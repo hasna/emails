@@ -1,0 +1,33 @@
+node_modules/
+dist/
+*.db
+.env
+.env.local
+.env.*.local
+.secrets
+.secrets/
+bun.lockb
+*.lock
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Editors
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Logs
+*.log
+npm-debug.log*
+bun-debug.log*
+
+# Coverage
+coverage/
+.nyc_output/
