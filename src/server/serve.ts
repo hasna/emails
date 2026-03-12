@@ -127,11 +127,16 @@ export async function startServer(port = 3900): Promise<void> {
           const body = await parseBody(req) as Record<string, unknown>;
           const provider = createProvider({
             name: String(body.name ?? ""),
-            type: (body.type as "resend" | "ses") ?? "resend",
+            type: (body.type as "resend" | "ses" | "gmail") ?? "resend",
             api_key: body.api_key as string | undefined,
             region: body.region as string | undefined,
             access_key: body.access_key as string | undefined,
             secret_key: body.secret_key as string | undefined,
+            oauth_client_id: body.oauth_client_id as string | undefined,
+            oauth_client_secret: body.oauth_client_secret as string | undefined,
+            oauth_refresh_token: body.oauth_refresh_token as string | undefined,
+            oauth_access_token: body.oauth_access_token as string | undefined,
+            oauth_token_expiry: body.oauth_token_expiry as string | undefined,
           });
           return json(provider, 201);
         } catch (e) { return internalError(e); }
@@ -145,6 +150,33 @@ export async function startServer(port = 3900): Promise<void> {
         try {
           deleteProvider(id);
           return json({ ok: true });
+        } catch (e) { return internalError(e); }
+      }
+
+      // POST /api/providers/:id/auth — Gmail OAuth re-authentication
+      const providerAuthMatch = path.match(/^\/api\/providers\/([^/]+)\/auth$/);
+      if (providerAuthMatch && method === "POST") {
+        const id = resolveId("providers", providerAuthMatch[1]!);
+        if (!id) return notFound();
+        try {
+          const provider = getProvider(id);
+          if (!provider) return notFound("Provider not found");
+          if (provider.type !== "gmail") return badRequest("Only Gmail providers support OAuth re-authentication");
+          if (!provider.oauth_client_id || !provider.oauth_client_secret) {
+            return badRequest("Provider is missing oauth_client_id or oauth_client_secret");
+          }
+
+          const { startGmailOAuthFlow } = await import("../lib/gmail-oauth.js");
+          const tokens = await startGmailOAuthFlow(provider.oauth_client_id, provider.oauth_client_secret);
+
+          const { updateProvider } = await import("../db/providers.js");
+          const updated = updateProvider(id, {
+            oauth_refresh_token: tokens.refresh_token,
+            oauth_access_token: tokens.access_token,
+            oauth_token_expiry: tokens.expiry,
+          });
+
+          return json({ ok: true, provider: updated });
         } catch (e) { return internalError(e); }
       }
 

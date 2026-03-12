@@ -56,19 +56,64 @@ server.tool(
 
 server.tool(
   "add_provider",
-  "Add a new email provider (resend or ses)",
+  "Add a new email provider (resend, ses, or gmail)",
   {
     name: z.string().describe("Provider name"),
-    type: z.enum(["resend", "ses"]).describe("Provider type"),
+    type: z.enum(["resend", "ses", "gmail"]).describe("Provider type"),
     api_key: z.string().optional().describe("Resend API key"),
     region: z.string().optional().describe("SES region (e.g. us-east-1)"),
     access_key: z.string().optional().describe("SES access key ID"),
     secret_key: z.string().optional().describe("SES secret access key"),
+    oauth_client_id: z.string().optional().describe("Gmail OAuth client ID"),
+    oauth_client_secret: z.string().optional().describe("Gmail OAuth client secret"),
+    oauth_refresh_token: z.string().optional().describe("Gmail OAuth refresh token"),
+    oauth_access_token: z.string().optional().describe("Gmail OAuth access token"),
+    oauth_token_expiry: z.string().optional().describe("Gmail OAuth token expiry (ISO 8601)"),
   },
   async (input) => {
     try {
       const provider = createProvider(input);
       return { content: [{ type: "text", text: JSON.stringify(provider, null, 2) }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+    }
+  },
+);
+
+server.tool(
+  "authenticate_gmail_provider",
+  "Trigger Gmail OAuth re-authentication flow for an existing Gmail provider. Opens a browser window. Must be run in an interactive terminal.",
+  {
+    provider_id: z.string().describe("Gmail provider ID (or prefix)"),
+  },
+  async ({ provider_id }) => {
+    try {
+      const id = resolveId("providers", provider_id);
+      const provider = getProvider(id);
+      if (!provider) throw new Error(`Provider not found: ${provider_id}`);
+      if (provider.type !== "gmail") throw new Error("Only Gmail providers require OAuth authentication");
+      if (!provider.oauth_client_id || !provider.oauth_client_secret) {
+        throw new Error("Provider is missing oauth_client_id or oauth_client_secret");
+      }
+
+      const { startGmailOAuthFlow } = await import("../lib/gmail-oauth.js");
+      const tokens = await startGmailOAuthFlow(provider.oauth_client_id, provider.oauth_client_secret);
+
+      const { updateProvider } = await import("../db/providers.js");
+      const updated = updateProvider(id, {
+        oauth_refresh_token: tokens.refresh_token,
+        oauth_access_token: tokens.access_token,
+        oauth_token_expiry: tokens.expiry,
+      });
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ success: true, provider: updated }, null, 2),
+          },
+        ],
+      };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
     }

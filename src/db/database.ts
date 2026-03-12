@@ -39,6 +39,7 @@ const MIGRATIONS = [
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
+  -- Note: type CHECK constraint only covers resend/ses for migration 1, gmail added in migration 2
 
   CREATE TABLE IF NOT EXISTS domains (
     id TEXT PRIMARY KEY,
@@ -116,6 +117,16 @@ const MIGRATIONS = [
 
   INSERT OR IGNORE INTO _migrations (id) VALUES (1);
   `,
+
+  // Migration 2: Add OAuth fields for Gmail provider + allow gmail type
+  `
+  ALTER TABLE providers ADD COLUMN oauth_client_id TEXT;
+  ALTER TABLE providers ADD COLUMN oauth_client_secret TEXT;
+  ALTER TABLE providers ADD COLUMN oauth_refresh_token TEXT;
+  ALTER TABLE providers ADD COLUMN oauth_access_token TEXT;
+  ALTER TABLE providers ADD COLUMN oauth_token_expiry TEXT;
+  INSERT OR IGNORE INTO _migrations (id) VALUES (2);
+  `,
 ];
 
 let _db: Database | null = null;
@@ -163,6 +174,16 @@ function runMigrations(db: Database): void {
 }
 
 function ensureSchema(db: Database): void {
+  // Ensure OAuth columns exist (idempotent — ALTER TABLE fails gracefully if column already exists)
+  const ensureColumn = (sql: string) => {
+    try { db.exec(sql); } catch {}
+  };
+  ensureColumn("ALTER TABLE providers ADD COLUMN oauth_client_id TEXT");
+  ensureColumn("ALTER TABLE providers ADD COLUMN oauth_client_secret TEXT");
+  ensureColumn("ALTER TABLE providers ADD COLUMN oauth_refresh_token TEXT");
+  ensureColumn("ALTER TABLE providers ADD COLUMN oauth_access_token TEXT");
+  ensureColumn("ALTER TABLE providers ADD COLUMN oauth_token_expiry TEXT");
+
   const ensureIndex = (sql: string) => {
     try { db.exec(sql); } catch {}
   };

@@ -17,8 +17,10 @@ export function createProvider(input: CreateProviderInput, db?: Database): Provi
   const timestamp = now();
 
   d.run(
-    `INSERT INTO providers (id, name, type, api_key, region, access_key, secret_key, active, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+    `INSERT INTO providers (id, name, type, api_key, region, access_key, secret_key,
+       oauth_client_id, oauth_client_secret, oauth_refresh_token, oauth_access_token, oauth_token_expiry,
+       active, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
     [
       id,
       input.name,
@@ -27,6 +29,11 @@ export function createProvider(input: CreateProviderInput, db?: Database): Provi
       input.region || null,
       input.access_key || null,
       input.secret_key || null,
+      input.oauth_client_id || null,
+      input.oauth_client_secret || null,
+      input.oauth_refresh_token || null,
+      input.oauth_access_token || null,
+      input.oauth_token_expiry || null,
       timestamp,
       timestamp,
     ],
@@ -66,6 +73,11 @@ export function updateProvider(
   if (input.region !== undefined) { sets.push("region = ?"); params.push(input.region || null); }
   if (input.access_key !== undefined) { sets.push("access_key = ?"); params.push(input.access_key || null); }
   if (input.secret_key !== undefined) { sets.push("secret_key = ?"); params.push(input.secret_key || null); }
+  if (input.oauth_client_id !== undefined) { sets.push("oauth_client_id = ?"); params.push(input.oauth_client_id || null); }
+  if (input.oauth_client_secret !== undefined) { sets.push("oauth_client_secret = ?"); params.push(input.oauth_client_secret || null); }
+  if (input.oauth_refresh_token !== undefined) { sets.push("oauth_refresh_token = ?"); params.push(input.oauth_refresh_token || null); }
+  if (input.oauth_access_token !== undefined) { sets.push("oauth_access_token = ?"); params.push(input.oauth_access_token || null); }
+  if (input.oauth_token_expiry !== undefined) { sets.push("oauth_token_expiry = ?"); params.push(input.oauth_token_expiry || null); }
   if (input.active !== undefined) { sets.push("active = ?"); params.push(input.active ? 1 : 0); }
 
   params.push(id);

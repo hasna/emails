@@ -1,5 +1,5 @@
 // Provider types
-export type ProviderType = "resend" | "ses";
+export type ProviderType = "resend" | "ses" | "gmail";
 
 export interface Provider {
   id: string;
@@ -9,6 +9,11 @@ export interface Provider {
   region: string | null;
   access_key: string | null;
   secret_key: string | null;
+  oauth_client_id: string | null;
+  oauth_client_secret: string | null;
+  oauth_refresh_token: string | null;
+  oauth_access_token: string | null;
+  oauth_token_expiry: string | null;
   active: boolean;
   created_at: string;
   updated_at: string;
@@ -21,6 +26,20 @@ export interface CreateProviderInput {
   region?: string;
   access_key?: string;
   secret_key?: string;
+  oauth_client_id?: string;
+  oauth_client_secret?: string;
+  oauth_refresh_token?: string;
+  oauth_access_token?: string;
+  oauth_token_expiry?: string;
+}
+
+export interface CreateGmailProviderInput {
+  name: string;
+  oauth_client_id: string;
+  oauth_client_secret: string;
+  oauth_refresh_token: string;
+  oauth_access_token: string;
+  oauth_token_expiry: string;
 }
 
 export interface ProviderRow {
@@ -31,6 +50,11 @@ export interface ProviderRow {
   region: string | null;
   access_key: string | null;
   secret_key: string | null;
+  oauth_client_id: string | null;
+  oauth_client_secret: string | null;
+  oauth_refresh_token: string | null;
+  oauth_access_token: string | null;
+  oauth_token_expiry: string | null;
   active: number;
   created_at: string;
   updated_at: string;

@@ -43,7 +43,7 @@ function resolveId(table: string, partialId: string): string {
 
 program
   .name("emails")
-  .description("Email management CLI — Resend and AWS SES")
+  .description("Email management CLI — Resend, AWS SES, and Gmail")
   .version(getPackageVersion());
 
 // ─── PROVIDER ─────────────────────────────────────────────────────────────────
@@ -52,18 +52,51 @@ const providerCmd = program.command("provider").description("Manage email provid
 
 providerCmd
   .command("add")
-  .description("Add an email provider (resend or ses)")
+  .description("Add an email provider (resend, ses, or gmail)")
   .requiredOption("--name <name>", "Provider name")
-  .requiredOption("--type <type>", "Provider type: resend | ses")
+  .requiredOption("--type <type>", "Provider type: resend | ses | gmail")
   .option("--api-key <key>", "Resend API key")
   .option("--region <region>", "SES region")
   .option("--access-key <key>", "SES access key ID")
   .option("--secret-key <key>", "SES secret access key")
-  .action((opts: { name: string; type: string; apiKey?: string; region?: string; accessKey?: string; secretKey?: string }) => {
+  .option("--client-id <id>", "Gmail OAuth client ID")
+  .option("--client-secret <secret>", "Gmail OAuth client secret")
+  .action(async (opts: {
+    name: string;
+    type: string;
+    apiKey?: string;
+    region?: string;
+    accessKey?: string;
+    secretKey?: string;
+    clientId?: string;
+    clientSecret?: string;
+  }) => {
     try {
-      if (opts.type !== "resend" && opts.type !== "ses") {
-        handleError(new Error("Provider type must be 'resend' or 'ses'"));
+      if (opts.type !== "resend" && opts.type !== "ses" && opts.type !== "gmail") {
+        handleError(new Error("Provider type must be 'resend', 'ses', or 'gmail'"));
       }
+
+      if (opts.type === "gmail") {
+        if (!opts.clientId) handleError(new Error("Gmail provider requires --client-id"));
+        if (!opts.clientSecret) handleError(new Error("Gmail provider requires --client-secret"));
+
+        const { startGmailOAuthFlow } = await import("../lib/gmail-oauth.js");
+        console.log(chalk.dim("Starting Gmail OAuth flow..."));
+        const tokens = await startGmailOAuthFlow(opts.clientId!, opts.clientSecret!);
+
+        const provider = createProvider({
+          name: opts.name,
+          type: "gmail",
+          oauth_client_id: opts.clientId,
+          oauth_client_secret: opts.clientSecret,
+          oauth_refresh_token: tokens.refresh_token,
+          oauth_access_token: tokens.access_token,
+          oauth_token_expiry: tokens.expiry,
+        });
+        console.log(chalk.green(`✓ Gmail provider created: ${provider.name} (${provider.id.slice(0, 8)})`));
+        return;
+      }
+
       const provider = createProvider({
         name: opts.name,
         type: opts.type as "resend" | "ses",
@@ -109,6 +142,38 @@ providerCmd
       if (!provider) handleError(new Error(`Provider not found: ${id}`));
       deleteProvider(resolvedId);
       console.log(chalk.green(`✓ Provider removed: ${provider!.name}`));
+    } catch (e) {
+      handleError(e);
+    }
+  });
+
+providerCmd
+  .command("auth <id>")
+  .description("Re-authenticate a Gmail provider (refresh OAuth tokens)")
+  .action(async (id: string) => {
+    try {
+      const resolvedId = resolveId("providers", id);
+      const provider = getProvider(resolvedId);
+      if (!provider) handleError(new Error(`Provider not found: ${id}`));
+      if (provider!.type !== "gmail") {
+        handleError(new Error("Only Gmail providers require OAuth re-authentication"));
+      }
+      if (!provider!.oauth_client_id || !provider!.oauth_client_secret) {
+        handleError(new Error("Provider is missing oauth_client_id or oauth_client_secret"));
+      }
+
+      const { startGmailOAuthFlow } = await import("../lib/gmail-oauth.js");
+      console.log(chalk.dim("Starting Gmail OAuth flow..."));
+      const tokens = await startGmailOAuthFlow(provider!.oauth_client_id!, provider!.oauth_client_secret!);
+
+      const { updateProvider } = await import("../db/providers.js");
+      updateProvider(resolvedId, {
+        oauth_refresh_token: tokens.refresh_token,
+        oauth_access_token: tokens.access_token,
+        oauth_token_expiry: tokens.expiry,
+      });
+
+      console.log(chalk.green(`✓ Gmail provider re-authenticated: ${provider!.name}`));
     } catch (e) {
       handleError(e);
     }
