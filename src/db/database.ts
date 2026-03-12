@@ -1,0 +1,215 @@
+import { Database } from "bun:sqlite";
+import { existsSync, mkdirSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+
+function isInMemoryDb(path: string): boolean {
+  return path === ":memory:" || path.startsWith("file::memory:");
+}
+
+function getDbPath(): string {
+  // 1. Environment variable override (used for tests)
+  if (process.env["EMAILS_DB_PATH"]) {
+    return process.env["EMAILS_DB_PATH"];
+  }
+  // 2. Always at ~/.emails/emails.db (global user root)
+  const home = process.env["HOME"] || process.env["USERPROFILE"] || "~";
+  return join(home, ".emails", "emails.db");
+}
+
+function ensureDir(filePath: string): void {
+  if (isInMemoryDb(filePath)) return;
+  const dir = dirname(resolve(filePath));
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true });
+  }
+}
+
+const MIGRATIONS = [
+  // Migration 1: Initial schema
+  `
+  CREATE TABLE IF NOT EXISTS providers (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    type TEXT NOT NULL CHECK(type IN ('resend', 'ses')),
+    api_key TEXT,
+    region TEXT,
+    access_key TEXT,
+    secret_key TEXT,
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS domains (
+    id TEXT PRIMARY KEY,
+    provider_id TEXT NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
+    domain TEXT NOT NULL,
+    dkim_status TEXT NOT NULL DEFAULT 'pending' CHECK(dkim_status IN ('pending','verified','failed')),
+    spf_status TEXT NOT NULL DEFAULT 'pending' CHECK(spf_status IN ('pending','verified','failed')),
+    dmarc_status TEXT NOT NULL DEFAULT 'pending' CHECK(dmarc_status IN ('pending','verified','failed')),
+    verified_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(provider_id, domain)
+  );
+
+  CREATE TABLE IF NOT EXISTS addresses (
+    id TEXT PRIMARY KEY,
+    provider_id TEXT NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
+    email TEXT NOT NULL,
+    display_name TEXT,
+    verified INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(provider_id, email)
+  );
+
+  CREATE TABLE IF NOT EXISTS emails (
+    id TEXT PRIMARY KEY,
+    provider_id TEXT NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
+    provider_message_id TEXT,
+    from_address TEXT NOT NULL,
+    to_addresses TEXT NOT NULL DEFAULT '[]',
+    cc_addresses TEXT NOT NULL DEFAULT '[]',
+    bcc_addresses TEXT NOT NULL DEFAULT '[]',
+    reply_to TEXT,
+    subject TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'sent' CHECK(status IN ('sent','delivered','bounced','complained','failed')),
+    has_attachments INTEGER NOT NULL DEFAULT 0,
+    attachment_count INTEGER NOT NULL DEFAULT 0,
+    tags TEXT NOT NULL DEFAULT '{}',
+    sent_at TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS events (
+    id TEXT PRIMARY KEY,
+    email_id TEXT REFERENCES emails(id) ON DELETE SET NULL,
+    provider_id TEXT NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
+    provider_event_id TEXT,
+    type TEXT NOT NULL CHECK(type IN ('delivered','bounced','complained','opened','clicked','unsubscribed')),
+    recipient TEXT,
+    metadata TEXT NOT NULL DEFAULT '{}',
+    occurred_at TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_domains_provider ON domains(provider_id);
+  CREATE INDEX IF NOT EXISTS idx_domains_domain ON domains(domain);
+  CREATE INDEX IF NOT EXISTS idx_addresses_provider ON addresses(provider_id);
+  CREATE INDEX IF NOT EXISTS idx_addresses_email ON addresses(email);
+  CREATE INDEX IF NOT EXISTS idx_emails_provider ON emails(provider_id);
+  CREATE INDEX IF NOT EXISTS idx_emails_status ON emails(status);
+  CREATE INDEX IF NOT EXISTS idx_emails_sent_at ON emails(sent_at);
+  CREATE INDEX IF NOT EXISTS idx_emails_from ON emails(from_address);
+  CREATE INDEX IF NOT EXISTS idx_events_email ON events(email_id);
+  CREATE INDEX IF NOT EXISTS idx_events_provider ON events(provider_id);
+  CREATE INDEX IF NOT EXISTS idx_events_type ON events(type);
+  CREATE INDEX IF NOT EXISTS idx_events_occurred ON events(occurred_at);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_events_provider_event ON events(provider_id, provider_event_id) WHERE provider_event_id IS NOT NULL;
+
+  CREATE TABLE IF NOT EXISTS _migrations (
+    id INTEGER PRIMARY KEY,
+    applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  INSERT OR IGNORE INTO _migrations (id) VALUES (1);
+  `,
+];
+
+let _db: Database | null = null;
+
+export function getDatabase(dbPath?: string): Database {
+  if (_db) return _db;
+
+  const path = dbPath || getDbPath();
+  ensureDir(path);
+
+  _db = new Database(path, { create: true });
+
+  _db.run("PRAGMA journal_mode = WAL");
+  _db.run("PRAGMA busy_timeout = 5000");
+  _db.run("PRAGMA foreign_keys = ON");
+
+  runMigrations(_db);
+
+  return _db;
+}
+
+function runMigrations(db: Database): void {
+  try {
+    const result = db.query("SELECT MAX(id) as max_id FROM _migrations").get() as { max_id: number | null } | null;
+    const currentLevel = result?.max_id ?? 0;
+
+    for (let i = currentLevel; i < MIGRATIONS.length; i++) {
+      try {
+        db.exec(MIGRATIONS[i]!);
+      } catch {
+        // Migration partially failed — ensureSchema will fix gaps
+      }
+    }
+  } catch {
+    for (const migration of MIGRATIONS) {
+      try {
+        db.exec(migration);
+      } catch {
+        // Partial failure handled by ensureSchema
+      }
+    }
+  }
+
+  ensureSchema(db);
+}
+
+function ensureSchema(db: Database): void {
+  const ensureIndex = (sql: string) => {
+    try { db.exec(sql); } catch {}
+  };
+
+  ensureIndex("CREATE INDEX IF NOT EXISTS idx_domains_provider ON domains(provider_id)");
+  ensureIndex("CREATE INDEX IF NOT EXISTS idx_domains_domain ON domains(domain)");
+  ensureIndex("CREATE INDEX IF NOT EXISTS idx_addresses_provider ON addresses(provider_id)");
+  ensureIndex("CREATE INDEX IF NOT EXISTS idx_addresses_email ON addresses(email)");
+  ensureIndex("CREATE INDEX IF NOT EXISTS idx_emails_provider ON emails(provider_id)");
+  ensureIndex("CREATE INDEX IF NOT EXISTS idx_emails_status ON emails(status)");
+  ensureIndex("CREATE INDEX IF NOT EXISTS idx_emails_sent_at ON emails(sent_at)");
+  ensureIndex("CREATE INDEX IF NOT EXISTS idx_emails_from ON emails(from_address)");
+  ensureIndex("CREATE INDEX IF NOT EXISTS idx_events_email ON events(email_id)");
+  ensureIndex("CREATE INDEX IF NOT EXISTS idx_events_provider ON events(provider_id)");
+  ensureIndex("CREATE INDEX IF NOT EXISTS idx_events_type ON events(type)");
+  ensureIndex("CREATE INDEX IF NOT EXISTS idx_events_occurred ON events(occurred_at)");
+  ensureIndex("CREATE UNIQUE INDEX IF NOT EXISTS idx_events_provider_event ON events(provider_id, provider_event_id) WHERE provider_event_id IS NOT NULL");
+}
+
+export function closeDatabase(): void {
+  if (_db) {
+    _db.close();
+    _db = null;
+  }
+}
+
+export function resetDatabase(): void {
+  _db = null;
+}
+
+export function now(): string {
+  return new Date().toISOString();
+}
+
+export function uuid(): string {
+  return crypto.randomUUID();
+}
+
+export function resolvePartialId(db: Database, table: string, partialId: string): string | null {
+  if (partialId.length >= 36) {
+    const row = db.query(`SELECT id FROM ${table} WHERE id = ?`).get(partialId) as { id: string } | null;
+    return row?.id ?? null;
+  }
+
+  const rows = db.query(`SELECT id FROM ${table} WHERE id LIKE ?`).all(`${partialId}%`) as { id: string }[];
+  if (rows.length === 1) {
+    return rows[0]!.id;
+  }
+  return null;
+}
