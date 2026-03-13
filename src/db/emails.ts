@@ -3,7 +3,7 @@ import type { Email, EmailFilter, EmailRow, EmailStatus, SendEmailOptions } from
 import { EmailNotFoundError } from "../types/index.js";
 import { getDatabase, now, uuid } from "./database.js";
 
-function rowToEmail(row: EmailRow): Email {
+function parseEmailRow(row: EmailRow): Email {
   return {
     ...row,
     to_addresses: JSON.parse(row.to_addresses || "[]") as string[],
@@ -14,6 +14,8 @@ function rowToEmail(row: EmailRow): Email {
     has_attachments: !!row.has_attachments,
   };
 }
+
+const rowToEmail = parseEmailRow;
 
 export function createEmail(
   provider_id: string,
@@ -113,6 +115,16 @@ export function listEmails(filter: EmailFilter = {}, db?: Database): Email[] {
     .all(...params) as EmailRow[];
 
   return rows.map(rowToEmail);
+}
+
+export function searchEmails(query: string, opts?: { since?: string; limit?: number }, db?: Database): Email[] {
+  const d = db || getDatabase();
+  let sql = "SELECT * FROM emails WHERE (subject LIKE ? OR from_address LIKE ? OR to_addresses LIKE ?)";
+  const params: any[] = [`%${query}%`, `%${query}%`, `%${query}%`];
+  if (opts?.since) { sql += " AND sent_at >= ?"; params.push(opts.since); }
+  sql += " ORDER BY sent_at DESC";
+  if (opts?.limit) { sql += " LIMIT ?"; params.push(opts.limit); }
+  return (d.query(sql).all(...params) as any[]).map(parseEmailRow);
 }
 
 export function updateEmailStatus(id: string, status: EmailStatus, db?: Database): Email {

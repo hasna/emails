@@ -5,6 +5,7 @@ import {
   createEmail,
   getEmail,
   listEmails,
+  searchEmails,
   updateEmailStatus,
   deleteEmail,
 } from "./emails.js";
@@ -148,5 +149,51 @@ describe("deleteEmail", () => {
 
   it("returns false for unknown id", () => {
     expect(deleteEmail("nonexistent")).toBe(false);
+  });
+});
+
+describe("searchEmails", () => {
+  it("searches by subject", () => {
+    createEmail(providerId, { ...baseOpts, subject: "Welcome aboard" });
+    createEmail(providerId, { ...baseOpts, subject: "Password reset" });
+    const results = searchEmails("Welcome");
+    expect(results.length).toBe(1);
+    expect(results[0]!.subject).toBe("Welcome aboard");
+  });
+
+  it("searches by from_address", () => {
+    createEmail(providerId, { ...baseOpts, from: "alice@example.com" });
+    createEmail(providerId, { ...baseOpts, from: "bob@example.com" });
+    const results = searchEmails("alice");
+    expect(results.length).toBe(1);
+    expect(results[0]!.from_address).toBe("alice@example.com");
+  });
+
+  it("searches by to_addresses", () => {
+    createEmail(providerId, { ...baseOpts, to: ["charlie@example.com"] });
+    createEmail(providerId, { ...baseOpts, to: ["dave@example.com"] });
+    const results = searchEmails("charlie");
+    expect(results.length).toBe(1);
+    expect(results[0]!.to_addresses).toEqual(["charlie@example.com"]);
+  });
+
+  it("respects limit option", () => {
+    for (let i = 0; i < 5; i++) {
+      createEmail(providerId, { ...baseOpts, subject: `Match ${i}` });
+    }
+    const results = searchEmails("Match", { limit: 3 });
+    expect(results.length).toBe(3);
+  });
+
+  it("returns empty array for no matches", () => {
+    createEmail(providerId, baseOpts);
+    const results = searchEmails("nonexistent-term-xyz");
+    expect(results.length).toBe(0);
+  });
+
+  it("is case-insensitive via LIKE", () => {
+    createEmail(providerId, { ...baseOpts, subject: "IMPORTANT Notice" });
+    const results = searchEmails("important");
+    expect(results.length).toBe(1);
   });
 });

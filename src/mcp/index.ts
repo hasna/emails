@@ -2,12 +2,15 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { createProvider, listProviders, deleteProvider, getProvider, getActiveProvider } from "../db/providers.js";
+import { createProvider, listProviders, deleteProvider, getProvider, getActiveProvider, updateProvider } from "../db/providers.js";
 import { createDomain, listDomains, deleteDomain, getDomain, updateDnsStatus } from "../db/domains.js";
 import { createAddress, listAddresses, deleteAddress, getAddress } from "../db/addresses.js";
-import { createEmail, listEmails, getEmail } from "../db/emails.js";
+import { createEmail, listEmails, getEmail, searchEmails } from "../db/emails.js";
 import { createTemplate, listTemplates, getTemplate, deleteTemplate, renderTemplate } from "../db/templates.js";
 import { listContacts, suppressContact, unsuppressContact } from "../db/contacts.js";
+import { createScheduledEmail, listScheduledEmails, cancelScheduledEmail } from "../db/scheduled.js";
+import { createGroup, getGroupByName, listGroups, deleteGroup, addMember, removeMember, listMembers, getMemberCount } from "../db/groups.js";
+import { storeEmailContent, getEmailContent } from "../db/email-content.js";
 import { getDatabase, resolvePartialId } from "../db/database.js";
 import { getAdapter } from "../providers/index.js";
 import { getLocalStats } from "../lib/stats.js";
@@ -99,6 +102,34 @@ server.tool(
       }
 
       return { content: [{ type: "text", text: JSON.stringify(provider, null, 2) }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+    }
+  },
+);
+
+server.tool(
+  "update_provider",
+  "Update an existing email provider's configuration",
+  {
+    id: z.string().describe("Provider ID (or prefix)"),
+    name: z.string().optional().describe("New provider name"),
+    api_key: z.string().optional().describe("Resend API key"),
+    region: z.string().optional().describe("SES region"),
+    access_key: z.string().optional().describe("SES access key ID"),
+    secret_key: z.string().optional().describe("SES secret access key"),
+    oauth_client_id: z.string().optional().describe("Gmail OAuth client ID"),
+    oauth_client_secret: z.string().optional().describe("Gmail OAuth client secret"),
+    oauth_refresh_token: z.string().optional().describe("Gmail OAuth refresh token"),
+    oauth_access_token: z.string().optional().describe("Gmail OAuth access token"),
+    oauth_token_expiry: z.string().optional().describe("Gmail OAuth token expiry (ISO 8601)"),
+  },
+  async (input) => {
+    try {
+      const resolvedId = resolveId("providers", input.id);
+      const { id: _, ...updates } = input;
+      const updated = updateProvider(resolvedId, updates);
+      return { content: [{ type: "text", text: JSON.stringify(updated, null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
     }
@@ -456,6 +487,9 @@ server.tool(
 
       const email = createEmail(providerId, sendInput, messageId, db);
 
+      // Store email content
+      storeEmailContent(email.id, { html, text }, db);
+
       return {
         content: [
           {
@@ -503,6 +537,24 @@ server.tool(
 );
 
 server.tool(
+  "search_emails",
+  "Search emails by subject, from address, or to address",
+  {
+    query: z.string().describe("Search query (matches subject, from, or to)"),
+    since: z.string().optional().describe("ISO timestamp — only show emails after this"),
+    limit: z.number().optional().describe("Max results (default 50)"),
+  },
+  async ({ query, since, limit }) => {
+    try {
+      const emails = searchEmails(query, { since, limit: limit ?? 50 });
+      return { content: [{ type: "text", text: JSON.stringify(emails, null, 2) }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+    }
+  },
+);
+
+server.tool(
   "get_email",
   "Get details of a specific email",
   {
@@ -514,6 +566,30 @@ server.tool(
       const email = getEmail(id);
       if (!email) throw new EmailNotFoundError(id);
       return { content: [{ type: "text", text: JSON.stringify(email, null, 2) }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+    }
+  },
+);
+
+server.tool(
+  "get_email_content",
+  "Get the full content (body, headers) of a sent email",
+  {
+    email_id: z.string().describe("Email ID (or prefix)"),
+  },
+  async ({ email_id }) => {
+    try {
+      const id = resolveId("emails", email_id);
+      const email = getEmail(id);
+      if (!email) throw new EmailNotFoundError(id);
+      const content = getEmailContent(id);
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({ email, content: content || { html: null, text_body: null, headers: {} } }, null, 2),
+        }],
+      };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
     }
@@ -661,6 +737,224 @@ server.tool(
     try {
       unsuppressContact(email);
       return { content: [{ type: "text", text: `Contact unsuppressed: ${email}` }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+    }
+  },
+);
+
+
+// ─── SCHEDULED ──────────────────────────────────────────────────────────────
+
+server.tool(
+  "schedule_email",
+  "Schedule an email to be sent later",
+  {
+    from: z.string().describe("Sender email address"),
+    to: z.union([z.string(), z.array(z.string())]).describe("Recipient(s)"),
+    subject: z.string().describe("Email subject"),
+    html: z.string().optional().describe("HTML body"),
+    text: z.string().optional().describe("Plain text body"),
+    cc: z.union([z.string(), z.array(z.string())]).optional().describe("CC recipients"),
+    bcc: z.union([z.string(), z.array(z.string())]).optional().describe("BCC recipients"),
+    reply_to: z.string().optional().describe("Reply-to address"),
+    provider_id: z.string().optional().describe("Provider ID (uses active provider if not specified)"),
+    template: z.string().optional().describe("Template name to use"),
+    template_vars: z.record(z.string()).optional().describe("Template variables"),
+    scheduled_at: z.string().describe("ISO 8601 datetime to send the email"),
+  },
+  async (input) => {
+    try {
+      const db = getDatabase();
+      let providerId: string;
+      if (input.provider_id) {
+        providerId = resolveId("providers", input.provider_id);
+      } else {
+        const active = getActiveProvider(db);
+        providerId = active.id;
+      }
+
+      // Resolve template if provided
+      let subject = input.subject;
+      let html = input.html;
+      let text = input.text;
+      if (input.template) {
+        const tpl = getTemplate(input.template, db);
+        if (!tpl) throw new Error(`Template not found: ${input.template}`);
+        const vars = input.template_vars || {};
+        subject = renderTemplate(tpl.subject_template, vars);
+        if (tpl.html_template) html = renderTemplate(tpl.html_template, vars);
+        if (tpl.text_template) text = renderTemplate(tpl.text_template, vars);
+      }
+
+      const toArr = Array.isArray(input.to) ? input.to : [input.to];
+      const ccArr = input.cc ? (Array.isArray(input.cc) ? input.cc : [input.cc]) : [];
+      const bccArr = input.bcc ? (Array.isArray(input.bcc) ? input.bcc : [input.bcc]) : [];
+
+      const scheduled = createScheduledEmail({
+        provider_id: providerId,
+        from_address: input.from,
+        to_addresses: toArr,
+        cc_addresses: ccArr,
+        bcc_addresses: bccArr,
+        reply_to: input.reply_to,
+        subject,
+        html,
+        text_body: text,
+        template_name: input.template,
+        template_vars: input.template_vars,
+        scheduled_at: input.scheduled_at,
+      }, db);
+
+      return { content: [{ type: "text", text: JSON.stringify(scheduled, null, 2) }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+    }
+  },
+);
+
+server.tool(
+  "list_scheduled",
+  "List scheduled emails",
+  {
+    status: z.enum(["pending", "sent", "cancelled", "failed"]).optional().describe("Filter by status"),
+  },
+  async ({ status }) => {
+    try {
+      const emails = listScheduledEmails(status ? { status } : undefined);
+      return { content: [{ type: "text", text: JSON.stringify(emails, null, 2) }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+    }
+  },
+);
+
+server.tool(
+  "cancel_scheduled",
+  "Cancel a pending scheduled email",
+  {
+    id: z.string().describe("Scheduled email ID (or prefix)"),
+  },
+  async ({ id }) => {
+    try {
+      const resolvedId = resolveId("scheduled_emails", id);
+      const cancelled = cancelScheduledEmail(resolvedId);
+      if (!cancelled) throw new Error(`Cannot cancel email ${id} (may already be sent or cancelled)`);
+      return { content: [{ type: "text", text: `Scheduled email cancelled: ${resolvedId}` }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+    }
+  },
+);
+
+// ─── GROUPS ─────────────────────────────────────────────────────────────────
+
+server.tool(
+  "list_groups",
+  "List all recipient groups",
+  {},
+  async () => {
+    try {
+      const groups = listGroups();
+      const result = groups.map(g => ({
+        ...g,
+        member_count: getMemberCount(g.id),
+      }));
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+    }
+  },
+);
+
+server.tool(
+  "create_group",
+  "Create a new recipient group",
+  {
+    name: z.string().describe("Unique group name"),
+    description: z.string().optional().describe("Group description"),
+  },
+  async ({ name, description }) => {
+    try {
+      const group = createGroup(name, description);
+      return { content: [{ type: "text", text: JSON.stringify(group, null, 2) }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+    }
+  },
+);
+
+server.tool(
+  "delete_group",
+  "Delete a recipient group",
+  {
+    name: z.string().describe("Group name"),
+  },
+  async ({ name }) => {
+    try {
+      const group = getGroupByName(name);
+      if (!group) throw new Error(`Group not found: ${name}`);
+      deleteGroup(group.id);
+      return { content: [{ type: "text", text: `Group deleted: ${name}` }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+    }
+  },
+);
+
+server.tool(
+  "add_group_member",
+  "Add a member to a recipient group",
+  {
+    group_name: z.string().describe("Group name"),
+    email: z.string().describe("Member email address"),
+    name: z.string().optional().describe("Member display name"),
+    vars: z.record(z.string()).optional().describe("Template variables for this member"),
+  },
+  async ({ group_name, email, name, vars }) => {
+    try {
+      const group = getGroupByName(group_name);
+      if (!group) throw new Error(`Group not found: ${group_name}`);
+      const member = addMember(group.id, email, name, vars);
+      return { content: [{ type: "text", text: JSON.stringify(member, null, 2) }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+    }
+  },
+);
+
+server.tool(
+  "remove_group_member",
+  "Remove a member from a recipient group",
+  {
+    group_name: z.string().describe("Group name"),
+    email: z.string().describe("Member email address"),
+  },
+  async ({ group_name, email }) => {
+    try {
+      const group = getGroupByName(group_name);
+      if (!group) throw new Error(`Group not found: ${group_name}`);
+      const removed = removeMember(group.id, email);
+      if (!removed) throw new Error(`Member not found: ${email}`);
+      return { content: [{ type: "text", text: `Member removed: ${email} from ${group_name}` }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+    }
+  },
+);
+
+server.tool(
+  "list_group_members",
+  "List all members of a recipient group",
+  {
+    group_name: z.string().describe("Group name"),
+  },
+  async ({ group_name }) => {
+    try {
+      const group = getGroupByName(group_name);
+      if (!group) throw new Error(`Group not found: ${group_name}`);
+      const members = listMembers(group.id);
+      return { content: [{ type: "text", text: JSON.stringify(members, null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
     }

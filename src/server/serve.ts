@@ -6,10 +6,10 @@
 import { existsSync, readFileSync } from "fs";
 import { join, dirname, extname } from "path";
 import { fileURLToPath } from "url";
-import { createProvider, listProviders, deleteProvider, getProvider } from "../db/providers.js";
+import { createProvider, listProviders, deleteProvider, getProvider, updateProvider } from "../db/providers.js";
 import { createDomain, listDomains, deleteDomain, getDomain, updateDnsStatus } from "../db/domains.js";
 import { createAddress, listAddresses, deleteAddress } from "../db/addresses.js";
-import { listEmails, getEmail } from "../db/emails.js";
+import { listEmails, getEmail, searchEmails } from "../db/emails.js";
 import { listEvents } from "../db/events.js";
 import { getDatabase, resolvePartialId } from "../db/database.js";
 import { getAdapter } from "../providers/index.js";
@@ -139,6 +139,24 @@ export async function startServer(port = 3900): Promise<void> {
             oauth_token_expiry: body.oauth_token_expiry as string | undefined,
           });
           return json(provider, 201);
+        } catch (e) { return internalError(e); }
+      }
+
+      // PUT /api/providers/:id
+      const providerPutMatch = path.match(/^\/api\/providers\/([^/]+)$/);
+      if (providerPutMatch && method === "PUT") {
+        const id = resolveId("providers", providerPutMatch[1]!);
+        if (!id) return notFound();
+        try {
+          const provider = getProvider(id);
+          if (!provider) return notFound("Provider not found");
+          const body = await parseBody(req) as Record<string, unknown>;
+          const updates: Record<string, unknown> = {};
+          for (const key of ["name", "api_key", "region", "access_key", "secret_key", "oauth_client_id", "oauth_client_secret", "oauth_refresh_token", "oauth_access_token", "oauth_token_expiry"]) {
+            if (body[key] !== undefined) updates[key] = body[key];
+          }
+          const updated = updateProvider(id, updates as any);
+          return json(updated);
         } catch (e) { return internalError(e); }
       }
 
@@ -314,6 +332,17 @@ export async function startServer(port = 3900): Promise<void> {
             offset: url.searchParams.has("offset") ? parseInt(url.searchParams.get("offset")!, 10) : undefined,
           };
           return json(listEmails(filter));
+        } catch (e) { return internalError(e); }
+      }
+
+      // GET /api/emails/search?q=...
+      if (path === "/api/emails/search" && method === "GET") {
+        try {
+          const q = url.searchParams.get("q") ?? "";
+          if (!q) return badRequest("q parameter is required");
+          const since = url.searchParams.get("since") ?? undefined;
+          const limit = url.searchParams.has("limit") ? parseInt(url.searchParams.get("limit")!, 10) : 50;
+          return json(searchEmails(q, { since, limit }));
         } catch (e) { return internalError(e); }
       }
 

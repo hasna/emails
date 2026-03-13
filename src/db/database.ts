@@ -162,6 +162,66 @@ const MIGRATIONS = [
   CREATE INDEX IF NOT EXISTS idx_contacts_suppressed ON contacts(suppressed);
   INSERT OR IGNORE INTO _migrations (id) VALUES (4);
   `,
+
+  // Migration 5: Scheduled emails table
+  `
+  CREATE TABLE IF NOT EXISTS scheduled_emails (
+    id TEXT PRIMARY KEY,
+    provider_id TEXT NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
+    from_address TEXT NOT NULL,
+    to_addresses TEXT NOT NULL DEFAULT '[]',
+    cc_addresses TEXT NOT NULL DEFAULT '[]',
+    bcc_addresses TEXT NOT NULL DEFAULT '[]',
+    reply_to TEXT,
+    subject TEXT NOT NULL,
+    html TEXT,
+    text_body TEXT,
+    attachments_json TEXT NOT NULL DEFAULT '[]',
+    template_name TEXT,
+    template_vars TEXT,
+    scheduled_at TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','sent','cancelled','failed')),
+    error TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_scheduled_status ON scheduled_emails(status);
+  CREATE INDEX IF NOT EXISTS idx_scheduled_at ON scheduled_emails(scheduled_at);
+  INSERT OR IGNORE INTO _migrations (id) VALUES (5);
+  `,
+
+  // Migration 6: Groups and group_members tables
+  `
+  CREATE TABLE IF NOT EXISTS groups (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    description TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_groups_name ON groups(name);
+
+  CREATE TABLE IF NOT EXISTS group_members (
+    group_id TEXT NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+    email TEXT NOT NULL,
+    name TEXT,
+    vars TEXT NOT NULL DEFAULT '{}',
+    added_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (group_id, email)
+  );
+  CREATE INDEX IF NOT EXISTS idx_group_members_group ON group_members(group_id);
+  INSERT OR IGNORE INTO _migrations (id) VALUES (6);
+  `,
+
+  // Migration 7: Email content table
+  `
+  CREATE TABLE IF NOT EXISTS email_content (
+    email_id TEXT PRIMARY KEY REFERENCES emails(id) ON DELETE CASCADE,
+    html TEXT,
+    text_body TEXT,
+    headers_json TEXT NOT NULL DEFAULT '{}'
+  );
+  INSERT OR IGNORE INTO _migrations (id) VALUES (7);
+  `,
 ];
 
 let _db: Database | null = null;
@@ -268,6 +328,58 @@ function ensureSchema(db: Database): void {
   )`);
   ensureIndex("CREATE INDEX IF NOT EXISTS idx_contacts_email ON contacts(email)");
   ensureIndex("CREATE INDEX IF NOT EXISTS idx_contacts_suppressed ON contacts(suppressed)");
+
+  // Ensure scheduled_emails table exists
+  ensureTable(`CREATE TABLE IF NOT EXISTS scheduled_emails (
+    id TEXT PRIMARY KEY,
+    provider_id TEXT NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
+    from_address TEXT NOT NULL,
+    to_addresses TEXT NOT NULL DEFAULT '[]',
+    cc_addresses TEXT NOT NULL DEFAULT '[]',
+    bcc_addresses TEXT NOT NULL DEFAULT '[]',
+    reply_to TEXT,
+    subject TEXT NOT NULL,
+    html TEXT,
+    text_body TEXT,
+    attachments_json TEXT NOT NULL DEFAULT '[]',
+    template_name TEXT,
+    template_vars TEXT,
+    scheduled_at TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','sent','cancelled','failed')),
+    error TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+  ensureIndex("CREATE INDEX IF NOT EXISTS idx_scheduled_status ON scheduled_emails(status)");
+  ensureIndex("CREATE INDEX IF NOT EXISTS idx_scheduled_at ON scheduled_emails(scheduled_at)");
+
+  // Ensure groups table exists
+  ensureTable(`CREATE TABLE IF NOT EXISTS groups (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    description TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+  ensureIndex("CREATE INDEX IF NOT EXISTS idx_groups_name ON groups(name)");
+
+  // Ensure group_members table exists
+  ensureTable(`CREATE TABLE IF NOT EXISTS group_members (
+    group_id TEXT NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+    email TEXT NOT NULL,
+    name TEXT,
+    vars TEXT NOT NULL DEFAULT '{}',
+    added_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (group_id, email)
+  )`);
+  ensureIndex("CREATE INDEX IF NOT EXISTS idx_group_members_group ON group_members(group_id)");
+
+  // Ensure email_content table exists
+  ensureTable(`CREATE TABLE IF NOT EXISTS email_content (
+    email_id TEXT PRIMARY KEY REFERENCES emails(id) ON DELETE CASCADE,
+    html TEXT,
+    text_body TEXT,
+    headers_json TEXT NOT NULL DEFAULT '{}'
+  )`);
 }
 
 export function closeDatabase(): void {
