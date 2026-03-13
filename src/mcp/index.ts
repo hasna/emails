@@ -6,6 +6,8 @@ import { createProvider, listProviders, deleteProvider, getProvider, getActivePr
 import { createDomain, listDomains, deleteDomain, getDomain, updateDnsStatus } from "../db/domains.js";
 import { createAddress, listAddresses, deleteAddress, getAddress } from "../db/addresses.js";
 import { createEmail, listEmails, getEmail } from "../db/emails.js";
+import { createTemplate, listTemplates, getTemplate, deleteTemplate, renderTemplate } from "../db/templates.js";
+import { listContacts, suppressContact, unsuppressContact } from "../db/contacts.js";
 import { getDatabase, resolvePartialId } from "../db/database.js";
 import { getAdapter } from "../providers/index.js";
 import { getLocalStats } from "../lib/stats.js";
@@ -69,10 +71,33 @@ server.tool(
     oauth_refresh_token: z.string().optional().describe("Gmail OAuth refresh token"),
     oauth_access_token: z.string().optional().describe("Gmail OAuth access token"),
     oauth_token_expiry: z.string().optional().describe("Gmail OAuth token expiry (ISO 8601)"),
+    skip_validation: z.boolean().optional().describe("Skip credential validation after adding (default: false)"),
   },
   async (input) => {
     try {
-      const provider = createProvider(input);
+      const { skip_validation, ...providerInput } = input;
+      const provider = createProvider(providerInput);
+
+      if (!skip_validation) {
+        try {
+          const adapter = getAdapter(provider);
+          if (provider.type === "gmail") {
+            await adapter.listAddresses();
+          } else {
+            await adapter.listDomains();
+          }
+        } catch (validationErr) {
+          deleteProvider(provider.id);
+          return {
+            content: [{
+              type: "text",
+              text: `Error: Provider credentials are invalid: ${validationErr instanceof Error ? validationErr.message : String(validationErr)}. Provider was not saved.`,
+            }],
+            isError: true,
+          };
+        }
+      }
+
       return { content: [{ type: "text", text: JSON.stringify(provider, null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
@@ -372,13 +397,15 @@ server.tool(
   {
     from: z.string().describe("Sender email address"),
     to: z.union([z.string(), z.array(z.string())]).describe("Recipient(s)"),
-    subject: z.string().describe("Email subject"),
+    subject: z.string().optional().describe("Email subject (required if no template)"),
     html: z.string().optional().describe("HTML body"),
     text: z.string().optional().describe("Plain text body"),
     cc: z.union([z.string(), z.array(z.string())]).optional().describe("CC recipients"),
     bcc: z.union([z.string(), z.array(z.string())]).optional().describe("BCC recipients"),
     reply_to: z.string().optional().describe("Reply-to address"),
     provider_id: z.string().optional().describe("Provider ID (uses active provider if not specified)"),
+    template: z.string().optional().describe("Template name to use"),
+    template_vars: z.record(z.string()).optional().describe("Variables to render into the template"),
     attachments: z
       .array(
         z.object({
@@ -394,6 +421,23 @@ server.tool(
   async (input) => {
     try {
       const db = getDatabase();
+
+      // Resolve template
+      let subject = input.subject || "";
+      let html = input.html;
+      let text = input.text;
+
+      if (input.template) {
+        const tpl = getTemplate(input.template, db);
+        if (!tpl) throw new Error(`Template not found: ${input.template}`);
+        const vars = input.template_vars || {};
+        subject = renderTemplate(tpl.subject_template, vars);
+        if (tpl.html_template) html = renderTemplate(tpl.html_template, vars);
+        if (tpl.text_template) text = renderTemplate(tpl.text_template, vars);
+      }
+
+      if (!subject) throw new Error("Subject is required (provide subject or template)");
+
       let providerId: string;
 
       if (input.provider_id) {
@@ -406,10 +450,11 @@ server.tool(
       const provider = getProvider(providerId, db);
       if (!provider) throw new ProviderNotFoundError(providerId);
 
+      const sendInput = { ...input, subject, html, text };
       const adapter = getAdapter(provider);
-      const messageId = await adapter.sendEmail(input);
+      const messageId = await adapter.sendEmail(sendInput);
 
-      const email = createEmail(providerId, input, messageId, db);
+      const email = createEmail(providerId, sendInput, messageId, db);
 
       return {
         content: [
@@ -514,6 +559,108 @@ server.tool(
       const resolvedId = provider_id ? resolveId("providers", provider_id) : undefined;
       const stats = getLocalStats(resolvedId, period ?? "30d");
       return { content: [{ type: "text", text: JSON.stringify(stats, null, 2) }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+    }
+  },
+);
+
+// ─── TEMPLATES ───────────────────────────────────────────────────────────────
+
+server.tool(
+  "list_templates",
+  "List all email templates",
+  {},
+  async () => {
+    try {
+      const templates = listTemplates();
+      return { content: [{ type: "text", text: JSON.stringify(templates, null, 2) }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+    }
+  },
+);
+
+server.tool(
+  "add_template",
+  "Create a new email template",
+  {
+    name: z.string().describe("Unique template name"),
+    subject_template: z.string().describe("Subject template (supports {{var}} placeholders)"),
+    html_template: z.string().optional().describe("HTML body template"),
+    text_template: z.string().optional().describe("Plain text body template"),
+  },
+  async (input) => {
+    try {
+      const template = createTemplate(input);
+      return { content: [{ type: "text", text: JSON.stringify(template, null, 2) }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+    }
+  },
+);
+
+server.tool(
+  "remove_template",
+  "Delete a template by name or ID",
+  {
+    name_or_id: z.string().describe("Template name or ID"),
+  },
+  async ({ name_or_id }) => {
+    try {
+      const deleted = deleteTemplate(name_or_id);
+      if (!deleted) throw new Error(`Template not found: ${name_or_id}`);
+      return { content: [{ type: "text", text: `Template removed: ${name_or_id}` }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+    }
+  },
+);
+
+// ─── CONTACTS ────────────────────────────────────────────────────────────────
+
+server.tool(
+  "list_contacts",
+  "List tracked email contacts",
+  {
+    suppressed: z.boolean().optional().describe("Filter by suppression status"),
+  },
+  async ({ suppressed }) => {
+    try {
+      const contacts = listContacts(suppressed !== undefined ? { suppressed } : undefined);
+      return { content: [{ type: "text", text: JSON.stringify(contacts, null, 2) }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+    }
+  },
+);
+
+server.tool(
+  "suppress_contact",
+  "Suppress a contact email (prevent sending)",
+  {
+    email: z.string().describe("Email address to suppress"),
+  },
+  async ({ email }) => {
+    try {
+      suppressContact(email);
+      return { content: [{ type: "text", text: `Contact suppressed: ${email}` }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+    }
+  },
+);
+
+server.tool(
+  "unsuppress_contact",
+  "Unsuppress a contact email (allow sending again)",
+  {
+    email: z.string().describe("Email address to unsuppress"),
+  },
+  async ({ email }) => {
+    try {
+      unsuppressContact(email);
+      return { content: [{ type: "text", text: `Contact unsuppressed: ${email}` }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
     }

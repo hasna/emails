@@ -9,11 +9,17 @@ import { createProvider, listProviders, deleteProvider, getProvider } from "../d
 import { createDomain, listDomains, deleteDomain, getDomain, updateDnsStatus } from "../db/domains.js";
 import { createAddress, listAddresses, deleteAddress, getAddress } from "../db/addresses.js";
 import { createEmail, listEmails } from "../db/emails.js";
+import { createTemplate, listTemplates, getTemplate, deleteTemplate, renderTemplate } from "../db/templates.js";
+import { listContacts, suppressContact, unsuppressContact, isContactSuppressed, incrementSendCount } from "../db/contacts.js";
 import { getDatabase, resolvePartialId } from "../db/database.js";
 import { getAdapter } from "../providers/index.js";
 import { formatDnsTable } from "../lib/dns.js";
 import { getLocalStats, formatStatsTable } from "../lib/stats.js";
 import { syncAll, syncProvider } from "../lib/sync.js";
+import { checkAllProviders, formatProviderHealth } from "../lib/health.js";
+import { loadConfig, getConfigValue, setConfigValue, getDefaultProviderId } from "../lib/config.js";
+import { colorStatus, colorDnsStatus, colorProvider, truncate, formatDate, tableRow } from "../lib/format.js";
+import { exportEmailsCsv, exportEmailsJson, exportEventsCsv, exportEventsJson } from "../lib/export.js";
 
 function getPackageVersion(): string {
   try {
@@ -61,6 +67,7 @@ providerCmd
   .option("--secret-key <key>", "SES secret access key")
   .option("--client-id <id>", "Gmail OAuth client ID")
   .option("--client-secret <secret>", "Gmail OAuth client secret")
+  .option("--skip-validation", "Skip credential validation after adding")
   .action(async (opts: {
     name: string;
     type: string;
@@ -70,6 +77,7 @@ providerCmd
     secretKey?: string;
     clientId?: string;
     clientSecret?: string;
+    skipValidation?: boolean;
   }) => {
     try {
       if (opts.type !== "resend" && opts.type !== "ses" && opts.type !== "gmail") {
@@ -93,6 +101,17 @@ providerCmd
           oauth_access_token: tokens.access_token,
           oauth_token_expiry: tokens.expiry,
         });
+
+        if (!opts.skipValidation) {
+          try {
+            const adapter = getAdapter(provider);
+            await adapter.listAddresses();
+          } catch (validationErr) {
+            deleteProvider(provider.id);
+            handleError(new Error(`Provider credentials are invalid: ${validationErr instanceof Error ? validationErr.message : String(validationErr)}. Provider was not saved.`));
+          }
+        }
+
         console.log(chalk.green(`✓ Gmail provider created: ${provider.name} (${provider.id.slice(0, 8)})`));
         return;
       }
@@ -105,6 +124,17 @@ providerCmd
         access_key: opts.accessKey,
         secret_key: opts.secretKey,
       });
+
+      if (!opts.skipValidation) {
+        try {
+          const adapter = getAdapter(provider);
+          await adapter.listDomains();
+        } catch (validationErr) {
+          deleteProvider(provider.id);
+          handleError(new Error(`Provider credentials are invalid: ${validationErr instanceof Error ? validationErr.message : String(validationErr)}. Provider was not saved.`));
+        }
+      }
+
       console.log(chalk.green(`✓ Provider created: ${provider.name} (${provider.id.slice(0, 8)})`));
     } catch (e) {
       handleError(e);
@@ -123,7 +153,7 @@ providerCmd
       }
       console.log(chalk.bold("\nProviders:"));
       for (const p of providers) {
-        const status = p.active ? chalk.green("active") : chalk.dim("inactive");
+        const status = colorProvider(p.active, p.active ? "active" : "inactive");
         console.log(`  ${chalk.cyan(p.id.slice(0, 8))}  ${p.name}  [${p.type}]  ${status}`);
       }
       console.log();
@@ -179,6 +209,26 @@ providerCmd
     }
   });
 
+providerCmd
+  .command("status")
+  .description("Health check all active providers")
+  .action(async () => {
+    try {
+      const results = await checkAllProviders();
+      if (results.length === 0) {
+        console.log(chalk.dim("No active providers. Add one with 'emails provider add'"));
+        return;
+      }
+      console.log(chalk.bold("\nProvider Health:\n"));
+      for (const h of results) {
+        console.log(formatProviderHealth(h));
+        console.log();
+      }
+    } catch (e) {
+      handleError(e);
+    }
+  });
+
 // ─── DOMAIN ───────────────────────────────────────────────────────────────────
 
 const domainCmd = program.command("domain").description("Manage sending domains");
@@ -218,9 +268,9 @@ domainCmd
       }
       console.log(chalk.bold("\nDomains:"));
       for (const d of domains) {
-        const dkim = statusBadge(d.dkim_status);
-        const spf = statusBadge(d.spf_status);
-        const dmarc = statusBadge(d.dmarc_status);
+        const dkim = colorDnsStatus(d.dkim_status);
+        const spf = colorDnsStatus(d.spf_status);
+        const dmarc = colorDnsStatus(d.dmarc_status);
         console.log(`  ${chalk.cyan(d.id.slice(0, 8))}  ${d.domain}  DKIM:${dkim}  SPF:${spf}  DMARC:${dmarc}`);
       }
       console.log();
@@ -284,9 +334,49 @@ domainCmd
       updateDnsStatus(found!.id, status.dkim, status.spf, status.dmarc);
 
       console.log(chalk.bold(`\nDNS Status for ${domain}:`));
-      console.log(`  DKIM:  ${statusBadge(status.dkim)}`);
-      console.log(`  SPF:   ${statusBadge(status.spf)}`);
-      console.log(`  DMARC: ${statusBadge(status.dmarc)}`);
+      console.log(`  DKIM:  ${colorDnsStatus(status.dkim)}`);
+      console.log(`  SPF:   ${colorDnsStatus(status.spf)}`);
+      console.log(`  DMARC: ${colorDnsStatus(status.dmarc)}`);
+      console.log();
+    } catch (e) {
+      handleError(e);
+    }
+  });
+
+domainCmd
+  .command("status")
+  .description("Show domain status summary table")
+  .option("--provider <id>", "Filter by provider ID")
+  .action((opts: { provider?: string }) => {
+    try {
+      const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
+      const domains = listDomains(providerId);
+      if (domains.length === 0) {
+        console.log(chalk.dim("No domains configured."));
+        return;
+      }
+      console.log();
+      console.log(tableRow(
+        [chalk.bold("Domain"), 16],
+        [chalk.bold("Provider"), 12],
+        [chalk.bold("DKIM"), 12],
+        [chalk.bold("SPF"), 12],
+        [chalk.bold("DMARC"), 12],
+        [chalk.bold("Last Verified"), 18],
+      ));
+      for (const d of domains) {
+        const provider = getProvider(d.provider_id);
+        const providerName = provider ? truncate(provider.name, 12) : d.provider_id.slice(0, 8);
+        const lastVerified = d.verified_at ? formatDate(d.verified_at) : chalk.dim("never");
+        console.log(tableRow(
+          [truncate(d.domain, 16), 16],
+          [providerName, 12],
+          [colorDnsStatus(d.dkim_status), 12],
+          [colorDnsStatus(d.spf_status), 12],
+          [colorDnsStatus(d.dmarc_status), 12],
+          [lastVerified, 18],
+        ));
+      }
       console.log();
     } catch (e) {
       handleError(e);
@@ -347,7 +437,7 @@ addressCmd
       }
       console.log(chalk.bold("\nAddresses:"));
       for (const a of addresses) {
-        const verified = a.verified ? chalk.green("verified") : chalk.yellow("unverified");
+        const verified = a.verified ? colorDnsStatus("verified") : colorDnsStatus("pending");
         const name = a.display_name ? ` (${a.display_name})` : "";
         console.log(`  ${chalk.cyan(a.id.slice(0, 8))}  ${a.email}${name}  [${verified}]`);
       }
@@ -408,28 +498,74 @@ program
   .description("Send an email")
   .requiredOption("--from <email>", "Sender email address")
   .requiredOption("--to <email...>", "Recipient email address(es)")
-  .requiredOption("--subject <subject>", "Email subject")
+  .option("--subject <subject>", "Email subject")
   .option("--body <text>", "Email body text")
+  .option("--body-file <path>", "Read body from file")
   .option("--html", "Treat --body as HTML")
   .option("--cc <email...>", "CC recipients")
   .option("--bcc <email...>", "BCC recipients")
   .option("--reply-to <email>", "Reply-to address")
   .option("--attachment <path...>", "Attachment file path(s)")
   .option("--provider <id>", "Provider ID (uses first active if not specified)")
+  .option("--template <name>", "Use a template by name")
+  .option("--vars <json>", "Template variables as JSON string")
+  .option("--force", "Send even if recipients are suppressed")
   .action(async (opts: {
     from: string;
     to: string[];
-    subject: string;
+    subject?: string;
     body?: string;
+    bodyFile?: string;
     html?: boolean;
     cc?: string[];
     bcc?: string[];
     replyTo?: string;
     attachment?: string[];
     provider?: string;
+    template?: string;
+    vars?: string;
+    force?: boolean;
   }) => {
     try {
       const db = getDatabase();
+
+      // Check suppressed contacts
+      const allRecipients = [...opts.to, ...(opts.cc || []), ...(opts.bcc || [])];
+      const suppressedRecipients = allRecipients.filter((email) => isContactSuppressed(email, db));
+      if (suppressedRecipients.length > 0 && !opts.force) {
+        console.log(chalk.yellow(`Warning: Suppressed recipients: ${suppressedRecipients.join(", ")}`));
+        console.log(chalk.dim("  Use --force to send anyway."));
+      }
+
+      // Resolve body from --body, --body-file, or stdin pipe
+      let body = opts.body;
+      if (opts.bodyFile) {
+        body = readFileSync(opts.bodyFile, "utf-8");
+      } else if (!body && !opts.template && !process.stdin.isTTY) {
+        body = await new Promise<string>((resolve) => {
+          let data = "";
+          process.stdin.setEncoding("utf-8");
+          process.stdin.on("data", (chunk: string) => data += chunk);
+          process.stdin.on("end", () => resolve(data));
+        });
+      }
+
+      // Resolve template
+      let subject = opts.subject || "";
+      let htmlBody = opts.html ? body : undefined;
+      let textBody = !opts.html ? body : undefined;
+
+      if (opts.template) {
+        const tpl = getTemplate(opts.template, db);
+        if (!tpl) handleError(new Error(`Template not found: ${opts.template}`));
+        const vars: Record<string, string> = opts.vars ? JSON.parse(opts.vars) : {};
+        subject = renderTemplate(tpl!.subject_template, vars);
+        if (tpl!.html_template) htmlBody = renderTemplate(tpl!.html_template, vars);
+        if (tpl!.text_template) textBody = renderTemplate(tpl!.text_template, vars);
+      }
+
+      if (!subject) handleError(new Error("Subject is required (use --subject or --template)"));
+
       let providerId: string;
       if (opts.provider) {
         providerId = resolveId("providers", opts.provider);
@@ -477,9 +613,9 @@ program
         cc: opts.cc,
         bcc: opts.bcc,
         reply_to: opts.replyTo,
-        subject: opts.subject,
-        text: !opts.html ? opts.body : undefined,
-        html: opts.html ? opts.body : undefined,
+        subject,
+        text: textBody,
+        html: htmlBody,
         attachments: attachments.length > 0 ? attachments : undefined,
       };
 
@@ -488,6 +624,11 @@ program
 
       createEmail(providerId, sendOpts, messageId, db);
 
+      // Track contacts
+      for (const recipientEmail of allRecipients) {
+        incrementSendCount(recipientEmail, db);
+      }
+
       console.log(chalk.green(`✓ Email sent to ${Array.isArray(opts.to) ? opts.to.join(", ") : opts.to}`));
       if (messageId) console.log(chalk.dim(`  Message ID: ${messageId}`));
     } catch (e) {
@@ -495,28 +636,201 @@ program
     }
   });
 
+// ─── TEMPLATE ────────────────────────────────────────────────────────────────
+
+const templateCmd = program.command("template").description("Manage email templates");
+
+templateCmd
+  .command("add <name>")
+  .description("Add an email template")
+  .requiredOption("--subject <subject>", "Subject template (supports {{var}} placeholders)")
+  .option("--html <html>", "Inline HTML template")
+  .option("--text <text>", "Inline text template")
+  .option("--html-file <path>", "Read HTML template from file")
+  .option("--text-file <path>", "Read text template from file")
+  .action((name: string, opts: { subject: string; html?: string; text?: string; htmlFile?: string; textFile?: string }) => {
+    try {
+      let htmlTemplate = opts.html;
+      let textTemplate = opts.text;
+
+      if (opts.htmlFile) {
+        htmlTemplate = readFileSync(opts.htmlFile, "utf-8");
+      }
+      if (opts.textFile) {
+        textTemplate = readFileSync(opts.textFile, "utf-8");
+      }
+
+      const template = createTemplate({
+        name,
+        subject_template: opts.subject,
+        html_template: htmlTemplate,
+        text_template: textTemplate,
+      });
+      console.log(chalk.green(`✓ Template created: ${template.name} (${template.id.slice(0, 8)})`));
+    } catch (e) {
+      handleError(e);
+    }
+  });
+
+templateCmd
+  .command("list")
+  .description("List all templates")
+  .action(() => {
+    try {
+      const templates = listTemplates();
+      if (templates.length === 0) {
+        console.log(chalk.dim("No templates configured. Use 'emails template add' to create one."));
+        return;
+      }
+      console.log(chalk.bold("\nTemplates:"));
+      for (const t of templates) {
+        const hasHtml = t.html_template ? chalk.green("html") : chalk.dim("no-html");
+        const hasText = t.text_template ? chalk.green("text") : chalk.dim("no-text");
+        console.log(`  ${chalk.cyan(t.id.slice(0, 8))}  ${t.name}  subject="${truncate(t.subject_template, 30)}"  [${hasHtml}] [${hasText}]`);
+      }
+      console.log();
+    } catch (e) {
+      handleError(e);
+    }
+  });
+
+templateCmd
+  .command("show <name>")
+  .description("Show template details")
+  .action((name: string) => {
+    try {
+      const template = getTemplate(name);
+      if (!template) handleError(new Error(`Template not found: ${name}`));
+      console.log(chalk.bold(`\nTemplate: ${template!.name}`));
+      console.log(`  ID:      ${template!.id}`);
+      console.log(`  Subject: ${template!.subject_template}`);
+      if (template!.html_template) {
+        console.log(`  HTML:    ${truncate(template!.html_template, 60)}`);
+      }
+      if (template!.text_template) {
+        console.log(`  Text:    ${truncate(template!.text_template, 60)}`);
+      }
+      console.log(`  Created: ${template!.created_at}`);
+      console.log();
+    } catch (e) {
+      handleError(e);
+    }
+  });
+
+templateCmd
+  .command("remove <name>")
+  .description("Remove a template")
+  .action((name: string) => {
+    try {
+      const deleted = deleteTemplate(name);
+      if (!deleted) handleError(new Error(`Template not found: ${name}`));
+      console.log(chalk.green(`✓ Template removed: ${name}`));
+    } catch (e) {
+      handleError(e);
+    }
+  });
+
+// ─── CONTACTS ────────────────────────────────────────────────────────────────
+
+const contactsCmd = program.command("contacts").description("Manage email contacts");
+
+contactsCmd
+  .command("list")
+  .description("List contacts")
+  .option("--suppressed", "Show only suppressed contacts")
+  .action((opts: { suppressed?: boolean }) => {
+    try {
+      const contacts = listContacts(opts.suppressed !== undefined ? { suppressed: opts.suppressed } : undefined);
+      if (contacts.length === 0) {
+        console.log(chalk.dim("No contacts tracked yet."));
+        return;
+      }
+      console.log(chalk.bold("\nContacts:"));
+      for (const c of contacts) {
+        const suppressed = c.suppressed ? chalk.red("suppressed") : chalk.green("active");
+        const name = c.name ? ` (${c.name})` : "";
+        console.log(`  ${c.email}${name}  sent:${c.send_count} bounce:${c.bounce_count} complaint:${c.complaint_count}  [${suppressed}]`);
+      }
+      console.log();
+    } catch (e) {
+      handleError(e);
+    }
+  });
+
+contactsCmd
+  .command("suppress <email>")
+  .description("Suppress a contact (prevent sending)")
+  .action((email: string) => {
+    try {
+      suppressContact(email);
+      console.log(chalk.green(`✓ Contact suppressed: ${email}`));
+    } catch (e) {
+      handleError(e);
+    }
+  });
+
+contactsCmd
+  .command("unsuppress <email>")
+  .description("Unsuppress a contact (allow sending again)")
+  .action((email: string) => {
+    try {
+      unsuppressContact(email);
+      console.log(chalk.green(`✓ Contact unsuppressed: ${email}`));
+    } catch (e) {
+      handleError(e);
+    }
+  });
+
 // ─── PULL ─────────────────────────────────────────────────────────────────────
+
+function parseDuration(str: string): number {
+  const match = str.match(/^(\d+)(s|m|h)$/);
+  if (!match) return 300000;
+  const val = parseInt(match[1]!);
+  switch (match[2]) {
+    case "s": return val * 1000;
+    case "m": return val * 60000;
+    case "h": return val * 3600000;
+    default: return 300000;
+  }
+}
 
 program
   .command("pull")
   .description("Sync events from provider(s)")
   .option("--provider <id>", "Provider ID (syncs all if not specified)")
-  .action(async (opts: { provider?: string }) => {
+  .option("--watch", "Keep syncing on an interval")
+  .option("--interval <duration>", "Watch interval (e.g. 30s, 5m, 1h)", "5m")
+  .action(async (opts: { provider?: string; watch?: boolean; interval?: string }) => {
     try {
-      if (opts.provider) {
-        const providerId = resolveId("providers", opts.provider);
-        console.log(chalk.dim("Syncing events..."));
-        const count = await syncProvider(providerId);
-        console.log(chalk.green(`✓ Synced ${count} events`));
-      } else {
-        console.log(chalk.dim("Syncing all providers..."));
-        const results = await syncAll();
-        let total = 0;
-        for (const [id, count] of Object.entries(results)) {
-          console.log(`  ${id.slice(0, 8)}: ${count} events`);
-          total += count;
+      const runSync = async () => {
+        if (opts.provider) {
+          const providerId = resolveId("providers", opts.provider);
+          const count = await syncProvider(providerId);
+          return count;
+        } else {
+          const results = await syncAll();
+          let total = 0;
+          for (const [id, count] of Object.entries(results)) {
+            if (!opts.watch) console.log(`  ${id.slice(0, 8)}: ${count} events`);
+            total += count;
+          }
+          return total;
         }
-        console.log(chalk.green(`✓ Synced ${total} events total`));
+      };
+
+      if (opts.watch) {
+        const interval = parseDuration(opts.interval || "5m");
+        console.log(chalk.blue(`Watching for new events every ${opts.interval || "5m"}...`));
+        while (true) {
+          const total = await runSync();
+          console.log(chalk.gray(`[${new Date().toLocaleTimeString()}]`) + ` Synced ${total} events`);
+          await new Promise(r => setTimeout(r, interval));
+        }
+      } else {
+        console.log(chalk.dim(opts.provider ? "Syncing events..." : "Syncing all providers..."));
+        const total = await runSync();
+        console.log(chalk.green(`✓ Synced ${total} events${opts.provider ? "" : " total"}`));
       }
     } catch (e) {
       handleError(e);
@@ -570,8 +884,8 @@ program
         if (emails.length > 0) {
           console.log(chalk.bold("Recent emails:"));
           for (const e of emails) {
-            const status = emailStatusBadge(e.status);
-            console.log(`  ${status}  ${e.subject.slice(0, 40)}  → ${e.to_addresses[0] ?? ""}`);
+            const status = colorStatus(e.status);
+            console.log(`  ${padRight(status, 12)}  ${truncate(e.subject, 40)}  \u2192 ${e.to_addresses[0] ?? ""}`);
           }
         }
       } catch (err) {
@@ -651,24 +965,157 @@ program
     program.help();
   });
 
+// ─── EXPORT ──────────────────────────────────────────────────────────────────
+
+program
+  .command("export <type>")
+  .description("Export emails or events (type: emails | events)")
+  .option("--provider <id>", "Filter by provider ID")
+  .option("--since <date>", "Filter from date (ISO)")
+  .option("--until <date>", "Filter until date (ISO)")
+  .option("--format <fmt>", "Output format: json | csv", "json")
+  .option("--output <file>", "Write to file instead of stdout")
+  .action((type: string, opts: { provider?: string; since?: string; until?: string; format?: string; output?: string }) => {
+    try {
+      if (type !== "emails" && type !== "events") {
+        handleError(new Error("Export type must be 'emails' or 'events'"));
+      }
+
+      const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
+      const fmt = opts.format ?? "json";
+      let result: string;
+
+      if (type === "emails") {
+        const filters = { provider_id: providerId, since: opts.since, until: opts.until };
+        result = fmt === "csv" ? exportEmailsCsv(filters) : exportEmailsJson(filters);
+      } else {
+        const filters = { provider_id: providerId, since: opts.since };
+        result = fmt === "csv" ? exportEventsCsv(filters) : exportEventsJson(filters);
+      }
+
+      if (opts.output) {
+        const { writeFileSync } = require("node:fs");
+        writeFileSync(opts.output, result, "utf-8");
+        console.log(chalk.green("✓ Exported " + type + " to " + opts.output));
+      } else {
+        console.log(result);
+      }
+    } catch (e) {
+      handleError(e);
+    }
+  });
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function statusBadge(status: string): string {
-  switch (status) {
-    case "verified": return chalk.green("✓");
-    case "failed": return chalk.red("✗");
-    default: return chalk.yellow("⏳");
-  }
+function padRight(str: string, len: number): string {
+  const visibleLen = str.replace(/\[[0-9;]*m/g, "").length;
+  return str + " ".repeat(Math.max(0, len - visibleLen));
 }
 
-function emailStatusBadge(status: string): string {
-  switch (status) {
-    case "delivered": return chalk.green("delivered ");
-    case "bounced": return chalk.red("bounced   ");
-    case "complained": return chalk.red("complained");
-    case "failed": return chalk.red("failed    ");
-    default: return chalk.dim("sent      ");
-  }
-}
+// ─── CONFIG ──────────────────────────────────────────────────────────────────
+const configCmd = program.command("config").description("Manage configuration");
+configCmd.command("set <key> <value>").description("Set a config value").action((key: string, value: string) => {
+  try {
+    let parsed: unknown;
+    try { parsed = JSON.parse(value); } catch { parsed = value; }
+    setConfigValue(key, parsed);
+    console.log(chalk.green(`✓ ${key} = ${JSON.stringify(parsed)}`));
+  } catch (e) { handleError(e); }
+});
+configCmd.command("get <key>").description("Get a config value").action((key: string) => {
+  try {
+    const value = getConfigValue(key);
+    if (value === undefined) { console.log(chalk.dim(`${key} is not set`)); }
+    else { console.log(`${key} = ${JSON.stringify(value)}`); }
+  } catch (e) { handleError(e); }
+});
+configCmd.command("list").description("List all config values").action(() => {
+  try {
+    const config = loadConfig();
+    const keys = Object.keys(config);
+    if (keys.length === 0) { console.log(chalk.dim("No config values set.")); return; }
+    console.log(chalk.bold("\nConfig:"));
+    for (const key of keys) { console.log(`  ${chalk.cyan(key)} = ${JSON.stringify(config[key])}`); }
+    console.log();
+  } catch (e) { handleError(e); }
+});
+
+// ─── LOG ─────────────────────────────────────────────────────────────────────
+program.command("log").description("Show email send log")
+  .option("--provider <id>", "Filter by provider ID")
+  .option("--status <status>", "Filter by status: sent|delivered|bounced|complained|failed")
+  .option("--since <date>", "Show emails since date (ISO 8601)")
+  .option("--limit <n>", "Max results", "20")
+  .action((opts: { provider?: string; status?: string; since?: string; limit?: string }) => {
+    try {
+      const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
+      const limit = parseInt(opts.limit ?? "20", 10);
+      const emails = listEmails({ provider_id: providerId, status: opts.status as "sent" | "delivered" | "bounced" | "complained" | "failed" | undefined, since: opts.since, limit });
+      if (emails.length === 0) { console.log(chalk.dim("No emails found.")); return; }
+      console.log(chalk.bold(`${"Date".padEnd(20)}  ${"From".padEnd(30)}  ${"To".padEnd(30)}  ${"Subject".padEnd(40)}  Status`));
+      console.log(chalk.dim("\u2500".repeat(130)));
+      for (const e of emails) {
+        const date = new Date(e.sent_at).toLocaleString();
+        const from = e.from_address.length > 30 ? e.from_address.slice(0, 27) + "..." : e.from_address;
+        const to = (e.to_addresses[0] ?? "").length > 30 ? (e.to_addresses[0] ?? "").slice(0, 27) + "..." : (e.to_addresses[0] ?? "");
+        const subj = e.subject.length > 40 ? e.subject.slice(0, 37) + "..." : e.subject;
+        let statusStr: string;
+        switch (e.status) {
+          case "delivered": statusStr = chalk.green(e.status); break;
+          case "bounced": case "complained": case "failed": statusStr = chalk.red(e.status); break;
+          default: statusStr = chalk.blue(e.status);
+        }
+        console.log(`${date.padEnd(20)}  ${from.padEnd(30)}  ${to.padEnd(30)}  ${subj.padEnd(40)}  ${statusStr}`);
+      }
+      console.log();
+    } catch (e) { handleError(e); }
+  });
+
+// ─── TEST ────────────────────────────────────────────────────────────────────
+program.command("test [provider-id]").description("Send a test email")
+  .option("--to <email>", "Recipient email address")
+  .action(async (providerId?: string, opts?: { to?: string }) => {
+    try {
+      const db = getDatabase();
+      let resolvedProviderId: string;
+      if (providerId) { resolvedProviderId = resolveId("providers", providerId); }
+      else {
+        const defaultId = getDefaultProviderId();
+        if (defaultId) {
+          const resolved = resolvePartialId(db, "providers", defaultId);
+          if (resolved) { resolvedProviderId = resolved; }
+          else { handleError(new Error(`Default provider not found: ${defaultId}. Update with 'emails config set default_provider <id>'`)); }
+        } else {
+          const providers = listProviders(db).filter((p) => p.active);
+          if (providers.length === 0) handleError(new Error("No active providers. Add one with 'emails provider add'"));
+          resolvedProviderId = providers[0]!.id;
+        }
+      }
+      const provider = getProvider(resolvedProviderId!, db);
+      if (!provider) handleError(new Error(`Provider not found: ${resolvedProviderId!}`));
+      let toEmail = opts?.to;
+      if (!toEmail) {
+        const addrs = listAddresses(resolvedProviderId!, db);
+        const v = addrs.find((a) => a.verified);
+        if (v) { toEmail = v.email; } else if (addrs.length > 0) { toEmail = addrs[0]!.email; }
+        else { handleError(new Error("No --to address specified and no addresses found for this provider")); }
+      }
+      const fromAddrs = listAddresses(resolvedProviderId!, db);
+      let fromEmail: string;
+      const vf = fromAddrs.find((a) => a.verified);
+      if (vf) { fromEmail = vf.email; } else if (fromAddrs.length > 0) { fromEmail = fromAddrs[0]!.email; }
+      else { handleError(new Error("No sender addresses configured for this provider. Add one with 'emails address add'")); }
+      const ts = new Date().toISOString();
+      const subject = `Test from open-emails \u2014 ${ts}`;
+      const text = `This is a test email sent via open-emails at ${ts}. Provider: ${provider!.name} (${provider!.type})`;
+      const adapter = getAdapter(provider!);
+      const messageId = await adapter.sendEmail({ from: fromEmail!, to: toEmail!, subject, text });
+      createEmail(resolvedProviderId!, { from: fromEmail!, to: toEmail!, subject, text }, messageId, db);
+      console.log(chalk.green(`✓ Test email sent to ${toEmail}`));
+      if (messageId) console.log(chalk.dim(`  Message ID: ${messageId}`));
+      console.log(chalk.dim(`  From: ${fromEmail!}`));
+      console.log(chalk.dim(`  Provider: ${provider!.name} (${provider!.type})`));
+    } catch (e) { handleError(e); }
+  });
 
 program.parse(process.argv);

@@ -127,6 +127,41 @@ const MIGRATIONS = [
   ALTER TABLE providers ADD COLUMN oauth_token_expiry TEXT;
   INSERT OR IGNORE INTO _migrations (id) VALUES (2);
   `,
+
+  // Migration 3: Templates table
+  `
+  CREATE TABLE IF NOT EXISTS templates (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    subject_template TEXT NOT NULL,
+    html_template TEXT,
+    text_template TEXT,
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_templates_name ON templates(name);
+  INSERT OR IGNORE INTO _migrations (id) VALUES (3);
+  `,
+
+  // Migration 4: Contacts table
+  `
+  CREATE TABLE IF NOT EXISTS contacts (
+    id TEXT PRIMARY KEY,
+    email TEXT NOT NULL UNIQUE,
+    name TEXT,
+    send_count INTEGER NOT NULL DEFAULT 0,
+    bounce_count INTEGER NOT NULL DEFAULT 0,
+    complaint_count INTEGER NOT NULL DEFAULT 0,
+    last_sent_at TEXT,
+    suppressed INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_contacts_email ON contacts(email);
+  CREATE INDEX IF NOT EXISTS idx_contacts_suppressed ON contacts(suppressed);
+  INSERT OR IGNORE INTO _migrations (id) VALUES (4);
+  `,
 ];
 
 let _db: Database | null = null;
@@ -201,6 +236,38 @@ function ensureSchema(db: Database): void {
   ensureIndex("CREATE INDEX IF NOT EXISTS idx_events_type ON events(type)");
   ensureIndex("CREATE INDEX IF NOT EXISTS idx_events_occurred ON events(occurred_at)");
   ensureIndex("CREATE UNIQUE INDEX IF NOT EXISTS idx_events_provider_event ON events(provider_id, provider_event_id) WHERE provider_event_id IS NOT NULL");
+
+  // Ensure templates table exists
+  const ensureTable = (sql: string) => {
+    try { db.exec(sql); } catch {}
+  };
+  ensureTable(`CREATE TABLE IF NOT EXISTS templates (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    subject_template TEXT NOT NULL,
+    html_template TEXT,
+    text_template TEXT,
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+  ensureIndex("CREATE INDEX IF NOT EXISTS idx_templates_name ON templates(name)");
+
+  // Ensure contacts table exists
+  ensureTable(`CREATE TABLE IF NOT EXISTS contacts (
+    id TEXT PRIMARY KEY,
+    email TEXT NOT NULL UNIQUE,
+    name TEXT,
+    send_count INTEGER NOT NULL DEFAULT 0,
+    bounce_count INTEGER NOT NULL DEFAULT 0,
+    complaint_count INTEGER NOT NULL DEFAULT 0,
+    last_sent_at TEXT,
+    suppressed INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+  ensureIndex("CREATE INDEX IF NOT EXISTS idx_contacts_email ON contacts(email)");
+  ensureIndex("CREATE INDEX IF NOT EXISTS idx_contacts_suppressed ON contacts(suppressed)");
 }
 
 export function closeDatabase(): void {

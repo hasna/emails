@@ -2,6 +2,7 @@ import { getDatabase } from "../db/database.js";
 import { listProviders, getProvider } from "../db/providers.js";
 import { getEmail } from "../db/emails.js";
 import { upsertEvent } from "../db/events.js";
+import { incrementBounceCount, incrementComplaintCount } from "../db/contacts.js";
 import { getAdapter } from "../providers/index.js";
 import type { Database } from "bun:sqlite";
 
@@ -61,6 +62,15 @@ export async function syncProvider(providerId: string, db?: Database): Promise<n
             emailId,
           ]);
         }
+      }
+    }
+
+    // Track bounce/complaint counts on contacts
+    if (remoteEvent.recipient) {
+      if (remoteEvent.type === "bounced") {
+        incrementBounceCount(remoteEvent.recipient, d);
+      } else if (remoteEvent.type === "complained") {
+        incrementComplaintCount(remoteEvent.recipient, d);
       }
     }
 
