@@ -400,6 +400,42 @@ export function registerSendCommands(program: Command, output: (data: unknown, f
       } catch (e) { handleError(e); }
     });
 
+  // ─── CONVERSATION ─────────────────────────────────────────────────────────────
+  program.command("conversation <id>").description("Show full conversation thread for a sent email (email + all replies)")
+    .action((id: string) => {
+      try {
+        const db = getDatabase();
+        const resolvedId = resolveId("emails", id);
+        const emailRecord = getEmail(resolvedId, db);
+        if (!emailRecord) handleError(new Error(`Email not found: ${id}`));
+        const replies = listReplies(resolvedId, db);
+
+        console.log(chalk.bold(`\n📧 Conversation thread (${1 + replies.length} message${replies.length === 1 ? "" : "s"})\n`));
+
+        // Original sent email
+        console.log(chalk.bold(`  [Sent] ${emailRecord!.sent_at.slice(0, 16)}`));
+        console.log(`  ${chalk.cyan("From:")} ${emailRecord!.from_address} → ${emailRecord!.to_addresses.join(", ")}`);
+        console.log(`  ${chalk.dim("Subject:")} ${emailRecord!.subject}`);
+        console.log(`  ${chalk.dim("Status:")} ${colorStatus(emailRecord!.status)}`);
+
+        // Replies in chronological order
+        for (const r of replies) {
+          console.log(`\n  ${chalk.bold(`[Reply] ${r.received_at.slice(0, 16)}`)}`);
+          console.log(`  ${chalk.cyan("From:")} ${r.from_address}`);
+          console.log(`  ${chalk.dim("Subject:")} ${r.subject}`);
+          if (r.text_body) {
+            const preview = r.text_body.trim().slice(0, 200).replace(/\n+/g, " ");
+            console.log(`  ${chalk.dim("Body:")} ${preview}${r.text_body.length > 200 ? "..." : ""}`);
+          }
+        }
+
+        if (replies.length === 0) {
+          console.log(chalk.dim("\n  No replies received yet."));
+        }
+        console.log();
+      } catch (e) { handleError(e); }
+    });
+
   // ─── TEST ────────────────────────────────────────────────────────────────────
   program.command("test [provider-id]").description("Send a test email")
     .option("--to <email>", "Recipient email address")

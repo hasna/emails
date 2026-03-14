@@ -2,6 +2,34 @@
 
 All notable changes to `@hasna/emails` are documented here.
 
+## [0.4.17] - 2026-03-14
+- feat: reply tracking — inbound emails auto-linked to sent emails via `In-Reply-To`/`References` headers
+- feat: `emails replies <id>` — show conversation thread for a sent email
+- feat: `emails show` now displays reply count
+- feat: `list_replies` MCP tool
+- fix: `in_reply_to_email_id` added to `InboundEmail` interface (migration 14)
+
+## [0.4.16] - 2026-03-14
+- fix: MCP `send_email` now enforces domain warming limits (CLI parity)
+
+## [0.4.15] - 2026-03-14
+- feat: domain warming limits enforced on `emails send` — blocks at daily limit, warns at 80%
+- feat: `--force` flag bypasses warming check
+
+## [0.4.14] - 2026-03-14
+- feat: domain warming schedules — exponential ramp-up for new sending domains
+- feat: `emails domain warm/warm-status/warm-list/warm-pause/warm-resume`
+- feat: MCP `create_warming_schedule`, `get_warming_status`, `list_warming_schedules`, `update_warming_status`
+- feat: REST `GET/POST/PUT/DELETE /api/warming`
+- fix: `Email` and `EmailRow` interfaces now include `idempotency_key`
+- DB: migration 13 (warming_schedules table)
+
+## [0.4.13] - 2026-03-14
+- feat: `verify_email_address` MCP tool (format + MX + SMTP probe)
+- feat: `batch_send` MCP tool (send template to list of recipients)
+- docs: added `CHANGELOG.md`
+- chore: 54 MCP tools total
+
 ## [0.4.12] - 2026-03-14
 - fix: MCP `send_email` now uses `sendWithFailover` wrapper (was bypassing failover)
 - feat: export sequences, inbound, tracking, send modules from package root
