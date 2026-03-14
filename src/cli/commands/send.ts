@@ -43,6 +43,7 @@ export function registerSendCommands(program: Command, output: (data: unknown, f
     .option("--track-opens", "Inject tracking pixel to detect email opens (requires emails serve running)")
     .option("--track-clicks", "Rewrite links to track clicks (requires emails serve running)")
     .option("--tracking-url <url>", "Base URL for tracking server (default: http://localhost:3900)")
+    .option("--in-reply-to <id>", "Reply to an existing sent email — sets In-Reply-To/References headers for threading")
     .action(async (opts: {
       from: string;
       to?: string[];
@@ -211,6 +212,18 @@ export function registerSendCommands(program: Command, output: (data: unknown, f
           return;
         }
 
+        // Build threading headers if replying to an existing email
+        let threadingHeaders: Record<string, string> = {};
+        const inReplyToId = (opts as Record<string, unknown>).inReplyTo as string | undefined;
+        if (inReplyToId) {
+          const originalEmail = getEmail(resolveId("emails", inReplyToId), db);
+          if (originalEmail?.provider_message_id) {
+            threadingHeaders["In-Reply-To"] = `<${originalEmail.provider_message_id}>`;
+            threadingHeaders["References"] = `<${originalEmail.provider_message_id}>`;
+            log.info(chalk.dim(`  Threading reply to: ${originalEmail.subject}`));
+          }
+        }
+
         const sendOpts = {
           provider_id: providerId,
           from: opts.from,
@@ -222,6 +235,7 @@ export function registerSendCommands(program: Command, output: (data: unknown, f
           text: textBody,
           html: htmlBody,
           attachments: attachments.length > 0 ? attachments : undefined,
+          headers: Object.keys(threadingHeaders).length > 0 ? threadingHeaders : undefined,
           unsubscribe_url: (opts as Record<string, unknown>).unsubscribeUrl as string | undefined,
           idempotency_key: (opts as Record<string, unknown>).idempotencyKey as string | undefined,
         };
