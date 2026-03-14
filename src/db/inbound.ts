@@ -107,7 +107,28 @@ export function storeInboundEmail(
   );
 
   const row = d.query("SELECT * FROM inbound_emails WHERE id = ?").get(id) as InboundEmailRow;
-  return rowToEmail(row);
+  const stored = rowToEmail(row);
+
+  // Auto-unenroll from active sequences if this is a reply (respects sequence-auto-unenroll config)
+  if (replyToEmailId && input.from_address) {
+    try {
+      // Check if this sender is enrolled in any active sequences
+      const enrollments = d
+        .query("SELECT id, sequence_id FROM sequence_enrollments WHERE contact_email = ? AND status = 'active'")
+        .all(input.from_address) as { id: string; sequence_id: string }[];
+      for (const e of enrollments) {
+        d.run(
+          "UPDATE sequence_enrollments SET status = 'cancelled', completed_at = ? WHERE id = ?",
+          [now(), e.id],
+        );
+        process.stderr.write(`[sequences] Auto-unenrolled ${input.from_address} from sequence ${e.sequence_id} (replied to email)\n`);
+      }
+    } catch {
+      // Non-fatal — sequence tables may not exist on all installs
+    }
+  }
+
+  return stored;
 }
 
 export function listReplies(emailId: string, db?: Database): InboundEmail[] {

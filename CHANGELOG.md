@@ -2,6 +2,23 @@
 
 All notable changes to `@hasna/emails` are documented here.
 
+## [0.4.21] - 2026-03-14
+- feat: auto-unenroll from active sequences when contact replies to an email
+- chore: update CHANGELOG for v0.4.18-0.4.20
+
+## [0.4.20] - 2026-03-14
+- feat: webhook signature verification — Resend (svix HMAC-SHA256 + replay protection), SES/SNS structure check
+- feat: `emails serve --webhook-secret whsec_...` for verified webhook endpoint
+- feat: `emails send --dry-run` — preview what would be sent without sending
+- fix: export `verifyResendSignature`, `verifySnsStructure` from library
+
+## [0.4.19] - 2026-03-14
+- docs: add `AGENTS.md` — 202-line AI agent guide covering 59 MCP tools and all workflows
+
+## [0.4.18] - 2026-03-14
+- feat: `emails conversation <id>` — full thread view (sent email + replies)
+- chore: update CHANGELOG for v0.4.14-v0.4.17
+
 ## [0.4.17] - 2026-03-14
 - feat: reply tracking — inbound emails auto-linked to sent emails via `In-Reply-To`/`References` headers
 - feat: `emails replies <id>` — show conversation thread for a sent email
