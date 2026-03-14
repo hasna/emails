@@ -93,6 +93,8 @@
   <button onclick="showPage('templates',this)">Templates</button>
   <button onclick="showPage('inbound',this)">Inbound</button>
   <button onclick="showPage('sequences',this)">Sequences</button>
+  <button onclick="showPage('warming',this)">Warming</button>
+  <button onclick="showPage('conversations',this)">Conversations</button>
   <div class="nav-right">
     <label><input type="checkbox" id="auto-refresh-cb" onchange="toggleAutoRefresh(this)"> Auto-refresh</label>
   </div>
@@ -234,6 +236,21 @@
     <div class="panel"><table id="table-sequences"><tr><td class="loading">Loading...</td></tr></table></div>
   </div>
 
+  <!-- WARMING -->
+  <div id="page-warming" class="page">
+    <h2>Domain Warming</h2>
+    <p style="color:#94a3b8;font-size:13px;margin-bottom:20px;">Gradually ramp up email volume on new sending domains. <code>emails domain warm example.com --target 10000</code></p>
+    <div id="error-warming"></div>
+    <div class="panel"><table id="table-warming"><tr><td class="loading">Loading...</td></tr></table></div>
+  </div>
+
+  <!-- CONVERSATIONS -->
+  <div id="page-conversations" class="page">
+    <h2>Conversations</h2>
+    <div id="error-conversations"></div>
+    <div class="panel"><table id="table-conversations"><tr><td class="loading">Loading...</td></tr></table></div>
+  </div>
+
 </div>
 
 <!-- MODALS -->
@@ -336,6 +353,15 @@
   </div>
 </div>
 
+<!-- Conversation Modal -->
+<div class="modal-bg" id="modal-conversation">
+  <div class="modal" style="width:600px;max-width:96vw;">
+    <h3 id="conv-title">Conversation</h3>
+    <div id="conv-body" style="max-height:400px;overflow-y:auto;"></div>
+    <div class="actions"><button class="btn btn-secondary" onclick="closeModal('modal-conversation')">Close</button></div>
+  </div>
+</div>
+
 <script>
 const API = '';
 
@@ -370,6 +396,8 @@ function showPage(name, btn) {
   if (name === 'templates') loadTemplates();
   if (name === 'inbound') loadInbound();
   if (name === 'sequences') loadSequences();
+  if (name === 'warming') loadWarming();
+  if (name === 'conversations') loadConversations();
 }
 
 function refreshCurrent() {
@@ -383,6 +411,8 @@ function refreshCurrent() {
   else if (currentPage === 'templates') loadTemplates();
   else if (currentPage === 'inbound') loadInbound();
   else if (currentPage === 'sequences') loadSequences();
+  else if (currentPage === 'warming') loadWarming();
+  else if (currentPage === 'conversations') loadConversations();
 }
 
 function toggleAutoRefresh(cb) {
@@ -905,6 +935,115 @@ async function loadProviderSelects() {
       if (el) el.innerHTML = options || '<option value="">No providers</option>';
     });
   } catch {}
+}
+
+// ─── WARMING ─────────────────────────────────────────────────────────────────
+async function loadWarming() {
+  try {
+    const schedules = await api('/api/warming');
+    const table = document.getElementById('table-warming');
+    if (!schedules.length) { table.innerHTML = '<tr><td class="empty">No warming schedules. Use <code>emails domain warm</code> to create one.</td></tr>'; return; }
+
+    // For each schedule, also get today's status
+    const details = await Promise.all(schedules.map(s => api('/api/warming/' + s.domain).catch(() => null)));
+
+    table.innerHTML = `
+      <thead><tr><th>Domain</th><th>Status</th><th>Day</th><th>Today's Limit</th><th>Sent Today</th><th>Progress</th><th>Target</th><th>Started</th></tr></thead>
+      <tbody>${schedules.map((s, i) => {
+        const d = details[i];
+        const limit = d?.today_limit ?? '—';
+        const sent = d?.today_sent ?? 0;
+        const currentDay = d?.current_day ?? '—';
+        const pct = limit && limit > 0 ? Math.min(100, Math.round(sent / limit * 100)) : 0;
+        const barColor = pct >= 100 ? '#ef4444' : pct >= 80 ? '#f59e0b' : '#3b82f6';
+        return `<tr>
+          <td><strong>${s.domain}</strong></td>
+          <td>${badge(s.status, s.status === 'active' ? 'verified' : s.status === 'paused' ? 'pending' : 'sent')}</td>
+          <td>${currentDay}</td>
+          <td>${limit}</td>
+          <td>${sent}</td>
+          <td>
+            <div style="background:#334155;border-radius:4px;height:8px;width:120px;">
+              <div style="background:${barColor};height:8px;border-radius:4px;width:${pct}%;"></div>
+            </div>
+            <span style="font-size:11px;color:#94a3b8;">${pct}%</span>
+          </td>
+          <td>${s.target_daily_volume.toLocaleString()}/day</td>
+          <td>${s.start_date}</td>
+        </tr>`;
+      }).join('')}</tbody>`;
+  } catch(e) {
+    document.getElementById('error-warming').innerHTML = '<div class="error">' + e.message + '</div>';
+  }
+}
+
+// ─── CONVERSATIONS ────────────────────────────────────────────────────────────
+function escapeHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+async function loadConversations() {
+  try {
+    const emails = await api('/api/emails?limit=50');
+    const table = document.getElementById('table-conversations');
+    if (!emails.length) { table.innerHTML = '<tr><td class="empty">No sent emails found.</td></tr>'; return; }
+    table.innerHTML = `
+      <thead><tr><th>Subject</th><th>From</th><th>To</th><th>Status</th><th>Sent</th><th>Replies</th></tr></thead>
+      <tbody>${emails.map(e => `
+        <tr style="cursor:pointer;" onclick="openConversation('${e.id}','${escapeHtml(e.subject)}')">
+          <td>${escapeHtml(e.subject)}</td>
+          <td>${e.from_address}</td>
+          <td>${(e.to_addresses || []).slice(0,2).join(', ')}${(e.to_addresses || []).length > 2 ? '...' : ''}</td>
+          <td>${badge(e.status, e.status)}</td>
+          <td>${fmt(e.sent_at)}</td>
+          <td id="reply-count-${e.id}"><span style="color:#64748b">—</span></td>
+        </tr>`).join('')}</tbody>`;
+
+    // Load reply counts async
+    for (const e of emails) {
+      api('/api/inbound?limit=100').then(inbound => {
+        const replyCount = inbound.filter(i => i.in_reply_to_email_id === e.id).length;
+        const cell = document.getElementById('reply-count-' + e.id);
+        if (cell) cell.innerHTML = replyCount > 0 ? `<span style="color:#3b82f6;font-weight:600;">${replyCount} 💬</span>` : '<span style="color:#64748b">0</span>';
+      }).catch(() => {});
+    }
+  } catch(e) {
+    document.getElementById('error-conversations').innerHTML = '<div class="error">' + e.message + '</div>';
+  }
+}
+
+async function openConversation(emailId, subject) {
+  document.getElementById('conv-title').textContent = subject;
+  document.getElementById('conv-body').innerHTML = '<div class="loading">Loading...</div>';
+  document.getElementById('modal-conversation').classList.add('open');
+
+  try {
+    const [email, inbound] = await Promise.all([
+      api('/api/emails/' + emailId),
+      api('/api/inbound?limit=100'),
+    ]);
+    const replies = inbound.filter(i => i.in_reply_to_email_id === emailId);
+
+    let html = `<div style="border-left:3px solid #3b82f6;padding:8px 12px;margin-bottom:16px;">
+      <div style="font-size:12px;color:#94a3b8;">[Sent] ${fmt(email.sent_at)}</div>
+      <div><strong>${email.from_address}</strong> → ${(email.to_addresses||[]).join(', ')}</div>
+      <div style="margin-top:4px;color:#94a3b8;">${badge(email.status, email.status)}</div>
+    </div>`;
+
+    for (const r of replies) {
+      html += `<div style="border-left:3px solid #22c55e;padding:8px 12px;margin-bottom:12px;">
+        <div style="font-size:12px;color:#94a3b8;">[Reply] ${fmt(r.received_at)}</div>
+        <div><strong>${r.from_address}</strong></div>
+        <div style="margin-top:4px;font-size:13px;color:#cbd5e1;">${escapeHtml((r.text_body||'').slice(0,300))}${(r.text_body||'').length > 300 ? '...' : ''}</div>
+      </div>`;
+    }
+
+    if (!replies.length) html += '<div style="color:#64748b;font-size:13px;">No replies received yet.</div>';
+
+    document.getElementById('conv-body').innerHTML = html;
+  } catch(e) {
+    document.getElementById('conv-body').innerHTML = '<div class="error">' + e.message + '</div>';
+  }
 }
 
 // ─── Close modal on bg click ─────────────────────────────────────────────────

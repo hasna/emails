@@ -1,8 +1,9 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
 import { join } from "path";
 
-const CONFIG_DIR = join(process.env.HOME || "~", ".emails");
-const CONFIG_PATH = join(CONFIG_DIR, "config.json");
+// Lazy getters so tests can override HOME via process.env before calling
+function getConfigDir(): string { return join(process.env.HOME || "~", ".emails"); }
+function getConfigPath(): string { return join(getConfigDir(), "config.json"); }
 
 interface EmailsConfig {
   default_provider?: string;
@@ -10,13 +11,15 @@ interface EmailsConfig {
 }
 
 export function loadConfig(): EmailsConfig {
-  if (!existsSync(CONFIG_PATH)) return {};
-  return JSON.parse(readFileSync(CONFIG_PATH, "utf-8"));
+  const path = getConfigPath();
+  if (!existsSync(path)) return {};
+  return JSON.parse(readFileSync(path, "utf-8"));
 }
 
 export function saveConfig(config: EmailsConfig): void {
-  if (!existsSync(CONFIG_DIR)) mkdirSync(CONFIG_DIR, { recursive: true });
-  writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
+  const dir = getConfigDir();
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  writeFileSync(getConfigPath(), JSON.stringify(config, null, 2));
 }
 
 export function getConfigValue(key: string): unknown {
