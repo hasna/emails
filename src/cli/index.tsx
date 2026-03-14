@@ -687,11 +687,20 @@ program
       if (!provider) handleError(new Error(`Provider not found: ${providerId}`));
 
       // Read attachments
+      const MAX_ATTACHMENT_SIZE = 25 * 1024 * 1024; // 25MB (Resend/SES limit)
+      const MAX_ATTACHMENT_COUNT = 10;
       const attachments = [];
       if (opts.attachment) {
-        const { readFileSync } = await import("node:fs");
+        if (opts.attachment.length > MAX_ATTACHMENT_COUNT) {
+          handleError(new Error(`Too many attachments: ${opts.attachment.length} (max ${MAX_ATTACHMENT_COUNT})`));
+        }
+        const { readFileSync, statSync } = await import("node:fs");
         const { basename, extname } = await import("node:path");
         for (const path of opts.attachment) {
+          const stat = statSync(path);
+          if (stat.size > MAX_ATTACHMENT_SIZE) {
+            handleError(new Error(`Attachment "${basename(path)}" is too large: ${(stat.size / 1024 / 1024).toFixed(1)}MB (max 25MB)`));
+          }
           const content = readFileSync(path);
           const ext = extname(path).toLowerCase();
           const mimeTypes: Record<string, string> = {
