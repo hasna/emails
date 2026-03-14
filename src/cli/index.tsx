@@ -623,6 +623,9 @@ program
   .option("--schedule <datetime>", "Schedule email for later (ISO 8601 datetime)")
   .option("--unsubscribe-url <url>", "Inject List-Unsubscribe headers (RFC 8058 one-click)")
   .option("--idempotency-key <key>", "Prevent duplicate sends — returns existing email if key was used before")
+  .option("--track-opens", "Inject tracking pixel to detect email opens (requires emails serve running)")
+  .option("--track-clicks", "Rewrite links to track clicks (requires emails serve running)")
+  .option("--tracking-url <url>", "Base URL for tracking server (default: http://localhost:3900)")
   .action(async (opts: {
     from: string;
     to?: string[];
@@ -640,6 +643,9 @@ program
     vars?: string;
     force?: boolean;
     schedule?: string;
+    trackOpens?: boolean;
+    trackClicks?: boolean;
+    trackingUrl?: string;
   }) => {
     try {
       const db = getDatabase();
@@ -783,8 +789,19 @@ program
 
       const email = createEmail(actualProviderId, sendOpts, messageId, db);
 
-      // Store email content
-      storeEmailContent(email.id, { html: htmlBody, text: textBody }, db);
+      // Store email content (with tracking injected if requested)
+      let storedHtml = htmlBody;
+      if ((opts.trackOpens || opts.trackClicks) && htmlBody) {
+        const { prepareTrackedHtml } = await import("../lib/tracking.js");
+        // If --tracking-url was specified, temporarily use it by setting the config key
+        if (opts.trackingUrl) {
+          const { setConfigValue } = await import("../lib/config.js");
+          setConfigValue("tracking-base-url", opts.trackingUrl);
+        }
+        storedHtml = await prepareTrackedHtml(htmlBody, email.id, !!opts.trackOpens, !!opts.trackClicks);
+        log.info(chalk.dim("  Tracking enabled — open emails serve to record opens/clicks"));
+      }
+      storeEmailContent(email.id, { html: storedHtml, text: textBody }, db);
 
       // Track contacts
       for (const recipientEmail of allRecipients) {
@@ -1354,6 +1371,37 @@ sequenceCmd
     } catch (e) {
       handleError(e);
     }
+  });
+
+sequenceCmd
+  .command("enroll-bulk <name>")
+  .description("Bulk-enroll contacts from a CSV file into a sequence")
+  .requiredOption("--csv <path>", "CSV file with 'email' column")
+  .option("--provider <id>", "Provider ID (uses default if not specified)")
+  .action(async (name: string, opts: { csv: string; provider?: string }) => {
+    try {
+      const seq = getSequence(name);
+      if (!seq) handleError(new Error(`Sequence not found: ${name}`));
+      const { parseCsv } = await import("../lib/batch.js");
+      const { readFileSync } = await import("node:fs");
+      const content = readFileSync(opts.csv, "utf-8");
+      const rows = parseCsv(content);
+      if (!rows.length) handleError(new Error("CSV is empty or has no rows"));
+      if (!rows[0]!.email) handleError(new Error("CSV must have an 'email' column"));
+      let enrolled = 0, skipped = 0, failed = 0;
+      for (const row of rows) {
+        const email = row.email?.trim();
+        if (!email) { skipped++; continue; }
+        try {
+          enroll({ sequence_id: seq!.id, contact_email: email, provider_id: opts.provider });
+          enrolled++;
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          if (msg.includes("UNIQUE constraint")) { skipped++; } else { failed++; }
+        }
+      }
+      console.log(chalk.green(`✓ Bulk enroll complete: ${enrolled} enrolled, ${skipped} skipped, ${failed} failed`));
+    } catch (e) { handleError(e); }
   });
 
 sequenceCmd

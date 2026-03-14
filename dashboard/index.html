@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Open Emails Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f172a; color: #e2e8f0; min-height: 100vh; }
@@ -90,6 +91,8 @@
   <button onclick="showPage('events',this)">Events</button>
   <button onclick="showPage('contacts',this)">Contacts</button>
   <button onclick="showPage('templates',this)">Templates</button>
+  <button onclick="showPage('inbound',this)">Inbound</button>
+  <button onclick="showPage('sequences',this)">Sequences</button>
   <div class="nav-right">
     <label><input type="checkbox" id="auto-refresh-cb" onchange="toggleAutoRefresh(this)"> Auto-refresh</label>
   </div>
@@ -100,16 +103,32 @@
   <!-- OVERVIEW -->
   <div id="page-overview" class="page active">
     <h2>Overview</h2>
-    <div class="overview-toolbar">
+    <div class="toolbar">
       <select id="stats-period" onchange="loadStats()">
-        <option value="7d">7 days</option>
-        <option value="30d" selected>30 days</option>
-        <option value="90d">90 days</option>
+        <option value="7d">Last 7 days</option>
+        <option value="30d" selected>Last 30 days</option>
+        <option value="90d">Last 90 days</option>
       </select>
-      <button class="btn btn-primary btn-sm" onclick="triggerSync()">&#8635; Sync</button>
+      <button class="btn btn-primary" onclick="triggerSync()" id="btn-sync">↻ Sync</button>
     </div>
     <div id="error-overview"></div>
     <div class="cards" id="stats-cards"><div class="loading">Loading...</div></div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-top:24px;">
+      <div class="card" style="padding:20px;">
+        <div class="label">Daily Send Volume</div>
+        <canvas id="chart-volume" height="200"></canvas>
+      </div>
+      <div class="card" style="padding:20px;">
+        <div class="label">Delivery Breakdown</div>
+        <canvas id="chart-breakdown" height="200"></canvas>
+      </div>
+    </div>
+    <div style="margin-top:20px;">
+      <div class="card" style="padding:20px;">
+        <div class="label">Hourly Send Distribution</div>
+        <canvas id="chart-hourly" height="120"></canvas>
+      </div>
+    </div>
   </div>
 
   <!-- PROVIDERS -->
@@ -199,6 +218,20 @@
     </div>
     <div id="error-templates"></div>
     <div class="panel"><table id="table-templates"><tr><td class="loading">Loading...</td></tr></table></div>
+  </div>
+
+  <!-- INBOUND -->
+  <div id="page-inbound" class="page">
+    <h2>Inbound</h2>
+    <div id="error-inbound"></div>
+    <div class="panel"><table id="table-inbound"><tr><td class="loading">Loading...</td></tr></table></div>
+  </div>
+
+  <!-- SEQUENCES -->
+  <div id="page-sequences" class="page">
+    <h2>Sequences</h2>
+    <div id="error-sequences"></div>
+    <div class="panel"><table id="table-sequences"><tr><td class="loading">Loading...</td></tr></table></div>
   </div>
 
 </div>
@@ -335,6 +368,8 @@ function showPage(name, btn) {
   if (name === 'events') loadEvents();
   if (name === 'contacts') loadContacts();
   if (name === 'templates') loadTemplates();
+  if (name === 'inbound') loadInbound();
+  if (name === 'sequences') loadSequences();
 }
 
 function refreshCurrent() {
@@ -346,6 +381,8 @@ function refreshCurrent() {
   else if (currentPage === 'events') loadEvents();
   else if (currentPage === 'contacts') loadContacts();
   else if (currentPage === 'templates') loadTemplates();
+  else if (currentPage === 'inbound') loadInbound();
+  else if (currentPage === 'sequences') loadSequences();
 }
 
 function toggleAutoRefresh(cb) {
@@ -409,22 +446,70 @@ async function triggerSync() {
 }
 
 // ─── STATS ───────────────────────────────────────────────────────────────────
+let volumeChart = null, breakdownChart = null, hourlyChart = null;
+
 async function loadStats() {
-  const period = document.getElementById('stats-period').value;
+  const period = document.getElementById('stats-period')?.value || '30d';
   try {
-    const stats = await api('/api/stats?period=' + period);
-    const label = period === '7d' ? 'Last 7 days' : period === '30d' ? 'Last 30 days' : 'Last 90 days';
+    const [stats, analytics] = await Promise.all([
+      api('/api/stats?period=' + period),
+      api('/api/analytics?period=' + period).catch(() => null),
+    ]);
+
+    // Stat cards
     document.getElementById('stats-cards').innerHTML = `
-      <div class="card"><div class="label">Sent</div><div class="value">${stats.sent}</div><div class="sub">${label}</div></div>
-      <div class="card"><div class="label">Delivered</div><div class="value">${stats.delivered}</div><div class="sub">${stats.delivery_rate.toFixed(1)}% rate</div></div>
-      <div class="card"><div class="label">Bounced</div><div class="value">${stats.bounced}</div><div class="sub">${stats.bounce_rate.toFixed(1)}% rate</div></div>
+      <div class="card"><div class="label">Sent</div><div class="value">${stats.sent}</div><div class="sub">Last ${period}</div></div>
+      <div class="card"><div class="label">Delivered</div><div class="value">${stats.delivered}</div><div class="sub">${stats.delivery_rate?.toFixed(1) ?? 0}% rate</div></div>
+      <div class="card"><div class="label">Bounced</div><div class="value">${stats.bounced}</div><div class="sub">${stats.bounce_rate?.toFixed(1) ?? 0}% rate</div></div>
       <div class="card"><div class="label">Complained</div><div class="value">${stats.complained}</div><div class="sub">&nbsp;</div></div>
-      <div class="card"><div class="label">Opened</div><div class="value">${stats.opened}</div><div class="sub">${stats.open_rate.toFixed(1)}% rate</div></div>
+      <div class="card"><div class="label">Opened</div><div class="value">${stats.opened}</div><div class="sub">${stats.open_rate?.toFixed(1) ?? 0}% rate</div></div>
       <div class="card"><div class="label">Clicked</div><div class="value">${stats.clicked}</div><div class="sub">&nbsp;</div></div>
     `;
+
+    if (!analytics || typeof Chart === 'undefined') return;
+
+    // Chart colors
+    const blue = '#3b82f6', green = '#22c55e', red = '#ef4444', yellow = '#f59e0b', gray = '#475569';
+
+    // 1. Daily volume line chart
+    const volLabels = (analytics.dailyVolume || []).map(d => d.date);
+    const volData = (analytics.dailyVolume || []).map(d => d.count);
+    if (volumeChart) volumeChart.destroy();
+    volumeChart = new Chart(document.getElementById('chart-volume'), {
+      type: 'line',
+      data: {
+        labels: volLabels,
+        datasets: [{ label: 'Emails Sent', data: volData, borderColor: blue, backgroundColor: blue + '20', fill: true, tension: 0.3 }],
+      },
+      options: { responsive: true, plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#94a3b8', maxTicksLimit: 7 } }, y: { ticks: { color: '#94a3b8' }, beginAtZero: true } } },
+    });
+
+    // 2. Delivery breakdown doughnut
+    if (breakdownChart) breakdownChart.destroy();
+    breakdownChart = new Chart(document.getElementById('chart-breakdown'), {
+      type: 'doughnut',
+      data: {
+        labels: ['Delivered', 'Bounced', 'Complained', 'Sent (pending)'],
+        datasets: [{ data: [stats.delivered, stats.bounced, stats.complained, Math.max(0, stats.sent - stats.delivered - stats.bounced - stats.complained)], backgroundColor: [green, red, yellow, gray] }],
+      },
+      options: { responsive: true, plugins: { legend: { labels: { color: '#94a3b8' } } } },
+    });
+
+    // 3. Hourly distribution bar chart
+    const hours = Array.from({length: 24}, (_, i) => i);
+    const hourMap = Object.fromEntries((analytics.busiestHours || []).map(h => [h.hour, h.count]));
+    if (hourlyChart) hourlyChart.destroy();
+    hourlyChart = new Chart(document.getElementById('chart-hourly'), {
+      type: 'bar',
+      data: {
+        labels: hours.map(h => h + ':00'),
+        datasets: [{ label: 'Emails', data: hours.map(h => hourMap[h] || 0), backgroundColor: blue + '80', borderColor: blue }],
+      },
+      options: { responsive: true, plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#94a3b8', maxRotation: 0 } }, y: { ticks: { color: '#94a3b8' }, beginAtZero: true } } },
+    });
+
   } catch(e) {
-    document.getElementById('stats-cards').innerHTML = '';
-    showError('error-overview', e.message);
+    document.getElementById('stats-cards').innerHTML = `<div class="error">${e.message}</div>`;
   }
 }
 

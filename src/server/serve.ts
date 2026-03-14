@@ -9,9 +9,9 @@ import { fileURLToPath } from "url";
 import { createProvider, listProviders, deleteProvider, getProvider, updateProvider } from "../db/providers.js";
 import { createDomain, listDomains, deleteDomain, getDomain, updateDnsStatus } from "../db/domains.js";
 import { createAddress, listAddresses, deleteAddress } from "../db/addresses.js";
-import { listEmails, getEmail, searchEmails } from "../db/emails.js";
+import { listEmails, getEmail, searchEmails, updateEmailStatus } from "../db/emails.js";
 import { listSandboxEmails, getSandboxEmail, clearSandboxEmails } from "../db/sandbox.js";
-import { listEvents } from "../db/events.js";
+import { listEvents, upsertEvent } from "../db/events.js";
 import { getDatabase, resolvePartialId } from "../db/database.js";
 import { getAdapter } from "../providers/index.js";
 import { getLocalStats } from "../lib/stats.js";
@@ -896,6 +896,57 @@ export async function startServer(port = 3900): Promise<void> {
           if (!removed) return notFound("Enrollment not found or already inactive");
           return json({ unenrolled: true });
         } catch (e) { return internalError(e); }
+      }
+
+      // ─── TRACKING ────────────────────────────────────────────────────────
+
+      // GET /track/open/:emailId — record open event, return 1x1 transparent GIF
+      const trackOpenMatch = path.match(/^\/track\/open\/([^/]+)$/);
+      if (trackOpenMatch && method === "GET") {
+        const emailId = trackOpenMatch[1]!;
+        try {
+          upsertEvent({
+            email_id: emailId,
+            provider_id: "tracking",
+            provider_event_id: `open-${emailId}-${Date.now()}`,
+            type: "opened",
+            recipient: null,
+            metadata: { tracked: true, ip: req.headers.get("x-forwarded-for") ?? "unknown" },
+            occurred_at: new Date().toISOString(),
+          });
+          updateEmailStatus(emailId, "delivered");
+        } catch { /* non-fatal — don't break the tracking pixel response */ }
+
+        // Return 1x1 transparent GIF
+        const gif = Buffer.from("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7", "base64");
+        return new Response(gif, {
+          headers: { "Content-Type": "image/gif", "Cache-Control": "no-store, no-cache" },
+        });
+      }
+
+      // GET /track/click/:emailId/:encodedUrl — record click, redirect to original URL
+      const trackClickMatch = path.match(/^\/track\/click\/([^/]+)\/([^/]+)$/);
+      if (trackClickMatch && method === "GET") {
+        const emailId = trackClickMatch[1]!;
+        const encoded = trackClickMatch[2]!;
+        let originalUrl = "https://example.com";
+        try {
+          originalUrl = Buffer.from(encoded, "base64url").toString("utf-8");
+          upsertEvent({
+            email_id: emailId,
+            provider_id: "tracking",
+            provider_event_id: `click-${emailId}-${encoded}-${Date.now()}`,
+            type: "clicked",
+            recipient: null,
+            metadata: { url: originalUrl, tracked: true },
+            occurred_at: new Date().toISOString(),
+          });
+        } catch { /* non-fatal — still redirect */ }
+
+        return new Response(null, {
+          status: 302,
+          headers: { "Location": originalUrl },
+        });
       }
 
       // ─── STATIC DASHBOARD ────────────────────────────────────────────────
