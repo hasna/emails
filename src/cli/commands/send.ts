@@ -36,6 +36,7 @@ export function registerSendCommands(program: Command, output: (data: unknown, f
     .option("--template <name>", "Use a template by name")
     .option("--vars <json>", "Template variables as JSON string")
     .option("--force", "Send even if recipients are suppressed")
+    .option("--dry-run", "Preview what would be sent without actually sending")
     .option("--schedule <datetime>", "Schedule email for later (ISO 8601 datetime)")
     .option("--unsubscribe-url <url>", "Inject List-Unsubscribe headers (RFC 8058 one-click)")
     .option("--idempotency-key <key>", "Prevent duplicate sends — returns existing email if key was used before")
@@ -224,6 +225,21 @@ export function registerSendCommands(program: Command, output: (data: unknown, f
           unsubscribe_url: (opts as Record<string, unknown>).unsubscribeUrl as string | undefined,
           idempotency_key: (opts as Record<string, unknown>).idempotencyKey as string | undefined,
         };
+
+        // Dry run — show what would be sent without actually sending
+        if ((opts as Record<string, unknown>).dryRun) {
+          console.log(chalk.bold("\n[DRY RUN] Would send:"));
+          console.log(`  ${chalk.dim("From:")}    ${sendOpts.from}`);
+          console.log(`  ${chalk.dim("To:")}      ${(Array.isArray(sendOpts.to) ? sendOpts.to : [sendOpts.to]).join(", ")}`);
+          if (sendOpts.cc) console.log(`  ${chalk.dim("CC:")}      ${(Array.isArray(sendOpts.cc) ? sendOpts.cc : [sendOpts.cc]).join(", ")}`);
+          console.log(`  ${chalk.dim("Subject:")} ${sendOpts.subject}`);
+          if (sendOpts.html) console.log(`  ${chalk.dim("Body:")}    HTML (${sendOpts.html.length} chars)`);
+          else if (sendOpts.text) console.log(`  ${chalk.dim("Body:")}    ${sendOpts.text.slice(0, 100)}${sendOpts.text.length > 100 ? "..." : ""}`);
+          if (sendOpts.attachments?.length) console.log(`  ${chalk.dim("Attachments:")} ${sendOpts.attachments.length} file(s)`);
+          if (sendOpts.unsubscribe_url) console.log(`  ${chalk.dim("Unsubscribe:")} ${sendOpts.unsubscribe_url}`);
+          console.log(chalk.yellow("\n  [NOT SENT] Use without --dry-run to send.\n"));
+          return;
+        }
 
         const { messageId, providerId: actualProviderId, usedFailover } = await sendWithFailover(providerId, sendOpts, db);
         if (usedFailover) log.info(chalk.yellow(`  (Used failover provider)`));

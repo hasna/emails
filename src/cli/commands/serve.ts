@@ -14,7 +14,8 @@ export function registerServeCommands(program: Command, _output: (data: unknown,
     .option("--smtp-port <port>", "Also start SMTP inbound listener on this port")
     .option("--all", "Start all listeners (HTTP :3900, webhook :9877, SMTP :2525)")
     .option("--provider <id>", "Provider ID for inbound/webhook listeners")
-    .action(async (opts: { port?: string; host?: string; webhookPort?: string; smtpPort?: string; all?: boolean; provider?: string }) => {
+    .option("--webhook-secret <secret>", "Resend webhook signing secret (whsec_...) for signature verification")
+    .action(async (opts: { port?: string; host?: string; webhookPort?: string; smtpPort?: string; all?: boolean; provider?: string; webhookSecret?: string }) => {
       const { startServer } = await import("../../server/serve.js");
       const port = parseInt(opts.port ?? "3900", 10);
       const host = opts.host ?? "127.0.0.1";
@@ -24,8 +25,9 @@ export function registerServeCommands(program: Command, _output: (data: unknown,
       const smtpPort = opts.all ? 2525 : (opts.smtpPort ? parseInt(opts.smtpPort, 10) : null);
       if (webhookPort) {
         const { createWebhookServer } = await import("../../lib/webhook.js");
-        createWebhookServer(webhookPort, opts.provider);
-        console.log(chalk.dim(`  Webhook listener on port ${webhookPort}`));
+        createWebhookServer(webhookPort, opts.provider, opts.webhookSecret);
+        const securityNote = opts.webhookSecret ? chalk.green(" (signature verified)") : chalk.yellow(" (no signature verification)");
+        console.log(chalk.dim(`  Webhook listener on port ${webhookPort}`) + securityNote);
       }
       if (smtpPort) {
         const { createSmtpServer } = await import("../../lib/inbound.js");

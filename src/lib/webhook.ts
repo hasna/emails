@@ -2,6 +2,51 @@ import { upsertEvent } from "../db/events.js";
 import { getDatabase } from "../db/database.js";
 import chalk from "chalk";
 
+/**
+ * Verify Resend webhook signature (svix-style HMAC-SHA256).
+ * Resend sends: svix-id, svix-timestamp, svix-signature headers.
+ * The signed content is: `{svix-id}.{svix-timestamp}.{body}`
+ */
+export async function verifyResendSignature(
+  body: string,
+  headers: Record<string, string | null>,
+  secret: string,
+): Promise<boolean> {
+  const svixId = headers["svix-id"];
+  const svixTimestamp = headers["svix-timestamp"];
+  const svixSignature = headers["svix-signature"];
+  if (!svixId || !svixTimestamp || !svixSignature) return false;
+
+  // Reject if timestamp is more than 5 minutes old
+  const ts = parseInt(svixTimestamp, 10);
+  if (Math.abs(Date.now() / 1000 - ts) > 300) return false;
+
+  const signedContent = `${svixId}.${svixTimestamp}.${body}`;
+  const secretBytes = Buffer.from(secret.replace(/^whsec_/, ""), "base64");
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey("raw", secretBytes, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const sig = await crypto.subtle.sign("HMAC", key, encoder.encode(signedContent));
+  const computed = "v1," + Buffer.from(sig).toString("base64");
+
+  // svix-signature may be multiple signatures separated by spaces
+  return svixSignature.split(" ").some(s => s === computed);
+}
+
+/**
+ * Verify SES/SNS webhook signature.
+ * SNS signs with its own certificate — we do a basic check that the message
+ * comes from an SNS source (Type=Notification). Full cert verification requires
+ * downloading the cert from AWS which is optional — we at least check the structure.
+ */
+export function verifySnsStructure(body: Record<string, unknown>): boolean {
+  // If Type is present, ensure it's from SNS (not a random request)
+  if (body.Type && body.Type !== "Notification" && body.Type !== "SubscriptionConfirmation") return false;
+  // If TopicArn is present, ensure it's from AWS
+  const topicArn = body.TopicArn as string | undefined;
+  if (topicArn && !topicArn.includes("amazonaws.com")) return false;
+  return true;
+}
+
 export interface WebhookEvent {
   provider_event_id: string;
   type: "delivered" | "bounced" | "complained" | "opened" | "clicked";
@@ -62,7 +107,7 @@ function colorEventType(type: string): string {
   }
 }
 
-export function createWebhookServer(port: number, providerId?: string) {
+export function createWebhookServer(port: number, providerId?: string, webhookSecret?: string) {
   const db = getDatabase();
 
   const server = Bun.serve({
@@ -75,17 +120,31 @@ export function createWebhookServer(port: number, providerId?: string) {
       }
 
       let event: WebhookEvent | null = null;
+      let bodyText: string;
       let body: any;
 
       try {
-        body = await req.json();
+        bodyText = await req.text();
+        body = JSON.parse(bodyText);
       } catch {
         return new Response("Invalid JSON", { status: 400 });
       }
 
       if (url.pathname === "/webhook/resend") {
+        // Verify Resend signature if secret is configured
+        if (webhookSecret) {
+          const headers: Record<string, string | null> = {
+            "svix-id": req.headers.get("svix-id"),
+            "svix-timestamp": req.headers.get("svix-timestamp"),
+            "svix-signature": req.headers.get("svix-signature"),
+          };
+          const valid = await verifyResendSignature(bodyText, headers, webhookSecret).catch(() => false);
+          if (!valid) return new Response("Invalid signature", { status: 401 });
+        }
         event = parseResendWebhook(body);
       } else if (url.pathname === "/webhook/ses") {
+        // Verify SNS structure
+        if (!verifySnsStructure(body)) return new Response("Invalid SNS payload", { status: 400 });
         event = parseSesWebhook(body);
       } else {
         return new Response("Not found", { status: 404 });
