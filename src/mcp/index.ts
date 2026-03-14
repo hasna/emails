@@ -1289,6 +1289,74 @@ server.tool(
   },
 );
 
+// ─── VERIFY EMAIL ─────────────────────────────────────────────────────────────
+
+server.tool(
+  "verify_email_address",
+  "Verify an email address — checks format, MX records, and optionally SMTP probe",
+  {
+    email: z.string().describe("Email address to verify"),
+    smtp_probe: z.boolean().optional().describe("Also do SMTP probe (RCPT TO check, no email sent)"),
+    timeout_ms: z.number().optional().describe("DNS/SMTP timeout in milliseconds (default: 5000)"),
+  },
+  async ({ email, smtp_probe, timeout_ms }) => {
+    try {
+      const { verifyEmailAddress, formatVerifyResult } = await import("../lib/email-verify.js");
+      const result = await verifyEmailAddress(email, { smtpProbe: !!smtp_probe, timeoutMs: timeout_ms ?? 5000 });
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) + "\n\n" + formatVerifyResult(result) }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+    }
+  },
+);
+
+// ─── BATCH SEND ───────────────────────────────────────────────────────────────
+
+server.tool(
+  "batch_send",
+  "Send emails to a list of recipients using a template. Each recipient gets personalized content.",
+  {
+    recipients: z.array(z.object({ email: z.string(), vars: z.record(z.string()).optional() })).describe("List of recipients with optional template variables"),
+    template_name: z.string().describe("Template name to use"),
+    from_address: z.string().describe("From email address"),
+    provider_id: z.string().optional().describe("Provider ID (uses default if not specified)"),
+    force: z.boolean().optional().describe("Send even to suppressed contacts"),
+  },
+  async ({ recipients, template_name, from_address, provider_id, force }) => {
+    try {
+      const { getTemplate, renderTemplate } = await import("../db/templates.js");
+      const template = getTemplate(template_name);
+      if (!template) throw new Error(`Template not found: ${template_name}`);
+      const { getActiveProvider, getProvider } = await import("../db/providers.js");
+      const db = getDatabase();
+      const resolvedProviderId = provider_id ? resolvePartialId(db, "providers", provider_id) ?? provider_id
+        : getActiveProvider(db).id;
+      const provider = getProvider(resolvedProviderId, db);
+      if (!provider) throw new ProviderNotFoundError(resolvedProviderId);
+      const { isContactSuppressed, incrementSendCount } = await import("../db/contacts.js");
+      const { createEmail } = await import("../db/emails.js");
+      let sent = 0, skipped = 0, failed = 0;
+      const errors: string[] = [];
+      for (const r of recipients) {
+        if (!force && isContactSuppressed(r.email, db)) { skipped++; continue; }
+        try {
+          const vars = r.vars ?? { email: r.email };
+          const subject = renderTemplate(template.subject_template, vars);
+          const html = template.html_template ? renderTemplate(template.html_template, vars) : undefined;
+          const text = template.text_template ? renderTemplate(template.text_template, vars) : undefined;
+          const { messageId, providerId: actualId } = await sendWithFailover(resolvedProviderId, { from: from_address, to: r.email, subject, html, text }, db);
+          createEmail(actualId, { from: from_address, to: r.email, subject, html, text }, messageId, db);
+          incrementSendCount(r.email, db);
+          sent++;
+        } catch (e) { failed++; errors.push(`${r.email}: ${e instanceof Error ? e.message : String(e)}`); }
+      }
+      return { content: [{ type: "text", text: JSON.stringify({ sent, skipped, failed, errors }, null, 2) }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+    }
+  },
+);
+
 // ─── Start ────────────────────────────────────────────────────────────────────
 
 async function main() {

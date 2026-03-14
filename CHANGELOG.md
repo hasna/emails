@@ -1,0 +1,83 @@
+# Changelog
+
+All notable changes to `@hasna/emails` are documented here.
+
+## [0.4.12] - 2026-03-14
+- fix: MCP `send_email` now uses `sendWithFailover` wrapper (was bypassing failover)
+- feat: export sequences, inbound, tracking, send modules from package root
+- feat: added `getFailoverProviderIds` export
+
+## [0.4.11] - 2026-03-14
+- test: add `config.ts` tests (8 tests covering all config functions)
+
+## [0.4.10] - 2026-03-14
+- fix: `emails serve` now binds to `127.0.0.1` by default (use `--host 0.0.0.0` for all interfaces)
+- feat: `emails serve --all` starts HTTP + webhook + SMTP listeners in one command
+
+## [0.4.9] - 2026-03-14
+- refactor: split CLI `index.tsx` (2416 lines) into 14 modular command files
+- fix: open redirect vulnerability in tracking `/track/click` endpoint
+- fix: `require("net")` → ESM `import` in `email-verify.ts`
+
+## [0.4.8] - 2026-03-14
+- feat: local open/click tracking (`--track-opens --track-clicks` on send)
+- feat: `emails sequence enroll-bulk --csv` for bulk CSV enrollment
+- feat: Chart.js analytics charts in dashboard (daily volume, delivery doughnut, hourly bar)
+- feat: Inbound + Sequences pages in dashboard
+
+## [0.4.7] - 2026-03-14
+- feat: email sequences / drip campaigns (`emails sequence create/step/enroll`)
+- feat: `emails verify-email` — format + MX + optional SMTP probe
+- docs: README updated for all v0.4.x features
+
+## [0.4.6] - 2026-03-14
+- feat: inbound email processing (SMTP server port 2525, webhook endpoint)
+- feat: `emails inbound listen/list/show/open/clear`
+- feat: multi-provider failover (`emails config set failover-providers id1,id2`)
+
+## [0.4.5] - 2026-03-14
+- feat: bounce/complaint rate alerts with configurable thresholds
+- feat: idempotency keys on send (`--idempotency-key`)
+- DB: migration 10 (idempotency_key column on emails)
+
+## [0.4.4] - 2026-03-14
+- feat: `List-Unsubscribe` header injection (RFC 8058) via `--unsubscribe-url`
+- feat: custom `headers` on `SendEmailOptions`
+
+## [0.4.3] - 2026-03-14
+- feat: sandbox provider (`emails provider add --type sandbox`)
+- feat: dashboard improvements (search, sync, auto-refresh, DNS modal, Contacts/Templates pages)
+- feat: 20+ missing REST endpoints (contacts, templates, groups, sequences, analytics, sandbox, email-content)
+- feat: 7 new MCP tools (get_analytics, run_doctor, export_emails, etc.)
+- feat: expanded library exports in `src/index.ts`
+- DB: migration 9 (expanded provider type CHECK to include gmail/sandbox)
+
+## [0.4.2] - 2026-03-14
+- fix: 25MB attachment size limit, max 10 attachments per send
+- feat: rate limiting on server endpoints (pull: 5/min, verify: 10/min)
+
+## [0.4.1] - 2026-03-14
+- test: comprehensive Resend adapter tests (72 tests)
+- test: comprehensive SES adapter tests (42 tests)
+- docs: README.md created
+
+## [0.4.0] - 2026-03-14
+- feat: 15 QoL features (scheduling, batch send, groups, analytics, webhook, doctor, shell completion)
+- feat: email templates with variable substitution
+- feat: contacts tracking with auto-suppress on 3+ bounces
+- feat: CSV export (emails + events)
+- 293 tests
+
+## [0.3.0] - 2026-03-14
+- feat: 13 QoL features (config, log, test, templates, contacts, export, health, colored output)
+- 175 tests
+
+## [0.2.0] - 2026-03-14
+- feat: Gmail provider via OAuth2
+- feat: `connect-aws` SES support added to open-connectors
+
+## [0.1.0] - 2026-03-14
+- feat: initial release — Resend + AWS SES providers
+- feat: CLI + MCP server + HTTP dashboard
+- feat: domains, addresses, emails, events, sync
+- 100 tests
