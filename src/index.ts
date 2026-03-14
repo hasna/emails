@@ -118,6 +118,21 @@ export { checkProviderHealth, checkAllProviders, formatProviderHealth } from "./
 export { log, setLogLevel } from "./lib/logger.js";
 export { colorStatus, colorDnsStatus, truncate, formatDate } from "./lib/format.js";
 
+// New modules (v0.4.x)
+export { sendWithFailover } from "./lib/send.js";
+export { verifyEmailAddress, formatVerifyResult } from "./lib/email-verify.js";
+export { injectOpenPixel, injectClickTracking, prepareTrackedHtml } from "./lib/tracking.js";
+export { getFailoverProviderIds } from "./lib/config.js";
+export {
+  createSequence, getSequence, listSequences, updateSequence, deleteSequence,
+  addStep, listSteps, removeStep,
+  enroll, unenroll, listEnrollments, getDueEnrollments, advanceEnrollment,
+} from "./db/sequences.js";
+export {
+  storeInboundEmail, getInboundEmail, listInboundEmails,
+  deleteInboundEmail, clearInboundEmails,
+} from "./db/inbound.js";
+
 // Provider factory
 export { getAdapter } from "./providers/index.js";
 export type { ProviderAdapter, RemoteDomain, RemoteAddress, RemoteEvent } from "./providers/interface.js";

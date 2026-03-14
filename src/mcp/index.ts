@@ -22,6 +22,7 @@ import { getDatabase, resolvePartialId } from "../db/database.js";
 import { getAdapter } from "../providers/index.js";
 import { getLocalStats } from "../lib/stats.js";
 import { syncAll, syncProvider } from "../lib/sync.js";
+import { sendWithFailover } from "../lib/send.js";
 import {
   ProviderNotFoundError,
   DomainNotFoundError,
@@ -492,10 +493,9 @@ server.tool(
       if (!provider) throw new ProviderNotFoundError(providerId);
 
       const sendInput = { ...input, subject, html, text };
-      const adapter = getAdapter(provider);
-      const messageId = await adapter.sendEmail(sendInput);
+      const { messageId, providerId: actualProviderId } = await sendWithFailover(providerId, sendInput, db);
 
-      const email = createEmail(providerId, sendInput, messageId, db);
+      const email = createEmail(actualProviderId, sendInput, messageId, db);
 
       // Store email content
       storeEmailContent(email.id, { html, text }, db);
