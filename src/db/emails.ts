@@ -32,7 +32,7 @@ export function createEmail(
   const attachCount = opts.attachments?.length ?? 0;
 
   // Idempotency: if key provided and already sent, return existing email
-  const idempotencyKey = (opts as Record<string, unknown>).idempotency_key as string | undefined;
+  const idempotencyKey = (opts as unknown as Record<string, unknown>).idempotency_key as string | undefined;
   if (idempotencyKey) {
     const existing = d.query("SELECT * FROM emails WHERE idempotency_key = ?").get(idempotencyKey) as EmailRow | null;
     if (existing) return rowToEmail(existing);
