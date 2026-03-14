@@ -120,6 +120,12 @@ export { colorStatus, colorDnsStatus, truncate, formatDate } from "./lib/format.
 
 // New modules (v0.4.x)
 export { sendWithFailover } from "./lib/send.js";
+export {
+  verifyResendSignature, verifySnsStructure,
+  parseResendWebhook, parseSesWebhook,
+  createWebhookServer,
+} from "./lib/webhook.js";
+export type { WebhookEvent } from "./lib/webhook.js";
 export { verifyEmailAddress, formatVerifyResult } from "./lib/email-verify.js";
 export { injectOpenPixel, injectClickTracking, prepareTrackedHtml } from "./lib/tracking.js";
 export { getFailoverProviderIds } from "./lib/config.js";
