@@ -1,0 +1,22 @@
+{
+  "name": "@hasna/emails-sdk",
+  "version": "0.4.26",
+  "description": "Zero-dependency TypeScript client for @hasna/emails REST API",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" }
+  },
+  "files": ["dist"],
+  "publishConfig": { "access": "public" },
+  "license": "Apache-2.0",
+  "author": "Andrei Hasna <andrei@hasna.com>",
+  "scripts": {
+    "build": "bun build src/index.ts --outdir dist --target browser && tsc --emitDeclarationOnly --outDir dist",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3"
+  }
+}

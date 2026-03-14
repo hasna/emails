@@ -1,0 +1,539 @@
+/**
+ * @hasna/emails-sdk
+ * Zero-dependency TypeScript client for the @hasna/emails REST API.
+ * Works in Node.js, Bun, Deno, and browser environments.
+ */
+
+// ── Types ──────────────────────────────────────────────────────────────────
+
+export interface Provider {
+  id: string;
+  name: string;
+  type: string;
+  active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Domain {
+  id: string;
+  provider_id: string;
+  domain: string;
+  dkim_status: string;
+  spf_status: string;
+  dmarc_status: string;
+  verified_at: string | null;
+  created_at: string;
+}
+
+export interface EmailAddress {
+  id: string;
+  provider_id: string;
+  email: string;
+  display_name: string | null;
+  verified: boolean;
+  created_at: string;
+}
+
+export interface Email {
+  id: string;
+  provider_id: string;
+  provider_message_id: string | null;
+  from_address: string;
+  to_addresses: string[];
+  subject: string;
+  status: string;
+  sent_at: string;
+}
+
+export interface EmailEvent {
+  id: string;
+  email_id: string | null;
+  provider_id: string;
+  type: string;
+  recipient: string | null;
+  occurred_at: string;
+}
+
+export interface Contact {
+  id: string;
+  email: string;
+  name: string | null;
+  send_count: number;
+  bounce_count: number;
+  suppressed: boolean;
+}
+
+export interface Template {
+  id: string;
+  name: string;
+  subject_template: string;
+  html_template: string | null;
+  text_template: string | null;
+  created_at: string;
+}
+
+export interface Group {
+  id: string;
+  name: string;
+  description: string | null;
+  created_at: string;
+}
+
+export interface GroupMember {
+  email: string;
+  name: string | null;
+}
+
+export interface ScheduledEmail {
+  id: string;
+  status: string;
+  scheduled_at: string;
+  subject: string;
+}
+
+export interface Sequence {
+  id: string;
+  name: string;
+  status: string;
+  created_at: string;
+}
+
+export interface SequenceStep {
+  id: string;
+  sequence_id: string;
+  step_number: number;
+  delay_hours: number;
+  template_name: string;
+}
+
+export interface Enrollment {
+  id: string;
+  sequence_id: string;
+  contact_email: string;
+  current_step: number;
+  status: string;
+}
+
+export interface SandboxEmail {
+  id: string;
+  from_address: string;
+  to_addresses: string[];
+  subject: string;
+  created_at: string;
+}
+
+export interface InboundEmail {
+  id: string;
+  from_address: string;
+  to_addresses: string[];
+  subject: string;
+  in_reply_to_email_id: string | null;
+  received_at: string;
+}
+
+export interface WarmingSchedule {
+  id: string;
+  domain: string;
+  target_daily_volume: number;
+  start_date: string;
+  status: string;
+}
+
+export interface Stats {
+  sent: number;
+  delivered: number;
+  bounced: number;
+  complained: number;
+  opened: number;
+  clicked: number;
+  delivery_rate: number;
+  bounce_rate: number;
+  open_rate: number;
+}
+
+export interface Analytics {
+  dailyVolume: { date: string; count: number }[];
+  topRecipients: { email: string; count: number }[];
+  busiestHours: { hour: number; count: number }[];
+  deliveryTrend: { date: string; sent: number; delivered: number; bounced: number }[];
+}
+
+export interface DnsRecord {
+  type: string;
+  name: string;
+  value: string;
+  purpose: string;
+}
+
+export interface DoctorCheck {
+  name: string;
+  status: string;
+  message: string;
+}
+
+export interface EmailsClientOptions {
+  /** Base URL of the emails server, e.g. "http://localhost:3900" */
+  serverUrl: string;
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+async function checkResponse(res: Response): Promise<void> {
+  if (!res.ok) {
+    let message = `HTTP ${res.status}`;
+    try {
+      const body = (await res.json()) as { error?: string };
+      if (body.error) message = body.error;
+    } catch {
+      // ignore JSON parse errors — use status code message
+    }
+    throw new Error(message);
+  }
+}
+
+function qs(params?: Record<string, string | number | boolean | undefined>): string {
+  if (!params) return "";
+  const entries = Object.entries(params).filter(
+    ([, v]) => v !== undefined && v !== null
+  ) as [string, string | number | boolean][];
+  if (entries.length === 0) return "";
+  const sp = new URLSearchParams();
+  for (const [k, v] of entries) sp.set(k, String(v));
+  return "?" + sp.toString();
+}
+
+// ── Client ─────────────────────────────────────────────────────────────────
+
+export class EmailsClient {
+  private readonly baseUrl: string;
+
+  constructor(options: EmailsClientOptions) {
+    this.baseUrl = options.serverUrl.replace(/\/$/, "");
+  }
+
+  private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
+    const res = await fetch(this.baseUrl + path, {
+      ...init,
+      headers: { "Content-Type": "application/json", ...init.headers },
+    });
+    await checkResponse(res);
+    return res.json() as Promise<T>;
+  }
+
+  // ── Providers ──
+
+  async listProviders(): Promise<Provider[]> {
+    return this.request("/api/providers");
+  }
+
+  async addProvider(body: {
+    name: string;
+    type: string;
+    api_key?: string;
+    region?: string;
+    access_key?: string;
+    secret_key?: string;
+    oauth_client_id?: string;
+    oauth_client_secret?: string;
+  }): Promise<Provider> {
+    return this.request("/api/providers", { method: "POST", body: JSON.stringify(body) });
+  }
+
+  async updateProvider(id: string, body: Record<string, unknown>): Promise<Provider> {
+    return this.request(`/api/providers/${id}`, { method: "PUT", body: JSON.stringify(body) });
+  }
+
+  async removeProvider(id: string): Promise<void> {
+    await this.request(`/api/providers/${id}`, { method: "DELETE" });
+  }
+
+  async reauthProvider(id: string): Promise<{ ok: boolean; provider: Provider }> {
+    return this.request(`/api/providers/${id}/auth`, { method: "POST" });
+  }
+
+  // ── Domains ──
+
+  async listDomains(providerId?: string): Promise<Domain[]> {
+    return this.request(`/api/domains${qs({ provider_id: providerId })}`);
+  }
+
+  async addDomain(body: { provider_id: string; domain: string }): Promise<Domain> {
+    return this.request("/api/domains", { method: "POST", body: JSON.stringify(body) });
+  }
+
+  async getDnsRecords(id: string): Promise<DnsRecord[]> {
+    return this.request(`/api/domains/${id}/dns`);
+  }
+
+  async verifyDomain(id: string): Promise<unknown> {
+    return this.request(`/api/domains/${id}/verify`, { method: "POST" });
+  }
+
+  async removeDomain(id: string): Promise<void> {
+    await this.request(`/api/domains/${id}`, { method: "DELETE" });
+  }
+
+  // ── Addresses ──
+
+  async listAddresses(): Promise<EmailAddress[]> {
+    return this.request("/api/addresses");
+  }
+
+  async addAddress(body: { provider_id: string; email: string; display_name?: string }): Promise<EmailAddress> {
+    return this.request("/api/addresses", { method: "POST", body: JSON.stringify(body) });
+  }
+
+  async removeAddress(id: string): Promise<void> {
+    await this.request(`/api/addresses/${id}`, { method: "DELETE" });
+  }
+
+  // ── Emails ──
+
+  async listEmails(params?: {
+    status?: string;
+    limit?: number;
+    offset?: number;
+    provider_id?: string;
+  }): Promise<Email[]> {
+    return this.request(`/api/emails${qs(params as Record<string, string | number | undefined>)}`);
+  }
+
+  async getEmail(id: string): Promise<Email> {
+    return this.request(`/api/emails/${id}`);
+  }
+
+  async searchEmails(query: string, params?: { since?: string; limit?: number }): Promise<Email[]> {
+    return this.request(`/api/emails/search${qs({ q: query, ...params })}`);
+  }
+
+  async getEmailContent(id: string): Promise<{
+    html: string | null;
+    text_body: string | null;
+    headers: Record<string, string>;
+  }> {
+    return this.request(`/api/email-content/${id}`);
+  }
+
+  // ── Events ──
+
+  async listEvents(params?: { type?: string; limit?: number }): Promise<EmailEvent[]> {
+    return this.request(`/api/events${qs(params as Record<string, string | number | undefined>)}`);
+  }
+
+  // ── Stats & Analytics ──
+
+  async getStats(period?: string): Promise<Stats> {
+    return this.request(`/api/stats${qs({ period })}`);
+  }
+
+  async getAnalytics(params?: { period?: string; provider_id?: string }): Promise<Analytics> {
+    return this.request(`/api/analytics${qs(params)}`);
+  }
+
+  // ── Sync ──
+
+  async pull(providerId?: string): Promise<Record<string, number>> {
+    return this.request("/api/pull", {
+      method: "POST",
+      body: providerId ? JSON.stringify({ provider_id: providerId }) : "{}",
+    });
+  }
+
+  // ── Contacts ──
+
+  async listContacts(suppressed?: boolean): Promise<Contact[]> {
+    return this.request(`/api/contacts${qs({ suppressed: suppressed !== undefined ? String(suppressed) : undefined })}`);
+  }
+
+  async suppressContact(email: string): Promise<void> {
+    await this.request(`/api/contacts/${encodeURIComponent(email)}/suppress`, { method: "POST" });
+  }
+
+  async unsuppressContact(email: string): Promise<void> {
+    await this.request(`/api/contacts/${encodeURIComponent(email)}/unsuppress`, { method: "POST" });
+  }
+
+  // ── Templates ──
+
+  async listTemplates(): Promise<Template[]> {
+    return this.request("/api/templates");
+  }
+
+  async addTemplate(body: {
+    name: string;
+    subject_template: string;
+    html_template?: string;
+    text_template?: string;
+  }): Promise<Template> {
+    return this.request("/api/templates", { method: "POST", body: JSON.stringify(body) });
+  }
+
+  async removeTemplate(id: string): Promise<void> {
+    await this.request(`/api/templates/${id}`, { method: "DELETE" });
+  }
+
+  // ── Groups ──
+
+  async listGroups(): Promise<Group[]> {
+    return this.request("/api/groups");
+  }
+
+  async createGroup(body: { name: string; description?: string }): Promise<Group> {
+    return this.request("/api/groups", { method: "POST", body: JSON.stringify(body) });
+  }
+
+  async deleteGroup(id: string): Promise<void> {
+    await this.request(`/api/groups/${id}`, { method: "DELETE" });
+  }
+
+  async listGroupMembers(id: string): Promise<GroupMember[]> {
+    return this.request(`/api/groups/${id}/members`);
+  }
+
+  async addGroupMember(id: string, body: { email: string; name?: string }): Promise<void> {
+    await this.request(`/api/groups/${id}/members`, { method: "POST", body: JSON.stringify(body) });
+  }
+
+  async removeGroupMember(id: string, email: string): Promise<void> {
+    await this.request(`/api/groups/${id}/members/${encodeURIComponent(email)}`, { method: "DELETE" });
+  }
+
+  // ── Scheduled ──
+
+  async listScheduled(status?: string): Promise<ScheduledEmail[]> {
+    return this.request(`/api/scheduled${qs({ status })}`);
+  }
+
+  async cancelScheduled(id: string): Promise<void> {
+    await this.request(`/api/scheduled/${id}`, { method: "DELETE" });
+  }
+
+  // ── Sequences ──
+
+  async listSequences(): Promise<Sequence[]> {
+    return this.request("/api/sequences");
+  }
+
+  async createSequence(body: { name: string; description?: string }): Promise<Sequence> {
+    return this.request("/api/sequences", { method: "POST", body: JSON.stringify(body) });
+  }
+
+  async deleteSequence(id: string): Promise<void> {
+    await this.request(`/api/sequences/${id}`, { method: "DELETE" });
+  }
+
+  async listSequenceSteps(id: string): Promise<SequenceStep[]> {
+    return this.request(`/api/sequences/${id}/steps`);
+  }
+
+  async addSequenceStep(
+    id: string,
+    body: { step_number: number; delay_hours: number; template_name: string }
+  ): Promise<SequenceStep> {
+    return this.request(`/api/sequences/${id}/steps`, { method: "POST", body: JSON.stringify(body) });
+  }
+
+  async listEnrollments(id: string): Promise<Enrollment[]> {
+    return this.request(`/api/sequences/${id}/enrollments`);
+  }
+
+  async enrollContact(
+    id: string,
+    body: { contact_email: string; provider_id?: string }
+  ): Promise<Enrollment> {
+    return this.request(`/api/sequences/${id}/enroll`, { method: "POST", body: JSON.stringify(body) });
+  }
+
+  async unenrollContact(id: string, email: string): Promise<void> {
+    await this.request(`/api/sequences/${id}/enrollments/${encodeURIComponent(email)}`, {
+      method: "DELETE",
+    });
+  }
+
+  // ── Sandbox ──
+
+  async listSandboxEmails(params?: { provider_id?: string; limit?: number }): Promise<SandboxEmail[]> {
+    return this.request(`/api/sandbox${qs(params as Record<string, string | number | undefined>)}`);
+  }
+
+  async getSandboxEmail(id: string): Promise<SandboxEmail> {
+    return this.request(`/api/sandbox/${id}`);
+  }
+
+  async clearSandboxEmails(providerId?: string): Promise<{ deleted: number }> {
+    return this.request(`/api/sandbox${qs({ provider_id: providerId })}`, { method: "DELETE" });
+  }
+
+  // ── Inbound ──
+
+  async listInboundEmails(params?: { provider_id?: string; limit?: number }): Promise<InboundEmail[]> {
+    return this.request(`/api/inbound${qs(params as Record<string, string | number | undefined>)}`);
+  }
+
+  async getInboundEmail(id: string): Promise<InboundEmail> {
+    return this.request(`/api/inbound/${id}`);
+  }
+
+  async clearInboundEmails(providerId?: string): Promise<void> {
+    await this.request(`/api/inbound${qs({ provider_id: providerId })}`, { method: "DELETE" });
+  }
+
+  // ── Warming ──
+
+  async listWarmingSchedules(): Promise<WarmingSchedule[]> {
+    return this.request("/api/warming");
+  }
+
+  async createWarmingSchedule(body: {
+    domain: string;
+    target_daily_volume: number;
+    start_date?: string;
+  }): Promise<WarmingSchedule> {
+    return this.request("/api/warming", { method: "POST", body: JSON.stringify(body) });
+  }
+
+  async getWarmingStatus(
+    domain: string
+  ): Promise<WarmingSchedule & { today_limit: number; today_sent: number; current_day: number }> {
+    return this.request(`/api/warming/${domain}`);
+  }
+
+  async updateWarmingStatus(domain: string, status: string): Promise<WarmingSchedule> {
+    return this.request(`/api/warming/${domain}`, { method: "PUT", body: JSON.stringify({ status }) });
+  }
+
+  async deleteWarmingSchedule(domain: string): Promise<void> {
+    await this.request(`/api/warming/${domain}`, { method: "DELETE" });
+  }
+
+  // ── Export ──
+
+  async exportEmails(
+    format?: "csv" | "json",
+    params?: { provider_id?: string; since?: string }
+  ): Promise<string> {
+    const res = await fetch(
+      this.baseUrl + `/api/export/emails${qs({ format: format || "json", ...params })}`
+    );
+    await checkResponse(res);
+    return res.text();
+  }
+
+  async exportEvents(
+    format?: "csv" | "json",
+    params?: { provider_id?: string; since?: string }
+  ): Promise<string> {
+    const res = await fetch(
+      this.baseUrl + `/api/export/events${qs({ format: format || "json", ...params })}`
+    );
+    await checkResponse(res);
+    return res.text();
+  }
+
+  // ── Doctor ──
+
+  async runDoctor(): Promise<DoctorCheck[]> {
+    return this.request("/api/doctor");
+  }
+}
