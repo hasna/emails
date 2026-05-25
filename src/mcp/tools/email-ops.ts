@@ -3,20 +3,17 @@ import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { createEmail, listEmails, getEmail, searchEmails } from '../../db/emails.js';
 import { storeEmailContent, getEmailContent } from '../../db/email-content.js';
-import { listEvents } from '../../db/events.js';
 import { getLocalStats } from '../../lib/stats.js';
 import { createTemplate, listTemplates, getTemplate, deleteTemplate, renderTemplate } from '../../db/templates.js';
 import { listContacts, suppressContact, unsuppressContact } from '../../db/contacts.js';
 import { createScheduledEmail, listScheduledEmails, cancelScheduledEmail } from '../../db/scheduled.js';
-import { listProviders, getProvider } from '../../db/providers.js';
-import { listAddresses } from '../../db/addresses.js';
-import { getTemplate as getTemplateFn, renderTemplate as renderTemplateFn } from '../../db/templates.js';
-import { getGroupByName, listMembers } from '../../db/groups.js';
-import { getDatabase, resolvePartialId } from '../../db/database.js';
-import { getDefaultProviderId, getFailoverProviderIds } from '../../lib/config.js';
+import { getActiveProvider, getProvider } from '../../db/providers.js';
+import { getWarmingSchedule } from '../../db/warming.js';
+import { getTodayLimit, getTodaySentCount } from '../../lib/warming.js';
+import { syncProvider, syncAll } from '../../lib/sync.js';
+import { getDatabase } from '../../db/database.js';
 import { sendWithFailover } from '../../lib/send.js';
-import { isContactSuppressed, incrementSendCount } from '../../db/contacts.js';
-import { formatError, resolveId, EmailNotFoundError } from '../helpers.js';
+import { formatError, resolveId, EmailNotFoundError, ProviderNotFoundError } from '../helpers.js';
 
 export function registerEmailOpsTools(server: McpServer): void {
   // ─── SEND EMAIL ───────────────────────────────────────────────────────────────

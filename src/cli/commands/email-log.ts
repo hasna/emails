@@ -7,20 +7,13 @@
  */
 import type { Command } from "commander";
 import chalk from "chalk";
-import { readFileSync } from "node:fs";
 import { createEmail, listEmails, getEmail, searchEmails } from "../../db/emails.js";
-import { getEmailContent, storeEmailContent } from "../../db/email-content.js";
+import { getEmailContent } from "../../db/email-content.js";
 import { listProviders, getProvider } from "../../db/providers.js";
 import { listAddresses } from "../../db/addresses.js";
-import { getTemplate, renderTemplate } from "../../db/templates.js";
-import { isContactSuppressed, incrementSendCount } from "../../db/contacts.js";
-import { createScheduledEmail } from "../../db/scheduled.js";
-import { getGroupByName, listMembers } from "../../db/groups.js";
 import { getDatabase, resolvePartialId } from "../../db/database.js";
 import { getDefaultProviderId } from "../../lib/config.js";
-import { sendWithFailover } from "../../lib/send.js";
 import { colorStatus } from "../../lib/format.js";
-import { log } from "../../lib/logger.js";
 import { handleError, resolveId } from "../utils.js";
 import { listReplies, getReplyCount } from "../../db/inbound.js";
 
