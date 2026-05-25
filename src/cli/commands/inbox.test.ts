@@ -3,11 +3,12 @@
  * exercised by `emails inbox` subcommands.
  */
 import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { getDatabase, resetDatabase, closeDatabase, uuid, getDataDir } from "../../db/database.js";
 import { storeInboundEmail, listInboundEmails, getInboundEmail, getInboundCount, clearInboundEmails } from "../../db/inbound.js";
 import { getGmailSyncState, updateLastSynced, setGmailSyncState } from "../../db/gmail-sync-state.js";
+import { saveConfig } from "../../lib/config.js";
 
 // ─── Mock @hasna/connectors before any gmail-sync imports ─────────────────────
 
@@ -30,6 +31,9 @@ const mockRun = mock(async (_n: string, args: string[]) => {
 mock.module("@hasna/connectors", () => ({ runConnectorCommand: mockRun }));
 
 const { syncGmailInbox } = await import("../../lib/gmail-sync.js");
+
+const TMP_HOME = join("/tmp", `emails-inbox-test-${process.pid}`);
+const origHome = process.env["HOME"];
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -102,6 +106,9 @@ afterEach(() => {
   delete process.env["EMAILS_DB_PATH"];
   delete process.env["AWS_ACCESS_KEY_ID"];
   delete process.env["AWS_SECRET_ACCESS_KEY"];
+  if (origHome !== undefined) process.env["HOME"] = origHome;
+  else delete process.env["HOME"];
+  if (existsSync(TMP_HOME)) rmSync(TMP_HOME, { recursive: true, force: true });
 });
 
 // ─── inbox list (listInboundEmails) ──────────────────────────────────────────
@@ -224,7 +231,12 @@ describe("inbox search — local filter", () => {
 describe("inbox sync — syncGmailInbox", () => {
   it("falls back to local_path when S3 upload credentials are unavailable", async () => {
     const { db, providerId } = setupDb();
-    process.env["HOME"] = "/home/hasna";
+    mkdirSync(TMP_HOME, { recursive: true });
+    process.env["HOME"] = TMP_HOME;
+    saveConfig({
+      gmail_attachment_storage: "s3",
+      gmail_s3_bucket: "test-bucket",
+    });
     process.env["AWS_ACCESS_KEY_ID"] = "test-key";
     process.env["AWS_SECRET_ACCESS_KEY"] = "test-secret";
     mockListMsgs = [{ id: "gmail-att-1", subject: "Attachment Test", from: "a@test.com" }];
