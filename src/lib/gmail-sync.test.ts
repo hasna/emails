@@ -3,13 +3,23 @@ import { resetDatabase, closeDatabase, getDatabase, uuid } from "../db/database.
 
 // ─── Mock @hasna/connectors ───────────────────────────────────────────────────
 
-const mockRun = mock(async (_name: string, _args: string[]) => ({
-  success: true, stdout: "[]", stderr: "", exitCode: 0,
+const mockRun = mock(async (_args: {
+  connector: string;
+  operation: string;
+  input?: Record<string, unknown> & { args?: Array<string | number | boolean> };
+}) => ({
+  connector: "gmail",
+  operation: _args.operation,
+  success: true,
+  stdout: "[]",
+  stderr: "",
+  exitCode: 0,
+  data: [],
 }));
 
-mock.module("@hasna/connectors", () => ({ runConnectorCommand: mockRun }));
+mock.module("@hasna/connectors", () => ({ runConnectorOperation: mockRun }));
 
-const { syncGmailInbox, syncGmailInboxAll, parseJsonFromOutput } = await import("./gmail-sync.js");
+const { syncGmailInbox, syncGmailInboxAll } = await import("./gmail-sync.js");
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -22,6 +32,10 @@ function makeListOutput(msgs: { id: string; from?: string; subject?: string }[])
 function makeReadOutput(m: { id: string; from?: string; to?: string; subject?: string; body?: string; htmlBody?: string }): string {
   return JSON.stringify({
     id: m.id,
+    threadId: `thread-${m.id}`,
+    labelIds: ["INBOX", "Label_1"],
+    historyId: `history-${m.id}`,
+    internalDate: "1774000800000",
     from: m.from ?? "a@b.com",
     to: m.to ?? "me@b.com",
     subject: m.subject ?? "S",
@@ -46,50 +60,39 @@ function setMock(
   readOutputs?: string[],
 ) {
   let readIdx = 0;
-  mockRun.mockImplementation(async (_name: string, args: string[]) => {
-    if (args.includes("read") || args.includes("get")) {
-      const isHtml = args.includes("--html");
-      const idx = Math.max(args.indexOf("read"), args.indexOf("get"));
-      const id = args[idx + 1] ?? "x";
+  mockRun.mockImplementation(async (operationArgs: {
+    operation: string;
+    input?: Record<string, unknown> & { args?: Array<string | number | boolean> };
+  }) => {
+    const { operation, input } = operationArgs;
+    if (operation === "messages.read" || operation === "messages.get") {
+      const isHtml = input?.html === true;
+      const id = String(input?.args?.[0] ?? "x");
       const msg = msgs.find((m) => m.id === id);
       if (readOutputs && !isHtml) {
-        return { success: true, stdout: readOutputs[readIdx++] ?? makeReadOutput({ id }), stderr: "", exitCode: 0 };
+        const data = JSON.parse(readOutputs[readIdx++] ?? makeReadOutput({ id }));
+        return { connector: "gmail", operation, success: true, stdout: JSON.stringify(data), stderr: "", exitCode: 0, data };
       }
       if (isHtml && msg?.htmlBody) {
         // Return HTML body for --html calls
-        return { success: true, stdout: JSON.stringify({ id, from: msg.from ?? "a@b.com", subject: msg.subject ?? "S", date: DATE, body: msg.htmlBody, size: 200 }), stderr: "", exitCode: 0 };
+        const data = { id, from: msg.from ?? "a@b.com", subject: msg.subject ?? "S", date: DATE, body: msg.htmlBody, size: 200 };
+        return { connector: "gmail", operation, success: true, stdout: JSON.stringify(data), stderr: "", exitCode: 0, data };
       }
       // Return text body
-      return { success: true, stdout: makeReadOutput({ id, from: msg?.from, subject: msg?.subject, body: msg?.body }), stderr: "", exitCode: 0 };
+      const data = JSON.parse(makeReadOutput({ id, from: msg?.from, subject: msg?.subject, body: msg?.body }));
+      return { connector: "gmail", operation, success: true, stdout: JSON.stringify(data), stderr: "", exitCode: 0, data };
     }
-    if (args.includes("list")) {
-      return { success: true, stdout: makeListOutput(msgs), stderr: "", exitCode: 0 };
+    if (operation === "messages.list") {
+      const data = JSON.parse(makeListOutput(msgs));
+      return { connector: "gmail", operation, success: true, stdout: JSON.stringify(data), stderr: "", exitCode: 0, data };
     }
     // attachments list/download — return empty
-    return { success: true, stdout: "[]", stderr: "", exitCode: 0 };
+    return { connector: "gmail", operation, success: true, stdout: "[]", stderr: "", exitCode: 0, data: [] };
   });
 }
 
 beforeEach(() => mockRun.mockReset());
 afterEach(() => { closeDatabase(); delete process.env["EMAILS_DB_PATH"]; });
-
-// ─── parseJsonFromOutput ──────────────────────────────────────────────────────
-
-describe("parseJsonFromOutput", () => {
-  it("parses plain JSON array", () => {
-    expect(parseJsonFromOutput('[{"id":"1"}]')).toEqual([{ id: "1" }]);
-  });
-  it("parses plain JSON object", () => {
-    expect(parseJsonFromOutput('{"id":"1"}')).toEqual({ id: "1" });
-  });
-  it("strips preamble text", () => {
-    const r = parseJsonFromOutput('✓ Found:\n[{"id":"1"}]');
-    expect(Array.isArray(r)).toBe(true);
-  });
-  it("throws when no JSON", () => {
-    expect(() => parseJsonFromOutput("No JSON here")).toThrow("No JSON found");
-  });
-});
 
 // ─── syncGmailInbox ───────────────────────────────────────────────────────────
 
@@ -124,9 +127,34 @@ describe("syncGmailInbox", () => {
     expect(row!.html_body).toBe("<b>html</b>");
   });
 
+  it("stores Gmail archive metadata from connector detail", async () => {
+    const { db, providerId } = setupDb();
+    setMock([{ id: "msg1", body: "plain text" }]);
+    await syncGmailInbox({ providerId, db });
+    const row = db
+      .query("SELECT provider_thread_id, provider_history_id, provider_internal_date, label_ids_json FROM inbound_emails WHERE message_id = 'msg1'")
+      .get() as {
+        provider_thread_id: string;
+        provider_history_id: string;
+        provider_internal_date: string;
+        label_ids_json: string;
+      } | null;
+    expect(row!.provider_thread_id).toBe("thread-msg1");
+    expect(row!.provider_history_id).toBe("history-msg1");
+    expect(row!.provider_internal_date).toBe("1774000800000");
+    expect(JSON.parse(row!.label_ids_json)).toEqual(["INBOX", "Label_1"]);
+  });
+
   it("returns error when list fails", async () => {
     const { db, providerId } = setupDb();
-    mockRun.mockImplementation(async () => ({ success: false, stdout: "", stderr: "auth error", exitCode: 1 }));
+    mockRun.mockImplementation(async (operationArgs: { operation: string }) => ({
+      connector: "gmail",
+      operation: operationArgs.operation,
+      success: false,
+      stdout: "",
+      stderr: "auth error",
+      exitCode: 1,
+    }));
     const r = await syncGmailInbox({ providerId, db });
     expect(r.synced).toBe(0);
     expect(r.errors[0]).toContain("Failed to list messages");
@@ -135,14 +163,20 @@ describe("syncGmailInbox", () => {
   it("isolates per-message errors", async () => {
     const { db, providerId } = setupDb();
     let readCount = 0;
-    mockRun.mockImplementation(async (_n: string, args: string[]) => {
-      if (args.includes("read") || args.includes("get")) {
+    mockRun.mockImplementation(async (operationArgs: { operation: string }) => {
+      if (operationArgs.operation === "messages.read" || operationArgs.operation === "messages.get") {
         readCount++;
-        if (readCount === 1) return { success: true, stdout: "invalid json{{{", stderr: "", exitCode: 0 };
-        return { success: true, stdout: makeReadOutput({ id: "msg2" }), stderr: "", exitCode: 0 };
+        if (readCount === 1) {
+          return { connector: "gmail", operation: operationArgs.operation, success: true, stdout: "", stderr: "", exitCode: 0 };
+        }
+        const data = JSON.parse(makeReadOutput({ id: "msg2" }));
+        return { connector: "gmail", operation: operationArgs.operation, success: true, stdout: JSON.stringify(data), stderr: "", exitCode: 0, data };
       }
-      if (args.includes("list")) return { success: true, stdout: makeListOutput([{ id: "msg1" }, { id: "msg2" }]), stderr: "", exitCode: 0 };
-      return { success: true, stdout: "[]", stderr: "", exitCode: 0 };
+      if (operationArgs.operation === "messages.list") {
+        const data = JSON.parse(makeListOutput([{ id: "msg1" }, { id: "msg2" }]));
+        return { connector: "gmail", operation: operationArgs.operation, success: true, stdout: JSON.stringify(data), stderr: "", exitCode: 0, data };
+      }
+      return { connector: "gmail", operation: operationArgs.operation, success: true, stdout: "[]", stderr: "", exitCode: 0, data: [] };
     });
     const r = await syncGmailInbox({ providerId, db });
     expect(r.synced).toBeGreaterThanOrEqual(1);
@@ -160,16 +194,16 @@ describe("syncGmailInbox", () => {
     const { db, providerId } = setupDb();
     setMock([]);
     await syncGmailInbox({ providerId, batchSize: 5, db });
-    const listCall = mockRun.mock.calls.find((c) => (c[1] as string[]).includes("list"));
-    expect(listCall?.[1]).toContain("5");
+    const listCall = mockRun.mock.calls.find((c) => c[0]?.operation === "messages.list");
+    expect(listCall?.[0]?.input?.max).toBe(5);
   });
 
   it("passes query to list command", async () => {
     const { db, providerId } = setupDb();
     setMock([]);
     await syncGmailInbox({ providerId, query: "is:unread", db });
-    const listCall = mockRun.mock.calls.find((c) => (c[1] as string[]).includes("list"));
-    expect(listCall?.[1]).toContain("is:unread");
+    const listCall = mockRun.mock.calls.find((c) => c[0]?.operation === "messages.list");
+    expect(listCall?.[0]?.input?.query).toBe("is:unread");
   });
 });
 

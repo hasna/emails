@@ -310,6 +310,12 @@ const MIGRATIONS = [
     id TEXT PRIMARY KEY,
     provider_id TEXT REFERENCES providers(id) ON DELETE SET NULL,
     message_id TEXT,
+    provider_thread_id TEXT,
+    provider_history_id TEXT,
+    provider_internal_date TEXT,
+    label_ids_json TEXT NOT NULL DEFAULT '[]',
+    raw_s3_url TEXT,
+    metadata_s3_url TEXT,
     from_address TEXT NOT NULL,
     to_addresses TEXT NOT NULL DEFAULT '[]',
     cc_addresses TEXT NOT NULL DEFAULT '[]',
@@ -440,6 +446,19 @@ const MIGRATIONS = [
   `
   ALTER TABLE inbound_emails ADD COLUMN attachment_paths TEXT NOT NULL DEFAULT '[]';
   INSERT OR IGNORE INTO _migrations (id) VALUES (17);
+  `,
+
+  // Migration 18: Gmail archive metadata and S3 object references
+  `
+  ALTER TABLE inbound_emails ADD COLUMN provider_thread_id TEXT;
+  ALTER TABLE inbound_emails ADD COLUMN provider_history_id TEXT;
+  ALTER TABLE inbound_emails ADD COLUMN provider_internal_date TEXT;
+  ALTER TABLE inbound_emails ADD COLUMN label_ids_json TEXT NOT NULL DEFAULT '[]';
+  ALTER TABLE inbound_emails ADD COLUMN raw_s3_url TEXT;
+  ALTER TABLE inbound_emails ADD COLUMN metadata_s3_url TEXT;
+  CREATE INDEX IF NOT EXISTS idx_inbound_thread ON inbound_emails(provider_thread_id);
+  CREATE INDEX IF NOT EXISTS idx_inbound_history ON inbound_emails(provider_history_id);
+  INSERT OR IGNORE INTO _migrations (id) VALUES (18);
   `,
 ];
 
@@ -624,6 +643,12 @@ function ensureSchema(db: Database): void {
     id TEXT PRIMARY KEY,
     provider_id TEXT REFERENCES providers(id) ON DELETE SET NULL,
     message_id TEXT,
+    provider_thread_id TEXT,
+    provider_history_id TEXT,
+    provider_internal_date TEXT,
+    label_ids_json TEXT NOT NULL DEFAULT '[]',
+    raw_s3_url TEXT,
+    metadata_s3_url TEXT,
     from_address TEXT NOT NULL,
     to_addresses TEXT NOT NULL DEFAULT '[]',
     cc_addresses TEXT NOT NULL DEFAULT '[]',
@@ -641,6 +666,14 @@ function ensureSchema(db: Database): void {
   ensureIndex("CREATE INDEX IF NOT EXISTS idx_inbound_provider ON inbound_emails(provider_id)");
   ensureColumn("ALTER TABLE inbound_emails ADD COLUMN in_reply_to_email_id TEXT REFERENCES emails(id) ON DELETE SET NULL");
   ensureIndex("CREATE INDEX IF NOT EXISTS idx_inbound_reply_to ON inbound_emails(in_reply_to_email_id)");
+  ensureColumn("ALTER TABLE inbound_emails ADD COLUMN provider_thread_id TEXT");
+  ensureColumn("ALTER TABLE inbound_emails ADD COLUMN provider_history_id TEXT");
+  ensureColumn("ALTER TABLE inbound_emails ADD COLUMN provider_internal_date TEXT");
+  ensureColumn("ALTER TABLE inbound_emails ADD COLUMN label_ids_json TEXT NOT NULL DEFAULT '[]'");
+  ensureColumn("ALTER TABLE inbound_emails ADD COLUMN raw_s3_url TEXT");
+  ensureColumn("ALTER TABLE inbound_emails ADD COLUMN metadata_s3_url TEXT");
+  ensureIndex("CREATE INDEX IF NOT EXISTS idx_inbound_thread ON inbound_emails(provider_thread_id)");
+  ensureIndex("CREATE INDEX IF NOT EXISTS idx_inbound_history ON inbound_emails(provider_history_id)");
 
   // Ensure sequences tables exist
   ensureTable(`CREATE TABLE IF NOT EXISTS sequences (

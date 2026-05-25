@@ -5,11 +5,17 @@ import { getGmailSyncState, updateLastSynced } from "../db/gmail-sync-state.js";
 
 // ─── Mock @hasna/connectors ───────────────────────────────────────────────────
 
-const mockRun = mock(async (_n: string, _a: string[]) => ({
-  success: true, stdout: "[]", stderr: "", exitCode: 0,
+const mockRun = mock(async (operationArgs: { operation: string }) => ({
+  connector: "gmail",
+  operation: operationArgs.operation,
+  success: true,
+  stdout: "[]",
+  stderr: "",
+  exitCode: 0,
+  data: [],
 }));
 
-mock.module("@hasna/connectors", () => ({ runConnectorCommand: mockRun }));
+mock.module("@hasna/connectors", () => ({ runConnectorOperation: mockRun }));
 
 const { syncGmailInbox, syncGmailInboxAll } = await import("../lib/gmail-sync.js");
 
@@ -40,12 +46,16 @@ function seed(providerId: string, n: number) {
 }
 
 function setMock(listOutput: string, readOutput?: string) {
-  mockRun.mockImplementation(async (_n: string, args: string[]) => {
-    if ((args as string[]).includes("read") || (args as string[]).includes("get"))
-      return { success: true, stdout: readOutput ?? JSON.stringify({ id: "t1", from: "a@x.com", to: "me@x.com", subject: "S1", date: DATE, body: "Hello MCP", size: 100 }), stderr: "", exitCode: 0 };
-    if ((args as string[]).includes("list"))
-      return { success: true, stdout: listOutput, stderr: "", exitCode: 0 };
-    return { success: true, stdout: "[]", stderr: "", exitCode: 0 };
+  mockRun.mockImplementation(async (operationArgs: { operation: string }) => {
+    if (operationArgs.operation === "messages.read" || operationArgs.operation === "messages.get") {
+      const data = JSON.parse(readOutput ?? JSON.stringify({ id: "t1", from: "a@x.com", to: "me@x.com", subject: "S1", date: DATE, body: "Hello MCP", size: 100 }));
+      return { connector: "gmail", operation: operationArgs.operation, success: true, stdout: JSON.stringify(data), stderr: "", exitCode: 0, data };
+    }
+    if (operationArgs.operation === "messages.list") {
+      const data = JSON.parse(listOutput);
+      return { connector: "gmail", operation: operationArgs.operation, success: true, stdout: JSON.stringify(data), stderr: "", exitCode: 0, data };
+    }
+    return { connector: "gmail", operation: operationArgs.operation, success: true, stdout: "[]", stderr: "", exitCode: 0, data: [] };
   });
 }
 
@@ -76,7 +86,14 @@ describe("sync_inbox tool logic", () => {
 
   it("errors when list fails", async () => {
     const { db, pid } = setupDb();
-    mockRun.mockImplementation(async () => ({ success: false, stdout: "", stderr: "auth fail", exitCode: 1 }));
+    mockRun.mockImplementation(async (operationArgs: { operation: string }) => ({
+      connector: "gmail",
+      operation: operationArgs.operation,
+      success: false,
+      stdout: "",
+      stderr: "auth fail",
+      exitCode: 1,
+    }));
     const r = await syncGmailInbox({ providerId: pid, db });
     expect(r.errors.length).toBeGreaterThan(0);
     expect(r.errors[0]).toContain("Failed to list messages");

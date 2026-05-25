@@ -1,10 +1,10 @@
 import type { Command } from "commander";
 import chalk from "chalk";
-import { runConnectorCommand } from "@hasna/connectors";
-import { syncGmailInbox, listGmailLabels } from "../../lib/gmail-sync.js";
+import { runConnectorOperation } from "@hasna/connectors";
+import { syncGmailInbox, listGmailConnectorProfiles, listGmailLabels } from "../../lib/gmail-sync.js";
 import { listInboundEmails, getInboundEmail, deleteInboundEmail, clearInboundEmails, getInboundCount } from "../../db/inbound.js";
 import { getGmailSyncState, updateLastSynced } from "../../db/gmail-sync-state.js";
-import { listProviders } from "../../db/providers.js";
+import { createProvider, listProviders } from "../../db/providers.js";
 import { getDatabase } from "../../db/database.js";
 import { confirmDestructiveAction, handleError } from "../utils.js";
 
@@ -16,23 +16,65 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .command("sync")
     .description("Sync Gmail inbox messages into local SQLite")
     .option("--provider <id>", "Provider ID or name (defaults to first active Gmail provider)")
+    .option("--profile <name>", "Connector Gmail profile to use")
+    .option("--all-profiles", "Discover connector Gmail profiles and sync each one")
     .option("--label <label>", "Gmail label to sync (e.g. INBOX, SENT, label ID)", "INBOX")
     .option("--query <query>", "Gmail search query (e.g. 'is:unread from:boss@example.com')")
     .option("--limit <n>", "Max messages per sync run", "50")
     .option("--since <date>", "Only sync messages after this date (ISO 8601 or YYYY-MM-DD)")
     .option("--all", "Sync all pages until done (use for initial backfill)")
+    .option("--archive-s3 [bucket]", "Archive raw MIME and metadata to S3 bucket (default: prod-emails)")
     .option("--no-attachments", "Skip attachment download")
     .action(async (opts: {
       provider?: string;
+      profile?: string;
+      allProfiles?: boolean;
       label?: string;
       query?: string;
       limit?: string;
       since?: string;
       all?: boolean;
+      archiveS3?: boolean | string;
       attachments: boolean;
     }) => {
       try {
         const db = getDatabase();
+        const archiveBucket = opts.archiveS3
+          ? (typeof opts.archiveS3 === "string" ? opts.archiveS3 : "prod-emails")
+          : undefined;
+
+        if (opts.allProfiles) {
+          const profiles = await listGmailConnectorProfiles();
+          if (profiles.length === 0) {
+            console.error(chalk.red("No Gmail connector profiles found."));
+            process.exit(1);
+          }
+
+          const aggregate = { synced: 0, skipped: 0, attachments_saved: 0, errors: [] as string[], done: true };
+          for (const profile of profiles) {
+            const providerId = ensureGmailProviderForProfile(profile);
+            const page = await syncGmailInbox({
+              providerId,
+              profile,
+              labelFilter: opts.label,
+              query: opts.query,
+              batchSize: parseInt(opts.limit ?? "50", 10),
+              since: opts.since,
+              archiveS3Bucket: archiveBucket,
+              downloadAttachments: opts.attachments !== false,
+              db,
+            });
+            updateLastSynced(providerId, undefined, db);
+            aggregate.synced += page.synced;
+            aggregate.skipped += page.skipped;
+            aggregate.attachments_saved += page.attachments_saved;
+            aggregate.errors.push(...page.errors);
+            aggregate.done = aggregate.done && page.done;
+          }
+
+          output(aggregate, formatSyncResult(aggregate, false));
+          return;
+        }
 
         // Resolve provider
         const providerId = resolveGmailProvider(opts.provider);
@@ -44,9 +86,11 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         const syncOpts = {
           providerId,
           labelFilter: opts.label,
+          profile: opts.profile,
           query: opts.query,
           batchSize: parseInt(opts.limit ?? "50", 10),
           since: opts.since,
+          archiveS3Bucket: archiveBucket,
           downloadAttachments: opts.attachments !== false,
           db,
         };
@@ -143,20 +187,18 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
 
         if (opts.remote) {
           // Live Gmail search via connectors SDK
-          const r = await runConnectorCommand("gmail", ["-f", "json", "messages", "list", "--query", query, "--max", opts.limit ?? "20"]);
+          const r = await runConnectorOperation<{ messages?: { id: string; from: string; subject: string; date: string }[] } | { id: string; from: string; subject: string; date: string }[]>({
+            connector: "gmail",
+            operation: "messages.list",
+            input: { query, max: opts.limit ?? "20" },
+          });
           if (!r.success) {
             console.error(chalk.red(`Gmail search failed: ${r.stderr}`));
             process.exit(1);
           }
-          try {
-            const { parseJsonFromOutput } = await import("../../lib/gmail-sync.js");
-            const raw = parseJsonFromOutput(r.stdout);
-            const msgs = Array.isArray(raw) ? raw : (raw as { messages?: { id: string; from: string; subject: string; date: string }[] }).messages ?? [];
-            const results = msgs as { id: string; from: string; subject: string; date: string }[];
-            output(results, formatRemoteResults(results, query));
-          } catch {
-            console.log(r.stdout);
-          }
+          const raw = r.data;
+          const results = (Array.isArray(raw) ? raw : raw?.messages ?? []) as { id: string; from: string; subject: string; date: string }[];
+          output(results, formatRemoteResults(results, query));
           return;
         }
 
@@ -260,7 +302,11 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     const db = getDatabase();
     const row = db.query("SELECT message_id FROM inbound_emails WHERE id = ?").get(emailId) as { message_id: string } | null;
     if (!row?.message_id) throw new Error(`No Gmail message ID for email ${emailId}`);
-    const r = await runConnectorCommand("gmail", [...connectorArgs, row.message_id]);
+    const r = await runConnectorOperation({
+      connector: "gmail",
+      operation: connectorArgs.join("."),
+      input: { args: [row.message_id] },
+    });
     if (!r.success) throw new Error(r.stderr || r.stdout);
     console.log(chalk.green(`✓ ${label}: ${emailId.slice(0, 8)}`));
   }
@@ -303,10 +349,12 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
           console.error(chalk.red("Email not found or has no Gmail message ID."));
           process.exit(1);
         }
-        const args = ["messages", "reply", email.message_id, "--body", opts.body];
-        if (opts.html) args.push("--html");
         console.log(chalk.dim(`Replying to: ${email.subject}`));
-        const r = await runConnectorCommand("gmail", args);
+        const r = await runConnectorOperation({
+          connector: "gmail",
+          operation: "messages.reply",
+          input: { args: [email.message_id], body: opts.body, ...(opts.html ? { html: true } : {}) },
+        });
         if (!r.success) { console.error(chalk.red(`Reply failed: ${r.stderr}`)); process.exit(1); }
         console.log(chalk.green("✓ Reply sent"));
         output({}, "");
@@ -467,6 +515,14 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function ensureGmailProviderForProfile(profile: string): string {
+  const db = getDatabase();
+  const providerName = `Gmail (${profile})`;
+  const existing = listProviders(db).find((p) => p.type === "gmail" && p.name === providerName);
+  if (existing) return existing.id;
+  return createProvider({ name: providerName, type: "gmail" }, db).id;
+}
 
 function resolveGmailProvider(idOrName?: string): string | null {
   const db = getDatabase();
