@@ -217,33 +217,44 @@ export async function migrateS3Prefix(input: S3PrefixMigrationInput): Promise<S3
   const client = input.client ?? new S3Client({ region: input.region ?? "us-east-1" });
   const sourcePrefix = input.sourcePrefix ?? "";
   const targetPrefix = (input.targetPrefix ?? "").replace(/^\/+|\/+$/g, "");
-  const listed = await client.send(new ListObjectsV2Command({
-    Bucket: input.sourceBucket,
-    Prefix: sourcePrefix,
-    MaxKeys: input.limit,
-  })) as { Contents?: Array<{ Key?: string }>; NextContinuationToken?: string };
-  const objects = (listed.Contents ?? []).filter((obj): obj is { Key: string } => Boolean(obj.Key));
   const migrated: Array<{ source: string; target: string }> = [];
-  for (const object of objects) {
-    const relative = sourcePrefix && object.Key.startsWith(sourcePrefix)
-      ? object.Key.slice(sourcePrefix.length).replace(/^\/+/, "")
-      : object.Key;
-    const target = targetPrefix ? `${targetPrefix}/${relative}` : relative;
-    migrated.push({ source: object.Key, target });
-    if (!input.dryRun) {
-      await client.send(new CopyObjectCommand({
-        Bucket: input.targetBucket,
-        Key: target,
-        CopySource: `${input.sourceBucket}/${encodeS3CopySourceKey(object.Key)}`,
-      }));
+  let continuationToken: string | undefined;
+  let nextContinuationToken: string | undefined;
+
+  do {
+    const remaining = input.limit ? input.limit - migrated.length : undefined;
+    if (remaining !== undefined && remaining <= 0) break;
+    const listed = await client.send(new ListObjectsV2Command({
+      Bucket: input.sourceBucket,
+      Prefix: sourcePrefix,
+      MaxKeys: remaining !== undefined ? Math.min(remaining, 1000) : undefined,
+      ContinuationToken: continuationToken,
+    })) as { Contents?: Array<{ Key?: string }>; NextContinuationToken?: string };
+    const objects = (listed.Contents ?? []).filter((obj): obj is { Key: string } => Boolean(obj.Key));
+    for (const object of objects) {
+      const relative = sourcePrefix && object.Key.startsWith(sourcePrefix)
+        ? object.Key.slice(sourcePrefix.length).replace(/^\/+/, "")
+        : object.Key;
+      const target = targetPrefix ? `${targetPrefix}/${relative}` : relative;
+      migrated.push({ source: object.Key, target });
+      if (!input.dryRun) {
+        await client.send(new CopyObjectCommand({
+          Bucket: input.targetBucket,
+          Key: target,
+          CopySource: `${input.sourceBucket}/${encodeS3CopySourceKey(object.Key)}`,
+        }));
+      }
     }
-  }
+    continuationToken = listed.NextContinuationToken;
+    nextContinuationToken = listed.NextContinuationToken;
+  } while (continuationToken && (!input.limit || migrated.length < input.limit));
+
   return {
-    scanned: objects.length,
-    copied: input.dryRun ? 0 : objects.length,
+    scanned: migrated.length,
+    copied: input.dryRun ? 0 : migrated.length,
     dryRun: Boolean(input.dryRun),
     objects: migrated,
-    nextContinuationToken: listed.NextContinuationToken,
+    nextContinuationToken,
   };
 }
 

@@ -82,6 +82,7 @@ describe("Gmail archive S3 helpers", () => {
 
   it("plans and copies legacy S3 prefixes to a target prefix", async () => {
     const copied: Array<{ source?: string; key?: string }> = [];
+    const listTokens: Array<string | undefined> = [];
     const result = await migrateS3Prefix({
       sourceBucket: "hasna-mail-maximstaris",
       targetBucket: "prod-emails",
@@ -89,12 +90,20 @@ describe("Gmail archive S3 helpers", () => {
       targetPrefix: "legacy/maximstaris",
       client: {
         send: async (command) => {
-          const input = (command as { input?: { CopySource?: string; Key?: string } }).input;
+          const input = (command as { input?: { CopySource?: string; Key?: string; ContinuationToken?: string } }).input;
           if (input?.CopySource) {
             copied.push({ source: input.CopySource, key: input.Key });
             return {};
           }
-          return { Contents: [{ Key: "emails/a.eml" }, { Key: "emails/folder/b.eml" }] };
+          listTokens.push(input?.ContinuationToken);
+          if (!input?.ContinuationToken) {
+            return {
+              Contents: [{ Key: "emails/a.eml" }],
+              IsTruncated: true,
+              NextContinuationToken: "next-page",
+            };
+          }
+          return { Contents: [{ Key: "emails/folder/b.eml" }], IsTruncated: false };
         },
       },
     });
@@ -108,5 +117,6 @@ describe("Gmail archive S3 helpers", () => {
       { source: "hasna-mail-maximstaris/emails/a.eml", key: "legacy/maximstaris/a.eml" },
       { source: "hasna-mail-maximstaris/emails/folder/b.eml", key: "legacy/maximstaris/folder/b.eml" },
     ]);
+    expect(listTokens).toEqual([undefined, "next-page"]);
   });
 });
