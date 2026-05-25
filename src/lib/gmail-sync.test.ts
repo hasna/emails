@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
 import { resetDatabase, closeDatabase, getDatabase, uuid } from "../db/database.js";
+import { getGmailSyncState, setGmailSyncState } from "../db/gmail-sync-state.js";
 
 // ─── Mock @hasna/connectors ───────────────────────────────────────────────────
 
@@ -19,7 +20,7 @@ const mockRun = mock(async (_args: {
 
 mock.module("@hasna/connectors", () => ({ runConnectorOperation: mockRun }));
 
-const { syncGmailInbox, syncGmailInboxAll } = await import("./gmail-sync.js");
+const { syncGmailInbox, syncGmailInboxAll, syncGmailInboxHistory } = await import("./gmail-sync.js");
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -216,5 +217,54 @@ describe("syncGmailInboxAll", () => {
     const r = await syncGmailInboxAll({ providerId, db });
     expect(r.synced).toBe(2);
     expect(r.done).toBe(true);
+  });
+});
+
+describe("syncGmailInboxHistory", () => {
+  it("syncs changed Gmail messages from stored history cursor and advances it", async () => {
+    const { db, providerId } = setupDb();
+    setGmailSyncState(providerId, { history_id: "100" }, db);
+    const ops: string[] = [];
+    mockRun.mockImplementation(async (operationArgs: {
+      operation: string;
+      input?: Record<string, unknown> & { args?: Array<string | number | boolean> };
+    }) => {
+      ops.push(operationArgs.operation);
+      if (operationArgs.operation === "history.list") {
+        const data = {
+          historyId: "200",
+          history: [
+            { id: "150", messagesAdded: [{ message: { id: "hist-msg-1", threadId: "thread-1" } }] },
+            { id: "199", labelsAdded: [{ message: { id: "hist-msg-1", threadId: "thread-1" }, labelIds: ["INBOX"] }] },
+          ],
+        };
+        return { connector: "gmail", operation: operationArgs.operation, success: true, stdout: JSON.stringify(data), stderr: "", exitCode: 0, data };
+      }
+      if (operationArgs.operation === "messages.read") {
+        const id = String(operationArgs.input?.args?.[0] ?? "x");
+        const isHtml = operationArgs.input?.html === true;
+        const data = isHtml
+          ? { id, body: "<p>history html</p>" }
+          : JSON.parse(makeReadOutput({ id, body: "history text", subject: "History" }));
+        return { connector: "gmail", operation: operationArgs.operation, success: true, stdout: JSON.stringify(data), stderr: "", exitCode: 0, data };
+      }
+      return { connector: "gmail", operation: operationArgs.operation, success: true, stdout: "[]", stderr: "", exitCode: 0, data: [] };
+    });
+
+    const result = await syncGmailInboxHistory({ providerId, db });
+    expect(result.synced).toBe(1);
+    expect(ops).toContain("history.list");
+    expect(ops).not.toContain("messages.list");
+    expect(getGmailSyncState(providerId, db)?.history_id).toBe("200");
+    const stored = db.query("SELECT message_id, subject FROM inbound_emails").get() as { message_id: string; subject: string };
+    expect(stored).toEqual({ message_id: "hist-msg-1", subject: "History" });
+  });
+
+  it("falls back to normal sync when no history cursor exists", async () => {
+    const { db, providerId } = setupDb();
+    setMock([{ id: "msg1" }]);
+    const result = await syncGmailInboxHistory({ providerId, db });
+    expect(result.synced).toBe(1);
+    expect(getGmailSyncState(providerId, db)?.history_id).toBe("history-msg1");
   });
 });

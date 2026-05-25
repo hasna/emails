@@ -1,7 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { listInboundEmails, getInboundEmail, clearInboundEmails } from "../../db/inbound.js";
-import { syncGmailInbox, syncGmailInboxAll } from "../../lib/gmail-sync.js";
+import { syncGmailInbox, syncGmailInboxAll, syncGmailInboxHistory } from "../../lib/gmail-sync.js";
 import { getGmailSyncState, updateLastSynced } from "../../db/gmail-sync-state.js";
 import { getDatabase } from "../../db/database.js";
 import { listProviders } from "../../db/providers.js";
@@ -75,8 +75,9 @@ export function registerInboxTools(server: McpServer): void {
     limit: z.number().optional().describe("Max messages per run (default: 50)"),
     since: z.string().optional().describe("Only sync messages after this ISO date"),
     all_pages: z.boolean().optional().describe("Sync all pages until done (for full backfill)"),
+    history: z.boolean().optional().describe("Use stored Gmail history cursor for incremental sync"),
   },
-  async ({ provider_id, label, query, limit, since, all_pages }) => {
+  async ({ provider_id, label, query, limit, since, all_pages, history }) => {
     try {
       const db = getDatabase();
       const opts = {
@@ -89,6 +90,8 @@ export function registerInboxTools(server: McpServer): void {
       };
       const result = all_pages
         ? await syncGmailInboxAll(opts)
+        : history
+          ? await syncGmailInboxHistory(opts)
         : await syncGmailInbox(opts);
 
       updateLastSynced(provider_id, undefined, db);

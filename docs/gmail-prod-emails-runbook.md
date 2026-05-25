@@ -41,14 +41,17 @@ Run the same command without `--all` for normal scheduled batches:
 ```bash
 AWS_PROFILE=hasna emails inbox sync \
   --all-profiles \
+  --history \
   --archive-s3 prod-emails \
   --label INBOX \
   --limit 100
 ```
 
-The local database deduplicates by provider/message ID. Gmail history IDs are
-stored on inbound rows and can be used by future history-based resumable sync
-jobs.
+The first incremental run for a provider falls back to a normal list-based sync
+when no Gmail history cursor exists yet. After that, `--history` asks Gmail for
+changes since the stored cursor and advances the provider sync state to Gmail's
+latest returned history ID. The local database still deduplicates by
+provider/message ID.
 
 ## Verify an Archived Message
 

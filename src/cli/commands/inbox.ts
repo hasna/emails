@@ -1,7 +1,7 @@
 import type { Command } from "commander";
 import chalk from "chalk";
 import { runConnectorOperation } from "@hasna/connectors";
-import { syncGmailInbox, syncGmailInboxAll, listGmailConnectorProfiles, listGmailLabels } from "../../lib/gmail-sync.js";
+import { syncGmailInbox, syncGmailInboxAll, syncGmailInboxHistory, listGmailConnectorProfiles, listGmailLabels } from "../../lib/gmail-sync.js";
 import { listInboundEmails, getInboundEmail, deleteInboundEmail, clearInboundEmails, getInboundCount } from "../../db/inbound.js";
 import { getGmailSyncState, updateLastSynced } from "../../db/gmail-sync-state.js";
 import { createProvider, listProviders } from "../../db/providers.js";
@@ -23,6 +23,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .option("--limit <n>", "Max messages per sync run", "50")
     .option("--since <date>", "Only sync messages after this date (ISO 8601 or YYYY-MM-DD)")
     .option("--all", "Sync all pages until done (use for initial backfill)")
+    .option("--history", "Use stored Gmail history cursor for incremental sync")
     .option("--archive-s3 [bucket]", "Archive raw MIME and metadata to S3 bucket (default: prod-emails)")
     .option("--no-attachments", "Skip attachment download")
     .action(async (opts: {
@@ -34,6 +35,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
       limit?: string;
       since?: string;
       all?: boolean;
+      history?: boolean;
       archiveS3?: boolean | string;
       attachments: boolean;
     }) => {
@@ -66,6 +68,8 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
             };
             const page = opts.all
               ? await syncGmailInboxAll(syncOptions)
+              : opts.history
+                ? await syncGmailInboxHistory(syncOptions)
               : await syncGmailInbox(syncOptions);
             updateLastSynced(providerId, undefined, db);
             aggregate.synced += page.synced;
@@ -124,6 +128,8 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
             if (aggregate.errors.length >= 20) { aggregate.errors.push("Too many errors — aborting"); break; }
           } while (!aggregate.done);
           result = aggregate;
+        } else if (opts.history) {
+          result = await syncGmailInboxHistory(syncOpts);
         } else {
           result = await syncGmailInbox(syncOpts);
         }

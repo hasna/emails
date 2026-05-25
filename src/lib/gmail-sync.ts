@@ -19,6 +19,7 @@ import { mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { storeInboundEmail, updateAttachmentPaths, listInboundEmails } from "../db/inbound.js";
 import type { AttachmentPath } from "../db/inbound.js";
 import { getDatabase, getDataDir } from "../db/database.js";
+import { getGmailSyncState, setGmailSyncState } from "../db/gmail-sync-state.js";
 import { getGmailSyncConfig } from "./config.js";
 import { uploadGmailArchive, uploadGmailArchiveAttachment, uploadGmailArchiveManifest } from "./gmail-archive.js";
 import type { Database } from "../db/database.js";
@@ -103,6 +104,26 @@ interface GmailAttachmentMeta {
   size: number;
 }
 
+interface GmailHistoryMessageRef {
+  id: string;
+  threadId?: string;
+}
+
+interface GmailHistoryRecord {
+  id?: string;
+  messages?: GmailHistoryMessageRef[];
+  messagesAdded?: Array<{ message?: GmailHistoryMessageRef }>;
+  labelsAdded?: Array<{ message?: GmailHistoryMessageRef }>;
+  labelsRemoved?: Array<{ message?: GmailHistoryMessageRef }>;
+  messageChanged?: Array<{ message?: GmailHistoryMessageRef }>;
+}
+
+interface GmailHistoryEnvelope {
+  history?: GmailHistoryRecord[];
+  historyId?: string;
+  nextPageToken?: string;
+}
+
 type GmailConnectorInput = Record<string, unknown> & {
   args?: Array<string | number | boolean>;
 };
@@ -162,10 +183,7 @@ function getAttachmentDir(emailId: string): string {
  * Uses the connectors SDK for all Gmail API calls.
  */
 export async function syncGmailInbox(opts: ConnectorSyncOptions): Promise<GmailSyncResult> {
-  const db = opts.db ?? getDatabase();
   const batchSize = opts.batchSize ?? 50;
-  const downloadAttachments = opts.downloadAttachments ?? true;
-  const syncConfig = getGmailSyncConfig();
   const result: GmailSyncResult = { synced: 0, skipped: 0, attachments_saved: 0, errors: [], done: true };
 
   const q = buildQuery(opts);
@@ -205,6 +223,18 @@ export async function syncGmailInbox(opts: ConnectorSyncOptions): Promise<GmailS
   }
 
   const capped = opts.maxMessages != null ? messages.slice(0, opts.maxMessages) : messages;
+  return syncGmailMessages(opts, capped, result);
+}
+
+async function syncGmailMessages(
+  opts: Omit<ConnectorSyncOptions, "pageToken">,
+  capped: GmailListMessage[],
+  result: GmailSyncResult = { synced: 0, skipped: 0, attachments_saved: 0, errors: [], done: true },
+): Promise<GmailSyncResult> {
+  const db = opts.db ?? getDatabase();
+  const downloadAttachments = opts.downloadAttachments ?? true;
+  const syncConfig = getGmailSyncConfig();
+  let latestHistoryId: string | undefined;
 
   for (const msgRef of capped) {
     if (!msgRef.id) continue;
@@ -227,6 +257,7 @@ export async function syncGmailInbox(opts: ConnectorSyncOptions): Promise<GmailS
         opts.profile,
       );
       const detail = readTextResult.data ?? { id: msgRef.id };
+      latestHistoryId = detail.historyId ?? latestHistoryId;
 
       const textBody = detail.body || detail.snippet || null;
       const receivedAt = parseDate(detail.date ?? "");
@@ -454,7 +485,85 @@ export async function syncGmailInbox(opts: ConnectorSyncOptions): Promise<GmailS
     }
   }
 
+  if (latestHistoryId) {
+    setGmailSyncState(opts.providerId, { history_id: latestHistoryId, next_page_token: null }, db);
+  }
+
   return result;
+}
+
+/**
+ * Sync mailbox deltas from the stored Gmail history cursor.
+ *
+ * If no history cursor exists yet, this falls back to normal message listing so
+ * the first run can establish local rows. Gmail returns a new mailbox historyId
+ * on every successful history response; that cursor is persisted for the next
+ * incremental run.
+ */
+export async function syncGmailInboxHistory(opts: Omit<ConnectorSyncOptions, "pageToken">): Promise<GmailSyncResult> {
+  const db = opts.db ?? getDatabase();
+  const state = getGmailSyncState(opts.providerId, db);
+  if (!state?.history_id) {
+    return syncGmailInbox(opts);
+  }
+
+  const aggregate: GmailSyncResult = { synced: 0, skipped: 0, attachments_saved: 0, errors: [], done: true };
+  const messageRefs = new Map<string, GmailListMessage>();
+  let pageToken: string | undefined;
+  let latestHistoryId: string | undefined;
+
+  do {
+    const page = await runGmailOperation<GmailHistoryEnvelope>(
+      "history.list",
+      {
+        startHistoryId: state.history_id,
+        historyTypes: ["messageAdded", "messageChanged", "labelAdded", "labelRemoved"],
+        maxResults: opts.batchSize ?? 100,
+        ...(pageToken ? { pageToken } : {}),
+      },
+      opts.profile,
+    );
+    if (!page.success) {
+      aggregate.errors.push(`Failed to list Gmail history: ${page.stderr || page.stdout}`);
+      return aggregate;
+    }
+
+    const data = page.data ?? {};
+    latestHistoryId = data.historyId ?? latestHistoryId;
+    for (const record of data.history ?? []) {
+      if (!latestHistoryId && record.id) latestHistoryId = record.id;
+      for (const ref of extractHistoryMessageRefs(record)) {
+        if (ref.id) messageRefs.set(ref.id, ref);
+      }
+    }
+    pageToken = data.nextPageToken;
+    aggregate.nextPageToken = pageToken;
+    aggregate.done = !pageToken;
+  } while (pageToken);
+
+  if (messageRefs.size > 0) {
+    const page = await syncGmailMessages(opts, Array.from(messageRefs.values()));
+    aggregate.synced += page.synced;
+    aggregate.skipped += page.skipped;
+    aggregate.attachments_saved += page.attachments_saved;
+    aggregate.errors.push(...page.errors);
+  }
+
+  if (latestHistoryId) {
+    setGmailSyncState(opts.providerId, { history_id: latestHistoryId, next_page_token: null }, db);
+  }
+
+  return aggregate;
+}
+
+function extractHistoryMessageRefs(record: GmailHistoryRecord): GmailListMessage[] {
+  const refs: GmailListMessage[] = [];
+  refs.push(...(record.messages ?? []));
+  for (const item of record.messagesAdded ?? []) if (item.message) refs.push(item.message);
+  for (const item of record.labelsAdded ?? []) if (item.message) refs.push(item.message);
+  for (const item of record.labelsRemoved ?? []) if (item.message) refs.push(item.message);
+  for (const item of record.messageChanged ?? []) if (item.message) refs.push(item.message);
+  return refs;
 }
 
 /**
