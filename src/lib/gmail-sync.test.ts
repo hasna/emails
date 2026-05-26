@@ -225,12 +225,14 @@ describe("syncGmailInboxHistory", () => {
     const { db, providerId } = setupDb();
     setGmailSyncState(providerId, { history_id: "100" }, db);
     const ops: string[] = [];
+    const historyInputs: Array<Record<string, unknown> | undefined> = [];
     mockRun.mockImplementation(async (operationArgs: {
       operation: string;
       input?: Record<string, unknown> & { args?: Array<string | number | boolean> };
     }) => {
       ops.push(operationArgs.operation);
       if (operationArgs.operation === "history.list") {
+        historyInputs.push(operationArgs.input);
         const data = {
           historyId: "200",
           history: [
@@ -255,6 +257,7 @@ describe("syncGmailInboxHistory", () => {
     expect(result.synced).toBe(1);
     expect(ops).toContain("history.list");
     expect(ops).not.toContain("messages.list");
+    expect(historyInputs[0]).toEqual({ startHistoryId: "100", maxResults: 100 });
     expect(getGmailSyncState(providerId, db)?.history_id).toBe("200");
     const stored = db.query("SELECT message_id, subject FROM inbound_emails").get() as { message_id: string; subject: string };
     expect(stored).toEqual({ message_id: "hist-msg-1", subject: "History" });

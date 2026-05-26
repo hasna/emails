@@ -234,6 +234,7 @@ async function syncGmailMessages(
   const db = opts.db ?? getDatabase();
   const downloadAttachments = opts.downloadAttachments ?? true;
   const syncConfig = getGmailSyncConfig();
+  const archiveRegion = syncConfig.archive_s3_region ?? syncConfig.s3_region;
   let latestHistoryId: string | undefined;
 
   for (const msgRef of capped) {
@@ -309,7 +310,7 @@ async function syncGmailMessages(
 
         const archive = await uploadGmailArchive({
           bucket: archiveBucket,
-          region: syncConfig.s3_region,
+          region: archiveRegion,
           prefix: syncConfig.archive_s3_prefix,
           profile: opts.profile ?? opts.providerId,
           messageId: msgRef.id,
@@ -376,7 +377,7 @@ async function syncGmailMessages(
                 try {
                   const uploaded = await uploadGmailArchiveAttachment({
                     bucket: archiveBucket,
-                    region: syncConfig.s3_region,
+                    region: archiveRegion,
                     prefix: syncConfig.archive_s3_prefix,
                     profile: opts.profile ?? opts.providerId,
                     messageId: msgRef.id,
@@ -429,7 +430,7 @@ async function syncGmailMessages(
             try {
               await uploadGmailArchiveManifest({
                 bucket: archiveBucket,
-                region: syncConfig.s3_region,
+                region: archiveRegion,
                 prefix: syncConfig.archive_s3_prefix,
                 profile: opts.profile ?? opts.providerId,
                 messageId: msgRef.id,
@@ -462,7 +463,7 @@ async function syncGmailMessages(
         try {
           await uploadGmailArchiveManifest({
             bucket: archiveBucket,
-            region: syncConfig.s3_region,
+            region: archiveRegion,
             prefix: syncConfig.archive_s3_prefix,
             profile: opts.profile ?? opts.providerId,
             messageId: msgRef.id,
@@ -517,7 +518,6 @@ export async function syncGmailInboxHistory(opts: Omit<ConnectorSyncOptions, "pa
       "history.list",
       {
         startHistoryId: state.history_id,
-        historyTypes: ["messageAdded", "messageChanged", "labelAdded", "labelRemoved"],
         maxResults: opts.batchSize ?? 100,
         ...(pageToken ? { pageToken } : {}),
       },

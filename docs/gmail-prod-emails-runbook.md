@@ -7,6 +7,8 @@ raw MIME, metadata, manifests, and attachments in
 
 `hasna-xyz-prod-emails` is the single production email archive bucket. It lives
 in the `hasna-xyz-infra` AWS account (`789877399345`) in `us-west-2`.
+Gmail archive uploads default to `us-west-2`; keep
+`gmail_archive_s3_region` set to `us-west-2` if overriding config.
 
 ## Archive Layout
 
