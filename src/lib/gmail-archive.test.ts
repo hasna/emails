@@ -7,7 +7,7 @@ import {
 } from "./gmail-archive.js";
 
 describe("buildGmailArchiveKeys", () => {
-  it("builds deterministic prod-emails Gmail keys by profile and message", () => {
+  it("builds deterministic hasna-xyz-prod-emails Gmail keys by profile and message", () => {
     expect(buildGmailArchiveKeys({
       prefix: "gmail",
       profile: "andrei@hasna.com",
@@ -38,7 +38,7 @@ describe("Gmail archive S3 helpers", () => {
   it("uploads attachments into the profile/message archive prefix", async () => {
     const sent: unknown[] = [];
     const result = await uploadGmailArchiveAttachment({
-      bucket: "prod-emails",
+      bucket: "hasna-xyz-prod-emails",
       prefix: "gmail",
       profile: "maxim@staris.ro",
       messageId: "msg/1",
@@ -51,7 +51,7 @@ describe("Gmail archive S3 helpers", () => {
     expect(result).toEqual({
       filename: "invoice final.pdf",
       key: "gmail/maxim_staris.ro/attachments/msg_1/invoice_final.pdf",
-      s3_url: "s3://prod-emails/gmail/maxim_staris.ro/attachments/msg_1/invoice_final.pdf",
+      s3_url: "s3://hasna-xyz-prod-emails/gmail/maxim_staris.ro/attachments/msg_1/invoice_final.pdf",
     });
     expect(sent).toHaveLength(1);
   });
@@ -63,7 +63,7 @@ describe("Gmail archive S3 helpers", () => {
       "gmail/profile/manifests/msg.json",
     ]);
     const result = await verifyGmailArchive({
-      bucket: "prod-emails",
+      bucket: "hasna-xyz-prod-emails",
       profile: "profile",
       messageId: "msg",
       expectedAttachments: ["invoice.pdf"],
@@ -85,7 +85,7 @@ describe("Gmail archive S3 helpers", () => {
     const listTokens: Array<string | undefined> = [];
     const result = await migrateS3Prefix({
       sourceBucket: "hasna-mail-maximstaris",
-      targetBucket: "prod-emails",
+      targetBucket: "hasna-xyz-prod-emails",
       sourcePrefix: "emails/",
       targetPrefix: "legacy/maximstaris",
       client: {
@@ -125,7 +125,7 @@ describe("Gmail archive S3 helpers", () => {
     const targetCalls: Array<{ key?: string; body?: unknown; copySource?: string }> = [];
     const result = await migrateS3Prefix({
       sourceBucket: "hasna-mail-maximstaris",
-      targetBucket: "prod-emails",
+      targetBucket: "hasna-xyz-prod-emails",
       sourcePrefix: "emails/",
       targetPrefix: "legacy/maximstaris",
       sourceClient: {

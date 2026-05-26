@@ -10,6 +10,8 @@ import { createProvider, listProviders } from "../../db/providers.js";
 import { getDatabase } from "../../db/database.js";
 import { confirmDestructiveAction, handleError } from "../utils.js";
 
+const DEFAULT_GMAIL_ARCHIVE_BUCKET = "hasna-xyz-prod-emails";
+
 export function registerInboxCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   const inboxCmd = program.command("inbox").description("Sync and browse inbound emails (Gmail, SMTP, S3)");
 
@@ -26,7 +28,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .option("--since <date>", "Only sync messages after this date (ISO 8601 or YYYY-MM-DD)")
     .option("--all", "Sync all pages until done (use for initial backfill)")
     .option("--history", "Use stored Gmail history cursor for incremental sync")
-    .option("--archive-s3 [bucket]", "Archive raw MIME and metadata to S3 bucket (default: prod-emails)")
+    .option("--archive-s3 [bucket]", `Archive raw MIME and metadata to S3 bucket (default: ${DEFAULT_GMAIL_ARCHIVE_BUCKET})`)
     .option("--no-attachments", "Skip attachment download")
     .action(async (opts: {
       provider?: string;
@@ -44,7 +46,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
       try {
         const db = getDatabase();
         const archiveBucket = opts.archiveS3
-          ? (typeof opts.archiveS3 === "string" ? opts.archiveS3 : "prod-emails")
+          ? (typeof opts.archiveS3 === "string" ? opts.archiveS3 : DEFAULT_GMAIL_ARCHIVE_BUCKET)
           : undefined;
 
         if (opts.allProfiles) {
@@ -482,7 +484,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
   inboxCmd
     .command("archive-verify")
     .description("Verify a Gmail message archive in S3")
-    .requiredOption("--bucket <name>", "Archive bucket name", "prod-emails")
+    .requiredOption("--bucket <name>", "Archive bucket name", DEFAULT_GMAIL_ARCHIVE_BUCKET)
     .requiredOption("--profile <profile>", "Gmail connector profile")
     .requiredOption("--message-id <id>", "Gmail message ID")
     .option("--prefix <prefix>", "Archive prefix", "gmail")
@@ -521,9 +523,9 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
 
   inboxCmd
     .command("archive-migrate")
-    .description("Copy a legacy Gmail-to-S3 bucket/prefix into prod-emails")
+    .description(`Copy a legacy Gmail-to-S3 bucket/prefix into ${DEFAULT_GMAIL_ARCHIVE_BUCKET}`)
     .requiredOption("--source-bucket <name>", "Legacy source bucket, e.g. hasna-mail-maximstaris")
-    .option("--target-bucket <name>", "Target archive bucket", "prod-emails")
+    .option("--target-bucket <name>", "Target archive bucket", DEFAULT_GMAIL_ARCHIVE_BUCKET)
     .option("--source-prefix <prefix>", "Source key prefix", "")
     .option("--target-prefix <prefix>", "Target key prefix", "legacy/maximstaris")
     .option("--region <region>", "AWS region", "us-east-1")

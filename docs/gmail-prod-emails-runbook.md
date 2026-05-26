@@ -1,18 +1,22 @@
-# Gmail prod-emails Archive Runbook
+# Gmail hasna-xyz-prod-emails Archive Runbook
 
 This runbook covers the production Gmail archive path that syncs Gmail profiles
 through `@hasna/connectors`, stores messages in `@hasna/emails`, and archives
-raw MIME, metadata, manifests, and attachments in `s3://prod-emails`.
+raw MIME, metadata, manifests, and attachments in
+`s3://hasna-xyz-prod-emails`.
+
+`hasna-xyz-prod-emails` is the single production email archive bucket. It lives
+in the `hasna-xyz-infra` AWS account (`789877399345`) in `us-west-2`.
 
 ## Archive Layout
 
 For each Gmail profile and message ID:
 
 ```text
-s3://prod-emails/gmail/<profile>/raw/<message-id>.eml
-s3://prod-emails/gmail/<profile>/metadata/<message-id>.json
-s3://prod-emails/gmail/<profile>/manifests/<message-id>.json
-s3://prod-emails/gmail/<profile>/attachments/<message-id>/<filename>
+s3://hasna-xyz-prod-emails/gmail/<profile>/raw/<message-id>.eml
+s3://hasna-xyz-prod-emails/gmail/<profile>/metadata/<message-id>.json
+s3://hasna-xyz-prod-emails/gmail/<profile>/manifests/<message-id>.json
+s3://hasna-xyz-prod-emails/gmail/<profile>/attachments/<message-id>/<filename>
 ```
 
 Profiles and message IDs are normalized for S3 key safety. The manifest links
@@ -26,7 +30,7 @@ Use an explicit AWS profile for production runs:
 AWS_PROFILE=hasna emails inbox sync \
   --all-profiles \
   --all \
-  --archive-s3 prod-emails \
+  --archive-s3 hasna-xyz-prod-emails \
   --label INBOX \
   --limit 100
 ```
@@ -42,7 +46,7 @@ Run the same command without `--all` for normal scheduled batches:
 AWS_PROFILE=hasna emails inbox sync \
   --all-profiles \
   --history \
-  --archive-s3 prod-emails \
+  --archive-s3 hasna-xyz-prod-emails \
   --label INBOX \
   --limit 100
 ```
@@ -58,7 +62,7 @@ provider/message ID.
 ```bash
 emails inbox archive-verify \
   --aws-profile hasna \
-  --bucket prod-emails \
+  --bucket hasna-xyz-prod-emails \
   --profile maximstaris \
   --message-id <gmail-message-id> \
   --attachment invoice.pdf
@@ -75,7 +79,7 @@ First run a dry run:
 emails inbox archive-migrate \
   --aws-profile hasna \
   --source-bucket hasna-mail-maximstaris \
-  --target-bucket prod-emails \
+  --target-bucket hasna-xyz-prod-emails \
   --source-prefix "" \
   --target-prefix legacy/maximstaris \
   --dry-run
@@ -87,21 +91,21 @@ Then run the copy:
 emails inbox archive-migrate \
   --aws-profile hasna \
   --source-bucket hasna-mail-maximstaris \
-  --target-bucket prod-emails \
+  --target-bucket hasna-xyz-prod-emails \
   --source-prefix "" \
   --target-prefix legacy/maximstaris
 ```
 
-If the legacy bucket and `prod-emails` require different AWS identities, pass
-both profiles. The command will read from the source profile and stream objects
-into the target profile instead of using S3 server-side copy:
+If the legacy bucket and production archive bucket require different AWS
+identities, pass both profiles. The command will read from the source profile
+and stream objects into the target profile instead of using S3 server-side copy:
 
 ```bash
 emails inbox archive-migrate \
   --source-aws-profile hasna \
-  --target-aws-profile <profile-with-prod-emails-write-access> \
+  --target-aws-profile hasna-xyz-infra \
   --source-bucket hasna-mail-maximstaris \
-  --target-bucket prod-emails \
+  --target-bucket hasna-xyz-prod-emails \
   --source-prefix "" \
   --target-prefix legacy/maximstaris \
   --region us-east-1 \
@@ -109,14 +113,14 @@ emails inbox archive-migrate \
 ```
 
 The target profile must be able to `s3:PutObject` and multipart upload into
-`arn:aws:s3:::prod-emails/legacy/maximstaris/*`. The source profile must be
-able to `s3:ListBucket` and `s3:GetObject` on the legacy bucket.
+`arn:aws:s3:::hasna-xyz-prod-emails/legacy/maximstaris/*`. The source profile
+must be able to `s3:ListBucket` and `s3:GetObject` on the legacy bucket.
 
 After migration, compare object counts in AWS:
 
 ```bash
 aws s3 ls s3://hasna-mail-maximstaris --recursive --profile hasna | wc -l
-aws s3 ls s3://prod-emails/legacy/maximstaris --recursive --profile hasna | wc -l
+aws s3 ls s3://hasna-xyz-prod-emails/legacy/maximstaris --recursive --profile hasna | wc -l
 ```
 
 ## Operational Checks
@@ -125,4 +129,4 @@ aws s3 ls s3://prod-emails/legacy/maximstaris --recursive --profile hasna | wc -
 2. `emails inbox status` should show recent `last_synced_at` values per Gmail
    provider.
 3. Spot-check a recently synced message with `emails inbox archive-verify`.
-4. Keep S3 bucket versioning/encryption enabled on `prod-emails`.
+4. Keep S3 bucket versioning/encryption enabled on `hasna-xyz-prod-emails`.
