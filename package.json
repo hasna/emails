@@ -3,6 +3,10 @@
   "version": "0.5.26",
   "description": "Email management CLI + MCP server + dashboard for Resend and AWS SES",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hasna/emails.git"
+  },
   "bin": {
     "emails": "dist/cli/index.js",
     "emails-mcp": "dist/mcp/index.js",
