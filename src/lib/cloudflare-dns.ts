@@ -1,7 +1,7 @@
 /**
  * Cloudflare DNS setup helper for email domain verification.
  *
- * Uses @hasna/connect-cloudflare SDK to automatically create the DNS records
+ * Uses the @hasna/connectors SDK to automatically create the DNS records
  * required for email sending (SES/Resend) in a Cloudflare-managed zone.
  *
  * Records created:
@@ -11,7 +11,7 @@
  *   - MX          (optional, for receiving email)
  */
 
-import { Cloudflare, type CloudflareDnsRecord } from "@hasna/connect-cloudflare";
+import { runConnectorOperation } from "@hasna/connectors";
 import type { DnsRecord } from "../types/index.js";
 import type { Provider } from "../types/index.js";
 import { getAdapter } from "../providers/index.js";
@@ -37,18 +37,141 @@ export interface EmailDnsSetupResult {
   failed: number;
 }
 
+export interface CloudflareZone {
+  id: string;
+  name: string;
+  name_servers?: string[];
+  nameservers?: string[];
+}
+
+export interface CloudflareDnsRecord {
+  id?: string;
+  type: string;
+  name: string;
+  content: string;
+  ttl?: number;
+  proxied?: boolean;
+  priority?: number;
+}
+
+export interface CloudflareDnsClient {
+  listZones(params?: { name?: string; page?: number; perPage?: number }): Promise<CloudflareZone[]>;
+  listDnsRecords(zoneId: string, params?: { type?: string; name?: string; page?: number; perPage?: number }): Promise<CloudflareDnsRecord[]>;
+  createDnsRecord(zoneId: string, params: {
+    type: "TXT" | "CNAME" | "MX";
+    name: string;
+    content: string;
+    ttl?: number;
+    proxied?: boolean;
+    priority?: number;
+  }): Promise<CloudflareDnsRecord>;
+}
+
 // ─── Cloudflare factory ───────────────────────────────────────────────────────
+
+class ConnectorsCloudflareClient implements CloudflareDnsClient {
+  constructor(private readonly apiToken?: string) {}
+
+  async listZones(params?: { name?: string; page?: number; perPage?: number }): Promise<CloudflareZone[]> {
+    const data = await this.run<unknown>("zones.list", {
+      name: params?.name,
+      page: params?.page,
+      perPage: params?.perPage,
+    });
+    return unwrapList<CloudflareZone>(data);
+  }
+
+  async listDnsRecords(
+    zoneId: string,
+    params?: { type?: string; name?: string; page?: number; perPage?: number },
+  ): Promise<CloudflareDnsRecord[]> {
+    const data = await this.run<unknown>("dns.list", {
+      args: [zoneId],
+      type: params?.type,
+      name: params?.name,
+      page: params?.page,
+      perPage: params?.perPage,
+    });
+    return unwrapList<CloudflareDnsRecord>(data);
+  }
+
+  async createDnsRecord(
+    zoneId: string,
+    params: {
+      type: "TXT" | "CNAME" | "MX";
+      name: string;
+      content: string;
+      ttl?: number;
+      proxied?: boolean;
+      priority?: number;
+    },
+  ): Promise<CloudflareDnsRecord> {
+    const data = await this.run<unknown>("dns.create", {
+      args: [zoneId],
+      type: params.type,
+      name: params.name,
+      content: params.content,
+      ttl: params.ttl,
+      proxied: params.proxied,
+      priority: params.priority,
+    });
+    return unwrapRecord(data);
+  }
+
+  private async run<T>(operation: string, input: Record<string, unknown>): Promise<T> {
+    const previousToken = process.env["CLOUDFLARE_API_KEY"];
+    if (this.apiToken) process.env["CLOUDFLARE_API_KEY"] = this.apiToken;
+    try {
+      const result = await runConnectorOperation<T>({
+        connector: "cloudflare",
+        operation,
+        input,
+      });
+      if (!result.success) {
+        throw new Error(result.stderr || result.stdout || `Cloudflare ${operation} failed`);
+      }
+      return result.data as T;
+    } finally {
+      if (this.apiToken) {
+        if (previousToken === undefined) delete process.env["CLOUDFLARE_API_KEY"];
+        else process.env["CLOUDFLARE_API_KEY"] = previousToken;
+      }
+    }
+  }
+}
+
+function unwrapList<T>(data: unknown): T[] {
+  if (Array.isArray(data)) return data as T[];
+  if (data && typeof data === "object") {
+    const envelope = data as Record<string, unknown>;
+    for (const key of ["result", "results", "records", "zones", "data"]) {
+      const value = envelope[key];
+      if (Array.isArray(value)) return value as T[];
+    }
+  }
+  return [];
+}
+
+function unwrapRecord(data: unknown): CloudflareDnsRecord {
+  if (data && typeof data === "object" && !Array.isArray(data)) {
+    const envelope = data as Record<string, unknown>;
+    if (envelope["result"] && typeof envelope["result"] === "object") {
+      return envelope["result"] as CloudflareDnsRecord;
+    }
+    if (envelope["record"] && typeof envelope["record"] === "object") {
+      return envelope["record"] as CloudflareDnsRecord;
+    }
+    return envelope as unknown as CloudflareDnsRecord;
+  }
+  throw new Error("Cloudflare DNS create returned an invalid response");
+}
 
 /**
  * Create a Cloudflare instance from an explicit token, config file, or env var.
  */
-export function getCloudflare(apiToken?: string): Cloudflare {
+export function getCloudflare(apiToken?: string): CloudflareDnsClient {
   const token = apiToken || getCloudflareToken();
-  if (token) {
-    return new Cloudflare({ apiToken: token });
-  }
-  // Fall back to connector's own config (~/.connectors/connect-cloudflare/)
-  return Cloudflare.create();
+  return new ConnectorsCloudflareClient(token);
 }
 
 // ─── Zone lookup ──────────────────────────────────────────────────────────────
@@ -58,7 +181,7 @@ export function getCloudflare(apiToken?: string): Cloudflare {
  * Tries exact match first, then walks up the domain hierarchy.
  */
 export async function findZone(
-  cf: Cloudflare,
+  cf: CloudflareDnsClient,
   domain: string,
 ): Promise<{ id: string; name: string; nameservers: string[] } | null> {
   // Try exact match first, then apex domain
@@ -70,14 +193,13 @@ export async function findZone(
 
   for (const candidate of candidates) {
     try {
-      const res = await cf.zones.list({ name: candidate });
-      const zones = res.result ?? [];
+      const zones = await cf.listZones({ name: candidate });
       if (zones.length > 0) {
         const z = zones[0]!;
         return {
           id: z.id,
           name: z.name,
-          nameservers: (z as unknown as { name_servers?: string[] }).name_servers ?? [],
+          nameservers: z.name_servers ?? z.nameservers ?? [],
         };
       }
     } catch {
@@ -94,13 +216,12 @@ export async function findZone(
  * (matched by type + name + content).
  */
 export async function upsertEmailDnsRecords(
-  cf: Cloudflare,
+  cf: CloudflareDnsClient,
   zoneId: string,
   records: DnsRecord[],
 ): Promise<DnsSetupRecord[]> {
   // Fetch existing records once
-  const existingRes = await cf.dns.list(zoneId, { per_page: 500 });
-  const existing = existingRes.result ?? [];
+  const existing = await cf.listDnsRecords(zoneId, { perPage: 500 });
 
   const results: DnsSetupRecord[] = [];
 
@@ -122,7 +243,7 @@ export async function upsertEmailDnsRecords(
     }
 
     try {
-      await cf.dns.create(zoneId, {
+      await cf.createDnsRecord(zoneId, {
         type: record.type as "TXT" | "CNAME" | "MX",
         name: record.name,
         content: record.type === "TXT" ? `"${normalizedContent}"` : normalizedContent,
@@ -148,22 +269,21 @@ export async function upsertEmailDnsRecords(
  * Add an MX record for receiving email (e.g. AWS SES inbound or Google Workspace).
  */
 export async function addMxRecord(
-  cf: Cloudflare,
+  cf: CloudflareDnsClient,
   zoneId: string,
   domain: string,
   mailserver: string,
   priority = 10,
 ): Promise<DnsSetupRecord> {
   // Check if MX already exists
-  const existingRes = await cf.dns.list(zoneId, { type: "MX", name: domain });
-  const existing = existingRes.result ?? [];
+  const existing = await cf.listDnsRecords(zoneId, { type: "MX", name: domain });
   const alreadyExists = existing.some((e: { content: string }) => e.content === mailserver);
   if (alreadyExists) {
     return { type: "MX", name: domain, content: mailserver, status: "skipped" };
   }
 
   try {
-    await cf.dns.create(zoneId, {
+    await cf.createDnsRecord(zoneId, {
       type: "MX",
       name: domain,
       content: mailserver,
