@@ -206,6 +206,41 @@ describe("syncGmailInbox", () => {
     const listCall = mockRun.mock.calls.find((c) => c[0]?.operation === "messages.list");
     expect(listCall?.[0]?.input?.query).toBe("is:unread");
   });
+
+  it("processes message details with bounded concurrency", async () => {
+    const { db, providerId } = setupDb();
+    let activeReads = 0;
+    let maxActiveReads = 0;
+    mockRun.mockImplementation(async (operationArgs: {
+      operation: string;
+      input?: Record<string, unknown> & { args?: Array<string | number | boolean> };
+    }) => {
+      if (operationArgs.operation === "messages.list") {
+        const data = JSON.parse(makeListOutput([{ id: "m1" }, { id: "m2" }, { id: "m3" }, { id: "m4" }]));
+        return { connector: "gmail", operation: operationArgs.operation, success: true, stdout: JSON.stringify(data), stderr: "", exitCode: 0, data };
+      }
+      if (operationArgs.operation === "messages.read" && operationArgs.input?.html !== true) {
+        activeReads++;
+        maxActiveReads = Math.max(maxActiveReads, activeReads);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        activeReads--;
+        const id = String(operationArgs.input?.args?.[0] ?? "x");
+        const data = JSON.parse(makeReadOutput({ id }));
+        return { connector: "gmail", operation: operationArgs.operation, success: true, stdout: JSON.stringify(data), stderr: "", exitCode: 0, data };
+      }
+      if (operationArgs.operation === "messages.read") {
+        const id = String(operationArgs.input?.args?.[0] ?? "x");
+        const data = { id, body: "<p>html</p>" };
+        return { connector: "gmail", operation: operationArgs.operation, success: true, stdout: JSON.stringify(data), stderr: "", exitCode: 0, data };
+      }
+      return { connector: "gmail", operation: operationArgs.operation, success: true, stdout: "[]", stderr: "", exitCode: 0, data: [] };
+    });
+
+    const result = await syncGmailInbox({ providerId, db, messageConcurrency: 2 });
+
+    expect(result.synced).toBe(4);
+    expect(maxActiveReads).toBe(2);
+  });
 });
 
 // ─── syncGmailInboxAll ────────────────────────────────────────────────────────

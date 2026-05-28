@@ -25,6 +25,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .option("--label <label>", "Gmail label to sync (e.g. INBOX, SENT, label ID)", "INBOX")
     .option("--query <query>", "Gmail search query (e.g. 'is:unread from:boss@example.com')")
     .option("--limit <n>", "Max messages per sync run", "50")
+    .option("--concurrency <n>", "Messages to process concurrently per listed page", process.env.EMAILS_GMAIL_SYNC_CONCURRENCY ?? "1")
     .option("--since <date>", "Only sync messages after this date (ISO 8601 or YYYY-MM-DD)")
     .option("--all", "Sync all pages until done (use for initial backfill)")
     .option("--history", "Use stored Gmail history cursor for incremental sync")
@@ -37,6 +38,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
       label?: string;
       query?: string;
       limit?: string;
+      concurrency?: string;
       since?: string;
       all?: boolean;
       history?: boolean;
@@ -65,6 +67,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
               labelFilter: opts.label,
               query: opts.query,
               batchSize: parseInt(opts.limit ?? "50", 10),
+              messageConcurrency: parseInt(opts.concurrency ?? "1", 10),
               since: opts.since,
               archiveS3Bucket: archiveBucket,
               downloadAttachments: opts.attachments !== false,
@@ -100,6 +103,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
           profile: opts.profile,
           query: opts.query,
           batchSize: parseInt(opts.limit ?? "50", 10),
+          messageConcurrency: parseInt(opts.concurrency ?? "1", 10),
           since: opts.since,
           archiveS3Bucket: archiveBucket,
           downloadAttachments: opts.attachments !== false,

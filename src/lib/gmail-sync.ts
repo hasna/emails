@@ -47,6 +47,8 @@ export interface ConnectorSyncOptions {
   archiveS3Bucket?: string;
   /** Download and store attachment files. Default: true */
   downloadAttachments?: boolean;
+  /** Number of Gmail messages to process concurrently within one listed page. Default: 1 */
+  messageConcurrency?: number;
   db?: Database;
 }
 
@@ -236,9 +238,10 @@ async function syncGmailMessages(
   const syncConfig = getGmailSyncConfig();
   const archiveRegion = syncConfig.archive_s3_region ?? syncConfig.s3_region;
   let latestHistoryId: string | undefined;
+  const concurrency = normalizeConcurrency(opts.messageConcurrency);
 
-  for (const msgRef of capped) {
-    if (!msgRef.id) continue;
+  await mapWithConcurrency(capped, concurrency, async (msgRef) => {
+    if (!msgRef.id) return;
 
     try {
       // Dedup
@@ -247,7 +250,7 @@ async function syncGmailMessages(
         .get(opts.providerId, msgRef.id);
       if (existing) {
         result.skipped++;
-        continue;
+        return;
       }
 
       // Fetch full message — two calls: text body + HTML body
@@ -258,7 +261,7 @@ async function syncGmailMessages(
         opts.profile,
       );
       const detail = readTextResult.data ?? { id: msgRef.id };
-      latestHistoryId = detail.historyId ?? latestHistoryId;
+      latestHistoryId = newerHistoryId(latestHistoryId, detail.historyId);
 
       const textBody = detail.body || detail.snippet || null;
       const receivedAt = parseDate(detail.date ?? "");
@@ -484,13 +487,44 @@ async function syncGmailMessages(
     } catch (e) {
       result.errors.push(`Message ${msgRef.id}: ${String(e)}`);
     }
-  }
+  });
 
   if (latestHistoryId) {
     setGmailSyncState(opts.providerId, { history_id: latestHistoryId, next_page_token: null }, db);
   }
 
   return result;
+}
+
+function normalizeConcurrency(value: number | undefined): number {
+  if (value == null || !Number.isFinite(value)) return 1;
+  return Math.max(1, Math.min(32, Math.trunc(value)));
+}
+
+async function mapWithConcurrency<T>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T) => Promise<void>,
+): Promise<void> {
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (true) {
+      const index = nextIndex++;
+      if (index >= items.length) return;
+      await worker(items[index]!);
+    }
+  });
+  await Promise.all(workers);
+}
+
+function newerHistoryId(current: string | undefined, candidate: string | undefined): string | undefined {
+  if (!candidate) return current;
+  if (!current) return candidate;
+  try {
+    return BigInt(candidate) > BigInt(current) ? candidate : current;
+  } catch {
+    return candidate > current ? candidate : current;
+  }
 }
 
 /**
