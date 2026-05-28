@@ -14,8 +14,9 @@
  */
 
 import { runConnectorOperation } from "@hasna/connectors";
-import { join } from "node:path";
-import { mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { simpleParser } from "mailparser";
+import { basename, join } from "node:path";
+import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { storeInboundEmail, updateAttachmentPaths, listInboundEmails } from "../db/inbound.js";
 import type { AttachmentPath } from "../db/inbound.js";
 import { getDatabase, getDataDir } from "../db/database.js";
@@ -118,6 +119,19 @@ interface GmailAttachmentMeta {
   filename: string;
   mimeType: string;
   size: number;
+}
+
+interface ParsedRawAttachment extends GmailAttachmentMeta {
+  content: Buffer;
+}
+
+interface ParsedRawMessage {
+  detail: GmailMessageDetail;
+  textBody: string | null;
+  htmlBody: string | null;
+  receivedAt: string;
+  rawBuffer: Buffer;
+  attachments: ParsedRawAttachment[];
 }
 
 interface GmailHistoryMessageRef {
@@ -224,6 +238,55 @@ function collectAttachmentsFromPayload(part: GmailMessagePart | undefined, attac
   return attachments;
 }
 
+function rawSize(raw: string): number {
+  try {
+    return Buffer.from(raw, "base64url").length;
+  } catch {
+    return 0;
+  }
+}
+
+function rawReceivedAt(detail: GmailMessageDetail, parsedDate: Date | undefined): string {
+  if (parsedDate && !isNaN(parsedDate.getTime())) return parsedDate.toISOString();
+  if (detail.internalDate && /^\d+$/.test(detail.internalDate)) {
+    const date = new Date(Number(detail.internalDate));
+    if (!isNaN(date.getTime())) return date.toISOString();
+  }
+  return parseDate(detail.date ?? "");
+}
+
+async function parseRawGmailMessage(detail: GmailMessageDetail): Promise<ParsedRawMessage | null> {
+  if (!detail.raw) return null;
+  const rawBuffer = Buffer.from(detail.raw, "base64url");
+  const parsed = await simpleParser(rawBuffer);
+  const textBody = typeof parsed.text === "string" && parsed.text.length > 0 ? parsed.text : (detail.snippet ?? null);
+  const htmlBody = typeof parsed.html === "string" && parsed.html.length > 0 ? parsed.html : null;
+  const attachments = parsed.attachments.map((attachment, index) => ({
+    attachmentId: `raw-${index}`,
+    filename: basename(attachment.filename || `attachment-${index + 1}`),
+    mimeType: attachment.contentType || "application/octet-stream",
+    size: attachment.size ?? attachment.content.length,
+    content: Buffer.from(attachment.content),
+  }));
+
+  return {
+    detail: {
+      ...detail,
+      from: detail.from ?? parsed.from?.text ?? "",
+      to: detail.to ?? parsed.to?.text ?? "",
+      cc: detail.cc ?? parsed.cc?.text ?? "",
+      subject: detail.subject ?? parsed.subject ?? "(no subject)",
+      date: detail.date ?? parsed.date?.toUTCString(),
+      size: detail.size ?? rawBuffer.length,
+    },
+    textBody,
+    htmlBody,
+    receivedAt: rawReceivedAt(detail, parsed.date),
+    rawBuffer,
+    attachments,
+  };
+}
+
 // ─── Core sync ────────────────────────────────────────────────────────────────
 
 /**
@@ -299,6 +362,124 @@ async function syncGmailMessages(
         return;
       }
 
+      const archiveBucket = opts.archiveS3Bucket ?? syncConfig.archive_s3_bucket;
+      if (archiveBucket) {
+        const rawResult = await runGmailOperation<GmailMessageDetail>(
+          "messages.getRaw",
+          { args: [msgRef.id] },
+          opts.profile,
+        );
+        const parsedRaw = rawResult.success && rawResult.data?.raw
+          ? await parseRawGmailMessage({
+              ...rawResult.data,
+              id: rawResult.data.id ?? msgRef.id,
+              threadId: rawResult.data.threadId ?? msgRef.threadId,
+            })
+          : null;
+
+        if (parsedRaw) {
+          const { detail, textBody, htmlBody, attachments, rawBuffer } = parsedRaw;
+          latestHistoryId = newerHistoryId(latestHistoryId, detail.historyId);
+          const attachmentMeta = attachments.map((a) => ({
+            filename: a.filename,
+            content_type: a.mimeType,
+            size: a.size,
+          }));
+          const archive = await uploadGmailArchive({
+            bucket: archiveBucket,
+            region: archiveRegion,
+            prefix: syncConfig.archive_s3_prefix,
+            profile: opts.profile ?? opts.providerId,
+            messageId: msgRef.id,
+            raw: detail.raw,
+            metadata: {
+              message: { ...detail, raw: undefined },
+              attachments: attachments.map((attachment) => ({
+                attachmentId: attachment.attachmentId,
+                filename: attachment.filename,
+                mimeType: attachment.mimeType,
+                size: attachment.size,
+              })),
+            },
+          });
+          const rawS3Url = archive.raw_s3_url ?? null;
+          const metadataS3Url = archive.metadata_s3_url;
+          const stored = storeInboundEmail(
+            {
+              provider_id: opts.providerId,
+              message_id: msgRef.id,
+              in_reply_to_email_id: null,
+              provider_thread_id: detail.threadId ?? msgRef.threadId ?? null,
+              provider_history_id: detail.historyId ?? null,
+              provider_internal_date: detail.internalDate ?? null,
+              label_ids: detail.labelIds ?? [],
+              raw_s3_url: rawS3Url,
+              metadata_s3_url: metadataS3Url,
+              from_address: detail.from ?? "",
+              to_addresses: parseAddresses(detail.to),
+              cc_addresses: parseAddresses(detail.cc),
+              subject: detail.subject ?? "(no subject)",
+              text_body: textBody,
+              html_body: htmlBody,
+              attachments: attachmentMeta,
+              attachment_paths: [],
+              headers: {},
+              raw_size: detail.size ?? rawBuffer.length,
+              received_at: parsedRaw.receivedAt,
+            },
+            db,
+          );
+
+          result.synced++;
+          let paths: AttachmentPath[] = [];
+          if (downloadAttachments && attachments.length > 0 && syncConfig.attachment_storage !== "none") {
+            const outputDir = getAttachmentDir(stored.id);
+            for (const attachment of attachments) {
+              const filename = basename(attachment.filename || attachment.attachmentId);
+              const filePath = join(outputDir, filename);
+              writeFileSync(filePath, attachment.content);
+              const uploaded = await uploadGmailArchiveAttachment({
+                bucket: archiveBucket,
+                region: archiveRegion,
+                prefix: syncConfig.archive_s3_prefix,
+                profile: opts.profile ?? opts.providerId,
+                messageId: msgRef.id,
+                filename,
+                body: attachment.content,
+                contentType: attachment.mimeType,
+              });
+              paths.push({ filename, content_type: attachment.mimeType, size: attachment.size, s3_url: uploaded.s3_url });
+              result.attachments_saved++;
+            }
+            if (paths.length > 0) updateAttachmentPaths(stored.id, paths, db);
+          }
+
+          await uploadGmailArchiveManifest({
+            bucket: archiveBucket,
+            region: archiveRegion,
+            prefix: syncConfig.archive_s3_prefix,
+            profile: opts.profile ?? opts.providerId,
+            messageId: msgRef.id,
+            manifest: {
+              profile: opts.profile ?? opts.providerId,
+              message_id: msgRef.id,
+              ...(rawS3Url ? { raw_s3_url: rawS3Url } : {}),
+              metadata_s3_url: metadataS3Url,
+              attachments: paths
+                .filter((path) => path.s3_url)
+                .map((path) => ({
+                  filename: path.filename,
+                  s3_url: path.s3_url!,
+                  content_type: path.content_type,
+                  size: path.size,
+                })),
+              archived_at: new Date().toISOString(),
+            },
+          });
+          return;
+        }
+      }
+
       // Fetch full message — two calls: text body + HTML body
       // (connector returns only one body per call based on --html flag)
       const readTextResult = await runGmailOperation<GmailMessageDetail>(
@@ -335,7 +516,6 @@ async function syncGmailMessages(
 
       let rawS3Url: string | null = null;
       let metadataS3Url: string | null = null;
-      const archiveBucket = opts.archiveS3Bucket ?? syncConfig.archive_s3_bucket;
       if (archiveBucket) {
         let raw: string | undefined = detail.raw;
         if (!raw) {

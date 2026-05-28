@@ -20,6 +20,25 @@ const mockRun = mock(async (_args: {
 
 mock.module("@hasna/connectors", () => ({ runConnectorOperation: mockRun }));
 
+mock.module("@aws-sdk/client-s3", () => {
+  class S3Client {
+    async send() {
+      return {};
+    }
+  }
+  class PutObjectCommand {
+    input: unknown;
+    constructor(input: unknown) {
+      this.input = input;
+    }
+  }
+  class HeadObjectCommand extends PutObjectCommand {}
+  class GetObjectCommand extends PutObjectCommand {}
+  class ListObjectsV2Command extends PutObjectCommand {}
+  class CopyObjectCommand extends PutObjectCommand {}
+  return { S3Client, PutObjectCommand, HeadObjectCommand, GetObjectCommand, ListObjectsV2Command, CopyObjectCommand };
+});
+
 const { syncGmailInbox, syncGmailInboxAll, syncGmailInboxHistory } = await import("./gmail-sync.js");
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -174,6 +193,76 @@ describe("syncGmailInbox", () => {
     expect(row!.text_body).toBe("payload text");
     expect(row!.html_body).toBe("<strong>payload html</strong>");
     expect(JSON.parse(row!.attachments_json)).toEqual([{ filename: "invoice.pdf", content_type: "application/pdf", size: 42 }]);
+  });
+
+  it("uses raw Gmail MIME as the archived sync source without extra attachment calls", async () => {
+    const { db, providerId } = setupDb();
+    const rawMime = [
+      "From: Alice <alice@example.com>",
+      "To: Me <me@example.com>",
+      "Subject: Raw archived",
+      "Date: Fri, 20 Mar 2026 10:00:00 +0000",
+      "MIME-Version: 1.0",
+      "Content-Type: multipart/mixed; boundary=\"b\"",
+      "",
+      "--b",
+      "Content-Type: text/plain; charset=utf-8",
+      "",
+      "raw text",
+      "--b",
+      "Content-Type: text/html; charset=utf-8",
+      "",
+      "<p>raw html</p>",
+      "--b",
+      "Content-Type: application/pdf",
+      "Content-Disposition: attachment; filename=\"invoice.pdf\"",
+      "Content-Transfer-Encoding: base64",
+      "",
+      Buffer.from("pdf").toString("base64"),
+      "--b--",
+      "",
+    ].join("\r\n");
+
+    mockRun.mockImplementation(async (operationArgs: {
+      operation: string;
+      input?: Record<string, unknown> & { args?: Array<string | number | boolean> };
+    }) => {
+      if (operationArgs.operation === "messages.list") {
+        const data = JSON.parse(makeListOutput([{ id: "raw-msg" }]));
+        return { connector: "gmail", operation: operationArgs.operation, success: true, stdout: JSON.stringify(data), stderr: "", exitCode: 0, data };
+      }
+      if (operationArgs.operation === "messages.getRaw") {
+        const data = {
+          id: "raw-msg",
+          threadId: "thread-raw-msg",
+          labelIds: ["INBOX"],
+          historyId: "202",
+          internalDate: "1774000800000",
+          raw: Buffer.from(rawMime).toString("base64url"),
+        };
+        return { connector: "gmail", operation: operationArgs.operation, success: true, stdout: JSON.stringify(data), stderr: "", exitCode: 0, data };
+      }
+      return { connector: "gmail", operation: operationArgs.operation, success: true, stdout: "[]", stderr: "", exitCode: 0, data: [] };
+    });
+
+    const result = await syncGmailInbox({ providerId, db, archiveS3Bucket: "bucket" });
+
+    expect(result.synced).toBe(1);
+    expect(result.attachments_saved).toBe(1);
+    expect(mockRun.mock.calls.some((call) => call[0]?.operation === "messages.read")).toBe(false);
+    expect(mockRun.mock.calls.some((call) => call[0]?.operation === "attachments.download")).toBe(false);
+    const row = db.query("SELECT from_address, subject, text_body, html_body, attachments_json FROM inbound_emails WHERE message_id = 'raw-msg'").get() as {
+      from_address: string;
+      subject: string;
+      text_body: string;
+      html_body: string;
+      attachments_json: string;
+    } | null;
+    expect(row!.from_address).toContain("alice@example.com");
+    expect(row!.subject).toBe("Raw archived");
+    expect(row!.text_body).toContain("raw text");
+    expect(row!.html_body).toContain("raw html");
+    expect(JSON.parse(row!.attachments_json)).toEqual([{ filename: "invoice.pdf", content_type: "application/pdf", size: 3 }]);
   });
 
   it("stores Gmail archive metadata from connector detail", async () => {
