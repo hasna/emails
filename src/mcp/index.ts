@@ -1,46 +1,48 @@
 #!/usr/bin/env bun
 /**
  * emails MCP server entry point.
- *
- * All tools are split into domain-specific modules in tools/.
- * This file just wires them together and starts the server.
  */
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { registerCloudTools } from "@hasna/cloud";
+import pkg from "../../package.json" with { type: "json" };
+import { buildServer } from "./server.js";
+import { isHttpMode, resolveHttpPort, startHttpServer } from "./http.js";
 
-// Tool modules
-import { registerTriageTools } from "./tools/triage.js";
-import { registerWarmingTools } from "./tools/warming.js";
-import { registerProviderTools } from "./tools/providers.js";
-import { registerInboxTools } from "./tools/inbox.js";
-import { registerSequenceTools } from "./tools/sequences.js";
-import { registerDomainTools } from "./tools/domains.js";
-import { registerEmailOpsTools } from "./tools/email-ops.js";
-import { registerMiscOpsTools } from "./tools/misc-ops.js";
-import { registerInfrastructureTools } from "./tools/infrastructure.js";
+function printHelp(): void {
+  console.log(`Usage: emails-mcp [options]
 
-// --- in-memory agent registry (used by infrastructure tools) ---
-export interface EmailAgent { id: string; name: string; session_id?: string; last_seen_at: string; project_id?: string; }
-export const emailAgents = new Map<string, EmailAgent>();
+Runs the @hasna/emails MCP server (stdio by default).
 
-const server = new McpServer({
-  name: "emails",
-  version: "0.1.0",
-});
+Options:
+      --http         Serve MCP over Streamable HTTP on 127.0.0.1
+  -p, --port <port>  HTTP port (default: MCP_HTTP_PORT or 8816)
+  -V, --version      output the version number
+  -h, --help         display help for command
 
-async function main() {
+Environment:
+  MCP_HTTP=1         Enable HTTP mode
+  MCP_HTTP_PORT      Override default HTTP port (8816)`);
+}
+
+const args = process.argv.slice(2);
+if (args.includes("--help") || args.includes("-h")) {
+  printHelp();
+  process.exit(0);
+}
+
+if (args.includes("--version") || args.includes("-V")) {
+  console.log(pkg.version);
+  process.exit(0);
+}
+
+async function main(): Promise<void> {
+  if (isHttpMode(args)) {
+    startHttpServer({ port: resolveHttpPort(args) });
+    await new Promise<never>(() => {});
+    return;
+  }
+
+  const server = buildServer();
   const transport = new StdioServerTransport();
-  registerCloudTools(server, "emails");
-  registerProviderTools(server);
-  registerDomainTools(server);
-  registerEmailOpsTools(server);
-  registerMiscOpsTools(server);
-  registerInboxTools(server);
-  registerSequenceTools(server);
-  registerWarmingTools(server);
-  registerTriageTools(server);
-  registerInfrastructureTools(server);
   await server.connect(transport);
 }
 

@@ -103,6 +103,19 @@ emails cloud pull
 
 Stored in `~/.hasna/emails/` (SQLite + attachments).
 
+## HTTP mode
+
+Shared Streamable HTTP transport for multi-agent sessions (stdio remains the default):
+
+```bash
+emails-mcp --http              # http://127.0.0.1:8816/mcp
+MCP_HTTP=1 emails-mcp          # same
+emails-mcp --http --port 8816  # explicit port
+```
+
+- Health: `GET http://127.0.0.1:8816/health` → `{"status":"ok","name":"emails"}`
+- Override port with `MCP_HTTP_PORT` or `--port`
+
 ## License
 
 Apache-2.0 — see [LICENSE](LICENSE)
