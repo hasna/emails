@@ -540,7 +540,7 @@ async function syncGmailMessages(
 
 function normalizeConcurrency(value: number | undefined): number {
   if (value == null || !Number.isFinite(value)) return 1;
-  return Math.max(1, Math.min(32, Math.trunc(value)));
+  return Math.max(1, Math.min(64, Math.trunc(value)));
 }
 
 async function mapWithConcurrency<T>(

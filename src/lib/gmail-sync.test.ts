@@ -289,6 +289,37 @@ describe("syncGmailInbox", () => {
     expect(result.synced).toBe(4);
     expect(maxActiveReads).toBe(2);
   });
+
+  it("caps message concurrency at 64 workers", async () => {
+    const { db, providerId } = setupDb();
+    const messages = Array.from({ length: 65 }, (_, index) => ({ id: `m${index}` }));
+    let activeReads = 0;
+    let maxActiveReads = 0;
+    mockRun.mockImplementation(async (operationArgs: {
+      operation: string;
+      input?: Record<string, unknown> & { args?: Array<string | number | boolean> };
+    }) => {
+      if (operationArgs.operation === "messages.list") {
+        const data = JSON.parse(makeListOutput(messages));
+        return { connector: "gmail", operation: operationArgs.operation, success: true, stdout: JSON.stringify(data), stderr: "", exitCode: 0, data };
+      }
+      if (operationArgs.operation === "messages.read") {
+        activeReads++;
+        maxActiveReads = Math.max(maxActiveReads, activeReads);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        activeReads--;
+        const id = String(operationArgs.input?.args?.[0] ?? "x");
+        const data = JSON.parse(makeReadOutput({ id }));
+        return { connector: "gmail", operation: operationArgs.operation, success: true, stdout: JSON.stringify(data), stderr: "", exitCode: 0, data };
+      }
+      return { connector: "gmail", operation: operationArgs.operation, success: true, stdout: "[]", stderr: "", exitCode: 0, data: [] };
+    });
+
+    const result = await syncGmailInbox({ providerId, db, messageConcurrency: 128, downloadAttachments: false });
+
+    expect(result.synced).toBe(65);
+    expect(maxActiveReads).toBe(64);
+  });
 });
 
 // ─── syncGmailInboxAll ────────────────────────────────────────────────────────
