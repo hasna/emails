@@ -1,6 +1,7 @@
 import { describe, it, expect, mock, beforeEach } from "bun:test";
+import type { CloudflareDnsClient } from "./cloudflare-dns.js";
 
-// ─── Mock @hasna/connect-cloudflare ──────────────────────────────────────────
+// ─── Mock Cloudflare connector client ────────────────────────────────────────
 
 type MockRecord = { id: string; type: string; name: string; content: string; ttl: number; proxied: boolean };
 let mockZones: { id: string; name: string; name_servers?: string[] }[] = [];
@@ -8,70 +9,50 @@ let mockRecords: MockRecord[] = [];
 let createCalled: { type: string; name: string; content: string }[] = [];
 
 const mockCf = {
-  zones: {
-    list: mock(async (params?: { name?: string }) => ({
-      result: params?.name
-        ? mockZones.filter((z) => z.name === params.name)
-        : mockZones,
-      success: true, errors: [], messages: [],
-    })),
-  },
-  dns: {
-    list: mock(async (_zoneId: string, params?: { type?: string; name?: string }) => ({
-      result: mockRecords.filter((r) => {
-        if (params?.type && r.type !== params.type) return false;
-        if (params?.name && r.name !== params.name) return false;
-        return true;
-      }),
-      success: true, errors: [], messages: [],
-    })),
-    create: mock(async (_zoneId: string, params: { type: string; name: string; content: string; ttl?: number; proxied?: boolean }) => {
-      createCalled.push({ type: params.type, name: params.name, content: params.content });
-      const record: MockRecord = { id: `rec-${Math.random().toString(36).slice(2,8)}`, type: params.type, name: params.name, content: params.content, ttl: params.ttl ?? 300, proxied: params.proxied ?? false };
-      mockRecords.push(record);
-      return record;
-    }),
-  },
+  listZones: mock(async (params?: { name?: string }) => (
+    params?.name
+      ? mockZones.filter((z) => z.name === params.name)
+      : mockZones
+  )),
+  listDnsRecords: mock(async (_zoneId: string, params?: { type?: string; name?: string }) => (
+    mockRecords.filter((r) => {
+      if (params?.type && r.type !== params.type) return false;
+      if (params?.name && r.name !== params.name) return false;
+      return true;
+    })
+  )),
+  createDnsRecord: mock(async (_zoneId: string, params: { type: string; name: string; content: string; ttl?: number; proxied?: boolean }) => {
+    createCalled.push({ type: params.type, name: params.name, content: params.content });
+    const record: MockRecord = { id: `rec-${Math.random().toString(36).slice(2,8)}`, type: params.type, name: params.name, content: params.content, ttl: params.ttl ?? 300, proxied: params.proxied ?? false };
+    mockRecords.push(record);
+    return record;
+  }),
 };
-
-mock.module("@hasna/connect-cloudflare", () => ({
-  Cloudflare: class {
-    zones = mockCf.zones;
-    dns = mockCf.dns;
-    static create() { return new this(); }
-    static fromEnv() { return new this(); }
-  },
-}));
-
-// Set env var so getCloudflareToken() returns a value without reading config file
-process.env["CLOUDFLARE_API_TOKEN"] = "mock-cf-token-for-tests";
 
 const { findZone, upsertEmailDnsRecords, addMxRecord } = await import("./cloudflare-dns.js");
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function makeCf() { return mockCf as unknown as import("@hasna/connect-cloudflare").Cloudflare; }
+function makeCf() { return mockCf as unknown as CloudflareDnsClient; }
 
 beforeEach(() => {
   mockZones = [];
   mockRecords = [];
   createCalled = [];
-  mockCf.zones.list.mockReset();
-  mockCf.dns.list.mockReset();
-  mockCf.dns.create.mockReset();
-  mockCf.zones.list.mockImplementation(async (params?: { name?: string }) => ({
-    result: params?.name ? mockZones.filter((z) => z.name === params.name) : mockZones,
-    success: true, errors: [], messages: [],
-  }));
-  mockCf.dns.list.mockImplementation(async (_zoneId: string, params?: { type?: string; name?: string }) => ({
-    result: mockRecords.filter((r) => {
-      if (params?.type && r.type !== params.type) return false;
-      if (params?.name && r.name !== params.name) return false;
-      return true;
-    }),
-    success: true, errors: [], messages: [],
-  }));
-  mockCf.dns.create.mockImplementation(async (_zoneId: string, params: { type: string; name: string; content: string; ttl?: number; proxied?: boolean }) => {
+  mockCf.listZones.mockReset();
+  mockCf.listDnsRecords.mockReset();
+  mockCf.createDnsRecord.mockReset();
+  mockCf.listZones.mockImplementation(async (params?: { name?: string }) => (
+    params?.name ? mockZones.filter((z) => z.name === params.name) : mockZones
+  ));
+  mockCf.listDnsRecords.mockImplementation(async (_zoneId: string, params?: { type?: string; name?: string }) => (
+    mockRecords.filter((r) => {
+        if (params?.type && r.type !== params.type) return false;
+        if (params?.name && r.name !== params.name) return false;
+        return true;
+      })
+  ));
+  mockCf.createDnsRecord.mockImplementation(async (_zoneId: string, params: { type: string; name: string; content: string; ttl?: number; proxied?: boolean }) => {
     createCalled.push({ type: params.type, name: params.name, content: params.content });
     const record: MockRecord = { id: `rec-${Math.random().toString(36).slice(2,8)}`, type: params.type, name: params.name, content: params.content, ttl: 300, proxied: false };
     mockRecords.push(record);
@@ -94,10 +75,10 @@ describe("findZone", () => {
     mockZones = [{ id: "z2", name: "example.com" }];
     // First call returns nothing (exact), second returns the apex
     let callCount = 0;
-    mockCf.zones.list.mockImplementation(async (params?: { name?: string }) => {
+    mockCf.listZones.mockImplementation(async (params?: { name?: string }) => {
       callCount++;
-      if (callCount === 1) return { result: [], success: true, errors: [], messages: [] };
-      return { result: mockZones.filter((z) => z.name === params?.name), success: true, errors: [], messages: [] };
+      if (callCount === 1) return [];
+      return mockZones.filter((z) => z.name === params?.name);
     });
     const zone = await findZone(makeCf(), "mail.example.com");
     expect(zone).not.toBeNull();
@@ -124,7 +105,7 @@ describe("upsertEmailDnsRecords", () => {
 
     expect(results).toHaveLength(2);
     expect(results.every((r) => r.status === "created")).toBe(true);
-    expect(mockCf.dns.create).toHaveBeenCalledTimes(2);
+    expect(mockCf.createDnsRecord).toHaveBeenCalledTimes(2);
   });
 
   it("skips records that already exist", async () => {
@@ -139,7 +120,7 @@ describe("upsertEmailDnsRecords", () => {
     const results = await upsertEmailDnsRecords(makeCf(), "z1", records);
 
     expect(results[0]!.status).toBe("skipped");
-    expect(mockCf.dns.create).not.toHaveBeenCalled();
+    expect(mockCf.createDnsRecord).not.toHaveBeenCalled();
   });
 
   it("creates some and skips others", async () => {
@@ -179,6 +160,6 @@ describe("addMxRecord", () => {
 
     const result = await addMxRecord(makeCf(), "z1", "example.com", "inbound-smtp.us-east-1.amazonaws.com");
     expect(result.status).toBe("skipped");
-    expect(mockCf.dns.create).not.toHaveBeenCalled();
+    expect(mockCf.createDnsRecord).not.toHaveBeenCalled();
   });
 });

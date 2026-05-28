@@ -3,7 +3,7 @@ import { mkdirSync, rmSync, existsSync } from "fs";
 import { join } from "path";
 import {
   loadConfig, saveConfig, getConfigValue, setConfigValue,
-  getDefaultProviderId, getFailoverProviderIds,
+  getDefaultProviderId, getFailoverProviderIds, getGmailSyncConfig,
 } from "./config.js";
 
 // Use a temp dir unique per test run to isolate from real ~/.hasna/emails
@@ -72,5 +72,18 @@ describe("config", () => {
   it("getFailoverProviderIds filters empty strings", () => {
     setConfigValue("failover-providers", "id1,,id2");
     expect(getFailoverProviderIds()).toEqual(["id1", "id2"]);
+  });
+
+  it("getGmailSyncConfig defaults Gmail archives to the production bucket region", () => {
+    expect(getGmailSyncConfig()).toMatchObject({
+      s3_region: "us-east-1",
+      archive_s3_region: "us-west-2",
+      archive_s3_prefix: "gmail",
+    });
+  });
+
+  it("getGmailSyncConfig reads explicit Gmail archive region overrides", () => {
+    setConfigValue("gmail_archive_s3_region", "eu-central-1");
+    expect(getGmailSyncConfig().archive_s3_region).toBe("eu-central-1");
   });
 });

@@ -1,12 +1,16 @@
 import type { Command } from "commander";
 import chalk from "chalk";
-import { runConnectorCommand } from "@hasna/connectors";
-import { syncGmailInbox, listGmailLabels } from "../../lib/gmail-sync.js";
+import { fromIni } from "@aws-sdk/credential-provider-ini";
+import { S3Client } from "@aws-sdk/client-s3";
+import { runConnectorOperation } from "@hasna/connectors";
+import { syncGmailInbox, syncGmailInboxAll, syncGmailInboxHistory, listGmailConnectorProfiles, listGmailLabels } from "../../lib/gmail-sync.js";
 import { listInboundEmails, getInboundEmail, deleteInboundEmail, clearInboundEmails, getInboundCount } from "../../db/inbound.js";
 import { getGmailSyncState, updateLastSynced } from "../../db/gmail-sync-state.js";
-import { listProviders } from "../../db/providers.js";
+import { createProvider, listProviders } from "../../db/providers.js";
 import { getDatabase } from "../../db/database.js";
 import { confirmDestructiveAction, handleError } from "../utils.js";
+
+const DEFAULT_GMAIL_ARCHIVE_BUCKET = "hasna-xyz-prod-emails";
 
 export function registerInboxCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   const inboxCmd = program.command("inbox").description("Sync and browse inbound emails (Gmail, SMTP, S3)");
@@ -16,23 +20,75 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .command("sync")
     .description("Sync Gmail inbox messages into local SQLite")
     .option("--provider <id>", "Provider ID or name (defaults to first active Gmail provider)")
+    .option("--profile <name>", "Connector Gmail profile to use")
+    .option("--all-profiles", "Discover connector Gmail profiles and sync each one")
     .option("--label <label>", "Gmail label to sync (e.g. INBOX, SENT, label ID)", "INBOX")
     .option("--query <query>", "Gmail search query (e.g. 'is:unread from:boss@example.com')")
     .option("--limit <n>", "Max messages per sync run", "50")
+    .option("--concurrency <n>", "Messages to process concurrently per listed page", process.env.EMAILS_GMAIL_SYNC_CONCURRENCY ?? "1")
     .option("--since <date>", "Only sync messages after this date (ISO 8601 or YYYY-MM-DD)")
     .option("--all", "Sync all pages until done (use for initial backfill)")
+    .option("--history", "Use stored Gmail history cursor for incremental sync")
+    .option("--archive-s3 [bucket]", `Archive raw MIME and metadata to S3 bucket (default: ${DEFAULT_GMAIL_ARCHIVE_BUCKET})`)
     .option("--no-attachments", "Skip attachment download")
     .action(async (opts: {
       provider?: string;
+      profile?: string;
+      allProfiles?: boolean;
       label?: string;
       query?: string;
       limit?: string;
+      concurrency?: string;
       since?: string;
       all?: boolean;
+      history?: boolean;
+      archiveS3?: boolean | string;
       attachments: boolean;
     }) => {
       try {
         const db = getDatabase();
+        const archiveBucket = opts.archiveS3
+          ? (typeof opts.archiveS3 === "string" ? opts.archiveS3 : DEFAULT_GMAIL_ARCHIVE_BUCKET)
+          : undefined;
+
+        if (opts.allProfiles) {
+          const profiles = await listGmailConnectorProfiles();
+          if (profiles.length === 0) {
+            console.error(chalk.red("No Gmail connector profiles found."));
+            process.exit(1);
+          }
+
+          const aggregate = { synced: 0, skipped: 0, attachments_saved: 0, errors: [] as string[], done: true };
+          for (const profile of profiles) {
+            const providerId = ensureGmailProviderForProfile(profile);
+            const syncOptions = {
+              providerId,
+              profile,
+              labelFilter: opts.label,
+              query: opts.query,
+              batchSize: parseInt(opts.limit ?? "50", 10),
+              messageConcurrency: parseInt(opts.concurrency ?? "1", 10),
+              since: opts.since,
+              archiveS3Bucket: archiveBucket,
+              downloadAttachments: opts.attachments !== false,
+              db,
+            };
+            const page = opts.all
+              ? await syncGmailInboxAll(syncOptions)
+              : opts.history
+                ? await syncGmailInboxHistory(syncOptions)
+              : await syncGmailInbox(syncOptions);
+            updateLastSynced(providerId, undefined, db);
+            aggregate.synced += page.synced;
+            aggregate.skipped += page.skipped;
+            aggregate.attachments_saved += page.attachments_saved;
+            aggregate.errors.push(...page.errors);
+            aggregate.done = aggregate.done && page.done;
+          }
+
+          output(aggregate, formatSyncResult(aggregate, false));
+          return;
+        }
 
         // Resolve provider
         const providerId = resolveGmailProvider(opts.provider);
@@ -44,9 +100,12 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         const syncOpts = {
           providerId,
           labelFilter: opts.label,
+          profile: opts.profile,
           query: opts.query,
           batchSize: parseInt(opts.limit ?? "50", 10),
+          messageConcurrency: parseInt(opts.concurrency ?? "1", 10),
           since: opts.since,
+          archiveS3Bucket: archiveBucket,
           downloadAttachments: opts.attachments !== false,
           db,
         };
@@ -77,6 +136,8 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
             if (aggregate.errors.length >= 20) { aggregate.errors.push("Too many errors — aborting"); break; }
           } while (!aggregate.done);
           result = aggregate;
+        } else if (opts.history) {
+          result = await syncGmailInboxHistory(syncOpts);
         } else {
           result = await syncGmailInbox(syncOpts);
         }
@@ -143,20 +204,18 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
 
         if (opts.remote) {
           // Live Gmail search via connectors SDK
-          const r = await runConnectorCommand("gmail", ["-f", "json", "messages", "list", "--query", query, "--max", opts.limit ?? "20"]);
+          const r = await runConnectorOperation<{ messages?: { id: string; from: string; subject: string; date: string }[] } | { id: string; from: string; subject: string; date: string }[]>({
+            connector: "gmail",
+            operation: "messages.list",
+            input: { query, max: opts.limit ?? "20" },
+          });
           if (!r.success) {
             console.error(chalk.red(`Gmail search failed: ${r.stderr}`));
             process.exit(1);
           }
-          try {
-            const { parseJsonFromOutput } = await import("../../lib/gmail-sync.js");
-            const raw = parseJsonFromOutput(r.stdout);
-            const msgs = Array.isArray(raw) ? raw : (raw as { messages?: { id: string; from: string; subject: string; date: string }[] }).messages ?? [];
-            const results = msgs as { id: string; from: string; subject: string; date: string }[];
-            output(results, formatRemoteResults(results, query));
-          } catch {
-            console.log(r.stdout);
-          }
+          const raw = r.data;
+          const results = (Array.isArray(raw) ? raw : raw?.messages ?? []) as { id: string; from: string; subject: string; date: string }[];
+          output(results, formatRemoteResults(results, query));
           return;
         }
 
@@ -260,7 +319,11 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     const db = getDatabase();
     const row = db.query("SELECT message_id FROM inbound_emails WHERE id = ?").get(emailId) as { message_id: string } | null;
     if (!row?.message_id) throw new Error(`No Gmail message ID for email ${emailId}`);
-    const r = await runConnectorCommand("gmail", [...connectorArgs, row.message_id]);
+    const r = await runConnectorOperation({
+      connector: "gmail",
+      operation: connectorArgs.join("."),
+      input: { args: [row.message_id] },
+    });
     if (!r.success) throw new Error(r.stderr || r.stdout);
     console.log(chalk.green(`✓ ${label}: ${emailId.slice(0, 8)}`));
   }
@@ -303,10 +366,12 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
           console.error(chalk.red("Email not found or has no Gmail message ID."));
           process.exit(1);
         }
-        const args = ["messages", "reply", email.message_id, "--body", opts.body];
-        if (opts.html) args.push("--html");
         console.log(chalk.dim(`Replying to: ${email.subject}`));
-        const r = await runConnectorCommand("gmail", args);
+        const r = await runConnectorOperation({
+          connector: "gmail",
+          operation: "messages.reply",
+          input: { args: [email.message_id], body: opts.body, ...(opts.html ? { html: true } : {}) },
+        });
         if (!r.success) { console.error(chalk.red(`Reply failed: ${r.stderr}`)); process.exit(1); }
         console.log(chalk.green("✓ Reply sent"));
         output({}, "");
@@ -420,6 +485,101 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
       } catch (e) { handleError(e); }
     });
 
+  inboxCmd
+    .command("archive-verify")
+    .description("Verify a Gmail message archive in S3")
+    .requiredOption("--bucket <name>", "Archive bucket name", DEFAULT_GMAIL_ARCHIVE_BUCKET)
+    .requiredOption("--profile <profile>", "Gmail connector profile")
+    .requiredOption("--message-id <id>", "Gmail message ID")
+    .option("--prefix <prefix>", "Archive prefix", "gmail")
+    .option("--region <region>", "AWS region", "us-west-2")
+    .option("--aws-profile <profile>", "AWS profile")
+    .option("--attachment <filename...>", "Expected attachment filename(s)")
+    .option("--no-raw", "Do not require the raw MIME object")
+    .action(async (opts: {
+      bucket: string;
+      profile: string;
+      messageId: string;
+      prefix: string;
+      region: string;
+      awsProfile?: string;
+      attachment?: string[];
+      raw: boolean;
+    }) => {
+      try {
+        if (opts.awsProfile) process.env["AWS_PROFILE"] = opts.awsProfile;
+        const { verifyGmailArchive } = await import("../../lib/gmail-archive.js");
+        const result = await verifyGmailArchive({
+          bucket: opts.bucket,
+          profile: opts.profile,
+          messageId: opts.messageId,
+          prefix: opts.prefix,
+          region: opts.region,
+          expectedAttachments: opts.attachment ?? [],
+          requireRaw: opts.raw !== false,
+        });
+        output(result, formatArchiveVerifyResult(result));
+        if (!result.ok) process.exitCode = 1;
+      } catch (e) {
+        handleError(e);
+      }
+    });
+
+  inboxCmd
+    .command("archive-migrate")
+    .description(`Copy a legacy Gmail-to-S3 bucket/prefix into ${DEFAULT_GMAIL_ARCHIVE_BUCKET}`)
+    .requiredOption("--source-bucket <name>", "Legacy source bucket, e.g. hasna-mail-maximstaris")
+    .option("--target-bucket <name>", "Target archive bucket", DEFAULT_GMAIL_ARCHIVE_BUCKET)
+    .option("--source-prefix <prefix>", "Source key prefix", "")
+    .option("--target-prefix <prefix>", "Target key prefix", "legacy/maximstaris")
+    .option("--region <region>", "AWS region", "us-east-1")
+    .option("--target-region <region>", "Target AWS region", "us-west-2")
+    .option("--aws-profile <profile>", "AWS profile")
+    .option("--source-aws-profile <profile>", "AWS profile for reading the source bucket")
+    .option("--target-aws-profile <profile>", "AWS profile for writing the target bucket")
+    .option("--limit <n>", "Maximum objects to scan in this run")
+    .option("--dry-run", "Plan copies without writing to target")
+    .action(async (opts: {
+      sourceBucket: string;
+      targetBucket: string;
+      sourcePrefix?: string;
+      targetPrefix?: string;
+      region: string;
+      targetRegion?: string;
+      awsProfile?: string;
+      sourceAwsProfile?: string;
+      targetAwsProfile?: string;
+      limit?: string;
+      dryRun?: boolean;
+    }) => {
+      try {
+        if (opts.awsProfile) process.env["AWS_PROFILE"] = opts.awsProfile;
+        const { migrateS3Prefix } = await import("../../lib/gmail-archive.js");
+        const sourceProfile = opts.sourceAwsProfile ?? opts.awsProfile;
+        const targetProfile = opts.targetAwsProfile ?? opts.awsProfile;
+        const sourceClient = sourceProfile
+          ? new S3Client({ region: opts.region, credentials: fromIni({ profile: sourceProfile }) })
+          : undefined;
+        const targetClient = targetProfile
+          ? new S3Client({ region: opts.targetRegion ?? opts.region, credentials: fromIni({ profile: targetProfile }) })
+          : undefined;
+        const result = await migrateS3Prefix({
+          sourceBucket: opts.sourceBucket,
+          targetBucket: opts.targetBucket,
+          sourcePrefix: opts.sourcePrefix,
+          targetPrefix: opts.targetPrefix,
+          region: opts.region,
+          sourceClient,
+          targetClient,
+          limit: opts.limit ? parseInt(opts.limit, 10) : undefined,
+          dryRun: opts.dryRun,
+        });
+        output(result, formatArchiveMigrationResult(result));
+      } catch (e) {
+        handleError(e);
+      }
+    });
+
   // ─── LISTEN (SMTP) ────────────────────────────────────────────────────────
   inboxCmd
     .command("listen")
@@ -467,6 +627,14 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function ensureGmailProviderForProfile(profile: string): string {
+  const db = getDatabase();
+  const providerName = `Gmail (${profile})`;
+  const existing = listProviders(db).find((p) => p.type === "gmail" && p.name === providerName);
+  if (existing) return existing.id;
+  return createProvider({ name: providerName, type: "gmail" }, db).id;
+}
 
 function resolveGmailProvider(idOrName?: string): string | null {
   const db = getDatabase();
@@ -519,6 +687,33 @@ function formatRemoteResults(
       `  ${chalk.dim(r.id.slice(0, 16))}  ${chalk.cyan(r.from.slice(0, 28).padEnd(28))}  ${r.subject.slice(0, 50)}`,
     );
   }
+  lines.push("");
+  return lines.join("\n");
+}
+
+function formatArchiveVerifyResult(result: { ok: boolean; checked: string[]; missing: string[]; bucket: string; profile: string; messageId: string }): string {
+  const lines = [chalk.bold("\nArchive verification:")];
+  lines.push(`  Bucket:  ${chalk.cyan(result.bucket)}`);
+  lines.push(`  Profile: ${chalk.cyan(result.profile)}`);
+  lines.push(`  Message: ${chalk.cyan(result.messageId)}`);
+  lines.push(`  Status:  ${result.ok ? chalk.green("ok") : chalk.red("missing objects")}`);
+  lines.push(`  Checked: ${String(result.checked.length)}`);
+  if (result.missing.length > 0) {
+    lines.push("  Missing:");
+    for (const key of result.missing) lines.push(`    ${chalk.red(key)}`);
+  }
+  lines.push("");
+  return lines.join("\n");
+}
+
+function formatArchiveMigrationResult(result: { scanned: number; copied: number; dryRun: boolean; objects: Array<{ source: string; target: string }>; nextContinuationToken?: string }): string {
+  const lines = [chalk.bold("\nArchive migration:")];
+  lines.push(`  Mode:    ${result.dryRun ? chalk.yellow("dry run") : chalk.green("copy")}`);
+  lines.push(`  Scanned: ${String(result.scanned)}`);
+  lines.push(`  Copied:  ${String(result.copied)}`);
+  for (const obj of result.objects.slice(0, 10)) lines.push(`  ${chalk.dim(obj.source)} -> ${chalk.cyan(obj.target)}`);
+  if (result.objects.length > 10) lines.push(chalk.dim(`  ... ${result.objects.length - 10} more`));
+  if (result.nextContinuationToken) lines.push(chalk.dim("  More objects are available; rerun with a larger limit or continuation support."));
   lines.push("");
   return lines.join("\n");
 }

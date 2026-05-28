@@ -22,6 +22,12 @@ export interface InboundEmail {
   provider_id: string | null;
   message_id: string | null;
   in_reply_to_email_id: string | null;  // linked sent email if this is a reply
+  provider_thread_id: string | null;
+  provider_history_id: string | null;
+  provider_internal_date: string | null;
+  label_ids: string[];
+  raw_s3_url: string | null;
+  metadata_s3_url: string | null;
   from_address: string;
   to_addresses: string[];
   cc_addresses: string[];
@@ -41,6 +47,12 @@ interface InboundEmailRow {
   provider_id: string | null;
   message_id: string | null;
   in_reply_to_email_id?: string | null;
+  provider_thread_id?: string | null;
+  provider_history_id?: string | null;
+  provider_internal_date?: string | null;
+  label_ids_json?: string;
+  raw_s3_url?: string | null;
+  metadata_s3_url?: string | null;
   from_address: string;
   to_addresses: string;
   cc_addresses: string;
@@ -61,6 +73,12 @@ function rowToEmail(row: InboundEmailRow): InboundEmail {
     provider_id: row.provider_id,
     message_id: row.message_id,
     in_reply_to_email_id: row.in_reply_to_email_id ?? null,
+    provider_thread_id: row.provider_thread_id ?? null,
+    provider_history_id: row.provider_history_id ?? null,
+    provider_internal_date: row.provider_internal_date ?? null,
+    label_ids: JSON.parse(row.label_ids_json ?? "[]") as string[],
+    raw_s3_url: row.raw_s3_url ?? null,
+    metadata_s3_url: row.metadata_s3_url ?? null,
     from_address: row.from_address,
     to_addresses: JSON.parse(row.to_addresses) as string[],
     cc_addresses: JSON.parse(row.cc_addresses) as string[],
@@ -93,7 +111,15 @@ function detectReplyToEmailId(headers: Record<string, string>, d: Database): str
 }
 
 export function storeInboundEmail(
-  input: Omit<InboundEmail, "id" | "created_at">,
+  input: Omit<
+    InboundEmail,
+    "id" | "created_at" | "provider_thread_id" | "provider_history_id" |
+    "provider_internal_date" | "label_ids" | "raw_s3_url" | "metadata_s3_url"
+  > & Partial<Pick<
+    InboundEmail,
+    "provider_thread_id" | "provider_history_id" | "provider_internal_date" |
+    "label_ids" | "raw_s3_url" | "metadata_s3_url"
+  >>,
   db?: Database,
 ): InboundEmail {
   const d = db || getDatabase();
@@ -104,14 +130,21 @@ export function storeInboundEmail(
 
   d.run(
     `INSERT INTO inbound_emails
-       (id, provider_id, message_id, in_reply_to_email_id, from_address, to_addresses, cc_addresses,
+       (id, provider_id, message_id, in_reply_to_email_id, provider_thread_id, provider_history_id,
+        provider_internal_date, label_ids_json, raw_s3_url, metadata_s3_url, from_address, to_addresses, cc_addresses,
         subject, text_body, html_body, attachments_json, attachment_paths, headers_json, raw_size, received_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       input.provider_id,
       input.message_id,
       replyToEmailId,
+      input.provider_thread_id ?? null,
+      input.provider_history_id ?? null,
+      input.provider_internal_date ?? null,
+      JSON.stringify(input.label_ids ?? []),
+      input.raw_s3_url ?? null,
+      input.metadata_s3_url ?? null,
       input.from_address,
       JSON.stringify(input.to_addresses),
       JSON.stringify(input.cc_addresses),

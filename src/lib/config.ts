@@ -56,6 +56,12 @@ export interface GmailSyncConfig {
   s3_prefix?: string;
   /** S3 region (default: us-east-1) */
   s3_region?: string;
+  /** S3 bucket for durable Gmail archive objects, usually "hasna-xyz-prod-emails" */
+  archive_s3_bucket?: string;
+  /** S3 region for durable Gmail archive objects (default: us-west-2) */
+  archive_s3_region?: string;
+  /** S3 prefix for Gmail archive objects (default: "gmail") */
+  archive_s3_prefix?: string;
 }
 
 export function getCloudflareToken(): string | undefined {
@@ -70,5 +76,8 @@ export function getGmailSyncConfig(): GmailSyncConfig {
     s3_bucket: config["gmail_s3_bucket"] as string | undefined,
     s3_prefix: (config["gmail_s3_prefix"] as string | undefined) ?? "emails",
     s3_region: (config["gmail_s3_region"] as string | undefined) ?? "us-east-1",
+    archive_s3_bucket: config["gmail_archive_s3_bucket"] as string | undefined,
+    archive_s3_region: (config["gmail_archive_s3_region"] as string | undefined) ?? "us-west-2",
+    archive_s3_prefix: (config["gmail_archive_s3_prefix"] as string | undefined) ?? "gmail",
   };
 }

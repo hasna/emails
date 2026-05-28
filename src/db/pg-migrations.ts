@@ -236,6 +236,12 @@ export const PG_MIGRATIONS: string[] = [
     id TEXT PRIMARY KEY,
     provider_id TEXT REFERENCES providers(id) ON DELETE SET NULL,
     message_id TEXT,
+    provider_thread_id TEXT,
+    provider_history_id TEXT,
+    provider_internal_date TEXT,
+    label_ids_json TEXT NOT NULL DEFAULT '[]',
+    raw_s3_url TEXT,
+    metadata_s3_url TEXT,
     from_address TEXT NOT NULL,
     to_addresses TEXT NOT NULL DEFAULT '[]',
     cc_addresses TEXT NOT NULL DEFAULT '[]',
@@ -358,6 +364,25 @@ export const PG_MIGRATIONS: string[] = [
   CREATE UNIQUE INDEX IF NOT EXISTS idx_triage_email_unique ON email_triage(email_id) WHERE email_id IS NOT NULL;
   CREATE UNIQUE INDEX IF NOT EXISTS idx_triage_inbound_unique ON email_triage(inbound_email_id) WHERE inbound_email_id IS NOT NULL;
   INSERT INTO _migrations (id) VALUES (16) ON CONFLICT DO NOTHING;
+  `,
+
+  // Migration 17: attachment_paths — store local/S3 paths for downloaded attachments
+  `
+  ALTER TABLE inbound_emails ADD COLUMN IF NOT EXISTS attachment_paths TEXT NOT NULL DEFAULT '[]';
+  INSERT INTO _migrations (id) VALUES (17) ON CONFLICT DO NOTHING;
+  `,
+
+  // Migration 18: Gmail archive metadata and S3 object references
+  `
+  ALTER TABLE inbound_emails ADD COLUMN IF NOT EXISTS provider_thread_id TEXT;
+  ALTER TABLE inbound_emails ADD COLUMN IF NOT EXISTS provider_history_id TEXT;
+  ALTER TABLE inbound_emails ADD COLUMN IF NOT EXISTS provider_internal_date TEXT;
+  ALTER TABLE inbound_emails ADD COLUMN IF NOT EXISTS label_ids_json TEXT NOT NULL DEFAULT '[]';
+  ALTER TABLE inbound_emails ADD COLUMN IF NOT EXISTS raw_s3_url TEXT;
+  ALTER TABLE inbound_emails ADD COLUMN IF NOT EXISTS metadata_s3_url TEXT;
+  CREATE INDEX IF NOT EXISTS idx_inbound_thread ON inbound_emails(provider_thread_id);
+  CREATE INDEX IF NOT EXISTS idx_inbound_history ON inbound_emails(provider_history_id);
+  INSERT INTO _migrations (id) VALUES (18) ON CONFLICT DO NOTHING;
   `,
 
   // Feedback table

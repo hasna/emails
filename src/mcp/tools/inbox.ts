@@ -1,7 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { listInboundEmails, getInboundEmail, clearInboundEmails } from "../../db/inbound.js";
-import { syncGmailInbox, syncGmailInboxAll } from "../../lib/gmail-sync.js";
+import { syncGmailInbox, syncGmailInboxAll, syncGmailInboxHistory } from "../../lib/gmail-sync.js";
 import { getGmailSyncState, updateLastSynced } from "../../db/gmail-sync-state.js";
 import { getDatabase } from "../../db/database.js";
 import { listProviders } from "../../db/providers.js";
@@ -75,8 +75,9 @@ export function registerInboxTools(server: McpServer): void {
     limit: z.number().optional().describe("Max messages per run (default: 50)"),
     since: z.string().optional().describe("Only sync messages after this ISO date"),
     all_pages: z.boolean().optional().describe("Sync all pages until done (for full backfill)"),
+    history: z.boolean().optional().describe("Use stored Gmail history cursor for incremental sync"),
   },
-  async ({ provider_id, label, query, limit, since, all_pages }) => {
+  async ({ provider_id, label, query, limit, since, all_pages, history }) => {
     try {
       const db = getDatabase();
       const opts = {
@@ -89,6 +90,8 @@ export function registerInboxTools(server: McpServer): void {
       };
       const result = all_pages
         ? await syncGmailInboxAll(opts)
+        : history
+          ? await syncGmailInboxHistory(opts)
         : await syncGmailInbox(opts);
 
       updateLastSynced(provider_id, undefined, db);
@@ -116,8 +119,12 @@ async function gmailMessageAction(email_id: string, connectorArgs: string[]): Pr
   const db = getDatabase();
   const row = db.query("SELECT message_id FROM inbound_emails WHERE id = ?").get(email_id) as { message_id: string } | null;
   if (!row?.message_id) throw new Error(`No Gmail message ID for email ${email_id}`);
-  const { runConnectorCommand } = await import("@hasna/connectors");
-  const r = await runConnectorCommand("gmail", [...connectorArgs, row.message_id]);
+  const { runConnectorOperation } = await import("@hasna/connectors");
+  const r = await runConnectorOperation({
+    connector: "gmail",
+    operation: connectorArgs.join("."),
+    input: { args: [row.message_id] },
+  });
   if (!r.success) throw new Error(r.stderr || r.stdout);
   return row.message_id;
 }
@@ -171,10 +178,12 @@ async function gmailMessageAction(email_id: string, connectorArgs: string[]): Pr
       const db = getDatabase();
       const row = db.query("SELECT message_id, subject FROM inbound_emails WHERE id = ?").get(email_id) as { message_id: string; subject: string } | null;
       if (!row?.message_id) throw new Error(`Email not found or no Gmail message ID: ${email_id}`);
-      const { runConnectorCommand } = await import("@hasna/connectors");
-      const args = ["messages", "reply", row.message_id, "--body", body];
-      if (is_html) args.push("--html");
-      const r = await runConnectorCommand("gmail", args);
+      const { runConnectorOperation } = await import("@hasna/connectors");
+      const r = await runConnectorOperation({
+        connector: "gmail",
+        operation: "messages.reply",
+        input: { args: [row.message_id], body, ...(is_html ? { html: true } : {}) },
+      });
       if (!r.success) throw new Error(r.stderr || r.stdout);
       return { content: [{ type: "text", text: JSON.stringify({ replied_to: row.subject, status: "sent" }, null, 2) }] };
     } catch (e) {

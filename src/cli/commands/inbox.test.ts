@@ -3,33 +3,42 @@
  * exercised by `emails inbox` subcommands.
  */
 import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { getDatabase, resetDatabase, closeDatabase, uuid, getDataDir } from "../../db/database.js";
 import { storeInboundEmail, listInboundEmails, getInboundEmail, getInboundCount, clearInboundEmails } from "../../db/inbound.js";
 import { getGmailSyncState, updateLastSynced, setGmailSyncState } from "../../db/gmail-sync-state.js";
+import { saveConfig } from "../../lib/config.js";
 
 // ─── Mock @hasna/connectors before any gmail-sync imports ─────────────────────
 
 const DATE = "Fri, 20 Mar 2026 10:00:00 +0000";
 let mockListMsgs: { id: string; subject?: string; from?: string }[] = [];
 
-const mockRun = mock(async (_n: string, args: string[]) => {
-  const a = args as string[];
-  if (a.includes("list")) {
-    return { success: true, stdout: JSON.stringify(mockListMsgs.map((m) => ({ id: m.id, from: m.from ?? "a@b.com", subject: m.subject ?? "S", date: DATE }))), stderr: "", exitCode: 0 };
+const mockRun = mock(async (operationArgs: {
+  operation: string;
+  input?: Record<string, unknown> & { args?: Array<string | number | boolean> };
+}) => {
+  const { operation, input } = operationArgs;
+  if (operation === "messages.list") {
+    const data = mockListMsgs.map((m) => ({ id: m.id, from: m.from ?? "a@b.com", subject: m.subject ?? "S", date: DATE }));
+    return { connector: "gmail", operation, success: true, stdout: JSON.stringify(data), stderr: "", exitCode: 0, data };
   }
-  if (a.includes("read") || a.includes("get")) {
-    const id = a.find((x) => x.length > 5 && !x.startsWith("-")) ?? "x";
+  if (operation === "messages.read" || operation === "messages.get") {
+    const id = String(input?.args?.[0] ?? "x");
     const m = mockListMsgs.find((x) => x.id === id);
-    return { success: true, stdout: JSON.stringify({ id, from: m?.from ?? "a@b.com", to: "me@b.com", subject: m?.subject ?? "S", date: DATE, body: "body", htmlBody: "<p>body</p>", size: 100 }), stderr: "", exitCode: 0 };
+    const data = { id, from: m?.from ?? "a@b.com", to: "me@b.com", subject: m?.subject ?? "S", date: DATE, body: "body", htmlBody: "<p>body</p>", size: 100 };
+    return { connector: "gmail", operation, success: true, stdout: JSON.stringify(data), stderr: "", exitCode: 0, data };
   }
-  return { success: true, stdout: "[]", stderr: "", exitCode: 0 };
+  return { connector: "gmail", operation, success: true, stdout: "[]", stderr: "", exitCode: 0, data: [] };
 });
 
-mock.module("@hasna/connectors", () => ({ runConnectorCommand: mockRun }));
+mock.module("@hasna/connectors", () => ({ runConnectorOperation: mockRun }));
 
 const { syncGmailInbox } = await import("../../lib/gmail-sync.js");
+
+const TMP_HOME = join("/tmp", `emails-inbox-test-${process.pid}`);
+const origHome = process.env["HOME"];
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -70,30 +79,34 @@ function seedInboundEmails(providerId: string, count: number) {
 beforeEach(() => {
   mockListMsgs = [];
   mockRun.mockReset();
-  mockRun.mockImplementation(async (_n: string, args: string[]) => {
-    const a = args as string[];
-    if (a.includes("messages") && a.includes("list")) {
-      return { success: true, stdout: JSON.stringify(mockListMsgs.map((m) => ({ id: m.id, from: m.from ?? "a@b.com", subject: m.subject ?? "S", date: DATE }))), stderr: "", exitCode: 0 };
+  mockRun.mockImplementation(async (operationArgs: {
+    operation: string;
+    input?: Record<string, unknown> & { args?: Array<string | number | boolean> };
+  }) => {
+    const { operation, input } = operationArgs;
+    if (operation === "messages.list") {
+      const data = mockListMsgs.map((m) => ({ id: m.id, from: m.from ?? "a@b.com", subject: m.subject ?? "S", date: DATE }));
+      return { connector: "gmail", operation, success: true, stdout: JSON.stringify(data), stderr: "", exitCode: 0, data };
     }
-    if (a.includes("read") || a.includes("get")) {
-      const idx = Math.max(a.indexOf("read"), a.indexOf("get"));
-      const id = a[idx + 1] ?? "x";
+    if (operation === "messages.read" || operation === "messages.get") {
+      const id = String(input?.args?.[0] ?? "x");
       const m = mockListMsgs.find((x) => x.id === id);
-      return { success: true, stdout: JSON.stringify({ id, from: m?.from ?? "a@b.com", to: "me@b.com", subject: m?.subject ?? "S", date: DATE, body: "body", htmlBody: "<p>body</p>", size: 100 }), stderr: "", exitCode: 0 };
+      const data = { id, from: m?.from ?? "a@b.com", to: "me@b.com", subject: m?.subject ?? "S", date: DATE, body: "body", htmlBody: "<p>body</p>", size: 100 };
+      return { connector: "gmail", operation, success: true, stdout: JSON.stringify(data), stderr: "", exitCode: 0, data };
     }
-    if (a.includes("attachments") && a.includes("list")) {
-      return { success: true, stdout: JSON.stringify([{ attachmentId: "att-1", filename: "invoice.pdf", mimeType: "application/pdf", size: 12 }]), stderr: "", exitCode: 0 };
+    if (operation === "attachments.list") {
+      const data = [{ attachmentId: "att-1", filename: "invoice.pdf", mimeType: "application/pdf", size: 12 }];
+      return { connector: "gmail", operation, success: true, stdout: JSON.stringify(data), stderr: "", exitCode: 0, data };
     }
-    if (a.includes("attachments") && a.includes("download")) {
-      const dirIndex = a.indexOf("--dir");
-      const outputDir = dirIndex >= 0 ? a[dirIndex + 1] : undefined;
+    if (operation === "attachments.download") {
+      const outputDir = typeof input?.dir === "string" ? input.dir : undefined;
       if (outputDir) {
         mkdirSync(outputDir, { recursive: true });
         writeFileSync(join(outputDir, "invoice.pdf"), "pdf-data");
       }
-      return { success: true, stdout: "", stderr: "", exitCode: 0 };
+      return { connector: "gmail", operation, success: true, stdout: "", stderr: "", exitCode: 0, data: [] };
     }
-    return { success: true, stdout: "[]", stderr: "", exitCode: 0 };
+    return { connector: "gmail", operation, success: true, stdout: "[]", stderr: "", exitCode: 0, data: [] };
   });
 });
 
@@ -102,6 +115,9 @@ afterEach(() => {
   delete process.env["EMAILS_DB_PATH"];
   delete process.env["AWS_ACCESS_KEY_ID"];
   delete process.env["AWS_SECRET_ACCESS_KEY"];
+  if (origHome !== undefined) process.env["HOME"] = origHome;
+  else delete process.env["HOME"];
+  if (existsSync(TMP_HOME)) rmSync(TMP_HOME, { recursive: true, force: true });
 });
 
 // ─── inbox list (listInboundEmails) ──────────────────────────────────────────
@@ -222,18 +238,20 @@ describe("inbox search — local filter", () => {
 // ─── inbox sync (via syncGmailInbox) ─────────────────────────────────────────
 
 describe("inbox sync — syncGmailInbox", () => {
-  it("falls back to local_path when S3 upload credentials are unavailable", async () => {
+  it("stores downloaded attachments as local_path when S3 storage is disabled", async () => {
     const { db, providerId } = setupDb();
-    process.env["HOME"] = "/home/hasna";
-    process.env["AWS_ACCESS_KEY_ID"] = "test-key";
-    process.env["AWS_SECRET_ACCESS_KEY"] = "test-secret";
+    mkdirSync(TMP_HOME, { recursive: true });
+    process.env["HOME"] = TMP_HOME;
+    saveConfig({
+      gmail_attachment_storage: "local",
+    });
     mockListMsgs = [{ id: "gmail-att-1", subject: "Attachment Test", from: "a@test.com" }];
 
     const result = await syncGmailInbox({ providerId, db });
 
     expect(result.synced).toBe(1);
     expect(result.attachments_saved).toBe(1);
-    expect(result.errors).toHaveLength(1);
+    expect(result.errors).toHaveLength(0);
 
     const stored = listInboundEmails({ provider_id: providerId }, db);
     expect(stored).toHaveLength(1);
