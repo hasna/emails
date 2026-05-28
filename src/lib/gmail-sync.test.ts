@@ -320,6 +320,27 @@ describe("syncGmailInbox", () => {
     expect(r.synced).toBeGreaterThanOrEqual(1);
   });
 
+  it("does not store metadata-only rows when Gmail detail fetch returns no data", async () => {
+    const { db, providerId } = setupDb();
+    mockRun.mockImplementation(async (operationArgs: { operation: string }) => {
+      if (operationArgs.operation === "messages.list") {
+        const data = JSON.parse(makeListOutput([{ id: "missing-msg" }]));
+        return { connector: "gmail", operation: operationArgs.operation, success: true, stdout: JSON.stringify(data), stderr: "", exitCode: 0, data };
+      }
+      if (operationArgs.operation === "messages.getRaw" || operationArgs.operation === "messages.read") {
+        return { connector: "gmail", operation: operationArgs.operation, success: false, stdout: "", stderr: "not found", exitCode: 1 };
+      }
+      return { connector: "gmail", operation: operationArgs.operation, success: true, stdout: "[]", stderr: "", exitCode: 0, data: [] };
+    });
+
+    const result = await syncGmailInbox({ providerId, db, archiveS3Bucket: "bucket" });
+
+    expect(result.synced).toBe(0);
+    expect(result.errors[0]).toContain("Failed to read Gmail message detail for missing-msg");
+    const count = db.query("SELECT count(*) as count FROM inbound_emails WHERE message_id = 'missing-msg'").get() as { count: number };
+    expect(count.count).toBe(0);
+  });
+
   it("handles empty list", async () => {
     const { db, providerId } = setupDb();
     setMock([]);

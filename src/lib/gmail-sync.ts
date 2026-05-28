@@ -485,7 +485,11 @@ async function syncGmailMessages(
         { args: [msgRef.id], body: true },
         opts.profile,
       );
-      const detail = readTextResult.data ?? { id: msgRef.id };
+      if (!readTextResult.success || !readTextResult.data) {
+        const detail = readTextResult.stderr || readTextResult.stdout || `exit code ${readTextResult.exitCode}`;
+        throw new Error(`Failed to read Gmail message detail for ${msgRef.id}: ${detail}`);
+      }
+      const detail = readTextResult.data;
       latestHistoryId = newerHistoryId(latestHistoryId, detail.historyId);
 
       const textBody = detail.body || extractBodyFromPayload(detail.payload, false) || detail.snippet || null;
