@@ -70,6 +70,21 @@ export async function runDiagnostics(db?: Database): Promise<DoctorCheck[]> {
   const addresses = listAddresses(undefined, db);
   checks.push({ name: "Addresses", status: addresses.length > 0 ? "pass" : "warn", message: `${addresses.length} sender address(es)` });
 
+  // 6b. SES sandbox / production access (best-effort; needs AWS creds)
+  if (process.env["AWS_ACCESS_KEY_ID"] || process.env["AWS_PROFILE"]) {
+    try {
+      const { getSandboxStatus, describeSandboxStatus } = await import("./ses-sandbox.js");
+      const status = await getSandboxStatus({ region: process.env["AWS_REGION"] ?? "us-east-1" });
+      checks.push({
+        name: "SES Sending",
+        status: status.sendingEnabled ? "pass" : "fail",
+        message: describeSandboxStatus(status),
+      });
+    } catch {
+      // no creds / not reachable — skip silently
+    }
+  }
+
   // 7. Contacts
   const contacts = listContacts(undefined, db);
   const suppressed = listContacts({ suppressed: true }, db);
