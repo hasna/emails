@@ -12,6 +12,8 @@ mock.module("@aws-sdk/client-ses", () => ({
   ListReceiptRuleSetsCommand: class { constructor(public input: unknown) {} },
   CreateReceiptRuleCommand: class { constructor(public input: unknown) {} },
   DescribeActiveReceiptRuleSetCommand: class { constructor(public input: unknown) {} },
+  DescribeReceiptRuleCommand: class { constructor(public input: unknown) {} },
+  UpdateReceiptRuleCommand: class { constructor(public input: unknown) {} },
 }));
 
 mock.module("@aws-sdk/client-s3", () => ({
