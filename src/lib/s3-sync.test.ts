@@ -112,6 +112,36 @@ describe("syncS3Inbox — with objects", () => {
     expect(result.errors).toHaveLength(0);
   });
 
+  it("resolves a PARTIAL provider id (regression: FOREIGN KEY constraint failed)", async () => {
+    const { db, providerId } = setupDb();
+    const partial = providerId.slice(0, 8); // e.g. "45c38857"
+    let callCount = 0;
+    mockSend.mockImplementation(async (cmd: unknown) => {
+      const c = cmd as { input?: Record<string, unknown> };
+      if (c?.input && "Prefix" in (c.input ?? {})) {
+        if (callCount === 0) { callCount++; return { Contents: [{ Key: "inbound/example.com/p1", Size: 1024 }], IsTruncated: false }; }
+        return { Contents: [], IsTruncated: false };
+      }
+      if (c?.input && "Key" in (c.input ?? {})) {
+        return { Body: (async function* () { yield Buffer.from("From: a@b.com\r\nSubject: T\r\n\r\nB"); })() };
+      }
+      return {};
+    });
+
+    const result = await syncS3Inbox({ bucket: "test-bucket", db, providerId: partial });
+    expect(result.synced).toBe(1);
+    expect(result.errors).toHaveLength(0);
+    // stored with the FULL provider id, satisfying the FK
+    const row = db.query("SELECT provider_id FROM inbound_emails WHERE message_id = ?").get("inbound/example.com/p1") as { provider_id: string };
+    expect(row.provider_id).toBe(providerId);
+  });
+
+  it("throws a clear error for an unknown provider id", async () => {
+    const { db } = setupDb();
+    mockSend.mockImplementation(async () => ({ Contents: [], IsTruncated: false }));
+    await expect(syncS3Inbox({ bucket: "test-bucket", db, providerId: "nonexistent-provider" })).rejects.toThrow(/Provider not found/);
+  });
+
   it("skips already-synced objects (dedup by S3 key)", async () => {
     const { db, providerId } = setupDb();
 

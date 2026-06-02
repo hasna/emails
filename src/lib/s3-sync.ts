@@ -17,7 +17,7 @@ import {
 import { simpleParser } from "mailparser";
 import { storeInboundEmail, updateAttachmentPaths } from "../db/inbound.js";
 import type { AttachmentPath } from "../db/inbound.js";
-import { getDatabase, getDataDir } from "../db/database.js";
+import { getDatabase, getDataDir, resolvePartialId } from "../db/database.js";
 import { loadConfig, saveConfig, getGmailSyncConfig } from "./config.js";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -129,6 +129,16 @@ export async function syncS3Inbox(opts: S3SyncOptions): Promise<S3SyncResult> {
   const s3 = makeS3Client(opts);
   const prefix = opts.prefix ?? "";
   const limit = opts.limit ?? 100;
+
+  // Resolve a possibly-partial provider id to the full id so the inbound
+  // foreign key (provider_id -> providers.id) is satisfied. Passing a short id
+  // (e.g. "45c38857") previously failed with "FOREIGN KEY constraint failed".
+  let providerId: string | null = opts.providerId ?? null;
+  if (providerId) {
+    const resolved = resolvePartialId(db, "providers", providerId);
+    if (!resolved) throw new Error(`Provider not found: ${providerId}`);
+    providerId = resolved;
+  }
   const syncConfig = getGmailSyncConfig();
   const result: S3SyncResult = { synced: 0, skipped: 0, attachments_saved: 0, errors: [] };
 
@@ -181,7 +191,7 @@ export async function syncS3Inbox(opts: S3SyncOptions): Promise<S3SyncResult> {
       }));
 
       const stored = storeInboundEmail({
-        provider_id: opts.providerId ?? null,
+        provider_id: providerId,
         message_id: obj.key, // use S3 key as message ID for dedup
         in_reply_to_email_id: null,
         from_address: fromAddr,
