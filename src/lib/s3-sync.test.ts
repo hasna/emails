@@ -136,6 +136,31 @@ describe("syncS3Inbox — with objects", () => {
     expect(row.provider_id).toBe(providerId);
   });
 
+  it("syncs later-arriving objects whose key sorts BEFORE an already-synced key (regression: random SES keys)", async () => {
+    const { db, providerId } = setupDb();
+    // S3 already has a high-sorting key m-zzz (synced), and a lower-sorting
+    // m-aaa arrives later. A StartAfter cursor would skip m-aaa forever.
+    db.run(`INSERT INTO inbound_emails (id, provider_id, message_id, from_address, to_addresses, cc_addresses, subject, received_at) VALUES (?, ?, ?, 'x@y.com', '[]', '[]', 'old', datetime('now'))`,
+      [uuid(), providerId, "inbound/example.com/m-zzz"]);
+
+    mockSend.mockImplementation(async (cmd: unknown) => {
+      const c = cmd as { input?: Record<string, unknown> };
+      if (c?.input && "Prefix" in (c.input ?? {})) {
+        // Full listing returns BOTH keys, out of arrival order
+        return { Contents: [{ Key: "inbound/example.com/m-aaa", Size: 100 }, { Key: "inbound/example.com/m-zzz", Size: 100 }], IsTruncated: false };
+      }
+      if (c?.input && "Key" in (c.input ?? {})) {
+        return { Body: (async function* () { yield Buffer.from("From: a@b.com\r\nSubject: New\r\n\r\nB"); })() };
+      }
+      return {};
+    });
+
+    const result = await syncS3Inbox({ bucket: "test-bucket", db, providerId });
+    expect(result.synced).toBe(1); // m-aaa stored, m-zzz skipped (dedup)
+    const row = db.query("SELECT id FROM inbound_emails WHERE message_id = ?").get("inbound/example.com/m-aaa");
+    expect(row).not.toBeNull();
+  });
+
   it("throws a clear error for an unknown provider id", async () => {
     const { db } = setupDb();
     mockSend.mockImplementation(async () => ({ Contents: [], IsTruncated: false }));

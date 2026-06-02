@@ -77,9 +77,14 @@ async function listNewObjects(
   s3: S3Client,
   bucket: string,
   prefix: string,
-  lastKey: string | undefined,
+  _lastKey: string | undefined,
   limit: number,
 ): Promise<{ key: string; size: number; lastModified?: Date }[]> {
+  // NOTE: SES inbound stores objects under RANDOM keys, so a key-ordered cursor
+  // (StartAfter: lastKey) silently skips any later-arriving object whose key
+  // sorts before the last-synced key. We therefore paginate the FULL prefix and
+  // rely on dedup-by-key in syncS3Inbox for idempotency. `limit` caps how many
+  // objects we examine per run (callers raise it for large backlogs).
   const objects: { key: string; size: number; lastModified?: Date }[] = [];
   let continuationToken: string | undefined;
 
@@ -87,8 +92,7 @@ async function listNewObjects(
     const res = await s3.send(new ListObjectsV2Command({
       Bucket: bucket,
       Prefix: prefix,
-      StartAfter: lastKey, // only fetch objects after last synced key
-      MaxKeys: Math.min(limit - objects.length, 1000),
+      MaxKeys: 1000,
       ContinuationToken: continuationToken,
     }));
 
