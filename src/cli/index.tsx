@@ -21,6 +21,7 @@ import { registerSandboxCommands } from "./commands/sandbox.js";
 // inbound commands merged into inbox
 import { registerMiscCommands } from "./commands/misc.js";
 import { registerInboxCommands } from "./commands/inbox.js";
+import { registerProvisionCommands } from "./commands/provision.js";
 import { registerTriageCommands } from "./commands/triage.js";
 import { registerAwsCommands } from "./commands/aws.js";
 import { registerCloudCommands } from "./commands/cloud.js";
@@ -73,6 +74,7 @@ registerSandboxCommands(program, output);
 
 registerMiscCommands(program, output);
 registerInboxCommands(program, output);
+  registerProvisionCommands(program, output);
 registerTriageCommands(program, output);
 registerAwsCommands(program, output);
 registerCloudCommands(program, output);
