@@ -460,6 +460,45 @@ const MIGRATIONS = [
   CREATE INDEX IF NOT EXISTS idx_inbound_history ON inbound_emails(provider_history_id);
   INSERT OR IGNORE INTO _migrations (id) VALUES (18);
   `,
+
+  // Migration 19: automated provisioning — domain/address lifecycle fields +
+  // append-only provisioning_events audit. DNS is always Cloudflare.
+  `
+  ALTER TABLE domains ADD COLUMN provisioning_status TEXT NOT NULL DEFAULT 'none';
+  ALTER TABLE domains ADD COLUMN purchase_provider TEXT;
+  ALTER TABLE domains ADD COLUMN dns_provider TEXT NOT NULL DEFAULT 'cloudflare';
+  ALTER TABLE domains ADD COLUMN send_provider TEXT;
+  ALTER TABLE domains ADD COLUMN cf_zone_id TEXT;
+  ALTER TABLE domains ADD COLUMN registrar TEXT;
+  ALTER TABLE domains ADD COLUMN nameservers_json TEXT NOT NULL DEFAULT '[]';
+  ALTER TABLE domains ADD COLUMN mail_from_domain TEXT;
+  ALTER TABLE domains ADD COLUMN last_error TEXT;
+  ALTER TABLE domains ADD COLUMN next_check_at TEXT;
+
+  ALTER TABLE addresses ADD COLUMN domain_id TEXT;
+  ALTER TABLE addresses ADD COLUMN receive_strategy TEXT;
+  ALTER TABLE addresses ADD COLUMN forward_to TEXT;
+  ALTER TABLE addresses ADD COLUMN routing_rule_id TEXT;
+  ALTER TABLE addresses ADD COLUMN provisioning_status TEXT NOT NULL DEFAULT 'none';
+  ALTER TABLE addresses ADD COLUMN last_validated_at TEXT;
+  ALTER TABLE addresses ADD COLUMN last_error TEXT;
+  ALTER TABLE addresses ADD COLUMN next_check_at TEXT;
+
+  CREATE TABLE IF NOT EXISTS provisioning_events (
+    id TEXT PRIMARY KEY,
+    entity_type TEXT NOT NULL CHECK(entity_type IN ('domain','address')),
+    entity_id TEXT NOT NULL,
+    from_state TEXT,
+    to_state TEXT NOT NULL,
+    detail_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_provevents_entity ON provisioning_events(entity_type, entity_id);
+  CREATE INDEX IF NOT EXISTS idx_domains_provstatus ON domains(provisioning_status);
+  CREATE INDEX IF NOT EXISTS idx_addresses_provstatus ON addresses(provisioning_status);
+  CREATE INDEX IF NOT EXISTS idx_addresses_domain ON addresses(domain_id);
+  INSERT OR IGNORE INTO _migrations (id) VALUES (19);
+  `,
 ];
 
 let _db: Database | null = null;
@@ -516,6 +555,44 @@ function ensureSchema(db: Database): void {
   ensureColumn("ALTER TABLE providers ADD COLUMN oauth_refresh_token TEXT");
   ensureColumn("ALTER TABLE providers ADD COLUMN oauth_access_token TEXT");
   ensureColumn("ALTER TABLE providers ADD COLUMN oauth_token_expiry TEXT");
+
+  // Migration 19 (idempotent guarantee): provisioning fields for automated
+  // domain/address provisioning. ALTER ADD COLUMN has no IF NOT EXISTS, so these
+  // run individually and tolerate "duplicate column" on already-migrated DBs.
+  ensureColumn("ALTER TABLE domains ADD COLUMN provisioning_status TEXT NOT NULL DEFAULT 'none'");
+  ensureColumn("ALTER TABLE domains ADD COLUMN purchase_provider TEXT");
+  ensureColumn("ALTER TABLE domains ADD COLUMN dns_provider TEXT NOT NULL DEFAULT 'cloudflare'");
+  ensureColumn("ALTER TABLE domains ADD COLUMN send_provider TEXT");
+  ensureColumn("ALTER TABLE domains ADD COLUMN cf_zone_id TEXT");
+  ensureColumn("ALTER TABLE domains ADD COLUMN registrar TEXT");
+  ensureColumn("ALTER TABLE domains ADD COLUMN nameservers_json TEXT NOT NULL DEFAULT '[]'");
+  ensureColumn("ALTER TABLE domains ADD COLUMN mail_from_domain TEXT");
+  ensureColumn("ALTER TABLE domains ADD COLUMN last_error TEXT");
+  ensureColumn("ALTER TABLE domains ADD COLUMN next_check_at TEXT");
+
+  ensureColumn("ALTER TABLE addresses ADD COLUMN domain_id TEXT");
+  ensureColumn("ALTER TABLE addresses ADD COLUMN receive_strategy TEXT");
+  ensureColumn("ALTER TABLE addresses ADD COLUMN forward_to TEXT");
+  ensureColumn("ALTER TABLE addresses ADD COLUMN routing_rule_id TEXT");
+  ensureColumn("ALTER TABLE addresses ADD COLUMN provisioning_status TEXT NOT NULL DEFAULT 'none'");
+  ensureColumn("ALTER TABLE addresses ADD COLUMN last_validated_at TEXT");
+  ensureColumn("ALTER TABLE addresses ADD COLUMN last_error TEXT");
+  ensureColumn("ALTER TABLE addresses ADD COLUMN next_check_at TEXT");
+
+  const ensureProvTable = (sql: string) => { try { db.exec(sql); } catch {} };
+  ensureProvTable(`CREATE TABLE IF NOT EXISTS provisioning_events (
+    id TEXT PRIMARY KEY,
+    entity_type TEXT NOT NULL,
+    entity_id TEXT NOT NULL,
+    from_state TEXT,
+    to_state TEXT NOT NULL,
+    detail_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+  ensureProvTable("CREATE INDEX IF NOT EXISTS idx_provevents_entity ON provisioning_events(entity_type, entity_id)");
+  ensureProvTable("CREATE INDEX IF NOT EXISTS idx_domains_provstatus ON domains(provisioning_status)");
+  ensureProvTable("CREATE INDEX IF NOT EXISTS idx_addresses_provstatus ON addresses(provisioning_status)");
+  ensureProvTable("CREATE INDEX IF NOT EXISTS idx_addresses_domain ON addresses(domain_id)");
 
   const ensureIndex = (sql: string) => {
     try { db.exec(sql); } catch {}

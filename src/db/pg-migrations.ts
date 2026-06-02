@@ -385,6 +385,44 @@ export const PG_MIGRATIONS: string[] = [
   INSERT INTO _migrations (id) VALUES (18) ON CONFLICT DO NOTHING;
   `,
 
+  // Migration 19: automated provisioning — domain/address lifecycle + audit.
+  `
+  ALTER TABLE domains ADD COLUMN IF NOT EXISTS provisioning_status TEXT NOT NULL DEFAULT 'none';
+  ALTER TABLE domains ADD COLUMN IF NOT EXISTS purchase_provider TEXT;
+  ALTER TABLE domains ADD COLUMN IF NOT EXISTS dns_provider TEXT NOT NULL DEFAULT 'cloudflare';
+  ALTER TABLE domains ADD COLUMN IF NOT EXISTS send_provider TEXT;
+  ALTER TABLE domains ADD COLUMN IF NOT EXISTS cf_zone_id TEXT;
+  ALTER TABLE domains ADD COLUMN IF NOT EXISTS registrar TEXT;
+  ALTER TABLE domains ADD COLUMN IF NOT EXISTS nameservers_json TEXT NOT NULL DEFAULT '[]';
+  ALTER TABLE domains ADD COLUMN IF NOT EXISTS mail_from_domain TEXT;
+  ALTER TABLE domains ADD COLUMN IF NOT EXISTS last_error TEXT;
+  ALTER TABLE domains ADD COLUMN IF NOT EXISTS next_check_at TEXT;
+
+  ALTER TABLE addresses ADD COLUMN IF NOT EXISTS domain_id TEXT;
+  ALTER TABLE addresses ADD COLUMN IF NOT EXISTS receive_strategy TEXT;
+  ALTER TABLE addresses ADD COLUMN IF NOT EXISTS forward_to TEXT;
+  ALTER TABLE addresses ADD COLUMN IF NOT EXISTS routing_rule_id TEXT;
+  ALTER TABLE addresses ADD COLUMN IF NOT EXISTS provisioning_status TEXT NOT NULL DEFAULT 'none';
+  ALTER TABLE addresses ADD COLUMN IF NOT EXISTS last_validated_at TEXT;
+  ALTER TABLE addresses ADD COLUMN IF NOT EXISTS last_error TEXT;
+  ALTER TABLE addresses ADD COLUMN IF NOT EXISTS next_check_at TEXT;
+
+  CREATE TABLE IF NOT EXISTS provisioning_events (
+    id TEXT PRIMARY KEY,
+    entity_type TEXT NOT NULL,
+    entity_id TEXT NOT NULL,
+    from_state TEXT,
+    to_state TEXT NOT NULL,
+    detail_json TEXT NOT NULL DEFAULT '{}',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+  CREATE INDEX IF NOT EXISTS idx_provevents_entity ON provisioning_events(entity_type, entity_id);
+  CREATE INDEX IF NOT EXISTS idx_domains_provstatus ON domains(provisioning_status);
+  CREATE INDEX IF NOT EXISTS idx_addresses_provstatus ON addresses(provisioning_status);
+  CREATE INDEX IF NOT EXISTS idx_addresses_domain ON addresses(domain_id);
+  INSERT INTO _migrations (id) VALUES (19) ON CONFLICT DO NOTHING;
+  `,
+
   // Feedback table
   `
   CREATE TABLE IF NOT EXISTS feedback (
