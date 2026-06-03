@@ -552,6 +552,96 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
       } catch (e) { handleError(e); }
     });
 
+  // ─── REAL-TIME INBOUND ────────────────────────────────────────────────────
+  inboxCmd
+    .command("setup-realtime <domain>")
+    .description("Wire SES→SNS→SQS so inbound mail auto-syncs (no manual sync-s3)")
+    .option("--rule-set <name>", "SES receipt rule set name", "emails-inbound")
+    .option("--rule <name>", "SES receipt rule name (defaults to inbound-<domain>)")
+    .option("--region <region>", "AWS region (defaults to config inbound_s3_region)")
+    .option("--profile <profile>", "AWS profile")
+    .action(async (domain: string, opts: { ruleSet: string; rule?: string; region?: string; profile?: string }) => {
+      try {
+        const { getInboundConfig, loadConfig, saveConfig } = await import("../../lib/config.js");
+        const inbound = getInboundConfig();
+        const profile = opts.profile ?? inbound.profile;
+        if (profile) process.env["AWS_PROFILE"] = profile;
+        const { setupRealtimeInbound } = await import("../../lib/inbound-realtime-aws.js");
+        const ruleName = opts.rule ?? `inbound-${domain.replace(/\./g, "-")}`;
+        console.log(chalk.dim(`Wiring real-time inbound for ${domain} (rule ${opts.ruleSet}/${ruleName})...`));
+        const result = await setupRealtimeInbound({
+          domain,
+          ruleSetName: opts.ruleSet,
+          ruleName,
+          region: opts.region ?? inbound.region,
+        });
+        // Persist the queue URL so `inbox watch` can find it with no args.
+        const config = loadConfig();
+        config["inbound_realtime_queue_url"] = result.queue_url;
+        config["inbound_realtime_topic_arn"] = result.topic_arn;
+        saveConfig(config);
+        const lines = [chalk.bold("\n✓ Real-time inbound wired:")];
+        lines.push(`  SNS topic:  ${chalk.cyan(result.topic_arn)}`);
+        lines.push(`  SQS queue:  ${chalk.cyan(result.queue_url)}`);
+        lines.push(`  SES rule:   ${result.rule_updated ? chalk.green("updated (TopicArn attached)") : chalk.yellow("not updated — attach TopicArn manually")}`);
+        lines.push(chalk.dim("\n  Now run:  emails inbox watch"));
+        output(result, lines.join("\n"));
+      } catch (e) { handleError(e); }
+    });
+
+  inboxCmd
+    .command("watch")
+    .description("Watch the SQS queue and auto-sync inbound mail in real-time (no manual sync-s3)")
+    .option("--queue-url <url>", "SQS queue URL (defaults to config inbound_realtime_queue_url)")
+    .option("--bucket <name>", "S3 bucket (defaults to config inbound_s3_bucket)")
+    .option("--prefix <prefix>", "S3 key prefix to sync")
+    .option("--region <region>", "AWS region")
+    .option("--provider <id>", "Associate emails with this provider ID")
+    .option("--profile <profile>", "AWS profile")
+    .option("--once", "Poll a single time then exit (for testing)")
+    .action(async (opts: { queueUrl?: string; bucket?: string; prefix?: string; region?: string; provider?: string; profile?: string; once?: boolean }) => {
+      try {
+        const { getInboundConfig, loadConfig } = await import("../../lib/config.js");
+        const inbound = getInboundConfig();
+        const config = loadConfig();
+        const profile = opts.profile ?? inbound.profile;
+        if (profile) process.env["AWS_PROFILE"] = profile;
+        const queueUrl = opts.queueUrl ?? (config["inbound_realtime_queue_url"] as string | undefined);
+        const bucket = opts.bucket ?? inbound.bucket;
+        const region = opts.region ?? inbound.region;
+        const prefix = opts.prefix ?? inbound.prefix;
+        if (!queueUrl) { handleError(new Error("No SQS queue: run 'emails inbox setup-realtime <domain>' first or pass --queue-url")); return; }
+        if (!bucket) { handleError(new Error("No S3 bucket: pass --bucket or set inbound_s3_bucket")); return; }
+
+        const { makeSqsAdapter } = await import("../../lib/inbound-realtime-aws.js");
+        const { watchInboundOnce } = await import("../../lib/inbound-realtime.js");
+        const { syncS3Inbox } = await import("../../lib/s3-sync.js");
+        const sqs = makeSqsAdapter({ queueUrl, region });
+        const sync = async () => {
+          const r = await syncS3Inbox({ bucket, prefix, region, providerId: opts.provider, limit: 100 });
+          if (r.synced > 0) console.log(chalk.green(`  ✓ ${r.synced} new email(s) delivered`) + chalk.dim(` (${r.skipped} already stored)`));
+        };
+
+        if (opts.once) {
+          const r = await watchInboundOnce(sqs, queueUrl, sync);
+          output(r, r.triggered ? chalk.green(`✓ Processed ${r.messages} notification(s)`) : chalk.dim("No new mail."));
+          return;
+        }
+
+        console.log(chalk.green(`👀 Watching for inbound mail on ${queueUrl.split("/").pop()}`));
+        console.log(chalk.dim("   Press Ctrl+C to stop\n"));
+        // eslint-disable-next-line no-constant-condition
+        while (true) {
+          try {
+            await watchInboundOnce(sqs, queueUrl, sync);
+          } catch (e) {
+            console.error(chalk.yellow(`  poll error: ${e instanceof Error ? e.message : String(e)}`));
+            await new Promise((r) => setTimeout(r, 3000));
+          }
+        }
+      } catch (e) { handleError(e); }
+    });
+
   inboxCmd
     .command("archive-verify")
     .description("Verify a Gmail message archive in S3")
