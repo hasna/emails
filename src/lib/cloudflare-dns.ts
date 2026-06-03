@@ -1,7 +1,7 @@
 /**
  * Cloudflare DNS setup helper for email domain verification.
  *
- * Uses the @hasna/connectors SDK to automatically create the DNS records
+ * Uses a DIRECT Cloudflare REST client (no @hasna/connectors) to create the DNS records
  * required for email sending (SES/Resend) in a Cloudflare-managed zone.
  *
  * Records created:
@@ -11,16 +11,12 @@
  *   - MX          (optional, for receiving email)
  */
 
-import { runConnectorOperation } from "@hasna/connectors";
 import type { DnsRecord } from "../types/index.js";
 import type { Provider } from "../types/index.js";
 import { getAdapter } from "../providers/index.js";
 import { getCloudflareToken, getCloudflareAuth } from "./config.js";
-import {
-  type CloudflareAuth,
-  cloudflareAuthEnv,
-  resolveCloudflareAuth,
-} from "./cloudflare-auth.js";
+import { resolveCloudflareAuth } from "./cloudflare-auth.js";
+import { DirectCloudflareClient } from "./cloudflare-dns-rest.js";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -74,126 +70,16 @@ export interface CloudflareDnsClient {
 
 // ─── Cloudflare factory ───────────────────────────────────────────────────────
 
-class ConnectorsCloudflareClient implements CloudflareDnsClient {
-  private readonly auth?: CloudflareAuth;
-
-  constructor(auth?: CloudflareAuth | string) {
-    // Back-compat: a bare string is treated as a scoped token.
-    if (typeof auth === "string") this.auth = { kind: "token", token: auth };
-    else this.auth = auth;
-  }
-
-  async listZones(params?: { name?: string; page?: number; perPage?: number }): Promise<CloudflareZone[]> {
-    const data = await this.run<unknown>("zones.list", {
-      name: params?.name,
-      page: params?.page,
-      perPage: params?.perPage,
-    });
-    return unwrapList<CloudflareZone>(data);
-  }
-
-  async listDnsRecords(
-    zoneId: string,
-    params?: { type?: string; name?: string; page?: number; perPage?: number },
-  ): Promise<CloudflareDnsRecord[]> {
-    const data = await this.run<unknown>("dns.list", {
-      args: [zoneId],
-      type: params?.type,
-      name: params?.name,
-      page: params?.page,
-      perPage: params?.perPage,
-    });
-    return unwrapList<CloudflareDnsRecord>(data);
-  }
-
-  async createDnsRecord(
-    zoneId: string,
-    params: {
-      type: "TXT" | "CNAME" | "MX";
-      name: string;
-      content: string;
-      ttl?: number;
-      proxied?: boolean;
-      priority?: number;
-    },
-  ): Promise<CloudflareDnsRecord> {
-    const data = await this.run<unknown>("dns.create", {
-      args: [zoneId],
-      type: params.type,
-      name: params.name,
-      content: params.content,
-      ttl: params.ttl,
-      proxied: params.proxied,
-      priority: params.priority,
-    });
-    return unwrapRecord(data);
-  }
-
-  private async run<T>(operation: string, input: Record<string, unknown>): Promise<T> {
-    // Inject the auth env vars the Cloudflare connector expects (token or
-    // global key + email), restoring any previous values afterwards.
-    const injected = this.auth ? cloudflareAuthEnv(this.auth) : {};
-    const previous: Record<string, string | undefined> = {};
-    for (const [key, value] of Object.entries(injected)) {
-      previous[key] = process.env[key];
-      process.env[key] = value;
-    }
-    try {
-      const result = await runConnectorOperation<T>({
-        connector: "cloudflare",
-        operation,
-        input,
-      });
-      if (!result.success) {
-        throw new Error(result.stderr || result.stdout || `Cloudflare ${operation} failed`);
-      }
-      return result.data as T;
-    } finally {
-      for (const key of Object.keys(injected)) {
-        if (previous[key] === undefined) delete process.env[key];
-        else process.env[key] = previous[key]!;
-      }
-    }
-  }
-}
-
-function unwrapList<T>(data: unknown): T[] {
-  if (Array.isArray(data)) return data as T[];
-  if (data && typeof data === "object") {
-    const envelope = data as Record<string, unknown>;
-    for (const key of ["result", "results", "records", "zones", "data"]) {
-      const value = envelope[key];
-      if (Array.isArray(value)) return value as T[];
-    }
-  }
-  return [];
-}
-
-function unwrapRecord(data: unknown): CloudflareDnsRecord {
-  if (data && typeof data === "object" && !Array.isArray(data)) {
-    const envelope = data as Record<string, unknown>;
-    if (envelope["result"] && typeof envelope["result"] === "object") {
-      return envelope["result"] as CloudflareDnsRecord;
-    }
-    if (envelope["record"] && typeof envelope["record"] === "object") {
-      return envelope["record"] as CloudflareDnsRecord;
-    }
-    return envelope as unknown as CloudflareDnsRecord;
-  }
-  throw new Error("Cloudflare DNS create returned an invalid response");
-}
-
 /**
- * Create a Cloudflare instance from an explicit token, config file, or env var.
+ * Create a Cloudflare DNS client. Uses the DIRECT Cloudflare REST client (plain
+ * fetch + our own auth headers) — NOT @hasna/connectors — so provisioning never
+ * shells out to a connector CLI or depends on the connectors package/source.
  */
 export function getCloudflare(apiToken?: string): CloudflareDnsClient {
-  // Explicit token wins (back-compat). Otherwise resolve full auth — scoped
-  // token OR global key + email — from config + env + vault names.
-  if (apiToken) return new ConnectorsCloudflareClient(apiToken);
+  if (apiToken) return new DirectCloudflareClient({ auth: apiToken });
   const auth = getCloudflareAuth() ?? resolveCloudflareAuth();
-  // Last-ditch back-compat: a bare configured token via the old accessor.
-  if (!auth) return new ConnectorsCloudflareClient(getCloudflareToken());
-  return new ConnectorsCloudflareClient(auth);
+  const token = getCloudflareToken();
+  return new DirectCloudflareClient({ auth: auth ?? (token ? { kind: "token", token } : undefined) });
 }
 
 // ─── Zone lookup ──────────────────────────────────────────────────────────────
