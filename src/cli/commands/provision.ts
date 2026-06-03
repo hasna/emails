@@ -139,7 +139,9 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
     .option("--count <n>", "Round-trip messages per pair (0 = skip test)", "1")
     .option("--timeout <sec>", "Max seconds to wait for SES verification", "600")
     .option("--no-test", "Skip the final round-trip test")
-    .action(async (domain: string, opts: { provider: string; addresses: string; bucket?: string; addMx?: boolean; count: string; timeout: string; test?: boolean }) => {
+    .option("--buy-if-needed", "Buy + delegate the domain first (via @hasna/domains SDK) if not already owned")
+    .option("--purchase-profile <profile>", "AWS profile for the purchase (default: hasna-xyz-infra)")
+    .action(async (domain: string, opts: { provider: string; addresses: string; bucket?: string; addMx?: boolean; count: string; timeout: string; test?: boolean; buyIfNeeded?: boolean; purchaseProfile?: string }) => {
       try {
         const db = getDatabase();
         const providerId = resolveId("providers", opts.provider);
@@ -148,12 +150,46 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
         const { getInboundConfig } = await import("../../lib/config.js");
         const cfg = getInboundConfig();
         const bucket = opts.bucket ?? cfg.bucket;
-        if (cfg.profile) process.env["AWS_PROFILE"] = cfg.profile;
         if (!bucket) return handleError(new Error("No inbound bucket: pass --bucket or set inbound_s3_bucket"));
 
         const adapter = getAdapter(provider!);
         const rec = getDomainByName(providerId, domain, db) ?? createDomain(providerId, domain, db);
         const step = (n: string) => console.log(chalk.cyan(`▸ ${n}`));
+
+        // ── Buy + delegate first (in-process @hasna/domains SDK) ──────────────
+        if (opts.buyIfNeeded) {
+          step("Buy + delegate domain (Route53 → Cloudflare)");
+          const dom = await import("@hasna/domains");
+          // Purchase runs in the purchase account; restore the SES profile after.
+          const purchaseProfile = opts.purchaseProfile ?? "hasna-xyz-infra";
+          const prevProfile = process.env["AWS_PROFILE"];
+          process.env["AWS_PROFILE"] = purchaseProfile;
+          try {
+            const avail = await (dom as any).r53CheckAvailability(domain);
+            if (avail.available) {
+              const { readFileSync } = await import("node:fs");
+              const { homedir } = await import("node:os");
+              const contact = JSON.parse(readFileSync(`${homedir()}/.hasna/domains/config.json`, "utf-8")).contact;
+              if (!contact?.first_name) throw new Error("No registrant contact configured (domains config set contact.*)");
+              const reg = await (dom as any).r53RegisterDomain(domain, contact, 1);
+              console.log(chalk.dim(`  registering ${domain} (op ${reg.operationId})...`));
+              const res = await (dom as any).pollRegistrationUntilDone(reg.operationId, { getStatus: (id: string) => (dom as any).r53GetRegistrationStatus(id) });
+              if (res.status !== "success") throw new Error(`registration ${res.status}`);
+              console.log(chalk.dim("  registered ✓"));
+            } else {
+              console.log(chalk.dim(`  ${domain} not available to register — assuming already owned`));
+            }
+            const zone = await (dom as any).cfEnsureZone(domain);
+            await (dom as any).r53UpdateNameservers(domain, zone.nameservers);
+            console.log(chalk.dim(`  Cloudflare zone ${zone.id}; nameservers → ${zone.nameservers.join(", ")}`));
+            setDomainProvisioning(rec.id, { provisioning_status: "ns_delegated", purchase_provider: "route53", cf_zone_id: zone.id, nameservers: zone.nameservers }, db);
+          } finally {
+            if (prevProfile === undefined) delete process.env["AWS_PROFILE"]; else process.env["AWS_PROFILE"] = prevProfile;
+          }
+        }
+
+        // SES + inbound run in the SES account.
+        if (cfg.profile) process.env["AWS_PROFILE"] = cfg.profile;
 
         step("SES identity + MAIL FROM");
         await adapter.addDomain(domain);
