@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { createDomain, listDomains, deleteDomain, getDomain, updateDnsStatus } from '../../db/domains.js';
 import { createAddress, listAddresses, deleteAddress, getAddress } from '../../db/addresses.js';
+import { suspendAddress, activateAddress, setAddressQuota } from '../../db/address-lifecycle.js';
 import { getProvider } from '../../db/providers.js';
 import { getDatabase } from '../../db/database.js';
 import { getAdapter } from '../../providers/index.js';
@@ -228,6 +229,61 @@ export function registerDomainTools(server: McpServer): void {
       if (!addr) throw new AddressNotFoundError(id);
       deleteAddress(id);
       return { content: [{ type: "text", text: `Address removed: ${addr.email}` }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+    }
+  },
+  );
+
+  server.tool(
+  "suspend_address",
+  "Suspend a sender address (blocks sending until reactivated)",
+  {
+    address_id: z.string().describe("Address ID (or prefix)"),
+  },
+  async ({ address_id }) => {
+    try {
+      const id = resolveId("addresses", address_id);
+      if (!getAddress(id)) throw new AddressNotFoundError(id);
+      const addr = suspendAddress(id);
+      return { content: [{ type: "text", text: JSON.stringify(addr, null, 2) }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+    }
+  },
+  );
+
+  server.tool(
+  "activate_address",
+  "Reactivate a suspended sender address",
+  {
+    address_id: z.string().describe("Address ID (or prefix)"),
+  },
+  async ({ address_id }) => {
+    try {
+      const id = resolveId("addresses", address_id);
+      if (!getAddress(id)) throw new AddressNotFoundError(id);
+      const addr = activateAddress(id);
+      return { content: [{ type: "text", text: JSON.stringify(addr, null, 2) }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+    }
+  },
+  );
+
+  server.tool(
+  "set_address_quota",
+  "Set (or clear) the daily send quota for a sender address",
+  {
+    address_id: z.string().describe("Address ID (or prefix)"),
+    per_day: z.number().int().nonnegative().nullable().describe("Max sends per UTC day, or null to clear"),
+  },
+  async ({ address_id, per_day }) => {
+    try {
+      const id = resolveId("addresses", address_id);
+      if (!getAddress(id)) throw new AddressNotFoundError(id);
+      const addr = setAddressQuota(id, per_day ?? null);
+      return { content: [{ type: "text", text: JSON.stringify(addr, null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
     }

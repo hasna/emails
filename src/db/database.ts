@@ -532,6 +532,14 @@ const MIGRATIONS = [
   CREATE INDEX IF NOT EXISTS idx_inbound_threadid ON inbound_emails(thread_id);
   INSERT OR IGNORE INTO _migrations (id) VALUES (21);
   `,
+
+  // Migration 22: address lifecycle — status + per-address daily send quota.
+  `
+  ALTER TABLE addresses ADD COLUMN status TEXT NOT NULL DEFAULT 'active';
+  ALTER TABLE addresses ADD COLUMN daily_quota INTEGER;
+  CREATE INDEX IF NOT EXISTS idx_addresses_status ON addresses(status);
+  INSERT OR IGNORE INTO _migrations (id) VALUES (22);
+  `,
 ];
 
 let _db: Database | null = null;

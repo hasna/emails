@@ -82,6 +82,10 @@ export interface DnsRecord {
   purpose: "DKIM" | "SPF" | "DMARC" | "MX";
 }
 
+// Address lifecycle status. `active` can send/receive; `suspended` is blocked
+// from sending (and excluded from delivery) but retained.
+export type AddressStatus = "active" | "suspended";
+
 // Email address (sender identity)
 export interface EmailAddress {
   id: string;
@@ -89,6 +93,8 @@ export interface EmailAddress {
   email: string;
   display_name: string | null;
   verified: boolean;
+  status: AddressStatus;
+  daily_quota: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -99,6 +105,8 @@ export interface AddressRow {
   email: string;
   display_name: string | null;
   verified: number;
+  status: AddressStatus | null;
+  daily_quota: number | null;
   created_at: string;
   updated_at: string;
 }

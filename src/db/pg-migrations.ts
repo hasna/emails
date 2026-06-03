@@ -455,6 +455,14 @@ export const PG_MIGRATIONS: string[] = [
   CREATE INDEX IF NOT EXISTS idx_inbound_threadid ON inbound_emails(thread_id);
   INSERT INTO _migrations (id) VALUES (21) ON CONFLICT DO NOTHING;
   `,
+  // Migration 22: address lifecycle.
+  `
+  ALTER TABLE addresses ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active';
+  ALTER TABLE addresses ADD COLUMN IF NOT EXISTS daily_quota INTEGER;
+  CREATE INDEX IF NOT EXISTS idx_addresses_status ON addresses(status);
+  INSERT INTO _migrations (id) VALUES (22) ON CONFLICT DO NOTHING;
+  `,
+
 
   // Feedback table
   `

@@ -1,6 +1,7 @@
 import type { Command } from "commander";
 import chalk from "chalk";
 import { createAddress, listAddresses, deleteAddress, getAddress } from "../../db/addresses.js";
+import { suspendAddress, activateAddress, setAddressQuota, countSendsToday } from "../../db/address-lifecycle.js";
 import { getProvider } from "../../db/providers.js";
 import { getDatabase } from "../../db/database.js";
 import { getAdapter } from "../../providers/index.js";
@@ -47,7 +48,9 @@ export function registerAddressCommands(program: Command, output: (data: unknown
         for (const a of addresses) {
           const verified = a.verified ? colorDnsStatus("verified") : colorDnsStatus("pending");
           const name = a.display_name ? ` (${a.display_name})` : "";
-          lines.push(`  ${chalk.cyan(a.id.slice(0, 8))}  ${a.email}${name}  [${verified}]`);
+          const status = a.status === "suspended" ? chalk.red("suspended") : chalk.green("active");
+          const quota = a.daily_quota !== null ? chalk.dim(`  quota ${countSendsToday(a.email)}/${a.daily_quota}/day`) : "";
+          lines.push(`  ${chalk.cyan(a.id.slice(0, 8))}  ${a.email}${name}  [${verified}] [${status}]${quota}`);
         }
         lines.push("");
         output(addresses, lines.join("\n"));
@@ -97,6 +100,54 @@ export function registerAddressCommands(program: Command, output: (data: unknown
         await confirmDestructiveAction(`Remove sender address ${addr.email}?`, opts.yes);
         deleteAddress(resolvedId);
         console.log(chalk.green(`✓ Address removed: ${addr.email}`));
+      } catch (e) {
+        handleError(e);
+      }
+    });
+
+  addressCmd
+    .command("suspend <id>")
+    .description("Suspend a sender address (blocks sending until reactivated)")
+    .action((id: string) => {
+      try {
+        const resolvedId = resolveId("addresses", id);
+        if (!getAddress(resolvedId)) handleError(new Error(`Address not found: ${id}`));
+        const a = suspendAddress(resolvedId);
+        output(a, chalk.yellow(`⏸ Suspended ${a.email} — sending blocked`));
+      } catch (e) {
+        handleError(e);
+      }
+    });
+
+  addressCmd
+    .command("activate <id>")
+    .description("Reactivate a suspended sender address")
+    .action((id: string) => {
+      try {
+        const resolvedId = resolveId("addresses", id);
+        if (!getAddress(resolvedId)) handleError(new Error(`Address not found: ${id}`));
+        const a = activateAddress(resolvedId);
+        output(a, chalk.green(`✓ Activated ${a.email} — sending allowed`));
+      } catch (e) {
+        handleError(e);
+      }
+    });
+
+  addressCmd
+    .command("quota <id> <perDay>")
+    .description("Set a daily send quota for an address (use 'none' to clear)")
+    .action((id: string, perDay: string) => {
+      try {
+        const resolvedId = resolveId("addresses", id);
+        if (!getAddress(resolvedId)) handleError(new Error(`Address not found: ${id}`));
+        const quota = /^(none|null|unlimited|0?)$/i.test(perDay) && perDay !== "0"
+          ? null
+          : Number.parseInt(perDay, 10);
+        if (quota !== null && Number.isNaN(quota)) handleError(new Error(`Invalid quota: ${perDay}`));
+        const a = setAddressQuota(resolvedId, quota);
+        output(a, a.daily_quota === null
+          ? chalk.green(`✓ Cleared daily quota for ${a.email}`)
+          : chalk.green(`✓ Daily quota for ${a.email}: ${a.daily_quota}/day`));
       } catch (e) {
         handleError(e);
       }

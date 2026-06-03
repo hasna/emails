@@ -1,0 +1,92 @@
+import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { closeDatabase, resetDatabase, getDatabase, uuid, now } from "./database.js";
+import { createProvider } from "./providers.js";
+import { createAddress, getAddress } from "./addresses.js";
+import {
+  suspendAddress, activateAddress, setAddressQuota,
+  getAddressSendability, countSendsToday,
+} from "./address-lifecycle.js";
+
+let providerId: string;
+beforeEach(() => {
+  process.env["EMAILS_DB_PATH"] = ":memory:";
+  resetDatabase();
+  providerId = createProvider({ name: "ses", type: "ses" }).id;
+});
+afterEach(() => { closeDatabase(); delete process.env["EMAILS_DB_PATH"]; });
+
+function seedSend(from: string, at: string): void {
+  const d = getDatabase();
+  d.run(
+    `INSERT INTO emails (id, provider_id, from_address, subject, status, sent_at, created_at, updated_at)
+     VALUES (?, ?, ?, ?, 'sent', ?, ?, ?)`,
+    [uuid(), providerId, from, "hi", at, at, at],
+  );
+}
+
+describe("address lifecycle — suspend / activate", () => {
+  it("new addresses default to active", () => {
+    const a = createAddress({ provider_id: providerId, email: "a@x.com" });
+    expect(getAddress(a.id)!.status).toBe("active");
+  });
+
+  it("suspends and reactivates an address", () => {
+    const a = createAddress({ provider_id: providerId, email: "a@x.com" });
+    expect(suspendAddress(a.id).status).toBe("suspended");
+    expect(getAddress(a.id)!.status).toBe("suspended");
+    expect(activateAddress(a.id).status).toBe("active");
+  });
+
+  it("throws on unknown address", () => {
+    expect(() => suspendAddress("nope")).toThrow();
+  });
+});
+
+describe("address lifecycle — quota", () => {
+  it("stores and clears a daily quota", () => {
+    const a = createAddress({ provider_id: providerId, email: "a@x.com" });
+    expect(setAddressQuota(a.id, 50).daily_quota).toBe(50);
+    expect(setAddressQuota(a.id, null).daily_quota).toBeNull();
+  });
+
+  it("rejects a negative quota", () => {
+    const a = createAddress({ provider_id: providerId, email: "a@x.com" });
+    expect(() => setAddressQuota(a.id, -1)).toThrow();
+  });
+});
+
+describe("address lifecycle — sendability", () => {
+  it("active, no quota → sendable", () => {
+    const a = createAddress({ provider_id: providerId, email: "a@x.com" });
+    expect(getAddressSendability("a@x.com").sendable).toBe(true);
+  });
+
+  it("unknown address → sendable (no registered restriction)", () => {
+    expect(getAddressSendability("ghost@x.com").sendable).toBe(true);
+  });
+
+  it("suspended → not sendable", () => {
+    const a = createAddress({ provider_id: providerId, email: "a@x.com" });
+    suspendAddress(a.id);
+    const s = getAddressSendability("a@x.com");
+    expect(s.sendable).toBe(false);
+    expect(s.reason).toMatch(/suspend/i);
+  });
+
+  it("over daily quota → not sendable; under → sendable", () => {
+    const a = createAddress({ provider_id: providerId, email: "a@x.com" });
+    setAddressQuota(a.id, 2);
+    const today = now();
+    seedSend("a@x.com", today);
+    expect(getAddressSendability("a@x.com").sendable).toBe(true); // 1 < 2
+    seedSend("a@x.com", today);
+    const s = getAddressSendability("a@x.com");
+    expect(s.sendable).toBe(false); // 2 >= 2
+    expect(s.reason).toMatch(/quota/i);
+  });
+
+  it("countSendsToday ignores yesterday's sends", () => {
+    seedSend("a@x.com", "2020-01-01T10:00:00.000Z");
+    expect(countSendsToday("a@x.com")).toBe(0);
+  });
+});

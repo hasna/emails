@@ -1,6 +1,7 @@
 import { getProvider } from "../db/providers.js";
 import { getAdapter } from "../providers/index.js";
 import { getFailoverProviderIds } from "./config.js";
+import { getAddressSendability } from "../db/address-lifecycle.js";
 import type { SendEmailOptions } from "../types/index.js";
 import type { Database } from "../db/database.js";
 
@@ -20,6 +21,14 @@ export async function sendWithFailover(
   opts: SendEmailOptions,
   db?: Database,
 ): Promise<SendResult> {
+  // Lifecycle guard: a suspended or over-quota sender address is blocked before
+  // any provider is touched.
+  if (opts.from) {
+    const senderEmail = opts.from.match(/<([^>]+)>/)?.[1] ?? opts.from;
+    const s = getAddressSendability(senderEmail, db);
+    if (!s.sendable) throw new Error(`Send blocked: ${s.reason}`);
+  }
+
   const providerIds = [primaryProviderId, ...getFailoverProviderIds()];
   const errors: string[] = [];
 

@@ -7,6 +7,8 @@ function rowToAddress(row: AddressRow): EmailAddress {
   return {
     ...row,
     verified: !!row.verified,
+    status: row.status ?? "active",
+    daily_quota: row.daily_quota ?? null,
   };
 }
 
