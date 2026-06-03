@@ -506,6 +506,14 @@ export const PG_MIGRATIONS: string[] = [
   INSERT INTO _migrations (id) VALUES (25) ON CONFLICT DO NOTHING;
   `,
 
+  // Migration 26: composite mailbox-list indexes (see SQLite migration 26).
+  `
+  CREATE INDEX IF NOT EXISTS idx_inbound_arch_recv ON inbound_emails(is_archived, received_at);
+  CREATE INDEX IF NOT EXISTS idx_inbound_read_arch_recv ON inbound_emails(is_read, is_archived, received_at);
+  CREATE INDEX IF NOT EXISTS idx_inbound_star_arch_recv ON inbound_emails(is_starred, is_archived, received_at);
+  INSERT INTO _migrations (id) VALUES (26) ON CONFLICT DO NOTHING;
+  `,
+
 
   // Feedback table
   `

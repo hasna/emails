@@ -9,10 +9,10 @@
 import type { Database } from "../../db/database.js";
 import { getDatabase } from "../../db/database.js";
 import {
-  listInboundEmails, getInboundEmail, getUnreadCount,
+  getInboundEmail, getUnreadCount,
   setInboundRead, setInboundArchived, setInboundStarred,
 } from "../../db/inbound.js";
-import { listEmails, getEmail, createEmail } from "../../db/emails.js";
+import { getEmail, createEmail } from "../../db/emails.js";
 import { getEmailContent, storeEmailContent } from "../../db/email-content.js";
 import { getThreadMessages } from "../../db/threads.js";
 import { listProviders } from "../../db/providers.js";
@@ -45,48 +45,54 @@ function snippetOf(text: string | null | undefined): string {
   return text.replace(/\s+/g, " ").trim().slice(0, 100);
 }
 
-function inboundToMessage(e: ReturnType<typeof getInboundEmail> & object): TuiMessage {
+interface LiteRow {
+  id: string; from_address: string; to_addresses: string; subject: string; date: string;
+  is_read?: number; is_starred?: number; label_ids_json?: string | null; thread_id?: string | null; snippet?: string | null;
+}
+
+function liteToMessage(r: LiteRow, kind: "inbound" | "sent"): TuiMessage {
+  let labels: string[] = [];
+  try { const v = JSON.parse(r.label_ids_json ?? "[]"); if (Array.isArray(v)) labels = v as string[]; } catch { /* ignore */ }
+  let to = r.to_addresses;
+  try { const v = JSON.parse(r.to_addresses); if (Array.isArray(v)) to = v.join(", "); } catch { /* already a string */ }
   return {
-    kind: "inbound",
-    id: e.id,
-    from: e.from_address,
-    to: e.to_addresses.join(", "),
-    subject: e.subject || "(no subject)",
-    date: e.received_at,
-    is_read: e.is_read,
-    is_starred: e.is_starred,
-    labels: e.label_ids,
-    snippet: snippetOf(e.text_body),
-    thread_id: e.thread_id,
+    kind, id: r.id, from: r.from_address, to,
+    subject: r.subject || "(no subject)", date: r.date,
+    is_read: kind === "sent" ? true : !!r.is_read,
+    is_starred: !!r.is_starred,
+    labels, snippet: snippetOf(r.snippet), thread_id: r.thread_id ?? null,
   };
 }
 
-/** List the messages in a mailbox, newest first. */
+/**
+ * List the messages in a mailbox, newest first. Uses a LEAN projection
+ * (no html_body, snippet via substr) so it stays fast on very large mailboxes
+ * — loading full bodies for hundreds of rows is what made the TUI freeze.
+ */
 export function listMailbox(mailbox: Mailbox, opts?: { limit?: number; search?: string }, db?: Database): TuiMessage[] {
   const d = db || getDatabase();
-  const limit = opts?.limit ?? 200;
+  const limit = Math.max(1, Math.trunc(opts?.limit ?? 200));
   let messages: TuiMessage[];
 
   if (mailbox === "sent") {
-    messages = listEmails({ limit }, d).map((e) => ({
-      kind: "sent" as const,
-      id: e.id,
-      from: e.from_address,
-      to: e.to_addresses.join(", "),
-      subject: e.subject || "(no subject)",
-      date: e.sent_at,
-      is_read: true,
-      is_starred: false,
-      labels: [],
-      snippet: snippetOf(getEmailContent(e.id, d)?.text_body),
-      thread_id: (e as { thread_id?: string | null }).thread_id ?? null,
-    }));
+    const rows = d.query(
+      `SELECT e.id, e.from_address, e.to_addresses, e.subject, e.sent_at AS date, e.thread_id,
+              substr(c.text_body, 1, 140) AS snippet
+       FROM emails e LEFT JOIN email_content c ON c.email_id = e.id
+       ORDER BY e.sent_at DESC LIMIT ?`,
+    ).all(limit) as LiteRow[];
+    messages = rows.map((r) => liteToMessage(r, "sent"));
   } else {
-    const filter: Parameters<typeof listInboundEmails>[0] = { limit };
-    if (mailbox === "unread") filter.unread = true;
-    else if (mailbox === "starred") filter.starred = true;
-    else if (mailbox === "archived") filter.archived = true;
-    messages = listInboundEmails(filter, d).map(inboundToMessage);
+    const where = mailbox === "unread" ? "is_read = 0 AND is_archived = 0"
+      : mailbox === "starred" ? "is_starred = 1 AND is_archived = 0"
+      : mailbox === "archived" ? "is_archived = 1"
+      : "is_archived = 0";
+    const rows = d.query(
+      `SELECT id, from_address, to_addresses, subject, received_at AS date,
+              is_read, is_starred, label_ids_json, thread_id, substr(text_body, 1, 140) AS snippet
+       FROM inbound_emails WHERE ${where} ORDER BY received_at DESC LIMIT ?`,
+    ).all(limit) as LiteRow[];
+    messages = rows.map((r) => liteToMessage(r, "inbound"));
   }
 
   if (opts?.search) {
@@ -99,14 +105,20 @@ export function listMailbox(mailbox: Mailbox, opts?: { limit?: number; search?: 
 
 export interface MailboxCounts { inbox: number; unread: number; starred: number; sent: number; archived: number }
 
+function count(d: Database, sql: string): number {
+  const row = d.query(sql).get() as { c: number } | null;
+  return row?.c ?? 0;
+}
+
+/** Folder counts via COUNT(*) — never materialize rows (that froze big DBs). */
 export function mailboxCounts(db?: Database): MailboxCounts {
   const d = db || getDatabase();
   return {
-    inbox: listInboundEmails({ limit: 10_000 }, d).length,
+    inbox: count(d, "SELECT COUNT(*) AS c FROM inbound_emails WHERE is_archived = 0"),
     unread: getUnreadCount(undefined, d),
-    starred: listInboundEmails({ starred: true, limit: 10_000 }, d).length,
-    sent: listEmails({ limit: 10_000 }, d).length,
-    archived: listInboundEmails({ archived: true, limit: 10_000 }, d).length,
+    starred: count(d, "SELECT COUNT(*) AS c FROM inbound_emails WHERE is_starred = 1 AND is_archived = 0"),
+    sent: count(d, "SELECT COUNT(*) AS c FROM emails"),
+    archived: count(d, "SELECT COUNT(*) AS c FROM inbound_emails WHERE is_archived = 1"),
   };
 }
 

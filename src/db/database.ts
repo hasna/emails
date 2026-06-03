@@ -587,6 +587,16 @@ const MIGRATIONS = [
   CREATE INDEX IF NOT EXISTS idx_send_keys_hash ON send_keys(key_hash);
   INSERT OR IGNORE INTO _migrations (id) VALUES (25);
   `,
+
+  // Migration 26: composite indexes so the mailbox list queries
+  // (WHERE is_archived/is_read/is_starred ORDER BY received_at) seek+walk an
+  // index instead of sorting the whole table — critical on large inboxes.
+  `
+  CREATE INDEX IF NOT EXISTS idx_inbound_arch_recv ON inbound_emails(is_archived, received_at);
+  CREATE INDEX IF NOT EXISTS idx_inbound_read_arch_recv ON inbound_emails(is_read, is_archived, received_at);
+  CREATE INDEX IF NOT EXISTS idx_inbound_star_arch_recv ON inbound_emails(is_starred, is_archived, received_at);
+  INSERT OR IGNORE INTO _migrations (id) VALUES (26);
+  `,
 ];
 
 let _db: Database | null = null;
@@ -746,6 +756,11 @@ function ensureSchema(db: Database): void {
   )`);
   ensureProvTable("CREATE INDEX IF NOT EXISTS idx_send_keys_owner ON send_keys(owner_id)");
   ensureProvTable("CREATE INDEX IF NOT EXISTS idx_send_keys_hash ON send_keys(key_hash)");
+
+  // Migration 26 idempotent guarantee: composite mailbox-list indexes.
+  ensureProvTable("CREATE INDEX IF NOT EXISTS idx_inbound_arch_recv ON inbound_emails(is_archived, received_at)");
+  ensureProvTable("CREATE INDEX IF NOT EXISTS idx_inbound_read_arch_recv ON inbound_emails(is_read, is_archived, received_at)");
+  ensureProvTable("CREATE INDEX IF NOT EXISTS idx_inbound_star_arch_recv ON inbound_emails(is_starred, is_archived, received_at)");
 
   const ensureIndex = (sql: string) => {
     try { db.exec(sql); } catch {}
