@@ -3,6 +3,7 @@ import chalk from "chalk";
 import { getDatabase, uuid, resolvePartialId, type Database } from "../../db/database.js";
 import { getInboundEmail, type InboundEmail } from "../../db/inbound.js";
 import { getEmail, createEmail } from "../../db/emails.js";
+import { listProviders } from "../../db/providers.js";
 import type { Email } from "../../types/index.js";
 import { storeEmailContent } from "../../db/email-content.js";
 import { getEmailThreading, setEmailThreading, setInboundThreadId } from "../../db/threads.js";
@@ -20,6 +21,14 @@ export function resolveInboundOrSent(id: string, db: Database): { inbound: Inbou
   if (inbound) return { inbound, sent: null };
   const sent = getEmail(resolvePartialId(db, "emails", id) ?? id, db);
   return { inbound: null, sent };
+}
+
+/** Resolve the provider to send through — the given one, else the first active. */
+function resolveSendProvider(optProvider: string | undefined, db: Database): string {
+  if (optProvider) return resolveId("providers", optProvider);
+  const active = listProviders(db).filter((p) => p.active);
+  if (active.length === 0) throw new Error("No active providers. Add one with 'emails provider add'");
+  return active[0]!.id;
 }
 
 function rePrefix(subject: string): string {
@@ -61,10 +70,10 @@ export function registerReplyCommand(program: Command, output: (data: unknown, f
         const subject = fwdPrefix(origSubject);
         const body = (opts.body ? opts.body : "") + quoteBody(origFrom, origAt, origBody);
 
-        const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
+        const providerId = resolveSendProvider(opts.provider, db);
         const ourMessageId = generateMessageId(opts.from.split("@")[1] ?? "localhost");
         const sendOpts = { provider_id: providerId, from: opts.from, to: opts.to, subject, text: body, headers: { "Message-ID": ourMessageId } };
-        const { messageId, providerId: actual } = await sendWithFailover(providerId ?? "", sendOpts, db);
+        const { messageId, providerId: actual } = await sendWithFailover(providerId, sendOpts, db);
         const email = createEmail(actual, sendOpts, messageId, db);
         setEmailThreading(email.id, { message_id: ourMessageId, thread_id: ourMessageId.replace(/[<>]/g, ""), in_reply_to: null, references: [] });
         storeEmailContent(email.id, { text: body }, db);
@@ -113,7 +122,7 @@ export function registerReplyCommand(program: Command, output: (data: unknown, f
         }
         if (!from) return handleError(new Error("Could not determine From address; pass --from"));
 
-        const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
+        const providerId = resolveSendProvider(opts.provider, db);
         const fromDomain = from.split("@")[1] ?? "localhost";
         const ourMessageId = generateMessageId(fromDomain);
         const headers: Record<string, string> = { "Message-ID": ourMessageId };
@@ -132,7 +141,7 @@ export function registerReplyCommand(program: Command, output: (data: unknown, f
           ...(opts.html ? { html: opts.body } : { text: opts.body }),
           headers,
         };
-        const { messageId, providerId: actual } = await sendWithFailover(providerId ?? "", sendOpts, db);
+        const { messageId, providerId: actual } = await sendWithFailover(providerId, sendOpts, db);
         const email = createEmail(actual, sendOpts, messageId, db);
         setEmailThreading(email.id, { message_id: ourMessageId, thread_id: threadId, in_reply_to: inReplyTo, references }, db);
         storeEmailContent(email.id, opts.html ? { html: opts.body } : { text: opts.body }, db);
