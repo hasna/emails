@@ -78,10 +78,12 @@ export function resolveThreadForInbound(
 ): { thread_id: string; parent_email_id: string | null } {
   const d = db || getDatabase();
   const h = headers ?? {};
+  const ownMsgId = h["Message-ID"] ?? h["message-id"] ?? h["Message-Id"] ?? "";
   const inReplyTo = h["In-Reply-To"] ?? h["in-reply-to"] ?? "";
   const refs = parseReferences(h["References"] ?? h["references"]);
-  // Try In-Reply-To first, then References from newest to oldest.
-  const candidates = [inReplyTo, ...refs.reverse()].map((s) => s.trim()).filter(Boolean);
+  // Own Message-ID first (the received copy of one of our sends shares it),
+  // then In-Reply-To, then References newest→oldest.
+  const candidates = [ownMsgId, inReplyTo, ...refs.reverse()].map((s) => s.trim()).filter(Boolean);
   for (const c of candidates) {
     const parent = getEmailByMessageId(c, d);
     if (parent) {
