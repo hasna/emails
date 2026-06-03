@@ -2,6 +2,7 @@ import { getProvider } from "../db/providers.js";
 import { getAdapter } from "../providers/index.js";
 import { getFailoverProviderIds } from "./config.js";
 import { getAddressSendability } from "../db/address-lifecycle.js";
+import { assertSendAuthorized } from "../db/send-keys.js";
 import type { SendEmailOptions } from "../types/index.js";
 import type { Database } from "../db/database.js";
 
@@ -21,6 +22,12 @@ export async function sendWithFailover(
   opts: SendEmailOptions,
   db?: Database,
 ): Promise<SendResult> {
+  // Scoped-auth guard: when an auth_token (send key) is supplied, the sender
+  // must own or administer the From address. No token = trusted local caller.
+  if (opts.auth_token) {
+    assertSendAuthorized(opts.auth_token, opts.from, db);
+  }
+
   // Lifecycle guard: a suspended or over-quota sender address is blocked before
   // any provider is touched.
   if (opts.from) {

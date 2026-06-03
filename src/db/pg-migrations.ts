@@ -489,6 +489,23 @@ export const PG_MIGRATIONS: string[] = [
   INSERT INTO _migrations (id) VALUES (24) ON CONFLICT DO NOTHING;
   `,
 
+  // Migration 25: scoped send keys.
+  `
+  CREATE TABLE IF NOT EXISTS send_keys (
+    id TEXT PRIMARY KEY,
+    owner_id TEXT NOT NULL REFERENCES owners(id) ON DELETE CASCADE,
+    key_hash TEXT NOT NULL UNIQUE,
+    prefix TEXT NOT NULL,
+    label TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_used_at TIMESTAMPTZ,
+    revoked_at TIMESTAMPTZ
+  );
+  CREATE INDEX IF NOT EXISTS idx_send_keys_owner ON send_keys(owner_id);
+  CREATE INDEX IF NOT EXISTS idx_send_keys_hash ON send_keys(key_hash);
+  INSERT INTO _migrations (id) VALUES (25) ON CONFLICT DO NOTHING;
+  `,
+
 
   // Feedback table
   `

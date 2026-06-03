@@ -47,6 +47,7 @@ export function registerEmailOpsTools(server: McpServer): void {
     headers: z.record(z.string()).optional().describe("Custom email headers"),
     unsubscribe_url: z.string().optional().describe("Auto-inject List-Unsubscribe headers (RFC 8058 one-click)"),
     idempotency_key: z.string().optional().describe("Prevent duplicate sends — returns existing email if key was used before"),
+    auth_token: z.string().optional().describe("Scoped send key (esk_…) — restricts sending to addresses the key's owner owns or administers"),
   },
   async (input) => {
     try {

@@ -569,6 +569,24 @@ const MIGRATIONS = [
   CREATE INDEX IF NOT EXISTS idx_aliases_domain ON aliases(domain);
   INSERT OR IGNORE INTO _migrations (id) VALUES (24);
   `,
+
+  // Migration 25: scoped send keys — an API/MCP credential bound to one owner.
+  // A key authorizes sending only from addresses that owner owns or administers.
+  `
+  CREATE TABLE IF NOT EXISTS send_keys (
+    id TEXT PRIMARY KEY,
+    owner_id TEXT NOT NULL REFERENCES owners(id) ON DELETE CASCADE,
+    key_hash TEXT NOT NULL UNIQUE,
+    prefix TEXT NOT NULL,
+    label TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    last_used_at TEXT,
+    revoked_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_send_keys_owner ON send_keys(owner_id);
+  CREATE INDEX IF NOT EXISTS idx_send_keys_hash ON send_keys(key_hash);
+  INSERT OR IGNORE INTO _migrations (id) VALUES (25);
+  `,
 ];
 
 let _db: Database | null = null;
@@ -714,6 +732,20 @@ function ensureSchema(db: Database): void {
     UNIQUE(domain, local_part)
   )`);
   ensureProvTable("CREATE INDEX IF NOT EXISTS idx_aliases_domain ON aliases(domain)");
+
+  // Migration 25 idempotent guarantee: scoped send keys.
+  ensureProvTable(`CREATE TABLE IF NOT EXISTS send_keys (
+    id TEXT PRIMARY KEY,
+    owner_id TEXT NOT NULL REFERENCES owners(id) ON DELETE CASCADE,
+    key_hash TEXT NOT NULL UNIQUE,
+    prefix TEXT NOT NULL,
+    label TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    last_used_at TEXT,
+    revoked_at TEXT
+  )`);
+  ensureProvTable("CREATE INDEX IF NOT EXISTS idx_send_keys_owner ON send_keys(owner_id)");
+  ensureProvTable("CREATE INDEX IF NOT EXISTS idx_send_keys_hash ON send_keys(key_hash)");
 
   const ensureIndex = (sql: string) => {
     try { db.exec(sql); } catch {}

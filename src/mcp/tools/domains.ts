@@ -5,6 +5,7 @@ import { createDomain, listDomains, deleteDomain, getDomain, updateDnsStatus } f
 import { createAddress, listAddresses, deleteAddress, getAddress } from '../../db/addresses.js';
 import { suspendAddress, activateAddress, setAddressQuota } from '../../db/address-lifecycle.js';
 import { createAlias, createCatchAll, removeAlias, getAlias, listAliases, resolveAlias } from '../../db/aliases.js';
+import { createSendKey, listSendKeys, revokeSendKey, getSendKey, canOwnerSendFrom } from '../../db/send-keys.js';
 import { getProvider } from '../../db/providers.js';
 import { getDatabase } from '../../db/database.js';
 import { getAdapter } from '../../providers/index.js';
@@ -369,6 +370,73 @@ export function registerDomainTools(server: McpServer): void {
     try {
       const target = resolveAlias(recipient);
       return { content: [{ type: "text", text: JSON.stringify({ recipient, target }, null, 2) }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+    }
+  },
+  );
+
+  server.tool(
+  "create_send_key",
+  "Issue a scoped send key for an owner. The token is returned ONCE and only its hash is stored.",
+  {
+    owner_id: z.string().describe("Owner ID the key is bound to"),
+    label: z.string().optional().describe("Label to identify the key"),
+  },
+  async ({ owner_id, label }) => {
+    try {
+      const { token, key } = createSendKey(owner_id, label);
+      return { content: [{ type: "text", text: JSON.stringify({ token, id: key.id, owner_id: key.owner_id, label: key.label, note: "Store the token now — it will not be shown again." }, null, 2) }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+    }
+  },
+  );
+
+  server.tool(
+  "list_send_keys",
+  "List scoped send keys (hashes only, never tokens)",
+  {
+    owner_id: z.string().optional().describe("Filter by owner ID"),
+  },
+  async ({ owner_id }) => {
+    try {
+      const keys = listSendKeys(owner_id).map(({ key_hash, ...rest }) => rest);
+      return { content: [{ type: "text", text: JSON.stringify(keys, null, 2) }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+    }
+  },
+  );
+
+  server.tool(
+  "revoke_send_key",
+  "Revoke a scoped send key by ID",
+  {
+    key_id: z.string().describe("Send key ID"),
+  },
+  async ({ key_id }) => {
+    try {
+      if (!getSendKey(key_id)) throw new Error(`Send key not found: ${key_id}`);
+      revokeSendKey(key_id);
+      return { content: [{ type: "text", text: `Send key revoked: ${key_id}` }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+    }
+  },
+  );
+
+  server.tool(
+  "check_send_authorization",
+  "Check whether an owner is authorized to send from an address",
+  {
+    owner_id: z.string().describe("Owner ID"),
+    from: z.string().describe("From address to check"),
+  },
+  async ({ owner_id, from }) => {
+    try {
+      const authorized = canOwnerSendFrom(owner_id, from);
+      return { content: [{ type: "text", text: JSON.stringify({ owner_id, from, authorized }, null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
     }
