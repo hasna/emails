@@ -39,21 +39,22 @@ emails cloud push
 
 ## Interactive mailbox (`emails interactive`)
 
-A full-screen, Gmail-style terminal client — three panes (mailboxes · message
-list · reader), live read-state, and a built-in composer. It **auto-refreshes**
-from the local store and **auto-pulls** new mail in the background (draining the
-real-time SES→SNS→SQS queue, or doing a dedup-safe S3 sync), so the inbox stays
-current without running a manual sync.
+A clean, full-screen terminal mail client — a folder tab bar plus one focused
+view at a time (message list → reader → composer). Live read-state, and it
+**auto-refreshes** from the local store and **auto-pulls** new mail in the
+background (draining the real-time SES→SNS→SQS queue, or a dedup-safe S3 sync),
+so the inbox stays current without a manual sync.
 
 ```bash
 emails interactive            # or: emails ui
 emails interactive --mailbox unread
 ```
 
-Keys: `↑↓`/`j k` move · `Enter` open (marks read) · `r` reply · `c` compose ·
-`s` star · `e` archive · `u` unread · `/` search · `g` refresh now · `Tab`
-switch pane · `q` quit. In the composer: `Tab` next field · `Ctrl-S` send ·
-`Esc` cancel. Mailboxes: Inbox · Unread · Starred · Sent · Archived.
+Keys — list: `↑↓`/`j k` move · `Enter` open · `]`/`[` or `1`–`5` switch folder ·
+`r` reply · `c` compose · `s` star · `e` archive · `u` unread · `/` search ·
+`g` refresh now · `q` quit. Reader: `j/k` scroll · `J/K` next/prev message ·
+`Esc` back. Composer: `Tab` next field · `Ctrl-S` send · `Esc` cancel.
+Folders: Inbox · Unread · Starred · Sent · Archived.
 
 ## Command Structure
 
