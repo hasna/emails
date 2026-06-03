@@ -171,7 +171,7 @@ export function App({ initialMailbox = "inbox" }: AppProps) {
   if (view === "compose" && compose) content = <Compose compose={compose} from={deriveFrom(compose)} width={innerW} height={contentH} />;
   else if (view === "profiles") content = <Profiles width={innerW} height={contentH} />;
   else if (view === "reader") content = <Reader body={body} conversation={conversation} scroll={scroll} width={innerW} height={contentH} />;
-  else content = <List messages={messages} sel={sel} now={now} width={innerW} height={contentH} searching={searching} search={search} />;
+  else content = <List messages={messages} sel={sel} now={now} width={innerW} height={contentH} searching={searching} search={search} emptyStore={counts.inbox === 0 && counts.sent === 0 && counts.archived === 0} />;
 
   return (
     <Box flexDirection="column" width={cols} height={rows}>
@@ -208,7 +208,7 @@ function Tabs({ mailbox, counts, status, cols }: { mailbox: Mailbox; counts: Mai
   );
 }
 
-function List({ messages, sel, now, width, height, searching, search }: { messages: TuiMessage[]; sel: number; now: number; width: number; height: number; searching: boolean; search: string }) {
+function List({ messages, sel, now, width, height, searching, search, emptyStore }: { messages: TuiMessage[]; sel: number; now: number; width: number; height: number; searching: boolean; search: string; emptyStore: boolean }) {
   const rowH = searching ? height - 1 : height;
   const start = Math.max(0, Math.min(sel - Math.floor(rowH / 2), Math.max(0, messages.length - rowH)));
   const win = messages.slice(start, start + rowH);
@@ -218,7 +218,20 @@ function List({ messages, sel, now, width, height, searching, search }: { messag
   return (
     <Box flexDirection="column" width={width}>
       {searching && <Text color="yellow">/ {search}<Text color="cyan">▌</Text></Text>}
-      {messages.length === 0 ? <Text dimColor>No messages here.</Text> : win.map((m, i) => {
+      {messages.length === 0 ? (
+        emptyStore ? (
+          <Box flexDirection="column">
+            <Text color="yellow">No mail synced on this machine yet.</Text>
+            <Text> </Text>
+            <Text dimColor>The local store is per-machine. To pull your mail here:</Text>
+            <Text>  <Text color="cyan">emails inbox sync --all-profiles --all</Text><Text dimColor>   # from Gmail (needs connector auth)</Text></Text>
+            <Text>  <Text color="cyan">emails inbox sync-s3 --bucket &lt;bucket&gt;</Text><Text dimColor>     # from SES-S3 inbound</Text></Text>
+            <Text>  <Text color="cyan">emails cloud pull</Text><Text dimColor>                          # if RDS cloud sync is configured</Text></Text>
+            <Text> </Text>
+            <Text dimColor>Press g to refresh after syncing · q to quit.</Text>
+          </Box>
+        ) : <Text dimColor>No messages here.</Text>
+      ) : win.map((m, i) => {
         const selected = start + i === sel;
         const who = senderName(m.kind === "sent" ? m.to : m.from);
         const subjCell = m.attachments > 0 ? `📎 ${m.subject}` : m.subject;
