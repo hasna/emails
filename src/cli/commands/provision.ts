@@ -117,6 +117,105 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
       } catch (e) { handleError(e); }
     });
 
+  // ── up: full end-to-end orchestrator ─────────────────────────────────────
+  cmd
+    .command("up <domain>")
+    .description("One command: SES identity + MAIL FROM → publish DNS (Cloudflare) → wait verify → inbound → addresses → round-trip test")
+    .requiredOption("--provider <id>", "SES provider ID")
+    .option("--addresses <list>", "Comma-separated local parts to create", "one,two,three")
+    .option("--bucket <name>", "Inbound S3 bucket (defaults to config inbound_s3_bucket)")
+    .option("--add-mx", "Publish inbound MX (ses-s3 receive)", true)
+    .option("--count <n>", "Round-trip messages per pair (0 = skip test)", "1")
+    .option("--timeout <sec>", "Max seconds to wait for SES verification", "600")
+    .option("--no-test", "Skip the final round-trip test")
+    .action(async (domain: string, opts: { provider: string; addresses: string; bucket?: string; addMx?: boolean; count: string; timeout: string; test?: boolean }) => {
+      try {
+        const db = getDatabase();
+        const providerId = resolveId("providers", opts.provider);
+        const provider = getProvider(providerId);
+        if (!provider) return handleError(new Error(`Provider not found: ${opts.provider}`));
+        const { getInboundConfig } = await import("../../lib/config.js");
+        const cfg = getInboundConfig();
+        const bucket = opts.bucket ?? cfg.bucket;
+        if (cfg.profile) process.env["AWS_PROFILE"] = cfg.profile;
+        if (!bucket) return handleError(new Error("No inbound bucket: pass --bucket or set inbound_s3_bucket"));
+
+        const adapter = getAdapter(provider!);
+        const rec = getDomainByName(providerId, domain, db) ?? createDomain(providerId, domain, db);
+        const step = (n: string) => console.log(chalk.cyan(`▸ ${n}`));
+
+        step("SES identity + MAIL FROM");
+        await adapter.addDomain(domain);
+        let mailFrom: string | undefined;
+        if (adapter.setMailFrom) { mailFrom = await adapter.setMailFrom(domain); }
+        setDomainProvisioning(rec.id, { provisioning_status: "ses_identity_created", send_provider: "ses", dns_provider: "cloudflare", mail_from_domain: mailFrom ?? null }, db);
+
+        step("Publish DNS to Cloudflare");
+        const { setupEmailDns } = await import("../../lib/cloudflare-dns.js");
+        const dns = await setupEmailDns({ domain, provider: provider!, addMx: opts.addMx !== false });
+        console.log(chalk.dim(`  ${dns.created} created, ${dns.skipped} skipped`));
+        setDomainProvisioning(rec.id, { provisioning_status: "dns_published" }, db);
+
+        step("Wait for SES verification");
+        const deadline = Date.now() + parseInt(opts.timeout, 10) * 1000;
+        let verified = false;
+        while (Date.now() < deadline) {
+          if ((await adapter.verifyDomain(domain)).dkim === "verified") { verified = true; break; }
+          process.stdout.write(chalk.dim("."));
+          await new Promise((r) => setTimeout(r, 15000));
+        }
+        process.stdout.write("\n");
+        if (!verified) return handleError(new Error("SES verification timed out"));
+        setDomainProvisioning(rec.id, { provisioning_status: "verified" }, db);
+        console.log(chalk.green("  verified ✓"));
+
+        step("Set up SES inbound (S3 receipt rules)");
+        const { setupInboundEmail } = await import("../../lib/aws-inbound.js");
+        const inbound = await setupInboundEmail({ domain, bucket: bucket!, region: cfg.region });
+        console.log(chalk.dim(`  bucket ${inbound.bucket}, MX ${inbound.mx_record}`));
+        setDomainProvisioning(rec.id, { provisioning_status: "inbound_ready" }, db);
+
+        step("Create addresses");
+        const locals = opts.addresses.split(",").map((a) => a.trim());
+        for (const l of locals) {
+          const email = `${l}@${domain}`;
+          const addr = getAddressByEmail(providerId, email, db) ?? createAddress({ provider_id: providerId, email }, db);
+          setAddressProvisioning(addr.id, { domain_id: rec.id, receive_strategy: "ses-s3", provisioning_status: "ready" }, db);
+          console.log(chalk.dim(`  + ${email}`));
+        }
+        setDomainProvisioning(rec.id, { provisioning_status: "ready", next_check_at: null }, db);
+
+        let rtSuccess = true;
+        const count = parseInt(opts.count, 10);
+        if (opts.test !== false && count > 0 && locals.length >= 2) {
+          step(`Round-trip test (${count}/pair)`);
+          const { sendWithFailover } = await import("../../lib/send.js");
+          const { syncS3Inbox } = await import("../../lib/s3-sync.js");
+          const { runRoundtrip } = await import("../../lib/provision/roundtrip.js");
+          const report = await runRoundtrip(
+            {
+              send: async ({ from, to, subject, text }) => {
+                const r = await sendWithFailover(providerId, { from, to, subject, text, html: `<p>${text}</p>` }, db);
+                await new Promise((res) => setTimeout(res, 1100));
+                return { messageId: r.messageId };
+              },
+              fetchReceived: async (mailbox) => {
+                await syncS3Inbox({ bucket: bucket!, prefix: `inbound/${domain}/`, providerId, limit: 1000, region: cfg.region, db });
+                return db.query("SELECT subject FROM inbound_emails WHERE to_addresses LIKE ?").all(`%${mailbox}%`) as { subject: string }[];
+              },
+            },
+            { addresses: locals.map((l) => `${l}@${domain}`), count, tokenPrefix: `UP-${domain.split(".")[0]}`, pollAttempts: 10, pollIntervalMs: 9000 },
+          );
+          rtSuccess = report.success;
+          console.log(report.success ? chalk.green(`  ✓ ${report.totalReceived}/${report.totalSent} delivered`) : chalk.red(`  ✗ ${report.totalReceived}/${report.totalSent}`));
+        }
+
+        output({ domain, mail_from: mailFrom, verified, inbound_bucket: inbound.bucket, addresses: locals, roundtrip_ok: rtSuccess },
+          (rtSuccess ? chalk.green : chalk.yellow)(`\n${rtSuccess ? "✓" : "⚠"} ${domain} provisioned end-to-end via CLI (send via ${opts.provider}, receive via SES→S3)`));
+        if (!rtSuccess) process.exitCode = 1;
+      } catch (e) { handleError(e); }
+    });
+
   // ── roundtrip (acceptance test) ─────────────────────────────────────────
   cmd
     .command("roundtrip")
