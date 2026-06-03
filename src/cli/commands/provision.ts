@@ -181,6 +181,51 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
       } catch (e) { handleError(e); }
     });
 
+  // ── daemon (reconciler loop) ─────────────────────────────────────────────
+  cmd
+    .command("daemon")
+    .description("Run the provisioning reconciler: advance due domains/addresses toward ready")
+    .requiredOption("--provider <id>", "SES provider ID")
+    .option("--bucket <name>", "Inbound S3 bucket (defaults to config inbound_s3_bucket)")
+    .option("--add-mx", "Publish inbound MX when setting up domains")
+    .option("--once", "Run a single reconcile tick and exit")
+    .option("--interval <sec>", "Seconds between ticks", "30")
+    .option("--max-ticks <n>", "Stop after N ticks (default: unlimited)")
+    .action(async (opts: { provider: string; bucket?: string; addMx?: boolean; once?: boolean; interval: string; maxTicks?: string }) => {
+      try {
+        const db = getDatabase();
+        const providerId = resolveId("providers", opts.provider);
+        const provider = getProvider(providerId);
+        if (!provider) return handleError(new Error(`Provider not found: ${opts.provider}`));
+        const { getInboundConfig } = await import("../../lib/config.js");
+        const cfg = getInboundConfig();
+        const bucket = opts.bucket ?? cfg.bucket;
+        if (cfg.profile) process.env["AWS_PROFILE"] = cfg.profile;
+        if (!bucket) return handleError(new Error("No inbound bucket: pass --bucket or set inbound_s3_bucket"));
+
+        const { makeDomainDeps, makeAddressDeps } = await import("../../lib/provision/real-deps.js");
+        const { reconcileTick, runDaemon } = await import("../../daemon/provisioner.js");
+        const deps = {
+          domainDeps: makeDomainDeps({ provider: provider!, inboundBucket: bucket!, region: cfg.region, addMx: !!opts.addMx, db }),
+          addressDeps: makeAddressDeps({ provider: provider!, inboundBucket: bucket!, region: cfg.region, db }),
+        };
+        const log = (event: string, detail: Record<string, unknown>) => console.log(chalk.dim(`[${event}] ${JSON.stringify(detail)}`));
+
+        if (opts.once) {
+          const s = await reconcileTick(deps, { db, log });
+          output(s, chalk.green(`✓ tick: ${s.advanced} advanced, ${s.errors} errors (domains ${s.domainsProcessed}, addresses ${s.addressesProcessed})`));
+          return;
+        }
+        console.log(chalk.dim(`Provisioning daemon started (interval ${opts.interval}s). Ctrl-C to stop.`));
+        const total = await runDaemon(deps, {
+          db, log,
+          intervalSec: parseInt(opts.interval, 10),
+          maxTicks: opts.maxTicks ? parseInt(opts.maxTicks, 10) : undefined,
+        });
+        output(total, chalk.green(`daemon stopped: ${total.advanced} advanced, ${total.errors} errors`));
+      } catch (e) { handleError(e); }
+    });
+
   // ── retry ───────────────────────────────────────────────────────────────
   cmd
     .command("retry <domain>")
