@@ -168,6 +168,24 @@ describe("inbox list — listInboundEmails", () => {
     expect(emails).toHaveLength(2);
   });
 
+  it("filters by recipient address and by recipient domain (backs `inbox list --to`)", () => {
+    const { db, providerId } = setupDb();
+    const mk = (subject: string, to: string[]) => storeInboundEmail({
+      provider_id: providerId, message_id: `<${subject}@x>`, in_reply_to_email_id: null,
+      from_address: "openai@ext.com", to_addresses: to, cc_addresses: [], subject,
+      text_body: "b", html_body: null, attachments: [], attachment_paths: [], headers: {},
+      raw_size: 1, received_at: new Date().toISOString(),
+    }, db);
+    mk("to-elyra", ["el@elyratelier.com"]);
+    mk("to-holy", ["ap@holypaper.com"]);
+
+    // exact address
+    expect(listInboundEmails({ recipients: ["el@elyratelier.com"] }, db).map((e) => e.subject)).toEqual(["to-elyra"]);
+    // bare domain (catch-all routing) — case-insensitive
+    expect(listInboundEmails({ recipientDomains: ["ELYRATELIER.COM"] }, db).map((e) => e.subject)).toEqual(["to-elyra"]);
+    expect(listInboundEmails({ recipientDomains: ["holypaper.com"] }, db).map((e) => e.subject)).toEqual(["to-holy"]);
+  });
+
   it("filters by since date", () => {
     const { providerId } = setupDb();
     seedInboundEmails(providerId, 5); // emails dated Mar 20, 19, 18, 17, 16

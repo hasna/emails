@@ -17,6 +17,7 @@ import { getEmailContent, storeEmailContent } from "../../db/email-content.js";
 import { getThreadMessages } from "../../db/threads.js";
 import { listProviders } from "../../db/providers.js";
 import { sendWithFailover } from "../../lib/send.js";
+import { loadConfig, saveConfig } from "../../lib/config.js";
 import { marked } from "marked";
 
 export type Mailbox = "inbox" | "unread" | "starred" | "sent" | "archived";
@@ -99,27 +100,40 @@ const FOLDER_WHERE: Record<Exclude<Mailbox, "sent">, string> = {
  * very large mailboxes. The Sent folder unions app-sent mail (`emails`) with
  * Gmail-synced sent mail (`inbound_emails` where is_sent = 1).
  */
-export function listMailbox(mailbox: Mailbox, opts?: { limit?: number; search?: string }, db?: Database): TuiMessage[] {
+export interface MailboxSource { providerId?: string; domain?: string }
+
+export function listMailbox(mailbox: Mailbox, opts?: { limit?: number; search?: string; source?: MailboxSource }, db?: Database): TuiMessage[] {
   const d = db || getDatabase();
   const limit = Math.max(1, Math.trunc(opts?.limit ?? 200));
   let messages: TuiMessage[];
 
+  // Per-inbox source filter: a specific account (provider) or a domain.
+  const src = opts?.source;
+  const srcParams: string[] = [];
+  let srcClause = "";
+  if (src?.providerId) { srcClause += " AND provider_id = ?"; srcParams.push(src.providerId); }
+  if (src?.domain) {
+    srcClause += " AND (json_valid(to_addresses) AND EXISTS (SELECT 1 FROM json_each(to_addresses) WHERE LOWER(value) LIKE ?))";
+    srcParams.push(`%@${src.domain.toLowerCase()}`);
+  }
+
   if (mailbox === "sent") {
+    const appClause = src?.providerId ? " WHERE e.provider_id = ?" : "";
     const appSent = (d.query(
       `SELECT e.id, e.from_address, e.to_addresses, e.subject, e.sent_at AS date, e.thread_id,
               e.attachment_count AS attachments, substr(c.text_body, 1, 140) AS snippet
-       FROM emails e LEFT JOIN email_content c ON c.email_id = e.id
+       FROM emails e LEFT JOIN email_content c ON c.email_id = e.id${appClause}
        ORDER BY e.sent_at DESC LIMIT ?`,
-    ).all(limit) as LiteRow[]).map((r) => liteToMessage(r, "sent"));
+    ).all(...(src?.providerId ? [src.providerId] : []), limit) as LiteRow[]).map((r) => liteToMessage(r, "sent"));
     const gmailSent = (d.query(
-      `SELECT ${INBOUND_LITE_COLS} FROM inbound_emails WHERE is_sent = 1 AND is_archived = 0
+      `SELECT ${INBOUND_LITE_COLS} FROM inbound_emails WHERE is_sent = 1 AND is_archived = 0${srcClause}
        ORDER BY received_at DESC LIMIT ?`,
-    ).all(limit) as LiteRow[]).map((r) => liteToMessage(r, "inbound"));
+    ).all(...srcParams, limit) as LiteRow[]).map((r) => liteToMessage(r, "inbound"));
     messages = [...appSent, ...gmailSent].sort((a, b) => b.date.localeCompare(a.date)).slice(0, limit);
   } else {
     const rows = d.query(
-      `SELECT ${INBOUND_LITE_COLS} FROM inbound_emails WHERE ${FOLDER_WHERE[mailbox]} ORDER BY received_at DESC LIMIT ?`,
-    ).all(limit) as LiteRow[];
+      `SELECT ${INBOUND_LITE_COLS} FROM inbound_emails WHERE ${FOLDER_WHERE[mailbox]}${srcClause} ORDER BY received_at DESC LIMIT ?`,
+    ).all(...srcParams, limit) as LiteRow[];
     messages = rows.map((r) => liteToMessage(r, "inbound"));
   }
 
@@ -274,6 +288,41 @@ export interface ProfileInfo {
   active: boolean;
   domains: string[];
   addresses: string[];
+}
+
+// ── inbox sources (per-account / per-domain switching) ─────────────────────────
+
+export interface InboxSource { id: string; label: string; providerId?: string; domain?: string }
+
+/** The selectable inboxes: All, each account, and each registered domain. */
+export function listSources(db?: Database): InboxSource[] {
+  const d = db || getDatabase();
+  const out: InboxSource[] = [{ id: "all", label: "All Mail" }];
+  for (const p of listProviders(d).filter((p) => p.active)) out.push({ id: `p:${p.id}`, label: p.name, providerId: p.id });
+  const doms = d.query("SELECT DISTINCT domain FROM domains ORDER BY domain").all() as { domain: string }[];
+  for (const r of doms) out.push({ id: `d:${r.domain}`, label: `@${r.domain}`, domain: r.domain });
+  return out;
+}
+
+// ── settings (persisted to config.json) ────────────────────────────────────────
+
+export interface TuiSettings { autoPull: boolean; gmailAutoPull: boolean; dimRead: boolean; defaultMailbox: Mailbox }
+
+export function getSettings(): TuiSettings {
+  const c = loadConfig();
+  return {
+    autoPull: c["tui_autopull"] !== false,
+    gmailAutoPull: c["tui_gmail_autopull"] !== false,
+    dimRead: c["tui_dim_read"] === true, // default false = high contrast
+    defaultMailbox: (c["default_mailbox"] as Mailbox) ?? "inbox",
+  };
+}
+
+export function setSetting<K extends keyof TuiSettings>(key: K, value: TuiSettings[K]): void {
+  const c = loadConfig();
+  const map: Record<keyof TuiSettings, string> = { autoPull: "tui_autopull", gmailAutoPull: "tui_gmail_autopull", dimRead: "tui_dim_read", defaultMailbox: "default_mailbox" };
+  c[map[key]] = value as never;
+  saveConfig(c);
 }
 
 /**

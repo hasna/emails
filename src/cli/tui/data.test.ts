@@ -1,11 +1,15 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { closeDatabase, resetDatabase, getDatabase } from "../../db/database.js";
 import { createProvider } from "../../db/providers.js";
+import { createDomain } from "../../db/domains.js";
 import { storeInboundEmail, setInboundRead, setInboundStarred, setInboundArchived } from "../../db/inbound.js";
 import {
   listMailbox, mailboxCounts, getMessageBody, toggleStar, toggleRead, archiveMessage,
-  replyDefaults, sendComposed,
+  replyDefaults, sendComposed, listSources, getSettings, setSetting,
 } from "./data.js";
+import { mkdtempSync, rmSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 
 let providerId: string;
 function seed(subject: string, opts: { read?: boolean; star?: boolean; archived?: boolean; to?: string[] } = {}) {
@@ -179,5 +183,57 @@ describe("tui data — Sent folder (Gmail SENT + app-sent)", () => {
     const m = listMailbox("sent").find((x) => x.subject === "to a client")!;
     expect(m.sentByMe).toBe(true);
     expect(m.to).toBe("client@y.com");
+  });
+});
+
+describe("tui data — inbox sources (per-inbox switching)", () => {
+  it("lists All + each active provider + each registered domain", () => {
+    createDomain(providerId, "elyratelier.com");
+    const sources = listSources();
+    expect(sources[0]).toMatchObject({ id: "all", label: "All Mail" });
+    expect(sources.some((s) => s.providerId === providerId)).toBe(true);
+    expect(sources.some((s) => s.domain === "elyratelier.com")).toBe(true);
+  });
+
+  it("filters a mailbox by provider", () => {
+    const other = createProvider({ name: "other", type: "sandbox", active: true }).id;
+    const db = getDatabase();
+    storeInboundEmail({ provider_id: providerId, message_id: "<p1@x>", from_address: "a@x.com", to_addresses: ["me@x.com"], cc_addresses: [], subject: "from-provider-1", text_body: "b", html_body: null, attachments: [], headers: {}, raw_size: 1, received_at: new Date().toISOString() }, db);
+    storeInboundEmail({ provider_id: other, message_id: "<p2@x>", from_address: "a@x.com", to_addresses: ["me@x.com"], cc_addresses: [], subject: "from-provider-2", text_body: "b", html_body: null, attachments: [], headers: {}, raw_size: 1, received_at: new Date().toISOString() }, db);
+    const only = listMailbox("inbox", { source: { providerId } }).map((m) => m.subject);
+    expect(only).toContain("from-provider-1");
+    expect(only).not.toContain("from-provider-2");
+  });
+
+  it("filters a mailbox by recipient domain", () => {
+    seed("to-elyra", { to: ["el@elyratelier.com"] });
+    seed("to-other", { to: ["x@droolbowl.com"] });
+    const only = listMailbox("inbox", { source: { domain: "elyratelier.com" } }).map((m) => m.subject);
+    expect(only).toEqual(["to-elyra"]);
+  });
+});
+
+describe("tui data — settings (persisted to config)", () => {
+  let savedHome: string | undefined;
+  let tmpHome: string;
+  beforeEach(() => { savedHome = process.env["HOME"]; tmpHome = mkdtempSync(join(tmpdir(), "emails-cfg-")); process.env["HOME"] = tmpHome; });
+  afterEach(() => { if (savedHome === undefined) delete process.env["HOME"]; else process.env["HOME"] = savedHome; rmSync(tmpHome, { recursive: true, force: true }); });
+
+  it("defaults to auto-pull on + high contrast (dimRead off)", () => {
+    const s = getSettings();
+    expect(s.autoPull).toBe(true);
+    expect(s.gmailAutoPull).toBe(true);
+    expect(s.dimRead).toBe(false);
+    expect(s.defaultMailbox).toBe("inbox");
+  });
+
+  it("round-trips a setting change", () => {
+    setSetting("autoPull", false);
+    setSetting("dimRead", true);
+    setSetting("defaultMailbox", "starred");
+    const s = getSettings();
+    expect(s.autoPull).toBe(false);
+    expect(s.dimRead).toBe(true);
+    expect(s.defaultMailbox).toBe("starred");
   });
 });

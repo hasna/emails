@@ -9,7 +9,7 @@ export function registerInteractiveCommand(program: Command, _output: (data: unk
     .command("interactive")
     .alias("ui")
     .description("Open the interactive mailbox — a Gmail-style TUI with auto-refresh & auto-pull")
-    .option("--mailbox <name>", "Start in: inbox | unread | starred | sent | archived", "inbox")
+    .option("--mailbox <name>", "Start in: inbox | unread | starred | sent | archived (default: your saved setting)")
     .action((opts: { mailbox?: string }) => {
       if (!process.stdin.isTTY || !process.stdout.isTTY) {
         console.error(chalk.red("Interactive mode requires a TTY terminal."));
@@ -17,7 +17,7 @@ export function registerInteractiveCommand(program: Command, _output: (data: unk
         process.exit(1);
       }
       const valid: Mailbox[] = ["inbox", "unread", "starred", "sent", "archived"];
-      const mailbox = (valid.includes(opts.mailbox as Mailbox) ? opts.mailbox : "inbox") as Mailbox;
+      const mailbox = opts.mailbox && valid.includes(opts.mailbox as Mailbox) ? (opts.mailbox as Mailbox) : undefined;
       const app = render(<App initialMailbox={mailbox} />);
       void app.waitUntilExit().then(() => process.exit(0));
     });

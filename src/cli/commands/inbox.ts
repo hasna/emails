@@ -177,20 +177,24 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .option("--limit <n>", "Max results", "20")
     .option("--offset <n>", "Skip first N emails", "0")
     .option("--search <query>", "Filter by subject/from (local, not Gmail API)")
+    .option("--to <addr-or-domain>", "Only mail addressed to this address or domain (e.g. el@elyratelier.com or elyratelier.com)")
     .option("--unread", "Only unread mail")
     .option("--read", "Only read mail")
     .option("--starred", "Only starred mail")
     .option("--archived", "Show archived mail (hidden by default)")
     .option("--label <label>", "Only mail carrying this label")
-    .action((opts: { provider?: string; since?: string; limit?: string; offset?: string; search?: string; unread?: boolean; read?: boolean; starred?: boolean; archived?: boolean; label?: string }) => {
+    .action((opts: { provider?: string; since?: string; limit?: string; offset?: string; search?: string; to?: string; unread?: boolean; read?: boolean; starred?: boolean; archived?: boolean; label?: string }) => {
       try {
         const db = getDatabase();
         const limit = parseInt(opts.limit ?? "20", 10);
         const offset = parseInt(opts.offset ?? "0", 10);
+        const toFilter = opts.to?.trim().toLowerCase();
         let emails = listInboundEmails({
           provider_id: opts.provider, since: opts.since, limit, offset,
           unread: opts.unread, read: opts.read, starred: opts.starred,
           archived: opts.archived, label: opts.label,
+          recipients: toFilter?.includes("@") ? [toFilter] : undefined,
+          recipientDomains: toFilter && !toFilter.includes("@") ? [toFilter] : undefined,
         }, db);
 
         if (opts.search) {
