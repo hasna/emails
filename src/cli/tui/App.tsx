@@ -14,7 +14,8 @@ interface ComposeState { to: string; subject: string; body: string; field: Compo
 interface Status { text: string; tone: "info" | "ok" | "err" }
 
 const REFRESH_MS = 4000;
-const PULL_MS = 12000;
+const PULL_MS = 12000;      // S3 / real-time inbound
+const GMAIL_PULL_MS = 45000; // Gmail incremental (heavier — slower cadence)
 
 function useDimensions(): { cols: number; rows: number } {
   const { stdout } = useStdout();
@@ -67,15 +68,16 @@ export function App({ initialMailbox = "inbox" }: AppProps) {
 
   useEffect(() => {
     let alive = true;
-    const tick = async () => {
-      const r = await autoPull().catch(() => null);
+    const tick = async (gmail: boolean) => {
+      const r = await autoPull(gmail ? { s3: false, gmail: true } : undefined).catch(() => null);
       if (!alive) return;
       if (r?.pulled) { flash(`↓ ${r.pulled} new`, "ok"); reload(); }
-      else if (r && !r.ok && r.reason && !/credential|profile|not configured|region|access key/i.test(r.reason)) flash(`pull: ${r.reason.slice(0, 36)}`, "err");
+      else if (r && !r.ok && r.reason && !/credential|profile|not configured|region|access key|connector|auth/i.test(r.reason)) flash(`pull: ${r.reason.slice(0, 36)}`, "err");
     };
-    void tick();
-    const t = setInterval(() => { void tick(); }, PULL_MS);
-    return () => { alive = false; clearInterval(t); };
+    void tick(false);
+    const s3 = setInterval(() => { void tick(false); }, PULL_MS);          // SES / S3 / real-time
+    const gm = setInterval(() => { void tick(true); }, GMAIL_PULL_MS);     // Gmail incremental
+    return () => { alive = false; clearInterval(s3); clearInterval(gm); };
   }, [reload]);
 
   const body = useMemo(() => (selectedMsg ? getMessageBody(selectedMsg) : null), [selectedMsg?.id, messages]);

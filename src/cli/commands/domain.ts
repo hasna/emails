@@ -50,7 +50,6 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
         const providerId = resolveId("providers", opts.provider);
         const provider = getProvider(providerId);
         if (!provider) return handleError(new Error(`Provider not found: ${opts.provider}`));
-        if (provider.type !== "ses") return handleError(new Error("`adopt` needs an SES provider — inbound is SES-based."));
 
         const region = opts.region ?? provider.region ?? "us-east-1";
         const accessKeyId = provider.access_key ?? undefined;
@@ -73,8 +72,16 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
           lines.push(`  ${colorDnsStatus(st.dkim)} DKIM · ${colorDnsStatus(st.spf)} SPF · ${colorDnsStatus(st.dmarc)} DMARC`);
         } catch { /* non-fatal */ }
 
-        // 4. SES inbound (S3 bucket + receipt rule → mail for *@domain lands in S3).
-        if (opts.inbound !== false) {
+        // 4. Inbound — per provider.
+        if (opts.inbound !== false && provider.type === "resend") {
+          lines.push(chalk.green(`✓ Resend domain ready`));
+          lines.push(chalk.dim(`  Inbound is push: add a Resend inbound webhook → POST /webhook/resend-inbound on 'emails serve'`));
+        }
+        if (opts.inbound !== false && provider.type === "gmail") {
+          lines.push(chalk.dim(`  Gmail is account-based — receive with 'emails inbox sync' (the interactive auto-pulls Gmail every 45s)`));
+        }
+        // 4a. SES inbound (S3 bucket + receipt rule → mail for *@domain lands in S3).
+        if (opts.inbound !== false && provider.type === "ses") {
           // Bucket is account-specific — resolve the SES account for this provider
           // so domains in different accounts get the right bucket.
           let bucket = opts.bucket;

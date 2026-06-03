@@ -1,13 +1,19 @@
 /**
- * Background auto-pull for the TUI — the "daemon" half. On each tick it drains
- * any real-time inbound (SES→SNS→SQS) and/or does a dedup-safe S3 sync, plus a
- * best-effort Gmail incremental sync, so new mail appears in the inbox without
- * the user running a manual sync. Entirely best-effort: missing config or creds
- * is silently a no-op.
+ * Background auto-pull for the TUI — the "daemon" half, across every provider:
+ *   • SES   — drain real-time SES→SNS→SQS and/or dedup-safe scan of each inbound
+ *             S3 bucket (buckets can be in different AWS accounts).
+ *   • Gmail — incremental sync of the newest messages for each active Gmail
+ *             account (via its connector profile).
+ *   • Resend — inbound is push (webhook to `emails serve`), so there's nothing to
+ *             pull here; it lands the moment the server receives it.
+ * Entirely best-effort: missing config/creds/connector-auth is a silent no-op.
  */
 export interface PullResult { pulled: number; ok: boolean; reason?: string; configured: boolean }
+export interface PullOpts { s3?: boolean; gmail?: boolean }
 
-export async function autoPull(): Promise<PullResult> {
+export async function autoPull(opts?: PullOpts): Promise<PullResult> {
+  const doS3 = opts?.s3 !== false;
+  const doGmail = opts?.gmail === true;
   const { getInboundConfig, getInboundBuckets, loadConfig } = await import("../../lib/config.js");
   const inbound = getInboundConfig();
   const buckets = getInboundBuckets();
@@ -16,39 +22,60 @@ export async function autoPull(): Promise<PullResult> {
   const configured = buckets.length > 0 || Boolean(queueUrl);
 
   let pulled = 0;
-  try {
-    const { syncS3Inbox } = await import("../../lib/s3-sync.js");
-    const { getProvider } = await import("../../db/providers.js");
-    const profile = inbound.profile;
-    if (profile) process.env["AWS_PROFILE"] = profile;
-    // Dedup-safe scan of every configured inbound bucket. Each bucket uses its
-    // SES provider's stored creds (buckets live in different AWS accounts); the
-    // legacy bucket falls back to the configured SES profile / default chain.
-    const syncAll = async () => {
-      let n = 0;
-      for (const b of buckets) {
-        const prov = b.providerId ? getProvider(b.providerId) : null;
-        const r = await syncS3Inbox({
-          bucket: b.bucket, prefix: inbound.prefix, region: b.region,
-          accessKeyId: prov?.access_key ?? undefined,
-          secretAccessKey: prov?.secret_key ?? undefined,
-          limit: 100,
-        });
-        n += r.synced;
+  let reason: string | undefined;
+  let ok = true;
+
+  if (doS3) {
+    try {
+      const { syncS3Inbox } = await import("../../lib/s3-sync.js");
+      const { getProvider } = await import("../../db/providers.js");
+      if (inbound.profile) process.env["AWS_PROFILE"] = inbound.profile;
+      const syncAll = async () => {
+        let n = 0;
+        for (const b of buckets) {
+          const prov = b.providerId ? getProvider(b.providerId) : null;
+          const r = await syncS3Inbox({
+            bucket: b.bucket, prefix: inbound.prefix, region: b.region,
+            accessKeyId: prov?.access_key ?? undefined,
+            secretAccessKey: prov?.secret_key ?? undefined,
+            limit: 100,
+          });
+          n += r.synced;
+        }
+        return n;
+      };
+      if (queueUrl && buckets.length > 0) {
+        const { makeSqsAdapter } = await import("../../lib/inbound-realtime-aws.js");
+        const { watchInboundOnce } = await import("../../lib/inbound-realtime.js");
+        const sqs = makeSqsAdapter({ queueUrl, region: inbound.region, waitTimeSeconds: 1 });
+        await watchInboundOnce(sqs, queueUrl, async () => { const n = await syncAll(); pulled += n; return { synced: n }; });
+      } else if (buckets.length > 0) {
+        pulled += await syncAll();
       }
-      return n;
-    };
-    if (queueUrl && buckets.length > 0) {
-      // Real-time: drain the queue, syncing all buckets on any notification.
-      const { makeSqsAdapter } = await import("../../lib/inbound-realtime-aws.js");
-      const { watchInboundOnce } = await import("../../lib/inbound-realtime.js");
-      const sqs = makeSqsAdapter({ queueUrl, region: inbound.region, waitTimeSeconds: 1 });
-      await watchInboundOnce(sqs, queueUrl, async () => { const n = await syncAll(); pulled += n; return { synced: n }; });
-    } else if (buckets.length > 0) {
-      pulled += await syncAll();
-    }
-    return { pulled, ok: true, configured };
-  } catch (e) {
-    return { pulled, ok: false, reason: e instanceof Error ? e.message : String(e), configured };
+    } catch (e) { ok = false; reason = e instanceof Error ? e.message : String(e); }
   }
+
+  if (doGmail) {
+    try { pulled += await pullGmail(); }
+    catch (e) { if (ok) { ok = false; reason = e instanceof Error ? e.message : String(e); } }
+  }
+
+  return { pulled, ok, reason, configured: configured || doGmail };
+}
+
+/** Incremental sync of the newest messages for each active Gmail account. */
+async function pullGmail(): Promise<number> {
+  const { listProviders } = await import("../../db/providers.js");
+  const { syncGmailInbox } = await import("../../lib/gmail-sync.js");
+  const gmails = listProviders().filter((p) => p.type === "gmail" && p.active);
+  let n = 0;
+  for (const p of gmails) {
+    // Provider name "Gmail (andreihasnacom)" → connector profile "andreihasnacom".
+    const profile = p.name.match(/\(([^)]+)\)/)?.[1];
+    try {
+      const r = await syncGmailInbox({ providerId: p.id, profile, labelFilter: "INBOX", batchSize: 25, maxMessages: 25, downloadAttachments: true });
+      n += r.synced;
+    } catch { /* connector not authed here / transient — best-effort */ }
+  }
+  return n;
 }

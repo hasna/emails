@@ -10,6 +10,7 @@ import { handle as handleContactsGroups } from "./routes/contacts-groups.js";
 import { handle as handleInboundSequences } from "./routes/inbound-sequences.js";
 import { handle as handleAgentApi } from "./routes/agent-api.js";
 import { handleInboundWebhook } from "./routes/inbound-webhook.js";
+import { handleResendWebhook } from "./routes/resend-webhook.js";
 
 export async function handleApiRequest(
   req: Request,
@@ -19,6 +20,7 @@ export async function handleApiRequest(
 ): Promise<Response | null> {
   return (
     (await handleInboundWebhook(req, path, method)) ??
+    (await handleResendWebhook(req, path, method)) ??
     (await handleAgentApi(req, url, path, method)) ??
     (await handleCore(req, url, path, method)) ??
     (await handleContactsGroups(req, url, path, method)) ??
