@@ -70,13 +70,26 @@ export interface GmailSyncConfig {
  * in the hasna-studio-alumia account, so the default bucket is the alumia
  * inbound bucket. Resolved from config, env, then a sensible default.
  */
-export function getInboundConfig(): { bucket?: string; region: string; prefix?: string } {
+export function getInboundConfig(): { bucket?: string; region: string; prefix?: string; profile?: string } {
   const config = loadConfig();
   return {
     bucket: (config["inbound_s3_bucket"] as string | undefined) ?? process.env["EMAILS_INBOUND_S3_BUCKET"],
     region: (config["inbound_s3_region"] as string | undefined) ?? process.env["AWS_REGION"] ?? "us-east-1",
     prefix: config["inbound_s3_prefix"] as string | undefined,
+    profile: getSesProfile(),
   };
+}
+
+/**
+ * AWS profile to use for SES + inbound S3 operations (so the operator does not
+ * pass --profile every time). For this app SES runs in hasna-studio-alumia.
+ */
+export function getSesProfile(): string | undefined {
+  const config = loadConfig();
+  return (config["ses_aws_profile"] as string | undefined)
+    ?? (config["inbound_s3_profile"] as string | undefined)
+    ?? process.env["EMAILS_SES_AWS_PROFILE"]
+    ?? undefined;
 }
 
 export function getCloudflareToken(): string | undefined {

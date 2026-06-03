@@ -25,12 +25,10 @@ export function registerAwsCommands(program: Command, output: (data: unknown, fo
       prefix?: string; catchAll?: boolean; profile?: string;
     }) => {
       try {
-        if (opts.profile) {
-          process.env["AWS_PROFILE"] = opts.profile;
-        }
-
         const { getInboundConfig } = await import("../../lib/config.js");
         const inbound = getInboundConfig();
+        const profile = opts.profile ?? inbound.profile;
+        if (profile) process.env["AWS_PROFILE"] = profile;
         const bucket = opts.bucket ?? inbound.bucket;
         const region = opts.region ?? inbound.region;
         if (!bucket) { handleError(new Error("No S3 bucket: pass --bucket or set 'emails config set inbound_s3_bucket <name>'")); return; }

@@ -461,9 +461,10 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .option("--profile <profile>", "AWS profile")
     .action(async (opts: { bucket?: string; prefix?: string; region?: string; provider?: string; limit: string; profile?: string }) => {
       try {
-        if (opts.profile) process.env["AWS_PROFILE"] = opts.profile;
         const { getInboundConfig } = await import("../../lib/config.js");
         const inbound = getInboundConfig();
+        const profile = opts.profile ?? inbound.profile;
+        if (profile) process.env["AWS_PROFILE"] = profile;
         const bucket = opts.bucket ?? inbound.bucket;
         const region = opts.region ?? inbound.region;
         const prefix = opts.prefix ?? inbound.prefix;

@@ -132,7 +132,9 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
     .option("--throttle <ms>", "Delay between sends (SES sandbox = 1100)", "1100")
     .action(async (opts: { domain: string; provider: string; addresses: string; count: string; bucket?: string; profile?: string; pollAttempts: string; pollInterval: string; throttle: string }) => {
       try {
-        if (opts.profile) process.env["AWS_PROFILE"] = opts.profile;
+        const { getInboundConfig: _gic } = await import("../../lib/config.js");
+        const _profile = opts.profile ?? _gic().profile;
+        if (_profile) process.env["AWS_PROFILE"] = _profile;
         const db = getDatabase();
         const providerId = resolveId("providers", opts.provider);
         if (!getProvider(providerId)) handleError(new Error(`Provider not found: ${opts.provider}`));
