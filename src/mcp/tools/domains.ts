@@ -4,6 +4,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { createDomain, listDomains, deleteDomain, getDomain, updateDnsStatus } from '../../db/domains.js';
 import { createAddress, listAddresses, deleteAddress, getAddress } from '../../db/addresses.js';
 import { suspendAddress, activateAddress, setAddressQuota } from '../../db/address-lifecycle.js';
+import { createAlias, createCatchAll, removeAlias, getAlias, listAliases, resolveAlias } from '../../db/aliases.js';
 import { getProvider } from '../../db/providers.js';
 import { getDatabase } from '../../db/database.js';
 import { getAdapter } from '../../providers/index.js';
@@ -284,6 +285,90 @@ export function registerDomainTools(server: McpServer): void {
       if (!getAddress(id)) throw new AddressNotFoundError(id);
       const addr = setAddressQuota(id, per_day ?? null);
       return { content: [{ type: "text", text: JSON.stringify(addr, null, 2) }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+    }
+  },
+  );
+
+  server.tool(
+  "add_alias",
+  "Route an alias address (alias@domain) to a target address",
+  {
+    alias: z.string().describe("Alias address, e.g. hello@acme.com"),
+    target: z.string().describe("Target address mail is delivered to"),
+  },
+  async ({ alias, target }) => {
+    try {
+      const a = createAlias(alias, target);
+      return { content: [{ type: "text", text: JSON.stringify(a, null, 2) }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+    }
+  },
+  );
+
+  server.tool(
+  "add_catch_all",
+  "Route every unmatched recipient on a domain to a target address",
+  {
+    domain: z.string().describe("Domain, e.g. acme.com"),
+    target: z.string().describe("Target address"),
+  },
+  async ({ domain, target }) => {
+    try {
+      const a = createCatchAll(domain, target);
+      return { content: [{ type: "text", text: JSON.stringify(a, null, 2) }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+    }
+  },
+  );
+
+  server.tool(
+  "list_aliases",
+  "List aliases and catch-alls (optionally filtered by domain)",
+  {
+    domain: z.string().optional().describe("Filter by domain"),
+  },
+  async ({ domain }) => {
+    try {
+      const aliases = listAliases(domain);
+      return { content: [{ type: "text", text: JSON.stringify(aliases, null, 2) }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+    }
+  },
+  );
+
+  server.tool(
+  "remove_alias",
+  "Remove an alias or catch-all by ID",
+  {
+    alias_id: z.string().describe("Alias ID"),
+  },
+  async ({ alias_id }) => {
+    try {
+      const a = getAlias(alias_id);
+      if (!a) throw new Error(`Alias not found: ${alias_id}`);
+      removeAlias(alias_id);
+      return { content: [{ type: "text", text: `Alias removed: ${a.local_part}@${a.domain}` }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+    }
+  },
+  );
+
+  server.tool(
+  "resolve_alias",
+  "Resolve where a recipient address would be routed (alias → target, or null)",
+  {
+    recipient: z.string().describe("Recipient address to resolve"),
+  },
+  async ({ recipient }) => {
+    try {
+      const target = resolveAlias(recipient);
+      return { content: [{ type: "text", text: JSON.stringify({ recipient, target }, null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
     }

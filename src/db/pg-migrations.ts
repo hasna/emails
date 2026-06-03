@@ -474,6 +474,21 @@ export const PG_MIGRATIONS: string[] = [
   INSERT INTO _migrations (id) VALUES (23) ON CONFLICT DO NOTHING;
   `,
 
+  // Migration 24: per-domain aliases + catch-all.
+  `
+  CREATE TABLE IF NOT EXISTS aliases (
+    id TEXT PRIMARY KEY,
+    domain TEXT NOT NULL,
+    local_part TEXT NOT NULL,
+    target_address TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(domain, local_part)
+  );
+  CREATE INDEX IF NOT EXISTS idx_aliases_domain ON aliases(domain);
+  INSERT INTO _migrations (id) VALUES (24) ON CONFLICT DO NOTHING;
+  `,
+
 
   // Feedback table
   `

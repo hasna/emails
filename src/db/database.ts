@@ -552,6 +552,23 @@ const MIGRATIONS = [
   CREATE INDEX IF NOT EXISTS idx_inbound_is_archived ON inbound_emails(is_archived);
   INSERT OR IGNORE INTO _migrations (id) VALUES (23);
   `,
+
+  // Migration 24: per-domain aliases + catch-all. An alias maps a recipient
+  // local-part to a target address; a catch-all (local_part = '*') maps every
+  // unmatched recipient on a domain. Unique per (domain, local_part).
+  `
+  CREATE TABLE IF NOT EXISTS aliases (
+    id TEXT PRIMARY KEY,
+    domain TEXT NOT NULL,
+    local_part TEXT NOT NULL,
+    target_address TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(domain, local_part)
+  );
+  CREATE INDEX IF NOT EXISTS idx_aliases_domain ON aliases(domain);
+  INSERT OR IGNORE INTO _migrations (id) VALUES (24);
+  `,
 ];
 
 let _db: Database | null = null;
@@ -685,6 +702,18 @@ function ensureSchema(db: Database): void {
   ensureColumn("ALTER TABLE inbound_emails ADD COLUMN is_starred INTEGER NOT NULL DEFAULT 0");
   ensureProvTable("CREATE INDEX IF NOT EXISTS idx_inbound_is_read ON inbound_emails(is_read)");
   ensureProvTable("CREATE INDEX IF NOT EXISTS idx_inbound_is_archived ON inbound_emails(is_archived)");
+
+  // Migration 24 idempotent guarantee: aliases / catch-all.
+  ensureProvTable(`CREATE TABLE IF NOT EXISTS aliases (
+    id TEXT PRIMARY KEY,
+    domain TEXT NOT NULL,
+    local_part TEXT NOT NULL,
+    target_address TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(domain, local_part)
+  )`);
+  ensureProvTable("CREATE INDEX IF NOT EXISTS idx_aliases_domain ON aliases(domain)");
 
   const ensureIndex = (sql: string) => {
     try { db.exec(sql); } catch {}
