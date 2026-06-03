@@ -1,7 +1,8 @@
 import type { Command } from "commander";
 import chalk from "chalk";
-import { createDomain, listDomains, deleteDomain, getDomain, updateDnsStatus } from "../../db/domains.js";
+import { createDomain, listDomains, deleteDomain, getDomain, getDomainByName, updateDnsStatus } from "../../db/domains.js";
 import { getProvider } from "../../db/providers.js";
+import { getDatabase } from "../../db/database.js";
 import { getAdapter } from "../../providers/index.js";
 import { formatDnsTable } from "../../lib/dns.js";
 import { colorDnsStatus, truncate, formatDate, tableRow } from "../../lib/format.js";
@@ -31,6 +32,91 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
       } catch (e) {
         handleError(e);
       }
+    });
+
+  // ── adopt: seamlessly add an already-registered & SES-verified domain ────────
+  domainCmd
+    .command("adopt <domain>")
+    .description("Add an already-registered, SES-verified domain: register it, wire SES inbound (S3), add a catch-all, and optionally sync")
+    .requiredOption("--provider <id>", "SES provider where the domain is verified")
+    .option("--no-inbound", "Skip SES inbound (S3 receipt rule) setup")
+    .option("--bucket <name>", "Inbound S3 bucket (default: config, else hasna-emails-prod-inbound-<accountId>)")
+    .option("--region <region>", "AWS region (default: the provider's region)")
+    .option("--catch-all <target>", "Route ALL mail for this domain to this address")
+    .option("--sync", "Run an initial inbound sync after wiring")
+    .action(async (domain: string, opts: { provider: string; inbound?: boolean; bucket?: string; region?: string; catchAll?: string; sync?: boolean }) => {
+      try {
+        const db = getDatabase();
+        const providerId = resolveId("providers", opts.provider);
+        const provider = getProvider(providerId);
+        if (!provider) return handleError(new Error(`Provider not found: ${opts.provider}`));
+        if (provider.type !== "ses") return handleError(new Error("`adopt` needs an SES provider — inbound is SES-based."));
+
+        const region = opts.region ?? provider.region ?? "us-east-1";
+        const accessKeyId = provider.access_key ?? undefined;
+        const secretAccessKey = provider.secret_key ?? undefined;
+        const lines: string[] = [chalk.bold(`\nAdopting ${domain} → ${provider.name}`)];
+
+        // 1. Ensure the SES identity exists (idempotent if already verified).
+        const adapter = getAdapter(provider);
+        await adapter.addDomain(domain);
+        lines.push(chalk.green(`✓ SES identity ensured`));
+
+        // 2. Register in the emails store.
+        const rec = getDomainByName(providerId, domain, db) ?? createDomain(providerId, domain, db);
+        lines.push(chalk.green(`✓ Registered in emails (${rec.id.slice(0, 8)})`));
+
+        // 3. Record verification status.
+        try {
+          const st = await adapter.verifyDomain(domain);
+          updateDnsStatus(rec.id, st.dkim, st.spf, st.dmarc, db);
+          lines.push(`  ${colorDnsStatus(st.dkim)} DKIM · ${colorDnsStatus(st.spf)} SPF · ${colorDnsStatus(st.dmarc)} DMARC`);
+        } catch { /* non-fatal */ }
+
+        // 4. SES inbound (S3 bucket + receipt rule → mail for *@domain lands in S3).
+        if (opts.inbound !== false) {
+          // Bucket is account-specific — resolve the SES account for this provider
+          // so domains in different accounts get the right bucket.
+          let bucket = opts.bucket;
+          if (!bucket) {
+            const { STSClient, GetCallerIdentityCommand } = await import("@aws-sdk/client-sts");
+            const sts = new STSClient({ region, credentials: accessKeyId && secretAccessKey ? { accessKeyId, secretAccessKey } : undefined });
+            const acct = (await sts.send(new GetCallerIdentityCommand({}))).Account;
+            bucket = `hasna-emails-prod-inbound-${acct}`;
+          }
+          const { setupInboundEmail } = await import("../../lib/aws-inbound.js");
+          const r = await setupInboundEmail({ domain, bucket, region, accessKeyId, secretAccessKey });
+          lines.push(chalk.green(`✓ SES inbound → s3://${r.bucket}/${r.s3_prefix}`) + chalk.dim(` (rule ${r.rule_name}${r.bucket_created ? ", bucket created" : ""})`));
+          lines.push(chalk.dim(`  Publish MX in DNS:  ${r.mx_record}  (for @${domain})`));
+          // Register the bucket so 'inbox watch' / the TUI auto-pull sync it
+          // (multi-bucket: domains can live in different AWS accounts).
+          const { addInboundBucket } = await import("../../lib/config.js");
+          addInboundBucket(r.bucket, region, providerId);
+        }
+
+        // 5. Catch-all: the protected global catch-all already covers every domain;
+        // optionally pin a domain-specific target.
+        const { ensureDefaultCatchAll, createCatchAll } = await import("../../db/aliases.js");
+        ensureDefaultCatchAll(db);
+        if (opts.catchAll) {
+          createCatchAll(domain, opts.catchAll, db);
+          lines.push(chalk.green(`✓ catch-all *@${domain} → ${opts.catchAll}`));
+        }
+
+        // 6. Optional initial sync.
+        if (opts.sync && opts.inbound !== false) {
+          const { getInboundConfig } = await import("../../lib/config.js");
+          const bucket = opts.bucket ?? getInboundConfig().bucket;
+          if (bucket) {
+            const { syncS3Inbox } = await import("../../lib/s3-sync.js");
+            const sr = await syncS3Inbox({ bucket, prefix: `inbound/${domain}/`, region, providerId, limit: 500 });
+            lines.push(chalk.green(`✓ Synced ${sr.synced} message(s)`) + (sr.errors.length ? chalk.yellow(` (${sr.errors.length} errors)`) : ""));
+          }
+        }
+
+        lines.push(chalk.dim(`\n  Live mail:  emails inbox watch   ·   browse:  emails interactive`));
+        output({ domain, provider: provider.name, domain_id: rec.id }, lines.join("\n"));
+      } catch (e) { handleError(e); }
     });
 
   domainCmd

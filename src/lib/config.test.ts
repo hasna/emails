@@ -87,3 +87,18 @@ describe("config", () => {
     expect(getGmailSyncConfig().archive_s3_region).toBe("eu-central-1");
   });
 });
+
+import { getInboundBuckets, addInboundBucket } from "./config.js";
+describe("inbound buckets (multi-account)", () => {
+  it("adds, dedupes, and backfills providerId", () => {
+    addInboundBucket("bkt-a", "us-east-1", "prov-a");
+    addInboundBucket("bkt-b", "eu-west-1", "prov-b");
+    addInboundBucket("bkt-a", "us-east-1");            // dup, keep providerId
+    const list = getInboundBuckets();
+    const a = list.find((b) => b.bucket === "bkt-a")!;
+    const b = list.find((b) => b.bucket === "bkt-b")!;
+    expect(a.providerId).toBe("prov-a");
+    expect(b.region).toBe("eu-west-1");
+    expect(list.filter((x) => x.bucket === "bkt-a")).toHaveLength(1);
+  });
+});

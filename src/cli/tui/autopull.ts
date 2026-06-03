@@ -8,30 +8,44 @@
 export interface PullResult { pulled: number; ok: boolean; reason?: string; configured: boolean }
 
 export async function autoPull(): Promise<PullResult> {
-  const { getInboundConfig, loadConfig } = await import("../../lib/config.js");
+  const { getInboundConfig, getInboundBuckets, loadConfig } = await import("../../lib/config.js");
   const inbound = getInboundConfig();
+  const buckets = getInboundBuckets();
   const config = loadConfig();
   const queueUrl = config["inbound_realtime_queue_url"] as string | undefined;
-  const configured = Boolean(inbound.bucket || queueUrl);
+  const configured = buckets.length > 0 || Boolean(queueUrl);
 
   let pulled = 0;
   try {
-    if (queueUrl && inbound.bucket) {
-      // Real-time: drain the queue, syncing the bucket on any notification.
+    const { syncS3Inbox } = await import("../../lib/s3-sync.js");
+    const { getProvider } = await import("../../db/providers.js");
+    const profile = inbound.profile;
+    if (profile) process.env["AWS_PROFILE"] = profile;
+    // Dedup-safe scan of every configured inbound bucket. Each bucket uses its
+    // SES provider's stored creds (buckets live in different AWS accounts); the
+    // legacy bucket falls back to the configured SES profile / default chain.
+    const syncAll = async () => {
+      let n = 0;
+      for (const b of buckets) {
+        const prov = b.providerId ? getProvider(b.providerId) : null;
+        const r = await syncS3Inbox({
+          bucket: b.bucket, prefix: inbound.prefix, region: b.region,
+          accessKeyId: prov?.access_key ?? undefined,
+          secretAccessKey: prov?.secret_key ?? undefined,
+          limit: 100,
+        });
+        n += r.synced;
+      }
+      return n;
+    };
+    if (queueUrl && buckets.length > 0) {
+      // Real-time: drain the queue, syncing all buckets on any notification.
       const { makeSqsAdapter } = await import("../../lib/inbound-realtime-aws.js");
       const { watchInboundOnce } = await import("../../lib/inbound-realtime.js");
-      const { syncS3Inbox } = await import("../../lib/s3-sync.js");
       const sqs = makeSqsAdapter({ queueUrl, region: inbound.region, waitTimeSeconds: 1 });
-      await watchInboundOnce(sqs, queueUrl, async () => {
-        const r = await syncS3Inbox({ bucket: inbound.bucket!, prefix: inbound.prefix, region: inbound.region, limit: 100 });
-        pulled += r.synced;
-        return { synced: r.synced };
-      });
-    } else if (inbound.bucket) {
-      // No queue configured — fall back to a periodic dedup-safe S3 scan.
-      const { syncS3Inbox } = await import("../../lib/s3-sync.js");
-      const r = await syncS3Inbox({ bucket: inbound.bucket, prefix: inbound.prefix, region: inbound.region, limit: 100 });
-      pulled += r.synced;
+      await watchInboundOnce(sqs, queueUrl, async () => { const n = await syncAll(); pulled += n; return { synced: n }; });
+    } else if (buckets.length > 0) {
+      pulled += await syncAll();
     }
     return { pulled, ok: true, configured };
   } catch (e) {

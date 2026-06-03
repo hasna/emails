@@ -80,6 +80,39 @@ export function getInboundConfig(): { bucket?: string; region: string; prefix?: 
   };
 }
 
+/** An inbound S3 bucket + the SES provider whose creds reach it (buckets can be
+ *  in different AWS accounts, so each carries its own provider). */
+export interface InboundBucket { bucket: string; region: string; providerId?: string }
+
+/**
+ * All inbound S3 buckets to sync — domains can span multiple AWS accounts (one
+ * bucket each), so the watcher/auto-pull iterates every one. Includes the legacy
+ * single `inbound_s3_bucket` for back-compat, de-duplicated (list entries, which
+ * carry a providerId, win over the legacy single).
+ */
+export function getInboundBuckets(): InboundBucket[] {
+  const config = loadConfig();
+  const list = Array.isArray(config["inbound_s3_buckets"]) ? config["inbound_s3_buckets"] as InboundBucket[] : [];
+  const single = config["inbound_s3_bucket"] as string | undefined;
+  const region = (config["inbound_s3_region"] as string | undefined) ?? process.env["AWS_REGION"] ?? "us-east-1";
+  const all = [...list];
+  if (single && !all.some((b) => b.bucket === single)) all.push({ bucket: single, region });
+  const seen = new Set<string>();
+  return all.filter((b) => b.bucket && !seen.has(b.bucket) && seen.add(b.bucket));
+}
+
+/** Register an inbound bucket so it's included in syncs (idempotent; fills in
+ *  the providerId if a prior entry lacked one). */
+export function addInboundBucket(bucket: string, region: string, providerId?: string): void {
+  const config = loadConfig();
+  const list = Array.isArray(config["inbound_s3_buckets"]) ? config["inbound_s3_buckets"] as InboundBucket[] : [];
+  const existing = list.find((b) => b.bucket === bucket);
+  if (existing) { existing.region = region; if (providerId) existing.providerId = providerId; }
+  else list.push({ bucket, region, providerId });
+  config["inbound_s3_buckets"] = list;
+  saveConfig(config);
+}
+
 /**
  * AWS profile to use for SES + inbound S3 operations (so the operator does not
  * pass --profile every time). For this app SES runs in hasna-studio-alumia.
