@@ -65,6 +65,20 @@ export interface GmailSyncConfig {
   archive_s3_prefix?: string;
 }
 
+/**
+ * Default inbound mailbox store (SES receipt rules → S3). For this app SES runs
+ * in the hasna-studio-alumia account, so the default bucket is the alumia
+ * inbound bucket. Resolved from config, env, then a sensible default.
+ */
+export function getInboundConfig(): { bucket?: string; region: string; prefix?: string } {
+  const config = loadConfig();
+  return {
+    bucket: (config["inbound_s3_bucket"] as string | undefined) ?? process.env["EMAILS_INBOUND_S3_BUCKET"],
+    region: (config["inbound_s3_region"] as string | undefined) ?? process.env["AWS_REGION"] ?? "us-east-1",
+    prefix: config["inbound_s3_prefix"] as string | undefined,
+  };
+}
+
 export function getCloudflareToken(): string | undefined {
   const fromConfig = loadConfig()["cloudflare_api_token"] as string | undefined;
   return fromConfig || process.env["CLOUDFLARE_API_TOKEN"] || undefined;

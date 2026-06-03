@@ -47,3 +47,18 @@ crash-safe because all state lives in the DB.
 Verified end-to-end: 3 funny `.com` domains bought, DNS in Cloudflare, SES DKIM
 verified, 3 addresses/domain, **144/144 emails** sent via the `emails` CLI and
 received (SES→S3→SQLite). See `docs/PLAN-PROVISIONING.md` for the architecture.
+
+## AWS account architecture (this app)
+| Concern | AWS account | Notes |
+|---|---|---|
+| **SES** (send + inbound) | **hasna-studio-alumia** (638389534677) | Production access (50k/day). All domain identities, MAIL FROM, receipt rules → S3 live here. Inbound bucket `hasna-emails-prod-inbound-638389534677` (set as `inbound_s3_bucket`). |
+| **Domain purchase** (Route53 Domains) | **hasna-xyz-infra** (789877399345) | Run `domains domain buy` with `AWS_PROFILE=hasna-xyz-infra`. |
+| **DNS** | Cloudflare (account `4f59afea…`) | Always Cloudflare — DKIM/SPF/DMARC/MAIL-FROM/inbound-MX + Email Routing. |
+| **Send (secondary)** | Resend | Provider integrated; sends proven. Free plan caps Resend-verified domains at 1. |
+
+`emails config set inbound_s3_bucket <bucket>` makes `emails inbox sync-s3` default to the alumia inbound bucket (no `--bucket` needed). `emails doctor` reports SES sandbox/production + provisioning creds.
+
+### Integration status (priority: SES, Resend, Cloudflare — not Gmail)
+- **SES (alumia)**: ✅ all 3 domains verified + send/receive tested (6/6 round-trip).
+- **Resend**: ✅ send tested end-to-end (Resend send → our domain → SES inbound).
+- **Cloudflare**: ✅ DNS + Email Routing client.

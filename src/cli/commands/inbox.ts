@@ -452,22 +452,28 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
   // ─── SYNC S3 ──────────────────────────────────────────────────────────────
   inboxCmd
     .command("sync-s3")
-    .description("Sync inbound emails from S3 bucket (stored by SES receipt rules)")
-    .requiredOption("--bucket <name>", "S3 bucket name")
+    .description("Sync inbound emails from S3 bucket (stored by SES receipt rules). Defaults --bucket/--region to config inbound_s3_bucket/region.")
+    .option("--bucket <name>", "S3 bucket name (defaults to config inbound_s3_bucket)")
     .option("--prefix <prefix>", "S3 key prefix to scan (e.g. inbound/example.com/)")
-    .option("--region <region>", "AWS region", "us-east-1")
+    .option("--region <region>", "AWS region (defaults to config inbound_s3_region or us-east-1)")
     .option("--provider <id>", "Associate emails with this provider ID")
     .option("--limit <n>", "Max emails per run", "100")
     .option("--profile <profile>", "AWS profile")
-    .action(async (opts: { bucket: string; prefix?: string; region: string; provider?: string; limit: string; profile?: string }) => {
+    .action(async (opts: { bucket?: string; prefix?: string; region?: string; provider?: string; limit: string; profile?: string }) => {
       try {
         if (opts.profile) process.env["AWS_PROFILE"] = opts.profile;
+        const { getInboundConfig } = await import("../../lib/config.js");
+        const inbound = getInboundConfig();
+        const bucket = opts.bucket ?? inbound.bucket;
+        const region = opts.region ?? inbound.region;
+        const prefix = opts.prefix ?? inbound.prefix;
+        if (!bucket) { handleError(new Error("No S3 bucket: pass --bucket or set 'emails config set inbound_s3_bucket <name>'")); return; }
         const { syncS3Inbox } = await import("../../lib/s3-sync.js");
-        console.log(chalk.dim(`Syncing emails from s3://${opts.bucket}/${opts.prefix ?? ""}...`));
+        console.log(chalk.dim(`Syncing emails from s3://${bucket}/${prefix ?? ""}...`));
         const result = await syncS3Inbox({
-          bucket: opts.bucket,
-          prefix: opts.prefix,
-          region: opts.region,
+          bucket,
+          prefix,
+          region,
           providerId: opts.provider,
           limit: parseInt(opts.limit, 10),
         });
