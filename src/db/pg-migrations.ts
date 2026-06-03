@@ -443,6 +443,19 @@ export const PG_MIGRATIONS: string[] = [
   INSERT INTO _migrations (id) VALUES (20) ON CONFLICT DO NOTHING;
   `,
 
+  // Migration 21: threading.
+  `
+  ALTER TABLE emails ADD COLUMN IF NOT EXISTS message_id TEXT;
+  ALTER TABLE emails ADD COLUMN IF NOT EXISTS thread_id TEXT;
+  ALTER TABLE emails ADD COLUMN IF NOT EXISTS in_reply_to TEXT;
+  ALTER TABLE emails ADD COLUMN IF NOT EXISTS references_json TEXT NOT NULL DEFAULT '[]';
+  ALTER TABLE inbound_emails ADD COLUMN IF NOT EXISTS thread_id TEXT;
+  CREATE INDEX IF NOT EXISTS idx_emails_thread ON emails(thread_id);
+  CREATE INDEX IF NOT EXISTS idx_emails_message_id ON emails(message_id);
+  CREATE INDEX IF NOT EXISTS idx_inbound_threadid ON inbound_emails(thread_id);
+  INSERT INTO _migrations (id) VALUES (21) ON CONFLICT DO NOTHING;
+  `,
+
   // Feedback table
   `
   CREATE TABLE IF NOT EXISTS feedback (

@@ -519,6 +519,19 @@ const MIGRATIONS = [
   CREATE INDEX IF NOT EXISTS idx_addresses_admin ON addresses(administrator_id);
   INSERT OR IGNORE INTO _migrations (id) VALUES (20);
   `,
+
+  // Migration 21: threading — RFC Message-ID, thread_id, In-Reply-To, References.
+  `
+  ALTER TABLE emails ADD COLUMN message_id TEXT;
+  ALTER TABLE emails ADD COLUMN thread_id TEXT;
+  ALTER TABLE emails ADD COLUMN in_reply_to TEXT;
+  ALTER TABLE emails ADD COLUMN references_json TEXT NOT NULL DEFAULT '[]';
+  ALTER TABLE inbound_emails ADD COLUMN thread_id TEXT;
+  CREATE INDEX IF NOT EXISTS idx_emails_thread ON emails(thread_id);
+  CREATE INDEX IF NOT EXISTS idx_emails_message_id ON emails(message_id);
+  CREATE INDEX IF NOT EXISTS idx_inbound_threadid ON inbound_emails(thread_id);
+  INSERT OR IGNORE INTO _migrations (id) VALUES (21);
+  `,
 ];
 
 let _db: Database | null = null;
@@ -629,6 +642,16 @@ function ensureSchema(db: Database): void {
   ensureColumn("ALTER TABLE addresses ADD COLUMN administrator_id TEXT REFERENCES owners(id) ON DELETE SET NULL");
   ensureProvTable("CREATE INDEX IF NOT EXISTS idx_addresses_owner ON addresses(owner_id)");
   ensureProvTable("CREATE INDEX IF NOT EXISTS idx_addresses_admin ON addresses(administrator_id)");
+
+  // Migration 21 idempotent guarantee: threading columns.
+  ensureColumn("ALTER TABLE emails ADD COLUMN message_id TEXT");
+  ensureColumn("ALTER TABLE emails ADD COLUMN thread_id TEXT");
+  ensureColumn("ALTER TABLE emails ADD COLUMN in_reply_to TEXT");
+  ensureColumn("ALTER TABLE emails ADD COLUMN references_json TEXT NOT NULL DEFAULT '[]'");
+  ensureColumn("ALTER TABLE inbound_emails ADD COLUMN thread_id TEXT");
+  ensureProvTable("CREATE INDEX IF NOT EXISTS idx_emails_thread ON emails(thread_id)");
+  ensureProvTable("CREATE INDEX IF NOT EXISTS idx_emails_message_id ON emails(message_id)");
+  ensureProvTable("CREATE INDEX IF NOT EXISTS idx_inbound_threadid ON inbound_emails(thread_id)");
 
   const ensureIndex = (sql: string) => {
     try { db.exec(sql); } catch {}
