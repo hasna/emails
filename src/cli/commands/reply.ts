@@ -39,7 +39,9 @@ export function registerReplyCommand(program: Command, output: (data: unknown, f
           from = ourAddr;
           to = [inbound.from_address, ...(opts.all ? inbound.to_addresses.filter((a) => a !== ourAddr) : [])];
           subject = rePrefix(inbound.subject);
-          parentMsgId = inbound.message_id ?? null;
+          // The inbound's RFC Message-ID lives in its headers (the message_id
+          // column holds the S3 key for dedup, not the RFC id).
+          parentMsgId = inbound.headers?.["message-id"] ?? inbound.headers?.["Message-ID"] ?? inbound.headers?.["Message-Id"] ?? null;
           parentRefs = parseReferences(inbound.headers?.["References"] ?? inbound.headers?.["references"]);
           threadId = inbound.thread_id ?? uuid();
           if (!inbound.thread_id) setInboundThreadId(inbound.id, threadId, db);

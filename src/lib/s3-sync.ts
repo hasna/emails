@@ -128,6 +128,25 @@ async function fetchAndParseEmail(s3: S3Client, bucket: string, key: string) {
 /**
  * Sync new emails from S3 into the local inbound_emails table.
  */
+/**
+ * Flatten mailparser headers (a Map, or object) into a plain string record.
+ * Object.entries(Map) is empty, so a Map must be iterated explicitly.
+ */
+function flattenHeaders(headers: unknown): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!headers) return out;
+  const entries: Iterable<[string, unknown]> =
+    headers instanceof Map ? headers.entries() : Object.entries(headers as Record<string, unknown>);
+  for (const [k, v] of entries) {
+    out[k] =
+      typeof v === "string" ? v
+      : Array.isArray(v) ? v.map(String).join(" ")
+      : (v && typeof v === "object" && "text" in (v as Record<string, unknown>)) ? String((v as Record<string, unknown>).text)
+      : String(v);
+  }
+  return out;
+}
+
 export async function syncS3Inbox(opts: S3SyncOptions): Promise<S3SyncResult> {
   const db = opts.db ?? getDatabase();
   const s3 = makeS3Client(opts);
@@ -194,6 +213,10 @@ export async function syncS3Inbox(opts: S3SyncOptions): Promise<S3SyncResult> {
         size: a.size ?? 0,
       }));
 
+      // mailparser returns headers as a Map — Object.entries(Map) is empty, so
+      // flatten it explicitly (also preserves both raw + lowercased keys).
+      const headerObj = flattenHeaders(parsed.headers);
+
       const stored = storeInboundEmail({
         provider_id: providerId,
         message_id: obj.key, // use S3 key as message ID for dedup
@@ -206,19 +229,14 @@ export async function syncS3Inbox(opts: S3SyncOptions): Promise<S3SyncResult> {
         html_body: typeof parsed.html === "string" ? parsed.html : null,
         attachments: attachmentMeta,
         attachment_paths: [],
-        headers: Object.fromEntries(
-          Object.entries(parsed.headers ?? {}).map(([k, v]) => [k, String(v)])
-        ),
+        headers: headerObj,
         raw_size: obj.size,
         received_at: (parsed.date ?? new Date()).toISOString(),
       }, db);
 
       // Threading: link this inbound to an existing thread if it replies to one
-      // of our sent emails (via In-Reply-To / References), else start a new one.
+      // of our sent emails (via In-Reply-To / References / own Message-ID).
       try {
-        const headerObj = Object.fromEntries(
-          Object.entries(parsed.headers ?? {}).map(([k, v]) => [k, String(v)]),
-        );
         const { resolveThreadForInbound, setInboundThreadId } = await import("../db/threads.js");
         const { uuid } = await import("../db/database.js");
         const { thread_id, parent_email_id } = resolveThreadForInbound(headerObj, uuid(), db);
