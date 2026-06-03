@@ -13,7 +13,53 @@ function rePrefix(subject: string): string {
   return /^re:/i.test(subject.trim()) ? subject : `Re: ${subject}`;
 }
 
+function fwdPrefix(subject: string): string {
+  return /^fwd?:/i.test(subject.trim()) ? subject : `Fwd: ${subject}`;
+}
+
+function quoteBody(from: string, at: string, body: string): string {
+  return `\n\n---------- Forwarded message ----------\nFrom: ${from}\nDate: ${at}\n\n${body}`;
+}
+
 export function registerReplyCommand(program: Command, output: (data: unknown, formatted: string) => void): void {
+  // ── forward ───────────────────────────────────────────────────────────────
+  program
+    .command("forward <id>")
+    .description("Forward an inbound or sent email to new recipients (quoted body)")
+    .requiredOption("--to <email...>", "Recipient(s)")
+    .requiredOption("--from <email>", "From address")
+    .option("--body <text>", "Optional note prepended to the quoted message")
+    .option("--provider <id>", "Provider ID")
+    .action(async (id: string, opts: { to: string[]; from: string; body?: string; provider?: string }) => {
+      try {
+        const db = getDatabase();
+        const inbound = getInboundEmail(resolveId("inbound_emails", id) ?? id, db);
+        const sent = inbound ? null : getEmail(resolveId("emails", id) ?? id, db);
+        if (!inbound && !sent) return handleError(new Error(`Email not found: ${id}`));
+
+        const origFrom = inbound ? inbound.from_address : sent!.from_address;
+        const origAt = inbound ? inbound.received_at : sent!.sent_at;
+        const origSubject = inbound ? inbound.subject : sent!.subject;
+        let origBody = "";
+        if (inbound) origBody = inbound.text_body ?? "";
+        else {
+          const { getEmailContent } = await import("../../db/email-content.js");
+          origBody = getEmailContent(sent!.id, db)?.text_body ?? "";
+        }
+        const subject = fwdPrefix(origSubject);
+        const body = (opts.body ? opts.body : "") + quoteBody(origFrom, origAt, origBody);
+
+        const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
+        const ourMessageId = generateMessageId(opts.from.split("@")[1] ?? "localhost");
+        const sendOpts = { provider_id: providerId, from: opts.from, to: opts.to, subject, text: body, headers: { "Message-ID": ourMessageId } };
+        const { messageId, providerId: actual } = await sendWithFailover(providerId ?? "", sendOpts, db);
+        const email = createEmail(actual, sendOpts, messageId, db);
+        setEmailThreading(email.id, { message_id: ourMessageId, thread_id: ourMessageId.replace(/[<>]/g, ""), in_reply_to: null, references: [] });
+        storeEmailContent(email.id, { text: body }, db);
+        output({ id: email.id, to: opts.to, subject }, chalk.green(`✓ forwarded to ${opts.to.join(", ")} — "${subject}"`));
+      } catch (e) { handleError(e); }
+    });
+
   program
     .command("reply <id>")
     .description("Reply to an inbound or sent email, in-thread (sets In-Reply-To/References, Re: subject)")
