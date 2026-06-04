@@ -34,6 +34,7 @@ References:
 - https://opentui.com/docs/getting-started/
 - https://opentui.com/docs/bindings/react/
 - https://opentui.com/docs/core-concepts/renderer/
+- https://www.termcn.dev/docs/components/opentui
 
 ## Implementation Notes
 
@@ -43,13 +44,20 @@ References:
   terminal background control, and renderable layout.
 - `src/cli/tui/data.ts` remains the DB-backed data layer for mailbox lists,
   counts, address choices, profiles, settings, compose send, and mutations.
-- `src/cli/tui/theme.ts` now exposes hex palettes for OpenTUI `fg`/`bg` colors.
+- `src/cli/tui/theme.ts` now exposes hex palettes for OpenTUI `fg`/`bg` colors,
+  including dashboard sidebar and metric surfaces.
 - `src/cli/tui/App.test.ts` uses `@opentui/react/test-utils` and OpenTUI mock
   keyboard input instead of `ink-testing-library`.
+- There is no mature official OpenTUI template gallery to vendor here. The
+  current layout stays as owned app code and follows the available OpenTUI
+  renderer, React, resize, and theme-mode APIs.
 
 ## UX Model
 
 - Startup without `--mailbox` opens Home, not Inbox.
+- Wide terminals open as a two-column dashboard: persistent left navigation and
+  a right workspace with mailbox metrics or the active surface.
+- Narrow terminals collapse to a single workspace with a compact top nav.
 - Inbox is a unified all-address view by default.
 - Press `a` in Inbox to choose an exact email address.
 - The Inbox surface does not show provider/domain/source groupings.

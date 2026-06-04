@@ -111,6 +111,19 @@ interface FrameLine {
   bold?: boolean;
 }
 
+interface RenderContentArgs {
+  state: Model;
+  addresses: InboxAddressChoice[];
+  address: InboxAddressChoice;
+  selectedIndex: number;
+  selectedMsg: TuiMessage | null;
+  readerBody: ReturnType<typeof getMessageBody>;
+  conversation: ReturnType<typeof getConversation>;
+  width: number;
+  height: number;
+  theme: TuiTheme;
+}
+
 const CLOCK_TICK_MS = 4000;
 const LOCAL_RELOAD_MS = 30000;
 const PULL_MS = 45000;
@@ -661,9 +674,14 @@ export function App({ initialMailbox }: AppProps) {
     else if (input === "/") dispatch({ type: "searchStart" });
   });
 
-  const innerW = Math.max(24, cols - 4);
-  const contentH = Math.max(4, rows - 6);
-  const contentLines = renderContent({
+  const isDashboard = cols >= 104 && rows >= 20;
+  const topBar = renderTopBar({ state, address, cols, theme });
+  const footer = footerLine(state.view, state.searchActive, theme);
+  const bodyH = Math.max(6, rows - 2);
+  const sidebarW = isDashboard ? Math.min(34, Math.max(28, Math.floor(cols * 0.24))) : 0;
+  const workspaceW = isDashboard ? Math.max(36, cols - sidebarW - 5) : Math.max(24, cols - 4);
+  const contentH = Math.max(4, bodyH - 2);
+  const contentArgs: RenderContentArgs = {
     state,
     addresses,
     address,
@@ -671,28 +689,64 @@ export function App({ initialMailbox }: AppProps) {
     selectedMsg,
     readerBody,
     conversation,
-    width: innerW,
+    width: workspaceW,
     height: contentH,
     theme,
-  });
-  const headerLines = renderHeader({ state, address, cols, theme });
-  const footer = footerLine(state.view, state.searchActive, theme);
+  };
+  const contentLines = renderWorkspace(contentArgs);
+  const sidebarLines = renderSidebar({ state, address, width: sidebarW - 2, height: contentH, theme });
+  const compactLines = [
+    compactNavLine({ state, address, width: workspaceW, theme }),
+    ...contentLines,
+  ];
 
   return (
     <box width={cols} height={rows} flexDirection="column" backgroundColor={theme.background}>
-      {headerLines.map((line, i) => <FrameText key={`header-${i}`} line={line} width={cols} />)}
-      <box
-        width="100%"
-        flexGrow={1}
-        flexDirection="column"
-        border
-        borderStyle="rounded"
-        borderColor={theme.border}
-        paddingX={1}
-        backgroundColor={theme.panel}
-      >
-        {contentLines.slice(0, contentH).map((line, i) => <FrameText key={`content-${i}`} line={line} width={innerW} />)}
-      </box>
+      <FrameText line={topBar} width={cols} />
+      {isDashboard ? (
+        <box width="100%" flexGrow={1} flexDirection="row" columnGap={1} paddingX={1} backgroundColor={theme.background}>
+          <box
+            width={sidebarW}
+            height="100%"
+            flexDirection="column"
+            border
+            borderStyle="rounded"
+            borderColor={theme.border}
+            paddingX={1}
+            backgroundColor={theme.sidebarBg}
+            title=" navigation "
+          >
+            {sidebarLines.slice(0, contentH).map((line, i) => <FrameText key={`sidebar-${i}`} line={line} width={sidebarW - 2} />)}
+          </box>
+          <box
+            flexGrow={1}
+            height="100%"
+            flexDirection="column"
+            border
+            borderStyle="rounded"
+            borderColor={theme.border}
+            paddingX={1}
+            backgroundColor={theme.panel}
+            title={workspacePanelTitle(state)}
+          >
+            {contentLines.slice(0, contentH).map((line, i) => <FrameText key={`content-${i}`} line={line} width={workspaceW} />)}
+          </box>
+        </box>
+      ) : (
+        <box
+          width="100%"
+          flexGrow={1}
+          flexDirection="column"
+          border
+          borderStyle="rounded"
+          borderColor={theme.border}
+          paddingX={1}
+          backgroundColor={theme.panel}
+          title={workspacePanelTitle(state)}
+        >
+          {compactLines.slice(0, contentH).map((line, i) => <FrameText key={`content-${i}`} line={line} width={workspaceW} />)}
+        </box>
+      )}
       <FrameText line={footer} width={cols} />
     </box>
   );
@@ -793,45 +847,33 @@ function fitLine(left: string, right: string, width: number): string {
   return truncate(`${left}${" ".repeat(gap)}${right}`, width);
 }
 
-function renderHeader({ state, address, cols, theme }: {
+function renderTopBar({ state, address, cols, theme }: {
   state: Model;
   address: InboxAddressChoice;
   cols: number;
   theme: TuiTheme;
-}): FrameLine[] {
+}): FrameLine {
   const statusColor = state.status.tone === "ok" ? theme.ok : state.status.tone === "err" ? theme.error : theme.warning;
-  if (state.view === "home") {
-    return [
-      line(fitLine(" emails ui", state.status.text, cols), theme, { fg: theme.activeFg, bg: theme.headerBg, bold: true }),
-    ];
-  }
-  const tabs = MAILBOXES.map((m) => {
-    const n = state.counts[m];
-    const active = m === state.mailbox;
-    return `${active ? "[" : " "}${mailboxLabel(m)}${n ? ` ${n}` : ""}${active ? "]" : " "}`;
-  }).join(" ");
-  return [
-    line(fitLine(` ${tabs}`, state.status.text, cols), theme, { fg: state.status.text ? statusColor : theme.activeFg, bg: theme.headerBg, bold: true }),
-    line(` ${mailboxLabel(state.mailbox)}: ${address.label}${state.view === "list" ? "   a choose address" : ""}`, theme, {
-      fg: theme.sourceFg,
-      bg: theme.sourceBg,
-      bold: true,
-    }),
-  ];
+  const left = ` emails ui  ${workspaceTitle(state, address)}`;
+  const right = state.status.text || `${state.counts.unread} unread  ${state.settings.theme}/${theme.name}`;
+  return line(fitLine(left, right, cols), theme, {
+    fg: state.status.text ? statusColor : theme.activeFg,
+    bg: theme.headerBg,
+    bold: true,
+  });
 }
 
-function renderContent(args: {
-  state: Model;
-  addresses: InboxAddressChoice[];
-  address: InboxAddressChoice;
-  selectedIndex: number;
-  selectedMsg: TuiMessage | null;
-  readerBody: ReturnType<typeof getMessageBody>;
-  conversation: ReturnType<typeof getConversation>;
-  width: number;
-  height: number;
-  theme: TuiTheme;
-}): FrameLine[] {
+function renderWorkspace(args: RenderContentArgs): FrameLine[] {
+  const { state, address, theme } = args;
+  const rows = [
+    line(workspaceTitle(state, address), theme, { fg: theme.accentStrong, bold: true }),
+    line(workspaceSubtitle(args), theme, { fg: theme.muted }),
+    line(" ", theme),
+  ];
+  return [...rows, ...renderContent(args)];
+}
+
+function renderContent(args: RenderContentArgs): FrameLine[] {
   const { state } = args;
   if (state.view === "home") return renderHome(args);
   if (state.view === "compose" && state.compose) return renderCompose({ compose: state.compose, width: args.width, height: args.height, theme: args.theme });
@@ -842,12 +884,111 @@ function renderContent(args: {
   return renderList(args);
 }
 
+function workspacePanelTitle(state: Model): string {
+  return ` ${state.view === "home" ? "dashboard" : state.view === "list" ? mailboxLabel(state.mailbox).toLowerCase() : state.view} `;
+}
+
+function workspaceTitle(state: Model, address: InboxAddressChoice): string {
+  if (state.view === "home") return "Dashboard";
+  if (state.view === "list") return `${mailboxLabel(state.mailbox)}: ${address.label}`;
+  if (state.view === "addressPicker") return "Choose inbox address";
+  if (state.view === "reader") return "Message reader";
+  if (state.view === "compose") return state.compose?.replyTo ? "Reply" : "Compose";
+  if (state.view === "profiles") return "Profiles";
+  return "Settings";
+}
+
+function workspaceSubtitle({ state, address, width }: RenderContentArgs): string {
+  if (state.view === "home") return truncate("Home · Inbox · Compose · Profiles · Settings", width);
+  if (state.view === "list") {
+    const shown = `${state.messages.length} shown`;
+    const counts = `${state.counts.inbox} inbox · ${state.counts.unread} unread · ${state.counts.sent} sent`;
+    const action = address.address ? "a changes address" : "a chooses address";
+    return truncate(`${shown} · ${counts} · ${action}`, width);
+  }
+  if (state.view === "compose") return truncate("Editable From, To, Subject, and markdown Body · Ctrl-S sends", width);
+  if (state.view === "settings") return truncate("Theme, defaults, and background pull controls", width);
+  if (state.view === "profiles") return truncate("Configured accounts with their domains and addresses", width);
+  if (state.view === "addressPicker") return truncate("Choose All addresses or one exact inbox address", width);
+  return truncate("b returns to Inbox · r replies · s stars · e archives", width);
+}
+
+function compactNavLine({ state, address, width, theme }: {
+  state: Model;
+  address: InboxAddressChoice;
+  width: number;
+  theme: TuiTheme;
+}): FrameLine {
+  const nav = `1 Inbox  2 Compose  3 Profiles  4 Settings  ·  ${workspaceTitle(state, address)}`;
+  return line(truncate(nav, width), theme, { fg: theme.sourceFg, bg: theme.sourceBg, bold: true });
+}
+
+function renderSidebar({ state, address, width, height, theme }: {
+  state: Model;
+  address: InboxAddressChoice;
+  width: number;
+  height: number;
+  theme: TuiTheme;
+}): FrameLine[] {
+  const rows: FrameLine[] = [];
+  const section = (labelText: string) => rows.push(line(labelText.toUpperCase(), theme, { fg: theme.sidebarMuted, bg: theme.sidebarBg, bold: true }));
+  const nav = (labelText: string, active: boolean, keyChar: string) => rows.push(line(`${keyChar}  ${truncate(labelText, width - 4)}`, theme, {
+    fg: active ? theme.selectedFg : theme.sidebarFg,
+    bg: active ? theme.selectedBg : theme.sidebarBg,
+    bold: active,
+  }));
+  rows.push(line("Mailbox", theme, { fg: theme.sidebarFg, bg: theme.sidebarBg, bold: true }));
+  rows.push(line(truncate(address.label, width), theme, { fg: theme.sidebarMuted, bg: theme.sidebarBg }));
+  rows.push(line(" ", theme, { bg: theme.sidebarBg }));
+  section("Navigation");
+  nav("Inbox", state.view === "list" || state.view === "reader" || state.view === "addressPicker", "1");
+  nav("Compose", state.view === "compose", "2");
+  nav("Profiles", state.view === "profiles", "3");
+  nav("Settings", state.view === "settings", "4");
+  rows.push(line(" ", theme, { bg: theme.sidebarBg }));
+  section("Folders");
+  for (const [i, mailbox] of MAILBOXES.entries()) {
+    const active = state.mailbox === mailbox && state.view !== "home" && state.view !== "compose" && state.view !== "profiles" && state.view !== "settings";
+    const countText = String(state.counts[mailbox]);
+    const labelText = `${i + 1}  ${mailboxLabel(mailbox)}`;
+    rows.push(line(fitLine(labelText, countText, width), theme, {
+      fg: active ? theme.selectedFg : theme.sidebarFg,
+      bg: active ? theme.selectedBg : theme.sidebarBg,
+      bold: active || state.counts[mailbox] > 0,
+    }));
+  }
+  rows.push(line(" ", theme, { bg: theme.sidebarBg }));
+  section("Actions");
+  rows.push(line("a  choose address", theme, { fg: theme.sidebarFg, bg: theme.sidebarBg }));
+  rows.push(line("c  compose", theme, { fg: theme.sidebarFg, bg: theme.sidebarBg }));
+  rows.push(line("g  refresh", theme, { fg: theme.sidebarFg, bg: theme.sidebarBg }));
+  rows.push(line("G  pull now", theme, { fg: theme.sidebarFg, bg: theme.sidebarBg }));
+  rows.push(line(" ", theme, { bg: theme.sidebarBg }));
+  section("Status");
+  rows.push(line(`Theme ${state.settings.theme}/${theme.name}`, theme, { fg: theme.sidebarFg, bg: theme.sidebarBg }));
+  rows.push(line(`Auto-pull ${state.settings.autoPull ? "on" : "off"}`, theme, {
+    fg: state.settings.autoPull ? theme.ok : theme.sidebarMuted,
+    bg: theme.sidebarBg,
+    bold: state.settings.autoPull,
+  }));
+  while (rows.length < height) rows.push(line(" ", theme, { bg: theme.sidebarBg }));
+  return rows;
+}
+
 function renderHome({ state, width, theme }: {
   state: Model;
   width: number;
   theme: TuiTheme;
 }): FrameLine[] {
   const rows = [
+    line("Mailbox overview", theme, { fg: theme.accentStrong, bold: true }),
+    ...renderMetricGrid([
+      ["Inbox", state.counts.inbox, "received"],
+      ["Unread", state.counts.unread, "needs review"],
+      ["Starred", state.counts.starred, "follow-up"],
+      ["Sent", state.counts.sent, "outbound"],
+    ], width, theme),
+    line(" ", theme),
     line("Choose", theme, { fg: theme.accentStrong, bold: true }),
     line(" ", theme),
   ];
@@ -862,6 +1003,36 @@ function renderHome({ state, width, theme }: {
   rows.push(line(" ", theme));
   rows.push(line(truncate("Inbox opens all mail first; use a inside Inbox to choose an address.", width), theme, { fg: theme.muted }));
   return rows;
+}
+
+function renderMetricGrid(items: Array<[string, number, string]>, width: number, theme: TuiTheme): FrameLine[] {
+  const rows: FrameLine[] = [];
+  if (width >= 72) {
+    const colW = Math.max(26, Math.floor((width - 2) / 2));
+    for (let i = 0; i < items.length; i += 2) {
+      const left = metricCell(items[i]!, colW);
+      const right = items[i + 1] ? metricCell(items[i + 1]!, colW) : "";
+      rows.push(line(`${left.padEnd(colW)}  ${right.padEnd(colW)}`, theme, {
+        fg: theme.primary,
+        bg: theme.metricBg,
+        bold: true,
+      }));
+    }
+    return rows;
+  }
+  for (const item of items) {
+    rows.push(line(metricCell(item, width), theme, {
+      fg: theme.primary,
+      bg: theme.metricBg,
+      bold: true,
+    }));
+  }
+  return rows;
+}
+
+function metricCell([labelText, count, detail]: [string, number, string], width: number): string {
+  const value = String(count).padStart(4);
+  return truncate(`${labelText.padEnd(9)} ${value}  ${detail}`, width);
 }
 
 function renderAddressPicker({ addresses, state, width, height, theme }: {

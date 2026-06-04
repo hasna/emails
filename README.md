@@ -39,11 +39,14 @@ emails cloud push
 
 ## Email UI (`emails ui`)
 
-A clean, full-screen OpenTUI mail client with a simple home screen: Inbox,
-Compose, Profiles, and Settings. Inbox starts at all addresses and can be
-filtered to one email address when needed. Live read-state, local refresh,
-background auto-pull, and an `auto`/`light`/`dark` color theme keep the mailbox
-current and readable across terminals.
+A full-screen OpenTUI mail client with a responsive dashboard shell. Wide
+terminals use a two-column admin layout with persistent navigation, mailbox
+metrics, folders, actions, and a focused workspace. Narrow terminals collapse to
+a compact single-column view with the same Inbox, Compose, Profiles, and
+Settings flow. Inbox starts at all addresses and can be filtered to one email
+address when needed. Live read-state, local refresh, background auto-pull, and
+an `auto`/`light`/`dark` color theme keep the mailbox current and readable
+across terminals.
 
 ```bash
 emails ui

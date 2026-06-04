@@ -70,10 +70,10 @@ describe("emails ui App", () => {
     });
   }
 
-  async function renderApp(props?: { initialMailbox?: string }) {
+  async function renderApp(props?: { initialMailbox?: string }, size?: { width?: number; height?: number }) {
     setup = await testRender(React.createElement(App, props), {
-      width: 100,
-      height: 30,
+      width: size?.width ?? 100,
+      height: size?.height ?? 30,
       exitOnCtrlC: false,
       consoleMode: "disabled",
       openConsoleOnError: false,
@@ -134,6 +134,25 @@ describe("emails ui App", () => {
 
     expect(frame()).toContain("Inbox: All addresses");
     expect(frame()).toContain("hello inbox");
+  });
+
+  it("uses a two-column dashboard on wide terminals and collapses after resize", async () => {
+    seedMessage("wide message", "2026-01-01T10:00:00.000Z");
+    await renderApp({ initialMailbox: "inbox" }, { width: 132, height: 32 });
+
+    expect(frame()).toContain("NAVIGATION");
+    expect(frame()).toContain("FOLDERS");
+    expect(frame()).toContain("Inbox: All addresses");
+    expect(frame()).toContain("wide message");
+
+    await withAct(async () => {
+      setup?.resize(78, 26);
+    });
+    await setup?.flush();
+
+    expect(frame()).toContain("1 Inbox  2 Compose  3 Profiles  4 Settings");
+    expect(frame()).toContain("Inbox: All addresses");
+    expect(frame()).not.toContain("NAVIGATION");
   });
 
   it("opens compose with an editable From field defaulted from configured addresses", async () => {
