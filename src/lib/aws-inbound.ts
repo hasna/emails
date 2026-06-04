@@ -111,18 +111,32 @@ async function ensureS3Bucket(s3: S3Client, bucket: string, region: string): Pro
 }
 
 /**
- * Build the SES inbound bucket policy. The aws:SourceAccount condition must be
- * the REAL account id — a literal "*" with StringEquals never matches, which
- * denies SES (InvalidS3ConfigurationException). When the account id is unknown,
- * omit the condition entirely (SES can still write). Pure + testable.
+ * Build the SES inbound bucket policy.
+ *
+ * The grant Resource MUST cover the shared inbound base (e.g. `inbound/*`), NOT
+ * the single per-domain prefix. `PutBucketPolicy` REPLACES the whole policy, so
+ * a per-domain Resource means every `domain adopt` clobbers the previous
+ * domain's grant — only the last-adopted domain can receive; all others bounce
+ * with "recipient error" because SES can't write their objects. Granting the
+ * shared base makes the policy identical for every domain → idempotent, no
+ * clobbering.
+ *
+ * The aws:SourceAccount condition must be the REAL account id — a literal "*"
+ * with StringEquals never matches, which denies SES
+ * (InvalidS3ConfigurationException). When the account id is unknown, omit the
+ * condition entirely (SES can still write). Pure + testable.
  */
 export function buildSesBucketPolicy(bucket: string, prefix: string, accountId?: string): object {
+  // Shared base = the top-level folder of the prefix (e.g. "inbound" from
+  // "inbound/elyratelier.com/"); fall back to the whole bucket if there is none.
+  const base = prefix.split("/")[0];
+  const resource = base ? `arn:aws:s3:::${bucket}/${base}/*` : `arn:aws:s3:::${bucket}/*`;
   const statement: Record<string, unknown> = {
     Sid: "AllowSESPuts",
     Effect: "Allow",
     Principal: { Service: "ses.amazonaws.com" },
     Action: "s3:PutObject",
-    Resource: `arn:aws:s3:::${bucket}/${prefix}*`,
+    Resource: resource,
   };
   if (accountId) statement["Condition"] = { StringEquals: { "aws:SourceAccount": accountId } };
   return { Version: "2012-10-17", Statement: [statement] };

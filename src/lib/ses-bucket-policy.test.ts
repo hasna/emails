@@ -7,7 +7,9 @@ describe("buildSesBucketPolicy", () => {
     const stmt = p.Statement[0];
     expect(stmt.Principal.Service).toBe("ses.amazonaws.com");
     expect(stmt.Action).toBe("s3:PutObject");
-    expect(stmt.Resource).toBe("arn:aws:s3:::b/inbound/x.com/*");
+    // Shared inbound base, NOT per-domain — a per-domain grant gets clobbered on
+    // the next `domain adopt` (PutBucketPolicy replaces the whole policy).
+    expect(stmt.Resource).toBe("arn:aws:s3:::b/inbound/*");
     expect(stmt.Condition.StringEquals["aws:SourceAccount"]).toBe("638389534677");
   });
   it("omits the condition when account id is unknown (never uses literal '*')", () => {

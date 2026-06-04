@@ -28,7 +28,7 @@ mock.module("@aws-sdk/client-s3", () => ({
   GetObjectCommand: class { constructor(public input: unknown) {} },
 }));
 
-const { setupInboundEmail } = await import("./aws-inbound.js");
+const { setupInboundEmail, buildSesBucketPolicy } = await import("./aws-inbound.js");
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -60,6 +60,33 @@ function setupMocks(bucketExists = false) {
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
+
+describe("buildSesBucketPolicy — must not clobber other domains' grants", () => {
+  type Pol = { Statement: { Resource: string; Condition?: unknown }[] };
+  it("grants the shared inbound base, not a single per-domain prefix", () => {
+    const pol = buildSesBucketPolicy("buck", "inbound/elyratelier.com/", "111122223333") as Pol;
+    // Must cover ALL inbound objects so a later adopt of another domain still works.
+    expect(pol.Statement[0]!.Resource).toBe("arn:aws:s3:::buck/inbound/*");
+  });
+
+  it("produces an IDENTICAL policy for different domains (idempotent — no clobber)", () => {
+    const a = JSON.stringify(buildSesBucketPolicy("buck", "inbound/elyratelier.com/", "111122223333"));
+    const b = JSON.stringify(buildSesBucketPolicy("buck", "inbound/droolbowl.com/", "111122223333"));
+    // Re-adopting droolbowl must not change the grant that lets elyratelier receive.
+    expect(a).toBe(b);
+  });
+
+  it("falls back to the whole bucket when prefix has no folder", () => {
+    const pol = buildSesBucketPolicy("buck", "", "111122223333") as Pol;
+    expect(pol.Statement[0]!.Resource).toBe("arn:aws:s3:::buck/*");
+  });
+
+  it("keeps the SourceAccount condition when an account id is given (and omits it otherwise)", () => {
+    expect((buildSesBucketPolicy("buck", "inbound/x.com/", "111122223333") as Pol).Statement[0]!.Condition)
+      .toEqual({ StringEquals: { "aws:SourceAccount": "111122223333" } });
+    expect((buildSesBucketPolicy("buck", "inbound/x.com/") as Pol).Statement[0]!.Condition).toBeUndefined();
+  });
+});
 
 describe("setupInboundEmail", () => {
   it("creates bucket and receipt rule when neither exists", async () => {
