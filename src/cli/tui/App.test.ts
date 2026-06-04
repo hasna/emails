@@ -70,23 +70,26 @@ describe("emails ui App", () => {
     });
   }
 
+  const withAct = async (fn: () => void | Promise<void>) => {
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+    await act(fn);
+  };
+
   async function renderApp(props?: { initialMailbox?: string }, size?: { width?: number; height?: number }) {
-    setup = await testRender(React.createElement(App, props), {
-      width: size?.width ?? 100,
-      height: size?.height ?? 30,
-      exitOnCtrlC: false,
-      consoleMode: "disabled",
-      openConsoleOnError: false,
+    await withAct(async () => {
+      setup = await testRender(React.createElement(App, props), {
+        width: size?.width ?? 100,
+        height: size?.height ?? 30,
+        exitOnCtrlC: false,
+        consoleMode: "disabled",
+        openConsoleOnError: false,
+      });
     });
     await setup.flush();
     return setup;
   }
 
   const frame = () => setup?.captureCharFrame() ?? "";
-  const withAct = async (fn: () => void | Promise<void>) => {
-    globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-    await act(fn);
-  };
   const type = async (text: string) => {
     await withAct(async () => {
       await setup?.mockInput.typeText(text);
