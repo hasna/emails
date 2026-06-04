@@ -143,7 +143,7 @@ export function App({ initialMailbox }: AppProps) {
     if (input === "p") { setView("profiles"); return; }
     if (input === ",") { setView("settings"); return; }
     if (input === "a" || input === "A") { cycleSource(input === "a" ? 1 : -1); return; }
-    if (input === "g") { flash("refreshing…"); void autoPull().then((r) => { reload(); flash(r?.pulled ? `↓ ${r.pulled} new` : "up to date", "ok"); }); return; }
+    if (input === "g") { flash("refreshing…"); void autoPull({ limit: 1000 }).then((r) => { reload(); flash(r?.pulled ? `↓ ${r.pulled} new` : "up to date", "ok"); }); return; }
 
     if (view === "reader") {
       if (key.upArrow || input === "k") setScroll((s) => Math.max(0, s - 1));

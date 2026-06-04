@@ -9,11 +9,12 @@
  * Entirely best-effort: missing config/creds/connector-auth is a silent no-op.
  */
 export interface PullResult { pulled: number; ok: boolean; reason?: string; configured: boolean }
-export interface PullOpts { s3?: boolean; gmail?: boolean }
+export interface PullOpts { s3?: boolean; gmail?: boolean; limit?: number }
 
 export async function autoPull(opts?: PullOpts): Promise<PullResult> {
   const doS3 = opts?.s3 !== false;
   const doGmail = opts?.gmail === true;
+  const limit = opts?.limit ?? 100;
   const { getInboundConfig, getInboundBuckets, loadConfig } = await import("../../lib/config.js");
   const inbound = getInboundConfig();
   const buckets = getInboundBuckets();
@@ -38,19 +39,29 @@ export async function autoPull(opts?: PullOpts): Promise<PullResult> {
             bucket: b.bucket, prefix: inbound.prefix, region: b.region,
             accessKeyId: prov?.access_key ?? undefined,
             secretAccessKey: prov?.secret_key ?? undefined,
-            limit: 100,
+            limit,
           });
           n += r.synced;
         }
         return n;
       };
-      if (queueUrl && buckets.length > 0) {
-        const { makeSqsAdapter } = await import("../../lib/inbound-realtime-aws.js");
-        const { watchInboundOnce } = await import("../../lib/inbound-realtime.js");
-        const sqs = makeSqsAdapter({ queueUrl, region: inbound.region, waitTimeSeconds: 1 });
-        await watchInboundOnce(sqs, queueUrl, async () => { const n = await syncAll(); pulled += n; return { synced: n }; });
-      } else if (buckets.length > 0) {
+      // Always do a full dedup-safe scan of every bucket — this catches mail for
+      // EVERY domain regardless of realtime wiring. (A previous version only
+      // scanned S3 when the realtime SQS queue had messages; since that queue is
+      // wired for one domain, mail to every other domain was never auto-pulled.)
+      if (buckets.length > 0) {
         pulled += await syncAll();
+        // Best-effort: drain the realtime SQS queue so it doesn't back up. The
+        // objects it points to are already covered by the scan above, so we just
+        // clear it (no extra sync needed).
+        if (queueUrl) {
+          try {
+            const { makeSqsAdapter } = await import("../../lib/inbound-realtime-aws.js");
+            const { watchInboundOnce } = await import("../../lib/inbound-realtime.js");
+            const sqs = makeSqsAdapter({ queueUrl, region: inbound.region, waitTimeSeconds: 1 });
+            await watchInboundOnce(sqs, queueUrl, async () => ({ synced: 0 }));
+          } catch { /* realtime drain is best-effort */ }
+        }
       }
     } catch (e) { ok = false; reason = e instanceof Error ? e.message : String(e); }
   }
