@@ -1,17 +1,48 @@
 import type { Command } from "commander";
 import chalk from "chalk";
 import { createDomain, listDomains, deleteDomain, getDomain, getDomainByName, updateDnsStatus } from "../../db/domains.js";
+import { listAddresses } from "../../db/addresses.js";
 import { getProvider } from "../../db/providers.js";
 import { getDatabase } from "../../db/database.js";
 import { getAdapter } from "../../providers/index.js";
 import { formatDnsTable } from "../../lib/dns.js";
-import { colorDnsStatus, truncate, formatDate, tableRow } from "../../lib/format.js";
+import { colorDnsStatus, truncate, tableRow } from "../../lib/format.js";
 import { confirmDestructiveAction, handleError, resolveId } from "../utils.js";
 import { createWarmingSchedule, getWarmingSchedule, listWarmingSchedules, updateWarmingStatus } from "../../db/warming.js";
 import { formatWarmingStatus, generateWarmingPlan, getTodayLimit, getTodaySentCount } from "../../lib/warming.js";
+import { getAddressProvisioning, getDomainProvisioning } from "../../db/provisioning.js";
+import { assessDomainReadiness, formatDomainReadinessState } from "../../lib/domain-readiness.js";
 
 export function registerDomainCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   const domainCmd = program.command("domain").description("Manage sending domains");
+
+  const listDomainsAction = (opts: { provider?: string }) => {
+    try {
+      const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
+      const domains = listDomains(providerId);
+      if (domains.length === 0) {
+        output([], chalk.dim("No domains configured."));
+        return;
+      }
+      const lines: string[] = [chalk.bold("\nDomains:")];
+      for (const d of domains) {
+        const dkim = colorDnsStatus(d.dkim_status);
+        const spf = colorDnsStatus(d.spf_status);
+        const dmarc = colorDnsStatus(d.dmarc_status);
+        lines.push(`  ${chalk.cyan(d.id.slice(0, 8))}  ${d.domain}  DKIM:${dkim}  SPF:${spf}  DMARC:${dmarc}`);
+      }
+      lines.push("");
+      output(domains, lines.join("\n"));
+    } catch (e) {
+      handleError(e);
+    }
+  };
+
+  program
+    .command("domains")
+    .description("List sending domains (alias: emails domain list)")
+    .option("--provider <id>", "Filter by provider ID")
+    .action(listDomainsAction);
 
   domainCmd
     .command("add <domain>")
@@ -130,27 +161,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .command("list")
     .description("List domains")
     .option("--provider <id>", "Filter by provider ID")
-    .action((opts: { provider?: string }) => {
-      try {
-        const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
-        const domains = listDomains(providerId);
-        if (domains.length === 0) {
-          output([], chalk.dim("No domains configured."));
-          return;
-        }
-        const lines: string[] = [chalk.bold("\nDomains:")];
-        for (const d of domains) {
-          const dkim = colorDnsStatus(d.dkim_status);
-          const spf = colorDnsStatus(d.spf_status);
-          const dmarc = colorDnsStatus(d.dmarc_status);
-          lines.push(`  ${chalk.cyan(d.id.slice(0, 8))}  ${d.domain}  DKIM:${dkim}  SPF:${spf}  DMARC:${dmarc}`);
-        }
-        lines.push("");
-        output(domains, lines.join("\n"));
-      } catch (e) {
-        handleError(e);
-      }
-    });
+    .action(listDomainsAction);
 
   domainCmd
     .command("dns <domain>")
@@ -216,40 +227,69 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
 
   domainCmd
     .command("status")
-    .description("Show domain status summary table")
+    .description("Show domain readiness summary table")
     .option("--provider <id>", "Filter by provider ID")
     .action((opts: { provider?: string }) => {
       try {
+        const db = getDatabase();
         const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
-        const domains = listDomains(providerId);
+        const domains = listDomains(providerId, db);
         if (domains.length === 0) {
           output([], chalk.dim("No domains configured."));
           return;
         }
+        const addresses = listAddresses(undefined, db);
+        const rows = domains.map((d) => {
+          const provider = getProvider(d.provider_id);
+          const provisioning = getDomainProvisioning(d.id, db);
+          const ready_addresses = addresses.filter((address) => {
+            const addressProvisioning = getAddressProvisioning(address.id, db);
+            return addressProvisioning?.domain_id === d.id && addressProvisioning.provisioning_status === "ready";
+          }).length;
+          const readiness = assessDomainReadiness(d, provisioning, { ready_addresses });
+          return {
+            ...d,
+            provider_name: provider?.name ?? null,
+            provisioning,
+            readiness,
+          };
+        });
         const lines: string[] = [""];
         lines.push(tableRow(
-          [chalk.bold("Domain"), 16],
-          [chalk.bold("Provider"), 12],
-          [chalk.bold("DKIM"), 12],
-          [chalk.bold("SPF"), 12],
-          [chalk.bold("DMARC"), 12],
-          [chalk.bold("Last Verified"), 18],
+          [chalk.bold("Domain"), 18],
+          [chalk.bold("Provider"), 14],
+          [chalk.bold("Send"), 12],
+          [chalk.bold("Receive"), 12],
+          [chalk.bold("DNS"), 22],
+          [chalk.bold("Readiness"), 28],
         ));
-        for (const d of domains) {
-          const provider = getProvider(d.provider_id);
-          const providerName = provider ? truncate(provider.name, 12) : d.provider_id.slice(0, 8);
-          const lastVerified = d.verified_at ? formatDate(d.verified_at) : chalk.dim("never");
+        for (const row of rows) {
+          const providerName = row.provider_name ? truncate(row.provider_name, 14) : row.provider_id.slice(0, 8);
+          const send = row.readiness.send_ready ? chalk.green("ready") : chalk.yellow("not ready");
+          const receive = row.readiness.receive_ready ? chalk.green("ready") : chalk.yellow("not ready");
+          const dns = `D:${colorDnsStatus(row.dkim_status)} S:${colorDnsStatus(row.spf_status)} M:${colorDnsStatus(row.dmarc_status)}`;
+          const state = row.readiness.state === "broken"
+            ? chalk.red(formatDomainReadinessState(row.readiness.state))
+            : row.readiness.state.includes("ready")
+              ? chalk.green(formatDomainReadinessState(row.readiness.state))
+              : chalk.yellow(formatDomainReadinessState(row.readiness.state));
           lines.push(tableRow(
-            [truncate(d.domain, 16), 16],
-            [providerName, 12],
-            [colorDnsStatus(d.dkim_status), 12],
-            [colorDnsStatus(d.spf_status), 12],
-            [colorDnsStatus(d.dmarc_status), 12],
-            [lastVerified, 18],
+            [truncate(row.domain, 18), 18],
+            [providerName, 14],
+            [send, 12],
+            [receive, 12],
+            [dns, 22],
+            [state, 28],
           ));
+          if (row.readiness.issues.length > 0) {
+            lines.push(chalk.dim(`  ${row.domain}: ${row.readiness.issues.join(", ")}`));
+          }
+          if (row.readiness.fix_commands.length > 0 && !row.readiness.receive_ready) {
+            lines.push(chalk.dim(`  fix: ${row.readiness.fix_commands[0]}`));
+          }
         }
         lines.push("");
-        output(domains, lines.join("\n"));
+        output(rows, lines.join("\n"));
       } catch (e) {
         handleError(e);
       }

@@ -11,6 +11,35 @@ import { confirmDestructiveAction, handleError, resolveId } from "../utils.js";
 export function registerAddressCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   const addressCmd = program.command("address").description("Manage sender email addresses");
 
+  const listAddressesAction = (opts: { provider?: string }) => {
+    try {
+      const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
+      const addresses = listAddresses(providerId);
+      if (addresses.length === 0) {
+        output([], chalk.dim("No addresses configured."));
+        return;
+      }
+      const lines: string[] = [chalk.bold("\nAddresses:")];
+      for (const a of addresses) {
+        const verified = a.verified ? colorDnsStatus("verified") : colorDnsStatus("pending");
+        const name = a.display_name ? ` (${a.display_name})` : "";
+        const status = a.status === "suspended" ? chalk.red("suspended") : chalk.green("active");
+        const quota = a.daily_quota !== null ? chalk.dim(`  quota ${countSendsToday(a.email)}/${a.daily_quota}/day`) : "";
+        lines.push(`  ${chalk.cyan(a.id.slice(0, 8))}  ${a.email}${name}  [${verified}] [${status}]${quota}`);
+      }
+      lines.push("");
+      output(addresses, lines.join("\n"));
+    } catch (e) {
+      handleError(e);
+    }
+  };
+
+  program
+    .command("addresses")
+    .description("List sender email addresses (alias: emails address list)")
+    .option("--provider <id>", "Filter by provider ID")
+    .action(listAddressesAction);
+
   addressCmd
     .command("add <email>")
     .description("Add a sender address")
@@ -36,28 +65,7 @@ export function registerAddressCommands(program: Command, output: (data: unknown
     .command("list")
     .description("List sender addresses")
     .option("--provider <id>", "Filter by provider ID")
-    .action((opts: { provider?: string }) => {
-      try {
-        const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
-        const addresses = listAddresses(providerId);
-        if (addresses.length === 0) {
-          output([], chalk.dim("No addresses configured."));
-          return;
-        }
-        const lines: string[] = [chalk.bold("\nAddresses:")];
-        for (const a of addresses) {
-          const verified = a.verified ? colorDnsStatus("verified") : colorDnsStatus("pending");
-          const name = a.display_name ? ` (${a.display_name})` : "";
-          const status = a.status === "suspended" ? chalk.red("suspended") : chalk.green("active");
-          const quota = a.daily_quota !== null ? chalk.dim(`  quota ${countSendsToday(a.email)}/${a.daily_quota}/day`) : "";
-          lines.push(`  ${chalk.cyan(a.id.slice(0, 8))}  ${a.email}${name}  [${verified}] [${status}]${quota}`);
-        }
-        lines.push("");
-        output(addresses, lines.join("\n"));
-      } catch (e) {
-        handleError(e);
-      }
-    });
+    .action(listAddressesAction);
 
   addressCmd
     .command("verify <email>")

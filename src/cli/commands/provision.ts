@@ -48,11 +48,16 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
     .option("--forward-to <email>", "Forward target (for cf-routing)")
     .option("--owner <name|id>", "Owner (human or agent). Human owners require --administrator.")
     .option("--administrator <name|id>", "Administering agent (required for human owners; defaults to owner for agents)")
-    .action(async (email: string, opts: { provider: string; domain?: string; receive: string; forwardTo?: string; owner?: string; administrator?: string }) => {
+    .option("--wait", "Advance provisioning now and wait until the address is ready to receive")
+    .option("--timeout <sec>", "Max seconds to wait when --wait is used", "120")
+    .option("--interval <sec>", "Seconds between readiness checks when --wait is used", "5")
+    .option("--bucket <name>", "Inbound S3 bucket for receive validation (defaults to config inbound_s3_bucket)")
+    .action(async (email: string, opts: { provider: string; domain?: string; receive: string; forwardTo?: string; owner?: string; administrator?: string; wait?: boolean; timeout: string; interval: string; bucket?: string }) => {
       try {
         const db = getDatabase();
         const providerId = resolveId("providers", opts.provider);
-        if (!getProvider(providerId)) handleError(new Error(`Provider not found: ${opts.provider}`));
+        const provider = getProvider(providerId);
+        if (!provider) handleError(new Error(`Provider not found: ${opts.provider}`));
         const addr = getAddressByEmail(providerId, email, db) ?? createAddress({ provider_id: providerId, email }, db);
         const domainName = email.split("@")[1];
         const domainId = opts.domain ? resolveId("domains", opts.domain) : (domainName ? getDomainByName(providerId, domainName, db)?.id ?? null : null);
@@ -72,7 +77,46 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
           const own = assignAddressOwner(addr.id, owner.id, admin?.id, db);
           ownerNote = ` owner=${owner.name}(${owner.type}) admin=${own.administrator_id === owner.id ? "self" : opts.administrator}`;
         }
-        output({ id: addr.id, email, receive: opts.receive }, chalk.green(`✓ address ${email} provisioned (receive=${opts.receive})${ownerNote}`));
+
+        let provisioning = getAddressProvisioning(addr.id, db);
+        if (opts.wait) {
+          const { getInboundConfig } = await import("../../lib/config.js");
+          const cfg = getInboundConfig();
+          if (cfg.profile) process.env["AWS_PROFILE"] = cfg.profile;
+          const bucket = opts.bucket ?? cfg.bucket;
+          if (!bucket) handleError(new Error("No inbound bucket: pass --bucket or set inbound_s3_bucket"));
+
+          const { makeAddressDeps } = await import("../../lib/provision/real-deps.js");
+          const { advanceAddress } = await import("../../lib/provision/orchestrator.js");
+          const deps = makeAddressDeps({ provider: provider!, inboundBucket: bucket!, region: cfg.region, db });
+          const deadline = Date.now() + Math.max(1, parseInt(opts.timeout, 10) || 120) * 1000;
+          const intervalMs = Math.max(1, parseInt(opts.interval, 10) || 5) * 1000;
+
+          while (Date.now() < deadline) {
+            provisioning = getAddressProvisioning(addr.id, db);
+            if (provisioning?.provisioning_status === "ready") break;
+            if (provisioning?.provisioning_status === "failed") {
+              handleError(new Error(`Address provisioning failed: ${provisioning.last_error ?? "unknown error"}`));
+            }
+            const res = await advanceAddress(addr.id, deps, { db, now: new Date().toISOString() });
+            provisioning = getAddressProvisioning(addr.id, db);
+            if (provisioning?.provisioning_status === "ready") break;
+            if (res.error || provisioning?.provisioning_status === "failed") {
+              handleError(new Error(`Address provisioning failed: ${res.error ?? provisioning?.last_error ?? "unknown error"}`));
+            }
+            await new Promise((resolve) => setTimeout(resolve, intervalMs));
+          }
+
+          provisioning = getAddressProvisioning(addr.id, db);
+          if (provisioning?.provisioning_status !== "ready") {
+            handleError(new Error(`Timed out waiting for ${email} to become ready (current=${provisioning?.provisioning_status ?? "unknown"})`));
+          }
+        }
+
+        const readyText = provisioning?.provisioning_status === "ready"
+          ? chalk.green(`✓ address ${email} ready to receive (receive=${opts.receive})${ownerNote}`)
+          : chalk.green(`✓ address ${email} requested (receive=${opts.receive})${ownerNote}`) + chalk.dim(`\n  Finish now: emails provision address ${email} --provider ${opts.provider} --wait`);
+        output({ id: addr.id, email, receive: opts.receive, provisioning }, readyText);
       } catch (e) { handleError(e); }
     });
 
