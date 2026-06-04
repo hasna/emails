@@ -6,8 +6,8 @@ import { createAddress, markVerified } from "../../db/addresses.js";
 import { storeInboundEmail, setInboundRead, setInboundStarred, setInboundArchived } from "../../db/inbound.js";
 import {
   listMailbox, mailboxCounts, getMessageBody, toggleStar, toggleRead, archiveMessage,
-  replyDefaults, sendComposed, listSources, getSettings, setSetting,
-  defaultFromAddress,
+  replyDefaults, sendComposed, listSources, listInboxAddresses, getSettings, setSetting,
+  defaultFromAddress, providerIdForSender,
 } from "./data.js";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
@@ -205,6 +205,22 @@ describe("tui data — Sent folder (Gmail SENT + app-sent)", () => {
 });
 
 describe("tui data — inbox sources (per-inbox switching)", () => {
+  it("lists All addresses, configured addresses, and observed recipients", () => {
+    createAddress({ provider_id: providerId, email: "ops@elyratelier.com" });
+    seed("observed", { to: ['"Signup" <signup@wobblyrobottaco.com>'] });
+    storeInboundEmail({
+      provider_id: providerId, message_id: "<sent-client@x>", from_address: "me@elyratelier.com", to_addresses: ["client@example.com"],
+      cc_addresses: [], subject: "sent client", text_body: "b", html_body: null, attachments: [],
+      label_ids: ["SENT"], headers: {}, raw_size: 1, received_at: new Date().toISOString(),
+    });
+
+    const choices = listInboxAddresses();
+    expect(choices[0]).toMatchObject({ id: "all", label: "All addresses" });
+    expect(choices.some((choice) => choice.address === "ops@elyratelier.com" && choice.configured)).toBe(true);
+    expect(choices.some((choice) => choice.address === "signup@wobblyrobottaco.com" && choice.observed)).toBe(true);
+    expect(choices.some((choice) => choice.address === "client@example.com")).toBe(false);
+  });
+
   it("lists All + each active provider + each registered domain", () => {
     createDomain(providerId, "elyratelier.com");
     const sources = listSources();
@@ -228,6 +244,28 @@ describe("tui data — inbox sources (per-inbox switching)", () => {
     seed("to-other", { to: ["x@droolbowl.com"] });
     const only = listMailbox("inbox", { source: { domain: "elyratelier.com" } }).map((m) => m.subject);
     expect(only).toEqual(["to-elyra"]);
+  });
+
+  it("filters received and sent mail by exact email address", async () => {
+    seed("to-ops", { to: ['"Ops Team" <ops@elyratelier.com>'] });
+    seed("to-team", { to: ["team@elyratelier.com"] });
+    await sendComposed({ from: "ops@elyratelier.com", to: "client@y.com", subject: "sent ops", body: "hi", providerId });
+    await sendComposed({ from: "team@elyratelier.com", to: "client@y.com", subject: "sent team", body: "hi", providerId });
+
+    const inbox = listMailbox("inbox", { source: { address: "ops@elyratelier.com" } }).map((m) => m.subject);
+    expect(inbox).toEqual(["to-ops"]);
+    const sent = listMailbox("sent", { source: { address: "ops@elyratelier.com" } }).map((m) => m.subject);
+    expect(sent).toContain("sent ops");
+    expect(sent).not.toContain("sent team");
+    expect(mailboxCounts({ source: { address: "ops@elyratelier.com" } }).inbox).toBe(1);
+    expect(mailboxCounts({ source: { address: "ops@elyratelier.com" } }).sent).toBe(1);
+  });
+
+  it("resolves sender provider by configured From address", () => {
+    const address = createAddress({ provider_id: providerId, email: "ops@elyratelier.com" });
+    markVerified(address.id);
+    expect(providerIdForSender("ops@elyratelier.com")).toBe(providerId);
+    expect(providerIdForSender("missing@elyratelier.com")).toBeNull();
   });
 
   it("computes counts for the active source", async () => {
@@ -280,6 +318,8 @@ describe("tui data — settings (persisted to config)", () => {
     expect(s.gmailAutoPull).toBe(true);
     expect(s.dimRead).toBe(false);
     expect(s.defaultMailbox).toBe("inbox");
+    expect(s.defaultAddress).toBeNull();
+    expect(s.defaultFrom).toBeNull();
     expect(s.theme).toBe("auto");
   });
 
@@ -287,11 +327,15 @@ describe("tui data — settings (persisted to config)", () => {
     setSetting("autoPull", false);
     setSetting("dimRead", true);
     setSetting("defaultMailbox", "starred");
+    setSetting("defaultAddress", "ops@example.com");
+    setSetting("defaultFrom", "team@example.com");
     setSetting("theme", "dark");
     const s = getSettings();
     expect(s.autoPull).toBe(false);
     expect(s.dimRead).toBe(true);
     expect(s.defaultMailbox).toBe("starred");
+    expect(s.defaultAddress).toBe("ops@example.com");
+    expect(s.defaultFrom).toBe("team@example.com");
     expect(s.theme).toBe("dark");
   });
 });

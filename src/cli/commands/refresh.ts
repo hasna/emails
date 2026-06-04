@@ -6,7 +6,7 @@ import { handleError } from "../utils.js";
 /**
  * `emails refresh` — one-shot "pull everything now". Syncs every configured
  * inbound S3 bucket (each with its own provider creds / AWS account) and,
- * optionally, the Gmail accounts — the same engine the interactive TUI runs in
+ * optionally, the Gmail accounts — the same pull engine emails ui runs in
  * the background, exposed as a single instant command so you never have to type
  * `inbox sync-s3 --bucket … --prefix … --profile … --provider …` by hand.
  */

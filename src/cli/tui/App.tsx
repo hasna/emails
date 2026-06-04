@@ -12,18 +12,19 @@ import {
   replyDefaults,
   sendComposed,
   listProfiles,
-  listSources,
+  listInboxAddresses,
   getSettings,
   setSetting,
   defaultFromAddress,
+  addressChoiceByAddress,
+  ALL_ADDRESSES,
   MAILBOXES,
   mailboxLabel,
   type Mailbox,
   type MailboxCounts,
-  type MailboxSource,
   type TuiMessage,
   type ProfileInfo,
-  type InboxSource,
+  type InboxAddressChoice,
   type TuiSettings,
 } from "./data.js";
 import { autoPull } from "./autopull.js";
@@ -31,7 +32,7 @@ import { truncate, senderName, relativeTime, formatDate, wrapText } from "./form
 import { nextThemeMode, resolveTheme, type TuiTheme } from "./theme.js";
 import { startEventLoopWatchdog } from "./watchdog.js";
 
-type View = "list" | "reader" | "compose" | "profiles" | "settings";
+type View = "home" | "list" | "addressPicker" | "reader" | "compose" | "profiles" | "settings";
 type ComposeField = "from" | "to" | "subject" | "body";
 
 interface ComposeState {
@@ -40,6 +41,7 @@ interface ComposeState {
   subject: string;
   body: string;
   field: ComposeField;
+  returnTo: View;
   replyTo?: TuiMessage;
 }
 
@@ -56,7 +58,9 @@ interface LoadedMailbox {
 
 interface Model extends LoadedMailbox {
   mailbox: Mailbox;
-  sourceIdx: number;
+  addressIdx: number;
+  homeIdx: number;
+  addressPickerIdx: number;
   selectedId: string | null;
   view: View;
   searchActive: boolean;
@@ -75,8 +79,12 @@ type Action =
   | { type: "clearStatus"; text: string }
   | { type: "setMailbox"; mailbox: Mailbox }
   | { type: "cycleMailbox"; delta: number }
-  | { type: "cycleSource"; delta: number; count: number }
-  | { type: "clampSource"; count: number }
+  | { type: "setAddress"; index: number }
+  | { type: "syncAddressIndex"; index: number }
+  | { type: "clampAddresses"; count: number }
+  | { type: "selectHomeOffset"; delta: number }
+  | { type: "selectAddressPickerOffset"; delta: number; count: number }
+  | { type: "openAddressPicker" }
   | { type: "selectOffset"; delta: number }
   | { type: "view"; view: View }
   | { type: "reader"; scroll?: number }
@@ -98,7 +106,7 @@ const GMAIL_PULL_MS = 120000;
 const AUTOPULL_START_DELAY_MS = 15000;
 const USER_IDLE_MS = 1500;
 const STATUS_MS = 5000;
-const ALL_SOURCE: InboxSource = { id: "all", label: "All Mail" };
+const HOME_ITEMS = ["Inbox", "Compose", "Profiles", "Settings"] as const;
 
 function useDimensions(): { cols: number; rows: number } {
   const { stdout } = useStdout();
@@ -114,13 +122,12 @@ function useDimensions(): { cols: number; rows: number } {
   return dims;
 }
 
-function sourceToFilter(source: InboxSource | undefined): MailboxSource | undefined {
-  if (!source?.providerId && !source?.domain) return undefined;
-  return { providerId: source.providerId, domain: source.domain };
+function choiceToFilter(choice: InboxAddressChoice | undefined): { address?: string } | undefined {
+  return choice?.address ? { address: choice.address } : undefined;
 }
 
-function loadMailbox(mailbox: Mailbox, search: string, source: InboxSource | undefined): LoadedMailbox {
-  const filter = sourceToFilter(source);
+function loadMailbox(mailbox: Mailbox, search: string, choice: InboxAddressChoice | undefined): LoadedMailbox {
+  const filter = choiceToFilter(choice);
   const messages = listMailbox(mailbox, { search: search || undefined, source: filter });
   const counts = mailboxCounts(filter ? { source: filter } : undefined);
   const allCounts = filter ? mailboxCounts() : counts;
@@ -168,19 +175,32 @@ function reducer(state: Model, action: Action): Model {
       const mailbox = MAILBOXES[(i + action.delta + MAILBOXES.length) % MAILBOXES.length]!;
       return { ...state, mailbox, selectedId: null, view: "list", readerScroll: 0 };
     }
-    case "cycleSource": {
-      if (action.count < 2) return state;
-      const sourceIdx = (state.sourceIdx + action.delta + action.count) % action.count;
-      return { ...state, sourceIdx, selectedId: null, view: "list", readerScroll: 0 };
+    case "setAddress":
+      return { ...state, addressIdx: action.index, selectedId: null, view: "list", readerScroll: 0 };
+    case "syncAddressIndex":
+      return { ...state, addressIdx: action.index, addressPickerIdx: Math.min(state.addressPickerIdx, action.index) };
+    case "clampAddresses": {
+      if (action.count <= 0) return { ...state, addressIdx: 0, addressPickerIdx: 0 };
+      return {
+        ...state,
+        addressIdx: Math.min(state.addressIdx, action.count - 1),
+        addressPickerIdx: Math.min(state.addressPickerIdx, action.count - 1),
+      };
     }
-    case "clampSource": {
-      if (action.count <= 0) return { ...state, sourceIdx: 0 };
-      return state.sourceIdx >= action.count ? { ...state, sourceIdx: action.count - 1 } : state;
+    case "selectHomeOffset": {
+      const next = Math.min(HOME_ITEMS.length - 1, Math.max(0, state.homeIdx + action.delta));
+      return { ...state, homeIdx: next };
     }
+    case "selectAddressPickerOffset": {
+      const next = Math.min(Math.max(0, action.count - 1), Math.max(0, state.addressPickerIdx + action.delta));
+      return { ...state, addressPickerIdx: next };
+    }
+    case "openAddressPicker":
+      return { ...state, addressPickerIdx: state.addressIdx, view: "addressPicker" };
     case "selectOffset":
       return { ...state, selectedId: selectWithin(state.messages, state.selectedId, action.delta) };
     case "view":
-      return { ...state, view: action.view };
+      return { ...state, view: action.view, searchActive: action.view === "list" ? state.searchActive : false };
     case "reader":
       return { ...state, view: "reader", readerScroll: action.scroll ?? 0 };
     case "scroll":
@@ -198,7 +218,7 @@ function reducer(state: Model, action: Action): Model {
     case "composeStart":
       return { ...state, view: "compose", compose: action.compose };
     case "composeCancel":
-      return { ...state, view: "list", compose: null };
+      return { ...state, view: state.compose?.returnTo ?? "home", compose: null };
     case "composePatch":
       return state.compose ? { ...state, compose: { ...state.compose, ...action.patch } } : state;
     case "settingsPatch":
@@ -206,11 +226,11 @@ function reducer(state: Model, action: Action): Model {
   }
 }
 
-function sameSources(a: InboxSource[], b: InboxSource[]): boolean {
+function sameAddressChoices(a: InboxAddressChoice[], b: InboxAddressChoice[]): boolean {
   if (a.length !== b.length) return false;
   return a.every((x, i) => {
     const y = b[i];
-    return y && x.id === y.id && x.label === y.label && x.providerId === y.providerId && x.domain === y.domain;
+    return y && x.id === y.id && x.label === y.label && x.address === y.address && x.configured === y.configured && x.observed === y.observed;
   });
 }
 
@@ -223,18 +243,22 @@ export function App({ initialMailbox }: AppProps) {
   const { cols, rows } = useDimensions();
   const lastInputAt = useRef(0);
   const backgroundBusy = useRef(false);
-  const initialSources = useMemo(() => listSources(), []);
-  const [sources, setSources] = useState<InboxSource[]>(initialSources.length ? initialSources : [ALL_SOURCE]);
+  const initialChoices = useMemo(() => listInboxAddresses(), []);
+  const [addresses, setAddresses] = useState<InboxAddressChoice[]>(initialChoices.length ? initialChoices : [ALL_ADDRESSES]);
   const initialModel = useMemo<Model>(() => {
     const settings = getSettings();
     const mailbox = initialMailbox ?? settings.defaultMailbox;
-    const source = initialSources[0] ?? ALL_SOURCE;
-    const loaded = loadMailbox(mailbox, "", source);
+    const configuredChoice = addressChoiceByAddress(settings.defaultAddress);
+    const addressIdx = Math.max(0, (initialChoices.length ? initialChoices : [ALL_ADDRESSES]).findIndex((choice) => choice.id === configuredChoice.id));
+    const choice = (initialChoices.length ? initialChoices : [ALL_ADDRESSES])[addressIdx] ?? ALL_ADDRESSES;
+    const loaded = loadMailbox(mailbox, "", choice);
     return {
       mailbox,
-      sourceIdx: 0,
+      addressIdx,
+      homeIdx: 0,
+      addressPickerIdx: addressIdx,
       selectedId: loaded.messages[0]?.id ?? null,
-      view: "list",
+      view: initialMailbox ? "list" : "home",
       searchActive: false,
       search: "",
       readerScroll: 0,
@@ -247,9 +271,8 @@ export function App({ initialMailbox }: AppProps) {
   }, []);
   const [state, dispatch] = useReducer(reducer, initialModel);
 
-  const source = sources[state.sourceIdx] ?? sources[0] ?? ALL_SOURCE;
-  const sourceKey = `${source.id}:${source.providerId ?? ""}:${source.domain ?? ""}`;
-  const sourceFilter = useMemo(() => sourceToFilter(source), [sourceKey]);
+  const address = addresses[state.addressIdx] ?? addresses[0] ?? ALL_ADDRESSES;
+  const addressKey = `${address.id}:${address.address ?? ""}`;
   const theme = useMemo(() => resolveTheme(state.settings.theme), [state.settings.theme]);
   const sel = selectedIndex(state.messages, state.selectedId);
   const selectedMsg = state.messages[sel] ?? null;
@@ -258,26 +281,28 @@ export function App({ initialMailbox }: AppProps) {
     dispatch({ type: "flash", status: { text, tone } });
   }, []);
 
-  const reload = useCallback((preserveSelection = true, opts?: { refreshSources?: boolean }) => {
-    const nextSources = opts?.refreshSources ? listSources() : sources;
-    const normalizedSources = nextSources.length ? nextSources : [ALL_SOURCE];
-    if (opts?.refreshSources) setSources((prev) => (sameSources(prev, normalizedSources) ? prev : normalizedSources));
+  const reload = useCallback((preserveSelection = true, opts?: { refreshAddresses?: boolean }) => {
+    const nextAddresses = opts?.refreshAddresses ? listInboxAddresses() : addresses;
+    const normalized = nextAddresses.length ? nextAddresses : [ALL_ADDRESSES];
+    if (opts?.refreshAddresses) setAddresses((prev) => (sameAddressChoices(prev, normalized) ? prev : normalized));
 
-    const nextSource =
-      normalizedSources.find((s) => s.id === source.id) ??
-      normalizedSources[state.sourceIdx] ??
-      normalizedSources[0] ??
-      ALL_SOURCE;
-    dispatch({ type: "hydrate", loaded: loadMailbox(state.mailbox, state.search, nextSource), preserveSelection });
-  }, [source.id, sources, state.mailbox, state.search, state.sourceIdx]);
+    const nextAddress =
+      normalized.find((a) => a.id === address.id) ??
+      normalized[state.addressIdx] ??
+      normalized[0] ??
+      ALL_ADDRESSES;
+    const nextIndex = Math.max(0, normalized.findIndex((a) => a.id === nextAddress.id));
+    if (nextIndex !== state.addressIdx) dispatch({ type: "syncAddressIndex", index: nextIndex });
+    dispatch({ type: "hydrate", loaded: loadMailbox(state.mailbox, state.search, nextAddress), preserveSelection });
+  }, [address.id, addresses, state.addressIdx, state.mailbox, state.search]);
 
   useEffect(() => {
-    dispatch({ type: "clampSource", count: sources.length });
-  }, [sources.length]);
+    dispatch({ type: "clampAddresses", count: addresses.length });
+  }, [addresses.length]);
 
   useEffect(() => {
     reload(false);
-  }, [state.mailbox, state.search, sourceKey, reload]);
+  }, [state.mailbox, state.search, addressKey, reload]);
 
   useEffect(() => {
     const t = setInterval(() => {
@@ -294,7 +319,7 @@ export function App({ initialMailbox }: AppProps) {
   useEffect(() => {
     const t = setInterval(() => {
       if (Date.now() - lastInputAt.current < USER_IDLE_MS) return;
-      reload(true);
+      reload(true, { refreshAddresses: true });
     }, LOCAL_RELOAD_MS);
     return () => clearInterval(t);
   }, [reload]);
@@ -323,7 +348,7 @@ export function App({ initialMailbox }: AppProps) {
         if (!alive) return;
         if (result.pulled > 0) {
           flash(`pulled ${result.pulled} new`, "ok");
-          reload(true);
+          reload(true, { refreshAddresses: true });
         } else if (!result.ok && result.reason && !/credential|profile|not configured|region|access key|connector|auth/i.test(result.reason)) {
           flash(`pull: ${result.reason.slice(0, 42)}`, "err");
         }
@@ -354,16 +379,17 @@ export function App({ initialMailbox }: AppProps) {
 
   const startCompose = useCallback((replyTo?: TuiMessage) => {
     const compose: ComposeState = replyTo
-      ? { ...replyDefaults(replyTo), body: "", field: "body", replyTo }
+      ? { ...replyDefaults(replyTo), body: "", field: "body", returnTo: state.view, replyTo }
       : {
-        from: defaultFromAddress({ source: sourceFilter, fallback: firstAddress(selectedMsg?.to) }),
+        from: state.settings.defaultFrom ?? (address.configured ? address.address : undefined) ?? defaultFromAddress({ fallback: firstAddress(selectedMsg?.to) }),
         to: "",
         subject: "",
         body: "",
         field: "to",
+        returnTo: state.view,
       };
     dispatch({ type: "composeStart", compose });
-  }, [selectedMsg?.to, sourceFilter]);
+  }, [address.address, address.configured, selectedMsg?.to, state.settings.defaultFrom, state.view]);
 
   const openSelected = useCallback(() => {
     if (!selectedMsg) return;
@@ -397,15 +423,14 @@ export function App({ initialMailbox }: AppProps) {
         to: draft.to,
         subject: draft.subject,
         body: draft.body,
-        providerId: source.providerId,
       });
       dispatch({ type: "composeCancel" });
       flash("sent", "ok");
-      reload(false);
+      reload(false, { refreshAddresses: true });
     } catch (e) {
       flash((e instanceof Error ? e.message : String(e)).slice(0, 64), "err");
     }
-  }, [flash, reload, source.providerId, state.compose]);
+  }, [flash, reload, state.compose]);
 
   const toggleSetting = useCallback((key: "autoPull" | "gmailAutoPull" | "dimRead") => {
     const next = !state.settings[key];
@@ -420,12 +445,53 @@ export function App({ initialMailbox }: AppProps) {
     flash(`default folder: ${mailboxLabel(mailbox)}`, "ok");
   }, [flash]);
 
+  const cycleDefaultAddress = useCallback(() => {
+    const current = addressChoiceByAddress(state.settings.defaultAddress);
+    const i = addresses.findIndex((choice) => choice.id === current.id);
+    const next = addresses[(i + 1 + addresses.length) % addresses.length] ?? ALL_ADDRESSES;
+    const value = next.address ?? null;
+    setSetting("defaultAddress", value);
+    dispatch({ type: "settingsPatch", patch: { defaultAddress: value } });
+    flash(`default inbox: ${next.label}`, "ok");
+  }, [addresses, flash, state.settings.defaultAddress]);
+
+  const cycleDefaultFrom = useCallback(() => {
+    const senders = addresses.filter((choice) => choice.address && choice.configured);
+    if (senders.length === 0) {
+      setSetting("defaultFrom", null);
+      dispatch({ type: "settingsPatch", patch: { defaultFrom: null } });
+      flash("default from: auto", "ok");
+      return;
+    }
+    const currentIdx = state.settings.defaultFrom
+      ? senders.findIndex((choice) => choice.address === state.settings.defaultFrom)
+      : -1;
+    const next = currentIdx < 0 ? senders[0] : senders[currentIdx + 1];
+    const value = next?.address ?? null;
+    setSetting("defaultFrom", value);
+    dispatch({ type: "settingsPatch", patch: { defaultFrom: value } });
+    flash(`default from: ${value ?? "auto"}`, "ok");
+  }, [addresses, flash, state.settings.defaultFrom]);
+
   const cycleTheme = useCallback(() => {
     const next = nextThemeMode(state.settings.theme);
     setSetting("theme", next);
     dispatch({ type: "settingsPatch", patch: { theme: next } });
     flash(`theme: ${next}`, "ok");
   }, [flash, state.settings.theme]);
+
+  const openHomeSelection = useCallback(() => {
+    const item = HOME_ITEMS[state.homeIdx];
+    if (item === "Inbox") {
+      dispatch({ type: "view", view: "list" });
+    } else if (item === "Compose") {
+      startCompose();
+    } else if (item === "Profiles") {
+      dispatch({ type: "view", view: "profiles" });
+    } else {
+      dispatch({ type: "view", view: "settings" });
+    }
+  }, [startCompose, state.homeIdx]);
 
   useInput((input, key) => {
     lastInputAt.current = Date.now();
@@ -444,8 +510,20 @@ export function App({ initialMailbox }: AppProps) {
       return;
     }
 
+    if (state.view === "home") {
+      if (input === "q") { exit(); return; }
+      if (key.upArrow || input === "k") dispatch({ type: "selectHomeOffset", delta: -1 });
+      else if (key.downArrow || input === "j") dispatch({ type: "selectHomeOffset", delta: 1 });
+      else if (key.return || key.rightArrow || input === "l") openHomeSelection();
+      else if (input === "1") dispatch({ type: "view", view: "list" });
+      else if (input === "2") startCompose();
+      else if (input === "3") dispatch({ type: "view", view: "profiles" });
+      else if (input === "4") dispatch({ type: "view", view: "settings" });
+      return;
+    }
+
     if (state.view === "settings") {
-      if (input === "q" || input === "," || key.escape) dispatch({ type: "view", view: "list" });
+      if (input === "q" || input === "b" || input === "," || key.escape) dispatch({ type: "view", view: "home" });
       else if (input === "1") toggleSetting("autoPull");
       else if (input === "2") toggleSetting("gmailAutoPull");
       else if (input === "3") toggleSetting("dimRead");
@@ -453,34 +531,53 @@ export function App({ initialMailbox }: AppProps) {
         const i = MAILBOXES.indexOf(state.settings.defaultMailbox);
         setDefaultMailbox(MAILBOXES[(i + 1) % MAILBOXES.length]!);
       }
-      else if (input === "5") cycleTheme();
+      else if (input === "5") cycleDefaultAddress();
+      else if (input === "6") cycleDefaultFrom();
+      else if (input === "7") cycleTheme();
       return;
     }
 
     if (state.view === "profiles") {
-      if (input === "q" || input === "p" || key.escape) dispatch({ type: "view", view: "list" });
+      if (input === "q" || input === "b" || input === "p" || key.escape) dispatch({ type: "view", view: "home" });
       return;
     }
 
-    if (input === "q") {
+    if (state.view === "addressPicker") {
+      if (input === "q" || input === "b" || key.escape) { dispatch({ type: "view", view: "list" }); return; }
+      if (key.upArrow || input === "k") dispatch({ type: "selectAddressPickerOffset", delta: -1, count: addresses.length });
+      else if (key.downArrow || input === "j") dispatch({ type: "selectAddressPickerOffset", delta: 1, count: addresses.length });
+      else if (key.return || key.rightArrow || input === "l") {
+        dispatch({ type: "setAddress", index: state.addressPickerIdx });
+        const next = addresses[state.addressPickerIdx] ?? ALL_ADDRESSES;
+        flash(`inbox: ${next.label}`, "ok");
+      }
+      return;
+    }
+
+    if (input === "q" || input === "b") {
       if (state.view === "reader") dispatch({ type: "view", view: "list" });
-      else exit();
+      else dispatch({ type: "view", view: "home" });
+      return;
+    }
+    if (key.escape) {
+      if (state.view === "reader") dispatch({ type: "view", view: "list" });
+      else dispatch({ type: "view", view: "home" });
       return;
     }
     if (input === "c") { startCompose(); return; }
     if (input === "p") { dispatch({ type: "view", view: "profiles" }); return; }
     if (input === ",") { dispatch({ type: "view", view: "settings" }); return; }
-    if (input === "a" || input === "A") { dispatch({ type: "cycleSource", delta: input === "a" ? 1 : -1, count: sources.length }); return; }
+    if (input === "a") { dispatch({ type: "openAddressPicker" }); return; }
     if (input === "g") {
       flash("refreshing");
-      reload(true, { refreshSources: true });
-      flash("refreshed", "ok");
+      reload(true, { refreshAddresses: true });
+      flash(`refreshed ${address.label}`, "ok");
       return;
     }
     if (input === "G") {
       flash("pulling");
       void autoPull({ limit: 1000 })
-        .then((r) => { reload(true, { refreshSources: true }); flash(r.pulled ? `pulled ${r.pulled} new` : "up to date", "ok"); })
+        .then((r) => { reload(true, { refreshAddresses: true }); flash(r.pulled ? `pulled ${r.pulled} new` : `up to date: ${address.label}`, "ok"); })
         .catch((e) => { reload(true); flash(e instanceof Error ? e.message.slice(0, 64) : String(e).slice(0, 64), "err"); });
       return;
     }
@@ -488,7 +585,7 @@ export function App({ initialMailbox }: AppProps) {
     if (state.view === "reader") {
       if (key.upArrow || input === "k") dispatch({ type: "scroll", delta: -1 });
       else if (key.downArrow || input === "j") dispatch({ type: "scroll", delta: 1 });
-      else if (key.escape || key.leftArrow || input === "h") dispatch({ type: "view", view: "list" });
+      else if (key.leftArrow || input === "h") dispatch({ type: "view", view: "list" });
       else if (input === "J") { dispatch({ type: "selectOffset", delta: 1 }); dispatch({ type: "reader", scroll: 0 }); }
       else if (input === "K") { dispatch({ type: "selectOffset", delta: -1 }); dispatch({ type: "reader", scroll: 0 }); }
       else if (input === "r" && selectedMsg) startCompose(selectedMsg);
@@ -514,9 +611,11 @@ export function App({ initialMailbox }: AppProps) {
   const innerW = Math.max(24, cols - 4);
   const contentH = Math.max(4, rows - 6);
   const content =
+    state.view === "home" ? <Home items={HOME_ITEMS} selected={state.homeIdx} width={innerW} height={contentH} theme={theme} /> :
     state.view === "compose" && state.compose ? <Compose compose={state.compose} width={innerW} height={contentH} theme={theme} /> :
-    state.view === "settings" ? <Settings settings={state.settings} width={innerW} height={contentH} theme={theme} /> :
+    state.view === "settings" ? <Settings settings={state.settings} addresses={addresses} width={innerW} height={contentH} theme={theme} /> :
     state.view === "profiles" ? <Profiles width={innerW} height={contentH} theme={theme} /> :
+    state.view === "addressPicker" ? <AddressPicker addresses={addresses} selected={state.addressPickerIdx} width={innerW} height={contentH} theme={theme} /> :
     state.view === "reader" ? <Reader body={readerBody} conversation={conversation} scroll={state.readerScroll} width={innerW} height={contentH} theme={theme} /> :
     <List
       messages={state.messages}
@@ -533,7 +632,15 @@ export function App({ initialMailbox }: AppProps) {
 
   return (
     <Box flexDirection="column" width={cols} height={rows}>
-      <Tabs mailbox={state.mailbox} counts={state.counts} status={state.status} cols={cols} source={source} sourceCount={sources.length} theme={theme} />
+      <Header
+        view={state.view}
+        mailbox={state.mailbox}
+        counts={state.counts}
+        status={state.status}
+        cols={cols}
+        address={address}
+        theme={theme}
+      />
       <Box borderStyle="round" borderColor={theme.border} paddingX={1} flexGrow={1}>{content}</Box>
       <Footer view={state.view} searching={state.searchActive} theme={theme} />
     </Box>
@@ -595,24 +702,32 @@ function handleComposeInput(
   }
 }
 
-function Tabs({
+function Header({
+  view,
   mailbox,
   counts,
   status,
   cols,
-  source,
-  sourceCount,
+  address,
   theme,
 }: {
+  view: View;
   mailbox: Mailbox;
   counts: MailboxCounts;
   status: Status;
   cols: number;
-  source: InboxSource;
-  sourceCount: number;
+  address: InboxAddressChoice;
   theme: TuiTheme;
 }) {
   const tone = status.tone === "ok" ? theme.ok : status.tone === "err" ? theme.error : theme.warning;
+  if (view === "home") {
+    return (
+      <Box width={cols} paddingX={1} justifyContent="space-between">
+        <Text bold color={theme.primary}>emails ui</Text>
+        <Text color={tone} bold>{status.text}</Text>
+      </Box>
+    );
+  }
   return (
     <Box flexDirection="column" width={cols}>
       <Box width={cols} paddingX={1} justifyContent="space-between">
@@ -633,9 +748,73 @@ function Tabs({
         <Text color={tone} bold>{status.text}</Text>
       </Box>
       <Box width={cols} paddingX={1}>
-        <Text color={theme.sourceFg} backgroundColor={theme.sourceBg} bold>{" "}{source.label}{" "}</Text>
-        {sourceCount > 1 ? <Text color={theme.primary}> <Text color={theme.muted}>press</Text> a <Text color={theme.muted}>to switch inbox</Text></Text> : null}
+        <Text color={theme.sourceFg} backgroundColor={theme.sourceBg} bold>{" "}{mailboxLabel(mailbox)}: {address.label}{" "}</Text>
+        {view === "list" ? <Text color={theme.primary}> <Text color={theme.muted}>press</Text> a <Text color={theme.muted}>to choose address</Text></Text> : null}
       </Box>
+    </Box>
+  );
+}
+
+function Home({
+  items,
+  selected,
+  width,
+  height,
+  theme,
+}: {
+  items: readonly string[];
+  selected: number;
+  width: number;
+  height: number;
+  theme: TuiTheme;
+}) {
+  return (
+    <Box flexDirection="column" width={width} height={height}>
+      <Text bold color={theme.primary}>Choose</Text>
+      <Text> </Text>
+      {items.map((item, i) => {
+        const active = i === selected;
+        return (
+          <Text key={item} backgroundColor={active ? theme.selectedBg : undefined} color={active ? theme.selectedFg : theme.primary}>
+            <Text color={active ? theme.selectedFg : theme.muted}>{String(i + 1).padStart(2)} </Text>
+            <Text bold={active}>{item}</Text>
+          </Text>
+        );
+      })}
+    </Box>
+  );
+}
+
+function AddressPicker({
+  addresses,
+  selected,
+  width,
+  height,
+  theme,
+}: {
+  addresses: InboxAddressChoice[];
+  selected: number;
+  width: number;
+  height: number;
+  theme: TuiTheme;
+}) {
+  const rowH = Math.max(1, height - 2);
+  const start = Math.max(0, Math.min(selected - Math.floor(rowH / 2), Math.max(0, addresses.length - rowH)));
+  const win = addresses.slice(start, start + rowH);
+  return (
+    <Box flexDirection="column" width={width}>
+      <Text bold color={theme.primary}>Choose Address</Text>
+      <Text> </Text>
+      {win.map((choice, i) => {
+        const index = start + i;
+        const active = index === selected;
+        return (
+          <Text key={choice.id} wrap="truncate" backgroundColor={active ? theme.selectedBg : undefined}>
+            <Text color={active ? theme.selectedFg : theme.muted}>{active ? ">" : " "}</Text>{" "}
+            <Text bold={active} color={active ? theme.selectedFg : theme.primary}>{truncate(choice.label, width - 8)}</Text>
+          </Text>
+        );
+      })}
     </Box>
   );
 }
@@ -683,7 +862,7 @@ function List({
             <Text>  <Text color={theme.accentStrong}>emails inbox sync-s3 --bucket &lt;bucket&gt;</Text><Text color={theme.muted}>     SES/S3 inbound</Text></Text>
             <Text>  <Text color={theme.accentStrong}>emails cloud pull</Text><Text color={theme.muted}>                          RDS cloud sync</Text></Text>
           </Box>
-        ) : <Text color={theme.primary}>No messages in this folder/source.</Text>
+        ) : <Text color={theme.primary}>No messages in this folder/address.</Text>
       ) : win.map((m, i) => {
         const selected = start + i === sel;
         const who = (m.sentByMe ? "-> " : "") + senderName(m.sentByMe ? m.to : m.from);
@@ -776,33 +955,48 @@ function Profiles({ width, height, theme }: { width: number; height: number; the
 
   return (
     <Box flexDirection="column" width={width} height={height}>
-      <Text bold color={theme.primary}>Profiles <Text color={theme.muted}>accounts, domains, addresses</Text></Text>
+      <Text bold color={theme.primary}>Profiles</Text>
       <Text> </Text>
       {rows.slice(0, height - 3)}
     </Box>
   );
 }
 
-function Settings({ settings, width, height, theme }: { settings: TuiSettings; width: number; height: number; theme: TuiTheme }) {
+function Settings({
+  settings,
+  addresses,
+  width,
+  height,
+  theme,
+}: {
+  settings: TuiSettings;
+  addresses: InboxAddressChoice[];
+  width: number;
+  height: number;
+  theme: TuiTheme;
+}) {
   const row = (keyChar: string, label: string, value: string, on: boolean) => (
     <Text wrap="truncate">
       <Text color={theme.activeFg} backgroundColor={theme.activeBg} bold>{" "}{keyChar}{" "}</Text>{"  "}
       <Text color={theme.primary}>{label.padEnd(22)}</Text>
-      <Text color={on ? theme.ok : theme.muted} bold>{value}</Text>
+      <Text color={on ? theme.ok : theme.muted} bold>{truncate(value, Math.max(10, width - 30))}</Text>
     </Text>
   );
+  const defaultInbox = addressChoiceByAddress(settings.defaultAddress);
+  const defaultFrom = settings.defaultFrom ?? "auto";
+  const inboxLabel = addresses.find((choice) => choice.id === defaultInbox.id)?.label ?? defaultInbox.label;
 
   return (
     <Box flexDirection="column" width={width} height={height}>
-      <Text bold color={theme.primary}>Settings <Text color={theme.muted}>number keys change values, q/Esc goes back</Text></Text>
+      <Text bold color={theme.primary}>Settings</Text>
       <Text> </Text>
       {row("1", "Auto-pull inbound", settings.autoPull ? "ON" : "OFF", settings.autoPull)}
       {row("2", "Gmail auto-pull", settings.gmailAutoPull ? "ON" : "OFF", settings.gmailAutoPull)}
       {row("3", "Dim read messages", settings.dimRead ? "ON" : "OFF", settings.dimRead)}
       {row("4", "Default folder", mailboxLabel(settings.defaultMailbox), true)}
-      {row("5", "Theme", `${settings.theme} -> ${theme.name}`, true)}
-      <Text> </Text>
-      <Text color={theme.muted}>Auto-pull checks SES/S3 every 12s and Gmail every 45s. Switch inbox source with a.</Text>
+      {row("5", "Default inbox", inboxLabel, true)}
+      {row("6", "Default From", defaultFrom, true)}
+      {row("7", "Theme", `${settings.theme} -> ${theme.name}`, true)}
     </Box>
   );
 }
@@ -844,10 +1038,12 @@ function Compose({ compose, width, height, theme }: { compose: ComposeState; wid
 
 function Footer({ view, searching, theme }: { view: View; searching: boolean; theme: TuiTheme }) {
   const hint = searching ? "type to filter - Enter apply - Esc clear"
+    : view === "home" ? "up/down choose - Enter open - q quit"
+    : view === "addressPicker" ? "up/down choose address - Enter apply - b back"
     : view === "compose" ? "Tab field - edit From/To/Subject/Body - Ctrl-S send - Esc cancel"
-    : view === "profiles" ? "profiles/accounts - p or Esc back"
-    : view === "settings" ? "1-5 toggle a setting - q or Esc back"
-    : view === "reader" ? "j/k scroll - J/K next/prev - r reply - s star - e archive - Esc back"
-    : "up/down move - Enter open - ]/[ folders - a inbox - c compose - p profiles - , settings - / search - g refresh - G pull - q quit";
+    : view === "profiles" ? "profiles - b back"
+    : view === "settings" ? "1-7 change setting - b back"
+    : view === "reader" ? "j/k scroll - J/K next/prev - r reply - s star - e archive - b back"
+    : "up/down move - Enter open - ]/[ folders - a address - c compose - p profiles - , settings - / search - g refresh - G pull - b home";
   return <Box paddingX={1}><Text color={theme.muted}>{hint}</Text></Box>;
 }

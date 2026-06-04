@@ -109,7 +109,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
           lines.push(chalk.dim(`  Inbound is push: add a Resend inbound webhook → POST /webhook/resend-inbound on 'emails serve'`));
         }
         if (opts.inbound !== false && provider.type === "gmail") {
-          lines.push(chalk.dim(`  Gmail is account-based — receive with 'emails inbox sync' (the interactive auto-pulls Gmail every 45s)`));
+          lines.push(chalk.dim(`  Gmail is account-based — receive with 'emails inbox sync' (emails ui can auto-pull Gmail)`));
         }
         // 4a. SES inbound (S3 bucket + receipt rule → mail for *@domain lands in S3).
         if (opts.inbound !== false && provider.type === "ses") {
@@ -152,7 +152,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
           }
         }
 
-        lines.push(chalk.dim(`\n  Live mail:  emails inbox watch   ·   browse:  emails interactive`));
+        lines.push(chalk.dim(`\n  Live mail:  emails inbox watch   ·   browse:  emails ui`));
         output({ domain, provider: provider.name, domain_id: rec.id }, lines.join("\n"));
       } catch (e) { handleError(e); }
     });

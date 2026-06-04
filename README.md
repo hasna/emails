@@ -37,22 +37,22 @@ emails email list
 emails cloud push
 ```
 
-## Interactive mailbox (`emails interactive`)
+## Email UI (`emails ui`)
 
-A clean, full-screen terminal mail client — a folder tab bar plus one focused
-view at a time (message list → reader → composer). Live read-state, and it
-**auto-refreshes** from the local store and **auto-pulls** new mail in the
-background (draining the real-time SES→SNS→SQS queue, or a dedup-safe S3 sync),
-so the inbox stays current without a manual sync.
+A clean, full-screen terminal mail client with a simple home screen: Inbox,
+Compose, Profiles, and Settings. Inbox starts at all addresses and can be
+filtered to one email address when needed. Live read-state, local refresh, and
+background auto-pull keep the mailbox current.
 
 ```bash
-emails interactive            # or: emails ui
-emails interactive --mailbox unread
+emails ui
+emails ui --mailbox unread
 ```
 
-Keys — list: `↑↓`/`j k` move · `Enter` open · `]`/`[` or `1`–`5` switch folder ·
+Keys — home: `↑↓`/`j k` choose · `Enter` open · `q` quit. Inbox: `a` choose
+address · `↑↓`/`j k` move · `Enter` open · `]`/`[` or `1`–`5` switch folder ·
 `r` reply · `c` compose · `p` profiles · `s` star · `e` archive · `u` unread ·
-`/` search · `g` refresh local view · `G` pull new mail now · `q` quit. Reader: `j/k` scroll · `J/K` next/prev ·
+`/` search · `g` refresh local view · `G` pull new mail now · `b` home. Reader: `j/k` scroll · `J/K` next/prev ·
 `Esc` back — shows 📎 attachments with size/type. Composer writes **markdown**
 (rendered to HTML on send), `Enter` for blank/new lines · `Tab` next field ·
 editable From/To/Subject/Body · `Ctrl-S` send · `Esc` cancel. `p` shows your profiles (accounts) + their
@@ -63,7 +63,7 @@ Inbox · Unread · Starred · Sent · Archived.
 ## Command Structure
 
 ```
-emails interactive       # 📬 Mailbox TUI (alias: emails ui) — markdown compose, attachments, profiles
+emails ui                # 📬 Mailbox UI — home, inbox, compose, profiles, settings
 emails profiles          # your accounts (gmail/ses/resend) + their domains & addresses
 emails provider          # add/list/remove/sync providers (ses, resend, gmail)
 emails domain            # add/verify/buy/setup/dns/check domains

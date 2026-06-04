@@ -1,5 +1,5 @@
 /**
- * Data layer for the interactive mail TUI (`emails interactive`).
+ * Data layer for the email UI (`emails ui`).
  *
  * Presents a Gmail-like unified view over the local store: inbound mail
  * (SES-S3 / SMTP / Gmail, with read-state/star/archive/labels) and sent mail,
@@ -102,17 +102,31 @@ const FOLDER_WHERE: Record<Exclude<Mailbox, "sent">, string> = {
  * very large mailboxes. The Sent folder unions app-sent mail (`emails`) with
  * Gmail-synced sent mail (`inbound_emails` where is_sent = 1).
  */
-export interface MailboxSource { providerId?: string; domain?: string }
+export interface MailboxSource { providerId?: string; domain?: string; address?: string }
 
 interface SqlClause { sql: string; params: string[] }
+
+function recipientAddressSql(): string {
+  return "(LOWER(TRIM(value)) = ? OR LOWER(value) LIKE ?)";
+}
+
+function recipientDomainSql(): string {
+  return "(LOWER(TRIM(value)) LIKE ? OR LOWER(value) LIKE ?)";
+}
 
 function recipientSourceClause(src?: MailboxSource): SqlClause {
   const params: string[] = [];
   let sql = "";
   if (src?.providerId) { sql += " AND provider_id = ?"; params.push(src.providerId); }
+  if (src?.address) {
+    const address = src.address.toLowerCase();
+    sql += ` AND (json_valid(to_addresses) AND EXISTS (SELECT 1 FROM json_each(to_addresses) WHERE ${recipientAddressSql()}))`;
+    params.push(address, `%<${address}>%`);
+  }
   if (src?.domain) {
-    sql += " AND (json_valid(to_addresses) AND EXISTS (SELECT 1 FROM json_each(to_addresses) WHERE LOWER(value) LIKE ?))";
-    params.push(`%@${src.domain.toLowerCase()}`);
+    const domain = src.domain.toLowerCase();
+    sql += ` AND (json_valid(to_addresses) AND EXISTS (SELECT 1 FROM json_each(to_addresses) WHERE ${recipientDomainSql()}))`;
+    params.push(`%@${domain}`, `%<%@${domain}>%`);
   }
   return { sql, params };
 }
@@ -121,6 +135,7 @@ function senderSourceClause(src?: MailboxSource): SqlClause {
   const params: string[] = [];
   let sql = "";
   if (src?.providerId) { sql += " AND provider_id = ?"; params.push(src.providerId); }
+  if (src?.address) { sql += " AND LOWER(from_address) = ?"; params.push(src.address.toLowerCase()); }
   if (src?.domain) { sql += " AND LOWER(from_address) LIKE ?"; params.push(`%@${src.domain.toLowerCase()}`); }
   return { sql, params };
 }
@@ -129,6 +144,7 @@ function appSentSourceClause(src?: MailboxSource): SqlClause {
   const params: string[] = [];
   const where: string[] = [];
   if (src?.providerId) { where.push("e.provider_id = ?"); params.push(src.providerId); }
+  if (src?.address) { where.push("LOWER(e.from_address) = ?"); params.push(src.address.toLowerCase()); }
   if (src?.domain) { where.push("LOWER(e.from_address) LIKE ?"); params.push(`%@${src.domain.toLowerCase()}`); }
   return { sql: where.length ? ` WHERE ${where.join(" AND ")}` : "", params };
 }
@@ -270,6 +286,15 @@ export function activeProviderId(db?: Database): string | null {
   return active[0]?.id ?? null;
 }
 
+export function providerIdForSender(address: string, db?: Database): string | null {
+  const d = db || getDatabase();
+  const normalized = extractEmail(address);
+  if (!normalized) return null;
+  const matches = listAddresses(undefined, d)
+    .filter((a) => (a.status ?? "active") === "active" && a.email.toLowerCase() === normalized);
+  return matches.find((a) => a.verified)?.provider_id ?? matches[0]?.provider_id ?? null;
+}
+
 /** Pre-fill values for replying to a message. */
 export function replyDefaults(msg: TuiMessage): { from: string; to: string; subject: string } {
   const subject = /^re:/i.test(msg.subject) ? msg.subject : `Re: ${msg.subject}`;
@@ -284,6 +309,7 @@ export interface ComposeInput { from: string; to: string; subject: string; body:
 /** Pick the best configured sender for a new TUI compose. */
 export function defaultFromAddress(opts?: { source?: MailboxSource; fallback?: string }, db?: Database): string {
   const d = db || getDatabase();
+  if (opts?.source?.address) return opts.source.address;
   const all = listAddresses(opts?.source?.providerId, d).filter((a) => (a.status ?? "active") === "active");
   const pick = (addresses: typeof all) => addresses.find((a) => a.verified)?.email ?? addresses[0]?.email ?? "";
   const domain = opts?.source?.domain?.toLowerCase();
@@ -309,7 +335,7 @@ export function renderMarkdown(md: string): string {
  */
 export async function sendComposed(input: ComposeInput, db?: Database): Promise<{ id: string; messageId: string }> {
   const d = db || getDatabase();
-  const raw = input.providerId ?? activeProviderId(d);
+  const raw = input.providerId ?? providerIdForSender(input.from, d) ?? activeProviderId(d);
   if (!raw) throw new Error("No active provider. Add one with 'emails provider add'.");
   // Accept a full or partial provider id.
   const providerId = (await import("../../db/database.js")).resolvePartialId(d, "providers", raw) ?? raw;
@@ -336,7 +362,82 @@ export interface ProfileInfo {
   addresses: string[];
 }
 
-// ── inbox sources (per-account / per-domain switching) ─────────────────────────
+// ── inbox address choices ──────────────────────────────────────────────────────
+
+export interface InboxAddressChoice {
+  id: string;
+  label: string;
+  address?: string;
+  configured: boolean;
+  observed: boolean;
+}
+
+export const ALL_ADDRESSES: InboxAddressChoice = {
+  id: "all",
+  label: "All addresses",
+  configured: false,
+  observed: false,
+};
+
+function extractEmail(value: unknown): string | null {
+  const raw = String(value ?? "").trim().toLowerCase();
+  const bracketed = raw.match(/<\s*([^<>\s@]+@[^<>\s@]+\.[^<>\s@]+)\s*>/);
+  const email = bracketed?.[1] ?? raw;
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : null;
+}
+
+function upsertAddressChoice(
+  map: Map<string, InboxAddressChoice>,
+  address: string,
+  patch: Partial<Pick<InboxAddressChoice, "configured" | "observed">>,
+): void {
+  const existing = map.get(address) ?? { id: `a:${address}`, label: address, address, configured: false, observed: false };
+  map.set(address, { ...existing, ...patch });
+}
+
+/**
+ * User-facing inbox choices. The normal TUI exposes only "All addresses" or a
+ * concrete email address; providers/domains stay in Profiles/diagnostics.
+ */
+export function listInboxAddresses(db?: Database): InboxAddressChoice[] {
+  const d = db || getDatabase();
+  const byAddress = new Map<string, InboxAddressChoice>();
+
+  for (const row of listAddresses(undefined, d).filter((a) => (a.status ?? "active") === "active")) {
+    const address = extractEmail(row.email);
+    if (address) upsertAddressChoice(byAddress, address, { configured: true });
+  }
+
+  const inboundRecipients = d.query(
+    `SELECT DISTINCT LOWER(j.value) AS email
+     FROM inbound_emails e, json_each(CASE WHEN json_valid(e.to_addresses) THEN e.to_addresses ELSE '[]' END) j
+     WHERE e.is_sent = 0 AND j.value LIKE '%@%'`,
+  ).all() as { email: string }[];
+  for (const row of inboundRecipients) {
+    const address = extractEmail(row.email);
+    if (address) upsertAddressChoice(byAddress, address, { observed: true });
+  }
+
+  const choices = [...byAddress.values()].sort((a, b) => {
+    if (a.configured !== b.configured) return a.configured ? -1 : 1;
+    return a.label.localeCompare(b.label);
+  });
+  return [ALL_ADDRESSES, ...choices];
+}
+
+export function addressChoiceByAddress(address: string | null | undefined, db?: Database): InboxAddressChoice {
+  const normalized = extractEmail(address);
+  if (!normalized) return ALL_ADDRESSES;
+  return listInboxAddresses(db).find((choice) => choice.address === normalized) ?? {
+    id: `a:${normalized}`,
+    label: normalized,
+    address: normalized,
+    configured: false,
+    observed: true,
+  };
+}
+
+// ── legacy inbox sources (kept for non-UI callers/tests) ──────────────────────
 
 export interface InboxSource { id: string; label: string; providerId?: string; domain?: string }
 
@@ -352,7 +453,15 @@ export function listSources(db?: Database): InboxSource[] {
 
 // ── settings (persisted to config.json) ────────────────────────────────────────
 
-export interface TuiSettings { autoPull: boolean; gmailAutoPull: boolean; dimRead: boolean; defaultMailbox: Mailbox; theme: TuiThemeMode }
+export interface TuiSettings {
+  autoPull: boolean;
+  gmailAutoPull: boolean;
+  dimRead: boolean;
+  defaultMailbox: Mailbox;
+  defaultAddress: string | null;
+  defaultFrom: string | null;
+  theme: TuiThemeMode;
+}
 
 export function getSettings(): TuiSettings {
   const c = loadConfig();
@@ -361,13 +470,23 @@ export function getSettings(): TuiSettings {
     gmailAutoPull: c["tui_gmail_autopull"] !== false,
     dimRead: c["tui_dim_read"] === true, // default false = high contrast
     defaultMailbox: (c["default_mailbox"] as Mailbox) ?? "inbox",
+    defaultAddress: extractEmail(c["tui_default_address"]) ?? null,
+    defaultFrom: extractEmail(c["tui_default_from"]) ?? null,
     theme: normalizeThemeMode(c["tui_theme"]),
   };
 }
 
 export function setSetting<K extends keyof TuiSettings>(key: K, value: TuiSettings[K]): void {
   const c = loadConfig();
-  const map: Record<keyof TuiSettings, string> = { autoPull: "tui_autopull", gmailAutoPull: "tui_gmail_autopull", dimRead: "tui_dim_read", defaultMailbox: "default_mailbox", theme: "tui_theme" };
+  const map: Record<keyof TuiSettings, string> = {
+    autoPull: "tui_autopull",
+    gmailAutoPull: "tui_gmail_autopull",
+    dimRead: "tui_dim_read",
+    defaultMailbox: "default_mailbox",
+    defaultAddress: "tui_default_address",
+    defaultFrom: "tui_default_from",
+    theme: "tui_theme",
+  };
   c[map[key]] = value as never;
   saveConfig(c);
 }
