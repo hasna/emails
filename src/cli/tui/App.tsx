@@ -1,5 +1,7 @@
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState, type ReactNode } from "react";
-import { Box, Text, useApp, useInput, useStdout } from "ink";
+/** @jsxImportSource @opentui/react */
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { TextAttributes, type KeyEvent, type ThemeMode as OpenTuiThemeMode } from "@opentui/core";
+import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react";
 import {
   listMailbox,
   mailboxCounts,
@@ -23,13 +25,12 @@ import {
   type Mailbox,
   type MailboxCounts,
   type TuiMessage,
-  type ProfileInfo,
   type InboxAddressChoice,
   type TuiSettings,
 } from "./data.js";
 import { autoPull } from "./autopull.js";
 import { truncate, senderName, relativeTime, formatDate, wrapText } from "./format.js";
-import { nextThemeMode, resolveTheme, type TuiTheme } from "./theme.js";
+import { nextThemeMode, resolveTheme, type ResolvedTuiThemeName, type TuiTheme } from "./theme.js";
 import { startEventLoopWatchdog } from "./watchdog.js";
 
 type View = "home" | "list" | "addressPicker" | "reader" | "compose" | "profiles" | "settings";
@@ -97,7 +98,18 @@ type Action =
   | { type: "composeStart"; compose: ComposeState }
   | { type: "composeCancel" }
   | { type: "composePatch"; patch: Partial<ComposeState> }
+  | { type: "composeCycleField"; delta: number }
+  | { type: "composeEnter" }
+  | { type: "composeBackspace" }
+  | { type: "composeText"; text: string }
   | { type: "settingsPatch"; patch: Partial<TuiSettings> };
+
+interface FrameLine {
+  text: string;
+  fg?: string;
+  bg?: string;
+  bold?: boolean;
+}
 
 const CLOCK_TICK_MS = 4000;
 const LOCAL_RELOAD_MS = 30000;
@@ -107,20 +119,7 @@ const AUTOPULL_START_DELAY_MS = 15000;
 const USER_IDLE_MS = 1500;
 const STATUS_MS = 5000;
 const HOME_ITEMS = ["Inbox", "Compose", "Profiles", "Settings"] as const;
-
-function useDimensions(): { cols: number; rows: number } {
-  const { stdout } = useStdout();
-  const [dims, setDims] = useState({ cols: stdout?.columns ?? 100, rows: stdout?.rows ?? 30 });
-
-  useEffect(() => {
-    if (!stdout) return;
-    const onResize = () => setDims({ cols: stdout.columns ?? 100, rows: stdout.rows ?? 30 });
-    stdout.on("resize", onResize);
-    return () => { stdout.off("resize", onResize); };
-  }, [stdout]);
-
-  return dims;
-}
+const COMPOSE_FIELDS: ComposeField[] = ["from", "to", "subject", "body"];
 
 function choiceToFilter(choice: InboxAddressChoice | undefined): { address?: string } | undefined {
   return choice?.address ? { address: choice.address } : undefined;
@@ -221,6 +220,27 @@ function reducer(state: Model, action: Action): Model {
       return { ...state, view: state.compose?.returnTo ?? "home", compose: null };
     case "composePatch":
       return state.compose ? { ...state, compose: { ...state.compose, ...action.patch } } : state;
+    case "composeCycleField": {
+      if (!state.compose) return state;
+      const i = COMPOSE_FIELDS.indexOf(state.compose.field);
+      return { ...state, compose: { ...state.compose, field: COMPOSE_FIELDS[(i + action.delta + COMPOSE_FIELDS.length) % COMPOSE_FIELDS.length]! } };
+    }
+    case "composeEnter": {
+      if (!state.compose) return state;
+      if (state.compose.field === "body") return { ...state, compose: { ...state.compose, body: `${state.compose.body}\n` } };
+      const i = COMPOSE_FIELDS.indexOf(state.compose.field);
+      return { ...state, compose: { ...state.compose, field: COMPOSE_FIELDS[Math.min(COMPOSE_FIELDS.length - 1, i + 1)]! } };
+    }
+    case "composeBackspace": {
+      if (!state.compose) return state;
+      const field = state.compose.field;
+      return { ...state, compose: { ...state.compose, [field]: state.compose[field].slice(0, -1) } };
+    }
+    case "composeText": {
+      if (!state.compose) return state;
+      const field = state.compose.field;
+      return { ...state, compose: { ...state.compose, [field]: state.compose[field] + action.text } };
+    }
     case "settingsPatch":
       return { ...state, settings: { ...state.settings, ...action.patch } };
   }
@@ -234,13 +254,42 @@ function sameAddressChoices(a: InboxAddressChoice[], b: InboxAddressChoice[]): b
   });
 }
 
+function normalizeOpenTuiTheme(mode: OpenTuiThemeMode | null | undefined): ResolvedTuiThemeName | null {
+  return mode === "dark" || mode === "light" ? mode : null;
+}
+
+function useOpenTuiThemeMode(): ResolvedTuiThemeName | null {
+  const renderer = useRenderer();
+  const [mode, setMode] = useState<ResolvedTuiThemeName | null>(() => normalizeOpenTuiTheme(renderer.themeMode));
+  useEffect(() => {
+    if (process.env["EMAILS_TUI_DISABLE_THEME_PROBE"] === "1") return;
+    let alive = true;
+    void renderer.waitForThemeMode(250).then((next) => {
+      const normalized = normalizeOpenTuiTheme(next);
+      if (alive) setMode((prev) => prev === normalized ? prev : normalized);
+    });
+    const onTheme = (next: OpenTuiThemeMode) => {
+      const normalized = normalizeOpenTuiTheme(next);
+      setMode((prev) => prev === normalized ? prev : normalized);
+    };
+    renderer.on("theme_mode", onTheme);
+    return () => {
+      alive = false;
+      renderer.off("theme_mode", onTheme);
+    };
+  }, [renderer]);
+  return mode;
+}
+
 export interface AppProps {
   initialMailbox?: Mailbox;
 }
 
 export function App({ initialMailbox }: AppProps) {
-  const { exit } = useApp();
-  const { cols, rows } = useDimensions();
+  const renderer = useRenderer();
+  const dims = useTerminalDimensions();
+  const cols = Math.max(40, dims.width);
+  const rows = Math.max(16, dims.height);
   const lastInputAt = useRef(0);
   const backgroundBusy = useRef(false);
   const initialChoices = useMemo(() => listInboxAddresses(), []);
@@ -249,8 +298,10 @@ export function App({ initialMailbox }: AppProps) {
     const settings = getSettings();
     const mailbox = initialMailbox ?? settings.defaultMailbox;
     const configuredChoice = addressChoiceByAddress(settings.defaultAddress);
-    const addressIdx = Math.max(0, (initialChoices.length ? initialChoices : [ALL_ADDRESSES]).findIndex((choice) => choice.id === configuredChoice.id));
-    const choice = (initialChoices.length ? initialChoices : [ALL_ADDRESSES])[addressIdx] ?? ALL_ADDRESSES;
+    const choices = initialChoices.length ? initialChoices : [ALL_ADDRESSES];
+    const configuredIndex = choices.findIndex((choice) => choice.id === configuredChoice.id);
+    const addressIdx = Math.max(0, configuredIndex);
+    const choice = choices[addressIdx] ?? ALL_ADDRESSES;
     const loaded = loadMailbox(mailbox, "", choice);
     return {
       mailbox,
@@ -268,14 +319,19 @@ export function App({ initialMailbox }: AppProps) {
       now: Date.now(),
       ...loaded,
     };
-  }, []);
+  }, [initialChoices, initialMailbox]);
   const [state, dispatch] = useReducer(reducer, initialModel);
 
   const address = addresses[state.addressIdx] ?? addresses[0] ?? ALL_ADDRESSES;
   const addressKey = `${address.id}:${address.address ?? ""}`;
-  const theme = useMemo(() => resolveTheme(state.settings.theme), [state.settings.theme]);
+  const detectedTheme = useOpenTuiThemeMode();
+  const theme = useMemo(() => resolveTheme(state.settings.theme, process.env, detectedTheme), [detectedTheme, state.settings.theme]);
   const sel = selectedIndex(state.messages, state.selectedId);
   const selectedMsg = state.messages[sel] ?? null;
+
+  useEffect(() => {
+    renderer.setBackgroundColor(theme.background);
+  }, [renderer, theme.background]);
 
   const flash = useCallback((text: string, tone: Status["tone"] = "info") => {
     dispatch({ type: "flash", status: { text, tone } });
@@ -370,11 +426,11 @@ export function App({ initialMailbox }: AppProps) {
 
   const readerBody = useMemo(
     () => (state.view === "reader" && selectedMsg ? getMessageBody(selectedMsg) : null),
-    [state.view, selectedMsg?.id],
+    [selectedMsg, state.view],
   );
   const conversation = useMemo(
     () => (state.view === "reader" && selectedMsg ? getConversation(selectedMsg) : []),
-    [state.view, selectedMsg?.id],
+    [selectedMsg, state.view],
   );
 
   const startCompose = useCallback((replyTo?: TuiMessage) => {
@@ -493,15 +549,17 @@ export function App({ initialMailbox }: AppProps) {
     }
   }, [startCompose, state.homeIdx]);
 
-  useInput((input, key) => {
+  useKeyboard((event) => {
+    const input = printableInput(event);
+    const key = keyFlags(event);
     lastInputAt.current = Date.now();
-    if (key.ctrl && input === "c") {
-      exit();
+    if (event.ctrl && input === "c") {
+      renderer.destroy();
       return;
     }
 
     if (state.view === "compose" && state.compose) {
-      handleComposeInput(input, key, state.compose, dispatch, sendDraft, flash);
+      handleComposeInput(input, key, dispatch, sendDraft, flash);
       return;
     }
 
@@ -511,7 +569,7 @@ export function App({ initialMailbox }: AppProps) {
     }
 
     if (state.view === "home") {
-      if (input === "q") { exit(); return; }
+      if (input === "q") { renderer.destroy(); return; }
       if (key.upArrow || input === "k") dispatch({ type: "selectHomeOffset", delta: -1 });
       else if (key.downArrow || input === "j") dispatch({ type: "selectHomeOffset", delta: 1 });
       else if (key.return || key.rightArrow || input === "l") openHomeSelection();
@@ -554,12 +612,7 @@ export function App({ initialMailbox }: AppProps) {
       return;
     }
 
-    if (input === "q" || input === "b") {
-      if (state.view === "reader") dispatch({ type: "view", view: "list" });
-      else dispatch({ type: "view", view: "home" });
-      return;
-    }
-    if (key.escape) {
+    if (input === "q" || input === "b" || key.escape) {
       if (state.view === "reader") dispatch({ type: "view", view: "list" });
       else dispatch({ type: "view", view: "home" });
       return;
@@ -610,46 +663,84 @@ export function App({ initialMailbox }: AppProps) {
 
   const innerW = Math.max(24, cols - 4);
   const contentH = Math.max(4, rows - 6);
-  const content =
-    state.view === "home" ? <Home items={HOME_ITEMS} selected={state.homeIdx} width={innerW} height={contentH} theme={theme} /> :
-    state.view === "compose" && state.compose ? <Compose compose={state.compose} width={innerW} height={contentH} theme={theme} /> :
-    state.view === "settings" ? <Settings settings={state.settings} addresses={addresses} width={innerW} height={contentH} theme={theme} /> :
-    state.view === "profiles" ? <Profiles width={innerW} height={contentH} theme={theme} /> :
-    state.view === "addressPicker" ? <AddressPicker addresses={addresses} selected={state.addressPickerIdx} width={innerW} height={contentH} theme={theme} /> :
-    state.view === "reader" ? <Reader body={readerBody} conversation={conversation} scroll={state.readerScroll} width={innerW} height={contentH} theme={theme} /> :
-    <List
-      messages={state.messages}
-      sel={sel}
-      now={state.now}
-      width={innerW}
-      height={contentH}
-      searching={state.searchActive}
-      search={state.search}
-      dimRead={state.settings.dimRead}
-      emptyStore={!state.hasAnyMail}
-      theme={theme}
-    />;
+  const contentLines = renderContent({
+    state,
+    addresses,
+    address,
+    selectedIndex: sel,
+    selectedMsg,
+    readerBody,
+    conversation,
+    width: innerW,
+    height: contentH,
+    theme,
+  });
+  const headerLines = renderHeader({ state, address, cols, theme });
+  const footer = footerLine(state.view, state.searchActive, theme);
 
   return (
-    <Box flexDirection="column" width={cols} height={rows}>
-      <Header
-        view={state.view}
-        mailbox={state.mailbox}
-        counts={state.counts}
-        status={state.status}
-        cols={cols}
-        address={address}
-        theme={theme}
-      />
-      <Box borderStyle="round" borderColor={theme.border} paddingX={1} flexGrow={1}>{content}</Box>
-      <Footer view={state.view} searching={state.searchActive} theme={theme} />
-    </Box>
+    <box width={cols} height={rows} flexDirection="column" backgroundColor={theme.background}>
+      {headerLines.map((line, i) => <FrameText key={`header-${i}`} line={line} width={cols} />)}
+      <box
+        width="100%"
+        flexGrow={1}
+        flexDirection="column"
+        border
+        borderStyle="rounded"
+        borderColor={theme.border}
+        paddingX={1}
+        backgroundColor={theme.panel}
+      >
+        {contentLines.slice(0, contentH).map((line, i) => <FrameText key={`content-${i}`} line={line} width={innerW} />)}
+      </box>
+      <FrameText line={footer} width={cols} />
+    </box>
   );
+}
+
+interface KeyFlags {
+  return?: boolean;
+  escape?: boolean;
+  tab?: boolean;
+  shift?: boolean;
+  backspace?: boolean;
+  delete?: boolean;
+  ctrl?: boolean;
+  upArrow?: boolean;
+  downArrow?: boolean;
+  leftArrow?: boolean;
+  rightArrow?: boolean;
+}
+
+function printableInput(key: KeyEvent): string {
+  if (key.ctrl) return key.name.length === 1 ? key.name.toLowerCase() : "";
+  if (key.sequence && key.sequence.length === 1 && key.sequence >= " " && key.sequence !== "\x7f") return key.sequence;
+  if (key.raw && key.raw.length === 1 && key.raw >= " " && key.raw !== "\x7f") return key.raw;
+  if (key.name.length === 1) return key.shift ? key.name.toUpperCase() : key.name;
+  return "";
+}
+
+function keyFlags(key: KeyEvent): KeyFlags {
+  const name = key.name.toLowerCase();
+  const sequence = key.sequence || key.raw;
+  return {
+    return: name === "enter" || name === "return" || sequence === "\r" || sequence === "\n",
+    escape: name === "escape" || name === "esc" || /^\u001B+$/.test(sequence),
+    tab: name === "tab" || sequence === "\t",
+    shift: key.shift,
+    backspace: name === "backspace" || sequence === "\b" || sequence === "\x7f",
+    delete: name === "delete" || sequence === "\u001B[3~",
+    ctrl: key.ctrl,
+    upArrow: name === "up" || name === "arrowup" || sequence === "\u001B[A",
+    downArrow: name === "down" || name === "arrowdown" || sequence === "\u001B[B",
+    leftArrow: name === "left" || name === "arrowleft" || sequence === "\u001B[D",
+    rightArrow: name === "right" || name === "arrowright" || sequence === "\u001B[C",
+  };
 }
 
 function handleSearchInput(
   input: string,
-  key: { return?: boolean; escape?: boolean; backspace?: boolean; delete?: boolean },
+  key: KeyFlags,
   dispatch: (action: Action) => void,
 ) {
   if (key.escape) { dispatch({ type: "searchClear" }); return; }
@@ -660,8 +751,7 @@ function handleSearchInput(
 
 function handleComposeInput(
   input: string,
-  key: { return?: boolean; escape?: boolean; tab?: boolean; shift?: boolean; backspace?: boolean; delete?: boolean; ctrl?: boolean },
-  compose: ComposeState,
+  key: KeyFlags,
   dispatch: (action: Action) => void,
   sendDraft: () => Promise<void>,
   flash: (text: string, tone?: Status["tone"]) => void,
@@ -676,211 +766,170 @@ function handleComposeInput(
     return;
   }
 
-  const order: ComposeField[] = ["from", "to", "subject", "body"];
-  const i = order.indexOf(compose.field);
   if (key.tab) {
-    const next = key.shift ? (i + order.length - 1) % order.length : (i + 1) % order.length;
-    dispatch({ type: "composePatch", patch: { field: order[next]! } });
+    dispatch({ type: "composeCycleField", delta: key.shift ? -1 : 1 });
     return;
   }
   if (key.backspace || key.delete) {
-    const field = compose.field;
-    dispatch({ type: "composePatch", patch: { [field]: compose[field].slice(0, -1) } });
+    dispatch({ type: "composeBackspace" });
     return;
   }
   if (key.return) {
-    if (compose.field === "body") {
-      dispatch({ type: "composePatch", patch: { body: `${compose.body}\n` } });
-    } else {
-      dispatch({ type: "composePatch", patch: { field: order[Math.min(order.length - 1, i + 1)]! } });
-    }
+    dispatch({ type: "composeEnter" });
     return;
   }
   if (input && !key.ctrl) {
-    const field = compose.field;
-    dispatch({ type: "composePatch", patch: { [field]: compose[field] + input } });
+    dispatch({ type: "composeText", text: input });
   }
 }
 
-function Header({
-  view,
-  mailbox,
-  counts,
-  status,
-  cols,
-  address,
-  theme,
-}: {
-  view: View;
-  mailbox: Mailbox;
-  counts: MailboxCounts;
-  status: Status;
-  cols: number;
+function line(text: string, theme: TuiTheme, opts?: Partial<FrameLine>): FrameLine {
+  return { text: text || " ", fg: theme.primary, ...opts };
+}
+
+function fitLine(left: string, right: string, width: number): string {
+  if (!right) return truncate(left, width);
+  const gap = Math.max(1, width - left.length - right.length);
+  return truncate(`${left}${" ".repeat(gap)}${right}`, width);
+}
+
+function renderHeader({ state, address, cols, theme }: {
+  state: Model;
   address: InboxAddressChoice;
+  cols: number;
   theme: TuiTheme;
-}) {
-  const tone = status.tone === "ok" ? theme.ok : status.tone === "err" ? theme.error : theme.warning;
-  if (view === "home") {
-    return (
-      <Box width={cols} paddingX={1} justifyContent="space-between">
-        <Text bold color={theme.primary}>emails ui</Text>
-        <Text color={tone} bold>{status.text}</Text>
-      </Box>
-    );
+}): FrameLine[] {
+  const statusColor = state.status.tone === "ok" ? theme.ok : state.status.tone === "err" ? theme.error : theme.warning;
+  if (state.view === "home") {
+    return [
+      line(fitLine(" emails ui", state.status.text, cols), theme, { fg: theme.activeFg, bg: theme.headerBg, bold: true }),
+    ];
   }
-  return (
-    <Box flexDirection="column" width={cols}>
-      <Box width={cols} paddingX={1} justifyContent="space-between">
-        <Box>
-          {MAILBOXES.map((m, i) => {
-            const active = m === mailbox;
-            const n = counts[m];
-            return (
-              <Text key={m}>
-                {i > 0 ? <Text> </Text> : null}
-                <Text color={active ? theme.activeFg : theme.primary} backgroundColor={active ? theme.activeBg : undefined} bold={active}>
-                  {" "}{mailboxLabel(m)}{n ? ` ${n}` : ""}{" "}
-                </Text>
-              </Text>
-            );
-          })}
-        </Box>
-        <Text color={tone} bold>{status.text}</Text>
-      </Box>
-      <Box width={cols} paddingX={1}>
-        <Text color={theme.sourceFg} backgroundColor={theme.sourceBg} bold>{" "}{mailboxLabel(mailbox)}: {address.label}{" "}</Text>
-        {view === "list" ? <Text color={theme.primary}> <Text color={theme.muted}>press</Text> a <Text color={theme.muted}>to choose address</Text></Text> : null}
-      </Box>
-    </Box>
-  );
+  const tabs = MAILBOXES.map((m) => {
+    const n = state.counts[m];
+    const active = m === state.mailbox;
+    return `${active ? "[" : " "}${mailboxLabel(m)}${n ? ` ${n}` : ""}${active ? "]" : " "}`;
+  }).join(" ");
+  return [
+    line(fitLine(` ${tabs}`, state.status.text, cols), theme, { fg: state.status.text ? statusColor : theme.activeFg, bg: theme.headerBg, bold: true }),
+    line(` ${mailboxLabel(state.mailbox)}: ${address.label}${state.view === "list" ? "   a choose address" : ""}`, theme, {
+      fg: theme.sourceFg,
+      bg: theme.sourceBg,
+      bold: true,
+    }),
+  ];
 }
 
-function Home({
-  items,
-  selected,
-  width,
-  height,
-  theme,
-}: {
-  items: readonly string[];
-  selected: number;
-  width: number;
-  height: number;
-  theme: TuiTheme;
-}) {
-  return (
-    <Box flexDirection="column" width={width} height={height}>
-      <Text bold color={theme.primary}>Choose</Text>
-      <Text> </Text>
-      {items.map((item, i) => {
-        const active = i === selected;
-        return (
-          <Text key={item} backgroundColor={active ? theme.selectedBg : undefined} color={active ? theme.selectedFg : theme.primary}>
-            <Text color={active ? theme.selectedFg : theme.muted}>{String(i + 1).padStart(2)} </Text>
-            <Text bold={active}>{item}</Text>
-          </Text>
-        );
-      })}
-    </Box>
-  );
-}
-
-function AddressPicker({
-  addresses,
-  selected,
-  width,
-  height,
-  theme,
-}: {
+function renderContent(args: {
+  state: Model;
   addresses: InboxAddressChoice[];
-  selected: number;
+  address: InboxAddressChoice;
+  selectedIndex: number;
+  selectedMsg: TuiMessage | null;
+  readerBody: ReturnType<typeof getMessageBody>;
+  conversation: ReturnType<typeof getConversation>;
   width: number;
   height: number;
   theme: TuiTheme;
-}) {
-  const rowH = Math.max(1, height - 2);
-  const start = Math.max(0, Math.min(selected - Math.floor(rowH / 2), Math.max(0, addresses.length - rowH)));
-  const win = addresses.slice(start, start + rowH);
-  return (
-    <Box flexDirection="column" width={width}>
-      <Text bold color={theme.primary}>Choose Address</Text>
-      <Text> </Text>
-      {win.map((choice, i) => {
-        const index = start + i;
-        const active = index === selected;
-        return (
-          <Text key={choice.id} wrap="truncate" backgroundColor={active ? theme.selectedBg : undefined}>
-            <Text color={active ? theme.selectedFg : theme.muted}>{active ? ">" : " "}</Text>{" "}
-            <Text bold={active} color={active ? theme.selectedFg : theme.primary}>{truncate(choice.label, width - 8)}</Text>
-          </Text>
-        );
-      })}
-    </Box>
-  );
+}): FrameLine[] {
+  const { state } = args;
+  if (state.view === "home") return renderHome(args);
+  if (state.view === "compose" && state.compose) return renderCompose({ compose: state.compose, width: args.width, height: args.height, theme: args.theme });
+  if (state.view === "settings") return renderSettings({ settings: state.settings, addresses: args.addresses, width: args.width, theme: args.theme });
+  if (state.view === "profiles") return renderProfiles({ width: args.width, height: args.height, theme: args.theme });
+  if (state.view === "addressPicker") return renderAddressPicker(args);
+  if (state.view === "reader") return renderReader({ body: args.readerBody, conversation: args.conversation, scroll: state.readerScroll, width: args.width, height: args.height, theme: args.theme });
+  return renderList(args);
 }
 
-function List({
-  messages,
-  sel,
-  now,
-  width,
-  height,
-  searching,
-  search,
-  dimRead,
-  emptyStore,
-  theme,
-}: {
-  messages: TuiMessage[];
-  sel: number;
-  now: number;
+function renderHome({ state, width, theme }: {
+  state: Model;
+  width: number;
+  theme: TuiTheme;
+}): FrameLine[] {
+  const rows = [
+    line("Choose", theme, { fg: theme.accentStrong, bold: true }),
+    line(" ", theme),
+  ];
+  HOME_ITEMS.forEach((item, i) => {
+    const active = i === state.homeIdx;
+    rows.push(line(`${String(i + 1).padStart(2)}  ${item}`, theme, {
+      fg: active ? theme.selectedFg : theme.primary,
+      bg: active ? theme.selectedBg : undefined,
+      bold: active,
+    }));
+  });
+  rows.push(line(" ", theme));
+  rows.push(line(truncate("Inbox opens all mail first; use a inside Inbox to choose an address.", width), theme, { fg: theme.muted }));
+  return rows;
+}
+
+function renderAddressPicker({ addresses, state, width, height, theme }: {
+  addresses: InboxAddressChoice[];
+  state: Model;
   width: number;
   height: number;
-  searching: boolean;
-  search: string;
-  dimRead: boolean;
-  emptyStore: boolean;
   theme: TuiTheme;
-}) {
-  const rowH = Math.max(1, searching ? height - 1 : height);
+}): FrameLine[] {
+  const rows = [
+    line("Choose Address", theme, { fg: theme.accentStrong, bold: true }),
+    line(" ", theme),
+  ];
+  const rowH = Math.max(1, height - rows.length);
+  const start = Math.max(0, Math.min(state.addressPickerIdx - Math.floor(rowH / 2), Math.max(0, addresses.length - rowH)));
+  for (const [offset, choice] of addresses.slice(start, start + rowH).entries()) {
+    const index = start + offset;
+    const active = index === state.addressPickerIdx;
+    rows.push(line(`${active ? ">" : " "} ${truncate(choice.label, width - 4)}`, theme, {
+      fg: active ? theme.selectedFg : theme.primary,
+      bg: active ? theme.selectedBg : undefined,
+      bold: active,
+    }));
+  }
+  return rows;
+}
+
+function renderList({ state, selectedIndex: sel, width, height, theme }: {
+  state: Model;
+  selectedIndex: number;
+  width: number;
+  height: number;
+  theme: TuiTheme;
+}): FrameLine[] {
+  const rows: FrameLine[] = [];
+  if (state.searchActive) rows.push(line(`/ ${state.search}|`, theme, { fg: theme.warning, bold: true }));
+  const rowH = Math.max(1, height - rows.length);
+  const messages = state.messages;
+  if (messages.length === 0) {
+    if (state.hasAnyMail) return [...rows, line("No messages in this folder/address.", theme)];
+    return [
+      ...rows,
+      line("No mail synced on this machine yet.", theme, { fg: theme.warning, bold: true }),
+      line(" ", theme),
+      line("Pull mail into the local store, then press g here to refresh.", theme),
+      line("  emails inbox sync --all-profiles --all      Gmail", theme, { fg: theme.accentStrong }),
+      line("  emails inbox sync-s3 --bucket <bucket>       SES/S3 inbound", theme, { fg: theme.accentStrong }),
+      line("  emails cloud pull                            RDS cloud sync", theme, { fg: theme.accentStrong }),
+    ];
+  }
+
   const start = Math.max(0, Math.min(sel - Math.floor(rowH / 2), Math.max(0, messages.length - rowH)));
-  const win = messages.slice(start, start + rowH);
   const whoW = Math.min(24, Math.max(12, Math.floor(width * 0.24)));
   const timeW = 6;
   const subjW = Math.max(8, width - whoW - timeW - 7);
-
-  return (
-    <Box flexDirection="column" width={width}>
-      {searching ? <Text color={theme.warning}>/ {search}<Text color={theme.accentStrong}>|</Text></Text> : null}
-      {messages.length === 0 ? (
-        emptyStore ? (
-          <Box flexDirection="column">
-            <Text color={theme.warning} bold>No mail synced on this machine yet.</Text>
-            <Text> </Text>
-            <Text color={theme.primary}>Pull mail into the local store, then press g here to refresh.</Text>
-            <Text>  <Text color={theme.accentStrong}>emails inbox sync --all-profiles --all</Text><Text color={theme.muted}>   Gmail</Text></Text>
-            <Text>  <Text color={theme.accentStrong}>emails inbox sync-s3 --bucket &lt;bucket&gt;</Text><Text color={theme.muted}>     SES/S3 inbound</Text></Text>
-            <Text>  <Text color={theme.accentStrong}>emails cloud pull</Text><Text color={theme.muted}>                          RDS cloud sync</Text></Text>
-          </Box>
-        ) : <Text color={theme.primary}>No messages in this folder/address.</Text>
-      ) : win.map((m, i) => {
-        const selected = start + i === sel;
-        const who = (m.sentByMe ? "-> " : "") + senderName(m.sentByMe ? m.to : m.from);
-        const subjCell = m.attachments > 0 ? `[${m.attachments}] ${m.subject}` : m.subject;
-        const faded = dimRead && m.is_read && !selected;
-        const primary = selected ? theme.selectedFg : faded ? theme.dimRead : theme.primary;
-        return (
-          <Text key={m.id} wrap="truncate" backgroundColor={selected ? theme.selectedBg : undefined}>
-            <Text color={m.is_starred ? theme.star : selected ? theme.selectedFg : theme.muted}>{m.is_starred ? "*" : " "}</Text>
-            <Text color={m.is_read ? (selected ? theme.selectedFg : theme.muted) : theme.unread} bold={!m.is_read}>{m.is_read ? " " : "!"}</Text>{" "}
-            <Text bold={!m.is_read} color={primary}>{truncate(who, whoW).padEnd(whoW)}</Text>{" "}
-            <Text bold={!m.is_read} color={selected ? theme.selectedFg : faded ? theme.dimRead : theme.primary}>{truncate(subjCell, subjW).padEnd(subjW)}</Text>{" "}
-            <Text color={selected ? theme.selectedFg : theme.muted}>{relativeTime(m.date, now).padStart(timeW)}</Text>
-          </Text>
-        );
-      })}
-    </Box>
-  );
+  for (const [offset, m] of messages.slice(start, start + rowH).entries()) {
+    const selected = start + offset === sel;
+    const who = (m.sentByMe ? "-> " : "") + senderName(m.sentByMe ? m.to : m.from);
+    const subjCell = m.attachments > 0 ? `[${m.attachments}] ${m.subject}` : m.subject;
+    const faded = state.settings.dimRead && m.is_read && !selected;
+    const marker = `${m.is_starred ? "*" : " "}${m.is_read ? " " : "!"}`;
+    rows.push(line(`${marker} ${truncate(who, whoW).padEnd(whoW)} ${truncate(subjCell, subjW).padEnd(subjW)} ${relativeTime(m.date, state.now).padStart(timeW)}`, theme, {
+      fg: selected ? theme.selectedFg : faded ? theme.dimRead : m.is_read ? theme.primary : theme.unread,
+      bg: selected ? theme.selectedBg : undefined,
+      bold: selected || !m.is_read,
+    }));
+  }
+  return rows;
 }
 
 function bytes(n: number): string {
@@ -889,154 +938,127 @@ function bytes(n: number): string {
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
-function Reader({
-  body,
-  conversation,
-  scroll,
-  width,
-  height,
-  theme,
-}: {
+function renderReader({ body, conversation, scroll, width, height, theme }: {
   body: ReturnType<typeof getMessageBody>;
   conversation: ReturnType<typeof getConversation>;
   scroll: number;
   width: number;
   height: number;
   theme: TuiTheme;
-}) {
-  if (!body) return <Text dimColor>No message selected.</Text>;
+}): FrameLine[] {
+  if (!body) return [line("No message selected.", theme, { fg: theme.muted })];
   const text = body.text ?? (body.html ? body.html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim() : "(no text content)");
   const atts = body.attachments ?? [];
-  const attH = atts.length ? Math.min(atts.length, 6) + 1 : 0;
-  const headerH = 4 + (conversation.length > 1 ? 1 : 0) + attH;
+  const rows: FrameLine[] = [
+    line(truncate(body.subject, width), theme, { fg: theme.accentStrong, bold: true }),
+    line(`from ${truncate(senderName(body.from), width - 5)}`, theme),
+    line(`to   ${truncate(body.to, width - 5)}`, theme),
+    line(`${formatDate(body.date)} - ${body.flags.join(", ")}`, theme, { fg: theme.muted }),
+  ];
+  if (conversation.length > 1) rows.push(line(`${conversation.length} in thread`, theme, { fg: theme.accent }));
+  if (atts.length > 0) {
+    rows.push(line(`${atts.length} attachment${atts.length > 1 ? "s" : ""}:`, theme, { fg: theme.warning, bold: true }));
+    for (const a of atts.slice(0, 6)) {
+      rows.push(line(` - ${truncate(a.filename, width - 28)} ${bytes(a.size)} ${a.content_type.split("/").pop()}${a.location ? " saved" : ""}`, theme, { fg: theme.secondary }));
+    }
+  }
+  rows.push(line(" ", theme));
+  const avail = Math.max(2, height - rows.length - 1);
   const lines = wrapText(text, Math.max(20, width), 5000);
-  const avail = Math.max(2, height - headerH - 1);
   const safeScroll = Math.min(scroll, Math.max(0, lines.length - avail));
-  const view = lines.slice(safeScroll, safeScroll + avail);
-  const addr = body.from.replace(/.*</, "").replace(/>.*/, "");
-
-  return (
-    <Box flexDirection="column" width={width}>
-      <Text bold color={theme.primary} wrap="truncate">{body.subject}</Text>
-      <Text color={theme.primary} wrap="truncate"><Text color={theme.muted}>from </Text>{senderName(body.from)}{addr !== senderName(body.from) ? <Text color={theme.muted}> {addr}</Text> : null}</Text>
-      <Text color={theme.primary} wrap="truncate"><Text color={theme.muted}>to   </Text>{truncate(body.to, width - 5)}</Text>
-      <Text color={theme.muted}>{formatDate(body.date)} - {body.flags.join(", ")}</Text>
-      {conversation.length > 1 ? <Text color={theme.sourceBg}>{conversation.length} in thread</Text> : null}
-      {atts.length > 0 ? <Text color={theme.warning}>{atts.length} attachment{atts.length > 1 ? "s" : ""}:</Text> : null}
-      {atts.slice(0, 6).map((a, i) => (
-        <Text key={i} color={theme.primary} wrap="truncate"><Text color={theme.muted}> - </Text>{truncate(a.filename, width - 28)} <Text color={theme.muted}>{bytes(a.size)} - {a.content_type.split("/").pop()}{a.location ? " saved" : ""}</Text></Text>
-      ))}
-      <Text> </Text>
-      {view.map((l, i) => <Text key={i} color={theme.primary} wrap="truncate">{l || " "}</Text>)}
-      {safeScroll + avail < lines.length ? <Text color={theme.muted}>{lines.length - safeScroll - avail} more - j/k to scroll</Text> : null}
-    </Box>
-  );
+  for (const l of lines.slice(safeScroll, safeScroll + avail)) rows.push(line(l || " ", theme));
+  if (safeScroll + avail < lines.length) rows.push(line(`${lines.length - safeScroll - avail} more - j/k to scroll`, theme, { fg: theme.muted }));
+  return rows;
 }
 
-function Profiles({ width, height, theme }: { width: number; height: number; theme: TuiTheme }) {
+function renderProfiles({ width, height, theme }: { width: number; height: number; theme: TuiTheme }): FrameLine[] {
   const profiles = listProfiles();
-  const byProvider = new Map<string, ProfileInfo[]>();
+  const byProvider = new Map<string, ReturnType<typeof listProfiles>>();
   for (const p of profiles) {
     const list = byProvider.get(p.provider) ?? [];
     list.push(p);
     byProvider.set(p.provider, list);
   }
 
-  const rows: ReactNode[] = [];
+  const rows: FrameLine[] = [
+    line("Profiles", theme, { fg: theme.accentStrong, bold: true }),
+    line(" ", theme),
+  ];
   for (const [provider, list] of byProvider) {
-    rows.push(<Text key={`h-${provider}`} bold color={theme.sourceBg}>{provider.toUpperCase()}</Text>);
+    rows.push(line(provider.toUpperCase(), theme, { fg: theme.accent, bold: true }));
     for (const p of list) {
-      rows.push(<Text key={p.id} color={theme.primary} wrap="truncate">  <Text color={theme.accentStrong}>{p.name}</Text>{p.active ? "" : <Text color={theme.muted}> (inactive)</Text>}</Text>);
-      if (p.domains.length) rows.push(<Text key={`${p.id}-domains`} color={theme.primary} wrap="truncate"><Text color={theme.muted}>    domains:   </Text>{truncate(p.domains.join(", "), width - 14)}</Text>);
-      if (p.addresses.length) rows.push(<Text key={`${p.id}-addresses`} color={theme.primary} wrap="truncate"><Text color={theme.muted}>    addresses: </Text>{truncate(p.addresses.join(", "), width - 14)} <Text color={theme.muted}>({p.addresses.length})</Text></Text>);
-      if (!p.domains.length && !p.addresses.length) rows.push(<Text key={`${p.id}-empty`} color={theme.muted}>    (no domains/addresses)</Text>);
+      rows.push(line(`  ${p.name}${p.active ? "" : " (inactive)"}`, theme, { fg: theme.primary, bold: p.active }));
+      if (p.domains.length) rows.push(line(`    domains:   ${truncate(p.domains.join(", "), width - 14)}`, theme, { fg: theme.secondary }));
+      if (p.addresses.length) rows.push(line(`    addresses: ${truncate(p.addresses.join(", "), width - 14)} (${p.addresses.length})`, theme, { fg: theme.secondary }));
+      if (!p.domains.length && !p.addresses.length) rows.push(line("    (no domains/addresses)", theme, { fg: theme.muted }));
     }
   }
-
-  return (
-    <Box flexDirection="column" width={width} height={height}>
-      <Text bold color={theme.primary}>Profiles</Text>
-      <Text> </Text>
-      {rows.slice(0, height - 3)}
-    </Box>
-  );
+  return rows.slice(0, height);
 }
 
-function Settings({
-  settings,
-  addresses,
-  width,
-  height,
-  theme,
-}: {
+function renderSettings({ settings, addresses, width, theme }: {
   settings: TuiSettings;
   addresses: InboxAddressChoice[];
   width: number;
-  height: number;
   theme: TuiTheme;
-}) {
-  const row = (keyChar: string, label: string, value: string, on: boolean) => (
-    <Text wrap="truncate">
-      <Text color={theme.activeFg} backgroundColor={theme.activeBg} bold>{" "}{keyChar}{" "}</Text>{"  "}
-      <Text color={theme.primary}>{label.padEnd(22)}</Text>
-      <Text color={on ? theme.ok : theme.muted} bold>{truncate(value, Math.max(10, width - 30))}</Text>
-    </Text>
-  );
+}): FrameLine[] {
   const defaultInbox = addressChoiceByAddress(settings.defaultAddress);
   const defaultFrom = settings.defaultFrom ?? "auto";
   const inboxLabel = addresses.find((choice) => choice.id === defaultInbox.id)?.label ?? defaultInbox.label;
-
-  return (
-    <Box flexDirection="column" width={width} height={height}>
-      <Text bold color={theme.primary}>Settings</Text>
-      <Text> </Text>
-      {row("1", "Auto-pull inbound", settings.autoPull ? "ON" : "OFF", settings.autoPull)}
-      {row("2", "Gmail auto-pull", settings.gmailAutoPull ? "ON" : "OFF", settings.gmailAutoPull)}
-      {row("3", "Dim read messages", settings.dimRead ? "ON" : "OFF", settings.dimRead)}
-      {row("4", "Default folder", mailboxLabel(settings.defaultMailbox), true)}
-      {row("5", "Default inbox", inboxLabel, true)}
-      {row("6", "Default From", defaultFrom, true)}
-      {row("7", "Theme", `${settings.theme} -> ${theme.name}`, true)}
-    </Box>
-  );
+  const row = (keyChar: string, labelText: string, value: string, on: boolean) => {
+    const prefix = `[${keyChar}] ${labelText.padEnd(22)} `;
+    return line(`${prefix}${truncate(value, Math.max(10, width - prefix.length))}`, theme, {
+      fg: on ? theme.ok : theme.muted,
+      bg: theme.panelAlt,
+      bold: on,
+    });
+  };
+  return [
+    line("Settings", theme, { fg: theme.accentStrong, bold: true }),
+    line(" ", theme),
+    row("1", "Auto-pull inbound", settings.autoPull ? "ON" : "OFF", settings.autoPull),
+    row("2", "Gmail auto-pull", settings.gmailAutoPull ? "ON" : "OFF", settings.gmailAutoPull),
+    row("3", "Dim read messages", settings.dimRead ? "ON" : "OFF", settings.dimRead),
+    row("4", "Default folder", mailboxLabel(settings.defaultMailbox), true),
+    row("5", "Default inbox", inboxLabel, true),
+    row("6", "Default From", defaultFrom, true),
+    row("7", "Theme", `${settings.theme} -> ${theme.name}`, true),
+  ];
 }
 
-function Compose({ compose, width, height, theme }: { compose: ComposeState; width: number; height: number; theme: TuiTheme }) {
-  const cursor = (f: ComposeField) => (compose.field === f ? <Text color={theme.accentStrong}>|</Text> : null);
-  const field = (f: ComposeField, v: string) => (
-    <Text wrap="truncate">
-      <Text color={compose.field === f ? theme.accentStrong : theme.muted} bold>{f.padEnd(8)}</Text>
-      <Text color={theme.primary}>
-      {truncate(v, Math.max(8, width - 10))}{cursor(f)}
-      </Text>
-    </Text>
-  );
+function renderCompose({ compose, width, height, theme }: {
+  compose: ComposeState;
+  width: number;
+  height: number;
+  theme: TuiTheme;
+}): FrameLine[] {
+  const field = (f: ComposeField, v: string) => {
+    const active = compose.field === f;
+    return line(`${f.padEnd(8)} ${truncate(v, Math.max(8, width - 11))}${active ? "|" : ""}`, theme, {
+      fg: active ? theme.accentStrong : theme.primary,
+      bg: active ? theme.panelAlt : undefined,
+      bold: active,
+    });
+  };
   const bodyLines = (compose.body || "").split("\n");
   const bodyH = Math.max(1, height - 6);
   const start = Math.max(0, bodyLines.length - bodyH);
-
-  return (
-    <Box flexDirection="column" width={width} height={height}>
-      <Text color={theme.sourceBg} bold>{compose.replyTo ? "Reply" : "New message"} <Text color={theme.muted}>markdown body, Ctrl-S sends</Text></Text>
-      {field("from", compose.from)}
-      {field("to", compose.to)}
-      {field("subject", compose.subject)}
-      <Text color={theme.muted}>{"-".repeat(Math.min(width, 60))}</Text>
-      {bodyLines.slice(start, start + bodyH).map((line, i) => {
-        const absolute = start + i;
-        const isLast = absolute === bodyLines.length - 1;
-        return (
-          <Text key={absolute} color={theme.primary} wrap="truncate">
-            {truncate(line || " ", width)}
-            {compose.field === "body" && isLast ? <Text color={theme.accentStrong}>|</Text> : null}
-          </Text>
-        );
-      })}
-    </Box>
-  );
+  const rows = [
+    line(`${compose.replyTo ? "Reply" : "New message"}   markdown body, Ctrl-S sends`, theme, { fg: theme.accent, bold: true }),
+    field("from", compose.from),
+    field("to", compose.to),
+    field("subject", compose.subject),
+    line("-".repeat(Math.min(width, 60)), theme, { fg: theme.muted }),
+  ];
+  for (const [offset, bodyLine] of bodyLines.slice(start, start + bodyH).entries()) {
+    const absolute = start + offset;
+    const isLast = absolute === bodyLines.length - 1;
+    rows.push(line(`${truncate(bodyLine || " ", width)}${compose.field === "body" && isLast ? "|" : ""}`, theme));
+  }
+  return rows;
 }
 
-function Footer({ view, searching, theme }: { view: View; searching: boolean; theme: TuiTheme }) {
+function footerLine(view: View, searching: boolean, theme: TuiTheme): FrameLine {
   const hint = searching ? "type to filter - Enter apply - Esc clear"
     : view === "home" ? "up/down choose - Enter open - q quit"
     : view === "addressPicker" ? "up/down choose address - Enter apply - b back"
@@ -1045,5 +1067,19 @@ function Footer({ view, searching, theme }: { view: View; searching: boolean; th
     : view === "settings" ? "1-7 change setting - b back"
     : view === "reader" ? "j/k scroll - J/K next/prev - r reply - s star - e archive - b back"
     : "up/down move - Enter open - ]/[ folders - a address - c compose - p profiles - , settings - / search - g refresh - G pull - b home";
-  return <Box paddingX={1}><Text color={theme.muted}>{hint}</Text></Box>;
+  return line(` ${hint}`, theme, { fg: theme.muted, bg: theme.background });
+}
+
+function FrameText({ line: frameLine, width }: { line: FrameLine; width: number }) {
+  return (
+    <text
+      width={width}
+      height={1}
+      content={frameLine.text || " "}
+      fg={frameLine.fg}
+      bg={frameLine.bg}
+      attributes={frameLine.bold ? TextAttributes.BOLD : TextAttributes.NONE}
+      truncate
+    />
+  );
 }

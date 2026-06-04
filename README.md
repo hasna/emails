@@ -39,10 +39,11 @@ emails cloud push
 
 ## Email UI (`emails ui`)
 
-A clean, full-screen terminal mail client with a simple home screen: Inbox,
+A clean, full-screen OpenTUI mail client with a simple home screen: Inbox,
 Compose, Profiles, and Settings. Inbox starts at all addresses and can be
-filtered to one email address when needed. Live read-state, local refresh, and
-background auto-pull keep the mailbox current.
+filtered to one email address when needed. Live read-state, local refresh,
+background auto-pull, and an `auto`/`light`/`dark` color theme keep the mailbox
+current and readable across terminals.
 
 ```bash
 emails ui
@@ -57,7 +58,7 @@ address · `↑↓`/`j k` move · `Enter` open · `]`/`[` or `1`–`5` switch fo
 (rendered to HTML on send), `Enter` for blank/new lines · `Tab` next field ·
 editable From/To/Subject/Body · `Ctrl-S` send · `Esc` cancel. `p` shows your profiles (accounts) + their
 domains/addresses. `,` opens settings, including theme mode (`auto`/`light`/`dark`);
-auto detects common terminal background hints and falls back to light. Folders:
+uses OpenTUI terminal theme detection and falls back to local background hints. Folders:
 Inbox · Unread · Starred · Sent · Archived.
 
 ## Command Structure

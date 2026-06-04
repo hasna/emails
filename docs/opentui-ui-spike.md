@@ -1,99 +1,72 @@
-# OpenTUI UI Spike
+# OpenTUI UI Implementation
 
 Date: 2026-06-04
 
 ## Scope
 
-Evaluate whether `emails ui` should move from Ink to OpenTUI after the UI was
-simplified to:
+`emails ui` has moved from Ink to OpenTUI. The command now creates an
+OpenTUI `CliRenderer`, renders through `@opentui/react`, and keeps OpenTUI
+core/react packages external in the Bun bundle so native runtime package
+resolution works correctly.
+
+The implemented UI covers:
 
 - Home
 - Inbox
+- Address picker
+- Reader
 - Compose
 - Profiles
 - Settings
-
-The target OpenTUI reproduction would cover home selection, Inbox rows, address
-picker, reader scrolling, and compose fields.
 
 ## Current OpenTUI Facts
 
 - OpenTUI is a native terminal UI core written in Zig with TypeScript bindings.
 - OpenTUI is currently Bun-exclusive; Node and Deno support are still in progress.
-- First-party packages expose React support.
-- Core components include layout, text, input, select, scrollbox, keyboard
-  handling, and focus support.
-- Current npm versions checked on 2026-06-04:
-  - `@opentui/core`: `0.3.1`
-  - `@opentui/react`: `0.3.1`
+- The UI uses `@opentui/core` and `@opentui/react` at `0.3.2`.
+- React is pinned to `19.2.0` to satisfy the OpenTUI React peer dependency.
+- OpenTUI detects terminal theme mode; `emails ui` uses that for the persisted
+  `auto` theme setting and falls back to local terminal environment hints.
 
 References:
 
 - https://opentui.com/
 - https://opentui.com/docs/getting-started/
-- https://opentui.com/docs/plugins/react/
+- https://opentui.com/docs/bindings/react/
+- https://opentui.com/docs/core-concepts/renderer/
 
-## Prototype Mapping
+## Implementation Notes
 
-The simplified `emails ui` can map cleanly to OpenTUI:
+- `src/cli/commands/ui.tsx` owns renderer creation, terminal title setup, and
+  shutdown waiting.
+- `src/cli/tui/App.tsx` owns OpenTUI keyboard handling, theme detection,
+  terminal background control, and renderable layout.
+- `src/cli/tui/data.ts` remains the DB-backed data layer for mailbox lists,
+  counts, address choices, profiles, settings, compose send, and mutations.
+- `src/cli/tui/theme.ts` now exposes hex palettes for OpenTUI `fg`/`bg` colors.
+- `src/cli/tui/App.test.ts` uses `@opentui/react/test-utils` and OpenTUI mock
+  keyboard input instead of `ink-testing-library`.
 
-- Home: `Select` rows for Inbox, Compose, Profiles, Settings.
-- Inbox: `Box` header plus a selectable message list.
-- Address picker: `Select` rows for All addresses and exact addresses.
-- Reader: `ScrollBox` for message body and attachment metadata.
-- Compose: input fields for From, To, Subject, and body.
-- Footer/status: a fixed bottom `Box` with compact key hints.
+## UX Model
 
-No data-layer changes would be required. The existing `listMailbox`,
-`mailboxCounts`, `listInboxAddresses`, `sendComposed`, and message mutation
-helpers can be reused.
+- Startup without `--mailbox` opens Home, not Inbox.
+- Inbox is a unified all-address view by default.
+- Press `a` in Inbox to choose an exact email address.
+- The Inbox surface does not show provider/domain/source groupings.
+- Compose has editable From, To, Subject, and Body fields.
+- Settings can cycle auto-pull, Gmail auto-pull, dim-read, default folder,
+  default inbox address, default From, and theme mode.
 
-## Dependency Impact
+## Verification
 
-Adding OpenTUI would add at least:
+Focused verification should include:
 
-- `@opentui/core`
-- `@opentui/react`
-- native runtime artifacts through OpenTUI's Zig core
+```bash
+bun run build
+bun test src/cli/tui
+bun dist/cli/index.js ui --help
+bun dist/cli/index.js interactive
+```
 
-The package already targets Bun, so Bun-only support is acceptable for this
-repo. The bigger cost is not runtime compatibility; it is replacing the current
-Ink tests and validating terminal cleanup, focus, input handling, and rendering
-across local machines.
-
-## Recommendation
-
-Do not migrate to OpenTUI now.
-
-The major issue was product structure, not terminal rendering capacity:
-
-- The app started directly in Inbox.
-- Inbox exposed provider/domain/source concepts.
-- Address selection was not the user-facing model.
-
-Those issues are now addressed in Ink by the home screen, address-only Inbox
-filtering, and exact address data-layer support. Migrating immediately would add
-dependency and test churn without a clear user-facing gain.
-
-## When To Revisit
-
-Reconsider OpenTUI if any of these remain true after dogfooding the simplified
-Ink UI:
-
-- Large Inbox scrolling is still visibly slow.
-- Input focus or compose editing remains unreliable.
-- Background refresh still causes terminal rendering stalls.
-- We need richer widgets that Ink cannot support cleanly.
-
-## Migration Estimate
-
-If migration becomes justified:
-
-- 0.5 day: build a disposable OpenTUI prototype with static fixtures.
-- 1 day: port data wiring and view transitions.
-- 1 day: port compose, reader, address picker, and settings.
-- 1 day: replace Ink tests with OpenTUI-specific render/input tests or a thin
-  state-machine harness.
-- 0.5 day: terminal cleanup, packaging, smoke tests across local machines.
-
-Estimated total: 3.5 to 5 engineering days.
+`interactive` should remain an unknown command; this internal app intentionally
+uses `emails ui` only.

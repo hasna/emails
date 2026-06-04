@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import React from "react";
-import { render, cleanup as cleanupInk } from "ink-testing-library";
+import { act } from "react";
+import { testRender, type TestRendererSetup } from "@opentui/react/test-utils";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -20,16 +21,14 @@ mock.module("./autopull.js", () => ({
 
 const { App } = await import("./App.js");
 
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
-const arrowDown = "\u001B[B";
-const arrowUp = "\u001B[A";
-
 let savedHome: string | undefined;
 let tmpHome: string;
 let providerId: string;
+let setup: TestRendererSetup | null = null;
 
 beforeEach(() => {
   process.env["EMAILS_DB_PATH"] = ":memory:";
+  process.env["EMAILS_TUI_DISABLE_THEME_PROBE"] = "1";
   savedHome = process.env["HOME"];
   tmpHome = mkdtempSync(join(tmpdir(), "emails-tui-"));
   process.env["HOME"] = tmpHome;
@@ -41,10 +40,13 @@ beforeEach(() => {
   autoPullCalls = 0;
 });
 
-afterEach(() => {
-  cleanupInk();
+afterEach(async () => {
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  setup?.renderer.destroy();
+  setup = null;
   closeDatabase();
   delete process.env["EMAILS_DB_PATH"];
+  delete process.env["EMAILS_TUI_DISABLE_THEME_PROBE"];
   if (savedHome === undefined) delete process.env["HOME"];
   else process.env["HOME"] = savedHome;
   rmSync(tmpHome, { recursive: true, force: true });
@@ -68,50 +70,88 @@ describe("emails ui App", () => {
     });
   }
 
+  async function renderApp(props?: { initialMailbox?: string }) {
+    setup = await testRender(React.createElement(App, props), {
+      width: 100,
+      height: 30,
+      exitOnCtrlC: false,
+      consoleMode: "disabled",
+      openConsoleOnError: false,
+    });
+    await setup.flush();
+    return setup;
+  }
+
+  const frame = () => setup?.captureCharFrame() ?? "";
+  const withAct = async (fn: () => void | Promise<void>) => {
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+    await act(fn);
+  };
+  const type = async (text: string) => {
+    await withAct(async () => {
+      await setup?.mockInput.typeText(text);
+    });
+    await setup?.flush();
+  };
+  const key = async (name: "up" | "down" | "left" | "right") => {
+    await withAct(async () => {
+      setup?.mockInput.pressArrow(name);
+    });
+    await setup?.flush();
+  };
+  const tab = async () => {
+    await withAct(async () => {
+      setup?.mockInput.pressTab();
+    });
+    await setup?.flush();
+  };
+  const escape = async () => {
+    await withAct(async () => {
+      setup?.mockInput.pressEscape();
+      await new Promise((resolve) => setTimeout(resolve, 80));
+    });
+    await setup?.flush();
+  };
+  const enter = async () => {
+    await withAct(async () => {
+      setup?.mockInput.pressEnter();
+    });
+    await setup?.flush();
+  };
+
   it("starts on a simple home screen and opens Inbox from there", async () => {
     seedMessage("hello inbox", "2026-01-01T10:00:00.000Z");
-    const app = render(React.createElement(App));
-    await tick();
+    await renderApp();
 
-    let frame = app.lastFrame() ?? "";
-    expect(frame).toContain("emails ui");
-    expect(frame).toContain("Choose");
-    expect(frame).toContain("Inbox");
-    expect(frame).toContain("Compose");
-    expect(frame).toContain("Profiles");
-    expect(frame).toContain("Settings");
+    expect(frame()).toContain("emails ui");
+    expect(frame()).toContain("Choose");
+    expect(frame()).toContain("Inbox");
+    expect(frame()).toContain("Compose");
+    expect(frame()).toContain("Profiles");
+    expect(frame()).toContain("Settings");
 
-    app.stdin.write("l");
-    await tick();
+    await type("l");
 
-    frame = app.lastFrame() ?? "";
-    expect(frame).toContain("Inbox: All addresses");
-    expect(frame).toContain("hello inbox");
+    expect(frame()).toContain("Inbox: All addresses");
+    expect(frame()).toContain("hello inbox");
   });
 
   it("opens compose with an editable From field defaulted from configured addresses", async () => {
-    const app = render(React.createElement(App, { initialMailbox: "inbox" }));
-    await tick();
+    await renderApp({ initialMailbox: "inbox" });
 
-    app.stdin.write("c");
-    await tick();
+    await type("c");
 
-    const frame = app.lastFrame() ?? "";
-    expect(frame).toContain("New message");
-    expect(frame).toContain("from");
-    expect(frame).toContain("ops@example.com");
-    expect(frame).toContain("edit From/To/Subject/Body");
+    expect(frame()).toContain("New message");
+    expect(frame()).toContain("from");
+    expect(frame()).toContain("ops@example.com");
+    expect(frame()).toContain("edit From/To/Subject/Body");
 
-    app.stdin.write("\t");
-    await tick();
-    app.stdin.write("\t");
-    await tick();
-    app.stdin.write("\t");
-    await tick();
-    app.stdin.write("+");
-    await tick();
+    await tab();
+    await tab();
+    await tab();
+    await type("+");
 
-    expect(app.lastFrame() ?? "").toContain("ops@example.com+");
+    expect(frame()).toContain("ops@example.com+");
   });
 
   it("honors Default From over the selected inbox address", async () => {
@@ -121,87 +161,62 @@ describe("emails ui App", () => {
     markVerified(team.id);
     setSetting("defaultFrom", "team@example.com");
     seedMessage("sales message", "2026-01-02T10:00:00.000Z", "sales@example.com");
-    const app = render(React.createElement(App, { initialMailbox: "inbox" }));
-    await tick();
+    await renderApp({ initialMailbox: "inbox" });
 
-    app.stdin.write("a");
-    await tick();
-    app.stdin.write(arrowDown);
-    await tick();
-    app.stdin.write(arrowDown);
-    await tick();
-    app.stdin.write("l");
-    await tick();
-    app.stdin.write("c");
-    await tick();
+    await type("a");
+    await key("down");
+    await key("down");
+    await type("l");
+    await type("c");
 
-    const frame = app.lastFrame() ?? "";
-    expect(frame).toContain("New message");
-    expect(frame).toContain("team@example.com");
-    expect(frame).not.toContain("sales@example.com|");
+    expect(frame()).toContain("New message");
+    expect(frame()).toContain("team@example.com");
+    expect(frame()).not.toContain("sales@example.com|");
   });
 
   it("returns to Inbox when compose is cancelled from Inbox", async () => {
     seedMessage("inbox message", "2026-01-02T10:00:00.000Z");
-    const app = render(React.createElement(App, { initialMailbox: "inbox" }));
-    await tick();
+    await renderApp({ initialMailbox: "inbox" });
 
-    app.stdin.write("c");
-    await tick();
-    expect(app.lastFrame() ?? "").toContain("New message");
+    await type("c");
+    expect(frame()).toContain("New message");
 
-    app.stdin.write("\u001B");
-    await tick();
+    await escape();
 
-    const frame = app.lastFrame() ?? "";
-    expect(frame).toContain("Inbox: All addresses");
-    expect(frame).toContain("inbox message");
-    expect(frame).not.toContain("Choose");
+    expect(frame()).toContain("Inbox: All addresses");
+    expect(frame()).toContain("inbox message");
+    expect(frame()).not.toContain("Choose");
   });
 
   it("advances from recipient to subject to body with Enter", async () => {
-    const app = render(React.createElement(App, { initialMailbox: "inbox" }));
-    await tick();
+    await renderApp({ initialMailbox: "inbox" });
 
-    app.stdin.write("c");
-    await tick();
-    app.stdin.write("client@example.com");
-    await tick();
-    app.stdin.write("\n");
-    await tick();
-    app.stdin.write("Quarterly update");
-    await tick();
-    app.stdin.write("\n");
-    await tick();
-    app.stdin.write("Body line");
-    await tick();
+    await type("c");
+    await type("client@example.com");
+    await enter();
+    await type("Quarterly update");
+    await enter();
+    await type("Body line");
 
-    const frame = app.lastFrame() ?? "";
-    expect(frame).toContain("client@example.com");
-    expect(frame).toContain("Quarterly update");
-    expect(frame).toContain("Body line");
-    expect(frame).not.toContain("Quarterly updateBody line");
+    expect(frame()).toContain("client@example.com");
+    expect(frame()).toContain("Quarterly update");
+    expect(frame()).toContain("Body line");
+    expect(frame()).not.toContain("Quarterly updateBody line");
   });
 
   it("moves selection with down and up arrow keys", async () => {
     seedMessage("older message", "2026-01-01T10:00:00.000Z");
     seedMessage("newer message", "2026-01-02T10:00:00.000Z");
-    const app = render(React.createElement(App, { initialMailbox: "inbox" }));
-    await tick();
+    await renderApp({ initialMailbox: "inbox" });
 
-    app.stdin.write(arrowDown);
-    await tick();
-    app.stdin.write("l");
-    await tick();
-    expect(app.lastFrame() ?? "").toContain("older message");
+    await key("down");
+    await type("l");
+    expect(frame()).toContain("older message");
 
-    app.stdin.write("q");
-    await tick();
-    app.stdin.write(arrowUp);
-    await tick();
-    app.stdin.write("l");
-    await tick();
-    expect(app.lastFrame() ?? "").toContain("newer message");
+    await type("q");
+    await key("up");
+    await type("l");
+    expect(frame()).toContain("newer message");
   });
 
   it("filters Inbox by selected email address", async () => {
@@ -209,97 +224,73 @@ describe("emails ui App", () => {
     markVerified(sales.id);
     seedMessage("ops message", "2026-01-01T10:00:00.000Z", "ops@example.com");
     seedMessage("sales message", "2026-01-02T10:00:00.000Z", "sales@example.com");
-    const app = render(React.createElement(App, { initialMailbox: "inbox" }));
-    await tick();
+    await renderApp({ initialMailbox: "inbox" });
 
-    expect(app.lastFrame() ?? "").toContain("Inbox: All addresses");
-    expect(app.lastFrame() ?? "").toContain("ops message");
-    expect(app.lastFrame() ?? "").toContain("sales message");
+    expect(frame()).toContain("Inbox: All addresses");
+    expect(frame()).toContain("ops message");
+    expect(frame()).toContain("sales message");
 
-    app.stdin.write("a");
-    await tick();
-    expect(app.lastFrame() ?? "").toContain("Choose Address");
-    expect(app.lastFrame() ?? "").toContain("All addresses");
-    expect(app.lastFrame() ?? "").toContain("sales@example.com");
+    await type("a");
+    expect(frame()).toContain("Choose Address");
+    expect(frame()).toContain("All addresses");
+    expect(frame()).toContain("sales@example.com");
 
-    app.stdin.write(arrowDown);
-    await tick();
-    app.stdin.write(arrowDown);
-    await tick();
-    app.stdin.write("l");
-    await tick();
-    await tick();
+    await key("down");
+    await key("down");
+    await type("l");
 
-    const frame = app.lastFrame() ?? "";
-    expect(frame).toContain("Inbox: sales@example.com");
-    expect(frame).toContain("sales message");
-    expect(frame).not.toContain("ops message");
+    expect(frame()).toContain("Inbox: sales@example.com");
+    expect(frame()).toContain("sales message");
+    expect(frame()).not.toContain("ops message");
   });
 
   it("keeps the selected address stable when refresh reorders address choices", async () => {
     const sales = createAddress({ provider_id: providerId, email: "sales@example.com" });
     markVerified(sales.id);
     seedMessage("sales message", "2026-01-02T10:00:00.000Z", "sales@example.com");
-    const app = render(React.createElement(App, { initialMailbox: "inbox" }));
-    await tick();
+    await renderApp({ initialMailbox: "inbox" });
 
-    app.stdin.write("a");
-    await tick();
-    app.stdin.write(arrowDown);
-    await tick();
-    app.stdin.write(arrowDown);
-    await tick();
-    app.stdin.write("l");
-    await tick();
-    expect(app.lastFrame() ?? "").toContain("Inbox: sales@example.com");
+    await type("a");
+    await key("down");
+    await key("down");
+    await type("l");
+    expect(frame()).toContain("Inbox: sales@example.com");
 
     const aaa = createAddress({ provider_id: providerId, email: "aaa@example.com" });
     markVerified(aaa.id);
-    app.stdin.write("g");
-    await tick();
-    await tick();
+    await type("g");
 
-    const frame = app.lastFrame() ?? "";
-    expect(frame).toContain("Inbox: sales@example.com");
-    expect(frame).toContain("sales message");
+    expect(frame()).toContain("Inbox: sales@example.com");
+    expect(frame()).toContain("sales message");
   });
 
   it("remains responsive on startup when auto-pull is enabled", async () => {
     setSetting("autoPull", true);
-    const app = render(React.createElement(App, { initialMailbox: "inbox" }));
-    await tick();
+    await renderApp({ initialMailbox: "inbox" });
 
-    app.stdin.write("c");
-    await tick();
+    await type("c");
 
-    expect(app.lastFrame() ?? "").toContain("New message");
+    expect(frame()).toContain("New message");
     expect(autoPullCalls).toBe(0);
   });
 
   it("local refresh keeps selection and does not run the pull engine", async () => {
     seedMessage("older message", "2026-01-01T10:00:00.000Z");
     seedMessage("newer message", "2026-01-02T10:00:00.000Z");
-    const app = render(React.createElement(App, { initialMailbox: "inbox" }));
-    await tick();
+    await renderApp({ initialMailbox: "inbox" });
 
-    app.stdin.write(arrowDown);
-    await tick();
-    app.stdin.write("g");
-    await tick();
-    app.stdin.write("\n");
-    await tick();
+    await key("down");
+    await type("g");
+    await enter();
 
-    expect(app.lastFrame() ?? "").toContain("older message");
+    expect(frame()).toContain("older message");
     expect(autoPullCalls).toBe(0);
   });
 
   it("explicit pull is on Shift-G", async () => {
-    const app = render(React.createElement(App, { initialMailbox: "inbox" }));
-    await tick();
+    await renderApp({ initialMailbox: "inbox" });
 
-    app.stdin.write("G");
-    await tick();
-    await tick();
+    await type("G");
 
     expect(autoPullCalls).toBe(1);
   });

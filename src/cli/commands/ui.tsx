@@ -1,6 +1,8 @@
+/** @jsxImportSource @opentui/react */
 import type { Command } from "commander";
 import chalk from "chalk";
-import { render } from "ink";
+import { createCliRenderer } from "@opentui/core";
+import { createRoot } from "@opentui/react";
 import { App } from "../tui/App.js";
 import type { Mailbox } from "../tui/data.js";
 
@@ -9,7 +11,7 @@ export function registerUiCommand(program: Command, _output: (data: unknown, for
     .command("ui")
     .description("Open the email UI")
     .option("--mailbox <name>", "Start in: inbox | unread | starred | sent | archived (default: your saved setting)")
-    .action((opts: { mailbox?: string }) => {
+    .action(async (opts: { mailbox?: string }) => {
       if (!process.stdin.isTTY || !process.stdout.isTTY) {
         console.error(chalk.red("Email UI requires a TTY terminal."));
         console.error(chalk.dim("Use `emails inbox list`, `emails inbox read <id>`, or `emails send` non-interactively."));
@@ -17,7 +19,21 @@ export function registerUiCommand(program: Command, _output: (data: unknown, for
       }
       const valid: Mailbox[] = ["inbox", "unread", "starred", "sent", "archived"];
       const mailbox = opts.mailbox && valid.includes(opts.mailbox as Mailbox) ? (opts.mailbox as Mailbox) : undefined;
-      const app = render(<App initialMailbox={mailbox} />);
-      void app.waitUntilExit().then(() => process.exit(0));
+      await runOpenTuiApp(mailbox);
     });
+}
+
+export async function runOpenTuiApp(initialMailbox?: Mailbox): Promise<void> {
+  const renderer = await createCliRenderer({
+    exitOnCtrlC: false,
+    targetFps: 30,
+    consoleMode: "disabled",
+    openConsoleOnError: false,
+    backgroundColor: "#101418",
+  });
+  renderer.setTerminalTitle("emails ui");
+  createRoot(renderer).render(<App initialMailbox={initialMailbox} />);
+  await new Promise<void>((resolve) => {
+    renderer.on("destroy", () => resolve());
+  });
 }

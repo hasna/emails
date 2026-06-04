@@ -3,6 +3,10 @@ export type ResolvedTuiThemeName = "light" | "dark";
 
 export interface TuiTheme {
   name: ResolvedTuiThemeName;
+  background: string;
+  panel: string;
+  panelAlt: string;
+  headerBg: string;
   border: string;
   primary: string;
   secondary: string;
@@ -25,46 +29,54 @@ export interface TuiTheme {
 
 const LIGHT: TuiTheme = {
   name: "light",
-  border: "blue",
-  primary: "black",
-  secondary: "gray",
-  muted: "gray",
-  accent: "blue",
-  accentStrong: "blueBright",
-  ok: "green",
-  warning: "yellow",
-  error: "red",
-  activeFg: "white",
-  activeBg: "blue",
-  sourceFg: "white",
-  sourceBg: "magenta",
-  selectedFg: "white",
-  selectedBg: "blue",
-  unread: "blue",
-  star: "yellow",
-  dimRead: "gray",
+  background: "#f7f4ef",
+  panel: "#fffdf8",
+  panelAlt: "#ede7db",
+  headerBg: "#213547",
+  border: "#6b7d8f",
+  primary: "#17212b",
+  secondary: "#4d5d6c",
+  muted: "#7a8793",
+  accent: "#0b6f8a",
+  accentStrong: "#005f73",
+  ok: "#207a3c",
+  warning: "#9b5d00",
+  error: "#b42318",
+  activeFg: "#fffdf8",
+  activeBg: "#0b6f8a",
+  sourceFg: "#fffdf8",
+  sourceBg: "#7c3aed",
+  selectedFg: "#fffdf8",
+  selectedBg: "#213547",
+  unread: "#0b6f8a",
+  star: "#b7791f",
+  dimRead: "#87919b",
 };
 
 const DARK: TuiTheme = {
   name: "dark",
-  border: "cyan",
-  primary: "white",
-  secondary: "whiteBright",
-  muted: "gray",
-  accent: "cyan",
-  accentStrong: "cyanBright",
-  ok: "greenBright",
-  warning: "yellowBright",
-  error: "redBright",
-  activeFg: "black",
-  activeBg: "cyanBright",
-  sourceFg: "black",
-  sourceBg: "magentaBright",
-  selectedFg: "whiteBright",
-  selectedBg: "blue",
-  unread: "cyanBright",
-  star: "yellowBright",
-  dimRead: "gray",
+  background: "#101418",
+  panel: "#171c22",
+  panelAlt: "#202832",
+  headerBg: "#0c1117",
+  border: "#3d5969",
+  primary: "#edf2f7",
+  secondary: "#b8c4cc",
+  muted: "#7f8d98",
+  accent: "#64d2ff",
+  accentStrong: "#8bd5ca",
+  ok: "#7ee787",
+  warning: "#f2cc60",
+  error: "#ff7b72",
+  activeFg: "#071018",
+  activeBg: "#64d2ff",
+  sourceFg: "#071018",
+  sourceBg: "#d2a8ff",
+  selectedFg: "#ffffff",
+  selectedBg: "#2d4f67",
+  unread: "#64d2ff",
+  star: "#f2cc60",
+  dimRead: "#6f7b85",
 };
 
 export function normalizeThemeMode(value: unknown): TuiThemeMode {
@@ -104,12 +116,20 @@ export function detectSystemTheme(env: Record<string, string | undefined> = proc
   return "light";
 }
 
-export function resolveThemeName(mode: TuiThemeMode = "auto", env: Record<string, string | undefined> = process.env): ResolvedTuiThemeName {
-  return mode === "auto" ? detectSystemTheme(env) : mode;
+export function resolveThemeName(
+  mode: TuiThemeMode = "auto",
+  env: Record<string, string | undefined> = process.env,
+  detected?: ResolvedTuiThemeName | null,
+): ResolvedTuiThemeName {
+  return mode === "auto" ? detected ?? detectSystemTheme(env) : mode;
 }
 
-export function resolveTheme(mode: TuiThemeMode = "auto", env: Record<string, string | undefined> = process.env): TuiTheme {
-  return resolveThemeName(mode, env) === "dark" ? DARK : LIGHT;
+export function resolveTheme(
+  mode: TuiThemeMode = "auto",
+  env: Record<string, string | undefined> = process.env,
+  detected?: ResolvedTuiThemeName | null,
+): TuiTheme {
+  return resolveThemeName(mode, env, detected) === "dark" ? DARK : LIGHT;
 }
 
 export function nextThemeMode(mode: TuiThemeMode): TuiThemeMode {
