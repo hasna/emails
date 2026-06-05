@@ -1,6 +1,6 @@
 {
   "name": "@hasna/emails",
-  "version": "0.6.3",
+  "version": "0.6.4",
   "description": "Email management CLI + MCP server + dashboard for Resend and AWS SES",
   "type": "module",
   "repository": {
@@ -32,7 +32,7 @@
     "README.md"
   ],
   "scripts": {
-    "build": "bun build src/cli/index.tsx --outdir dist/cli --target bun --external @opentui/core --external @opentui/react --external react --external chalk --external @modelcontextprotocol/sdk && bun build src/mcp/index.ts --outdir dist/mcp --target bun --external @modelcontextprotocol/sdk && bun build src/server/index.ts --outdir dist/server --target bun && bun build src/index.ts --outdir dist --target bun && bun build src/db/pg-migrations.ts --outdir dist/db --target bun && tsc --emitDeclarationOnly --outDir dist",
+    "build": "bun build src/cli/index.tsx --outdir dist/cli --target bun --external @opentui/core --external chalk --external @modelcontextprotocol/sdk && bun build src/mcp/index.ts --outdir dist/mcp --target bun --external @modelcontextprotocol/sdk && bun build src/server/index.ts --outdir dist/server --target bun && bun build src/index.ts --outdir dist --target bun && bun build src/db/pg-migrations.ts --outdir dist/db --target bun && tsc --emitDeclarationOnly --outDir dist",
     "test": "bun test",
     "dev:cli": "bun run src/cli/index.tsx",
     "dev:mcp": "bun run src/mcp/index.ts",
