@@ -1,6 +1,6 @@
 /** @jsxImportSource @opentui/react */
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
-import { TextAttributes, type KeyEvent, type ThemeMode as OpenTuiThemeMode } from "@opentui/core";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState, type ReactNode } from "react";
+import { MouseButton, RGBA, TextAttributes, type KeyEvent, type MouseEvent, type ThemeMode as OpenTuiThemeMode } from "@opentui/core";
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react";
 import {
   listMailbox,
@@ -34,7 +34,8 @@ import { nextThemeMode, resolveTheme, type ResolvedTuiThemeName, type TuiTheme }
 import { startEventLoopWatchdog } from "./watchdog.js";
 import { getEmailSystemStatus, type EmailSystemStatus } from "../../lib/agent-context.js";
 
-type View = "home" | "list" | "addressPicker" | "reader" | "compose" | "profiles" | "settings" | "commands";
+type View = "home" | "list" | "reader" | "compose" | "profiles" | "settings";
+type DialogKind = "addressPicker" | "commands" | null;
 type ComposeField = "from" | "to" | "subject" | "body";
 
 interface ComposeState {
@@ -67,6 +68,7 @@ interface Model extends LoadedMailbox {
   commandIdx: number;
   commandSearch: string;
   commandReturnTo: View;
+  dialog: DialogKind;
   page: number;
   sort: "newest" | "oldest";
   selectedId: string | null;
@@ -101,6 +103,8 @@ type Action =
   | { type: "commandBackspace" }
   | { type: "commandClear" }
   | { type: "openAddressPicker" }
+  | { type: "closeDialog" }
+  | { type: "selectId"; id: string | null }
   | { type: "selectOffset"; delta: number }
   | { type: "view"; view: View }
   | { type: "reader"; scroll?: number }
@@ -113,6 +117,7 @@ type Action =
   | { type: "composeStart"; compose: ComposeState }
   | { type: "composeCancel" }
   | { type: "composePatch"; patch: Partial<ComposeState> }
+  | { type: "composeFocusField"; field: ComposeField }
   | { type: "composeCycleField"; delta: number }
   | { type: "composeEnter" }
   | { type: "composeBackspace" }
@@ -124,6 +129,11 @@ interface FrameLine {
   fg?: string;
   bg?: string;
   bold?: boolean;
+}
+
+interface ActionLine {
+  line: FrameLine;
+  onPress?: () => void;
 }
 
 interface RenderContentArgs {
@@ -232,14 +242,14 @@ function reducer(state: Model, action: Action): Model {
     case "clearStatus":
       return state.status.text === action.text ? { ...state, status: { text: "", tone: "info" } } : state;
     case "setMailbox":
-      return { ...state, mailbox: action.mailbox, page: 0, selectedId: null, view: "list", readerScroll: 0 };
+      return { ...state, mailbox: action.mailbox, page: 0, selectedId: null, view: "list", readerScroll: 0, dialog: null };
     case "cycleMailbox": {
       const i = MAILBOXES.indexOf(state.mailbox);
       const mailbox = MAILBOXES[(i + action.delta + MAILBOXES.length) % MAILBOXES.length]!;
-      return { ...state, mailbox, page: 0, selectedId: null, view: "list", readerScroll: 0 };
+      return { ...state, mailbox, page: 0, selectedId: null, view: "list", readerScroll: 0, dialog: null };
     }
     case "setAddress":
-      return { ...state, addressIdx: action.index, page: 0, selectedId: null, view: "list", readerScroll: 0 };
+      return { ...state, addressIdx: action.index, page: 0, selectedId: null, view: "list", readerScroll: 0, dialog: null };
     case "cycleSort":
       return { ...state, sort: state.sort === "newest" ? "oldest" : "newest", page: 0, selectedId: null, view: "list", readerScroll: 0 };
     case "pageOffset": {
@@ -266,9 +276,9 @@ function reducer(state: Model, action: Action): Model {
       return { ...state, addressPickerIdx: next };
     }
     case "openCommandPalette":
-      return { ...state, view: "commands", commandReturnTo: action.returnTo, commandIdx: 0, commandSearch: "" };
+      return { ...state, dialog: "commands", commandReturnTo: action.returnTo, commandIdx: 0, commandSearch: "" };
     case "closeCommandPalette":
-      return { ...state, view: state.commandReturnTo };
+      return { ...state, dialog: null, commandSearch: "", commandIdx: 0 };
     case "selectCommandOffset": {
       const next = Math.min(Math.max(0, action.count - 1), Math.max(0, state.commandIdx + action.delta));
       return { ...state, commandIdx: next };
@@ -280,11 +290,15 @@ function reducer(state: Model, action: Action): Model {
     case "commandClear":
       return { ...state, commandSearch: "", commandIdx: 0 };
     case "openAddressPicker":
-      return { ...state, addressPickerIdx: state.addressIdx, view: "addressPicker" };
+      return { ...state, addressPickerIdx: state.addressIdx, dialog: "addressPicker" };
+    case "closeDialog":
+      return { ...state, dialog: null, commandSearch: "", commandIdx: 0 };
+    case "selectId":
+      return { ...state, selectedId: action.id };
     case "selectOffset":
       return { ...state, selectedId: selectWithin(state.messages, state.selectedId, action.delta) };
     case "view":
-      return { ...state, view: action.view, searchActive: action.view === "list" ? state.searchActive : false };
+      return { ...state, view: action.view, searchActive: action.view === "list" ? state.searchActive : false, dialog: null };
     case "reader":
       return { ...state, view: "reader", readerScroll: action.scroll ?? 0 };
     case "scroll":
@@ -300,11 +314,13 @@ function reducer(state: Model, action: Action): Model {
     case "searchBackspace":
       return { ...state, search: state.search.slice(0, -1), page: 0, selectedId: null };
     case "composeStart":
-      return { ...state, view: "compose", compose: action.compose };
+      return { ...state, view: "compose", compose: action.compose, dialog: null };
     case "composeCancel":
       return { ...state, view: state.compose?.returnTo ?? "home", compose: null };
     case "composePatch":
       return state.compose ? { ...state, compose: { ...state.compose, ...action.patch } } : state;
+    case "composeFocusField":
+      return state.compose ? { ...state, compose: { ...state.compose, field: action.field } } : state;
     case "composeCycleField": {
       if (!state.compose) return state;
       const i = COMPOSE_FIELDS.indexOf(state.compose.field);
@@ -396,6 +412,7 @@ export function App({ initialMailbox }: AppProps) {
       commandIdx: 0,
       commandSearch: "",
       commandReturnTo: initialMailbox ? "list" : "home",
+      dialog: null,
       page: 0,
       sort: "newest",
       selectedId: loaded.messages[0]?.id ?? null,
@@ -569,6 +586,13 @@ export function App({ initialMailbox }: AppProps) {
     reload(true);
   }, [reload, selectedMsg]);
 
+  const openMessage = useCallback((message: TuiMessage) => {
+    markRead(message);
+    dispatch({ type: "selectId", id: message.id });
+    dispatch({ type: "reader", scroll: 0 });
+    reload(true);
+  }, [reload]);
+
   const mutateSelected = useCallback((kind: "star" | "read" | "archive") => {
     if (!selectedMsg || selectedMsg.kind !== "inbound") return;
     if (kind === "star") {
@@ -665,6 +689,7 @@ export function App({ initialMailbox }: AppProps) {
   }, [startCompose, state.homeIdx]);
 
   const executePaletteAction = useCallback((action: PaletteAction) => {
+    dispatch({ type: "closeCommandPalette" });
     if (action === "inbox") dispatch({ type: "view", view: "list" });
     else if (action === "compose") startCompose();
     else if (action === "profiles") dispatch({ type: "view", view: "profiles" });
@@ -696,17 +721,7 @@ export function App({ initialMailbox }: AppProps) {
       return;
     }
 
-    if (state.view === "compose" && state.compose) {
-      handleComposeInput(input, key, dispatch, sendDraft, flash);
-      return;
-    }
-
-    if (state.searchActive) {
-      handleSearchInput(input, key, dispatch);
-      return;
-    }
-
-    if (state.view === "commands") {
+    if (state.dialog === "commands") {
       const commands = filteredCommands(state.commandSearch);
       if (key.escape || (!state.commandSearch && (input === "q" || input === "b"))) { dispatch({ type: "closeCommandPalette" }); return; }
       if (key.upArrow || input === "k") dispatch({ type: "selectCommandOffset", delta: -1, count: commands.length });
@@ -719,6 +734,28 @@ export function App({ initialMailbox }: AppProps) {
       } else if (input && !key.ctrl) {
         dispatch({ type: "commandAppend", text: input });
       }
+      return;
+    }
+
+    if (state.dialog === "addressPicker") {
+      if (input === "q" || input === "b" || key.escape) { dispatch({ type: "closeDialog" }); return; }
+      if (key.upArrow || input === "k") dispatch({ type: "selectAddressPickerOffset", delta: -1, count: addresses.length });
+      else if (key.downArrow || input === "j") dispatch({ type: "selectAddressPickerOffset", delta: 1, count: addresses.length });
+      else if (key.return || key.rightArrow || input === "l") {
+        dispatch({ type: "setAddress", index: state.addressPickerIdx });
+        const next = addresses[state.addressPickerIdx] ?? ALL_ADDRESSES;
+        flash(`inbox: ${next.label}`, "ok");
+      }
+      return;
+    }
+
+    if (state.view === "compose" && state.compose) {
+      handleComposeInput(input, key, dispatch, sendDraft, flash);
+      return;
+    }
+
+    if (state.searchActive) {
+      handleSearchInput(input, key, dispatch);
       return;
     }
 
@@ -756,18 +793,6 @@ export function App({ initialMailbox }: AppProps) {
 
     if (state.view === "profiles") {
       if (input === "q" || input === "b" || input === "p" || key.escape) dispatch({ type: "view", view: "home" });
-      return;
-    }
-
-    if (state.view === "addressPicker") {
-      if (input === "q" || input === "b" || key.escape) { dispatch({ type: "view", view: "list" }); return; }
-      if (key.upArrow || input === "k") dispatch({ type: "selectAddressPickerOffset", delta: -1, count: addresses.length });
-      else if (key.downArrow || input === "j") dispatch({ type: "selectAddressPickerOffset", delta: 1, count: addresses.length });
-      else if (key.return || key.rightArrow || input === "l") {
-        dispatch({ type: "setAddress", index: state.addressPickerIdx });
-        const next = addresses[state.addressPickerIdx] ?? ALL_ADDRESSES;
-        flash(`inbox: ${next.label}`, "ok");
-      }
       return;
     }
 
@@ -822,7 +847,7 @@ export function App({ initialMailbox }: AppProps) {
 
   const isDashboard = cols >= 104 && rows >= 20;
   const topBar = renderTopBar({ state, address, cols, theme });
-  const footer = footerLine(state.view, state.searchActive, theme);
+  const footer = footerLine(state.view, state.dialog, state.searchActive, theme);
   const bodyH = Math.max(6, rows - 2);
   const sidebarW = isDashboard ? Math.min(34, Math.max(28, Math.floor(cols * 0.24))) : 0;
   const workspaceW = isDashboard ? Math.max(36, cols - sidebarW - 5) : Math.max(24, cols - 4);
@@ -841,11 +866,79 @@ export function App({ initialMailbox }: AppProps) {
     theme,
   };
   const contentLines = renderWorkspace(contentArgs);
-  const sidebarLines = renderSidebar({ state, address, width: sidebarW - 2, height: contentH, theme });
+  const openHomeItem = (index: number) => {
+    const item = HOME_ITEMS[index];
+    if (item === "Inbox") dispatch({ type: "view", view: "list" });
+    else if (item === "Compose") startCompose();
+    else if (item === "Profiles") dispatch({ type: "view", view: "profiles" });
+    else if (item === "Settings") dispatch({ type: "view", view: "settings" });
+  };
+  const applyAddressChoice = (index: number) => {
+    dispatch({ type: "setAddress", index });
+    const next = addresses[index] ?? ALL_ADDRESSES;
+    flash(`inbox: ${next.label}`, "ok");
+  };
+  const refreshNow = () => {
+    flash("refreshing");
+    reload(true, { refreshAddresses: true });
+    flash(`refreshed ${address.label}`, "ok");
+  };
+  const sidebarItems = renderSidebarItems({
+    state,
+    address,
+    width: Math.max(1, sidebarW - 2),
+    height: contentH,
+    theme,
+    onInbox: () => dispatch({ type: "view", view: "list" }),
+    onCompose: () => startCompose(),
+    onProfiles: () => dispatch({ type: "view", view: "profiles" }),
+    onSettings: () => dispatch({ type: "view", view: "settings" }),
+    onCommands: () => dispatch({ type: "openCommandPalette", returnTo: state.view }),
+    onMailbox: (mailbox) => dispatch({ type: "setMailbox", mailbox }),
+    onAddress: () => dispatch({ type: "openAddressPicker" }),
+    onSort: () => dispatch({ type: "cycleSort" }),
+    onNextPage: () => dispatch({ type: "pageOffset", delta: 1 }),
+    onPrevPage: () => dispatch({ type: "pageOffset", delta: -1 }),
+    onRefresh: refreshNow,
+    onPull: runPullNow,
+  });
+  const contentActions = workspaceLineActions({
+    state,
+    width: workspaceW,
+    height: contentH,
+    selectedIndex: sel,
+    selectedMsg,
+    onHomeItem: openHomeItem,
+    onMessage: openMessage,
+    onToggleAutoPull: () => toggleSetting("autoPull"),
+    onToggleGmailAutoPull: () => toggleSetting("gmailAutoPull"),
+    onToggleDimRead: () => toggleSetting("dimRead"),
+    onDefaultMailbox: () => {
+      const i = MAILBOXES.indexOf(state.settings.defaultMailbox);
+      setDefaultMailbox(MAILBOXES[(i + 1) % MAILBOXES.length]!);
+    },
+    onDefaultAddress: cycleDefaultAddress,
+    onDefaultFrom: cycleDefaultFrom,
+    onTheme: cycleTheme,
+    onComposeField: (field) => dispatch({ type: "composeFocusField", field }),
+  });
   const compactLines = [
     compactNavLine({ state, address, width: workspaceW, theme }),
     ...contentLines,
   ];
+  const compactActions = [undefined, ...contentActions];
+
+  const onWorkspaceScroll = (event: MouseEvent) => {
+    if (event.button === MouseButton.WHEEL_UP) {
+      if (state.view === "reader") dispatch({ type: "scroll", delta: -2 });
+      else if (state.view === "list") dispatch({ type: "selectOffset", delta: -2 });
+      event.stopPropagation();
+    } else if (event.button === MouseButton.WHEEL_DOWN) {
+      if (state.view === "reader") dispatch({ type: "scroll", delta: 2 });
+      else if (state.view === "list") dispatch({ type: "selectOffset", delta: 2 });
+      event.stopPropagation();
+    }
+  };
 
   return (
     <box width={cols} height={rows} flexDirection="column" backgroundColor={theme.background}>
@@ -863,7 +956,9 @@ export function App({ initialMailbox }: AppProps) {
             backgroundColor={theme.sidebarBg}
             title=" navigation "
           >
-            {sidebarLines.slice(0, contentH).map((line, i) => <FrameText key={`sidebar-${i}`} line={line} width={sidebarW - 2} />)}
+            {sidebarItems.slice(0, contentH).map((item, i) => (
+              <ActionFrameText key={`sidebar-${i}`} item={item} width={sidebarW - 2} />
+            ))}
           </box>
           <box
             flexGrow={1}
@@ -875,8 +970,11 @@ export function App({ initialMailbox }: AppProps) {
             paddingX={1}
             backgroundColor={theme.panel}
             title={workspacePanelTitle(state)}
+            onMouseScroll={onWorkspaceScroll}
           >
-            {contentLines.slice(0, contentH).map((line, i) => <FrameText key={`content-${i}`} line={line} width={workspaceW} />)}
+            {contentLines.slice(0, contentH).map((line, i) => (
+              <ActionFrameText key={`content-${i}`} item={{ line, onPress: contentActions[i] }} width={workspaceW} />
+            ))}
           </box>
         </box>
       ) : (
@@ -890,10 +988,25 @@ export function App({ initialMailbox }: AppProps) {
           paddingX={1}
           backgroundColor={theme.panel}
           title={workspacePanelTitle(state)}
+          onMouseScroll={onWorkspaceScroll}
         >
-          {compactLines.slice(0, contentH).map((line, i) => <FrameText key={`content-${i}`} line={line} width={workspaceW} />)}
+          {compactLines.slice(0, contentH).map((line, i) => (
+            <ActionFrameText key={`content-${i}`} item={{ line, onPress: compactActions[i] }} width={workspaceW} />
+          ))}
         </box>
       )}
+      <DialogLayer
+        state={state}
+        addresses={addresses}
+        cols={cols}
+        rows={rows}
+        theme={theme}
+        onClose={() => dispatch({ type: "closeDialog" })}
+        onCommandMove={(delta, count) => dispatch({ type: "selectCommandOffset", delta, count })}
+        onCommandSelect={executePaletteAction}
+        onAddressMove={(delta) => dispatch({ type: "selectAddressPickerOffset", delta, count: addresses.length })}
+        onAddressSelect={applyAddressChoice}
+      />
       <FrameText line={footer} width={cols} />
     </box>
   );
@@ -1026,10 +1139,78 @@ function renderContent(args: RenderContentArgs): FrameLine[] {
   if (state.view === "compose" && state.compose) return renderCompose({ compose: state.compose, width: args.width, height: args.height, theme: args.theme });
   if (state.view === "settings") return renderSettings({ settings: state.settings, addresses: args.addresses, width: args.width, theme: args.theme });
   if (state.view === "profiles") return renderProfiles({ width: args.width, height: args.height, theme: args.theme });
-  if (state.view === "commands") return renderCommandPalette({ state, width: args.width, height: args.height, theme: args.theme });
-  if (state.view === "addressPicker") return renderAddressPicker(args);
   if (state.view === "reader") return renderReader({ body: args.readerBody, conversation: args.conversation, scroll: state.readerScroll, width: args.width, height: args.height, theme: args.theme });
   return renderList(args);
+}
+
+function workspaceLineActions({ state, width, height, selectedIndex: sel, selectedMsg, onHomeItem, onMessage, onToggleAutoPull, onToggleGmailAutoPull, onToggleDimRead, onDefaultMailbox, onDefaultAddress, onDefaultFrom, onTheme, onComposeField }: {
+  state: Model;
+  width: number;
+  height: number;
+  selectedIndex: number;
+  selectedMsg: TuiMessage | null;
+  onHomeItem: (index: number) => void;
+  onMessage: (message: TuiMessage) => void;
+  onToggleAutoPull: () => void;
+  onToggleGmailAutoPull: () => void;
+  onToggleDimRead: () => void;
+  onDefaultMailbox: () => void;
+  onDefaultAddress: () => void;
+  onDefaultFrom: () => void;
+  onTheme: () => void;
+  onComposeField: (field: ComposeField) => void;
+}): Array<(() => void) | undefined> {
+  const actions: Array<(() => void) | undefined> = [];
+  const workspacePrefix = 3;
+
+  if (state.view === "home") {
+    const metricRows = width >= 72 ? 2 : 4;
+    const firstHomeItem = workspacePrefix + metricRows + 2;
+    HOME_ITEMS.forEach((_, index) => {
+      actions[firstHomeItem + index] = () => onHomeItem(index);
+    });
+    return actions;
+  }
+
+  if (state.view === "settings") {
+    const firstSetting = workspacePrefix + 2;
+    const handlers = [
+      onToggleAutoPull,
+      onToggleGmailAutoPull,
+      onToggleDimRead,
+      onDefaultMailbox,
+      onDefaultAddress,
+      onDefaultFrom,
+      onTheme,
+    ];
+    handlers.forEach((handler, index) => {
+      actions[firstSetting + index] = handler;
+    });
+    return actions;
+  }
+
+  if (state.view === "compose" && state.compose) {
+    const firstField = workspacePrefix + 1;
+    actions[firstField] = () => onComposeField("from");
+    actions[firstField + 1] = () => onComposeField("to");
+    actions[firstField + 2] = () => onComposeField("subject");
+    for (let i = firstField + 4; i < height; i++) actions[i] = () => onComposeField("body");
+    return actions;
+  }
+
+  if (state.view !== "list" || state.messages.length === 0) return actions;
+
+  const prefixRows = state.searchActive ? 1 : 0;
+  const rowH = Math.max(1, height - prefixRows);
+  const start = Math.max(0, Math.min(sel - Math.floor(rowH / 2), Math.max(0, state.messages.length - rowH)));
+  const firstMessageRow = workspacePrefix + prefixRows;
+  const visible = width >= 92 && selectedMsg ? Math.min(rowH, state.messages.length - start) : Math.min(rowH, state.messages.length - start);
+  for (let offset = 0; offset < visible; offset++) {
+    const message = state.messages[start + offset];
+    if (!message) continue;
+    actions[firstMessageRow + offset] = () => onMessage(message);
+  }
+  return actions;
 }
 
 function workspacePanelTitle(state: Model): string {
@@ -1039,11 +1220,9 @@ function workspacePanelTitle(state: Model): string {
 function workspaceTitle(state: Model, address: InboxAddressChoice): string {
   if (state.view === "home") return "Dashboard";
   if (state.view === "list") return `${mailboxLabel(state.mailbox)}: ${address.label}`;
-  if (state.view === "addressPicker") return "Choose inbox address";
   if (state.view === "reader") return "Message reader";
   if (state.view === "compose") return state.compose?.replyTo ? "Reply" : "Compose";
   if (state.view === "profiles") return "Profiles";
-  if (state.view === "commands") return "Command palette";
   return "Settings";
 }
 
@@ -1060,8 +1239,6 @@ function workspaceSubtitle({ state, address, width }: RenderContentArgs): string
   if (state.view === "compose") return truncate("Editable From, To, Subject, and markdown Body · Ctrl-S sends", width);
   if (state.view === "settings") return truncate("Theme, defaults, and background pull controls", width);
   if (state.view === "profiles") return truncate("Configured accounts with their domains and addresses", width);
-  if (state.view === "commands") return truncate("Type to filter actions · Enter runs · Esc closes", width);
-  if (state.view === "addressPicker") return truncate("Choose All addresses or one exact inbox address", width);
   return truncate("b returns to Inbox · r replies · s stars · e archives", width);
 }
 
@@ -1075,59 +1252,73 @@ function compactNavLine({ state, address, width, theme }: {
   return line(truncate(nav, width), theme, { fg: theme.sourceFg, bg: theme.sourceBg, bold: true });
 }
 
-function renderSidebar({ state, address, width, height, theme }: {
+function renderSidebarItems({ state, address, width, height, theme, onInbox, onCompose, onProfiles, onSettings, onCommands, onMailbox, onAddress, onSort, onNextPage, onPrevPage, onRefresh, onPull }: {
   state: Model;
   address: InboxAddressChoice;
   width: number;
   height: number;
   theme: TuiTheme;
-}): FrameLine[] {
-  const rows: FrameLine[] = [];
-  const section = (labelText: string) => rows.push(line(labelText.toUpperCase(), theme, { fg: theme.sidebarMuted, bg: theme.sidebarBg, bold: true }));
-  const nav = (labelText: string, active: boolean, keyChar: string) => rows.push(line(`${keyChar}  ${truncate(labelText, width - 4)}`, theme, {
+  onInbox: () => void;
+  onCompose: () => void;
+  onProfiles: () => void;
+  onSettings: () => void;
+  onCommands: () => void;
+  onMailbox: (mailbox: Mailbox) => void;
+  onAddress: () => void;
+  onSort: () => void;
+  onNextPage: () => void;
+  onPrevPage: () => void;
+  onRefresh: () => void;
+  onPull: () => void;
+}): ActionLine[] {
+  const rows: ActionLine[] = [];
+  const push = (frameLine: FrameLine, onPress?: () => void) => rows.push({ line: frameLine, onPress });
+  const section = (labelText: string) => push(line(labelText.toUpperCase(), theme, { fg: theme.sidebarMuted, bg: theme.sidebarBg, bold: true }));
+  const nav = (labelText: string, active: boolean, keyChar: string, onPress: () => void) => push(line(`${keyChar}  ${truncate(labelText, width - 4)}`, theme, {
     fg: active ? theme.selectedFg : theme.sidebarFg,
     bg: active ? theme.selectedBg : theme.sidebarBg,
     bold: active,
-  }));
-  rows.push(line("Mailbox", theme, { fg: theme.sidebarFg, bg: theme.sidebarBg, bold: true }));
-  rows.push(line(truncate(address.label, width), theme, { fg: theme.sidebarMuted, bg: theme.sidebarBg }));
-  rows.push(line(" ", theme, { bg: theme.sidebarBg }));
+  }), onPress);
+  push(line("Mailbox", theme, { fg: theme.sidebarFg, bg: theme.sidebarBg, bold: true }));
+  push(line(truncate(address.label, width), theme, { fg: theme.sidebarMuted, bg: theme.sidebarBg }), onAddress);
+  push(line(" ", theme, { bg: theme.sidebarBg }));
   section("Navigation");
-  nav("Inbox", state.view === "list" || state.view === "reader" || state.view === "addressPicker", "1");
-  nav("Compose", state.view === "compose", "2");
-  nav("Profiles", state.view === "profiles", "3");
-  nav("Settings", state.view === "settings", "4");
-  nav("Commands", state.view === "commands", ":");
-  rows.push(line(" ", theme, { bg: theme.sidebarBg }));
+  nav("Inbox", state.view === "list" || state.view === "reader", "1", onInbox);
+  nav("Compose", state.view === "compose", "2", onCompose);
+  nav("Profiles", state.view === "profiles", "3", onProfiles);
+  nav("Settings", state.view === "settings", "4", onSettings);
+  nav("Commands", state.dialog === "commands", ":", onCommands);
+  push(line(" ", theme, { bg: theme.sidebarBg }));
   section("Folders");
   for (const [i, mailbox] of MAILBOXES.entries()) {
     const active = state.mailbox === mailbox && state.view !== "home" && state.view !== "compose" && state.view !== "profiles" && state.view !== "settings";
     const countText = String(state.counts[mailbox]);
     const labelText = `${i + 1}  ${mailboxLabel(mailbox)}`;
-    rows.push(line(fitLine(labelText, countText, width), theme, {
+    push(line(fitLine(labelText, countText, width), theme, {
       fg: active ? theme.selectedFg : theme.sidebarFg,
       bg: active ? theme.selectedBg : theme.sidebarBg,
       bold: active || state.counts[mailbox] > 0,
-    }));
+    }), () => onMailbox(mailbox));
   }
-  rows.push(line(" ", theme, { bg: theme.sidebarBg }));
+  push(line(" ", theme, { bg: theme.sidebarBg }));
   section("Actions");
-  rows.push(line("a  choose address", theme, { fg: theme.sidebarFg, bg: theme.sidebarBg }));
-  rows.push(line(":  commands", theme, { fg: theme.sidebarFg, bg: theme.sidebarBg }));
-  rows.push(line("o  sort order", theme, { fg: theme.sidebarFg, bg: theme.sidebarBg }));
-  rows.push(line("n/N page", theme, { fg: theme.sidebarFg, bg: theme.sidebarBg }));
-  rows.push(line("c  compose", theme, { fg: theme.sidebarFg, bg: theme.sidebarBg }));
-  rows.push(line("g  refresh", theme, { fg: theme.sidebarFg, bg: theme.sidebarBg }));
-  rows.push(line("G  pull now", theme, { fg: theme.sidebarFg, bg: theme.sidebarBg }));
-  rows.push(line(" ", theme, { bg: theme.sidebarBg }));
+  push(line("a  choose address", theme, { fg: theme.sidebarFg, bg: theme.sidebarBg }), onAddress);
+  push(line(":  commands", theme, { fg: theme.sidebarFg, bg: theme.sidebarBg }), onCommands);
+  push(line("o  sort order", theme, { fg: theme.sidebarFg, bg: theme.sidebarBg }), onSort);
+  push(line("n  next page", theme, { fg: theme.sidebarFg, bg: theme.sidebarBg }), onNextPage);
+  push(line("N  prev page", theme, { fg: theme.sidebarFg, bg: theme.sidebarBg }), onPrevPage);
+  push(line("c  compose", theme, { fg: theme.sidebarFg, bg: theme.sidebarBg }), onCompose);
+  push(line("g  refresh", theme, { fg: theme.sidebarFg, bg: theme.sidebarBg }), onRefresh);
+  push(line("G  pull now", theme, { fg: theme.sidebarFg, bg: theme.sidebarBg }), onPull);
+  push(line(" ", theme, { bg: theme.sidebarBg }));
   section("Status");
-  rows.push(line(`Theme ${state.settings.theme}/${theme.name}`, theme, { fg: theme.sidebarFg, bg: theme.sidebarBg }));
-  rows.push(line(`Auto-pull ${state.settings.autoPull ? "on" : "off"}`, theme, {
+  push(line(`Theme ${state.settings.theme}/${theme.name}`, theme, { fg: theme.sidebarFg, bg: theme.sidebarBg }));
+  push(line(`Auto-pull ${state.settings.autoPull ? "on" : "off"}`, theme, {
     fg: state.settings.autoPull ? theme.ok : theme.sidebarMuted,
     bg: theme.sidebarBg,
     bold: state.settings.autoPull,
   }));
-  while (rows.length < height) rows.push(line(" ", theme, { bg: theme.sidebarBg }));
+  while (rows.length < height) push(line(" ", theme, { bg: theme.sidebarBg }));
   return rows;
 }
 
@@ -1197,63 +1388,6 @@ function renderMetricGrid(items: Array<[string, number, string]>, width: number,
 function metricCell([labelText, count, detail]: [string, number, string], width: number): string {
   const value = String(count).padStart(4);
   return truncate(`${labelText.padEnd(9)} ${value}  ${detail}`, width);
-}
-
-function renderCommandPalette({ state, width, height, theme }: {
-  state: Model;
-  width: number;
-  height: number;
-  theme: TuiTheme;
-}): FrameLine[] {
-  const commands = filteredCommands(state.commandSearch);
-  const rows: FrameLine[] = [
-    line(`> ${state.commandSearch}|`, theme, { fg: theme.warning, bold: true }),
-    line(" ", theme),
-  ];
-  if (commands.length === 0) {
-    rows.push(line("No matching actions.", theme, { fg: theme.muted }));
-    return rows;
-  }
-  const rowH = Math.max(1, height - rows.length);
-  const activeIdx = Math.min(state.commandIdx, commands.length - 1);
-  const start = Math.max(0, Math.min(activeIdx - Math.floor(rowH / 2), Math.max(0, commands.length - rowH)));
-  const titleW = Math.min(24, Math.max(12, Math.floor(width * 0.32)));
-  for (const [offset, command] of commands.slice(start, start + rowH).entries()) {
-    const index = start + offset;
-    const active = index === activeIdx;
-    const text = `${active ? ">" : " "} ${truncate(command.title, titleW).padEnd(titleW)} ${truncate(command.detail, Math.max(8, width - titleW - 4))}`;
-    rows.push(line(text, theme, {
-      fg: active ? theme.selectedFg : theme.primary,
-      bg: active ? theme.selectedBg : undefined,
-      bold: active,
-    }));
-  }
-  return rows;
-}
-
-function renderAddressPicker({ addresses, state, width, height, theme }: {
-  addresses: InboxAddressChoice[];
-  state: Model;
-  width: number;
-  height: number;
-  theme: TuiTheme;
-}): FrameLine[] {
-  const rows = [
-    line("Choose Address", theme, { fg: theme.accentStrong, bold: true }),
-    line(" ", theme),
-  ];
-  const rowH = Math.max(1, height - rows.length);
-  const start = Math.max(0, Math.min(state.addressPickerIdx - Math.floor(rowH / 2), Math.max(0, addresses.length - rowH)));
-  for (const [offset, choice] of addresses.slice(start, start + rowH).entries()) {
-    const index = start + offset;
-    const active = index === state.addressPickerIdx;
-    rows.push(line(`${active ? ">" : " "} ${truncate(choice.label, width - 4)}`, theme, {
-      fg: active ? theme.selectedFg : theme.primary,
-      bg: active ? theme.selectedBg : undefined,
-      bold: active,
-    }));
-  }
-  return rows;
 }
 
 function renderList({ state, selectedIndex: sel, selectedMsg, width, height, theme }: {
@@ -1497,17 +1631,201 @@ function renderCompose({ compose, width, height, theme }: {
   return rows;
 }
 
-function footerLine(view: View, searching: boolean, theme: TuiTheme): FrameLine {
-  const hint = searching ? "type to filter - Enter apply - Esc clear"
+function footerLine(view: View, dialog: DialogKind, searching: boolean, theme: TuiTheme): FrameLine {
+  const hint = dialog === "addressPicker" ? "address dialog - up/down choose - Enter apply - Esc close"
+    : dialog === "commands" ? "command dialog - type filter - up/down choose - Enter run - Esc close"
+    : searching ? "type to filter - Enter apply - Esc clear"
     : view === "home" ? "up/down choose - Enter open - q quit"
-    : view === "addressPicker" ? "up/down choose address - Enter apply - b back"
-    : view === "commands" ? "type filter - up/down choose - Enter run - Esc close"
     : view === "compose" ? "Tab field - edit From/To/Subject/Body - Ctrl-S send - Esc cancel"
     : view === "profiles" ? "profiles - b back"
     : view === "settings" ? "1-7 change setting - b back"
     : view === "reader" ? "j/k scroll - J/K next/prev - r reply - s star - e archive - b back"
     : "up/down move - Enter open - o sort - n/N page - : commands - ]/[ folders - a address - c compose - / search - g refresh - G pull - b home";
   return line(` ${hint}`, theme, { fg: theme.muted, bg: theme.background });
+}
+
+function ActionFrameText({ item, width }: { item: ActionLine; width: number }) {
+  if (!item.onPress) return <FrameText line={item.line} width={width} />;
+  return (
+    <box
+      width={width}
+      height={1}
+      onMouseUp={(event: MouseEvent) => {
+        event.stopPropagation();
+        item.onPress?.();
+      }}
+      onMouseOver={(event: MouseEvent) => {
+        event.stopPropagation();
+      }}
+    >
+      <FrameText line={item.line} width={width} />
+    </box>
+  );
+}
+
+function DialogLayer({ state, addresses, cols, rows, theme, onClose, onCommandMove, onCommandSelect, onAddressMove, onAddressSelect }: {
+  state: Model;
+  addresses: InboxAddressChoice[];
+  cols: number;
+  rows: number;
+  theme: TuiTheme;
+  onClose: () => void;
+  onCommandMove: (delta: number, count: number) => void;
+  onCommandSelect: (action: PaletteAction) => void;
+  onAddressMove: (delta: number) => void;
+  onAddressSelect: (index: number) => void;
+}) {
+  if (!state.dialog) return null;
+
+  if (state.dialog === "commands") {
+    const commands = filteredCommands(state.commandSearch);
+    const width = Math.min(76, Math.max(42, cols - 6));
+    const height = Math.min(Math.max(10, rows - 6), 18);
+    const activeIdx = Math.min(state.commandIdx, Math.max(0, commands.length - 1));
+    const rowsAvailable = Math.max(3, height - 5);
+    const start = Math.max(0, Math.min(activeIdx - Math.floor(rowsAvailable / 2), Math.max(0, commands.length - rowsAvailable)));
+    const titleW = Math.min(28, Math.max(14, Math.floor(width * 0.36)));
+    return (
+      <DialogFrame title="Command palette" width={width} height={height} cols={cols} rows={rows} theme={theme} onClose={onClose}>
+        <FrameText line={line(`> ${state.commandSearch}|`, theme, { fg: theme.warning, bold: true })} width={width - 4} />
+        <FrameText line={line(" ", theme)} width={width - 4} />
+        {commands.length === 0 ? (
+          <FrameText line={line("No matching actions.", theme, { fg: theme.muted })} width={width - 4} />
+        ) : commands.slice(start, start + rowsAvailable).map((command, offset) => {
+          const index = start + offset;
+          const active = index === activeIdx;
+          const text = `${active ? ">" : " "} ${truncate(command.title, titleW).padEnd(titleW)} ${truncate(command.detail, Math.max(8, width - titleW - 8))}`;
+          return (
+            <box
+              key={command.action}
+              width={width - 4}
+              height={1}
+              onMouseOver={(event: MouseEvent) => {
+                event.stopPropagation();
+                onCommandMove(index - state.commandIdx, commands.length);
+              }}
+              onMouseUp={(event: MouseEvent) => {
+                event.stopPropagation();
+                onCommandSelect(command.action);
+              }}
+            >
+              <FrameText
+                width={width - 4}
+                line={line(text, theme, {
+                  fg: active ? theme.selectedFg : theme.primary,
+                  bg: active ? theme.selectedBg : undefined,
+                  bold: active,
+                })}
+              />
+            </box>
+          );
+        })}
+      </DialogFrame>
+    );
+  }
+
+  const width = Math.min(72, Math.max(38, cols - 6));
+  const height = Math.min(Math.max(10, rows - 6), 18);
+  const rowH = Math.max(4, height - 4);
+  const start = Math.max(0, Math.min(state.addressPickerIdx - Math.floor(rowH / 2), Math.max(0, addresses.length - rowH)));
+  return (
+    <DialogFrame title="Choose Address" width={width} height={height} cols={cols} rows={rows} theme={theme} onClose={onClose}>
+      <FrameText line={line("All mail stays in one inbox; this only filters the view.", theme, { fg: theme.muted })} width={width - 4} />
+      <FrameText line={line(" ", theme)} width={width - 4} />
+      {addresses.slice(start, start + rowH).map((choice, offset) => {
+        const index = start + offset;
+        const active = index === state.addressPickerIdx;
+        return (
+          <box
+            key={choice.id}
+            width={width - 4}
+            height={1}
+            onMouseOver={(event: MouseEvent) => {
+              event.stopPropagation();
+              onAddressMove(index - state.addressPickerIdx);
+            }}
+            onMouseUp={(event: MouseEvent) => {
+              event.stopPropagation();
+              onAddressSelect(index);
+            }}
+          >
+            <FrameText
+              width={width - 4}
+              line={line(`${active ? ">" : " "} ${truncate(choice.label, width - 7)}`, theme, {
+                fg: active ? theme.selectedFg : theme.primary,
+                bg: active ? theme.selectedBg : undefined,
+                bold: active,
+              })}
+            />
+          </box>
+        );
+      })}
+    </DialogFrame>
+  );
+}
+
+function DialogFrame({ title, width, height, cols, rows, theme, onClose, children }: {
+  title: string;
+  width: number;
+  height: number;
+  cols: number;
+  rows: number;
+  theme: TuiTheme;
+  onClose: () => void;
+  children: ReactNode;
+}) {
+  const top = Math.max(1, Math.floor((rows - height) / 3));
+  const left = Math.max(1, Math.floor((cols - width) / 2));
+  return (
+    <box
+      position="absolute"
+      zIndex={3000}
+      left={0}
+      top={0}
+      width={cols}
+      height={rows}
+      backgroundColor={RGBA.fromInts(0, 0, 0, 145)}
+      onMouseUp={(event: MouseEvent) => {
+        event.stopPropagation();
+        onClose();
+      }}
+    >
+      <box
+        position="absolute"
+        left={left}
+        top={top}
+        width={width}
+        height={height}
+        border
+        borderStyle="rounded"
+        borderColor={theme.border}
+        backgroundColor={theme.panel}
+        paddingX={1}
+        paddingY={1}
+        title={` ${title} `}
+        onMouseUp={(event: MouseEvent) => {
+          event.stopPropagation();
+        }}
+      >
+        <box flexDirection="column" width={width - 2} height={height - 2}>
+          <box flexDirection="row" justifyContent="space-between" width={width - 4} height={1}>
+            <FrameText line={line(title, theme, { fg: theme.accentStrong, bold: true })} width={Math.max(1, width - 12)} />
+            <box
+              width={5}
+              height={1}
+              onMouseUp={(event: MouseEvent) => {
+                event.stopPropagation();
+                onClose();
+              }}
+            >
+              <FrameText line={line("esc", theme, { fg: theme.muted })} width={5} />
+            </box>
+          </box>
+          {children}
+        </box>
+      </box>
+    </box>
+  );
 }
 
 function FrameText({ line: frameLine, width }: { line: FrameLine; width: number }) {

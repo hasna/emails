@@ -26,9 +26,12 @@ export function registerUiCommand(program: Command, _output: (data: unknown, for
 export async function runOpenTuiApp(initialMailbox?: Mailbox): Promise<void> {
   const renderer = await createCliRenderer({
     exitOnCtrlC: false,
-    targetFps: 30,
+    targetFps: 60,
     consoleMode: "disabled",
     openConsoleOnError: false,
+    useKittyKeyboard: {},
+    useMouse: true,
+    enableMouseMovement: true,
     backgroundColor: "#101418",
   });
   renderer.setTerminalTitle("emails ui");

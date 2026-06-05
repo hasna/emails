@@ -99,6 +99,8 @@ describe("emails ui App", () => {
         exitOnCtrlC: false,
         consoleMode: "disabled",
         openConsoleOnError: false,
+        useMouse: true,
+        enableMouseMovement: true,
       });
     });
     await flush();
@@ -140,6 +142,12 @@ describe("emails ui App", () => {
   const resize = async (width: number, height: number) => {
     await withAct(async () => {
       setup?.resize(width, height);
+    });
+    await flush();
+  };
+  const click = async (x: number, y: number) => {
+    await withAct(async () => {
+      await setup?.mockMouse.click(x, y);
     });
     await flush();
   };
@@ -394,5 +402,40 @@ describe("emails ui App", () => {
       release();
     });
     await flush();
+  });
+
+  it("opens sidebar destinations with mouse clicks on wide terminals", async () => {
+    await renderApp({ initialMailbox: "inbox" }, { width: 132, height: 32 });
+
+    await click(5, 7);
+
+    expect(frame()).toContain("New message");
+    expect(frame()).toContain("from");
+    expect(frame()).toContain("to");
+  });
+
+  it("opens the address dialog and applies an address with mouse clicks", async () => {
+    const sales = createAddress({ provider_id: providerId, email: "sales@example.com" });
+    markVerified(sales.id);
+    seedMessage("sales message", "2026-01-02T10:00:00.000Z", "sales@example.com");
+    await renderApp({ initialMailbox: "inbox" });
+
+    await type("a");
+    expect(frame()).toContain("Choose Address");
+
+    await click(28, 11);
+
+    expect(frame()).toContain("Inbox: sales@example.com");
+    expect(frame()).toContain("sales message");
+  });
+
+  it("opens a message row with a mouse click", async () => {
+    seedMessage("clickable message", "2026-01-02T10:00:00.000Z");
+    await renderApp({ initialMailbox: "inbox" });
+
+    await click(5, 6);
+
+    expect(frame()).toContain("Message reader");
+    expect(frame()).toContain("clickable message");
   });
 });
