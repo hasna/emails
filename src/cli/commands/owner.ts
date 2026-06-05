@@ -1,6 +1,7 @@
 import type { Command } from "commander";
 import chalk from "chalk";
 import { createOwner, getOwner, getOwnerByName, listOwners, listAddressesByOwner } from "../../db/owners.js";
+import { enrichAddress } from "../../lib/address-ownership.js";
 import { handleError } from "../utils.js";
 
 export function registerOwnerCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
@@ -38,8 +39,15 @@ export function registerOwnerCommands(program: Command, output: (data: unknown, 
     .action((owner: string, opts: { administered?: boolean }) => {
       const o = getOwnerByName(owner) ?? getOwner(owner);
       if (!o) return handleError(new Error(`Owner not found: ${owner}`));
-      const addrs = listAddressesByOwner(o.id, opts.administered ? "administrator" : "owner");
-      const text = addrs.length ? addrs.map((a) => `  ${a.email}`).join("\n") : "(none)";
-      output(addrs, `${o.name} ${opts.administered ? "administers" : "owns"}:\n${text}`);
+      const role = opts.administered ? "administrator" : "owner";
+      const addrs = listAddressesByOwner(o.id, role).map((address) => enrichAddress(address));
+      const text = addrs.length
+        ? addrs.map((a) => {
+          const ownerText = a.owner ? `owner=${a.owner.name}(${a.owner.type})` : "owner=none";
+          const adminText = a.administrator ? `admin=${a.administrator.name}` : "admin=none";
+          return `  ${a.email}  ${chalk.dim(a.provider_name ?? a.provider_id.slice(0, 8))}  ${chalk.dim(a.status)}  ${chalk.dim(ownerText)}  ${chalk.dim(adminText)}`;
+        }).join("\n")
+        : "(none)";
+      output(addrs, `${o.name} ${role === "administrator" ? "administers" : "owns"}:\n${text}`);
     });
 }

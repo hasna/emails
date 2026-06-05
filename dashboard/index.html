@@ -7,28 +7,28 @@
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f172a; color: #e2e8f0; min-height: 100vh; }
-    nav { background: #1e293b; border-bottom: 1px solid #334155; padding: 0 24px; display: flex; align-items: center; gap: 8px; height: 52px; flex-wrap: wrap; }
-    nav h1 { font-size: 16px; font-weight: 700; color: #f1f5f9; margin-right: 16px; }
-    nav button { background: none; border: none; color: #94a3b8; cursor: pointer; padding: 6px 14px; border-radius: 6px; font-size: 13px; transition: all .15s; }
-    nav button:hover, nav button.active { background: #334155; color: #f1f5f9; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #111412; color: #e7ece8; min-height: 100vh; }
+    nav { background: #171b18; border-bottom: 1px solid #303a34; padding: 0 24px; display: flex; align-items: center; gap: 8px; min-height: 52px; flex-wrap: wrap; }
+    nav h1 { font-size: 16px; font-weight: 700; color: #f5f7f3; margin-right: 16px; }
+    nav button { background: none; border: none; color: #9aa89d; cursor: pointer; padding: 6px 14px; border-radius: 6px; font-size: 13px; transition: all .15s; }
+    nav button:hover, nav button.active { background: #253029; color: #f5f7f3; }
     .nav-right { margin-left: auto; display: flex; align-items: center; gap: 12px; }
     .nav-right label { font-size: 12px; color: #94a3b8; display: flex; align-items: center; gap: 6px; cursor: pointer; white-space: nowrap; }
     .nav-right input[type=checkbox] { accent-color: #3b82f6; cursor: pointer; }
     .main { padding: 24px; max-width: 1200px; margin: 0 auto; }
     .page { display: none; }
     .page.active { display: block; }
-    h2 { font-size: 18px; font-weight: 600; margin-bottom: 20px; color: #f1f5f9; }
+    h2 { font-size: 18px; font-weight: 600; margin-bottom: 20px; color: #f5f7f3; }
     .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 16px; margin-bottom: 28px; }
-    .card { background: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 18px; }
-    .card .label { font-size: 12px; color: #94a3b8; margin-bottom: 6px; text-transform: uppercase; letter-spacing: .5px; }
-    .card .value { font-size: 28px; font-weight: 700; color: #f1f5f9; }
-    .card .sub { font-size: 12px; color: #64748b; margin-top: 4px; }
+    .card { background: #1a201c; border: 1px solid #303a34; border-radius: 8px; padding: 18px; }
+    .card .label { font-size: 12px; color: #9aa89d; margin-bottom: 6px; text-transform: uppercase; letter-spacing: .5px; }
+    .card .value { font-size: 28px; font-weight: 700; color: #f5f7f3; }
+    .card .sub { font-size: 12px; color: #718078; margin-top: 4px; }
     table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    th { text-align: left; padding: 10px 12px; color: #94a3b8; font-weight: 500; border-bottom: 1px solid #334155; font-size: 12px; text-transform: uppercase; letter-spacing: .4px; }
-    td { padding: 10px 12px; border-bottom: 1px solid #1e293b; }
+    th { text-align: left; padding: 10px 12px; color: #9aa89d; font-weight: 500; border-bottom: 1px solid #303a34; font-size: 12px; text-transform: uppercase; letter-spacing: .4px; }
+    td { padding: 10px 12px; border-bottom: 1px solid #253029; }
     tr:last-child td { border-bottom: none; }
-    tr:hover td { background: #1e293b; }
+    tr:hover td { background: #1a201c; }
     tr.clickable { cursor: pointer; }
     .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
     .badge.verified, .badge.delivered { background: #166534; color: #86efac; }
@@ -40,21 +40,33 @@
     .badge.sandbox { background: #3b2a00; color: #fde68a; }
     .badge.suppressed { background: #7f1d1d; color: #fca5a5; }
     .btn { padding: 7px 14px; border-radius: 6px; font-size: 13px; font-weight: 500; cursor: pointer; border: 1px solid; transition: all .15s; }
-    .btn-primary { background: #3b82f6; border-color: #3b82f6; color: #fff; }
-    .btn-primary:hover { background: #2563eb; }
+    .btn-primary { background: #178f7b; border-color: #178f7b; color: #fff; }
+    .btn-primary:hover { background: #0f7a69; }
     .btn-danger { background: transparent; border-color: #ef4444; color: #ef4444; }
     .btn-danger:hover { background: #7f1d1d; }
     .btn-secondary { background: transparent; border-color: #334155; color: #94a3b8; }
     .btn-secondary:hover { background: #334155; color: #f1f5f9; }
     .btn-sm { padding: 4px 10px; font-size: 12px; }
     .toolbar { display: flex; gap: 12px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
-    .toolbar select, .toolbar input { background: #1e293b; border: 1px solid #334155; color: #e2e8f0; padding: 7px 12px; border-radius: 6px; font-size: 13px; }
+    .toolbar select, .toolbar input { background: #1a201c; border: 1px solid #303a34; color: #e7ece8; padding: 7px 12px; border-radius: 6px; font-size: 13px; }
     .toolbar input[type=text] { min-width: 220px; }
     .error { background: #7f1d1d; border: 1px solid #ef4444; color: #fca5a5; padding: 12px 16px; border-radius: 8px; margin-bottom: 16px; font-size: 13px; display: flex; justify-content: space-between; align-items: center; }
     .error .dismiss { cursor: pointer; font-size: 16px; line-height: 1; padding: 0 4px; opacity: .7; }
     .error .dismiss:hover { opacity: 1; }
     .empty { text-align: center; color: #64748b; padding: 48px; font-size: 14px; }
-    .panel { background: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 0; overflow: hidden; }
+    .panel { background: #1a201c; border: 1px solid #303a34; border-radius: 8px; padding: 0; overflow: hidden; }
+    .inbox-shell { display: grid; grid-template-columns: minmax(320px, 0.9fr) minmax(360px, 1.2fr); gap: 16px; align-items: stretch; }
+    .inbox-list, .inbox-reader { background: #1a201c; border: 1px solid #303a34; border-radius: 8px; overflow: hidden; min-height: 560px; }
+    .message-row { padding: 12px 14px; border-bottom: 1px solid #253029; cursor: pointer; display: grid; gap: 4px; }
+    .message-row:hover, .message-row.active { background: #253029; }
+    .message-row .meta { display: flex; justify-content: space-between; gap: 12px; color: #9aa89d; font-size: 12px; }
+    .message-row .subject { color: #f5f7f3; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .message-row .to { color: #b7c2ba; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .inbox-reader { padding: 18px; overflow: auto; }
+    .inbox-reader h3 { font-size: 15px; margin-bottom: 10px; color: #f5f7f3; }
+    .inbox-reader .reader-meta { color: #9aa89d; font-size: 12px; line-height: 1.7; margin-bottom: 16px; }
+    .inbox-reader pre { white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; line-height: 1.55; color: #dce5df; }
+    @media (max-width: 860px) { .main { padding: 14px; } .inbox-shell { grid-template-columns: 1fr; } .inbox-list, .inbox-reader { min-height: auto; } }
     .pagination { display: flex; gap: 8px; align-items: center; margin-top: 14px; font-size: 13px; color: #94a3b8; }
     .pagination button { background: #1e293b; border: 1px solid #334155; color: #e2e8f0; padding: 5px 12px; border-radius: 5px; cursor: pointer; font-size: 12px; }
     .pagination button:disabled { opacity: .4; cursor: not-allowed; }
@@ -82,7 +94,7 @@
 <body>
 
 <nav>
-  <h1>✉ Emails</h1>
+  <h1>Emails</h1>
   <button class="active" onclick="showPage('overview',this)">Overview</button>
   <button onclick="showPage('providers',this)">Providers</button>
   <button onclick="showPage('domains',this)">Domains</button>
@@ -225,8 +237,16 @@
   <!-- INBOUND -->
   <div id="page-inbound" class="page">
     <h2>Inbound</h2>
+    <div class="toolbar">
+      <select id="inbound-address" onchange="loadInbound()"><option value="">All addresses</option></select>
+      <input type="text" id="inbound-search" placeholder="Search local inbound..." oninput="loadInbound()" />
+      <button class="btn btn-primary btn-sm" onclick="triggerSync()">&#8635; Sync</button>
+    </div>
     <div id="error-inbound"></div>
-    <div class="panel"><table id="table-inbound"><tr><td class="loading">Loading...</td></tr></table></div>
+    <div class="inbox-shell">
+      <div class="inbox-list" id="inbound-list"><div class="loading">Loading...</div></div>
+      <div class="inbox-reader" id="inbound-reader"><div class="empty">Select a message.</div></div>
+    </div>
   </div>
 
   <!-- SEQUENCES -->
@@ -370,6 +390,8 @@ const emailsLimit = 25;
 let emailsSearchTimer = null;
 let autoRefreshInterval = null;
 let currentPage = 'overview';
+let inboundCache = [];
+let inboundSelectedId = null;
 
 async function api(path, opts = {}) {
   const res = await fetch(API + path, opts);
@@ -670,14 +692,15 @@ async function loadAddresses() {
     const table = document.getElementById('table-addresses');
     if (!addresses.length) { table.innerHTML = `<tr><td class="empty">No addresses configured.</td></tr>`; return; }
     table.innerHTML = `
-      <thead><tr><th>ID</th><th>Email</th><th>Display Name</th><th>Verified</th><th>Created</th><th></th></tr></thead>
+      <thead><tr><th>ID</th><th>Email</th><th>Provider</th><th>Owner</th><th>Admin</th><th>Verified</th><th></th></tr></thead>
       <tbody>${addresses.map(a => `
         <tr>
           <td class="id">${a.id.slice(0,8)}</td>
           <td>${a.email}</td>
-          <td>${a.display_name || '-'}</td>
+          <td>${a.provider_name || a.provider_id?.slice(0,8) || '-'}</td>
+          <td>${a.owner ? `${a.owner.name} (${a.owner.type})` : '-'}</td>
+          <td>${a.administrator ? a.administrator.name : '-'}</td>
           <td>${badge(a.verified ? 'verified' : 'unverified', a.verified ? 'verified' : 'pending')}</td>
-          <td>${fmt(a.created_at)}</td>
           <td><button class="btn btn-danger btn-sm" onclick="removeAddress('${a.id}','${a.email}')">Remove</button></td>
         </tr>`).join('')}</tbody>`;
   } catch(e) {
@@ -884,24 +907,77 @@ async function removeTemplate(id, name) {
 }
 
 // ─── INBOUND ─────────────────────────────────────────────────────────────────
+async function loadInboundAddressOptions() {
+  const select = document.getElementById('inbound-address');
+  if (!select) return;
+  const current = select.value;
+  const addresses = await api('/api/addresses').catch(() => []);
+  select.innerHTML = '<option value="">All addresses</option>' + addresses
+    .map(a => `<option value="${escapeHtml(a.email)}">${escapeHtml(a.email)}</option>`)
+    .join('');
+  select.value = current;
+}
+
 async function loadInbound() {
   try {
-    const emails = await api('/api/inbound?limit=50');
-    const table = document.getElementById('table-inbound');
-    if (!emails.length) { table.innerHTML = `<tr><td class="empty">No inbound emails found.</td></tr>`; return; }
-    table.innerHTML = `
-      <thead><tr><th>ID</th><th>From</th><th>To</th><th>Subject</th><th>Received</th></tr></thead>
-      <tbody>${emails.map(e => `
-        <tr>
-          <td class="id">${e.id.slice(0,8)}</td>
-          <td>${e.from_address || '-'}</td>
-          <td>${(e.to_addresses || []).join(', ') || '-'}</td>
-          <td>${e.subject || '-'}</td>
-          <td>${fmt(e.received_at || e.created_at)}</td>
-        </tr>`).join('')}</tbody>`;
+    await loadInboundAddressOptions();
+    const selectedAddress = document.getElementById('inbound-address')?.value || '';
+    const query = (document.getElementById('inbound-search')?.value || '').trim().toLowerCase();
+    const params = new URLSearchParams({ limit: '75' });
+    if (selectedAddress) params.set('to', selectedAddress);
+    let emails = await api('/api/inbound?' + params);
+    if (query) {
+      emails = emails.filter(e =>
+        String(e.subject || '').toLowerCase().includes(query) ||
+        String(e.from_address || '').toLowerCase().includes(query) ||
+        String(e.text_body || '').toLowerCase().includes(query));
+    }
+    inboundCache = emails;
+    if (!inboundSelectedId || !emails.some(e => e.id === inboundSelectedId)) inboundSelectedId = emails[0]?.id || null;
+    renderInboundList();
+    renderInboundReader();
   } catch(e) {
     showError('error-inbound', e.message);
   }
+}
+
+function renderInboundList() {
+  const list = document.getElementById('inbound-list');
+  if (!inboundCache.length) {
+    list.innerHTML = '<div class="empty">No inbound emails found.</div>';
+    return;
+  }
+  list.innerHTML = inboundCache.map(e => `
+    <div class="message-row ${e.id === inboundSelectedId ? 'active' : ''}" onclick="selectInbound('${e.id}')">
+      <div class="meta"><span>${escapeHtml(e.from_address || '-')}</span><span>${fmt(e.received_at || e.created_at)}</span></div>
+      <div class="subject">${escapeHtml(e.subject || '(no subject)')}</div>
+      <div class="to">${escapeHtml((e.to_addresses || []).join(', ') || '-')}</div>
+    </div>`).join('');
+}
+
+function selectInbound(id) {
+  inboundSelectedId = id;
+  renderInboundList();
+  renderInboundReader();
+}
+
+function renderInboundReader() {
+  const reader = document.getElementById('inbound-reader');
+  const e = inboundCache.find(m => m.id === inboundSelectedId);
+  if (!e) {
+    reader.innerHTML = '<div class="empty">Select a message.</div>';
+    return;
+  }
+  const body = e.text_body || String(e.html_body || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() || '(no body)';
+  reader.innerHTML = `
+    <h3>${escapeHtml(e.subject || '(no subject)')}</h3>
+    <div class="reader-meta">
+      <div><strong>From</strong> ${escapeHtml(e.from_address || '-')}</div>
+      <div><strong>To</strong> ${escapeHtml((e.to_addresses || []).join(', ') || '-')}</div>
+      <div><strong>Received</strong> ${fmt(e.received_at || e.created_at)}</div>
+      <div><strong>ID</strong> <span class="id">${e.id}</span></div>
+    </div>
+    <pre>${escapeHtml(body)}</pre>`;
 }
 
 // ─── SEQUENCES ───────────────────────────────────────────────────────────────

@@ -9,12 +9,19 @@ import {
   setInboundRead, setInboundArchived, setInboundStarred,
   addInboundLabel, removeInboundLabel, getUnreadCount,
 } from "../../db/inbound.js";
-import { getGmailSyncState, updateLastSynced } from "../../db/gmail-sync-state.js";
+import { updateLastSynced } from "../../db/gmail-sync-state.js";
 import { createProvider, listProviders } from "../../db/providers.js";
 import { getDatabase, resolvePartialId } from "../../db/database.js";
 import { confirmDestructiveAction, handleError } from "../utils.js";
 import { autoPull } from "../tui/autopull.js";
 import { findVerificationCode } from "../../lib/verification-code.js";
+import { getEmailSystemStatus } from "../../lib/agent-context.js";
+import { getAddressOwnershipDetail } from "../../lib/address-ownership.js";
+import { resolveAlias } from "../../db/aliases.js";
+import { listAddresses } from "../../db/addresses.js";
+import { listDomains } from "../../db/domains.js";
+import { getAddressProvisioning, getDomainProvisioning } from "../../db/provisioning.js";
+import { assessDomainReadiness } from "../../lib/domain-readiness.js";
 
 const DEFAULT_GMAIL_ARCHIVE_BUCKET = "hasna-xyz-prod-emails";
 
@@ -25,8 +32,10 @@ interface CodeOptions {
   refresh?: boolean;
   gmail?: boolean;
   watch?: boolean;
+  wait?: boolean;
   timeout?: string;
   interval?: string;
+  since?: string;
 }
 
 export function registerInboxCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
@@ -35,6 +44,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
   async function runCodeCommand(address: string, opts: CodeOptions): Promise<void> {
     const normalized = address.trim().toLowerCase();
     const limit = Math.max(1, parseInt(opts.limit ?? "50", 10) || 50);
+    const watching = opts.watch || opts.wait;
     const timeoutMs = Math.max(1, parseInt(opts.timeout ?? "120", 10) || 120) * 1000;
     const intervalMs = Math.max(1, parseInt(opts.interval ?? "5", 10) || 5) * 1000;
     const deadline = Date.now() + timeoutMs;
@@ -44,8 +54,8 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         await autoPull({ s3: true, gmail: opts.gmail === true, limit: Math.max(limit, 1000) });
       }
 
-      const local = listInboundEmails({ recipients: [normalized], limit }, getDatabase());
-      const archived = listInboundEmails({ recipients: [normalized], limit, archived: true }, getDatabase());
+      const local = listInboundEmails({ recipients: [normalized], limit, since: opts.since }, getDatabase());
+      const archived = listInboundEmails({ recipients: [normalized], limit, since: opts.since, archived: true }, getDatabase());
       const byId = new Map([...local, ...archived].map((email) => [email.id, email]));
       const match = findVerificationCode([...byId.values()], { from: opts.from, subject: opts.subject });
 
@@ -61,7 +71,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         return;
       }
 
-      if (!opts.watch || Date.now() >= deadline) {
+      if (!watching || Date.now() >= deadline) {
         output({ code: null, address: normalized }, chalk.dim(`No verification code found for ${normalized}.`));
         process.exitCode = 1;
         return;
@@ -80,9 +90,24 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .option("--no-refresh", "Do not refresh inbound mail before searching")
     .option("--gmail", "Also pull Gmail while refreshing")
     .option("--watch", "Keep refreshing until a code arrives or timeout is reached")
+    .option("--wait", "Alias for --watch")
+    .option("--since <date>", "Only consider mail received after this ISO date")
     .option("--timeout <sec>", "Watch timeout in seconds", "120")
     .option("--interval <sec>", "Watch polling interval in seconds", "5")
     .action(runCodeCommand);
+
+  inboxCmd
+    .command("wait-code <address>")
+    .description("Wait for a verification code for an inbound address")
+    .option("--from <text>", "Only consider messages whose From contains this text")
+    .option("--subject <text>", "Only consider messages whose subject contains this text")
+    .option("--limit <n>", "Messages to inspect per mailbox state", "50")
+    .option("--no-refresh", "Do not refresh inbound mail before searching")
+    .option("--gmail", "Also pull Gmail while refreshing")
+    .option("--since <date>", "Only consider mail received after this ISO date")
+    .option("--timeout <sec>", "Wait timeout in seconds", "120")
+    .option("--interval <sec>", "Polling interval in seconds", "5")
+    .action((address: string, opts: CodeOptions) => runCodeCommand(address, { ...opts, wait: true }));
 
   program
     .command("code <address>")
@@ -93,9 +118,91 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .option("--no-refresh", "Do not refresh inbound mail before searching")
     .option("--gmail", "Also pull Gmail while refreshing")
     .option("--watch", "Keep refreshing until a code arrives or timeout is reached")
+    .option("--wait", "Alias for --watch")
+    .option("--since <date>", "Only consider mail received after this ISO date")
     .option("--timeout <sec>", "Watch timeout in seconds", "120")
     .option("--interval <sec>", "Watch polling interval in seconds", "5")
     .action(runCodeCommand);
+
+  async function waitForLatestEmail(address: string, opts: {
+    from?: string;
+    subject?: string;
+    limit?: string;
+    refresh?: boolean;
+    gmail?: boolean;
+    timeout?: string;
+    interval?: string;
+    since?: string;
+  }): Promise<void> {
+    const normalized = address.trim().toLowerCase();
+    const limit = Math.max(1, parseInt(opts.limit ?? "50", 10) || 50);
+    const timeoutMs = Math.max(1, parseInt(opts.timeout ?? "120", 10) || 120) * 1000;
+    const intervalMs = Math.max(1, parseInt(opts.interval ?? "5", 10) || 5) * 1000;
+    const deadline = Date.now() + timeoutMs;
+    const from = opts.from?.toLowerCase();
+    const subject = opts.subject?.toLowerCase();
+
+    while (true) {
+      if (opts.refresh !== false) {
+        await autoPull({ s3: true, gmail: opts.gmail === true, limit: Math.max(limit, 1000) });
+      }
+      const email = listInboundEmails({ recipients: [normalized], limit, since: opts.since }, getDatabase())
+        .find((candidate) =>
+          (!from || candidate.from_address.toLowerCase().includes(from)) &&
+          (!subject || candidate.subject.toLowerCase().includes(subject)));
+      if (email) {
+        output(email, email.id);
+        return;
+      }
+      if (Date.now() >= deadline) {
+        output({ email: null, address: normalized }, chalk.dim(`No email found for ${normalized}.`));
+        process.exitCode = 1;
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    }
+  }
+
+  inboxCmd
+    .command("wait <address>")
+    .description("Wait for the next inbound email for an address")
+    .option("--from <text>", "Only consider messages whose From contains this text")
+    .option("--subject <text>", "Only consider messages whose subject contains this text")
+    .option("--limit <n>", "Messages to inspect", "50")
+    .option("--no-refresh", "Do not refresh inbound mail before searching")
+    .option("--gmail", "Also pull Gmail while refreshing")
+    .option("--since <date>", "Only consider mail received after this ISO date")
+    .option("--timeout <sec>", "Wait timeout in seconds", "120")
+    .option("--interval <sec>", "Polling interval in seconds", "5")
+    .action(waitForLatestEmail);
+
+  inboxCmd
+    .command("latest <address>")
+    .description("Print the latest local inbound email for an address")
+    .option("--from <text>", "Only consider messages whose From contains this text")
+    .option("--subject <text>", "Only consider messages whose subject contains this text")
+    .option("--limit <n>", "Messages to inspect", "50")
+    .option("--refresh", "Refresh inbound mail before searching")
+    .option("--gmail", "Also pull Gmail while refreshing")
+    .option("--since <date>", "Only consider mail received after this ISO date")
+    .action(async (address: string, opts: { from?: string; subject?: string; limit?: string; refresh?: boolean; gmail?: boolean; since?: string }) => {
+      try {
+        const normalized = address.trim().toLowerCase();
+        if (opts.refresh) await autoPull({ s3: true, gmail: opts.gmail === true, limit: Math.max(1000, parseInt(opts.limit ?? "50", 10) || 50) });
+        const from = opts.from?.toLowerCase();
+        const subject = opts.subject?.toLowerCase();
+        const email = listInboundEmails({ recipients: [normalized], limit: parseInt(opts.limit ?? "50", 10), since: opts.since }, getDatabase())
+          .find((candidate) =>
+            (!from || candidate.from_address.toLowerCase().includes(from)) &&
+            (!subject || candidate.subject.toLowerCase().includes(subject)));
+        if (!email) {
+          output({ email: null, address: normalized }, chalk.dim(`No email found for ${normalized}.`));
+          process.exitCode = 1;
+          return;
+        }
+        output(email, formatEmailDetail(email));
+      } catch (e) { handleError(e); }
+    });
 
   // ─── SYNC ─────────────────────────────────────────────────────────────────
   inboxCmd
@@ -283,11 +390,111 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         }
 
         if (emails.length === 0) {
-          console.log(chalk.dim("No emails found. Run `emails inbox sync` to pull from Gmail."));
+          output([], chalk.dim("No emails found locally. Try `emails inbox sync-status`, `emails refresh`, or `emails inbox wait <address>`."));
           return;
         }
 
         output(emails, formatEmailList(emails));
+      } catch (e) {
+        handleError(e);
+      }
+    });
+
+  inboxCmd
+    .command("unread-count")
+    .description("Show unread inbox counts")
+    .option("--by-address", "Group unread counts by recipient address")
+    .action((opts: { byAddress?: boolean }) => {
+      try {
+        const db = getDatabase();
+        if (!opts.byAddress) {
+          const count = getUnreadCount(undefined, db);
+          output({ unread: count }, String(count));
+          return;
+        }
+        const rows = db.query(
+          `SELECT LOWER(json_each.value) AS address, COUNT(*) AS unread
+             FROM inbound_emails, json_each(inbound_emails.to_addresses)
+            WHERE inbound_emails.is_read = 0
+              AND inbound_emails.is_archived = 0
+              AND json_valid(inbound_emails.to_addresses)
+            GROUP BY LOWER(json_each.value)
+            ORDER BY unread DESC, address ASC`,
+        ).all() as Array<{ address: string; unread: number }>;
+        const formatted = rows.length
+          ? rows.map((row) => `${row.address}\t${row.unread}`).join("\n")
+          : chalk.dim("No unread mail.");
+        output(rows, formatted);
+      } catch (e) {
+        handleError(e);
+      }
+    });
+
+  inboxCmd
+    .command("explain <email-id>")
+    .description("Explain local routing, recipient ownership, and source readiness for an inbound email")
+    .action((emailId: string) => {
+      try {
+        const db = getDatabase();
+        const fullId = resolvePartialId(db, "inbound_emails", emailId) ?? emailId;
+        const email = getInboundEmail(fullId, db);
+        if (!email) handleError(new Error(`Email not found: ${emailId}`));
+        const providers = listProviders(db);
+        const domains = listDomains(undefined, db);
+        const addresses = listAddresses(undefined, db);
+        const recipients = email!.to_addresses.map((recipient) => {
+          const normalized = recipient.toLowerCase();
+          const domainName = normalized.split("@")[1] ?? "";
+          const aliasTarget = resolveAlias(normalized, db);
+          const exactAddresses = addresses.filter((address) => address.email.toLowerCase() === normalized);
+          const domainRows = domains.filter((domain) => domain.domain.toLowerCase() === domainName);
+          return {
+            recipient: normalized,
+            alias_target: aliasTarget,
+            configured_addresses: exactAddresses.map((address) => {
+              const detail = getAddressOwnershipDetail(address.id, db);
+              return {
+                id: address.id,
+                provider_id: address.provider_id,
+                provider_name: providers.find((provider) => provider.id === address.provider_id)?.name ?? null,
+                provisioning: getAddressProvisioning(address.id, db),
+                owner: detail.address.owner,
+                administrator: detail.address.administrator,
+              };
+            }),
+            domains: domainRows.map((domain) => {
+              const readyAddresses = addresses.filter((address) => getAddressProvisioning(address.id, db)?.domain_id === domain.id && getAddressProvisioning(address.id, db)?.provisioning_status === "ready").length;
+              const readiness = assessDomainReadiness(domain, getDomainProvisioning(domain.id, db), { ready_addresses: readyAddresses });
+              return {
+                id: domain.id,
+                provider_id: domain.provider_id,
+                provider_name: providers.find((provider) => provider.id === domain.provider_id)?.name ?? null,
+                readiness,
+              };
+            }),
+          };
+        });
+        const result = {
+          email_id: email!.id,
+          provider_id: email!.provider_id,
+          message_id: email!.message_id,
+          from: email!.from_address,
+          subject: email!.subject,
+          received_at: email!.received_at,
+          recipients,
+        };
+        const lines = [chalk.bold(`\nRouting for ${email!.id.slice(0, 8)}`)];
+        lines.push(`  From:     ${email!.from_address}`);
+        lines.push(`  Subject:  ${email!.subject || "(no subject)"}`);
+        lines.push(`  Source:   ${email!.provider_id ? providers.find((provider) => provider.id === email!.provider_id)?.name ?? email!.provider_id : "unknown/local"}`);
+        for (const recipient of recipients) {
+          lines.push(`\n  To:       ${recipient.recipient}`);
+          lines.push(`  Alias:    ${recipient.alias_target ?? chalk.dim("none")}`);
+          lines.push(`  Address:  ${recipient.configured_addresses.length ? recipient.configured_addresses.map((a) => `${a.id.slice(0, 8)}${a.owner ? ` owner=${a.owner.name}` : ""}`).join(", ") : chalk.dim("not configured")}`);
+          lines.push(`  Domain:   ${recipient.domains.length ? recipient.domains.map((d) => `${d.id.slice(0, 8)} ${d.readiness.state}`).join(", ") : chalk.dim("not configured")}`);
+        }
+        lines.push("");
+        output(result, lines.join("\n"));
       } catch (e) {
         handleError(e);
       }
@@ -345,28 +552,23 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
   // ─── STATUS ───────────────────────────────────────────────────────────────
   inboxCmd
     .command("status")
-    .description("Show sync status per Gmail provider")
+    .description("Show sync status for all inbox sources")
     .action(() => {
       try {
-        const db = getDatabase();
-        const providers = listProviders(db).filter((p) => p.type === "gmail");
+        const status = getEmailSystemStatus();
+        output(status.inbox, formatInboxSyncStatus(status));
+      } catch (e) {
+        handleError(e);
+      }
+    });
 
-        if (providers.length === 0) {
-          console.log(chalk.dim("No Gmail providers configured. Add one with: emails provider add-gmail"));
-          return;
-        }
-
-        console.log(chalk.bold("\nGmail Sync Status:"));
-        for (const p of providers) {
-          const state = getGmailSyncState(p.id, db);
-          const count = getInboundCount(p.id, db);
-          const unread = getUnreadCount(p.id, db);
-          console.log(`\n  ${chalk.cyan(p.name)} ${chalk.dim(`[${p.id.slice(0, 8)}]`)}`);
-          console.log(`    Synced emails:  ${count} ${unread > 0 ? chalk.cyan(`(${unread} unread)`) : ""}`);
-          console.log(`    Last synced:    ${state?.last_synced_at ? chalk.green(state.last_synced_at) : chalk.dim("never")}`);
-          if (state?.last_message_id) console.log(`    Last message:   ${state.last_message_id}`);
-        }
-        console.log();
+  inboxCmd
+    .command("sync-status")
+    .description("Show source-aware inbox sync status")
+    .action(() => {
+      try {
+        const status = getEmailSystemStatus();
+        output({ inbox: status.inbox, gmail: status.providers.gmail, cli_equivalents: status.cli_equivalents }, formatInboxSyncStatus(status));
       } catch (e) {
         handleError(e);
       }
@@ -946,6 +1148,27 @@ function resolveGmailProvider(idOrName?: string): string | null {
     (p) => p.id === idOrName || p.id.startsWith(idOrName) || p.name === idOrName,
   );
   return match?.id ?? null;
+}
+
+function formatInboxSyncStatus(status: ReturnType<typeof getEmailSystemStatus>): string {
+  const lines: string[] = [chalk.bold("\nInbox sync status:")];
+  lines.push(`  Local inbox: ${status.inbox.total} total, ${status.inbox.unread} unread`);
+  lines.push(`  Latest mail: ${status.inbox.latest_received_at ? chalk.green(status.inbox.latest_received_at) : chalk.dim("never")}`);
+  lines.push(`  S3 buckets:  ${status.inbox.inbound_buckets.length > 0 ? chalk.green(String(status.inbox.inbound_buckets.length)) : chalk.yellow("0")}`);
+  for (const bucket of status.inbox.inbound_buckets) {
+    lines.push(`    - s3://${bucket.bucket} ${chalk.dim(bucket.region)}${bucket.providerId ? chalk.dim(` provider=${bucket.providerId.slice(0, 8)}`) : ""}`);
+  }
+  lines.push(`  Realtime:    ${status.inbox.realtime.queue_configured ? chalk.green("configured") : chalk.yellow("not configured")}`);
+  if (status.inbox.realtime.last_poll_at) lines.push(`  Last poll:   ${chalk.green(status.inbox.realtime.last_poll_at)}`);
+  if (status.inbox.realtime.last_error) lines.push(`  Last error:  ${chalk.red(status.inbox.realtime.last_error)}`);
+  lines.push(`  Gmail:       ${status.providers.gmail.length} provider(s)`);
+  for (const provider of status.providers.gmail) {
+    lines.push(`    - ${provider.name} ${chalk.dim(provider.id.slice(0, 8))}: ${provider.synced_count} synced, ${provider.unread_count} unread, last ${provider.last_synced_at ? chalk.green(provider.last_synced_at) : chalk.dim("never")}`);
+  }
+  lines.push(chalk.dim("\n  Pull now: emails refresh"));
+  lines.push(chalk.dim("  Watch realtime: emails inbox watch --all-buckets"));
+  lines.push("");
+  return lines.join("\n");
 }
 
 function formatSyncResult(

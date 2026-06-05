@@ -33,6 +33,8 @@ import { registerProfilesCommands } from "./commands/profiles.js";
 import { registerTriageCommands } from "./commands/triage.js";
 import { registerAwsCommands } from "./commands/aws.js";
 import { registerCloudCommands } from "./commands/cloud.js";
+import { registerStatusCommands } from "./commands/status.js";
+import { registerDaemonCommands } from "./commands/daemon.js";
 
 function getPackageVersion(): string {
   try {
@@ -93,4 +95,6 @@ registerProfilesCommands(program, output);
 registerTriageCommands(program, output);
 registerAwsCommands(program, output);
 registerCloudCommands(program, output);
+registerStatusCommands(program, output);
+registerDaemonCommands(program, output);
 program.parse(process.argv);

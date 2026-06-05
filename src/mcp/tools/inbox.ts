@@ -6,10 +6,12 @@ import {
   addInboundLabel, removeInboundLabel,
 } from "../../db/inbound.js";
 import { syncGmailInbox, syncGmailInboxAll, syncGmailInboxHistory } from "../../lib/gmail-sync.js";
-import { getGmailSyncState, updateLastSynced } from "../../db/gmail-sync-state.js";
+import { updateLastSynced } from "../../db/gmail-sync-state.js";
 import { getDatabase } from "../../db/database.js";
-import { listProviders } from "../../db/providers.js";
 import { formatError, resolveId } from "../helpers.js";
+import { getEmailSystemStatus } from "../../lib/agent-context.js";
+import { findVerificationCode } from "../../lib/verification-code.js";
+import { autoPull } from "../../cli/tui/autopull.js";
 
 export function registerInboxTools(server: McpServer): void {
 // ─── INBOUND EMAILS ───────────────────────────────────────────────────────────
@@ -32,6 +34,144 @@ export function registerInboxTools(server: McpServer): void {
     try {
       const emails = listInboundEmails({ provider_id, since, limit, offset, unread, read, starred, archived, label });
       return { content: [{ type: "text", text: JSON.stringify(emails, null, 2) }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+    }
+  },
+);
+
+  server.tool(
+  "get_latest_inbound_email",
+  "Get the latest local inbound email for an address.",
+  {
+    address: z.string().describe("Recipient email address"),
+    from: z.string().optional().describe("Only consider messages whose From contains this text"),
+    subject: z.string().optional().describe("Only consider messages whose subject contains this text"),
+    since: z.string().optional().describe("Only consider messages received after this ISO date"),
+    limit: z.number().int().positive().optional().describe("Messages to inspect (default 50)"),
+  },
+  async ({ address, from, subject, since, limit }) => {
+    try {
+      const normalized = address.trim().toLowerCase();
+      const fromFilter = from?.toLowerCase();
+      const subjectFilter = subject?.toLowerCase();
+      const email = listInboundEmails({ recipients: [normalized], since, limit: limit ?? 50 })
+        .find((candidate) =>
+          (!fromFilter || candidate.from_address.toLowerCase().includes(fromFilter)) &&
+          (!subjectFilter || candidate.subject.toLowerCase().includes(subjectFilter)));
+      return {
+        content: [{ type: "text", text: JSON.stringify({
+          email,
+          cli_equivalent: `emails inbox latest ${normalized} --json`,
+        }, null, 2) }],
+      };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+    }
+  },
+);
+
+  server.tool(
+  "wait_for_email",
+  "Wait for the next inbound email for an address, refreshing S3 sources by default.",
+  {
+    address: z.string().describe("Recipient email address"),
+    from: z.string().optional().describe("Only consider messages whose From contains this text"),
+    subject: z.string().optional().describe("Only consider messages whose subject contains this text"),
+    since: z.string().optional().describe("Only consider messages received after this ISO date"),
+    timeout_seconds: z.number().int().positive().optional().describe("Wait timeout (default 120)"),
+    interval_seconds: z.number().int().positive().optional().describe("Polling interval (default 5)"),
+    refresh: z.boolean().optional().describe("Refresh inbound sources while waiting (default true)"),
+    gmail: z.boolean().optional().describe("Also pull Gmail while refreshing (default false)"),
+  },
+  async ({ address, from, subject, since, timeout_seconds, interval_seconds, refresh, gmail }) => {
+    try {
+      const normalized = address.trim().toLowerCase();
+      const fromFilter = from?.toLowerCase();
+      const subjectFilter = subject?.toLowerCase();
+      const deadline = Date.now() + (timeout_seconds ?? 120) * 1000;
+      const intervalMs = (interval_seconds ?? 5) * 1000;
+      while (true) {
+        if (refresh !== false) await autoPull({ s3: true, gmail: gmail === true, limit: 1000 });
+        const email = listInboundEmails({ recipients: [normalized], since, limit: 50 })
+          .find((candidate) =>
+            (!fromFilter || candidate.from_address.toLowerCase().includes(fromFilter)) &&
+            (!subjectFilter || candidate.subject.toLowerCase().includes(subjectFilter)));
+        if (email) {
+          return {
+            content: [{ type: "text", text: JSON.stringify({
+              email,
+              cli_equivalent: `emails inbox wait ${normalized} --timeout ${timeout_seconds ?? 120} --json`,
+            }, null, 2) }],
+          };
+        }
+        if (Date.now() >= deadline) {
+          return {
+            content: [{ type: "text", text: JSON.stringify({
+              email: null,
+              address: normalized,
+              cli_equivalent: `emails inbox wait ${normalized} --timeout ${timeout_seconds ?? 120} --json`,
+            }, null, 2) }],
+            isError: true,
+          };
+        }
+        await new Promise((resolve) => setTimeout(resolve, intervalMs));
+      }
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+    }
+  },
+);
+
+  server.tool(
+  "wait_for_verification_code",
+  "Wait for a verification code for an inbound address, refreshing S3 sources by default.",
+  {
+    address: z.string().describe("Recipient email address"),
+    from: z.string().optional().describe("Only consider messages whose From contains this text"),
+    subject: z.string().optional().describe("Only consider messages whose subject contains this text"),
+    since: z.string().optional().describe("Only consider messages received after this ISO date"),
+    timeout_seconds: z.number().int().positive().optional().describe("Wait timeout (default 120)"),
+    interval_seconds: z.number().int().positive().optional().describe("Polling interval (default 5)"),
+    refresh: z.boolean().optional().describe("Refresh inbound sources while waiting (default true)"),
+    gmail: z.boolean().optional().describe("Also pull Gmail while refreshing (default false)"),
+  },
+  async ({ address, from, subject, since, timeout_seconds, interval_seconds, refresh, gmail }) => {
+    try {
+      const normalized = address.trim().toLowerCase();
+      const deadline = Date.now() + (timeout_seconds ?? 120) * 1000;
+      const intervalMs = (interval_seconds ?? 5) * 1000;
+      while (true) {
+        if (refresh !== false) await autoPull({ s3: true, gmail: gmail === true, limit: 1000 });
+        const local = listInboundEmails({ recipients: [normalized], since, limit: 50 });
+        const archived = listInboundEmails({ recipients: [normalized], since, limit: 50, archived: true });
+        const byId = new Map([...local, ...archived].map((email) => [email.id, email]));
+        const match = findVerificationCode([...byId.values()], { from, subject });
+        if (match) {
+          return {
+            content: [{ type: "text", text: JSON.stringify({
+              code: match.code,
+              email_id: match.email.id,
+              from: match.email.from_address,
+              subject: match.email.subject,
+              received_at: match.email.received_at,
+              confidence: match.confidence,
+              cli_equivalent: `emails inbox wait-code ${normalized} --timeout ${timeout_seconds ?? 120} --json`,
+            }, null, 2) }],
+          };
+        }
+        if (Date.now() >= deadline) {
+          return {
+            content: [{ type: "text", text: JSON.stringify({
+              code: null,
+              address: normalized,
+              cli_equivalent: `emails inbox wait-code ${normalized} --timeout ${timeout_seconds ?? 120} --json`,
+            }, null, 2) }],
+            isError: true,
+          };
+        }
+        await new Promise((resolve) => setTimeout(resolve, intervalMs));
+      }
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
     }
@@ -281,24 +421,16 @@ async function gmailMessageAction(email_id: string, connectorArgs: string[]): Pr
 
   server.tool(
   "get_inbox_sync_status",
-  "Get Gmail sync status for all Gmail providers — last synced time, message counts",
+  "Get source-aware inbox sync status for S3, realtime queue, and Gmail providers.",
   {},
   async () => {
     try {
-      const db = getDatabase();
-      const providers = listProviders(db).filter((p) => p.type === "gmail");
-      const status = providers.map((p) => {
-        const state = getGmailSyncState(p.id, db);
-        const count = db.query("SELECT COUNT(*) as c FROM inbound_emails WHERE provider_id = ?").get(p.id) as { c: number } | null;
-        return {
-          provider_id: p.id,
-          provider_name: p.name,
-          synced_count: count?.c ?? 0,
-          last_synced_at: state?.last_synced_at ?? null,
-          last_message_id: state?.last_message_id ?? null,
-        };
-      });
-      return { content: [{ type: "text", text: JSON.stringify(status, null, 2) }] };
+      const status = getEmailSystemStatus();
+      return { content: [{ type: "text", text: JSON.stringify({
+        inbox: status.inbox,
+        gmail: status.providers.gmail,
+        cli_equivalent: "emails inbox sync-status --json",
+      }, null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
     }

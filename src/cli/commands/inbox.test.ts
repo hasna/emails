@@ -293,6 +293,101 @@ describe("inbox code", () => {
     expect(out).toBe("492255");
     expect(data).toMatchObject({ code: "492255", confidence: "high" });
   });
+
+  it("wait-code reuses code extraction and returns immediately when a match exists", async () => {
+    const { db, providerId } = setupDb();
+    storeInboundEmail({
+      provider_id: providerId,
+      message_id: "code-now",
+      in_reply_to_email_id: null,
+      from_address: "security@example.com",
+      to_addresses: ["me@example.com"],
+      cc_addresses: [],
+      subject: "Verification code",
+      text_body: "Your code is 123456",
+      html_body: null,
+      attachments: [],
+      attachment_paths: [],
+      headers: {},
+      raw_size: 100,
+      received_at: "2026-06-04T11:29:09.000Z",
+    }, db);
+
+    const { out, data } = await runInboxCommand(["inbox", "wait-code", "me@example.com", "--no-refresh", "--timeout", "1"]);
+
+    expect(out).toBe("123456");
+    expect(data).toMatchObject({ code: "123456", confidence: "high" });
+  });
+
+  it("latest returns the newest matching local email", async () => {
+    const { db, providerId } = setupDb();
+    storeInboundEmail({
+      provider_id: providerId,
+      message_id: "latest-now",
+      in_reply_to_email_id: null,
+      from_address: "sender@example.com",
+      to_addresses: ["me@example.com"],
+      cc_addresses: [],
+      subject: "Latest local mail",
+      text_body: "body",
+      html_body: null,
+      attachments: [],
+      attachment_paths: [],
+      headers: {},
+      raw_size: 100,
+      received_at: "2026-06-04T11:29:09.000Z",
+    }, db);
+
+    const { out, data } = await runInboxCommand(["inbox", "latest", "me@example.com"]);
+
+    expect(out).toContain("Latest local mail");
+    expect(data).toMatchObject({ subject: "Latest local mail" });
+  });
+
+  it("unread-count groups unread messages by recipient address", async () => {
+    const { db, providerId } = setupDb();
+    storeInboundEmail({
+      provider_id: providerId,
+      message_id: "unread-one",
+      in_reply_to_email_id: null,
+      from_address: "sender@example.com",
+      to_addresses: ["one@example.com"],
+      cc_addresses: [],
+      subject: "Unread one",
+      text_body: "body",
+      html_body: null,
+      attachments: [],
+      attachment_paths: [],
+      headers: {},
+      raw_size: 100,
+      received_at: "2026-06-04T11:29:09.000Z",
+    }, db);
+    storeInboundEmail({
+      provider_id: providerId,
+      message_id: "unread-two",
+      in_reply_to_email_id: null,
+      from_address: "sender@example.com",
+      to_addresses: ["two@example.com"],
+      cc_addresses: [],
+      subject: "Unread two",
+      text_body: "body",
+      html_body: null,
+      attachments: [],
+      attachment_paths: [],
+      headers: {},
+      raw_size: 100,
+      received_at: "2026-06-04T11:30:09.000Z",
+    }, db);
+
+    const { data, out } = await runInboxCommand(["inbox", "unread-count", "--by-address"]);
+
+    expect(out).toContain("one@example.com");
+    expect(out).toContain("two@example.com");
+    expect(data).toEqual([
+      { address: "one@example.com", unread: 1 },
+      { address: "two@example.com", unread: 1 },
+    ]);
+  });
 });
 
 // ─── inbox sync (via syncGmailInbox) ─────────────────────────────────────────

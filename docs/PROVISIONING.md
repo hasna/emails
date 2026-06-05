@@ -8,9 +8,15 @@ receiving, create addresses, and verify by sending mail back and forth.
 ```
 emails provision domain ours.com --provider <ses-id> --add-mx   # SES identity + publish DNS in Cloudflare
 emails provision address andrew@ours.com --provider <ses-id> --receive ses-s3
+emails address provision andrew@ours.com --provider <ses-id> --receive ses-s3  # address-first alias
 emails provision status
 ```
 For buying + delegating first, use `@hasna/domains` (`domains domain buy <name> --wait --dns cloudflare`) or the `setup_domain_for_email` MCP tool (which now buys, creates the Cloudflare zone, delegates NS, registers with SES, and publishes DNS **in Cloudflare**).
+
+Ownership is separate from address creation. Use `emails address owner <email>`
+to inspect owner/admin state, `emails address set-owner <email> --owner <owner>`
+for initial assignment, and the explicit `transfer-owner`, `unassign-owner`, and
+`owner-history` commands when ownership changes need an audit trail.
 
 ## The pipeline
 1. **Buy** (Route53, `@hasna/domains`) — the only reliable self-serve API.
@@ -33,6 +39,16 @@ Domains and addresses move through an explicit, resumable lifecycle
 (`src/lib/provision/state-machine.ts`); the reconciler daemon
 (`src/daemon/provisioner.ts`) advances any entity whose `next_check_at` is due,
 crash-safe because all state lives in the DB.
+
+Useful health checks:
+
+```
+emails status
+emails daemon status
+emails inbox sync-status
+emails doctor delivery andrew@ours.com
+emails logs tail --component daemon
+```
 
 ## Credentials (`emails doctor`)
 - **AWS** (SES send/inbound, Route53 buy): `AWS_PROFILE` or keys, region us-east-1.

@@ -41,7 +41,8 @@ emails cloud push
 
 A full-screen OpenTUI mail client with a responsive dashboard shell. Wide
 terminals use a two-column admin layout with persistent navigation, mailbox
-metrics, folders, actions, and a focused workspace. Narrow terminals collapse to
+metrics, operations health, folders, actions, and a focused workspace. Inbox on
+wide terminals uses a split message list + preview reader. Narrow terminals collapse to
 a compact single-column view with the same Inbox, Compose, Profiles, and
 Settings flow. Inbox starts at all addresses and can be filtered to one email
 address when needed. Live read-state, local refresh, background auto-pull, and
@@ -72,6 +73,10 @@ emails profiles          # your accounts (gmail/ses/resend) + their domains & ad
 emails provider          # add/list/remove/sync providers (ses, resend, gmail)
 emails domain            # add/verify/buy/setup/dns/check domains
 emails address           # manage sender addresses (add, suspend, activate, quota)
+emails status            # redacted system status + next useful actions
+emails agent context     # agent-oriented context snapshot and workflows
+emails daemon            # background queue/realtime status and restart guidance
+emails logs tail         # local daemon/sync/inbound/scheduler log tails
 emails owner             # tenancy: register human/agent owners
 emails alias             # per-domain aliases + catch-all routing
 emails sendkey           # scoped send keys (restrict an agent to its own addresses)
@@ -91,6 +96,7 @@ emails config            # configuration (key=value)
 emails stats             # delivery statistics (--inbox for received mail)
 emails analytics         # email analytics
 emails doctor            # system diagnostics
+emails doctor delivery   # diagnose missing inbound mail for one address
 emails serve             # HTTP server + dashboard + authenticated /api/v1
 emails mcp               # install MCP server
 ```
@@ -106,6 +112,11 @@ behalf); agent-owned addresses are self-administered.
 emails owner register Andrei --type human --email andrei@example.com
 emails owner register Atlas  --type agent
 emails provision address andrei@example.com --provider <ses-id> --owner Andrei --administrator Atlas
+emails address owner andrei@example.com
+emails address set-owner andrei@example.com --owner Andrei --administrator Atlas
+emails address transfer-owner andrei@example.com --owner Atlas --reason "handoff" --yes
+emails address unassign-owner andrei@example.com --reason "retired" --yes
+emails address owner-history andrei@example.com
 
 # Scoped send keys — an agent can only send from addresses it owns/administers
 emails sendkey create Atlas --label ci        # prints the esk_… token ONCE
@@ -119,6 +130,8 @@ emails alias global inbox@example.com                   # protected global catch
 emails alias resolve anything@example.com               # show where it routes
 
 # Address lifecycle
+emails address provision ops@example.com --provider <ses-id> --owner Atlas
+emails address suggest --domain example.com
 emails address suspend <id>     # block sending from this address
 emails address activate <id>
 emails address quota <id> 200   # max 200 sends/day (use 'none' to clear)
@@ -127,7 +140,9 @@ emails address quota <id> 200   # max 200 sends/day (use 'none' to clear)
 ## MCP Server
 
 100+ tools for AI agents — send/read mail, provisioning, tenancy, aliases, scoped
-send keys, inbound read-state, and real-time sync.
+send keys, inbound read-state, real-time sync, agent context, source-aware inbox
+status, ownership lookup/assignment/transfer audit, and verification-code
+waiting.
 
 ```bash
 emails-mcp
@@ -162,6 +177,11 @@ emails inbox sync-s3 --bucket my-emails --prefix inbound/example.com/
 
 # Read-state / organize (works for SES-S3, SMTP, and Gmail mail)
 emails inbox list --unread            # filters: --unread/--read/--starred/--archived/--label <l>
+emails inbox latest ops@example.com --json
+emails inbox wait ops@example.com --timeout 120
+emails inbox wait-code ops@example.com --from openai --timeout 120
+emails inbox sync-status --json       # S3, realtime, and Gmail status
+emails inbox explain <id>             # route/owner/readiness trace
 emails inbox read <id>                # opening marks it read
 emails inbox star|archive|label <id>  # --undo / --remove to reverse
 ```

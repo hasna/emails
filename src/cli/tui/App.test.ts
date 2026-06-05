@@ -12,14 +12,18 @@ import { storeInboundEmail } from "../../db/inbound.js";
 import { setSetting } from "./data.js";
 
 let autoPullCalls = 0;
+let autoPullWaiter: Promise<void> | null = null;
 mock.module("./autopull.js", () => ({
   autoPull: mock(async () => {
     autoPullCalls += 1;
+    if (autoPullWaiter) await autoPullWaiter;
     return { pulled: 0, ok: true, configured: true };
   }),
 }));
 
 const { App } = await import("./App.js");
+
+globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 let savedHome: string | undefined;
 let tmpHome: string;
@@ -27,6 +31,7 @@ let providerId: string;
 let setup: TestRendererSetup | null = null;
 
 beforeEach(() => {
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   process.env["EMAILS_DB_PATH"] = ":memory:";
   process.env["EMAILS_TUI_DISABLE_THEME_PROBE"] = "1";
   savedHome = process.env["HOME"];
@@ -38,11 +43,17 @@ beforeEach(() => {
   markVerified(address.id);
   setSetting("autoPull", false);
   autoPullCalls = 0;
+  autoPullWaiter = null;
 });
 
 afterEach(async () => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-  setup?.renderer.destroy();
+  if (setup) {
+    await act(async () => {
+      setup?.renderer.destroy();
+      await setup?.flush();
+    });
+  }
   setup = null;
   closeDatabase();
   delete process.env["EMAILS_DB_PATH"];
@@ -74,6 +85,11 @@ describe("emails ui App", () => {
     globalThis.IS_REACT_ACT_ENVIRONMENT = true;
     await act(fn);
   };
+  const flush = async () => {
+    await withAct(async () => {
+      await setup?.flush();
+    });
+  };
 
   async function renderApp(props?: { initialMailbox?: string }, size?: { width?: number; height?: number }) {
     await withAct(async () => {
@@ -85,7 +101,7 @@ describe("emails ui App", () => {
         openConsoleOnError: false,
       });
     });
-    await setup.flush();
+    await flush();
     return setup;
   }
 
@@ -94,32 +110,38 @@ describe("emails ui App", () => {
     await withAct(async () => {
       await setup?.mockInput.typeText(text);
     });
-    await setup?.flush();
+    await flush();
   };
   const key = async (name: "up" | "down" | "left" | "right") => {
     await withAct(async () => {
       setup?.mockInput.pressArrow(name);
     });
-    await setup?.flush();
+    await flush();
   };
   const tab = async () => {
     await withAct(async () => {
       setup?.mockInput.pressTab();
     });
-    await setup?.flush();
+    await flush();
   };
   const escape = async () => {
     await withAct(async () => {
       setup?.mockInput.pressEscape();
       await new Promise((resolve) => setTimeout(resolve, 80));
     });
-    await setup?.flush();
+    await flush();
   };
   const enter = async () => {
     await withAct(async () => {
       setup?.mockInput.pressEnter();
     });
-    await setup?.flush();
+    await flush();
+  };
+  const resize = async (width: number, height: number) => {
+    await withAct(async () => {
+      setup?.resize(width, height);
+    });
+    await flush();
   };
 
   it("starts on a simple home screen and opens Inbox from there", async () => {
@@ -148,10 +170,7 @@ describe("emails ui App", () => {
     expect(frame()).toContain("Inbox: All addresses");
     expect(frame()).toContain("wide message");
 
-    await withAct(async () => {
-      setup?.resize(78, 26);
-    });
-    await setup?.flush();
+    await resize(78, 26);
 
     expect(frame()).toContain("1 Inbox  2 Compose  3 Profiles  4 Settings");
     expect(frame()).toContain("Inbox: All addresses");
@@ -315,5 +334,20 @@ describe("emails ui App", () => {
     await type("G");
 
     expect(autoPullCalls).toBe(1);
+  });
+
+  it("ignores overlapping explicit pulls", async () => {
+    let release!: () => void;
+    autoPullWaiter = new Promise<void>((resolve) => { release = resolve; });
+    await renderApp({ initialMailbox: "inbox" });
+
+    await type("G");
+    await type("G");
+
+    expect(autoPullCalls).toBe(1);
+    await withAct(async () => {
+      release();
+    });
+    await flush();
   });
 });

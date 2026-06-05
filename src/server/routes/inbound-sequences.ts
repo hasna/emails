@@ -20,8 +20,21 @@ if (path === "/api/inbound" && method === "GET") {
   try {
     const provider_id = url.searchParams.get("provider_id") ?? undefined;
     const since = url.searchParams.get("since") ?? undefined;
+    const to = url.searchParams.get("to")?.trim().toLowerCase() || undefined;
+    const unread = url.searchParams.get("unread") === "true" ? true : undefined;
+    const read = url.searchParams.get("read") === "true" ? true : undefined;
+    const archived = url.searchParams.get("archived") === "true" ? true : undefined;
     const limit = url.searchParams.get("limit") ? parseInt(url.searchParams.get("limit")!, 10) : 50;
-    return json(listInboundEmails({ provider_id, since, limit }));
+    return json(listInboundEmails({
+      provider_id,
+      since,
+      limit,
+      unread,
+      read,
+      archived,
+      recipients: to?.includes("@") ? [to] : undefined,
+      recipientDomains: to && !to.includes("@") ? [to] : undefined,
+    }));
   } catch (e) { return internalError(e); }
 }
 

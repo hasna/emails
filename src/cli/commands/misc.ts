@@ -9,6 +9,7 @@ import { getAdapter } from "../../providers/index.js";
 import { batchSend } from "../../lib/batch.js";
 import { generateBashCompletion, generateZshCompletion, generateFishCompletion } from "../../lib/completion.js";
 import { runDiagnostics, formatDiagnostics } from "../../lib/doctor.js";
+import { diagnoseInboundDelivery, formatDeliveryDoctorReport } from "../../lib/delivery-doctor.js";
 import { getDatabase, resolvePartialId } from "../../db/database.js";
 import {
   getDueEnrollments, advanceEnrollment, listSteps,
@@ -328,13 +329,25 @@ export function registerMiscCommands(program: Command, output: (data: unknown, f
     });
 
   // ─── DOCTOR ───────────────────────────────────────────────────────────────────
-  program
+  const doctorCmd = program
     .command("doctor")
     .description("Run system diagnostics")
     .action(async () => {
       try {
         const checks = await runDiagnostics();
         output(checks, formatDiagnostics(checks));
+      } catch (e) {
+        handleError(e);
+      }
+    });
+
+  doctorCmd
+    .command("delivery <address>")
+    .description("Diagnose why inbound mail may not be reaching a local address")
+    .action((address: string) => {
+      try {
+        const report = diagnoseInboundDelivery(address);
+        output(report, formatDeliveryDoctorReport(report));
       } catch (e) {
         handleError(e);
       }

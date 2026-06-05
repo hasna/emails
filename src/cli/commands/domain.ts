@@ -296,6 +296,51 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     });
 
   domainCmd
+    .command("usable")
+    .description("List domains usable for sending and/or receiving")
+    .option("--receive", "Only domains ready to receive")
+    .option("--send", "Only domains ready to send")
+    .option("--provider <id>", "Filter by provider ID")
+    .action((opts: { receive?: boolean; send?: boolean; provider?: string }) => {
+      try {
+        const db = getDatabase();
+        const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
+        const addresses = listAddresses(undefined, db);
+        const rows = listDomains(providerId, db).map((domain) => {
+          const provisioning = getDomainProvisioning(domain.id, db);
+          const ready_addresses = addresses.filter((address) => {
+            const addressProvisioning = getAddressProvisioning(address.id, db);
+            return addressProvisioning?.domain_id === domain.id && addressProvisioning.provisioning_status === "ready";
+          }).length;
+          const readiness = assessDomainReadiness(domain, provisioning, { ready_addresses });
+          return {
+            ...domain,
+            provider_name: getProvider(domain.provider_id, db)?.name ?? null,
+            provisioning,
+            readiness,
+          };
+        }).filter((row) => {
+          if (opts.receive && !row.readiness.receive_ready) return false;
+          if (opts.send && !row.readiness.send_ready) return false;
+          if (!opts.receive && !opts.send) return row.readiness.send_ready || row.readiness.receive_ready;
+          return true;
+        });
+        const lines = rows.length ? [chalk.bold("\nUsable domains:")] : [chalk.dim("No usable domains found.")];
+        for (const row of rows) {
+          const modes = [
+            row.readiness.send_ready ? "send" : null,
+            row.readiness.receive_ready ? "receive" : null,
+          ].filter(Boolean).join("+");
+          lines.push(`  ${chalk.cyan(row.domain)}  ${chalk.dim(row.provider_name ?? row.provider_id.slice(0, 8))}  ${chalk.green(modes || "none")}  ${chalk.dim(formatDomainReadinessState(row.readiness.state))}`);
+        }
+        lines.push("");
+        output(rows, lines.join("\n"));
+      } catch (e) {
+        handleError(e);
+      }
+    });
+
+  domainCmd
     .command("remove <id>")
     .description("Remove a domain")
     .option("--yes", "Skip confirmation prompt")

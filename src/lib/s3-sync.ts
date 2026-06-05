@@ -6,7 +6,8 @@
  *   SES receipt rule → S3 bucket (raw RFC 2822) → this sync → inbound_emails table
  *
  * Uses mailparser to parse raw RFC 2822 email files.
- * Tracks last-synced S3 key in config so only new emails are fetched.
+ * Scans the configured prefix and relies on DB dedup by S3 key. SES object
+ * names are random, so a key-ordered cursor would skip valid later mail.
  */
 
 import {
@@ -71,7 +72,7 @@ function getAttachmentDir(emailId: string): string {
 }
 
 /**
- * List new S3 objects since last sync (using StartAfter for efficient pagination).
+ * List S3 objects to examine this run.
  */
 async function listNewObjects(
   s3: S3Client,

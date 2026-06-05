@@ -32,6 +32,7 @@ import { autoPull } from "./autopull.js";
 import { truncate, senderName, relativeTime, formatDate, wrapText } from "./format.js";
 import { nextThemeMode, resolveTheme, type ResolvedTuiThemeName, type TuiTheme } from "./theme.js";
 import { startEventLoopWatchdog } from "./watchdog.js";
+import { getEmailSystemStatus, type EmailSystemStatus } from "../../lib/agent-context.js";
 
 type View = "home" | "list" | "addressPicker" | "reader" | "compose" | "profiles" | "settings";
 type ComposeField = "from" | "to" | "subject" | "body";
@@ -119,6 +120,7 @@ interface RenderContentArgs {
   selectedMsg: TuiMessage | null;
   readerBody: ReturnType<typeof getMessageBody>;
   conversation: ReturnType<typeof getConversation>;
+  systemStatus: EmailSystemStatus;
   width: number;
   height: number;
   theme: TuiTheme;
@@ -341,6 +343,10 @@ export function App({ initialMailbox }: AppProps) {
   const theme = useMemo(() => resolveTheme(state.settings.theme, process.env, detectedTheme), [detectedTheme, state.settings.theme]);
   const sel = selectedIndex(state.messages, state.selectedId);
   const selectedMsg = state.messages[sel] ?? null;
+  const systemStatus = useMemo(
+    () => getEmailSystemStatus(),
+    [addresses.length, state.counts.inbox, state.counts.unread, state.messages.length, state.now],
+  );
 
   useEffect(() => {
     renderer.setBackgroundColor(theme.background);
@@ -436,6 +442,27 @@ export function App({ initialMailbox }: AppProps) {
       if (gmail) clearInterval(gmail);
     };
   }, [flash, reload, state.settings.autoPull, state.settings.gmailAutoPull]);
+
+  const runPullNow = useCallback(() => {
+    if (backgroundBusy.current) {
+      flash("pull already running");
+      return;
+    }
+    backgroundBusy.current = true;
+    flash("pulling");
+    void autoPull({ limit: 1000 })
+      .then((r) => {
+        reload(true, { refreshAddresses: true });
+        flash(r.pulled ? `pulled ${r.pulled} new` : `up to date: ${address.label}`, "ok");
+      })
+      .catch((e) => {
+        reload(true);
+        flash(e instanceof Error ? e.message.slice(0, 64) : String(e).slice(0, 64), "err");
+      })
+      .finally(() => {
+        backgroundBusy.current = false;
+      });
+  }, [address.label, flash, reload]);
 
   const readerBody = useMemo(
     () => (state.view === "reader" && selectedMsg ? getMessageBody(selectedMsg) : null),
@@ -641,10 +668,7 @@ export function App({ initialMailbox }: AppProps) {
       return;
     }
     if (input === "G") {
-      flash("pulling");
-      void autoPull({ limit: 1000 })
-        .then((r) => { reload(true, { refreshAddresses: true }); flash(r.pulled ? `pulled ${r.pulled} new` : `up to date: ${address.label}`, "ok"); })
-        .catch((e) => { reload(true); flash(e instanceof Error ? e.message.slice(0, 64) : String(e).slice(0, 64), "err"); });
+      runPullNow();
       return;
     }
 
@@ -689,6 +713,7 @@ export function App({ initialMailbox }: AppProps) {
     selectedMsg,
     readerBody,
     conversation,
+    systemStatus,
     width: workspaceW,
     height: contentH,
     theme,
@@ -975,10 +1000,11 @@ function renderSidebar({ state, address, width, height, theme }: {
   return rows;
 }
 
-function renderHome({ state, width, theme }: {
+function renderHome({ state, width, theme, systemStatus }: {
   state: Model;
   width: number;
   theme: TuiTheme;
+  systemStatus: EmailSystemStatus;
 }): FrameLine[] {
   const rows = [
     line("Mailbox overview", theme, { fg: theme.accentStrong, bold: true }),
@@ -1000,6 +1026,13 @@ function renderHome({ state, width, theme }: {
       bold: active,
     }));
   });
+  rows.push(line(" ", theme));
+  rows.push(line("Operations", theme, { fg: theme.accentStrong, bold: true }));
+  rows.push(line(`  Sources   ${systemStatus.inbox.inbound_buckets.length} S3 bucket(s)  ${systemStatus.providers.gmail.length} Gmail  realtime ${systemStatus.inbox.realtime.queue_configured ? "on" : "off"}`, theme, {
+    fg: systemStatus.inbox.inbound_buckets.length || systemStatus.providers.gmail.length ? theme.ok : theme.warning,
+  }));
+  rows.push(line(`  Pulling   auto ${state.settings.autoPull ? "on" : "off"}  Gmail ${state.settings.gmailAutoPull ? "on" : "off"}  latest ${systemStatus.inbox.latest_received_at ?? "never"}`, theme, { fg: theme.secondary }));
+  if (systemStatus.inbox.realtime.last_error) rows.push(line(`  Error     ${truncate(systemStatus.inbox.realtime.last_error, width - 12)}`, theme, { fg: theme.error }));
   rows.push(line(" ", theme));
   rows.push(line(truncate("Inbox opens all mail first; use a inside Inbox to choose an address.", width), theme, { fg: theme.muted }));
   return rows;
@@ -1060,9 +1093,10 @@ function renderAddressPicker({ addresses, state, width, height, theme }: {
   return rows;
 }
 
-function renderList({ state, selectedIndex: sel, width, height, theme }: {
+function renderList({ state, selectedIndex: sel, selectedMsg, width, height, theme }: {
   state: Model;
   selectedIndex: number;
+  selectedMsg: TuiMessage | null;
   width: number;
   height: number;
   theme: TuiTheme;
@@ -1084,6 +1118,10 @@ function renderList({ state, selectedIndex: sel, width, height, theme }: {
     ];
   }
 
+  if (width >= 92 && selectedMsg) {
+    return renderSplitList({ state, selectedIndex: sel, selectedMsg, width, height, theme, prefixRows: rows });
+  }
+
   const start = Math.max(0, Math.min(sel - Math.floor(rowH / 2), Math.max(0, messages.length - rowH)));
   const whoW = Math.min(24, Math.max(12, Math.floor(width * 0.24)));
   const timeW = 6;
@@ -1101,6 +1139,55 @@ function renderList({ state, selectedIndex: sel, width, height, theme }: {
     }));
   }
   return rows;
+}
+
+function renderSplitList({ state, selectedIndex: sel, selectedMsg, width, height, theme, prefixRows }: {
+  state: Model;
+  selectedIndex: number;
+  selectedMsg: TuiMessage;
+  width: number;
+  height: number;
+  theme: TuiTheme;
+  prefixRows: FrameLine[];
+}): FrameLine[] {
+  const leftW = Math.min(48, Math.max(36, Math.floor(width * 0.46)));
+  const rightW = Math.max(28, width - leftW - 3);
+  const rowH = Math.max(1, height - prefixRows.length);
+  const start = Math.max(0, Math.min(sel - Math.floor(rowH / 2), Math.max(0, state.messages.length - rowH)));
+  const whoW = Math.min(16, Math.max(10, Math.floor(leftW * 0.34)));
+  const timeW = 6;
+  const subjW = Math.max(8, leftW - whoW - timeW - 8);
+  const left: string[] = [];
+  for (const [offset, m] of state.messages.slice(start, start + rowH).entries()) {
+    const selected = start + offset === sel;
+    const marker = selected ? ">" : " ";
+    const who = senderName(m.sentByMe ? m.to : m.from);
+    const stateMark = `${m.is_starred ? "*" : " "}${m.is_read ? " " : "!"}`;
+    left.push(truncate(`${marker}${stateMark} ${truncate(who, whoW).padEnd(whoW)} ${truncate(m.subject, subjW).padEnd(subjW)} ${relativeTime(m.date, state.now).padStart(timeW)}`, leftW));
+  }
+
+  const body = getMessageBody(selectedMsg);
+  const text = body?.text ?? (body?.html ? body.html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim() : "(no text content)");
+  const right = [
+    truncate("Preview", rightW),
+    truncate(body?.subject ?? selectedMsg.subject, rightW),
+    truncate(`from ${senderName(body?.from ?? selectedMsg.from)}`, rightW),
+    truncate(formatDate(body?.date ?? selectedMsg.date), rightW),
+    "",
+    ...wrapText(text, Math.max(20, rightW), 1200),
+  ].slice(0, rowH);
+
+  const out = [...prefixRows];
+  for (let i = 0; i < rowH; i++) {
+    const l = (left[i] ?? "").padEnd(leftW);
+    const r = right[i] ?? "";
+    out.push(line(`${l} ${theme.name === "dark" ? "|" : "|"} ${truncate(r, rightW)}`, theme, {
+      fg: i === 0 ? theme.accentStrong : theme.primary,
+      bg: i === sel - start ? theme.panelAlt : undefined,
+      bold: i === sel - start || i === 0,
+    }));
+  }
+  return out.slice(0, height);
 }
 
 function bytes(n: number): string {

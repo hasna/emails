@@ -614,6 +614,24 @@ const MIGRATIONS = [
   CREATE INDEX IF NOT EXISTS idx_inbound_sent_arch_recv ON inbound_emails(is_sent, is_archived, received_at);
   INSERT OR IGNORE INTO _migrations (id) VALUES (28);
   `,
+
+  // Migration 29: address ownership audit log.
+  `
+  CREATE TABLE IF NOT EXISTS address_ownership_events (
+    id TEXT PRIMARY KEY,
+    address_id TEXT NOT NULL REFERENCES addresses(id) ON DELETE CASCADE,
+    action TEXT NOT NULL CHECK(action IN ('assign','transfer','unassign')),
+    previous_owner_id TEXT REFERENCES owners(id) ON DELETE SET NULL,
+    previous_administrator_id TEXT REFERENCES owners(id) ON DELETE SET NULL,
+    owner_id TEXT REFERENCES owners(id) ON DELETE SET NULL,
+    administrator_id TEXT REFERENCES owners(id) ON DELETE SET NULL,
+    actor TEXT,
+    reason TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_addrownevents_address ON address_ownership_events(address_id, created_at);
+  INSERT OR IGNORE INTO _migrations (id) VALUES (29);
+  `,
 ];
 
 let _db: Database | null = null;
@@ -785,6 +803,21 @@ function ensureSchema(db: Database): void {
   // Migration 28 idempotent guarantee: is_sent flag + index.
   ensureColumn("ALTER TABLE inbound_emails ADD COLUMN is_sent INTEGER NOT NULL DEFAULT 0");
   ensureProvTable("CREATE INDEX IF NOT EXISTS idx_inbound_sent_arch_recv ON inbound_emails(is_sent, is_archived, received_at)");
+
+  // Migration 29 idempotent guarantee: ownership audit log.
+  ensureProvTable(`CREATE TABLE IF NOT EXISTS address_ownership_events (
+    id TEXT PRIMARY KEY,
+    address_id TEXT NOT NULL REFERENCES addresses(id) ON DELETE CASCADE,
+    action TEXT NOT NULL,
+    previous_owner_id TEXT REFERENCES owners(id) ON DELETE SET NULL,
+    previous_administrator_id TEXT REFERENCES owners(id) ON DELETE SET NULL,
+    owner_id TEXT REFERENCES owners(id) ON DELETE SET NULL,
+    administrator_id TEXT REFERENCES owners(id) ON DELETE SET NULL,
+    actor TEXT,
+    reason TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+  ensureProvTable("CREATE INDEX IF NOT EXISTS idx_addrownevents_address ON address_ownership_events(address_id, created_at)");
 
   const ensureIndex = (sql: string) => {
     try { db.exec(sql); } catch {}

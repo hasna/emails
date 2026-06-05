@@ -528,6 +528,24 @@ export const PG_MIGRATIONS: string[] = [
   INSERT INTO _migrations (id) VALUES (28) ON CONFLICT DO NOTHING;
   `,
 
+  // Migration 29: address ownership audit log.
+  `
+  CREATE TABLE IF NOT EXISTS address_ownership_events (
+    id TEXT PRIMARY KEY,
+    address_id TEXT NOT NULL REFERENCES addresses(id) ON DELETE CASCADE,
+    action TEXT NOT NULL,
+    previous_owner_id TEXT REFERENCES owners(id) ON DELETE SET NULL,
+    previous_administrator_id TEXT REFERENCES owners(id) ON DELETE SET NULL,
+    owner_id TEXT REFERENCES owners(id) ON DELETE SET NULL,
+    administrator_id TEXT REFERENCES owners(id) ON DELETE SET NULL,
+    actor TEXT,
+    reason TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+  CREATE INDEX IF NOT EXISTS idx_addrownevents_address ON address_ownership_events(address_id, created_at);
+  INSERT INTO _migrations (id) VALUES (29) ON CONFLICT DO NOTHING;
+  `,
+
 
   // Feedback table
   `

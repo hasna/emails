@@ -9,6 +9,8 @@ import { registerDomainTools } from "./tools/domains.js";
 import { registerEmailOpsTools } from "./tools/email-ops.js";
 import { registerMiscOpsTools } from "./tools/misc-ops.js";
 import { registerInfrastructureTools } from "./tools/infrastructure.js";
+import { registerAgentTools } from "./tools/agent.js";
+import { registerEmailResources } from "./resources.js";
 import pkg from "../../package.json" with { type: "json" };
 
 export const MCP_NAME = "emails";
@@ -30,7 +32,9 @@ export function buildServer(): McpServer {
     version: pkg.version,
   });
 
+  registerEmailResources(server);
   registerCloudTools(server, MCP_NAME);
+  registerAgentTools(server);
   registerProviderTools(server);
   registerDomainTools(server);
   registerEmailOpsTools(server);

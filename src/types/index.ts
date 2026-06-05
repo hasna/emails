@@ -93,6 +93,8 @@ export interface EmailAddress {
   email: string;
   display_name: string | null;
   verified: boolean;
+  owner_id: string | null;
+  administrator_id: string | null;
   status: AddressStatus;
   daily_quota: number | null;
   created_at: string;
@@ -105,6 +107,8 @@ export interface AddressRow {
   email: string;
   display_name: string | null;
   verified: number;
+  owner_id: string | null;
+  administrator_id: string | null;
   status: AddressStatus | null;
   daily_quota: number | null;
   created_at: string;

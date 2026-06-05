@@ -13,6 +13,7 @@ The implemented UI covers:
 
 - Home
 - Inbox
+- Wide inbox split preview
 - Address picker
 - Reader
 - Compose
@@ -48,6 +49,8 @@ References:
   including dashboard sidebar and metric surfaces.
 - `src/cli/tui/App.test.ts` uses `@opentui/react/test-utils` and OpenTUI mock
   keyboard input instead of `ink-testing-library`.
+- Explicit Shift-G pulls are serialized through the same busy lock as
+  background auto-pull so repeated refreshes do not overlap.
 - There is no mature official OpenTUI template gallery to vendor here. The
   current layout stays as owned app code and follows the available OpenTUI
   renderer, React, resize, and theme-mode APIs.
@@ -56,9 +59,11 @@ References:
 
 - Startup without `--mailbox` opens Home, not Inbox.
 - Wide terminals open as a two-column dashboard: persistent left navigation and
-  a right workspace with mailbox metrics or the active surface.
+  a right workspace with mailbox metrics, operations health, or the active
+  surface.
 - Narrow terminals collapse to a single workspace with a compact top nav.
 - Inbox is a unified all-address view by default.
+- Wide Inbox renders a message list and preview reader side by side.
 - Press `a` in Inbox to choose an exact email address.
 - The Inbox surface does not show provider/domain/source groupings.
 - Compose has editable From, To, Subject, and Body fields.

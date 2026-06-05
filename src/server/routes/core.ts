@@ -1,13 +1,14 @@
 // API route handlers — core.ts
 import { createProvider, listProviders, deleteProvider, getProvider, updateProvider } from '../../db/providers.js';
 import { createDomain, listDomains, deleteDomain, getDomain, updateDnsStatus } from '../../db/domains.js';
-import { createAddress, listAddresses, deleteAddress } from '../../db/addresses.js';
+import { createAddress, deleteAddress } from '../../db/addresses.js';
 import { listEmails, getEmail, searchEmails } from '../../db/emails.js';
 import { listSandboxEmails, getSandboxEmail, clearSandboxEmails } from '../../db/sandbox.js';
 import { getDatabase, resolvePartialId } from '../../db/database.js';
 import { listEvents } from '../../db/events.js';
 import { getAdapter } from '../../providers/index.js';
 import { getLocalStats } from '../../lib/stats.js';
+import { listEnrichedAddresses } from '../../lib/address-ownership.js';
 import { json, notFound, badRequest, internalError, resolveId, parseBody, sanitizeProvider, checkRateLimit, tooManyRequests } from './helpers.js';
 
 export async function handle(req: Request, url: URL, path: string, method: string): Promise<Response | null> {
@@ -180,7 +181,7 @@ if (path === "/api/addresses" && method === "GET") {
   try {
     const providerId = url.searchParams.get("provider_id") ?? undefined;
     const resolvedId = providerId ? resolveId("providers", providerId) ?? providerId : undefined;
-    return json(listAddresses(resolvedId));
+    return json(listEnrichedAddresses(resolvedId));
   } catch (e) { return internalError(e); }
 }
 

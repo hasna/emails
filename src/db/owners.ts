@@ -30,6 +30,14 @@ export interface CreateOwnerInput {
   external_id?: string;
 }
 
+let lastOwnershipEventMs = 0;
+
+function ownershipEventTimestamp(): string {
+  const current = Date.now();
+  lastOwnershipEventMs = current <= lastOwnershipEventMs ? lastOwnershipEventMs + 1 : current;
+  return new Date(lastOwnershipEventMs).toISOString();
+}
+
 export function createOwner(input: CreateOwnerInput, db?: Database): Owner {
   if (input.type !== "human" && input.type !== "agent") {
     throw new Error(`Invalid owner type '${input.type}' (must be 'human' or 'agent')`);
@@ -67,6 +75,103 @@ export interface AddressOwnership {
   administrator_id: string;
 }
 
+export type AddressOwnershipAction = "assign" | "transfer" | "unassign";
+
+export interface AddressOwnershipEvent {
+  id: string;
+  address_id: string;
+  action: AddressOwnershipAction;
+  previous_owner_id: string | null;
+  previous_administrator_id: string | null;
+  owner_id: string | null;
+  administrator_id: string | null;
+  actor: string | null;
+  reason: string | null;
+  created_at: string;
+}
+
+interface CurrentAddressOwnership {
+  owner_id: string | null;
+  administrator_id: string | null;
+}
+
+interface OwnershipChangeOptions {
+  actor?: string;
+  reason?: string;
+}
+
+function getCurrentAddressOwnership(addressId: string, db: Database): CurrentAddressOwnership {
+  const current = db.query("SELECT owner_id, administrator_id FROM addresses WHERE id = ?").get(addressId) as CurrentAddressOwnership | null;
+  if (!current) throw new Error(`Address not found: ${addressId}`);
+  return current;
+}
+
+function validateAddressOwnership(
+  ownerId: string,
+  administratorId: string | undefined,
+  db: Database,
+): AddressOwnership {
+  const owner = getOwner(ownerId, db);
+  if (!owner) throw new Error(`Owner not found: ${ownerId}`);
+
+  let adminId: string;
+  if (owner.type === "agent") {
+    adminId = owner.id;
+  } else {
+    if (!administratorId) {
+      throw new Error("A human-owned address requires an agent administrator (pass administratorId)");
+    }
+    const admin = getOwner(administratorId, db);
+    if (!admin) throw new Error(`Administrator not found: ${administratorId}`);
+    if (admin.type !== "agent") throw new Error("The administrator must be an agent");
+    adminId = admin.id;
+  }
+
+  return { owner_id: owner.id, owner_type: owner.type, administrator_id: adminId };
+}
+
+function recordAddressOwnershipEvent(
+  db: Database,
+  addressId: string,
+  action: AddressOwnershipAction,
+  previous: CurrentAddressOwnership,
+  next: { owner_id: string | null; administrator_id: string | null },
+  options: OwnershipChangeOptions = {},
+): AddressOwnershipEvent {
+  const id = uuid();
+  const ts = ownershipEventTimestamp();
+  db.run(
+    `INSERT INTO address_ownership_events
+      (id, address_id, action, previous_owner_id, previous_administrator_id, owner_id, administrator_id, actor, reason, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      id,
+      addressId,
+      action,
+      previous.owner_id,
+      previous.administrator_id,
+      next.owner_id,
+      next.administrator_id,
+      options.actor?.trim() || null,
+      options.reason?.trim() || null,
+      ts,
+    ],
+  );
+  return getAddressOwnershipEvent(id, db)!;
+}
+
+export function getAddressOwnershipEvent(id: string, db?: Database): AddressOwnershipEvent | null {
+  const d = db || getDatabase();
+  return (d.query("SELECT * FROM address_ownership_events WHERE id = ?").get(id) as AddressOwnershipEvent | null) ?? null;
+}
+
+export function listAddressOwnershipEvents(addressId: string, limit = 20, db?: Database): AddressOwnershipEvent[] {
+  const d = db || getDatabase();
+  const safeLimit = Math.min(100, Math.max(1, Number.isFinite(limit) ? Math.trunc(limit) : 20));
+  return d.query("SELECT * FROM address_ownership_events WHERE address_id = ? ORDER BY created_at DESC, id DESC LIMIT ?")
+    .all(addressId, safeLimit) as AddressOwnershipEvent[];
+}
+
 /**
  * Assign ownership of an address.
  *  - agent owner → self-administered (administrator = owner; administratorId ignored)
@@ -79,33 +184,61 @@ export function assignAddressOwner(
   db?: Database,
 ): AddressOwnership {
   const d = db || getDatabase();
-  const owner = getOwner(ownerId, d);
-  if (!owner) throw new Error(`Owner not found: ${ownerId}`);
+  const ownership = validateAddressOwnership(ownerId, administratorId, d);
 
   // Refuse to silently take over an address already owned by someone else —
   // prevents cross-tenant hijack on (re)provision. Reassigning to the same
   // owner (e.g. updating the administrator) stays allowed.
-  const current = d.query("SELECT owner_id FROM addresses WHERE id = ?").get(addressId) as { owner_id: string | null } | null;
-  if (current?.owner_id && current.owner_id !== ownerId) {
+  const current = getCurrentAddressOwnership(addressId, d);
+  if (current.owner_id && current.owner_id !== ownership.owner_id) {
     throw new Error(`Address ${addressId} is already owned by another owner; transfer is not permitted`);
   }
 
-  let adminId: string;
-  if (owner.type === "agent") {
-    adminId = owner.id; // self-administered
-  } else {
-    if (!administratorId) {
-      throw new Error("A human-owned address requires an agent administrator (pass administratorId)");
-    }
-    const admin = getOwner(administratorId, d);
-    if (!admin) throw new Error(`Administrator not found: ${administratorId}`);
-    if (admin.type !== "agent") throw new Error("The administrator must be an agent");
-    adminId = admin.id;
+  d.run("UPDATE addresses SET owner_id = ?, administrator_id = ?, updated_at = ? WHERE id = ?",
+    [ownership.owner_id, ownership.administrator_id, now(), addressId]);
+  if (current.owner_id !== ownership.owner_id || current.administrator_id !== ownership.administrator_id) {
+    recordAddressOwnershipEvent(d, addressId, "assign", current, ownership);
   }
+  return ownership;
+}
+
+export function transferAddressOwner(
+  addressId: string,
+  ownerId: string,
+  administratorId: string | undefined,
+  options: OwnershipChangeOptions,
+  db?: Database,
+): AddressOwnership {
+  const d = db || getDatabase();
+  const reason = options.reason?.trim();
+  if (!reason) throw new Error("Address ownership transfer requires a reason");
+
+  const current = getCurrentAddressOwnership(addressId, d);
+  const ownership = validateAddressOwnership(ownerId, administratorId, d);
 
   d.run("UPDATE addresses SET owner_id = ?, administrator_id = ?, updated_at = ? WHERE id = ?",
-    [ownerId, adminId, now(), addressId]);
-  return { owner_id: ownerId, owner_type: owner.type, administrator_id: adminId };
+    [ownership.owner_id, ownership.administrator_id, now(), addressId]);
+  if (current.owner_id !== ownership.owner_id || current.administrator_id !== ownership.administrator_id) {
+    recordAddressOwnershipEvent(d, addressId, "transfer", current, ownership, options);
+  }
+  return ownership;
+}
+
+export function unassignAddressOwner(
+  addressId: string,
+  options: OwnershipChangeOptions,
+  db?: Database,
+): null {
+  const d = db || getDatabase();
+  const reason = options.reason?.trim();
+  if (!reason) throw new Error("Address ownership unassign requires a reason");
+
+  const current = getCurrentAddressOwnership(addressId, d);
+  d.run("UPDATE addresses SET owner_id = NULL, administrator_id = NULL, updated_at = ? WHERE id = ?", [now(), addressId]);
+  if (current.owner_id || current.administrator_id) {
+    recordAddressOwnershipEvent(d, addressId, "unassign", current, { owner_id: null, administrator_id: null }, options);
+  }
+  return null;
 }
 
 export function getAddressOwnership(addressId: string, db?: Database): AddressOwnership | null {

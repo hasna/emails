@@ -9,6 +9,17 @@ import { createSendKey, listSendKeys, revokeSendKey, getSendKey, canOwnerSendFro
 import { getProvider } from '../../db/providers.js';
 import { getDatabase } from '../../db/database.js';
 import { getAdapter } from '../../providers/index.js';
+import {
+  getAddressOwnershipDetail,
+  getAddressOwnershipHistoryByRef,
+  listEnrichedAddresses,
+  setAddressOwnerByRef,
+  suggestAddressLocalParts,
+  transferAddressOwnerByRef,
+  unassignAddressOwnerByRef,
+} from '../../lib/address-ownership.js';
+import { getDomainProvisioning, getAddressProvisioning } from '../../db/provisioning.js';
+import { assessDomainReadiness } from '../../lib/domain-readiness.js';
 import { formatError, resolveId, DomainNotFoundError, AddressNotFoundError, ProviderNotFoundError } from '../helpers.js';
 
 export function registerDomainTools(server: McpServer): void {
@@ -25,6 +36,45 @@ export function registerDomainTools(server: McpServer): void {
       const resolvedId = provider_id ? resolveId("providers", provider_id) : undefined;
       const domains = listDomains(resolvedId);
       return { content: [{ type: "text", text: JSON.stringify(domains, null, 2) }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+    }
+  },
+  );
+
+  server.tool(
+  "list_usable_domains",
+  "List domains usable for sending and/or receiving.",
+  {
+    provider_id: z.string().optional().describe("Filter by provider ID"),
+    send: z.boolean().optional().describe("Only domains ready to send"),
+    receive: z.boolean().optional().describe("Only domains ready to receive"),
+  },
+  async ({ provider_id, send, receive }) => {
+    try {
+      const resolvedId = provider_id ? resolveId("providers", provider_id) : undefined;
+      const addresses = listAddresses();
+      const domains = listDomains(resolvedId).map((domain) => {
+        const ready_addresses = addresses.filter((address) => {
+          const provisioning = getAddressProvisioning(address.id);
+          return provisioning?.domain_id === domain.id && provisioning.provisioning_status === "ready";
+        }).length;
+        const readiness = assessDomainReadiness(domain, getDomainProvisioning(domain.id), { ready_addresses });
+        return {
+          ...domain,
+          provider_name: getProvider(domain.provider_id)?.name ?? null,
+          readiness,
+        };
+      }).filter((domain) => {
+        if (send && !domain.readiness.send_ready) return false;
+        if (receive && !domain.readiness.receive_ready) return false;
+        if (!send && !receive) return domain.readiness.send_ready || domain.readiness.receive_ready;
+        return true;
+      });
+      return { content: [{ type: "text", text: JSON.stringify({
+        domains,
+        cli_equivalent: `emails domain usable${send ? " --send" : ""}${receive ? " --receive" : ""} --json`,
+      }, null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
     }
@@ -148,8 +198,135 @@ export function registerDomainTools(server: McpServer): void {
   async ({ provider_id }) => {
     try {
       const resolvedId = provider_id ? resolveId("providers", provider_id) : undefined;
-      const addresses = listAddresses(resolvedId);
-      return { content: [{ type: "text", text: JSON.stringify(addresses, null, 2) }] };
+      const addresses = listEnrichedAddresses(resolvedId);
+      return { content: [{ type: "text", text: JSON.stringify({
+        addresses,
+        cli_equivalent: provider_id ? `emails address list --provider ${provider_id} --json` : "emails address list --json",
+      }, null, 2) }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+    }
+  },
+  );
+
+  server.tool(
+  "get_address_owner",
+  "Show owner and administering agent for an address by email or ID.",
+  {
+    address: z.string().describe("Address email, ID, or ID prefix"),
+  },
+  async ({ address }) => {
+    try {
+      const detail = getAddressOwnershipDetail(address);
+      return { content: [{ type: "text", text: JSON.stringify({
+        ...detail,
+        cli_equivalent: `emails address owner ${address} --json`,
+      }, null, 2) }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+    }
+  },
+  );
+
+  server.tool(
+  "set_address_owner",
+  "Assign address ownership. Human owners require an agent administrator.",
+  {
+    address: z.string().describe("Address email, ID, or ID prefix"),
+    owner: z.string().describe("Owner name, ID, or ID prefix"),
+    administrator: z.string().optional().describe("Administering agent name, ID, or ID prefix"),
+  },
+  async ({ address, owner, administrator }) => {
+    try {
+      const detail = setAddressOwnerByRef(address, owner, administrator);
+      return { content: [{ type: "text", text: JSON.stringify({
+        ...detail,
+        cli_equivalent: `emails address set-owner ${address} --owner ${owner}${administrator ? ` --administrator ${administrator}` : ""} --json`,
+      }, null, 2) }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+    }
+  },
+  );
+
+  server.tool(
+  "transfer_address_owner",
+  "Explicitly transfer address ownership. Requires a reason and preserves set-owner anti-hijack defaults.",
+  {
+    address: z.string().describe("Address email, ID, or ID prefix"),
+    owner: z.string().describe("New owner name, ID, or ID prefix"),
+    administrator: z.string().optional().describe("Administering agent name, ID, or ID prefix"),
+    reason: z.string().describe("Reason recorded in the ownership audit log"),
+    actor: z.string().optional().describe("Actor recorded in the ownership audit log"),
+  },
+  async ({ address, owner, administrator, reason, actor }) => {
+    try {
+      const detail = transferAddressOwnerByRef(address, owner, administrator, { actor: actor ?? "mcp", reason });
+      return { content: [{ type: "text", text: JSON.stringify({
+        ...detail,
+        cli_equivalent: `emails address transfer-owner ${address} --owner ${owner}${administrator ? ` --administrator ${administrator}` : ""} --reason ${JSON.stringify(reason)} --yes --json`,
+      }, null, 2) }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+    }
+  },
+  );
+
+  server.tool(
+  "unassign_address_owner",
+  "Clear owner/admin assignment for an address. Requires a reason and records audit history.",
+  {
+    address: z.string().describe("Address email, ID, or ID prefix"),
+    reason: z.string().describe("Reason recorded in the ownership audit log"),
+    actor: z.string().optional().describe("Actor recorded in the ownership audit log"),
+  },
+  async ({ address, reason, actor }) => {
+    try {
+      const detail = unassignAddressOwnerByRef(address, { actor: actor ?? "mcp", reason });
+      return { content: [{ type: "text", text: JSON.stringify({
+        ...detail,
+        cli_equivalent: `emails address unassign-owner ${address} --reason ${JSON.stringify(reason)} --yes --json`,
+      }, null, 2) }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+    }
+  },
+  );
+
+  server.tool(
+  "list_address_owner_history",
+  "List owner/admin audit history for an address.",
+  {
+    address: z.string().describe("Address email, ID, or ID prefix"),
+    limit: z.number().optional().describe("Maximum events to return"),
+  },
+  async ({ address, limit }) => {
+    try {
+      const detail = getAddressOwnershipHistoryByRef(address, limit ?? 20);
+      return { content: [{ type: "text", text: JSON.stringify({
+        ...detail,
+        cli_equivalent: `emails address owner-history ${address} --limit ${limit ?? 20} --json`,
+      }, null, 2) }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+    }
+  },
+  );
+
+  server.tool(
+  "suggest_address",
+  "Suggest available sender addresses for a domain.",
+  {
+    domain: z.string().describe("Domain name"),
+  },
+  async ({ domain }) => {
+    try {
+      const suggestions = suggestAddressLocalParts(domain, listAddresses().map((address) => address.email));
+      return { content: [{ type: "text", text: JSON.stringify({
+        domain,
+        suggestions,
+        cli_equivalent: `emails address suggest --domain ${domain} --json`,
+      }, null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
     }

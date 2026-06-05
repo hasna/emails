@@ -5,6 +5,7 @@ import { createAddress } from "./addresses.js";
 import {
   createOwner, getOwner, getOwnerByName, listOwners,
   assignAddressOwner, getAddressOwnership, listAddressesByOwner,
+  listAddressOwnershipEvents, transferAddressOwner, unassignAddressOwner,
 } from "./owners.js";
 
 let providerId: string;
@@ -83,5 +84,38 @@ describe("assignAddressOwner — anti-hijack", () => {
     expect(() => assignAddressOwner(addr.id, a2.id)).toThrow(/already owned/i);
     // re-assigning to the same owner stays allowed (idempotent)
     expect(() => assignAddressOwner(addr.id, a1.id)).not.toThrow();
+  });
+});
+
+describe("address ownership audit", () => {
+  it("records assign, transfer, and unassign events", () => {
+    const first = createOwner({ type: "agent", name: "First" });
+    const second = createOwner({ type: "agent", name: "Second" });
+    const addr = createAddress({ provider_id: providerId, email: "audit@x.com" });
+
+    assignAddressOwner(addr.id, first.id);
+    transferAddressOwner(addr.id, second.id, undefined, { actor: "test", reason: "handoff" });
+    unassignAddressOwner(addr.id, { actor: "test", reason: "retired" });
+
+    const ownership = getAddressOwnership(addr.id);
+    expect(ownership).toBeNull();
+
+    const events = listAddressOwnershipEvents(addr.id);
+    expect(events.map((event) => event.action)).toEqual(["unassign", "transfer", "assign"]);
+    expect(events[0]!.previous_owner_id).toBe(second.id);
+    expect(events[0]!.reason).toBe("retired");
+    expect(events[1]!.previous_owner_id).toBe(first.id);
+    expect(events[1]!.owner_id).toBe(second.id);
+    expect(events[1]!.actor).toBe("test");
+  });
+
+  it("requires a reason for transfer and unassign", () => {
+    const first = createOwner({ type: "agent", name: "Reasoned" });
+    const second = createOwner({ type: "agent", name: "Other" });
+    const addr = createAddress({ provider_id: providerId, email: "reason@x.com" });
+    assignAddressOwner(addr.id, first.id);
+
+    expect(() => transferAddressOwner(addr.id, second.id, undefined, { reason: "" })).toThrow(/requires a reason/i);
+    expect(() => unassignAddressOwner(addr.id, { reason: " " })).toThrow(/requires a reason/i);
   });
 });
