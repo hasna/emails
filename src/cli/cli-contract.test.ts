@@ -102,6 +102,21 @@ describe("CLI JSON contracts", () => {
     });
   });
 
+  it("wraps direct human logs in stable JSON when --json is enabled", () => {
+    const dir = mkdtempSync(join(tmpdir(), "emails-cli-contract-"));
+    tempDirs.push(dir);
+    const env = isolatedEnv(join(dir, "emails.db"), join(dir, "home"));
+
+    const result = runCli(["--json", "provider", "add", "--name", "dev", "--type", "sandbox"], env);
+    const stdout = new TextDecoder().decode(result.stdout);
+    expect(result.exitCode).toBe(0);
+
+    const parsed = JSON.parse(stdout) as { output: string[]; errors: string[] };
+    expect(parsed.output.join("\n")).toContain("Sandbox provider created: dev");
+    expect(parsed.output.join("\n")).not.toContain("undefined");
+    expect(parsed.errors).toEqual([]);
+  });
+
   it("prints structured JSON errors with fix commands", () => {
     const dir = mkdtempSync(join(tmpdir(), "emails-cli-contract-"));
     tempDirs.push(dir);

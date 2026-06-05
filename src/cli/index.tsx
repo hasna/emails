@@ -4,7 +4,6 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setLogLevel } from "../lib/logger.js";
-import { redactSecrets } from "../lib/redaction.js";
 
 import { registerProviderCommands } from "./commands/provider.js";
 import { registerDomainCommands } from "./commands/domain.js";
@@ -35,7 +34,7 @@ import { registerAwsCommands } from "./commands/aws.js";
 import { registerCloudCommands } from "./commands/cloud.js";
 import { registerStatusCommands } from "./commands/status.js";
 import { registerDaemonCommands } from "./commands/daemon.js";
-import { configureCliRuntime } from "./utils.js";
+import { configureCliRuntime, emitJson } from "./utils.js";
 
 function getPackageVersion(): string {
   try {
@@ -64,7 +63,7 @@ program
 function output(data: unknown, formatted: string): void {
   const opts = program.opts();
   if (opts.json) {
-    console.log(JSON.stringify(redactSecrets(data), null, 2));
+    emitJson(data);
   } else {
     console.log(formatted);
   }

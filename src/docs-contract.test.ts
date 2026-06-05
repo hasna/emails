@@ -19,4 +19,24 @@ describe("agent documentation contract", () => {
     expect(agents).not.toContain("59 MCP tools");
     expect(agents).not.toContain("mcp/index.ts               # MCP server (59 tools)");
   });
+
+  it("documents checked feature-extension conventions for future agents", () => {
+    const conventions = readFileSync(join(root, "docs", "FEATURE-CONVENTIONS.md"), "utf8");
+
+    for (const phrase of [
+      "DB-backed feature",
+      "CLI command",
+      "MCP tool",
+      "REST endpoint",
+      "Public library export",
+      "Release gate",
+      "src/cli/cli-contract.test.ts",
+      "src/mcp/http.test.ts",
+      "src/server/routes/rest-parity.test.ts",
+      "src/index.test.ts",
+      "fresh tmux session",
+    ]) {
+      expect(conventions).toContain(phrase);
+    }
+  });
 });

@@ -110,8 +110,38 @@ describe("emails-mcp HTTP transport", () => {
       const text = result.content[0]?.type === "text" ? result.content[0].text : "";
       expect(text).toContain('"access_key": "***"');
       expect(text).toContain('"secret_key": "***"');
+      expect(text).toContain('"cli_equivalent": "emails provider list --json"');
       expect(text).not.toContain("AKIA_MCP_SHOULD_NOT_LEAK");
       expect(text).not.toContain("MCP_SECRET_SHOULD_NOT_LEAK");
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("returns structured MCP errors with CLI fix commands", async () => {
+    const server = startHttpServer({ port: 0, log: () => {} });
+    servers.push(server);
+
+    const client = new Client({ name: "emails-mcp-error-contract-test", version: "1.0.0" }, { capabilities: {} });
+    const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${server.port}/mcp`));
+
+    try {
+      await client.connect(transport, { timeout: 10_000 });
+      const result = await client.callTool(
+        { name: "remove_provider", arguments: { provider_id: "missing" } },
+        undefined,
+        { timeout: 10_000 },
+      );
+      const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+      const parsed = JSON.parse(text) as {
+        error: { code: string; fix_command: string; fix_commands: string[]; retryable: boolean };
+        cli_equivalent: string;
+      };
+      expect(parsed.error.code).toBe("not_found");
+      expect(parsed.error.fix_command).toBe("emails provider list --json");
+      expect(parsed.error.fix_commands).toContain("emails provider add --help");
+      expect(parsed.error.retryable).toBe(false);
+      expect(parsed.cli_equivalent).toBe("emails provider remove missing --yes --json");
     } finally {
       await client.close();
     }

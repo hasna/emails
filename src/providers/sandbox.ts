@@ -53,7 +53,9 @@ export class SandboxAdapter implements ProviderAdapter {
       db,
     );
     const toStr = Array.isArray(opts.to) ? opts.to.join(", ") : opts.to;
-    process.stderr.write(`\n[sandbox] Email captured: ${opts.subject} → ${toStr} (id: ${email.id})\n`);
+    if (process.env["EMAILS_JSON_OUTPUT"] !== "1") {
+      process.stderr.write(`\n[sandbox] Email captured: ${opts.subject} → ${toStr} (id: ${email.id})\n`);
+    }
     return email.id;
   }
 

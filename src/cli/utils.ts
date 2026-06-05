@@ -5,9 +5,59 @@ import { redactSecrets } from "../lib/redaction.js";
 
 const ID_ERROR_SUGGESTION_LIMIT = 5;
 let jsonOutput = false;
+let jsonConsolePatched = false;
+let structuredJsonEmitted = false;
+const jsonStdoutLines: string[] = [];
+const jsonStderrLines: string[] = [];
+const originalConsoleLog = console.log.bind(console);
+const originalConsoleError = console.error.bind(console);
 
 export function configureCliRuntime(opts: { json?: boolean }): void {
   jsonOutput = !!opts.json;
+  if (jsonOutput) process.env["EMAILS_JSON_OUTPUT"] = "1";
+  if (jsonOutput && !jsonConsolePatched) {
+    jsonConsolePatched = true;
+    console.log = (...args: unknown[]) => {
+      jsonStdoutLines.push(args.map(formatJsonConsoleArg).join(" "));
+    };
+    console.error = (...args: unknown[]) => {
+      jsonStderrLines.push(args.map(formatJsonConsoleArg).join(" "));
+    };
+    process.once("exit", (code) => {
+      if (!jsonOutput || structuredJsonEmitted) return;
+      if (jsonStdoutLines.length === 0 && jsonStderrLines.length === 0) return;
+      const stderr = jsonStderrLines.join("\n").trim();
+      const payload = code && code !== 0
+        ? {
+            error: {
+              message: stderr || `Command failed with exit code ${code}`,
+              code: errorCode(stderr || "Command failed"),
+              fix_commands: fixCommands(stderr || "Command failed"),
+              retryable: false,
+            },
+            output: jsonStdoutLines,
+          }
+        : {
+            output: jsonStdoutLines,
+            errors: jsonStderrLines,
+          };
+      originalConsoleLog(JSON.stringify(redactSecrets(payload), null, 2));
+    });
+  }
+}
+
+function formatJsonConsoleArg(arg: unknown): string {
+  if (typeof arg === "string") return arg;
+  try {
+    return JSON.stringify(redactSecrets(arg));
+  } catch {
+    return String(arg);
+  }
+}
+
+export function emitJson(data: unknown): void {
+  structuredJsonEmitted = true;
+  originalConsoleLog(JSON.stringify(redactSecrets(data), null, 2));
 }
 
 function errorCode(message: string): string {
@@ -34,11 +84,13 @@ function fixCommands(message: string): string[] {
 export function handleError(e: unknown): never {
   const message = e instanceof Error ? e.message : String(e);
   if (jsonOutput) {
-    console.error(JSON.stringify(redactSecrets({
+    structuredJsonEmitted = true;
+    originalConsoleError(JSON.stringify(redactSecrets({
       error: {
         message,
         code: errorCode(message),
         fix_commands: fixCommands(message),
+        retryable: false,
       },
     }), null, 2));
   } else {

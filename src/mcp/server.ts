@@ -11,6 +11,7 @@ import { registerMiscOpsTools } from "./tools/misc-ops.js";
 import { registerInfrastructureTools } from "./tools/infrastructure.js";
 import { registerAgentTools } from "./tools/agent.js";
 import { registerEmailResources } from "./resources.js";
+import { installMcpToolContracts } from "./contracts.js";
 import pkg from "../../package.json" with { type: "json" };
 
 export const MCP_NAME = "emails";
@@ -34,6 +35,7 @@ export function buildServer(): McpServer {
 
   registerEmailResources(server);
   registerCloudTools(server, MCP_NAME);
+  installMcpToolContracts(server);
   registerAgentTools(server);
   registerProviderTools(server);
   registerDomainTools(server);
