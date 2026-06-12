@@ -339,11 +339,11 @@ describe("emails ui App", () => {
     await enter();
     await type("y");
 
-    expect(frame()).toContain("copied message body");
+    expect(frame()).toContain("copied message body via dry-run");
 
     await type("Y");
 
-    expect(frame()).toContain("copied message");
+    expect(frame()).toContain("copied message via dry-run");
   });
 
   it("toggles inbox flags without reloading the mailbox page", async () => {

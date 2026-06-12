@@ -778,7 +778,10 @@ export function App({ initialMailbox }: AppProps) {
     }
     const text = scope === "body" ? formatMessageBodyForCopy(body) : formatMessageForCopy(body);
     const result = copyTextToClipboard(text);
-    if (result.ok) flash(scope === "body" ? "copied message body" : "copied message", "ok");
+    if (result.ok) {
+      const target = scope === "body" ? "message body" : "message";
+      flash(result.method === "tmux-buffer" ? `stored ${target} in tmux buffer` : `copied ${target} via ${result.method ?? "clipboard"}`, "ok");
+    }
     else flash(`copy failed: ${result.error ?? "clipboard unavailable"}`, "err");
   }, [flash, readerBody, selectedMsg]);
 
