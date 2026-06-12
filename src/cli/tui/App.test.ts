@@ -37,6 +37,7 @@ beforeEach(() => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   process.env["EMAILS_DB_PATH"] = ":memory:";
   process.env["EMAILS_TUI_DISABLE_THEME_PROBE"] = "1";
+  process.env["EMAILS_TUI_CLIPBOARD_DRY_RUN"] = "1";
   savedHome = process.env["HOME"];
   tmpHome = mkdtempSync(join(tmpdir(), "emails-tui-"));
   process.env["HOME"] = tmpHome;
@@ -62,6 +63,7 @@ afterEach(async () => {
   closeDatabase();
   delete process.env["EMAILS_DB_PATH"];
   delete process.env["EMAILS_TUI_DISABLE_THEME_PROBE"];
+  delete process.env["EMAILS_TUI_CLIPBOARD_DRY_RUN"];
   if (savedHome === undefined) delete process.env["HOME"];
   else process.env["HOME"] = savedHome;
   rmSync(tmpHome, { recursive: true, force: true });
@@ -328,6 +330,20 @@ describe("emails ui App", () => {
     } finally {
       db.query = originalQuery;
     }
+  });
+
+  it("copies the selected message from the reader", async () => {
+    seedMessage("copy me", "2026-01-01T10:00:00.000Z");
+    await renderApp({ initialMailbox: "inbox" });
+
+    await enter();
+    await type("y");
+
+    expect(frame()).toContain("copied message body");
+
+    await type("Y");
+
+    expect(frame()).toContain("copied message");
   });
 
   it("toggles inbox flags without reloading the mailbox page", async () => {

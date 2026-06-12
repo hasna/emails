@@ -31,9 +31,10 @@ import {
   type ProfileInfo,
 } from "./data.js";
 import { autoPull } from "./autopull.js";
-import { truncate, senderName, relativeTime, formatDate, wrapText } from "./format.js";
+import { truncate, senderName, relativeTime, formatDate, renderReadableBodyLines, formatMessageBodyForCopy, formatMessageForCopy, type RenderedBodyLine } from "./format.js";
 import { nextThemeMode, resolveTheme, type ResolvedTuiThemeName, type TuiTheme } from "./theme.js";
 import { startEventLoopWatchdog } from "./watchdog.js";
+import { copyTextToClipboard } from "./clipboard.js";
 
 type View = "list" | "reader" | "compose" | "profiles" | "domains" | "settings";
 type DialogKind = "addressPicker" | "commands" | null;
@@ -765,6 +766,22 @@ export function App({ initialMailbox }: AppProps) {
     dispatch({ type: "composeStart", compose });
   }, [address.address, address.configured, selectedMsg?.to, state.settings.defaultFrom, state.view]);
 
+  const copySelected = useCallback((scope: "body" | "message") => {
+    if (!selectedMsg) {
+      flash("nothing to copy", "err");
+      return;
+    }
+    const body = readerBody ?? getMessageBody(selectedMsg);
+    if (!body) {
+      flash("message not found", "err");
+      return;
+    }
+    const text = scope === "body" ? formatMessageBodyForCopy(body) : formatMessageForCopy(body);
+    const result = copyTextToClipboard(text);
+    if (result.ok) flash(scope === "body" ? "copied message body" : "copied message", "ok");
+    else flash(`copy failed: ${result.error ?? "clipboard unavailable"}`, "err");
+  }, [flash, readerBody, selectedMsg]);
+
   const openSelected = useCallback(() => {
     if (!selectedMsg) return;
     const needsReadPatch = selectedMsg.kind === "inbound" && !selectedMsg.is_read;
@@ -1084,6 +1101,14 @@ export function App({ initialMailbox }: AppProps) {
     }
     if (input === "G") {
       runPullNow();
+      return;
+    }
+    if ((input === "y" || (event.ctrl && input === "y")) && selectedMsg) {
+      copySelected("body");
+      return;
+    }
+    if (input === "Y" && selectedMsg) {
+      copySelected("message");
       return;
     }
 
@@ -1469,7 +1494,7 @@ function workspaceSubtitle({ state, address, width }: RenderContentArgs): string
   if (state.view === "domains") return truncate(`Configured domains · page ${state.domainsPage + 1}${state.domainsHasMore ? "+" : ""} · n/N pages`, width);
   if (state.view === "profiles") return truncate(`Configured accounts · page ${state.profilesPage + 1}${state.profilesHasMore ? "+" : ""} · n/N pages`, width);
   if (state.view === "settings") return truncate("Editable defaults, theme, and pull behavior", width);
-  return truncate("b returns to Inbox · r replies · s stars · e archives", width);
+  return truncate("b returns to Inbox · y copies body · Y copies message · r replies · s stars · e archives", width);
 }
 
 function compactNavLine({ width, theme }: {
@@ -1677,7 +1702,6 @@ function renderReader({ body, conversation, scroll, width, height, theme }: {
   theme: TuiTheme;
 }): FrameLine[] {
   if (!body) return [line("No message selected.", theme, { fg: theme.muted })];
-  const text = body.text ?? (body.html ? body.html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim() : "(no text content)");
   const atts = body.attachments ?? [];
   const rows: FrameLine[] = [
     line(truncate(body.subject, width), theme, { fg: theme.accentStrong, bold: true }),
@@ -1694,11 +1718,20 @@ function renderReader({ body, conversation, scroll, width, height, theme }: {
   }
   rows.push(line(" ", theme));
   const avail = Math.max(2, height - rows.length - 1);
-  const lines = wrapText(text, Math.max(20, width), 5000);
+  const lines = renderReadableBodyLines(body.text, body.html, Math.max(20, width), 5000);
   const safeScroll = Math.min(scroll, Math.max(0, lines.length - avail));
-  for (const l of lines.slice(safeScroll, safeScroll + avail)) rows.push(line(l || " ", theme));
+  for (const l of lines.slice(safeScroll, safeScroll + avail)) rows.push(line(l.text || " ", theme, bodyLineStyle(l.kind, theme)));
   if (safeScroll + avail < lines.length) rows.push(line(`${lines.length - safeScroll - avail} more - j/k to scroll`, theme, { fg: theme.muted }));
   return rows;
+}
+
+function bodyLineStyle(kind: RenderedBodyLine["kind"], theme: TuiTheme): Partial<FrameLine> | undefined {
+  if (kind === "list") return { fg: theme.secondary };
+  if (kind === "quote") return { fg: theme.muted };
+  if (kind === "code") return { fg: theme.accentStrong, bg: theme.panelAlt };
+  if (kind === "heading") return { fg: theme.accentStrong, bold: true };
+  if (kind === "muted") return { fg: theme.muted };
+  return undefined;
 }
 
 function renderProfiles({ profiles: rawProfiles, page, hasMore, width, height, theme }: {
@@ -1917,8 +1950,8 @@ function footerLine(view: View, dialog: DialogKind, searching: boolean, theme: T
     : view === "domains" ? "domains - n/N page - b back"
     : view === "profiles" ? "profiles - n/N page - b back"
     : view === "settings" ? "settings - up/down choose - Enter edit - 1-7 edit - b back"
-    : view === "reader" ? "j/k scroll - J/K next/prev - r reply - s star - e archive - b back"
-    : "up/down move - Enter open - o sort - n/N page - : commands - ]/[ folders - a address - d domains - c compose - , settings - / search - g refresh - G pull";
+    : view === "reader" ? "j/k scroll - y copy body - Y copy message - r reply - s star - e archive - b back"
+    : "up/down move - Enter open - y copy - o sort - n/N page - : commands - ]/[ folders - a address - d domains - c compose - , settings - / search - g refresh - G pull";
   return line(` ${hint}`, theme, { fg: theme.muted, bg: theme.background });
 }
 
@@ -2119,6 +2152,7 @@ function FrameText({ line: frameLine, width }: { line: FrameLine; width: number 
       fg={frameLine.fg}
       bg={frameLine.bg}
       attributes={frameLine.bold ? TextAttributes.BOLD : TextAttributes.NONE}
+      selectable
       truncate
     />
   );
