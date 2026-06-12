@@ -15,7 +15,23 @@ export function registerUiCommand(program: Command, _output: (data: unknown, for
     .command("ui")
     .description("Open the email UI")
     .option("--mailbox <name>", "Start in: inbox | unread | starred | sent | archived (default: your saved setting)")
-    .action(async (opts: { mailbox?: string }) => {
+    .option("--clipboard-test [text]", "Copy test text using the same clipboard path as the UI")
+    .action(async (opts: { mailbox?: string; clipboardTest?: string | boolean }) => {
+      if (opts.clipboardTest !== undefined) {
+        const { copyTextToClipboard } = await import("../tui/clipboard.js");
+        const text = typeof opts.clipboardTest === "string" && opts.clipboardTest.trim()
+          ? opts.clipboardTest
+          : `emails ui clipboard test ${new Date().toISOString()}`;
+        const result = copyTextToClipboard(text);
+        if (result.ok) {
+          console.log(chalk.green(`Copied clipboard test via ${result.method ?? "clipboard"}`));
+          console.log(chalk.dim(text));
+        } else {
+          console.error(chalk.red(`Clipboard test failed: ${result.error ?? "clipboard unavailable"}`));
+          process.exitCode = 1;
+        }
+        return;
+      }
       if (!process.stdin.isTTY || !process.stdout.isTTY) {
         console.error(chalk.red("Email UI requires a TTY terminal."));
         console.error(chalk.dim("Use `emails inbox list`, `emails inbox read <id>`, or `emails send` non-interactively."));

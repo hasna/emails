@@ -8,7 +8,8 @@ describe("tui clipboard", () => {
       EMAILS_TUI_CLIPBOARD_SSH_HOSTS: "apple01, apple06",
       SSH_CLIENT: "100.100.226.69 54111 22",
       SSH_CONNECTION: "100.100.226.69 54111 100.85.234.92 22",
-    })).toEqual(["apple03", "apple01", "apple06", "100.100.226.69"]);
+      MOSH_CLIENT_IP: "100.100.226.70",
+    })).toEqual(["apple03", "apple01", "apple06", "100.100.226.69", "100.100.226.70"]);
   });
 
   it("tries configured, local, and SSH clipboard commands before terminal escapes", () => {
@@ -42,5 +43,28 @@ describe("tui clipboard", () => {
     expect(result).toEqual({ ok: true, method: "ssh-pbcopy:100.100.226.69" });
     expect(calls[0]).toBe("ssh -o BatchMode=yes -o ConnectTimeout=2 -o LogLevel=ERROR 100.100.226.69 pbcopy");
     expect(writes).toEqual([]);
+  });
+
+  it("copies through the attached tmux client SSH environment when the pane env is stale", () => {
+    const calls: string[] = [];
+    const result = copyTextToClipboard("hello from tmux", {
+      env: { TMUX: "/tmp/tmux-1000/default,1,0" },
+      platform: "linux",
+      stdoutIsTTY: true,
+      writeStdout: () => {},
+      readFile: (path) => path === "/proc/123/environ" ? "SSH_CLIENT=100.100.226.69 54111 22\0" : null,
+      spawnSync: ({ cmd, stdout }) => {
+        calls.push(cmd.join(" "));
+        if (stdout === "pipe") {
+          if (cmd.join(" ") === "tmux display-message -p #{client_pid}") return { exitCode: 0, stdout: "123\n" };
+          if (cmd.join(" ") === "tmux list-clients -F #{client_pid}") return { exitCode: 0, stdout: "123\n" };
+          return { exitCode: 1, stdout: "" };
+        }
+        return { exitCode: cmd[0] === "ssh" ? 0 : 1 };
+      },
+    });
+
+    expect(result).toEqual({ ok: true, method: "ssh-pbcopy:100.100.226.69" });
+    expect(calls).toContain("ssh -o BatchMode=yes -o ConnectTimeout=2 -o LogLevel=ERROR 100.100.226.69 pbcopy");
   });
 });
