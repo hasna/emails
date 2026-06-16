@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { Command } from "commander";
+import { registerEventsCommands } from "@hasna/events/commander";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -202,7 +203,9 @@ async function main(): Promise<void> {
 
   await registerCommandsForArgs(program, output, process.argv.slice(2));
 
-  await program.parseAsync(process.argv);
+  registerEventsCommands(program, { source: "emails" });
+
+await program.parseAsync(process.argv);
 }
 
 await main();

@@ -1,6 +1,6 @@
 {
   "name": "@hasna/emails",
-  "version": "0.6.12",
+  "version": "0.6.18",
   "description": "Email management CLI + MCP server + dashboard for Resend and AWS SES",
   "type": "module",
   "repository": {
@@ -83,7 +83,8 @@
     "pg": "^8.13.3",
     "react": "19.2.0",
     "resend": "^4.0.0",
-    "zod": "^3.24.2"
+    "zod": "^3.24.2",
+    "@hasna/events": "^0.1.6"
   },
   "devDependencies": {
     "@types/bun": "^1.2.4",
