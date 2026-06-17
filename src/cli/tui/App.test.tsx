@@ -10,6 +10,7 @@ import { onCleanup } from "solid-js";
 import { closeDatabase, resetDatabase } from "../../db/database.js";
 import { createAddress, markVerified } from "../../db/addresses.js";
 import { createDomain } from "../../db/domains.js";
+import { saveEmailAgentRun } from "../../db/email-agents.js";
 import { storeInboundEmail } from "../../db/inbound.js";
 import { createProvider } from "../../db/providers.js";
 import { setSetting } from "./data.js";
@@ -209,6 +210,26 @@ describe("Mailery Solid TUI", () => {
     expect(frame()).toContain("invoice.pdf");
     expect(frame()).toContain("application/pdf");
     expect(frame()).toContain("2 KB");
+  });
+
+  it("renders AI summaries below the email body in the reader", async () => {
+    const email = seedMessage("summary bottom", "2026-01-01T10:00:00.000Z");
+    saveEmailAgentRun({
+      agent_key: "categorizer",
+      inbound_email_id: email.id,
+      provider: "groq",
+      model: "test",
+      status: "ok",
+      summary: "AI summary belongs below the email body.",
+    });
+    await renderApp();
+
+    await key("enter");
+    const output = frame();
+    const bodyIndex = output.indexOf("body for summary bottom");
+    const summaryIndex = output.indexOf("AI summary belongs below");
+    expect(bodyIndex).toBeGreaterThanOrEqual(0);
+    expect(summaryIndex).toBeGreaterThan(bodyIndex);
   });
 
   it("searches through a dialog and keeps the search visible in the content area", async () => {

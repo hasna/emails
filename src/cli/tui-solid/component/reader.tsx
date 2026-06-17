@@ -76,20 +76,6 @@ export function ReaderRoute() {
               </box>
             </Show>
 
-            <Show when={body().summary}>
-              <box
-                marginTop={1}
-                marginBottom={1}
-                paddingLeft={2}
-                paddingRight={2}
-                paddingTop={1}
-                paddingBottom={1}
-                backgroundColor={theme.backgroundElement}
-              >
-                <text fg={theme.markdownText} wrapMode="word" width="100%">{body().summary}</text>
-              </box>
-            </Show>
-
             <scrollbox flexGrow={1} width="100%" paddingTop={1}>
               <For each={mailery.conversation()}>
                 {(entry) => (
@@ -121,6 +107,19 @@ export function ReaderRoute() {
                 <For each={bodyLines()}>
                   {(line) => <text fg={lineColor(line)}>{line.text}</text>}
                 </For>
+              </Show>
+              <Show when={body().summary}>
+                <box
+                  marginTop={1}
+                  marginBottom={1}
+                  paddingLeft={2}
+                  paddingRight={2}
+                  paddingTop={1}
+                  paddingBottom={1}
+                  backgroundColor={theme.backgroundElement}
+                >
+                  <text fg={theme.markdownText} wrapMode="word" width="100%">{body().summary}</text>
+                </box>
               </Show>
             </scrollbox>
 
