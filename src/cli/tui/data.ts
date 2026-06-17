@@ -1,5 +1,5 @@
 /**
- * Data layer for the email UI (`emails ui`).
+ * Data layer for the Mailery UI (`mailery ui`).
  *
  * Presents a Gmail-like unified view over the local store: inbound mail
  * (SES-S3 / SMTP / Gmail, with read-state/star/archive/labels) and sent mail,
@@ -7,7 +7,7 @@
  * without a terminal.
  */
 import type { Database } from "../../db/database.js";
-import { getDatabase, now, resolvePartialIdOrThrow } from "../../db/database.js";
+import { getDatabase, resolvePartialIdOrThrow, uuid } from "../../db/database.js";
 import { sqlEmailAddress, sqlEmailDomain } from "../../db/email-address-sql.js";
 import { parseJsonArray } from "../../db/json.js";
 import { countValue } from "../../db/scalars.js";
@@ -15,28 +15,36 @@ import {
   getReceivedInboundCount,
   getLatestReceivedInboundAt,
   setInboundReadFlag, setInboundArchivedFlag, setInboundStarredFlag,
+  addInboundLabelSummary, removeInboundLabelSummary,
+  getInboundEmail,
 } from "../../db/inbound.js";
 import { getEmail, createEmail } from "../../db/emails.js";
 import { getEmailContent, storeEmailContent } from "../../db/email-content.js";
-import { getThreadMessages } from "../../db/threads.js";
-import { getLatestActiveProviderId, listActiveProviderSummaries, listProviderNamesByIds, listProviderSummaries } from "../../db/providers.js";
-import { listDomains, listDomainsByProviderIds } from "../../db/domains.js";
-import { findAddressesByEmail, getPreferredActiveAddressEmail, listActiveAddressCountsByDomains, listActiveAddressEmails, listAddressesByProviderIds } from "../../db/addresses.js";
-import { listAliasesByTargets } from "../../db/aliases.js";
-import { listSendKeySummariesByOwners } from "../../db/send-keys.js";
-import { listOwnerNamesByIds } from "../../db/owners.js";
+import { getEmailThreading, getThreadMessages, setEmailThreading, setInboundThreadId } from "../../db/threads.js";
+import { getLatestActiveProviderId, listActiveProviderSummaries, listProviderNamesByIds } from "../../db/providers.js";
+import { listDomains } from "../../db/domains.js";
+import { findAddressesByEmail, getPreferredActiveAddressEmail, listActiveAddressCountsByDomains } from "../../db/addresses.js";
 import { listAddressProvisioningByIds, listDomainProvisioningByIds, listReadyAddressCountsByDomains } from "../../db/provisioning.js";
 import { loadConfig, saveConfig } from "../../lib/config.js";
-import { assessDomainReadiness, type DomainReadiness } from "../../lib/domain-readiness.js";
+import { assessDomainReadiness } from "../../lib/domain-readiness.js";
+import { buildThreadingHeaders, generateMessageId, parseReferences } from "../../lib/threading.js";
 import { marked } from "marked";
 import { normalizeThemeMode, type TuiThemeMode } from "./theme.js";
 
-export type Mailbox = "inbox" | "unread" | "starred" | "sent" | "archived";
+export type Mailbox = "inbox" | "unread" | "starred" | "sent" | "archived" | "spam" | "trash";
 
-export const MAILBOXES: Mailbox[] = ["inbox", "unread", "starred", "sent", "archived"];
+export const MAILBOXES: Mailbox[] = ["inbox", "unread", "starred", "sent", "archived", "spam", "trash"];
 
 export function mailboxLabel(m: Mailbox): string {
-  return { inbox: "Inbox", unread: "Unread", starred: "Starred", sent: "Sent", archived: "Archived" }[normalizeMailbox(m)];
+  return {
+    inbox: "Inbox",
+    unread: "Unread",
+    starred: "Starred",
+    sent: "Sent",
+    archived: "Archived",
+    spam: "Spam",
+    trash: "Trash",
+  }[normalizeMailbox(m)];
 }
 
 function normalizeMailbox(value: unknown): Mailbox {
@@ -77,9 +85,24 @@ export interface TuiMessage {
   labels: string[];
   snippet: string;
   thread_id: string | null;
+  provider_thread_id: string | null;
   attachments: number;
   /** True if I sent it (app-sent, or a Gmail-synced message labelled SENT). */
   sentByMe: boolean;
+}
+
+export interface TuiThreadMessage {
+  kind: "sent" | "received";
+  storage: "email" | "inbound";
+  id: string;
+  from: string;
+  subject: string;
+  at: string;
+}
+
+export interface TuiThreadBody {
+  item: TuiThreadMessage;
+  body: MessageBody | null;
 }
 
 export interface AttachmentInfo {
@@ -96,7 +119,7 @@ function snippetOf(text: string | null | undefined): string {
 
 interface LiteRow {
   id: string; from_address: string; to_addresses: string; subject: string; date: string;
-  is_read?: number; is_starred?: number; label_ids_json?: string | null; thread_id?: string | null; snippet?: string | null;
+  is_read?: number; is_starred?: number; label_ids_json?: string | null; thread_id?: string | null; provider_thread_id?: string | null; snippet?: string | null;
   attachments?: number;
 }
 
@@ -114,26 +137,32 @@ function liteToMessage(r: LiteRow, kind: "inbound" | "sent"): TuiMessage {
     subject: r.subject || "(no subject)", date: r.date,
     is_read: kind === "sent" ? true : !!r.is_read,
     is_starred: !!r.is_starred,
-    labels, snippet: snippetOf(r.snippet), thread_id: r.thread_id ?? null,
+    labels, snippet: snippetOf(r.snippet), thread_id: r.thread_id ?? null, provider_thread_id: r.provider_thread_id ?? null,
     attachments: r.attachments ?? 0,
-    sentByMe: kind === "sent" || labels.includes("SENT"),
+    sentByMe: kind === "sent" || labels.some((label) => label.trim().toLowerCase() === "sent"),
   };
 }
 
 // Lean inbound projection columns (no html_body). Reused across folder queries.
 const INBOUND_LITE_COLS = `id, from_address, to_addresses, subject, received_at AS date,
-  is_read, is_starred, label_ids_json, thread_id, substr(text_body, 1, 140) AS snippet,
+  is_read, is_starred, label_ids_json, thread_id, provider_thread_id, substr(text_body, 1, 140) AS snippet,
   (CASE WHEN attachments_json IS NULL OR attachments_json = '[]' THEN 0
         ELSE (LENGTH(attachments_json) - LENGTH(REPLACE(attachments_json, '"filename"', ''))) / LENGTH('"filename"') END) AS attachments`;
-const MAILBOX_UNION_COLS = "kind, id, from_address, to_addresses, subject, date, is_read, is_starred, label_ids_json, thread_id, snippet, attachments";
+const MAILBOX_UNION_COLS = "kind, id, from_address, to_addresses, subject, date, is_read, is_starred, label_ids_json, thread_id, provider_thread_id, snippet, attachments";
 
-// The receiving folders exclude mail I sent (is_sent is a denormalized, indexed
-// flag set from the Gmail SENT label at sync time — no JSON scanning at query time).
+// The receiving folders use denormalized, indexed flags so the UI never scans
+// label_ids_json on large stores.
+const SPAM_LABEL_SQL = "is_spam = 1";
+const TRASH_LABEL_SQL = "is_trash = 1";
+const NOT_SPAM_OR_TRASH_SQL = "is_spam = 0 AND is_trash = 0";
+
 const FOLDER_WHERE: Record<Exclude<Mailbox, "sent">, string> = {
-  inbox: "is_sent = 0 AND is_archived = 0",
-  unread: "is_sent = 0 AND is_read = 0 AND is_archived = 0",
-  starred: "is_sent = 0 AND is_starred = 1 AND is_archived = 0",
-  archived: "is_archived = 1",
+  inbox: `is_sent = 0 AND is_archived = 0 AND ${NOT_SPAM_OR_TRASH_SQL}`,
+  unread: `is_sent = 0 AND is_read = 0 AND is_archived = 0 AND ${NOT_SPAM_OR_TRASH_SQL}`,
+  starred: `is_sent = 0 AND is_starred = 1 AND is_archived = 0 AND ${NOT_SPAM_OR_TRASH_SQL}`,
+  archived: `is_archived = 1 AND ${NOT_SPAM_OR_TRASH_SQL}`,
+  spam: `is_sent = 0 AND ${SPAM_LABEL_SQL}`,
+  trash: `is_sent = 0 AND ${TRASH_LABEL_SQL}`,
 };
 
 /**
@@ -197,9 +226,24 @@ function searchClause(search: string | undefined, columns: string[]): SqlClause 
   };
 }
 
-function appSentSourceClause(src?: MailboxSource, search?: string): SqlClause {
+function labelClause(label: string | undefined): SqlClause {
+  const aliases = labelNameAliases(label ?? "");
+  if (aliases.length === 0) return { sql: "", params: [] };
+  return {
+    sql: ` AND EXISTS (
+      SELECT 1
+        FROM inbound_labels label
+       WHERE label.inbound_email_id = inbound_emails.id
+         AND label.label IN (${aliases.map(() => "?").join(", ")})
+    )`,
+    params: aliases,
+  };
+}
+
+function appSentSourceClause(src?: MailboxSource, search?: string, includeAppSent = true): SqlClause {
   const params: string[] = [];
   const where: string[] = [];
+  if (!includeAppSent) where.push("0 = 1");
   if (src?.providerId) { where.push("e.provider_id = ?"); params.push(src.providerId); }
   if (src?.address) { where.push(`${sqlEmailAddress("e.from_address")} = ?`); params.push(src.address.toLowerCase()); }
   if (src?.domain) { where.push(addressDomainSql("e.from_address")); params.push(...addressDomainParams(src.domain)); }
@@ -216,6 +260,7 @@ export interface MailboxListOptions {
   limit?: number;
   offset?: number;
   search?: string;
+  label?: string;
   source?: MailboxSource;
   sort?: "newest" | "oldest";
 }
@@ -230,17 +275,18 @@ export function listMailbox(mailbox: Mailbox, opts?: MailboxListOptions, db?: Da
 
   const src = opts?.source;
   const recipientSrc = recipientSourceClause(src);
-  const inboundSearch = searchClause(opts?.search, ["subject", "from_address", "to_addresses", "text_body"]);
+  const inboundSearch = searchClause(opts?.search, ["subject", "from_address", "to_addresses"]);
 
   if (selectedMailbox === "sent") {
-    const appSrc = appSentSourceClause(src, opts?.search);
+    const appSrc = appSentSourceClause(src, opts?.search, !opts?.label);
     const senderSrc = senderSourceClause(src);
     const sentSearch = searchClause(opts?.search, ["subject", "from_address", "to_addresses", "text_body"]);
+    const sentLabel = labelClause(opts?.label);
     const branchLimit = limit + offset;
     const rows = d.query(
       `WITH app_sent AS (
          SELECT 'sent' AS kind, e.id, e.from_address, e.to_addresses, e.subject, e.sent_at AS date,
-                1 AS is_read, 0 AS is_starred, '[]' AS label_ids_json, e.thread_id,
+                1 AS is_read, 0 AS is_starred, '[]' AS label_ids_json, e.thread_id, NULL AS provider_thread_id,
                 substr(c.text_body, 1, 140) AS snippet, e.attachment_count AS attachments
          FROM emails e LEFT JOIN email_content c ON c.email_id = e.id${appSrc.sql}
          ORDER BY e.sent_at ${order}
@@ -248,10 +294,10 @@ export function listMailbox(mailbox: Mailbox, opts?: MailboxListOptions, db?: Da
        ),
        synced_sent AS (
          SELECT 'inbound' AS kind, id, from_address, to_addresses, subject, received_at AS date,
-                is_read, is_starred, label_ids_json, thread_id, substr(text_body, 1, 140) AS snippet,
+                is_read, is_starred, label_ids_json, thread_id, provider_thread_id, substr(text_body, 1, 140) AS snippet,
                 (CASE WHEN attachments_json IS NULL OR attachments_json = '[]' THEN 0
                       ELSE (LENGTH(attachments_json) - LENGTH(REPLACE(attachments_json, '"filename"', ''))) / LENGTH('"filename"') END) AS attachments
-         FROM inbound_emails WHERE is_sent = 1 AND is_archived = 0${senderSrc.sql}${sentSearch.sql}
+         FROM inbound_emails WHERE is_sent = 1 AND is_archived = 0${senderSrc.sql}${sentSearch.sql}${sentLabel.sql}
          ORDER BY received_at ${order}
          LIMIT ?
        )
@@ -260,19 +306,28 @@ export function listMailbox(mailbox: Mailbox, opts?: MailboxListOptions, db?: Da
          UNION ALL
          SELECT ${MAILBOX_UNION_COLS} FROM synced_sent
        ) ORDER BY date ${order} LIMIT ? OFFSET ?`,
-    ).all(...appSrc.params, branchLimit, ...senderSrc.params, ...sentSearch.params, branchLimit, limit, offset) as MailboxUnionRow[];
+    ).all(...appSrc.params, branchLimit, ...senderSrc.params, ...sentSearch.params, ...sentLabel.params, branchLimit, limit, offset) as MailboxUnionRow[];
     messages = rows.map((r) => liteToMessage(r, r.kind));
   } else {
+    const inboundLabel = labelClause(opts?.label);
     const rows = d.query(
-      `SELECT ${INBOUND_LITE_COLS} FROM inbound_emails WHERE ${FOLDER_WHERE[selectedMailbox]}${recipientSrc.sql}${inboundSearch.sql} ORDER BY received_at ${order} LIMIT ? OFFSET ?`,
-    ).all(...recipientSrc.params, ...inboundSearch.params, limit, offset) as LiteRow[];
+      `SELECT ${INBOUND_LITE_COLS} FROM inbound_emails WHERE ${FOLDER_WHERE[selectedMailbox]}${recipientSrc.sql}${inboundSearch.sql}${inboundLabel.sql} ORDER BY received_at ${order} LIMIT ? OFFSET ?`,
+    ).all(...recipientSrc.params, ...inboundSearch.params, ...inboundLabel.params, limit, offset) as LiteRow[];
     messages = rows.map((r) => liteToMessage(r, "inbound"));
   }
 
   return messages;
 }
 
-export interface MailboxCounts { inbox: number; unread: number; starred: number; sent: number; archived: number }
+export interface MailboxCounts {
+  inbox: number;
+  unread: number;
+  starred: number;
+  sent: number;
+  archived: number;
+  spam: number;
+  trash: number;
+}
 
 function hasSourceFilter(source: MailboxSource | undefined): boolean {
   return !!(source?.providerId || source?.domain || source?.address);
@@ -285,6 +340,8 @@ function unscopedMailboxCounts(db: Database): MailboxCounts {
        (SELECT COUNT(*) FROM inbound_emails WHERE ${FOLDER_WHERE.unread}) AS unread,
        (SELECT COUNT(*) FROM inbound_emails WHERE ${FOLDER_WHERE.starred}) AS starred,
        (SELECT COUNT(*) FROM inbound_emails WHERE ${FOLDER_WHERE.archived}) AS archived,
+       (SELECT COUNT(*) FROM inbound_emails WHERE ${FOLDER_WHERE.spam}) AS spam,
+       (SELECT COUNT(*) FROM inbound_emails WHERE ${FOLDER_WHERE.trash}) AS trash,
        (SELECT COUNT(*) FROM emails) +
        (SELECT COUNT(*) FROM inbound_emails WHERE is_sent = 1 AND is_archived = 0) AS sent`,
   ).get() as Partial<Record<keyof MailboxCounts, unknown>> | null;
@@ -294,6 +351,8 @@ function unscopedMailboxCounts(db: Database): MailboxCounts {
     starred: countValue(row?.starred),
     sent: countValue(row?.sent),
     archived: countValue(row?.archived),
+    spam: countValue(row?.spam),
+    trash: countValue(row?.trash),
   };
 }
 
@@ -315,6 +374,8 @@ export function mailboxCounts(optsOrDb?: Database | { source?: MailboxSource }, 
        COALESCE(inbound.unread, 0) AS unread,
        COALESCE(inbound.starred, 0) AS starred,
        COALESCE(inbound.archived, 0) AS archived,
+       COALESCE(inbound.spam, 0) AS spam,
+       COALESCE(inbound.trash, 0) AS trash,
        (SELECT COUNT(*) FROM emails e${appSrc.sql}) +
        (SELECT COUNT(*) FROM inbound_emails WHERE is_sent = 1 AND is_archived = 0${senderSrc.sql}) AS sent
      FROM (
@@ -322,7 +383,9 @@ export function mailboxCounts(optsOrDb?: Database | { source?: MailboxSource }, 
          SUM(CASE WHEN ${FOLDER_WHERE.inbox} THEN 1 ELSE 0 END) AS inbox,
          SUM(CASE WHEN ${FOLDER_WHERE.unread} THEN 1 ELSE 0 END) AS unread,
          SUM(CASE WHEN ${FOLDER_WHERE.starred} THEN 1 ELSE 0 END) AS starred,
-         SUM(CASE WHEN ${FOLDER_WHERE.archived} THEN 1 ELSE 0 END) AS archived
+         SUM(CASE WHEN ${FOLDER_WHERE.archived} THEN 1 ELSE 0 END) AS archived,
+         SUM(CASE WHEN ${FOLDER_WHERE.spam} THEN 1 ELSE 0 END) AS spam,
+         SUM(CASE WHEN ${FOLDER_WHERE.trash} THEN 1 ELSE 0 END) AS trash
        FROM inbound_emails
        WHERE 1 = 1${recipientSrc.sql}
      ) inbound`,
@@ -333,6 +396,8 @@ export function mailboxCounts(optsOrDb?: Database | { source?: MailboxSource }, 
     starred: countValue(row?.starred),
     sent: countValue(row?.sent),
     archived: countValue(row?.archived),
+    spam: countValue(row?.spam),
+    trash: countValue(row?.trash),
   };
 }
 
@@ -344,6 +409,7 @@ export interface MessageBody {
   date: string;
   text: string | null;
   html: string | null;
+  summary: string;
   flags: string[];
   attachments: AttachmentInfo[];
 }
@@ -362,6 +428,7 @@ interface InboundBodyRow {
   label_ids_json: string | null;
   attachments_json: string | null;
   attachment_paths: string | null;
+  summary: string | null;
 }
 
 /** Merge attachment metadata with downloaded-path info (local/s3 location). */
@@ -370,24 +437,83 @@ function mergeAttachments(meta: { filename: string; content_type: string; size: 
   return meta.map((a) => ({ filename: a.filename, content_type: a.content_type, size: a.size, location: byName.get(a.filename) }));
 }
 
+function htmlToPlainText(value: string | null | undefined): string {
+  return (value ?? "")
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, "\"")
+    .replace(/&#39;/gi, "'")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function normalizeSummary(value: string | null | undefined): string | null {
+  const text = (value ?? "").replace(/\s+/g, " ").trim();
+  return text ? text.slice(0, 360) : null;
+}
+
+function fallbackMessageSummary(subject: string, text: string | null | undefined, html: string | null | undefined): string {
+  const topic = (subject || "(no subject)").replace(/\s+/g, " ").trim();
+  const plain = ((text ?? "").trim() || htmlToPlainText(html)).replace(/\s+/g, " ").trim();
+  const excerpt = plain && plain.toLowerCase() !== topic.toLowerCase()
+    ? plain.slice(0, 180).replace(/\s+\S*$/, "").trim()
+    : "";
+  if (excerpt) return `About ${topic}: ${excerpt}.`;
+  return `About ${topic}.`;
+}
+
 export function getMessageBody(msg: TuiMessage, db?: Database): MessageBody | null {
   const d = db || getDatabase();
   if (msg.kind === "inbound") {
     const e = d.query(
       `SELECT from_address, to_addresses, cc_addresses, subject, received_at,
               text_body, html_body, is_read, is_starred, is_archived,
-              label_ids_json, attachments_json, attachment_paths
+              label_ids_json, attachments_json, attachment_paths,
+              COALESCE(
+                (
+                  SELECT r.summary
+                    FROM email_agent_runs r
+                   WHERE r.inbound_email_id = inbound_emails.id
+                     AND r.status = 'ok'
+                     AND TRIM(COALESCE(r.summary, '')) != ''
+                   ORDER BY CASE r.agent_key
+                              WHEN 'categorizer' THEN 0
+                              WHEN 'labeler' THEN 1
+                              WHEN 'fraud' THEN 2
+                              ELSE 3
+                            END,
+                            r.completed_at DESC
+                   LIMIT 1
+                ),
+                (
+                  SELECT t.summary
+                    FROM email_triage t
+                   WHERE t.inbound_email_id = inbound_emails.id
+                     AND TRIM(COALESCE(t.summary, '')) != ''
+                   ORDER BY t.triaged_at DESC
+                   LIMIT 1
+                )
+              ) AS summary
          FROM inbound_emails
         WHERE id = ?`,
     ).get(msg.id) as InboundBodyRow | null;
     if (!e) return null;
     const labels = parseJsonArray<string>(e.label_ids_json);
+    const summary = normalizeSummary(e.summary) ?? fallbackMessageSummary(e.subject || "(no subject)", e.text_body, e.html_body);
     return {
       from: e.from_address,
       to: parseJsonArray<string>(e.to_addresses).join(", "),
       cc: parseJsonArray<string>(e.cc_addresses).join(", "),
       subject: e.subject || "(no subject)", date: e.received_at,
       text: e.text_body, html: e.html_body,
+      summary,
       flags: [e.is_read ? "read" : "unread", e.is_starred && "starred", e.is_archived && "archived", ...labels].filter(Boolean) as string[],
       attachments: mergeAttachments(parseJsonArray(e.attachments_json), parseJsonArray(e.attachment_paths)),
     };
@@ -395,19 +521,99 @@ export function getMessageBody(msg: TuiMessage, db?: Database): MessageBody | nu
   const e = getEmail(msg.id, d);
   if (!e) return null;
   const content = getEmailContent(e.id, d);
+  const triage = d.query(
+    `SELECT summary
+       FROM email_triage
+      WHERE email_id = ?
+        AND TRIM(COALESCE(summary, '')) != ''
+      ORDER BY triaged_at DESC
+      LIMIT 1`,
+  ).get(e.id) as { summary: string | null } | null;
+  const summary = normalizeSummary(triage?.summary) ?? fallbackMessageSummary(e.subject || "(no subject)", content?.text_body, content?.html);
   return {
     from: e.from_address, to: e.to_addresses.join(", "), cc: e.cc_addresses.join(", "),
     subject: e.subject || "(no subject)", date: e.sent_at,
     text: content?.text_body ?? null, html: content?.html ?? null,
+    summary,
     flags: ["sent", e.status].filter(Boolean) as string[],
     attachments: [],
   };
 }
 
 /** The full conversation (sent + received) for a message's thread, oldest first. */
-export function getConversation(msg: TuiMessage, db?: Database): Array<{ kind: "sent" | "received"; from: string; subject: string; at: string }> {
-  if (!msg.thread_id) return [];
-  return getThreadMessages(msg.thread_id, db);
+export function getConversation(msg: TuiMessage, db?: Database): TuiThreadMessage[] {
+  const d = db || getDatabase();
+  if (msg.thread_id) {
+    const messages = getThreadMessages(msg.thread_id, d);
+    if (messages.length > 0) {
+      return messages.map((message) => ({
+        ...message,
+        storage: message.kind === "sent" ? "email" : "inbound",
+      }));
+    }
+  }
+  if (msg.kind !== "inbound" || !msg.provider_thread_id) return [];
+  const rows = d.query(
+    `SELECT id, from_address, subject, received_at, is_sent
+       FROM inbound_emails
+      WHERE provider_thread_id = ?
+      ORDER BY received_at ASC
+      LIMIT 100`,
+  ).all(msg.provider_thread_id) as Array<{ id: string; from_address: string; subject: string; received_at: string; is_sent: number }>;
+  return rows.map((row) => ({
+    kind: row.is_sent ? "sent" : "received",
+    storage: "inbound",
+    id: row.id,
+    from: row.from_address,
+    subject: row.subject,
+    at: row.received_at,
+  }));
+}
+
+export function threadItemToMessage(item: TuiThreadMessage, base: TuiMessage): TuiMessage {
+  const inbound = item.storage === "inbound";
+  return {
+    kind: inbound ? "inbound" : "sent",
+    id: item.id,
+    from: item.from,
+    to: "",
+    subject: item.subject || "(no subject)",
+    date: item.at,
+    is_read: true,
+    is_starred: false,
+    labels: inbound && item.kind === "sent" ? ["SENT"] : [],
+    snippet: "",
+    thread_id: base.thread_id,
+    provider_thread_id: base.provider_thread_id,
+    attachments: 0,
+    sentByMe: item.kind === "sent",
+  };
+}
+
+export interface ConversationBodyOptions {
+  limit?: number;
+}
+
+/** The full conversation with bodies, oldest first. Falls back to the selected message. */
+export function getConversationBodies(msg: TuiMessage, db?: Database, opts?: ConversationBodyOptions): TuiThreadBody[] {
+  const d = db || getDatabase();
+  const conversation = getConversation(msg, d);
+  const allItems = conversation.length > 0
+    ? conversation
+    : [{
+      kind: msg.sentByMe ? "sent" as const : "received" as const,
+      storage: msg.kind === "sent" ? "email" as const : "inbound" as const,
+      id: msg.id,
+      from: msg.from,
+      subject: msg.subject,
+      at: msg.date,
+    }];
+  const limit = opts?.limit ? positiveInt(opts.limit, 100) : undefined;
+  const items = limit && allItems.length > limit ? allItems.slice(-limit) : allItems;
+  return items.map((item) => ({
+    item,
+    body: getMessageBody(threadItemToMessage(item, msg), d),
+  }));
 }
 
 // ── mutations (inbound only; sent messages are immutable) ──────────────────────
@@ -425,6 +631,113 @@ export function markRead(msg: TuiMessage, db?: Database): void {
 }
 export function archiveMessage(msg: TuiMessage, archived = true, db?: Database): void {
   if (msg.kind === "inbound") setInboundArchivedFlag(msg.id, archived, db);
+}
+
+export const COMMON_LABELS = [
+  "action-required",
+  "urgent",
+  "follow-up",
+  "fyi",
+  "newsletter",
+  "transactional",
+  "spam",
+  "trash",
+] as const;
+
+export const GMAIL_CATEGORY_LABELS = [
+  { name: "category_personal", title: "Primary" },
+  { name: "category_social", title: "Social" },
+  { name: "category_promotions", title: "Promotions" },
+  { name: "category_updates", title: "Updates" },
+  { name: "category_forums", title: "Forums" },
+] as const;
+
+const GMAIL_CATEGORY_KEYS = new Map(GMAIL_CATEGORY_LABELS.map((category) => [labelNameKey(category.name), category]));
+
+export interface LabelSummary {
+  name: string;
+  count: number;
+  popular: boolean;
+}
+
+export interface ListLabelSummaryOptions {
+  limit?: number;
+  search?: string;
+}
+
+export function listLabelSummaries(db?: Database): LabelSummary[];
+export function listLabelSummaries(opts?: ListLabelSummaryOptions, db?: Database): LabelSummary[];
+export function listLabelSummaries(optsOrDb?: ListLabelSummaryOptions | Database, maybeDb?: Database): LabelSummary[] {
+  const d = isDatabase(optsOrDb) ? optsOrDb : maybeDb || getDatabase();
+  const opts = isDatabase(optsOrDb) ? undefined : optsOrDb;
+  const counts = new Map<string, number>();
+  const rows = d.query(
+    `SELECT label, COUNT(*) AS count
+       FROM inbound_labels
+      WHERE TRIM(label) != ''
+      GROUP BY label`,
+  ).all() as Array<{ label: string; count: unknown }>;
+  for (const row of rows) counts.set(row.label, countValue(row.count));
+  for (const label of COMMON_LABELS) counts.set(label, counts.get(label) ?? 0);
+
+  const commonRank = new Map<string, number>(COMMON_LABELS.map((label, index) => [label, index]));
+  let labels = [...counts.entries()].map(([name, count]) => ({ name, count, popular: count > 0 }));
+  const q = opts?.search?.trim().toLowerCase();
+  if (q) labels = labels.filter((label) => label.name.includes(q));
+  labels.sort((a, b) => {
+    if (a.count !== b.count) return b.count - a.count;
+    const aRank = commonRank.get(a.name) ?? Number.MAX_SAFE_INTEGER;
+    const bRank = commonRank.get(b.name) ?? Number.MAX_SAFE_INTEGER;
+    if (aRank !== bRank) return aRank - bRank;
+    return a.name.localeCompare(b.name);
+  });
+  return labels.slice(0, positiveInt(opts?.limit, 50));
+}
+
+function normalizeLabel(label: string): string {
+  return label.trim().toLowerCase().replace(/\s+/g, "-").slice(0, 64);
+}
+
+export function normalizedLabelName(label: string): string {
+  return normalizeLabel(label);
+}
+
+export function labelNameKey(label: string): string {
+  return normalizeLabel(label).replace(/-/g, "_");
+}
+
+export function labelNameAliases(label: string): string[] {
+  const normalized = normalizeLabel(label);
+  if (!normalized) return [];
+  return [...new Set([normalized, normalized.replace(/_/g, "-"), normalized.replace(/-/g, "_")])];
+}
+
+export function isGmailCategoryLabel(label: string): boolean {
+  return GMAIL_CATEGORY_KEYS.has(labelNameKey(label));
+}
+
+export function gmailCategoryTitle(label: string): string | null {
+  return GMAIL_CATEGORY_KEYS.get(labelNameKey(label))?.title ?? null;
+}
+
+export function labelDisplayName(label: string): string {
+  const display = gmailCategoryTitle(label) ?? normalizeLabel(label).replace(/^category[_-]+/i, "");
+  return display
+    .trim()
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/\b\w/g, (ch) => ch.toUpperCase());
+}
+
+export function toggleMessageLabel(msg: TuiMessage, label: string, db?: Database): string[] {
+  if (msg.kind !== "inbound") return msg.labels;
+  const normalized = normalizeLabel(label);
+  if (!normalized) return msg.labels;
+  const labels = new Set(msg.labels.map((item) => normalizeLabel(item)).filter(Boolean));
+  const next = labels.has(normalized)
+    ? removeInboundLabelSummary(msg.id, normalized, db).label_ids
+    : addInboundLabelSummary(msg.id, normalized, db).label_ids;
+  return next.map(normalizeLabel).filter(Boolean);
 }
 
 // ── compose / reply ────────────────────────────────────────────────────────────
@@ -445,13 +758,20 @@ export function providerIdForSender(address: string, db?: Database): string | nu
 /** Pre-fill values for replying to a message. */
 export function replyDefaults(msg: TuiMessage): { from: string; to: string; subject: string } {
   const subject = /^re:/i.test(msg.subject) ? msg.subject : `Re: ${msg.subject}`;
-  // Reply goes back to the sender for inbound, to the recipient for sent.
-  const to = msg.kind === "inbound" ? msg.from : msg.to;
-  const from = msg.kind === "inbound" ? (msg.to.split(",")[0]?.trim() ?? "") : msg.from;
+  const to = msg.sentByMe ? msg.to : msg.from;
+  const from = msg.sentByMe ? msg.from : (msg.to.split(",")[0]?.trim() ?? "");
   return { from, to, subject };
 }
 
-export interface ComposeInput { from: string; to: string; subject: string; body: string; providerId?: string; markdown?: boolean }
+export interface ComposeInput {
+  from: string;
+  to: string;
+  subject: string;
+  body: string;
+  providerId?: string;
+  markdown?: boolean;
+  replyTo?: TuiMessage;
+}
 
 /** Pick the best configured sender for a new TUI compose. */
 export function defaultFromAddress(opts?: { source?: MailboxSource; fallback?: string }, db?: Database): string {
@@ -481,7 +801,7 @@ export function renderMarkdown(md: string): string {
 export async function sendComposed(input: ComposeInput, db?: Database): Promise<{ id: string; messageId: string }> {
   const d = db || getDatabase();
   const raw = input.providerId ?? providerIdForSender(input.from, d) ?? activeProviderId(d);
-  if (!raw) throw new Error("No active provider. Add one with 'emails provider add'.");
+  if (!raw) throw new Error("No active provider. Add one with 'mailery provider add'.");
   // Accept a full or partial provider id, but fail loudly on missing/ambiguous values.
   const providerId = resolvePartialIdOrThrow(d, "providers", raw);
   const to = input.to.split(",").map((s) => s.trim()).filter(Boolean);
@@ -489,53 +809,60 @@ export async function sendComposed(input: ComposeInput, db?: Database): Promise<
   if (!input.from) throw new Error("A From address is required.");
   const useMd = input.markdown !== false && input.body.trim().length > 0;
   const html = useMd ? renderMarkdown(input.body) : undefined;
-  const sendOpts = { provider_id: providerId, from: input.from, to, subject: input.subject, text: input.body, ...(html ? { html } : {}) };
+
+  let threadId: string | null = null;
+  let inReplyTo: string | null = null;
+  let references: string[] = [];
+  let generatedMessageId: string | null = null;
+  const headers: Record<string, string> = {};
+
+  if (input.replyTo) {
+    const parent = input.replyTo;
+    let parentMsgId: string | null = null;
+    let parentRefs: string[] = [];
+    generatedMessageId = generateMessageId(input.from.split("@")[1] ?? "localhost");
+    headers["Message-ID"] = generatedMessageId;
+
+    if (parent.kind === "inbound") {
+      const inbound = getInboundEmail(parent.id, d);
+      parentMsgId = inbound?.headers?.["message-id"] ?? inbound?.headers?.["Message-ID"] ?? inbound?.headers?.["Message-Id"] ?? null;
+      parentRefs = parseReferences(inbound?.headers?.["References"] ?? inbound?.headers?.["references"]);
+      threadId = inbound?.thread_id ?? parent.thread_id ?? uuid();
+      if (inbound && !inbound.thread_id) setInboundThreadId(inbound.id, threadId, d);
+    } else {
+      const sent = getEmail(parent.id, d);
+      const threading = sent ? getEmailThreading(sent.id, d) : null;
+      parentMsgId = threading?.message_id ?? (sent?.provider_message_id ? `<${sent.provider_message_id}>` : null);
+      parentRefs = threading?.references ?? [];
+      threadId = threading?.thread_id ?? parent.thread_id ?? uuid();
+    }
+
+    if (parentMsgId) {
+      const parentHeaders = buildThreadingHeaders({ message_id: parentMsgId, references: parentRefs });
+      headers["In-Reply-To"] = parentHeaders.inReplyToHeader;
+      headers["References"] = parentHeaders.referencesHeader;
+      inReplyTo = parentHeaders.inReplyTo;
+      references = parentHeaders.references;
+    }
+  }
+
+  const sendOpts = {
+    provider_id: providerId,
+    from: input.from,
+    to,
+    subject: input.subject,
+    text: input.body,
+    ...(html ? { html } : {}),
+    ...(Object.keys(headers).length > 0 ? { headers } : {}),
+  };
   const { sendWithFailover } = await import("../../lib/send.js");
   const { messageId, providerId: actual } = await sendWithFailover(providerId, sendOpts, d);
   const email = createEmail(actual, sendOpts, messageId, d);
+  if (generatedMessageId) {
+    setEmailThreading(email.id, { message_id: generatedMessageId, thread_id: threadId, in_reply_to: inReplyTo, references }, d);
+  }
   storeEmailContent(email.id, { text: input.body, ...(html ? { html } : {}) }, d);
   return { id: email.id, messageId };
-}
-
-// ── profiles (configured accounts) + their domains/addresses ───────────────────
-
-export interface ProfileInfo {
-  id: string;
-  name: string;
-  provider: string;   // the kind: gmail | ses | resend | cloudflare | sandbox
-  active: boolean;
-  domains: string[];
-  addresses: string[];
-  domain_details: ProfileDomainInfo[];
-  address_details: ProfileAddressInfo[];
-  send_keys: ProfileSendKeyInfo[];
-}
-
-export interface ProfileDomainInfo {
-  domain: string;
-  readiness: DomainReadiness;
-  provisioning_status: string;
-}
-
-export interface ProfileAddressInfo {
-  email: string;
-  verified: boolean;
-  status: string;
-  owner: string | null;
-  administrator: string | null;
-  receive_status: string;
-  daily_quota: number | null;
-  sent_today: number;
-  aliases: string[];
-  send_keys: ProfileSendKeyInfo[];
-}
-
-export interface ProfileSendKeyInfo {
-  id: string;
-  owner: string | null;
-  label: string | null;
-  prefix: string;
-  active: boolean;
 }
 
 export interface DomainSummary {
@@ -634,24 +961,6 @@ function allDomainMailCounts(db: Database, domains: string[]): Map<string, Domai
   return counts;
 }
 
-function sentTodayByAddresses(db: Database, addresses: Iterable<string>): Map<string, number> {
-  const normalized = [...new Set([...addresses].map((address) => address.trim().toLowerCase()).filter(Boolean))];
-  if (normalized.length === 0) return new Map();
-  const today = now().slice(0, 10);
-  const placeholders = normalized.map(() => "?").join(", ");
-  const rows = db.query(
-    `SELECT email, COUNT(*) AS c
-     FROM (
-       SELECT ${sqlEmailAddress("from_address")} AS email
-       FROM emails
-       WHERE sent_at LIKE ?
-     )
-     WHERE email IN (${placeholders})
-     GROUP BY email`,
-  ).all(`${today}%`, ...normalized) as Array<{ email: string; c: number }>;
-  return new Map(rows.map((row) => [row.email, row.c]));
-}
-
 export interface ListDomainSummaryOptions {
   limit?: number;
   offset?: number;
@@ -698,6 +1007,10 @@ export interface InboxAddressChoice {
   id: string;
   label: string;
   address?: string;
+  domain?: string;
+  providerId?: string;
+  provider?: string;
+  receiveStatus?: string;
   configured: boolean;
   observed: boolean;
 }
@@ -712,7 +1025,7 @@ export const ALL_ADDRESSES: InboxAddressChoice = {
 function upsertAddressChoice(
   map: Map<string, InboxAddressChoice>,
   address: string,
-  patch: Partial<Pick<InboxAddressChoice, "configured" | "observed">>,
+  patch: Partial<Pick<InboxAddressChoice, "configured" | "observed" | "providerId" | "provider" | "domain" | "receiveStatus">>,
 ): void {
   const existing = map.get(address) ?? { id: `a:${address}`, label: address, address, configured: false, observed: false };
   map.set(address, { ...existing, ...patch });
@@ -736,18 +1049,27 @@ export interface ListInboxAddressOptions {
   search?: string;
 }
 
-function listConfiguredInboxAddresses(db: Database, opts?: ListInboxAddressOptions): string[] {
-  if (!opts) return listActiveAddressEmails(undefined, db);
+interface ConfiguredInboxAddress {
+  id: string;
+  email: string;
+  provider_id: string;
+}
+
+function listConfiguredInboxAddresses(db: Database, opts?: ListInboxAddressOptions): ConfiguredInboxAddress[] {
+  if (!opts) {
+    return db
+      .query("SELECT id, email, provider_id FROM addresses WHERE COALESCE(status, 'active') = 'active' ORDER BY created_at DESC, email ASC")
+      .all() as ConfiguredInboxAddress[];
+  }
   const limit = positiveInt(opts.limit, 200);
   const q = opts.search?.trim().toLowerCase();
   const searchSql = q ? " AND LOWER(email) LIKE ?" : "";
   const params: Array<string | number> = [];
   if (q) params.push(`%${q}%`);
   params.push(limit);
-  const rows = db
-    .query(`SELECT email FROM addresses WHERE COALESCE(status, 'active') = 'active'${searchSql} ORDER BY created_at DESC, email ASC LIMIT ?`)
-    .all(...params) as Array<{ email: string }>;
-  return rows.map((row) => row.email);
+  return db
+    .query(`SELECT id, email, provider_id FROM addresses WHERE COALESCE(status, 'active') = 'active'${searchSql} ORDER BY created_at DESC, email ASC LIMIT ?`)
+    .all(...params) as ConfiguredInboxAddress[];
 }
 
 function listObservedInboxAddresses(db: Database, opts?: ListInboxAddressOptions): string[] {
@@ -815,20 +1137,29 @@ function listObservedInboxAddresses(db: Database, opts?: ListInboxAddressOptions
   return addresses;
 }
 
-/**
- * User-facing inbox choices. The normal TUI exposes only "All inboxes" or a
- * concrete email address; providers/domains stay in Profiles/diagnostics.
- */
+/** User-facing inbox choices: all inboxes plus configured or observed addresses. */
 export function listInboxAddresses(db?: Database): InboxAddressChoice[];
 export function listInboxAddresses(opts?: ListInboxAddressOptions, db?: Database): InboxAddressChoice[];
 export function listInboxAddresses(optsOrDb?: ListInboxAddressOptions | Database, maybeDb?: Database): InboxAddressChoice[] {
   const d = isDatabase(optsOrDb) ? optsOrDb : maybeDb || getDatabase();
   const opts = isDatabase(optsOrDb) ? undefined : optsOrDb;
   const byAddress = new Map<string, InboxAddressChoice>();
+  const configured = listConfiguredInboxAddresses(d, opts);
+  const providerNames = listProviderNamesByIds(configured.map((address) => address.provider_id), d);
+  const provisioningByAddress = listAddressProvisioningByIds(configured.map((address) => address.id), d);
 
-  for (const email of listConfiguredInboxAddresses(d, opts)) {
-    const address = extractEmail(email);
-    if (address) upsertAddressChoice(byAddress, address, { configured: true });
+  for (const item of configured) {
+    const address = extractEmail(item.email);
+    if (address) {
+      const provisioning = provisioningByAddress.get(item.id);
+      upsertAddressChoice(byAddress, address, {
+        configured: true,
+        domain: address.split("@")[1],
+        providerId: item.provider_id,
+        provider: providerNames.get(item.provider_id) ?? item.provider_id,
+        receiveStatus: provisioning?.provisioning_status ?? "none",
+      });
+    }
   }
 
   for (const address of listObservedInboxAddresses(d, opts)) {
@@ -849,8 +1180,8 @@ export function addressChoiceByAddress(address: string | null | undefined, db?: 
   if (!normalized) return ALL_ADDRESSES;
   const d = db || getDatabase();
   const configured = d
-    .query("SELECT email FROM addresses WHERE email = ? COLLATE NOCASE AND COALESCE(status, 'active') = 'active' LIMIT 1")
-    .get(normalized) as { email: string } | null;
+    .query("SELECT id, email, provider_id FROM addresses WHERE email = ? COLLATE NOCASE AND COALESCE(status, 'active') = 'active' LIMIT 1")
+    .get(normalized) as ConfiguredInboxAddress | null;
   const observed = d
     .query(
       `SELECT r.address AS email
@@ -862,10 +1193,16 @@ export function addressChoiceByAddress(address: string | null | undefined, db?: 
     )
     .get(normalized) as { email: string } | null;
   if (configured || observed) {
+    const provider = configured ? listProviderNamesByIds([configured.provider_id], d).get(configured.provider_id) ?? configured.provider_id : undefined;
+    const provisioning = configured ? listAddressProvisioningByIds([configured.id], d).get(configured.id) : undefined;
     return {
       id: `a:${normalized}`,
       label: configured?.email ?? observed?.email ?? normalized,
       address: normalized,
+      domain: normalized.split("@")[1],
+      providerId: configured?.provider_id,
+      provider,
+      receiveStatus: provisioning?.provisioning_status ?? (configured ? "none" : undefined),
       configured: !!configured,
       observed: !!observed,
     };
@@ -874,6 +1211,7 @@ export function addressChoiceByAddress(address: string | null | undefined, db?: 
     id: `a:${normalized}`,
     label: normalized,
     address: normalized,
+    domain: normalized.split("@")[1],
     configured: false,
     observed: true,
   };
@@ -908,13 +1246,13 @@ export interface TuiSettings {
 export function getSettings(): TuiSettings {
   const c = loadConfig();
   return {
-    autoPull: c["tui_autopull"] !== false,
-    gmailAutoPull: c["tui_gmail_autopull"] !== false,
+    autoPull: c["tui_autopull"] === true,
+    gmailAutoPull: c["tui_gmail_autopull"] === true,
     dimRead: c["tui_dim_read"] === true, // default false = high contrast
     defaultMailbox: normalizeMailbox(c["default_mailbox"]),
     defaultAddress: extractEmail(c["tui_default_address"]) ?? null,
     defaultFrom: extractEmail(c["tui_default_from"]) ?? null,
-    theme: normalizeThemeMode(c["tui_theme"]),
+    theme: c["tui_theme"] == null ? "dark" : normalizeThemeMode(c["tui_theme"]),
   };
 }
 
@@ -931,138 +1269,4 @@ export function setSetting<K extends keyof TuiSettings>(key: K, value: TuiSettin
   };
   c[map[key]] = value as never;
   saveConfig(c);
-}
-
-/**
- * A "profile" is a configured account (a row in `providers`); the "provider" is
- * the kind of service it uses (gmail/ses/resend/cloudflare). This returns each
- * profile with the domains and sender addresses registered under it.
- */
-export interface ListProfileOptions {
-  limit?: number;
-  offset?: number;
-}
-
-export function listProfiles(db?: Database): ProfileInfo[];
-export function listProfiles(opts?: ListProfileOptions, db?: Database): ProfileInfo[];
-export function listProfiles(optsOrDb?: ListProfileOptions | Database, maybeDb?: Database): ProfileInfo[] {
-  const d = isDatabase(optsOrDb) ? optsOrDb : maybeDb || getDatabase();
-  const opts = isDatabase(optsOrDb) ? undefined : optsOrDb;
-  const page = pageFromOptions(opts, 50);
-  const providers = listProviderSummaries(d, page);
-  const providerIds = providers.map((provider) => provider.id);
-  const domains = listDomainsByProviderIds(providerIds, d);
-  const addresses = listAddressesByProviderIds(providerIds, d);
-  const ownerIds = new Set<string>();
-  for (const address of addresses) {
-    if (address.owner_id) ownerIds.add(address.owner_id);
-    if (address.administrator_id) ownerIds.add(address.administrator_id);
-  }
-  const aliases = listAliasesByTargets(addresses.map((address) => address.email), d);
-  const keys = listSendKeySummariesByOwners(ownerIds, d);
-  const ownerNames = listOwnerNamesByIds(ownerIds, d);
-  const domainProvisioning = listDomainProvisioningByIds(domains.map((domain) => domain.id), d);
-  const addressProvisioning = listAddressProvisioningByIds(addresses.map((address) => address.id), d);
-  const sendsToday = sentTodayByAddresses(d, addresses.map((address) => address.email));
-  const domainsByProvider = new Map<string, typeof domains>();
-  const addressesByProvider = new Map<string, typeof addresses>();
-  const aliasesByTarget = new Map<string, string[]>();
-  const keysByOwner = new Map<string, ProfileSendKeyInfo[]>();
-
-  for (const domain of domains) {
-    const list = domainsByProvider.get(domain.provider_id) ?? [];
-    list.push(domain);
-    domainsByProvider.set(domain.provider_id, list);
-  }
-
-  for (const address of addresses) {
-    const list = addressesByProvider.get(address.provider_id) ?? [];
-    list.push(address);
-    addressesByProvider.set(address.provider_id, list);
-  }
-
-  for (const alias of aliases) {
-    const target = alias.target_address.toLowerCase();
-    const list = aliasesByTarget.get(target) ?? [];
-    list.push(alias.local_part === "*" ? `*@${alias.domain}` : `${alias.local_part}@${alias.domain}`);
-    aliasesByTarget.set(target, list);
-  }
-
-  for (const key of keys) {
-    const list = keysByOwner.get(key.owner_id) ?? [];
-    list.push({
-      id: key.id,
-      owner: ownerNames.get(key.owner_id) ?? null,
-      label: key.label,
-      prefix: key.prefix,
-      active: !key.revoked_at,
-    });
-    keysByOwner.set(key.owner_id, list);
-  }
-
-  return providers.map((p) => {
-    const rawDomains = domainsByProvider.get(p.id) ?? [];
-    const providerAddresses = addressesByProvider.get(p.id) ?? [];
-    const readyAddressesByDomain = new Map<string, number>();
-    for (const address of providerAddresses) {
-      const provisioning = addressProvisioning.get(address.id);
-      if (provisioning?.domain_id && provisioning.provisioning_status === "ready") {
-        readyAddressesByDomain.set(provisioning.domain_id, (readyAddressesByDomain.get(provisioning.domain_id) ?? 0) + 1);
-      }
-    }
-    const domain_details = rawDomains.map((domain) => {
-      const ready_addresses = readyAddressesByDomain.get(domain.id) ?? 0;
-      const provisioning = domainProvisioning.get(domain.id) ?? null;
-      return {
-        domain: domain.domain,
-        readiness: assessDomainReadiness(domain, provisioning, { ready_addresses }),
-        provisioning_status: provisioning?.provisioning_status ?? "none",
-      };
-    });
-    const profileKeyIds = new Set<string>();
-    const address_details = providerAddresses
-      .sort((a, b) => a.email.localeCompare(b.email))
-      .map((address) => {
-        const receive = addressProvisioning.get(address.id);
-        const ownerIds = [address.owner_id, address.administrator_id].filter((id): id is string => !!id);
-        const addressKeyMap = new Map<string, ProfileSendKeyInfo>();
-        for (const ownerId of ownerIds) {
-          for (const key of keysByOwner.get(ownerId) ?? []) addressKeyMap.set(key.id, key);
-        }
-        const addressKeys = [...addressKeyMap.values()];
-        for (const key of addressKeys) profileKeyIds.add(key.id);
-        return {
-          email: address.email,
-          verified: !!address.verified,
-          status: address.status ?? "active",
-          owner: address.owner_id ? ownerNames.get(address.owner_id) ?? null : null,
-          administrator: address.administrator_id ? ownerNames.get(address.administrator_id) ?? null : null,
-          receive_status: receive?.provisioning_status ?? "none",
-          daily_quota: address.daily_quota ?? null,
-          sent_today: sendsToday.get(address.email.toLowerCase()) ?? 0,
-          aliases: aliasesByTarget.get(address.email.toLowerCase()) ?? [],
-          send_keys: addressKeys,
-        };
-      });
-    const send_keys = keys
-      .filter((key) => profileKeyIds.has(key.id))
-      .map((key) => ({
-        id: key.id,
-        owner: ownerNames.get(key.owner_id) ?? null,
-        label: key.label,
-        prefix: key.prefix,
-        active: !key.revoked_at,
-      }));
-    return {
-      id: p.id,
-      name: p.name,
-      provider: p.type,
-      active: !!p.active,
-      domains: domain_details.map((domain) => domain.domain),
-      addresses: address_details.map((address) => address.email),
-      domain_details,
-      address_details,
-      send_keys,
-    };
-  });
 }

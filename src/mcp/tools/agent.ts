@@ -63,8 +63,8 @@ export function registerAgentTools(server: McpServer): void {
         if (matches.length === 0) {
           blockers.push("No exact local address exists.");
           next_commands.push(provider_id
-            ? `emails address provision ${normalized} --provider ${provider_id} --owner <owner>`
-            : `emails address provision ${normalized} --provider <provider> --owner <owner>`);
+            ? `mailery address provision ${normalized} --provider ${provider_id} --owner <owner>`
+            : `mailery address provision ${normalized} --provider <provider> --owner <owner>`);
         }
 
         if (owner && matches.length === 1) {
@@ -72,7 +72,7 @@ export function registerAgentTools(server: McpServer): void {
         } else if (owner && matches.length > 1) {
           blockers.push("Address exists on multiple providers; assign ownership by address ID.");
         } else if (matches.length > 0 && !matches.some((address) => address.owner_id)) {
-          next_commands.push(`emails address set-owner ${matches[0]!.id} --owner <owner>`);
+          next_commands.push(`mailery address set-owner ${matches[0]!.id} --owner <owner>`);
         }
 
         const addresses = matches.map((address) => ({
@@ -89,8 +89,8 @@ export function registerAgentTools(server: McpServer): void {
           next_commands,
           diagnosis,
           cli_equivalent: provider_id
-            ? `emails address provision ${normalized} --provider ${provider_id}${owner ? ` --owner ${owner}` : ""} --json`
-            : `emails doctor delivery ${normalized} --json`,
+            ? `mailery address provision ${normalized} --provider ${provider_id}${owner ? ` --owner ${owner}` : ""} --json`
+            : `mailery doctor delivery ${normalized} --json`,
         });
       } catch (e) {
         return { content: [{ type: "text" as const, text: `Error: ${formatError(e)}` }], isError: true };
@@ -105,7 +105,7 @@ export function registerAgentTools(server: McpServer): void {
     async () => {
       try {
         const { getEmailSystemStatus } = await import("../../lib/agent-context.js");
-        return json({ ...getEmailSystemStatus(), cli_equivalent: "emails status --json" });
+        return json({ ...getEmailSystemStatus(), cli_equivalent: "mailery status --json" });
       } catch (e) {
         return { content: [{ type: "text" as const, text: `Error: ${formatError(e)}` }], isError: true };
       }
@@ -114,12 +114,12 @@ export function registerAgentTools(server: McpServer): void {
 
   server.tool(
     "get_agent_context",
-    "Get a redacted orientation snapshot and recommended workflows for agents using this emails app.",
+    "Get a redacted orientation snapshot and recommended workflows for agents using this mailery app.",
     {},
     async () => {
       try {
         const { getAgentContext } = await import("../../lib/agent-context.js");
-        return json({ ...getAgentContext(), cli_equivalent: "emails agent context --json" });
+        return json({ ...getAgentContext(), cli_equivalent: "mailery agent context --json" });
       } catch (e) {
         return { content: [{ type: "text" as const, text: `Error: ${formatError(e)}` }], isError: true };
       }
@@ -135,7 +135,7 @@ export function registerAgentTools(server: McpServer): void {
     async ({ goal }) => {
       try {
         const { getNextEmailAction } = await import("../../lib/agent-context.js");
-        return json({ ...getNextEmailAction(goal), cli_equivalent: "emails status --json" });
+        return json({ ...getNextEmailAction(goal), cli_equivalent: "mailery status --json" });
       } catch (e) {
         return { content: [{ type: "text" as const, text: `Error: ${formatError(e)}` }], isError: true };
       }
@@ -150,8 +150,8 @@ export function registerAgentTools(server: McpServer): void {
     },
     async ({ address }) => {
       try {
-        const { diagnoseInboundDelivery } = await import("../../lib/delivery-doctor.js");
-        return json(diagnoseInboundDelivery(address));
+        const { diagnoseInboundDeliveryLive } = await import("../../lib/delivery-doctor.js");
+        return json(await diagnoseInboundDeliveryLive(address));
       } catch (e) {
         return { content: [{ type: "text" as const, text: `Error: ${formatError(e)}` }], isError: true };
       }

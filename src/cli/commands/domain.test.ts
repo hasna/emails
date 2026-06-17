@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { Command } from "commander";
 import { closeDatabase, getDatabase, resetDatabase } from "../../db/database.js";
+import { createAddress, getAddress } from "../../db/addresses.js";
 import { createDomain, listDomains, updateDnsStatus } from "../../db/domains.js";
 import { createProvider } from "../../db/providers.js";
 import { setDomainProvisioning } from "../../db/provisioning.js";
@@ -173,6 +174,34 @@ describe("domain list command", () => {
       { domain: "domain-3.example.com" },
       { domain: "domain-2.example.com" },
     ]);
+  });
+});
+
+describe("domain move-provider command", () => {
+  it("moves a domain and matching address rows to another provider", async () => {
+    const from = createProvider({ name: "ses-sandbox", type: "ses", region: "us-east-1" });
+    const to = createProvider({ name: "ses-production", type: "ses", region: "us-east-1" });
+    const domain = createDomain(from.id, "example.com");
+    const address = createAddress({ provider_id: from.id, email: "hello@example.com" });
+    getDatabase().run("UPDATE addresses SET domain_id = ?, provisioning_status = 'ready' WHERE id = ?", [domain.id, address.id]);
+
+    const result = await runDomainCommand([
+      "domain", "move-provider", "example.com",
+      "--from-provider", from.id,
+      "--to-provider", to.id,
+      "--yes",
+    ]);
+
+    expect(result.data).toMatchObject({
+      domain: { provider_id: to.id, domain: "example.com" },
+      moved_addresses: 1,
+    });
+    expect(listDomains(to.id, getDatabase())).toMatchObject([{ id: domain.id, domain: "example.com" }]);
+    expect(getAddress(address.id, getDatabase())).toMatchObject({
+      provider_id: to.id,
+      domain_id: domain.id,
+      email: "hello@example.com",
+    });
   });
 });
 

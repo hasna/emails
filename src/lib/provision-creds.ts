@@ -1,8 +1,8 @@
 /**
- * Provisioning credential status (open-emails) — reports whether usable
+ * Provisioning credential status (mailery) — reports whether usable
  * credentials are present for each provisioning provider, across all supported
  * auth modes. Pure (env injected); surfaced by
- * `emails doctor`.
+ * `mailery doctor`.
  */
 
 import { resolveCloudflareAuth, describeCloudflareAuth } from "./cloudflare-auth.js";
@@ -13,8 +13,16 @@ export interface ProvisionCredStatus {
   detail: string;
 }
 
+export interface ProvisionCredConfig {
+  cloudflare_api_token?: string;
+  cloudflare_api_key?: string;
+  cloudflare_email?: string;
+  cloudflare_account_id?: string;
+}
+
 export function checkProvisionCredentials(
   env: Record<string, string | undefined> = process.env as Record<string, string | undefined>,
+  config: ProvisionCredConfig = {},
 ): ProvisionCredStatus[] {
   const out: ProvisionCredStatus[] = [];
 
@@ -27,11 +35,17 @@ export function checkProvisionCredentials(
   });
 
   // Cloudflare (DNS + Email Routing).
-  const cf = resolveCloudflareAuth({ env });
+  const cf = resolveCloudflareAuth({
+    env,
+    configToken: config.cloudflare_api_token,
+    configApiKey: config.cloudflare_api_key,
+    configEmail: config.cloudflare_email,
+  });
+  const cfAccountId = env["CLOUDFLARE_ACCOUNT_ID"] ?? config.cloudflare_account_id;
   out.push({
     provider: "cloudflare",
     configured: !!cf,
-    detail: cf ? describeCloudflareAuth(cf) + (env["CLOUDFLARE_ACCOUNT_ID"] ? " (+account)" : " (no account id — zone create needs it)") : "Set CLOUDFLARE_API_TOKEN or CLOUDFLARE_API_KEY+CLOUDFLARE_EMAIL",
+    detail: cf ? describeCloudflareAuth(cf) + (cfAccountId ? " (+account)" : " (no account id — zone create needs it)") : "Set CLOUDFLARE_API_TOKEN or CLOUDFLARE_API_KEY+CLOUDFLARE_EMAIL",
   });
 
   // Resend (optional secondary send + inbound webhook).

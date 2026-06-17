@@ -17,7 +17,7 @@ The implemented UI covers:
 - Address picker
 - Reader
 - Compose
-- Profiles
+- Domains
 - Settings
 
 ## Current OpenTUI Facts
@@ -44,7 +44,7 @@ References:
 - `src/cli/tui/App.tsx` owns OpenTUI keyboard handling, theme detection,
   terminal background control, and renderable layout.
 - `src/cli/tui/data.ts` remains the DB-backed data layer for mailbox lists,
-  counts, address choices, profiles, settings, compose send, and mutations.
+  counts, enriched inbox/address choices, domains, settings, compose send, and mutations.
 - `src/cli/tui/theme.ts` now exposes hex palettes for OpenTUI `fg`/`bg` colors,
   including dashboard sidebar and metric surfaces.
 - `src/cli/tui/App.test.ts` uses `@opentui/react/test-utils` and OpenTUI mock
@@ -64,11 +64,16 @@ References:
 - Narrow terminals collapse to a single workspace with a compact top nav.
 - Inbox is a unified all-address view by default.
 - Wide Inbox renders a message list and preview reader side by side.
-- Press `a` in Inbox to choose an exact email address.
-- The Inbox surface does not show provider/domain/source groupings.
+- Use the Inboxes dialog to choose all inboxes or an exact email address.
+- Sidebar labels filter the mailbox without mutating message labels.
+- Gmail-style Categories are listed separately as Primary, Social, Promotions,
+  Updates, and Forums.
+- Configured inboxes include provider/account context in the picker; domain
+  diagnostics live in Domains.
 - Compose has editable From, To, Subject, and Body fields.
-- Settings can cycle auto-pull, Gmail auto-pull, dim-read, default folder,
-  default inbox address, default From, and theme mode.
+- Settings opens as a compact dialog with Sync, Defaults, and Display submenus
+  for auto-pull, Gmail auto-pull, dim-read, default folder, default inbox,
+  default From, and theme mode.
 
 ## Verification
 

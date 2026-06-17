@@ -60,7 +60,7 @@ export function registerAddressCommands(program: Command, output: (data: unknown
 
   program
     .command("addresses")
-    .description("List sender email addresses (alias: emails address list)")
+    .description("List sender email addresses (alias: mailery address list)")
     .option("--provider <id>", "Filter by provider ID")
     .option("--limit <n>", "Maximum addresses to show", "50")
     .option("--offset <n>", "Number of addresses to skip", "0")
@@ -283,7 +283,7 @@ export function registerAddressCommands(program: Command, output: (data: unknown
             would_assign_owner: !!opts.owner,
             current_provisioning: existing ? getAddressProvisioning(existing.id, db) : null,
             planned_provisioning: plannedProvisioning,
-            cli_equivalent: `emails address provision ${email} --provider ${opts.provider}${opts.owner ? ` --owner ${opts.owner}` : ""}${opts.wait ? " --wait" : ""} --json`,
+            cli_equivalent: `mailery address provision ${email} --provider ${opts.provider}${opts.owner ? ` --owner ${opts.owner}` : ""}${opts.wait ? " --wait" : ""} --json`,
           }, existing
             ? chalk.dim(`Would update provisioning for existing address ${email} (${existing.id.slice(0, 8)}).`)
             : chalk.dim(`Would create ${email} and request ${opts.receive} receive provisioning.`));
@@ -334,7 +334,7 @@ export function registerAddressCommands(program: Command, output: (data: unknown
         ownership = ownership ?? getAddressOwnershipDetail(addr.id, db);
         const readyText = provisioning?.provisioning_status === "ready"
           ? chalk.green(`✓ address ${email} ready to receive (receive=${opts.receive})`)
-          : chalk.green(`✓ address ${email} requested (receive=${opts.receive})`) + chalk.dim(`\n  Finish now: emails address provision ${email} --provider ${opts.provider} --wait`);
+          : chalk.green(`✓ address ${email} requested (receive=${opts.receive})`) + chalk.dim(`\n  Finish now: mailery address provision ${email} --provider ${opts.provider} --wait`);
         output({ id: addr.id, email, receive: opts.receive, created: !existing, provisioning, ownership }, readyText);
       } catch (e) {
         handleError(e);

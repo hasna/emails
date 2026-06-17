@@ -18,6 +18,13 @@ import { getAdapter } from "../providers/index.js";
 import { getCloudflareToken, getCloudflareAuth } from "./config.js";
 import { resolveCloudflareAuth } from "./cloudflare-auth.js";
 import { DirectCloudflareClient } from "./cloudflare-dns-rest.js";
+import { dnsRecordMatches } from "./dns-check.js";
+import {
+  classifyMxRecords,
+  formatMxSwitchWarning,
+  normalizeMxExchange,
+  requiresMxSwitchConfirmation,
+} from "./mx-ownership.js";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -138,13 +145,12 @@ export async function upsertEmailDnsRecords(
     // TXT values from SES come without quotes; Cloudflare stores them with quotes
     const normalizedContent = record.value.replace(/^"|"$/g, "");
 
-    // Check for existing record with same type + name
-    const alreadyExists = existing.some(
-      (e: CloudflareDnsRecord) =>
-        e.type === record.type &&
-        e.name === record.name &&
-        e.content.replace(/^"|"$/g, "") === normalizedContent,
-    );
+    // Check for an existing compatible record with same type + name. SPF and
+    // DMARC are policy records, so compatibility is broader than byte equality:
+    // an SPF record with extra includes or a stricter DMARC policy is already OK.
+    const alreadyExists = existing
+      .filter((e: CloudflareDnsRecord) => e.type === record.type && e.name === record.name)
+      .some((e: CloudflareDnsRecord) => dnsRecordMatches(record, [cloudflareRecordValue(e)]));
 
     if (alreadyExists) {
       results.push({ type: record.type, name: record.name, content: normalizedContent, status: "skipped" });
@@ -183,12 +189,23 @@ export async function addMxRecord(
   domain: string,
   mailserver: string,
   priority = 10,
+  opts: { forceMxSwitch?: boolean } = {},
 ): Promise<DnsSetupRecord> {
   // Check if MX already exists
   const existing = await cf.listDnsRecords(zoneId, { type: "MX", name: domain });
-  const alreadyExists = existing.some((e: { content: string }) => e.content === mailserver);
+  const alreadyExists = existing.some((e: { content: string }) => normalizeMxExchange(e.content) === normalizeMxExchange(mailserver));
   if (alreadyExists) {
     return { type: "MX", name: domain, content: mailserver, status: "skipped" };
+  }
+  const assessment = classifyMxRecords(existing.map((record) => ({ content: record.content, priority: record.priority })), domain);
+  if (requiresMxSwitchConfirmation(assessment) && !opts.forceMxSwitch) {
+    return {
+      type: "MX",
+      name: domain,
+      content: mailserver,
+      status: "failed",
+      error: formatMxSwitchWarning(assessment),
+    };
   }
 
   try {
@@ -224,15 +241,9 @@ export async function setupEmailDns(opts: {
   apiToken?: string;
   addMx?: boolean;
   mxServer?: string;
+  forceMxSwitch?: boolean;
 }): Promise<EmailDnsSetupResult> {
   const cf = getCloudflare(opts.apiToken);
-
-  // Get required DNS records from the email provider
-  const adapter = getAdapter(opts.provider);
-  if (opts.provider.type === "ses" && adapter.reinitiateDomainVerification) {
-    await adapter.reinitiateDomainVerification(opts.domain);
-  }
-  const dnsRecords = await adapter.getDnsRecords(opts.domain);
 
   // Find Cloudflare zone
   const zone = await findZone(cf, opts.domain);
@@ -243,6 +254,25 @@ export async function setupEmailDns(opts: {
     );
   }
 
+  if (opts.addMx) {
+    const region = opts.provider.region ?? "us-east-1";
+    const mxServer = opts.mxServer ?? `inbound-smtp.${region}.amazonaws.com`;
+    const existingMx = await cf.listDnsRecords(zone.id, { type: "MX", name: opts.domain });
+    const alreadyExists = existingMx.some((record) => normalizeMxExchange(record.content) === normalizeMxExchange(mxServer));
+    const assessment = classifyMxRecords(existingMx.map((record) => ({ content: record.content, priority: record.priority })), opts.domain);
+    if (!alreadyExists && requiresMxSwitchConfirmation(assessment) && !opts.forceMxSwitch) {
+      throw new Error(formatMxSwitchWarning(assessment));
+    }
+  }
+
+  // Get required DNS records from the email provider after MX safety checks so
+  // a blocked inbound change cannot mutate provider-side verification state.
+  const adapter = getAdapter(opts.provider);
+  if (opts.provider.type === "ses" && adapter.reinitiateDomainVerification) {
+    await adapter.reinitiateDomainVerification(opts.domain);
+  }
+  const dnsRecords = await adapter.getDnsRecords(opts.domain);
+
   // Upsert email DNS records
   const records = await upsertEmailDnsRecords(cf, zone.id, dnsRecords);
 
@@ -250,7 +280,7 @@ export async function setupEmailDns(opts: {
   if (opts.addMx) {
     const region = opts.provider.region ?? "us-east-1";
     const mxServer = opts.mxServer ?? `inbound-smtp.${region}.amazonaws.com`;
-    const mxResult = await addMxRecord(cf, zone.id, opts.domain, mxServer);
+    const mxResult = await addMxRecord(cf, zone.id, opts.domain, mxServer, 10, { forceMxSwitch: opts.forceMxSwitch });
     records.push(mxResult);
   }
 
@@ -263,4 +293,9 @@ export async function setupEmailDns(opts: {
     skipped: records.filter((r) => r.status === "skipped").length,
     failed: records.filter((r) => r.status === "failed").length,
   };
+}
+
+function cloudflareRecordValue(record: CloudflareDnsRecord): string {
+  if (record.type === "MX") return `${record.priority ?? "-"} ${record.content}`;
+  return record.content.replace(/^"|"$/g, "");
 }

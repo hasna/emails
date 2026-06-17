@@ -124,6 +124,14 @@ function getExistingMessageIds(db: Database, messageIds: string[]): Set<string> 
   return existing;
 }
 
+function tagExistingMessageProvider(db: Database, messageId: string, providerId: string | null): void {
+  if (!providerId) return;
+  db.run(
+    "UPDATE inbound_emails SET provider_id = ? WHERE message_id = ? AND provider_id IS NULL",
+    [providerId, messageId],
+  );
+}
+
 async function processS3Object(
   db: Database,
   s3: S3Client,
@@ -293,6 +301,7 @@ export async function syncS3Inbox(opts: S3SyncOptions): Promise<S3SyncResult> {
     const existingMessageIds = getExistingMessageIds(db, page.objects.map((object) => object.key));
     for (const obj of page.objects) {
       if (existingMessageIds.has(obj.key)) {
+        tagExistingMessageProvider(db, obj.key, providerId);
         result.skipped++;
         result.last_key = obj.key;
         continue;

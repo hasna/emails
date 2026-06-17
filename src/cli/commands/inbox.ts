@@ -14,6 +14,7 @@ import { getDatabase, resolvePartialIdOrThrow } from "../../db/database.js";
 import { confirmDestructiveAction, handleError } from "../utils.js";
 import { findVerificationCode, listVerificationCodeCandidates } from "../../lib/verification-code.js";
 import { enrichAddresses } from "../../lib/address-ownership.js";
+import { extractEmailLinks, formatEmailLinks, type ExtractedEmailLink } from "../../lib/email-links.js";
 import { resolveAlias } from "../../db/aliases.js";
 import { findAddressesByEmail } from "../../db/addresses.js";
 import { findDomainsByName } from "../../db/domains.js";
@@ -59,8 +60,45 @@ interface CodeOptions {
   since?: string;
 }
 
+interface InboundLinksResult {
+  email_id: string;
+  from: string;
+  subject: string;
+  received_at: string;
+  links: ExtractedEmailLink[];
+}
+
 export function registerInboxCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   const inboxCmd = program.command("inbox").description("Sync and browse inbound emails (Gmail, SMTP, S3)");
+
+  function getInboundLinks(emailId: string, opts?: { all?: boolean }): InboundLinksResult {
+    const db = getDatabase();
+    const fullId = resolveInboundEmailId(emailId);
+    const email = getInboundEmail(fullId, db);
+    if (!email) handleError(new Error(`Email not found: ${emailId}`));
+    return {
+      email_id: email.id,
+      from: email.from_address,
+      subject: email.subject,
+      received_at: email.received_at,
+      links: extractEmailLinks({
+        text: email.text_body,
+        html: email.html_body,
+        includeNonWeb: opts?.all === true,
+      }),
+    };
+  }
+
+  function formatInboundLinks(result: InboundLinksResult): string {
+    return [
+      chalk.bold(`Links for ${result.email_id.slice(0, 8)}`),
+      `From:    ${result.from}`,
+      `Subject: ${result.subject || "(no subject)"}`,
+      `Date:    ${result.received_at}`,
+      "",
+      formatEmailLinks(result.links),
+    ].join("\n");
+  }
 
   async function runCodeCommand(address: string, opts: CodeOptions): Promise<void> {
     const normalized = address.trim().toLowerCase();
@@ -150,7 +188,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
 
   program
     .command("code <address>")
-    .description("Find the latest verification code for an inbound address (alias: emails inbox code)")
+    .description("Find the latest verification code for an inbound address (alias: mailery inbox code)")
     .option("--from <text>", "Only consider messages whose From contains this text")
     .option("--subject <text>", "Only consider messages whose subject contains this text")
     .option("--limit <n>", "Messages to inspect per mailbox state", "50")
@@ -350,7 +388,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         // Resolve provider
         const providerId = resolveGmailProvider(opts.provider);
         if (!providerId) {
-          console.error(chalk.red("No Gmail provider found. Add one with: emails provider add-gmail"));
+          console.error(chalk.red("No Gmail provider found. Add one with: mailery provider add-gmail"));
           process.exit(1);
         }
 
@@ -442,7 +480,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         }, db);
 
         if (emails.length === 0) {
-          output([], chalk.dim("No emails found locally. Try `emails inbox sync-status`, `emails refresh`, or `emails inbox wait <address>`."));
+          output([], chalk.dim("No emails found locally. Try `mailery inbox sync-status`, `mailery refresh`, or `mailery inbox wait <address>`."));
           return;
         }
 
@@ -662,7 +700,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
       try {
         const providerId = resolveGmailProvider(opts.provider);
         if (!providerId) {
-          console.error(chalk.red("No Gmail provider found. Add one with: emails provider add-gmail"));
+          console.error(chalk.red("No Gmail provider found. Add one with: mailery provider add-gmail"));
           process.exit(1);
         }
         const { listGmailLabels } = await import("../../lib/gmail-sync.js");
@@ -698,6 +736,32 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         // Opening an email marks it read (Gmail parity), unless --keep-unread.
         if (!opts.keepUnread && !email.is_read) email = setInboundRead(email.id, true, db);
         output(email, formatEmailDetail(email));
+      } catch (e) {
+        handleError(e);
+      }
+    });
+
+  inboxCmd
+    .command("links <email-id>")
+    .description("Extract links from a synced inbound email")
+    .option("--all", "Include non-web links such as mailto: and tel:")
+    .action((emailId: string, opts: { all?: boolean }) => {
+      try {
+        const result = getInboundLinks(emailId, opts);
+        output(result, formatInboundLinks(result));
+      } catch (e) {
+        handleError(e);
+      }
+    });
+
+  program
+    .command("links <email-id>")
+    .description("Extract links from a synced inbound email (alias: mailery inbox links)")
+    .option("--all", "Include non-web links such as mailto: and tel:")
+    .action((emailId: string, opts: { all?: boolean }) => {
+      try {
+        const result = getInboundLinks(emailId, opts);
+        output(result, formatInboundLinks(result));
       } catch (e) {
         handleError(e);
       }
@@ -901,7 +965,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         const bucket = opts.bucket ?? inbound.bucket;
         const region = opts.region ?? inbound.region;
         const prefix = opts.prefix ?? inbound.prefix;
-        if (!bucket) { handleError(new Error("No S3 bucket: pass --bucket or set 'emails config set inbound_s3_bucket <name>'")); return; }
+        if (!bucket) { handleError(new Error("No S3 bucket: pass --bucket or set 'mailery config set inbound_s3_bucket <name>'")); return; }
         const { syncS3Inbox } = await import("../../lib/s3-sync.js");
         console.log(chalk.dim(`Syncing emails from s3://${bucket}/${prefix ?? ""}...`));
         const result = await syncS3Inbox({
@@ -957,7 +1021,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         lines.push(`  SNS topic:  ${chalk.cyan(result.topic_arn)}`);
         lines.push(`  SQS queue:  ${chalk.cyan(result.queue_url)}`);
         lines.push(`  SES rule:   ${result.rule_updated ? chalk.green("updated (TopicArn attached)") : chalk.yellow("not updated — attach TopicArn manually")}`);
-        lines.push(chalk.dim("\n  Now run:  emails inbox watch"));
+        lines.push(chalk.dim("\n  Now run:  mailery inbox watch"));
         output(result, lines.join("\n"));
       } catch (e) { handleError(e); }
     });
@@ -992,7 +1056,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         lines.push(`  Last mail:   ${data.last_received_at ? chalk.green(String(data.last_received_at)) : chalk.dim("never")}`);
         lines.push(`  Last poll:   ${data.last_poll_at ? chalk.green(String(data.last_poll_at)) : chalk.dim("never")}`);
         if (data.last_error) lines.push(`  Last error:  ${chalk.red(String(data.last_error))}`);
-        lines.push(chalk.dim("\n  Start watcher: emails inbox watch --all-buckets"));
+        lines.push(chalk.dim("\n  Start watcher: mailery inbox watch --all-buckets"));
         output(data, lines.join("\n"));
       } catch (e) { handleError(e); }
     });
@@ -1019,7 +1083,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         const bucket = opts.bucket ?? inbound.bucket;
         const region = opts.region ?? inbound.region;
         const prefix = opts.prefix ?? inbound.prefix;
-        if (!queueUrl) { handleError(new Error("No SQS queue: run 'emails inbox setup-realtime <domain>' first or pass --queue-url")); return; }
+        if (!queueUrl) { handleError(new Error("No SQS queue: run 'mailery inbox setup-realtime <domain>' first or pass --queue-url")); return; }
         if (!bucket) { handleError(new Error("No S3 bucket: pass --bucket or set inbound_s3_bucket")); return; }
 
         const { makeSqsAdapter } = await import("../../lib/inbound-realtime-aws.js");
@@ -1264,8 +1328,8 @@ function formatInboxSyncStatus(status: EmailSystemStatus): string {
   for (const provider of status.providers.gmail) {
     lines.push(`    - ${provider.name} ${chalk.dim(provider.id.slice(0, 8))}: ${provider.synced_count} synced, ${provider.unread_count} unread, last ${provider.last_synced_at ? chalk.green(provider.last_synced_at) : chalk.dim("never")}`);
   }
-  lines.push(chalk.dim("\n  Pull now: emails refresh"));
-  lines.push(chalk.dim("  Watch realtime: emails inbox watch --all-buckets"));
+  lines.push(chalk.dim("\n  Pull now: mailery refresh"));
+  lines.push(chalk.dim("  Watch realtime: mailery inbox watch --all-buckets"));
   lines.push("");
   return lines.join("\n");
 }
@@ -1380,7 +1444,7 @@ function formatEmailDetail(
     lines.push(chalk.yellow(`  📎 Attachments (${atts.length}):`));
     for (const a of atts) {
       const loc = byName.get(a.filename);
-      lines.push(`     ${a.filename.padEnd(44)} ${chalk.dim(`${fmtBytes(a.size)} · ${a.content_type}`)}${loc ? chalk.green("  ✓saved") : chalk.dim("  (run: emails inbox sync to download)")}`);
+      lines.push(`     ${a.filename.padEnd(44)} ${chalk.dim(`${fmtBytes(a.size)} · ${a.content_type}`)}${loc ? chalk.green("  ✓saved") : chalk.dim("  (run: mailery inbox sync to download)")}`);
     }
   }
   lines.push("", email.text_body ?? chalk.dim("(no body)"), "");

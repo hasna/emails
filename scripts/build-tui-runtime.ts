@@ -1,6 +1,7 @@
 import { createRequire } from "node:module";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { createSolidTransformPlugin } from "@opentui/solid/bun-plugin";
 
 const require = createRequire(import.meta.url);
 
@@ -64,29 +65,18 @@ const externalPackages = [
   ...nativePackages.filter((name) => !bundledNative.has(name)),
 ];
 
-const args = [
-  "build",
-  "src/cli/tui/runtime.tsx",
-  "--outdir",
-  "dist/cli",
-  "--target",
-  "bun",
-  "--entry-naming",
-  "ui-runtime-bundle.[ext]",
-];
-
-for (const name of externalPackages) {
-  args.push("--external", name);
-}
-
-const result = Bun.spawnSync({
-  cmd: ["bun", ...args],
-  stdout: "inherit",
-  stderr: "inherit",
+const result = await Bun.build({
+  entrypoints: ["src/cli/tui/runtime.tsx"],
+  outdir: "dist/cli",
+  target: "bun",
+  naming: "ui-runtime-bundle.[ext]",
+  external: externalPackages,
+  plugins: [createSolidTransformPlugin()],
 });
 
-if (result.exitCode !== 0) {
-  process.exitCode = result.exitCode;
+if (!result.success) {
+  for (const log of result.logs) console.error(log);
+  process.exitCode = 1;
 } else {
   patchBundledNativeAssetPath();
 }

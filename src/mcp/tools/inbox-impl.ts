@@ -11,6 +11,7 @@ import { getDatabase } from "../../db/database.js";
 import { cappedLimit, safeOffset } from "../../db/pagination.js";
 import { formatError, resolveId } from "../helpers.js";
 import { findVerificationCode, listVerificationCodeCandidates } from "../../lib/verification-code.js";
+import { extractEmailLinks } from "../../lib/email-links.js";
 
 const DEFAULT_INBOUND_LIST_LIMIT = 50;
 const DEFAULT_INBOUND_SEARCH_LIMIT = 20;
@@ -52,7 +53,7 @@ export function registerInboxTools(server: McpServer): void {
   "List received inbound emails",
   {
     provider_id: z.string().optional().describe("Filter by provider ID"),
-    since: z.string().optional().describe("ISO 8601 date — only return emails received after this time"),
+    since: z.string().optional().describe("ISO 8601 date - only return emails received after this time"),
     limit: z.number().int().positive().max(MAX_MCP_INBOX_LIMIT).optional().describe("Max results (default 50, max 1000)"),
     offset: z.number().int().nonnegative().optional().describe("Pagination offset (default 0)"),
     unread: z.boolean().optional().describe("Only unread mail"),
@@ -112,7 +113,7 @@ export function registerInboxTools(server: McpServer): void {
       return {
         content: [{ type: "text", text: JSON.stringify({
           email,
-          cli_equivalent: `emails inbox latest ${normalized} --json`,
+          cli_equivalent: `mailery inbox latest ${normalized} --json`,
         }, null, 2) }],
       };
     } catch (e) {
@@ -146,7 +147,7 @@ export function registerInboxTools(server: McpServer): void {
           return {
             content: [{ type: "text", text: JSON.stringify({
               email,
-              cli_equivalent: `emails inbox wait ${normalized} --timeout ${timeout_seconds ?? 120} --json`,
+              cli_equivalent: `mailery inbox wait ${normalized} --timeout ${timeout_seconds ?? 120} --json`,
             }, null, 2) }],
           };
         }
@@ -157,7 +158,7 @@ export function registerInboxTools(server: McpServer): void {
             return {
               content: [{ type: "text", text: JSON.stringify({
                 email,
-                cli_equivalent: `emails inbox wait ${normalized} --timeout ${timeout_seconds ?? 120} --json`,
+                cli_equivalent: `mailery inbox wait ${normalized} --timeout ${timeout_seconds ?? 120} --json`,
               }, null, 2) }],
             };
           }
@@ -167,7 +168,7 @@ export function registerInboxTools(server: McpServer): void {
             content: [{ type: "text", text: JSON.stringify({
               email: null,
               address: normalized,
-              cli_equivalent: `emails inbox wait ${normalized} --timeout ${timeout_seconds ?? 120} --json`,
+              cli_equivalent: `mailery inbox wait ${normalized} --timeout ${timeout_seconds ?? 120} --json`,
             }, null, 2) }],
             isError: true,
           };
@@ -213,7 +214,7 @@ export function registerInboxTools(server: McpServer): void {
               subject: match.email.subject,
               received_at: match.email.received_at,
               confidence: match.confidence,
-              cli_equivalent: `emails inbox wait-code ${normalized} --timeout ${timeout_seconds ?? 120} --json`,
+              cli_equivalent: `mailery inbox wait-code ${normalized} --timeout ${timeout_seconds ?? 120} --json`,
             }, null, 2) }],
           };
         }
@@ -229,7 +230,7 @@ export function registerInboxTools(server: McpServer): void {
                 subject: match.email.subject,
                 received_at: match.email.received_at,
                 confidence: match.confidence,
-                cli_equivalent: `emails inbox wait-code ${normalized} --timeout ${timeout_seconds ?? 120} --json`,
+                cli_equivalent: `mailery inbox wait-code ${normalized} --timeout ${timeout_seconds ?? 120} --json`,
               }, null, 2) }],
             };
           }
@@ -239,7 +240,7 @@ export function registerInboxTools(server: McpServer): void {
             content: [{ type: "text", text: JSON.stringify({
               code: null,
               address: normalized,
-              cli_equivalent: `emails inbox wait-code ${normalized} --timeout ${timeout_seconds ?? 120} --json`,
+              cli_equivalent: `mailery inbox wait-code ${normalized} --timeout ${timeout_seconds ?? 120} --json`,
             }, null, 2) }],
             isError: true,
           };
@@ -285,7 +286,7 @@ export function registerInboxTools(server: McpServer): void {
               subject: match.email.subject,
               received_at: match.email.received_at,
               confidence: match.confidence,
-              cli_equivalent: `emails inbox wait-code ${normalized} --timeout ${timeout_seconds ?? 120} --json`,
+              cli_equivalent: `mailery inbox wait-code ${normalized} --timeout ${timeout_seconds ?? 120} --json`,
             }, null, 2) }],
           };
         }
@@ -301,7 +302,7 @@ export function registerInboxTools(server: McpServer): void {
                 subject: match.email.subject,
                 received_at: match.email.received_at,
                 confidence: match.confidence,
-                cli_equivalent: `emails inbox wait-code ${normalized} --timeout ${timeout_seconds ?? 120} --json`,
+                cli_equivalent: `mailery inbox wait-code ${normalized} --timeout ${timeout_seconds ?? 120} --json`,
               }, null, 2) }],
             };
           }
@@ -311,7 +312,7 @@ export function registerInboxTools(server: McpServer): void {
             content: [{ type: "text", text: JSON.stringify({
               code: null,
               address: normalized,
-              cli_equivalent: `emails inbox wait-code ${normalized} --timeout ${timeout_seconds ?? 120} --json`,
+              cli_equivalent: `mailery inbox wait-code ${normalized} --timeout ${timeout_seconds ?? 120} --json`,
             }, null, 2) }],
             isError: true,
           };
@@ -336,6 +337,38 @@ export function registerInboxTools(server: McpServer): void {
       const email = getInboundEmail(resolvedId);
       if (!email) throw new Error(`Inbound email not found: ${id}`);
       return { content: [{ type: "text", text: JSON.stringify(email, null, 2) }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+    }
+  },
+);
+
+  server.tool(
+  "extract_inbound_email_links",
+  "Extract links from a specific inbound email by ID. Read-only.",
+  {
+    id: z.string().describe("Inbound email ID (or prefix)"),
+    include_non_web: z.boolean().optional().describe("Include mailto: and tel: links"),
+  },
+  async ({ id, include_non_web }) => {
+    try {
+      const resolvedId = resolveId("inbound_emails", id);
+      const email = getInboundEmail(resolvedId);
+      if (!email) throw new Error(`Inbound email not found: ${id}`);
+      return {
+        content: [{ type: "text", text: JSON.stringify({
+          email_id: email.id,
+          from: email.from_address,
+          subject: email.subject,
+          received_at: email.received_at,
+          links: extractEmailLinks({
+            text: email.text_body,
+            html: email.html_body,
+            includeNonWeb: include_non_web === true,
+          }),
+          cli_equivalent: `mailery inbox links ${email.id} --json${include_non_web ? " --all" : ""}`,
+        }, null, 2) }],
+      };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
     }
@@ -586,7 +619,7 @@ async function gmailMessageAction(email_id: string, connectorArgs: string[]): Pr
       return { content: [{ type: "text", text: JSON.stringify({
         inbox: status.inbox,
         gmail: status.providers.gmail,
-        cli_equivalent: "emails inbox sync-status --json",
+        cli_equivalent: "mailery inbox sync-status --json",
       }, null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
@@ -608,6 +641,7 @@ type InboxToolName =
   | "wait_for_verification_code"
   | "wait_for_code"
   | "get_inbound_email"
+  | "extract_inbound_email_links"
   | "clear_inbound_emails"
   | "sync_inbox"
   | "mark_email_read"

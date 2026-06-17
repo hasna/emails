@@ -1,15 +1,15 @@
 export function generateBashCompletion(): string {
-  return `# bash completion for emails
-_emails_completion() {
+  return `# bash completion for mailery
+_mailery_completion() {
   local cur prev commands
   COMPREPLY=()
   cur="\${COMP_WORDS[COMP_CWORD]}"
   prev="\${COMP_WORDS[COMP_CWORD-1]}"
 
-  commands="provider domain address send pull stats monitor serve mcp config log test search export template contacts group batch scheduled scheduler webhook analytics doctor completion"
+  commands="provider domain address forwarding send pull stats monitor serve mcp config log test search export template contacts group batch scheduled scheduler webhook analytics doctor completion"
 
   case "\${prev}" in
-    emails)
+    mailery)
       COMPREPLY=( $(compgen -W "\${commands}" -- "\${cur}") )
       ;;
     provider)
@@ -20,6 +20,9 @@ _emails_completion() {
       ;;
     address)
       COMPREPLY=( $(compgen -W "add list verify remove" -- "\${cur}") )
+      ;;
+    forwarding)
+      COMPREPLY=( $(compgen -W "add list enable disable remove run explain" -- "\${cur}") )
       ;;
     template)
       COMPREPLY=( $(compgen -W "add list show remove" -- "\${cur}") )
@@ -47,18 +50,19 @@ _emails_completion() {
       ;;
   esac
 }
-complete -F _emails_completion emails`;
+complete -F _mailery_completion mailery`;
 }
 
 export function generateZshCompletion(): string {
-  return `#compdef emails
+  return `#compdef mailery
 
-_emails() {
+_mailery() {
   local -a commands
   commands=(
     'provider:Manage email providers'
     'domain:Manage domains'
     'address:Manage sender addresses'
+    'forwarding:Manage app-level forwarding rules'
     'send:Send an email'
     'pull:Sync events from providers'
     'stats:Show email statistics'
@@ -99,6 +103,9 @@ _emails() {
         address)
           _values 'subcommand' 'add' 'list' 'verify' 'remove'
           ;;
+        forwarding)
+          _values 'subcommand' 'add' 'list' 'enable' 'disable' 'remove' 'run' 'explain'
+          ;;
         template)
           _values 'subcommand' 'add' 'list' 'show' 'remove'
           ;;
@@ -128,69 +135,73 @@ _emails() {
   esac
 }
 
-_emails "$@"`;
+_mailery "$@"`;
 }
 
 export function generateFishCompletion(): string {
-  return `# fish completion for emails
-complete -c emails -f
+  return `# fish completion for mailery
+complete -c mailery -f
 
 # Top-level commands
-complete -c emails -n '__fish_use_subcommand' -a 'provider' -d 'Manage email providers'
-complete -c emails -n '__fish_use_subcommand' -a 'domain' -d 'Manage domains'
-complete -c emails -n '__fish_use_subcommand' -a 'address' -d 'Manage sender addresses'
-complete -c emails -n '__fish_use_subcommand' -a 'send' -d 'Send an email'
-complete -c emails -n '__fish_use_subcommand' -a 'pull' -d 'Sync events from providers'
-complete -c emails -n '__fish_use_subcommand' -a 'stats' -d 'Show email statistics'
-complete -c emails -n '__fish_use_subcommand' -a 'monitor' -d 'Monitor provider health'
-complete -c emails -n '__fish_use_subcommand' -a 'serve' -d 'Start HTTP server'
-complete -c emails -n '__fish_use_subcommand' -a 'mcp' -d 'Start MCP server'
-complete -c emails -n '__fish_use_subcommand' -a 'config' -d 'Manage configuration'
-complete -c emails -n '__fish_use_subcommand' -a 'log' -d 'Show email log'
-complete -c emails -n '__fish_use_subcommand' -a 'test' -d 'Send a test email'
-complete -c emails -n '__fish_use_subcommand' -a 'search' -d 'Search emails'
-complete -c emails -n '__fish_use_subcommand' -a 'export' -d 'Export data'
-complete -c emails -n '__fish_use_subcommand' -a 'template' -d 'Manage templates'
-complete -c emails -n '__fish_use_subcommand' -a 'contacts' -d 'Manage contacts'
-complete -c emails -n '__fish_use_subcommand' -a 'group' -d 'Manage contact groups'
-complete -c emails -n '__fish_use_subcommand' -a 'batch' -d 'Batch operations'
-complete -c emails -n '__fish_use_subcommand' -a 'scheduled' -d 'Manage scheduled emails'
-complete -c emails -n '__fish_use_subcommand' -a 'scheduler' -d 'Run the scheduler'
-complete -c emails -n '__fish_use_subcommand' -a 'webhook' -d 'Manage webhooks'
-complete -c emails -n '__fish_use_subcommand' -a 'analytics' -d 'Show email analytics'
-complete -c emails -n '__fish_use_subcommand' -a 'doctor' -d 'Run system diagnostics'
-complete -c emails -n '__fish_use_subcommand' -a 'completion' -d 'Generate shell completions'
+complete -c mailery -n '__fish_use_subcommand' -a 'provider' -d 'Manage email providers'
+complete -c mailery -n '__fish_use_subcommand' -a 'domain' -d 'Manage domains'
+complete -c mailery -n '__fish_use_subcommand' -a 'address' -d 'Manage sender addresses'
+complete -c mailery -n '__fish_use_subcommand' -a 'forwarding' -d 'Manage app-level forwarding rules'
+complete -c mailery -n '__fish_use_subcommand' -a 'send' -d 'Send an email'
+complete -c mailery -n '__fish_use_subcommand' -a 'pull' -d 'Sync events from providers'
+complete -c mailery -n '__fish_use_subcommand' -a 'stats' -d 'Show email statistics'
+complete -c mailery -n '__fish_use_subcommand' -a 'monitor' -d 'Monitor provider health'
+complete -c mailery -n '__fish_use_subcommand' -a 'serve' -d 'Start HTTP server'
+complete -c mailery -n '__fish_use_subcommand' -a 'mcp' -d 'Start MCP server'
+complete -c mailery -n '__fish_use_subcommand' -a 'config' -d 'Manage configuration'
+complete -c mailery -n '__fish_use_subcommand' -a 'log' -d 'Show email log'
+complete -c mailery -n '__fish_use_subcommand' -a 'test' -d 'Send a test email'
+complete -c mailery -n '__fish_use_subcommand' -a 'search' -d 'Search emails'
+complete -c mailery -n '__fish_use_subcommand' -a 'export' -d 'Export data'
+complete -c mailery -n '__fish_use_subcommand' -a 'template' -d 'Manage templates'
+complete -c mailery -n '__fish_use_subcommand' -a 'contacts' -d 'Manage contacts'
+complete -c mailery -n '__fish_use_subcommand' -a 'group' -d 'Manage contact groups'
+complete -c mailery -n '__fish_use_subcommand' -a 'batch' -d 'Batch operations'
+complete -c mailery -n '__fish_use_subcommand' -a 'scheduled' -d 'Manage scheduled emails'
+complete -c mailery -n '__fish_use_subcommand' -a 'scheduler' -d 'Run the scheduler'
+complete -c mailery -n '__fish_use_subcommand' -a 'webhook' -d 'Manage webhooks'
+complete -c mailery -n '__fish_use_subcommand' -a 'analytics' -d 'Show email analytics'
+complete -c mailery -n '__fish_use_subcommand' -a 'doctor' -d 'Run system diagnostics'
+complete -c mailery -n '__fish_use_subcommand' -a 'completion' -d 'Generate shell completions'
 
 # Provider subcommands
-complete -c emails -n '__fish_seen_subcommand_from provider' -a 'add list remove update status'
+complete -c mailery -n '__fish_seen_subcommand_from provider' -a 'add list remove update status'
 
 # Domain subcommands
-complete -c emails -n '__fish_seen_subcommand_from domain' -a 'add list dns verify remove status check'
+complete -c mailery -n '__fish_seen_subcommand_from domain' -a 'add list dns verify remove status check'
 
 # Address subcommands
-complete -c emails -n '__fish_seen_subcommand_from address' -a 'add list verify remove'
+complete -c mailery -n '__fish_seen_subcommand_from address' -a 'add list verify remove'
+
+# Forwarding subcommands
+complete -c mailery -n '__fish_seen_subcommand_from forwarding' -a 'add list enable disable remove run explain'
 
 # Template subcommands
-complete -c emails -n '__fish_seen_subcommand_from template' -a 'add list show remove'
+complete -c mailery -n '__fish_seen_subcommand_from template' -a 'add list show remove'
 
 # Contacts subcommands
-complete -c emails -n '__fish_seen_subcommand_from contacts' -a 'list suppress unsuppress'
+complete -c mailery -n '__fish_seen_subcommand_from contacts' -a 'list suppress unsuppress'
 
 # Group subcommands
-complete -c emails -n '__fish_seen_subcommand_from group' -a 'create list show add remove-member delete'
+complete -c mailery -n '__fish_seen_subcommand_from group' -a 'create list show add remove-member delete'
 
 # Scheduled subcommands
-complete -c emails -n '__fish_seen_subcommand_from scheduled' -a 'list cancel'
+complete -c mailery -n '__fish_seen_subcommand_from scheduled' -a 'list cancel'
 
 # Config subcommands
-complete -c emails -n '__fish_seen_subcommand_from config' -a 'set get list'
+complete -c mailery -n '__fish_seen_subcommand_from config' -a 'set get list'
 
 # Export subcommands
-complete -c emails -n '__fish_seen_subcommand_from export' -a 'emails events'
+complete -c mailery -n '__fish_seen_subcommand_from export' -a 'emails events'
 
 # Batch subcommands
-complete -c emails -n '__fish_seen_subcommand_from batch' -a 'send'
+complete -c mailery -n '__fish_seen_subcommand_from batch' -a 'send'
 
 # Completion subcommands
-complete -c emails -n '__fish_seen_subcommand_from completion' -a 'bash zsh fish'`;
+complete -c mailery -n '__fish_seen_subcommand_from completion' -a 'bash zsh fish'`;
 }

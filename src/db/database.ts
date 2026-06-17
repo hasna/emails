@@ -125,6 +125,104 @@ const INBOUND_RECIPIENTS_TRIGGERS_SQL = `
   END;
 `;
 
+function normalizedLabelSql(valueSql: string): string {
+  let value = `LOWER(TRIM(CAST(${valueSql} AS TEXT)))`;
+  for (const whitespace of ["char(9)", "char(10)", "char(11)", "char(12)", "char(13)"]) {
+    value = `REPLACE(${value}, ${whitespace}, ' ')`;
+  }
+  for (let i = 0; i < 8; i += 1) {
+    value = `REPLACE(${value}, '  ', ' ')`;
+  }
+  return `SUBSTR(REPLACE(${value}, ' ', '-'), 1, 64)`;
+}
+
+function inboundLabelInsertSql(idSql: string, labelIdsSql: string): string {
+  return `INSERT OR IGNORE INTO inbound_labels (inbound_email_id, label)
+    SELECT ${idSql}, normalized.label
+      FROM (
+        SELECT ${normalizedLabelSql("j.value")} AS label
+          FROM json_each(CASE WHEN json_valid(${labelIdsSql}) THEN ${labelIdsSql} ELSE '[]' END) AS j
+      ) normalized
+     WHERE normalized.label != ''`;
+}
+
+function inboundLabelFlagUpdateSql(idSql: string): string {
+  return `UPDATE inbound_emails
+     SET is_spam = CASE WHEN EXISTS (
+           SELECT 1 FROM inbound_labels
+            WHERE inbound_email_id = ${idSql}
+              AND label = 'spam'
+         ) THEN 1 ELSE 0 END,
+         is_trash = CASE WHEN EXISTS (
+           SELECT 1 FROM inbound_labels
+            WHERE inbound_email_id = ${idSql}
+              AND label = 'trash'
+         ) THEN 1 ELSE 0 END
+   WHERE id = ${idSql}`;
+}
+
+function inboundLabelsBackfillSql(): string {
+  return `INSERT OR IGNORE INTO inbound_labels (inbound_email_id, label)
+    SELECT normalized.inbound_email_id, normalized.label
+      FROM (
+        SELECT e.id AS inbound_email_id, ${normalizedLabelSql("j.value")} AS label
+          FROM inbound_emails e,
+               json_each(CASE WHEN json_valid(e.label_ids_json) THEN e.label_ids_json ELSE '[]' END) AS j
+      ) normalized
+     WHERE normalized.label != ''`;
+}
+
+const INBOUND_LABELS_SCHEMA_SQL = `
+  CREATE TABLE IF NOT EXISTS inbound_labels (
+    inbound_email_id TEXT NOT NULL REFERENCES inbound_emails(id) ON DELETE CASCADE,
+    label TEXT NOT NULL,
+    PRIMARY KEY (inbound_email_id, label)
+  );
+  CREATE INDEX IF NOT EXISTS idx_inbound_labels_label ON inbound_labels(label, inbound_email_id);
+  CREATE INDEX IF NOT EXISTS idx_inbound_labels_email ON inbound_labels(inbound_email_id);
+`;
+
+const INBOUND_LABELS_BACKFILL_SQL = `
+  ${inboundLabelsBackfillSql()};
+`;
+
+const INBOUND_LABELS_FLAG_BACKFILL_SQL = `
+  UPDATE inbound_emails
+     SET is_spam = CASE WHEN EXISTS (
+           SELECT 1 FROM inbound_labels
+            WHERE inbound_email_id = inbound_emails.id
+              AND label = 'spam'
+         ) THEN 1 ELSE 0 END,
+         is_trash = CASE WHEN EXISTS (
+           SELECT 1 FROM inbound_labels
+            WHERE inbound_email_id = inbound_emails.id
+              AND label = 'trash'
+         ) THEN 1 ELSE 0 END;
+`;
+
+const INBOUND_LABELS_TRIGGERS_SQL = `
+  CREATE TRIGGER IF NOT EXISTS trg_inbound_labels_insert
+  AFTER INSERT ON inbound_emails
+  BEGIN
+    ${inboundLabelInsertSql("NEW.id", "NEW.label_ids_json")};
+    ${inboundLabelFlagUpdateSql("NEW.id")};
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS trg_inbound_labels_update_labels
+  AFTER UPDATE OF label_ids_json ON inbound_emails
+  BEGIN
+    DELETE FROM inbound_labels WHERE inbound_email_id = NEW.id;
+    ${inboundLabelInsertSql("NEW.id", "NEW.label_ids_json")};
+    ${inboundLabelFlagUpdateSql("NEW.id")};
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS trg_inbound_labels_delete
+  AFTER DELETE ON inbound_emails
+  BEGIN
+    DELETE FROM inbound_labels WHERE inbound_email_id = OLD.id;
+  END;
+`;
+
 function safeExec(db: Database, sql: string): void {
   try { db.exec(sql); } catch {}
 }
@@ -158,6 +256,32 @@ function ensureInboundRecipients(db: Database): void {
   safeExec(db, INBOUND_RECIPIENTS_TRIGGERS_SQL);
   if (tableExists(db, "inbound_recipients")) {
     safeExec(db, "INSERT OR IGNORE INTO _migrations (id) VALUES (31)");
+  }
+}
+
+function ensureInboundLabels(db: Database): void {
+  const tableExisted = tableExists(db, "inbound_labels");
+  safeExec(db, "ALTER TABLE inbound_emails ADD COLUMN is_spam INTEGER NOT NULL DEFAULT 0");
+  safeExec(db, "ALTER TABLE inbound_emails ADD COLUMN is_trash INTEGER NOT NULL DEFAULT 0");
+  safeExec(db, INBOUND_LABELS_SCHEMA_SQL);
+  if (!migrationRecorded(db, 36) || !tableExisted) {
+    safeExec(db, INBOUND_LABELS_BACKFILL_SQL);
+    safeExec(db, INBOUND_LABELS_FLAG_BACKFILL_SQL);
+  }
+  safeExec(db, INBOUND_LABELS_TRIGGERS_SQL);
+  safeExec(db, "CREATE INDEX IF NOT EXISTS idx_inbound_sent_arch_spam_trash_recv ON inbound_emails(is_sent, is_archived, is_spam, is_trash, received_at)");
+  safeExec(db, "CREATE INDEX IF NOT EXISTS idx_inbound_sent_read_arch_spam_trash_recv ON inbound_emails(is_sent, is_read, is_archived, is_spam, is_trash, received_at)");
+  safeExec(db, "CREATE INDEX IF NOT EXISTS idx_inbound_sent_star_arch_spam_trash_recv ON inbound_emails(is_sent, is_starred, is_archived, is_spam, is_trash, received_at)");
+  safeExec(db, "CREATE INDEX IF NOT EXISTS idx_inbound_arch_spam_trash_recv ON inbound_emails(is_archived, is_spam, is_trash, received_at)");
+  safeExec(db, "CREATE INDEX IF NOT EXISTS idx_inbound_spam_recv ON inbound_emails(is_spam, received_at)");
+  safeExec(db, "CREATE INDEX IF NOT EXISTS idx_inbound_trash_recv ON inbound_emails(is_trash, received_at)");
+  safeExec(db, "CREATE INDEX IF NOT EXISTS idx_inbound_sent_spam_recv ON inbound_emails(is_sent, is_spam, received_at)");
+  safeExec(db, "CREATE INDEX IF NOT EXISTS idx_inbound_sent_trash_recv ON inbound_emails(is_sent, is_trash, received_at)");
+  safeExec(db, "CREATE INDEX IF NOT EXISTS idx_inbound_provider_sent_arch_spam_trash_recv ON inbound_emails(provider_id, is_sent, is_archived, is_spam, is_trash, received_at)");
+  safeExec(db, "CREATE INDEX IF NOT EXISTS idx_inbound_provider_sent_read_arch_spam_trash_recv ON inbound_emails(provider_id, is_sent, is_read, is_archived, is_spam, is_trash, received_at)");
+  safeExec(db, "CREATE INDEX IF NOT EXISTS idx_inbound_provider_sent_star_arch_spam_trash_recv ON inbound_emails(provider_id, is_sent, is_starred, is_archived, is_spam, is_trash, received_at)");
+  if (tableExists(db, "inbound_labels")) {
+    safeExec(db, "INSERT OR IGNORE INTO _migrations (id) VALUES (36)");
   }
 }
 
@@ -725,7 +849,13 @@ const MIGRATIONS = [
   // the receiving folders be plain indexed seeks (no JSON label scanning).
   `
   ALTER TABLE inbound_emails ADD COLUMN is_sent INTEGER NOT NULL DEFAULT 0;
-  UPDATE inbound_emails SET is_sent = 1 WHERE label_ids_json LIKE '%"SENT"%';
+  UPDATE inbound_emails
+     SET is_sent = 1
+   WHERE json_valid(label_ids_json)
+     AND EXISTS (
+       SELECT 1 FROM json_each(label_ids_json)
+        WHERE LOWER(value) = 'sent'
+     );
   CREATE INDEX IF NOT EXISTS idx_inbound_sent_arch_recv ON inbound_emails(is_sent, is_archived, received_at);
   INSERT OR IGNORE INTO _migrations (id) VALUES (28);
   `,
@@ -749,7 +879,7 @@ const MIGRATIONS = [
   `,
 
   // Migration 30: hot-path composite indexes for bounded list views.
-  // These match the query shapes used by emails ui, MCP list/export tools, and
+  // These match the query shapes used by Mailery UI, MCP list/export tools, and
   // diagnostics: equality filters first, then the timestamp used for ordering.
   `
   CREATE INDEX IF NOT EXISTS idx_inbound_sent_read_arch_recv ON inbound_emails(is_sent, is_read, is_archived, received_at);
@@ -806,6 +936,80 @@ const MIGRATIONS = [
   CREATE INDEX IF NOT EXISTS idx_inbound_sender_canonical_recv ON inbound_emails(is_sent, is_archived, ${sqlEmailAddress("from_address")}, received_at);
   CREATE INDEX IF NOT EXISTS idx_inbound_sender_domain_recv ON inbound_emails(is_sent, is_archived, ${sqlEmailDomain("from_address")}, received_at);
   INSERT OR IGNORE INTO _migrations (id) VALUES (35);
+  `,
+
+  // Migration 36: normalized labels plus hot spam/trash flags for Mailery UI.
+  // Folder counts/listing must not json_each(label_ids_json) on large stores.
+  `
+  ALTER TABLE inbound_emails ADD COLUMN is_spam INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE inbound_emails ADD COLUMN is_trash INTEGER NOT NULL DEFAULT 0;
+  ${INBOUND_LABELS_SCHEMA_SQL}
+  ${INBOUND_LABELS_BACKFILL_SQL}
+  ${INBOUND_LABELS_FLAG_BACKFILL_SQL}
+  ${INBOUND_LABELS_TRIGGERS_SQL}
+  CREATE INDEX IF NOT EXISTS idx_inbound_sent_arch_spam_trash_recv ON inbound_emails(is_sent, is_archived, is_spam, is_trash, received_at);
+  CREATE INDEX IF NOT EXISTS idx_inbound_sent_read_arch_spam_trash_recv ON inbound_emails(is_sent, is_read, is_archived, is_spam, is_trash, received_at);
+  CREATE INDEX IF NOT EXISTS idx_inbound_sent_star_arch_spam_trash_recv ON inbound_emails(is_sent, is_starred, is_archived, is_spam, is_trash, received_at);
+  CREATE INDEX IF NOT EXISTS idx_inbound_arch_spam_trash_recv ON inbound_emails(is_archived, is_spam, is_trash, received_at);
+  CREATE INDEX IF NOT EXISTS idx_inbound_spam_recv ON inbound_emails(is_spam, received_at);
+  CREATE INDEX IF NOT EXISTS idx_inbound_trash_recv ON inbound_emails(is_trash, received_at);
+  CREATE INDEX IF NOT EXISTS idx_inbound_sent_spam_recv ON inbound_emails(is_sent, is_spam, received_at);
+  CREATE INDEX IF NOT EXISTS idx_inbound_sent_trash_recv ON inbound_emails(is_sent, is_trash, received_at);
+  CREATE INDEX IF NOT EXISTS idx_inbound_provider_sent_arch_spam_trash_recv ON inbound_emails(provider_id, is_sent, is_archived, is_spam, is_trash, received_at);
+  CREATE INDEX IF NOT EXISTS idx_inbound_provider_sent_read_arch_spam_trash_recv ON inbound_emails(provider_id, is_sent, is_read, is_archived, is_spam, is_trash, received_at);
+  CREATE INDEX IF NOT EXISTS idx_inbound_provider_sent_star_arch_spam_trash_recv ON inbound_emails(provider_id, is_sent, is_starred, is_archived, is_spam, is_trash, received_at);
+  INSERT OR IGNORE INTO _migrations (id) VALUES (36);
+  `,
+
+  // Migration 37: re-normalize inbound label index after whitespace/truncation
+  // normalization was made consistent with app-side label filters.
+  `
+  DELETE FROM inbound_labels;
+  ${INBOUND_LABELS_BACKFILL_SQL}
+  ${INBOUND_LABELS_FLAG_BACKFILL_SQL}
+  INSERT OR IGNORE INTO _migrations (id) VALUES (37);
+  `,
+
+  // Migration 38: persistent Mailery email agents and per-email run ledger.
+  `
+  CREATE TABLE IF NOT EXISTS email_agent_settings (
+    agent_key TEXT PRIMARY KEY,
+    enabled INTEGER NOT NULL DEFAULT 0,
+    always_on INTEGER NOT NULL DEFAULT 0,
+    provider TEXT NOT NULL DEFAULT 'groq' CHECK(provider IN ('cerebras','groq')),
+    model TEXT,
+    apply_labels INTEGER NOT NULL DEFAULT 1,
+    use_network_tools INTEGER NOT NULL DEFAULT 1,
+    config_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS email_agent_runs (
+    id TEXT PRIMARY KEY,
+    agent_key TEXT NOT NULL,
+    inbound_email_id TEXT NOT NULL REFERENCES inbound_emails(id) ON DELETE CASCADE,
+    provider TEXT NOT NULL CHECK(provider IN ('cerebras','groq')),
+    model TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('ok','error','skipped')),
+    category TEXT,
+    labels_json TEXT NOT NULL DEFAULT '[]',
+    priority INTEGER CHECK(priority BETWEEN 1 AND 5),
+    confidence REAL,
+    risk_score INTEGER CHECK(risk_score BETWEEN 0 AND 100),
+    summary TEXT,
+    reasoning TEXT,
+    tool_calls_json TEXT NOT NULL DEFAULT '[]',
+    output_json TEXT NOT NULL DEFAULT '{}',
+    error TEXT,
+    started_at TEXT NOT NULL,
+    completed_at TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(agent_key, inbound_email_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_email_agent_runs_agent_status ON email_agent_runs(agent_key, status, completed_at);
+  CREATE INDEX IF NOT EXISTS idx_email_agent_runs_inbound ON email_agent_runs(inbound_email_id);
+  CREATE INDEX IF NOT EXISTS idx_email_agent_runs_completed ON email_agent_runs(completed_at);
+  INSERT OR IGNORE INTO _migrations (id) VALUES (38);
   `,
 ];
 
@@ -952,6 +1156,33 @@ function ensureSchema(db: Database): void {
     UNIQUE(domain, local_part)
   )`);
   ensureProvTable("CREATE INDEX IF NOT EXISTS idx_aliases_domain ON aliases(domain)");
+
+  // Migration 36 idempotent guarantee: app-level inbound forwarding rules.
+  ensureProvTable(`CREATE TABLE IF NOT EXISTS forwarding_rules (
+    id TEXT PRIMARY KEY,
+    source_address TEXT NOT NULL,
+    target_address TEXT NOT NULL,
+    mode TEXT NOT NULL DEFAULT 'app-copy' CHECK(mode IN ('app-copy')),
+    provider_id TEXT REFERENCES providers(id) ON DELETE SET NULL,
+    from_address TEXT,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(source_address, target_address, mode)
+  )`);
+  ensureProvTable("CREATE INDEX IF NOT EXISTS idx_forwarding_rules_source ON forwarding_rules(source_address, enabled)");
+  ensureProvTable(`CREATE TABLE IF NOT EXISTS forwarding_deliveries (
+    id TEXT PRIMARY KEY,
+    rule_id TEXT NOT NULL REFERENCES forwarding_rules(id) ON DELETE CASCADE,
+    inbound_email_id TEXT NOT NULL REFERENCES inbound_emails(id) ON DELETE CASCADE,
+    sent_email_id TEXT REFERENCES emails(id) ON DELETE SET NULL,
+    status TEXT NOT NULL CHECK(status IN ('sent','failed')),
+    error TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(rule_id, inbound_email_id)
+  )`);
+  ensureProvTable("CREATE INDEX IF NOT EXISTS idx_forwarding_deliveries_rule ON forwarding_deliveries(rule_id, created_at)");
+  ensureProvTable("CREATE INDEX IF NOT EXISTS idx_forwarding_deliveries_inbound ON forwarding_deliveries(inbound_email_id)");
 
   // Migration 25 idempotent guarantee: scoped send keys.
   ensureProvTable(`CREATE TABLE IF NOT EXISTS send_keys (
@@ -1179,6 +1410,7 @@ function ensureSchema(db: Database): void {
   ensureIndex("CREATE INDEX IF NOT EXISTS idx_inbound_thread ON inbound_emails(provider_thread_id)");
   ensureIndex("CREATE INDEX IF NOT EXISTS idx_inbound_history ON inbound_emails(provider_history_id)");
   ensureInboundRecipients(db);
+  ensureInboundLabels(db);
 
   // Ensure sequences tables exist
   ensureTable(`CREATE TABLE IF NOT EXISTS sequences (
@@ -1274,6 +1506,44 @@ function ensureSchema(db: Database): void {
   ensureIndex("CREATE UNIQUE INDEX IF NOT EXISTS idx_triage_email_unique ON email_triage(email_id) WHERE email_id IS NOT NULL");
   ensureIndex("CREATE UNIQUE INDEX IF NOT EXISTS idx_triage_inbound_unique ON email_triage(inbound_email_id) WHERE inbound_email_id IS NOT NULL");
 
+  ensureTable(`CREATE TABLE IF NOT EXISTS email_agent_settings (
+    agent_key TEXT PRIMARY KEY,
+    enabled INTEGER NOT NULL DEFAULT 0,
+    always_on INTEGER NOT NULL DEFAULT 0,
+    provider TEXT NOT NULL DEFAULT 'groq' CHECK(provider IN ('cerebras','groq')),
+    model TEXT,
+    apply_labels INTEGER NOT NULL DEFAULT 1,
+    use_network_tools INTEGER NOT NULL DEFAULT 1,
+    config_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+  ensureTable(`CREATE TABLE IF NOT EXISTS email_agent_runs (
+    id TEXT PRIMARY KEY,
+    agent_key TEXT NOT NULL,
+    inbound_email_id TEXT NOT NULL REFERENCES inbound_emails(id) ON DELETE CASCADE,
+    provider TEXT NOT NULL CHECK(provider IN ('cerebras','groq')),
+    model TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('ok','error','skipped')),
+    category TEXT,
+    labels_json TEXT NOT NULL DEFAULT '[]',
+    priority INTEGER CHECK(priority BETWEEN 1 AND 5),
+    confidence REAL,
+    risk_score INTEGER CHECK(risk_score BETWEEN 0 AND 100),
+    summary TEXT,
+    reasoning TEXT,
+    tool_calls_json TEXT NOT NULL DEFAULT '[]',
+    output_json TEXT NOT NULL DEFAULT '{}',
+    error TEXT,
+    started_at TEXT NOT NULL,
+    completed_at TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(agent_key, inbound_email_id)
+  )`);
+  ensureIndex("CREATE INDEX IF NOT EXISTS idx_email_agent_runs_agent_status ON email_agent_runs(agent_key, status, completed_at)");
+  ensureIndex("CREATE INDEX IF NOT EXISTS idx_email_agent_runs_inbound ON email_agent_runs(inbound_email_id)");
+  ensureIndex("CREATE INDEX IF NOT EXISTS idx_email_agent_runs_completed ON email_agent_runs(completed_at)");
+
   ensureTable(`CREATE TABLE IF NOT EXISTS feedback (
     id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
     message TEXT NOT NULL,
@@ -1283,6 +1553,32 @@ function ensureSchema(db: Database): void {
     machine_id TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`);
+
+  ensureTable(`CREATE TABLE IF NOT EXISTS forwarding_rules (
+    id TEXT PRIMARY KEY,
+    source_address TEXT NOT NULL,
+    target_address TEXT NOT NULL,
+    mode TEXT NOT NULL DEFAULT 'app-copy' CHECK(mode IN ('app-copy')),
+    provider_id TEXT REFERENCES providers(id) ON DELETE SET NULL,
+    from_address TEXT,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(source_address, target_address, mode)
+  )`);
+  ensureIndex("CREATE INDEX IF NOT EXISTS idx_forwarding_rules_source ON forwarding_rules(source_address, enabled)");
+  ensureTable(`CREATE TABLE IF NOT EXISTS forwarding_deliveries (
+    id TEXT PRIMARY KEY,
+    rule_id TEXT NOT NULL REFERENCES forwarding_rules(id) ON DELETE CASCADE,
+    inbound_email_id TEXT NOT NULL REFERENCES inbound_emails(id) ON DELETE CASCADE,
+    sent_email_id TEXT REFERENCES emails(id) ON DELETE SET NULL,
+    status TEXT NOT NULL CHECK(status IN ('sent','failed')),
+    error TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(rule_id, inbound_email_id)
+  )`);
+  ensureIndex("CREATE INDEX IF NOT EXISTS idx_forwarding_deliveries_rule ON forwarding_deliveries(rule_id, created_at)");
+  ensureIndex("CREATE INDEX IF NOT EXISTS idx_forwarding_deliveries_inbound ON forwarding_deliveries(inbound_email_id)");
 }
 
 export function closeDatabase(): void {
@@ -1328,7 +1624,7 @@ export function uuid(): string {
 const RESOLVABLE_TABLES = new Set([
   "providers", "domains", "addresses", "emails", "inbound_emails", "sandbox_emails",
   "templates", "contacts", "groups", "scheduled_emails", "sequences", "owners", "events",
-  "aliases", "send_keys",
+  "aliases", "send_keys", "forwarding_rules", "forwarding_deliveries",
 ]);
 
 export function resolvePartialId(db: Database, table: string, partialId: string): string | null {

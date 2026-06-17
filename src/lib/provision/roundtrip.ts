@@ -27,6 +27,17 @@ export interface RoundtripOptions {
   sleep?: (ms: number) => Promise<void>;
 }
 
+export interface SelfRoundtripOptions {
+  address: string;
+  count: number;
+  tokenPrefix?: string;
+  /** How many times to poll for receipt before giving up (default 12). */
+  pollAttempts?: number;
+  /** Delay between polls in ms (default 5000). */
+  pollIntervalMs?: number;
+  sleep?: (ms: number) => Promise<void>;
+}
+
 export interface DirectionReport {
   from: string;
   to: string;
@@ -75,6 +86,34 @@ export async function runRoundtrip(deps: RoundtripDeps, opts: RoundtripOptions):
 
   const totalSent = directions.reduce((s, d) => s + d.sent, 0);
   const totalReceived = directions.reduce((s, d) => s + d.received, 0);
+  return { directions, totalSent, totalReceived, success: totalSent === totalReceived };
+}
+
+export async function runSelfRoundtrip(deps: RoundtripDeps, opts: SelfRoundtripOptions): Promise<RoundtripReport> {
+  const { address, count } = opts;
+  if (!address) throw new Error("self roundtrip requires an address");
+
+  const prefix = opts.tokenPrefix ?? "RT";
+  const pollAttempts = opts.pollAttempts ?? 12;
+  const pollIntervalMs = opts.pollIntervalMs ?? 5000;
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+
+  const tokens: string[] = [];
+  for (let n = 0; n < count; n++) {
+    const token = `${prefix}-0-${n}`;
+    tokens.push(token);
+    await deps.send({
+      from: address,
+      to: address,
+      subject: `[${token}] roundtrip ${address} -> ${address}`,
+      text: `Provisioning round-trip probe. token=${token}`,
+    });
+  }
+
+  const missing = await waitForTokens(deps, address, tokens, pollAttempts, pollIntervalMs, sleep);
+  const directions = [{ from: address, to: address, sent: count, received: count - missing.length, missing }];
+  const totalSent = count;
+  const totalReceived = count - missing.length;
   return { directions, totalSent, totalReceived, success: totalSent === totalReceived };
 }
 

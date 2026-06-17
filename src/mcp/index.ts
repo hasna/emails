@@ -1,23 +1,23 @@
 #!/usr/bin/env bun
 /**
- * emails MCP server entry point.
+ * Mailery MCP server entry point.
  */
 import pkg from "../../package.json" with { type: "json" };
 
 function printHelp(): void {
-  console.log(`Usage: emails-mcp [options]
+  console.log(`Usage: mailery-mcp [options]
 
-Runs the @hasna/emails MCP server (stdio by default).
+Runs the @hasna/mailery MCP server (stdio by default).
 
 Options:
       --http         Serve MCP over Streamable HTTP on 127.0.0.1
-  -p, --port <port>  HTTP port (default: MCP_HTTP_PORT or 8816)
+  -p, --port <port>  HTTP port (default: MCP_HTTP_PORT or 8861)
   -V, --version      output the version number
   -h, --help         display help for command
 
 Environment:
   MCP_HTTP=1         Enable HTTP mode
-  MCP_HTTP_PORT      Override default HTTP port (8816)`);
+  MCP_HTTP_PORT      Override default HTTP port (8861)`);
 }
 
 const args = process.argv.slice(2);

@@ -15,9 +15,9 @@ export type CloudflareAuth =
   | { kind: "global"; apiKey: string; email: string };
 
 export interface CloudflareAuthSource {
-  /** Token from the emails config file (highest priority). */
+  /** Token from the Mailery config file (highest priority). */
   configToken?: string;
-  /** Global key/email from the emails config file. */
+  /** Global key/email from the Mailery config file. */
   configApiKey?: string;
   configEmail?: string;
   /** Defaults to process.env. */

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { runRoundtrip, type RoundtripDeps } from "./roundtrip.js";
+import { runRoundtrip, runSelfRoundtrip, type RoundtripDeps } from "./roundtrip.js";
 
 /** In-memory mail server: send() drops into per-recipient inboxes. */
 function fakeServer(opts: { dropTokens?: Set<string> } = {}): RoundtripDeps {
@@ -82,5 +82,34 @@ describe("runRoundtrip", () => {
 
   it("requires at least 2 addresses", async () => {
     await expect(runRoundtrip(fakeServer(), { addresses: ["solo@d.com"], count: 1, sleep: noSleep })).rejects.toThrow(/at least 2/);
+  });
+});
+
+describe("runSelfRoundtrip", () => {
+  it("delivers one address to itself", async () => {
+    const report = await runSelfRoundtrip(fakeServer(), {
+      address: "solo@d.com",
+      count: 1,
+      sleep: noSleep,
+    });
+
+    expect(report.success).toBe(true);
+    expect(report.directions).toEqual([
+      { from: "solo@d.com", to: "solo@d.com", sent: 1, received: 1, missing: [] },
+    ]);
+    expect(report.totalSent).toBe(1);
+    expect(report.totalReceived).toBe(1);
+  });
+
+  it("reports missing self-delivery tokens", async () => {
+    const report = await runSelfRoundtrip(fakeServer({ dropTokens: new Set(["RT-0-0"]) }), {
+      address: "solo@d.com",
+      count: 1,
+      pollAttempts: 2,
+      sleep: noSleep,
+    });
+
+    expect(report.success).toBe(false);
+    expect(report.directions[0]?.missing).toEqual(["RT-0-0"]);
   });
 });

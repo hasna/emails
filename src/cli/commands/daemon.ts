@@ -32,9 +32,9 @@ async function daemonStatus() {
     },
     realtime: system.inbox.realtime,
     start_commands: {
-      provisioner_once: "emails provision daemon --provider <provider> --bucket <bucket> --once",
-      provisioner_loop: "emails provision daemon --provider <provider> --bucket <bucket>",
-      realtime_watch: "emails inbox watch --all-buckets",
+      provisioner_once: "mailery provision daemon --provider <provider> --bucket <bucket> --once",
+      provisioner_loop: "mailery provision daemon --provider <provider> --bucket <bucket>",
+      realtime_watch: "mailery inbox watch --all-buckets",
     },
   };
 }
@@ -90,7 +90,7 @@ export function registerDaemonCommands(program: Command, output: (data: unknown,
           managed_process: false,
           reason: "No built-in supervisor or PID file is configured for this package.",
           start_commands: status.start_commands,
-          cli_equivalent: "emails daemon status --json",
+          cli_equivalent: "mailery daemon status --json",
         };
         output(result, [
           chalk.yellow("No managed email daemon process is configured."),

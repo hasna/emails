@@ -1,6 +1,6 @@
 import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
-import { createDomain, listDomains, listUsableDomains, deleteDomain, findDomainsByName, getDomain, getDomainByName, updateDnsStatus } from "../../db/domains.js";
+import { createDomain, listDomains, listUsableDomains, deleteDomain, findDomainsByName, getDomain, getDomainByName, moveDomainProvider, updateDnsStatus } from "../../db/domains.js";
 import { getProvider, listProviderNamesByIds } from "../../db/providers.js";
 import { getDatabase } from "../../db/database.js";
 import { getAdapter } from "../../providers/index.js";
@@ -9,7 +9,7 @@ import { colorDnsStatus, truncate, tableRow } from "../../lib/format.js";
 import { confirmDestructiveAction, handleError, parseCliPage, resolveId } from "../utils.js";
 import { createWarmingSchedule, getWarmingSchedule, listWarmingSchedules, updateWarmingStatus } from "../../db/warming.js";
 import { formatWarmingStatus, generateWarmingPlan, getTodayLimit, getTodaySentCount } from "../../lib/warming.js";
-import { listDomainProvisioningByIds, listReadyAddressCountsByDomains } from "../../db/provisioning.js";
+import { listDomainProvisioningByIds, listReadyAddressCountsByDomains, setDomainProvisioning } from "../../db/provisioning.js";
 import { assessDomainReadiness, formatDomainReadinessState } from "../../lib/domain-readiness.js";
 import { normalizeRoute53RegistrationContact } from "../../lib/route53-contact.js";
 
@@ -40,7 +40,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
 
   program
     .command("domains")
-    .description("List sending domains (alias: emails domain list)")
+    .description("List sending domains (alias: mailery domain list)")
     .option("--provider <id>", "Filter by provider ID")
     .option("--limit <n>", "Maximum domains to show", "50")
     .option("--offset <n>", "Number of domains to skip", "0")
@@ -66,7 +66,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
             existing,
             would_create_domain: !existing,
             would_call_provider: !existing,
-            cli_equivalent: `emails domain add ${domain} --provider ${opts.provider}`,
+            cli_equivalent: `mailery domain add ${domain} --provider ${opts.provider}`,
           }, existing
             ? chalk.dim(`Domain already exists locally: ${domain} (${existing.id.slice(0, 8)})`)
             : chalk.dim(`Would add ${domain} to provider ${provider!.name} and register it locally.`));
@@ -83,7 +83,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
 
         const d = createDomain(providerId, domain);
         console.log(chalk.green(`✓ Domain added: ${domain} (${d.id.slice(0, 8)})`));
-        console.log(chalk.dim("Run 'emails domain dns <domain>' to see required DNS records."));
+        console.log(chalk.dim("Run 'mailery domain dns <domain>' to see required DNS records."));
       } catch (e) {
         handleError(e);
       }
@@ -99,7 +99,8 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .option("--region <region>", "AWS region (default: the provider's region)")
     .option("--catch-all <target>", "Route ALL mail for this domain to this address")
     .option("--sync", "Run an initial inbound sync after wiring")
-    .action(async (domain: string, opts: { provider: string; inbound?: boolean; bucket?: string; region?: string; catchAll?: string; sync?: boolean }) => {
+    .option("--force-mx-switch", "Allow SES inbound setup even when public root MX belongs to another provider")
+    .action(async (domain: string, opts: { provider: string; inbound?: boolean; bucket?: string; region?: string; catchAll?: string; sync?: boolean; forceMxSwitch?: boolean }) => {
       try {
         const db = getDatabase();
         const providerId = resolveId("providers", opts.provider);
@@ -111,29 +112,43 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
         const secretAccessKey = provider.secret_key ?? undefined;
         const lines: string[] = [chalk.bold(`\nAdopting ${domain} → ${provider.name}`)];
 
+        if (opts.inbound !== false && provider.type === "ses") {
+          const { guardSesInboundMx } = await import("../../lib/mx-ownership.js");
+          await guardSesInboundMx(domain, !!opts.forceMxSwitch);
+        }
+
         // 1. Ensure the SES identity exists (idempotent if already verified).
         const adapter = getAdapter(provider);
         await adapter.addDomain(domain);
         lines.push(chalk.green(`✓ SES identity ensured`));
 
-        // 2. Register in the emails store.
+        // 2. Register in the mailery store.
         const rec = getDomainByName(providerId, domain, db) ?? createDomain(providerId, domain, db);
-        lines.push(chalk.green(`✓ Registered in emails (${rec.id.slice(0, 8)})`));
+        setDomainProvisioning(rec.id, {
+          provisioning_status: "ses_identity_created",
+          dns_provider: "cloudflare",
+          send_provider: provider.type,
+          last_error: null,
+        }, db);
+        lines.push(chalk.green(`✓ Registered in Mailery (${rec.id.slice(0, 8)})`));
 
         // 3. Record verification status.
         try {
           const st = await adapter.verifyDomain(domain);
           updateDnsStatus(rec.id, st.dkim, st.spf, st.dmarc, db);
+          if (st.dkim === "verified") {
+            setDomainProvisioning(rec.id, { provisioning_status: "verified", next_check_at: null, last_error: null }, db);
+          }
           lines.push(`  ${colorDnsStatus(st.dkim)} DKIM · ${colorDnsStatus(st.spf)} SPF · ${colorDnsStatus(st.dmarc)} DMARC`);
         } catch { /* non-fatal */ }
 
         // 4. Inbound — per provider.
         if (opts.inbound !== false && provider.type === "resend") {
           lines.push(chalk.green(`✓ Resend domain ready`));
-          lines.push(chalk.dim(`  Inbound is push: add a Resend inbound webhook → POST /webhook/resend-inbound on 'emails serve'`));
+          lines.push(chalk.dim(`  Inbound is push: add a Resend inbound webhook -> POST /webhook/resend-inbound on 'mailery serve'`));
         }
         if (opts.inbound !== false && provider.type === "gmail") {
-          lines.push(chalk.dim(`  Gmail is account-based — receive with 'emails inbox sync' (emails ui can auto-pull Gmail)`));
+          lines.push(chalk.dim(`  Gmail is account-based - receive with 'mailery inbox sync' (mailery ui can auto-pull Gmail)`));
         }
         // 4a. SES inbound (S3 bucket + receipt rule → mail for *@domain lands in S3).
         if (opts.inbound !== false && provider.type === "ses") {
@@ -154,6 +169,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
           // (multi-bucket: domains can live in different AWS accounts).
           const { addInboundBucket } = await import("../../lib/config.js");
           addInboundBucket(r.bucket, region, providerId);
+          setDomainProvisioning(rec.id, { provisioning_status: "ready", next_check_at: null, last_error: null }, db);
         }
 
         // 5. Catch-all: the protected global catch-all already covers every domain;
@@ -176,7 +192,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
           }
         }
 
-        lines.push(chalk.dim(`\n  Live mail:  emails inbox watch   ·   browse:  emails ui`));
+        lines.push(chalk.dim(`\n  Live mail:  mailery inbox watch   ·   browse:  mailery ui`));
         output({ domain, provider: provider.name, domain_id: rec.id }, lines.join("\n"));
       } catch (e) { handleError(e); }
     });
@@ -392,6 +408,96 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     });
 
   domainCmd
+    .command("move-provider <domain>")
+    .description("Move an existing domain and its addresses to another provider")
+    .requiredOption("--to-provider <id>", "Target provider ID")
+    .option("--from-provider <id>", "Source provider ID; required if the domain exists on multiple providers")
+    .option("--dry-run", "Show the planned provider move without mutating state")
+    .option("--yes", "Skip confirmation prompt")
+    .action(async (domainName: string, opts: { toProvider: string; fromProvider?: string; dryRun?: boolean; yes?: boolean }) => {
+      try {
+        const db = getDatabase();
+        const toProviderId = resolveId("providers", opts.toProvider);
+        const toProvider = getProvider(toProviderId);
+        if (!toProvider) handleError(new Error(`Provider not found: ${opts.toProvider}`));
+
+        let domain;
+        if (opts.fromProvider) {
+          const fromProviderId = resolveId("providers", opts.fromProvider);
+          domain = getDomainByName(fromProviderId, domainName, db);
+          if (!domain) handleError(new Error(`Domain not found for source provider: ${domainName}`));
+        } else {
+          const matches = findDomainsByName(domainName, db);
+          if (matches.length === 0) handleError(new Error(`Domain not found: ${domainName}`));
+          if (matches.length > 1) {
+            const choices = matches.map((d) => `${d.id.slice(0, 8)} provider=${d.provider_id.slice(0, 8)}`).join(", ");
+            handleError(new Error(`Domain is ambiguous; pass --from-provider. Matches: ${choices}`));
+          }
+          domain = matches[0];
+        }
+
+        const fromProvider = getProvider(domain!.provider_id);
+        if (!fromProvider) handleError(new Error(`Source provider not found: ${domain!.provider_id}`));
+        const targetDomain = getDomainByName(toProviderId, domain!.domain, db);
+        const matchingAddresses = db
+          .query(
+            `SELECT COUNT(*) AS count
+               FROM addresses
+              WHERE provider_id = ?
+                AND LOWER(substr(email, instr(email, '@') + 1)) = LOWER(?)`,
+          )
+          .get(domain!.provider_id, domain!.domain) as { count: number } | null;
+        const conflicts = db
+          .query(
+            `SELECT a.email
+               FROM addresses a
+              WHERE a.provider_id = ?
+                AND LOWER(substr(a.email, instr(a.email, '@') + 1)) = LOWER(?)
+                AND EXISTS (
+                  SELECT 1
+                    FROM addresses b
+                   WHERE b.provider_id = ?
+                     AND b.email = a.email COLLATE NOCASE
+                     AND b.id != a.id
+                )
+              ORDER BY a.email ASC
+              LIMIT 10`,
+          )
+          .all(domain!.provider_id, domain!.domain, toProviderId) as Array<{ email: string }>;
+
+        const plan = {
+          domain: domain!.domain,
+          domain_id: domain!.id,
+          from_provider_id: domain!.provider_id,
+          from_provider_name: fromProvider!.name,
+          to_provider_id: toProviderId,
+          to_provider_name: toProvider!.name,
+          matching_addresses: Number(matchingAddresses?.count ?? 0),
+          target_domain_exists: !!targetDomain,
+          conflicts: conflicts.map((row) => row.email),
+        };
+
+        if (opts.dryRun) {
+          output({ dry_run: true, ...plan }, chalk.dim(`Would move ${domain!.domain} from ${fromProvider!.name} to ${toProvider!.name} and update ${plan.matching_addresses} address row(s).`));
+          return;
+        }
+
+        if (targetDomain && targetDomain.id !== domain!.id) {
+          handleError(new Error(`Target provider already has domain ${domain!.domain} (${targetDomain.id.slice(0, 8)})`));
+        }
+        if (conflicts.length > 0) {
+          handleError(new Error(`Target provider already has matching address row(s): ${conflicts.map((row) => row.email).join(", ")}`));
+        }
+
+        await confirmDestructiveAction(`Move ${domain!.domain} from ${fromProvider!.name} to ${toProvider!.name}?`, opts.yes);
+        const result = moveDomainProvider(domain!.id, toProviderId, db);
+        output({ ...plan, ...result }, chalk.green(`✓ Moved ${domain!.domain} to ${toProvider!.name}; updated ${result.moved_addresses} address row(s).`));
+      } catch (e) {
+        handleError(e);
+      }
+    });
+
+  domainCmd
     .command("remove <id>")
     .description("Remove a domain")
     .option("--yes", "Skip confirmation prompt")
@@ -415,6 +521,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .action(async (domain: string, opts: { provider?: string }) => {
       try {
         const { checkDnsRecords, formatDnsCheck } = await import("../../lib/dns-check.js");
+        const { inspectPublicMx, ownerLabel, requiresMxSwitchConfirmation, formatMxRecords } = await import("../../lib/mx-ownership.js");
 
         let providerId: string | undefined;
         if (opts.provider) {
@@ -437,18 +544,30 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
           expectedRecords = [generateSpfRecord(domain), generateDmarcRecord(domain)];
         }
 
-        console.log(chalk.bold(`\nDNS Check for ${domain}:`));
         const results = await checkDnsRecords(domain, expectedRecords);
-        console.log(formatDnsCheck(results));
+        const mx = await inspectPublicMx(domain);
 
+        const lines = [chalk.bold(`\nDNS Check for ${domain}:`), formatDnsCheck(results).trimEnd(), ""];
+        lines.push(chalk.bold("Root MX ownership:"));
+        lines.push(`  ${ownerLabel(mx.owner)} - ${mx.summary}`);
+        lines.push(`  ${chalk.dim(formatMxRecords(mx.records))}`);
+        if (requiresMxSwitchConfirmation(mx)) {
+          lines.push(chalk.yellow("  Existing inbound is protected. Use SES send-only setup unless you intentionally move or mix root MX."));
+        } else if (mx.owner === "aws-ses") {
+          lines.push(chalk.green("  SES already owns root inbound MX."));
+        } else {
+          lines.push(chalk.dim("  No root MX detected; SES inbound MX can be added when receiving is desired."));
+        }
+        lines.push("");
         const allMatch = results.every((r) => r.match);
         if (allMatch) {
-          console.log(chalk.green("All DNS records verified successfully."));
+          lines.push(chalk.green("All DNS records verified successfully."));
         } else {
           const missing = results.filter((r) => !r.match).length;
-          console.log(chalk.yellow(`${missing} record(s) not yet propagated or missing.`));
+          lines.push(chalk.yellow(`${missing} record(s) not yet propagated or missing.`));
         }
-        console.log();
+        lines.push("");
+        output({ domain, records: results, mx }, lines.join("\n"));
       } catch (e) { handleError(e); }
     });
 
@@ -462,17 +581,24 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .option("--mx", "Also add MX record for receiving email")
     .option("--mx-server <host>", "Custom MX server hostname")
     .option("--register-ses", "Register the domain with SES first if not already added")
+    .option("--force-mx-switch", "Allow adding MX even when existing root MX belongs to another provider")
     .action(async (domain: string, opts: {
       provider: string;
       cloudflareToken?: string;
       mx?: boolean;
       mxServer?: string;
       registerSes?: boolean;
+      forceMxSwitch?: boolean;
     }) => {
       try {
         const providerId = resolveId("providers", opts.provider);
         const provider = getProvider(providerId);
         if (!provider) handleError(new Error(`Provider not found: ${opts.provider}`));
+
+        if (opts.mx) {
+          const { guardSesInboundMx } = await import("../../lib/mx-ownership.js");
+          await guardSesInboundMx(domain, !!opts.forceMxSwitch);
+        }
 
         // Optionally register with SES first
         if (opts.registerSes) {
@@ -493,6 +619,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
           apiToken: opts.cloudflareToken,
           addMx: opts.mx,
           mxServer: opts.mxServer,
+          forceMxSwitch: opts.forceMxSwitch,
         });
 
         console.log(chalk.bold(`\nCloudflare DNS setup for ${domain}:`));
@@ -511,10 +638,109 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
 
         if (result.created > 0) {
           console.log(chalk.dim(`\n  DNS changes may take a few minutes to propagate.`));
-          console.log(chalk.dim(`  Verify with: emails domain verify ${domain} --provider ${opts.provider}`));
+          console.log(chalk.dim(`  Verify with: mailery domain verify ${domain} --provider ${opts.provider}`));
         }
         console.log();
         output(result, "");
+      } catch (e) {
+        handleError(e);
+      }
+    });
+
+  domainCmd
+    .command("setup-brandsight <domain>")
+    .description("Auto-create DNS records in BrandSight/GCD for email sending and SES receiving")
+    .requiredOption("--provider <id>", "SES or Resend provider ID")
+    .option("--api-key <key>", "BrandSight API key (falls back to config/env)")
+    .option("--api-secret <secret>", "BrandSight API secret (falls back to config/env)")
+    .option("--customer-id <id>", "BrandSight customer ID (falls back to config/env)")
+    .option("--mx", "Also add SES inbound MX record for receiving email")
+    .option("--mail-from <subdomain>", "Custom SES MAIL FROM subdomain (default mail.<domain>)")
+    .option("--no-set-nameservers", "Do not switch the registrar nameservers to BrandSight/GCD")
+    .option("--remove-dnssec", "Remove stale registrar DNSSEC records before/while switching to unsigned BrandSight DNS")
+    .option("--force-mx-switch", "Allow adding SES inbound MX even when existing root MX belongs to another provider")
+    .action(async (domain: string, opts: {
+      provider: string;
+      apiKey?: string;
+      apiSecret?: string;
+      customerId?: string;
+      mx?: boolean;
+      mailFrom?: string;
+      setNameservers?: boolean;
+      removeDnssec?: boolean;
+      forceMxSwitch?: boolean;
+    }) => {
+      try {
+        const providerId = resolveId("providers", opts.provider);
+        const provider = getProvider(providerId);
+        if (!provider) handleError(new Error(`Provider not found: ${opts.provider}`));
+
+        if (opts.mx) {
+          const { guardSesInboundMx } = await import("../../lib/mx-ownership.js");
+          await guardSesInboundMx(domain, !!opts.forceMxSwitch);
+        }
+
+        const adapter = getAdapter(provider!);
+        await adapter.addDomain(domain);
+        if (provider!.type === "ses" && adapter.reinitiateDomainVerification) {
+          await adapter.reinitiateDomainVerification(domain);
+        }
+        let mailFrom: string | null = null;
+        if (adapter.setMailFrom) {
+          mailFrom = await adapter.setMailFrom(domain, opts.mailFrom);
+        }
+
+        const { getBrandsightAuth } = await import("../../lib/config.js");
+        const auth = opts.apiKey || opts.apiSecret || opts.customerId
+          ? {
+              apiKey: opts.apiKey ?? "",
+              apiSecret: opts.apiSecret ?? "",
+              customerId: opts.customerId ?? "",
+            }
+          : getBrandsightAuth();
+        if (!auth?.apiKey || !auth.apiSecret || !auth.customerId) {
+          handleError(new Error("BrandSight credentials not configured (set config keys or pass --api-key, --api-secret, --customer-id)"));
+        }
+
+        const { setupBrandsightEmailDns } = await import("../../lib/brandsight-dns.js");
+        console.log(chalk.dim(`Setting up DNS records in BrandSight for ${domain}...`));
+        const result = await setupBrandsightEmailDns({
+          domain,
+          provider: provider!,
+          auth: auth!,
+          addMx: !!opts.mx,
+          mailFromDomain: mailFrom,
+          setNameservers: opts.setNameservers !== false,
+          removeDnssec: !!opts.removeDnssec,
+        });
+
+        const db = getDatabase();
+        const rec = getDomainByName(providerId, domain, db) ?? createDomain(providerId, domain, db);
+        setDomainProvisioning(rec.id, {
+          provisioning_status: "dns_published",
+          dns_provider: "brandsight",
+          send_provider: provider!.type,
+          nameservers: result.nameservers.desired,
+          mail_from_domain: mailFrom,
+          last_error: result.failed > 0 ? `${result.failed} BrandSight DNS record(s) failed` : null,
+          next_check_at: new Date().toISOString(),
+        }, db);
+
+        console.log(chalk.bold(`\nBrandSight DNS setup for ${domain}:`));
+        console.log(chalk.dim(`  Nameservers: ${result.nameservers.status}`) + (result.nameservers.error ? chalk.red(` (${result.nameservers.error})`) : ""));
+        console.log(chalk.dim(`  DNSSEC: ${result.dnssec.status}${result.dnssec.removed ? ` (${result.dnssec.removed} removed)` : ""}`) + (result.dnssec.error ? chalk.red(` (${result.dnssec.error})`) : ""));
+        for (const r of result.records) {
+          const icon = r.status === "created" || r.status === "replaced" ? chalk.green("✓")
+            : r.status === "skipped" ? chalk.dim("–")
+            : chalk.red("✗");
+          const err = r.error ? chalk.red(` (${r.error})`) : "";
+          console.log(`  ${icon} ${r.type.padEnd(6)} ${r.name} ${chalk.dim(r.status)}${err}`);
+        }
+        console.log(`\n  Created: ${chalk.green(String(result.created))}  Replaced: ${chalk.green(String(result.replaced))}  Skipped: ${chalk.dim(String(result.skipped))}${result.failed > 0 ? `  Failed: ${chalk.red(String(result.failed))}` : ""}`);
+        console.log(chalk.dim(`\n  Verify: mailery domain check ${domain} --provider ${opts.provider}`));
+        console.log();
+        output(result, "");
+        if (result.failed > 0) handleError(new Error(`${result.failed} BrandSight DNS record(s) failed for ${domain}`));
       } catch (e) {
         handleError(e);
       }
@@ -707,7 +933,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
         const result = await r53RegisterDomain(domain, contact as Parameters<typeof r53RegisterDomain>[1], parseInt(opts.years));
         console.log(chalk.green(`✓ Registration submitted for ${domain}`));
         console.log(chalk.dim(`  Operation ID: ${result.operationId}`));
-        console.log(chalk.dim(`  Check status: emails domain purchase-status ${result.operationId}`));
+        console.log(chalk.dim(`  Check status: mailery domain purchase-status ${result.operationId}`));
         output(result, "");
       } catch (e) { handleError(e); }
     });
@@ -827,7 +1053,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
           console.log(chalk.bold("\n  Name servers (point your registrar here):"));
           for (const ns of nameServers) console.log(chalk.cyan(`    ${ns}`));
         }
-        console.log(chalk.dim(`\n  Verify: emails domain verify ${domain} --provider ${opts.provider}`));
+        console.log(chalk.dim(`\n  Verify: mailery domain verify ${domain} --provider ${opts.provider}`));
         console.log();
       } catch (e) { handleError(e); }
     });

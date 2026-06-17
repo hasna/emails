@@ -68,7 +68,7 @@ export function registerWarmingTools(server: McpServer): void {
           limit: effectiveLimit,
           offset: effectiveOffset,
           truncated: rows.length > effectiveLimit,
-          cli_equivalent: `emails domain warm-list${status ? ` --status ${status}` : ""}${limit !== undefined ? ` --limit ${limit}` : ""}${offset !== undefined ? ` --offset ${offset}` : ""} --json`,
+          cli_equivalent: `mailery domain warm-list${status ? ` --status ${status}` : ""}${limit !== undefined ? ` --limit ${limit}` : ""}${offset !== undefined ? ` --offset ${offset}` : ""} --json`,
         }, null, 2) }] };
       } catch (e) {
         return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };

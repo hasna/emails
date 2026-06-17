@@ -3,7 +3,7 @@ import type { CloudflareDnsClient } from "./cloudflare-dns.js";
 
 // ─── Mock Cloudflare connector client ────────────────────────────────────────
 
-type MockRecord = { id: string; type: string; name: string; content: string; ttl: number; proxied: boolean };
+type MockRecord = { id: string; type: string; name: string; content: string; ttl: number; proxied: boolean; priority?: number };
 let mockZones: { id: string; name: string; name_servers?: string[] }[] = [];
 let mockRecords: MockRecord[] = [];
 let createCalled: { type: string; name: string; content: string }[] = [];
@@ -52,9 +52,9 @@ beforeEach(() => {
         return true;
       })
   ));
-  mockCf.createDnsRecord.mockImplementation(async (_zoneId: string, params: { type: string; name: string; content: string; ttl?: number; proxied?: boolean }) => {
+  mockCf.createDnsRecord.mockImplementation(async (_zoneId: string, params: { type: string; name: string; content: string; ttl?: number; proxied?: boolean; priority?: number }) => {
     createCalled.push({ type: params.type, name: params.name, content: params.content });
-    const record: MockRecord = { id: `rec-${Math.random().toString(36).slice(2,8)}`, type: params.type, name: params.name, content: params.content, ttl: 300, proxied: false };
+    const record: MockRecord = { id: `rec-${Math.random().toString(36).slice(2,8)}`, type: params.type, name: params.name, content: params.content, ttl: 300, proxied: false, priority: params.priority };
     mockRecords.push(record);
     return record;
   });
@@ -123,6 +123,36 @@ describe("upsertEmailDnsRecords", () => {
     expect(mockCf.createDnsRecord).not.toHaveBeenCalled();
   });
 
+  it("skips compatible SPF records with extra existing providers", async () => {
+    mockRecords = [
+      { id: "r1", type: "TXT", name: "example.com", content: '"v=spf1 include:amazonses.com include:_spf.google.com ~all"', ttl: 300, proxied: false },
+    ];
+
+    const records = [
+      { type: "TXT" as const, name: "example.com", value: "v=spf1 include:amazonses.com ~all", purpose: "SPF" as const },
+    ];
+
+    const results = await upsertEmailDnsRecords(makeCf(), "z1", records);
+
+    expect(results[0]!.status).toBe("skipped");
+    expect(mockCf.createDnsRecord).not.toHaveBeenCalled();
+  });
+
+  it("skips stricter compatible DMARC records", async () => {
+    mockRecords = [
+      { id: "r1", type: "TXT", name: "_dmarc.example.com", content: '"v=DMARC1; p=quarantine; rua=mailto:dmarc@example.com"', ttl: 300, proxied: false },
+    ];
+
+    const records = [
+      { type: "TXT" as const, name: "_dmarc.example.com", value: "v=DMARC1; p=none; rua=mailto:dmarc@example.com", purpose: "DMARC" as const },
+    ];
+
+    const results = await upsertEmailDnsRecords(makeCf(), "z1", records);
+
+    expect(results[0]!.status).toBe("skipped");
+    expect(mockCf.createDnsRecord).not.toHaveBeenCalled();
+  });
+
   it("creates some and skips others", async () => {
     mockRecords = [
       { id: "r1", type: "TXT", name: "example.com", content: '"v=spf1 include:amazonses.com ~all"', ttl: 300, proxied: false },
@@ -161,5 +191,29 @@ describe("addMxRecord", () => {
     const result = await addMxRecord(makeCf(), "z1", "example.com", "inbound-smtp.us-east-1.amazonaws.com");
     expect(result.status).toBe("skipped");
     expect(mockCf.createDnsRecord).not.toHaveBeenCalled();
+  });
+
+  it("blocks SES inbound MX beside Google Workspace unless forced", async () => {
+    mockRecords = [
+      { id: "mx1", type: "MX", name: "example.com", content: "aspmx.l.google.com", ttl: 300, proxied: false, priority: 1 },
+      { id: "mx2", type: "MX", name: "example.com", content: "alt1.aspmx.l.google.com", ttl: 300, proxied: false, priority: 5 },
+    ];
+
+    const result = await addMxRecord(makeCf(), "z1", "example.com", "inbound-smtp.us-east-1.amazonaws.com");
+
+    expect(result.status).toBe("failed");
+    expect(result.error).toContain("Google Workspace");
+    expect(mockCf.createDnsRecord).not.toHaveBeenCalled();
+  });
+
+  it("allows forced SES inbound MX beside an existing provider", async () => {
+    mockRecords = [
+      { id: "mx1", type: "MX", name: "example.com", content: "aspmx.l.google.com", ttl: 300, proxied: false, priority: 1 },
+    ];
+
+    const result = await addMxRecord(makeCf(), "z1", "example.com", "inbound-smtp.us-east-1.amazonaws.com", 10, { forceMxSwitch: true });
+
+    expect(result.status).toBe("created");
+    expect(mockCf.createDnsRecord).toHaveBeenCalledTimes(1);
   });
 });

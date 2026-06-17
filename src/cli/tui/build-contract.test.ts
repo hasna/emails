@@ -21,12 +21,13 @@ describe("emails ui build contract", () => {
     expect(buildHelper).toContain("src/cli/tui/runtime.tsx");
     expect(buildHelper).toContain("ui-runtime-bundle.[ext]");
     expect(buildHelper).not.toContain("--packages external");
+    expect(buildHelper).toContain("createSolidTransformPlugin");
     expect(buildHelper).toContain('"@opentui/core-linux-arm64"');
     expect(buildHelper).toContain('"@opentui/core-darwin-arm64"');
   });
 
   it("runs the UI in alternate screen and keeps renderer cleanup on signal paths", () => {
-    const source = readFileSync(join(root, "src", "cli", "tui", "runtime.tsx"), "utf8");
+    const source = readFileSync(join(root, "src", "cli", "tui-solid", "runtime.tsx"), "utf8");
 
     expect(source).toContain('process.env["OTUI_USE_ALTERNATE_SCREEN"] = "true"');
     expect(source).toContain('screenMode: "alternate-screen"');
@@ -44,7 +45,10 @@ describe("emails ui build contract", () => {
     expect(source).toContain("../tui/runtime.js");
     expect(source).not.toContain('from "@opentui/core"');
     expect(source).not.toContain('from "@opentui/react"');
+    expect(source).not.toContain('from "@opentui/solid"');
+    expect(source).not.toContain('from "@opentui/keymap"');
     expect(source).not.toContain('from "react"');
+    expect(source).not.toContain('from "solid-js"');
   });
 
   it("keeps send/provider runtime code out of the initial TUI data graph", () => {

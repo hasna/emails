@@ -21,6 +21,17 @@ describe("checkProvisionCredentials", () => {
     expect(cf.detail).toMatch(/account id/i);
   });
 
+  it("detects Cloudflare global key from stored config", () => {
+    const cf = checkProvisionCredentials({}, {
+      cloudflare_api_key: "k",
+      cloudflare_email: "a@b.com",
+      cloudflare_account_id: "acct",
+    }).find((x) => x.provider === "cloudflare")!;
+    expect(cf.configured).toBe(true);
+    expect(cf.detail).toContain("global key");
+    expect(cf.detail).toContain("account");
+  });
+
   it("resend optional when absent", () => {
     expect(checkProvisionCredentials({}).find((x) => x.provider === "resend")!.configured).toBe(false);
   });

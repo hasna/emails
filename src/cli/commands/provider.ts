@@ -112,7 +112,7 @@ export function registerProviderCommands(program: Command, output: (data: unknow
       try {
         const providers = listProviderSummaries(undefined, parseCliPage(opts));
         if (providers.length === 0) {
-          output([], chalk.dim("No providers configured. Use 'emails provider add' to add one."));
+          output([], chalk.dim("No providers configured. Use 'mailery provider add' to add one."));
           return;
         }
         const lines: string[] = [chalk.bold("\nProviders:")];
@@ -249,7 +249,7 @@ export function registerProviderCommands(program: Command, output: (data: unknow
         const { checkAllProviders, formatProviderHealth } = await import("../../lib/health.js");
         const results = await checkAllProviders();
         if (results.length === 0) {
-          output([], chalk.dim("No active providers. Add one with 'emails provider add'"));
+          output([], chalk.dim("No active providers. Add one with 'mailery provider add'"));
           return;
         }
         const lines: string[] = [chalk.bold("\nProvider Health:\n")];
@@ -273,9 +273,9 @@ export function registerProviderCommands(program: Command, output: (data: unknow
         if (providers.length === 0) {
           console.log(chalk.dim("No providers configured."));
           console.log(chalk.bold("\nQuick setup:"));
-          console.log(chalk.dim("  SES:    emails provider add --type ses --name \"My SES\" --region us-east-1 --access-key ... --secret-key ..."));
-          console.log(chalk.dim("  Resend: emails provider add --type resend --name \"My Resend\" --api-key re_..."));
-          console.log(chalk.dim("  Gmail:  connectors auth gmail --no-browser  →  emails provider add-gmail"));
+          console.log(chalk.dim("  SES:    mailery provider add --type ses --name \"My SES\" --region us-east-1 --access-key ... --secret-key ..."));
+          console.log(chalk.dim("  Resend: mailery provider add --type resend --name \"My Resend\" --api-key re_..."));
+          console.log(chalk.dim("  Gmail:  connectors auth gmail --no-browser  ->  mailery provider add-gmail"));
           return;
         }
 
@@ -428,9 +428,9 @@ export function registerProviderCommands(program: Command, output: (data: unknow
         }
 
         console.log(chalk.bold("\nNext steps:"));
-        console.log(chalk.dim(`  Sync inbox:    emails inbox sync --provider ${provider.id.slice(0, 8)} --all`));
-        console.log(chalk.dim(`  Check status:  emails inbox status`));
-        console.log(chalk.dim(`  Send email:    emails send --from ${emailAddress} --to ... --subject ... --body ...`));
+        console.log(chalk.dim(`  Sync inbox:    mailery inbox sync --provider ${provider.id.slice(0, 8)} --all`));
+        console.log(chalk.dim(`  Check status:  mailery inbox status`));
+        console.log(chalk.dim(`  Send email:    mailery send --from ${emailAddress} --to ... --subject ... --body ...`));
         console.log();
       } catch (e) {
         handleError(e);

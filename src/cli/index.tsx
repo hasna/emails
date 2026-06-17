@@ -1,6 +1,5 @@
 #!/usr/bin/env bun
 import { Command } from "commander";
-import { registerEventsCommands } from "@hasna/events/commander";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -43,8 +42,8 @@ const allCommandModules = [
   "alias",
   "sendkey",
   "reply",
+  "forwarding",
   "ui",
-  "profiles",
   "triage",
   "aws",
   "storage",
@@ -53,6 +52,90 @@ const allCommandModules = [
 ] as const;
 
 type CommandModule = typeof allCommandModules[number];
+
+const knownCommandNames = new Set([
+  "provider",
+  "domain",
+  "domains",
+  "address",
+  "addresses",
+  "send",
+  "email",
+  "log",
+  "search",
+  "show",
+  "replies",
+  "conversation",
+  "test",
+  "export",
+  "webhook",
+  "pull",
+  "stats",
+  "monitor",
+  "analytics",
+  "serve",
+  "mcp",
+  "config",
+  "template",
+  "preview",
+  "contact",
+  "contacts",
+  "group",
+  "sequence",
+  "sandbox",
+  "schedule",
+  "scheduled",
+  "scheduler",
+  "batch",
+  "completion",
+  "doctor",
+  "delivery",
+  "verify-email",
+  "inbox",
+  "code",
+  "refresh",
+  "provision",
+  "owner",
+  "alias",
+  "sendkey",
+  "reply",
+  "forward",
+  "forwarding",
+  "ui",
+  "links",
+  "triage",
+  "agent",
+  "ask",
+  "aws",
+  "storage",
+  "status",
+  "daemon",
+  "logs",
+]);
+
+function routeRootPromptArgs(args: string[]): string[] {
+  const command = requestedCommand(args);
+  if (args.includes("--help") || args.includes("-h")) return args;
+
+  const firstCommandIndex = args.findIndex((arg) => arg === command);
+  const promptArgs = firstCommandIndex >= 0 ? args.slice(firstCommandIndex) : args;
+  if (!command) return args;
+  if (knownCommandNames.has(command)) {
+    if (command !== "links" || !looksLikeLinksPrompt(promptArgs)) return args;
+  }
+  const promptText = promptArgs.join(" ").trim();
+  const looksNatural = promptArgs.length > 1 || /\s|\?/.test(command);
+  if (!promptText || !looksNatural) return args;
+
+  const leading = firstCommandIndex > 0 ? args.slice(0, firstCommandIndex) : [];
+  return [...leading, "agent", ...promptArgs];
+}
+
+function looksLikeLinksPrompt(args: string[]): boolean {
+  const target = args.slice(1).find((arg) => !arg.startsWith("-"));
+  if (!target) return false;
+  return !/^[a-f0-9-]{4,}$/i.test(target);
+}
 
 function requestedCommand(args: string[]): string | null {
   for (const arg of args) {
@@ -104,7 +187,8 @@ function commandModulesFor(args: string[]): readonly CommandModule[] {
     case "doctor":
     case "delivery":
     case "verify-email": return ["misc"];
-    case "inbox": return ["inbox"];
+    case "inbox":
+    case "links": return ["inbox"];
     case "refresh": return ["refresh"];
     case "provision": return ["provision"];
     case "owner": return ["owner"];
@@ -112,14 +196,14 @@ function commandModulesFor(args: string[]): readonly CommandModule[] {
     case "sendkey": return ["sendkey"];
     case "reply":
     case "forward": return ["reply"];
+    case "forwarding": return ["forwarding"];
     case "ui": return ["ui"];
-    case "profiles":
-    case "accounts": return ["profiles"];
     case "triage": return ["triage"];
+    case "agent":
+    case "ask": return ["status"];
     case "aws": return ["aws"];
     case "storage": return ["storage"];
-    case "status":
-    case "agent": return ["status"];
+    case "status": return ["status"];
     case "daemon":
     case "logs": return ["daemon"];
     default: return allCommandModules;
@@ -149,8 +233,8 @@ async function loadCommandModule(module: CommandModule): Promise<RegisterFn> {
     case "alias": return (await import("./commands/alias.js")).registerAliasCommands;
     case "sendkey": return (await import("./commands/sendkey.js")).registerSendKeyCommands;
     case "reply": return (await import("./commands/reply.js")).registerReplyCommand;
+    case "forwarding": return (await import("./commands/forwarding.js")).registerForwardingCommands;
     case "ui": return (await import("./commands/ui.js")).registerUiCommand;
-    case "profiles": return (await import("./commands/profiles.js")).registerProfilesCommands;
     case "triage": return (await import("./commands/triage.js")).registerTriageCommands;
     case "aws": return (await import("./commands/aws.js")).registerAwsCommands;
     case "storage": return (await import("./commands/storage.js")).registerStorageCommands;
@@ -166,12 +250,25 @@ async function registerCommandsForArgs(program: Command, output: OutputFn, args:
   }
 }
 
+async function registerOptionalEventsCommands(program: Command): Promise<void> {
+  try {
+    const importer = new Function("specifier", "return import(specifier)") as (specifier: string) => Promise<{ registerEventsCommands?: (program: Command, opts: { source: string }) => void }>;
+    const events = await importer("@hasna/events/commander");
+    events.registerEventsCommands?.(program, { source: "mailery" });
+  } catch {
+    // The events integration is optional; keep the Mailery CLI usable when the
+    // companion package is not installed in a global/npm environment.
+  }
+}
+
 async function main(): Promise<void> {
   const version = getPackageVersion();
-  if (shouldPrintVersionEarly(process.argv.slice(2))) {
+  const rawArgs = process.argv.slice(2);
+  if (shouldPrintVersionEarly(rawArgs)) {
     console.log(version);
     return;
   }
+  const cliArgs = routeRootPromptArgs(rawArgs);
 
   const program = new Command();
   const [{ setLogLevel }, { configureCliRuntime, emitJson }] = await Promise.all([
@@ -180,8 +277,8 @@ async function main(): Promise<void> {
   ]);
 
   program
-    .name("emails")
-    .description("Email management CLI — send, receive, sync, and manage email via Resend, AWS SES, and Gmail")
+    .name("mailery")
+    .description("Mailery email management CLI - send, receive, sync, and manage email via Resend, AWS SES, and Gmail")
     .version(version)
     .option("--json", "Output JSON instead of formatted text")
     .option("-q, --quiet", "Suppress info output")
@@ -201,11 +298,10 @@ async function main(): Promise<void> {
     }
   }
 
-  await registerCommandsForArgs(program, output, process.argv.slice(2));
+  await registerCommandsForArgs(program, output, cliArgs);
+  await registerOptionalEventsCommands(program);
 
-  registerEventsCommands(program, { source: "emails" });
-
-await program.parseAsync(process.argv);
+  await program.parseAsync([process.argv[0] ?? "bun", process.argv[1] ?? "mailery", ...cliArgs]);
 }
 
 await main();

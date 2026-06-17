@@ -50,7 +50,7 @@ export function registerTemplateCommands(program: Command, output: (data: unknow
       try {
         const templates = listTemplateSummaries(undefined, parseCliPage(opts));
         if (templates.length === 0) {
-          output([], chalk.dim("No templates configured. Use 'emails template add' to create one."));
+          output([], chalk.dim("No templates configured. Use 'mailery template add' to create one."));
           return;
         }
         const tplLines: string[] = [chalk.bold("\nTemplates:")];

@@ -250,6 +250,33 @@ describe("syncS3Inbox — with objects", () => {
     expect(result.skipped).toBe(1);
   });
 
+  it("tags already-synced S3 rows that were previously missing a provider id", async () => {
+    const { db, providerId } = setupDb();
+
+    db.run(
+      `INSERT INTO inbound_emails (id, provider_id, message_id, from_address, to_addresses, cc_addresses, subject, attachments_json, attachment_paths, headers_json, raw_size, received_at, created_at)
+       VALUES (?, NULL, ?, 'a@b.com', '[]', '[]', 'S', '[]', '[]', '{}', 0, datetime('now'), datetime('now'))`,
+      [uuid(), "inbound/example.com/msg001"],
+    );
+
+    mockSend.mockImplementation(async (cmd: unknown) => {
+      const c = cmd as { input?: Record<string, unknown> };
+      if (c?.input && "Prefix" in (c.input ?? {})) {
+        return {
+          Contents: [{ Key: "inbound/example.com/msg001", Size: 1024 }],
+          IsTruncated: false,
+        };
+      }
+      return {};
+    });
+
+    const result = await syncS3Inbox({ bucket: "test-bucket", db, providerId });
+    expect(result.synced).toBe(0);
+    expect(result.skipped).toBe(1);
+    const row = db.query("SELECT provider_id FROM inbound_emails WHERE message_id = ?").get("inbound/example.com/msg001") as { provider_id: string };
+    expect(row.provider_id).toBe(providerId);
+  });
+
   it("handles list error gracefully", async () => {
     const { db, providerId } = setupDb();
 

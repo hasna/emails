@@ -25,6 +25,8 @@ export const STORAGE_TABLES = [
   "gmail_sync_state",
   "aliases",
   "send_keys",
+  "forwarding_rules",
+  "forwarding_deliveries",
   "address_ownership_events",
   "provisioning_events",
   "email_triage",
@@ -58,6 +60,8 @@ const PRIMARY_KEYS: Record<StorageTable, string[]> = {
   gmail_sync_state: ["provider_id"],
   aliases: ["id"],
   send_keys: ["id"],
+  forwarding_rules: ["id"],
+  forwarding_deliveries: ["id"],
   address_ownership_events: ["id"],
   provisioning_events: ["id"],
   email_triage: ["id"],
@@ -168,7 +172,21 @@ export async function getStoragePg(): Promise<PgAdapterAsync> {
 export async function runStorageMigrations(remote: PgAdapterAsync): Promise<void> {
   const { PG_MIGRATIONS } = await import("./pg-migrations.js");
   await remote.run("CREATE EXTENSION IF NOT EXISTS pgcrypto");
-  for (const sql of PG_MIGRATIONS) await remote.run(sql);
+  const [baseMigration, ...remaining] = PG_MIGRATIONS;
+  if (baseMigration) await remote.run(baseMigration);
+  const appliedRows = await remote.all("SELECT id FROM _migrations");
+  const applied = new Set(appliedRows.map((row) => Number((row as { id?: unknown }).id)).filter(Number.isFinite));
+  for (const sql of remaining) {
+    const id = migrationId(sql);
+    if (id !== null && applied.has(id)) continue;
+    await remote.run(sql);
+    if (id !== null) applied.add(id);
+  }
+}
+
+function migrationId(sql: string): number | null {
+  const match = sql.match(/INSERT\s+INTO\s+_migrations\s*\(\s*id\s*\)\s*VALUES\s*\(\s*(\d+)\s*\)/i);
+  return match ? Number(match[1]) : null;
 }
 
 export async function storagePush(options?: StorageSyncOptions): Promise<SyncResult[]> {

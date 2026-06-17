@@ -143,11 +143,11 @@ describe("send keys — scope enforcement", () => {
   });
 
   it("agent administering a human-owned address can send from it", () => {
-    const human = createOwner({ type: "human", name: "Andrei" });
+    const human = createOwner({ type: "human", name: "Morgan" });
     const agent = createOwner({ type: "agent", name: "Tiberius" });
-    const addr = createAddress({ provider_id: providerId, email: "andrei@x.com" });
+    const addr = createAddress({ provider_id: providerId, email: "morgan@x.com" });
     assignAddressOwner(addr.id, human.id, agent.id);
-    expect(canOwnerSendFrom(agent.id, "andrei@x.com")).toBe(true);
+    expect(canOwnerSendFrom(agent.id, "morgan@x.com")).toBe(true);
   });
 
   it("assertSendAuthorized throws for an out-of-scope from address", () => {

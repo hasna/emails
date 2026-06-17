@@ -29,7 +29,7 @@ export function registerGroupCommands(program: Command, output: (data: unknown, 
         const page = parseCliPage(opts);
         const groups = listGroups(undefined, page);
         if (groups.length === 0) {
-          output([], chalk.dim("No groups configured. Use 'emails group create' to add one."));
+          output([], chalk.dim("No groups configured. Use 'mailery group create' to add one."));
           return;
         }
         const counts = getMemberCounts(groups.map((group) => group.id));
@@ -66,7 +66,7 @@ export function registerGroupCommands(program: Command, output: (data: unknown, 
         if (group!.description) lines.push(chalk.dim(`  ${group!.description}`));
         lines.push(`  Members (${members.length} shown / ${memberCount} total):`);
         if (members.length === 0) {
-          lines.push(chalk.dim("    No members. Use 'emails group add' to add some."));
+          lines.push(chalk.dim("    No members. Use 'mailery group add' to add some."));
         } else {
           for (const m of members) {
             const displayName = m.name ? ` (${m.name})` : "";

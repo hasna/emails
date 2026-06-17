@@ -14,10 +14,15 @@ import {
 } from "../../db/provisioning.js";
 import { handleError, parseCliPage, resolveId } from "../utils.js";
 import { normalizeRoute53RegistrationContact } from "../../lib/route53-contact.js";
+import type { MxAssessment } from "../../lib/mx-ownership.js";
 
 type ReceiveStrategy = "ses-s3" | "cf-routing" | "resend-webhook";
 
-export function registerProvisionCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
+export interface ProvisionCommandDeps {
+  inspectMx?: (domain: string) => Promise<MxAssessment>;
+}
+
+export function registerProvisionCommands(program: Command, output: (data: unknown, formatted: string) => void, deps: ProvisionCommandDeps = {}): void {
   const cmd = program.command("provision").description("Automated domain + address provisioning");
 
   // ── status ────────────────────────────────────────────────────────────────
@@ -89,7 +94,7 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
             would_assign_owner: !!opts.owner,
             current_provisioning: existing ? getAddressProvisioning(existing.id, db) : null,
             planned_provisioning: plannedProvisioning,
-            cli_equivalent: `emails provision address ${email} --provider ${opts.provider}${opts.owner ? ` --owner ${opts.owner}` : ""}${opts.wait ? " --wait" : ""} --json`,
+            cli_equivalent: `mailery provision address ${email} --provider ${opts.provider}${opts.owner ? ` --owner ${opts.owner}` : ""}${opts.wait ? " --wait" : ""} --dry-run --json`,
           }, existing
             ? chalk.dim(`Would update provisioning for existing address ${email} (${existing.id.slice(0, 8)}).`)
             : chalk.dim(`Would create ${email} and request ${opts.receive} receive provisioning.`));
@@ -145,7 +150,7 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
 
         const readyText = provisioning?.provisioning_status === "ready"
           ? chalk.green(`✓ address ${email} ready to receive (receive=${opts.receive})${ownerNote}`)
-          : chalk.green(`✓ address ${email} requested (receive=${opts.receive})${ownerNote}`) + chalk.dim(`\n  Finish now: emails provision address ${email} --provider ${opts.provider} --wait`);
+          : chalk.green(`✓ address ${email} requested (receive=${opts.receive})${ownerNote}`) + chalk.dim(`\n  Finish now: mailery provision address ${email} --provider ${opts.provider} --wait`);
         output({ id: addr.id, email, receive: opts.receive, created: !existing, provisioning }, readyText);
       } catch (e) { handleError(e); }
     });
@@ -157,11 +162,12 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
     .requiredOption("--provider <id>", "SES provider ID")
     .option("--send <provider>", "Send provider", "ses")
     .option("--add-mx", "Also publish inbound MX (ses-s3 receive)")
+    .option("--force-mx-switch", "Allow adding SES inbound MX even when existing root MX belongs to another provider")
     .option("--mail-from <subdomain>", "Custom MAIL FROM subdomain (default mail.<domain>)")
     .option("--dry-run", "Resolve inputs and show the planned change without calling providers or writing to the DB")
     .option("--wait", "Poll SES until the domain is verified for sending")
     .option("--timeout <sec>", "Max seconds to wait for verification", "600")
-    .action(async (domain: string, opts: { provider: string; send: string; addMx?: boolean; mailFrom?: string; dryRun?: boolean; wait?: boolean; timeout: string }) => {
+    .action(async (domain: string, opts: { provider: string; send: string; addMx?: boolean; forceMxSwitch?: boolean; mailFrom?: string; dryRun?: boolean; wait?: boolean; timeout: string }) => {
       try {
         const db = getDatabase();
         const providerId = resolveId("providers", opts.provider);
@@ -169,6 +175,22 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
         if (!provider) handleError(new Error(`Provider not found: ${opts.provider}`));
         const existing = getDomainByName(providerId, domain, db);
         if (opts.dryRun) {
+          let mxAssessment: MxAssessment | null = null;
+          let mxSafety = opts.addMx
+            ? "Existing root MX is checked before DNS is written; use --force-mx-switch only after confirming inbound can move."
+            : "Root MX is preserved; this is send-only SES setup.";
+          let mxRequiresConfirmation = false;
+          let mxFormattedRecords: string | null = null;
+          if (opts.addMx) {
+            const mx = await import("../../lib/mx-ownership.js");
+            const inspectMx = deps.inspectMx ?? mx.inspectPublicMx;
+            mxAssessment = await inspectMx(domain);
+            mxRequiresConfirmation = mx.requiresMxSwitchConfirmation(mxAssessment);
+            mxFormattedRecords = mx.formatMxRecords(mxAssessment.records);
+            mxSafety = mxRequiresConfirmation
+              ? mx.formatMxSwitchWarning(mxAssessment)
+              : `Root MX is compatible with SES inbound: ${mxAssessment.summary}.`;
+          }
           output({
             dry_run: true,
             domain,
@@ -182,12 +204,24 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
               dns_provider: "cloudflare",
               mail_from_domain: opts.mailFrom ?? `mail.${domain}`,
               add_mx: !!opts.addMx,
+              force_mx_switch: !!opts.forceMxSwitch,
             },
-            cli_equivalent: `emails provision domain ${domain} --provider ${opts.provider}${opts.addMx ? " --add-mx" : ""}${opts.wait ? " --wait" : ""} --json`,
+            mx_safety: mxSafety,
+            mx_assessment: mxAssessment,
+            mx_requires_confirmation: mxRequiresConfirmation,
+            cli_equivalent: `mailery provision domain ${domain} --provider ${opts.provider}${opts.addMx ? " --add-mx" : ""}${opts.forceMxSwitch ? " --force-mx-switch" : ""}${opts.wait ? " --wait" : ""} --dry-run --json`,
           }, existing
             ? chalk.dim(`Would provision existing domain ${domain} (${existing.id.slice(0, 8)}).`)
-            : chalk.dim(`Would register ${domain} locally, create SES identity, publish DNS, and${opts.wait ? "" : " not"} wait for verification.`));
+            : chalk.dim(`Would register ${domain} locally, create SES identity, publish DNS, and${opts.wait ? "" : " not"} wait for verification.`)
+              + (opts.addMx
+                ? chalk.yellow(`\n  ${mxSafety}${mxFormattedRecords ? `\n  Current MX: ${mxFormattedRecords}` : ""}`)
+                : chalk.dim("\n  Root MX will be preserved (send-only).")));
           return;
+        }
+
+        if (opts.addMx) {
+          const { guardSesInboundMx } = await import("../../lib/mx-ownership.js");
+          await guardSesInboundMx(domain, !!opts.forceMxSwitch);
         }
 
         const rec = existing ?? createDomain(providerId, domain, db);
@@ -202,7 +236,7 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
           setDomainProvisioning(rec.id, { mail_from_domain: mailFrom }, db);
         }
         const { setupEmailDns } = await import("../../lib/cloudflare-dns.js");
-        const dns = await setupEmailDns({ domain, provider: provider!, addMx: !!opts.addMx });
+        const dns = await setupEmailDns({ domain, provider: provider!, addMx: !!opts.addMx, forceMxSwitch: !!opts.forceMxSwitch });
         setDomainProvisioning(rec.id, { provisioning_status: "dns_published", next_check_at: new Date().toISOString() }, db);
 
         let verified = false;
@@ -221,7 +255,7 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
 
         output(
           { domain, mail_from: mailFrom, dns, verified },
-          chalk.green(`✓ ${domain}: SES identity + MAIL FROM (${mailFrom ?? "n/a"}), ${dns.created} DNS records in Cloudflare${opts.wait ? (verified ? ", VERIFIED ✓" : ", verification still pending") : `. Verify: emails domain verify ${domain} --provider ${opts.provider}`}`),
+          chalk.green(`✓ ${domain}: SES identity + MAIL FROM (${mailFrom ?? "n/a"}), ${dns.created} DNS records in Cloudflare${opts.wait ? (verified ? ", VERIFIED ✓" : ", verification still pending") : `. Verify: mailery domain verify ${domain} --provider ${opts.provider}`}`),
         );
       } catch (e) { handleError(e); }
     });
@@ -234,12 +268,14 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
     .option("--addresses <list>", "Comma-separated local parts to create", "one,two,three")
     .option("--bucket <name>", "Inbound S3 bucket (defaults to config inbound_s3_bucket)")
     .option("--add-mx", "Publish inbound MX (ses-s3 receive)", true)
+    .option("--no-add-mx", "Preserve existing root MX and skip SES inbound MX publishing")
+    .option("--force-mx-switch", "Allow adding SES inbound MX even when existing root MX belongs to another provider")
     .option("--count <n>", "Round-trip messages per pair (0 = skip test)", "1")
     .option("--timeout <sec>", "Max seconds to wait for SES verification", "600")
     .option("--no-test", "Skip the final round-trip test")
     .option("--buy-if-needed", "Buy + delegate the domain first (via @hasna/domains SDK) if not already owned")
     .option("--purchase-profile <profile>", "AWS profile for the purchase (default: hasna-xyz-infra)")
-    .action(async (domain: string, opts: { provider: string; addresses: string; bucket?: string; addMx?: boolean; count: string; timeout: string; test?: boolean; buyIfNeeded?: boolean; purchaseProfile?: string }) => {
+    .action(async (domain: string, opts: { provider: string; addresses: string; bucket?: string; addMx?: boolean; forceMxSwitch?: boolean; count: string; timeout: string; test?: boolean; buyIfNeeded?: boolean; purchaseProfile?: string }) => {
       try {
         const db = getDatabase();
         const providerId = resolveId("providers", opts.provider);
@@ -247,8 +283,14 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
         if (!provider) return handleError(new Error(`Provider not found: ${opts.provider}`));
         const { getInboundConfig } = await import("../../lib/config.js");
         const cfg = getInboundConfig();
+        const sesInboundRequested = opts.addMx !== false;
         const bucket = opts.bucket ?? cfg.bucket;
-        if (!bucket) return handleError(new Error("No inbound bucket: pass --bucket or set inbound_s3_bucket"));
+        if (sesInboundRequested && !bucket) return handleError(new Error("No inbound bucket: pass --bucket or set inbound_s3_bucket"));
+
+        if (sesInboundRequested) {
+          const { guardSesInboundMx } = await import("../../lib/mx-ownership.js");
+          await guardSesInboundMx(domain, !!opts.forceMxSwitch);
+        }
 
         const adapter = getAdapter(provider!);
         const rec = getDomainByName(providerId, domain, db) ?? createDomain(providerId, domain, db);
@@ -298,7 +340,7 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
 
         step("Publish DNS to Cloudflare");
         const { setupEmailDns } = await import("../../lib/cloudflare-dns.js");
-        const dns = await setupEmailDns({ domain, provider: provider!, addMx: opts.addMx !== false });
+        const dns = await setupEmailDns({ domain, provider: provider!, addMx: sesInboundRequested, forceMxSwitch: !!opts.forceMxSwitch });
         console.log(chalk.dim(`  ${dns.created} created, ${dns.skipped} skipped`));
         setDomainProvisioning(rec.id, { provisioning_status: "dns_published" }, db);
 
@@ -316,24 +358,33 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
         console.log(chalk.green("  verified ✓"));
 
         step("Set up SES inbound (S3 receipt rules)");
-        const { setupInboundEmail } = await import("../../lib/aws-inbound.js");
-        const inbound = await setupInboundEmail({ domain, bucket: bucket!, region: cfg.region });
-        console.log(chalk.dim(`  bucket ${inbound.bucket}, MX ${inbound.mx_record}`));
-        setDomainProvisioning(rec.id, { provisioning_status: "inbound_ready" }, db);
+        let inbound: { bucket: string; mx_record: string } | null = null;
+        if (sesInboundRequested) {
+          const { setupInboundEmail } = await import("../../lib/aws-inbound.js");
+          inbound = await setupInboundEmail({ domain, bucket: bucket!, region: cfg.region });
+          console.log(chalk.dim(`  bucket ${inbound.bucket}, MX ${inbound.mx_record}`));
+          setDomainProvisioning(rec.id, { provisioning_status: "inbound_ready" }, db);
+        } else {
+          console.log(chalk.dim("  skipped; existing root MX preserved"));
+        }
 
         step("Create addresses");
         const locals = opts.addresses.split(",").map((a) => a.trim());
+        const sesReceiveReady = sesInboundRequested;
         for (const l of locals) {
           const email = `${l}@${domain}`;
           const addr = getAddressByEmail(providerId, email, db) ?? createAddress({ provider_id: providerId, email }, db);
-          setAddressProvisioning(addr.id, { domain_id: rec.id, receive_strategy: "ses-s3", provisioning_status: "ready" }, db);
-          console.log(chalk.dim(`  + ${email}`));
+          setAddressProvisioning(addr.id, { domain_id: rec.id, receive_strategy: "ses-s3", provisioning_status: sesReceiveReady ? "ready" : "requested" }, db);
+          console.log(chalk.dim(`  + ${email}${sesReceiveReady ? "" : " (send-only; existing inbound preserved)"}`));
         }
-        setDomainProvisioning(rec.id, { provisioning_status: "ready", next_check_at: null }, db);
+        setDomainProvisioning(rec.id, { provisioning_status: sesReceiveReady ? "ready" : "verified", next_check_at: null }, db);
 
         let rtSuccess = true;
         const count = parseInt(opts.count, 10);
-        if (opts.test !== false && count > 0 && locals.length >= 2) {
+        if (!sesInboundRequested && opts.test !== false && count > 0) {
+          step("Round-trip test");
+          console.log(chalk.dim("  skipped; existing root MX was preserved, so SES->S3 receipt is not the active inbound path"));
+        } else if (opts.test !== false && count > 0 && locals.length >= 2) {
           step(`Round-trip test (${count}/pair)`);
           const { sendWithFailover } = await import("../../lib/send.js");
           const { syncS3Inbox } = await import("../../lib/s3-sync.js");
@@ -348,7 +399,16 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
                 return { messageId: r.messageId };
               },
               fetchReceived: async (mailbox) => {
-                await syncS3Inbox({ bucket: bucket!, prefix: `inbound/${domain}/`, providerId, limit: 1000, region: cfg.region, db });
+                await syncS3Inbox({
+                  bucket: bucket!,
+                  prefix: `inbound/${domain}/`,
+                  providerId,
+                  accessKeyId: provider.access_key ?? undefined,
+                  secretAccessKey: provider.secret_key ?? undefined,
+                  limit: 1000,
+                  region: cfg.region,
+                  db,
+                });
                 return listInboundSubjectsForRecipient(mailbox, { since: roundtripStartedAt, limit: subjectLimit }, db);
               },
             },
@@ -358,8 +418,8 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
           console.log(report.success ? chalk.green(`  ✓ ${report.totalReceived}/${report.totalSent} delivered`) : chalk.red(`  ✗ ${report.totalReceived}/${report.totalSent}`));
         }
 
-        output({ domain, mail_from: mailFrom, verified, inbound_bucket: inbound.bucket, addresses: locals, roundtrip_ok: rtSuccess },
-          (rtSuccess ? chalk.green : chalk.yellow)(`\n${rtSuccess ? "✓" : "⚠"} ${domain} provisioned end-to-end via CLI (send via ${opts.provider}, receive via SES→S3)`));
+        output({ domain, mail_from: mailFrom, verified, inbound_bucket: inbound?.bucket ?? null, addresses: locals, roundtrip_ok: rtSuccess },
+          (rtSuccess ? chalk.green : chalk.yellow)(`\n${rtSuccess ? "✓" : "⚠"} ${domain} provisioned via CLI (send via ${opts.provider}${sesInboundRequested ? ", receive via SES->S3" : ", existing inbound preserved"})`));
         if (!rtSuccess) process.exitCode = 1;
       } catch (e) { handleError(e); }
     });
@@ -367,7 +427,7 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
   // ── roundtrip (acceptance test) ─────────────────────────────────────────
   cmd
     .command("roundtrip")
-    .description("Send N tokened emails around a ring of addresses and confirm 100% receipt (via SES inbound → S3 → SQLite)")
+    .description("Send N tokened mailery around a ring of addresses and confirm 100% receipt (via SES inbound → S3 → SQLite)")
     .requiredOption("--domain <domain>", "Domain whose addresses to test")
     .requiredOption("--provider <id>", "SES provider ID (sends + inbound association)")
     .option("--addresses <list>", "Comma-separated local parts", "one,two,three")
@@ -384,7 +444,8 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
         if (_profile) process.env["AWS_PROFILE"] = _profile;
         const db = getDatabase();
         const providerId = resolveId("providers", opts.provider);
-        if (!getProvider(providerId)) handleError(new Error(`Provider not found: ${opts.provider}`));
+        const provider = getProvider(providerId);
+        if (!provider) handleError(new Error(`Provider not found: ${opts.provider}`));
         const addresses = opts.addresses.split(",").map((a) => `${a.trim()}@${opts.domain}`);
         const { getInboundConfig } = await import("../../lib/config.js");
         const bucket = opts.bucket ?? getInboundConfig().bucket;
@@ -407,7 +468,15 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
             },
             fetchReceived: async (mailbox) => {
               const domain = mailbox.split("@")[1]!;
-              await syncS3Inbox({ bucket: bucket!, prefix: `inbound/${domain}/`, providerId, limit: 1000, db });
+              await syncS3Inbox({
+                bucket: bucket!,
+                prefix: `inbound/${domain}/`,
+                providerId,
+                accessKeyId: provider!.access_key ?? undefined,
+                secretAccessKey: provider!.secret_key ?? undefined,
+                limit: 1000,
+                db,
+              });
               return listInboundSubjectsForRecipient(mailbox, { since: roundtripStartedAt, limit: subjectLimit }, db);
             },
           },
@@ -437,10 +506,11 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
     .requiredOption("--provider <id>", "SES provider ID")
     .option("--bucket <name>", "Inbound S3 bucket (defaults to config inbound_s3_bucket)")
     .option("--add-mx", "Publish inbound MX when setting up domains")
+    .option("--force-mx-switch", "Allow adding SES inbound MX even when existing root MX belongs to another provider")
     .option("--once", "Run a single reconcile tick and exit")
     .option("--interval <sec>", "Seconds between ticks", "30")
     .option("--max-ticks <n>", "Stop after N ticks (default: unlimited)")
-    .action(async (opts: { provider: string; bucket?: string; addMx?: boolean; once?: boolean; interval: string; maxTicks?: string }) => {
+    .action(async (opts: { provider: string; bucket?: string; addMx?: boolean; forceMxSwitch?: boolean; once?: boolean; interval: string; maxTicks?: string }) => {
       try {
         const db = getDatabase();
         const providerId = resolveId("providers", opts.provider);
@@ -455,7 +525,7 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
         const { makeDomainDeps, makeAddressDeps } = await import("../../lib/provision/real-deps.js");
         const { reconcileTick, runDaemon } = await import("../../daemon/provisioner.js");
         const deps = {
-          domainDeps: makeDomainDeps({ provider: provider!, inboundBucket: bucket!, region: cfg.region, addMx: !!opts.addMx, db }),
+          domainDeps: makeDomainDeps({ provider: provider!, inboundBucket: bucket!, region: cfg.region, addMx: !!opts.addMx, forceMxSwitch: !!opts.forceMxSwitch, db }),
           addressDeps: makeAddressDeps({ provider: provider!, inboundBucket: bucket!, region: cfg.region, db }),
         };
         const log = (event: string, detail: Record<string, unknown>) => console.log(chalk.dim(`[${event}] ${JSON.stringify(detail)}`));

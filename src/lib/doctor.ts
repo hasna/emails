@@ -2,6 +2,7 @@ import { getDatabase } from "../db/database.js";
 import { listProviders } from "../db/providers.js";
 import { countValue } from "../db/scalars.js";
 import { checkAllProviders } from "./health.js";
+import { loadConfig } from "./config.js";
 import { existsSync } from "fs";
 import { join } from "path";
 import type { Database } from "../db/database.js";
@@ -46,7 +47,7 @@ export async function runDiagnostics(db?: Database, opts: DiagnosticsOptions = {
   checks.push(
     existsSync(configPath)
       ? { name: "Config", status: "pass", message: "Config file exists" }
-      : { name: "Config", status: "warn", message: "No config file (run 'emails config set' to create)" },
+      : { name: "Config", status: "warn", message: "No config file (run 'mailery config set' to create)" },
   );
 
   // 3. Providers
@@ -108,7 +109,13 @@ export async function runDiagnostics(db?: Database, opts: DiagnosticsOptions = {
 
   // 6c. Provisioning credentials (AWS / Cloudflare / Resend)
   const { checkProvisionCredentials } = await import("./provision-creds.js");
-  for (const c of checkProvisionCredentials()) {
+  const config = loadConfig();
+  for (const c of checkProvisionCredentials(undefined, {
+    cloudflare_api_token: config["cloudflare_api_token"] as string | undefined,
+    cloudflare_api_key: config["cloudflare_api_key"] as string | undefined,
+    cloudflare_email: config["cloudflare_email"] as string | undefined,
+    cloudflare_account_id: config["cloudflare_account_id"] as string | undefined,
+  })) {
     checks.push({
       name: `Provisioning: ${c.provider}`,
       status: c.configured ? "pass" : c.provider === "resend" ? "warn" : "fail",
@@ -140,7 +147,7 @@ export async function runDiagnostics(db?: Database, opts: DiagnosticsOptions = {
   const gmailProviders = providers.filter((p) => p.type === "gmail");
   for (const p of gmailProviders) {
     if (!p.oauth_refresh_token) {
-      checks.push({ name: `Gmail: ${p.name}`, status: "fail", message: "No refresh token — run 'emails provider auth <id>'" });
+      checks.push({ name: `Gmail: ${p.name}`, status: "fail", message: "No refresh token - run 'mailery provider auth <id>'" });
       continue;
     }
 

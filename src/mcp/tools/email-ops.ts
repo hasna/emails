@@ -138,7 +138,7 @@ export function registerEmailOpsTools(server: McpServer): void {
       .optional()
       .describe("Filter by status"),
     from_address: z.string().optional().describe("Filter by sender address"),
-    since: z.string().optional().describe("ISO timestamp — only show emails after this"),
+    since: z.string().optional().describe("ISO timestamp - only show emails after this"),
     limit: z.number().int().positive().max(MAX_MCP_EMAIL_LIST_LIMIT).optional().describe("Max results (default 50, max 1000)"),
     offset: z.number().int().min(0).optional().describe("Pagination offset"),
   },
@@ -167,7 +167,7 @@ export function registerEmailOpsTools(server: McpServer): void {
   "Search emails by subject, from address, or to address",
   {
     query: z.string().describe("Search query (matches subject, from, or to)"),
-    since: z.string().optional().describe("ISO timestamp — only show emails after this"),
+    since: z.string().optional().describe("ISO timestamp - only show emails after this"),
     limit: z.number().int().positive().max(MAX_MCP_EMAIL_LIST_LIMIT).optional().describe("Max results (default 50, max 1000)"),
     offset: z.number().int().min(0).optional().describe("Pagination offset"),
   },

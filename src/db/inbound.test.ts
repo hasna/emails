@@ -405,12 +405,21 @@ describe("listInboundEmails", () => {
       to_addresses: ["recipient@example.com"],
       label_ids: ["SENT"],
     }, db);
+    const lowerSent = storeInboundEmail({
+      ...sampleInput,
+      subject: "synced lower sent",
+      message_id: "<lower-sent@example.com>",
+      from_address: "me@example.com",
+      to_addresses: ["recipient@example.com"],
+      label_ids: ["sent"],
+    }, db);
 
     expect(sent.is_sent).toBe(true);
+    expect(lowerSent.is_sent).toBe(true);
     expect(listInboundEmails({}, db).map((email) => email.subject)).toEqual(["received"]);
     expect(listInboundEmailSummaries({}, db).map((email) => email.subject)).toEqual(["received"]);
-    expect(listInboundEmails({ sent: true }, db).map((email) => email.subject)).toEqual(["synced sent"]);
-    expect(listInboundEmails({ includeSent: true }, db).map((email) => email.subject).sort()).toEqual(["received", "synced sent"]);
+    expect(listInboundEmails({ sent: true }, db).map((email) => email.subject).sort()).toEqual(["synced lower sent", "synced sent"]);
+    expect(listInboundEmails({ includeSent: true }, db).map((email) => email.subject).sort()).toEqual(["received", "synced lower sent", "synced sent"]);
   });
 });
 
@@ -553,6 +562,28 @@ describe("label mutations", () => {
 
     expect(addInboundLabel(stored.id, "work", db).label_ids).toEqual(["work"]);
     expect(removeInboundLabel(stored.id, "work", db).label_ids).toEqual([]);
+  });
+
+  it("matches labels case-insensitively for filters and mutations", () => {
+    const db = makeDb();
+    const stored = storeInboundEmail({ ...sampleInput, label_ids: ["Urgent"] }, db);
+
+    expect(listInboundEmails({ label: "urgent" }, db).map((email) => email.id)).toEqual([stored.id]);
+    expect(addInboundLabel(stored.id, "urgent", db).label_ids).toEqual(["Urgent"]);
+    expect(removeInboundLabel(stored.id, "urgent", db).label_ids).toEqual([]);
+  });
+
+  it("normalizes whitespace and length consistently for label filters", () => {
+    const db = makeDb();
+    const longLabel = `Long ${"Label ".repeat(20)}`;
+    const stored = storeInboundEmail({ ...sampleInput, label_ids: ["Needs  Review", "Tab\tLabel", longLabel] }, db);
+    const labels = db.query("SELECT label FROM inbound_labels WHERE inbound_email_id = ? ORDER BY label").all(stored.id) as Array<{ label: string }>;
+
+    expect(labels.map((row) => row.label)).toContain("needs-review");
+    expect(labels.map((row) => row.label)).toContain("tab-label");
+    expect(listInboundEmails({ label: "Needs Review" }, db).map((email) => email.id)).toEqual([stored.id]);
+    expect(listInboundEmails({ label: "tab label" }, db).map((email) => email.id)).toEqual([stored.id]);
+    expect(listInboundEmails({ label: longLabel }, db).map((email) => email.id)).toEqual([stored.id]);
   });
 });
 

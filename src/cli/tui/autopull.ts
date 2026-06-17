@@ -4,12 +4,14 @@
  *             S3 bucket (buckets can be in different AWS accounts).
  *   • Gmail — incremental sync of the newest messages for each active Gmail
  *             account (via its connector profile).
- *   • Resend — inbound is push (webhook to `emails serve`), so there's nothing to
+ *   • Resend — inbound is push (webhook to `mailery serve`), so there's nothing to
  *             pull here; it lands the moment the server receives it.
  * Entirely best-effort: missing config/creds/connector-auth is a silent no-op.
  */
-export interface PullResult { pulled: number; ok: boolean; reason?: string; configured: boolean }
-export interface PullOpts { s3?: boolean; gmail?: boolean; limit?: number }
+export interface PullForwardingResult { attempted: number; sent: number; failed: number; skipped: number }
+export interface PullAgentsResult { agents: number; runs: number; errors: number }
+export interface PullResult { pulled: number; ok: boolean; reason?: string; configured: boolean; forwarded?: PullForwardingResult; agents?: PullAgentsResult }
+export interface PullOpts { s3?: boolean; gmail?: boolean; limit?: number; forwarding?: boolean; agents?: boolean }
 
 export async function autoPull(opts?: PullOpts): Promise<PullResult> {
   const doS3 = opts?.s3 !== false;
@@ -39,6 +41,7 @@ export async function autoPull(opts?: PullOpts): Promise<PullResult> {
             bucket: b.bucket, prefix: inbound.prefix, region: b.region,
             accessKeyId: prov?.access_key ?? undefined,
             secretAccessKey: prov?.secret_key ?? undefined,
+            providerId: b.providerId,
             limit,
           });
           n += r.synced;
@@ -71,7 +74,53 @@ export async function autoPull(opts?: PullOpts): Promise<PullResult> {
     catch (e) { if (ok) { ok = false; reason = e instanceof Error ? e.message : String(e); } }
   }
 
-  return { pulled, ok, reason, configured: configured || doGmail };
+  let forwarded: PullForwardingResult | undefined;
+  if (opts?.forwarding !== false) {
+    try {
+      const { processForwardingRules } = await import("../../lib/forwarding.js");
+      const r = await processForwardingRules({ limit });
+      forwarded = {
+        attempted: r.attempted,
+        sent: r.sent,
+        failed: r.failed,
+        skipped: r.skipped,
+      };
+      if (r.failed > 0 && ok) {
+        ok = false;
+        reason = `Forwarding failed for ${r.failed} message${r.failed === 1 ? "" : "s"}`;
+      }
+    } catch (e) {
+      if (ok) {
+        ok = false;
+        reason = e instanceof Error ? e.message : String(e);
+      }
+    }
+  }
+
+  let agents: PullAgentsResult | undefined;
+  if (opts?.agents !== false) {
+    try {
+      const { runAlwaysOnEmailAgents } = await import("../../lib/email-agents.js");
+      const r = await runAlwaysOnEmailAgents({ limitPerAgent: Math.min(25, Math.max(1, Math.trunc(limit))) });
+      agents = {
+        agents: r.agents,
+        runs: r.runs,
+        errors: r.errors.length,
+      };
+    } catch {
+      // Always-on agents are best-effort; sync and forwarding health should not
+      // be reported as failed just because an AI provider is unavailable.
+    }
+  }
+
+  return {
+    pulled,
+    ok,
+    reason,
+    configured: configured || doGmail || (forwarded?.attempted ?? 0) > 0 || (agents?.agents ?? 0) > 0,
+    forwarded,
+    agents,
+  };
 }
 
 /** Incremental sync of the newest messages for each active Gmail account. */

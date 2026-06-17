@@ -11,6 +11,7 @@ interface SpawnOptions {
   stdin?: Uint8Array;
   stdout: "ignore" | "pipe";
   stderr: "ignore";
+  timeoutMs?: number;
 }
 
 interface SpawnResult {
@@ -24,11 +25,13 @@ interface ClipboardRuntime {
   stdoutIsTTY: boolean;
   writeStdout: (value: string) => void;
   spawnSync: (options: SpawnOptions) => SpawnResult;
+  spawnAsync?: (options: SpawnOptions) => Promise<SpawnResult>;
   readFile?: (path: string) => Uint8Array | string | null;
 }
 
 const OSC52_MAX_BYTES = 90_000;
-const DEFAULT_SSH_TIMEOUT_SECONDS = "2";
+const DEFAULT_SSH_TIMEOUT_SECONDS = "1";
+const DEFAULT_COMMAND_TIMEOUT_MS = 1500;
 
 function defaultRuntime(): ClipboardRuntime {
   return {
@@ -39,6 +42,36 @@ function defaultRuntime(): ClipboardRuntime {
       process.stdout.write(value);
     },
     spawnSync: (options) => Bun.spawnSync(options),
+    spawnAsync: async (options) => {
+      const proc = Bun.spawn({
+        cmd: options.cmd,
+        stdin: options.stdin ? "pipe" : "ignore",
+        stdout: options.stdout,
+        stderr: options.stderr,
+      });
+      if (options.stdin && proc.stdin) {
+        proc.stdin.write(options.stdin);
+        proc.stdin.end();
+      }
+      let timedOut = false;
+      const timeout = options.timeoutMs
+        ? setTimeout(() => {
+          timedOut = true;
+          proc.kill("SIGKILL");
+        }, options.timeoutMs)
+        : null;
+      try {
+        const [exitCode, stdout] = await Promise.all([
+          proc.exited.catch(() => null),
+          options.stdout === "pipe" && proc.stdout
+            ? new Response(proc.stdout).arrayBuffer().then((buffer) => new Uint8Array(buffer)).catch(() => undefined)
+            : Promise.resolve(undefined),
+        ]);
+        return { exitCode: timedOut ? null : exitCode, stdout };
+      } finally {
+        if (timeout) clearTimeout(timeout);
+      }
+    },
     readFile: (path) => {
       try {
         return readFileSync(path);
@@ -73,6 +106,28 @@ function runClipboardCommand(runtime: ClipboardRuntime, cmd: string[], text: str
       stdin: new TextEncoder().encode(text),
       stdout: "ignore",
       stderr: "ignore",
+    });
+    return result.exitCode === 0;
+  } catch {
+    return false;
+  }
+}
+
+function clipboardCommandTimeoutMs(runtime: ClipboardRuntime): number {
+  const raw = runtime.env["MAILERY_TUI_CLIPBOARD_COMMAND_TIMEOUT_MS"] || runtime.env["EMAILS_TUI_CLIPBOARD_COMMAND_TIMEOUT_MS"];
+  const parsed = raw ? Number.parseInt(raw, 10) : DEFAULT_COMMAND_TIMEOUT_MS;
+  return Number.isFinite(parsed) ? Math.max(250, parsed) : DEFAULT_COMMAND_TIMEOUT_MS;
+}
+
+async function runClipboardCommandAsync(runtime: ClipboardRuntime, cmd: string[], text: string): Promise<boolean> {
+  if (!runtime.spawnAsync) return runClipboardCommand(runtime, cmd, text);
+  try {
+    const result = await runtime.spawnAsync({
+      cmd,
+      stdin: new TextEncoder().encode(text),
+      stdout: "ignore",
+      stderr: "ignore",
+      timeoutMs: clipboardCommandTimeoutMs(runtime),
     });
     return result.exitCode === 0;
   } catch {
@@ -141,6 +196,8 @@ function tmuxEnvironmentHosts(runtime: ClipboardRuntime): string[] {
 
 export function sshClipboardHosts(env: NodeJS.ProcessEnv = process.env, discoveredHosts: string[] = []): string[] {
   const explicitHosts = [
+    ...splitHostList(env["MAILERY_TUI_CLIPBOARD_HOST"]),
+    ...splitHostList(env["MAILERY_TUI_CLIPBOARD_SSH_HOSTS"]),
     ...splitHostList(env["EMAILS_TUI_CLIPBOARD_HOST"]),
     ...splitHostList(env["EMAILS_TUI_CLIPBOARD_SSH_HOSTS"]),
   ];
@@ -157,7 +214,7 @@ export function sshClipboardHosts(env: NodeJS.ProcessEnv = process.env, discover
 }
 
 function sshClipboardCommands(env: NodeJS.ProcessEnv, discoveredHosts: string[] = []): string[][] {
-  const timeout = env["EMAILS_TUI_CLIPBOARD_SSH_TIMEOUT"] || DEFAULT_SSH_TIMEOUT_SECONDS;
+  const timeout = env["MAILERY_TUI_CLIPBOARD_SSH_TIMEOUT"] || env["EMAILS_TUI_CLIPBOARD_SSH_TIMEOUT"] || DEFAULT_SSH_TIMEOUT_SECONDS;
   return sshClipboardHosts(env, discoveredHosts).map((host) => [
     "ssh",
     "-o", "BatchMode=yes",
@@ -170,7 +227,7 @@ function sshClipboardCommands(env: NodeJS.ProcessEnv, discoveredHosts: string[] 
 
 export function clipboardCommands(platform: NodeJS.Platform = process.platform, env: NodeJS.ProcessEnv = process.env, discoveredHosts: string[] = []): string[][] {
   const commands: string[][] = [];
-  const configured = env["EMAILS_TUI_CLIPBOARD_COMMAND"]?.trim();
+  const configured = (env["MAILERY_TUI_CLIPBOARD_COMMAND"] || env["EMAILS_TUI_CLIPBOARD_COMMAND"])?.trim();
   if (configured) commands.push(configured.split(/\s+/));
   if (platform === "darwin") commands.push(["pbcopy"]);
   commands.push(...sshClipboardCommands(env, discoveredHosts));
@@ -197,15 +254,39 @@ function copyToTmuxBuffer(text: string, runtime: ClipboardRuntime): ClipboardRes
   return null;
 }
 
+async function copyToTmuxBufferAsync(text: string, runtime: ClipboardRuntime): Promise<ClipboardResult | null> {
+  if (!runtime.env["TMUX"]) return null;
+  if (await runClipboardCommandAsync(runtime, ["tmux", "load-buffer", "-"], text)) return { ok: true, method: "tmux-buffer" };
+  return null;
+}
+
 export function copyTextToClipboard(text: string, runtime: ClipboardRuntime = defaultRuntime()): ClipboardResult {
   if (!text.trim()) return { ok: false, error: "nothing to copy" };
-  if (runtime.env["EMAILS_TUI_CLIPBOARD_DRY_RUN"] === "1") return { ok: true, method: "dry-run" };
+  if (runtime.env["MAILERY_TUI_CLIPBOARD_DRY_RUN"] === "1" || runtime.env["EMAILS_TUI_CLIPBOARD_DRY_RUN"] === "1") return { ok: true, method: "dry-run" };
 
   for (const cmd of clipboardCommands(runtime.platform, runtime.env, tmuxEnvironmentHosts(runtime))) {
     if (runClipboardCommand(runtime, cmd, text)) return { ok: true, method: commandMethod(cmd) };
   }
 
   const tmux = copyToTmuxBuffer(text, runtime);
+  if (tmux) return tmux;
+
+  const osc52 = copyWithOsc52(text, runtime);
+  if (osc52) return osc52;
+
+  return { ok: false, error: "no supported clipboard route found" };
+}
+
+export async function copyTextToClipboardAsync(text: string, runtime: ClipboardRuntime = defaultRuntime()): Promise<ClipboardResult> {
+  if (!text.trim()) return { ok: false, error: "nothing to copy" };
+  if (runtime.env["MAILERY_TUI_CLIPBOARD_DRY_RUN"] === "1" || runtime.env["EMAILS_TUI_CLIPBOARD_DRY_RUN"] === "1") return { ok: true, method: "dry-run" };
+
+  const commands = clipboardCommands(runtime.platform, runtime.env, tmuxEnvironmentHosts(runtime));
+  for (const cmd of commands) {
+    if (await runClipboardCommandAsync(runtime, cmd, text)) return { ok: true, method: commandMethod(cmd) };
+  }
+
+  const tmux = await copyToTmuxBufferAsync(text, runtime);
   if (tmux) return tmux;
 
   const osc52 = copyWithOsc52(text, runtime);

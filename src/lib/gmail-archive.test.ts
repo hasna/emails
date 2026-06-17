@@ -12,13 +12,13 @@ describe("buildGmailArchiveKeys", () => {
   it("builds deterministic Gmail archive keys by profile and message", () => {
     expect(buildGmailArchiveKeys({
       prefix: "gmail",
-      profile: "andrei@hasna.com",
+      profile: "user@example.com",
       messageId: "190971d5a7402e62",
     })).toEqual({
-      raw: "gmail/andrei_hasna.com/raw/190971d5a7402e62.eml",
-      metadata: "gmail/andrei_hasna.com/metadata/190971d5a7402e62.json",
-      manifest: "gmail/andrei_hasna.com/manifests/190971d5a7402e62.json",
-      attachmentsPrefix: "gmail/andrei_hasna.com/attachments/190971d5a7402e62/",
+      raw: "gmail/user_example.com/raw/190971d5a7402e62.eml",
+      metadata: "gmail/user_example.com/metadata/190971d5a7402e62.json",
+      manifest: "gmail/user_example.com/manifests/190971d5a7402e62.json",
+      attachmentsPrefix: "gmail/user_example.com/attachments/190971d5a7402e62/",
     });
   });
 

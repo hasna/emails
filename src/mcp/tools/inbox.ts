@@ -15,6 +15,7 @@ type InboxToolName =
   | "wait_for_verification_code"
   | "wait_for_code"
   | "get_inbound_email"
+  | "extract_inbound_email_links"
   | "clear_inbound_emails"
   | "sync_inbox"
   | "mark_email_read"
@@ -122,6 +123,16 @@ export function registerInboxTools(server: McpServer): void {
       id: z.string().describe("Inbound email ID (or prefix)"),
     },
     handler("get_inbound_email"),
+  );
+
+  server.tool(
+    "extract_inbound_email_links",
+    "Extract links from a specific inbound email by ID. Read-only.",
+    {
+      id: z.string().describe("Inbound email ID (or prefix)"),
+      include_non_web: z.boolean().optional().describe("Include mailto: and tel: links"),
+    },
+    handler("extract_inbound_email_links"),
   );
 
   server.tool(

@@ -17,7 +17,7 @@ export function registerEmailStorageTools(server: McpServer): void {
     "storage_status",
     {
       title: "Storage Status",
-      description: "Show emails remote storage sync configuration and local sync history.",
+      description: "Show Mailery remote storage sync configuration and local sync history.",
       inputSchema: {},
     },
     async () => {
@@ -30,7 +30,7 @@ export function registerEmailStorageTools(server: McpServer): void {
     "storage_push",
     {
       title: "Storage Push",
-      description: "Push local emails data to remote PostgreSQL storage.",
+      description: "Push local Mailery data to remote PostgreSQL storage.",
       inputSchema: {
         tables: z.array(z.string()).optional(),
         batch_size: z.number().int().positive().max(5000).optional().describe("Rows to read per table batch"),
@@ -50,7 +50,7 @@ export function registerEmailStorageTools(server: McpServer): void {
     "storage_pull",
     {
       title: "Storage Pull",
-      description: "Pull emails data from remote PostgreSQL storage to local SQLite.",
+      description: "Pull Mailery data from remote PostgreSQL storage to local SQLite.",
       inputSchema: {
         tables: z.array(z.string()).optional(),
         batch_size: z.number().int().positive().max(5000).optional().describe("Rows to read per table batch"),
@@ -70,7 +70,7 @@ export function registerEmailStorageTools(server: McpServer): void {
     "storage_sync",
     {
       title: "Storage Sync",
-      description: "Bidirectional emails storage sync: pull then push.",
+      description: "Bidirectional Mailery storage sync: pull then push.",
       inputSchema: {
         tables: z.array(z.string()).optional(),
         batch_size: z.number().int().positive().max(5000).optional().describe("Rows to read per table batch"),

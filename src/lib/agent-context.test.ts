@@ -148,12 +148,12 @@ describe("agent context", () => {
     const status = getEmailSystemStatus(db);
 
     expect(status.domains.usable.map((domain) => domain.domain)).not.toContain("old-needs-dns.example.com");
-    expect(status.next_actions).toContain("emails domain dns old-needs-dns.example.com");
+    expect(status.next_actions).toContain("mailery domain dns old-needs-dns.example.com");
   });
 
   it("suggests wait-code for verification goals", () => {
     const next = getNextEmailAction("need verification code");
-    expect(next).toMatchObject({ command: "emails inbox wait-code <address> --timeout 120" });
+    expect(next).toMatchObject({ command: "mailery inbox wait-code <address> --timeout 120" });
   });
 
   it("reports the newest inbound timestamp even when older mail is archived", () => {

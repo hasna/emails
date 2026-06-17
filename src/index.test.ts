@@ -18,6 +18,7 @@ const lazyRootModules = [
   "./lib/email-verify.js",
   "./lib/triage.js",
   "./lib/cerebras.js",
+  "./lib/forwarding.js",
 ];
 
 function runBuild(args: string[]): void {
@@ -75,6 +76,15 @@ describe("public package entrypoint", () => {
       "listSendKeySummaries",
       "listSendKeySummariesByOwners",
       "assertSendAuthorized",
+      "createForwardingRule",
+      "listForwardingRules",
+      "processForwardingRules",
+      "extractEmailLinks",
+      "formatEmailLinks",
+      "buildReadOnlyMaileryTools",
+      "runMaileryAgent",
+      "formatMaileryAgentResult",
+      "resolveMaileryAgentDefaults",
       "getDefaultGmailArchiveS3Bucket",
       "getDefaultGmailArchiveS3Region",
       "getDefaultGmailArchiveS3Prefix",

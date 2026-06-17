@@ -4,16 +4,16 @@ import { createProvider, updateProvider } from "../../db/providers.js";
 import { createDomain, updateDomain } from "../../db/domains.js";
 import { createAddress, markVerified } from "../../db/addresses.js";
 import { createEmail } from "../../db/emails.js";
-import { setAddressQuota } from "../../db/address-lifecycle.js";
-import { createAlias } from "../../db/aliases.js";
-import { createOwner, assignAddressOwner } from "../../db/owners.js";
-import { createSendKey } from "../../db/send-keys.js";
 import { setAddressProvisioning, setDomainProvisioning } from "../../db/provisioning.js";
-import { storeInboundEmail, setInboundRead, setInboundStarred, setInboundArchived } from "../../db/inbound.js";
+import { getInboundEmail, storeInboundEmail, setInboundRead, setInboundStarred, setInboundArchived } from "../../db/inbound.js";
+import { getEmailThreading } from "../../db/threads.js";
+import { saveEmailAgentRun } from "../../db/email-agents.js";
+import { saveTriage } from "../../db/triage.js";
 import {
   listMailbox, mailboxCounts, getMessageBody, toggleStar, toggleRead, archiveMessage,
   replyDefaults, sendComposed, listSources, listInboxAddresses, getSettings, setSetting,
   defaultFromAddress, providerIdForSender, listDomainSummaries, mailboxLabel, addressChoiceByAddress,
+  listLabelSummaries, toggleMessageLabel, getConversation, labelDisplayName, isGmailCategoryLabel,
 } from "./data.js";
 import { setConfigValue } from "../../lib/config.js";
 import { mkdtempSync, rmSync } from "fs";
@@ -21,11 +21,11 @@ import { tmpdir } from "os";
 import { join } from "path";
 
 let providerId: string;
-function seed(subject: string, opts: { read?: boolean; star?: boolean; archived?: boolean; to?: string[] } = {}) {
+function seed(subject: string, opts: { read?: boolean; star?: boolean; archived?: boolean; to?: string[]; labels?: string[] } = {}) {
   const e = storeInboundEmail({
     provider_id: null, message_id: `<${subject}@x>`, from_address: "alice@ext.com",
     to_addresses: opts.to ?? ["me@x.com"], cc_addresses: [], subject, text_body: `body of ${subject}`,
-    html_body: null, attachments: [], headers: {}, raw_size: 1, received_at: new Date().toISOString(),
+    html_body: null, attachments: [], label_ids: opts.labels ?? [], headers: {}, raw_size: 1, received_at: new Date().toISOString(),
   });
   if (opts.read) setInboundRead(e.id, true);
   if (opts.star) setInboundStarred(e.id, true);
@@ -97,16 +97,19 @@ describe("tui data — mailboxes", () => {
 
     const c = mailboxCounts(recordingDb as never);
 
-    expect(c).toEqual({ inbox: 3, unread: 2, starred: 1, sent: 2, archived: 1 });
+    expect(c).toEqual({ inbox: 3, unread: 2, starred: 1, sent: 2, archived: 1, spam: 0, trash: 0 });
     expect(calls).toHaveLength(1);
-    expect(calls[0]).toContain("SELECT COUNT(*) FROM inbound_emails WHERE is_sent = 0 AND is_archived = 0");
+    expect(calls[0]).toContain("SELECT COUNT(*) FROM inbound_emails WHERE is_sent = 0 AND is_archived = 0 AND is_spam = 0 AND is_trash = 0");
+    expect(calls[0]).not.toContain("json_each");
     expect(calls[0]).not.toContain("SUM(CASE");
     const plan = db.query(`EXPLAIN QUERY PLAN ${calls[0]}`).all() as Array<{ detail: string }>;
     const details = plan.map((row) => row.detail).join(" ");
-    expect(details).toMatch(/idx_inbound_(sent_arch_recv|sender_domain_recv)/);
-    expect(details).toContain("idx_inbound_sent_read_arch_recv");
-    expect(details).toContain("idx_inbound_sent_star_arch_recv");
-    expect(details).toMatch(/idx_inbound_(arch_recv|is_archived)/);
+    expect(details).toContain("idx_inbound_sent_arch_spam_trash_recv");
+    expect(details).toContain("idx_inbound_sent_read_arch_spam_trash_recv");
+    expect(details).toContain("idx_inbound_sent_star_arch_spam_trash_recv");
+    expect(details).toContain("idx_inbound_arch_spam_trash_recv");
+    expect(details).toContain("idx_inbound_sent_spam_recv");
+    expect(details).toContain("idx_inbound_sent_trash_recv");
     expect(details).not.toContain("SCAN inbound_emails");
   });
 
@@ -145,17 +148,88 @@ describe("tui data — mailboxes", () => {
 
     const c = mailboxCounts({ source: { address: "me@x.com" } }, recordingDb as never);
 
-    expect(c).toEqual({ inbox: 3, unread: 2, starred: 1, sent: 2, archived: 1 });
+    expect(c).toEqual({ inbox: 3, unread: 2, starred: 1, sent: 2, archived: 1, spam: 0, trash: 0 });
     expect(calls).toHaveLength(1);
     expect(calls[0]!.sql).toContain("FROM inbound_recipients");
-    expect(calls[0]!.sql).not.toContain("json_each");
     expect(calls[0]!.args).toEqual(["me@x.com", "me@x.com", "me@x.com"]);
+  });
+
+  it("routes spam and trash labels out of the regular folders", () => {
+    seed("plain");
+    seed("spammy");
+    seed("trashed");
+    seed("archived-spam", { archived: true });
+    const spam = listMailbox("inbox").find((m) => m.subject === "spammy")!;
+    const trash = listMailbox("inbox").find((m) => m.subject === "trashed")!;
+    const archivedSpam = listMailbox("archived").find((m) => m.subject === "archived-spam")!;
+
+    toggleMessageLabel(spam, "spam");
+    toggleMessageLabel(trash, "trash");
+    toggleMessageLabel(archivedSpam, "SPAM");
+
+    expect(listMailbox("inbox").map((m) => m.subject).sort()).toEqual(["plain"]);
+    expect(listMailbox("spam").map((m) => m.subject).sort()).toEqual(["archived-spam", "spammy"]);
+    expect(listMailbox("archived").map((m) => m.subject)).not.toContain("archived-spam");
+    expect(listMailbox("trash").map((m) => m.subject)).toEqual(["trashed"]);
+    expect(mailboxCounts()).toMatchObject({ inbox: 1, archived: 0, spam: 2, trash: 1 });
+  });
+
+  it("summarizes common and popular labels", () => {
+    seed("needs label");
+    const msg = listMailbox("inbox")[0]!;
+
+    expect(toggleMessageLabel(msg, "Urgent")).toContain("urgent");
+    const summaries = listLabelSummaries();
+    expect(summaries.find((label) => label.name === "urgent")).toMatchObject({ count: 1, popular: true });
+    expect(summaries.find((label) => label.name === "follow-up")).toMatchObject({ count: 0, popular: false });
+    expect(listLabelSummaries({ search: "urg" }).map((label) => label.name)).toEqual(["urgent"]);
+    const labelPlan = getDatabase().query("EXPLAIN QUERY PLAN SELECT label, COUNT(*) AS count FROM inbound_labels WHERE TRIM(label) != '' GROUP BY label").all() as Array<{ detail: string }>;
+    expect(labelPlan.map((row) => row.detail).join(" ")).not.toContain("inbound_emails");
+
+    const updated = listMailbox("inbox")[0]!;
+    expect(toggleMessageLabel(updated, "urgent")).not.toContain("urgent");
+  });
+
+  it("filters mailboxes by labels and displays Gmail categories without the Category prefix", () => {
+    const urgent = seed("urgent work");
+    seed("category update", { labels: ["CATEGORY_UPDATES"] });
+    seed("plain note");
+
+    toggleMessageLabel(listMailbox("inbox").find((item) => item.id === urgent.id)!, "Urgent");
+
+    expect(listMailbox("inbox", { label: "urgent" }).map((m) => m.subject)).toEqual(["urgent work"]);
+    expect(listMailbox("inbox", { label: "category-updates" }).map((m) => m.subject)).toEqual(["category update"]);
+    expect(listMailbox("inbox", { label: "category_updates" }).map((m) => m.subject)).toEqual(["category update"]);
+    expect(labelDisplayName("category_updates")).toBe("Updates");
+    expect(isGmailCategoryLabel("category-updates")).toBe(true);
+    expect(isGmailCategoryLabel("urgent")).toBe(false);
   });
 
   it("filters by search", () => {
     seed("invoice report");
     seed("lunch plans");
     expect(listMailbox("inbox", { search: "invoice" }).map((m) => m.subject)).toEqual(["invoice report"]);
+  });
+
+  it("builds conversations from provider thread ids when RFC thread ids are absent", () => {
+    const db = getDatabase();
+    storeInboundEmail({
+      provider_id: providerId, message_id: "<gmail-sent-thread@x>", from_address: "me@x.com", to_addresses: ["client@y.com"],
+      cc_addresses: [], subject: "gmail sent thread", text_body: "sent body", html_body: null, attachments: [],
+      label_ids: ["SENT"], provider_thread_id: "gmail-thread-1", headers: {}, raw_size: 1, received_at: "2026-01-01T10:00:00.000Z",
+    }, db);
+    storeInboundEmail({
+      provider_id: providerId, message_id: "<gmail-reply-thread@x>", from_address: "client@y.com", to_addresses: ["me@x.com"],
+      cc_addresses: [], subject: "gmail reply thread", text_body: "reply body", html_body: null, attachments: [],
+      provider_thread_id: "gmail-thread-1", headers: {}, raw_size: 1, received_at: "2026-01-01T11:00:00.000Z",
+    }, db);
+
+    const msg = listMailbox("inbox").find((item) => item.subject === "gmail reply thread")!;
+    expect(msg.provider_thread_id).toBe("gmail-thread-1");
+    expect(getConversation(msg).map((item) => `${item.kind}:${item.subject}`)).toEqual([
+      "sent:gmail sent thread",
+      "received:gmail reply thread",
+    ]);
   });
 
   it("searches before applying the page limit", () => {
@@ -247,7 +321,59 @@ describe("tui data — body + mutations", () => {
     const b = getMessageBody({ kind: "inbound", id: e.id } as never)!;
     expect(b.subject).toBe("hello");
     expect(b.text).toContain("body of hello");
+    expect(b.summary).toContain("About hello");
     expect(b.flags).toContain("starred");
+  });
+
+  it("prefers managed agent summaries over fallback body summaries", () => {
+    const e = seed("summary source");
+    saveEmailAgentRun({
+      agent_key: "categorizer",
+      inbound_email_id: e.id,
+      provider: "groq",
+      model: "test",
+      status: "ok",
+      summary: "Agent summary: this email asks for a contract review.",
+    });
+
+    const b = getMessageBody({ kind: "inbound", id: e.id } as never)!;
+
+    expect(b.summary).toBe("Agent summary: this email asks for a contract review.");
+  });
+
+  it("uses triage summaries for sent messages", () => {
+    const db = getDatabase();
+    const sent = createEmail(providerId, {
+      from: "me@x.com",
+      to: "client@example.com",
+      subject: "Sent proposal",
+      text: "Attached proposal for review.",
+    }, undefined, db);
+    saveTriage({
+      email_id: sent.id,
+      label: "follow-up",
+      priority: 2,
+      summary: "Sent a proposal to the client and should follow up.",
+    }, db);
+
+    const b = getMessageBody({
+      kind: "sent",
+      id: sent.id,
+      from: sent.from_address,
+      to: sent.to_addresses.join(", "),
+      subject: sent.subject,
+      date: sent.sent_at,
+      is_read: true,
+      is_starred: false,
+      labels: [],
+      snippet: "",
+      thread_id: null,
+      provider_thread_id: null,
+      attachments: 0,
+      sentByMe: true,
+    })!;
+
+    expect(b.summary).toBe("Sent a proposal to the client and should follow up.");
   });
 
   it("reads inbound body with a narrow projection", () => {
@@ -280,6 +406,7 @@ describe("tui data — body + mutations", () => {
     expect(b.subject).toBe("lean body");
     expect(calls).toHaveLength(1);
     expect(calls[0]!.sql).toContain("SELECT from_address, to_addresses");
+    expect(calls[0]!.sql).toContain("email_agent_runs");
     expect(calls[0]!.sql).not.toContain("SELECT *");
     expect(calls[0]!.sql).not.toContain("headers_json");
     expect(calls[0]!.args).toEqual([e.id]);
@@ -337,10 +464,69 @@ describe("tui data — compose / reply", () => {
     expect(d.from).toBe("ops@me.com");
   });
 
+  it("derives reply defaults for Gmail-synced sent mail from sentByMe", () => {
+    storeInboundEmail({
+      provider_id: providerId,
+      message_id: "<gmail-sent-reply-defaults@example.com>",
+      from_address: "me@x.com",
+      to_addresses: ["client@y.com"],
+      cc_addresses: [],
+      subject: "Sent from Gmail",
+      text_body: "already sent",
+      html_body: null,
+      attachments: [],
+      label_ids: ["SENT"],
+      headers: {},
+      raw_size: 1,
+      received_at: "2026-01-01T10:00:00.000Z",
+    });
+
+    const msg = listMailbox("sent").find((item) => item.subject === "Sent from Gmail")!;
+    const d = replyDefaults(msg);
+
+    expect(msg.sentByMe).toBe(true);
+    expect(d.subject).toBe("Re: Sent from Gmail");
+    expect(d.from).toBe("me@x.com");
+    expect(d.to).toBe("client@y.com");
+  });
+
   it("sends a composed message via the active provider", async () => {
     const r = await sendComposed({ from: "me@x.com", to: "you@y.com", subject: "hi", body: "yo" });
     expect(r.messageId).toBeTruthy();
     expect(listMailbox("sent").map((m) => m.subject)).toContain("hi");
+  });
+
+  it("sends TUI replies with Message-ID, In-Reply-To, References, and a persisted thread id", async () => {
+    const inbound = storeInboundEmail({
+      provider_id: null,
+      message_id: "s3-key-or-provider-id",
+      from_address: "sender@example.com",
+      to_addresses: ["ops@example.com"],
+      cc_addresses: [],
+      subject: "Needs reply",
+      text_body: "please reply",
+      html_body: null,
+      attachments: [],
+      headers: { "Message-ID": "<parent@example.com>", References: "<root@example.com>" },
+      raw_size: 1,
+      received_at: "2026-01-01T10:00:00.000Z",
+    });
+    const parent = listMailbox("inbox").find((item) => item.id === inbound.id)!;
+
+    const sent = await sendComposed({
+      from: "ops@example.com",
+      to: "sender@example.com",
+      subject: "Re: Needs reply",
+      body: "reply body",
+      replyTo: parent,
+    });
+
+    const threading = getEmailThreading(sent.id, getDatabase());
+    expect(threading?.message_id).toMatch(/^<.+@example\.com>$/);
+    expect(threading?.in_reply_to).toBe("<parent@example.com>");
+    expect(threading?.references).toEqual(["<root@example.com>", "<parent@example.com>"]);
+    expect(threading?.thread_id).toBeTruthy();
+    expect(getInboundEmail(inbound.id, getDatabase())?.thread_id).toBe(threading?.thread_id);
   });
 
   it("rejects an empty recipient", async () => {
@@ -359,9 +545,9 @@ describe("tui data — compose / reply", () => {
   });
 });
 
-import { renderMarkdown, listProfiles } from "./data.js";
+import { renderMarkdown } from "./data.js";
 
-describe("tui data — attachments + markdown + profiles", () => {
+describe("tui data — attachments + markdown + inbox metadata", () => {
   it("surfaces attachment count + details", () => {
     const db = getDatabase();
     db.run(`INSERT INTO inbound_emails (id, message_id, from_address, to_addresses, cc_addresses, subject, text_body, attachments_json, attachment_paths, headers_json, raw_size, received_at) VALUES ('att1','<a@x>','s@x.com','["me@x.com"]','[]','has files','body','[{"filename":"report.pdf","content_type":"application/pdf","size":2048},{"filename":"pic.png","content_type":"image/png","size":512}]','[{"filename":"report.pdf","s3_url":"s3://b/report.pdf"}]','{}',1,'2026-06-03T10:00:00.000Z')`);
@@ -389,86 +575,12 @@ describe("tui data — attachments + markdown + profiles", () => {
     expect(content?.text_body).toBe("**hello** world");
   });
 
-  it("lists profiles with provider type + domains + addresses", () => {
+  it("merges provider and receive status into configured inbox choices without credentials", () => {
     const db = getDatabase();
-    const domain = createDomain(providerId, "acme.com", db);
-    const address = createAddress({ provider_id: providerId, email: "ops@acme.com" }, db);
-    markVerified(address.id, db);
-    setAddressQuota(address.id, 25, db);
-    setDomainProvisioning(domain.id, { provisioning_status: "ready" }, db);
+    const provider = createProvider({ name: "SES (primary)", type: "ses", api_key: "inbox-secret-key", active: true }, db);
+    const domain = createDomain(provider.id, "primary.test", db);
+    const address = createAddress({ provider_id: provider.id, email: "ops@primary.test" }, db);
     setAddressProvisioning(address.id, { domain_id: domain.id, provisioning_status: "ready", receive_strategy: "ses-s3" }, db);
-    const owner = createOwner({ type: "agent", name: "ops-agent" }, db);
-    assignAddressOwner(address.id, owner.id, undefined, db);
-    createAlias("support@acme.com", "ops@acme.com", db);
-    createSendKey(owner.id, "ops-key", db);
-    createAlias("noise@elsewhere.com", "other@elsewhere.com", db);
-    const unrelatedOwner = createOwner({ type: "agent", name: "unrelated-agent" }, db);
-    createSendKey(unrelatedOwner.id, "unrelated-key", db);
-    createEmail(providerId, {
-      from: '"Ops Team" <ops@acme.com>',
-      to: ["client@example.com"],
-      subject: "sent today",
-    }, "profile-sent-today", db);
-
-    const profiles = listProfiles();
-    const p = profiles.find((x) => x.id === providerId)!;
-    expect(p.provider).toBe("sandbox");
-    expect(p.domains).toContain("acme.com");
-    expect(p.addresses).toContain("ops@acme.com");
-    expect(p.domain_details[0]).toMatchObject({
-      domain: "acme.com",
-      provisioning_status: "ready",
-      readiness: { receive_ready: true },
-    });
-    expect(p.address_details[0]).toMatchObject({
-      email: "ops@acme.com",
-      verified: true,
-      owner: "ops-agent",
-      receive_status: "ready",
-      daily_quota: 25,
-      sent_today: 1,
-      aliases: ["support@acme.com"],
-    });
-    expect(p.address_details[0]!.send_keys[0]).toMatchObject({ owner: "ops-agent", label: "ops-key", active: true });
-    expect(JSON.stringify(p)).not.toContain("noise@elsewhere.com");
-    expect(JSON.stringify(p)).not.toContain("unrelated-key");
-  });
-
-  it("paginates profiles before hydrating provider details", () => {
-    const db = getDatabase();
-    const older = createProvider({ name: "older-profile", type: "sandbox", active: true }, db);
-    const middle = createProvider({ name: "middle-profile", type: "sandbox", active: true }, db);
-    const newer = createProvider({ name: "newer-profile", type: "sandbox", active: true }, db);
-    db.run("UPDATE providers SET created_at = ? WHERE id = ?", ["2025-01-01T00:00:00.000Z", providerId]);
-    db.run("UPDATE providers SET created_at = ? WHERE id = ?", ["2026-01-01T00:00:00.000Z", older.id]);
-    db.run("UPDATE providers SET created_at = ? WHERE id = ?", ["2026-01-02T00:00:00.000Z", middle.id]);
-    db.run("UPDATE providers SET created_at = ? WHERE id = ?", ["2026-01-03T00:00:00.000Z", newer.id]);
-    createDomain(older.id, "older-profile.test", db);
-    createDomain(middle.id, "middle-profile.test", db);
-    createDomain(newer.id, "newer-profile.test", db);
-    createAddress({ provider_id: older.id, email: "ops@older-profile.test" }, db);
-    createAddress({ provider_id: middle.id, email: "ops@middle-profile.test" }, db);
-    createAddress({ provider_id: newer.id, email: "ops@newer-profile.test" }, db);
-
-    const page = listProfiles({ limit: 1, offset: 1 });
-
-    expect(page.map((profile) => profile.name)).toEqual(["middle-profile"]);
-    expect(JSON.stringify(page)).toContain("middle-profile.test");
-    expect(JSON.stringify(page)).not.toContain("older-profile.test");
-    expect(JSON.stringify(page)).not.toContain("newer-profile.test");
-  });
-
-  it("hydrates profile domains and addresses with batched provider queries", () => {
-    const db = getDatabase();
-    const first = createProvider({ name: "first-profile", type: "resend", api_key: "profile-secret-key", active: true }, db);
-    const second = createProvider({ name: "second-profile", type: "sandbox", active: true }, db);
-    createDomain(first.id, "first-profile.test", db);
-    createDomain(second.id, "second-profile.test", db);
-    const firstAddress = createAddress({ provider_id: first.id, email: "ops@first-profile.test" }, db);
-    createAddress({ provider_id: second.id, email: "ops@second-profile.test" }, db);
-    const owner = createOwner({ type: "agent", name: "profile-key-agent" }, db);
-    assignAddressOwner(firstAddress.id, owner.id, undefined, db);
-    const key = createSendKey(owner.id, "profile-key", db).key;
     const queries: string[] = [];
     const recordingDb = new Proxy(db, {
       get(target, prop, receiver) {
@@ -483,18 +595,20 @@ describe("tui data — attachments + markdown + profiles", () => {
       },
     }) as typeof db;
 
-    const profiles = listProfiles({ limit: 3 }, recordingDb);
+    const choices = listInboxAddresses({ limit: 5 }, recordingDb);
+    const choice = choices.find((item) => item.address === "ops@primary.test");
 
-    expect(profiles.some((profile) => profile.domains.includes("first-profile.test"))).toBe(true);
-    expect(profiles.some((profile) => profile.addresses.includes("ops@second-profile.test"))).toBe(true);
-    expect(JSON.stringify(profiles)).not.toContain("profile-secret-key");
-    expect(JSON.stringify(profiles)).not.toContain(key.key_hash);
+    expect(choice).toMatchObject({
+      address: "ops@primary.test",
+      domain: "primary.test",
+      provider: "SES (primary)",
+      providerId: provider.id,
+      receiveStatus: "ready",
+      configured: true,
+    });
+    expect(JSON.stringify(choices)).not.toContain("inbox-secret-key");
     expect(queries.filter((sql) => sql.includes("FROM providers")).join("\n")).not.toMatch(/\b(api_key|access_key|secret_key|oauth_client_id|oauth_client_secret|oauth_refresh_token|oauth_access_token|oauth_token_expiry)\b/);
-    expect(queries.filter((sql) => sql.includes("FROM send_keys")).join("\n")).not.toMatch(/\bkey_hash\b/);
-    expect(queries.filter((sql) => sql.includes("FROM domains WHERE provider_id IN"))).toHaveLength(1);
-    expect(queries.filter((sql) => sql.includes("FROM addresses WHERE provider_id IN"))).toHaveLength(1);
-    expect(queries.filter((sql) => sql.includes("FROM domains WHERE provider_id = ?"))).toHaveLength(0);
-    expect(queries.filter((sql) => sql.includes("FROM addresses WHERE provider_id = ?"))).toHaveLength(0);
+    expect(queries.filter((sql) => sql.includes("provisioning_status"))).toHaveLength(1);
   });
 
   it("defaults compose From to the best configured sender for the active source", () => {
@@ -526,6 +640,11 @@ describe("tui data — Sent folder (Gmail SENT + app-sent)", () => {
       cc_addresses: [], subject: "gmail sent", text_body: "b", html_body: null, attachments: [],
       label_ids: ["SENT"], headers: {}, raw_size: 1, received_at: new Date().toISOString(),
     }, db);
+    storeInboundEmail({
+      provider_id: null, message_id: "<sent-lower@x>", from_address: "me@x.com", to_addresses: ["client2@y.com"],
+      cc_addresses: [], subject: "gmail lower sent", text_body: "b", html_body: null, attachments: [],
+      label_ids: ["sent"], headers: {}, raw_size: 1, received_at: new Date().toISOString(),
+    }, db);
     // a received message
     seed("received-1");
     // an app-sent message
@@ -533,15 +652,17 @@ describe("tui data — Sent folder (Gmail SENT + app-sent)", () => {
 
     const sent = listMailbox("sent").map((m) => m.subject);
     expect(sent).toContain("gmail sent");
+    expect(sent).toContain("gmail lower sent");
     expect(sent).toContain("app sent");
     expect(sent).not.toContain("received-1");
 
     const inbox = listMailbox("inbox").map((m) => m.subject);
     expect(inbox).toContain("received-1");
     expect(inbox).not.toContain("gmail sent");   // SENT excluded from inbox
+    expect(inbox).not.toContain("gmail lower sent");
 
     const c = mailboxCounts();
-    expect(c.sent).toBe(2);   // 1 gmail-sent + 1 app-sent
+    expect(c.sent).toBe(3);   // 2 gmail-sent + 1 app-sent
   });
 
   it("marks sentByMe + shows the recipient for sent mail", () => {
@@ -1208,15 +1329,15 @@ describe("tui data — settings (persisted to config)", () => {
   beforeEach(() => { savedHome = process.env["HOME"]; tmpHome = mkdtempSync(join(tmpdir(), "emails-cfg-")); process.env["HOME"] = tmpHome; });
   afterEach(() => { if (savedHome === undefined) delete process.env["HOME"]; else process.env["HOME"] = savedHome; rmSync(tmpHome, { recursive: true, force: true }); });
 
-  it("defaults to auto-pull on + high contrast (dimRead off)", () => {
+  it("defaults to dark theme with provider pulls off", () => {
     const s = getSettings();
-    expect(s.autoPull).toBe(true);
-    expect(s.gmailAutoPull).toBe(true);
+    expect(s.autoPull).toBe(false);
+    expect(s.gmailAutoPull).toBe(false);
     expect(s.dimRead).toBe(false);
     expect(s.defaultMailbox).toBe("inbox");
     expect(s.defaultAddress).toBeNull();
     expect(s.defaultFrom).toBeNull();
-    expect(s.theme).toBe("auto");
+    expect(s.theme).toBe("dark");
   });
 
   it("round-trips a setting change", () => {

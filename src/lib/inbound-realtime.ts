@@ -1,12 +1,12 @@
 /**
  * Real-time inbound — push delivery so mail lands in the inbox without a manual
- * `emails inbox sync-s3`.
+ * `mailery inbox sync-s3`.
  *
  * Wiring: SES receipt rule (S3 action with a TopicArn) → SNS topic → SQS queue.
  * A watch daemon long-polls the queue; any notification triggers a dedup-safe
  * `syncS3Inbox` of the bucket/prefix, so the new object is pulled into SQLite
  * immediately. The same notification is also accepted over an HTTP webhook on
- * `emails serve` (see server/routes/agent-api / inbound webhook).
+ * `mailery serve` (see server/routes/agent-api / inbound webhook).
  *
  * The parser and poller here are pure / dependency-injected so they are fully
  * testable without AWS.

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { clipboardCommands, copyTextToClipboard, sshClipboardHosts } from "./clipboard.js";
+import { clipboardCommands, copyTextToClipboard, copyTextToClipboardAsync, sshClipboardHosts } from "./clipboard.js";
 
 describe("tui clipboard", () => {
   it("detects explicit and SSH client clipboard hosts", () => {
@@ -20,7 +20,7 @@ describe("tui clipboard", () => {
 
     expect(commands.slice(0, 4)).toEqual([
       "custom-copy --stdin",
-      "ssh -o BatchMode=yes -o ConnectTimeout=2 -o LogLevel=ERROR 100.100.226.69 pbcopy",
+      "ssh -o BatchMode=yes -o ConnectTimeout=1 -o LogLevel=ERROR 100.100.226.69 pbcopy",
       "pbcopy",
       "tmux-clipboard-copy",
     ]);
@@ -41,8 +41,31 @@ describe("tui clipboard", () => {
     });
 
     expect(result).toEqual({ ok: true, method: "ssh-pbcopy:100.100.226.69" });
-    expect(calls[0]).toBe("ssh -o BatchMode=yes -o ConnectTimeout=2 -o LogLevel=ERROR 100.100.226.69 pbcopy");
+    expect(calls[0]).toBe("ssh -o BatchMode=yes -o ConnectTimeout=1 -o LogLevel=ERROR 100.100.226.69 pbcopy");
     expect(writes).toEqual([]);
+  });
+
+  it("bounds async SSH clipboard attempts and falls back to OSC52", async () => {
+    const calls: Array<{ cmd: string; timeoutMs: number | undefined }> = [];
+    const writes: string[] = [];
+    const result = await copyTextToClipboardAsync("hello async", {
+      env: { SSH_CLIENT: "100.100.226.69 54111 22" },
+      platform: "linux",
+      stdoutIsTTY: true,
+      writeStdout: (value) => writes.push(value),
+      spawnSync: () => ({ exitCode: 1, stdout: "" }),
+      spawnAsync: async ({ cmd, timeoutMs }) => {
+        calls.push({ cmd: cmd.join(" "), timeoutMs });
+        return { exitCode: 1 };
+      },
+    });
+
+    expect(result).toEqual({ ok: true, method: "osc52" });
+    expect(calls[0]).toEqual({
+      cmd: "ssh -o BatchMode=yes -o ConnectTimeout=1 -o LogLevel=ERROR 100.100.226.69 pbcopy",
+      timeoutMs: 1500,
+    });
+    expect(writes.join("")).toContain("]52;c;");
   });
 
   it("copies through the attached tmux client SSH environment when the pane env is stale", () => {
@@ -65,6 +88,6 @@ describe("tui clipboard", () => {
     });
 
     expect(result).toEqual({ ok: true, method: "ssh-pbcopy:100.100.226.69" });
-    expect(calls).toContain("ssh -o BatchMode=yes -o ConnectTimeout=2 -o LogLevel=ERROR 100.100.226.69 pbcopy");
+    expect(calls).toContain("ssh -o BatchMode=yes -o ConnectTimeout=1 -o LogLevel=ERROR 100.100.226.69 pbcopy");
   });
 });

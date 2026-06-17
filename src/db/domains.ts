@@ -220,6 +220,78 @@ export function updateDomain(
   return getDomain(id, d)!;
 }
 
+export interface MoveDomainProviderResult {
+  domain: Domain;
+  from_provider_id: string;
+  to_provider_id: string;
+  moved_addresses: number;
+}
+
+export function moveDomainProvider(id: string, toProviderId: string, db?: Database): MoveDomainProviderResult {
+  const d = db || getDatabase();
+  const domain = getDomain(id, d);
+  if (!domain) throw new DomainNotFoundError(id);
+
+  if (domain.provider_id === toProviderId) {
+    return {
+      domain,
+      from_provider_id: domain.provider_id,
+      to_provider_id: toProviderId,
+      moved_addresses: 0,
+    };
+  }
+
+  const targetDomain = getDomainByName(toProviderId, domain.domain, d);
+  if (targetDomain && targetDomain.id !== id) {
+    throw new Error(`Target provider already has domain ${domain.domain} (${targetDomain.id})`);
+  }
+
+  const conflicts = d
+    .query(
+      `SELECT a.email
+         FROM addresses a
+        WHERE a.provider_id = ?
+          AND LOWER(substr(a.email, instr(a.email, '@') + 1)) = LOWER(?)
+          AND EXISTS (
+            SELECT 1
+              FROM addresses b
+             WHERE b.provider_id = ?
+               AND b.email = a.email COLLATE NOCASE
+               AND b.id != a.id
+          )
+        ORDER BY a.email ASC
+        LIMIT 10`,
+    )
+    .all(domain.provider_id, domain.domain, toProviderId) as Array<{ email: string }>;
+  if (conflicts.length > 0) {
+    const shown = conflicts.map((row) => row.email).join(", ");
+    throw new Error(`Target provider already has matching address row(s): ${shown}`);
+  }
+
+  const timestamp = now();
+  d.run("BEGIN");
+  try {
+    d.run("UPDATE domains SET provider_id = ?, updated_at = ? WHERE id = ?", [toProviderId, timestamp, id]);
+    const moved = d.run(
+      `UPDATE addresses
+          SET provider_id = ?, domain_id = ?, updated_at = ?
+        WHERE provider_id = ?
+          AND LOWER(substr(email, instr(email, '@') + 1)) = LOWER(?)`,
+      [toProviderId, id, timestamp, domain.provider_id, domain.domain],
+    );
+    d.run("COMMIT");
+    return {
+      domain: getDomain(id, d)!,
+      from_provider_id: domain.provider_id,
+      to_provider_id: toProviderId,
+      moved_addresses: moved.changes,
+    };
+  } catch (error) {
+    try { d.run("ROLLBACK"); } catch {}
+    throw error;
+  }
+}
+
 export function deleteDomain(id: string, db?: Database): boolean {
   const d = db || getDatabase();
   const result = d.run("DELETE FROM domains WHERE id = ?", [id]);

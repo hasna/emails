@@ -239,7 +239,7 @@ export function storeInboundEmail(
 
   // Mail synced from Gmail's Sent folder carries the SENT label — flag it so it
   // lands in the Sent folder, not the inbox.
-  const isSent = (input.label_ids ?? []).includes("SENT") ? 1 : 0;
+  const isSent = (input.label_ids ?? []).some((label) => label.trim().toLowerCase() === "sent") ? 1 : 0;
 
   d.run(
     `INSERT INTO inbound_emails
@@ -486,9 +486,13 @@ function applyInboundFilters(opts: ListInboundOpts | undefined, conditions: stri
   // Archived mail is hidden unless explicitly requested.
   conditions.push(opts?.archived ? "is_archived = 1" : "is_archived = 0");
   if (opts?.label) {
-    // json_valid guards against one malformed row failing the whole query.
-    conditions.push("(json_valid(inbound_emails.label_ids_json) AND EXISTS (SELECT 1 FROM json_each(inbound_emails.label_ids_json) WHERE value = ?))");
-    params.push(opts.label);
+    conditions.push(`EXISTS (
+      SELECT 1
+        FROM inbound_labels label
+       WHERE label.inbound_email_id = inbound_emails.id
+         AND label.label = ?
+    )`);
+    params.push(normalizeInboundLabel(opts.label));
   }
   const from = opts?.from?.trim().toLowerCase();
   if (from) {
@@ -511,6 +515,10 @@ function applyInboundFilters(opts: ListInboundOpts | undefined, conditions: stri
     )`);
     params.push(like, like, like, like);
   }
+}
+
+function normalizeInboundLabel(label: string): string {
+  return label.trim().toLowerCase().replace(/\s+/g, "-").slice(0, 64);
 }
 
 function applyExplicitRecipientFilters(opts: ListInboundOpts | undefined, conditions: string[], params: (string | number)[]): void {
@@ -796,9 +804,11 @@ export function setInboundStarredFlag(id: string, starred: boolean, db?: Databas
 function mutateInboundLabel(id: string, label: string, remove: boolean, d: Database): void {
   const row = requireInboundLabels(id, d);
   const labels = parseJsonArray<string>(row.label_ids_json);
+  const normalized = normalizeInboundLabel(label);
+  const sameLabel = (value: string) => normalizeInboundLabel(value) === normalized;
   const next = remove
-    ? labels.filter((l) => l !== label)
-    : labels.includes(label)
+    ? labels.filter((l) => !sameLabel(l))
+    : labels.some(sameLabel)
       ? labels
       : [...labels, label];
   d.run("UPDATE inbound_emails SET label_ids_json = ? WHERE id = ?", [JSON.stringify(next), id]);

@@ -14,6 +14,10 @@ describe("agent documentation contract", () => {
     expect(agents).toContain("prepare_inbox");
     expect(agents).toContain("wait_for_code");
     expect(agents).toContain("list_usable_from_addresses");
+    expect(agents).toContain("add_forwarding_rule");
+    expect(agents).toContain("backfill=true");
+    expect(agents).toContain("diagnose_inbound_delivery");
+    expect(agents).toContain("--force-mx-switch");
     expect(agents).toContain("emails://agent/context");
     expect(agents).toContain("emails://recent-errors");
     expect(agents).not.toContain("59 MCP tools");

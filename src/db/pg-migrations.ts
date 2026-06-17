@@ -1,5 +1,5 @@
 /**
- * PostgreSQL migrations for open-emails remote storage sync.
+ * PostgreSQL migrations for Mailery remote storage sync.
  *
  * Equivalent of the SQLite migrations in database.ts, translated for PostgreSQL.
  * Each element is a standalone SQL string that must be executed in order.
@@ -523,7 +523,7 @@ export const PG_MIGRATIONS: string[] = [
   // Migration 28: denormalized is_sent flag on inbound_emails (see SQLite).
   `
   ALTER TABLE inbound_emails ADD COLUMN IF NOT EXISTS is_sent INTEGER NOT NULL DEFAULT 0;
-  UPDATE inbound_emails SET is_sent = 1 WHERE label_ids_json LIKE '%"SENT"%';
+  UPDATE inbound_emails SET is_sent = 1 WHERE LOWER(label_ids_json) LIKE '%"sent"%';
   CREATE INDEX IF NOT EXISTS idx_inbound_sent_arch_recv ON inbound_emails(is_sent, is_archived, received_at);
   INSERT INTO _migrations (id) VALUES (28) ON CONFLICT DO NOTHING;
   `,
@@ -623,6 +623,131 @@ export const PG_MIGRATIONS: string[] = [
     END)), '@', 2)
   ), received_at);
   INSERT INTO _migrations (id) VALUES (35) ON CONFLICT DO NOTHING;
+  `,
+
+  // Migration 36: app-level inbound forwarding rules and delivery ledger.
+  `
+  CREATE TABLE IF NOT EXISTS forwarding_rules (
+    id TEXT PRIMARY KEY,
+    source_address TEXT NOT NULL,
+    target_address TEXT NOT NULL,
+    mode TEXT NOT NULL DEFAULT 'app-copy' CHECK(mode IN ('app-copy')),
+    provider_id TEXT REFERENCES providers(id) ON DELETE SET NULL,
+    from_address TEXT,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(source_address, target_address, mode)
+  );
+  CREATE INDEX IF NOT EXISTS idx_forwarding_rules_source ON forwarding_rules(source_address, enabled);
+  CREATE TABLE IF NOT EXISTS forwarding_deliveries (
+    id TEXT PRIMARY KEY,
+    rule_id TEXT NOT NULL REFERENCES forwarding_rules(id) ON DELETE CASCADE,
+    inbound_email_id TEXT NOT NULL REFERENCES inbound_emails(id) ON DELETE CASCADE,
+    sent_email_id TEXT REFERENCES emails(id) ON DELETE SET NULL,
+    status TEXT NOT NULL CHECK(status IN ('sent','failed')),
+    error TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(rule_id, inbound_email_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_forwarding_deliveries_rule ON forwarding_deliveries(rule_id, created_at);
+  CREATE INDEX IF NOT EXISTS idx_forwarding_deliveries_inbound ON forwarding_deliveries(inbound_email_id);
+  INSERT INTO _migrations (id) VALUES (36) ON CONFLICT DO NOTHING;
+  `,
+
+  // Migration 37: normalized labels plus hot spam/trash flags for Mailery UI.
+  `
+  ALTER TABLE inbound_emails ADD COLUMN IF NOT EXISTS is_spam INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE inbound_emails ADD COLUMN IF NOT EXISTS is_trash INTEGER NOT NULL DEFAULT 0;
+  CREATE TABLE IF NOT EXISTS inbound_labels (
+    inbound_email_id TEXT NOT NULL REFERENCES inbound_emails(id) ON DELETE CASCADE,
+    label TEXT NOT NULL,
+    PRIMARY KEY (inbound_email_id, label)
+  );
+  CREATE INDEX IF NOT EXISTS idx_inbound_labels_label ON inbound_labels(label, inbound_email_id);
+  CREATE INDEX IF NOT EXISTS idx_inbound_labels_email ON inbound_labels(inbound_email_id);
+  CREATE OR REPLACE FUNCTION mailery_jsonb_array_text(input text)
+  RETURNS SETOF text
+  LANGUAGE plpgsql
+  AS $$
+  BEGIN
+    RETURN QUERY SELECT jsonb_array_elements_text(input::jsonb);
+  EXCEPTION WHEN others THEN
+    RETURN;
+  END;
+  $$;
+  INSERT INTO inbound_labels (inbound_email_id, label)
+  SELECT e.id, left(regexp_replace(lower(trim(value)), '\\s+', '-', 'g'), 64)
+    FROM inbound_emails e,
+         mailery_jsonb_array_text(e.label_ids_json) AS value
+   WHERE e.label_ids_json IS NOT NULL
+     AND trim(value) != ''
+  ON CONFLICT DO NOTHING;
+  UPDATE inbound_emails
+     SET is_spam = CASE WHEN EXISTS (
+           SELECT 1 FROM inbound_labels
+            WHERE inbound_email_id = inbound_emails.id
+              AND label = 'spam'
+         ) THEN 1 ELSE 0 END,
+         is_trash = CASE WHEN EXISTS (
+           SELECT 1 FROM inbound_labels
+            WHERE inbound_email_id = inbound_emails.id
+              AND label = 'trash'
+         ) THEN 1 ELSE 0 END;
+  CREATE INDEX IF NOT EXISTS idx_inbound_sent_arch_spam_trash_recv ON inbound_emails(is_sent, is_archived, is_spam, is_trash, received_at);
+  CREATE INDEX IF NOT EXISTS idx_inbound_sent_read_arch_spam_trash_recv ON inbound_emails(is_sent, is_read, is_archived, is_spam, is_trash, received_at);
+  CREATE INDEX IF NOT EXISTS idx_inbound_sent_star_arch_spam_trash_recv ON inbound_emails(is_sent, is_starred, is_archived, is_spam, is_trash, received_at);
+  CREATE INDEX IF NOT EXISTS idx_inbound_arch_spam_trash_recv ON inbound_emails(is_archived, is_spam, is_trash, received_at);
+  CREATE INDEX IF NOT EXISTS idx_inbound_spam_recv ON inbound_emails(is_spam, received_at);
+  CREATE INDEX IF NOT EXISTS idx_inbound_trash_recv ON inbound_emails(is_trash, received_at);
+  CREATE INDEX IF NOT EXISTS idx_inbound_sent_spam_recv ON inbound_emails(is_sent, is_spam, received_at);
+  CREATE INDEX IF NOT EXISTS idx_inbound_sent_trash_recv ON inbound_emails(is_sent, is_trash, received_at);
+  CREATE INDEX IF NOT EXISTS idx_inbound_provider_sent_arch_spam_trash_recv ON inbound_emails(provider_id, is_sent, is_archived, is_spam, is_trash, received_at);
+  CREATE INDEX IF NOT EXISTS idx_inbound_provider_sent_read_arch_spam_trash_recv ON inbound_emails(provider_id, is_sent, is_read, is_archived, is_spam, is_trash, received_at);
+  CREATE INDEX IF NOT EXISTS idx_inbound_provider_sent_star_arch_spam_trash_recv ON inbound_emails(provider_id, is_sent, is_starred, is_archived, is_spam, is_trash, received_at);
+  INSERT INTO _migrations (id) VALUES (37) ON CONFLICT DO NOTHING;
+  `,
+
+  // Migration 38: persistent Mailery email agents and per-email run ledger.
+  `
+  CREATE TABLE IF NOT EXISTS email_agent_settings (
+    agent_key TEXT PRIMARY KEY,
+    enabled INTEGER NOT NULL DEFAULT 0,
+    always_on INTEGER NOT NULL DEFAULT 0,
+    provider TEXT NOT NULL DEFAULT 'groq' CHECK(provider IN ('cerebras','groq')),
+    model TEXT,
+    apply_labels INTEGER NOT NULL DEFAULT 1,
+    use_network_tools INTEGER NOT NULL DEFAULT 1,
+    config_json TEXT NOT NULL DEFAULT '{}',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+  CREATE TABLE IF NOT EXISTS email_agent_runs (
+    id TEXT PRIMARY KEY,
+    agent_key TEXT NOT NULL,
+    inbound_email_id TEXT NOT NULL REFERENCES inbound_emails(id) ON DELETE CASCADE,
+    provider TEXT NOT NULL CHECK(provider IN ('cerebras','groq')),
+    model TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('ok','error','skipped')),
+    category TEXT,
+    labels_json TEXT NOT NULL DEFAULT '[]',
+    priority INTEGER CHECK(priority BETWEEN 1 AND 5),
+    confidence REAL,
+    risk_score INTEGER CHECK(risk_score BETWEEN 0 AND 100),
+    summary TEXT,
+    reasoning TEXT,
+    tool_calls_json TEXT NOT NULL DEFAULT '[]',
+    output_json TEXT NOT NULL DEFAULT '{}',
+    error TEXT,
+    started_at TIMESTAMPTZ NOT NULL,
+    completed_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(agent_key, inbound_email_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_email_agent_runs_agent_status ON email_agent_runs(agent_key, status, completed_at);
+  CREATE INDEX IF NOT EXISTS idx_email_agent_runs_inbound ON email_agent_runs(inbound_email_id);
+  CREATE INDEX IF NOT EXISTS idx_email_agent_runs_completed ON email_agent_runs(completed_at);
+  INSERT INTO _migrations (id) VALUES (38) ON CONFLICT DO NOTHING;
   `,
 
   // Feedback table

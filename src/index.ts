@@ -120,6 +120,16 @@ export {
 export type { SendKey, SendKeySummary } from "./db/send-keys.js";
 
 export {
+  createForwardingRule, getForwardingRule, listForwardingRules,
+  setForwardingRuleEnabled, removeForwardingRule, listPendingForwarding,
+  recordForwardingDelivery,
+} from "./db/forwarding.js";
+export type {
+  ForwardingRule, ForwardingDelivery, ForwardingMode,
+  ForwardingDeliveryStatus, PendingForwarding,
+} from "./db/forwarding.js";
+
+export {
   createScheduledEmail, listScheduledEmails, listScheduledEmailSummaries, getScheduledEmail,
   cancelScheduledEmail, getDueEmails, markSent, markFailed,
 } from "./db/scheduled.js";
@@ -138,6 +148,56 @@ export { getLocalStats, formatStatsTable } from "./lib/stats.js";
 export { generateSpfRecord, generateDmarcRecord, formatDnsTable } from "./lib/dns.js";
 export { getAnalytics, formatAnalytics } from "./lib/analytics.js";
 export { parseCsv } from "./lib/csv.js";
+export { extractEmailLinks, formatEmailLinks } from "./lib/email-links.js";
+export type { ExtractEmailLinksInput, ExtractedEmailLink, EmailLinkSource } from "./lib/email-links.js";
+export {
+  buildReadOnlyMaileryTools,
+  formatMaileryAgentResult,
+  resolveMaileryAgentDefaults,
+  runMaileryAgent,
+  MAILERY_AGENT_SYSTEM_PROMPT,
+} from "./lib/mailery-agent.js";
+export type { MaileryAgentOptions, MaileryAgentProvider, MaileryAgentResult } from "./lib/mailery-agent.js";
+export {
+  buildManagedEmailAgentTools,
+  formatEmailAgentRun,
+  formatEmailAgentSetting,
+  runAlwaysOnEmailAgents,
+  runEmailAgentBatch,
+  runManagedEmailAgent,
+} from "./lib/email-agents.js";
+export type {
+  AlwaysOnEmailAgentsResult,
+  RunEmailAgentBatchOptions,
+  RunEmailAgentBatchResult,
+  RunManagedEmailAgentOptions,
+} from "./lib/email-agents.js";
+export {
+  EMAIL_AGENT_DEFINITIONS,
+  ensureEmailAgentSettings,
+  getEmailAgentDefinition,
+  getEmailAgentRun,
+  getEmailAgentSetting,
+  listEmailAgentRuns,
+  listEmailAgentSettings,
+  listEnabledAlwaysOnEmailAgents,
+  listPendingInboundEmailsForAgent,
+  normalizeEmailAgentKey,
+  saveEmailAgentRun,
+  updateEmailAgentSetting,
+} from "./db/email-agents.js";
+export type {
+  EmailAgentDefinition,
+  EmailAgentKey,
+  EmailAgentProvider,
+  EmailAgentRun,
+  EmailAgentRunFilter,
+  EmailAgentRunStatus,
+  EmailAgentSetting,
+  PendingAgentEmail,
+  SaveEmailAgentRunInput,
+  SaveEmailAgentSettingInput,
+} from "./db/email-agents.js";
 export { formatDnsCheck } from "./lib/dns-check-format.js";
 export type { DnsCheckResult } from "./lib/dns-check-format.js";
 export { formatDiagnostics } from "./lib/diagnostics-format.js";
@@ -220,6 +280,7 @@ export {
 export type { TriageResult, TriageSummary, TriageLabel, TriageSentiment, SaveTriageInput, TriageFilter, TriageStats } from "./db/triage.js";
 export type { ClassifyResult, EmailContext, TriageOptions } from "./lib/triage.js";
 export type { CerebrasMessage, CerebrasCompletionOptions, CerebrasResponse } from "./lib/cerebras.js";
+export type { ForwardingRunOptions, ForwardingRunResult, ForwardingRunItem } from "./lib/forwarding.js";
 
 // Provider factory
 export { getAdapter } from "./providers/index.js";
@@ -235,6 +296,7 @@ type GmailArchiveModule = typeof import("./lib/gmail-archive.js");
 type EmailVerifyModule = typeof import("./lib/email-verify.js");
 type TriageModule = typeof import("./lib/triage.js");
 type CerebrasModule = typeof import("./lib/cerebras.js");
+type ForwardingModule = typeof import("./lib/forwarding.js");
 
 export async function syncProvider(...args: Parameters<SyncModule["syncProvider"]>): Promise<Awaited<ReturnType<SyncModule["syncProvider"]>>> {
   const { syncProvider } = await import("./lib/sync.js");
@@ -259,6 +321,11 @@ export async function batchSend(...args: Parameters<BatchModule["batchSend"]>): 
 export async function runDiagnostics(...args: Parameters<DoctorModule["runDiagnostics"]>): Promise<Awaited<ReturnType<DoctorModule["runDiagnostics"]>>> {
   const { runDiagnostics } = await import("./lib/doctor.js");
   return runDiagnostics(...args);
+}
+
+export async function processForwardingRules(...args: Parameters<ForwardingModule["processForwardingRules"]>): Promise<Awaited<ReturnType<ForwardingModule["processForwardingRules"]>>> {
+  const { processForwardingRules } = await import("./lib/forwarding.js");
+  return processForwardingRules(...args);
 }
 
 export async function checkProviderHealth(...args: Parameters<HealthModule["checkProviderHealth"]>): Promise<Awaited<ReturnType<HealthModule["checkProviderHealth"]>>> {

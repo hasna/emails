@@ -99,8 +99,9 @@ export function registerInfrastructureTools(server: McpServer): void {
     }).optional().describe("Registrant contact info (omit if domain already purchased)"),
     duration_years: z.number().int().positive().max(MAX_DOMAIN_REGISTRATION_YEARS).optional(),
     add_mx: z.boolean().optional().describe("Also publish an inbound MX record for receiving (default false)"),
+    force_mx_switch: z.boolean().optional().describe("Allow adding inbound MX when an existing provider already owns root MX"),
   },
-  async ({ domain, provider_id, contact, duration_years, add_mx }) => {
+  async ({ domain, provider_id, contact, duration_years, add_mx, force_mx_switch }) => {
     try {
       const {
         r53CheckAvailability, r53RegisterDomain, r53GetRegistrationStatus,
@@ -109,6 +110,10 @@ export function registerInfrastructureTools(server: McpServer): void {
 
       const provider = getProvider(resolveId("providers", provider_id));
       if (!provider) throw new ProviderNotFoundError(provider_id);
+      if (add_mx) {
+        const { guardSesInboundMx } = await import("../../lib/mx-ownership.js");
+        await guardSesInboundMx(domain, !!force_mx_switch);
+      }
 
       const steps: string[] = [];
 
@@ -145,7 +150,7 @@ export function registerInfrastructureTools(server: McpServer): void {
 
       // 4. Publish DKIM/SPF/DMARC (+ optional MX) records IN CLOUDFLARE.
       const { setupEmailDns } = await import("../../lib/cloudflare-dns.js");
-      const dns = await setupEmailDns({ domain, provider, addMx: add_mx ?? false });
+      const dns = await setupEmailDns({ domain, provider, addMx: add_mx ?? false, forceMxSwitch: !!force_mx_switch });
       steps.push(`${dns.created} DNS records published to Cloudflare (${dns.skipped} skipped, ${dns.failed} failed)`);
 
       return {
@@ -154,7 +159,7 @@ export function registerInfrastructureTools(server: McpServer): void {
           text: JSON.stringify({
             domain, cloudflare_zone_id: zone.id, nameservers: zone.nameservers,
             dns_provider: "cloudflare",
-            steps, next: `Verify SES: emails domain verify ${domain} --provider ${provider_id}`,
+            steps, next: `Verify SES: mailery domain verify ${domain} --provider ${provider_id}`,
           }, null, 2),
         }],
       };
@@ -194,11 +199,16 @@ export function registerInfrastructureTools(server: McpServer): void {
     add_mx: z.boolean().optional().describe("Also add MX record for receiving email"),
     mx_server: z.string().optional().describe("Custom MX server hostname (default: inbound-smtp.<region>.amazonaws.com for SES)"),
     register_domain: z.boolean().optional().describe("Register the domain with SES/Resend first if not already added"),
+    force_mx_switch: z.boolean().optional().describe("Allow adding inbound MX when an existing provider already owns root MX"),
   },
-  async ({ domain, provider_id, cloudflare_token, add_mx, mx_server, register_domain }) => {
+  async ({ domain, provider_id, cloudflare_token, add_mx, mx_server, register_domain, force_mx_switch }) => {
     try {
       const provider = getProvider(resolveId("providers", provider_id));
       if (!provider) throw new ProviderNotFoundError(provider_id);
+      if (add_mx) {
+        const { guardSesInboundMx } = await import("../../lib/mx-ownership.js");
+        await guardSesInboundMx(domain, !!force_mx_switch);
+      }
 
       if (register_domain) {
         const adapter = getAdapter(provider);
@@ -213,6 +223,7 @@ export function registerInfrastructureTools(server: McpServer): void {
         apiToken: cloudflare_token,
         addMx: add_mx,
         mxServer: mx_server,
+        forceMxSwitch: !!force_mx_switch,
       });
 
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
@@ -229,7 +240,7 @@ export function registerInfrastructureTools(server: McpServer): void {
     bucket: z.string().describe("S3 bucket name"),
     prefix: z.string().optional().describe("S3 key prefix (e.g. inbound/example.com/)"),
     region: z.string().optional().describe("AWS region (default: us-east-1)"),
-    provider_id: z.string().optional().describe("Associate emails with this provider ID"),
+    provider_id: z.string().optional().describe("Associate mailery with this provider ID"),
     limit: z.number().int().positive().max(MAX_MCP_S3_SYNC_LIMIT).optional().describe("Max emails per run (default: 100, max: 10000)"),
   },
   async ({ bucket, prefix, region, provider_id, limit }) => {
@@ -385,13 +396,18 @@ export function registerInfrastructureTools(server: McpServer): void {
       provider_id: z.string().describe("SES provider ID"),
       send_provider: z.string().optional(),
       add_mx: z.boolean().optional().describe("Also publish inbound MX (ses-s3 receive)"),
+      force_mx_switch: z.boolean().optional().describe("Allow adding inbound MX when an existing provider already owns root MX"),
     },
-    async ({ domain, provider_id, send_provider, add_mx }) => {
+    async ({ domain, provider_id, send_provider, add_mx, force_mx_switch }) => {
       try {
         const db = getDatabase();
         const resolvedProviderId = resolveId("providers", provider_id);
         const provider = getProvider(resolvedProviderId);
         if (!provider) throw new ProviderNotFoundError(provider_id);
+        if (add_mx) {
+          const { guardSesInboundMx } = await import("../../lib/mx-ownership.js");
+          await guardSesInboundMx(domain, !!force_mx_switch);
+        }
         const { getDomainByName } = await import("../../db/domains.js");
         const { setDomainProvisioning } = await import("../../db/provisioning.js");
         const rec = getDomainByName(resolvedProviderId, domain, db) ?? createDomain(resolvedProviderId, domain, db);
@@ -399,7 +415,7 @@ export function registerInfrastructureTools(server: McpServer): void {
         const adapter = getAdapter(provider);
         await adapter.addDomain(domain);
         const { setupEmailDns } = await import("../../lib/cloudflare-dns.js");
-        const dns = await setupEmailDns({ domain, provider, addMx: !!add_mx });
+        const dns = await setupEmailDns({ domain, provider, addMx: !!add_mx, forceMxSwitch: !!force_mx_switch });
         setDomainProvisioning(rec.id, { provisioning_status: "dns_published", next_check_at: new Date().toISOString() }, db);
         return { content: [{ type: "text" as const, text: JSON.stringify({ domain, dns_provider: "cloudflare", records_published: dns.created, dns }, null, 2) }] };
       } catch (e) { return { content: [{ type: "text" as const, text: `Error: ${formatError(e)}` }], isError: true }; }
@@ -486,7 +502,79 @@ export function registerInfrastructureTools(server: McpServer): void {
           domain_id: domainId,
           provisioning,
           ownership,
-          cli_equivalent: `emails address provision ${email} --provider ${provider_id}${owner ? ` --owner ${owner}` : ""}${administrator ? ` --administrator ${administrator}` : ""}${wait ? " --wait" : ""} --json`,
+          cli_equivalent: `mailery address provision ${email} --provider ${provider_id}${owner ? ` --owner ${owner}` : ""}${administrator ? ` --administrator ${administrator}` : ""}${wait ? " --wait" : ""} --json`,
+        }, null, 2) }] };
+      } catch (e) { return { content: [{ type: "text" as const, text: `Error: ${formatError(e)}` }], isError: true }; }
+    },
+  );
+
+  server.tool(
+    "add_forwarding_rule",
+    "Create or update an app-level forwarding rule. It forwards inbound mail only after this app has received or synced the source mailbox.",
+    {
+      source_address: z.string().describe("Mailbox to watch, e.g. user@example.com"),
+      target_address: z.string().describe("Destination for forwarded copies"),
+      provider_id: z.string().optional().describe("Provider used to send forwarded copies"),
+      from_address: z.string().optional().describe("From address for forwarded copies; defaults to source_address"),
+      enabled: z.boolean().optional().describe("Whether the rule is enabled; default true"),
+    },
+    async ({ source_address, target_address, provider_id, from_address, enabled }) => {
+      try {
+        const providerId = provider_id ? resolveId("providers", provider_id) : null;
+        const { createForwardingRule } = await import("../../db/forwarding.js");
+        const rule = createForwardingRule({
+          source_address,
+          target_address,
+          provider_id: providerId,
+          from_address: from_address ?? null,
+          enabled: enabled !== false,
+        });
+        return { content: [{ type: "text" as const, text: JSON.stringify({
+          ...rule,
+          cli_equivalent: `mailery forwarding add ${source_address} ${target_address}${provider_id ? ` --provider ${provider_id}` : ""}${from_address ? ` --from ${from_address}` : ""}${enabled === false ? " --disabled" : ""} --json`,
+        }, null, 2) }] };
+      } catch (e) { return { content: [{ type: "text" as const, text: `Error: ${formatError(e)}` }], isError: true }; }
+    },
+  );
+
+  server.tool(
+    "list_forwarding_rules",
+    "List app-level forwarding rules.",
+    {
+      source_address: z.string().optional(),
+      enabled: z.boolean().optional(),
+      limit: z.number().int().positive().max(1000).optional(),
+      offset: z.number().int().min(0).optional(),
+    },
+    async ({ source_address, enabled, limit, offset }) => {
+      try {
+        const { listForwardingRules } = await import("../../db/forwarding.js");
+        const rules = listForwardingRules({ source_address, enabled, limit: limit ?? 50, offset: offset ?? 0 });
+        return { content: [{ type: "text" as const, text: JSON.stringify({
+          rules,
+          cli_equivalent: `mailery forwarding list${source_address ? ` --source ${source_address}` : ""}${enabled === true ? " --enabled" : enabled === false ? " --disabled" : ""}${limit ? ` --limit ${limit}` : ""}${offset ? ` --offset ${offset}` : ""} --json`,
+        }, null, 2) }] };
+      } catch (e) { return { content: [{ type: "text" as const, text: `Error: ${formatError(e)}` }], isError: true }; }
+    },
+  );
+
+  server.tool(
+    "run_forwarding_rules",
+    "Process pending app-level forwarding rules.",
+    {
+      provider_id: z.string().optional(),
+      from_address: z.string().optional(),
+      limit: z.number().int().positive().max(1000).optional(),
+      backfill: z.boolean().optional().describe("Also process matching messages received before the forwarding rule was created"),
+    },
+    async ({ provider_id, from_address, limit, backfill }) => {
+      try {
+        const providerId = provider_id ? resolveId("providers", provider_id) : undefined;
+        const { processForwardingRules } = await import("../../lib/forwarding.js");
+        const result = await processForwardingRules({ providerId, fromAddress: from_address, limit: limit ?? 100, backfill });
+        return { content: [{ type: "text" as const, text: JSON.stringify({
+          ...result,
+          cli_equivalent: `mailery forwarding run${provider_id ? ` --provider ${provider_id}` : ""}${from_address ? ` --from ${from_address}` : ""}${limit ? ` --limit ${limit}` : ""}${backfill ? " --backfill" : ""} --json`,
         }, null, 2) }] };
       } catch (e) { return { content: [{ type: "text" as const, text: `Error: ${formatError(e)}` }], isError: true }; }
     },

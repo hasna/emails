@@ -34,4 +34,16 @@ describe("assessDomainReadiness", () => {
     expect(readiness.ready_addresses).toBe(1);
     expect(readiness.state).toBe("ready_to_send_and_receive");
   });
+
+  it("uses safe dry-run guidance when receive readiness is missing", () => {
+    const readiness = assessDomainReadiness(
+      { domain: "example.com", dkim_status: "verified", spf_status: "verified", dmarc_status: "verified" },
+      null,
+    );
+
+    expect(readiness.receive_ready).toBe(false);
+    expect(readiness.fix_commands).toContain("mailery domain check example.com");
+    expect(readiness.fix_commands).toContain("mailery provision domain example.com --provider <provider> --dry-run");
+    expect(readiness.fix_commands.join(" ")).not.toContain("domain adopt");
+  });
 });

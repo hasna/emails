@@ -5,9 +5,9 @@ import { createAddress, listAddresses } from "../../db/addresses.js";
 import { createDomain, listDomains } from "../../db/domains.js";
 import { createProvider } from "../../db/providers.js";
 import { getDomainProvisioning, setAddressProvisioning, setDomainProvisioning } from "../../db/provisioning.js";
-import { registerProvisionCommands } from "./provision.js";
+import { registerProvisionCommands, type ProvisionCommandDeps } from "./provision.js";
 
-async function runProvisionCommand(args: string[]) {
+async function runProvisionCommand(args: string[], deps?: ProvisionCommandDeps) {
   const program = new Command();
   program.exitOverride();
   let data: unknown;
@@ -15,7 +15,7 @@ async function runProvisionCommand(args: string[]) {
   registerProvisionCommands(program, (d, formatted) => {
     data = d;
     out.push(String(formatted ?? ""));
-  });
+  }, deps);
   await program.parseAsync(["node", "emails", ...args]);
   return { data, out: out.join("\n") };
 }
@@ -45,6 +45,7 @@ describe("provision command dry-runs", () => {
         receive_strategy: "ses-s3",
         provisioning_status: "requested",
       },
+      cli_equivalent: `mailery provision address agent@example.com --provider ${provider.id} --dry-run --json`,
     });
     expect(listAddresses(undefined, getDatabase())).toHaveLength(0);
   });
@@ -52,7 +53,17 @@ describe("provision command dry-runs", () => {
   it("plans domain provisioning without writing local state", async () => {
     const provider = createProvider({ name: "ses", type: "ses", region: "us-east-1" });
 
-    const result = await runProvisionCommand(["provision", "domain", "example.com", "--provider", provider.id, "--add-mx", "--dry-run"]);
+    const result = await runProvisionCommand(["provision", "domain", "example.com", "--provider", provider.id, "--add-mx", "--dry-run"], {
+      inspectMx: async () => ({
+        domain: "example.com",
+        owner: "google-workspace",
+        records: [
+          { exchange: "aspmx.l.google.com", priority: 1, owner: "google-workspace" },
+        ],
+        summary: "1 root MX record(s), owner: Google Workspace",
+        protects_existing_inbound: true,
+      }),
+    });
 
     expect(result.data).toMatchObject({
       dry_run: true,
@@ -65,7 +76,13 @@ describe("provision command dry-runs", () => {
         dns_provider: "cloudflare",
         add_mx: true,
       },
+      mx_assessment: {
+        owner: "google-workspace",
+      },
+      mx_requires_confirmation: true,
+      cli_equivalent: `mailery provision domain example.com --provider ${provider.id} --add-mx --dry-run --json`,
     });
+    expect(result.out).toContain("Refusing to add AWS SES inbound");
     expect(listDomains(undefined, getDatabase())).toHaveLength(0);
   });
 });

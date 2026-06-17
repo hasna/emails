@@ -98,8 +98,8 @@ describe("CLI JSON contracts", () => {
       target: "claude",
       action: "install",
       command: "claude",
-      args: ["mcp", "add", "--transport", "stdio", "--scope", "user", "emails", "--", "emails-mcp"],
-      shell: "claude mcp add --transport stdio --scope user emails -- emails-mcp",
+      args: ["mcp", "add", "--transport", "stdio", "--scope", "user", "mailery", "--", "mailery-mcp"],
+      shell: "claude mcp add --transport stdio --scope user mailery -- mailery-mcp",
     });
   });
 
@@ -193,6 +193,70 @@ describe("CLI JSON contracts", () => {
     const parsed = JSON.parse(stderr) as { error: { message: string; code: string; fix_commands: string[] } };
     expect(parsed.error.code).toBe("not_found");
     expect(parsed.error.message).toContain("Could not resolve ID");
-    expect(parsed.error.fix_commands).toContain("emails provider list --json");
+    expect(parsed.error.fix_commands).toContain("mailery provider list --json");
+  });
+
+  it("routes natural-language root prompts to the read-only agent", () => {
+    const dir = mkdtempSync(join(tmpdir(), "emails-cli-contract-"));
+    tempDirs.push(dir);
+    const env = isolatedEnv(join(dir, "emails.db"), join(dir, "home"));
+    delete env.CEREBRAS_API_KEY;
+
+    const result = runCli(["--json", "extract", "links", "from", "latest", "email"], env);
+    const stderr = new TextDecoder().decode(result.stderr);
+
+    expect(result.exitCode).toBe(1);
+    const parsed = JSON.parse(stderr) as { error: { message: string; code: string } };
+    expect(parsed.error.code).toBe("auth_error");
+    expect(parsed.error.message).toContain("CEREBRAS_API_KEY");
+  });
+
+  it("routes natural-language links prompts to the read-only agent", () => {
+    const dir = mkdtempSync(join(tmpdir(), "emails-cli-contract-"));
+    tempDirs.push(dir);
+    const env = isolatedEnv(join(dir, "emails.db"), join(dir, "home"));
+    delete env.CEREBRAS_API_KEY;
+
+    const result = runCli(["--json", "links", "from", "latest", "email"], env);
+    const stderr = new TextDecoder().decode(result.stderr);
+
+    expect(result.exitCode).toBe(1);
+    const parsed = JSON.parse(stderr) as { error: { message: string; code: string } };
+    expect(parsed.error.code).toBe("auth_error");
+    expect(parsed.error.message).toContain("CEREBRAS_API_KEY");
+  });
+
+  it("honors saved Groq provider config for agent prompts", () => {
+    const dir = mkdtempSync(join(tmpdir(), "emails-cli-contract-"));
+    tempDirs.push(dir);
+    const env = isolatedEnv(join(dir, "emails.db"), join(dir, "home"));
+    delete env.CEREBRAS_API_KEY;
+    delete env.GROQ_API_KEY;
+
+    const config = runCli(["config", "set", "ai_provider", "groq"], env);
+    expect(config.exitCode).toBe(0);
+
+    const result = runCli(["--json", "agent", "extract", "links"], env);
+    const stderr = new TextDecoder().decode(result.stderr);
+
+    expect(result.exitCode).toBe(1);
+    const parsed = JSON.parse(stderr) as { error: { message: string; code: string } };
+    expect(parsed.error.code).toBe("auth_error");
+    expect(parsed.error.message).toContain("GROQ_API_KEY");
+    expect(parsed.error.message).not.toContain("CEREBRAS_API_KEY");
+  });
+
+  it("keeps one-word unknown commands as command errors", () => {
+    const dir = mkdtempSync(join(tmpdir(), "emails-cli-contract-"));
+    tempDirs.push(dir);
+    const env = isolatedEnv(join(dir, "emails.db"), join(dir, "home"));
+    delete env.CEREBRAS_API_KEY;
+
+    const result = runCli(["definitely-not-a-command"], env);
+    const stderr = new TextDecoder().decode(result.stderr);
+
+    expect(result.exitCode).not.toBe(0);
+    expect(stderr).toContain("unknown command");
+    expect(stderr).not.toContain("CEREBRAS_API_KEY");
   });
 });

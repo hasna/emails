@@ -99,7 +99,7 @@ export function registerServeCommands(program: Command, output: (data: unknown, 
   program
     .command("remove")
     .alias("uninstall")
-    .description("Uninstall the emails MCP from agent configs")
+    .description("Uninstall the Mailery MCP from agent configs")
     .option("--claude", "Remove from Claude Code")
     .option("--codex", "Remove from Codex CLI (~/.codex/config.toml)")
     .option("--gemini", "Remove from Gemini CLI (~/.gemini/settings.json)")
@@ -129,7 +129,7 @@ export function registerServeCommands(program: Command, output: (data: unknown, 
             const result: string[] = [];
             let skipping = false;
             for (const line of lines) {
-              if (line.trim() === "[mcp_servers.emails]") { skipping = true; continue; }
+              if (line.trim() === "[mcp_servers.mailery]" || line.trim() === "[mcp_servers.emails]") { skipping = true; continue; }
               if (skipping && line.startsWith("[")) skipping = false;
               if (!skipping) result.push(line);
             }
@@ -147,12 +147,13 @@ export function registerServeCommands(program: Command, output: (data: unknown, 
           } else {
             const config = JSON.parse(readFileSync(configPath, "utf-8")) as Record<string, unknown>;
             const mcpServers = config["mcpServers"] as Record<string, unknown> | undefined;
-            if (mcpServers?.["emails"]) {
+            if (mcpServers?.["mailery"] || mcpServers?.["emails"]) {
+              delete mcpServers["mailery"];
               delete mcpServers["emails"];
               writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n");
               console.log(chalk.green("✓ Removed from Gemini CLI config"));
             } else {
-              console.log(chalk.dim("emails not found in Gemini CLI config, skipping"));
+              console.log(chalk.dim("mailery not found in Gemini CLI config, skipping"));
             }
           }
         } catch (e) { handleError(e); }

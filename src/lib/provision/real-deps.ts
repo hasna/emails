@@ -16,7 +16,7 @@ import { getDomainProvisioning } from "../../db/provisioning.js";
 import { listInboundSubjectsForRecipient } from "../../db/inbound.js";
 import type { Database } from "../../db/database.js";
 import type { DomainDeps, AddressDeps } from "./orchestrator.js";
-import { runRoundtrip } from "./roundtrip.js";
+import { runSelfRoundtrip } from "./roundtrip.js";
 
 const CF_NS_SUFFIX = ".ns.cloudflare.com";
 
@@ -25,6 +25,7 @@ export interface RealDepsOptions {
   inboundBucket: string;
   region?: string;
   addMx?: boolean;
+  forceMxSwitch?: boolean;
   db?: Database;
 }
 
@@ -58,6 +59,10 @@ export function makeDomainDeps(opts: RealDepsOptions): DomainDeps {
       }
     },
     async createSesIdentity(ctx) {
+      if (opts.addMx) {
+        const { guardSesInboundMx } = await import("../mx-ownership.js");
+        await guardSesInboundMx(ctx.domain, !!opts.forceMxSwitch);
+      }
       await adapter.addDomain(ctx.domain);
       let mailFromDomain = `mail.${ctx.domain}`;
       if (adapter.setMailFrom) mailFromDomain = await adapter.setMailFrom(ctx.domain);
@@ -70,7 +75,7 @@ export function makeDomainDeps(opts: RealDepsOptions): DomainDeps {
     },
     async publishDns(ctx) {
       const { setupEmailDns } = await import("../cloudflare-dns.js");
-      const result = await setupEmailDns({ domain: ctx.domain, provider: opts.provider, addMx: !!opts.addMx });
+      const result = await setupEmailDns({ domain: ctx.domain, provider: opts.provider, addMx: !!opts.addMx, forceMxSwitch: !!opts.forceMxSwitch });
       return { recordsPublished: result.created };
     },
     async checkSesVerification(ctx) {
@@ -104,8 +109,11 @@ export function makeAddressDeps(opts: RealDepsOptions): AddressDeps {
       void prov;
       const { sendWithFailover } = await import("../send.js");
       const { syncS3Inbox } = await import("../s3-sync.js");
-      const roundtripStartedAt = new Date().toISOString();
-      const report = await runRoundtrip(
+      // SES/S3 parsed `received_at` timestamps are second-granularity. Give the
+      // query a small grace window so same-second deliveries are not filtered
+      // out by this process's millisecond-precision start time.
+      const roundtripStartedAt = new Date(Date.now() - 60_000).toISOString();
+      const report = await runSelfRoundtrip(
         {
           send: async ({ from, to, subject, text }) => {
             const r = await sendWithFailover(providerId, { from, to, subject, text, html: `<p>${text}</p>` }, opts.db);
@@ -113,12 +121,21 @@ export function makeAddressDeps(opts: RealDepsOptions): AddressDeps {
             return { messageId: r.messageId };
           },
           fetchReceived: async (mailbox) => {
-            await syncS3Inbox({ bucket: opts.inboundBucket, prefix: `inbound/${domain}/`, providerId, limit: 1000, region, db: opts.db });
+            await syncS3Inbox({
+              bucket: opts.inboundBucket,
+              prefix: `inbound/${domain}/`,
+              providerId,
+              accessKeyId: opts.provider.access_key ?? undefined,
+              secretAccessKey: opts.provider.secret_key ?? undefined,
+              limit: 1000,
+              region,
+              db: opts.db,
+            });
             const db = opts.db ?? (await import("../../db/database.js")).getDatabase();
             return listInboundSubjectsForRecipient(mailbox, { since: roundtripStartedAt, limit: 100 }, db);
           },
         },
-        { addresses: [ctx.email, ctx.email], count: 1, tokenPrefix: `VAL-${Date.now()}`, pollAttempts: 8, pollIntervalMs: 8000 },
+        { address: ctx.email, count: 1, tokenPrefix: `VAL-${Date.now()}`, pollAttempts: 10, pollIntervalMs: 8000 },
       );
       return { validated: report.success };
     },

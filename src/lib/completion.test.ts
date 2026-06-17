@@ -8,20 +8,21 @@ describe("generateBashCompletion", () => {
     expect(result.length).toBeGreaterThan(100);
   });
 
-  it("contains the emails command", () => {
+  it("contains the mailery command", () => {
     const result = generateBashCompletion();
-    expect(result).toContain("emails");
+    expect(result).toContain("mailery");
   });
 
   it("contains bash shebang / completion function", () => {
     const result = generateBashCompletion();
-    expect(result).toContain("_emails_completion");
+    expect(result).toContain("_mailery_completion");
   });
 
   it("contains core command names", () => {
     const result = generateBashCompletion();
     expect(result).toContain("provider");
     expect(result).toContain("domain");
+    expect(result).toContain("forwarding");
     expect(result).toContain("send");
   });
 });
@@ -42,6 +43,7 @@ describe("generateZshCompletion", () => {
     const result = generateZshCompletion();
     expect(result).toContain("provider");
     expect(result).toContain("domain");
+    expect(result).toContain("forwarding");
   });
 });
 
@@ -55,13 +57,14 @@ describe("generateFishCompletion", () => {
   it("contains fish complete commands", () => {
     const result = generateFishCompletion();
     expect(result).toContain("complete");
-    expect(result).toContain("emails");
+    expect(result).toContain("mailery");
   });
 
   it("contains core command names", () => {
     const result = generateFishCompletion();
     expect(result).toContain("provider");
     expect(result).toContain("domain");
+    expect(result).toContain("forwarding");
     expect(result).toContain("send");
   });
 });

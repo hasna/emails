@@ -14,6 +14,7 @@ import {
   parseStorageTables,
   pullTable,
   pushTable,
+  runStorageMigrations,
 } from "./storage-sync.js";
 
 type Row = Record<string, unknown>;
@@ -27,10 +28,14 @@ class FakeRemote {
   allCalls: Array<{ sql: string; params: unknown[] }> = [];
   runCalls: Array<{ sql: string; params: unknown[] }> = [];
 
-  constructor(private readonly rowsByTable: Record<string, Row[]> = {}) {}
+  constructor(
+    private readonly rowsByTable: Record<string, Row[]> = {},
+    private readonly migrationRows: Row[] = [],
+  ) {}
 
   async all(sql: string, ...params: unknown[]): Promise<unknown[]> {
     this.allCalls.push({ sql, params });
+    if (sql.includes("FROM _migrations")) return this.migrationRows;
     if (sql.includes("information_schema.columns")) return [];
     const table = sql.match(/FROM "([^"]+)"/)?.[1] ?? "";
     const limit = Number(params[0] ?? this.rowsByTable[table]?.length ?? 0);
@@ -129,6 +134,16 @@ describe("emails storage sync configuration", () => {
 });
 
 describe("storage table sync batching", () => {
+  it("skips PostgreSQL migrations that are already recorded", async () => {
+    const remote = new FakeRemote({}, Array.from({ length: 37 }, (_, index) => ({ id: index + 1 })));
+
+    await runStorageMigrations(remote as unknown as PgAdapterAsync);
+
+    const sql = remote.runCalls.map((call) => call.sql).join("\n");
+    expect(sql).not.toContain("INSERT INTO inbound_labels");
+    expect(sql).toContain("CREATE TABLE IF NOT EXISTS feedback");
+  });
+
   it("pushes local rows in bounded batches", async () => {
     const localRows = ["1", "2", "3", "4", "5"].map((id) => providerRow(id, `Provider ${id}`));
     const dataReads: Array<{ sql: string; args: unknown[] }> = [];

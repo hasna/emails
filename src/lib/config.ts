@@ -216,6 +216,27 @@ export function getCloudflareAuth(): CloudflareAuth | undefined {
   });
 }
 
+export interface BrandsightAuth {
+  apiKey: string;
+  apiSecret: string;
+  customerId: string;
+}
+
+export function getBrandsightAuth(): BrandsightAuth | undefined {
+  const config = loadConfig();
+  const apiKey = (config["brandsight_api_key"] as string | undefined)
+    ?? process.env["BRANDSIGHT_API_KEY"]
+    ?? process.env["HASNAXYZ_BRANDSIGHT_LIVE_API_KEY"];
+  const apiSecret = (config["brandsight_api_secret"] as string | undefined)
+    ?? process.env["BRANDSIGHT_API_SECRET"]
+    ?? process.env["HASNAXYZ_BRANDSIGHT_LIVE_API_SECRET"];
+  const customerId = (config["brandsight_customer_id"] as string | undefined)
+    ?? process.env["BRANDSIGHT_CUSTOMER_ID"]
+    ?? process.env["HASNAXYZ_BRANDSIGHT_LIVE_CUSTOMER_ID"];
+  if (!apiKey || !apiSecret || !customerId) return undefined;
+  return { apiKey, apiSecret, customerId };
+}
+
 export function getGmailSyncConfig(): GmailSyncConfig {
   const config = loadConfig();
   return {

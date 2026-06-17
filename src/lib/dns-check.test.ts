@@ -63,6 +63,40 @@ describe("checkDnsRecords", () => {
     expect(results[1]!.match).toBe(true);
   });
 
+  it("matches SPF when the live record has extra authorized senders", async () => {
+    const records: DnsRecord[] = [
+      { type: "TXT", name: "example.com", value: "v=spf1 include:amazonses.com ~all", purpose: "SPF" },
+    ];
+    mockResolve.mockResolvedValueOnce([["v=spf1 include:amazonses.com include:_spf.google.com ~all"]]);
+
+    const results = await checkDnsRecords("example.com", records);
+
+    expect(results[0]!.match).toBe(true);
+  });
+
+  it("matches DMARC when the live policy is stricter than expected", async () => {
+    const records: DnsRecord[] = [
+      { type: "TXT", name: "_dmarc.example.com", value: "v=DMARC1; p=none; rua=mailto:dmarc@example.com", purpose: "DMARC" },
+    ];
+    mockResolve.mockResolvedValueOnce([["v=DMARC1; p=quarantine; rua=mailto:dmarc@example.com"]]);
+
+    const results = await checkDnsRecords("example.com", records);
+
+    expect(results[0]!.match).toBe(true);
+  });
+
+  it("checks MX hosts by exchange value", async () => {
+    const records: DnsRecord[] = [
+      { type: "MX", name: "example.com", value: "inbound-smtp.us-east-1.amazonaws.com", purpose: "MX" },
+    ];
+    mockResolve.mockResolvedValueOnce([{ priority: 10, exchange: "inbound-smtp.us-east-1.amazonaws.com" }]);
+
+    const results = await checkDnsRecords("example.com", records);
+
+    expect(results[0]!.match).toBe(true);
+    expect(results[0]!.found).toEqual(["10 inbound-smtp.us-east-1.amazonaws.com"]);
+  });
+
   it("uses CNAME resolver for CNAME records", async () => {
     const records: DnsRecord[] = [
       { type: "CNAME", name: "dkim._domainkey.example.com", value: "dkim.resend.com", purpose: "DKIM" },

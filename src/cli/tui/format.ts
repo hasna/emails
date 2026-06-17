@@ -1,5 +1,6 @@
 /** Presentation helpers for the mail TUI. Pure + unit-tested. */
 import { marked } from "marked";
+import { detectEmailLinkSpans, type DetectedEmailLinkSpan } from "../../lib/email-links.js";
 
 export interface MessageBodyLike {
   from: string;
@@ -16,6 +17,14 @@ export interface MessageBodyLike {
 export interface RenderedBodyLine {
   text: string;
   kind: "body" | "list" | "quote" | "code" | "heading" | "muted";
+  links?: DetectedEmailLinkSpan[];
+}
+
+const MAX_UI_BODY_SOURCE_CHARS = 220_000;
+
+function capUiSource(value: string): string {
+  if (value.length <= MAX_UI_BODY_SOURCE_CHARS) return value;
+  return `${value.slice(0, MAX_UI_BODY_SOURCE_CHARS)}\n\n[message truncated in UI; use copy to get the full body]`;
 }
 
 export function truncate(value: string, width: number): string {
@@ -63,6 +72,43 @@ export function formatDate(iso: string | null | undefined): string {
   return t.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
+function sameLocalDate(a: Date, b: Date): boolean {
+  return a.getFullYear() === b.getFullYear()
+    && a.getMonth() === b.getMonth()
+    && a.getDate() === b.getDate();
+}
+
+function localTime(date: Date): string {
+  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+}
+
+function localTimeWithPeriod(date: Date): string {
+  return `${localTime(date)} ${date.getHours() >= 12 ? "PM" : "AM"}`;
+}
+
+function shortMonth(date: Date): string {
+  return ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][date.getMonth()] ?? "???";
+}
+
+/** Friendly list date that stays compact in a fixed-width mail row. */
+export function listDateTime(iso: string | null | undefined, nowMs: number): string {
+  if (!iso) return "—";
+  const date = new Date(iso);
+  const time = date.getTime();
+  if (Number.isNaN(time)) return iso.slice(0, 12);
+  const now = new Date(nowMs);
+  if (sameLocalDate(date, now)) return localTimeWithPeriod(date);
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const startOfDate = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+  const daysAgo = Math.floor((startOfToday - startOfDate) / 86_400_000);
+  if (daysAgo === 1) return "Yesterday";
+  if (daysAgo > 1 && daysAgo < 7) return `${daysAgo} days ago`;
+  if (date.getFullYear() === now.getFullYear()) {
+    return `${shortMonth(date)} ${date.getDate()}`;
+  }
+  return `${shortMonth(date)} ${date.getDate()} ${date.getFullYear()}`;
+}
+
 /** Wrap a body into lines no wider than `width`, preserving paragraph breaks. */
 export function wrapText(text: string, width: number, maxLines: number): string[] {
   const out: string[] = [];
@@ -93,14 +139,16 @@ function decodeHtmlEntities(value: string): string {
     quot: "\"",
   };
   return value.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (entity, name: string) => {
+    const decodeCodePoint = (code: number) =>
+      Number.isFinite(code) && code >= 0 && code <= 0x10FFFF ? String.fromCodePoint(code) : entity;
     const key = name.toLowerCase();
     if (key.startsWith("#x")) {
       const code = Number.parseInt(key.slice(2), 16);
-      return Number.isFinite(code) ? String.fromCodePoint(code) : entity;
+      return decodeCodePoint(code);
     }
     if (key.startsWith("#")) {
       const code = Number.parseInt(key.slice(1), 10);
-      return Number.isFinite(code) ? String.fromCodePoint(code) : entity;
+      return decodeCodePoint(code);
     }
     return named[key] ?? entity;
   });
@@ -156,6 +204,14 @@ function looksLikeMarkdown(value: string): boolean {
     || /(?:\*\*|__)[^\n]+(?:\*\*|__)/.test(value);
 }
 
+function looksLikeHtml(value: string): boolean {
+  const sample = value.slice(0, 4096).trimStart();
+  return /^<!doctype\s+html\b/i.test(sample)
+    || /^<html[\s>]/i.test(sample)
+    || /<\/(?:html|body|table|div|p|span|style|head)>/i.test(sample)
+    || /<(?:br|p|div|table|tr|td|a|span|style|head|body)\b[^>]*>/i.test(sample);
+}
+
 export function markdownToReadableText(markdown: string): string {
   const html = marked.parse(markdown, { async: false, gfm: true, breaks: true }) as string;
   return htmlToReadableText(html);
@@ -163,7 +219,10 @@ export function markdownToReadableText(markdown: string): string {
 
 export function readableMessageText(text: string | null | undefined, html: string | null | undefined): string {
   const plain = text?.trim();
-  if (plain) return looksLikeMarkdown(plain) ? markdownToReadableText(plain) : tidyText(plain);
+  if (plain) {
+    if (looksLikeHtml(plain)) return htmlToReadableText(plain);
+    return looksLikeMarkdown(plain) ? markdownToReadableText(plain) : tidyText(plain);
+  }
   const rendered = html?.trim() ? htmlToReadableText(html) : "";
   return rendered || "(no text content)";
 }
@@ -178,11 +237,16 @@ function classifyBodyLine(value: string): RenderedBodyLine["kind"] {
 }
 
 export function renderReadableBodyLines(text: string | null | undefined, html: string | null | undefined, width: number, maxLines: number): RenderedBodyLine[] {
-  const body = readableMessageText(text, html);
-  return wrapText(body, width, maxLines).map((textLine) => ({
-    text: textLine,
-    kind: classifyBodyLine(textLine),
-  }));
+  const plain = text?.trim();
+  const body = plain ? readableMessageText(capUiSource(plain), null) : readableMessageText(null, html ? capUiSource(html) : html);
+  return wrapText(body, width, maxLines).map((textLine) => {
+    const links = detectEmailLinkSpans(textLine, { includeNonWeb: true });
+    return {
+      text: textLine,
+      kind: classifyBodyLine(textLine),
+      ...(links.length ? { links } : {}),
+    };
+  });
 }
 
 export function formatMessageBodyForCopy(body: MessageBodyLike): string {

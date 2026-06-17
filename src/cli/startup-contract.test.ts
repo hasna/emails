@@ -7,11 +7,12 @@ const cliEntry = join(import.meta.dir, "index.tsx");
 
 const heavyRuntimeImports = [
   "@opentui/core",
-  "@opentui/react",
+  "@opentui/keymap",
+  "@opentui/solid",
   "@aws-sdk/",
   "@hasna/connectors",
   "pg",
-  "react",
+  "solid-js",
   "../../db/remote-storage.js",
   "../../db/storage-sync.js",
   "../../lib/gmail-sync.js",
@@ -53,8 +54,9 @@ describe("CLI startup contract", () => {
     expect(source).toContain("registerCommandsForArgs");
     expect(source).toContain('case "provider": return ["provider", "sync"]');
     expect(source).toContain('case "storage": return ["storage"]');
+    expect(source).toContain("routeRootPromptArgs");
     expect(source).toContain("await Promise.all");
-    expect(source).toContain("await program.parseAsync(process.argv)");
+    expect(source).toContain("await program.parseAsync([process.argv[0]");
   });
 
   it("keeps heavy command dependencies behind action-local dynamic imports", () => {

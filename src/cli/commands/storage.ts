@@ -1,5 +1,5 @@
 /**
- * `emails storage` — repo-native sync commands for local SQLite and remote PostgreSQL storage.
+ * `mailery storage` — repo-native sync commands for local SQLite and remote PostgreSQL storage.
  */
 
 import type { Command } from "commander";
@@ -151,7 +151,7 @@ function installStorageSubcommands(storageCmd: Command, output: (data: unknown, 
       console.log("\nLoad that secret into the canonical PostgreSQL connection string env var:");
       console.log(`  ${info.canonical.env}`);
       console.log(`\nFallback env for local/self-hosted compatibility: ${info.canonical.fallbackEnv}`);
-      console.log("\nThen run: emails storage status");
+      console.log("\nThen run: mailery storage status");
     });
 
   storageCmd

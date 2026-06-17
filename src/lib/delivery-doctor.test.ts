@@ -6,7 +6,7 @@ import { createDomain, updateDnsStatus } from "../db/domains.js";
 import { createOwner, assignAddressOwner } from "../db/owners.js";
 import { setAddressProvisioning, setDomainProvisioning } from "../db/provisioning.js";
 import { setInboundArchived, storeInboundEmail } from "../db/inbound.js";
-import { diagnoseInboundDelivery } from "./delivery-doctor.js";
+import { diagnoseInboundDelivery, diagnoseInboundDeliveryLive } from "./delivery-doctor.js";
 
 beforeEach(() => {
   process.env["EMAILS_DB_PATH"] = ":memory:";
@@ -31,6 +31,38 @@ describe("delivery doctor", () => {
     expect(report.checks.some((check) => check.name === "Configured address" && check.status === "pass")).toBe(true);
     expect(report.checks.some((check) => check.name === "Ownership" && check.status === "pass")).toBe(true);
     expect(report.checks.some((check) => check.name === "Address receive readiness" && check.status === "pass")).toBe(true);
+  });
+
+  it("suggests safe domain dry-run provisioning for unknown domains", () => {
+    const report = diagnoseInboundDelivery("ops@example.com");
+    const domainCheck = report.checks.find((check) => check.name === "Domain");
+
+    expect(domainCheck).toMatchObject({
+      status: "warn",
+      fix_command: "mailery provision domain example.com --provider <provider> --dry-run",
+    });
+  });
+
+  it("surfaces public MX ownership in live delivery diagnosis", async () => {
+    const report = await diagnoseInboundDeliveryLive("ops@example.com", getDatabase(), {
+      inspectMx: async () => ({
+        domain: "example.com",
+        owner: "google-workspace",
+        records: [
+          { exchange: "aspmx.l.google.com", priority: 1, owner: "google-workspace" },
+        ],
+        summary: "1 root MX record(s), owner: Google Workspace",
+        protects_existing_inbound: true,
+      }),
+    });
+    const mxCheck = report.checks.find((check) => check.name === "Public MX");
+
+    expect(mxCheck).toMatchObject({
+      status: "warn",
+      fix_command: "mailery forwarding explain ops@example.com",
+    });
+    expect(mxCheck?.message).toContain("Google Workspace");
+    expect(mxCheck?.message).toContain("Do not add SES inbound MX");
   });
 
   it("diagnoses one address without depending on all address/domain rows", () => {

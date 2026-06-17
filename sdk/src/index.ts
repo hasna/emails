@@ -332,10 +332,10 @@ async function checkResponse(res: Response): Promise<void> {
   }
 }
 
-function qs(params?: Record<string, string | number | boolean | undefined>): string {
+function qs(params?: object): string {
   if (!params) return "";
   const entries = Object.entries(params).filter(
-    ([, v]) => v !== undefined && v !== null
+    ([, v]) => v !== undefined && v !== null && (typeof v === "string" || typeof v === "number" || typeof v === "boolean")
   ) as [string, string | number | boolean][];
   if (entries.length === 0) return "";
   const sp = new URLSearchParams();

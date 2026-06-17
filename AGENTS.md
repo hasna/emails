@@ -1,10 +1,10 @@
-# AGENTS.md — @hasna/emails
+# AGENTS.md - @hasna/mailery
 
-This file guides AI coding agents working with `@hasna/emails` — an email management CLI, MCP server, and library supporting Resend, AWS SES, and Gmail.
+This file guides AI coding agents working with `@hasna/mailery` - an email management CLI, MCP server, and library supporting Resend, AWS SES, and Gmail.
 
 ## What This Package Does
 
-`@hasna/emails` manages the full email lifecycle locally:
+`@hasna/mailery` manages the full email lifecycle locally:
 - **Send** transactional emails via Resend, SES, or Gmail
 - **Receive** inbound emails via SMTP listener or webhooks
 - **Track** delivery events, opens, clicks, replies
@@ -19,8 +19,8 @@ or `EMAILS_DB_PATH` for isolated tests and smoke runs.
 
 Install the MCP server into Claude Code:
 ```bash
-emails mcp --claude
-emails mcp --claude --dry-run   # show the exact install command without mutating config
+mailery mcp --claude
+mailery mcp --claude --dry-run   # show the exact install command without mutating config
 ```
 
 This gives you 100+ MCP tools plus orientation resources for agents.
@@ -44,6 +44,7 @@ update_provider(id, ...)                  → update credentials
 add_domain(provider_id, domain)           → register domain with provider
 get_dns_records(domain)                   → get DKIM/SPF/DMARC records
 verify_domain(domain)                     → re-check DNS status
+provision_domain(domain, provider_id, add_mx?) → provision SES DNS; add_mx is guarded when root MX already belongs to another provider
 create_warming_schedule(domain, target)   → start gradual volume ramp-up
 get_warming_status(domain)                → check today's limit
 ```
@@ -88,11 +89,26 @@ wait_for_code(email, timeout_seconds?)
 list_usable_from_addresses(send?, receive?)
 ```
 
+### Forwarding
+```
+add_forwarding_rule(source_address, target_address, provider_id?, from_address?, enabled?)
+list_forwarding_rules(source_address?, enabled?, limit?, offset?)
+run_forwarding_rules(provider_id?, from_address?, limit?, backfill?)
+```
+
+Forwarding rules are app-level: they forward mail only after this app has
+received or synced the source mailbox. For domains whose root MX belongs to
+Google Workspace, Microsoft 365, Cloudflare Email Routing, or another mailbox
+provider, use provider-native forwarding unless the source mailbox is synced
+into this app. `run_forwarding_rules` processes only messages received after
+the rule was created unless `backfill=true` is explicitly set.
+
 ### Analytics & diagnostics
 ```
 get_analytics(period?)                    → daily volume, top recipients, hourly distribution
 get_stats(period?)                        → delivery/bounce/complaint rates
 run_doctor(live?)                        → diagnostic check; live=true validates provider credentials remotely
+diagnose_inbound_delivery(address)        → missing-mail diagnosis, including public MX ownership
 ```
 
 ### Sandbox (development)
@@ -128,6 +144,14 @@ emails://recent-errors     → latest provisioning/source errors
 5. send_email(from="hello@example.com", to="test@test.com", subject="Test", text="Hello!")
 ```
 
+### Existing mailbox provider + SES sending
+```
+1. Run `mailery domain check example.com` to detect current root MX ownership.
+2. Use `mailery provision domain example.com --provider <ses-id> --dry-run`.
+3. Preserve root MX for send-only SES setup when Google Workspace or another mailbox provider already receives mail.
+4. Use `--add-mx --force-mx-switch` only for an intentional inbound migration to SES/S3.
+```
+
 ### Bulk campaign
 ```
 1. add_template(name="welcome", subject_template="Welcome {{name}}!", html_template="<h1>Hi {{name}}</h1>")
@@ -140,7 +164,7 @@ emails://recent-errors     → latest provisioning/source errors
 2. add_sequence_step(sequence_id, step_number=1, delay_hours=0, template_name="welcome")
 3. add_sequence_step(sequence_id, step_number=2, delay_hours=72, template_name="followup")
 4. enroll_contact(sequence_id, contact_email="user@example.com")
-# Run `emails scheduler start` or the daemon/reconciler flow to process due steps
+# Run `mailery scheduler` or the daemon/reconciler flow to process due steps
 ```
 
 ### Dev/test (never send real emails)
@@ -157,7 +181,7 @@ emails://recent-errors     → latest provisioning/source errors
 3. **Domain warming**: If a warming schedule is active for a domain, `send_email` will block at the daily limit. Use `get_warming_status(domain)` first.
 4. **Suppression**: Always check `list_contacts(suppressed=true)` before bulk sends.
 5. **Attachment limits**: Max 25MB per attachment, max 10 attachments.
-6. **Server binding**: `emails serve` defaults to `127.0.0.1:3900` (localhost only). Use `--host 0.0.0.0` to expose externally.
+6. **Server binding**: `mailery serve` defaults to `127.0.0.1:3900` (localhost only). Use `--host 0.0.0.0` to expose externally.
 
 ## Development
 
@@ -177,7 +201,7 @@ src/
 ├── cli/
 │   ├── index.tsx              # thin orchestrator (~65 lines)
 │   ├── utils.ts               # shared helpers
-│   ├── tui/                   # OpenTUI emails ui dashboard
+│   ├── tui/                   # OpenTUI Mailery UI dashboard
 │   └── commands/              # modular command files
 │       ├── send.ts            # send, log, search, show, replies, conversation
 │       ├── provider.ts        # provider CRUD

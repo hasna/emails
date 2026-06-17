@@ -28,7 +28,7 @@ import type { Database } from "../db/database.js";
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface ConnectorSyncOptions {
-  /** open-emails provider ID */
+  /** Mailery provider ID */
   providerId: string;
   /** Gmail label ID, e.g. "INBOX", "SENT". Default: "INBOX" */
   labelFilter?: string;

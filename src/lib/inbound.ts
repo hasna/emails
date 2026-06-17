@@ -196,7 +196,7 @@ function parsePart(part: string): { headers: Record<string, string>; body: strin
 
 /**
  * Parse Resend inbound webhook payload.
- * Resend sends inbound emails with a structured JSON payload.
+ * Resend sends inbound mailery with a structured JSON payload.
  */
 export function parseResendInbound(body: Record<string, unknown>): ParsedEmail {
   const headers: Record<string, string> = {};
@@ -292,7 +292,7 @@ export function createSmtpServer(port: number, providerId?: string): SmtpServer 
           data: [],
           collectingData: false,
         };
-        socket.write("220 open-emails ESMTP ready\r\n");
+        socket.write("220 mailery ESMTP ready\r\n");
       },
       data(socket, data) {
         const s = socket as unknown as SmtpSocket;
@@ -391,7 +391,7 @@ function handleSmtpLine(
 
   if (upper.startsWith("EHLO") || upper.startsWith("HELO")) {
     state.stage = "ready";
-    socket.write("250-open-emails\r\n250-SIZE 10485760\r\n250 OK\r\n");
+    socket.write("250-mailery\r\n250-SIZE 10485760\r\n250 OK\r\n");
   } else if (upper.startsWith("MAIL FROM:")) {
     state.from = extractAngle(line.slice(10));
     state.stage = "mail";

@@ -135,19 +135,19 @@ describe("setupInboundEmail", () => {
     setupMocks(false);
 
     const result = await setupInboundEmail({
-      domain: "hasna.com",
-      bucket: "hasna-emails",
+      domain: "example.com",
+      bucket: "example-emails",
     });
 
-    expect(result.s3_prefix).toBe("inbound/hasna.com/");
+    expect(result.s3_prefix).toBe("inbound/example.com/");
   });
 
   it("respects custom prefix", async () => {
     setupMocks(false);
 
     const result = await setupInboundEmail({
-      domain: "hasna.com",
-      bucket: "hasna-emails",
+      domain: "example.com",
+      bucket: "example-emails",
       prefix: "custom/prefix/",
     });
 

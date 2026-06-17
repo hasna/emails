@@ -15,6 +15,19 @@ const KNOWN_KEYS: { key: string; description: string; example: string }[] = [
   { key: "gmail_archive_s3_region", description: "AWS region for Gmail archive uploads", example: CANONICAL_OPEN_EMAILS_S3_REGION },
   { key: "gmail_archive_s3_prefix", description: "S3 key prefix for Gmail archive uploads (default: gmail)", example: "gmail" },
   { key: "cloudflare_api_token", description: "Cloudflare API token for auto DNS setup (also reads CLOUDFLARE_API_TOKEN env var)", example: "abc123..." },
+  { key: "cloudflare_api_key", description: "Cloudflare global API key for auto DNS setup (also reads CLOUDFLARE_API_KEY env var)", example: "abc123..." },
+  { key: "cloudflare_email", description: "Cloudflare account email used with cloudflare_api_key (also reads CLOUDFLARE_EMAIL env var)", example: "admin@example.com" },
+  { key: "cloudflare_account_id", description: "Optional Cloudflare account ID for zone creation workflows (also reads CLOUDFLARE_ACCOUNT_ID env var)", example: "abc12345" },
+  { key: "brandsight_api_key", description: "BrandSight/GCD API key for DNS setup (also reads BRANDSIGHT_API_KEY env var)", example: "abc123..." },
+  { key: "brandsight_api_secret", description: "BrandSight/GCD API secret for DNS setup (also reads BRANDSIGHT_API_SECRET env var)", example: "abc123..." },
+  { key: "brandsight_customer_id", description: "BrandSight/GCD customer ID for DNS setup (also reads BRANDSIGHT_CUSTOMER_ID env var)", example: "123456" },
+  { key: "ai_provider", description: "Default Mailery AI provider: cerebras or groq", example: "cerebras" },
+  { key: "ai_model", description: "Default Mailery AI model override for the selected provider", example: "zai-glm-4.7" },
+  { key: "cerebras_api_key", description: "Cerebras API key for `mailery agent` (also reads CEREBRAS_API_KEY env var)", example: "csk_..." },
+  { key: "cerebras_model", description: "Cerebras model for `mailery agent` (default: zai-glm-4.7)", example: "zai-glm-4.7" },
+  { key: "groq_api_key", description: "Groq API key for `mailery agent --provider groq` (also reads GROQ_API_KEY env var)", example: "gsk_..." },
+  { key: "groq_model", description: "Groq model for `mailery agent --provider groq` (default: qwen/qwen3-32b)", example: "qwen/qwen3-32b" },
+  { key: "brave_search_api_key", description: "Optional Brave Search API key for managed email agent domain/company lookups (also reads BRAVE_SEARCH_API_KEY)", example: "BSA..." },
   { key: "inbound_s3_bucket", description: "S3 bucket name used by SES for inbound email storage", example: "my-emails-bucket" },
   { key: "inbound_s3_prefix", description: "S3 key prefix for inbound emails (default: inbound/<domain>/)", example: "inbound/example.com/" },
   { key: "inbound_s3_region", description: "AWS region for inbound S3 bucket (default: us-east-1)", example: "us-east-1" },
@@ -74,7 +87,7 @@ export function registerConfigCommands(program: Command, output: (data: unknown,
       try {
         const config = loadConfig();
         const keys = Object.keys(config);
-        if (keys.length === 0) { output({}, chalk.dim("No config values set. Run 'emails config keys' to see available keys.")); return; }
+        if (keys.length === 0) { output({}, chalk.dim("No config values set. Run 'mailery config keys' to see available keys.")); return; }
         const redacted = redactSecrets(config);
         console.log(chalk.bold("\nConfig:"));
         for (const key of keys) { console.log(`  ${chalk.cyan(key.padEnd(32))} ${JSON.stringify(redacted[key])}`); }
@@ -93,7 +106,7 @@ export function registerConfigCommands(program: Command, output: (data: unknown,
         console.log(`    ${chalk.dim(k.description)}`);
         console.log(`    ${chalk.dim("e.g.")} ${k.example}\n`);
       }
-      console.log(chalk.dim("Set with: emails config set <key> <value>"));
+      console.log(chalk.dim("Set with: mailery config set <key> <value>"));
       console.log();
     });
 }

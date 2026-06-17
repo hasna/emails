@@ -31,13 +31,18 @@ describe("emails refresh", () => {
   it("pulls all buckets with a high scan limit by default", async () => {
     pullResult = { pulled: 3, ok: true, configured: true };
     const { out } = await runAsync(["refresh"]);
-    expect(lastOpts).toMatchObject({ s3: true, gmail: false, limit: 1000 });
+    expect(lastOpts).toMatchObject({ s3: true, gmail: false, forwarding: true, limit: 1000 });
     expect(out).toContain("Pulled 3 new emails");
   });
 
   it("passes --gmail through and respects --limit", async () => {
     await runAsync(["refresh", "--gmail", "--limit", "50"]);
     expect(lastOpts).toMatchObject({ s3: true, gmail: true, limit: 50 });
+  });
+
+  it("can skip forwarding after refresh", async () => {
+    await runAsync(["refresh", "--no-forwarding"]);
+    expect(lastOpts).toMatchObject({ forwarding: false });
   });
 
   it("bounds invalid or oversized scan limits", async () => {
@@ -52,6 +57,13 @@ describe("emails refresh", () => {
     pullResult = { pulled: 0, ok: true, configured: true };
     const { out } = await runAsync(["refresh"]);
     expect(out).toContain("Up to date");
+  });
+
+  it("reports forwarded mail when forwarding rules send copies", async () => {
+    pullResult = { pulled: 2, ok: true, configured: true, forwarded: { attempted: 1, sent: 1, failed: 0, skipped: 0 } };
+    const { out, data } = await runAsync(["refresh"]);
+    expect(out).toContain("Pulled 2 new emails; forwarded 1");
+    expect(data).toMatchObject({ pulled: 2, forwarded: { sent: 1 }, ok: true });
   });
 
   it("warns when no inbound sources are configured", async () => {

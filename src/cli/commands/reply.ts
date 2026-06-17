@@ -41,7 +41,7 @@ function resolveSendProvider(optProvider: string | undefined, db: Database): str
     return resolvePartialIdOrThrow(db, "providers", optProvider);
   }
   const activeProviderId = getLatestActiveProviderId(undefined, db);
-  if (!activeProviderId) throw new Error("No active providers. Add one with 'emails provider add'");
+  if (!activeProviderId) throw new Error("No active providers. Add one with 'mailery provider add'");
   return activeProviderId;
 }
 

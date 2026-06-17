@@ -1,4 +1,4 @@
-export const MCP_NAME = "emails";
+export const MCP_NAME = "mailery";
 export const DEFAULT_MCP_HTTP_PORT = 8861;
 
 export function isHttpMode(argv: string[] = process.argv.slice(2)): boolean {

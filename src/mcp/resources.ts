@@ -51,7 +51,7 @@ export function domainsResourcePayload(db: Database = getDatabase()): Record<str
     total: countDomains(db),
     limit: DOMAIN_RESOURCE_LIMIT,
     truncated,
-    cli_equivalent: `emails domain status --limit ${DOMAIN_RESOURCE_LIMIT} --json`,
+    cli_equivalent: `mailery domain status --limit ${DOMAIN_RESOURCE_LIMIT} --json`,
   };
 }
 
@@ -70,7 +70,7 @@ export async function addressesResourcePayload(db: Database = getDatabase()): Pr
     total: countAddresses(db),
     limit: ADDRESS_RESOURCE_LIMIT,
     truncated,
-    cli_equivalent: `emails address list --limit ${ADDRESS_RESOURCE_LIMIT} --json`,
+    cli_equivalent: `mailery address list --limit ${ADDRESS_RESOURCE_LIMIT} --json`,
   };
 }
 
@@ -103,7 +103,7 @@ export function recentErrorsResourcePayload(db: Database = getDatabase()): Recor
       component: "domain-provisioning",
       entity: domain,
       message: last_error ?? "domain provisioning failed",
-      fix_command: `emails provision status ${domain}`,
+      fix_command: `mailery provision status ${domain}`,
     }));
   const addressErrors = addressRows
     .slice(0, RECENT_ERROR_LIMIT_PER_COMPONENT)
@@ -111,13 +111,13 @@ export function recentErrorsResourcePayload(db: Database = getDatabase()): Recor
       component: "address-provisioning",
       entity: email,
       message: last_error ?? "address provisioning failed",
-      fix_command: `emails doctor delivery ${email}`,
+      fix_command: `mailery doctor delivery ${email}`,
     }));
   const errors = [
     realtimeError ? {
       component: "inbound-realtime",
       message: realtimeError,
-      fix_command: "emails inbox sync-status",
+      fix_command: "mailery inbox sync-status",
     } : null,
     ...domainErrors,
     ...addressErrors,
@@ -132,7 +132,7 @@ export function recentErrorsResourcePayload(db: Database = getDatabase()): Recor
       domain_provisioning: domainErrorsTruncated,
       address_provisioning: addressErrorsTruncated,
     },
-    cli_equivalent: "emails status --json",
+    cli_equivalent: "mailery status --json",
   };
 }
 

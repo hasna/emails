@@ -1,5 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import { handleInboundWebhook } from "./inbound-webhook.js";
+import { setConfigValue } from "../../lib/config.js";
 
 const sesNotification = JSON.stringify({
   notificationType: "Received",
@@ -50,14 +51,31 @@ describe("inbound webhook", () => {
   });
 
   it("syncs on an SNS-wrapped Notification", async () => {
-    let synced = 0;
-    const res = await handleInboundWebhook(
-      post({ Type: "Notification", Message: sesNotification }),
-      "/webhook/ses-inbound", "POST",
-      { sync: async () => { synced++; return { synced: 2 }; } },
-    );
-    expect((await res!.json()).synced).toBe(2);
-    expect(synced).toBe(1);
+    setConfigValue("inbound_s3_bucket", "configured-inbound");
+    setConfigValue("inbound_s3_prefix", "inbound/");
+    setConfigValue("inbound_s3_region", "us-east-1");
+    try {
+      let synced = 0;
+      const res = await handleInboundWebhook(
+        post({ Type: "Notification", Message: sesNotification }),
+        "/webhook/ses-inbound", "POST",
+        {
+          sync: async (bucket, prefix, region) => {
+            expect(bucket).toBe("configured-inbound");
+            expect(prefix).toBe("inbound/");
+            expect(region).toBe("us-east-1");
+            synced++;
+            return { synced: 2 };
+          },
+        },
+      );
+      expect((await res!.json()).synced).toBe(2);
+      expect(synced).toBe(1);
+    } finally {
+      setConfigValue("inbound_s3_bucket", undefined);
+      setConfigValue("inbound_s3_prefix", undefined);
+      setConfigValue("inbound_s3_region", undefined);
+    }
   });
 
   it("ignores an unrecognized notification gracefully", async () => {

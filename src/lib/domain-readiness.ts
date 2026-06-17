@@ -43,8 +43,8 @@ export function assessDomainReadiness(
   if (!ok(domain.dmarc_status)) issues.push(`DMARC ${domain.dmarc_status}`);
   if (bad(domain.dkim_status) || bad(domain.spf_status) || bad(domain.dmarc_status) || provisioning?.last_error) {
     if (provisioning?.last_error) issues.push(provisioning.last_error);
-    fix_commands.push(`emails domain check ${domain.domain}`);
-    fix_commands.push(`emails domain setup-cloudflare ${domain.domain}`);
+    fix_commands.push(`mailery domain check ${domain.domain}`);
+    fix_commands.push(`mailery domain setup-cloudflare ${domain.domain}`);
     return { state: "broken", send_ready: false, receive_ready: readyAddresses > 0, ready_addresses: readyAddresses, issues, fix_commands };
   }
 
@@ -52,11 +52,12 @@ export function assessDomainReadiness(
   const receiveReady = readyAddresses > 0 || provisioning?.provisioning_status === "ready" || provisioning?.provisioning_status === "inbound_ready";
 
   if (!sendReady) {
-    fix_commands.push(`emails domain dns ${domain.domain}`);
-    fix_commands.push(`emails domain verify ${domain.domain}`);
+    fix_commands.push(`mailery domain dns ${domain.domain}`);
+    fix_commands.push(`mailery domain verify ${domain.domain}`);
   }
   if (!receiveReady) {
-    fix_commands.push(`emails domain adopt ${domain.domain} --provider <provider>`);
+    fix_commands.push(`mailery domain check ${domain.domain}`);
+    fix_commands.push(`mailery provision domain ${domain.domain} --provider <provider> --dry-run`);
   }
 
   let state: DomainReadinessState;

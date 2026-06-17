@@ -1,11 +1,12 @@
 import { describe, expect, it } from "bun:test";
 import { detectSystemTheme, nextThemeMode, normalizeThemeMode, resolveTheme, resolveThemeName } from "./theme.js";
+import { resolveSolidTheme, selectedForeground } from "../tui-solid/context/theme.js";
 
 describe("tui theme", () => {
-  it("defaults to light when no system signal is available", () => {
-    expect(detectSystemTheme({})).toBe("light");
-    expect(resolveThemeName("auto", {})).toBe("light");
-    expect(resolveTheme("auto", {}).name).toBe("light");
+  it("defaults to dark when no system signal is available", () => {
+    expect(detectSystemTheme({})).toBe("dark");
+    expect(resolveThemeName("auto", {})).toBe("dark");
+    expect(resolveTheme("auto", {}).name).toBe("dark");
   });
 
   it("detects dark and light terminal backgrounds from COLORFGBG", () => {
@@ -21,8 +22,39 @@ describe("tui theme", () => {
   it("normalizes and cycles persisted theme modes", () => {
     expect(normalizeThemeMode("dark")).toBe("dark");
     expect(normalizeThemeMode("weird")).toBe("auto");
-    expect(nextThemeMode("auto")).toBe("light");
-    expect(nextThemeMode("light")).toBe("dark");
-    expect(nextThemeMode("dark")).toBe("auto");
+    expect(nextThemeMode("auto")).toBe("dark");
+    expect(nextThemeMode("dark")).toBe("light");
+    expect(nextThemeMode("light")).toBe("auto");
+  });
+
+  it("keeps dark action and unread colors readable", () => {
+    const dark = resolveTheme("dark", {}, "dark");
+    expect(dark.listUnreadFg).toBe("#ffffff");
+    expect(dark.unread).toBe("#ffffff");
+    expect(dark.unreadBadgeFg).toBe("#0a0a0a");
+    expect(dark.unreadBadgeBg).toBe("#fcd53a");
+    expect(dark.buttonFg).toBe("#ededed");
+    expect(dark.buttonBg).toBe("#050505");
+  });
+
+  it("maps the Solid TUI theme to open-aicopilot default dark roles", () => {
+    const dark = resolveSolidTheme("dark", {});
+    expect(dark.background).toBe("#0a0a0a");
+    expect(dark.backgroundPanel).toBe("#141414");
+    expect(dark.backgroundElement).toBe("#1e1e1e");
+    expect(dark.backgroundMenu).toBe("#1e1e1e");
+    expect(dark.primary).toBe("#fab283");
+    expect(dark.secondary).toBe("#5c9cf5");
+    expect(dark.accent).toBe("#9d7cd8");
+    expect(dark.text).toBe("#eeeeee");
+    expect(dark.textMuted).toBe("#808080");
+    expect(dark.selectedListItemText).toBe("#0a0a0a");
+    expect(dark.markdownHeading).toBe("#9d7cd8");
+    expect(dark.markdownLink).toBe("#fab283");
+    expect(dark.markdownLinkText).toBe("#56b6c2");
+    expect(dark.markdownCode).toBe("#7fd88f");
+    expect(dark.markdownBlockQuote).toBe("#e5c07b");
+    expect(dark.markdownStrong).toBe("#f5a742");
+    expect(selectedForeground(dark, dark.primary)).toBe("#0a0a0a");
   });
 });

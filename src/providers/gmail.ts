@@ -26,7 +26,7 @@ export class GmailAdapter implements ProviderAdapter {
       throw new ProviderConfigError("Gmail provider requires oauth_client_secret");
     }
     if (!provider.oauth_refresh_token) {
-      throw new ProviderConfigError("Gmail provider requires oauth_refresh_token. Run 'emails provider auth <id>' to authenticate.");
+      throw new ProviderConfigError("Gmail provider requires oauth_refresh_token. Run 'mailery provider auth <id>' to authenticate.");
     }
 
     this.providerId = provider.id;
@@ -87,7 +87,7 @@ export class GmailAdapter implements ProviderAdapter {
   }
 
   async addAddress(_email: string): Promise<void> {
-    throw new Error("Gmail addresses are managed via OAuth — use 'emails provider auth <id>' to re-authenticate");
+    throw new Error("Gmail addresses are managed via OAuth — use 'mailery provider auth <id>' to re-authenticate");
   }
 
   async verifyAddress(_email: string): Promise<boolean> {

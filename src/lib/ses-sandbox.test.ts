@@ -16,11 +16,11 @@ describe("requestProductionAccess", () => {
   it("submits PutAccountDetails with production access enabled", async () => {
     let input: any;
     const client = { send: async (cmd: any) => { input = cmd.input; return {}; } };
-    const r = await requestProductionAccess({ websiteUrl: "https://hasna.com", useCaseDescription: "agent email" }, { client });
+    const r = await requestProductionAccess({ websiteUrl: "https://example.com", useCaseDescription: "agent email" }, { client });
     expect(r.submitted).toBe(true);
     expect(input.ProductionAccessEnabled).toBe(true);
     expect(input.MailType).toBe("TRANSACTIONAL");
-    expect(input.WebsiteURL).toBe("https://hasna.com");
+    expect(input.WebsiteURL).toBe("https://example.com");
   });
 });
 

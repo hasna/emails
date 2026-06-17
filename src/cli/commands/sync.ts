@@ -34,7 +34,7 @@ export function registerSyncCommands(program: Command, output: (data: unknown, f
   // ─── PULL ─────────────────────────────────────────────────────────────────────
   program
     .command("pull")
-    .description("Sync events from provider(s) (alias: emails provider sync)")
+    .description("Sync events from provider(s) (alias: mailery provider sync)")
     .option("--provider <id>", "Provider ID (syncs all if not specified)")
     .option("--watch", "Keep syncing on an interval")
     .option("--interval <duration>", "Watch interval (e.g. 30s, 5m, 1h)", "5m")

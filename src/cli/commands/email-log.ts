@@ -88,7 +88,7 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
         const limit = parseCliPositiveIntOption(opts.limit, 20);
         const offset = parseCliNonNegativeIntOption(opts.offset);
         const emails = listEmails({ provider_id: providerId, status: opts.status as "sent" | "delivered" | "bounced" | "complained" | "failed" | undefined, from_address: opts.from, since: opts.since, limit, offset });
-        if (emails.length === 0) { output([], chalk.dim("No emails found.")); return; }
+        if (emails.length === 0) { output([], chalk.dim("No sent emails found.")); return; }
         const lines: string[] = [];
         lines.push(chalk.bold(`${"Date".padEnd(20)}  ${"From".padEnd(28)}  ${"To".padEnd(28)}  ${"Subject".padEnd(36)}  Status`));
         lines.push(chalk.dim("─".repeat(120)));
@@ -107,7 +107,7 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
 
   emailCmd
     .command("search <query>")
-    .description("Search sent emails by subject, from, or to")
+    .description("Search sent email by subject, from, or to")
     .option("--since <date>", "Show emails since date")
     .option("--limit <n>", "Max results", "20")
     .option("--offset <n>", "Skip first N results", "0")
@@ -118,7 +118,7 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
           limit: parseCliPositiveIntOption(opts.limit, 20),
           offset: parseCliNonNegativeIntOption(opts.offset),
         });
-        if (emails.length === 0) { output([], chalk.dim(`No emails matching "${query}".`)); return; }
+        if (emails.length === 0) { output([], chalk.dim(`No sent emails matching "${query}".`)); return; }
         const lines: string[] = [];
         for (const e of emails) {
           const date = new Date(e.sent_at).toLocaleString();
@@ -230,16 +230,16 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
 
   emailCmd
     .command("send")
-    .description("Send an email (alias of top-level `emails send`)")
+    .description("Send an email (alias of top-level `mailery send`)")
     .option("--from <email>", "Sender")
     .option("--to <email...>", "Recipient(s)")
     .option("--subject <subject>", "Subject")
     .option("--body <text>", "Body")
     .option("--provider <id>", "Provider ID")
-    .action(() => { console.log(chalk.dim("Use: emails send --from ... --to ... --subject ... --body ...")); });
+    .action(() => { console.log(chalk.dim("Use: mailery send --from ... --to ... --subject ... --body ...")); });
 
   // ─── LOG ─────────────────────────────────────────────────────────────────────
-  program.command("log").description("Show email send log (alias: emails email list)")
+  program.command("log").description("Show email send log (alias: mailery email list)")
     .option("--provider <id>", "Filter by provider ID")
     .option("--status <status>", "Filter by status: sent|delivered|bounced|complained|failed")
     .option("--from <email>", "Filter by sender address")
@@ -252,7 +252,7 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
         const limit = parseCliPositiveIntOption(opts.limit, 20);
         const offset = parseCliNonNegativeIntOption(opts.offset);
         const emails = listEmails({ provider_id: providerId, status: opts.status as "sent" | "delivered" | "bounced" | "complained" | "failed" | undefined, from_address: opts.from, since: opts.since, limit, offset });
-        if (emails.length === 0) { output([], chalk.dim("No emails found.")); return; }
+        if (emails.length === 0) { output([], chalk.dim("No sent emails found.")); return; }
         const logLines: string[] = [];
         logLines.push(chalk.bold(`${"Date".padEnd(20)}  ${"From".padEnd(30)}  ${"To".padEnd(30)}  ${"Subject".padEnd(40)}  Status`));
         logLines.push(chalk.dim("\u2500".repeat(130)));
@@ -275,8 +275,8 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
     });
 
   // ─── SEARCH ─────────────────────────────────────────────────────────────────
-  program.command("search <query>").description("Search emails by subject, from, or to")
-    .option("--since <date>", "Show emails since date (ISO 8601)")
+  program.command("search <query>").description("Search email by subject, from, or to")
+    .option("--since <date>", "Show mailery since date (ISO 8601)")
     .option("--limit <n>", "Max results", "20")
     .option("--offset <n>", "Skip first N results", "0")
     .action((query: string, opts: { since?: string; limit?: string; offset?: string }) => {
@@ -284,7 +284,7 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
         const limit = parseCliPositiveIntOption(opts.limit, 20);
         const emails = searchEmails(query, { since: opts.since, limit, offset: parseCliNonNegativeIntOption(opts.offset) });
         if (emails.length === 0) {
-          const formatted = chalk.dim(`No emails matching "${query}".`);
+          const formatted = chalk.dim(`No sent emails matching "${query}".`);
           output([], formatted);
           return;
         }
@@ -331,7 +331,7 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
         console.log(`  ${chalk.dim("Sent:")}     ${emailRecord!.sent_at}`);
         if (emailRecord!.provider_message_id) console.log(`  ${chalk.dim("Msg ID:")}   ${emailRecord!.provider_message_id}`);
         const replyCount = getReplyCount(resolvedId!, db);
-        if (replyCount > 0) console.log(`  ${chalk.dim("Replies:")}  ${chalk.cyan(String(replyCount))} (use 'emails replies ${id}' to view)`);
+        if (replyCount > 0) console.log(`  ${chalk.dim("Replies:")}  ${chalk.cyan(String(replyCount))} (use 'mailery replies ${id}' to view)`);
 
         if (content) {
           const headers = content.headers;
@@ -442,7 +442,7 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
             resolvedProviderId = resolvePartialIdOrThrow(db, "providers", defaultId);
           } else {
             const activeProviderId = getLatestActiveProviderId(undefined, db);
-            if (!activeProviderId) handleError(new Error("No active providers. Add one with 'emails provider add'"));
+            if (!activeProviderId) handleError(new Error("No active providers. Add one with 'mailery provider add'"));
             resolvedProviderId = activeProviderId!;
           }
         }
@@ -456,10 +456,10 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
         }
         let fromEmail: string;
         if (preferredAddress) { fromEmail = preferredAddress; }
-        else { handleError(new Error("No sender addresses configured for this provider. Add one with 'emails address add'")); }
+        else { handleError(new Error("No sender addresses configured for this provider. Add one with 'mailery address add'")); }
         const ts = new Date().toISOString();
-        const subject = `Test from open-emails \u2014 ${ts}`;
-        const text = `This is a test email sent via open-emails at ${ts}. Provider: ${provider!.name} (${provider!.type})`;
+        const subject = `Test from mailery \u2014 ${ts}`;
+        const text = `This is a test email sent via Mailery at ${ts}. Provider: ${provider!.name} (${provider!.type})`;
         const { getAdapter } = await import("../../providers/index.js");
         const adapter = getAdapter(provider!);
         const messageId = await adapter.sendEmail({ from: fromEmail!, to: toEmail!, subject, text });
@@ -476,7 +476,7 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
     .command("export <type>")
     .description("Export emails or events (type: emails | events)")
     .option("--provider <id>", "Filter by provider ID")
-    .option("--from <email>", "Filter exported emails by sender address")
+    .option("--from <email>", "Filter exported mailery by sender address")
     .option("--since <date>", "Filter from date (ISO)")
     .option("--until <date>", "Filter until date (ISO)")
     .option("--limit <n>", "Maximum rows to export")

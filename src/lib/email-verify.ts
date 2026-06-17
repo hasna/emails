@@ -80,10 +80,10 @@ async function smtpProbeCheck(
         const code = parseInt(line.slice(0, 3));
         if (state === "connect" && code === 220) {
           state = "ehlo";
-          send(`EHLO open-emails-verify`);
+          send(`EHLO mailery-verify`);
         } else if (state === "ehlo" && (code === 250)) {
           state = "mail";
-          send(`MAIL FROM:<verify@open-emails.local>`);
+          send(`MAIL FROM:<verify@mailery.local>`);
         } else if (state === "mail" && code === 250) {
           state = "rcpt";
           send(`RCPT TO:<${email}>`);

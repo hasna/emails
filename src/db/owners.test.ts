@@ -19,11 +19,11 @@ afterEach(() => { closeDatabase(); delete process.env["EMAILS_DB_PATH"]; });
 
 describe("owners", () => {
   it("registers a human and an agent owner", () => {
-    const human = createOwner({ type: "human", name: "Andrei", contact_email: "andrei@hasna.com" });
+    const human = createOwner({ type: "human", name: "Example Person", contact_email: "person@example.com" });
     const agent = createOwner({ type: "agent", name: "Tiberius", external_id: "agent-503a" });
     expect(human.type).toBe("human");
     expect(agent.type).toBe("agent");
-    expect(getOwner(human.id)!.contact_email).toBe("andrei@hasna.com");
+    expect(getOwner(human.id)!.contact_email).toBe("person@example.com");
     expect(getOwnerByName("Tiberius")!.id).toBe(agent.id);
     expect(listOwners("agent").map((o) => o.name)).toContain("Tiberius");
   });
@@ -57,9 +57,9 @@ describe("assignAddressOwner — human-owned must be agent-administered", () => 
   });
 
   it("human-owned address requires an agent administrator", () => {
-    const human = createOwner({ type: "human", name: "Andrei" });
+    const human = createOwner({ type: "human", name: "Morgan" });
     const agent = createOwner({ type: "agent", name: "Tiberius" });
-    const a = createAddress({ provider_id: providerId, email: "andrei@x.com" });
+    const a = createAddress({ provider_id: providerId, email: "morgan@x.com" });
     // missing administrator → throws
     expect(() => assignAddressOwner(a.id, human.id)).toThrow(/human-owned.*agent administrator/i);
     // administrator must be an agent, not a human

@@ -81,7 +81,7 @@ function assertProviderConfig(provider: Provider): void {
       if (!provider.oauth_client_id) throw new ProviderConfigError("Gmail provider requires oauth_client_id");
       if (!provider.oauth_client_secret) throw new ProviderConfigError("Gmail provider requires oauth_client_secret");
       if (!provider.oauth_refresh_token) {
-        throw new ProviderConfigError("Gmail provider requires oauth_refresh_token. Run 'emails provider auth <id>' to authenticate.");
+        throw new ProviderConfigError("Gmail provider requires oauth_refresh_token. Run 'mailery provider auth <id>' to authenticate.");
       }
       return;
     case "ses":

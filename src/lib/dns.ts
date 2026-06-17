@@ -4,7 +4,7 @@ export function generateSpfRecord(domain: string): DnsRecord {
   return {
     type: "TXT",
     name: domain,
-    value: "v=spf1 include:amazonses.com include:sendgrid.net ~all",
+    value: "v=spf1 include:amazonses.com ~all",
     purpose: "SPF",
   };
 }

@@ -200,16 +200,16 @@ describe("inbox list — listInboundEmails", () => {
       text_body: "b", html_body: null, attachments: [], attachment_paths: [], headers: {},
       raw_size: 1, received_at: new Date().toISOString(),
     }, db);
-    mk("to-elyra", ["el@elyratelier.com"]);
-    mk("to-holy", ["ap@holypaper.com"]);
-    mk("to-display", ['"Display Name" <display@elyratelier.com>']);
+    mk("to-primary", ["el@example.com"]);
+    mk("to-secondary", ["ap@example.net"]);
+    mk("to-display", ['"Display Name" <display@example.com>']);
 
     // exact address
-    expect(listInboundEmails({ recipients: ["el@elyratelier.com"] }, db).map((e) => e.subject)).toEqual(["to-elyra"]);
-    expect(listInboundEmails({ recipients: ["display@elyratelier.com"] }, db).map((e) => e.subject)).toEqual(["to-display"]);
+    expect(listInboundEmails({ recipients: ["el@example.com"] }, db).map((e) => e.subject)).toEqual(["to-primary"]);
+    expect(listInboundEmails({ recipients: ["display@example.com"] }, db).map((e) => e.subject)).toEqual(["to-display"]);
     // bare domain (catch-all routing) — case-insensitive
-    expect(listInboundEmails({ recipientDomains: ["ELYRATELIER.COM"] }, db).map((e) => e.subject).sort()).toEqual(["to-display", "to-elyra"]);
-    expect(listInboundEmails({ recipientDomains: ["holypaper.com"] }, db).map((e) => e.subject)).toEqual(["to-holy"]);
+    expect(listInboundEmails({ recipientDomains: ["EXAMPLE.COM"] }, db).map((e) => e.subject).sort()).toEqual(["to-display", "to-primary"]);
+    expect(listInboundEmails({ recipientDomains: ["example.net"] }, db).map((e) => e.subject)).toEqual(["to-secondary"]);
   });
 
   it("filters by since date", () => {
@@ -346,6 +346,70 @@ describe("inbox list — listInboundEmails", () => {
     expect(queries.some((sql) => sql.includes("FROM addresses") && sql.includes("WHERE id IN ("))).toBe(true);
     expect(queries.some((sql) => sql.includes("FROM domains") && sql.includes("WHERE id IN ("))).toBe(true);
     expect(queries.some((sql) => sql.includes("COUNT(*)") && sql.includes("domain_id IN ("))).toBe(true);
+  });
+});
+
+describe("inbox links", () => {
+  it("extracts links from an inbound email via inbox subcommand and top-level alias", async () => {
+    const { db, providerId } = setupDb();
+    const email = storeInboundEmail({
+      provider_id: providerId,
+      message_id: "links-msg",
+      in_reply_to_email_id: null,
+      from_address: "sender@example.com",
+      to_addresses: ["me@example.com"],
+      cc_addresses: [],
+      subject: "Links please",
+      text_body: "Plain link https://plain.example/path.",
+      html_body: `<p>Open <a href="https://Example.com/docs?x=1&amp;y=2">Docs</a></p>`,
+      attachments: [],
+      attachment_paths: [],
+      headers: {},
+      raw_size: 100,
+      received_at: "2026-06-16T10:00:00.000Z",
+    }, db);
+
+    const viaInbox = await runInboxCommand(["inbox", "links", email.id.slice(0, 8)]);
+    expect(viaInbox.out).toContain("Links for");
+    expect(viaInbox.out).toContain("https://Example.com/docs?x=1&y=2");
+    expect(viaInbox.out).toContain("https://plain.example/path");
+    expect(viaInbox.out).toContain("text: Docs");
+    expect((viaInbox.data as { links: unknown[] }).links).toHaveLength(2);
+
+    const viaAlias = await runInboxCommand(["links", email.id]);
+    expect((viaAlias.data as { links: Array<{ normalized_url: string }> }).links.map((link) => link.normalized_url)).toEqual([
+      "https://example.com/docs?x=1&y=2",
+      "https://plain.example/path",
+    ]);
+  });
+
+  it("keeps mailto links out unless --all is passed", async () => {
+    const { db, providerId } = setupDb();
+    const email = storeInboundEmail({
+      provider_id: providerId,
+      message_id: "mailto-msg",
+      in_reply_to_email_id: null,
+      from_address: "sender@example.com",
+      to_addresses: ["me@example.com"],
+      cc_addresses: [],
+      subject: "Mailto",
+      text_body: "mailto:ops@example.com and https://example.com",
+      html_body: null,
+      attachments: [],
+      attachment_paths: [],
+      headers: {},
+      raw_size: 100,
+      received_at: "2026-06-16T10:00:00.000Z",
+    }, db);
+
+    const normal = await runInboxCommand(["inbox", "links", email.id]);
+    expect((normal.data as { links: Array<{ normalized_url: string }> }).links.map((link) => link.normalized_url)).toEqual(["https://example.com/"]);
+
+    const all = await runInboxCommand(["inbox", "links", email.id, "--all"]);
+    expect((all.data as { links: Array<{ normalized_url: string }> }).links.map((link) => link.normalized_url)).toEqual([
+      "mailto:ops@example.com",
+      "https://example.com/",
+    ]);
   });
 });
 

@@ -95,13 +95,13 @@ describe("MCP resource payloads", () => {
         component: "domain-provisioning",
         entity: "failed.example.com",
         message: "DNS failed",
-        fix_command: "emails provision status failed.example.com",
+        fix_command: "mailery provision status failed.example.com",
       },
       {
         component: "address-provisioning",
         entity: "failed@example.com",
         message: "route failed",
-        fix_command: "emails doctor delivery failed@example.com",
+        fix_command: "mailery doctor delivery failed@example.com",
       },
     ]);
   });
