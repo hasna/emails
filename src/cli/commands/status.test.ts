@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Command } from "commander";
 import { closeDatabase, getDatabase, resetDatabase } from "../../db/database.js";
 import { listEmailAgentRuns } from "../../db/email-agents.js";
@@ -18,7 +21,13 @@ async function runStatusCommand(args: string[]) {
   return { data, formatted };
 }
 
+let previousHome: string | undefined;
+let tempHome: string | undefined;
+
 beforeEach(() => {
+  previousHome = process.env["HOME"];
+  tempHome = mkdtempSync(join(tmpdir(), "mailery-status-test-home-"));
+  process.env["HOME"] = tempHome;
   process.env["EMAILS_DB_PATH"] = ":memory:";
   resetDatabase();
 });
@@ -26,6 +35,11 @@ beforeEach(() => {
 afterEach(() => {
   closeDatabase();
   delete process.env["EMAILS_DB_PATH"];
+  if (previousHome === undefined) delete process.env["HOME"];
+  else process.env["HOME"] = previousHome;
+  if (tempHome) rmSync(tempHome, { recursive: true, force: true });
+  tempHome = undefined;
+  previousHome = undefined;
 });
 
 function seedInbound() {

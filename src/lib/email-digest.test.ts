@@ -1,10 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { closeDatabase, getDatabase, resetDatabase } from "../db/database.js";
 import { getLatestEmailDigest } from "../db/email-digests.js";
 import { storeInboundEmail } from "../db/inbound.js";
 import { generateEmailDigest, loadEmailDigest, resolveEmailDigestWindow } from "./email-digest.js";
 
+let previousHome: string | undefined;
+let tempHome: string | undefined;
+
 beforeEach(() => {
+  previousHome = process.env["HOME"];
+  tempHome = mkdtempSync(join(tmpdir(), "mailery-digest-test-home-"));
+  process.env["HOME"] = tempHome;
   process.env["EMAILS_DB_PATH"] = ":memory:";
   resetDatabase();
 });
@@ -13,6 +22,11 @@ afterEach(() => {
   closeDatabase();
   delete process.env["EMAILS_DB_PATH"];
   delete process.env["GROQ_API_KEY"];
+  if (previousHome === undefined) delete process.env["HOME"];
+  else process.env["HOME"] = previousHome;
+  if (tempHome) rmSync(tempHome, { recursive: true, force: true });
+  tempHome = undefined;
+  previousHome = undefined;
 });
 
 function seedInbound(subject: string, received_at: string, labels: string[] = []) {
@@ -76,14 +90,14 @@ describe("email digest", () => {
     const generateText = mock(async (opts: Record<string, unknown>) => {
       expect(String(opts.system)).toContain("read-only email digest agent");
       expect(String(opts.prompt)).toContain("Board meeting");
-      expect(opts.providerOptions).toMatchObject({ groq: { structuredOutputs: false } });
+      expect(opts.output).toBeUndefined();
       return {
-        output: {
+        text: JSON.stringify({
           summary: "Board meeting mail needs attention.",
           highlights: ["Board meeting from Digest Sender"],
           action_items: ["Review the board meeting message."],
           important_email_ids: [email.id, "not-a-real-id"],
-        },
+        }),
       };
     });
 

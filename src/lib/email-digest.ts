@@ -74,6 +74,18 @@ const DIGEST_OUTPUT_SCHEMA = z.object({
 
 type DigestOutput = z.infer<typeof DIGEST_OUTPUT_SCHEMA>;
 
+const DIGEST_JSON_OUTPUT_INSTRUCTIONS = `Return ONLY one valid JSON object. Do not use markdown, code fences, comments, or prose outside the JSON.
+
+Required shape:
+{
+  "summary": "concise mailbox summary",
+  "highlights": ["important message highlight"],
+  "action_items": ["specific next action"],
+  "important_email_ids": ["id copied exactly from the provided emails"]
+}
+
+Constraints: highlights and action_items have at most 10 items each; important_email_ids has at most 30 ids and must only contain ids shown in the prompt.`;
+
 function startOfLocalDay(date: Date): Date {
   return new Date(date.getFullYear(), date.getMonth(), date.getDate());
 }
@@ -132,6 +144,29 @@ function normalizeDigestOutput(value: unknown): DigestOutput {
     action_items: [],
     important_email_ids: [],
   };
+}
+
+function parseDigestTextOutput(text: string | undefined): unknown {
+  const raw = String(text ?? "").trim();
+  if (!raw) return {};
+  const withoutFence = raw
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
+  try {
+    return JSON.parse(withoutFence);
+  } catch {
+    const start = withoutFence.indexOf("{");
+    const end = withoutFence.lastIndexOf("}");
+    if (start >= 0 && end > start) {
+      try {
+        return JSON.parse(withoutFence.slice(start, end + 1));
+      } catch {
+        return {};
+      }
+    }
+    return {};
+  }
 }
 
 function sourceRows(window: EmailDigestWindow, limit: number, db: Database): DigestSourceEmail[] {
@@ -367,25 +402,39 @@ export async function generateEmailDigest(
   });
   const provider = providerDefaults.provider;
   const model = providerDefaults.model;
-  const ai = deps.generateText && deps.Output ? deps : await import("ai");
+  const ai = deps.generateText && (provider === "groq" || deps.Output) ? deps : await import("ai");
   const languageModel = deps.model ?? await createMaileryAiModel(provider, model);
 
   try {
-    const result = await (ai.generateText as NonNullable<GenerateTextDeps["generateText"]>)({
-      model: languageModel,
-      system: `You are Mailery's read-only email digest agent. Return JSON matching the requested schema. Prompt version: ${DIGEST_PROMPT_VERSION}.`,
-      prompt: digestPrompt(emails, window),
-      output: (ai.Output as NonNullable<GenerateTextDeps["Output"]>).object({ schema: DIGEST_OUTPUT_SCHEMA }),
-      providerOptions: provider === "groq" ? { groq: { structuredOutputs: false } } : undefined,
-      temperature: 0.1,
-      maxOutputTokens: 1800,
-    });
+    const system = `You are Mailery's read-only email digest agent. Return JSON matching the requested schema. Prompt version: ${DIGEST_PROMPT_VERSION}.`;
+    const prompt = digestPrompt(emails, window);
+    let outputValue: unknown;
+    if (provider === "groq") {
+      const result = await (ai.generateText as NonNullable<GenerateTextDeps["generateText"]>)({
+        model: languageModel,
+        system,
+        prompt: `${prompt}\n\n${DIGEST_JSON_OUTPUT_INSTRUCTIONS}`,
+        temperature: 0.1,
+        maxOutputTokens: 1800,
+      });
+      outputValue = parseDigestTextOutput(result.text);
+    } else {
+      const result = await (ai.generateText as NonNullable<GenerateTextDeps["generateText"]>)({
+        model: languageModel,
+        system,
+        prompt,
+        output: (ai.Output as NonNullable<GenerateTextDeps["Output"]>).object({ schema: DIGEST_OUTPUT_SCHEMA }),
+        temperature: 0.1,
+        maxOutputTokens: 1800,
+      });
+      outputValue = result.output;
+    }
     return saveDigestFromOutput({
       window,
       provider,
       model,
       emails,
-      output: normalizeDigestOutput(result.output),
+      output: normalizeDigestOutput(outputValue),
       startedAt,
     }, db);
   } catch (error) {

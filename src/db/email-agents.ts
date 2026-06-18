@@ -369,7 +369,7 @@ export function listPendingInboundEmailsForAgent(agentKey: EmailAgentKey, limit 
            ON r.inbound_email_id = e.id
           AND r.agent_key = ?
         WHERE e.is_sent = 0
-          AND r.id IS NULL
+          AND (r.id IS NULL OR r.status = 'error')
         ORDER BY e.created_at ASC, e.received_at ASC
         LIMIT ?`,
     )
