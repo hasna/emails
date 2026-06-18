@@ -76,6 +76,33 @@ describe("inbound count command", () => {
   });
 });
 
+describe("inbound show command", () => {
+  it("renders HTML bodies as readable text", async () => {
+    const { db, providerId } = setupDb();
+    const email = storeInboundEmail({
+      provider_id: providerId,
+      message_id: "html-inbound-show",
+      from_address: "sender@example.com",
+      to_addresses: ["me@example.com"],
+      cc_addresses: [],
+      subject: "HTML inbound",
+      text_body: null,
+      html_body: '<p>Hello <strong>there</strong> &amp; welcome</p><p><a href="https://example.com">docs</a></p>',
+      attachments: [],
+      headers: {},
+      raw_size: 100,
+      received_at: "2026-06-04T11:29:09.000Z",
+    }, db);
+
+    const { out } = await runInboundCommand(["inbound", "show", email.id]);
+
+    expect(out).toContain("Hello there & welcome");
+    expect(out).toContain("docs (https://example.com)");
+    expect(out).not.toContain("<strong>");
+    expect(out).not.toContain("&amp;");
+  });
+});
+
 describe("inbound list command", () => {
   it("falls back to the default page size for invalid limits", async () => {
     const { db, providerId } = setupDb();

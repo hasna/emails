@@ -15,12 +15,15 @@ import { confirmDestructiveAction, handleError } from "../utils.js";
 import { findVerificationCode, listVerificationCodeCandidates } from "../../lib/verification-code.js";
 import { enrichAddresses } from "../../lib/address-ownership.js";
 import { extractEmailLinks, formatEmailLinks, type ExtractedEmailLink } from "../../lib/email-links.js";
+import { formatAttachmentSize, mergeAttachmentDetails, type AttachmentDetail } from "../../lib/attachment-actions.js";
+import { openLocalTarget } from "../../lib/local-actions.js";
 import { resolveAlias } from "../../db/aliases.js";
 import { findAddressesByEmail } from "../../db/addresses.js";
 import { findDomainsByName } from "../../db/domains.js";
 import { listAddressProvisioningByIds, listDomainProvisioningByIds, listReadyAddressCountsByDomains } from "../../db/provisioning.js";
 import { sqlEmailAddress } from "../../db/email-address-sql.js";
 import { assessDomainReadiness } from "../../lib/domain-readiness.js";
+import { readableMessageText, renderReadableEmailDocument } from "../tui/format.js";
 
 const MAX_INBOX_CLI_LIMIT = 1000;
 const MAX_GMAIL_SYNC_CONCURRENCY = 64;
@@ -879,29 +882,24 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
   // ─── ATTACHMENT ───────────────────────────────────────────────────────────
   inboxCmd
     .command("attachment <emailId>")
-    .description("Show downloaded attachment paths for a synced email")
+    .description("Show attachment metadata and downloaded paths for a synced email")
     .option("--filename <name>", "Filter by filename")
     .action((emailId: string, opts: { filename?: string }) => {
       try {
         const db = getDatabase();
         const fullId = resolveInboundEmailId(emailId);
-        const paths = getInboundAttachmentPaths(fullId, db);
-        if (!paths) {
+        const email = getInboundEmail(fullId, db);
+        if (!email) {
           console.error(chalk.red(`Email not found: ${emailId}`));
           process.exit(1);
         }
-        const filtered = opts.filename ? paths.filter((p) => p.filename === opts.filename) : paths;
+        const details = mergeAttachmentDetails(email.attachments, getInboundAttachmentPaths(fullId, db) ?? email.attachment_paths ?? []);
+        const filtered = opts.filename ? details.filter((p) => p.filename === opts.filename) : details;
         if (filtered.length === 0) {
-          console.log(chalk.dim("No attachments found for this email."));
+          output([], chalk.dim("No attachments found for this email."));
           return;
         }
-        console.log(chalk.bold(`\nAttachments for ${fullId.slice(0, 8)}:`));
-        for (const p of filtered) {
-          const loc = p.local_path ? chalk.cyan(p.local_path) : p.s3_url ? chalk.blue(p.s3_url) : chalk.dim("(not downloaded)");
-          console.log(`  ${p.filename.padEnd(40)} ${chalk.dim(p.content_type)}  ${loc}`);
-        }
-        console.log();
-        output(filtered, "");
+        output(filtered, formatAttachmentDetailList(fullId, filtered));
       } catch (e) {
         handleError(e);
       }
@@ -1270,23 +1268,31 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
   // ─── OPEN HTML ────────────────────────────────────────────────────────────
   inboxCmd
     .command("open <id>")
-    .description("Open HTML body of a synced email in the browser")
+    .description("Open a readable local HTML view of a synced email in the browser")
     .action(async (id: string) => {
       try {
         const db = getDatabase();
         const resolvedId = resolveInboundEmailId(id);
-        const email = db.query("SELECT html_body, text_body FROM inbound_emails WHERE id = ?").get(resolvedId) as { html_body: string | null; text_body: string | null } | null;
+        const email = getInboundEmail(resolvedId, db);
         if (!email) { console.error(chalk.red(`Email not found: ${id}`)); process.exit(1); }
-        const body = email.html_body ?? email.text_body;
-        if (!body) { console.error(chalk.red("This email has no body content.")); process.exit(1); }
         const { writeFileSync } = await import("node:fs");
         const { tmpdir } = await import("node:os");
         const { join: pathJoin } = await import("node:path");
-        const { execSync } = await import("node:child_process");
-        const tmpFile = pathJoin(tmpdir(), `inbox-${resolvedId.slice(0, 8)}.html`);
-        writeFileSync(tmpFile, body);
-        execSync(`open "${tmpFile}" 2>/dev/null || xdg-open "${tmpFile}" 2>/dev/null || echo "File saved: ${tmpFile}"`);
-        console.log(chalk.green(`✓ Opened: ${tmpFile}`));
+        const tmpFile = pathJoin(tmpdir(), `mailery-inbox-${resolvedId.slice(0, 8)}.html`);
+        writeFileSync(tmpFile, renderReadableEmailDocument({
+          subject: email.subject,
+          from: email.from_address,
+          to: email.to_addresses,
+          date: email.received_at,
+          text: email.text_body,
+          html: email.html_body,
+        }), "utf8");
+        const opened = openLocalTarget(tmpFile);
+        const result = { path: tmpFile, file_url: opened.target?.file_url, opened: opened.ok, method: opened.method, error: opened.error };
+        const formatted = opened.ok
+          ? chalk.green(`Opened readable email view: ${tmpFile}`)
+          : `${chalk.yellow(`Saved readable email view: ${tmpFile}`)}\n${chalk.dim(opened.error ?? "Open command unavailable.")}`;
+        output(result, formatted);
       } catch (e) { handleError(e); }
     });
 }
@@ -1411,17 +1417,24 @@ function formatArchiveMigrationResult(result: { scanned: number; copied: number;
   return lines.join("\n");
 }
 
-function fmtBytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
-  return `${(n / 1024 / 1024).toFixed(1)} MB`;
-}
-
 interface AttMeta { filename: string; content_type: string; size: number }
 interface AttPath { filename: string; local_path?: string; s3_url?: string }
 
+function formatAttachmentDetailList(emailId: string, attachments: AttachmentDetail[]): string {
+  const lines = [chalk.bold(`\nAttachments for ${emailId.slice(0, 8)}:`)];
+  for (const attachment of attachments) {
+    const location = attachment.location
+      ? attachment.location_type === "local" ? chalk.cyan(attachment.location) : chalk.blue(attachment.location)
+      : chalk.dim("(not downloaded)");
+    lines.push(`  ${attachment.filename.padEnd(40)} ${chalk.dim(`${formatAttachmentSize(attachment.size)} · ${attachment.content_type}`)}  ${location}`);
+    if (attachment.file_url) lines.push(`  ${chalk.dim("link:")} ${attachment.file_url}`);
+  }
+  lines.push("");
+  return lines.join("\n");
+}
+
 function formatEmailDetail(
-  email: { id: string; from_address: string; subject: string; received_at: string; text_body?: string | null; to_addresses: string[]; cc_addresses: string[]; is_read?: boolean; is_starred?: boolean; is_archived?: boolean; label_ids?: string[]; attachments?: AttMeta[]; attachment_paths?: AttPath[] },
+  email: { id: string; from_address: string; subject: string; received_at: string; text_body?: string | null; html_body?: string | null; to_addresses: string[]; cc_addresses: string[]; is_read?: boolean; is_starred?: boolean; is_archived?: boolean; label_ids?: string[]; attachments?: AttMeta[]; attachment_paths?: AttPath[] },
 ): string {
   const flags = [
     email.is_read === false ? "unread" : "read",
@@ -1429,8 +1442,7 @@ function formatEmailDetail(
     email.is_archived ? "archived" : null,
     ...(email.label_ids ?? []),
   ].filter(Boolean).join(", ");
-  const atts = email.attachments ?? [];
-  const byName = new Map((email.attachment_paths ?? []).map((p) => [p.filename, p.local_path ?? p.s3_url]));
+  const atts = mergeAttachmentDetails(email.attachments, email.attachment_paths);
   const lines: string[] = [
     chalk.bold(`\n  Subject: ${email.subject}`),
     `  From:    ${chalk.cyan(email.from_address)}`,
@@ -1443,10 +1455,11 @@ function formatEmailDetail(
   if (atts.length > 0) {
     lines.push(chalk.yellow(`  📎 Attachments (${atts.length}):`));
     for (const a of atts) {
-      const loc = byName.get(a.filename);
-      lines.push(`     ${a.filename.padEnd(44)} ${chalk.dim(`${fmtBytes(a.size)} · ${a.content_type}`)}${loc ? chalk.green("  ✓saved") : chalk.dim("  (run: mailery inbox sync to download)")}`);
+      const loc = a.location ? `  ${a.location_type === "local" ? chalk.cyan(a.location) : chalk.blue(a.location)}` : chalk.dim("  (run: mailery inbox sync to download)");
+      lines.push(`     ${a.filename.padEnd(44)} ${chalk.dim(`${formatAttachmentSize(a.size)} · ${a.content_type}`)}${loc}`);
+      if (a.file_url) lines.push(`     ${chalk.dim("link:")} ${a.file_url}`);
     }
   }
-  lines.push("", email.text_body ?? chalk.dim("(no body)"), "");
+  lines.push("", readableMessageText(email.text_body, email.html_body) || chalk.dim("(no body)"), "");
   return lines.filter((l) => l !== "").join("\n");
 }

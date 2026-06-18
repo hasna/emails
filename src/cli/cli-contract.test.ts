@@ -2,10 +2,18 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { closeDatabase, resetDatabase } from "../db/database.js";
+import { storeEmailContent } from "../db/email-content.js";
+import { createEmail } from "../db/emails.js";
+import { storeInboundEmail } from "../db/inbound.js";
+import { createProvider } from "../db/providers.js";
+import { storeSandboxEmail } from "../db/sandbox.js";
 
 const tempDirs: string[] = [];
 
 afterEach(() => {
+  closeDatabase();
+  delete process.env["EMAILS_DB_PATH"];
   for (const dir of tempDirs.splice(0)) {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -29,6 +37,40 @@ function runCli(args: string[], env: NodeJS.ProcessEnv) {
     stdout: "pipe",
     stderr: "pipe",
   });
+}
+
+function stdoutText(result: ReturnType<typeof runCli>): string {
+  return new TextDecoder().decode(result.stdout);
+}
+
+function stderrText(result: ReturnType<typeof runCli>): string {
+  return new TextDecoder().decode(result.stderr);
+}
+
+function expectCliJsonOk<T>(result: ReturnType<typeof runCli>): T {
+  const stdout = stdoutText(result);
+  const stderr = stderrText(result);
+  expect(result.exitCode).toBe(0);
+  expect(stderr).toBe("");
+  return JSON.parse(stdout) as T;
+}
+
+function withSeededCliDb<T>(env: NodeJS.ProcessEnv, seed: () => T): T {
+  const previousDb = process.env["EMAILS_DB_PATH"];
+  const previousHome = process.env["HOME"];
+  closeDatabase();
+  process.env["EMAILS_DB_PATH"] = String(env.EMAILS_DB_PATH);
+  process.env["HOME"] = String(env.HOME);
+  resetDatabase();
+  try {
+    return seed();
+  } finally {
+    closeDatabase();
+    if (previousDb === undefined) delete process.env["EMAILS_DB_PATH"];
+    else process.env["EMAILS_DB_PATH"] = previousDb;
+    if (previousHome === undefined) delete process.env["HOME"];
+    else process.env["HOME"] = previousHome;
+  }
 }
 
 describe("CLI JSON contracts", () => {
@@ -259,4 +301,130 @@ describe("CLI JSON contracts", () => {
     expect(stderr).toContain("unknown command");
     expect(stderr).not.toContain("CEREBRAS_API_KEY");
   });
+
+  it("prints managed email agent defaults as stable redacted JSON", () => {
+    const dir = mkdtempSync(join(tmpdir(), "emails-cli-contract-"));
+    tempDirs.push(dir);
+    const env = isolatedEnv(join(dir, "emails.db"), join(dir, "home"));
+    env.GROQ_API_KEY = "gsk_cli_contract_secret";
+
+    const result = runCli(["--json", "agent", "defaults"], env);
+    const stdout = stdoutText(result);
+    const parsed = expectCliJsonOk<{
+      defaultProvider: string;
+      defaultGroqModel: string;
+      credentials: string;
+    }>(result);
+
+    expect(parsed.defaultProvider).toBe("groq");
+    expect(parsed.defaultGroqModel).toBe("llama-3.3-70b-versatile");
+    expect(parsed.credentials).toBe("***");
+    expect(stdout).not.toContain("gsk_cli_contract_secret");
+  });
+
+  it("prints valid JSON for inbox list, read, links, and attachments", () => {
+    const dir = mkdtempSync(join(tmpdir(), "emails-cli-contract-"));
+    tempDirs.push(dir);
+    const env = isolatedEnv(join(dir, "emails.db"), join(dir, "home"));
+    const seeded = withSeededCliDb(env, () => {
+      const provider = createProvider({ name: "gmail", type: "gmail" });
+      const email = storeInboundEmail({
+        provider_id: provider.id,
+        message_id: "<cli-json-inbox@example.com>",
+        in_reply_to_email_id: null,
+        from_address: "sender@example.com",
+        to_addresses: ["ops@example.com"],
+        cc_addresses: [],
+        subject: "CLI JSON contract",
+        text_body: "# Contract\n\nOpen https://example.com/read and mailto:ops@example.com",
+        html_body: null,
+        attachments: [{ filename: "invoice.pdf", content_type: "application/pdf", size: 2048 }],
+        attachment_paths: [{ filename: "invoice.pdf", content_type: "application/pdf", size: 2048, local_path: "/tmp/contract-invoice.pdf" }],
+        headers: {},
+        raw_size: 123,
+        received_at: "2026-06-18T08:00:00.000Z",
+      });
+      return { emailId: email.id };
+    });
+
+    const list = expectCliJsonOk<Array<{ id: string; subject: string }>>(runCli(["--json", "inbox", "list", "--search", "contract", "--limit", "1"], env));
+    expect(list).toEqual([expect.objectContaining({ id: seeded.emailId, subject: "CLI JSON contract" })]);
+
+    const read = expectCliJsonOk<{ id: string; subject: string; text_body: string }>(runCli(["--json", "inbox", "read", seeded.emailId, "--keep-unread"], env));
+    expect(read).toMatchObject({ id: seeded.emailId, subject: "CLI JSON contract" });
+    expect(read.text_body).toContain("https://example.com/read");
+
+    const links = expectCliJsonOk<{ links: Array<{ url: string }> }>(runCli(["--json", "links", seeded.emailId, "--all"], env));
+    expect(links.links.map((link) => link.url)).toEqual(["https://example.com/read", "mailto:ops@example.com"]);
+
+    const attachments = expectCliJsonOk<Array<{ filename: string; file_url?: string; location_type?: string }>>(runCli(["--json", "inbox", "attachment", seeded.emailId, "--filename", "invoice.pdf"], env));
+    expect(attachments).toEqual([
+      expect.objectContaining({
+        filename: "invoice.pdf",
+        file_url: "file:///tmp/contract-invoice.pdf",
+        location_type: "local",
+      }),
+    ]);
+  });
+
+  it("prints valid JSON for sent email show", () => {
+    const dir = mkdtempSync(join(tmpdir(), "emails-cli-contract-"));
+    tempDirs.push(dir);
+    const env = isolatedEnv(join(dir, "emails.db"), join(dir, "home"));
+    const seeded = withSeededCliDb(env, () => {
+      const provider = createProvider({ name: "sandbox", type: "sandbox" });
+      const email = createEmail(provider.id, {
+        from: "sender@example.com",
+        to: "ops@example.com",
+        subject: "Show JSON contract",
+        text: "plain fallback",
+      }, "show-json-message");
+      storeEmailContent(email.id, {
+        html: '<p>Hello <strong>show</strong> &amp; JSON</p>',
+      });
+      return { emailId: email.id };
+    });
+
+    const shown = expectCliJsonOk<{ id: string; subject: string; provider_message_id: string }>(
+      runCli(["--json", "email", "show", seeded.emailId], env),
+    );
+
+    expect(shown).toMatchObject({
+      id: seeded.emailId,
+      subject: "Show JSON contract",
+      provider_message_id: "show-json-message",
+    });
+  });
+
+  it("prints valid JSON for sandbox list and count", () => {
+    const dir = mkdtempSync(join(tmpdir(), "emails-cli-contract-"));
+    tempDirs.push(dir);
+    const env = isolatedEnv(join(dir, "emails.db"), join(dir, "home"));
+    withSeededCliDb(env, () => {
+      const provider = createProvider({ name: "sandbox", type: "sandbox" });
+      storeSandboxEmail({
+        provider_id: provider.id,
+        from_address: "sender@example.com",
+        to_addresses: ["ops@example.com"],
+        cc_addresses: [],
+        bcc_addresses: [],
+        reply_to: null,
+        subject: "Sandbox JSON",
+        html: "<p>hidden</p>",
+        text_body: null,
+        attachments: [],
+        headers: {},
+      });
+    });
+
+    const rows = expectCliJsonOk<Array<Record<string, unknown>>>(runCli(["--json", "sandbox", "list", "--limit", "1"], env));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ subject: "Sandbox JSON" });
+    expect(rows[0]).not.toHaveProperty("html");
+    expect(rows[0]).not.toHaveProperty("text_body");
+
+    const count = expectCliJsonOk<{ count: number }>(runCli(["--json", "sandbox", "count"], env));
+    expect(count).toEqual({ count: 1 });
+  });
+
 });

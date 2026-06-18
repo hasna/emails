@@ -7,7 +7,45 @@ import { getTodayLimit, getTodaySentCount } from '../../lib/warming.js';
 import { getTriage, listTriagedSummaries, getTriageStats } from '../../db/triage.js';
 import { updateEmailStatus } from '../../db/emails.js';
 import { upsertEvent } from '../../db/events.js';
+import { getDatabase } from '../../db/database.js';
 import { json, notFound, badRequest, internalError, resolveId, resolveIdStrict, resolveOptionalId, parseBody, checkRateLimit, tooManyRequests, parseInteger, queryInteger, optionalQueryInteger, queryPage } from './helpers.js';
+
+
+function normalizeDisplaySummary(value: string | null | undefined): string | null {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  return text ? text.slice(0, 360) : null;
+}
+
+function getInboundDisplaySummary(inboundEmailId: string): string | null {
+  const db = getDatabase();
+  const agent = db.query(`
+    SELECT summary
+      FROM email_agent_runs
+     WHERE inbound_email_id = ?
+       AND status = 'ok'
+       AND TRIM(COALESCE(summary, '')) != ''
+     ORDER BY CASE agent_key
+                WHEN 'categorizer' THEN 0
+                WHEN 'labeler' THEN 1
+                WHEN 'fraud' THEN 2
+                ELSE 3
+              END,
+              completed_at DESC
+     LIMIT 1
+  `).get(inboundEmailId) as { summary: string | null } | null;
+  const agentSummary = normalizeDisplaySummary(agent?.summary);
+  if (agentSummary) return agentSummary;
+
+  const triage = db.query(`
+    SELECT summary
+      FROM email_triage
+     WHERE inbound_email_id = ?
+       AND TRIM(COALESCE(summary, '')) != ''
+     ORDER BY triaged_at DESC
+     LIMIT 1
+  `).get(inboundEmailId) as { summary: string | null } | null;
+  return normalizeDisplaySummary(triage?.summary);
+}
 
 function parseEnrollmentStatus(value: string | null): EnrollmentStatus | undefined {
   if (value === null || value === "") return undefined;
@@ -105,7 +143,7 @@ if (inboundMatch && method === "GET") {
     if (!id) return notFound("Inbound email not found");
     const email = getInboundEmail(id);
     if (!email) return notFound("Inbound email not found");
-    return json(email);
+    return json({ ...email, summary: getInboundDisplaySummary(email.id) });
   } catch (e) { return internalError(e); }
 }
 

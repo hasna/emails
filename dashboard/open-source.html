@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Mailery Open Source</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #101411; color: #eef4ef; min-height: 100vh; }
+    a { color: inherit; }
+    .wrap { width: min(1120px, calc(100% - 32px)); margin: 0 auto; }
+    header { min-height: 56px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #29332d; }
+    .brand { font-size: 16px; font-weight: 800; letter-spacing: 0; }
+    nav { display: flex; gap: 10px; align-items: center; }
+    nav a { color: #a8b8ad; text-decoration: none; font-size: 13px; padding: 7px 10px; border-radius: 6px; }
+    nav a:hover { color: #f7fbf8; background: #1c251f; }
+    .hero { min-height: calc(100vh - 96px); display: grid; grid-template-columns: minmax(0, 0.92fr) minmax(360px, 1.08fr); gap: 48px; align-items: center; padding: 42px 0 54px; }
+    .eyebrow { color: #8bd3ff; font-size: 13px; font-weight: 700; margin-bottom: 16px; }
+    h1 { font-size: clamp(44px, 8vw, 86px); line-height: .94; letter-spacing: 0; margin-bottom: 20px; }
+    .lead { font-size: 18px; line-height: 1.6; color: #b8c8be; max-width: 620px; margin-bottom: 24px; }
+    .actions { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 28px; }
+    .btn { display: inline-flex; align-items: center; justify-content: center; min-height: 38px; padding: 0 16px; border-radius: 6px; border: 1px solid #3b5147; color: #eff7f1; text-decoration: none; font-size: 14px; font-weight: 650; }
+    .btn.primary { background: #178f7b; border-color: #178f7b; color: white; }
+    .btn:hover { background: #223028; }
+    .btn.primary:hover { background: #0f7a69; }
+    .facts { display: flex; flex-wrap: wrap; gap: 10px; color: #9fb0a5; font-size: 13px; }
+    .facts span { border: 1px solid #304039; border-radius: 6px; padding: 7px 10px; background: #151b17; }
+    .product { border: 1px solid #33443b; border-radius: 8px; background: #171e1a; overflow: hidden; box-shadow: 0 22px 70px rgba(0,0,0,.28); }
+    .product-top { display: flex; align-items: center; justify-content: space-between; padding: 12px 14px; border-bottom: 1px solid #29332d; color: #a8b8ad; font-size: 12px; }
+    .screen { display: grid; grid-template-columns: 190px 1fr; min-height: 420px; }
+    .side { background: #121713; border-right: 1px solid #29332d; padding: 14px; }
+    .side strong { display: block; margin-bottom: 14px; }
+    .side div { color: #9fb0a5; padding: 7px 8px; border-radius: 6px; margin-bottom: 4px; font-size: 13px; }
+    .side .active { background: #203129; color: #eafff5; }
+    .mail { padding: 16px; }
+    .toolbar { display: flex; gap: 8px; margin-bottom: 14px; }
+    .pill { border: 1px solid #34483f; border-radius: 6px; color: #dcebe2; padding: 6px 9px; font-size: 12px; }
+    .message { border: 1px solid #29332d; border-radius: 8px; padding: 14px; margin-bottom: 12px; background: #121713; }
+    .message h3 { font-size: 14px; margin-bottom: 7px; }
+    .message p { color: #a8b8ad; font-size: 13px; line-height: 1.5; }
+    .summary { border-color: #245244; background: #14231e; }
+    .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; padding: 36px 0 64px; }
+    .tile { border: 1px solid #29332d; border-radius: 8px; padding: 18px; background: #151b17; }
+    .tile h2 { font-size: 16px; margin-bottom: 8px; }
+    .tile p { color: #a8b8ad; font-size: 14px; line-height: 1.55; }
+    @media (max-width: 880px) { .hero { grid-template-columns: 1fr; gap: 28px; min-height: auto; } .screen { grid-template-columns: 1fr; } .side { display: none; } .grid { grid-template-columns: 1fr; } header { align-items: flex-start; flex-direction: column; gap: 10px; padding: 14px 0; } }
+  </style>
+</head>
+<body>
+  <header class="wrap">
+    <div class="brand">Mailery</div>
+    <nav>
+      <a href="/">Dashboard</a>
+      <a href="https://github.com/hasna/mailery">GitHub</a>
+      <a href="https://www.npmjs.com/package/@hasna/mailery">npm</a>
+    </nav>
+  </header>
+
+  <main class="wrap">
+    <section class="hero">
+      <div>
+        <div class="eyebrow">Open source, local-first email operations</div>
+        <h1>Mailery</h1>
+        <p class="lead">A CLI, MCP server, library, and dashboard for sending, receiving, tracking, and inspecting email across Resend, AWS SES, Gmail, and local sandbox workflows.</p>
+        <div class="actions">
+          <a class="btn primary" href="https://github.com/hasna/mailery">View source</a>
+          <a class="btn" href="/">Open dashboard</a>
+        </div>
+        <div class="facts"><span>Apache-2.0</span><span>Bun + TypeScript</span><span>CLI + MCP + REST</span></div>
+      </div>
+      <div class="product" aria-label="Mailery dashboard preview">
+        <div class="product-top"><span>mailery serve</span><span>127.0.0.1:3900</span></div>
+        <div class="screen">
+          <div class="side"><strong>Mailery</strong><div class="active">Inbound</div><div>Providers</div><div>Domains</div><div>Sequences</div><div>Events</div></div>
+          <div class="mail">
+            <div class="toolbar"><span class="pill">Filter</span><span class="pill">Pull</span><span class="pill">Attachments</span></div>
+            <div class="message summary"><h3>Summary: Customer asked for the latest invoice</h3><p>Attachment available locally as a file link, with raw email hidden until needed.</p></div>
+            <div class="message"><h3>ops@example.com</h3><p>Markdown, HTML, links, replies, labels, and provider events stay searchable in the local database.</p></div>
+            <div class="message"><h3>mailery mcp</h3><p>Agent-friendly tools expose safe operations for sending, inbox prep, DNS checks, analytics, and diagnostics.</p></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="grid">
+      <div class="tile"><h2>Own the data</h2><p>Mailery stores operational email state in a local SQLite database by default, with isolated test paths for smoke runs.</p></div>
+      <div class="tile"><h2>Use real providers</h2><p>Send with Resend, SES, Gmail, or sandbox capture. Receive through webhooks, SMTP, Gmail sync, or SES/S3 flows.</p></div>
+      <div class="tile"><h2>Built for agents</h2><p>The MCP server exposes tools and redacted context resources so coding agents can inspect and operate email safely.</p></div>
+    </section>
+  </main>
+</body>
+</html>

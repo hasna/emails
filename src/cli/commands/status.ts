@@ -75,9 +75,23 @@ export function registerStatusCommands(program: Command, output: (data: unknown,
     .action(async () => {
       try {
         const { ensureEmailAgentSettings } = await import("../../db/email-agents.js");
-        const { formatEmailAgentSetting } = await import("../../lib/email-agents.js");
+        const { formatEmailAgentRuntimeStatus, formatEmailAgentSetting, getEmailAgentRuntimeStatus } = await import("../../lib/email-agents.js");
         const settings = ensureEmailAgentSettings();
-        output(settings, settings.map(formatEmailAgentSetting).join("\n\n"));
+        const status = getEmailAgentRuntimeStatus();
+        output({ status, settings }, [formatEmailAgentRuntimeStatus(status), settings.map(formatEmailAgentSetting).join("\n\n")].join("\n\n"));
+      } catch (e) {
+        handleError(e);
+      }
+    });
+
+  agent
+    .command("defaults")
+    .description("Show managed email agent defaults, Groq model, and credential readiness")
+    .action(async () => {
+      try {
+        const { formatEmailAgentRuntimeStatus, getEmailAgentRuntimeStatus } = await import("../../lib/email-agents.js");
+        const status = getEmailAgentRuntimeStatus();
+        output(status, formatEmailAgentRuntimeStatus(status));
       } catch (e) {
         handleError(e);
       }

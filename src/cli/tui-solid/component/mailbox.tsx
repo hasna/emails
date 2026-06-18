@@ -110,6 +110,11 @@ export function MailboxRoute() {
       <box height={2} flexDirection="row" justifyContent="space-between">
         <box flexDirection="row" columnGap={1}>
           <Button label={mailery.state.sort === "newest" ? "Newest first" : "Oldest first"} onPress={() => mailery.actions.cycleSort()} />
+          <Button
+            label="Filter"
+            active={!!mailery.state.search || !!mailery.state.activeLabel || mailery.state.mailbox !== "inbox"}
+            onPress={() => mailery.actions.openDialog("filter")}
+          />
           <Button label="Search" onPress={() => mailery.actions.openDialog("search")} />
           <Button label="Pull" onPress={() => void pullNow()} />
         </box>

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDatabase, getDatabase, resetDatabase } from "../../db/database.js";
 import { createEmail } from "../../db/emails.js";
+import { storeEmailContent } from "../../db/email-content.js";
 import { storeInboundEmail } from "../../db/inbound.js";
 import { createProvider } from "../../db/providers.js";
 import { createAddress, markVerified } from "../../db/addresses.js";
@@ -133,6 +134,19 @@ describe("email log list and search commands", () => {
     expect(rows.map((row) => row.subject)).toEqual(["Searchable sent 2", "Searchable sent 1"]);
     expect(rows[0]).not.toHaveProperty("idempotency_key");
     expect(JSON.stringify(rows)).not.toContain("search-secret");
+  });
+});
+
+describe("email show command", () => {
+  it("renders stored HTML as readable text", async () => {
+    const db = getDatabase();
+    const sent = db.query("SELECT id FROM emails LIMIT 1").get() as { id: string };
+    storeEmailContent(sent.id, { html: "<p>Hello <strong>there</strong> &amp; welcome</p>" }, db);
+
+    const { consoleOutput } = await runEmailLogCommand(["show", sent.id]);
+
+    expect(consoleOutput).toContain("Hello there & welcome");
+    expect(consoleOutput).not.toContain("<strong>");
   });
 });
 

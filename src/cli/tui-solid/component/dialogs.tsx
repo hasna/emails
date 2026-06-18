@@ -9,6 +9,11 @@ import { copyTextToClipboardAsync } from "../../tui/clipboard.js";
 import { useToast } from "../context/toast.js";
 import { Button, EmptyState, Row } from "../ui/primitives.js";
 import { labelDisplayName, mailboxLabel, type Mailbox } from "../../tui/data.js";
+import { formatDate, wrapText } from "../../tui/format.js";
+import { formatAttachmentSize, mergeAttachmentDetails, type AttachmentDetail, type AttachmentPathLike } from "../../../lib/attachment-actions.js";
+import { openLocalTarget } from "../../../lib/local-actions.js";
+import { ensureEmailAgentSettings } from "../../../db/email-agents.js";
+import { DEFAULT_GROQ_EMAIL_AGENT_MODEL } from "../../../lib/mailery-ai.js";
 
 export function MaileryDialogs() {
   const mailery = useMailery();
@@ -77,6 +82,33 @@ export function MaileryDialogs() {
     markerColor: theme.secondary,
   })));
 
+  const attachmentDetails = createMemo<AttachmentDetail[]>(() => {
+    const attachments = mailery.selectedBody()?.attachments ?? [];
+    return mergeAttachmentDetails(
+      attachments.map((attachment) => ({
+        filename: attachment.filename,
+        content_type: attachment.content_type,
+        size: attachment.size,
+      })),
+      attachments.flatMap((attachment): AttachmentPathLike[] => {
+        if (!attachment.location) return [];
+        if (attachment.location.startsWith("s3://")) {
+          return [{ filename: attachment.filename, content_type: attachment.content_type, s3_url: attachment.location }];
+        }
+        return [{ filename: attachment.filename, content_type: attachment.content_type, local_path: attachment.location }];
+      }),
+    );
+  });
+
+  const attachmentItems = createMemo<SelectDialogItem[]>(() => attachmentDetails().map((attachment, index) => ({
+    id: String(index),
+    title: attachment.filename,
+    detail: [attachment.file_url ?? attachment.location, attachment.content_type, formatAttachmentSize(attachment.size)].filter(Boolean).join(" · "),
+    category: attachment.location_type === "local" ? "Local" : attachment.location_type === "s3" ? "S3" : "Attachment",
+    marker: attachment.openable ? "↗" : "□",
+    markerColor: attachment.openable ? theme.secondary : theme.textMuted,
+  })));
+
   createEffect(() => {
     const kind = mailery.state.dialog;
     untrack(() => {
@@ -119,6 +151,11 @@ export function MaileryDialogs() {
           onClose={close}
         />
       ), { size: "large", onClose: mailery.actions.closeDialog });
+      return;
+    }
+
+    if (kind === "filter") {
+      dialog.replace(() => <FilterDialog close={close} />, { size: "large", onClose: mailery.actions.closeDialog });
       return;
     }
 
@@ -213,6 +250,22 @@ export function MaileryDialogs() {
             }}
             onClose={close}
           />
+          <Show when={mailery.links().length > 0}>
+            <Button
+              label="Open first link"
+              onPress={() => {
+                const link = mailery.links()[0];
+                if (!link) return;
+                const result = openLocalTarget(link.url);
+                toast.show({
+                  title: result.ok ? "Link opened" : "Open failed",
+                  message: result.ok ? link.url : result.error ?? "Could not open link.",
+                  tone: result.ok ? "success" : "error",
+                });
+                close();
+              }}
+            />
+          </Show>
           <Button
             label="Copy all links"
             onPress={() => {
@@ -228,11 +281,200 @@ export function MaileryDialogs() {
           </For>
         </box>
       ), { size: "large", onClose: mailery.actions.closeDialog });
+      return;
+    }
+
+    if (kind === "attachments") {
+      dialog.replace(() => <AttachmentsDialog close={close} attachments={attachmentDetails()} items={attachmentItems()} />, { size: "large", onClose: mailery.actions.closeDialog });
+      return;
+    }
+
+    if (kind === "raw") {
+      dialog.replace(() => <RawMessageDialog close={close} />, { size: "large", onClose: mailery.actions.closeDialog });
+      return;
     }
     });
   });
 
   return null;
+}
+
+
+function FilterDialog(props: { close: () => void }) {
+  const mailery = useMailery();
+  const theme = useTheme();
+  const applySearch = () => {
+    mailery.actions.search(mailery.state.searchDraft);
+    props.close();
+  };
+  const clearFilters = () => {
+    mailery.actions.clearFilters();
+    props.close();
+  };
+
+  useKeyboard((key) => {
+    if (key.name === "escape") props.close();
+  });
+
+  return (
+    <box flexDirection="column" width="100%" rowGap={1}>
+      <box height={1} flexDirection="row" justifyContent="space-between">
+        <text fg={theme.text}>Filter Mail</text>
+        <Button label="Close" onPress={props.close} />
+      </box>
+      <input
+        focused
+        value={mailery.state.searchDraft}
+        placeholder="Subject, sender, recipient, or body"
+        width="100%"
+        textColor={theme.text}
+        backgroundColor={theme.backgroundElement}
+        focusedTextColor={theme.text}
+        focusedBackgroundColor={theme.backgroundActive}
+        placeholderColor={theme.textMuted}
+        cursorColor={theme.text}
+        onInput={mailery.actions.setSearchDraft}
+        onSubmit={applySearch}
+      />
+      <box height={1} flexDirection="row" columnGap={1}>
+        <Button label="Apply" tone="primary" onPress={applySearch} />
+        <Button label="Clear" onPress={clearFilters} />
+        <Button label={mailery.state.sort === "newest" ? "Newest" : "Oldest"} onPress={() => mailery.actions.cycleSort()} />
+      </box>
+      <box height={1} flexDirection="row" columnGap={1}>
+        <Button label="Inbox" active={mailery.state.mailbox === "inbox" && !mailery.state.activeLabel} onPress={() => mailery.actions.setMailbox("inbox")} />
+        <Button label="Unread" active={mailery.state.mailbox === "unread"} onPress={() => mailery.actions.setMailbox("unread")} />
+        <Button label="Starred" active={mailery.state.mailbox === "starred"} onPress={() => mailery.actions.setMailbox("starred")} />
+        <Button label="Archived" active={mailery.state.mailbox === "archived"} onPress={() => mailery.actions.setMailbox("archived")} />
+      </box>
+      <Show when={mailery.state.search || mailery.state.activeLabel}>
+        <text fg={theme.textMuted}>
+          Active: {[mailery.state.search && `search "${mailery.state.search}"`, mailery.state.activeLabel && labelDisplayName(mailery.state.activeLabel)].filter(Boolean).join(" · ")}
+        </text>
+      </Show>
+    </box>
+  );
+}
+
+function attachmentCopyTarget(attachment: AttachmentDetail): string {
+  return attachment.file_url ?? attachment.location ?? attachment.filename;
+}
+
+function AttachmentsDialog(props: { close: () => void; attachments: AttachmentDetail[]; items: SelectDialogItem[] }) {
+  const theme = useTheme();
+  const toast = useToast();
+  const copyAttachment = (attachment: AttachmentDetail) => {
+    const target = attachmentCopyTarget(attachment);
+    void copyTextToClipboardAsync(target).then((result) => {
+      toast.show({
+        title: result.ok ? "Attachment link copied" : "Copy failed",
+        message: result.ok ? target : result.error ?? "Clipboard unavailable",
+        tone: result.ok ? "success" : "error",
+      });
+    });
+    props.close();
+  };
+  const openable = () => props.attachments.find((attachment) => attachment.openable && attachment.location);
+
+  return (
+    <box flexDirection="column" width="100%" rowGap={1}>
+      <SelectDialog
+        title="Attachments"
+        placeholder="Filter attachments"
+        items={props.items}
+        query=""
+        onQuery={() => undefined}
+        onSelect={(item) => {
+          const attachment = props.attachments[Number(item.id)];
+          if (attachment) copyAttachment(attachment);
+        }}
+        onClose={props.close}
+        footer="Select an attachment to copy its local file link or storage location."
+      />
+      <For each={props.attachments.filter((attachment) => attachment.file_url || attachment.location)}>
+        {(attachment) => (
+          <text fg={theme.textMuted} wrapMode="word" width="100%">
+            {attachment.filename}: {attachment.file_url ?? attachment.location}
+          </text>
+        )}
+      </For>
+      <Show when={openable()}>
+        {(attachment) => (
+          <Button
+            label="Open first local"
+            onPress={() => {
+              const target = attachment().location;
+              if (!target) return;
+              const result = openLocalTarget(target);
+              toast.show({
+                title: result.ok ? "Attachment opened" : "Open failed",
+                message: result.ok ? target : result.error ?? "Could not open attachment.",
+                tone: result.ok ? "success" : "error",
+              });
+              props.close();
+            }}
+          />
+        )}
+      </Show>
+      <Button
+        label="Copy all attachment links"
+        onPress={() => {
+          const links = props.attachments.map(attachmentCopyTarget).join("\n");
+          void copyTextToClipboardAsync(links).then((result) => {
+            toast.show({ title: result.ok ? "Attachment links copied" : "Copy failed", message: `${props.attachments.length} attachment(s)`, tone: result.ok ? "success" : "error" });
+          });
+          props.close();
+        }}
+      />
+      <Show when={props.attachments.length === 0}>
+        <text fg={theme.textMuted}>No attachments on this message.</text>
+      </Show>
+    </box>
+  );
+}
+
+function RawMessageDialog(props: { close: () => void }) {
+  const mailery = useMailery();
+  const theme = useTheme();
+  const body = () => mailery.selectedBody();
+  const rawLines = () => {
+    const selected = body();
+    if (!selected) return [];
+    const parts = [
+      selected.text ? `Text body\n${selected.text}` : "",
+      selected.html ? `HTML body\n${selected.html}` : "",
+    ].filter(Boolean).join("\n\n");
+    return wrapText(parts || "(no body)", 110, 220);
+  };
+
+  useKeyboard((key) => {
+    if (key.name === "escape") props.close();
+  });
+
+  return (
+    <box flexDirection="column" width="100%" rowGap={1}>
+      <box height={1} flexDirection="row" justifyContent="space-between">
+        <text fg={theme.text}>Raw Email</text>
+        <Button label="Close" onPress={props.close} />
+      </box>
+      <Show when={body()} fallback={<EmptyState title="No message selected" detail="Choose a message first." />}>
+        {(selected) => (
+          <box flexDirection="column" width="100%" rowGap={1}>
+            <text fg={theme.textMuted}>Subject: {selected().subject}</text>
+            <text fg={theme.textMuted}>From: {selected().from}</text>
+            <text fg={theme.textMuted}>To: {selected().to}</text>
+            <text fg={theme.textMuted}>Date: {formatDate(selected().date)}</text>
+            <text fg={theme.textMuted}>Flags: {selected().flags.join(", ") || "none"}</text>
+            <scrollbox height={16} width="100%">
+              <For each={rawLines()}>
+                {(line) => <text fg={theme.text} wrapMode="word" width="100%">{line || " "}</text>}
+              </For>
+            </scrollbox>
+          </box>
+        )}
+      </Show>
+    </box>
+  );
 }
 
 function inboxDetail(address: { provider?: string; receiveStatus?: string; configured: boolean; observed: boolean }): string {
@@ -314,13 +556,14 @@ function DomainsDialog(props: { close: () => void }) {
   );
 }
 
-type SettingsSection = "main" | "sync" | "defaults" | "display";
+type SettingsSection = "main" | "sync" | "defaults" | "display" | "agents";
 
 function settingsTitle(section: SettingsSection): string {
   switch (section) {
     case "sync": return "Settings / Sync";
     case "defaults": return "Settings / Defaults";
     case "display": return "Settings / Display";
+    case "agents": return "Settings / Agents";
     default: return "Settings";
   }
 }
@@ -353,6 +596,9 @@ function SettingsDialog(props: { close: () => void }) {
   const mailery = useMailery();
   const [section, setSection] = createSignal<SettingsSection>("main");
   const settings = () => mailery.state.settings;
+  const agentSettings = createMemo(() => ensureEmailAgentSettings());
+  const enabledAgentCount = () => agentSettings().filter((setting) => setting.enabled).length;
+  const alwaysOnAgentCount = () => agentSettings().filter((setting) => setting.enabled && setting.always_on).length;
   const goBack = () => {
     if (section() === "main") props.close();
     else setSection("main");
@@ -388,6 +634,7 @@ function SettingsDialog(props: { close: () => void }) {
       <Show when={section() === "main"}>
         <box flexDirection="column" width="100%" rowGap={1}>
           <SettingsMenuRow title="Sync" detail="Auto-pull and Gmail refresh" onPress={() => setSection("sync")} />
+          <SettingsMenuRow title="Agents" detail="Groq defaults and always-on" onPress={() => setSection("agents")} />
           <SettingsMenuRow title="Defaults" detail="Inbox, folder, and sender" onPress={() => setSection("defaults")} />
           <SettingsMenuRow title="Display" detail="Theme and read-state styling" onPress={() => setSection("display")} />
         </box>
@@ -404,6 +651,20 @@ function SettingsDialog(props: { close: () => void }) {
             title="Gmail auto-pull"
             value={boolText(settings().gmailAutoPull)}
             onPress={() => mailery.actions.setSetting("gmailAutoPull", !settings().gmailAutoPull)}
+          />
+        </box>
+      </Show>
+
+      <Show when={section() === "agents"}>
+        <box flexDirection="column" width="100%" rowGap={1}>
+          <SettingsActionRow title="Enabled agents" value={`${enabledAgentCount()}/${agentSettings().length}`} onPress={() => undefined} />
+          <SettingsActionRow title="Always-on agents" value={String(alwaysOnAgentCount())} onPress={() => undefined} />
+          <SettingsActionRow title="Default provider" value="Groq" onPress={() => undefined} />
+          <SettingsActionRow title="Groq email model" value={DEFAULT_GROQ_EMAIL_AGENT_MODEL} onPress={() => undefined} />
+          <SettingsActionRow
+            title="Auto-pull inbound"
+            value={boolText(settings().autoPull)}
+            onPress={() => mailery.actions.setSetting("autoPull", !settings().autoPull)}
           />
         </box>
       </Show>

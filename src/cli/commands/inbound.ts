@@ -1,10 +1,11 @@
 import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
-import { execSync } from "node:child_process";
 import { listInboundEmailSummaries, getInboundEmail, clearInboundEmails, getReceivedInboundCount } from "../../db/inbound.js";
 import { getDatabase, resolvePartialId } from "../../db/database.js";
 import { truncate, formatDate } from "../../lib/format.js";
 import { handleError, parseCliPage, resolveId } from "../utils.js";
+import { openLocalTarget } from "../../lib/local-actions.js";
+import { readableMessageText, renderReadableEmailDocument } from "../tui/format.js";
 
 export function registerInboundCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   const inboundCmd = program.command("inbound").description("Receive and inspect inbound emails");
@@ -73,12 +74,9 @@ export function registerInboundCommands(program: Command, output: (data: unknown
           `  ${chalk.dim("Received:")} ${formatDate(email!.received_at)}`,
           `  ${chalk.dim("Size:")}     ${email!.raw_size} bytes`,
           "",
-          chalk.bold("  Body (text):"),
-          email!.text_body ? email!.text_body.slice(0, 500) : chalk.dim("  (none)"),
+          chalk.bold("  Body:"),
+          readableMessageText(email!.text_body, email!.html_body),
         ];
-        if (email!.html_body) {
-          lines.push("", chalk.bold("  Body (html):"), email!.html_body.slice(0, 200) + "...");
-        }
         output(email, lines.join("\n"));
       } catch (e) {
         handleError(e);
@@ -87,7 +85,7 @@ export function registerInboundCommands(program: Command, output: (data: unknown
 
   inboundCmd
     .command("open <id>")
-    .description("Open HTML content of an inbound email in the browser")
+    .description("Open a readable local HTML view of an inbound email")
     .action(async (id: string) => {
       try {
         const db = getDatabase();
@@ -95,15 +93,26 @@ export function registerInboundCommands(program: Command, output: (data: unknown
         if (!resolvedId) handleError(new Error(`Inbound email not found: ${id}`));
         const email = getInboundEmail(resolvedId!, db);
         if (!email) handleError(new Error(`Inbound email not found: ${id}`));
-        if (!email!.html_body) handleError(new Error("This inbound email has no HTML content."));
+        if (!email!.html_body && !email!.text_body) handleError(new Error("This inbound email has no body content."));
 
         const { writeFileSync } = await import("node:fs");
         const { tmpdir } = await import("node:os");
         const { join: pathJoin } = await import("node:path");
-        const tmpFile = pathJoin(tmpdir(), `inbound-${resolvedId!.slice(0, 8)}.html`);
-        writeFileSync(tmpFile, email!.html_body!);
-        execSync(`open "${tmpFile}"`);
-        console.log(chalk.green(`✓ Opened in browser: ${tmpFile}`));
+        const tmpFile = pathJoin(tmpdir(), `mailery-inbound-${resolvedId!.slice(0, 8)}.html`);
+        writeFileSync(tmpFile, renderReadableEmailDocument({
+          subject: email!.subject,
+          from: email!.from_address,
+          to: email!.to_addresses,
+          date: email!.received_at,
+          text: email!.text_body,
+          html: email!.html_body,
+        }), "utf8");
+        const opened = openLocalTarget(tmpFile);
+        const result = { path: tmpFile, file_url: opened.target?.file_url, opened: opened.ok, method: opened.method, error: opened.error };
+        const formatted = opened.ok
+          ? chalk.green(`Opened readable inbound email view: ${tmpFile}`)
+          : `${chalk.yellow(`Saved readable inbound email view: ${tmpFile}`)}\n${chalk.dim(opened.error ?? "Open command unavailable.")}`;
+        output(result, formatted);
       } catch (e) {
         handleError(e);
       }

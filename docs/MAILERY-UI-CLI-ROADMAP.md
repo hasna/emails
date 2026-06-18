@@ -1,0 +1,121 @@
+# Mailery UI + CLI Roadmap
+
+Created: 2026-06-18
+
+## Baseline
+
+- `EMAILS_DB_PATH=:memory: bun test` passes: 1559 tests, 0 failures.
+- Main terminal UI is `src/cli/tui-solid/App.tsx`, loaded by `mailery ui`.
+- Legacy `src/cli/tui/App.tsx` re-exports the Solid/OpenTUI app.
+- Dashboard frontend is one static file: `dashboard/index.html`.
+- Dashboard API routes are split under `src/server/routes/`.
+- Existing inbound data already stores attachment metadata and paths.
+- Existing TUI reader already renders markdown/html into readable terminal text.
+- Existing AI summaries are stored in `email_agent_runs` / `email_triage` and preferred in `getMessageBody`.
+
+## Findings
+
+- Branding still says `Emails`/`Open Emails Dashboard` in the web dashboard, while TUI uses `Mailery` in a secondary line under the selected inbox.
+- TUI has `Search`, but not a broader compact filter dialog for address/read/star/label/sort.
+- TUI reader shows attachments inline, but has no first-class attachments button/dialog for copy/open actions.
+- CLI has `mailery inbox attachment <emailId>`, but MCP reports an imprecise CLI equivalent that looks like it expects an attachment id.
+- CLI `mailery inbox open <id>` writes raw body to `/tmp` and shells out with `open || xdg-open`; this needs a safer, testable helper.
+- Sent-email `show` still has its own HTML regex rendering instead of reusing the TUI formatter.
+- Web inbound reader hides neither local metadata well nor renders text/markdown/html with the same polish as the TUI.
+- Web inbound filtering is inline and minimal; it should become a compact filter dialog.
+- Link extraction exists in TUI/CLI/MCP, but click behavior only copies the first link on a rendered line.
+- Managed Groq email agents already exist, but the UI should make the AI summary presentation explicit with `Summary:` and a raw view toggle.
+
+## Goal Chain
+
+### Goal 2: Shared Email Presentation + Safe Actions
+
+- [x] Create shared helpers for readable email body rendering used by CLI/TUI/web API where practical.
+- [x] Add a safe local open/copy helper for URLs and file paths with tests.
+- [x] Normalize attachment display into filename, type, size, location, and action fields.
+- [x] Fix MCP `get_attachment` CLI equivalent.
+- [x] Add focused tests for attachment path/action behavior and CLI rendering.
+
+### Goal 3: Terminal UI Inbox + Reader
+
+- [x] Move `Mailery` above the inbox/address selector in the sidebar.
+- [x] Keep Enter behavior consistent for the active row/dialog item/control.
+- [x] Add an Inbox `Filter` button that opens a compact filter dialog.
+- [x] Add reader `Attachments` button/dialog with copy/open actions.
+- [x] Improve link actions: copy link and optionally open web links in browser.
+- [x] Prefix summary block with `Summary:`.
+- [x] Hide noisy metadata by default and add an explicit raw/details view.
+- [x] Add OpenTUI tests for filters, attachment dialog/actions, summary prefix, and raw/details toggle.
+
+### Goal 4: Web Dashboard + Open Source Page
+
+- [x] Add a simple `mailery.co` open-source landing page route/static page.
+- [x] Rename visible dashboard branding from `Emails`/`Open Emails` to `Mailery`.
+- [x] Improve inbound reader rendering for markdown/html/text and summaries.
+- [x] Add inbound filter dialog.
+- [x] Add attachments and links controls in each web email view.
+- [x] Add REST endpoints if needed for rendered bodies/attachment actions.
+- [x] Add route and dashboard tests, plus browser smoke checks if a dev server is needed.
+
+### Goal 5: AI Email Agent UX
+
+- [x] Add explicit CLI commands for managed email agents if missing from user-facing CLI.
+- [x] Make Groq defaults and settings obvious in CLI/UI.
+- [x] Ensure auto-pull settings can run always-on agents predictably.
+- [x] Keep prompt-injection boundaries: email content is data, not instructions.
+- [x] Add tests for summary source selection and settings behavior.
+
+### Goal 6: Test Hardening + Debloat
+
+- [x] Add CLI contract tests for every command namespace and high-use options.
+- [x] Add JSON-mode smoke coverage for read/list/show/attachment/link/filter commands.
+- [x] Remove duplicate formatter/rendering paths after shared helpers land.
+- [x] Run `bun run build`, `EMAILS_DB_PATH=:memory: bun test`, and `npm pack --dry-run`.
+
+### Goal 7: Release
+
+- [x] Review git diff and ensure no unrelated changes are included.
+- [ ] Commit with a focused message.
+- [ ] Push branch/main as requested.
+- [ ] Publish only after credentials/auth and release gates are clean.
+- [ ] Update local/global install and smoke `mailery --version`, `mailery ui --help`, and representative CLI commands.
+
+## External Guidance Applied
+
+- Attachment handling should avoid trusting MIME types and filenames, limit size, keep files outside public webroot, and require explicit access paths.
+- Untrusted email HTML should use safe sinks/sanitization and avoid raw `innerHTML` where possible.
+- Browser link opening should avoid opener access for untrusted links.
+- Embedded email HTML should be sandboxed and escaped correctly when using `srcdoc`.
+
+## Verification Log
+
+- Goal 2: `EMAILS_DB_PATH=:memory: bun test` passed: 1568 tests, 0 failures.
+- Goal 3: `./node_modules/.bin/tsc --noEmit` passed.
+- Goal 3: `EMAILS_DB_PATH=:memory: bun test src/cli/tui/App.test.tsx` passed: 11 tests, 0 failures.
+- Goal 3: `EMAILS_DB_PATH=:memory: bun test` passed: 1569 tests, 0 failures.
+- Goal 4: `EMAILS_DB_PATH=:memory: bun test src/server/serve.test.ts src/server/routes/rest-parity.test.ts` passed: 28 tests, 0 failures.
+- Goal 4: `./node_modules/.bin/tsc --noEmit` passed.
+- Goal 4: dashboard inline scripts parsed with `new Function(...)`.
+- Goal 4: local smoke server on `http://127.0.0.1:3991` served `/`, `/open-source`, and `/api/inbound?limit=1`; server stopped after verification.
+- Goal 4: `EMAILS_DB_PATH=:memory: bun test` passed: 1571 tests, 0 failures.
+- Goal 5: `EMAILS_DB_PATH=:memory: bun test src/server/routes/rest-parity.test.ts src/lib/email-agents.test.ts src/cli/commands/status.test.ts src/cli/tui/App.test.tsx` passed: 41 tests, 0 failures.
+- Goal 5: `./node_modules/.bin/tsc --noEmit` passed.
+- Goal 5: `EMAILS_DB_PATH=:memory: bun test` passed: 1573 tests, 0 failures.
+- Goal 6: router/startup contract coverage validates all CLI command namespaces, including the `code` to `inbox` alias.
+- Goal 6: `EMAILS_DB_PATH=:memory: bun test src/cli/router.test.ts src/cli/startup-contract.test.ts src/cli/commands/sandbox.test.ts src/cli/tui/format.test.ts src/cli/cli-contract.test.ts src/cli/commands/inbox.test.ts src/cli/commands/inbound.test.ts src/cli/commands/templates.test.ts` passed: 82 tests, 0 failures.
+- Goal 6: process-level JSON smoke coverage now exercises agent defaults, inbox list/read/attachment, links, sent email show, and sandbox list/count.
+- Goal 6: `./node_modules/.bin/tsc --noEmit` passed.
+- Goal 6: `bun run build` passed.
+- Goal 6: `npm pack --dry-run` passed.
+- Goal 6: package dry-run content check confirmed `dashboard/index.html` and `dashboard/open-source.html` are included: 784 packed entries.
+- Goal 6: `EMAILS_DB_PATH=:memory: bun test` passed: 1585 tests, 0 failures, 4780 expect calls across 145 files.
+- Goal 7: release review found npm already had `@hasna/mailery@0.6.46`, so package metadata was bumped to `0.6.47`.
+- Goal 7: `git diff --check` passed.
+- Goal 7: `./node_modules/.bin/tsc --noEmit` passed.
+- Goal 7: `EMAILS_DB_PATH=:memory: bun test` passed: 1585 tests, 0 failures, 4780 expect calls across 145 files.
+- Goal 7: `bun run build` passed after the `0.6.47` version bump.
+- Goal 7: `npm pack --dry-run --silent` passed and produced `hasna-mailery-0.6.47.tgz`.
+- Goal 7: package dry-run content check confirmed `dashboard/index.html` and `dashboard/open-source.html` are included: 784 packed entries.
+- Goal 7: built CLI smoke passed for `mailery --version` (`0.6.47`), `mailery ui --help`, `provider list --json`, and `agent defaults --json`.
+- Goal 7: built server smoke passed for `/` (`Mailery Dashboard`) and `/open-source` (`Mailery Open Source`) on an isolated local DB.
+- Goal 7: npm auth is available as `andreihasna2`; latest registry version before publish was `0.6.46`.

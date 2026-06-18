@@ -38,7 +38,7 @@ import { autoPull } from "../../tui/autopull.js";
 import { extractEmailLinks, type ExtractedEmailLink } from "../../../lib/email-links.js";
 
 export type RouteName = "mailbox" | "reader" | "domains";
-export type DialogName = "commands" | "address" | "search" | "domains" | "settings" | "labels" | "links" | null;
+export type DialogName = "commands" | "address" | "filter" | "search" | "domains" | "settings" | "labels" | "links" | "attachments" | "raw" | null;
 export type ComposeMode = "new" | "reply" | "forward";
 export type ComposeField = "from" | "to" | "subject" | "body";
 
@@ -315,6 +315,7 @@ function createMaileryStore(initialMailbox?: Mailbox) {
         setState("addressSearch", "");
         setState("addresses", loadAddresses());
       }
+      if (dialog === "filter" || dialog === "search") setState("searchDraft", state.search);
       if (dialog === "domains") reloadWorkspace();
       if (dialog === "labels") setState("labels", listLabelSummaries({ limit: 80 }));
       setState("dialog", dialog);
@@ -370,6 +371,18 @@ function createMaileryStore(initialMailbox?: Mailbox) {
     },
     search(value: string) {
       setState({ search: value, searchDraft: value, page: 0, selectedMessageId: null });
+      reload({ preserveSelection: false });
+    },
+    clearFilters() {
+      setState({
+        mailbox: "inbox",
+        activeLabel: null,
+        search: "",
+        searchDraft: "",
+        page: 0,
+        route: "mailbox",
+        selectedMessageId: null,
+      });
       reload({ preserveSelection: false });
     },
     setSearchDraft(value: string) {

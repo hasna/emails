@@ -1,9 +1,10 @@
 import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
-import { execSync } from "node:child_process";
 import { listSandboxEmailSummaries, getSandboxEmail, clearSandboxEmails, getSandboxCount } from "../../db/sandbox.js";
 import { getDatabase, resolvePartialId } from "../../db/database.js";
 import { confirmDestructiveAction, handleError, parseCliPage, resolveId } from "../utils.js";
+import { readableMessageText, renderReadableEmailDocument } from "../tui/format.js";
+import { openLocalTarget } from "../../lib/local-actions.js";
 
 export function registerSandboxCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   const sandboxCmd = program.command("sandbox").description("Inspect emails captured by sandbox providers");
@@ -61,21 +62,10 @@ export function registerSandboxCommands(program: Command, output: (data: unknown
         console.log(`  ${chalk.dim("Captured:")} ${email!.created_at}`);
         console.log(`  ${chalk.dim("Provider:")} ${email!.provider_id.slice(0, 8)}`);
 
-        if (email!.text_body) {
-          console.log(chalk.bold("\n  Body (text):"));
-          console.log(email!.text_body.split("\n").map((l: string) => `    ${l}`).join("\n"));
-        } else if (email!.html) {
-          console.log(chalk.bold("\n  Body (HTML rendered as text):"));
-          const textFromHtml = email!.html
-            .replace(/<br\s*\/?>/gi, "\n")
-            .replace(/<\/p>/gi, "\n")
-            .replace(/<[^>]+>/g, "")
-            .replace(/&nbsp;/g, " ")
-            .replace(/&amp;/g, "&")
-            .replace(/&lt;/g, "<")
-            .replace(/&gt;/g, ">")
-            .trim();
-          console.log(textFromHtml.split("\n").map((l: string) => `    ${l}`).join("\n"));
+        const body = readableMessageText(email!.text_body, email!.html);
+        if (body) {
+          console.log(chalk.bold("\n  Body:"));
+          console.log(body.split("\n").map((l: string) => `    ${l}`).join("\n"));
         }
         console.log();
       } catch (e) {
@@ -93,15 +83,26 @@ export function registerSandboxCommands(program: Command, output: (data: unknown
         if (!resolvedId) handleError(new Error(`Sandbox email not found: ${id}`));
         const email = getSandboxEmail(resolvedId!, db);
         if (!email) handleError(new Error(`Sandbox email not found: ${id}`));
-        if (!email!.html) handleError(new Error("This sandbox email has no HTML content."));
+        if (!email!.html && !email!.text_body) handleError(new Error("This sandbox email has no body content."));
 
         const { writeFileSync } = await import("node:fs");
         const { tmpdir } = await import("node:os");
         const { join: pathJoin } = await import("node:path");
-        const tmpFile = pathJoin(tmpdir(), `sandbox-${resolvedId!.slice(0, 8)}.html`);
-        writeFileSync(tmpFile, email!.html!);
-        execSync(`open "${tmpFile}"`);
-        console.log(chalk.green(`✓ Opened in browser: ${tmpFile}`));
+        const tmpFile = pathJoin(tmpdir(), `mailery-sandbox-${resolvedId!.slice(0, 8)}.html`);
+        writeFileSync(tmpFile, renderReadableEmailDocument({
+          subject: email!.subject,
+          from: email!.from_address,
+          to: email!.to_addresses,
+          date: email!.created_at,
+          text: email!.text_body,
+          html: email!.html,
+        }), "utf8");
+        const opened = openLocalTarget(tmpFile);
+        const result = { path: tmpFile, file_url: opened.target?.file_url, opened: opened.ok, method: opened.method, error: opened.error };
+        const formatted = opened.ok
+          ? chalk.green(`Opened readable sandbox email view: ${tmpFile}`)
+          : `${chalk.yellow(`Saved readable sandbox email view: ${tmpFile}`)}\n${chalk.dim(opened.error ?? "Open command unavailable.")}`;
+        output(result, formatted);
       } catch (e) {
         handleError(e);
       }

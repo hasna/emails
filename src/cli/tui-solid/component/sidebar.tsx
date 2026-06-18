@@ -51,10 +51,8 @@ export function Sidebar() {
           mailery.actions.openDialog("address");
         }}
       >
-        <text fg={theme.text} attributes={TextAttributes.BOLD}>
-          {mailery.selectedAddress().label}
-        </text>
-        <text fg={theme.textMuted}>Mailery</text>
+        <text fg={theme.text} attributes={TextAttributes.BOLD}>Mailery</text>
+        <text fg={theme.textMuted}>{mailery.selectedAddress().label}</text>
       </box>
 
       <SectionHeader label={open().mail ? "Mail" : "Mail +"} onPress={() => setOpen((value) => ({ ...value, mail: !value.mail }))} />

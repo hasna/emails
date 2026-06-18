@@ -227,6 +227,52 @@ export function readableMessageText(text: string | null | undefined, html: strin
   return rendered || "(no text content)";
 }
 
+export interface ReadableEmailDocumentInput {
+  subject: string | null | undefined;
+  from: string | null | undefined;
+  to: string | string[] | null | undefined;
+  date: string | null | undefined;
+  text?: string | null;
+  html?: string | null;
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+export function renderReadableEmailDocument(email: ReadableEmailDocumentInput): string {
+  const subject = email.subject?.trim() || "(no subject)";
+  const to = Array.isArray(email.to) ? email.to.join(", ") : email.to ?? "";
+  const body = readableMessageText(email.text, email.html);
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${escapeHtml(subject)}</title>
+  <style>
+    body { color: #111827; font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 32px auto; max-width: 840px; padding: 0 20px; }
+    h1 { font-size: 22px; line-height: 1.2; margin: 0 0 16px; }
+    .meta { color: #6b7280; font-size: 13px; margin-bottom: 24px; }
+    .body { white-space: pre-wrap; word-break: break-word; }
+  </style>
+</head>
+<body>
+  <h1>${escapeHtml(subject)}</h1>
+  <div class="meta">
+    <div><strong>From:</strong> ${escapeHtml(email.from || "-")}</div>
+    <div><strong>To:</strong> ${escapeHtml(to || "-")}</div>
+    <div><strong>Date:</strong> ${escapeHtml(email.date || "-")}</div>
+  </div>
+  <main class="body">${escapeHtml(body)}</main>
+</body>
+</html>`;
+}
+
 function classifyBodyLine(value: string): RenderedBodyLine["kind"] {
   const line = value.trimStart();
   if (!line) return "body";

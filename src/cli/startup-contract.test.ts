@@ -4,6 +4,7 @@ import { join } from "node:path";
 
 const commandsDir = join(import.meta.dir, "commands");
 const cliEntry = join(import.meta.dir, "index.tsx");
+const routerFile = join(import.meta.dir, "router.ts");
 
 const heavyRuntimeImports = [
   "@opentui/core",
@@ -43,20 +44,22 @@ function commandFiles(): string[] {
 describe("CLI startup contract", () => {
   it("keeps command modules out of the CLI entrypoint static import graph", () => {
     const source = readFileSync(cliEntry, "utf8");
+    const routerSource = readFileSync(routerFile, "utf8");
     const staticImport = /^\s*import\s+(?!type\b)[\s\S]*?\sfrom\s+["']([^"']+)["'];/gm;
     const offenders = [...source.matchAll(staticImport)]
       .map((match) => match[1] ?? "")
       .filter((specifier) => specifier.startsWith("./commands/") || specifier === "./utils.js" || specifier === "../lib/logger.js");
 
     expect(offenders).toEqual([]);
-    expect(source).toContain("shouldPrintVersionEarly");
-    expect(source).toContain("commandModulesFor");
+    expect(source).toContain('from "./router.js"');
     expect(source).toContain("registerCommandsForArgs");
-    expect(source).toContain('case "provider": return ["provider", "sync"]');
-    expect(source).toContain('case "storage": return ["storage"]');
-    expect(source).toContain("routeRootPromptArgs");
     expect(source).toContain("await Promise.all");
     expect(source).toContain("await program.parseAsync([process.argv[0]");
+    expect(routerSource).toContain("shouldPrintVersionEarly");
+    expect(routerSource).toContain("commandModulesFor");
+    expect(routerSource).toContain('case "provider": return ["provider", "sync"]');
+    expect(routerSource).toContain('case "storage": return ["storage"]');
+    expect(routerSource).toContain("routeRootPromptArgs");
   });
 
   it("keeps heavy command dependencies behind action-local dynamic imports", () => {

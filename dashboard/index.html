@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Open Emails Dashboard</title>
+  <title>Mailery Dashboard</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -63,10 +63,28 @@
     .message-row .subject { color: #f5f7f3; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .message-row .to { color: #b7c2ba; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .inbox-reader { padding: 18px; overflow: auto; }
-    .inbox-reader h3 { font-size: 15px; margin-bottom: 10px; color: #f5f7f3; }
-    .inbox-reader .reader-meta { color: #9aa89d; font-size: 12px; line-height: 1.7; margin-bottom: 16px; }
-    .inbox-reader pre { white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; line-height: 1.55; color: #dce5df; }
-    @media (max-width: 860px) { .main { padding: 14px; } .inbox-shell { grid-template-columns: 1fr; } .inbox-list, .inbox-reader { min-height: auto; } }
+    .inbox-reader h3 { font-size: 17px; line-height: 1.3; margin-bottom: 6px; color: #f5f7f3; }
+    .reader-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+    .reader-from { color: #b7c2ba; font-size: 13px; line-height: 1.55; margin-bottom: 12px; }
+    .reader-summary { background: #14231e; border: 1px solid #245244; border-radius: 8px; padding: 12px; color: #dff7ed; font-size: 13px; line-height: 1.55; margin-bottom: 14px; }
+    .reader-actions-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 14px; }
+    .reader-panel { border: 1px solid #303a34; border-radius: 8px; background: #151a17; padding: 12px; margin-bottom: 14px; }
+    .reader-panel.hidden, .raw-panel.hidden { display: none; }
+    .reader-panel h4 { font-size: 12px; color: #9aa89d; text-transform: uppercase; letter-spacing: .4px; margin-bottom: 10px; }
+    .attachment-row, .link-row { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 10px; align-items: center; padding: 8px 0; border-top: 1px solid #253029; }
+    .attachment-row:first-of-type, .link-row:first-of-type { border-top: 0; }
+    .attachment-name, .link-title { color: #f5f7f3; font-size: 13px; overflow-wrap: anywhere; }
+    .attachment-meta, .link-url { color: #9aa89d; font-size: 12px; overflow-wrap: anywhere; margin-top: 2px; }
+    .reader-body { color: #dce5df; font-size: 14px; line-height: 1.62; }
+    .reader-body p { margin: 0 0 10px; }
+    .reader-body h4 { color: #f5f7f3; font-size: 15px; margin: 16px 0 8px; }
+    .reader-body blockquote { border-left: 3px solid #447568; margin: 10px 0; padding: 2px 0 2px 12px; color: #b7c2ba; }
+    .reader-body code { background: #111412; border: 1px solid #303a34; border-radius: 4px; padding: 1px 4px; color: #e9d28a; }
+    .reader-body a, .reader-panel a { color: #8bd3ff; text-decoration: none; }
+    .reader-body a:hover, .reader-panel a:hover { text-decoration: underline; }
+    .raw-panel pre { white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.55; color: #dce5df; background: #0f172a; border: 1px solid #334155; border-radius: 8px; padding: 12px; max-height: 420px; overflow: auto; }
+    .filter-summary { color: #9aa89d; font-size: 13px; }
+    @media (max-width: 860px) { .main { padding: 14px; } .inbox-shell { grid-template-columns: 1fr; } .inbox-list, .inbox-reader { min-height: auto; } .reader-head { flex-direction: column; } }
     .pagination { display: flex; gap: 8px; align-items: center; margin-top: 14px; font-size: 13px; color: #94a3b8; }
     .pagination button { background: #1e293b; border: 1px solid #334155; color: #e2e8f0; padding: 5px 12px; border-radius: 5px; cursor: pointer; font-size: 12px; }
     .pagination button:disabled { opacity: .4; cursor: not-allowed; }
@@ -94,7 +112,8 @@
 <body>
 
 <nav>
-  <h1>Emails</h1>
+  <h1>Mailery</h1>
+  <button onclick="location.href='/open-source'">Open Source</button>
   <button class="active" onclick="showPage('overview',this)">Overview</button>
   <button onclick="showPage('providers',this)">Providers</button>
   <button onclick="showPage('domains',this)">Domains</button>
@@ -237,10 +256,10 @@
   <!-- INBOUND -->
   <div id="page-inbound" class="page">
     <h2>Inbound</h2>
-    <div class="toolbar">
-      <select id="inbound-address" onchange="loadInbound()"><option value="">All addresses</option></select>
-      <input type="text" id="inbound-search" placeholder="Search local inbound..." oninput="loadInbound()" />
+    <div class="toolbar inbox-toolbar">
+      <button class="btn btn-secondary" onclick="openInboundFilter()">Filter</button>
       <button class="btn btn-primary btn-sm" onclick="triggerSync()">&#8635; Sync</button>
+      <span class="filter-summary" id="inbound-filter-summary">All inbound</span>
     </div>
     <div id="error-inbound"></div>
     <div class="inbox-shell">
@@ -358,6 +377,27 @@
   </div>
 </div>
 
+<!-- Inbound Filter Modal -->
+<div class="modal-bg" id="modal-inbound-filter">
+  <div class="modal">
+    <h3>Filter Inbound</h3>
+    <label>Inbox</label><select id="inbound-filter-address"><option value="">All addresses</option></select>
+    <label>Status</label>
+    <select id="inbound-filter-state">
+      <option value="">All messages</option>
+      <option value="unread">Unread</option>
+      <option value="read">Read</option>
+      <option value="archived">Archived</option>
+    </select>
+    <label>Search</label><input id="inbound-filter-search" placeholder="Subject, sender, recipient" onkeydown="if(event.key==='Enter') applyInboundFilter()" />
+    <div class="actions">
+      <button class="btn btn-secondary" onclick="clearInboundFilter()">Clear</button>
+      <button class="btn btn-secondary" onclick="closeModal('modal-inbound-filter')">Cancel</button>
+      <button class="btn btn-primary" onclick="applyInboundFilter()">Apply Filter</button>
+    </div>
+  </div>
+</div>
+
 <!-- Template Modal -->
 <div class="modal-bg" id="modal-template">
   <div class="modal modal-wide">
@@ -392,6 +432,9 @@ let autoRefreshInterval = null;
 let currentPage = 'overview';
 let inboundCache = [];
 let inboundSelectedId = null;
+let inboundDetailCache = {};
+let inboundDetailToken = 0;
+let inboundFilters = { address: '', search: '', state: '' };
 
 async function api(path, opts = {}) {
   const res = await fetch(API + path, opts);
@@ -449,6 +492,7 @@ function toggleAutoRefresh(cb) {
 function openModal(id) {
   document.getElementById(id).classList.add('open');
   if (id === 'modal-domain' || id === 'modal-address') loadProviderSelects();
+  if (id === 'modal-inbound-filter') loadInboundAddressOptions();
 }
 
 function closeModal(id) {
@@ -908,34 +952,82 @@ async function removeTemplate(id, name) {
 
 // ─── INBOUND ─────────────────────────────────────────────────────────────────
 async function loadInboundAddressOptions() {
-  const select = document.getElementById('inbound-address');
-  if (!select) return;
-  const current = select.value;
+  const selects = ['inbound-filter-address'].map(id => document.getElementById(id)).filter(Boolean);
+  if (!selects.length) return;
+  const current = Object.fromEntries(selects.map(select => [select.id, select.value]));
   const addresses = await api('/api/addresses').catch(() => []);
-  select.innerHTML = '<option value="">All addresses</option>' + addresses
+  const options = '<option value="">All addresses</option>' + addresses
     .map(a => `<option value="${escapeHtml(a.email)}">${escapeHtml(a.email)}</option>`)
     .join('');
-  select.value = current;
+  selects.forEach(select => {
+    select.innerHTML = options;
+    select.value = current[select.id] || inboundFilters.address || '';
+  });
+}
+
+function openInboundFilter() {
+  loadInboundAddressOptions();
+  document.getElementById('inbound-filter-address').value = inboundFilters.address;
+  document.getElementById('inbound-filter-state').value = inboundFilters.state;
+  document.getElementById('inbound-filter-search').value = inboundFilters.search;
+  openModal('modal-inbound-filter');
+}
+
+function applyInboundFilter() {
+  inboundFilters = {
+    address: document.getElementById('inbound-filter-address')?.value || '',
+    state: document.getElementById('inbound-filter-state')?.value || '',
+    search: (document.getElementById('inbound-filter-search')?.value || '').trim(),
+  };
+  inboundSelectedId = null;
+  closeModal('modal-inbound-filter');
+  loadInbound();
+}
+
+function clearInboundFilter() {
+  inboundFilters = { address: '', search: '', state: '' };
+  ['inbound-filter-address', 'inbound-filter-state', 'inbound-filter-search'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.value = '';
+  });
+  inboundSelectedId = null;
+  closeModal('modal-inbound-filter');
+  loadInbound();
+}
+
+function updateInboundFilterSummary() {
+  const parts = [];
+  if (inboundFilters.address) parts.push(inboundFilters.address);
+  if (inboundFilters.state) parts.push(inboundFilters.state[0].toUpperCase() + inboundFilters.state.slice(1));
+  if (inboundFilters.search) parts.push(`Search "${inboundFilters.search}"`);
+  const el = document.getElementById('inbound-filter-summary');
+  if (el) el.textContent = parts.length ? parts.join(' · ') : 'All inbound';
 }
 
 async function loadInbound() {
   try {
     await loadInboundAddressOptions();
-    const selectedAddress = document.getElementById('inbound-address')?.value || '';
-    const query = (document.getElementById('inbound-search')?.value || '').trim().toLowerCase();
     const params = new URLSearchParams({ limit: '75' });
-    if (selectedAddress) params.set('to', selectedAddress);
+    if (inboundFilters.address) params.set('to', inboundFilters.address);
+    if (inboundFilters.state === 'unread') params.set('unread', 'true');
+    if (inboundFilters.state === 'read') params.set('read', 'true');
+    if (inboundFilters.state === 'archived') params.set('archived', 'true');
     let emails = await api('/api/inbound?' + params);
+    const query = inboundFilters.search.trim().toLowerCase();
     if (query) {
-      emails = emails.filter(e =>
-        String(e.subject || '').toLowerCase().includes(query) ||
-        String(e.from_address || '').toLowerCase().includes(query) ||
-        String(e.text_body || '').toLowerCase().includes(query));
+      emails = emails.filter(e => [
+        e.subject,
+        e.from_address,
+        (e.to_addresses || []).join(' '),
+        (e.cc_addresses || []).join(' '),
+      ].some(value => String(value || '').toLowerCase().includes(query)));
     }
     inboundCache = emails;
+    updateInboundFilterSummary();
     if (!inboundSelectedId || !emails.some(e => e.id === inboundSelectedId)) inboundSelectedId = emails[0]?.id || null;
     renderInboundList();
     renderInboundReader();
+    if (inboundSelectedId && !inboundDetailCache[inboundSelectedId]) loadInboundDetail(inboundSelectedId);
   } catch(e) {
     showError('error-inbound', e.message);
   }
@@ -959,25 +1051,218 @@ function selectInbound(id) {
   inboundSelectedId = id;
   renderInboundList();
   renderInboundReader();
+  if (!inboundDetailCache[id]) loadInboundDetail(id);
+}
+
+async function loadInboundDetail(id) {
+  const token = ++inboundDetailToken;
+  try {
+    const detail = await api('/api/inbound/' + encodeURIComponent(id));
+    inboundDetailCache[id] = detail;
+    if (token >= inboundDetailToken && inboundSelectedId === id) renderInboundReader();
+  } catch(e) {
+    showError('error-inbound', e.message);
+  }
 }
 
 function renderInboundReader() {
   const reader = document.getElementById('inbound-reader');
-  const e = inboundCache.find(m => m.id === inboundSelectedId);
-  if (!e) {
+  const summary = inboundCache.find(m => m.id === inboundSelectedId);
+  if (!summary) {
     reader.innerHTML = '<div class="empty">Select a message.</div>';
     return;
   }
-  const body = e.text_body || String(e.html_body || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() || '(no body)';
+  const e = inboundDetailCache[summary.id];
+  if (!e) {
+    reader.innerHTML = `<h3>${escapeHtml(summary.subject || '(no subject)')}</h3><div class="loading">Loading message...</div>`;
+    return;
+  }
+
+  const bodyHtml = renderEmailBody(e.text_body, e.html_body);
+  const links = extractEmailLinks(e.text_body, e.html_body);
+  const attachments = mergeInboundAttachments(e);
+  const summaryHtml = e.summary ? `<div class="reader-summary"><strong>Summary:</strong> ${escapeHtml(e.summary)}</div>` : '';
+  const attachmentButton = attachments.length ? `<button class="btn btn-secondary btn-sm" onclick="toggleReaderPanel('inbound-attachments-panel')">Attachments (${attachments.length})</button>` : '';
+  const linksButton = links.length ? `<button class="btn btn-secondary btn-sm" onclick="toggleReaderPanel('inbound-links-panel')">Links (${links.length})</button>` : '';
+
   reader.innerHTML = `
-    <h3>${escapeHtml(e.subject || '(no subject)')}</h3>
-    <div class="reader-meta">
-      <div><strong>From</strong> ${escapeHtml(e.from_address || '-')}</div>
-      <div><strong>To</strong> ${escapeHtml((e.to_addresses || []).join(', ') || '-')}</div>
-      <div><strong>Received</strong> ${fmt(e.received_at || e.created_at)}</div>
-      <div><strong>ID</strong> <span class="id">${e.id}</span></div>
+    <div class="reader-head">
+      <div>
+        <h3>${escapeHtml(e.subject || '(no subject)')}</h3>
+        <div class="reader-from">${escapeHtml(e.from_address || '-')} to ${escapeHtml((e.to_addresses || []).join(', ') || '-')}<br>${fmt(e.received_at || e.created_at)}</div>
+      </div>
+      <button class="btn btn-secondary btn-sm" onclick="toggleReaderPanel('inbound-raw-panel')">Raw</button>
     </div>
-    <pre>${escapeHtml(body)}</pre>`;
+    ${summaryHtml}
+    <div class="reader-actions-row">${attachmentButton}${linksButton}</div>
+    ${renderAttachmentsPanel(attachments)}
+    ${renderLinksPanel(links)}
+    <div class="reader-body">${bodyHtml}</div>
+    <div class="raw-panel hidden" id="inbound-raw-panel"><pre>${escapeHtml(rawInboundText(e))}</pre></div>`;
+}
+
+function toggleReaderPanel(id) {
+  const el = document.getElementById(id);
+  if (el) el.classList.toggle('hidden');
+}
+
+function copyDashboardText(value) {
+  if (navigator.clipboard?.writeText) navigator.clipboard.writeText(value).catch(() => {});
+}
+
+function readableEmailText(text, html) {
+  const plain = String(text || '').trim();
+  if (plain) return looksLikeHtml(plain) ? htmlToReadableText(plain) : plain;
+  const rendered = htmlToReadableText(String(html || ''));
+  return rendered || '(no text content)';
+}
+
+function looksLikeHtml(value) {
+  return /<\/?(?:html|body|table|div|p|span|br|a|style|head)\b/i.test(value);
+}
+
+function htmlToReadableText(html) {
+  return String(html || '')
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '')
+    .replace(/<a\b[^>]*href=(["'])(.*?)\1[^>]*>([\s\S]*?)<\/a>/gi, (_m, _q, href, label) => {
+      const text = label.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+      return text && text !== href ? `${text} (${href})` : href;
+    })
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|div|section|article|tr|table|blockquote|h[1-6])>/gi, '\n')
+    .replace(/<li\b[^>]*>/gi, '\n- ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function renderEmailBody(text, html) {
+  const readable = readableEmailText(text, html);
+  const lines = readable.replace(/\r/g, '').split('\n');
+  let out = '';
+  for (const raw of lines) {
+    const line = raw.trimEnd();
+    if (!line.trim()) { out += '<p></p>'; continue; }
+    const heading = line.match(/^#{1,4}\s+(.+)/);
+    if (heading) { out += `<h4>${renderInlineText(heading[1])}</h4>`; continue; }
+    if (/^>\s+/.test(line)) { out += `<blockquote>${renderInlineText(line.replace(/^>\s+/, ''))}</blockquote>`; continue; }
+    if (/^([-*+] |\d+\.\s+)/.test(line)) { out += `<p>${renderInlineText(line)}</p>`; continue; }
+    out += `<p>${renderInlineText(line)}</p>`;
+  }
+  return out || '<p>(no text content)</p>';
+}
+
+function renderInlineText(value) {
+  let html = escapeHtml(value);
+  const markdownLinks = [];
+  html = html.replace(/\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)/gi, (_m, label, url) => {
+    const index = markdownLinks.push({ label, url }) - 1;
+    return `__MAILERY_LINK_${index}__`;
+  });
+  html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+  html = html.replace(/(^|\s)(https?:\/\/[^\s<]+)/gi, (_m, lead, url) => `${lead}<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(url)}</a>`);
+  html = html.replace(/__MAILERY_LINK_(\d+)__/g, (_m, index) => {
+    const link = markdownLinks[Number(index)];
+    return link ? `<a href="${escapeHtml(link.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(link.label)}</a>` : '';
+  });
+  return html;
+}
+
+function extractEmailLinks(text, html) {
+  const found = new Map();
+  const add = (url, label) => {
+    const normalized = normalizeWebUrl(url);
+    if (normalized && !found.has(normalized)) found.set(normalized, label || normalized);
+  };
+  String(text || '').replace(/https?:\/\/[^\s)]+/gi, url => { add(url, url); return url; });
+  String(html || '').replace(/<a\b[^>]*href=(["'])(.*?)\1[^>]*>([\s\S]*?)<\/a>/gi, (_m, _q, href, label) => {
+    add(href, label.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim());
+    return _m;
+  });
+  return [...found.entries()].map(([url, label]) => ({ url, label }));
+}
+
+function normalizeWebUrl(value) {
+  try {
+    const parsed = new URL(String(value || '').trim());
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+    return parsed.toString();
+  } catch { return null; }
+}
+
+function mergeInboundAttachments(email) {
+  const paths = new Map((email.attachment_paths || []).map(path => [path.filename, path]));
+  const rows = (email.attachments || []).map(meta => {
+    const path = paths.get(meta.filename) || {};
+    const location = path.local_path || path.s3_url || '';
+    return { ...meta, location, file_url: path.local_path ? localFileUrl(path.local_path) : '' };
+  });
+  for (const path of (email.attachment_paths || [])) {
+    if (!rows.some(row => row.filename === path.filename)) {
+      rows.push({ filename: path.filename, content_type: path.content_type || 'application/octet-stream', size: path.size || 0, location: path.local_path || path.s3_url || '', file_url: path.local_path ? localFileUrl(path.local_path) : '' });
+    }
+  }
+  return rows;
+}
+
+function localFileUrl(path) {
+  if (!path) return '';
+  const prefix = path.startsWith('/') ? 'file://' : 'file:///';
+  return prefix + path.split('/').map(encodeURIComponent).join('/').replace(/%3A/g, ':');
+}
+
+function formatBytes(value) {
+  const size = Number(value || 0);
+  if (!Number.isFinite(size) || size <= 0) return '0 B';
+  if (size < 1024) return Math.round(size) + ' B';
+  if (size < 1024 * 1024) return Math.round(size / 1024) + ' KB';
+  return (size / 1024 / 1024).toFixed(size >= 10 * 1024 * 1024 ? 0 : 1) + ' MB';
+}
+
+function renderAttachmentsPanel(attachments) {
+  if (!attachments.length) return '';
+  return `<div class="reader-panel hidden" id="inbound-attachments-panel"><h4>Attachments</h4>${attachments.map(attachment => {
+    const link = attachment.file_url || attachment.location || '';
+    const action = link ? `<div><a class="btn btn-secondary btn-sm" href="${escapeHtml(link)}" target="_blank" rel="noopener noreferrer">Open</a> <button class="btn btn-secondary btn-sm" onclick="copyDashboardText('${escapeHtml(escapeJs(link))}')">Copy</button></div>` : '<span class="attachment-meta">No local link</span>';
+    return `<div class="attachment-row"><div><div class="attachment-name">${escapeHtml(attachment.filename || 'attachment')}</div><div class="attachment-meta">${escapeHtml(attachment.content_type || 'application/octet-stream')} · ${formatBytes(attachment.size)}${link ? ' · ' + escapeHtml(link) : ''}</div></div>${action}</div>`;
+  }).join('')}</div>`;
+}
+
+function renderLinksPanel(links) {
+  if (!links.length) return '';
+  return `<div class="reader-panel hidden" id="inbound-links-panel"><h4>Links</h4>${links.map(link => `<div class="link-row"><div><div class="link-title">${escapeHtml(link.label)}</div><div class="link-url">${escapeHtml(link.url)}</div></div><div><a class="btn btn-secondary btn-sm" href="${escapeHtml(link.url)}" target="_blank" rel="noopener noreferrer">Open</a> <button class="btn btn-secondary btn-sm" onclick="copyDashboardText('${escapeHtml(escapeJs(link.url))}')">Copy</button></div></div>`).join('')}</div>`;
+}
+
+function rawInboundText(e) {
+  return [
+    `Subject: ${e.subject || '(no subject)'}`,
+    `From: ${e.from_address || '-'}`,
+    `To: ${(e.to_addresses || []).join(', ') || '-'}`,
+    `Cc: ${(e.cc_addresses || []).join(', ') || '-'}`,
+    `Received: ${e.received_at || e.created_at || '-'}`,
+    `ID: ${e.id}`,
+    `Message-ID: ${e.message_id || '-'}`,
+    `Flags: ${[e.is_read ? 'read' : 'unread', e.is_starred ? 'starred' : '', e.is_archived ? 'archived' : ''].filter(Boolean).join(', ') || 'none'}`,
+    '',
+    'Text body:',
+    e.text_body || '',
+    '',
+    'HTML body:',
+    e.html_body || '',
+  ].join('\n');
+}
+
+function escapeJs(value) {
+  return String(value).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\n/g, '\\n').replace(/\r/g, '');
 }
 
 // ─── SEQUENCES ───────────────────────────────────────────────────────────────

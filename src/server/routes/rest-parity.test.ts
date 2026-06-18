@@ -3,6 +3,7 @@ import { createAddress } from "../../db/addresses.js";
 import { suppressContact, upsertContact } from "../../db/contacts.js";
 import { closeDatabase, getDatabase, resetDatabase } from "../../db/database.js";
 import { createDomain } from "../../db/domains.js";
+import { saveEmailAgentRun } from "../../db/email-agents.js";
 import { createEmail } from "../../db/emails.js";
 import { createEvent } from "../../db/events.js";
 import { addMember, createGroup } from "../../db/groups.js";
@@ -50,6 +51,47 @@ afterEach(() => {
 });
 
 describe("emails serve REST parity smoke", () => {
+  it("prefers managed agent summaries over legacy triage summaries for inbound detail", async () => {
+    const provider = createProvider({ name: "sandbox", type: "sandbox", active: true });
+    const inboundEmail = storeInboundEmail({
+      provider_id: provider.id,
+      message_id: "<agent-summary@example.com>",
+      from_address: "sender@example.com",
+      to_addresses: ["ops@example.com"],
+      cc_addresses: [],
+      subject: "Agent summary source",
+      text_body: "body",
+      html_body: null,
+      attachments: [],
+      headers: {},
+      raw_size: 4,
+      received_at: "2026-02-03T00:00:00.000Z",
+    });
+    saveTriage({
+      inbound_email_id: inboundEmail.id,
+      label: "fyi",
+      priority: 1,
+      summary: "Legacy triage summary",
+      confidence: 0.8,
+    });
+    saveEmailAgentRun({
+      agent_key: "categorizer",
+      inbound_email_id: inboundEmail.id,
+      provider: "groq",
+      model: "llama-3.3-70b-versatile",
+      status: "ok",
+      category: "fyi",
+      labels: ["fyi"],
+      summary: "Managed agent summary",
+      output: {},
+      started_at: "2026-02-03T00:00:01.000Z",
+      completed_at: "2026-02-03T00:00:02.000Z",
+    });
+
+    const detail = await json<{ summary: string | null }>(`/api/inbound/${inboundEmail.id}`);
+    expect(detail.summary).toBe("Managed agent summary");
+  });
+
   it("serves core dashboard APIs without leaking provider credentials", async () => {
     const provider = createProvider({
       name: "sandbox",
@@ -72,7 +114,7 @@ describe("emails serve REST parity smoke", () => {
       recipient: "user@example.com",
       occurred_at: "2026-02-01T00:00:00.000Z",
     });
-    storeInboundEmail({
+    const inboundEmail = storeInboundEmail({
       provider_id: provider.id,
       message_id: "<inbound@example.com>",
       from_address: "user@example.com",
@@ -85,6 +127,13 @@ describe("emails serve REST parity smoke", () => {
       headers: {},
       raw_size: 10,
       received_at: "2026-02-02T00:00:00.000Z",
+    });
+    saveTriage({
+      inbound_email_id: inboundEmail.id,
+      label: "fyi",
+      priority: 2,
+      summary: "REST inbound summary",
+      confidence: 0.8,
     });
     storeSandboxEmail({
       provider_id: provider.id,
@@ -118,6 +167,9 @@ describe("emails serve REST parity smoke", () => {
 
     const inbound = await json<Array<{ subject: string }>>("/api/inbound?to=ops@example.com");
     expect(inbound[0]?.subject).toBe("Inbound smoke");
+    const inboundDetail = await json<{ summary: string | null; text_body: string | null }>(`/api/inbound/${inboundEmail.id}`);
+    expect(inboundDetail.summary).toBe("REST inbound summary");
+    expect(inboundDetail.text_body).toBe("reply");
 
     const events = await json<Array<{ type: string }>>(`/api/events?provider_id=${provider.id}&type=delivered`);
     expect(events[0]?.type).toBe("delivered");

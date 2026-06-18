@@ -7,13 +7,6 @@ import { formatDate, renderReadableBodyLines } from "../../tui/format.js";
 import { copyTextToClipboardAsync } from "../../tui/clipboard.js";
 import { useToast } from "../context/toast.js";
 
-function formatAttachmentSize(size: number): string {
-  if (!Number.isFinite(size) || size <= 0) return "0 B";
-  if (size < 1024) return `${Math.round(size)} B`;
-  if (size < 1024 * 1024) return `${Math.round(size / 1024)} KB`;
-  return `${(size / 1024 / 1024).toFixed(size >= 10 * 1024 * 1024 ? 0 : 1)} MB`;
-}
-
 export function ReaderRoute() {
   const theme = useTheme();
   const mailery = useMailery();
@@ -54,26 +47,9 @@ export function ReaderRoute() {
             </box>
 
             <Show when={body().attachments.length > 0}>
-              <box
-                height={Math.min(8, body().attachments.length + 4)}
-                marginTop={1}
-                marginBottom={1}
-                paddingLeft={2}
-                paddingRight={2}
-                paddingTop={1}
-                paddingBottom={1}
-                backgroundColor={theme.backgroundElement}
-                flexDirection="column"
-              >
-                <text fg={theme.text} attributes={TextAttributes.BOLD}>Attachments</text>
-                <For each={body().attachments}>
-                  {(attachment) => (
-                    <text fg={theme.textMuted} wrapMode="word" width="100%">
-                      {attachment.filename} - {attachment.content_type} - {formatAttachmentSize(attachment.size)}{attachment.location ? ` - ${attachment.location}` : ""}
-                    </text>
-                  )}
-                </For>
-              </box>
+              <text fg={theme.textMuted}>
+                {body().attachments.length} attachment{body().attachments.length === 1 ? "" : "s"} available
+              </text>
             </Show>
 
             <scrollbox flexGrow={1} width="100%" paddingTop={1}>
@@ -118,7 +94,7 @@ export function ReaderRoute() {
                   paddingBottom={1}
                   backgroundColor={theme.backgroundElement}
                 >
-                  <text fg={theme.markdownText} wrapMode="word" width="100%">{body().summary}</text>
+                  <text fg={theme.markdownText} wrapMode="word" width="100%">Summary: {body().summary}</text>
                 </box>
               </Show>
             </scrollbox>
@@ -126,7 +102,11 @@ export function ReaderRoute() {
             <box height={2} flexDirection="row" columnGap={1}>
               <Button label="Reply" onPress={() => mailery.selectedMessage() && mailery.actions.startCompose("reply", mailery.selectedMessage()!)} />
               <Button label="Forward" onPress={() => mailery.selectedMessage() && mailery.actions.startCompose("forward", mailery.selectedMessage()!)} />
+              <Show when={body().attachments.length > 0}>
+                <Button label="Attachments" onPress={() => mailery.actions.openDialog("attachments")} />
+              </Show>
               <Button label="Links" onPress={() => mailery.actions.openDialog("links")} />
+              <Button label="Raw" onPress={() => mailery.actions.openDialog("raw")} />
               <Button label="Label" onPress={() => mailery.actions.openDialog("labels")} />
             </box>
           </>

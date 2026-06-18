@@ -958,6 +958,35 @@ describe("inbox code", () => {
   });
 });
 
+describe("inbox read", () => {
+  it("renders markdown-ish bodies as readable text", async () => {
+    const { db, providerId } = setupDb();
+    const email = storeInboundEmail({
+      provider_id: providerId,
+      message_id: "read-rendered",
+      in_reply_to_email_id: null,
+      from_address: "sender@example.com",
+      to_addresses: ["me@example.com"],
+      cc_addresses: [],
+      subject: "Rendered body",
+      text_body: "# Heading\n\n- **hello**\n- [docs](https://example.com/start)",
+      html_body: null,
+      attachments: [],
+      attachment_paths: [],
+      headers: {},
+      raw_size: 100,
+      received_at: "2026-06-04T11:29:09.000Z",
+    }, db);
+
+    const { out } = await runInboxCommand(["inbox", "read", email.id, "--keep-unread"]);
+
+    expect(out).toContain("Heading");
+    expect(out).toContain("- hello");
+    expect(out).toContain("docs (https://example.com/start)");
+    expect(out).not.toContain("**hello**");
+  });
+});
+
 describe("inbox attachment", () => {
   it("lists attachment paths by partial inbound id and filename", async () => {
     const { db, providerId } = setupDb();
@@ -984,11 +1013,21 @@ describe("inbox attachment", () => {
       received_at: "2026-06-04T11:29:09.000Z",
     }, db);
 
-    const { data } = await runInboxCommand(["inbox", "attachment", email.id.slice(0, 8), "--filename", "invoice.pdf"]);
+    const { data, out } = await runInboxCommand(["inbox", "attachment", email.id.slice(0, 8), "--filename", "invoice.pdf"]);
 
     expect(data).toEqual([
-      { filename: "invoice.pdf", content_type: "application/pdf", size: 2048, local_path: "/tmp/invoice.pdf" },
+      {
+        filename: "invoice.pdf",
+        content_type: "application/pdf",
+        size: 2048,
+        location: "/tmp/invoice.pdf",
+        location_type: "local",
+        file_url: "file:///tmp/invoice.pdf",
+        openable: true,
+      },
     ]);
+    expect(out).toContain("2 KB");
+    expect(out).toContain("file:///tmp/invoice.pdf");
   });
 });
 

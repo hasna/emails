@@ -125,7 +125,7 @@ export function cliEquivalentForTool(name: string, input: unknown): string {
     star_email: () => `mailery inbox star ${id ?? "<inbound-id>"} --json`,
     label_email: () => `mailery inbox label ${id ?? "<inbound-id>"} --json`,
     reply_to_email: () => `mailery reply ${id ?? "<email-id>"} --json`,
-    get_attachment: () => `mailery inbox attachment ${id ?? "<attachment-id>"} --json`,
+    get_attachment: () => `mailery inbox attachment ${id ?? "<inbound-id>"}${flag(input, "filename")} --json`,
     search_inbound: () => `mailery inbox search ${arg(input, "query") ?? "<query>"} --json`,
     get_inbox_sync_status: () => "mailery inbox sync-status --json",
 

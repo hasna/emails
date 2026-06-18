@@ -50,14 +50,23 @@ function seedInbound() {
 describe("managed agent CLI commands", () => {
   it("lists and enables managed agents", async () => {
     const list = await runStatusCommand(["agent", "list"]);
+    expect(list.formatted).toContain("Managed email agent defaults");
+    expect(list.formatted).toContain("default provider: groq");
+    expect(list.formatted).toContain("default Groq model: llama-3.3-70b-versatile");
+    expect(list.formatted).toContain("Groq credential: missing");
     expect(list.formatted).toContain("Categorizer");
     expect(list.formatted).toContain("enabled: no");
+    expect(list.formatted).toContain("provider: groq");
+
+    const defaults = await runStatusCommand(["agent", "defaults"]);
+    expect(defaults.formatted).toContain("prompt boundary: mailery-managed-email-agent-v1");
 
     const enabled = await runStatusCommand(["agent", "enable", "labeler", "--always-on", "--skip-network"]);
     expect(enabled.formatted).toContain("Labeler");
     expect(enabled.formatted).toContain("enabled: yes");
     expect(enabled.formatted).toContain("always on: yes");
     expect(enabled.formatted).toContain("network tools: no");
+    expect(enabled.formatted).toContain("credential: missing");
   });
 
   it("records skipped runs without requiring AI credentials when an agent is disabled", async () => {

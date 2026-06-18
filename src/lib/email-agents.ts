@@ -8,6 +8,7 @@ import {
   EMAIL_AGENT_DEFINITIONS,
   getEmailAgentDefinition,
   getEmailAgentSetting,
+  ensureEmailAgentSettings,
   listEnabledAlwaysOnEmailAgents,
   listPendingInboundEmailsForAgent,
   saveEmailAgentRun,
@@ -45,6 +46,26 @@ export interface AlwaysOnEmailAgentsResult {
   errors: { agent_key: EmailAgentKey; inbound_email_id: string; error: string }[];
 }
 
+export interface EmailAgentCredentialStatus {
+  provider: EmailAgentProvider;
+  configured: boolean;
+  source: "env" | "config" | "missing";
+  env: "GROQ_API_KEY" | "CEREBRAS_API_KEY";
+  config_key: "groq_api_key" | "cerebras_api_key";
+}
+
+export interface EmailAgentRuntimeStatus {
+  defaultProvider: EmailAgentProvider;
+  defaultGroqModel: string;
+  promptVersion: string;
+  credentials: Record<EmailAgentProvider, EmailAgentCredentialStatus>;
+  agents: {
+    total: number;
+    enabled: number;
+    alwaysOn: number;
+  };
+}
+
 interface GenerateTextDeps {
   generateText?: (opts: Record<string, unknown>) => Promise<{
     output?: unknown;
@@ -62,6 +83,48 @@ const MANAGED_AGENT_PROMPT_VERSION = "mailery-managed-email-agent-v1";
 const MAX_EMAIL_BODY_CHARS = 16_000;
 const MAX_SEARCH_RESULTS = 5;
 const MAX_ALWAYS_ON_PER_AGENT = 50;
+const MANAGED_AGENT_DEFAULT_PROVIDER: EmailAgentProvider = "groq";
+
+function credentialStatus(provider: EmailAgentProvider): EmailAgentCredentialStatus {
+  const config = loadConfig();
+  const env = provider === "groq" ? "GROQ_API_KEY" : "CEREBRAS_API_KEY";
+  const configKey = provider === "groq" ? "groq_api_key" : "cerebras_api_key";
+  if (process.env[env]) return { provider, configured: true, source: "env", env, config_key: configKey };
+  if (config[configKey]) return { provider, configured: true, source: "config", env, config_key: configKey };
+  return { provider, configured: false, source: "missing", env, config_key: configKey };
+}
+
+export function getEmailAgentRuntimeStatus(db?: Database): EmailAgentRuntimeStatus {
+  const settings = ensureEmailAgentSettings(db);
+  return {
+    defaultProvider: MANAGED_AGENT_DEFAULT_PROVIDER,
+    defaultGroqModel: DEFAULT_GROQ_EMAIL_AGENT_MODEL,
+    promptVersion: MANAGED_AGENT_PROMPT_VERSION,
+    credentials: {
+      groq: credentialStatus("groq"),
+      cerebras: credentialStatus("cerebras"),
+    },
+    agents: {
+      total: settings.length,
+      enabled: settings.filter((setting) => setting.enabled).length,
+      alwaysOn: settings.filter((setting) => setting.enabled && setting.always_on).length,
+    },
+  };
+}
+
+export function formatEmailAgentRuntimeStatus(status: EmailAgentRuntimeStatus): string {
+  const groq = status.credentials.groq;
+  const credentialText = groq.configured ? groq.source : `missing (${groq.env} or config ${groq.config_key})`;
+  return [
+    "Managed email agent defaults",
+    `  default provider: ${status.defaultProvider}`,
+    `  default Groq model: ${status.defaultGroqModel}`,
+    `  Groq credential: ${credentialText}`,
+    `  prompt boundary: ${status.promptVersion}`,
+    `  enabled/always-on: ${status.agents.enabled}/${status.agents.alwaysOn} of ${status.agents.total}`,
+  ].join("\n");
+}
+
 
 const MANAGED_AGENT_SYSTEM_PROMPT = `You are a Mailery managed email agent.
 
@@ -370,7 +433,7 @@ function resolveAgentProvider(setting: EmailAgentSetting, opts: RunManagedEmailA
   return resolveMaileryAiDefaults({
     provider: opts.provider ?? setting.provider,
     model: opts.model ?? setting.model,
-    defaultProvider: "groq",
+    defaultProvider: MANAGED_AGENT_DEFAULT_PROVIDER,
     defaultGroqModel: DEFAULT_GROQ_EMAIL_AGENT_MODEL,
   });
 }
@@ -463,11 +526,16 @@ function collectToolCalls(steps: Array<{ toolCalls?: Array<{ toolName?: string }
 
 export function formatEmailAgentSetting(setting: EmailAgentSetting): string {
   const definition = EMAIL_AGENT_DEFINITIONS.find((agent) => agent.key === setting.agent_key);
+  const provider = setting.provider ?? MANAGED_AGENT_DEFAULT_PROVIDER;
+  const credential = credentialStatus(provider);
+  const credentialText = credential.configured ? credential.source : "missing";
   return [
     `${definition?.name ?? setting.agent_key} (${setting.agent_key})`,
     `  enabled: ${setting.enabled ? "yes" : "no"}`,
     `  always on: ${setting.always_on ? "yes" : "no"}`,
-    `  model: ${setting.provider}/${setting.model ?? definition?.defaultModel ?? DEFAULT_GROQ_EMAIL_AGENT_MODEL}`,
+    `  provider: ${provider}`,
+    `  model: ${setting.model ?? definition?.defaultModel ?? DEFAULT_GROQ_EMAIL_AGENT_MODEL}`,
+    `  credential: ${credentialText}`,
     `  apply labels: ${setting.apply_labels ? "yes" : "no"}`,
     `  network tools: ${setting.use_network_tools ? "yes" : "no"}`,
   ].join("\n");

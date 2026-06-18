@@ -17,6 +17,7 @@ import { colorStatus } from "../../lib/format.js";
 import { handleError, parseCliPositiveIntOption, parseCliNonNegativeIntOption, resolveId } from "../utils.js";
 import { listReplies, listReplySummaries, getReplyCount } from "../../db/inbound.js";
 import type { InboundEmail, InboundEmailSummary } from "../../db/inbound.js";
+import { readableMessageText } from "../tui/format.js";
 
 const MAX_EMAIL_EXPORT_LIMIT = 10000;
 const DEFAULT_REPLY_LIMIT = 20;
@@ -147,7 +148,10 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
         console.log(`  ${chalk.dim("To:")}       ${emailRecord!.to_addresses.join(", ")}`);
         console.log(`  ${chalk.dim("Status:")}   ${colorStatus(emailRecord!.status)}`);
         console.log(`  ${chalk.dim("Sent:")}     ${emailRecord!.sent_at}`);
-        if (content?.text_body) { console.log(chalk.bold("\n  Body:"), "\n" + content.text_body.slice(0,500)); }
+        if (content?.text_body || content?.html) {
+          console.log(chalk.bold("\n  Body:"));
+          console.log(readableMessageText(content.text_body, content.html));
+        }
         console.log();
         output(emailRecord, "");
       } catch (e) { handleError(e); }
@@ -342,21 +346,9 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
             }
           }
 
-          if (content.text_body) {
-            console.log(chalk.bold("\n  Body (text):"));
-            console.log(content.text_body.split("\n").map((l: string) => `    ${l}`).join("\n"));
-          } else if (content.html) {
-            console.log(chalk.bold("\n  Body (HTML rendered as text):"));
-            const textFromHtml = content.html
-              .replace(/<br\s*\/?>/gi, "\n")
-              .replace(/<\/p>/gi, "\n")
-              .replace(/<[^>]+>/g, "")
-              .replace(/&nbsp;/g, " ")
-              .replace(/&amp;/g, "&")
-              .replace(/&lt;/g, "<")
-              .replace(/&gt;/g, ">")
-              .trim();
-            console.log(textFromHtml.split("\n").map((l: string) => `    ${l}`).join("\n"));
+          if (content.text_body || content.html) {
+            console.log(chalk.bold("\n  Body:"));
+            console.log(readableMessageText(content.text_body, content.html).split("\n").map((l: string) => `    ${l}`).join("\n"));
           }
         } else {
           console.log(chalk.dim("\n  No body content stored for this email."));

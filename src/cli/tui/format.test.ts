@@ -11,6 +11,7 @@ import {
   readableMessageText,
   renderReadableBodyLines,
   formatMessageForCopy,
+  renderReadableEmailDocument,
 } from "./format.js";
 
 describe("format helpers", () => {
@@ -86,6 +87,22 @@ describe("format helpers", () => {
     expect(text).toContain("Hello there");
     expect(text).not.toContain("<!doctype");
     expect(text).not.toContain("<strong>");
+  });
+
+  it("wraps readable message text in an escaped local HTML document", () => {
+    const doc = renderReadableEmailDocument({
+      subject: "Hello <ops>",
+      from: "sender@example.com",
+      to: ["ops@example.com"],
+      date: "2026-06-18T00:00:00.000Z",
+      text: null,
+      html: '<p>Open <a href="https://example.com">docs</a> &amp; confirm</p>',
+    });
+
+    expect(doc).toContain("Hello &lt;ops&gt;");
+    expect(doc).toContain("docs (https://example.com) &amp; confirm");
+    expect(doc).not.toContain("<ops>");
+    expect(doc).not.toContain("<a href");
   });
 
   it("leaves invalid numeric HTML entities intact", () => {

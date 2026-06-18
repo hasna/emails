@@ -125,6 +125,11 @@ describe("MCP CLI equivalents", () => {
       .toBe("mailery inbox links abc123 --all --json");
   });
 
+  it("includes inbound attachment commands", () => {
+    expect(cliEquivalentForTool("get_attachment", { email_id: "abc123", filename: "invoice.pdf" }))
+      .toBe("mailery inbox attachment abc123 --filename invoice.pdf --json");
+  });
+
   it("includes storage sync commands", () => {
     expect(cliEquivalentForTool("storage_status", {}))
       .toBe("mailery storage status --json");

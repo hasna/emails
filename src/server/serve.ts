@@ -63,6 +63,13 @@ export function resolveDashboardStaticPath(dashboardDir: string, requestPath: st
   const filePath = resolve(root, requested);
   const rel = relative(root, filePath);
   if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return null;
+  if (!extname(filePath)) {
+    const htmlPath = `${filePath}.html`;
+    const htmlRel = relative(root, htmlPath);
+    if (!(htmlRel === ".." || htmlRel.startsWith(`..${sep}`) || isAbsolute(htmlRel)) && existsSync(htmlPath)) {
+      return htmlPath;
+    }
+  }
   return filePath;
 }
 
@@ -133,7 +140,7 @@ export async function startServer(port = 3900, hostname = "127.0.0.1"): Promise<
     },
   });
 
-  console.log(`\nEmails dashboard running at http://${hostname}:${server.port}`);
+  console.log(`\nMailery dashboard running at http://${hostname}:${server.port}`);
   console.log(`API available at http://${hostname}:${server.port}/api`);
   console.log(`Press Ctrl+C to stop\n`);
 }

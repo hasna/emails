@@ -62,6 +62,12 @@ function createCommands(): Accessor<MaileryCommand[]> {
       run: () => mailery.actions.openDialog("address"),
     },
     {
+      id: "filter.open",
+      title: "Filter Mail",
+      category: "Mail",
+      run: () => mailery.actions.openDialog("filter"),
+    },
+    {
       id: "search.open",
       title: "Search Mail",
       category: "Mail",
@@ -83,6 +89,20 @@ function createCommands(): Accessor<MaileryCommand[]> {
       category: "Mail",
       enabled: () => !!mailery.selectedMessage(),
       run: () => mailery.actions.openDialog("links"),
+    },
+    {
+      id: "attachments.open",
+      title: "Attachments",
+      category: "Mail",
+      enabled: () => (mailery.selectedBody()?.attachments.length ?? 0) > 0,
+      run: () => mailery.actions.openDialog("attachments"),
+    },
+    {
+      id: "raw.open",
+      title: "Raw Message",
+      category: "Mail",
+      enabled: () => !!mailery.selectedMessage(),
+      run: () => mailery.actions.openDialog("raw"),
     },
     {
       id: "refresh.local",

@@ -1,10 +1,12 @@
 import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
-import { readFileSync } from "node:fs";
-import { execSync } from "node:child_process";
+import { readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join as pathJoin } from "node:path";
 import { createTemplate, listTemplateSummaries, getTemplate, deleteTemplate, renderTemplate } from "../../db/templates.js";
 import { truncate } from "../../lib/format.js";
 import { handleError, parseCliPage } from "../utils.js";
+import { openLocalTarget } from "../../lib/local-actions.js";
 
 export function registerTemplateCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   const templateCmd = program.command("template").description("Manage email templates");
@@ -122,11 +124,11 @@ export function registerTemplateCommands(program: Command, output: (data: unknow
           console.log(renderedHtml);
 
           if (opts.open) {
-            const { writeFileSync } = require("node:fs");
-            const tmpPath = `/tmp/emails-preview-${templateName}.html`;
+            const tmpPath = pathJoin(tmpdir(), `mailery-preview-${templateName}.html`);
             writeFileSync(tmpPath, renderedHtml, "utf-8");
-            execSync(`open "${tmpPath}"`);
-            console.log(chalk.dim(`\nOpened preview in browser: ${tmpPath}`));
+            const opened = openLocalTarget(tmpPath);
+            const message = opened.ok ? `Opened preview in browser: ${tmpPath}` : `Saved preview: ${tmpPath}`;
+            console.log(chalk.dim(`\n${message}`));
           }
         }
 

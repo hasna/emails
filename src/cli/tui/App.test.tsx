@@ -73,7 +73,7 @@ function seedMessage(
   received_at = "2026-01-01T10:00:00.000Z",
   to = "ops@example.com",
   labels: string[] = [],
-  attachments: Array<{ filename: string; content_type: string; size: number }> = [],
+  attachments: Array<{ filename: string; content_type: string; size: number; local_path?: string; s3_url?: string }> = [],
 ) {
   return storeInboundEmail({
     provider_id: providerId,
@@ -84,7 +84,14 @@ function seedMessage(
     subject,
     text_body: `# ${subject}\n\nbody for ${subject}\n\nhttps://example.com/${encodeURIComponent(subject)}`,
     html_body: null,
-    attachments,
+    attachments: attachments.map(({ filename, content_type, size }) => ({ filename, content_type, size })),
+    attachment_paths: attachments.flatMap((attachment) => attachment.local_path || attachment.s3_url ? [{
+      filename: attachment.filename,
+      content_type: attachment.content_type,
+      size: attachment.size,
+      ...(attachment.local_path ? { local_path: attachment.local_path } : {}),
+      ...(attachment.s3_url ? { s3_url: attachment.s3_url } : {}),
+    }] : []),
     label_ids: labels,
     headers: {},
     raw_size: 1,
@@ -176,6 +183,7 @@ describe("Mailery Solid TUI", () => {
     await key("p", { ctrl: true });
     expect(frame()).toContain("Shortcuts");
     expect(frame()).toContain("Compose");
+    expect(frame()).toContain("Filter Mail");
     expect(frame()).toContain("Search Mail");
 
     await key("down");
@@ -199,17 +207,22 @@ describe("Mailery Solid TUI", () => {
     expect(frame()).toContain("Forward");
   });
 
-  it("renders attachment details in the reader", async () => {
+  it("opens attachment details from the reader", async () => {
     seedMessage("has attachment", "2026-01-01T10:00:00.000Z", "ops@example.com", [], [
-      { filename: "invoice.pdf", content_type: "application/pdf", size: 2048 },
+      { filename: "invoice.pdf", content_type: "application/pdf", size: 2048, local_path: "/tmp/invoice.pdf" },
     ]);
     await renderApp();
 
     await key("enter");
+    expect(frame()).toContain("1 attachment available");
     expect(frame()).toContain("Attachments");
+
+    await clickText("Attachments");
     expect(frame()).toContain("invoice.pdf");
     expect(frame()).toContain("application/pdf");
     expect(frame()).toContain("2 KB");
+    expect(frame()).toContain("file:///tmp/invoice.pdf");
+    expect(frame()).toContain("Copy all attachment links");
   });
 
   it("renders AI summaries below the email body in the reader", async () => {
@@ -227,7 +240,7 @@ describe("Mailery Solid TUI", () => {
     await key("enter");
     const output = frame();
     const bodyIndex = output.indexOf("body for summary bottom");
-    const summaryIndex = output.indexOf("AI summary belongs below");
+    const summaryIndex = output.indexOf("Summary: AI summary belongs below");
     expect(bodyIndex).toBeGreaterThanOrEqual(0);
     expect(summaryIndex).toBeGreaterThan(bodyIndex);
   });
@@ -246,6 +259,30 @@ describe("Mailery Solid TUI", () => {
     expect(frame()).toContain("alpha invoice");
     expect(frame()).not.toContain("beta newsletter");
     expect(frame()).toContain("Search: invoice");
+  });
+
+  it("filters from the compact filter dialog and clears filters", async () => {
+    seedMessage("alpha invoice");
+    seedMessage("beta newsletter");
+    await renderApp();
+
+    await clickText("Filter");
+    expect(frame()).toContain("Filter Mail");
+    expect(frame()).toContain("Unread");
+    expect(frame()).toContain("Starred");
+    await typeText("invoice");
+    setup?.mockInput.pressEnter();
+    await flush();
+
+    expect(frame()).toContain("alpha invoice");
+    expect(frame()).not.toContain("beta newsletter");
+    expect(frame()).toContain("Search: invoice");
+
+    await clickText("Filter");
+    await clickText("Clear");
+    expect(frame()).toContain("alpha invoice");
+    expect(frame()).toContain("beta newslett");
+    expect(frame()).not.toContain("Search: invoice");
   });
 
   it("filters mailbox content from sidebar labels and Gmail categories", async () => {
@@ -316,6 +353,7 @@ describe("Mailery Solid TUI", () => {
     await clickText("Settings");
     expect(frame()).toContain("Settings");
     expect(frame()).toContain("Sync");
+    expect(frame()).toContain("Agents");
     expect(frame()).toContain("Defaults");
     expect(frame()).toContain("Display");
 
@@ -323,6 +361,13 @@ describe("Mailery Solid TUI", () => {
     expect(frame()).toContain("Settings / Sync");
     expect(frame()).toContain("Auto-pull inbound");
     expect(frame()).toContain("Gmail auto-pull");
+    await key("escape");
+
+    await clickText("Agents");
+    expect(frame()).toContain("Settings / Agents");
+    expect(frame()).toContain("Default provider");
+    expect(frame()).toContain("Groq email model");
+    expect(frame()).toContain("llama-3.3-70b-versatile");
     await key("escape");
 
     await clickText("Defaults");
@@ -338,7 +383,7 @@ describe("Mailery Solid TUI", () => {
     expect(frame()).toContain("Theme");
   });
 
-  it("opens links and labels dialogs from the reader", async () => {
+  it("opens links, raw, and labels dialogs from the reader", async () => {
     seedMessage("links label");
     await renderApp();
     await key("enter");
@@ -346,6 +391,13 @@ describe("Mailery Solid TUI", () => {
     await clickText("Links");
     expect(frame()).toContain("Links");
     expect(frame()).toContain("https://example.com");
+    expect(frame()).toContain("Open first link");
+    await key("escape");
+
+    await clickText("Raw");
+    expect(frame()).toContain("Raw Email");
+    expect(frame()).toContain("Subject: links label");
+    expect(frame()).toContain("Text body");
     await key("escape");
 
     await clickText("Label", 1);
