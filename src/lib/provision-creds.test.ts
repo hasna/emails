@@ -32,6 +32,14 @@ describe("checkProvisionCredentials", () => {
     expect(cf.detail).toContain("account");
   });
 
+  it("accepts stored SES provider credentials for AWS provisioning", () => {
+    const aws = checkProvisionCredentials({}, {
+      aws_provider_credentials: true,
+    }).find((x) => x.provider === "aws")!;
+    expect(aws.configured).toBe(true);
+    expect(aws.detail).toContain("stored SES provider credentials");
+  });
+
   it("resend optional when absent", () => {
     expect(checkProvisionCredentials({}).find((x) => x.provider === "resend")!.configured).toBe(false);
   });

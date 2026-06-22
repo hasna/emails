@@ -110,7 +110,11 @@ export async function runDiagnostics(db?: Database, opts: DiagnosticsOptions = {
   // 6c. Provisioning credentials (AWS / Cloudflare / Resend)
   const { checkProvisionCredentials } = await import("./provision-creds.js");
   const config = loadConfig();
+  const hasStoredAwsProviderCredentials = providers.some((provider) =>
+    provider.type === "ses" && !!provider.access_key && !!provider.secret_key
+  );
   for (const c of checkProvisionCredentials(undefined, {
+    aws_provider_credentials: hasStoredAwsProviderCredentials,
     cloudflare_api_token: config["cloudflare_api_token"] as string | undefined,
     cloudflare_api_key: config["cloudflare_api_key"] as string | undefined,
     cloudflare_email: config["cloudflare_email"] as string | undefined,

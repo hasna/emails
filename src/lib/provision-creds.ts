@@ -14,6 +14,7 @@ export interface ProvisionCredStatus {
 }
 
 export interface ProvisionCredConfig {
+  aws_provider_credentials?: boolean;
   cloudflare_api_token?: string;
   cloudflare_api_key?: string;
   cloudflare_email?: string;
@@ -27,11 +28,14 @@ export function checkProvisionCredentials(
   const out: ProvisionCredStatus[] = [];
 
   // AWS (SES send/inbound + Route53 buy via @hasna/domains), us-east-1.
-  const hasAws = !!(env["AWS_ACCESS_KEY_ID"] && env["AWS_SECRET_ACCESS_KEY"]) || !!env["AWS_PROFILE"];
+  const hasEnvAws = !!(env["AWS_ACCESS_KEY_ID"] && env["AWS_SECRET_ACCESS_KEY"]) || !!env["AWS_PROFILE"];
+  const hasAws = hasEnvAws || !!config.aws_provider_credentials;
   out.push({
     provider: "aws",
     configured: hasAws,
-    detail: hasAws ? `${env["AWS_PROFILE"] ? `profile:${env["AWS_PROFILE"]}` : "access-keys"} (us-east-1 for SES inbound + Route53)` : "Set AWS_PROFILE or AWS_ACCESS_KEY_ID/SECRET",
+    detail: hasAws
+      ? `${hasEnvAws ? (env["AWS_PROFILE"] ? `profile:${env["AWS_PROFILE"]}` : "access-keys") : "stored SES provider credentials"} (us-east-1 for SES inbound + Route53)`
+      : "Set AWS_PROFILE or AWS_ACCESS_KEY_ID/SECRET",
   });
 
   // Cloudflare (DNS + Email Routing).

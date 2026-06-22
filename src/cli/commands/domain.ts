@@ -605,8 +605,8 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
           console.log(chalk.dim(`Registering ${domain} with ${provider!.type.toUpperCase()}...`));
           const adapter = getAdapter(provider!);
           await adapter.addDomain(domain);
-          const { createDomain } = await import("../../db/domains.js");
-          createDomain(providerId, domain);
+          const { createDomain, getDomainByName } = await import("../../db/domains.js");
+          getDomainByName(providerId, domain) ?? createDomain(providerId, domain);
           console.log(chalk.green(`  ✓ Domain registered with ${provider!.type.toUpperCase()}`));
         }
 
