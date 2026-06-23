@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { optionalQueryInteger, parseInteger, queryInteger, queryPage } from "./helpers.js";
+import { json, optionalQueryInteger, parseInteger, queryInteger, queryPage } from "./helpers.js";
 
 describe("route integer parsing", () => {
   it("uses defaults for missing, empty, and invalid values", () => {
@@ -27,5 +27,15 @@ describe("route integer parsing", () => {
     expect(queryPage(new URL("http://127.0.0.1/api/providers"), 50)).toEqual({ limit: 50, offset: 0 });
     expect(queryPage(new URL("http://127.0.0.1/api/providers?limit=0&offset=bad"), 50)).toEqual({ limit: 1, offset: 0 });
     expect(queryPage(new URL("http://127.0.0.1/api/providers?limit=5000&offset=2"), 50, 1000)).toEqual({ limit: 1000, offset: 2 });
+  });
+});
+
+describe("route JSON responses", () => {
+  it("does not emit wildcard CORS headers", async () => {
+    const response = json({ ok: true });
+
+    expect(response.headers.get("Content-Type")).toBe("application/json");
+    expect(response.headers.get("Access-Control-Allow-Origin")).toBeNull();
+    expect(await response.json()).toEqual({ ok: true });
   });
 });
