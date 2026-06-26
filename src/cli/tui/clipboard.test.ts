@@ -26,11 +26,51 @@ describe("tui clipboard", () => {
     ]);
   });
 
-  it("copies through SSH pbcopy before OSC52 when a client host is available", () => {
+  it("prefers OSC52 over SSH pbcopy in a remote TTY session (forwarded to the user's terminal)", () => {
     const calls: string[] = [];
     const writes: string[] = [];
     const result = copyTextToClipboard("hello clipboard", {
       env: { SSH_CLIENT: "100.100.226.69 54111 22" },
+      platform: "linux",
+      stdoutIsTTY: true,
+      writeStdout: (value) => writes.push(value),
+      spawnSync: ({ cmd }) => {
+        calls.push(cmd.join(" "));
+        return { exitCode: 0 }; // even if a local/ssh command WOULD succeed, OSC52 wins first
+      },
+    });
+
+    expect(result).toEqual({ ok: true, method: "osc52" });
+    expect(writes.join("")).toContain("]52;c;");
+    expect(calls).toEqual([]); // no reverse-ssh / local clipboard command attempted
+  });
+
+  it("regression: over SSH, never copies to the REMOTE host's clipboard (wrong machine)", () => {
+    // Running the UI on a remote mac over SSH: previously `pbcopy` ran on the REMOTE mac
+    // and set ITS clipboard (useless to the user on their own machine). OSC52 must win.
+    const calls: string[] = [];
+    const writes: string[] = [];
+    const result = copyTextToClipboard("https://has.na/a/xyz", {
+      env: { SSH_CONNECTION: "100.100.226.69 54111 100.85.234.92 22" },
+      platform: "darwin",
+      stdoutIsTTY: true,
+      writeStdout: (value) => writes.push(value),
+      spawnSync: ({ cmd }) => {
+        calls.push(cmd.join(" "));
+        return { exitCode: 0 }; // pbcopy on the remote mac WOULD succeed — must not be used
+      },
+    });
+
+    expect(result.method).toMatch(/^osc52/);
+    expect(calls).not.toContain("pbcopy");
+    expect(writes.join("")).toContain("]52;c;");
+  });
+
+  it("falls back to SSH pbcopy when OSC52 is disabled", () => {
+    const calls: string[] = [];
+    const writes: string[] = [];
+    const result = copyTextToClipboard("hello clipboard", {
+      env: { SSH_CLIENT: "100.100.226.69 54111 22", MAILERY_TUI_CLIPBOARD_OSC52: "never" },
       platform: "linux",
       stdoutIsTTY: true,
       writeStdout: (value) => writes.push(value),
@@ -45,11 +85,31 @@ describe("tui clipboard", () => {
     expect(writes).toEqual([]);
   });
 
-  it("bounds async SSH clipboard attempts and falls back to OSC52", async () => {
+  it("prefers OSC52 first in a remote async TTY session", async () => {
+    const calls: string[] = [];
+    const writes: string[] = [];
+    const result = await copyTextToClipboardAsync("hello async", {
+      env: { SSH_TTY: "/dev/pts/3", SSH_CONNECTION: "100.100.226.69 54111 100.85.234.92 22" },
+      platform: "linux",
+      stdoutIsTTY: true,
+      writeStdout: (value) => writes.push(value),
+      spawnSync: () => ({ exitCode: 1, stdout: "" }),
+      spawnAsync: async ({ cmd }) => {
+        calls.push(cmd.join(" "));
+        return { exitCode: 0 };
+      },
+    });
+
+    expect(result).toEqual({ ok: true, method: "osc52" });
+    expect(writes.join("")).toContain("]52;c;");
+    expect(calls).toEqual([]);
+  });
+
+  it("bounds async SSH clipboard attempts and emits no escape when OSC52 is disabled", async () => {
     const calls: Array<{ cmd: string; timeoutMs: number | undefined }> = [];
     const writes: string[] = [];
     const result = await copyTextToClipboardAsync("hello async", {
-      env: { SSH_CLIENT: "100.100.226.69 54111 22" },
+      env: { SSH_CLIENT: "100.100.226.69 54111 22", MAILERY_TUI_CLIPBOARD_OSC52: "never" },
       platform: "linux",
       stdoutIsTTY: true,
       writeStdout: (value) => writes.push(value),
@@ -60,18 +120,20 @@ describe("tui clipboard", () => {
       },
     });
 
-    expect(result).toEqual({ ok: true, method: "osc52" });
+    expect(result.ok).toBe(false);
     expect(calls[0]).toEqual({
       cmd: "ssh -o BatchMode=yes -o ConnectTimeout=1 -o LogLevel=ERROR 100.100.226.69 pbcopy",
       timeoutMs: 1500,
     });
-    expect(writes.join("")).toContain("]52;c;");
+    expect(writes.join("")).not.toContain("]52;c;");
   });
 
   it("copies through the attached tmux client SSH environment when the pane env is stale", () => {
+    // With OSC52 disabled, the discovered SSH host (from the stale tmux pane env) is still
+    // used for the reverse-ssh pbcopy route.
     const calls: string[] = [];
     const result = copyTextToClipboard("hello from tmux", {
-      env: { TMUX: "/tmp/tmux-1000/default,1,0" },
+      env: { TMUX: "/tmp/tmux-1000/default,1,0", MAILERY_TUI_CLIPBOARD_OSC52: "never" },
       platform: "linux",
       stdoutIsTTY: true,
       writeStdout: () => {},

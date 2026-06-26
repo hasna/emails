@@ -1350,7 +1350,7 @@ describe("tui data — settings (persisted to config)", () => {
   beforeEach(() => { savedHome = process.env["HOME"]; tmpHome = mkdtempSync(join(tmpdir(), "emails-cfg-")); process.env["HOME"] = tmpHome; });
   afterEach(() => { if (savedHome === undefined) delete process.env["HOME"]; else process.env["HOME"] = savedHome; rmSync(tmpHome, { recursive: true, force: true }); });
 
-  it("defaults to dark theme with provider pulls off", () => {
+  it("defaults to the light (Catppuccin Latte) theme with provider pulls off", () => {
     const s = getSettings();
     expect(s.autoPull).toBe(false);
     expect(s.gmailAutoPull).toBe(false);
@@ -1358,7 +1358,7 @@ describe("tui data — settings (persisted to config)", () => {
     expect(s.defaultMailbox).toBe("inbox");
     expect(s.defaultAddress).toBeNull();
     expect(s.defaultFrom).toBeNull();
-    expect(s.theme).toBe("dark");
+    expect(s.theme).toBe("light");
   });
 
   it("round-trips a setting change", () => {

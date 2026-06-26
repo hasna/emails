@@ -51,54 +51,59 @@ export interface TuiTheme {
   labelPalette: string[];
 }
 
+// Catppuccin Latte (the light variant) — https://catppuccin.com/palette
+// base #eff1f5 · mantle #e6e9ef · crust #dce0e8 · surface0 #ccd0da · surface1 #bcc0cc
+// surface2 #acb0be · overlay0 #9ca0b0 · overlay1 #8c8fa1 · subtext0 #6c6f85
+// subtext1 #5c5f77 · text #4c4f69 · blue #1e66f5 · mauve #8839ef · green #40a02b
+// yellow #df8e1d · red #d20f39 · peach #fe640b · teal #179299 · lavender #7287fd
 const LIGHT: TuiTheme = {
   name: "light",
-  background: "#ffffff",
-  panel: "#fafafa",
-  panelAlt: "#eeeeee",
-  panelActive: "#f5f5f5",
-  dialogBg: "#fafafa",
-  composeBg: "#f5f5f5",
-  buttonFg: "#ffffff",
-  buttonBg: "#111111",
-  buttonActiveFg: "#ffffff",
-  buttonActiveBg: "#2a2a2a",
-  buttonSecondaryFg: "#ffffff",
-  buttonSecondaryBg: "#1f1f1f",
-  menuFg: "#161616",
-  menuBg: "#f0f0f0",
-  menuActiveFg: "#ffffff",
-  menuActiveBg: "#22388f",
-  headerBg: "#ffffff",
-  sidebarBg: "#fafafa",
-  sidebarFg: "#161616",
-  sidebarMuted: "#808080",
-  metricBg: "#eeeeee",
-  border: "#e8e8e8",
-  primary: "#161616",
-  secondary: "#5c5c5c",
-  muted: "#808080",
-  accent: "#3b5cf6",
-  accentStrong: "#034cff",
-  ok: "#198b43",
-  warning: "#cb9f34",
-  error: "#d92e3c",
-  activeFg: "#22388f",
-  activeBg: "#ecf1fe",
-  sourceFg: "#22388f",
-  sourceBg: "#ecf1fe",
-  selectedFg: "#22388f",
-  selectedBg: "#ecf1fe",
-  listReadFg: "#161616",
-  listUnreadFg: "#161616",
-  unreadBadgeFg: "#111111",
-  unreadBadgeBg: "#ffd43b",
-  unread: "#161616",
-  star: "#e7af36",
-  dimRead: "#808080",
-  selectionFg: "#ffffff",
-  selectionBg: "#3b5cf6",
-  labelPalette: ["#3b7dd8", "#7b5bb6", "#d68c27", "#3d9a57", "#318795", "#d1383d", "#b0851f"],
+  background: "#eff1f5",     // base
+  panel: "#e6e9ef",          // mantle
+  panelAlt: "#dce0e8",       // crust
+  panelActive: "#ccd0da",    // surface0
+  dialogBg: "#e6e9ef",       // mantle
+  composeBg: "#dce0e8",      // crust
+  buttonFg: "#eff1f5",       // base text on the accent button
+  buttonBg: "#1e66f5",       // blue
+  buttonActiveFg: "#eff1f5",
+  buttonActiveBg: "#1552c9", // darker blue (derived) for the pressed/active button
+  buttonSecondaryFg: "#eff1f5",
+  buttonSecondaryBg: "#7287fd", // lavender
+  menuFg: "#4c4f69",         // text
+  menuBg: "#e6e9ef",         // mantle
+  menuActiveFg: "#eff1f5",   // base
+  menuActiveBg: "#1e66f5",   // blue
+  headerBg: "#eff1f5",       // base
+  sidebarBg: "#e6e9ef",      // mantle
+  sidebarFg: "#4c4f69",      // text
+  sidebarMuted: "#6c6f85",   // subtext0
+  metricBg: "#ccd0da",       // surface0
+  border: "#bcc0cc",         // surface1
+  primary: "#4c4f69",        // text
+  secondary: "#5c5f77",      // subtext1
+  muted: "#8c8fa1",          // overlay1
+  accent: "#1e66f5",         // blue
+  accentStrong: "#8839ef",   // mauve
+  ok: "#40a02b",             // green
+  warning: "#df8e1d",        // yellow
+  error: "#d20f39",          // red
+  activeFg: "#1e66f5",       // blue
+  activeBg: "#dce6fb",       // soft blue tint (derived) for active rows
+  sourceFg: "#1e66f5",
+  sourceBg: "#dce6fb",
+  selectedFg: "#1e66f5",
+  selectedBg: "#dce6fb",
+  listReadFg: "#6c6f85",     // subtext0 — read items read as muted
+  listUnreadFg: "#4c4f69",   // text — unread items at full strength
+  unreadBadgeFg: "#eff1f5",  // base
+  unreadBadgeBg: "#1e66f5",  // blue badge
+  unread: "#4c4f69",         // text
+  star: "#df8e1d",           // yellow
+  dimRead: "#9ca0b0",        // overlay0
+  selectionFg: "#eff1f5",    // base
+  selectionBg: "#1e66f5",    // blue
+  labelPalette: ["#1e66f5", "#8839ef", "#fe640b", "#40a02b", "#179299", "#d20f39", "#df8e1d"],
 };
 
 const DARK: TuiTheme = {
@@ -185,7 +190,8 @@ export function detectSystemTheme(env: Record<string, string | undefined> = proc
 
   if (/\b(dark|night|black)\b/.test(joined)) return "dark";
   if (/\b(light|day|white)\b/.test(joined)) return "light";
-  return "dark";
+  // Default to the light (Catppuccin Latte) theme when no signal is available.
+  return "light";
 }
 
 export function resolveThemeName(

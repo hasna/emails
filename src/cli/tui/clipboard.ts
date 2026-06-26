@@ -260,19 +260,64 @@ async function copyToTmuxBufferAsync(text: string, runtime: ClipboardRuntime): P
   return null;
 }
 
+function osc52Preference(env: NodeJS.ProcessEnv): "always" | "never" | "auto" {
+  const raw = (env["MAILERY_TUI_CLIPBOARD_OSC52"] ?? env["EMAILS_TUI_CLIPBOARD_OSC52"] ?? "").trim().toLowerCase();
+  if (raw === "always" || raw === "1" || raw === "true" || raw === "force") return "always";
+  if (raw === "never" || raw === "0" || raw === "false" || raw === "off") return "never";
+  return "auto";
+}
+
+function hasConfiguredCommand(env: NodeJS.ProcessEnv): boolean {
+  return !!(env["MAILERY_TUI_CLIPBOARD_COMMAND"] || env["EMAILS_TUI_CLIPBOARD_COMMAND"])?.trim();
+}
+
+// True when the TUI runs over SSH/mosh (or inside a tmux session attached from a remote
+// client). In that case a LOCAL pbcopy/xclip/wl-copy would set the clipboard on the WRONG
+// machine — the host the TUI runs on (e.g. spark01), not the user's terminal (e.g. apple01).
+export function isRemoteSession(env: NodeJS.ProcessEnv = process.env, discoveredHosts: string[] = []): boolean {
+  if (env["SSH_TTY"] || env["SSH_CONNECTION"] || env["SSH_CLIENT"]) return true;
+  if (env["MOSH_CONNECTION"] || env["MOSH_CLIENT_IP"] || env["MOSH_IP"]) return true;
+  if (env["TMUX"] && discoveredHosts.length > 0) return true;
+  return false;
+}
+
+// Decide whether to emit OSC 52 BEFORE trying local/SSH clipboard commands. OSC 52 is a
+// terminal escape that the user's OWN terminal emulator interprets, so the copy lands on
+// the machine the user is physically at — the correct behavior over SSH. We prefer it for
+// remote sessions (unless an explicit command is configured), always when
+// MAILERY_TUI_CLIPBOARD_OSC52=always, and `never` disables it entirely.
+function shouldPreferOsc52(runtime: ClipboardRuntime, discoveredHosts: string[]): boolean {
+  const mode = osc52Preference(runtime.env);
+  if (mode === "never") return false;
+  if (!runtime.stdoutIsTTY) return false;
+  if (mode === "always") return true;
+  return isRemoteSession(runtime.env, discoveredHosts) && !hasConfiguredCommand(runtime.env);
+}
+
 export function copyTextToClipboard(text: string, runtime: ClipboardRuntime = defaultRuntime()): ClipboardResult {
   if (!text.trim()) return { ok: false, error: "nothing to copy" };
   if (runtime.env["MAILERY_TUI_CLIPBOARD_DRY_RUN"] === "1" || runtime.env["EMAILS_TUI_CLIPBOARD_DRY_RUN"] === "1") return { ok: true, method: "dry-run" };
 
-  for (const cmd of clipboardCommands(runtime.platform, runtime.env, tmuxEnvironmentHosts(runtime))) {
+  const discovered = tmuxEnvironmentHosts(runtime);
+
+  // Remote sessions: forward to the user's terminal via OSC 52 first so the copy lands on
+  // the machine they are actually using, not the host running the TUI.
+  if (shouldPreferOsc52(runtime, discovered)) {
+    const osc52 = copyWithOsc52(text, runtime);
+    if (osc52) return osc52;
+  }
+
+  for (const cmd of clipboardCommands(runtime.platform, runtime.env, discovered)) {
     if (runClipboardCommand(runtime, cmd, text)) return { ok: true, method: commandMethod(cmd) };
   }
 
   const tmux = copyToTmuxBuffer(text, runtime);
   if (tmux) return tmux;
 
-  const osc52 = copyWithOsc52(text, runtime);
-  if (osc52) return osc52;
+  if (osc52Preference(runtime.env) !== "never") {
+    const osc52 = copyWithOsc52(text, runtime);
+    if (osc52) return osc52;
+  }
 
   return { ok: false, error: "no supported clipboard route found" };
 }
@@ -281,7 +326,14 @@ export async function copyTextToClipboardAsync(text: string, runtime: ClipboardR
   if (!text.trim()) return { ok: false, error: "nothing to copy" };
   if (runtime.env["MAILERY_TUI_CLIPBOARD_DRY_RUN"] === "1" || runtime.env["EMAILS_TUI_CLIPBOARD_DRY_RUN"] === "1") return { ok: true, method: "dry-run" };
 
-  const commands = clipboardCommands(runtime.platform, runtime.env, tmuxEnvironmentHosts(runtime));
+  const discovered = tmuxEnvironmentHosts(runtime);
+
+  if (shouldPreferOsc52(runtime, discovered)) {
+    const osc52 = copyWithOsc52(text, runtime);
+    if (osc52) return osc52;
+  }
+
+  const commands = clipboardCommands(runtime.platform, runtime.env, discovered);
   for (const cmd of commands) {
     if (await runClipboardCommandAsync(runtime, cmd, text)) return { ok: true, method: commandMethod(cmd) };
   }
@@ -289,8 +341,10 @@ export async function copyTextToClipboardAsync(text: string, runtime: ClipboardR
   const tmux = await copyToTmuxBufferAsync(text, runtime);
   if (tmux) return tmux;
 
-  const osc52 = copyWithOsc52(text, runtime);
-  if (osc52) return osc52;
+  if (osc52Preference(runtime.env) !== "never") {
+    const osc52 = copyWithOsc52(text, runtime);
+    if (osc52) return osc52;
+  }
 
   return { ok: false, error: "no supported clipboard route found" };
 }
