@@ -51,35 +51,34 @@ export interface TuiTheme {
   labelPalette: string[];
 }
 
-// Catppuccin Latte (the light variant) — https://catppuccin.com/palette
-// base #eff1f5 · mantle #e6e9ef · crust #dce0e8 · surface0 #ccd0da · surface1 #bcc0cc
-// surface2 #acb0be · overlay0 #9ca0b0 · overlay1 #8c8fa1 · subtext0 #6c6f85
-// subtext1 #5c5f77 · text #4c4f69 · blue #1e66f5 · mauve #8839ef · green #40a02b
-// yellow #df8e1d · red #d20f39 · peach #fe640b · teal #179299 · lavender #7287fd
+// Catppuccin Latte accents on a clean WHITE background (mirrors open-aicopilot's light
+// theme — white base + neutral light surfaces — instead of Latte's blue-gray #eff1f5 base).
+// Latte accents: blue #1e66f5 · mauve #8839ef · green #40a02b · yellow #df8e1d
+// red #d20f39 · peach #fe640b · teal #179299 · text #4c4f69 · subtext0 #6c6f85
 const LIGHT: TuiTheme = {
   name: "light",
-  background: "#eff1f5",     // base
-  panel: "#e6e9ef",          // mantle
-  panelAlt: "#dce0e8",       // crust
-  panelActive: "#ccd0da",    // surface0
-  dialogBg: "#e6e9ef",       // mantle
-  composeBg: "#dce0e8",      // crust
-  buttonFg: "#eff1f5",       // base text on the accent button
+  background: "#ffffff",     // clean white — no gray
+  panel: "#fafbfc",
+  panelAlt: "#f0f1f3",
+  panelActive: "#f4f5f7",
+  dialogBg: "#fafbfc",
+  composeBg: "#f4f5f7",
+  buttonFg: "#ffffff",       // white text on the accent button
   buttonBg: "#1e66f5",       // blue
-  buttonActiveFg: "#eff1f5",
+  buttonActiveFg: "#ffffff",
   buttonActiveBg: "#1552c9", // darker blue (derived) for the pressed/active button
-  buttonSecondaryFg: "#eff1f5",
+  buttonSecondaryFg: "#ffffff",
   buttonSecondaryBg: "#7287fd", // lavender
   menuFg: "#4c4f69",         // text
-  menuBg: "#e6e9ef",         // mantle
-  menuActiveFg: "#eff1f5",   // base
+  menuBg: "#fafbfc",
+  menuActiveFg: "#ffffff",
   menuActiveBg: "#1e66f5",   // blue
-  headerBg: "#eff1f5",       // base
-  sidebarBg: "#e6e9ef",      // mantle
+  headerBg: "#ffffff",
+  sidebarBg: "#fafbfc",
   sidebarFg: "#4c4f69",      // text
   sidebarMuted: "#6c6f85",   // subtext0
-  metricBg: "#ccd0da",       // surface0
-  border: "#bcc0cc",         // surface1
+  metricBg: "#f0f1f3",
+  border: "#dce0e8",
   primary: "#4c4f69",        // text
   secondary: "#5c5f77",      // subtext1
   muted: "#8c8fa1",          // overlay1
@@ -89,19 +88,19 @@ const LIGHT: TuiTheme = {
   warning: "#df8e1d",        // yellow
   error: "#d20f39",          // red
   activeFg: "#1e66f5",       // blue
-  activeBg: "#dce6fb",       // soft blue tint (derived) for active rows
+  activeBg: "#e8eefc",       // soft blue tint for active rows
   sourceFg: "#1e66f5",
-  sourceBg: "#dce6fb",
+  sourceBg: "#e8eefc",
   selectedFg: "#1e66f5",
-  selectedBg: "#dce6fb",
+  selectedBg: "#e8eefc",
   listReadFg: "#6c6f85",     // subtext0 — read items read as muted
   listUnreadFg: "#4c4f69",   // text — unread items at full strength
-  unreadBadgeFg: "#eff1f5",  // base
+  unreadBadgeFg: "#ffffff",
   unreadBadgeBg: "#1e66f5",  // blue badge
   unread: "#4c4f69",         // text
   star: "#df8e1d",           // yellow
   dimRead: "#9ca0b0",        // overlay0
-  selectionFg: "#eff1f5",    // base
+  selectionFg: "#ffffff",
   selectionBg: "#1e66f5",    // blue
   labelPalette: ["#1e66f5", "#8839ef", "#fe640b", "#40a02b", "#179299", "#d20f39", "#df8e1d"],
 };

@@ -9,10 +9,10 @@ describe("tui theme", () => {
     expect(resolveTheme("auto", {}).name).toBe("light");
   });
 
-  it("uses the Catppuccin Latte palette for the light theme", () => {
+  it("uses Catppuccin Latte accents on a clean white background for the light theme", () => {
     const light = resolveTheme("light", {}, "light");
     expect(light.name).toBe("light");
-    expect(light.background).toBe("#eff1f5"); // Latte base
+    expect(light.background).toBe("#ffffff"); // clean white — not the gray Latte base
     expect(light.accent).toBe("#1e66f5"); // Latte blue
     expect(light.selectionBg).toBe("#1e66f5");
     expect(light.error).toBe("#d20f39"); // Latte red
@@ -20,7 +20,7 @@ describe("tui theme", () => {
     expect(light.unreadBadgeBg).toBe("#1e66f5");
 
     const solidLight = resolveSolidTheme("light", {});
-    expect(solidLight.background).toBe("#eff1f5");
+    expect(solidLight.background).toBe("#ffffff");
     expect(solidLight.primary).toBe("#1e66f5");
     expect(solidLight.text).toBe("#4c4f69"); // Latte text
     expect(solidLight.markdownHeading).toBe("#8839ef"); // Latte mauve
