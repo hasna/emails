@@ -15,6 +15,7 @@ import { storeInboundEmail } from "../../db/inbound.js";
 import { createProvider } from "../../db/providers.js";
 import { setSetting } from "./data.js";
 import { App } from "./App.js";
+import { resolveAddressChoice } from "../tui-solid/context/mailery-state.js";
 
 let autoPullCalls = 0;
 mock.module("./autopull.js", () => ({
@@ -159,6 +160,26 @@ async function typeText(value: string) {
 }
 
 describe("Mailery Solid TUI", () => {
+  it("resolves a searched-for inbox to its real address, never falling back to All inboxes", () => {
+    // Regression: the picker caps the address list (200). An address found by TYPING in the
+    // search box but sitting beyond that cap used to make reload() fall back to list[0] =
+    // "All inboxes", so selecting it showed every message instead of that inbox.
+    expect(resolveAddressChoice("all", []).id).toBe("all");
+    expect(resolveAddressChoice("", []).id).toBe("all");
+
+    const inList = resolveAddressChoice("a:ops@example.com", [
+      { id: "a:ops@example.com", label: "ops@example.com", address: "ops@example.com", configured: true, observed: false },
+    ]);
+    expect(inList.address).toBe("ops@example.com");
+
+    // The bug: an id NOT in the candidate list must still resolve to its real address
+    // (via the DB), not collapse to "All inboxes".
+    const beyondCap = resolveAddressChoice("a:vlado0549196@mbox.contact.bg", []);
+    expect(beyondCap.id).toBe("a:vlado0549196@mbox.contact.bg");
+    expect(beyondCap.address).toBe("vlado0549196@mbox.contact.bg");
+    expect(beyondCap.id).not.toBe("all");
+  });
+
   it("renders the Solid/OpenTUI mailbox with open-aicopilot-style structure", async () => {
     seedMessage("hello inbox", new Date().toISOString(), "long.recipient@example.com");
     await renderApp();

@@ -84,30 +84,32 @@ const DARK: TuiColorTheme = {
   labelPalette: ["#fab283", "#5c9cf5", "#9d7cd8", "#7fd88f", "#56b6c2", "#e06c75", "#e5c07b"],
 };
 
-// Catppuccin Latte (the light variant) — https://catppuccin.com/palette
+// Catppuccin Latte accents on a clean WHITE background (mirrors open-aicopilot's light
+// theme structure — white base, neutral light surfaces — rather than Latte's blue-gray
+// #eff1f5 base, which read as a "weird gray" background).
 const LIGHT: TuiColorTheme = {
   mode: "light",
-  primary: "#1e66f5",        // blue
-  secondary: "#209fb5",      // sapphire
-  accent: "#8839ef",         // mauve
-  error: "#d20f39",          // red
-  warning: "#df8e1d",        // yellow
-  success: "#40a02b",        // green
-  info: "#04a5e5",           // sky
-  text: "#4c4f69",           // text
-  textMuted: "#6c6f85",      // subtext0
-  textFaint: "#8c8fa1",      // overlay1
-  selectedListItemText: "#eff1f5", // base
-  background: "#eff1f5",     // base
-  backgroundPanel: "#e6e9ef",   // mantle
-  backgroundElement: "#dce0e8", // crust
-  backgroundMenu: "#dce0e8",    // crust
-  backgroundActive: "#ccd0da",  // surface0
-  backgroundHover: "#bcc0cc",   // surface1
-  backgroundPressed: "#acb0be", // surface2
-  border: "#bcc0cc",         // surface1
-  borderActive: "#9ca0b0",   // overlay0
-  borderSubtle: "#ccd0da",   // surface0
+  primary: "#1e66f5",        // Latte blue
+  secondary: "#209fb5",      // Latte sapphire
+  accent: "#8839ef",         // Latte mauve
+  error: "#d20f39",          // Latte red
+  warning: "#df8e1d",        // Latte yellow
+  success: "#40a02b",        // Latte green
+  info: "#04a5e5",           // Latte sky
+  text: "#4c4f69",           // Latte text
+  textMuted: "#6c6f85",      // Latte subtext0
+  textFaint: "#9ca0b0",      // Latte overlay0
+  selectedListItemText: "#ffffff",
+  background: "#ffffff",      // clean white — no gray
+  backgroundPanel: "#fafbfc",
+  backgroundElement: "#f4f5f7",
+  backgroundMenu: "#f4f5f7",
+  backgroundActive: "#e8eefc",   // soft Latte-blue tint for the active/selected row
+  backgroundHover: "#eef0f4",
+  backgroundPressed: "#dfe3ea",
+  border: "#dce0e8",
+  borderActive: "#bcc0cc",
+  borderSubtle: "#eceef1",
   markdownText: "#4c4f69",
   markdownHeading: "#8839ef",   // mauve
   markdownLink: "#1e66f5",      // blue
@@ -116,7 +118,7 @@ const LIGHT: TuiColorTheme = {
   markdownBlockQuote: "#df8e1d",// yellow
   markdownEmph: "#df8e1d",
   markdownStrong: "#fe640b",    // peach
-  markdownHorizontalRule: "#6c6f85",
+  markdownHorizontalRule: "#9ca0b0",
   markdownListItem: "#1e66f5",
   markdownListEnumeration: "#209fb5",
   markdownImage: "#1e66f5",
