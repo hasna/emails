@@ -2,6 +2,7 @@ import { createContext, createMemo, onCleanup, onMount, useContext, type ParentP
 import { createStore } from "solid-js/store";
 import {
   ALL_ADDRESSES,
+  addressChoiceByAddress,
   COMMON_LABELS,
   MAILBOXES,
   archiveMessage,
@@ -109,8 +110,23 @@ function sourceForAddress(address: InboxAddressChoice | undefined) {
   return address?.address ? { address: address.address } : undefined;
 }
 
+/**
+ * Resolve a selected-address id to its choice. Falls back to the DB (addressChoiceByAddress)
+ * so an address that sits beyond the picker's list cap — only reachable by typing in the
+ * search box — never collapses to "All inboxes". Previously `find(id) ?? list[0]` would
+ * fall back to ALL_ADDRESSES (list[0]) when the selected address wasn't in the capped list,
+ * so selecting a searched-for address showed every inbox instead of that one.
+ */
+export function resolveAddressChoice(id: string, candidates: InboxAddressChoice[]): InboxAddressChoice {
+  if (!id || id === ALL_ADDRESSES.id) return ALL_ADDRESSES;
+  const inList = candidates.find((item) => item.id === id);
+  if (inList) return inList;
+  if (id.startsWith("a:")) return addressChoiceByAddress(id.slice(2));
+  return ALL_ADDRESSES;
+}
+
 function selectedAddress(state: Pick<MaileryState, "addresses" | "selectedAddressId">): InboxAddressChoice {
-  return state.addresses.find((item) => item.id === state.selectedAddressId) ?? state.addresses[0] ?? ALL_ADDRESSES;
+  return resolveAddressChoice(state.selectedAddressId, state.addresses);
 }
 
 function pageOffset(page: number): number {
@@ -216,8 +232,18 @@ function createMaileryStore(initialMailbox?: Mailbox) {
     const preserveSelection = options?.preserveSelection ?? true;
     setState("loading", true);
     try {
-      const addresses = loadAddresses(options?.addressSearch);
-      const selected = addresses.find((item) => item.id === state.selectedAddressId) ?? addresses[0] ?? ALL_ADDRESSES;
+      const loaded = loadAddresses(options?.addressSearch);
+      // Resolve against the freshly-loaded list AND the current in-memory list (which still
+      // holds the just-clicked address right after setAddress), then the DB — never fall
+      // back to "All inboxes" for a real selection.
+      const selected = resolveAddressChoice(state.selectedAddressId, [...loaded, ...state.addresses]);
+      // Keep the selected inbox in the rendered picker list even when it sits beyond the
+      // list cap, so it shows its marker and the inbox stays filtered to it.
+      const addresses = selected.id === ALL_ADDRESSES.id || loaded.some((item) => item.id === selected.id)
+        ? loaded
+        : loaded[0]?.id === ALL_ADDRESSES.id
+          ? [loaded[0], selected, ...loaded.slice(1)]
+          : [selected, ...loaded];
       const source = sourceForAddress(selected);
       const messages = listMailbox(state.mailbox, {
         limit: PAGE_SIZE + 1,
