@@ -236,11 +236,11 @@ if (path === "/api/export/emails" && method === "GET") {
     const filters = { provider_id: providerId, from_address: fromAddress, since, until, limit, offset };
     if (format === "csv") {
       return new Response(exportEmailsCsv(filters), {
-        headers: { "Content-Type": "text/csv", "Access-Control-Allow-Origin": "*", "X-Export-Limit": String(limit), "X-Export-Offset": String(offset) },
+        headers: { "Content-Type": "text/csv", "X-Export-Limit": String(limit), "X-Export-Offset": String(offset) },
       });
     }
     return new Response(exportEmailsJson(filters), {
-      headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*", "X-Export-Limit": String(limit), "X-Export-Offset": String(offset) },
+      headers: { "Content-Type": "application/json", "X-Export-Limit": String(limit), "X-Export-Offset": String(offset) },
     });
   } catch (e) { return internalError(e); }
 }
@@ -257,11 +257,11 @@ if (path === "/api/export/events" && method === "GET") {
     const filters = { provider_id: providerId, since, until, limit, offset };
     if (format === "csv") {
       return new Response(exportEventsCsv(filters), {
-        headers: { "Content-Type": "text/csv", "Access-Control-Allow-Origin": "*", "X-Export-Limit": String(limit), "X-Export-Offset": String(offset) },
+        headers: { "Content-Type": "text/csv", "X-Export-Limit": String(limit), "X-Export-Offset": String(offset) },
       });
     }
     return new Response(exportEventsJson(filters), {
-      headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*", "X-Export-Limit": String(limit), "X-Export-Offset": String(offset) },
+      headers: { "Content-Type": "application/json", "X-Export-Limit": String(limit), "X-Export-Offset": String(offset) },
     });
   } catch (e) { return internalError(e); }
 }
