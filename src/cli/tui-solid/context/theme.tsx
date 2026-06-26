@@ -84,47 +84,48 @@ const DARK: TuiColorTheme = {
   labelPalette: ["#fab283", "#5c9cf5", "#9d7cd8", "#7fd88f", "#56b6c2", "#e06c75", "#e5c07b"],
 };
 
+// Catppuccin Latte (the light variant) — https://catppuccin.com/palette
 const LIGHT: TuiColorTheme = {
   mode: "light",
-  primary: "#3b7dd8",
-  secondary: "#7b5bb6",
-  accent: "#d68c27",
-  error: "#d1383d",
-  warning: "#d68c27",
-  success: "#3d9a57",
-  info: "#318795",
-  text: "#1a1a1a",
-  textMuted: "#8a8a8a",
-  textFaint: "#a0a0a0",
-  selectedListItemText: "#ffffff",
-  background: "#ffffff",
-  backgroundPanel: "#fafafa",
-  backgroundElement: "#f5f5f5",
-  backgroundMenu: "#f5f5f5",
-  backgroundActive: "#ebebeb",
-  backgroundHover: "#e1e1e1",
-  backgroundPressed: "#d4d4d4",
-  border: "#b8b8b8",
-  borderActive: "#a0a0a0",
-  borderSubtle: "#d4d4d4",
-  markdownText: "#1a1a1a",
-  markdownHeading: "#d68c27",
-  markdownLink: "#3b7dd8",
-  markdownLinkText: "#318795",
-  markdownCode: "#3d9a57",
-  markdownBlockQuote: "#b0851f",
-  markdownEmph: "#b0851f",
-  markdownStrong: "#d68c27",
-  markdownHorizontalRule: "#8a8a8a",
-  markdownListItem: "#3b7dd8",
-  markdownListEnumeration: "#318795",
-  markdownImage: "#3b7dd8",
-  markdownImageText: "#318795",
-  markdownCodeBlock: "#1a1a1a",
-  labelPalette: ["#3b7dd8", "#7b5bb6", "#d68c27", "#3d9a57", "#318795", "#d1383d", "#b0851f"],
+  primary: "#1e66f5",        // blue
+  secondary: "#209fb5",      // sapphire
+  accent: "#8839ef",         // mauve
+  error: "#d20f39",          // red
+  warning: "#df8e1d",        // yellow
+  success: "#40a02b",        // green
+  info: "#04a5e5",           // sky
+  text: "#4c4f69",           // text
+  textMuted: "#6c6f85",      // subtext0
+  textFaint: "#8c8fa1",      // overlay1
+  selectedListItemText: "#eff1f5", // base
+  background: "#eff1f5",     // base
+  backgroundPanel: "#e6e9ef",   // mantle
+  backgroundElement: "#dce0e8", // crust
+  backgroundMenu: "#dce0e8",    // crust
+  backgroundActive: "#ccd0da",  // surface0
+  backgroundHover: "#bcc0cc",   // surface1
+  backgroundPressed: "#acb0be", // surface2
+  border: "#bcc0cc",         // surface1
+  borderActive: "#9ca0b0",   // overlay0
+  borderSubtle: "#ccd0da",   // surface0
+  markdownText: "#4c4f69",
+  markdownHeading: "#8839ef",   // mauve
+  markdownLink: "#1e66f5",      // blue
+  markdownLinkText: "#209fb5",  // sapphire
+  markdownCode: "#40a02b",      // green
+  markdownBlockQuote: "#df8e1d",// yellow
+  markdownEmph: "#df8e1d",
+  markdownStrong: "#fe640b",    // peach
+  markdownHorizontalRule: "#6c6f85",
+  markdownListItem: "#1e66f5",
+  markdownListEnumeration: "#209fb5",
+  markdownImage: "#1e66f5",
+  markdownImageText: "#209fb5",
+  markdownCodeBlock: "#4c4f69",
+  labelPalette: ["#1e66f5", "#8839ef", "#fe640b", "#40a02b", "#179299", "#d20f39", "#df8e1d"],
 };
 
-export function resolveSolidTheme(mode: TuiThemeMode = "dark", env: Record<string, string | undefined> = process.env): TuiColorTheme {
+export function resolveSolidTheme(mode: TuiThemeMode = "auto", env: Record<string, string | undefined> = process.env): TuiColorTheme {
   const normalized = normalizeThemeMode(mode);
   const resolved = normalized === "auto" ? detectSystemTheme(env) : normalized;
   return resolved === "light" ? LIGHT : DARK;
@@ -156,7 +157,7 @@ export function selectedForeground(theme: TuiColorTheme, bg?: ColorInput): Color
 const ThemeContext = createContext<TuiColorTheme>();
 
 export function ThemeProvider(props: ParentProps<{ mode?: TuiThemeMode }>) {
-  const theme = createMemo(() => resolveSolidTheme(props.mode ?? "dark"));
+  const theme = createMemo(() => resolveSolidTheme(props.mode ?? "auto"));
   const value = new Proxy({} as TuiColorTheme, {
     get: (_, key: string | symbol) => typeof key === "string" ? theme()[key as keyof TuiColorTheme] : undefined,
   });

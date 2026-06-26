@@ -3,10 +3,27 @@ import { detectSystemTheme, nextThemeMode, normalizeThemeMode, resolveTheme, res
 import { resolveSolidTheme, selectedForeground } from "../tui-solid/context/theme.js";
 
 describe("tui theme", () => {
-  it("defaults to dark when no system signal is available", () => {
-    expect(detectSystemTheme({})).toBe("dark");
-    expect(resolveThemeName("auto", {})).toBe("dark");
-    expect(resolveTheme("auto", {}).name).toBe("dark");
+  it("defaults to light (Catppuccin Latte) when no system signal is available", () => {
+    expect(detectSystemTheme({})).toBe("light");
+    expect(resolveThemeName("auto", {})).toBe("light");
+    expect(resolveTheme("auto", {}).name).toBe("light");
+  });
+
+  it("uses the Catppuccin Latte palette for the light theme", () => {
+    const light = resolveTheme("light", {}, "light");
+    expect(light.name).toBe("light");
+    expect(light.background).toBe("#eff1f5"); // Latte base
+    expect(light.accent).toBe("#1e66f5"); // Latte blue
+    expect(light.selectionBg).toBe("#1e66f5");
+    expect(light.error).toBe("#d20f39"); // Latte red
+    expect(light.ok).toBe("#40a02b"); // Latte green
+    expect(light.unreadBadgeBg).toBe("#1e66f5");
+
+    const solidLight = resolveSolidTheme("light", {});
+    expect(solidLight.background).toBe("#eff1f5");
+    expect(solidLight.primary).toBe("#1e66f5");
+    expect(solidLight.text).toBe("#4c4f69"); // Latte text
+    expect(solidLight.markdownHeading).toBe("#8839ef"); // Latte mauve
   });
 
   it("detects dark and light terminal backgrounds from COLORFGBG", () => {

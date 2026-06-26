@@ -1341,7 +1341,7 @@ export function getSettings(): TuiSettings {
     defaultMailbox: normalizeMailbox(c["default_mailbox"]),
     defaultAddress: extractEmail(c["tui_default_address"]) ?? null,
     defaultFrom: extractEmail(c["tui_default_from"]) ?? null,
-    theme: c["tui_theme"] == null ? "dark" : normalizeThemeMode(c["tui_theme"]),
+    theme: c["tui_theme"] == null ? "light" : normalizeThemeMode(c["tui_theme"]),
   };
 }
 
