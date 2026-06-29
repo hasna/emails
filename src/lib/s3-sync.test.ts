@@ -175,8 +175,35 @@ describe("syncS3Inbox — with objects", () => {
     const result = await syncS3Inbox({ bucket: "test-bucket", db, providerId });
     expect(result.synced).toBe(1);
     expect(result.errors).toHaveLength(0);
-    const row = db.query("SELECT raw_s3_url FROM inbound_emails WHERE message_id = ?").get("inbound/example.com/msg001") as { raw_s3_url: string };
+    const row = db.query("SELECT message_id, raw_s3_url FROM inbound_emails WHERE raw_s3_url = ?").get("s3://test-bucket/inbound/example.com/msg001") as { message_id: string; raw_s3_url: string };
+    expect(row.message_id).toBe("s3://test-bucket/inbound/example.com/msg001");
     expect(row.raw_s3_url).toBe("s3://test-bucket/inbound/example.com/msg001");
+  });
+
+  it("dedupes by exact S3 URL so matching keys in different buckets both sync", async () => {
+    const { db, providerId } = setupDb();
+
+    mockSend.mockImplementation(async (cmd: unknown) => {
+      const c = cmd as { input?: Record<string, unknown> };
+      if (c?.input && "Prefix" in (c.input ?? {})) {
+        return { Contents: [{ Key: "inbound/example.com/same-key", Size: 1024 }], IsTruncated: false };
+      }
+      if (c?.input && "Key" in (c.input ?? {})) {
+        return { Body: (async function* () { yield Buffer.from("From: a@b.com\r\nSubject: Same key\r\n\r\nB"); })() };
+      }
+      return {};
+    });
+
+    const first = await syncS3Inbox({ bucket: "bucket-a", db, providerId });
+    const second = await syncS3Inbox({ bucket: "bucket-b", db, providerId });
+
+    expect(first).toMatchObject({ synced: 1, skipped: 0, errors: [] });
+    expect(second).toMatchObject({ synced: 1, skipped: 0, errors: [] });
+    const rows = db.query("SELECT message_id, raw_s3_url FROM inbound_emails ORDER BY raw_s3_url").all() as Array<{ message_id: string; raw_s3_url: string }>;
+    expect(rows).toEqual([
+      { message_id: "s3://bucket-a/inbound/example.com/same-key", raw_s3_url: "s3://bucket-a/inbound/example.com/same-key" },
+      { message_id: "s3://bucket-b/inbound/example.com/same-key", raw_s3_url: "s3://bucket-b/inbound/example.com/same-key" },
+    ]);
   });
 
   it("resolves a PARTIAL provider id (regression: FOREIGN KEY constraint failed)", async () => {
@@ -199,7 +226,7 @@ describe("syncS3Inbox — with objects", () => {
     expect(result.synced).toBe(1);
     expect(result.errors).toHaveLength(0);
     // stored with the FULL provider id, satisfying the FK
-    const row = db.query("SELECT provider_id FROM inbound_emails WHERE message_id = ?").get("inbound/example.com/p1") as { provider_id: string };
+    const row = db.query("SELECT provider_id FROM inbound_emails WHERE raw_s3_url = ?").get("s3://test-bucket/inbound/example.com/p1") as { provider_id: string };
     expect(row.provider_id).toBe(providerId);
   });
 
@@ -207,8 +234,8 @@ describe("syncS3Inbox — with objects", () => {
     const { db, providerId } = setupDb();
     // S3 already has a high-sorting key m-zzz (synced), and a lower-sorting
     // m-aaa arrives later. A StartAfter cursor would skip m-aaa forever.
-    db.run(`INSERT INTO inbound_emails (id, provider_id, message_id, from_address, to_addresses, cc_addresses, subject, received_at) VALUES (?, ?, ?, 'x@y.com', '[]', '[]', 'old', datetime('now'))`,
-      [uuid(), providerId, "inbound/example.com/m-zzz"]);
+    db.run(`INSERT INTO inbound_emails (id, provider_id, message_id, raw_s3_url, from_address, to_addresses, cc_addresses, subject, received_at) VALUES (?, ?, ?, ?, 'x@y.com', '[]', '[]', 'old', datetime('now'))`,
+      [uuid(), providerId, "s3://test-bucket/inbound/example.com/m-zzz", "s3://test-bucket/inbound/example.com/m-zzz"]);
 
     mockSend.mockImplementation(async (cmd: unknown) => {
       const c = cmd as { input?: Record<string, unknown> };
@@ -224,7 +251,7 @@ describe("syncS3Inbox — with objects", () => {
 
     const result = await syncS3Inbox({ bucket: "test-bucket", db, providerId });
     expect(result.synced).toBe(1); // m-aaa stored, m-zzz skipped (dedup)
-    const row = db.query("SELECT id FROM inbound_emails WHERE message_id = ?").get("inbound/example.com/m-aaa");
+    const row = db.query("SELECT id FROM inbound_emails WHERE raw_s3_url = ?").get("s3://test-bucket/inbound/example.com/m-aaa");
     expect(row).not.toBeNull();
   });
 
@@ -232,9 +259,9 @@ describe("syncS3Inbox — with objects", () => {
     const { db, providerId } = setupDb();
     for (const key of ["inbound/example.com/old-1", "inbound/example.com/old-2"]) {
       db.run(
-        `INSERT INTO inbound_emails (id, provider_id, message_id, from_address, to_addresses, cc_addresses, subject, received_at)
-         VALUES (?, ?, ?, 'x@y.com', '[]', '[]', 'old', datetime('now'))`,
-        [uuid(), providerId, key],
+        `INSERT INTO inbound_emails (id, provider_id, message_id, raw_s3_url, from_address, to_addresses, cc_addresses, subject, received_at)
+         VALUES (?, ?, ?, ?, 'x@y.com', '[]', '[]', 'old', datetime('now'))`,
+        [uuid(), providerId, `s3://test-bucket/${key}`, `s3://test-bucket/${key}`],
       );
     }
 
@@ -268,7 +295,7 @@ describe("syncS3Inbox — with objects", () => {
     expect(result.synced).toBe(1);
     expect(result.skipped).toBe(2);
     expect(listInputs).toHaveLength(2);
-    expect(db.query("SELECT id FROM inbound_emails WHERE message_id = ?").get("inbound/example.com/new-1")).not.toBeNull();
+    expect(db.query("SELECT id FROM inbound_emails WHERE raw_s3_url = ?").get("s3://test-bucket/inbound/example.com/new-1")).not.toBeNull();
   });
 
   it("throws a clear error for an unknown provider id", async () => {
@@ -280,11 +307,11 @@ describe("syncS3Inbox — with objects", () => {
   it("skips already-synced objects (dedup by S3 key)", async () => {
     const { db, providerId } = setupDb();
 
-    // Pre-insert with the S3 key as message_id
+    // Pre-insert with the exact S3 URL as the durable object identity.
     db.run(
-      `INSERT INTO inbound_emails (id, provider_id, message_id, from_address, to_addresses, cc_addresses, subject, attachments_json, attachment_paths, headers_json, raw_size, received_at, created_at)
-       VALUES (?, ?, ?, 'a@b.com', '[]', '[]', 'S', '[]', '[]', '{}', 0, datetime('now'), datetime('now'))`,
-      [uuid(), providerId, "inbound/example.com/msg001"],
+      `INSERT INTO inbound_emails (id, provider_id, message_id, raw_s3_url, from_address, to_addresses, cc_addresses, subject, attachments_json, attachment_paths, headers_json, raw_size, received_at, created_at)
+       VALUES (?, ?, ?, ?, 'a@b.com', '[]', '[]', 'S', '[]', '[]', '{}', 0, datetime('now'), datetime('now'))`,
+      [uuid(), providerId, "s3://test-bucket/inbound/example.com/msg001", "s3://test-bucket/inbound/example.com/msg001"],
     );
 
     mockSend.mockImplementation(async (cmd: unknown) => {
@@ -307,9 +334,9 @@ describe("syncS3Inbox — with objects", () => {
     const { db, providerId } = setupDb();
 
     db.run(
-      `INSERT INTO inbound_emails (id, provider_id, message_id, from_address, to_addresses, cc_addresses, subject, attachments_json, attachment_paths, headers_json, raw_size, received_at, created_at)
-       VALUES (?, NULL, ?, 'a@b.com', '[]', '[]', 'S', '[]', '[]', '{}', 0, datetime('now'), datetime('now'))`,
-      [uuid(), "inbound/example.com/msg001"],
+      `INSERT INTO inbound_emails (id, provider_id, message_id, raw_s3_url, from_address, to_addresses, cc_addresses, subject, attachments_json, attachment_paths, headers_json, raw_size, received_at, created_at)
+       VALUES (?, NULL, ?, ?, 'a@b.com', '[]', '[]', 'S', '[]', '[]', '{}', 0, datetime('now'), datetime('now'))`,
+      [uuid(), "s3://test-bucket/inbound/example.com/msg001", "s3://test-bucket/inbound/example.com/msg001"],
     );
 
     mockSend.mockImplementation(async (cmd: unknown) => {
@@ -326,7 +353,7 @@ describe("syncS3Inbox — with objects", () => {
     const result = await syncS3Inbox({ bucket: "test-bucket", db, providerId });
     expect(result.synced).toBe(0);
     expect(result.skipped).toBe(1);
-    const row = db.query("SELECT provider_id FROM inbound_emails WHERE message_id = ?").get("inbound/example.com/msg001") as { provider_id: string };
+    const row = db.query("SELECT provider_id FROM inbound_emails WHERE raw_s3_url = ?").get("s3://test-bucket/inbound/example.com/msg001") as { provider_id: string };
     expect(row.provider_id).toBe(providerId);
   });
 

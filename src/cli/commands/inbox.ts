@@ -433,8 +433,9 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
           result = await syncGmailInbox(syncOpts);
         }
 
-        // Update sync state
-        updateLastSynced(providerId, undefined, db);
+        if (result.errors.length === 0) {
+          updateLastSynced(providerId, undefined, db);
+        }
 
         output(result, formatSyncResult(result, opts.all));
 
@@ -1072,11 +1073,16 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
       try {
         const db = getDatabase();
         const id = requireLocal(emailId);
-        const email = db.query("SELECT provider_id, message_id, subject FROM inbound_emails WHERE id = ?").get(id) as { provider_id: string | null; message_id: string; subject: string } | null;
+        const email = db.query(
+          `SELECT i.provider_id AS provider_id, i.message_id AS message_id, i.subject AS subject, p.type AS provider_type
+             FROM inbound_emails i LEFT JOIN providers p ON p.id = i.provider_id
+            WHERE i.id = ?`,
+        ).get(id) as { provider_id: string | null; message_id: string | null; subject: string; provider_type: string | null } | null;
         if (!email?.message_id) {
           console.error(chalk.red("Email not found or has no Gmail message ID."));
           process.exit(1);
         }
+        if (email.provider_type !== "gmail") throw new Error(`Email is not from a Gmail source: ${emailId}`);
         const { resolveGmailLiveSource } = await import("../../lib/gmail-sync.js");
         const source = resolveGmailLiveSource({
           providerId: email.provider_id,

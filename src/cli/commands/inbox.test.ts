@@ -778,6 +778,33 @@ describe("inbox live Gmail gates", () => {
     expect(result.stderr).toContain("live Gmail access is blocked");
     expect(mockRun.mock.calls.some((call) => call[0]?.operation === "messages.reply")).toBe(false);
   });
+
+  it("refuses replies for non-Gmail local rows even when a live Gmail source exists", async () => {
+    const { db } = setupDb();
+    const sandboxProvider = createProvider({ name: "Sandbox Source", type: "sandbox", active: true });
+    const email = storeInboundEmail({
+      provider_id: sandboxProvider.id,
+      message_id: "s3://bucket/inbound/example.com/reply-target",
+      in_reply_to_email_id: null,
+      raw_s3_url: "s3://bucket/inbound/example.com/reply-target",
+      from_address: "sender@example.com",
+      to_addresses: ["me@example.com"],
+      cc_addresses: [],
+      subject: "Non Gmail reply",
+      text_body: "body",
+      html_body: null,
+      attachments: [],
+      attachment_paths: [],
+      headers: {},
+      raw_size: 100,
+      received_at: "2026-06-04T11:29:09.000Z",
+    }, db);
+
+    const result = await runInboxCommandExpectingExit(["inbox", "reply", email.id, "--body", "No live send"]);
+
+    expect(result.stderr).toContain("not from a Gmail source");
+    expect(mockRun.mock.calls.some((call) => call[0]?.operation === "messages.reply")).toBe(false);
+  });
 });
 
 describe("inbox code", () => {
@@ -1354,5 +1381,24 @@ describe("inbox status — sync state tracking", () => {
     updateLastSynced(providerId, undefined, db);
     const state = getGmailSyncState(providerId, db);
     expect(state!.next_page_token).toBeNull();
+  });
+
+  it("does not update last_synced_at when CLI Gmail sync returns errors", async () => {
+    const { db, providerId } = setupDb();
+    mockRun.mockImplementation(async (operationArgs: {
+      operation: string;
+      input?: Record<string, unknown> & { args?: Array<string | number | boolean> };
+    }) => {
+      const { operation } = operationArgs;
+      if (operation === "messages.list") {
+        return { connector: "gmail", operation, success: false, stdout: "", stderr: "list failed", exitCode: 1, data: [] };
+      }
+      return { connector: "gmail", operation, success: true, stdout: "[]", stderr: "", exitCode: 0, data: [] };
+    });
+
+    const result = await runInboxCommand(["inbox", "sync", "--provider", providerId]);
+
+    expect((result.data as { errors: string[] }).errors[0]).toContain("Failed to list messages");
+    expect(getGmailSyncState(providerId, db)).toBeNull();
   });
 });

@@ -15,7 +15,7 @@ npm install -g @hasna/mailery
 
 ```bash
 # Add a provider (SES, Resend, or Gmail)
-mailery provider add --type ses --region us-east-1 --access-key ... --secret-key ...
+mailery provider add --name production-ses --type ses --region us-east-1 --access-key ... --secret-key ...
 mailery provider add-gmail   # requires: connectors auth gmail
 
 # Set up a domain (buy + DNS + SES in one command)
@@ -306,11 +306,9 @@ Mailery is local-first. The public OSS default is local SQLite and files under
 `~/.hasna/emails/`, with no remote dependency. Remote storage is opt-in, and
 uses the `emails` slug: use `HASNA_EMAILS_*` env vars, not `HASNA_MAILERY_*`.
 
-Canonical Hasna production storage is the `emails` database on
-`hasna-xyz-infra-apps-prod-postgres`. The runtime secret path is
-`hasna/xyz/opensource/emails/prod/rds`; load it into the canonical env var
-without printing or committing the connection string. Self-hosted installs can
-use the fallback `EMAILS_DATABASE_URL`.
+For managed or self-hosted PostgreSQL, set `HASNA_EMAILS_DATABASE_URL` to the
+database connection string without printing or committing it. Self-hosted
+installs can use the fallback `EMAILS_DATABASE_URL`.
 
 Storage modes:
 

@@ -1,5 +1,5 @@
 import type { Database } from "./database.js";
-import { getDatabase } from "./database.js";
+import { getDatabase, rebuildInboundLabelState, reconcileMailboxMessageState } from "./database.js";
 import type { PgAdapterAsync } from "./remote-storage.js";
 import { getCanonicalOpenEmailsRdsConfig, type CanonicalOpenEmailsRdsConfig } from "../lib/config.js";
 
@@ -12,6 +12,11 @@ export const STORAGE_TABLES = [
   "inbound_emails",
   "inbound_recipients",
   "inbound_labels",
+  "mailboxes",
+  "mailbox_sources",
+  "mail_folders",
+  "mail_messages",
+  "mailbox_message_state",
   "events",
   "templates",
   "contacts",
@@ -52,6 +57,11 @@ const PRIMARY_KEYS: Record<StorageTable, string[]> = {
   inbound_emails: ["id"],
   inbound_recipients: ["inbound_email_id", "address"],
   inbound_labels: ["inbound_email_id", "label"],
+  mailboxes: ["id"],
+  mailbox_sources: ["id"],
+  mail_folders: ["id"],
+  mail_messages: ["id"],
+  mailbox_message_state: ["mailbox_id", "mail_message_id"],
   events: ["id"],
   templates: ["id"],
   contacts: ["id"],
@@ -212,6 +222,7 @@ export async function storagePush(options?: StorageSyncOptions): Promise<SyncRes
     await runStorageMigrations(remote);
     const results: SyncResult[] = [];
     for (const table of parseStorageTables(options?.tables)) results.push(await pushTable(db, remote, table, { batchSize: options?.batchSize }));
+    await reconcileRemoteDerivedState(remote);
     recordSyncMeta(db, "push", results);
     return results;
   } finally {
@@ -264,6 +275,7 @@ export async function pullTablesFromRemote(remote: PgAdapterAsync, db: Database,
       finished = true;
       return results;
     }
+    reconcileLocalDerivedState(db);
     recordSyncMeta(db, "pull", results);
     releaseLocalStorageTransaction(db, savepoint);
     finished = true;
@@ -271,6 +283,65 @@ export async function pullTablesFromRemote(remote: PgAdapterAsync, db: Database,
   } finally {
     if (!finished) rollbackLocalStorageTransaction(db, savepoint);
   }
+}
+
+function reconcileLocalDerivedState(db: Database): void {
+  rebuildInboundLabelState(db);
+  reconcileMailboxMessageState(db);
+}
+
+async function reconcileRemoteDerivedState(remote: PgAdapterAsync): Promise<void> {
+  await remote.run(`
+    DELETE FROM inbound_labels label
+     WHERE NOT EXISTS (
+       SELECT 1
+         FROM inbound_emails inbound,
+              mailery_jsonb_array_text(inbound.label_ids_json) AS value
+        WHERE inbound.id = label.inbound_email_id
+          AND trim(value) != ''
+          AND left(regexp_replace(lower(trim(value)), '\\s+', '-', 'g'), 64) = label.label
+     );
+
+    INSERT INTO inbound_labels (inbound_email_id, label)
+    SELECT inbound.id, left(regexp_replace(lower(trim(value)), '\\s+', '-', 'g'), 64)
+      FROM inbound_emails inbound,
+           mailery_jsonb_array_text(inbound.label_ids_json) AS value
+     WHERE inbound.label_ids_json IS NOT NULL
+       AND trim(value) != ''
+    ON CONFLICT DO NOTHING;
+
+    UPDATE inbound_emails
+       SET is_spam = CASE WHEN EXISTS (
+             SELECT 1 FROM inbound_labels
+              WHERE inbound_email_id = inbound_emails.id
+                AND label = 'spam'
+           ) THEN 1 ELSE 0 END,
+           is_trash = CASE WHEN EXISTS (
+             SELECT 1 FROM inbound_labels
+              WHERE inbound_email_id = inbound_emails.id
+                AND label = 'trash'
+           ) THEN 1 ELSE 0 END;
+
+    UPDATE mailbox_message_state state
+       SET labels_json = inbound.label_ids_json,
+           is_read = inbound.is_read,
+           read_at = inbound.read_at,
+           is_archived = inbound.is_archived,
+           is_starred = inbound.is_starred,
+           is_spam = inbound.is_spam,
+           is_trash = inbound.is_trash,
+           folder_id = 'folder:' || state.mailbox_id || ':' ||
+             CASE
+               WHEN COALESCE(inbound.is_sent, 0) = 1 THEN 'sent'
+               WHEN COALESCE(inbound.is_trash, 0) = 1 THEN 'trash'
+               WHEN COALESCE(inbound.is_spam, 0) = 1 THEN 'spam'
+               WHEN COALESCE(inbound.is_archived, 0) = 1 THEN 'archive'
+               ELSE 'inbox'
+             END,
+           updated_at = NOW()
+      FROM inbound_emails inbound
+     WHERE state.mail_message_id = COALESCE(inbound.mail_message_id, 'msg:inbound:' || inbound.id);
+  `);
 }
 
 export async function storageSync(options?: StorageSyncOptions, hooks: StorageSyncHooks = {}): Promise<{ pull: SyncResult[]; push: SyncResult[] }> {

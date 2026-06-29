@@ -1,9 +1,6 @@
-import { createRequire } from "node:module";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createSolidTransformPlugin } from "@opentui/solid/bun-plugin";
-
-const require = createRequire(import.meta.url);
 
 const nativePackages = [
   "@opentui/core-darwin-x64",
@@ -33,46 +30,9 @@ const alwaysExternal = [
   "web-tree-sitter",
   "bun-ffi-structs",
 ];
-
-function installedPackage(name: string): boolean {
-  try {
-    require.resolve(`${name}/package.json`);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function nativeBundleCandidates(): string[] {
-  if (process.platform === "darwin") {
-    if (process.arch === "x64") return ["@opentui/core-darwin-x64"];
-    if (process.arch === "arm64") return ["@opentui/core-darwin-arm64"];
-  }
-  if (process.platform === "linux") {
-    const suffix = isLinuxMusl() ? "musl" : "";
-    if (process.arch === "x64") return [`@opentui/core-linux-x64${suffix ? `-${suffix}` : ""}`];
-    if (process.arch === "arm64") return [`@opentui/core-linux-arm64${suffix ? `-${suffix}` : ""}`];
-  }
-  if (process.platform === "win32") {
-    if (process.arch === "x64") return ["@opentui/core-win32-x64"];
-    if (process.arch === "arm64") return ["@opentui/core-win32-arm64"];
-  }
-  return [];
-}
-
-function isLinuxMusl(): boolean {
-  if (process.platform !== "linux") return false;
-  const report = typeof process.report?.getReport === "function" ? process.report.getReport() : undefined;
-  const glibc = report?.header && "glibcVersionRuntime" in report.header
-    ? report.header.glibcVersionRuntime
-    : undefined;
-  return !glibc;
-}
-
-const bundledNative = new Set(nativeBundleCandidates().filter(installedPackage));
 const externalPackages = [
   ...alwaysExternal,
-  ...nativePackages.filter((name) => !bundledNative.has(name)),
+  ...nativePackages,
 ];
 
 const result = await Bun.build({

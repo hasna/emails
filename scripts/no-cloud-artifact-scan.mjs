@@ -17,6 +17,7 @@ const forbiddenMarkers = [
   ["cloud", "setup"].join(" "),
   ["cloud", "sync"].join(" "),
 ];
+const platformNativeArtifactPattern = /(^|\/)(?:libopentui|opentui).*\.(?:so|dylib|dll|node)$/i;
 
 const root = process.cwd();
 const tempRoot = mkdtempSync(join(tmpdir(), "open-emails-pack-scan-"));
@@ -51,6 +52,10 @@ try {
 
   for (const file of packInfo.files ?? []) {
     const relativePath = file.path;
+    if (platformNativeArtifactPattern.test(relativePath)) {
+      findings.push(`${relativePath} is a platform-native artifact`);
+      continue;
+    }
     if (!/\.(json|md|ts|tsx|js|mjs|cjs|yml|yaml|toml|lock)$/.test(relativePath)) continue;
     const path = join(packageDir, relativePath);
     if (!existsSync(path)) continue;
@@ -67,7 +72,7 @@ try {
     console.error(findings.join("\n"));
     process.exitCode = 1;
   } else {
-    console.log(`${basename(tarball)} has no retired cloud runtime references`);
+    console.log(`${basename(tarball)} has no retired cloud runtime references or platform-native artifacts`);
   }
 } finally {
   rmSync(tempRoot, { recursive: true, force: true });

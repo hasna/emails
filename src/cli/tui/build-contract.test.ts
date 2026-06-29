@@ -24,6 +24,9 @@ describe("emails ui build contract", () => {
     expect(buildHelper).toContain("createSolidTransformPlugin");
     expect(buildHelper).toContain('"@opentui/core-linux-arm64"');
     expect(buildHelper).toContain('"@opentui/core-darwin-arm64"');
+    expect(buildHelper).toContain("...nativePackages");
+    expect(buildHelper).not.toContain("nativeBundleCandidates");
+    expect(buildHelper).not.toContain("bundledNative");
   });
 
   it("runs the UI in alternate screen and keeps renderer cleanup on signal paths", () => {

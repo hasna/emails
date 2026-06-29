@@ -161,7 +161,7 @@ const FOLDER_WHERE: Record<Exclude<Mailbox, "sent">, string> = {
   inbox: `is_sent = 0 AND is_archived = 0 AND ${NOT_SPAM_OR_TRASH_SQL}`,
   unread: `is_sent = 0 AND is_read = 0 AND is_archived = 0 AND ${NOT_SPAM_OR_TRASH_SQL}`,
   starred: `is_sent = 0 AND is_starred = 1 AND is_archived = 0 AND ${NOT_SPAM_OR_TRASH_SQL}`,
-  archived: `is_archived = 1 AND ${NOT_SPAM_OR_TRASH_SQL}`,
+  archived: `is_sent = 0 AND is_archived = 1 AND ${NOT_SPAM_OR_TRASH_SQL}`,
   spam: `is_sent = 0 AND ${SPAM_LABEL_SQL}`,
   trash: `is_sent = 0 AND ${TRASH_LABEL_SQL}`,
 };
@@ -232,13 +232,8 @@ function inboundSourceClause(src?: MailboxSource): SqlClause {
   if (normalized?.providerId) { sql += " AND provider_id = ?"; params.push(normalized.providerId); }
   if (normalized?.legacy) sql += " AND provider_id IS NULL";
   if (normalized?.s3Bucket) {
-    if (normalized.providerId) {
-      sql += " AND (raw_s3_url LIKE ? OR (raw_s3_url IS NULL AND message_id IS NOT NULL))";
-      params.push(`s3://${normalized.s3Bucket}/%`);
-    } else {
-      sql += " AND raw_s3_url LIKE ?";
-      params.push(`s3://${normalized.s3Bucket}/%`);
-    }
+    sql += " AND raw_s3_url LIKE ?";
+    params.push(`s3://${normalized.s3Bucket}/%`);
   }
   return { sql, params };
 }
@@ -374,7 +369,7 @@ export function listMailbox(mailbox: Mailbox, opts?: MailboxListOptions, db?: Da
                 is_read, is_starred, label_ids_json, thread_id, provider_thread_id, substr(text_body, 1, 140) AS snippet,
                 (CASE WHEN attachments_json IS NULL OR attachments_json = '[]' THEN 0
                       ELSE (LENGTH(attachments_json) - LENGTH(REPLACE(attachments_json, '"filename"', ''))) / LENGTH('"filename"') END) AS attachments
-         FROM inbound_emails WHERE is_sent = 1 AND is_archived = 0${senderSrc.sql}${sentSearch.sql}${sentLabel.sql}
+         FROM inbound_emails WHERE is_sent = 1${senderSrc.sql}${sentSearch.sql}${sentLabel.sql}
          ORDER BY received_at ${order}
          LIMIT ?
        )
@@ -420,7 +415,7 @@ function unscopedMailboxCounts(db: Database): MailboxCounts {
        (SELECT COUNT(*) FROM inbound_emails WHERE ${FOLDER_WHERE.spam}) AS spam,
        (SELECT COUNT(*) FROM inbound_emails WHERE ${FOLDER_WHERE.trash}) AS trash,
        (SELECT COUNT(*) FROM emails) +
-       (SELECT COUNT(*) FROM inbound_emails WHERE is_sent = 1 AND is_archived = 0) AS sent`,
+       (SELECT COUNT(*) FROM inbound_emails WHERE is_sent = 1) AS sent`,
   ).get() as Partial<Record<keyof MailboxCounts, unknown>> | null;
   return {
     inbox: countValue(row?.inbox),
@@ -455,7 +450,7 @@ export function mailboxCounts(optsOrDb?: Database | { source?: MailboxSource }, 
        COALESCE(inbound.spam, 0) AS spam,
        COALESCE(inbound.trash, 0) AS trash,
        (SELECT COUNT(*) FROM emails e${appSrc.sql}) +
-       (SELECT COUNT(*) FROM inbound_emails WHERE is_sent = 1 AND is_archived = 0${senderSrc.sql}) AS sent
+       (SELECT COUNT(*) FROM inbound_emails WHERE is_sent = 1${senderSrc.sql}) AS sent
      FROM (
        SELECT
          SUM(CASE WHEN ${FOLDER_WHERE.inbox} THEN 1 ELSE 0 END) AS inbox,
@@ -1310,7 +1305,7 @@ function allDomainMailCounts(db: Database, domains: string[]): Map<string, Domai
        domain,
        COALESCE(SUM(CASE WHEN is_sent = 0 AND is_archived = 0 THEN 1 ELSE 0 END), 0) AS inbox,
        COALESCE(SUM(CASE WHEN is_sent = 0 AND is_read = 0 AND is_archived = 0 THEN 1 ELSE 0 END), 0) AS unread,
-       COALESCE(SUM(CASE WHEN is_archived = 1 THEN 1 ELSE 0 END), 0) AS archived
+       COALESCE(SUM(CASE WHEN is_sent = 0 AND is_archived = 1 THEN 1 ELSE 0 END), 0) AS archived
      FROM recipient_domains
      GROUP BY domain`,
   ).all(...domainParams) as Array<{ domain: string; inbox: unknown; unread: unknown; archived: unknown }>;

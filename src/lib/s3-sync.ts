@@ -323,27 +323,31 @@ async function listObjectPage(
   };
 }
 
-function getExistingMessageIds(db: Database, messageIds: string[]): Set<string> {
-  const unique = [...new Set(messageIds.filter(Boolean))];
+function s3ObjectUrl(bucket: string, key: string): string {
+  return `s3://${bucket}/${key}`;
+}
+
+function getExistingS3Urls(db: Database, rawS3Urls: string[]): Set<string> {
+  const unique = [...new Set(rawS3Urls.filter(Boolean))];
   const existing = new Set<string>();
   for (let i = 0; i < unique.length; i += 500) {
     const chunk = unique.slice(i, i + 500);
     const placeholders = chunk.map(() => "?").join(", ");
     const rows = db
-      .query(`SELECT message_id FROM inbound_emails WHERE message_id IN (${placeholders})`)
-      .all(...chunk) as Array<{ message_id: string | null }>;
+      .query(`SELECT raw_s3_url FROM inbound_emails WHERE raw_s3_url IN (${placeholders})`)
+      .all(...chunk) as Array<{ raw_s3_url: string | null }>;
     for (const row of rows) {
-      if (row.message_id) existing.add(row.message_id);
+      if (row.raw_s3_url) existing.add(row.raw_s3_url);
     }
   }
   return existing;
 }
 
-function tagExistingMessageProvider(db: Database, messageId: string, providerId: string | null): void {
+function tagExistingS3Provider(db: Database, rawS3Url: string, providerId: string | null): void {
   if (!providerId) return;
   db.run(
-    "UPDATE inbound_emails SET provider_id = ? WHERE message_id = ? AND provider_id IS NULL",
-    [providerId, messageId],
+    "UPDATE inbound_emails SET provider_id = ? WHERE raw_s3_url = ? AND provider_id IS NULL",
+    [providerId, rawS3Url],
   );
 }
 
@@ -378,12 +382,13 @@ async function processS3Object(
   }));
 
   const headerObj = flattenHeaders(parsed.headers);
+  const rawS3Url = s3ObjectUrl(bucket, obj.key);
 
   const stored = storeInboundEmail({
     provider_id: providerId,
-    message_id: obj.key,
+    message_id: rawS3Url,
     in_reply_to_email_id: null,
-    raw_s3_url: `s3://${bucket}/${obj.key}`,
+    raw_s3_url: rawS3Url,
     from_address: fromAddr,
     to_addresses: toAddrs,
     cc_addresses: ccAddrs,
@@ -486,7 +491,8 @@ function flattenHeaders(headers: unknown): Record<string, string> {
 
 export async function syncS3Inbox(opts: S3SyncOptions): Promise<S3SyncResult> {
   opts = resolveS3SourceForSync(opts);
-  if (!opts.bucket) throw new Error("No S3 bucket: pass bucket or sourceId");
+  const bucket = opts.bucket;
+  if (!bucket) throw new Error("No S3 bucket: pass bucket or sourceId");
   const db = opts.db ?? getDatabase();
   const { s3, s3Sdk } = await makeS3Client(opts);
   const prefix = opts.prefix ?? "";
@@ -510,16 +516,17 @@ export async function syncS3Inbox(opts: S3SyncOptions): Promise<S3SyncResult> {
   do {
     let page: Awaited<ReturnType<typeof listObjectPage>>;
     try {
-      page = await listObjectPage(s3, s3Sdk, opts.bucket, prefix, continuationToken);
+      page = await listObjectPage(s3, s3Sdk, bucket, prefix, continuationToken);
     } catch (e) {
       result.errors.push(`Failed to list S3 objects: ${String(e)}`);
       return result;
     }
 
-    const existingMessageIds = getExistingMessageIds(db, page.objects.map((object) => object.key));
+    const existingS3Urls = getExistingS3Urls(db, page.objects.map((object) => s3ObjectUrl(bucket, object.key)));
     for (const obj of page.objects) {
-      if (existingMessageIds.has(obj.key)) {
-        tagExistingMessageProvider(db, obj.key, providerId);
+      const rawS3Url = s3ObjectUrl(bucket, obj.key);
+      if (existingS3Urls.has(rawS3Url)) {
+        tagExistingS3Provider(db, rawS3Url, providerId);
         result.skipped++;
         result.last_key = obj.key;
         continue;
@@ -528,7 +535,7 @@ export async function syncS3Inbox(opts: S3SyncOptions): Promise<S3SyncResult> {
       if (attemptedNewObjects >= limit) break;
       attemptedNewObjects++;
       try {
-        await processS3Object(db, s3, s3Sdk, syncConfig, opts.bucket, providerId, obj, result);
+        await processS3Object(db, s3, s3Sdk, syncConfig, bucket, providerId, obj, result);
       } catch (e) {
         result.errors.push(`${obj.key}: ${String(e)}`);
       }
@@ -540,7 +547,7 @@ export async function syncS3Inbox(opts: S3SyncOptions): Promise<S3SyncResult> {
 
   // Persist last synced key
   if (result.last_key) {
-    setLastSyncedKey(opts.bucket, prefix, result.last_key);
+    setLastSyncedKey(bucket, prefix, result.last_key);
   }
 
   return result;

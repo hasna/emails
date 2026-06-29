@@ -77,6 +77,31 @@ describe("tui data — mailboxes", () => {
     expect(c.inbox).toBe(3);      // a, b, s (archived excluded)
   });
 
+  it("keeps sent mail in Sent even when it also has archived state", () => {
+    const db = getDatabase();
+    const sent = storeInboundEmail({
+      provider_id: providerId,
+      message_id: "<sent-archived@x>",
+      from_address: "me@example.com",
+      to_addresses: ["client@example.com"],
+      cc_addresses: [],
+      subject: "sent archived",
+      text_body: "body",
+      html_body: null,
+      attachments: [],
+      label_ids: ["SENT"],
+      headers: {},
+      raw_size: 1,
+      received_at: "2026-01-04T10:00:00.000Z",
+    }, db);
+    setInboundArchived(sent.id, true, db);
+
+    expect(listMailbox("sent", undefined, db).map((message) => message.subject)).toContain("sent archived");
+    expect(listMailbox("archived", undefined, db).map((message) => message.subject)).not.toContain("sent archived");
+    expect(mailboxCounts(db).sent).toBe(1);
+    expect(mailboxCounts(db).archived).toBe(0);
+  });
+
   it("computes unscoped counts with indexed scalar probes", () => {
     seed("a");
     seed("b", { read: true });
@@ -121,7 +146,6 @@ describe("tui data — mailboxes", () => {
     expect(details).toContain("idx_inbound_sent_arch_spam_trash_recv");
     expect(details).toContain("idx_inbound_sent_read_arch_spam_trash_recv");
     expect(details).toContain("idx_inbound_sent_star_arch_spam_trash_recv");
-    expect(details).toContain("idx_inbound_arch_spam_trash_recv");
     expect(details).toContain("idx_inbound_sent_spam_recv");
     expect(details).toContain("idx_inbound_sent_trash_recv");
     expect(details).not.toContain("SCAN inbound_emails");
@@ -1178,7 +1202,7 @@ describe("tui data — mailbox scopes and ingestion sources", () => {
     });
   });
 
-  it("counts legacy S3 rows without raw_s3_url under configured S3 sources", () => {
+  it("does not attribute provider-tagged rows without raw_s3_url to a configured S3 bucket", () => {
     const db = getDatabase();
     setConfigValue("inbound_s3_buckets", [{ bucket: "legacy-s3-bucket", region: "us-east-1", providerId }]);
     storeInboundEmail({
@@ -1199,8 +1223,9 @@ describe("tui data — mailbox scopes and ingestion sources", () => {
     const sourceId = `s3:${encodeURIComponent("legacy-s3-bucket")}`;
     const s3Source = listMailboxSources({ search: "legacy-s3-bucket" }, db).find((source) => source.id === sourceId);
 
-    expect(s3Source).toMatchObject({ kind: "s3", providerId, total: 1 });
-    expect(listMailbox("inbox", { source: { sourceId } }, db).map((message) => message.subject)).toEqual(["old s3 row"]);
+    expect(s3Source).toMatchObject({ kind: "s3", providerId, total: 0 });
+    expect(listMailbox("inbox", { source: { sourceId } }, db).map((message) => message.subject)).toEqual([]);
+    expect(listMailbox("inbox", { source: { sourceId: providerSourceId(providerId) } }, db).map((message) => message.subject)).toEqual(["old s3 row"]);
   });
 
   it("uses the same source-aware folder status for TUI lists and search", () => {

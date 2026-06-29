@@ -148,14 +148,39 @@ describe("emails storage sync configuration", () => {
 
   it("parses and validates storage table filters", () => {
     expect(parseStorageTables(["providers", "domains"])).toEqual(["providers", "domains"]);
-    expect(parseStorageTables(["inbound_recipients", "inbound_labels", "email_agent_settings", "email_agent_runs", "email_digests"])).toEqual([
+    expect(parseStorageTables([
       "inbound_recipients",
       "inbound_labels",
+      "mailboxes",
+      "mailbox_sources",
+      "mail_folders",
+      "mail_messages",
+      "mailbox_message_state",
+      "email_agent_settings",
+      "email_agent_runs",
+      "email_digests",
+    ])).toEqual([
+      "inbound_recipients",
+      "inbound_labels",
+      "mailboxes",
+      "mailbox_sources",
+      "mail_folders",
+      "mail_messages",
+      "mailbox_message_state",
       "email_agent_settings",
       "email_agent_runs",
       "email_digests",
     ]);
     expect(() => parseStorageTables(["providers", "missing"])).toThrow("Unknown emails sync table(s): missing");
+  });
+
+  it("reconciles remote-derived labels and canonical mailbox state after storage sync", () => {
+    const source = readFileSync(`${import.meta.dir}/storage-sync.ts`, "utf8");
+
+    expect(source).toContain("rebuildInboundLabelState");
+    expect(source).toContain("reconcileMailboxMessageState");
+    expect(source).toContain("DELETE FROM inbound_labels label");
+    expect(source).toContain("UPDATE mailbox_message_state state");
   });
 
   it("requires explicit force for pull-then-push sync", async () => {
@@ -193,6 +218,60 @@ describe("emails storage sync configuration", () => {
     expect(results[0]).toMatchObject({ table: "providers", rowsWritten: 1, errors: [] });
     expect(results[1]).toMatchObject({ table: "owners", errors: ["remote read failed"] });
     expect(listProviders()).toEqual([]);
+  });
+
+  it("rebuilds stale pulled inbound label rows from inbound_emails.label_ids_json", async () => {
+    const remote = new FakeRemote({
+      inbound_emails: [{
+        id: "inbound-1",
+        provider_id: null,
+        message_id: "remote-message-1",
+        in_reply_to_email_id: null,
+        provider_thread_id: null,
+        thread_id: null,
+        provider_history_id: null,
+        provider_internal_date: null,
+        label_ids_json: "[]",
+        raw_s3_url: null,
+        metadata_s3_url: null,
+        from_address: "sender@example.com",
+        to_addresses: "[\"me@example.com\"]",
+        cc_addresses: "[]",
+        subject: "Remote pull",
+        text_body: "body",
+        html_body: null,
+        attachments_json: "[]",
+        attachment_paths: "[]",
+        headers_json: "{}",
+        raw_size: 1,
+        is_read: 0,
+        read_at: null,
+        is_archived: 0,
+        is_starred: 0,
+        is_sent: 0,
+        is_spam: 0,
+        is_trash: 0,
+        received_at: "2026-01-01T00:00:00.000Z",
+        created_at: "2026-01-01T00:00:00.000Z",
+        mail_message_id: "msg:inbound:inbound-1",
+      }],
+      inbound_labels: [{ inbound_email_id: "inbound-1", label: "spam" }],
+    });
+
+    const results = await pullTablesFromRemote(
+      remote as unknown as PgAdapterAsync,
+      getDatabase(),
+      { tables: ["inbound_emails", "inbound_labels"], batchSize: 2 },
+    );
+
+    expect(results.every((result) => result.errors.length === 0)).toBe(true);
+    expect(getDatabase().query("SELECT * FROM inbound_labels").all()).toEqual([]);
+    expect(getDatabase().query("SELECT is_spam, is_trash FROM inbound_emails WHERE id = 'inbound-1'").get()).toEqual({ is_spam: 0, is_trash: 0 });
+    expect(getDatabase().query("SELECT is_spam, is_trash, folder_id FROM mailbox_message_state WHERE mail_message_id = 'msg:inbound:inbound-1'").get()).toMatchObject({
+      is_spam: 0,
+      is_trash: 0,
+      folder_id: "folder:mbx:me@example.com:inbox",
+    });
   });
 });
 
