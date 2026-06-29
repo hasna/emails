@@ -6,7 +6,7 @@
  * user-visible scopes, and folders are inbox/unread/sent/etc.
  */
 import type { Database } from "../../db/database.js";
-import { getDatabase, resolvePartialIdOrThrow, uuid } from "../../db/database.js";
+import { backfillLegacyS3RawUrls, getDatabase, resolvePartialIdOrThrow, uuid } from "../../db/database.js";
 import { sqlEmailAddress, sqlEmailDomain } from "../../db/email-address-sql.js";
 import { parseJsonArray } from "../../db/json.js";
 import { countValue } from "../../db/scalars.js";
@@ -609,6 +609,10 @@ export function listMailboxSources(opts?: ListMailboxSourcesOptions, db?: Databa
 export function listMailboxSources(optsOrDb?: ListMailboxSourcesOptions | Database, maybeDb?: Database): MailboxSourceSummary[] {
   const d = isDatabase(optsOrDb) ? optsOrDb : maybeDb || getDatabase();
   const opts = isDatabase(optsOrDb) ? undefined : optsOrDb;
+  const inboundBuckets = getInboundBuckets();
+  if (inboundBuckets.length > 0) {
+    backfillLegacyS3RawUrls(inboundBuckets.map((bucket) => ({ bucket: bucket.bucket, providerId: bucket.providerId })), d);
+  }
   const sources: MailboxSourceSummary[] = [
     sourceSummary({
       id: "all",
@@ -645,7 +649,7 @@ export function listMailboxSources(optsOrDb?: ListMailboxSourcesOptions | Databa
     }, { sourceId: id }, d));
   }
 
-  for (const bucket of getInboundBuckets()) {
+  for (const bucket of inboundBuckets) {
     const id = s3SourceId(bucket.bucket);
     sources.push(sourceSummary({
       id,

@@ -1202,8 +1202,9 @@ describe("tui data — mailbox scopes and ingestion sources", () => {
     });
   });
 
-  it("does not attribute provider-tagged rows without raw_s3_url to a configured S3 bucket", () => {
+  it("backfills provider-tagged S3 rows only when a configured bucket maps the provider", () => {
     const db = getDatabase();
+    const otherProvider = createProvider({ name: "other-ses", type: "ses", active: true }).id;
     setConfigValue("inbound_s3_buckets", [{ bucket: "legacy-s3-bucket", region: "us-east-1", providerId }]);
     storeInboundEmail({
       provider_id: providerId,
@@ -1219,13 +1220,28 @@ describe("tui data — mailbox scopes and ingestion sources", () => {
       raw_size: 1,
       received_at: "2026-01-04T10:00:00.000Z",
     }, db);
+    storeInboundEmail({
+      provider_id: otherProvider,
+      message_id: "inbound/example.com/other-object",
+      from_address: "sender@example.com",
+      to_addresses: ["ops@example.com"],
+      cc_addresses: [],
+      subject: "unmapped s3 row",
+      text_body: "body",
+      html_body: null,
+      attachments: [],
+      headers: {},
+      raw_size: 1,
+      received_at: "2026-01-04T11:00:00.000Z",
+    }, db);
 
     const sourceId = `s3:${encodeURIComponent("legacy-s3-bucket")}`;
     const s3Source = listMailboxSources({ search: "legacy-s3-bucket" }, db).find((source) => source.id === sourceId);
 
-    expect(s3Source).toMatchObject({ kind: "s3", providerId, total: 0 });
-    expect(listMailbox("inbox", { source: { sourceId } }, db).map((message) => message.subject)).toEqual([]);
+    expect(s3Source).toMatchObject({ kind: "s3", providerId, total: 1 });
+    expect(listMailbox("inbox", { source: { sourceId } }, db).map((message) => message.subject)).toEqual(["old s3 row"]);
     expect(listMailbox("inbox", { source: { sourceId: providerSourceId(providerId) } }, db).map((message) => message.subject)).toEqual(["old s3 row"]);
+    expect(listMailbox("inbox", { source: { sourceId: providerSourceId(otherProvider) } }, db).map((message) => message.subject)).toEqual(["unmapped s3 row"]);
   });
 
   it("uses the same source-aware folder status for TUI lists and search", () => {

@@ -44,7 +44,7 @@ describe("getDatabase", () => {
   it("records the latest SQLite migration in _migrations", () => {
     const db = getDatabase();
     const row = db.query("SELECT MAX(id) as max_id FROM _migrations").get() as { max_id: number } | null;
-    expect(row?.max_id).toBeGreaterThanOrEqual(35);
+    expect(row?.max_id).toBeGreaterThanOrEqual(43);
   });
 
   it("creates hot-path composite indexes used by list and export queries", () => {

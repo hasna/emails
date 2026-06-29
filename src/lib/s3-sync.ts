@@ -13,7 +13,7 @@
 import type { S3Client } from "@aws-sdk/client-s3";
 import { storeInboundEmail, updateAttachmentPaths } from "../db/inbound.js";
 import type { AttachmentPath } from "../db/inbound.js";
-import { getDatabase, getDataDir, resolvePartialId } from "../db/database.js";
+import { backfillLegacyS3RawUrls, getDatabase, getDataDir, resolvePartialId } from "../db/database.js";
 import { loadConfig, saveConfig, getGmailSyncConfig } from "./config.js";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -508,6 +508,7 @@ export async function syncS3Inbox(opts: S3SyncOptions): Promise<S3SyncResult> {
     if (!resolved) throw new Error(`Provider not found: ${providerId}`);
     providerId = resolved;
   }
+  backfillLegacyS3RawUrls([{ bucket, providerId }], db);
   const syncConfig = getGmailSyncConfig();
   const result: S3SyncResult = { synced: 0, skipped: 0, attachments_saved: 0, errors: [] };
 

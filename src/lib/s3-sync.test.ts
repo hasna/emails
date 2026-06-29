@@ -206,6 +206,35 @@ describe("syncS3Inbox — with objects", () => {
     ]);
   });
 
+  it("backfills legacy provider-key rows before exact S3 URL dedupe", async () => {
+    const { db, providerId } = setupDb();
+    db.run(
+      `INSERT INTO inbound_emails
+        (id, provider_id, message_id, from_address, to_addresses, cc_addresses, subject, received_at)
+       VALUES (?, ?, ?, 'old@example.com', '[]', '[]', 'legacy', datetime('now'))`,
+      [uuid(), providerId, "inbound/example.com/legacy-key"],
+    );
+
+    mockSend.mockImplementation(async (cmd: unknown) => {
+      const c = cmd as { input?: Record<string, unknown> };
+      if (c?.input && "Prefix" in (c.input ?? {})) {
+        return { Contents: [{ Key: "inbound/example.com/legacy-key", Size: 1024 }], IsTruncated: false };
+      }
+      if (c?.input && "Key" in (c.input ?? {})) {
+        return { Body: (async function* () { yield Buffer.from("From: a@b.com\r\nSubject: duplicate\r\n\r\nB"); })() };
+      }
+      return {};
+    });
+
+    const result = await syncS3Inbox({ bucket: "test-bucket", db, providerId });
+    const rows = db.query("SELECT message_id, raw_s3_url FROM inbound_emails").all() as Array<{ message_id: string; raw_s3_url: string | null }>;
+
+    expect(result).toMatchObject({ synced: 0, skipped: 1, errors: [] });
+    expect(rows).toEqual([
+      { message_id: "inbound/example.com/legacy-key", raw_s3_url: "s3://test-bucket/inbound/example.com/legacy-key" },
+    ]);
+  });
+
   it("resolves a PARTIAL provider id (regression: FOREIGN KEY constraint failed)", async () => {
     const { db, providerId } = setupDb();
     const partial = providerId.slice(0, 8); // e.g. "45c38857"

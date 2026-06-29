@@ -1482,6 +1482,34 @@ export const PG_MIGRATIONS: string[] = [
   INSERT INTO _migrations (id) VALUES (42) ON CONFLICT DO NOTHING;
   `,
 
+  // Migration 43: preserve already bucket-qualified S3 provenance in
+  // canonical messages before exact S3 source filters/dedupe rely on raw_s3_url.
+  `
+  UPDATE inbound_emails
+     SET raw_s3_url = message_id
+   WHERE (raw_s3_url IS NULL OR raw_s3_url = '')
+     AND message_id LIKE 's3://%';
+
+  UPDATE mail_messages message
+     SET raw_s3_url = inbound.raw_s3_url
+    FROM inbound_emails inbound
+   WHERE inbound.mail_message_id = message.id
+     AND (message.raw_s3_url IS NULL OR message.raw_s3_url = '')
+     AND inbound.raw_s3_url IS NOT NULL
+     AND inbound.raw_s3_url != '';
+
+  UPDATE mail_messages message
+     SET raw_s3_url = inbound.raw_s3_url
+    FROM inbound_emails inbound
+   WHERE inbound.mail_message_id IS NULL
+     AND 'msg:inbound:' || inbound.id = message.id
+     AND (message.raw_s3_url IS NULL OR message.raw_s3_url = '')
+     AND inbound.raw_s3_url IS NOT NULL
+     AND inbound.raw_s3_url != '';
+
+  INSERT INTO _migrations (id) VALUES (43) ON CONFLICT DO NOTHING;
+  `,
+
   // Feedback table
   `
   CREATE TABLE IF NOT EXISTS feedback (

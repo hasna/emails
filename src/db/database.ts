@@ -816,6 +816,50 @@ const MAIL_ARCHITECTURE_STATE_RECONCILE_SQL = `
   DROP TABLE IF EXISTS temp_mailery_inbound_state_reconcile;
 `;
 
+const S3_MESSAGE_ID_RAW_URL_BACKFILL_SQL = `
+  UPDATE inbound_emails
+     SET raw_s3_url = message_id
+   WHERE (raw_s3_url IS NULL OR raw_s3_url = '')
+     AND message_id LIKE 's3://%';
+
+  UPDATE mail_messages
+     SET raw_s3_url = (
+           SELECT inbound.raw_s3_url
+             FROM inbound_emails inbound
+            WHERE inbound.mail_message_id = mail_messages.id
+              AND inbound.raw_s3_url IS NOT NULL
+              AND inbound.raw_s3_url != ''
+            LIMIT 1
+         )
+   WHERE (raw_s3_url IS NULL OR raw_s3_url = '')
+     AND id IN (
+           SELECT inbound.mail_message_id
+             FROM inbound_emails inbound
+            WHERE inbound.mail_message_id IS NOT NULL
+              AND inbound.raw_s3_url IS NOT NULL
+              AND inbound.raw_s3_url != ''
+         );
+
+  UPDATE mail_messages
+     SET raw_s3_url = (
+           SELECT inbound.raw_s3_url
+             FROM inbound_emails inbound
+            WHERE inbound.mail_message_id IS NULL
+              AND 'msg:inbound:' || inbound.id = mail_messages.id
+              AND inbound.raw_s3_url IS NOT NULL
+              AND inbound.raw_s3_url != ''
+            LIMIT 1
+         )
+   WHERE (raw_s3_url IS NULL OR raw_s3_url = '')
+     AND id IN (
+           SELECT 'msg:inbound:' || inbound.id
+             FROM inbound_emails inbound
+            WHERE inbound.mail_message_id IS NULL
+              AND inbound.raw_s3_url IS NOT NULL
+              AND inbound.raw_s3_url != ''
+         );
+`;
+
 const PROVIDER_DELETE_GUARD_SQL = `
   CREATE TRIGGER trg_providers_preserve_mail_history
   BEFORE DELETE ON providers
@@ -924,6 +968,61 @@ export function reconcileMailboxMessageState(db?: Database): void {
   const d = db || getDatabase();
   ensureMailArchitecture(d);
   d.exec(MAIL_ARCHITECTURE_STATE_RECONCILE_SQL);
+}
+
+export interface LegacyS3RawUrlSource {
+  bucket: string;
+  providerId?: string | null;
+}
+
+function runS3MessageIdRawUrlBackfill(db: Database): void {
+  for (const statement of S3_MESSAGE_ID_RAW_URL_BACKFILL_SQL.split(";")) {
+    const sql = statement.trim();
+    if (!sql) continue;
+    db.query(sql).run();
+  }
+}
+
+export function backfillLegacyS3RawUrls(sources: LegacyS3RawUrlSource[], db?: Database): number {
+  const d = db || getDatabase();
+  runS3MessageIdRawUrlBackfill(d);
+
+  let updated = 0;
+  const seen = new Set<string>();
+  for (const source of sources) {
+    const bucket = source.bucket.trim();
+    const providerId = source.providerId?.trim();
+    if (!bucket || !providerId) continue;
+    const key = `${bucket}\0${providerId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    const before = d
+      .query(
+        `SELECT COUNT(*) AS count
+           FROM inbound_emails
+          WHERE provider_id = ?
+            AND (raw_s3_url IS NULL OR raw_s3_url = '')
+            AND message_id IS NOT NULL
+            AND message_id != ''
+            AND message_id NOT LIKE 's3://%'`,
+      )
+      .get(providerId) as { count: number } | null;
+
+    d.query(
+      `UPDATE inbound_emails
+          SET raw_s3_url = 's3://' || ? || '/' || message_id
+        WHERE provider_id = ?
+          AND (raw_s3_url IS NULL OR raw_s3_url = '')
+          AND message_id IS NOT NULL
+          AND message_id != ''
+          AND message_id NOT LIKE 's3://%'`,
+    ).run(bucket, providerId);
+    updated += before?.count ?? 0;
+  }
+
+  runS3MessageIdRawUrlBackfill(d);
+  return updated;
 }
 
 const MIGRATIONS = [
@@ -1705,6 +1804,13 @@ const MIGRATIONS = [
   `
   ${MAIL_ARCHITECTURE_STATE_RECONCILE_SQL}
   INSERT OR IGNORE INTO _migrations (id) VALUES (42);
+  `,
+
+  // Migration 43: preserve already bucket-qualified S3 provenance in
+  // canonical messages before exact S3 source filters/dedupe rely on raw_s3_url.
+  `
+  ${S3_MESSAGE_ID_RAW_URL_BACKFILL_SQL}
+  INSERT OR IGNORE INTO _migrations (id) VALUES (43);
   `,
 ];
 

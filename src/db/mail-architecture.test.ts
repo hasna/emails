@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { Database } from "bun:sqlite";
-import { closeDatabase, ensureMailArchitecture, getDatabase, resetDatabase } from "./database.js";
+import { backfillLegacyS3RawUrls, closeDatabase, ensureMailArchitecture, getDatabase, resetDatabase } from "./database.js";
 import { createProvider, deleteProvider, getProvider } from "./providers.js";
 import { createMailbox, getMailboxFolderByRole, listMailboxes } from "./mailboxes.js";
 import { createMailboxSource, getMailboxSource, listMailboxSources } from "./sources.js";
@@ -449,6 +449,38 @@ describe("mail architecture data model", () => {
     expect(listMailboxes(db).map((mailbox) => mailbox.address).sort()).toEqual(["a@example.com", "b@example.com"]);
   });
 
+  it("backfills legacy SES/S3 rows from configured bucket provenance", () => {
+    const db = getDatabase();
+    const provider = createProvider({ name: "SES inbound", type: "ses", region: "us-east-1", access_key: "local-access" }, db);
+    const stored = storeInboundEmail({
+      provider_id: provider.id,
+      message_id: "inbound/example.com/object-key",
+      from_address: "sender@example.com",
+      to_addresses: ["ops@example.com"],
+      cc_addresses: [],
+      subject: "Legacy S3 object",
+      text_body: "body",
+      html_body: null,
+      attachments: [],
+      headers: {},
+      raw_size: 12,
+      received_at: "2026-06-29T10:00:00.000Z",
+    }, db);
+
+    const updated = backfillLegacyS3RawUrls([{ bucket: "mailery-test-bucket", providerId: provider.id }], db);
+    const inbound = db
+      .query("SELECT raw_s3_url, mail_message_id FROM inbound_emails WHERE id = ?")
+      .get(stored.id) as { raw_s3_url: string; mail_message_id: string };
+    const message = db
+      .query("SELECT raw_s3_url FROM mail_messages WHERE id = ?")
+      .get(inbound.mail_message_id) as { raw_s3_url: string };
+
+    expect(updated).toBe(1);
+    expect(inbound.raw_s3_url).toBe("s3://mailery-test-bucket/inbound/example.com/object-key");
+    expect(message.raw_s3_url).toBe("s3://mailery-test-bucket/inbound/example.com/object-key");
+    expect(backfillLegacyS3RawUrls([{ bucket: "mailery-test-bucket", providerId: provider.id }], db)).toBe(0);
+  });
+
   it("dedupes source keys per source while allowing the same key on another source", () => {
     const db = getDatabase();
     const mailbox = createMailbox({ address: "dedupe@example.com" }, db);
@@ -534,7 +566,7 @@ describe("mail architecture data model", () => {
 
     expect(sqliteIndex?.name).toBe("idx_mailbox_state_source_dedupe");
     expect(sqliteTrigger?.name).toBe("trg_providers_preserve_mail_history");
-    expect(latestMigration.max_id).toBeGreaterThanOrEqual(42);
+    expect(latestMigration.max_id).toBeGreaterThanOrEqual(43);
     expect(pgSql).toContain("idx_mailbox_state_source_dedupe");
     expect(pgSql).toContain("mailery_after_inbound_insert_architecture");
     expect(pgSql).toContain("DROP TRIGGER IF EXISTS trg_mail_architecture_inbound_insert ON inbound_emails");
@@ -542,5 +574,6 @@ describe("mail architecture data model", () => {
     expect(pgSql).toContain("INSERT INTO _migrations (id) VALUES (40)");
     expect(pgSql).toContain("INSERT INTO _migrations (id) VALUES (41)");
     expect(pgSql).toContain("INSERT INTO _migrations (id) VALUES (42)");
+    expect(pgSql).toContain("INSERT INTO _migrations (id) VALUES (43)");
   });
 });
