@@ -42,7 +42,7 @@ describe("checkProvisionCredentials", () => {
     expect(aws.configured).toBe(true);
     expect(aws.status).toBe("warn");
     expect(aws.detail).toContain("Stored SES provider credentials");
-    expect(aws.detail).toContain("Route53");
+    expect(aws.detail).toContain("AWS domain purchase");
   });
 
   it("resend optional when absent", () => {

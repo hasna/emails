@@ -16,8 +16,6 @@ const heavyRouteImports = [
   "../../lib/doctor.js",
   "../../lib/delivery-doctor.js",
   "../../lib/agent-context.js",
-  "../../lib/gmail-sync.js",
-  "../../lib/gmail-archive.js",
   "../../lib/s3-sync.js",
   "../../lib/aws-inbound.js",
   "../../lib/batch.js",

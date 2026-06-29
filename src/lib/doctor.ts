@@ -11,20 +11,8 @@ import type { DoctorCheck } from "./diagnostics-format.js";
 export { formatDiagnostics } from "./diagnostics-format.js";
 export type { DoctorCheck } from "./diagnostics-format.js";
 
-interface GmailAuthCheckResult {
-  success: boolean;
-  stdout: string;
-  stderr?: string;
-}
-
 export interface DiagnosticsOptions {
   liveProviderChecks?: boolean;
-  gmailAuthCheck?: () => Promise<GmailAuthCheckResult>;
-}
-
-async function runGmailAuthCheck(): Promise<GmailAuthCheckResult> {
-  const { runConnectorCommand } = await import("@hasna/connectors");
-  return runConnectorCommand("gmail", ["-f", "json", "me"]);
 }
 
 export async function runDiagnostics(db?: Database, opts: DiagnosticsOptions = {}): Promise<DoctorCheck[]> {
@@ -146,58 +134,6 @@ export async function runDiagnostics(db?: Database, opts: DiagnosticsOptions = {
   const templateCounts = d.query("SELECT COUNT(*) AS total FROM templates").get() as { total: unknown };
   const templates = countValue(templateCounts.total);
   checks.push({ name: "Templates", status: "pass", message: `${templates} template(s)` });
-
-  // 9. Gmail OAuth status
-  const gmailProviders = providers.filter((p) => p.type === "gmail");
-  for (const p of gmailProviders) {
-    if (!p.oauth_refresh_token) {
-      checks.push({ name: `Gmail: ${p.name}`, status: "fail", message: "No refresh token - run 'mailery provider auth <id>'" });
-      continue;
-    }
-
-    const expiryStatus = (() => {
-      if (!p.oauth_token_expiry) return { status: "warn" as const, message: "Token expiry unknown — will refresh on next use" };
-      const expiry = new Date(p.oauth_token_expiry).getTime();
-      const now = Date.now();
-      if (expiry < now) return { status: "warn" as const, message: `Access token expired (${p.oauth_token_expiry}) — will auto-refresh` };
-      const minsLeft = Math.round((expiry - now) / 60000);
-      return { status: "pass" as const, message: `Access token valid (~${minsLeft}min remaining)` };
-    })();
-
-    if (opts.liveProviderChecks !== true) {
-      checks.push({
-        name: `Gmail: ${p.name}`,
-        status: expiryStatus.status,
-        message: `${expiryStatus.message}; live auth check skipped`,
-      });
-      continue;
-    }
-
-    // Live check via connectors SDK
-    try {
-      const meResult = await (opts.gmailAuthCheck ?? runGmailAuthCheck)();
-      if (!meResult.success) throw new Error(meResult.stderr || meResult.stdout);
-      let emailAddress = "";
-      try {
-        const me = JSON.parse(meResult.stdout) as { emailAddress?: string };
-        emailAddress = me.emailAddress ?? "";
-      } catch {
-        const match = meResult.stdout.match(/emailAddress[:\s]+([^\s,}]+)/);
-        if (match?.[1]) emailAddress = match[1];
-      }
-      checks.push({
-        name: `Gmail: ${p.name}`,
-        status: "pass",
-        message: `Authenticated${emailAddress ? ` as ${emailAddress}` : ""} (${expiryStatus.message})`,
-      });
-    } catch (e) {
-      checks.push({
-        name: `Gmail: ${p.name}`,
-        status: "fail",
-        message: `Auth failed: ${e instanceof Error ? e.message : String(e)}`,
-      });
-    }
-  }
 
   return checks;
 }

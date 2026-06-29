@@ -140,7 +140,7 @@ export function listActiveProviders(type?: ProviderType, db?: Database): Provide
   const d = db || getDatabase();
   const rows = type
     ? d.query(`SELECT ${PROVIDER_COLUMNS} FROM providers WHERE active = 1 AND type = ? ORDER BY created_at DESC`).all(type) as ProviderRow[]
-    : d.query(`SELECT ${PROVIDER_COLUMNS} FROM providers WHERE active = 1 ORDER BY created_at DESC`).all() as ProviderRow[];
+    : d.query(`SELECT ${PROVIDER_COLUMNS} FROM providers WHERE active = 1 AND type != 'gmail' ORDER BY created_at DESC`).all() as ProviderRow[];
   return rows.map(rowToProvider);
 }
 
@@ -153,8 +153,8 @@ export function listActiveProviderSummaries(type?: ProviderType, db?: Database, 
         ? d.query(`SELECT ${PROVIDER_SUMMARY_COLUMNS} FROM providers WHERE active = 1 AND type = ? ORDER BY created_at DESC LIMIT ? OFFSET ?`).all(type, limit, offset) as ProviderSummaryRow[]
         : d.query(`SELECT ${PROVIDER_SUMMARY_COLUMNS} FROM providers WHERE active = 1 AND type = ? ORDER BY created_at DESC`).all(type) as ProviderSummaryRow[])
     : (limit !== null
-        ? d.query(`SELECT ${PROVIDER_SUMMARY_COLUMNS} FROM providers WHERE active = 1 ORDER BY created_at DESC LIMIT ? OFFSET ?`).all(limit, offset) as ProviderSummaryRow[]
-        : d.query(`SELECT ${PROVIDER_SUMMARY_COLUMNS} FROM providers WHERE active = 1 ORDER BY created_at DESC`).all() as ProviderSummaryRow[]);
+        ? d.query(`SELECT ${PROVIDER_SUMMARY_COLUMNS} FROM providers WHERE active = 1 AND type != 'gmail' ORDER BY created_at DESC LIMIT ? OFFSET ?`).all(limit, offset) as ProviderSummaryRow[]
+        : d.query(`SELECT ${PROVIDER_SUMMARY_COLUMNS} FROM providers WHERE active = 1 AND type != 'gmail' ORDER BY created_at DESC`).all() as ProviderSummaryRow[]);
   return rows.map(rowToProviderSummary);
 }
 
@@ -162,7 +162,7 @@ export function getLatestActiveProvider(type?: ProviderType, db?: Database): Pro
   const d = db || getDatabase();
   const row = type
     ? d.query(`SELECT ${PROVIDER_COLUMNS} FROM providers WHERE active = 1 AND type = ? ORDER BY created_at DESC LIMIT 1`).get(type) as ProviderRow | null
-    : d.query(`SELECT ${PROVIDER_COLUMNS} FROM providers WHERE active = 1 ORDER BY created_at DESC LIMIT 1`).get() as ProviderRow | null;
+    : d.query(`SELECT ${PROVIDER_COLUMNS} FROM providers WHERE active = 1 AND type != 'gmail' ORDER BY created_at DESC LIMIT 1`).get() as ProviderRow | null;
   return row ? rowToProvider(row) : null;
 }
 
@@ -170,7 +170,7 @@ export function getLatestActiveProviderId(type?: ProviderType, db?: Database): s
   const d = db || getDatabase();
   const row = type
     ? d.query("SELECT id FROM providers WHERE active = 1 AND type = ? ORDER BY created_at DESC LIMIT 1").get(type) as { id: string } | null
-    : d.query("SELECT id FROM providers WHERE active = 1 ORDER BY created_at DESC LIMIT 1").get() as { id: string } | null;
+    : d.query("SELECT id FROM providers WHERE active = 1 AND type != 'gmail' ORDER BY created_at DESC LIMIT 1").get() as { id: string } | null;
   return row?.id ?? null;
 }
 
@@ -213,7 +213,7 @@ export function deleteProvider(id: string, db?: Database): boolean {
 
 export function getActiveProvider(db?: Database): Provider {
   const d = db || getDatabase();
-  const row = d.query(`SELECT ${PROVIDER_COLUMNS} FROM providers WHERE active = 1 ORDER BY created_at LIMIT 1`).get() as ProviderRow | null;
+  const row = d.query(`SELECT ${PROVIDER_COLUMNS} FROM providers WHERE active = 1 AND type != 'gmail' ORDER BY created_at LIMIT 1`).get() as ProviderRow | null;
   if (!row) throw new ProviderNotFoundError("(no active provider)");
   return rowToProvider(row);
 }

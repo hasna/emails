@@ -3,8 +3,6 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDatabase, resetDatabase } from "../../db/database.js";
-import { createProvider } from "../../db/providers.js";
-import { registerGmailSource } from "../../lib/gmail-sync.js";
 
 // Mock the pull engine so we test the command's behavior, not AWS.
 let pullResult: { pulled: number; ok: boolean; reason?: string; configured: boolean };
@@ -51,29 +49,12 @@ afterEach(() => {
   if (tmpHome) rmSync(tmpHome, { recursive: true, force: true });
 });
 
-function createLiveGmailSource() {
-  const provider = createProvider({ name: "Gmail Test", type: "gmail" });
-  registerGmailSource({ providerId: provider.id, profile: "gmail-test", status: "live", liveSyncEnabled: true });
-  return provider;
-}
-
 describe("emails refresh", () => {
   it("pulls all buckets with a high scan limit by default", async () => {
     pullResult = { pulled: 3, ok: true, configured: true };
     const { out } = await runAsync(["refresh"]);
-    expect(lastOpts).toMatchObject({ s3: true, gmail: false, forwarding: true, limit: 1000 });
+    expect(lastOpts).toMatchObject({ s3: true, forwarding: true, limit: 1000 });
     expect(out).toContain("Pulled 3 new emails");
-  });
-
-  it("does not pass --gmail through without a live Gmail source", async () => {
-    await runAsync(["refresh", "--gmail", "--limit", "50"]);
-    expect(lastOpts).toMatchObject({ s3: true, gmail: false, limit: 50 });
-  });
-
-  it("passes --gmail through when a live Gmail source exists", async () => {
-    createLiveGmailSource();
-    await runAsync(["refresh", "--gmail", "--limit", "50"]);
-    expect(lastOpts).toMatchObject({ s3: true, gmail: true, limit: 50 });
   });
 
   it("can skip forwarding after refresh", async () => {

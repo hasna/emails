@@ -383,7 +383,6 @@ describe("Mailery Solid TUI", () => {
     await clickText("Sync");
     expect(frame()).toContain("Settings / Sync");
     expect(frame()).toContain("Auto-pull inbound");
-    expect(frame()).toContain("Gmail auto-pull");
     await key("escape");
 
     await clickText("Agents");

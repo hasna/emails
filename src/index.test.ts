@@ -5,7 +5,7 @@ import { join } from "node:path";
 import * as emails from "./index.js";
 
 const root = join(import.meta.dir, "..");
-const staticHeavyImport = /^\s*import\s+(?:[\s\S]*?\s+from\s+)?["'](?:@aws-sdk\/|@hasna\/connectors|googleapis|mailparser|pg|resend|chalk|@opentui\/|react(?:\/|["']))/m;
+const staticHeavyImport = /^\s*import\s+(?:[\s\S]*?\s+from\s+)?["'](?:@aws-sdk\/|@hasna\/connectors|mailparser|pg|resend|chalk|@opentui\/|react(?:\/|["']))/m;
 const staticRuntimeReexport = /^\s*export\s+(?!type\b)[\s\S]*?\sfrom\s+["']([^"']+)["'];/gm;
 const lazyRootModules = [
   "./lib/send.js",
@@ -14,7 +14,6 @@ const lazyRootModules = [
   "./lib/doctor.js",
   "./lib/health.js",
   "./lib/dns-check.js",
-  "./lib/gmail-archive.js",
   "./lib/email-verify.js",
   "./lib/triage.js",
   "./lib/cerebras.js",
@@ -85,9 +84,17 @@ describe("public package entrypoint", () => {
       "runMaileryAgent",
       "formatMaileryAgentResult",
       "resolveMaileryAgentDefaults",
+      "getInboundAttachmentStorageConfig",
       "getDefaultGmailArchiveS3Bucket",
       "getDefaultGmailArchiveS3Region",
       "getDefaultGmailArchiveS3Prefix",
+      "getGmailArchiveConfig",
+      "buildGmailArchiveKeys",
+      "uploadGmailArchive",
+      "uploadGmailArchiveAttachment",
+      "uploadGmailArchiveManifest",
+      "verifyGmailArchive",
+      "migrateS3Prefix",
       "listSandboxEmailSummaries",
       "listScheduledEmailSummaries",
       "listTriagedSummaries",

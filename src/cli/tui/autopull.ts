@@ -1,21 +1,18 @@
 /**
- * Background auto-pull for the TUI — the "daemon" half, across every provider:
+ * Background auto-pull for the TUI:
  *   • SES   — drain real-time SES→SNS→SQS and/or dedup-safe scan of each inbound
  *             S3 bucket (buckets can be in different AWS accounts).
- *   • Gmail — incremental sync of the newest messages for each active Gmail
- *             account (via its connector profile).
  *   • Resend — inbound is push (webhook to `mailery serve`), so there's nothing to
  *             pull here; it lands the moment the server receives it.
- * Entirely best-effort: missing config/creds/connector-auth is a silent no-op.
+ * Entirely best-effort: missing config/creds is a silent no-op.
  */
 export interface PullForwardingResult { attempted: number; sent: number; failed: number; skipped: number }
 export interface PullAgentsResult { agents: number; runs: number; errors: number }
 export interface PullResult { pulled: number; ok: boolean; reason?: string; configured: boolean; forwarded?: PullForwardingResult; agents?: PullAgentsResult }
-export interface PullOpts { s3?: boolean; gmail?: boolean; limit?: number; forwarding?: boolean; agents?: boolean }
+export interface PullOpts { s3?: boolean; limit?: number; forwarding?: boolean; agents?: boolean }
 
 export async function autoPull(opts?: PullOpts): Promise<PullResult> {
   const doS3 = opts?.s3 !== false;
-  const doGmail = opts?.gmail === true;
   const limit = opts?.limit ?? 100;
   const { getInboundConfig, getInboundBuckets, loadConfig } = await import("../../lib/config.js");
   const inbound = getInboundConfig();
@@ -69,11 +66,6 @@ export async function autoPull(opts?: PullOpts): Promise<PullResult> {
     } catch (e) { ok = false; reason = e instanceof Error ? e.message : String(e); }
   }
 
-  if (doGmail) {
-    try { pulled += await pullGmail(); }
-    catch (e) { if (ok) { ok = false; reason = e instanceof Error ? e.message : String(e); } }
-  }
-
   let forwarded: PullForwardingResult | undefined;
   if (opts?.forwarding !== false) {
     try {
@@ -117,25 +109,8 @@ export async function autoPull(opts?: PullOpts): Promise<PullResult> {
     pulled,
     ok,
     reason,
-    configured: configured || doGmail || (forwarded?.attempted ?? 0) > 0 || (agents?.agents ?? 0) > 0,
+    configured: configured || (forwarded?.attempted ?? 0) > 0 || (agents?.agents ?? 0) > 0,
     forwarded,
     agents,
   };
-}
-
-/** Incremental sync of the newest messages for each active Gmail account. */
-async function pullGmail(): Promise<number> {
-  const { listActiveProviderSummaries } = await import("../../db/providers.js");
-  const { syncGmailInbox } = await import("../../lib/gmail-sync.js");
-  const gmails = listActiveProviderSummaries("gmail");
-  let n = 0;
-  for (const p of gmails) {
-    // Provider name "Gmail (andreihasnacom)" → connector profile "andreihasnacom".
-    const profile = p.name.match(/\(([^)]+)\)/)?.[1];
-    try {
-      const r = await syncGmailInbox({ providerId: p.id, profile, labelFilter: "INBOX", batchSize: 25, maxMessages: 25, downloadAttachments: true });
-      n += r.synced;
-    } catch { /* connector not authed here / transient — best-effort */ }
-  }
-  return n;
 }

@@ -60,16 +60,17 @@ describe("inbound webhook", () => {
         post({ Type: "Notification", Message: sesNotification }),
         "/webhook/ses-inbound", "POST",
         {
-          sync: async (bucket, prefix, region) => {
+          sync: async (bucket, prefix, region, opts) => {
             expect(bucket).toBe("configured-inbound");
             expect(prefix).toBe("inbound/");
             expect(region).toBe("us-east-1");
+            expect(opts?.keys).toEqual(["inbound/acme.com/msg-1"]);
             synced++;
             return { synced: 2 };
           },
         },
       );
-      expect((await res!.json()).synced).toBe(2);
+      expect(await res!.json()).toMatchObject({ synced: 2, object_key: "inbound/acme.com/msg-1" });
       expect(synced).toBe(1);
     } finally {
       setConfigValue("inbound_s3_bucket", undefined);
@@ -85,6 +86,30 @@ describe("inbound webhook", () => {
       { sync: async () => ({ synced: 0 }) },
     );
     expect((await res!.json()).ignored).toBeTruthy();
+  });
+
+  it("does not sync a notification object key outside the configured prefix", async () => {
+    setConfigValue("inbound_s3_bucket", "configured-inbound");
+    setConfigValue("inbound_s3_prefix", "allowed/");
+    setConfigValue("inbound_s3_region", "us-east-1");
+    try {
+      let synced = 0;
+      const res = await handleInboundWebhook(
+        post({ Type: "Notification", Message: sesNotification }),
+        "/webhook/ses-inbound", "POST",
+        { sync: async () => { synced++; return { synced: 1 }; } },
+      );
+      expect(await res!.json()).toMatchObject({
+        ok: true,
+        ignored: "notification object key outside configured prefix",
+        object_key: "inbound/acme.com/msg-1",
+      });
+      expect(synced).toBe(0);
+    } finally {
+      setConfigValue("inbound_s3_bucket", undefined);
+      setConfigValue("inbound_s3_prefix", undefined);
+      setConfigValue("inbound_s3_region", undefined);
+    }
   });
 });
 

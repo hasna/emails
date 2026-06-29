@@ -14,13 +14,15 @@ import type { S3Client } from "@aws-sdk/client-s3";
 import { storeInboundEmail, updateAttachmentPaths } from "../db/inbound.js";
 import type { AttachmentPath } from "../db/inbound.js";
 import { backfillLegacyS3RawUrls, getDatabase, getDataDir, rebuildInboundCanonicalState, resolvePartialId } from "../db/database.js";
-import { loadConfig, saveConfig, getGmailSyncConfig } from "./config.js";
+import { loadConfig, saveConfig, getInboundAttachmentStorageConfig } from "./config.js";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Database } from "../db/database.js";
-import type { MailSourceStatus } from "./gmail-sync.js";
+import { emitMaileryEventBestEffort, inboundReceivedEventData } from "./mailery-events.js";
 
 const MAIL_SOURCES_CONFIG_KEY = "mail_sources";
+
+export type MailSourceStatus = "live" | "import" | "legacy" | "retired";
 
 export interface S3SyncOptions {
   bucket?: string;
@@ -31,6 +33,8 @@ export interface S3SyncOptions {
   providerId?: string;
   sourceId?: string;
   forceSource?: boolean;
+  /** Exact S3 object keys to process without listing the whole prefix. */
+  keys?: string[];
   /** Max objects to process per run */
   limit?: number;
   db?: Database;
@@ -94,6 +98,28 @@ function nowIso(): string {
 function normalizePrefix(prefix: string | null | undefined): string | undefined {
   const value = String(prefix ?? "").trim();
   return value.length > 0 ? value : undefined;
+}
+
+function normalizeObjectKey(key: string | null | undefined): string | undefined {
+  const value = String(key ?? "").trim().replace(/^\/+/, "");
+  return value.length > 0 ? value : undefined;
+}
+
+function normalizeExactObjectKeys(keys: string[] | undefined, prefix: string): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of keys ?? []) {
+    const key = normalizeObjectKey(raw);
+    if (!key) continue;
+    if (prefix && !key.startsWith(prefix)) {
+      throw new Error(`S3 object key ${key} is outside configured prefix ${prefix}`);
+    }
+    if (!seen.has(key)) {
+      seen.add(key);
+      out.push(key);
+    }
+  }
+  return out;
 }
 
 function normalizeStatus(status: unknown): MailSourceStatus {
@@ -375,7 +401,7 @@ async function processS3Object(
   db: Database,
   s3: S3Client,
   s3Sdk: S3Sdk,
-  syncConfig: ReturnType<typeof getGmailSyncConfig>,
+  syncConfig: ReturnType<typeof getInboundAttachmentStorageConfig>,
   bucket: string,
   providerId: string | null,
   obj: { key: string; size: number },
@@ -422,6 +448,31 @@ async function processS3Object(
     received_at: (parsed.date ?? new Date()).toISOString(),
   }, db);
 
+  emitMaileryEventBestEffort({
+    type: "mailery.inbound.received",
+    subject: stored.id,
+    severity: "notice",
+    dedupeKey: `mailery:inbound:received:${stored.id}`,
+    message: `Inbound email received from SES/S3`,
+    data: inboundReceivedEventData({
+      emailId: stored.id,
+      providerId,
+      source: "ses-s3",
+      messageId: rawS3Url,
+      fromAddress: fromAddr,
+      toAddresses: toAddrs,
+      ccAddresses: ccAddrs,
+      subject: parsed.subject ?? "(no subject)",
+      receivedAt: stored.received_at,
+      rawS3Url,
+      attachmentCount: attachmentMeta.length,
+    }),
+    metadata: {
+      bucket,
+      object_key: obj.key,
+    },
+  });
+
   // Threading: link this inbound to an existing thread if it replies to one
   // of our sent emails (via In-Reply-To / References / own Message-ID).
   try {
@@ -456,6 +507,21 @@ async function processS3Object(
             ContentType: att.contentType ?? "application/octet-stream",
           }));
           paths.push({ filename: safeName, content_type: att.contentType ?? "", size: att.size ?? 0, s3_url: `s3://${syncConfig.s3_bucket}/${s3Key}` });
+          emitMaileryEventBestEffort({
+            type: "mailery.inbound.attachment.saved",
+            subject: stored.id,
+            severity: "info",
+            dedupeKey: `mailery:inbound:attachment:${stored.id}:${safeName}`,
+            message: "Inbound attachment stored",
+            data: {
+              email_id: stored.id,
+              filename: safeName,
+              content_type: att.contentType ?? "application/octet-stream",
+              size: att.size ?? 0,
+              storage: "s3",
+              uri: `s3://${syncConfig.s3_bucket}/${s3Key}`,
+            },
+          });
         } catch (e) {
           result.errors.push(`S3 upload ${safeName}: ${String(e)}`);
         }
@@ -463,6 +529,21 @@ async function processS3Object(
         const filePath = join(outputDir, safeName);
         writeFileSync(filePath, att.content);
         paths.push({ filename: safeName, content_type: att.contentType ?? "", size: att.size ?? 0, local_path: filePath });
+        emitMaileryEventBestEffort({
+          type: "mailery.inbound.attachment.saved",
+          subject: stored.id,
+          severity: "info",
+          dedupeKey: `mailery:inbound:attachment:${stored.id}:${safeName}`,
+          message: "Inbound attachment stored",
+          data: {
+            email_id: stored.id,
+            filename: safeName,
+            content_type: att.contentType ?? "application/octet-stream",
+            size: att.size ?? 0,
+            storage: "local",
+            uri: filePath,
+          },
+        });
       }
       result.attachments_saved++;
     }
@@ -529,8 +610,29 @@ export async function syncS3Inbox(opts: S3SyncOptions): Promise<S3SyncResult> {
     providerId = resolved;
   }
   backfillLegacyS3RawUrls([{ bucket, providerId }], db);
-  const syncConfig = getGmailSyncConfig();
+  const syncConfig = getInboundAttachmentStorageConfig();
   const result: S3SyncResult = { synced: 0, skipped: 0, attachments_saved: 0, errors: [] };
+  const exactKeys = normalizeExactObjectKeys(opts.keys, prefix);
+
+  if (exactKeys.length > 0) {
+    const existingS3Urls = getExistingS3Urls(db, exactKeys.map((key) => s3ObjectUrl(bucket, key)));
+    for (const key of exactKeys.slice(0, limit)) {
+      const rawS3Url = s3ObjectUrl(bucket, key);
+      if (existingS3Urls.has(rawS3Url)) {
+        tagExistingS3Provider(db, rawS3Url, providerId);
+        result.skipped++;
+        result.last_key = key;
+        continue;
+      }
+      try {
+        await processS3Object(db, s3, s3Sdk, syncConfig, bucket, providerId, { key, size: 0 }, result);
+      } catch (e) {
+        result.errors.push(`${key}: ${String(e)}`);
+      }
+    }
+    if (result.last_key) setLastSyncedKey(bucket, prefix, result.last_key);
+    return result;
+  }
 
   let continuationToken: string | undefined;
   let attemptedNewObjects = 0;

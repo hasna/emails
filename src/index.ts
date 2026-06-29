@@ -274,6 +274,8 @@ export {
   getDefaultGmailArchiveS3Bucket,
   getDefaultGmailArchiveS3Prefix,
   getDefaultGmailArchiveS3Region,
+  getGmailArchiveConfig,
+  getInboundAttachmentStorageConfig,
   loadConfig,
   saveConfig,
   getConfigValue,

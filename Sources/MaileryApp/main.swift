@@ -15,7 +15,7 @@
 //          data back into the page via `window.HasnaMail.hydrate(...)`.
 //
 // Design split (see MaileryCore): reads go straight to SQLite; writes ALWAYS go through
-// the `mailery` CLI so provider auth, Gmail mirroring, and threading headers stay correct.
+// the `mailery` CLI so provider auth, inbound refresh, and threading headers stay correct.
 import AppKit
 import WebKit
 import MaileryCore

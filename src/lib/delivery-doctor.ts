@@ -36,12 +36,6 @@ function check(status: DeliveryDoctorCheck["status"], name: string, message: str
   return { name, status, message, fix_command };
 }
 
-function countGmailProviders(db: Database): number {
-  const row = db.query("SELECT COUNT(*) AS count FROM providers WHERE type = 'gmail'").get() as { count: unknown } | null;
-  const value = Number(row?.count ?? 0);
-  return Number.isFinite(value) ? value : 0;
-}
-
 function recentLocalMailSummary(address: string, db: Database): { count: number; latest_received_at: string | null } {
   const normalized = normalizeEmailAddress(address);
   if (!normalized) return { count: 0, latest_received_at: null };
@@ -69,7 +63,6 @@ export function diagnoseInboundDelivery(address: string, db: Database = getDatab
   const aliasTarget = normalized.includes("@") ? resolveAlias(normalized, db) : null;
   const recent = recentLocalMailSummary(normalized, db);
   const inboundBuckets = getInboundBuckets();
-  const gmailProviderCount = countGmailProviders(db);
   const config = loadConfig();
   const realtimeQueueConfigured = typeof config["inbound_realtime_queue_url"] === "string";
   const enrichedExactAddresses = exactAddresses.length > 0 ? enrichAddresses(exactAddresses, db) : [];
@@ -126,10 +119,10 @@ export function diagnoseInboundDelivery(address: string, db: Database = getDatab
     ));
   }
 
-  if (inboundBuckets.length > 0 || gmailProviderCount > 0) {
-    checks.push(check("pass", "Inbound sources", `${inboundBuckets.length} S3 bucket(s), ${gmailProviderCount} Gmail provider(s) configured.`));
+  if (inboundBuckets.length > 0) {
+    checks.push(check("pass", "Inbound sources", `${inboundBuckets.length} S3 bucket(s) configured.`));
   } else {
-    checks.push(check("fail", "Inbound sources", "No S3 inbound bucket or Gmail provider configured.", "mailery inbox sync-status"));
+    checks.push(check("fail", "Inbound sources", "No S3 inbound bucket configured.", "mailery inbox sync-status"));
   }
 
   if (realtimeQueueConfigured) {

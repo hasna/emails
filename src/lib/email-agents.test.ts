@@ -160,7 +160,7 @@ describe("managed email agents", () => {
     expect(run.tool_calls).toEqual(["current_email_links"]);
   });
 
-  it("projects priority and spam agent labels into raw UI/folder labels", async () => {
+  it("projects priority and risky agent labels into raw UI/folder labels without raw spam", async () => {
     const email = seedInbound("agent-priority-labels");
     const generateText = mock(async (opts: Record<string, unknown>) => ({
       text: JSON.stringify(String(opts.prompt).includes("fraud")
@@ -202,7 +202,15 @@ describe("managed email agents", () => {
 
     expect(result.runs).toHaveLength(2);
     const labels = getInboundEmail(email.id, getDatabase())?.label_ids ?? [];
-    expect(labels).toEqual(expect.arrayContaining(["ai:important", "important", "action-required", "ai:spam", "spam"]));
+    expect(labels).toEqual(expect.arrayContaining([
+      "ai:important",
+      "important",
+      "action-required",
+      "ai:spam-candidate",
+      "ai:quarantine",
+      "quarantine",
+    ]));
+    expect(labels).not.toContain("spam");
   });
 
   it("runs enabled always-on agents over pending emails", async () => {

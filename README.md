@@ -1,6 +1,6 @@
 # @hasna/mailery
 
-Mailery is an email management CLI + MCP server - send, receive, sync, and manage email via Resend, AWS SES, and Gmail.
+Mailery is an email management CLI + MCP server - send, receive, sync, and manage email via Resend, AWS SES, and Cloudflare-routed inbound mail.
 
 [![npm](https://img.shields.io/npm/v/@hasna/mailery)](https://www.npmjs.com/package/@hasna/mailery)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
@@ -17,9 +17,9 @@ npm install -g @hasna/mailery
 ## Quick Start
 
 ```bash
-# Add a provider (SES, Resend, or Gmail)
+# Add a provider (SES or Resend)
 mailery provider add --name production-ses --type ses --region us-east-1 --access-key ... --secret-key ...
-mailery provider add-gmail   # requires: connectors auth gmail
+mailery provider add --name production-resend --type resend --api-key ...
 
 # Set up a domain (buy + DNS + SES in one command)
 mailery domain setup example.com --provider <id> --email you@example.com ...
@@ -36,9 +36,9 @@ mailery provision domain example.com --provider <ses-id> --dry-run
 # Send an email
 mailery send --from you@example.com --to them@example.com --subject "Hi" --body "Hello"
 
-# Sync an explicitly registered Gmail source (full content: HTML + attachments)
-mailery inbox source add-gmail --provider <gmail-provider-id> --profile <profile>
-mailery inbox sync --source <gmail-source-id> --all
+# Pull inbound mail from SES/S3 or Cloudflare-routed storage
+mailery inbox source add-s3 --bucket <bucket> --prefix inbound/example.com/ --provider <provider-id>
+mailery inbox sync-s3 --bucket <bucket> --prefix inbound/example.com/
 
 # Inspect mailbox folders and ingestion sources
 mailery inbox mailboxes
@@ -83,7 +83,7 @@ controls. Folders: Inbox · Unread · Starred · Sent · Archived · Spam · Tra
 
 ```
 mailery ui                # Mailbox UI - inbox, compose, domains, settings
-mailery provider          # provider credentials/capabilities (ses, resend, gmail)
+mailery provider          # provider credentials/capabilities (ses, resend, sandbox)
 mailery domain            # add/verify/buy/setup/dns/check domains
 mailery address           # manage sender addresses (add, suspend, activate, quota)
 mailery status            # redacted system status + next useful actions
@@ -210,8 +210,8 @@ verification-code waiting.
 
 Terminology used by the CLI, REST API, MCP tools, and TUI:
 
-- **Provider**: credentials and capability, such as SES send rights or a Gmail OAuth profile.
-- **Source**: an ingestion stream that brings mail into local storage, such as `provider:<id>`, `s3:<bucket>`, `legacy`, or `orphaned:<id>`.
+- **Provider**: credentials and capability, such as SES send rights, Resend API access, or a sandbox.
+- **Source**: an ingestion stream that brings mail into local storage, such as `provider:<id>`, `s3:<bucket>`, Cloudflare-routed inbound storage, `legacy`, or `orphaned:<id>`.
 - **Mailbox**: the user-visible scope being browsed, such as all mail, one address, or one domain.
 - **Folder**: a mailbox view such as `inbox`, `unread`, `sent`, `starred`, `archived`, `spam`, or `trash`.
 
@@ -279,12 +279,12 @@ mailery aws setup-inbound --domain example.com --bucket my-emails
 # Pull received emails on demand
 mailery inbox sync-s3 --bucket my-emails --prefix inbound/example.com/
 
-# Read-state / organize (works for SES-S3, SMTP, and Gmail mail)
+# Read-state / organize (works for SES-S3, SMTP, Cloudflare-routed, and legacy imported mail)
 mailery inbox list --unread            # filters: --unread/--read/--starred/--archived/--label <l>
 mailery inbox latest ops@example.com --json
 mailery inbox wait ops@example.com --timeout 120
 mailery inbox wait-code ops@example.com --from openai --timeout 120
-mailery inbox sync-status --json       # S3, realtime, and Gmail status
+mailery inbox sync-status --json       # S3 and realtime status
 mailery inbox explain <id>             # route/owner/readiness trace
 mailery inbox read <id>                # opening marks it read
 mailery inbox star|archive|label <id>  # --undo / --remove to reverse

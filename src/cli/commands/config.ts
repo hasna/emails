@@ -1,19 +1,19 @@
 import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
-import { CANONICAL_OPEN_EMAILS_S3_BUCKET, CANONICAL_OPEN_EMAILS_S3_REGION, loadConfig, saveConfig, getConfigValue, setConfigValue } from "../../lib/config.js";
+import { loadConfig, saveConfig, getConfigValue, setConfigValue } from "../../lib/config.js";
 import { redactSecrets } from "../../lib/redaction.js";
 import { formatListHint, handleError, isCliVerboseOutput, parseCliPage, summarizeCliValue } from "../utils.js";
 
 const KNOWN_KEYS: { key: string; description: string; example: string }[] = [
   { key: "default_provider", description: "Default provider ID used when --provider is not specified", example: "abc12345" },
   { key: "failover-providers", description: "Comma-separated provider IDs used as failover for send()", example: "abc12345,def67890" },
-  { key: "gmail_attachment_storage", description: "Where to store Gmail attachments: local | s3 | none", example: "local" },
-  { key: "gmail_s3_bucket", description: "S3 bucket name for attachment storage (requires gmail_attachment_storage=s3)", example: "my-email-archive" },
-  { key: "gmail_s3_prefix", description: "S3 key prefix for attachments (default: emails)", example: "emails" },
-  { key: "gmail_s3_region", description: "AWS region for S3 uploads (default: us-east-1)", example: "us-east-1" },
-  { key: "gmail_archive_s3_bucket", description: "S3 bucket for durable Gmail archive uploads", example: CANONICAL_OPEN_EMAILS_S3_BUCKET },
-  { key: "gmail_archive_s3_region", description: "AWS region for Gmail archive uploads", example: CANONICAL_OPEN_EMAILS_S3_REGION },
-  { key: "gmail_archive_s3_prefix", description: "S3 key prefix for Gmail archive uploads (default: gmail)", example: "gmail" },
+  { key: "attachment_storage", description: "Where to store inbound attachments: local | s3 | none", example: "local" },
+  { key: "attachment_s3_bucket", description: "S3 bucket name for inbound attachment storage (requires attachment_storage=s3)", example: "my-email-archive" },
+  { key: "attachment_s3_prefix", description: "S3 key prefix for inbound attachments (default: emails)", example: "emails" },
+  { key: "attachment_s3_region", description: "AWS region for inbound attachment S3 uploads (default: us-east-1)", example: "us-east-1" },
+  { key: "gmail_archive_s3_bucket", description: "Legacy Gmail archive bucket override for old imports", example: "hasna-xyz-opensource-emails-prod" },
+  { key: "gmail_archive_s3_region", description: "Legacy Gmail archive region override for old imports", example: "us-east-1" },
+  { key: "gmail_archive_s3_prefix", description: "Legacy Gmail archive key prefix for old imports", example: "gmail" },
   { key: "cloudflare_api_token", description: "Cloudflare API token for auto DNS setup (also reads CLOUDFLARE_API_TOKEN env var)", example: "abc123..." },
   { key: "cloudflare_api_key", description: "Cloudflare global API key for auto DNS setup (also reads CLOUDFLARE_API_KEY env var)", example: "abc123..." },
   { key: "cloudflare_email", description: "Cloudflare account email used with cloudflare_api_key (also reads CLOUDFLARE_EMAIL env var)", example: "admin@example.com" },

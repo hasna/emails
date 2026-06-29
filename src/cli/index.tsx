@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { commandModulesFor, remoteStorageRuntimeError, routeRootPromptArgs, shouldPrintVersionEarly, type CommandModule } from "./router.js";
+import { createMaileryEventsClient, getMaileryEventsDataDir } from "../lib/mailery-events.js";
 
 function getPackageVersion(): string {
   try {
@@ -63,13 +64,18 @@ async function registerCommandsForArgs(program: Command, output: OutputFn, args:
 async function registerOptionalEventsCommands(program: Command): Promise<void> {
   try {
     const importer = new Function("specifier", "return import(specifier)") as (specifier: string) => Promise<{
-      registerChannelCommands?: (program: Command, opts: { source: string; channelsCommandName?: string }) => void;
-      registerEventsCommands?: (program: Command, opts: { source: string }) => void;
+      registerChannelCommands?: (program: Command, opts: { source: string; dataDir?: string; createClient?: () => unknown; channelsCommandName?: string }) => void;
+      registerEventsCommands?: (program: Command, opts: { source: string; dataDir?: string; createClient?: () => unknown }) => void;
     }>;
     const events = await importer("@hasna/events/commander");
-    events.registerEventsCommands?.(program, { source: "mailery" });
+    const eventsOptions = {
+      source: "mailery",
+      dataDir: getMaileryEventsDataDir(),
+      createClient: createMaileryEventsClient,
+    };
+    events.registerEventsCommands?.(program, eventsOptions);
     if (!program.commands.some((command) => command.name() === "webhooks")) {
-      events.registerChannelCommands?.(program, { source: "mailery", channelsCommandName: "webhooks" });
+      events.registerChannelCommands?.(program, { ...eventsOptions, channelsCommandName: "webhooks" });
     }
   } catch {
     // The events integration is optional; keep the Mailery CLI usable when the
@@ -94,7 +100,7 @@ async function main(): Promise<void> {
 
   program
     .name("mailery")
-    .description("Mailery email management CLI - send, receive, sync, and manage email via Resend, AWS SES, and Gmail")
+    .description("Mailery email management CLI - send, receive, sync, and manage email via Resend, AWS SES, and Cloudflare")
     .version(version)
     .option("--json", "Output JSON instead of formatted text")
     .option("-q, --quiet", "Suppress info output")

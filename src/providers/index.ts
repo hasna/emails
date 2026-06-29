@@ -78,12 +78,7 @@ function assertProviderConfig(provider: Provider): void {
       if (!provider.api_key) throw new ProviderConfigError("Resend provider requires an API key");
       return;
     case "gmail":
-      if (!provider.oauth_client_id) throw new ProviderConfigError("Gmail provider requires oauth_client_id");
-      if (!provider.oauth_client_secret) throw new ProviderConfigError("Gmail provider requires oauth_client_secret");
-      if (!provider.oauth_refresh_token) {
-        throw new ProviderConfigError("Gmail provider requires oauth_refresh_token. Run 'mailery provider auth <id>' to authenticate.");
-      }
-      return;
+      throw new ProviderConfigError("Gmail is no longer an active Mailery provider. Existing Gmail-sourced mail remains available as legacy local mailbox data.");
     case "ses":
     case "sandbox":
       return;
@@ -105,11 +100,6 @@ export function getAdapter(provider: Provider): ProviderAdapter {
         const { SESAdapter } = await import("./ses.js");
         return new SESAdapter(provider);
       }, { supportsMailFrom: true, supportsDomainVerification: true });
-    case "gmail":
-      return new LazyProviderAdapter(async () => {
-        const { GmailAdapter } = await import("./gmail.js");
-        return new GmailAdapter(provider);
-      });
     case "sandbox":
       return new LazyProviderAdapter(async () => {
         const { SandboxAdapter } = await import("./sandbox.js");

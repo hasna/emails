@@ -564,7 +564,7 @@ function createMaileryStore(initialMailbox?: Mailbox) {
       if (state.busyPull) return { pulled: 0, ok: false, configured: false, reason: "Pull already running" };
       setState("busyPull", true);
       try {
-        const result = await autoPull({ limit: 1000, gmail: true, forwarding: true, agents: true });
+        const result = await autoPull({ limit: 1000, forwarding: true, agents: true });
         reload({ preserveSelection: true });
         return result;
       } finally {

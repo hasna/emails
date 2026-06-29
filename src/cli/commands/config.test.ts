@@ -59,16 +59,20 @@ describe("config command redaction", () => {
     expect(listResult.data).toEqual({ cloudflare_api_token: "***" });
   });
 
-  it("shows canonical archive and actual inbound config keys", async () => {
+  it("shows attachment storage and actual inbound config keys", async () => {
     const result = await runConfigCommand(["config", "keys"]);
-    expect(result.out).toContain("gmail_archive_s3_bucket");
+    expect(result.out).toContain("attachment_storage");
+    expect(result.out).toContain("attachment_s3_bucket");
     expect(result.out).toContain("inbound_s3_bucket");
     expect(result.out).toContain("inbound_s3_prefix");
     expect(result.out).toContain("inbound_s3_region");
+    expect(result.out).toContain("gmail_archive_s3_bucket");
+    expect(result.out).toContain("Legacy Gmail archive bucket override");
     expect(result.out).not.toContain("aws_s3_inbound_bucket");
     expect(result.out).toContain("Use --verbose for examples");
 
     const verbose = await runConfigCommand(["config", "keys", "--verbose"]);
+    expect(verbose.out).toContain("my-email-archive");
     expect(verbose.out).toContain("hasna-xyz-opensource-emails-prod");
   });
 });

@@ -157,9 +157,6 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
           lines.push(chalk.green(`✓ Resend domain ready`));
           lines.push(chalk.dim(`  Inbound is push: add a Resend inbound webhook -> POST /webhook/resend-inbound on 'mailery serve'`));
         }
-        if (opts.inbound !== false && provider.type === "gmail") {
-          lines.push(chalk.dim(`  Gmail is account-based - receive with 'mailery inbox sync' (mailery ui can auto-pull Gmail)`));
-        }
         // 4a. SES inbound (S3 bucket + receipt rule → mail for *@domain lands in S3).
         if (opts.inbound !== false && provider.type === "ses") {
           // Bucket is account-specific — resolve the SES account for this provider

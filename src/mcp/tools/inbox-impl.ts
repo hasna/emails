@@ -6,7 +6,6 @@ import {
   setInboundReadSummary, setInboundArchivedSummary, setInboundStarredSummary,
   addInboundLabelSummary, removeInboundLabelSummary,
 } from "../../db/inbound.js";
-import { updateLastSynced } from "../../db/gmail-sync-state.js";
 import { getDatabase } from "../../db/database.js";
 import { cappedLimit, safeOffset } from "../../db/pagination.js";
 import { formatError, resolveId } from "../helpers.js";
@@ -24,7 +23,6 @@ import {
 
 const DEFAULT_INBOUND_LIST_LIMIT = 50;
 const DEFAULT_INBOUND_SEARCH_LIMIT = 20;
-const DEFAULT_GMAIL_SYNC_LIMIT = 50;
 const MAX_MCP_INBOX_LIMIT = 1000;
 const MAX_MCP_WAIT_TIMEOUT_SECONDS = 300;
 const MAX_MCP_WAIT_INTERVAL_SECONDS = 60;
@@ -36,7 +34,7 @@ function inboxLimit(value: number | undefined, fallback: number): number {
   return cappedLimit(value, fallback, MAX_MCP_INBOX_LIMIT);
 }
 
-async function runAutoPull(opts: { s3?: boolean; gmail?: boolean; limit?: number }) {
+async function runAutoPull(opts: { s3?: boolean; limit?: number }) {
   const { autoPull } = await import("../../cli/tui/autopull.js");
   return autoPull(opts);
 }
@@ -256,9 +254,8 @@ export function registerInboxTools(server: McpServer): void {
     timeout_seconds: waitTimeoutSchema.describe("Wait timeout (default 120, max 300)"),
     interval_seconds: waitIntervalSchema.describe("Polling interval (default 5, max 60)"),
     refresh: z.boolean().optional().describe("Refresh inbound sources while waiting (default true)"),
-    gmail: z.boolean().optional().describe("Also pull Gmail while refreshing (default false)"),
   },
-  async ({ address, from, subject, since, timeout_seconds, interval_seconds, refresh, gmail }) => {
+  async ({ address, from, subject, since, timeout_seconds, interval_seconds, refresh }) => {
     try {
       const normalized = address.trim().toLowerCase();
       const deadline = Date.now() + (timeout_seconds ?? 120) * 1000;
@@ -275,7 +272,7 @@ export function registerInboxTools(server: McpServer): void {
           };
         }
         if (refresh !== false) {
-          await runAutoPull({ s3: true, gmail: gmail === true, limit: 1000 });
+          await runAutoPull({ s3: true, limit: 1000 });
           email = findLocalEmail();
           if (email) {
             return {
@@ -315,9 +312,8 @@ export function registerInboxTools(server: McpServer): void {
     timeout_seconds: waitTimeoutSchema.describe("Wait timeout (default 120, max 300)"),
     interval_seconds: waitIntervalSchema.describe("Polling interval (default 5, max 60)"),
     refresh: z.boolean().optional().describe("Refresh inbound sources while waiting (default true)"),
-    gmail: z.boolean().optional().describe("Also pull Gmail while refreshing (default false)"),
   },
-  async ({ address, from, subject, since, timeout_seconds, interval_seconds, refresh, gmail }) => {
+  async ({ address, from, subject, since, timeout_seconds, interval_seconds, refresh }) => {
     try {
       const normalized = address.trim().toLowerCase();
       const deadline = Date.now() + (timeout_seconds ?? 120) * 1000;
@@ -342,7 +338,7 @@ export function registerInboxTools(server: McpServer): void {
           };
         }
         if (refresh !== false) {
-          await runAutoPull({ s3: true, gmail: gmail === true, limit: 1000 });
+          await runAutoPull({ s3: true, limit: 1000 });
           match = findLocalMatch();
           if (match) {
             return {
@@ -387,9 +383,8 @@ export function registerInboxTools(server: McpServer): void {
     timeout_seconds: waitTimeoutSchema.describe("Wait timeout (default 120, max 300)"),
     interval_seconds: waitIntervalSchema.describe("Polling interval (default 5, max 60)"),
     refresh: z.boolean().optional().describe("Refresh inbound sources while waiting (default true)"),
-    gmail: z.boolean().optional().describe("Also pull Gmail while refreshing (default false)"),
   },
-  async ({ address, from, subject, since, timeout_seconds, interval_seconds, refresh, gmail }) => {
+  async ({ address, from, subject, since, timeout_seconds, interval_seconds, refresh }) => {
     try {
       const normalized = address.trim().toLowerCase();
       const deadline = Date.now() + (timeout_seconds ?? 120) * 1000;
@@ -414,7 +409,7 @@ export function registerInboxTools(server: McpServer): void {
           };
         }
         if (refresh !== false) {
-          await runAutoPull({ s3: true, gmail: gmail === true, limit: 1000 });
+          await runAutoPull({ s3: true, limit: 1000 });
           match = findLocalMatch();
           if (match) {
             return {
@@ -514,133 +509,41 @@ export function registerInboxTools(server: McpServer): void {
   },
 );
 
-// ─── GMAIL INBOX SYNC ─────────────────────────────────────────────────────────
-
-  server.tool(
-  "sync_inbox",
-  "Sync Gmail inbox messages into local SQLite. Fetches new messages via the Gmail connector and stores them for offline access.",
-  {
-    provider_id: z.string().describe("Gmail provider ID to sync"),
-    label: z.string().optional().describe("Gmail label to sync (default: INBOX)"),
-    query: z.string().optional().describe("Gmail search query, e.g. 'is:unread from:someone@example.com'"),
-    limit: z.number().int().positive().max(MAX_MCP_INBOX_LIMIT).optional().describe("Max messages per run (default 50, max 1000)"),
-    since: z.string().optional().describe("Only sync messages after this ISO date"),
-    all_pages: z.boolean().optional().describe("Sync all pages until done (for full backfill)"),
-    history: z.boolean().optional().describe("Use stored Gmail history cursor for incremental sync"),
-  },
-  async ({ provider_id, label, query, limit, since, all_pages, history }) => {
-    try {
-      const { syncGmailInbox, syncGmailInboxAll, syncGmailInboxHistory } = await import("../../lib/gmail-sync.js");
-      const db = getDatabase();
-      const batchSize = inboxLimit(limit, DEFAULT_GMAIL_SYNC_LIMIT);
-      const opts = {
-        providerId: provider_id,
-        labelFilter: label,
-        query,
-        batchSize,
-        since,
-        db,
-      };
-      const result = all_pages
-        ? await syncGmailInboxAll(opts)
-        : history
-          ? await syncGmailInboxHistory(opts)
-        : await syncGmailInbox(opts);
-
-      if (result.errors.length === 0) {
-        updateLastSynced(provider_id, undefined, db);
-      }
-
-      return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            synced: result.synced,
-            skipped: result.skipped,
-            attachments_saved: result.attachments_saved,
-            errors: result.errors,
-            done: result.done,
-            nextPageToken: result.nextPageToken,
-            batch_size: batchSize,
-          }, null, 2),
-        }],
-      };
-    } catch (e) {
-      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
-    }
-  },
-);
-
-/**
- * Best-effort Gmail mirror of a local state change. Only attempts the connector
- * when the inbound email belongs to a Gmail-type provider; for SES-S3 (or any
- * non-Gmail) mail the local state change stands on its own. Returns true if the
- * Gmail action ran.
- */
-async function gmailMessageAction(email_id: string, connectorArgs: string[]): Promise<boolean> {
-  const db = getDatabase();
-  const row = db.query(
-    `SELECT i.provider_id AS provider_id, i.message_id AS message_id, p.type AS provider_type
-       FROM inbound_emails i LEFT JOIN providers p ON p.id = i.provider_id
-      WHERE i.id = ?`,
-  ).get(email_id) as { provider_id: string | null; message_id: string | null; provider_type: string | null } | null;
-  if (!row || row.provider_type !== "gmail" || !row.message_id) return false;
-  const { resolveGmailLiveSource } = await import("../../lib/gmail-sync.js");
-  let source;
-  try {
-    source = resolveGmailLiveSource({ providerId: row.provider_id, db });
-  } catch {
-    return false;
-  }
-  const { runConnectorOperation } = await import("@hasna/connectors");
-  const r = await runConnectorOperation({
-    connector: "gmail",
-    operation: connectorArgs.join("."),
-    input: { args: [row.message_id] },
-    profile: source.profile,
-  });
-  if (!r.success) throw new Error(r.stderr || r.stdout);
-  return true;
-}
-
   server.tool(
   "mark_email_read",
-  "Mark an inbound email as read (local state; mirrors to Gmail when applicable)",
+  "Mark an inbound email as read (local state)",
   { email_id: z.string(), unread: z.boolean().optional().describe("Mark unread instead") },
   async ({ email_id, unread }) => {
     try {
       const id = resolveId("inbound_emails", email_id);
       const e = setInboundReadSummary(id, !unread);
-      const synced = await gmailMessageAction(id, ["messages", unread ? "mark-unread" : "mark-read"]).catch(() => false);
-      return { content: [{ type: "text", text: JSON.stringify({ ...e, gmail_synced: synced }, null, 2) }] };
+      return { content: [{ type: "text", text: JSON.stringify(e, null, 2) }] };
     } catch (e) { return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true }; }
   },
 );
 
   server.tool(
   "archive_email",
-  "Archive (or unarchive) an inbound email (local state; mirrors to Gmail when applicable)",
+  "Archive (or unarchive) an inbound email (local state)",
   { email_id: z.string(), unarchive: z.boolean().optional().describe("Restore to inbox instead") },
   async ({ email_id, unarchive }) => {
     try {
       const id = resolveId("inbound_emails", email_id);
       const e = setInboundArchivedSummary(id, !unarchive);
-      const synced = unarchive ? false : await gmailMessageAction(id, ["messages", "archive"]).catch(() => false);
-      return { content: [{ type: "text", text: JSON.stringify({ ...e, gmail_synced: synced }, null, 2) }] };
+      return { content: [{ type: "text", text: JSON.stringify(e, null, 2) }] };
     } catch (e) { return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true }; }
   },
 );
 
   server.tool(
   "star_email",
-  "Star (or unstar) an inbound email (local state; mirrors to Gmail when applicable)",
+  "Star (or unstar) an inbound email (local state)",
   { email_id: z.string(), unstar: z.boolean().optional().describe("Remove the star instead") },
   async ({ email_id, unstar }) => {
     try {
       const id = resolveId("inbound_emails", email_id);
       const e = setInboundStarredSummary(id, !unstar);
-      const synced = unstar ? false : await gmailMessageAction(id, ["messages", "star"]).catch(() => false);
-      return { content: [{ type: "text", text: JSON.stringify({ ...e, gmail_synced: synced }, null, 2) }] };
+      return { content: [{ type: "text", text: JSON.stringify(e, null, 2) }] };
     } catch (e) { return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true }; }
   },
 );
@@ -655,42 +558,6 @@ async function gmailMessageAction(email_id: string, connectorArgs: string[]): Pr
       const e = remove ? removeInboundLabelSummary(id, label) : addInboundLabelSummary(id, label);
       return { content: [{ type: "text", text: JSON.stringify(e, null, 2) }] };
     } catch (e) { return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true }; }
-  },
-);
-
-  server.tool(
-  "reply_to_email",
-  "Reply to a synced inbound Gmail email, keeping it in the same thread",
-  {
-    email_id: z.string().describe("Inbound email ID (from local DB)"),
-    body: z.string().describe("Reply body text"),
-    is_html: z.boolean().optional().describe("Send as HTML email (default: false)"),
-  },
-  async ({ email_id, body, is_html }) => {
-    try {
-      const db = getDatabase();
-      const id = resolveId("inbound_emails", email_id);
-      const row = db.query(
-        `SELECT i.provider_id AS provider_id, i.message_id AS message_id, i.subject AS subject, p.type AS provider_type
-           FROM inbound_emails i LEFT JOIN providers p ON p.id = i.provider_id
-          WHERE i.id = ?`,
-      ).get(id) as { provider_id: string | null; message_id: string | null; subject: string; provider_type: string | null } | null;
-      if (!row?.message_id) throw new Error(`Email not found or no Gmail message ID: ${email_id}`);
-      if (row.provider_type !== "gmail") throw new Error(`Email is not from a Gmail source: ${email_id}`);
-      const { resolveGmailLiveSource } = await import("../../lib/gmail-sync.js");
-      const source = resolveGmailLiveSource({ providerId: row.provider_id, db });
-      const { runConnectorOperation } = await import("@hasna/connectors");
-      const r = await runConnectorOperation({
-        connector: "gmail",
-        operation: "messages.reply",
-        input: { args: [row.message_id], body, ...(is_html ? { html: true } : {}) },
-        profile: source.profile,
-      });
-      if (!r.success) throw new Error(r.stderr || r.stdout);
-      return { content: [{ type: "text", text: JSON.stringify({ replied_to: row.subject, status: "sent" }, null, 2) }] };
-    } catch (e) {
-      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
-    }
   },
 );
 
@@ -752,7 +619,7 @@ async function gmailMessageAction(email_id: string, connectorArgs: string[]): Pr
 
   server.tool(
     "get_inbox_sync_status",
-    "Get source-aware mailbox sync status for S3 ingestion, realtime queue, and Gmail provider credentials.",
+    "Get source-aware mailbox sync status for S3 ingestion and realtime queue.",
     {},
     async () => {
       try {
@@ -762,7 +629,6 @@ async function gmailMessageAction(email_id: string, connectorArgs: string[]): Pr
           inbox: status.inbox,
           mailboxes: status.mailboxes,
           sources: status.sources,
-          gmail: status.providers.gmail,
           cli_equivalent: "mailery inbox sync-status --json",
         }, null, 2) }] };
       } catch (e) {
@@ -790,12 +656,10 @@ type InboxToolName =
   | "get_inbound_email"
   | "extract_inbound_email_links"
   | "clear_inbound_emails"
-  | "sync_inbox"
   | "mark_email_read"
   | "archive_email"
   | "star_email"
   | "label_email"
-  | "reply_to_email"
   | "get_attachment"
   | "search_inbound"
   | "get_inbox_sync_status";

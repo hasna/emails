@@ -1,31 +1,13 @@
-import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { getDatabase, resetDatabase, closeDatabase, uuid } from "../db/database.js";
 import { storeInboundEmail, listInboundEmails } from "../db/inbound.js";
-import { getGmailSyncState, updateLastSynced } from "../db/gmail-sync-state.js";
-
-// ─── Mock @hasna/connectors ───────────────────────────────────────────────────
-
-const mockRun = mock(async (operationArgs: { operation: string }) => ({
-  connector: "gmail",
-  operation: operationArgs.operation,
-  success: true,
-  stdout: "[]",
-  stderr: "",
-  exitCode: 0,
-  data: [],
-}));
-
-mock.module("@hasna/connectors", () => ({ runConnectorOperation: mockRun }));
-
-const { registerGmailSource, retireGmailSource, syncGmailInbox, syncGmailInboxAll } = await import("../lib/gmail-sync.js");
 const { runInboxTool } = await import("./tools/inbox-impl.js");
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-const DATE = "Fri, 20 Mar 2026 10:00:00 +0000";
 const ORIGINAL_HOME = process.env["HOME"];
 let tmpHome: string | null = null;
 
@@ -34,8 +16,7 @@ function setupDb() {
   process.env["EMAILS_DB_PATH"] = ":memory:";
   const db = getDatabase();
   const pid = uuid();
-  db.run(`INSERT INTO providers (id, name, type, active) VALUES (?, 'Gmail', 'gmail', 1)`, [pid]);
-  registerGmailSource({ providerId: pid, profile: "default", email: "me@example.com", name: "MCP Test Gmail" });
+  db.run(`INSERT INTO providers (id, name, type, active) VALUES (?, 'SES', 'ses', 1)`, [pid]);
   return { db, pid };
 }
 
@@ -73,20 +54,6 @@ function seedOne(providerId: string | null, overrides: Partial<Parameters<typeof
   }, db);
 }
 
-function setMock(listOutput: string, readOutput?: string) {
-  mockRun.mockImplementation(async (operationArgs: { operation: string }) => {
-    if (operationArgs.operation === "messages.read" || operationArgs.operation === "messages.get") {
-      const data = JSON.parse(readOutput ?? JSON.stringify({ id: "t1", from: "a@x.com", to: "me@x.com", subject: "S1", date: DATE, body: "Hello MCP", size: 100 }));
-      return { connector: "gmail", operation: operationArgs.operation, success: true, stdout: JSON.stringify(data), stderr: "", exitCode: 0, data };
-    }
-    if (operationArgs.operation === "messages.list") {
-      const data = JSON.parse(listOutput);
-      return { connector: "gmail", operation: operationArgs.operation, success: true, stdout: JSON.stringify(data), stderr: "", exitCode: 0, data };
-    }
-    return { connector: "gmail", operation: operationArgs.operation, success: true, stdout: "[]", stderr: "", exitCode: 0, data: [] };
-  });
-}
-
 async function toolJson(name: Parameters<typeof runInboxTool>[0], input: Record<string, unknown>) {
   const result = await runInboxTool(name, input);
   expect(result.isError).not.toBe(true);
@@ -94,7 +61,6 @@ async function toolJson(name: Parameters<typeof runInboxTool>[0], input: Record<
 }
 
 beforeEach(() => {
-  mockRun.mockReset();
   tmpHome = mkdtempSync(join(tmpdir(), "mailery-mcp-inbox-"));
   process.env["HOME"] = tmpHome;
 });
@@ -106,75 +72,6 @@ afterEach(() => {
   else process.env["HOME"] = ORIGINAL_HOME;
   if (tmpHome) rmSync(tmpHome, { recursive: true, force: true });
   tmpHome = null;
-});
-
-// ─── sync_inbox tool logic ────────────────────────────────────────────────────
-
-describe("sync_inbox tool logic", () => {
-  it("returns synced/skipped/errors/done shape", async () => {
-    const { db, pid } = setupDb();
-    setMock('[{"id":"t1","from":"a@x.com","subject":"S1","date":"' + DATE + '"}]');
-    const r = await syncGmailInbox({ providerId: pid, db });
-    expect(typeof r.synced).toBe("number");
-    expect(typeof r.skipped).toBe("number");
-    expect(Array.isArray(r.errors)).toBe(true);
-    expect(typeof r.done).toBe("boolean");
-    expect(typeof r.attachments_saved).toBe("number");
-  });
-
-  it("synced=1 after one message", async () => {
-    const { db, pid } = setupDb();
-    setMock('[{"id":"t1","from":"a@x.com","subject":"S1","date":"' + DATE + '"}]');
-    const r = await syncGmailInbox({ providerId: pid, db });
-    expect(r.synced).toBe(1);
-    expect(r.errors).toHaveLength(0);
-  });
-
-  it("errors when list fails", async () => {
-    const { db, pid } = setupDb();
-    mockRun.mockImplementation(async (operationArgs: { operation: string }) => ({
-      connector: "gmail",
-      operation: operationArgs.operation,
-      success: false,
-      stdout: "",
-      stderr: "auth fail",
-      exitCode: 1,
-    }));
-    const r = await syncGmailInbox({ providerId: pid, db });
-    expect(r.errors.length).toBeGreaterThan(0);
-    expect(r.errors[0]).toContain("Failed to list messages");
-  });
-
-  it("updateLastSynced sets last_synced_at", async () => {
-    const { db, pid } = setupDb();
-    setMock('[{"id":"t1","from":"a@x.com","subject":"S1","date":"' + DATE + '"}]');
-    await syncGmailInbox({ providerId: pid, db });
-    updateLastSynced(pid, undefined, db);
-    const state = getGmailSyncState(pid, db);
-    expect(state?.last_synced_at).toBeTruthy();
-  });
-
-  it("syncGmailInboxAll returns done=true", async () => {
-    const { db, pid } = setupDb();
-    setMock('[{"id":"t1","from":"a@x.com","subject":"S1","date":"' + DATE + '"}]');
-    const r = await syncGmailInboxAll({ providerId: pid, db });
-    expect(r.done).toBe(true);
-    expect(r.synced).toBe(1);
-  });
-
-  it("does not mark Gmail sync state as synced when live-source resolution fails", async () => {
-    resetDatabase();
-    process.env["EMAILS_DB_PATH"] = ":memory:";
-    const db = getDatabase();
-    const pid = uuid();
-    db.run(`INSERT INTO providers (id, name, type, active) VALUES (?, 'Gmail without source', 'gmail', 1)`, [pid]);
-
-    const result = await toolJson("sync_inbox", { provider_id: pid, limit: 1 });
-
-    expect((result.errors as string[])[0]).toContain("live Gmail access is blocked");
-    expect(getGmailSyncState(pid, db)?.last_synced_at ?? null).toBeNull();
-    expect(mockRun).not.toHaveBeenCalled();
-  });
 });
 
 // ─── search_inbound tool logic ────────────────────────────────────────────────
@@ -280,61 +177,13 @@ describe("mailbox source tools", () => {
   });
 });
 
-describe("Gmail lifecycle gates for MCP mutations", () => {
-  it("keeps local state mutations but skips Gmail mirror for retired sources", async () => {
+describe("MCP local state mutations", () => {
+  it("keeps local state mutations local", async () => {
     const { pid } = setupDb();
     const email = seedOne(pid);
-    retireGmailSource(pid);
 
     const result = await toolJson("mark_email_read", { email_id: email.id });
 
     expect(result.is_read).toBe(true);
-    expect(result.gmail_synced).toBe(false);
-    expect(mockRun).not.toHaveBeenCalled();
-  });
-
-  it("blocks Gmail replies for retired sources before any connector call", async () => {
-    const { pid } = setupDb();
-    const email = seedOne(pid);
-    retireGmailSource(pid);
-
-    const result = await runInboxTool("reply_to_email", { email_id: email.id, body: "Reply body" });
-
-    expect(result.isError).toBe(true);
-    expect(result.content[0]!.text).toContain("live Gmail access is blocked");
-    expect(mockRun).not.toHaveBeenCalled();
-  });
-
-  it("blocks Gmail replies for non-Gmail inbound rows before any connector call", async () => {
-    resetDatabase();
-    process.env["EMAILS_DB_PATH"] = ":memory:";
-    const db = getDatabase();
-    const providerId = uuid();
-    db.run(`INSERT INTO providers (id, name, type, active) VALUES (?, 'SES', 'ses', 1)`, [providerId]);
-    const email = seedOne(providerId, { message_id: "s3/object/key" });
-
-    const result = await runInboxTool("reply_to_email", { email_id: email.id, body: "Reply body" });
-
-    expect(result.isError).toBe(true);
-    expect(result.content[0]!.text).toContain("not from a Gmail source");
-    expect(mockRun).not.toHaveBeenCalled();
-  });
-});
-
-// ─── get_inbox_sync_status tool logic ────────────────────────────────────────
-
-describe("get_inbox_sync_status tool logic", () => {
-  it("null before any sync", () => {
-    const { pid } = setupDb();
-    const db = getDatabase();
-    expect(getGmailSyncState(pid, db)?.last_synced_at ?? null).toBeNull();
-  });
-
-  it("reflects updateLastSynced", () => {
-    const { db, pid } = setupDb();
-    updateLastSynced(pid, "last-id", db);
-    const state = getGmailSyncState(pid, db);
-    expect(state!.last_synced_at).toBeTruthy();
-    expect(state!.last_message_id).toBe("last-id");
   });
 });

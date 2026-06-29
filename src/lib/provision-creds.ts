@@ -28,7 +28,7 @@ export function checkProvisionCredentials(
 ): ProvisionCredStatus[] {
   const out: ProvisionCredStatus[] = [];
 
-  // AWS (SES send/inbound + Route53 buy via @hasna/domains), us-east-1.
+  // AWS (SES send/inbound + domain purchase via @hasna/domains), us-east-1.
   const hasEnvAws = !!(env["AWS_ACCESS_KEY_ID"] && env["AWS_SECRET_ACCESS_KEY"]) || !!env["AWS_PROFILE"];
   const hasStoredSesProviderCredentials = !!config.aws_provider_credentials;
   out.push({
@@ -36,9 +36,9 @@ export function checkProvisionCredentials(
     configured: hasEnvAws || hasStoredSesProviderCredentials,
     status: hasEnvAws ? "pass" : hasStoredSesProviderCredentials ? "warn" : "fail",
     detail: hasEnvAws
-      ? `${env["AWS_PROFILE"] ? `profile:${env["AWS_PROFILE"]}` : "access-keys"} (us-east-1 for SES inbound + Route53)`
+      ? `${env["AWS_PROFILE"] ? `profile:${env["AWS_PROFILE"]}` : "access-keys"} (us-east-1 for SES inbound + AWS domain purchase)`
       : hasStoredSesProviderCredentials
-        ? "Stored SES provider credentials found for SES send/inbound; set AWS_PROFILE or AWS_ACCESS_KEY_ID/SECRET for Route53/domain purchase workflows"
+        ? "Stored SES provider credentials found for SES send/inbound; set AWS_PROFILE or AWS_ACCESS_KEY_ID/SECRET for AWS domain purchase/provisioning workflows"
       : "Set AWS_PROFILE or AWS_ACCESS_KEY_ID/SECRET",
   });
 

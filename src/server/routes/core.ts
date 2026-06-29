@@ -102,18 +102,17 @@ if (path === "/api/providers" && method === "GET") {
 if (path === "/api/providers" && method === "POST") {
   try {
     const body = await parseBody(req) as Record<string, unknown>;
+    const type = String(body.type ?? "resend");
+    if (type !== "resend" && type !== "ses" && type !== "sandbox") {
+      return badRequest("Provider type must be one of: resend, ses, sandbox");
+    }
     const provider = createProvider({
       name: String(body.name ?? ""),
-      type: (body.type as "resend" | "ses" | "gmail") ?? "resend",
+      type: type as "resend" | "ses" | "sandbox",
       api_key: body.api_key as string | undefined,
       region: body.region as string | undefined,
       access_key: body.access_key as string | undefined,
       secret_key: body.secret_key as string | undefined,
-      oauth_client_id: body.oauth_client_id as string | undefined,
-      oauth_client_secret: body.oauth_client_secret as string | undefined,
-      oauth_refresh_token: body.oauth_refresh_token as string | undefined,
-      oauth_access_token: body.oauth_access_token as string | undefined,
-      oauth_token_expiry: body.oauth_token_expiry as string | undefined,
     });
     return json(sanitizeProvider(provider as unknown as Record<string, unknown>), 201);
   } catch (e) { return internalError(e); }
@@ -129,7 +128,7 @@ if (providerPutMatch && method === "PUT") {
     if (!provider) return notFound("Provider not found");
     const body = await parseBody(req) as Record<string, unknown>;
     const updates: Record<string, unknown> = {};
-    for (const key of ["name", "api_key", "region", "access_key", "secret_key", "oauth_client_id", "oauth_client_secret", "oauth_refresh_token", "oauth_access_token", "oauth_token_expiry"]) {
+    for (const key of ["name", "api_key", "region", "access_key", "secret_key"]) {
       if (body[key] !== undefined) updates[key] = body[key];
     }
     const updated = updateProvider(id, updates as any);
@@ -145,33 +144,6 @@ if (providerMatch && method === "DELETE") {
   try {
     deleteProvider(id);
     return json({ ok: true });
-  } catch (e) { return internalError(e); }
-}
-
-// POST /api/providers/:id/auth — Gmail OAuth re-authentication
-const providerAuthMatch = path.match(/^\/api\/providers\/([^/]+)\/auth$/);
-if (providerAuthMatch && method === "POST") {
-  const id = resolveId("providers", providerAuthMatch[1]!);
-  if (!id) return notFound();
-  try {
-    const provider = getProvider(id);
-    if (!provider) return notFound("Provider not found");
-    if (provider.type !== "gmail") return badRequest("Only Gmail providers support OAuth re-authentication");
-    if (!provider.oauth_client_id || !provider.oauth_client_secret) {
-      return badRequest("Provider is missing oauth_client_id or oauth_client_secret");
-    }
-
-    const { startGmailOAuthFlow } = await import("../../lib/gmail-oauth.js");
-    const tokens = await startGmailOAuthFlow(provider.oauth_client_id, provider.oauth_client_secret);
-
-    const { updateProvider } = await import("../../db/providers.js");
-    const updated = updateProvider(id, {
-      oauth_refresh_token: tokens.refresh_token,
-      oauth_access_token: tokens.access_token,
-      oauth_token_expiry: tokens.expiry,
-    });
-
-    return json({ ok: true, provider: sanitizeProvider(updated as unknown as Record<string, unknown>) });
   } catch (e) { return internalError(e); }
 }
 

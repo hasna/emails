@@ -281,7 +281,7 @@ export function registerInfrastructureTools(server: McpServer): void {
   server.tool(
   "get_config",
   "Get a configuration value by key",
-  { key: z.string().describe("Config key (e.g. gmail_attachment_storage, gmail_s3_bucket, default_provider)") },
+  { key: z.string().describe("Config key (e.g. attachment_storage, attachment_s3_bucket, default_provider)") },
   async ({ key }) => {
     try {
       const value = getConfigValue(key);
@@ -294,7 +294,7 @@ export function registerInfrastructureTools(server: McpServer): void {
 
   server.tool(
   "set_config",
-  "Set a configuration value. Known keys: gmail_attachment_storage (local|s3|none), gmail_s3_bucket, gmail_s3_prefix, gmail_s3_region, default_provider, failover-providers",
+  "Set a configuration value. Known keys: attachment_storage (local|s3|none), attachment_s3_bucket, attachment_s3_prefix, attachment_s3_region, default_provider, failover-providers",
   {
     key: z.string().describe("Config key"),
     value: z.string().describe("Config value (strings, numbers, or JSON)"),

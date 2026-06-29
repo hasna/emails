@@ -25,9 +25,10 @@ in Cloudflare regardless of where the domain was bought.
 | SES domain identity + Easy DKIM + send | `src/providers/ses.ts` | SESv2. `addDomain`, `getDnsRecords`, `send`. |
 | SES inbound → S3 receipt rules | `src/lib/aws-inbound.ts` | SES **v1** (receipt rules only there). Bucket + rule set + rule. |
 | S3 → SQLite inbound sync | `src/lib/s3-sync.ts`, `inbox sync-s3` | Parses raw MIME from S3. |
-| Cloudflare DNS auto-publish (DKIM/SPF/DMARC/MX) | `src/lib/cloudflare-dns.ts` `setupEmailDns()` | Via `@hasna/connectors`. |
+| Cloudflare DNS auto-publish (DKIM/SPF/DMARC/MX) | `src/lib/cloudflare-dns.ts` `setupEmailDns()` | Direct Cloudflare REST client, no connector dependency. |
 | Resend send + domain | `src/providers/resend.ts` | Send-only + domain create/verify. |
-| Gmail inbound sync | `src/lib/gmail-sync.ts` | Existing working path (143k msgs synced). |
+| S3/SES inbound sync | `src/lib/s3-sync.ts`, `inbox sync-s3` | Active stored-mail path. |
+| Cloudflare routing inbound | `src/lib/cloudflare-routing.ts` | Active forwarding/routing setup; stored body requires SES/S3 or Worker/webhook persistence. |
 | Partial orchestration | `src/mcp/tools/infrastructure.ts` | `setup_domain_for_email`, `setup_cloudflare_dns`, `setup_ses_inbound`. |
 | Address / domain / provider DB | `src/db/{addresses,domains,providers}.ts` | Schema exists; needs extension (§5). |
 | Cross-repo link | imports `@hasna/domains` | r53 buy/zone functions already imported. |
@@ -51,7 +52,7 @@ Cloudflare and publish records via `cloudflare-dns.ts` (§6, T-E2).
 - **Send provider default = SES.** SES domain identity means any address on the domain can send — no per-address object needed.
 - **Receive strategies (per address):**
   - `ses-s3` — SES receipt rule → S3 → SQLite. The only **true mailbox** (full raw message stored). Default.
-  - `cf-routing` — Cloudflare Email Routing forward to a destination (e.g. a Gmail) or Worker. Free, no stored body unless a Worker persists it.
+  - `cf-routing` — Cloudflare Email Routing forward to a destination address or Worker. Free, no stored body unless a Worker persists it.
   - `resend-webhook` — Resend inbound via `email.received` webhook → our HTTP server stores it.
 - **No IMAP/POP mailbox exists at any provider** — providers are credentials/capabilities, sources ingest mail, and SQLite/S3-backed local storage is the user-visible mailbox. Document this clearly so nobody expects "direct access."
 

@@ -3,46 +3,18 @@
  * exercised by `emails inbox` subcommands.
  */
 import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
-import { mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { getDatabase, resetDatabase, closeDatabase, uuid, getDataDir } from "../../db/database.js";
-import { storeInboundEmail, listInboundEmails, getInboundEmail, getInboundCount, clearInboundEmails } from "../../db/inbound.js";
-import { getGmailSyncState, updateLastSynced, setGmailSyncState } from "../../db/gmail-sync-state.js";
+import { getDatabase, resetDatabase, closeDatabase, uuid } from "../../db/database.js";
+import { storeInboundEmail, listInboundEmails, getInboundEmail } from "../../db/inbound.js";
 import { createAddress } from "../../db/addresses.js";
 import { createDomain } from "../../db/domains.js";
 import { createProvider } from "../../db/providers.js";
 import { setAddressProvisioning, setDomainProvisioning } from "../../db/provisioning.js";
-import { saveConfig } from "../../lib/config.js";
-
-// ─── Mock @hasna/connectors before any gmail-sync imports ─────────────────────
-
-const DATE = "Fri, 20 Mar 2026 10:00:00 +0000";
-let mockListMsgs: { id: string; subject?: string; from?: string }[] = [];
-
-const mockRun = mock(async (operationArgs: {
-  operation: string;
-  input?: Record<string, unknown> & { args?: Array<string | number | boolean> };
-}) => {
-  const { operation, input } = operationArgs;
-  if (operation === "messages.list") {
-    const data = mockListMsgs.map((m) => ({ id: m.id, from: m.from ?? "a@b.com", subject: m.subject ?? "S", date: DATE }));
-    return { connector: "gmail", operation, success: true, stdout: JSON.stringify(data), stderr: "", exitCode: 0, data };
-  }
-  if (operation === "messages.read" || operation === "messages.get") {
-    const id = String(input?.args?.[0] ?? "x");
-    const m = mockListMsgs.find((x) => x.id === id);
-    const data = { id, from: m?.from ?? "a@b.com", to: "me@b.com", subject: m?.subject ?? "S", date: DATE, body: "body", htmlBody: "<p>body</p>", size: 100 };
-    return { connector: "gmail", operation, success: true, stdout: JSON.stringify(data), stderr: "", exitCode: 0, data };
-  }
-  return { connector: "gmail", operation, success: true, stdout: "[]", stderr: "", exitCode: 0, data: [] };
-});
-
-mock.module("@hasna/connectors", () => ({ runConnectorOperation: mockRun }));
 
 const mockAutoPull = mock(async () => ({ pulled: 0, ok: true, configured: true }));
 mock.module("../tui/autopull.js", () => ({ autoPull: mockAutoPull }));
 
-const { syncGmailInbox, registerGmailSource, retireGmailSource } = await import("../../lib/gmail-sync.js");
 const { registerInboxCommands } = await import("./inbox.js");
 const { Command } = await import("commander");
 
@@ -56,8 +28,7 @@ function setupDb() {
   process.env["EMAILS_DB_PATH"] = ":memory:";
   const db = getDatabase();
   const providerId = uuid();
-  db.run(`INSERT INTO providers (id, name, type, active) VALUES (?, 'Gmail Test', 'gmail', 1)`, [providerId]);
-  registerGmailSource({ providerId, profile: "gmail-test", status: "live", liveSyncEnabled: true });
+  db.run(`INSERT INTO providers (id, name, type, active) VALUES (?, 'SES Test', 'ses', 1)`, [providerId]);
   return { db, providerId };
 }
 
@@ -122,39 +93,8 @@ beforeEach(() => {
   if (existsSync(TMP_HOME)) rmSync(TMP_HOME, { recursive: true, force: true });
   mkdirSync(TMP_HOME, { recursive: true });
   process.env["HOME"] = TMP_HOME;
-  mockListMsgs = [];
   mockAutoPull.mockReset();
   mockAutoPull.mockImplementation(async () => ({ pulled: 0, ok: true, configured: true }));
-  mockRun.mockReset();
-  mockRun.mockImplementation(async (operationArgs: {
-    operation: string;
-    input?: Record<string, unknown> & { args?: Array<string | number | boolean> };
-  }) => {
-    const { operation, input } = operationArgs;
-    if (operation === "messages.list") {
-      const data = mockListMsgs.map((m) => ({ id: m.id, from: m.from ?? "a@b.com", subject: m.subject ?? "S", date: DATE }));
-      return { connector: "gmail", operation, success: true, stdout: JSON.stringify(data), stderr: "", exitCode: 0, data };
-    }
-    if (operation === "messages.read" || operation === "messages.get") {
-      const id = String(input?.args?.[0] ?? "x");
-      const m = mockListMsgs.find((x) => x.id === id);
-      const data = { id, from: m?.from ?? "a@b.com", to: "me@b.com", subject: m?.subject ?? "S", date: DATE, body: "body", htmlBody: "<p>body</p>", size: 100 };
-      return { connector: "gmail", operation, success: true, stdout: JSON.stringify(data), stderr: "", exitCode: 0, data };
-    }
-    if (operation === "attachments.list") {
-      const data = [{ attachmentId: "att-1", filename: "invoice.pdf", mimeType: "application/pdf", size: 12 }];
-      return { connector: "gmail", operation, success: true, stdout: JSON.stringify(data), stderr: "", exitCode: 0, data };
-    }
-    if (operation === "attachments.download") {
-      const outputDir = typeof input?.dir === "string" ? input.dir : undefined;
-      if (outputDir) {
-        mkdirSync(outputDir, { recursive: true });
-        writeFileSync(join(outputDir, "invoice.pdf"), "pdf-data");
-      }
-      return { connector: "gmail", operation, success: true, stdout: "", stderr: "", exitCode: 0, data: [] };
-    }
-    return { connector: "gmail", operation, success: true, stdout: "[]", stderr: "", exitCode: 0, data: [] };
-  });
 });
 
 afterEach(() => {
@@ -193,7 +133,7 @@ describe("inbox list — listInboundEmails", () => {
 
     // Create a second provider and seed it
     const otherId = uuid();
-    db.run(`INSERT INTO providers (id, name, type, active) VALUES (?, 'Other', 'gmail', 1)`, [otherId]);
+    db.run(`INSERT INTO providers (id, name, type, active) VALUES (?, 'Other', 'ses', 1)`, [otherId]);
     storeInboundEmail({
       provider_id: otherId,
       message_id: "other-msg",
@@ -395,10 +335,10 @@ describe("inbox list — listInboundEmails", () => {
     const recipient = result.recipients[0]!;
     expect(recipient.recipient).toBe("me@example.com");
     expect(recipient.configured_addresses.map((address) => address.id)).toEqual([targetAddress.id]);
-    expect(recipient.configured_addresses[0]?.provider_name).toBe("Gmail Test");
+    expect(recipient.configured_addresses[0]?.provider_name).toBe("SES Test");
     expect(recipient.configured_addresses[0]?.provisioning?.domain_id).toBe(targetDomain.id);
     expect(recipient.domains.map((domain) => domain.id)).toEqual([targetDomain.id]);
-    expect(recipient.domains[0]?.provider_name).toBe("Gmail Test");
+    expect(recipient.domains[0]?.provider_name).toBe("SES Test");
     expect(recipient.domains[0]?.readiness.ready_addresses).toBe(2);
     expect(recipient.domains[0]?.readiness.receive_ready).toBe(true);
 
@@ -482,26 +422,6 @@ describe("inbox links", () => {
       "mailto:ops@example.com",
       "https://example.com/",
     ]);
-  });
-});
-
-// ─── archive migration command contract ──────────────────────────────────────
-
-describe("inbox archive-migrate contract", () => {
-  it("supports bounded continuation-token resumes and target-region clients", () => {
-    const source = readFileSync(join(import.meta.dir, "inbox.ts"), "utf8");
-    expect(source).toContain('.option("--continuation-token <token>"');
-    expect(source).toContain("continuationToken: opts.continuationToken");
-    expect(source).toContain("targetRegion !== opts.region");
-    expect(source).toContain("getDefaultGmailArchiveS3Region()");
-  });
-
-  it("does not resolve archive config defaults during command registration", () => {
-    const source = readFileSync(join(import.meta.dir, "inbox.ts"), "utf8");
-    expect(source).not.toContain('from "../../lib/config.js"');
-    expect(source).not.toContain("const defaultGmailArchiveBucket = getDefaultGmailArchiveS3Bucket()");
-    expect(source).not.toContain("const defaultGmailArchiveRegion = getDefaultGmailArchiveS3Region()");
-    expect(source).toContain('import("../../lib/config.js")');
   });
 });
 
@@ -639,48 +559,10 @@ describe("inbox search — local filter", () => {
     expect(emails[0]).not.toHaveProperty("html_body");
     expect(emails[0]).not.toHaveProperty("headers");
   });
-
-  it("caps remote Gmail search limit before calling the connector", async () => {
-    setupDb();
-
-    await runInboxCommand(["inbox", "search", "needle", "--remote", "--limit", "100000"]);
-
-    const listCall = mockRun.mock.calls.find((call) => call[0]?.operation === "messages.list");
-    expect(listCall?.[0]?.input).toMatchObject({ query: "needle", max: 1000 });
-  });
-
-  it("keeps import-only Gmail searchable locally but blocks remote search", async () => {
-    const { db, providerId } = setupDb();
-    registerGmailSource({ providerId, profile: "gmail-test", status: "import", liveSyncEnabled: false });
-    storeInboundEmail({
-      provider_id: providerId,
-      message_id: "import-local",
-      in_reply_to_email_id: null,
-      from_address: "sender@example.com",
-      to_addresses: ["me@example.com"],
-      cc_addresses: [],
-      subject: "Imported searchable mail",
-      text_body: "contains slice-b needle",
-      html_body: null,
-      attachments: [],
-      attachment_paths: [],
-      headers: {},
-      raw_size: 100,
-      received_at: "2026-06-04T11:29:09.000Z",
-    }, db);
-
-    const local = await runInboxCommand(["inbox", "search", "slice-b"]);
-    expect((local.data as Array<{ subject: string }>).map((email) => email.subject)).toEqual(["Imported searchable mail"]);
-
-    mockRun.mockClear();
-    const remote = await runInboxCommandExpectingExit(["inbox", "search", "slice-b", "--remote", "--provider", providerId]);
-    expect(remote.stderr).toContain("live Gmail access is blocked");
-    expect(mockRun.mock.calls.some((call) => call[0]?.operation === "messages.list")).toBe(false);
-  });
 });
 
 describe("inbox source lifecycle", () => {
-  it("lists and retires Gmail and S3 sources without deleting local mail", async () => {
+  it("lists and retires S3 sources without deleting local mail", async () => {
     const { db, providerId } = setupDb();
     const email = storeInboundEmail({
       provider_id: providerId,
@@ -702,108 +584,16 @@ describe("inbox source lifecycle", () => {
     await runInboxCommand(["inbox", "source", "add-s3", "--bucket", "mail-bucket", "--prefix", "inbound/example.com/", "--provider", providerId]);
     const before = await runInboxCommand(["inbox", "source", "list"]);
     expect((before.data as Array<{ type: string; status: string }>).map((source) => `${source.type}:${source.status}`).sort()).toEqual([
-      "gmail:live",
       "s3:live",
     ]);
 
-    const gmailSource = (before.data as Array<{ id: string; type: string }>).find((source) => source.type === "gmail")!;
-    await runInboxCommand(["inbox", "source", "retire", gmailSource.id]);
+    const s3Source = (before.data as Array<{ id: string; type: string }>).find((source) => source.type === "s3")!;
+    await runInboxCommand(["inbox", "source", "retire", s3Source.id]);
     const after = await runInboxCommand(["inbox", "source", "list"]);
-    const gmail = (after.data as Array<{ type: string; status: string; live_sync_enabled: boolean }>).find((source) => source.type === "gmail")!;
+    const s3 = (after.data as Array<{ type: string; status: string; live_sync_enabled: boolean }>).find((source) => source.type === "s3")!;
 
-    expect(gmail).toMatchObject({ status: "retired", live_sync_enabled: false });
+    expect(s3).toMatchObject({ status: "retired", live_sync_enabled: false });
     expect(getInboundEmail(email.id, db)?.subject).toBe("Source lifecycle local");
-  });
-});
-
-describe("inbox live Gmail gates", () => {
-  it("ignores retired Gmail during refresh autopull wrappers", async () => {
-    const { providerId } = setupDb();
-    retireGmailSource(providerId);
-
-    await runInboxCommand(["inbox", "wait", "me@example.com", "--gmail", "--timeout", "1", "--interval", "1"]);
-
-    expect(mockAutoPull).toHaveBeenCalled();
-    expect(mockAutoPull.mock.calls[0]?.[0]).toMatchObject({ gmail: false });
-  });
-
-  it("does not mirror mark-read to retired Gmail sources", async () => {
-    const { db, providerId } = setupDb();
-    retireGmailSource(providerId, db);
-    const email = storeInboundEmail({
-      provider_id: providerId,
-      message_id: "mirror-retired",
-      in_reply_to_email_id: null,
-      from_address: "sender@example.com",
-      to_addresses: ["me@example.com"],
-      cc_addresses: [],
-      subject: "Mirror retired",
-      text_body: "body",
-      html_body: null,
-      attachments: [],
-      attachment_paths: [],
-      headers: {},
-      raw_size: 100,
-      received_at: "2026-06-04T11:29:09.000Z",
-    }, db);
-
-    await runInboxCommand(["inbox", "mark-read", email.id]);
-
-    expect(getInboundEmail(email.id, db)?.is_read).toBe(true);
-    expect(mockRun.mock.calls.some((call) => call[0]?.operation === "messages.mark-read")).toBe(false);
-  });
-
-  it("refuses replies through import-only Gmail sources", async () => {
-    const { db, providerId } = setupDb();
-    registerGmailSource({ providerId, profile: "gmail-test", status: "import", liveSyncEnabled: false });
-    const email = storeInboundEmail({
-      provider_id: providerId,
-      message_id: "reply-import-only",
-      in_reply_to_email_id: null,
-      from_address: "sender@example.com",
-      to_addresses: ["me@example.com"],
-      cc_addresses: [],
-      subject: "Reply import only",
-      text_body: "body",
-      html_body: null,
-      attachments: [],
-      attachment_paths: [],
-      headers: {},
-      raw_size: 100,
-      received_at: "2026-06-04T11:29:09.000Z",
-    }, db);
-
-    const result = await runInboxCommandExpectingExit(["inbox", "reply", email.id, "--body", "No live send"]);
-
-    expect(result.stderr).toContain("live Gmail access is blocked");
-    expect(mockRun.mock.calls.some((call) => call[0]?.operation === "messages.reply")).toBe(false);
-  });
-
-  it("refuses replies for non-Gmail local rows even when a live Gmail source exists", async () => {
-    const { db } = setupDb();
-    const sandboxProvider = createProvider({ name: "Sandbox Source", type: "sandbox", active: true });
-    const email = storeInboundEmail({
-      provider_id: sandboxProvider.id,
-      message_id: "s3://bucket/inbound/example.com/reply-target",
-      in_reply_to_email_id: null,
-      raw_s3_url: "s3://bucket/inbound/example.com/reply-target",
-      from_address: "sender@example.com",
-      to_addresses: ["me@example.com"],
-      cc_addresses: [],
-      subject: "Non Gmail reply",
-      text_body: "body",
-      html_body: null,
-      attachments: [],
-      attachment_paths: [],
-      headers: {},
-      raw_size: 100,
-      received_at: "2026-06-04T11:29:09.000Z",
-    }, db);
-
-    const result = await runInboxCommandExpectingExit(["inbox", "reply", email.id, "--body", "No live send"]);
-
-    expect(result.stderr).toContain("not from a Gmail source");
-    expect(mockRun.mock.calls.some((call) => call[0]?.operation === "messages.reply")).toBe(false);
   });
 });
 
@@ -1257,148 +1047,5 @@ describe("inbox attachment", () => {
     ]);
     expect(out).toContain("2 KB");
     expect(out).toContain("file:///tmp/invoice.pdf");
-  });
-});
-
-// ─── inbox sync (via syncGmailInbox) ─────────────────────────────────────────
-
-describe("inbox sync — syncGmailInbox", () => {
-  it("defaults invalid sync limits before calling the Gmail connector", async () => {
-    setupDb();
-
-    await runInboxCommand(["inbox", "sync", "--limit", "not-a-number", "--concurrency", "not-a-number"]);
-
-    const listCall = mockRun.mock.calls.find((call) => call[0]?.operation === "messages.list");
-    expect(listCall?.[0]?.input).toMatchObject({ max: 50 });
-  });
-
-  it("caps oversized sync limits before calling the Gmail connector", async () => {
-    setupDb();
-
-    await runInboxCommand(["inbox", "sync", "--limit", "100000"]);
-
-    const listCall = mockRun.mock.calls.find((call) => call[0]?.operation === "messages.list");
-    expect(listCall?.[0]?.input).toMatchObject({ max: 1000 });
-  });
-
-  it("stores downloaded attachments as local_path when S3 storage is disabled", async () => {
-    const { db, providerId } = setupDb();
-    mkdirSync(TMP_HOME, { recursive: true });
-    process.env["HOME"] = TMP_HOME;
-    saveConfig({
-      gmail_attachment_storage: "local",
-    });
-    registerGmailSource({ providerId, profile: "gmail-test", status: "live", liveSyncEnabled: true });
-    mockListMsgs = [{ id: "gmail-att-1", subject: "Attachment Test", from: "a@test.com" }];
-
-    const result = await syncGmailInbox({ providerId, db });
-
-    expect(result.synced).toBe(1);
-    expect(result.attachments_saved).toBe(1);
-    expect(result.errors).toHaveLength(0);
-
-    const stored = listInboundEmails({ provider_id: providerId }, db);
-    expect(stored).toHaveLength(1);
-    expect(stored[0]?.attachment_paths).toEqual([
-      {
-        filename: "invoice.pdf",
-        content_type: "application/pdf",
-        size: 8,
-        local_path: join(getDataDir(), "attachments", stored[0]!.id, "invoice.pdf"),
-      },
-    ]);
-  });
-
-  it("syncs messages and they appear in listInboundEmails", async () => {
-    const { db, providerId } = setupDb();
-    mockListMsgs = [{ id: "cli-msg1", subject: "CLI Test 1", from: "a@test.com" }, { id: "cli-msg2", subject: "CLI Test 2", from: "b@test.com" }];
-    const result = await syncGmailInbox({ providerId, db });
-    expect(result.synced).toBe(2);
-    const stored = listInboundEmails({ provider_id: providerId });
-    expect(stored).toHaveLength(2);
-    expect(stored.map((e) => e.subject).sort()).toEqual(["CLI Test 1", "CLI Test 2"]);
-  });
-
-  it("getInboundCount reflects synced messages", async () => {
-    const { db, providerId } = setupDb();
-    mockListMsgs = [{ id: "m1" }, { id: "m2" }];
-    await syncGmailInbox({ providerId, db });
-    expect(getInboundCount(providerId, db)).toBe(2);
-  });
-
-  it("getInboundEmail retrieves synced message by id", async () => {
-    const { db, providerId } = setupDb();
-    mockListMsgs = [{ id: "m1" }];
-    await syncGmailInbox({ providerId, db });
-    const emails = listInboundEmails({ provider_id: providerId }, db);
-    const fetched = getInboundEmail(emails[0]!.id, db);
-    expect(fetched).not.toBeNull();
-    expect(fetched!.message_id).toBe(emails[0]!.message_id);
-  });
-
-  it("clearInboundEmails removes synced messages", async () => {
-    const { db, providerId } = setupDb();
-    mockListMsgs = [{ id: "m1" }, { id: "m2" }];
-    await syncGmailInbox({ providerId, db });
-    expect(getInboundCount(providerId, db)).toBe(2);
-    clearInboundEmails(providerId, db);
-    expect(getInboundCount(providerId, db)).toBe(0);
-  });
-});
-
-// ─── inbox status (getGmailSyncState / updateLastSynced) ─────────────────────
-
-describe("inbox status — sync state tracking", () => {
-  it("returns null state before any sync", () => {
-    const { providerId } = setupDb();
-    const state = getGmailSyncState(providerId);
-    expect(state).toBeNull();
-  });
-
-  it("updateLastSynced sets last_synced_at", () => {
-    const { db, providerId } = setupDb();
-    const before = new Date().toISOString();
-    updateLastSynced(providerId, "msg-xyz", db);
-    const state = getGmailSyncState(providerId, db);
-    expect(state).not.toBeNull();
-    expect(new Date(state!.last_synced_at!).getTime()).toBeGreaterThanOrEqual(new Date(before).getTime());
-    expect(state!.last_message_id).toBe("msg-xyz");
-  });
-
-  it("setGmailSyncState updates existing state", () => {
-    const { db, providerId } = setupDb();
-    updateLastSynced(providerId, "first-msg", db);
-
-    setGmailSyncState(providerId, { history_id: "12345" }, db);
-    const state = getGmailSyncState(providerId, db);
-    expect(state!.history_id).toBe("12345");
-    expect(state!.last_message_id).toBe("first-msg"); // preserved
-  });
-
-  it("clears next_page_token on updateLastSynced", () => {
-    const { db, providerId } = setupDb();
-    setGmailSyncState(providerId, { next_page_token: "tok123" }, db);
-    updateLastSynced(providerId, undefined, db);
-    const state = getGmailSyncState(providerId, db);
-    expect(state!.next_page_token).toBeNull();
-  });
-
-  it("does not update last_synced_at when CLI Gmail sync returns errors", async () => {
-    const { db, providerId } = setupDb();
-    mockRun.mockImplementation(async (operationArgs: {
-      operation: string;
-      input?: Record<string, unknown> & { args?: Array<string | number | boolean> };
-    }) => {
-      const { operation } = operationArgs;
-      if (operation === "messages.list") {
-        return { connector: "gmail", operation, success: false, stdout: "", stderr: "list failed", exitCode: 1, data: [] };
-      }
-      return { connector: "gmail", operation, success: true, stdout: "[]", stderr: "", exitCode: 0, data: [] };
-    });
-
-    const result = await runInboxCommand(["inbox", "sync", "--provider", providerId]);
-
-    expect((result.data as { errors: string[] }).errors[0]).toContain("Failed to list messages");
-    expect(getGmailSyncState(providerId, db)).toBeNull();
   });
 });

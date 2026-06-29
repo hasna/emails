@@ -1,27 +1,32 @@
 import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
 import { createProvider, listProviders, listProviderSummaries, deleteProvider, getProvider, updateProvider } from "../../db/providers.js";
-import { createAddress } from "../../db/addresses.js";
 import { getAdapter } from "../../providers/index.js";
 import { log } from "../../lib/logger.js";
 import { confirmDestructiveAction, formatListHint, handleError, isCliVerboseOutput, parseCliListPage, resolveId } from "../utils.js";
+
+type SupportedProviderType = "resend" | "ses" | "sandbox";
+const GMAIL_RETIRED_MESSAGE = "Gmail is no longer an active Mailery provider. Use SES, Resend, or Cloudflare inbound routing.";
+
+function parseProviderType(value: string): SupportedProviderType {
+  if (value === "gmail") handleError(new Error(GMAIL_RETIRED_MESSAGE));
+  if (value === "resend" || value === "ses" || value === "sandbox") return value;
+  handleError(new Error("Provider type must be 'resend', 'ses', or 'sandbox'"));
+  return "sandbox";
+}
 
 export function registerProviderCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   const providerCmd = program.command("provider").description("Manage email providers");
 
   providerCmd
     .command("add")
-    .description("Add an email provider (resend, ses, or gmail)")
+    .description("Add an email provider (resend, ses, or sandbox)")
     .requiredOption("--name <name>", "Provider name")
-    .requiredOption("--type <type>", "Provider type: resend | ses | gmail")
+    .requiredOption("--type <type>", "Provider type: resend | ses | sandbox")
     .option("--api-key <key>", "Resend API key")
     .option("--region <region>", "SES region")
     .option("--access-key <key>", "SES access key ID")
     .option("--secret-key <key>", "SES secret access key")
-    .option("--client-id <id>", "Gmail OAuth client ID")
-    .option("--client-secret <secret>", "Gmail OAuth client secret")
     .option("--skip-validation", "Skip credential validation after adding")
     .action(async (opts: {
       name: string;
@@ -30,64 +35,20 @@ export function registerProviderCommands(program: Command, output: (data: unknow
       region?: string;
       accessKey?: string;
       secretKey?: string;
-      clientId?: string;
-      clientSecret?: string;
       skipValidation?: boolean;
     }) => {
       try {
-        if (opts.type !== "resend" && opts.type !== "ses" && opts.type !== "gmail" && opts.type !== "sandbox") {
-          handleError(new Error("Provider type must be 'resend', 'ses', 'gmail', or 'sandbox'"));
-        }
-
-        if (opts.type === "sandbox") {
-          const provider = createProvider({ name: opts.name, type: "sandbox" });
-          log.success(`✓ Sandbox provider created: ${provider.name} (${provider.id.slice(0, 8)})`);
-          log.info(chalk.dim("  Emails sent to this provider are captured locally — not delivered."));
-          return;
-        }
-
-        if (opts.type === "gmail") {
-          if (!opts.clientId) handleError(new Error("Gmail provider requires --client-id"));
-          if (!opts.clientSecret) handleError(new Error("Gmail provider requires --client-secret"));
-
-          const { startGmailOAuthFlow } = await import("../../lib/gmail-oauth.js");
-          log.info(chalk.dim("Starting Gmail OAuth flow..."));
-          const tokens = await startGmailOAuthFlow(opts.clientId!, opts.clientSecret!);
-
-          const provider = createProvider({
-            name: opts.name,
-            type: "gmail",
-            oauth_client_id: opts.clientId,
-            oauth_client_secret: opts.clientSecret,
-            oauth_refresh_token: tokens.refresh_token,
-            oauth_access_token: tokens.access_token,
-            oauth_token_expiry: tokens.expiry,
-          });
-
-          if (!opts.skipValidation) {
-            try {
-              const adapter = getAdapter(provider);
-              await adapter.listAddresses();
-            } catch (validationErr) {
-              deleteProvider(provider.id);
-              handleError(new Error(`Provider credentials are invalid: ${validationErr instanceof Error ? validationErr.message : String(validationErr)}. Provider was not saved.`));
-            }
-          }
-
-          log.success(`\u2713 Gmail provider created: ${provider.name} (${provider.id.slice(0, 8)})`);
-          return;
-        }
-
+        const type = parseProviderType(opts.type);
         const provider = createProvider({
           name: opts.name,
-          type: opts.type as "resend" | "ses",
+          type,
           api_key: opts.apiKey,
           region: opts.region,
           access_key: opts.accessKey,
           secret_key: opts.secretKey,
         });
 
-        if (!opts.skipValidation) {
+        if (!opts.skipValidation && type !== "sandbox") {
           try {
             const adapter = getAdapter(provider);
             await adapter.listDomains();
@@ -97,7 +58,12 @@ export function registerProviderCommands(program: Command, output: (data: unknow
           }
         }
 
-        log.success(`\u2713 Provider created: ${provider.name} (${provider.id.slice(0, 8)})`);
+        if (type === "sandbox") {
+          log.success(`✓ Sandbox provider created: ${provider.name} (${provider.id.slice(0, 8)})`);
+          log.info(chalk.dim("  Emails sent to this provider are captured locally, not delivered."));
+        } else {
+          log.success(`✓ Provider created: ${provider.name} (${provider.id.slice(0, 8)})`);
+        }
       } catch (e) {
         handleError(e);
       }
@@ -120,7 +86,8 @@ export function registerProviderCommands(program: Command, output: (data: unknow
         const lines: string[] = [chalk.bold("\nProviders:")];
         for (const p of providers) {
           const status = p.active ? chalk.green("active") : chalk.yellow("inactive");
-          lines.push(`  ${chalk.cyan(p.id.slice(0, 8))}  ${p.name}  [${p.type}]  ${status}`);
+          const legacy = p.type === "gmail" ? chalk.dim(" legacy/import-only") : "";
+          lines.push(`  ${chalk.cyan(p.id.slice(0, 8))}  ${p.name}  [${p.type}]  ${status}${legacy}`);
         }
         lines.push("");
         lines.push(formatListHint({
@@ -155,37 +122,6 @@ export function registerProviderCommands(program: Command, output: (data: unknow
     });
 
   providerCmd
-    .command("auth <id>")
-    .description("Re-authenticate a Gmail provider (refresh OAuth tokens)")
-    .action(async (id: string) => {
-      try {
-        const resolvedId = resolveId("providers", id);
-        const provider = getProvider(resolvedId);
-        if (!provider) handleError(new Error(`Provider not found: ${id}`));
-        if (provider!.type !== "gmail") {
-          handleError(new Error("Only Gmail providers require OAuth re-authentication"));
-        }
-        if (!provider!.oauth_client_id || !provider!.oauth_client_secret) {
-          handleError(new Error("Provider is missing oauth_client_id or oauth_client_secret"));
-        }
-
-        const { startGmailOAuthFlow } = await import("../../lib/gmail-oauth.js");
-        console.log(chalk.dim("Starting Gmail OAuth flow..."));
-        const tokens = await startGmailOAuthFlow(provider!.oauth_client_id!, provider!.oauth_client_secret!);
-
-        updateProvider(resolvedId, {
-          oauth_refresh_token: tokens.refresh_token,
-          oauth_access_token: tokens.access_token,
-          oauth_token_expiry: tokens.expiry,
-        });
-
-        console.log(chalk.green(`✓ Gmail provider re-authenticated: ${provider!.name}`));
-      } catch (e) {
-        handleError(e);
-      }
-    });
-
-  providerCmd
     .command("update <id>")
     .description("Update an existing provider")
     .option("--name <name>", "Provider name")
@@ -206,10 +142,9 @@ export function registerProviderCommands(program: Command, output: (data: unknow
         const resolvedId = resolveId("providers", id);
         const existing = getProvider(resolvedId);
         if (!existing) handleError(new Error(`Provider not found: ${id}`));
+        if (existing!.type === "gmail") handleError(new Error(GMAIL_RETIRED_MESSAGE));
 
-        // Save original state for revert
         const original = { ...existing! };
-
         const updates: Record<string, string | undefined> = {};
         if (opts.name !== undefined) updates.name = opts.name;
         if (opts.apiKey !== undefined) updates.api_key = opts.apiKey;
@@ -219,33 +154,23 @@ export function registerProviderCommands(program: Command, output: (data: unknow
 
         const updated = updateProvider(resolvedId, updates);
 
-        if (!opts.skipValidation) {
+        if (!opts.skipValidation && updated.type !== "sandbox") {
           try {
             const adapter = getAdapter(updated);
-            if (updated.type === "gmail") {
-              await adapter.listAddresses();
-            } else {
-              await adapter.listDomains();
-            }
+            await adapter.listDomains();
           } catch (validationErr) {
-            // Revert the update
             updateProvider(resolvedId, {
               name: original.name,
               api_key: original.api_key ?? undefined,
               region: original.region ?? undefined,
               access_key: original.access_key ?? undefined,
               secret_key: original.secret_key ?? undefined,
-              oauth_client_id: original.oauth_client_id ?? undefined,
-              oauth_client_secret: original.oauth_client_secret ?? undefined,
-              oauth_refresh_token: original.oauth_refresh_token ?? undefined,
-              oauth_access_token: original.oauth_access_token ?? undefined,
-              oauth_token_expiry: original.oauth_token_expiry ?? undefined,
             });
             handleError(new Error(`Provider credentials are invalid: ${validationErr instanceof Error ? validationErr.message : String(validationErr)}. Update was reverted.`));
           }
         }
 
-        log.success(`\u2713 Provider updated: ${updated.name} (${updated.id.slice(0, 8)})`);
+        log.success(`✓ Provider updated: ${updated.name} (${updated.id.slice(0, 8)})`);
       } catch (e) {
         handleError(e);
       }
@@ -253,13 +178,13 @@ export function registerProviderCommands(program: Command, output: (data: unknow
 
   providerCmd
     .command("status")
-    .description("Health check all active providers")
+    .description("Health check active supported providers")
     .action(async () => {
       try {
         const { checkAllProviders, formatProviderHealth } = await import("../../lib/health.js");
         const results = await checkAllProviders();
         if (results.length === 0) {
-          output([], chalk.dim("No active providers. Add one with 'mailery provider add'"));
+          output([], chalk.dim("No active supported providers. Add one with 'mailery provider add'"));
           return;
         }
         const lines: string[] = [chalk.bold("\nProvider Health:\n")];
@@ -273,53 +198,28 @@ export function registerProviderCommands(program: Command, output: (data: unknow
       }
     });
 
-  // ─── CHECK ───────────────────────────────────────────────────────────────
   providerCmd
     .command("check")
-    .description("Verify all providers are healthy with connector auth validation")
+    .description("Verify supported providers are healthy")
     .action(async () => {
       try {
         const providers = listProviders();
+        const supported = providers.filter((p) => p.type !== "gmail");
         if (providers.length === 0) {
           console.log(chalk.dim("No providers configured."));
           console.log(chalk.bold("\nQuick setup:"));
           console.log(chalk.dim("  SES:    mailery provider add --type ses --name \"My SES\" --region us-east-1 --access-key ... --secret-key ..."));
           console.log(chalk.dim("  Resend: mailery provider add --type resend --name \"My Resend\" --api-key re_..."));
-          console.log(chalk.dim("  Gmail:  connectors auth gmail --no-browser  ->  mailery provider add-gmail"));
+          console.log(chalk.dim("  Sandbox: mailery provider add --type sandbox --name \"Local Sandbox\""));
           return;
         }
 
-        console.log(chalk.bold(`\nChecking ${providers.length} provider(s)...\n`));
-        const { runConnectorOperation } = await import("@hasna/connectors");
-        const { resolveGmailLiveSource } = await import("../../lib/gmail-sync.js");
-
-        for (const p of providers) {
+        console.log(chalk.bold(`\nChecking ${supported.length} supported provider(s)...\n`));
+        const legacyGmail = providers.filter((p) => p.type === "gmail");
+        for (const p of supported) {
           const icon = p.active ? "" : chalk.dim("[inactive] ");
           process.stdout.write(`  ${icon}${chalk.cyan(p.name)} (${p.type}) ... `);
-
-          if (p.type === "gmail") {
-            let source;
-            try {
-              source = resolveGmailLiveSource({ providerId: p.id });
-            } catch {
-              console.log(chalk.dim("skipped (no live Gmail source)"));
-              continue;
-            }
-            const meResult = await runConnectorOperation<{ emailAddress?: string }>({
-              connector: "gmail",
-              operation: "me",
-              input: {},
-              profile: source.profile,
-            });
-            if (meResult.success) {
-              let email = "";
-              try { email = (meResult.data ?? JSON.parse(meResult.stdout) as { emailAddress?: string }).emailAddress ?? ""; } catch {}
-              console.log(chalk.green(`✓ authenticated${email ? ` as ${email}` : ""}`));
-            } else {
-              console.log(chalk.red("✗ not authenticated"));
-              console.log(chalk.dim(`    Fix: connectors auth gmail --no-browser`));
-            }
-          } else if (p.type === "ses") {
+          if (p.type === "ses") {
             if (!p.access_key || !p.secret_key) {
               console.log(chalk.yellow("⚠ missing credentials"));
             } else {
@@ -347,132 +247,9 @@ export function registerProviderCommands(program: Command, output: (data: unknow
             console.log(chalk.dim("sandbox (no auth needed)"));
           }
         }
-
-        console.log();
-      } catch (e) {
-        handleError(e);
-      }
-    });
-
-  // ─── ADD-GMAIL ────────────────────────────────────────────────────────────
-  providerCmd
-    .command("add-gmail")
-    .description("Add a Gmail provider from saved connector tokens")
-    .option("--name <name>", "Provider name (defaults to Gmail profile name)")
-    .option("--profile <profile>", "Connector Gmail profile to use (default: \"default\")", "default")
-    .option("--list-profiles", "List available Gmail profiles and exit")
-    .option("--import-only", "Record the Gmail account as import-only; local mail remains readable but live sync is disabled")
-    .option("--no-live-sync", "Create the source but keep live sync disabled")
-    .option("--force", "Allow duplicate default/named profile use")
-    .action(async (opts: { name?: string; profile?: string; listProfiles?: boolean; importOnly?: boolean; liveSync?: boolean; force?: boolean }) => {
-      try {
-        const HOME = process.env["HOME"] || process.env["USERPROFILE"] || "~";
-        const profilesDir = join(HOME, ".connectors", "connect-gmail", "profiles");
-        const knownProfiles = existsSync(profilesDir)
-          ? readdirSync(profilesDir).filter((p) => existsSync(join(profilesDir, p, "tokens.json")))
-          : [];
-
-        if (opts.listProfiles) {
-          if (!existsSync(profilesDir)) {
-            console.log(chalk.dim("No Gmail profiles found. Run: connectors auth gmail"));
-            return;
-          }
-          console.log(chalk.bold("\nAvailable Gmail profiles:"));
-          for (const p of knownProfiles) console.log(`  ${chalk.cyan(p)}`);
-          console.log();
-          return;
+        if (legacyGmail.length > 0) {
+          console.log(chalk.dim(`\nSkipped ${legacyGmail.length} legacy Gmail provider(s); Gmail is import-only now.`));
         }
-
-        const profile = opts.profile ?? "default";
-        const { assertNoDuplicateDefaultGmailProfile } = await import("../../lib/gmail-sync.js");
-        assertNoDuplicateDefaultGmailProfile(profile, knownProfiles, opts.force === true);
-        const tokensPath = join(profilesDir, profile, "tokens.json");
-
-        if (!existsSync(tokensPath)) {
-          console.error(chalk.red(`Gmail not authenticated (profile: "${profile}")`));
-          console.log("");
-          console.log(chalk.bold("To authenticate, run:"));
-          console.log(chalk.cyan("  connectors auth gmail --no-browser"));
-          console.log(chalk.dim("  (prints a URL — open it in your browser, complete OAuth, then re-run this command)"));
-          console.log("");
-          console.log(chalk.dim("Or check if credentials are configured:"));
-          console.log(chalk.dim("  connectors config gmail show"));
-          process.exit(1);
-        }
-
-        const tokens = JSON.parse(readFileSync(tokensPath, "utf-8")) as {
-          accessToken?: string;
-          refreshToken?: string;
-          expiresAt?: string;
-        };
-
-        if (!tokens.refreshToken) {
-          console.error(chalk.red("Authentication incomplete — no refresh token found."));
-          console.log(chalk.dim("Re-run: connectors auth gmail --no-browser"));
-          process.exit(1);
-        }
-
-        // Get Gmail profile info to use as the email address
-        const { runConnectorOperation } = await import("@hasna/connectors");
-        console.log(chalk.dim("Verifying Gmail connection..."));
-        const meResult = await runConnectorOperation<{ emailAddress?: string }>({
-          connector: "gmail",
-          operation: "me",
-          input: {},
-          profile,
-        });
-        let emailAddress = "";
-        if (meResult.success) {
-          try {
-            const me = meResult.data ?? JSON.parse(meResult.stdout) as { emailAddress?: string };
-            emailAddress = me.emailAddress ?? "";
-          } catch {
-            const match = meResult.stdout.match(/emailAddress[:\s]+([^\s,}]+)/);
-            if (match?.[1]) emailAddress = match[1];
-          }
-        } else {
-          console.error(chalk.red("Could not verify Gmail connection."));
-          console.log(chalk.dim("Try re-authenticating: connectors auth gmail --no-browser"));
-          process.exit(1);
-        }
-
-        const providerName = opts.name ?? (emailAddress ? `Gmail (${emailAddress})` : `Gmail (${profile})`);
-
-        // Create provider
-        const expiryMs = tokens.expiresAt ? parseInt(tokens.expiresAt, 10) : undefined;
-        const expiry = expiryMs ? new Date(expiryMs).toISOString() : undefined;
-
-        const provider = createProvider({
-          name: providerName,
-          type: "gmail",
-          oauth_access_token: tokens.accessToken,
-          oauth_refresh_token: tokens.refreshToken,
-          oauth_token_expiry: expiry,
-        });
-        const { registerGmailSource } = await import("../../lib/gmail-sync.js");
-        const source = registerGmailSource({
-          providerId: provider.id,
-          profile,
-          name: providerName,
-          email: emailAddress || undefined,
-          status: opts.importOnly ? "import" : "live",
-          liveSyncEnabled: !opts.importOnly && opts.liveSync !== false,
-        });
-
-        console.log(chalk.green(`✓ Connected as: ${emailAddress}`));
-        console.log(chalk.green(`✓ Created provider: ${providerName} [${provider.id.slice(0, 8)}]`));
-        console.log(chalk.green(`✓ Created source: ${source.id} [${source.status}${source.live_sync_enabled ? ", live sync" : ", live sync disabled"}]`));
-
-        // Create address record if we have the email
-        if (emailAddress) {
-          createAddress({ provider_id: provider.id, email: emailAddress });
-          console.log(chalk.green(`✓ Added address: ${emailAddress}`));
-        }
-
-        console.log(chalk.bold("\nNext steps:"));
-        console.log(chalk.dim(`  Sync inbox:    mailery inbox sync --provider ${provider.id.slice(0, 8)} --all`));
-        console.log(chalk.dim(`  Check status:  mailery inbox status`));
-        console.log(chalk.dim(`  Send email:    mailery send --from ${emailAddress} --to ... --subject ... --body ...`));
         console.log();
       } catch (e) {
         handleError(e);

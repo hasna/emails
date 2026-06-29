@@ -4,7 +4,6 @@ import { createProvider } from "../db/providers.js";
 import { createAddress, markVerified } from "../db/addresses.js";
 import { createDomain, updateDnsStatus } from "../db/domains.js";
 import { storeInboundEmail, setInboundArchived, setInboundRead } from "../db/inbound.js";
-import { setGmailSyncState } from "../db/gmail-sync-state.js";
 import { createOwner, assignAddressOwner } from "../db/owners.js";
 import { setAddressProvisioning, setDomainProvisioning } from "../db/provisioning.js";
 import { getEmailSystemStatus, getNextEmailAction } from "./agent-context.js";
@@ -272,110 +271,5 @@ describe("agent context", () => {
     expect(queries.some((sql) => sql.includes("WHERE is_sent = 0"))).toBe(true);
     expect(queries.filter((sql) => sql.includes("COUNT(*) as count FROM inbound_emails"))).toHaveLength(0);
     expect(queries.filter((sql) => sql.includes("MAX(received_at) as latest FROM inbound_emails"))).toHaveLength(0);
-  });
-
-  it("batches Gmail sync state and provider inbox counts", () => {
-    const db = getDatabase();
-    const first = createProvider({ name: "gmail-first", type: "gmail" }, db);
-    const second = createProvider({ name: "gmail-second", type: "gmail" }, db);
-    createProvider({ name: "sandbox", type: "sandbox" }, db);
-    const read = storeInboundEmail({
-      provider_id: first.id,
-      message_id: "<read@gmail.example>",
-      from_address: "sender@example.com",
-      to_addresses: ["ops@example.com"],
-      cc_addresses: [],
-      subject: "read",
-      text_body: "read",
-      html_body: null,
-      attachments: [],
-      headers: {},
-      raw_size: 1,
-      received_at: "2026-01-01T10:00:00.000Z",
-    }, db);
-    setInboundRead(read.id, true, db);
-    storeInboundEmail({
-      provider_id: first.id,
-      message_id: "<unread@gmail.example>",
-      from_address: "sender@example.com",
-      to_addresses: ["ops@example.com"],
-      cc_addresses: [],
-      subject: "unread",
-      text_body: "unread",
-      html_body: null,
-      attachments: [],
-      headers: {},
-      raw_size: 1,
-      received_at: "2026-01-02T10:00:00.000Z",
-    }, db);
-    storeInboundEmail({
-      provider_id: first.id,
-      message_id: "<sent@gmail.example>",
-      from_address: "ops@example.com",
-      to_addresses: ["sender@example.com"],
-      cc_addresses: [],
-      subject: "sent",
-      text_body: "sent",
-      html_body: null,
-      attachments: [],
-      headers: {},
-      label_ids: ["SENT"],
-      raw_size: 1,
-      received_at: "2026-01-04T10:00:00.000Z",
-    }, db);
-    const archived = storeInboundEmail({
-      provider_id: second.id,
-      message_id: "<archived@gmail.example>",
-      from_address: "sender@example.com",
-      to_addresses: ["ops@example.com"],
-      cc_addresses: [],
-      subject: "archived",
-      text_body: "archived",
-      html_body: null,
-      attachments: [],
-      headers: {},
-      raw_size: 1,
-      received_at: "2026-01-03T10:00:00.000Z",
-    }, db);
-    setInboundArchived(archived.id, true, db);
-    setGmailSyncState(first.id, {
-      last_synced_at: "2026-01-04T10:00:00.000Z",
-      last_message_id: "first-last",
-    }, db);
-    setGmailSyncState(second.id, {
-      last_synced_at: "2026-01-05T10:00:00.000Z",
-      last_message_id: "second-last",
-    }, db);
-
-    const queries: string[] = [];
-    const recordingDb = new Proxy(db, {
-      get(target, prop, receiver) {
-        if (prop !== "query") return Reflect.get(target, prop, receiver);
-        return (sql: string) => {
-          queries.push(sql);
-          return target.query(sql);
-        };
-      },
-    }) as typeof db;
-
-    const status = getEmailSystemStatus(recordingDb);
-    const gmail = new Map(status.providers.gmail.map((provider) => [provider.name, provider]));
-
-    expect(gmail.get("gmail-first")).toMatchObject({
-      synced_count: 3,
-      unread_count: 1,
-      last_synced_at: "2026-01-04T10:00:00.000Z",
-      last_message_id: "first-last",
-    });
-    expect(gmail.get("gmail-second")).toMatchObject({
-      synced_count: 1,
-      unread_count: 0,
-      last_synced_at: "2026-01-05T10:00:00.000Z",
-      last_message_id: "second-last",
-    });
-    expect(queries.filter((sql) => sql.includes("FROM gmail_sync_state WHERE provider_id IN"))).toHaveLength(1);
-    expect(queries.filter((sql) => sql.includes("FROM gmail_sync_state WHERE provider_id = ?"))).toHaveLength(0);
-    expect(queries.filter((sql) => sql.includes("FROM inbound_emails") && sql.includes("provider_id IN") && sql.includes("GROUP BY provider_id"))).toHaveLength(1);
-    expect(queries.filter((sql) => sql.includes("FROM inbound_emails WHERE provider_id = ?"))).toHaveLength(0);
   });
 });

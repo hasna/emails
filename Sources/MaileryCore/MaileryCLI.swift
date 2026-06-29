@@ -4,7 +4,7 @@ import Foundation
 //
 // Design split: MaileryCore READS the SQLite store directly (fast, no shell-out), but
 // every MUTATION (send / reply / mark-read / archive / star / label / refresh) is
-// delegated to the `mailery` CLI. The CLI owns provider auth, Gmail mirroring, threading
+// delegated to the `mailery` CLI. The CLI owns provider auth, inbound refresh, threading
 // headers, and write-path invariants — re-implementing those in Swift would drift from
 // the source of truth and risk corrupting the shared DB. So the app never writes to
 // emails.db itself; it shells out.

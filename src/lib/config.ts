@@ -116,11 +116,11 @@ export function getFailoverProviderIds(): string[] {
   return String(val).split(",").map(s => s.trim()).filter(Boolean);
 }
 
-// ─── Gmail Attachment Config ──────────────────────────────────────────────────
+// ─── Inbound Attachment Config ────────────────────────────────────────────────
 
 export type AttachmentStorage = "local" | "s3" | "none";
 
-export interface GmailSyncConfig {
+export interface InboundAttachmentStorageConfig {
   /** Where to store attachment files: local fs, S3, or skip. Default: "local" */
   attachment_storage: AttachmentStorage;
   /** S3 bucket name (required when attachment_storage = "s3") */
@@ -129,12 +129,12 @@ export interface GmailSyncConfig {
   s3_prefix?: string;
   /** S3 region (default: us-east-1) */
   s3_region?: string;
-  /** S3 bucket for durable Gmail archive objects. */
-  archive_s3_bucket?: string;
-  /** S3 region for durable Gmail archive objects (default: us-east-1) */
-  archive_s3_region?: string;
-  /** S3 prefix for Gmail archive objects (default: "gmail") */
-  archive_s3_prefix?: string;
+}
+
+export interface GmailArchiveConfig {
+  archive_s3_bucket: string;
+  archive_s3_region: string;
+  archive_s3_prefix: string;
 }
 
 /**
@@ -237,18 +237,20 @@ export function getBrandsightAuth(): BrandsightAuth | undefined {
   return { apiKey, apiSecret, customerId };
 }
 
-export function getGmailSyncConfig(): GmailSyncConfig {
+export function getInboundAttachmentStorageConfig(): InboundAttachmentStorageConfig {
   const config = loadConfig();
   return {
-    attachment_storage: (config["gmail_attachment_storage"] as AttachmentStorage) ?? "local",
-    s3_bucket: config["gmail_s3_bucket"] as string | undefined,
-    s3_prefix: (config["gmail_s3_prefix"] as string | undefined) ?? "emails",
-    s3_region: (config["gmail_s3_region"] as string | undefined) ?? "us-east-1",
-    archive_s3_bucket: (config["gmail_archive_s3_bucket"] as string | undefined)
-      ?? process.env["HASNA_EMAILS_ARCHIVE_S3_BUCKET"]
-      ?? process.env["EMAILS_ARCHIVE_S3_BUCKET"],
-    archive_s3_region: getDefaultGmailArchiveS3Region(config),
-    archive_s3_prefix: getDefaultGmailArchiveS3Prefix(config),
+    attachment_storage: (config["attachment_storage"] as AttachmentStorage)
+      ?? (config["gmail_attachment_storage"] as AttachmentStorage)
+      ?? "local",
+    s3_bucket: (config["attachment_s3_bucket"] as string | undefined)
+      ?? (config["gmail_s3_bucket"] as string | undefined),
+    s3_prefix: (config["attachment_s3_prefix"] as string | undefined)
+      ?? (config["gmail_s3_prefix"] as string | undefined)
+      ?? "emails",
+    s3_region: (config["attachment_s3_region"] as string | undefined)
+      ?? (config["gmail_s3_region"] as string | undefined)
+      ?? "us-east-1",
   };
 }
 
@@ -271,4 +273,12 @@ export function getDefaultGmailArchiveS3Prefix(config: EmailsConfig = loadConfig
     ?? process.env["HASNA_EMAILS_ARCHIVE_S3_PREFIX"]
     ?? process.env["EMAILS_ARCHIVE_S3_PREFIX"]
     ?? "gmail";
+}
+
+export function getGmailArchiveConfig(config: EmailsConfig = loadConfig()): GmailArchiveConfig {
+  return {
+    archive_s3_bucket: getDefaultGmailArchiveS3Bucket(config),
+    archive_s3_region: getDefaultGmailArchiveS3Region(config),
+    archive_s3_prefix: getDefaultGmailArchiveS3Prefix(config),
+  };
 }

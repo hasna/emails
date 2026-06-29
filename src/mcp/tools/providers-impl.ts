@@ -13,7 +13,6 @@ type ProviderToolName =
   | "list_providers"
   | "add_provider"
   | "update_provider"
-  | "authenticate_gmail_provider"
   | "remove_provider";
 
 function formatError(error: unknown): string {
@@ -47,11 +46,6 @@ function createProviderInput(input: Record<string, unknown>): CreateProviderInpu
     region: optionalString(input, "region"),
     access_key: optionalString(input, "access_key"),
     secret_key: optionalString(input, "secret_key"),
-    oauth_client_id: optionalString(input, "oauth_client_id"),
-    oauth_client_secret: optionalString(input, "oauth_client_secret"),
-    oauth_refresh_token: optionalString(input, "oauth_refresh_token"),
-    oauth_access_token: optionalString(input, "oauth_access_token"),
-    oauth_token_expiry: optionalString(input, "oauth_token_expiry"),
   };
 }
 
@@ -72,16 +66,15 @@ export async function runProviderTool(name: ProviderToolName, input: Record<stri
       }
       case "add_provider": {
         const providerInput = createProviderInput(input);
+        if (providerInput.type === "gmail") {
+          return text("Error: Gmail is no longer an active Mailery provider. Use SES, Resend, or Cloudflare inbound routing.", true);
+        }
         const provider = createProvider(providerInput);
 
         if (!input["skip_validation"] && provider.type !== "sandbox") {
           try {
             const adapter = getAdapter(provider);
-            if (provider.type === "gmail") {
-              await adapter.listAddresses();
-            } else {
-              await adapter.listDomains();
-            }
+            await adapter.listDomains();
           } catch (validationErr) {
             deleteProvider(provider.id);
             return text(
@@ -97,26 +90,6 @@ export async function runProviderTool(name: ProviderToolName, input: Record<stri
         const resolvedId = resolveId("providers", String(input["id"]));
         const { id: _, ...updates } = input;
         return json(redactSecrets(updateProvider(resolvedId, updates)));
-      }
-      case "authenticate_gmail_provider": {
-        const providerRef = String(input["provider_id"]);
-        const id = resolveId("providers", providerRef);
-        const provider = getProvider(id);
-        if (!provider) throw new Error(`Provider not found: ${providerRef}`);
-        if (provider.type !== "gmail") throw new Error("Only Gmail providers require OAuth authentication");
-        if (!provider.oauth_client_id || !provider.oauth_client_secret) {
-          throw new Error("Provider is missing oauth_client_id or oauth_client_secret");
-        }
-
-        const { startGmailOAuthFlow } = await import("../../lib/gmail-oauth.js");
-        const tokens = await startGmailOAuthFlow(provider.oauth_client_id, provider.oauth_client_secret);
-        const updated = updateProvider(id, {
-          oauth_refresh_token: tokens.refresh_token,
-          oauth_access_token: tokens.access_token,
-          oauth_token_expiry: tokens.expiry,
-        });
-
-        return json(redactSecrets({ success: true, provider: updated }));
       }
       case "remove_provider": {
         const providerRef = String(input["provider_id"]);

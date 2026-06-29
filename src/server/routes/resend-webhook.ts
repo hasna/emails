@@ -7,11 +7,13 @@
  * RESEND_WEBHOOK_SECRET); when present, requests with a bad/absent signature are
  * rejected.
  */
-import { isResendInboundEvent, parseResendInboundEvent, verifyResendWebhook, type ResendInboundEvent } from "../../lib/resend-inbound.js";
+import { isResendInboundEvent, parseResendInboundEvent, type ResendInboundEvent } from "../../lib/resend-inbound.js";
 import { storeInboundEmail } from "../../db/inbound.js";
 import { getLatestActiveProvider } from "../../db/providers.js";
 import { getDatabase } from "../../db/database.js";
 import { json, badRequest } from "./helpers.js";
+import { verifyResendSignature } from "../../lib/webhook-events.js";
+import { emitMaileryEventBestEffort, inboundReceivedEventData } from "../../lib/mailery-events.js";
 
 export async function handleResendWebhook(req: Request, path: string, method: string): Promise<Response | null> {
   if (path !== "/webhook/resend-inbound" || method !== "POST") return null;
@@ -24,10 +26,10 @@ export async function handleResendWebhook(req: Request, path: string, method: st
   const { loadConfig } = await import("../../lib/config.js");
   const secret = (loadConfig()["resend_webhook_secret"] as string | undefined) ?? process.env["RESEND_WEBHOOK_SECRET"];
   if (secret) {
-    const headers: Record<string, string> = {};
+    const headers: Record<string, string | null> = {};
     req.headers.forEach((v, k) => { headers[k] = v; });
     let valid = false;
-    try { valid = verifyResendWebhook(raw, headers, secret); } catch { valid = false; }
+    try { valid = await verifyResendSignature(raw, headers, secret); } catch { valid = false; }
     if (!valid) return json({ error: "Invalid signature" }, 401);
   }
 
@@ -53,6 +55,30 @@ export async function handleResendWebhook(req: Request, path: string, method: st
     raw_size: (parsed.text_body ?? parsed.html_body ?? "").length,
     received_at: parsed.received_at,
   }, db);
+
+  emitMaileryEventBestEffort({
+    type: "mailery.inbound.received",
+    subject: stored.id,
+    severity: "notice",
+    dedupeKey: `mailery:inbound:received:${stored.id}`,
+    message: "Inbound email received from Resend",
+    data: inboundReceivedEventData({
+      emailId: stored.id,
+      providerId: resend?.id ?? null,
+      source: "resend",
+      messageId: parsed.provider_message_id || null,
+      fromAddress: parsed.from_address,
+      toAddresses: parsed.to_addresses,
+      ccAddresses: parsed.cc_addresses,
+      subject: parsed.subject,
+      receivedAt: parsed.received_at,
+      attachmentCount: 0,
+    }),
+    metadata: {
+      provider: "resend",
+      webhook_type: event.type,
+    },
+  });
 
   return json({ ok: true, id: stored.id, message_id: parsed.provider_message_id });
 }

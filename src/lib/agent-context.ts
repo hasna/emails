@@ -3,12 +3,11 @@ import type { Database } from "../db/database.js";
 import { listProviderSummaries } from "../db/providers.js";
 import { getDomain, listDomains } from "../db/domains.js";
 import { listUsableSendingAddresses } from "../db/addresses.js";
-import { listGmailSyncStatesByProviderIds } from "../db/gmail-sync-state.js";
 import { listDomainProvisioningByIds, listReadyAddressCountsByDomains } from "../db/provisioning.js";
 import { countValue } from "../db/scalars.js";
 import type { Domain } from "../types/index.js";
 import { assessDomainReadiness } from "./domain-readiness.js";
-import { getInboundBuckets, getGmailSyncConfig, loadConfig } from "./config.js";
+import { getInboundBuckets, loadConfig } from "./config.js";
 import { enrichAddresses, type EnrichedAddress } from "./address-ownership.js";
 import {
   listMailboxSources,
@@ -30,14 +29,6 @@ export interface EmailSystemStatus {
     total: number;
     active: number;
     by_type: Record<string, number>;
-    gmail: Array<{
-      id: string;
-      name: string;
-      synced_count: number;
-      unread_count: number;
-      last_synced_at: string | null;
-      last_message_id: string | null;
-    }>;
   };
   domains: {
     total: number;
@@ -79,7 +70,6 @@ export interface EmailSystemStatus {
       last_poll_at: string | null;
       last_error: string | null;
     };
-    gmail_attachment_storage: ReturnType<typeof getGmailSyncConfig>["attachment_storage"];
   };
   mailboxes: MailboxStatusSummary;
   sources: {
@@ -107,47 +97,6 @@ function countByType(providers: AgentProviderSummary[]): Record<string, number> 
   const counts: Record<string, number> = {};
   for (const provider of providers) counts[provider.type] = (counts[provider.type] ?? 0) + 1;
   return counts;
-}
-
-function gmailProviderStatuses(providers: AgentProviderSummary[], db: Database): EmailSystemStatus["providers"]["gmail"] {
-  const gmailProviders = providers.filter((provider) => provider.type === "gmail");
-  const providerIds = gmailProviders.map((provider) => provider.id);
-  const states = listGmailSyncStatesByProviderIds(providerIds, db);
-  const counts = new Map<string, { synced_count: number; unread_count: number }>(
-    providerIds.map((providerId) => [providerId, { synced_count: 0, unread_count: 0 }]),
-  );
-
-  if (providerIds.length > 0) {
-    const placeholders = providerIds.map(() => "?").join(", ");
-    const rows = db.query(
-      `SELECT
-         provider_id,
-         COUNT(*) AS synced_count,
-         COALESCE(SUM(CASE WHEN is_sent = 0 AND is_read = 0 AND is_archived = 0 THEN 1 ELSE 0 END), 0) AS unread_count
-       FROM inbound_emails
-       WHERE provider_id IN (${placeholders})
-       GROUP BY provider_id`,
-    ).all(...providerIds) as Array<{ provider_id: string; synced_count: unknown; unread_count: unknown }>;
-    for (const row of rows) {
-      counts.set(row.provider_id, {
-        synced_count: countValue(row.synced_count),
-        unread_count: countValue(row.unread_count),
-      });
-    }
-  }
-
-  return gmailProviders.map((provider) => {
-    const state = states.get(provider.id);
-    const providerCounts = counts.get(provider.id) ?? { synced_count: 0, unread_count: 0 };
-    return {
-      id: provider.id,
-      name: provider.name,
-      synced_count: providerCounts.synced_count,
-      unread_count: providerCounts.unread_count,
-      last_synced_at: state?.last_synced_at ?? null,
-      last_message_id: state?.last_message_id ?? null,
-    };
-  });
 }
 
 interface AddressSummaryRow {
@@ -362,7 +311,6 @@ export function getEmailSystemStatus(db: Database = getDatabase()): EmailSystemS
   const domainReadinessTruncated = domainRows.length > DOMAIN_READINESS_LIMIT;
   const domainReadiness = buildDomainReadiness(domainRows.slice(0, DOMAIN_READINESS_LIMIT), providersById, db);
 
-  const gmail = gmailProviderStatuses(providers, db);
   const mailboxStatus = listMailboxStatus(undefined, db);
   const sourceRows = listMailboxSources({ limit: Math.max(SOURCE_STATUS_LIMIT + 1, 1000) }, db);
   const countedSources = sourceRows.filter((source) => source.kind !== "all");
@@ -389,7 +337,6 @@ export function getEmailSystemStatus(db: Database = getDatabase()): EmailSystemS
       total: providers.length,
       active: providers.filter((provider) => provider.active).length,
       by_type: countByType(providers),
-      gmail,
     },
     domains: {
       total: domainCounts.total,
@@ -420,7 +367,6 @@ export function getEmailSystemStatus(db: Database = getDatabase()): EmailSystemS
         last_poll_at: typeof config["inbound_realtime_last_poll_at"] === "string" ? config["inbound_realtime_last_poll_at"] : null,
         last_error: typeof config["inbound_realtime_last_error"] === "string" ? config["inbound_realtime_last_error"] : null,
       },
-      gmail_attachment_storage: getGmailSyncConfig().attachment_storage,
     },
     mailboxes: mailboxStatus,
     sources: {
@@ -527,7 +473,6 @@ export function getAgentContext(db: Database = getDatabase()): Record<string, un
     refresh_cadence: {
       ui_local_reload_ms: 30000,
       ui_s3_pull_ms: 45000,
-      ui_gmail_pull_ms: 120000,
       realtime_watch_command: "mailery inbox watch --all-buckets",
     },
   };

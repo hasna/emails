@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { closeDatabase, getDatabase, resetDatabase } from "../db/database.js";
 import { createProvider } from "../db/providers.js";
 import { createDomain, updateDnsStatus } from "../db/domains.js";
@@ -9,16 +9,9 @@ import { runDiagnostics, formatDiagnostics } from "./doctor.js";
 import type { DoctorCheck } from "./doctor.js";
 import type { Database } from "../db/database.js";
 
-const runConnectorCommand = mock(async () => ({
-  success: true,
-  stdout: JSON.stringify({ emailAddress: "doctor@example.com" }),
-  stderr: "",
-}));
-
 beforeEach(() => {
   process.env["EMAILS_DB_PATH"] = ":memory:";
   resetDatabase();
-  runConnectorCommand.mockClear();
 });
 
 afterEach(() => {
@@ -182,7 +175,7 @@ describe("runDiagnostics", () => {
     expect(provHealthCheck?.message).toContain("live credential check skipped");
   });
 
-  it("does not treat stored SES provider keys as full AWS/Route53 provisioning readiness", async () => {
+  it("does not treat stored SES provider keys as full AWS provisioning readiness", async () => {
     createProvider({
       name: "SES",
       type: "ses",
@@ -191,13 +184,30 @@ describe("runDiagnostics", () => {
       secret_key: "secret",
     });
 
-    const checks = await runDiagnostics();
-    const awsProvisioning = checks.find((c) => c.name === "Provisioning: aws");
-    expect(awsProvisioning).toMatchObject({
-      status: "warn",
-    });
-    expect(awsProvisioning?.message).toContain("Stored SES provider credentials");
-    expect(awsProvisioning?.message).toContain("Route53");
+    const saved = {
+      AWS_PROFILE: process.env["AWS_PROFILE"],
+      AWS_ACCESS_KEY_ID: process.env["AWS_ACCESS_KEY_ID"],
+      AWS_SECRET_ACCESS_KEY: process.env["AWS_SECRET_ACCESS_KEY"],
+      AWS_SESSION_TOKEN: process.env["AWS_SESSION_TOKEN"],
+    };
+    delete process.env["AWS_PROFILE"];
+    delete process.env["AWS_ACCESS_KEY_ID"];
+    delete process.env["AWS_SECRET_ACCESS_KEY"];
+    delete process.env["AWS_SESSION_TOKEN"];
+    try {
+      const checks = await runDiagnostics();
+      const awsProvisioning = checks.find((c) => c.name === "Provisioning: aws");
+      expect(awsProvisioning).toMatchObject({
+        status: "warn",
+      });
+      expect(awsProvisioning?.message).toContain("Stored SES provider credentials");
+      expect(awsProvisioning?.message).toContain("AWS domain purchase");
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
   });
 
   it("can run live provider credential checks explicitly", async () => {
@@ -206,42 +216,6 @@ describe("runDiagnostics", () => {
     const provHealthCheck = checks.find((c) => c.name.startsWith("Provider: BrokenResend"));
     expect(provHealthCheck).toBeDefined();
     expect(provHealthCheck?.message).toContain("Credentials invalid");
-  });
-
-  it("does not run live Gmail connector auth checks by default", async () => {
-    createProvider({
-      name: "Gmail",
-      type: "gmail",
-      oauth_refresh_token: "refresh-token",
-      oauth_token_expiry: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
-    });
-
-    const checks = await runDiagnostics(undefined, { gmailAuthCheck: runConnectorCommand });
-    const gmailCheck = checks.find((c) => c.name === "Gmail: Gmail");
-
-    expect(gmailCheck).toMatchObject({
-      status: "pass",
-    });
-    expect(gmailCheck?.message).toContain("live auth check skipped");
-    expect(runConnectorCommand).not.toHaveBeenCalled();
-  });
-
-  it("runs Gmail connector auth checks only when live diagnostics are requested", async () => {
-    createProvider({
-      name: "Gmail",
-      type: "gmail",
-      oauth_refresh_token: "refresh-token",
-      oauth_token_expiry: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
-    });
-
-    const checks = await runDiagnostics(undefined, { liveProviderChecks: true, gmailAuthCheck: runConnectorCommand });
-    const gmailCheck = checks.find((c) => c.name === "Gmail: Gmail");
-
-    expect(runConnectorCommand).toHaveBeenCalledTimes(1);
-    expect(gmailCheck).toMatchObject({
-      status: "pass",
-    });
-    expect(gmailCheck?.message).toContain("Authenticated as doctor@example.com");
   });
 });
 

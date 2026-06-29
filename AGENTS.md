@@ -1,11 +1,11 @@
 # AGENTS.md - @hasna/mailery
 
-This file guides AI coding agents working with `@hasna/mailery` - an email management CLI, MCP server, and library supporting Resend, AWS SES, and Gmail.
+This file guides AI coding agents working with `@hasna/mailery` - an email management CLI, MCP server, and library supporting Resend, AWS SES, and Cloudflare-routed inbound mail.
 
 ## What This Package Does
 
 `@hasna/mailery` manages the full email lifecycle locally:
-- **Send** transactional emails via Resend, SES, or Gmail
+- **Send** transactional emails via Resend or SES
 - **Receive** inbound emails via SMTP listener or webhooks
 - **Track** delivery events, opens, clicks, replies
 - **Manage** domains, addresses, templates, contacts, sequences
@@ -35,7 +35,7 @@ send_email(from, to, subject, html?, text?, provider_id?, template?, template_va
 ### Manage providers
 ```
 list_providers()                          → see configured providers
-add_provider(name, type, ...)             → add resend/ses/gmail/sandbox
+add_provider(name, type, ...)             → add resend/ses/sandbox
 update_provider(id, ...)                  → update credentials
 ```
 
@@ -97,9 +97,9 @@ run_forwarding_rules(provider_id?, from_address?, limit?, backfill?)
 ```
 
 Forwarding rules are app-level: they forward mail only after this app has
-received or synced the source mailbox. For domains whose root MX belongs to
+received the source mailbox via SES/S3, Cloudflare-routed inbound storage, SMTP, or webhooks. For domains whose root MX belongs to
 Google Workspace, Microsoft 365, Cloudflare Email Routing, or another mailbox
-provider, use provider-native forwarding unless the source mailbox is synced
+provider, use provider-native forwarding unless the source mailbox is delivered
 into this app. `run_forwarding_rules` processes only messages received after
 the rule was created unless `backfill=true` is explicitly set.
 
@@ -225,7 +225,7 @@ src/
 │   ├── agent-context.ts       # redacted agent orientation snapshots
 │   └── ...
 ├── providers/                 # provider adapters
-│   ├── resend.ts, ses.ts, gmail.ts, sandbox.ts
+│   ├── resend.ts, ses.ts, sandbox.ts
 │   └── interface.ts           # ProviderAdapter interface
 ├── mcp/                       # MCP server, modular tools, and resources
 ├── server/serve.ts            # HTTP server + REST API

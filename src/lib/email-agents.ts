@@ -1,4 +1,5 @@
 import { promises as dns } from "node:dns";
+import { createHash } from "node:crypto";
 import { z } from "zod";
 import { tool } from "ai";
 import type { Database } from "../db/database.js";
@@ -20,6 +21,7 @@ import {
 import { extractEmailLinks } from "./email-links.js";
 import { createMaileryAiModel, DEFAULT_GROQ_EMAIL_AGENT_MODEL, resolveMaileryAiDefaults } from "./mailery-ai.js";
 import { loadConfig } from "./config.js";
+import { emitMaileryEventBestEffort } from "./mailery-events.js";
 
 export interface RunManagedEmailAgentOptions {
   provider?: EmailAgentProvider;
@@ -50,7 +52,29 @@ export interface EmailOrganizationResult {
   agents: EmailAgentKey[];
   emails: number;
   runs: EmailAgentRun[];
+  dry_run: boolean;
+  action_plans: EmailWorkflowActionPlan[];
   errors: { agent_key: EmailAgentKey; inbound_email_id: string; error: string }[];
+}
+
+export type EmailWorkflowActionType = "add-label" | "archive" | "flag-spam" | "trash";
+
+export interface EmailWorkflowAction {
+  type: EmailWorkflowActionType;
+  label?: string;
+  reason: string;
+  requires_approval: boolean;
+}
+
+export interface EmailWorkflowActionPlan {
+  plan_hash: string;
+  inbound_email_id: string;
+  agent_run_id: string;
+  agent_key: EmailAgentKey;
+  category: string | null;
+  risk_score: number | null;
+  labels: string[];
+  actions: EmailWorkflowAction[];
 }
 
 export interface EmailAgentCredentialStatus {
@@ -415,6 +439,23 @@ export async function runManagedEmailAgent(
     if (shouldApplyLabels(agentKey, setting, opts)) {
       applyAgentLabels(inboundEmailId, labels, db);
     }
+    emitMaileryEventBestEffort({
+      type: "mailery.agent.classified",
+      subject: inboundEmailId,
+      severity: output.risk_score >= 70 ? "warning" : "info",
+      dedupeKey: `mailery:agent:classified:${run.id}`,
+      message: `Email classified by ${agentKey}`,
+      data: {
+        agent_run_id: run.id,
+        agent_key: agentKey,
+        inbound_email_id: inboundEmailId,
+        category: run.category,
+        labels: run.labels,
+        priority: run.priority,
+        confidence: run.confidence,
+        risk_score: run.risk_score,
+      },
+    });
     return run;
   } catch (error) {
     return saveEmailAgentRun({
@@ -469,14 +510,16 @@ export async function runAlwaysOnEmailAgents(opts: { limitPerAgent?: number; db?
 }
 
 export async function runEmailOrganization(
-  opts: RunEmailAgentBatchOptions & { agents?: EmailAgentKey[]; applyActions?: boolean } = {},
+  opts: RunEmailAgentBatchOptions & { agents?: EmailAgentKey[]; applyActions?: boolean; dryRun?: boolean; allowSpamFlag?: boolean; allowTrash?: boolean } = {},
   deps: GenerateTextDeps = {},
 ): Promise<EmailOrganizationResult> {
   const db = opts.db || getDatabase();
   const agentKeys = opts.agents?.length ? opts.agents : DEFAULT_ORGANIZATION_AGENTS;
   const limit = Math.max(1, Math.min(opts.limit ?? 100, MAX_ORGANIZATION_EMAILS));
   const runs: EmailAgentRun[] = [];
+  const actionPlans: EmailWorkflowActionPlan[] = [];
   const errors: EmailOrganizationResult["errors"] = [];
+  const dryRun = opts.dryRun === true;
 
   if (opts.all) {
     const emails = listInboundEmailSummaries({ limit }, db).filter((email) => !email.is_sent);
@@ -486,14 +529,19 @@ export async function runEmailOrganization(
           ...opts,
           db,
           force: opts.force ?? true,
-          applyLabels: opts.applyLabels ?? true,
+          applyLabels: dryRun ? false : opts.applyLabels ?? true,
         }, deps);
         runs.push(run);
-        if (run.status === "ok" && opts.applyActions) applyOrganizationActions(run, db);
+        if (run.status === "ok") {
+          const plan = planOrganizationActions(run);
+          actionPlans.push(plan);
+          emitPlannedActionEvent(plan, dryRun);
+          if (opts.applyActions && !dryRun) applyOrganizationActions(plan, db, opts);
+        }
         if (run.status === "error") errors.push({ agent_key: agentKey, inbound_email_id: email.id, error: run.error ?? "unknown error" });
       }
     }
-    return { agents: agentKeys, emails: emails.length, runs, errors };
+    return { agents: agentKeys, emails: emails.length, runs, dry_run: dryRun, action_plans: actionPlans, errors };
   }
 
   const emailIds = new Set<string>();
@@ -503,16 +551,21 @@ export async function runEmailOrganization(
       db,
       limit,
       force: opts.force ?? true,
-      applyLabels: opts.applyLabels ?? true,
+      applyLabels: dryRun ? false : opts.applyLabels ?? true,
     }, deps);
     for (const run of result.runs) {
       runs.push(run);
       emailIds.add(run.inbound_email_id);
-      if (run.status === "ok" && opts.applyActions) applyOrganizationActions(run, db);
+      if (run.status === "ok") {
+        const plan = planOrganizationActions(run);
+        actionPlans.push(plan);
+        emitPlannedActionEvent(plan, dryRun);
+        if (opts.applyActions && !dryRun) applyOrganizationActions(plan, db, opts);
+      }
     }
     errors.push(...result.errors);
   }
-  return { agents: agentKeys, emails: emailIds.size, runs, errors };
+  return { agents: agentKeys, emails: emailIds.size, runs, dry_run: dryRun, action_plans: actionPlans, errors };
 }
 
 function resolveAgentProvider(setting: EmailAgentSetting, opts: RunManagedEmailAgentOptions): { provider: EmailAgentProvider; model: string } {
@@ -661,7 +714,8 @@ function labelsForAgent(agentKey: EmailAgentKey, output: AgentOutput): string[] 
   if (agentKey === "fraud") {
     if (output.risk_score >= 70) {
       labels.add("fraud-risk");
-      labels.add("spam");
+      labels.add("spam-candidate");
+      labels.add("quarantine");
     }
     else if (output.risk_score >= 40) labels.add("review-risk");
   }
@@ -673,9 +727,10 @@ function labelsForAgent(agentKey: EmailAgentKey, output: AgentOutput): string[] 
     labels.add("important");
   }
   if (["spam", "scam", "phishing", "fraud", "fraud-risk"].some((label) => labels.has(label) || category.includes(label))) {
-    labels.add("spam");
+    labels.add("spam-candidate");
+    labels.add("quarantine");
   }
-  if (["trash", "junk", "delete"].some((label) => labels.has(label))) labels.add("trash");
+  if (["trash", "junk", "delete"].some((label) => labels.has(label))) labels.add("trash-candidate");
   return [...labels];
 }
 
@@ -707,16 +762,119 @@ function rawLabelsForAgentLabel(label: string): string[] {
     || normalized === "action-required"
     || normalized === "follow-up"
   ) raw.add(normalized === "priority" ? "important" : normalized);
-  if (normalized === "spam" || normalized === "trash") raw.add(normalized);
+  if (normalized === "quarantine") raw.add("quarantine");
   if (normalized === "newsletter" || normalized === "transactional") raw.add(normalized);
   if (normalized.startsWith("category-") || normalized.startsWith("category_")) raw.add(normalized.replace(/-/g, "_"));
   return [...raw];
 }
 
-function applyOrganizationActions(run: EmailAgentRun, db: Database): void {
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, item]) => `${JSON.stringify(key)}:${stableStringify(item)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function planHash(input: Omit<EmailWorkflowActionPlan, "plan_hash">): string {
+  return createHash("sha256").update(stableStringify(input)).digest("hex");
+}
+
+function planOrganizationActions(run: EmailAgentRun): EmailWorkflowActionPlan {
   const labels = new Set(run.labels.map(normalizeAgentLabel));
+  const actions: EmailWorkflowAction[] = [];
   if (labels.has("archive") || labels.has("archived") || labels.has("archive-suggested")) {
-    setInboundArchivedFlag(run.inbound_email_id, true, db);
+    actions.push({ type: "archive", reason: "agent suggested archive", requires_approval: false });
+  }
+  if (labels.has("quarantine") || labels.has("spam-candidate") || labels.has("fraud-risk") || (run.risk_score ?? 0) >= 70) {
+    actions.push({ type: "add-label", label: "quarantine", reason: "high-risk or spam-candidate mail is quarantined before destructive action", requires_approval: false });
+  }
+  if (labels.has("spam")) {
+    actions.push({ type: "flag-spam", label: "spam", reason: "agent produced a spam label; spam flag requires explicit apply permission", requires_approval: true });
+  }
+  if (labels.has("trash") || labels.has("trash-candidate")) {
+    actions.push({ type: "trash", label: "trash", reason: "trash/delete action requires explicit apply permission", requires_approval: true });
+  }
+  const plan = {
+    inbound_email_id: run.inbound_email_id,
+    agent_run_id: run.id,
+    agent_key: run.agent_key,
+    category: run.category,
+    risk_score: run.risk_score,
+    labels: run.labels,
+    actions,
+  };
+  return { plan_hash: planHash(plan), ...plan };
+}
+
+function emitPlannedActionEvent(plan: EmailWorkflowActionPlan, dryRun: boolean): void {
+  emitMaileryEventBestEffort({
+    type: "mailery.action.planned",
+    subject: plan.inbound_email_id,
+    severity: plan.actions.some((action) => action.requires_approval) ? "warning" : "info",
+    dedupeKey: `mailery:action:planned:${plan.plan_hash}`,
+    message: "Email workflow action plan created",
+    data: {
+      ...plan,
+      dry_run: dryRun,
+    },
+  });
+}
+
+function applyOrganizationActions(
+  plan: EmailWorkflowActionPlan,
+  db: Database,
+  opts: { allowSpamFlag?: boolean; allowTrash?: boolean },
+): void {
+  const applied: EmailWorkflowAction[] = [];
+  for (const action of plan.actions) {
+    if (action.type === "archive") {
+      setInboundArchivedFlag(plan.inbound_email_id, true, db);
+      applied.push(action);
+    } else if (action.type === "add-label" && action.label) {
+      addInboundLabel(plan.inbound_email_id, action.label, db);
+      applied.push(action);
+      if (action.label === "quarantine") {
+        emitMaileryEventBestEffort({
+          type: "mailery.quarantine.created",
+          subject: plan.inbound_email_id,
+          severity: "warning",
+          dedupeKey: `mailery:quarantine:${plan.plan_hash}`,
+          message: "Email quarantined by workflow plan",
+          data: {
+            plan_hash: plan.plan_hash,
+            agent_run_id: plan.agent_run_id,
+            inbound_email_id: plan.inbound_email_id,
+            risk_score: plan.risk_score,
+            labels: plan.labels,
+          },
+        });
+      }
+    } else if (action.type === "flag-spam" && opts.allowSpamFlag && action.label) {
+      addInboundLabel(plan.inbound_email_id, action.label, db);
+      applied.push(action);
+    } else if (action.type === "trash" && opts.allowTrash && action.label) {
+      addInboundLabel(plan.inbound_email_id, action.label, db);
+      applied.push(action);
+    }
+  }
+  if (applied.length > 0) {
+    emitMaileryEventBestEffort({
+      type: "mailery.action.applied",
+      subject: plan.inbound_email_id,
+      severity: applied.some((action) => action.type === "trash" || action.type === "flag-spam") ? "warning" : "info",
+      dedupeKey: `mailery:action:applied:${plan.plan_hash}`,
+      message: "Email workflow action plan applied",
+      data: {
+        plan_hash: plan.plan_hash,
+        agent_run_id: plan.agent_run_id,
+        inbound_email_id: plan.inbound_email_id,
+        applied_actions: applied,
+      },
+    });
   }
 }
 
@@ -757,9 +915,18 @@ export function formatEmailOrganizationResult(result: EmailOrganizationResult): 
   const ok = result.runs.filter((run) => run.status === "ok").length;
   const skipped = result.runs.filter((run) => run.status === "skipped").length;
   const lines = [
-    `Organized ${result.emails} email${result.emails === 1 ? "" : "s"} with ${result.agents.join(", ")}.`,
+    `Organized ${result.emails} email${result.emails === 1 ? "" : "s"} with ${result.agents.join(", ")}${result.dry_run ? " (dry-run)" : ""}.`,
     `Runs: ${ok} ok, ${skipped} skipped, ${result.errors.length} error${result.errors.length === 1 ? "" : "s"}.`,
   ];
+  const plansWithActions = result.action_plans.filter((plan) => plan.actions.length > 0);
+  if (plansWithActions.length > 0) {
+    lines.push("", `Action plans: ${plansWithActions.length}`);
+    for (const plan of plansWithActions.slice(0, 10)) {
+      const actions = plan.actions.map((action) => action.label ? `${action.type}:${action.label}` : action.type).join(", ");
+      lines.push(`- ${plan.inbound_email_id.slice(0, 8)} ${plan.plan_hash.slice(0, 12)} ${actions}`);
+    }
+    if (plansWithActions.length > 10) lines.push(`... ${plansWithActions.length - 10} more plan(s)`);
+  }
   if (result.runs.length) {
     lines.push("", ...result.runs.slice(0, 20).map(formatEmailAgentRun));
     if (result.runs.length > 20) lines.push(`... ${result.runs.length - 20} more run(s)`);

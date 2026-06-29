@@ -35,15 +35,6 @@ export interface CreateProviderInput {
   oauth_token_expiry?: string;
 }
 
-export interface CreateGmailProviderInput {
-  name: string;
-  oauth_client_id: string;
-  oauth_client_secret: string;
-  oauth_refresh_token: string;
-  oauth_access_token: string;
-  oauth_token_expiry: string;
-}
-
 export interface ProviderRow {
   id: string;
   name: string;

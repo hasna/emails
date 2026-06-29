@@ -1,18 +1,8 @@
-import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { Command } from "commander";
 import { closeDatabase, getDatabase, resetDatabase } from "../../db/database.js";
 import { createProvider } from "../../db/providers.js";
 import { registerProviderCommands } from "./provider.js";
-
-const mockRunConnectorOperation = mock(async () => ({
-  success: true,
-  stdout: "{}",
-  stderr: "",
-  exitCode: 0,
-  data: {},
-}));
-
-mock.module("@hasna/connectors", () => ({ runConnectorOperation: mockRunConnectorOperation }));
 
 async function runProviderCommand(args: string[]) {
   const originalLog = console.log;
@@ -37,7 +27,6 @@ async function runProviderCommand(args: string[]) {
 beforeEach(() => {
   process.env["EMAILS_DB_PATH"] = ":memory:";
   resetDatabase();
-  mockRunConnectorOperation.mockClear();
 });
 
 afterEach(() => {
@@ -46,13 +35,12 @@ afterEach(() => {
 });
 
 describe("provider check command", () => {
-  it("does not touch Gmail live auth when the provider has no live source", async () => {
+  it("skips legacy Gmail providers", async () => {
     createProvider({ name: "Gmail Import", type: "gmail" });
 
     const result = await runProviderCommand(["provider", "check"]);
 
-    expect(result.out).toContain("skipped (no live Gmail source)");
-    expect(mockRunConnectorOperation).not.toHaveBeenCalled();
+    expect(result.out).toContain("Skipped 1 legacy Gmail provider(s); Gmail is import-only now.");
   });
 });
 

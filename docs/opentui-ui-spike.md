@@ -73,7 +73,7 @@ References:
   live in Domains.
 - Compose has editable From, To, Subject, and Body fields.
 - Settings opens as a compact dialog with Sync, Defaults, and Display submenus
-  for auto-pull, Gmail auto-pull, dim-read, default folder, default inbox,
+  for auto-pull, dim-read, default folder, default inbox,
   default From, and theme mode.
 
 ## Verification

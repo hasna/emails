@@ -21,8 +21,15 @@ afterEach(() => {
 
 function isolatedEnv(dbPath: string, homePath: string): NodeJS.ProcessEnv {
   mkdirSync(homePath, { recursive: true });
+  const {
+    HASNA_EMAILS_DATABASE_URL: _canonicalDb,
+    EMAILS_DATABASE_URL: _fallbackDb,
+    HASNA_EMAILS_STORAGE_MODE: _canonicalMode,
+    EMAILS_STORAGE_MODE: _fallbackMode,
+    ...baseEnv
+  } = process.env;
   return {
-    ...process.env,
+    ...baseEnv,
     EMAILS_DB_PATH: dbPath,
     HOME: homePath,
     NO_COLOR: "1",
@@ -371,7 +378,7 @@ describe("CLI JSON contracts", () => {
     tempDirs.push(dir);
     const env = isolatedEnv(join(dir, "emails.db"), join(dir, "home"));
     const seeded = withSeededCliDb(env, () => {
-      const provider = createProvider({ name: "gmail", type: "gmail" });
+      const provider = createProvider({ name: "ses", type: "ses" });
       const email = storeInboundEmail({
         provider_id: provider.id,
         message_id: "<cli-json-inbox@example.com>",

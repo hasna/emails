@@ -254,7 +254,7 @@ export function registerEmailResources(server: McpServer): void {
     "emails://inbox/sync-status",
     {
       title: "Emails Inbox Sync Status",
-      description: "Inbox source status for S3, realtime queue, and explicit Gmail sources.",
+      description: "Inbox source status for S3 ingestion, realtime queue, and local mailbox sources.",
       mimeType: "application/json",
     },
     async () => {
@@ -264,7 +264,6 @@ export function registerEmailResources(server: McpServer): void {
         inbox: status.inbox,
         mailboxes: status.mailboxes,
         sources: status.sources,
-        gmail: status.providers.gmail,
         cli_equivalents: status.cli_equivalents,
       });
     },

@@ -3,10 +3,9 @@ import { mkdirSync, rmSync, existsSync, writeFileSync } from "fs";
 import { join } from "path";
 import {
   loadConfig, saveConfig, getConfigValue, setConfigValue,
-  getDefaultProviderId, getFailoverProviderIds, getGmailSyncConfig,
-  getDefaultGmailArchiveS3Bucket,
-  getDefaultGmailArchiveS3Region,
-  getDefaultGmailArchiveS3Prefix,
+  getDefaultProviderId, getFailoverProviderIds, getInboundAttachmentStorageConfig,
+  getDefaultGmailArchiveS3Bucket, getDefaultGmailArchiveS3Prefix,
+  getDefaultGmailArchiveS3Region, getGmailArchiveConfig,
   CANONICAL_OPEN_EMAILS_S3_BUCKET,
   CANONICAL_OPEN_EMAILS_S3_REGION,
   CANONICAL_OPEN_EMAILS_SECRET_PATHS,
@@ -19,39 +18,15 @@ import {
 // Use a temp dir unique per test run to isolate from real ~/.hasna/emails
 const TMP_HOME = join("/tmp", `emails-config-test-${process.pid}`);
 const origHome = process.env.HOME;
-const origArchiveBucket = process.env["HASNA_EMAILS_ARCHIVE_S3_BUCKET"];
-const origArchiveRegion = process.env["HASNA_EMAILS_ARCHIVE_S3_REGION"];
-const origArchivePrefix = process.env["HASNA_EMAILS_ARCHIVE_S3_PREFIX"];
-const origLegacyArchiveBucket = process.env["EMAILS_ARCHIVE_S3_BUCKET"];
-const origLegacyArchiveRegion = process.env["EMAILS_ARCHIVE_S3_REGION"];
-const origLegacyArchivePrefix = process.env["EMAILS_ARCHIVE_S3_PREFIX"];
 
 beforeEach(() => {
   mkdirSync(TMP_HOME, { recursive: true });
   process.env.HOME = TMP_HOME;
-  delete process.env["HASNA_EMAILS_ARCHIVE_S3_BUCKET"];
-  delete process.env["HASNA_EMAILS_ARCHIVE_S3_REGION"];
-  delete process.env["HASNA_EMAILS_ARCHIVE_S3_PREFIX"];
-  delete process.env["EMAILS_ARCHIVE_S3_BUCKET"];
-  delete process.env["EMAILS_ARCHIVE_S3_REGION"];
-  delete process.env["EMAILS_ARCHIVE_S3_PREFIX"];
 });
 
 afterEach(() => {
   if (origHome === undefined) delete process.env.HOME;
   else process.env.HOME = origHome;
-  if (origArchiveBucket === undefined) delete process.env["HASNA_EMAILS_ARCHIVE_S3_BUCKET"];
-  else process.env["HASNA_EMAILS_ARCHIVE_S3_BUCKET"] = origArchiveBucket;
-  if (origArchiveRegion === undefined) delete process.env["HASNA_EMAILS_ARCHIVE_S3_REGION"];
-  else process.env["HASNA_EMAILS_ARCHIVE_S3_REGION"] = origArchiveRegion;
-  if (origArchivePrefix === undefined) delete process.env["HASNA_EMAILS_ARCHIVE_S3_PREFIX"];
-  else process.env["HASNA_EMAILS_ARCHIVE_S3_PREFIX"] = origArchivePrefix;
-  if (origLegacyArchiveBucket === undefined) delete process.env["EMAILS_ARCHIVE_S3_BUCKET"];
-  else process.env["EMAILS_ARCHIVE_S3_BUCKET"] = origLegacyArchiveBucket;
-  if (origLegacyArchiveRegion === undefined) delete process.env["EMAILS_ARCHIVE_S3_REGION"];
-  else process.env["EMAILS_ARCHIVE_S3_REGION"] = origLegacyArchiveRegion;
-  if (origLegacyArchivePrefix === undefined) delete process.env["EMAILS_ARCHIVE_S3_PREFIX"];
-  else process.env["EMAILS_ARCHIVE_S3_PREFIX"] = origLegacyArchivePrefix;
   if (existsSync(TMP_HOME)) rmSync(TMP_HOME, { recursive: true, force: true });
 });
 
@@ -145,16 +120,12 @@ describe("config", () => {
     expect(getFailoverProviderIds()).toEqual(["id1", "id2"]);
   });
 
-  it("getGmailSyncConfig defaults Gmail archives to the production bucket region", () => {
-    expect(getGmailSyncConfig()).toMatchObject({
+  it("getInboundAttachmentStorageConfig defaults local attachment storage", () => {
+    expect(getInboundAttachmentStorageConfig()).toMatchObject({
+      attachment_storage: "local",
       s3_region: "us-east-1",
-      archive_s3_region: CANONICAL_OPEN_EMAILS_S3_REGION,
-      archive_s3_prefix: "gmail",
+      s3_prefix: "emails",
     });
-    expect(getGmailSyncConfig().archive_s3_bucket).toBeUndefined();
-    expect(getDefaultGmailArchiveS3Bucket()).toBe(CANONICAL_OPEN_EMAILS_S3_BUCKET);
-    expect(getDefaultGmailArchiveS3Region()).toBe(CANONICAL_OPEN_EMAILS_S3_REGION);
-    expect(getDefaultGmailArchiveS3Prefix()).toBe("gmail");
   });
 
   it("exports canonical Hasna XYZ emails resource paths", () => {
@@ -178,26 +149,44 @@ describe("config", () => {
     });
   });
 
-  it("getGmailSyncConfig reads canonical archive env overrides", () => {
-    process.env["HASNA_EMAILS_ARCHIVE_S3_BUCKET"] = "override-bucket";
-    process.env["HASNA_EMAILS_ARCHIVE_S3_REGION"] = "eu-west-1";
-    process.env["HASNA_EMAILS_ARCHIVE_S3_PREFIX"] = "archive";
-    try {
-      expect(getGmailSyncConfig()).toMatchObject({
-        archive_s3_bucket: "override-bucket",
-        archive_s3_region: "eu-west-1",
-        archive_s3_prefix: "archive",
-      });
-    } finally {
-      delete process.env["HASNA_EMAILS_ARCHIVE_S3_BUCKET"];
-      delete process.env["HASNA_EMAILS_ARCHIVE_S3_REGION"];
-      delete process.env["HASNA_EMAILS_ARCHIVE_S3_PREFIX"];
-    }
+  it("getInboundAttachmentStorageConfig reads explicit inbound attachment overrides", () => {
+    setConfigValue("attachment_storage", "s3");
+    setConfigValue("attachment_s3_bucket", "attachments");
+    setConfigValue("attachment_s3_region", "eu-west-1");
+    setConfigValue("attachment_s3_prefix", "mail");
+
+    expect(getInboundAttachmentStorageConfig()).toMatchObject({
+      attachment_storage: "s3",
+      s3_bucket: "attachments",
+      s3_region: "eu-west-1",
+      s3_prefix: "mail",
+    });
   });
 
-  it("getGmailSyncConfig reads explicit Gmail archive region overrides", () => {
-    setConfigValue("gmail_archive_s3_region", "eu-central-1");
-    expect(getGmailSyncConfig().archive_s3_region).toBe("eu-central-1");
+  it("getInboundAttachmentStorageConfig keeps legacy attachment key compatibility", () => {
+    setConfigValue("gmail_attachment_storage", "none");
+    setConfigValue("gmail_s3_region", "eu-central-1");
+
+    expect(getInboundAttachmentStorageConfig()).toMatchObject({
+      attachment_storage: "none",
+      s3_region: "eu-central-1",
+    });
+  });
+
+  it("keeps legacy Gmail archive config helpers for old imports", () => {
+    expect(getDefaultGmailArchiveS3Bucket()).toBe(CANONICAL_OPEN_EMAILS_S3_BUCKET);
+    expect(getDefaultGmailArchiveS3Region()).toBe(CANONICAL_OPEN_EMAILS_S3_REGION);
+    expect(getDefaultGmailArchiveS3Prefix()).toBe("gmail");
+
+    setConfigValue("gmail_archive_s3_bucket", "legacy-bucket");
+    setConfigValue("gmail_archive_s3_region", "eu-west-1");
+    setConfigValue("gmail_archive_s3_prefix", "legacy/gmail");
+
+    expect(getGmailArchiveConfig()).toEqual({
+      archive_s3_bucket: "legacy-bucket",
+      archive_s3_region: "eu-west-1",
+      archive_s3_prefix: "legacy/gmail",
+    });
   });
 });
 

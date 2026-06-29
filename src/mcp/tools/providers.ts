@@ -5,7 +5,6 @@ type ProviderToolName =
   | "list_providers"
   | "add_provider"
   | "update_provider"
-  | "authenticate_gmail_provider"
   | "remove_provider";
 
 async function runProviderTool(name: ProviderToolName, input: Record<string, unknown>) {
@@ -30,19 +29,14 @@ export function registerProviderTools(server: McpServer): void {
 
   server.tool(
   "add_provider",
-  "Add a new email provider (resend, ses, or gmail)",
+  "Add a new email provider (resend, ses, or sandbox)",
   {
     name: z.string().describe("Provider name"),
-    type: z.enum(["resend", "ses", "gmail", "sandbox"]).describe("Provider type"),
+    type: z.enum(["resend", "ses", "sandbox"]).describe("Provider type"),
     api_key: z.string().optional().describe("Resend API key"),
     region: z.string().optional().describe("SES region (e.g. us-east-1)"),
     access_key: z.string().optional().describe("SES access key ID"),
     secret_key: z.string().optional().describe("SES secret access key"),
-    oauth_client_id: z.string().optional().describe("Gmail OAuth client ID"),
-    oauth_client_secret: z.string().optional().describe("Gmail OAuth client secret"),
-    oauth_refresh_token: z.string().optional().describe("Gmail OAuth refresh token"),
-    oauth_access_token: z.string().optional().describe("Gmail OAuth access token"),
-    oauth_token_expiry: z.string().optional().describe("Gmail OAuth token expiry (ISO 8601)"),
     skip_validation: z.boolean().optional().describe("Skip credential validation after adding (default: false)"),
   },
   async (input) => {
@@ -60,25 +54,9 @@ export function registerProviderTools(server: McpServer): void {
     region: z.string().optional().describe("SES region"),
     access_key: z.string().optional().describe("SES access key ID"),
     secret_key: z.string().optional().describe("SES secret access key"),
-    oauth_client_id: z.string().optional().describe("Gmail OAuth client ID"),
-    oauth_client_secret: z.string().optional().describe("Gmail OAuth client secret"),
-    oauth_refresh_token: z.string().optional().describe("Gmail OAuth refresh token"),
-    oauth_access_token: z.string().optional().describe("Gmail OAuth access token"),
-    oauth_token_expiry: z.string().optional().describe("Gmail OAuth token expiry (ISO 8601)"),
   },
   async (input) => {
     return runProviderTool("update_provider", input);
-  },
-);
-
-  server.tool(
-  "authenticate_gmail_provider",
-  "Trigger Gmail OAuth re-authentication flow for an existing Gmail provider. Opens a browser window. Must be run in an interactive terminal.",
-  {
-    provider_id: z.string().describe("Gmail provider ID (or prefix)"),
-  },
-  async ({ provider_id }) => {
-    return runProviderTool("authenticate_gmail_provider", { provider_id });
   },
 );
 

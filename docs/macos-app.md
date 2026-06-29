@@ -28,8 +28,8 @@ Mailery deliberately splits reads from writes:
   writes to the database itself.**
 - **Writes ALWAYS go through the `mailery` CLI.** Every mutation — send, reply, mark-read,
   archive, star, label, trash/spam, refresh — is delegated to the `mailery inbox …` /
-  `mailery send` / `mailery refresh` commands. The CLI owns provider auth, Gmail
-  mirroring, threading headers (In-Reply-To/References), and write-path invariants;
+  `mailery send` / `mailery refresh` commands. The CLI owns provider auth,
+  inbound refresh, threading headers (In-Reply-To/References), and write-path invariants;
   re-implementing those in Swift would drift from the source of truth and risk corrupting
   the shared DB. `MaileryCore.MaileryCLI` builds the exact argv (pure + unit-tested) and
   shells out.
@@ -97,7 +97,7 @@ REMOTE_HOST=apple03 bash scripts/run_on_apple_mac.sh
 The local inbox may be **empty** — pull mail first, then launch:
 
 ```bash
-mailery refresh          # pull new inbound mail into emails.db (S3 buckets; add --gmail for Gmail)
+mailery refresh          # pull new inbound mail into emails.db (S3 buckets and realtime queue)
 mailery inbox list       # sanity-check there is data
 open dist/Mailery.app
 # Confirm render via the app's NSLog diagnostics:

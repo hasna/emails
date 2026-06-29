@@ -12,8 +12,6 @@ const heavyToolImports = [
   "pg",
   "../../db/remote-storage.js",
   "../../db/storage-sync.js",
-  "../../lib/gmail-sync.js",
-  "../../lib/gmail-archive.js",
   "../../lib/s3-sync.js",
   "../../lib/aws-inbound.js",
   "../../lib/triage.js",
@@ -129,7 +127,6 @@ describe("MCP startup contract", () => {
   it("keeps inbox tool implementation dependencies lazy", () => {
     const lazyToolDeps = [
       "../../db/inbound.js",
-      "../../db/gmail-sync-state.js",
       "../../db/database.js",
       "../../db/pagination.js",
       "../../lib/verification-code.js",

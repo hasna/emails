@@ -258,8 +258,11 @@ export function registerStatusCommands(program: Command, output: (data: unknown,
     .option("--model <model>", "Model override")
     .option("--skip-labels", "Do not apply returned labels locally")
     .option("--skip-network", "Disable DNS/RDAP/search tools")
+    .option("--dry-run", "Classify and emit action plans without applying labels or mailbox state")
     .option("--apply-actions", "Apply safe mailbox state actions such as archive-suggested")
-    .action(async (opts: { limit?: string; all?: boolean; agents?: string; provider?: string; model?: string; skipLabels?: boolean; skipNetwork?: boolean; applyActions?: boolean }) => {
+    .option("--allow-spam-flag", "Allow applied action plans to set the raw spam flag")
+    .option("--allow-trash", "Allow applied action plans to move mail to trash")
+    .action(async (opts: { limit?: string; all?: boolean; agents?: string; provider?: string; model?: string; skipLabels?: boolean; skipNetwork?: boolean; dryRun?: boolean; applyActions?: boolean; allowSpamFlag?: boolean; allowTrash?: boolean }) => {
       try {
         const { normalizeEmailAgentKey } = await import("../../db/email-agents.js");
         const { formatEmailOrganizationResult, runEmailOrganization } = await import("../../lib/email-agents.js");
@@ -275,7 +278,10 @@ export function registerStatusCommands(program: Command, output: (data: unknown,
           model: opts.model,
           applyLabels: opts.skipLabels ? false : true,
           useNetworkTools: opts.skipNetwork ? false : undefined,
+          dryRun: opts.dryRun,
           applyActions: opts.applyActions,
+          allowSpamFlag: opts.allowSpamFlag,
+          allowTrash: opts.allowTrash,
         });
         output(result, formatEmailOrganizationResult(result));
       } catch (e) {

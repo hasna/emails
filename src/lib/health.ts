@@ -30,7 +30,7 @@ function locallyConfigured(provider: Provider): { ok: boolean; message?: string 
     case "ses":
       return provider.region ? { ok: true } : { ok: false, message: "Missing AWS region" };
     case "gmail":
-      return provider.oauth_refresh_token ? { ok: true } : { ok: false, message: "Missing Gmail refresh token" };
+      return { ok: false, message: "Gmail is legacy-only and no longer supports live provider checks" };
     default:
       return { ok: false, message: `Unknown provider type: ${(provider as { type?: unknown }).type}` };
   }

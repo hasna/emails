@@ -52,8 +52,8 @@ afterEach(() => {
 
 describe("emails serve REST parity smoke", () => {
   it("serves mailbox/source surfaces with source-aware filtering and visible legacy mail", async () => {
-    const primary = createProvider({ name: "Primary Gmail", type: "gmail", active: true });
-    const secondary = createProvider({ name: "Secondary Gmail", type: "gmail", active: true });
+    const primary = createProvider({ name: "Primary SES", type: "ses", active: true });
+    const secondary = createProvider({ name: "Secondary Resend", type: "resend", active: true });
     storeInboundEmail({
       provider_id: primary.id,
       message_id: "<primary-source@example.com>",

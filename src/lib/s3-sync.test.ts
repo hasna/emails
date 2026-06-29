@@ -215,6 +215,44 @@ describe("syncS3Inbox — with objects", () => {
     expect(row.raw_s3_url).toBe("s3://test-bucket/inbound/example.com/msg001");
   });
 
+  it("syncs exact S3 object keys without listing the whole prefix", async () => {
+    const { db, providerId } = setupDb();
+    const calls: Array<Record<string, unknown>> = [];
+
+    mockSend.mockImplementation(async (cmd: unknown) => {
+      const input = (cmd as { input?: Record<string, unknown> }).input ?? {};
+      calls.push(input);
+      if ("Key" in input) {
+        return { Body: (async function* () { yield Buffer.from("From: a@b.com\r\nSubject: Exact\r\n\r\nB"); })() };
+      }
+      throw new Error("unexpected S3 list call");
+    });
+
+    const result = await syncS3Inbox({
+      bucket: "test-bucket",
+      prefix: "inbound/",
+      keys: ["inbound/example.com/msg-exact"],
+      db,
+      providerId,
+    });
+
+    expect(result).toMatchObject({ synced: 1, skipped: 0, errors: [] });
+    expect(calls).toEqual([{ Bucket: "test-bucket", Key: "inbound/example.com/msg-exact" }]);
+    expect(db.query("SELECT id FROM inbound_emails WHERE raw_s3_url = ?").get("s3://test-bucket/inbound/example.com/msg-exact")).not.toBeNull();
+  });
+
+  it("rejects exact object keys outside the configured prefix", async () => {
+    const { db, providerId } = setupDb();
+    await expect(syncS3Inbox({
+      bucket: "test-bucket",
+      prefix: "inbound/",
+      keys: ["other/msg"],
+      db,
+      providerId,
+    })).rejects.toThrow(/outside configured prefix/);
+    expect(mockSend).not.toHaveBeenCalled();
+  });
+
   it("dedupes by exact S3 URL so matching keys in different buckets both sync", async () => {
     const { db, providerId } = setupDb();
 

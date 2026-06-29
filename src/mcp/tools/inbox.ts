@@ -20,12 +20,10 @@ type InboxToolName =
   | "get_inbound_email"
   | "extract_inbound_email_links"
   | "clear_inbound_emails"
-  | "sync_inbox"
   | "mark_email_read"
   | "archive_email"
   | "star_email"
   | "label_email"
-  | "reply_to_email"
   | "get_attachment"
   | "search_inbound"
   | "get_inbox_sync_status";
@@ -121,7 +119,6 @@ export function registerInboxTools(server: McpServer): void {
       timeout_seconds: waitTimeoutSchema.describe("Wait timeout (default 120, max 300)"),
       interval_seconds: waitIntervalSchema.describe("Polling interval (default 5, max 60)"),
       refresh: z.boolean().optional().describe("Refresh inbound sources while waiting (default true)"),
-      gmail: z.boolean().optional().describe("Also pull Gmail while refreshing (default false)"),
     },
     handler("wait_for_email"),
   );
@@ -137,7 +134,6 @@ export function registerInboxTools(server: McpServer): void {
       timeout_seconds: waitTimeoutSchema.describe("Wait timeout (default 120, max 300)"),
       interval_seconds: waitIntervalSchema.describe("Polling interval (default 5, max 60)"),
       refresh: z.boolean().optional().describe("Refresh inbound sources while waiting (default true)"),
-      gmail: z.boolean().optional().describe("Also pull Gmail while refreshing (default false)"),
     },
     handler("wait_for_verification_code"),
   );
@@ -153,7 +149,6 @@ export function registerInboxTools(server: McpServer): void {
       timeout_seconds: waitTimeoutSchema.describe("Wait timeout (default 120, max 300)"),
       interval_seconds: waitIntervalSchema.describe("Polling interval (default 5, max 60)"),
       refresh: z.boolean().optional().describe("Refresh inbound sources while waiting (default true)"),
-      gmail: z.boolean().optional().describe("Also pull Gmail while refreshing (default false)"),
     },
     handler("wait_for_code"),
   );
@@ -187,23 +182,8 @@ export function registerInboxTools(server: McpServer): void {
   );
 
   server.tool(
-    "sync_inbox",
-    "Sync Gmail inbox messages into local SQLite. Fetches new messages via the Gmail connector and stores them for offline access.",
-    {
-      provider_id: z.string().describe("Gmail provider ID to sync"),
-      label: z.string().optional().describe("Gmail label to sync (default: INBOX)"),
-      query: z.string().optional().describe("Gmail search query, e.g. 'is:unread from:someone@example.com'"),
-      limit: z.number().int().positive().max(MAX_MCP_INBOX_LIMIT).optional().describe("Max messages per run (default 50, max 1000)"),
-      since: z.string().optional().describe("Only sync messages after this ISO date"),
-      all_pages: z.boolean().optional().describe("Sync all pages until done (for full backfill)"),
-      history: z.boolean().optional().describe("Use stored Gmail history cursor for incremental sync"),
-    },
-    handler("sync_inbox"),
-  );
-
-  server.tool(
     "mark_email_read",
-    "Mark an inbound email as read (local state; mirrors to Gmail when applicable)",
+    "Mark an inbound email as read (local state)",
     {
       email_id: z.string(),
       unread: z.boolean().optional().describe("Mark unread instead"),
@@ -213,7 +193,7 @@ export function registerInboxTools(server: McpServer): void {
 
   server.tool(
     "archive_email",
-    "Archive (or unarchive) an inbound email (local state; mirrors to Gmail when applicable)",
+    "Archive (or unarchive) an inbound email (local state)",
     {
       email_id: z.string(),
       unarchive: z.boolean().optional().describe("Restore to inbox instead"),
@@ -223,7 +203,7 @@ export function registerInboxTools(server: McpServer): void {
 
   server.tool(
     "star_email",
-    "Star (or unstar) an inbound email (local state; mirrors to Gmail when applicable)",
+    "Star (or unstar) an inbound email (local state)",
     {
       email_id: z.string(),
       unstar: z.boolean().optional().describe("Remove the star instead"),
@@ -240,17 +220,6 @@ export function registerInboxTools(server: McpServer): void {
       remove: z.boolean().optional().describe("Remove the label instead of adding"),
     },
     handler("label_email"),
-  );
-
-  server.tool(
-    "reply_to_email",
-    "Reply to a synced inbound Gmail email, keeping it in the same thread",
-    {
-      email_id: z.string().describe("Inbound email ID (from local DB)"),
-      body: z.string().describe("Reply body text"),
-      is_html: z.boolean().optional().describe("Send as HTML email (default: false)"),
-    },
-    handler("reply_to_email"),
   );
 
   server.tool(
@@ -277,7 +246,7 @@ export function registerInboxTools(server: McpServer): void {
 
   server.tool(
     "get_inbox_sync_status",
-    "Get source-aware mailbox sync status for S3 ingestion, realtime queue, and Gmail provider credentials.",
+    "Get source-aware mailbox sync status for S3 ingestion and realtime queue.",
     {},
     handler("get_inbox_sync_status"),
   );

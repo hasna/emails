@@ -1,19 +1,7 @@
-import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-
-mock.module("@hasna/connectors", () => ({
-  runConnectorOperation: mock(async (operationArgs: { operation: string }) => ({
-    connector: "gmail",
-    operation: operationArgs.operation,
-    success: true,
-    stdout: "[]",
-    stderr: "",
-    exitCode: 0,
-    data: [],
-  })),
-}));
 
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 const { StreamableHTTPClientTransport } = await import("@modelcontextprotocol/sdk/client/streamableHttp.js");
@@ -953,7 +941,7 @@ describe("emails-mcp HTTP transport", () => {
   });
 
   it("gets the latest inbound email with filters before applying the result limit", async () => {
-    const provider = createProvider({ name: "gmail", type: "gmail", active: true });
+    const provider = createProvider({ name: "ses", type: "ses", active: true });
     storeInboundEmail({
       provider_id: provider.id,
       message_id: "recent-noise",
@@ -1016,7 +1004,7 @@ describe("emails-mcp HTTP transport", () => {
   });
 
   it("waits for inbound email summaries without body or header payloads", async () => {
-    const provider = createProvider({ name: "gmail", type: "gmail", active: true });
+    const provider = createProvider({ name: "ses", type: "ses", active: true });
     const email = storeInboundEmail({
       provider_id: provider.id,
       message_id: "wait-summary-row",
@@ -1062,8 +1050,8 @@ describe("emails-mcp HTTP transport", () => {
     }
   });
 
-  it("wait_for_code ignores Gmail SENT rows", async () => {
-    const provider = createProvider({ name: "gmail", type: "gmail", active: true });
+  it("wait_for_code ignores SENT rows", async () => {
+    const provider = createProvider({ name: "ses", type: "ses", active: true });
     storeInboundEmail({
       provider_id: provider.id,
       message_id: "incoming-code",
@@ -1120,7 +1108,7 @@ describe("emails-mcp HTTP transport", () => {
   });
 
   it("lists inbound email summaries without body or header payloads", async () => {
-    const provider = createProvider({ name: "gmail", type: "gmail", active: true });
+    const provider = createProvider({ name: "ses", type: "ses", active: true });
     const email = storeInboundEmail({
       provider_id: provider.id,
       message_id: "summary-row",
@@ -1202,7 +1190,7 @@ describe("emails-mcp HTTP transport", () => {
   });
 
   it("returns paged inbound search summaries with truncation metadata", async () => {
-    const provider = createProvider({ name: "gmail", type: "gmail", active: true });
+    const provider = createProvider({ name: "ses", type: "ses", active: true });
     storeInboundEmail({
       provider_id: provider.id,
       message_id: "search-recent-match",
@@ -1282,7 +1270,7 @@ describe("emails-mcp HTTP transport", () => {
   });
 
   it("returns inbound mutation summaries without body or header payloads", async () => {
-    const provider = createProvider({ name: "gmail", type: "gmail", active: true });
+    const provider = createProvider({ name: "ses", type: "ses", active: true });
     const email = storeInboundEmail({
       provider_id: provider.id,
       message_id: "mutation-summary-row",

@@ -36,7 +36,6 @@
     .badge.failed, .badge.bounced, .badge.complained { background: #7f1d1d; color: #fca5a5; }
     .badge.resend { background: #1e3a5f; color: #93c5fd; }
     .badge.ses { background: #2d1b69; color: #c4b5fd; }
-    .badge.gmail { background: #1a3a1a; color: #86efac; }
     .badge.sandbox { background: #3b2a00; color: #fde68a; }
     .badge.suppressed { background: #7f1d1d; color: #fca5a5; }
     .btn { padding: 7px 14px; border-radius: 6px; font-size: 13px; font-weight: 500; cursor: pointer; border: 1px solid; transition: all .15s; }
@@ -312,7 +311,6 @@
     <select id="prov-type" onchange="toggleProviderFields()">
       <option value="resend">Resend</option>
       <option value="ses">AWS SES</option>
-      <option value="gmail">Gmail</option>
       <option value="sandbox">Sandbox</option>
     </select>
     <div id="prov-resend-fields">
@@ -322,10 +320,6 @@
       <label>Region</label><input id="prov-region" placeholder="us-east-1" />
       <label>Access Key ID</label><input id="prov-access-key" placeholder="AKIA..." />
       <label>Secret Access Key</label><input id="prov-secret-key" type="password" />
-    </div>
-    <div id="prov-gmail-fields" style="display:none">
-      <label>Client ID</label><input id="prov-client-id" placeholder="xxxx.apps.googleusercontent.com" />
-      <label>Client Secret</label><input id="prov-client-secret" type="password" placeholder="GOCSPX-..." />
     </div>
     <div id="prov-sandbox-fields" style="display:none">
       <p style="margin-top:12px;font-size:12px;color:#64748b;">Sandbox provider requires no credentials. Emails are captured locally and not delivered.</p>
@@ -567,7 +561,6 @@ function toggleProviderFields() {
   const type = document.getElementById('prov-type').value;
   document.getElementById('prov-resend-fields').style.display = type === 'resend' ? '' : 'none';
   document.getElementById('prov-ses-fields').style.display = type === 'ses' ? '' : 'none';
-  document.getElementById('prov-gmail-fields').style.display = type === 'gmail' ? '' : 'none';
   document.getElementById('prov-sandbox-fields').style.display = type === 'sandbox' ? '' : 'none';
 }
 
@@ -694,8 +687,6 @@ async function addProvider() {
     region: type === 'ses' ? document.getElementById('prov-region').value : undefined,
     access_key: type === 'ses' ? document.getElementById('prov-access-key').value : undefined,
     secret_key: type === 'ses' ? document.getElementById('prov-secret-key').value : undefined,
-    client_id: type === 'gmail' ? document.getElementById('prov-client-id').value : undefined,
-    client_secret: type === 'gmail' ? document.getElementById('prov-client-secret').value : undefined,
   };
   try {
     await api('/api/providers', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });

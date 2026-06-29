@@ -184,8 +184,9 @@ describe("listActiveProviders", () => {
     getDatabase().run("UPDATE providers SET created_at = ? WHERE id = ?", ["2026-01-03T00:00:00.000Z", gmail.id]);
     updateProvider(inactive.id, { active: false });
 
-    expect(listActiveProviders().map((provider) => provider.id)).toEqual([gmail.id, old.id]);
+    expect(listActiveProviders().map((provider) => provider.id)).toEqual([old.id]);
     expect(listActiveProviders("resend").map((provider) => provider.id)).toEqual([old.id]);
+    expect(listActiveProviders("gmail").map((provider) => provider.id)).toEqual([gmail.id]);
   });
 });
 
@@ -213,7 +214,7 @@ describe("listActiveProviderSummaries", () => {
     const all = listActiveProviderSummaries(undefined, recordingDb, { limit: 10 });
     const gmailOnly = listActiveProviderSummaries("gmail", recordingDb);
 
-    expect(all.map((provider) => provider.id)).toEqual([gmail.id, old.id]);
+    expect(all.map((provider) => provider.id)).toEqual([old.id]);
     expect(gmailOnly.map((provider) => provider.id)).toEqual([gmail.id]);
     expect(JSON.stringify(all)).not.toContain("secret");
     expect(all[0]).not.toHaveProperty("api_key");
@@ -232,8 +233,9 @@ describe("getLatestActiveProvider", () => {
     getDatabase().run("UPDATE providers SET created_at = ? WHERE id = ?", ["2026-01-03T00:00:00.000Z", latest.id]);
     updateProvider(inactive.id, { active: false });
 
-    expect(getLatestActiveProvider()?.id).toBe(latest.id);
+    expect(getLatestActiveProvider()?.id).toBe(old.id);
     expect(getLatestActiveProvider("resend")?.id).toBe(old.id);
+    expect(getLatestActiveProvider("gmail")?.id).toBe(latest.id);
     expect(getLatestActiveProvider("ses")).toBeNull();
   });
 
@@ -254,10 +256,11 @@ describe("getLatestActiveProvider", () => {
       },
     }) as typeof db;
 
-    expect(getLatestActiveProviderId(undefined, recordingDb)).toBe(latest.id);
+    expect(getLatestActiveProviderId(undefined, recordingDb)).toBe(old.id);
     expect(getLatestActiveProviderId("resend", recordingDb)).toBe(old.id);
+    expect(getLatestActiveProviderId("gmail", recordingDb)).toBe(latest.id);
 
-    expect(queries).toHaveLength(2);
+    expect(queries).toHaveLength(3);
     expect(queries.every((sql) => sql.startsWith("SELECT id FROM providers"))).toBe(true);
     expect(queries.join("\n")).not.toMatch(/\b(api_key|access_key|secret_key|oauth_client_id|oauth_client_secret|oauth_refresh_token|oauth_access_token|oauth_token_expiry)\b/);
   });

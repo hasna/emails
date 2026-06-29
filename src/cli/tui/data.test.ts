@@ -1596,7 +1596,6 @@ describe("tui data — settings (persisted to config)", () => {
   it("defaults to the light (Catppuccin Latte) theme with provider pulls off", () => {
     const s = getSettings();
     expect(s.autoPull).toBe(false);
-    expect(s.gmailAutoPull).toBe(false);
     expect(s.dimRead).toBe(false);
     expect(s.defaultMailbox).toBe("inbox");
     expect(s.defaultAddress).toBeNull();

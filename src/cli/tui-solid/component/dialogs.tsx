@@ -760,7 +760,7 @@ function SettingsDialog(props: { close: () => void }) {
 
       <Show when={section() === "main"}>
         <box flexDirection="column" width="100%" rowGap={1}>
-          <SettingsMenuRow title="Sync" detail="Auto-pull and Gmail refresh" onPress={() => setSection("sync")} />
+          <SettingsMenuRow title="Sync" detail="Auto-pull inbound mail" onPress={() => setSection("sync")} />
           <SettingsMenuRow title="Agents" detail="Groq defaults and always-on" onPress={() => setSection("agents")} />
           <SettingsMenuRow title="Defaults" detail="Inbox, folder, and sender" onPress={() => setSection("defaults")} />
           <SettingsMenuRow title="Display" detail="Theme and read-state styling" onPress={() => setSection("display")} />
@@ -773,11 +773,6 @@ function SettingsDialog(props: { close: () => void }) {
             title="Auto-pull inbound"
             value={boolText(settings().autoPull)}
             onPress={() => mailery.actions.setSetting("autoPull", !settings().autoPull)}
-          />
-          <SettingsActionRow
-            title="Gmail auto-pull"
-            value={boolText(settings().gmailAutoPull)}
-            onPress={() => mailery.actions.setSetting("gmailAutoPull", !settings().gmailAutoPull)}
           />
         </box>
       </Show>

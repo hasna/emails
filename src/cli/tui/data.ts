@@ -645,21 +645,19 @@ export function listMailboxSources(optsOrDb?: ListMailboxSourcesOptions | Databa
     if (!provider.active && !hasStoredMail) continue;
     const id = providerSourceId(provider.id);
     const kind: MailboxSourceKind = provider.type === "gmail" ? "gmail" : "provider";
-    const legacyGmailImport = provider.type === "gmail" && hasStoredMail && !provider.active;
+    const legacyGmailImport = provider.type === "gmail";
     sources.push(sourceSummary({
       id,
       label: legacyGmailImport
         ? `Legacy Gmail import: ${provider.name}`
-        : provider.type === "gmail"
-          ? `Gmail source: ${provider.name}`
-          : `Provider-tagged stream: ${provider.name}`,
+        : `Provider-tagged stream: ${provider.name}`,
       kind,
       providerId: provider.id,
       providerName: provider.name,
       providerType: provider.type,
       badges: [
         ...(legacyGmailImport ? ["legacy"] : []),
-        provider.active ? "active" : "inactive",
+        legacyGmailImport ? "inactive" : provider.active ? "active" : "inactive",
         `capability:${provider.type}`,
         ...(hasStoredMail ? [] : ["empty"]),
       ],
@@ -1662,7 +1660,6 @@ export function listSources(db?: Database): InboxSource[] {
 
 export interface TuiSettings {
   autoPull: boolean;
-  gmailAutoPull: boolean;
   dimRead: boolean;
   defaultMailbox: Mailbox;
   defaultAddress: string | null;
@@ -1674,7 +1671,6 @@ export function getSettings(): TuiSettings {
   const c = loadConfig();
   return {
     autoPull: c["tui_autopull"] === true,
-    gmailAutoPull: c["tui_gmail_autopull"] === true,
     dimRead: c["tui_dim_read"] === true, // default false = high contrast
     defaultMailbox: normalizeMailbox(c["default_mailbox"]),
     defaultAddress: extractEmail(c["tui_default_address"]) ?? null,
@@ -1687,7 +1683,6 @@ export function setSetting<K extends keyof TuiSettings>(key: K, value: TuiSettin
   const c = loadConfig();
   const map: Record<keyof TuiSettings, string> = {
     autoPull: "tui_autopull",
-    gmailAutoPull: "tui_gmail_autopull",
     dimRead: "tui_dim_read",
     defaultMailbox: "default_mailbox",
     defaultAddress: "tui_default_address",

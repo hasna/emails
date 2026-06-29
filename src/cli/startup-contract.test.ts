@@ -16,8 +16,6 @@ const heavyRuntimeImports = [
   "solid-js",
   "../../db/remote-storage.js",
   "../../db/storage-sync.js",
-  "../../lib/gmail-sync.js",
-  "../../lib/gmail-archive.js",
   "../../lib/s3-sync.js",
   "../../lib/sync.js",
   "../../lib/inbound.js",
