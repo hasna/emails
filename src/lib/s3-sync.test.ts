@@ -139,8 +139,34 @@ describe("syncS3Inbox — empty bucket", () => {
     const source = registerS3Source({ bucket: "retired-bucket", prefix: "inbound/", providerId, status: "live", liveSyncEnabled: true });
     retireS3Source(source.id);
 
-    await expect(syncS3Inbox({ bucket: "retired-bucket", db, providerId })).rejects.toThrow(/S3 sync is blocked/);
+    await expect(syncS3Inbox({ bucket: "retired-bucket", db, providerId })).rejects.toThrow(/configured source prefixes/);
     expect(mockSend).not.toHaveBeenCalled();
+  });
+
+  it("blocks raw bucket sync when configured child prefixes include retired sources", async () => {
+    const { db, providerId } = setupDb();
+    registerS3Source({ id: "s3-mixed-live", bucket: "mixed-prefix-bucket", prefix: "live/", providerId, status: "live", liveSyncEnabled: true });
+    const retired = registerS3Source({ id: "s3-mixed-retired", bucket: "mixed-prefix-bucket", prefix: "retired/", providerId, status: "live", liveSyncEnabled: true });
+    retireS3Source(retired.id);
+
+    await expect(syncS3Inbox({ bucket: "mixed-prefix-bucket", db, providerId })).rejects.toThrow(/configured source prefixes/);
+    expect(mockSend).not.toHaveBeenCalled();
+  });
+
+  it("allows direct bucket sync when the requested prefix exactly matches a live source", async () => {
+    const { db, providerId } = setupDb();
+    registerS3Source({ id: "s3-exact-live", bucket: "exact-prefix-bucket", prefix: "live/", providerId, status: "live", liveSyncEnabled: true });
+    mockSend.mockImplementation(async (cmd: { input?: Record<string, unknown> }) => {
+      if (cmd?.input && "Prefix" in cmd.input) {
+        return { Contents: [], IsTruncated: false };
+      }
+      return {};
+    });
+
+    const result = await syncS3Inbox({ bucket: "exact-prefix-bucket", prefix: "live/", db, providerId });
+
+    expect(result.errors).toEqual([]);
+    expect(mockSend.mock.calls[0]?.[0]).toMatchObject({ input: { Bucket: "exact-prefix-bucket", Prefix: "live/" } });
   });
 
   it("rejects ambiguous S3 source prefixes instead of choosing the first match", async () => {

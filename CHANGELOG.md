@@ -2,6 +2,9 @@
 
 All notable changes to `@hasna/mailery` are documented here.
 
+## [0.6.69] - 2026-06-29
+- fix: block raw S3 bucket sync when configured child prefixes could bypass retired source lifecycle rules.
+
 ## [0.6.68] - 2026-06-29
 - fix: repair inbound-derived mailbox/source canonical state for orphaned provider history.
 - fix: keep canonical message/state rows aligned when local inbound mail is deleted or cleared.

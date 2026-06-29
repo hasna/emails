@@ -158,6 +158,12 @@ function sameS3Endpoint(
   return source.bucket === bucket && normalizePrefix(source.prefix) === normalizePrefix(prefix);
 }
 
+function prefixContains(parent: string | undefined, child: string | undefined): boolean {
+  const normalizedParent = normalizePrefix(parent) ?? "";
+  const normalizedChild = normalizePrefix(child) ?? "";
+  return normalizedChild.length > normalizedParent.length && normalizedChild.startsWith(normalizedParent);
+}
+
 function findUniqueS3Source(
   sources: S3MailSource[],
   ref: string,
@@ -259,6 +265,13 @@ function resolveS3SourceForSync(opts: S3SyncOptions): S3SyncOptions {
   if (requestedSourceId && !source) throw new Error(`S3 source not found: ${requestedSourceId}`);
   if (source && !sourceIsLive(source) && !opts.forceSource) {
     throw new Error(`S3 source ${source.id} is ${source.status}${source.live_sync_enabled ? "" : " with live sync disabled"}; S3 sync is blocked.`);
+  }
+  if (opts.bucket && !requestedSourceId && !opts.forceSource) {
+    const bucketSources = sources.filter((candidate) => candidate.bucket === opts.bucket);
+    const coveredChildSources = bucketSources.filter((candidate) => prefixContains(prefix, candidate.prefix));
+    if (coveredChildSources.length > 0) {
+      throw new Error(`S3 bucket ${opts.bucket} has configured source prefixes under ${prefix ?? "<root>"}; choose a source with --source or an exact --prefix before syncing.`);
+    }
   }
   if (!source && opts.bucket && !opts.forceSource) {
     const bucketSources = sources.filter((candidate) => candidate.bucket === opts.bucket);
