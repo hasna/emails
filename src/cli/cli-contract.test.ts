@@ -427,4 +427,44 @@ describe("CLI JSON contracts", () => {
     expect(count).toEqual({ count: 1 });
   });
 
+  it("prints a project panel contract from local Mailery state", () => {
+    const dir = mkdtempSync(join(tmpdir(), "emails-cli-contract-"));
+    tempDirs.push(dir);
+    const env = isolatedEnv(join(dir, "emails.db"), join(dir, "home"));
+    const seeded = withSeededCliDb(env, () => {
+      const provider = createProvider({ name: "sandbox", type: "sandbox" });
+      const inbound = storeInboundEmail({
+        provider_id: provider.id,
+        message_id: "project-panel-message",
+        in_reply_to_email_id: null,
+        from_address: "ionut@example.com",
+        to_addresses: ["andrei@example.com"],
+        cc_addresses: [],
+        subject: "Project panel email",
+        text_body: "Body should stay out of the panel.",
+        html_body: null,
+        attachments: [],
+        attachment_paths: [],
+        headers: {},
+        raw_size: 64,
+        received_at: "2026-06-29T00:00:00.000Z",
+      });
+      return { inboundId: inbound.id };
+    });
+
+    const panel = expectCliJsonOk<{
+      schema: string;
+      projectId: string;
+      provider: { kind: string };
+      metrics: Array<{ id: string; value: unknown }>;
+      items: Array<{ id: string }>;
+    }>(runCli(["project-panel", "--project", "Swiss Bank Account", "--json", "--contract"], env));
+
+    expect(panel.schema).toBe("hasna.project_panel.v1");
+    expect(panel.projectId).toBe("swiss-bank-account");
+    expect(panel.provider.kind).toBe("mailery");
+    expect(panel.metrics.find((metric) => metric.id === "inbox_unread")?.value).toBe(1);
+    expect(panel.items.some((item) => item.id === seeded.inboundId)).toBe(true);
+  });
+
 });

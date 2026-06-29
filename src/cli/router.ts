@@ -35,7 +35,7 @@ export const allCommandModules = [
   "browserplan",
 ] as const;
 
-export type CommandModule = typeof allCommandModules[number];
+export type CommandModule = typeof allCommandModules[number] | "project-panel";
 
 export const knownCommandNames = new Set([
   "provider",
@@ -93,6 +93,7 @@ export const knownCommandNames = new Set([
   "aws",
   "storage",
   "status",
+  "project-panel",
   "daemon",
   "logs",
   "cloud",
@@ -191,6 +192,7 @@ export function commandModulesFor(args: string[]): readonly CommandModule[] {
     case "aws": return ["aws"];
     case "storage": return ["storage"];
     case "status": return ["status"];
+    case "project-panel": return ["status"];
     case "daemon":
     case "logs": return ["daemon"];
     case "cloud": return ["cloud"];

@@ -29,6 +29,7 @@ describe("CLI router", () => {
       [["schedule", "list"], ["misc"]],
       [["links", "abc123"], ["inbox"]],
       [["ask", "latest"], ["status"]],
+      [["project-panel"], ["status"]],
       [["logs"], ["daemon"]],
       [["cloud", "status"], ["cloud"]],
     ];

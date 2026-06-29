@@ -1,5 +1,5 @@
 import type { Command } from "commander";
-import { handleError, isCliVerboseOutput, parseCliNonNegativeIntOption, parseCliPositiveIntOption } from "../utils.js";
+import { emitJson, handleError, isCliVerboseOutput, parseCliNonNegativeIntOption, parseCliPositiveIntOption } from "../utils.js";
 
 interface AgentPromptOptions {
   provider?: "cerebras" | "groq";
@@ -46,6 +46,35 @@ export function registerStatusCommands(program: Command, output: (data: unknown,
         const { getEmailSystemStatus, formatEmailSystemStatus } = await import("../../lib/agent-context.js");
         const status = getEmailSystemStatus();
         output(status, formatEmailSystemStatus(status));
+      } catch (e) {
+        handleError(e);
+      }
+    });
+
+  program
+    .command("project-panel")
+    .description("Emit a contract-valid project dashboard panel for Mailery")
+    .option("--project <project>", "Dashboard project slug or name", "mailery")
+    .option("--limit <n>", "Maximum panel items/resources", "20")
+    .option("--contract", "Emit hasna.project_panel.v1 contract JSON")
+    .option("--json", "Output JSON")
+    .action(async (opts: { project?: string; limit?: string; contract?: boolean; json?: boolean }) => {
+      try {
+        const { createMaileryProjectPanel } = await import("../../lib/project-panel.js");
+        const panel = createMaileryProjectPanel(opts.project ?? "mailery", {
+          limit: parseCliPositiveIntOption(opts.limit, 20, 100),
+        });
+        if (opts.json || opts.contract) {
+          emitJson(panel);
+          return;
+        }
+        output(panel, [
+          "Mailery project panel",
+          `  Project: ${panel.projectId}`,
+          `  State:   ${panel.state}`,
+          `  ${panel.summary ?? "No summary."}`,
+          ...panel.metrics.map((metric) => `  ${metric.label}: ${metric.value}${metric.unit ? ` ${metric.unit}` : ""}`),
+        ].join("\n"));
       } catch (e) {
         handleError(e);
       }

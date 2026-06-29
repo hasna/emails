@@ -46,10 +46,12 @@ async function loadCommandModule(module: CommandModule): Promise<RegisterFn> {
     case "aws": return (await import("./commands/aws.js")).registerAwsCommands;
     case "storage": return (await import("./commands/storage.js")).registerStorageCommands;
     case "status": return (await import("./commands/status.js")).registerStatusCommands;
+    case "project-panel": return (await import("./commands/status.js")).registerStatusCommands;
     case "daemon": return (await import("./commands/daemon.js")).registerDaemonCommands;
     case "cloud": return (await import("./commands/cloud.js")).registerCloudCommands;
     case "browserplan": return (await import("./commands/browserplan.js")).registerBrowserPlanCommands;
   }
+  throw new Error(`Unknown command module: ${module}`);
 }
 
 async function registerCommandsForArgs(program: Command, output: OutputFn, args: string[]): Promise<void> {
