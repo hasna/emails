@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resetDatabase, closeDatabase, getDatabase, uuid } from "../db/database.js";
 import { createProvider } from "../db/providers.js";
@@ -41,8 +42,10 @@ mock.module("mailparser", () => ({
 
 process.env["EMAILS_DB_PATH"] = ":memory:";
 process.env["CLOUDFLARE_API_TOKEN"] = "mock-cf-token-for-tests";
+const originalHome = process.env["HOME"];
+let tmpHome = "";
 
-const { syncS3Inbox } = await import("./s3-sync.js");
+const { syncS3Inbox, registerS3Source, retireS3Source } = await import("./s3-sync.js");
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -55,11 +58,16 @@ function setupDb() {
 }
 
 beforeEach(() => {
+  tmpHome = mkdtempSync(join(tmpdir(), "emails-s3-source-"));
+  process.env["HOME"] = tmpHome;
   mockSend.mockReset();
 });
 
 afterEach(() => {
   closeDatabase();
+  if (originalHome === undefined) delete process.env["HOME"];
+  else process.env["HOME"] = originalHome;
+  if (tmpHome) rmSync(tmpHome, { recursive: true, force: true });
 });
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -90,6 +98,49 @@ describe("syncS3Inbox — empty bucket", () => {
     expect(result.synced).toBe(0);
     expect(result.skipped).toBe(0);
     expect(result.errors).toHaveLength(0);
+  });
+
+  it("resolves bucket, prefix, region, and provider from an explicit live S3 source", async () => {
+    const { db, providerId } = setupDb();
+    const source = registerS3Source({
+      bucket: "source-bucket",
+      prefix: "inbound/example.com/",
+      region: "eu-west-1",
+      providerId,
+      status: "live",
+      liveSyncEnabled: true,
+    });
+    const listInputs: unknown[] = [];
+    mockSend.mockImplementation(async (cmd: { input?: Record<string, unknown> }) => {
+      if (cmd?.input && "Prefix" in cmd.input) {
+        listInputs.push(cmd.input);
+        return { Contents: [], IsTruncated: false };
+      }
+      return {};
+    });
+
+    const result = await syncS3Inbox({ sourceId: source.id, db });
+
+    expect(result.errors).toHaveLength(0);
+    expect(listInputs[0]).toMatchObject({ Bucket: "source-bucket", Prefix: "inbound/example.com/" });
+  });
+
+  it("blocks retired S3 sources before listing the bucket", async () => {
+    const { db, providerId } = setupDb();
+    const source = registerS3Source({ bucket: "retired-bucket", prefix: "inbound/", providerId, status: "live", liveSyncEnabled: true });
+    retireS3Source(source.id);
+
+    await expect(syncS3Inbox({ sourceId: source.id, db })).rejects.toThrow(/S3 sync is blocked/);
+    expect(mockSend).not.toHaveBeenCalled();
+  });
+
+  it("rejects ambiguous S3 source prefixes instead of choosing the first match", async () => {
+    const { db, providerId } = setupDb();
+    registerS3Source({ id: "s3-shared-a", bucket: "bucket-a", prefix: "inbound/a/", providerId, status: "live", liveSyncEnabled: true });
+    registerS3Source({ id: "s3-shared-b", bucket: "bucket-b", prefix: "inbound/b/", providerId, status: "live", liveSyncEnabled: true });
+
+    await expect(syncS3Inbox({ sourceId: "s3-shared", db })).rejects.toThrow(/Ambiguous S3 source prefix/);
+    expect(mockSend).not.toHaveBeenCalled();
   });
 });
 

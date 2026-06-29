@@ -290,18 +290,30 @@ export function registerProviderCommands(program: Command, output: (data: unknow
         }
 
         console.log(chalk.bold(`\nChecking ${providers.length} provider(s)...\n`));
-        const { runConnectorCommand } = await import("@hasna/connectors");
+        const { runConnectorOperation } = await import("@hasna/connectors");
+        const { resolveGmailLiveSource } = await import("../../lib/gmail-sync.js");
 
         for (const p of providers) {
           const icon = p.active ? "" : chalk.dim("[inactive] ");
           process.stdout.write(`  ${icon}${chalk.cyan(p.name)} (${p.type}) ... `);
 
           if (p.type === "gmail") {
-            // Check connector auth
-            const meResult = await runConnectorCommand("gmail", ["-f", "json", "me"]);
+            let source;
+            try {
+              source = resolveGmailLiveSource({ providerId: p.id });
+            } catch {
+              console.log(chalk.dim("skipped (no live Gmail source)"));
+              continue;
+            }
+            const meResult = await runConnectorOperation<{ emailAddress?: string }>({
+              connector: "gmail",
+              operation: "me",
+              input: {},
+              profile: source.profile,
+            });
             if (meResult.success) {
               let email = "";
-              try { email = (JSON.parse(meResult.stdout) as { emailAddress?: string }).emailAddress ?? ""; } catch {}
+              try { email = (meResult.data ?? JSON.parse(meResult.stdout) as { emailAddress?: string }).emailAddress ?? ""; } catch {}
               console.log(chalk.green(`✓ authenticated${email ? ` as ${email}` : ""}`));
             } else {
               console.log(chalk.red("✗ not authenticated"));
@@ -349,26 +361,31 @@ export function registerProviderCommands(program: Command, output: (data: unknow
     .option("--name <name>", "Provider name (defaults to Gmail profile name)")
     .option("--profile <profile>", "Connector Gmail profile to use (default: \"default\")", "default")
     .option("--list-profiles", "List available Gmail profiles and exit")
-    .action(async (opts: { name?: string; profile?: string; listProfiles?: boolean }) => {
+    .option("--import-only", "Record the Gmail account as import-only; local mail remains readable but live sync is disabled")
+    .option("--no-live-sync", "Create the source but keep live sync disabled")
+    .option("--force", "Allow duplicate default/named profile use")
+    .action(async (opts: { name?: string; profile?: string; listProfiles?: boolean; importOnly?: boolean; liveSync?: boolean; force?: boolean }) => {
       try {
         const HOME = process.env["HOME"] || process.env["USERPROFILE"] || "~";
         const profilesDir = join(HOME, ".connectors", "connect-gmail", "profiles");
+        const knownProfiles = existsSync(profilesDir)
+          ? readdirSync(profilesDir).filter((p) => existsSync(join(profilesDir, p, "tokens.json")))
+          : [];
 
         if (opts.listProfiles) {
           if (!existsSync(profilesDir)) {
             console.log(chalk.dim("No Gmail profiles found. Run: connectors auth gmail"));
             return;
           }
-          const profiles = readdirSync(profilesDir).filter(
-            (p) => existsSync(join(profilesDir, p, "tokens.json")),
-          );
           console.log(chalk.bold("\nAvailable Gmail profiles:"));
-          for (const p of profiles) console.log(`  ${chalk.cyan(p)}`);
+          for (const p of knownProfiles) console.log(`  ${chalk.cyan(p)}`);
           console.log();
           return;
         }
 
         const profile = opts.profile ?? "default";
+        const { assertNoDuplicateDefaultGmailProfile } = await import("../../lib/gmail-sync.js");
+        assertNoDuplicateDefaultGmailProfile(profile, knownProfiles, opts.force === true);
         const tokensPath = join(profilesDir, profile, "tokens.json");
 
         if (!existsSync(tokensPath)) {
@@ -396,13 +413,18 @@ export function registerProviderCommands(program: Command, output: (data: unknow
         }
 
         // Get Gmail profile info to use as the email address
-        const { runConnectorCommand } = await import("@hasna/connectors");
+        const { runConnectorOperation } = await import("@hasna/connectors");
         console.log(chalk.dim("Verifying Gmail connection..."));
-        const meResult = await runConnectorCommand("gmail", ["-f", "json", "me"]);
+        const meResult = await runConnectorOperation<{ emailAddress?: string }>({
+          connector: "gmail",
+          operation: "me",
+          input: {},
+          profile,
+        });
         let emailAddress = "";
         if (meResult.success) {
           try {
-            const me = JSON.parse(meResult.stdout) as { emailAddress?: string };
+            const me = meResult.data ?? JSON.parse(meResult.stdout) as { emailAddress?: string };
             emailAddress = me.emailAddress ?? "";
           } catch {
             const match = meResult.stdout.match(/emailAddress[:\s]+([^\s,}]+)/);
@@ -427,9 +449,19 @@ export function registerProviderCommands(program: Command, output: (data: unknow
           oauth_refresh_token: tokens.refreshToken,
           oauth_token_expiry: expiry,
         });
+        const { registerGmailSource } = await import("../../lib/gmail-sync.js");
+        const source = registerGmailSource({
+          providerId: provider.id,
+          profile,
+          name: providerName,
+          email: emailAddress || undefined,
+          status: opts.importOnly ? "import" : "live",
+          liveSyncEnabled: !opts.importOnly && opts.liveSync !== false,
+        });
 
         console.log(chalk.green(`✓ Connected as: ${emailAddress}`));
         console.log(chalk.green(`✓ Created provider: ${providerName} [${provider.id.slice(0, 8)}]`));
+        console.log(chalk.green(`✓ Created source: ${source.id} [${source.status}${source.live_sync_enabled ? ", live sync" : ", live sync disabled"}]`));
 
         // Create address record if we have the email
         if (emailAddress) {

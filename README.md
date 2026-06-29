@@ -33,8 +33,14 @@ mailery provision domain example.com --provider <ses-id> --dry-run
 # Send an email
 mailery send --from you@example.com --to them@example.com --subject "Hi" --body "Hello"
 
-# Sync Gmail inbox (full content — HTML + attachments)
-mailery inbox sync --all
+# Sync an explicitly registered Gmail source (full content: HTML + attachments)
+mailery inbox source add-gmail --provider <gmail-provider-id> --profile <profile>
+mailery inbox sync --source <gmail-source-id> --all
+
+# Inspect mailbox folders and ingestion sources
+mailery inbox mailboxes
+mailery inbox sources
+mailery inbox list --folder unread --source provider:<id>
 
 # Check sent email log
 mailery email list
@@ -51,10 +57,10 @@ metrics, operations health, folders, actions, and a focused workspace. Inbox on
 wide terminals uses a split message list + preview reader. Narrow terminals collapse to
 a compact single-column view with the same Inbox, Compose, Domains, and
 Settings dialog. Inbox starts at all addresses and can be filtered to one email
-address when needed; configured inboxes show their provider/account context in
-the inbox picker. Live read-state, local refresh, background auto-pull, and
-an `auto`/`light`/`dark` color theme keep the mailbox current and readable
-across terminals.
+address when needed; source filters show the ingestion streams behind the mail
+without treating provider credentials as inboxes. Live read-state, local
+refresh, background auto-pull, and an `auto`/`light`/`dark` color theme keep the
+mailbox current and readable across terminals.
 
 ```bash
 mailery ui
@@ -62,19 +68,20 @@ mailery ui --mailbox unread
 ```
 
 The app uses visible buttons and the Shortcuts command palette for actions.
-Inbox filtering is handled by the Inboxes dialog, which lists all inboxes and
-configured/observed recipient addresses. Sidebar labels filter mailbox content,
-and Gmail-style Categories show Primary, Social, Promotions, Updates, and
-Forums separately from custom labels. Reader shows attachments with size/type.
-Composer writes **markdown** rendered to HTML on send. Settings opens as a
-simple menu dialog for sync, defaults, and display controls. Folders:
-Inbox · Unread · Starred · Sent · Archived · Spam · Trash.
+Mailbox filtering is handled by the mailbox dialog, which lists all mailboxes
+and configured/observed recipient addresses. The source dialog lists active,
+legacy, and orphaned ingestion streams so old mail stays visible. Sidebar labels
+filter mailbox content, and Gmail-style Categories show Primary, Social,
+Promotions, Updates, and Forums separately from custom labels. Reader shows
+attachments with size/type. Composer writes **markdown** rendered to HTML on
+send. Settings opens as a simple menu dialog for sync, defaults, and display
+controls. Folders: Inbox · Unread · Starred · Sent · Archived · Spam · Trash.
 
 ## Command Structure
 
 ```
 mailery ui                # Mailbox UI - inbox, compose, domains, settings
-mailery provider          # add/list/remove/sync providers (ses, resend, gmail)
+mailery provider          # provider credentials/capabilities (ses, resend, gmail)
 mailery domain            # add/verify/buy/setup/dns/check domains
 mailery address           # manage sender addresses (add, suspend, activate, quota)
 mailery status            # redacted system status + next useful actions
@@ -88,7 +95,7 @@ mailery sendkey           # scoped send keys (restrict an agent to its own addre
 mailery send              # send an email
 mailery reply / forward   # reply (in-thread) or forward a sent/inbound email
 mailery email             # sent email: list, search, show, replies, conversation
-mailery inbox             # inbound: sync, list, read/star/archive/label, watch (real-time)
+mailery inbox             # mailbox folders, sources, sync, read/star/archive/label, watch
 mailery template          # email templates
 mailery contact           # contacts (suppression list)
 mailery group             # recipient groups
@@ -195,9 +202,26 @@ intentional migrations after confirming mailbox ownership can move.
 ## MCP Server
 
 100+ tools for AI agents — send/read mail, provisioning, tenancy, aliases, scoped
-send keys, inbound read-state, real-time sync, agent context, source-aware inbox
-status, ownership lookup/assignment/transfer audit, and verification-code
-waiting.
+send keys, inbound read-state, real-time sync, agent context, source-aware
+mailbox status, ownership lookup/assignment/transfer audit, and
+verification-code waiting.
+
+Terminology used by the CLI, REST API, MCP tools, and TUI:
+
+- **Provider**: credentials and capability, such as SES send rights or a Gmail OAuth profile.
+- **Source**: an ingestion stream that brings mail into local storage, such as `provider:<id>`, `s3:<bucket>`, `legacy`, or `orphaned:<id>`.
+- **Mailbox**: the user-visible scope being browsed, such as all mail, one address, or one domain.
+- **Folder**: a mailbox view such as `inbox`, `unread`, `sent`, `starred`, `archived`, `spam`, or `trash`.
+
+Useful source-aware surfaces:
+
+```bash
+mailery inbox sources --json
+mailery inbox mailboxes --source provider:<id> --json
+mailery inbox search invoice --folder sent --source provider:<id> --json
+curl 'localhost:3900/api/sources'
+curl 'localhost:3900/api/mailboxes?source_id=legacy'
+```
 
 ```bash
 mailery-mcp

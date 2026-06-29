@@ -10,6 +10,16 @@ import { upsertEvent } from '../../db/events.js';
 import { getDatabase } from '../../db/database.js';
 import { getLatestEmailDigest, normalizeEmailDigestPeriod } from '../../db/email-digests.js';
 import { json, notFound, badRequest, internalError, resolveId, resolveIdStrict, resolveOptionalId, parseBody, checkRateLimit, tooManyRequests, parseInteger, queryInteger, optionalQueryInteger, queryPage } from './helpers.js';
+import {
+  MAILBOXES,
+  listMailbox,
+  listMailboxSources,
+  listMailboxStatus,
+  mailboxSourceFromRef,
+  searchMailbox,
+  type Mailbox,
+  type MailboxSource,
+} from '../../cli/tui/data.js';
 
 
 function normalizeDisplaySummary(value: string | null | undefined): string | null {
@@ -58,6 +68,50 @@ function resolveSequenceRef(raw: string) {
   return getSequence(decodeURIComponent(raw));
 }
 
+function normalizeMailboxParam(value: string | null | undefined): Mailbox {
+  const normalized = (value ?? "inbox").trim().toLowerCase();
+  return MAILBOXES.includes(normalized as Mailbox) ? normalized as Mailbox : "inbox";
+}
+
+function mailboxSourceFromUrl(url: URL, sourceId?: string): MailboxSource | undefined {
+  const to = url.searchParams.get("to")?.trim().toLowerCase();
+  const domain = url.searchParams.get("domain")?.trim().toLowerCase();
+  const address = url.searchParams.get("address")?.trim().toLowerCase();
+  const providerId = resolveOptionalId("providers", url.searchParams.get("provider_id"));
+  return mailboxSourceFromRef({
+    sourceId: sourceId ?? url.searchParams.get("source_id") ?? url.searchParams.get("source") ?? undefined,
+    providerId,
+    address: address ?? (to?.includes("@") ? to : undefined),
+    domain: domain ?? (to && !to.includes("@") ? to : undefined),
+  });
+}
+
+function mailboxPage(url: URL): { limit: number; offset: number } {
+  return queryPage(url, 50, 1000);
+}
+
+function mailboxListPayload(mailbox: Mailbox, url: URL, source?: MailboxSource): Record<string, unknown> {
+  const page = mailboxPage(url);
+  const rows = listMailbox(mailbox, {
+    ...page,
+    limit: page.limit + 1,
+    source,
+    label: url.searchParams.get("label") ?? undefined,
+    search: url.searchParams.get("search") ?? url.searchParams.get("q") ?? undefined,
+    sort: url.searchParams.get("sort") === "oldest" ? "oldest" : "newest",
+  });
+  const items = rows.slice(0, page.limit);
+  return {
+    mailbox,
+    folder: mailbox,
+    source: source ?? null,
+    items,
+    limit: page.limit,
+    offset: page.offset,
+    truncated: rows.length > page.limit,
+  };
+}
+
 export async function handle(req: Request, url: URL, path: string, method: string): Promise<Response | null> {
 // ─── INBOUND EMAILS ────────────────────────────────────────────────────
 
@@ -81,6 +135,110 @@ if (path === "/api/inbound" && method === "GET") {
       recipients: to?.includes("@") ? [to] : undefined,
       recipientDomains: to && !to.includes("@") ? [to] : undefined,
     }));
+  } catch (e) { return internalError(e); }
+}
+
+// GET /api/mailboxes?source_id=... — folder counts for a mailbox/source scope.
+if (path === "/api/mailboxes" && method === "GET") {
+  try {
+    const source = mailboxSourceFromUrl(url);
+    return json({
+      source: source ?? null,
+      ...listMailboxStatus({ source }),
+    });
+  } catch (e) { return internalError(e); }
+}
+
+// GET /api/mailbox/:folder?source_id=...&search=...
+const mailboxMatch = path.match(/^\/api\/mailbox(?:es)?\/([^/]+)$/);
+if (mailboxMatch && method === "GET" && mailboxMatch[1] !== "search") {
+  try {
+    const mailbox = normalizeMailboxParam(mailboxMatch[1]);
+    const source = mailboxSourceFromUrl(url);
+    return json(mailboxListPayload(mailbox, url, source));
+  } catch (e) { return internalError(e); }
+}
+
+// GET /api/mailbox/search?q=...&folder=inbox&source_id=...
+if (path === "/api/mailbox/search" && method === "GET") {
+  try {
+    const query = url.searchParams.get("q") ?? url.searchParams.get("query") ?? url.searchParams.get("search") ?? "";
+    if (!query.trim()) return badRequest("q is required");
+    const page = mailboxPage(url);
+    const mailbox = normalizeMailboxParam(url.searchParams.get("folder") ?? url.searchParams.get("mailbox"));
+    const source = mailboxSourceFromUrl(url);
+    const rows = searchMailbox(query, {
+      mailbox,
+      ...page,
+      limit: page.limit + 1,
+      source,
+      label: url.searchParams.get("label") ?? undefined,
+      sort: url.searchParams.get("sort") === "oldest" ? "oldest" : "newest",
+    });
+    const items = rows.slice(0, page.limit);
+    return json({
+      mailbox,
+      folder: mailbox,
+      source: source ?? null,
+      query,
+      items,
+      limit: page.limit,
+      offset: page.offset,
+      truncated: rows.length > page.limit,
+    });
+  } catch (e) { return internalError(e); }
+}
+
+// GET /api/sources — ingestion stream status with legacy/orphaned badges.
+if (path === "/api/sources" && method === "GET") {
+  try {
+    return json({
+      sources: listMailboxSources({
+        limit: queryInteger(url, "limit", 100, { min: 1, max: 1000 }),
+        search: url.searchParams.get("search") ?? url.searchParams.get("q") ?? undefined,
+      }),
+    });
+  } catch (e) { return internalError(e); }
+}
+
+// GET /api/sources/:sourceId/mailbox/:folder
+const sourceMailboxMatch = path.match(/^\/api\/sources\/([^/]+)\/mailbox(?:es)?\/([^/]+)$/);
+if (sourceMailboxMatch && method === "GET") {
+  try {
+    const sourceId = decodeURIComponent(sourceMailboxMatch[1]!);
+    const mailbox = normalizeMailboxParam(sourceMailboxMatch[2]);
+    return json(mailboxListPayload(mailbox, url, mailboxSourceFromUrl(url, sourceId)));
+  } catch (e) { return internalError(e); }
+}
+
+// GET /api/sources/:sourceId/search?q=...&folder=inbox
+const sourceSearchMatch = path.match(/^\/api\/sources\/([^/]+)\/search$/);
+if (sourceSearchMatch && method === "GET") {
+  try {
+    const query = url.searchParams.get("q") ?? url.searchParams.get("query") ?? url.searchParams.get("search") ?? "";
+    if (!query.trim()) return badRequest("q is required");
+    const sourceId = decodeURIComponent(sourceSearchMatch[1]!);
+    const page = mailboxPage(url);
+    const mailbox = normalizeMailboxParam(url.searchParams.get("folder") ?? url.searchParams.get("mailbox"));
+    const source = mailboxSourceFromUrl(url, sourceId);
+    const rows = searchMailbox(query, {
+      mailbox,
+      ...page,
+      limit: page.limit + 1,
+      source,
+      label: url.searchParams.get("label") ?? undefined,
+      sort: url.searchParams.get("sort") === "oldest" ? "oldest" : "newest",
+    });
+    return json({
+      mailbox,
+      folder: mailbox,
+      source,
+      query,
+      items: rows.slice(0, page.limit),
+      limit: page.limit,
+      offset: page.offset,
+      truncated: rows.length > page.limit,
+    });
   } catch (e) { return internalError(e); }
 }
 

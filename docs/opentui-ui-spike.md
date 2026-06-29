@@ -64,12 +64,13 @@ References:
 - Narrow terminals collapse to a single workspace with a compact top nav.
 - Inbox is a unified all-address view by default.
 - Wide Inbox renders a message list and preview reader side by side.
-- Use the Inboxes dialog to choose all inboxes or an exact email address.
+- Use the mailbox dialog to choose all mail or an exact email address.
+- Use the source dialog to filter by active, legacy, or orphaned ingestion stream.
 - Sidebar labels filter the mailbox without mutating message labels.
 - Gmail-style Categories are listed separately as Primary, Social, Promotions,
   Updates, and Forums.
-- Configured inboxes include provider/account context in the picker; domain
-  diagnostics live in Domains.
+- Sources carry provider/account provenance in the picker; domain diagnostics
+  live in Domains.
 - Compose has editable From, To, Subject, and Body fields.
 - Settings opens as a compact dialog with Sync, Defaults, and Display submenus
   for auto-pull, Gmail auto-pull, dim-read, default folder, default inbox,

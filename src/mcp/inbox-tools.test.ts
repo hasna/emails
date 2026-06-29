@@ -1,4 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { getDatabase, resetDatabase, closeDatabase, uuid } from "../db/database.js";
 import { storeInboundEmail, listInboundEmails } from "../db/inbound.js";
 import { getGmailSyncState, updateLastSynced } from "../db/gmail-sync-state.js";
@@ -17,11 +20,14 @@ const mockRun = mock(async (operationArgs: { operation: string }) => ({
 
 mock.module("@hasna/connectors", () => ({ runConnectorOperation: mockRun }));
 
-const { syncGmailInbox, syncGmailInboxAll } = await import("../lib/gmail-sync.js");
+const { registerGmailSource, syncGmailInbox, syncGmailInboxAll } = await import("../lib/gmail-sync.js");
+const { runInboxTool } = await import("./tools/inbox-impl.js");
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 const DATE = "Fri, 20 Mar 2026 10:00:00 +0000";
+const ORIGINAL_HOME = process.env["HOME"];
+let tmpHome: string | null = null;
 
 function setupDb() {
   resetDatabase();
@@ -29,6 +35,7 @@ function setupDb() {
   const db = getDatabase();
   const pid = uuid();
   db.run(`INSERT INTO providers (id, name, type, active) VALUES (?, 'Gmail', 'gmail', 1)`, [pid]);
+  registerGmailSource({ providerId: pid, profile: "default", email: "me@example.com", name: "MCP Test Gmail" });
   return { db, pid };
 }
 
@@ -59,8 +66,26 @@ function setMock(listOutput: string, readOutput?: string) {
   });
 }
 
-beforeEach(() => mockRun.mockReset());
-afterEach(() => { closeDatabase(); delete process.env["EMAILS_DB_PATH"]; });
+async function toolJson(name: Parameters<typeof runInboxTool>[0], input: Record<string, unknown>) {
+  const result = await runInboxTool(name, input);
+  expect(result.isError).not.toBe(true);
+  return JSON.parse(result.content[0]!.text) as Record<string, unknown>;
+}
+
+beforeEach(() => {
+  mockRun.mockReset();
+  tmpHome = mkdtempSync(join(tmpdir(), "mailery-mcp-inbox-"));
+  process.env["HOME"] = tmpHome;
+});
+
+afterEach(() => {
+  closeDatabase();
+  delete process.env["EMAILS_DB_PATH"];
+  if (ORIGINAL_HOME === undefined) delete process.env["HOME"];
+  else process.env["HOME"] = ORIGINAL_HOME;
+  if (tmpHome) rmSync(tmpHome, { recursive: true, force: true });
+  tmpHome = null;
+});
 
 // ─── sync_inbox tool logic ────────────────────────────────────────────────────
 
@@ -184,6 +209,39 @@ describe("search_inbound tool logic", () => {
     }, db);
 
     expect(results.map((email) => email.subject)).toEqual(["target login alert"]);
+  });
+});
+
+describe("mailbox source tools", () => {
+  it("lists sources, folder status, and source-filtered search without hiding legacy mail", async () => {
+    const { db, pid } = setupDb();
+    storeInboundEmail({
+      provider_id: pid, message_id: "mcp-provider-source", in_reply_to_email_id: null,
+      from_address: "sender@example.com", to_addresses: ["ops@example.com"], cc_addresses: [],
+      subject: "mcp provider needle", text_body: "body", html_body: null,
+      attachments: [], attachment_paths: [], headers: {}, raw_size: 1,
+      received_at: "2026-01-02T10:00:00.000Z",
+    }, db);
+    storeInboundEmail({
+      provider_id: null, message_id: "mcp-legacy-source", in_reply_to_email_id: null,
+      from_address: "legacy@example.com", to_addresses: ["ops@example.com"], cc_addresses: [],
+      subject: "mcp legacy visible", text_body: "needle", html_body: null,
+      attachments: [], attachment_paths: [], headers: {}, raw_size: 1,
+      received_at: "2026-01-03T10:00:00.000Z",
+    }, db);
+
+    const sources = await toolJson("list_mailbox_sources", {});
+    const sourceItems = sources.sources as Array<{ id: string; badges: string[]; total: number }>;
+    expect(sourceItems.find((source) => source.id === `provider:${pid}`)).toMatchObject({ total: 1 });
+    expect(sourceItems.find((source) => source.id === "legacy")?.badges).toContain("legacy");
+
+    const legacyStatus = await toolJson("list_mailboxes", { source_id: "legacy" });
+    expect((legacyStatus.counts as { inbox: number }).inbox).toBe(1);
+    expect(legacyStatus.cli_equivalent).toBe("mailery inbox mailboxes --source legacy --json");
+
+    const search = await toolJson("search_mailbox", { query: "needle", source_id: `provider:${pid}` });
+    expect((search.items as Array<{ subject: string }>).map((item) => item.subject)).toEqual(["mcp provider needle"]);
+    expect(search.cli_equivalent).toBe(`mailery inbox search needle --folder inbox --source provider:${pid} --json`);
   });
 });
 

@@ -9,7 +9,7 @@ import {
   addInboundLabelSummary, removeInboundLabelSummary, getUnreadCount, normalizeEmailAddress,
 } from "../../db/inbound.js";
 import { updateLastSynced } from "../../db/gmail-sync-state.js";
-import { createProvider, getProviderByNameAndType, listActiveProviderSummaries, listProviderNamesByIds } from "../../db/providers.js";
+import { listActiveProviderSummaries, listProviderNamesByIds } from "../../db/providers.js";
 import { getDatabase, resolvePartialIdOrThrow } from "../../db/database.js";
 import { confirmDestructiveAction, handleError } from "../utils.js";
 import { findVerificationCode, listVerificationCodeCandidates } from "../../lib/verification-code.js";
@@ -24,10 +24,18 @@ import { listAddressProvisioningByIds, listDomainProvisioningByIds, listReadyAdd
 import { sqlEmailAddress } from "../../db/email-address-sql.js";
 import { assessDomainReadiness } from "../../lib/domain-readiness.js";
 import { readableMessageText, renderReadableEmailDocument } from "../tui/format.js";
+import type {
+  Mailbox,
+  MailboxSource,
+  TuiMessage,
+  MailboxSourceSummary,
+  MailboxStatusSummary,
+} from "../tui/data.js";
 
 const MAX_INBOX_CLI_LIMIT = 1000;
 const MAX_GMAIL_SYNC_CONCURRENCY = 64;
 const MAX_ARCHIVE_MIGRATE_LIMIT = 10_000;
+const CLI_MAILBOXES = ["inbox", "unread", "starred", "sent", "archived", "spam", "trash"] as const satisfies readonly Mailbox[];
 
 function resolveInboundEmailId(id: string): string {
   return resolvePartialIdOrThrow(getDatabase(), "inbound_emails", id);
@@ -45,7 +53,31 @@ function parseNonNegativeIntOption(value: string | undefined, fallback = 0): num
   return parsed;
 }
 
+function normalizeCliMailbox(value: string | undefined): Mailbox {
+  const normalized = (value ?? "inbox").trim().toLowerCase();
+  return CLI_MAILBOXES.includes(normalized as Mailbox) ? normalized as Mailbox : "inbox";
+}
+
+function mailboxSourceFromOptions(opts: { source?: string; provider?: string; address?: string; domain?: string }): MailboxSource | undefined {
+  const sourceId = opts.source?.trim();
+  const providerId = opts.provider?.trim();
+  const address = opts.address?.trim().toLowerCase();
+  const domain = opts.domain?.trim().toLowerCase();
+  if (!sourceId && !providerId && !address && !domain) return undefined;
+
+  const source: MailboxSource = { sourceId, providerId, address, domain };
+  if (sourceId === "legacy") source.legacy = true;
+  else if (sourceId?.startsWith("provider:")) source.providerId = sourceId.slice("provider:".length);
+  else if (sourceId?.startsWith("orphaned:")) source.providerId = sourceId.slice("orphaned:".length);
+  else if (sourceId?.startsWith("s3:")) source.s3Bucket = decodeURIComponent(sourceId.slice("s3:".length));
+  return source;
+}
+
 async function runAutoPull(opts: { s3?: boolean; gmail?: boolean; limit?: number }) {
+  if (opts.gmail === true) {
+    const { hasLiveGmailSources } = await import("../../lib/gmail-sync.js");
+    if (!hasLiveGmailSources(getDatabase())) opts = { ...opts, gmail: false };
+  }
   const { autoPull } = await import("../tui/autopull.js");
   return autoPull(opts);
 }
@@ -305,8 +337,8 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .command("sync")
     .description("Sync Gmail inbox messages into local SQLite")
     .option("--provider <id>", "Provider ID or name (defaults to first active Gmail provider)")
+    .option("--source <id>", "Explicit Gmail source id")
     .option("--profile <name>", "Connector Gmail profile to use")
-    .option("--all-profiles", "Discover connector Gmail profiles and sync each one")
     .option("--label <label>", "Gmail label to sync (e.g. INBOX, SENT, label ID)", "INBOX")
     .option("--query <query>", "Gmail search query (e.g. 'is:unread from:boss@example.com')")
     .option("--limit <n>", "Max messages per sync run", "50")
@@ -318,8 +350,8 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .option("--no-attachments", "Skip attachment download")
     .action(async (opts: {
       provider?: string;
+      source?: string;
       profile?: string;
-      allProfiles?: boolean;
       label?: string;
       query?: string;
       limit?: string;
@@ -331,7 +363,13 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
       attachments: boolean;
     }) => {
       try {
-        const { syncGmailInbox, syncGmailInboxAll, syncGmailInboxHistory, listGmailConnectorProfiles } = await import("../../lib/gmail-sync.js");
+        const {
+          syncGmailInbox,
+          syncGmailInboxHistory,
+          listGmailConnectorProfiles,
+          assertNoDuplicateDefaultGmailProfile,
+          resolveGmailLiveSource,
+        } = await import("../../lib/gmail-sync.js");
         const db = getDatabase();
         const batchSize = parsePositiveIntOption(opts.limit, 50);
         const messageConcurrency = parsePositiveIntOption(opts.concurrency, 1, MAX_GMAIL_SYNC_CONCURRENCY);
@@ -341,64 +379,20 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
             : (await import("../../lib/config.js")).getDefaultGmailArchiveS3Bucket()
           : undefined;
 
-        if (opts.allProfiles) {
-          const discovered = await listGmailConnectorProfiles();
-          if (discovered.length === 0) {
-            console.error(chalk.red("No Gmail connector profiles found."));
-            process.exit(1);
-          }
-          // The generic "default" connector profile is an alias of a named
-          // account (same mailbox) — syncing it duplicates every email. Skip it
-          // when named profiles exist so we don't re-create "Gmail (default)".
-          const named = discovered.filter((p) => p.toLowerCase() !== "default");
-          const profiles = named.length > 0 ? named : discovered;
-          if (profiles.length < discovered.length) {
-            console.log(chalk.dim(`Skipping the generic "default" profile (duplicate of a named account).`));
-          }
-
-          const aggregate = { synced: 0, skipped: 0, attachments_saved: 0, errors: [] as string[], done: true };
-          for (const profile of profiles) {
-            const providerId = ensureGmailProviderForProfile(profile);
-            const syncOptions = {
-              providerId,
-              profile,
-              labelFilter: opts.label,
-              query: opts.query,
-              batchSize,
-              messageConcurrency,
-              since: opts.since,
-              archiveS3Bucket: archiveBucket,
-              downloadAttachments: opts.attachments !== false,
-              db,
-            };
-            const page = opts.all
-              ? await syncGmailInboxAll(syncOptions)
-              : opts.history
-                ? await syncGmailInboxHistory(syncOptions)
-              : await syncGmailInbox(syncOptions);
-            updateLastSynced(providerId, undefined, db);
-            aggregate.synced += page.synced;
-            aggregate.skipped += page.skipped;
-            aggregate.attachments_saved += page.attachments_saved;
-            aggregate.errors.push(...page.errors);
-            aggregate.done = aggregate.done && page.done;
-          }
-
-          output(aggregate, formatSyncResult(aggregate, false));
-          return;
-        }
-
-        // Resolve provider
-        const providerId = resolveGmailProvider(opts.provider);
-        if (!providerId) {
-          console.error(chalk.red("No Gmail provider found. Add one with: mailery provider add-gmail"));
-          process.exit(1);
-        }
+        if (opts.profile) assertNoDuplicateDefaultGmailProfile(opts.profile, await listGmailConnectorProfiles(), false);
+        const resolved = resolveGmailLiveSource({
+          providerId: opts.provider,
+          profile: opts.profile,
+          sourceId: opts.source,
+          db,
+        });
+        const providerId = resolved.providerId;
 
         const syncOpts = {
           providerId,
           labelFilter: opts.label,
-          profile: opts.profile,
+          sourceId: opts.source,
+          profile: resolved.profile,
           query: opts.query,
           batchSize,
           messageConcurrency,
@@ -408,7 +402,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
           db,
         };
 
-        console.log(chalk.dim(`Syncing Gmail inbox for provider ${providerId}...`));
+        console.log(chalk.dim(`Syncing Gmail source for provider credential ${providerId}...`));
 
         let result;
         if (opts.all) {
@@ -456,8 +450,12 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
   // ─── LIST ─────────────────────────────────────────────────────────────────
   inboxCmd
     .command("list")
-    .description("List synced inbound emails from local SQLite")
-    .option("--provider <id>", "Filter by provider ID")
+    .description("List local mailbox mail")
+    .option("--provider <id>", "Credential/capability ID used as a provenance filter")
+    .option("--source <id>", "Filter by ingestion source ID from `mailery inbox sources`")
+    .option("--folder <folder>", "Folder to list: inbox, unread, starred, sent, archived, spam, trash", "inbox")
+    .option("--address <address>", "Mailbox scope: exact recipient/sender address")
+    .option("--domain <domain>", "Mailbox scope: recipient/sender domain")
     .option("--since <date>", "Only show emails after this date")
     .option("--limit <n>", "Max results", "20")
     .option("--offset <n>", "Skip first N emails", "0")
@@ -468,12 +466,30 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .option("--starred", "Only starred mail")
     .option("--archived", "Show archived mail (hidden by default)")
     .option("--label <label>", "Only mail carrying this label")
-    .action((opts: { provider?: string; since?: string; limit?: string; offset?: string; search?: string; to?: string; unread?: boolean; read?: boolean; starred?: boolean; archived?: boolean; label?: string }) => {
+    .action(async (opts: { provider?: string; source?: string; folder?: string; address?: string; domain?: string; since?: string; limit?: string; offset?: string; search?: string; to?: string; unread?: boolean; read?: boolean; starred?: boolean; archived?: boolean; label?: string }) => {
       try {
         const db = getDatabase();
         const limit = parsePositiveIntOption(opts.limit, 20);
         const offset = parseNonNegativeIntOption(opts.offset);
         const toFilter = opts.to?.trim().toLowerCase();
+        const folder = normalizeCliMailbox(opts.folder);
+        if (opts.source || folder !== "inbox" || opts.address || opts.domain) {
+          const { listMailbox } = await import("../tui/data.js");
+          const source = mailboxSourceFromOptions(opts);
+          const rows = listMailbox(folder, {
+            source,
+            limit,
+            offset,
+            search: opts.search,
+            label: opts.label,
+          }, db);
+          if (rows.length === 0) {
+            output([], chalk.dim("No mail found locally. Try `mailery inbox sources`, `mailery refresh`, or `mailery inbox wait <address>`."));
+            return;
+          }
+          output(rows, formatMailboxMessages(rows, `Mailbox ${folder}`));
+          return;
+        }
         const emails = listInboundEmailSummaries({
           provider_id: opts.provider, since: opts.since, limit, offset,
           unread: opts.unread, read: opts.read, starred: opts.starred,
@@ -625,11 +641,17 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
   inboxCmd
     .command("search <query>")
     .description("Search synced emails locally (add --remote to search live Gmail)")
-    .option("--provider <id>", "Filter by provider ID")
+    .option("--provider <id>", "Credential/capability ID used as a provenance filter")
+    .option("--folder <folder>", "Folder to search: inbox, unread, starred, sent, archived, spam, trash", "inbox")
+    .option("--address <address>", "Mailbox scope: exact recipient/sender address")
+    .option("--domain <domain>", "Mailbox scope: recipient/sender domain")
+    .option("--label <label>", "Only mail carrying this label")
     .option("--limit <n>", "Max results", "20")
     .option("--offset <n>", "Skip first N local results", "0")
     .option("--remote", "Search live Gmail via connector (not just local DB)")
-    .action(async (query: string, opts: { provider?: string; limit?: string; offset?: string; remote?: boolean }) => {
+    .option("--source <id>", "Local ingestion source ID, or explicit Gmail source for --remote")
+    .option("--profile <name>", "Connector Gmail profile for remote search")
+    .action(async (query: string, opts: { provider?: string; folder?: string; address?: string; domain?: string; label?: string; limit?: string; offset?: string; remote?: boolean; source?: string; profile?: string }) => {
       try {
         const db = getDatabase();
         const limit = parsePositiveIntOption(opts.limit, 20);
@@ -637,11 +659,19 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
 
         if (opts.remote) {
           // Live Gmail search via connectors SDK
+          const { resolveGmailLiveSource } = await import("../../lib/gmail-sync.js");
+          const resolved = resolveGmailLiveSource({
+            providerId: opts.provider,
+            profile: opts.profile,
+            sourceId: opts.source,
+            db,
+          });
           const { runConnectorOperation } = await import("@hasna/connectors");
           const r = await runConnectorOperation<{ messages?: { id: string; from: string; subject: string; date: string }[] } | { id: string; from: string; subject: string; date: string }[]>({
             connector: "gmail",
             operation: "messages.list",
             input: { query, max: limit },
+            profile: resolved.profile,
           });
           if (!r.success) {
             console.error(chalk.red(`Gmail search failed: ${r.stderr}`));
@@ -650,6 +680,24 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
           const raw = r.data;
           const results = (Array.isArray(raw) ? raw : raw?.messages ?? []) as { id: string; from: string; subject: string; date: string }[];
           output(results, formatRemoteResults(results, query));
+          return;
+        }
+
+        if (opts.source || opts.folder !== "inbox" || opts.address || opts.domain || opts.label) {
+          const folder = normalizeCliMailbox(opts.folder);
+          const { searchMailbox } = await import("../tui/data.js");
+          const rows = searchMailbox(query, {
+            mailbox: folder,
+            source: mailboxSourceFromOptions(opts),
+            label: opts.label,
+            limit,
+            offset,
+          }, db);
+          if (rows.length === 0) {
+            console.log(chalk.dim(`No results for "${query}". Try --remote to search live Gmail.`));
+            return;
+          }
+          output(rows, formatMailboxMessages(rows, `Search ${folder}: "${query}"`));
           return;
         }
 
@@ -669,8 +717,44 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
 
   // ─── STATUS ───────────────────────────────────────────────────────────────
   inboxCmd
+    .command("sources")
+    .description("List ingestion sources with legacy/orphaned badges")
+    .option("--search <query>", "Filter by source label, ID, kind, provider, bucket, or badge")
+    .option("--limit <n>", "Max sources", "100")
+    .action(async (opts: { search?: string; limit?: string }) => {
+      try {
+        const { listMailboxSources } = await import("../tui/data.js");
+        const sources = listMailboxSources({
+          search: opts.search,
+          limit: parsePositiveIntOption(opts.limit, 100),
+        });
+        output(sources, formatMailboxSources(sources));
+      } catch (e) {
+        handleError(e);
+      }
+    });
+
+  inboxCmd
+    .command("mailboxes")
+    .description("List folder counts for a mailbox scope or ingestion source")
+    .option("--source <id>", "Filter by ingestion source ID from `mailery inbox sources`")
+    .option("--provider <id>", "Credential/capability ID used as a provenance filter")
+    .option("--address <address>", "Mailbox scope: exact recipient/sender address")
+    .option("--domain <domain>", "Mailbox scope: recipient/sender domain")
+    .action(async (opts: { source?: string; provider?: string; address?: string; domain?: string }) => {
+      try {
+        const { listMailboxStatus } = await import("../tui/data.js");
+        const source = mailboxSourceFromOptions(opts);
+        const status = listMailboxStatus({ source });
+        output({ source: source ?? null, ...status }, formatMailboxStatus(status));
+      } catch (e) {
+        handleError(e);
+      }
+    });
+
+  inboxCmd
     .command("status")
-    .description("Show sync status for all inbox sources")
+    .description("Show sync status for all ingestion sources")
     .action(async () => {
       try {
         const { getEmailSystemStatus } = await import("../../lib/agent-context.js");
@@ -683,12 +767,121 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
 
   inboxCmd
     .command("sync-status")
-    .description("Show source-aware inbox sync status")
+    .description("Show source-aware mailbox sync status")
     .action(async () => {
       try {
         const { getEmailSystemStatus } = await import("../../lib/agent-context.js");
         const status = getEmailSystemStatus();
-        output({ inbox: status.inbox, gmail: status.providers.gmail, cli_equivalents: status.cli_equivalents }, formatInboxSyncStatus(status));
+        output({ inbox: status.inbox, mailboxes: status.mailboxes, sources: status.sources, gmail: status.providers.gmail, cli_equivalents: status.cli_equivalents }, formatInboxSyncStatus(status));
+      } catch (e) {
+        handleError(e);
+      }
+    });
+
+  const sourceCmd = inboxCmd.command("source").description("Manage ingestion source lifecycle");
+
+  sourceCmd
+    .command("list")
+    .alias("status")
+    .description("List Gmail and S3 ingestion sources")
+    .action(async () => {
+      try {
+        const [{ listGmailSources }, { listS3Sources }] = await Promise.all([
+          import("../../lib/gmail-sync.js"),
+          import("../../lib/s3-sync.js"),
+        ]);
+        const db = getDatabase();
+        const sources = [...listGmailSources(db), ...listS3Sources()];
+        output(sources, formatSourceList(sources));
+      } catch (e) {
+        handleError(e);
+      }
+    });
+
+  sourceCmd
+    .command("add-gmail")
+    .description("Register a Gmail provider credential/profile as an ingestion source")
+    .requiredOption("--provider <id-or-name>", "Gmail provider id or name")
+    .option("--profile <name>", "Connector Gmail profile", "default")
+    .option("--name <name>", "Source display name")
+    .option("--status <status>", "Source status: live | import | legacy | retired", "live")
+    .option("--no-live-sync", "Register source but disable live sync")
+    .option("--force", "Allow duplicate default/named profile use")
+    .action(async (opts: { provider: string; profile?: string; name?: string; status?: string; liveSync?: boolean; force?: boolean }) => {
+      try {
+        const providerId = resolveGmailProvider(opts.provider);
+        if (!providerId) handleError(new Error(`Gmail provider not found: ${opts.provider}`));
+        const { assertNoDuplicateDefaultGmailProfile, listGmailConnectorProfiles, registerGmailSource } = await import("../../lib/gmail-sync.js");
+        assertNoDuplicateDefaultGmailProfile(opts.profile, await listGmailConnectorProfiles(), opts.force === true);
+        const status = parseSourceStatus(opts.status);
+        const source = registerGmailSource({
+          providerId: providerId!,
+          profile: opts.profile,
+          name: opts.name,
+          status,
+          liveSyncEnabled: opts.liveSync !== false && status === "live",
+        });
+        output(source, chalk.green(`✓ Gmail source ${source.id} is ${source.status}${source.live_sync_enabled ? " (live sync enabled)" : " (live sync disabled)"}`));
+      } catch (e) {
+        handleError(e);
+      }
+    });
+
+  sourceCmd
+    .command("add-s3")
+    .description("Register an SES/S3 inbound bucket/prefix as a source")
+    .requiredOption("--bucket <name>", "S3 bucket name")
+    .option("--prefix <prefix>", "S3 key prefix")
+    .option("--region <region>", "AWS region", "us-east-1")
+    .option("--provider <id>", "SES provider id for provenance")
+    .option("--name <name>", "Source display name")
+    .option("--status <status>", "Source status: live | import | legacy | retired", "live")
+    .option("--no-live-sync", "Register source but disable live sync")
+    .action(async (opts: { bucket: string; prefix?: string; region?: string; provider?: string; name?: string; status?: string; liveSync?: boolean }) => {
+      try {
+        const { registerS3Source } = await import("../../lib/s3-sync.js");
+        const status = parseSourceStatus(opts.status);
+        const providerId = opts.provider ? resolvePartialIdOrThrow(getDatabase(), "providers", opts.provider) : undefined;
+        const source = registerS3Source({
+          bucket: opts.bucket,
+          prefix: opts.prefix,
+          region: opts.region,
+          providerId,
+          name: opts.name,
+          status,
+          liveSyncEnabled: opts.liveSync !== false && status === "live",
+        });
+        output(source, chalk.green(`✓ S3 source ${source.id} is ${source.status}${source.live_sync_enabled ? " (live sync enabled)" : " (live sync disabled)"}`));
+      } catch (e) {
+        handleError(e);
+      }
+    });
+
+  sourceCmd
+    .command("retire <source>")
+    .description("Retire a Gmail or S3 source without deleting provider rows or mail")
+    .action(async (sourceRef: string) => {
+      try {
+        const [{ retireGmailSource }, { retireS3Source }] = await Promise.all([
+          import("../../lib/gmail-sync.js"),
+          import("../../lib/s3-sync.js"),
+        ]);
+        const db = getDatabase();
+        try {
+          const retired = retireGmailSource(sourceRef, db);
+          output(retired, chalk.green(`✓ Retired Gmail source ${retired.id}`));
+          return;
+        } catch (gmailError) {
+          try {
+            const retired = retireS3Source(sourceRef);
+            output(retired, chalk.green(`✓ Retired S3 source ${retired.id}`));
+            return;
+          } catch (s3Error) {
+            const gmailMessage = gmailError instanceof Error ? gmailError.message : String(gmailError);
+            const s3Message = s3Error instanceof Error ? s3Error.message : String(s3Error);
+            handleError(new Error(`Source not found: ${sourceRef}. Gmail: ${gmailMessage}. S3: ${s3Message}`));
+          }
+        }
       } catch (e) {
         handleError(e);
       }
@@ -699,15 +892,22 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .command("labels")
     .description("List available Gmail labels for the connected account")
     .option("--provider <id>", "Provider ID (defaults to first active Gmail provider)")
-    .action(async (opts: { provider?: string }) => {
+    .option("--source <id>", "Explicit Gmail source id")
+    .option("--profile <name>", "Connector Gmail profile")
+    .action(async (opts: { provider?: string; source?: string; profile?: string }) => {
       try {
-        const providerId = resolveGmailProvider(opts.provider);
-        if (!providerId) {
-          console.error(chalk.red("No Gmail provider found. Add one with: mailery provider add-gmail"));
-          process.exit(1);
-        }
-        const { listGmailLabels } = await import("../../lib/gmail-sync.js");
-        const labels = await listGmailLabels(providerId);
+        const { listGmailLabels, resolveGmailLiveSource } = await import("../../lib/gmail-sync.js");
+        const resolved = resolveGmailLiveSource({
+          providerId: opts.provider,
+          profile: opts.profile,
+          sourceId: opts.source,
+          db: getDatabase(),
+        });
+        const labels = await listGmailLabels(resolved.providerId, {
+          profile: resolved.profile,
+          sourceId: opts.source,
+          db: getDatabase(),
+        });
         if (labels.length === 0) {
           console.log(chalk.dim("No labels found. Is this Gmail provider authenticated?"));
           return;
@@ -778,16 +978,24 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
   async function gmailMirror(emailId: string, connectorArgs: string[]): Promise<boolean> {
     const db = getDatabase();
     const row = db.query(
-      `SELECT i.message_id AS message_id, p.type AS provider_type
+      `SELECT i.provider_id AS provider_id, i.message_id AS message_id, p.type AS provider_type
          FROM inbound_emails i LEFT JOIN providers p ON p.id = i.provider_id
         WHERE i.id = ?`,
-    ).get(emailId) as { message_id: string | null; provider_type: string | null } | null;
+    ).get(emailId) as { provider_id: string | null; message_id: string | null; provider_type: string | null } | null;
     if (!row || row.provider_type !== "gmail" || !row.message_id) return false;
+    const { resolveGmailLiveSource } = await import("../../lib/gmail-sync.js");
+    let source;
+    try {
+      source = resolveGmailLiveSource({ providerId: row.provider_id, db });
+    } catch {
+      return false;
+    }
     const { runConnectorOperation } = await import("@hasna/connectors");
     const r = await runConnectorOperation({
       connector: "gmail",
       operation: connectorArgs.join("."),
       input: { args: [row.message_id] },
+      profile: source.profile,
     });
     if (!r.success) throw new Error(r.stderr || r.stdout);
     return true;
@@ -858,20 +1066,31 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .description("Reply to a synced inbound email via Gmail")
     .requiredOption("--body <text>", "Reply body text")
     .option("--html", "Send as HTML email")
-    .action(async (emailId: string, opts: { body: string; html?: boolean }) => {
+    .option("--source <id>", "Explicit Gmail source id")
+    .option("--profile <name>", "Connector Gmail profile")
+    .action(async (emailId: string, opts: { body: string; html?: boolean; source?: string; profile?: string }) => {
       try {
         const db = getDatabase();
-        const email = db.query("SELECT message_id, subject FROM inbound_emails WHERE id = ?").get(emailId) as { message_id: string; subject: string } | null;
+        const id = requireLocal(emailId);
+        const email = db.query("SELECT provider_id, message_id, subject FROM inbound_emails WHERE id = ?").get(id) as { provider_id: string | null; message_id: string; subject: string } | null;
         if (!email?.message_id) {
           console.error(chalk.red("Email not found or has no Gmail message ID."));
           process.exit(1);
         }
+        const { resolveGmailLiveSource } = await import("../../lib/gmail-sync.js");
+        const source = resolveGmailLiveSource({
+          providerId: email.provider_id,
+          profile: opts.profile,
+          sourceId: opts.source,
+          db,
+        });
         console.log(chalk.dim(`Replying to: ${email.subject}`));
         const { runConnectorOperation } = await import("@hasna/connectors");
         const r = await runConnectorOperation({
           connector: "gmail",
           operation: "messages.reply",
           input: { args: [email.message_id], body: opts.body, ...(opts.html ? { html: true } : {}) },
+          profile: source.profile,
         });
         if (!r.success) { console.error(chalk.red(`Reply failed: ${r.stderr}`)); process.exit(1); }
         console.log(chalk.green("✓ Reply sent"));
@@ -948,13 +1167,15 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
   inboxCmd
     .command("sync-s3")
     .description("Sync inbound emails from S3 bucket (stored by SES receipt rules). Defaults --bucket/--region to config inbound_s3_bucket/region.")
+    .option("--source <id>", "Explicit S3 source id")
     .option("--bucket <name>", "S3 bucket name (defaults to config inbound_s3_bucket)")
     .option("--prefix <prefix>", "S3 key prefix to scan (e.g. inbound/example.com/)")
     .option("--region <region>", "AWS region (defaults to config inbound_s3_region or us-east-1)")
     .option("--provider <id>", "Associate emails with this provider ID")
     .option("--limit <n>", "Max emails per run", "100")
     .option("--profile <profile>", "AWS profile")
-    .action(async (opts: { bucket?: string; prefix?: string; region?: string; provider?: string; limit: string; profile?: string }) => {
+    .option("--force", "Allow syncing a retired or disabled S3 source")
+    .action(async (opts: { source?: string; bucket?: string; prefix?: string; region?: string; provider?: string; limit: string; profile?: string; force?: boolean }) => {
       try {
         const { getInboundConfig } = await import("../../lib/config.js");
         const inbound = getInboundConfig();
@@ -963,14 +1184,16 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         const bucket = opts.bucket ?? inbound.bucket;
         const region = opts.region ?? inbound.region;
         const prefix = opts.prefix ?? inbound.prefix;
-        if (!bucket) { handleError(new Error("No S3 bucket: pass --bucket or set 'mailery config set inbound_s3_bucket <name>'")); return; }
+        if (!bucket && !opts.source) { handleError(new Error("No S3 bucket: pass --bucket, --source, or set 'mailery config set inbound_s3_bucket <name>'")); return; }
         const { syncS3Inbox } = await import("../../lib/s3-sync.js");
-        console.log(chalk.dim(`Syncing emails from s3://${bucket}/${prefix ?? ""}...`));
+        console.log(chalk.dim(`Syncing emails from ${opts.source ? `source ${opts.source}` : `s3://${bucket}/${prefix ?? ""}`}...`));
         const result = await syncS3Inbox({
           bucket,
           prefix,
           region,
           providerId: opts.provider,
+          sourceId: opts.source,
+          forceSource: opts.force === true,
           limit: parsePositiveIntOption(opts.limit, 100),
         });
         const lines = [chalk.bold("\nS3 sync complete:")];
@@ -1299,12 +1522,9 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function ensureGmailProviderForProfile(profile: string): string {
-  const db = getDatabase();
-  const providerName = `Gmail (${profile})`;
-  const existing = getProviderByNameAndType(providerName, "gmail", db);
-  if (existing) return existing.id;
-  return createProvider({ name: providerName, type: "gmail" }, db).id;
+function parseSourceStatus(value: string | undefined): "live" | "import" | "legacy" | "retired" {
+  if (value === "live" || value === "import" || value === "legacy" || value === "retired") return value;
+  throw new Error("Source status must be one of: live, import, legacy, retired");
 }
 
 function resolveGmailProvider(idOrName?: string): string | null {
@@ -1322,7 +1542,13 @@ function resolveGmailProvider(idOrName?: string): string | null {
 function formatInboxSyncStatus(status: EmailSystemStatus): string {
   const lines: string[] = [chalk.bold("\nInbox sync status:")];
   lines.push(`  Local inbox: ${status.inbox.total} total, ${status.inbox.unread} unread`);
+  lines.push(`  Folders:     ${status.mailboxes.counts.inbox} inbox, ${status.mailboxes.counts.sent} sent, ${status.mailboxes.counts.archived} archived`);
   lines.push(`  Latest mail: ${status.inbox.latest_received_at ? chalk.green(status.inbox.latest_received_at) : chalk.dim("never")}`);
+  lines.push(`  Sources:     ${status.sources.total} ingestion source(s), ${status.sources.legacy} legacy, ${status.sources.orphaned} orphaned`);
+  for (const source of status.sources.items.filter((item) => item.kind !== "all").slice(0, 5)) {
+    const badges = source.badges.length ? chalk.dim(` [${source.badges.join(", ")}]`) : "";
+    lines.push(`    - ${source.label}${badges}: ${source.total} total, ${source.unread} unread`);
+  }
   lines.push(`  S3 buckets:  ${status.inbox.inbound_buckets.length > 0 ? chalk.green(String(status.inbox.inbound_buckets.length)) : chalk.yellow("0")}`);
   for (const bucket of status.inbox.inbound_buckets) {
     lines.push(`    - s3://${bucket.bucket} ${chalk.dim(bucket.region)}${bucket.providerId ? chalk.dim(` provider=${bucket.providerId.slice(0, 8)}`) : ""}`);
@@ -1354,6 +1580,42 @@ function formatSyncResult(
   return lines.join("\n");
 }
 
+function formatSourceList(
+  sources: Array<{
+    id: string;
+    type: string;
+    name?: string;
+    status: string;
+    live_sync_enabled: boolean;
+    provider_id?: string;
+    profile?: string;
+    bucket?: string;
+    prefix?: string;
+    region?: string;
+  }>,
+): string {
+  const lines = [chalk.bold("\nInbox sources:")];
+  if (sources.length === 0) {
+    lines.push(chalk.dim("  No sources configured."));
+    lines.push("");
+    return lines.join("\n");
+  }
+  for (const source of sources) {
+    const live = source.status === "live" && source.live_sync_enabled
+      ? chalk.green("live")
+      : source.status === "retired"
+        ? chalk.yellow("retired")
+        : chalk.dim(source.live_sync_enabled ? source.status : `${source.status}/disabled`);
+    const detail = source.type === "gmail"
+      ? `provider=${source.provider_id?.slice(0, 8) ?? "unknown"} profile=${source.profile ?? "default"}`
+      : `s3://${source.bucket ?? "unknown"}/${source.prefix ?? ""} ${source.region ?? "us-east-1"}${source.provider_id ? ` provider=${source.provider_id.slice(0, 8)}` : ""}`;
+    lines.push(`  ${chalk.cyan(source.id)}  [${source.type}]  ${live}  ${source.name ?? ""}`);
+    lines.push(chalk.dim(`    ${detail}`));
+  }
+  lines.push("");
+  return lines.join("\n");
+}
+
 function formatEmailList(
   emails: { id: string; from_address: string; subject: string; received_at: string; text_body?: string | null; is_read?: boolean; is_starred?: boolean; label_ids?: string[] }[],
   title = "Inbound Emails",
@@ -1368,6 +1630,44 @@ function formatEmailList(
     lines.push(
       `  ${star}${unread} ${chalk.dim(e.id.slice(0, 8))}  ${chalk.cyan(e.from_address.slice(0, 28).padEnd(28))}  ${subj}  ${chalk.dim(date)}${labels}`,
     );
+  }
+  lines.push("");
+  return lines.join("\n");
+}
+
+function formatMailboxMessages(messages: TuiMessage[], title = "Mailbox"): string {
+  const lines: string[] = [chalk.bold(`\n${title} (${messages.length}):`)];
+  for (const message of messages) {
+    const date = new Date(message.date).toLocaleDateString();
+    const star = message.is_starred ? chalk.yellow("★") : " ";
+    const unread = !message.is_read ? chalk.cyan("●") : " ";
+    const subject = !message.is_read ? chalk.bold(message.subject.slice(0, 50).padEnd(50)) : message.subject.slice(0, 50).padEnd(50);
+    const actor = message.sentByMe ? message.to : message.from;
+    const labels = message.labels.length ? chalk.magenta(` {${message.labels.join(",")}}`) : "";
+    lines.push(
+      `  ${star}${unread} ${chalk.dim(message.id.slice(0, 8))}  ${chalk.cyan(actor.slice(0, 28).padEnd(28))}  ${subject}  ${chalk.dim(date)}${labels}`,
+    );
+  }
+  lines.push("");
+  return lines.join("\n");
+}
+
+function formatMailboxSources(sources: MailboxSourceSummary[]): string {
+  const lines: string[] = [chalk.bold(`\nIngestion sources (${sources.length}):`)];
+  for (const source of sources) {
+    const badges = source.badges.length ? chalk.dim(` [${source.badges.join(", ")}]`) : "";
+    const latest = source.latestReceivedAt ? chalk.dim(` latest ${source.latestReceivedAt}`) : chalk.dim(" latest never");
+    lines.push(`  ${chalk.cyan(source.id.padEnd(28))} ${source.label}${badges}`);
+    lines.push(`    ${source.total} total, ${source.unread} unread${latest}`);
+  }
+  lines.push("");
+  return lines.join("\n");
+}
+
+function formatMailboxStatus(status: MailboxStatusSummary): string {
+  const lines: string[] = [chalk.bold("\nMailbox folders:")];
+  for (const folder of status.folders) {
+    lines.push(`  ${folder.label.padEnd(10)} ${folder.count}`);
   }
   lines.push("");
   return lines.join("\n");

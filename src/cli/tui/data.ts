@@ -1,10 +1,9 @@
 /**
  * Data layer for the Mailery UI (`mailery ui`).
  *
- * Presents a Gmail-like unified view over the local store: inbound mail
- * (SES-S3 / SMTP / Gmail, with read-state/star/archive/labels) and sent mail,
- * grouped into mailboxes. Pure-ish and DB-backed so it can be unit-tested
- * without a terminal.
+ * Presents a Gmail-like unified view over the local store. Providers are
+ * credentials/capabilities, sources are ingestion streams, mailboxes are
+ * user-visible scopes, and folders are inbox/unread/sent/etc.
  */
 import type { Database } from "../../db/database.js";
 import { getDatabase, resolvePartialIdOrThrow, uuid } from "../../db/database.js";
@@ -21,19 +20,21 @@ import {
 import { getEmail, createEmail } from "../../db/emails.js";
 import { getEmailContent, storeEmailContent } from "../../db/email-content.js";
 import { getEmailThreading, getThreadMessages, setEmailThreading, setInboundThreadId } from "../../db/threads.js";
-import { getLatestActiveProviderId, listActiveProviderSummaries, listProviderNamesByIds } from "../../db/providers.js";
+import { getLatestActiveProviderId, listProviderSummaries, listProviderNamesByIds } from "../../db/providers.js";
 import { listDomains } from "../../db/domains.js";
 import { findAddressesByEmail, getPreferredActiveAddressEmail, listActiveAddressCountsByDomains } from "../../db/addresses.js";
 import { listAddressProvisioningByIds, listDomainProvisioningByIds, listReadyAddressCountsByDomains } from "../../db/provisioning.js";
-import { loadConfig, saveConfig } from "../../lib/config.js";
+import { getInboundBuckets, loadConfig, saveConfig } from "../../lib/config.js";
 import { assessDomainReadiness } from "../../lib/domain-readiness.js";
 import { buildThreadingHeaders, generateMessageId, parseReferences } from "../../lib/threading.js";
 import { marked } from "marked";
 import { normalizeThemeMode, type TuiThemeMode } from "./theme.js";
 
-export type Mailbox = "inbox" | "unread" | "starred" | "sent" | "archived" | "spam" | "trash";
+export type Folder = "inbox" | "unread" | "starred" | "sent" | "archived" | "spam" | "trash";
+export type Mailbox = Folder;
 
-export const MAILBOXES: Mailbox[] = ["inbox", "unread", "starred", "sent", "archived", "spam", "trash"];
+export const FOLDERS: Folder[] = ["inbox", "unread", "starred", "sent", "archived", "spam", "trash"];
+export const MAILBOXES: Mailbox[] = FOLDERS;
 
 export function mailboxLabel(m: Mailbox): string {
   return {
@@ -166,12 +167,25 @@ const FOLDER_WHERE: Record<Exclude<Mailbox, "sent">, string> = {
 };
 
 /**
- * List the messages in a mailbox, newest first. Uses a LEAN projection
+ * List the messages in a folder, newest first. Uses a LEAN projection
  * (no html_body, snippet via substr) over indexed columns so it stays fast on
  * very large mailboxes. The Sent folder unions app-sent mail (`emails`) with
  * Gmail-synced sent mail (`inbound_emails` where is_sent = 1).
  */
-export interface MailboxSource { providerId?: string; domain?: string; address?: string }
+export interface MailboxSource {
+  /** Source ID from listMailboxSources(), e.g. provider:<id>, s3:<bucket>, legacy, orphaned:<id>. */
+  sourceId?: string;
+  /** Credential/capability backing the ingestion stream. Kept as a storage filter, not a mailbox label. */
+  providerId?: string;
+  /** User-visible mailbox scope. */
+  domain?: string;
+  /** User-visible mailbox scope. */
+  address?: string;
+  /** S3 ingestion stream bucket. */
+  s3Bucket?: string;
+  /** Legacy/local mail with no provider/capability provenance. */
+  legacy?: boolean;
+}
 
 interface SqlClause { sql: string; params: string[] }
 
@@ -183,12 +197,58 @@ function addressDomainSql(column: string): string {
   return `${sqlEmailDomain(column)} = ?`;
 }
 
-function recipientSourceClause(src?: MailboxSource): SqlClause {
+function normalizeSourceId(value: string | undefined): MailboxSource {
+  const raw = value?.trim();
+  if (!raw || raw === "all") return {};
+  if (raw === "legacy") return { sourceId: "legacy", legacy: true };
+  if (raw.startsWith("provider:")) return { sourceId: raw, providerId: raw.slice("provider:".length) };
+  if (raw.startsWith("orphaned:")) return { sourceId: raw, providerId: raw.slice("orphaned:".length) };
+  if (raw.startsWith("s3:")) return { sourceId: raw, s3Bucket: decodeURIComponent(raw.slice("s3:".length)) };
+  return { sourceId: raw };
+}
+
+export function mailboxSourceFromRef(input?: MailboxSource): MailboxSource | undefined {
+  if (!input) return undefined;
+  const fromId = normalizeSourceId(input.sourceId);
+  const normalized: MailboxSource = {
+    ...fromId,
+    ...input,
+    providerId: input.providerId ?? fromId.providerId,
+    s3Bucket: input.s3Bucket ?? fromId.s3Bucket,
+    legacy: input.legacy ?? fromId.legacy,
+  };
+  if (!hasSourceFilter(normalized)) return undefined;
+  return normalized;
+}
+
+function inboundSourceClause(src?: MailboxSource): SqlClause {
+  const normalized = mailboxSourceFromRef(src);
   const params: string[] = [];
   let sql = "";
-  if (src?.providerId) { sql += " AND provider_id = ?"; params.push(src.providerId); }
-  if (src?.address) {
-    const address = src.address.toLowerCase();
+  if (normalized?.providerId) { sql += " AND provider_id = ?"; params.push(normalized.providerId); }
+  if (normalized?.legacy) sql += " AND provider_id IS NULL";
+  if (normalized?.s3Bucket) { sql += " AND raw_s3_url LIKE ?"; params.push(`s3://${normalized.s3Bucket}/%`); }
+  return { sql, params };
+}
+
+function appSourceClause(src?: MailboxSource): SqlClause {
+  const normalized = mailboxSourceFromRef(src);
+  const params: string[] = [];
+  const where: string[] = [];
+  if (normalized?.s3Bucket) where.push("0 = 1");
+  if (normalized?.providerId) { where.push("e.provider_id = ?"); params.push(normalized.providerId); }
+  if (normalized?.legacy) where.push("e.provider_id IS NULL");
+  return { sql: where.length ? ` WHERE ${where.join(" AND ")}` : "", params };
+}
+
+function recipientSourceClause(src?: MailboxSource): SqlClause {
+  const params: string[] = [];
+  const normalized = mailboxSourceFromRef(src);
+  const sourceOnly = inboundSourceClause(normalized);
+  let sql = sourceOnly.sql;
+  params.push(...sourceOnly.params);
+  if (normalized?.address) {
+    const address = normalized.address.toLowerCase();
     sql += ` AND inbound_emails.id IN (
       SELECT recipient.inbound_email_id
         FROM inbound_recipients recipient
@@ -196,23 +256,25 @@ function recipientSourceClause(src?: MailboxSource): SqlClause {
     )`;
     params.push(address);
   }
-  if (src?.domain) {
+  if (normalized?.domain) {
     sql += ` AND inbound_emails.id IN (
       SELECT recipient.inbound_email_id
         FROM inbound_recipients recipient
        WHERE recipient.domain = ?
     )`;
-    params.push(src.domain.toLowerCase());
+    params.push(normalized.domain.toLowerCase());
   }
   return { sql, params };
 }
 
 function senderSourceClause(src?: MailboxSource): SqlClause {
   const params: string[] = [];
-  let sql = "";
-  if (src?.providerId) { sql += " AND provider_id = ?"; params.push(src.providerId); }
-  if (src?.address) { sql += ` AND ${sqlEmailAddress("from_address")} = ?`; params.push(src.address.toLowerCase()); }
-  if (src?.domain) { sql += ` AND ${addressDomainSql("from_address")}`; params.push(...addressDomainParams(src.domain)); }
+  const normalized = mailboxSourceFromRef(src);
+  const sourceOnly = inboundSourceClause(normalized);
+  let sql = sourceOnly.sql;
+  params.push(...sourceOnly.params);
+  if (normalized?.address) { sql += ` AND ${sqlEmailAddress("from_address")} = ?`; params.push(normalized.address.toLowerCase()); }
+  if (normalized?.domain) { sql += ` AND ${addressDomainSql("from_address")}`; params.push(...addressDomainParams(normalized.domain)); }
   return { sql, params };
 }
 
@@ -241,12 +303,15 @@ function labelClause(label: string | undefined): SqlClause {
 }
 
 function appSentSourceClause(src?: MailboxSource, search?: string, includeAppSent = true): SqlClause {
+  const normalized = mailboxSourceFromRef(src);
   const params: string[] = [];
   const where: string[] = [];
   if (!includeAppSent) where.push("0 = 1");
-  if (src?.providerId) { where.push("e.provider_id = ?"); params.push(src.providerId); }
-  if (src?.address) { where.push(`${sqlEmailAddress("e.from_address")} = ?`); params.push(src.address.toLowerCase()); }
-  if (src?.domain) { where.push(addressDomainSql("e.from_address")); params.push(...addressDomainParams(src.domain)); }
+  if (normalized?.s3Bucket) where.push("0 = 1");
+  if (normalized?.providerId) { where.push("e.provider_id = ?"); params.push(normalized.providerId); }
+  if (normalized?.legacy) where.push("e.provider_id IS NULL");
+  if (normalized?.address) { where.push(`${sqlEmailAddress("e.from_address")} = ?`); params.push(normalized.address.toLowerCase()); }
+  if (normalized?.domain) { where.push(addressDomainSql("e.from_address")); params.push(...addressDomainParams(normalized.domain)); }
   const searchTerm = search?.trim().toLowerCase();
   if (searchTerm) {
     const like = `%${searchTerm}%`;
@@ -330,7 +395,7 @@ export interface MailboxCounts {
 }
 
 function hasSourceFilter(source: MailboxSource | undefined): boolean {
-  return !!(source?.providerId || source?.domain || source?.address);
+  return !!(source?.sourceId || source?.providerId || source?.domain || source?.address || source?.s3Bucket || source?.legacy);
 }
 
 function unscopedMailboxCounts(db: Database): MailboxCounts {
@@ -363,11 +428,12 @@ export function mailboxCounts(optsOrDb?: Database | { source?: MailboxSource }, 
   const isDb = typeof (optsOrDb as { query?: unknown } | undefined)?.query === "function";
   const d = (isDb ? optsOrDb as Database : maybeDb) || getDatabase();
   const opts = isDb ? undefined : optsOrDb as { source?: MailboxSource } | undefined;
-  if (!hasSourceFilter(opts?.source)) return unscopedMailboxCounts(d);
+  const source = mailboxSourceFromRef(opts?.source);
+  if (!hasSourceFilter(source)) return unscopedMailboxCounts(d);
 
-  const recipientSrc = recipientSourceClause(opts?.source);
-  const senderSrc = senderSourceClause(opts?.source);
-  const appSrc = appSentSourceClause(opts?.source);
+  const recipientSrc = recipientSourceClause(source);
+  const senderSrc = senderSourceClause(source);
+  const appSrc = appSentSourceClause(source);
   const row = d.query(
     `SELECT
        COALESCE(inbound.inbox, 0) AS inbox,
@@ -399,6 +465,234 @@ export function mailboxCounts(optsOrDb?: Database | { source?: MailboxSource }, 
     spam: countValue(row?.spam),
     trash: countValue(row?.trash),
   };
+}
+
+export interface MailboxFolderStatus {
+  id: Mailbox;
+  folder: Mailbox;
+  label: string;
+  count: number;
+}
+
+export interface MailboxStatusSummary {
+  counts: MailboxCounts;
+  folders: MailboxFolderStatus[];
+}
+
+export interface MailboxStatusOptions {
+  source?: MailboxSource;
+}
+
+export function listMailboxStatus(opts?: MailboxStatusOptions, db?: Database): MailboxStatusSummary {
+  const d = db || getDatabase();
+  const counts = mailboxCounts({ source: opts?.source }, d);
+  return {
+    counts,
+    folders: MAILBOXES.map((folder) => ({
+      id: folder,
+      folder,
+      label: mailboxLabel(folder),
+      count: counts[folder],
+    })),
+  };
+}
+
+export function searchMailbox(query: string, opts?: Omit<MailboxListOptions, "search"> & { mailbox?: Mailbox }, db?: Database): TuiMessage[] {
+  return listMailbox(opts?.mailbox ?? "inbox", { ...opts, search: query }, db);
+}
+
+export type MailboxSourceKind = "all" | "gmail" | "s3" | "provider" | "legacy" | "orphaned";
+
+export interface MailboxSourceSummary {
+  id: string;
+  label: string;
+  kind: MailboxSourceKind;
+  providerId?: string;
+  providerName?: string;
+  providerType?: string;
+  bucket?: string;
+  region?: string;
+  badges: string[];
+  counts: MailboxCounts;
+  total: number;
+  unread: number;
+  latestReceivedAt: string | null;
+}
+
+export interface ListMailboxSourcesOptions {
+  limit?: number;
+  search?: string;
+}
+
+export function providerSourceId(providerId: string): string {
+  return `provider:${providerId}`;
+}
+
+export function orphanedSourceId(providerId: string): string {
+  return `orphaned:${providerId}`;
+}
+
+export function s3SourceId(bucket: string): string {
+  return `s3:${encodeURIComponent(bucket)}`;
+}
+
+function countColumn(row: { count?: unknown } | null): number {
+  return countValue(row?.count);
+}
+
+function sourceMessageCount(source: MailboxSource | undefined, db: Database): number {
+  const normalized = mailboxSourceFromRef(source);
+  const inbound = inboundSourceClause(normalized);
+  const app = appSourceClause(normalized);
+  const inboundRow = db
+    .query(`SELECT COUNT(*) AS count FROM inbound_emails WHERE 1 = 1${inbound.sql}`)
+    .get(...inbound.params) as { count: unknown } | null;
+  const appRow = db
+    .query(`SELECT COUNT(*) AS count FROM emails e${app.sql}`)
+    .get(...app.params) as { count: unknown } | null;
+  return countColumn(inboundRow) + countColumn(appRow);
+}
+
+function latestReceivedAtForSource(source: MailboxSource | undefined, db: Database): string | null {
+  const normalized = mailboxSourceFromRef(source);
+  const inbound = inboundSourceClause(normalized);
+  const row = db
+    .query(`SELECT MAX(received_at) AS latest FROM inbound_emails WHERE is_sent = 0${inbound.sql}`)
+    .get(...inbound.params) as { latest: string | null } | null;
+  return row?.latest ?? null;
+}
+
+function sourceSummary(input: Omit<MailboxSourceSummary, "counts" | "total" | "unread" | "latestReceivedAt">, source: MailboxSource | undefined, db: Database): MailboxSourceSummary {
+  const counts = mailboxCounts({ source }, db);
+  return {
+    ...input,
+    counts,
+    total: sourceMessageCount(source, db),
+    unread: counts.unread,
+    latestReceivedAt: latestReceivedAtForSource(source, db),
+  };
+}
+
+function providerIdsWithStoredMail(db: Database): Set<string> {
+  const rows = db.query(
+    `SELECT provider_id FROM inbound_emails WHERE provider_id IS NOT NULL
+     UNION
+     SELECT provider_id FROM emails WHERE provider_id IS NOT NULL`,
+  ).all() as Array<{ provider_id: string }>;
+  return new Set(rows.map((row) => row.provider_id));
+}
+
+function orphanedProviderIds(db: Database): string[] {
+  const rows = db.query(
+    `SELECT DISTINCT mail.provider_id
+       FROM (
+         SELECT provider_id FROM inbound_emails WHERE provider_id IS NOT NULL
+         UNION
+         SELECT provider_id FROM emails WHERE provider_id IS NOT NULL
+       ) mail
+       LEFT JOIN providers p ON p.id = mail.provider_id
+      WHERE p.id IS NULL
+      ORDER BY mail.provider_id`,
+  ).all() as Array<{ provider_id: string }>;
+  return rows.map((row) => row.provider_id);
+}
+
+export function listMailboxSources(db?: Database): MailboxSourceSummary[];
+export function listMailboxSources(opts?: ListMailboxSourcesOptions, db?: Database): MailboxSourceSummary[];
+export function listMailboxSources(optsOrDb?: ListMailboxSourcesOptions | Database, maybeDb?: Database): MailboxSourceSummary[] {
+  const d = isDatabase(optsOrDb) ? optsOrDb : maybeDb || getDatabase();
+  const opts = isDatabase(optsOrDb) ? undefined : optsOrDb;
+  const sources: MailboxSourceSummary[] = [
+    sourceSummary({
+      id: "all",
+      label: "All sources",
+      kind: "all",
+      badges: [],
+    }, undefined, d),
+  ];
+
+  const idsWithMail = providerIdsWithStoredMail(d);
+  for (const provider of listProviderSummaries(d)) {
+    const hasStoredMail = idsWithMail.has(provider.id);
+    if (!provider.active && !hasStoredMail) continue;
+    const id = providerSourceId(provider.id);
+    const kind: MailboxSourceKind = provider.type === "gmail" ? "gmail" : "provider";
+    const legacyGmailImport = provider.type === "gmail" && hasStoredMail && !provider.active;
+    sources.push(sourceSummary({
+      id,
+      label: legacyGmailImport
+        ? `Legacy Gmail import: ${provider.name}`
+        : provider.type === "gmail"
+          ? `Gmail source: ${provider.name}`
+          : `Provider-tagged stream: ${provider.name}`,
+      kind,
+      providerId: provider.id,
+      providerName: provider.name,
+      providerType: provider.type,
+      badges: [
+        ...(legacyGmailImport ? ["legacy"] : []),
+        provider.active ? "active" : "inactive",
+        `capability:${provider.type}`,
+        ...(hasStoredMail ? [] : ["empty"]),
+      ],
+    }, { sourceId: id }, d));
+  }
+
+  for (const bucket of getInboundBuckets()) {
+    const id = s3SourceId(bucket.bucket);
+    sources.push(sourceSummary({
+      id,
+      label: `S3 ingestion: ${bucket.bucket}`,
+      kind: "s3",
+      providerId: bucket.providerId,
+      bucket: bucket.bucket,
+      region: bucket.region,
+      badges: ["configured", ...(bucket.providerId ? [] : ["legacy"])],
+    }, { sourceId: id }, d));
+  }
+
+  const legacySource = sourceSummary({
+    id: "legacy",
+    label: "Legacy/local mail",
+    kind: "legacy",
+    badges: ["legacy"],
+  }, { sourceId: "legacy" }, d);
+  if (legacySource.total > 0) sources.push(legacySource);
+
+  for (const providerId of orphanedProviderIds(d)) {
+    const id = orphanedSourceId(providerId);
+    sources.push(sourceSummary({
+      id,
+      label: `Orphaned source ${providerId.slice(0, 8)}`,
+      kind: "orphaned",
+      providerId,
+      badges: ["orphaned"],
+    }, { sourceId: id }, d));
+  }
+
+  const q = opts?.search?.trim().toLowerCase();
+  let filtered = q
+    ? sources.filter((source) => [
+        source.id,
+        source.label,
+        source.kind,
+        source.providerId,
+        source.providerName,
+        source.providerType,
+        source.bucket,
+        ...source.badges,
+      ].some((value) => String(value ?? "").toLowerCase().includes(q)))
+    : sources;
+
+  filtered = filtered.sort((a, b) => {
+    if (a.kind === "all") return -1;
+    if (b.kind === "all") return 1;
+    if (a.badges.includes("orphaned") !== b.badges.includes("orphaned")) return a.badges.includes("orphaned") ? 1 : -1;
+    if (a.badges.includes("legacy") !== b.badges.includes("legacy")) return a.badges.includes("legacy") ? 1 : -1;
+    return a.label.localeCompare(b.label);
+  });
+
+  return filtered.slice(0, positiveInt(opts?.limit, 100));
 }
 
 export interface MessageBody {
@@ -1106,7 +1400,7 @@ export interface InboxAddressChoice {
 
 export const ALL_ADDRESSES: InboxAddressChoice = {
   id: "all",
-  label: "All inboxes",
+  label: "All mailboxes",
   configured: false,
   observed: false,
 };
@@ -1226,7 +1520,7 @@ function listObservedInboxAddresses(db: Database, opts?: ListInboxAddressOptions
   return addresses;
 }
 
-/** User-facing inbox choices: all inboxes plus configured or observed addresses. */
+/** User-facing mailbox choices: all mailboxes plus configured or observed addresses. */
 export function listInboxAddresses(db?: Database): InboxAddressChoice[];
 export function listInboxAddresses(opts?: ListInboxAddressOptions, db?: Database): InboxAddressChoice[];
 export function listInboxAddresses(optsOrDb?: ListInboxAddressOptions | Database, maybeDb?: Database): InboxAddressChoice[] {
@@ -1306,18 +1600,18 @@ export function addressChoiceByAddress(address: string | null | undefined, db?: 
   };
 }
 
-// ── legacy inbox sources (kept for non-UI callers/tests) ──────────────────────
+// ── ingestion sources ─────────────────────────────────────────────────────────
 
 export interface InboxSource { id: string; label: string; providerId?: string; domain?: string }
 
-/** The selectable inboxes: All, each account, and each registered domain. */
+/** The selectable ingestion sources. Providers remain credentials/capabilities. */
 export function listSources(db?: Database): InboxSource[] {
   const d = db || getDatabase();
-  const out: InboxSource[] = [{ id: "all", label: "All Mail" }];
-  for (const p of listActiveProviderSummaries(undefined, d)) out.push({ id: `p:${p.id}`, label: p.name, providerId: p.id });
-  const doms = d.query("SELECT DISTINCT domain FROM domains ORDER BY domain").all() as { domain: string }[];
-  for (const r of doms) out.push({ id: `d:${r.domain}`, label: `@${r.domain}`, domain: r.domain });
-  return out;
+  return listMailboxSources(d).map((source) => ({
+    id: source.id,
+    label: source.badges.length ? `${source.label} [${source.badges.join(", ")}]` : source.label,
+    providerId: source.providerId,
+  }));
 }
 
 // ── settings (persisted to config.json) ────────────────────────────────────────

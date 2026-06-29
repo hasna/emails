@@ -1,4 +1,10 @@
-import { describe, it, expect, mock, beforeEach } from "bun:test";
+import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { closeDatabase, resetDatabase } from "../../db/database.js";
+import { createProvider } from "../../db/providers.js";
+import { registerGmailSource } from "../../lib/gmail-sync.js";
 
 // Mock the pull engine so we test the command's behavior, not AWS.
 let pullResult: { pulled: number; ok: boolean; reason?: string; configured: boolean };
@@ -9,6 +15,8 @@ mock.module("../tui/autopull.js", () => ({
 
 const { registerRefreshCommand } = await import("./refresh.js");
 const { Command } = await import("commander");
+const originalHome = process.env["HOME"];
+let tmpHome = "";
 
 async function runAsync(args: string[]) {
   const out: string[] = [];
@@ -25,7 +33,29 @@ async function runAsync(args: string[]) {
   return { out: out.join("\n"), data };
 }
 
-beforeEach(() => { pullResult = { pulled: 0, ok: true, configured: true }; lastOpts = undefined; });
+beforeEach(() => {
+  process.env["EMAILS_DB_PATH"] = ":memory:";
+  tmpHome = mkdtempSync(join(tmpdir(), "emails-refresh-source-"));
+  process.env["HOME"] = tmpHome;
+  resetDatabase();
+  pullResult = { pulled: 0, ok: true, configured: true };
+  lastOpts = undefined;
+});
+
+afterEach(() => {
+  closeDatabase();
+  delete process.env["EMAILS_DB_PATH"];
+  process.exitCode = 0;
+  if (originalHome === undefined) delete process.env["HOME"];
+  else process.env["HOME"] = originalHome;
+  if (tmpHome) rmSync(tmpHome, { recursive: true, force: true });
+});
+
+function createLiveGmailSource() {
+  const provider = createProvider({ name: "Gmail Test", type: "gmail" });
+  registerGmailSource({ providerId: provider.id, profile: "gmail-test", status: "live", liveSyncEnabled: true });
+  return provider;
+}
 
 describe("emails refresh", () => {
   it("pulls all buckets with a high scan limit by default", async () => {
@@ -35,7 +65,13 @@ describe("emails refresh", () => {
     expect(out).toContain("Pulled 3 new emails");
   });
 
-  it("passes --gmail through and respects --limit", async () => {
+  it("does not pass --gmail through without a live Gmail source", async () => {
+    await runAsync(["refresh", "--gmail", "--limit", "50"]);
+    expect(lastOpts).toMatchObject({ s3: true, gmail: false, limit: 50 });
+  });
+
+  it("passes --gmail through when a live Gmail source exists", async () => {
+    createLiveGmailSource();
     await runAsync(["refresh", "--gmail", "--limit", "50"]);
     expect(lastOpts).toMatchObject({ s3: true, gmail: true, limit: 50 });
   });

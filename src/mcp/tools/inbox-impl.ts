@@ -12,6 +12,15 @@ import { cappedLimit, safeOffset } from "../../db/pagination.js";
 import { formatError, resolveId } from "../helpers.js";
 import { findVerificationCode, listVerificationCodeCandidates } from "../../lib/verification-code.js";
 import { extractEmailLinks } from "../../lib/email-links.js";
+import {
+  MAILBOXES,
+  listMailboxSources,
+  listMailboxStatus,
+  searchMailbox,
+  mailboxSourceFromRef,
+  type Mailbox,
+  type MailboxSource,
+} from "../../cli/tui/data.js";
 
 const DEFAULT_INBOUND_LIST_LIMIT = 50;
 const DEFAULT_INBOUND_SEARCH_LIMIT = 20;
@@ -32,8 +41,35 @@ async function runAutoPull(opts: { s3?: boolean; gmail?: boolean; limit?: number
   return autoPull(opts);
 }
 
+function jsonText(value: unknown) {
+  return { content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] };
+}
+
+function mailboxFromInput(value: unknown): Mailbox {
+  const normalized = String(value ?? "inbox").trim().toLowerCase();
+  return MAILBOXES.includes(normalized as Mailbox) ? normalized as Mailbox : "inbox";
+}
+
+function mailboxSourceInput(input: { source_id?: string; provider_id?: string; address?: string; domain?: string }): MailboxSource | undefined {
+  return mailboxSourceFromRef({
+    sourceId: input.source_id,
+    providerId: input.provider_id,
+    address: input.address,
+    domain: input.domain,
+  });
+}
+
+function mailboxSourceCliFlags(source: MailboxSource | undefined): string {
+  if (!source) return "";
+  if (source.sourceId) return ` --source ${source.sourceId}`;
+  if (source.providerId) return ` --provider ${source.providerId}`;
+  if (source.address) return ` --address ${source.address}`;
+  if (source.domain) return ` --domain ${source.domain}`;
+  return "";
+}
+
 export function registerInboxTools(server: McpServer): void {
-// ─── INBOUND EMAILS ───────────────────────────────────────────────────────────
+  // ─── INBOUND EMAILS ─────────────────────────────────────────────────────────
   const getLatestInboundEmailSummaryForAddress = (
     address: string,
     filters: { since?: string; from?: string; subject?: string },
@@ -49,8 +85,95 @@ export function registerInboxTools(server: McpServer): void {
   };
 
   server.tool(
+    "list_mailboxes",
+    "List folder counts for a mailbox scope, optionally filtered by ingestion source.",
+    {
+      source_id: z.string().optional().describe("Ingestion source ID from list_mailbox_sources, e.g. provider:<id>, s3:<bucket>, legacy, or orphaned:<id>"),
+      provider_id: z.string().optional().describe("Credential/capability ID used as a provenance filter"),
+      address: z.string().optional().describe("Mailbox scope: exact recipient/sender address"),
+      domain: z.string().optional().describe("Mailbox scope: recipient/sender domain"),
+    },
+    async ({ source_id, provider_id, address, domain }) => {
+      try {
+        const source = mailboxSourceInput({ source_id, provider_id, address, domain });
+        return jsonText({
+          source: source ?? null,
+          ...listMailboxStatus({ source }),
+          cli_equivalent: `mailery inbox mailboxes${mailboxSourceCliFlags(source)} --json`,
+        });
+      } catch (e) {
+        return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+      }
+    },
+  );
+
+  server.tool(
+    "list_mailbox_sources",
+    "List ingestion streams with counts and legacy/orphaned badges.",
+    {
+      search: z.string().optional().describe("Filter sources by label, ID, kind, provider, bucket, or badge"),
+      limit: z.number().int().positive().max(MAX_MCP_INBOX_LIMIT).optional().describe("Max sources (default 100, max 1000)"),
+    },
+    async ({ search, limit }) => {
+      try {
+        const sources = listMailboxSources({ search, limit: inboxLimit(limit, 100) });
+        return jsonText({
+          sources,
+          cli_equivalent: "mailery inbox sources --json",
+        });
+      } catch (e) {
+        return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+      }
+    },
+  );
+
+  server.tool(
+    "search_mailbox",
+    "Search a mailbox folder locally, optionally filtered by ingestion source.",
+    {
+      query: z.string().describe("Search term to match against subject, sender, recipient, or snippet"),
+      mailbox: z.enum(["inbox", "unread", "starred", "sent", "archived", "spam", "trash"]).optional().describe("Folder to search (default inbox)"),
+      source_id: z.string().optional().describe("Ingestion source ID from list_mailbox_sources"),
+      provider_id: z.string().optional().describe("Credential/capability ID used as a provenance filter"),
+      address: z.string().optional().describe("Mailbox scope: exact recipient/sender address"),
+      domain: z.string().optional().describe("Mailbox scope: recipient/sender domain"),
+      label: z.string().optional().describe("Only mail carrying this label"),
+      limit: z.number().int().positive().max(MAX_MCP_INBOX_LIMIT).optional().describe("Max results (default 20, max 1000)"),
+      offset: z.number().int().nonnegative().optional().describe("Pagination offset (default 0)"),
+    },
+    async ({ query, mailbox, source_id, provider_id, address, domain, label, limit, offset }) => {
+      try {
+        const pageLimit = inboxLimit(limit, DEFAULT_INBOUND_SEARCH_LIMIT);
+        const pageOffset = safeOffset(offset);
+        const source = mailboxSourceInput({ source_id, provider_id, address, domain });
+        const selectedMailbox = mailboxFromInput(mailbox);
+        const rows = searchMailbox(query, {
+          mailbox: selectedMailbox,
+          source,
+          label,
+          limit: pageLimit + 1,
+          offset: pageOffset,
+        });
+        return jsonText({
+          mailbox: selectedMailbox,
+          folder: selectedMailbox,
+          source: source ?? null,
+          query,
+          items: rows.slice(0, pageLimit),
+          limit: pageLimit,
+          offset: pageOffset,
+          truncated: rows.length > pageLimit,
+          cli_equivalent: `mailery inbox search ${query} --folder ${selectedMailbox}${mailboxSourceCliFlags(source)} --json`,
+        });
+      } catch (e) {
+        return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+      }
+    },
+  );
+
+  server.tool(
   "list_inbound_emails",
-  "List received inbound emails",
+  "List received inbound emails from local storage. Use list_mailboxes/list_mailbox_sources for folder and source status.",
   {
     provider_id: z.string().optional().describe("Filter by provider ID"),
     since: z.string().optional().describe("ISO 8601 date - only return emails received after this time"),
@@ -609,23 +732,25 @@ async function gmailMessageAction(email_id: string, connectorArgs: string[]): Pr
 );
 
   server.tool(
-  "get_inbox_sync_status",
-  "Get source-aware inbox sync status for S3, realtime queue, and Gmail providers.",
-  {},
-  async () => {
-    try {
-      const { getEmailSystemStatus } = await import("../../lib/agent-context.js");
-      const status = getEmailSystemStatus();
-      return { content: [{ type: "text", text: JSON.stringify({
-        inbox: status.inbox,
-        gmail: status.providers.gmail,
-        cli_equivalent: "mailery inbox sync-status --json",
-      }, null, 2) }] };
-    } catch (e) {
-      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
-    }
-  },
-);
+    "get_inbox_sync_status",
+    "Get source-aware mailbox sync status for S3 ingestion, realtime queue, and Gmail provider credentials.",
+    {},
+    async () => {
+      try {
+        const { getEmailSystemStatus } = await import("../../lib/agent-context.js");
+        const status = getEmailSystemStatus();
+        return { content: [{ type: "text", text: JSON.stringify({
+          inbox: status.inbox,
+          mailboxes: status.mailboxes,
+          sources: status.sources,
+          gmail: status.providers.gmail,
+          cli_equivalent: "mailery inbox sync-status --json",
+        }, null, 2) }] };
+      } catch (e) {
+        return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+      }
+    },
+  );
 
 }
 
@@ -635,6 +760,9 @@ type ToolResult = {
 };
 
 type InboxToolName =
+  | "list_mailboxes"
+  | "list_mailbox_sources"
+  | "search_mailbox"
   | "list_inbound_emails"
   | "get_latest_inbound_email"
   | "wait_for_email"

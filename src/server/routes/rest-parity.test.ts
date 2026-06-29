@@ -51,6 +51,72 @@ afterEach(() => {
 });
 
 describe("emails serve REST parity smoke", () => {
+  it("serves mailbox/source surfaces with source-aware filtering and visible legacy mail", async () => {
+    const primary = createProvider({ name: "Primary Gmail", type: "gmail", active: true });
+    const secondary = createProvider({ name: "Secondary Gmail", type: "gmail", active: true });
+    storeInboundEmail({
+      provider_id: primary.id,
+      message_id: "<primary-source@example.com>",
+      from_address: "sender@example.com",
+      to_addresses: ["ops@example.com"],
+      cc_addresses: [],
+      subject: "primary needle",
+      text_body: "body",
+      html_body: null,
+      attachments: [],
+      headers: {},
+      raw_size: 1,
+      received_at: "2026-01-02T10:00:00.000Z",
+    });
+    storeInboundEmail({
+      provider_id: secondary.id,
+      message_id: "<secondary-source@example.com>",
+      from_address: "sender@example.com",
+      to_addresses: ["ops@example.com"],
+      cc_addresses: [],
+      subject: "secondary needle",
+      text_body: "body",
+      html_body: null,
+      attachments: [],
+      headers: {},
+      raw_size: 1,
+      received_at: "2026-01-03T10:00:00.000Z",
+    });
+    storeInboundEmail({
+      provider_id: null,
+      message_id: "<legacy-source@example.com>",
+      from_address: "legacy@example.com",
+      to_addresses: ["ops@example.com"],
+      cc_addresses: [],
+      subject: "legacy still visible",
+      text_body: "body",
+      html_body: null,
+      attachments: [],
+      headers: {},
+      raw_size: 1,
+      received_at: "2026-01-04T10:00:00.000Z",
+    });
+
+    const sourceId = `provider:${primary.id}`;
+    const sources = await json<{ sources: Array<{ id: string; badges: string[]; total: number }> }>("/api/sources");
+    expect(sources.sources.find((source) => source.id === sourceId)).toMatchObject({ total: 1 });
+    expect(sources.sources.find((source) => source.id === "legacy")?.badges).toContain("legacy");
+
+    const status = await json<{ counts: { inbox: number }; folders: Array<{ id: string; count: number }> }>(`/api/mailboxes?source_id=${encodeURIComponent(sourceId)}`);
+    expect(status.counts.inbox).toBe(1);
+    expect(status.folders.find((folder) => folder.id === "inbox")?.count).toBe(1);
+
+    const primaryInbox = await json<{ items: Array<{ subject: string }>; source: { sourceId: string } }>(`/api/mailbox/inbox?source_id=${encodeURIComponent(sourceId)}`);
+    expect(primaryInbox.source.sourceId).toBe(sourceId);
+    expect(primaryInbox.items.map((item) => item.subject)).toEqual(["primary needle"]);
+
+    const sourceSearch = await json<{ items: Array<{ subject: string }> }>(`/api/sources/${encodeURIComponent(sourceId)}/search?q=needle`);
+    expect(sourceSearch.items.map((item) => item.subject)).toEqual(["primary needle"]);
+
+    const legacyInbox = await json<{ items: Array<{ subject: string }> }>("/api/mailbox/inbox?source_id=legacy");
+    expect(legacyInbox.items.map((item) => item.subject)).toEqual(["legacy still visible"]);
+  });
+
   it("prefers managed agent summaries over legacy triage summaries for inbound detail", async () => {
     const provider = createProvider({ name: "sandbox", type: "sandbox", active: true });
     const inboundEmail = storeInboundEmail({

@@ -19,9 +19,10 @@ import { basename, join } from "node:path";
 import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { storeInboundEmail, updateAttachmentPaths, listInboundEmails } from "../db/inbound.js";
 import type { AttachmentPath } from "../db/inbound.js";
-import { getDatabase, getDataDir } from "../db/database.js";
+import { getDatabase, getDataDir, resolvePartialId } from "../db/database.js";
 import { getGmailSyncState, setGmailSyncState } from "../db/gmail-sync-state.js";
-import { getGmailSyncConfig } from "./config.js";
+import { getProvider, listActiveProviderSummaries } from "../db/providers.js";
+import { getGmailSyncConfig, loadConfig, saveConfig } from "./config.js";
 import { uploadGmailArchive, uploadGmailArchiveAttachment, uploadGmailArchiveManifest } from "./gmail-archive.js";
 import type { Database } from "../db/database.js";
 
@@ -30,6 +31,8 @@ import type { Database } from "../db/database.js";
 export interface ConnectorSyncOptions {
   /** Mailery provider ID */
   providerId: string;
+  /** Explicit source id from mail_sources config. */
+  sourceId?: string;
   /** Gmail label ID, e.g. "INBOX", "SENT". Default: "INBOX" */
   labelFilter?: string;
   /** Gmail search query, e.g. "is:unread from:someone@example.com" */
@@ -44,6 +47,8 @@ export interface ConnectorSyncOptions {
   pageToken?: string;
   /** Connector Gmail profile name */
   profile?: string;
+  /** Deprecated no-op: live Gmail access requires a matching live source. */
+  forceSource?: boolean;
   /** Archive raw MIME and metadata to this S3 bucket for this run. */
   archiveS3Bucket?: string;
   /** Download and store attachment files. Default: true */
@@ -158,6 +163,53 @@ type GmailConnectorInput = Record<string, unknown> & {
   args?: Array<string | number | boolean>;
 };
 
+export const MAIL_SOURCES_CONFIG_KEY = "mail_sources";
+export type MailSourceStatus = "live" | "import" | "legacy" | "retired";
+
+interface BaseMailSource {
+  id: string;
+  type: string;
+  name?: string;
+  status: MailSourceStatus;
+  live_sync_enabled: boolean;
+  created_at?: string;
+  updated_at?: string;
+  retired_at?: string | null;
+}
+
+export interface GmailMailSource extends BaseMailSource {
+  type: "gmail";
+  provider_id: string;
+  profile?: string;
+  email?: string;
+}
+
+type RawMailSource = Record<string, unknown>;
+
+export interface RegisterGmailSourceInput {
+  id?: string;
+  providerId: string;
+  profile?: string;
+  name?: string;
+  email?: string;
+  status?: MailSourceStatus;
+  liveSyncEnabled?: boolean;
+}
+
+export interface ResolveGmailLiveSourceOptions {
+  providerId?: string | null;
+  profile?: string | null;
+  sourceId?: string | null;
+  force?: boolean;
+  db?: Database;
+}
+
+export interface GmailSourceResolution {
+  source: GmailMailSource | null;
+  providerId: string;
+  profile?: string;
+}
+
 async function runGmailOperation<T>(
   operation: string,
   input: GmailConnectorInput,
@@ -169,6 +221,314 @@ async function runGmailOperation<T>(
     input,
     profile,
   });
+}
+
+function nowIso(): string {
+  return new Date().toISOString();
+}
+
+function normalizeProfile(profile: string | null | undefined): string | undefined {
+  const trimmed = String(profile ?? "").trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function normalizeStatus(status: unknown): MailSourceStatus {
+  return status === "live" || status === "import" || status === "legacy" || status === "retired"
+    ? status
+    : "legacy";
+}
+
+function sourceId(type: "gmail", parts: Array<string | undefined>): string {
+  const suffix = parts
+    .map((part) => String(part ?? "").trim().toLowerCase().replace(/[^a-z0-9._-]+/g, "-"))
+    .filter(Boolean)
+    .join("-");
+  return `${type}-${suffix || "source"}`;
+}
+
+function parseConfiguredGmailSource(raw: RawMailSource): GmailMailSource | null {
+  if (raw["type"] !== "gmail") return null;
+  const providerId = typeof raw["provider_id"] === "string"
+    ? raw["provider_id"]
+    : typeof raw["providerId"] === "string"
+      ? raw["providerId"]
+      : "";
+  if (!providerId) return null;
+  const status = normalizeStatus(raw["status"]);
+  return {
+    id: typeof raw["id"] === "string" && raw["id"].trim() ? raw["id"].trim() : sourceId("gmail", [providerId, raw["profile"] as string | undefined]),
+    type: "gmail",
+    provider_id: providerId,
+    profile: normalizeProfile(raw["profile"] as string | undefined),
+    email: typeof raw["email"] === "string" ? raw["email"] : undefined,
+    name: typeof raw["name"] === "string" ? raw["name"] : undefined,
+    status,
+    live_sync_enabled: raw["live_sync_enabled"] == null ? status === "live" : raw["live_sync_enabled"] === true,
+    created_at: typeof raw["created_at"] === "string" ? raw["created_at"] : undefined,
+    updated_at: typeof raw["updated_at"] === "string" ? raw["updated_at"] : undefined,
+    retired_at: typeof raw["retired_at"] === "string" ? raw["retired_at"] : null,
+  };
+}
+
+function readConfiguredSources(): RawMailSource[] {
+  const raw = loadConfig()[MAIL_SOURCES_CONFIG_KEY];
+  return Array.isArray(raw)
+    ? raw.filter((item): item is RawMailSource => !!item && typeof item === "object" && !Array.isArray(item))
+    : [];
+}
+
+function writeConfiguredSources(sources: RawMailSource[]): void {
+  const config = loadConfig();
+  config[MAIL_SOURCES_CONFIG_KEY] = sources;
+  saveConfig(config);
+}
+
+function listConfiguredGmailSources(): GmailMailSource[] {
+  return readConfiguredSources()
+    .map(parseConfiguredGmailSource)
+    .filter((source): source is GmailMailSource => !!source);
+}
+
+function sourceIsLive(source: GmailMailSource | null | undefined): boolean {
+  return !!source && source.status === "live" && source.live_sync_enabled === true;
+}
+
+function legacyGmailSourceForProvider(provider: { id: string; name: string }): GmailMailSource {
+  const profile = provider.name.match(/\(([^)]+)\)/)?.[1];
+  return {
+    id: `legacy-gmail-${provider.id.slice(0, 12)}`,
+    type: "gmail",
+    provider_id: provider.id,
+    profile: normalizeProfile(profile),
+    name: provider.name,
+    status: "legacy",
+    live_sync_enabled: false,
+  };
+}
+
+function sourceMatchesProvider(source: GmailMailSource, providerId: string | undefined): boolean {
+  return !providerId || source.provider_id === providerId;
+}
+
+function sourceMatchesProfile(source: GmailMailSource, profile: string | undefined): boolean {
+  return !profile || (source.profile ?? "default") === profile;
+}
+
+function resolveProviderId(idOrName: string | null | undefined, db: Database): string | undefined {
+  const value = String(idOrName ?? "").trim();
+  if (!value) return undefined;
+  const partial = resolvePartialId(db, "providers", value);
+  if (partial) return partial;
+  const match = listActiveProviderSummaries("gmail", db).find((provider) => provider.name === value);
+  return match?.id;
+}
+
+function assertGmailProvider(providerId: string, db: Database): void {
+  const provider = getProvider(providerId, db);
+  if (!provider) throw new Error(`Gmail provider not found: ${providerId}`);
+  if (provider.type !== "gmail") throw new Error(`Provider ${providerId} is ${provider.type}, not gmail`);
+}
+
+function findUniqueGmailSource(
+  sources: GmailMailSource[],
+  ref: string,
+  extraExactMatch?: (source: GmailMailSource) => boolean,
+): GmailMailSource | null {
+  const exact = sources.filter((source) => source.id === ref || extraExactMatch?.(source));
+  if (exact.length === 1) return exact[0]!;
+  if (exact.length > 1) {
+    throw new Error(`Ambiguous Gmail source; choose one with --source. Matches: ${exact.map((source) => source.id).join(", ")}`);
+  }
+
+  const prefixMatches = sources.filter((source) => source.id.startsWith(ref));
+  if (prefixMatches.length === 1) return prefixMatches[0]!;
+  if (prefixMatches.length > 1) {
+    throw new Error(`Ambiguous Gmail source prefix "${ref}"; choose one with --source. Matches: ${prefixMatches.map((source) => source.id).join(", ")}`);
+  }
+
+  return null;
+}
+
+function findSourceById(sources: GmailMailSource[], sourceId: string): GmailMailSource | null {
+  return findUniqueGmailSource(sources, sourceId);
+}
+
+function chooseSource(
+  sources: GmailMailSource[],
+  opts: { sourceId?: string; providerId?: string; profile?: string },
+): GmailMailSource | null {
+  if (opts.sourceId) return findSourceById(sources, opts.sourceId);
+  const matches = sources.filter((source) => sourceMatchesProvider(source, opts.providerId) && sourceMatchesProfile(source, opts.profile));
+  if (matches.length === 1) return matches[0]!;
+  const liveMatches = matches.filter(sourceIsLive);
+  if (liveMatches.length === 1) return liveMatches[0]!;
+  if (matches.length > 1) {
+    const refs = matches.map((source) => `${source.id}(${source.status}${source.live_sync_enabled ? "" : ",disabled"})`).join(", ");
+    throw new Error(`Ambiguous Gmail source; choose one with --source. Matches: ${refs}`);
+  }
+  return null;
+}
+
+export function listGmailSources(db: Database = getDatabase()): GmailMailSource[] {
+  const configured = listConfiguredGmailSources();
+  const configuredProviderIds = new Set(configured.map((source) => source.provider_id));
+  const legacy = listActiveProviderSummaries("gmail", db)
+    .filter((provider) => !configuredProviderIds.has(provider.id))
+    .map(legacyGmailSourceForProvider);
+  return [...configured, ...legacy];
+}
+
+export function listLiveGmailSources(db: Database = getDatabase()): GmailMailSource[] {
+  return listGmailSources(db).filter(sourceIsLive);
+}
+
+export function hasLiveGmailSources(db: Database = getDatabase()): boolean {
+  return listLiveGmailSources(db).length > 0;
+}
+
+export function registerGmailSource(input: RegisterGmailSourceInput): GmailMailSource {
+  const status = input.status ?? "live";
+  const timestamp = nowIso();
+  const id = input.id ?? sourceId("gmail", [input.providerId, input.profile]);
+  const next: GmailMailSource = {
+    id,
+    type: "gmail",
+    provider_id: input.providerId,
+    profile: normalizeProfile(input.profile),
+    email: input.email,
+    name: input.name,
+    status,
+    live_sync_enabled: input.liveSyncEnabled ?? status === "live",
+    created_at: timestamp,
+    updated_at: timestamp,
+    retired_at: status === "retired" ? timestamp : null,
+  };
+  const sources = readConfiguredSources();
+  const rawNext: RawMailSource = { ...next };
+  const index = sources.findIndex((source) =>
+    source["id"] === id ||
+    (source["type"] === "gmail" &&
+      (source["provider_id"] === input.providerId || source["providerId"] === input.providerId) &&
+      normalizeProfile(source["profile"] as string | undefined) === normalizeProfile(input.profile)));
+  if (index >= 0) {
+    const previous = sources[index]!;
+    next.created_at = typeof previous["created_at"] === "string" ? previous["created_at"] : timestamp;
+    sources[index] = { ...previous, ...rawNext, created_at: next.created_at };
+  } else {
+    sources.push(rawNext);
+  }
+  writeConfiguredSources(sources);
+  return next;
+}
+
+export function retireGmailSource(sourceIdOrProvider: string, db: Database = getDatabase()): GmailMailSource {
+  const sources = readConfiguredSources();
+  const parsed = sources.map(parseConfiguredGmailSource);
+  const providerId = resolveProviderId(sourceIdOrProvider, db);
+  const target = findUniqueGmailSource(
+    parsed.filter((source): source is GmailMailSource => !!source),
+    sourceIdOrProvider,
+    (source) => !!providerId && source.provider_id === providerId,
+  );
+  const index = target ? parsed.findIndex((source) => source?.id === target.id) : -1;
+  if (index < 0 || !parsed[index]) {
+    const legacy = findUniqueGmailSource(
+      listGmailSources(db),
+      sourceIdOrProvider,
+      (source) => !!providerId && source.provider_id === providerId,
+    );
+    if (!legacy) throw new Error(`Gmail source not found: ${sourceIdOrProvider}`);
+    return registerGmailSource({
+      id: legacy.id,
+      providerId: legacy.provider_id,
+      profile: legacy.profile,
+      name: legacy.name,
+      email: legacy.email,
+      status: "retired",
+      liveSyncEnabled: false,
+    });
+  }
+  const timestamp = nowIso();
+  const retired = {
+    ...sources[index]!,
+    status: "retired",
+    live_sync_enabled: false,
+    retired_at: timestamp,
+    updated_at: timestamp,
+  };
+  sources[index] = retired;
+  writeConfiguredSources(sources);
+  return parseConfiguredGmailSource(retired)!;
+}
+
+export function assertNoDuplicateDefaultGmailProfile(
+  profile: string | undefined,
+  knownProfiles: string[],
+  force = false,
+): void {
+  if (force || (profile ?? "default").toLowerCase() !== "default") return;
+  const named = knownProfiles.filter((candidate) => candidate.toLowerCase() !== "default");
+  if (named.length > 0) {
+    throw new Error(`Refusing Gmail profile "default" because named profile(s) also exist (${named.join(", ")}). Choose the named profile or pass --force.`);
+  }
+}
+
+export function resolveGmailLiveSource(opts: ResolveGmailLiveSourceOptions): GmailSourceResolution {
+  const db = opts.db ?? getDatabase();
+  const requestedProviderId = resolveProviderId(opts.providerId, db);
+  const requestedProfile = normalizeProfile(opts.profile ?? undefined);
+  const requestedSourceId = normalizeProfile(opts.sourceId ?? undefined);
+  const sources = listGmailSources(db);
+
+  let source = chooseSource(sources, { sourceId: requestedSourceId, providerId: requestedProviderId, profile: requestedProfile });
+  if (requestedSourceId && !source) throw new Error(`Gmail source not found: ${requestedSourceId}`);
+
+  if (source && requestedProviderId && source.provider_id !== requestedProviderId) {
+    throw new Error(`Gmail provider/profile mismatch: source ${source.id} belongs to provider ${source.provider_id}, not ${requestedProviderId}.`);
+  }
+  if (source && requestedProfile && (source.profile ?? "default") !== requestedProfile) {
+    throw new Error(`Gmail provider/profile mismatch: source ${source.id} uses profile ${source.profile ?? "default"}, not ${requestedProfile}.`);
+  }
+
+  if (source && sourceIsLive(source)) {
+    assertGmailProvider(source.provider_id, db);
+    return { source, providerId: source.provider_id, profile: source.profile };
+  }
+
+  if (!source && requestedProviderId && requestedProfile) {
+    const providerSource = sources.find((candidate) => candidate.provider_id === requestedProviderId);
+    if (providerSource && (providerSource.profile ?? "default") !== requestedProfile) {
+      throw new Error(`Gmail provider/profile mismatch: source ${providerSource.id} uses profile ${providerSource.profile ?? "default"}, not ${requestedProfile}.`);
+    }
+  }
+
+  if (source) {
+    throw new Error(`Gmail source ${source.id} is ${source.status}${source.live_sync_enabled ? "" : " with live sync disabled"}; live Gmail access is blocked.`);
+  }
+
+  if (requestedProviderId || requestedProfile) {
+    throw new Error("No matching live Gmail source configured. Add one with `mailery inbox source add-gmail`.");
+  }
+
+  const live = sources.filter(sourceIsLive);
+  if (live.length === 1) return { source: live[0]!, providerId: live[0]!.provider_id, profile: live[0]!.profile };
+  if (live.length > 1) throw new Error("Multiple live Gmail sources exist; choose one with --source or --provider.");
+  throw new Error("No live Gmail source configured. Add one with `mailery inbox source add-gmail`.");
+}
+
+function resolveSyncSource(opts: ConnectorSyncOptions): { ok: true; opts: ConnectorSyncOptions } | { ok: false; error: string } {
+  try {
+    const resolved = resolveGmailLiveSource({
+      providerId: opts.providerId,
+      profile: opts.profile,
+      sourceId: opts.sourceId,
+      force: opts.forceSource,
+      db: opts.db,
+    });
+    return { ok: true, opts: { ...opts, providerId: resolved.providerId, profile: resolved.profile } };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -313,6 +673,12 @@ async function parseRawGmailMessage(detail: GmailMessageDetail): Promise<ParsedR
  * Uses the connectors SDK for all Gmail API calls.
  */
 export async function syncGmailInbox(opts: ConnectorSyncOptions): Promise<GmailSyncResult> {
+  const resolved = resolveSyncSource(opts);
+  if (!resolved.ok) {
+    return { synced: 0, skipped: 0, attachments_saved: 0, errors: [resolved.error], done: true };
+  }
+  opts = resolved.opts;
+
   const batchSize = opts.batchSize ?? 50;
   const result: GmailSyncResult = { synced: 0, skipped: 0, attachments_saved: 0, errors: [], done: true };
 
@@ -779,6 +1145,12 @@ function newerHistoryId(current: string | undefined, candidate: string | undefin
  * incremental run.
  */
 export async function syncGmailInboxHistory(opts: Omit<ConnectorSyncOptions, "pageToken">): Promise<GmailSyncResult> {
+  const resolved = resolveSyncSource(opts);
+  if (!resolved.ok) {
+    return { synced: 0, skipped: 0, attachments_saved: 0, errors: [resolved.error], done: true };
+  }
+  opts = resolved.opts;
+
   const db = opts.db ?? getDatabase();
   const state = getGmailSyncState(opts.providerId, db);
   if (!state?.history_id) {
@@ -870,10 +1242,26 @@ export async function syncGmailInboxAll(opts: Omit<ConnectorSyncOptions, "pageTo
 /**
  * List available Gmail labels.
  */
-export async function listGmailLabels(_providerId: string): Promise<{ id: string; name: string }[]> {
+export async function listGmailLabels(
+  providerId: string,
+  opts: { profile?: string; sourceId?: string; forceSource?: boolean; db?: Database } = {},
+): Promise<{ id: string; name: string }[]> {
+  let resolved: GmailSourceResolution;
+  try {
+    resolved = resolveGmailLiveSource({
+      providerId,
+      profile: opts.profile,
+      sourceId: opts.sourceId,
+      force: opts.forceSource,
+      db: opts.db,
+    });
+  } catch {
+    return [];
+  }
   const result = await runGmailOperation<{ id: string; name: string }[] | { labels?: { id: string; name: string }[] }>(
     "labels.list",
     {},
+    resolved.profile,
   );
   if (!result.success) return [];
   if (Array.isArray(result.data)) return result.data;

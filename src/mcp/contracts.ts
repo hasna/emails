@@ -39,6 +39,7 @@ export function cliEquivalentForTool(name: string, input: unknown): string {
   const domain = arg(input, "domain");
   const format = arg(input, "format");
   const provider = arg(input, "provider_id", "provider");
+  const source = arg(input, "source_id", "source");
 
   const map: Record<string, () => string> = {
     prepare_inbox: () => `mailery address provision ${email ?? "<email>"}${provider ? ` --provider ${provider}` : " --provider <provider>"} --json`,
@@ -111,6 +112,9 @@ export function cliEquivalentForTool(name: string, input: unknown): string {
     list_scheduled: () => `mailery schedule list${flag(input, "status")}${flag(input, "limit")}${flag(input, "offset")} --json`,
     cancel_scheduled: () => `mailery schedule cancel ${id ?? "<scheduled-id>"} --json`,
 
+    list_mailboxes: () => `mailery inbox mailboxes${source ? ` --source ${source}` : provider ? ` --provider ${provider}` : ""}${flag(input, "address")}${flag(input, "domain")} --json`,
+    list_mailbox_sources: () => `mailery inbox sources${flag(input, "search")}${flag(input, "limit")} --json`,
+    search_mailbox: () => `mailery inbox search ${arg(input, "query") ?? "<query>"}${flag(input, "mailbox", "folder")}${source ? ` --source ${source}` : provider ? ` --provider ${provider}` : ""}${flag(input, "address")}${flag(input, "domain")}${flag(input, "label")}${flag(input, "limit")}${flag(input, "offset")} --json`,
     list_inbound_emails: () => `mailery inbox list${provider ? ` --provider ${provider}` : ""} --json`,
     get_latest_inbound_email: () => `mailery inbox latest ${email ?? "<address>"} --json`,
     wait_for_email: () => `mailery inbox wait ${email ?? "<address>"} --json`,

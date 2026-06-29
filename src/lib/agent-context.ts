@@ -10,9 +10,16 @@ import type { Domain } from "../types/index.js";
 import { assessDomainReadiness } from "./domain-readiness.js";
 import { getInboundBuckets, getGmailSyncConfig, loadConfig } from "./config.js";
 import { enrichAddresses, type EnrichedAddress } from "./address-ownership.js";
+import {
+  listMailboxSources,
+  listMailboxStatus,
+  type MailboxSourceSummary,
+  type MailboxStatusSummary,
+} from "../cli/tui/data.js";
 
 const USABLE_FROM_LIMIT = 25;
 const DOMAIN_READINESS_LIMIT = 25;
+const SOURCE_STATUS_LIMIT = 50;
 
 export interface EmailSystemStatus {
   generated_at: string;
@@ -73,6 +80,16 @@ export interface EmailSystemStatus {
       last_error: string | null;
     };
     gmail_attachment_storage: ReturnType<typeof getGmailSyncConfig>["attachment_storage"];
+  };
+  mailboxes: MailboxStatusSummary;
+  sources: {
+    total: number;
+    active: number;
+    legacy: number;
+    orphaned: number;
+    items: MailboxSourceSummary[];
+    limit: number;
+    truncated: boolean;
   };
   provisioning: {
     domains_pending: number;
@@ -346,6 +363,11 @@ export function getEmailSystemStatus(db: Database = getDatabase()): EmailSystemS
   const domainReadiness = buildDomainReadiness(domainRows.slice(0, DOMAIN_READINESS_LIMIT), providersById, db);
 
   const gmail = gmailProviderStatuses(providers, db);
+  const mailboxStatus = listMailboxStatus(undefined, db);
+  const sourceRows = listMailboxSources({ limit: Math.max(SOURCE_STATUS_LIMIT + 1, 1000) }, db);
+  const countedSources = sourceRows.filter((source) => source.kind !== "all");
+  const sourcesTruncated = countedSources.length > SOURCE_STATUS_LIMIT;
+  const visibleSources = sourceRows.slice(0, SOURCE_STATUS_LIMIT);
 
   const provisioningRows = provisioningSummary(db);
 
@@ -353,7 +375,7 @@ export function getEmailSystemStatus(db: Database = getDatabase()): EmailSystemS
   if (providers.length === 0) nextActions.push("mailery provider add --help");
   if (domainCounts.total === 0) nextActions.push("mailery domain add --help");
   if (addressCounts.total === 0) nextActions.push("mailery address add --help");
-  if (inboundBuckets.length === 0 && gmail.length === 0) nextActions.push("mailery inbox sync-status");
+  if (visibleSources.filter((source) => source.kind !== "all").length === 0) nextActions.push("mailery inbox sync-status");
   const domainFixCommand = firstDomainFixCommand(providersById, db);
   if (domainFixCommand) nextActions.push(domainFixCommand);
   if (provisioningRows.addresses_failed > 0 || provisioningRows.domains_failed > 0) nextActions.push("mailery provision status");
@@ -400,6 +422,16 @@ export function getEmailSystemStatus(db: Database = getDatabase()): EmailSystemS
       },
       gmail_attachment_storage: getGmailSyncConfig().attachment_storage,
     },
+    mailboxes: mailboxStatus,
+    sources: {
+      total: countedSources.length,
+      active: countedSources.filter((source) => source.badges.includes("active") || source.badges.includes("configured")).length,
+      legacy: countedSources.filter((source) => source.badges.includes("legacy")).length,
+      orphaned: countedSources.filter((source) => source.badges.includes("orphaned")).length,
+      items: visibleSources,
+      limit: SOURCE_STATUS_LIMIT,
+      truncated: sourcesTruncated,
+    },
     provisioning: provisioningRows,
     next_actions: [...new Set(nextActions)].slice(0, 5),
     cli_equivalents: {
@@ -415,14 +447,15 @@ export function getEmailSystemStatus(db: Database = getDatabase()): EmailSystemS
 export function formatEmailSystemStatus(status: EmailSystemStatus): string {
   const lines: string[] = [];
   lines.push("Email system status");
-  lines.push(`  Providers: ${status.providers.active}/${status.providers.total} active`);
+  lines.push(`  Capabilities: ${status.providers.active}/${status.providers.total} active provider credential(s)`);
   lines.push(`  Domains:   ${status.domains.send_ready} send-ready, ${status.domains.receive_ready} receive-ready, ${status.domains.total} total`);
   const usableFromLabel = status.addresses.usable_from_truncated
     ? `${status.addresses.usable_from.length}+ listed`
     : `${status.addresses.usable_from.length} listed`;
   lines.push(`  Addresses: ${status.addresses.active}/${status.addresses.total} active, ${status.addresses.owned} owned, ${status.addresses.verified} verified, ${usableFromLabel} usable sender(s)`);
+  lines.push(`  Mailboxes: ${status.mailboxes.counts.inbox} inbox, ${status.mailboxes.counts.unread} unread, ${status.mailboxes.counts.sent} sent`);
   lines.push(`  Inbox:     ${status.inbox.total} total, ${status.inbox.unread} unread${status.inbox.latest_received_at ? `, latest ${status.inbox.latest_received_at}` : ""}`);
-  lines.push(`  Sources:   ${status.inbox.inbound_buckets.length} S3 bucket(s), ${status.providers.gmail.length} Gmail provider(s), realtime ${status.inbox.realtime.queue_configured ? "configured" : "not configured"}`);
+  lines.push(`  Sources:   ${status.sources.total} ingestion source(s), ${status.sources.legacy} legacy, ${status.sources.orphaned} orphaned, realtime ${status.inbox.realtime.queue_configured ? "configured" : "not configured"}`);
   if (status.inbox.realtime.last_error) lines.push(`  Last realtime error: ${status.inbox.realtime.last_error}`);
   if (status.provisioning.domains_failed || status.provisioning.addresses_failed) {
     lines.push(`  Provisioning failures: ${status.provisioning.domains_failed} domain(s), ${status.provisioning.addresses_failed} address(es)`);

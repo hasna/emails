@@ -27,7 +27,12 @@ export function registerRefreshCommand(program: Command, output: (data: unknown,
     .action(async (opts: { gmail?: boolean; forwarding?: boolean; agents?: boolean; limit?: string }) => {
       try {
         const limit = parseCliPositiveIntOption(opts.limit, 1000, MAX_REFRESH_SCAN_LIMIT);
-        const r = await runAutoPull({ s3: true, gmail: opts.gmail === true, forwarding: opts.forwarding !== false, agents: opts.agents !== false, limit });
+        let gmail = opts.gmail === true;
+        if (gmail) {
+          const { hasLiveGmailSources } = await import("../../lib/gmail-sync.js");
+          gmail = hasLiveGmailSources();
+        }
+        const r = await runAutoPull({ s3: true, gmail, forwarding: opts.forwarding !== false, agents: opts.agents !== false, limit });
 
         if (!r.configured) {
           console.log(chalk.yellow("No inbound sources configured."));

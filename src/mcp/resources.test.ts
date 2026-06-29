@@ -4,7 +4,8 @@ import { createAddress } from "../db/addresses.js";
 import { createDomain, updateDnsStatus } from "../db/domains.js";
 import { createProvider } from "../db/providers.js";
 import { setAddressProvisioning, setDomainProvisioning } from "../db/provisioning.js";
-import { addressesResourcePayload, agentContextResourcePayload, domainsResourcePayload, recentErrorsResourcePayload } from "./resources.js";
+import { addressesResourcePayload, agentContextResourcePayload, domainsResourcePayload, mailboxesResourcePayload, recentErrorsResourcePayload, sourcesResourcePayload } from "./resources.js";
+import { storeInboundEmail } from "../db/inbound.js";
 
 beforeEach(() => {
   process.env["EMAILS_DB_PATH"] = ":memory:";
@@ -17,6 +18,46 @@ afterEach(() => {
 });
 
 describe("MCP resource payloads", () => {
+  it("exposes mailbox and source resource payloads with legacy badges", () => {
+    const provider = createProvider({ name: "gmail", type: "gmail" });
+    storeInboundEmail({
+      provider_id: provider.id,
+      message_id: "<mcp-source-provider@example.com>",
+      from_address: "sender@example.com",
+      to_addresses: ["ops@example.com"],
+      cc_addresses: [],
+      subject: "provider resource",
+      text_body: "body",
+      html_body: null,
+      attachments: [],
+      headers: {},
+      raw_size: 1,
+      received_at: "2026-01-02T10:00:00.000Z",
+    });
+    storeInboundEmail({
+      provider_id: null,
+      message_id: "<mcp-source-legacy@example.com>",
+      from_address: "legacy@example.com",
+      to_addresses: ["ops@example.com"],
+      cc_addresses: [],
+      subject: "legacy resource",
+      text_body: "body",
+      html_body: null,
+      attachments: [],
+      headers: {},
+      raw_size: 1,
+      received_at: "2026-01-03T10:00:00.000Z",
+    });
+
+    const mailboxes = mailboxesResourcePayload(getDatabase()) as { counts: { inbox: number }; folders: Array<{ id: string; count: number }> };
+    const sources = sourcesResourcePayload(getDatabase()) as { sources: Array<{ id: string; badges: string[]; total: number }> };
+
+    expect(mailboxes.counts.inbox).toBe(2);
+    expect(mailboxes.folders.find((folder) => folder.id === "inbox")?.count).toBe(2);
+    expect(sources.sources.find((source) => source.id === `provider:${provider.id}`)).toMatchObject({ total: 1 });
+    expect(sources.sources.find((source) => source.id === "legacy")?.badges).toContain("legacy");
+  });
+
   it("builds domain readiness with grouped ready-address counts", () => {
     const provider = createProvider({ name: "sandbox", type: "sandbox" });
     const domain = updateDnsStatus(createDomain(provider.id, "example.com").id, "verified", "verified", "verified");

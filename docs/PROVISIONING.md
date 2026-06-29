@@ -22,17 +22,19 @@ for initial assignment, and the explicit `transfer-owner`, `unassign-owner`, and
 1. **Buy** (Route53, `@hasna/domains`) — the only reliable self-serve API.
 2. **DNS → always Cloudflare** — create the zone, delegate registrar NS to it.
 3. **Send** — SES domain identity (any `*@domain` can send); Resend secondary.
-4. **Receive** — one of three strategies (none are IMAP mailboxes):
-   - `ses-s3` (default): SES receipt rule → S3 → `emails inbox sync-s3` → SQLite. **The real mailbox.**
+4. **Receive** — one of three ingestion-source strategies (none are IMAP mailboxes):
+   - `ses-s3` (default): SES receipt rule → S3 → `emails inbox sync-s3` → SQLite. This is an ingestion source feeding the local mailbox.
    - `cf-routing`: Cloudflare Email Routing forward/Worker (no stored body unless a Worker persists it).
-   - `resend-webhook`: Resend `email.received` webhook (no mailbox; body fetched via API).
+   - `resend-webhook`: Resend `email.received` webhook (no stored mailbox body unless persisted).
 5. **Validate** — `emails test roundtrip` sends tokened mail back and forth and confirms receipt.
 
 ## There is no IMAP/POP mailbox anywhere
-No provider (SES, Cloudflare, Resend) exposes an IMAP/POP inbox. **Our SQLite + S3
-IS the mailbox** for the `ses-s3` strategy: SES drops raw MIME into S3, and
-`emails inbox sync-s3` parses it into the local `inbound_emails` table. Don't
-expect "direct mailbox access" — query the synced store instead.
+No provider (SES, Cloudflare, Resend) exposes an IMAP/POP inbox. Providers are
+credentials/capabilities; sources are ingestion streams. For the `ses-s3`
+strategy, SES drops raw MIME into S3 and `emails inbox sync-s3` parses it into
+the local mailbox store. Query the synced store with `emails inbox mailboxes`,
+`emails inbox sources`, or mailbox list/search commands instead of expecting
+direct provider mailbox access.
 
 ## State machine + daemon
 Domains and addresses move through an explicit, resumable lifecycle

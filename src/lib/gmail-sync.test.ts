@@ -61,7 +61,15 @@ mock.module("@aws-sdk/client-s3", () => {
   };
 });
 
-const { syncGmailInbox, syncGmailInboxAll, syncGmailInboxHistory } = await import("./gmail-sync.js");
+const {
+  syncGmailInbox,
+  syncGmailInboxAll,
+  syncGmailInboxHistory,
+  registerGmailSource,
+  retireGmailSource,
+  listGmailSources,
+  assertNoDuplicateDefaultGmailProfile,
+} = await import("./gmail-sync.js");
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -105,6 +113,7 @@ function setupDb() {
   const db = getDatabase();
   const providerId = uuid();
   db.run(`INSERT INTO providers (id, name, type, active) VALUES (?, 'Gmail', 'gmail', 1)`, [providerId]);
+  registerGmailSource({ providerId, profile: "gmail-test", status: "live", liveSyncEnabled: true });
   return { db, providerId };
 }
 
@@ -426,6 +435,93 @@ describe("syncGmailInbox", () => {
     const r = await syncGmailInbox({ providerId, db });
     expect(r.synced).toBe(0);
     expect(r.errors[0]).toContain("Failed to list messages");
+  });
+
+  it("blocks import-only Gmail sources before any connector call", async () => {
+    const { db, providerId } = setupDb();
+    registerGmailSource({ providerId, profile: "gmail-test", status: "import", liveSyncEnabled: false });
+    setMock([{ id: "import-only-msg" }]);
+
+    const result = await syncGmailInbox({ providerId, db });
+
+    expect(result.synced).toBe(0);
+    expect(result.errors[0]).toContain("live Gmail access is blocked");
+    expect(mockRun.mock.calls.some((call) => call[0]?.operation === "messages.list")).toBe(false);
+  });
+
+  it("blocks retired Gmail sources while keeping local provenance intact", async () => {
+    const { db, providerId } = setupDb();
+    retireGmailSource(providerId, db);
+    db.run(
+      `INSERT INTO inbound_emails (id, provider_id, message_id, from_address, to_addresses, cc_addresses, subject, text_body, received_at)
+       VALUES (?, ?, 'retired-local', 'sender@example.com', '["me@example.com"]', '[]', 'Retired local', 'still searchable', ?)`,
+      [uuid(), providerId, "2026-06-01T00:00:00.000Z"],
+    );
+
+    const result = await syncGmailInbox({ providerId, db });
+    const local = db.query("SELECT subject FROM inbound_emails WHERE provider_id = ? AND text_body LIKE '%searchable%'").all(providerId);
+
+    expect(result.synced).toBe(0);
+    expect(result.errors[0]).toContain("live Gmail access is blocked");
+    expect(local).toHaveLength(1);
+  });
+
+  it("converts an auto-detected legacy Gmail provider source into an explicit retired source", () => {
+    process.env["EMAILS_DB_PATH"] = ":memory:";
+    resetDatabase();
+    const db = getDatabase();
+    const providerId = uuid();
+    db.run(`INSERT INTO providers (id, name, type, active) VALUES (?, 'Gmail (legacy-profile)', 'gmail', 1)`, [providerId]);
+
+    const legacy = listGmailSources(db).find((source) => source.provider_id === providerId);
+    expect(legacy).toMatchObject({ status: "legacy", live_sync_enabled: false });
+
+    const retired = retireGmailSource(legacy!.id, db);
+    const sources = listGmailSources(db).filter((source) => source.provider_id === providerId);
+
+    expect(retired).toMatchObject({ id: legacy!.id, status: "retired", live_sync_enabled: false });
+    expect(sources).toHaveLength(1);
+    expect(sources[0]).toMatchObject({ id: legacy!.id, status: "retired", live_sync_enabled: false });
+  });
+
+  it("rejects ambiguous Gmail source prefixes instead of choosing the first match", async () => {
+    process.env["EMAILS_DB_PATH"] = ":memory:";
+    resetDatabase();
+    const db = getDatabase();
+    const firstProvider = uuid();
+    const secondProvider = uuid();
+    db.run(`INSERT INTO providers (id, name, type, active) VALUES (?, 'Gmail A', 'gmail', 1)`, [firstProvider]);
+    db.run(`INSERT INTO providers (id, name, type, active) VALUES (?, 'Gmail B', 'gmail', 1)`, [secondProvider]);
+    registerGmailSource({ id: "gmail-shared-a", providerId: firstProvider, profile: "a", status: "live", liveSyncEnabled: true });
+    registerGmailSource({ id: "gmail-shared-b", providerId: secondProvider, profile: "b", status: "live", liveSyncEnabled: true });
+
+    const result = await syncGmailInbox({ sourceId: "gmail-shared", db });
+
+    expect(result.synced).toBe(0);
+    expect(result.errors[0]).toContain("Ambiguous Gmail source prefix");
+    expect(mockRun).not.toHaveBeenCalled();
+  });
+
+  it("refuses provider/profile mismatch even when old forceSource callers pass through", async () => {
+    const { db, providerId } = setupDb();
+    setMock([{ id: "forced-msg" }]);
+
+    const refused = await syncGmailInbox({ providerId, profile: "wrong-profile", db });
+    expect(refused.synced).toBe(0);
+    expect(refused.errors[0]).toContain("provider/profile mismatch");
+    expect(mockRun.mock.calls.some((call) => call[0]?.operation === "messages.list")).toBe(false);
+
+    mockRun.mockClear();
+    const forced = await syncGmailInbox({ providerId, profile: "wrong-profile", forceSource: true, db });
+    expect(forced.synced).toBe(0);
+    expect(forced.errors[0]).toContain("provider/profile mismatch");
+    expect(mockRun.mock.calls.some((call) => call[0]?.operation === "messages.list")).toBe(false);
+  });
+
+  it("detects duplicate default and named Gmail connector profiles", () => {
+    expect(() => assertNoDuplicateDefaultGmailProfile("default", ["default", "andrei"], false)).toThrow(/Refusing Gmail profile "default"/);
+    expect(() => assertNoDuplicateDefaultGmailProfile("default", ["default", "andrei"], true)).not.toThrow();
+    expect(() => assertNoDuplicateDefaultGmailProfile("andrei", ["default", "andrei"], false)).not.toThrow();
   });
 
   it("isolates per-message errors", async () => {

@@ -776,6 +776,661 @@ export const PG_MIGRATIONS: string[] = [
   INSERT INTO _migrations (id) VALUES (39) ON CONFLICT DO NOTHING;
   `,
 
+  // Migration 40: Provider/Source/Mailbox/Folder architecture.
+  `
+  CREATE TABLE IF NOT EXISTS mailboxes (
+    id TEXT PRIMARY KEY,
+    address TEXT NOT NULL UNIQUE,
+    display_name TEXT,
+    owner_id TEXT REFERENCES owners(id) ON DELETE SET NULL,
+    status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','inactive')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+
+  CREATE TABLE IF NOT EXISTS mail_folders (
+    id TEXT PRIMARY KEY,
+    mailbox_id TEXT NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE,
+    role TEXT NOT NULL DEFAULT 'custom' CHECK(role IN ('inbox','sent','archive','spam','trash','custom')),
+    name TEXT NOT NULL,
+    path TEXT NOT NULL,
+    provider_folder_id TEXT,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(mailbox_id, path)
+  );
+
+  CREATE TABLE IF NOT EXISTS mailbox_sources (
+    id TEXT PRIMARY KEY,
+    mailbox_id TEXT NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE,
+    provider_id TEXT REFERENCES providers(id) ON DELETE SET NULL,
+    type TEXT NOT NULL CHECK(type IN ('ses','ses_s3','gmail','resend','sandbox','legacy_inbound','manual')),
+    name TEXT NOT NULL,
+    external_account_id TEXT,
+    external_mailbox TEXT,
+    status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','inactive','legacy')),
+    settings_json TEXT NOT NULL DEFAULT '{}',
+    provider_snapshot_json TEXT NOT NULL DEFAULT '{}',
+    last_synced_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(mailbox_id, provider_id, type, external_mailbox)
+  );
+
+  CREATE TABLE IF NOT EXISTS mail_messages (
+    id TEXT PRIMARY KEY,
+    rfc_message_id TEXT,
+    subject TEXT NOT NULL DEFAULT '',
+    from_address TEXT,
+    to_addresses TEXT NOT NULL DEFAULT '[]',
+    cc_addresses TEXT NOT NULL DEFAULT '[]',
+    bcc_addresses TEXT NOT NULL DEFAULT '[]',
+    text_body TEXT,
+    html_body TEXT,
+    headers_json TEXT NOT NULL DEFAULT '{}',
+    attachments_json TEXT NOT NULL DEFAULT '[]',
+    raw_s3_url TEXT,
+    metadata_s3_url TEXT,
+    raw_size INTEGER NOT NULL DEFAULT 0,
+    sent_at TIMESTAMPTZ,
+    received_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+
+  CREATE TABLE IF NOT EXISTS mailbox_message_state (
+    id TEXT PRIMARY KEY,
+    mailbox_id TEXT NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE,
+    mail_message_id TEXT NOT NULL REFERENCES mail_messages(id) ON DELETE CASCADE,
+    folder_id TEXT REFERENCES mail_folders(id) ON DELETE SET NULL,
+    source_id TEXT REFERENCES mailbox_sources(id) ON DELETE SET NULL,
+    source_dedupe_key TEXT,
+    direction TEXT NOT NULL DEFAULT 'inbound' CHECK(direction IN ('inbound','outbound','sent')),
+    provider_message_id TEXT,
+    provider_thread_id TEXT,
+    thread_id TEXT,
+    labels_json TEXT NOT NULL DEFAULT '[]',
+    is_read INTEGER NOT NULL DEFAULT 0,
+    read_at TIMESTAMPTZ,
+    is_archived INTEGER NOT NULL DEFAULT 0,
+    is_starred INTEGER NOT NULL DEFAULT 0,
+    is_spam INTEGER NOT NULL DEFAULT 0,
+    is_trash INTEGER NOT NULL DEFAULT 0,
+    received_at TIMESTAMPTZ,
+    sent_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(mailbox_id, mail_message_id)
+  );
+
+  ALTER TABLE inbound_emails ADD COLUMN IF NOT EXISTS mail_message_id TEXT REFERENCES mail_messages(id) ON DELETE SET NULL;
+  ALTER TABLE inbound_emails ADD COLUMN IF NOT EXISTS primary_mailbox_id TEXT REFERENCES mailboxes(id) ON DELETE SET NULL;
+  ALTER TABLE inbound_emails ADD COLUMN IF NOT EXISTS primary_mailbox_source_id TEXT REFERENCES mailbox_sources(id) ON DELETE SET NULL;
+
+  CREATE INDEX IF NOT EXISTS idx_mailboxes_address ON mailboxes(address);
+  CREATE INDEX IF NOT EXISTS idx_mailboxes_owner ON mailboxes(owner_id);
+  CREATE INDEX IF NOT EXISTS idx_mail_folders_mailbox_role ON mail_folders(mailbox_id, role);
+  CREATE INDEX IF NOT EXISTS idx_mailbox_sources_mailbox ON mailbox_sources(mailbox_id, status);
+  CREATE INDEX IF NOT EXISTS idx_mailbox_sources_provider ON mailbox_sources(provider_id);
+  CREATE INDEX IF NOT EXISTS idx_mail_messages_rfc_message_id ON mail_messages(rfc_message_id) WHERE rfc_message_id IS NOT NULL;
+  CREATE INDEX IF NOT EXISTS idx_mail_messages_received ON mail_messages(received_at);
+  CREATE INDEX IF NOT EXISTS idx_mailbox_state_mailbox_folder_received ON mailbox_message_state(mailbox_id, folder_id, received_at);
+  CREATE INDEX IF NOT EXISTS idx_mailbox_state_message ON mailbox_message_state(mail_message_id);
+  CREATE INDEX IF NOT EXISTS idx_mailbox_state_source ON mailbox_message_state(source_id);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_mailbox_state_source_dedupe ON mailbox_message_state(source_id, source_dedupe_key)
+    WHERE source_id IS NOT NULL AND source_dedupe_key IS NOT NULL;
+  CREATE INDEX IF NOT EXISTS idx_inbound_mail_message ON inbound_emails(mail_message_id);
+  CREATE INDEX IF NOT EXISTS idx_inbound_primary_mailbox ON inbound_emails(primary_mailbox_id);
+  CREATE INDEX IF NOT EXISTS idx_inbound_primary_source ON inbound_emails(primary_mailbox_source_id);
+
+  WITH raw_recipients AS (
+    SELECT inbound.id AS inbound_email_id,
+           lower(btrim(CASE
+             WHEN btrim(value) ~ '<[^<>]+>' THEN regexp_replace(btrim(value), '^.*<([^<>]+)>.*$', '\\1')
+             ELSE btrim(value)
+           END)) AS address
+      FROM inbound_emails inbound,
+           mailery_jsonb_array_text(inbound.to_addresses) AS value
+  ),
+  valid_recipients AS (
+    SELECT inbound_email_id, address, 'mbx:' || address AS mailbox_id
+      FROM raw_recipients
+     WHERE address ~ '^[^[:space:]@<>]+@[^[:space:]@<>]+\\.[^[:space:]@<>]+$'
+    UNION ALL
+    SELECT inbound.id,
+           'legacy-inbound@local.mailery',
+           'mbx:legacy-inbound@local.mailery'
+      FROM inbound_emails inbound
+     WHERE NOT EXISTS (
+       SELECT 1 FROM raw_recipients raw
+        WHERE raw.inbound_email_id = inbound.id
+          AND raw.address ~ '^[^[:space:]@<>]+@[^[:space:]@<>]+\\.[^[:space:]@<>]+$'
+     )
+  )
+  INSERT INTO mailboxes (id, address, display_name, status, created_at, updated_at)
+  SELECT mailbox_id, address, address, 'active', MIN(inbound.created_at), NOW()
+    FROM valid_recipients recipients
+    JOIN inbound_emails inbound ON inbound.id = recipients.inbound_email_id
+   GROUP BY mailbox_id, address
+  ON CONFLICT DO NOTHING;
+
+  INSERT INTO mail_folders (id, mailbox_id, role, name, path, sort_order, created_at, updated_at)
+  SELECT 'folder:' || id || ':inbox', id, 'inbox', 'Inbox', 'INBOX', 10, NOW(), NOW() FROM mailboxes
+  ON CONFLICT DO NOTHING;
+  INSERT INTO mail_folders (id, mailbox_id, role, name, path, sort_order, created_at, updated_at)
+  SELECT 'folder:' || id || ':sent', id, 'sent', 'Sent', 'SENT', 20, NOW(), NOW() FROM mailboxes
+  ON CONFLICT DO NOTHING;
+  INSERT INTO mail_folders (id, mailbox_id, role, name, path, sort_order, created_at, updated_at)
+  SELECT 'folder:' || id || ':archive', id, 'archive', 'Archive', 'ARCHIVE', 30, NOW(), NOW() FROM mailboxes
+  ON CONFLICT DO NOTHING;
+  INSERT INTO mail_folders (id, mailbox_id, role, name, path, sort_order, created_at, updated_at)
+  SELECT 'folder:' || id || ':spam', id, 'spam', 'Spam', 'SPAM', 40, NOW(), NOW() FROM mailboxes
+  ON CONFLICT DO NOTHING;
+  INSERT INTO mail_folders (id, mailbox_id, role, name, path, sort_order, created_at, updated_at)
+  SELECT 'folder:' || id || ':trash', id, 'trash', 'Trash', 'TRASH', 50, NOW(), NOW() FROM mailboxes
+  ON CONFLICT DO NOTHING;
+
+  -- Do not duplicate historical bodies into mail_messages. Existing inbound
+  -- bodies remain preserved in inbound_emails and can be joined by the
+  -- deterministic msg:inbound:<id> link; new inserts populate canonical bodies.
+  INSERT INTO mail_messages (
+    id, rfc_message_id, subject, from_address, to_addresses, cc_addresses, bcc_addresses,
+    text_body, html_body, headers_json, attachments_json, raw_s3_url, metadata_s3_url,
+    raw_size, received_at, created_at, updated_at
+  )
+  SELECT 'msg:inbound:' || id,
+         message_id,
+         subject,
+         from_address,
+         to_addresses,
+         cc_addresses,
+         '[]',
+         NULL,
+         NULL,
+         headers_json,
+         attachments_json,
+         raw_s3_url,
+         metadata_s3_url,
+         COALESCE(raw_size, 0),
+         received_at,
+         created_at,
+         NOW()
+    FROM inbound_emails
+  ON CONFLICT DO NOTHING;
+
+  WITH raw_recipients AS (
+    SELECT inbound.id AS inbound_email_id,
+           lower(btrim(CASE
+             WHEN btrim(value) ~ '<[^<>]+>' THEN regexp_replace(btrim(value), '^.*<([^<>]+)>.*$', '\\1')
+             ELSE btrim(value)
+           END)) AS address
+      FROM inbound_emails inbound,
+           mailery_jsonb_array_text(inbound.to_addresses) AS value
+  ),
+  valid_recipients AS (
+    SELECT inbound_email_id, address, 'mbx:' || address AS mailbox_id
+      FROM raw_recipients
+     WHERE address ~ '^[^[:space:]@<>]+@[^[:space:]@<>]+\\.[^[:space:]@<>]+$'
+    UNION ALL
+    SELECT inbound.id,
+           'legacy-inbound@local.mailery',
+           'mbx:legacy-inbound@local.mailery'
+      FROM inbound_emails inbound
+     WHERE NOT EXISTS (
+       SELECT 1 FROM raw_recipients raw
+        WHERE raw.inbound_email_id = inbound.id
+          AND raw.address ~ '^[^[:space:]@<>]+@[^[:space:]@<>]+\\.[^[:space:]@<>]+$'
+     )
+  ),
+  source_rows AS (
+    SELECT DISTINCT
+           recipients.mailbox_id,
+           inbound.provider_id,
+           CASE
+             WHEN provider.type = 'gmail' THEN 'gmail'
+             WHEN provider.type = 'ses' AND (inbound.raw_s3_url IS NOT NULL OR inbound.metadata_s3_url IS NOT NULL OR COALESCE(inbound.message_id, '') LIKE 'inbound/%') THEN 'ses_s3'
+             WHEN provider.type = 'ses' THEN 'ses'
+             WHEN provider.type = 'resend' THEN 'resend'
+             WHEN provider.type = 'sandbox' THEN 'sandbox'
+             ELSE 'legacy_inbound'
+           END AS source_type,
+           provider.name AS provider_name,
+           provider.type AS provider_type,
+           provider.region AS provider_region,
+           provider.active AS provider_active,
+           provider.created_at AS provider_created_at,
+           provider.updated_at AS provider_updated_at
+      FROM valid_recipients recipients
+      JOIN inbound_emails inbound ON inbound.id = recipients.inbound_email_id
+      LEFT JOIN providers provider ON provider.id = inbound.provider_id
+  )
+  INSERT INTO mailbox_sources (
+    id, mailbox_id, provider_id, type, name, external_mailbox, status,
+    settings_json, provider_snapshot_json, created_at, updated_at
+  )
+  SELECT 'msrc:' || mailbox_id || ':' || COALESCE(provider_id, 'none') || ':' || source_type,
+         mailbox_id,
+         provider_id,
+         source_type,
+         COALESCE(provider_name || ' ' || source_type, 'Legacy inbound'),
+         substring(mailbox_id from 5),
+         CASE WHEN source_type IN ('legacy_inbound', 'gmail') THEN 'legacy' ELSE 'active' END,
+         '{}',
+         CASE WHEN provider_id IS NULL THEN '{}' ELSE jsonb_build_object(
+           'id', provider_id,
+           'name', provider_name,
+           'type', provider_type,
+           'region', provider_region,
+           'active', provider_active,
+           'created_at', provider_created_at,
+           'updated_at', provider_updated_at
+         )::text END,
+         NOW(),
+         NOW()
+    FROM source_rows
+  ON CONFLICT DO NOTHING;
+
+  WITH raw_recipients AS (
+    SELECT inbound.id AS inbound_email_id,
+           lower(btrim(CASE
+             WHEN btrim(value) ~ '<[^<>]+>' THEN regexp_replace(btrim(value), '^.*<([^<>]+)>.*$', '\\1')
+             ELSE btrim(value)
+           END)) AS address
+      FROM inbound_emails inbound,
+           mailery_jsonb_array_text(inbound.to_addresses) AS value
+  ),
+  valid_recipients AS (
+    SELECT inbound_email_id, address, 'mbx:' || address AS mailbox_id
+      FROM raw_recipients
+     WHERE address ~ '^[^[:space:]@<>]+@[^[:space:]@<>]+\\.[^[:space:]@<>]+$'
+    UNION ALL
+    SELECT inbound.id,
+           'legacy-inbound@local.mailery',
+           'mbx:legacy-inbound@local.mailery'
+      FROM inbound_emails inbound
+     WHERE NOT EXISTS (
+       SELECT 1 FROM raw_recipients raw
+        WHERE raw.inbound_email_id = inbound.id
+          AND raw.address ~ '^[^[:space:]@<>]+@[^[:space:]@<>]+\\.[^[:space:]@<>]+$'
+     )
+  ),
+  state_rows AS (
+    SELECT state_base.*,
+           COUNT(*) OVER (
+             PARTITION BY state_base.mailbox_id,
+                          COALESCE(state_base.provider_id, 'none'),
+                          state_base.source_type,
+                          state_base.dedupe_base
+           ) AS source_dedupe_count
+      FROM (
+        SELECT inbound.*,
+               recipients.address,
+               recipients.mailbox_id,
+               COALESCE(NULLIF(inbound.message_id, ''), inbound.id) AS dedupe_base,
+               CASE
+                 WHEN provider.type = 'gmail' THEN 'gmail'
+                 WHEN provider.type = 'ses' AND (inbound.raw_s3_url IS NOT NULL OR inbound.metadata_s3_url IS NOT NULL OR COALESCE(inbound.message_id, '') LIKE 'inbound/%') THEN 'ses_s3'
+                 WHEN provider.type = 'ses' THEN 'ses'
+                 WHEN provider.type = 'resend' THEN 'resend'
+                 WHEN provider.type = 'sandbox' THEN 'sandbox'
+                 ELSE 'legacy_inbound'
+               END AS source_type,
+               CASE
+                 WHEN COALESCE(inbound.is_sent, 0) = 1 THEN 'sent'
+                 WHEN COALESCE(inbound.is_trash, 0) = 1 THEN 'trash'
+                 WHEN COALESCE(inbound.is_spam, 0) = 1 THEN 'spam'
+                 WHEN COALESCE(inbound.is_archived, 0) = 1 THEN 'archive'
+                 ELSE 'inbox'
+               END AS folder_role
+          FROM valid_recipients recipients
+          JOIN inbound_emails inbound ON inbound.id = recipients.inbound_email_id
+          LEFT JOIN providers provider ON provider.id = inbound.provider_id
+      ) state_base
+  )
+  INSERT INTO mailbox_message_state (
+    id, mailbox_id, mail_message_id, folder_id, source_id, source_dedupe_key,
+    direction, provider_message_id, provider_thread_id, thread_id, labels_json,
+    is_read, read_at, is_archived, is_starred, is_spam, is_trash, received_at,
+    created_at, updated_at
+  )
+  SELECT 'state:' || id || ':' || address,
+         mailbox_id,
+         'msg:inbound:' || id,
+         'folder:' || mailbox_id || ':' || folder_role,
+         'msrc:' || mailbox_id || ':' || COALESCE(provider_id, 'none') || ':' || source_type,
+         CASE
+           WHEN source_dedupe_count > 1 THEN dedupe_base || ':inbound:' || id
+           ELSE dedupe_base
+         END,
+         CASE WHEN COALESCE(is_sent, 0) = 1 THEN 'sent' ELSE 'inbound' END,
+         message_id,
+         provider_thread_id,
+         thread_id,
+         label_ids_json,
+         COALESCE(is_read, 0),
+         read_at,
+         COALESCE(is_archived, 0),
+         COALESCE(is_starred, 0),
+         COALESCE(is_spam, 0),
+         COALESCE(is_trash, 0),
+         received_at,
+         created_at,
+         NOW()
+    FROM state_rows
+  ON CONFLICT DO NOTHING;
+
+  UPDATE inbound_emails
+     SET mail_message_id = COALESCE(mail_message_id, 'msg:inbound:' || id);
+
+  UPDATE inbound_emails
+     SET primary_mailbox_id = COALESCE(primary_mailbox_id, (
+           SELECT state.mailbox_id
+             FROM mailbox_message_state state
+            WHERE state.mail_message_id = 'msg:inbound:' || inbound_emails.id
+            ORDER BY state.mailbox_id
+            LIMIT 1
+         )),
+         primary_mailbox_source_id = COALESCE(primary_mailbox_source_id, (
+           SELECT state.source_id
+             FROM mailbox_message_state state
+            WHERE state.mail_message_id = 'msg:inbound:' || inbound_emails.id
+            ORDER BY state.mailbox_id
+             LIMIT 1
+         ));
+
+  CREATE OR REPLACE FUNCTION mailery_after_inbound_insert_architecture()
+  RETURNS trigger
+  LANGUAGE plpgsql
+  AS $$
+  BEGIN
+    INSERT INTO mail_messages (
+      id, rfc_message_id, subject, from_address, to_addresses, cc_addresses, bcc_addresses,
+      text_body, html_body, headers_json, attachments_json, raw_s3_url, metadata_s3_url,
+      raw_size, received_at, created_at, updated_at
+    )
+    VALUES (
+      'msg:inbound:' || NEW.id,
+      NEW.message_id,
+      NEW.subject,
+      NEW.from_address,
+      NEW.to_addresses,
+      NEW.cc_addresses,
+      '[]',
+      NEW.text_body,
+      NEW.html_body,
+      NEW.headers_json,
+      NEW.attachments_json,
+      NEW.raw_s3_url,
+      NEW.metadata_s3_url,
+      COALESCE(NEW.raw_size, 0),
+      NEW.received_at,
+      NEW.created_at,
+      NOW()
+    )
+    ON CONFLICT DO NOTHING;
+
+    UPDATE inbound_emails
+       SET mail_message_id = COALESCE(mail_message_id, 'msg:inbound:' || NEW.id)
+     WHERE id = NEW.id;
+
+    WITH raw_recipients AS (
+      SELECT lower(btrim(CASE
+               WHEN btrim(value) ~ '<[^<>]+>' THEN regexp_replace(btrim(value), '^.*<([^<>]+)>.*$', '\\1')
+               ELSE btrim(value)
+             END)) AS address
+        FROM mailery_jsonb_array_text(NEW.to_addresses) AS value
+    ),
+    valid_recipients AS (
+      SELECT address, 'mbx:' || address AS mailbox_id
+        FROM raw_recipients
+       WHERE address ~ '^[^[:space:]@<>]+@[^[:space:]@<>]+\\.[^[:space:]@<>]+$'
+      UNION ALL
+      SELECT 'legacy-inbound@local.mailery',
+             'mbx:legacy-inbound@local.mailery'
+       WHERE NOT EXISTS (
+         SELECT 1 FROM raw_recipients raw
+          WHERE raw.address ~ '^[^[:space:]@<>]+@[^[:space:]@<>]+\\.[^[:space:]@<>]+$'
+       )
+    )
+    INSERT INTO mailboxes (id, address, display_name, status, created_at, updated_at)
+    SELECT mailbox_id, address, address, 'active', NEW.created_at, NOW()
+      FROM valid_recipients
+    ON CONFLICT DO NOTHING;
+
+    WITH raw_recipients AS (
+      SELECT lower(btrim(CASE
+               WHEN btrim(value) ~ '<[^<>]+>' THEN regexp_replace(btrim(value), '^.*<([^<>]+)>.*$', '\\1')
+               ELSE btrim(value)
+             END)) AS address
+        FROM mailery_jsonb_array_text(NEW.to_addresses) AS value
+    ),
+    valid_recipients AS (
+      SELECT address, 'mbx:' || address AS mailbox_id
+        FROM raw_recipients
+       WHERE address ~ '^[^[:space:]@<>]+@[^[:space:]@<>]+\\.[^[:space:]@<>]+$'
+      UNION ALL
+      SELECT 'legacy-inbound@local.mailery',
+             'mbx:legacy-inbound@local.mailery'
+       WHERE NOT EXISTS (
+         SELECT 1 FROM raw_recipients raw
+          WHERE raw.address ~ '^[^[:space:]@<>]+@[^[:space:]@<>]+\\.[^[:space:]@<>]+$'
+       )
+    )
+    INSERT INTO mail_folders (id, mailbox_id, role, name, path, sort_order, created_at, updated_at)
+    SELECT 'folder:' || mailbox_id || ':inbox', mailbox_id, 'inbox', 'Inbox', 'INBOX', 10, NOW(), NOW()
+      FROM valid_recipients
+    UNION ALL
+    SELECT 'folder:' || mailbox_id || ':sent', mailbox_id, 'sent', 'Sent', 'SENT', 20, NOW(), NOW()
+      FROM valid_recipients
+    UNION ALL
+    SELECT 'folder:' || mailbox_id || ':archive', mailbox_id, 'archive', 'Archive', 'ARCHIVE', 30, NOW(), NOW()
+      FROM valid_recipients
+    UNION ALL
+    SELECT 'folder:' || mailbox_id || ':spam', mailbox_id, 'spam', 'Spam', 'SPAM', 40, NOW(), NOW()
+      FROM valid_recipients
+    UNION ALL
+    SELECT 'folder:' || mailbox_id || ':trash', mailbox_id, 'trash', 'Trash', 'TRASH', 50, NOW(), NOW()
+      FROM valid_recipients
+    ON CONFLICT DO NOTHING;
+
+    WITH raw_recipients AS (
+      SELECT lower(btrim(CASE
+               WHEN btrim(value) ~ '<[^<>]+>' THEN regexp_replace(btrim(value), '^.*<([^<>]+)>.*$', '\\1')
+               ELSE btrim(value)
+             END)) AS address
+        FROM mailery_jsonb_array_text(NEW.to_addresses) AS value
+    ),
+    valid_recipients AS (
+      SELECT address, 'mbx:' || address AS mailbox_id
+        FROM raw_recipients
+       WHERE address ~ '^[^[:space:]@<>]+@[^[:space:]@<>]+\\.[^[:space:]@<>]+$'
+      UNION ALL
+      SELECT 'legacy-inbound@local.mailery',
+             'mbx:legacy-inbound@local.mailery'
+       WHERE NOT EXISTS (
+         SELECT 1 FROM raw_recipients raw
+          WHERE raw.address ~ '^[^[:space:]@<>]+@[^[:space:]@<>]+\\.[^[:space:]@<>]+$'
+       )
+    ),
+    source_rows AS (
+      SELECT recipients.address,
+             recipients.mailbox_id,
+             NEW.provider_id AS provider_id,
+             CASE
+               WHEN provider.type = 'gmail' THEN 'gmail'
+               WHEN provider.type = 'ses' AND (NEW.raw_s3_url IS NOT NULL OR NEW.metadata_s3_url IS NOT NULL OR COALESCE(NEW.message_id, '') LIKE 'inbound/%') THEN 'ses_s3'
+               WHEN provider.type = 'ses' THEN 'ses'
+               WHEN provider.type = 'resend' THEN 'resend'
+               WHEN provider.type = 'sandbox' THEN 'sandbox'
+               ELSE 'legacy_inbound'
+             END AS source_type,
+             provider.name AS provider_name,
+             provider.type AS provider_type,
+             provider.region AS provider_region,
+             provider.active AS provider_active,
+             provider.created_at AS provider_created_at,
+             provider.updated_at AS provider_updated_at
+        FROM valid_recipients recipients
+        LEFT JOIN providers provider ON provider.id = NEW.provider_id
+    )
+    INSERT INTO mailbox_sources (
+      id, mailbox_id, provider_id, type, name, external_mailbox, status,
+      settings_json, provider_snapshot_json, created_at, updated_at
+    )
+    SELECT 'msrc:' || mailbox_id || ':' || COALESCE(provider_id, 'none') || ':' || source_type,
+           mailbox_id,
+           provider_id,
+           source_type,
+           COALESCE(provider_name || ' ' || source_type, 'Legacy inbound'),
+           address,
+           CASE WHEN source_type IN ('legacy_inbound', 'gmail') THEN 'legacy' ELSE 'active' END,
+           '{}',
+           CASE WHEN provider_id IS NULL THEN '{}' ELSE jsonb_build_object(
+             'id', provider_id,
+             'name', provider_name,
+             'type', provider_type,
+             'region', provider_region,
+             'active', provider_active,
+             'created_at', provider_created_at,
+             'updated_at', provider_updated_at
+           )::text END,
+           NOW(),
+           NOW()
+      FROM source_rows
+    ON CONFLICT DO NOTHING;
+
+    WITH raw_recipients AS (
+      SELECT lower(btrim(CASE
+               WHEN btrim(value) ~ '<[^<>]+>' THEN regexp_replace(btrim(value), '^.*<([^<>]+)>.*$', '\\1')
+               ELSE btrim(value)
+             END)) AS address
+        FROM mailery_jsonb_array_text(NEW.to_addresses) AS value
+    ),
+    valid_recipients AS (
+      SELECT address, 'mbx:' || address AS mailbox_id
+        FROM raw_recipients
+       WHERE address ~ '^[^[:space:]@<>]+@[^[:space:]@<>]+\\.[^[:space:]@<>]+$'
+      UNION ALL
+      SELECT 'legacy-inbound@local.mailery',
+             'mbx:legacy-inbound@local.mailery'
+       WHERE NOT EXISTS (
+         SELECT 1 FROM raw_recipients raw
+          WHERE raw.address ~ '^[^[:space:]@<>]+@[^[:space:]@<>]+\\.[^[:space:]@<>]+$'
+       )
+    ),
+    state_rows AS (
+      SELECT recipients.address,
+             recipients.mailbox_id,
+             NEW.provider_id AS provider_id,
+             COALESCE(NULLIF(NEW.message_id, ''), NEW.id) AS dedupe_base,
+             CASE
+               WHEN provider.type = 'gmail' THEN 'gmail'
+               WHEN provider.type = 'ses' AND (NEW.raw_s3_url IS NOT NULL OR NEW.metadata_s3_url IS NOT NULL OR COALESCE(NEW.message_id, '') LIKE 'inbound/%') THEN 'ses_s3'
+               WHEN provider.type = 'ses' THEN 'ses'
+               WHEN provider.type = 'resend' THEN 'resend'
+               WHEN provider.type = 'sandbox' THEN 'sandbox'
+               ELSE 'legacy_inbound'
+             END AS source_type,
+             CASE
+               WHEN COALESCE(NEW.is_sent, 0) = 1 THEN 'sent'
+               WHEN COALESCE(NEW.is_trash, 0) = 1 THEN 'trash'
+               WHEN COALESCE(NEW.is_spam, 0) = 1 THEN 'spam'
+               WHEN COALESCE(NEW.is_archived, 0) = 1 THEN 'archive'
+               ELSE 'inbox'
+             END AS folder_role
+        FROM valid_recipients recipients
+        LEFT JOIN providers provider ON provider.id = NEW.provider_id
+    )
+    INSERT INTO mailbox_message_state (
+      id, mailbox_id, mail_message_id, folder_id, source_id, source_dedupe_key,
+      direction, provider_message_id, provider_thread_id, thread_id, labels_json,
+      is_read, read_at, is_archived, is_starred, is_spam, is_trash, received_at,
+      created_at, updated_at
+    )
+    SELECT 'state:' || NEW.id || ':' || address,
+           mailbox_id,
+           'msg:inbound:' || NEW.id,
+           'folder:' || mailbox_id || ':' || folder_role,
+           'msrc:' || mailbox_id || ':' || COALESCE(provider_id, 'none') || ':' || source_type,
+           CASE
+             WHEN EXISTS (
+               SELECT 1
+                 FROM mailbox_message_state existing_state
+                WHERE existing_state.source_id = 'msrc:' || mailbox_id || ':' || COALESCE(provider_id, 'none') || ':' || source_type
+                  AND existing_state.source_dedupe_key = dedupe_base
+                LIMIT 1
+             ) THEN dedupe_base || ':inbound:' || NEW.id
+             ELSE dedupe_base
+           END,
+           CASE WHEN COALESCE(NEW.is_sent, 0) = 1 THEN 'sent' ELSE 'inbound' END,
+           NEW.message_id,
+           NEW.provider_thread_id,
+           NEW.thread_id,
+           NEW.label_ids_json,
+           COALESCE(NEW.is_read, 0),
+           NEW.read_at,
+           COALESCE(NEW.is_archived, 0),
+           COALESCE(NEW.is_starred, 0),
+           COALESCE(NEW.is_spam, 0),
+           COALESCE(NEW.is_trash, 0),
+           NEW.received_at,
+           NEW.created_at,
+           NOW()
+      FROM state_rows
+    ON CONFLICT DO NOTHING;
+
+    UPDATE inbound_emails
+       SET primary_mailbox_id = COALESCE(primary_mailbox_id, (
+             SELECT state.mailbox_id
+               FROM mailbox_message_state state
+              WHERE state.mail_message_id = 'msg:inbound:' || NEW.id
+              ORDER BY state.mailbox_id
+              LIMIT 1
+           )),
+           primary_mailbox_source_id = COALESCE(primary_mailbox_source_id, (
+             SELECT state.source_id
+               FROM mailbox_message_state state
+              WHERE state.mail_message_id = 'msg:inbound:' || NEW.id
+              ORDER BY state.mailbox_id
+              LIMIT 1
+           ))
+     WHERE id = NEW.id;
+
+    RETURN NEW;
+  END;
+  $$;
+  DROP TRIGGER IF EXISTS trg_mail_architecture_inbound_insert ON inbound_emails;
+  CREATE TRIGGER trg_mail_architecture_inbound_insert
+  AFTER INSERT ON inbound_emails
+  FOR EACH ROW
+  EXECUTE FUNCTION mailery_after_inbound_insert_architecture();
+
+  CREATE OR REPLACE FUNCTION mailery_prevent_provider_delete_with_history()
+  RETURNS trigger
+  LANGUAGE plpgsql
+  AS $$
+  BEGIN
+    IF EXISTS (SELECT 1 FROM mailbox_sources WHERE provider_id = OLD.id LIMIT 1)
+       OR EXISTS (SELECT 1 FROM inbound_emails WHERE provider_id = OLD.id LIMIT 1)
+       OR EXISTS (SELECT 1 FROM emails WHERE provider_id = OLD.id LIMIT 1)
+       OR EXISTS (SELECT 1 FROM events WHERE provider_id = OLD.id LIMIT 1)
+       OR EXISTS (SELECT 1 FROM sandbox_emails WHERE provider_id = OLD.id LIMIT 1)
+       OR EXISTS (SELECT 1 FROM gmail_sync_state WHERE provider_id = OLD.id LIMIT 1) THEN
+      RAISE EXCEPTION 'Cannot delete provider with mail/source history; deactivate it instead';
+    END IF;
+    RETURN OLD;
+  END;
+  $$;
+  DROP TRIGGER IF EXISTS trg_providers_preserve_mail_history ON providers;
+  CREATE TRIGGER trg_providers_preserve_mail_history
+  BEFORE DELETE ON providers
+  FOR EACH ROW
+  EXECUTE FUNCTION mailery_prevent_provider_delete_with_history();
+
+  INSERT INTO _migrations (id) VALUES (40) ON CONFLICT DO NOTHING;
+  `,
+
   // Feedback table
   `
   CREATE TABLE IF NOT EXISTS feedback (

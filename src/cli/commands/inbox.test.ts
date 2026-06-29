@@ -42,7 +42,7 @@ mock.module("@hasna/connectors", () => ({ runConnectorOperation: mockRun }));
 const mockAutoPull = mock(async () => ({ pulled: 0, ok: true, configured: true }));
 mock.module("../tui/autopull.js", () => ({ autoPull: mockAutoPull }));
 
-const { syncGmailInbox } = await import("../../lib/gmail-sync.js");
+const { syncGmailInbox, registerGmailSource, retireGmailSource } = await import("../../lib/gmail-sync.js");
 const { registerInboxCommands } = await import("./inbox.js");
 const { Command } = await import("commander");
 
@@ -57,6 +57,7 @@ function setupDb() {
   const db = getDatabase();
   const providerId = uuid();
   db.run(`INSERT INTO providers (id, name, type, active) VALUES (?, 'Gmail Test', 'gmail', 1)`, [providerId]);
+  registerGmailSource({ providerId, profile: "gmail-test", status: "live", liveSyncEnabled: true });
   return { db, providerId };
 }
 
@@ -98,7 +99,29 @@ async function runInboxCommand(args: string[]) {
   return { data, out: out.join("\n") };
 }
 
+async function runInboxCommandExpectingExit(args: string[]) {
+  const originalExit = process.exit;
+  const originalError = console.error;
+  const errors: string[] = [];
+  console.error = ((message?: unknown) => { errors.push(String(message ?? "")); }) as typeof console.error;
+  process.exit = ((code?: number) => {
+    throw new Error(`process.exit:${code ?? 0}`);
+  }) as typeof process.exit;
+  try {
+    await runInboxCommand(args);
+    throw new Error("Expected command to exit");
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e), stderr: errors.join("\n") };
+  } finally {
+    process.exit = originalExit;
+    console.error = originalError;
+  }
+}
+
 beforeEach(() => {
+  if (existsSync(TMP_HOME)) rmSync(TMP_HOME, { recursive: true, force: true });
+  mkdirSync(TMP_HOME, { recursive: true });
+  process.env["HOME"] = TMP_HOME;
   mockListMsgs = [];
   mockAutoPull.mockReset();
   mockAutoPull.mockImplementation(async () => ({ pulled: 0, ok: true, configured: true }));
@@ -137,6 +160,7 @@ beforeEach(() => {
 afterEach(() => {
   closeDatabase();
   delete process.env["EMAILS_DB_PATH"];
+  process.exitCode = 0;
   delete process.env["AWS_ACCESS_KEY_ID"];
   delete process.env["AWS_SECRET_ACCESS_KEY"];
   if (origHome !== undefined) process.env["HOME"] = origHome;
@@ -229,6 +253,54 @@ describe("inbox list — listInboundEmails", () => {
     setupDb();
     const emails = listInboundEmails();
     expect(emails).toHaveLength(0);
+  });
+
+  it("exposes source-aware mailbox status, listing, and search through the CLI", async () => {
+    const { db, providerId } = setupDb();
+    storeInboundEmail({
+      provider_id: providerId,
+      message_id: "source-cli-provider",
+      in_reply_to_email_id: null,
+      from_address: "sender@example.com",
+      to_addresses: ["ops@example.com"],
+      cc_addresses: [],
+      subject: "provider needle",
+      text_body: "body",
+      html_body: null,
+      attachments: [],
+      attachment_paths: [],
+      headers: {},
+      raw_size: 1,
+      received_at: "2026-01-02T10:00:00.000Z",
+    }, db);
+    storeInboundEmail({
+      provider_id: null,
+      message_id: "source-cli-legacy",
+      in_reply_to_email_id: null,
+      from_address: "legacy@example.com",
+      to_addresses: ["ops@example.com"],
+      cc_addresses: [],
+      subject: "legacy visible",
+      text_body: "needle body",
+      html_body: null,
+      attachments: [],
+      attachment_paths: [],
+      headers: {},
+      raw_size: 1,
+      received_at: "2026-01-03T10:00:00.000Z",
+    }, db);
+
+    const sources = await runInboxCommand(["inbox", "sources"]);
+    expect((sources.data as Array<{ id: string; badges: string[] }>).find((source) => source.id === "legacy")?.badges).toContain("legacy");
+
+    const mailboxes = await runInboxCommand(["inbox", "mailboxes", "--source", "legacy"]);
+    expect((mailboxes.data as { counts: { inbox: number } }).counts.inbox).toBe(1);
+
+    const legacyList = await runInboxCommand(["inbox", "list", "--source", "legacy"]);
+    expect((legacyList.data as Array<{ subject: string }>).map((email) => email.subject)).toEqual(["legacy visible"]);
+
+    const providerSearch = await runInboxCommand(["inbox", "search", "needle", "--source", `provider:${providerId}`]);
+    expect((providerSearch.data as Array<{ subject: string }>).map((email) => email.subject)).toEqual(["provider needle"]);
   });
 
   it("explains display-name recipients as normalized addresses", async () => {
@@ -575,6 +647,136 @@ describe("inbox search — local filter", () => {
 
     const listCall = mockRun.mock.calls.find((call) => call[0]?.operation === "messages.list");
     expect(listCall?.[0]?.input).toMatchObject({ query: "needle", max: 1000 });
+  });
+
+  it("keeps import-only Gmail searchable locally but blocks remote search", async () => {
+    const { db, providerId } = setupDb();
+    registerGmailSource({ providerId, profile: "gmail-test", status: "import", liveSyncEnabled: false });
+    storeInboundEmail({
+      provider_id: providerId,
+      message_id: "import-local",
+      in_reply_to_email_id: null,
+      from_address: "sender@example.com",
+      to_addresses: ["me@example.com"],
+      cc_addresses: [],
+      subject: "Imported searchable mail",
+      text_body: "contains slice-b needle",
+      html_body: null,
+      attachments: [],
+      attachment_paths: [],
+      headers: {},
+      raw_size: 100,
+      received_at: "2026-06-04T11:29:09.000Z",
+    }, db);
+
+    const local = await runInboxCommand(["inbox", "search", "slice-b"]);
+    expect((local.data as Array<{ subject: string }>).map((email) => email.subject)).toEqual(["Imported searchable mail"]);
+
+    mockRun.mockClear();
+    const remote = await runInboxCommandExpectingExit(["inbox", "search", "slice-b", "--remote", "--provider", providerId]);
+    expect(remote.stderr).toContain("live Gmail access is blocked");
+    expect(mockRun.mock.calls.some((call) => call[0]?.operation === "messages.list")).toBe(false);
+  });
+});
+
+describe("inbox source lifecycle", () => {
+  it("lists and retires Gmail and S3 sources without deleting local mail", async () => {
+    const { db, providerId } = setupDb();
+    const email = storeInboundEmail({
+      provider_id: providerId,
+      message_id: "source-retire-local",
+      in_reply_to_email_id: null,
+      from_address: "sender@example.com",
+      to_addresses: ["me@example.com"],
+      cc_addresses: [],
+      subject: "Source lifecycle local",
+      text_body: "still here",
+      html_body: null,
+      attachments: [],
+      attachment_paths: [],
+      headers: {},
+      raw_size: 100,
+      received_at: "2026-06-04T11:29:09.000Z",
+    }, db);
+
+    await runInboxCommand(["inbox", "source", "add-s3", "--bucket", "mail-bucket", "--prefix", "inbound/example.com/", "--provider", providerId]);
+    const before = await runInboxCommand(["inbox", "source", "list"]);
+    expect((before.data as Array<{ type: string; status: string }>).map((source) => `${source.type}:${source.status}`).sort()).toEqual([
+      "gmail:live",
+      "s3:live",
+    ]);
+
+    const gmailSource = (before.data as Array<{ id: string; type: string }>).find((source) => source.type === "gmail")!;
+    await runInboxCommand(["inbox", "source", "retire", gmailSource.id]);
+    const after = await runInboxCommand(["inbox", "source", "list"]);
+    const gmail = (after.data as Array<{ type: string; status: string; live_sync_enabled: boolean }>).find((source) => source.type === "gmail")!;
+
+    expect(gmail).toMatchObject({ status: "retired", live_sync_enabled: false });
+    expect(getInboundEmail(email.id, db)?.subject).toBe("Source lifecycle local");
+  });
+});
+
+describe("inbox live Gmail gates", () => {
+  it("ignores retired Gmail during refresh autopull wrappers", async () => {
+    const { providerId } = setupDb();
+    retireGmailSource(providerId);
+
+    await runInboxCommand(["inbox", "wait", "me@example.com", "--gmail", "--timeout", "1", "--interval", "1"]);
+
+    expect(mockAutoPull).toHaveBeenCalled();
+    expect(mockAutoPull.mock.calls[0]?.[0]).toMatchObject({ gmail: false });
+  });
+
+  it("does not mirror mark-read to retired Gmail sources", async () => {
+    const { db, providerId } = setupDb();
+    retireGmailSource(providerId, db);
+    const email = storeInboundEmail({
+      provider_id: providerId,
+      message_id: "mirror-retired",
+      in_reply_to_email_id: null,
+      from_address: "sender@example.com",
+      to_addresses: ["me@example.com"],
+      cc_addresses: [],
+      subject: "Mirror retired",
+      text_body: "body",
+      html_body: null,
+      attachments: [],
+      attachment_paths: [],
+      headers: {},
+      raw_size: 100,
+      received_at: "2026-06-04T11:29:09.000Z",
+    }, db);
+
+    await runInboxCommand(["inbox", "mark-read", email.id]);
+
+    expect(getInboundEmail(email.id, db)?.is_read).toBe(true);
+    expect(mockRun.mock.calls.some((call) => call[0]?.operation === "messages.mark-read")).toBe(false);
+  });
+
+  it("refuses replies through import-only Gmail sources", async () => {
+    const { db, providerId } = setupDb();
+    registerGmailSource({ providerId, profile: "gmail-test", status: "import", liveSyncEnabled: false });
+    const email = storeInboundEmail({
+      provider_id: providerId,
+      message_id: "reply-import-only",
+      in_reply_to_email_id: null,
+      from_address: "sender@example.com",
+      to_addresses: ["me@example.com"],
+      cc_addresses: [],
+      subject: "Reply import only",
+      text_body: "body",
+      html_body: null,
+      attachments: [],
+      attachment_paths: [],
+      headers: {},
+      raw_size: 100,
+      received_at: "2026-06-04T11:29:09.000Z",
+    }, db);
+
+    const result = await runInboxCommandExpectingExit(["inbox", "reply", email.id, "--body", "No live send"]);
+
+    expect(result.stderr).toContain("live Gmail access is blocked");
+    expect(mockRun.mock.calls.some((call) => call[0]?.operation === "messages.reply")).toBe(false);
   });
 });
 
@@ -1059,6 +1261,7 @@ describe("inbox sync — syncGmailInbox", () => {
     saveConfig({
       gmail_attachment_storage: "local",
     });
+    registerGmailSource({ providerId, profile: "gmail-test", status: "live", liveSyncEnabled: true });
     mockListMsgs = [{ id: "gmail-att-1", subject: "Attachment Test", from: "a@test.com" }];
 
     const result = await syncGmailInbox({ providerId, db });

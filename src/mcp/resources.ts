@@ -5,6 +5,7 @@ import { listAddressProvisioningByIds, listDomainProvisioningByIds, listReadyAdd
 import { countValue } from "../db/scalars.js";
 import { assessDomainReadiness } from "../lib/domain-readiness.js";
 import { loadConfig } from "../lib/config.js";
+import { listMailboxSources, listMailboxStatus } from "../cli/tui/data.js";
 
 const RECENT_ERROR_LIMIT_PER_COMPONENT = 50;
 const DOMAIN_RESOURCE_LIMIT = 50;
@@ -130,6 +131,20 @@ export async function agentContextResourcePayload(db: Database = getDatabase()):
   };
 }
 
+export function mailboxesResourcePayload(db: Database = getDatabase()): Record<string, unknown> {
+  return {
+    ...listMailboxStatus(undefined, db),
+    cli_equivalent: "mailery inbox mailboxes --json",
+  };
+}
+
+export function sourcesResourcePayload(db: Database = getDatabase()): Record<string, unknown> {
+  return {
+    sources: listMailboxSources({ limit: 100 }, db),
+    cli_equivalent: "mailery inbox sources --json",
+  };
+}
+
 interface FailedDomainProvisioningRow {
   domain: string;
   last_error: string | null;
@@ -239,7 +254,7 @@ export function registerEmailResources(server: McpServer): void {
     "emails://inbox/sync-status",
     {
       title: "Emails Inbox Sync Status",
-      description: "Inbox source status for S3, realtime queue, and Gmail sync.",
+      description: "Inbox source status for S3, realtime queue, and explicit Gmail sources.",
       mimeType: "application/json",
     },
     async () => {
@@ -247,9 +262,37 @@ export function registerEmailResources(server: McpServer): void {
       const status = getEmailSystemStatus();
       return jsonResource("emails://inbox/sync-status", {
         inbox: status.inbox,
+        mailboxes: status.mailboxes,
+        sources: status.sources,
         gmail: status.providers.gmail,
         cli_equivalents: status.cli_equivalents,
       });
+    },
+  );
+
+  server.registerResource(
+    "emails-mailboxes",
+    "emails://mailboxes",
+    {
+      title: "Mailery Mailboxes",
+      description: "Folder counts for the local mailbox view.",
+      mimeType: "application/json",
+    },
+    async () => {
+      return jsonResource("emails://mailboxes", mailboxesResourcePayload());
+    },
+  );
+
+  server.registerResource(
+    "emails-sources",
+    "emails://sources",
+    {
+      title: "Mailery Sources",
+      description: "Ingestion streams with source-aware counts and legacy/orphaned badges.",
+      mimeType: "application/json",
+    },
+    async () => {
+      return jsonResource("emails://sources", sourcesResourcePayload());
     },
   );
 

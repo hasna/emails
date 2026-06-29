@@ -14,7 +14,8 @@ import {
   replyDefaults, sendComposed, listSources, listInboxAddresses, getSettings, setSetting,
   defaultFromAddress, providerIdForSender, listDomainSummaries, mailboxLabel, addressChoiceByAddress,
   listLabelSummaries, toggleMessageLabel, getConversation, labelDisplayName, isGmailCategoryLabel,
-  groupMailboxMessages, isImportantMessage,
+  groupMailboxMessages, isImportantMessage, listMailboxSources, listMailboxStatus, searchMailbox,
+  providerSourceId,
 } from "./data.js";
 import { setConfigValue } from "../../lib/config.js";
 import { mkdtempSync, rmSync } from "fs";
@@ -752,8 +753,8 @@ describe("tui data — Sent folder (Gmail SENT + app-sent)", () => {
   });
 });
 
-describe("tui data — inbox sources (per-inbox switching)", () => {
-  it("lists All inboxes, configured addresses, and observed recipients", () => {
+describe("tui data — mailbox scopes and ingestion sources", () => {
+  it("lists All mailboxes, configured addresses, and observed recipients", () => {
     createAddress({ provider_id: providerId, email: "ops@elyratelier.com" });
     const suspended = createAddress({ provider_id: providerId, email: "paused@elyratelier.com" });
     getDatabase().run("UPDATE addresses SET status = 'suspended' WHERE id = ?", [suspended.id]);
@@ -765,7 +766,7 @@ describe("tui data — inbox sources (per-inbox switching)", () => {
     });
 
     const choices = listInboxAddresses();
-    expect(choices[0]).toMatchObject({ id: "all", label: "All inboxes" });
+    expect(choices[0]).toMatchObject({ id: "all", label: "All mailboxes" });
     expect(choices.some((choice) => choice.address === "ops@elyratelier.com" && choice.configured)).toBe(true);
     expect(choices.some((choice) => choice.address === "paused@elyratelier.com")).toBe(false);
     expect(choices.some((choice) => choice.address === "signup@wobblyrobottaco.com" && choice.observed)).toBe(true);
@@ -1057,7 +1058,7 @@ describe("tui data — inbox sources (per-inbox switching)", () => {
     expect(calls.some((sql) => sql.includes("FROM inbound_recipients"))).toBe(true);
   });
 
-  it("lists All + each active provider + each registered domain", () => {
+  it("lists ingestion sources without treating domains as providers-as-inboxes", () => {
     createDomain(providerId, "elyratelier.com");
     const inactive = createProvider({ name: "inactive", type: "sandbox", api_key: "inactive-secret" }).id;
     updateProvider(inactive, { active: false });
@@ -1075,12 +1076,111 @@ describe("tui data — inbox sources (per-inbox switching)", () => {
 
     const sources = listSources(recordingDb);
 
-    expect(sources[0]).toMatchObject({ id: "all", label: "All Mail" });
+    expect(sources[0]).toMatchObject({ id: "all", label: "All sources" });
     expect(sources.some((s) => s.providerId === providerId)).toBe(true);
     expect(sources.some((s) => s.providerId === inactive)).toBe(false);
-    expect(sources.some((s) => s.domain === "elyratelier.com")).toBe(true);
+    expect(sources.some((s) => s.domain === "elyratelier.com")).toBe(false);
     expect(queries.filter((sql) => sql.includes("FROM providers")).join("\n"))
       .not.toMatch(/\b(api_key|access_key|secret_key|oauth_client_id|oauth_client_secret|oauth_refresh_token|oauth_access_token|oauth_token_expiry)\b/);
+  });
+
+  it("badges legacy and orphaned ingestion sources while keeping their mail visible", () => {
+    const db = getDatabase();
+    const legacy = storeInboundEmail({
+      provider_id: null,
+      message_id: "<legacy-source@example.com>",
+      from_address: "legacy@example.com",
+      to_addresses: ["ops@example.com"],
+      cc_addresses: [],
+      subject: "legacy visible",
+      text_body: "legacy",
+      html_body: null,
+      attachments: [],
+      headers: {},
+      raw_size: 1,
+      received_at: "2026-01-01T10:00:00.000Z",
+    }, db);
+    db.run("PRAGMA foreign_keys = OFF");
+    db.run(
+      `INSERT INTO inbound_emails
+        (id, provider_id, message_id, from_address, to_addresses, cc_addresses, subject, text_body, html_body, attachments_json, attachment_paths, headers_json, raw_size, received_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        "orphaned-source-mail",
+        "missing-provider-id",
+        "<orphaned-source@example.com>",
+        "orphaned@example.com",
+        JSON.stringify(["ops@example.com"]),
+        "[]",
+        "orphaned visible",
+        "orphaned",
+        null,
+        "[]",
+        "[]",
+        "{}",
+        1,
+        "2026-01-02T10:00:00.000Z",
+        "2026-01-02T10:00:00.000Z",
+      ],
+    );
+    db.run("PRAGMA foreign_keys = ON");
+
+    const sources = listMailboxSources(undefined, db);
+    const legacySource = sources.find((source) => source.id === "legacy");
+    const orphanedSource = sources.find((source) => source.id === "orphaned:missing-provider-id");
+
+    expect(legacySource).toMatchObject({ kind: "legacy", badges: ["legacy"], total: 1 });
+    expect(orphanedSource).toMatchObject({ kind: "orphaned", badges: ["orphaned"], total: 1 });
+    expect(listMailbox("inbox", undefined, db).map((message) => message.subject)).toEqual(["orphaned visible", "legacy visible"]);
+    expect(listMailbox("inbox", { source: { sourceId: "legacy" } }, db).map((message) => message.id)).toEqual([legacy.id]);
+    expect(listMailbox("inbox", { source: { sourceId: "orphaned:missing-provider-id" } }, db).map((message) => message.subject)).toEqual(["orphaned visible"]);
+  });
+
+  it("labels inactive Gmail provenance as legacy import rather than live sync", () => {
+    const db = getDatabase();
+    const gmail = createProvider({ name: "Gmail (old)", type: "gmail", active: true }, db);
+    updateProvider(gmail.id, { active: false }, db);
+    storeInboundEmail({
+      provider_id: gmail.id,
+      message_id: "legacy-gmail-visible",
+      from_address: "sender@example.com",
+      to_addresses: ["ops@example.com"],
+      cc_addresses: [],
+      subject: "legacy gmail visible",
+      text_body: "body",
+      html_body: null,
+      attachments: [],
+      headers: {},
+      raw_size: 1,
+      received_at: "2026-01-03T10:00:00.000Z",
+    }, db);
+
+    const sources = listMailboxSources(undefined, db);
+    const source = sources.find((item) => item.providerId === gmail.id);
+
+    expect(source).toMatchObject({
+      label: "Legacy Gmail import: Gmail (old)",
+      kind: "gmail",
+      badges: expect.arrayContaining(["legacy", "inactive", "capability:gmail"]),
+      total: 1,
+    });
+  });
+
+  it("uses the same source-aware folder status for TUI lists and search", () => {
+    const other = createProvider({ name: "other", type: "sandbox", active: true }).id;
+    const db = getDatabase();
+    storeInboundEmail({ provider_id: providerId, message_id: "<status-source@x>", from_address: "a@x.com", to_addresses: ["ops@elyratelier.com"], cc_addresses: [], subject: "status needle", text_body: "b", html_body: null, attachments: [], headers: {}, raw_size: 1, received_at: "2026-01-02T10:00:00.000Z" }, db);
+    storeInboundEmail({ provider_id: other, message_id: "<status-other@x>", from_address: "a@x.com", to_addresses: ["ops@elyratelier.com"], cc_addresses: [], subject: "status other", text_body: "needle", html_body: null, attachments: [], headers: {}, raw_size: 1, received_at: "2026-01-03T10:00:00.000Z" }, db);
+    const source = { sourceId: providerSourceId(providerId) };
+
+    const status = listMailboxStatus({ source }, db);
+    const listed = listMailbox("inbox", { source }, db);
+    const searched = searchMailbox("needle", { mailbox: "inbox", source }, db);
+
+    expect(status.counts.inbox).toBe(1);
+    expect(status.folders.find((folder) => folder.id === "inbox")?.count).toBe(1);
+    expect(listed.map((message) => message.subject)).toEqual(["status needle"]);
+    expect(searched.map((message) => message.subject)).toEqual(["status needle"]);
   });
 
   it("filters a mailbox by provider", () => {

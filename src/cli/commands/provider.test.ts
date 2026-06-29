@@ -1,10 +1,23 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { Command } from "commander";
 import { closeDatabase, getDatabase, resetDatabase } from "../../db/database.js";
 import { createProvider } from "../../db/providers.js";
 import { registerProviderCommands } from "./provider.js";
 
+const mockRunConnectorOperation = mock(async () => ({
+  success: true,
+  stdout: "{}",
+  stderr: "",
+  exitCode: 0,
+  data: {},
+}));
+
+mock.module("@hasna/connectors", () => ({ runConnectorOperation: mockRunConnectorOperation }));
+
 async function runProviderCommand(args: string[]) {
+  const originalLog = console.log;
+  const logs: string[] = [];
+  console.log = ((message?: unknown) => { logs.push(String(message ?? "")); }) as typeof console.log;
   const program = new Command();
   program.exitOverride();
   let data: unknown;
@@ -13,18 +26,34 @@ async function runProviderCommand(args: string[]) {
     data = d;
     out.push(String(formatted ?? ""));
   });
-  await program.parseAsync(["node", "emails", ...args]);
-  return { data, out: out.join("\n") };
+  try {
+    await program.parseAsync(["node", "emails", ...args]);
+    return { data, out: [...logs, ...out].join("\n") };
+  } finally {
+    console.log = originalLog;
+  }
 }
 
 beforeEach(() => {
   process.env["EMAILS_DB_PATH"] = ":memory:";
   resetDatabase();
+  mockRunConnectorOperation.mockClear();
 });
 
 afterEach(() => {
   closeDatabase();
   delete process.env["EMAILS_DB_PATH"];
+});
+
+describe("provider check command", () => {
+  it("does not touch Gmail live auth when the provider has no live source", async () => {
+    createProvider({ name: "Gmail Import", type: "gmail" });
+
+    const result = await runProviderCommand(["provider", "check"]);
+
+    expect(result.out).toContain("skipped (no live Gmail source)");
+    expect(mockRunConnectorOperation).not.toHaveBeenCalled();
+  });
 });
 
 describe("provider list command", () => {

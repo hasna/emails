@@ -82,6 +82,7 @@ export function createMaileryProjectPanel(projectRef: string, options: MaileryPr
   const recentInbound = loadRecentInbound(limit, options.db);
   const provisioningFailures = status.provisioning.domains_failed + status.provisioning.addresses_failed;
   const hasMaileryState = status.providers.total > 0 || status.domains.total > 0 || status.addresses.total > 0 || status.inbox.total > 0;
+  const visibleSources = status.sources.items.filter((source) => source.kind !== "all");
 
   const draft: ProjectPanelInput = {
     schema: SCHEMA_IDS.projectPanel,
@@ -98,14 +99,17 @@ export function createMaileryProjectPanel(projectRef: string, options: MaileryPr
     kind: "mailery",
     title: "Mailery",
     summary: hasMaileryState
-      ? `${status.inbox.unread} unread inbound email${status.inbox.unread === 1 ? "" : "s"} across ${status.providers.active}/${status.providers.total} active provider${status.providers.total === 1 ? "" : "s"}.`
-      : "No Mailery providers, domains, addresses, or inbound emails are configured yet.",
+      ? `${status.inbox.unread} unread inbound email${status.inbox.unread === 1 ? "" : "s"} across ${status.sources.active}/${status.sources.total} ingestion source${status.sources.total === 1 ? "" : "s"}.`
+      : "No Mailery provider credentials, domains, addresses, or inbound emails are configured yet.",
     state: hasMaileryState ? "ready" : "empty",
     generatedAt,
     freshness: status.inbox.latest_received_at ? "fresh" : "unknown",
     metrics: [
-      { id: "providers_total", label: "Providers", value: status.providers.total, status: status.providers.total > 0 ? "good" : "unknown" },
-      { id: "providers_active", label: "Active providers", value: status.providers.active, status: status.providers.active > 0 ? "good" : "warning" },
+      { id: "providers_total", label: "Provider credentials", value: status.providers.total, status: status.providers.total > 0 ? "good" : "unknown" },
+      { id: "providers_active", label: "Active capabilities", value: status.providers.active, status: status.providers.active > 0 ? "good" : "warning" },
+      { id: "sources_total", label: "Ingestion sources", value: status.sources.total, status: status.sources.total > 0 ? "good" : "unknown" },
+      { id: "sources_legacy", label: "Legacy sources", value: status.sources.legacy, status: status.sources.legacy > 0 ? "warning" : "good" },
+      { id: "sources_orphaned", label: "Orphaned sources", value: status.sources.orphaned, status: status.sources.orphaned > 0 ? "critical" : "good" },
       { id: "domains_send_ready", label: "Send-ready domains", value: status.domains.send_ready, status: status.domains.send_ready > 0 ? "good" : "unknown" },
       { id: "domains_receive_ready", label: "Receive-ready domains", value: status.domains.receive_ready, status: status.domains.receive_ready > 0 ? "good" : "unknown" },
       { id: "addresses_verified", label: "Verified addresses", value: status.addresses.verified, status: status.addresses.verified > 0 ? "good" : "unknown" },
@@ -123,6 +127,7 @@ export function createMaileryProjectPanel(projectRef: string, options: MaileryPr
       timestamp: emailTimestamp(email.received_at),
       resourceRefs: [inboundEmailResource(email)],
       metadata: {
+        source_id: email.provider_id ? `provider:${email.provider_id}` : "legacy",
         provider_id: email.provider_id,
         message_id: email.message_id,
         thread_id: email.thread_id,
@@ -138,14 +143,14 @@ export function createMaileryProjectPanel(projectRef: string, options: MaileryPr
     ],
     resourceRefs: [
       projectResource(projectId, projectRef),
-      ...status.providers.gmail.slice(0, limit).map((provider) => ({
+      ...visibleSources.slice(0, limit).map((source) => ({
         kind: "integration" as const,
-        id: provider.id,
-        name: provider.name,
-        uri: `mailery://providers/${provider.id}`,
-        externalId: provider.id,
+        id: source.id,
+        name: source.label,
+        uri: `mailery://sources/${encodeURIComponent(source.id)}`,
+        externalId: source.id,
         sourcePackage: SOURCE_PACKAGE,
-        tags: ["gmail"],
+        tags: [source.kind, ...source.badges],
       })),
     ],
     renderFragment: {
@@ -153,7 +158,7 @@ export function createMaileryProjectPanel(projectRef: string, options: MaileryPr
       title: "Mailery",
       spec: {
         component: "project.mailery.summary",
-        metrics: ["providers_active", "inbox_unread", "domains_send_ready", "addresses_ready_to_receive", "provisioning_failures"],
+        metrics: ["providers_active", "sources_total", "inbox_unread", "domains_send_ready", "addresses_ready_to_receive", "provisioning_failures"],
         itemLimit: limit,
       },
     },

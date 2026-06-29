@@ -53,7 +53,7 @@ Cloudflare and publish records via `cloudflare-dns.ts` (§6, T-E2).
   - `ses-s3` — SES receipt rule → S3 → SQLite. The only **true mailbox** (full raw message stored). Default.
   - `cf-routing` — Cloudflare Email Routing forward to a destination (e.g. a Gmail) or Worker. Free, no stored body unless a Worker persists it.
   - `resend-webhook` — Resend inbound via `email.received` webhook → our HTTP server stores it.
-- **No IMAP/POP mailbox exists at any provider** — our SQLite + S3 IS the mailbox. Document this clearly so nobody expects "direct access."
+- **No IMAP/POP mailbox exists at any provider** — providers are credentials/capabilities, sources ingest mail, and SQLite/S3-backed local storage is the user-visible mailbox. Document this clearly so nobody expects "direct access."
 
 ## 4. Architecture — the provisioning state machine
 

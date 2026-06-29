@@ -71,6 +71,9 @@ export function routeModulesFor(path: string): readonly RouteKey[] {
   if (
     pathStartsWithAny(path, [
       "/api/inbound",
+      "/api/mailbox",
+      "/api/mailboxes",
+      "/api/sources",
       "/api/doctor",
       "/api/pull",
       "/api/digest",

@@ -125,6 +125,20 @@ describe("MCP CLI equivalents", () => {
       .toBe("mailery inbox links abc123 --all --json");
   });
 
+  it("includes mailbox source and folder commands", () => {
+    expect(cliEquivalentForTool("list_mailbox_sources", { search: "legacy", limit: 5 }))
+      .toBe("mailery inbox sources --search legacy --limit 5 --json");
+    expect(cliEquivalentForTool("list_mailboxes", { source_id: "legacy" }))
+      .toBe("mailery inbox mailboxes --source legacy --json");
+    expect(cliEquivalentForTool("search_mailbox", {
+      query: "invoice",
+      mailbox: "sent",
+      source_id: "provider:abc",
+      limit: 2,
+      offset: 1,
+    })).toBe("mailery inbox search invoice --folder sent --source provider:abc --limit 2 --offset 1 --json");
+  });
+
   it("includes inbound attachment commands", () => {
     expect(cliEquivalentForTool("get_attachment", { email_id: "abc123", filename: "invoice.pdf" }))
       .toBe("mailery inbox attachment abc123 --filename invoice.pdf --json");

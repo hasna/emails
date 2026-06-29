@@ -131,19 +131,22 @@ the raw MIME object, metadata object, and any archived attachments.
 
 ## Initial Full Sync
 
-Use an explicit AWS profile for production runs:
+Use explicit Gmail sources and an explicit AWS profile for production runs. The
+source registration is a deliberate step; sync does not create Gmail providers
+or live sources automatically.
 
 ```bash
+emails inbox source add-gmail --provider "Gmail (<profile>)" --profile <profile>
+
 AWS_PROFILE=hasna-xyz-infra AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1 emails inbox sync \
-  --all-profiles \
+  --source <gmail-source-id> \
   --all \
   --archive-s3 hasna-xyz-opensource-emails-prod \
   --label INBOX \
   --limit 100
 ```
 
-This discovers Gmail connector profiles via `connectors` and creates one active
-`Gmail (<profile>)` provider per profile in `emails`.
+Repeat the source registration and sync command per intended live Gmail source.
 
 ## Incremental Sync
 
@@ -151,7 +154,7 @@ Run the same command without `--all` for normal scheduled batches:
 
 ```bash
 AWS_PROFILE=hasna-xyz-infra AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1 emails inbox sync \
-  --all-profiles \
+  --source <gmail-source-id> \
   --history \
   --archive-s3 hasna-xyz-opensource-emails-prod \
   --label INBOX \

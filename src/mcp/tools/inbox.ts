@@ -9,6 +9,9 @@ const waitTimeoutSchema = z.number().int().positive().max(MAX_MCP_WAIT_TIMEOUT_S
 const waitIntervalSchema = z.number().int().positive().max(MAX_MCP_WAIT_INTERVAL_SECONDS).optional();
 
 type InboxToolName =
+  | "list_mailboxes"
+  | "list_mailbox_sources"
+  | "search_mailbox"
   | "list_inbound_emails"
   | "get_latest_inbound_email"
   | "wait_for_email"
@@ -38,8 +41,47 @@ function handler(name: InboxToolName) {
 
 export function registerInboxTools(server: McpServer): void {
   server.tool(
+    "list_mailboxes",
+    "List folder counts for a mailbox scope, optionally filtered by ingestion source.",
+    {
+      source_id: z.string().optional().describe("Ingestion source ID from list_mailbox_sources, e.g. provider:<id>, s3:<bucket>, legacy, or orphaned:<id>"),
+      provider_id: z.string().optional().describe("Credential/capability ID used as a provenance filter"),
+      address: z.string().optional().describe("Mailbox scope: exact recipient/sender address"),
+      domain: z.string().optional().describe("Mailbox scope: recipient/sender domain"),
+    },
+    handler("list_mailboxes"),
+  );
+
+  server.tool(
+    "list_mailbox_sources",
+    "List ingestion streams with counts and legacy/orphaned badges.",
+    {
+      search: z.string().optional().describe("Filter sources by label, ID, kind, provider, bucket, or badge"),
+      limit: z.number().int().positive().max(MAX_MCP_INBOX_LIMIT).optional().describe("Max sources (default 100, max 1000)"),
+    },
+    handler("list_mailbox_sources"),
+  );
+
+  server.tool(
+    "search_mailbox",
+    "Search a mailbox folder locally, optionally filtered by ingestion source.",
+    {
+      query: z.string().describe("Search term to match against subject, sender, recipient, or snippet"),
+      mailbox: z.enum(["inbox", "unread", "starred", "sent", "archived", "spam", "trash"]).optional().describe("Folder to search (default inbox)"),
+      source_id: z.string().optional().describe("Ingestion source ID from list_mailbox_sources"),
+      provider_id: z.string().optional().describe("Credential/capability ID used as a provenance filter"),
+      address: z.string().optional().describe("Mailbox scope: exact recipient/sender address"),
+      domain: z.string().optional().describe("Mailbox scope: recipient/sender domain"),
+      label: z.string().optional().describe("Only mail carrying this label"),
+      limit: z.number().int().positive().max(MAX_MCP_INBOX_LIMIT).optional().describe("Max results (default 20, max 1000)"),
+      offset: z.number().int().nonnegative().optional().describe("Pagination offset (default 0)"),
+    },
+    handler("search_mailbox"),
+  );
+
+  server.tool(
     "list_inbound_emails",
-    "List received inbound emails",
+    "List received inbound emails from local storage. Use list_mailboxes/list_mailbox_sources for folder and source status.",
     {
       provider_id: z.string().optional().describe("Filter by provider ID"),
       since: z.string().optional().describe("ISO 8601 date - only return emails received after this time"),
@@ -235,7 +277,7 @@ export function registerInboxTools(server: McpServer): void {
 
   server.tool(
     "get_inbox_sync_status",
-    "Get source-aware inbox sync status for S3, realtime queue, and Gmail providers.",
+    "Get source-aware mailbox sync status for S3 ingestion, realtime queue, and Gmail provider credentials.",
     {},
     handler("get_inbox_sync_status"),
   );
