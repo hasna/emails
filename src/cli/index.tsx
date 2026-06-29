@@ -63,9 +63,15 @@ async function registerCommandsForArgs(program: Command, output: OutputFn, args:
 
 async function registerOptionalEventsCommands(program: Command): Promise<void> {
   try {
-    const importer = new Function("specifier", "return import(specifier)") as (specifier: string) => Promise<{ registerEventsCommands?: (program: Command, opts: { source: string }) => void }>;
+    const importer = new Function("specifier", "return import(specifier)") as (specifier: string) => Promise<{
+      registerChannelCommands?: (program: Command, opts: { source: string; channelsCommandName?: string }) => void;
+      registerEventsCommands?: (program: Command, opts: { source: string }) => void;
+    }>;
     const events = await importer("@hasna/events/commander");
     events.registerEventsCommands?.(program, { source: "mailery" });
+    if (!program.commands.some((command) => command.name() === "webhooks")) {
+      events.registerChannelCommands?.(program, { source: "mailery", channelsCommandName: "webhooks" });
+    }
   } catch {
     // The events integration is optional; keep the Mailery CLI usable when the
     // companion package is not installed in a global/npm environment.
