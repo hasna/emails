@@ -1,6 +1,6 @@
 {
   "name": "@hasna/mailery",
-  "version": "0.6.60",
+  "version": "0.6.61",
   "description": "Mailery email management CLI + MCP server + dashboard for Resend, AWS SES, and Gmail",
   "type": "module",
   "repository": {
@@ -50,8 +50,10 @@
     "build:pg-migrations": "bun build src/db/pg-migrations.ts --outdir dist/db --target bun --packages external --splitting",
     "build:types": "tsc --emitDeclarationOnly --outDir dist",
     "test": "bun test",
-    "prepack": "bun run build",
-    "prepublishOnly": "bun test && bun run build",
+    "no-cloud:source": "bun test src/no-cloud-boundary.test.ts",
+    "no-cloud:pack": "node scripts/no-cloud-artifact-scan.mjs",
+    "prepack": "bun run build && bun run no-cloud:source && bun run no-cloud:pack",
+    "prepublishOnly": "EMAILS_DB_PATH=:memory: bun test && bun run build && bun run no-cloud:pack",
     "dev:cli": "bun run src/cli/index.tsx",
     "dev:mcp": "bun run src/mcp/index.ts",
     "dev:serve": "bun run src/server/index.ts",

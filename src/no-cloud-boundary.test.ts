@@ -6,7 +6,13 @@ const root = join(import.meta.dir, "..");
 const PRIVATE_CLOUD_PATTERNS = [
   /@hasna\/cloud\b/,
   /@hasna\/wallets\b/,
-  /\bopen-cloud\b/,
+  new RegExp(`\\b${["open", "cloud"].join("-")}\\b`),
+  new RegExp(`\\b${["cloud", "mcp"].join("-")}\\b`),
+  new RegExp(`\\b${["register", "Cloud", "Commands"].join("")}\\b`),
+  new RegExp(`${["HASNA", "CLOUD", ""].join("_")}`),
+  new RegExp(`${["HASNA", "RDS"].join("_")}`),
+  new RegExp(`\\b${["cloud", "setup"].join(" ")}\\b`),
+  new RegExp(`\\b${["cloud", "sync"].join(" ")}\\b`),
 ] as const;
 
 const SOURCE_ROOTS = [

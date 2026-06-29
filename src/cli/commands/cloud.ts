@@ -68,7 +68,7 @@ function formatStatus(data: {
   ].join("\n");
 }
 
-export function registerCloudCommands(program: Command, output: Output): void {
+export function registerMaileryPlatformCommands(program: Command, output: Output): void {
   const cloud = program.command("cloud").description("Use the paid Mailery Cloud platform without changing local-first defaults");
 
   cloud
