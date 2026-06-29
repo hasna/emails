@@ -6,7 +6,7 @@
  * user-visible scopes, and folders are inbox/unread/sent/etc.
  */
 import type { Database } from "../../db/database.js";
-import { backfillLegacyS3RawUrls, getDatabase, resolvePartialIdOrThrow, uuid } from "../../db/database.js";
+import { getDatabase, resolvePartialIdOrThrow, uuid } from "../../db/database.js";
 import { sqlEmailAddress, sqlEmailDomain } from "../../db/email-address-sql.js";
 import { parseJsonArray } from "../../db/json.js";
 import { countValue } from "../../db/scalars.js";
@@ -26,6 +26,7 @@ import { findAddressesByEmail, getPreferredActiveAddressEmail, listActiveAddress
 import { listAddressProvisioningByIds, listDomainProvisioningByIds, listReadyAddressCountsByDomains } from "../../db/provisioning.js";
 import { getInboundBuckets, loadConfig, saveConfig } from "../../lib/config.js";
 import { assessDomainReadiness } from "../../lib/domain-readiness.js";
+import { listS3Sources } from "../../lib/s3-sync.js";
 import { buildThreadingHeaders, generateMessageId, parseReferences } from "../../lib/threading.js";
 import { marked } from "marked";
 import { normalizeThemeMode, type TuiThemeMode } from "./theme.js";
@@ -185,6 +186,8 @@ export interface MailboxSource {
   s3Bucket?: string;
   /** Legacy/local mail with no provider/capability provenance. */
   legacy?: boolean;
+  /** Unknown source ID that should match no mail. */
+  unknown?: boolean;
 }
 
 interface SqlClause { sql: string; params: string[] }
@@ -208,7 +211,11 @@ function normalizeSourceId(value: string | undefined): MailboxSource {
     const configured = getInboundBuckets().find((candidate) => candidate.bucket === bucket);
     return { sourceId: raw, s3Bucket: bucket, providerId: configured?.providerId };
   }
-  return { sourceId: raw };
+  const s3Source = listS3Sources().find((candidate) => candidate.id === raw);
+  if (s3Source) {
+    return { sourceId: raw, s3Bucket: s3Source.bucket, providerId: s3Source.provider_id };
+  }
+  return { sourceId: raw, unknown: true };
 }
 
 export function mailboxSourceFromRef(input?: MailboxSource): MailboxSource | undefined {
@@ -229,11 +236,22 @@ function inboundSourceClause(src?: MailboxSource): SqlClause {
   const normalized = mailboxSourceFromRef(src);
   const params: string[] = [];
   let sql = "";
+  if (normalized?.unknown) sql += " AND 0 = 1";
   if (normalized?.providerId) { sql += " AND provider_id = ?"; params.push(normalized.providerId); }
   if (normalized?.legacy) sql += " AND provider_id IS NULL";
   if (normalized?.s3Bucket) {
-    sql += " AND raw_s3_url LIKE ?";
-    params.push(`s3://${normalized.s3Bucket}/%`);
+    if (normalized.providerId) {
+      sql += ` AND (raw_s3_url LIKE ? OR (
+        (raw_s3_url IS NULL OR raw_s3_url = '')
+        AND message_id IS NOT NULL
+        AND message_id != ''
+        AND message_id NOT LIKE 's3://%'
+      ))`;
+      params.push(`s3://${normalized.s3Bucket}/%`);
+    } else {
+      sql += " AND raw_s3_url LIKE ?";
+      params.push(`s3://${normalized.s3Bucket}/%`);
+    }
   }
   return { sql, params };
 }
@@ -242,6 +260,7 @@ function appSourceClause(src?: MailboxSource): SqlClause {
   const normalized = mailboxSourceFromRef(src);
   const params: string[] = [];
   const where: string[] = [];
+  if (normalized?.unknown) where.push("0 = 1");
   if (normalized?.s3Bucket) where.push("0 = 1");
   if (normalized?.providerId) { where.push("e.provider_id = ?"); params.push(normalized.providerId); }
   if (normalized?.legacy) where.push("e.provider_id IS NULL");
@@ -402,7 +421,7 @@ export interface MailboxCounts {
 }
 
 function hasSourceFilter(source: MailboxSource | undefined): boolean {
-  return !!(source?.sourceId || source?.providerId || source?.domain || source?.address || source?.s3Bucket || source?.legacy);
+  return !!(source?.sourceId || source?.providerId || source?.domain || source?.address || source?.s3Bucket || source?.legacy || source?.unknown);
 }
 
 function unscopedMailboxCounts(db: Database): MailboxCounts {
@@ -610,9 +629,7 @@ export function listMailboxSources(optsOrDb?: ListMailboxSourcesOptions | Databa
   const d = isDatabase(optsOrDb) ? optsOrDb : maybeDb || getDatabase();
   const opts = isDatabase(optsOrDb) ? undefined : optsOrDb;
   const inboundBuckets = getInboundBuckets();
-  if (inboundBuckets.length > 0) {
-    backfillLegacyS3RawUrls(inboundBuckets.map((bucket) => ({ bucket: bucket.bucket, providerId: bucket.providerId })), d);
-  }
+  const s3Sources = listS3Sources();
   const sources: MailboxSourceSummary[] = [
     sourceSummary({
       id: "all",
@@ -660,6 +677,22 @@ export function listMailboxSources(optsOrDb?: ListMailboxSourcesOptions | Databa
       region: bucket.region,
       badges: ["configured", ...(bucket.providerId ? [] : ["legacy"])],
     }, { sourceId: id, providerId: bucket.providerId }, d));
+  }
+
+  const listedS3Ids = new Set(inboundBuckets.map((bucket) => s3SourceId(bucket.bucket)));
+  for (const source of s3Sources) {
+    const id = source.id;
+    if (listedS3Ids.has(id)) continue;
+    listedS3Ids.add(id);
+    sources.push(sourceSummary({
+      id,
+      label: `S3 ingestion: ${source.bucket}${source.prefix ? `/${source.prefix}` : ""}`,
+      kind: "s3",
+      providerId: source.provider_id,
+      bucket: source.bucket,
+      region: source.region,
+      badges: [source.status, source.live_sync_enabled ? "live" : "disabled"],
+    }, { sourceId: id, providerId: source.provider_id, s3Bucket: source.bucket }, d));
   }
 
   const legacySource = sourceSummary({

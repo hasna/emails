@@ -18,6 +18,7 @@ import {
   providerSourceId,
 } from "./data.js";
 import { setConfigValue } from "../../lib/config.js";
+import { registerS3Source } from "../../lib/s3-sync.js";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -1242,6 +1243,70 @@ describe("tui data — mailbox scopes and ingestion sources", () => {
     expect(listMailbox("inbox", { source: { sourceId } }, db).map((message) => message.subject)).toEqual(["old s3 row"]);
     expect(listMailbox("inbox", { source: { sourceId: providerSourceId(providerId) } }, db).map((message) => message.subject)).toEqual(["old s3 row"]);
     expect(listMailbox("inbox", { source: { sourceId: providerSourceId(otherProvider) } }, db).map((message) => message.subject)).toEqual(["unmapped s3 row"]);
+  });
+
+  it("lists registered S3 lifecycle sources without requiring legacy bucket config", () => {
+    const db = getDatabase();
+    const source = registerS3Source({
+      id: "s3-registered-source",
+      bucket: "registered-s3-bucket",
+      prefix: "inbound/",
+      region: "eu-west-1",
+      providerId,
+      status: "live",
+      liveSyncEnabled: true,
+    });
+    storeInboundEmail({
+      provider_id: providerId,
+      message_id: "s3://registered-s3-bucket/inbound/example.com/msg001",
+      raw_s3_url: "s3://registered-s3-bucket/inbound/example.com/msg001",
+      from_address: "sender@example.com",
+      to_addresses: ["ops@example.com"],
+      cc_addresses: [],
+      subject: "registered s3 row",
+      text_body: "body",
+      html_body: null,
+      attachments: [],
+      headers: {},
+      raw_size: 1,
+      received_at: "2026-01-04T12:00:00.000Z",
+    }, db);
+
+    const listed = listMailboxSources({ search: "registered-s3-bucket" }, db);
+    const summary = listed.find((item) => item.id === source.id);
+
+    expect(summary).toMatchObject({
+      kind: "s3",
+      providerId,
+      bucket: "registered-s3-bucket",
+      badges: expect.arrayContaining(["live"]),
+      total: 1,
+    });
+    expect(listMailbox("inbox", { source: { sourceId: source.id } }, db).map((message) => message.subject)).toEqual(["registered s3 row"]);
+  });
+
+  it("treats unknown lifecycle source IDs as an empty source filter", () => {
+    const db = getDatabase();
+    storeInboundEmail({
+      provider_id: providerId,
+      message_id: "<known-source@example.com>",
+      from_address: "sender@example.com",
+      to_addresses: ["ops@example.com"],
+      cc_addresses: [],
+      subject: "known source row",
+      text_body: "body",
+      html_body: null,
+      attachments: [],
+      headers: {},
+      raw_size: 1,
+      received_at: "2026-01-04T13:00:00.000Z",
+    }, db);
+
+    const source = { sourceId: "missing-source-id" };
+
+    expect(listMailbox("inbox", { source }, db)).toEqual([]);
+    expect(searchMailbox("known", { mailbox: "inbox", source }, db)).toEqual([]);
+    expect(listMailboxStatus({ source }, db).counts.inbox).toBe(0);
   });
 
   it("uses the same source-aware folder status for TUI lists and search", () => {

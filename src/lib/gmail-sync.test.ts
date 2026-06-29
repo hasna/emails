@@ -449,6 +449,35 @@ describe("syncGmailInbox", () => {
     expect(mockRun.mock.calls.some((call) => call[0]?.operation === "messages.list")).toBe(false);
   });
 
+  it("blocks inactive Gmail providers even when a live source exists", async () => {
+    const { db, providerId } = setupDb();
+    db.run("UPDATE providers SET active = 0 WHERE id = ?", [providerId]);
+    setMock([{ id: "inactive-msg" }]);
+
+    const result = await syncGmailInbox({ providerId, db });
+
+    expect(result.synced).toBe(0);
+    expect(result.errors[0]).toContain("inactive; live Gmail access is blocked");
+    expect(mockRun.mock.calls.some((call) => call[0]?.operation === "messages.list")).toBe(false);
+  });
+
+  it("does not collapse mixed import and live Gmail sources into provider-only live sync", async () => {
+    process.env["EMAILS_DB_PATH"] = ":memory:";
+    resetDatabase();
+    const db = getDatabase();
+    const providerId = uuid();
+    db.run(`INSERT INTO providers (id, name, type, active) VALUES (?, 'Gmail Mixed', 'gmail', 1)`, [providerId]);
+    registerGmailSource({ id: "gmail-import-source", providerId, profile: "historical", status: "import", liveSyncEnabled: false });
+    registerGmailSource({ id: "gmail-live-source", providerId, profile: "current", status: "live", liveSyncEnabled: true });
+    setMock([{ id: "mixed-msg" }]);
+
+    const result = await syncGmailInbox({ providerId, db });
+
+    expect(result.synced).toBe(0);
+    expect(result.errors[0]).toContain("Ambiguous Gmail source");
+    expect(mockRun.mock.calls.some((call) => call[0]?.operation === "messages.list")).toBe(false);
+  });
+
   it("blocks retired Gmail sources while keeping local provenance intact", async () => {
     const { db, providerId } = setupDb();
     retireGmailSource(providerId, db);

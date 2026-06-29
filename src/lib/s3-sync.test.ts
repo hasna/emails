@@ -134,6 +134,15 @@ describe("syncS3Inbox — empty bucket", () => {
     expect(mockSend).not.toHaveBeenCalled();
   });
 
+  it("blocks direct bucket sync when the bucket is only registered as retired", async () => {
+    const { db, providerId } = setupDb();
+    const source = registerS3Source({ bucket: "retired-bucket", prefix: "inbound/", providerId, status: "live", liveSyncEnabled: true });
+    retireS3Source(source.id);
+
+    await expect(syncS3Inbox({ bucket: "retired-bucket", db, providerId })).rejects.toThrow(/S3 sync is blocked/);
+    expect(mockSend).not.toHaveBeenCalled();
+  });
+
   it("rejects ambiguous S3 source prefixes instead of choosing the first match", async () => {
     const { db, providerId } = setupDb();
     registerS3Source({ id: "s3-shared-a", bucket: "bucket-a", prefix: "inbound/a/", providerId, status: "live", liveSyncEnabled: true });
@@ -382,8 +391,17 @@ describe("syncS3Inbox — with objects", () => {
     const result = await syncS3Inbox({ bucket: "test-bucket", db, providerId });
     expect(result.synced).toBe(0);
     expect(result.skipped).toBe(1);
-    const row = db.query("SELECT provider_id FROM inbound_emails WHERE raw_s3_url = ?").get("s3://test-bucket/inbound/example.com/msg001") as { provider_id: string };
+    const row = db.query("SELECT id, mail_message_id, provider_id, primary_mailbox_source_id FROM inbound_emails WHERE raw_s3_url = ?").get("s3://test-bucket/inbound/example.com/msg001") as {
+      id: string;
+      mail_message_id: string;
+      provider_id: string;
+      primary_mailbox_source_id: string;
+    };
     expect(row.provider_id).toBe(providerId);
+    expect(row.mail_message_id).toBe(`msg:inbound:${row.id}`);
+    expect(row.primary_mailbox_source_id).toContain(`:${providerId}:ses_s3`);
+    const state = db.query("SELECT source_id FROM mailbox_message_state WHERE mail_message_id = ?").get(row.mail_message_id) as { source_id: string };
+    expect(state.source_id).toBe(row.primary_mailbox_source_id);
   });
 
   it("handles list error gracefully", async () => {

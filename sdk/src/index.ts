@@ -1,6 +1,6 @@
 /**
- * @hasna/emails-sdk
- * Zero-dependency TypeScript client for the @hasna/emails REST API.
+ * @hasna/mailery-sdk
+ * Zero-dependency TypeScript client for the @hasna/mailery REST API.
  * Works in Node.js, Bun, Deno, and browser environments.
  */
 
@@ -219,6 +219,67 @@ export interface ListInboundEmailParams extends PageParams {
   unread?: boolean;
   read?: boolean;
   archived?: boolean;
+}
+
+export interface MailboxSourceSummary {
+  id: string;
+  label: string;
+  kind: string;
+  providerId?: string | null;
+  providerName?: string | null;
+  providerType?: string | null;
+  bucket?: string | null;
+  region?: string | null;
+  badges: string[];
+  counts: Record<string, number>;
+  total: number;
+  unread: number;
+  latestReceivedAt: string | null;
+}
+
+export interface MailboxStatus {
+  source: unknown | null;
+  inbox: number;
+  unread: number;
+  starred: number;
+  sent: number;
+  archived: number;
+  spam: number;
+  trash: number;
+}
+
+export interface MailboxMessage {
+  id: string;
+  kind: string;
+  from: string;
+  to: string[];
+  subject: string;
+  date: string;
+  isRead: boolean;
+  isStarred: boolean;
+  labels: string[];
+  threadId: string | null;
+  providerThreadId: string | null;
+  snippet: string | null;
+  attachments: number;
+}
+
+export interface ListSourcesParams extends PageParams {
+  search?: string;
+}
+
+export interface MailboxQueryParams extends PageParams {
+  source_id?: string;
+  search?: string;
+  label?: string;
+  sort?: "newest" | "oldest";
+}
+
+export interface MailboxSearchParams extends PageParams {
+  source_id?: string;
+  folder?: string;
+  label?: string;
+  sort?: "newest" | "oldest";
 }
 
 export interface WarmingSchedule {
@@ -642,6 +703,23 @@ export class EmailsClient {
 
   async clearInboundEmails(providerId?: string): Promise<void> {
     await this.request(`/api/inbound${qs({ provider_id: providerId })}`, { method: "DELETE" });
+  }
+
+  async listSources(params?: ListSourcesParams): Promise<MailboxSourceSummary[]> {
+    const payload = await this.request<{ sources: MailboxSourceSummary[] }>(`/api/sources${qs(params)}`);
+    return payload.sources;
+  }
+
+  async listMailboxes(sourceId?: string): Promise<MailboxStatus> {
+    return this.request(`/api/mailboxes${qs({ source_id: sourceId })}`);
+  }
+
+  async listMailbox(folder: string, params?: MailboxQueryParams): Promise<{ items: MailboxMessage[]; truncated: boolean; limit: number; offset: number }> {
+    return this.request(`/api/mailbox/${pathSegment(folder)}${qs(params)}`);
+  }
+
+  async searchMailbox(query: string, params?: MailboxSearchParams): Promise<{ items: MailboxMessage[]; truncated: boolean; limit: number; offset: number }> {
+    return this.request(`/api/mailbox/search${qs({ q: query, ...params })}`);
   }
 
   // ── Warming ──

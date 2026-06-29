@@ -13,7 +13,7 @@
 import type { S3Client } from "@aws-sdk/client-s3";
 import { storeInboundEmail, updateAttachmentPaths } from "../db/inbound.js";
 import type { AttachmentPath } from "../db/inbound.js";
-import { backfillLegacyS3RawUrls, getDatabase, getDataDir, resolvePartialId } from "../db/database.js";
+import { backfillLegacyS3RawUrls, getDatabase, getDataDir, rebuildInboundCanonicalState, resolvePartialId } from "../db/database.js";
 import { loadConfig, saveConfig, getGmailSyncConfig } from "./config.js";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -260,6 +260,12 @@ function resolveS3SourceForSync(opts: S3SyncOptions): S3SyncOptions {
   if (source && !sourceIsLive(source) && !opts.forceSource) {
     throw new Error(`S3 source ${source.id} is ${source.status}${source.live_sync_enabled ? "" : " with live sync disabled"}; S3 sync is blocked.`);
   }
+  if (!source && opts.bucket && !opts.forceSource) {
+    const bucketSources = sources.filter((candidate) => candidate.bucket === opts.bucket);
+    if (bucketSources.length > 0 && !bucketSources.some(sourceIsLive)) {
+      throw new Error(`S3 bucket ${opts.bucket} only has retired or disabled sources; S3 sync is blocked.`);
+    }
+  }
   if (!source) return { ...opts, prefix };
   return {
     ...opts,
@@ -345,10 +351,11 @@ function getExistingS3Urls(db: Database, rawS3Urls: string[]): Set<string> {
 
 function tagExistingS3Provider(db: Database, rawS3Url: string, providerId: string | null): void {
   if (!providerId) return;
-  db.run(
+  const result = db.run(
     "UPDATE inbound_emails SET provider_id = ? WHERE raw_s3_url = ? AND provider_id IS NULL",
     [providerId, rawS3Url],
   );
+  if (result.changes > 0) rebuildInboundCanonicalState(db);
 }
 
 async function processS3Object(

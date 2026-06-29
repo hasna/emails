@@ -327,6 +327,7 @@ function assertGmailProvider(providerId: string, db: Database): void {
   const provider = getProvider(providerId, db);
   if (!provider) throw new Error(`Gmail provider not found: ${providerId}`);
   if (provider.type !== "gmail") throw new Error(`Provider ${providerId} is ${provider.type}, not gmail`);
+  if (!provider.active) throw new Error(`Gmail provider ${providerId} is inactive; live Gmail access is blocked.`);
 }
 
 function findUniqueGmailSource(
@@ -360,8 +361,6 @@ function chooseSource(
   if (opts.sourceId) return findSourceById(sources, opts.sourceId);
   const matches = sources.filter((source) => sourceMatchesProvider(source, opts.providerId) && sourceMatchesProfile(source, opts.profile));
   if (matches.length === 1) return matches[0]!;
-  const liveMatches = matches.filter(sourceIsLive);
-  if (liveMatches.length === 1) return liveMatches[0]!;
   if (matches.length > 1) {
     const refs = matches.map((source) => `${source.id}(${source.status}${source.live_sync_enabled ? "" : ",disabled"})`).join(", ");
     throw new Error(`Ambiguous Gmail source; choose one with --source. Matches: ${refs}`);

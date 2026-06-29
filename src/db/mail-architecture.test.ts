@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { Database } from "bun:sqlite";
-import { backfillLegacyS3RawUrls, closeDatabase, ensureMailArchitecture, getDatabase, resetDatabase } from "./database.js";
+import { backfillLegacyS3RawUrls, closeDatabase, ensureMailArchitecture, getDatabase, rebuildInboundCanonicalState, resetDatabase } from "./database.js";
 import { createProvider, deleteProvider, getProvider } from "./providers.js";
 import { createMailbox, getMailboxFolderByRole, listMailboxes } from "./mailboxes.js";
 import { createMailboxSource, getMailboxSource, listMailboxSources } from "./sources.js";
@@ -521,6 +521,108 @@ describe("mail architecture data model", () => {
     expect(listMailboxMessageStates(mailbox.id, db).map((state) => state.id).sort()).toEqual([first.id, otherSource.id].sort());
   });
 
+  it("backfills orphan inbound provider ids as legacy sources without FK failures", () => {
+    const db = new Database(":memory:");
+    try {
+      db.exec(`
+        PRAGMA foreign_keys = ON;
+        CREATE TABLE _migrations (id INTEGER PRIMARY KEY);
+        CREATE TABLE owners (id TEXT PRIMARY KEY);
+        CREATE TABLE providers (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          type TEXT NOT NULL,
+          region TEXT,
+          active INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT,
+          updated_at TEXT
+        );
+        CREATE TABLE inbound_emails (
+          id TEXT PRIMARY KEY,
+          provider_id TEXT,
+          message_id TEXT,
+          provider_thread_id TEXT,
+          label_ids_json TEXT NOT NULL DEFAULT '[]',
+          raw_s3_url TEXT,
+          metadata_s3_url TEXT,
+          from_address TEXT NOT NULL,
+          to_addresses TEXT NOT NULL DEFAULT '[]',
+          cc_addresses TEXT NOT NULL DEFAULT '[]',
+          subject TEXT NOT NULL DEFAULT '',
+          text_body TEXT,
+          html_body TEXT,
+          attachments_json TEXT NOT NULL DEFAULT '[]',
+          attachment_paths TEXT NOT NULL DEFAULT '[]',
+          headers_json TEXT NOT NULL DEFAULT '{}',
+          raw_size INTEGER DEFAULT 0,
+          in_reply_to_email_id TEXT,
+          thread_id TEXT,
+          is_read INTEGER NOT NULL DEFAULT 0,
+          read_at TEXT,
+          is_archived INTEGER NOT NULL DEFAULT 0,
+          is_starred INTEGER NOT NULL DEFAULT 0,
+          is_sent INTEGER NOT NULL DEFAULT 0,
+          is_spam INTEGER NOT NULL DEFAULT 0,
+          is_trash INTEGER NOT NULL DEFAULT 0,
+          received_at TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        CREATE TABLE inbound_recipients (
+          inbound_email_id TEXT NOT NULL,
+          address TEXT NOT NULL,
+          domain TEXT NOT NULL,
+          PRIMARY KEY (inbound_email_id, address)
+        );
+        CREATE TABLE emails (id TEXT PRIMARY KEY, provider_id TEXT);
+        CREATE TABLE events (id TEXT PRIMARY KEY, provider_id TEXT);
+        CREATE TABLE sandbox_emails (id TEXT PRIMARY KEY, provider_id TEXT);
+        CREATE TABLE gmail_sync_state (provider_id TEXT PRIMARY KEY);
+        INSERT INTO inbound_emails (
+          id, provider_id, message_id, from_address, to_addresses, cc_addresses,
+          subject, text_body, attachments_json, headers_json, raw_size,
+          received_at, created_at
+        )
+        VALUES (
+          'orphan-provider-row', 'missing-provider', '<orphan@example.com>',
+          'sender@example.com', '["ops@example.com"]', '[]',
+          'Orphan provider', 'body', '[]', '{}', 1,
+          '2026-01-02T00:00:00.000Z', '2026-01-02T00:00:00.000Z'
+        );
+        INSERT INTO inbound_recipients (inbound_email_id, address, domain)
+        VALUES ('orphan-provider-row', 'ops@example.com', 'example.com');
+      `);
+
+      rebuildInboundCanonicalState(db);
+
+      const source = db.query("SELECT id, provider_id, type, provider_snapshot_json FROM mailbox_sources").get() as {
+        id: string;
+        provider_id: string | null;
+        type: string;
+        provider_snapshot_json: string;
+      };
+      const state = db.query("SELECT source_id FROM mailbox_message_state WHERE mail_message_id = ?").get("msg:inbound:orphan-provider-row") as { source_id: string };
+      const inbound = db.query("SELECT mail_message_id, primary_mailbox_source_id FROM inbound_emails WHERE id = ?").get("orphan-provider-row") as {
+        mail_message_id: string;
+        primary_mailbox_source_id: string;
+      };
+
+      expect(source).toEqual({
+        id: "msrc:mbx:ops@example.com:none:legacy_inbound",
+        provider_id: null,
+        type: "legacy_inbound",
+        provider_snapshot_json: "{}",
+      });
+      expect(state.source_id).toBe(source.id);
+      expect(inbound).toEqual({
+        mail_message_id: "msg:inbound:orphan-provider-row",
+        primary_mailbox_source_id: source.id,
+      });
+      expect(db.query("SELECT 1 AS ok FROM _migrations WHERE id = 40").get()).toMatchObject({ ok: 1 });
+    } finally {
+      db.close();
+    }
+  });
+
   it("keeps SQLite and PostgreSQL migrations in parity for the core model", () => {
     const db = getDatabase();
     const pgSql = PG_MIGRATIONS.join("\n");
@@ -566,14 +668,17 @@ describe("mail architecture data model", () => {
 
     expect(sqliteIndex?.name).toBe("idx_mailbox_state_source_dedupe");
     expect(sqliteTrigger?.name).toBe("trg_providers_preserve_mail_history");
-    expect(latestMigration.max_id).toBeGreaterThanOrEqual(43);
+    expect(latestMigration.max_id).toBeGreaterThanOrEqual(44);
     expect(pgSql).toContain("idx_mailbox_state_source_dedupe");
     expect(pgSql).toContain("mailery_after_inbound_insert_architecture");
     expect(pgSql).toContain("DROP TRIGGER IF EXISTS trg_mail_architecture_inbound_insert ON inbound_emails");
+    expect(pgSql).toContain("mailery_after_inbound_delete_architecture");
+    expect(pgSql).toContain("DROP TRIGGER IF EXISTS trg_mail_architecture_inbound_delete ON inbound_emails");
     expect(pgSql).toContain("mailery_prevent_provider_delete_with_history");
     expect(pgSql).toContain("INSERT INTO _migrations (id) VALUES (40)");
     expect(pgSql).toContain("INSERT INTO _migrations (id) VALUES (41)");
     expect(pgSql).toContain("INSERT INTO _migrations (id) VALUES (42)");
     expect(pgSql).toContain("INSERT INTO _migrations (id) VALUES (43)");
+    expect(pgSql).toContain("INSERT INTO _migrations (id) VALUES (44)");
   });
 });

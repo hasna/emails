@@ -1,6 +1,18 @@
 # Changelog
 
-All notable changes to `@hasna/emails` are documented here.
+All notable changes to `@hasna/mailery` are documented here.
+
+## [0.6.68] - 2026-06-29
+- fix: repair inbound-derived mailbox/source canonical state for orphaned provider history.
+- fix: keep canonical message/state rows aligned when local inbound mail is deleted or cleared.
+- fix: block inactive or ambiguous Gmail live-source resolution and retired S3 source bypasses.
+- fix: list registered S3 sources and make unknown source filters match no mail.
+- chore: retire the old hosted command surface from the public package.
+- docs: document the Bun runtime requirement for global installs.
+
+## [0.6.67] - 2026-06-29
+- fix: backfill legacy SES/S3 object-key rows to exact `raw_s3_url` provenance.
+- fix: preserve configured S3 source counts after exact S3 source filtering.
 
 ## [0.4.21] - 2026-03-14
 - feat: auto-unenroll from active sequences when contact replies to an email

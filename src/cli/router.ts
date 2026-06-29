@@ -33,7 +33,6 @@ export const allCommandModules = [
   "storage",
   "status",
   "daemon",
-  "cloud",
   "browserplan",
 ] as const;
 
@@ -98,7 +97,6 @@ export const knownCommandNames = new Set([
   "project-panel",
   "daemon",
   "logs",
-  "cloud",
   "browserplan",
 ]);
 
@@ -228,7 +226,6 @@ export function commandModulesFor(args: string[]): readonly CommandModule[] {
     case "project-panel": return ["status"];
     case "daemon":
     case "logs": return ["daemon"];
-    case "cloud": return ["cloud"];
     case "browserplan": return ["browserplan"];
     default: return allCommandModules;
   }

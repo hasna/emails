@@ -1,6 +1,6 @@
 {
   "name": "@hasna/mailery",
-  "version": "0.6.67",
+  "version": "0.6.68",
   "description": "Mailery email management CLI + MCP server + dashboard for Resend, AWS SES, and Gmail",
   "type": "module",
   "repository": {
@@ -57,7 +57,7 @@
     "dev:cli": "bun run src/cli/index.tsx",
     "dev:mcp": "bun run src/mcp/index.ts",
     "dev:serve": "bun run src/server/index.ts",
-    "postinstall": "mkdir -p $HOME/.hasna/mailery $HOME/.hasna/emails 2>/dev/null || true"
+    "postinstall": "mkdir -p $HOME/.hasna/emails 2>/dev/null || true"
   },
   "publishConfig": {
     "registry": "https://registry.npmjs.org",

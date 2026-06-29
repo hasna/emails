@@ -427,9 +427,12 @@ describe("deleteInboundEmail", () => {
   it("deletes an email by id", () => {
     const db = makeDb();
     const email = storeInboundEmail(sampleInput, db);
+    const mailMessageId = `msg:inbound:${email.id}`;
     const result = deleteInboundEmail(email.id, db);
     expect(result).toBe(true);
     expect(getInboundEmail(email.id, db)).toBeNull();
+    expect(db.query("SELECT COUNT(*) AS count FROM mail_messages WHERE id = ?").get(mailMessageId)).toMatchObject({ count: 0 });
+    expect(db.query("SELECT COUNT(*) AS count FROM mailbox_message_state WHERE mail_message_id = ?").get(mailMessageId)).toMatchObject({ count: 0 });
   });
 
   it("returns false for unknown id", () => {
@@ -446,6 +449,8 @@ describe("clearInboundEmails", () => {
     const count = clearInboundEmails(undefined, db);
     expect(count).toBe(2);
     expect(listInboundEmails({}, db)).toEqual([]);
+    expect(db.query("SELECT COUNT(*) AS count FROM mail_messages").get()).toMatchObject({ count: 0 });
+    expect(db.query("SELECT COUNT(*) AS count FROM mailbox_message_state").get()).toMatchObject({ count: 0 });
   });
 
   it("clears by provider_id", () => {
@@ -459,6 +464,8 @@ describe("clearInboundEmails", () => {
     const remaining = listInboundEmails({}, db);
     expect(remaining.length).toBe(1);
     expect(remaining[0]!.provider_id).toBe(provB);
+    expect(db.query("SELECT COUNT(*) AS count FROM mail_messages").get()).toMatchObject({ count: 1 });
+    expect(db.query("SELECT COUNT(*) AS count FROM mailbox_message_state").get()).toMatchObject({ count: 1 });
   });
 
   it("returns 0 when nothing to clear", () => {

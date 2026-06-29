@@ -483,7 +483,7 @@ const MAIL_ARCHITECTURE_BACKFILL_SQL = `
   source_rows AS (
     SELECT DISTINCT
            recipient_rows.mailbox_id,
-           inbound.provider_id,
+           CASE WHEN provider.id IS NULL THEN NULL ELSE inbound.provider_id END AS provider_id,
            ${mailSourceTypeSql("provider.type", "inbound.raw_s3_url", "inbound.metadata_s3_url", "inbound.message_id")} AS source_type,
            provider.name AS provider_name,
            provider.type AS provider_type,
@@ -539,7 +539,7 @@ const MAIL_ARCHITECTURE_BACKFILL_SQL = `
     SELECT state_base.*,
            COUNT(*) OVER (
              PARTITION BY state_base.mailbox_id,
-                          COALESCE(state_base.provider_id, 'none'),
+                          COALESCE(state_base.source_provider_id, 'none'),
                           state_base.source_type,
                           state_base.dedupe_base
            ) AS source_dedupe_count
@@ -547,6 +547,7 @@ const MAIL_ARCHITECTURE_BACKFILL_SQL = `
         SELECT inbound.*,
                recipient_rows.address,
                recipient_rows.mailbox_id,
+               CASE WHEN provider.id IS NULL THEN NULL ELSE inbound.provider_id END AS source_provider_id,
                COALESCE(NULLIF(inbound.message_id, ''), inbound.id) AS dedupe_base,
                ${mailSourceTypeSql("provider.type", "inbound.raw_s3_url", "inbound.metadata_s3_url", "inbound.message_id")} AS source_type,
                ${folderRoleSql("inbound.is_sent", "inbound.is_trash", "inbound.is_spam", "inbound.is_archived")} AS folder_role
@@ -565,7 +566,7 @@ const MAIL_ARCHITECTURE_BACKFILL_SQL = `
          mailbox_id,
          'msg:inbound:' || id,
          'folder:' || mailbox_id || ':' || folder_role,
-         'msrc:' || mailbox_id || ':' || COALESCE(provider_id, 'none') || ':' || source_type,
+         'msrc:' || mailbox_id || ':' || COALESCE(source_provider_id, 'none') || ':' || source_type,
          CASE
            WHEN source_dedupe_count > 1 THEN dedupe_base || ':inbound:' || id
            ELSE dedupe_base
@@ -650,10 +651,10 @@ const MAIL_ARCHITECTURE_INBOUND_INSERT_TRIGGER_SQL = `
       id, mailbox_id, provider_id, type, name, external_mailbox, status,
       settings_json, provider_snapshot_json, created_at, updated_at
     )
-    SELECT 'msrc:' || recipients.mailbox_id || ':' || COALESCE(NEW.provider_id, 'none') || ':' ||
+    SELECT 'msrc:' || recipients.mailbox_id || ':' || COALESCE(provider.id, 'none') || ':' ||
              ${mailSourceTypeSql("provider.type", "NEW.raw_s3_url", "NEW.metadata_s3_url", "NEW.message_id")},
            recipients.mailbox_id,
-           NEW.provider_id,
+           CASE WHEN provider.id IS NULL THEN NULL ELSE NEW.provider_id END,
            ${mailSourceTypeSql("provider.type", "NEW.raw_s3_url", "NEW.metadata_s3_url", "NEW.message_id")},
            COALESCE(provider.name || ' ' || ${mailSourceTypeSql("provider.type", "NEW.raw_s3_url", "NEW.metadata_s3_url", "NEW.message_id")}, 'Legacy inbound'),
            recipients.address,
@@ -686,13 +687,13 @@ const MAIL_ARCHITECTURE_INBOUND_INSERT_TRIGGER_SQL = `
            recipients.mailbox_id,
            'msg:inbound:' || NEW.id,
            'folder:' || recipients.mailbox_id || ':' || ${folderRoleSql("NEW.is_sent", "NEW.is_trash", "NEW.is_spam", "NEW.is_archived")},
-           'msrc:' || recipients.mailbox_id || ':' || COALESCE(NEW.provider_id, 'none') || ':' ||
+           'msrc:' || recipients.mailbox_id || ':' || COALESCE(provider.id, 'none') || ':' ||
              ${mailSourceTypeSql("provider.type", "NEW.raw_s3_url", "NEW.metadata_s3_url", "NEW.message_id")},
            CASE
              WHEN EXISTS (
                SELECT 1
                  FROM mailbox_message_state existing_state
-                WHERE existing_state.source_id = 'msrc:' || recipients.mailbox_id || ':' || COALESCE(NEW.provider_id, 'none') || ':' ||
+                WHERE existing_state.source_id = 'msrc:' || recipients.mailbox_id || ':' || COALESCE(provider.id, 'none') || ':' ||
                     ${mailSourceTypeSql("provider.type", "NEW.raw_s3_url", "NEW.metadata_s3_url", "NEW.message_id")}
                   AND existing_state.source_dedupe_key = COALESCE(NULLIF(NEW.message_id, ''), NEW.id)
                 LIMIT 1
@@ -732,6 +733,21 @@ const MAIL_ARCHITECTURE_INBOUND_INSERT_TRIGGER_SQL = `
               LIMIT 1
            ))
      WHERE id = NEW.id;
+  END;
+`;
+
+const MAIL_ARCHITECTURE_INBOUND_DELETE_TRIGGER_SQL = `
+  CREATE TRIGGER trg_mail_architecture_inbound_delete
+  AFTER DELETE ON inbound_emails
+  BEGIN
+    DELETE FROM mail_messages
+     WHERE id = COALESCE(OLD.mail_message_id, 'msg:inbound:' || OLD.id)
+       AND NOT EXISTS (
+             SELECT 1
+               FROM inbound_emails inbound
+              WHERE COALESCE(inbound.mail_message_id, 'msg:inbound:' || inbound.id) = COALESCE(OLD.mail_message_id, 'msg:inbound:' || OLD.id)
+              LIMIT 1
+           );
   END;
 `;
 
@@ -814,6 +830,37 @@ const MAIL_ARCHITECTURE_STATE_RECONCILE_SQL = `
       WHERE inbound_state.mail_message_id = mailbox_message_state.mail_message_id
    );
   DROP TABLE IF EXISTS temp_mailery_inbound_state_reconcile;
+`;
+
+const MAIL_ARCHITECTURE_REPAIR_SQL = `
+  DELETE FROM mailbox_message_state
+   WHERE mail_message_id IN (
+         SELECT COALESCE(mail_message_id, 'msg:inbound:' || id)
+           FROM inbound_emails
+       );
+
+  ${MAIL_ARCHITECTURE_BACKFILL_SQL}
+
+  UPDATE inbound_emails
+     SET primary_mailbox_id = (
+           SELECT state.mailbox_id
+             FROM mailbox_message_state state
+            WHERE state.mail_message_id = COALESCE(inbound_emails.mail_message_id, 'msg:inbound:' || inbound_emails.id)
+            ORDER BY state.mailbox_id
+            LIMIT 1
+         ),
+         primary_mailbox_source_id = (
+           SELECT state.source_id
+             FROM mailbox_message_state state
+            WHERE state.mail_message_id = COALESCE(inbound_emails.mail_message_id, 'msg:inbound:' || inbound_emails.id)
+            ORDER BY state.mailbox_id
+            LIMIT 1
+         )
+   WHERE EXISTS (
+         SELECT 1
+           FROM mailbox_message_state state
+          WHERE state.mail_message_id = COALESCE(inbound_emails.mail_message_id, 'msg:inbound:' || inbound_emails.id)
+       );
 `;
 
 const S3_MESSAGE_ID_RAW_URL_BACKFILL_SQL = `
@@ -941,7 +988,7 @@ export function ensureMailArchitecture(db: Database): void {
   safeExec(db, MAIL_ARCHITECTURE_SCHEMA_SQL);
   ensureMailArchitectureColumns(db);
   if (!migrationRecorded(db, 40) || !tableExisted) {
-    safeExec(db, MAIL_ARCHITECTURE_BACKFILL_SQL);
+    db.exec(MAIL_ARCHITECTURE_BACKFILL_SQL);
   }
   if (!migrationRecorded(db, 41) && tableExists(db, "mailbox_message_state")) {
     safeExec(db, MAIL_ARCHITECTURE_STATE_RECONCILE_SQL);
@@ -949,6 +996,8 @@ export function ensureMailArchitecture(db: Database): void {
   }
   safeExec(db, "DROP TRIGGER IF EXISTS trg_mail_architecture_inbound_insert");
   safeExec(db, MAIL_ARCHITECTURE_INBOUND_INSERT_TRIGGER_SQL);
+  safeExec(db, "DROP TRIGGER IF EXISTS trg_mail_architecture_inbound_delete");
+  safeExec(db, MAIL_ARCHITECTURE_INBOUND_DELETE_TRIGGER_SQL);
   safeExec(db, "DROP TRIGGER IF EXISTS trg_providers_preserve_mail_history");
   safeExec(db, PROVIDER_DELETE_GUARD_SQL);
   if (tableExists(db, "mailbox_message_state")) {
@@ -968,6 +1017,12 @@ export function reconcileMailboxMessageState(db?: Database): void {
   const d = db || getDatabase();
   ensureMailArchitecture(d);
   d.exec(MAIL_ARCHITECTURE_STATE_RECONCILE_SQL);
+}
+
+export function rebuildInboundCanonicalState(db?: Database): void {
+  const d = db || getDatabase();
+  ensureMailArchitecture(d);
+  d.exec(MAIL_ARCHITECTURE_REPAIR_SQL);
 }
 
 export interface LegacyS3RawUrlSource {
@@ -1811,6 +1866,17 @@ const MIGRATIONS = [
   `
   ${S3_MESSAGE_ID_RAW_URL_BACKFILL_SQL}
   INSERT OR IGNORE INTO _migrations (id) VALUES (43);
+  `,
+
+  // Migration 44: rebuild inbound-derived canonical state with sanitized source
+  // provider IDs and install canonical cleanup for deleted inbound rows.
+  `
+  DROP TRIGGER IF EXISTS trg_mail_architecture_inbound_insert;
+  ${MAIL_ARCHITECTURE_INBOUND_INSERT_TRIGGER_SQL}
+  DROP TRIGGER IF EXISTS trg_mail_architecture_inbound_delete;
+  ${MAIL_ARCHITECTURE_INBOUND_DELETE_TRIGGER_SQL}
+  ${MAIL_ARCHITECTURE_REPAIR_SQL}
+  INSERT OR IGNORE INTO _migrations (id) VALUES (44);
   `,
 ];
 

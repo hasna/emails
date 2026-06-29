@@ -76,6 +76,10 @@ describe("EmailsClient", () => {
     await client.listEnrollments("seq 1", { status: "active", limit: 3, offset: 6 });
     await client.listSandboxEmails({ provider_id: "provider 1", limit: 3, offset: 4 });
     await client.listInboundEmails({ provider_id: "provider 1", to: "me@example.com", unread: true, limit: 3, offset: 4 });
+    await client.listSources({ search: "s3", limit: 4, offset: 8 });
+    await client.listMailboxes("s3:bucket");
+    await client.listMailbox("inbox", { source_id: "provider 1", search: "hello", limit: 2, offset: 6 });
+    await client.searchMailbox("hello world", { source_id: "provider 1", folder: "unread", limit: 2, offset: 6 });
     await client.listWarmingSchedules({ status: "active", limit: 3, offset: 4 });
 
     expect(seenUrls).toEqual([
@@ -89,6 +93,10 @@ describe("EmailsClient", () => {
       "https://emails.example/api/sequences/seq%201/enrollments?status=active&limit=3&offset=6",
       "https://emails.example/api/sandbox?provider_id=provider+1&limit=3&offset=4",
       "https://emails.example/api/inbound?provider_id=provider+1&to=me%40example.com&unread=true&limit=3&offset=4",
+      "https://emails.example/api/sources?search=s3&limit=4&offset=8",
+      "https://emails.example/api/mailboxes?source_id=s3%3Abucket",
+      "https://emails.example/api/mailbox/inbox?source_id=provider+1&search=hello&limit=2&offset=6",
+      "https://emails.example/api/mailbox/search?q=hello+world&source_id=provider+1&folder=unread&limit=2&offset=6",
       "https://emails.example/api/warming?status=active&limit=3&offset=4",
     ]);
   });

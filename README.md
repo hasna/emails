@@ -7,6 +7,9 @@ Mailery is an email management CLI + MCP server - send, receive, sync, and manag
 
 ## Install
 
+Mailery is built for the Bun runtime. Install Bun 1.3 or newer before installing
+the CLI with npm.
+
 ```bash
 npm install -g @hasna/mailery
 ```
