@@ -120,7 +120,7 @@ export function cliEquivalentForTool(name: string, input: unknown): string {
     wait_for_email: () => `mailery inbox wait ${email ?? "<address>"} --json`,
     wait_for_verification_code: () => `mailery inbox wait-code ${email ?? "<address>"} --json`,
     wait_for_code: () => `mailery inbox wait-code ${email ?? "<address>"} --json`,
-    get_inbound_email: () => `mailery inbox show ${id ?? "<inbound-id>"} --json`,
+    get_inbound_email: () => `mailery inbox read ${id ?? "<inbound-id>"} --json`,
     extract_inbound_email_links: () => `mailery inbox links ${id ?? "<inbound-id>"}${enabled(input, "include_non_web", "all")} --json`,
     clear_inbound_emails: () => "mailery inbox clear --json",
     sync_inbox: () => "mailery inbox sync --json",

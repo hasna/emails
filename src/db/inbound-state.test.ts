@@ -69,7 +69,7 @@ describe("inbound read-state", () => {
     const updated = setInboundRead(e.id, true, recordingDb);
 
     expect(updated.is_read).toBe(true);
-    expect(runs).toHaveLength(1);
+    expect(runs).toHaveLength(2);
     expect(queries[0]).toContain("SELECT 1 AS ok");
     expect(queries[0]).not.toMatch(/\b(text_body|html_body|headers_json)\b/);
     expect(queries.filter((sql) => sql.includes("SELECT * FROM inbound_emails WHERE id = ?"))).toHaveLength(1);
@@ -98,12 +98,43 @@ describe("inbound read-state", () => {
     expect(setInboundStarredFlag(e.id, true, recordingDb)).toBe(true);
     expect(setInboundArchivedFlag(e.id, true, recordingDb)).toBe(true);
 
-    expect(runs).toHaveLength(3);
+    expect(runs).toHaveLength(6);
     expect(queries).toHaveLength(3);
     expect(queries.every((sql) => sql.includes("SELECT 1 AS ok"))).toBe(true);
     expect(queries.join("\n")).not.toContain("SELECT *");
     expect(queries.join("\n")).not.toMatch(/\b(text_body|html_body|headers_json)\b/);
     expect(getInboundEmail(e.id, db)).toMatchObject({ is_read: true, is_starred: true, is_archived: true });
+  });
+
+  it("keeps canonical mailbox state in sync with local read, star, and archive changes", () => {
+    const e = seed("canonical-state");
+
+    setInboundRead(e.id, true);
+    setInboundStarred(e.id, true);
+    setInboundArchived(e.id, true);
+
+    let state = db
+      .query("SELECT is_read, is_starred, is_archived, folder_id FROM mailbox_message_state WHERE mail_message_id = ?")
+      .get(`msg:inbound:${e.id}`) as { is_read: number; is_starred: number; is_archived: number; folder_id: string };
+    expect(state).toEqual({
+      is_read: 1,
+      is_starred: 1,
+      is_archived: 1,
+      folder_id: "folder:mbx:me@x.com:archive",
+    });
+
+    setInboundRead(e.id, false);
+    setInboundArchived(e.id, false);
+
+    state = db
+      .query("SELECT is_read, read_at, is_archived, folder_id FROM mailbox_message_state WHERE mail_message_id = ?")
+      .get(`msg:inbound:${e.id}`) as { is_read: number; read_at: string | null; is_archived: number; folder_id: string };
+    expect(state).toMatchObject({
+      is_read: 0,
+      read_at: null,
+      is_archived: 0,
+      folder_id: "folder:mbx:me@x.com:inbox",
+    });
   });
 
   it("returns lean summaries for state mutations without hydrating bodies", () => {
@@ -175,9 +206,11 @@ describe("inbound labels", () => {
     addInboundLabel(e.id, "work"); // idempotent
     addInboundLabel(e.id, "urgent");
     expect(getInboundEmail(e.id, db)!.label_ids.sort()).toEqual(["urgent", "work"]);
+    expect(JSON.parse((db.query("SELECT labels_json FROM mailbox_message_state WHERE mail_message_id = ?").get(`msg:inbound:${e.id}`) as { labels_json: string }).labels_json).sort()).toEqual(["urgent", "work"]);
     expect(listInboundEmails({ label: "work" }, db)).toHaveLength(1);
     removeInboundLabel(e.id, "work");
     expect(getInboundEmail(e.id, db)!.label_ids).toEqual(["urgent"]);
+    expect(JSON.parse((db.query("SELECT labels_json FROM mailbox_message_state WHERE mail_message_id = ?").get(`msg:inbound:${e.id}`) as { labels_json: string }).labels_json)).toEqual(["urgent"]);
     expect(listInboundEmails({ label: "work" }, db)).toHaveLength(0);
   });
 

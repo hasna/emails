@@ -743,6 +743,58 @@ function requireInboundLabels(id: string, d: Database): { label_ids_json?: strin
   return row;
 }
 
+function inboundStateMessagePredicate(): string {
+  return "mail_message_id = COALESCE((SELECT mail_message_id FROM inbound_emails WHERE id = ?), 'msg:inbound:' || ?)";
+}
+
+function syncMailboxReadState(id: string, read: boolean, readAt: string | null, d: Database): void {
+  d.run(
+    `UPDATE mailbox_message_state
+        SET is_read = ?,
+            read_at = ?,
+            updated_at = ?
+      WHERE ${inboundStateMessagePredicate()}`,
+    [read ? 1 : 0, readAt, now(), id, id],
+  );
+}
+
+function syncMailboxArchivedState(id: string, archived: boolean, d: Database): void {
+  d.run(
+    `UPDATE mailbox_message_state
+        SET is_archived = ?,
+            folder_id = CASE
+              WHEN is_trash = 1 THEN folder_id
+              WHEN is_spam = 1 THEN folder_id
+              WHEN ? = 1 THEN 'folder:' || mailbox_id || ':archive'
+              WHEN direction IN ('sent', 'outbound') THEN 'folder:' || mailbox_id || ':sent'
+              ELSE 'folder:' || mailbox_id || ':inbox'
+            END,
+            updated_at = ?
+      WHERE ${inboundStateMessagePredicate()}`,
+    [archived ? 1 : 0, archived ? 1 : 0, now(), id, id],
+  );
+}
+
+function syncMailboxStarredState(id: string, starred: boolean, d: Database): void {
+  d.run(
+    `UPDATE mailbox_message_state
+        SET is_starred = ?,
+            updated_at = ?
+      WHERE ${inboundStateMessagePredicate()}`,
+    [starred ? 1 : 0, now(), id, id],
+  );
+}
+
+function syncMailboxLabelState(id: string, labels: string[], d: Database): void {
+  d.run(
+    `UPDATE mailbox_message_state
+        SET labels_json = ?,
+            updated_at = ?
+      WHERE ${inboundStateMessagePredicate()}`,
+    [JSON.stringify(labels), now(), id, id],
+  );
+}
+
 /** Mark an inbound email read (stamps read_at) or unread (clears it). */
 export function setInboundRead(id: string, read: boolean, db?: Database): InboundEmail {
   const d = db || getDatabase();
@@ -759,7 +811,9 @@ export function setInboundReadSummary(id: string, read: boolean, db?: Database):
 export function setInboundReadFlag(id: string, read: boolean, db?: Database): boolean {
   const d = db || getDatabase();
   requireInboundExists(id, d);
-  d.run("UPDATE inbound_emails SET is_read = ?, read_at = ? WHERE id = ?", [read ? 1 : 0, read ? now() : null, id]);
+  const readAt = read ? now() : null;
+  d.run("UPDATE inbound_emails SET is_read = ?, read_at = ? WHERE id = ?", [read ? 1 : 0, readAt, id]);
+  syncMailboxReadState(id, read, readAt, d);
   return read;
 }
 
@@ -779,6 +833,7 @@ export function setInboundArchivedFlag(id: string, archived: boolean, db?: Datab
   const d = db || getDatabase();
   requireInboundExists(id, d);
   d.run("UPDATE inbound_emails SET is_archived = ? WHERE id = ?", [archived ? 1 : 0, id]);
+  syncMailboxArchivedState(id, archived, d);
   return archived;
 }
 
@@ -798,6 +853,7 @@ export function setInboundStarredFlag(id: string, starred: boolean, db?: Databas
   const d = db || getDatabase();
   requireInboundExists(id, d);
   d.run("UPDATE inbound_emails SET is_starred = ? WHERE id = ?", [starred ? 1 : 0, id]);
+  syncMailboxStarredState(id, starred, d);
   return starred;
 }
 
@@ -812,6 +868,7 @@ function mutateInboundLabel(id: string, label: string, remove: boolean, d: Datab
       ? labels
       : [...labels, label];
   d.run("UPDATE inbound_emails SET label_ids_json = ? WHERE id = ?", [JSON.stringify(next), id]);
+  syncMailboxLabelState(id, next, d);
 }
 
 /** Add a label (no-op if already present). */

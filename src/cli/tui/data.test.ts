@@ -23,6 +23,9 @@ import { tmpdir } from "os";
 import { join } from "path";
 
 let providerId: string;
+const originalHome = process.env["HOME"];
+let tmpHome: string | null = null;
+
 function seed(subject: string, opts: { read?: boolean; star?: boolean; archived?: boolean; to?: string[]; labels?: string[] } = {}) {
   const e = storeInboundEmail({
     provider_id: null, message_id: `<${subject}@x>`, from_address: "alice@ext.com",
@@ -36,11 +39,20 @@ function seed(subject: string, opts: { read?: boolean; star?: boolean; archived?
 }
 
 beforeEach(() => {
+  tmpHome = mkdtempSync(join(tmpdir(), "mailery-tui-data-"));
+  process.env["HOME"] = tmpHome;
   process.env["EMAILS_DB_PATH"] = ":memory:";
   resetDatabase();
   providerId = createProvider({ name: "sandbox", type: "sandbox", active: true }).id;
 });
-afterEach(() => { closeDatabase(); delete process.env["EMAILS_DB_PATH"]; });
+afterEach(() => {
+  closeDatabase();
+  delete process.env["EMAILS_DB_PATH"];
+  if (originalHome === undefined) delete process.env["HOME"];
+  else process.env["HOME"] = originalHome;
+  if (tmpHome) rmSync(tmpHome, { recursive: true, force: true });
+  tmpHome = null;
+});
 
 describe("tui data — mailboxes", () => {
   it("routes messages to the right mailbox", () => {
@@ -448,7 +460,7 @@ describe("tui data — body + mutations", () => {
     expect(toggleRead(msg, recordingDb as never)).toBe(true);
     archiveMessage(msg, true, recordingDb as never);
 
-    expect(runs).toHaveLength(3);
+    expect(runs).toHaveLength(6);
     expect(queries).toHaveLength(3);
     expect(queries.every((sql) => sql.includes("SELECT 1 AS ok"))).toBe(true);
     expect(queries.join("\n")).not.toContain("SELECT *");
@@ -1164,6 +1176,31 @@ describe("tui data — mailbox scopes and ingestion sources", () => {
       badges: expect.arrayContaining(["legacy", "inactive", "capability:gmail"]),
       total: 1,
     });
+  });
+
+  it("counts legacy S3 rows without raw_s3_url under configured S3 sources", () => {
+    const db = getDatabase();
+    setConfigValue("inbound_s3_buckets", [{ bucket: "legacy-s3-bucket", region: "us-east-1", providerId }]);
+    storeInboundEmail({
+      provider_id: providerId,
+      message_id: "inbound/example.com/old-object",
+      from_address: "sender@example.com",
+      to_addresses: ["ops@example.com"],
+      cc_addresses: [],
+      subject: "old s3 row",
+      text_body: "body",
+      html_body: null,
+      attachments: [],
+      headers: {},
+      raw_size: 1,
+      received_at: "2026-01-04T10:00:00.000Z",
+    }, db);
+
+    const sourceId = `s3:${encodeURIComponent("legacy-s3-bucket")}`;
+    const s3Source = listMailboxSources({ search: "legacy-s3-bucket" }, db).find((source) => source.id === sourceId);
+
+    expect(s3Source).toMatchObject({ kind: "s3", providerId, total: 1 });
+    expect(listMailbox("inbox", { source: { sourceId } }, db).map((message) => message.subject)).toEqual(["old s3 row"]);
   });
 
   it("uses the same source-aware folder status for TUI lists and search", () => {

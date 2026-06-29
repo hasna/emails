@@ -383,6 +383,7 @@ async function processS3Object(
     provider_id: providerId,
     message_id: obj.key,
     in_reply_to_email_id: null,
+    raw_s3_url: `s3://${bucket}/${obj.key}`,
     from_address: fromAddr,
     to_addresses: toAddrs,
     cc_addresses: ccAddrs,

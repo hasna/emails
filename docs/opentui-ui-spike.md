@@ -65,7 +65,7 @@ References:
 - Inbox is a unified all-address view by default.
 - Wide Inbox renders a message list and preview reader side by side.
 - Use the mailbox dialog to choose all mail or an exact email address.
-- Use the source dialog to filter by active, legacy, or orphaned ingestion stream.
+- Use CLI/API/MCP source filters to inspect active, legacy, or orphaned ingestion streams.
 - Sidebar labels filter the mailbox without mutating message labels.
 - Gmail-style Categories are listed separately as Primary, Social, Promotions,
   Updates, and Forums.

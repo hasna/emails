@@ -121,6 +121,8 @@ describe("MCP CLI equivalents", () => {
   });
 
   it("includes inbound link extraction commands", () => {
+    expect(cliEquivalentForTool("get_inbound_email", { id: "abc123" }))
+      .toBe("mailery inbox read abc123 --json");
     expect(cliEquivalentForTool("extract_inbound_email_links", { id: "abc123", include_non_web: true }))
       .toBe("mailery inbox links abc123 --all --json");
   });

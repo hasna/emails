@@ -20,7 +20,7 @@ const mockRun = mock(async (operationArgs: { operation: string }) => ({
 
 mock.module("@hasna/connectors", () => ({ runConnectorOperation: mockRun }));
 
-const { registerGmailSource, syncGmailInbox, syncGmailInboxAll } = await import("../lib/gmail-sync.js");
+const { registerGmailSource, retireGmailSource, syncGmailInbox, syncGmailInboxAll } = await import("../lib/gmail-sync.js");
 const { runInboxTool } = await import("./tools/inbox-impl.js");
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -50,6 +50,27 @@ function seed(providerId: string, n: number) {
       received_at: new Date().toISOString(),
     }, db);
   }
+}
+
+function seedOne(providerId: string | null, overrides: Partial<Parameters<typeof storeInboundEmail>[0]> = {}) {
+  const db = getDatabase();
+  return storeInboundEmail({
+    provider_id: providerId,
+    message_id: "mcp-action-msg",
+    in_reply_to_email_id: null,
+    from_address: "from@example.com",
+    to_addresses: ["me@example.com"],
+    cc_addresses: [],
+    subject: "MCP Action Subject",
+    text_body: "MCP action body",
+    html_body: null,
+    attachments: [],
+    attachment_paths: [],
+    headers: {},
+    raw_size: 80,
+    received_at: new Date().toISOString(),
+    ...overrides,
+  }, db);
 }
 
 function setMock(listOutput: string, readOutput?: string) {
@@ -139,6 +160,20 @@ describe("sync_inbox tool logic", () => {
     const r = await syncGmailInboxAll({ providerId: pid, db });
     expect(r.done).toBe(true);
     expect(r.synced).toBe(1);
+  });
+
+  it("does not mark Gmail sync state as synced when live-source resolution fails", async () => {
+    resetDatabase();
+    process.env["EMAILS_DB_PATH"] = ":memory:";
+    const db = getDatabase();
+    const pid = uuid();
+    db.run(`INSERT INTO providers (id, name, type, active) VALUES (?, 'Gmail without source', 'gmail', 1)`, [pid]);
+
+    const result = await toolJson("sync_inbox", { provider_id: pid, limit: 1 });
+
+    expect((result.errors as string[])[0]).toContain("live Gmail access is blocked");
+    expect(getGmailSyncState(pid, db)?.last_synced_at ?? null).toBeNull();
+    expect(mockRun).not.toHaveBeenCalled();
   });
 });
 
@@ -242,6 +277,47 @@ describe("mailbox source tools", () => {
     const search = await toolJson("search_mailbox", { query: "needle", source_id: `provider:${pid}` });
     expect((search.items as Array<{ subject: string }>).map((item) => item.subject)).toEqual(["mcp provider needle"]);
     expect(search.cli_equivalent).toBe(`mailery inbox search needle --folder inbox --source provider:${pid} --json`);
+  });
+});
+
+describe("Gmail lifecycle gates for MCP mutations", () => {
+  it("keeps local state mutations but skips Gmail mirror for retired sources", async () => {
+    const { pid } = setupDb();
+    const email = seedOne(pid);
+    retireGmailSource(pid);
+
+    const result = await toolJson("mark_email_read", { email_id: email.id });
+
+    expect(result.is_read).toBe(true);
+    expect(result.gmail_synced).toBe(false);
+    expect(mockRun).not.toHaveBeenCalled();
+  });
+
+  it("blocks Gmail replies for retired sources before any connector call", async () => {
+    const { pid } = setupDb();
+    const email = seedOne(pid);
+    retireGmailSource(pid);
+
+    const result = await runInboxTool("reply_to_email", { email_id: email.id, body: "Reply body" });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain("live Gmail access is blocked");
+    expect(mockRun).not.toHaveBeenCalled();
+  });
+
+  it("blocks Gmail replies for non-Gmail inbound rows before any connector call", async () => {
+    resetDatabase();
+    process.env["EMAILS_DB_PATH"] = ":memory:";
+    const db = getDatabase();
+    const providerId = uuid();
+    db.run(`INSERT INTO providers (id, name, type, active) VALUES (?, 'SES', 'ses', 1)`, [providerId]);
+    const email = seedOne(providerId, { message_id: "s3/object/key" });
+
+    const result = await runInboxTool("reply_to_email", { email_id: email.id, body: "Reply body" });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain("not from a Gmail source");
+    expect(mockRun).not.toHaveBeenCalled();
   });
 });
 

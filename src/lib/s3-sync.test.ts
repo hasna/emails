@@ -175,6 +175,8 @@ describe("syncS3Inbox — with objects", () => {
     const result = await syncS3Inbox({ bucket: "test-bucket", db, providerId });
     expect(result.synced).toBe(1);
     expect(result.errors).toHaveLength(0);
+    const row = db.query("SELECT raw_s3_url FROM inbound_emails WHERE message_id = ?").get("inbound/example.com/msg001") as { raw_s3_url: string };
+    expect(row.raw_s3_url).toBe("s3://test-bucket/inbound/example.com/msg001");
   });
 
   it("resolves a PARTIAL provider id (regression: FOREIGN KEY constraint failed)", async () => {

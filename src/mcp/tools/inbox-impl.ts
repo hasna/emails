@@ -547,7 +547,9 @@ export function registerInboxTools(server: McpServer): void {
           ? await syncGmailInboxHistory(opts)
         : await syncGmailInbox(opts);
 
-      updateLastSynced(provider_id, undefined, db);
+      if (result.errors.length === 0) {
+        updateLastSynced(provider_id, undefined, db);
+      }
 
       return {
         content: [{
@@ -578,16 +580,24 @@ export function registerInboxTools(server: McpServer): void {
 async function gmailMessageAction(email_id: string, connectorArgs: string[]): Promise<boolean> {
   const db = getDatabase();
   const row = db.query(
-    `SELECT i.message_id AS message_id, p.type AS provider_type
+    `SELECT i.provider_id AS provider_id, i.message_id AS message_id, p.type AS provider_type
        FROM inbound_emails i LEFT JOIN providers p ON p.id = i.provider_id
       WHERE i.id = ?`,
-  ).get(email_id) as { message_id: string | null; provider_type: string | null } | null;
+  ).get(email_id) as { provider_id: string | null; message_id: string | null; provider_type: string | null } | null;
   if (!row || row.provider_type !== "gmail" || !row.message_id) return false;
+  const { resolveGmailLiveSource } = await import("../../lib/gmail-sync.js");
+  let source;
+  try {
+    source = resolveGmailLiveSource({ providerId: row.provider_id, db });
+  } catch {
+    return false;
+  }
   const { runConnectorOperation } = await import("@hasna/connectors");
   const r = await runConnectorOperation({
     connector: "gmail",
     operation: connectorArgs.join("."),
     input: { args: [row.message_id] },
+    profile: source.profile,
   });
   if (!r.success) throw new Error(r.stderr || r.stdout);
   return true;
@@ -659,13 +669,22 @@ async function gmailMessageAction(email_id: string, connectorArgs: string[]): Pr
   async ({ email_id, body, is_html }) => {
     try {
       const db = getDatabase();
-      const row = db.query("SELECT message_id, subject FROM inbound_emails WHERE id = ?").get(email_id) as { message_id: string; subject: string } | null;
+      const id = resolveId("inbound_emails", email_id);
+      const row = db.query(
+        `SELECT i.provider_id AS provider_id, i.message_id AS message_id, i.subject AS subject, p.type AS provider_type
+           FROM inbound_emails i LEFT JOIN providers p ON p.id = i.provider_id
+          WHERE i.id = ?`,
+      ).get(id) as { provider_id: string | null; message_id: string | null; subject: string; provider_type: string | null } | null;
       if (!row?.message_id) throw new Error(`Email not found or no Gmail message ID: ${email_id}`);
+      if (row.provider_type !== "gmail") throw new Error(`Email is not from a Gmail source: ${email_id}`);
+      const { resolveGmailLiveSource } = await import("../../lib/gmail-sync.js");
+      const source = resolveGmailLiveSource({ providerId: row.provider_id, db });
       const { runConnectorOperation } = await import("@hasna/connectors");
       const r = await runConnectorOperation({
         connector: "gmail",
         operation: "messages.reply",
         input: { args: [row.message_id], body, ...(is_html ? { html: true } : {}) },
+        profile: source.profile,
       });
       if (!r.success) throw new Error(r.stderr || r.stdout);
       return { content: [{ type: "text", text: JSON.stringify({ replied_to: row.subject, status: "sent" }, null, 2) }] };

@@ -203,7 +203,11 @@ function normalizeSourceId(value: string | undefined): MailboxSource {
   if (raw === "legacy") return { sourceId: "legacy", legacy: true };
   if (raw.startsWith("provider:")) return { sourceId: raw, providerId: raw.slice("provider:".length) };
   if (raw.startsWith("orphaned:")) return { sourceId: raw, providerId: raw.slice("orphaned:".length) };
-  if (raw.startsWith("s3:")) return { sourceId: raw, s3Bucket: decodeURIComponent(raw.slice("s3:".length)) };
+  if (raw.startsWith("s3:")) {
+    const bucket = decodeURIComponent(raw.slice("s3:".length));
+    const configured = getInboundBuckets().find((candidate) => candidate.bucket === bucket);
+    return { sourceId: raw, s3Bucket: bucket, providerId: configured?.providerId };
+  }
   return { sourceId: raw };
 }
 
@@ -227,7 +231,15 @@ function inboundSourceClause(src?: MailboxSource): SqlClause {
   let sql = "";
   if (normalized?.providerId) { sql += " AND provider_id = ?"; params.push(normalized.providerId); }
   if (normalized?.legacy) sql += " AND provider_id IS NULL";
-  if (normalized?.s3Bucket) { sql += " AND raw_s3_url LIKE ?"; params.push(`s3://${normalized.s3Bucket}/%`); }
+  if (normalized?.s3Bucket) {
+    if (normalized.providerId) {
+      sql += " AND (raw_s3_url LIKE ? OR (raw_s3_url IS NULL AND message_id IS NOT NULL))";
+      params.push(`s3://${normalized.s3Bucket}/%`);
+    } else {
+      sql += " AND raw_s3_url LIKE ?";
+      params.push(`s3://${normalized.s3Bucket}/%`);
+    }
+  }
   return { sql, params };
 }
 
@@ -648,7 +660,7 @@ export function listMailboxSources(optsOrDb?: ListMailboxSourcesOptions | Databa
       bucket: bucket.bucket,
       region: bucket.region,
       badges: ["configured", ...(bucket.providerId ? [] : ["legacy"])],
-    }, { sourceId: id }, d));
+    }, { sourceId: id, providerId: bucket.providerId }, d));
   }
 
   const legacySource = sourceSummary({

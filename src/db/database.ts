@@ -735,6 +735,87 @@ const MAIL_ARCHITECTURE_INBOUND_INSERT_TRIGGER_SQL = `
   END;
 `;
 
+const MAIL_ARCHITECTURE_STATE_RECONCILE_SQL = `
+  DROP TABLE IF EXISTS temp_mailery_inbound_state_reconcile;
+  CREATE TEMP TABLE temp_mailery_inbound_state_reconcile AS
+  SELECT COALESCE(mail_message_id, 'msg:inbound:' || id) AS mail_message_id,
+         label_ids_json,
+         is_read,
+         read_at,
+         is_archived,
+         is_starred,
+         is_spam,
+         is_trash,
+         is_sent
+    FROM inbound_emails;
+  CREATE INDEX temp_mailery_inbound_state_reconcile_message
+      ON temp_mailery_inbound_state_reconcile(mail_message_id);
+
+  UPDATE mailbox_message_state
+     SET labels_json = (
+           SELECT inbound_state.label_ids_json
+             FROM temp_mailery_inbound_state_reconcile inbound_state
+            WHERE inbound_state.mail_message_id = mailbox_message_state.mail_message_id
+            LIMIT 1
+         ),
+         is_read = COALESCE((
+           SELECT inbound_state.is_read
+             FROM temp_mailery_inbound_state_reconcile inbound_state
+            WHERE inbound_state.mail_message_id = mailbox_message_state.mail_message_id
+            LIMIT 1
+         ), is_read),
+         read_at = (
+           SELECT inbound_state.read_at
+             FROM temp_mailery_inbound_state_reconcile inbound_state
+            WHERE inbound_state.mail_message_id = mailbox_message_state.mail_message_id
+            LIMIT 1
+         ),
+         is_archived = COALESCE((
+           SELECT inbound_state.is_archived
+             FROM temp_mailery_inbound_state_reconcile inbound_state
+            WHERE inbound_state.mail_message_id = mailbox_message_state.mail_message_id
+            LIMIT 1
+         ), is_archived),
+         is_starred = COALESCE((
+           SELECT inbound_state.is_starred
+             FROM temp_mailery_inbound_state_reconcile inbound_state
+            WHERE inbound_state.mail_message_id = mailbox_message_state.mail_message_id
+            LIMIT 1
+         ), is_starred),
+         is_spam = COALESCE((
+           SELECT inbound_state.is_spam
+             FROM temp_mailery_inbound_state_reconcile inbound_state
+            WHERE inbound_state.mail_message_id = mailbox_message_state.mail_message_id
+            LIMIT 1
+         ), is_spam),
+         is_trash = COALESCE((
+           SELECT inbound_state.is_trash
+             FROM temp_mailery_inbound_state_reconcile inbound_state
+            WHERE inbound_state.mail_message_id = mailbox_message_state.mail_message_id
+            LIMIT 1
+         ), is_trash),
+         folder_id = COALESCE((
+           SELECT 'folder:' || mailbox_message_state.mailbox_id || ':' ||
+                  CASE
+                    WHEN COALESCE(inbound_state.is_trash, 0) = 1 THEN 'trash'
+                    WHEN COALESCE(inbound_state.is_spam, 0) = 1 THEN 'spam'
+                    WHEN COALESCE(inbound_state.is_archived, 0) = 1 THEN 'archive'
+                    WHEN COALESCE(inbound_state.is_sent, 0) = 1 THEN 'sent'
+                    ELSE 'inbox'
+                  END
+             FROM temp_mailery_inbound_state_reconcile inbound_state
+            WHERE inbound_state.mail_message_id = mailbox_message_state.mail_message_id
+            LIMIT 1
+         ), folder_id),
+         updated_at = datetime('now')
+   WHERE EXISTS (
+     SELECT 1
+       FROM temp_mailery_inbound_state_reconcile inbound_state
+      WHERE inbound_state.mail_message_id = mailbox_message_state.mail_message_id
+   );
+  DROP TABLE IF EXISTS temp_mailery_inbound_state_reconcile;
+`;
+
 const PROVIDER_DELETE_GUARD_SQL = `
   CREATE TRIGGER trg_providers_preserve_mail_history
   BEFORE DELETE ON providers
@@ -817,6 +898,10 @@ export function ensureMailArchitecture(db: Database): void {
   ensureMailArchitectureColumns(db);
   if (!migrationRecorded(db, 40) || !tableExisted) {
     safeExec(db, MAIL_ARCHITECTURE_BACKFILL_SQL);
+  }
+  if (!migrationRecorded(db, 41) && tableExists(db, "mailbox_message_state")) {
+    safeExec(db, MAIL_ARCHITECTURE_STATE_RECONCILE_SQL);
+    safeExec(db, "INSERT OR IGNORE INTO _migrations (id) VALUES (41)");
   }
   safeExec(db, "DROP TRIGGER IF EXISTS trg_mail_architecture_inbound_insert");
   safeExec(db, MAIL_ARCHITECTURE_INBOUND_INSERT_TRIGGER_SQL);
@@ -1592,6 +1677,13 @@ const MIGRATIONS = [
   ${MAIL_ARCHITECTURE_INBOUND_INSERT_TRIGGER_SQL}
   ${PROVIDER_DELETE_GUARD_SQL}
   INSERT OR IGNORE INTO _migrations (id) VALUES (40);
+  `,
+
+  // Migration 41: Reconcile canonical mailbox state after local read/archive/star
+  // mutations that were made before state writes updated both surfaces.
+  `
+  ${MAIL_ARCHITECTURE_STATE_RECONCILE_SQL}
+  INSERT OR IGNORE INTO _migrations (id) VALUES (41);
   `,
 ];
 

@@ -57,10 +57,10 @@ metrics, operations health, folders, actions, and a focused workspace. Inbox on
 wide terminals uses a split message list + preview reader. Narrow terminals collapse to
 a compact single-column view with the same Inbox, Compose, Domains, and
 Settings dialog. Inbox starts at all addresses and can be filtered to one email
-address when needed; source filters show the ingestion streams behind the mail
-without treating provider credentials as inboxes. Live read-state, local
-refresh, background auto-pull, and an `auto`/`light`/`dark` color theme keep the
-mailbox current and readable across terminals.
+address when needed. Mailbox source status is exposed through CLI/API/MCP
+surfaces without treating provider credentials as inboxes. Live read-state,
+local refresh, background auto-pull, and an `auto`/`light`/`dark` color theme
+keep the mailbox current and readable across terminals.
 
 ```bash
 mailery ui
@@ -69,10 +69,9 @@ mailery ui --mailbox unread
 
 The app uses visible buttons and the Shortcuts command palette for actions.
 Mailbox filtering is handled by the mailbox dialog, which lists all mailboxes
-and configured/observed recipient addresses. The source dialog lists active,
-legacy, and orphaned ingestion streams so old mail stays visible. Sidebar labels
-filter mailbox content, and Gmail-style Categories show Primary, Social,
-Promotions, Updates, and Forums separately from custom labels. Reader shows
+and configured/observed recipient addresses. Sidebar labels filter mailbox
+content, and Gmail-style Categories show Primary, Social, Promotions, Updates,
+and Forums separately from custom labels. Reader shows
 attachments with size/type. Composer writes **markdown** rendered to HTML on
 send. Settings opens as a simple menu dialog for sync, defaults, and display
 controls. Folders: Inbox · Unread · Starred · Sent · Archived · Spam · Trash.
@@ -135,7 +134,7 @@ mailery agent context --json      # full machine-readable context
 mailery config list --verbose     # full redacted config values
 mailery config keys --verbose     # include examples for every key
 mailery email show <id>           # detail path for one sent email
-mailery inbox show <id>           # detail path for one inbound email
+mailery inbox read <id>           # detail path for one inbound email
 ```
 
 `--json` remains the machine-readable path. Broad MCP list tools default to

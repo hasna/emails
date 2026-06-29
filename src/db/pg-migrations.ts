@@ -1431,6 +1431,31 @@ export const PG_MIGRATIONS: string[] = [
   INSERT INTO _migrations (id) VALUES (40) ON CONFLICT DO NOTHING;
   `,
 
+  // Migration 41: Reconcile canonical mailbox state after local state mutations.
+  `
+  UPDATE mailbox_message_state state
+     SET labels_json = inbound.label_ids_json,
+         is_read = inbound.is_read,
+         read_at = inbound.read_at,
+         is_archived = inbound.is_archived,
+         is_starred = inbound.is_starred,
+         is_spam = inbound.is_spam,
+         is_trash = inbound.is_trash,
+         folder_id = 'folder:' || state.mailbox_id || ':' ||
+           CASE
+             WHEN COALESCE(inbound.is_trash, 0) = 1 THEN 'trash'
+             WHEN COALESCE(inbound.is_spam, 0) = 1 THEN 'spam'
+             WHEN COALESCE(inbound.is_archived, 0) = 1 THEN 'archive'
+             WHEN COALESCE(inbound.is_sent, 0) = 1 THEN 'sent'
+             ELSE 'inbox'
+           END,
+         updated_at = NOW()
+    FROM inbound_emails inbound
+   WHERE state.mail_message_id = COALESCE(inbound.mail_message_id, 'msg:inbound:' || inbound.id);
+
+  INSERT INTO _migrations (id) VALUES (41) ON CONFLICT DO NOTHING;
+  `,
+
   // Feedback table
   `
   CREATE TABLE IF NOT EXISTS feedback (
