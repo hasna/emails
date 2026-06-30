@@ -32,6 +32,9 @@ const KNOWN_KEYS: { key: string; description: string; example: string }[] = [
   { key: "inbound_s3_prefix", description: "S3 key prefix for inbound emails (default: inbound/<domain>/)", example: "inbound/example.com/" },
   { key: "inbound_s3_region", description: "AWS region for inbound S3 bucket (default: us-east-1)", example: "us-east-1" },
   { key: "inbound_s3_profile", description: "AWS profile for inbound S3 sync when not using provider credentials", example: "hasna-xyz-infra" },
+  { key: "cloud_api_url", description: "Mailery Cloud API URL (also reads MAILERY_CLOUD_API_URL or MAILERY_API_URL)", example: "https://mailery.co" },
+  { key: "cloud_session_token", description: "Mailery Cloud user session token from `mailery cloud login` (also reads MAILERY_CLOUD_TOKEN)", example: "eyJ..." },
+  { key: "cloud_api_key", description: "Mailery Cloud API key from `mailery cloud login --api-key` (also reads MAILERY_API_KEY)", example: "mly_..." },
 ];
 
 function redactConfigEntry(key: string, value: unknown): unknown {

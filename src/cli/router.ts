@@ -34,6 +34,7 @@ export const allCommandModules = [
   "status",
   "daemon",
   "browserplan",
+  "cloud",
 ] as const;
 
 export type CommandModule = typeof allCommandModules[number] | "project-panel";
@@ -98,6 +99,7 @@ export const knownCommandNames = new Set([
   "daemon",
   "logs",
   "browserplan",
+  "cloud",
 ]);
 
 export function routeRootPromptArgs(args: string[]): string[] {
@@ -142,6 +144,7 @@ export function remoteStorageRuntimeError(args: string[]): string | null {
   if (args.includes("--help") || args.includes("-h")) return null;
   const command = requestedCommand(args);
   if (!command) return null;
+  if (command === "cloud") return null;
   if (command === "storage") {
     const subcommand = requestedStorageSubcommand(args);
     if (!subcommand || REMOTE_RUNTIME_ALLOWED_STORAGE_COMMANDS.has(subcommand)) return null;
@@ -227,6 +230,7 @@ export function commandModulesFor(args: string[]): readonly CommandModule[] {
     case "daemon":
     case "logs": return ["daemon"];
     case "browserplan": return ["browserplan"];
+    case "cloud": return ["cloud"];
     default: return allCommandModules;
   }
 }

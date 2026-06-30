@@ -32,6 +32,7 @@ describe("CLI router", () => {
       [["ask", "latest"], ["status"]],
       [["project-panel"], ["status"]],
       [["logs"], ["daemon"]],
+      [["cloud", "status"], ["cloud"]],
     ];
 
     for (const [args, modules] of cases) {
@@ -77,6 +78,7 @@ describe("CLI router", () => {
       expect(remoteStorageRuntimeError(["mcp", "--claude"])).toContain("remote source-of-truth runtime");
       expect(remoteStorageRuntimeError(["mcp", "--claude", "--codex"])).toContain("remote source-of-truth runtime");
       expect(remoteStorageRuntimeError(["mcp", "--uninstall", "--gemini"])).toContain("remote source-of-truth runtime");
+      expect(remoteStorageRuntimeError(["cloud", "status"])).toBeNull();
       expect(remoteStorageRuntimeError(["inbox", "list"])).toContain("remote source-of-truth runtime");
       expect(remoteStorageRuntimeError(["send", "--help"])).toBeNull();
     } finally {

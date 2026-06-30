@@ -27,6 +27,10 @@
       "types": "./dist/storage.d.ts",
       "import": "./dist/storage.js"
     },
+    "./cloud": {
+      "types": "./dist/cloud.d.ts",
+      "import": "./dist/cloud.js"
+    },
     "./dist/db/pg-migrations.js": {
       "import": "./dist/db/pg-migrations.js"
     }
@@ -46,7 +50,7 @@
     "build:tui-runtime": "bun run scripts/build-tui-runtime.ts",
     "build:mcp": "bun build src/mcp/index.ts --outdir dist/mcp --target bun --packages external --splitting",
     "build:server": "bun build src/server/index.ts --outdir dist/server --target bun --packages external --splitting",
-    "build:lib": "bun build src/index.ts src/storage.ts --outdir dist --target bun --packages external --splitting",
+    "build:lib": "bun build src/index.ts src/storage.ts src/cloud.ts --outdir dist --target bun --packages external --splitting",
     "build:pg-migrations": "bun build src/db/pg-migrations.ts --outdir dist/db --target bun --packages external --splitting",
     "build:types": "tsc --emitDeclarationOnly --outDir dist",
     "test": "bun test",
@@ -81,6 +85,7 @@
     "@aws-sdk/credential-provider-ini": "^3.972.55",
     "@hasna/contacts": "0.6.19",
     "@hasna/contracts": "^0.2.2",
+    "@hasna/domains": "0.0.26",
     "@hasna/events": "^0.1.8",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@opentui/core": "0.4.1",
