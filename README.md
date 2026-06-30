@@ -14,6 +14,24 @@ the CLI with npm.
 npm install -g @hasna/mailery
 ```
 
+## Open Core And Cloud
+
+Users install the open-source package: `@hasna/mailery`.
+
+Mailery stays local-first by default: local SQLite, local provider credentials,
+local MCP, and optional local remote-storage sync. Cloud is an opt-in hosted
+source of truth at `https://mailery.co`; the same public CLI can sign up, create
+an agent API key, create a billing link, create hosted mailboxes, read hosted
+messages, generate hosted digests, and pull cloud mail into local SQLite.
+
+The SaaS control plane is private Hasna Tools infrastructure. End users and
+open-source contributors should not install or depend on private Hasna Tools
+platform packages.
+
+`@hasna/emails` is compatibility-only during the rename period. New installs and
+docs should use `@hasna/mailery`; the compatibility name is expected to be
+retired after migration.
+
 ## Quick Start
 
 ```bash
@@ -51,6 +69,43 @@ mailery email list
 # Sync email data to remote PostgreSQL storage
 mailery storage push
 ```
+
+## Mailery Cloud
+
+Cloud commands are non-interactive enough for agents and CI. Use `--no-open`
+when creating billing links from a headless environment.
+
+```bash
+# Show the hosted service status
+mailery cloud --api-url https://mailery.co status
+
+# Create or log into a hosted account, generate an agent API key, and create a
+# hosted billing link without opening a browser
+mailery cloud setup \
+  --api-url https://mailery.co \
+  --email you@example.com \
+  --password "$MAILERY_PASSWORD" \
+  --api-key-name "Agent CLI" \
+  --scope mail_read mail_write billing_read \
+  --billing \
+  --no-open
+
+# Hosted mailbox and message workflow
+mailery cloud mailbox add agent@example.com --provider manual
+mailery cloud messages list --limit 20
+mailery cloud messages pull --limit 20
+mailery inbox list --limit 20
+
+# Billing and domains
+mailery cloud billing overview
+mailery cloud billing subscribe --plan starter --no-open
+mailery cloud domain available example-agent-mail.com
+mailery cloud domain setup example-agent-mail.com --address agent --catch-all
+```
+
+The starter SaaS plan is currently `$10/month` and grants hosted credits. Domain
+setup can return DNS records in safe planning mode before any domain purchase or
+MX migration is performed.
 
 ## Mailery UI (`mailery ui`)
 
@@ -105,6 +160,7 @@ mailery sequence          # drip sequences
 mailery schedule          # scheduled emails: list, cancel, run
 mailery triage            # AI triage: classify, prioritize, draft replies
 mailery storage           # sync to/from remote PostgreSQL storage: push, pull, migrate
+mailery cloud             # optional Mailery Cloud signup/login/billing/mailbox/message/digest/domain workflow
 mailery aws               # AWS setup: SES receipt rules, S3 inbound bucket
 mailery config            # configuration (key=value)
 mailery stats             # delivery statistics (--inbox for received mail)
