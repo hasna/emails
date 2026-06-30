@@ -1,6 +1,6 @@
 # Feature conventions for agents
 
-Use this checklist when adding behavior to `@hasna/emails`. The project is a
+Use this checklist when adding behavior to `@hasna/mailery`. The project is a
 CLI, MCP server, REST dashboard API, and public library over the same local
 SQLite store, so new behavior should land in the right layer and get regression
 coverage there.

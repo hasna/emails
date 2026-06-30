@@ -6,21 +6,18 @@ import { basename, join } from "node:path";
 
 const forbiddenMarkers = [
   ["@hasna", "cloud"].join("/"),
+  ["@hasna", "tools"].join(""),
+  ["platform", "mailery"].join("-"),
   ["@hasna", "wallets"].join("/"),
   ["open", "cloud"].join("-"),
   ["cloud", "mcp"].join("-"),
   ["cloud", "tool"].join("-"),
-  ["register", "Cloud", "Commands"].join(""),
-  ["Mailery", "Cloud"].join(" "),
-  ["mailery", "cloud"].join(" "),
-  ["cloud", "api", "key"].join("_"),
-  ["cloud", "session", "token"].join("_"),
-  ["MAILERY", "API", "KEY"].join("_"),
+  ["STRIPE", "SECRET", "KEY"].join("_"),
+  ["STRIPE", "WEBHOOK", "SECRET"].join("_"),
+  ["MAILERY", "ADMIN", "API", "KEY"].join("_"),
   [".hasna", "cloud"].join("/"),
   ["HASNA", "CLOUD", ""].join("_"),
   ["HASNA", "RDS"].join("_"),
-  ["cloud", "setup"].join(" "),
-  ["cloud", "sync"].join(" "),
 ];
 const platformNativeArtifactPattern = /(^|\/)(?:libopentui|opentui).*\.(?:so|dylib|dll|node)$/i;
 
@@ -77,7 +74,7 @@ try {
     console.error(findings.join("\n"));
     process.exitCode = 1;
   } else {
-    console.log(`${basename(tarball)} has no retired cloud runtime references or platform-native artifacts`);
+    console.log(`${basename(tarball)} has no private platform references or platform-native artifacts`);
   }
 } finally {
   rmSync(tempRoot, { recursive: true, force: true });

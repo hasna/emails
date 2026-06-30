@@ -3,22 +3,20 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 
 const root = join(import.meta.dir, "..");
-const PRIVATE_CLOUD_PATTERNS = [
+const PRIVATE_PLATFORM_PATTERNS = [
   /@hasna\/cloud\b/,
+  new RegExp(`${["@hasna", "tools"].join("")}\\b`),
+  new RegExp(`${["platform", "mailery"].join("-")}\\b`),
   /@hasna\/wallets\b/,
   new RegExp(`\\b${["open", "cloud"].join("-")}\\b`),
   new RegExp(`\\b${["cloud", "mcp"].join("-")}\\b`),
   new RegExp(`\\b${["cloud", "tool"].join("-")}\\b`),
-  new RegExp(`\\b${["register", "Cloud", "Commands"].join("")}\\b`),
-  new RegExp(`\\b${["Mailery", "Cloud"].join(" ")}\\b`),
-  new RegExp(`\\b${["mailery", "cloud"].join(" ")}\\b`),
-  new RegExp(`\\b${["cloud", "api", "key"].join("_")}\\b`),
-  new RegExp(`\\b${["cloud", "session", "token"].join("_")}\\b`),
-  new RegExp(`\\b${["MAILERY", "API", "KEY"].join("_")}\\b`),
+  new RegExp(`\\b${["STRIPE", "SECRET", "KEY"].join("_")}\\b`),
+  new RegExp(`\\b${["STRIPE", "WEBHOOK", "SECRET"].join("_")}\\b`),
+  new RegExp(`\\b${["MAILERY", "ADMIN", "API", "KEY"].join("_")}\\b`),
   new RegExp(`${["HASNA", "CLOUD", ""].join("_")}`),
   new RegExp(`${["HASNA", "RDS"].join("_")}`),
-  new RegExp(`\\b${["cloud", "setup"].join(" ")}\\b`),
-  new RegExp(`\\b${["cloud", "sync"].join(" ")}\\b`),
+  new RegExp(`\\b${["rds", "cluster"].join("_")}\\b`, "i"),
 ] as const;
 
 const SOURCE_ROOTS = [
@@ -68,7 +66,7 @@ function privateCloudHits(files: string[]): string[] {
   const hits: string[] = [];
   for (const file of files) {
     const text = readFileSync(file, "utf8");
-    for (const pattern of PRIVATE_CLOUD_PATTERNS) {
+    for (const pattern of PRIVATE_PLATFORM_PATTERNS) {
       if (pattern.test(text)) {
         hits.push(relative(root, file));
         break;
@@ -78,8 +76,8 @@ function privateCloudHits(files: string[]): string[] {
   return hits.sort();
 }
 
-describe("no private cloud package boundary", () => {
-  it("keeps package metadata and lockfiles free of private cloud packages", () => {
+describe("no private platform package boundary", () => {
+  it("keeps package metadata and lockfiles free of private platform packages", () => {
     const files = ["package.json", "bun.lock"]
       .map((file) => join(root, file))
       .filter((file) => existsSync(file));
@@ -87,7 +85,7 @@ describe("no private cloud package boundary", () => {
     expect(privateCloudHits(files)).toEqual([]);
   });
 
-  it("keeps runtime source, SDK, and docs off private cloud package names", () => {
+  it("keeps runtime source, SDK, and docs off private platform package names", () => {
     const files = SOURCE_ROOTS.flatMap((entry) => collectFiles(join(root, entry)));
 
     expect(privateCloudHits(files)).toEqual([]);
