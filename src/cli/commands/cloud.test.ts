@@ -282,6 +282,12 @@ describe("cloud command", () => {
     expect(result.out).toContain("mly_secret_once");
     expect(result.out.match(/mly_secret_once/g)?.length).toBe(1);
     expect(result.out).toContain("This secret is shown once");
+    expect((result.data as { key?: string; record?: { id?: string; prefix?: string } }).key).toBe("mly_secret_once");
+    expect((result.data as { record?: { id?: string; prefix?: string } }).record).toMatchObject({
+      id: "key_1",
+      prefix: "mly_live_abcd",
+    });
+    expect((result.data as { api_key?: unknown }).api_key).toBeUndefined();
   });
 
   it("revokes a cloud API key", async () => {

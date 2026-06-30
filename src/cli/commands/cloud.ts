@@ -566,7 +566,18 @@ export function registerCloudCommands(program: Command, output: OutputFn, deps: 
           scopes: opts.scope?.length ? opts.scope : undefined,
         });
         output(
-          result,
+          {
+            key: result.key,
+            record: {
+              id: result.api_key.id,
+              name: result.api_key.name,
+              prefix: result.api_key.prefix,
+              scopes: result.api_key.scopes,
+              lastUsedAt: result.api_key.lastUsedAt,
+              revokedAt: result.api_key.revokedAt,
+              createdAt: result.api_key.createdAt,
+            },
+          },
           [
             chalk.green(`Created API key ${result.api_key.name} (${result.api_key.prefix}).`),
             `  ${result.key}`,
