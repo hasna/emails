@@ -305,8 +305,8 @@ describe("agent context", () => {
       if (sql.includes("provider_id IS NULL")) return "0";
       if (sql.includes("raw_s3_url LIKE")) return "4";
       if (sql.includes("provider_id = ?")) return "3";
-      if (sql.includes("COALESCE(is_sent, 0) = 1")) return "1";
-      if (sql.includes("COALESCE(is_read, 0) = 0")) return "2";
+      if (sql.includes("COALESCE(is_sent, false) = true")) return "1";
+      if (sql.includes("COALESCE(is_read, false) = false")) return "2";
       return "7";
     };
     const remote = {

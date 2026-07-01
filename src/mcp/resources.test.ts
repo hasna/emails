@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { closeDatabase, getDatabase, resetDatabase } from "../db/database.js";
 import { createAddress } from "../db/addresses.js";
 import { createDomain, updateDnsStatus } from "../db/domains.js";
@@ -16,14 +19,36 @@ import {
 } from "./resources.js";
 import { storeInboundEmail } from "../db/inbound.js";
 
+const RUNTIME_ENV = [
+  "MAILERY_MODE",
+  "HASNA_EMAILS_MODE",
+  "HASNA_EMAILS_STORAGE_MODE",
+  "EMAILS_DATABASE_URL",
+  "HASNA_EMAILS_DATABASE_URL",
+  "HASNA_EMAILS_DB_PATH",
+] as const;
+
+let previousHome: string | undefined;
+let tempHome: string | undefined;
+
 beforeEach(() => {
+  previousHome = process.env["HOME"];
+  tempHome = mkdtempSync(join(tmpdir(), "mailery-mcp-resources-test-home-"));
+  process.env["HOME"] = tempHome;
   process.env["EMAILS_DB_PATH"] = ":memory:";
+  for (const key of RUNTIME_ENV) delete process.env[key];
   resetDatabase();
 });
 
 afterEach(() => {
   closeDatabase();
   delete process.env["EMAILS_DB_PATH"];
+  for (const key of RUNTIME_ENV) delete process.env[key];
+  if (previousHome === undefined) delete process.env["HOME"];
+  else process.env["HOME"] = previousHome;
+  if (tempHome) rmSync(tempHome, { recursive: true, force: true });
+  tempHome = undefined;
+  previousHome = undefined;
 });
 
 describe("MCP resource payloads", () => {
@@ -160,8 +185,8 @@ describe("MCP resource payloads", () => {
       if (sql.includes("provider_id IS NULL")) return "0";
       if (sql.includes("raw_s3_url LIKE")) return "4";
       if (sql.includes("provider_id = ?")) return "3";
-      if (sql.includes("COALESCE(is_sent, 0) = 1")) return "1";
-      if (sql.includes("COALESCE(is_read, 0) = 0")) return "2";
+      if (sql.includes("COALESCE(is_sent, false) = true")) return "1";
+      if (sql.includes("COALESCE(is_read, false) = false")) return "2";
       return "7";
     };
     const remote = {

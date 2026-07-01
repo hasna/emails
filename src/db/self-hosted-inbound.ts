@@ -488,13 +488,13 @@ const MAILBOX_LABELS: Record<SelfHostedMailbox, string> = {
 };
 
 const COUNT_WHERE: Record<SelfHostedMailbox, string> = {
-  inbox: "COALESCE(is_sent, 0) = 0 AND COALESCE(is_archived, 0) = 0 AND COALESCE(is_spam, 0) = 0 AND COALESCE(is_trash, 0) = 0",
-  unread: "COALESCE(is_sent, 0) = 0 AND COALESCE(is_read, 0) = 0 AND COALESCE(is_archived, 0) = 0 AND COALESCE(is_spam, 0) = 0 AND COALESCE(is_trash, 0) = 0",
-  starred: "COALESCE(is_sent, 0) = 0 AND COALESCE(is_starred, 0) = 1 AND COALESCE(is_archived, 0) = 0 AND COALESCE(is_spam, 0) = 0 AND COALESCE(is_trash, 0) = 0",
-  sent: "COALESCE(is_sent, 0) = 1",
-  archived: "COALESCE(is_sent, 0) = 0 AND COALESCE(is_archived, 0) = 1 AND COALESCE(is_spam, 0) = 0 AND COALESCE(is_trash, 0) = 0",
-  spam: "COALESCE(is_sent, 0) = 0 AND COALESCE(is_spam, 0) = 1",
-  trash: "COALESCE(is_sent, 0) = 0 AND COALESCE(is_trash, 0) = 1",
+  inbox: "COALESCE(is_sent, false) = false AND COALESCE(is_archived, false) = false AND COALESCE(is_spam, false) = false AND COALESCE(is_trash, false) = false",
+  unread: "COALESCE(is_sent, false) = false AND COALESCE(is_read, false) = false AND COALESCE(is_archived, false) = false AND COALESCE(is_spam, false) = false AND COALESCE(is_trash, false) = false",
+  starred: "COALESCE(is_sent, false) = false AND COALESCE(is_starred, false) = true AND COALESCE(is_archived, false) = false AND COALESCE(is_spam, false) = false AND COALESCE(is_trash, false) = false",
+  sent: "COALESCE(is_sent, false) = true",
+  archived: "COALESCE(is_sent, false) = false AND COALESCE(is_archived, false) = true AND COALESCE(is_spam, false) = false AND COALESCE(is_trash, false) = false",
+  spam: "COALESCE(is_sent, false) = false AND COALESCE(is_spam, false) = true",
+  trash: "COALESCE(is_sent, false) = false AND COALESCE(is_trash, false) = true",
 };
 
 function numericCount(value: unknown): number {
@@ -532,7 +532,7 @@ async function latestInbound(remote: Remote, filter: { sql: string; params: Arra
   const rows = await remote.all(
     `SELECT MAX(received_at) AS latest
        FROM inbound_emails
-      WHERE COALESCE(is_sent, 0) = 0${filter.sql}`,
+      WHERE COALESCE(is_sent, false) = false${filter.sql}`,
     ...filter.params,
   ) as Array<{ latest: string | Date | null }>;
   return iso(rows[0]?.latest);
@@ -914,7 +914,7 @@ export async function listSelfHostedSourceSummaries(
 export async function getSelfHostedInboxStatus(remote?: Remote): Promise<SelfHostedInboxStatus> {
   return withRemote(remote, async (pg) => {
     const filter = sourceFilter(undefined);
-    const total = await countInbound(pg, "COALESCE(is_sent, 0) = 0");
+    const total = await countInbound(pg, "COALESCE(is_sent, false) = false");
     const unread = await countInbound(pg, COUNT_WHERE.unread);
     const latest_received_at = await latestInbound(pg, filter);
     const mailboxes = await getSelfHostedMailboxStatus(undefined, pg);
