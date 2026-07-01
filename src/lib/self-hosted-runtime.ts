@@ -23,13 +23,13 @@ export const SELF_HOSTED_RUNTIME_TABLES = [
   "emails",
   "email_content",
   "events",
+  "mail_messages",
   "inbound_emails",
   "inbound_recipients",
   "inbound_labels",
   "mailboxes",
   "mailbox_sources",
   "mail_folders",
-  "mail_messages",
   "mailbox_message_state",
   "templates",
   "contacts",
@@ -73,13 +73,13 @@ export const SELF_HOSTED_RUNTIME_PUSH_TABLES = [
 
 export const SELF_HOSTED_S3_MATERIALIZATION_TABLES = [
   "providers",
+  "mail_messages",
   "inbound_emails",
   "inbound_recipients",
   "inbound_labels",
   "mailboxes",
   "mailbox_sources",
   "mail_folders",
-  "mail_messages",
   "mailbox_message_state",
 ] as const;
 

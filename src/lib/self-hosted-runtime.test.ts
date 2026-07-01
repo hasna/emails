@@ -7,6 +7,8 @@ import { storeInboundEmail } from "../db/inbound.js";
 import { createProvider } from "../db/providers.js";
 import { loadConfig } from "./config.js";
 import {
+  SELF_HOSTED_RUNTIME_TABLES,
+  SELF_HOSTED_S3_MATERIALIZATION_TABLES,
   cleanupOwnedRuntimeCache,
   flushSelfHostedRuntimeCache,
   getSelfHostedRuntimeStatus,
@@ -46,6 +48,13 @@ afterEach(() => {
 });
 
 describe("self-hosted runtime cache bridge", () => {
+  it("orders self-hosted mail tables by foreign-key dependency", () => {
+    expect(SELF_HOSTED_RUNTIME_TABLES.indexOf("mail_messages")).toBeLessThan(SELF_HOSTED_RUNTIME_TABLES.indexOf("inbound_emails"));
+    expect(SELF_HOSTED_RUNTIME_TABLES.indexOf("inbound_emails")).toBeLessThan(SELF_HOSTED_RUNTIME_TABLES.indexOf("inbound_recipients"));
+    expect(SELF_HOSTED_RUNTIME_TABLES.indexOf("inbound_emails")).toBeLessThan(SELF_HOSTED_RUNTIME_TABLES.indexOf("inbound_labels"));
+    expect(SELF_HOSTED_S3_MATERIALIZATION_TABLES.indexOf("mail_messages")).toBeLessThan(SELF_HOSTED_S3_MATERIALIZATION_TABLES.indexOf("inbound_emails"));
+  });
+
   it("fails closed when remote source-of-truth mode has no database URL", async () => {
     process.env["HASNA_EMAILS_STORAGE_MODE"] = "remote";
 

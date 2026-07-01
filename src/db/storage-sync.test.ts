@@ -232,6 +232,14 @@ describe("emails storage sync configuration", () => {
     expect(() => parseStorageTables(["providers", "missing"])).toThrow("Unknown emails sync table(s): missing");
   });
 
+  it("pushes canonical messages before inbound rows that reference them", () => {
+    const tables = parseStorageTables();
+
+    expect(tables.indexOf("mail_messages")).toBeLessThan(tables.indexOf("inbound_emails"));
+    expect(tables.indexOf("inbound_emails")).toBeLessThan(tables.indexOf("inbound_recipients"));
+    expect(tables.indexOf("inbound_emails")).toBeLessThan(tables.indexOf("inbound_labels"));
+  });
+
   it("reconciles remote-derived labels and canonical mailbox state after storage sync", () => {
     const source = readFileSync(`${import.meta.dir}/storage-sync.ts`, "utf8");
 
