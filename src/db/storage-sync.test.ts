@@ -19,12 +19,14 @@ import {
   runStorageMigrations,
   storageSync,
 } from "./storage-sync.js";
+import { MAILERY_MODE_ENV_KEYS } from "../lib/mode.js";
 
 type Row = Record<string, unknown>;
 
 const STORAGE_ENV = [
   ...STORAGE_DATABASE_ENV,
   ...STORAGE_MODE_ENV,
+  ...MAILERY_MODE_ENV_KEYS,
 ] as const;
 
 class FakeRemote {
@@ -190,8 +192,10 @@ describe("emails storage sync configuration", () => {
   });
 
   it("resolves storage mode from storage envs", () => {
+    process.env["MAILERY_MODE"] = "local";
     expect(getStorageMode()).toBe("local");
 
+    process.env["MAILERY_MODE"] = "self_hosted";
     process.env["EMAILS_DATABASE_URL"] = "postgres://remote";
     expect(getStorageMode()).toBe("remote");
 
@@ -350,6 +354,16 @@ describe("storage table sync batching", () => {
     const sql = remote.runCalls.map((call) => call.sql).join("\n");
     expect(sql).not.toContain("INSERT INTO inbound_labels");
     expect(sql).toContain("CREATE TABLE IF NOT EXISTS feedback");
+  });
+
+  it("runs the attachment path repair migration on drifted PostgreSQL schemas", async () => {
+    const remote = new FakeRemote({}, Array.from({ length: 44 }, (_, index) => ({ id: index + 1 })));
+
+    await runStorageMigrations(remote as unknown as PgAdapterAsync);
+
+    const sql = remote.runCalls.map((call) => call.sql).join("\n");
+    expect(sql).toContain("ALTER TABLE inbound_emails ADD COLUMN IF NOT EXISTS attachment_paths");
+    expect(sql).toContain("INSERT INTO _migrations (id) VALUES (45)");
   });
 
   it("pushes local rows in bounded batches", async () => {

@@ -1727,6 +1727,13 @@ export const PG_MIGRATIONS: string[] = [
   INSERT INTO _migrations (id) VALUES (44) ON CONFLICT DO NOTHING;
   `,
 
+  // Migration 45: repair drifted Postgres databases that recorded migration 17
+  // without retaining the attachment path column expected by self-hosted reads.
+  `
+  ALTER TABLE inbound_emails ADD COLUMN IF NOT EXISTS attachment_paths TEXT NOT NULL DEFAULT '[]';
+  INSERT INTO _migrations (id) VALUES (45) ON CONFLICT DO NOTHING;
+  `,
+
   // Feedback table
   `
   CREATE TABLE IF NOT EXISTS feedback (

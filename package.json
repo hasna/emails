@@ -1,6 +1,6 @@
 {
   "name": "@hasna/mailery",
-  "version": "0.6.83",
+  "version": "0.6.84",
   "description": "Mailery email management CLI + MCP server + dashboard for Resend, AWS SES, and Cloudflare inbound workflows",
   "type": "module",
   "repository": {
@@ -57,7 +57,7 @@
     "no-cloud:source": "bun test src/no-cloud-boundary.test.ts",
     "no-cloud:pack": "node scripts/no-cloud-artifact-scan.mjs",
     "prepack": "bun run build && bun run no-cloud:source && bun run no-cloud:pack",
-    "prepublishOnly": "EMAILS_DB_PATH=:memory: bun test && bun run build && bun run no-cloud:pack",
+    "prepublishOnly": "tmp_home=$(mktemp -d) && HOME=\"$tmp_home\" MAILERY_MODE=local HASNA_EMAILS_MODE=local EMAILS_DB_PATH=:memory: bun test; status=$?; rm -rf \"$tmp_home\"; if [ $status -ne 0 ]; then exit $status; fi; bun run build && bun run no-cloud:pack",
     "dev:cli": "bun run src/cli/index.tsx",
     "dev:mcp": "bun run src/mcp/index.ts",
     "dev:serve": "bun run src/server/index.ts",
