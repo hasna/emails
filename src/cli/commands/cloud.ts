@@ -832,13 +832,15 @@ export function registerCloudCommands(program: Command, output: OutputFn, deps: 
     .option("--address <email>", "Initial mailbox address")
     .option("--purchase", "Purchase the domain if available")
     .option("--catch-all", "Configure catch-all receiving when supported")
-    .action(async (domainName: string, opts: { address?: string; purchase?: boolean; catchAll?: boolean }, cmd: Command) => {
+    .option("--mx-migration-consent", "Consent to switch the domain MX records to Mailery Cloud inbound mail")
+    .action(async (domainName: string, opts: { address?: string; purchase?: boolean; catchAll?: boolean; mxMigrationConsent?: boolean }, cmd: Command) => {
       try {
         const result = await makeClient(cmd, deps).setupDomain({
           domain: domainName,
           address: opts.address,
           purchase: !!opts.purchase,
           catchAll: !!opts.catchAll,
+          mxMigrationConsent: !!opts.mxMigrationConsent,
         });
         output(result, chalk.green(`Cloud domain ${result.domain}: ${result.status}`));
       } catch (e) {

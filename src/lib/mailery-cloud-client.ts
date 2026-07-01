@@ -199,6 +199,7 @@ export interface MaileryCloudDomainSetupInput {
   purchase?: boolean;
   provider?: "ses" | "route53" | "open-domains" | string;
   catchAll?: boolean;
+  mxMigrationConsent?: boolean;
 }
 
 export interface MaileryCloudDomainSetupResult {

@@ -68,4 +68,30 @@ describe("MaileryCloudClient", () => {
       expect(error instanceof Error ? error.message : "").toBe("billing_read scope required");
     }
   });
+
+  it("sends explicit MX migration consent during cloud domain setup", async () => {
+    const calls: Array<{ body?: unknown }> = [];
+    const client = new MaileryCloudClient({
+      apiUrl: "https://mailery.example",
+      token: "t",
+      fetchImpl: (async (_url, init) => {
+        calls.push({ body: init?.body ? JSON.parse(String(init.body)) as unknown : undefined });
+        return jsonResponse({ domain: "example.com", status: "pending_dns" });
+      }) as typeof fetch,
+    });
+
+    await client.setupDomain({
+      domain: "example.com",
+      address: "agent",
+      catchAll: true,
+      mxMigrationConsent: true,
+    });
+
+    expect(calls[0]?.body).toEqual({
+      domain: "example.com",
+      address: "agent",
+      catchAll: true,
+      mxMigrationConsent: true,
+    });
+  });
 });

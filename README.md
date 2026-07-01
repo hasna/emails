@@ -102,7 +102,7 @@ mailery inbox list --limit 20
 mailery cloud billing overview
 mailery cloud billing subscribe --plan starter --no-open
 mailery cloud domain available example-agent-mail.com
-mailery cloud domain setup example-agent-mail.com --address agent --catch-all
+mailery cloud domain setup example-agent-mail.com --address agent --catch-all --mx-migration-consent
 ```
 
 The starter SaaS plan is currently `$10/month` and grants hosted credits. Domain
