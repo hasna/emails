@@ -185,8 +185,8 @@ describe("MCP resource payloads", () => {
       if (sql.includes("provider_id IS NULL")) return "0";
       if (sql.includes("raw_s3_url LIKE")) return "4";
       if (sql.includes("provider_id = ?")) return "3";
-      if (sql.includes("COALESCE(is_sent, false) = true")) return "1";
-      if (sql.includes("COALESCE(is_read, false) = false")) return "2";
+      if (sql.includes("is_sent::text") && sql.includes("'true'")) return "1";
+      if (sql.includes("is_read::text") && sql.includes("'false'")) return "2";
       return "7";
     };
     const remote = {

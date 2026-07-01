@@ -85,7 +85,7 @@ describe("self-hosted inbound repository", () => {
       is_read: false,
       is_starred: true,
     });
-    expect(calls[0]!.sql).toContain("is_read = 0");
+    expect(calls[0]!.sql).toContain("is_read::text");
     expect(calls[0]!.sql).toContain("provider_id = ?");
     expect(calls[0]!.sql).toContain("LOWER(COALESCE(text_body, '')) LIKE ?");
     expect(calls[0]!.sql).toContain("recipient.address IN (?)");
@@ -314,8 +314,8 @@ describe("self-hosted inbound repository", () => {
   it("builds mailbox and source status from the remote source of truth", async () => {
     const calls: Array<{ sql: string; params: unknown[] }> = [];
     const countFor = (sql: string) => {
-      if (sql.includes("COALESCE(is_sent, false) = true")) return "1";
-      if (sql.includes("COALESCE(is_read, false) = false")) return "2";
+      if (sql.includes("is_sent::text") && sql.includes("'true'")) return "1";
+      if (sql.includes("is_read::text") && sql.includes("'false'")) return "2";
       if (sql.includes("raw_s3_url LIKE")) return "4";
       if (sql.includes("provider_id = ?")) return "3";
       return "7";

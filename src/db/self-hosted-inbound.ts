@@ -218,28 +218,36 @@ function inboundStateMessagePredicate(): string {
   return "mail_message_id = COALESCE((SELECT mail_message_id FROM inbound_emails WHERE id = ?), 'msg:inbound:' || ?)";
 }
 
+function pgFlagFalse(column: string): string {
+  return `COALESCE(${column}::text, 'false') IN ('false', '0', 'f')`;
+}
+
+function pgFlagTrue(column: string): string {
+  return `COALESCE(${column}::text, 'false') IN ('true', '1', 't')`;
+}
+
 function appendMailboxFilter(mailbox: SelfHostedMailbox | undefined, conditions: string[]): void {
   switch (mailbox ?? "inbox") {
     case "inbox":
-      conditions.push("is_sent = 0", "is_archived = 0", "is_spam = 0", "is_trash = 0");
+      conditions.push(pgFlagFalse("is_sent"), pgFlagFalse("is_archived"), pgFlagFalse("is_spam"), pgFlagFalse("is_trash"));
       break;
     case "unread":
-      conditions.push("is_sent = 0", "is_read = 0", "is_archived = 0", "is_spam = 0", "is_trash = 0");
+      conditions.push(pgFlagFalse("is_sent"), pgFlagFalse("is_read"), pgFlagFalse("is_archived"), pgFlagFalse("is_spam"), pgFlagFalse("is_trash"));
       break;
     case "starred":
-      conditions.push("is_sent = 0", "is_starred = 1", "is_archived = 0", "is_spam = 0", "is_trash = 0");
+      conditions.push(pgFlagFalse("is_sent"), pgFlagTrue("is_starred"), pgFlagFalse("is_archived"), pgFlagFalse("is_spam"), pgFlagFalse("is_trash"));
       break;
     case "archived":
-      conditions.push("is_sent = 0", "is_archived = 1", "is_spam = 0", "is_trash = 0");
+      conditions.push(pgFlagFalse("is_sent"), pgFlagTrue("is_archived"), pgFlagFalse("is_spam"), pgFlagFalse("is_trash"));
       break;
     case "sent":
-      conditions.push("is_sent = 1");
+      conditions.push(pgFlagTrue("is_sent"));
       break;
     case "spam":
-      conditions.push("is_sent = 0", "is_spam = 1");
+      conditions.push(pgFlagFalse("is_sent"), pgFlagTrue("is_spam"));
       break;
     case "trash":
-      conditions.push("is_sent = 0", "is_trash = 1");
+      conditions.push(pgFlagFalse("is_sent"), pgFlagTrue("is_trash"));
       break;
   }
 }
@@ -488,13 +496,13 @@ const MAILBOX_LABELS: Record<SelfHostedMailbox, string> = {
 };
 
 const COUNT_WHERE: Record<SelfHostedMailbox, string> = {
-  inbox: "COALESCE(is_sent, false) = false AND COALESCE(is_archived, false) = false AND COALESCE(is_spam, false) = false AND COALESCE(is_trash, false) = false",
-  unread: "COALESCE(is_sent, false) = false AND COALESCE(is_read, false) = false AND COALESCE(is_archived, false) = false AND COALESCE(is_spam, false) = false AND COALESCE(is_trash, false) = false",
-  starred: "COALESCE(is_sent, false) = false AND COALESCE(is_starred, false) = true AND COALESCE(is_archived, false) = false AND COALESCE(is_spam, false) = false AND COALESCE(is_trash, false) = false",
-  sent: "COALESCE(is_sent, false) = true",
-  archived: "COALESCE(is_sent, false) = false AND COALESCE(is_archived, false) = true AND COALESCE(is_spam, false) = false AND COALESCE(is_trash, false) = false",
-  spam: "COALESCE(is_sent, false) = false AND COALESCE(is_spam, false) = true",
-  trash: "COALESCE(is_sent, false) = false AND COALESCE(is_trash, false) = true",
+  inbox: `${pgFlagFalse("is_sent")} AND ${pgFlagFalse("is_archived")} AND ${pgFlagFalse("is_spam")} AND ${pgFlagFalse("is_trash")}`,
+  unread: `${pgFlagFalse("is_sent")} AND ${pgFlagFalse("is_read")} AND ${pgFlagFalse("is_archived")} AND ${pgFlagFalse("is_spam")} AND ${pgFlagFalse("is_trash")}`,
+  starred: `${pgFlagFalse("is_sent")} AND ${pgFlagTrue("is_starred")} AND ${pgFlagFalse("is_archived")} AND ${pgFlagFalse("is_spam")} AND ${pgFlagFalse("is_trash")}`,
+  sent: pgFlagTrue("is_sent"),
+  archived: `${pgFlagFalse("is_sent")} AND ${pgFlagTrue("is_archived")} AND ${pgFlagFalse("is_spam")} AND ${pgFlagFalse("is_trash")}`,
+  spam: `${pgFlagFalse("is_sent")} AND ${pgFlagTrue("is_spam")}`,
+  trash: `${pgFlagFalse("is_sent")} AND ${pgFlagTrue("is_trash")}`,
 };
 
 function numericCount(value: unknown): number {
@@ -532,7 +540,7 @@ async function latestInbound(remote: Remote, filter: { sql: string; params: Arra
   const rows = await remote.all(
     `SELECT MAX(received_at) AS latest
        FROM inbound_emails
-      WHERE COALESCE(is_sent, false) = false${filter.sql}`,
+      WHERE ${pgFlagFalse("is_sent")}${filter.sql}`,
     ...filter.params,
   ) as Array<{ latest: string | Date | null }>;
   return iso(rows[0]?.latest);
@@ -914,7 +922,7 @@ export async function listSelfHostedSourceSummaries(
 export async function getSelfHostedInboxStatus(remote?: Remote): Promise<SelfHostedInboxStatus> {
   return withRemote(remote, async (pg) => {
     const filter = sourceFilter(undefined);
-    const total = await countInbound(pg, "COALESCE(is_sent, false) = false");
+    const total = await countInbound(pg, pgFlagFalse("is_sent"));
     const unread = await countInbound(pg, COUNT_WHERE.unread);
     const latest_received_at = await latestInbound(pg, filter);
     const mailboxes = await getSelfHostedMailboxStatus(undefined, pg);
