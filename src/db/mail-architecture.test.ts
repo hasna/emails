@@ -680,5 +680,6 @@ describe("mail architecture data model", () => {
     expect(pgSql).toContain("INSERT INTO _migrations (id) VALUES (42)");
     expect(pgSql).toContain("INSERT INTO _migrations (id) VALUES (43)");
     expect(pgSql).toContain("INSERT INTO _migrations (id) VALUES (44)");
+    expect(pgSql.match(/NULLIF\((?:NEW\.|inbound\.)?read_at, ''\)::TIMESTAMPTZ/g)).toHaveLength(5);
   });
 });
