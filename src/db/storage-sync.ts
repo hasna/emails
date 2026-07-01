@@ -57,6 +57,9 @@ type Row = Record<string, unknown>;
 type StorageTableFilterParam = string | number | bigint | boolean | null | Uint8Array;
 export const STORAGE_SYNC_BATCH_SIZE = 500;
 const POSTGRES_UPSERT_PARAM_BUDGET = 30_000;
+const REMOTE_PUSH_OMIT_COLUMNS: Partial<Record<StorageTable, Set<string>>> = {
+  inbound_emails: new Set(["text_body", "html_body", "headers_json"]),
+};
 
 const PRIMARY_KEYS: Record<StorageTable, string[]> = {
   providers: ["id"],
@@ -442,7 +445,7 @@ export async function pushTable(
         .all(...params);
       result.rowsRead += rows.length;
       if (rows.length === 0) break;
-      const columns = filterRemoteColumns(remoteColumns, Object.keys(rows[0]!));
+      const columns = filterRemotePushColumns(table, filterRemoteColumns(remoteColumns, Object.keys(rows[0]!)));
       result.rowsWritten += await upsertPg(remote, table, columns, rows, remoteColumns);
       if (rows.length < batchSize) break;
     }
@@ -503,8 +506,13 @@ async function getRemoteColumns(remote: PgAdapterAsync, table: string): Promise<
 }
 
 function filterRemoteColumns(remoteColumns: Map<string, string>, columns: string[]): string[] {
-  if (remoteColumns.size === 0) return columns;
-  return columns.filter((column) => remoteColumns.has(column));
+  return remoteColumns.size === 0 ? columns : columns.filter((column) => remoteColumns.has(column));
+}
+
+function filterRemotePushColumns(table: StorageTable, columns: string[]): string[] {
+  const omitted = REMOTE_PUSH_OMIT_COLUMNS[table];
+  if (!omitted) return columns;
+  return columns.filter((column) => !omitted.has(column));
 }
 
 function filterLocalColumns(db: Database, table: string, columns: string[]): string[] {

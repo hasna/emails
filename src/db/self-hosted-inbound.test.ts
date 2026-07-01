@@ -3,6 +3,7 @@ import {
   addSelfHostedInboundLabel,
   clearSelfHostedInboundEmails,
   deleteSelfHostedInboundEmail,
+  getSelfHostedInboundEmail,
   getSelfHostedInboundAttachmentPaths,
   getSelfHostedInboxStatus,
   getSelfHostedMailboxStatus,
@@ -145,6 +146,34 @@ describe("self-hosted inbound repository", () => {
     expect(runs[1]!.sql).toContain("UPDATE mailbox_message_state");
   });
 
+  it("reads body and headers from canonical mail_messages when inbound rows are lean", async () => {
+    const calls: Array<{ sql: string; params: unknown[] }> = [];
+    const remote = {
+      all: async (sql: string, ...params: unknown[]) => {
+        calls.push({ sql, params });
+        if (sql.includes("SELECT id FROM inbound_emails")) return [{ id: "email_12345678" }];
+        return [inboundRow({
+          text_body: "canonical text from mail_messages",
+          html_body: "<p>canonical html</p>",
+          headers_json: JSON.stringify({ "Message-ID": "<canonical@example.com>" }),
+        })];
+      },
+      run: async () => undefined,
+      close: async () => undefined,
+    };
+
+    const email = await getSelfHostedInboundEmail("email_123", remote);
+
+    expect(email).toMatchObject({
+      id: "email_12345678",
+      text_body: "canonical text from mail_messages",
+      html_body: "<p>canonical html</p>",
+    });
+    expect(email?.headers).toEqual({ "Message-ID": "<canonical@example.com>" });
+    expect(calls[1]!.sql).toContain("LEFT JOIN mail_messages");
+    expect(calls[1]!.sql).toContain("COALESCE(message.text_body, inbound.text_body)");
+  });
+
   it("reads attachment paths and verification candidates from the remote source of truth", async () => {
     const calls: Array<{ sql: string; params: unknown[] }> = [];
     const remote = {
@@ -189,6 +218,7 @@ describe("self-hosted inbound repository", () => {
       received_at: "2026-07-01T09:00:00.000Z",
     }]);
     expect(calls.some((call) => call.sql.includes("SELECT attachment_paths FROM inbound_emails"))).toBe(true);
+    expect(calls.some((call) => call.sql.includes("LEFT JOIN mail_messages"))).toBe(true);
     expect(calls.some((call) => call.params.includes("ops@example.com"))).toBe(true);
   });
 

@@ -409,6 +409,42 @@ describe("storage table sync batching", () => {
     expect(remote.runCalls[0]!.params[0]).toBe("2");
   });
 
+  it("pushes inbound email rows as a lean index because mail_messages owns bodies", async () => {
+    const localRows = [{
+      id: "inbound-lean",
+      provider_id: null,
+      message_id: "<lean@example.com>",
+      from_address: "sender@example.com",
+      to_addresses: "[\"ops@example.com\"]",
+      cc_addresses: "[]",
+      subject: "Lean inbound",
+      text_body: "large body should live in mail_messages",
+      html_body: "<p>large html should live in mail_messages</p>",
+      attachments_json: "[]",
+      attachment_paths: "[]",
+      headers_json: "{\"Message-ID\":\"<lean@example.com>\"}",
+      raw_size: 123,
+      received_at: "2026-07-01T12:00:00.000Z",
+      created_at: "2026-07-01T12:00:00.000Z",
+      mail_message_id: "msg:inbound:inbound-lean",
+    }];
+    const db = {
+      query: (sql: string) => ({
+        get: () => sql.includes("sqlite_master") ? { name: "inbound_emails" } : null,
+        all: (...args: unknown[]) => localRows.slice(Number(args[1]), Number(args[1]) + Number(args[0])),
+      }),
+    } as unknown as Database;
+    const remote = new FakeRemote();
+
+    const result = await pushTable(db, remote as unknown as PgAdapterAsync, "inbound_emails", { batchSize: 1 });
+
+    expect(result).toMatchObject({ table: "inbound_emails", rowsRead: 1, rowsWritten: 1, errors: [] });
+    expect(remote.runCalls[0]!.sql).not.toContain("text_body");
+    expect(remote.runCalls[0]!.sql).not.toContain("html_body");
+    expect(remote.runCalls[0]!.sql).not.toContain("headers_json");
+    expect(remote.runCalls[0]!.params).not.toContain("large body should live in mail_messages");
+  });
+
   it("returns per-table push errors for CLI aggregation", async () => {
     const db = {
       query: (sql: string) => ({

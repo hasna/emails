@@ -129,6 +129,37 @@ const INBOUND_SUMMARY_COLS = `
   created_at
 `;
 
+const INBOUND_FULL_COLS = `
+  inbound.id,
+  inbound.provider_id,
+  inbound.message_id,
+  inbound.in_reply_to_email_id,
+  inbound.provider_thread_id,
+  inbound.thread_id,
+  inbound.provider_history_id,
+  inbound.provider_internal_date,
+  inbound.label_ids_json,
+  inbound.raw_s3_url,
+  inbound.metadata_s3_url,
+  inbound.from_address,
+  inbound.to_addresses,
+  inbound.cc_addresses,
+  inbound.subject,
+  COALESCE(message.text_body, inbound.text_body) AS text_body,
+  COALESCE(message.html_body, inbound.html_body) AS html_body,
+  inbound.attachments_json,
+  inbound.attachment_paths,
+  COALESCE(message.headers_json, inbound.headers_json) AS headers_json,
+  inbound.raw_size,
+  inbound.is_read,
+  inbound.read_at,
+  inbound.is_archived,
+  inbound.is_starred,
+  inbound.is_sent,
+  inbound.received_at,
+  inbound.created_at
+`;
+
 function iso(value: string | Date | null | undefined): string | null {
   if (value == null) return null;
   if (value instanceof Date) return value.toISOString();
@@ -267,8 +298,14 @@ function applyFilters(opts: ListSelfHostedInboundOpts | undefined, conditions: s
       OR LOWER(COALESCE(from_address, '')) LIKE ?
       OR LOWER(COALESCE(to_addresses, '')) LIKE ?
       OR LOWER(COALESCE(text_body, '')) LIKE ?
+      OR EXISTS (
+        SELECT 1
+          FROM mail_messages message
+         WHERE message.id = COALESCE(inbound_emails.mail_message_id, 'msg:inbound:' || inbound_emails.id)
+           AND LOWER(COALESCE(message.text_body, '')) LIKE ?
+      )
     )`);
-    params.push(like, like, like, like);
+    params.push(like, like, like, like, like);
   }
 
   const recipients = (opts?.recipients ?? []).map((value) => value.trim().toLowerCase()).filter(Boolean);
@@ -607,7 +644,15 @@ export async function resolveSelfHostedInboundEmailId(id: string, remote?: Remot
 export async function getSelfHostedInboundEmail(id: string, remote?: Remote): Promise<InboundEmail | null> {
   return withRemote(remote, async (pg) => {
     const fullId = await resolveSelfHostedInboundEmailId(id, pg);
-    const row = await pg.all("SELECT * FROM inbound_emails WHERE id = ? LIMIT 1", fullId) as InboundEmailRow[];
+    const row = await pg.all(
+      `SELECT ${INBOUND_FULL_COLS}
+         FROM inbound_emails inbound
+         LEFT JOIN mail_messages message
+           ON message.id = COALESCE(inbound.mail_message_id, 'msg:inbound:' || inbound.id)
+        WHERE inbound.id = ?
+        LIMIT 1`,
+      fullId,
+    ) as InboundEmailRow[];
     return row[0] ? rowToEmail(row[0]) : null;
   });
 }
@@ -689,12 +734,13 @@ export async function listSelfHostedVerificationCodeCandidates(
     const limit = safeLimit(opts.limit);
     const active = verificationCandidateFilterSql(normalized, false, opts);
     const archived = verificationCandidateFilterSql(normalized, true, opts);
-    const selected = "e.id, e.from_address, e.subject, e.text_body, e.html_body, e.received_at";
+    const selected = "e.id, e.from_address, e.subject, COALESCE(message.text_body, e.text_body) AS text_body, COALESCE(message.html_body, e.html_body) AS html_body, e.received_at";
     const rows = await pg.all(
       `WITH active AS (
          SELECT ${selected}
            FROM inbound_recipients recipient
            JOIN inbound_emails e ON e.id = recipient.inbound_email_id
+           LEFT JOIN mail_messages message ON message.id = COALESCE(e.mail_message_id, 'msg:inbound:' || e.id)
           WHERE ${active.conditions.join(" AND ")}
           ORDER BY e.received_at DESC
           LIMIT ?
@@ -703,6 +749,7 @@ export async function listSelfHostedVerificationCodeCandidates(
          SELECT ${selected}
            FROM inbound_recipients recipient
            JOIN inbound_emails e ON e.id = recipient.inbound_email_id
+           LEFT JOIN mail_messages message ON message.id = COALESCE(e.mail_message_id, 'msg:inbound:' || e.id)
           WHERE ${archived.conditions.join(" AND ")}
           ORDER BY e.received_at DESC
           LIMIT ?
