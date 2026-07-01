@@ -166,8 +166,15 @@ function iso(value: string | Date | null | undefined): string | null {
   return String(value);
 }
 
-function bool(value: number | boolean | null | undefined): boolean {
+function bool(value: string | number | boolean | null | undefined): boolean {
   if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (["1", "t", "true", "yes", "y", "on"].includes(normalized)) return true;
+    if (["0", "f", "false", "no", "n", "off", ""].includes(normalized)) return false;
+    const numeric = Number(normalized);
+    return Number.isNaN(numeric) ? Boolean(normalized) : numeric !== 0;
+  }
   return Number(value ?? 0) !== 0;
 }
 
@@ -821,7 +828,7 @@ export async function listSelfHostedSourceSummaries(
     ];
 
     const providerRows = await pg.all(
-      `SELECT p.id, p.name, p.type, COALESCE(p.active, 1) AS active,
+      `SELECT p.id, p.name, p.type, COALESCE(p.active::text, 'true') AS active,
               EXISTS (
                 SELECT 1 FROM inbound_emails inbound WHERE inbound.provider_id = p.id
                 UNION ALL
@@ -831,8 +838,8 @@ export async function listSelfHostedSourceSummaries(
         ORDER BY p.name ASC`,
     ) as Array<{ id: string; name: string; type: string; active: unknown; has_mail: unknown }>;
     for (const provider of providerRows) {
-      const hasMail = Boolean(provider.has_mail);
-      const active = Boolean(provider.active);
+      const hasMail = bool(provider.has_mail as string | number | boolean | null | undefined);
+      const active = bool(provider.active as string | number | boolean | null | undefined);
       if (!active && !hasMail) continue;
       sources.push(await selfHostedSourceSummary({
         id: `provider:${provider.id}`,
