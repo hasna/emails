@@ -372,7 +372,7 @@ async function reconcileRemoteDerivedState(remote: PgAdapterAsync): Promise<void
     UPDATE mailbox_message_state state
        SET labels_json = inbound.label_ids_json,
            is_read = inbound.is_read,
-           read_at = inbound.read_at,
+           read_at = NULLIF(inbound.read_at, '')::TIMESTAMPTZ,
            is_archived = inbound.is_archived,
            is_starred = inbound.is_starred,
            is_spam = inbound.is_spam,

@@ -147,6 +147,7 @@ describe("emails storage sync configuration", () => {
     const source = readFileSync(`${import.meta.dir}/storage-sync.ts`, "utf8");
     expect(source).not.toMatch(/^\s*import\s+(?!type\b)[\s\S]*?\sfrom\s+["']\.\/pg-migrations\.js["'];/m);
     expect(source).toContain('await import("./pg-migrations.js")');
+    expect(source).toContain("read_at = NULLIF(inbound.read_at, '')::TIMESTAMPTZ");
   });
 
   it("prefers canonical storage database env over fallback", () => {
