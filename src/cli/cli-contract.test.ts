@@ -3,11 +3,14 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDatabase, resetDatabase } from "../db/database.js";
+import { createDomain, updateDnsStatus, updateDomainReadiness } from "../db/domains.js";
 import { storeEmailContent } from "../db/email-content.js";
 import { createEmail } from "../db/emails.js";
 import { storeInboundEmail } from "../db/inbound.js";
 import { createProvider } from "../db/providers.js";
+import { setDomainProvisioning } from "../db/provisioning.js";
 import { storeSandboxEmail } from "../db/sandbox.js";
+import { registerS3Source } from "../lib/s3-sync.js";
 
 const tempDirs: string[] = [];
 
@@ -638,6 +641,91 @@ describe("CLI JSON contracts", () => {
     expect(stdoutText(send)).toContain("[NOT SENT]");
     expect(stderrText(send)).toBe("");
   }, 15_000);
+
+  it("prints JSON domain lifecycle state for local cache-only and self-hosted source rows", () => {
+    const dir = mkdtempSync(join(tmpdir(), "emails-cli-domains-"));
+    tempDirs.push(dir);
+    const env = isolatedEnv(join(dir, "emails.db"), join(dir, "home"));
+    const seeded = withSeededCliDb(env, () => {
+      const localProvider = createProvider({ name: "local-sandbox", type: "sandbox" });
+      const localDomain = createDomain(localProvider.id, "local-only.example.com");
+      updateDomainReadiness(localDomain.id, {
+        domain_type: "local_only",
+        source_of_truth: "local",
+      });
+
+      const selfHostedProvider = createProvider({ name: "self-hosted-ses", type: "ses", region: "us-east-1" });
+      const selfHostedDomain = createDomain(selfHostedProvider.id, "selfhosted.example.com");
+      updateDnsStatus(selfHostedDomain.id, "verified", "verified", "verified");
+      updateDomainReadiness(selfHostedDomain.id, {
+        domain_type: "self_hosted",
+        source_of_truth: "postgres",
+        ownership_status: "verified",
+        inbound_status: "ready",
+        outbound_status: "ready",
+      });
+      setDomainProvisioning(selfHostedDomain.id, { provisioning_status: "ready", send_provider: "ses" });
+      registerS3Source({
+        bucket: "temp-self-hosted-inbound",
+        prefix: "inbound/selfhosted.example.com/",
+        region: "us-east-1",
+        providerId: selfHostedProvider.id,
+        status: "live",
+        liveSyncEnabled: true,
+      });
+      return { localDomainId: localDomain.id, selfHostedDomainId: selfHostedDomain.id };
+    });
+
+    const localRows = expectCliJsonOk<Array<{
+      id: string;
+      domain: string;
+      mode: string;
+      domain_type: string;
+      source_of_truth: string;
+      readiness: { send_ready: boolean; receive_ready: boolean };
+    }>>(runCli(["--json", "domains", "list", "--limit", "10"], env));
+    const local = localRows.find((row) => row.id === seeded.localDomainId);
+    expect(local).toMatchObject({
+      domain: "local-only.example.com",
+      mode: "local",
+      domain_type: "local_only",
+      source_of_truth: "local",
+      readiness: { send_ready: false, receive_ready: false },
+    });
+
+    const selfHostedEnv = {
+      ...env,
+      MAILERY_MODE: "self_hosted",
+      HASNA_EMAILS_STORAGE_MODE: "hybrid",
+    };
+    const selfHosted = expectCliJsonOk<{
+      id: string;
+      domain: string;
+      mode: string;
+      domain_type: string;
+      source_of_truth: string;
+      readiness: {
+        send_ready: boolean;
+        receive_ready: boolean;
+        inbound_evidence_ready: boolean;
+        inbound_evidence: { live_s3_sources: number };
+      };
+    }>(runCli(["--json", "domains", "status", "selfhosted.example.com"], selfHostedEnv));
+
+    expect(selfHosted).toMatchObject({
+      id: seeded.selfHostedDomainId,
+      domain: "selfhosted.example.com",
+      mode: "self_hosted",
+      domain_type: "self_hosted",
+      source_of_truth: "postgres",
+      readiness: {
+        send_ready: true,
+        receive_ready: true,
+        inbound_evidence_ready: true,
+        inbound_evidence: { live_s3_sources: 1 },
+      },
+    });
+  }, 20_000);
 
   it("prints valid JSON for sent email show", () => {
     const dir = mkdtempSync(join(tmpdir(), "emails-cli-contract-"));
