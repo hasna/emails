@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { closeDatabase, getDatabase } from "../../db/database.js";
 import { storeInboundEmail } from "../../db/inbound.js";
 import { getConfigValue } from "../../lib/config.js";
+import { MaileryCloudError } from "../../lib/mailery-cloud-client.js";
 import { redactSecrets } from "../../lib/redaction.js";
 import { registerCloudCommands } from "./cloud.js";
 
@@ -535,6 +536,112 @@ describe("cloud command", () => {
     expect(result.data).toMatchObject({ read: 1, stored: 0, updated: 1, pruned: 0, source_of_truth: false });
   });
 
+  it("preserves cloud attachment refs, custom labels, and classification locally", async () => {
+    const cloudMessage = {
+      id: "cloud_msg_attachments",
+      tenantId: "ten_1",
+      mailboxId: "mbx_cloud",
+      direction: "inbound" as const,
+      status: "parsed",
+      subject: "Invoice attached",
+      fromAddress: "billing@example.com",
+      toAddresses: ["agent@example.com"],
+      ccAddresses: [],
+      externalId: "ses:abc",
+      receivedAt: "2026-06-30T10:00:00.000Z",
+      sentAt: null,
+      textBody: "cloud body",
+      htmlBody: null,
+      cleanMarkdown: "# Invoice\n\ncloud body",
+      summary: "Invoice needs review",
+      parserModel: "groq-test",
+      classification: {
+        labels: ["Billing", "Important"],
+        label: "urgent",
+        priority: 2,
+        sentiment: "neutral",
+        confidence: 0.82,
+        model: "groq-classifier",
+      },
+      labels: [{ name: "Client Finance", kind: "custom" }],
+      metadata: { source: "ses" },
+      importanceScore: 91,
+      isRead: false,
+      isImportant: true,
+      isSpam: false,
+      isTrash: false,
+      isArchived: false,
+      createdAt: "2026-06-30T10:00:00.000Z",
+      updatedAt: "2026-06-30T10:00:00.000Z",
+    };
+
+    await runCloudCommand(["cloud", "--api-url", "https://mailery.test", "messages", "pull", "--limit", "1"], {
+      createClient: () => ({
+        listMessages: async () => [cloudMessage],
+        getMessage: async () => ({
+          ...cloudMessage,
+          attachments: [{
+            id: "att_1",
+            filename: "invoice.pdf",
+            contentType: "application/pdf",
+            sizeBytes: 2048,
+            checksum: "sha256:test",
+            storageDriver: "s3",
+            storageKey: "ten_1/cloud_msg_attachments/invoice.pdf",
+            download_url: "/api/v1/attachments/att_1/download",
+            body: { driver: "s3", key: "ten_1/cloud_msg_attachments/invoice.pdf" },
+            metadata: { disposition: "attachment" },
+          }],
+        }),
+      } as never),
+    });
+
+    const db = getDatabase();
+    const row = db.query(
+      "SELECT id, label_ids_json, attachments_json, attachment_paths, headers_json FROM inbound_emails WHERE message_id = ?",
+    ).get("cloud:cloud_msg_attachments") as {
+      id: string;
+      label_ids_json: string;
+      attachments_json: string;
+      attachment_paths: string;
+      headers_json: string;
+    };
+    const labels = JSON.parse(row.label_ids_json) as string[];
+    const attachments = JSON.parse(row.attachments_json) as Array<Record<string, unknown>>;
+    const paths = JSON.parse(row.attachment_paths) as Array<Record<string, unknown>>;
+    const headers = JSON.parse(row.headers_json) as Record<string, string>;
+    const triage = db.query("SELECT label, priority, summary, sentiment, confidence, model FROM email_triage WHERE inbound_email_id = ?").get(row.id) as Record<string, unknown>;
+
+    expect(labels).toEqual(["important", "Billing", "urgent", "Client Finance"]);
+    expect(attachments[0]).toMatchObject({
+      filename: "invoice.pdf",
+      content_type: "application/pdf",
+      size: 2048,
+      cloud_attachment_id: "att_1",
+      checksum: "sha256:test",
+      storage_driver: "s3",
+      storage_key: "ten_1/cloud_msg_attachments/invoice.pdf",
+      download_url: "https://mailery.test/api/v1/attachments/att_1/download",
+      body: { driver: "s3", key: "ten_1/cloud_msg_attachments/invoice.pdf" },
+      metadata: { disposition: "attachment" },
+    });
+    expect(paths[0]).toMatchObject({
+      filename: "invoice.pdf",
+      cloud_attachment_id: "att_1",
+      download_url: "https://mailery.test/api/v1/attachments/att_1/download",
+    });
+    expect(JSON.parse(headers["X-Mailery-Cloud-Classification"]!)).toMatchObject({ label: "urgent", labels: ["Billing", "Important"] });
+    expect(headers["X-Mailery-Cloud-Labels"]).toBe("important, Billing, urgent, Client Finance");
+    expect(triage).toMatchObject({
+      label: "urgent",
+      priority: 2,
+      summary: "Invoice needs review",
+      sentiment: "neutral",
+      model: "groq-classifier",
+    });
+    expect(Number(triage.confidence)).toBeCloseTo(0.82);
+  });
+
   it("replace mode prunes stale cloud cache rows without deleting local-only mail", async () => {
     storeInboundEmail({
       provider_id: null,
@@ -580,6 +687,58 @@ describe("cloud command", () => {
     expect(db.query("SELECT subject FROM inbound_emails WHERE message_id = ?").get("local-only")).toEqual({ subject: "Local only" });
     expect(result.data).toMatchObject({ read: 0, stored: 0, updated: 0, source_of_truth: true });
     expect((result.data as { pruned?: number }).pruned).toBeGreaterThanOrEqual(before.count);
+  });
+
+  it("replace mode applies explicit cloud tombstones before stale pruning", async () => {
+    storeInboundEmail({
+      provider_id: null,
+      message_id: "cloud:deleted_cloud_msg",
+      in_reply_to_email_id: null,
+      from_address: "old@example.com",
+      to_addresses: ["agent@example.com"],
+      cc_addresses: [],
+      subject: "Deleted cloud",
+      text_body: "old",
+      html_body: null,
+      attachments: [],
+      headers: {},
+      raw_size: 3,
+      received_at: "2026-06-29T10:00:00.000Z",
+    });
+    storeInboundEmail({
+      provider_id: null,
+      message_id: "local-only-after-tombstone",
+      in_reply_to_email_id: null,
+      from_address: "local@example.com",
+      to_addresses: ["agent@example.com"],
+      cc_addresses: [],
+      subject: "Local only",
+      text_body: "local",
+      html_body: null,
+      attachments: [],
+      headers: {},
+      raw_size: 5,
+      received_at: "2026-06-29T10:00:00.000Z",
+    });
+
+    const result = await runCloudCommand(["cloud", "messages", "pull", "--replace", "--limit", "1"], {
+      createClient: () => ({
+        listMessagesPage: async () => ({
+          data: [{ id: "tombstone_row_1", message_id: "cloud:deleted_cloud_msg", tombstone: true, deleted_at: "2026-07-01T10:00:00.000Z" }],
+          nextCursor: null,
+        }),
+        listMessages: async () => { throw new Error("unused"); },
+        getMessage: async () => { throw new Error("tombstone should not be fetched"); },
+        listMessageTombstones: async () => {
+          throw new MaileryCloudError("not found", { status: 404, code: "not_found" });
+        },
+      } as never),
+    });
+
+    const db = getDatabase();
+    expect(db.query("SELECT COUNT(*) AS count FROM inbound_emails WHERE message_id = ?").get("cloud:deleted_cloud_msg")).toEqual({ count: 0 });
+    expect(db.query("SELECT subject FROM inbound_emails WHERE message_id = ?").get("local-only-after-tombstone")).toEqual({ subject: "Local only" });
+    expect(result.data).toMatchObject({ read: 1, stored: 0, updated: 0, deleted: 1, pruned: 0, source_of_truth: true });
   });
 
   it("replace mode pulls every cursor page before pruning stale cloud cache rows", async () => {
@@ -651,5 +810,61 @@ describe("cloud command", () => {
     expect(db.query("SELECT COUNT(*) AS count FROM inbound_emails WHERE message_id = ?").get("cloud:stale_cloud_msg")).toEqual({ count: 0 });
     expect(result.data).toMatchObject({ read: 2, stored: 2, updated: 0, source_of_truth: true, pages: 2, next_cursor: null });
     expect((result.data as { pruned?: number }).pruned).toBeGreaterThanOrEqual(1);
+  });
+
+  it("syncs cloud digest rows into the local digest cache with message linkage", async () => {
+    const stored = storeInboundEmail({
+      provider_id: null,
+      message_id: "cloud:cloud_msg_digest",
+      in_reply_to_email_id: null,
+      from_address: "digest@example.com",
+      to_addresses: ["agent@example.com"],
+      cc_addresses: [],
+      subject: "Digest source",
+      text_body: "digest body",
+      html_body: null,
+      attachments: [],
+      headers: {},
+      raw_size: 11,
+      received_at: "2026-06-30T10:00:00.000Z",
+    });
+
+    const result = await runCloudCommand(["cloud", "digest", "list", "--limit", "1"], {
+      createClient: () => ({
+        listDigests: async () => [{
+          id: "dig_1",
+          window: "last_7_days",
+          title: "Last 7 days digest",
+          summary: "Two messages, one important.",
+          periodStart: "2026-06-24T00:00:00.000Z",
+          periodEnd: "2026-07-01T00:00:00.000Z",
+          messageCount: 2,
+          importantCount: 1,
+          highlights: ["Billing needs review"],
+          actionItems: ["Reply to billing"],
+          importantMessageIds: ["cloud_msg_digest", "missing_remote_msg"],
+          labelCounts: { billing: 2 },
+          model: "groq-test",
+          createdAt: "2026-07-01T00:01:00.000Z",
+        }],
+      } as never),
+    });
+
+    const row = getDatabase().query(
+      "SELECT period, provider, model, message_count, summary, highlights_json, action_items_json, important_email_ids_json, label_counts_json FROM email_digests WHERE model = ?",
+    ).get("mailery-cloud:dig_1:groq-test") as Record<string, unknown>;
+
+    expect(result.data).toMatchObject({ local_sync: { stored: 1, updated: 0 } });
+    expect(row).toMatchObject({
+      period: "last7",
+      provider: "groq",
+      model: "mailery-cloud:dig_1:groq-test",
+      message_count: 2,
+      summary: "Two messages, one important.",
+    });
+    expect(JSON.parse(String(row.highlights_json))).toEqual(["Billing needs review"]);
+    expect(JSON.parse(String(row.action_items_json))).toEqual(["Reply to billing"]);
+    expect(JSON.parse(String(row.important_email_ids_json))).toEqual([stored.id, "cloud:missing_remote_msg"]);
+    expect(JSON.parse(String(row.label_counts_json))).toEqual({ billing: 2, important: 1 });
   });
 });

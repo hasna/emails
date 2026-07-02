@@ -72,6 +72,54 @@ describe("MaileryCloudClient", () => {
     expect(calls[0]).toBe("https://mailery.example/api/v1/messages?group=inbox&limit=10&cursor=cursor_1");
   });
 
+  it("keeps message tombstones and attachment download links in cloud responses", async () => {
+    const calls: string[] = [];
+    const client = new MaileryCloudClient({
+      apiUrl: "https://mailery.example",
+      token: "t",
+      fetchImpl: (async (url) => {
+        calls.push(String(url));
+        if (String(url).endsWith("/api/v1/messages")) {
+          return jsonResponse({
+            data: [{ id: "cloud_msg_deleted", tombstone: true, deletedAt: "2026-07-01T10:00:00.000Z" }],
+            next_cursor: null,
+          });
+        }
+        if (String(url).includes("/api/v1/messages/tombstones")) {
+          return jsonResponse({ data: [{ id: "tomb_1", message_id: "cloud:cloud_msg_deleted", deleted_at: "2026-07-01T10:00:00.000Z" }] });
+        }
+        return jsonResponse({
+          message: {
+            id: "cloud_msg_1",
+            tenantId: "ten_1",
+            mailboxId: "mbx_1",
+            classification: { labels: ["Billing"] },
+          },
+          attachments: [{
+            id: "att_1",
+            filename: "invoice.pdf",
+            contentType: "application/pdf",
+            sizeBytes: 2048,
+            download_url: "/api/v1/attachments/att_1/download",
+          }],
+        });
+      }) as typeof fetch,
+    });
+
+    const page = await client.listMessagesPage();
+    const full = await client.getMessage("cloud_msg_1");
+    const tombstones = await client.listMessageTombstones({ limit: 25, since: "2026-07-01T00:00:00.000Z" });
+
+    expect(page.data).toEqual([{ id: "cloud_msg_deleted", tombstone: true, deletedAt: "2026-07-01T10:00:00.000Z" }]);
+    expect(tombstones).toEqual([{ id: "tomb_1", message_id: "cloud:cloud_msg_deleted", deleted_at: "2026-07-01T10:00:00.000Z" }]);
+    expect(full.attachments[0]).toMatchObject({
+      id: "att_1",
+      filename: "invoice.pdf",
+      download_url: "/api/v1/attachments/att_1/download",
+    });
+    expect(calls).toContain("https://mailery.example/api/v1/messages/tombstones?limit=25&since=2026-07-01T00%3A00%3A00.000Z");
+  });
+
   it("maps platform error envelopes into typed errors", async () => {
     const client = new MaileryCloudClient({
       apiUrl: "https://mailery.example",

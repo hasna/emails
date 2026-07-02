@@ -1,18 +1,23 @@
 import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
 import { getDatabase, reconcileMailboxMessageState, type Database } from "../../db/database.js";
+import { saveEmailDigest, type EmailDigestPeriod } from "../../db/email-digests.js";
 import { getInboundEmail, listInboundEmailSummaries, storeInboundEmail, type InboundEmail } from "../../db/inbound.js";
+import { saveTriage, type TriageLabel, type TriageSentiment } from "../../db/triage.js";
 import { getConfigValue, loadConfig, saveConfig, setConfigValue } from "../../lib/config.js";
 import { openLocalTarget, type LocalOpenResult } from "../../lib/local-actions.js";
 import {
   DEFAULT_MAILERY_CLOUD_API_URL,
   MaileryCloudClient,
   MaileryCloudError,
+  type MaileryCloudAttachment,
   type MaileryCloudBillingOverview,
   type MaileryCloudClientOptions,
+  type MaileryCloudDigest,
   type MaileryCloudDigestWindow,
   type MaileryCloudMeResponse,
   type MaileryCloudMessage,
+  type MaileryCloudMessageListItem,
   type MaileryCloudMessagePage,
   type MaileryCloudMessageUploadInput,
   type MaileryCloudMessageWithAttachments,
@@ -63,7 +68,7 @@ type MaileryCloudClientLike = Pick<
   | "revokeApiKey"
   | "checkDomainAvailability"
   | "setupDomain"
-> & Partial<Pick<MaileryCloudClient, "listMessagesPage">>;
+> & Partial<Pick<MaileryCloudClient, "listMessagesPage" | "listMessageTombstones">>;
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
@@ -209,13 +214,18 @@ function formatMailboxes(rows: Array<{ id: string; email: string; provider: stri
   ].join("\n");
 }
 
-function formatMessages(rows: MaileryCloudMessage[]): string {
+function formatMessages(rows: MaileryCloudMessageListItem[]): string {
   if (rows.length === 0) return chalk.dim("No cloud messages.");
   return [
     chalk.bold("Cloud messages"),
     ...rows.map((row) => {
-      const when = row.receivedAt ?? row.sentAt ?? row.createdAt;
-      return `  ${row.id.slice(0, 8)}  ${when?.slice(0, 19) ?? ""}  ${row.fromAddress.padEnd(28).slice(0, 28)}  ${row.subject || "(no subject)"}`;
+      if (isCloudMessageTombstone(row)) {
+        const tombstone = row as { id: string; deletedAt?: string | null; deleted_at?: string | null; updatedAt?: string };
+        return `  ${tombstone.id.slice(0, 8)}  ${tombstone.deletedAt?.slice(0, 19) ?? tombstone.deleted_at?.slice(0, 19) ?? tombstone.updatedAt?.slice(0, 19) ?? ""}  ${chalk.dim("(deleted)")}`;
+      }
+      const message = row as MaileryCloudMessage;
+      const when = message.receivedAt ?? message.sentAt ?? message.createdAt;
+      return `  ${message.id.slice(0, 8)}  ${when?.slice(0, 19) ?? ""}  ${message.fromAddress.padEnd(28).slice(0, 28)}  ${message.subject || "(no subject)"}`;
     }),
   ].join("\n");
 }
@@ -258,22 +268,94 @@ function cloudMessageId(message: MaileryCloudMessage): string {
   return `cloud:${message.id}`;
 }
 
+function cloudMessageIdFromRemoteId(remoteId: string): string {
+  return remoteId.startsWith("cloud:") ? remoteId : `cloud:${remoteId}`;
+}
+
+function objectValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function optionalString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function normalizedCloudLabel(value: unknown): string | undefined {
+  const label = typeof value === "string"
+    ? value
+    : value && typeof value === "object"
+      ? optionalString((value as Record<string, unknown>)["name"]) ?? optionalString((value as Record<string, unknown>)["label"])
+      : undefined;
+  return label?.replace(/\s+/g, " ").trim().slice(0, 80) || undefined;
+}
+
+function uniqueLabels(labels: Iterable<string | undefined>): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const label of labels) {
+    if (!label) continue;
+    const key = label.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(label);
+  }
+  return out;
+}
+
+function classificationLabels(message: MaileryCloudMessage): string[] {
+  const classification = objectValue(message.classification);
+  const fromLabels = Array.isArray(classification["labels"])
+    ? classification["labels"].map(normalizedCloudLabel)
+    : [];
+  const singleLabel = normalizedCloudLabel(classification["label"]);
+  const messageLabels = Array.isArray(message.labels) ? message.labels.map(normalizedCloudLabel) : [];
+  return uniqueLabels([
+    ...fromLabels,
+    singleLabel,
+    ...messageLabels,
+    ...(message.label_names ?? []),
+    ...(message.label_ids ?? []),
+    ...(message.custom_labels ?? []),
+  ]);
+}
+
 function cloudLabels(message: MaileryCloudMessage): string[] {
-  return [
+  return uniqueLabels([
     message.direction === "outbound" ? "sent" : "",
     message.isImportant ? "important" : "",
     message.isSpam ? "spam" : "",
     message.isTrash ? "trash" : "",
     message.isArchived ? "archived" : "",
-  ].filter(Boolean);
+    ...classificationLabels(message),
+  ]);
 }
 
-function cloudHeaders(message: MaileryCloudMessage): Record<string, string> {
-  return {
+function compactJsonHeader(value: unknown): string | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const record = objectValue(value);
+  if (Object.keys(record).length === 0) return undefined;
+  return JSON.stringify(record);
+}
+
+function cloudHeaders(message: MaileryCloudMessage, apiUrl?: string): Record<string, string> {
+  const headers: Record<string, string> = {
     "X-Mailery-Cloud-Message-Id": message.id,
     "X-Mailery-Cloud-Mailbox-Id": message.mailboxId,
     "X-Mailery-Cloud-Updated-At": message.updatedAt,
   };
+  if (apiUrl) headers["X-Mailery-Cloud-Api-Url"] = apiUrl;
+  if (message.externalId) headers["X-Mailery-Cloud-External-Id"] = message.externalId;
+  if (message.parserModel) headers["X-Mailery-Cloud-Parser-Model"] = message.parserModel;
+  if (message.summary) headers["X-Mailery-Cloud-Summary"] = message.summary;
+  const digestIds = uniqueLabels([...(message.digestIds ?? []), ...(message.digest_ids ?? [])]);
+  if (digestIds.length > 0) headers["X-Mailery-Cloud-Digest-Ids"] = digestIds.join(", ");
+  const labels = cloudLabels(message);
+  if (labels.length > 0) headers["X-Mailery-Cloud-Labels"] = labels.join(", ");
+  const classification = compactJsonHeader(message.classification);
+  if (classification) headers["X-Mailery-Cloud-Classification"] = classification;
+  const metadata = compactJsonHeader(message.metadata);
+  if (metadata) headers["X-Mailery-Cloud-Metadata"] = metadata;
+  return headers;
 }
 
 async function listCloudMessagePage(
@@ -282,6 +364,115 @@ async function listCloudMessagePage(
 ): Promise<MaileryCloudMessagePage> {
   if (typeof client.listMessagesPage === "function") return client.listMessagesPage(opts);
   return { data: await client.listMessages(opts), nextCursor: null };
+}
+
+function cloudAttachmentDownloadUrl(attachment: MaileryCloudAttachment, apiUrl?: string): string | undefined {
+  const raw = optionalString(attachment.download_url) ?? optionalString(attachment.downloadUrl);
+  if (!raw) return undefined;
+  if (!apiUrl) return raw;
+  try {
+    return new URL(raw, apiUrl).toString();
+  } catch {
+    return raw;
+  }
+}
+
+function cloudAttachmentMeta(attachments: MaileryCloudAttachment[], apiUrl?: string): Array<Record<string, unknown>> {
+  return attachments.map((attachment) => ({
+    filename: attachment.filename,
+    content_type: attachment.contentType,
+    size: attachment.sizeBytes,
+    cloud_attachment_id: attachment.id,
+    ...(attachment.checksum ? { checksum: attachment.checksum } : {}),
+    ...(attachment.storageDriver ? { storage_driver: attachment.storageDriver } : {}),
+    ...(attachment.storageKey ? { storage_key: attachment.storageKey } : {}),
+    ...(cloudAttachmentDownloadUrl(attachment, apiUrl) ? { download_url: cloudAttachmentDownloadUrl(attachment, apiUrl) } : {}),
+    ...(attachment.body && Object.keys(attachment.body).length > 0 ? { body: attachment.body } : {}),
+    ...(attachment.metadata && Object.keys(attachment.metadata).length > 0 ? { metadata: attachment.metadata } : {}),
+  }));
+}
+
+function cloudAttachmentPaths(attachments: MaileryCloudAttachment[], apiUrl?: string): Array<Record<string, unknown>> {
+  return attachments.map((attachment) => ({
+    filename: attachment.filename,
+    content_type: attachment.contentType,
+    size: attachment.sizeBytes,
+    cloud_attachment_id: attachment.id,
+    ...(cloudAttachmentDownloadUrl(attachment, apiUrl) ? { download_url: cloudAttachmentDownloadUrl(attachment, apiUrl) } : {}),
+  }));
+}
+
+const TRIAGE_LABELS = new Set<TriageLabel>(["action-required", "fyi", "urgent", "follow-up", "spam", "newsletter", "transactional"]);
+const TRIAGE_SENTIMENTS = new Set<TriageSentiment>(["positive", "negative", "neutral"]);
+
+function normalizeTriageLabel(value: unknown, message: MaileryCloudMessage): TriageLabel | null {
+  const candidates = [
+    optionalString(value),
+    ...classificationLabels(message),
+    message.isSpam ? "spam" : undefined,
+    message.isImportant ? "urgent" : undefined,
+  ];
+  for (const candidate of candidates) {
+    const normalized = candidate?.trim().toLowerCase().replace(/[\s_]+/g, "-");
+    if (normalized && TRIAGE_LABELS.has(normalized as TriageLabel)) return normalized as TriageLabel;
+  }
+  return null;
+}
+
+function normalizeTriageSentiment(value: unknown): TriageSentiment | null {
+  const normalized = optionalString(value)?.toLowerCase();
+  return normalized && TRIAGE_SENTIMENTS.has(normalized as TriageSentiment) ? normalized as TriageSentiment : null;
+}
+
+function normalizeCloudPriority(value: unknown, importanceScore: number): number {
+  if (typeof value === "number" && Number.isFinite(value)) return Math.max(1, Math.min(5, Math.round(value)));
+  if (importanceScore >= 85) return 1;
+  if (importanceScore >= 65) return 2;
+  if (importanceScore >= 35) return 3;
+  if (importanceScore > 0) return 4;
+  return 5;
+}
+
+function syncCloudClassification(message: MaileryCloudMessage, localId: string, db: Database): void {
+  const classification = objectValue(message.classification);
+  const label = normalizeTriageLabel(classification["label"], message);
+  if (!label) return;
+  saveTriage({
+    inbound_email_id: localId,
+    label,
+    priority: normalizeCloudPriority(classification["priority"], message.importanceScore),
+    summary: optionalString(classification["summary"]) ?? message.summary ?? null,
+    sentiment: normalizeTriageSentiment(classification["sentiment"]),
+    draft_reply: optionalString(classification["draftReply"]) ?? optionalString(classification["draft_reply"]) ?? null,
+    confidence: typeof classification["confidence"] === "number" && Number.isFinite(classification["confidence"])
+      ? Math.max(0, Math.min(1, classification["confidence"]))
+      : 0,
+    model: optionalString(classification["model"]) ?? message.parserModel ?? "mailery-cloud",
+  }, db);
+}
+
+function isCloudMessageTombstone(row: MaileryCloudMessageListItem | MaileryCloudMessageWithAttachments): boolean {
+  const record = row as unknown as Record<string, unknown>;
+  const status = optionalString(record["status"])?.toLowerCase();
+  return record["deleted"] === true
+    || record["isDeleted"] === true
+    || record["tombstone"] === true
+    || status === "deleted"
+    || status === "tombstone"
+    || !!optionalString(record["deletedAt"])
+    || !!optionalString(record["deleted_at"]);
+}
+
+function cloudTombstoneRemoteId(row: MaileryCloudMessageListItem | MaileryCloudMessageWithAttachments): string {
+  const record = row as unknown as Record<string, unknown>;
+  return optionalString(record["message_id"]) ?? optionalString(record["messageId"]) ?? row.id;
+}
+
+function deleteCloudCacheMessage(remoteId: string, db: Database): number {
+  const rows = db.query("SELECT id FROM inbound_emails WHERE message_id = ?").all(cloudMessageIdFromRemoteId(remoteId)) as Array<{ id: string }>;
+  for (const row of rows) db.run("DELETE FROM inbound_emails WHERE id = ?", [row.id]);
+  if (rows.length > 0) reconcileMailboxMessageState(db);
+  return rows.length;
 }
 
 function applyCloudMessageState(db: Database, id: string, message: MaileryCloudMessage): void {
@@ -310,7 +501,7 @@ function applyCloudMessageState(db: Database, id: string, message: MaileryCloudM
   );
 }
 
-function updateCloudMessageCache(message: MaileryCloudMessageWithAttachments, id: string, db: Database): void {
+function updateCloudMessageCache(message: MaileryCloudMessageWithAttachments, id: string, db: Database, apiUrl?: string): void {
   db.run(
     `UPDATE inbound_emails
         SET provider_id = NULL,
@@ -343,19 +534,16 @@ function updateCloudMessageCache(message: MaileryCloudMessageWithAttachments, id
       message.subject ?? "",
       message.textBody ?? message.cleanMarkdown ?? message.summary ?? null,
       message.htmlBody ?? null,
-      JSON.stringify(message.attachments.map((attachment) => ({
-        filename: attachment.filename,
-        content_type: attachment.contentType,
-        size: attachment.sizeBytes,
-      }))),
-      JSON.stringify([]),
-      JSON.stringify(cloudHeaders(message)),
+      JSON.stringify(cloudAttachmentMeta(message.attachments, apiUrl)),
+      JSON.stringify(cloudAttachmentPaths(message.attachments, apiUrl)),
+      JSON.stringify(cloudHeaders(message, apiUrl)),
       rawSize(message),
       message.receivedAt ?? message.sentAt ?? message.createdAt,
       id,
     ],
   );
   applyCloudMessageState(db, id, message);
+  syncCloudClassification(message, id, db);
 }
 
 function pruneStaleCloudCache(keepMessageIds: Set<string>, db: Database): number {
@@ -372,12 +560,12 @@ function pruneStaleCloudCache(keepMessageIds: Set<string>, db: Database): number
   return pruned;
 }
 
-function storeCloudMessage(message: MaileryCloudMessageWithAttachments, deps: CloudCommandDeps): { stored: boolean; updated?: boolean; id?: string; skipped?: boolean } {
+function storeCloudMessage(message: MaileryCloudMessageWithAttachments, deps: CloudCommandDeps, apiUrl?: string): { stored: boolean; updated?: boolean; id?: string; skipped?: boolean } {
   const messageId = `cloud:${message.id}`;
   const db = getDatabase();
   const existing = db.query("SELECT id FROM inbound_emails WHERE message_id = ? LIMIT 1").get(messageId) as { id: string } | null;
   if (existing) {
-    updateCloudMessageCache(message, existing.id, db);
+    updateCloudMessageCache(message, existing.id, db, apiUrl);
     reconcileMailboxMessageState(db);
     return { stored: false, updated: true, id: existing.id };
   }
@@ -391,18 +579,15 @@ function storeCloudMessage(message: MaileryCloudMessageWithAttachments, deps: Cl
     subject: message.subject ?? "",
     text_body: message.textBody ?? message.cleanMarkdown ?? message.summary ?? null,
     html_body: message.htmlBody ?? null,
-    attachments: message.attachments.map((attachment) => ({
-      filename: attachment.filename,
-      content_type: attachment.contentType,
-      size: attachment.sizeBytes,
-    })),
-    attachment_paths: [],
-    headers: cloudHeaders(message),
+    attachments: cloudAttachmentMeta(message.attachments, apiUrl) as never,
+    attachment_paths: cloudAttachmentPaths(message.attachments, apiUrl) as never,
+    headers: cloudHeaders(message, apiUrl),
     raw_size: rawSize(message),
     received_at: message.receivedAt ?? message.sentAt ?? message.createdAt,
     label_ids: cloudLabels(message),
   }, db);
   applyCloudMessageState(db, stored.id, message);
+  syncCloudClassification(message, stored.id, db);
   reconcileMailboxMessageState(db);
   return { stored: true, id: stored.id };
 }
@@ -411,6 +596,125 @@ function normalizeDigestWindow(value: string | undefined): MaileryCloudDigestWin
   const window = (value ?? "today") as MaileryCloudDigestWindow;
   if (["today", "yesterday", "last_7_days", "month"].includes(window)) return window;
   throw new Error("window must be one of: today, yesterday, last_7_days, month");
+}
+
+function localDigestPeriod(window: MaileryCloudDigestWindow): EmailDigestPeriod {
+  return window === "last_7_days" ? "last7" : window;
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.map((item) => typeof item === "string" ? item.trim() : "").filter(Boolean) : [];
+}
+
+function localIdsForCloudMessageIds(ids: string[], db: Database): string[] {
+  const out: string[] = [];
+  for (const id of ids) {
+    const messageId = id.startsWith("cloud:") ? id : cloudMessageIdFromRemoteId(id);
+    const row = db.query("SELECT id FROM inbound_emails WHERE message_id = ? LIMIT 1").get(messageId) as { id: string } | null;
+    out.push(row?.id ?? messageId);
+  }
+  return out;
+}
+
+function cloudDigestImportantIds(digest: MaileryCloudDigest, db: Database): string[] {
+  const ids = stringArray(digest.importantMessageIds)
+    .concat(stringArray(digest.important_message_ids));
+  return localIdsForCloudMessageIds(uniqueLabels(ids), db);
+}
+
+function cloudDigestLabelCounts(digest: MaileryCloudDigest): Record<string, number> {
+  const source = digest.labelCounts ?? digest.label_counts ?? {};
+  const counts: Record<string, number> = {};
+  for (const [key, value] of Object.entries(source)) {
+    if (typeof value === "number" && Number.isFinite(value) && value > 0) counts[key] = Math.trunc(value);
+  }
+  if (digest.importantCount > 0 && counts["important"] === undefined) counts["important"] = digest.importantCount;
+  return counts;
+}
+
+function cloudDigestActionItems(digest: MaileryCloudDigest): string[] {
+  return stringArray(digest.actionItems).concat(stringArray(digest.action_items));
+}
+
+function syncCloudDigest(digest: MaileryCloudDigest, db: Database): { stored: boolean; updated: boolean; id: string } {
+  const model = `mailery-cloud:${digest.id}${digest.model ? `:${digest.model}` : ""}`;
+  const period = localDigestPeriod(digest.window);
+  const status = digest.status === "error" ? "error" : "ok";
+  const completedAt = digest.completedAt ?? digest.createdAt;
+  const existing = db.query("SELECT id FROM email_digests WHERE model = ? LIMIT 1").get(model) as { id: string } | null;
+  const highlights = stringArray(digest.highlights);
+  const actionItems = cloudDigestActionItems(digest);
+  const importantEmailIds = cloudDigestImportantIds(digest, db);
+  const labelCounts = cloudDigestLabelCounts(digest);
+  if (existing) {
+    db.run(
+      `UPDATE email_digests
+          SET period = ?,
+              since = ?,
+              until = ?,
+              provider = ?,
+              status = ?,
+              message_count = ?,
+              summary = ?,
+              highlights_json = ?,
+              action_items_json = ?,
+              important_email_ids_json = ?,
+              label_counts_json = ?,
+              error = ?,
+              started_at = ?,
+              completed_at = ?
+        WHERE id = ?`,
+      [
+        period,
+        digest.periodStart,
+        digest.periodEnd,
+        "groq",
+        status,
+        digest.messageCount,
+        digest.summary,
+        JSON.stringify(highlights),
+        JSON.stringify(actionItems),
+        JSON.stringify(importantEmailIds),
+        JSON.stringify(labelCounts),
+        digest.error ?? null,
+        digest.periodStart,
+        completedAt,
+        existing.id,
+      ],
+    );
+    return { stored: false, updated: true, id: existing.id };
+  }
+  const saved = saveEmailDigest({
+    period,
+    since: digest.periodStart,
+    until: digest.periodEnd,
+    provider: "groq",
+    model,
+    status,
+    message_count: digest.messageCount,
+    summary: digest.summary,
+    highlights,
+    action_items: actionItems,
+    important_email_ids: importantEmailIds,
+    label_counts: labelCounts,
+    error: digest.error ?? null,
+    started_at: digest.periodStart,
+    completed_at: completedAt,
+  }, db);
+  return { stored: true, updated: false, id: saved.id };
+}
+
+function syncCloudDigests(digests: MaileryCloudDigest[], db: Database): { stored: number; updated: number; ids: string[] } {
+  let stored = 0;
+  let updated = 0;
+  const ids: string[] = [];
+  for (const digest of digests) {
+    const result = syncCloudDigest(digest, db);
+    if (result.stored) stored += 1;
+    if (result.updated) updated += 1;
+    ids.push(result.id);
+  }
+  return { stored, updated, ids };
 }
 
 async function runUploadLocal(
@@ -855,25 +1159,47 @@ export function registerCloudCommands(program: Command, output: OutputFn, deps: 
     .action(async (opts: { group?: string; limit?: string; cursor?: string; all?: boolean; replace?: boolean; sourceOfTruth?: boolean }, cmd: Command) => {
       try {
         const client = makeClient(cmd, deps);
+        const apiUrl = getApiUrl(globals(cmd));
         const sourceOfTruth = Boolean(opts.replace || opts.sourceOfTruth);
         const pullAllPages = Boolean(opts.all || sourceOfTruth);
         const limit = parseCliPositiveIntOption(opts.limit, 50, 200);
         let stored = 0;
         let updated = 0;
         let skipped = 0;
+        let deleted = 0;
         let read = 0;
         let pages = 0;
         let cursor = opts.cursor;
         let nextCursor: string | null = null;
         const seen = new Set<string>();
+        const listGroup = sourceOfTruth ? undefined : opts.group;
         do {
-          const page = await listCloudMessagePage(client, { group: opts.group, limit, cursor });
+          const page = await listCloudMessagePage(client, { group: listGroup, limit, cursor });
           pages += 1;
           read += page.data.length;
           for (const row of page.data) {
-            const message = await client.getMessage(row.id);
+            if (isCloudMessageTombstone(row)) {
+              if (sourceOfTruth) deleted += deleteCloudCacheMessage(cloudTombstoneRemoteId(row), getDatabase());
+              else skipped += 1;
+              continue;
+            }
+            let message: MaileryCloudMessageWithAttachments;
+            try {
+              message = await client.getMessage(row.id);
+            } catch (error) {
+              if (sourceOfTruth && error instanceof MaileryCloudError && error.status === 404) {
+                deleted += deleteCloudCacheMessage(row.id, getDatabase());
+                continue;
+              }
+              throw error;
+            }
+            if (isCloudMessageTombstone(message)) {
+              if (sourceOfTruth) deleted += deleteCloudCacheMessage(cloudTombstoneRemoteId(message), getDatabase());
+              else skipped += 1;
+              continue;
+            }
             seen.add(cloudMessageId(message));
-            const result = storeCloudMessage(message, deps);
+            const result = storeCloudMessage(message, deps, apiUrl);
             if (result.stored) stored += 1;
             if (result.updated) updated += 1;
             if (result.skipped) skipped += 1;
@@ -881,10 +1207,18 @@ export function registerCloudCommands(program: Command, output: OutputFn, deps: 
           nextCursor = page.nextCursor;
           cursor = page.nextCursor ?? undefined;
         } while (pullAllPages && cursor);
+        if (sourceOfTruth && typeof client.listMessageTombstones === "function") {
+          try {
+            const tombstones = await client.listMessageTombstones({ limit: 500 });
+            for (const tombstone of tombstones) deleted += deleteCloudCacheMessage(cloudTombstoneRemoteId(tombstone), getDatabase());
+          } catch (error) {
+            if (!(error instanceof MaileryCloudError && error.status === 404)) throw error;
+          }
+        }
         const pruned = sourceOfTruth ? pruneStaleCloudCache(seen, getDatabase()) : 0;
         output(
-          { read, stored, updated, skipped, pruned, source_of_truth: sourceOfTruth, pages, next_cursor: nextCursor },
-          chalk.green(`Pulled ${stored} new and ${updated} updated cloud message(s) across ${pages} page(s).${pruned ? ` Pruned ${pruned} stale cloud cache row(s).` : ""}`),
+          { read, stored, updated, skipped, deleted, pruned, source_of_truth: sourceOfTruth, pages, next_cursor: nextCursor },
+          chalk.green(`Pulled ${stored} new and ${updated} updated cloud message(s) across ${pages} page(s).${deleted ? ` Deleted ${deleted} tombstoned cloud row(s).` : ""}${pruned ? ` Pruned ${pruned} stale cloud cache row(s).` : ""}`),
         );
       } catch (e) {
         handleError(new Error(cloudErrorText(e)));
@@ -915,10 +1249,11 @@ export function registerCloudCommands(program: Command, output: OutputFn, deps: 
     .action(async (opts: { limit?: string }, cmd: Command) => {
       try {
         const rows = await makeClient(cmd, deps).listDigests({ limit: parseCliPositiveIntOption(opts.limit, 20, 100) });
+        const localSync = syncCloudDigests(rows, getDatabase());
         const lines = rows.length
           ? [chalk.bold("Cloud digests"), ...rows.map((row) => `  ${row.id.slice(0, 8)}  ${row.window.padEnd(12)} ${row.title}`)]
           : [chalk.dim("No cloud digests.")];
-        output({ data: rows }, lines.join("\n"));
+        output({ data: rows, local_sync: localSync }, lines.join("\n"));
       } catch (e) {
         handleError(new Error(cloudErrorText(e)));
       }
@@ -931,7 +1266,8 @@ export function registerCloudCommands(program: Command, output: OutputFn, deps: 
     .action(async (opts: { window?: string }, cmd: Command) => {
       try {
         const row = await makeClient(cmd, deps).generateDigest(normalizeDigestWindow(opts.window));
-        output(row, chalk.green(`Generated ${row.window} digest: ${row.title}`));
+        const localSync = syncCloudDigest(row, getDatabase());
+        output({ ...row, local_digest_id: localSync.id }, chalk.green(`Generated ${row.window} digest: ${row.title}`));
       } catch (e) {
         handleError(new Error(cloudErrorText(e)));
       }

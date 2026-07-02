@@ -74,7 +74,14 @@ export interface MaileryCloudAttachment {
   filename: string;
   contentType: string;
   sizeBytes: number;
+  checksum?: string | null;
+  storageDriver?: string;
+  storageKey?: string | null;
+  metadata?: Record<string, unknown>;
+  contentBase64?: string;
   download_url?: string;
+  downloadUrl?: string;
+  body?: Record<string, unknown>;
 }
 
 export interface MaileryCloudMessage {
@@ -87,20 +94,33 @@ export interface MaileryCloudMessage {
   fromAddress: string;
   toAddresses: string[];
   ccAddresses: string[];
+  externalId?: string | null;
   receivedAt: string | null;
   sentAt: string | null;
   textBody: string | null;
   htmlBody: string | null;
+  rawEmail?: string | null;
   cleanMarkdown: string | null;
   summary: string | null;
   parserModel: string | null;
   classification: Record<string, unknown>;
+  labels?: Array<string | { name?: string | null; label?: string | null; kind?: string | null }>;
+  label_names?: string[];
+  label_ids?: string[];
+  custom_labels?: string[];
+  digest_ids?: string[];
+  digestIds?: string[];
+  metadata?: Record<string, unknown>;
   importanceScore: number;
   isRead: boolean;
   isImportant: boolean;
   isSpam: boolean;
   isTrash: boolean;
   isArchived: boolean;
+  isDeleted?: boolean;
+  deleted?: boolean;
+  tombstone?: boolean;
+  deletedAt?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -109,8 +129,31 @@ export interface MaileryCloudMessageWithAttachments extends MaileryCloudMessage 
   attachments: MaileryCloudAttachment[];
 }
 
+export interface MaileryCloudMessageTombstone {
+  id: string;
+  tenantId?: string;
+  mailboxId?: string;
+  mailbox_id?: string | null;
+  externalId?: string | null;
+  external_id?: string | null;
+  message_id?: string;
+  reason?: string;
+  metadata?: Record<string, unknown>;
+  status?: string;
+  deleted?: boolean;
+  isDeleted?: boolean;
+  tombstone?: boolean;
+  deletedAt?: string | null;
+  deleted_at?: string | null;
+  updatedAt?: string;
+  createdAt?: string;
+  created_at?: string;
+}
+
+export type MaileryCloudMessageListItem = MaileryCloudMessage | MaileryCloudMessageTombstone;
+
 export interface MaileryCloudMessagePage {
-  data: MaileryCloudMessage[];
+  data: MaileryCloudMessageListItem[];
   nextCursor: string | null;
 }
 
@@ -154,6 +197,19 @@ export interface MaileryCloudDigest {
   periodEnd: string;
   messageCount: number;
   importantCount: number;
+  highlights?: string[];
+  actionItems?: string[];
+  action_items?: string[];
+  messageIds?: string[];
+  message_ids?: string[];
+  importantMessageIds?: string[];
+  important_message_ids?: string[];
+  labelCounts?: Record<string, number>;
+  label_counts?: Record<string, number>;
+  model?: string | null;
+  status?: string | null;
+  error?: string | null;
+  completedAt?: string | null;
   createdAt: string;
 }
 
@@ -273,7 +329,7 @@ function normalizeMessageResponse(value: MaileryCloudMessageWithAttachments | {
   return { ...value, attachments: value.attachments ?? [] };
 }
 
-function normalizeMessagePageResponse(value: { data: MaileryCloudMessage[]; next_cursor?: string | null; nextCursor?: string | null }): MaileryCloudMessagePage {
+function normalizeMessagePageResponse(value: { data: MaileryCloudMessageListItem[]; next_cursor?: string | null; nextCursor?: string | null }): MaileryCloudMessagePage {
   return { data: value.data, nextCursor: value.next_cursor ?? value.nextCursor ?? null };
 }
 
@@ -404,11 +460,11 @@ export class MaileryCloudClient {
     if (opts.limit) params.set("limit", String(opts.limit));
     if (opts.cursor) params.set("cursor", opts.cursor);
     const query = params.toString();
-    return this.request<{ data: MaileryCloudMessage[]; next_cursor?: string | null; nextCursor?: string | null }>(`/messages${query ? `?${query}` : ""}`)
+    return this.request<{ data: MaileryCloudMessageListItem[]; next_cursor?: string | null; nextCursor?: string | null }>(`/messages${query ? `?${query}` : ""}`)
       .then(normalizeMessagePageResponse);
   }
 
-  listMessages(opts: { group?: string; q?: string; limit?: number; cursor?: string } = {}): Promise<MaileryCloudMessage[]> {
+  listMessages(opts: { group?: string; q?: string; limit?: number; cursor?: string } = {}): Promise<MaileryCloudMessageListItem[]> {
     return this.listMessagesPage(opts).then((result) => result.data);
   }
 
@@ -423,6 +479,19 @@ export class MaileryCloudClient {
 
   patchMessage(id: string, patch: Partial<Pick<MaileryCloudMessage, "isRead" | "isImportant" | "isArchived" | "isSpam" | "isTrash">>): Promise<MaileryCloudMessage> {
     return this.request(`/messages/${encodeURIComponent(id)}`, { method: "PATCH", body: patch });
+  }
+
+  deleteMessage(id: string, input: { reason?: string } = {}): Promise<{ ok: boolean; tombstone: MaileryCloudMessageTombstone }> {
+    return this.request(`/messages/${encodeURIComponent(id)}`, { method: "DELETE", body: input });
+  }
+
+  listMessageTombstones(opts: { limit?: number; since?: string } = {}): Promise<MaileryCloudMessageTombstone[]> {
+    const params = new URLSearchParams();
+    if (opts.limit) params.set("limit", String(opts.limit));
+    if (opts.since) params.set("since", opts.since);
+    const query = params.toString();
+    return this.request<{ data: MaileryCloudMessageTombstone[] }>(`/messages/tombstones${query ? `?${query}` : ""}`)
+      .then((result) => result.data);
   }
 
   parseMessage(id: string): Promise<unknown> {
