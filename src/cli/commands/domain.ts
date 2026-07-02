@@ -1,20 +1,227 @@
 import type { Command } from "commander";
+import type { Database } from "../../db/database.js";
+import type { Domain, DomainSourceOfTruth, DomainType, Provider } from "../../types/index.js";
 import chalk from "../../lib/chalk-lite.js";
 import { createDomain, listDomains, listUsableDomains, deleteDomain, findDomainsByName, getDomain, getDomainByName, moveDomainProvider, updateDnsStatus, updateDomainReadiness } from "../../db/domains.js";
 import { getProvider, listProviderNamesByIds } from "../../db/providers.js";
-import { getDatabase } from "../../db/database.js";
+import { getDatabase, now } from "../../db/database.js";
 import { getAdapter } from "../../providers/index.js";
 import { formatDnsTable } from "../../lib/dns.js";
 import { colorDnsStatus, truncate, tableRow } from "../../lib/format.js";
 import { confirmDestructiveAction, formatListHint, handleError, isCliVerboseOutput, parseCliListPage, resolveId } from "../utils.js";
 import { createWarmingSchedule, getWarmingSchedule, listWarmingSchedules, updateWarmingStatus } from "../../db/warming.js";
 import { formatWarmingStatus, generateWarmingPlan, getTodayLimit, getTodaySentCount } from "../../lib/warming.js";
-import { listDomainProvisioningByIds, listReadyAddressCountsByDomains, setDomainProvisioning } from "../../db/provisioning.js";
+import { getDomainProvisioning, listDomainProvisioningByIds, listReadyAddressCountsByDomains, setDomainProvisioning } from "../../db/provisioning.js";
 import { assessDomainReadiness, formatDomainReadinessState } from "../../lib/domain-readiness.js";
 import { normalizeRoute53RegistrationContact } from "../../lib/route53-contact.js";
+import { resolveMaileryMode, type MaileryModeResolution } from "../../lib/mode.js";
+
+type ProviderSummary = Pick<Provider, "id" | "name" | "type" | "region" | "active">;
+
+interface DomainLifecycleSummary {
+  id: string;
+  domain: string;
+  mode: MaileryModeResolution["mode"];
+  mode_label: MaileryModeResolution["label"];
+  source_of_truth: DomainSourceOfTruth;
+  domain_type: DomainType;
+  provider: ProviderSummary | null;
+  ownership_status: Domain["ownership_status"];
+  inbound_status: Domain["inbound_status"];
+  outbound_status: Domain["outbound_status"];
+  monitoring_status: Domain["monitoring_status"];
+  readiness: ReturnType<typeof assessDomainReadiness> & {
+    inbound_ready: boolean;
+    outbound_ready: boolean;
+    monitored: boolean;
+    restricted: boolean;
+    suspended: boolean;
+  };
+  dns: {
+    dkim: Domain["dkim_status"];
+    spf: Domain["spf_status"];
+    dmarc: Domain["dmarc_status"];
+    missing_records: string[];
+    warnings: string[];
+  };
+  provisioning: ReturnType<typeof getDomainProvisioning>;
+  missing_requirements: string[];
+  next_actions: string[];
+}
+
+function providerSummary(provider: Provider | null): ProviderSummary | null {
+  if (!provider) return null;
+  return {
+    id: provider.id,
+    name: provider.name,
+    type: provider.type,
+    region: provider.region,
+    active: provider.active,
+  };
+}
+
+function defaultSourceOfTruth(mode: MaileryModeResolution["mode"]): DomainSourceOfTruth {
+  if (mode === "self_hosted") return "postgres";
+  if (mode === "cloud") return "cloud";
+  return "local";
+}
+
+function normalizeDomainType(value: string | undefined): DomainType | undefined {
+  if (!value) return undefined;
+  const normalized = value.trim().toLowerCase().replace(/-/g, "_");
+  if (["system", "tenant", "self_hosted", "local_only"].includes(normalized)) return normalized as DomainType;
+  handleError(new Error(`Invalid domain type '${value}'. Use system, tenant, self_hosted, or local_only.`));
+}
+
+function normalizeSourceOfTruth(value: string | undefined): DomainSourceOfTruth | undefined {
+  if (!value) return undefined;
+  const normalized = value.trim().toLowerCase().replace(/-/g, "_");
+  if (normalized === "postgres" || normalized === "local" || normalized === "cloud") return normalized;
+  if (normalized === "self_hosted" || normalized === "remote") return "postgres";
+  handleError(new Error(`Invalid source of truth '${value}'. Use local, postgres, or cloud.`));
+}
+
+function resolveDomainRecord(
+  domainOrId: string,
+  opts: { provider?: string } = {},
+  db: Database = getDatabase(),
+): Domain {
+  if (opts.provider) {
+    const providerId = resolveId("providers", opts.provider);
+    const domain = getDomainByName(providerId, domainOrId, db);
+    if (!domain) handleError(new Error(`Domain not found for provider ${opts.provider}: ${domainOrId}`));
+    return domain;
+  }
+
+  const byId = getDomain(domainOrId, db);
+  if (byId) return byId;
+
+  const matches = findDomainsByName(domainOrId, db);
+  if (matches.length === 0) handleError(new Error(`Domain not found: ${domainOrId}`));
+  if (matches.length > 1) {
+    const choices = matches.map((domain) => `${domain.domain} provider=${domain.provider_id.slice(0, 8)}`).join(", ");
+    handleError(new Error(`Domain is ambiguous; pass --provider. Matches: ${choices}`));
+  }
+  return matches[0]!;
+}
+
+function buildDomainLifecycleSummary(domain: Domain, db: Database = getDatabase()): DomainLifecycleSummary {
+  const mode = resolveMaileryMode();
+  const provider = getProvider(domain.provider_id, db);
+  const provisioning = getDomainProvisioning(domain.id, db);
+  const readyAddresses = listReadyAddressCountsByDomains([domain.id], db).get(domain.id) ?? 0;
+  const readiness = assessDomainReadiness(domain, provisioning, { ready_addresses: readyAddresses });
+  const missingRecords: string[] = [];
+  const warnings: string[] = [];
+  const missingRequirements: string[] = [];
+  const nextActions: string[] = [];
+
+  if (domain.dkim_status !== "verified") missingRecords.push("DKIM");
+  if (domain.spf_status !== "verified") missingRecords.push("SPF");
+  if (domain.dmarc_status !== "verified") {
+    missingRecords.push("DMARC");
+    warnings.push("DMARC is per-domain monitoring; it does not block inbound aggregation.");
+  }
+  if (!provider) missingRequirements.push("provider is missing");
+  if (domain.ownership_status !== "verified") missingRequirements.push("domain ownership is not verified");
+  if (domain.inbound_status !== "ready" && !readiness.receive_ready) missingRequirements.push("inbound route is not ready");
+  if (domain.outbound_status !== "ready") missingRequirements.push("outbound sending is not enabled");
+  if (domain.dkim_status !== "verified") missingRequirements.push("DKIM is not verified");
+  if (domain.spf_status !== "verified") missingRequirements.push("SPF is not verified");
+
+  if (missingRecords.length > 0) nextActions.push(`mailery domains dns ${domain.domain}`);
+  if (domain.dkim_status !== "verified" || domain.spf_status !== "verified") nextActions.push(`mailery domains verify ${domain.domain}`);
+  if (domain.inbound_status !== "ready" && !readiness.receive_ready) nextActions.push(`mailery domains enable-inbound ${domain.domain} --force`);
+  if (domain.outbound_status !== "ready") nextActions.push(`mailery domains enable-outbound ${domain.domain}`);
+  if (mode.warning) warnings.push(mode.warning);
+
+  return {
+    id: domain.id,
+    domain: domain.domain,
+    mode: mode.mode,
+    mode_label: mode.label,
+    source_of_truth: domain.source_of_truth,
+    domain_type: domain.domain_type,
+    provider: providerSummary(provider),
+    ownership_status: domain.ownership_status,
+    inbound_status: domain.inbound_status,
+    outbound_status: domain.outbound_status,
+    monitoring_status: domain.monitoring_status,
+    readiness: {
+      ...readiness,
+      inbound_ready: domain.inbound_status === "ready" || readiness.receive_ready,
+      outbound_ready: domain.outbound_status === "ready" && readiness.send_ready,
+      monitored: domain.monitoring_status === "monitoring" || domain.monitoring_status === "clean",
+      restricted: !!domain.restricted_at || domain.outbound_status === "disabled",
+      suspended: !!domain.suspended_at,
+    },
+    dns: {
+      dkim: domain.dkim_status,
+      spf: domain.spf_status,
+      dmarc: domain.dmarc_status,
+      missing_records: missingRecords,
+      warnings,
+    },
+    provisioning,
+    missing_requirements: [...new Set(missingRequirements)],
+    next_actions: [...new Set(nextActions)],
+  };
+}
+
+function formatDomainLifecycleSummary(summary: DomainLifecycleSummary): string {
+  const lines = [chalk.bold(`\nDomain ${summary.domain}`)];
+  lines.push(`  Mode:            ${summary.mode} (${summary.mode_label})`);
+  lines.push(`  Source of truth: ${summary.source_of_truth}`);
+  lines.push(`  Type:            ${summary.domain_type}`);
+  lines.push(`  Provider:        ${summary.provider ? `${summary.provider.name} (${summary.provider.type})` : "(missing)"}`);
+  lines.push(`  Ownership:       ${summary.ownership_status}`);
+  lines.push(`  Inbound:         ${summary.readiness.inbound_ready ? chalk.green("ready") : chalk.yellow(summary.inbound_status)}`);
+  lines.push(`  Outbound:        ${summary.readiness.outbound_ready ? chalk.green("ready") : chalk.yellow(summary.outbound_status)}`);
+  lines.push(`  Monitoring:      ${summary.monitoring_status}`);
+  lines.push(`  DNS:             DKIM:${summary.dns.dkim} SPF:${summary.dns.spf} DMARC:${summary.dns.dmarc}`);
+  if (summary.missing_requirements.length > 0) lines.push(chalk.dim(`  Missing:         ${summary.missing_requirements.join("; ")}`));
+  if (summary.next_actions.length > 0) {
+    lines.push(chalk.dim("  Next:"));
+    for (const action of summary.next_actions.slice(0, 3)) lines.push(chalk.dim(`    ${action}`));
+  }
+  lines.push("");
+  return lines.join("\n");
+}
+
+function formatDomainLifecycleList(summaries: DomainLifecycleSummary[], opts: { verbose?: boolean } = {}): string {
+  if (summaries.length === 0) return chalk.dim("No domains configured.");
+  const lines = [chalk.bold("\nDomains:")];
+  lines.push(tableRow(
+    [chalk.bold("Domain"), 22],
+    [chalk.bold("Mode"), 12],
+    [chalk.bold("Source"), 10],
+    [chalk.bold("Provider"), 14],
+    [chalk.bold("Inbound"), 10],
+    [chalk.bold("Outbound"), 10],
+    [chalk.bold("Next"), 26],
+  ));
+  for (const summary of summaries) {
+    const next = summary.next_actions[0] ?? "none";
+    lines.push(tableRow(
+      [truncate(summary.domain, 22), 22],
+      [summary.mode, 12],
+      [summary.source_of_truth, 10],
+      [summary.provider ? truncate(summary.provider.name, 14) : "(missing)", 14],
+      [summary.readiness.inbound_ready ? chalk.green("ready") : chalk.yellow(summary.inbound_status), 10],
+      [summary.readiness.outbound_ready ? chalk.green("ready") : chalk.yellow(summary.outbound_status), 10],
+      [truncate(next, 26), 26],
+    ));
+    if (opts.verbose && summary.missing_requirements.length > 0) {
+      lines.push(chalk.dim(`  ${summary.domain}: ${summary.missing_requirements.join("; ")}`));
+    }
+  }
+  lines.push("");
+  return lines.join("\n");
+}
 
 export function registerDomainCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   const domainCmd = program.command("domain").description("Manage sending domains");
+  const domainsCmd = program.command("domains").description("Manage domain lifecycle");
 
   const listDomainsAction = (opts: { provider?: string; limit?: string; offset?: string; verbose?: boolean }) => {
     try {
@@ -47,57 +254,420 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     }
   };
 
-  program
-    .command("domains")
-    .description("List sending domains (alias: mailery domain list)")
+  const listLifecycleAction = (opts: { provider?: string; limit?: string; offset?: string; verbose?: boolean }) => {
+    try {
+      const db = getDatabase();
+      const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
+      const page = parseCliListPage(opts);
+      const rows = listDomains(providerId, db, page).map((domain) => buildDomainLifecycleSummary(domain, db));
+      output(rows, `${formatDomainLifecycleList(rows, { verbose: opts.verbose || isCliVerboseOutput() })}\n${formatListHint({
+        shown: rows.length,
+        limit: page.limit,
+        offset: page.offset,
+        noun: "domain",
+        detailCommand: "use mailery domains status <domain> for lifecycle details",
+        verbose: opts.verbose || isCliVerboseOutput(),
+      })}`);
+    } catch (e) {
+      handleError(e);
+    }
+  };
+
+  const statusLifecycleAction = (domainOrId: string | undefined, opts: { provider?: string; limit?: string; offset?: string; verbose?: boolean }) => {
+    try {
+      if (!domainOrId) {
+        listLifecycleAction(opts);
+        return;
+      }
+      const db = getDatabase();
+      const domain = resolveDomainRecord(domainOrId, opts, db);
+      const summary = buildDomainLifecycleSummary(domain, db);
+      output(summary, formatDomainLifecycleSummary(summary));
+    } catch (e) {
+      handleError(e);
+    }
+  };
+
+  const addDomainAction = async (
+    domain: string,
+    opts: { provider: string; dryRun?: boolean; domainType?: string; sourceOfTruth?: string },
+    commandPrefix: "domain" | "domains",
+  ) => {
+    try {
+      const db = getDatabase();
+      const providerId = resolveId("providers", opts.provider);
+      const provider = getProvider(providerId, db);
+      if (!provider) handleError(new Error(`Provider not found: ${opts.provider}`));
+      const existing = getDomainByName(providerId, domain, db);
+      const mode = resolveMaileryMode();
+      const domainType = normalizeDomainType(opts.domainType) ?? "self_hosted";
+      const sourceOfTruth = normalizeSourceOfTruth(opts.sourceOfTruth) ?? defaultSourceOfTruth(mode.mode);
+
+      if (opts.dryRun) {
+        output({
+          dry_run: true,
+          domain,
+          provider_id: providerId,
+          mode: mode.mode,
+          provider: providerSummary(provider),
+          source_of_truth: sourceOfTruth,
+          domain_type: domainType,
+          existing: existing ? buildDomainLifecycleSummary(existing, db) : null,
+          would_create_domain: !existing,
+          would_call_provider: !existing,
+          cli_equivalent: `mailery ${commandPrefix} add ${domain} --provider ${opts.provider}`,
+        }, existing
+          ? chalk.dim(`Domain already exists locally: ${domain} (${existing.id.slice(0, 8)})`)
+          : chalk.dim(`Would add ${domain} to provider ${provider!.name} and register it as ${sourceOfTruth} source of truth.`));
+        return;
+      }
+
+      if (existing) {
+        const summary = buildDomainLifecycleSummary(existing, db);
+        output(summary, chalk.green(`✓ Domain already exists: ${domain} (${existing.id.slice(0, 8)})\n`) + formatDomainLifecycleSummary(summary));
+        return;
+      }
+
+      const adapter = getAdapter(provider!);
+      await adapter.addDomain(domain);
+
+      const created = createDomain(providerId, domain, db);
+      const updated = updateDomainReadiness(created.id, {
+        domain_type: domainType,
+        source_of_truth: sourceOfTruth,
+      }, db);
+      const summary = buildDomainLifecycleSummary(updated, db);
+      output(summary, chalk.green(`✓ Domain added: ${domain} (${updated.id.slice(0, 8)})\n`) + formatDomainLifecycleSummary(summary));
+    } catch (e) {
+      handleError(e);
+    }
+  };
+
+  const enableInboundAction = (domainOrId: string, opts: { provider?: string; force?: boolean }) => {
+    try {
+      const db = getDatabase();
+      const domain = resolveDomainRecord(domainOrId, opts, db);
+      const summary = buildDomainLifecycleSummary(domain, db);
+      if (!opts.force && !summary.readiness.receive_ready) {
+        handleError(new Error(`Inbound is not verified for ${domain.domain}; run mailery domains check ${domain.domain} or pass --force after manual/provider setup.`));
+      }
+      const updated = updateDomainReadiness(domain.id, {
+        inbound_status: "ready",
+        last_inbound_check_at: now(),
+      }, db);
+      setDomainProvisioning(domain.id, {
+        provisioning_status: "inbound_ready",
+        last_error: null,
+        next_check_at: null,
+      }, db);
+      const next = buildDomainLifecycleSummary(updated, db);
+      output(next, chalk.green(`✓ Inbound enabled for ${domain.domain}\n`) + formatDomainLifecycleSummary(next));
+    } catch (e) {
+      handleError(e);
+    }
+  };
+
+  const enableOutboundAction = (domainOrId: string, opts: { provider?: string; force?: boolean }) => {
+    try {
+      const db = getDatabase();
+      const domain = resolveDomainRecord(domainOrId, opts, db);
+      const dnsReady = domain.dkim_status === "verified" && domain.spf_status === "verified";
+      if (!opts.force && !dnsReady) {
+        handleError(new Error(`Outbound is not verified for ${domain.domain}; DKIM and SPF must be verified or pass --force after manual/provider setup.`));
+      }
+      const updated = updateDomainReadiness(domain.id, {
+        ownership_status: domain.verified_at || dnsReady ? "verified" : domain.ownership_status,
+        outbound_status: "ready",
+        monitoring_status: domain.dmarc_status === "verified" ? "monitoring" : domain.monitoring_status,
+        last_outbound_check_at: now(),
+      }, db);
+      if (dnsReady) {
+        setDomainProvisioning(domain.id, {
+          provisioning_status: "verified",
+          last_error: null,
+          next_check_at: null,
+        }, db);
+      }
+      const next = buildDomainLifecycleSummary(updated, db);
+      output(next, chalk.green(`✓ Outbound enabled for ${domain.domain}\n`) + formatDomainLifecycleSummary(next));
+    } catch (e) {
+      handleError(e);
+    }
+  };
+
+  const disableOutboundAction = (domainOrId: string, opts: { provider?: string }) => {
+    try {
+      const db = getDatabase();
+      const domain = resolveDomainRecord(domainOrId, opts, db);
+      const updated = updateDomainReadiness(domain.id, {
+        outbound_status: "disabled",
+        restricted_at: now(),
+      }, db);
+      const summary = buildDomainLifecycleSummary(updated, db);
+      output(summary, chalk.yellow(`⏸ Outbound disabled for ${domain.domain}\n`) + formatDomainLifecycleSummary(summary));
+    } catch (e) {
+      handleError(e);
+    }
+  };
+
+  const dnsAction = async (domain: string, opts: { provider?: string }) => {
+    try {
+      let providerId: string | undefined;
+      if (opts.provider) {
+        providerId = resolveId("providers", opts.provider);
+      }
+
+      const found = providerId ? getDomainByName(providerId, domain) : findDomainsByName(domain)[0];
+
+      if (found) {
+        const provider = getProvider(found.provider_id);
+        if (provider) {
+          const adapter = getAdapter(provider);
+          const records = await adapter.getDnsRecords(domain);
+          const summary = buildDomainLifecycleSummary(found);
+          output({
+            domain,
+            records,
+            lifecycle: summary,
+          }, chalk.bold(`\nDNS Records for ${domain}:\n`) + formatDnsTable(records) + formatDomainLifecycleSummary(summary));
+          return;
+        }
+      }
+
+      const { generateSpfRecord, generateDmarcRecord } = await import("../../lib/dns.js");
+      const records = [generateSpfRecord(domain), generateDmarcRecord(domain)];
+      output({
+        domain,
+        records,
+        lifecycle: null,
+      }, chalk.bold(`\nDNS Records for ${domain} (generic):\n`) + formatDnsTable(records));
+    } catch (e) {
+      handleError(e);
+    }
+  };
+
+  const verifyAction = async (domain: string, opts: { provider?: string }) => {
+    try {
+      const db = getDatabase();
+      const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
+      const found = providerId ? getDomainByName(providerId, domain, db) : findDomainsByName(domain, db)[0];
+      if (!found) handleError(new Error(`Domain not found: ${domain}`));
+
+      const provider = getProvider(found!.provider_id, db);
+      if (!provider) handleError(new Error("Provider not found"));
+
+      const adapter = getAdapter(provider!);
+      let status = await adapter.verifyDomain(domain);
+      let reinitiatedRecords: Awaited<ReturnType<NonNullable<typeof adapter.reinitiateDomainVerification>>> | null = null;
+      if (
+        provider!.type === "ses" &&
+        adapter.reinitiateDomainVerification &&
+        (status.dkim === "failed" || status.spf === "failed")
+      ) {
+        reinitiatedRecords = await adapter.reinitiateDomainVerification(domain);
+        const refreshed = await adapter.verifyDomain(domain);
+        status = {
+          dkim: refreshed.dkim === "failed" ? "pending" : refreshed.dkim,
+          spf: refreshed.spf === "failed" ? "pending" : refreshed.spf,
+          dmarc: refreshed.dmarc,
+        };
+      }
+      const updated = updateDnsStatus(found!.id, status.dkim, status.spf, status.dmarc, db);
+      const lifecycle = buildDomainLifecycleSummary(updated, db);
+
+      const lines = [chalk.bold(`\nDNS Status for ${domain}:`)];
+      if (reinitiatedRecords) {
+        lines.push(chalk.yellow("  SES verification was failed; identity/DKIM verification was re-initiated."));
+        if (reinitiatedRecords.length > 0) {
+          lines.push(chalk.dim("  Required SES verification records:"));
+          lines.push(formatDnsTable(reinitiatedRecords).trimEnd());
+        }
+      }
+      lines.push(`  DKIM:  ${colorDnsStatus(status.dkim)}`);
+      lines.push(`  SPF:   ${colorDnsStatus(status.spf)}`);
+      lines.push(`  DMARC: ${colorDnsStatus(status.dmarc)}`);
+      lines.push(formatDomainLifecycleSummary(lifecycle).trimEnd());
+      lines.push("");
+      output({ domain, status, reinitiated_records: reinitiatedRecords, lifecycle }, lines.join("\n"));
+    } catch (e) {
+      handleError(e);
+    }
+  };
+
+  const checkAction = async (domain: string, opts: { provider?: string }) => {
+    try {
+      const { checkDomainAuthentication, formatDnsCheck } = await import("../../lib/dns-check.js");
+      const { inspectPublicMx, ownerLabel, requiresMxSwitchConfirmation, formatMxRecords } = await import("../../lib/mx-ownership.js");
+
+      let providerId: string | undefined;
+      if (opts.provider) {
+        providerId = resolveId("providers", opts.provider);
+      }
+
+      const found = providerId ? getDomainByName(providerId, domain) : findDomainsByName(domain)[0];
+
+      let expectedRecords;
+      if (found) {
+        const provider = getProvider(found.provider_id);
+        if (provider) {
+          const adapter = getAdapter(provider);
+          expectedRecords = await adapter.getDnsRecords(domain);
+        }
+      }
+
+      if (!expectedRecords) {
+        const { generateSpfRecord, generateDmarcRecord } = await import("../../lib/dns.js");
+        expectedRecords = [generateSpfRecord(domain), generateDmarcRecord(domain)];
+      }
+
+      const authentication = await checkDomainAuthentication(domain, expectedRecords);
+      const results = authentication.records;
+      const mx = await inspectPublicMx(domain);
+      let lifecycle: DomainLifecycleSummary | null = null;
+      if (found) {
+        const missingOutbound =
+          authentication.signals.ownership.status === "missing" ||
+          authentication.signals.dkim.status === "missing" ||
+          authentication.signals.spf.status === "missing" ||
+          authentication.signals.mail_from.status === "missing";
+        const updated = updateDomainReadiness(found.id, {
+          ownership_status: authentication.signals.ownership.status === "verified"
+            ? "verified"
+            : authentication.signals.ownership.status === "missing"
+              ? "failed"
+              : "pending",
+          inbound_status: authentication.inbound_ready
+            ? "ready"
+            : authentication.signals.mx.status === "missing"
+              ? "failed"
+              : "pending",
+          outbound_status: authentication.outbound_ready ? "ready" : missingOutbound ? "failed" : "pending",
+          monitoring_status: authentication.dmarc_monitoring_ready ? "monitoring" : "none",
+          dns_records: {
+            checked_at: authentication.checked_at,
+            records: results,
+            missing_requirements: authentication.missing_requirements,
+            warnings: authentication.warnings,
+          },
+          last_dns_check_at: authentication.checked_at,
+        });
+        lifecycle = buildDomainLifecycleSummary(updated);
+      }
+
+      const lines = [chalk.bold(`\nDNS Check for ${domain}:`), formatDnsCheck(results).trimEnd(), ""];
+      lines.push(chalk.bold("Authentication readiness:"));
+      lines.push(`  Outbound: ${authentication.outbound_ready ? chalk.green("ready") : chalk.yellow("not ready")}`);
+      lines.push(`  Inbound:  ${authentication.inbound_ready ? chalk.green("ready") : chalk.yellow("not ready")}`);
+      lines.push(`  DMARC:    ${authentication.dmarc_monitoring_ready ? chalk.green("monitoring ready") : chalk.yellow("monitoring not verified")}`);
+      if (authentication.missing_requirements.length > 0) {
+        lines.push(chalk.dim(`  Missing: ${authentication.missing_requirements.join("; ")}`));
+      }
+      for (const warning of authentication.warnings) {
+        lines.push(chalk.dim(`  Note: ${warning}`));
+      }
+      lines.push("");
+      lines.push(chalk.bold("Root MX ownership:"));
+      lines.push(`  ${ownerLabel(mx.owner)} - ${mx.summary}`);
+      lines.push(`  ${chalk.dim(formatMxRecords(mx.records))}`);
+      if (requiresMxSwitchConfirmation(mx)) {
+        lines.push(chalk.yellow("  Existing inbound is protected. Use SES send-only setup unless you intentionally move or mix root MX."));
+      } else if (mx.owner === "aws-ses") {
+        lines.push(chalk.green("  SES already owns root inbound MX."));
+      } else {
+        lines.push(chalk.dim("  No root MX detected; SES inbound MX can be added when receiving is desired."));
+      }
+      lines.push("");
+      const allMatch = results.every((r) => r.match);
+      if (allMatch) {
+        lines.push(chalk.green("All DNS records verified successfully."));
+      } else {
+        const missing = results.filter((r) => !r.match).length;
+        lines.push(chalk.yellow(`${missing} record(s) not yet propagated or missing.`));
+      }
+      if (lifecycle) lines.push(formatDomainLifecycleSummary(lifecycle).trimEnd());
+      lines.push("");
+      output({ domain, records: results, authentication, mx, lifecycle }, lines.join("\n"));
+    } catch (e) {
+      handleError(e);
+    }
+  };
+
+  domainsCmd
+    .action(() => listLifecycleAction({}));
+
+  domainsCmd
+    .command("list")
+    .description("List domains with lifecycle readiness")
     .option("--provider <id>", "Filter by provider ID")
     .option("--limit <n>", "Maximum domains to show (default 20 compact, 50 verbose/json)")
     .option("--offset <n>", "Number of domains to skip", "0")
-    .option("--verbose", "Show expanded list hints")
-    .action(listDomainsAction);
+    .option("--verbose", "Show expanded lifecycle details")
+    .action(listLifecycleAction);
+
+  domainsCmd
+    .command("status [domain]")
+    .description("Show domain lifecycle readiness")
+    .option("--provider <id>", "Provider ID")
+    .option("--limit <n>", "Maximum domains to show when no domain is passed")
+    .option("--offset <n>", "Number of domains to skip when no domain is passed", "0")
+    .option("--verbose", "Show expanded lifecycle details")
+    .action(statusLifecycleAction);
+
+  domainsCmd
+    .command("add <domain>")
+    .description("Add a domain to a provider")
+    .requiredOption("--provider <id>", "Provider ID")
+    .option("--domain-type <type>", "Domain type: system, tenant, self_hosted, or local_only")
+    .option("--source-of-truth <source>", "Source of truth: local, postgres, or cloud")
+    .option("--dry-run", "Resolve inputs and show the planned change without calling the provider or writing to the DB")
+    .action((domain: string, opts: { provider: string; dryRun?: boolean; domainType?: string; sourceOfTruth?: string }) => addDomainAction(domain, opts, "domains"));
+
+  domainsCmd
+    .command("dns <domain>")
+    .description("Show required DNS records and lifecycle context for a domain")
+    .option("--provider <id>", "Provider ID")
+    .action(dnsAction);
+
+  domainsCmd
+    .command("verify <domain>")
+    .description("Re-verify domain DNS status and update lifecycle context")
+    .option("--provider <id>", "Provider ID")
+    .action(verifyAction);
+
+  domainsCmd
+    .command("check <domain>")
+    .description("Live DNS check with per-domain authentication readiness")
+    .option("--provider <id>", "Provider ID")
+    .action(checkAction);
+
+  domainsCmd
+    .command("enable-inbound <domain>")
+    .description("Mark a domain inbound-ready after provider/DNS routing is configured")
+    .option("--provider <id>", "Provider ID")
+    .option("--force", "Mark inbound ready even if local readiness checks are not yet verified")
+    .action(enableInboundAction);
+
+  domainsCmd
+    .command("enable-outbound <domain>")
+    .description("Enable outbound sending for a verified domain")
+    .option("--provider <id>", "Provider ID")
+    .option("--force", "Enable outbound even if local DKIM/SPF checks are not yet verified")
+    .action(enableOutboundAction);
+
+  domainsCmd
+    .command("disable-outbound <domain>")
+    .description("Disable outbound sending for a domain")
+    .option("--provider <id>", "Provider ID")
+    .action(disableOutboundAction);
 
   domainCmd
     .command("add <domain>")
     .description("Add a domain to a provider")
     .requiredOption("--provider <id>", "Provider ID")
+    .option("--domain-type <type>", "Domain type: system, tenant, self_hosted, or local_only")
+    .option("--source-of-truth <source>", "Source of truth: local, postgres, or cloud")
     .option("--dry-run", "Resolve inputs and show the planned change without calling the provider or writing to the DB")
-    .action(async (domain: string, opts: { provider: string; dryRun?: boolean }) => {
-      try {
-        const providerId = resolveId("providers", opts.provider);
-        const provider = getProvider(providerId);
-        if (!provider) handleError(new Error(`Provider not found: ${opts.provider}`));
-        const existing = getDomainByName(providerId, domain);
-
-        if (opts.dryRun) {
-          output({
-            dry_run: true,
-            domain,
-            provider_id: providerId,
-            existing,
-            would_create_domain: !existing,
-            would_call_provider: !existing,
-            cli_equivalent: `mailery domain add ${domain} --provider ${opts.provider}`,
-          }, existing
-            ? chalk.dim(`Domain already exists locally: ${domain} (${existing.id.slice(0, 8)})`)
-            : chalk.dim(`Would add ${domain} to provider ${provider!.name} and register it locally.`));
-          return;
-        }
-
-        if (existing) {
-          output(existing, chalk.green(`✓ Domain already exists: ${domain} (${existing.id.slice(0, 8)})`));
-          return;
-        }
-
-        const adapter = getAdapter(provider!);
-        await adapter.addDomain(domain);
-
-        const d = createDomain(providerId, domain);
-        console.log(chalk.green(`✓ Domain added: ${domain} (${d.id.slice(0, 8)})`));
-        console.log(chalk.dim("Run 'mailery domain dns <domain>' to see required DNS records."));
-      } catch (e) {
-        handleError(e);
-      }
-    });
+    .action((domain: string, opts: { provider: string; dryRun?: boolean; domainType?: string; sourceOfTruth?: string }) => addDomainAction(domain, opts, "domain"));
 
   // ── adopt: seamlessly add an already-registered & SES-verified domain ────────
   domainCmd
@@ -217,81 +787,13 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .command("dns <domain>")
     .description("Show DNS records for a domain")
     .option("--provider <id>", "Provider ID (optional if domain is unambiguous)")
-    .action(async (domain: string, opts: { provider?: string }) => {
-      try {
-        let providerId: string | undefined;
-        if (opts.provider) {
-          providerId = resolveId("providers", opts.provider);
-        }
-
-        const found = providerId ? getDomainByName(providerId, domain) : findDomainsByName(domain)[0];
-
-        if (found) {
-          const provider = getProvider(found.provider_id);
-          if (provider) {
-            const adapter = getAdapter(provider);
-            const records = await adapter.getDnsRecords(domain);
-            output(records, chalk.bold(`\nDNS Records for ${domain}:\n`) + formatDnsTable(records));
-            return;
-          }
-        }
-
-        // Fallback: generate generic records
-        const { generateSpfRecord, generateDmarcRecord } = await import("../../lib/dns.js");
-        const records = [generateSpfRecord(domain), generateDmarcRecord(domain)];
-        output(records, chalk.bold(`\nDNS Records for ${domain} (generic):\n`) + formatDnsTable(records));
-      } catch (e) {
-        handleError(e);
-      }
-    });
+    .action(dnsAction);
 
   domainCmd
     .command("verify <domain>")
     .description("Re-verify domain DNS status")
     .option("--provider <id>", "Provider ID")
-    .action(async (domain: string, opts: { provider?: string }) => {
-      try {
-        const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
-        const found = providerId ? getDomainByName(providerId, domain) : findDomainsByName(domain)[0];
-        if (!found) handleError(new Error(`Domain not found: ${domain}`));
-
-        const provider = getProvider(found!.provider_id);
-        if (!provider) handleError(new Error("Provider not found"));
-
-        const adapter = getAdapter(provider!);
-        let status = await adapter.verifyDomain(domain);
-        let reinitiatedRecords: Awaited<ReturnType<NonNullable<typeof adapter.reinitiateDomainVerification>>> | null = null;
-        if (
-          provider!.type === "ses" &&
-          adapter.reinitiateDomainVerification &&
-          (status.dkim === "failed" || status.spf === "failed")
-        ) {
-          reinitiatedRecords = await adapter.reinitiateDomainVerification(domain);
-          const refreshed = await adapter.verifyDomain(domain);
-          status = {
-            dkim: refreshed.dkim === "failed" ? "pending" : refreshed.dkim,
-            spf: refreshed.spf === "failed" ? "pending" : refreshed.spf,
-            dmarc: refreshed.dmarc,
-          };
-        }
-        updateDnsStatus(found!.id, status.dkim, status.spf, status.dmarc);
-
-        console.log(chalk.bold(`\nDNS Status for ${domain}:`));
-        if (reinitiatedRecords) {
-          console.log(chalk.yellow("  SES verification was failed; identity/DKIM verification was re-initiated."));
-          if (reinitiatedRecords.length > 0) {
-            console.log(chalk.dim("  Required SES verification records:"));
-            console.log(formatDnsTable(reinitiatedRecords));
-          }
-        }
-        console.log(`  DKIM:  ${colorDnsStatus(status.dkim)}`);
-        console.log(`  SPF:   ${colorDnsStatus(status.spf)}`);
-        console.log(`  DMARC: ${colorDnsStatus(status.dmarc)}`);
-        console.log();
-      } catch (e) {
-        handleError(e);
-      }
-    });
+    .action(verifyAction);
 
   domainCmd
     .command("status")
@@ -550,98 +1052,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .command("check <domain>")
     .description("Live DNS check — verify actual DNS records against expected")
     .option("--provider <id>", "Provider ID")
-    .action(async (domain: string, opts: { provider?: string }) => {
-      try {
-        const { checkDomainAuthentication, formatDnsCheck } = await import("../../lib/dns-check.js");
-        const { inspectPublicMx, ownerLabel, requiresMxSwitchConfirmation, formatMxRecords } = await import("../../lib/mx-ownership.js");
-
-        let providerId: string | undefined;
-        if (opts.provider) {
-          providerId = resolveId("providers", opts.provider);
-        }
-
-        const found = providerId ? getDomainByName(providerId, domain) : findDomainsByName(domain)[0];
-
-        let expectedRecords;
-        if (found) {
-          const provider = getProvider(found.provider_id);
-          if (provider) {
-            const adapter = getAdapter(provider);
-            expectedRecords = await adapter.getDnsRecords(domain);
-          }
-        }
-
-        if (!expectedRecords) {
-          const { generateSpfRecord, generateDmarcRecord } = await import("../../lib/dns.js");
-          expectedRecords = [generateSpfRecord(domain), generateDmarcRecord(domain)];
-        }
-
-        const authentication = await checkDomainAuthentication(domain, expectedRecords);
-        const results = authentication.records;
-        const mx = await inspectPublicMx(domain);
-        if (found) {
-          const missingOutbound =
-            authentication.signals.ownership.status === "missing" ||
-            authentication.signals.dkim.status === "missing" ||
-            authentication.signals.spf.status === "missing" ||
-            authentication.signals.mail_from.status === "missing";
-          updateDomainReadiness(found.id, {
-            ownership_status: authentication.signals.ownership.status === "verified"
-              ? "verified"
-              : authentication.signals.ownership.status === "missing"
-                ? "failed"
-                : "pending",
-            inbound_status: authentication.inbound_ready
-              ? "ready"
-              : authentication.signals.mx.status === "missing"
-                ? "failed"
-                : "pending",
-            outbound_status: authentication.outbound_ready ? "ready" : missingOutbound ? "failed" : "pending",
-            monitoring_status: authentication.dmarc_monitoring_ready ? "monitoring" : "none",
-            dns_records: {
-              checked_at: authentication.checked_at,
-              records: results,
-              missing_requirements: authentication.missing_requirements,
-              warnings: authentication.warnings,
-            },
-            last_dns_check_at: authentication.checked_at,
-          });
-        }
-
-        const lines = [chalk.bold(`\nDNS Check for ${domain}:`), formatDnsCheck(results).trimEnd(), ""];
-        lines.push(chalk.bold("Authentication readiness:"));
-        lines.push(`  Outbound: ${authentication.outbound_ready ? chalk.green("ready") : chalk.yellow("not ready")}`);
-        lines.push(`  Inbound:  ${authentication.inbound_ready ? chalk.green("ready") : chalk.yellow("not ready")}`);
-        lines.push(`  DMARC:    ${authentication.dmarc_monitoring_ready ? chalk.green("monitoring ready") : chalk.yellow("monitoring not verified")}`);
-        if (authentication.missing_requirements.length > 0) {
-          lines.push(chalk.dim(`  Missing: ${authentication.missing_requirements.join("; ")}`));
-        }
-        for (const warning of authentication.warnings) {
-          lines.push(chalk.dim(`  Note: ${warning}`));
-        }
-        lines.push("");
-        lines.push(chalk.bold("Root MX ownership:"));
-        lines.push(`  ${ownerLabel(mx.owner)} - ${mx.summary}`);
-        lines.push(`  ${chalk.dim(formatMxRecords(mx.records))}`);
-        if (requiresMxSwitchConfirmation(mx)) {
-          lines.push(chalk.yellow("  Existing inbound is protected. Use SES send-only setup unless you intentionally move or mix root MX."));
-        } else if (mx.owner === "aws-ses") {
-          lines.push(chalk.green("  SES already owns root inbound MX."));
-        } else {
-          lines.push(chalk.dim("  No root MX detected; SES inbound MX can be added when receiving is desired."));
-        }
-        lines.push("");
-        const allMatch = results.every((r) => r.match);
-        if (allMatch) {
-          lines.push(chalk.green("All DNS records verified successfully."));
-        } else {
-          const missing = results.filter((r) => !r.match).length;
-          lines.push(chalk.yellow(`${missing} record(s) not yet propagated or missing.`));
-        }
-        lines.push("");
-        output({ domain, records: results, authentication, mx }, lines.join("\n"));
-      } catch (e) { handleError(e); }
-    });
+    .action(checkAction);
 
   // ─── WARMING COMMANDS ──────────────────────────────────────────────────────
 

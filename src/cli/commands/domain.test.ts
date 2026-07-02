@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { Command } from "commander";
 import { closeDatabase, getDatabase, resetDatabase } from "../../db/database.js";
 import { createAddress, getAddress } from "../../db/addresses.js";
-import { createDomain, listDomains, updateDnsStatus } from "../../db/domains.js";
+import { createDomain, getDomain, listDomains, updateDnsStatus } from "../../db/domains.js";
 import { createProvider } from "../../db/providers.js";
 import { setDomainProvisioning } from "../../db/provisioning.js";
 import { createWarmingSchedule } from "../../db/warming.js";
@@ -51,6 +51,7 @@ async function runDomainCommand(args: string[]) {
 
 beforeEach(() => {
   process.env["EMAILS_DB_PATH"] = ":memory:";
+  process.env["MAILERY_MODE"] = "local";
   resetDatabase();
   mockR53CheckAvailability.mockReset();
   mockR53CheckAvailability.mockImplementation(async (domain: string) => ({
@@ -81,6 +82,7 @@ beforeEach(() => {
 afterEach(() => {
   closeDatabase();
   delete process.env["EMAILS_DB_PATH"];
+  delete process.env["MAILERY_MODE"];
 });
 
 describe("domain add command", () => {
@@ -174,6 +176,109 @@ describe("domain list command", () => {
       { domain: "domain-3.example.com" },
       { domain: "domain-2.example.com" },
     ]);
+  });
+});
+
+describe("domains lifecycle commands", () => {
+  it("lists domains with stable lifecycle JSON fields", async () => {
+    const provider = createProvider({ name: "sandbox", type: "sandbox" });
+    createDomain(provider.id, "example.com");
+
+    const result = await runDomainCommand(["domains", "list"]);
+
+    expect(result.out).toContain("Source");
+    expect(result.data).toMatchObject([
+      {
+        domain: "example.com",
+        mode: "local",
+        source_of_truth: "local",
+        domain_type: "self_hosted",
+        provider: { id: provider.id, name: "sandbox", type: "sandbox" },
+        ownership_status: "pending",
+        inbound_status: "pending",
+        outbound_status: "pending",
+        readiness: {
+          inbound_ready: false,
+          outbound_ready: false,
+        },
+      },
+    ]);
+  });
+
+  it("shows a single domain lifecycle status with missing requirements and next actions", async () => {
+    const provider = createProvider({ name: "sandbox", type: "sandbox" });
+    createDomain(provider.id, "example.com");
+
+    const result = await runDomainCommand(["domains", "status", "example.com"]);
+
+    expect(result.out).toContain("Source of truth");
+    expect(result.data).toMatchObject({
+      domain: "example.com",
+      mode: "local",
+      source_of_truth: "local",
+      missing_requirements: expect.arrayContaining([
+        "domain ownership is not verified",
+        "outbound sending is not enabled",
+      ]),
+      next_actions: expect.arrayContaining([
+        "mailery domains dns example.com",
+        "mailery domains verify example.com",
+      ]),
+    });
+  });
+
+  it("supports plural add dry-run without mutating state", async () => {
+    const provider = createProvider({ name: "sandbox", type: "sandbox" });
+
+    const result = await runDomainCommand([
+      "domains", "add", "example.com",
+      "--provider", provider.id,
+      "--source-of-truth", "postgres",
+      "--dry-run",
+    ]);
+
+    expect(result.data).toMatchObject({
+      dry_run: true,
+      domain: "example.com",
+      provider: { id: provider.id, name: "sandbox" },
+      source_of_truth: "postgres",
+      would_create_domain: true,
+      cli_equivalent: `mailery domains add example.com --provider ${provider.id}`,
+    });
+    expect(listDomains(undefined, getDatabase())).toHaveLength(0);
+  });
+
+  it("enables and disables per-domain inbound/outbound lifecycle states", async () => {
+    const provider = createProvider({ name: "ses-main", type: "ses", region: "us-east-1" });
+    const domain = createDomain(provider.id, "ready.example.com");
+    updateDnsStatus(domain.id, "verified", "verified", "verified");
+    setDomainProvisioning(domain.id, { provisioning_status: "ready", send_provider: "ses" });
+
+    const inbound = await runDomainCommand(["domains", "enable-inbound", "ready.example.com"]);
+    expect(inbound.data).toMatchObject({
+      domain: "ready.example.com",
+      inbound_status: "ready",
+      readiness: { inbound_ready: true },
+    });
+
+    const outbound = await runDomainCommand(["domains", "enable-outbound", "ready.example.com"]);
+    expect(outbound.data).toMatchObject({
+      domain: "ready.example.com",
+      outbound_status: "ready",
+      monitoring_status: "monitoring",
+      readiness: { outbound_ready: true },
+    });
+
+    const disabled = await runDomainCommand(["domains", "disable-outbound", "ready.example.com"]);
+    expect(disabled.data).toMatchObject({
+      domain: "ready.example.com",
+      outbound_status: "disabled",
+      readiness: { restricted: true },
+    });
+    expect(getDomain(domain.id, getDatabase())).toMatchObject({
+      inbound_status: "ready",
+      outbound_status: "disabled",
+    });
   });
 });
 
