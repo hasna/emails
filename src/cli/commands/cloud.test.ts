@@ -581,4 +581,75 @@ describe("cloud command", () => {
     expect(result.data).toMatchObject({ read: 0, stored: 0, updated: 0, source_of_truth: true });
     expect((result.data as { pruned?: number }).pruned).toBeGreaterThanOrEqual(before.count);
   });
+
+  it("replace mode pulls every cursor page before pruning stale cloud cache rows", async () => {
+    storeInboundEmail({
+      provider_id: null,
+      message_id: "cloud:stale_cloud_msg",
+      in_reply_to_email_id: null,
+      from_address: "old@example.com",
+      to_addresses: ["agent@example.com"],
+      cc_addresses: [],
+      subject: "Stale cloud",
+      text_body: "old",
+      html_body: null,
+      attachments: [],
+      headers: {},
+      raw_size: 3,
+      received_at: "2026-06-29T10:00:00.000Z",
+    });
+
+    const cloudMessage = (id: string, subject: string) => ({
+      id,
+      tenantId: "ten_1",
+      mailboxId: "mbx_cloud",
+      direction: "inbound" as const,
+      status: "stored",
+      subject,
+      fromAddress: `${id}@example.com`,
+      toAddresses: ["agent@example.com"],
+      ccAddresses: [],
+      receivedAt: "2026-06-30T10:00:00.000Z",
+      sentAt: null,
+      textBody: `${subject} body`,
+      htmlBody: null,
+      cleanMarkdown: null,
+      summary: null,
+      parserModel: null,
+      classification: {},
+      importanceScore: 0,
+      isRead: false,
+      isImportant: false,
+      isSpam: false,
+      isTrash: false,
+      isArchived: false,
+      createdAt: "2026-06-30T10:00:00.000Z",
+      updatedAt: "2026-06-30T10:00:00.000Z",
+    });
+    const messages = new Map([
+      ["cloud_msg_1", cloudMessage("cloud_msg_1", "Page one")],
+      ["cloud_msg_2", cloudMessage("cloud_msg_2", "Page two")],
+    ]);
+    const cursors: Array<string | undefined> = [];
+
+    const result = await runCloudCommand(["cloud", "messages", "pull", "--replace", "--limit", "1"], {
+      createClient: () => ({
+        listMessagesPage: async (opts: { cursor?: string }) => {
+          cursors.push(opts.cursor);
+          if (!opts.cursor) return { data: [messages.get("cloud_msg_1")!], nextCursor: "cursor_2" };
+          return { data: [messages.get("cloud_msg_2")!], nextCursor: null };
+        },
+        listMessages: async () => { throw new Error("unused"); },
+        getMessage: async (id: string) => ({ ...messages.get(id)!, attachments: [] }),
+      } as never),
+    });
+
+    const db = getDatabase();
+    expect(cursors).toEqual([undefined, "cursor_2"]);
+    expect(db.query("SELECT subject FROM inbound_emails WHERE message_id = ?").get("cloud:cloud_msg_1")).toEqual({ subject: "Page one" });
+    expect(db.query("SELECT subject FROM inbound_emails WHERE message_id = ?").get("cloud:cloud_msg_2")).toEqual({ subject: "Page two" });
+    expect(db.query("SELECT COUNT(*) AS count FROM inbound_emails WHERE message_id = ?").get("cloud:stale_cloud_msg")).toEqual({ count: 0 });
+    expect(result.data).toMatchObject({ read: 2, stored: 2, updated: 0, source_of_truth: true, pages: 2, next_cursor: null });
+    expect((result.data as { pruned?: number }).pruned).toBeGreaterThanOrEqual(1);
+  });
 });

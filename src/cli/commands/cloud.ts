@@ -13,6 +13,7 @@ import {
   type MaileryCloudDigestWindow,
   type MaileryCloudMeResponse,
   type MaileryCloudMessage,
+  type MaileryCloudMessagePage,
   type MaileryCloudMessageUploadInput,
   type MaileryCloudMessageWithAttachments,
 } from "../../lib/mailery-cloud-client.js";
@@ -62,7 +63,7 @@ type MaileryCloudClientLike = Pick<
   | "revokeApiKey"
   | "checkDomainAvailability"
   | "setupDomain"
->;
+> & Partial<Pick<MaileryCloudClient, "listMessagesPage">>;
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
@@ -273,6 +274,14 @@ function cloudHeaders(message: MaileryCloudMessage): Record<string, string> {
     "X-Mailery-Cloud-Mailbox-Id": message.mailboxId,
     "X-Mailery-Cloud-Updated-At": message.updatedAt,
   };
+}
+
+async function listCloudMessagePage(
+  client: MaileryCloudClientLike,
+  opts: { group?: string; q?: string; limit?: number; cursor?: string },
+): Promise<MaileryCloudMessagePage> {
+  if (typeof client.listMessagesPage === "function") return client.listMessagesPage(opts);
+  return { data: await client.listMessages(opts), nextCursor: null };
 }
 
 function applyCloudMessageState(db: Database, id: string, message: MaileryCloudMessage): void {
@@ -779,14 +788,16 @@ export function registerCloudCommands(program: Command, output: OutputFn, deps: 
     .option("--group <group>", "inbox | important | unread | archived | spam | trash")
     .option("--q <query>", "Search query")
     .option("--limit <n>", "Maximum messages", "50")
-    .action(async (opts: { group?: string; q?: string; limit?: string }, cmd: Command) => {
+    .option("--cursor <cursor>", "Continue from a previous next_cursor")
+    .action(async (opts: { group?: string; q?: string; limit?: string; cursor?: string }, cmd: Command) => {
       try {
-        const rows = await makeClient(cmd, deps).listMessages({
+        const page = await listCloudMessagePage(makeClient(cmd, deps), {
           group: opts.group,
           q: opts.q,
           limit: parseCliPositiveIntOption(opts.limit, 50, 200),
+          cursor: opts.cursor,
         });
-        output({ data: rows }, formatMessages(rows));
+        output({ data: page.data, next_cursor: page.nextCursor }, formatMessages(page.data));
       } catch (e) {
         handleError(new Error(cloudErrorText(e)));
       }
@@ -837,29 +848,43 @@ export function registerCloudCommands(program: Command, output: OutputFn, deps: 
     .description("Pull cloud messages into the local SQLite inbox")
     .option("--group <group>", "Cloud message group", "inbox")
     .option("--limit <n>", "Maximum messages", "50")
-    .option("--replace", "Replace the local cloud cache with the returned cloud source-of-truth window")
+    .option("--cursor <cursor>", "Continue from a previous next_cursor")
+    .option("--all", "Pull every cloud page until next_cursor is empty")
+    .option("--replace", "Replace the local cloud cache after pulling every cloud page")
     .option("--source-of-truth", "Alias for --replace")
-    .action(async (opts: { group?: string; limit?: string; replace?: boolean; sourceOfTruth?: boolean }, cmd: Command) => {
+    .action(async (opts: { group?: string; limit?: string; cursor?: string; all?: boolean; replace?: boolean; sourceOfTruth?: boolean }, cmd: Command) => {
       try {
         const client = makeClient(cmd, deps);
-        const rows = await client.listMessages({ group: opts.group, limit: parseCliPositiveIntOption(opts.limit, 50, 200) });
+        const sourceOfTruth = Boolean(opts.replace || opts.sourceOfTruth);
+        const pullAllPages = Boolean(opts.all || sourceOfTruth);
+        const limit = parseCliPositiveIntOption(opts.limit, 50, 200);
         let stored = 0;
         let updated = 0;
         let skipped = 0;
+        let read = 0;
+        let pages = 0;
+        let cursor = opts.cursor;
+        let nextCursor: string | null = null;
         const seen = new Set<string>();
-        for (const row of rows) {
-          const message = await client.getMessage(row.id);
-          seen.add(cloudMessageId(message));
-          const result = storeCloudMessage(message, deps);
-          if (result.stored) stored += 1;
-          if (result.updated) updated += 1;
-          if (result.skipped) skipped += 1;
-        }
-        const sourceOfTruth = Boolean(opts.replace || opts.sourceOfTruth);
+        do {
+          const page = await listCloudMessagePage(client, { group: opts.group, limit, cursor });
+          pages += 1;
+          read += page.data.length;
+          for (const row of page.data) {
+            const message = await client.getMessage(row.id);
+            seen.add(cloudMessageId(message));
+            const result = storeCloudMessage(message, deps);
+            if (result.stored) stored += 1;
+            if (result.updated) updated += 1;
+            if (result.skipped) skipped += 1;
+          }
+          nextCursor = page.nextCursor;
+          cursor = page.nextCursor ?? undefined;
+        } while (pullAllPages && cursor);
         const pruned = sourceOfTruth ? pruneStaleCloudCache(seen, getDatabase()) : 0;
         output(
-          { read: rows.length, stored, updated, skipped, pruned, source_of_truth: sourceOfTruth },
-          chalk.green(`Pulled ${stored} new and ${updated} updated cloud message(s).${pruned ? ` Pruned ${pruned} stale cloud cache row(s).` : ""}`),
+          { read, stored, updated, skipped, pruned, source_of_truth: sourceOfTruth, pages, next_cursor: nextCursor },
+          chalk.green(`Pulled ${stored} new and ${updated} updated cloud message(s) across ${pages} page(s).${pruned ? ` Pruned ${pruned} stale cloud cache row(s).` : ""}`),
         );
       } catch (e) {
         handleError(new Error(cloudErrorText(e)));

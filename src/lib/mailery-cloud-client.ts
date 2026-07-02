@@ -109,6 +109,11 @@ export interface MaileryCloudMessageWithAttachments extends MaileryCloudMessage 
   attachments: MaileryCloudAttachment[];
 }
 
+export interface MaileryCloudMessagePage {
+  data: MaileryCloudMessage[];
+  nextCursor: string | null;
+}
+
 export interface MaileryCloudMessageUploadInput {
   mailboxId: string;
   direction?: MaileryCloudMessageDirection;
@@ -268,6 +273,10 @@ function normalizeMessageResponse(value: MaileryCloudMessageWithAttachments | {
   return { ...value, attachments: value.attachments ?? [] };
 }
 
+function normalizeMessagePageResponse(value: { data: MaileryCloudMessage[]; next_cursor?: string | null; nextCursor?: string | null }): MaileryCloudMessagePage {
+  return { data: value.data, nextCursor: value.next_cursor ?? value.nextCursor ?? null };
+}
+
 export class MaileryCloudClient {
   private apiUrl: string;
   private token?: string;
@@ -388,13 +397,19 @@ export class MaileryCloudClient {
     return this.request("/messages/groups");
   }
 
-  listMessages(opts: { group?: string; q?: string; limit?: number } = {}): Promise<MaileryCloudMessage[]> {
+  listMessagesPage(opts: { group?: string; q?: string; limit?: number; cursor?: string } = {}): Promise<MaileryCloudMessagePage> {
     const params = new URLSearchParams();
     if (opts.group) params.set("group", opts.group);
     if (opts.q) params.set("q", opts.q);
     if (opts.limit) params.set("limit", String(opts.limit));
+    if (opts.cursor) params.set("cursor", opts.cursor);
     const query = params.toString();
-    return this.request<{ data: MaileryCloudMessage[] }>(`/messages${query ? `?${query}` : ""}`).then((result) => result.data);
+    return this.request<{ data: MaileryCloudMessage[]; next_cursor?: string | null; nextCursor?: string | null }>(`/messages${query ? `?${query}` : ""}`)
+      .then(normalizeMessagePageResponse);
+  }
+
+  listMessages(opts: { group?: string; q?: string; limit?: number; cursor?: string } = {}): Promise<MaileryCloudMessage[]> {
+    return this.listMessagesPage(opts).then((result) => result.data);
   }
 
   createMessage(input: MaileryCloudMessageUploadInput): Promise<MaileryCloudMessageWithAttachments> {

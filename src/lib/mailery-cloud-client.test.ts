@@ -50,6 +50,28 @@ describe("MaileryCloudClient", () => {
     expect(sleeps).toEqual([250]);
   });
 
+  it("lists messages with cursor pagination metadata", async () => {
+    const calls: string[] = [];
+    const client = new MaileryCloudClient({
+      apiUrl: "https://mailery.example",
+      token: "t",
+      fetchImpl: (async (url) => {
+        calls.push(String(url));
+        return jsonResponse({
+          data: [{ id: "cloud_msg_1", tenantId: "ten_1", mailboxId: "mbx_1" }],
+          next_cursor: "cursor_2",
+        });
+      }) as typeof fetch,
+    });
+
+    const page = await client.listMessagesPage({ group: "inbox", limit: 10, cursor: "cursor_1" });
+    const rows = await client.listMessages({ group: "inbox", limit: 10, cursor: "cursor_1" });
+
+    expect(page.nextCursor).toBe("cursor_2");
+    expect(rows).toEqual(page.data);
+    expect(calls[0]).toBe("https://mailery.example/api/v1/messages?group=inbox&limit=10&cursor=cursor_1");
+  });
+
   it("maps platform error envelopes into typed errors", async () => {
     const client = new MaileryCloudClient({
       apiUrl: "https://mailery.example",
