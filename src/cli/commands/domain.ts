@@ -1,12 +1,12 @@
 import type { Command } from "commander";
 import type { Database } from "../../db/database.js";
-import type { Domain, DomainSourceOfTruth, DomainType } from "../../types/index.js";
+import type { DnsRecord, Domain, DomainSourceOfTruth, DomainType, Provider } from "../../types/index.js";
 import chalk from "../../lib/chalk-lite.js";
 import { createDomain, listDomains, listUsableDomains, deleteDomain, findDomainsByName, getDomain, getDomainByName, moveDomainProvider, updateDnsStatus, updateDomainReadiness } from "../../db/domains.js";
 import { getProvider, listProviderNamesByIds } from "../../db/providers.js";
 import { getDatabase, now } from "../../db/database.js";
 import { getAdapter } from "../../providers/index.js";
-import { formatDnsTable } from "../../lib/dns.js";
+import { formatDnsTable, generateDmarcRecord, generateSpfRecord } from "../../lib/dns.js";
 import { colorDnsStatus, truncate, tableRow } from "../../lib/format.js";
 import { confirmDestructiveAction, formatListHint, handleError, isCliVerboseOutput, parseCliListPage, resolveId } from "../utils.js";
 import { createWarmingSchedule, getWarmingSchedule, listWarmingSchedules, updateWarmingStatus } from "../../db/warming.js";
@@ -35,6 +35,40 @@ function normalizeSourceOfTruth(value: string | undefined): DomainSourceOfTruth 
   if (normalized === "postgres" || normalized === "local" || normalized === "cloud") return normalized;
   if (normalized === "self_hosted" || normalized === "remote") return "postgres";
   handleError(new Error(`Invalid source of truth '${value}'. Use local, postgres, or cloud.`));
+}
+
+function normalizeDnsProvider(value: string | undefined): string {
+  const normalized = String(value ?? "manual").trim().toLowerCase().replace(/-/g, "_");
+  if (["manual", "cloudflare", "route53"].includes(normalized)) return normalized;
+  handleError(new Error(`Invalid DNS provider '${value}'. Use manual, cloudflare, or route53.`));
+}
+
+function fallbackDomainDnsRecords(domain: string, provider: Provider): DnsRecord[] {
+  const records = [generateSpfRecord(domain), generateDmarcRecord(domain)];
+  if (provider.type === "sandbox") return records;
+  return records;
+}
+
+interface DomainDnsTask {
+  purpose: string;
+  type: string;
+  name: string;
+  value: string;
+  status: "pending";
+  check_command: string;
+  verify_command: string;
+}
+
+function domainDnsTasks(domain: string, records: DnsRecord[]): DomainDnsTask[] {
+  return records.map((record) => ({
+    purpose: record.purpose,
+    type: record.type,
+    name: record.name,
+    value: record.value,
+    status: "pending" as const,
+    check_command: `mailery domain check ${domain}`,
+    verify_command: `mailery domain verify ${domain}`,
+  }));
 }
 
 function resolveDomainRecord(
@@ -233,6 +267,106 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
       }, db);
       const summary = buildDomainLifecycleSummary(updated, { db });
       output(summary, chalk.green(`✓ Domain added: ${domain} (${updated.id.slice(0, 8)})\n`) + formatDomainLifecycleSummary(summary));
+    } catch (e) {
+      handleError(e);
+    }
+  };
+
+  const connectDomainAction = async (
+    domain: string,
+    opts: { provider: string; dryRun?: boolean; domainType?: string; sourceOfTruth?: string; dnsProvider?: string; registerProvider?: boolean },
+    commandPrefix: "domain" | "domains",
+  ) => {
+    try {
+      const db = getDatabase();
+      const providerId = resolveId("providers", opts.provider);
+      const provider = getProvider(providerId, db);
+      if (!provider) handleError(new Error(`Provider not found: ${opts.provider}`));
+      const mode = resolveMaileryMode();
+      const sourceOfTruth = normalizeSourceOfTruth(opts.sourceOfTruth) ?? defaultDomainSourceOfTruth(mode.mode);
+      const domainType = normalizeDomainType(opts.domainType) ?? (sourceOfTruth === "postgres" ? "self_hosted" : sourceOfTruth === "cloud" ? "tenant" : "local_only");
+      const dnsProvider = normalizeDnsProvider(opts.dnsProvider);
+      const existing = getDomainByName(providerId, domain, db);
+      const fallbackRecords = fallbackDomainDnsRecords(domain, provider!);
+      const fallbackTasks = domainDnsTasks(domain, fallbackRecords);
+
+      if (opts.dryRun) {
+        output({
+          dry_run: true,
+          domain,
+          provider_id: providerId,
+          provider: { id: provider!.id, name: provider!.name, type: provider!.type, region: provider!.region, active: provider!.active },
+          source_of_truth: sourceOfTruth,
+          domain_type: domainType,
+          dns_provider: dnsProvider,
+          would_create_domain: !existing,
+          would_register_provider: opts.registerProvider !== false,
+          dns_tasks: fallbackTasks,
+          cli_equivalent: `mailery ${commandPrefix} connect ${domain} --provider ${opts.provider}`,
+        }, chalk.dim(`Would connect ${domain} to ${provider!.name}, generate DNS tasks, and return readiness without purchasing the domain.`));
+        return;
+      }
+
+      let records: DnsRecord[] = [];
+      if (opts.registerProvider !== false) {
+        const adapter = getAdapter(provider!);
+        await adapter.addDomain(domain);
+        records = await adapter.getDnsRecords(domain);
+      }
+      if (records.length === 0) records = fallbackRecords;
+
+      const rec = existing ?? createDomain(providerId, domain, db);
+      const generatedAt = now();
+      const updated = updateDomainReadiness(rec.id, {
+        domain_type: domainType,
+        source_of_truth: sourceOfTruth,
+        dns_records: {
+          expected_records: records,
+          generated_at: generatedAt,
+          dns_provider: dnsProvider,
+        },
+        provider_metadata: {
+          ...rec.provider_metadata,
+          dns_setup: {
+            dns_provider: dnsProvider,
+            expected_records: records,
+            generated_at: generatedAt,
+            register_provider: opts.registerProvider !== false,
+          },
+        },
+        last_dns_check_at: generatedAt,
+      }, db);
+      setDomainProvisioning(rec.id, {
+        provisioning_status: opts.registerProvider !== false ? "ses_identity_created" : "registered",
+        dns_provider: dnsProvider,
+        send_provider: provider!.type,
+        last_error: null,
+      }, db);
+
+      const lifecycle = buildDomainLifecycleSummary(updated, { db });
+      const dnsTasks = domainDnsTasks(domain, records);
+      const result = {
+        domain,
+        domain_id: updated.id,
+        created: !existing,
+        registered_with_provider: opts.registerProvider !== false,
+        provider: lifecycle.provider,
+        source_of_truth: sourceOfTruth,
+        domain_type: domainType,
+        dns_provider: dnsProvider,
+        dns_tasks: dnsTasks,
+        lifecycle,
+        next_actions: lifecycle.next_actions,
+      };
+      const lines = [chalk.green(`✓ Connected ${domain} to ${provider!.name}`)];
+      lines.push(chalk.dim(`  Source of truth: ${sourceOfTruth} · DNS provider: ${dnsProvider}`));
+      lines.push(chalk.bold("\nDNS tasks:"));
+      for (const task of dnsTasks) {
+        lines.push(`  ${chalk.cyan(task.type.padEnd(6))} ${task.name} ${chalk.dim(task.value)}`);
+      }
+      lines.push("");
+      lines.push(formatDomainLifecycleSummary(lifecycle).trimEnd());
+      output(result, lines.join("\n"));
     } catch (e) {
       handleError(e);
     }
@@ -518,6 +652,17 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .action((domain: string, opts: { provider: string; dryRun?: boolean; domainType?: string; sourceOfTruth?: string }) => addDomainAction(domain, opts, "domains"));
 
   domainsCmd
+    .command("connect <domain>")
+    .description("Connect an already-owned domain and generate DNS readiness tasks")
+    .requiredOption("--provider <id>", "Provider ID")
+    .option("--domain-type <type>", "Domain type: system, tenant, self_hosted, or local_only")
+    .option("--source-of-truth <source>", "Source of truth: local, postgres, or cloud")
+    .option("--dns-provider <provider>", "DNS provider label: manual, cloudflare, or route53", "manual")
+    .option("--no-register-provider", "Do not call the mail provider to register the domain")
+    .option("--dry-run", "Show the connection plan without calling the provider or writing to the DB")
+    .action((domain: string, opts: { provider: string; dryRun?: boolean; domainType?: string; sourceOfTruth?: string; dnsProvider?: string; registerProvider?: boolean }) => connectDomainAction(domain, opts, "domains"));
+
+  domainsCmd
     .command("dns <domain>")
     .description("Show required DNS records and lifecycle context for a domain")
     .option("--provider <id>", "Provider ID")
@@ -563,6 +708,17 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .option("--source-of-truth <source>", "Source of truth: local, postgres, or cloud")
     .option("--dry-run", "Resolve inputs and show the planned change without calling the provider or writing to the DB")
     .action((domain: string, opts: { provider: string; dryRun?: boolean; domainType?: string; sourceOfTruth?: string }) => addDomainAction(domain, opts, "domain"));
+
+  domainCmd
+    .command("connect <domain>")
+    .description("Connect an already-owned domain and generate DNS readiness tasks")
+    .requiredOption("--provider <id>", "Provider ID")
+    .option("--domain-type <type>", "Domain type: system, tenant, self_hosted, or local_only")
+    .option("--source-of-truth <source>", "Source of truth: local, postgres, or cloud")
+    .option("--dns-provider <provider>", "DNS provider label: manual, cloudflare, or route53", "manual")
+    .option("--no-register-provider", "Do not call the mail provider to register the domain")
+    .option("--dry-run", "Show the connection plan without calling the provider or writing to the DB")
+    .action((domain: string, opts: { provider: string; dryRun?: boolean; domainType?: string; sourceOfTruth?: string; dnsProvider?: string; registerProvider?: boolean }) => connectDomainAction(domain, opts, "domain"));
 
   // ── adopt: seamlessly add an already-registered & SES-verified domain ────────
   domainCmd

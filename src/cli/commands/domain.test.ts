@@ -5,9 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDatabase, getDatabase, resetDatabase } from "../../db/database.js";
 import { createAddress, getAddress } from "../../db/addresses.js";
-import { createDomain, getDomain, listDomains, updateDnsStatus, updateDomainReadiness } from "../../db/domains.js";
+import { createDomain, getDomain, getDomainByName, listDomains, updateDnsStatus, updateDomainReadiness } from "../../db/domains.js";
 import { createProvider } from "../../db/providers.js";
-import { setDomainProvisioning } from "../../db/provisioning.js";
+import { getDomainProvisioning, setDomainProvisioning } from "../../db/provisioning.js";
 import { createWarmingSchedule } from "../../db/warming.js";
 import { registerS3Source } from "../../lib/s3-sync.js";
 import { registerDomainCommands } from "./domain.js";
@@ -250,6 +250,83 @@ describe("domains lifecycle commands", () => {
       cli_equivalent: `mailery domains add example.com --provider ${provider.id}`,
     });
     expect(listDomains(undefined, getDatabase())).toHaveLength(0);
+  });
+
+  it("connects an owned domain with DNS tasks and lifecycle readiness", async () => {
+    const provider = createProvider({ name: "sandbox", type: "sandbox" });
+
+    const dryRun = await runDomainCommand([
+      "domains", "connect", "owned.example.com",
+      "--provider", provider.id,
+      "--source-of-truth", "postgres",
+      "--dns-provider", "cloudflare",
+      "--dry-run",
+    ]);
+
+    expect(dryRun.data).toMatchObject({
+      dry_run: true,
+      domain: "owned.example.com",
+      would_create_domain: true,
+      dns_provider: "cloudflare",
+      dns_tasks: expect.arrayContaining([
+        expect.objectContaining({ purpose: "SPF", check_command: "mailery domain check owned.example.com" }),
+        expect.objectContaining({ purpose: "DMARC", verify_command: "mailery domain verify owned.example.com" }),
+      ]),
+    });
+    expect(listDomains(undefined, getDatabase())).toHaveLength(0);
+
+    const connected = await runDomainCommand([
+      "domains", "connect", "owned.example.com",
+      "--provider", provider.id,
+      "--source-of-truth", "postgres",
+      "--dns-provider", "cloudflare",
+      "--no-register-provider",
+    ]);
+
+    expect(connected.data).toMatchObject({
+      domain: "owned.example.com",
+      created: true,
+      registered_with_provider: false,
+      source_of_truth: "postgres",
+      domain_type: "self_hosted",
+      dns_provider: "cloudflare",
+      dns_tasks: expect.arrayContaining([
+        expect.objectContaining({ purpose: "SPF", name: "owned.example.com" }),
+        expect.objectContaining({ purpose: "DMARC", name: "_dmarc.owned.example.com" }),
+      ]),
+      lifecycle: {
+        domain: "owned.example.com",
+        readiness: {
+          send_ready: false,
+          receive_ready: false,
+        },
+        next_actions: expect.arrayContaining([
+          "mailery domains dns owned.example.com",
+          "mailery domains verify owned.example.com",
+        ]),
+      },
+    });
+
+    const domain = getDomainByName(provider.id, "owned.example.com", getDatabase());
+    expect(domain).toMatchObject({
+      source_of_truth: "postgres",
+      domain_type: "self_hosted",
+      dns_records: {
+        dns_provider: "cloudflare",
+        expected_records: expect.any(Array),
+      },
+      provider_metadata: {
+        dns_setup: {
+          dns_provider: "cloudflare",
+          register_provider: false,
+        },
+      },
+    });
+    expect(getDomainProvisioning(domain!.id, getDatabase())).toMatchObject({
+      provisioning_status: "registered",
+      dns_provider: "cloudflare",
+      send_provider: "sandbox",
+    });
   });
 
   it("enables and disables per-domain inbound/outbound lifecycle states", async () => {
