@@ -7,6 +7,7 @@ import {
   getStorageDatabaseEnvName,
   getStorageDatabaseUrl,
   getStorageMode,
+  getRemoteSyncMetaAll,
   getStoragePg,
   getStorageStatus,
   prepareLocalMigrationDedupePlan,
@@ -158,6 +159,7 @@ export interface SelfHostedReadinessReport {
     reachable: boolean;
     providerCount: number | null;
     activeSesProviders: Array<{ id: string; name: string; region: string | null; active: boolean }>;
+    sync: Array<{ table_name: string; last_synced_at: string | null; direction: "push" | "pull" }>;
     domains: Array<{
       provider_id: string;
       provider_name: string | null;
@@ -541,6 +543,7 @@ export async function checkSelfHostedRuntimeReadiness(): Promise<SelfHostedReadi
     reachable: false,
     providerCount: null,
     activeSesProviders: [],
+    sync: [],
     domains: [],
   };
 
@@ -554,6 +557,7 @@ export async function checkSelfHostedRuntimeReadiness(): Promise<SelfHostedReadi
 
       try {
         remote.providerCount = countRows(await pg.all("SELECT COUNT(*) AS count FROM providers"));
+        remote.sync = await getRemoteSyncMetaAll(pg);
         remote.activeSesProviders = (await pg.all(`
           SELECT id, name, region, active
             FROM providers
@@ -635,6 +639,21 @@ export async function checkSelfHostedRuntimeReadiness(): Promise<SelfHostedReadi
       "mailery domain dns <domain>",
       "mailery domain verify <domain>",
       "mailery provision domain <domain> --provider <provider>",
+    ],
+  }));
+
+  const sourceTables = ["domains", "mailboxes", "mail_messages", "inbound_emails", "mailbox_message_state"];
+  const syncedTables = new Set(remote.sync.map((entry) => entry.table_name));
+  const missingSyncTables = sourceTables.filter((table) => !syncedTables.has(table));
+  checks.push(check("source_of_truth_sync_metadata", missingSyncTables.length === 0, "warning", missingSyncTables.length === 0 ? "core_tables_synced" : "missing_core_table_sync_metadata", {
+    details: {
+      requiredTables: sourceTables,
+      missingTables: missingSyncTables,
+      entries: remote.sync.length,
+    },
+    fix_commands: missingSyncTables.length === 0 ? [] : [
+      "mailery storage pull --tables domains,mailboxes,mail_messages,inbound_emails,mailbox_message_state --json",
+      "mailery storage push --tables domains,mailboxes,mail_messages,inbound_emails,mailbox_message_state --json",
     ],
   }));
 

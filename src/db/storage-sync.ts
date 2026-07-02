@@ -275,6 +275,7 @@ export async function storagePush(options?: StorageSyncOptions): Promise<SyncRes
       }));
     }
     await reconcileRemoteDerivedState(remote);
+    await recordRemoteSyncMeta(remote, "push", results);
     recordSyncMeta(db, "push", results);
     return results;
   } finally {
@@ -436,6 +437,7 @@ export async function pullTablesFromRemote(remote: PgAdapterAsync, db: Database,
       return results;
     }
     reconcileLocalDerivedState(db);
+    await recordRemoteSyncMeta(remote, "pull", results);
     recordSyncMeta(db, "pull", results);
     releaseLocalStorageTransaction(db, savepoint);
     finished = true;
@@ -521,6 +523,25 @@ export function getSyncMetaAll(): SyncMeta[] {
   const db = getDatabase();
   ensureSyncMetaTable(db);
   return db.query<SyncMeta, []>("SELECT table_name, last_synced_at, direction FROM _emails_sync_meta ORDER BY table_name, direction").all();
+}
+
+export async function getRemoteSyncMetaAll(remote: PgAdapterAsync): Promise<SyncMeta[]> {
+  await ensureRemoteSyncMetaTable(remote);
+  const rows = await remote.all(`
+    SELECT table_name, last_synced_at, direction
+      FROM "_emails_sync_meta"
+     ORDER BY table_name, direction
+  `) as Array<{ table_name?: unknown; last_synced_at?: unknown; direction?: unknown }>;
+  return rows.flatMap((row) => {
+    const tableName = String(row.table_name ?? "");
+    const direction = row.direction === "push" || row.direction === "pull" ? row.direction : null;
+    if (!tableName || !direction) return [];
+    return [{
+      table_name: tableName,
+      last_synced_at: row.last_synced_at == null ? null : String(row.last_synced_at),
+      direction,
+    }];
+  });
 }
 
 export function parseStorageTables(tables?: string[]): StorageTable[] {
@@ -758,6 +779,34 @@ function recordSyncMeta(db: Database, direction: "push" | "pull", results: SyncR
 
 function ensureSyncMetaTable(db: Database): void {
   db.exec("CREATE TABLE IF NOT EXISTS _emails_sync_meta (table_name TEXT NOT NULL, last_synced_at TEXT, direction TEXT NOT NULL CHECK(direction IN ('push', 'pull')), PRIMARY KEY (table_name, direction))");
+}
+
+async function ensureRemoteSyncMetaTable(remote: PgAdapterAsync): Promise<void> {
+  await remote.run(`
+    CREATE TABLE IF NOT EXISTS "_emails_sync_meta" (
+      table_name TEXT NOT NULL,
+      last_synced_at TIMESTAMPTZ,
+      direction TEXT NOT NULL CHECK(direction IN ('push', 'pull')),
+      PRIMARY KEY (table_name, direction)
+    )
+  `);
+}
+
+export async function recordRemoteSyncMeta(remote: PgAdapterAsync, direction: "push" | "pull", results: SyncResult[]): Promise<void> {
+  await ensureRemoteSyncMetaTable(remote);
+  const timestamp = new Date().toISOString();
+  for (const result of results) {
+    if (result.errors.length > 0) continue;
+    await remote.run(
+      `INSERT INTO "_emails_sync_meta" (table_name, last_synced_at, direction)
+       VALUES (?, ?, ?)
+       ON CONFLICT (table_name, direction)
+       DO UPDATE SET last_synced_at = EXCLUDED.last_synced_at`,
+      result.table,
+      timestamp,
+      direction,
+    );
+  }
 }
 
 function sqliteTableExists(db: Database, table: string): boolean {

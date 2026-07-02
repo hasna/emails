@@ -130,6 +130,7 @@ function formatReadinessReport(report: Awaited<ReturnType<typeof import("../../l
     `Attachment storage: ${report.attachments.attachment_storage}`,
     `Active SES providers: ${report.remote.activeSesProviders.length}`,
     `Checked SES domains: ${report.remote.domains.length}`,
+    `Remote sync metadata: ${report.remote.sync.length}`,
   ];
   if (report.summary.blockers.length > 0) {
     lines.push(chalk.red(`Blockers: ${report.summary.blockers.join(", ")}`));

@@ -3,11 +3,16 @@ import { readFileSync } from "node:fs";
 import type { Database } from "./database.js";
 import { closeDatabase, getDatabase, resetDatabase } from "./database.js";
 import { storeInboundEmail } from "./inbound.js";
+import { createDomain, updateDomain, updateDomainReadiness } from "./domains.js";
+import { createMailbox } from "./mailboxes.js";
+import { createMailMessage, upsertMailboxMessageState } from "./messages.js";
 import { listProviders } from "./providers.js";
+import { createMailboxSource } from "./sources.js";
 import type { PgAdapterAsync } from "./remote-storage.js";
 import {
   STORAGE_DATABASE_ENV,
   STORAGE_MODE_ENV,
+  getRemoteSyncMetaAll,
   getStorageDatabaseEnv,
   getStorageDatabaseEnvName,
   getStorageMode,
@@ -17,6 +22,7 @@ import {
   pullTablesFromRemote,
   pullTable,
   pushTable,
+  recordRemoteSyncMeta,
   runStorageMigrations,
   storageSync,
 } from "./storage-sync.js";
@@ -90,7 +96,7 @@ class StatefulRemote extends FakeRemote {
 
   async run(sql: string, ...params: unknown[]): Promise<{ changes: number }> {
     this.runCalls.push({ sql, params });
-    const match = sql.match(/INSERT INTO "([^"]+)" \(([^)]+)\) VALUES/i);
+    const match = sql.match(/INSERT INTO "([^"]+)" \(([^)]+)\)\s+VALUES/i);
     if (!match) return { changes: 1 };
     const table = match[1]!;
     const columns = match[2]!
@@ -100,6 +106,8 @@ class StatefulRemote extends FakeRemote {
       ? ["mailbox_id", "mail_message_id"]
       : table === "inbound_recipients" || table === "inbound_labels"
         ? ["inbound_email_id", table === "inbound_recipients" ? "address" : "label"]
+        : table === "_emails_sync_meta"
+          ? ["table_name", "direction"]
         : ["id"];
     const tableRows = this.rows.get(table) ?? [];
     for (let offset = 0; offset < params.length; offset += columns.length) {
@@ -662,6 +670,90 @@ describe("storage table sync batching", () => {
       subject: "Remote authoritative subject",
       is_archived: 0,
     });
+  });
+
+  it("round-trips domain, mailbox, message, and sync metadata through remote source-of-truth storage", async () => {
+    const db = getDatabase();
+    const remote = new StatefulRemote();
+    db.run(
+      `INSERT INTO providers (id, name, type, active, created_at, updated_at)
+       VALUES ('provider-1', 'Self-hosted SES', 'ses', 1, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
+    );
+    const domain = createDomain("provider-1", "example.com", db);
+    updateDomain(domain.id, { dkim_status: "verified", spf_status: "verified", dmarc_status: "pending" }, db);
+    updateDomainReadiness(domain.id, {
+      source_of_truth: "postgres",
+      ownership_status: "verified",
+      inbound_status: "ready",
+      outbound_status: "ready",
+    }, db);
+    const mailbox = createMailbox({ address: "ops@example.com", display_name: "Ops" }, db);
+    const source = createMailboxSource({
+      mailbox_id: mailbox.id,
+      provider_id: "provider-1",
+      type: "ses_s3",
+      name: "Self-hosted S3",
+      external_mailbox: "ops@example.com",
+    }, db);
+    const message = createMailMessage({
+      subject: "Remote authoritative message",
+      from_address: "sender@example.com",
+      to_addresses: ["ops@example.com"],
+      text_body: "body from source of truth",
+      raw_s3_url: "s3://mailery-inbound/example/message.eml",
+      received_at: "2026-07-01T12:00:00.000Z",
+    }, db);
+    const state = upsertMailboxMessageState({
+      mailbox_id: mailbox.id,
+      mail_message_id: message.id,
+      source_id: source.id,
+      source_dedupe_key: "ses-s3:message-1",
+      is_read: false,
+      received_at: "2026-07-01T12:00:00.000Z",
+    }, db);
+
+    const pushed = [];
+    for (const table of ["providers", "domains", "mailboxes", "mail_folders", "mailbox_sources", "mail_messages", "mailbox_message_state"] as const) {
+      pushed.push(await pushTable(db, remote as unknown as PgAdapterAsync, table, { batchSize: 2 }));
+    }
+    await recordRemoteSyncMeta(remote as unknown as PgAdapterAsync, "push", pushed);
+
+    db.run("UPDATE domains SET outbound_status = 'disabled' WHERE id = ?", [domain.id]);
+    db.run("UPDATE mailboxes SET display_name = 'Local stale cache' WHERE id = ?", [mailbox.id]);
+    db.run("UPDATE mail_messages SET subject = 'Local stale message' WHERE id = ?", [message.id]);
+    db.run("UPDATE mailbox_message_state SET is_read = 1 WHERE id = ?", [state.id]);
+
+    const pulled = await pullTablesFromRemote(
+      remote as unknown as PgAdapterAsync,
+      db,
+      { tables: ["domains", "mailboxes", "mail_folders", "mailbox_sources", "mail_messages", "mailbox_message_state"], batchSize: 2, replace: true },
+    );
+
+    expect(pulled.every((result) => result.errors.length === 0)).toBe(true);
+    expect(db.query("SELECT source_of_truth, ownership_status, inbound_status, outbound_status FROM domains WHERE id = ?").get(domain.id)).toEqual({
+      source_of_truth: "postgres",
+      ownership_status: "verified",
+      inbound_status: "ready",
+      outbound_status: "ready",
+    });
+    expect(db.query("SELECT display_name FROM mailboxes WHERE id = ?").get(mailbox.id)).toEqual({ display_name: "Ops" });
+    expect(db.query("SELECT subject FROM mail_messages WHERE id = ?").get(message.id)).toEqual({ subject: "Remote authoritative message" });
+    expect(db.query("SELECT is_read FROM mailbox_message_state WHERE id = ?").get(state.id)).toEqual({ is_read: 0 });
+
+    const remoteMeta = await getRemoteSyncMetaAll(remote as unknown as PgAdapterAsync);
+    expect(remoteMeta).toEqual(expect.arrayContaining([
+      expect.objectContaining({ table_name: "domains", direction: "push" }),
+      expect.objectContaining({ table_name: "domains", direction: "pull" }),
+      expect.objectContaining({ table_name: "mailboxes", direction: "pull" }),
+      expect.objectContaining({ table_name: "mail_messages", direction: "pull" }),
+      expect.objectContaining({ table_name: "mailbox_message_state", direction: "pull" }),
+    ]));
+    expect(db.query("SELECT table_name, direction FROM _emails_sync_meta WHERE table_name IN ('domains', 'mailboxes', 'mail_messages', 'mailbox_message_state') ORDER BY table_name, direction").all()).toEqual([
+      { table_name: "domains", direction: "pull" },
+      { table_name: "mail_messages", direction: "pull" },
+      { table_name: "mailbox_message_state", direction: "pull" },
+      { table_name: "mailboxes", direction: "pull" },
+    ]);
   });
 
   it("treats remote tombstones as authoritative for disposable self-hosted mail caches", async () => {
