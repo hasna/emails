@@ -6,6 +6,90 @@ import { normalizeMxExchange } from "./mx-ownership.js";
 export { formatDnsCheck } from "./dns-check-format.js";
 export type { DnsCheckResult } from "./dns-check-format.js";
 
+export type DomainAuthenticationSignalStatus = "verified" | "missing" | "not_configured";
+
+export interface DomainAuthenticationSignal {
+  status: DomainAuthenticationSignalStatus;
+  required: boolean;
+  records: DnsCheckResult[];
+}
+
+export interface DomainAuthenticationCheck {
+  domain: string;
+  checked_at: string;
+  records: DnsCheckResult[];
+  signals: {
+    ownership: DomainAuthenticationSignal;
+    dkim: DomainAuthenticationSignal;
+    spf: DomainAuthenticationSignal;
+    mail_from: DomainAuthenticationSignal;
+    dmarc: DomainAuthenticationSignal;
+    mx: DomainAuthenticationSignal;
+  };
+  outbound_ready: boolean;
+  inbound_ready: boolean;
+  dmarc_monitoring_ready: boolean;
+  missing_requirements: string[];
+  warnings: string[];
+}
+
+export async function checkDomainAuthentication(
+  domain: string,
+  expectedRecords: DnsRecord[],
+): Promise<DomainAuthenticationCheck> {
+  const records = await checkDnsRecords(domain, expectedRecords);
+  const ownership = signal(records, ["SES_IDENTITY"], true);
+  const dkim = signal(records, ["DKIM"], true);
+  const spf = signal(records, ["SPF"], true);
+  const mailFrom = signal(records, ["MAIL_FROM"], false);
+  const dmarc = signal(records, ["DMARC"], false);
+  const mx = signal(records, ["MX"], false);
+  const missingRequirements: string[] = [];
+  const warnings: string[] = [];
+
+  if (ownership.status === "missing") missingRequirements.push("ownership verification DNS is missing");
+  if (dkim.status === "missing") missingRequirements.push("DKIM DNS is missing");
+  if (spf.status === "missing") missingRequirements.push("SPF DNS is missing");
+  if (mailFrom.status === "missing") missingRequirements.push("custom MAIL FROM DNS is missing");
+  if (mx.status === "missing") missingRequirements.push("inbound MX DNS is missing");
+  if (dmarc.status !== "verified") {
+    warnings.push("DMARC is not verified for this domain; this does not block aggregation but weakens production outbound monitoring.");
+  }
+
+  const outboundReady =
+    (ownership.status === "verified" || ownership.status === "not_configured") &&
+    dkim.status === "verified" &&
+    spf.status === "verified" &&
+    mailFrom.status !== "missing";
+  const inboundReady = mx.status === "verified";
+
+  return {
+    domain,
+    checked_at: new Date().toISOString(),
+    records,
+    signals: { ownership, dkim, spf, mail_from: mailFrom, dmarc, mx },
+    outbound_ready: outboundReady,
+    inbound_ready: inboundReady,
+    dmarc_monitoring_ready: dmarc.status === "verified",
+    missing_requirements: missingRequirements,
+    warnings,
+  };
+}
+
+function signal(
+  records: DnsCheckResult[],
+  purposes: DnsRecord["purpose"][],
+  required: boolean,
+): DomainAuthenticationSignal {
+  const matches = records.filter((result) => purposes.includes(result.record.purpose));
+  if (matches.length === 0) return { status: "not_configured", required, records: [] };
+  return {
+    status: matches.every((result) => result.match) ? "verified" : "missing",
+    required,
+    records: matches,
+  };
+}
+
 export async function checkDnsRecords(
   _domain: string,
   expectedRecords: DnsRecord[],

@@ -1,6 +1,6 @@
 import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
-import { createDomain, listDomains, listUsableDomains, deleteDomain, findDomainsByName, getDomain, getDomainByName, moveDomainProvider, updateDnsStatus } from "../../db/domains.js";
+import { createDomain, listDomains, listUsableDomains, deleteDomain, findDomainsByName, getDomain, getDomainByName, moveDomainProvider, updateDnsStatus, updateDomainReadiness } from "../../db/domains.js";
 import { getProvider, listProviderNamesByIds } from "../../db/providers.js";
 import { getDatabase } from "../../db/database.js";
 import { getAdapter } from "../../providers/index.js";
@@ -552,7 +552,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .option("--provider <id>", "Provider ID")
     .action(async (domain: string, opts: { provider?: string }) => {
       try {
-        const { checkDnsRecords, formatDnsCheck } = await import("../../lib/dns-check.js");
+        const { checkDomainAuthentication, formatDnsCheck } = await import("../../lib/dns-check.js");
         const { inspectPublicMx, ownerLabel, requiresMxSwitchConfirmation, formatMxRecords } = await import("../../lib/mx-ownership.js");
 
         let providerId: string | undefined;
@@ -576,10 +576,50 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
           expectedRecords = [generateSpfRecord(domain), generateDmarcRecord(domain)];
         }
 
-        const results = await checkDnsRecords(domain, expectedRecords);
+        const authentication = await checkDomainAuthentication(domain, expectedRecords);
+        const results = authentication.records;
         const mx = await inspectPublicMx(domain);
+        if (found) {
+          const missingOutbound =
+            authentication.signals.ownership.status === "missing" ||
+            authentication.signals.dkim.status === "missing" ||
+            authentication.signals.spf.status === "missing" ||
+            authentication.signals.mail_from.status === "missing";
+          updateDomainReadiness(found.id, {
+            ownership_status: authentication.signals.ownership.status === "verified"
+              ? "verified"
+              : authentication.signals.ownership.status === "missing"
+                ? "failed"
+                : "pending",
+            inbound_status: authentication.inbound_ready
+              ? "ready"
+              : authentication.signals.mx.status === "missing"
+                ? "failed"
+                : "pending",
+            outbound_status: authentication.outbound_ready ? "ready" : missingOutbound ? "failed" : "pending",
+            monitoring_status: authentication.dmarc_monitoring_ready ? "monitoring" : "none",
+            dns_records: {
+              checked_at: authentication.checked_at,
+              records: results,
+              missing_requirements: authentication.missing_requirements,
+              warnings: authentication.warnings,
+            },
+            last_dns_check_at: authentication.checked_at,
+          });
+        }
 
         const lines = [chalk.bold(`\nDNS Check for ${domain}:`), formatDnsCheck(results).trimEnd(), ""];
+        lines.push(chalk.bold("Authentication readiness:"));
+        lines.push(`  Outbound: ${authentication.outbound_ready ? chalk.green("ready") : chalk.yellow("not ready")}`);
+        lines.push(`  Inbound:  ${authentication.inbound_ready ? chalk.green("ready") : chalk.yellow("not ready")}`);
+        lines.push(`  DMARC:    ${authentication.dmarc_monitoring_ready ? chalk.green("monitoring ready") : chalk.yellow("monitoring not verified")}`);
+        if (authentication.missing_requirements.length > 0) {
+          lines.push(chalk.dim(`  Missing: ${authentication.missing_requirements.join("; ")}`));
+        }
+        for (const warning of authentication.warnings) {
+          lines.push(chalk.dim(`  Note: ${warning}`));
+        }
+        lines.push("");
         lines.push(chalk.bold("Root MX ownership:"));
         lines.push(`  ${ownerLabel(mx.owner)} - ${mx.summary}`);
         lines.push(`  ${chalk.dim(formatMxRecords(mx.records))}`);
@@ -599,7 +639,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
           lines.push(chalk.yellow(`${missing} record(s) not yet propagated or missing.`));
         }
         lines.push("");
-        output({ domain, records: results, mx }, lines.join("\n"));
+        output({ domain, records: results, authentication, mx }, lines.join("\n"));
       } catch (e) { handleError(e); }
     });
 

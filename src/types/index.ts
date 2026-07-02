@@ -342,7 +342,7 @@ export interface DnsRecord {
   type: "TXT" | "CNAME" | "MX";
   name: string;
   value: string;
-  purpose: "DKIM" | "SPF" | "DMARC" | "MX" | "SES_IDENTITY";
+  purpose: "DKIM" | "SPF" | "DMARC" | "MX" | "MAIL_FROM" | "SES_IDENTITY";
 }
 
 // Address lifecycle status. `active` can send/receive; `suspended` is blocked
