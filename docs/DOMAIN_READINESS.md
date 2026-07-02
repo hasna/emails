@@ -116,6 +116,17 @@ Local mode must not:
   outbound readiness;
 - require Mailery Cloud.
 
+Typical local setup:
+
+```bash
+mailery domains add example.com --provider <provider-id>
+mailery domains connect example.com --provider <provider-id> --source-of-truth local --dry-run
+mailery domains status example.com --json
+```
+
+For a local-only/imported-mail domain, DNS output is guidance. It becomes a
+hard send requirement only when the user chooses a real sending provider.
+
 ### Self-Hosted
 
 Self-hosted mode uses user-owned infrastructure. PostgreSQL owns rows for
@@ -136,6 +147,34 @@ Self-hosted mode must:
 - avoid storing operator-specific secret names, bucket names, or account IDs in
   public defaults.
 
+Typical self-hosted setup:
+
+```bash
+export HASNA_EMAILS_DATABASE_URL='<postgresql-connection-url>'
+export MAILERY_MODE=self_hosted
+export HASNA_EMAILS_STORAGE_MODE=remote
+
+mailery self-hosted migrate
+mailery domains connect example.com --provider <ses-id> --source-of-truth postgres --dns-provider route53 --no-register-provider
+mailery domains dns example.com --json
+mailery domains verify example.com
+mailery domains enable-inbound example.com
+mailery domains enable-outbound example.com
+```
+
+`domains connect` is for domains the operator already owns. It does not require
+Mailery Cloud, and `--no-register-provider` keeps the command to local/source of
+truth metadata plus DNS tasks when the provider identity already exists. Domain
+purchase remains a separate registrar action (`domain buy` / `domain setup`)
+and must be explicit.
+
+To migrate away from local-authoritative mail, run `mailery self-hosted
+migrate-local` once before switching production commands to
+`HASNA_EMAILS_STORAGE_MODE=remote`. After that point, local SQLite must be
+treated as a runtime cache. Operators should validate `mailery self-hosted
+status --json`, then use source-aware inbox/domain commands to confirm rows are
+read from the self-hosted source.
+
 ### Cloud
 
 Cloud mode uses Mailery Cloud as the source of truth. The OSS CLI is a client of
@@ -152,6 +191,19 @@ Cloud mode must:
 - allow inbound aggregation to be ready before outbound sending is ready;
 - keep `mail_mode=test` or equivalent provider-safe behavior until platform SES
   production access and real-send checks pass.
+
+Typical cloud setup:
+
+```bash
+mailery cloud setup --api-url https://mailery.co --email you@example.com --billing --no-open
+mailery cloud domain available example.com
+mailery cloud domain setup example.com --address agent --catch-all --mx-migration-consent
+mailery cloud messages pull --limit 20
+```
+
+Cloud commands are the only path that should require Mailery Cloud tenant,
+billing, or hosted credit state. The OSS local and self-hosted paths must remain
+usable without a SaaS account.
 
 ## Sending Guard
 
@@ -209,6 +261,8 @@ The OSS CLI should converge on these user-facing verbs:
 
 ```bash
 mailery domains add example.com
+mailery domains connect example.com --provider <provider-id> --source-of-truth local --dry-run
+mailery domains connect example.com --provider <provider-id> --source-of-truth postgres --dns-provider route53 --no-register-provider
 mailery domains list
 mailery domains status example.com --json
 mailery domains dns example.com --json

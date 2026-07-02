@@ -62,6 +62,26 @@ mailery self-hosted migrate-local --json
 It does not pull first, because pulling would overwrite the local data being
 migrated.
 
+After a successful local-to-self-hosted migration, production/runtime commands
+should run with:
+
+```bash
+export MAILERY_MODE=self_hosted
+export HASNA_EMAILS_STORAGE_MODE=remote
+```
+
+At that point the local SQLite file is no longer the durable mailbox source of
+truth. It is recreated or refreshed from PostgreSQL, used as a command/runtime
+cache, and flushed back to PostgreSQL. Do not keep adding new production mail to
+local-only providers or local-only inbox sources after the migration unless the
+intent is explicitly test/import-only. Validate the cutover with:
+
+```bash
+mailery self-hosted status --json
+mailery domains list --json
+mailery inbox sources --json
+```
+
 The older storage commands remain available:
 
 ```bash

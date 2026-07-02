@@ -45,6 +45,10 @@ mailery provider add --name production-resend --type resend --api-key ...
 # Set up a domain (buy + DNS + SES in one command)
 mailery domain setup example.com --provider <id> --email you@example.com ...
 
+# Or connect a domain you already own without buying or calling Mailery Cloud
+mailery domains connect example.com --provider <id> --source-of-truth local --dry-run
+mailery domains connect example.com --provider <id> --source-of-truth postgres --dns-provider route53 --no-register-provider
+
 # Or configure DNS for an existing domain via Cloudflare
 mailery domain setup-cloudflare example.com --provider <id>
 
@@ -110,6 +114,35 @@ mailery cloud domain setup example-agent-mail.com --address agent --catch-all --
 The starter SaaS plan is currently `$10/month` and grants hosted credits. Domain
 setup can return DNS records in safe planning mode before any domain purchase or
 MX migration is performed.
+
+## Domain Modes
+
+Mailery is a multi-domain aggregator. Every domain is tracked independently, so
+DNS, inbound, outbound, and safety state belong to the domain, not to the app as
+a whole.
+
+Use these setup paths:
+
+| Mode | Who owns the mail source of truth | Domain setup path |
+| --- | --- | --- |
+| `local` | The local SQLite/files install | `mailery domains add` or `mailery domains connect --source-of-truth local`; DNS checks are advisory unless using a real send/receive provider. |
+| `self_hosted` | Your PostgreSQL/S3/SES or equivalent infrastructure | `mailery domains connect --source-of-truth postgres`, then publish the returned DNS tasks and enable inbound/outbound when evidence is ready. |
+| `cloud` | Mailery Cloud at `https://mailery.co` | `mailery cloud domain setup`; SaaS billing and tenant checks are handled by the hosted control plane. |
+
+Authentication records are required only for the capability you enable:
+
+- Inbound aggregation needs an inbound route, usually MX plus SES/S3 or another
+  configured source.
+- Outbound sending needs ownership verification plus DKIM and SPF/custom MAIL
+  FROM alignment for the selected provider.
+- DMARC is per sending domain. It does not block local viewing or inbound
+  aggregation, but it should be present before production sending and monitored
+  before moving from `p=none` to stricter policies.
+
+For self-hosted migration, run `mailery self-hosted migrate-local` once, switch
+to `MAILERY_MODE=self_hosted` with `HASNA_EMAILS_STORAGE_MODE=remote`, and treat
+PostgreSQL/S3 as the durable source of truth. Local SQLite is then only a runtime
+cache prepared from and flushed back to the self-hosted source.
 
 ## Mailery UI (`mailery ui`)
 
