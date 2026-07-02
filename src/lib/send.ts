@@ -9,6 +9,7 @@ import { getDomainByName } from "../db/domains.js";
 import { countReadyAddressesForDomain, getDomainProvisioning } from "../db/provisioning.js";
 import { createSelfHostedSendAttempt, markSelfHostedSendAttemptFailed } from "../db/self-hosted-sent.js";
 import { assessDomainReadiness } from "./domain-readiness.js";
+import { resolveMaileryMode } from "./mode.js";
 import { getSelfHostedRuntimeStatus } from "./self-hosted-runtime.js";
 import { getTodayLimit, getTodaySentCount } from "./warming.js";
 import type { Provider, SendEmailOptions } from "../types/index.js";
@@ -59,6 +60,52 @@ function senderDomain(opts: SendEmailOptions): string | null {
   const sender = canonicalSender(opts.from) ?? opts.from;
   const domain = sender.split("@")[1]?.trim().toLowerCase();
   return domain || null;
+}
+
+function providerRef(provider: Provider): string {
+  return `${provider.name} (${provider.id})`;
+}
+
+function domainLifecycleFix(domainName: string, provider: Provider): string {
+  return [
+    `mailery domains status ${domainName} --provider ${provider.id}`,
+    `mailery domains verify ${domainName} --provider ${provider.id}`,
+    `mailery domains enable-outbound ${domainName} --provider ${provider.id}`,
+  ].join(" && ");
+}
+
+export function assertDomainOutboundReady(provider: Provider, opts: SendEmailOptions, db?: Database): void {
+  const mode = resolveMaileryMode().mode;
+
+  if (mode === "cloud") {
+    throw new Error(`Mailery Cloud mode delegates outbound sends to the hosted Mailery Cloud API. Local provider send is disabled for ${providerRef(provider)}.`);
+  }
+
+  // Sandbox is the explicit local/test provider. It must remain usable in OSS
+  // local tests even when the From domain is not registered for real sending.
+  if (provider.type === "sandbox") return;
+
+  const domainName = senderDomain(opts);
+  if (!domainName) {
+    throw new Error(`Outbound send requires a valid From domain: ${opts.from}`);
+  }
+
+  const domain = getDomainByName(provider.id, domainName, db);
+  if (!domain) {
+    throw new Error(`Outbound send requires domain ${domainName} to be registered for provider ${providerRef(provider)}. Missing: domain registration. Run: mailery domains add ${domainName} --provider ${provider.id}`);
+  }
+
+  const missing: string[] = [];
+  if (domain.suspended_at) missing.push(`domain not suspended (current: suspended since ${domain.suspended_at})`);
+  if (domain.restricted_at) missing.push(`domain not restricted (current: restricted since ${domain.restricted_at})`);
+  if (domain.ownership_status !== "verified") missing.push(`ownership_status=verified (current: ${domain.ownership_status})`);
+  if (domain.outbound_status !== "ready") missing.push(`outbound_status=ready (current: ${domain.outbound_status})`);
+  if (domain.dkim_status !== "verified") missing.push(`DKIM verified (current: ${domain.dkim_status})`);
+  if (domain.spf_status !== "verified") missing.push(`SPF verified (current: ${domain.spf_status})`);
+
+  if (missing.length > 0) {
+    throw new Error(`Outbound send requires ${domainName} to be outbound-ready for provider ${providerRef(provider)}. Missing: ${missing.join("; ")}. Run: ${domainLifecycleFix(domainName, provider)}`);
+  }
 }
 
 function sesClientConfig(provider: Provider): { region: string; accessKeyId?: string; secretAccessKey?: string } {
@@ -142,6 +189,8 @@ export async function assertSelfHostedSendReady(provider: Provider, opts: SendEm
     throw new Error(`Self-hosted SES send requires domain ${domainName} to be registered for provider ${provider.name}. Run: mailery domain add ${domainName} --provider ${provider.id}`);
   }
 
+  assertDomainOutboundReady(provider, opts, db);
+
   const provisioning = getDomainProvisioning(domain.id, db);
   const readiness = assessDomainReadiness(domain, provisioning, {
     ready_addresses: countReadyAddressesForDomain(domain.id, db),
@@ -194,6 +243,7 @@ export async function sendWithFailover(
 
     let selfHostedSendAttemptId: string | undefined;
     try {
+      assertDomainOutboundReady(provider, opts, db);
       await assertSelfHostedSendReady(provider, opts, db);
       if (getSelfHostedRuntimeStatus().enabled) {
         selfHostedSendAttemptId = (await createSelfHostedSendAttempt(providerId, opts)).id;

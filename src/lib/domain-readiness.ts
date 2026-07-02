@@ -41,7 +41,7 @@ export function assessDomainReadiness(
   if (!ok(domain.dkim_status)) issues.push(`DKIM ${domain.dkim_status}`);
   if (!ok(domain.spf_status)) issues.push(`SPF ${domain.spf_status}`);
   if (!ok(domain.dmarc_status)) issues.push(`DMARC ${domain.dmarc_status}`);
-  if (bad(domain.dkim_status) || bad(domain.spf_status) || bad(domain.dmarc_status) || provisioning?.last_error) {
+  if (bad(domain.dkim_status) || bad(domain.spf_status) || provisioning?.last_error) {
     if (provisioning?.last_error) issues.push(provisioning.last_error);
     fix_commands.push(`mailery domain check ${domain.domain}`);
     fix_commands.push(`mailery domain setup-cloudflare ${domain.domain}`);

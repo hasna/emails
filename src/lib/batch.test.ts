@@ -10,14 +10,24 @@ let testProvider: Provider;
 
 beforeEach(() => {
   process.env["EMAILS_DB_PATH"] = ":memory:";
+  process.env["MAILERY_MODE"] = "local";
+  delete process.env["HASNA_EMAILS_DATABASE_URL"];
+  delete process.env["EMAILS_DATABASE_URL"];
+  delete process.env["HASNA_EMAILS_STORAGE_MODE"];
+  delete process.env["EMAILS_STORAGE_MODE"];
   resetDatabase();
   const db = getDatabase();
-  testProvider = createProvider({ name: "test", type: "resend", api_key: "re_test" }, db);
+  testProvider = createProvider({ name: "test", type: "sandbox" }, db);
 });
 
 afterEach(() => {
   closeDatabase();
   delete process.env["EMAILS_DB_PATH"];
+  delete process.env["MAILERY_MODE"];
+  delete process.env["HASNA_EMAILS_DATABASE_URL"];
+  delete process.env["EMAILS_DATABASE_URL"];
+  delete process.env["HASNA_EMAILS_STORAGE_MODE"];
+  delete process.env["EMAILS_STORAGE_MODE"];
 });
 
 describe("parseCsv", () => {
@@ -197,5 +207,28 @@ describe("batchSend", () => {
     expect(result.failed).toBe(1);
     expect(result.errors[0]!.email).toBe("alice@example.com");
     expect(result.errors[0]!.error).toBe("Connection refused");
+  });
+
+  it("applies outbound domain guard before an injected adapter send", async () => {
+    createTemplate({
+      name: "welcome",
+      subject_template: "Hello",
+    });
+    const provider = createProvider({ name: "ses-real", type: "ses", region: "us-east-1" }, getDatabase());
+    const mockSendEmail = mock(() => Promise.resolve("msg-123"));
+
+    const result = await batchSend({
+      csvPath: "/fake/path.csv",
+      templateName: "welcome",
+      from: "sender@example.com",
+      provider,
+      _adapter: { sendEmail: mockSendEmail },
+      _csvContent: "email\nalice@example.com",
+    });
+
+    expect(result.sent).toBe(0);
+    expect(result.failed).toBe(1);
+    expect(result.errors[0]!.error).toContain("domain registration");
+    expect(mockSendEmail).not.toHaveBeenCalled();
   });
 });

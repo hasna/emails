@@ -23,6 +23,17 @@ describe("assessDomainReadiness", () => {
     expect(readiness.fix_commands.join(" ")).toContain("domain check example.com");
   });
 
+  it("keeps failed DMARC visible without hard-blocking send readiness", () => {
+    const readiness = assessDomainReadiness(
+      { domain: "example.com", dkim_status: "verified", spf_status: "verified", dmarc_status: "failed" },
+      null,
+    );
+
+    expect(readiness.send_ready).toBe(true);
+    expect(readiness.issues).toContain("DMARC failed");
+    expect(readiness.state).toBe("ready_to_send");
+  });
+
   it("treats ready receive addresses as receive readiness evidence", () => {
     const readiness = assessDomainReadiness(
       { domain: "example.com", dkim_status: "verified", spf_status: "verified", dmarc_status: "pending" },

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { closeDatabase, resetDatabase } from "../db/database.js";
 import { createProvider, getProvider } from "../db/providers.js";
 import { createAddress } from "../db/addresses.js";
-import { createDomain, updateDomain } from "../db/domains.js";
+import { createDomain, updateDomain, updateDomainReadiness } from "../db/domains.js";
 import { setDomainProvisioning } from "../db/provisioning.js";
 import { listSandboxEmails } from "../db/sandbox.js";
 import { suspendAddress } from "../db/address-lifecycle.js";
@@ -10,11 +10,16 @@ import { createOwner, assignAddressOwner } from "../db/owners.js";
 import { createSendKey } from "../db/send-keys.js";
 import { createWarmingSchedule } from "../db/warming.js";
 import { createEmail } from "../db/emails.js";
-import { assertSelfHostedSendReady, MAX_ATTACHMENT_COUNT, MAX_ATTACHMENT_SIZE_BYTES, sendWithFailover } from "./send.js";
+import { assertDomainOutboundReady, assertSelfHostedSendReady, MAX_ATTACHMENT_COUNT, MAX_ATTACHMENT_SIZE_BYTES, sendWithFailover } from "./send.js";
 
 let providerId: string;
 beforeEach(() => {
   process.env["EMAILS_DB_PATH"] = ":memory:";
+  process.env["MAILERY_MODE"] = "local";
+  delete process.env["HASNA_EMAILS_DATABASE_URL"];
+  delete process.env["EMAILS_DATABASE_URL"];
+  delete process.env["HASNA_EMAILS_STORAGE_MODE"];
+  delete process.env["EMAILS_STORAGE_MODE"];
   resetDatabase();
   providerId = createProvider({ name: "sandbox", type: "sandbox" }).id;
 });
@@ -23,6 +28,9 @@ afterEach(() => {
   delete process.env["EMAILS_DB_PATH"];
   delete process.env["MAILERY_MODE"];
   delete process.env["HASNA_EMAILS_DATABASE_URL"];
+  delete process.env["EMAILS_DATABASE_URL"];
+  delete process.env["HASNA_EMAILS_STORAGE_MODE"];
+  delete process.env["EMAILS_STORAGE_MODE"];
   delete process.env["MAILERY_SKIP_SELF_HOSTED_SES_PREFLIGHT"];
 });
 
@@ -158,6 +166,49 @@ describe("sendWithFailover — shared send safety guards", () => {
     expect(result.messageId).toBeTruthy();
   });
 
+  it("allows sandbox providers as explicit local/test sends without domain lifecycle state", () => {
+    expect(() => assertDomainOutboundReady(
+      getProvider(providerId)!,
+      { from: "sender@example.test", to: "next@x.com", subject: "hi", text: "yo" },
+    )).not.toThrow();
+  });
+
+  it("blocks real local provider sends until the From domain is outbound-ready", async () => {
+    const sesProvider = createProvider({ name: "ses-local", type: "ses", region: "us-east-1" });
+    const domain = createDomain(sesProvider.id, "example.com");
+    updateDomain(domain.id, { dkim_status: "verified", spf_status: "verified", dmarc_status: "failed" });
+
+    expect(() => assertDomainOutboundReady(
+      getProvider(sesProvider.id)!,
+      { from: "sender@example.com", to: "next@x.com", subject: "hi", text: "yo" },
+    )).toThrow(/ownership_status=verified.*outbound_status=ready/i);
+
+    await expect(
+      sendWithFailover(sesProvider.id, { from: "sender@example.com", to: "next@x.com", subject: "hi", text: "yo" }),
+    ).rejects.toThrow(/outbound_status=ready/i);
+
+    updateDomainReadiness(domain.id, { ownership_status: "verified", outbound_status: "ready" });
+
+    expect(() => assertDomainOutboundReady(
+      getProvider(sesProvider.id)!,
+      { from: "sender@example.com", to: "next@x.com", subject: "hi", text: "yo" },
+    )).not.toThrow();
+  });
+
+  it("cloud mode delegates outbound sends to the Mailery Cloud API state", () => {
+    process.env["MAILERY_MODE"] = "cloud";
+    const sesProvider = createProvider({ name: "ses-cloud-cache", type: "ses", region: "us-east-1" });
+
+    expect(() => assertDomainOutboundReady(
+      getProvider(sesProvider.id)!,
+      { from: "sender@example.com", to: "next@x.com", subject: "hi", text: "yo" },
+    )).toThrow(/Cloud mode delegates outbound sends/i);
+    expect(() => assertDomainOutboundReady(
+      getProvider(providerId)!,
+      { from: "sender@example.test", to: "next@x.com", subject: "hi", text: "yo" },
+    )).toThrow(/Cloud mode delegates outbound sends/i);
+  });
+
   it("self_hosted mode blocks non-SES providers before touching the provider", async () => {
     process.env["MAILERY_MODE"] = "self_hosted";
     process.env["HASNA_EMAILS_DATABASE_URL"] = "postgres://mailery.example.invalid/db";
@@ -181,6 +232,12 @@ describe("sendWithFailover — shared send safety guards", () => {
     const domain = createDomain(sesProvider.id, "example.com");
     updateDomain(domain.id, { dkim_status: "verified", spf_status: "verified" });
     setDomainProvisioning(domain.id, { mail_from_domain: "mail.example.com", send_provider: "ses" });
+
+    await expect(
+      assertSelfHostedSendReady(getProvider(sesProvider.id)!, { from: "sender@example.com", to: "next@x.com", subject: "hi", text: "yo" }),
+    ).rejects.toThrow(/outbound_status=ready/i);
+
+    updateDomainReadiness(domain.id, { ownership_status: "verified", outbound_status: "ready" });
 
     await expect(
       assertSelfHostedSendReady(getProvider(sesProvider.id)!, { from: "sender@example.com", to: "next@x.com", subject: "hi", text: "yo" }),

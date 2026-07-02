@@ -5,7 +5,7 @@ import { getDatabase } from "../db/database.js";
 import { parseCsv } from "./csv.js";
 import type { Provider } from "../types/index.js";
 import { createSentEmailLedger } from "./sent-ledger.js";
-import { sendWithFailover } from "./send.js";
+import { assertDomainOutboundReady, sendWithFailover } from "./send.js";
 
 export { parseCsv } from "./csv.js";
 
@@ -69,6 +69,7 @@ export async function batchSend(opts: {
         html,
         text,
       };
+      assertDomainOutboundReady(opts.provider, sendOpts, db);
 
       const sent = adapter
         ? { providerId: opts.provider.id, messageId: await adapter.sendEmail(sendOpts) }
