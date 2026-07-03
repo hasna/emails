@@ -17,6 +17,11 @@ function sslConfigFor(connectionString: string): { rejectUnauthorized: boolean }
     : undefined;
 }
 
+export interface PgSession {
+  run(sql: string, ...params: unknown[]): Promise<{ changes: number }>;
+  all(sql: string, ...params: unknown[]): Promise<unknown[]>;
+}
+
 export class PgAdapterAsync {
   private readonly pool: Pool;
 
@@ -27,6 +32,37 @@ export class PgAdapterAsync {
   async run(sql: string, ...params: unknown[]): Promise<{ changes: number }> {
     const result = await this.pool.query(translatePlaceholders(sql), normalizeParams(params));
     return { changes: result.rowCount ?? 0 };
+  }
+
+  /**
+   * Runs `fn` against a single pooled connection so session-scoped state
+   * (advisory locks, statement_timeout) stays on one backend for the whole
+   * callback. `pool.query` may route every statement to a different
+   * connection, which silently breaks pg_advisory_lock/unlock pairing.
+   *
+   * If `fn` throws, the connection is destroyed instead of returned to the
+   * pool so leftover session state can never leak into unrelated queries.
+   */
+  async withSession<T>(fn: (session: PgSession) => Promise<T>): Promise<T> {
+    const client = await this.pool.connect();
+    let broken = false;
+    try {
+      return await fn({
+        run: async (sql: string, ...params: unknown[]) => {
+          const result = await client.query(translatePlaceholders(sql), normalizeParams(params));
+          return { changes: result.rowCount ?? 0 };
+        },
+        all: async (sql: string, ...params: unknown[]) => {
+          const result = await client.query(translatePlaceholders(sql), normalizeParams(params));
+          return result.rows;
+        },
+      });
+    } catch (error) {
+      broken = true;
+      throw error;
+    } finally {
+      client.release(broken);
+    }
   }
 
   async all(sql: string, ...params: unknown[]): Promise<unknown[]> {

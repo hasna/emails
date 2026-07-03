@@ -10,6 +10,7 @@ import { listProviders } from "./providers.js";
 import { createMailboxSource } from "./sources.js";
 import type { PgAdapterAsync } from "./remote-storage.js";
 import {
+  REMOTE_RECONCILE_LOCK_KEY,
   STORAGE_DATABASE_ENV,
   STORAGE_MODE_ENV,
   getRemoteSyncMetaAll,
@@ -22,6 +23,7 @@ import {
   pullTablesFromRemote,
   pullTable,
   pushTable,
+  reconcileRemoteDerivedState,
   recordRemoteSyncMeta,
   runStorageMigrations,
   storageSync,
@@ -153,6 +155,52 @@ function hasTuple(params: unknown[], left: unknown, right: unknown): boolean {
     if (params[index] === left && params[index + 1] === right) return true;
   }
   return false;
+}
+
+interface ReconcileSessionOptions {
+  locked?: boolean;
+  staleLabels?: number;
+  failOnDelete?: boolean;
+}
+
+class ReconcileSessionRemote {
+  sessionCalls: Array<{ sql: string; params: unknown[] }> = [];
+  sessionReleased = false;
+  private remainingStale: number;
+
+  constructor(private readonly options: ReconcileSessionOptions = {}) {
+    this.remainingStale = options.staleLabels ?? 0;
+  }
+
+  async withSession<T>(
+    fn: (session: {
+      run(sql: string, ...params: unknown[]): Promise<{ changes: number }>;
+      all(sql: string, ...params: unknown[]): Promise<unknown[]>;
+    }) => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await fn({
+        all: async (sql: string, ...params: unknown[]) => {
+          this.sessionCalls.push({ sql, params });
+          if (sql.includes("pg_try_advisory_lock")) return [{ locked: this.options.locked ?? true }];
+          return [];
+        },
+        run: async (sql: string, ...params: unknown[]) => {
+          this.sessionCalls.push({ sql, params });
+          if (sql.includes("DELETE FROM inbound_labels")) {
+            if (this.options.failOnDelete) throw new Error("reconcile delete failed");
+            const limit = Number(params[0] ?? 0);
+            const changes = Math.min(limit, this.remainingStale);
+            this.remainingStale -= changes;
+            return { changes };
+          }
+          return { changes: 0 };
+        },
+      });
+    } finally {
+      this.sessionReleased = true;
+    }
+  }
 }
 
 function providerRow(id: string, name: string): Row {
@@ -367,8 +415,16 @@ describe("emails storage sync configuration", () => {
 
     expect(source).toContain("rebuildInboundLabelState");
     expect(source).toContain("reconcileMailboxMessageState");
-    expect(source).toContain("DELETE FROM inbound_labels label");
+    expect(source).toContain("DELETE FROM inbound_labels");
     expect(source).toContain("UPDATE mailbox_message_state state");
+    // Incident hardening: single-flight advisory lock, ctid-batched cleanup,
+    // and a reconcile-scoped statement timeout on the remote path.
+    expect(source).toContain("pg_try_advisory_lock");
+    expect(source).toContain("pg_advisory_unlock");
+    expect(source).toContain("ctid IN (");
+    expect(source).toContain("SET statement_timeout");
+    // Reconcile is best-effort: a failed cleanup run must not fail the push.
+    expect(source).toContain("remote derived-state reconcile failed (will retry on next push)");
   });
 
   it("requires explicit force for pull-then-push sync", async () => {
@@ -795,5 +851,76 @@ describe("storage table sync batching", () => {
     ]);
     expect(db.query("SELECT id FROM inbound_emails WHERE id = ?").get(stored.id)).toBeNull();
     expect(db.query("SELECT COUNT(*) AS count FROM mailbox_message_state WHERE mail_message_id = ?").get(`msg:inbound:${stored.id}`)).toEqual({ count: 0 });
+  });
+});
+
+describe("remote derived-state reconcile hardening", () => {
+  const sqlOf = (remote: ReconcileSessionRemote): string[] => remote.sessionCalls.map((call) => call.sql);
+
+  it("skips the reconcile entirely when another instance holds the advisory lock", async () => {
+    const remote = new ReconcileSessionRemote({ locked: false, staleLabels: 10 });
+
+    const result = await reconcileRemoteDerivedState(remote as unknown as PgAdapterAsync);
+
+    expect(result).toEqual({ skipped: true, staleLabelBatches: 0, staleLabelsDeleted: 0, reachedBatchCap: false });
+    expect(remote.sessionCalls).toHaveLength(1);
+    expect(remote.sessionCalls[0]!.sql).toContain(`pg_try_advisory_lock(${REMOTE_RECONCILE_LOCK_KEY})`);
+    const sql = sqlOf(remote).join("\n");
+    expect(sql).not.toContain("DELETE FROM inbound_labels");
+    expect(sql).not.toContain("UPDATE mailbox_message_state");
+    // Never release an advisory lock this instance does not own.
+    expect(sql).not.toContain("pg_advisory_unlock");
+    expect(remote.sessionReleased).toBe(true);
+  });
+
+  it("deletes stale labels in bounded ctid batches until the cleanup drains", async () => {
+    const remote = new ReconcileSessionRemote({ staleLabels: 12 });
+
+    const result = await reconcileRemoteDerivedState(remote as unknown as PgAdapterAsync, { labelDeleteBatchSize: 5 });
+
+    expect(result).toEqual({ skipped: false, staleLabelBatches: 3, staleLabelsDeleted: 12, reachedBatchCap: false });
+    const deletes = remote.sessionCalls.filter((call) => call.sql.includes("DELETE FROM inbound_labels"));
+    expect(deletes).toHaveLength(3);
+    expect(deletes.every((call) => call.sql.includes("ctid IN (") && call.sql.includes("LIMIT ?"))).toBe(true);
+    expect(deletes.map((call) => call.params)).toEqual([[5], [5], [5]]);
+    const sql = sqlOf(remote);
+    expect(sql[0]).toContain("pg_try_advisory_lock");
+    expect(sql[1]).toContain("SET statement_timeout");
+    const combined = sql.join("\n");
+    expect(combined).toContain("INSERT INTO inbound_labels");
+    expect(combined).toContain("UPDATE inbound_emails");
+    expect(combined).toContain("UPDATE mailbox_message_state state");
+    expect(combined).toContain("IS DISTINCT FROM");
+    expect(sql[sql.length - 2]).toContain("RESET statement_timeout");
+    expect(sql[sql.length - 1]).toContain(`pg_advisory_unlock(${REMOTE_RECONCILE_LOCK_KEY})`);
+  });
+
+  it("stops batched label cleanup at the safety cap and leaves the rest to the next run", async () => {
+    const remote = new ReconcileSessionRemote({ staleLabels: 100 });
+
+    const result = await reconcileRemoteDerivedState(remote as unknown as PgAdapterAsync, {
+      labelDeleteBatchSize: 5,
+      maxLabelDeleteBatches: 3,
+    });
+
+    expect(result).toEqual({ skipped: false, staleLabelBatches: 3, staleLabelsDeleted: 15, reachedBatchCap: true });
+    const deletes = remote.sessionCalls.filter((call) => call.sql.includes("DELETE FROM inbound_labels"));
+    expect(deletes).toHaveLength(3);
+    const sql = sqlOf(remote).join("\n");
+    // A capped run still reconciles missing labels and flags, and still releases the lock.
+    expect(sql).toContain("INSERT INTO inbound_labels");
+    expect(sql).toContain("UPDATE mailbox_message_state state");
+    expect(sql).toContain(`pg_advisory_unlock(${REMOTE_RECONCILE_LOCK_KEY})`);
+  });
+
+  it("releases the advisory lock and resets the timeout when a reconcile statement fails", async () => {
+    const remote = new ReconcileSessionRemote({ staleLabels: 1, failOnDelete: true });
+
+    await expect(reconcileRemoteDerivedState(remote as unknown as PgAdapterAsync)).rejects.toThrow("reconcile delete failed");
+
+    const sql = sqlOf(remote).join("\n");
+    expect(sql).toContain("RESET statement_timeout");
+    expect(sql).toContain(`pg_advisory_unlock(${REMOTE_RECONCILE_LOCK_KEY})`);
+    expect(remote.sessionReleased).toBe(true);
   });
 });

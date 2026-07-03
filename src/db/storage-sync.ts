@@ -274,7 +274,15 @@ export async function storagePush(options?: StorageSyncOptions): Promise<SyncRes
         filter: options?.rowFilters?.[table],
       }));
     }
-    await reconcileRemoteDerivedState(remote);
+    try {
+      await reconcileRemoteDerivedState(remote);
+    } catch (error) {
+      // Derived-state reconcile is best-effort, idempotent cleanup. The pushed
+      // rows are already committed, so a reconcile failure (e.g. statement
+      // timeout on a very large table) must not fail the push; the next push
+      // picks the cleanup back up where the committed batches left off.
+      console.error(`emails storage push: remote derived-state reconcile failed (will retry on next push): ${error instanceof Error ? error.message : String(error)}`);
+    }
     await recordRemoteSyncMeta(remote, "push", results);
     recordSyncMeta(db, "push", results);
     return results;
@@ -452,58 +460,207 @@ function reconcileLocalDerivedState(db: Database): void {
   reconcileMailboxMessageState(db);
 }
 
-async function reconcileRemoteDerivedState(remote: PgAdapterAsync): Promise<void> {
-  await remote.run(`
-    DELETE FROM inbound_labels label
-     WHERE NOT EXISTS (
-       SELECT 1
-         FROM inbound_emails inbound,
-              mailery_jsonb_array_text(inbound.label_ids_json) AS value
-        WHERE inbound.id = label.inbound_email_id
-          AND trim(value) != ''
-          AND left(regexp_replace(lower(trim(value)), '\\s+', '-', 'g'), 64) = label.label
-     );
+/**
+ * Advisory-lock key for the remote derived-state reconcile. Documented literal
+ * constant: the ASCII bytes of "mailery1" read as a big-endian signed int64
+ * (0x6d61696c65727931 = 7881696737154464049), so the key is stable across
+ * versions and clearly namespaced to Mailery. Every Mailery process (CLI push,
+ * MCP daemon, self-hosted runtime) funnels the reconcile through
+ * pg_try_advisory_lock on this key; whoever loses the race skips the run.
+ *
+ * Deployment caveat: advisory locks are backend-session-scoped, so the lock is
+ * only reliable on direct Postgres connections (or session-mode pooling). A
+ * transaction-mode pooler (pgbouncer transaction pooling, multiplexing RDS
+ * Proxy) can route each statement to a different backend, which would strand
+ * the lock and make every future reconcile skip until that backend recycles.
+ */
+export const REMOTE_RECONCILE_LOCK_KEY = 0x6d61696c65727931n;
+/** Per-statement timeout for reconcile work so pathological plans self-terminate. */
+export const REMOTE_RECONCILE_STATEMENT_TIMEOUT_MS = 180_000;
+/** Stale-label rows removed per DELETE batch (each batch is its own short transaction). */
+export const REMOTE_RECONCILE_LABEL_DELETE_BATCH_SIZE = 5_000;
+/** Hard safety cap on DELETE batches per run (~1M rows); the next run continues the cleanup. */
+export const REMOTE_RECONCILE_MAX_LABEL_DELETE_BATCHES = 200;
 
-    INSERT INTO inbound_labels (inbound_email_id, label)
-    SELECT inbound.id, left(regexp_replace(lower(trim(value)), '\\s+', '-', 'g'), 64)
-      FROM inbound_emails inbound,
-           mailery_jsonb_array_text(inbound.label_ids_json) AS value
-     WHERE inbound.label_ids_json IS NOT NULL
-       AND trim(value) != ''
-    ON CONFLICT DO NOTHING;
+export interface RemoteReconcileResult {
+  /** True when another instance held the advisory lock and this run did nothing. */
+  skipped: boolean;
+  staleLabelBatches: number;
+  staleLabelsDeleted: number;
+  /** True when the batch cap stopped the cleanup early; remaining rows are handled by the next run. */
+  reachedBatchCap: boolean;
+}
 
-    UPDATE inbound_emails
-       SET is_spam = CASE WHEN EXISTS (
-             SELECT 1 FROM inbound_labels
-              WHERE inbound_email_id = inbound_emails.id
-                AND label = 'spam'
-           ) THEN 1 ELSE 0 END,
-           is_trash = CASE WHEN EXISTS (
-             SELECT 1 FROM inbound_labels
-              WHERE inbound_email_id = inbound_emails.id
-                AND label = 'trash'
-           ) THEN 1 ELSE 0 END;
+export interface RemoteReconcileOptions {
+  labelDeleteBatchSize?: number;
+  maxLabelDeleteBatches?: number;
+}
 
-    UPDATE mailbox_message_state state
-       SET labels_json = inbound.label_ids_json,
-           is_read = inbound.is_read,
-           read_at = NULLIF(inbound.read_at, '')::TIMESTAMPTZ,
-           is_archived = inbound.is_archived,
-           is_starred = inbound.is_starred,
-           is_spam = inbound.is_spam,
-           is_trash = inbound.is_trash,
-           folder_id = 'folder:' || state.mailbox_id || ':' ||
-             CASE
-               WHEN COALESCE(inbound.is_sent, 0) = 1 THEN 'sent'
-               WHEN COALESCE(inbound.is_trash, 0) = 1 THEN 'trash'
-               WHEN COALESCE(inbound.is_spam, 0) = 1 THEN 'spam'
-               WHEN COALESCE(inbound.is_archived, 0) = 1 THEN 'archive'
-               ELSE 'inbox'
-             END,
-           updated_at = NOW()
-      FROM inbound_emails inbound
-     WHERE state.mail_message_id = COALESCE(inbound.mail_message_id, 'msg:inbound:' || inbound.id);
-  `);
+function isPgTrue(value: unknown): boolean {
+  return value === true || value === 1 || value === "t" || value === "true" || value === "1";
+}
+
+function normalizePositiveInt(value: number | undefined, fallback: number): number {
+  if (value === undefined || value === null || !Number.isFinite(value)) return fallback;
+  return Math.max(1, Math.trunc(value));
+}
+
+/**
+ * Rebuilds remote derived state (inbound_labels, spam/trash flags, mailbox
+ * message state) after a push. This is best-effort, idempotent cleanup:
+ * skipping a run (because another instance holds the advisory lock) or
+ * stopping at the batch cap is safe — the next push converges the state.
+ *
+ * Incident hardening (2026-07-03 RDS outage):
+ * - Single-flight via pg_try_advisory_lock so N concurrent MCP instances
+ *   cannot pile up in a lock convoy on the same full-table cleanup.
+ * - The stale-label DELETE runs in bounded ctid batches instead of one
+ *   multi-hour full-table transaction.
+ * - statement_timeout is set on the pinned session (and reset before the
+ *   connection returns to the pool) so no reconcile statement can hold row
+ *   locks for hours even with a pathological plan.
+ */
+export async function reconcileRemoteDerivedState(
+  remote: PgAdapterAsync,
+  options?: RemoteReconcileOptions,
+): Promise<RemoteReconcileResult> {
+  const batchSize = normalizePositiveInt(options?.labelDeleteBatchSize, REMOTE_RECONCILE_LABEL_DELETE_BATCH_SIZE);
+  const maxBatches = normalizePositiveInt(options?.maxLabelDeleteBatches, REMOTE_RECONCILE_MAX_LABEL_DELETE_BATCHES);
+  return remote.withSession(async (session) => {
+    const lockRows = await session.all(
+      `SELECT pg_try_advisory_lock(${REMOTE_RECONCILE_LOCK_KEY}) AS locked`,
+    ) as Array<{ locked?: unknown }>;
+    if (!isPgTrue(lockRows[0]?.locked)) {
+      return { skipped: true, staleLabelBatches: 0, staleLabelsDeleted: 0, reachedBatchCap: false };
+    }
+    let result: RemoteReconcileResult;
+    try {
+      await session.run(`SET statement_timeout TO ${REMOTE_RECONCILE_STATEMENT_TIMEOUT_MS}`);
+
+      let staleLabelBatches = 0;
+      let staleLabelsDeleted = 0;
+      let reachedBatchCap = false;
+      for (;;) {
+        const { changes } = await session.run(`
+          DELETE FROM inbound_labels
+           WHERE ctid IN (
+             SELECT label.ctid
+               FROM inbound_labels label
+              WHERE NOT EXISTS (
+                SELECT 1
+                  FROM inbound_emails inbound,
+                       mailery_jsonb_array_text(inbound.label_ids_json) AS value
+                 WHERE inbound.id = label.inbound_email_id
+                   AND trim(value) != ''
+                   AND left(regexp_replace(lower(trim(value)), '\\s+', '-', 'g'), 64) = label.label
+              )
+              LIMIT ?
+           )
+        `, batchSize);
+        staleLabelBatches += 1;
+        staleLabelsDeleted += changes;
+        if (changes < batchSize) break;
+        if (staleLabelBatches >= maxBatches) {
+          reachedBatchCap = true;
+          break;
+        }
+      }
+
+      await session.run(`
+        INSERT INTO inbound_labels (inbound_email_id, label)
+        SELECT inbound.id, left(regexp_replace(lower(trim(value)), '\\s+', '-', 'g'), 64)
+          FROM inbound_emails inbound,
+               mailery_jsonb_array_text(inbound.label_ids_json) AS value
+         WHERE inbound.label_ids_json IS NOT NULL
+           AND trim(value) != ''
+        ON CONFLICT DO NOTHING
+      `);
+
+      await session.run(`
+        UPDATE inbound_emails
+           SET is_spam = CASE WHEN EXISTS (
+                 SELECT 1 FROM inbound_labels
+                  WHERE inbound_email_id = inbound_emails.id
+                    AND label = 'spam'
+               ) THEN 1 ELSE 0 END,
+               is_trash = CASE WHEN EXISTS (
+                 SELECT 1 FROM inbound_labels
+                  WHERE inbound_email_id = inbound_emails.id
+                    AND label = 'trash'
+               ) THEN 1 ELSE 0 END
+         WHERE is_spam IS DISTINCT FROM CASE WHEN EXISTS (
+                 SELECT 1 FROM inbound_labels
+                  WHERE inbound_email_id = inbound_emails.id
+                    AND label = 'spam'
+               ) THEN 1 ELSE 0 END
+            OR is_trash IS DISTINCT FROM CASE WHEN EXISTS (
+                 SELECT 1 FROM inbound_labels
+                  WHERE inbound_email_id = inbound_emails.id
+                    AND label = 'trash'
+               ) THEN 1 ELSE 0 END
+      `);
+
+      await session.run(`
+        UPDATE mailbox_message_state state
+           SET labels_json = inbound.label_ids_json,
+               is_read = inbound.is_read,
+               read_at = NULLIF(inbound.read_at, '')::TIMESTAMPTZ,
+               is_archived = inbound.is_archived,
+               is_starred = inbound.is_starred,
+               is_spam = inbound.is_spam,
+               is_trash = inbound.is_trash,
+               folder_id = 'folder:' || state.mailbox_id || ':' ||
+                 CASE
+                   WHEN COALESCE(inbound.is_sent, 0) = 1 THEN 'sent'
+                   WHEN COALESCE(inbound.is_trash, 0) = 1 THEN 'trash'
+                   WHEN COALESCE(inbound.is_spam, 0) = 1 THEN 'spam'
+                   WHEN COALESCE(inbound.is_archived, 0) = 1 THEN 'archive'
+                   ELSE 'inbox'
+                 END,
+               updated_at = NOW()
+          FROM inbound_emails inbound
+         WHERE state.mail_message_id = COALESCE(inbound.mail_message_id, 'msg:inbound:' || inbound.id)
+           AND (
+                state.labels_json IS DISTINCT FROM inbound.label_ids_json
+             OR state.is_read IS DISTINCT FROM inbound.is_read
+             OR state.read_at IS DISTINCT FROM NULLIF(inbound.read_at, '')::TIMESTAMPTZ
+             OR state.is_archived IS DISTINCT FROM inbound.is_archived
+             OR state.is_starred IS DISTINCT FROM inbound.is_starred
+             OR state.is_spam IS DISTINCT FROM inbound.is_spam
+             OR state.is_trash IS DISTINCT FROM inbound.is_trash
+             OR state.folder_id IS DISTINCT FROM 'folder:' || state.mailbox_id || ':' ||
+                 CASE
+                   WHEN COALESCE(inbound.is_sent, 0) = 1 THEN 'sent'
+                   WHEN COALESCE(inbound.is_trash, 0) = 1 THEN 'trash'
+                   WHEN COALESCE(inbound.is_spam, 0) = 1 THEN 'spam'
+                   WHEN COALESCE(inbound.is_archived, 0) = 1 THEN 'archive'
+                   ELSE 'inbox'
+                 END
+           )
+      `);
+
+      result = { skipped: false, staleLabelBatches, staleLabelsDeleted, reachedBatchCap };
+    } catch (error) {
+      // Best-effort cleanup that must never mask the root-cause error. The
+      // rethrow below makes withSession destroy this pooled connection, so a
+      // failed RESET cannot leak the timeout into the pool, and a failed
+      // unlock is released server-side when the backend session ends.
+      try {
+        await session.run("RESET statement_timeout");
+      } catch { /* connection is destroyed below */ }
+      try {
+        await session.run(`SELECT pg_advisory_unlock(${REMOTE_RECONCILE_LOCK_KEY})`);
+      } catch { /* released at disconnect */ }
+      throw error;
+    }
+    // Success path: cleanup failures here are real errors — silently returning
+    // the connection to the pool with a leaked statement_timeout or a held
+    // advisory lock is worse than failing the reconcile (the thrown error
+    // makes withSession destroy the connection, releasing both server-side).
+    await session.run("RESET statement_timeout");
+    await session.run(`SELECT pg_advisory_unlock(${REMOTE_RECONCILE_LOCK_KEY})`);
+    return result;
+  });
 }
 
 export async function storageSync(options?: StorageSyncOptions, hooks: StorageSyncHooks = {}): Promise<{ pull: SyncResult[]; push: SyncResult[] }> {
