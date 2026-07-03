@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { Database as SqliteDatabase } from "bun:sqlite";
+import { existsSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { closeDatabase, getDatabase, getDatabasePath, resetDatabase } from "../db/database.js";
@@ -16,6 +17,7 @@ import {
   migrateLocalToSelfHosted,
   prepareSelfHostedRuntimeCache,
 } from "./self-hosted-runtime.js";
+import { getStoragePullMarkerPath } from "../db/storage-sync.js";
 import type { SyncResult } from "../db/storage-sync.js";
 
 const tempDirs: string[] = [];
@@ -30,10 +32,29 @@ const ENV_KEYS = [
   "EMAILS_DB_PATH",
   "HASNA_EMAILS_DB_PATH",
   "MAILERY_SELF_HOSTED_CACHE_PATH",
+  "MAILERY_RUNTIME_CACHE_MAX_AGE_SECONDS",
 ] as const;
 
 function ok(table = "providers"): SyncResult {
   return { table, rowsRead: 1, rowsWritten: 1, errors: [] };
+}
+
+/** Creates a cache file that provably contains a committed pull from remote storage. */
+function seedWarmCache(path: string): void {
+  const db = new SqliteDatabase(path, { create: true });
+  db.exec("CREATE TABLE IF NOT EXISTS _emails_sync_meta (table_name TEXT NOT NULL, last_synced_at TEXT, direction TEXT NOT NULL CHECK(direction IN ('push', 'pull')), PRIMARY KEY (table_name, direction))");
+  db.run(
+    "INSERT INTO _emails_sync_meta (table_name, last_synced_at, direction) VALUES ('providers', ?, 'pull') ON CONFLICT(table_name, direction) DO UPDATE SET last_synced_at = excluded.last_synced_at",
+    [new Date().toISOString()],
+  );
+  db.close();
+}
+
+/** Creates a schema-initialized cache file with NO committed pull evidence. */
+function seedNeverPulledCache(path: string): void {
+  const db = new SqliteDatabase(path, { create: true });
+  db.exec("CREATE TABLE IF NOT EXISTS _emails_sync_meta (table_name TEXT NOT NULL, last_synced_at TEXT, direction TEXT NOT NULL CHECK(direction IN ('push', 'pull')), PRIMARY KEY (table_name, direction))");
+  db.close();
 }
 
 beforeEach(() => {
@@ -176,6 +197,7 @@ describe("self-hosted runtime cache bridge", () => {
       cacheOwner: "mailery_runtime",
     });
     expect(pulled[0]).toMatchObject({ replace: true, tables: expect.arrayContaining(["inbound_emails", "mailbox_message_state"]) });
+    expect(existsSync(getStoragePullMarkerPath(cachePath!))).toBe(false);
 
     const flushed = await flushSelfHostedRuntimeCache(
       { source: "test", cleanupCache: true },
@@ -187,7 +209,7 @@ describe("self-hosted runtime cache bridge", () => {
     expect(existsSync(dirname(cachePath!))).toBe(false);
   });
 
-  it("prevents HASNA_EMAILS_DB_PATH from bypassing the owned runtime cache", async () => {
+  it("uses a preset HASNA_EMAILS_DB_PATH as the persistent runtime cache", async () => {
     const dir = mkdtempSync(join(tmpdir(), "mailery-hasna-db-path-"));
     tempDirs.push(dir);
     const persistentLocalPath = join(dir, "persistent-local.db");
@@ -195,28 +217,316 @@ describe("self-hosted runtime cache bridge", () => {
     process.env["HASNA_EMAILS_DATABASE_URL"] = "postgres://runtime";
     process.env["HASNA_EMAILS_DB_PATH"] = persistentLocalPath;
 
+    let pulls = 0;
     await prepareSelfHostedRuntimeCache(
       { source: "test" },
-      { pull: async () => [ok("providers")] },
+      { pull: async () => { pulls += 1; return [ok("providers")]; } },
     );
 
-    const cachePath = process.env["HASNA_EMAILS_DB_PATH"];
-    expect(cachePath).toContain("mailery-self-hosted-cache-");
-    expect(process.env["EMAILS_DB_PATH"]).toBe(cachePath);
-    expect(getDatabasePath()).toBe(cachePath);
+    expect(pulls).toBe(1);
+    expect(process.env["HASNA_EMAILS_DB_PATH"]).toBe(persistentLocalPath);
+    expect(process.env["EMAILS_DB_PATH"]).toBe(persistentLocalPath);
+    expect(getDatabasePath()).toBe(persistentLocalPath);
     expect(getSelfHostedRuntimeStatus()).toMatchObject({
-      cachePath,
-      cacheOwner: "mailery_runtime",
+      cachePath: persistentLocalPath,
+      cacheOwner: "explicit",
     });
 
+    writeFileSync(persistentLocalPath, "cache-data");
     await flushSelfHostedRuntimeCache(
       { source: "test", cleanupCache: true },
       { push: async () => [ok("providers")] },
     );
 
     expect(process.env["HASNA_EMAILS_DB_PATH"]).toBe(persistentLocalPath);
-    expect(process.env["EMAILS_DB_PATH"]).toBeUndefined();
-    expect(existsSync(dirname(cachePath!))).toBe(false);
+    expect(process.env["EMAILS_DB_PATH"]).toBe(persistentLocalPath);
+    expect(existsSync(persistentLocalPath)).toBe(true);
+  });
+
+  it("uses the preset cache path when both EMAILS_DB_PATH and HASNA_EMAILS_DB_PATH are set", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mailery-preset-cache-"));
+    tempDirs.push(dir);
+    const presetPath = join(dir, "emails.db");
+    process.env["MAILERY_MODE"] = "self_hosted";
+    process.env["HASNA_EMAILS_DATABASE_URL"] = "postgres://runtime";
+    process.env["EMAILS_DB_PATH"] = presetPath;
+    process.env["HASNA_EMAILS_DB_PATH"] = presetPath;
+
+    let pulls = 0;
+    const prepared = await prepareSelfHostedRuntimeCache(
+      { source: "test" },
+      { pull: async () => { pulls += 1; return [ok("providers")]; } },
+    );
+
+    expect(prepared).toMatchObject({ enabled: true, action: "prepare", source: "test" });
+    expect(pulls).toBe(1);
+    expect(process.env["EMAILS_DB_PATH"]).toBe(presetPath);
+    expect(process.env["HASNA_EMAILS_DB_PATH"]).toBe(presetPath);
+    expect(process.env["EMAILS_DB_PATH"]).not.toContain("mailery-self-hosted-cache-");
+    expect(getSelfHostedRuntimeStatus()).toMatchObject({
+      cachePath: presetPath,
+      cacheOwner: "explicit",
+    });
+
+    seedWarmCache(presetPath);
+    await flushSelfHostedRuntimeCache(
+      { source: "test", cleanupCache: true },
+      { push: async () => [ok("providers")] },
+    );
+
+    expect(process.env["EMAILS_DB_PATH"]).toBe(presetPath);
+    expect(process.env["HASNA_EMAILS_DB_PATH"]).toBe(presetPath);
+    expect(existsSync(presetPath)).toBe(true);
+  });
+
+  it("prefers HASNA_EMAILS_DB_PATH over EMAILS_DB_PATH when both are set to different paths", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mailery-preset-precedence-"));
+    tempDirs.push(dir);
+    const hasnaPath = join(dir, "hasna.db");
+    const emailsPath = join(dir, "emails.db");
+    process.env["MAILERY_MODE"] = "self_hosted";
+    process.env["HASNA_EMAILS_DATABASE_URL"] = "postgres://runtime";
+    process.env["HASNA_EMAILS_DB_PATH"] = hasnaPath;
+    process.env["EMAILS_DB_PATH"] = emailsPath;
+
+    await prepareSelfHostedRuntimeCache(
+      { source: "test" },
+      { pull: async () => [ok("providers")] },
+    );
+
+    expect(process.env["HASNA_EMAILS_DB_PATH"]).toBe(hasnaPath);
+    expect(process.env["EMAILS_DB_PATH"]).toBe(hasnaPath);
+    expect(getDatabasePath()).toBe(hasnaPath);
+  });
+
+  it("skips the prepare pull when the persistent cache has a fresh pull marker", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mailery-fresh-marker-"));
+    tempDirs.push(dir);
+    const presetPath = join(dir, "emails.db");
+    process.env["MAILERY_MODE"] = "self_hosted";
+    process.env["HASNA_EMAILS_DATABASE_URL"] = "postgres://runtime";
+    process.env["HASNA_EMAILS_DB_PATH"] = presetPath;
+    seedWarmCache(presetPath);
+    writeFileSync(getStoragePullMarkerPath(presetPath), JSON.stringify({
+      pulledAt: new Date().toISOString(),
+      tables: [...SELF_HOSTED_RUNTIME_TABLES],
+    }));
+
+    let pulls = 0;
+    const prepared = await prepareSelfHostedRuntimeCache(
+      { source: "test" },
+      { pull: async () => { pulls += 1; return [ok("providers")]; } },
+    );
+
+    expect(pulls).toBe(0);
+    expect(prepared).toMatchObject({
+      enabled: true,
+      action: "prepare",
+      source: "test",
+      results: [],
+      skippedFreshCache: true,
+    });
+  });
+
+  it("pulls when the persistent cache pull marker is stale", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mailery-stale-marker-"));
+    tempDirs.push(dir);
+    const presetPath = join(dir, "emails.db");
+    process.env["MAILERY_MODE"] = "self_hosted";
+    process.env["HASNA_EMAILS_DATABASE_URL"] = "postgres://runtime";
+    process.env["HASNA_EMAILS_DB_PATH"] = presetPath;
+    seedWarmCache(presetPath);
+    const staleIso = new Date(Date.now() - 3_600_000).toISOString();
+    writeFileSync(getStoragePullMarkerPath(presetPath), JSON.stringify({
+      pulledAt: staleIso,
+      tables: [...SELF_HOSTED_RUNTIME_TABLES],
+    }));
+
+    let pulls = 0;
+    const prepared = await prepareSelfHostedRuntimeCache(
+      { source: "test" },
+      { pull: async () => { pulls += 1; return [ok("providers")]; } },
+    );
+
+    expect(pulls).toBe(1);
+    expect(prepared.skippedFreshCache).toBeFalsy();
+    const marker = JSON.parse(readFileSync(getStoragePullMarkerPath(presetPath), "utf8")) as { pulledAt: string };
+    expect(Date.parse(marker.pulledAt)).toBeGreaterThan(Date.parse(staleIso));
+  });
+
+  it("bypasses the freshness gate when force is set", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mailery-force-pull-"));
+    tempDirs.push(dir);
+    const presetPath = join(dir, "emails.db");
+    process.env["MAILERY_MODE"] = "self_hosted";
+    process.env["HASNA_EMAILS_DATABASE_URL"] = "postgres://runtime";
+    process.env["HASNA_EMAILS_DB_PATH"] = presetPath;
+    seedWarmCache(presetPath);
+    writeFileSync(getStoragePullMarkerPath(presetPath), JSON.stringify({
+      pulledAt: new Date().toISOString(),
+      tables: [...SELF_HOSTED_RUNTIME_TABLES],
+    }));
+
+    let pulls = 0;
+    const prepared = await prepareSelfHostedRuntimeCache(
+      { source: "test", force: true },
+      { pull: async () => { pulls += 1; return [ok("providers")]; } },
+    );
+
+    expect(pulls).toBe(1);
+    expect(prepared.skippedFreshCache).toBeFalsy();
+  });
+
+  it("always pulls when MAILERY_RUNTIME_CACHE_MAX_AGE_SECONDS is 0", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mailery-gate-disabled-"));
+    tempDirs.push(dir);
+    const presetPath = join(dir, "emails.db");
+    process.env["MAILERY_MODE"] = "self_hosted";
+    process.env["HASNA_EMAILS_DATABASE_URL"] = "postgres://runtime";
+    process.env["HASNA_EMAILS_DB_PATH"] = presetPath;
+    process.env["MAILERY_RUNTIME_CACHE_MAX_AGE_SECONDS"] = "0";
+    seedWarmCache(presetPath);
+    writeFileSync(getStoragePullMarkerPath(presetPath), JSON.stringify({
+      pulledAt: new Date().toISOString(),
+      tables: [...SELF_HOSTED_RUNTIME_TABLES],
+    }));
+
+    let pulls = 0;
+    const prepared = await prepareSelfHostedRuntimeCache(
+      { source: "test" },
+      { pull: async () => { pulls += 1; return [ok("providers")]; } },
+    );
+
+    expect(pulls).toBe(1);
+    expect(prepared.skippedFreshCache).toBeFalsy();
+  });
+
+  it("writes a pull marker next to a persistent cache after a successful prepare pull", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mailery-marker-write-"));
+    tempDirs.push(dir);
+    const presetPath = join(dir, "emails.db");
+    process.env["MAILERY_MODE"] = "self_hosted";
+    process.env["HASNA_EMAILS_DATABASE_URL"] = "postgres://runtime";
+    process.env["HASNA_EMAILS_DB_PATH"] = presetPath;
+
+    const before = Date.now();
+    await prepareSelfHostedRuntimeCache(
+      { source: "test" },
+      { pull: async () => [ok("inbound_emails")] },
+    );
+
+    const markerPath = getStoragePullMarkerPath(presetPath);
+    expect(existsSync(markerPath)).toBe(true);
+    const marker = JSON.parse(readFileSync(markerPath, "utf8")) as { pulledAt: string; tables: string[] };
+    expect(Date.parse(marker.pulledAt)).toBeGreaterThanOrEqual(before - 1000);
+    expect(marker.tables).toEqual(expect.arrayContaining(["inbound_emails", "mailbox_message_state"]));
+  });
+
+  it("does not write a pull marker when the prepare pull fails", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mailery-marker-failure-"));
+    tempDirs.push(dir);
+    const presetPath = join(dir, "emails.db");
+    process.env["MAILERY_MODE"] = "self_hosted";
+    process.env["HASNA_EMAILS_DATABASE_URL"] = "postgres://runtime";
+    process.env["HASNA_EMAILS_DB_PATH"] = presetPath;
+
+    await expect(prepareSelfHostedRuntimeCache(
+      { source: "test" },
+      { pull: async () => [{ table: "providers", rowsRead: 1, rowsWritten: 0, errors: ["pull failed"] }] },
+    )).rejects.toThrow("pull failed");
+
+    expect(existsSync(getStoragePullMarkerPath(presetPath))).toBe(false);
+  });
+
+  it("treats an externally warmed cache file as fresh via mtime fallback", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mailery-mtime-fresh-"));
+    tempDirs.push(dir);
+    const presetPath = join(dir, "emails.db");
+    process.env["MAILERY_MODE"] = "self_hosted";
+    process.env["HASNA_EMAILS_DATABASE_URL"] = "postgres://runtime";
+    process.env["HASNA_EMAILS_DB_PATH"] = presetPath;
+    seedWarmCache(presetPath);
+
+    let pulls = 0;
+    const prepared = await prepareSelfHostedRuntimeCache(
+      { source: "test" },
+      { pull: async () => { pulls += 1; return [ok("providers")]; } },
+    );
+
+    expect(pulls).toBe(0);
+    expect(prepared).toMatchObject({ enabled: true, action: "prepare", results: [], skippedFreshCache: true });
+    // The skip materializes a marker anchored at the warm file's mtime so
+    // freshness expires from the warm time on subsequent commands.
+    const markerPath = getStoragePullMarkerPath(presetPath);
+    expect(existsSync(markerPath)).toBe(true);
+    const marker = JSON.parse(readFileSync(markerPath, "utf8")) as { pulledAt: string };
+    expect(Date.parse(marker.pulledAt)).toBeLessThanOrEqual(Date.now());
+  });
+
+  it("pulls when an externally warmed cache file is older than the freshness window", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mailery-mtime-stale-"));
+    tempDirs.push(dir);
+    const presetPath = join(dir, "emails.db");
+    process.env["MAILERY_MODE"] = "self_hosted";
+    process.env["HASNA_EMAILS_DATABASE_URL"] = "postgres://runtime";
+    process.env["HASNA_EMAILS_DB_PATH"] = presetPath;
+    seedWarmCache(presetPath);
+    const old = new Date(Date.now() - 3_600_000);
+    utimesSync(presetPath, old, old);
+
+    let pulls = 0;
+    const prepared = await prepareSelfHostedRuntimeCache(
+      { source: "test" },
+      { pull: async () => { pulls += 1; return [ok("providers")]; } },
+    );
+
+    expect(pulls).toBe(1);
+    expect(prepared.skippedFreshCache).toBeFalsy();
+  });
+
+  it("re-pulls when a fresh marker points at a cache without committed pull evidence", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mailery-never-pulled-marker-"));
+    tempDirs.push(dir);
+    const presetPath = join(dir, "emails.db");
+    process.env["MAILERY_MODE"] = "self_hosted";
+    process.env["HASNA_EMAILS_DATABASE_URL"] = "postgres://runtime";
+    process.env["HASNA_EMAILS_DB_PATH"] = presetPath;
+    // Simulates a cache file recreated (or left schema-initialized by a failed
+    // pull) while a fresh marker survived next to it.
+    seedNeverPulledCache(presetPath);
+    writeFileSync(getStoragePullMarkerPath(presetPath), JSON.stringify({
+      pulledAt: new Date().toISOString(),
+      tables: [...SELF_HOSTED_RUNTIME_TABLES],
+    }));
+
+    let pulls = 0;
+    const prepared = await prepareSelfHostedRuntimeCache(
+      { source: "test" },
+      { pull: async () => { pulls += 1; return [ok("providers")]; } },
+    );
+
+    expect(pulls).toBe(1);
+    expect(prepared.skippedFreshCache).toBeFalsy();
+  });
+
+  it("does not trust mtime freshness for a cache file without committed pull evidence", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mailery-never-pulled-mtime-"));
+    tempDirs.push(dir);
+    const presetPath = join(dir, "emails.db");
+    process.env["MAILERY_MODE"] = "self_hosted";
+    process.env["HASNA_EMAILS_DATABASE_URL"] = "postgres://runtime";
+    process.env["HASNA_EMAILS_DB_PATH"] = presetPath;
+    seedNeverPulledCache(presetPath);
+
+    let pulls = 0;
+    const prepared = await prepareSelfHostedRuntimeCache(
+      { source: "test" },
+      { pull: async () => { pulls += 1; return [ok("providers")]; } },
+    );
+
+    expect(pulls).toBe(1);
+    expect(prepared.skippedFreshCache).toBeFalsy();
+    expect(existsSync(getStoragePullMarkerPath(presetPath))).toBe(true);
   });
 
   it("respects an explicit local cache path and does not delete it during cleanup", async () => {

@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Database } from "./database.js";
 import { closeDatabase, getDatabase, resetDatabase } from "./database.js";
 import { storeInboundEmail } from "./inbound.js";
@@ -17,14 +19,18 @@ import {
   getStorageDatabaseEnv,
   getStorageDatabaseEnvName,
   getStorageMode,
+  getStoragePullMarkerPath,
   getStorageStatus,
+  localDatabaseHasCommittedPull,
   parseStorageTables,
   prepareLocalMigrationDedupePlan,
   pullTablesFromRemote,
   pullTable,
   pushTable,
+  readStoragePullMarker,
   reconcileRemoteDerivedState,
   recordRemoteSyncMeta,
+  recordStoragePullMarker,
   runStorageMigrations,
   storageSync,
 } from "./storage-sync.js";
@@ -922,5 +928,95 @@ describe("remote derived-state reconcile hardening", () => {
     expect(sql).toContain("RESET statement_timeout");
     expect(sql).toContain(`pg_advisory_unlock(${REMOTE_RECONCILE_LOCK_KEY})`);
     expect(remote.sessionReleased).toBe(true);
+  });
+});
+
+describe("storage pull marker", () => {
+  const markerTempDirs: string[] = [];
+
+  afterEach(() => {
+    for (const dir of markerTempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("round-trips a pull marker next to a persistent database path", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mailery-pull-marker-"));
+    markerTempDirs.push(dir);
+    const dbPath = join(dir, "emails.db");
+
+    expect(getStoragePullMarkerPath(dbPath)).toBe(`${dbPath}.last-pull.json`);
+    recordStoragePullMarker(["providers", "emails"], dbPath);
+
+    const marker = readStoragePullMarker(dbPath);
+    expect(marker?.tables).toEqual(["providers", "emails"]);
+    expect(Number.isFinite(Date.parse(marker?.pulledAt ?? ""))).toBe(true);
+  });
+
+  it("skips marker writes and reads for in-memory database paths", () => {
+    recordStoragePullMarker(["providers"], ":memory:");
+    expect(readStoragePullMarker(":memory:")).toBeNull();
+    expect(existsSync(getStoragePullMarkerPath(":memory:"))).toBe(false);
+  });
+
+  it("returns null for corrupt or invalid markers", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mailery-pull-marker-invalid-"));
+    markerTempDirs.push(dir);
+    const dbPath = join(dir, "emails.db");
+    const markerPath = getStoragePullMarkerPath(dbPath);
+
+    writeFileSync(markerPath, "{not json");
+    expect(readStoragePullMarker(dbPath)).toBeNull();
+
+    writeFileSync(markerPath, JSON.stringify({ pulledAt: "not-a-date", tables: [] }));
+    expect(readStoragePullMarker(dbPath)).toBeNull();
+
+    writeFileSync(markerPath, JSON.stringify({ tables: ["providers"] }));
+    expect(readStoragePullMarker(dbPath)).toBeNull();
+  });
+
+  it("records a marker with an explicit pulledAt timestamp", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mailery-pull-marker-anchor-"));
+    markerTempDirs.push(dir);
+    const dbPath = join(dir, "emails.db");
+    const anchorMs = Date.now() - 120_000;
+
+    recordStoragePullMarker(["providers"], dbPath, anchorMs);
+
+    const marker = readStoragePullMarker(dbPath);
+    expect(marker?.pulledAt).toBe(new Date(anchorMs).toISOString());
+  });
+
+  it("detects committed pull evidence only in databases that recorded a pull", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mailery-pull-evidence-"));
+    markerTempDirs.push(dir);
+    const missingPath = join(dir, "missing.db");
+    const garbagePath = join(dir, "garbage.db");
+    const pulledPath = join(dir, "pulled.db");
+    writeFileSync(garbagePath, "not a sqlite database");
+
+    expect(localDatabaseHasCommittedPull(":memory:")).toBe(false);
+    expect(localDatabaseHasCommittedPull(missingPath)).toBe(false);
+    expect(localDatabaseHasCommittedPull(garbagePath)).toBe(false);
+
+    const previousEmailsDbPath = process.env["EMAILS_DB_PATH"];
+    const previousHasnaEmailsDbPath = process.env["HASNA_EMAILS_DB_PATH"];
+    try {
+      process.env["EMAILS_DB_PATH"] = pulledPath;
+      process.env["HASNA_EMAILS_DB_PATH"] = pulledPath;
+      resetDatabase();
+      const db = getDatabase();
+      const remote = new FakeRemote({ providers: [] });
+      const results = await pullTablesFromRemote(remote as unknown as PgAdapterAsync, db, { tables: ["providers"] });
+      expect(results.every((result) => result.errors.length === 0)).toBe(true);
+      closeDatabase();
+
+      expect(localDatabaseHasCommittedPull(pulledPath)).toBe(true);
+    } finally {
+      closeDatabase();
+      if (previousEmailsDbPath === undefined) delete process.env["EMAILS_DB_PATH"];
+      else process.env["EMAILS_DB_PATH"] = previousEmailsDbPath;
+      if (previousHasnaEmailsDbPath === undefined) delete process.env["HASNA_EMAILS_DB_PATH"];
+      else process.env["HASNA_EMAILS_DB_PATH"] = previousHasnaEmailsDbPath;
+      resetDatabase();
+    }
   });
 });

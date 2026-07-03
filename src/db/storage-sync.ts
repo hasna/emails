@@ -1,5 +1,7 @@
+import { Database as SqliteDatabase } from "bun:sqlite";
+import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import type { Database } from "./database.js";
-import { getDatabase, rebuildInboundLabelState, reconcileMailboxMessageState } from "./database.js";
+import { getDatabase, getDatabasePath, rebuildInboundLabelState, reconcileMailboxMessageState } from "./database.js";
 import type { PgAdapterAsync } from "./remote-storage.js";
 import { getCanonicalOpenEmailsRdsConfig, type CanonicalOpenEmailsRdsConfig } from "../lib/config.js";
 import {
@@ -393,12 +395,91 @@ export async function prepareLocalMigrationDedupePlan(
   };
 }
 
+export interface StoragePullMarker {
+  pulledAt: string;
+  tables: string[];
+}
+
+function isPersistentDbPath(path: string): boolean {
+  return Boolean(path) && path !== ":memory:" && !path.startsWith("file::memory:");
+}
+
+export function getStoragePullMarkerPath(dbPath: string = getDatabasePath()): string {
+  return `${dbPath}.last-pull.json`;
+}
+
+export function recordStoragePullMarker(
+  tables: readonly string[],
+  dbPath: string = getDatabasePath(),
+  pulledAtMs: number = Date.now(),
+): void {
+  if (!isPersistentDbPath(dbPath)) return;
+  const markerPath = getStoragePullMarkerPath(dbPath);
+  const tempPath = `${markerPath}.${process.pid}.tmp`;
+  try {
+    const marker: StoragePullMarker = { pulledAt: new Date(pulledAtMs).toISOString(), tables: [...tables] };
+    writeFileSync(tempPath, `${JSON.stringify(marker, null, 2)}\n`);
+    renameSync(tempPath, markerPath);
+  } catch (error) {
+    process.stderr.write(`[mailery storage] failed to write pull marker ${markerPath}: ${error instanceof Error ? error.message : String(error)}\n`);
+    try {
+      rmSync(tempPath, { force: true });
+    } catch {}
+  }
+}
+
+/**
+ * True when the local database file contains committed pull sync metadata,
+ * i.e. it was provably populated by a successful pull from remote storage.
+ * A schema-initialized but never-pulled cache (e.g. left behind by a failed
+ * pull) returns false.
+ */
+export function localDatabaseHasCommittedPull(dbPath: string = getDatabasePath()): boolean {
+  if (!isPersistentDbPath(dbPath) || !existsSync(dbPath)) return false;
+  let db: SqliteDatabase | null = null;
+  try {
+    db = new SqliteDatabase(dbPath, { readonly: true });
+    const tableExists = db
+      .query("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = '_emails_sync_meta' LIMIT 1")
+      .get();
+    if (!tableExists) return false;
+    return Boolean(db.query("SELECT 1 AS ok FROM _emails_sync_meta WHERE direction = 'pull' LIMIT 1").get());
+  } catch {
+    return false;
+  } finally {
+    try {
+      db?.close();
+    } catch {}
+  }
+}
+
+export function readStoragePullMarker(dbPath: string = getDatabasePath()): StoragePullMarker | null {
+  if (!isPersistentDbPath(dbPath)) return null;
+  const markerPath = getStoragePullMarkerPath(dbPath);
+  if (!existsSync(markerPath)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(markerPath, "utf8")) as Partial<StoragePullMarker> | null;
+    const pulledAt = typeof parsed?.pulledAt === "string" ? parsed.pulledAt : null;
+    if (!pulledAt || !Number.isFinite(Date.parse(pulledAt))) return null;
+    const tables = Array.isArray(parsed?.tables)
+      ? parsed.tables.filter((table): table is string => typeof table === "string")
+      : [];
+    return { pulledAt, tables };
+  } catch {
+    return null;
+  }
+}
+
 export async function storagePull(options?: StorageSyncOptions): Promise<SyncResult[]> {
   const remote = await getStoragePg();
   const db = getDatabase();
   try {
     await runStorageMigrations(remote);
-    return await pullTablesFromRemote(remote, db, options);
+    const results = await pullTablesFromRemote(remote, db, options);
+    if (!options?.tables && results.every((result) => result.errors.length === 0)) {
+      recordStoragePullMarker(STORAGE_TABLES);
+    }
+    return results;
   } finally {
     await remote.close();
   }

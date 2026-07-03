@@ -1,5 +1,5 @@
 import type { StorageSyncOptions, SyncResult } from "../db/storage-sync.js";
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { closeDatabase, databaseFileExists, getDatabase, getDatabasePath, isDatabaseOpen } from "../db/database.js";
@@ -10,7 +10,10 @@ import {
   getRemoteSyncMetaAll,
   getStoragePg,
   getStorageStatus,
+  localDatabaseHasCommittedPull,
   prepareLocalMigrationDedupePlan,
+  readStoragePullMarker,
+  recordStoragePullMarker,
   runStorageMigrations,
   storagePull,
   storagePush,
@@ -105,6 +108,8 @@ export interface SelfHostedRuntimeResult {
   results: SyncResult[];
   migration?: LocalMailMigrationSummary;
   dedupe?: LocalMailMigrationDedupeSummary;
+  /** Set when prepare skipped the replace-pull because a persistent cache was still fresh. */
+  skippedFreshCache?: boolean;
 }
 
 export interface SelfHostedRuntimeOptions extends StorageSyncOptions {
@@ -330,7 +335,14 @@ function configureRuntimeCachePath(options: SelfHostedRuntimeOptions = {}): void
     return;
   }
 
-  if (process.env["EMAILS_DB_PATH"]?.trim() && !process.env["HASNA_EMAILS_DB_PATH"]?.trim()) return;
+  // A user-preset local database path always wins as the persistent runtime
+  // cache: prefer HASNA_EMAILS_DB_PATH, then EMAILS_DB_PATH. Only fall through
+  // to an owned throwaway temp cache when neither env var is set.
+  const presetPath = process.env["HASNA_EMAILS_DB_PATH"]?.trim() || process.env["EMAILS_DB_PATH"]?.trim();
+  if (presetPath) {
+    setRuntimeDatabasePath(presetPath);
+    return;
+  }
 
   const dir = mkdtempSync(join(tmpdir(), "mailery-self-hosted-cache-"));
   previousEmailsDbPath = process.env["EMAILS_DB_PATH"];
@@ -364,6 +376,55 @@ export function cleanupOwnedRuntimeCache(): void {
   rmSync(dir, { recursive: true, force: true });
 }
 
+export const RUNTIME_CACHE_MAX_AGE_ENV = "MAILERY_RUNTIME_CACHE_MAX_AGE_SECONDS";
+export const RUNTIME_CACHE_DEFAULT_MAX_AGE_SECONDS = 900;
+
+function runtimeCacheMaxAgeMs(): number {
+  const raw = process.env[RUNTIME_CACHE_MAX_AGE_ENV]?.trim();
+  if (!raw) return RUNTIME_CACHE_DEFAULT_MAX_AGE_SECONDS * 1000;
+  const seconds = Number(raw);
+  if (!Number.isFinite(seconds)) return RUNTIME_CACHE_DEFAULT_MAX_AGE_SECONDS * 1000;
+  // 0 (and any negative value) disables the freshness gate: always pull.
+  return Math.max(0, seconds) * 1000;
+}
+
+interface RuntimeCacheFreshness {
+  fresh: boolean;
+  source: "marker" | "mtime" | null;
+  referenceMs: number | null;
+}
+
+const RUNTIME_CACHE_STALE: RuntimeCacheFreshness = { fresh: false, source: null, referenceMs: null };
+
+function isWithinMaxAge(referenceMs: number, maxAgeMs: number): boolean {
+  // Absolute age bounds future-dated references (clock skew, restored
+  // backups) instead of treating them as fresh forever.
+  return Math.abs(Date.now() - referenceMs) < maxAgeMs;
+}
+
+function evaluateRuntimeCacheFreshness(cachePath: string): RuntimeCacheFreshness {
+  const maxAgeMs = runtimeCacheMaxAgeMs();
+  if (maxAgeMs <= 0) return RUNTIME_CACHE_STALE;
+  if (!cachePath || cachePath === ":memory:" || cachePath.startsWith("file::memory:")) return RUNTIME_CACHE_STALE;
+  if (!existsSync(cachePath)) return RUNTIME_CACHE_STALE;
+  // Only a cache that provably contains a committed pull may skip the
+  // replace-pull. A schema-initialized but never-pulled file (e.g. left
+  // behind by a failed pull, or recreated after deletion while a marker
+  // survived) must be re-pulled regardless of marker or mtime age.
+  if (!localDatabaseHasCommittedPull(cachePath)) return RUNTIME_CACHE_STALE;
+  const marker = readStoragePullMarker(cachePath);
+  if (marker) {
+    const referenceMs = Date.parse(marker.pulledAt);
+    return { fresh: isWithinMaxAge(referenceMs, maxAgeMs), source: "marker", referenceMs };
+  }
+  try {
+    const referenceMs = statSync(cachePath).mtimeMs;
+    return { fresh: isWithinMaxAge(referenceMs, maxAgeMs), source: "mtime", referenceMs };
+  } catch {
+    return RUNTIME_CACHE_STALE;
+  }
+}
+
 export async function prepareSelfHostedRuntimeCache(
   options: SelfHostedRuntimeOptions = {},
   hooks: SelfHostedRuntimeHooks = {},
@@ -373,8 +434,25 @@ export async function prepareSelfHostedRuntimeCache(
   if (!status.enabled) return { enabled: false, action: "prepare", source, results: [] };
   assertConfigured(status);
   configureRuntimeCachePath(options);
+  const cachePath = getDatabasePath();
+  const ownedCache = ownedRuntimeCachePath !== null && cachePath === ownedRuntimeCachePath;
+  if (!options.force && !ownedCache) {
+    const freshness = evaluateRuntimeCacheFreshness(cachePath);
+    if (freshness.fresh) {
+      if (freshness.source === "mtime" && freshness.referenceMs !== null) {
+        // Externally warmed cache without a marker: materialize one anchored at
+        // the file's mtime so freshness expires from the warm time instead of
+        // being extended forever by routine sqlite writes bumping mtime.
+        recordStoragePullMarker([...SELF_HOSTED_RUNTIME_TABLES], cachePath, freshness.referenceMs);
+      }
+      return { enabled: true, action: "prepare", source, results: [], skippedFreshCache: true };
+    }
+  }
   const results = await (hooks.pull ?? storagePull)(runtimeTables({ ...options, replace: options.replace ?? true }));
   assertNoSyncErrors("Self-hosted runtime cache prepare", results);
+  if (!ownedCache && !options.tables) {
+    recordStoragePullMarker([...SELF_HOSTED_RUNTIME_TABLES], cachePath);
+  }
   return { enabled: true, action: "prepare", source, results };
 }
 
