@@ -34,6 +34,7 @@ interface CloudState {
   bulkResponse: unknown;
   sendResponse: unknown;
   labelResponse: unknown;
+  labels: unknown[];
 }
 
 function fullMessage(partial: Record<string, unknown>): Record<string, unknown> {
@@ -76,6 +77,7 @@ function createApi(init: Partial<CloudState> = {}, opts: { clock?: () => number 
     bulkResponse: init.bulkResponse ?? { ok: true, action: "", affected: 0, matched: 0, has_more: false, next_cursor: null },
     sendResponse: init.sendResponse ?? {},
     labelResponse: init.labelResponse ?? { ok: true, labels: [], label_names: [] },
+    labels: init.labels ?? [],
   };
   const calls: RecordedCall[] = [];
   let fetchCount = 0;
@@ -89,6 +91,7 @@ function createApi(init: Partial<CloudState> = {}, opts: { clock?: () => number 
     const path = u.pathname;
 
     if (path === "/api/v1/mailboxes" && method === "GET") return jsonResponse({ data: state.mailboxes });
+    if (path === "/api/v1/labels" && method === "GET") return jsonResponse({ data: state.labels });
     if (path === "/api/v1/messages/groups" && method === "GET") return jsonResponse(state.groups);
     if (path === "/api/v1/messages/changes" && method === "GET") return jsonResponse({ data: state.changesData, next_cursor: state.changesNextCursor });
     if (path === "/api/v1/messages/tombstones" && method === "GET") return jsonResponse({ data: state.tombstones });
@@ -272,7 +275,7 @@ describe("ApiMailDataSource reads", () => {
     expect(sources[0]).toMatchObject({ id: "provider:mbx_1", label: "Agent", kind: "provider", providerId: "mbx_1", providerType: "ses" });
   });
 
-  it("finds the latest verification code, filtering by recipient client-side", async () => {
+  it("FIX-6: finds the latest verification code via the server recipient search (q)", async () => {
     const { dataSource, calls } = createApi({
       listData: [
         fullMessage({ id: "other", fromAddress: "noreply@bank.com", subject: "Someone else", toAddresses: ["notme@x.com"] }),
@@ -284,14 +287,184 @@ describe("ApiMailDataSource reads", () => {
     const candidates = await dataSource.verificationCandidates("me@x.com", { limit: 5 });
     const match = await dataSource.findLatest("me@x.com");
 
-    // Only the message addressed to me@x.com is a candidate (server search never
-    // matches recipient, so filtering is client-side over to_addresses).
+    // The recipient address is sent to the server as `q` — the search UNION now matches
+    // recipients_text (to/cc), so the lookup is server-side + complete. The exact-recipient
+    // guard still narrows the fuzzy match to messages addressed TO me@x.com.
+    expect(calls[0]?.query["q"]).toBe("me@x.com");
     expect(candidates.map((c) => c.id)).toEqual(["m1"]);
     expect(candidates[0]).toMatchObject({ from_address: "noreply@bank.com", text_body: "Your verification code is 123456" });
     expect(match?.code).toBe("123456");
     expect(match?.confidence).toBe("high");
-    // Recipient scoping does not rely on the server's q search param.
-    expect(calls[0]?.query["q"]).toBeUndefined();
+  });
+});
+
+// A cloud harness that pages GET /messages by a KEYSET cursor (numeric index) with a
+// per-page size equal to the requested `limit` — the real server's paging contract — and
+// serves GET /messages/:id from the same set (a short/unknown id 400s, like the server).
+function createPagedApi(all: Array<Record<string, unknown>>) {
+  const calls: RecordedCall[] = [];
+  const fetchImpl = (async (url: string | URL | Request, req?: RequestInit) => {
+    const u = new URL(String(url));
+    const method = (req?.method ?? "GET").toUpperCase();
+    calls.push({ method, path: u.pathname, query: Object.fromEntries(u.searchParams), body: undefined });
+    if (u.pathname === "/api/v1/messages" && method === "GET") {
+      const limit = Number(u.searchParams.get("limit") ?? "50");
+      const start = Number(u.searchParams.get("cursor") ?? "0");
+      const slice = all.slice(start, start + limit);
+      const next = start + limit;
+      return jsonResponse({ data: slice, next_cursor: next < all.length ? String(next) : null });
+    }
+    const byId = u.pathname.match(/^\/api\/v1\/messages\/([^/]+)$/);
+    if (byId && method === "GET") {
+      const found = all.find((m) => m["id"] === decodeURIComponent(byId[1]!));
+      return found ? jsonResponse(found) : jsonResponse({ error: { code: "bad_request", message: "invalid id or value" } }, 400);
+    }
+    return jsonResponse({ error: { code: "not_found", message: `unrouted ${method} ${u.pathname}` } }, 404);
+  }) as typeof fetch;
+  const client = new MaileryCloudClient({ apiUrl: "https://mailery.example", token: "t", fetchImpl });
+  const dataSource = new ApiMailDataSource({ client, cache: new MailCache() });
+  return { dataSource, calls };
+}
+
+describe("ApiMailDataSource cloud fixes", () => {
+  it("FIX-1: honors --limit (caps output) and pages by cursor so --offset returns different rows", async () => {
+    const all = ["m1", "m2", "m3", "m4", "m5"].map((id) => fullMessage({ id, subject: id }));
+    const { dataSource, calls } = createPagedApi(all);
+
+    const page1 = await dataSource.listMailbox("inbox", { limit: 2 });
+    const page2 = await dataSource.listMailbox("inbox", { limit: 2, offset: 2 });
+
+    expect(page1.map((m) => m.id)).toEqual(["m1", "m2"]); // exactly 2 (limit caps output)
+    expect(page2.map((m) => m.id)).toEqual(["m3", "m4"]); // successive page -> different rows
+    expect(page1.map((m) => m.id)).not.toEqual(page2.map((m) => m.id));
+    // The requested limit is sent to the server as the keyset page size (not a fixed 200).
+    expect(calls.find((c) => c.path === "/api/v1/messages")?.query["limit"]).toBe("2");
+  });
+
+  it("FIX-1: caps output to --limit even when the server returns a larger page", async () => {
+    const { dataSource } = createApi({
+      listData: ["m1", "m2", "m3", "m4", "m5"].map((id) => fullMessage({ id })),
+    });
+    const rows = await dataSource.listMailbox("inbox", { limit: 2 });
+    expect(rows.map((m) => m.id)).toEqual(["m1", "m2"]);
+  });
+
+  it("FIX-1: an offset deeper than the page budget refuses instead of silently truncating", async () => {
+    // 60 rows, page size 1 -> the 50-page budget is exhausted at offset 50 while rows
+    // remain, so the boundary must throw (not return an empty/short page).
+    const all = Array.from({ length: 60 }, (_, i) => fullMessage({ id: `m${i}` }));
+    const { dataSource } = createPagedApi(all);
+    await expect(dataSource.listMailbox("inbox", { limit: 1, offset: 50 })).rejects.toThrow(/too deep/i);
+    // A reachable deep offset still works (row 48).
+    expect((await dataSource.listMailbox("inbox", { limit: 1, offset: 48 })).map((m) => m.id)).toEqual(["m48"]);
+  });
+
+  it("FIX-1: an offset past a fully-drained mailbox returns empty (not an error)", async () => {
+    // Exactly 50 rows: offset 50 skips them all and the feed drains -> legitimate empty.
+    const all = Array.from({ length: 50 }, (_, i) => fullMessage({ id: `m${i}` }));
+    const { dataSource } = createPagedApi(all);
+    expect(await dataSource.listMailbox("inbox", { limit: 1, offset: 50 })).toEqual([]);
+  });
+
+  it("FIX-2: populates per-source total/unread/latest from message groups", async () => {
+    const { dataSource } = createApi({
+      mailboxes: [{ id: "mbx_1", email: "agent@acme.com", name: "Agent", provider: "ses" }],
+      groups: { total: 10, inbox: 7, unread: 3, starred: 1, sent: 2, archive: 1, spam: 0, trash: 0 },
+      listData: [fullMessage({ id: "latest", receivedAt: "2026-07-04T09:00:00.000Z" })],
+    });
+
+    const [source] = await dataSource.listMailboxSources();
+
+    expect(source).toMatchObject({
+      id: "provider:mbx_1",
+      total: 10,
+      unread: 3,
+      latestReceivedAt: "2026-07-04T09:00:00.000Z",
+    });
+    expect(source!.counts.inbox).toBe(7);
+  });
+
+  it("FIX-3: the short id printed by inbox list resolves to a full id usable in read", async () => {
+    const fullId = "0190aaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    const all = [
+      fullMessage({ id: fullId, subject: "Target" }),
+      fullMessage({ id: "0190ffff-1111-2222-3333-444444444444", subject: "Other" }),
+    ];
+    const { dataSource } = createPagedApi(all);
+
+    const listed = await dataSource.listMailbox("inbox", { limit: 20 });
+    const shortId = listed[0]!.id.slice(0, 8); // exactly what `inbox list` prints
+    const resolved = await dataSource.resolveId(shortId);
+
+    expect(resolved).toBe(fullId);
+    // The short id straight to the server is the original defect (400 invalid id)...
+    await expect(dataSource.getMessage(shortId)).rejects.toThrow(/invalid id/i);
+    // ...but the resolved id reads verbatim.
+    expect((await dataSource.getMessage(resolved))?.subject).toBe("Target");
+    // A full id is used verbatim (no resolution scan needed).
+    expect(await dataSource.resolveId(fullId)).toBe(fullId);
+  });
+
+  it("FIX-3: an ambiguous short prefix is rejected with a clear message", async () => {
+    const all = [
+      fullMessage({ id: "0190aaaa-1111-1111-1111-111111111111" }),
+      fullMessage({ id: "0190aaaa-2222-2222-2222-222222222222" }),
+    ];
+    const { dataSource } = createPagedApi(all);
+    await expect(dataSource.resolveId("0190aaaa")).rejects.toThrow(/ambiguous/i);
+  });
+
+  it("FIX-4: suppresses the system unread label on a read message (no contradictory flags)", async () => {
+    const { dataSource } = createApi({
+      messages: { m1: fullMessage({ id: "m1", isRead: true, label_names: ["unread", "Billing"] }) },
+    });
+
+    const msg = await dataSource.getMessage("m1");
+    const body = await dataSource.getMessageBody(msg!);
+
+    expect(msg!.labels).toEqual(["Billing"]);
+    expect(body!.flags).toContain("Billing");
+    expect(body!.flags).not.toContain("unread");
+  });
+
+  it("FIX-7: builds label summaries from the authoritative /labels endpoint (not a sampled page)", async () => {
+    const { dataSource, calls } = createApi({
+      labels: [
+        { id: "l1", name: "Billing", color: "#abc", kind: "custom", count: 5, message_count: 5 },
+        { id: "l2", name: "Unread", color: "#def", kind: "system", count: 2 },
+      ],
+    });
+
+    const summaries = await dataSource.listLabelSummaries();
+
+    expect(summaries).toEqual([
+      { name: "Billing", count: 5, popular: true },
+      { name: "Unread", count: 2, popular: true },
+    ]);
+    expect(calls.some((c) => c.path === "/api/v1/labels")).toBe(true);
+    // No message-list sampling was used to derive labels.
+    expect(calls.some((c) => c.path === "/api/v1/messages")).toBe(false);
+  });
+
+  it("FIX-8: forwards mailboxId to the tombstones feed for a mailbox-scoped changesSince", async () => {
+    const t = Date.parse("2026-07-04T12:00:00.000Z");
+    const api = createApi(
+      {
+        mailboxes: [{ id: "mbx_1", email: "a@x.com" }],
+        changesData: [],
+        tombstones: [{ id: "t1", message_id: "gone", mailboxId: "mbx_1" }],
+      },
+      { clock: () => t },
+    );
+    api.cache.advanceWatermark("2026-07-01T00:00:00.000Z");
+
+    const changes = await api.dataSource.changesSince({ source: { providerId: "mbx_1" } });
+
+    const tombCall = api.calls.find((c) => c.path === "/api/v1/messages/tombstones");
+    const changesCall = api.calls.find((c) => c.path === "/api/v1/messages/changes");
+    expect(changesCall?.query["mailboxId"]).toBe("mbx_1");
+    expect(tombCall?.query["mailboxId"]).toBe("mbx_1"); // mailbox-scoped deletions
+    expect(changes.deletedIds).toEqual(["gone"]);
   });
 });
 

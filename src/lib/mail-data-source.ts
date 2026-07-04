@@ -19,10 +19,12 @@
 // This module is ADDITIVE: nothing here is wired into callers yet.
 
 import { getConfigValue } from "./config.js";
+import { getDatabase, resolvePartialIdOrThrow } from "../db/database.js";
 import { MailCache, countsCacheKey, messagePageCacheKey } from "./mail-cache.js";
 import {
   MaileryCloudClient,
   type MaileryCloudGroupCounts,
+  type MaileryCloudLabelSummary,
   type MaileryCloudMailbox,
   type MaileryCloudMessage,
   type MaileryCloudMessageListItem,
@@ -190,6 +192,13 @@ export interface MailClearResult {
 export interface MailDataSource {
   readonly mode: MailDataSourceMode;
 
+  /**
+   * Resolve a possibly-partial id (the short id printed by `inbox list`) to a full id
+   * usable on every read/write. local: SQLite partial-id resolution. cloud: matches a
+   * unique id prefix over a bounded recent scan (a full id is used verbatim).
+   */
+  resolveId(id: string): Promise<string>;
+
   // reads
   listMailbox(mailbox: Mailbox, opts?: MailboxListOptions): Promise<TuiMessage[]>;
   mailboxCounts(opts?: { source?: MailboxSource }): Promise<MailboxCounts>;
@@ -255,6 +264,11 @@ const LOCAL_BULK_FLAG_ACTIONS: Record<string, LocalFlagSetter> = {
 
 export class SqliteMailDataSource implements MailDataSource {
   readonly mode = "local" as const;
+
+  async resolveId(id: string): Promise<string> {
+    // Partial-id resolution is a local SQLite concern (prefix match over inbound_emails).
+    return resolvePartialIdOrThrow(getDatabase(), "inbound_emails", id);
+  }
 
   async listMailbox(mailbox: Mailbox, opts?: MailboxListOptions): Promise<TuiMessage[]> {
     return localListMailbox(mailbox, opts);
@@ -399,6 +413,11 @@ function labelNamesOf(item: MaileryCloudMessage): string[] {
   return [];
 }
 
+// The labels endpoint emits the per-label live count under snake + camel aliases.
+function labelCount(label: MaileryCloudLabelSummary): number {
+  return label.count ?? label.message_count ?? label.messageCount ?? 0;
+}
+
 function isTombstoneItem(item: MaileryCloudMessageListItem): boolean {
   const record = item as { tombstone?: boolean; deleted?: boolean; isDeleted?: boolean };
   return record.tombstone === true || record.deleted === true || record.isDeleted === true;
@@ -414,9 +433,17 @@ function bareEmail(value: string): string {
   return (angled ? angled[1]! : value).trim().toLowerCase();
 }
 
+// Drop a redundant system `unread` label from a read message's label set. The server may
+// still carry it, but showing it produces a contradictory "read, unread" flag line; local
+// has no such label and renders just "read", so suppress it for parity.
+function visibleLabels(labels: string[], isRead: boolean): string[] {
+  return isRead ? labels.filter((name) => name.trim().toLowerCase() !== "unread") : labels;
+}
+
 function cloudItemToTuiMessage(item: MaileryCloudMessage): TuiMessage {
   const direction = item.direction;
   const hasAttachments = item.hasAttachments ?? item.has_attachments ?? false;
+  const isRead = item.isRead ?? true;
   return {
     kind: direction === "outbound" ? "sent" : "inbound",
     id: item.id,
@@ -424,9 +451,9 @@ function cloudItemToTuiMessage(item: MaileryCloudMessage): TuiMessage {
     to: (item.toAddresses ?? []).join(", "),
     subject: item.subject || "(no subject)",
     date: cloudMessageDate(item),
-    is_read: item.isRead ?? true,
+    is_read: isRead,
     is_starred: item.isStarred ?? item.is_starred ?? false,
-    labels: labelNamesOf(item),
+    labels: visibleLabels(labelNamesOf(item), isRead),
     snippet: item.snippet ?? "",
     thread_id: item.threadId ?? item.thread_id ?? null,
     provider_thread_id: null,
@@ -444,7 +471,7 @@ function cloudMessageToTuiMessage(msg: MaileryCloudMessageWithAttachments): TuiM
 
 function cloudMessageToBody(msg: MaileryCloudMessageWithAttachments): MessageBody {
   const flags = [...new Set([
-    ...labelNamesOf(msg),
+    ...visibleLabels(labelNamesOf(msg), msg.isRead ?? true),
     msg.isStarred ? "starred" : "",
     msg.isRead ? "" : "unread",
     msg.isImportant ? "important" : "",
@@ -510,6 +537,19 @@ function hasCloudSourceScope(source?: MailboxSource): boolean {
 // has more, the watermark is NOT advanced and a resume cursor is returned so the next
 // call continues from exactly where this one stopped (no gap, no lost newest rows).
 const CLOUD_MAX_CHANGE_PAGES = 25;
+
+// Safety cap on keyset-cursor pages walked to satisfy one listMailbox call. The server
+// pages by cursor (no offset), so --offset is translated into cursor hops; this bounds
+// how deep an offset can page before the client asks the user to narrow the query.
+const CLOUD_MAX_LIST_PAGES = 50;
+
+// Safety cap on pages scanned to resolve a short id prefix (as printed by `inbox list`)
+// to a full cloud id. Deep enough to cover a large working set without an unbounded scan.
+const CLOUD_MAX_RESOLVE_PAGES = 10;
+
+// A complete server message id (uuidv7). Used verbatim; anything shorter is a prefix
+// that resolveId matches over a bounded recent scan.
+const CLOUD_FULL_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // Safety guard on bulk-delete pages drained by a single clear() so a server that always
 // reports `hasMore` cannot spin forever. Large enough to clear a real mailbox.
@@ -581,7 +621,7 @@ export class ApiMailDataSource implements MailDataSource {
     return undefined;
   }
 
-  private async fetchPageInto(key: string, query: { group?: string; q?: string; mailboxId?: string }): Promise<CachedCloudPage> {
+  private async fetchPageInto(key: string, query: { group?: string; q?: string; mailboxId?: string; cursor?: string; limit?: number }): Promise<CachedCloudPage> {
     // Capture the invalidation epoch BEFORE the request so a write/delta that lands
     // while this fetch is in flight can veto caching pre-write data (coherence guard).
     const epoch = this.cache.epoch;
@@ -589,7 +629,8 @@ export class ApiMailDataSource implements MailDataSource {
       group: query.group,
       q: query.q,
       mailboxId: query.mailboxId,
-      limit: this.listLimit,
+      cursor: query.cursor,
+      limit: query.limit ?? this.listLimit,
     });
     const data = page.data.filter((item): item is MaileryCloudMessage => !isTombstoneItem(item));
     const stored: CachedCloudPage = { data, nextCursor: page.nextCursor };
@@ -599,7 +640,7 @@ export class ApiMailDataSource implements MailDataSource {
 
   // Read-through with stale-while-revalidate: a fresh hit is served from cache; a
   // stale hit is served immediately while a background refresh runs; a miss fetches.
-  private async readPage(key: string, query: { group?: string; q?: string; mailboxId?: string }): Promise<CachedCloudPage> {
+  private async readPage(key: string, query: { group?: string; q?: string; mailboxId?: string; cursor?: string; limit?: number }): Promise<CachedCloudPage> {
     const peeked = this.cache.peekPage<CachedCloudPage>(key);
     if (peeked?.fresh) return peeked.value;
     if (peeked) {
@@ -617,14 +658,69 @@ export class ApiMailDataSource implements MailDataSource {
     return full;
   }
 
+  async resolveId(id: string): Promise<string> {
+    const trimmed = id.trim();
+    // A full uuidv7 is a complete id — use it verbatim (the common `read`-a-known-id path).
+    if (CLOUD_FULL_ID_RE.test(trimmed)) return trimmed;
+    // Resolve a short prefix (as printed by `inbox list`) to a full id by matching a UNIQUE
+    // id prefix over a bounded recent scan (never an unbounded walk of a huge mailbox).
+    const matches = new Set<string>();
+    let cursor: string | undefined;
+    for (let page = 0; page < CLOUD_MAX_RESOLVE_PAGES; page += 1) {
+      const result = await this.client.listMessagesPage({ cursor, limit: this.listLimit });
+      for (const item of result.data) {
+        if (isTombstoneItem(item)) continue;
+        const fullId = (item as MaileryCloudMessage).id;
+        if (fullId === trimmed) return fullId; // exact hit (e.g. a non-uuid id) — done
+        if (fullId.startsWith(trimmed)) matches.add(fullId);
+      }
+      if (!result.nextCursor) break;
+      cursor = result.nextCursor;
+    }
+    if (matches.size === 1) return [...matches][0]!;
+    if (matches.size > 1) {
+      throw new Error(`Ambiguous email id prefix '${trimmed}' — it matches ${matches.size} messages. Use a longer id.`);
+    }
+    // No match in the scanned window: hand the original back so the server returns a clear
+    // 404 for the id the user typed (rather than a confusing client-side error).
+    return trimmed;
+  }
+
   async listMailbox(mailbox: Mailbox, opts?: MailboxListOptions): Promise<TuiMessage[]> {
     const group = folderToGroup(mailbox);
     const mailboxId = await this.resolveCloudMailboxId(opts?.source);
     // A specified-but-unresolvable source narrows to nothing (never widens to tenant).
     if (!mailboxId && hasCloudSourceScope(opts?.source)) return [];
-    const key = messagePageCacheKey({ group, q: opts?.search, cursor: "", mailbox: mailboxId });
-    const page = await this.readPage(key, { group, q: opts?.search, mailboxId });
-    return page.data.map(cloudItemToTuiMessage);
+    // The server pages by KEYSET cursor (no offset), so honor `limit` by requesting pages
+    // of that size and translate `offset` into bounded cursor hops. Each page is cached
+    // under its own cursor+limit key, so successive `--offset` pages hit different rows.
+    const limit = opts?.limit && opts.limit > 0 ? opts.limit : this.listLimit;
+    const offset = opts?.offset && opts.offset > 0 ? opts.offset : 0;
+    let skip = offset;
+    const collected: MaileryCloudMessage[] = [];
+    let cursor: string | undefined;
+    let more = true;
+    let pages = 0;
+    while (collected.length < limit && more && pages < CLOUD_MAX_LIST_PAGES) {
+      const key = messagePageCacheKey({ group, q: opts?.search, cursor: cursor ?? "", mailbox: mailboxId, limit });
+      const result = await this.readPage(key, { group, q: opts?.search, mailboxId, cursor, limit });
+      for (const item of result.data) {
+        if (skip > 0) { skip -= 1; continue; }
+        if (collected.length >= limit) break;
+        collected.push(item);
+      }
+      cursor = result.nextCursor ?? undefined;
+      more = Boolean(cursor);
+      pages += 1;
+    }
+    // Budget exhausted (still more rows on the server) before the requested offset window
+    // could be satisfied: refuse with a clear message rather than SILENTLY truncating —
+    // returning an empty OR a short (< limit) page here would read as "end of mailbox".
+    // A drained feed (more === false) is the legitimate tail: return whatever was collected.
+    if (more && collected.length < limit && pages >= CLOUD_MAX_LIST_PAGES && offset > 0) {
+      throw new Error(`Cloud offset ${offset} is too deep to page within ${CLOUD_MAX_LIST_PAGES} pages of ${limit}. Narrow with --search/--folder, or use a smaller --offset.`);
+    }
+    return collected.map(cloudItemToTuiMessage);
   }
 
   async mailboxCounts(opts?: { source?: MailboxSource }): Promise<MailboxCounts> {
@@ -658,18 +754,28 @@ export class ApiMailDataSource implements MailDataSource {
 
   async listMailboxSources(_opts?: ListMailboxSourcesOptions): Promise<MailboxSourceSummary[]> {
     const mailboxes = await this.cloudMailboxes();
-    return mailboxes.map((mailbox) => ({
-      id: `provider:${mailbox.id}`,
-      label: mailbox.name ?? mailbox.email,
-      kind: "provider" as const,
-      providerId: mailbox.id,
-      providerName: mailbox.name ?? undefined,
-      providerType: mailbox.provider,
-      badges: [],
-      counts: emptyCounts(),
-      total: 0,
-      unread: 0,
-      latestReceivedAt: null,
+    return Promise.all(mailboxes.map(async (mailbox) => {
+      // Per-mailbox counts come from messageGroups (the same O(1) counter path
+      // mailboxCounts uses); the latest-received timestamp from a single-row page read.
+      const [groups, latestPage] = await Promise.all([
+        this.client.messageGroups({ mailboxId: mailbox.id }),
+        this.client.listMessagesPage({ mailboxId: mailbox.id, limit: 1 }),
+      ]);
+      const counts = cloudGroupsToCounts(groups);
+      const latest = latestPage.data.find((item): item is MaileryCloudMessage => !isTombstoneItem(item));
+      return {
+        id: `provider:${mailbox.id}`,
+        label: mailbox.name ?? mailbox.email,
+        kind: "provider" as const,
+        providerId: mailbox.id,
+        providerName: mailbox.name ?? undefined,
+        providerType: mailbox.provider,
+        badges: [],
+        counts,
+        total: groups.total ?? 0,
+        unread: counts.unread,
+        latestReceivedAt: latest ? cloudMessageDate(latest) : null,
+      };
     }));
   }
 
@@ -735,34 +841,39 @@ export class ApiMailDataSource implements MailDataSource {
     });
   }
 
-  async listLabelSummaries(_opts?: ListLabelSummaryOptions): Promise<LabelSummary[]> {
-    const cached = this.cache.getLabels<LabelSummary[]>();
-    if (cached) return cached;
-    // The server has no dedicated label-summary endpoint; derive popular labels from a
-    // bounded sample of the inbox. See the returned FLAG in the task summary.
-    const key = messagePageCacheKey({ group: "inbox", cursor: "", mailbox: "" });
-    const page = await this.readPage(key, { group: "inbox" });
-    const counts = new Map<string, number>();
-    for (const item of page.data) {
-      for (const name of labelNamesOf(item)) counts.set(name, (counts.get(name) ?? 0) + 1);
-    }
-    const summaries: LabelSummary[] = [...counts.entries()]
-      .map(([name, count]) => ({ name, count, popular: count > 0 }))
+  async listLabelSummaries(opts?: ListLabelSummaryOptions): Promise<LabelSummary[]> {
+    // Authoritative: GET /api/v1/labels returns the tenant's full label set with real
+    // per-label counts, so the client no longer derives labels from a sampled page. The
+    // full set is cached; the caller's search/limit are applied per call over it.
+    const summaries = this.cache.getLabels<LabelSummary[]>() ?? await this.loadCloudLabels();
+    const q = opts?.search?.trim().toLowerCase();
+    const filtered = q ? summaries.filter((label) => label.name.toLowerCase().includes(q)) : summaries;
+    const limit = opts?.limit && opts.limit > 0 ? opts.limit : 50;
+    return filtered.slice(0, limit);
+  }
+
+  private async loadCloudLabels(): Promise<LabelSummary[]> {
+    const labels = await this.client.listLabels();
+    const summaries: LabelSummary[] = labels
+      .map((label) => {
+        const count = labelCount(label);
+        return { name: label.name, count, popular: count > 0 };
+      })
       .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
     this.cache.setLabels(summaries);
     return summaries;
   }
 
   async verificationCandidates(address: string, opts?: VerificationCodeCandidateOptions): Promise<VerificationCodeEmail[]> {
-    // The server's search UNION matches subject/from_address/snippet — NOT recipient
-    // (to_addresses). A verification email is addressed TO `address`, so we scan a
-    // bounded recent page and filter by recipient CLIENT-SIDE (the list projection
-    // carries to_addresses). See the returned FLAG: no server by-recipient filter.
+    // The server's search UNION now matches recipients_text (to/cc) as well as
+    // subject/from/snippet, so a by-recipient lookup resolves SERVER-SIDE and complete
+    // via `q` — not by scanning a bounded recent window. The exact-recipient guard below
+    // still narrows the fuzzy trigram match to messages addressed TO the target.
     const limit = opts?.limit ?? 20;
     const target = address.trim().toLowerCase();
     const from = opts?.from?.trim().toLowerCase();
     const subject = opts?.subject?.trim().toLowerCase();
-    const page = await this.client.listMessagesPage({ limit: Math.max(limit, 50) });
+    const page = await this.client.listMessagesPage({ q: target, limit: Math.max(limit, 50) });
     const candidates: VerificationCodeEmail[] = [];
     for (const item of page.data) {
       if (isTombstoneItem(item)) continue;
@@ -826,7 +937,7 @@ export class ApiMailDataSource implements MailDataSource {
       if (page + 1 >= CLOUD_MAX_CHANGE_PAGES) { drained = false; break; }
     }
 
-    const tombstones = await this.client.listMessageTombstones({ since: since ?? undefined });
+    const tombstones = await this.client.listMessageTombstones({ since: since ?? undefined, mailboxId });
     const deletedIds = [...new Set(
       tombstones
         .map((tombstone) => tombstone.message_id ?? tombstone.id)
