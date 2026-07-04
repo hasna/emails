@@ -3,7 +3,7 @@ import { Command } from "commander";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { commandModulesFor, remoteStorageRuntimeError, routeRootPromptArgs, shouldPrintVersionEarly, shouldUseSelfHostedRuntimeCacheForArgs, type CommandModule } from "./router.js";
+import { commandModulesFor, routeRootPromptArgs, shouldPrintVersionEarly, type CommandModule } from "./router.js";
 import { createMaileryEventsClient, getMaileryEventsDataDir } from "../lib/mailery-events.js";
 
 function getPackageVersion(): string {
@@ -45,7 +45,6 @@ async function loadCommandModule(module: CommandModule): Promise<RegisterFn> {
     case "ui": return (await import("./commands/ui.js")).registerUiCommand;
     case "triage": return (await import("./commands/triage.js")).registerTriageCommands;
     case "aws": return (await import("./commands/aws.js")).registerAwsCommands;
-    case "storage": return (await import("./commands/storage.js")).registerStorageCommands;
     case "status": return (await import("./commands/status.js")).registerStatusCommands;
     case "project-panel": return (await import("./commands/status.js")).registerStatusCommands;
     case "daemon": return (await import("./commands/daemon.js")).registerDaemonCommands;
@@ -110,29 +109,6 @@ async function main(): Promise<void> {
   configureCliRuntime({ json: jsonRequested, verbose: verboseRequested });
   setLogLevel(quietRequested, verboseRequested);
 
-  let selfHostedRuntimePrepared = false;
-
-  async function prepareSelfHostedRuntimeIfNeeded(): Promise<void> {
-    if (!shouldUseSelfHostedRuntimeCacheForArgs(cliArgs)) return;
-    try {
-      const { prepareSelfHostedRuntimeCache } = await import("../lib/self-hosted-runtime.js");
-      const result = await prepareSelfHostedRuntimeCache({ source: "mailery-cli" });
-      selfHostedRuntimePrepared = result.enabled;
-    } catch (e) {
-      handleError(e);
-    }
-  }
-
-  async function flushSelfHostedRuntimeIfNeeded(): Promise<void> {
-    if (!selfHostedRuntimePrepared) return;
-    try {
-      const { flushSelfHostedRuntimeCache } = await import("../lib/self-hosted-runtime.js");
-      await flushSelfHostedRuntimeCache({ source: "mailery-cli", cleanupCache: true });
-    } catch (e) {
-      handleError(e);
-    }
-  }
-
   program
     .name("mailery")
     .description("Mailery email management CLI - send, receive, sync, and manage email via Resend, AWS SES, and Cloudflare")
@@ -144,10 +120,6 @@ async function main(): Promise<void> {
       const opts = program.opts();
       configureCliRuntime({ json: !!opts.json, verbose: !!opts.verbose });
       setLogLevel(!!opts.quiet, !!opts.verbose);
-      await prepareSelfHostedRuntimeIfNeeded();
-    })
-    .hook("postAction", async () => {
-      await flushSelfHostedRuntimeIfNeeded();
     });
 
   function output(data: unknown, formatted: string): void {
@@ -157,11 +129,6 @@ async function main(): Promise<void> {
     } else {
       console.log(formatted);
     }
-  }
-
-  const remoteRuntimeError = remoteStorageRuntimeError(cliArgs);
-  if (remoteRuntimeError) {
-    handleError(new Error(remoteRuntimeError));
   }
 
   await registerCommandsForArgs(program, output, cliArgs);

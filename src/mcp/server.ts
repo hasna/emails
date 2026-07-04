@@ -1,7 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerTriageTools } from "./tools/triage.js";
 import { registerWarmingTools } from "./tools/warming.js";
-import { registerEmailStorageTools } from "./tools/storage.js";
 import { registerProviderTools } from "./tools/providers.js";
 import { registerInboxTools } from "./tools/inbox.js";
 import { registerSequenceTools } from "./tools/sequences.js";
@@ -35,7 +34,6 @@ export function buildServer(): McpServer {
 
   registerEmailResources(server);
   installMcpToolContracts(server);
-  registerEmailStorageTools(server);
   registerAgentTools(server);
   registerProviderTools(server);
   registerDomainTools(server);

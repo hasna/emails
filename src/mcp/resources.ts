@@ -8,14 +8,11 @@ import { domainInboundReadinessSignals } from "../lib/domain-inbound-evidence.js
 import { loadConfig } from "../lib/config.js";
 import { resolveMaileryMode } from "../lib/mode.js";
 import { listMailboxSources, listMailboxStatus } from "../cli/tui/data.js";
-import type { PgAdapterAsync } from "../db/remote-storage.js";
 
 const RECENT_ERROR_LIMIT_PER_COMPONENT = 50;
 const DOMAIN_RESOURCE_LIMIT = 50;
 const ADDRESS_RESOURCE_LIMIT = 100;
 const AGENT_CONTEXT_SAMPLE_LIMIT = 5;
-
-type SelfHostedStatusRemote = Pick<PgAdapterAsync, "all" | "run" | "close">;
 
 function jsonResource(uri: string, value: unknown) {
   return {
@@ -85,15 +82,9 @@ export async function addressesResourcePayload(db: Database = getDatabase()): Pr
   };
 }
 
-async function selfHostedRuntimeEnabled(remote: SelfHostedStatusRemote | undefined): Promise<boolean> {
-  if (remote) return true;
-  const { getSelfHostedRuntimeStatus } = await import("../lib/self-hosted-runtime.js");
-  return getSelfHostedRuntimeStatus().enabled;
-}
-
-export async function agentContextResourcePayload(db: Database = getDatabase(), remote?: SelfHostedStatusRemote): Promise<Record<string, unknown>> {
+export async function agentContextResourcePayload(db: Database = getDatabase()): Promise<Record<string, unknown>> {
   const { getAgentContextForRuntime } = await import("../lib/agent-context.js");
-  const context = await getAgentContextForRuntime(db, remote);
+  const context = await getAgentContextForRuntime(db);
   const status = context["status"] as Record<string, unknown>;
   const domains = status["domains"] as { usable?: unknown[]; usable_limit?: number; usable_truncated?: boolean } | undefined;
   const addresses = status["addresses"] as { usable_from?: Array<Record<string, unknown>>; usable_from_limit?: number; usable_from_truncated?: boolean } | undefined;
@@ -155,14 +146,8 @@ export function mailboxesResourcePayload(db: Database = getDatabase()): Record<s
   };
 }
 
-export async function mailboxesResourcePayloadForRuntime(db: Database = getDatabase(), remote?: SelfHostedStatusRemote): Promise<Record<string, unknown>> {
-  if (!await selfHostedRuntimeEnabled(remote)) return mailboxesResourcePayload(db);
-  const { assertSelfHostedDirectRuntimeConfigured, getSelfHostedMailboxStatus } = await import("../db/self-hosted-inbound.js");
-  if (!remote) assertSelfHostedDirectRuntimeConfigured();
-  return {
-    ...await getSelfHostedMailboxStatus(undefined, remote),
-    cli_equivalent: "mailery inbox mailboxes --json",
-  };
+export async function mailboxesResourcePayloadForRuntime(db: Database = getDatabase()): Promise<Record<string, unknown>> {
+  return mailboxesResourcePayload(db);
 }
 
 export function sourcesResourcePayload(db: Database = getDatabase()): Record<string, unknown> {
@@ -172,14 +157,8 @@ export function sourcesResourcePayload(db: Database = getDatabase()): Record<str
   };
 }
 
-export async function sourcesResourcePayloadForRuntime(db: Database = getDatabase(), remote?: SelfHostedStatusRemote): Promise<Record<string, unknown>> {
-  if (!await selfHostedRuntimeEnabled(remote)) return sourcesResourcePayload(db);
-  const { assertSelfHostedDirectRuntimeConfigured, listSelfHostedSourceSummaries } = await import("../db/self-hosted-inbound.js");
-  if (!remote) assertSelfHostedDirectRuntimeConfigured();
-  return {
-    sources: await listSelfHostedSourceSummaries({ limit: 100 }, remote),
-    cli_equivalent: "mailery inbox sources --json",
-  };
+export async function sourcesResourcePayloadForRuntime(db: Database = getDatabase()): Promise<Record<string, unknown>> {
+  return sourcesResourcePayload(db);
 }
 
 interface FailedDomainProvisioningRow {

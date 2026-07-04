@@ -3,7 +3,6 @@
  * Mailery MCP server entry point.
  */
 import pkg from "../../package.json" with { type: "json" };
-import { assertRemoteRuntimeSupported } from "../lib/remote-runtime-guard.js";
 
 function printHelp(): void {
   console.log(`Usage: mailery-mcp [options]
@@ -33,10 +32,6 @@ if (args.includes("--version") || args.includes("-V")) {
 }
 
 async function main(): Promise<void> {
-  assertRemoteRuntimeSupported("mailery-mcp");
-  const { installSelfHostedRuntimeShutdownHooks, startSelfHostedRuntimeCache } = await import("../lib/self-hosted-runtime.js");
-  await startSelfHostedRuntimeCache({ source: "mailery-mcp" });
-  installSelfHostedRuntimeShutdownHooks({ source: "mailery-mcp", cleanupCache: true });
   const { isStdioMode, resolveHttpPort } = await import("./options.js");
   if (isStdioMode(args)) {
     const [{ StdioServerTransport }, { buildServer }] = await Promise.all([

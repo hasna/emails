@@ -25,25 +25,6 @@ import { assessDomainReadiness } from "../../lib/domain-readiness.js";
 import { domainInboundReadinessSignals } from "../../lib/domain-inbound-evidence.js";
 import { resolveMaileryMode } from "../../lib/mode.js";
 import { readableMessageText, renderReadableEmailDocument } from "../tui/format.js";
-import { getSelfHostedRuntimeStatus } from "../../lib/self-hosted-runtime.js";
-import {
-  addSelfHostedInboundLabel,
-  assertSelfHostedDirectRuntimeConfigured,
-  clearSelfHostedInboundEmails,
-  deleteSelfHostedInboundEmail,
-  getLatestSelfHostedInboundEmail,
-  getSelfHostedInboundEmail,
-  getSelfHostedInboxStatus,
-  getSelfHostedMailboxStatus,
-  listSelfHostedInboundEmailSummaries,
-  listSelfHostedSourceSummaries,
-  removeSelfHostedInboundLabel,
-  setSelfHostedInboundArchived,
-  setSelfHostedInboundRead,
-  setSelfHostedInboundStarred,
-  type ListSelfHostedInboundOpts,
-  type SelfHostedMailbox,
-} from "../../db/self-hosted-inbound.js";
 import type {
   Mailbox,
   MailboxSource,
@@ -91,24 +72,6 @@ function mailboxSourceFromOptions(opts: { source?: string; provider?: string; ad
   return source;
 }
 
-function selfHostedSourceOptions(source: MailboxSource | undefined): Pick<ListSelfHostedInboundOpts, "provider_id" | "sourceId" | "s3Bucket" | "legacy"> | undefined {
-  if (!source) return undefined;
-  return {
-    provider_id: source.providerId,
-    sourceId: source.sourceId,
-    s3Bucket: source.s3Bucket,
-    legacy: source.legacy,
-  };
-}
-
-function selfHostedRuntimeRequested(): boolean {
-  return getSelfHostedRuntimeStatus().enabled;
-}
-
-function requireSelfHostedRuntime(): void {
-  assertSelfHostedDirectRuntimeConfigured();
-}
-
 async function runAutoPull(opts: { s3?: boolean; limit?: number }) {
   const { autoPull } = await import("../tui/autopull.js");
   return autoPull(opts);
@@ -141,23 +104,6 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     const db = getDatabase();
     const fullId = resolveInboundEmailId(emailId);
     const email = getInboundEmail(fullId, db);
-    if (!email) handleError(new Error(`Email not found: ${emailId}`));
-    return {
-      email_id: email.id,
-      from: email.from_address,
-      subject: email.subject,
-      received_at: email.received_at,
-      links: extractEmailLinks({
-        text: email.text_body,
-        html: email.html_body,
-        includeNonWeb: opts?.all === true,
-      }),
-    };
-  }
-
-  async function getInboundLinksDirect(emailId: string, opts?: { all?: boolean }): Promise<InboundLinksResult> {
-    requireSelfHostedRuntime();
-    const email = await getSelfHostedInboundEmail(emailId);
     if (!email) handleError(new Error(`Email not found: ${emailId}`));
     return {
       email_id: email.id,
@@ -355,21 +301,6 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .action(async (address: string, opts: { from?: string; subject?: string; limit?: string; refresh?: boolean; since?: string }) => {
       try {
         const normalized = address.trim().toLowerCase();
-        if (selfHostedRuntimeRequested()) {
-          requireSelfHostedRuntime();
-          const email = await getLatestSelfHostedInboundEmail(normalized, {
-            since: opts.since,
-            from: opts.from,
-            subject: opts.subject,
-          });
-          if (!email) {
-            output({ email: null, address: normalized }, chalk.dim(`No email found for ${normalized}.`));
-            process.exitCode = 1;
-            return;
-          }
-          output(email, formatEmailDetail(email));
-          return;
-        }
         if (opts.refresh) await runAutoPull({ s3: true, limit: Math.max(1000, parsePositiveIntOption(opts.limit, 50)) });
         const db = getDatabase();
         const summary = listInboundEmailSummaries({
@@ -414,37 +345,6 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         const offset = parseNonNegativeIntOption(opts.offset);
         const toFilter = opts.to?.trim().toLowerCase();
         const folder = normalizeCliMailbox(opts.folder);
-        if (selfHostedRuntimeRequested()) {
-          requireSelfHostedRuntime();
-          const source = mailboxSourceFromOptions(opts);
-          const emails = await listSelfHostedInboundEmailSummaries({
-            provider_id: opts.provider ?? source?.providerId,
-            sourceId: source?.sourceId,
-            s3Bucket: source?.s3Bucket,
-            legacy: source?.legacy,
-            mailbox: folder as SelfHostedMailbox,
-            since: opts.since,
-            limit,
-            offset,
-            unread: opts.unread,
-            read: opts.read,
-            starred: opts.starred,
-            archived: opts.archived,
-            label: opts.label,
-            search: opts.search,
-            recipients: opts.address ? [opts.address] : source?.address ? [source.address] : toFilter?.includes("@") ? [toFilter] : undefined,
-            recipientDomains: opts.domain ? [opts.domain] : source?.domain ? [source.domain] : toFilter && !toFilter.includes("@") ? [toFilter] : undefined,
-          });
-
-          if (emails.length === 0) {
-            output([], chalk.dim("No emails found in self-hosted storage. Try `mailery refresh` or `mailery inbox wait <address>`."));
-            return;
-          }
-
-          output(emails, formatEmailList(emails));
-          return;
-        }
-
         const db = getDatabase();
         if (opts.source || folder !== "inbox" || opts.address || opts.domain) {
           const { listMailbox } = await import("../tui/data.js");
@@ -632,30 +532,6 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         const offset = parseNonNegativeIntOption(opts.offset);
         const folder = normalizeCliMailbox(opts.folder);
 
-        if (selfHostedRuntimeRequested()) {
-          requireSelfHostedRuntime();
-          const source = mailboxSourceFromOptions(opts);
-          const emails = await listSelfHostedInboundEmailSummaries({
-            provider_id: opts.provider ?? source?.providerId,
-            sourceId: source?.sourceId,
-            s3Bucket: source?.s3Bucket,
-            legacy: source?.legacy,
-            mailbox: folder as SelfHostedMailbox,
-            label: opts.label,
-            limit,
-            offset,
-            search: query,
-            recipients: opts.address ? [opts.address] : source?.address ? [source.address] : undefined,
-            recipientDomains: opts.domain ? [opts.domain] : source?.domain ? [source.domain] : undefined,
-          });
-          if (emails.length === 0) {
-            console.log(chalk.dim(`No results for "${query}".`));
-            return;
-          }
-          output(emails, formatEmailList(emails, `Search ${folder}: "${query}"`));
-          return;
-        }
-
         const db = getDatabase();
 
         if (opts.source || opts.folder !== "inbox" || opts.address || opts.domain || opts.label) {
@@ -697,15 +573,6 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .option("--limit <n>", "Max sources", "100")
     .action(async (opts: { search?: string; limit?: string }) => {
       try {
-        if (selfHostedRuntimeRequested()) {
-          requireSelfHostedRuntime();
-          const sources = await listSelfHostedSourceSummaries({
-            search: opts.search,
-            limit: parsePositiveIntOption(opts.limit, 100),
-          });
-          output(sources, formatMailboxSources(sources));
-          return;
-        }
         const { listMailboxSources } = await import("../tui/data.js");
         const sources = listMailboxSources({
           search: opts.search,
@@ -727,12 +594,6 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .action(async (opts: { source?: string; provider?: string; address?: string; domain?: string }) => {
       try {
         const source = mailboxSourceFromOptions(opts);
-        if (selfHostedRuntimeRequested()) {
-          requireSelfHostedRuntime();
-          const status = await getSelfHostedMailboxStatus(selfHostedSourceOptions(source));
-          output({ source: source ?? null, ...status }, formatMailboxStatus(status));
-          return;
-        }
         const { listMailboxStatus } = await import("../tui/data.js");
         const status = listMailboxStatus({ source });
         output({ source: source ?? null, ...status }, formatMailboxStatus(status));
@@ -746,12 +607,6 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .description("Show sync status for all ingestion sources")
     .action(async () => {
       try {
-        if (selfHostedRuntimeRequested()) {
-          requireSelfHostedRuntime();
-          const status = await getSelfHostedInboxStatus();
-          output(status, formatSelfHostedInboxSyncStatus(status));
-          return;
-        }
         const { getEmailSystemStatus } = await import("../../lib/agent-context.js");
         const status = getEmailSystemStatus();
         output(status.inbox, formatInboxSyncStatus(status));
@@ -765,12 +620,6 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .description("Show source-aware mailbox sync status")
     .action(async () => {
       try {
-        if (selfHostedRuntimeRequested()) {
-          requireSelfHostedRuntime();
-          const status = await getSelfHostedInboxStatus();
-          output(status, formatSelfHostedInboxSyncStatus(status));
-          return;
-        }
         const { getEmailSystemStatus } = await import("../../lib/agent-context.js");
         const status = getEmailSystemStatus();
         output({ inbox: status.inbox, mailboxes: status.mailboxes, sources: status.sources, cli_equivalents: status.cli_equivalents }, formatInboxSyncStatus(status));
@@ -845,18 +694,6 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .option("--keep-unread", "Do not mark the email as read")
     .action(async (id: string, opts: { keepUnread?: boolean }) => {
       try {
-        if (selfHostedRuntimeRequested()) {
-          requireSelfHostedRuntime();
-          let email = await getSelfHostedInboundEmail(id);
-          if (!email) {
-            console.error(chalk.red(`Email not found: ${id}`));
-            process.exit(1);
-          }
-          if (!opts.keepUnread && !email.is_read) email = await setSelfHostedInboundRead(email.id, true);
-          output(email, formatEmailDetail(email));
-          return;
-        }
-
         const db = getDatabase();
         const fullId = resolveInboundEmailId(id);
         let email = getInboundEmail(fullId, db);
@@ -878,9 +715,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .option("--all", "Include non-web links such as mailto: and tel:")
     .action(async (emailId: string, opts: { all?: boolean }) => {
       try {
-        const result = selfHostedRuntimeRequested()
-          ? await getInboundLinksDirect(emailId, opts)
-          : getInboundLinks(emailId, opts);
+        const result = getInboundLinks(emailId, opts);
         output(result, formatInboundLinks(result));
       } catch (e) {
         handleError(e);
@@ -893,9 +728,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .option("--all", "Include non-web links such as mailto: and tel:")
     .action(async (emailId: string, opts: { all?: boolean }) => {
       try {
-        const result = selfHostedRuntimeRequested()
-          ? await getInboundLinksDirect(emailId, opts)
-          : getInboundLinks(emailId, opts);
+        const result = getInboundLinks(emailId, opts);
         output(result, formatInboundLinks(result));
       } catch (e) {
         handleError(e);
@@ -920,12 +753,6 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .option("--unread", "Mark as unread instead")
     .action(async (emailId: string, opts: { unread?: boolean }) => {
       try {
-        if (selfHostedRuntimeRequested()) {
-          requireSelfHostedRuntime();
-          const e = await setSelfHostedInboundRead(emailId, !opts.unread);
-          output(e, chalk.green(`✓ Marked ${opts.unread ? "unread" : "read"}: ${e.subject.slice(0, 40)}`));
-          return;
-        }
         const id = requireLocal(emailId);
         const e = setInboundReadSummary(id, !opts.unread, getDatabase());
         output(e, chalk.green(`✓ Marked ${opts.unread ? "unread" : "read"}: ${e.subject.slice(0, 40)}`));
@@ -938,12 +765,6 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .option("--undo", "Unarchive (restore to inbox) instead")
     .action(async (emailId: string, opts: { undo?: boolean }) => {
       try {
-        if (selfHostedRuntimeRequested()) {
-          requireSelfHostedRuntime();
-          const e = await setSelfHostedInboundArchived(emailId, !opts.undo);
-          output(e, chalk.green(`✓ ${opts.undo ? "Unarchived" : "Archived"}: ${e.subject.slice(0, 40)}`));
-          return;
-        }
         const id = requireLocal(emailId);
         const e = setInboundArchivedSummary(id, !opts.undo, getDatabase());
         output(e, chalk.green(`✓ ${opts.undo ? "Unarchived" : "Archived"}: ${e.subject.slice(0, 40)}`));
@@ -956,12 +777,6 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .option("--undo", "Unstar instead")
     .action(async (emailId: string, opts: { undo?: boolean }) => {
       try {
-        if (selfHostedRuntimeRequested()) {
-          requireSelfHostedRuntime();
-          const e = await setSelfHostedInboundStarred(emailId, !opts.undo);
-          output(e, chalk[opts.undo ? "green" : "yellow"](`${opts.undo ? "✓ Unstarred" : "★ Starred"}: ${e.subject.slice(0, 40)}`));
-          return;
-        }
         const id = requireLocal(emailId);
         const e = setInboundStarredSummary(id, !opts.undo, getDatabase());
         output(e, chalk[opts.undo ? "green" : "yellow"](`${opts.undo ? "✓ Unstarred" : "★ Starred"}: ${e.subject.slice(0, 40)}`));
@@ -974,14 +789,6 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .option("--remove", "Remove the label instead of adding")
     .action(async (emailId: string, label: string, opts: { remove?: boolean }) => {
       try {
-        if (selfHostedRuntimeRequested()) {
-          requireSelfHostedRuntime();
-          const e = opts.remove
-            ? await removeSelfHostedInboundLabel(emailId, label)
-            : await addSelfHostedInboundLabel(emailId, label);
-          output(e, chalk.green(`✓ ${opts.remove ? "Removed" : "Added"} label "${label}": ${e.label_ids.join(", ") || "(none)"}`));
-          return;
-        }
         const id = requireLocal(emailId);
         const e = opts.remove ? removeInboundLabelSummary(id, label, getDatabase()) : addInboundLabelSummary(id, label, getDatabase());
         output(e, chalk.green(`✓ ${opts.remove ? "Removed" : "Added"} label "${label}": ${e.label_ids.join(", ") || "(none)"}`));
@@ -995,22 +802,6 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .option("--filename <name>", "Filter by filename")
     .action(async (emailId: string, opts: { filename?: string }) => {
       try {
-        if (selfHostedRuntimeRequested()) {
-          requireSelfHostedRuntime();
-          const email = await getSelfHostedInboundEmail(emailId);
-          if (!email) {
-            console.error(chalk.red(`Email not found: ${emailId}`));
-            process.exit(1);
-          }
-          const details = mergeAttachmentDetails(email.attachments, email.attachment_paths ?? []);
-          const filtered = opts.filename ? details.filter((p) => p.filename === opts.filename) : details;
-          if (filtered.length === 0) {
-            output([], chalk.dim("No attachments found for this email."));
-            return;
-          }
-          output(filtered, formatAttachmentDetailList(email.id, filtered));
-          return;
-        }
         const db = getDatabase();
         const fullId = resolveInboundEmailId(emailId);
         const email = getInboundEmail(fullId, db);
@@ -1037,18 +828,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .option("--yes", "Skip confirmation prompt")
     .action(async (id: string, opts: { yes?: boolean }) => {
       try {
-        await confirmDestructiveAction(`Delete ${selfHostedRuntimeRequested() ? "self-hosted" : "local"} inbox email ${id}?`, opts.yes);
-        if (selfHostedRuntimeRequested()) {
-          requireSelfHostedRuntime();
-          const deleted = await deleteSelfHostedInboundEmail(id);
-          if (deleted) {
-            console.log(chalk.green(`✓ Deleted email ${id.slice(0, 8)}`));
-          } else {
-            console.error(chalk.red(`Email not found: ${id}`));
-            process.exit(1);
-          }
-          return;
-        }
+        await confirmDestructiveAction(`Delete local inbox email ${id}?`, opts.yes);
         const db = getDatabase();
         const deleted = deleteInboundEmail(id, db);
         if (deleted) {
@@ -1071,13 +851,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .action(async (opts: { provider?: string; yes?: boolean }) => {
       try {
         const target = opts.provider ? `for provider ${opts.provider}` : "for all providers";
-        await confirmDestructiveAction(`Clear ${selfHostedRuntimeRequested() ? "self-hosted" : "local"} inbox emails ${target}?`, opts.yes);
-        if (selfHostedRuntimeRequested()) {
-          requireSelfHostedRuntime();
-          const deleted = await clearSelfHostedInboundEmails(opts.provider);
-          console.log(chalk.green(`✓ Cleared ${deleted} email(s)`));
-          return;
-        }
+        await confirmDestructiveAction(`Clear local inbox emails ${target}?`, opts.yes);
         const db = getDatabase();
         const deleted = clearInboundEmails(opts.provider, db);
         console.log(chalk.green(`✓ Cleared ${deleted} email(s)`));
@@ -1351,24 +1125,6 @@ function formatInboxSyncStatus(status: EmailSystemStatus): string {
   lines.push(`  Realtime:    ${status.inbox.realtime.queue_configured ? chalk.green("configured") : chalk.yellow("not configured")}`);
   if (status.inbox.realtime.last_poll_at) lines.push(`  Last poll:   ${chalk.green(status.inbox.realtime.last_poll_at)}`);
   if (status.inbox.realtime.last_error) lines.push(`  Last error:  ${chalk.red(status.inbox.realtime.last_error)}`);
-  lines.push(chalk.dim("\n  Pull now: mailery refresh"));
-  lines.push(chalk.dim("  Watch realtime: mailery inbox watch --all-buckets"));
-  lines.push("");
-  return lines.join("\n");
-}
-
-function formatSelfHostedInboxSyncStatus(status: Awaited<ReturnType<typeof getSelfHostedInboxStatus>>): string {
-  const lines: string[] = [chalk.bold("\nInbox sync status:")];
-  lines.push(`  Source:      ${chalk.green("self-hosted PostgreSQL")}`);
-  lines.push(`  Inbox:       ${status.total} total, ${status.unread} unread`);
-  lines.push(`  Folders:     ${status.mailboxes.counts.inbox} inbox, ${status.mailboxes.counts.sent} sent, ${status.mailboxes.counts.archived} archived`);
-  lines.push(`  Latest mail: ${status.latest_received_at ? chalk.green(status.latest_received_at) : chalk.dim("never")}`);
-  const countedSources = status.sources.filter((source) => source.kind !== "all");
-  lines.push(`  Sources:     ${countedSources.length} ingestion source(s)`);
-  for (const source of countedSources.slice(0, 5)) {
-    const badges = source.badges.length ? chalk.dim(` [${source.badges.join(", ")}]`) : "";
-    lines.push(`    - ${source.label}${badges}: ${source.total} total, ${source.unread} unread`);
-  }
   lines.push(chalk.dim("\n  Pull now: mailery refresh"));
   lines.push(chalk.dim("  Watch realtime: mailery inbox watch --all-buckets"));
   lines.push("");

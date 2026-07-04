@@ -17,14 +17,10 @@ import {
   type MailboxSourceSummary,
   type MailboxStatusSummary,
 } from "../cli/tui/data.js";
-import type { PgAdapterAsync } from "../db/remote-storage.js";
-import type { SelfHostedInboxStatus } from "../db/self-hosted-inbound.js";
 
 const USABLE_FROM_LIMIT = 25;
 const DOMAIN_READINESS_LIMIT = 25;
 const SOURCE_STATUS_LIMIT = 50;
-
-type SelfHostedStatusRemote = Pick<PgAdapterAsync, "all" | "run" | "close">;
 
 export interface EmailSystemStatus {
   generated_at: string;
@@ -364,48 +360,10 @@ export function getEmailSystemStatus(db: Database = getDatabase()): EmailSystemS
   };
 }
 
-async function selfHostedRuntimeEnabled(remote: SelfHostedStatusRemote | undefined): Promise<boolean> {
-  if (remote) return true;
-  const { getSelfHostedRuntimeStatus } = await import("./self-hosted-runtime.js");
-  return getSelfHostedRuntimeStatus().enabled;
-}
-
-function patchSelfHostedInboxStatus(
-  status: EmailSystemStatus,
-  remote: SelfHostedInboxStatus,
-): EmailSystemStatus {
-  const countedSources = remote.sources.filter((source) => source.kind !== "all");
-  return {
-    ...status,
-    inbox: {
-      ...status.inbox,
-      total: remote.total,
-      unread: remote.unread,
-      latest_received_at: remote.latest_received_at,
-    },
-    mailboxes: remote.mailboxes,
-    sources: {
-      ...status.sources,
-      total: countedSources.length,
-      active: countedSources.filter((source) => source.badges.includes("active") || source.badges.includes("configured")).length,
-      legacy: countedSources.filter((source) => source.badges.includes("legacy")).length,
-      orphaned: countedSources.filter((source) => source.badges.includes("orphaned")).length,
-      items: remote.sources.slice(0, status.sources.limit),
-      truncated: remote.sources.length > status.sources.limit,
-    },
-  };
-}
-
 export async function getEmailSystemStatusForRuntime(
   db: Database = getDatabase(),
-  remote?: SelfHostedStatusRemote,
 ): Promise<EmailSystemStatus> {
-  const status = getEmailSystemStatus(db);
-  if (!await selfHostedRuntimeEnabled(remote)) return status;
-
-  const { assertSelfHostedDirectRuntimeConfigured, getSelfHostedInboxStatus } = await import("../db/self-hosted-inbound.js");
-  if (!remote) assertSelfHostedDirectRuntimeConfigured();
-  return patchSelfHostedInboxStatus(status, await getSelfHostedInboxStatus(remote));
+  return getEmailSystemStatus(db);
 }
 
 export function formatEmailSystemStatus(status: EmailSystemStatus): string {
@@ -504,9 +462,8 @@ export function getAgentContext(db: Database = getDatabase()): Record<string, un
 
 export async function getAgentContextForRuntime(
   db: Database = getDatabase(),
-  remote?: SelfHostedStatusRemote,
 ): Promise<Record<string, unknown>> {
-  return buildAgentContext(await getEmailSystemStatusForRuntime(db, remote));
+  return buildAgentContext(await getEmailSystemStatusForRuntime(db));
 }
 
 export function getNextEmailAction(goal?: string, db: Database = getDatabase()): Record<string, unknown> {

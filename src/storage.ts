@@ -1,4 +1,9 @@
-export { PgAdapterAsync } from "./db/remote-storage.js";
+// Public `@hasna/mailery/storage` entry.
+//
+// The self-hosted PostgreSQL/S3 mirror surface (remote-storage, storage-sync,
+// self-hosted-runtime) has been removed: the client has exactly two modes,
+// `local` (SQLite) and `cloud` (API client, URL-configurable). This entry now
+// only re-exports the still-public Mailery mode helpers.
 export {
   HASNA_EMAILS_MODE_ENV,
   LEGACY_STORAGE_MODE_ENV,
@@ -11,62 +16,9 @@ export {
   normalizeMaileryMode,
   resolveMaileryMode,
 } from "./lib/mode.js";
-export {
-  SELF_HOSTED_RUNTIME_TABLES,
-  SELF_HOSTED_S3_MATERIALIZATION_TABLES,
-  checkSelfHostedRuntimeReadiness,
-  cleanupOwnedRuntimeCache,
-  describeSelfHostedRuntime,
-  flushSelfHostedRuntimeCache,
-  getSelfHostedRuntimeStatus,
-  migrateLocalToSelfHosted,
-  prepareSelfHostedRuntimeCache,
-  startSelfHostedRuntimeCache,
-  stopSelfHostedRuntimeCache,
-} from "./lib/self-hosted-runtime.js";
-export {
-  EMAILS_STORAGE_ENV,
-  EMAILS_STORAGE_FALLBACK_ENV,
-  EMAILS_STORAGE_MODE_ENV,
-  EMAILS_STORAGE_MODE_FALLBACK_ENV,
-  EMAILS_STORAGE_TABLES,
-  STORAGE_DATABASE_ENV,
-  STORAGE_MODE_ENV,
-  STORAGE_SYNC_BATCH_SIZE,
-  STORAGE_TABLES,
-  getStorageDatabaseEnv,
-  getStorageDatabaseEnvName,
-  getStorageDatabaseUrl,
-  getStorageMode,
-  getStoragePg,
-  getStorageStatus,
-  getSyncMetaAll,
-  parseStorageTables,
-  resolveTables,
-  runStorageMigrations,
-  storagePull,
-  storagePush,
-  storageSync,
-} from "./db/storage-sync.js";
-export type {
-  SelfHostedRuntimeHooks,
-  SelfHostedRuntimeOptions,
-  SelfHostedRuntimeResult,
-  SelfHostedRuntimeStatus,
-  SelfHostedReadinessCheck,
-  SelfHostedReadinessReport,
-} from "./lib/self-hosted-runtime.js";
 export type {
   MaileryMode,
   MaileryModeLabel,
   MaileryModeResolution,
   MaileryModeSource,
 } from "./lib/mode.js";
-export type {
-  StorageEnv,
-  StorageMode,
-  StorageStatus,
-  StorageSyncOptions,
-  SyncMeta,
-  SyncResult,
-} from "./db/storage-sync.js";

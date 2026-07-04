@@ -1,7 +1,7 @@
 import { loadConfig, saveConfig } from "./config.js";
 
-export type MaileryMode = "local" | "self_hosted" | "cloud";
-export type MaileryModeLabel = "Local" | "Self-hosted" | "Mailery Cloud";
+export type MaileryMode = "local" | "cloud";
+export type MaileryModeLabel = "Local" | "Mailery Cloud";
 
 export const MAILERY_MODE_ENV = "MAILERY_MODE";
 export const HASNA_EMAILS_MODE_ENV = "HASNA_EMAILS_MODE";
@@ -42,20 +42,23 @@ export function labelForMaileryMode(mode: MaileryMode): MaileryModeLabel {
   switch (mode) {
     case "local":
       return "Local";
-    case "self_hosted":
-      return "Self-hosted";
     case "cloud":
       return "Mailery Cloud";
   }
 }
 
+// There are exactly two modes: `local` (SQLite) and `cloud` (API client — a
+// self-hosted server is just `cloud` pointed at a private base URL). The legacy
+// `self_hosted` / `remote` / `hybrid` values are accepted as deprecated aliases
+// for `cloud`.
 export function normalizeMaileryMode(value: string): { mode: MaileryMode; deprecatedAlias: string | null } {
   const normalized = value.trim().toLowerCase().replace(/-/g, "_");
   if (normalized === "local") return { mode: "local", deprecatedAlias: null };
-  if (normalized === "self_hosted") return { mode: "self_hosted", deprecatedAlias: null };
   if (normalized === "cloud" || normalized === "mailery_cloud") return { mode: "cloud", deprecatedAlias: null };
-  if (normalized === "remote" || normalized === "hybrid") return { mode: "self_hosted", deprecatedAlias: normalized };
-  throw new Error(`Unknown Mailery mode: ${value}. Use local, self_hosted, or cloud.`);
+  if (normalized === "self_hosted" || normalized === "remote" || normalized === "hybrid") {
+    return { mode: "cloud", deprecatedAlias: normalized };
+  }
+  throw new Error(`Unknown Mailery mode: ${value}. Use local or cloud.`);
 }
 
 function findConfiguredMode(config: Record<string, unknown>): { key: string; value: string } | null {
@@ -67,26 +70,26 @@ function findConfiguredMode(config: Record<string, unknown>): { key: string; val
   return null;
 }
 
-function warningFor(source: MaileryModeSource, deprecatedAlias: string | null, migratedConfig: boolean, mode?: MaileryMode): string | null {
+function warningFor(source: MaileryModeSource, deprecatedAlias: string | null, migratedConfig: boolean, mode: MaileryMode): string | null {
   if (!deprecatedAlias && !migratedConfig) return null;
   const oldValue = deprecatedAlias ?? source.value ?? "";
   if (source.kind === "config") {
     if (migratedConfig && deprecatedAlias) {
-      return `Migrated deprecated Mailery mode '${oldValue}' from config to '${MAILERY_MODE_CONFIG_KEY}=self_hosted'.`;
+      return `Migrated deprecated Mailery mode '${oldValue}' from config to '${MAILERY_MODE_CONFIG_KEY}=${mode}'.`;
     }
     if (migratedConfig) {
-      return `Migrated deprecated Mailery mode config key '${source.name}' to '${MAILERY_MODE_CONFIG_KEY}=${mode ?? "self_hosted"}'.`;
+      return `Migrated deprecated Mailery mode config key '${source.name}' to '${MAILERY_MODE_CONFIG_KEY}=${mode}'.`;
     }
-    return `Deprecated Mailery mode '${oldValue}' in config is treated as 'self_hosted'.`;
+    return `Deprecated Mailery mode '${oldValue}' in config is treated as '${mode}'.`;
   }
   if (source.kind === "env") {
-    return `Deprecated Mailery mode '${oldValue}' from ${source.name} is treated as 'self_hosted'. Set ${MAILERY_MODE_ENV}=self_hosted instead.`;
+    return `Deprecated Mailery mode '${oldValue}' from ${source.name} is treated as '${mode}'. Set ${MAILERY_MODE_ENV}=${mode} instead.`;
   }
   return null;
 }
 
 function defaultMode(): MaileryMode {
-  return readEnv("HASNA_EMAILS_DATABASE_URL") || readEnv("EMAILS_DATABASE_URL") ? "self_hosted" : "local";
+  return "local";
 }
 
 export function resolveMaileryMode(opts: ResolveMaileryModeOptions = {}): MaileryModeResolution {

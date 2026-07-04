@@ -126,7 +126,6 @@ function resolveMode(mode?: MaileryModeResolution): MaileryModeResolution {
 }
 
 export function defaultDomainSourceOfTruth(mode: MaileryModeResolution["mode"]): DomainSourceOfTruth {
-  if (mode === "self_hosted") return "postgres";
   if (mode === "cloud") return "cloud";
   return "local";
 }

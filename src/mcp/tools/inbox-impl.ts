@@ -20,26 +20,6 @@ import {
   type Mailbox,
   type MailboxSource,
 } from "../../cli/tui/data.js";
-import { getSelfHostedRuntimeStatus } from "../../lib/self-hosted-runtime.js";
-import {
-  addSelfHostedInboundLabel,
-  assertSelfHostedDirectRuntimeConfigured,
-  clearSelfHostedInboundEmails,
-  getLatestSelfHostedInboundEmail,
-  getSelfHostedInboundAttachmentPaths,
-  getSelfHostedInboundEmail,
-  getSelfHostedInboxStatus,
-  getSelfHostedMailboxStatus,
-  listSelfHostedInboundEmailSummaries,
-  listSelfHostedSourceSummaries,
-  listSelfHostedVerificationCodeCandidates,
-  removeSelfHostedInboundLabel,
-  setSelfHostedInboundArchived,
-  setSelfHostedInboundRead,
-  setSelfHostedInboundStarred,
-  type ListSelfHostedInboundOpts,
-  type SelfHostedMailbox,
-} from "../../db/self-hosted-inbound.js";
 
 const DEFAULT_INBOUND_LIST_LIMIT = 50;
 const DEFAULT_INBOUND_SEARCH_LIMIT = 20;
@@ -86,37 +66,12 @@ function mailboxSourceCliFlags(source: MailboxSource | undefined): string {
   return "";
 }
 
-function selfHostedRuntimeRequested(): boolean {
-  return getSelfHostedRuntimeStatus().enabled;
-}
-
-function requireSelfHostedRuntime(): void {
-  assertSelfHostedDirectRuntimeConfigured();
-}
-
-function selfHostedSourceOptions(source: MailboxSource | undefined): Pick<ListSelfHostedInboundOpts, "provider_id" | "sourceId" | "s3Bucket" | "legacy"> | undefined {
-  if (!source) return undefined;
-  let providerId = source.providerId;
-  let s3Bucket = source.s3Bucket;
-  let legacy = source.legacy;
-  const sourceId = source.sourceId;
-  if (sourceId === "legacy") legacy = true;
-  else if (sourceId?.startsWith("provider:")) providerId = sourceId.slice("provider:".length);
-  else if (sourceId?.startsWith("orphaned:")) providerId = sourceId.slice("orphaned:".length);
-  else if (sourceId?.startsWith("s3:")) s3Bucket = decodeURIComponent(sourceId.slice("s3:".length));
-  return { provider_id: providerId, sourceId, s3Bucket, legacy };
-}
-
 export function registerInboxTools(server: McpServer): void {
   // ─── INBOUND EMAILS ─────────────────────────────────────────────────────────
   const getLatestInboundEmailForAddress = async (
     address: string,
     filters: { since?: string; from?: string; subject?: string },
   ) => {
-    if (selfHostedRuntimeRequested()) {
-      requireSelfHostedRuntime();
-      return await getLatestSelfHostedInboundEmail(address, filters);
-    }
     const db = getDatabase();
     return listInboundEmailSummaries({
       recipients: [address],
@@ -131,11 +86,6 @@ export function registerInboxTools(server: McpServer): void {
     address: string,
     filters: { since?: string; from?: string; subject?: string; limit?: number },
   ) => {
-    if (selfHostedRuntimeRequested()) {
-      requireSelfHostedRuntime();
-      const candidates = await listSelfHostedVerificationCodeCandidates(address, filters);
-      return findVerificationCode(candidates, filters);
-    }
     const candidates = listVerificationCodeCandidates(address, filters);
     return findVerificationCode(candidates, filters);
   };
@@ -152,14 +102,6 @@ export function registerInboxTools(server: McpServer): void {
     async ({ source_id, provider_id, address, domain }) => {
       try {
         const source = mailboxSourceInput({ source_id, provider_id, address, domain });
-        if (selfHostedRuntimeRequested()) {
-          requireSelfHostedRuntime();
-          return jsonText({
-            source: source ?? null,
-            ...await getSelfHostedMailboxStatus(selfHostedSourceOptions(source)),
-            cli_equivalent: `mailery inbox mailboxes${mailboxSourceCliFlags(source)} --json`,
-          });
-        }
         return jsonText({
           source: source ?? null,
           ...listMailboxStatus({ source }),
@@ -180,14 +122,6 @@ export function registerInboxTools(server: McpServer): void {
     },
     async ({ search, limit }) => {
       try {
-        if (selfHostedRuntimeRequested()) {
-          requireSelfHostedRuntime();
-          const sources = await listSelfHostedSourceSummaries({ search, limit: inboxLimit(limit, 100) });
-          return jsonText({
-            sources,
-            cli_equivalent: "mailery inbox sources --json",
-          });
-        }
         const sources = listMailboxSources({ search, limit: inboxLimit(limit, 100) });
         return jsonText({
           sources,
@@ -219,30 +153,6 @@ export function registerInboxTools(server: McpServer): void {
         const pageOffset = safeOffset(offset);
         const source = mailboxSourceInput({ source_id, provider_id, address, domain });
         const selectedMailbox = mailboxFromInput(mailbox);
-        if (selfHostedRuntimeRequested()) {
-          requireSelfHostedRuntime();
-          const rows = await listSelfHostedInboundEmailSummaries({
-            ...selfHostedSourceOptions(source),
-            mailbox: selectedMailbox as SelfHostedMailbox,
-            label,
-            search: query,
-            recipients: source?.address ? [source.address] : undefined,
-            recipientDomains: source?.domain ? [source.domain] : undefined,
-            limit: pageLimit + 1,
-            offset: pageOffset,
-          });
-          return jsonText({
-            mailbox: selectedMailbox,
-            folder: selectedMailbox,
-            source: source ?? null,
-            query,
-            items: rows.slice(0, pageLimit),
-            limit: pageLimit,
-            offset: pageOffset,
-            truncated: rows.length > pageLimit,
-            cli_equivalent: `mailery inbox search ${query} --folder ${selectedMailbox}${mailboxSourceCliFlags(source)} --json`,
-          });
-        }
         const rows = searchMailbox(query, {
           mailbox: selectedMailbox,
           source,
@@ -286,20 +196,7 @@ export function registerInboxTools(server: McpServer): void {
     try {
       const pageLimit = inboxLimit(limit, DEFAULT_INBOUND_LIST_LIMIT);
       const pageOffset = safeOffset(offset);
-      const emails = selfHostedRuntimeRequested()
-        ? await (requireSelfHostedRuntime(), listSelfHostedInboundEmailSummaries({
-          provider_id,
-          since,
-          limit: pageLimit + 1,
-          offset: pageOffset,
-          unread,
-          read,
-          starred,
-          archived,
-          label,
-          search,
-        }))
-        : listInboundEmailSummaries({
+      const emails = listInboundEmailSummaries({
         provider_id,
         since,
         limit: pageLimit + 1,
@@ -553,9 +450,7 @@ export function registerInboxTools(server: McpServer): void {
   },
   async ({ id }) => {
     try {
-      const email = selfHostedRuntimeRequested()
-        ? await (requireSelfHostedRuntime(), getSelfHostedInboundEmail(id))
-        : getInboundEmail(resolveId("inbound_emails", id));
+      const email = getInboundEmail(resolveId("inbound_emails", id));
       if (!email) throw new Error(`Inbound email not found: ${id}`);
       return { content: [{ type: "text", text: JSON.stringify(email, null, 2) }] };
     } catch (e) {
@@ -573,9 +468,7 @@ export function registerInboxTools(server: McpServer): void {
   },
   async ({ id, include_non_web }) => {
     try {
-      const email = selfHostedRuntimeRequested()
-        ? await (requireSelfHostedRuntime(), getSelfHostedInboundEmail(id))
-        : getInboundEmail(resolveId("inbound_emails", id));
+      const email = getInboundEmail(resolveId("inbound_emails", id));
       if (!email) throw new Error(`Inbound email not found: ${id}`);
       return {
         content: [{ type: "text", text: JSON.stringify({
@@ -605,9 +498,7 @@ export function registerInboxTools(server: McpServer): void {
   },
   async ({ provider_id }) => {
     try {
-      const count = selfHostedRuntimeRequested()
-        ? await (requireSelfHostedRuntime(), clearSelfHostedInboundEmails(provider_id))
-        : clearInboundEmails(provider_id);
+      const count = clearInboundEmails(provider_id);
       return { content: [{ type: "text", text: `Cleared ${count} inbound email(s)` }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
@@ -621,9 +512,7 @@ export function registerInboxTools(server: McpServer): void {
   { email_id: z.string(), unread: z.boolean().optional().describe("Mark unread instead") },
   async ({ email_id, unread }) => {
     try {
-      const e = selfHostedRuntimeRequested()
-        ? await (requireSelfHostedRuntime(), setSelfHostedInboundRead(email_id, !unread))
-        : setInboundReadSummary(resolveId("inbound_emails", email_id), !unread);
+      const e = setInboundReadSummary(resolveId("inbound_emails", email_id), !unread);
       return { content: [{ type: "text", text: JSON.stringify(e, null, 2) }] };
     } catch (e) { return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true }; }
   },
@@ -635,9 +524,7 @@ export function registerInboxTools(server: McpServer): void {
   { email_id: z.string(), unarchive: z.boolean().optional().describe("Restore to inbox instead") },
   async ({ email_id, unarchive }) => {
     try {
-      const e = selfHostedRuntimeRequested()
-        ? await (requireSelfHostedRuntime(), setSelfHostedInboundArchived(email_id, !unarchive))
-        : setInboundArchivedSummary(resolveId("inbound_emails", email_id), !unarchive);
+      const e = setInboundArchivedSummary(resolveId("inbound_emails", email_id), !unarchive);
       return { content: [{ type: "text", text: JSON.stringify(e, null, 2) }] };
     } catch (e) { return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true }; }
   },
@@ -649,9 +536,7 @@ export function registerInboxTools(server: McpServer): void {
   { email_id: z.string(), unstar: z.boolean().optional().describe("Remove the star instead") },
   async ({ email_id, unstar }) => {
     try {
-      const e = selfHostedRuntimeRequested()
-        ? await (requireSelfHostedRuntime(), setSelfHostedInboundStarred(email_id, !unstar))
-        : setInboundStarredSummary(resolveId("inbound_emails", email_id), !unstar);
+      const e = setInboundStarredSummary(resolveId("inbound_emails", email_id), !unstar);
       return { content: [{ type: "text", text: JSON.stringify(e, null, 2) }] };
     } catch (e) { return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true }; }
   },
@@ -663,16 +548,9 @@ export function registerInboxTools(server: McpServer): void {
   { email_id: z.string(), label: z.string(), remove: z.boolean().optional().describe("Remove the label instead of adding") },
   async ({ email_id, label, remove }) => {
     try {
-      const e = selfHostedRuntimeRequested()
-        ? await (
-          requireSelfHostedRuntime(),
-          remove
-            ? removeSelfHostedInboundLabel(email_id, label)
-            : addSelfHostedInboundLabel(email_id, label)
-        )
-        : remove
-          ? removeInboundLabelSummary(resolveId("inbound_emails", email_id), label)
-          : addInboundLabelSummary(resolveId("inbound_emails", email_id), label);
+      const e = remove
+        ? removeInboundLabelSummary(resolveId("inbound_emails", email_id), label)
+        : addInboundLabelSummary(resolveId("inbound_emails", email_id), label);
       return { content: [{ type: "text", text: JSON.stringify(e, null, 2) }] };
     } catch (e) { return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true }; }
   },
@@ -687,9 +565,7 @@ export function registerInboxTools(server: McpServer): void {
   },
   async ({ email_id, filename }) => {
     try {
-      const paths = selfHostedRuntimeRequested()
-        ? await (requireSelfHostedRuntime(), getSelfHostedInboundAttachmentPaths(email_id))
-        : getInboundAttachmentPaths(resolveId("inbound_emails", email_id));
+      const paths = getInboundAttachmentPaths(resolveId("inbound_emails", email_id));
       if (!paths) return { content: [{ type: "text", text: `Email not found: ${email_id}` }], isError: true };
       const filtered = filename ? paths.filter((p) => p.filename === filename) : paths;
       return { content: [{ type: "text", text: JSON.stringify(filtered, null, 2) }] };
@@ -712,14 +588,7 @@ export function registerInboxTools(server: McpServer): void {
     try {
       const pageLimit = inboxLimit(limit, DEFAULT_INBOUND_SEARCH_LIMIT);
       const pageOffset = safeOffset(offset);
-      const emails = selfHostedRuntimeRequested()
-        ? await (requireSelfHostedRuntime(), listSelfHostedInboundEmailSummaries({
-          provider_id,
-          limit: pageLimit + 1,
-          offset: pageOffset,
-          search: query,
-        }))
-        : listInboundEmailSummaries({
+      const emails = listInboundEmailSummaries({
         provider_id,
         limit: pageLimit + 1,
         offset: pageOffset,
@@ -748,20 +617,6 @@ export function registerInboxTools(server: McpServer): void {
     {},
     async () => {
       try {
-        if (selfHostedRuntimeRequested()) {
-          requireSelfHostedRuntime();
-          const status = await getSelfHostedInboxStatus();
-          return { content: [{ type: "text", text: JSON.stringify({
-            inbox: {
-              total: status.total,
-              unread: status.unread,
-              latest_received_at: status.latest_received_at,
-            },
-            mailboxes: status.mailboxes,
-            sources: status.sources,
-            cli_equivalent: "mailery inbox sync-status --json",
-          }, null, 2) }] };
-        }
         const { getEmailSystemStatus } = await import("../../lib/agent-context.js");
         const status = getEmailSystemStatus();
         return { content: [{ type: "text", text: JSON.stringify({

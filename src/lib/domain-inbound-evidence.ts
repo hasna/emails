@@ -17,8 +17,8 @@ export function listDomainLiveS3Sources(domain: Domain, sources: S3MailSource[] 
 }
 
 export function domainInboundReadinessSignals(domain: Domain, mode: MaileryModeResolution): DomainReadinessSignals {
-  const selfHostedSource = domain.source_of_truth === "postgres" || (mode.mode === "self_hosted" && domain.source_of_truth !== "local" && domain.source_of_truth !== "cloud");
-  if (!selfHostedSource) {
+  const postgresSource = domain.source_of_truth === "postgres";
+  if (!postgresSource) {
     return {
       mode: mode.mode,
       source_of_truth: domain.source_of_truth,

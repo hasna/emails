@@ -14,7 +14,6 @@ import type { S3Client } from "@aws-sdk/client-s3";
 import { storeInboundEmail, updateAttachmentPaths } from "../db/inbound.js";
 import type { AttachmentPath } from "../db/inbound.js";
 import { backfillLegacyS3RawUrls, getDatabase, getDataDir, rebuildInboundCanonicalState, resolvePartialId } from "../db/database.js";
-import type { StorageTable, StorageTableFilter } from "../db/storage-sync.js";
 import { loadConfig, saveConfig, getInboundAttachmentStorageConfig } from "./config.js";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -48,7 +47,6 @@ export interface S3SyncResult {
   attachments_saved: number;
   errors: string[];
   last_key?: string;
-  materialized_raw_s3_urls?: string[];
 }
 
 type S3Sdk = typeof import("@aws-sdk/client-s3");
@@ -484,8 +482,6 @@ async function processS3Object(
 
   result.synced++;
   result.last_key = obj.key;
-  result.materialized_raw_s3_urls ??= [];
-  result.materialized_raw_s3_urls.push(rawS3Url);
 
   // Save attachment files
   if (attachmentMeta.length > 0 && syncConfig.attachment_storage !== "none") {
@@ -556,73 +552,6 @@ async function processS3Object(
 
     if (paths.length > 0) updateAttachmentPaths(stored.id, paths, db);
   }
-}
-
-function uniqueRawS3Urls(urls: string[] | undefined): string[] {
-  return [...new Set((urls ?? []).map((url) => url.trim()).filter(Boolean))];
-}
-
-function rawUrlFilter(whereTemplate: (placeholders: string) => string, rawS3Urls: string[]): StorageTableFilter {
-  return {
-    where: whereTemplate(rawS3Urls.map(() => "?").join(", ")),
-    params: rawS3Urls,
-  };
-}
-
-function buildSelfHostedS3MaterializationFilters(rawS3Urls: string[]): Partial<Record<StorageTable, StorageTableFilter>> {
-  const inboundIdsByRaw = (placeholders: string) =>
-    `inbound_email_id IN (SELECT id FROM inbound_emails WHERE raw_s3_url IN (${placeholders}))`;
-  const messageIdsByRaw = (placeholders: string) =>
-    `mail_message_id IN (SELECT COALESCE(mail_message_id, 'msg:inbound:' || id) FROM inbound_emails WHERE raw_s3_url IN (${placeholders}))`;
-  const mailboxIdsByRaw = (placeholders: string) =>
-    `mailbox_id IN (
-       SELECT DISTINCT state.mailbox_id
-         FROM mailbox_message_state state
-        WHERE state.mail_message_id IN (
-          SELECT COALESCE(mail_message_id, 'msg:inbound:' || id)
-            FROM inbound_emails
-           WHERE raw_s3_url IN (${placeholders})
-        )
-     )`;
-
-  return {
-    providers: rawUrlFilter(
-      (placeholders) => `id IN (SELECT DISTINCT provider_id FROM inbound_emails WHERE raw_s3_url IN (${placeholders}) AND provider_id IS NOT NULL)`,
-      rawS3Urls,
-    ),
-    inbound_emails: rawUrlFilter((placeholders) => `raw_s3_url IN (${placeholders})`, rawS3Urls),
-    inbound_recipients: rawUrlFilter(inboundIdsByRaw, rawS3Urls),
-    inbound_labels: rawUrlFilter(inboundIdsByRaw, rawS3Urls),
-    mailboxes: rawUrlFilter(mailboxIdsByRaw, rawS3Urls),
-    mailbox_sources: rawUrlFilter(
-      (placeholders) => `id IN (
-         SELECT DISTINCT state.source_id
-           FROM mailbox_message_state state
-          WHERE state.source_id IS NOT NULL
-            AND state.mail_message_id IN (
-              SELECT COALESCE(mail_message_id, 'msg:inbound:' || id)
-                FROM inbound_emails
-               WHERE raw_s3_url IN (${placeholders})
-            )
-       )`,
-      rawS3Urls,
-    ),
-    mail_folders: rawUrlFilter(mailboxIdsByRaw, rawS3Urls),
-    mail_messages: rawUrlFilter((placeholders) => `raw_s3_url IN (${placeholders})`, rawS3Urls),
-    mailbox_message_state: rawUrlFilter(messageIdsByRaw, rawS3Urls),
-  };
-}
-
-async function flushSelfHostedS3MaterializationIfNeeded(opts: S3SyncOptions, result: S3SyncResult): Promise<void> {
-  if (opts.db) return;
-  const rawS3Urls = uniqueRawS3Urls(result.materialized_raw_s3_urls);
-  if (rawS3Urls.length === 0) return;
-  const { SELF_HOSTED_S3_MATERIALIZATION_TABLES, flushSelfHostedRuntimeCache } = await import("./self-hosted-runtime.js");
-  await flushSelfHostedRuntimeCache({
-    source: "s3-sync",
-    tables: [...SELF_HOSTED_S3_MATERIALIZATION_TABLES],
-    rowFilters: buildSelfHostedS3MaterializationFilters(rawS3Urls),
-  });
 }
 
 /**
@@ -704,7 +633,6 @@ export async function syncS3Inbox(opts: S3SyncOptions): Promise<S3SyncResult> {
       }
     }
     if (result.last_key) setLastSyncedKey(bucket, prefix, result.last_key);
-    await flushSelfHostedS3MaterializationIfNeeded(opts, result);
     return result;
   }
 
@@ -746,8 +674,6 @@ export async function syncS3Inbox(opts: S3SyncOptions): Promise<S3SyncResult> {
   if (result.last_key) {
     setLastSyncedKey(bucket, prefix, result.last_key);
   }
-
-  await flushSelfHostedS3MaterializationIfNeeded(opts, result);
 
   return result;
 }
