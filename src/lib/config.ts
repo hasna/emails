@@ -2,6 +2,7 @@ import { chmodSync, existsSync, readFileSync, writeFileSync, mkdirSync, statSync
 import { join } from "path";
 import { getDataDir } from "../db/database.js";
 import { resolveCloudflareAuth, type CloudflareAuth } from "./cloudflare-auth.js";
+import { getMaileryMode } from "./mode.js";
 
 // Lazy getters so tests can override HOME via process.env before calling
 function getConfigDir(): string { return getDataDir(); }
@@ -266,36 +267,19 @@ export function getInboundAttachmentStorageConfig(): InboundAttachmentStorageCon
     ?? (config["gmail_s3_bucket"] as string | undefined);
   const inboundBucket = (config["inbound_s3_bucket"] as string | undefined)
     ?? process.env["EMAILS_INBOUND_S3_BUCKET"];
-  const rawMode = String(
-    process.env["MAILERY_MODE"]
-      ?? process.env["HASNA_EMAILS_MODE"]
-      ?? config["mailery_mode"]
-      ?? config["mode"]
-      ?? "",
-  ).trim().toLowerCase().replace(/-/g, "_");
-  const storageMode = String(
-    process.env["HASNA_EMAILS_STORAGE_MODE"]
-      ?? process.env["EMAILS_STORAGE_MODE"]
-      ?? config["storage_mode"]
-      ?? "",
-  ).trim().toLowerCase().replace(/-/g, "_");
-  const selfHostedRuntime =
-    rawMode === "self_hosted" ||
-    rawMode === "remote" ||
-    rawMode === "hybrid" ||
-    storageMode === "remote" ||
-    !!process.env["HASNA_EMAILS_DATABASE_URL"] ||
-    !!process.env["EMAILS_DATABASE_URL"];
-  const effectiveStorage = selfHostedRuntime
-    ? configuredStorage === "local" || configuredStorage === "s3"
-      ? (configuredBucket || inboundBucket ? "s3" : "none")
-      : configuredStorage
+  // Mode-based (no self_hosted/remote/hybrid or *_DATABASE_URL env heuristic).
+  //   local  -> attachments live on the local filesystem by default.
+  //   cloud  -> the server owns attachments; the thin client never keeps them on the
+  //             local filesystem — it uses S3 when a bucket is configured, else none
+  //             (an explicit "local"/"s3" is coerced to that safe pair).
+  const cloud = getMaileryMode() === "cloud";
+  const cloudStorage: AttachmentStorage = configuredBucket || inboundBucket ? "s3" : "none";
+  const effectiveStorage = cloud
+    ? (configuredStorage === "local" || configuredStorage === "s3" ? cloudStorage : configuredStorage)
     : configuredStorage;
   return {
-    attachment_storage: effectiveStorage
-      ?? (selfHostedRuntime ? (configuredBucket || inboundBucket ? "s3" : "none") : "local"),
-    s3_bucket: configuredBucket
-      ?? (selfHostedRuntime ? inboundBucket : undefined),
+    attachment_storage: effectiveStorage ?? (cloud ? cloudStorage : "local"),
+    s3_bucket: configuredBucket ?? (cloud ? inboundBucket : undefined),
     s3_prefix: (config["attachment_s3_prefix"] as string | undefined)
       ?? (config["gmail_s3_prefix"] as string | undefined)
       ?? "emails",
