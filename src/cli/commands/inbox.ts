@@ -2,16 +2,13 @@ import type { Command } from "commander";
 import type { EmailSystemStatus } from "../../lib/agent-context.js";
 import chalk from "../../lib/chalk-lite.js";
 import {
-  listInboundEmailSummaries, getInboundEmail, getInboundEmailSummary, deleteInboundEmail, clearInboundEmails,
+  getInboundEmailSummary, clearInboundEmails,
   getReceivedInboundCount, getLatestReceivedInboundAt,
-  getInboundAttachmentPaths,
-  setInboundRead, setInboundReadSummary, setInboundArchivedSummary, setInboundStarredSummary,
-  addInboundLabelSummary, removeInboundLabelSummary, getUnreadCount, normalizeEmailAddress,
+  getUnreadCount, normalizeEmailAddress,
 } from "../../db/inbound.js";
 import { listProviderNamesByIds } from "../../db/providers.js";
 import { getDatabase, resolvePartialIdOrThrow } from "../../db/database.js";
 import { confirmDestructiveAction, handleError } from "../utils.js";
-import { findVerificationCode, listVerificationCodeCandidates } from "../../lib/verification-code.js";
 import { enrichAddresses } from "../../lib/address-ownership.js";
 import { extractEmailLinks, formatEmailLinks, type ExtractedEmailLink } from "../../lib/email-links.js";
 import { formatAttachmentSize, mergeAttachmentDetails, type AttachmentDetail } from "../../lib/attachment-actions.js";
@@ -24,10 +21,12 @@ import { sqlEmailAddress } from "../../db/email-address-sql.js";
 import { assessDomainReadiness } from "../../lib/domain-readiness.js";
 import { domainInboundReadinessSignals } from "../../lib/domain-inbound-evidence.js";
 import { resolveMaileryMode } from "../../lib/mode.js";
+import { resolveMailDataSource, type MailDataSource } from "../../lib/mail-data-source.js";
 import { readableMessageText, renderReadableEmailDocument } from "../tui/format.js";
 import type {
   Mailbox,
   MailboxSource,
+  MessageBody,
   TuiMessage,
   MailboxSourceSummary,
   MailboxStatusSummary,
@@ -38,6 +37,84 @@ const CLI_MAILBOXES = ["inbox", "unread", "starred", "sent", "archived", "spam",
 
 function resolveInboundEmailId(id: string): string {
   return resolvePartialIdOrThrow(getDatabase(), "inbound_emails", id);
+}
+
+// Partial-id resolution is a LOCAL SQLite concern; cloud ids arrive fully qualified.
+function resolveMailId(ds: MailDataSource, id: string): string {
+  return ds.mode === "local" ? resolveInboundEmailId(id) : id;
+}
+
+// unread/starred/archived collapse to their folder view; read/since have no folder
+// equivalent and are applied client-side over the returned page.
+function folderForListFlags(flags: { unread?: boolean; starred?: boolean; archived?: boolean }): Mailbox {
+  if (flags.archived) return "archived";
+  if (flags.starred) return "starred";
+  if (flags.unread) return "unread";
+  return "inbox";
+}
+
+interface SeamMailDetail {
+  id: string;
+  thread_id: string | null;
+  from_address: string;
+  to_addresses: string[];
+  cc_addresses: string[];
+  subject: string;
+  received_at: string;
+  is_read: boolean;
+  is_starred: boolean;
+  is_archived: boolean;
+  label_ids: string[];
+  text_body: string | null;
+  html_body: string | null;
+  summary: string;
+  attachments: Array<{ filename: string; content_type: string; size: number }>;
+  attachment_paths: Array<{ filename: string; local_path?: string; s3_url?: string }>;
+}
+
+function splitAddresses(value: string | null | undefined): string[] {
+  if (!value) return [];
+  return value.split(",").map((entry) => entry.trim()).filter(Boolean);
+}
+
+// A read/detail projection built from the seam (TuiMessage + MessageBody) so the CLI
+// renders identically in local and cloud mode.
+function seamMessageDetail(msg: TuiMessage, body: MessageBody | null): SeamMailDetail {
+  const attachments = (body?.attachments ?? []).map((att) => ({
+    filename: att.filename,
+    content_type: att.content_type,
+    size: att.size,
+  }));
+  const attachmentPaths = (body?.attachments ?? [])
+    .filter((att) => att.location)
+    .map((att) => (att.location!.startsWith("s3://")
+      ? { filename: att.filename, s3_url: att.location! }
+      : { filename: att.filename, local_path: att.location! }));
+  return {
+    id: msg.id,
+    thread_id: msg.thread_id,
+    from_address: body?.from ?? msg.from,
+    to_addresses: splitAddresses(body?.to ?? msg.to),
+    cc_addresses: splitAddresses(body?.cc),
+    subject: body?.subject ?? msg.subject,
+    received_at: body?.date ?? msg.date,
+    is_read: msg.is_read,
+    is_starred: msg.is_starred,
+    is_archived: (body?.flags ?? []).includes("archived"),
+    label_ids: msg.labels,
+    text_body: body?.text ?? null,
+    html_body: body?.html ?? null,
+    summary: body?.summary ?? "",
+    attachments,
+    attachment_paths: attachmentPaths,
+  };
+}
+
+async function seamDetailById(ds: MailDataSource, id: string): Promise<SeamMailDetail | null> {
+  const msg = await ds.getMessage(id);
+  if (!msg) return null;
+  const body = await ds.getMessageBody(msg);
+  return seamMessageDetail(msg, body);
 }
 
 function parsePositiveIntOption(value: string | undefined, fallback: number, max = MAX_INBOX_CLI_LIMIT): number {
@@ -73,6 +150,9 @@ function mailboxSourceFromOptions(opts: { source?: string; provider?: string; ad
 }
 
 async function runAutoPull(opts: { s3?: boolean; limit?: number }) {
+  // Auto-pull is LOCAL S3 ingestion. In cloud mode the API is the source of truth and
+  // each poll re-reads it through the seam, so there is nothing to pull.
+  if (resolveMailDataSource().mode !== "local") return { pulled: 0, ok: true, configured: false, reason: "cloud mode" };
   const { autoPull } = await import("../tui/autopull.js");
   return autoPull(opts);
 }
@@ -100,19 +180,20 @@ interface InboundLinksResult {
 export function registerInboxCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   const inboxCmd = program.command("inbox").description("Sync and browse inbound emails (SES/S3, Cloudflare, Resend, SMTP)");
 
-  function getInboundLinks(emailId: string, opts?: { all?: boolean }): InboundLinksResult {
-    const db = getDatabase();
-    const fullId = resolveInboundEmailId(emailId);
-    const email = getInboundEmail(fullId, db);
-    if (!email) handleError(new Error(`Email not found: ${emailId}`));
+  async function getInboundLinks(emailId: string, opts?: { all?: boolean }): Promise<InboundLinksResult> {
+    const ds = resolveMailDataSource();
+    const fullId = resolveMailId(ds, emailId);
+    const msg = await ds.getMessage(fullId);
+    if (!msg) handleError(new Error(`Email not found: ${emailId}`));
+    const body = await ds.getMessageBody(msg);
     return {
-      email_id: email.id,
-      from: email.from_address,
-      subject: email.subject,
-      received_at: email.received_at,
+      email_id: msg.id,
+      from: body?.from ?? msg.from,
+      subject: body?.subject ?? msg.subject,
+      received_at: body?.date ?? msg.date,
       links: extractEmailLinks({
-        text: email.text_body,
-        html: email.html_body,
+        text: body?.text ?? null,
+        html: body?.html ?? null,
         includeNonWeb: opts?.all === true,
       }),
     };
@@ -137,18 +218,16 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     const intervalMs = Math.max(1, parseInt(opts.interval ?? "5", 10) || 5) * 1000;
     const deadline = Date.now() + timeoutMs;
 
-    const findLocalMatch = () => {
-      const candidates = listVerificationCodeCandidates(normalized, {
-        limit,
-        since: opts.since,
-        from: opts.from,
-        subject: opts.subject,
-      }, getDatabase());
-      return findVerificationCode(candidates, { from: opts.from, subject: opts.subject });
-    };
+    const ds = resolveMailDataSource();
+    const findMatch = () => ds.findLatest(normalized, {
+      limit,
+      since: opts.since,
+      from: opts.from,
+      subject: opts.subject,
+    });
 
     while (true) {
-      let match = findLocalMatch();
+      let match = await findMatch();
       if (match) {
         output({
           code: match.code,
@@ -163,7 +242,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
 
       if (opts.refresh !== false) {
         await runAutoPull({ s3: true, limit: Math.max(limit, 1000) });
-        match = findLocalMatch();
+        match = await findMatch();
         if (match) {
           output({
             code: match.code,
@@ -242,20 +321,19 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     const intervalMs = Math.max(1, parseInt(opts.interval ?? "5", 10) || 5) * 1000;
     const deadline = Date.now() + timeoutMs;
 
-    const findLocalEmail = () => {
-      const db = getDatabase();
-      const summary = listInboundEmailSummaries({
-        recipients: [normalized],
+    const ds = resolveMailDataSource();
+    const findEmail = async (): Promise<SeamMailDetail | null> => {
+      const [latest] = await ds.verificationCandidates(normalized, {
         limit: 1,
         since: opts.since,
         from: opts.from,
         subject: opts.subject,
-      }, db)[0];
-      return summary ? getInboundEmail(summary.id, db) : null;
+      });
+      return latest ? seamDetailById(ds, latest.id) : null;
     };
 
     while (true) {
-      let email = findLocalEmail();
+      let email = await findEmail();
       if (email) {
         output(email, email.id);
         return;
@@ -263,7 +341,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
 
       if (opts.refresh !== false) {
         await runAutoPull({ s3: true, limit: Math.max(limit, 1000) });
-        email = findLocalEmail();
+        email = await findEmail();
         if (email) {
           output(email, email.id);
           return;
@@ -302,15 +380,14 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
       try {
         const normalized = address.trim().toLowerCase();
         if (opts.refresh) await runAutoPull({ s3: true, limit: Math.max(1000, parsePositiveIntOption(opts.limit, 50)) });
-        const db = getDatabase();
-        const summary = listInboundEmailSummaries({
-          recipients: [normalized],
+        const ds = resolveMailDataSource();
+        const [latest] = await ds.verificationCandidates(normalized, {
           limit: 1,
           since: opts.since,
           from: opts.from,
           subject: opts.subject,
-        }, db)[0];
-        const email = summary ? getInboundEmail(summary.id, db) : null;
+        });
+        const email = latest ? await seamDetailById(ds, latest.id) : null;
         if (!email) {
           output({ email: null, address: normalized }, chalk.dim(`No email found for ${normalized}.`));
           process.exitCode = 1;
@@ -344,39 +421,32 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         const limit = parsePositiveIntOption(opts.limit, 20);
         const offset = parseNonNegativeIntOption(opts.offset);
         const toFilter = opts.to?.trim().toLowerCase();
-        const folder = normalizeCliMailbox(opts.folder);
-        const db = getDatabase();
-        if (opts.source || folder !== "inbox" || opts.address || opts.domain) {
-          const { listMailbox } = await import("../tui/data.js");
-          const source = mailboxSourceFromOptions(opts);
-          const rows = listMailbox(folder, {
-            source,
-            limit,
-            offset,
-            search: opts.search,
-            label: opts.label,
-          }, db);
-          if (rows.length === 0) {
-            output([], chalk.dim("No mail found locally. Try `mailery inbox sources`, `mailery refresh`, or `mailery inbox wait <address>`."));
-            return;
-          }
-          output(rows, formatMailboxMessages(rows, `Mailbox ${folder}`));
+        // An explicit non-inbox --folder wins; otherwise the flag shorthands pick it.
+        const folder = opts.folder && opts.folder !== "inbox"
+          ? normalizeCliMailbox(opts.folder)
+          : folderForListFlags(opts);
+        let source = mailboxSourceFromOptions(opts);
+        if (toFilter) {
+          source = source ?? {};
+          if (toFilter.includes("@")) { if (!source.address) source.address = toFilter; }
+          else if (!source.domain) source.domain = toFilter;
+        }
+        const ds = resolveMailDataSource();
+        let rows = await ds.listMailbox(folder, {
+          source,
+          limit,
+          offset,
+          search: opts.search,
+          label: opts.label,
+        });
+        // read/since have no folder equivalent; apply them over the returned page.
+        if (opts.read) rows = rows.filter((row) => row.is_read);
+        if (opts.since) rows = rows.filter((row) => row.date >= opts.since!);
+        if (rows.length === 0) {
+          output([], chalk.dim("No mail found. Try `mailery inbox sources`, `mailery refresh`, or `mailery inbox wait <address>`."));
           return;
         }
-        const emails = listInboundEmailSummaries({
-          provider_id: opts.provider, since: opts.since, limit, offset,
-          unread: opts.unread, read: opts.read, starred: opts.starred,
-          archived: opts.archived, label: opts.label, search: opts.search,
-          recipients: toFilter?.includes("@") ? [toFilter] : undefined,
-          recipientDomains: toFilter && !toFilter.includes("@") ? [toFilter] : undefined,
-        }, db);
-
-        if (emails.length === 0) {
-          output([], chalk.dim("No emails found locally. Try `mailery inbox sync-status`, `mailery refresh`, or `mailery inbox wait <address>`."));
-          return;
-        }
-
-        output(emails, formatEmailList(emails));
+        output(rows, formatMailboxMessages(rows, `Mailbox ${folder}`));
       } catch (e) {
         handleError(e);
       }
@@ -388,14 +458,14 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .option("--by-address", "Group unread counts by recipient address")
     .option("--limit <n>", "Maximum grouped addresses to show", "50")
     .option("--offset <n>", "Number of grouped addresses to skip", "0")
-    .action((opts: { byAddress?: boolean; limit?: string; offset?: string }) => {
+    .action(async (opts: { byAddress?: boolean; limit?: string; offset?: string }) => {
       try {
-        const db = getDatabase();
         if (!opts.byAddress) {
-          const count = getUnreadCount(undefined, db);
-          output({ unread: count }, String(count));
+          const counts = await resolveMailDataSource().mailboxCounts();
+          output({ unread: counts.unread }, String(counts.unread));
           return;
         }
+        const db = getDatabase();
         const limit = parsePositiveIntOption(opts.limit, 50);
         const offset = parseNonNegativeIntOption(opts.offset);
         const recipientSql = sqlEmailAddress("r.address");
@@ -531,35 +601,19 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         const limit = parsePositiveIntOption(opts.limit, 20);
         const offset = parseNonNegativeIntOption(opts.offset);
         const folder = normalizeCliMailbox(opts.folder);
-
-        const db = getDatabase();
-
-        if (opts.source || opts.folder !== "inbox" || opts.address || opts.domain || opts.label) {
-          const { searchMailbox } = await import("../tui/data.js");
-          const rows = searchMailbox(query, {
-            mailbox: folder,
-            source: mailboxSourceFromOptions(opts),
-            label: opts.label,
-            limit,
-            offset,
-          }, db);
-          if (rows.length === 0) {
-            console.log(chalk.dim(`No results for "${query}".`));
-            return;
-          }
-          output(rows, formatMailboxMessages(rows, `Search ${folder}: "${query}"`));
-          return;
-        }
-
-        // Local DB search
-        const emails = listInboundEmailSummaries({ provider_id: opts.provider, limit, offset, search: query }, db);
-
-        if (emails.length === 0) {
+        const ds = resolveMailDataSource();
+        const rows = await ds.listMailbox(folder, {
+          source: mailboxSourceFromOptions(opts),
+          label: opts.label,
+          search: query,
+          limit,
+          offset,
+        });
+        if (rows.length === 0) {
           console.log(chalk.dim(`No results for "${query}".`));
           return;
         }
-
-        output(emails, formatEmailList(emails, `Search: "${query}"`));
+        output(rows, formatMailboxMessages(rows, `Search ${folder}: "${query}"`));
       } catch (e) {
         handleError(e);
       }
@@ -573,8 +627,8 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .option("--limit <n>", "Max sources", "100")
     .action(async (opts: { search?: string; limit?: string }) => {
       try {
-        const { listMailboxSources } = await import("../tui/data.js");
-        const sources = listMailboxSources({
+        const ds = resolveMailDataSource();
+        const sources = await ds.listMailboxSources({
           search: opts.search,
           limit: parsePositiveIntOption(opts.limit, 100),
         });
@@ -594,8 +648,8 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .action(async (opts: { source?: string; provider?: string; address?: string; domain?: string }) => {
       try {
         const source = mailboxSourceFromOptions(opts);
-        const { listMailboxStatus } = await import("../tui/data.js");
-        const status = listMailboxStatus({ source });
+        const ds = resolveMailDataSource();
+        const status = await ds.listMailboxStatus({ source });
         output({ source: source ?? null, ...status }, formatMailboxStatus(status));
       } catch (e) {
         handleError(e);
@@ -694,16 +748,18 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .option("--keep-unread", "Do not mark the email as read")
     .action(async (id: string, opts: { keepUnread?: boolean }) => {
       try {
-        const db = getDatabase();
-        const fullId = resolveInboundEmailId(id);
-        let email = getInboundEmail(fullId, db);
-        if (!email) {
+        const ds = resolveMailDataSource();
+        const fullId = resolveMailId(ds, id);
+        const msg = await ds.getMessage(fullId);
+        if (!msg) {
           console.error(chalk.red(`Email not found: ${id}`));
           process.exit(1);
         }
         // Opening an email marks it read unless --keep-unread is set.
-        if (!opts.keepUnread && !email.is_read) email = setInboundRead(email.id, true, db);
-        output(email, formatEmailDetail(email));
+        if (!opts.keepUnread && !msg.is_read) { await ds.setRead(fullId, true); msg.is_read = true; }
+        const body = await ds.getMessageBody(msg);
+        const detail = seamMessageDetail(msg, body);
+        output(detail, formatEmailDetail(detail));
       } catch (e) {
         handleError(e);
       }
@@ -715,7 +771,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .option("--all", "Include non-web links such as mailto: and tel:")
     .action(async (emailId: string, opts: { all?: boolean }) => {
       try {
-        const result = getInboundLinks(emailId, opts);
+        const result = await getInboundLinks(emailId, opts);
         output(result, formatInboundLinks(result));
       } catch (e) {
         handleError(e);
@@ -728,7 +784,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .option("--all", "Include non-web links such as mailto: and tel:")
     .action(async (emailId: string, opts: { all?: boolean }) => {
       try {
-        const result = getInboundLinks(emailId, opts);
+        const result = await getInboundLinks(emailId, opts);
         output(result, formatInboundLinks(result));
       } catch (e) {
         handleError(e);
@@ -736,14 +792,12 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     });
 
   // ─── READ-STATE / ARCHIVE / STAR / LABELS ─────────────────────────────────
-  // These commands write to the local SQLite store via the inbound helpers.
+  // These commands write through the mail data source seam (local SQLite or cloud API).
 
-  function requireLocal(id: string): string {
-    const db = getDatabase();
-    const fullId = resolveInboundEmailId(id);
-    const e = getInboundEmailSummary(fullId, db);
-    if (!e) { console.error(chalk.red(`Email not found: ${id}`)); process.exit(1); }
-    return e.id;
+  async function requireMessage(ds: MailDataSource, id: string): Promise<TuiMessage> {
+    const msg = await ds.getMessage(resolveMailId(ds, id));
+    if (!msg) { console.error(chalk.red(`Email not found: ${id}`)); process.exit(1); }
+    return msg;
   }
 
   inboxCmd
@@ -752,9 +806,11 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .option("--unread", "Mark as unread instead")
     .action(async (emailId: string, opts: { unread?: boolean }) => {
       try {
-        const id = requireLocal(emailId);
-        const e = setInboundReadSummary(id, !opts.unread, getDatabase());
-        output(e, chalk.green(`✓ Marked ${opts.unread ? "unread" : "read"}: ${e.subject.slice(0, 40)}`));
+        const ds = resolveMailDataSource();
+        const msg = await requireMessage(ds, emailId);
+        await ds.setRead(msg.id, !opts.unread);
+        const updated = (await ds.getMessage(msg.id)) ?? { ...msg, is_read: !opts.unread };
+        output(updated, chalk.green(`✓ Marked ${opts.unread ? "unread" : "read"}: ${updated.subject.slice(0, 40)}`));
       } catch (e) { handleError(e); }
     });
 
@@ -764,9 +820,10 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .option("--undo", "Unarchive (restore to inbox) instead")
     .action(async (emailId: string, opts: { undo?: boolean }) => {
       try {
-        const id = requireLocal(emailId);
-        const e = setInboundArchivedSummary(id, !opts.undo, getDatabase());
-        output(e, chalk.green(`✓ ${opts.undo ? "Unarchived" : "Archived"}: ${e.subject.slice(0, 40)}`));
+        const ds = resolveMailDataSource();
+        const msg = await requireMessage(ds, emailId);
+        await ds.setArchived(msg.id, !opts.undo);
+        output(msg, chalk.green(`✓ ${opts.undo ? "Unarchived" : "Archived"}: ${msg.subject.slice(0, 40)}`));
       } catch (e) { handleError(e); }
     });
 
@@ -776,9 +833,11 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .option("--undo", "Unstar instead")
     .action(async (emailId: string, opts: { undo?: boolean }) => {
       try {
-        const id = requireLocal(emailId);
-        const e = setInboundStarredSummary(id, !opts.undo, getDatabase());
-        output(e, chalk[opts.undo ? "green" : "yellow"](`${opts.undo ? "✓ Unstarred" : "★ Starred"}: ${e.subject.slice(0, 40)}`));
+        const ds = resolveMailDataSource();
+        const msg = await requireMessage(ds, emailId);
+        await ds.setStarred(msg.id, !opts.undo);
+        const updated = (await ds.getMessage(msg.id)) ?? { ...msg, is_starred: !opts.undo };
+        output(updated, chalk[opts.undo ? "green" : "yellow"](`${opts.undo ? "✓ Unstarred" : "★ Starred"}: ${updated.subject.slice(0, 40)}`));
       } catch (e) { handleError(e); }
     });
 
@@ -788,9 +847,10 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .option("--remove", "Remove the label instead of adding")
     .action(async (emailId: string, label: string, opts: { remove?: boolean }) => {
       try {
-        const id = requireLocal(emailId);
-        const e = opts.remove ? removeInboundLabelSummary(id, label, getDatabase()) : addInboundLabelSummary(id, label, getDatabase());
-        output(e, chalk.green(`✓ ${opts.remove ? "Removed" : "Added"} label "${label}": ${e.label_ids.join(", ") || "(none)"}`));
+        const ds = resolveMailDataSource();
+        const msg = await requireMessage(ds, emailId);
+        const labels = opts.remove ? await ds.removeLabel(msg.id, label) : await ds.addLabel(msg.id, label);
+        output({ id: msg.id, subject: msg.subject, label_ids: labels }, chalk.green(`✓ ${opts.remove ? "Removed" : "Added"} label "${label}": ${labels.join(", ") || "(none)"}`));
       } catch (e) { handleError(e); }
     });
 
@@ -801,14 +861,16 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .option("--filename <name>", "Filter by filename")
     .action(async (emailId: string, opts: { filename?: string }) => {
       try {
-        const db = getDatabase();
-        const fullId = resolveInboundEmailId(emailId);
-        const email = getInboundEmail(fullId, db);
-        if (!email) {
+        const ds = resolveMailDataSource();
+        const fullId = resolveMailId(ds, emailId);
+        const msg = await ds.getMessage(fullId);
+        if (!msg) {
           console.error(chalk.red(`Email not found: ${emailId}`));
           process.exit(1);
         }
-        const details = mergeAttachmentDetails(email.attachments, getInboundAttachmentPaths(fullId, db) ?? email.attachment_paths ?? []);
+        const body = await ds.getMessageBody(msg);
+        const paths = await ds.getAttachmentPaths(fullId);
+        const details = mergeAttachmentDetails(body?.attachments ?? [], paths);
         const filtered = opts.filename ? details.filter((p) => p.filename === opts.filename) : details;
         if (filtered.length === 0) {
           output([], chalk.dim("No attachments found for this email."));
@@ -827,15 +889,16 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .option("--yes", "Skip confirmation prompt")
     .action(async (id: string, opts: { yes?: boolean }) => {
       try {
-        await confirmDestructiveAction(`Delete local inbox email ${id}?`, opts.yes);
-        const db = getDatabase();
-        const deleted = deleteInboundEmail(id, db);
-        if (deleted) {
-          console.log(chalk.green(`✓ Deleted email ${id.slice(0, 8)}`));
-        } else {
+        await confirmDestructiveAction(`Delete inbox email ${id}?`, opts.yes);
+        const ds = resolveMailDataSource();
+        const fullId = resolveMailId(ds, id);
+        const existing = await ds.getMessage(fullId);
+        if (!existing) {
           console.error(chalk.red(`Email not found: ${id}`));
           process.exit(1);
         }
+        await ds.deleteMessage(fullId);
+        console.log(chalk.green(`✓ Deleted email ${fullId.slice(0, 8)}`));
       } catch (e) {
         handleError(e);
       }
@@ -1074,21 +1137,22 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .description("Open a readable local HTML view of a synced email in the browser")
     .action(async (id: string) => {
       try {
-        const db = getDatabase();
-        const resolvedId = resolveInboundEmailId(id);
-        const email = getInboundEmail(resolvedId, db);
-        if (!email) { console.error(chalk.red(`Email not found: ${id}`)); process.exit(1); }
+        const ds = resolveMailDataSource();
+        const resolvedId = resolveMailId(ds, id);
+        const msg = await ds.getMessage(resolvedId);
+        if (!msg) { console.error(chalk.red(`Email not found: ${id}`)); process.exit(1); }
+        const body = await ds.getMessageBody(msg);
         const { writeFileSync } = await import("node:fs");
         const { tmpdir } = await import("node:os");
         const { join: pathJoin } = await import("node:path");
         const tmpFile = pathJoin(tmpdir(), `mailery-inbox-${resolvedId.slice(0, 8)}.html`);
         writeFileSync(tmpFile, renderReadableEmailDocument({
-          subject: email.subject,
-          from: email.from_address,
-          to: email.to_addresses,
-          date: email.received_at,
-          text: email.text_body,
-          html: email.html_body,
+          subject: body?.subject ?? msg.subject,
+          from: body?.from ?? msg.from,
+          to: splitAddresses(body?.to ?? msg.to),
+          date: body?.date ?? msg.date,
+          text: body?.text ?? null,
+          html: body?.html ?? null,
         }), "utf8");
         const opened = openLocalTarget(tmpFile);
         const result = { path: tmpFile, file_url: opened.target?.file_url, opened: opened.ok, method: opened.method, error: opened.error };
@@ -1159,25 +1223,6 @@ function formatSourceList(
     const detail = `s3://${source.bucket ?? "unknown"}/${source.prefix ?? ""} ${source.region ?? "us-east-1"}${source.provider_id ? ` provider=${source.provider_id.slice(0, 8)}` : ""}`;
     lines.push(`  ${chalk.cyan(source.id)}  [${source.type}]  ${live}  ${source.name ?? ""}`);
     lines.push(chalk.dim(`    ${detail}`));
-  }
-  lines.push("");
-  return lines.join("\n");
-}
-
-function formatEmailList(
-  emails: { id: string; from_address: string; subject: string; received_at: string; text_body?: string | null; is_read?: boolean; is_starred?: boolean; label_ids?: string[] }[],
-  title = "Inbound Emails",
-): string {
-  const lines: string[] = [chalk.bold(`\n${title} (${emails.length}):`)];
-  for (const e of emails) {
-    const date = new Date(e.received_at).toLocaleDateString();
-    const star = e.is_starred ? chalk.yellow("★") : " ";
-    const unread = e.is_read === false ? chalk.cyan("●") : " ";
-    const subj = e.is_read === false ? chalk.bold(e.subject.slice(0, 50).padEnd(50)) : e.subject.slice(0, 50).padEnd(50);
-    const labels = e.label_ids && e.label_ids.length ? chalk.magenta(` {${e.label_ids.join(",")}}`) : "";
-    lines.push(
-      `  ${star}${unread} ${chalk.dim(e.id.slice(0, 8))}  ${chalk.cyan(e.from_address.slice(0, 28).padEnd(28))}  ${subj}  ${chalk.dim(date)}${labels}`,
-    );
   }
   lines.push("");
   return lines.join("\n");

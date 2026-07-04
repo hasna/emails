@@ -400,7 +400,9 @@ describe("CLI JSON contracts", () => {
     const list = expectCliJsonOk<Array<{ id: string; subject: string }>>(runCli(["--json", "inbox", "list", "--search", "local", "--limit", "1"], env));
     expect(list).toEqual([expect.objectContaining({ id: seeded.emailId, subject: "Local only contract" })]);
 
-    const search = expectCliJsonOk<Array<{ id: string; subject: string }>>(runCli(["--json", "inbox", "search", "offline"], env));
+    // Search routes through the mail data source seam (subject/from/snippet scope in
+    // both modes), so match on a subject term rather than a body-only word.
+    const search = expectCliJsonOk<Array<{ id: string; subject: string }>>(runCli(["--json", "inbox", "search", "contract"], env));
     expect(search).toEqual([expect.objectContaining({ id: seeded.emailId, subject: "Local only contract" })]);
 
     const read = expectCliJsonOk<{ id: string; text_body: string }>(runCli(["--json", "inbox", "read", seeded.emailId, "--keep-unread"], env));

@@ -506,7 +506,9 @@ describe("inbox search — local filter", () => {
       received_at: "2026-06-04T11:29:09.000Z",
     }, db);
 
-    const { data } = await runInboxCommand(["inbox", "search", "needle", "--limit", "1"]);
+    // Search routes through the seam (subject/from/snippet scope), so match on the
+    // subject term; the filter must still run before the result limit is applied.
+    const { data } = await runInboxCommand(["inbox", "search", "match", "--limit", "1"]);
 
     expect((data as Array<{ subject: string }>).map((email) => email.subject)).toEqual(["Older match"]);
   });
