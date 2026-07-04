@@ -382,8 +382,8 @@ export function registerMiscOpsTools(server: McpServer): void {
           const html = template.html_template ? renderTemplate(template.html_template, vars) : undefined;
           const text = template.text_template ? renderTemplate(template.text_template, vars) : undefined;
           const sendOpts = { from: from_address, to: r.email, subject, html, text };
-          const { messageId, providerId: actualId, selfHostedSendAttemptId } = await sendWithFailover(resolvedProviderId, sendOpts, db);
-          await createSentEmailLedger(actualId, sendOpts, messageId, db, selfHostedSendAttemptId);
+          const { messageId, providerId: actualId } = await sendWithFailover(resolvedProviderId, sendOpts, db);
+          await createSentEmailLedger(actualId, sendOpts, messageId, db);
           sentEmails.push(r.email);
           sent++;
         } catch (e) { failed++; errors.push(`${r.email}: ${e instanceof Error ? e.message : String(e)}`); }

@@ -455,8 +455,8 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
         const text = `This is a test email sent via Mailery at ${ts}. Provider: ${provider!.name} (${provider!.type})`;
         const sendOpts = { from: fromEmail!, to: toEmail!, subject, text };
         const { sendWithFailover } = await import("../../lib/send.js");
-        const { messageId, providerId: actualProviderId, selfHostedSendAttemptId } = await sendWithFailover(resolvedProviderId!, sendOpts, db);
-        await createSentEmailLedger(actualProviderId, sendOpts, messageId, db, selfHostedSendAttemptId);
+        const { messageId, providerId: actualProviderId } = await sendWithFailover(resolvedProviderId!, sendOpts, db);
+        await createSentEmailLedger(actualProviderId, sendOpts, messageId, db);
         console.log(chalk.green(`✓ Test email sent to ${toEmail}`));
         if (messageId) console.log(chalk.dim(`  Message ID: ${messageId}`));
         console.log(chalk.dim(`  From: ${fromEmail!}`));

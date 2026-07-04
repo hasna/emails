@@ -113,7 +113,7 @@ async function processDueScheduledEmails(cache: SchedulerTickCache, log: Schedul
         text: scheduled.text_body || undefined,
       };
       const sent = await sendWithFailoverLazy(provider.id, sendOpts, cache.db);
-      await createSentEmailLedger(sent.providerId, sendOpts, sent.messageId, cache.db, sent.selfHostedSendAttemptId);
+      await createSentEmailLedger(sent.providerId, sendOpts, sent.messageId, cache.db);
       markSent(scheduled.id, cache.db);
       result.sent++;
       log(chalk.green(`✓ Sent scheduled email ${scheduled.id.slice(0, 8)} to ${scheduled.to_addresses.join(", ")}`));
@@ -178,7 +178,7 @@ async function processDueSequenceEnrollments(cache: SchedulerTickCache, log: Sch
       };
 
       const sent = await sendWithFailoverLazy(provider.id, sendOpts, cache.db);
-      await createSentEmailLedger(sent.providerId, sendOpts, sent.messageId, cache.db, sent.selfHostedSendAttemptId);
+      await createSentEmailLedger(sent.providerId, sendOpts, sent.messageId, cache.db);
       advanceEnrollment(enrollment.id, cache.db);
       result.sent++;
       log(chalk.green(`✓ Sent sequence step ${step.step_number} to ${enrollment.contact_email}`));

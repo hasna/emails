@@ -88,8 +88,8 @@ export function registerReplyCommand(program: Command, output: (data: unknown, f
         const ourMessageId = generateMessageId(opts.from.split("@")[1] ?? "localhost");
         const sendOpts = { provider_id: providerId, from: opts.from, to: opts.to, subject, text: body, headers: { "Message-ID": ourMessageId } };
         const { sendWithFailover } = await import("../../lib/send.js");
-        const { messageId, providerId: actual, selfHostedSendAttemptId } = await sendWithFailover(providerId, sendOpts, db);
-        const email = await createSentEmailLedger(actual, sendOpts, messageId, db, selfHostedSendAttemptId);
+        const { messageId, providerId: actual } = await sendWithFailover(providerId, sendOpts, db);
+        const email = await createSentEmailLedger(actual, sendOpts, messageId, db);
         await setSentEmailThreading(email.id, { message_id: ourMessageId, thread_id: ourMessageId.replace(/[<>]/g, ""), in_reply_to: null, references: [] }, db);
         await storeSentEmailContent(email.id, { text: body }, db);
         output({ id: email.id, to: opts.to, subject }, chalk.green(`✓ forwarded to ${opts.to.join(", ")} — "${subject}"`));
@@ -157,8 +157,8 @@ export function registerReplyCommand(program: Command, output: (data: unknown, f
           headers,
         };
         const { sendWithFailover } = await import("../../lib/send.js");
-        const { messageId, providerId: actual, selfHostedSendAttemptId } = await sendWithFailover(providerId, sendOpts, db);
-        const email = await createSentEmailLedger(actual, sendOpts, messageId, db, selfHostedSendAttemptId);
+        const { messageId, providerId: actual } = await sendWithFailover(providerId, sendOpts, db);
+        const email = await createSentEmailLedger(actual, sendOpts, messageId, db);
         await setSentEmailThreading(email.id, { message_id: ourMessageId, thread_id: threadId, in_reply_to: inReplyTo, references }, db);
         await storeSentEmailContent(email.id, opts.html ? { html: opts.body } : { text: opts.body }, db);
 

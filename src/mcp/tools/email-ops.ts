@@ -104,9 +104,9 @@ export function registerEmailOpsTools(server: McpServer): void {
 
       const sendInput = { ...input, subject, html, text };
       const { sendWithFailover } = await import('../../lib/send.js');
-      const { messageId, providerId: actualProviderId, selfHostedSendAttemptId } = await sendWithFailover(providerId, sendInput, db);
+      const { messageId, providerId: actualProviderId } = await sendWithFailover(providerId, sendInput, db);
 
-      const email = await createSentEmailLedger(actualProviderId, sendInput, messageId, db, selfHostedSendAttemptId);
+      const email = await createSentEmailLedger(actualProviderId, sendInput, messageId, db);
 
       // Store email content
       await storeSentEmailContent(email.id, { html, text }, db);

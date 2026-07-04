@@ -267,10 +267,10 @@ export function registerSendCommands(program: Command, _output: (data: unknown, 
         }
 
         const { sendWithFailover } = await import("../../lib/send.js");
-        const { messageId, providerId: actualProviderId, usedFailover, selfHostedSendAttemptId } = await sendWithFailover(providerId, sendOpts, db);
+        const { messageId, providerId: actualProviderId, usedFailover } = await sendWithFailover(providerId, sendOpts, db);
         if (usedFailover) log.info(chalk.yellow(`  (Used failover provider)`));
 
-        const email = await createSentEmailLedger(actualProviderId, sendOpts, messageId, db, selfHostedSendAttemptId);
+        const email = await createSentEmailLedger(actualProviderId, sendOpts, messageId, db);
         // Persist threading (own Message-ID, thread_id, In-Reply-To, References).
         await setSentEmailThreading(email.id, { message_id: ourMessageId, thread_id: threadId, in_reply_to: inReplyTo, references }, db);
 

@@ -1284,8 +1284,8 @@ export async function sendComposed(input: ComposeInput, db?: Database): Promise<
     ...(Object.keys(headers).length > 0 ? { headers } : {}),
   };
   const { sendWithFailover } = await import("../../lib/send.js");
-  const { messageId, providerId: actual, selfHostedSendAttemptId } = await sendWithFailover(providerId, sendOpts, d);
-  const email = await createSentEmailLedger(actual, sendOpts, messageId, d, selfHostedSendAttemptId);
+  const { messageId, providerId: actual } = await sendWithFailover(providerId, sendOpts, d);
+  const email = await createSentEmailLedger(actual, sendOpts, messageId, d);
   if (generatedMessageId) {
     await setSentEmailThreading(email.id, { message_id: generatedMessageId, thread_id: threadId, in_reply_to: inReplyTo, references }, d);
   }

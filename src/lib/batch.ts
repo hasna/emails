@@ -74,7 +74,7 @@ export async function batchSend(opts: {
       const sent = adapter
         ? { providerId: opts.provider.id, messageId: await adapter.sendEmail(sendOpts) }
         : await sendWithFailover(opts.provider.id, sendOpts, db);
-      await createSentEmailLedger(sent.providerId, sendOpts, sent.messageId, db, "selfHostedSendAttemptId" in sent ? sent.selfHostedSendAttemptId : undefined);
+      await createSentEmailLedger(sent.providerId, sendOpts, sent.messageId, db);
       sentEmails.push(email);
 
       result.sent++;

@@ -81,7 +81,7 @@ export async function processForwardingRules(opts: ForwardingRunOptions = {}): P
     try {
       const send = opts.send ?? sendWithFailover;
       const sent = await send(providerId, sendOpts, db);
-      const email = await createSentEmailLedger(sent.providerId, sendOpts, sent.messageId, db, sent.selfHostedSendAttemptId);
+      const email = await createSentEmailLedger(sent.providerId, sendOpts, sent.messageId, db);
       await storeSentEmailContent(email.id, { text: body, html: sendOpts.html }, db);
       recordForwardingDelivery({
         rule_id: pendingItem.rule.id,

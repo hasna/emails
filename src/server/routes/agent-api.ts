@@ -140,8 +140,8 @@ export async function handle(req: Request, url: URL, path: string, method: strin
       };
       const db = getDatabase();
       const { sendWithFailover } = await import("../../lib/send.js");
-      const { messageId, providerId: actual, selfHostedSendAttemptId } = await sendWithFailover(providerId, sendOpts, db);
-      const email = await createSentEmailLedger(actual, sendOpts, messageId, db, selfHostedSendAttemptId);
+      const { messageId, providerId: actual } = await sendWithFailover(providerId, sendOpts, db);
+      const email = await createSentEmailLedger(actual, sendOpts, messageId, db);
       await storeSentEmailContent(email.id, { html: sendOpts.html, text: sendOpts.text }, db);
       return json({ id: email.id, message_id: messageId }, 201);
     } catch (e) { return internalError(e); }
