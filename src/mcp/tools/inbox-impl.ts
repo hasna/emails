@@ -1,24 +1,17 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import {
-  listInboundEmailSummaries, getInboundEmail, clearInboundEmails,
-  getInboundAttachmentPaths,
-  setInboundReadSummary, setInboundArchivedSummary, setInboundStarredSummary,
-  addInboundLabelSummary, removeInboundLabelSummary,
-} from "../../db/inbound.js";
-import { getDatabase } from "../../db/database.js";
+import { clearInboundEmails } from "../../db/inbound.js";
 import { cappedLimit, safeOffset } from "../../db/pagination.js";
 import { formatError, resolveId } from "../helpers.js";
-import { findVerificationCode, listVerificationCodeCandidates } from "../../lib/verification-code.js";
 import { extractEmailLinks } from "../../lib/email-links.js";
+import { resolveMailDataSource, type MailDataSource } from "../../lib/mail-data-source.js";
 import {
   MAILBOXES,
-  listMailboxSources,
-  listMailboxStatus,
-  searchMailbox,
   mailboxSourceFromRef,
   type Mailbox,
   type MailboxSource,
+  type MessageBody,
+  type TuiMessage,
 } from "../../cli/tui/data.js";
 
 const DEFAULT_INBOUND_LIST_LIMIT = 50;
@@ -35,6 +28,9 @@ function inboxLimit(value: number | undefined, fallback: number): number {
 }
 
 async function runAutoPull(opts: { s3?: boolean; limit?: number }) {
+  // Auto-pull is LOCAL S3 ingestion. In cloud mode the API is the source of truth and
+  // each poll already re-reads it through the seam, so there is nothing to pull.
+  if (resolveMailDataSource().mode !== "local") return { pulled: 0 };
   const { autoPull } = await import("../../cli/tui/autopull.js");
   return autoPull(opts);
 }
@@ -66,28 +62,101 @@ function mailboxSourceCliFlags(source: MailboxSource | undefined): string {
   return "";
 }
 
+// Partial-id resolution is a LOCAL SQLite concern; cloud ids arrive fully qualified
+// from the API, so we pass them through untouched.
+function resolveMailId(ds: MailDataSource, id: string): string {
+  return ds.mode === "local" ? resolveId("inbound_emails", id) : id;
+}
+
+function splitAddresses(value: string | null | undefined): string[] {
+  if (!value) return [];
+  return value.split(",").map((entry) => entry.trim()).filter(Boolean);
+}
+
+// A body-free source scope for list_inbound_emails: unread/starred/archived collapse
+// to their folder view; the residual (read/since) are applied as client-side filters.
+function folderForListFlags(flags: { unread?: boolean; starred?: boolean; archived?: boolean }): Mailbox {
+  if (flags.archived) return "archived";
+  if (flags.starred) return "starred";
+  if (flags.unread) return "unread";
+  return "inbox";
+}
+
+// The read/detail projection shared by get_inbound_email (and returned by the mail
+// mutation tools). Built from the seam's TuiMessage + MessageBody so cloud and local
+// yield the same shape.
+function messageDetail(msg: TuiMessage, body: MessageBody | null): Record<string, unknown> {
+  return {
+    id: msg.id,
+    thread_id: msg.thread_id,
+    from_address: body?.from ?? msg.from,
+    to_addresses: splitAddresses(body?.to ?? msg.to),
+    cc_addresses: splitAddresses(body?.cc),
+    subject: body?.subject ?? msg.subject,
+    received_at: body?.date ?? msg.date,
+    is_read: msg.is_read,
+    is_starred: msg.is_starred,
+    labels: msg.labels,
+    text_body: body?.text ?? null,
+    html_body: body?.html ?? null,
+    summary: body?.summary ?? "",
+    attachments: body?.attachments ?? [],
+  };
+}
+
+// The body-free mutation/summary projection: id + flags + subject, never body/headers.
+function messageSummary(msg: TuiMessage): Record<string, unknown> {
+  return {
+    id: msg.id,
+    thread_id: msg.thread_id,
+    from_address: msg.from,
+    to: msg.to,
+    subject: msg.subject,
+    received_at: msg.date,
+    is_read: msg.is_read,
+    is_starred: msg.is_starred,
+    labels: msg.labels,
+    attachments: msg.attachments,
+  };
+}
+
+async function seamMessageOrThrow(ds: MailDataSource, id: string): Promise<TuiMessage> {
+  const msg = await ds.getMessage(id);
+  if (!msg) throw new Error(`Inbound email not found: ${id}`);
+  return msg;
+}
+
 export function registerInboxTools(server: McpServer): void {
   // ─── INBOUND EMAILS ─────────────────────────────────────────────────────────
+  // The latest inbound email for an address, body-free, via the seam so cloud mode
+  // reads the API (not the empty local store). verificationCandidates already scopes
+  // to recipient (client-side in cloud), excludes sent, and orders newest-first.
   const getLatestInboundEmailForAddress = async (
     address: string,
     filters: { since?: string; from?: string; subject?: string },
-  ) => {
-    const db = getDatabase();
-    return listInboundEmailSummaries({
-      recipients: [address],
+  ): Promise<Record<string, unknown> | null> => {
+    const ds = resolveMailDataSource();
+    const [latest] = await ds.verificationCandidates(address, {
+      limit: 1,
       since: filters.since,
       from: filters.from,
       subject: filters.subject,
-      limit: 1,
-    }, db)[0] ?? null;
+    });
+    if (!latest) return null;
+    return {
+      id: latest.id,
+      from_address: latest.from_address,
+      subject: latest.subject,
+      received_at: latest.received_at,
+    };
   };
 
   const findVerificationMatchForAddress = async (
     address: string,
     filters: { since?: string; from?: string; subject?: string; limit?: number },
   ) => {
-    const candidates = listVerificationCodeCandidates(address, filters);
-    return findVerificationCode(candidates, filters);
+    const ds = resolveMailDataSource();
+    return ds.findLatest(address, filters);
   };
 
   server.tool(
@@ -101,10 +170,11 @@ export function registerInboxTools(server: McpServer): void {
     },
     async ({ source_id, provider_id, address, domain }) => {
       try {
+        const ds = resolveMailDataSource();
         const source = mailboxSourceInput({ source_id, provider_id, address, domain });
         return jsonText({
           source: source ?? null,
-          ...listMailboxStatus({ source }),
+          ...(await ds.listMailboxStatus({ source })),
           cli_equivalent: `mailery inbox mailboxes${mailboxSourceCliFlags(source)} --json`,
         });
       } catch (e) {
@@ -122,7 +192,8 @@ export function registerInboxTools(server: McpServer): void {
     },
     async ({ search, limit }) => {
       try {
-        const sources = listMailboxSources({ search, limit: inboxLimit(limit, 100) });
+        const ds = resolveMailDataSource();
+        const sources = await ds.listMailboxSources({ search, limit: inboxLimit(limit, 100) });
         return jsonText({
           sources,
           cli_equivalent: "mailery inbox sources --json",
@@ -149,12 +220,13 @@ export function registerInboxTools(server: McpServer): void {
     },
     async ({ query, mailbox, source_id, provider_id, address, domain, label, limit, offset }) => {
       try {
+        const ds = resolveMailDataSource();
         const pageLimit = inboxLimit(limit, DEFAULT_INBOUND_SEARCH_LIMIT);
         const pageOffset = safeOffset(offset);
         const source = mailboxSourceInput({ source_id, provider_id, address, domain });
         const selectedMailbox = mailboxFromInput(mailbox);
-        const rows = searchMailbox(query, {
-          mailbox: selectedMailbox,
+        const rows = await ds.listMailbox(selectedMailbox, {
+          search: query,
           source,
           label,
           limit: pageLimit + 1,
@@ -194,28 +266,29 @@ export function registerInboxTools(server: McpServer): void {
   },
   async ({ provider_id, since, limit, offset, unread, read, starred, archived, label, search }) => {
     try {
+      const ds = resolveMailDataSource();
       const pageLimit = inboxLimit(limit, DEFAULT_INBOUND_LIST_LIMIT);
       const pageOffset = safeOffset(offset);
-      const emails = listInboundEmailSummaries({
-        provider_id,
-        since,
-        limit: pageLimit + 1,
-        offset: pageOffset,
-        unread,
-        read,
-        starred,
-        archived,
+      const folder = folderForListFlags({ unread, starred, archived });
+      const source = provider_id ? mailboxSourceInput({ provider_id }) : undefined;
+      let rows = await ds.listMailbox(folder, {
+        source,
         label,
         search,
+        limit: pageLimit + 1,
+        offset: pageOffset,
       });
+      // read/since have no folder equivalent; apply them client-side over the seam page.
+      if (read) rows = rows.filter((row) => row.is_read);
+      if (since) rows = rows.filter((row) => row.date >= since);
       return {
         content: [{
           type: "text",
           text: JSON.stringify({
-            items: emails.slice(0, pageLimit),
+            items: rows.slice(0, pageLimit),
             limit: pageLimit,
             offset: pageOffset,
-            truncated: emails.length > pageLimit,
+            truncated: rows.length > pageLimit,
           }, null, 2),
         }],
       };
@@ -450,9 +523,10 @@ export function registerInboxTools(server: McpServer): void {
   },
   async ({ id }) => {
     try {
-      const email = getInboundEmail(resolveId("inbound_emails", id));
-      if (!email) throw new Error(`Inbound email not found: ${id}`);
-      return { content: [{ type: "text", text: JSON.stringify(email, null, 2) }] };
+      const ds = resolveMailDataSource();
+      const msg = await seamMessageOrThrow(ds, resolveMailId(ds, id));
+      const body = await ds.getMessageBody(msg);
+      return { content: [{ type: "text", text: JSON.stringify(messageDetail(msg, body), null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
     }
@@ -468,20 +542,21 @@ export function registerInboxTools(server: McpServer): void {
   },
   async ({ id, include_non_web }) => {
     try {
-      const email = getInboundEmail(resolveId("inbound_emails", id));
-      if (!email) throw new Error(`Inbound email not found: ${id}`);
+      const ds = resolveMailDataSource();
+      const msg = await seamMessageOrThrow(ds, resolveMailId(ds, id));
+      const body = await ds.getMessageBody(msg);
       return {
         content: [{ type: "text", text: JSON.stringify({
-          email_id: email.id,
-          from: email.from_address,
-          subject: email.subject,
-          received_at: email.received_at,
+          email_id: msg.id,
+          from: body?.from ?? msg.from,
+          subject: body?.subject ?? msg.subject,
+          received_at: body?.date ?? msg.date,
           links: extractEmailLinks({
-            text: email.text_body,
-            html: email.html_body,
+            text: body?.text ?? null,
+            html: body?.html ?? null,
             includeNonWeb: include_non_web === true,
           }),
-          cli_equivalent: `mailery inbox links ${email.id} --json${include_non_web ? " --all" : ""}`,
+          cli_equivalent: `mailery inbox links ${msg.id} --json${include_non_web ? " --all" : ""}`,
         }, null, 2) }],
       };
     } catch (e) {
@@ -512,8 +587,11 @@ export function registerInboxTools(server: McpServer): void {
   { email_id: z.string(), unread: z.boolean().optional().describe("Mark unread instead") },
   async ({ email_id, unread }) => {
     try {
-      const e = setInboundReadSummary(resolveId("inbound_emails", email_id), !unread);
-      return { content: [{ type: "text", text: JSON.stringify(e, null, 2) }] };
+      const ds = resolveMailDataSource();
+      const fullId = resolveMailId(ds, email_id);
+      await ds.setRead(fullId, !unread);
+      const msg = await seamMessageOrThrow(ds, fullId);
+      return { content: [{ type: "text", text: JSON.stringify(messageSummary(msg), null, 2) }] };
     } catch (e) { return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true }; }
   },
 );
@@ -524,8 +602,11 @@ export function registerInboxTools(server: McpServer): void {
   { email_id: z.string(), unarchive: z.boolean().optional().describe("Restore to inbox instead") },
   async ({ email_id, unarchive }) => {
     try {
-      const e = setInboundArchivedSummary(resolveId("inbound_emails", email_id), !unarchive);
-      return { content: [{ type: "text", text: JSON.stringify(e, null, 2) }] };
+      const ds = resolveMailDataSource();
+      const fullId = resolveMailId(ds, email_id);
+      await ds.setArchived(fullId, !unarchive);
+      const msg = await seamMessageOrThrow(ds, fullId);
+      return { content: [{ type: "text", text: JSON.stringify(messageSummary(msg), null, 2) }] };
     } catch (e) { return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true }; }
   },
 );
@@ -536,8 +617,11 @@ export function registerInboxTools(server: McpServer): void {
   { email_id: z.string(), unstar: z.boolean().optional().describe("Remove the star instead") },
   async ({ email_id, unstar }) => {
     try {
-      const e = setInboundStarredSummary(resolveId("inbound_emails", email_id), !unstar);
-      return { content: [{ type: "text", text: JSON.stringify(e, null, 2) }] };
+      const ds = resolveMailDataSource();
+      const fullId = resolveMailId(ds, email_id);
+      await ds.setStarred(fullId, !unstar);
+      const msg = await seamMessageOrThrow(ds, fullId);
+      return { content: [{ type: "text", text: JSON.stringify(messageSummary(msg), null, 2) }] };
     } catch (e) { return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true }; }
   },
 );
@@ -548,10 +632,11 @@ export function registerInboxTools(server: McpServer): void {
   { email_id: z.string(), label: z.string(), remove: z.boolean().optional().describe("Remove the label instead of adding") },
   async ({ email_id, label, remove }) => {
     try {
-      const e = remove
-        ? removeInboundLabelSummary(resolveId("inbound_emails", email_id), label)
-        : addInboundLabelSummary(resolveId("inbound_emails", email_id), label);
-      return { content: [{ type: "text", text: JSON.stringify(e, null, 2) }] };
+      const ds = resolveMailDataSource();
+      const fullId = resolveMailId(ds, email_id);
+      const labels = remove ? await ds.removeLabel(fullId, label) : await ds.addLabel(fullId, label);
+      const msg = await seamMessageOrThrow(ds, fullId);
+      return { content: [{ type: "text", text: JSON.stringify({ ...messageSummary(msg), labels }, null, 2) }] };
     } catch (e) { return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true }; }
   },
 );
@@ -565,8 +650,11 @@ export function registerInboxTools(server: McpServer): void {
   },
   async ({ email_id, filename }) => {
     try {
-      const paths = getInboundAttachmentPaths(resolveId("inbound_emails", email_id));
-      if (!paths) return { content: [{ type: "text", text: `Email not found: ${email_id}` }], isError: true };
+      const ds = resolveMailDataSource();
+      const fullId = resolveMailId(ds, email_id);
+      const msg = await ds.getMessage(fullId);
+      if (!msg) return { content: [{ type: "text", text: `Email not found: ${email_id}` }], isError: true };
+      const paths = await ds.getAttachmentPaths(fullId);
       const filtered = filename ? paths.filter((p) => p.filename === filename) : paths;
       return { content: [{ type: "text", text: JSON.stringify(filtered, null, 2) }] };
     } catch (e) {
@@ -586,22 +674,24 @@ export function registerInboxTools(server: McpServer): void {
   },
   async ({ query, provider_id, limit, offset }) => {
     try {
+      const ds = resolveMailDataSource();
       const pageLimit = inboxLimit(limit, DEFAULT_INBOUND_SEARCH_LIMIT);
       const pageOffset = safeOffset(offset);
-      const emails = listInboundEmailSummaries({
-        provider_id,
+      const source = provider_id ? mailboxSourceInput({ provider_id }) : undefined;
+      const rows = await ds.listMailbox("inbox", {
+        source,
+        search: query,
         limit: pageLimit + 1,
         offset: pageOffset,
-        search: query,
       });
       return {
         content: [{
           type: "text",
           text: JSON.stringify({
-            items: emails.slice(0, pageLimit),
+            items: rows.slice(0, pageLimit),
             limit: pageLimit,
             offset: pageOffset,
-            truncated: emails.length > pageLimit,
+            truncated: rows.length > pageLimit,
           }, null, 2),
         }],
       };
