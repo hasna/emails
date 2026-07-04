@@ -109,11 +109,6 @@ describe("public package entrypoint", () => {
 
   it("exposes only Mailery mode helpers from the explicit storage subpath", async () => {
     const storage = await import("./storage.js");
-    const migrations = await import("./db/pg-migrations.js");
-
-    // pg-migrations still ships (SQLite→PG schema definition) but is only
-    // reachable from its own module, never re-exported by the storage subpath.
-    expect(Array.isArray(migrations.PG_MIGRATIONS)).toBe(true);
 
     expect(typeof storage.getMaileryMode).toBe("function");
     expect(typeof storage.resolveMaileryMode).toBe("function");
@@ -137,11 +132,12 @@ describe("public package entrypoint", () => {
       scripts["build:mcp"] ?? "",
       scripts["build:server"] ?? "",
       scripts["build:lib"] ?? "",
-      scripts["build:pg-migrations"] ?? "",
     ].filter((command) => command.includes("bun build"));
     const tuiRuntimeBuild = scripts["build:tui-runtime"] ?? "";
 
-    expect(buildCommands).toHaveLength(5);
+    // pg-migrations was removed with the self-hosted PostgreSQL mirror subsystem.
+    expect(scripts["build:pg-migrations"]).toBeUndefined();
+    expect(buildCommands).toHaveLength(4);
     expect(buildCommands.every((command) => command.includes("--packages external"))).toBe(true);
     expect(buildCommands.every((command) => command.includes("--splitting"))).toBe(true);
     expect(tuiRuntimeBuild).toContain("scripts/build-tui-runtime.ts");

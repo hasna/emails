@@ -20,9 +20,6 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
-    "./pg-migrations": {
-      "import": "./dist/db/pg-migrations.js"
-    },
     "./storage": {
       "types": "./dist/storage.d.ts",
       "import": "./dist/storage.js"
@@ -30,9 +27,6 @@
     "./cloud": {
       "types": "./dist/cloud.d.ts",
       "import": "./dist/cloud.js"
-    },
-    "./dist/db/pg-migrations.js": {
-      "import": "./dist/db/pg-migrations.js"
     }
   },
   "files": [
@@ -45,13 +39,12 @@
   ],
   "scripts": {
     "clean": "rm -rf dist",
-    "build": "bun run clean && bun run build:cli && bun run build:tui-runtime && bun run build:mcp && bun run build:server && bun run build:lib && bun run build:pg-migrations && bun run build:types",
+    "build": "bun run clean && bun run build:cli && bun run build:tui-runtime && bun run build:mcp && bun run build:server && bun run build:lib && bun run build:types",
     "build:cli": "bun build src/cli/index.tsx --outdir dist/cli --target bun --packages external --splitting",
     "build:tui-runtime": "bun run scripts/build-tui-runtime.ts",
     "build:mcp": "bun build src/mcp/index.ts --outdir dist/mcp --target bun --packages external --splitting",
     "build:server": "bun build src/server/index.ts --outdir dist/server --target bun --packages external --splitting",
     "build:lib": "bun build src/index.ts src/storage.ts src/cloud.ts --outdir dist --target bun --packages external --splitting",
-    "build:pg-migrations": "bun build src/db/pg-migrations.ts --outdir dist/db --target bun --packages external --splitting",
     "build:types": "tsc --emitDeclarationOnly --outDir dist",
     "test": "bun test",
     "no-cloud:source": "bun test src/no-cloud-boundary.test.ts",

@@ -6,7 +6,6 @@ import { createMailbox, getMailboxFolderByRole, listMailboxes } from "./mailboxe
 import { createMailboxSource, getMailboxSource, listMailboxSources } from "./sources.js";
 import { createMailMessage, listMailboxMessageStates, upsertMailboxMessageState } from "./messages.js";
 import { storeInboundEmail } from "./inbound.js";
-import { PG_MIGRATIONS } from "./pg-migrations.js";
 
 beforeEach(() => {
   process.env["EMAILS_DB_PATH"] = ":memory:";
@@ -623,20 +622,17 @@ describe("mail architecture data model", () => {
     }
   });
 
-  it("keeps SQLite and PostgreSQL migrations in parity for the core model", () => {
+  it("keeps the SQLite core mail-architecture schema present", () => {
     const db = getDatabase();
-    const pgSql = PG_MIGRATIONS.join("\n");
     const expectedTables = ["mailboxes", "mail_folders", "mailbox_sources", "mail_messages", "mailbox_message_state"];
     const sqliteTables = new Set((db.query("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map((row) => row.name));
 
     for (const table of expectedTables) {
       expect(sqliteTables.has(table)).toBe(true);
-      expect(pgSql).toContain(`CREATE TABLE IF NOT EXISTS ${table}`);
     }
 
     for (const column of ["mail_message_id", "primary_mailbox_id", "primary_mailbox_source_id"]) {
       expect(sqliteColumns(db, "inbound_emails")).toContain(column);
-      expect(pgSql).toContain(`ADD COLUMN IF NOT EXISTS ${column}`);
     }
 
     expect(sqliteColumns(db, "mailbox_sources")).toEqual(expect.arrayContaining([
@@ -669,19 +665,5 @@ describe("mail architecture data model", () => {
     expect(sqliteIndex?.name).toBe("idx_mailbox_state_source_dedupe");
     expect(sqliteTrigger?.name).toBe("trg_providers_preserve_mail_history");
     expect(latestMigration.max_id).toBeGreaterThanOrEqual(44);
-    expect(pgSql).toContain("idx_mailbox_state_source_dedupe");
-    expect(pgSql).toContain("mailery_after_inbound_insert_architecture");
-    expect(pgSql).toContain("DROP TRIGGER IF EXISTS trg_mail_architecture_inbound_insert ON inbound_emails");
-    expect(pgSql).toContain("mailery_after_inbound_delete_architecture");
-    expect(pgSql).toContain("DROP TRIGGER IF EXISTS trg_mail_architecture_inbound_delete ON inbound_emails");
-    expect(pgSql).toContain("mailery_prevent_provider_delete_with_history");
-    expect(pgSql).toContain("INSERT INTO _migrations (id) VALUES (40)");
-    expect(pgSql).toContain("INSERT INTO _migrations (id) VALUES (41)");
-    expect(pgSql).toContain("INSERT INTO _migrations (id) VALUES (42)");
-    expect(pgSql).toContain("INSERT INTO _migrations (id) VALUES (43)");
-    expect(pgSql).toContain("INSERT INTO _migrations (id) VALUES (44)");
-    expect(pgSql).toContain("INSERT INTO _migrations (id) VALUES (45)");
-    expect(pgSql).toContain("ALTER TABLE inbound_emails ADD COLUMN IF NOT EXISTS attachment_paths");
-    expect(pgSql.match(/NULLIF\((?:NEW\.|inbound\.)?read_at, ''\)::TIMESTAMPTZ/g)).toHaveLength(5);
   });
 });
