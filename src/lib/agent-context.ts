@@ -10,6 +10,7 @@ import { assessDomainReadiness } from "./domain-readiness.js";
 import { domainInboundReadinessSignals } from "./domain-inbound-evidence.js";
 import { getInboundBuckets, loadConfig } from "./config.js";
 import { enrichAddresses, type EnrichedAddress } from "./address-ownership.js";
+import { resolveMailDataSource } from "./mail-data-source.js";
 import { resolveMaileryMode, type MaileryMode, type MaileryModeLabel, type MaileryModeSource } from "./mode.js";
 import {
   listMailboxSources,
@@ -360,10 +361,42 @@ export function getEmailSystemStatus(db: Database = getDatabase()): EmailSystemS
   };
 }
 
+// The runtime status backs `mailery status`, `mailery agent context`, and the MCP
+// status resources/tools. In cloud mode the inbox/mailbox/source reads must come from
+// the API (not the empty local DB), so route those specific reads through the seam.
+// Provider/domain/address/provisioning state stays local — that is local config, not
+// message data. In local mode the seam resolves to SQLite, so the result is unchanged.
 export async function getEmailSystemStatusForRuntime(
   db: Database = getDatabase(),
 ): Promise<EmailSystemStatus> {
-  return getEmailSystemStatus(db);
+  const status = getEmailSystemStatus(db);
+  const ds = resolveMailDataSource();
+  if (ds.mode !== "cloud") return status;
+
+  const [counts, mailboxes, sources] = await Promise.all([
+    ds.mailboxCounts(),
+    ds.listMailboxStatus(),
+    ds.listMailboxSources({ limit: Math.max(SOURCE_STATUS_LIMIT + 1, 1000) }),
+  ]);
+  const receivedTotal = counts.inbox + counts.archived + counts.spam + counts.trash;
+  return {
+    ...status,
+    inbox: {
+      ...status.inbox,
+      total: receivedTotal,
+      unread: counts.unread,
+    },
+    mailboxes,
+    sources: {
+      total: sources.length,
+      active: sources.length,
+      legacy: 0,
+      orphaned: 0,
+      items: sources.slice(0, SOURCE_STATUS_LIMIT),
+      limit: SOURCE_STATUS_LIMIT,
+      truncated: sources.length > SOURCE_STATUS_LIMIT,
+    },
+  };
 }
 
 export function formatEmailSystemStatus(status: EmailSystemStatus): string {

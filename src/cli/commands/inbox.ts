@@ -661,8 +661,8 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .description("Show sync status for all ingestion sources")
     .action(async () => {
       try {
-        const { getEmailSystemStatus } = await import("../../lib/agent-context.js");
-        const status = getEmailSystemStatus();
+        const { getEmailSystemStatusForRuntime } = await import("../../lib/agent-context.js");
+        const status = await getEmailSystemStatusForRuntime();
         output(status.inbox, formatInboxSyncStatus(status));
       } catch (e) {
         handleError(e);
@@ -674,8 +674,8 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .description("Show source-aware mailbox sync status")
     .action(async () => {
       try {
-        const { getEmailSystemStatus } = await import("../../lib/agent-context.js");
-        const status = getEmailSystemStatus();
+        const { getEmailSystemStatusForRuntime } = await import("../../lib/agent-context.js");
+        const status = await getEmailSystemStatusForRuntime();
         output({ inbox: status.inbox, mailboxes: status.mailboxes, sources: status.sources, cli_equivalents: status.cli_equivalents }, formatInboxSyncStatus(status));
       } catch (e) {
         handleError(e);

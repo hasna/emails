@@ -104,8 +104,8 @@ export function registerAgentTools(server: McpServer): void {
     {},
     async () => {
       try {
-        const { getEmailSystemStatus } = await import("../../lib/agent-context.js");
-        return json({ ...getEmailSystemStatus(), cli_equivalent: "mailery status --json" });
+        const { getEmailSystemStatusForRuntime } = await import("../../lib/agent-context.js");
+        return json({ ...(await getEmailSystemStatusForRuntime()), cli_equivalent: "mailery status --json" });
       } catch (e) {
         return { content: [{ type: "text" as const, text: `Error: ${formatError(e)}` }], isError: true };
       }
@@ -118,8 +118,8 @@ export function registerAgentTools(server: McpServer): void {
     {},
     async () => {
       try {
-        const { getAgentContext } = await import("../../lib/agent-context.js");
-        return json({ ...getAgentContext(), cli_equivalent: "mailery agent context --json" });
+        const { getAgentContextForRuntime } = await import("../../lib/agent-context.js");
+        return json({ ...(await getAgentContextForRuntime()), cli_equivalent: "mailery agent context --json" });
       } catch (e) {
         return { content: [{ type: "text" as const, text: `Error: ${formatError(e)}` }], isError: true };
       }

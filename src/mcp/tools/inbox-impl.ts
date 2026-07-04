@@ -707,8 +707,8 @@ export function registerInboxTools(server: McpServer): void {
     {},
     async () => {
       try {
-        const { getEmailSystemStatus } = await import("../../lib/agent-context.js");
-        const status = getEmailSystemStatus();
+        const { getEmailSystemStatusForRuntime } = await import("../../lib/agent-context.js");
+        const status = await getEmailSystemStatusForRuntime();
         return { content: [{ type: "text", text: JSON.stringify({
           inbox: status.inbox,
           mailboxes: status.mailboxes,
