@@ -674,11 +674,17 @@ export class ApiMailDataSource implements MailDataSource {
 
   async getAttachmentPaths(id: string): Promise<AttachmentPath[]> {
     const full = await this.fetchFullMessage(id);
-    return (full.attachments ?? []).map((attachment) => ({
-      filename: attachment.filename,
-      content_type: attachment.contentType,
-      size: attachment.sizeBytes,
-    }));
+    return (full.attachments ?? []).map((attachment) => {
+      const url = attachment.download_url ?? attachment.downloadUrl;
+      // Surface the server download URL so cloud `get_attachment` / `inbox attachment`
+      // return a fetchable location instead of bare metadata.
+      return {
+        filename: attachment.filename,
+        content_type: attachment.contentType,
+        size: attachment.sizeBytes,
+        ...(url ? { s3_url: url } : {}),
+      };
+    });
   }
 
   async listLabelSummaries(_opts?: ListLabelSummaryOptions): Promise<LabelSummary[]> {

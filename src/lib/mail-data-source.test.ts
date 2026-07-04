@@ -237,6 +237,23 @@ describe("ApiMailDataSource reads", () => {
     expect(bodies.map((entry) => entry.body?.text)).toEqual(["first", "reply"]);
   });
 
+  it("surfaces the cloud attachment download URL in getAttachmentPaths", async () => {
+    const { dataSource } = createApi({
+      messages: {
+        a1: fullMessage({
+          id: "a1",
+          attachments: [{ id: "att1", filename: "invoice.pdf", contentType: "application/pdf", sizeBytes: 2048, download_url: "https://cloud.test/api/v1/attachments/att1/download" }],
+        }),
+      },
+    });
+
+    const paths = await dataSource.getAttachmentPaths("a1");
+
+    expect(paths).toEqual([
+      expect.objectContaining({ filename: "invoice.pdf", content_type: "application/pdf", size: 2048, s3_url: "https://cloud.test/api/v1/attachments/att1/download" }),
+    ]);
+  });
+
   it("falls back to the open message body when there is no thread", async () => {
     const { dataSource } = createApi({
       messages: { m1: fullMessage({ id: "m1", subject: "solo", textBody: "only me" }) },
