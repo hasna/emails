@@ -2,7 +2,7 @@ import type { Command } from "commander";
 import type { EmailSystemStatus } from "../../lib/agent-context.js";
 import chalk from "../../lib/chalk-lite.js";
 import {
-  getInboundEmailSummary, clearInboundEmails,
+  getInboundEmailSummary,
   getReceivedInboundCount, getLatestReceivedInboundAt,
   getUnreadCount, normalizeEmailAddress,
 } from "../../db/inbound.js";
@@ -465,6 +465,13 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
           output({ unread: counts.unread }, String(counts.unread));
           return;
         }
+        // --by-address is a local-only SQL rollup over inbound_recipients; there is no
+        // server endpoint for it. In cloud mode fail cleanly instead of querying the
+        // empty local DB (which would misleadingly report zero unread).
+        if (resolveMailDataSource().mode !== "local") {
+          handleError(new Error("`inbox unread-count --by-address` is not available in cloud mode. Use `mailery inbox unread-count` for the total unread count."));
+          return;
+        }
         const db = getDatabase();
         const limit = parsePositiveIntOption(opts.limit, 50);
         const offset = parseNonNegativeIntOption(opts.offset);
@@ -912,11 +919,16 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .option("--yes", "Skip confirmation prompt")
     .action(async (opts: { provider?: string; yes?: boolean }) => {
       try {
+        const ds = resolveMailDataSource();
         const target = opts.provider ? `for provider ${opts.provider}` : "for all providers";
-        await confirmDestructiveAction(`Clear local inbox emails ${target}?`, opts.yes);
-        const db = getDatabase();
-        const deleted = clearInboundEmails(opts.provider, db);
-        console.log(chalk.green(`✓ Cleared ${deleted} email(s)`));
+        // Cloud mode deletes on the server (scoped to the inbox folder), so drop the
+        // "local" wording; confirmation semantics are otherwise unchanged.
+        const scope = ds.mode === "local" ? "local inbox emails" : "inbox emails";
+        await confirmDestructiveAction(`Clear ${scope} ${target}?`, opts.yes);
+        // local: wipes the inbound store (optionally by provider). cloud: drains a bulk
+        // delete over the inbox folder (scoped to the provider's mailbox when resolvable).
+        const { cleared } = await ds.clear({ providerId: opts.provider });
+        console.log(chalk.green(`✓ Cleared ${cleared} email(s)`));
       } catch (e) {
         handleError(e);
       }

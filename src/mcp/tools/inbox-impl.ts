@@ -1,6 +1,5 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { clearInboundEmails } from "../../db/inbound.js";
 import { cappedLimit, safeOffset } from "../../db/pagination.js";
 import { formatError, resolveId } from "../helpers.js";
 import { extractEmailLinks } from "../../lib/email-links.js";
@@ -573,8 +572,11 @@ export function registerInboxTools(server: McpServer): void {
   },
   async ({ provider_id }) => {
     try {
-      const count = clearInboundEmails(provider_id);
-      return { content: [{ type: "text", text: `Cleared ${count} inbound email(s)` }] };
+      // local: wipes the inbound store (optionally by provider). cloud: drains a
+      // server-side bulk delete over the inbox folder through the seam.
+      const ds = resolveMailDataSource();
+      const { cleared } = await ds.clear({ providerId: provider_id });
+      return { content: [{ type: "text", text: `Cleared ${cleared} inbound email(s)` }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
     }
