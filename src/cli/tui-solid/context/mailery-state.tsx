@@ -1,33 +1,22 @@
-import { createContext, createMemo, onCleanup, onMount, useContext, type ParentProps } from "solid-js";
+import { createContext, createMemo, createResource, onCleanup, onMount, useContext, type ParentProps } from "solid-js";
 import { createStore } from "solid-js/store";
 import {
   ALL_ADDRESSES,
   addressChoiceByAddress,
   COMMON_LABELS,
   MAILBOXES,
-  archiveMessage,
   defaultFromAddress,
   getConversationBodies,
-  getMessageBody,
   getSettings,
   groupMailboxMessages,
   listDomainSummaries,
   listInboxAddresses,
-  listLabelSummaries,
-  listMailbox,
-  mailboxCounts,
   mailboxGroupModeLabel,
-  markRead,
   labelNameKey,
   normalizeMailboxGroupMode,
   normalizedLabelName,
   replyDefaults,
-  sendComposed,
   setSetting as persistSetting,
-  toggleMessageLabel,
-  toggleRead as toggleMessageRead,
-  toggleStar as toggleMessageStar,
-  type ComposeInput,
   type DomainSummary,
   type InboxAddressChoice,
   type LabelSummary,
@@ -40,6 +29,7 @@ import {
   type TuiSettings,
   type TuiThreadBody,
 } from "../../tui/data.js";
+import { resolveMailDataSource } from "../../../lib/mail-data-source.js";
 import { autoPull } from "../../tui/autopull.js";
 import { extractEmailLinks, type ExtractedEmailLink } from "../../../lib/email-links.js";
 import { loadEmailDigest } from "../../../lib/email-digest.js";
@@ -193,11 +183,16 @@ function createMaileryStore(initialMailbox?: Mailbox) {
     lastError: null,
   });
 
+  // The active mail data source: `local` (SQLite) or `cloud` (API client). All
+  // message reads/writes below flow through this seam so the TUI works in both
+  // modes; local-only concepts (domains, address picker, settings, threaded
+  // conversation bodies) still read the local store directly.
+  const ds = resolveMailDataSource();
+
   const currentAddress = createMemo(() => selectedAddress(state));
   const currentMessage = createMemo(() => selectedMessage(state));
-  const currentBody = createMemo<MessageBody | null>(() => {
-    const message = currentMessage();
-    return message ? getMessageBody(message) : null;
+  const [currentBody] = createResource(currentMessage, async (message): Promise<MessageBody | null> => {
+    return message ? await ds.getMessageBody(message) : null;
   });
   const currentConversation = createMemo<TuiThreadBody[]>(() => {
     const message = currentMessage();
@@ -240,31 +235,33 @@ function createMaileryStore(initialMailbox?: Mailbox) {
     if (sidebarMetaTimer) clearTimeout(sidebarMetaTimer);
     sidebarMetaTimer = setTimeout(() => {
       sidebarMetaTimer = undefined;
-      try {
-        // Load the full address list here (off the critical path): the observed-address scan
-        // is the cold-start cost (~200ms on a large mailbox), and the message list doesn't
-        // need it — only the picker + counts do.
-        const loaded = loadAddresses(addressSearch);
-        const selected = resolveAddressChoice(state.selectedAddressId, [...loaded, ...state.addresses]);
-        // Keep the selected inbox in the rendered picker list even when it sits beyond the
-        // list cap, so it shows its marker and the inbox stays filtered to it.
-        const addresses = selected.id === ALL_ADDRESSES.id || loaded.some((item) => item.id === selected.id)
-          ? loaded
-          : loaded[0]?.id === ALL_ADDRESSES.id
-            ? [loaded[0], selected, ...loaded.slice(1)]
-            : [selected, ...loaded];
-        setState({
-          addresses,
-          counts: mailboxCounts({ source }),
-          labels: listLabelSummaries({ limit: 80, search: state.labelSearch || undefined }),
-        });
-      } catch (error) {
-        setState("lastError", error instanceof Error ? error.message : String(error));
-      }
+      void (async () => {
+        try {
+          // Load the full address list here (off the critical path): the observed-address scan
+          // is the cold-start cost (~200ms on a large mailbox), and the message list doesn't
+          // need it — only the picker + counts do.
+          const loaded = loadAddresses(addressSearch);
+          const selected = resolveAddressChoice(state.selectedAddressId, [...loaded, ...state.addresses]);
+          // Keep the selected inbox in the rendered picker list even when it sits beyond the
+          // list cap, so it shows its marker and the inbox stays filtered to it.
+          const addresses = selected.id === ALL_ADDRESSES.id || loaded.some((item) => item.id === selected.id)
+            ? loaded
+            : loaded[0]?.id === ALL_ADDRESSES.id
+              ? [loaded[0], selected, ...loaded.slice(1)]
+              : [selected, ...loaded];
+          const [counts, labels] = await Promise.all([
+            ds.mailboxCounts({ source }),
+            ds.listLabelSummaries({ limit: 80, search: state.labelSearch || undefined }),
+          ]);
+          setState({ addresses, counts, labels });
+        } catch (error) {
+          setState("lastError", error instanceof Error ? error.message : String(error));
+        }
+      })();
     }, 0);
   };
 
-  const reload = (options?: { preserveSelection?: boolean; addressSearch?: string }) => {
+  const reload = async (options?: { preserveSelection?: boolean; addressSearch?: string }): Promise<void> => {
     const preserveSelection = options?.preserveSelection ?? true;
     setState("loading", true);
     try {
@@ -273,7 +270,7 @@ function createMaileryStore(initialMailbox?: Mailbox) {
       // The full address list, counts, and labels load off the critical path below.
       const selected = resolveAddressChoice(state.selectedAddressId, state.addresses);
       const source = sourceForAddress(selected);
-      const messages = listMailbox(state.mailbox, {
+      const messages = await ds.listMailbox(state.mailbox, {
         limit: PAGE_SIZE + 1,
         offset: pageOffset(state.page),
         search: state.search,
@@ -317,7 +314,7 @@ function createMaileryStore(initialMailbox?: Mailbox) {
     if (!message) return;
     setState("selectedMessageId", message.id);
     if (!message.is_read) {
-      markRead(message);
+      void ds.setRead(message.id, true);
       setState("messages", (item) => item.id === message.id, "is_read", true);
       setState("counts", "unread", Math.max(0, state.counts.unread - 1));
     }
@@ -364,16 +361,15 @@ function createMaileryStore(initialMailbox?: Mailbox) {
 
   const sendCompose = async () => {
     if (!state.compose) return;
-    const input: ComposeInput = {
+    const result = await ds.send({
       from: state.compose.from,
       to: state.compose.to,
       subject: state.compose.subject,
       body: state.compose.body,
-      replyTo: state.compose.mode === "reply" ? state.compose.replyTo : undefined,
-    };
-    const result = await sendComposed(input);
+      replyToId: state.compose.mode === "reply" ? state.compose.replyTo?.id : undefined,
+    });
     setState("compose", null);
-    reload({ preserveSelection: false });
+    void reload({ preserveSelection: false });
     return result;
   };
 
@@ -383,12 +379,16 @@ function createMaileryStore(initialMailbox?: Mailbox) {
     setState("selectedMessageId", state.messages[next]?.id ?? null);
   };
 
-  const toggleSelectedLabel = (label: string) => {
+  const toggleSelectedLabel = async (label: string) => {
     const message = currentMessage();
     if (!message) return;
-    const labels = toggleMessageLabel(message, label);
+    const normalized = normalizedLabelName(label);
+    const has = message.labels.some((existing) => labelNameKey(existing) === labelNameKey(normalized));
+    const labels = has
+      ? await ds.removeLabel(message.id, normalized)
+      : await ds.addLabel(message.id, normalized);
     setState("messages", (item) => item.id === message.id, "labels", labels);
-    setState("labels", listLabelSummaries({ limit: 80, search: state.labelSearch || undefined }));
+    setState("labels", await ds.listLabelSummaries({ limit: 80, search: state.labelSearch || undefined }));
   };
 
   const actions = {
@@ -406,7 +406,7 @@ function createMaileryStore(initialMailbox?: Mailbox) {
       if (dialog === "filter" || dialog === "search") setState("searchDraft", state.search);
       if (dialog === "digest") void loadDigestSnapshot(state.digestPeriod, { local: true });
       if (dialog === "domains") reloadWorkspace();
-      if (dialog === "labels") setState("labels", listLabelSummaries({ limit: 80 }));
+      if (dialog === "labels") void ds.listLabelSummaries({ limit: 80 }).then((labels) => setState("labels", labels));
       setState("dialog", dialog);
     },
     closeDialog() {
@@ -508,31 +508,33 @@ function createMaileryStore(initialMailbox?: Mailbox) {
       if (labelSearchTimer) clearTimeout(labelSearchTimer);
       labelSearchTimer = setTimeout(() => {
         labelSearchTimer = undefined;
-        setState("labels", listLabelSummaries({ limit: 80, search: value || undefined }));
+        void ds.listLabelSummaries({ limit: 80, search: value || undefined }).then((labels) => setState("labels", labels));
       }, 160);
     },
     setLinkIndex(index: number) {
       setState("linkIndex", Math.max(0, Math.min(currentLinks().length - 1, index)));
     },
-    toggleStar() {
+    async toggleStar() {
       const message = currentMessage();
       if (!message) return;
-      const isStarred = toggleMessageStar(message);
+      const isStarred = !message.is_starred;
+      await ds.setStarred(message.id, isStarred);
       setState("messages", (item) => item.id === message.id, "is_starred", isStarred);
-      reload({ preserveSelection: true });
+      void reload({ preserveSelection: true });
     },
-    toggleRead() {
+    async toggleRead() {
       const message = currentMessage();
       if (!message) return;
-      const isRead = toggleMessageRead(message);
+      const isRead = !message.is_read;
+      await ds.setRead(message.id, isRead);
       setState("messages", (item) => item.id === message.id, "is_read", isRead);
-      reload({ preserveSelection: true });
+      void reload({ preserveSelection: true });
     },
-    archive() {
+    async archive() {
       const message = currentMessage();
       if (!message) return;
-      archiveMessage(message, true);
-      reload({ preserveSelection: false });
+      await ds.setArchived(message.id, true);
+      void reload({ preserveSelection: false });
     },
     toggleSelectedLabel,
     startCompose,
