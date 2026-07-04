@@ -1,7 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { cappedLimit, safeOffset } from "../../db/pagination.js";
-import { formatError, resolveId } from "../helpers.js";
+import { formatError } from "../helpers.js";
 import { extractEmailLinks } from "../../lib/email-links.js";
 import { resolveMailDataSource, type MailDataSource } from "../../lib/mail-data-source.js";
 import {
@@ -61,10 +61,11 @@ function mailboxSourceCliFlags(source: MailboxSource | undefined): string {
   return "";
 }
 
-// Partial-id resolution is a LOCAL SQLite concern; cloud ids arrive fully qualified
-// from the API, so we pass them through untouched.
-function resolveMailId(ds: MailDataSource, id: string): string {
-  return ds.mode === "local" ? resolveId("inbound_emails", id) : id;
+// Resolve a possibly-short id to a full id through the seam: local SQLite partial-id
+// resolution, or a bounded cloud prefix match (so a truncated id works in cloud too,
+// matching the CLI).
+function resolveMailId(ds: MailDataSource, id: string): Promise<string> {
+  return ds.resolveId(id);
 }
 
 function splitAddresses(value: string | null | undefined): string[] {
@@ -523,7 +524,7 @@ export function registerInboxTools(server: McpServer): void {
   async ({ id }) => {
     try {
       const ds = resolveMailDataSource();
-      const msg = await seamMessageOrThrow(ds, resolveMailId(ds, id));
+      const msg = await seamMessageOrThrow(ds, await resolveMailId(ds, id));
       const body = await ds.getMessageBody(msg);
       return { content: [{ type: "text", text: JSON.stringify(messageDetail(msg, body), null, 2) }] };
     } catch (e) {
@@ -542,7 +543,7 @@ export function registerInboxTools(server: McpServer): void {
   async ({ id, include_non_web }) => {
     try {
       const ds = resolveMailDataSource();
-      const msg = await seamMessageOrThrow(ds, resolveMailId(ds, id));
+      const msg = await seamMessageOrThrow(ds, await resolveMailId(ds, id));
       const body = await ds.getMessageBody(msg);
       return {
         content: [{ type: "text", text: JSON.stringify({
@@ -590,7 +591,7 @@ export function registerInboxTools(server: McpServer): void {
   async ({ email_id, unread }) => {
     try {
       const ds = resolveMailDataSource();
-      const fullId = resolveMailId(ds, email_id);
+      const fullId = await resolveMailId(ds, email_id);
       await ds.setRead(fullId, !unread);
       const msg = await seamMessageOrThrow(ds, fullId);
       return { content: [{ type: "text", text: JSON.stringify(messageSummary(msg), null, 2) }] };
@@ -605,7 +606,7 @@ export function registerInboxTools(server: McpServer): void {
   async ({ email_id, unarchive }) => {
     try {
       const ds = resolveMailDataSource();
-      const fullId = resolveMailId(ds, email_id);
+      const fullId = await resolveMailId(ds, email_id);
       await ds.setArchived(fullId, !unarchive);
       const msg = await seamMessageOrThrow(ds, fullId);
       return { content: [{ type: "text", text: JSON.stringify(messageSummary(msg), null, 2) }] };
@@ -620,7 +621,7 @@ export function registerInboxTools(server: McpServer): void {
   async ({ email_id, unstar }) => {
     try {
       const ds = resolveMailDataSource();
-      const fullId = resolveMailId(ds, email_id);
+      const fullId = await resolveMailId(ds, email_id);
       await ds.setStarred(fullId, !unstar);
       const msg = await seamMessageOrThrow(ds, fullId);
       return { content: [{ type: "text", text: JSON.stringify(messageSummary(msg), null, 2) }] };
@@ -635,7 +636,7 @@ export function registerInboxTools(server: McpServer): void {
   async ({ email_id, label, remove }) => {
     try {
       const ds = resolveMailDataSource();
-      const fullId = resolveMailId(ds, email_id);
+      const fullId = await resolveMailId(ds, email_id);
       const labels = remove ? await ds.removeLabel(fullId, label) : await ds.addLabel(fullId, label);
       const msg = await seamMessageOrThrow(ds, fullId);
       return { content: [{ type: "text", text: JSON.stringify({ ...messageSummary(msg), labels }, null, 2) }] };
@@ -653,7 +654,7 @@ export function registerInboxTools(server: McpServer): void {
   async ({ email_id, filename }) => {
     try {
       const ds = resolveMailDataSource();
-      const fullId = resolveMailId(ds, email_id);
+      const fullId = await resolveMailId(ds, email_id);
       const msg = await ds.getMessage(fullId);
       if (!msg) return { content: [{ type: "text", text: `Email not found: ${email_id}` }], isError: true };
       const paths = await ds.getAttachmentPaths(fullId);

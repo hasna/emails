@@ -88,6 +88,94 @@ function startFakeCloud() {
   return { server, base: `http://127.0.0.1:${server.port}`, bulk };
 }
 
+// A fake cloud that serves a fixed message set: a keyset-paged GET /messages (cursor =
+// numeric index, honoring limit + a substring q), GET /messages/:id (400 for an unknown
+// or short id, like the real server), and a PATCH that flips flags. Enough to drive the
+// real CLI `inbox list` / `inbox read` end-to-end in cloud mode.
+function startFakeCloudWithMessages(seed: Array<Record<string, unknown>>) {
+  const messages = seed.map((m) => ({ ccAddresses: [], htmlBody: null, summary: null, direction: "inbound", isStarred: false, isImportant: false, attachments: [], createdAt: "2026-07-01T00:00:00.000Z", receivedAt: "2026-07-01T00:00:00.000Z", ...m }));
+  const server = Bun.serve({
+    port: 0,
+    fetch(req) {
+      const url = new URL(req.url);
+      const path = url.pathname;
+      const j = (b: unknown, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
+      if (path === "/api/v1/mailboxes" && req.method === "GET") return j({ data: [] });
+      if (path === "/api/v1/messages/groups" && req.method === "GET") return j({ inbox: messages.length, unread: messages.filter((m) => !m["isRead"]).length });
+      if (path === "/api/v1/messages" && req.method === "GET") {
+        const q = (url.searchParams.get("q") ?? "").toLowerCase();
+        const limit = Number(url.searchParams.get("limit") ?? "50");
+        const start = Number(url.searchParams.get("cursor") ?? "0");
+        const filtered = q
+          ? messages.filter((m) => `${m["subject"]} ${m["fromAddress"]} ${(m["toAddresses"] as string[]).join(" ")}`.toLowerCase().includes(q))
+          : messages;
+        const slice = filtered.slice(start, start + limit);
+        const next = start + limit;
+        return j({ data: slice, next_cursor: next < filtered.length ? String(next) : null });
+      }
+      const byId = path.match(/^\/api\/v1\/messages\/([^/]+)$/);
+      if (byId) {
+        const id = decodeURIComponent(byId[1]!);
+        const found = messages.find((m) => m["id"] === id);
+        if (!found) return j({ error: { code: "bad_request", message: "invalid id or value" } }, 400);
+        if (req.method === "GET") return j(found);
+        if (req.method === "PATCH") return req.json().then((patch) => { Object.assign(found, patch as object); return j(found); });
+      }
+      return j({ data: [], next_cursor: null });
+    },
+  });
+  return { server, base: `http://127.0.0.1:${server.port}` };
+}
+
+describe("inbox read — cloud mode (FIX-3 short id, FIX-4 read flags)", () => {
+  const fullId = "0190aaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+
+  function cloudEnv(dir: string, base: string): NodeJS.ProcessEnv {
+    const homePath = join(dir, "home");
+    mkdirSync(homePath, { recursive: true });
+    return { ...baseLocalEnv(join(dir, "emails.db"), homePath), MAILERY_MODE: "cloud", MAILERY_API_URL: base, MAILERY_API_KEY: "test-token" };
+  }
+
+  it("FIX-3: the short id printed by `inbox list` reads verbatim in cloud mode", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "read-shortid-"));
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+    const { server, base } = startFakeCloudWithMessages([
+      { id: fullId, subject: "Target", fromAddress: "a@x.com", toAddresses: ["me@x.com"], isRead: true, label_names: [], textBody: "hi" },
+      { id: "0190ffff-1111-2222-3333-444444444444", subject: "Other", fromAddress: "b@x.com", toAddresses: ["me@x.com"], isRead: true, label_names: [], textBody: "nope" },
+    ]);
+    cleanups.push(() => server.stop(true));
+    const env = cloudEnv(dir, base);
+
+    const shortId = fullId.slice(0, 8); // exactly what `inbox list` prints
+    const list = await runCli(["inbox", "list", "--limit", "10"], env);
+    expect(list.code).toBe(0);
+    expect(list.out).toContain(shortId); // list prints the short id
+
+    const read = await runCli(["inbox", "read", shortId], env);
+    expect(read.code).toBe(0); // the printed short id works verbatim
+    expect(read.out).toContain("Target");
+  }, 30_000);
+
+  it("FIX-4: reading an unread cloud message shows 'read', never a contradictory 'unread'", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "read-flags-"));
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+    const { server, base } = startFakeCloudWithMessages([
+      { id: fullId, subject: "Hello", fromAddress: "a@x.com", toAddresses: ["me@x.com"], isRead: false, label_names: ["unread", "Billing"], textBody: "hi" },
+    ]);
+    cleanups.push(() => server.stop(true));
+    const env = cloudEnv(dir, base);
+
+    // Opening an unread message marks it read; the Flags line must read "read" (+ Billing)
+    // with no leftover system "unread" label.
+    const read = await runCli(["inbox", "read", fullId], env);
+    expect(read.code).toBe(0);
+    const flagsLine = read.out.split("\n").find((line) => line.includes("Flags:")) ?? "";
+    expect(flagsLine).toContain("read");
+    expect(flagsLine).toContain("Billing");
+    expect(flagsLine).not.toContain("unread");
+  }, 30_000);
+});
+
 describe("inbox clear — cloud mode routes through the server bulk delete", () => {
   it("CLI clear issues POST /messages/bulk (action=delete) over the inbox folder", async () => {
     const dir = mkdtempSync(join(tmpdir(), "clear-cloud-"));

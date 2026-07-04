@@ -39,9 +39,11 @@ function resolveInboundEmailId(id: string): string {
   return resolvePartialIdOrThrow(getDatabase(), "inbound_emails", id);
 }
 
-// Partial-id resolution is a LOCAL SQLite concern; cloud ids arrive fully qualified.
-function resolveMailId(ds: MailDataSource, id: string): string {
-  return ds.mode === "local" ? resolveInboundEmailId(id) : id;
+// Resolve a possibly-short id (the 8-char id printed by `inbox list`) to a full id
+// through the seam: local SQLite partial-id resolution, or a bounded cloud prefix match
+// so the id shown by `inbox list` is usable verbatim in cloud read/mark/star/label.
+function resolveMailId(ds: MailDataSource, id: string): Promise<string> {
+  return ds.resolveId(id);
 }
 
 // unread/starred/archived collapse to their folder view; read/since have no folder
@@ -90,6 +92,13 @@ function seamMessageDetail(msg: TuiMessage, body: MessageBody | null): SeamMailD
     .map((att) => (att.location!.startsWith("s3://")
       ? { filename: att.filename, s3_url: att.location! }
       : { filename: att.filename, local_path: att.location! }));
+  // A read message must not display the system `unread` label alongside the "read" flag
+  // (the cloud read flow fetches the message while unread, then marks it read without
+  // re-fetching its labels). Suppress it here so `Flags:` reads just "read" — parity with
+  // local, which has no such label.
+  const label_ids = msg.is_read
+    ? msg.labels.filter((label) => label.trim().toLowerCase() !== "unread")
+    : msg.labels;
   return {
     id: msg.id,
     thread_id: msg.thread_id,
@@ -101,7 +110,7 @@ function seamMessageDetail(msg: TuiMessage, body: MessageBody | null): SeamMailD
     is_read: msg.is_read,
     is_starred: msg.is_starred,
     is_archived: (body?.flags ?? []).includes("archived"),
-    label_ids: msg.labels,
+    label_ids,
     text_body: body?.text ?? null,
     html_body: body?.html ?? null,
     summary: body?.summary ?? "",
@@ -182,7 +191,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
 
   async function getInboundLinks(emailId: string, opts?: { all?: boolean }): Promise<InboundLinksResult> {
     const ds = resolveMailDataSource();
-    const fullId = resolveMailId(ds, emailId);
+    const fullId = await resolveMailId(ds, emailId);
     const msg = await ds.getMessage(fullId);
     if (!msg) handleError(new Error(`Email not found: ${emailId}`));
     const body = await ds.getMessageBody(msg);
@@ -756,7 +765,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .action(async (id: string, opts: { keepUnread?: boolean }) => {
       try {
         const ds = resolveMailDataSource();
-        const fullId = resolveMailId(ds, id);
+        const fullId = await resolveMailId(ds, id);
         const msg = await ds.getMessage(fullId);
         if (!msg) {
           console.error(chalk.red(`Email not found: ${id}`));
@@ -802,7 +811,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
   // These commands write through the mail data source seam (local SQLite or cloud API).
 
   async function requireMessage(ds: MailDataSource, id: string): Promise<TuiMessage> {
-    const msg = await ds.getMessage(resolveMailId(ds, id));
+    const msg = await ds.getMessage(await resolveMailId(ds, id));
     if (!msg) { console.error(chalk.red(`Email not found: ${id}`)); process.exit(1); }
     return msg;
   }
@@ -869,7 +878,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .action(async (emailId: string, opts: { filename?: string }) => {
       try {
         const ds = resolveMailDataSource();
-        const fullId = resolveMailId(ds, emailId);
+        const fullId = await resolveMailId(ds, emailId);
         const msg = await ds.getMessage(fullId);
         if (!msg) {
           console.error(chalk.red(`Email not found: ${emailId}`));
@@ -898,7 +907,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
       try {
         await confirmDestructiveAction(`Delete inbox email ${id}?`, opts.yes);
         const ds = resolveMailDataSource();
-        const fullId = resolveMailId(ds, id);
+        const fullId = await resolveMailId(ds, id);
         const existing = await ds.getMessage(fullId);
         if (!existing) {
           console.error(chalk.red(`Email not found: ${id}`));
@@ -1150,7 +1159,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .action(async (id: string) => {
       try {
         const ds = resolveMailDataSource();
-        const resolvedId = resolveMailId(ds, id);
+        const resolvedId = await resolveMailId(ds, id);
         const msg = await ds.getMessage(resolvedId);
         if (!msg) { console.error(chalk.red(`Email not found: ${id}`)); process.exit(1); }
         const body = await ds.getMessageBody(msg);
