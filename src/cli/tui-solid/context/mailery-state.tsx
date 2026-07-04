@@ -6,7 +6,6 @@ import {
   COMMON_LABELS,
   MAILBOXES,
   defaultFromAddress,
-  getConversationBodies,
   getSettings,
   groupMailboxMessages,
   listDomainSummaries,
@@ -194,10 +193,12 @@ function createMaileryStore(initialMailbox?: Mailbox) {
   const [currentBody] = createResource(currentMessage, async (message): Promise<MessageBody | null> => {
     return message ? await ds.getMessageBody(message) : null;
   });
-  const currentConversation = createMemo<TuiThreadBody[]>(() => {
-    const message = currentMessage();
-    return message ? getConversationBodies(message, undefined, { limit: 12 }) : [];
+  // Thread bodies flow through the seam so the reader's conversation view works in
+  // both modes (cloud: listThread + per-message bodies; local: SQLite conversation).
+  const [conversationResource] = createResource(currentMessage, async (message): Promise<TuiThreadBody[]> => {
+    return message ? await ds.getConversationBodies(message, { limit: 12 }) : [];
   });
+  const currentConversation = createMemo<TuiThreadBody[]>(() => conversationResource() ?? []);
   const currentLinks = createMemo<ExtractedEmailLink[]>(() => {
     const body = currentBody();
     return body ? extractEmailLinks({ text: body.text, html: body.html, includeNonWeb: true, max: 200 }) : [];

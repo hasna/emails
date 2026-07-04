@@ -44,6 +44,7 @@ import {
 } from "../db/inbound.js";
 import {
   type ComposeInput,
+  type ConversationBodyOptions,
   type LabelSummary,
   type ListLabelSummaryOptions,
   type ListMailboxSourcesOptions,
@@ -57,8 +58,10 @@ import {
   type MailboxStatusSummary,
   type MessageBody,
   type TuiMessage,
+  type TuiThreadBody,
   type TuiThreadMessage,
   getConversation as localGetConversation,
+  getConversationBodies as localGetConversationBodies,
   getMessageBody as localGetMessageBody,
   listLabelSummaries as localListLabelSummaries,
   listMailbox as localListMailbox,
@@ -158,6 +161,7 @@ export interface MailDataSource {
   getMessage(id: string): Promise<TuiMessage | null>;
   getMessageBody(msg: TuiMessage): Promise<MessageBody | null>;
   getConversation(msg: TuiMessage): Promise<TuiThreadMessage[]>;
+  getConversationBodies(msg: TuiMessage, opts?: ConversationBodyOptions): Promise<TuiThreadBody[]>;
   getAttachmentPaths(id: string): Promise<AttachmentPath[]>;
   listLabelSummaries(opts?: ListLabelSummaryOptions): Promise<LabelSummary[]>;
   verificationCandidates(address: string, opts?: VerificationCodeCandidateOptions): Promise<VerificationCodeEmail[]>;
@@ -241,6 +245,10 @@ export class SqliteMailDataSource implements MailDataSource {
 
   async getConversation(msg: TuiMessage): Promise<TuiThreadMessage[]> {
     return localGetConversation(msg);
+  }
+
+  async getConversationBodies(msg: TuiMessage, opts?: ConversationBodyOptions): Promise<TuiThreadBody[]> {
+    return localGetConversationBodies(msg, undefined, opts);
   }
 
   async getAttachmentPaths(id: string): Promise<AttachmentPath[]> {
@@ -628,11 +636,40 @@ export class ApiMailDataSource implements MailDataSource {
   }
 
   async getConversation(msg: TuiMessage): Promise<TuiThreadMessage[]> {
+    return this.cloudThreadItems(msg);
+  }
+
+  // Thread items oldest-first (listThread is newest-first) to match the local
+  // getConversation ordering the reader renders top-to-bottom.
+  private async cloudThreadItems(msg: TuiMessage): Promise<TuiThreadMessage[]> {
     if (!msg.thread_id) return [];
     const page = await this.client.listThread(msg.thread_id, { limit: this.listLimit });
     return page.data
       .filter((item): item is MaileryCloudMessage => !isTombstoneItem(item))
-      .map(cloudItemToThreadMessage);
+      .map(cloudItemToThreadMessage)
+      .reverse();
+  }
+
+  async getConversationBodies(msg: TuiMessage, opts?: ConversationBodyOptions): Promise<TuiThreadBody[]> {
+    const thread = await this.cloudThreadItems(msg);
+    // Fall back to the selected message alone (mirrors SqliteMailDataSource) so the
+    // reader always has at least the open message's body, even with no thread.
+    const items: TuiThreadMessage[] = thread.length > 0
+      ? thread
+      : [{
+        kind: msg.sentByMe ? "sent" : "received",
+        storage: "inbound",
+        id: msg.id,
+        from: msg.from,
+        subject: msg.subject,
+        at: msg.date,
+      }];
+    const limit = opts?.limit && opts.limit > 0 ? opts.limit : undefined;
+    const scoped = limit && items.length > limit ? items.slice(-limit) : items;
+    return Promise.all(scoped.map(async (item) => {
+      const full = await this.fetchFullMessage(item.id);
+      return { item, body: cloudMessageToBody(full) };
+    }));
   }
 
   async getAttachmentPaths(id: string): Promise<AttachmentPath[]> {

@@ -206,7 +206,9 @@ describe("ApiMailDataSource reads", () => {
 
     const thread = await dataSource.getConversation({ id: "m1", thread_id: "thr_1" } as never);
 
-    expect(thread.map((t) => t.kind)).toEqual(["received", "sent"]);
+    // listThread is newest-first; the seam reverses to oldest-first so the reader
+    // renders a thread top-to-bottom exactly like the local SQLite conversation.
+    expect(thread.map((t) => t.kind)).toEqual(["sent", "received"]);
     expect(calls[0]).toMatchObject({ path: "/api/v1/messages", query: { threadId: "thr_1", limit: "200" } });
   });
 
@@ -215,6 +217,36 @@ describe("ApiMailDataSource reads", () => {
     const thread = await dataSource.getConversation({ id: "m1", thread_id: null } as never);
     expect(thread).toEqual([]);
     expect(fetchCount()).toBe(0);
+  });
+
+  it("reads conversation bodies for a thread (oldest-first, per-message body)", async () => {
+    const { dataSource } = createApi({
+      listData: [
+        fullMessage({ id: "m2", direction: "outbound", fromAddress: "me@x.com", subject: "Re: hi" }),
+        fullMessage({ id: "m1", direction: "inbound", fromAddress: "a@x.com", subject: "hi" }),
+      ],
+      messages: {
+        m1: fullMessage({ id: "m1", direction: "inbound", fromAddress: "a@x.com", subject: "hi", textBody: "first" }),
+        m2: fullMessage({ id: "m2", direction: "outbound", fromAddress: "me@x.com", subject: "Re: hi", textBody: "reply" }),
+      },
+    });
+
+    const bodies = await dataSource.getConversationBodies({ id: "m1", thread_id: "thr_1" } as never, { limit: 12 });
+
+    expect(bodies.map((entry) => entry.item.id)).toEqual(["m1", "m2"]);
+    expect(bodies.map((entry) => entry.body?.text)).toEqual(["first", "reply"]);
+  });
+
+  it("falls back to the open message body when there is no thread", async () => {
+    const { dataSource } = createApi({
+      messages: { m1: fullMessage({ id: "m1", subject: "solo", textBody: "only me" }) },
+    });
+
+    const bodies = await dataSource.getConversationBodies({ id: "m1", thread_id: null, from: "a@x.com", subject: "solo", date: "2026-07-01T00:00:00.000Z", sentByMe: false } as never);
+
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]!.item.id).toBe("m1");
+    expect(bodies[0]!.body?.text).toBe("only me");
   });
 
   it("maps cloud mailboxes into source summaries", async () => {
