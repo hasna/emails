@@ -37,19 +37,6 @@ describe("resend inbound webhook", () => {
     expect(inbox[0]!.from_address).toBe("alice@ext.com");
   });
 
-  it("does not store Resend inbound email locally in self-hosted mode", async () => {
-    process.env["MAILERY_MODE"] = "self_hosted";
-    process.env["HASNA_EMAILS_DATABASE_URL"] = "postgres://self-hosted-test";
-
-    const res = (await handleResendWebhook(post(inboundEvent), "/webhook/resend-inbound", "POST"))!;
-
-    expect(res.status).toBe(409);
-    expect(await res.json()).toMatchObject({
-      error: expect.stringContaining("disabled in self_hosted mode"),
-    });
-    expect(listInboundEmails({}, getDatabase())).toHaveLength(0);
-  });
-
   it("ignores non-inbound events", async () => {
     const res = (await handleResendWebhook(post({ type: "email.sent", data: {} }), "/webhook/resend-inbound", "POST"))!;
     expect((await res.json()).ignored).toBeTruthy();

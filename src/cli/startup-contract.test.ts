@@ -14,8 +14,6 @@ const heavyRuntimeImports = [
   "@hasna/connectors",
   "pg",
   "solid-js",
-  "../../db/remote-storage.js",
-  "../../db/storage-sync.js",
   "../../lib/s3-sync.js",
   "../../lib/sync.js",
   "../../lib/inbound.js",
@@ -56,7 +54,6 @@ describe("CLI startup contract", () => {
     expect(routerSource).toContain("shouldPrintVersionEarly");
     expect(routerSource).toContain("commandModulesFor");
     expect(routerSource).toContain('case "provider": return ["provider", "sync"]');
-    expect(routerSource).toContain('case "storage": return ["storage"]');
     expect(routerSource).toContain("routeRootPromptArgs");
   });
 

@@ -465,19 +465,9 @@ describe("syncS3Inbox — with objects", () => {
     expect(db.query("SELECT id FROM inbound_emails WHERE raw_s3_url = ?").get("s3://test-bucket/inbound/example.com/msg-exact")).not.toBeNull();
   });
 
-  it("flushes S3 materialization tables and keeps exact-key self-hosted ingestion idempotent", async () => {
-    const { providerId } = setupDb();
-    const flushCalls: Array<Record<string, unknown>> = [];
+  it("keeps exact-key S3 ingestion idempotent without a remote flush", async () => {
+    const { db, providerId } = setupDb();
     let getObjectCalls = 0;
-    mock.module("./self-hosted-runtime.js", () => ({
-      SELF_HOSTED_S3_MATERIALIZATION_TABLES: ["providers", "inbound_emails", "mail_messages"],
-      flushSelfHostedRuntimeCache: mock(async (options: Record<string, unknown>) => {
-        flushCalls.push(options);
-        return { enabled: true, action: "flush", source: "s3-sync", results: [] };
-      }),
-    }));
-    process.env["MAILERY_MODE"] = "self_hosted";
-    process.env["HASNA_EMAILS_DATABASE_URL"] = "postgres://runtime";
 
     mockSend.mockImplementation(async (cmd: unknown) => {
       const input = (cmd as { input?: Record<string, unknown> }).input ?? {};
@@ -492,33 +482,23 @@ describe("syncS3Inbox — with objects", () => {
       bucket: "test-bucket",
       prefix: "inbound/",
       keys: ["inbound/example.com/msg-flush"],
+      db,
       providerId,
     });
     const second = await syncS3Inbox({
       bucket: "test-bucket",
       prefix: "inbound/",
       keys: ["inbound/example.com/msg-flush"],
+      db,
       providerId,
     });
 
     expect(result).toMatchObject({ synced: 1, skipped: 0, errors: [] });
     expect(second).toMatchObject({ synced: 0, skipped: 1, errors: [] });
     expect(getObjectCalls).toBe(1);
-    expect(flushCalls).toHaveLength(1);
-    expect(flushCalls[0]).toMatchObject({
-      source: "s3-sync",
-      tables: ["providers", "inbound_emails", "mail_messages"],
-    });
-    const rowFilters = flushCalls[0]!["rowFilters"] as Record<string, { where: string; params: string[] }>;
-    expect(rowFilters.inbound_emails).toEqual({
-      where: "raw_s3_url IN (?)",
-      params: ["s3://test-bucket/inbound/example.com/msg-flush"],
-    });
-    expect(rowFilters.mail_messages).toEqual({
-      where: "raw_s3_url IN (?)",
-      params: ["s3://test-bucket/inbound/example.com/msg-flush"],
-    });
-    expect(rowFilters.providers.where).toContain("provider_id");
+    // syncS3Inbox writes only local SQLite now; the raw object stays local-only.
+    const row = db.query("SELECT raw_s3_url FROM inbound_emails WHERE raw_s3_url = ?").get("s3://test-bucket/inbound/example.com/msg-flush") as { raw_s3_url: string };
+    expect(row.raw_s3_url).toBe("s3://test-bucket/inbound/example.com/msg-flush");
   });
 
   it("rejects exact object keys outside the configured prefix", async () => {

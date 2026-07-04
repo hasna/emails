@@ -11,6 +11,7 @@ import { createProvider } from "../db/providers.js";
 import { setDomainProvisioning } from "../db/provisioning.js";
 import { storeSandboxEmail } from "../db/sandbox.js";
 import { registerS3Source } from "../lib/s3-sync.js";
+import { redactSecrets } from "../lib/redaction.js";
 
 const tempDirs: string[] = [];
 
@@ -172,286 +173,35 @@ describe("CLI JSON contracts", () => {
     expect(parsed.errors).toEqual([]);
   });
 
-  it("reports self-hosted storage status with canonical env names", () => {
-    const dir = mkdtempSync(join(tmpdir(), "emails-cli-contract-"));
+  it("never leaks a postgres connection string through the CLI", () => {
+    const dir = mkdtempSync(join(tmpdir(), "emails-cli-redaction-"));
     tempDirs.push(dir);
     const env = isolatedEnv(join(dir, "emails.db"), join(dir, "home"));
+    const connectionString = "postgres://mailery_user:sup3r-s3cret@db.internal:5432/mailery";
 
-    const result = runCli(["storage", "status", "--json"], env);
-    const stdout = new TextDecoder().decode(result.stdout);
-    expect(result.exitCode).toBe(0);
+    // redaction.ts is the last line of defense: a connection string stored under
+    // a sensitive key must be replaced with the redaction sentinel.
+    expect(redactSecrets({ cloud_session_token: connectionString })).toEqual({ cloud_session_token: "***" });
 
-    const parsed = JSON.parse(stdout) as {
-      configured: boolean;
-      mode: string;
-      sourceOfTruth: string;
-      localCache: string;
-      maileryMode: string;
-      maileryModeLabel: string;
-      env: string[];
-      canonical: {
-        cluster: string | null;
-        database: string | null;
-        runtimePath: string | null;
-        env: string;
-        fallbackEnv: string;
-      };
-      service: string;
-      tables: string[];
-    };
-    expect(parsed.configured).toBe(false);
-    expect(parsed.mode).toBe("local");
-    expect(parsed.sourceOfTruth).toBe("local");
-    expect(parsed.localCache).toBe("source");
-    expect(parsed.maileryMode).toBe("local");
-    expect(parsed.maileryModeLabel).toBe("Local");
-    expect(parsed.env).toEqual(["HASNA_EMAILS_DATABASE_URL", "EMAILS_DATABASE_URL"]);
-    expect(parsed.canonical).toEqual({
-      cluster: null,
-      database: null,
-      runtimePath: null,
-      env: "HASNA_EMAILS_DATABASE_URL",
-      fallbackEnv: "EMAILS_DATABASE_URL",
-    });
-    expect(parsed.service).toBe("emails");
-    expect(parsed.tables).toContain("providers");
-  });
+    const set = runCli(["config", "set", "cloud_session_token", connectionString], env);
+    expect(set.exitCode).toBe(0);
+    expect(stdoutText(set)).toContain("***");
+    expect(stdoutText(set)).not.toContain(connectionString);
+    expect(stdoutText(set)).not.toContain("sup3r-s3cret");
 
-  it("prints generic self-hosted setup instructions without a secret value", () => {
-    const dir = mkdtempSync(join(tmpdir(), "emails-cli-contract-"));
-    tempDirs.push(dir);
-    const env = isolatedEnv(join(dir, "emails.db"), join(dir, "home"));
+    const get = runCli(["config", "get", "cloud_session_token"], env);
+    expect(get.exitCode).toBe(0);
+    const getOut = stdoutText(get);
+    expect(getOut).toContain("***");
+    expect(getOut).not.toContain(connectionString);
+    expect(getOut).not.toContain("sup3r-s3cret");
 
-    const result = runCli(["storage", "setup"], env);
-    const stdout = new TextDecoder().decode(result.stdout);
-    expect(result.exitCode).toBe(0);
-    expect(stdout).toContain("Self-hosted Mailery uses your PostgreSQL connection string");
-    expect(stdout).toContain("HASNA_EMAILS_DATABASE_URL");
-    expect(stdout).toContain("MAILERY_MODE=self_hosted");
-    expect(stdout).toContain("HASNA_EMAILS_STORAGE_MODE=remote");
-    expect(stdout).toContain("HASNA_EMAILS_STORAGE_MODE=hybrid");
-    expect(stdout).not.toContain("postgres://");
-  });
-
-  it("exposes self-hosted setup and status commands", () => {
-    const dir = mkdtempSync(join(tmpdir(), "emails-cli-contract-"));
-    tempDirs.push(dir);
-    const dbPath = join(dir, "emails.db");
-    const env = isolatedEnv(dbPath, join(dir, "home"));
-
-    const status = runCli(["self-hosted", "status", "--json"], env);
-    expect(status.exitCode).toBe(0);
-    const parsed = JSON.parse(stdoutText(status)) as {
-      enabled: boolean;
-      sourceOfTruth: string;
-      localCache: string;
-      storage: { configured: boolean; mode: string };
-    };
-    expect(parsed.enabled).toBe(false);
-    expect(parsed.sourceOfTruth).toBe("local");
-    expect(parsed.localCache).toBe("local_store");
-    expect(parsed.storage).toMatchObject({ configured: false, mode: "local" });
-    expect(existsSync(dbPath)).toBe(false);
-
-    const setup = runCli(["self-hosted", "setup"], env);
-    expect(setup.exitCode).toBe(0);
-    expect(stdoutText(setup)).toContain("mailery self-hosted status");
-    expect(stdoutText(setup)).not.toContain("postgres://");
-    expect(existsSync(dbPath)).toBe(false);
-
-    const setupJson = expectCliJsonOk<{ commands: string[]; database: { env: string; configured: boolean } }>(
-      runCli(["self-hosted", "setup", "--json"], env),
-    );
-    expect(setupJson.database).toMatchObject({ env: "HASNA_EMAILS_DATABASE_URL", configured: false });
-    expect(setupJson.commands).toContain("mailery self-hosted check --json");
-    expect(JSON.stringify(setupJson)).not.toContain("postgres://");
-
-    const migrateDryRun = expectCliJsonOk<{ status: string; statements: number }>(
-      runCli(["self-hosted", "migrate", "--dry-run", "--json"], env),
-    );
-    expect(migrateDryRun.status).toBe("dry-run");
-    expect(migrateDryRun.statements).toBeGreaterThan(0);
-  });
-
-  it("reports coherent misconfigured self-hosted status without creating a local DB", () => {
-    const dir = mkdtempSync(join(tmpdir(), "emails-cli-contract-"));
-    tempDirs.push(dir);
-    const dbPath = join(dir, "emails.db");
-    const env = {
-      ...isolatedEnv(dbPath, join(dir, "home")),
-      MAILERY_MODE: "self_hosted",
-    };
-
-    const parsed = expectCliJsonOk<{
-      enabled: boolean;
-      configured: boolean;
-      sourceOfTruth: string;
-      localCache: string;
-      storage: { configured: boolean; mode: string; sourceOfTruth: string; localCache: string };
-    }>(runCli(["self-hosted", "status", "--json"], env));
-    expect(parsed).toMatchObject({
-      enabled: true,
-      configured: false,
-      sourceOfTruth: "postgres",
-      localCache: "runtime_cache",
-      storage: {
-        configured: false,
-        mode: "remote",
-        sourceOfTruth: "postgres",
-        localCache: "runtime-cache",
-      },
-    });
-    expect(existsSync(dbPath)).toBe(false);
-  });
-
-  it("reports self-hosted readiness blockers without printing secrets", () => {
-    const dir = mkdtempSync(join(tmpdir(), "emails-cli-contract-"));
-    tempDirs.push(dir);
-    const dbPath = join(dir, "emails.db");
-    const env = isolatedEnv(dbPath, join(dir, "home"));
-
-    const result = runCli(["self-hosted", "check", "--json"], env);
-    expect(result.exitCode).toBe(1);
-    expect(stderrText(result)).toBe("");
-    const parsed = JSON.parse(stdoutText(result)) as {
-      summary: { ready: boolean; blockers: string[] };
-      checks: Array<{ name: string; ok: boolean; status: string; fix_commands?: string[] }>;
-      runtime: { enabled: boolean; sourceOfTruth: string };
-      remote: { activeSesProviders: Array<{ name: string; region: string | null }> };
-    };
-    expect(parsed.summary.ready).toBe(false);
-    expect(parsed.summary.blockers).toContain("runtime_mode");
-    expect(parsed.summary.blockers).toContain("database_url");
-    expect(parsed.summary.blockers).toContain("database_access");
-    expect(parsed.checks.find((entry) => entry.name === "database_url")?.fix_commands).toContain(
-      "export HASNA_EMAILS_DATABASE_URL='<postgresql-connection-url>'",
-    );
-    expect(parsed.runtime).toMatchObject({ enabled: false, sourceOfTruth: "local" });
-    expect(parsed.remote.activeSesProviders).toEqual([]);
-    const serialized = JSON.stringify(parsed);
-    expect(serialized).not.toContain("postgres://");
-    expect(serialized).not.toContain("secret");
-    expect(existsSync(dbPath)).toBe(false);
-  });
-
-  it("fails self-hosted readiness when local mailbox rows are still authoritative", () => {
-    const dir = mkdtempSync(join(tmpdir(), "emails-cli-local-authoritative-"));
-    tempDirs.push(dir);
-    const env = isolatedEnv(join(dir, "emails.db"), join(dir, "home"));
-    withSeededCliDb(env, () => {
-      const provider = createProvider({ name: "local-sandbox", type: "sandbox" });
-      storeInboundEmail({
-        provider_id: provider.id,
-        message_id: "<local-authoritative@example.com>",
-        in_reply_to_email_id: null,
-        from_address: "sender@example.com",
-        to_addresses: ["agent@example.com"],
-        cc_addresses: [],
-        subject: "Authoritative local mailbox",
-        text_body: "This local row must be migrated before self-hosted cutover.",
-        html_body: null,
-        attachments: [],
-        attachment_paths: [],
-        headers: {},
-        raw_size: 128,
-        received_at: "2026-07-01T10:00:00.000Z",
-      });
-    });
-
-    const result = runCli(["self-hosted", "check", "--json"], env);
-    expect(result.exitCode).toBe(1);
-    expect(stderrText(result)).toBe("");
-    const parsed = JSON.parse(stdoutText(result)) as {
-      local: { authoritative: boolean; sourcePath: string; mailRows: number; cachePath: string | null };
-      summary: { blockers: string[] };
-      checks: Array<{ name: string; ok: boolean; status: string; fix_commands?: string[] }>;
-    };
-    const localCheck = parsed.checks.find((entry) => entry.name === "local_mailbox_source_of_truth");
-    expect(parsed.local.authoritative).toBe(true);
-    expect(parsed.local.sourcePath).toBe(String(env.EMAILS_DB_PATH));
-    expect(parsed.local.cachePath).toBe(String(env.EMAILS_DB_PATH));
-    expect(parsed.local.mailRows).toBeGreaterThan(0);
-    expect(parsed.summary.blockers).toContain("local_mailbox_source_of_truth");
-    expect(localCheck).toMatchObject({
-      ok: false,
-      status: "local_mailbox_rows_are_authoritative",
-      fix_commands: expect.arrayContaining(["mailery self-hosted migrate-local --json"]),
-    });
-  });
-
-  it("refuses empty local-to-self-hosted migrations before creating a local DB", () => {
-    const dir = mkdtempSync(join(tmpdir(), "emails-cli-contract-"));
-    tempDirs.push(dir);
-    const dbPath = join(dir, "missing.db");
-    const env = {
-      ...isolatedEnv(dbPath, join(dir, "home")),
-      HASNA_EMAILS_DATABASE_URL: "postgres://self-hosted-target",
-    };
-
-    const result = runCli(["--json", "self-hosted", "migrate-local"], env);
-    expect(result.exitCode).toBe(1);
-    expect(stdoutText(result)).toBe("");
-    const parsed = JSON.parse(stderrText(result)) as { error: { code: string; message: string } };
-    expect(parsed.error.code).toBe("missing_required_input");
-    expect(parsed.error.message).toContain("found no local mail rows");
-    expect(parsed.error.message).not.toContain("postgres://self-hosted-target");
-    expect(existsSync(dbPath)).toBe(false);
-  });
-
-  it("requires a database URL for self-hosted source-of-truth runtime commands", () => {
-    const dir = mkdtempSync(join(tmpdir(), "emails-cli-contract-"));
-    tempDirs.push(dir);
-    const env = {
-      ...isolatedEnv(join(dir, "emails.db"), join(dir, "home")),
-      HASNA_EMAILS_STORAGE_MODE: "remote",
-    };
-
-    const result = runCli(["--json", "inbox", "list"], env);
-    const stdout = new TextDecoder().decode(result.stdout);
-    const stderr = new TextDecoder().decode(result.stderr);
-    expect(result.exitCode).toBe(1);
-    expect(stdout).toBe("");
-    const parsed = JSON.parse(stderr) as { error: { message: string; code: string; fix_commands: string[] } };
-    expect(parsed.error.code).toBe("self_hosted_runtime_not_configured");
-    expect(parsed.error.message).toContain("Self-hosted source-of-truth mode requires");
-    expect(parsed.error.fix_commands).toContain("mailery self-hosted setup");
-
-    const storage = runCli(["--json", "storage", "status"], env);
-    expect(storage.exitCode).toBe(0);
-
-    const feedback = runCli(["--json", "storage", "feedback", "hello"], env);
-    expect(feedback.exitCode).toBe(1);
-    expect(stdoutText(feedback)).toBe("");
-    const feedbackParsed = JSON.parse(stderrText(feedback)) as { error: { code: string } };
-    expect(feedbackParsed.error.code).toBe("self_hosted_runtime_not_configured");
-
-    const mcpDryRun = runCli(["--json", "mcp", "--claude", "--dry-run"], env);
-    expect(mcpDryRun.exitCode).toBe(0);
-    expect(JSON.parse(stdoutText(mcpDryRun))).toMatchObject({ target: "claude", action: "install" });
-  });
-
-  it("requires --force for pull-then-push storage sync", () => {
-    const dir = mkdtempSync(join(tmpdir(), "emails-cli-contract-"));
-    tempDirs.push(dir);
-    const env = isolatedEnv(join(dir, "emails.db"), join(dir, "home"));
-
-    const result = runCli(["--json", "storage", "sync"], env);
-    expect(result.exitCode).toBe(1);
-    expect(stdoutText(result)).toBe("");
-    const parsed = JSON.parse(stderrText(result)) as { error: { message: string } };
-    expect(parsed.error.message).toContain("can overwrite local rows");
-  });
-
-  it("documents storage command without legacy cloud wording", () => {
-    const dir = mkdtempSync(join(tmpdir(), "emails-cli-contract-"));
-    tempDirs.push(dir);
-    const env = isolatedEnv(join(dir, "emails.db"), join(dir, "home"));
-
-    const result = runCli(["storage", "--help"], env);
-    const stdout = new TextDecoder().decode(result.stdout);
-    expect(result.exitCode).toBe(0);
-    expect(stdout).toContain("self-hosted PostgreSQL storage");
-    expect(stdout).not.toContain("cloud");
+    const list = runCli(["--json", "config", "list"], env);
+    expect(list.exitCode).toBe(0);
+    const listOut = stdoutText(list);
+    expect(listOut).not.toContain(connectionString);
+    expect(listOut).not.toContain("sup3r-s3cret");
+    expect(listOut).not.toContain("postgres://");
   });
 
   it("prints structured JSON errors with fix commands", () => {
@@ -538,7 +288,7 @@ describe("CLI JSON contracts", () => {
     tempDirs.push(dir);
     const env = isolatedEnv(join(dir, "emails.db"), join(dir, "home"));
 
-    const result = runCli(["--json", "self-hosted", "definitely-missing"], env);
+    const result = runCli(["--json", "cloud", "definitely-missing"], env);
     expect(result.exitCode).toBe(1);
     expect(stdoutText(result)).toBe("");
     const parsed = JSON.parse(stderrText(result)) as { error: { code: string; message: string } };
@@ -636,19 +386,6 @@ describe("CLI JSON contracts", () => {
       return { providerId: provider.id, emailId: email.id };
     });
 
-    const storage = expectCliJsonOk<{
-      mode: string;
-      sourceOfTruth: string;
-      localCache: string;
-      configured: boolean;
-    }>(runCli(["--json", "storage", "status"], env));
-    expect(storage).toMatchObject({
-      mode: "local",
-      sourceOfTruth: "local",
-      localCache: "source",
-      configured: false,
-    });
-
     const status = expectCliJsonOk<{
       mode: { current: string };
       inbox: { total: number; unread: number; latest_received_at: string | null };
@@ -738,10 +475,9 @@ describe("CLI JSON contracts", () => {
       readiness: { send_ready: false, receive_ready: false },
     });
 
-    const selfHostedEnv = {
+    const cloudEnv = {
       ...env,
-      MAILERY_MODE: "self_hosted",
-      HASNA_EMAILS_STORAGE_MODE: "hybrid",
+      MAILERY_MODE: "cloud",
     };
     const selfHosted = expectCliJsonOk<{
       id: string;
@@ -755,12 +491,12 @@ describe("CLI JSON contracts", () => {
         inbound_evidence_ready: boolean;
         inbound_evidence: { live_s3_sources: number };
       };
-    }>(runCli(["--json", "domains", "status", "selfhosted.example.com"], selfHostedEnv));
+    }>(runCli(["--json", "domains", "status", "selfhosted.example.com"], cloudEnv));
 
     expect(selfHosted).toMatchObject({
       id: seeded.selfHostedDomainId,
       domain: "selfhosted.example.com",
-      mode: "self_hosted",
+      mode: "cloud",
       domain_type: "self_hosted",
       source_of_truth: "postgres",
       readiness: {

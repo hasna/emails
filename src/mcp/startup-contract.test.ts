@@ -10,8 +10,6 @@ const heavyToolImports = [
   "@hasna/connectors",
   "mailparser",
   "pg",
-  "../../db/remote-storage.js",
-  "../../db/storage-sync.js",
   "../../lib/s3-sync.js",
   "../../lib/aws-inbound.js",
   "../../lib/triage.js",
@@ -47,29 +45,6 @@ function hasDynamicImport(source: string, specifier: string): boolean {
 }
 
 describe("MCP startup contract", () => {
-  it("requires database configuration before starting the remote MCP runtime", () => {
-    const result = Bun.spawnSync({
-      cmd: ["bun", "src/mcp/index.ts"],
-      cwd: join(import.meta.dir, "..", ".."),
-      env: {
-        ...process.env,
-        HASNA_EMAILS_STORAGE_MODE: "remote",
-      },
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const stderr = new TextDecoder().decode(result.stderr);
-    expect(result.exitCode).toBe(1);
-    expect(stderr).toContain("Self-hosted source-of-truth mode requires");
-  });
-
-  it("installs self-hosted shutdown hooks for long-running MCP runtimes", () => {
-    const source = readFileSync(join(mcpDir, "index.ts"), "utf8");
-
-    expect(source).toContain("installSelfHostedRuntimeShutdownHooks");
-    expect(source).toContain('source: "mailery-mcp", cleanupCache: true');
-  });
-
   it("keeps heavy provider and sync dependencies behind tool-local dynamic imports", () => {
     const offenders: string[] = [];
 
@@ -267,17 +242,5 @@ describe("MCP startup contract", () => {
       .filter((specifier) => heavyResourceImports.includes(specifier));
 
     expect(offenders).toEqual([]);
-  });
-
-  it("registers storage sync tools", () => {
-    const source = readFileSync(join(toolsDir, "storage.ts"), "utf8");
-    const serverSource = readFileSync(join(mcpDir, "server.ts"), "utf8");
-
-    expect(source).toContain('"storage_status"');
-    expect(source).toContain('"storage_push"');
-    expect(source).toContain('"storage_pull"');
-    expect(source).toContain('"storage_sync"');
-    expect(source).toContain("self-hosted PostgreSQL storage");
-    expect(serverSource).toContain("registerEmailStorageTools");
   });
 });

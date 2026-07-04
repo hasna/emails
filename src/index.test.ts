@@ -107,17 +107,24 @@ describe("public package entrypoint", () => {
     }
   });
 
-  it("exposes storage internals from the explicit storage subpath", async () => {
+  it("exposes only Mailery mode helpers from the explicit storage subpath", async () => {
     const storage = await import("./storage.js");
     const migrations = await import("./db/pg-migrations.js");
 
-    expect((storage as Record<string, unknown>).PG_MIGRATIONS).toBeUndefined();
+    // pg-migrations still ships (SQLite→PG schema definition) but is only
+    // reachable from its own module, never re-exported by the storage subpath.
     expect(Array.isArray(migrations.PG_MIGRATIONS)).toBe(true);
-    expect(typeof storage.PgAdapterAsync).toBe("function");
-    expect(typeof storage.getStorageStatus).toBe("function");
-    expect(typeof storage.storagePush).toBe("function");
-    expect(typeof storage.storagePull).toBe("function");
-    expect(typeof storage.storageSync).toBe("function");
+
+    expect(typeof storage.getMaileryMode).toBe("function");
+    expect(typeof storage.resolveMaileryMode).toBe("function");
+    expect(typeof storage.normalizeMaileryMode).toBe("function");
+    expect(typeof storage.labelForMaileryMode).toBe("function");
+
+    // The self-hosted PostgreSQL/S3 mirror surface is gone; the storage subpath
+    // must not resurrect any of the removed sync internals.
+    for (const removed of ["PG_MIGRATIONS", "PgAdapterAsync", "getStorageStatus", "storagePush", "storagePull", "storageSync"]) {
+      expect((storage as Record<string, unknown>)[removed]).toBeUndefined();
+    }
   });
 
   it("keeps build outputs lean by externalizing installed runtime packages", () => {
@@ -170,8 +177,11 @@ describe("public package entrypoint", () => {
         expect(rootEntry).not.toContain(storageInternal);
       }
       const storageEntry = readFileSync(join(rootDir, "storage.js"), "utf8");
-      expect(storageEntry).toContain("storagePush");
+      expect(storageEntry).toContain("labelForMaileryMode");
       expect(storageEntry).not.toContain("var PG_MIGRATIONS");
+      for (const removed of ["PgAdapterAsync", "storagePush", "storagePull", "storageSync"]) {
+        expect(storageEntry).not.toContain(removed);
+      }
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

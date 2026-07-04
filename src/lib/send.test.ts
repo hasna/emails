@@ -3,14 +3,12 @@ import { closeDatabase, resetDatabase } from "../db/database.js";
 import { createProvider, getProvider } from "../db/providers.js";
 import { createAddress } from "../db/addresses.js";
 import { createDomain, updateDomain, updateDomainReadiness } from "../db/domains.js";
-import { setDomainProvisioning } from "../db/provisioning.js";
-import { listSandboxEmails } from "../db/sandbox.js";
 import { suspendAddress } from "../db/address-lifecycle.js";
 import { createOwner, assignAddressOwner } from "../db/owners.js";
 import { createSendKey } from "../db/send-keys.js";
 import { createWarmingSchedule } from "../db/warming.js";
 import { createEmail } from "../db/emails.js";
-import { assertDomainOutboundReady, assertSelfHostedSendReady, MAX_ATTACHMENT_COUNT, MAX_ATTACHMENT_SIZE_BYTES, sendWithFailover } from "./send.js";
+import { assertDomainOutboundReady, MAX_ATTACHMENT_COUNT, MAX_ATTACHMENT_SIZE_BYTES, sendWithFailover } from "./send.js";
 
 let providerId: string;
 beforeEach(() => {
@@ -31,7 +29,6 @@ afterEach(() => {
   delete process.env["EMAILS_DATABASE_URL"];
   delete process.env["HASNA_EMAILS_STORAGE_MODE"];
   delete process.env["EMAILS_STORAGE_MODE"];
-  delete process.env["MAILERY_SKIP_SELF_HOSTED_SES_PREFLIGHT"];
 });
 
 describe("sendWithFailover — lifecycle guard", () => {
@@ -207,40 +204,5 @@ describe("sendWithFailover — shared send safety guards", () => {
       getProvider(providerId)!,
       { from: "sender@example.test", to: "next@x.com", subject: "hi", text: "yo" },
     )).toThrow(/Cloud mode delegates outbound sends/i);
-  });
-
-  it("self_hosted mode blocks non-SES providers before touching the provider", async () => {
-    process.env["MAILERY_MODE"] = "self_hosted";
-    process.env["HASNA_EMAILS_DATABASE_URL"] = "postgres://mailery.example.invalid/db";
-
-    await expect(
-      sendWithFailover(providerId, { from: "sender@example.com", to: "next@x.com", subject: "hi", text: "yo" }),
-    ).rejects.toThrow(/AWS SES provider/i);
-    expect(listSandboxEmails(providerId)).toHaveLength(0);
-  });
-
-  it("self_hosted mode requires a send-ready domain before SES send", async () => {
-    process.env["MAILERY_MODE"] = "self_hosted";
-    process.env["HASNA_EMAILS_DATABASE_URL"] = "postgres://mailery.example.invalid/db";
-    process.env["MAILERY_SKIP_SELF_HOSTED_SES_PREFLIGHT"] = "1";
-    const sesProvider = createProvider({ name: "ses", type: "ses", region: "us-east-1" });
-
-    await expect(
-      assertSelfHostedSendReady(sesProvider, { from: "sender@example.com", to: "next@x.com", subject: "hi", text: "yo" }),
-    ).rejects.toThrow(/requires domain example.com/i);
-
-    const domain = createDomain(sesProvider.id, "example.com");
-    updateDomain(domain.id, { dkim_status: "verified", spf_status: "verified" });
-    setDomainProvisioning(domain.id, { mail_from_domain: "mail.example.com", send_provider: "ses" });
-
-    await expect(
-      assertSelfHostedSendReady(getProvider(sesProvider.id)!, { from: "sender@example.com", to: "next@x.com", subject: "hi", text: "yo" }),
-    ).rejects.toThrow(/outbound_status=ready/i);
-
-    updateDomainReadiness(domain.id, { ownership_status: "verified", outbound_status: "ready" });
-
-    await expect(
-      assertSelfHostedSendReady(getProvider(sesProvider.id)!, { from: "sender@example.com", to: "next@x.com", subject: "hi", text: "yo" }),
-    ).resolves.toBeUndefined();
   });
 });

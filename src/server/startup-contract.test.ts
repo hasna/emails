@@ -30,47 +30,19 @@ function routeFiles(): string[] {
 }
 
 describe("server startup contract", () => {
-  it("requires database configuration before starting the remote HTTP runtime", () => {
-    const result = Bun.spawnSync({
-      cmd: ["bun", "src/server/index.ts"],
-      cwd: join(import.meta.dir, "..", ".."),
-      env: {
-        ...process.env,
-        HASNA_EMAILS_STORAGE_MODE: "remote",
-      },
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const stderr = new TextDecoder().decode(result.stderr);
-    expect(result.exitCode).toBe(1);
-    expect(stderr).toContain("Self-hosted source-of-truth mode requires");
-  });
-
-  it("keeps direct help and version available in remote storage mode", () => {
+  it("keeps direct help and version available without booting the HTTP runtime", () => {
     for (const args of [["--help"], ["--version"]]) {
       const result = Bun.spawnSync({
         cmd: ["bun", "src/server/index.ts", ...args],
         cwd: join(import.meta.dir, "..", ".."),
-        env: {
-          ...process.env,
-          HASNA_EMAILS_STORAGE_MODE: "remote",
-        },
+        env: { ...process.env },
         stdout: "pipe",
         stderr: "pipe",
       });
-      const stdout = new TextDecoder().decode(result.stdout);
       const stderr = new TextDecoder().decode(result.stderr);
       expect(result.exitCode).toBe(0);
       expect(stderr).toBe("");
-      expect(stdout).not.toContain("Self-hosted source-of-truth mode requires");
     }
-  });
-
-  it("installs self-hosted shutdown hooks for the long-running HTTP runtime", () => {
-    const source = readFileSync(join(import.meta.dir, "index.ts"), "utf8");
-
-    expect(source).toContain("installSelfHostedRuntimeShutdownHooks");
-    expect(source).toContain('source: "mailery-serve", cleanupCache: true');
   });
 
   it("keeps route modules lazy behind the API dispatcher", () => {
