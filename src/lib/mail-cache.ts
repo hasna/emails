@@ -80,9 +80,11 @@ function sizeOf(value: unknown): number {
 }
 
 // Stable cache key for a list/search page. Keyed by the full request shape so two
-// requests that differ only in group/q/cursor/mailbox never collide.
-export function messagePageCacheKey(opts: { group?: string; q?: string; cursor?: string; mailbox?: string } = {}): string {
-  return [opts.group ?? "", opts.q ?? "", opts.cursor ?? "", opts.mailbox ?? ""].join("|");
+// requests that differ only in group/q/cursor/mailbox/limit never collide. `limit` is
+// appended only when set, so keys built without it (the 4-segment form) are unchanged.
+export function messagePageCacheKey(opts: { group?: string; q?: string; cursor?: string; mailbox?: string; limit?: number } = {}): string {
+  const base = [opts.group ?? "", opts.q ?? "", opts.cursor ?? "", opts.mailbox ?? ""].join("|");
+  return opts.limit ? `${base}|${opts.limit}` : base;
 }
 
 // Stable cache key for group counts, scoped by mailbox.

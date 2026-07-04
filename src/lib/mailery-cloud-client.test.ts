@@ -288,6 +288,39 @@ describe("MaileryCloudClient", () => {
     expect(calls[0]).toMatchObject({ url: "https://mailery.example/api/v1/messages/bulk", method: "POST", body: { action: "markRead", mailboxId: "mbx_1", folder: "inbox" } });
   });
 
+  it("FIX-7: lists the tenant label set with counts via GET /api/v1/labels", async () => {
+    const calls: string[] = [];
+    const client = new MaileryCloudClient({
+      apiUrl: "https://mailery.example",
+      token: "t",
+      fetchImpl: (async (url) => {
+        calls.push(String(url));
+        return jsonResponse({ data: [{ id: "l1", name: "Billing", color: "#abc", kind: "custom", count: 4, message_count: 4 }] });
+      }) as typeof fetch,
+    });
+
+    const labels = await client.listLabels();
+
+    expect(labels[0]).toMatchObject({ id: "l1", name: "Billing", kind: "custom", count: 4 });
+    expect(calls[0]).toBe("https://mailery.example/api/v1/labels");
+  });
+
+  it("FIX-8: scopes the tombstones feed to a mailbox when mailboxId is given", async () => {
+    const calls: string[] = [];
+    const client = new MaileryCloudClient({
+      apiUrl: "https://mailery.example",
+      token: "t",
+      fetchImpl: (async (url) => {
+        calls.push(String(url));
+        return jsonResponse({ data: [] });
+      }) as typeof fetch,
+    });
+
+    await client.listMessageTombstones({ since: "2026-07-01T00:00:00.000Z", mailboxId: "mbx_1" });
+
+    expect(calls[0]).toBe("https://mailery.example/api/v1/messages/tombstones?since=2026-07-01T00%3A00%3A00.000Z&mailboxId=mbx_1");
+  });
+
   it("scopes group counts to a mailbox when requested", async () => {
     const calls: string[] = [];
     const client = new MaileryCloudClient({

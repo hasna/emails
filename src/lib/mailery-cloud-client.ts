@@ -178,6 +178,18 @@ export interface MaileryCloudLabelRecord {
   kind: "system" | "custom";
 }
 
+// GAP-4: an entry of GET /api/v1/labels — the tenant's label set with a per-label
+// live-message count. The server emits the count under snake + camel aliases.
+export interface MaileryCloudLabelSummary {
+  id: string;
+  name: string;
+  color: string;
+  kind: "system" | "custom";
+  count?: number;
+  message_count?: number;
+  messageCount?: number;
+}
+
 // Response shape of POST /messages/:id/labels and DELETE /messages/:id/labels/:label.
 export interface MaileryCloudLabelMutationResult {
   ok: boolean;
@@ -581,6 +593,12 @@ export class MaileryCloudClient {
     return this.request("/mailboxes", { method: "POST", body: input });
   }
 
+  // GAP-4: GET /api/v1/labels — authoritative tenant label set with per-label counts.
+  // Lets the client render a labels sidebar instead of deriving it from a sampled page.
+  listLabels(): Promise<MaileryCloudLabelSummary[]> {
+    return this.request<{ data: MaileryCloudLabelSummary[] }>("/labels").then((result) => result.data);
+  }
+
   messageGroups(opts: { mailboxId?: string } = {}): Promise<MaileryCloudGroupCounts> {
     const query = opts.mailboxId ? `?mailboxId=${encodeURIComponent(opts.mailboxId)}` : "";
     return this.request(`/messages/groups${query}`);
@@ -672,10 +690,13 @@ export class MaileryCloudClient {
     return this.request(`/messages/${encodeURIComponent(id)}`, { method: "DELETE", body: input });
   }
 
-  listMessageTombstones(opts: { limit?: number; since?: string } = {}): Promise<MaileryCloudMessageTombstone[]> {
+  // GAP-5: an optional mailboxId scopes the deletions feed to one mailbox so a
+  // mailbox-scoped changesSince gets only that mailbox's tombstones (omit for tenant-wide).
+  listMessageTombstones(opts: { limit?: number; since?: string; mailboxId?: string } = {}): Promise<MaileryCloudMessageTombstone[]> {
     const params = new URLSearchParams();
     if (opts.limit) params.set("limit", String(opts.limit));
     if (opts.since) params.set("since", opts.since);
+    if (opts.mailboxId) params.set("mailboxId", opts.mailboxId);
     const query = params.toString();
     return this.request<{ data: MaileryCloudMessageTombstone[] }>(`/messages/tombstones${query ? `?${query}` : ""}`)
       .then((result) => result.data);
