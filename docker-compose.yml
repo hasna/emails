@@ -1,0 +1,42 @@
+# Local run of the Mailery self_hosted service against a Postgres.
+#
+#   HASNA_MAILERY_DATABASE_URL=postgres://... \
+#   HASNA_MAILERY_API_SIGNING_KEY=$(openssl rand -hex 32) \
+#   docker compose up
+#
+# In cloud mode the service is PURE REMOTE (Amendment A1): it reads/writes the
+# Postgres you point it at. A local `db` service is included for convenience;
+# point HASNA_MAILERY_DATABASE_URL at it or at your own Postgres.
+services:
+  mailery-serve:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    platform: linux/arm64
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: "8080"
+      HOST: "0.0.0.0"
+      HASNA_MAILERY_STORAGE_MODE: "cloud"
+      HASNA_MAILERY_DATABASE_URL: "${HASNA_MAILERY_DATABASE_URL:-postgres://mailery:mailery@db:5432/mailery?sslmode=disable}"
+      HASNA_MAILERY_API_SIGNING_KEY: "${HASNA_MAILERY_API_SIGNING_KEY:?set HASNA_MAILERY_API_SIGNING_KEY}"
+    depends_on:
+      db:
+        condition: service_healthy
+    # Apply migrations, then serve.
+    command: ["sh", "-c", "mailery db migrate && exec mailery-serve"]
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: mailery
+      POSTGRES_PASSWORD: mailery
+      POSTGRES_DB: mailery
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mailery"]
+      interval: 3s
+      timeout: 3s
+      retries: 20

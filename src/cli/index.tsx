@@ -50,6 +50,7 @@ async function loadCommandModule(module: CommandModule): Promise<RegisterFn> {
     case "daemon": return (await import("./commands/daemon.js")).registerDaemonCommands;
     case "browserplan": return (await import("./commands/browserplan.js")).registerBrowserPlanCommands;
     case "cloud": return (await import("./commands/cloud.js")).registerCloudCommands;
+    case "db": return (await import("./commands/db.js")).registerDbCommands;
   }
   throw new Error(`Unknown command module: ${module}`);
 }
