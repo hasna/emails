@@ -17,6 +17,13 @@ async function post(url: string, body: unknown): Promise<Response> {
   });
 }
 
+async function signResendWebhook(bodyText: string, svixId: string, timestamp: string, signingKey: string): Promise<string> {
+  const keyBytes = Buffer.from(signingKey.replace(/^whsec_/, ""), "base64");
+  const key = await crypto.subtle.importKey("raw", keyBytes, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`${svixId}.${timestamp}.${bodyText}`));
+  return `v1,${Buffer.from(sig).toString("base64")}`;
+}
+
 // ─── createWebhookServer tests ────────────────────────────────────────────────
 
 describe("webhook module startup contract", () => {
@@ -84,6 +91,54 @@ describe("createWebhookServer", () => {
     const res = await post(`${base}/webhook/resend`, payload);
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("OK");
+  });
+
+  it("accepts a signed Resend payload once and rejects replayed svix ids", async () => {
+    server.stop(true);
+    const p2 = randomPort() + 75;
+    const keyPrefix = ["whsec", "_"].join("");
+    const signingKey = `${keyPrefix}${Buffer.from("test-webhook-fixture-32-bytes").toString("base64")}`;
+    const signedServer = createWebhookServer(p2, undefined, signingKey);
+    try {
+      const payload = {
+        type: "email.delivered",
+        data: {
+          email_id: "resend-evt-replay",
+          to: ["user@example.com"],
+          created_at: "2025-01-15T10:00:00Z",
+        },
+      };
+      const body = JSON.stringify(payload);
+      const svixId = "msg_replay_guard_1";
+      const timestamp = String(Math.floor(Date.now() / 1000));
+      const signature = await signResendWebhook(body, svixId, timestamp, signingKey);
+      const first = await fetch(`http://localhost:${p2}/webhook/resend`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "svix-id": svixId,
+          "svix-timestamp": timestamp,
+          "svix-signature": signature,
+        },
+        body,
+      });
+      expect(first.status).toBe(200);
+
+      const replay = await fetch(`http://localhost:${p2}/webhook/resend`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "svix-id": svixId,
+          "svix-timestamp": timestamp,
+          "svix-signature": signature,
+        },
+        body,
+      });
+      expect(replay.status).toBe(409);
+      expect(await replay.text()).toContain("Replay");
+    } finally {
+      signedServer.stop(true);
+    }
   });
 
   it("accepts a valid SES Delivery payload and returns 200", async () => {

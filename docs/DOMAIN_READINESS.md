@@ -16,13 +16,13 @@ Mailery has three user-visible modes.
 | Mode | Owner | Source of truth | Local storage role |
 | --- | --- | --- | --- |
 | `local` | User machine | Local SQLite/files | Durable source of truth |
-| `self_hosted` | User or organization | User-owned PostgreSQL/S3/provider state | Runtime cache only |
+| `self-hosted` | Hasna-owned AWS | Hasna-owned RDS/S3/provider state behind a service/API deployment | Local clients use API/cache paths only |
 | `cloud` | Mailery Cloud SaaS | Mailery Cloud API/RDS/S3/provider state | Optional cache/pull target |
 
 `remote` and `hybrid` are legacy vocabulary and must not be used in new user
 interfaces for deployment mode. Compatibility code may continue accepting those
 values as aliases, but user-facing docs and CLI output should say `local`,
-`self_hosted`, and `cloud`.
+`self-hosted`, and `cloud`.
 
 The lower-level storage sync mode is separate:
 
@@ -39,12 +39,13 @@ Every domain belongs to exactly one operational scope.
 | --- | --- | --- |
 | System domain | `mailery.co` | Platform-owned mail for signup, login, billing, alerts, and system notifications. |
 | Tenant domain | `example.com` in Mailery Cloud | A customer or user domain managed by the SaaS control plane. |
-| Self-hosted domain | `example.com` in a user AWS account | A user-owned domain managed by the OSS package against user-owned infrastructure. |
+| Self-hosted domain | Hasna-owned internal domain in Hasna AWS | A domain managed by the Hasna-owned AWS deployment. |
 | Local-only domain | `example.test` or imported mail | A local development or imported-mail domain with no provider readiness guarantee. |
 
 System domains must never be treated as a fallback sender for tenant domains.
 Tenant domains must never be allowed to send as another tenant or as the system
-domain. Self-hosted domains must not depend on Mailery Cloud to function.
+domain. Self-hosted domains belong to Hasna-owned AWS infrastructure and must
+not be presented as local or external operator deployments.
 
 ## Lifecycle
 
@@ -129,14 +130,14 @@ hard send requirement only when the user chooses a real sending provider.
 
 ### Self-Hosted
 
-Self-hosted mode uses user-owned infrastructure. PostgreSQL owns rows for
-mailboxes, messages, domains, providers, send state, and operational state. S3
-owns raw inbound MIME and optional attachment materialization. Local SQLite is a
-runtime cache only when `HASNA_EMAILS_STORAGE_MODE=remote`.
+Self-hosted mode uses Hasna-owned AWS infrastructure. RDS/PostgreSQL owns rows
+for mailboxes, messages, domains, providers, send state, and operational state.
+S3 owns raw inbound MIME and optional attachment materialization. Local SQLite is
+a runtime cache only when `HASNA_EMAILS_STORAGE_MODE=remote`.
 
-Self-hosted mode may use AWS RDS/S3/SES, but the OSS contract is not
-AWS-exclusive. AWS-specific helpers are implementation details for SES/S3
-operators.
+Do not use self-hosted for local machines, fleet boxes, or external deployments.
+Those may reuse OSS package capabilities, but the canonical deployment mode term
+remains reserved for Hasna-owned AWS.
 
 Self-hosted mode must:
 
@@ -149,11 +150,10 @@ Self-hosted mode must:
 
 Typical self-hosted setup:
 
-```bash
-export HASNA_EMAILS_DATABASE_URL='<postgresql-connection-url>'
-export MAILERY_MODE=self_hosted
-export HASNA_EMAILS_STORAGE_MODE=remote
+Configure `HASNA_EMAILS_DATABASE_URL` in the deployment secret store and use the
+`cloud` value for `MAILERY_MODE` on API-backed clients. Then run:
 
+```bash
 mailery self-hosted migrate
 mailery domains connect example.com --provider <ses-id> --source-of-truth postgres --dns-provider route53 --no-register-provider
 mailery domains dns example.com --json

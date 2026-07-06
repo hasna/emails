@@ -343,6 +343,21 @@ export { createWebhookServer } from "./lib/webhook.js";
 export { injectOpenPixel, injectClickTracking, prepareTrackedHtml } from "./lib/tracking.js";
 export { getFailoverProviderIds } from "./lib/config.js";
 export {
+  MAILERY_MODE_BOUNDARIES,
+  MAILERY_PROVIDER_OPERATION_GATES,
+  MAILERY_ROOT_BOUNDARIES,
+  maileryProviderSafetyMatrix,
+  requireMaileryLiveMutationEvidence,
+} from "./lib/provider-safety.js";
+export type {
+  MaileryDeploymentMode,
+  MaileryModeBoundary,
+  MaileryProviderOperationGate,
+  MaileryRootBoundary,
+  ProviderMode,
+  SideEffectClass,
+} from "./lib/provider-safety.js";
+export {
   resolveAddressRef, enrichAddress, listEnrichedAddresses,
   getAddressOwnershipDetail, setAddressOwnerByRef,
   transferAddressOwnerByRef, unassignAddressOwnerByRef,

@@ -43,4 +43,18 @@ describe("agent documentation contract", () => {
       expect(conventions).toContain(phrase);
     }
   });
+
+  it("documents canonical Mailery mode and provider safety boundaries", () => {
+    const safety = readFileSync(join(root, "docs", "MODE_BOUNDARY_AND_PROVIDER_SAFETY.md"), "utf8");
+
+    expect(safety).toContain("Canonical GitHub repo: `hasna/mailery`");
+    expect(safety).toContain("`open-emails` is compatibility-only");
+    expect(safety).toContain("| `local` |");
+    expect(safety).toContain("| `self-hosted` |");
+    expect(safety).toContain("| `cloud` |");
+    expect(safety).toContain("No-send");
+    expect(safety).toContain("No-domain-change");
+    expect(safety).toContain("Signed webhook");
+    expect(safety).toContain("maileryProviderSafetyMatrix()");
+  });
 });

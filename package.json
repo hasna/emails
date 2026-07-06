@@ -34,6 +34,7 @@
     "dashboard/dist",
     "dashboard/index.html",
     "dashboard/open-source.html",
+    "docs",
     "LICENSE",
     "README.md"
   ],

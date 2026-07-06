@@ -19,13 +19,15 @@ npm install -g @hasna/mailery
 Users install the open-source package: `@hasna/mailery`.
 
 Mailery stays local-first by default: local SQLite, local provider credentials,
-and local MCP. Self-hosted mode uses user-owned PostgreSQL/S3/SES as source of
-truth with local SQLite as a runtime cache. Mailery Cloud is an opt-in
-hosted source of truth at `https://mailery.co`; the same public CLI can sign up,
+and local MCP. Self-hosted mode means Hasna-owned AWS infrastructure for
+internal deployments, with RDS/S3/SES as the service source of truth. Mailery
+Cloud is the managed SaaS source of truth at `https://mailery.co`; the same public CLI can sign up,
 create an agent API key, create a billing link, create hosted mailboxes, read
 hosted messages, generate hosted digests, and pull cloud mail into local SQLite.
 The per-domain readiness contract for local, self-hosted, and cloud operation
-lives in [`docs/DOMAIN_READINESS.md`](docs/DOMAIN_READINESS.md).
+lives in [`docs/DOMAIN_READINESS.md`](docs/DOMAIN_READINESS.md). The root,
+mode, provider, no-send, no-domain-change, and webhook safety matrix lives in
+[`docs/MODE_BOUNDARY_AND_PROVIDER_SAFETY.md`](docs/MODE_BOUNDARY_AND_PROVIDER_SAFETY.md).
 
 The SaaS control plane is private Hasna Tools infrastructure. End users and
 open-source contributors should not install or depend on private Hasna Tools
@@ -126,7 +128,7 @@ Use these setup paths:
 | Mode | Who owns the mail source of truth | Domain setup path |
 | --- | --- | --- |
 | `local` | The local SQLite/files install | `mailery domains add` or `mailery domains connect --source-of-truth local`; DNS checks are advisory unless using a real send/receive provider. |
-| `self_hosted` | Your PostgreSQL/S3/SES or equivalent infrastructure | `mailery domains connect --source-of-truth postgres`, then publish the returned DNS tasks and enable inbound/outbound when evidence is ready. |
+| `self-hosted` | Hasna-owned AWS infrastructure for internal deployments | `mailery domains connect --source-of-truth postgres`, then publish the returned DNS tasks and enable inbound/outbound when evidence is ready. |
 | `cloud` | Mailery Cloud at `https://mailery.co` | `mailery cloud domain setup`; SaaS billing and tenant checks are handled by the hosted control plane. |
 
 Authentication records are required only for the capability you enable:
@@ -139,10 +141,10 @@ Authentication records are required only for the capability you enable:
   aggregation, but it should be present before production sending and monitored
   before moving from `p=none` to stricter policies.
 
-For self-hosted migration, run `mailery self-hosted migrate-local` once, switch
-to `MAILERY_MODE=self_hosted` with `HASNA_EMAILS_STORAGE_MODE=remote`, and treat
-PostgreSQL/S3 as the durable source of truth. Local SQLite is then only a runtime
-cache prepared from and flushed back to the self-hosted source.
+For self-hosted deployment, run the service/API path against Hasna-owned AWS
+RDS/S3/SES and point clients at that API. Do not treat a local SQLite install,
+or a non-Hasna operator deployment, as self-hosted just because it runs on a
+different machine.
 
 ## Mailery UI (`mailery ui`)
 
@@ -415,42 +417,28 @@ For managed or self-hosted PostgreSQL, set `HASNA_EMAILS_DATABASE_URL` to the
 database connection string without printing or committing it. Self-hosted
 installs can use the fallback `EMAILS_DATABASE_URL`.
 
-Mailery modes:
+Mailery deployment modes:
 
 - `local` - all reads/writes stay in local SQLite/files.
-- `self_hosted` - user/org-owned infrastructure. PostgreSQL is the source of
-  truth for provider, mailbox, message, label, send, and state rows. S3 stores
-  raw SES MIME and optional attachment objects. Local SQLite is a runtime cache
-  that is prepared from PostgreSQL and flushed back after CLI commands; long
-  running MCP/server processes flush periodically. For Hasna's own self-hosted
-  deployment this means AWS RDS plus SES/S3, but the concrete cluster, bucket,
-  and secret-path values live in private deployment secrets and are not package
+- `self-hosted` - Hasna-owned AWS service/API deployment backed by
+  RDS/S3/provider state for internal use. Concrete cluster, bucket, and
+  secret-path values live in private deployment secrets and are not package
   defaults.
 - `cloud` - Hasna-operated Mailery Cloud SaaS at `https://mailery.co`.
 
-Deprecated `remote` and `hybrid` values are accepted as aliases only for the
-deployment mode (`MAILERY_MODE`, `HASNA_EMAILS_MODE`, or legacy config keys) and
-map to `self_hosted`. The lower-level storage sync mode remains separate:
-`HASNA_EMAILS_STORAGE_MODE=remote` means PostgreSQL source of truth with local
-runtime cache. `HASNA_EMAILS_STORAGE_MODE=hybrid` keeps local SQLite as source
-and only syncs when `mailery storage pull`, `mailery storage push`, or
-`mailery storage sync --force` is run explicitly.
+The public client runtime currently accepts `local` and `cloud` as values for
+`MAILERY_MODE`. Deprecated `self_hosted`, `remote`, and `hybrid` values are
+compatibility aliases for API-client mode, not new deployment-mode vocabulary.
+
+Configure `HASNA_EMAILS_DATABASE_URL` with the PostgreSQL connection URL in the
+Hasna-owned AWS deployment secret store. `EMAILS_DATABASE_URL` remains an
+implementation fallback, not a signal that a local or external deployment is
+self-hosted. Self-hosted clients use cloud/API client mode with an API URL.
+Configure the inbound S3 bucket and attachment bucket through deployment
+secrets or `mailery config` without printing the concrete bucket names.
 
 ```bash
-# Configure RDS/PostgreSQL
-export HASNA_EMAILS_DATABASE_URL="postgres://..."
-# Optional self-hosted fallback:
-# export EMAILS_DATABASE_URL="postgres://..."
-
-# Optional explicit mode; default is local without a DB URL, self_hosted with one.
-export MAILERY_MODE=self_hosted
-export HASNA_EMAILS_STORAGE_MODE=remote
-
-# Optional AWS/S3 settings for self-hosted inbound and attachments.
-# Use your own bucket names and account-specific secrets.
-export EMAILS_INBOUND_S3_BUCKET="your-mailery-inbound-bucket"
 mailery config set attachment_storage s3
-mailery config set attachment_s3_bucket "your-mailery-attachments-bucket"
 
 # Check source-of-truth runtime status
 mailery self-hosted status

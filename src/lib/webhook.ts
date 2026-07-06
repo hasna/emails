@@ -21,6 +21,8 @@ function colorEventType(type: string, chalk: typeof import("chalk").default): st
 }
 
 export function createWebhookServer(port: number, providerId?: string, webhookSecret?: string) {
+  const maxRememberedWebhookIds = 10_000;
+  const seenWebhookIds = new Set<string>();
   const server = Bun.serve({
     port,
     async fetch(req) {
@@ -44,13 +46,24 @@ export function createWebhookServer(port: number, providerId?: string, webhookSe
       if (url.pathname === "/webhook/resend") {
         // Verify Resend signature if secret is configured
         if (webhookSecret) {
+          const svixId = req.headers.get("svix-id");
+          if (svixId && seenWebhookIds.has(svixId)) {
+            return new Response("Replay detected", { status: 409 });
+          }
           const headers: Record<string, string | null> = {
-            "svix-id": req.headers.get("svix-id"),
+            "svix-id": svixId,
             "svix-timestamp": req.headers.get("svix-timestamp"),
             "svix-signature": req.headers.get("svix-signature"),
           };
           const valid = await verifyResendSignature(bodyText, headers, webhookSecret).catch(() => false);
           if (!valid) return new Response("Invalid signature", { status: 401 });
+          if (svixId) {
+            seenWebhookIds.add(svixId);
+            if (seenWebhookIds.size > maxRememberedWebhookIds) {
+              const oldest = seenWebhookIds.values().next().value;
+              if (oldest) seenWebhookIds.delete(oldest);
+            }
+          }
         }
         event = parseResendWebhook(body);
       } else if (url.pathname === "/webhook/ses") {
