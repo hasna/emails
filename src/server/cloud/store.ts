@@ -314,6 +314,23 @@ export class MaileryCloudStore {
     return row ? mapMessageRow(row) : null;
   }
 
+  /**
+   * Look up an existing message by a stable upstream key, matching EITHER the
+   * `source_id` (this ingest path's idempotency key) OR the `message_id`
+   * (the S3 object key stored by the history backfill). Returns the row id, or
+   * null. Used by the ingest worker to avoid re-inserting mail already present
+   * from the local→cloud history import, whose rows carry the same object key
+   * in `message_id` but a different `source_id`.
+   */
+  async findMessageIdByKey(key: string): Promise<string | null> {
+    if (!key) return null;
+    const row = await this.client.get<{ id: string }>(
+      `SELECT id FROM messages WHERE source_id = $1 OR message_id = $1 LIMIT 1`,
+      [key],
+    );
+    return row ? row.id : null;
+  }
+
   /** Positional insert params shared by createMessage and upsertMessage. */
   private messageInsertParams(input: MessageInput): unknown[] {
     return [

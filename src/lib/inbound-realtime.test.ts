@@ -37,6 +37,23 @@ describe("parseSesNotification", () => {
     expect(r?.objectKey).toBe("inbound/acme.com/xyz");
   });
 
+  it("captures the SES receipt timestamp when present", () => {
+    const withTs = JSON.stringify({
+      notificationType: "Received",
+      mail: {
+        messageId: "ts123",
+        timestamp: "2026-07-01T16:37:06.000Z",
+      },
+      receipt: {
+        recipients: ["ops@acme.com"],
+        action: { type: "S3", bucketName: "acme-inbound", objectKey: "inbound/acme.com/ts123" },
+      },
+    });
+    const r = parseSesNotification(withTs);
+    expect(r?.timestamp).toBe("2026-07-01T16:37:06.000Z");
+    expect(r?.objectKey).toBe("inbound/acme.com/ts123");
+  });
+
   it("returns null for garbage", () => {
     expect(parseSesNotification("not json")).toBeNull();
     expect(parseSesNotification(JSON.stringify({ hello: "world" }))).toBeNull();
