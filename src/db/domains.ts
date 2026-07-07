@@ -13,6 +13,62 @@ import { DomainNotFoundError } from "../types/index.js";
 import { getDatabase, now, uuid } from "./database.js";
 import { parseJsonObject } from "./json.js";
 import { safeOffset, safeOptionalLimit } from "./pagination.js";
+import { cloudStoreFor, isCloudMode, type CloudResourceStore } from "./cloud-store.js";
+
+// ============================================================================
+// Cloud (self_hosted) routing
+// ============================================================================
+//
+// When the client-flip resolves to cloud (mode=self_hosted + HASNA_MAILERY_API_URL
+// + HASNA_MAILERY_API_KEY), the `domains` resource is served by the app's cloud
+// HTTP API (<API_URL>/v1/domains) instead of the local SQLite store. An explicit
+// `db` argument always means "use this local database" (tests / tooling), so
+// cloud routing is skipped whenever a caller passes `db`.
+const DOMAIN_RESOURCE = "domains";
+
+// Route to the cloud store whenever the client is flipped to self_hosted. The
+// `db` argument is intentionally ignored here: the app's CLI passes an explicit
+// local `getDatabase()` handle to every repo call, so keying on it would defeat
+// cloud routing. Tests never set the cloud env, so isCloudMode() is false there
+// and the local SQLite path is always used.
+function cloudDomains(_db?: Database): CloudResourceStore | null {
+  if (!isCloudMode()) return null;
+  return cloudStoreFor(DOMAIN_RESOURCE);
+}
+
+/** Map a cloud API domain entity to the local rich Domain shape (defaults filled). */
+function apiToDomain(e: Record<string, unknown>): Domain {
+  const str = (v: unknown): string | null => (v == null ? null : String(v));
+  const verified = Boolean(e["verified"]);
+  const dns: DnsStatus = verified ? "verified" : "pending";
+  const updatedAt = str(e["updated_at"]) ?? new Date().toISOString();
+  const createdAt = str(e["created_at"]) ?? updatedAt;
+  return {
+    id: String(e["id"]),
+    provider_id: str(e["provider"] ?? e["provider_id"]) ?? "cloud",
+    domain: String(e["domain"] ?? ""),
+    domain_type: "self_hosted",
+    source_of_truth: "cloud",
+    ownership_status: verified ? "verified" : "pending",
+    inbound_status: "pending",
+    outbound_status: "pending",
+    monitoring_status: "none",
+    dkim_status: dns,
+    spf_status: dns,
+    dmarc_status: dns,
+    dns_records: {},
+    provider_metadata: {},
+    verified_at: verified ? updatedAt : null,
+    last_dns_check_at: null,
+    last_inbound_check_at: null,
+    last_outbound_check_at: null,
+    last_monitored_at: null,
+    restricted_at: null,
+    suspended_at: null,
+    created_at: createdAt,
+    updated_at: updatedAt,
+  };
+}
 
 interface DomainRow {
   id: string;
@@ -62,6 +118,12 @@ export function createDomain(
   domain: string,
   db?: Database,
 ): Domain {
+  const cloud = cloudDomains(db);
+  if (cloud) {
+    const created = cloud.create({ domain, provider: provider_id });
+    return apiToDomain(created);
+  }
+
   const d = db || getDatabase();
   const id = uuid();
   const timestamp = now();
@@ -76,6 +138,12 @@ export function createDomain(
 }
 
 export function getDomain(id: string, db?: Database): Domain | null {
+  const cloud = cloudDomains(db);
+  if (cloud) {
+    const entity = cloud.get(id);
+    return entity ? apiToDomain(entity) : null;
+  }
+
   const d = db || getDatabase();
   const row = d.query("SELECT * FROM domains WHERE id = ?").get(id) as DomainRow | null;
   if (!row) return null;
@@ -83,6 +151,18 @@ export function getDomain(id: string, db?: Database): Domain | null {
 }
 
 export function getDomainByName(provider_id: string, domain: string, db?: Database): Domain | null {
+  const cloud = cloudDomains(db);
+  if (cloud) {
+    // Cloud is single-tenant per API key; match by domain name (provider is a
+    // local concept and is not part of the cloud domain identity).
+    const name = domain.trim().toLowerCase();
+    const match = cloud
+      .list({ limit: 1000 })
+      .map(apiToDomain)
+      .find((dm) => dm.domain.toLowerCase() === name);
+    return match ?? null;
+  }
+
   const d = db || getDatabase();
   const row = d
     .query("SELECT * FROM domains WHERE provider_id = ? AND domain = ? COLLATE NOCASE")
@@ -92,6 +172,16 @@ export function getDomainByName(provider_id: string, domain: string, db?: Databa
 }
 
 export function findDomainsByName(domain: string, db?: Database): Domain[] {
+  const cloud = cloudDomains(db);
+  if (cloud) {
+    const name = domain.trim().toLowerCase();
+    return cloud
+      .list({ limit: 1000 })
+      .map(apiToDomain)
+      .filter((dm) => dm.domain.toLowerCase() === name)
+      .sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
+  }
+
   const d = db || getDatabase();
   const rows = d
     .query("SELECT * FROM domains WHERE domain = ? COLLATE NOCASE ORDER BY created_at DESC")
@@ -135,6 +225,20 @@ export interface UsableDomainOptions extends ListDomainOptions {
 }
 
 export function listDomains(provider_id?: string, db?: Database, opts?: ListDomainOptions): Domain[] {
+  const cloud = cloudDomains(db);
+  if (cloud) {
+    const query: Record<string, string | number | undefined> = {};
+    const lim = safeOptionalLimit(opts?.limit);
+    if (lim !== null) query["limit"] = lim;
+    const off = safeOffset(opts?.offset);
+    if (off) query["offset"] = off;
+    let domains = cloud.list(query).map(apiToDomain);
+    if (provider_id) domains = domains.filter((dm) => dm.provider_id === provider_id);
+    domains.sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
+    if (lim !== null) domains = domains.slice(off, off + lim);
+    return domains;
+  }
+
   const d = db || getDatabase();
   const limit = safeOptionalLimit(opts?.limit);
   const offset = safeOffset(opts?.offset);
@@ -235,6 +339,17 @@ export function updateDomain(
   input: Partial<Pick<Domain, "dkim_status" | "spf_status" | "dmarc_status" | "verified_at">>,
   db?: Database,
 ): Domain {
+  const cloud = cloudDomains(db);
+  if (cloud) {
+    const current = cloud.get(id);
+    if (!current) throw new DomainNotFoundError(id);
+    const verified =
+      input.verified_at != null ||
+      (input.dkim_status === "verified" && input.spf_status === "verified" && input.dmarc_status === "verified");
+    const updated = verified ? cloud.update(id, { verified: true }) : current;
+    return apiToDomain(updated);
+  }
+
   const d = db || getDatabase();
   const domain = getDomain(id, d);
   if (!domain) throw new DomainNotFoundError(id);
@@ -275,6 +390,16 @@ export function updateDomainReadiness(
   input: DomainReadinessUpdate,
   db?: Database,
 ): Domain {
+  const cloud = cloudDomains(db);
+  if (cloud) {
+    // The cloud domain schema does not carry the local lifecycle/readiness
+    // fields; return the current cloud record so callers (e.g. `domain add`)
+    // still get a valid Domain back.
+    const current = cloud.get(id);
+    if (!current) throw new DomainNotFoundError(id);
+    return apiToDomain(current);
+  }
+
   const d = db || getDatabase();
   const domain = getDomain(id, d);
   if (!domain) throw new DomainNotFoundError(id);
@@ -376,6 +501,11 @@ export function moveDomainProvider(id: string, toProviderId: string, db?: Databa
 }
 
 export function deleteDomain(id: string, db?: Database): boolean {
+  const cloud = cloudDomains(db);
+  if (cloud) {
+    return cloud.del(id);
+  }
+
   const d = db || getDatabase();
   const result = d.run("DELETE FROM domains WHERE id = ?", [id]);
   return result.changes > 0;
@@ -388,6 +518,15 @@ export function updateDnsStatus(
   dmarc: DnsStatus,
   db?: Database,
 ): Domain {
+  const cloud = cloudDomains(db);
+  if (cloud) {
+    const current = cloud.get(id);
+    if (!current) throw new DomainNotFoundError(id);
+    const allVerifiedCloud = dkim === "verified" && spf === "verified" && dmarc === "verified";
+    const updated = allVerifiedCloud ? cloud.update(id, { verified: true }) : current;
+    return apiToDomain(updated);
+  }
+
   const d = db || getDatabase();
   const domain = getDomain(id, d);
   if (!domain) throw new DomainNotFoundError(id);

@@ -4,6 +4,11 @@ export type { Database };
 import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { sqlEmailAddress, sqlEmailDomain } from "./email-address-sql.js";
+import { cloudStoreFor, isCloudMode } from "./cloud-store.js";
+
+// Resources that are served by the cloud HTTP API in self_hosted mode. Only
+// these route id-resolution to the cloud; everything else stays local.
+const CLOUD_BACKED_RESOURCES = new Set(["domains", "addresses", "messages"]);
 
 function isInMemoryDb(path: string): boolean {
   return path === ":memory:" || path.startsWith("file::memory:");
@@ -2578,6 +2583,23 @@ export function resolvePartialId(db: Database, table: string, partialId: string)
   if (!RESOLVABLE_TABLES.has(table)) {
     throw new Error(`resolvePartialId: refusing unknown table '${table}'`);
   }
+
+  // Cloud (self_hosted) mode: resolve ids for cloud-backed resources against the
+  // cloud HTTP API so CLI helpers (remove/get by id) operate on the cloud dataset.
+  if (CLOUD_BACKED_RESOURCES.has(table) && isCloudMode()) {
+    const store = cloudStoreFor(table);
+    if (store) {
+      if (partialId.length >= 36) {
+        return store.get(partialId) ? partialId : null;
+      }
+      const matches = store
+        .list({ limit: 1000 })
+        .map((row) => String((row as { id?: unknown }).id ?? ""))
+        .filter((id) => id.startsWith(partialId));
+      return matches.length === 1 ? matches[0]! : null;
+    }
+  }
+
   if (partialId.length >= 36) {
     const row = db.query(`SELECT id FROM ${table} WHERE id = ?`).get(partialId) as { id: string } | null;
     return row?.id ?? null;
