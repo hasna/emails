@@ -39,17 +39,28 @@ const messageSchema = {
   type: "object",
   properties: {
     id: { type: "string" },
+    direction: { type: "string", description: "outbound | inbound" },
     from_addr: { type: "string" },
     to_addrs: { type: "array", items: { type: "string" } },
+    cc_addrs: { type: "array", items: { type: "string" } },
     subject: { type: "string", nullable: true },
     body_text: { type: "string", nullable: true },
     body_html: { type: "string", nullable: true },
     status: { type: "string" },
     provider_message_id: { type: "string", nullable: true },
+    message_id: { type: "string", nullable: true, description: "RFC 5322 Message-ID" },
+    in_reply_to: { type: "string", nullable: true },
+    received_at: { type: "string", format: "date-time", nullable: true, description: "Original receipt time (inbound)" },
+    is_read: { type: "boolean" },
+    is_starred: { type: "boolean" },
+    labels: { type: "array", items: { type: "string" } },
+    headers: { type: "object", additionalProperties: true },
+    attachments: { type: "array", items: { type: "object", additionalProperties: true } },
+    source_id: { type: "string", nullable: true, description: "Stable upstream id used for idempotent upsert" },
     created_at: { type: "string", format: "date-time" },
     updated_at: { type: "string", format: "date-time" },
   },
-  required: ["id", "from_addr", "to_addrs", "status", "created_at", "updated_at"],
+  required: ["id", "direction", "from_addr", "to_addrs", "status", "created_at", "updated_at"],
 } as const;
 
 const listParams = [
@@ -199,7 +210,9 @@ export const maileryCloudOpenApi: OpenApiDocument = {
       },
       post: {
         operationId: "createMessage",
-        summary: "Record an outbound message in the ledger (scope mailery:write)",
+        summary:
+          "Record a message — outbound (sent ledger) or inbound (received mail). " +
+          "Supplying source_id makes the write idempotent (upsert). Scope mailery:write.",
         requestBody: {
           required: true,
           content: {
@@ -209,17 +222,32 @@ export const maileryCloudOpenApi: OpenApiDocument = {
                 properties: {
                   from: { type: "string" },
                   to: { type: "array", items: { type: "string" } },
+                  cc: { type: "array", items: { type: "string" } },
                   subject: { type: "string", nullable: true },
                   text: { type: "string", nullable: true },
                   html: { type: "string", nullable: true },
                   status: { type: "string" },
+                  direction: { type: "string", description: "outbound | inbound (inferred as inbound when received_at/message_id set)" },
+                  received_at: { type: "string", format: "date-time", nullable: true },
+                  message_id: { type: "string", nullable: true },
+                  in_reply_to: { type: "string", nullable: true },
+                  is_read: { type: "boolean" },
+                  is_starred: { type: "boolean" },
+                  labels: { type: "array", items: { type: "string" } },
+                  headers: { type: "object", additionalProperties: true },
+                  attachments: { type: "array", items: { type: "object", additionalProperties: true } },
+                  provider_message_id: { type: "string", nullable: true },
+                  source_id: { type: "string", description: "Stable upstream id; enables idempotent upsert" },
                 },
                 required: ["from", "to"],
               },
             },
           },
         },
-        responses: { "201": { content: { "application/json": { schema: { type: "object", properties: { message: { $ref: "#/components/schemas/Message" } } } } } } },
+        responses: {
+          "200": { content: { "application/json": { schema: { type: "object", properties: { message: { $ref: "#/components/schemas/Message" } } } } } },
+          "201": { content: { "application/json": { schema: { type: "object", properties: { message: { $ref: "#/components/schemas/Message" } } } } } },
+        },
       },
     },
     "/v1/messages/{id}": {

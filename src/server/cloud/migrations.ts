@@ -52,8 +52,46 @@ const CORE_SCHEMA = defineMigration(
   `,
 );
 
-/** All migrations, in order: api-keys table (auth) then the domain schema. */
+/**
+ * Inbound-message support for the shared message store.
+ *
+ * The original `messages` table (0001) is an outbound-only ledger. This
+ * migration widens it so the SAME table can faithfully hold *inbound* mail
+ * (received email) alongside sent messages, which the /v1 API needs both for
+ * importing history and for future SES-inbound ingestion. Every column is
+ * additive and nullable/defaulted, so existing outbound rows and readers are
+ * unaffected.
+ *
+ * Idempotency: `source_id` is the stable identifier of the upstream record (the
+ * local row id for a history import, or the provider/receipt id for live
+ * ingestion). A partial UNIQUE index lets writers upsert on it, so re-running an
+ * import never creates duplicates.
+ */
+const INBOUND_SCHEMA = defineMigration(
+  "0002_mailery_messages_inbound",
+  `
+  ALTER TABLE messages ADD COLUMN IF NOT EXISTS direction   TEXT NOT NULL DEFAULT 'outbound';
+  ALTER TABLE messages ADD COLUMN IF NOT EXISTS cc_addrs    JSONB NOT NULL DEFAULT '[]'::jsonb;
+  ALTER TABLE messages ADD COLUMN IF NOT EXISTS received_at TIMESTAMPTZ;
+  ALTER TABLE messages ADD COLUMN IF NOT EXISTS message_id  TEXT;
+  ALTER TABLE messages ADD COLUMN IF NOT EXISTS in_reply_to TEXT;
+  ALTER TABLE messages ADD COLUMN IF NOT EXISTS is_read     BOOLEAN NOT NULL DEFAULT FALSE;
+  ALTER TABLE messages ADD COLUMN IF NOT EXISTS is_starred  BOOLEAN NOT NULL DEFAULT FALSE;
+  ALTER TABLE messages ADD COLUMN IF NOT EXISTS labels      JSONB NOT NULL DEFAULT '[]'::jsonb;
+  ALTER TABLE messages ADD COLUMN IF NOT EXISTS headers     JSONB NOT NULL DEFAULT '{}'::jsonb;
+  ALTER TABLE messages ADD COLUMN IF NOT EXISTS attachments JSONB NOT NULL DEFAULT '[]'::jsonb;
+  ALTER TABLE messages ADD COLUMN IF NOT EXISTS source_id   TEXT;
+
+  CREATE UNIQUE INDEX IF NOT EXISTS messages_source_id_uidx
+    ON messages (source_id) WHERE source_id IS NOT NULL;
+  CREATE INDEX IF NOT EXISTS messages_direction_idx ON messages (direction);
+  CREATE INDEX IF NOT EXISTS messages_received_idx ON messages (received_at DESC);
+  CREATE INDEX IF NOT EXISTS messages_message_id_idx ON messages (message_id);
+  `,
+);
+
+/** All migrations, in order: api-keys table (auth), the core schema, inbound. */
 export function maileryCloudMigrations(): Migration[] {
   const authMigrations = apiKeyMigrations().map((m) => defineMigration(m.id, m.sql));
-  return [...authMigrations, CORE_SCHEMA];
+  return [...authMigrations, CORE_SCHEMA, INBOUND_SCHEMA];
 }
