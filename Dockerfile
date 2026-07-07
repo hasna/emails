@@ -19,8 +19,14 @@ ENV NODE_EXTRA_CA_CERTS=/etc/ssl/certs/rds-global-bundle.pem
 
 # Install dependencies first for layer caching. bun.lock is not tracked in this
 # repo, so resolve from package.json (production deps only).
+#
+# The runtime image runs only `mailery-serve` (cloud API) and `mailery db
+# migrate`; neither imports the workspace-local `file:` deps (e.g. the lazily
+# loaded MCP harness). Those paths are outside the build context and would make
+# `bun install` fail, so strip them from package.json first.
 COPY package.json ./
-RUN bun install --production
+COPY scripts/docker-prune-file-deps.mjs ./scripts/docker-prune-file-deps.mjs
+RUN bun scripts/docker-prune-file-deps.mjs && bun install --production
 
 # Application source (run directly with Bun — no build step needed).
 COPY tsconfig.json ./

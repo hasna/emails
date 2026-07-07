@@ -76,6 +76,30 @@ function queryInt(url: URL, key: string): number | undefined {
   return Number.isFinite(n) ? n : undefined;
 }
 
+/** Coerce a JSON body value into a string[] (array, comma/whitespace-tolerant). */
+function asStringArray(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map((v) => String(v));
+  if (typeof value === "string" && value.trim()) return [value.trim()];
+  return [];
+}
+
+/** Coerce a JSON body value into a plain object, else undefined. */
+function asObject(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+/** Coerce a JSON body value into an array, else undefined. */
+function asArray(value: unknown): unknown[] | undefined {
+  return Array.isArray(value) ? value : undefined;
+}
+
+/** Optional string|null passthrough: undefined stays undefined. */
+function asOptStringOrNull(value: unknown): string | null | undefined {
+  return value === undefined ? undefined : (value as string | null);
+}
+
 interface AuthOk {
   ok: true;
   principal: ApiKeyPrincipal;
@@ -278,15 +302,42 @@ export async function handleCloudRequest(
         const rawTo = body.to ?? body.to_addrs;
         const to = Array.isArray(rawTo) ? rawTo.map((v) => String(v)) : typeof rawTo === "string" && rawTo.trim() ? [rawTo.trim()] : [];
         if (to.length === 0) return json(400, { error: "to is required" });
-        const created = await store.createMessage({
+
+        // Direction defaults to outbound; any inbound signal marks it inbound so
+        // the same POST route records both sent and received mail.
+        const receivedAt = asOptStringOrNull(body.received_at);
+        const directionRaw = body.direction === undefined ? undefined : String(body.direction);
+        const direction =
+          directionRaw ?? (receivedAt || body.message_id || body.in_reply_to ? "inbound" : undefined);
+
+        const input = {
           from_addr: from,
           to_addrs: to,
-          subject: body.subject === undefined ? undefined : (body.subject as string | null),
-          body_text: body.text === undefined ? (body.body_text as string | null | undefined) : (body.text as string | null),
-          body_html: body.html === undefined ? (body.body_html as string | null | undefined) : (body.html as string | null),
+          cc_addrs: body.cc === undefined && body.cc_addrs === undefined ? undefined : asStringArray(body.cc ?? body.cc_addrs),
+          subject: asOptStringOrNull(body.subject),
+          body_text: body.text === undefined ? asOptStringOrNull(body.body_text) : asOptStringOrNull(body.text),
+          body_html: body.html === undefined ? asOptStringOrNull(body.body_html) : asOptStringOrNull(body.html),
           status: body.status ? String(body.status) : undefined,
-          provider_message_id: body.provider_message_id === undefined ? undefined : (body.provider_message_id as string | null),
-        });
+          provider_message_id: asOptStringOrNull(body.provider_message_id),
+          direction,
+          message_id: asOptStringOrNull(body.message_id),
+          in_reply_to: asOptStringOrNull(body.in_reply_to),
+          received_at: receivedAt,
+          is_read: typeof body.is_read === "boolean" ? body.is_read : undefined,
+          is_starred: typeof body.is_starred === "boolean" ? body.is_starred : undefined,
+          labels: body.labels === undefined ? undefined : asStringArray(body.labels),
+          headers: asObject(body.headers),
+          attachments: asArray(body.attachments),
+          source_id: body.source_id === undefined ? undefined : String(body.source_id),
+        };
+
+        // With a source_id the write is idempotent (upsert): re-running an
+        // import updates the existing row instead of creating a duplicate.
+        if (input.source_id) {
+          const { record, inserted } = await store.upsertMessage(input);
+          return json(inserted ? 201 : 200, { message: record });
+        }
+        const created = await store.createMessage(input);
         return json(201, { message: created });
       }
       return json(405, { error: "method not allowed" });
