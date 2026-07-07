@@ -152,4 +152,14 @@ describe("domain CLI — cloud (self_hosted) routing", () => {
     await runDomainCommand(["domain", "remove", id, "--yes"]);
     expect((await serverDomains()).length).toBe(0);
   });
+
+  it("resolves an id PREFIX against the cloud dataset for remove", async () => {
+    await runDomainCommand(["domain", "add", "prefix.example.com", "--provider", "cloud"]);
+    const remote = await serverDomains();
+    const id = (remote[0] as { id: string }).id;
+    // An 8-char prefix must be resolved by listing the CLOUD store (not local
+    // SQLite, which is :memory: and empty here) — proving reads route to cloud.
+    await runDomainCommand(["domain", "remove", id.slice(0, 8), "--yes"]);
+    expect((await serverDomains()).length).toBe(0);
+  });
 });

@@ -2620,6 +2620,21 @@ export function listPartialIdMatches(db: Database, table: string, partialId: str
     throw new Error(`resolvePartialId: refusing unknown table '${table}'`);
   }
   const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 6;
+
+  // Cloud (self_hosted) mode: match ambiguity previews against the cloud dataset
+  // for cloud-backed resources so id resolution never leaks or consults the
+  // local SQLite store when the client is routed to the cloud HTTP API.
+  if (CLOUD_BACKED_RESOURCES.has(table) && isCloudMode()) {
+    const store = cloudStoreFor(table);
+    if (store) {
+      return store
+        .list({ limit: 1000 })
+        .map((row) => String((row as { id?: unknown }).id ?? ""))
+        .filter((id) => id.startsWith(partialId))
+        .slice(0, safeLimit);
+    }
+  }
+
   const rows = db
     .query(`SELECT id FROM ${table} WHERE id LIKE ? LIMIT ?`)
     .all(`${partialId}%`, safeLimit) as { id: string }[];
