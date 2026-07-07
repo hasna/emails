@@ -4,6 +4,7 @@ import type { DnsRecord, Domain, DomainSourceOfTruth, DomainType, Provider } fro
 import chalk from "../../lib/chalk-lite.js";
 import { createDomain, listDomains, listUsableDomains, deleteDomain, findDomainsByName, getDomain, getDomainByName, moveDomainProvider, updateDnsStatus, updateDomainReadiness } from "../../db/domains.js";
 import { getProvider, listProviderNamesByIds } from "../../db/providers.js";
+import { isCloudMode } from "../../db/cloud-store.js";
 import { getDatabase, now } from "../../db/database.js";
 import { getAdapter } from "../../providers/index.js";
 import { formatDnsTable, generateDmarcRecord, generateSpfRecord } from "../../lib/dns.js";
@@ -222,6 +223,43 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
   ) => {
     try {
       const db = getDatabase();
+
+      // Cloud (self_hosted) mode: the domain is created directly on the app's
+      // cloud HTTP API (<API_URL>/v1/domains). Providers are a local-only concept
+      // (the cloud API exposes no /v1/providers), so we do NOT resolve a local
+      // provider row or call a provider adapter — `--provider` is passed through
+      // as a label. This makes `domain add` a real cloud write, not a local one.
+      if (isCloudMode()) {
+        const existing = getDomainByName(opts.provider, domain, db);
+        const cloudMode = resolveMaileryMode();
+        const cloudDomainType = normalizeDomainType(opts.domainType) ?? "self_hosted";
+        if (opts.dryRun) {
+          output({
+            dry_run: true,
+            domain,
+            provider_id: opts.provider,
+            mode: cloudMode.mode,
+            provider: null,
+            source_of_truth: "cloud",
+            domain_type: cloudDomainType,
+            existing: existing ? { id: existing.id, domain: existing.domain } : null,
+            would_create_domain: !existing,
+            would_call_provider: false,
+            cli_equivalent: `mailery ${commandPrefix} add ${domain} --provider ${opts.provider}`,
+          }, existing
+            ? chalk.dim(`Domain already exists in cloud: ${domain} (${existing.id.slice(0, 8)})`)
+            : chalk.dim(`Would create ${domain} on the cloud API (provider label ${opts.provider}).`));
+          return;
+        }
+        if (existing) {
+          output(existing, chalk.green(`✓ Domain already exists: ${domain} (${existing.id.slice(0, 8)})`));
+          return;
+        }
+        const created = createDomain(opts.provider, domain);
+        output(created, chalk.green(`✓ Domain added to cloud: ${domain} (${created.id.slice(0, 8)})`));
+        return;
+      }
+
       const providerId = resolveId("providers", opts.provider);
       const provider = getProvider(providerId, db);
       if (!provider) handleError(new Error(`Provider not found: ${opts.provider}`));
