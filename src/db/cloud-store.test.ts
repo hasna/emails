@@ -48,7 +48,15 @@ describe("mailery cloud-store resolver (client flip)", () => {
     expect(cloudStoreFor("domains")!.resource).toBe("domains");
   });
 
-  test("cloud requested but no key => throws (fail-closed)", () => {
+  test("mode=cloud but NO api url/key => local (legacy fall-through, no throw)", () => {
+    process.env.HASNA_MAILERY_STORAGE_MODE = "self_hosted";
+    process.env.HASNA_EMAILS_MODE = "self_hosted";
+    resetCloudConfigCache();
+    expect(resolveCloudConfig()).toBeNull();
+    expect(isCloudMode()).toBe(false);
+  });
+
+  test("partial config: url set but no key => throws (fail-closed)", () => {
     process.env.HASNA_MAILERY_STORAGE_MODE = "self_hosted";
     process.env.HASNA_MAILERY_API_URL = "https://mailery.hasna.xyz";
     resetCloudConfigCache();
