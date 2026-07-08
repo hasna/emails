@@ -3,6 +3,41 @@ import type { CreateProviderInput, Provider, ProviderRow, ProviderSummary, Provi
 import { ProviderNotFoundError } from "../types/index.js";
 import { getDatabase, now, uuid } from "./database.js";
 import { safeOffset, safeOptionalLimit } from "./pagination.js";
+import { cloudResource, cloudListQuery, cloudPage, cbool, ciso, cstr, cstrOrNull } from "./cloud-resource.js";
+
+const PROVIDER_RESOURCE = "providers";
+
+// The cloud `providers` resource carries only NON-SECRET metadata (id, name,
+// type, region, active, timestamps) — provider credentials (api_key/secret_key/
+// oauth tokens) are never distributed to or fetched by a client. Secret columns
+// map to null; a flipped client uses cloud-side send (`/v1/send`), not local
+// provider secrets. So `provider list` shows the cloud inventory, not secrets.
+function apiToProviderSummary(e: Record<string, unknown>): ProviderSummary {
+  const updatedAt = ciso(e["updated_at"]);
+  return {
+    id: cstr(e["id"]),
+    name: cstr(e["name"]),
+    type: cstr(e["type"]) as Provider["type"],
+    region: cstrOrNull(e["region"]),
+    active: cbool(e["active"]),
+    created_at: ciso(e["created_at"], updatedAt),
+    updated_at: updatedAt,
+  };
+}
+
+function apiToProvider(e: Record<string, unknown>): Provider {
+  return {
+    ...apiToProviderSummary(e),
+    api_key: null,
+    access_key: null,
+    secret_key: null,
+    oauth_client_id: null,
+    oauth_client_secret: null,
+    oauth_refresh_token: null,
+    oauth_access_token: null,
+    oauth_token_expiry: null,
+  };
+}
 
 function rowToProvider(row: ProviderRow): Provider {
   return {
@@ -108,6 +143,14 @@ export interface ListProviderOptions {
 }
 
 export function listProviders(db?: Database, opts?: ListProviderOptions): Provider[] {
+  const cloud = cloudResource(PROVIDER_RESOURCE);
+  if (cloud) {
+    const { query, limit, offset } = cloudListQuery(opts);
+    const rows = cloud.list(query).map(apiToProvider);
+    rows.sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
+    return cloudPage(rows, limit, offset);
+  }
+
   const d = db || getDatabase();
   const limit = safeOptionalLimit(opts?.limit);
   const offset = safeOffset(opts?.offset);
@@ -118,6 +161,14 @@ export function listProviders(db?: Database, opts?: ListProviderOptions): Provid
 }
 
 export function listProviderSummaries(db?: Database, opts?: ListProviderOptions): ProviderSummary[] {
+  const cloud = cloudResource(PROVIDER_RESOURCE);
+  if (cloud) {
+    const { query, limit, offset } = cloudListQuery(opts);
+    const rows = cloud.list(query).map(apiToProviderSummary);
+    rows.sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
+    return cloudPage(rows, limit, offset);
+  }
+
   const d = db || getDatabase();
   const limit = safeOptionalLimit(opts?.limit);
   const offset = safeOffset(opts?.offset);

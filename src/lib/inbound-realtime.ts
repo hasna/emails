@@ -17,6 +17,8 @@ export interface InboundNotification {
   bucket?: string;
   objectKey?: string;
   recipients?: string[];
+  /** SES receipt time (`mail.timestamp`, ISO 8601) when present. */
+  timestamp?: string;
 }
 
 /**
@@ -46,6 +48,7 @@ export function parseSesNotification(body: string): InboundNotification | null {
     if (typeof action["bucketName"] === "string") out.bucket = action["bucketName"] as string;
     if (typeof action["objectKey"] === "string") out.objectKey = action["objectKey"] as string;
     if (Array.isArray(receipt["recipients"])) out.recipients = receipt["recipients"] as string[];
+    if (typeof mail["timestamp"] === "string") out.timestamp = mail["timestamp"] as string;
     if (out.messageId || out.bucket || out.objectKey || out.recipients) return out;
   }
 

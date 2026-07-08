@@ -2,6 +2,36 @@ import type { Database } from "./database.js";
 import { getDatabase, uuid, now } from "./database.js";
 import { parseJsonArray, parseJsonObject } from "./json.js";
 import { safeOffset, safeOptionalLimit } from "./pagination.js";
+import { cloudResource, cloudListQuery, cloudPage, carray, cobj, cstrArray, ciso, cstr, cstrOrNull } from "./cloud-resource.js";
+
+const SCHEDULED_RESOURCE = "scheduled";
+
+function apiToScheduledEmail(e: Record<string, unknown>): ScheduledEmail {
+  return {
+    id: cstr(e["id"]),
+    provider_id: cstr(e["provider_id"]),
+    from_address: cstr(e["from_address"]),
+    to_addresses: cstrArray(e["to_addresses"]),
+    cc_addresses: cstrArray(e["cc_addresses"]),
+    bcc_addresses: cstrArray(e["bcc_addresses"]),
+    reply_to: cstrOrNull(e["reply_to"]),
+    subject: cstr(e["subject"]),
+    html: cstrOrNull(e["html"]),
+    text_body: cstrOrNull(e["text_body"]),
+    attachments_json: carray(e["attachments_json"]),
+    template_name: cstrOrNull(e["template_name"]),
+    template_vars: e["template_vars"] == null ? null : (cobj(e["template_vars"]) as Record<string, string>),
+    scheduled_at: cstr(e["scheduled_at"]),
+    status: (cstr(e["status"]) || "pending") as ScheduledStatus,
+    error: cstrOrNull(e["error"]),
+    created_at: ciso(e["created_at"]),
+  };
+}
+
+function scheduledToSummary(s: ScheduledEmail): ScheduledEmailSummary {
+  const { html: _h, text_body: _t, attachments_json: _a, template_vars: _v, ...summary } = s;
+  return summary;
+}
 
 export type ScheduledStatus = "pending" | "sent" | "cancelled" | "failed";
 
@@ -176,6 +206,16 @@ function isDatabase(value: unknown): value is Database {
 }
 
 export function listScheduledEmails(opts?: ListScheduledEmailOptions, db?: Database): ScheduledEmail[] {
+  const cloud = cloudResource(SCHEDULED_RESOURCE);
+  if (cloud) {
+    const { query, limit, offset } = cloudListQuery(opts);
+    if (opts?.status) query["status"] = opts.status;
+    let rows = cloud.list(query).map(apiToScheduledEmail);
+    if (opts?.status) rows = rows.filter((s) => s.status === opts.status);
+    rows.sort((a, b) => (a.scheduled_at ?? "").localeCompare(b.scheduled_at ?? ""));
+    return cloudPage(rows, limit, offset);
+  }
+
   const d = db || getDatabase();
   const conditions: string[] = [];
   const params: Array<string | number> = [];
@@ -194,6 +234,16 @@ export function listScheduledEmails(opts?: ListScheduledEmailOptions, db?: Datab
 }
 
 export function listScheduledEmailSummaries(opts?: ListScheduledEmailOptions, db?: Database): ScheduledEmailSummary[] {
+  const cloud = cloudResource(SCHEDULED_RESOURCE);
+  if (cloud) {
+    const { query, limit, offset } = cloudListQuery(opts);
+    if (opts?.status) query["status"] = opts.status;
+    let rows = cloud.list(query).map(apiToScheduledEmail).map(scheduledToSummary);
+    if (opts?.status) rows = rows.filter((s) => s.status === opts.status);
+    rows.sort((a, b) => (a.scheduled_at ?? "").localeCompare(b.scheduled_at ?? ""));
+    return cloudPage(rows, limit, offset);
+  }
+
   const d = db || getDatabase();
   const conditions: string[] = [];
   const params: Array<string | number> = [];

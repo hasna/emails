@@ -376,7 +376,7 @@ export async function getEmailSystemStatusForRuntime(
   const [counts, mailboxes, sources] = await Promise.all([
     ds.mailboxCounts(),
     ds.listMailboxStatus(),
-    ds.listMailboxSources({ limit: Math.max(SOURCE_STATUS_LIMIT + 1, 1000) }),
+    ds.listMailboxSources({ limit: Math.max(SOURCE_STATUS_LIMIT + 1, 1000), includeLatest: false }),
   ]);
   const receivedTotal = counts.inbox + counts.archived + counts.spam + counts.trash;
   return {

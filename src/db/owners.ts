@@ -11,6 +11,23 @@ import type { Database } from "./database.js";
 import { getDatabase, now, uuid } from "./database.js";
 import type { EmailAddress } from "../types/index.js";
 import { cappedLimit, safeOffset, safeOptionalLimit } from "./pagination.js";
+import { cloudResource, cloudListQuery, cloudPage, ciso, cstr, cstrOrNull } from "./cloud-resource.js";
+
+const OWNER_RESOURCE = "owners";
+
+function apiToOwner(e: Record<string, unknown>): Owner {
+  const updatedAt = ciso(e["updated_at"]);
+  const type = cstr(e["type"]) === "agent" ? "agent" : "human";
+  return {
+    id: cstr(e["id"]),
+    type,
+    name: cstr(e["name"]),
+    contact_email: cstrOrNull(e["contact_email"]),
+    external_id: cstrOrNull(e["external_id"]),
+    created_at: ciso(e["created_at"], updatedAt),
+    updated_at: updatedAt,
+  };
+}
 
 export type OwnerType = "human" | "agent";
 
@@ -53,8 +70,26 @@ export function createOwner(input: CreateOwnerInput, db?: Database): Owner {
   if (input.type !== "human" && input.type !== "agent") {
     throw new Error(`Invalid owner type '${input.type}' (must be 'human' or 'agent')`);
   }
-  const d = db || getDatabase();
   const externalId = input.external_id?.trim();
+
+  // Cloud mode: route the write to the /v1/owners API so a flipped client no
+  // longer registers owners into the local SQLite island while `owner list`
+  // reads the cloud (the split-brain bug). Reads already route via listOwners().
+  const cloud = cloudResource(OWNER_RESOURCE);
+  if (cloud) {
+    if (externalId) {
+      const clash = cloud.list().map(apiToOwner).some((o) => o.external_id === externalId);
+      if (clash) throw new Error(`Owner external_id already exists: ${externalId}`);
+    }
+    return apiToOwner(cloud.create({
+      type: input.type,
+      name: input.name,
+      contact_email: input.contact_email ?? null,
+      external_id: externalId ?? null,
+    }));
+  }
+
+  const d = db || getDatabase();
   if (externalId && getOwnerByExternalId(externalId, d)) {
     throw new Error(`Owner external_id already exists: ${externalId}`);
   }
@@ -95,6 +130,16 @@ export function getOwnerByContactEmail(email: string, db?: Database): Owner | nu
 }
 
 export function listOwners(type?: OwnerType, db?: Database, opts?: ListOwnerOptions): Owner[] {
+  const cloud = cloudResource(OWNER_RESOURCE);
+  if (cloud) {
+    const { query, limit, offset } = cloudListQuery(opts);
+    if (type) query["type"] = type;
+    let rows = cloud.list(query).map(apiToOwner);
+    if (type) rows = rows.filter((o) => o.type === type);
+    rows.sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
+    return cloudPage(rows, limit, offset);
+  }
+
   const d = db || getDatabase();
   const limit = safeOptionalLimit(opts?.limit);
   const offset = safeOffset(opts?.offset);

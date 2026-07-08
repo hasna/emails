@@ -2,6 +2,20 @@ import type { Database } from "./database.js";
 import { getDatabase, uuid, now } from "./database.js";
 import { parseJsonObject } from "./json.js";
 import { safeOffset, safeOptionalLimit } from "./pagination.js";
+import { cloudResource, cloudListQuery, cloudPage, ciso, cstr, cstrOrNull } from "./cloud-resource.js";
+
+const GROUP_RESOURCE = "groups";
+
+function apiToGroup(e: Record<string, unknown>): Group {
+  const updatedAt = ciso(e["updated_at"]);
+  return {
+    id: cstr(e["id"]),
+    name: cstr(e["name"]),
+    description: cstrOrNull(e["description"]),
+    created_at: ciso(e["created_at"], updatedAt),
+    updated_at: updatedAt,
+  };
+}
 
 export interface Group {
   id: string;
@@ -76,6 +90,14 @@ function rowToMemberSummary(row: GroupMemberSummaryRow): GroupMemberSummary {
 }
 
 export function createGroup(name: string, description?: string, db?: Database): Group {
+  // Cloud mode: route the write to the /v1/groups API so a flipped client no
+  // longer creates groups in the local SQLite island while `group list` reads
+  // the cloud (the split-brain bug). Reads already route via listGroups().
+  const cloud = cloudResource(GROUP_RESOURCE);
+  if (cloud) {
+    return apiToGroup(cloud.create({ name, description: description || null }));
+  }
+
   const d = db || getDatabase();
   const id = uuid();
   const timestamp = now();
@@ -101,6 +123,14 @@ export function getGroupByName(name: string, db?: Database): Group | null {
 }
 
 export function listGroups(db?: Database, opts?: ListGroupOptions): Group[] {
+  const cloud = cloudResource(GROUP_RESOURCE);
+  if (cloud) {
+    const { query, limit, offset } = cloudListQuery(opts);
+    const rows = cloud.list(query).map(apiToGroup);
+    rows.sort((a, b) => (a.name ?? "").localeCompare(b.name ?? ""));
+    return cloudPage(rows, limit, offset);
+  }
+
   const d = db || getDatabase();
   const limit = safeOptionalLimit(opts?.limit);
   const offset = safeOffset(opts?.offset);

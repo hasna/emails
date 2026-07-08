@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { cloudStoreFor, isCloudMode, resetCloudConfigCache, resolveCloudConfig } from "./cloud-store.js";
+import { CloudTransportError, cloudStoreFor, isCloudMode, resetCloudConfigCache, resolveCloudConfig } from "./cloud-store.js";
 
 const KEYS = [
   "HASNA_MAILERY_STORAGE_MODE",
@@ -37,6 +37,16 @@ describe("mailery cloud-store resolver (client flip)", () => {
     expect(resolveCloudConfig()).toBeNull();
   });
 
+  test("url + key with NO mode env => inferred cloud (fleet client-flip)", () => {
+    process.env.HASNA_MAILERY_API_URL = "https://mailery.hasna.xyz";
+    process.env.HASNA_MAILERY_API_KEY = "hasna_test_key";
+    resetCloudConfigCache();
+    const cfg = resolveCloudConfig();
+    expect(cfg!.baseUrl).toBe("https://mailery.hasna.xyz/v1");
+    expect(isCloudMode()).toBe(true);
+    expect(cloudStoreFor("domains")!.baseUrl).toBe("https://mailery.hasna.xyz/v1");
+  });
+
   test("mode=self_hosted + url + key => cloud-http with /v1 base", () => {
     process.env.HASNA_MAILERY_STORAGE_MODE = "self_hosted";
     process.env.HASNA_MAILERY_API_URL = "https://mailery.hasna.xyz";
@@ -68,6 +78,31 @@ describe("mailery cloud-store resolver (client flip)", () => {
     process.env.HASNA_MAILERY_API_KEY = "hasna_test_key";
     resetCloudConfigCache();
     expect(() => resolveCloudConfig()).toThrow(/API URL/);
+  });
+
+  test("transport fails fast and LOUD (never hangs, never empty) when unreachable", () => {
+    // Blackhole address (TEST-NET-1, RFC 5737) — connect never completes. With a
+    // 1s bounded connect timeout the list() call must THROW a CloudTransportError
+    // quickly, not hang until an external wall nor return an empty list.
+    process.env.HASNA_MAILERY_STORAGE_MODE = "self_hosted";
+    process.env.HASNA_MAILERY_API_URL = "http://192.0.2.1:9";
+    process.env.HASNA_MAILERY_API_KEY = "hasna_test_key";
+    process.env.HASNA_MAILERY_HTTP_CONNECT_TIMEOUT = "1";
+    process.env.HASNA_MAILERY_HTTP_TIMEOUT = "2";
+    resetCloudConfigCache();
+    const store = cloudStoreFor("domains")!;
+    const started = Date.now();
+    let thrown: unknown;
+    try {
+      store.list({ limit: 10 });
+    } catch (error) {
+      thrown = error;
+    }
+    delete process.env.HASNA_MAILERY_HTTP_CONNECT_TIMEOUT;
+    delete process.env.HASNA_MAILERY_HTTP_TIMEOUT;
+    expect(thrown).toBeInstanceOf(CloudTransportError);
+    // Well under any external 2-minute wall.
+    expect(Date.now() - started).toBeLessThan(15_000);
   });
 
   test("resolver never exposes the key value", () => {

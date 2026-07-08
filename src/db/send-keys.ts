@@ -11,8 +11,27 @@ import { getDatabase, now, uuid } from "./database.js";
 import { getOwner, getAddressOwnership, type Owner } from "./owners.js";
 import { safeOffset, safeOptionalLimit } from "./pagination.js";
 import { canonicalSender } from "../lib/email-address.js";
+import { cloudResource, cloudListQuery, cloudPage, ciso, cstr, cstrOrNull } from "./cloud-resource.js";
 
 const TOKEN_PREFIX = "esk_";
+
+const SEND_KEY_RESOURCE = "send-keys";
+
+// The cloud `send-keys` resource is summary-only: the secret `key_hash` is NEVER
+// stored on or fetched by a client (token verification is server-side). A cloud
+// send-key maps its key_hash to "" (display/enumeration only; auth uses
+// verifySendKey, which stays on the authoritative store).
+function apiToSendKeySummary(e: Record<string, unknown>): SendKeySummary {
+  return {
+    id: cstr(e["id"]),
+    owner_id: cstr(e["owner_id"]),
+    prefix: cstr(e["prefix"]),
+    label: cstrOrNull(e["label"]),
+    created_at: ciso(e["created_at"]),
+    last_used_at: cstrOrNull(e["last_used_at"]),
+    revoked_at: cstrOrNull(e["revoked_at"]),
+  };
+}
 
 export interface SendKey {
   id: string;
@@ -66,6 +85,20 @@ function bareEmail(from: string): string {
 }
 
 export function createSendKey(ownerId: string, label?: string, db?: Database): { token: string; key: SendKey } {
+  // Cloud mode: FAIL LOUD instead of minting into the local SQLite island.
+  // A send key is a credential whose SHA-256 hash MUST live on the authoritative
+  // store that verifies it. The cloud `send_keys` resource is summary-only (no
+  // key_hash column server-side), so a key minted locally can never be verified
+  // by the cloud server — `sendkey list` (cloud) would show nothing and sends
+  // authenticated by that token would be rejected. Rather than silently create
+  // an unusable/split-brain key, refuse until the server exposes a dedicated
+  // mint endpoint (POST /v1/send-keys that generates the token server-side,
+  // stores the hash, and returns the token once).
+  if (cloudResource(SEND_KEY_RESOURCE)) {
+    throw new Error(
+      "Creating a send key against the cloud API is not supported yet: the cloud store holds send-key metadata only (no secret hash), so a key minted here could not be verified by the server. This needs a server-side mint endpoint. To create a send key today, run against the local store (unset HASNA_MAILERY_API_URL/HASNA_MAILERY_API_KEY or set HASNA_MAILERY_STORAGE_MODE=local).",
+    );
+  }
   const d = db || getDatabase();
   const owner = getOwner(ownerId, d);
   if (!owner) throw new Error(`Owner not found: ${ownerId}`);
@@ -95,6 +128,16 @@ export function verifySendKey(token: string, db?: Database): SendKey | null {
 }
 
 export function listSendKeys(ownerId?: string, db?: Database, opts?: ListSendKeyOptions): SendKey[] {
+  const cloud = cloudResource(SEND_KEY_RESOURCE);
+  if (cloud) {
+    const { query, limit, offset } = cloudListQuery(opts);
+    if (ownerId) query["owner_id"] = ownerId;
+    let rows = cloud.list(query).map((e) => ({ ...apiToSendKeySummary(e), key_hash: "" }) as SendKey);
+    if (ownerId) rows = rows.filter((k) => k.owner_id === ownerId);
+    rows.sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
+    return cloudPage(rows, limit, offset);
+  }
+
   const d = db || getDatabase();
   const limit = safeOptionalLimit(opts?.limit);
   const offset = safeOffset(opts?.offset);
@@ -108,6 +151,16 @@ export function listSendKeys(ownerId?: string, db?: Database, opts?: ListSendKey
 }
 
 export function listSendKeySummaries(ownerId?: string, db?: Database, opts?: ListSendKeyOptions): SendKeySummary[] {
+  const cloud = cloudResource(SEND_KEY_RESOURCE);
+  if (cloud) {
+    const { query, limit, offset } = cloudListQuery(opts);
+    if (ownerId) query["owner_id"] = ownerId;
+    let rows = cloud.list(query).map(apiToSendKeySummary);
+    if (ownerId) rows = rows.filter((k) => k.owner_id === ownerId);
+    rows.sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
+    return cloudPage(rows, limit, offset);
+  }
+
   const d = db || getDatabase();
   const limit = safeOptionalLimit(opts?.limit);
   const offset = safeOffset(opts?.offset);

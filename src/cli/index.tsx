@@ -5,6 +5,11 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { commandModulesFor, routeRootPromptArgs, shouldPrintVersionEarly, type CommandModule } from "./router.js";
 import { createMaileryEventsClient, getMaileryEventsDataDir } from "../lib/mailery-events.js";
+import { loadStagedCloudEnv } from "../lib/load-cloud-env.js";
+
+// Route to the self-hosted /v1 API when the fleet flip creds are staged
+// (~/.hasna/cloud/mailery.env), before any command reads the cloud config.
+loadStagedCloudEnv();
 
 function getPackageVersion(): string {
   try {

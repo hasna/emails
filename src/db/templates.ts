@@ -2,6 +2,36 @@ import type { Database } from "./database.js";
 import { getDatabase, uuid, now } from "./database.js";
 import { parseJsonObject } from "./json.js";
 import { safeOffset, safeOptionalLimit } from "./pagination.js";
+import { cloudResource, cloudListQuery, cloudPage, cobj, ciso, cstr, cstrOrNull } from "./cloud-resource.js";
+
+const TEMPLATE_RESOURCE = "templates";
+
+function apiToTemplate(e: Record<string, unknown>): Template {
+  const updatedAt = ciso(e["updated_at"]);
+  return {
+    id: cstr(e["id"]),
+    name: cstr(e["name"]),
+    subject_template: cstr(e["subject_template"]),
+    html_template: cstrOrNull(e["html_template"]),
+    text_template: cstrOrNull(e["text_template"]),
+    metadata: cobj(e["metadata"]),
+    created_at: ciso(e["created_at"], updatedAt),
+    updated_at: updatedAt,
+  };
+}
+
+function templateToSummary(t: Template): TemplateSummary {
+  return {
+    id: t.id,
+    name: t.name,
+    subject_template: t.subject_template,
+    metadata: t.metadata,
+    has_html_template: Boolean(t.html_template && t.html_template !== ""),
+    has_text_template: Boolean(t.text_template && t.text_template !== ""),
+    created_at: t.created_at,
+    updated_at: t.updated_at,
+  };
+}
 
 export interface Template {
   id: string;
@@ -97,6 +127,20 @@ export function createTemplate(
   },
   db?: Database,
 ): Template {
+  // Cloud mode: route the write to the /v1/templates API so a flipped client no
+  // longer creates templates in the local SQLite island while `template list`
+  // reads the cloud (the split-brain bug). Reads already route via listTemplates().
+  const cloud = cloudResource(TEMPLATE_RESOURCE);
+  if (cloud) {
+    return apiToTemplate(cloud.create({
+      name: input.name,
+      subject_template: input.subject_template,
+      html_template: input.html_template || null,
+      text_template: input.text_template || null,
+      metadata: {},
+    }));
+  }
+
   const d = db || getDatabase();
   const id = uuid();
   const timestamp = now();
@@ -119,6 +163,19 @@ export function createTemplate(
 }
 
 export function getTemplate(nameOrId: string, db?: Database): Template | null {
+  // Cloud mode: resolve `template show`/`remove` (and every send-flow template
+  // lookup) against /v1/templates so a flipped client reads the SAME template a
+  // cloud `template add` wrote — not the local island (the read half of the
+  // split-brain the create path already closed). The API only exposes get-by-id,
+  // so a name lookup falls back to a bounded cloud list scan.
+  const cloud = cloudResource(TEMPLATE_RESOURCE);
+  if (cloud) {
+    const direct = cloud.get(nameOrId);
+    if (direct) return apiToTemplate(direct);
+    const match = cloud.list({ limit: 500 }).map(apiToTemplate).find((t) => t.name === nameOrId);
+    return match ?? null;
+  }
+
   const d = db || getDatabase();
   // Try by ID first, then by name
   let row = d.query(`SELECT ${TEMPLATE_COLUMNS} FROM templates WHERE id = ?`).get(nameOrId) as TemplateRow | null;
@@ -137,6 +194,14 @@ export function getTemplateByName(name: string, db?: Database): Template | null 
 }
 
 export function listTemplates(db?: Database, opts?: ListTemplateOptions): Template[] {
+  const cloud = cloudResource(TEMPLATE_RESOURCE);
+  if (cloud) {
+    const { query, limit, offset } = cloudListQuery(opts);
+    const rows = cloud.list(query).map(apiToTemplate);
+    rows.sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
+    return cloudPage(rows, limit, offset);
+  }
+
   const d = db || getDatabase();
   const limit = safeOptionalLimit(opts?.limit);
   const offset = safeOffset(opts?.offset);
@@ -147,6 +212,14 @@ export function listTemplates(db?: Database, opts?: ListTemplateOptions): Templa
 }
 
 export function listTemplateSummaries(db?: Database, opts?: ListTemplateOptions): TemplateSummary[] {
+  const cloud = cloudResource(TEMPLATE_RESOURCE);
+  if (cloud) {
+    const { query, limit, offset } = cloudListQuery(opts);
+    const rows = cloud.list(query).map(apiToTemplate).map(templateToSummary);
+    rows.sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
+    return cloudPage(rows, limit, offset);
+  }
+
   const d = db || getDatabase();
   const limit = safeOptionalLimit(opts?.limit);
   const offset = safeOffset(opts?.offset);
@@ -157,6 +230,15 @@ export function listTemplateSummaries(db?: Database, opts?: ListTemplateOptions)
 }
 
 export function deleteTemplate(nameOrId: string, db?: Database): boolean {
+  // Cloud mode: `template remove` must delete the cloud record, not a local
+  // copy. Resolve name -> id first (the API deletes by id only), then DELETE.
+  const cloud = cloudResource(TEMPLATE_RESOURCE);
+  if (cloud) {
+    const existing = getTemplate(nameOrId);
+    if (!existing) return false;
+    return cloud.del(existing.id);
+  }
+
   const d = db || getDatabase();
   // Try by ID first
   let result = d.run("DELETE FROM templates WHERE id = ?", [nameOrId]);

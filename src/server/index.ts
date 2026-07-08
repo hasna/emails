@@ -8,14 +8,21 @@ if (args.includes("--version") || args.includes("-V")) {
   process.exit(0);
 }
 if (args.includes("--help") || args.includes("-h")) {
-  console.log(`Usage: mailery-serve [options]
+  console.log(`Usage: mailery-serve [command] [options]
 
-Runs the Mailery HTTP service.
-  - cloud mode  (HASNA_MAILERY_STORAGE_MODE=cloud + HASNA_MAILERY_DATABASE_URL,
-    or a platform-injected DATABASE_URL): the self_hosted PURE-REMOTE API
-    (GET /health, /ready, /version and the API-key-authenticated /v1 surface),
-    binding 0.0.0.0 by default.
-  - local mode  (default): the SQLite-backed dashboard on 127.0.0.1.
+Runs the Mailery HTTP service (or a background worker).
+
+Commands:
+  (default)          Run the HTTP service:
+                       - cloud mode (HASNA_MAILERY_STORAGE_MODE=cloud +
+                         HASNA_MAILERY_DATABASE_URL, or a platform-injected
+                         DATABASE_URL): the self_hosted PURE-REMOTE API
+                         (GET /health, /ready, /version and the API-key
+                         authenticated /v1 surface), binding 0.0.0.0.
+                       - local mode (default): the SQLite dashboard on 127.0.0.1.
+  ingest-worker      Run the SES-inbound ingestion worker: long-poll the SQS
+                     queue (MAILERY_INGEST_QUEUE_URL), fetch each archived raw
+                     message from S3, and write it to the cloud Postgres store.
 
 Options:
   --host <host>      Host to bind to
@@ -25,7 +32,10 @@ Options:
   process.exit(0);
 }
 
-if (isCloudMode()) {
+if (args[0] === "ingest-worker") {
+  const { runIngestWorker } = await import("./cloud/ingest-worker.js");
+  await runIngestWorker();
+} else if (isCloudMode()) {
   const { startCloudServer } = await import("./cloud/serve.js");
   const port = process.env["PORT"] ? parseInt(process.env["PORT"], 10) : 8080;
   const host = process.env["HOST"] ?? "0.0.0.0";

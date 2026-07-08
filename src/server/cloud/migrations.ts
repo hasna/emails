@@ -90,8 +90,158 @@ const INBOUND_SCHEMA = defineMigration(
   `,
 );
 
+/**
+ * Address verification support.
+ *
+ * The client `addresses` resource carries a `verified` flag (the send-readiness
+ * gate + `mailery address verify` / markVerified flow). The original cloud
+ * `addresses` table (0001) omitted it, so a client flipped to the cloud store
+ * could not persist verification. This additive column closes that gap so the
+ * full address CRUD — including verify — round-trips through /v1/addresses.
+ */
+const ADDRESS_VERIFIED_SCHEMA = defineMigration(
+  "0003_mailery_addresses_verified",
+  `
+  ALTER TABLE addresses ADD COLUMN IF NOT EXISTS verified BOOLEAN NOT NULL DEFAULT FALSE;
+  `,
+);
+
+/**
+ * Per-address daily send quota.
+ *
+ * `mailery address quota <id> <perDay>` (setAddressQuota) caps sends per UTC day
+ * for an address. A flipped client routes this write to /v1/addresses; without a
+ * cloud column the quota would silently only persist on the local island
+ * (split-brain). Nullable: NULL means "no quota" (the CLI's `quota <id> none`).
+ */
+const ADDRESS_QUOTA_SCHEMA = defineMigration(
+  "0004_mailery_addresses_daily_quota",
+  `
+  ALTER TABLE addresses ADD COLUMN IF NOT EXISTS daily_quota INTEGER;
+  `,
+);
+
+/**
+ * Generic list-backed resources for the fleet client-flip.
+ *
+ * Adds the cloud tables behind the /v1 resource CRUD used by `contact list`,
+ * `provider list`, `template list`, `group list`, `sequence list`, `owner
+ * list`, `sendkey list` and `scheduled list`. Without these, a flipped client
+ * fails closed (HTTP 404) on those reads rather than silently reading its local
+ * SQLite island. Every table carries id/created_at/updated_at plus NON-SECRET
+ * columns only: provider credentials and send-key hashes are never stored here.
+ */
+const RESOURCE_SCHEMA = defineMigration(
+  "0005_mailery_selfhosted_resources",
+  `
+  CREATE TABLE IF NOT EXISTS contacts (
+    id               TEXT PRIMARY KEY,
+    email            TEXT NOT NULL UNIQUE,
+    name             TEXT,
+    send_count       INTEGER NOT NULL DEFAULT 0,
+    bounce_count     INTEGER NOT NULL DEFAULT 0,
+    complaint_count  INTEGER NOT NULL DEFAULT 0,
+    last_sent_at     TIMESTAMPTZ,
+    suppressed       BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS contacts_suppressed_idx ON contacts (suppressed);
+
+  CREATE TABLE IF NOT EXISTS cloud_providers (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    type        TEXT NOT NULL,
+    region      TEXT,
+    active      BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+
+  CREATE TABLE IF NOT EXISTS templates (
+    id                TEXT PRIMARY KEY,
+    name              TEXT NOT NULL UNIQUE,
+    subject_template  TEXT NOT NULL DEFAULT '',
+    html_template     TEXT,
+    text_template     TEXT,
+    metadata          JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+
+  CREATE TABLE IF NOT EXISTS contact_groups (
+    id           TEXT PRIMARY KEY,
+    name         TEXT NOT NULL UNIQUE,
+    description  TEXT,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+
+  CREATE TABLE IF NOT EXISTS sequences (
+    id           TEXT PRIMARY KEY,
+    name         TEXT NOT NULL,
+    description  TEXT,
+    status       TEXT NOT NULL DEFAULT 'active',
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+
+  CREATE TABLE IF NOT EXISTS owners (
+    id            TEXT PRIMARY KEY,
+    type          TEXT NOT NULL DEFAULT 'human',
+    name          TEXT NOT NULL,
+    contact_email TEXT,
+    external_id   TEXT,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+
+  CREATE TABLE IF NOT EXISTS send_keys (
+    id            TEXT PRIMARY KEY,
+    owner_id      TEXT,
+    prefix        TEXT,
+    label         TEXT,
+    last_used_at  TIMESTAMPTZ,
+    revoked_at    TIMESTAMPTZ,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS send_keys_owner_idx ON send_keys (owner_id);
+
+  CREATE TABLE IF NOT EXISTS scheduled_emails (
+    id                TEXT PRIMARY KEY,
+    provider_id       TEXT,
+    from_address      TEXT,
+    to_addresses      JSONB NOT NULL DEFAULT '[]'::jsonb,
+    cc_addresses      JSONB NOT NULL DEFAULT '[]'::jsonb,
+    bcc_addresses     JSONB NOT NULL DEFAULT '[]'::jsonb,
+    reply_to          TEXT,
+    subject           TEXT NOT NULL DEFAULT '',
+    html              TEXT,
+    text_body         TEXT,
+    attachments_json  JSONB NOT NULL DEFAULT '[]'::jsonb,
+    template_name     TEXT,
+    template_vars     JSONB,
+    scheduled_at      TIMESTAMPTZ,
+    status            TEXT NOT NULL DEFAULT 'pending',
+    error             TEXT,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS scheduled_emails_status_idx ON scheduled_emails (status);
+  CREATE INDEX IF NOT EXISTS scheduled_emails_scheduled_idx ON scheduled_emails (scheduled_at);
+  `,
+);
+
 /** All migrations, in order: api-keys table (auth), the core schema, inbound. */
 export function maileryCloudMigrations(): Migration[] {
   const authMigrations = apiKeyMigrations().map((m) => defineMigration(m.id, m.sql));
-  return [...authMigrations, CORE_SCHEMA, INBOUND_SCHEMA];
+  return [
+    ...authMigrations,
+    CORE_SCHEMA,
+    INBOUND_SCHEMA,
+    ADDRESS_VERIFIED_SCHEMA,
+    ADDRESS_QUOTA_SCHEMA,
+    RESOURCE_SCHEMA,
+  ];
 }

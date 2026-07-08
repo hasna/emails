@@ -7,7 +7,7 @@
  */
 import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
-import { listEmails, getEmail, searchEmails } from "../../db/emails.js";
+import { listEmails, getEmail, searchEmails, resolveEmailId } from "../../db/emails.js";
 import { getEmailContent } from "../../db/email-content.js";
 import { getLatestActiveProviderId, getProvider } from "../../db/providers.js";
 import { getPreferredActiveAddressEmail } from "../../db/addresses.js";
@@ -138,7 +138,7 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
       // Re-use existing show logic
       try {
         const db = getDatabase();
-        const resolvedId = resolvePartialId(db, "emails", id);
+        const resolvedId = resolveEmailId(id, db);
         if (!resolvedId) handleError(new Error(`Email not found: ${id}`));
         const emailRecord = getEmail(resolvedId!, db);
         if (!emailRecord) handleError(new Error(`Email not found: ${id}`));
@@ -319,7 +319,7 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
     .action((id: string) => {
       try {
         const db = getDatabase();
-        const resolvedId = resolvePartialId(db, "emails", id);
+        const resolvedId = resolveEmailId(id, db);
         if (!resolvedId) handleError(new Error(`Email not found: ${id}`));
         const emailRecord = getEmail(resolvedId!, db);
         if (!emailRecord) handleError(new Error(`Email not found: ${id}`));

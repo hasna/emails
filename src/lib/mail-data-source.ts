@@ -31,6 +31,7 @@ import {
   type MaileryCloudMessageWithAttachments,
 } from "./mailery-cloud-client.js";
 import { getMaileryMode, type MaileryMode } from "./mode.js";
+import { SelfHostedMailDataSource, resolveSelfHostedMailDataSource } from "./self-hosted-mail-data-source.js";
 import {
   type AttachmentPath,
   addInboundLabelSummary,
@@ -752,14 +753,19 @@ export class ApiMailDataSource implements MailDataSource {
     };
   }
 
-  async listMailboxSources(_opts?: ListMailboxSourcesOptions): Promise<MailboxSourceSummary[]> {
+  async listMailboxSources(opts?: ListMailboxSourcesOptions): Promise<MailboxSourceSummary[]> {
+    const includeLatest = opts?.includeLatest ?? true;
     const mailboxes = await this.cloudMailboxes();
     return Promise.all(mailboxes.map(async (mailbox) => {
       // Per-mailbox counts come from messageGroups (the same O(1) counter path
       // mailboxCounts uses); the latest-received timestamp from a single-row page read.
+      // The latest probe is a SECOND round-trip per source — skipped when the
+      // caller does not need it (the status path) to avoid the cloud N+1 timeout.
       const [groups, latestPage] = await Promise.all([
         this.client.messageGroups({ mailboxId: mailbox.id }),
-        this.client.listMessagesPage({ mailboxId: mailbox.id, limit: 1 }),
+        includeLatest
+          ? this.client.listMessagesPage({ mailboxId: mailbox.id, limit: 1 })
+          : Promise.resolve({ data: [] as MaileryCloudMessageListItem[], nextCursor: null }),
       ]);
       const counts = cloudGroupsToCounts(groups);
       const latest = latestPage.data.find((item): item is MaileryCloudMessage => !isTombstoneItem(item));
@@ -1103,8 +1109,25 @@ let memoized: { mode: MailDataSourceMode; source: MailDataSource } | null = null
  */
 export function resolveMailDataSource(opts: ResolveMailDataSourceOptions = {}): MailDataSource {
   const override = Boolean(opts.mode || opts.client || opts.cache);
+
+  // Fleet self-hosted flip: HASNA_MAILERY_API_URL + HASNA_MAILERY_API_KEY present
+  // (cred-based — the SAME gate the domains resource uses) routes the inbox seam
+  // to the app's OWN /v1 resource API on mailery.hasna.xyz, NOT the mailery.co
+  // SaaS `/api/v1` shape. This takes precedence over the mode var because the
+  // flip sets creds only (no *_MODE), and getMaileryMode() defaults to `local`.
+  if (!override) {
+    const selfHosted = resolveSelfHostedMailDataSource();
+    if (selfHosted) {
+      if (memoized && memoized.source instanceof SelfHostedMailDataSource) return memoized.source;
+      memoized = { mode: "cloud", source: selfHosted };
+      return selfHosted;
+    }
+  }
+
   const mode = opts.mode ?? toDataSourceMode(getMaileryMode());
-  if (!override && memoized && memoized.mode === mode) return memoized.source;
+  if (!override && memoized && memoized.mode === mode && !(memoized.source instanceof SelfHostedMailDataSource)) {
+    return memoized.source;
+  }
 
   const source: MailDataSource = mode === "cloud"
     ? new ApiMailDataSource({ client: opts.client ?? buildDefaultCloudClient(), cache: opts.cache })

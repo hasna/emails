@@ -6,6 +6,7 @@
 
 import { randomUUID } from "node:crypto";
 import type { TypedQueryClient } from "../../generated/storage-kit/index.js";
+import type { CloudResourceSpec, ResourceColumn } from "./resources.js";
 
 export interface DomainRecord {
   id: string;
@@ -24,6 +25,8 @@ export interface AddressRecord {
   domain: string | null;
   display_name: string | null;
   status: string;
+  verified: boolean;
+  daily_quota: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -258,30 +261,50 @@ export class MaileryCloudStore {
     email: string;
     display_name?: string | null;
     status?: string;
+    verified?: boolean;
+    daily_quota?: number | null;
   }): Promise<AddressRecord> {
     const id = randomUUID();
     const email = input.email.trim().toLowerCase();
     const domain = email.includes("@") ? email.slice(email.indexOf("@") + 1) : null;
     return this.client.one<AddressRecord>(
-      `INSERT INTO addresses (id, email, domain, display_name, status)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO addresses (id, email, domain, display_name, status, verified, daily_quota)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
        RETURNING *`,
-      [id, email, domain, input.display_name ?? null, input.status ?? "active"],
+      [id, email, domain, input.display_name ?? null, input.status ?? "active", input.verified ?? false, input.daily_quota ?? null],
     );
   }
 
   async updateAddress(
     id: string,
-    patch: { display_name?: string | null; status?: string },
+    // `dailyQuotaSet` distinguishes "not provided" (keep existing) from an
+    // explicit clear (`daily_quota: null`, the CLI's `quota <id> none`). COALESCE
+    // alone cannot clear a column to NULL, so quota uses a CASE gated on the flag.
+    patch: {
+      display_name?: string | null;
+      status?: string;
+      verified?: boolean;
+      dailyQuotaSet?: boolean;
+      daily_quota?: number | null;
+    },
   ): Promise<AddressRecord | null> {
     return this.client.get<AddressRecord>(
       `UPDATE addresses SET
          display_name = COALESCE($2, display_name),
          status       = COALESCE($3, status),
+         verified     = COALESCE($4, verified),
+         daily_quota  = CASE WHEN $5 THEN $6 ELSE daily_quota END,
          updated_at   = now()
        WHERE id = $1
        RETURNING *`,
-      [id, patch.display_name ?? null, patch.status ?? null],
+      [
+        id,
+        patch.display_name ?? null,
+        patch.status ?? null,
+        patch.verified ?? null,
+        patch.dailyQuotaSet ?? false,
+        patch.dailyQuotaSet ? patch.daily_quota ?? null : null,
+      ],
     );
   }
 
@@ -312,6 +335,23 @@ export class MaileryCloudStore {
       [id],
     );
     return row ? mapMessageRow(row) : null;
+  }
+
+  /**
+   * Look up an existing message by a stable upstream key, matching EITHER the
+   * `source_id` (this ingest path's idempotency key) OR the `message_id`
+   * (the S3 object key stored by the history backfill). Returns the row id, or
+   * null. Used by the ingest worker to avoid re-inserting mail already present
+   * from the local→cloud history import, whose rows carry the same object key
+   * in `message_id` but a different `source_id`.
+   */
+  async findMessageIdByKey(key: string): Promise<string | null> {
+    if (!key) return null;
+    const row = await this.client.get<{ id: string }>(
+      `SELECT id FROM messages WHERE source_id = $1 OR message_id = $1 LIMIT 1`,
+      [key],
+    );
+    return row ? row.id : null;
   }
 
   /** Positional insert params shared by createMessage and upsertMessage. */
@@ -416,6 +456,93 @@ export class MaileryCloudStore {
   async deleteMessage(id: string): Promise<boolean> {
     const rows = await this.client.many<{ id: string }>(
       `DELETE FROM messages WHERE id = $1 RETURNING id`,
+      [id],
+    );
+    return rows.length > 0;
+  }
+
+  // ---- generic resources (contacts/providers/templates/groups/…) ----------
+  //
+  // Table + column names come from the trusted CLOUD_RESOURCES registry (never
+  // user input); all VALUES are bound parameters. JSONB columns are cast so
+  // arrays/objects round-trip; the returned rows keep JSONB as parsed values.
+
+  /** Coerce/encode a request value for a column per its declared kind. */
+  private static encodeColumn(col: ResourceColumn, value: unknown): unknown {
+    if (value === undefined) return null;
+    if (col.json) return JSON.stringify(value ?? null);
+    if (col.bool) return Boolean(value);
+    if (col.int) {
+      const n = typeof value === "number" ? value : Number(value);
+      return Number.isFinite(n) ? Math.trunc(n) : 0;
+    }
+    return value ?? null;
+  }
+
+  async listResource(
+    spec: CloudResourceSpec,
+    opts: ListOptions & { filters?: Record<string, unknown> } = {},
+  ): Promise<Record<string, unknown>[]> {
+    const params: unknown[] = [];
+    const where: string[] = [];
+    for (const key of spec.filters ?? []) {
+      const raw = opts.filters?.[key];
+      if (raw === undefined) continue;
+      const col = spec.columns.find((c) => c.name === key);
+      params.push(MaileryCloudStore.encodeColumn(col ?? { name: key }, raw));
+      where.push(`${key} = $${params.length}`);
+    }
+    const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+    params.push(clampLimit(opts.limit), clampOffset(opts.offset));
+    return this.client.many<Record<string, unknown>>(
+      `SELECT * FROM ${spec.table} ${whereSql} ORDER BY ${spec.orderBy} LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params,
+    );
+  }
+
+  async getResource(spec: CloudResourceSpec, id: string): Promise<Record<string, unknown> | null> {
+    return this.client.get<Record<string, unknown>>(`SELECT * FROM ${spec.table} WHERE id = $1`, [id]);
+  }
+
+  async createResource(spec: CloudResourceSpec, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const cols = ["id"];
+    const placeholders = ["$1"];
+    const params: unknown[] = [randomUUID()];
+    for (const col of spec.columns) {
+      if (!(col.name in body)) continue;
+      params.push(MaileryCloudStore.encodeColumn(col, body[col.name]));
+      cols.push(col.name);
+      placeholders.push(col.json ? `$${params.length}::jsonb` : `$${params.length}`);
+    }
+    return this.client.one<Record<string, unknown>>(
+      `INSERT INTO ${spec.table} (${cols.join(", ")}) VALUES (${placeholders.join(", ")}) RETURNING *`,
+      params,
+    );
+  }
+
+  async updateResource(
+    spec: CloudResourceSpec,
+    id: string,
+    body: Record<string, unknown>,
+  ): Promise<Record<string, unknown> | null> {
+    const sets: string[] = [];
+    const params: unknown[] = [id];
+    for (const col of spec.columns) {
+      if (!(col.name in body)) continue;
+      params.push(MaileryCloudStore.encodeColumn(col, body[col.name]));
+      sets.push(col.json ? `${col.name} = $${params.length}::jsonb` : `${col.name} = $${params.length}`);
+    }
+    if (sets.length === 0) return this.getResource(spec, id);
+    sets.push("updated_at = now()");
+    return this.client.get<Record<string, unknown>>(
+      `UPDATE ${spec.table} SET ${sets.join(", ")} WHERE id = $1 RETURNING *`,
+      params,
+    );
+  }
+
+  async deleteResource(spec: CloudResourceSpec, id: string): Promise<boolean> {
+    const rows = await this.client.many<{ id: string }>(
+      `DELETE FROM ${spec.table} WHERE id = $1 RETURNING id`,
       [id],
     );
     return rows.length > 0;
