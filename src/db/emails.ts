@@ -2,7 +2,7 @@ import type { Database } from "./database.js";
 import type { SQLQueryBindings } from "bun:sqlite";
 import type { Email, EmailFilter, EmailRow, EmailStatus, SendEmailOptions } from "../types/index.js";
 import { EmailNotFoundError } from "../types/index.js";
-import { getDatabase, now, uuid } from "./database.js";
+import { getDatabase, now, uuid, resolvePartialId } from "./database.js";
 import { sqlEmailAddress } from "./email-address-sql.js";
 import { parseJsonArray, parseJsonObject } from "./json.js";
 import { safeOffset, safeOptionalLimit } from "./pagination.js";
@@ -130,10 +130,40 @@ export function createEmail(
 }
 
 export function getEmail(id: string, db?: Database): Email | null {
+  const cloud = cloudResource(MESSAGE_RESOURCE);
+  if (cloud) {
+    const rec = cloud.get(id);
+    return rec ? apiMessageToEmail(rec) : null;
+  }
+
   const d = db || getDatabase();
   const row = d.query("SELECT * FROM emails WHERE id = ?").get(id) as EmailRow | null;
   if (!row) return null;
   return rowToEmail(row);
+}
+
+/**
+ * Resolve a full or partial email id to a canonical id, routed through the
+ * active Store. In cloud mode a full-length id is confirmed via the messages
+ * `/v1` endpoint and a prefix is matched against the cloud message list; in
+ * local mode it falls back to the SQLite partial-id resolver. This keeps
+ * `show`/`replies` consistent with `list`/`search` instead of always reading
+ * the (empty, in cloud mode) local `emails` table.
+ */
+export function resolveEmailId(id: string, db?: Database): string | null {
+  const cloud = cloudResource(MESSAGE_RESOURCE);
+  if (cloud) {
+    const trimmed = id.trim();
+    if (!trimmed) return null;
+    if (trimmed.length >= 36) return cloud.get(trimmed) ? trimmed : null;
+    const matches = cloud
+      .list({ limit: 1000 })
+      .map((row) => cstr(row["id"]))
+      .filter((mid) => mid.startsWith(trimmed));
+    return matches.length === 1 ? matches[0]! : null;
+  }
+
+  return resolvePartialId(db || getDatabase(), "emails", id);
 }
 
 export function listEmails(filter: EmailFilter = {}, db?: Database): Email[] {
