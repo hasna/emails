@@ -2,6 +2,36 @@ import type { Database } from "./database.js";
 import { getDatabase, uuid, now } from "./database.js";
 import { parseJsonObject } from "./json.js";
 import { safeOffset, safeOptionalLimit } from "./pagination.js";
+import { cloudResource, cloudListQuery, cloudPage, cobj, ciso, cstr, cstrOrNull } from "./cloud-resource.js";
+
+const TEMPLATE_RESOURCE = "templates";
+
+function apiToTemplate(e: Record<string, unknown>): Template {
+  const updatedAt = ciso(e["updated_at"]);
+  return {
+    id: cstr(e["id"]),
+    name: cstr(e["name"]),
+    subject_template: cstr(e["subject_template"]),
+    html_template: cstrOrNull(e["html_template"]),
+    text_template: cstrOrNull(e["text_template"]),
+    metadata: cobj(e["metadata"]),
+    created_at: ciso(e["created_at"], updatedAt),
+    updated_at: updatedAt,
+  };
+}
+
+function templateToSummary(t: Template): TemplateSummary {
+  return {
+    id: t.id,
+    name: t.name,
+    subject_template: t.subject_template,
+    metadata: t.metadata,
+    has_html_template: Boolean(t.html_template && t.html_template !== ""),
+    has_text_template: Boolean(t.text_template && t.text_template !== ""),
+    created_at: t.created_at,
+    updated_at: t.updated_at,
+  };
+}
 
 export interface Template {
   id: string;
@@ -137,6 +167,14 @@ export function getTemplateByName(name: string, db?: Database): Template | null 
 }
 
 export function listTemplates(db?: Database, opts?: ListTemplateOptions): Template[] {
+  const cloud = cloudResource(TEMPLATE_RESOURCE);
+  if (cloud) {
+    const { query, limit, offset } = cloudListQuery(opts);
+    const rows = cloud.list(query).map(apiToTemplate);
+    rows.sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
+    return cloudPage(rows, limit, offset);
+  }
+
   const d = db || getDatabase();
   const limit = safeOptionalLimit(opts?.limit);
   const offset = safeOffset(opts?.offset);
@@ -147,6 +185,14 @@ export function listTemplates(db?: Database, opts?: ListTemplateOptions): Templa
 }
 
 export function listTemplateSummaries(db?: Database, opts?: ListTemplateOptions): TemplateSummary[] {
+  const cloud = cloudResource(TEMPLATE_RESOURCE);
+  if (cloud) {
+    const { query, limit, offset } = cloudListQuery(opts);
+    const rows = cloud.list(query).map(apiToTemplate).map(templateToSummary);
+    rows.sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
+    return cloudPage(rows, limit, offset);
+  }
+
   const d = db || getDatabase();
   const limit = safeOptionalLimit(opts?.limit);
   const offset = safeOffset(opts?.offset);

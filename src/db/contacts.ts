@@ -1,6 +1,18 @@
 import type { Database } from "./database.js";
 import { getDatabase, uuid, now } from "./database.js";
 import { safeOffset, safeOptionalLimit } from "./pagination.js";
+import {
+  cloudResource,
+  cloudListQuery,
+  cloudPage,
+  cbool,
+  cnum,
+  ciso,
+  cstr,
+  cstrOrNull,
+} from "./cloud-resource.js";
+
+const CONTACT_RESOURCE = "contacts";
 
 export interface Contact {
   id: string;
@@ -13,6 +25,23 @@ export interface Contact {
   suppressed: boolean;
   created_at: string;
   updated_at: string;
+}
+
+/** Map a cloud API contact entity to the local Contact shape. */
+function apiToContact(e: Record<string, unknown>): Contact {
+  const updatedAt = ciso(e["updated_at"]);
+  return {
+    id: cstr(e["id"]),
+    email: cstr(e["email"]),
+    name: cstrOrNull(e["name"]),
+    send_count: cnum(e["send_count"]),
+    bounce_count: cnum(e["bounce_count"]),
+    complaint_count: cnum(e["complaint_count"]),
+    last_sent_at: cstrOrNull(e["last_sent_at"]),
+    suppressed: cbool(e["suppressed"]),
+    created_at: ciso(e["created_at"], updatedAt),
+    updated_at: updatedAt,
+  };
 }
 
 interface ContactRow {
@@ -69,6 +98,16 @@ export interface ListContactOptions {
 }
 
 export function listContacts(opts?: ListContactOptions, db?: Database): Contact[] {
+  const cloud = cloudResource(CONTACT_RESOURCE);
+  if (cloud) {
+    const { query, limit, offset } = cloudListQuery(opts);
+    if (opts?.suppressed !== undefined) query["suppressed"] = opts.suppressed;
+    let rows = cloud.list(query).map(apiToContact);
+    if (opts?.suppressed !== undefined) rows = rows.filter((c) => c.suppressed === opts.suppressed);
+    rows.sort((a, b) => (b.updated_at ?? "").localeCompare(a.updated_at ?? ""));
+    return cloudPage(rows, limit, offset);
+  }
+
   const d = db || getDatabase();
   const conditions: string[] = [];
   const params: Array<number> = [];

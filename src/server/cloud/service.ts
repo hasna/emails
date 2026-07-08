@@ -12,6 +12,7 @@ import type { TypedQueryClient, Migration } from "../../generated/storage-kit/in
 import { checkHealth } from "../../generated/storage-kit/index.js";
 import { MaileryCloudStore } from "./store.js";
 import { maileryCloudOpenApi } from "./openapi.js";
+import { resourceSpecForPath } from "./resources.js";
 
 interface ReadyResult {
   ok: boolean;
@@ -394,6 +395,60 @@ export async function handleCloudRequest(
         return (await store.deleteMessage(id)) ? json(200, { deleted: true, id }) : json(404, { error: "message not found" });
       }
       return json(405, { error: "method not allowed" });
+    }
+
+    // ---- generic resources (contacts/providers/templates/groups/…) --------
+    const resourceMatch = path.match(/^\/v1\/([^/]+)(?:\/([^/]+))?$/);
+    if (resourceMatch) {
+      const spec = resourceSpecForPath(resourceMatch[1]!);
+      if (spec) {
+        const id = resourceMatch[2] ? decodeURIComponent(resourceMatch[2]) : undefined;
+        if (id === undefined) {
+          if (method === "GET") {
+            const auth = await authenticate(deps, req, url, read);
+            if (!auth.ok) return auth.response;
+            const filters: Record<string, unknown> = {};
+            for (const key of spec.filters ?? []) {
+              const v = url.searchParams.get(key);
+              if (v !== null) filters[key] = v;
+            }
+            const items = await store.listResource(spec, {
+              limit: queryInt(url, "limit"),
+              offset: queryInt(url, "offset"),
+              filters,
+            });
+            return json(200, { items });
+          }
+          if (method === "POST") {
+            const auth = await authenticate(deps, req, url, write);
+            if (!auth.ok) return auth.response;
+            const body = await readJsonBody(req);
+            return json(201, await store.createResource(spec, body));
+          }
+          return json(405, { error: "method not allowed" });
+        }
+        if (method === "GET") {
+          const auth = await authenticate(deps, req, url, read);
+          if (!auth.ok) return auth.response;
+          const rec = await store.getResource(spec, id);
+          return rec ? json(200, rec) : json(404, { error: `${spec.path} not found` });
+        }
+        if (method === "PATCH" || method === "PUT") {
+          const auth = await authenticate(deps, req, url, write);
+          if (!auth.ok) return auth.response;
+          const body = await readJsonBody(req);
+          const rec = await store.updateResource(spec, id, body);
+          return rec ? json(200, rec) : json(404, { error: `${spec.path} not found` });
+        }
+        if (method === "DELETE") {
+          const auth = await authenticate(deps, req, url, write);
+          if (!auth.ok) return auth.response;
+          return (await store.deleteResource(spec, id))
+            ? json(200, { deleted: true, id })
+            : json(404, { error: `${spec.path} not found` });
+        }
+        return json(405, { error: "method not allowed" });
+      }
     }
 
     return json(404, { error: "not found" });

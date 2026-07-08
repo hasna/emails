@@ -11,6 +11,23 @@ import type { Database } from "./database.js";
 import { getDatabase, now, uuid } from "./database.js";
 import type { EmailAddress } from "../types/index.js";
 import { cappedLimit, safeOffset, safeOptionalLimit } from "./pagination.js";
+import { cloudResource, cloudListQuery, cloudPage, ciso, cstr, cstrOrNull } from "./cloud-resource.js";
+
+const OWNER_RESOURCE = "owners";
+
+function apiToOwner(e: Record<string, unknown>): Owner {
+  const updatedAt = ciso(e["updated_at"]);
+  const type = cstr(e["type"]) === "agent" ? "agent" : "human";
+  return {
+    id: cstr(e["id"]),
+    type,
+    name: cstr(e["name"]),
+    contact_email: cstrOrNull(e["contact_email"]),
+    external_id: cstrOrNull(e["external_id"]),
+    created_at: ciso(e["created_at"], updatedAt),
+    updated_at: updatedAt,
+  };
+}
 
 export type OwnerType = "human" | "agent";
 
@@ -95,6 +112,16 @@ export function getOwnerByContactEmail(email: string, db?: Database): Owner | nu
 }
 
 export function listOwners(type?: OwnerType, db?: Database, opts?: ListOwnerOptions): Owner[] {
+  const cloud = cloudResource(OWNER_RESOURCE);
+  if (cloud) {
+    const { query, limit, offset } = cloudListQuery(opts);
+    if (type) query["type"] = type;
+    let rows = cloud.list(query).map(apiToOwner);
+    if (type) rows = rows.filter((o) => o.type === type);
+    rows.sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
+    return cloudPage(rows, limit, offset);
+  }
+
   const d = db || getDatabase();
   const limit = safeOptionalLimit(opts?.limit);
   const offset = safeOffset(opts?.offset);

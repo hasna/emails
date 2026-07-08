@@ -11,8 +11,27 @@ import { getDatabase, now, uuid } from "./database.js";
 import { getOwner, getAddressOwnership, type Owner } from "./owners.js";
 import { safeOffset, safeOptionalLimit } from "./pagination.js";
 import { canonicalSender } from "../lib/email-address.js";
+import { cloudResource, cloudListQuery, cloudPage, ciso, cstr, cstrOrNull } from "./cloud-resource.js";
 
 const TOKEN_PREFIX = "esk_";
+
+const SEND_KEY_RESOURCE = "send-keys";
+
+// The cloud `send-keys` resource is summary-only: the secret `key_hash` is NEVER
+// stored on or fetched by a client (token verification is server-side). A cloud
+// send-key maps its key_hash to "" (display/enumeration only; auth uses
+// verifySendKey, which stays on the authoritative store).
+function apiToSendKeySummary(e: Record<string, unknown>): SendKeySummary {
+  return {
+    id: cstr(e["id"]),
+    owner_id: cstr(e["owner_id"]),
+    prefix: cstr(e["prefix"]),
+    label: cstrOrNull(e["label"]),
+    created_at: ciso(e["created_at"]),
+    last_used_at: cstrOrNull(e["last_used_at"]),
+    revoked_at: cstrOrNull(e["revoked_at"]),
+  };
+}
 
 export interface SendKey {
   id: string;
@@ -95,6 +114,16 @@ export function verifySendKey(token: string, db?: Database): SendKey | null {
 }
 
 export function listSendKeys(ownerId?: string, db?: Database, opts?: ListSendKeyOptions): SendKey[] {
+  const cloud = cloudResource(SEND_KEY_RESOURCE);
+  if (cloud) {
+    const { query, limit, offset } = cloudListQuery(opts);
+    if (ownerId) query["owner_id"] = ownerId;
+    let rows = cloud.list(query).map((e) => ({ ...apiToSendKeySummary(e), key_hash: "" }) as SendKey);
+    if (ownerId) rows = rows.filter((k) => k.owner_id === ownerId);
+    rows.sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
+    return cloudPage(rows, limit, offset);
+  }
+
   const d = db || getDatabase();
   const limit = safeOptionalLimit(opts?.limit);
   const offset = safeOffset(opts?.offset);
@@ -108,6 +137,16 @@ export function listSendKeys(ownerId?: string, db?: Database, opts?: ListSendKey
 }
 
 export function listSendKeySummaries(ownerId?: string, db?: Database, opts?: ListSendKeyOptions): SendKeySummary[] {
+  const cloud = cloudResource(SEND_KEY_RESOURCE);
+  if (cloud) {
+    const { query, limit, offset } = cloudListQuery(opts);
+    if (ownerId) query["owner_id"] = ownerId;
+    let rows = cloud.list(query).map(apiToSendKeySummary);
+    if (ownerId) rows = rows.filter((k) => k.owner_id === ownerId);
+    rows.sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
+    return cloudPage(rows, limit, offset);
+  }
+
   const d = db || getDatabase();
   const limit = safeOptionalLimit(opts?.limit);
   const offset = safeOffset(opts?.offset);

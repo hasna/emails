@@ -7,6 +7,47 @@ import { sqlEmailAddress } from "./email-address-sql.js";
 import { parseJsonArray, parseJsonObject } from "./json.js";
 import { safeOffset, safeOptionalLimit } from "./pagination.js";
 import { canonicalSender } from "../lib/email-address.js";
+import { cloudResource, cloudListQuery, cloudPage, carray, cstrArray, ciso, cnum, cstr, cstrOrNull } from "./cloud-resource.js";
+
+// The outbound sent-ledger (`email list` / `log` / `search`) is backed by the
+// shared `/v1/messages` store in cloud mode. A cloud message row maps to the
+// local Email shape; only outbound messages are surfaced as sent-log entries.
+const MESSAGE_RESOURCE = "messages";
+
+const EMAIL_STATUSES = new Set<EmailStatus>(["sent", "delivered", "bounced", "complained", "failed"]);
+
+function apiMessageToEmail(e: Record<string, unknown>): Email {
+  const createdAt = ciso(e["created_at"]);
+  const sentAt = ciso(e["received_at"] ?? e["created_at"], createdAt);
+  const rawStatus = cstr(e["status"]);
+  const status: EmailStatus = EMAIL_STATUSES.has(rawStatus as EmailStatus) ? (rawStatus as EmailStatus) : "sent";
+  const attachments = carray(e["attachments"]);
+  const attachCount = cnum(e["attachment_count"], attachments.length);
+  return {
+    id: cstr(e["id"]),
+    provider_id: cstrOrNull(e["provider_id"]) ?? "cloud",
+    provider_message_id: cstrOrNull(e["provider_message_id"]),
+    from_address: cstr(e["from_addr"] ?? e["from_address"]),
+    to_addresses: cstrArray(e["to_addrs"] ?? e["to_addresses"]),
+    cc_addresses: cstrArray(e["cc_addrs"] ?? e["cc_addresses"]),
+    bcc_addresses: cstrArray(e["bcc_addrs"] ?? e["bcc_addresses"]),
+    reply_to: cstrOrNull(e["reply_to"]),
+    subject: cstr(e["subject"]),
+    status,
+    has_attachments: attachCount > 0,
+    attachment_count: attachCount,
+    tags: {},
+    sent_at: sentAt,
+    created_at: createdAt,
+    updated_at: ciso(e["updated_at"], createdAt),
+  };
+}
+
+/** True when a cloud message row is an outbound (sent-ledger) entry. */
+function isOutbound(e: Record<string, unknown>): boolean {
+  const dir = cstr(e["direction"]).toLowerCase();
+  return dir === "" || dir === "outbound" || dir === "sent";
+}
 
 function parseEmailRow(row: EmailRow): Email {
   return {
@@ -96,6 +137,25 @@ export function getEmail(id: string, db?: Database): Email | null {
 }
 
 export function listEmails(filter: EmailFilter = {}, db?: Database): Email[] {
+  const cloud = cloudResource(MESSAGE_RESOURCE);
+  if (cloud) {
+    const { query, limit, offset } = cloudListQuery(filter);
+    let rows = cloud.list(query).filter(isOutbound).map(apiMessageToEmail);
+    if (filter.provider_id) rows = rows.filter((e) => e.provider_id === filter.provider_id);
+    if (filter.status) {
+      const wanted = Array.isArray(filter.status) ? filter.status : [filter.status];
+      rows = rows.filter((e) => wanted.includes(e.status));
+    }
+    if (filter.from_address) {
+      const want = canonicalSender(filter.from_address) ?? filter.from_address.trim().toLowerCase();
+      rows = rows.filter((e) => (canonicalSender(e.from_address) ?? e.from_address.toLowerCase()) === want);
+    }
+    if (filter.since) rows = rows.filter((e) => e.sent_at >= filter.since!);
+    if (filter.until) rows = rows.filter((e) => e.sent_at <= filter.until!);
+    rows.sort((a, b) => (b.sent_at ?? "").localeCompare(a.sent_at ?? ""));
+    return cloudPage(rows, limit, offset);
+  }
+
   const d = db || getDatabase();
   const conditions: string[] = [];
   const params: SQLQueryBindings[] = [];
@@ -149,6 +209,21 @@ export function listEmails(filter: EmailFilter = {}, db?: Database): Email[] {
 }
 
 export function searchEmails(query: string, opts?: { since?: string; limit?: number; offset?: number }, db?: Database): Email[] {
+  const cloud = cloudResource(MESSAGE_RESOURCE);
+  if (cloud) {
+    const { query: q, limit, offset } = cloudListQuery(opts);
+    const needle = query.toLowerCase();
+    let rows = cloud.list(q).filter(isOutbound).map(apiMessageToEmail);
+    rows = rows.filter((e) =>
+      e.subject.toLowerCase().includes(needle) ||
+      e.from_address.toLowerCase().includes(needle) ||
+      e.to_addresses.some((t) => t.toLowerCase().includes(needle)),
+    );
+    if (opts?.since) rows = rows.filter((e) => e.sent_at >= opts.since!);
+    rows.sort((a, b) => (b.sent_at ?? "").localeCompare(a.sent_at ?? ""));
+    return cloudPage(rows, limit, offset);
+  }
+
   const d = db || getDatabase();
   let sql = `SELECT ${EMAIL_LIST_COLS} FROM emails WHERE (subject LIKE ? OR from_address LIKE ? OR to_addresses LIKE ?)`;
   const params: any[] = [`%${query}%`, `%${query}%`, `%${query}%`];

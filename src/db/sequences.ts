@@ -1,6 +1,22 @@
 import type { Database } from "./database.js";
 import { getDatabase, uuid, now } from "./database.js";
 import { safeOffset, safeOptionalLimit } from "./pagination.js";
+import { cloudResource, cloudListQuery, cloudPage, ciso, cstr, cstrOrNull } from "./cloud-resource.js";
+
+const SEQUENCE_RESOURCE = "sequences";
+
+function apiToSequence(e: Record<string, unknown>): Sequence {
+  const updatedAt = ciso(e["updated_at"]);
+  const status = cstr(e["status"]) || "active";
+  return {
+    id: cstr(e["id"]),
+    name: cstr(e["name"]),
+    description: cstrOrNull(e["description"]),
+    status: status as SequenceStatus,
+    created_at: ciso(e["created_at"], updatedAt),
+    updated_at: updatedAt,
+  };
+}
 
 export type SequenceStatus = "active" | "paused" | "archived";
 export type EnrollmentStatus = "active" | "completed" | "cancelled";
@@ -123,6 +139,14 @@ export function getSequence(nameOrId: string, db?: Database): Sequence | null {
 }
 
 export function listSequences(db?: Database, opts?: ListSequenceOptions): Sequence[] {
+  const cloud = cloudResource(SEQUENCE_RESOURCE);
+  if (cloud) {
+    const { query, limit, offset } = cloudListQuery(opts);
+    const rows = cloud.list(query).map(apiToSequence);
+    rows.sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
+    return cloudPage(rows, limit, offset);
+  }
+
   const d = db || getDatabase();
   const limit = safeOptionalLimit(opts?.limit);
   const offset = safeOffset(opts?.offset);

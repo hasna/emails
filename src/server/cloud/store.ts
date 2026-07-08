@@ -6,6 +6,7 @@
 
 import { randomUUID } from "node:crypto";
 import type { TypedQueryClient } from "../../generated/storage-kit/index.js";
+import type { CloudResourceSpec, ResourceColumn } from "./resources.js";
 
 export interface DomainRecord {
   id: string;
@@ -455,6 +456,93 @@ export class MaileryCloudStore {
   async deleteMessage(id: string): Promise<boolean> {
     const rows = await this.client.many<{ id: string }>(
       `DELETE FROM messages WHERE id = $1 RETURNING id`,
+      [id],
+    );
+    return rows.length > 0;
+  }
+
+  // ---- generic resources (contacts/providers/templates/groups/…) ----------
+  //
+  // Table + column names come from the trusted CLOUD_RESOURCES registry (never
+  // user input); all VALUES are bound parameters. JSONB columns are cast so
+  // arrays/objects round-trip; the returned rows keep JSONB as parsed values.
+
+  /** Coerce/encode a request value for a column per its declared kind. */
+  private static encodeColumn(col: ResourceColumn, value: unknown): unknown {
+    if (value === undefined) return null;
+    if (col.json) return JSON.stringify(value ?? null);
+    if (col.bool) return Boolean(value);
+    if (col.int) {
+      const n = typeof value === "number" ? value : Number(value);
+      return Number.isFinite(n) ? Math.trunc(n) : 0;
+    }
+    return value ?? null;
+  }
+
+  async listResource(
+    spec: CloudResourceSpec,
+    opts: ListOptions & { filters?: Record<string, unknown> } = {},
+  ): Promise<Record<string, unknown>[]> {
+    const params: unknown[] = [];
+    const where: string[] = [];
+    for (const key of spec.filters ?? []) {
+      const raw = opts.filters?.[key];
+      if (raw === undefined) continue;
+      const col = spec.columns.find((c) => c.name === key);
+      params.push(MaileryCloudStore.encodeColumn(col ?? { name: key }, raw));
+      where.push(`${key} = $${params.length}`);
+    }
+    const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+    params.push(clampLimit(opts.limit), clampOffset(opts.offset));
+    return this.client.many<Record<string, unknown>>(
+      `SELECT * FROM ${spec.table} ${whereSql} ORDER BY ${spec.orderBy} LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params,
+    );
+  }
+
+  async getResource(spec: CloudResourceSpec, id: string): Promise<Record<string, unknown> | null> {
+    return this.client.get<Record<string, unknown>>(`SELECT * FROM ${spec.table} WHERE id = $1`, [id]);
+  }
+
+  async createResource(spec: CloudResourceSpec, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const cols = ["id"];
+    const placeholders = ["$1"];
+    const params: unknown[] = [randomUUID()];
+    for (const col of spec.columns) {
+      if (!(col.name in body)) continue;
+      params.push(MaileryCloudStore.encodeColumn(col, body[col.name]));
+      cols.push(col.name);
+      placeholders.push(col.json ? `$${params.length}::jsonb` : `$${params.length}`);
+    }
+    return this.client.one<Record<string, unknown>>(
+      `INSERT INTO ${spec.table} (${cols.join(", ")}) VALUES (${placeholders.join(", ")}) RETURNING *`,
+      params,
+    );
+  }
+
+  async updateResource(
+    spec: CloudResourceSpec,
+    id: string,
+    body: Record<string, unknown>,
+  ): Promise<Record<string, unknown> | null> {
+    const sets: string[] = [];
+    const params: unknown[] = [id];
+    for (const col of spec.columns) {
+      if (!(col.name in body)) continue;
+      params.push(MaileryCloudStore.encodeColumn(col, body[col.name]));
+      sets.push(col.json ? `${col.name} = $${params.length}::jsonb` : `${col.name} = $${params.length}`);
+    }
+    if (sets.length === 0) return this.getResource(spec, id);
+    sets.push("updated_at = now()");
+    return this.client.get<Record<string, unknown>>(
+      `UPDATE ${spec.table} SET ${sets.join(", ")} WHERE id = $1 RETURNING *`,
+      params,
+    );
+  }
+
+  async deleteResource(spec: CloudResourceSpec, id: string): Promise<boolean> {
+    const rows = await this.client.many<{ id: string }>(
+      `DELETE FROM ${spec.table} WHERE id = $1 RETURNING id`,
       [id],
     );
     return rows.length > 0;
