@@ -90,6 +90,14 @@ function rowToMemberSummary(row: GroupMemberSummaryRow): GroupMemberSummary {
 }
 
 export function createGroup(name: string, description?: string, db?: Database): Group {
+  // Cloud mode: route the write to the /v1/groups API so a flipped client no
+  // longer creates groups in the local SQLite island while `group list` reads
+  // the cloud (the split-brain bug). Reads already route via listGroups().
+  const cloud = cloudResource(GROUP_RESOURCE);
+  if (cloud) {
+    return apiToGroup(cloud.create({ name, description: description || null }));
+  }
+
   const d = db || getDatabase();
   const id = uuid();
   const timestamp = now();

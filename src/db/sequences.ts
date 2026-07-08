@@ -115,6 +115,18 @@ export function createSequence(
   input: { name: string; description?: string },
   db?: Database,
 ): Sequence {
+  // Cloud mode: route the write to the /v1/sequences API so a flipped client no
+  // longer creates sequences in the local SQLite island while `sequence list`
+  // reads the cloud (the split-brain bug). Reads already route via listSequences().
+  const cloud = cloudResource(SEQUENCE_RESOURCE);
+  if (cloud) {
+    return apiToSequence(cloud.create({
+      name: input.name,
+      description: input.description || null,
+      status: "active",
+    }));
+  }
+
   const d = db || getDatabase();
   const id = uuid();
   const timestamp = now();

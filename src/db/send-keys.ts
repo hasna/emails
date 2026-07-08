@@ -85,6 +85,20 @@ function bareEmail(from: string): string {
 }
 
 export function createSendKey(ownerId: string, label?: string, db?: Database): { token: string; key: SendKey } {
+  // Cloud mode: FAIL LOUD instead of minting into the local SQLite island.
+  // A send key is a credential whose SHA-256 hash MUST live on the authoritative
+  // store that verifies it. The cloud `send_keys` resource is summary-only (no
+  // key_hash column server-side), so a key minted locally can never be verified
+  // by the cloud server — `sendkey list` (cloud) would show nothing and sends
+  // authenticated by that token would be rejected. Rather than silently create
+  // an unusable/split-brain key, refuse until the server exposes a dedicated
+  // mint endpoint (POST /v1/send-keys that generates the token server-side,
+  // stores the hash, and returns the token once).
+  if (cloudResource(SEND_KEY_RESOURCE)) {
+    throw new Error(
+      "Creating a send key against the cloud API is not supported yet: the cloud store holds send-key metadata only (no secret hash), so a key minted here could not be verified by the server. This needs a server-side mint endpoint. To create a send key today, run against the local store (unset HASNA_MAILERY_API_URL/HASNA_MAILERY_API_KEY or set HASNA_MAILERY_STORAGE_MODE=local).",
+    );
+  }
   const d = db || getDatabase();
   const owner = getOwner(ownerId, d);
   if (!owner) throw new Error(`Owner not found: ${ownerId}`);

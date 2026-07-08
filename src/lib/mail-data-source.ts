@@ -753,14 +753,19 @@ export class ApiMailDataSource implements MailDataSource {
     };
   }
 
-  async listMailboxSources(_opts?: ListMailboxSourcesOptions): Promise<MailboxSourceSummary[]> {
+  async listMailboxSources(opts?: ListMailboxSourcesOptions): Promise<MailboxSourceSummary[]> {
+    const includeLatest = opts?.includeLatest ?? true;
     const mailboxes = await this.cloudMailboxes();
     return Promise.all(mailboxes.map(async (mailbox) => {
       // Per-mailbox counts come from messageGroups (the same O(1) counter path
       // mailboxCounts uses); the latest-received timestamp from a single-row page read.
+      // The latest probe is a SECOND round-trip per source — skipped when the
+      // caller does not need it (the status path) to avoid the cloud N+1 timeout.
       const [groups, latestPage] = await Promise.all([
         this.client.messageGroups({ mailboxId: mailbox.id }),
-        this.client.listMessagesPage({ mailboxId: mailbox.id, limit: 1 }),
+        includeLatest
+          ? this.client.listMessagesPage({ mailboxId: mailbox.id, limit: 1 })
+          : Promise.resolve({ data: [] as MaileryCloudMessageListItem[], nextCursor: null }),
       ]);
       const counts = cloudGroupsToCounts(groups);
       const latest = latestPage.data.find((item): item is MaileryCloudMessage => !isTombstoneItem(item));

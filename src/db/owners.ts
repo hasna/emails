@@ -70,8 +70,26 @@ export function createOwner(input: CreateOwnerInput, db?: Database): Owner {
   if (input.type !== "human" && input.type !== "agent") {
     throw new Error(`Invalid owner type '${input.type}' (must be 'human' or 'agent')`);
   }
-  const d = db || getDatabase();
   const externalId = input.external_id?.trim();
+
+  // Cloud mode: route the write to the /v1/owners API so a flipped client no
+  // longer registers owners into the local SQLite island while `owner list`
+  // reads the cloud (the split-brain bug). Reads already route via listOwners().
+  const cloud = cloudResource(OWNER_RESOURCE);
+  if (cloud) {
+    if (externalId) {
+      const clash = cloud.list().map(apiToOwner).some((o) => o.external_id === externalId);
+      if (clash) throw new Error(`Owner external_id already exists: ${externalId}`);
+    }
+    return apiToOwner(cloud.create({
+      type: input.type,
+      name: input.name,
+      contact_email: input.contact_email ?? null,
+      external_id: externalId ?? null,
+    }));
+  }
+
+  const d = db || getDatabase();
   if (externalId && getOwnerByExternalId(externalId, d)) {
     throw new Error(`Owner external_id already exists: ${externalId}`);
   }

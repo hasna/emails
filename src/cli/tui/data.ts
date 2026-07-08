@@ -551,6 +551,12 @@ export interface MailboxSourceSummary {
 export interface ListMailboxSourcesOptions {
   limit?: number;
   search?: string;
+  /**
+   * Include each source's latest-received timestamp. In cloud mode this costs an
+   * extra HTTP round-trip PER source, so the status path (which only shows the
+   * aggregate latest) passes `false` to avoid the N+1 timeout. Defaults to true.
+   */
+  includeLatest?: boolean;
 }
 
 export function providerSourceId(providerId: string): string {

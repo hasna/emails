@@ -11,6 +11,7 @@
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import type { Subprocess } from "bun";
+import { Command } from "commander";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,6 +19,7 @@ import { closeDatabase, getDatabase, resetDatabase, resolvePartialId, resolvePar
 import { resetCloudConfigCache } from "./cloud-store.js";
 import { getAddress, listAddresses } from "./addresses.js";
 import { activateAddress, getAddressSendability, setAddressQuota, suspendAddress } from "./address-lifecycle.js";
+import { registerAddressCommands } from "../cli/commands/address.js";
 
 const ID = "11111111-2222-4333-8444-555555555555";
 const EMAIL = "ceo@example.com";
@@ -150,5 +152,27 @@ describe("address cloud routing (self_hosted) — no split-brain", () => {
 
   test("setAddressQuota rejects a negative quota", () => {
     expect(() => setAddressQuota(ID, -1)).toThrow(/quota/i);
+  });
+
+  // Regression: `address verify` in cloud mode used to resolve a LOCAL provider
+  // and invoke a provider adapter, which fails on a flipped machine (no local
+  // providers, no /v1/providers endpoint) with "Provider not found". It must
+  // instead report the cloud address record's `verified` flag directly.
+  test("verify reports the cloud address verified state (no local provider)", async () => {
+    const logs: string[] = [];
+    const original = console.log;
+    console.log = (...args: unknown[]) => { logs.push(args.map(String).join(" ")); };
+    try {
+      const program = new Command();
+      program.exitOverride();
+      registerAddressCommands(program, () => {});
+      await program.parseAsync(["node", "mailery", "address", "verify", EMAIL]);
+    } finally {
+      console.log = original;
+    }
+    const out = logs.join("\n");
+    expect(out).toContain(`${EMAIL} is verified`);
+    expect(out).not.toContain("Provider not found");
+    expect(localAddressCount()).toBe(0);
   });
 });

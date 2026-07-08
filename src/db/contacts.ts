@@ -68,7 +68,36 @@ function rowToContact(row: ContactRow): Contact {
   };
 }
 
+/**
+ * Find a single cloud contact by exact email. Passes an `email` filter (honored
+ * server-side once the additive contacts filter is deployed) and also filters
+ * in-memory so it stays correct against an older server that ignores unknown
+ * query params.
+ */
+function findCloudContactByEmail(cloud: NonNullable<ReturnType<typeof cloudResource>>, email: string): Contact | null {
+  const rows = cloud.list({ email, limit: 500 }).map(apiToContact);
+  return rows.find((c) => c.email === email) ?? null;
+}
+
 export function upsertContact(email: string, db?: Database): Contact {
+  // Cloud mode: find-or-create against the /v1/contacts API so a flipped client
+  // no longer writes contacts to the local SQLite island while `contact list`
+  // reads the cloud (the split-brain bug).
+  const cloud = cloudResource(CONTACT_RESOURCE);
+  if (cloud) {
+    const existing = findCloudContactByEmail(cloud, email);
+    if (existing) return existing;
+    return apiToContact(cloud.create({
+      email,
+      name: null,
+      send_count: 0,
+      bounce_count: 0,
+      complaint_count: 0,
+      last_sent_at: null,
+      suppressed: false,
+    }));
+  }
+
   const d = db || getDatabase();
   const existing = d.query("SELECT * FROM contacts WHERE email = ?").get(email) as ContactRow | null;
   if (existing) return rowToContact(existing);
@@ -127,13 +156,22 @@ export function listContacts(opts?: ListContactOptions, db?: Database): Contact[
   return rows.map(rowToContact);
 }
 
+function setCloudContactSuppressed(cloud: NonNullable<ReturnType<typeof cloudResource>>, email: string, suppressed: boolean): void {
+  const existing = findCloudContactByEmail(cloud, email) ?? upsertContact(email);
+  cloud.update(existing.id, { suppressed });
+}
+
 export function suppressContact(email: string, db?: Database): void {
+  const cloud = cloudResource(CONTACT_RESOURCE);
+  if (cloud) return setCloudContactSuppressed(cloud, email, true);
   const d = db || getDatabase();
   upsertContact(email, d);
   d.run("UPDATE contacts SET suppressed = 1, updated_at = ? WHERE email = ?", [now(), email]);
 }
 
 export function unsuppressContact(email: string, db?: Database): void {
+  const cloud = cloudResource(CONTACT_RESOURCE);
+  if (cloud) return setCloudContactSuppressed(cloud, email, false);
   const d = db || getDatabase();
   upsertContact(email, d);
   d.run("UPDATE contacts SET suppressed = 0, updated_at = ? WHERE email = ?", [now(), email]);

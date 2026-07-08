@@ -40,7 +40,7 @@ export const CLOUD_RESOURCES: CloudResourceSpec[] = [
     path: "contacts",
     table: "contacts",
     orderBy: "updated_at DESC",
-    filters: ["suppressed"],
+    filters: ["suppressed", "email"],
     columns: [
       { name: "email" },
       { name: "name" },
