@@ -251,11 +251,22 @@ function searchMatch(m: V1Message, query?: string): boolean {
   return hay.includes(q);
 }
 
+// Bounded per-request timeout so a slow/unreachable self-hosted serve FAILS
+// FAST instead of hanging until an external wall (the reported ">30s hang /
+// 2-minute wall" on `inbox` reads). Overridable for very large tenants.
+function selfHostedTimeoutMs(): number {
+  const raw = process.env["HASNA_MAILERY_HTTP_TIMEOUT"];
+  const seconds = raw ? Number.parseInt(raw.trim(), 10) : NaN;
+  return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 30_000;
+}
+
 export interface SelfHostedMailDataSourceOptions {
   baseUrl: string;
   apiKey: string;
   fetchImpl?: SelfHostedFetch;
   now?: () => number;
+  /** Per-request timeout in ms (default: HASNA_MAILERY_HTTP_TIMEOUT or 30s). */
+  timeoutMs?: number;
 }
 
 export class SelfHostedMailDataSource implements MailDataSource {
@@ -264,12 +275,14 @@ export class SelfHostedMailDataSource implements MailDataSource {
   private readonly apiKey: string;
   private readonly fetchImpl: SelfHostedFetch;
   private readonly now: () => number;
+  private readonly timeoutMs: number;
   private scanCache: { at: number; rows: V1Message[] } | null = null;
 
   constructor(options: SelfHostedMailDataSourceOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
     this.apiKey = options.apiKey;
     this.now = options.now ?? Date.now;
+    this.timeoutMs = options.timeoutMs ?? selfHostedTimeoutMs();
     this.fetchImpl = options.fetchImpl
       ?? ((url, init) => fetch(url, init) as unknown as ReturnType<SelfHostedFetch>);
   }
@@ -286,7 +299,19 @@ export class SelfHostedMailDataSource implements MailDataSource {
       headers["Content-Type"] = "application/json";
       init.body = JSON.stringify(body);
     }
-    const res = await this.fetchImpl(`${this.baseUrl}${path}`, init);
+    // Bound the request so a slow/unreachable serve fails fast and loud rather
+    // than hanging. AbortSignal.timeout aborts the underlying fetch.
+    const timer = AbortSignal.timeout(this.timeoutMs);
+    init.signal = timer;
+    let res: Awaited<ReturnType<SelfHostedFetch>>;
+    try {
+      res = await this.fetchImpl(`${this.baseUrl}${path}`, init);
+    } catch (error) {
+      if (timer.aborted || (error as Error)?.name === "TimeoutError" || (error as Error)?.name === "AbortError") {
+        throw new Error(`self-hosted mailery: ${method} ${path} timed out after ${this.timeoutMs}ms`);
+      }
+      throw new Error(`self-hosted mailery: cannot reach ${this.baseUrl} for ${method} ${path}`);
+    }
     const text = await res.text();
     let json: unknown = null;
     if (text && text.trim()) {

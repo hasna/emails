@@ -163,6 +163,33 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     await expect(ds.setStarred("2", true)).rejects.toThrow(/not yet supported/);
     await expect(ds.addLabel("2", "x")).rejects.toThrow(/not yet supported/);
   });
+
+  it("fails fast and loud (never hangs) when the serve stalls past the timeout", async () => {
+    // A fetch that respects the AbortSignal, resolving only when aborted — models
+    // a hung endpoint. With a tiny timeout the read must REJECT, never hang, and
+    // never resolve to an empty list with a success exit.
+    const hangingFetch: SelfHostedFetch = (_url, init) =>
+      new Promise((_resolve, reject) => {
+        const signal = init.signal;
+        if (signal) {
+          signal.addEventListener("abort", () => {
+            const err = new Error("aborted");
+            err.name = "AbortError";
+            reject(err);
+          });
+        }
+      }) as unknown as ReturnType<SelfHostedFetch>;
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://mailery.hasna.xyz/v1",
+      apiKey: "test-key",
+      fetchImpl: hangingFetch,
+      timeoutMs: 25,
+    });
+    const started = Date.now();
+    await expect(ds.listMailbox("inbox")).rejects.toThrow(/timed out after 25ms/);
+    // Well under any external 2-minute wall.
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
 });
 
 describe("resolveMailDataSource — self-hosted seam selection", () => {

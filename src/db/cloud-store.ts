@@ -168,8 +168,36 @@ interface CurlResult {
   body: string;
 }
 
+// Bounded timeouts so a slow/unreachable self-hosted endpoint FAILS FAST and
+// LOUD instead of hanging until an external wall (the "17 then 0 / 2-minute
+// wall / nondeterministic empty" bug). Overridable for very large tenants.
+function positiveIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const n = Number.parseInt(raw.trim(), 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+// Resolved per-call so an env override always applies (and tests can shorten it).
+function connectTimeoutSeconds(): number { return positiveIntEnv("HASNA_MAILERY_HTTP_CONNECT_TIMEOUT", 10); }
+function maxTimeSeconds(): number { return positiveIntEnv("HASNA_MAILERY_HTTP_TIMEOUT", 30); }
+
+/**
+ * Thrown when the curl transport itself fails (DNS/connect failure or a timeout)
+ * — i.e. NO HTTP status was received. Distinct from CloudHttpError (a real HTTP
+ * status the server returned) so callers never confuse "couldn't reach the
+ * cloud" with "the cloud returned empty". Never carries the API key.
+ */
+export class CloudTransportError extends Error {
+  constructor(readonly method: string, readonly path: string, detail: string) {
+    super(`Cannot reach mailery cloud for ${method} ${path}: ${detail}`);
+    this.name = "CloudTransportError";
+  }
+}
+
 function httpRequest(config: CloudConfig, method: string, path: string, body?: unknown): CurlResult {
   const url = `${config.baseUrl}${path}`;
+  const connectTimeout = connectTimeoutSeconds();
+  const maxTime = maxTimeSeconds();
   const dir = mkdtempSync(join(tmpdir(), "mailery-cloud-"));
   const cfgPath = join(dir, "curl.cfg");
   try {
@@ -178,6 +206,9 @@ function httpRequest(config: CloudConfig, method: string, path: string, body?: u
       `request = "${method}"`,
       `header = "Authorization: Bearer ${config.apiKey}"`,
       `header = "Accept: application/json"`,
+      // Bounded, fail-loud transport (never hang indefinitely).
+      `connect-timeout = ${connectTimeout}`,
+      `max-time = ${maxTime}`,
       `silent`,
       `show-error`,
     ];
@@ -191,17 +222,30 @@ function httpRequest(config: CloudConfig, method: string, path: string, body?: u
     const proc = spawnSync("curl", ["-K", cfgPath, "-w", "\n%{http_code}"], {
       encoding: "utf-8",
       maxBuffer: 128 * 1024 * 1024,
+      // Hard ceiling in case curl itself wedges: kill just past its own max-time.
+      timeout: (maxTime + connectTimeout + 5) * 1000,
     });
-    if (proc.error) throw proc.error;
-    if (proc.status !== 0 && !proc.stdout) {
-      throw new Error(`curl failed for ${method} ${path}: ${(proc.stderr || "").trim()}`);
+    if (proc.error) {
+      // spawnSync's own timeout (ETIMEDOUT) or a spawn failure — surface as a
+      // transport error, not a mysterious throw.
+      throw new CloudTransportError(method, path, (proc.error as Error).message || "curl could not run");
     }
     const out = proc.stdout ?? "";
     const nl = out.lastIndexOf("\n");
     const statusStr = nl >= 0 ? out.slice(nl + 1).trim() : out.trim();
     const bodyText = nl >= 0 ? out.slice(0, nl) : "";
     const status = Number.parseInt(statusStr, 10);
-    return { status: Number.isFinite(status) ? status : 0, body: bodyText };
+    // http_code 000 (or unparseable) means curl never got an HTTP response:
+    // connect failure or the connect/max-time budget elapsed. Fail LOUD so a
+    // read never silently degrades to an empty list with a success exit code.
+    if (!Number.isFinite(status) || status === 0) {
+      const stderr = (proc.stderr || "").trim();
+      const detail = proc.status === 28
+        ? `timed out after ${maxTime}s`
+        : (stderr || `curl exited ${proc.status ?? "unknown"}`);
+      throw new CloudTransportError(method, path, detail);
+    }
+    return { status, body: bodyText };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
