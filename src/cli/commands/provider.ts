@@ -2,6 +2,7 @@ import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
 import { createProvider, listProviders, listProviderSummaries, deleteProvider, getProvider, updateProvider } from "../../db/providers.js";
 import { getAdapter } from "../../providers/index.js";
+import { isCloudMode } from "../../db/cloud-store.js";
 import { log } from "../../lib/logger.js";
 import { confirmDestructiveAction, formatListHint, handleError, isCliVerboseOutput, parseCliListPage, resolveId } from "../utils.js";
 
@@ -48,7 +49,11 @@ export function registerProviderCommands(program: Command, output: (data: unknow
           secret_key: opts.secretKey,
         });
 
-        if (!opts.skipValidation && type !== "sandbox") {
+        // Local mode validates the credentials against the live API before
+        // keeping the row. Cloud mode stores only non-secret metadata (no
+        // credentials round-trip), so there is nothing local to validate — the
+        // flipped client sends through the server.
+        if (!isCloudMode() && !opts.skipValidation && type !== "sandbox") {
           try {
             const adapter = getAdapter(provider);
             await adapter.listDomains();
@@ -154,7 +159,9 @@ export function registerProviderCommands(program: Command, output: (data: unknow
 
         const updated = updateProvider(resolvedId, updates);
 
-        if (!opts.skipValidation && updated.type !== "sandbox") {
+        // Cloud mode carries no credentials, so there is nothing local to
+        // validate (and the returned provider has null secrets) — skip.
+        if (!isCloudMode() && !opts.skipValidation && updated.type !== "sandbox") {
           try {
             const adapter = getAdapter(updated);
             await adapter.listDomains();

@@ -1,4 +1,5 @@
 import { loadConfig, saveConfig } from "./config.js";
+import { isCloudMode } from "../db/cloud-store.js";
 
 export type MaileryMode = "local" | "cloud";
 export type MaileryModeLabel = "Local" | "Mailery Cloud";
@@ -126,6 +127,24 @@ export function resolveMaileryMode(opts: ResolveMaileryModeOptions = {}): Mailer
       source,
       migratedConfig,
       warning: warningFor(source, normalized.deprecatedAlias, migratedConfig, normalized.mode),
+    };
+  }
+
+  // Fleet client-flip: the flip sets HASNA_MAILERY_API_URL + HASNA_MAILERY_API_KEY
+  // (and/or a *_STORAGE_MODE var) but no MAILERY_MODE/HASNA_EMAILS_MODE, so the
+  // checks above fall through to the default. The db/MCP layer already routes to
+  // the cloud in that case (isCloudMode()); resolve the SAME here so user-facing
+  // surfaces (doctor, agent-context, `send` routing) report cloud instead of
+  // "local" while the client is actively cloud-routing (the doctor mismatch bug).
+  if (isCloudMode()) {
+    const apiUrlName = readEnv("HASNA_MAILERY_API_URL") ? "HASNA_MAILERY_API_URL" : "MAILERY_API_URL";
+    return {
+      mode: "cloud",
+      label: labelForMaileryMode("cloud"),
+      source: { kind: "env", name: apiUrlName, value: "cloud" },
+      deprecatedAlias: null,
+      migratedConfig: false,
+      warning: null,
     };
   }
 

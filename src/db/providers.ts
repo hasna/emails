@@ -1,7 +1,7 @@
 import type { Database } from "./database.js";
 import type { CreateProviderInput, Provider, ProviderRow, ProviderSummary, ProviderType } from "../types/index.js";
 import { ProviderNotFoundError } from "../types/index.js";
-import { getDatabase, now, uuid } from "./database.js";
+import { getDatabase, now, uuid, resolvePartialId } from "./database.js";
 import { safeOffset, safeOptionalLimit } from "./pagination.js";
 import { cloudResource, cloudListQuery, cloudPage, cbool, ciso, cstr, cstrOrNull } from "./cloud-resource.js";
 
@@ -94,6 +94,21 @@ function rowToProviderSummary(row: ProviderSummaryRow): ProviderSummary {
 }
 
 export function createProvider(input: CreateProviderInput, db?: Database): Provider {
+  // Cloud mode: register the provider's NON-SECRET metadata (name/type/region)
+  // through the /v1/providers API so a flipped client no longer writes to the
+  // local SQLite island while `provider list` reads the cloud (the split-brain
+  // bug: "✓ created" but /v1/providers stays empty). Credentials are never sent
+  // to or stored by the cloud resource — a flipped client sends via the server.
+  const cloud = cloudResource(PROVIDER_RESOURCE);
+  if (cloud) {
+    return apiToProvider(cloud.create({
+      name: input.name,
+      type: input.type,
+      region: input.region || null,
+      active: true,
+    }));
+  }
+
   const d = db || getDatabase();
   const id = uuid();
   const timestamp = now();
@@ -125,10 +140,40 @@ export function createProvider(input: CreateProviderInput, db?: Database): Provi
 }
 
 export function getProvider(id: string, db?: Database): Provider | null {
+  const cloud = cloudResource(PROVIDER_RESOURCE);
+  if (cloud) {
+    const rec = cloud.get(id);
+    return rec ? apiToProvider(rec) : null;
+  }
+
   const d = db || getDatabase();
   const row = d.query(`SELECT ${PROVIDER_COLUMNS} FROM providers WHERE id = ?`).get(id) as ProviderRow | null;
   if (!row) return null;
   return rowToProvider(row);
+}
+
+/**
+ * Resolve a full or partial provider id to a canonical id, routed through the
+ * active Store. In cloud mode a full-length id is confirmed via the /v1/providers
+ * endpoint and a prefix is matched against the cloud provider list; in local
+ * mode it falls back to the SQLite partial-id resolver. Keeps `provider
+ * remove`/`update` consistent with `provider list` instead of always reading the
+ * (empty, in cloud mode) local `providers` table.
+ */
+export function resolveProviderId(id: string, db?: Database): string | null {
+  const cloud = cloudResource(PROVIDER_RESOURCE);
+  if (cloud) {
+    const trimmed = id.trim();
+    if (!trimmed) return null;
+    if (trimmed.length >= 36) return cloud.get(trimmed) ? trimmed : null;
+    const matches = cloud
+      .list({ limit: 1000 })
+      .map((row) => cstr(row["id"]))
+      .filter((pid) => pid.startsWith(trimmed));
+    return matches.length === 1 ? matches[0]! : null;
+  }
+
+  return resolvePartialId(db || getDatabase(), "providers", id);
 }
 
 export function getProviderByNameAndType(name: string, type: ProviderType, db?: Database): Provider | null {
@@ -230,6 +275,19 @@ export function updateProvider(
   input: Partial<CreateProviderInput> & { active?: boolean },
   db?: Database,
 ): Provider {
+  // Cloud mode: patch the non-secret metadata via /v1/providers/:id. Secret
+  // columns are never carried by the cloud resource, so credential updates are
+  // silently ignored server-side (a flipped client sends via the server).
+  const cloud = cloudResource(PROVIDER_RESOURCE);
+  if (cloud) {
+    const patch: Record<string, unknown> = {};
+    if (input.name !== undefined) patch["name"] = input.name;
+    if (input.type !== undefined) patch["type"] = input.type;
+    if (input.region !== undefined) patch["region"] = input.region || null;
+    if (input.active !== undefined) patch["active"] = input.active;
+    return apiToProvider(cloud.update(id, patch));
+  }
+
   const d = db || getDatabase();
   const provider = getProvider(id, d);
   if (!provider) throw new ProviderNotFoundError(id);
@@ -257,6 +315,9 @@ export function updateProvider(
 }
 
 export function deleteProvider(id: string, db?: Database): boolean {
+  const cloud = cloudResource(PROVIDER_RESOURCE);
+  if (cloud) return cloud.del(id);
+
   const d = db || getDatabase();
   const result = d.run("DELETE FROM providers WHERE id = ?", [id]);
   return result.changes > 0;

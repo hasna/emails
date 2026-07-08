@@ -2,6 +2,7 @@ import type { Database } from "./database.js";
 import { getDatabase, uuid, now } from "./database.js";
 import { parseJsonArray, parseJsonObject } from "./json.js";
 import { cappedLimit, safeLimit, safeOffset, safeOptionalLimit } from "./pagination.js";
+import { isCloudMode } from "./cloud-store.js";
 
 export interface AttachmentMeta {
   filename: string;
@@ -343,7 +344,17 @@ export interface ReplyPromptPart {
   text_body: string | null;
 }
 
+// NOTE (cloud mode): inbound replies are linked to a sent email locally via the
+// `in_reply_to_email_id` column. The shared /v1 message store links inbound mail
+// by RFC `in_reply_to` (a Message-ID), not by the sent email's row id, so there
+// is no server endpoint that returns "replies to sent email <id>" today. Rather
+// than silently read the (empty, in cloud mode) LOCAL `inbound_emails` island —
+// the split-brain this codebase is closing — the reply-listing helpers return
+// empty in cloud mode. This keeps `replies`/`conversation` working (they no
+// longer resolve the id against local SQLite and no longer read local replies);
+// cloud-side reply threading is a tracked follow-up.
 export function listReplies(emailId: string, db?: Database, opts?: ListRepliesOptions): InboundEmail[] {
+  if (isCloudMode()) return [];
   const d = db || getDatabase();
   const limit = safeOptionalLimit(opts?.limit);
   const offset = safeOffset(opts?.offset);
@@ -356,6 +367,7 @@ export function listReplies(emailId: string, db?: Database, opts?: ListRepliesOp
 }
 
 export function listReplySummaries(emailId: string, db?: Database, opts?: ListRepliesOptions): InboundEmailSummary[] {
+  if (isCloudMode()) return [];
   const d = db || getDatabase();
   const limit = safeOptionalLimit(opts?.limit);
   const offset = safeOffset(opts?.offset);
@@ -379,6 +391,7 @@ export function listReplyPromptParts(emailId: string, db?: Database, opts?: List
 }
 
 export function getReplyCount(emailId: string, db?: Database): number {
+  if (isCloudMode()) return 0;
   const d = db || getDatabase();
   const result = d.query("SELECT COUNT(*) as count FROM inbound_emails WHERE in_reply_to_email_id = ?").get(emailId) as { count: number } | null;
   return result?.count ?? 0;

@@ -111,12 +111,36 @@ export function createGroup(name: string, description?: string, db?: Database): 
 }
 
 export function getGroup(id: string, db?: Database): Group | null {
+  const cloud = cloudResource(GROUP_RESOURCE);
+  if (cloud) {
+    const rec = cloud.get(id);
+    return rec ? apiToGroup(rec) : null;
+  }
+
   const d = db || getDatabase();
   const row = d.query(`SELECT ${GROUP_COLUMNS} FROM groups WHERE id = ?`).get(id) as Group | null;
   return row;
 }
 
+// Resolve a group by name OR id. In cloud mode the /v1/groups resource has no
+// name-lookup endpoint, so we list the cloud groups and match by exact name,
+// then exact id, then id-prefix — this is what makes `group show <name|id>` and
+// `group delete <name|id>` work against the cloud store instead of returning
+// "Group not found" for a group that demonstrably exists in `group list`.
 export function getGroupByName(name: string, db?: Database): Group | null {
+  const cloud = cloudResource(GROUP_RESOURCE);
+  if (cloud) {
+    const needle = name.trim();
+    if (!needle) return null;
+    const groups = cloud.list({ limit: 1000 }).map(apiToGroup);
+    return (
+      groups.find((g) => g.name === needle) ??
+      groups.find((g) => g.id === needle) ??
+      (needle.length >= 6 ? groups.find((g) => g.id.startsWith(needle)) : undefined) ??
+      null
+    );
+  }
+
   const d = db || getDatabase();
   const row = d.query(`SELECT ${GROUP_COLUMNS} FROM groups WHERE name = ?`).get(name) as Group | null;
   return row;
@@ -140,6 +164,9 @@ export function listGroups(db?: Database, opts?: ListGroupOptions): Group[] {
 }
 
 export function deleteGroup(id: string, db?: Database): boolean {
+  const cloud = cloudResource(GROUP_RESOURCE);
+  if (cloud) return cloud.del(id);
+
   const d = db || getDatabase();
   const result = d.run("DELETE FROM groups WHERE id = ?", [id]);
   return result.changes > 0;

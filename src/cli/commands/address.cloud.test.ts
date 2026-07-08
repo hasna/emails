@@ -17,7 +17,6 @@ import { join } from "node:path";
 import { registerAddressCommands } from "./address.js";
 import { resetCloudConfigCache } from "../../db/cloud-store.js";
 import { closeDatabase, getDatabase, resetDatabase } from "../../db/database.js";
-import { createProvider } from "../../db/providers.js";
 
 const API_KEY = "hasna_mailery_test_key_addresses_1234";
 let serverProc: ReturnType<typeof Bun.spawn> | null = null;
@@ -139,12 +138,20 @@ describe("address CLI — cloud (self_hosted) routing", () => {
     // __reset cleared the mock).
     resetDatabase();
     const local = getDatabase();
-    const provider = createProvider({ name: "sandbox", type: "sandbox" }, local);
+    // Plant the local provider via a RAW insert — createProvider() now correctly
+    // routes to the cloud in cloud mode (like createAddress), so it can no longer
+    // be used to seed a local-only row.
     const nowIso = new Date().toISOString();
+    const providerId = crypto.randomUUID();
+    local.run(
+      `INSERT INTO providers (id, name, type, active, created_at, updated_at)
+       VALUES (?, ?, ?, 1, ?, ?)`,
+      [providerId, "sandbox", "sandbox", nowIso, nowIso],
+    );
     local.run(
       `INSERT INTO addresses (id, provider_id, email, display_name, verified, created_at, updated_at)
        VALUES (?, ?, ?, ?, 0, ?, ?)`,
-      [crypto.randomUUID(), provider.id, "local-only@example.com", null, nowIso, nowIso],
+      [crypto.randomUUID(), providerId, "local-only@example.com", null, nowIso, nowIso],
     );
 
     const { data, out } = await runAddressCommand(["addresses"]);

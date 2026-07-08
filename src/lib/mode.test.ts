@@ -10,6 +10,7 @@ import {
   normalizeMaileryMode,
   resolveMaileryMode,
 } from "./mode.js";
+import { resetCloudConfigCache } from "../db/cloud-store.js";
 
 const TMP_HOME = join("/tmp", `mailery-mode-test-${process.pid}`);
 const ORIGINAL_HOME = process.env["HOME"];
@@ -44,6 +45,21 @@ describe("Mailery mode resolution", () => {
       source: { kind: "default" },
       warning: null,
     });
+  });
+
+  it("resolves the credential-only fleet flip (API URL + key, no *_MODE) as cloud", () => {
+    process.env["HASNA_MAILERY_API_URL"] = "https://mailery.hasna.xyz";
+    process.env["HASNA_MAILERY_API_KEY"] = "test_key";
+    resetCloudConfigCache();
+    try {
+      const resolved = resolveMaileryMode();
+      expect(resolved.mode).toBe("cloud");
+      expect(resolved.label).toBe("Mailery Cloud");
+    } finally {
+      delete process.env["HASNA_MAILERY_API_URL"];
+      delete process.env["HASNA_MAILERY_API_KEY"];
+      resetCloudConfigCache();
+    }
   });
 
   it("normalizes canonical and deprecated mode names", () => {

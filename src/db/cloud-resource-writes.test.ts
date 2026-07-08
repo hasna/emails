@@ -13,7 +13,8 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } fr
 import type { Subprocess } from "bun";
 import { resetCloudConfigCache } from "./cloud-store.js";
 import { createOwner, listOwners } from "./owners.js";
-import { createGroup, listGroups } from "./groups.js";
+import { createGroup, listGroups, getGroupByName, deleteGroup } from "./groups.js";
+import { createProvider, listProviderSummaries, getProvider, resolveProviderId, deleteProvider } from "./providers.js";
 import { suppressContact, unsuppressContact, listContacts } from "./contacts.js";
 import { createSendKey } from "./send-keys.js";
 import { createTemplate, listTemplates, getTemplate, deleteTemplate } from "./templates.js";
@@ -22,6 +23,7 @@ import { createSequence, listSequences } from "./sequences.js";
 const SERVER_CODE = `
 const owners = [];
 const groups = [];
+const providers = [];
 const contacts = [];
 const templates = [];
 const sequences = [];
@@ -47,6 +49,35 @@ const server = Bun.serve({ port: 0, async fetch(req) {
     const g = { id: nid("g"), name: body.name, description: body.description ?? null, created_at: now, updated_at: now };
     groups.push(g);
     return ok(g, 201);
+  }
+  const gm = p.match(/^\\/v1\\/groups\\/([^/]+)$/);
+  if (gm && m === "GET") {
+    const g = groups.find((x) => x.id === gm[1]);
+    return g ? ok(g, 200) : ok({ error: "not found" }, 404);
+  }
+  if (gm && m === "DELETE") {
+    const i = groups.findIndex((x) => x.id === gm[1]);
+    if (i < 0) return ok({ error: "not found" }, 404);
+    groups.splice(i, 1);
+    return ok({ deleted: true, id: gm[1] }, 200);
+  }
+
+  if (p === "/v1/providers" && m === "GET") return ok({ items: providers });
+  if (p === "/v1/providers" && m === "POST") {
+    const pr = { id: nid("p"), name: body.name, type: body.type, region: body.region ?? null, active: body.active ?? true, created_at: now, updated_at: now };
+    providers.push(pr);
+    return ok(pr, 201);
+  }
+  const pm = p.match(/^\\/v1\\/providers\\/([^/]+)$/);
+  if (pm && m === "GET") {
+    const pr = providers.find((x) => x.id === pm[1]);
+    return pr ? ok(pr, 200) : ok({ error: "not found" }, 404);
+  }
+  if (pm && m === "DELETE") {
+    const i = providers.findIndex((x) => x.id === pm[1]);
+    if (i < 0) return ok({ error: "not found" }, 404);
+    providers.splice(i, 1);
+    return ok({ deleted: true, id: pm[1] }, 200);
   }
 
   if (p === "/v1/contacts" && m === "GET") {
@@ -186,5 +217,32 @@ describe("resource repos route writes to cloud in cloud mode", () => {
 
   test("createSendKey FAILS LOUD in cloud mode instead of a silent local mint", () => {
     expect(() => createSendKey("o1", "ci")).toThrow(/not supported yet|server-side mint/);
+  });
+
+  test("createProvider POSTs to /v1/providers and appears in cloud listProviderSummaries", () => {
+    const pr = createProvider({ name: "Prod SES", type: "ses", region: "us-east-1" });
+    expect(pr.id).toStartWith("p");
+    // Credentials are never carried by the cloud resource.
+    expect(pr.api_key).toBeNull();
+    expect(listProviderSummaries().some((x) => x.id === pr.id && x.name === "Prod SES")).toBe(true);
+  });
+
+  test("getProvider/resolveProviderId/deleteProvider route show+remove to cloud", () => {
+    const pr = createProvider({ name: "Sandbox", type: "sandbox" });
+    expect(getProvider(pr.id)?.name).toBe("Sandbox");
+    // Full id resolves through the cloud, and a prefix resolves via the cloud list.
+    expect(resolveProviderId(pr.id)).toBe(pr.id);
+    expect(resolveProviderId(pr.id.slice(0, 8))).toBe(pr.id);
+    expect(deleteProvider(pr.id)).toBe(true);
+    expect(getProvider(pr.id)).toBeNull();
+  });
+
+  test("getGroupByName/deleteGroup route show+delete to cloud (by name and id)", () => {
+    const g = createGroup("cloud-recipients", "team");
+    expect(getGroupByName("cloud-recipients")?.id).toBe(g.id);
+    // A group created via the cloud can also be resolved (and deleted) by id.
+    expect(getGroupByName(g.id)?.name).toBe("cloud-recipients");
+    expect(deleteGroup(g.id)).toBe(true);
+    expect(getGroupByName("cloud-recipients")).toBeNull();
   });
 });

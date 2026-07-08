@@ -1,7 +1,44 @@
 import chalk from "../lib/chalk-lite.js";
 import { createInterface } from "node:readline/promises";
 import { getDatabase, resolvePartialId } from "../db/database.js";
+import { cloudStoreFor, isCloudMode } from "../db/cloud-store.js";
 import { redactSecrets } from "../lib/redaction.js";
+
+// Map a local SQLite table name to its /v1 cloud resource path so `resolveId`
+// resolves a full-or-partial id against the SAME store the read/write path uses
+// when the client is flipped to cloud — instead of the (empty, in cloud mode)
+// local table, which produced the "Could not resolve ID … in table 'emails'"
+// EXIT=1 for ids that plainly existed in the cloud.
+const CLOUD_RESOURCE_BY_TABLE: Record<string, string> = {
+  emails: "messages",
+  inbound_emails: "messages",
+  messages: "messages",
+  providers: "providers",
+  templates: "templates",
+  groups: "groups",
+  contacts: "contacts",
+  sequences: "sequences",
+  owners: "owners",
+  scheduled_emails: "scheduled",
+  addresses: "addresses",
+  domains: "domains",
+};
+
+/** Resolve a full/partial id against the cloud store, or null. */
+function resolveCloudId(table: string, partialId: string): string | null {
+  const resource = CLOUD_RESOURCE_BY_TABLE[table];
+  if (!resource) return null;
+  const store = cloudStoreFor(resource);
+  if (!store) return null;
+  const trimmed = partialId.trim();
+  if (!trimmed) return null;
+  if (trimmed.length >= 36) return store.get(trimmed) ? trimmed : null;
+  const matches = store
+    .list({ limit: 1000 })
+    .map((row) => (row["id"] == null ? "" : String(row["id"])))
+    .filter((rid) => rid.startsWith(trimmed));
+  return matches.length === 1 ? matches[0]! : null;
+}
 
 const ID_ERROR_SUGGESTION_LIMIT = 5;
 let jsonOutput = false;
@@ -121,6 +158,11 @@ export function handleError(e: unknown): never {
 }
 
 export function resolveId(table: string, partialId: string): string {
+  if (isCloudMode()) {
+    const cloudId = resolveCloudId(table, partialId);
+    if (cloudId) return cloudId;
+    handleError(new Error(`Could not resolve ID '${partialId}' in table '${table}'.`));
+  }
   const db = getDatabase();
   const id = resolvePartialId(db, table, partialId);
   if (!id) {
