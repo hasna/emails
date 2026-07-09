@@ -1,16 +1,13 @@
 {
-  "name": "@hasna/mailery",
-  "version": "0.6.113",
+  "name": "@hasna/emails",
+  "version": "0.6.117",
   "description": "Mailery email management CLI + MCP server + dashboard for Resend, AWS SES, and Cloudflare inbound workflows",
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/hasna/mailery.git"
+    "url": "git+https://github.com/hasna/emails.git"
   },
   "bin": {
-    "mailery": "dist/cli/index.js",
-    "mailery-mcp": "dist/mcp/index.js",
-    "mailery-serve": "dist/server/index.js",
     "emails": "dist/cli/index.js",
     "emails-mcp": "dist/mcp/index.js",
     "emails-serve": "dist/server/index.js"

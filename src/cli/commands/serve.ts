@@ -153,7 +153,7 @@ export function registerServeCommands(program: Command, output: (data: unknown, 
               writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n");
               console.log(chalk.green("✓ Removed from Gemini CLI config"));
             } else {
-              console.log(chalk.dim("mailery not found in Gemini CLI config, skipping"));
+              console.log(chalk.dim("emails not found in Gemini CLI config, skipping"));
             }
           }
         } catch (e) { handleError(e); }

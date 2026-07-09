@@ -1,6 +1,6 @@
 /**
- * @hasna/mailery-sdk
- * Zero-dependency TypeScript client for the @hasna/mailery REST API.
+ * @hasna/emails-sdk
+ * Zero-dependency TypeScript client for the @hasna/emails REST API.
  * Works in Node.js, Bun, Deno, and browser environments.
  */
 

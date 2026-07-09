@@ -1,5 +1,5 @@
-export const EMAILS_MCP_SERVER_NAME = "mailery";
-export const EMAILS_MCP_COMMAND = "mailery-mcp";
+export const EMAILS_MCP_SERVER_NAME = "emails";
+export const EMAILS_MCP_COMMAND = "emails-mcp";
 
 export interface McpInstallCommand {
   command: string;

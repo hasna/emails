@@ -153,8 +153,8 @@ describe("CLI JSON contracts", () => {
       target: "claude",
       action: "install",
       command: "claude",
-      args: ["mcp", "add", "--transport", "stdio", "--scope", "user", "mailery", "--", "mailery-mcp"],
-      shell: "claude mcp add --transport stdio --scope user mailery -- mailery-mcp",
+      args: ["mcp", "add", "--transport", "stdio", "--scope", "user", "emails", "--", "emails-mcp"],
+      shell: "claude mcp add --transport stdio --scope user emails -- emails-mcp",
     });
   });
 

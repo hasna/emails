@@ -8,14 +8,14 @@ describe("generateBashCompletion", () => {
     expect(result.length).toBeGreaterThan(100);
   });
 
-  it("contains the mailery command", () => {
+  it("contains the emails command", () => {
     const result = generateBashCompletion();
-    expect(result).toContain("mailery");
+    expect(result).toContain("emails");
   });
 
   it("contains bash shebang / completion function", () => {
     const result = generateBashCompletion();
-    expect(result).toContain("_mailery_completion");
+    expect(result).toContain("_emails_completion");
   });
 
   it("contains core command names", () => {
@@ -57,7 +57,7 @@ describe("generateFishCompletion", () => {
   it("contains fish complete commands", () => {
     const result = generateFishCompletion();
     expect(result).toContain("complete");
-    expect(result).toContain("mailery");
+    expect(result).toContain("emails");
   });
 
   it("contains core command names", () => {

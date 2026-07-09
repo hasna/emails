@@ -116,7 +116,7 @@ async function main(): Promise<void> {
   setLogLevel(quietRequested, verboseRequested);
 
   program
-    .name("mailery")
+    .name("emails")
     .description("Mailery email management CLI - send, receive, sync, and manage email via Resend, AWS SES, and Cloudflare")
     .version(version)
     .option("--json", "Output JSON instead of formatted text")
@@ -145,7 +145,7 @@ async function main(): Promise<void> {
   }
 
   try {
-    await program.parseAsync([process.argv[0] ?? "bun", process.argv[1] ?? "mailery", ...cliArgs]);
+    await program.parseAsync([process.argv[0] ?? "bun", process.argv[1] ?? "emails", ...cliArgs]);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     handleError(new Error(message));

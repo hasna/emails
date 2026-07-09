@@ -1,6 +1,6 @@
 # Mailery — macOS desktop app
 
-Mailery ships a native macOS desktop app alongside the `@hasna/mailery` CLI. It is a UI
+Mailery ships a native macOS desktop app alongside the `@hasna/emails` CLI. It is a UI
 copycat of [open-notes](https://github.com/hasna/notes)' "Hasna Notes" app, retargeted to
 email: a thin AppKit **WKWebView shell** hosting an offline web UI, bridging real mail
 from the local Mailery SQLite store.
@@ -27,8 +27,8 @@ Mailery deliberately splits reads from writes:
   This is the fast path that powers the boot payload and every refresh. The app **never
   writes to the database itself.**
 - **Writes ALWAYS go through the `mailery` CLI.** Every mutation — send, reply, mark-read,
-  archive, star, label, trash/spam, refresh — is delegated to the `mailery inbox …` /
-  `mailery send` / `mailery refresh` commands. The CLI owns provider auth,
+  archive, star, label, trash/spam, refresh — is delegated to the `emails inbox …` /
+  `emails send` / `emails refresh` commands. The CLI owns provider auth,
   inbound refresh, threading headers (In-Reply-To/References), and write-path invariants;
   re-implementing those in Swift would drift from the source of truth and risk corrupting
   the shared DB. `MaileryCore.MaileryCLI` builds the exact argv (pure + unit-tested) and
@@ -97,18 +97,18 @@ REMOTE_HOST=apple03 bash scripts/run_on_apple_mac.sh
 The local inbox may be **empty** — pull mail first, then launch:
 
 ```bash
-mailery refresh          # pull new inbound mail into emails.db (S3 buckets and realtime queue)
-mailery inbox list       # sanity-check there is data
+emails refresh          # pull new inbound mail into emails.db (S3 buckets and realtime queue)
+emails inbox list       # sanity-check there is data
 open dist/Mailery.app
 # Confirm render via the app's NSLog diagnostics:
 log show --last 2m --predicate 'eventMessage CONTAINS "Mailery:"' --info
 #   → "Mailery: rendered N thread rows"
 ```
 
-A send goes through `mailery send` (same argv the app builds):
+A send goes through `emails send` (same argv the app builds):
 
 ```bash
-mailery send --from andrei@hasna.com --to andrei@hasna.com \
+emails send --from andrei@hasna.com --to andrei@hasna.com \
   --subject "Mailery test" --body "round-trip"
 ```
 

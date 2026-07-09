@@ -46,16 +46,16 @@ When `HASNA_EMAILS_STORAGE_MODE=remote`, runtime commands:
 Long-running MCP and HTTP server processes prepare the cache at startup and run
 periodic background flushes. `HASNA_EMAILS_STORAGE_MODE=hybrid` keeps the older
 explicit sync behavior where local SQLite remains the source and operators run
-`mailery storage pull`, `mailery storage push`, or `mailery storage sync --force`
+`emails storage pull`, `emails storage push`, or `emails storage sync --force`
 manually.
 
 ## Commands
 
 ```bash
-mailery self-hosted setup
-mailery self-hosted status --json
-mailery self-hosted migrate
-mailery self-hosted migrate-local --json
+emails self-hosted setup
+emails self-hosted status --json
+emails self-hosted migrate
+emails self-hosted migrate-local --json
 ```
 
 `migrate-local` pushes existing local SQLite rows into self-hosted PostgreSQL.
@@ -77,24 +77,24 @@ local-only providers or local-only inbox sources after the migration unless the
 intent is explicitly test/import-only. Validate the cutover with:
 
 ```bash
-mailery self-hosted status --json
-mailery domains list --json
-mailery inbox sources --json
+emails self-hosted status --json
+emails domains list --json
+emails inbox sources --json
 ```
 
 The older storage commands remain available:
 
 ```bash
-mailery storage status
-mailery storage migrate
-mailery storage migrate-local
-mailery storage pull
-mailery storage push
+emails storage status
+emails storage migrate
+emails storage migrate-local
+emails storage pull
+emails storage push
 ```
 
 ## S3 And Attachments
 
-SES inbound writes raw MIME to S3. `mailery inbox sync-s3` records `raw_s3_url`
+SES inbound writes raw MIME to S3. `emails inbox sync-s3` records `raw_s3_url`
 on inbound rows, stores attachment metadata, and, when configured, stores
 attachments in S3 as `s3://` URLs. In source-of-truth mode the S3 materialization
 tables are flushed to PostgreSQL after successful sync, so the local cache does

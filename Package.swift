@@ -3,7 +3,7 @@ import PackageDescription
 
 // Mailery — native macOS desktop app for the Mailery email client.
 //
-// This Swift package lives ALONGSIDE the `@hasna/mailery` TypeScript CLI in the same
+// This Swift package lives ALONGSIDE the `@hasna/emails` TypeScript CLI in the same
 // repo. It is a UI copycat of open-notes' "Hasna Notes" app: a WKWebView shell
 // (MaileryApp) hosting an offline web UI (`web/`) and bridging real mail data from the
 // local Mailery SQLite store (`~/.hasna/emails/emails.db`).
