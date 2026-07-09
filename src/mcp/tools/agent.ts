@@ -63,8 +63,8 @@ export function registerAgentTools(server: McpServer): void {
         if (matches.length === 0) {
           blockers.push("No exact local address exists.");
           next_commands.push(provider_id
-            ? `mailery address provision ${normalized} --provider ${provider_id} --owner <owner>`
-            : `mailery address provision ${normalized} --provider <provider> --owner <owner>`);
+            ? `emails address provision ${normalized} --provider ${provider_id} --owner <owner>`
+            : `emails address provision ${normalized} --provider <provider> --owner <owner>`);
         }
 
         if (owner && matches.length === 1) {
@@ -72,7 +72,7 @@ export function registerAgentTools(server: McpServer): void {
         } else if (owner && matches.length > 1) {
           blockers.push("Address exists on multiple providers; assign ownership by address ID.");
         } else if (matches.length > 0 && !matches.some((address) => address.owner_id)) {
-          next_commands.push(`mailery address set-owner ${matches[0]!.id} --owner <owner>`);
+          next_commands.push(`emails address set-owner ${matches[0]!.id} --owner <owner>`);
         }
 
         const addresses = matches.map((address) => ({
@@ -89,8 +89,8 @@ export function registerAgentTools(server: McpServer): void {
           next_commands,
           diagnosis,
           cli_equivalent: provider_id
-            ? `mailery address provision ${normalized} --provider ${provider_id}${owner ? ` --owner ${owner}` : ""} --json`
-            : `mailery doctor delivery ${normalized} --json`,
+            ? `emails address provision ${normalized} --provider ${provider_id}${owner ? ` --owner ${owner}` : ""} --json`
+            : `emails doctor delivery ${normalized} --json`,
         });
       } catch (e) {
         return { content: [{ type: "text" as const, text: `Error: ${formatError(e)}` }], isError: true };
@@ -105,7 +105,7 @@ export function registerAgentTools(server: McpServer): void {
     async () => {
       try {
         const { getEmailSystemStatusForRuntime } = await import("../../lib/agent-context.js");
-        return json({ ...(await getEmailSystemStatusForRuntime()), cli_equivalent: "mailery status --json" });
+        return json({ ...(await getEmailSystemStatusForRuntime()), cli_equivalent: "emails status --json" });
       } catch (e) {
         return { content: [{ type: "text" as const, text: `Error: ${formatError(e)}` }], isError: true };
       }
@@ -119,7 +119,7 @@ export function registerAgentTools(server: McpServer): void {
     async () => {
       try {
         const { getAgentContextForRuntime } = await import("../../lib/agent-context.js");
-        return json({ ...(await getAgentContextForRuntime()), cli_equivalent: "mailery agent context --json" });
+        return json({ ...(await getAgentContextForRuntime()), cli_equivalent: "emails agent context --json" });
       } catch (e) {
         return { content: [{ type: "text" as const, text: `Error: ${formatError(e)}` }], isError: true };
       }
@@ -135,7 +135,7 @@ export function registerAgentTools(server: McpServer): void {
     async ({ goal }) => {
       try {
         const { getNextEmailAction } = await import("../../lib/agent-context.js");
-        return json({ ...getNextEmailAction(goal), cli_equivalent: "mailery status --json" });
+        return json({ ...getNextEmailAction(goal), cli_equivalent: "emails status --json" });
       } catch (e) {
         return { content: [{ type: "text" as const, text: `Error: ${formatError(e)}` }], isError: true };
       }

@@ -68,8 +68,8 @@ export function assessDomainReadiness(
   if (selfHostedSource && !inboundEvidenceReady) issues.push("No live SES/S3 inbound source");
   if (bad(domain.dkim_status) || bad(domain.spf_status) || provisioning?.last_error) {
     if (provisioning?.last_error) issues.push(provisioning.last_error);
-    fix_commands.push(`mailery domain check ${domain.domain}`);
-    fix_commands.push(`mailery domain setup-cloudflare ${domain.domain}`);
+    fix_commands.push(`emails domain check ${domain.domain}`);
+    fix_commands.push(`emails domain setup-cloudflare ${domain.domain}`);
     return {
       state: "broken",
       send_ready: false,
@@ -96,16 +96,16 @@ export function assessDomainReadiness(
       : inboundLifecycleReady || readyAddresses > 0 || provisioningReceiveReady;
 
   if (!sendReady) {
-    fix_commands.push(`mailery domain dns ${domain.domain}`);
-    fix_commands.push(`mailery domain verify ${domain.domain}`);
+    fix_commands.push(`emails domain dns ${domain.domain}`);
+    fix_commands.push(`emails domain verify ${domain.domain}`);
   }
   if (!receiveReady) {
     if (selfHostedSource && !inboundEvidenceReady) {
-      fix_commands.push(`mailery domain adopt ${domain.domain} --provider <provider>`);
-      fix_commands.push(`mailery inbox sync-s3 --source <source-id>`);
+      fix_commands.push(`emails domain adopt ${domain.domain} --provider <provider>`);
+      fix_commands.push(`emails inbox sync-s3 --source <source-id>`);
     } else {
-      fix_commands.push(`mailery domain check ${domain.domain}`);
-      fix_commands.push(`mailery provision domain ${domain.domain} --provider <provider> --dry-run`);
+      fix_commands.push(`emails domain check ${domain.domain}`);
+      fix_commands.push(`emails provision domain ${domain.domain} --provider <provider> --dry-run`);
     }
   }
 

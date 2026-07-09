@@ -3,11 +3,11 @@ import chalk from "../../lib/chalk-lite.js";
 import { handleError } from "../utils.js";
 
 /**
- * `mailery db` — cloud (self_hosted) Postgres schema management.
+ * `emails db` — cloud (self_hosted) Postgres schema management.
  *
  * PURE REMOTE (Amendment A1): these commands operate on the shared cloud
  * Postgres and are meaningful only in cloud mode. The one-shot deploy migration
- * task runs `mailery db migrate`.
+ * task runs `emails db migrate`.
  */
 export function registerDbCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   const dbCmd = program.command("db").description("Cloud (self_hosted) Postgres schema: migrate / status");

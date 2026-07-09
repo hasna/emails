@@ -76,8 +76,8 @@ export function registerSendCommands(program: Command, _output: (data: unknown, 
     .option("--schedule <datetime>", "Schedule email for later (ISO 8601 datetime)")
     .option("--unsubscribe-url <url>", "Inject List-Unsubscribe headers (RFC 8058 one-click)")
     .option("--idempotency-key <key>", "Prevent duplicate sends — returns existing email if key was used before")
-    .option("--track-opens", "Inject tracking pixel to detect email opens (requires mailery serve running)")
-    .option("--track-clicks", "Rewrite links to track clicks (requires mailery serve running)")
+    .option("--track-opens", "Inject tracking pixel to detect email opens (requires emails serve running)")
+    .option("--track-clicks", "Rewrite links to track clicks (requires emails serve running)")
     .option("--tracking-url <url>", "Base URL for tracking server (default: http://localhost:3900)")
     .option("--in-reply-to <id>", "Reply to an existing sent email — sets In-Reply-To/References headers for threading")
     .action(async (opts: {
@@ -199,7 +199,7 @@ export function registerSendCommands(program: Command, _output: (data: unknown, 
           providerId = resolveId("providers", opts.provider);
         } else {
           const activeProviderId = getLatestActiveProviderId(undefined, db);
-          if (!activeProviderId) handleError(new Error("No active providers. Add one with 'mailery provider add'"));
+          if (!activeProviderId) handleError(new Error("No active providers. Add one with 'emails provider add'"));
           providerId = activeProviderId!;
         }
 
@@ -332,7 +332,7 @@ export function registerSendCommands(program: Command, _output: (data: unknown, 
             setConfigValue("tracking-base-url", opts.trackingUrl);
           }
           storedHtml = await prepareTrackedHtml(htmlBody, email.id, !!opts.trackOpens, !!opts.trackClicks);
-          log.info(chalk.dim("  Tracking enabled — open mailery serve to record opens/clicks"));
+          log.info(chalk.dim("  Tracking enabled — open emails serve to record opens/clicks"));
         }
         await storeSentEmailContent(email.id, { html: storedHtml, text: textBody }, db);
 

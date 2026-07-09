@@ -31,7 +31,7 @@ export function registerGroupCommands(program: Command, output: (data: unknown, 
         const page = parseCliListPage(opts);
         const groups = listGroups(undefined, page);
         if (groups.length === 0) {
-          output([], chalk.dim("No groups configured. Use 'mailery group create' to add one."));
+          output([], chalk.dim("No groups configured. Use 'emails group create' to add one."));
           return;
         }
         const counts = getMemberCounts(groups.map((group) => group.id));
@@ -52,7 +52,7 @@ export function registerGroupCommands(program: Command, output: (data: unknown, 
           limit: page.limit,
           offset: page.offset,
           noun: "group",
-          detailCommand: "use mailery group show <name> for members",
+          detailCommand: "use emails group show <name> for members",
           verbose,
         }));
         output(result, lines.join("\n"));
@@ -77,7 +77,7 @@ export function registerGroupCommands(program: Command, output: (data: unknown, 
         if (group!.description) lines.push(chalk.dim(`  ${group!.description}`));
         lines.push(`  Members (${members.length} shown / ${memberCount} total):`);
         if (members.length === 0) {
-          lines.push(chalk.dim("    No members. Use 'mailery group add' to add some."));
+          lines.push(chalk.dim("    No members. Use 'emails group add' to add some."));
         } else {
           for (const m of members) {
             const displayName = m.name ? ` (${m.name})` : "";
@@ -118,7 +118,7 @@ export function registerGroupCommands(program: Command, output: (data: unknown, 
           limit: page.limit,
           offset: page.offset,
           noun: "member",
-          detailCommand: "use mailery group show <name> for group details",
+          detailCommand: "use emails group show <name> for group details",
           verbose: opts.verbose || isCliVerboseOutput(),
         }));
         output(members, lines.join("\n"));

@@ -225,8 +225,8 @@ describe("domains lifecycle commands", () => {
         "outbound sending is not enabled",
       ]),
       next_actions: expect.arrayContaining([
-        "mailery domains dns example.com",
-        "mailery domains verify example.com",
+        "emails domains dns example.com",
+        "emails domains verify example.com",
       ]),
     });
   });
@@ -247,7 +247,7 @@ describe("domains lifecycle commands", () => {
       provider: { id: provider.id, name: "sandbox" },
       source_of_truth: "postgres",
       would_create_domain: true,
-      cli_equivalent: `mailery domains add example.com --provider ${provider.id}`,
+      cli_equivalent: `emails domains add example.com --provider ${provider.id}`,
     });
     expect(listDomains(undefined, getDatabase())).toHaveLength(0);
   });
@@ -269,8 +269,8 @@ describe("domains lifecycle commands", () => {
       would_create_domain: true,
       dns_provider: "cloudflare",
       dns_tasks: expect.arrayContaining([
-        expect.objectContaining({ purpose: "SPF", check_command: "mailery domain check owned.example.com" }),
-        expect.objectContaining({ purpose: "DMARC", verify_command: "mailery domain verify owned.example.com" }),
+        expect.objectContaining({ purpose: "SPF", check_command: "emails domain check owned.example.com" }),
+        expect.objectContaining({ purpose: "DMARC", verify_command: "emails domain verify owned.example.com" }),
       ]),
     });
     expect(listDomains(undefined, getDatabase())).toHaveLength(0);
@@ -301,8 +301,8 @@ describe("domains lifecycle commands", () => {
           receive_ready: false,
         },
         next_actions: expect.arrayContaining([
-          "mailery domains dns owned.example.com",
-          "mailery domains verify owned.example.com",
+          "emails domains dns owned.example.com",
+          "emails domains verify owned.example.com",
         ]),
       },
     });

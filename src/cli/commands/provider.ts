@@ -80,7 +80,7 @@ export function registerProviderCommands(program: Command, output: (data: unknow
         const page = parseCliListPage(opts);
         const providers = listProviderSummaries(undefined, page);
         if (providers.length === 0) {
-          output([], chalk.dim("No providers configured. Use 'mailery provider add' to add one."));
+          output([], chalk.dim("No providers configured. Use 'emails provider add' to add one."));
           return;
         }
         const lines: string[] = [chalk.bold("\nProviders:")];
@@ -95,7 +95,7 @@ export function registerProviderCommands(program: Command, output: (data: unknow
           limit: page.limit,
           offset: page.offset,
           noun: "provider",
-          detailCommand: "use mailery provider update <id> --help for editable fields",
+          detailCommand: "use emails provider update <id> --help for editable fields",
           verbose: opts.verbose || isCliVerboseOutput(),
         }));
         output(providers, lines.join("\n"));
@@ -184,7 +184,7 @@ export function registerProviderCommands(program: Command, output: (data: unknow
         const { checkAllProviders, formatProviderHealth } = await import("../../lib/health.js");
         const results = await checkAllProviders();
         if (results.length === 0) {
-          output([], chalk.dim("No active supported providers. Add one with 'mailery provider add'"));
+          output([], chalk.dim("No active supported providers. Add one with 'emails provider add'"));
           return;
         }
         const lines: string[] = [chalk.bold("\nProvider Health:\n")];
@@ -208,9 +208,9 @@ export function registerProviderCommands(program: Command, output: (data: unknow
         if (providers.length === 0) {
           console.log(chalk.dim("No providers configured."));
           console.log(chalk.bold("\nQuick setup:"));
-          console.log(chalk.dim("  SES:    mailery provider add --type ses --name \"My SES\" --region us-east-1 --access-key ... --secret-key ..."));
-          console.log(chalk.dim("  Resend: mailery provider add --type resend --name \"My Resend\" --api-key re_..."));
-          console.log(chalk.dim("  Sandbox: mailery provider add --type sandbox --name \"Local Sandbox\""));
+          console.log(chalk.dim("  SES:    emails provider add --type ses --name \"My SES\" --region us-east-1 --access-key ... --secret-key ..."));
+          console.log(chalk.dim("  Resend: emails provider add --type resend --name \"My Resend\" --api-key re_..."));
+          console.log(chalk.dim("  Sandbox: emails provider add --type sandbox --name \"Local Sandbox\""));
           return;
         }
 

@@ -91,15 +91,15 @@ function errorCode(message: string): string {
 
 function fixCommands(message: string): string[] {
   const lower = message.toLowerCase();
-  if (lower.includes("unknown command")) return ["mailery --help"];
-  if (lower.includes("provider")) return ["mailery provider list --json", "mailery provider add --help"];
-  if (lower.includes("domain")) return ["mailery domain list --json", "mailery domain add --help"];
-  if (lower.includes("address")) return ["mailery address list --json", "mailery address provision --help"];
-  if (lower.includes("template")) return ["mailery template list --json", "mailery template add --help"];
-  if (lower.includes("sequence")) return ["mailery sequence list --json", "mailery sequence --help"];
-  if (lower.includes("inbound") || lower.includes("inbox")) return ["mailery inbox sync-status --json", "mailery doctor delivery <address> --json"];
+  if (lower.includes("unknown command")) return ["emails --help"];
+  if (lower.includes("provider")) return ["emails provider list --json", "emails provider add --help"];
+  if (lower.includes("domain")) return ["emails domain list --json", "emails domain add --help"];
+  if (lower.includes("address")) return ["emails address list --json", "emails address provision --help"];
+  if (lower.includes("template")) return ["emails template list --json", "emails template add --help"];
+  if (lower.includes("sequence")) return ["emails sequence list --json", "emails sequence --help"];
+  if (lower.includes("inbound") || lower.includes("inbox")) return ["emails inbox sync-status --json", "emails doctor delivery <address> --json"];
   if (lower.includes("--yes") || lower.includes("destructive")) return ["Re-run the same command with --yes after confirming the target ID"];
-  return ["mailery status --json", "mailery doctor --json"];
+  return ["emails status --json", "emails doctor --json"];
 }
 
 export function handleError(e: unknown): never {

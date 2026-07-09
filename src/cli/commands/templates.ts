@@ -54,7 +54,7 @@ export function registerTemplateCommands(program: Command, output: (data: unknow
         const page = parseCliListPage(opts);
         const templates = listTemplateSummaries(undefined, page);
         if (templates.length === 0) {
-          output([], chalk.dim("No templates configured. Use 'mailery template add' to create one."));
+          output([], chalk.dim("No templates configured. Use 'emails template add' to create one."));
           return;
         }
         const tplLines: string[] = [chalk.bold("\nTemplates:")];
@@ -69,7 +69,7 @@ export function registerTemplateCommands(program: Command, output: (data: unknow
           limit: page.limit,
           offset: page.offset,
           noun: "template",
-          detailCommand: "use mailery template show <name> for body details",
+          detailCommand: "use emails template show <name> for body details",
           verbose: opts.verbose || isCliVerboseOutput(),
         }));
         output(templates, tplLines.join("\n"));

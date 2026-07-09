@@ -216,7 +216,7 @@ describe("CLI JSON contracts", () => {
     const parsed = JSON.parse(stderr) as { error: { message: string; code: string; fix_commands: string[] } };
     expect(parsed.error.code).toBe("not_found");
     expect(parsed.error.message).toContain("Could not resolve ID");
-    expect(parsed.error.fix_commands).toContain("mailery provider list --json");
+    expect(parsed.error.fix_commands).toContain("emails provider list --json");
   });
 
   it("routes natural-language root prompts to the read-only agent", () => {

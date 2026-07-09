@@ -67,7 +67,7 @@ export function registerAliasCommands(program: Command, output: (data: unknown, 
         limit: page.limit,
         offset: page.offset,
         noun: "alias",
-        detailCommand: "use mailery alias resolve <recipient> to test routing",
+        detailCommand: "use emails alias resolve <recipient> to test routing",
         verbose,
       }));
       if (verbose && g) lines.push(chalk.dim("\n  The global catch-all is protected — it catches mail for every domain and can't be deleted."));

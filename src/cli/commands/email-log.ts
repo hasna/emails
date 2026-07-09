@@ -235,16 +235,16 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
 
   emailCmd
     .command("send")
-    .description("Send an email (alias of top-level `mailery send`)")
+    .description("Send an email (alias of top-level `emails send`)")
     .option("--from <email>", "Sender")
     .option("--to <email...>", "Recipient(s)")
     .option("--subject <subject>", "Subject")
     .option("--body <text>", "Body")
     .option("--provider <id>", "Provider ID")
-    .action(() => { console.log(chalk.dim("Use: mailery send --from ... --to ... --subject ... --body ...")); });
+    .action(() => { console.log(chalk.dim("Use: emails send --from ... --to ... --subject ... --body ...")); });
 
   // ─── LOG ─────────────────────────────────────────────────────────────────────
-  program.command("log").description("Show email send log (alias: mailery email list)")
+  program.command("log").description("Show email send log (alias: emails email list)")
     .option("--provider <id>", "Filter by provider ID")
     .option("--status <status>", "Filter by status: sent|delivered|bounced|complained|failed")
     .option("--from <email>", "Filter by sender address")
@@ -336,7 +336,7 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
         console.log(`  ${chalk.dim("Sent:")}     ${emailRecord!.sent_at}`);
         if (emailRecord!.provider_message_id) console.log(`  ${chalk.dim("Msg ID:")}   ${emailRecord!.provider_message_id}`);
         const replyCount = getReplyCount(resolvedId!, db);
-        if (replyCount > 0) console.log(`  ${chalk.dim("Replies:")}  ${chalk.cyan(String(replyCount))} (use 'mailery replies ${id}' to view)`);
+        if (replyCount > 0) console.log(`  ${chalk.dim("Replies:")}  ${chalk.cyan(String(replyCount))} (use 'emails replies ${id}' to view)`);
 
         if (content) {
           const headers = content.headers;
@@ -435,7 +435,7 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
             resolvedProviderId = resolvePartialIdOrThrow(db, "providers", defaultId);
           } else {
             const activeProviderId = getLatestActiveProviderId(undefined, db);
-            if (!activeProviderId) handleError(new Error("No active providers. Add one with 'mailery provider add'"));
+            if (!activeProviderId) handleError(new Error("No active providers. Add one with 'emails provider add'"));
             resolvedProviderId = activeProviderId!;
           }
         }
@@ -449,7 +449,7 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
         }
         let fromEmail: string;
         if (preferredAddress) { fromEmail = preferredAddress; }
-        else { handleError(new Error("No sender addresses configured for this provider. Add one with 'mailery address add'")); }
+        else { handleError(new Error("No sender addresses configured for this provider. Add one with 'emails address add'")); }
         const ts = new Date().toISOString();
         const subject = `Test from mailery \u2014 ${ts}`;
         const text = `This is a test email sent via Mailery at ${ts}. Provider: ${provider!.name} (${provider!.type})`;

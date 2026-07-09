@@ -67,8 +67,8 @@ function domainDnsTasks(domain: string, records: DnsRecord[]): DomainDnsTask[] {
     name: record.name,
     value: record.value,
     status: "pending" as const,
-    check_command: `mailery domain check ${domain}`,
-    verify_command: `mailery domain verify ${domain}`,
+    check_command: `emails domain check ${domain}`,
+    verify_command: `emails domain verify ${domain}`,
   }));
 }
 
@@ -173,7 +173,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
         limit: page.limit,
         offset: page.offset,
         noun: "domain",
-        detailCommand: "use mailery domain status or mailery domain dns <domain> for details",
+        detailCommand: "use emails domain status or emails domain dns <domain> for details",
         verbose: opts.verbose || isCliVerboseOutput(),
       }));
       output(domains, lines.join("\n"));
@@ -193,7 +193,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
         limit: page.limit,
         offset: page.offset,
         noun: "domain",
-        detailCommand: "use mailery domains status <domain> for lifecycle details",
+        detailCommand: "use emails domains status <domain> for lifecycle details",
         verbose: opts.verbose || isCliVerboseOutput(),
       })}`);
     } catch (e) {
@@ -245,7 +245,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
             existing: existing ? { id: existing.id, domain: existing.domain } : null,
             would_create_domain: !existing,
             would_call_provider: false,
-            cli_equivalent: `mailery ${commandPrefix} add ${domain} --provider ${opts.provider}`,
+            cli_equivalent: `emails ${commandPrefix} add ${domain} --provider ${opts.provider}`,
           }, existing
             ? chalk.dim(`Domain already exists in cloud: ${domain} (${existing.id.slice(0, 8)})`)
             : chalk.dim(`Would create ${domain} on the cloud API (provider label ${opts.provider}).`));
@@ -282,7 +282,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
           existing: existing ? buildDomainLifecycleSummary(existing, { db }) : null,
           would_create_domain: !existing,
           would_call_provider: !existing,
-          cli_equivalent: `mailery ${commandPrefix} add ${domain} --provider ${opts.provider}`,
+          cli_equivalent: `emails ${commandPrefix} add ${domain} --provider ${opts.provider}`,
         }, existing
           ? chalk.dim(`Domain already exists locally: ${domain} (${existing.id.slice(0, 8)})`)
           : chalk.dim(`Would add ${domain} to provider ${provider!.name} and register it as ${sourceOfTruth} source of truth.`));
@@ -340,7 +340,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
           would_create_domain: !existing,
           would_register_provider: opts.registerProvider !== false,
           dns_tasks: fallbackTasks,
-          cli_equivalent: `mailery ${commandPrefix} connect ${domain} --provider ${opts.provider}`,
+          cli_equivalent: `emails ${commandPrefix} connect ${domain} --provider ${opts.provider}`,
         }, chalk.dim(`Would connect ${domain} to ${provider!.name}, generate DNS tasks, and return readiness without purchasing the domain.`));
         return;
       }
@@ -416,7 +416,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
       const domain = resolveDomainRecord(domainOrId, opts, db);
       const summary = buildDomainLifecycleSummary(domain, { db });
       if (!opts.force && !summary.readiness.receive_ready && !summary.readiness.inbound_evidence_ready) {
-        handleError(new Error(`Inbound cloud source is not configured for ${domain.domain}; run mailery domain adopt ${domain.domain} --provider ${domain.provider_id} or pass --force after manual/provider setup.`));
+        handleError(new Error(`Inbound cloud source is not configured for ${domain.domain}; run emails domain adopt ${domain.domain} --provider ${domain.provider_id} or pass --force after manual/provider setup.`));
       }
       const updated = updateDomainReadiness(domain.id, {
         inbound_status: "ready",
@@ -814,7 +814,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
         // 4. Inbound — per provider.
         if (opts.inbound !== false && provider.type === "resend") {
           lines.push(chalk.green(`✓ Resend domain ready`));
-          lines.push(chalk.dim(`  Inbound is push: add a Resend inbound webhook -> POST /webhook/resend-inbound on 'mailery serve'`));
+          lines.push(chalk.dim(`  Inbound is push: add a Resend inbound webhook -> POST /webhook/resend-inbound on 'emails serve'`));
         }
         // 4a. SES inbound (S3 bucket + receipt rule → mail for *@domain lands in S3).
         if (opts.inbound !== false && provider.type === "ses") {
@@ -882,7 +882,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
           }
         }
 
-        lines.push(chalk.dim(`\n  Live mail:  mailery inbox watch   ·   browse:  mailery ui`));
+        lines.push(chalk.dim(`\n  Live mail:  emails inbox watch   ·   browse:  emails ui`));
         output({ domain, provider: provider.name, domain_id: rec.id }, lines.join("\n"));
       } catch (e) { handleError(e); }
     });
@@ -985,7 +985,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
           limit: page.limit,
           offset: page.offset,
           noun: "domain",
-          detailCommand: verbose ? "use mailery domain dns <domain> for DNS records" : "use --verbose for issue/fix lines or mailery domain dns <domain>",
+          detailCommand: verbose ? "use emails domain dns <domain> for DNS records" : "use --verbose for issue/fix lines or emails domain dns <domain>",
           verbose,
         }));
         output(rows, lines.join("\n"));
@@ -1049,7 +1049,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
           limit: page.limit,
           offset: page.offset,
           noun: "domain",
-          detailCommand: "use mailery domain status for readiness details",
+          detailCommand: "use emails domain status for readiness details",
           verbose: opts.verbose || isCliVerboseOutput(),
         }));
         output(visibleRows, lines.join("\n"));
@@ -1238,7 +1238,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
 
         if (result.created > 0) {
           console.log(chalk.dim(`\n  DNS changes may take a few minutes to propagate.`));
-          console.log(chalk.dim(`  Verify with: mailery domain verify ${domain} --provider ${opts.provider}`));
+          console.log(chalk.dim(`  Verify with: emails domain verify ${domain} --provider ${opts.provider}`));
         }
         console.log();
         output(result, "");
@@ -1337,7 +1337,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
           console.log(`  ${icon} ${r.type.padEnd(6)} ${r.name} ${chalk.dim(r.status)}${err}`);
         }
         console.log(`\n  Created: ${chalk.green(String(result.created))}  Replaced: ${chalk.green(String(result.replaced))}  Skipped: ${chalk.dim(String(result.skipped))}${result.failed > 0 ? `  Failed: ${chalk.red(String(result.failed))}` : ""}`);
-        console.log(chalk.dim(`\n  Verify: mailery domain check ${domain} --provider ${opts.provider}`));
+        console.log(chalk.dim(`\n  Verify: emails domain check ${domain} --provider ${opts.provider}`));
         console.log();
         output(result, "");
         if (result.failed > 0) handleError(new Error(`${result.failed} BrandSight DNS record(s) failed for ${domain}`));
@@ -1431,7 +1431,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
           limit: page.limit,
           offset: page.offset,
           noun: "warming schedule",
-          detailCommand: "use mailery domain warm-status <domain> for details",
+          detailCommand: "use emails domain warm-status <domain> for details",
           verbose: opts.verbose || isCliVerboseOutput(),
         }));
         output(schedules, lines.join("\n"));
@@ -1543,7 +1543,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
         const result = await r53RegisterDomain(domain, contact as Parameters<typeof r53RegisterDomain>[1], parseInt(opts.years));
         console.log(chalk.green(`✓ Registration submitted for ${domain}`));
         console.log(chalk.dim(`  Operation ID: ${result.operationId}`));
-        console.log(chalk.dim(`  Check status: mailery domain purchase-status ${result.operationId}`));
+        console.log(chalk.dim(`  Check status: emails domain purchase-status ${result.operationId}`));
         output(result, "");
       } catch (e) { handleError(e); }
     });
@@ -1663,7 +1663,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
           console.log(chalk.bold("\n  Name servers (point your registrar here):"));
           for (const ns of nameServers) console.log(chalk.cyan(`    ${ns}`));
         }
-        console.log(chalk.dim(`\n  Verify: mailery domain verify ${domain} --provider ${opts.provider}`));
+        console.log(chalk.dim(`\n  Verify: emails domain verify ${domain} --provider ${opts.provider}`));
         console.log();
       } catch (e) { handleError(e); }
     });

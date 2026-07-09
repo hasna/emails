@@ -147,7 +147,7 @@ describe("emails-mcp HTTP transport", () => {
       expect(text).not.toContain('"access_key"');
       expect(text).not.toContain('"secret_key"');
       expect(text).not.toContain('"oauth_refresh_token"');
-      expect(text).toContain('"cli_equivalent": "mailery provider list --json"');
+      expect(text).toContain('"cli_equivalent": "emails provider list --json"');
       expect(text).not.toContain("AKIA_MCP_SHOULD_NOT_LEAK");
       expect(text).not.toContain("MCP_SECRET_SHOULD_NOT_LEAK");
     } finally {
@@ -386,7 +386,7 @@ describe("emails-mcp HTTP transport", () => {
       expect(row).not.toHaveProperty("html_template");
       expect(row).not.toHaveProperty("text_template");
       expect(JSON.stringify(listed)).not.toContain("MCP template hidden");
-      expect(listed.cli_equivalent).toBe("mailery template list --limit 1 --json");
+      expect(listed.cli_equivalent).toBe("emails template list --limit 1 --json");
 
       const detailResult = await client.callTool(
         { name: "get_template", arguments: { name_or_id: "mcp-template-summary" } },
@@ -399,7 +399,7 @@ describe("emails-mcp HTTP transport", () => {
       expect(detail.name).toBe("mcp-template-summary");
       expect(String(detail.html_template)).toContain("MCP template hidden html");
       expect(String(detail.text_template)).toContain("MCP template hidden text");
-      expect(detail.cli_equivalent).toBe("mailery template show mcp-template-summary --json");
+      expect(detail.cli_equivalent).toBe("emails template show mcp-template-summary --json");
     } finally {
       await client.close();
     }
@@ -444,7 +444,7 @@ describe("emails-mcp HTTP transport", () => {
       expect(row).not.toHaveProperty("attachments_json");
       expect(row).not.toHaveProperty("template_vars");
       expect(JSON.stringify(parsed)).not.toContain("MCP hidden");
-      expect(parsed.cli_equivalent).toBe("mailery schedule list --limit 1 --json");
+      expect(parsed.cli_equivalent).toBe("emails schedule list --limit 1 --json");
     } finally {
       await client.close();
     }
@@ -474,7 +474,7 @@ describe("emails-mcp HTTP transport", () => {
       expect(row?.email).toBe("alice@example.com");
       expect(row).not.toHaveProperty("vars");
       expect(JSON.stringify(listed)).not.toContain("MCP hidden group vars");
-      expect(listed.cli_equivalent).toBe("mailery group members mcp-member-summary --limit 1 --json");
+      expect(listed.cli_equivalent).toBe("emails group members mcp-member-summary --limit 1 --json");
 
       const detailResult = await client.callTool(
         { name: "get_group_member", arguments: { group_name: group.name, email: "alice@example.com" } },
@@ -673,10 +673,10 @@ describe("emails-mcp HTTP transport", () => {
         cli_equivalent: string;
       };
       expect(parsed.error.code).toBe("not_found");
-      expect(parsed.error.fix_command).toBe("mailery provider list --json");
-      expect(parsed.error.fix_commands).toContain("mailery provider add --help");
+      expect(parsed.error.fix_command).toBe("emails provider list --json");
+      expect(parsed.error.fix_commands).toContain("emails provider add --help");
       expect(parsed.error.retryable).toBe(false);
-      expect(parsed.cli_equivalent).toBe("mailery provider remove missing --yes --json");
+      expect(parsed.cli_equivalent).toBe("emails provider remove missing --yes --json");
     } finally {
       await client.close();
     }
@@ -700,7 +700,7 @@ describe("emails-mcp HTTP transport", () => {
         { timeout: 10_000 },
       );
       const assignedText = assigned.content[0]?.type === "text" ? assigned.content[0].text : "";
-      expect(assignedText).toContain('"cli_equivalent": "mailery address set-owner owner@example.com --owner mcp-agent --json"');
+      expect(assignedText).toContain('"cli_equivalent": "emails address set-owner owner@example.com --owner mcp-agent --json"');
 
       const owner = await client.callTool(
         { name: "get_address_owner", arguments: { address: "owner@example.com" } },
@@ -709,7 +709,7 @@ describe("emails-mcp HTTP transport", () => {
       );
       const ownerText = owner.content[0]?.type === "text" ? owner.content[0].text : "";
       expect(ownerText).toContain('"name": "mcp-agent"');
-      expect(ownerText).toContain('"cli_equivalent": "mailery address owner owner@example.com --json"');
+      expect(ownerText).toContain('"cli_equivalent": "emails address owner owner@example.com --json"');
     } finally {
       await client.close();
     }

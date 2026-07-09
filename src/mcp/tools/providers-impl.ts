@@ -61,7 +61,7 @@ export async function runProviderTool(name: ProviderToolName, input: Record<stri
           providers: redactSecrets(providers),
           limit: effectiveLimit,
           offset: offset ?? 0,
-          cli_equivalent: `mailery provider list${limit !== undefined ? ` --limit ${limit}` : ""}${offset !== undefined ? ` --offset ${offset}` : ""} --json`,
+          cli_equivalent: `emails provider list${limit !== undefined ? ` --limit ${limit}` : ""}${offset !== undefined ? ` --offset ${offset}` : ""} --json`,
         });
       }
       case "add_provider": {

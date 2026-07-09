@@ -43,7 +43,7 @@ export function getMaileryAiApiKey(provider: MaileryAiProvider): string {
   if (!key) {
     const env = provider === "cerebras" ? "CEREBRAS_API_KEY" : "GROQ_API_KEY";
     const configKey = provider === "cerebras" ? "cerebras_api_key" : "groq_api_key";
-    throw new Error(`${provider} credential is not configured (${env}). Set ${env} or run: mailery config set ${configKey} <key>`);
+    throw new Error(`${provider} credential is not configured (${env}). Set ${env} or run: emails config set ${configKey} <key>`);
   }
   return key;
 }

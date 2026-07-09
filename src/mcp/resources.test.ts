@@ -175,7 +175,7 @@ describe("MCP resource payloads", () => {
     expect(payload.status.addresses.usable_from).toHaveLength(5);
     expect(payload.truncated).toEqual({ domains: true, addresses: true });
     expect(payload.full_context_resource).toBe("emails://agent/context/full");
-    expect(payload.full_context_cli).toBe("mailery agent context --json");
+    expect(payload.full_context_cli).toBe("emails agent context --json");
   });
 
   it("returns only failed provisioning rows for recent errors", () => {
@@ -195,13 +195,13 @@ describe("MCP resource payloads", () => {
         component: "domain-provisioning",
         entity: "failed.example.com",
         message: "DNS failed",
-        fix_command: "mailery provision status failed.example.com",
+        fix_command: "emails provision status failed.example.com",
       },
       {
         component: "address-provisioning",
         entity: "failed@example.com",
         message: "route failed",
-        fix_command: "mailery doctor delivery failed@example.com",
+        fix_command: "emails doctor delivery failed@example.com",
       },
     ]);
   });

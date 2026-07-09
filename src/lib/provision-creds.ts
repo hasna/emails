@@ -2,7 +2,7 @@
  * Provisioning credential status (mailery) — reports whether usable
  * credentials are present for each provisioning provider, across all supported
  * auth modes. Pure (env injected); surfaced by
- * `mailery doctor`.
+ * `emails doctor`.
  */
 
 import { resolveCloudflareAuth, describeCloudflareAuth } from "./cloudflare-auth.js";

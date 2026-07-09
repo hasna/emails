@@ -284,13 +284,13 @@ export function getEmailSystemStatus(db: Database = getDatabase()): EmailSystemS
   const provisioningRows = provisioningSummary(db);
 
   const nextActions: string[] = [];
-  if (providers.length === 0) nextActions.push("mailery provider add --help");
-  if (domainCounts.total === 0) nextActions.push("mailery domain add --help");
-  if (addressCounts.total === 0) nextActions.push("mailery address add --help");
-  if (visibleSources.filter((source) => source.kind !== "all").length === 0) nextActions.push("mailery inbox sync-status");
+  if (providers.length === 0) nextActions.push("emails provider add --help");
+  if (domainCounts.total === 0) nextActions.push("emails domain add --help");
+  if (addressCounts.total === 0) nextActions.push("emails address add --help");
+  if (visibleSources.filter((source) => source.kind !== "all").length === 0) nextActions.push("emails inbox sync-status");
   const domainFixCommand = firstDomainFixCommand(providersById, db);
   if (domainFixCommand) nextActions.push(domainFixCommand);
-  if (provisioningRows.addresses_failed > 0 || provisioningRows.domains_failed > 0) nextActions.push("mailery provision status");
+  if (provisioningRows.addresses_failed > 0 || provisioningRows.domains_failed > 0) nextActions.push("emails provision status");
 
   return {
     generated_at: new Date().toISOString(),
@@ -352,16 +352,16 @@ export function getEmailSystemStatus(db: Database = getDatabase()): EmailSystemS
     provisioning: provisioningRows,
     next_actions: [...new Set(nextActions)].slice(0, 5),
     cli_equivalents: {
-      status: "mailery status --json",
-      inbox_sync_status: "mailery inbox sync-status --json",
-      provision_address: "mailery address provision <email> --provider <provider>",
-      wait_code: "mailery inbox wait-code <address> --timeout 120",
-      address_owner: "mailery address owner <email-or-id>",
+      status: "emails status --json",
+      inbox_sync_status: "emails inbox sync-status --json",
+      provision_address: "emails address provision <email> --provider <provider>",
+      wait_code: "emails inbox wait-code <address> --timeout 120",
+      address_owner: "emails address owner <email-or-id>",
     },
   };
 }
 
-// The runtime status backs `mailery status`, `mailery agent context`, and the MCP
+// The runtime status backs `emails status`, `emails agent context`, and the MCP
 // status resources/tools. In cloud mode the inbox/mailbox/source reads must come from
 // the API (not the empty local DB), so route those specific reads through the seam.
 // Provider/domain/address/provisioning state stays local — that is local config, not
@@ -443,7 +443,7 @@ export function formatAgentContextSummary(context: Record<string, unknown>): str
       lines.push(`    ${domain.domain} ${domain.state} send=${domain.send_ready ? "yes" : "no"} receive=${domain.receive_ready ? "yes" : "no"}`);
     }
     if (status.domains.usable.length > 5 || status.domains.usable_truncated) {
-      lines.push(`    ... use mailery domain status --limit ${status.domains.usable_limit} for the full readiness table`);
+      lines.push(`    ... use emails domain status --limit ${status.domains.usable_limit} for the full readiness table`);
     }
   }
   if (status.addresses.usable_from.length > 0) {
@@ -453,11 +453,11 @@ export function formatAgentContextSummary(context: Record<string, unknown>): str
       lines.push(`    ${address.email}${owner}`);
     }
     if (status.addresses.usable_from.length > 5 || status.addresses.usable_from_truncated) {
-      lines.push(`    ... use mailery address list --limit ${status.addresses.usable_from_limit} for more addresses`);
+      lines.push(`    ... use emails address list --limit ${status.addresses.usable_from_limit} for more addresses`);
     }
   }
   lines.push("");
-  lines.push("Details: use mailery agent context --verbose or mailery agent context --json for the full redacted snapshot.");
+  lines.push("Details: use emails agent context --verbose or emails agent context --json for the full redacted snapshot.");
   return lines.join("\n");
 }
 
@@ -466,25 +466,25 @@ function buildAgentContext(status: EmailSystemStatus): Record<string, unknown> {
     status,
     workflows: {
       create_receive_address: [
-        "mailery owner register <name> --type agent",
-        "mailery address provision <email> --provider <provider> --owner <agent>",
-        "mailery inbox wait-code <email> --timeout 120",
+        "emails owner register <name> --type agent",
+        "emails address provision <email> --provider <provider> --owner <agent>",
+        "emails inbox wait-code <email> --timeout 120",
       ],
       diagnose_missing_mail: [
-        "mailery status",
-        "mailery inbox sync-status",
-        "mailery inbox explain <email-id>",
-        "mailery doctor delivery <address>",
+        "emails status",
+        "emails inbox sync-status",
+        "emails inbox explain <email-id>",
+        "emails doctor delivery <address>",
       ],
       ownership: [
-        "mailery address owner <email-or-id>",
-        "mailery address set-owner <email-or-id> --owner <owner> --administrator <agent>",
+        "emails address owner <email-or-id>",
+        "emails address set-owner <email-or-id> --owner <owner> --administrator <agent>",
       ],
     },
     refresh_cadence: {
       ui_local_reload_ms: 30000,
       ui_s3_pull_ms: 45000,
-      realtime_watch_command: "mailery inbox watch --all-buckets",
+      realtime_watch_command: "emails inbox watch --all-buckets",
     },
   };
 }
@@ -504,20 +504,20 @@ export function getNextEmailAction(goal?: string, db: Database = getDatabase()):
   const normalized = goal?.toLowerCase() ?? "";
   if (normalized.includes("code") || normalized.includes("verification")) {
     return {
-      command: "mailery inbox wait-code <address> --timeout 120",
+      command: "emails inbox wait-code <address> --timeout 120",
       reason: "Wait-code refreshes inbound S3 by default and extracts the latest matching code.",
       status,
     };
   }
   if (normalized.includes("owner")) {
     return {
-      command: "mailery address owner <email-or-id>",
+      command: "emails address owner <email-or-id>",
       reason: "Address ownership is stored on the address row and enriched with owner/admin records.",
       status,
     };
   }
   return {
-    command: status.next_actions[0] ?? "mailery status",
+    command: status.next_actions[0] ?? "emails status",
     reason: status.next_actions.length > 0 ? "This is the first unresolved setup or health action." : "The system has no obvious setup gaps.",
     status,
   };

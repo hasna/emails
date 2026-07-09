@@ -509,7 +509,7 @@ export class MaileryCloudClient {
     const url = `${this.apiUrl}${apiPath(path)}`;
     const tokenRequired = opts.tokenRequired ?? true;
     if (tokenRequired && !this.token) {
-      throw new MaileryCloudError("Mailery Cloud authentication is required. Run `mailery cloud login` first.", {
+      throw new MaileryCloudError("Mailery Cloud authentication is required. Run `emails cloud login` first.", {
         code: "unauthorized",
         status: 401,
       });

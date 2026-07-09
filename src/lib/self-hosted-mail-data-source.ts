@@ -550,19 +550,19 @@ export class SelfHostedMailDataSource implements MailDataSource {
   }
 
   async setArchived(_id: string, _archived: boolean): Promise<void> {
-    throw new Error("Archiving is not yet supported on the self-hosted mailery serve (/v1 PATCH persists status only).");
+    throw new Error("Archiving is not yet supported on the self-hosted emails serve (/v1 PATCH persists status only).");
   }
 
   async setStarred(_id: string, _starred: boolean): Promise<void> {
-    throw new Error("Starring is not yet supported on the self-hosted mailery serve (/v1 PATCH persists status only).");
+    throw new Error("Starring is not yet supported on the self-hosted emails serve (/v1 PATCH persists status only).");
   }
 
   async addLabel(_id: string, _label: string): Promise<string[]> {
-    throw new Error("Labels are not yet supported on the self-hosted mailery serve (/v1 PATCH persists status only).");
+    throw new Error("Labels are not yet supported on the self-hosted emails serve (/v1 PATCH persists status only).");
   }
 
   async removeLabel(_id: string, _label: string): Promise<string[]> {
-    throw new Error("Labels are not yet supported on the self-hosted mailery serve (/v1 PATCH persists status only).");
+    throw new Error("Labels are not yet supported on the self-hosted emails serve (/v1 PATCH persists status only).");
   }
 
   async deleteMessage(id: string): Promise<void> {
@@ -576,7 +576,7 @@ export class SelfHostedMailDataSource implements MailDataSource {
   async bulk(input: MailBulkInput): Promise<MailBulkResult> {
     const action = input.action;
     if (action !== "delete") {
-      throw new Error(`Bulk '${action}' is not yet supported on the self-hosted mailery serve.`);
+      throw new Error(`Bulk '${action}' is not yet supported on the self-hosted emails serve.`);
     }
     const ids = input.ids ?? [];
     let affected = 0;
@@ -589,10 +589,10 @@ export class SelfHostedMailDataSource implements MailDataSource {
 
   async send(input: MailSendInput): Promise<MailSendResult> {
     if (input.attachments && input.attachments.length > 0) {
-      throw new Error("Attachments are not yet supported when sending through the self-hosted mailery serve.");
+      throw new Error("Attachments are not yet supported when sending through the self-hosted emails serve.");
     }
     if (input.scheduledAt) {
-      throw new Error("Scheduled send is not supported on the self-hosted mailery serve.");
+      throw new Error("Scheduled send is not supported on the self-hosted emails serve.");
     }
     const to = input.to.split(",").map((v) => v.trim()).filter(Boolean);
     const useMarkdown = input.markdown !== false;

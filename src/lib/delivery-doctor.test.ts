@@ -39,7 +39,7 @@ describe("delivery doctor", () => {
 
     expect(domainCheck).toMatchObject({
       status: "warn",
-      fix_command: "mailery provision domain example.com --provider <provider> --dry-run",
+      fix_command: "emails provision domain example.com --provider <provider> --dry-run",
     });
   });
 
@@ -59,7 +59,7 @@ describe("delivery doctor", () => {
 
     expect(mxCheck).toMatchObject({
       status: "warn",
-      fix_command: "mailery forwarding explain ops@example.com",
+      fix_command: "emails forwarding explain ops@example.com",
     });
     expect(mxCheck?.message).toContain("Google Workspace");
     expect(mxCheck?.message).toContain("Do not add SES inbound MX");

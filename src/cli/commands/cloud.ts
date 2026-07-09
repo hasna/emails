@@ -835,7 +835,7 @@ export function registerCloudCommands(program: Command, output: OutputFn, deps: 
             `  Mode: ${mode.current} (${mode.label})`,
             `  API:  ${apiUrl}`,
             `  Live: ${info ? "yes" : "no"}`,
-            chalk.dim("  Not authenticated. Run `mailery cloud login`."),
+            chalk.dim("  Not authenticated. Run `emails cloud login`."),
           ].join("\n"));
           return;
         }
@@ -987,7 +987,7 @@ export function registerCloudCommands(program: Command, output: OutputFn, deps: 
           [
             chalk.green(`Created API key ${result.api_key.name} (${result.api_key.prefix}).`),
             `  ${result.key}`,
-            chalk.dim("  This secret is shown once. Store it in MAILERY_API_KEY or run mailery cloud login --api-key <key>."),
+            chalk.dim("  This secret is shown once. Store it in MAILERY_API_KEY or run emails cloud login --api-key <key>."),
           ].join("\n"),
         );
       } catch (e) {
@@ -1324,7 +1324,7 @@ export function registerCloudCommands(program: Command, output: OutputFn, deps: 
           `  ${CLOUD_API_URL_KEY}: ${apiUrl}`,
           `  ${CLOUD_SESSION_TOKEN_KEY}: ${hasSession ? "***" : "unset"}`,
           `  ${CLOUD_API_KEY_KEY}: ${hasApiKey ? "***" : "unset"}`,
-          chalk.dim("  Set with: mailery cloud login or mailery config set cloud_api_url <url>"),
+          chalk.dim("  Set with: emails cloud login or emails config set cloud_api_url <url>"),
         ].join("\n"),
       );
     });

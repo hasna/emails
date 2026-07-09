@@ -1,5 +1,5 @@
 /**
- * Data layer for the Mailery UI (`mailery ui`).
+ * Data layer for the Mailery UI (`emails ui`).
  *
  * Presents a Gmail-like unified view over the local store. Providers are
  * credentials/capabilities, sources are ingestion streams, mailboxes are
@@ -1235,7 +1235,7 @@ export function renderMarkdown(md: string): string {
 export async function sendComposed(input: ComposeInput, db?: Database): Promise<{ id: string; messageId: string }> {
   const d = db || getDatabase();
   const raw = input.providerId ?? providerIdForSender(input.from, d) ?? activeProviderId(d);
-  if (!raw) throw new Error("No active provider. Add one with 'mailery provider add'.");
+  if (!raw) throw new Error("No active provider. Add one with 'emails provider add'.");
   // Accept a full or partial provider id, but fail loudly on missing/ambiguous values.
   const providerId = resolvePartialIdOrThrow(d, "providers", raw);
   const to = input.to.split(",").map((s) => s.trim()).filter(Boolean);

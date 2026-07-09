@@ -1,5 +1,5 @@
 /**
- * `mailery aws` command group — AWS infrastructure setup for email.
+ * `emails aws` command group — AWS infrastructure setup for email.
  */
 
 import type { Command } from "commander";
@@ -31,7 +31,7 @@ export function registerAwsCommands(program: Command, output: (data: unknown, fo
         if (profile) process.env["AWS_PROFILE"] = profile;
         const bucket = opts.bucket ?? inbound.bucket;
         const region = opts.region ?? inbound.region;
-        if (!bucket) { handleError(new Error("No S3 bucket: pass --bucket or set 'mailery config set inbound_s3_bucket <name>'")); return; }
+        if (!bucket) { handleError(new Error("No S3 bucket: pass --bucket or set 'emails config set inbound_s3_bucket <name>'")); return; }
 
         const { setupInboundEmail } = await import("../../lib/aws-inbound.js");
 
@@ -66,10 +66,10 @@ export function registerAwsCommands(program: Command, output: (data: unknown, fo
         console.log(chalk.bold("  Required DNS records:"));
         console.log(chalk.yellow(`\n    MX  ${opts.domain}  ${result.mx_record}\n`));
         console.log(chalk.dim("  Add this MX record to your DNS provider."));
-        console.log(chalk.dim("  (For Cloudflare: mailery domain setup-cloudflare ... will set it automatically)\n"));
+        console.log(chalk.dim("  (For Cloudflare: emails domain setup-cloudflare ... will set it automatically)\n"));
 
         console.log(chalk.dim("  To sync received mailery locally:"));
-        console.log(chalk.dim(`    mailery inbox sync-s3 --bucket ${bucket} --prefix ${result.s3_prefix}\n`));
+        console.log(chalk.dim(`    emails inbox sync-s3 --bucket ${bucket} --prefix ${result.s3_prefix}\n`));
 
         output(result, "");
       } catch (e) { handleError(e); }
