@@ -5,7 +5,7 @@ Created: 2026-06-18
 ## Baseline
 
 - `EMAILS_DB_PATH=:memory: bun test` passes: 1559 tests, 0 failures.
-- Main terminal UI is `src/cli/tui-solid/App.tsx`, loaded by `mailery ui`.
+- Main terminal UI is `src/cli/tui-solid/App.tsx`, loaded by `emails ui`.
 - Legacy `src/cli/tui/App.tsx` re-exports the Solid/OpenTUI app.
 - Dashboard frontend is one static file: `dashboard/index.html`.
 - Dashboard API routes are split under `src/server/routes/`.
@@ -18,8 +18,8 @@ Created: 2026-06-18
 - Branding still says `Emails`/`Open Emails Dashboard` in the web dashboard, while TUI uses `Mailery` in a secondary line under the selected inbox.
 - TUI has `Search`, but not a broader compact filter dialog for address/read/star/label/sort.
 - TUI reader shows attachments inline, but has no first-class attachments button/dialog for copy/open actions.
-- CLI has `mailery inbox attachment <emailId>`, but MCP reports an imprecise CLI equivalent that looks like it expects an attachment id.
-- CLI `mailery inbox open <id>` writes raw body to `/tmp` and shells out with `open || xdg-open`; this needs a safer, testable helper.
+- CLI has `emails inbox attachment <emailId>`, but MCP reports an imprecise CLI equivalent that looks like it expects an attachment id.
+- CLI `emails inbox open <id>` writes raw body to `/tmp` and shells out with `open || xdg-open`; this needs a safer, testable helper.
 - Sent-email `show` still has its own HTML regex rendering instead of reusing the TUI formatter.
 - Web inbound reader hides neither local metadata well nor renders text/markdown/html with the same polish as the TUI.
 - Web inbound filtering is inline and minimal; it should become a compact filter dialog.
@@ -78,14 +78,14 @@ Created: 2026-06-18
 - [x] Commit with a focused message.
 - [x] Push branch/main as requested.
 - [x] Publish only after credentials/auth and release gates are clean.
-- [x] Update local/global install and smoke `mailery --version`, `mailery ui --help`, and representative CLI commands.
+- [x] Update local/global install and smoke `emails --version`, `emails ui --help`, and representative CLI commands.
 
 ### Goal 8: Digest + Intelligent Inbox Organization
 
 - [x] Audit existing managed Groq agent, label, digest, TUI, web dashboard, REST, and CLI surfaces.
 - [x] Add project-scoped Goal 8 plan and tasks to the local `todos` CLI.
 - [x] Add persisted `email_digests` storage with local fallback and Groq-backed generation.
-- [x] Add `mailery agent digest` and `mailery agent organize`.
+- [x] Add `emails agent digest` and `emails agent organize`.
 - [x] Normalize managed-agent labels so priority/security/action mail creates visible `important` labels and spam/trash labels drive folders.
 - [x] Add TUI Group and Digest controls, grouped mailbox sections, and broader important-square detection.
 - [x] Add web dashboard Group and Digest controls, digest API calls, grouped list rendering, and important-square detection.
@@ -129,7 +129,7 @@ Created: 2026-06-18
 - Goal 7: `bun run build` passed after the `0.6.47` version bump.
 - Goal 7: `npm pack --dry-run --silent` passed and produced `hasna-mailery-0.6.47.tgz`.
 - Goal 7: package dry-run content check confirmed `dashboard/index.html` and `dashboard/open-source.html` are included: 784 packed entries.
-- Goal 7: built CLI smoke passed for `mailery --version` (`0.6.47`), `mailery ui --help`, `provider list --json`, and `agent defaults --json`.
+- Goal 7: built CLI smoke passed for `emails --version` (`0.6.47`), `emails ui --help`, `provider list --json`, and `agent defaults --json`.
 - Goal 7: built server smoke passed for `/` (`Mailery Dashboard`) and `/open-source` (`Mailery Open Source`) on an isolated local DB.
 - Goal 7: npm auth is available as `andreihasna2`; latest registry version before publish was `0.6.46`.
 - Goal 7: committed release work as `d728b78 feat: improve Mailery inbox UI and release gates`.
@@ -137,7 +137,7 @@ Created: 2026-06-18
 - Goal 7: `EMAILS_DB_PATH=:memory: npm publish --access public --registry https://registry.npmjs.org` passed; prepublish tests passed: 1585 tests, 0 failures, 4780 expect calls.
 - Goal 7: published `@hasna/mailery@0.6.47` to npm with public access.
 - Goal 7: updated Bun global install to `@hasna/mailery@0.6.47` using `--minimum-release-age=0` because the local Bun security policy blocks packages newer than 604800 seconds by default.
-- Goal 7: installed `mailery` smoke passed for `mailery --version` (`0.6.47`), `mailery ui --help`, `mailery inbox --help`, `provider list --json`, `inbox list --json`, `sandbox count --json`, and `agent defaults --json`.
+- Goal 7: installed `mailery` smoke passed for `emails --version` (`0.6.47`), `emails ui --help`, `emails inbox --help`, `provider list --json`, `inbox list --json`, `sandbox count --json`, and `agent defaults --json`.
 - Goal 8: `./node_modules/.bin/tsc --noEmit` passed after digest/organization/TUI/web/API integration.
 - Goal 8: `EMAILS_DB_PATH=:memory: bun test src/lib/email-digest.test.ts src/lib/email-agents.test.ts src/cli/commands/status.test.ts src/cli/tui/data.test.ts src/server/routes/rest-parity.test.ts src/server/serve.test.ts src/server/startup-contract.test.ts` passed: 106 tests, 0 failures.
 - Goal 8: package metadata bumped from `0.6.47` to `0.6.48` because npm registry latest was already `0.6.47`.
@@ -147,14 +147,14 @@ Created: 2026-06-18
 - Goal 8: `bun run build` passed after the `0.6.48` version bump.
 - Goal 8: `npm pack --dry-run --silent` passed and produced `hasna-mailery-0.6.48.tgz`.
 - Goal 8: package dry-run content check confirmed `dashboard/index.html`, `dashboard/open-source.html`, and digest build artifacts are included: 796 packed entries.
-- Goal 8: built CLI smoke passed for `mailery --version` (`0.6.48`), `agent defaults --json`, `agent digest today --local --json`, and `agent organize --help`.
+- Goal 8: built CLI smoke passed for `emails --version` (`0.6.48`), `agent defaults --json`, `agent digest today --local --json`, and `agent organize --help`.
 - Goal 8: local digest smoke against the real default DB succeeded with 78 messages for today; live Groq organization over existing local mail was not run because `GROQ_API_KEY` / `groq_api_key` is not configured locally.
 - Goal 8: built dashboard smoke on isolated `http://127.0.0.1:3992` served `/`, `/open-source`, and `/api/digest?period=today`; server was stopped after verification.
 - Goal 8: committed implementation as `c29a619 feat: add Mailery inbox digests and grouping` and pushed `main` to `origin/main`.
 - Goal 8: `EMAILS_DB_PATH=:memory: npm publish --access public --registry https://registry.npmjs.org` passed; npm prepublish reran `bun test` (1592 tests, 0 failures, 4822 expect calls) and `bun run build`.
 - Goal 8: published `@hasna/mailery@0.6.48` to npm with public access.
 - Goal 8: updated Bun global install to `@hasna/mailery@0.6.48` using `--minimum-release-age=0`; Bun reported duplicate `@hasna/models` metadata warnings in the global package manifest, but installation and binary linking succeeded.
-- Goal 8: installed `mailery` smoke passed for `mailery --version` (`0.6.48`), `mailery ui --help`, `mailery agent digest today --local --json`, `mailery agent organize --help`, `mailery provider list --json`, `mailery inbox list --limit 1 --json`, and `mailery sandbox count --json`.
+- Goal 8: installed `mailery` smoke passed for `emails --version` (`0.6.48`), `emails ui --help`, `emails agent digest today --local --json`, `emails agent organize --help`, `emails provider list --json`, `emails inbox list --limit 1 --json`, and `emails sandbox count --json`.
 - Goal 8: npm registry verification returned latest version `0.6.48`.
 - Goal 8 follow-up: Groq API key was stored in the local secrets vault and in Mailery local config as redacted `groq_api_key`.
 - Goal 8 follow-up: the first live Groq organization pass exposed Groq's incompatibility with AI SDK JSON schema output plus function tools for `llama-3.3-70b-versatile`; `c1c4e0e` fixes Groq agent/digest generation by using strict JSON-text prompts with local validation, keeps function tools for non-Groq providers, and retries prior errored agent runs.
@@ -162,4 +162,4 @@ Created: 2026-06-18
 - Goal 8 follow-up: `./node_modules/.bin/tsc --noEmit`, `git diff --check`, `EMAILS_DB_PATH=:memory: bun test`, `bun run build`, and `npm pack --dry-run --silent` passed for `0.6.49`; the full suite passed with 1594 tests, 0 failures, and 4834 expect calls across 146 files.
 - Goal 8 follow-up: live source CLI Groq smokes passed for `agent digest today --fresh` and `agent organize --all --limit 100 --skip-network`; the organization pass completed 300 ok runs, 0 skipped, 0 errors.
 - Goal 8 follow-up: published `@hasna/mailery@0.6.49` to npm; npm prepublish reran the full test suite and build successfully.
-- Goal 8 follow-up: updated the local Bun global install from the published `0.6.49` tarball because Bun's registry resolver lagged npm; installed smokes passed for `mailery --version` (`0.6.49`), `mailery agent defaults`, `mailery agent digest today --fresh --limit 20`, and `mailery agent organize --all --limit 5 --skip-network` with 15 ok runs and 0 errors.
+- Goal 8 follow-up: updated the local Bun global install from the published `0.6.49` tarball because Bun's registry resolver lagged npm; installed smokes passed for `emails --version` (`0.6.49`), `emails agent defaults`, `emails agent digest today --fresh --limit 20`, and `emails agent organize --all --limit 5 --skip-network` with 15 ok runs and 0 errors.

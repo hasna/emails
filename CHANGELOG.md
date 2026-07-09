@@ -1,6 +1,9 @@
 # Changelog
 
-All notable changes to `@hasna/mailery` are documented here.
+All notable changes to `@hasna/emails` are documented here.
+
+## [0.6.117] - 2026-07-09
+- chore: rename package back to `@hasna/emails` and free the `mailery`/`mailery-mcp`/`mailery-serve` bins for the separate cloud CLI (`@hasnatools/mailery`). Remaining bins: `emails`, `emails-mcp`, `emails-serve`. The Mailery product/brand name, `mailery.co`, and cloud API-key app id are unchanged.
 
 ## [0.6.69] - 2026-06-29
 - fix: block raw S3 bucket sync when configured child prefixes could bypass retired source lifecycle rules.

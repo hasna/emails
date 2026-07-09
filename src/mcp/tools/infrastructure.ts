@@ -159,7 +159,7 @@ export function registerInfrastructureTools(server: McpServer): void {
           text: JSON.stringify({
             domain, cloudflare_zone_id: zone.id, nameservers: zone.nameservers,
             dns_provider: "cloudflare",
-            steps, next: `Verify SES: mailery domain verify ${domain} --provider ${provider_id}`,
+            steps, next: `Verify SES: emails domain verify ${domain} --provider ${provider_id}`,
           }, null, 2),
         }],
       };
@@ -502,7 +502,7 @@ export function registerInfrastructureTools(server: McpServer): void {
           domain_id: domainId,
           provisioning,
           ownership,
-          cli_equivalent: `mailery address provision ${email} --provider ${provider_id}${owner ? ` --owner ${owner}` : ""}${administrator ? ` --administrator ${administrator}` : ""}${wait ? " --wait" : ""} --json`,
+          cli_equivalent: `emails address provision ${email} --provider ${provider_id}${owner ? ` --owner ${owner}` : ""}${administrator ? ` --administrator ${administrator}` : ""}${wait ? " --wait" : ""} --json`,
         }, null, 2) }] };
       } catch (e) { return { content: [{ type: "text" as const, text: `Error: ${formatError(e)}` }], isError: true }; }
     },
@@ -531,7 +531,7 @@ export function registerInfrastructureTools(server: McpServer): void {
         });
         return { content: [{ type: "text" as const, text: JSON.stringify({
           ...rule,
-          cli_equivalent: `mailery forwarding add ${source_address} ${target_address}${provider_id ? ` --provider ${provider_id}` : ""}${from_address ? ` --from ${from_address}` : ""}${enabled === false ? " --disabled" : ""} --json`,
+          cli_equivalent: `emails forwarding add ${source_address} ${target_address}${provider_id ? ` --provider ${provider_id}` : ""}${from_address ? ` --from ${from_address}` : ""}${enabled === false ? " --disabled" : ""} --json`,
         }, null, 2) }] };
       } catch (e) { return { content: [{ type: "text" as const, text: `Error: ${formatError(e)}` }], isError: true }; }
     },
@@ -552,7 +552,7 @@ export function registerInfrastructureTools(server: McpServer): void {
         const rules = listForwardingRules({ source_address, enabled, limit: limit ?? 50, offset: offset ?? 0 });
         return { content: [{ type: "text" as const, text: JSON.stringify({
           rules,
-          cli_equivalent: `mailery forwarding list${source_address ? ` --source ${source_address}` : ""}${enabled === true ? " --enabled" : enabled === false ? " --disabled" : ""}${limit ? ` --limit ${limit}` : ""}${offset ? ` --offset ${offset}` : ""} --json`,
+          cli_equivalent: `emails forwarding list${source_address ? ` --source ${source_address}` : ""}${enabled === true ? " --enabled" : enabled === false ? " --disabled" : ""}${limit ? ` --limit ${limit}` : ""}${offset ? ` --offset ${offset}` : ""} --json`,
         }, null, 2) }] };
       } catch (e) { return { content: [{ type: "text" as const, text: `Error: ${formatError(e)}` }], isError: true }; }
     },
@@ -574,7 +574,7 @@ export function registerInfrastructureTools(server: McpServer): void {
         const result = await processForwardingRules({ providerId, fromAddress: from_address, limit: limit ?? 100, backfill });
         return { content: [{ type: "text" as const, text: JSON.stringify({
           ...result,
-          cli_equivalent: `mailery forwarding run${provider_id ? ` --provider ${provider_id}` : ""}${from_address ? ` --from ${from_address}` : ""}${limit ? ` --limit ${limit}` : ""}${backfill ? " --backfill" : ""} --json`,
+          cli_equivalent: `emails forwarding run${provider_id ? ` --provider ${provider_id}` : ""}${from_address ? ` --from ${from_address}` : ""}${limit ? ` --limit ${limit}` : ""}${backfill ? " --backfill" : ""} --json`,
         }, null, 2) }] };
       } catch (e) { return { content: [{ type: "text" as const, text: `Error: ${formatError(e)}` }], isError: true }; }
     },

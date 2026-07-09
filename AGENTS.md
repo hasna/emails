@@ -1,10 +1,10 @@
-# AGENTS.md - @hasna/mailery
+# AGENTS.md - @hasna/emails
 
-This file guides AI coding agents working with `@hasna/mailery` - an email management CLI, MCP server, and library supporting Resend, AWS SES, and Cloudflare-routed inbound mail.
+This file guides AI coding agents working with `@hasna/emails` - an email management CLI, MCP server, and library supporting Resend, AWS SES, and Cloudflare-routed inbound mail.
 
 ## What This Package Does
 
-`@hasna/mailery` manages the full email lifecycle locally:
+`@hasna/emails` manages the full email lifecycle locally:
 - **Send** transactional emails via Resend or SES
 - **Receive** inbound emails via SMTP listener or webhooks
 - **Track** delivery events, opens, clicks, replies
@@ -19,8 +19,8 @@ or `EMAILS_DB_PATH` for isolated tests and smoke runs.
 
 Install the MCP server into Claude Code:
 ```bash
-mailery mcp --claude
-mailery mcp --claude --dry-run   # show the exact install command without mutating config
+emails mcp --claude
+emails mcp --claude --dry-run   # show the exact install command without mutating config
 ```
 
 This gives you 100+ MCP tools plus orientation resources for agents.
@@ -146,8 +146,8 @@ emails://recent-errors     → latest provisioning/source errors
 
 ### Existing mailbox provider + SES sending
 ```
-1. Run `mailery domain check example.com` to detect current root MX ownership.
-2. Use `mailery provision domain example.com --provider <ses-id> --dry-run`.
+1. Run `emails domain check example.com` to detect current root MX ownership.
+2. Use `emails provision domain example.com --provider <ses-id> --dry-run`.
 3. Preserve root MX for send-only SES setup when Google Workspace or another mailbox provider already receives mail.
 4. Use `--add-mx --force-mx-switch` only for an intentional inbound migration to SES/S3.
 ```
@@ -164,7 +164,7 @@ emails://recent-errors     → latest provisioning/source errors
 2. add_sequence_step(sequence_id, step_number=1, delay_hours=0, template_name="welcome")
 3. add_sequence_step(sequence_id, step_number=2, delay_hours=72, template_name="followup")
 4. enroll_contact(sequence_id, contact_email="user@example.com")
-# Run `mailery scheduler` or the daemon/reconciler flow to process due steps
+# Run `emails scheduler` or the daemon/reconciler flow to process due steps
 ```
 
 ### Dev/test (never send real emails)
@@ -181,7 +181,7 @@ emails://recent-errors     → latest provisioning/source errors
 3. **Domain warming**: If a warming schedule is active for a domain, `send_email` will block at the daily limit. Use `get_warming_status(domain)` first.
 4. **Suppression**: Always check `list_contacts(suppressed=true)` before bulk sends.
 5. **Attachment limits**: Max 25MB per attachment, max 10 attachments.
-6. **Server binding**: `mailery serve` defaults to `127.0.0.1:3900` (localhost only). Use `--host 0.0.0.0` to expose externally.
+6. **Server binding**: `emails serve` defaults to `127.0.0.1:3900` (localhost only). Use `--host 0.0.0.0` to expose externally.
 
 ## Development
 

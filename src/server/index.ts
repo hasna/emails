@@ -8,7 +8,7 @@ if (args.includes("--version") || args.includes("-V")) {
   process.exit(0);
 }
 if (args.includes("--help") || args.includes("-h")) {
-  console.log(`Usage: mailery-serve [command] [options]
+  console.log(`Usage: emails-serve [command] [options]
 
 Runs the Mailery HTTP service (or a background worker).
 

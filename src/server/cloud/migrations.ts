@@ -94,7 +94,7 @@ const INBOUND_SCHEMA = defineMigration(
  * Address verification support.
  *
  * The client `addresses` resource carries a `verified` flag (the send-readiness
- * gate + `mailery address verify` / markVerified flow). The original cloud
+ * gate + `emails address verify` / markVerified flow). The original cloud
  * `addresses` table (0001) omitted it, so a client flipped to the cloud store
  * could not persist verification. This additive column closes that gap so the
  * full address CRUD — including verify — round-trips through /v1/addresses.
@@ -109,7 +109,7 @@ const ADDRESS_VERIFIED_SCHEMA = defineMigration(
 /**
  * Per-address daily send quota.
  *
- * `mailery address quota <id> <perDay>` (setAddressQuota) caps sends per UTC day
+ * `emails address quota <id> <perDay>` (setAddressQuota) caps sends per UTC day
  * for an address. A flipped client routes this write to /v1/addresses; without a
  * cloud column the quota would silently only persist on the local island
  * (split-brain). Nullable: NULL means "no quota" (the CLI's `quota <id> none`).

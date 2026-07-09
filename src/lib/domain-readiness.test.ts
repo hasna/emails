@@ -90,8 +90,8 @@ describe("assessDomainReadiness", () => {
     );
 
     expect(readiness.receive_ready).toBe(false);
-    expect(readiness.fix_commands).toContain("mailery domain check example.com");
-    expect(readiness.fix_commands).toContain("mailery provision domain example.com --provider <provider> --dry-run");
+    expect(readiness.fix_commands).toContain("emails domain check example.com");
+    expect(readiness.fix_commands).toContain("emails provision domain example.com --provider <provider> --dry-run");
     expect(readiness.fix_commands.join(" ")).not.toContain("domain adopt");
   });
 });

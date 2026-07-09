@@ -22,7 +22,7 @@ export function registerUiCommand(program: Command, _output: (data: unknown, for
         const { copyTextToClipboard } = await import("../tui/clipboard.js");
         const text = typeof opts.clipboardTest === "string" && opts.clipboardTest.trim()
           ? opts.clipboardTest
-          : `mailery ui clipboard test ${new Date().toISOString()}`;
+          : `emails ui clipboard test ${new Date().toISOString()}`;
         const result = copyTextToClipboard(text);
         if (result.ok) {
           console.log(chalk.green(`Copied clipboard test via ${result.method ?? "clipboard"}`));
@@ -35,7 +35,7 @@ export function registerUiCommand(program: Command, _output: (data: unknown, for
       }
       if (!process.stdin.isTTY || !process.stdout.isTTY) {
         console.error(chalk.red("Mailery UI requires a TTY terminal."));
-        console.error(chalk.dim("Use `mailery inbox list`, `mailery inbox read <id>`, or `mailery send` non-interactively."));
+        console.error(chalk.dim("Use `emails inbox list`, `emails inbox read <id>`, or `emails send` non-interactively."));
         process.exitCode = 1;
         return;
       }

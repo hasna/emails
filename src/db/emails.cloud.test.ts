@@ -2,7 +2,7 @@
 // `getEmailContent` MUST route to the app's /v1/messages API — never the local
 // (empty) SQLite `emails` table. Previously `getEmail`/`getEmailContent` read
 // SQLite unconditionally and `show`'s id resolution used the local
-// `resolvePartialId`, so `mailery show <id>` returned "Email not found" for a
+// `resolvePartialId`, so `emails show <id>` returned "Email not found" for a
 // message that plainly existed over /v1 (search/list found it) — the split-brain
 // bug this test locks closed.
 //

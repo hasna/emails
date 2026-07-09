@@ -1,4 +1,4 @@
-// Public `@hasna/mailery/storage` entry.
+// Public `@hasna/emails/storage` entry.
 //
 // The self-hosted PostgreSQL/S3 mirror surface (remote-storage, storage-sync,
 // self-hosted-runtime) has been removed: the client has exactly two modes,

@@ -1,5 +1,5 @@
 /**
- * GAP-A: `mailery send` routes through the mail-data-source seam.
+ * GAP-A: `emails send` routes through the mail-data-source seam.
  *   • cloud mode  → server send API (POST /messages/send), never the local provider path
  *   • local mode  → unchanged local provider path (writes a local sent ledger row)
  *
@@ -77,7 +77,7 @@ function startFakeCloud() {
   return { server, base: `http://127.0.0.1:${server.port}`, sent };
 }
 
-describe("mailery send — cloud mode routes through the server API", () => {
+describe("emails send — cloud mode routes through the server API", () => {
   it("POSTs to /messages/send with the resolved mailbox and never the local provider path", async () => {
     const dir = mkdtempSync(join(tmpdir(), "send-cloud-"));
     cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
@@ -104,7 +104,7 @@ describe("mailery send — cloud mode routes through the server API", () => {
   }, 30_000);
 });
 
-describe("mailery send — local mode is unchanged (local provider path)", () => {
+describe("emails send — local mode is unchanged (local provider path)", () => {
   it("sends via the sandbox provider and writes a local sent ledger row (no cloud)", async () => {
     const dir = mkdtempSync(join(tmpdir(), "send-local-"));
     cleanups.push(() => rmSync(dir, { recursive: true, force: true }));

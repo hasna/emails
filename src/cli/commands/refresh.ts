@@ -10,9 +10,9 @@ async function runAutoPull(opts: { s3?: boolean; forwarding?: boolean; agents?: 
 }
 
 /**
- * `mailery refresh` - one-shot "pull everything now". Syncs every configured
+ * `emails refresh` - one-shot "pull everything now". Syncs every configured
  * inbound S3 bucket (each with its own provider creds / AWS account) using the
- * same pull engine mailery ui runs in the background, exposed as a single
+ * same pull engine emails ui runs in the background, exposed as a single
  * instant command so you never have to type
  * `inbox sync-s3 --bucket … --prefix … --profile … --provider …` by hand.
  */
@@ -30,7 +30,7 @@ export function registerRefreshCommand(program: Command, output: (data: unknown,
 
         if (!r.configured) {
           console.log(chalk.yellow("No inbound sources configured."));
-          console.log(chalk.dim("Adopt a domain (`mailery domain adopt <domain>`) or add a bucket, then refresh."));
+          console.log(chalk.dim("Adopt a domain (`emails domain adopt <domain>`) or add a bucket, then refresh."));
           return;
         }
         if (!r.ok && r.reason) {

@@ -2,7 +2,7 @@
  * Background auto-pull for the TUI:
  *   • SES   — drain real-time SES→SNS→SQS and/or dedup-safe scan of each inbound
  *             S3 bucket (buckets can be in different AWS accounts).
- *   • Resend — inbound is push (webhook to `mailery serve`), so there's nothing to
+ *   • Resend — inbound is push (webhook to `emails serve`), so there's nothing to
  *             pull here; it lands the moment the server receives it.
  * Entirely best-effort: missing config/creds is a silent no-op.
  */

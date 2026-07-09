@@ -51,7 +51,7 @@ describe("domain readiness service", () => {
     expect(before.readiness.send_ready).toBe(true);
     expect(before.readiness.receive_ready).toBe(false);
     expect(before.readiness.inbound_evidence_ready).toBe(false);
-    expect(before.next_actions).toContain("mailery domain adopt example.com --provider <provider>");
+    expect(before.next_actions).toContain("emails domain adopt example.com --provider <provider>");
 
     expect(() => enableDomainInboundReadiness(domain.id)).toThrow("Inbound cloud source is not configured");
 

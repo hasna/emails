@@ -303,7 +303,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
 
   program
     .command("code <address>")
-    .description("Find the latest verification code for an inbound address (alias: mailery inbox code)")
+    .description("Find the latest verification code for an inbound address (alias: emails inbox code)")
     .option("--from <text>", "Only consider messages whose From contains this text")
     .option("--subject <text>", "Only consider messages whose subject contains this text")
     .option("--limit <n>", "Messages to inspect per mailbox state", "50")
@@ -411,7 +411,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .command("list")
     .description("List local mailbox mail")
     .option("--provider <id>", "Credential/capability ID used as a provenance filter")
-    .option("--source <id>", "Filter by ingestion source ID from `mailery inbox sources`")
+    .option("--source <id>", "Filter by ingestion source ID from `emails inbox sources`")
     .option("--folder <folder>", "Folder to list: inbox, unread, starred, sent, archived, spam, trash", "inbox")
     .option("--address <address>", "Mailbox scope: exact recipient/sender address")
     .option("--domain <domain>", "Mailbox scope: recipient/sender domain")
@@ -452,7 +452,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         if (opts.read) rows = rows.filter((row) => row.is_read);
         if (opts.since) rows = rows.filter((row) => row.date >= opts.since!);
         if (rows.length === 0) {
-          output([], chalk.dim("No mail found. Try `mailery inbox sources`, `mailery refresh`, or `mailery inbox wait <address>`."));
+          output([], chalk.dim("No mail found. Try `emails inbox sources`, `emails refresh`, or `emails inbox wait <address>`."));
           return;
         }
         output(rows, formatMailboxMessages(rows, `Mailbox ${folder}`));
@@ -478,7 +478,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         // server endpoint for it. In cloud mode fail cleanly instead of querying the
         // empty local DB (which would misleadingly report zero unread).
         if (resolveMailDataSource().mode !== "local") {
-          handleError(new Error("`inbox unread-count --by-address` is not available in cloud mode. Use `mailery inbox unread-count` for the total unread count."));
+          handleError(new Error("`inbox unread-count --by-address` is not available in cloud mode. Use `emails inbox unread-count` for the total unread count."));
           return;
         }
         const db = getDatabase();
@@ -657,7 +657,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
   inboxCmd
     .command("mailboxes")
     .description("List folder counts for a mailbox scope or ingestion source")
-    .option("--source <id>", "Filter by ingestion source ID from `mailery inbox sources`")
+    .option("--source <id>", "Filter by ingestion source ID from `emails inbox sources`")
     .option("--provider <id>", "Credential/capability ID used as a provenance filter")
     .option("--address <address>", "Mailbox scope: exact recipient/sender address")
     .option("--domain <domain>", "Mailbox scope: recipient/sender domain")
@@ -796,7 +796,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
 
   program
     .command("links <email-id>")
-    .description("Extract links from a synced inbound email (alias: mailery inbox links)")
+    .description("Extract links from a synced inbound email (alias: emails inbox links)")
     .option("--all", "Include non-web links such as mailto: and tel:")
     .action(async (emailId: string, opts: { all?: boolean }) => {
       try {
@@ -964,7 +964,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         const bucket = opts.bucket ?? inbound.bucket;
         const region = opts.region ?? inbound.region;
         const prefix = opts.prefix ?? inbound.prefix;
-        if (!bucket && !opts.source) { handleError(new Error("No S3 bucket: pass --bucket, --source, or set 'mailery config set inbound_s3_bucket <name>'")); return; }
+        if (!bucket && !opts.source) { handleError(new Error("No S3 bucket: pass --bucket, --source, or set 'emails config set inbound_s3_bucket <name>'")); return; }
         const { syncS3Inbox } = await import("../../lib/s3-sync.js");
         console.log(chalk.dim(`Syncing emails from ${opts.source ? `source ${opts.source}` : `s3://${bucket}/${prefix ?? ""}`}...`));
         const result = await syncS3Inbox({
@@ -1022,7 +1022,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         lines.push(`  SNS topic:  ${chalk.cyan(result.topic_arn)}`);
         lines.push(`  SQS queue:  ${chalk.cyan(result.queue_url)}`);
         lines.push(`  SES rule:   ${result.rule_updated ? chalk.green("updated (TopicArn attached)") : chalk.yellow("not updated — attach TopicArn manually")}`);
-        lines.push(chalk.dim("\n  Now run:  mailery inbox watch"));
+        lines.push(chalk.dim("\n  Now run:  emails inbox watch"));
         output(result, lines.join("\n"));
       } catch (e) { handleError(e); }
     });
@@ -1057,7 +1057,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         lines.push(`  Last mail:   ${data.last_received_at ? chalk.green(String(data.last_received_at)) : chalk.dim("never")}`);
         lines.push(`  Last poll:   ${data.last_poll_at ? chalk.green(String(data.last_poll_at)) : chalk.dim("never")}`);
         if (data.last_error) lines.push(`  Last error:  ${chalk.red(String(data.last_error))}`);
-        lines.push(chalk.dim("\n  Start watcher: mailery inbox watch --all-buckets"));
+        lines.push(chalk.dim("\n  Start watcher: emails inbox watch --all-buckets"));
         output(data, lines.join("\n"));
       } catch (e) { handleError(e); }
     });
@@ -1084,7 +1084,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         const bucket = opts.bucket ?? inbound.bucket;
         const region = opts.region ?? inbound.region;
         const prefix = opts.prefix ?? inbound.prefix;
-        if (!queueUrl) { handleError(new Error("No SQS queue: run 'mailery inbox setup-realtime <domain>' first or pass --queue-url")); return; }
+        if (!queueUrl) { handleError(new Error("No SQS queue: run 'emails inbox setup-realtime <domain>' first or pass --queue-url")); return; }
         if (!bucket) { handleError(new Error("No S3 bucket: pass --bucket or set inbound_s3_bucket")); return; }
 
         const { makeSqsAdapter } = await import("../../lib/inbound-realtime-aws.js");
@@ -1209,8 +1209,8 @@ function formatInboxSyncStatus(status: EmailSystemStatus): string {
   lines.push(`  Realtime:    ${status.inbox.realtime.queue_configured ? chalk.green("configured") : chalk.yellow("not configured")}`);
   if (status.inbox.realtime.last_poll_at) lines.push(`  Last poll:   ${chalk.green(status.inbox.realtime.last_poll_at)}`);
   if (status.inbox.realtime.last_error) lines.push(`  Last error:  ${chalk.red(status.inbox.realtime.last_error)}`);
-  lines.push(chalk.dim("\n  Pull now: mailery refresh"));
-  lines.push(chalk.dim("  Watch realtime: mailery inbox watch --all-buckets"));
+  lines.push(chalk.dim("\n  Pull now: emails refresh"));
+  lines.push(chalk.dim("  Watch realtime: emails inbox watch --all-buckets"));
   lines.push("");
   return lines.join("\n");
 }
@@ -1325,7 +1325,7 @@ function formatEmailDetail(
   if (atts.length > 0) {
     lines.push(chalk.yellow(`  📎 Attachments (${atts.length}):`));
     for (const a of atts) {
-      const loc = a.location ? `  ${a.location_type === "local" ? chalk.cyan(a.location) : chalk.blue(a.location)}` : chalk.dim("  (run: mailery inbox sync to download)");
+      const loc = a.location ? `  ${a.location_type === "local" ? chalk.cyan(a.location) : chalk.blue(a.location)}` : chalk.dim("  (run: emails inbox sync to download)");
       lines.push(`     ${a.filename.padEnd(44)} ${chalk.dim(`${formatAttachmentSize(a.size)} · ${a.content_type}`)}${loc}`);
       if (a.file_url) lines.push(`     ${chalk.dim("link:")} ${a.file_url}`);
     }

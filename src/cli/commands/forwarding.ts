@@ -38,7 +38,7 @@ export function registerForwardingCommands(program: Command, output: (data: unkn
         output(rule, [
           chalk.green(`✓ forwarding rule ${rule.source_address} -> ${rule.target_address}`),
           chalk.dim("  App-level forwarding only processes mail already synced into the local inbox."),
-          chalk.dim("  Run: mailery forwarding run --provider <provider>"),
+          chalk.dim("  Run: emails forwarding run --provider <provider>"),
         ].join("\n"));
       } catch (e) {
         handleError(e);
@@ -155,7 +155,7 @@ export function registerForwardingCommands(program: Command, output: (data: unkn
           source,
           domain: domain ?? null,
           mx,
-          app_level_command: `mailery forwarding add ${source.toLowerCase()} <target> --provider <provider>`,
+          app_level_command: `emails forwarding add ${source.toLowerCase()} <target> --provider <provider>`,
           provider_native_note: mx?.owner === "cloudflare-routing"
             ? "Cloudflare Email Routing can create native forward rules when Cloudflare owns root MX."
             : "Provider-native forwarding must be configured in the mailbox provider that owns root MX.",

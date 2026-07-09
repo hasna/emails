@@ -45,7 +45,7 @@ describe("provision command dry-runs", () => {
         receive_strategy: "ses-s3",
         provisioning_status: "requested",
       },
-      cli_equivalent: `mailery provision address agent@example.com --provider ${provider.id} --dry-run --json`,
+      cli_equivalent: `emails provision address agent@example.com --provider ${provider.id} --dry-run --json`,
     });
     expect(listAddresses(undefined, getDatabase())).toHaveLength(0);
   });
@@ -80,7 +80,7 @@ describe("provision command dry-runs", () => {
         owner: "google-workspace",
       },
       mx_requires_confirmation: true,
-      cli_equivalent: `mailery provision domain example.com --provider ${provider.id} --add-mx --dry-run --json`,
+      cli_equivalent: `emails provision domain example.com --provider ${provider.id} --add-mx --dry-run --json`,
     });
     expect(result.out).toContain("Refusing to add AWS SES inbound");
     expect(listDomains(undefined, getDatabase())).toHaveLength(0);

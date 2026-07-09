@@ -1,7 +1,7 @@
 {
-  "name": "@hasna/mailery-sdk",
+  "name": "@hasna/emails-sdk",
   "version": "0.6.69",
-  "description": "Zero-dependency TypeScript client for the @hasna/mailery REST API",
+  "description": "Zero-dependency TypeScript client for the @hasna/emails REST API",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

@@ -63,9 +63,9 @@ function providerRef(provider: Provider): string {
 
 function domainLifecycleFix(domainName: string, provider: Provider): string {
   return [
-    `mailery domains status ${domainName} --provider ${provider.id}`,
-    `mailery domains verify ${domainName} --provider ${provider.id}`,
-    `mailery domains enable-outbound ${domainName} --provider ${provider.id}`,
+    `emails domains status ${domainName} --provider ${provider.id}`,
+    `emails domains verify ${domainName} --provider ${provider.id}`,
+    `emails domains enable-outbound ${domainName} --provider ${provider.id}`,
   ].join(" && ");
 }
 
@@ -87,7 +87,7 @@ export function assertDomainOutboundReady(provider: Provider, opts: SendEmailOpt
 
   const domain = getDomainByName(provider.id, domainName, db);
   if (!domain) {
-    throw new Error(`Outbound send requires domain ${domainName} to be registered for provider ${providerRef(provider)}. Missing: domain registration. Run: mailery domains add ${domainName} --provider ${provider.id}`);
+    throw new Error(`Outbound send requires domain ${domainName} to be registered for provider ${providerRef(provider)}. Missing: domain registration. Run: emails domains add ${domainName} --provider ${provider.id}`);
   }
 
   const missing: string[] = [];

@@ -7,10 +7,10 @@ create duplicate identities or email address rows.
 ## CLI
 
 ```bash
-mailery --json browserplan coverage --machine machine003 --target 8
-mailery --json browserplan addresses --machine machine003 --target 8 --limit 100
-mailery --json browserplan validate hello@example.com --machine machine003
-mailery --json browserplan reserve hello@example.com \
+emails --json browserplan coverage --machine machine003 --target 8
+emails --json browserplan addresses --machine machine003 --target 8 --limit 100
+emails --json browserplan validate hello@example.com --machine machine003
+emails --json browserplan reserve hello@example.com \
   --machine machine003 \
   --address-id addr_... \
   --identity-id oid_... \
@@ -40,7 +40,7 @@ import {
   listBrowserPlanAddresses,
   reserveBrowserPlanAddress,
   validateBrowserPlanAddress,
-} from "@hasna/mailery";
+} from "@hasna/emails";
 
 const coverage = listBrowserPlanAddresses({ machineId: "machine003", target: 8 });
 const validation = validateBrowserPlanAddress({ machineId: "machine003", email: "hello@example.com" });

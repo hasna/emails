@@ -5,7 +5,7 @@
  *   - Notification             → we parse it and run a dedup-safe syncS3Inbox so
  *                                the new message lands in the inbox immediately.
  *
- * No manual `mailery inbox sync-s3` needed. The bucket/region/prefix come from
+ * No manual `emails inbox sync-s3` needed. The bucket/region/prefix come from
  * config (inbound_s3_bucket / inbound_s3_region / inbound_s3_prefix).
  */
 import { parseSesNotification } from "../../lib/inbound-realtime.js";

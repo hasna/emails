@@ -1,8 +1,8 @@
-# @hasna/mailery
+# @hasna/emails
 
 Mailery is an email management CLI + MCP server - send, receive, sync, and manage email via Resend, AWS SES, and Cloudflare-routed inbound mail.
 
-[![npm](https://img.shields.io/npm/v/@hasna/mailery)](https://www.npmjs.com/package/@hasna/mailery)
+[![npm](https://img.shields.io/npm/v/@hasna/emails)](https://www.npmjs.com/package/@hasna/emails)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
 ## Install
@@ -11,12 +11,12 @@ Mailery is built for the Bun runtime. Install Bun 1.3 or newer before installing
 the CLI with npm.
 
 ```bash
-npm install -g @hasna/mailery
+npm install -g @hasna/emails
 ```
 
 ## Open Core And Cloud
 
-Users install the open-source package: `@hasna/mailery`.
+Users install the open-source package: `@hasna/emails`.
 
 Mailery stays local-first by default: local SQLite, local provider credentials,
 and local MCP. Self-hosted mode uses user-owned PostgreSQL/S3/SES as source of
@@ -31,51 +31,51 @@ The SaaS control plane is private Hasna Tools infrastructure. End users and
 open-source contributors should not install or depend on private Hasna Tools
 platform packages.
 
-`@hasna/emails` is compatibility-only during the rename period. New installs and
-docs should use `@hasna/mailery`; the compatibility name is expected to be
-retired after migration.
+`@hasna/emails` is the canonical package. It was briefly published as
+`@hasna/mailery`; that name has been retired here and freed for the separate
+Hasna Tools cloud CLI, so new installs and docs should use `@hasna/emails`.
 
 ## Quick Start
 
 ```bash
 # Add a provider (SES or Resend)
-mailery provider add --name production-ses --type ses --region us-east-1 --access-key ... --secret-key ...
-mailery provider add --name production-resend --type resend --api-key ...
+emails provider add --name production-ses --type ses --region us-east-1 --access-key ... --secret-key ...
+emails provider add --name production-resend --type resend --api-key ...
 
 # Set up a domain (buy + DNS + SES in one command)
-mailery domain setup example.com --provider <id> --email you@example.com ...
+emails domain setup example.com --provider <id> --email you@example.com ...
 
 # Or connect a domain you already own without buying or calling Mailery Cloud
-mailery domains connect example.com --provider <id> --source-of-truth local --dry-run
-mailery domains connect example.com --provider <id> --source-of-truth postgres --dns-provider route53 --no-register-provider
+emails domains connect example.com --provider <id> --source-of-truth local --dry-run
+emails domains connect example.com --provider <id> --source-of-truth postgres --dns-provider route53 --no-register-provider
 
 # Or configure DNS for an existing domain via Cloudflare
-mailery domain setup-cloudflare example.com --provider <id>
+emails domain setup-cloudflare example.com --provider <id>
 
 # Check public DNS before changing inbound routing
-mailery domain check example.com
+emails domain check example.com
 
 # SES send-only setup preserves existing MX, such as Google Workspace
-mailery provision domain example.com --provider <ses-id> --dry-run
+emails provision domain example.com --provider <ses-id> --dry-run
 
 # Send an email
-mailery send --from you@example.com --to them@example.com --subject "Hi" --body "Hello"
+emails send --from you@example.com --to them@example.com --subject "Hi" --body "Hello"
 
 # Pull inbound mail from SES/S3 or Cloudflare-routed storage
-mailery inbox source add-s3 --bucket <bucket> --prefix inbound/example.com/ --provider <provider-id>
-mailery inbox sync-s3 --bucket <bucket> --prefix inbound/example.com/
+emails inbox source add-s3 --bucket <bucket> --prefix inbound/example.com/ --provider <provider-id>
+emails inbox sync-s3 --bucket <bucket> --prefix inbound/example.com/
 
 # Inspect mailbox folders and ingestion sources
-mailery inbox mailboxes
-mailery inbox sources
-mailery inbox list --folder unread --source provider:<id>
+emails inbox mailboxes
+emails inbox sources
+emails inbox list --folder unread --source provider:<id>
 
 # Check sent email log
-mailery email list
+emails email list
 
 # Use self-hosted PostgreSQL/S3/SES as source of truth
-mailery self-hosted status
-mailery self-hosted migrate-local
+emails self-hosted status
+emails self-hosted migrate-local
 ```
 
 ## Mailery Cloud
@@ -85,11 +85,11 @@ when creating billing links from a headless environment.
 
 ```bash
 # Show the hosted service status
-mailery cloud --api-url https://mailery.co status
+emails cloud --api-url https://mailery.co status
 
 # Create or log into a hosted account, generate an agent API key, and create a
 # hosted billing link without opening a browser
-mailery cloud setup \
+emails cloud setup \
   --api-url https://mailery.co \
   --email you@example.com \
   --password "$MAILERY_PASSWORD" \
@@ -99,16 +99,16 @@ mailery cloud setup \
   --no-open
 
 # Hosted mailbox and message workflow
-mailery cloud mailbox add agent@example.com --provider manual
-mailery cloud messages list --limit 20
-mailery cloud messages pull --limit 20
-mailery inbox list --limit 20
+emails cloud mailbox add agent@example.com --provider manual
+emails cloud messages list --limit 20
+emails cloud messages pull --limit 20
+emails inbox list --limit 20
 
 # Billing and domains
-mailery cloud billing overview
-mailery cloud billing subscribe --plan starter --no-open
-mailery cloud domain available example-agent-mail.com
-mailery cloud domain setup example-agent-mail.com --address agent --catch-all --mx-migration-consent
+emails cloud billing overview
+emails cloud billing subscribe --plan starter --no-open
+emails cloud domain available example-agent-mail.com
+emails cloud domain setup example-agent-mail.com --address agent --catch-all --mx-migration-consent
 ```
 
 The starter SaaS plan is currently `$10/month` and grants hosted credits. Domain
@@ -125,9 +125,9 @@ Use these setup paths:
 
 | Mode | Who owns the mail source of truth | Domain setup path |
 | --- | --- | --- |
-| `local` | The local SQLite/files install | `mailery domains add` or `mailery domains connect --source-of-truth local`; DNS checks are advisory unless using a real send/receive provider. |
-| `self_hosted` | Your PostgreSQL/S3/SES or equivalent infrastructure | `mailery domains connect --source-of-truth postgres`, then publish the returned DNS tasks and enable inbound/outbound when evidence is ready. |
-| `cloud` | Mailery Cloud at `https://mailery.co` | `mailery cloud domain setup`; SaaS billing and tenant checks are handled by the hosted control plane. |
+| `local` | The local SQLite/files install | `emails domains add` or `emails domains connect --source-of-truth local`; DNS checks are advisory unless using a real send/receive provider. |
+| `self_hosted` | Your PostgreSQL/S3/SES or equivalent infrastructure | `emails domains connect --source-of-truth postgres`, then publish the returned DNS tasks and enable inbound/outbound when evidence is ready. |
+| `cloud` | Mailery Cloud at `https://mailery.co` | `emails cloud domain setup`; SaaS billing and tenant checks are handled by the hosted control plane. |
 
 Authentication records are required only for the capability you enable:
 
@@ -139,12 +139,12 @@ Authentication records are required only for the capability you enable:
   aggregation, but it should be present before production sending and monitored
   before moving from `p=none` to stricter policies.
 
-For self-hosted migration, run `mailery self-hosted migrate-local` once, switch
+For self-hosted migration, run `emails self-hosted migrate-local` once, switch
 to `MAILERY_MODE=self_hosted` with `HASNA_EMAILS_STORAGE_MODE=remote`, and treat
 PostgreSQL/S3 as the durable source of truth. Local SQLite is then only a runtime
 cache prepared from and flushed back to the self-hosted source.
 
-## Mailery UI (`mailery ui`)
+## Mailery UI (`emails ui`)
 
 A full-screen OpenTUI mail client with a responsive dashboard shell. Wide
 terminals use a two-column admin layout with persistent navigation, mailbox
@@ -158,8 +158,8 @@ local refresh, background auto-pull, and an `auto`/`light`/`dark` color theme
 keep the mailbox current and readable across terminals.
 
 ```bash
-mailery ui
-mailery ui --mailbox unread
+emails ui
+emails ui --mailbox unread
 ```
 
 The app uses visible buttons and the Shortcuts command palette for actions.
@@ -174,39 +174,39 @@ controls. Folders: Inbox · Unread · Starred · Sent · Archived · Spam · Tra
 ## Command Structure
 
 ```
-mailery ui                # Mailbox UI - inbox, compose, domains, settings
-mailery provider          # provider credentials/capabilities (ses, resend, sandbox)
-mailery domain            # add/verify/buy/setup/dns/check domains
-mailery address           # manage sender addresses (add, suspend, activate, quota)
-mailery status            # redacted system status + next useful actions
-mailery agent context     # agent-oriented context snapshot and workflows
-mailery daemon            # background queue/realtime status and restart guidance
-mailery logs tail         # local daemon/sync/inbound/scheduler log tails
-mailery owner             # tenancy: register human/agent owners
-mailery alias             # per-domain aliases + catch-all routing
-mailery forwarding        # app-level forwarding for locally received/synced mail
-mailery sendkey           # scoped send keys (restrict an agent to its own addresses)
-mailery send              # send an email
-mailery reply / forward   # reply (in-thread) or forward a sent/inbound email
-mailery email             # sent email: list, search, show, replies, conversation
-mailery inbox             # mailbox folders, sources, sync, read/star/archive/label, watch
-mailery template          # email templates
-mailery contact           # contacts (suppression list)
-mailery group             # recipient groups
-mailery sequence          # drip sequences
-mailery schedule          # scheduled emails: list, cancel, run
-mailery triage            # AI triage: classify, prioritize, draft replies
-mailery storage           # self-hosted PostgreSQL storage: status, migrate, migrate-local, push, pull
-mailery self-hosted       # source-of-truth runtime setup/status/migrate commands
-mailery cloud             # optional Mailery Cloud signup/login/billing/mailbox/message/digest/domain workflow
-mailery aws               # AWS setup: SES receipt rules, S3 inbound bucket
-mailery config            # configuration (key=value)
-mailery stats             # delivery statistics (--inbox for received mail)
-mailery analytics         # email analytics
-mailery doctor            # system diagnostics
-mailery doctor delivery   # diagnose missing inbound mail for one address
-mailery serve             # HTTP server + dashboard + authenticated /api/v1
-mailery mcp               # install MCP server
+emails ui                # Mailbox UI - inbox, compose, domains, settings
+emails provider          # provider credentials/capabilities (ses, resend, sandbox)
+emails domain            # add/verify/buy/setup/dns/check domains
+emails address           # manage sender addresses (add, suspend, activate, quota)
+emails status            # redacted system status + next useful actions
+emails agent context     # agent-oriented context snapshot and workflows
+emails daemon            # background queue/realtime status and restart guidance
+emails logs tail         # local daemon/sync/inbound/scheduler log tails
+emails owner             # tenancy: register human/agent owners
+emails alias             # per-domain aliases + catch-all routing
+emails forwarding        # app-level forwarding for locally received/synced mail
+emails sendkey           # scoped send keys (restrict an agent to its own addresses)
+emails send              # send an email
+emails reply / forward   # reply (in-thread) or forward a sent/inbound email
+emails email             # sent email: list, search, show, replies, conversation
+emails inbox             # mailbox folders, sources, sync, read/star/archive/label, watch
+emails template          # email templates
+emails contact           # contacts (suppression list)
+emails group             # recipient groups
+emails sequence          # drip sequences
+emails schedule          # scheduled emails: list, cancel, run
+emails triage            # AI triage: classify, prioritize, draft replies
+emails storage           # self-hosted PostgreSQL storage: status, migrate, migrate-local, push, pull
+emails self-hosted       # source-of-truth runtime setup/status/migrate commands
+emails cloud             # optional Mailery Cloud signup/login/billing/mailbox/message/digest/domain workflow
+emails aws               # AWS setup: SES receipt rules, S3 inbound bucket
+emails config            # configuration (key=value)
+emails stats             # delivery statistics (--inbox for received mail)
+emails analytics         # email analytics
+emails doctor            # system diagnostics
+emails doctor delivery   # diagnose missing inbound mail for one address
+emails serve             # HTTP server + dashboard + authenticated /api/v1
+emails mcp               # install MCP server
 ```
 
 ### Compact Output and Gradual Disclosure
@@ -217,21 +217,21 @@ counts, and hints for the next detail command. Use these flags when you need
 more:
 
 ```bash
-mailery address list              # compact table
-mailery address list --verbose    # expanded owner/admin/quota rows
-mailery domain status --verbose   # includes per-domain issue and fix lines
-mailery provider list --limit 50  # explicit larger page
-mailery contact list --suppressed # compact filtered contact list
-mailery template show <name>      # detail path for template bodies
-mailery sequence show <name>      # detail path for steps/enrollments
-mailery forwarding list --source ops@example.com
-mailery agent context             # compact agent context summary
-mailery agent context --verbose   # full redacted context snapshot
-mailery agent context --json      # full machine-readable context
-mailery config list --verbose     # full redacted config values
-mailery config keys --verbose     # include examples for every key
-mailery email show <id>           # detail path for one sent email
-mailery inbox read <id>           # detail path for one inbound email
+emails address list              # compact table
+emails address list --verbose    # expanded owner/admin/quota rows
+emails domain status --verbose   # includes per-domain issue and fix lines
+emails provider list --limit 50  # explicit larger page
+emails contact list --suppressed # compact filtered contact list
+emails template show <name>      # detail path for template bodies
+emails sequence show <name>      # detail path for steps/enrollments
+emails forwarding list --source ops@example.com
+emails agent context             # compact agent context summary
+emails agent context --verbose   # full redacted context snapshot
+emails agent context --json      # full machine-readable context
+emails config list --verbose     # full redacted config values
+emails config keys --verbose     # include examples for every key
+emails email show <id>           # detail path for one sent email
+emails inbox read <id>           # detail path for one inbound email
 ```
 
 `--json` remains the machine-readable path. Broad MCP list tools default to
@@ -248,44 +248,44 @@ behalf); agent-owned addresses are self-administered.
 
 ```bash
 # Register owners and assign an address (human-owned, agent-administered)
-mailery owner register Morgan --type human --email morgan@example.com
-mailery owner register Atlas  --type agent
-mailery provision address morgan@example.com --provider <ses-id> --owner Morgan --administrator Atlas
-mailery address owner morgan@example.com
-mailery address set-owner morgan@example.com --owner Morgan --administrator Atlas
-mailery address transfer-owner morgan@example.com --owner Atlas --reason "handoff" --yes
-mailery address unassign-owner morgan@example.com --reason "retired" --yes
-mailery address owner-history morgan@example.com
+emails owner register Morgan --type human --email morgan@example.com
+emails owner register Atlas  --type agent
+emails provision address morgan@example.com --provider <ses-id> --owner Morgan --administrator Atlas
+emails address owner morgan@example.com
+emails address set-owner morgan@example.com --owner Morgan --administrator Atlas
+emails address transfer-owner morgan@example.com --owner Atlas --reason "handoff" --yes
+emails address unassign-owner morgan@example.com --reason "retired" --yes
+emails address owner-history morgan@example.com
 
 # Scoped send keys — an agent can only send from addresses it owns/administers
-mailery sendkey create Atlas --label ci        # prints the esk_... token ONCE
-mailery sendkey check  Atlas morgan@example.com # authorized
-mailery sendkey list / revoke <id>
+emails sendkey create Atlas --label ci        # prints the esk_... token ONCE
+emails sendkey check  Atlas morgan@example.com # authorized
+emails sendkey list / revoke <id>
 
 # Per-domain aliases + catch-all
-mailery alias add support@example.com ops@example.com
-mailery alias catch-all example.com inbox@example.com   # *@example.com -> inbox@
-mailery alias global inbox@example.com                  # protected global catch-all (ALL domains)
-mailery alias resolve anything@example.com              # show where it routes
+emails alias add support@example.com ops@example.com
+emails alias catch-all example.com inbox@example.com   # *@example.com -> inbox@
+emails alias global inbox@example.com                  # protected global catch-all (ALL domains)
+emails alias resolve anything@example.com              # show where it routes
 
 # App-level forwarding: forwards only mail already received or synced locally.
 # Use provider-native forwarding when the mailbox provider owns root MX.
-mailery forwarding explain support@example.com
-mailery forwarding add support@example.com archive@example.net --provider <provider-id>
-mailery forwarding run --provider <provider-id>            # future mail only
-mailery forwarding run --provider <provider-id> --backfill # intentionally include older synced mail
+emails forwarding explain support@example.com
+emails forwarding add support@example.com archive@example.net --provider <provider-id>
+emails forwarding run --provider <provider-id>            # future mail only
+emails forwarding run --provider <provider-id> --backfill # intentionally include older synced mail
 
 # Address lifecycle
-mailery address provision ops@example.com --provider <ses-id> --owner Atlas
-mailery address suggest --domain example.com
-mailery address suspend <id>     # block sending from this address
-mailery address activate <id>
-mailery address quota <id> 200   # max 200 sends/day (use 'none' to clear)
+emails address provision ops@example.com --provider <ses-id> --owner Atlas
+emails address suggest --domain example.com
+emails address suspend <id>     # block sending from this address
+emails address activate <id>
+emails address quota <id> 200   # max 200 sends/day (use 'none' to clear)
 ```
 
 ## DNS and inbound safety
 
-`mailery domain check <domain>` detects common root MX owners, including Google
+`emails domain check <domain>` detects common root MX owners, including Google
 Workspace, Microsoft 365, Cloudflare Email Routing, Zoho, Proton, and AWS SES.
 SES send-only provisioning does not require changing root MX and is the safest
 path when an existing mailbox provider already receives mail.
@@ -312,20 +312,20 @@ Terminology used by the CLI, REST API, MCP tools, and TUI:
 Useful source-aware surfaces:
 
 ```bash
-mailery inbox sources --json
-mailery inbox mailboxes --source provider:<id> --json
-mailery inbox search invoice --folder sent --source provider:<id> --json
+emails inbox sources --json
+emails inbox mailboxes --source provider:<id> --json
+emails inbox search invoice --folder sent --source provider:<id> --json
 curl 'localhost:3900/api/sources'
 curl 'localhost:3900/api/mailboxes?source_id=legacy'
 ```
 
 ```bash
-mailery-mcp
+emails-mcp
 ```
 
 ## REST API
 
-`mailery serve` exposes a dashboard plus two API surfaces:
+`emails serve` exposes a dashboard plus two API surfaces:
 
 - **Dashboard / management API** under `/api/*` (providers, domains, addresses, emails, stats).
 - **Authenticated programmatic API** under `/api/v1/*` for agents/apps, keyed on a
@@ -333,7 +333,7 @@ mailery-mcp
   key owner's addresses, so one caller can't act as another tenant:
 
 ```bash
-mailery serve   # or: mailery-serve   (HOST=0.0.0.0 to allow other machines)
+emails serve   # or: emails-serve   (HOST=0.0.0.0 to allow other machines)
 
 curl -H "Authorization: Bearer $ESK" localhost:3900/api/v1/addresses
 curl -H "Authorization: Bearer $ESK" -X POST localhost:3900/api/v1/provision/address -d '{"email":"ops@example.com"}'
@@ -343,7 +343,7 @@ curl -H "Authorization: Bearer $ESK" 'localhost:3900/api/v1/inbox?limit=50&offse
 
 ## Library API
 
-Import the stable local API from `@hasna/mailery`. The public entrypoint covers
+Import the stable local API from `@hasna/emails`. The public entrypoint covers
 provider/domain/address CRUD, sending, inbound storage and listing, templates,
 contacts and suppression, sequences, exports, ownership helpers, and scoped send
 keys.
@@ -361,27 +361,27 @@ import {
   createOwner,
   setAddressOwnerByRef,
   createSendKey,
-} from "@hasna/mailery";
+} from "@hasna/emails";
 ```
 
 ## Inbound Email (AWS SES -> S3)
 
 ```bash
 # Set up S3 bucket + SES receipt rules
-mailery aws setup-inbound --domain example.com --bucket my-emails
+emails aws setup-inbound --domain example.com --bucket my-emails
 
 # Pull received emails on demand
-mailery inbox sync-s3 --bucket my-emails --prefix inbound/example.com/
+emails inbox sync-s3 --bucket my-emails --prefix inbound/example.com/
 
 # Read-state / organize (works for SES-S3, SMTP, Cloudflare-routed, and legacy imported mail)
-mailery inbox list --unread            # filters: --unread/--read/--starred/--archived/--label <l>
-mailery inbox latest ops@example.com --json
-mailery inbox wait ops@example.com --timeout 120
-mailery inbox wait-code ops@example.com --from openai --timeout 120
-mailery inbox sync-status --json       # S3 and realtime status
-mailery inbox explain <id>             # route/owner/readiness trace
-mailery inbox read <id>                # opening marks it read
-mailery inbox star|archive|label <id>  # --undo / --remove to reverse
+emails inbox list --unread            # filters: --unread/--read/--starred/--archived/--label <l>
+emails inbox latest ops@example.com --json
+emails inbox wait ops@example.com --timeout 120
+emails inbox wait-code ops@example.com --from openai --timeout 120
+emails inbox sync-status --json       # S3 and realtime status
+emails inbox explain <id>             # route/owner/readiness trace
+emails inbox read <id>                # opening marks it read
+emails inbox star|archive|label <id>  # --undo / --remove to reverse
 ```
 
 ### Real-time inbound (no manual sync)
@@ -390,12 +390,12 @@ Push delivery so mail lands automatically. `setup-realtime` wires SES → SNS �
 (and attaches the topic to the receipt rule); `watch` long-polls and auto-syncs:
 
 ```bash
-mailery inbox setup-realtime example.com   # creates SNS topic + SQS queue, saves the queue URL
-mailery inbox watch                        # auto-delivers new mail in real-time (--once to poll once)
+emails inbox setup-realtime example.com   # creates SNS topic + SQS queue, saves the queue URL
+emails inbox watch                        # auto-delivers new mail in real-time (--once to poll once)
 ```
 
 Alternatively, point an SNS HTTP subscription at `POST /webhook/ses-inbound` on
-`mailery serve` auto-confirms the subscription and syncs on each notification.
+`emails serve` auto-confirms the subscription and syncs on each notification.
 
 ## Self-Hosted Runtime (PostgreSQL/S3/SES)
 
@@ -433,8 +433,8 @@ deployment mode (`MAILERY_MODE`, `HASNA_EMAILS_MODE`, or legacy config keys) and
 map to `self_hosted`. The lower-level storage sync mode remains separate:
 `HASNA_EMAILS_STORAGE_MODE=remote` means PostgreSQL source of truth with local
 runtime cache. `HASNA_EMAILS_STORAGE_MODE=hybrid` keeps local SQLite as source
-and only syncs when `mailery storage pull`, `mailery storage push`, or
-`mailery storage sync --force` is run explicitly.
+and only syncs when `emails storage pull`, `emails storage push`, or
+`emails storage sync --force` is run explicitly.
 
 ```bash
 # Configure RDS/PostgreSQL
@@ -449,24 +449,24 @@ export HASNA_EMAILS_STORAGE_MODE=remote
 # Optional AWS/S3 settings for self-hosted inbound and attachments.
 # Use your own bucket names and account-specific secrets.
 export EMAILS_INBOUND_S3_BUCKET="your-mailery-inbound-bucket"
-mailery config set attachment_storage s3
-mailery config set attachment_s3_bucket "your-mailery-attachments-bucket"
+emails config set attachment_storage s3
+emails config set attachment_s3_bucket "your-mailery-attachments-bucket"
 
 # Check source-of-truth runtime status
-mailery self-hosted status
+emails self-hosted status
 
 # Apply PostgreSQL migrations
-mailery self-hosted migrate
+emails self-hosted migrate
 
 # One-time local SQLite → self-hosted PostgreSQL migration
-mailery self-hosted migrate-local
+emails self-hosted migrate-local
 ```
 
 Storage internals are intentionally kept off the default library entrypoint.
 Import them from the explicit subpath when building storage tooling:
 
 ```ts
-import { getStorageStatus, prepareSelfHostedRuntimeCache } from "@hasna/mailery/storage";
+import { getStorageStatus, prepareSelfHostedRuntimeCache } from "@hasna/emails/storage";
 ```
 
 See `docs/SELF_HOSTED_RUNTIME.md` for the source-of-truth contract.
@@ -481,10 +481,10 @@ The shared Streamable HTTP transport is the default (one process, many agents); 
 `--stdio` for a per-client stdio server:
 
 ```bash
-mailery-mcp                     # http://127.0.0.1:8861/mcp (default)
-mailery-mcp --port 8861         # explicit port
-mailery-mcp --stdio             # stdio transport (one server per client)
-MCP_STDIO=1 mailery-mcp         # same
+emails-mcp                     # http://127.0.0.1:8861/mcp (default)
+emails-mcp --port 8861         # explicit port
+emails-mcp --stdio             # stdio transport (one server per client)
+MCP_STDIO=1 emails-mcp         # same
 ```
 
 - Health: `GET http://127.0.0.1:8861/health` -> `{"status":"ok","name":"mailery"}`

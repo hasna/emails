@@ -119,9 +119,9 @@ Local mode must not:
 Typical local setup:
 
 ```bash
-mailery domains add example.com --provider <provider-id>
-mailery domains connect example.com --provider <provider-id> --source-of-truth local --dry-run
-mailery domains status example.com --json
+emails domains add example.com --provider <provider-id>
+emails domains connect example.com --provider <provider-id> --source-of-truth local --dry-run
+emails domains status example.com --json
 ```
 
 For a local-only/imported-mail domain, DNS output is guidance. It becomes a
@@ -154,12 +154,12 @@ export HASNA_EMAILS_DATABASE_URL='<postgresql-connection-url>'
 export MAILERY_MODE=self_hosted
 export HASNA_EMAILS_STORAGE_MODE=remote
 
-mailery self-hosted migrate
-mailery domains connect example.com --provider <ses-id> --source-of-truth postgres --dns-provider route53 --no-register-provider
-mailery domains dns example.com --json
-mailery domains verify example.com
-mailery domains enable-inbound example.com
-mailery domains enable-outbound example.com
+emails self-hosted migrate
+emails domains connect example.com --provider <ses-id> --source-of-truth postgres --dns-provider route53 --no-register-provider
+emails domains dns example.com --json
+emails domains verify example.com
+emails domains enable-inbound example.com
+emails domains enable-outbound example.com
 ```
 
 `domains connect` is for domains the operator already owns. It does not require
@@ -168,10 +168,10 @@ truth metadata plus DNS tasks when the provider identity already exists. Domain
 purchase remains a separate registrar action (`domain buy` / `domain setup`)
 and must be explicit.
 
-To migrate away from local-authoritative mail, run `mailery self-hosted
+To migrate away from local-authoritative mail, run `emails self-hosted
 migrate-local` once before switching production commands to
 `HASNA_EMAILS_STORAGE_MODE=remote`. After that point, local SQLite must be
-treated as a runtime cache. Operators should validate `mailery self-hosted
+treated as a runtime cache. Operators should validate `emails self-hosted
 status --json`, then use source-aware inbox/domain commands to confirm rows are
 read from the self-hosted source.
 
@@ -195,10 +195,10 @@ Cloud mode must:
 Typical cloud setup:
 
 ```bash
-mailery cloud setup --api-url https://mailery.co --email you@example.com --billing --no-open
-mailery cloud domain available example.com
-mailery cloud domain setup example.com --address agent --catch-all --mx-migration-consent
-mailery cloud messages pull --limit 20
+emails cloud setup --api-url https://mailery.co --email you@example.com --billing --no-open
+emails cloud domain available example.com
+emails cloud domain setup example.com --address agent --catch-all --mx-migration-consent
+emails cloud messages pull --limit 20
 ```
 
 Cloud commands are the only path that should require Mailery Cloud tenant,
@@ -260,19 +260,19 @@ Mailery should recommend `p=none` for initial setup and should not move to
 The OSS CLI should converge on these user-facing verbs:
 
 ```bash
-mailery domains add example.com
-mailery domains connect example.com --provider <provider-id> --source-of-truth local --dry-run
-mailery domains connect example.com --provider <provider-id> --source-of-truth postgres --dns-provider route53 --no-register-provider
-mailery domains list
-mailery domains status example.com --json
-mailery domains dns example.com --json
-mailery domains verify example.com
-mailery domains enable-inbound example.com
-mailery domains enable-outbound example.com
-mailery domains disable-outbound example.com
+emails domains add example.com
+emails domains connect example.com --provider <provider-id> --source-of-truth local --dry-run
+emails domains connect example.com --provider <provider-id> --source-of-truth postgres --dns-provider route53 --no-register-provider
+emails domains list
+emails domains status example.com --json
+emails domains dns example.com --json
+emails domains verify example.com
+emails domains enable-inbound example.com
+emails domains enable-outbound example.com
+emails domains disable-outbound example.com
 ```
 
-Existing singular commands such as `mailery domain check` may remain as
+Existing singular commands such as `emails domain check` may remain as
 compatibility aliases, but new docs and machine-readable examples should prefer
 the plural `domains` surface.
 

@@ -84,10 +84,10 @@ export function diagnoseInboundDelivery(address: string, db: Database = getDatab
       checks.push(check("pass", "Configured address", `${exact.email} is configured on provider ${exact.provider_id.slice(0, 8)}.`));
       checks.push(provisioning?.provisioning_status === "ready"
         ? check("pass", "Address receive readiness", "Address provisioning is ready.")
-        : check("warn", "Address receive readiness", `Address provisioning is ${provisioning?.provisioning_status ?? "unknown"}.`, `mailery address provision ${normalized} --provider ${exact.provider_id} --wait`));
+        : check("warn", "Address receive readiness", `Address provisioning is ${provisioning?.provisioning_status ?? "unknown"}.`, `emails address provision ${normalized} --provider ${exact.provider_id} --wait`));
       checks.push(exact.owner
         ? check("pass", "Ownership", `Owned by ${exact.owner.name}.`)
-        : check("warn", "Ownership", "No owner/admin assigned.", `mailery address set-owner ${exact.id} --owner <owner>`));
+        : check("warn", "Ownership", "No owner/admin assigned.", `emails address set-owner ${exact.id} --owner <owner>`));
       const history = listAddressOwnershipEvents(exact.id, 1, db);
       if (history[0]) {
         const event = history[0];
@@ -97,7 +97,7 @@ export function diagnoseInboundDelivery(address: string, db: Database = getDatab
   } else if (aliasTarget) {
     checks.push(check("pass", "Alias", `${normalized} resolves to ${aliasTarget}.`));
   } else {
-    checks.push(check("warn", "Configured address", "No exact address or alias configured locally.", domain ? `mailery address provision ${normalized} --provider <provider>` : undefined));
+    checks.push(check("warn", "Configured address", "No exact address or alias configured locally.", domain ? `emails address provision ${normalized} --provider <provider>` : undefined));
   }
 
   if (domainRows.length > 0) {
@@ -112,33 +112,33 @@ export function diagnoseInboundDelivery(address: string, db: Database = getDatab
         : check("warn", "Domain receive readiness", `${d.domain} is not receive-ready (${readiness.state}).`, readiness.fix_commands[0]));
       checks.push(readiness.send_ready
         ? check("pass", "Domain send readiness", `${d.domain} is send-ready.`)
-        : check("warn", "Domain send readiness", `${d.domain} send DNS is incomplete.`, `mailery domain verify ${d.domain}`));
+        : check("warn", "Domain send readiness", `${d.domain} send DNS is incomplete.`, `emails domain verify ${d.domain}`));
     }
   } else if (domain) {
     checks.push(check(
       "warn",
       "Domain",
       `${domain} is not configured locally.`,
-      `mailery provision domain ${domain} --provider <provider> --dry-run`,
+      `emails provision domain ${domain} --provider <provider> --dry-run`,
     ));
   }
 
   if (inboundBuckets.length > 0) {
     checks.push(check("pass", "Inbound sources", `${inboundBuckets.length} S3 bucket(s) configured.`));
   } else {
-    checks.push(check("fail", "Inbound sources", "No S3 inbound bucket configured.", "mailery inbox sync-status"));
+    checks.push(check("fail", "Inbound sources", "No S3 inbound bucket configured.", "emails inbox sync-status"));
   }
 
   if (realtimeQueueConfigured) {
     checks.push(check("pass", "Realtime", "Realtime queue is configured."));
   } else {
-    checks.push(check("warn", "Realtime", "Realtime queue is not configured; manual refresh/sync is required.", domain ? `mailery inbox setup-realtime ${domain}` : undefined));
+    checks.push(check("warn", "Realtime", "Realtime queue is not configured; manual refresh/sync is required.", domain ? `emails inbox setup-realtime ${domain}` : undefined));
   }
 
   if (recent.count > 0) {
     checks.push(check("pass", "Recent local mail", `${recent.count} local message(s) found for ${normalized}.`));
   } else {
-    checks.push(check("warn", "Recent local mail", "No local messages found for this address.", `mailery inbox wait ${normalized} --timeout 120`));
+    checks.push(check("warn", "Recent local mail", "No local messages found for this address.", `emails inbox wait ${normalized} --timeout 120`));
   }
 
   return {
@@ -148,7 +148,7 @@ export function diagnoseInboundDelivery(address: string, db: Database = getDatab
     recent_local_messages: recent.count,
     latest_received_at: recent.latest_received_at,
     checks,
-    cli_equivalent: `mailery doctor delivery ${normalized} --json`,
+    cli_equivalent: `emails doctor delivery ${normalized} --json`,
   };
 }
 
@@ -173,16 +173,16 @@ export async function diagnoseInboundDeliveryLive(
   if (mx.owner === "aws-ses") {
     report.checks.push(check("pass", "Public MX", `Root MX is owned by ${owner}: ${records}.`));
   } else if (mx.owner === "none") {
-    report.checks.push(check("warn", "Public MX", "No public root MX records found.", `mailery domain check ${report.domain}`));
+    report.checks.push(check("warn", "Public MX", "No public root MX records found.", `emails domain check ${report.domain}`));
   } else if (requiresMxSwitchConfirmation(mx)) {
     report.checks.push(check(
       "warn",
       "Public MX",
       `Root MX is owned by ${owner}: ${records}. Do not add SES inbound MX unless you intend to move inbound mail.`,
-      `mailery forwarding explain ${report.address}`,
+      `emails forwarding explain ${report.address}`,
     ));
   } else {
-    report.checks.push(check("warn", "Public MX", `${mx.summary}.`, `mailery domain check ${report.domain}`));
+    report.checks.push(check("warn", "Public MX", `${mx.summary}.`, `emails domain check ${report.domain}`));
   }
 
   return report;

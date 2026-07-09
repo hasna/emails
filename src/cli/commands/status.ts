@@ -15,7 +15,7 @@ async function runAgentPrompt(
 ): Promise<void> {
   try {
     const prompt = (promptParts ?? []).join(" ").trim();
-    if (!prompt) handleError(new Error("Agent prompt is required. Try: mailery agent \"extract links from latest unread email\""));
+    if (!prompt) handleError(new Error("Agent prompt is required. Try: emails agent \"extract links from latest unread email\""));
     const { formatMaileryAgentResult, runMaileryAgent } = await import("../../lib/mailery-agent.js");
     const result = await runMaileryAgent(prompt, {
       provider: opts.provider,

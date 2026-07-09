@@ -42,7 +42,7 @@ export async function runDiagnostics(db?: Database, opts: DiagnosticsOptions = {
   checks.push(
     existsSync(configPath)
       ? { name: "Config", status: "pass", message: "Config file exists" }
-      : { name: "Config", status: "warn", message: "No config file (run 'mailery config set' to create)" },
+      : { name: "Config", status: "warn", message: "No config file (run 'emails config set' to create)" },
   );
 
   // 3. Providers

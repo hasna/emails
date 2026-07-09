@@ -175,7 +175,7 @@ export function registerInboxTools(server: McpServer): void {
         return jsonText({
           source: source ?? null,
           ...(await ds.listMailboxStatus({ source })),
-          cli_equivalent: `mailery inbox mailboxes${mailboxSourceCliFlags(source)} --json`,
+          cli_equivalent: `emails inbox mailboxes${mailboxSourceCliFlags(source)} --json`,
         });
       } catch (e) {
         return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
@@ -196,7 +196,7 @@ export function registerInboxTools(server: McpServer): void {
         const sources = await ds.listMailboxSources({ search, limit: inboxLimit(limit, 100) });
         return jsonText({
           sources,
-          cli_equivalent: "mailery inbox sources --json",
+          cli_equivalent: "emails inbox sources --json",
         });
       } catch (e) {
         return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
@@ -241,7 +241,7 @@ export function registerInboxTools(server: McpServer): void {
           limit: pageLimit,
           offset: pageOffset,
           truncated: rows.length > pageLimit,
-          cli_equivalent: `mailery inbox search ${query} --folder ${selectedMailbox}${mailboxSourceCliFlags(source)} --json`,
+          cli_equivalent: `emails inbox search ${query} --folder ${selectedMailbox}${mailboxSourceCliFlags(source)} --json`,
         });
       } catch (e) {
         return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
@@ -315,7 +315,7 @@ export function registerInboxTools(server: McpServer): void {
       return {
         content: [{ type: "text", text: JSON.stringify({
           email,
-          cli_equivalent: `mailery inbox latest ${normalized} --json`,
+          cli_equivalent: `emails inbox latest ${normalized} --json`,
         }, null, 2) }],
       };
     } catch (e) {
@@ -347,7 +347,7 @@ export function registerInboxTools(server: McpServer): void {
           return {
             content: [{ type: "text", text: JSON.stringify({
               email,
-              cli_equivalent: `mailery inbox wait ${normalized} --timeout ${timeout_seconds ?? 120} --json`,
+              cli_equivalent: `emails inbox wait ${normalized} --timeout ${timeout_seconds ?? 120} --json`,
             }, null, 2) }],
           };
         }
@@ -358,7 +358,7 @@ export function registerInboxTools(server: McpServer): void {
             return {
               content: [{ type: "text", text: JSON.stringify({
                 email,
-                cli_equivalent: `mailery inbox wait ${normalized} --timeout ${timeout_seconds ?? 120} --json`,
+                cli_equivalent: `emails inbox wait ${normalized} --timeout ${timeout_seconds ?? 120} --json`,
               }, null, 2) }],
             };
           }
@@ -368,7 +368,7 @@ export function registerInboxTools(server: McpServer): void {
             content: [{ type: "text", text: JSON.stringify({
               email: null,
               address: normalized,
-              cli_equivalent: `mailery inbox wait ${normalized} --timeout ${timeout_seconds ?? 120} --json`,
+              cli_equivalent: `emails inbox wait ${normalized} --timeout ${timeout_seconds ?? 120} --json`,
             }, null, 2) }],
             isError: true,
           };
@@ -409,7 +409,7 @@ export function registerInboxTools(server: McpServer): void {
               subject: match.email.subject,
               received_at: match.email.received_at,
               confidence: match.confidence,
-              cli_equivalent: `mailery inbox wait-code ${normalized} --timeout ${timeout_seconds ?? 120} --json`,
+              cli_equivalent: `emails inbox wait-code ${normalized} --timeout ${timeout_seconds ?? 120} --json`,
             }, null, 2) }],
           };
         }
@@ -425,7 +425,7 @@ export function registerInboxTools(server: McpServer): void {
                 subject: match.email.subject,
                 received_at: match.email.received_at,
                 confidence: match.confidence,
-                cli_equivalent: `mailery inbox wait-code ${normalized} --timeout ${timeout_seconds ?? 120} --json`,
+                cli_equivalent: `emails inbox wait-code ${normalized} --timeout ${timeout_seconds ?? 120} --json`,
               }, null, 2) }],
             };
           }
@@ -435,7 +435,7 @@ export function registerInboxTools(server: McpServer): void {
             content: [{ type: "text", text: JSON.stringify({
               code: null,
               address: normalized,
-              cli_equivalent: `mailery inbox wait-code ${normalized} --timeout ${timeout_seconds ?? 120} --json`,
+              cli_equivalent: `emails inbox wait-code ${normalized} --timeout ${timeout_seconds ?? 120} --json`,
             }, null, 2) }],
             isError: true,
           };
@@ -476,7 +476,7 @@ export function registerInboxTools(server: McpServer): void {
               subject: match.email.subject,
               received_at: match.email.received_at,
               confidence: match.confidence,
-              cli_equivalent: `mailery inbox wait-code ${normalized} --timeout ${timeout_seconds ?? 120} --json`,
+              cli_equivalent: `emails inbox wait-code ${normalized} --timeout ${timeout_seconds ?? 120} --json`,
             }, null, 2) }],
           };
         }
@@ -492,7 +492,7 @@ export function registerInboxTools(server: McpServer): void {
                 subject: match.email.subject,
                 received_at: match.email.received_at,
                 confidence: match.confidence,
-                cli_equivalent: `mailery inbox wait-code ${normalized} --timeout ${timeout_seconds ?? 120} --json`,
+                cli_equivalent: `emails inbox wait-code ${normalized} --timeout ${timeout_seconds ?? 120} --json`,
               }, null, 2) }],
             };
           }
@@ -502,7 +502,7 @@ export function registerInboxTools(server: McpServer): void {
             content: [{ type: "text", text: JSON.stringify({
               code: null,
               address: normalized,
-              cli_equivalent: `mailery inbox wait-code ${normalized} --timeout ${timeout_seconds ?? 120} --json`,
+              cli_equivalent: `emails inbox wait-code ${normalized} --timeout ${timeout_seconds ?? 120} --json`,
             }, null, 2) }],
             isError: true,
           };
@@ -556,7 +556,7 @@ export function registerInboxTools(server: McpServer): void {
             html: body?.html ?? null,
             includeNonWeb: include_non_web === true,
           }),
-          cli_equivalent: `mailery inbox links ${msg.id} --json${include_non_web ? " --all" : ""}`,
+          cli_equivalent: `emails inbox links ${msg.id} --json${include_non_web ? " --all" : ""}`,
         }, null, 2) }],
       };
     } catch (e) {
@@ -716,7 +716,7 @@ export function registerInboxTools(server: McpServer): void {
           inbox: status.inbox,
           mailboxes: status.mailboxes,
           sources: status.sources,
-          cli_equivalent: "mailery inbox sync-status --json",
+          cli_equivalent: "emails inbox sync-status --json",
         }, null, 2) }] };
       } catch (e) {
         return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };

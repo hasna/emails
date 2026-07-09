@@ -90,7 +90,7 @@ export function registerDomainTools(server: McpServer): void {
         limit: pageLimit,
         offset: pageOffset,
         truncated: pageOffset + pageLimit < total,
-        cli_equivalent: `mailery domain usable${provider_id ? ` --provider ${provider_id}` : ""}${send ? " --send" : ""}${receive ? " --receive" : ""}${limit !== undefined ? ` --limit ${limit}` : ""}${offset !== undefined ? ` --offset ${offset}` : ""} --json`,
+        cli_equivalent: `emails domain usable${provider_id ? ` --provider ${provider_id}` : ""}${send ? " --send" : ""}${receive ? " --receive" : ""}${limit !== undefined ? ` --limit ${limit}` : ""}${offset !== undefined ? ` --offset ${offset}` : ""} --json`,
       }, null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
@@ -244,7 +244,7 @@ export function registerDomainTools(server: McpServer): void {
       const addresses = listEnrichedAddresses(resolvedId, getDatabase(), { limit: limit ?? 100, offset: offset ?? 0 });
       return { content: [{ type: "text", text: JSON.stringify({
         addresses,
-        cli_equivalent: `mailery address list${provider_id ? ` --provider ${provider_id}` : ""}${limit !== undefined ? ` --limit ${limit}` : ""}${offset !== undefined ? ` --offset ${offset}` : ""} --json`,
+        cli_equivalent: `emails address list${provider_id ? ` --provider ${provider_id}` : ""}${limit !== undefined ? ` --limit ${limit}` : ""}${offset !== undefined ? ` --offset ${offset}` : ""} --json`,
       }, null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
@@ -330,7 +330,7 @@ export function registerDomainTools(server: McpServer): void {
         limit: pageLimit,
         offset: pageOffset,
         truncated: pageOffset + pageLimit < total,
-        cli_equivalent: `mailery address list${provider_id ? ` --provider ${provider_id}` : ""}${limit !== undefined ? ` --limit ${limit}` : ""}${offset !== undefined ? ` --offset ${offset}` : ""} --json`,
+        cli_equivalent: `emails address list${provider_id ? ` --provider ${provider_id}` : ""}${limit !== undefined ? ` --limit ${limit}` : ""}${offset !== undefined ? ` --offset ${offset}` : ""} --json`,
       }, null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
@@ -350,7 +350,7 @@ export function registerDomainTools(server: McpServer): void {
       const detail = getAddressOwnershipDetail(address);
       return { content: [{ type: "text", text: JSON.stringify({
         ...detail,
-        cli_equivalent: `mailery address owner ${address} --json`,
+        cli_equivalent: `emails address owner ${address} --json`,
       }, null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
@@ -372,7 +372,7 @@ export function registerDomainTools(server: McpServer): void {
       const detail = setAddressOwnerByRef(address, owner, administrator);
       return { content: [{ type: "text", text: JSON.stringify({
         ...detail,
-        cli_equivalent: `mailery address set-owner ${address} --owner ${owner}${administrator ? ` --administrator ${administrator}` : ""} --json`,
+        cli_equivalent: `emails address set-owner ${address} --owner ${owner}${administrator ? ` --administrator ${administrator}` : ""} --json`,
       }, null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
@@ -396,7 +396,7 @@ export function registerDomainTools(server: McpServer): void {
       const detail = transferAddressOwnerByRef(address, owner, administrator, { actor: actor ?? "mcp", reason });
       return { content: [{ type: "text", text: JSON.stringify({
         ...detail,
-        cli_equivalent: `mailery address transfer-owner ${address} --owner ${owner}${administrator ? ` --administrator ${administrator}` : ""} --reason ${JSON.stringify(reason)} --yes --json`,
+        cli_equivalent: `emails address transfer-owner ${address} --owner ${owner}${administrator ? ` --administrator ${administrator}` : ""} --reason ${JSON.stringify(reason)} --yes --json`,
       }, null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
@@ -418,7 +418,7 @@ export function registerDomainTools(server: McpServer): void {
       const detail = unassignAddressOwnerByRef(address, { actor: actor ?? "mcp", reason });
       return { content: [{ type: "text", text: JSON.stringify({
         ...detail,
-        cli_equivalent: `mailery address unassign-owner ${address} --reason ${JSON.stringify(reason)} --yes --json`,
+        cli_equivalent: `emails address unassign-owner ${address} --reason ${JSON.stringify(reason)} --yes --json`,
       }, null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
@@ -439,7 +439,7 @@ export function registerDomainTools(server: McpServer): void {
       const detail = getAddressOwnershipHistoryByRef(address, limit ?? 20);
       return { content: [{ type: "text", text: JSON.stringify({
         ...detail,
-        cli_equivalent: `mailery address owner-history ${address} --limit ${limit ?? 20} --json`,
+        cli_equivalent: `emails address owner-history ${address} --limit ${limit ?? 20} --json`,
       }, null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
@@ -460,7 +460,7 @@ export function registerDomainTools(server: McpServer): void {
       return { content: [{ type: "text", text: JSON.stringify({
         domain,
         suggestions,
-        cli_equivalent: `mailery address suggest --domain ${domain} --json`,
+        cli_equivalent: `emails address suggest --domain ${domain} --json`,
       }, null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };

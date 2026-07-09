@@ -169,10 +169,10 @@ function lifecycleSummaryFromParts(
   if (domain.dkim_status !== "verified") missingRequirements.push("DKIM is not verified");
   if (domain.spf_status !== "verified") missingRequirements.push("SPF is not verified");
 
-  if (missingRecords.length > 0) nextActions.push(`mailery domains dns ${domain.domain}`);
-  if (domain.dkim_status !== "verified" || domain.spf_status !== "verified") nextActions.push(`mailery domains verify ${domain.domain}`);
-  if (!readiness.receive_ready) nextActions.push(readiness.fix_commands.find((command) => command.includes("domain adopt")) ?? `mailery domains enable-inbound ${domain.domain} --force`);
-  if (domain.outbound_status !== "ready") nextActions.push(`mailery domains enable-outbound ${domain.domain}`);
+  if (missingRecords.length > 0) nextActions.push(`emails domains dns ${domain.domain}`);
+  if (domain.dkim_status !== "verified" || domain.spf_status !== "verified") nextActions.push(`emails domains verify ${domain.domain}`);
+  if (!readiness.receive_ready) nextActions.push(readiness.fix_commands.find((command) => command.includes("domain adopt")) ?? `emails domains enable-inbound ${domain.domain} --force`);
+  if (domain.outbound_status !== "ready") nextActions.push(`emails domains enable-outbound ${domain.domain}`);
   if (opts.mode.warning) warnings.push(opts.mode.warning);
 
   return {

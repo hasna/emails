@@ -13,7 +13,7 @@ export interface MaileryProjectPanelOptions {
   db?: Database;
 }
 
-const SOURCE_PACKAGE = "@hasna/mailery";
+const SOURCE_PACKAGE = "@hasna/emails";
 
 function clampLimit(limit: number | undefined): number {
   if (!Number.isFinite(limit ?? 0)) return 20;

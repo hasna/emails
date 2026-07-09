@@ -43,7 +43,7 @@ export function registerSequenceCommands(program: Command, output: (data: unknow
         const page = parseCliListPage(opts);
         const seqs = listSequences(undefined, page);
         if (seqs.length === 0) {
-          output([], chalk.dim("No sequences. Use 'mailery sequence create' to add one."));
+          output([], chalk.dim("No sequences. Use 'emails sequence create' to add one."));
           return;
         }
         const lines: string[] = [chalk.bold("\nSequences:")];
@@ -59,7 +59,7 @@ export function registerSequenceCommands(program: Command, output: (data: unknow
           limit: page.limit,
           offset: page.offset,
           noun: "sequence",
-          detailCommand: "use mailery sequence show <name> for steps and enrollment counts",
+          detailCommand: "use emails sequence show <name> for steps and enrollment counts",
           verbose,
         }));
         output(seqs, lines.join("\n"));
@@ -84,7 +84,7 @@ export function registerSequenceCommands(program: Command, output: (data: unknow
         console.log(`  Enrollments: ${enrollmentCounts.active} active / ${enrollmentCounts.total} total`);
         console.log(`\n  Steps (${steps.length}):`);
         if (steps.length === 0) {
-          console.log(chalk.dim("    No steps. Use 'mailery sequence step add' to add some."));
+          console.log(chalk.dim("    No steps. Use 'emails sequence step add' to add some."));
         } else {
           for (const step of steps) {
             const fromStr = step.from_address ? ` from ${step.from_address}` : "";

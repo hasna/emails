@@ -205,7 +205,7 @@ export function registerMiscCommands(program: Command, output: (data: unknown, f
   // Unified `schedule` command. Old `scheduled` kept as alias.
   const scheduleCmd = program.command("schedule").description("Manage and run the email scheduler");
   // Keep `scheduled` as alias
-  const scheduledCmd = program.command("scheduled").description("Manage scheduled emails (alias: mailery schedule)");
+  const scheduledCmd = program.command("scheduled").description("Manage scheduled emails (alias: emails schedule)");
 
   scheduledCmd
     .command("list")
@@ -331,7 +331,7 @@ export function registerMiscCommands(program: Command, output: (data: unknown, f
   // ─── SCHEDULER (alias) ───────────────────────────────────────────────────────
   program
     .command("scheduler")
-    .description("Start the email scheduler (alias: mailery schedule run)")
+    .description("Start the email scheduler (alias: emails schedule run)")
     .option("--interval <duration>", "Poll interval (e.g. 30s, 1m, 5m)", "30s")
     .action(async (opts: { interval?: string }) => {
       try {
@@ -364,7 +364,7 @@ export function registerMiscCommands(program: Command, output: (data: unknown, f
           providerId = resolveId("providers", opts.provider);
         } else {
           const activeProviderId = getLatestActiveProviderId(undefined, db);
-          if (!activeProviderId) handleError(new Error("No active providers. Add one with 'mailery provider add'"));
+          if (!activeProviderId) handleError(new Error("No active providers. Add one with 'emails provider add'"));
           providerId = activeProviderId!;
         }
 

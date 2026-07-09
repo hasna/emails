@@ -113,7 +113,7 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
             would_assign_owner: !!opts.owner,
             current_provisioning: existing ? getAddressProvisioning(existing.id, db) : null,
             planned_provisioning: plannedProvisioning,
-            cli_equivalent: `mailery provision address ${email} --provider ${opts.provider}${opts.owner ? ` --owner ${opts.owner}` : ""}${opts.wait ? " --wait" : ""} --dry-run --json`,
+            cli_equivalent: `emails provision address ${email} --provider ${opts.provider}${opts.owner ? ` --owner ${opts.owner}` : ""}${opts.wait ? " --wait" : ""} --dry-run --json`,
           }, existing
             ? chalk.dim(`Would update provisioning for existing address ${email} (${existing.id.slice(0, 8)}).`)
             : chalk.dim(`Would create ${email} and request ${opts.receive} receive provisioning.`));
@@ -169,7 +169,7 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
 
         const readyText = provisioning?.provisioning_status === "ready"
           ? chalk.green(`✓ address ${email} ready to receive (receive=${opts.receive})${ownerNote}`)
-          : chalk.green(`✓ address ${email} requested (receive=${opts.receive})${ownerNote}`) + chalk.dim(`\n  Finish now: mailery provision address ${email} --provider ${opts.provider} --wait`);
+          : chalk.green(`✓ address ${email} requested (receive=${opts.receive})${ownerNote}`) + chalk.dim(`\n  Finish now: emails provision address ${email} --provider ${opts.provider} --wait`);
         output({ id: addr.id, email, receive: opts.receive, created: !existing, provisioning }, readyText);
       } catch (e) { handleError(e); }
     });
@@ -228,7 +228,7 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
             mx_safety: mxSafety,
             mx_assessment: mxAssessment,
             mx_requires_confirmation: mxRequiresConfirmation,
-            cli_equivalent: `mailery provision domain ${domain} --provider ${opts.provider}${opts.addMx ? " --add-mx" : ""}${opts.forceMxSwitch ? " --force-mx-switch" : ""}${opts.wait ? " --wait" : ""} --dry-run --json`,
+            cli_equivalent: `emails provision domain ${domain} --provider ${opts.provider}${opts.addMx ? " --add-mx" : ""}${opts.forceMxSwitch ? " --force-mx-switch" : ""}${opts.wait ? " --wait" : ""} --dry-run --json`,
           }, existing
             ? chalk.dim(`Would provision existing domain ${domain} (${existing.id.slice(0, 8)}).`)
             : chalk.dim(`Would register ${domain} locally, create SES identity, publish DNS, and${opts.wait ? "" : " not"} wait for verification.`)
@@ -274,7 +274,7 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
 
         output(
           { domain, mail_from: mailFrom, dns, verified },
-          chalk.green(`✓ ${domain}: SES identity + MAIL FROM (${mailFrom ?? "n/a"}), ${dns.created} DNS records in Cloudflare${opts.wait ? (verified ? ", VERIFIED ✓" : ", verification still pending") : `. Verify: mailery domain verify ${domain} --provider ${opts.provider}`}`),
+          chalk.green(`✓ ${domain}: SES identity + MAIL FROM (${mailFrom ?? "n/a"}), ${dns.created} DNS records in Cloudflare${opts.wait ? (verified ? ", VERIFIED ✓" : ", verification still pending") : `. Verify: emails domain verify ${domain} --provider ${opts.provider}`}`),
         );
       } catch (e) { handleError(e); }
     });

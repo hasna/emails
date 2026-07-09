@@ -8,7 +8,7 @@ export function startEventLoopWatchdog(options: EventLoopWatchdogOptions = {}): 
   const intervalMs = Math.max(100, options.intervalMs ?? 2000);
   const thresholdMs = Math.max(intervalMs, options.thresholdMs ?? 5000);
   const onLag = options.onLag ?? ((lagMs) => {
-    process.stderr.write(`[mailery ui] event loop lag ${Math.round(lagMs)}ms\n`);
+    process.stderr.write(`[emails ui] event loop lag ${Math.round(lagMs)}ms\n`);
   });
 
   let expected = Date.now() + intervalMs;

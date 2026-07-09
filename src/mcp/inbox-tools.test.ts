@@ -165,11 +165,11 @@ describe("mailbox source tools", () => {
 
     const legacyStatus = await toolJson("list_mailboxes", { source_id: "legacy" });
     expect((legacyStatus.counts as { inbox: number }).inbox).toBe(1);
-    expect(legacyStatus.cli_equivalent).toBe("mailery inbox mailboxes --source legacy --json");
+    expect(legacyStatus.cli_equivalent).toBe("emails inbox mailboxes --source legacy --json");
 
     const search = await toolJson("search_mailbox", { query: "needle", source_id: `provider:${pid}` });
     expect((search.items as Array<{ subject: string }>).map((item) => item.subject)).toEqual(["mcp provider needle"]);
-    expect(search.cli_equivalent).toBe(`mailery inbox search needle --folder inbox --source provider:${pid} --json`);
+    expect(search.cli_equivalent).toBe(`emails inbox search needle --folder inbox --source provider:${pid} --json`);
   });
 });
 
