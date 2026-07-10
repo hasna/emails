@@ -1,0 +1,20 @@
+# Copy to a private, ignored location. Never commit real account IDs or image
+# registries if they identify private infrastructure.
+aws_region         = "us-east-1"
+expected_account_id = "111122223333"
+container_image    = "registry.example/emails@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+# Safe defaults are repeated for clarity. The plan provisions infrastructure
+# but starts no application tasks and does not activate SES receiving.
+api_desired_count    = 0
+worker_desired_count = 0
+secrets_ready        = false
+migrations_complete  = false
+enable_ses_inbound   = false
+enable_public_endpoint = false
+enable_nat_gateway     = false
+
+tags = {
+  Environment = "production"
+  Owner       = "email-platform"
+}
