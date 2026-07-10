@@ -1,0 +1,7 @@
+# Create this bucket in the same operator-owned account before initialization.
+# Keep the real file outside version control.
+bucket       = "operator-owned-terraform-state"
+key          = "emails/production.tfstate"
+region       = "us-east-1"
+encrypt      = true
+use_lockfile = true
