@@ -313,12 +313,26 @@ export async function handleCloudRequest(
       return json(405, { error: "method not allowed" });
     }
 
+    // /v1/messages/counts — per-folder counts via one SQL aggregate (avoids the
+    // client O(all-messages) scan behind `status` and mailbox summaries).
+    if (path === "/v1/messages/counts") {
+      if (method === "GET") {
+        const auth = await authenticate(deps, req, url, read);
+        if (!auth.ok) return auth.response;
+        return json(200, { counts: await store.messageCounts() });
+      }
+      return json(405, { error: "method not allowed" });
+    }
+
     // /v1/messages
     if (path === "/v1/messages") {
       if (method === "GET") {
         const auth = await authenticate(deps, req, url, read);
         if (!auth.ok) return auth.response;
-        return json(200, { messages: await store.listMessages({ limit: queryInt(url, "limit"), offset: queryInt(url, "offset") }) });
+        const directionRaw = (url.searchParams.get("direction") ?? "").trim().toLowerCase();
+        const direction = directionRaw === "inbound" || directionRaw === "outbound" ? directionRaw : undefined;
+        const to = url.searchParams.get("to") ?? undefined;
+        return json(200, { messages: await store.listMessages({ limit: queryInt(url, "limit"), offset: queryInt(url, "offset"), direction, to }) });
       }
       if (method === "POST") {
         const auth = await authenticate(deps, req, url, write);

@@ -35,15 +35,27 @@ function messagesClient(): { client: TypedQueryClient; rows: Record<string, unkn
       const rowsOut = (await client.many(sql, params)) as never[];
       return { rows: rowsOut, rowCount: rowsOut.length };
     },
-    async many<T>(sql: string, _params?: readonly unknown[]): Promise<T[]> {
+    async many<T>(sql: string, params?: readonly unknown[]): Promise<T[]> {
       if (sql.includes("SELECT 1")) return [{ ok: 1 } as unknown as T];
       if (sql.includes("FROM messages")) {
-        const sorted = [...rows].sort((a, b) => {
+        let out = [...rows];
+        // Server-side direction/to filters (additive: absent -> full list).
+        if (sql.includes("<> 'outbound'")) {
+          out = out.filter((r) => String(r["direction"] ?? "").toLowerCase() !== "outbound");
+        } else if (sql.includes("= 'outbound'")) {
+          out = out.filter((r) => String(r["direction"] ?? "").toLowerCase() === "outbound");
+        }
+        const like = (params ?? []).find((p) => typeof p === "string" && p.startsWith("%") && p.endsWith("%"));
+        if (like) {
+          const needle = String(like).slice(1, -1).toLowerCase();
+          out = out.filter((r) => JSON.stringify(r["to_addrs"] ?? []).toLowerCase().includes(needle));
+        }
+        out.sort((a, b) => {
           const av = String(a["received_at"] ?? a["created_at"] ?? "");
           const bv = String(b["received_at"] ?? b["created_at"] ?? "");
           return bv.localeCompare(av);
         });
-        return sorted as unknown as T[];
+        return out as unknown as T[];
       }
       return [] as T[];
     },
@@ -51,6 +63,38 @@ function messagesClient(): { client: TypedQueryClient; rows: Record<string, unkn
       if (sql.includes("FROM messages WHERE id")) {
         const id = (params ?? [])[0];
         return (rows.find((r) => r["id"] === id) as unknown as T) ?? null;
+      }
+      // messageCounts() aggregate: mirror the folder predicates. In real
+      // Postgres `labels` is JSONB (parsed to an array); the mock stores the
+      // JSON string, so parse it here to emulate the driver.
+      if (sql.includes("WITH m AS")) {
+        const isOut = (r: Record<string, unknown>) => String(r["direction"] ?? "").toLowerCase() === "outbound";
+        const labelsOf = (r: Record<string, unknown>): string[] => {
+          const l = r["labels"];
+          if (Array.isArray(l)) return l as string[];
+          if (typeof l === "string") { try { const p = JSON.parse(l); return Array.isArray(p) ? p : []; } catch { return []; } }
+          return [];
+        };
+        const has = (r: Record<string, unknown>, l: string) => labelsOf(r).includes(l);
+        const isSpam = (r: Record<string, unknown>) => has(r, "spam") || String(r["status"] ?? "").toLowerCase() === "spam";
+        const inbox = rows.filter((r) => !isOut(r) && !has(r, "archived") && !isSpam(r) && !has(r, "trash"));
+        const latest = rows
+          .filter((r) => !isOut(r))
+          .map((r) => String(r["received_at"] ?? r["created_at"] ?? ""))
+          .filter(Boolean)
+          .sort()
+          .at(-1) ?? null;
+        return {
+          inbox: String(inbox.length),
+          unread: String(inbox.filter((r) => !r["is_read"]).length),
+          starred: String(rows.filter((r) => r["is_starred"] && !has(r, "trash")).length),
+          sent: String(rows.filter(isOut).length),
+          archived: String(rows.filter((r) => has(r, "archived")).length),
+          spam: String(rows.filter(isSpam).length),
+          trash: String(rows.filter((r) => has(r, "trash")).length),
+          total: String(rows.length),
+          latest_received_at: latest,
+        } as unknown as T;
       }
       return null;
     },
@@ -196,6 +240,47 @@ describe("mailery cloud inbound messages", () => {
     expect(noFrom?.status).toBe(400);
     const noTo = await handleCloudRequest(deps(), post({ from: "a@b.com" }));
     expect(noTo?.status).toBe(400);
+  });
+
+  test("GET /v1/messages/counts returns per-folder counts", async () => {
+    const d = deps();
+    await handleCloudRequest(d, post({ ...INBOUND, source_id: "in1", is_read: false, labels: [] }));
+    await handleCloudRequest(d, post({ ...INBOUND, source_id: "in2", is_read: true, labels: [] }));
+    await handleCloudRequest(d, post({ ...INBOUND, source_id: "spam1", labels: ["spam"] }));
+    await handleCloudRequest(d, post({ from: "me@x.com", to: ["y@x.com"], subject: "s", text: "t" })); // outbound
+    const res = await handleCloudRequest(d, new Request("http://svc/v1/messages/counts", {
+      headers: { "x-api-key": writeToken() },
+    }));
+    expect(res?.status).toBe(200);
+    const counts = (await res!.json()).counts;
+    expect(counts.inbox).toBe(2);
+    expect(counts.unread).toBe(1);
+    expect(counts.spam).toBe(1);
+    expect(counts.sent).toBe(1);
+    expect(counts.total).toBe(4);
+    expect(typeof counts.latest_received_at === "string" || counts.latest_received_at === null).toBe(true);
+  });
+
+  test("GET /v1/messages?direction= filters inbound vs outbound", async () => {
+    const d = deps();
+    await handleCloudRequest(d, post({ ...INBOUND, source_id: "inb" }));
+    await handleCloudRequest(d, post({ from: "me@x.com", to: ["y@x.com"], subject: "s", text: "t" }));
+    const inbound = await handleCloudRequest(d, new Request("http://svc/v1/messages?direction=inbound", { headers: { "x-api-key": writeToken() } }));
+    const inMsgs = (await inbound!.json()).messages;
+    expect(inMsgs.every((m: { direction: string }) => m.direction !== "outbound")).toBe(true);
+    const outbound = await handleCloudRequest(d, new Request("http://svc/v1/messages?direction=outbound", { headers: { "x-api-key": writeToken() } }));
+    const outMsgs = (await outbound!.json()).messages;
+    expect(outMsgs.every((m: { direction: string }) => m.direction === "outbound")).toBe(true);
+  });
+
+  test("GET /v1/messages?to= filters by recipient", async () => {
+    const d = deps();
+    await handleCloudRequest(d, post({ ...INBOUND, source_id: "toandrei", to: ["andrei@hasna.com"] }));
+    await handleCloudRequest(d, post({ ...INBOUND, source_id: "toother", to: ["someone@else.com"] }));
+    const res = await handleCloudRequest(d, new Request("http://svc/v1/messages?to=andrei@hasna.com", { headers: { "x-api-key": writeToken() } }));
+    const msgs = (await res!.json()).messages;
+    expect(msgs.length).toBe(1);
+    expect(msgs[0].to_addrs).toEqual(["andrei@hasna.com"]);
   });
 });
 

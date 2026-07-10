@@ -89,6 +89,27 @@ export interface ListOptions {
   offset?: number;
 }
 
+/** List options for /v1/messages, with the optional server-side filters. */
+export interface ListMessagesOptions extends ListOptions {
+  /** "inbound" => direction<>'outbound'; "outbound" => direction='outbound'. */
+  direction?: "inbound" | "outbound";
+  /** Coarse recipient substring filter (matched against to_addrs JSONB text). */
+  to?: string;
+}
+
+/** Per-folder message counts (mirrors the client's folderMatch classification). */
+export interface MessageCountsRecord {
+  inbox: number;
+  unread: number;
+  starred: number;
+  sent: number;
+  archived: number;
+  spam: number;
+  trash: number;
+  total: number;
+  latest_received_at: string | null;
+}
+
 function clampLimit(limit: number | undefined): number {
   if (!limit || Number.isNaN(limit)) return 100;
   return Math.min(Math.max(1, Math.floor(limit)), 500);
@@ -320,13 +341,89 @@ export class MaileryCloudStore {
   //
   // Ordering is by original receipt time when known, else insertion time, so an
   // imported inbox reads in true chronological order rather than import order.
-  async listMessages(opts: ListOptions = {}): Promise<MessageRecord[]> {
+  //
+  // Optional `direction`/`to` filters push the split-brain-free client's
+  // inbound/outbound separation and its recipient scan DOWN to SQL, so a flipped
+  // client no longer O(all-messages)-scans the whole store for `inbox latest` or
+  // the per-folder views (the reported timeout). The filters are additive and
+  // backward-compatible: absent -> identical to the historical unfiltered list.
+  async listMessages(opts: ListMessagesOptions = {}): Promise<MessageRecord[]> {
+    const where: string[] = [];
+    const params: unknown[] = [];
+    if (opts.direction === "inbound") {
+      where.push(`lower(COALESCE(direction, '')) <> 'outbound'`);
+    } else if (opts.direction === "outbound") {
+      where.push(`lower(COALESCE(direction, '')) = 'outbound'`);
+    }
+    if (opts.to && opts.to.trim()) {
+      // Coarse recipient match on the JSONB array text; the client re-applies the
+      // exact per-address match on the (small) returned set. Keeps the SQL simple
+      // and index-agnostic while still bounding the scan server-side.
+      params.push(`%${opts.to.trim().toLowerCase()}%`);
+      where.push(`lower(to_addrs::text) LIKE $${params.length}`);
+    }
+    const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+    params.push(clampLimit(opts.limit));
+    const limitIdx = params.length;
+    params.push(clampOffset(opts.offset));
+    const offsetIdx = params.length;
     const rows = await this.client.many<Record<string, unknown>>(
-      `SELECT ${MESSAGE_COLUMNS} FROM messages
-       ORDER BY COALESCE(received_at, created_at) DESC LIMIT $1 OFFSET $2`,
-      [clampLimit(opts.limit), clampOffset(opts.offset)],
+      `SELECT ${MESSAGE_COLUMNS} FROM messages ${whereSql}
+       ORDER BY COALESCE(received_at, created_at) DESC LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
+      params,
     );
     return rows.map(mapMessageRow);
+  }
+
+  /**
+   * Per-folder message counts computed in a single SQL aggregate, so the flipped
+   * client's `status` / mailbox summaries never have to page the entire store.
+   * The folder predicates MIRROR the client's folderMatch() exactly (outbound is
+   * only a literal `direction='outbound'`; archived/spam/trash are label flags,
+   * spam also honours `status='spam'`). `labels` and `to_addrs` are JSONB.
+   */
+  async messageCounts(): Promise<MessageCountsRecord> {
+    const row = await this.client.get<Record<string, unknown>>(
+      `WITH m AS (
+         SELECT
+           (lower(COALESCE(direction, '')) = 'outbound')                       AS is_out,
+           (labels @> '["archived"]'::jsonb)                                   AS is_arch,
+           (labels @> '["spam"]'::jsonb OR lower(COALESCE(status, '')) = 'spam') AS is_spam,
+           (labels @> '["trash"]'::jsonb)                                      AS is_trash,
+           is_read,
+           is_starred,
+           COALESCE(received_at, created_at)                                   AS ts
+         FROM messages
+       )
+       SELECT
+         count(*) FILTER (WHERE is_out)                                                       AS sent,
+         count(*) FILTER (WHERE NOT is_out AND NOT is_arch AND NOT is_spam AND NOT is_trash)  AS inbox,
+         count(*) FILTER (WHERE NOT is_out AND NOT is_arch AND NOT is_spam AND NOT is_trash AND NOT is_read) AS unread,
+         count(*) FILTER (WHERE is_starred AND NOT is_trash)                                  AS starred,
+         count(*) FILTER (WHERE is_arch)                                                      AS archived,
+         count(*) FILTER (WHERE is_spam)                                                      AS spam,
+         count(*) FILTER (WHERE is_trash)                                                     AS trash,
+         count(*)                                                                             AS total,
+         max(ts) FILTER (WHERE NOT is_out)                                                    AS latest_received_at
+       FROM m`,
+    );
+    const n = (v: unknown): number => {
+      const x = typeof v === "number" ? v : Number(v);
+      return Number.isFinite(x) ? x : 0;
+    };
+    const latest = row?.["latest_received_at"];
+    return {
+      inbox: n(row?.["inbox"]),
+      unread: n(row?.["unread"]),
+      starred: n(row?.["starred"]),
+      sent: n(row?.["sent"]),
+      archived: n(row?.["archived"]),
+      spam: n(row?.["spam"]),
+      trash: n(row?.["trash"]),
+      total: n(row?.["total"]),
+      latest_received_at:
+        latest instanceof Date ? latest.toISOString() : latest ? String(latest) : null,
+    };
   }
 
   async getMessage(id: string): Promise<MessageRecord | null> {
