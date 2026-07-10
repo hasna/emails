@@ -166,7 +166,8 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
     .action((id: string, opts: ReplyPageOpts) => {
       try {
         const db = getDatabase();
-        const resolvedId = resolveId("emails", id);
+        const resolvedId = resolveEmailId(id, db);
+        if (!resolvedId) return handleError(new Error(`Email not found: ${id}`));
         const { limit, offset } = parseReplyPage(opts);
         const total = getReplyCount(resolvedId, db);
         const replies = listReplySummaries(resolvedId, db, { limit, offset });
@@ -365,7 +366,8 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
     .action((id: string, opts: ReplyPageOpts) => {
       try {
         const db = getDatabase();
-        const resolvedId = resolveId("emails", id);
+        const resolvedId = resolveEmailId(id, db);
+        if (!resolvedId) return handleError(new Error(`Email not found: ${id}`));
         const { limit, offset } = parseReplyPage(opts);
         const total = getReplyCount(resolvedId, db);
         const replies = listReplySummaries(resolvedId, db, { limit, offset });
@@ -383,7 +385,8 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
     .action((id: string, opts: ReplyPageOpts) => {
       try {
         const db = getDatabase();
-        const resolvedId = resolveId("emails", id);
+        const resolvedId = resolveEmailId(id, db);
+        if (!resolvedId) return handleError(new Error(`Email not found: ${id}`));
         const emailRecord = getEmail(resolvedId, db);
         if (!emailRecord) handleError(new Error(`Email not found: ${id}`));
         const { limit, offset } = parseReplyPage(opts);

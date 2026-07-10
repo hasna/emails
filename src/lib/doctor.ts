@@ -1,4 +1,5 @@
 import { getDatabase } from "../db/database.js";
+import { isCloudMode, cloudStoreFor } from "../db/cloud-store.js";
 import { listProviders } from "../db/providers.js";
 import { countValue } from "../db/scalars.js";
 import { checkAllProviders } from "./health.js";
@@ -20,14 +21,30 @@ export async function runDiagnostics(db?: Database, opts: DiagnosticsOptions = {
   const checks: DoctorCheck[] = [];
   let d: Database;
 
-  // 1. DB accessible
-  try {
-    d = db || getDatabase();
-    d.query("SELECT 1").get();
-    checks.push({ name: "Database", status: "pass", message: "SQLite database accessible" });
-  } catch (e) {
-    checks.push({ name: "Database", status: "fail", message: `Database error: ${e}` });
-    return checks;
+  // 1. Store accessible. In cloud mode the CLI routes to the /v1 API, NOT the
+  // local SQLite file, so probe the cloud store (bounded, fail-loud) and report
+  // that — reporting "SQLite database accessible" while actively cloud-routing
+  // is the misleading-diagnostic bug. A local handle is still opened so the
+  // later local-only checks (domains/addresses/etc.) do not crash.
+  d = db || getDatabase();
+  if (isCloudMode()) {
+    try {
+      const store = cloudStoreFor("providers");
+      store?.list({ limit: 1 });
+      checks.push({ name: "Database", status: "pass", message: "Cloud API store reachable (/v1)" });
+    } catch (e) {
+      const detail = e instanceof Error ? e.message : String(e);
+      checks.push({ name: "Database", status: "fail", message: `Cloud API store unreachable: ${detail}` });
+      return checks;
+    }
+  } else {
+    try {
+      d.query("SELECT 1").get();
+      checks.push({ name: "Database", status: "pass", message: "SQLite database accessible" });
+    } catch (e) {
+      checks.push({ name: "Database", status: "fail", message: `Database error: ${e}` });
+      return checks;
+    }
   }
 
   // 2. Config file
