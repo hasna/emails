@@ -1,7 +1,7 @@
 {
   "name": "@hasna/emails",
   "version": "0.6.117",
-  "description": "Mailery email management CLI + MCP server + dashboard for Resend, AWS SES, and Cloudflare inbound workflows",
+  "description": "Emails local and self-hosted email management CLI, MCP server, and dashboard",
   "type": "module",
   "repository": {
     "type": "git",
@@ -20,10 +20,6 @@
     "./storage": {
       "types": "./dist/storage.d.ts",
       "import": "./dist/storage.js"
-    },
-    "./cloud": {
-      "types": "./dist/cloud.d.ts",
-      "import": "./dist/cloud.js"
     },
     "./selfhost": {
       "types": "./dist/selfhost.d.ts",
@@ -45,13 +41,13 @@
     "build:tui-runtime": "bun run scripts/build-tui-runtime.ts",
     "build:mcp": "bun build src/mcp/index.ts --outdir dist/mcp --target bun --packages external --splitting",
     "build:server": "bun build src/server/index.ts --outdir dist/server --target bun --packages external --splitting",
-    "build:lib": "bun build src/index.ts src/storage.ts src/cloud.ts src/selfhost.ts --outdir dist --target bun --packages external --splitting",
+    "build:lib": "bun build src/index.ts src/storage.ts src/selfhost.ts --outdir dist --target bun --packages external --splitting",
     "build:types": "tsc --emitDeclarationOnly --outDir dist",
     "test": "bun test",
     "no-cloud:source": "bun test src/no-cloud-boundary.test.ts",
-    "no-cloud:pack": "node scripts/no-cloud-artifact-scan.mjs",
+    "no-cloud:pack": "bun scripts/no-cloud-artifact-scan.mjs",
     "prepack": "bun run build && bun run no-cloud:source && bun run no-cloud:pack",
-    "prepublishOnly": "tmp_home=$(mktemp -d) && HOME=\"$tmp_home\" MAILERY_MODE=local HASNA_EMAILS_MODE=local EMAILS_DB_PATH=:memory: bun test; status=$?; rm -rf \"$tmp_home\"; if [ $status -ne 0 ]; then exit $status; fi; bun run build && bun run no-cloud:pack",
+    "prepublishOnly": "tmp_home=$(mktemp -d) && HOME=\"$tmp_home\" EMAILS_MODE=local EMAILS_DB_PATH=:memory: bun test; status=$?; rm -rf \"$tmp_home\"; if [ $status -ne 0 ]; then exit $status; fi; bun run build && bun run no-cloud:pack",
     "dev:cli": "bun run src/cli/index.tsx",
     "dev:mcp": "bun run src/mcp/index.ts",
     "dev:serve": "bun run src/server/index.ts",

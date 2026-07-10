@@ -12,7 +12,7 @@ let tempHome: string | undefined;
 
 beforeEach(() => {
   previousHome = process.env["HOME"];
-  tempHome = mkdtempSync(join(tmpdir(), "mailery-agent-test-home-"));
+  tempHome = mkdtempSync(join(tmpdir(), "emails-agent-test-home-"));
   process.env["HOME"] = tempHome;
   process.env["EMAILS_DB_PATH"] = ":memory:";
   resetDatabase();

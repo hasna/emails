@@ -8,7 +8,7 @@ import {
 import { listInboundEmailSummaries, type InboundEmailSummary } from "../db/inbound.js";
 import { getEmailSystemStatus } from "./agent-context.js";
 
-export interface MaileryProjectPanelOptions {
+export interface EmailsProjectPanelOptions {
   limit?: number;
   db?: Database;
 }
@@ -25,7 +25,7 @@ function slugify(value: string): string {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
-    .replace(/-{2,}/g, "-") || "mailery";
+    .replace(/-{2,}/g, "-") || "emails";
 }
 
 function emailTimestamp(value: string | null | undefined): string | undefined {
@@ -51,7 +51,7 @@ function inboundEmailResource(email: InboundEmailSummary) {
     kind: "email" as const,
     id: email.id,
     name: email.subject || "(no subject)",
-    uri: `mailery://inbound/${email.id}`,
+    uri: `integration://emails/inbound/${email.id}`,
     externalId: email.id,
     sourcePackage: SOURCE_PACKAGE,
     tags: [
@@ -74,34 +74,34 @@ function loadRecentInbound(limit: number, db?: Database): InboundEmailSummary[] 
   return listInboundEmailSummaries({ limit }, db);
 }
 
-export function createMaileryProjectPanel(projectRef: string, options: MaileryProjectPanelOptions = {}): ProjectPanel {
+export function createEmailsProjectPanel(projectRef: string, options: EmailsProjectPanelOptions = {}): ProjectPanel {
   const limit = clampLimit(options.limit);
   const generatedAt = new Date().toISOString();
   const projectId = slugify(projectRef);
   const status = getEmailSystemStatus(options.db);
   const recentInbound = loadRecentInbound(limit, options.db);
   const provisioningFailures = status.provisioning.domains_failed + status.provisioning.addresses_failed;
-  const hasMaileryState = status.providers.total > 0 || status.domains.total > 0 || status.addresses.total > 0 || status.inbox.total > 0;
+  const hasEmailsState = status.providers.total > 0 || status.domains.total > 0 || status.addresses.total > 0 || status.inbox.total > 0;
   const visibleSources = status.sources.items.filter((source) => source.kind !== "all");
 
   const draft: ProjectPanelInput = {
     schema: SCHEMA_IDS.projectPanel,
-    id: `mailery_panel_${projectId}`,
+    id: `emails_panel_${projectId}`,
     createdAt: generatedAt,
     projectId,
     provider: {
-      kind: "mailery",
-      id: `mailery_${projectId}`,
-      name: "Mailery",
+      kind: "custom",
+      id: `emails_${projectId}`,
+      name: "Emails",
       sourcePackage: SOURCE_PACKAGE,
       externalId: projectId,
     },
-    kind: "mailery",
-    title: "Mailery",
-    summary: hasMaileryState
+    kind: "custom",
+    title: "Emails",
+    summary: hasEmailsState
       ? `${status.inbox.unread} unread inbound email${status.inbox.unread === 1 ? "" : "s"} across ${status.sources.active}/${status.sources.total} ingestion source${status.sources.total === 1 ? "" : "s"}.`
-      : "No Mailery provider credentials, domains, addresses, or inbound emails are configured yet.",
-    state: hasMaileryState ? "ready" : "empty",
+      : "No Emails provider credentials, domains, addresses, or inbound emails are configured yet.",
+    state: hasEmailsState ? "ready" : "empty",
     generatedAt,
     freshness: status.inbox.latest_received_at ? "fresh" : "unknown",
     metrics: [
@@ -138,8 +138,8 @@ export function createMaileryProjectPanel(projectRef: string, options: MaileryPr
       },
     })),
     actions: [
-      { kind: "action", id: "mailery:status", name: "Show Mailery status", sourcePackage: SOURCE_PACKAGE, externalId: "status" },
-      { kind: "action", id: "mailery:inbox", name: "List inbox", sourcePackage: SOURCE_PACKAGE, externalId: "inbox" },
+      { kind: "action", id: "emails:status", name: "Show Emails status", sourcePackage: SOURCE_PACKAGE, externalId: "status" },
+      { kind: "action", id: "emails:inbox", name: "List inbox", sourcePackage: SOURCE_PACKAGE, externalId: "inbox" },
     ],
     resourceRefs: [
       projectResource(projectId, projectRef),
@@ -147,7 +147,7 @@ export function createMaileryProjectPanel(projectRef: string, options: MaileryPr
         kind: "integration" as const,
         id: source.id,
         name: source.label,
-        uri: `mailery://sources/${encodeURIComponent(source.id)}`,
+        uri: `integration://emails/sources/${encodeURIComponent(source.id)}`,
         externalId: source.id,
         sourcePackage: SOURCE_PACKAGE,
         tags: [source.kind, ...source.badges],
@@ -155,15 +155,15 @@ export function createMaileryProjectPanel(projectRef: string, options: MaileryPr
     ],
     renderFragment: {
       renderer: "json_render",
-      title: "Mailery",
+      title: "Emails",
       spec: {
-        component: "project.mailery.summary",
+        component: "project.emails.summary",
         metrics: ["providers_active", "sources_total", "inbox_unread", "domains_send_ready", "addresses_ready_to_receive", "provisioning_failures"],
         itemLimit: limit,
       },
     },
     warnings: [
-      "Mailery does not yet persist a project-to-email mapping; this panel summarizes the current Mailery workspace.",
+      "Emails does not yet persist a project-to-email mapping; this panel summarizes the current Emails workspace.",
     ],
   };
 

@@ -44,7 +44,15 @@ describe("getDatabase", () => {
   it("records the latest SQLite migration in _migrations", () => {
     const db = getDatabase();
     const row = db.query("SELECT MAX(id) as max_id FROM _migrations").get() as { max_id: number } | null;
-    expect(row?.max_id).toBeGreaterThanOrEqual(44);
+    expect(row?.max_id).toBeGreaterThanOrEqual(46);
+  });
+
+  it("applies the additive rename bridge without leaving the legacy mailbox identity", () => {
+    const db = getDatabase();
+    const legacy = db.query("SELECT id FROM mailboxes WHERE id = ?").get("mbx:legacy-inbound@local.mailery");
+    const receipts = db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'webhook_receipts'").get() as { name: string } | null;
+    expect(legacy).toBeNull();
+    expect(receipts?.name).toBe("webhook_receipts");
   });
 
   it("creates hot-path composite indexes used by list and export queries", () => {

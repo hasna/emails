@@ -5,7 +5,7 @@ import { getDomainByName } from "../../db/domains.js";
 import { suspendAddress, activateAddress, setAddressQuota, countSendsTodayByAddress } from "../../db/address-lifecycle.js";
 import { getProvider } from "../../db/providers.js";
 import { getDatabase } from "../../db/database.js";
-import { isCloudMode } from "../../db/cloud-store.js";
+import { isSelfHostedMode } from "../../db/self-hosted-store.js";
 import { getAdapter } from "../../providers/index.js";
 import { colorDnsStatus, tableRow, truncate } from "../../lib/format.js";
 import { confirmDestructiveAction, formatListHint, handleError, isCliVerboseOutput, parseCliListPage, resolveId } from "../utils.js";
@@ -106,20 +106,20 @@ export function registerAddressCommands(program: Command, output: (data: unknown
     .option("--name <displayName>", "Display name")
     .action(async (email: string, opts: { provider: string; name?: string }) => {
       try {
-        // Cloud (self_hosted) mode: addresses are created directly on the app's
-        // cloud HTTP API (<API_URL>/v1/addresses). Providers are a local-only
-        // concept (the cloud API exposes no /v1/providers), so we do NOT resolve
+        // Self-hosted (self_hosted) mode: addresses are created directly on the app's
+        // self_hosted HTTP API (<API_URL>/v1/addresses). Providers are a local-only
+        // concept (the self_hosted API exposes no /v1/providers), so we do NOT resolve
         // a local provider row or invoke a provider adapter — `--provider` is
-        // carried through as a label. Mirrors `domain add`'s cloud passthrough so
-        // `address add` is a real cloud write that never touches the local store.
-        if (isCloudMode()) {
+        // carried through as a label. Mirrors `domain add`'s self_hosted passthrough so
+        // `address add` is a real self_hosted write that never touches the local store.
+        if (isSelfHostedMode()) {
           const existing = getAddressByEmail(opts.provider, email);
           if (existing) {
             output(existing, chalk.green(`✓ Address already exists: ${email} (${existing.id.slice(0, 8)})`));
             return;
           }
           const addr = createAddress({ provider_id: opts.provider, email, display_name: opts.name });
-          output(addr, chalk.green(`✓ Address added to cloud: ${email} (${addr.id.slice(0, 8)})`));
+          output(addr, chalk.green(`✓ Address added to self_hosted: ${email} (${addr.id.slice(0, 8)})`));
           return;
         }
 
@@ -398,13 +398,13 @@ export function registerAddressCommands(program: Command, output: (data: unknown
     .option("--provider <id>", "Provider ID")
     .action(async (email: string, opts: { provider?: string }) => {
       try {
-        // Cloud (self_hosted) mode: providers are a local-only concept and the
-        // cloud API exposes no /v1/providers, so we cannot resolve a local
+        // Self-hosted (self_hosted) mode: providers are a local-only concept and the
+        // self_hosted API exposes no /v1/providers, so we cannot resolve a local
         // provider row or invoke a provider adapter here (that path would fail
-        // with "Provider not found"). The cloud address record is the source of
+        // with "Provider not found"). The self_hosted address record is the source of
         // truth for verification state — report its `verified` flag directly.
-        // Mirrors `address add`'s cloud passthrough.
-        if (isCloudMode()) {
+        // Mirrors `address add`'s self_hosted passthrough.
+        if (isSelfHostedMode()) {
           const providerFilter = opts.provider;
           const found = findAddressesByEmail(email).find(
             (a) => !providerFilter || a.provider_id === providerFilter,

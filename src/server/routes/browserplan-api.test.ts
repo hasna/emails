@@ -36,7 +36,7 @@ let domainId: string;
 beforeEach(() => {
   process.env["EMAILS_DB_PATH"] = ":memory:";
   process.env["OPEN_IDENTITIES_STORE"] = "/tmp/missing-open-identities-store.json";
-  process.env["MAILERY_MACHINE_ID"] = "machine003";
+  process.env["EMAILS_MACHINE_ID"] = "machine003";
   resetDatabase();
   providerId = createProvider({ name: "ses", type: "ses" }).id;
   domainId = createDomain(providerId, "example.com").id;
@@ -47,7 +47,7 @@ afterEach(() => {
   closeDatabase();
   delete process.env["EMAILS_DB_PATH"];
   delete process.env["OPEN_IDENTITIES_STORE"];
-  delete process.env["MAILERY_MACHINE_ID"];
+  delete process.env["EMAILS_MACHINE_ID"];
 });
 
 function ready(email: string): void {
@@ -98,7 +98,7 @@ describe("BrowserPlan API routes", () => {
     const body = await response.json() as { error: string };
 
     expect(response.status).toBe(409);
-    expect(body.error).toContain("does not match local Mailery machine");
+    expect(body.error).toContain("does not match local Emails machine");
   });
 
   it("uses specific REST statuses for not-ready and missing addresses", async () => {

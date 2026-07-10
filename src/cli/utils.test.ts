@@ -57,14 +57,14 @@ describe("cli/utils", () => {
     const originalArgv = process.argv;
     try {
       configureCliRuntime({ json: false, verbose: false });
-      process.argv = ["bun", "mailery", "address", "list"];
+      process.argv = ["bun", "emails", "address", "list"];
       expect(parseCliListPage({})).toEqual({ limit: 20, offset: 0, compact: true });
       expect(parseCliListPage({ limit: "50" })).toEqual({ limit: 20, offset: 0, compact: true });
 
-      process.argv = ["bun", "mailery", "address", "list", "--limit", "50"];
+      process.argv = ["bun", "emails", "address", "list", "--limit", "50"];
       expect(parseCliListPage({ limit: "50" })).toEqual({ limit: 50, offset: 0, compact: false });
 
-      process.argv = ["bun", "mailery", "address", "list"];
+      process.argv = ["bun", "emails", "address", "list"];
       expect(parseCliListPage({ verbose: true })).toEqual({ limit: 50, offset: 0, compact: false });
       configureCliRuntime({ json: false, verbose: true });
       expect(parseCliListPage({})).toEqual({ limit: 50, offset: 0, compact: false });

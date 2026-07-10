@@ -134,7 +134,7 @@ export function registerTemplateCommands(program: Command, output: (data: unknow
           console.log(renderedHtml);
 
           if (opts.open) {
-            const tmpPath = pathJoin(tmpdir(), `mailery-preview-${templateName}.html`);
+            const tmpPath = pathJoin(tmpdir(), `emails-preview-${templateName}.html`);
             writeFileSync(tmpPath, renderedHtml, "utf-8");
             const opened = openLocalTarget(tmpPath);
             const message = opened.ok ? `Opened preview in browser: ${tmpPath}` : `Saved preview: ${tmpPath}`;

@@ -1,5 +1,5 @@
 /**
- * Provisioning credential status (mailery) — reports whether usable
+ * Provisioning credential status (emails) — reports whether usable
  * credentials are present for each provisioning provider, across all supported
  * auth modes. Pure (env injected); surfaced by
  * `emails doctor`.

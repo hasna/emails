@@ -1,5 +1,5 @@
 /**
- * Tenancy / ownership — addresses are owned by a human OR an agent.
+ * Ownership — addresses are owned by a human OR an agent.
  *
  * Rule: a human-owned address must be ADMINISTERED by an agent (owner=human,
  * administrator=agent). An agent-owned address is self-administered
@@ -11,7 +11,7 @@ import type { Database } from "./database.js";
 import { getDatabase, now, uuid } from "./database.js";
 import type { EmailAddress } from "../types/index.js";
 import { cappedLimit, safeOffset, safeOptionalLimit } from "./pagination.js";
-import { cloudResource, cloudListQuery, cloudPage, ciso, cstr, cstrOrNull } from "./cloud-resource.js";
+import { selfHostedResource, selfHostedListQuery, selfHostedPage, ciso, cstr, cstrOrNull } from "./self-hosted-resource.js";
 
 const OWNER_RESOURCE = "owners";
 
@@ -72,16 +72,16 @@ export function createOwner(input: CreateOwnerInput, db?: Database): Owner {
   }
   const externalId = input.external_id?.trim();
 
-  // Cloud mode: route the write to the /v1/owners API so a flipped client no
+  // Self-hosted mode: route the write to the /v1/owners API so a flipped client no
   // longer registers owners into the local SQLite island while `owner list`
-  // reads the cloud (the split-brain bug). Reads already route via listOwners().
-  const cloud = cloudResource(OWNER_RESOURCE);
-  if (cloud) {
+  // reads the selfHosted (the split-brain bug). Reads already route via listOwners().
+  const selfHosted = selfHostedResource(OWNER_RESOURCE);
+  if (selfHosted) {
     if (externalId) {
-      const clash = cloud.list().map(apiToOwner).some((o) => o.external_id === externalId);
+      const clash = selfHosted.list().map(apiToOwner).some((o) => o.external_id === externalId);
       if (clash) throw new Error(`Owner external_id already exists: ${externalId}`);
     }
-    return apiToOwner(cloud.create({
+    return apiToOwner(selfHosted.create({
       type: input.type,
       name: input.name,
       contact_email: input.contact_email ?? null,
@@ -104,11 +104,20 @@ export function createOwner(input: CreateOwnerInput, db?: Database): Owner {
 }
 
 export function getOwner(id: string, db?: Database): Owner | null {
+  const selfHosted = selfHostedResource(OWNER_RESOURCE);
+  if (selfHosted) {
+    const record = selfHosted.get(id);
+    return record ? apiToOwner(record) : null;
+  }
   const d = db || getDatabase();
   return (d.query("SELECT * FROM owners WHERE id = ?").get(id) as Owner | null) ?? null;
 }
 
 export function getOwnerByName(name: string, db?: Database): Owner | null {
+  const selfHosted = selfHostedResource(OWNER_RESOURCE);
+  if (selfHosted) {
+    return selfHosted.list({ limit: 1000 }).map(apiToOwner).find((owner) => owner.name === name) ?? null;
+  }
   const d = db || getDatabase();
   return (d.query("SELECT * FROM owners WHERE name = ? ORDER BY created_at ASC").get(name) as Owner | null) ?? null;
 }
@@ -116,6 +125,10 @@ export function getOwnerByName(name: string, db?: Database): Owner | null {
 export function getOwnerByExternalId(externalId: string, db?: Database): Owner | null {
   const normalized = externalId.trim();
   if (!normalized) return null;
+  const selfHosted = selfHostedResource(OWNER_RESOURCE);
+  if (selfHosted) {
+    return selfHosted.list({ limit: 1000 }).map(apiToOwner).find((owner) => owner.external_id === normalized) ?? null;
+  }
   const d = db || getDatabase();
   return (d.query("SELECT * FROM owners WHERE external_id = ? ORDER BY created_at ASC").get(normalized) as Owner | null) ?? null;
 }
@@ -123,6 +136,11 @@ export function getOwnerByExternalId(externalId: string, db?: Database): Owner |
 export function getOwnerByContactEmail(email: string, db?: Database): Owner | null {
   const normalized = email.trim().toLowerCase();
   if (!normalized) return null;
+  const selfHosted = selfHostedResource(OWNER_RESOURCE);
+  if (selfHosted) {
+    return selfHosted.list({ limit: 1000 }).map(apiToOwner)
+      .find((owner) => owner.contact_email?.toLowerCase() === normalized) ?? null;
+  }
   const d = db || getDatabase();
   return (d
     .query("SELECT * FROM owners WHERE LOWER(contact_email) = ? ORDER BY created_at ASC")
@@ -130,14 +148,14 @@ export function getOwnerByContactEmail(email: string, db?: Database): Owner | nu
 }
 
 export function listOwners(type?: OwnerType, db?: Database, opts?: ListOwnerOptions): Owner[] {
-  const cloud = cloudResource(OWNER_RESOURCE);
-  if (cloud) {
-    const { query, limit, offset } = cloudListQuery(opts);
+  const selfHosted = selfHostedResource(OWNER_RESOURCE);
+  if (selfHosted) {
+    const { query, limit, offset } = selfHostedListQuery(opts);
     if (type) query["type"] = type;
-    let rows = cloud.list(query).map(apiToOwner);
+    let rows = selfHosted.list(query).map(apiToOwner);
     if (type) rows = rows.filter((o) => o.type === type);
     rows.sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
-    return cloudPage(rows, limit, offset);
+    return selfHostedPage(rows, limit, offset);
   }
 
   const d = db || getDatabase();
@@ -271,7 +289,7 @@ export function assignAddressOwner(
   const ownership = validateAddressOwnership(ownerId, administratorId, d);
 
   // Refuse to silently take over an address already owned by someone else —
-  // prevents cross-tenant hijack on (re)provision. Reassigning to the same
+  // prevents cross-principal hijack on (re)provision. Reassigning to the same
   // owner (e.g. updating the administrator) stays allowed.
   const current = getCurrentAddressOwnership(addressId, d);
   if (current.owner_id && current.owner_id !== ownership.owner_id) {

@@ -289,7 +289,7 @@ export async function startServer(port = 3900, hostname = "127.0.0.1"): Promise<
     fetch: (req) => handleDashboardRequest(req, dashboardDir),
   });
 
-  console.log(`\nMailery dashboard running at http://${hostname}:${server.port}`);
+  console.log(`\nEmails dashboard running at http://${hostname}:${server.port}`);
   console.log(`API available at http://${hostname}:${server.port}/api`);
   console.log(`Press Ctrl+C to stop\n`);
 }

@@ -11,7 +11,7 @@ import {
   type EmailDigestProvider,
 } from "../db/email-digests.js";
 import { parseJsonArray } from "../db/json.js";
-import { createMaileryAiModel, DEFAULT_GROQ_EMAIL_AGENT_MODEL, resolveMaileryAiDefaults } from "./mailery-ai.js";
+import { createEmailsAiModel, DEFAULT_GROQ_EMAIL_AGENT_MODEL, resolveEmailsAiDefaults } from "./emails-ai.js";
 
 export interface EmailDigestWindow {
   period: EmailDigestPeriod;
@@ -63,7 +63,7 @@ interface DigestSourceEmail {
 
 const MAX_DIGEST_EMAILS = 160;
 const MAX_BODY_EXCERPT_CHARS = 900;
-const DIGEST_PROMPT_VERSION = "mailery-email-digest-v1";
+const DIGEST_PROMPT_VERSION = "emails-email-digest-v1";
 
 const DIGEST_OUTPUT_SCHEMA = z.object({
   summary: z.string().min(1).max(1800),
@@ -387,14 +387,14 @@ export async function generateEmailDigest(
     return saveDigestFromOutput({
       window,
       provider: "local",
-      model: "local-mailery-digest",
+      model: "local-emails-digest",
       emails,
       output: localDigestOutput(emails, window),
       startedAt,
     }, db);
   }
 
-  const providerDefaults = resolveMaileryAiDefaults({
+  const providerDefaults = resolveEmailsAiDefaults({
     provider: opts.provider ?? "groq",
     model: opts.model,
     defaultProvider: "groq",
@@ -403,10 +403,10 @@ export async function generateEmailDigest(
   const provider = providerDefaults.provider;
   const model = providerDefaults.model;
   const ai = deps.generateText && (provider === "groq" || deps.Output) ? deps : await import("ai");
-  const languageModel = deps.model ?? await createMaileryAiModel(provider, model);
+  const languageModel = deps.model ?? await createEmailsAiModel(provider, model);
 
   try {
-    const system = `You are Mailery's read-only email digest agent. Return JSON matching the requested schema. Prompt version: ${DIGEST_PROMPT_VERSION}.`;
+    const system = `You are Emails's read-only email digest agent. Return JSON matching the requested schema. Prompt version: ${DIGEST_PROMPT_VERSION}.`;
     const prompt = digestPrompt(emails, window);
     let outputValue: unknown;
     if (provider === "groq") {

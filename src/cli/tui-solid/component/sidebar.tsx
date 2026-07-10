@@ -9,7 +9,7 @@ import {
   mailboxLabel,
   type Mailbox,
 } from "../../tui/data.js";
-import { MAILBOXES, useMailery } from "../context/mailery-state.js";
+import { MAILBOXES, useEmails } from "../context/emails-state.js";
 import { labelColor, selectedForeground, useTheme } from "../context/theme.js";
 import { Row, SectionHeader } from "../ui/primitives.js";
 
@@ -27,16 +27,16 @@ function CountText(props: { value: number; selected?: boolean }) {
 
 export function Sidebar() {
   const theme = useTheme();
-  const mailery = useMailery();
+  const emails = useEmails();
   const [open, setOpen] = createSignal({ mail: true, categories: true, labels: true, tools: true });
-  const counts = () => mailery.state.counts;
+  const counts = () => emails.state.counts;
   const mailboxCount = (box: Mailbox) => counts()[box] ?? 0;
-  const activeLabel = (label: string) => !!mailery.state.activeLabel && labelNameKey(mailery.state.activeLabel) === labelNameKey(label);
+  const activeLabel = (label: string) => !!emails.state.activeLabel && labelNameKey(emails.state.activeLabel) === labelNameKey(label);
   const labelCount = (label: string) => {
     const aliases = new Set(labelNameAliases(label));
-    return mailery.state.labels.reduce((sum, item) => sum + (aliases.has(item.name) ? item.count : 0), 0);
+    return emails.state.labels.reduce((sum, item) => sum + (aliases.has(item.name) ? item.count : 0), 0);
   };
-  const labelRows = () => mailery.state.labels
+  const labelRows = () => emails.state.labels
     .filter((label) => !isGmailCategoryLabel(label.name) && !SYSTEM_LABEL_KEYS.has(labelNameKey(label.name)))
     .slice(0, 4);
 
@@ -48,21 +48,21 @@ export function Sidebar() {
         paddingLeft={1}
         onMouseUp={(event: MouseEvent) => {
           event.stopPropagation();
-          mailery.actions.openDialog("address");
+          emails.actions.openDialog("address");
         }}
       >
-        <text fg={theme.text} attributes={TextAttributes.BOLD}>Mailery</text>
-        <text fg={theme.textMuted}>{mailery.selectedAddress().label}</text>
+        <text fg={theme.text} attributes={TextAttributes.BOLD}>Emails</text>
+        <text fg={theme.textMuted}>{emails.selectedAddress().label}</text>
       </box>
 
       <SectionHeader label={open().mail ? "Mail" : "Mail +"} onPress={() => setOpen((value) => ({ ...value, mail: !value.mail }))} />
       <Show when={open().mail}>
         <For each={MAILBOXES}>
           {(box) => {
-            const active = () => mailery.state.mailbox === box && mailery.state.route === "mailbox";
+            const active = () => emails.state.mailbox === box && emails.state.route === "mailbox";
             const fg = () => active() ? selectedForeground(theme, theme.primary) : theme.text;
             return (
-            <Row active={active()} onPress={() => mailery.actions.setMailbox(box)}>
+            <Row active={active()} onPress={() => emails.actions.setMailbox(box)}>
               <box flexDirection="row" justifyContent="space-between" width="100%">
                 <text fg={fg()} attributes={box === "unread" && mailboxCount(box) > 0 ? TextAttributes.BOLD : 0}>
                   {mailboxLabel(box)}
@@ -82,7 +82,7 @@ export function Sidebar() {
             const active = () => activeLabel(category.name);
             const fg = () => active() ? selectedForeground(theme, theme.primary) : theme.text;
             return (
-              <Row active={active()} onPress={() => mailery.actions.filterLabel(category.name)}>
+              <Row active={active()} onPress={() => emails.actions.filterLabel(category.name)}>
                 <box flexDirection="row" width="100%" columnGap={1}>
                   <text fg={active() ? fg() : labelColor(theme, category.name)}>■</text>
                   <box flexGrow={1}>
@@ -103,7 +103,7 @@ export function Sidebar() {
             const active = () => activeLabel(label.name);
             const fg = () => active() ? selectedForeground(theme, theme.primary) : theme.text;
             return (
-              <Row active={active()} onPress={() => mailery.actions.filterLabel(label.name)}>
+              <Row active={active()} onPress={() => emails.actions.filterLabel(label.name)}>
                 <box flexDirection="row" width="100%" columnGap={1}>
                   <text fg={active() ? fg() : labelColor(theme, label.name)}>■</text>
                   <box flexGrow={1}>
@@ -119,28 +119,28 @@ export function Sidebar() {
 
       <SectionHeader label={open().tools ? "Actions" : "Actions +"} onPress={() => setOpen((value) => ({ ...value, tools: !value.tools }))} />
       <Show when={open().tools}>
-        <Row active={mailery.state.dialog === "commands"} onPress={() => mailery.actions.openDialog("commands")}>
-          <text fg={mailery.state.dialog === "commands" ? selectedForeground(theme, theme.primary) : theme.text}>Shortcuts</text>
+        <Row active={emails.state.dialog === "commands"} onPress={() => emails.actions.openDialog("commands")}>
+          <text fg={emails.state.dialog === "commands" ? selectedForeground(theme, theme.primary) : theme.text}>Shortcuts</text>
         </Row>
-        <Row onPress={() => mailery.actions.startCompose("new")}>
+        <Row onPress={() => emails.actions.startCompose("new")}>
           <text fg={theme.text}>Compose</text>
         </Row>
-        <Row active={mailery.state.dialog === "address"} onPress={() => mailery.actions.openDialog("address")}>
-          <text fg={mailery.state.dialog === "address" ? selectedForeground(theme, theme.primary) : theme.text}>All inboxes</text>
+        <Row active={emails.state.dialog === "address"} onPress={() => emails.actions.openDialog("address")}>
+          <text fg={emails.state.dialog === "address" ? selectedForeground(theme, theme.primary) : theme.text}>All inboxes</text>
         </Row>
-        <Row active={mailery.state.dialog === "domains"} onPress={() => mailery.actions.openDialog("domains")}>
-          <text fg={mailery.state.dialog === "domains" ? selectedForeground(theme, theme.primary) : theme.text}>Domains</text>
+        <Row active={emails.state.dialog === "domains"} onPress={() => emails.actions.openDialog("domains")}>
+          <text fg={emails.state.dialog === "domains" ? selectedForeground(theme, theme.primary) : theme.text}>Domains</text>
         </Row>
-        <Row active={mailery.state.dialog === "settings"} onPress={() => mailery.actions.openDialog("settings")}>
-          <text fg={mailery.state.dialog === "settings" ? selectedForeground(theme, theme.primary) : theme.text}>Settings</text>
+        <Row active={emails.state.dialog === "settings"} onPress={() => emails.actions.openDialog("settings")}>
+          <text fg={emails.state.dialog === "settings" ? selectedForeground(theme, theme.primary) : theme.text}>Settings</text>
         </Row>
       </Show>
 
       <box flexGrow={1} />
       <box height={2} flexDirection="column" paddingLeft={1}>
-        <text fg={theme.textMuted}>{mailery.state.loading ? "Loading" : mailery.state.busyPull ? "Pulling" : "Ready"}</text>
-        <Show when={mailery.state.lastError}>
-          <text fg={theme.error}>{mailery.state.lastError}</text>
+        <text fg={theme.textMuted}>{emails.state.loading ? "Loading" : emails.state.busyPull ? "Pulling" : "Ready"}</text>
+        <Show when={emails.state.lastError}>
+          <text fg={theme.error}>{emails.state.lastError}</text>
         </Show>
       </box>
 

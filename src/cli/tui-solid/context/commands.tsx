@@ -2,11 +2,11 @@ import { createContext, createMemo, onCleanup, onMount, useContext, type Accesso
 import { useRenderer } from "@opentui/solid";
 import type { KeyEvent } from "@opentui/core";
 import { mailboxLabel, type Mailbox } from "../../tui/data.js";
-import { MAILBOXES, useMailery } from "./mailery-state.js";
+import { MAILBOXES, useEmails } from "./emails-state.js";
 import { useToast } from "./toast.js";
 import { useStaticBindings } from "./keymap.js";
 
-export interface MaileryCommand {
+export interface EmailsCommand {
   id: string;
   title: string;
   category: string;
@@ -16,13 +16,13 @@ export interface MaileryCommand {
   run: () => void | Promise<void>;
 }
 
-function createCommands(): Accessor<MaileryCommand[]> {
-  const mailery = useMailery();
+function createCommands(): Accessor<EmailsCommand[]> {
+  const emails = useEmails();
   const toast = useToast();
 
   const pullNow = async () => {
     toast.show({ title: "Pulling mail", message: "Syncing configured inboxes.", tone: "info" });
-    const result = await mailery.actions.pullNow();
+    const result = await emails.actions.pullNow();
     toast.show({
       title: result.ok ? "Pull complete" : "Pull failed",
       message: result.ok ? `${result.pulled} message${result.pulled === 1 ? "" : "s"} pulled.` : result.reason ?? "Pull could not run.",
@@ -35,107 +35,107 @@ function createCommands(): Accessor<MaileryCommand[]> {
       id: "mailbox.open",
       title: "Open Inbox",
       category: "Mail",
-      run: () => mailery.actions.openRoute("mailbox"),
+      run: () => emails.actions.openRoute("mailbox"),
     },
     {
       id: "compose.new",
       title: "Compose",
       category: "Mail",
-      run: () => mailery.actions.startCompose("new"),
+      run: () => emails.actions.startCompose("new"),
     },
     {
       id: "domains.open",
       title: "Domains",
       category: "Tools",
-      run: () => mailery.actions.openDialog("domains"),
+      run: () => emails.actions.openDialog("domains"),
     },
     {
       id: "settings.open",
       title: "Settings",
       category: "Tools",
-      run: () => mailery.actions.openDialog("settings"),
+      run: () => emails.actions.openDialog("settings"),
     },
     {
       id: "inboxes.open",
       title: "Inboxes",
       category: "Mail",
-      run: () => mailery.actions.openDialog("address"),
+      run: () => emails.actions.openDialog("address"),
     },
     {
       id: "filter.open",
       title: "Filter Mail",
       category: "Mail",
-      run: () => mailery.actions.openDialog("filter"),
+      run: () => emails.actions.openDialog("filter"),
     },
     {
       id: "search.open",
       title: "Search Mail",
       category: "Mail",
       run: () => {
-        mailery.actions.setSearchDraft(mailery.state.search);
-        mailery.actions.openDialog("search");
+        emails.actions.setSearchDraft(emails.state.search);
+        emails.actions.openDialog("search");
       },
     },
     {
       id: "labels.open",
       title: "Label Message",
       category: "Mail",
-      enabled: () => !!mailery.selectedMessage(),
-      run: () => mailery.actions.openDialog("labels"),
+      enabled: () => !!emails.selectedMessage(),
+      run: () => emails.actions.openDialog("labels"),
     },
     {
       id: "links.open",
       title: "Extract Links",
       category: "Mail",
-      enabled: () => !!mailery.selectedMessage(),
-      run: () => mailery.actions.openDialog("links"),
+      enabled: () => !!emails.selectedMessage(),
+      run: () => emails.actions.openDialog("links"),
     },
     {
       id: "attachments.open",
       title: "Attachments",
       category: "Mail",
-      enabled: () => (mailery.selectedBody()?.attachments.length ?? 0) > 0,
-      run: () => mailery.actions.openDialog("attachments"),
+      enabled: () => (emails.selectedBody()?.attachments.length ?? 0) > 0,
+      run: () => emails.actions.openDialog("attachments"),
     },
     {
       id: "raw.open",
       title: "Raw Message",
       category: "Mail",
-      enabled: () => !!mailery.selectedMessage(),
-      run: () => mailery.actions.openDialog("raw"),
+      enabled: () => !!emails.selectedMessage(),
+      run: () => emails.actions.openDialog("raw"),
     },
     {
       id: "refresh.local",
       title: "Refresh",
       category: "Mail",
       run: () => {
-        mailery.actions.reload({ preserveSelection: true });
+        emails.actions.reload({ preserveSelection: true });
         toast.show({ title: "Refreshed", message: "Local mailbox state reloaded.", tone: "success" });
       },
     },
-    // Pull Now is LOCAL S3→SQLite ingestion. In cloud mode the server ingests and the
+    // Pull Now is LOCAL S3→SQLite ingestion. In self_hosted mode the server ingests and the
     // client syncs via the automatic changesSince delta, so there is no manual pull —
-    // omit the command entirely so no cloud affordance (palette or shortcut) reaches it.
-    ...(mailery.mode === "local"
+    // omit the command entirely so no self_hosted affordance (palette or shortcut) reaches it.
+    ...(emails.mode === "local"
       ? [{
           id: "pull.now",
           title: "Pull Now",
           category: "Mail",
           run: pullNow,
-        } satisfies MaileryCommand]
+        } satisfies EmailsCommand]
       : []),
-    ...MAILBOXES.map((mailbox): MaileryCommand => ({
+    ...MAILBOXES.map((mailbox): EmailsCommand => ({
       id: `mailbox.${mailbox}`,
       title: mailboxLabel(mailbox as Mailbox),
       category: "Folders",
-      run: () => mailery.actions.setMailbox(mailbox as Mailbox),
+      run: () => emails.actions.setMailbox(mailbox as Mailbox),
     })),
   ]);
 }
 
 type CommandContextValue = {
-  commands: Accessor<MaileryCommand[]>;
-  visibleCommands: Accessor<MaileryCommand[]>;
+  commands: Accessor<EmailsCommand[]>;
+  visibleCommands: Accessor<EmailsCommand[]>;
   runCommand: (id: string) => Promise<boolean>;
 };
 
@@ -143,7 +143,7 @@ const CommandContext = createContext<CommandContextValue>();
 
 export function CommandProvider(props: ParentProps) {
   const commands = createCommands();
-  const mailery = useMailery();
+  const emails = useEmails();
   const renderer = useRenderer();
   const value: CommandContextValue = {
     commands,
@@ -159,24 +159,24 @@ export function CommandProvider(props: ParentProps) {
   useStaticBindings(() => ({
     priority: 50,
     bindings: [
-      { key: "ctrl+p", desc: "Open shortcuts", group: "Commands", cmd: () => mailery.state.dialog === null && mailery.actions.openDialog("commands") },
-      { key: "ctrl+f", desc: "Search mail", group: "Commands", cmd: () => mailery.state.dialog === null && mailery.state.compose === null && value.runCommand("search.open") },
-      { key: "ctrl+r", desc: "Refresh", group: "Commands", cmd: () => mailery.state.dialog === null && mailery.state.compose === null && value.runCommand("refresh.local") },
+      { key: "ctrl+p", desc: "Open shortcuts", group: "Commands", cmd: () => emails.state.dialog === null && emails.actions.openDialog("commands") },
+      { key: "ctrl+f", desc: "Search mail", group: "Commands", cmd: () => emails.state.dialog === null && emails.state.compose === null && value.runCommand("search.open") },
+      { key: "ctrl+r", desc: "Refresh", group: "Commands", cmd: () => emails.state.dialog === null && emails.state.compose === null && value.runCommand("refresh.local") },
       { key: "escape", desc: "Back", group: "Navigation", cmd: () => {
-        if (mailery.state.dialog || mailery.state.compose) return;
-        mailery.state.route === "reader" ? mailery.actions.backToList() : renderer.destroy();
+        if (emails.state.dialog || emails.state.compose) return;
+        emails.state.route === "reader" ? emails.actions.backToList() : renderer.destroy();
       } },
-      { key: "up", desc: "Previous message", group: "Navigation", cmd: () => mailery.state.dialog === null && mailery.state.compose === null && mailery.actions.selectOffset(-1) },
-      { key: "down", desc: "Next message", group: "Navigation", cmd: () => mailery.state.dialog === null && mailery.state.compose === null && mailery.actions.selectOffset(1) },
-      { key: "right", desc: "Open message", group: "Navigation", cmd: () => mailery.state.dialog === null && mailery.state.compose === null && mailery.actions.openMessage() },
-      { key: "enter", desc: "Open message", group: "Navigation", cmd: () => mailery.state.dialog === null && mailery.state.compose === null && mailery.actions.openMessage() },
-      { key: "pageup", desc: "Previous page", group: "Navigation", cmd: () => mailery.state.dialog === null && mailery.state.compose === null && mailery.actions.page(-1) },
-      { key: "pagedown", desc: "Next page", group: "Navigation", cmd: () => mailery.state.dialog === null && mailery.state.compose === null && mailery.actions.page(1) },
+      { key: "up", desc: "Previous message", group: "Navigation", cmd: () => emails.state.dialog === null && emails.state.compose === null && emails.actions.selectOffset(-1) },
+      { key: "down", desc: "Next message", group: "Navigation", cmd: () => emails.state.dialog === null && emails.state.compose === null && emails.actions.selectOffset(1) },
+      { key: "right", desc: "Open message", group: "Navigation", cmd: () => emails.state.dialog === null && emails.state.compose === null && emails.actions.openMessage() },
+      { key: "enter", desc: "Open message", group: "Navigation", cmd: () => emails.state.dialog === null && emails.state.compose === null && emails.actions.openMessage() },
+      { key: "pageup", desc: "Previous page", group: "Navigation", cmd: () => emails.state.dialog === null && emails.state.compose === null && emails.actions.page(-1) },
+      { key: "pagedown", desc: "Next page", group: "Navigation", cmd: () => emails.state.dialog === null && emails.state.compose === null && emails.actions.page(1) },
     ],
   }));
 
   const handleKey = (key: KeyEvent) => {
-    if (mailery.state.dialog || mailery.state.compose) return;
+    if (emails.state.dialog || emails.state.compose) return;
 
     const consume = () => {
       key.preventDefault();
@@ -184,7 +184,7 @@ export function CommandProvider(props: ParentProps) {
     };
 
     if (key.ctrl && key.name === "p") {
-      mailery.actions.openDialog("commands");
+      emails.actions.openDialog("commands");
       consume();
       return;
     }
@@ -199,40 +199,40 @@ export function CommandProvider(props: ParentProps) {
       return;
     }
     if (key.name === "escape") {
-      mailery.state.route === "reader" ? mailery.actions.backToList() : renderer.destroy();
+      emails.state.route === "reader" ? emails.actions.backToList() : renderer.destroy();
       consume();
       return;
     }
     if (key.name === "up") {
-      mailery.actions.selectOffset(-1);
+      emails.actions.selectOffset(-1);
       consume();
       return;
     }
     if (key.name === "down") {
-      mailery.actions.selectOffset(1);
+      emails.actions.selectOffset(1);
       consume();
       return;
     }
     if (key.name === "right" || key.name === "enter" || key.name === "return") {
-      mailery.actions.openMessage();
+      emails.actions.openMessage();
       consume();
       return;
     }
     if (key.name === "pageup") {
-      mailery.actions.page(-1);
+      emails.actions.page(-1);
       consume();
     }
     if (key.name === "pagedown") {
-      mailery.actions.page(1);
+      emails.actions.page(1);
       consume();
     }
   };
 
   const handleRawInput = (sequence: string) => {
-    if (mailery.state.dialog || mailery.state.compose) return false;
+    if (emails.state.dialog || emails.state.compose) return false;
     const rawCommands: Record<string, () => void> = {
-      "\x10": () => mailery.actions.openDialog("commands"),
-      "\x1B[112;5u": () => mailery.actions.openDialog("commands"),
+      "\x10": () => emails.actions.openDialog("commands"),
+      "\x1B[112;5u": () => emails.actions.openDialog("commands"),
       "\x06": () => void value.runCommand("search.open"),
       "\x1B[102;5u": () => void value.runCommand("search.open"),
       "\x12": () => void value.runCommand("refresh.local"),

@@ -7,18 +7,18 @@ import type { Database } from "./database.js";
 import type { AddressStatus, EmailAddress } from "../types/index.js";
 import { AddressNotFoundError } from "../types/index.js";
 import { getDatabase, now } from "./database.js";
-import { apiToAddress, cloudAddresses, findAddressesByEmail, getAddress } from "./addresses.js";
+import { apiToAddress, selfHostedAddresses, findAddressesByEmail, getAddress } from "./addresses.js";
 import { sqlEmailAddress } from "./email-address-sql.js";
 import { canonicalSender } from "../lib/email-address.js";
 
 function setStatus(id: string, status: AddressStatus, db?: Database): EmailAddress {
-  // Cloud (self_hosted) mode: the address registry lives in the shared cloud
+  // Self-hosted (self_hosted) mode: the address registry lives in the shared selfHosted
   // dataset, so status transitions MUST write there — writing to the local
-  // island would diverge from the fleet-wide dataset (split-brain).
-  const cloud = cloudAddresses(db);
-  if (cloud) {
-    if (!cloud.get(id)) throw new AddressNotFoundError(id);
-    return apiToAddress(cloud.update(id, { status }));
+  // island would diverge from the operator-owned dataset (split-brain).
+  const selfHosted = selfHostedAddresses(db);
+  if (selfHosted) {
+    if (!selfHosted.get(id)) throw new AddressNotFoundError(id);
+    return apiToAddress(selfHosted.update(id, { status }));
   }
   const d = db || getDatabase();
   if (!getAddress(id, d)) throw new AddressNotFoundError(id);
@@ -39,12 +39,12 @@ export function setAddressQuota(id: string, quota: number | null, db?: Database)
   if (quota !== null && (!Number.isInteger(quota) || quota < 0)) {
     throw new Error(`Invalid daily quota: ${quota} (must be a non-negative integer or null)`);
   }
-  // Cloud (self_hosted) mode: persist the quota to the shared cloud dataset so
-  // it applies fleet-wide, not just on this machine's local island.
-  const cloud = cloudAddresses(db);
-  if (cloud) {
-    if (!cloud.get(id)) throw new AddressNotFoundError(id);
-    return apiToAddress(cloud.update(id, { daily_quota: quota }));
+  // Self-hosted (self_hosted) mode: persist the quota to the shared selfHosted dataset so
+  // it applies deployment-wide, not just on this machine's local island.
+  const selfHosted = selfHostedAddresses(db);
+  if (selfHosted) {
+    if (!selfHosted.get(id)) throw new AddressNotFoundError(id);
+    return apiToAddress(selfHosted.update(id, { daily_quota: quota }));
   }
   const d = db || getDatabase();
   if (!getAddress(id, d)) throw new AddressNotFoundError(id);
@@ -54,11 +54,11 @@ export function setAddressQuota(id: string, quota: number | null, db?: Database)
 
 /** Count emails sent from `email` so far during the current UTC day. */
 export function countSendsToday(email: string, db?: Database): number {
-  // Cloud (self_hosted) mode: the per-address daily send ledger (`emails`) is
-  // not part of the cloud address model, so we return 0 rather than consulting
+  // Self-hosted (self_hosted) mode: the per-address daily send ledger (`emails`) is
+  // not part of the selfHosted address model, so we return 0 rather than consulting
   // the local island — reading local counts on a flipped machine would report
   // stale/wrong usage (split-brain read).
-  if (cloudAddresses(db)) return 0;
+  if (selfHostedAddresses(db)) return 0;
   const d = db || getDatabase();
   const normalizedEmail = canonicalSender(email) ?? email.trim().toLowerCase();
   const today = now().slice(0, 10); // YYYY-MM-DD (ISO sorts lexicographically)
@@ -78,10 +78,10 @@ export function countSendsTodayByAddress(emails: Iterable<string>, db?: Database
   const counts = new Map(normalized.map((email) => [email, 0]));
   if (normalized.length === 0) return counts;
 
-  // Cloud (self_hosted) mode: return zeroed counts without touching the local
-  // island (see countSendsToday) — the cloud address model has no per-address
+  // Self-hosted (self_hosted) mode: return zeroed counts without touching the local
+  // island (see countSendsToday) — the selfHosted address model has no per-address
   // daily send ledger to count against.
-  if (cloudAddresses(db)) return counts;
+  if (selfHostedAddresses(db)) return counts;
 
   const d = db || getDatabase();
   const today = now().slice(0, 10);
@@ -111,11 +111,11 @@ export interface Sendability {
 export function getAddressSendability(email: string, db?: Database): Sendability {
   const normalizedEmail = canonicalSender(email) ?? email.trim().toLowerCase();
 
-  // Cloud (self_hosted) mode: enforce suspension/quota against the shared cloud
+  // Self-hosted (self_hosted) mode: enforce suspension/quota against the shared selfHosted
   // address dataset, never the local island (which is empty on a flipped
   // machine and would wrongly allow every sender to send).
-  const cloud = cloudAddresses(db);
-  if (cloud) {
+  const selfHosted = selfHostedAddresses(db);
+  if (selfHosted) {
     const matches = findAddressesByEmail(normalizedEmail, db);
     if (matches.length === 0) return { sendable: true };
     // A suspended record (any provider) takes precedence over an active one.

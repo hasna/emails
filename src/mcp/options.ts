@@ -3,13 +3,13 @@ import {
   isStdioMode as harnessIsStdioMode,
 } from "@hasna/mcp-harness";
 
-// mailery MCP transport/mode boilerplate — hand-wired onto `@hasna/mcp-harness`
+// emails MCP transport/mode boilerplate — hand-wired onto `@hasna/mcp-harness`
 // (the mode/port primitives live in a single shared package instead of being
 // re-implemented per repo). Public API (names, signatures, `-p`/`--port`
 // support, error messages) is unchanged so `http.ts`, `server.ts`, the CLI
 // entrypoint, and the tests keep working untouched.
 
-export const MCP_NAME = "mailery";
+export const MCP_NAME = "emails";
 export const DEFAULT_MCP_HTTP_PORT = 8861;
 
 export function isHttpMode(argv: string[] = process.argv.slice(2)): boolean {

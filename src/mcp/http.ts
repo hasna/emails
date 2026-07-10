@@ -4,7 +4,7 @@ import { DEFAULT_MCP_HTTP_PORT, isHttpMode, isStdioMode, MCP_NAME, resolveHttpPo
 
 export { DEFAULT_MCP_HTTP_PORT, isHttpMode, isStdioMode, MCP_NAME, resolveHttpPort };
 
-// mailery MCP HTTP transport — hand-wired onto `@hasna/mcp-harness` (the
+// emails MCP HTTP transport — hand-wired onto `@hasna/mcp-harness` (the
 // hand-rolled `WebStandardStreamableHTTPServerTransport` wiring + health
 // payload shape are now shared). Public API (`handleMcpHttpRequest`,
 // `startHttpServer`, the exported constants) is unchanged so `server/index.ts`
@@ -38,12 +38,12 @@ export function startHttpServer(options: StartHttpServerOptions = {}): ReturnTyp
   const log = options.log ?? console.error;
 
   const server = Bun.serve({
-    // The self-hosted data source pages the cloud /v1 API client-side (no
+    // The self-hosted data source pages the self_hosted /v1 API client-side (no
     // server-side filter/count), so `inbox status`/`search_inbound` tool calls
     // can take tens of seconds against a large mailbox. Bun's default
     // idleTimeout is 10s, which silently closes the streamable-HTTP connection
     // mid-call ("socket connection closed unexpectedly"). Raise it to Bun's max
-    // (255s) so slow cloud-backed tool calls and the long-lived MCP event
+    // (255s) so slow self_hosted-backed tool calls and the long-lived MCP event
     // stream survive.
     idleTimeout: 255,
     port,

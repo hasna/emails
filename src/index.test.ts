@@ -80,10 +80,10 @@ describe("public package entrypoint", () => {
       "processForwardingRules",
       "extractEmailLinks",
       "formatEmailLinks",
-      "buildReadOnlyMaileryTools",
-      "runMaileryAgent",
-      "formatMaileryAgentResult",
-      "resolveMaileryAgentDefaults",
+      "buildReadOnlyEmailsTools",
+      "runEmailsAgent",
+      "formatEmailsAgentResult",
+      "resolveEmailsAgentDefaults",
       "getInboundAttachmentStorageConfig",
       "getDefaultGmailArchiveS3Bucket",
       "getDefaultGmailArchiveS3Region",
@@ -107,13 +107,13 @@ describe("public package entrypoint", () => {
     }
   });
 
-  it("exposes only Mailery mode helpers from the explicit storage subpath", async () => {
+  it("exposes only Emails mode helpers from the explicit storage subpath", async () => {
     const storage = await import("./storage.js");
 
-    expect(typeof storage.getMaileryMode).toBe("function");
-    expect(typeof storage.resolveMaileryMode).toBe("function");
-    expect(typeof storage.normalizeMaileryMode).toBe("function");
-    expect(typeof storage.labelForMaileryMode).toBe("function");
+    expect(typeof storage.getEmailsMode).toBe("function");
+    expect(typeof storage.resolveEmailsMode).toBe("function");
+    expect(typeof storage.normalizeEmailsMode).toBe("function");
+    expect(typeof storage.labelForEmailsMode).toBe("function");
 
     // The self-hosted PostgreSQL/S3 mirror surface is gone; the storage subpath
     // must not resurrect any of the removed sync internals.
@@ -173,7 +173,7 @@ describe("public package entrypoint", () => {
         expect(rootEntry).not.toContain(storageInternal);
       }
       const storageEntry = readFileSync(join(rootDir, "storage.js"), "utf8");
-      expect(storageEntry).toContain("labelForMaileryMode");
+      expect(storageEntry).toContain("labelForEmailsMode");
       expect(storageEntry).not.toContain("var PG_MIGRATIONS");
       for (const removed of ["PgAdapterAsync", "storagePush", "storagePull", "storageSync"]) {
         expect(storageEntry).not.toContain(removed);

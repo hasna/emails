@@ -5,7 +5,7 @@ import { redactSecrets } from "../../lib/redaction.js";
 import { formatListHint, handleError, isCliVerboseOutput, parseCliPage, summarizeCliValue } from "../utils.js";
 
 const KNOWN_KEYS: { key: string; description: string; example: string }[] = [
-  { key: "mailery_mode", description: "Mailery mode: local | cloud", example: "cloud" },
+  { key: "emails_mode", description: "Emails mode: local | self_hosted", example: "self_hosted" },
   { key: "default_provider", description: "Default provider ID used when --provider is not specified", example: "abc12345" },
   { key: "failover-providers", description: "Comma-separated provider IDs used as failover for send()", example: "abc12345,def67890" },
   { key: "attachment_storage", description: "Where to store inbound attachments: local | s3 | none", example: "local" },
@@ -22,8 +22,8 @@ const KNOWN_KEYS: { key: string; description: string; example: string }[] = [
   { key: "brandsight_api_key", description: "BrandSight/GCD API key for DNS setup (also reads BRANDSIGHT_API_KEY env var)", example: "abc123..." },
   { key: "brandsight_api_secret", description: "BrandSight/GCD API secret for DNS setup (also reads BRANDSIGHT_API_SECRET env var)", example: "abc123..." },
   { key: "brandsight_customer_id", description: "BrandSight/GCD customer ID for DNS setup (also reads BRANDSIGHT_CUSTOMER_ID env var)", example: "123456" },
-  { key: "ai_provider", description: "Default Mailery AI provider: cerebras or groq", example: "cerebras" },
-  { key: "ai_model", description: "Default Mailery AI model override for the selected provider", example: "zai-glm-4.7" },
+  { key: "ai_provider", description: "Default Emails AI provider: cerebras or groq", example: "cerebras" },
+  { key: "ai_model", description: "Default Emails AI model override for the selected provider", example: "zai-glm-4.7" },
   { key: "cerebras_api_key", description: "Cerebras API key for `emails agent` (also reads CEREBRAS_API_KEY env var)", example: "csk_..." },
   { key: "cerebras_model", description: "Cerebras model for `emails agent` (default: zai-glm-4.7)", example: "zai-glm-4.7" },
   { key: "groq_api_key", description: "Groq API key for `emails agent --provider groq` (also reads GROQ_API_KEY env var)", example: "gsk_..." },
@@ -32,10 +32,7 @@ const KNOWN_KEYS: { key: string; description: string; example: string }[] = [
   { key: "inbound_s3_bucket", description: "S3 bucket name used by SES for inbound email storage", example: "my-emails-bucket" },
   { key: "inbound_s3_prefix", description: "S3 key prefix for inbound emails (default: inbound/<domain>/)", example: "inbound/example.com/" },
   { key: "inbound_s3_region", description: "AWS region for inbound S3 bucket (default: us-east-1)", example: "us-east-1" },
-  { key: "inbound_s3_profile", description: "AWS profile for inbound S3 sync when not using provider credentials", example: "mailery-prod" },
-  { key: "cloud_api_url", description: "Mailery Cloud API URL (also reads MAILERY_CLOUD_API_URL or MAILERY_API_URL)", example: "https://mailery.co" },
-  { key: "cloud_session_token", description: "Mailery Cloud user session token from `emails cloud login` (also reads MAILERY_CLOUD_TOKEN)", example: "eyJ..." },
-  { key: "cloud_api_key", description: "Mailery Cloud API key from `emails cloud login --api-key` (also reads MAILERY_API_KEY)", example: "mly_..." },
+  { key: "inbound_s3_profile", description: "AWS profile for inbound S3 sync when not using provider credentials", example: "emails-prod" },
 ];
 
 function redactConfigEntry(key: string, value: unknown): unknown {

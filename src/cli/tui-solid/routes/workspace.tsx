@@ -1,26 +1,26 @@
 import { For, Show } from "solid-js";
 import { TextAttributes } from "@opentui/core";
-import { useMailery } from "../context/mailery-state.js";
+import { useEmails } from "../context/emails-state.js";
 import { useTheme } from "../context/theme.js";
 import { Button, EmptyState, Row } from "../ui/primitives.js";
 
 export function DomainsRoute() {
   const theme = useTheme();
-  const mailery = useMailery();
+  const emails = useEmails();
   return (
     <box width="100%" height="100%" flexDirection="column" backgroundColor={theme.background} paddingTop={1} paddingLeft={2} paddingRight={2}>
       <box height={2} flexDirection="row" justifyContent="space-between">
         <text fg={theme.text} attributes={TextAttributes.BOLD}>Domains</text>
-        <Button label="Back" onPress={() => mailery.actions.openRoute("mailbox")} />
+        <Button label="Back" onPress={() => emails.actions.openRoute("mailbox")} />
       </box>
       <box height={1} flexDirection="row" columnGap={1} paddingLeft={1}>
         <box width={30}><text fg={theme.textMuted}>Domain</text></box>
         <box width={18}><text fg={theme.textMuted}>Provider</text></box>
         <box flexGrow={1}><text fg={theme.textMuted}>Readiness</text></box>
       </box>
-      <Show when={mailery.state.domains.length > 0} fallback={<EmptyState title="No domains" detail="Configured domains will appear here." />}>
+      <Show when={emails.state.domains.length > 0} fallback={<EmptyState title="No domains" detail="Configured domains will appear here." />}>
         <scrollbox flexGrow={1} width="100%">
-          <For each={mailery.state.domains}>
+          <For each={emails.state.domains}>
             {(domain) => (
               <Row>
                 <box flexDirection="row" width="100%" columnGap={1}>
@@ -35,8 +35,8 @@ export function DomainsRoute() {
       </Show>
       <box height={1} />
       <box height={2} flexDirection="row" columnGap={1}>
-        <Button label="Previous page" onPress={() => mailery.actions.workspacePage(-1)} />
-        <Button label="Next page" active={mailery.state.domainsHasMore} onPress={() => mailery.actions.workspacePage(1)} />
+        <Button label="Previous page" onPress={() => emails.actions.workspacePage(-1)} />
+        <Button label="Next page" active={emails.state.domainsHasMore} onPress={() => emails.actions.workspacePage(1)} />
       </box>
     </box>
   );

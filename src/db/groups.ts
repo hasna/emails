@@ -2,7 +2,7 @@ import type { Database } from "./database.js";
 import { getDatabase, uuid, now } from "./database.js";
 import { parseJsonObject } from "./json.js";
 import { safeOffset, safeOptionalLimit } from "./pagination.js";
-import { cloudResource, cloudListQuery, cloudPage, ciso, cstr, cstrOrNull } from "./cloud-resource.js";
+import { selfHostedResource, selfHostedListQuery, selfHostedPage, ciso, cstr, cstrOrNull } from "./self-hosted-resource.js";
 
 const GROUP_RESOURCE = "groups";
 
@@ -90,12 +90,12 @@ function rowToMemberSummary(row: GroupMemberSummaryRow): GroupMemberSummary {
 }
 
 export function createGroup(name: string, description?: string, db?: Database): Group {
-  // Cloud mode: route the write to the /v1/groups API so a flipped client no
+  // Self-hosted mode: route the write to the /v1/groups API so a flipped client no
   // longer creates groups in the local SQLite island while `group list` reads
-  // the cloud (the split-brain bug). Reads already route via listGroups().
-  const cloud = cloudResource(GROUP_RESOURCE);
-  if (cloud) {
-    return apiToGroup(cloud.create({ name, description: description || null }));
+  // the selfHosted (the split-brain bug). Reads already route via listGroups().
+  const selfHosted = selfHostedResource(GROUP_RESOURCE);
+  if (selfHosted) {
+    return apiToGroup(selfHosted.create({ name, description: description || null }));
   }
 
   const d = db || getDatabase();
@@ -111,24 +111,33 @@ export function createGroup(name: string, description?: string, db?: Database): 
 }
 
 export function getGroup(id: string, db?: Database): Group | null {
+  const selfHosted = selfHostedResource(GROUP_RESOURCE);
+  if (selfHosted) {
+    const record = selfHosted.get(id);
+    return record ? apiToGroup(record) : null;
+  }
   const d = db || getDatabase();
   const row = d.query(`SELECT ${GROUP_COLUMNS} FROM groups WHERE id = ?`).get(id) as Group | null;
   return row;
 }
 
 export function getGroupByName(name: string, db?: Database): Group | null {
+  const selfHosted = selfHostedResource(GROUP_RESOURCE);
+  if (selfHosted) {
+    return selfHosted.list({ limit: 1000 }).map(apiToGroup).find((group) => group.name === name) ?? null;
+  }
   const d = db || getDatabase();
   const row = d.query(`SELECT ${GROUP_COLUMNS} FROM groups WHERE name = ?`).get(name) as Group | null;
   return row;
 }
 
 export function listGroups(db?: Database, opts?: ListGroupOptions): Group[] {
-  const cloud = cloudResource(GROUP_RESOURCE);
-  if (cloud) {
-    const { query, limit, offset } = cloudListQuery(opts);
-    const rows = cloud.list(query).map(apiToGroup);
+  const selfHosted = selfHostedResource(GROUP_RESOURCE);
+  if (selfHosted) {
+    const { query, limit, offset } = selfHostedListQuery(opts);
+    const rows = selfHosted.list(query).map(apiToGroup);
     rows.sort((a, b) => (a.name ?? "").localeCompare(b.name ?? ""));
-    return cloudPage(rows, limit, offset);
+    return selfHostedPage(rows, limit, offset);
   }
 
   const d = db || getDatabase();
@@ -140,6 +149,8 @@ export function listGroups(db?: Database, opts?: ListGroupOptions): Group[] {
 }
 
 export function deleteGroup(id: string, db?: Database): boolean {
+  const selfHosted = selfHostedResource(GROUP_RESOURCE);
+  if (selfHosted) return selfHosted.del(id);
   const d = db || getDatabase();
   const result = d.run("DELETE FROM groups WHERE id = ?", [id]);
   return result.changes > 0;

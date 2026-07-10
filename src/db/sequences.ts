@@ -1,7 +1,7 @@
 import type { Database } from "./database.js";
 import { getDatabase, uuid, now } from "./database.js";
 import { safeOffset, safeOptionalLimit } from "./pagination.js";
-import { cloudResource, cloudListQuery, cloudPage, ciso, cstr, cstrOrNull } from "./cloud-resource.js";
+import { selfHostedResource, selfHostedListQuery, selfHostedPage, ciso, cstr, cstrOrNull } from "./self-hosted-resource.js";
 
 const SEQUENCE_RESOURCE = "sequences";
 
@@ -115,12 +115,12 @@ export function createSequence(
   input: { name: string; description?: string },
   db?: Database,
 ): Sequence {
-  // Cloud mode: route the write to the /v1/sequences API so a flipped client no
+  // Self-hosted mode: route the write to the /v1/sequences API so a flipped client no
   // longer creates sequences in the local SQLite island while `sequence list`
-  // reads the cloud (the split-brain bug). Reads already route via listSequences().
-  const cloud = cloudResource(SEQUENCE_RESOURCE);
-  if (cloud) {
-    return apiToSequence(cloud.create({
+  // reads the selfHosted (the split-brain bug). Reads already route via listSequences().
+  const selfHosted = selfHostedResource(SEQUENCE_RESOURCE);
+  if (selfHosted) {
+    return apiToSequence(selfHosted.create({
       name: input.name,
       description: input.description || null,
       status: "active",
@@ -141,6 +141,13 @@ export function createSequence(
 }
 
 export function getSequence(nameOrId: string, db?: Database): Sequence | null {
+  const selfHosted = selfHostedResource(SEQUENCE_RESOURCE);
+  if (selfHosted) {
+    const direct = selfHosted.get(nameOrId);
+    if (direct) return apiToSequence(direct);
+    return selfHosted.list({ limit: 1000 }).map(apiToSequence)
+      .find((sequence) => sequence.name === nameOrId) ?? null;
+  }
   const d = db || getDatabase();
   let row = d.query("SELECT * FROM sequences WHERE id = ?").get(nameOrId) as SequenceRow | null;
   if (!row) {
@@ -151,12 +158,12 @@ export function getSequence(nameOrId: string, db?: Database): Sequence | null {
 }
 
 export function listSequences(db?: Database, opts?: ListSequenceOptions): Sequence[] {
-  const cloud = cloudResource(SEQUENCE_RESOURCE);
-  if (cloud) {
-    const { query, limit, offset } = cloudListQuery(opts);
-    const rows = cloud.list(query).map(apiToSequence);
+  const selfHosted = selfHostedResource(SEQUENCE_RESOURCE);
+  if (selfHosted) {
+    const { query, limit, offset } = selfHostedListQuery(opts);
+    const rows = selfHosted.list(query).map(apiToSequence);
     rows.sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
-    return cloudPage(rows, limit, offset);
+    return selfHostedPage(rows, limit, offset);
   }
 
   const d = db || getDatabase();
@@ -173,6 +180,8 @@ export function updateSequence(
   updates: Partial<Pick<Sequence, "name" | "description" | "status">>,
   db?: Database,
 ): Sequence {
+  const selfHosted = selfHostedResource(SEQUENCE_RESOURCE);
+  if (selfHosted) return apiToSequence(selfHosted.update(id, updates));
   const d = db || getDatabase();
   const seq = d.query("SELECT * FROM sequences WHERE id = ?").get(id) as SequenceRow | null;
   if (!seq) throw new Error(`Sequence not found: ${id}`);
@@ -191,6 +200,8 @@ export function updateSequence(
 }
 
 export function deleteSequence(id: string, db?: Database): boolean {
+  const selfHosted = selfHostedResource(SEQUENCE_RESOURCE);
+  if (selfHosted) return selfHosted.del(id);
   const d = db || getDatabase();
   const result = d.run("DELETE FROM sequences WHERE id = ?", [id]);
   return result.changes > 0;

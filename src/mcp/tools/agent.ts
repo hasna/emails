@@ -114,7 +114,7 @@ export function registerAgentTools(server: McpServer): void {
 
   server.tool(
     "get_agent_context",
-    "Get a redacted orientation snapshot and recommended workflows for agents using this mailery app.",
+    "Get a redacted orientation snapshot and recommended workflows for agents using this emails app.",
     {},
     async () => {
       try {

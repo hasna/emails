@@ -69,7 +69,7 @@ export function registerReplyCommand(program: Command, output: (data: unknown, f
     .option("--provider <id>", "Provider ID")
     .action(async (id: string, opts: { to: string[]; from: string; body?: string; provider?: string }) => {
       try {
-        // Cloud mode: read the source message through the seam and forward via the server
+        // Self-hosted mode: read the source message through the seam and forward via the server
         // send API (the local provider path / local ledger does not apply).
         const ds = resolveMailDataSource();
         if (ds.mode !== "local") {
@@ -121,7 +121,7 @@ export function registerReplyCommand(program: Command, output: (data: unknown, f
     .option("--from <email>", "Override the From address")
     .action(async (id: string, opts: { body: string; html?: boolean; provider?: string; all?: boolean; from?: string }) => {
       try {
-        // Cloud mode: read the parent through the seam and reply via the server send API.
+        // Self-hosted mode: read the parent through the seam and reply via the server send API.
         // NOTE: the server /messages/send endpoint carries no in-reply-to/references, so
         // the reply is delivered as a new message and is not thread-linked server-side.
         // We report the parent's real thread id (when present) rather than fabricating one.

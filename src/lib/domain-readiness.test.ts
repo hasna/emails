@@ -46,7 +46,7 @@ describe("assessDomainReadiness", () => {
     expect(readiness.state).toBe("ready_to_send_and_receive");
   });
 
-  it("requires explicit self-hosted inbound status plus cloud source evidence", () => {
+  it("requires explicit self-hosted inbound status plus self_hosted source evidence", () => {
     const base = { domain: "example.com", dkim_status: "verified" as const, spf_status: "verified" as const, dmarc_status: "pending" as const };
 
     const provisioningOnly = assessDomainReadiness(

@@ -1,6 +1,6 @@
 import { For, Show, createEffect, createMemo, createSignal, untrack } from "solid-js";
 import { useKeyboard } from "@opentui/solid";
-import { useMailery, COMMON_LABELS, MAILBOXES } from "../context/mailery-state.js";
+import { useEmails, COMMON_LABELS, MAILBOXES } from "../context/emails-state.js";
 import { useCommands } from "../context/commands.js";
 import { labelColor, useTheme } from "../context/theme.js";
 import { useDialog } from "../context/dialog.js";
@@ -14,17 +14,17 @@ import { formatAttachmentSize, mergeAttachmentDetails, type AttachmentDetail, ty
 import { openLocalTarget } from "../../../lib/local-actions.js";
 import { ensureEmailAgentSettings } from "../../../db/email-agents.js";
 import { emailDigestPeriodLabel, type EmailDigestPeriod } from "../../../db/email-digests.js";
-import { DEFAULT_GROQ_EMAIL_AGENT_MODEL } from "../../../lib/mailery-ai.js";
+import { DEFAULT_GROQ_EMAIL_AGENT_MODEL } from "../../../lib/emails-ai.js";
 
-export function MaileryDialogs() {
-  const mailery = useMailery();
+export function EmailsDialogs() {
+  const emails = useEmails();
   const commands = useCommands();
   const dialog = useDialog();
   const theme = useTheme();
   const toast = useToast();
 
   const close = () => {
-    mailery.actions.closeDialog();
+    emails.actions.closeDialog();
     dialog.clear();
   };
 
@@ -35,17 +35,17 @@ export function MaileryDialogs() {
     category: command.category,
   })));
 
-  const addressItems = createMemo<SelectDialogItem[]>(() => mailery.state.addresses.map((address) => ({
+  const addressItems = createMemo<SelectDialogItem[]>(() => emails.state.addresses.map((address) => ({
     id: address.id,
     title: address.label,
     detail: inboxDetail(address),
-    marker: mailery.state.selectedAddressId === address.id ? "●" : " ",
+    marker: emails.state.selectedAddressId === address.id ? "●" : " ",
     markerColor: theme.primary,
   })));
 
   const labelItems = createMemo<SelectDialogItem[]>(() => {
-    const selected = new Set(mailery.selectedMessage()?.labels.map((label) => label.toLowerCase()) ?? []);
-    const summaries = mailery.state.labels.map((label) => ({
+    const selected = new Set(emails.selectedMessage()?.labels.map((label) => label.toLowerCase()) ?? []);
+    const summaries = emails.state.labels.map((label) => ({
       id: label.name,
       title: labelDisplayName(label.name),
       detail: label.popular ? `${label.count} selected` : label.count ? String(label.count) : "",
@@ -62,7 +62,7 @@ export function MaileryDialogs() {
       marker: selected.has(label.toLowerCase()) ? "■" : "□",
       markerColor: labelColor(theme, label),
     }));
-    const q = mailery.state.labelSearch.trim();
+    const q = emails.state.labelSearch.trim();
     const custom = q && !existing.has(q.toLowerCase().replace(/\s+/g, "-")) ? [{
       id: q,
       title: `Create ${labelDisplayName(q)}`,
@@ -74,7 +74,7 @@ export function MaileryDialogs() {
     return [...summaries, ...common, ...custom];
   });
 
-  const linkItems = createMemo<SelectDialogItem[]>(() => mailery.links().map((link, index) => ({
+  const linkItems = createMemo<SelectDialogItem[]>(() => emails.links().map((link, index) => ({
     id: String(index),
     title: link.text || link.url,
     detail: link.url,
@@ -84,7 +84,7 @@ export function MaileryDialogs() {
   })));
 
   const attachmentDetails = createMemo<AttachmentDetail[]>(() => {
-    const attachments = mailery.selectedBody()?.attachments ?? [];
+    const attachments = emails.selectedBody()?.attachments ?? [];
     return mergeAttachmentDetails(
       attachments.map((attachment) => ({
         filename: attachment.filename,
@@ -111,7 +111,7 @@ export function MaileryDialogs() {
   })));
 
   createEffect(() => {
-    const kind = mailery.state.dialog;
+    const kind = emails.state.dialog;
     untrack(() => {
       if (kind === null) {
         dialog.clear();
@@ -124,8 +124,8 @@ export function MaileryDialogs() {
           title="Shortcuts"
           placeholder="Search commands"
           items={commandItems()}
-          query={mailery.state.commandSearch}
-          onQuery={mailery.actions.setCommandSearch}
+          query={emails.state.commandSearch}
+          onQuery={emails.actions.setCommandSearch}
           onSelect={(item) => {
             close();
             void commands.runCommand(item.id);
@@ -133,7 +133,7 @@ export function MaileryDialogs() {
           onClose={close}
           footer="Use buttons, command palette, and safe global bindings. Single-letter shortcuts are disabled."
         />
-      ), { size: "large", onClose: mailery.actions.closeDialog });
+      ), { size: "large", onClose: emails.actions.closeDialog });
       return;
     }
 
@@ -143,30 +143,30 @@ export function MaileryDialogs() {
           title="Inboxes"
           placeholder="Search inboxes"
           items={addressItems()}
-          query={mailery.state.addressSearch}
-          onQuery={mailery.actions.setAddressSearch}
+          query={emails.state.addressSearch}
+          onQuery={emails.actions.setAddressSearch}
           onSelect={(item) => {
-            mailery.actions.setAddress(item.id);
+            emails.actions.setAddress(item.id);
             close();
           }}
           onClose={close}
         />
-      ), { size: "large", onClose: mailery.actions.closeDialog });
+      ), { size: "large", onClose: emails.actions.closeDialog });
       return;
     }
 
     if (kind === "filter") {
-      dialog.replace(() => <FilterDialog close={close} />, { size: "large", onClose: mailery.actions.closeDialog });
+      dialog.replace(() => <FilterDialog close={close} />, { size: "large", onClose: emails.actions.closeDialog });
       return;
     }
 
     if (kind === "group") {
-      dialog.replace(() => <GroupDialog close={close} />, { size: "large", onClose: mailery.actions.closeDialog });
+      dialog.replace(() => <GroupDialog close={close} />, { size: "large", onClose: emails.actions.closeDialog });
       return;
     }
 
     if (kind === "digest") {
-      dialog.replace(() => <DigestDialog close={close} />, { size: "large", onClose: mailery.actions.closeDialog });
+      dialog.replace(() => <DigestDialog close={close} />, { size: "large", onClose: emails.actions.closeDialog });
       return;
     }
 
@@ -179,7 +179,7 @@ export function MaileryDialogs() {
           </box>
           <input
             focused
-            value={mailery.state.searchDraft}
+            value={emails.state.searchDraft}
             placeholder="Search subject, sender, recipient, body"
             width="100%"
             textColor={theme.text}
@@ -188,34 +188,34 @@ export function MaileryDialogs() {
             focusedBackgroundColor={theme.backgroundActive}
             placeholderColor={theme.textMuted}
             cursorColor={theme.text}
-            onInput={mailery.actions.setSearchDraft}
+            onInput={emails.actions.setSearchDraft}
             onSubmit={(value) => {
-              mailery.actions.search(String(value));
+              emails.actions.search(String(value));
               close();
             }}
           />
           <box height={1} flexDirection="row" columnGap={1}>
             <Button label="Apply" active onPress={() => {
-              mailery.actions.search(mailery.state.searchDraft);
+              emails.actions.search(emails.state.searchDraft);
               close();
             }} />
             <Button label="Clear" onPress={() => {
-              mailery.actions.search("");
+              emails.actions.search("");
               close();
             }} />
           </box>
         </box>
-      ), { size: "large", onClose: mailery.actions.closeDialog });
+      ), { size: "large", onClose: emails.actions.closeDialog });
       return;
     }
 
     if (kind === "domains") {
-      dialog.replace(() => <DomainsDialog close={close} />, { size: "large", onClose: mailery.actions.closeDialog });
+      dialog.replace(() => <DomainsDialog close={close} />, { size: "large", onClose: emails.actions.closeDialog });
       return;
     }
 
     if (kind === "settings") {
-      dialog.replace(() => <SettingsDialog close={close} />, { size: "large", onClose: mailery.actions.closeDialog });
+      dialog.replace(() => <SettingsDialog close={close} />, { size: "large", onClose: emails.actions.closeDialog });
       return;
     }
 
@@ -225,16 +225,16 @@ export function MaileryDialogs() {
           title="Labels"
           placeholder="Search or create label"
           items={labelItems()}
-          query={mailery.state.labelSearch}
-          onQuery={mailery.actions.setLabelSearch}
+          query={emails.state.labelSearch}
+          onQuery={emails.actions.setLabelSearch}
           onSelect={(item) => {
-            mailery.actions.toggleSelectedLabel(item.id);
+            emails.actions.toggleSelectedLabel(item.id);
             toast.show({ title: "Label updated", message: labelDisplayName(item.id), tone: "success" });
             close();
           }}
           onClose={close}
         />
-      ), { size: "large", onClose: mailery.actions.closeDialog });
+      ), { size: "large", onClose: emails.actions.closeDialog });
       return;
     }
 
@@ -248,7 +248,7 @@ export function MaileryDialogs() {
             query=""
             onQuery={() => undefined}
             onSelect={(item) => {
-              const link = mailery.links()[Number(item.id)];
+              const link = emails.links()[Number(item.id)];
               if (!link) return;
               void copyTextToClipboardAsync(link.url).then((result) => {
                 toast.show({
@@ -261,11 +261,11 @@ export function MaileryDialogs() {
             }}
             onClose={close}
           />
-          <Show when={mailery.links().length > 0}>
+          <Show when={emails.links().length > 0}>
             <Button
               label="Open first link"
               onPress={() => {
-                const link = mailery.links()[0];
+                const link = emails.links()[0];
                 if (!link) return;
                 const result = openLocalTarget(link.url);
                 toast.show({
@@ -280,28 +280,28 @@ export function MaileryDialogs() {
           <Button
             label="Copy all links"
             onPress={() => {
-              const links = mailery.links().map((link) => link.url).join("\n");
+              const links = emails.links().map((link) => link.url).join("\n");
               void copyTextToClipboardAsync(links).then((result) => {
-                toast.show({ title: result.ok ? "Links copied" : "Copy failed", message: `${mailery.links().length} link(s)`, tone: result.ok ? "success" : "error" });
+                toast.show({ title: result.ok ? "Links copied" : "Copy failed", message: `${emails.links().length} link(s)`, tone: result.ok ? "success" : "error" });
               });
               close();
             }}
           />
-          <For each={mailery.links().length === 0 ? ["No links detected."] : []}>
+          <For each={emails.links().length === 0 ? ["No links detected."] : []}>
             {(message) => <text fg={theme.textMuted}>{message}</text>}
           </For>
         </box>
-      ), { size: "large", onClose: mailery.actions.closeDialog });
+      ), { size: "large", onClose: emails.actions.closeDialog });
       return;
     }
 
     if (kind === "attachments") {
-      dialog.replace(() => <AttachmentsDialog close={close} attachments={attachmentDetails()} items={attachmentItems()} />, { size: "large", onClose: mailery.actions.closeDialog });
+      dialog.replace(() => <AttachmentsDialog close={close} attachments={attachmentDetails()} items={attachmentItems()} />, { size: "large", onClose: emails.actions.closeDialog });
       return;
     }
 
     if (kind === "raw") {
-      dialog.replace(() => <RawMessageDialog close={close} />, { size: "large", onClose: mailery.actions.closeDialog });
+      dialog.replace(() => <RawMessageDialog close={close} />, { size: "large", onClose: emails.actions.closeDialog });
       return;
     }
     });
@@ -311,13 +311,13 @@ export function MaileryDialogs() {
 }
 
 function GroupDialog(props: { close: () => void }) {
-  const mailery = useMailery();
+  const emails = useEmails();
   const theme = useTheme();
   const items: SelectDialogItem[] = MAILBOX_GROUP_MODES.map((mode) => ({
     id: mode,
     title: mailboxGroupModeLabel(mode),
     detail: groupModeDetail(mode),
-    marker: mailery.state.groupMode === mode ? "●" : " ",
+    marker: emails.state.groupMode === mode ? "●" : " ",
     markerColor: theme.primary,
   }));
 
@@ -333,7 +333,7 @@ function GroupDialog(props: { close: () => void }) {
       query=""
       onQuery={() => undefined}
       onSelect={(item) => {
-        mailery.actions.setGroupMode(item.id as MailboxGroupMode);
+        emails.actions.setGroupMode(item.id as MailboxGroupMode);
         props.close();
       }}
       onClose={props.close}
@@ -353,12 +353,12 @@ function groupModeDetail(mode: MailboxGroupMode): string {
 const DIGEST_PERIODS: EmailDigestPeriod[] = ["today", "yesterday", "last7", "month"];
 
 function DigestDialog(props: { close: () => void }) {
-  const mailery = useMailery();
+  const emails = useEmails();
   const theme = useTheme();
   const toast = useToast();
   const lines = createMemo(() => {
-    const digest = mailery.state.digest;
-    if (mailery.state.digestLoading) return ["Loading digest..."];
+    const digest = emails.state.digest;
+    if (emails.state.digestLoading) return ["Loading digest..."];
     if (!digest) return ["No digest available."];
     const out = [`Summary: ${digest.summary ?? "(no summary)"}`, ""];
     if (digest.highlights.length) {
@@ -394,8 +394,8 @@ function DigestDialog(props: { close: () => void }) {
           {(period) => (
             <Button
               label={emailDigestPeriodLabel(period)}
-              active={mailery.state.digestPeriod === period}
-              onPress={() => void mailery.actions.loadDigest(period, { local: true })}
+              active={emails.state.digestPeriod === period}
+              onPress={() => void emails.actions.loadDigest(period, { local: true })}
             />
           )}
         </For>
@@ -409,12 +409,12 @@ function DigestDialog(props: { close: () => void }) {
         <Button
           label="Refresh"
           tone="primary"
-          active={!mailery.state.digestLoading}
+          active={!emails.state.digestLoading}
           onPress={() => {
-            void mailery.actions.generateDigest(mailery.state.digestPeriod).then((digest) => {
+            void emails.actions.generateDigest(emails.state.digestPeriod).then((digest) => {
               toast.show({
                 title: digest ? "Digest refreshed" : "Digest failed",
-                message: digest ? `${emailDigestPeriodLabel(digest.period)} · ${digest.provider}` : mailery.state.lastError ?? "Could not generate digest.",
+                message: digest ? `${emailDigestPeriodLabel(digest.period)} · ${digest.provider}` : emails.state.lastError ?? "Could not generate digest.",
                 tone: digest ? "success" : "error",
               });
             });
@@ -427,14 +427,14 @@ function DigestDialog(props: { close: () => void }) {
 
 
 function FilterDialog(props: { close: () => void }) {
-  const mailery = useMailery();
+  const emails = useEmails();
   const theme = useTheme();
   const applySearch = () => {
-    mailery.actions.search(mailery.state.searchDraft);
+    emails.actions.search(emails.state.searchDraft);
     props.close();
   };
   const clearFilters = () => {
-    mailery.actions.clearFilters();
+    emails.actions.clearFilters();
     props.close();
   };
 
@@ -450,7 +450,7 @@ function FilterDialog(props: { close: () => void }) {
       </box>
       <input
         focused
-        value={mailery.state.searchDraft}
+        value={emails.state.searchDraft}
         placeholder="Subject, sender, recipient, or body"
         width="100%"
         textColor={theme.text}
@@ -459,23 +459,23 @@ function FilterDialog(props: { close: () => void }) {
         focusedBackgroundColor={theme.backgroundActive}
         placeholderColor={theme.textMuted}
         cursorColor={theme.text}
-        onInput={mailery.actions.setSearchDraft}
+        onInput={emails.actions.setSearchDraft}
         onSubmit={applySearch}
       />
       <box height={1} flexDirection="row" columnGap={1}>
         <Button label="Apply" tone="primary" onPress={applySearch} />
         <Button label="Clear" onPress={clearFilters} />
-        <Button label={mailery.state.sort === "newest" ? "Newest" : "Oldest"} onPress={() => mailery.actions.cycleSort()} />
+        <Button label={emails.state.sort === "newest" ? "Newest" : "Oldest"} onPress={() => emails.actions.cycleSort()} />
       </box>
       <box height={1} flexDirection="row" columnGap={1}>
-        <Button label="Inbox" active={mailery.state.mailbox === "inbox" && !mailery.state.activeLabel} onPress={() => mailery.actions.setMailbox("inbox")} />
-        <Button label="Unread" active={mailery.state.mailbox === "unread"} onPress={() => mailery.actions.setMailbox("unread")} />
-        <Button label="Starred" active={mailery.state.mailbox === "starred"} onPress={() => mailery.actions.setMailbox("starred")} />
-        <Button label="Archived" active={mailery.state.mailbox === "archived"} onPress={() => mailery.actions.setMailbox("archived")} />
+        <Button label="Inbox" active={emails.state.mailbox === "inbox" && !emails.state.activeLabel} onPress={() => emails.actions.setMailbox("inbox")} />
+        <Button label="Unread" active={emails.state.mailbox === "unread"} onPress={() => emails.actions.setMailbox("unread")} />
+        <Button label="Starred" active={emails.state.mailbox === "starred"} onPress={() => emails.actions.setMailbox("starred")} />
+        <Button label="Archived" active={emails.state.mailbox === "archived"} onPress={() => emails.actions.setMailbox("archived")} />
       </box>
-      <Show when={mailery.state.search || mailery.state.activeLabel}>
+      <Show when={emails.state.search || emails.state.activeLabel}>
         <text fg={theme.textMuted}>
-          Active: {[mailery.state.search && `search "${mailery.state.search}"`, mailery.state.activeLabel && labelDisplayName(mailery.state.activeLabel)].filter(Boolean).join(" · ")}
+          Active: {[emails.state.search && `search "${emails.state.search}"`, emails.state.activeLabel && labelDisplayName(emails.state.activeLabel)].filter(Boolean).join(" · ")}
         </text>
       </Show>
     </box>
@@ -560,9 +560,9 @@ function AttachmentsDialog(props: { close: () => void; attachments: AttachmentDe
 }
 
 function RawMessageDialog(props: { close: () => void }) {
-  const mailery = useMailery();
+  const emails = useEmails();
   const theme = useTheme();
-  const body = () => mailery.selectedBody();
+  const body = () => emails.selectedBody();
   const rawLines = () => {
     const selected = body();
     if (!selected) return [];
@@ -640,7 +640,7 @@ function readinessColor(theme: ReturnType<typeof useTheme>, value: string) {
 }
 
 function DomainsDialog(props: { close: () => void }) {
-  const mailery = useMailery();
+  const emails = useEmails();
   const theme = useTheme();
   useKeyboard((key) => {
     if (key.name === "escape") props.close();
@@ -658,9 +658,9 @@ function DomainsDialog(props: { close: () => void }) {
         <box flexGrow={1}><text fg={theme.textMuted}>Readiness</text></box>
       </box>
 
-      <Show when={mailery.state.domains.length > 0} fallback={<EmptyState title="No domains" detail="Configured domains will appear here." />}>
+      <Show when={emails.state.domains.length > 0} fallback={<EmptyState title="No domains" detail="Configured domains will appear here." />}>
         <scrollbox height={14} width="100%">
-          <For each={mailery.state.domains}>
+          <For each={emails.state.domains}>
             {(domain) => (
               <Row>
                 <box flexDirection="row" width="100%" columnGap={2}>
@@ -676,8 +676,8 @@ function DomainsDialog(props: { close: () => void }) {
 
       <box height={1} />
       <box height={1} flexDirection="row" columnGap={1}>
-        <Button label="Previous page" onPress={() => mailery.actions.workspacePage(-1)} />
-        <Button label="Next page" active={mailery.state.domainsHasMore} onPress={() => mailery.actions.workspacePage(1)} />
+        <Button label="Previous page" onPress={() => emails.actions.workspacePage(-1)} />
+        <Button label="Next page" active={emails.state.domainsHasMore} onPress={() => emails.actions.workspacePage(1)} />
       </box>
     </box>
   );
@@ -720,9 +720,9 @@ function SettingsActionRow(props: { title: string; value: string; onPress: () =>
 }
 
 function SettingsDialog(props: { close: () => void }) {
-  const mailery = useMailery();
+  const emails = useEmails();
   const [section, setSection] = createSignal<SettingsSection>("main");
-  const settings = () => mailery.state.settings;
+  const settings = () => emails.state.settings;
   const agentSettings = createMemo(() => ensureEmailAgentSettings());
   const enabledAgentCount = () => agentSettings().filter((setting) => setting.enabled).length;
   const alwaysOnAgentCount = () => agentSettings().filter((setting) => setting.enabled && setting.always_on).length;
@@ -732,15 +732,15 @@ function SettingsDialog(props: { close: () => void }) {
   };
   const cycleMailbox = () => {
     const index = MAILBOXES.indexOf(settings().defaultMailbox);
-    mailery.actions.setSetting("defaultMailbox", MAILBOXES[(index + 1) % MAILBOXES.length] as Mailbox);
+    emails.actions.setSetting("defaultMailbox", MAILBOXES[(index + 1) % MAILBOXES.length] as Mailbox);
   };
   const openInboxes = () => {
     props.close();
-    mailery.actions.openDialog("address");
+    emails.actions.openDialog("address");
   };
   const openCompose = () => {
     props.close();
-    mailery.actions.startCompose("new");
+    emails.actions.startCompose("new");
   };
 
   useKeyboard((key) => {
@@ -772,7 +772,7 @@ function SettingsDialog(props: { close: () => void }) {
           <SettingsActionRow
             title="Auto-pull inbound"
             value={boolText(settings().autoPull)}
-            onPress={() => mailery.actions.setSetting("autoPull", !settings().autoPull)}
+            onPress={() => emails.actions.setSetting("autoPull", !settings().autoPull)}
           />
         </box>
       </Show>
@@ -786,7 +786,7 @@ function SettingsDialog(props: { close: () => void }) {
           <SettingsActionRow
             title="Auto-pull inbound"
             value={boolText(settings().autoPull)}
-            onPress={() => mailery.actions.setSetting("autoPull", !settings().autoPull)}
+            onPress={() => emails.actions.setSetting("autoPull", !settings().autoPull)}
           />
         </box>
       </Show>
@@ -804,12 +804,12 @@ function SettingsDialog(props: { close: () => void }) {
           <SettingsActionRow
             title="Dim read messages"
             value={boolText(settings().dimRead)}
-            onPress={() => mailery.actions.setSetting("dimRead", !settings().dimRead)}
+            onPress={() => emails.actions.setSetting("dimRead", !settings().dimRead)}
           />
           <SettingsActionRow
             title="Theme"
             value={settings().theme}
-            onPress={() => mailery.actions.setSetting("theme", settings().theme === "dark" ? "light" : "dark")}
+            onPress={() => emails.actions.setSetting("theme", settings().theme === "dark" ? "light" : "dark")}
           />
         </box>
       </Show>

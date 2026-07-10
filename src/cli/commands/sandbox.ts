@@ -88,7 +88,7 @@ export function registerSandboxCommands(program: Command, output: (data: unknown
         const { writeFileSync } = await import("node:fs");
         const { tmpdir } = await import("node:os");
         const { join: pathJoin } = await import("node:path");
-        const tmpFile = pathJoin(tmpdir(), `mailery-sandbox-${resolvedId!.slice(0, 8)}.html`);
+        const tmpFile = pathJoin(tmpdir(), `emails-sandbox-${resolvedId!.slice(0, 8)}.html`);
         writeFileSync(tmpFile, renderReadableEmailDocument({
           subject: email!.subject,
           from: email!.from_address,

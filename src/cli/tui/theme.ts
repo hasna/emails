@@ -172,7 +172,7 @@ function themeFromColorFgBg(value: string | undefined): ResolvedTuiThemeName | n
 }
 
 export function detectSystemTheme(env: Record<string, string | undefined> = process.env): ResolvedTuiThemeName {
-  const forced = normalizeThemeMode(env["MAILERY_TUI_THEME"] ?? env["EMAILS_TUI_THEME"] ?? env["TUI_THEME"] ?? env["TERMINAL_THEME"]);
+  const forced = normalizeThemeMode(env["EMAILS_TUI_THEME"] ?? env["EMAILS_TUI_THEME"] ?? env["TUI_THEME"] ?? env["TERMINAL_THEME"]);
   if (forced === "light" || forced === "dark") return forced;
 
   const colorFgBg = themeFromColorFgBg(env["COLORFGBG"]);

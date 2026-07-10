@@ -55,7 +55,7 @@ async function runDomainCommand(args: string[]) {
 
 beforeEach(() => {
   process.env["EMAILS_DB_PATH"] = ":memory:";
-  process.env["MAILERY_MODE"] = "local";
+  process.env["EMAILS_MODE"] = "local";
   resetDatabase();
   mockR53CheckAvailability.mockReset();
   mockR53CheckAvailability.mockImplementation(async (domain: string) => ({
@@ -86,7 +86,7 @@ beforeEach(() => {
 afterEach(() => {
   closeDatabase();
   delete process.env["EMAILS_DB_PATH"];
-  delete process.env["MAILERY_MODE"];
+  delete process.env["EMAILS_MODE"];
 });
 
 describe("domain add command", () => {
@@ -364,10 +364,8 @@ describe("domains lifecycle commands", () => {
 
   it("requires self-hosted domains to have SES/S3 source evidence before receive-ready status", async () => {
     const previousHome = process.env["HOME"];
-    const previousMode = process.env["MAILERY_MODE"];
-    const tmpHome = mkdtempSync(join(tmpdir(), "mailery-domain-test-"));
+    const tmpHome = mkdtempSync(join(tmpdir(), "emails-domain-test-"));
     process.env["HOME"] = tmpHome;
-    process.env["MAILERY_MODE"] = "self_hosted";
     try {
       const provider = createProvider({ name: "ses-main", type: "ses", region: "us-east-1" });
       const domain = createDomain(provider.id, "selfhosted.example.com");
@@ -421,8 +419,6 @@ describe("domains lifecycle commands", () => {
     } finally {
       if (previousHome === undefined) delete process.env["HOME"];
       else process.env["HOME"] = previousHome;
-      if (previousMode === undefined) delete process.env["MAILERY_MODE"];
-      else process.env["MAILERY_MODE"] = previousMode;
       rmSync(tmpHome, { recursive: true, force: true });
     }
   });

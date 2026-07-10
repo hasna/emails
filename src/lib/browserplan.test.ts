@@ -44,7 +44,7 @@ beforeEach(() => {
   providerId = createProvider({ name: "ses", type: "ses" }).id;
   domainId = createDomain(providerId, "example.com").id;
   setDomainProvisioning(domainId, { provisioning_status: "ready", send_provider: "ses" });
-  tmp = mkdtempSync(join(tmpdir(), "mailery-browserplan-"));
+  tmp = mkdtempSync(join(tmpdir(), "emails-browserplan-"));
   identityStorePath = join(tmp, "identities.json");
   writeIdentities([]);
 });

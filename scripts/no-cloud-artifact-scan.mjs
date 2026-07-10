@@ -1,94 +1,47 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
-
-const forbiddenMarkers = [
-  ["@hasna", "cloud"].join("/"),
-  ["@hasna", "tools"].join(""),
-  ["platform", "mailery"].join("-"),
-  ["@hasna", "wallets"].join("/"),
-  ["open", "cloud"].join("-"),
-  ["cloud", "mcp"].join("-"),
-  ["cloud", "tool"].join("-"),
-  ["STRIPE", "SECRET", "KEY"].join("_"),
-  ["STRIPE", "WEBHOOK", "SECRET"].join("_"),
-  ["MAILERY", "ADMIN", "API", "KEY"].join("_"),
-  [".hasna", "cloud"].join("/"),
-  ["HASNA", "CLOUD", ""].join("_"),
-  ["HASNA", "RDS"].join("_"),
-  ["hasna", "xyz"].join("-"),
-  ["hasna", "xyz"].join("/"),
-  ["hasna", "studio"].join("-"),
-  ["hasna", "studio"].join(""),
-  ["HASNA", "XYZ"].join(""),
-  ["apps", "prod", "postgres"].join("-"),
-  ["HASNA", "XYZ", ""].join("_"),
-  ["mailery", "postgres"].join("-"),
-  ["mailery", "email", "archive"].join("-"),
-  ["mailery", "archive"].join("-"),
-  ["mailery", "self-hosted"].join("/"),
-  ["mailery", "self-hosted", "postgres"].join("-"),
-  ["mailery", "self-hosted", "emails", "prod"].join("/"),
-];
-const platformNativeArtifactPattern = /(^|\/)(?:libopentui|opentui).*\.(?:so|dylib|dll|node)$/i;
+import { join, relative } from "node:path";
+import { hostedControlPlaneFindings } from "./no-cloud-scan-lib.mjs";
 
 const root = process.cwd();
-const tempRoot = mkdtempSync(join(tmpdir(), "open-emails-pack-scan-"));
+const tempRoot = mkdtempSync(join(tmpdir(), "emails-pack-scan-"));
 const packDir = join(tempRoot, "pack");
 const extractDir = join(tempRoot, "extract");
 mkdirSync(packDir);
 mkdirSync(extractDir);
 
-const packOutput = execFileSync("npm", [
-  "pack",
-  "--json",
-  "--ignore-scripts",
-  "--dry-run=false",
-  "--pack-destination",
-  packDir,
-], {
+const tarName = "emails-package.tgz";
+execFileSync("bun", ["pm", "pack", "--ignore-scripts", "--filename", join(packDir, tarName), "--quiet"], {
   cwd: root,
-  env: { ...process.env, ["npm" + "_config_dry_run"]: "false" },
-  encoding: "utf8",
+  stdio: "ignore",
 });
-const [packInfo] = JSON.parse(packOutput);
-if (!packInfo?.filename) {
-  throw new Error("npm pack did not return a tarball filename");
-}
+const tarball = join(packDir, tarName);
 
-const tarball = join(packDir, packInfo.filename);
+function files(path) {
+  if (!existsSync(path)) return [];
+  const stat = statSync(path);
+  if (stat.isFile()) return [path];
+  if (!stat.isDirectory()) return [];
+  return readdirSync(path).flatMap((entry) => files(join(path, entry)));
+}
 
 try {
   execFileSync("tar", ["-xzf", tarball, "-C", extractDir], { stdio: "ignore" });
   const packageDir = join(extractDir, "package");
   const findings = [];
-
-  for (const file of packInfo.files ?? []) {
-    const relativePath = file.path;
-    if (platformNativeArtifactPattern.test(relativePath)) {
-      findings.push(`${relativePath} is a platform-native artifact`);
-      continue;
-    }
-    if (!/\.(html|json|md|ts|tsx|js|mjs|cjs|yml|yaml|toml|lock)$/.test(relativePath)) continue;
-    const path = join(packageDir, relativePath);
-    if (!existsSync(path)) continue;
-
-    const text = readFileSync(path, "utf8");
-    for (const marker of forbiddenMarkers) {
-      if (text.includes(marker)) {
-        findings.push(`${relativePath} contains ${marker}`);
-      }
-    }
+  for (const file of files(packageDir)) {
+    if (!/\.(?:css|html|json|js|mjs|cjs|md|ts|tsx|yaml|yml)$/.test(file)) continue;
+    const rel = relative(packageDir, file);
+    const content = readFileSync(file, "utf8");
+    const reasons = hostedControlPlaneFindings(content, rel);
+    if (reasons.length) findings.push(`${rel}: ${reasons.join(", ")}`);
   }
-
-  if (findings.length > 0) {
-    console.error(findings.join("\n"));
-    process.exitCode = 1;
-  } else {
-    console.log(`${basename(tarball)} has no private platform references or platform-native artifacts`);
+  if (findings.length) {
+    throw new Error(`hosted-control-plane markers found in package:\n${findings.join("\n")}`);
   }
+  console.log(`${tarName} contains no hosted-control-plane markers`);
 } finally {
   rmSync(tempRoot, { recursive: true, force: true });
 }

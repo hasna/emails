@@ -1,5 +1,5 @@
 /**
- * Integration test - exercises the full Mailery flow using sandbox provider.
+ * Integration test - exercises the full Emails flow using sandbox provider.
  * Tests that CLI/DB/MCP layers work together correctly.
  */
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";

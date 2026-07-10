@@ -45,6 +45,20 @@ describe("server startup contract", () => {
     }
   });
 
+  it("fails closed on legacy hosted mode variables instead of booting local", () => {
+    const result = Bun.spawnSync({
+      cmd: ["bun", "src/server/index.ts"],
+      cwd: join(import.meta.dir, "..", ".."),
+      env: { ...process.env, MAILERY_MODE: "cloud", PORT: "0" },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const combined = new TextDecoder().decode(result.stdout) + new TextDecoder().decode(result.stderr);
+    expect(result.exitCode).not.toBe(0);
+    expect(combined).toContain("MAILERY_MODE");
+    expect(combined).toContain("removed hosted/legacy runtime");
+  });
+
   it("keeps route modules lazy behind the API dispatcher", () => {
     const source = readFileSync(apiRoutesFile, "utf8");
     const staticRouteImports = [...source.matchAll(staticImport)]

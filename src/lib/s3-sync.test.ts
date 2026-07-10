@@ -45,7 +45,7 @@ function defaultParsedMail() {
 // process-global `mock.module("mailparser", ...)` registered below (bun applies
 // module mocks eagerly, so importing "mailparser" here would already yield the
 // mock). We restore it in afterAll — otherwise this fixed-date parser leaks
-// into later test files (e.g. server/cloud/ingest-worker.test.ts) run in the
+// into later test files (e.g. server/self-hosted/ingest-worker.test.ts) run in the
 // same process and corrupts their received_at assertions.
 // @ts-expect-error — deep subpath has no type declarations
 const realSimpleParser = (await import("mailparser/lib/simple-parser.js")).default as (
@@ -101,7 +101,7 @@ beforeEach(() => {
 
 afterEach(() => {
   closeDatabase();
-  delete process.env["MAILERY_MODE"];
+  delete process.env["EMAILS_MODE"];
   delete process.env["HASNA_EMAILS_DATABASE_URL"];
   delete process.env["EMAILS_DATABASE_URL"];
   if (originalHome === undefined) delete process.env["HOME"];

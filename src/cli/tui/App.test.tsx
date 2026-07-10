@@ -15,7 +15,7 @@ import { storeInboundEmail } from "../../db/inbound.js";
 import { createProvider } from "../../db/providers.js";
 import { setSetting } from "./data.js";
 import { App } from "./App.js";
-import { resolveAddressChoice } from "../tui-solid/context/mailery-state.js";
+import { resolveAddressChoice } from "../tui-solid/context/emails-state.js";
 import { resetMailDataSource } from "../../lib/mail-data-source.js";
 
 let autoPullCalls = 0;
@@ -47,10 +47,12 @@ beforeEach(() => {
   process.env["EMAILS_TUI_DISABLE_THEME_PROBE"] = "1";
   process.env["EMAILS_TUI_CLIPBOARD_DRY_RUN"] = "1";
   savedHome = process.env["HOME"];
-  tmpHome = mkdtempSync(join(tmpdir(), "mailery-solid-tui-"));
+  tmpHome = mkdtempSync(join(tmpdir(), "emails-solid-tui-"));
   process.env["HOME"] = tmpHome;
-  delete process.env["MAILERY_MODE"];
+  delete process.env["EMAILS_MODE"];
   delete process.env["HASNA_EMAILS_MODE"];
+  delete process.env["EMAILS_SELF_HOSTED_URL"];
+  delete process.env["EMAILS_SELF_HOSTED_API_KEY"];
   resetMailDataSource();
   resetDatabase();
   providerId = createProvider({ name: "sandbox", type: "sandbox", active: true }).id;
@@ -65,8 +67,10 @@ afterEach(() => {
   setup?.renderer.destroy();
   setup = null;
   closeDatabase();
-  delete process.env["MAILERY_MODE"];
+  delete process.env["EMAILS_MODE"];
   delete process.env["HASNA_EMAILS_MODE"];
+  delete process.env["EMAILS_SELF_HOSTED_URL"];
+  delete process.env["EMAILS_SELF_HOSTED_API_KEY"];
   resetMailDataSource();
   delete process.env["EMAILS_DB_PATH"];
   delete process.env["EMAILS_TUI_DISABLE_THEME_PROBE"];
@@ -166,7 +170,7 @@ async function typeText(value: string) {
   await flush();
 }
 
-describe("Mailery Solid TUI", () => {
+describe("Emails Solid TUI", () => {
   it("resolves a searched-for inbox to its real address, never falling back to All inboxes", () => {
     // Regression: the picker caps the address list (200). An address found by TYPING in the
     // search box but sitting beyond that cap used to make reload() fall back to list[0] =
@@ -191,7 +195,7 @@ describe("Mailery Solid TUI", () => {
     seedMessage("hello inbox", new Date().toISOString(), "long.recipient@example.com");
     await renderApp();
 
-    expect(frame()).toContain("Mailery");
+    expect(frame()).toContain("Emails");
     expect(frame()).toContain("Mail");
     expect(frame()).toContain("Labels");
     expect(frame()).toContain("Actions");
@@ -448,7 +452,7 @@ describe("Mailery Solid TUI", () => {
     expect(lines[toastLine]!.indexOf("Pull complete")).toBeGreaterThan(58);
   });
 
-  // The manual Pull affordance triggers LOCAL S3→SQLite ingestion (autoPull). In cloud
+  // The manual Pull affordance triggers LOCAL S3→SQLite ingestion (autoPull). In self_hosted
   // mode the server ingests and the client syncs via the automatic changesSince delta, so
   // Pull is meaningless there — it must render only in local mode (toolbar button AND the
   // "Pull Now" command palette entry). The toolbar row is isolated by the "Digest" line so
@@ -470,18 +474,20 @@ describe("Mailery Solid TUI", () => {
     expect(frame()).toContain("Pull Now");
   });
 
-  it("hides the Pull toolbar action and command in cloud mode", async () => {
-    process.env["MAILERY_MODE"] = "cloud";
+  it("hides the Pull toolbar action and command in self_hosted mode", async () => {
+    process.env["EMAILS_MODE"] = "self_hosted";
+    process.env["EMAILS_SELF_HOSTED_URL"] = "http://127.0.0.1:9";
+    process.env["EMAILS_SELF_HOSTED_API_KEY"] = "test-only-key";
     resetMailDataSource();
     await renderApp();
 
-    // Cloud keeps the other toolbar actions but drops the manual Pull button.
+    // Self-hosted keeps the other toolbar actions but drops the manual Pull button.
     const toolbar = toolbarLine();
     expect(toolbar).toContain("Digest");
     expect(toolbar).toContain("Newest first");
     expect(toolbar).not.toContain("Pull");
 
-    // The command palette must not expose "Pull Now" in cloud mode.
+    // The command palette must not expose "Pull Now" in self_hosted mode.
     await key("p", { ctrl: true });
     expect(frame()).toContain("Shortcuts");
     await typeText("Pull");

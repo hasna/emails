@@ -1,12 +1,12 @@
 import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
-import { createProvider, listProviders, listProviderSummaries, deleteProvider, getProvider, updateProvider } from "../../db/providers.js";
+import { createProvider, listProviders, listProviderSummaries, deleteProvider, getProvider, resolveProviderId, updateProvider } from "../../db/providers.js";
 import { getAdapter } from "../../providers/index.js";
 import { log } from "../../lib/logger.js";
-import { confirmDestructiveAction, formatListHint, handleError, isCliVerboseOutput, parseCliListPage, resolveId } from "../utils.js";
+import { confirmDestructiveAction, formatListHint, handleError, isCliVerboseOutput, parseCliListPage } from "../utils.js";
 
 type SupportedProviderType = "resend" | "ses" | "sandbox";
-const GMAIL_RETIRED_MESSAGE = "Gmail is no longer an active Mailery provider. Use SES, Resend, or Cloudflare inbound routing.";
+const GMAIL_RETIRED_MESSAGE = "Gmail is no longer an active Emails provider. Use SES, Resend, or Cloudflare inbound routing.";
 
 function parseProviderType(value: string): SupportedProviderType {
   if (value === "gmail") handleError(new Error(GMAIL_RETIRED_MESSAGE));
@@ -110,7 +110,8 @@ export function registerProviderCommands(program: Command, output: (data: unknow
     .option("--yes", "Skip confirmation prompt")
     .action(async (id: string, opts: { yes?: boolean }) => {
       try {
-        const resolvedId = resolveId("providers", id);
+        const resolvedId = resolveProviderId(id);
+        if (!resolvedId) handleError(new Error(`Provider not found or ambiguous: ${id}`));
         const provider = getProvider(resolvedId);
         if (!provider) handleError(new Error(`Provider not found: ${id}`));
         await confirmDestructiveAction(`Remove provider ${provider.name}?`, opts.yes);
@@ -139,7 +140,8 @@ export function registerProviderCommands(program: Command, output: (data: unknow
       skipValidation?: boolean;
     }) => {
       try {
-        const resolvedId = resolveId("providers", id);
+        const resolvedId = resolveProviderId(id);
+        if (!resolvedId) handleError(new Error(`Provider not found or ambiguous: ${id}`));
         const existing = getProvider(resolvedId);
         if (!existing) handleError(new Error(`Provider not found: ${id}`));
         if (existing!.type === "gmail") handleError(new Error(GMAIL_RETIRED_MESSAGE));

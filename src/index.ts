@@ -152,13 +152,13 @@ export { parseCsv } from "./lib/csv.js";
 export { extractEmailLinks, formatEmailLinks } from "./lib/email-links.js";
 export type { ExtractEmailLinksInput, ExtractedEmailLink, EmailLinkSource } from "./lib/email-links.js";
 export {
-  buildReadOnlyMaileryTools,
-  formatMaileryAgentResult,
-  resolveMaileryAgentDefaults,
-  runMaileryAgent,
-  MAILERY_AGENT_SYSTEM_PROMPT,
-} from "./lib/mailery-agent.js";
-export type { MaileryAgentOptions, MaileryAgentProvider, MaileryAgentResult } from "./lib/mailery-agent.js";
+  buildReadOnlyEmailsTools,
+  formatEmailsAgentResult,
+  resolveEmailsAgentDefaults,
+  runEmailsAgent,
+  EMAILS_AGENT_SYSTEM_PROMPT,
+} from "./lib/emails-agent.js";
+export type { EmailsAgentOptions, EmailsAgentProvider, EmailsAgentResult } from "./lib/emails-agent.js";
 export {
   buildManagedEmailAgentTools,
   formatEmailAgentRun,

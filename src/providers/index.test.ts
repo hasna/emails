@@ -18,7 +18,7 @@ function provider(overrides: Partial<Provider>): Provider {
 describe("getAdapter", () => {
   it("keeps constructor-level validation without importing provider SDK modules", () => {
     expect(() => getAdapter(provider({ type: "resend", api_key: null }))).toThrow(ProviderConfigError);
-    expect(() => getAdapter(provider({ type: "gmail" }))).toThrow("Gmail is no longer an active Mailery provider");
+    expect(() => getAdapter(provider({ type: "gmail" }))).toThrow("Gmail is no longer an active Emails provider");
   });
 
   it("preserves optional SES-only MAIL FROM support on the lazy adapter", () => {

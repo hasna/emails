@@ -1,6 +1,6 @@
 import { For, Show } from "solid-js";
 import { TextAttributes, type MouseEvent } from "@opentui/core";
-import { useMailery } from "../context/mailery-state.js";
+import { useEmails } from "../context/emails-state.js";
 import { useTheme } from "../context/theme.js";
 import { Button, EmptyState } from "../ui/primitives.js";
 import { formatDate, renderReadableBodyLines } from "../../tui/format.js";
@@ -9,10 +9,10 @@ import { useToast } from "../context/toast.js";
 
 export function ReaderRoute() {
   const theme = useTheme();
-  const mailery = useMailery();
+  const emails = useEmails();
   const toast = useToast();
   const bodyLines = () => {
-    const body = mailery.selectedBody();
+    const body = emails.selectedBody();
     return body ? renderReadableBodyLines(body.text, body.html, 110, 180) : [];
   };
   const lineColor = (line: ReturnType<typeof renderReadableBodyLines>[number]) => {
@@ -33,13 +33,13 @@ export function ReaderRoute() {
 
   return (
     <box width="100%" height="100%" flexDirection="column" backgroundColor={theme.background} paddingTop={1} paddingLeft={2} paddingRight={2}>
-      <Show when={mailery.selectedBody()} fallback={<EmptyState title="No message selected" detail="Choose a message from the inbox." />}>
+      <Show when={emails.selectedBody()} fallback={<EmptyState title="No message selected" detail="Choose a message from the inbox." />}>
         {(body) => (
           <>
             <box height={5} flexDirection="column" rowGap={0}>
               <box flexDirection="row" justifyContent="space-between">
                 <text fg={theme.text} attributes={TextAttributes.BOLD}>{body().subject}</text>
-                <Button label="Back" onPress={() => mailery.actions.backToList()} />
+                <Button label="Back" onPress={() => emails.actions.backToList()} />
               </box>
               <text fg={theme.textMuted}>From: {body().from}</text>
               <text fg={theme.textMuted}>To: {body().to}</text>
@@ -53,7 +53,7 @@ export function ReaderRoute() {
             </Show>
 
             <scrollbox flexGrow={1} width="100%" paddingTop={1}>
-              <For each={mailery.conversation()}>
+              <For each={emails.conversation()}>
                 {(entry) => (
                   <box flexDirection="column" marginBottom={1}>
                     <text fg={theme.textMuted}>
@@ -79,7 +79,7 @@ export function ReaderRoute() {
                   </box>
                 )}
               </For>
-              <Show when={mailery.conversation().length === 0}>
+              <Show when={emails.conversation().length === 0}>
                 <For each={bodyLines()}>
                   {(line) => <text fg={lineColor(line)}>{line.text}</text>}
                 </For>
@@ -100,14 +100,14 @@ export function ReaderRoute() {
             </scrollbox>
 
             <box height={2} flexDirection="row" columnGap={1}>
-              <Button label="Reply" onPress={() => mailery.selectedMessage() && mailery.actions.startCompose("reply", mailery.selectedMessage()!)} />
-              <Button label="Forward" onPress={() => mailery.selectedMessage() && mailery.actions.startCompose("forward", mailery.selectedMessage()!)} />
+              <Button label="Reply" onPress={() => emails.selectedMessage() && emails.actions.startCompose("reply", emails.selectedMessage()!)} />
+              <Button label="Forward" onPress={() => emails.selectedMessage() && emails.actions.startCompose("forward", emails.selectedMessage()!)} />
               <Show when={body().attachments.length > 0}>
-                <Button label="Attachments" onPress={() => mailery.actions.openDialog("attachments")} />
+                <Button label="Attachments" onPress={() => emails.actions.openDialog("attachments")} />
               </Show>
-              <Button label="Links" onPress={() => mailery.actions.openDialog("links")} />
-              <Button label="Raw" onPress={() => mailery.actions.openDialog("raw")} />
-              <Button label="Label" onPress={() => mailery.actions.openDialog("labels")} />
+              <Button label="Links" onPress={() => emails.actions.openDialog("links")} />
+              <Button label="Raw" onPress={() => emails.actions.openDialog("raw")} />
+              <Button label="Label" onPress={() => emails.actions.openDialog("labels")} />
             </box>
           </>
         )}
