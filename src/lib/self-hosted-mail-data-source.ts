@@ -93,6 +93,20 @@ interface V1Message {
   updated_at?: string | null;
 }
 
+// Response of GET /v1/messages/counts on a modern serve (all fields optional so
+// a partial/older payload degrades gracefully).
+interface V1Counts {
+  inbox?: number;
+  unread?: number;
+  starred?: number;
+  sent?: number;
+  archived?: number;
+  spam?: number;
+  trash?: number;
+  total?: number;
+  latest_received_at?: string | null;
+}
+
 export type SelfHostedFetch = (url: string, init: RequestInit) => Promise<{
   status: number;
   text(): Promise<string>;
@@ -277,6 +291,10 @@ export class SelfHostedMailDataSource implements MailDataSource {
   private readonly now: () => number;
   private readonly timeoutMs: number;
   private scanCache: { at: number; rows: V1Message[] } | null = null;
+  // Whether the connected serve exposes the fast /v1/messages/counts + filter
+  // API. Probed once, cached: true (>=200<300) on a modern serve, false on a
+  // pre-counts serve (404/405) so we transparently fall back to the full scan.
+  private fastCaps: boolean | null = null;
 
   constructor(options: SelfHostedMailDataSourceOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
@@ -352,6 +370,55 @@ export class SelfHostedMailDataSource implements MailDataSource {
     this.scanCache = null;
   }
 
+  // Fetch the server-computed per-folder counts, or null when the serve is a
+  // pre-counts build (404/405) — the caller then falls back to a full scan.
+  // Any real HTTP/transport error still throws (fail loud, never silent-empty).
+  private async fetchCounts(): Promise<V1Counts | null> {
+    const { status, json } = await this.request("GET", "/messages/counts");
+    if (status === 404 || status === 405) {
+      this.fastCaps = false;
+      return null;
+    }
+    if (status < 200 || status >= 300) {
+      throw new Error(`self-hosted mailery: GET /messages/counts failed (HTTP ${status})`);
+    }
+    this.fastCaps = true;
+    const c = (json as { counts?: V1Counts } | null)?.counts ?? (json as V1Counts | null);
+    return c && typeof c === "object" ? c : null;
+  }
+
+  // True when the connected serve exposes the fast counts/filter API. Cached.
+  private async supportsFast(): Promise<boolean> {
+    if (this.fastCaps !== null) return this.fastCaps;
+    await this.fetchCounts();
+    return this.fastCaps ?? false;
+  }
+
+  // Server-filtered inbound fetch for one recipient. The `to` match is coarse
+  // (substring) server-side; the caller applies the exact per-address filter.
+  // One page (PAGE_LIMIT) is ample: a single recipient's mail is a small slice.
+  private async listInboundFor(target: string): Promise<V1Message[]> {
+    const q = `direction=inbound&to=${encodeURIComponent(target)}&limit=${PAGE_LIMIT}`;
+    const { status, json } = await this.request("GET", `/messages?${q}`);
+    if (status < 200 || status >= 300) {
+      throw new Error(`self-hosted mailery: GET /messages (filtered) failed (HTTP ${status})`);
+    }
+    const list = (json as { messages?: unknown } | null)?.messages;
+    return Array.isArray(list) ? (list as V1Message[]) : [];
+  }
+
+  private static countsToMailbox(c: V1Counts): MailboxCounts {
+    return {
+      inbox: c.inbox ?? 0,
+      unread: c.unread ?? 0,
+      starred: c.starred ?? 0,
+      sent: c.sent ?? 0,
+      archived: c.archived ?? 0,
+      spam: c.spam ?? 0,
+      trash: c.trash ?? 0,
+    };
+  }
+
   private async getRaw(id: string): Promise<V1Message | null> {
     const { status, json } = await this.request("GET", `/messages/${encodeURIComponent(id)}`);
     if (status === 404) return null;
@@ -402,6 +469,13 @@ export class SelfHostedMailDataSource implements MailDataSource {
   }
 
   async mailboxCounts(opts?: { source?: MailboxSource }): Promise<MailboxCounts> {
+    // Fast path: unscoped counts come straight from the server aggregate, so
+    // `status`/mailbox summaries never page the whole store (the reported hang).
+    // A source-scoped count still needs per-row classification -> full scan.
+    if (!hasSourceScope(opts?.source)) {
+      const counts = await this.fetchCounts();
+      if (counts) return SelfHostedMailDataSource.countsToMailbox(counts);
+    }
     const rows = await this.scanAll();
     const counts = emptyCounts();
     for (const m of rows) {
@@ -429,12 +503,22 @@ export class SelfHostedMailDataSource implements MailDataSource {
   async listMailboxSources(_opts?: ListMailboxSourcesOptions): Promise<MailboxSourceSummary[]> {
     // The self-hosted serve is a single shared store — expose it as one source so
     // `inbox sources` / status are informative rather than empty.
-    const counts = await this.mailboxCounts();
-    const rows = await this.scanAll();
-    const latest = rows.reduce<string | null>((max, m) => {
-      const d = messageDate(m);
-      return d && (max === null || d > max) ? d : max;
-    }, null);
+    // Fast path: the server counts aggregate carries the latest receipt time, so
+    // this no longer scans every message just to find the newest one.
+    const fast = await this.fetchCounts();
+    let counts: MailboxCounts;
+    let latest: string | null;
+    if (fast) {
+      counts = SelfHostedMailDataSource.countsToMailbox(fast);
+      latest = fast.latest_received_at ?? null;
+    } else {
+      counts = await this.mailboxCounts();
+      const rows = await this.scanAll();
+      latest = rows.reduce<string | null>((max, m) => {
+        const d = messageDate(m);
+        return d && (max === null || d > max) ? d : max;
+      }, null);
+    }
     const total = counts.inbox + counts.archived + counts.spam + counts.trash;
     return [{
       id: "cloud",
@@ -495,9 +579,15 @@ export class SelfHostedMailDataSource implements MailDataSource {
 
   async verificationCandidates(address: string, opts?: VerificationCodeCandidateOptions): Promise<VerificationCodeEmail[]> {
     const target = address.trim().toLowerCase();
-    const rows = await this.scanAll();
     const since = opts?.since;
     const fromFilter = opts?.from?.trim().toLowerCase();
+    // Fast path: push the inbound + recipient filter to the server so a single
+    // small page is fetched instead of scanning every message (the reported
+    // `inbox latest`/wait-code timeout). The coarse server `to` match is narrowed
+    // to the EXACT per-address match below, preserving historical semantics.
+    const rows = (await this.supportsFast())
+      ? await this.listInboundFor(target)
+      : await this.scanAll();
     const candidates = rows
       .filter((m) => (m.direction ?? "").toLowerCase() !== "outbound")
       .filter((m) => (m.to_addrs ?? []).map(bareEmail).includes(target))

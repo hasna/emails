@@ -103,12 +103,31 @@ export function createOwner(input: CreateOwnerInput, db?: Database): Owner {
   return getOwner(id, d)!;
 }
 
+// Cloud-mode owner lookups. The write (createOwner) and `owner list` already
+// route to /v1/owners; these read-side resolvers previously read only local
+// SQLite, so `owner addresses <name>`, ownership assignment, etc. reported
+// "owner not found" on a flipped client (the read/write split-brain). Match by
+// id (direct GET) or by the requested field over the cloud list.
+function cloudOwnerBy(predicate: (o: Owner) => boolean): Owner | null {
+  const cloud = cloudResource(OWNER_RESOURCE);
+  if (!cloud) return null;
+  const rows = cloud.list({ limit: 1000 }).map(apiToOwner);
+  const sorted = rows.sort((a, b) => (a.created_at ?? "").localeCompare(b.created_at ?? ""));
+  return sorted.find(predicate) ?? null;
+}
+
 export function getOwner(id: string, db?: Database): Owner | null {
+  const cloud = cloudResource(OWNER_RESOURCE);
+  if (cloud) {
+    const rec = cloud.get(id);
+    return rec ? apiToOwner(rec) : null;
+  }
   const d = db || getDatabase();
   return (d.query("SELECT * FROM owners WHERE id = ?").get(id) as Owner | null) ?? null;
 }
 
 export function getOwnerByName(name: string, db?: Database): Owner | null {
+  if (cloudResource(OWNER_RESOURCE)) return cloudOwnerBy((o) => o.name === name);
   const d = db || getDatabase();
   return (d.query("SELECT * FROM owners WHERE name = ? ORDER BY created_at ASC").get(name) as Owner | null) ?? null;
 }
@@ -116,6 +135,7 @@ export function getOwnerByName(name: string, db?: Database): Owner | null {
 export function getOwnerByExternalId(externalId: string, db?: Database): Owner | null {
   const normalized = externalId.trim();
   if (!normalized) return null;
+  if (cloudResource(OWNER_RESOURCE)) return cloudOwnerBy((o) => o.external_id === normalized);
   const d = db || getDatabase();
   return (d.query("SELECT * FROM owners WHERE external_id = ? ORDER BY created_at ASC").get(normalized) as Owner | null) ?? null;
 }
@@ -123,6 +143,9 @@ export function getOwnerByExternalId(externalId: string, db?: Database): Owner |
 export function getOwnerByContactEmail(email: string, db?: Database): Owner | null {
   const normalized = email.trim().toLowerCase();
   if (!normalized) return null;
+  if (cloudResource(OWNER_RESOURCE)) {
+    return cloudOwnerBy((o) => (o.contact_email ?? "").toLowerCase() === normalized);
+  }
   const d = db || getDatabase();
   return (d
     .query("SELECT * FROM owners WHERE LOWER(contact_email) = ? ORDER BY created_at ASC")

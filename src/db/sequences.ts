@@ -141,6 +141,24 @@ export function createSequence(
 }
 
 export function getSequence(nameOrId: string, db?: Database): Sequence | null {
+  // Cloud mode: resolve by id (direct GET) or by name/id-prefix over the cloud
+  // list, matching where createSequence/listSequences write & read. Previously
+  // this read only local SQLite, so `sequence show/pause/archive <name>` on a
+  // flipped client reported "not found" for a sequence that `sequence list`
+  // showed (the read/write split-brain).
+  const cloud = cloudResource(SEQUENCE_RESOURCE);
+  if (cloud) {
+    const key = nameOrId.trim();
+    if (!key) return null;
+    const direct = cloud.get(key);
+    if (direct) return apiToSequence(direct);
+    const rows = cloud.list({ limit: 1000 }).map(apiToSequence);
+    const byName = rows.find((s) => s.name === key);
+    if (byName) return byName;
+    const byPrefix = rows.filter((s) => s.id.startsWith(key));
+    return byPrefix.length === 1 ? byPrefix[0]! : null;
+  }
+
   const d = db || getDatabase();
   let row = d.query("SELECT * FROM sequences WHERE id = ?").get(nameOrId) as SequenceRow | null;
   if (!row) {
@@ -173,6 +191,15 @@ export function updateSequence(
   updates: Partial<Pick<Sequence, "name" | "description" | "status">>,
   db?: Database,
 ): Sequence {
+  const cloud = cloudResource(SEQUENCE_RESOURCE);
+  if (cloud) {
+    const patch: Record<string, unknown> = {};
+    if (updates.name !== undefined) patch["name"] = updates.name;
+    if (updates.description !== undefined) patch["description"] = updates.description;
+    if (updates.status !== undefined) patch["status"] = updates.status;
+    return apiToSequence(cloud.update(id, patch));
+  }
+
   const d = db || getDatabase();
   const seq = d.query("SELECT * FROM sequences WHERE id = ?").get(id) as SequenceRow | null;
   if (!seq) throw new Error(`Sequence not found: ${id}`);
@@ -191,6 +218,9 @@ export function updateSequence(
 }
 
 export function deleteSequence(id: string, db?: Database): boolean {
+  const cloud = cloudResource(SEQUENCE_RESOURCE);
+  if (cloud) return cloud.del(id);
+
   const d = db || getDatabase();
   const result = d.run("DELETE FROM sequences WHERE id = ?", [id]);
   return result.changes > 0;
