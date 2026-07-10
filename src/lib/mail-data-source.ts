@@ -396,7 +396,7 @@ export class SqliteMailDataSource implements MailDataSource {
   }
 }
 
-// ── cloud mode ───────────────────────────────────────────────────────────────
+// ── self-hosted API mode ─────────────────────────────────────────────────────
 
 function firstDefined(...values: Array<string | null | undefined>): string {
   for (const value of values) if (typeof value === "string" && value.length > 0) return value;
@@ -1014,13 +1014,13 @@ export class ApiMailDataSource implements MailDataSource {
     // The server /messages/send endpoint carries neither attachments nor a schedule, so
     // fail closed with a clear message rather than silently dropping them.
     if (input.attachments && input.attachments.length > 0) {
-      throw new Error("Cloud send does not support attachments yet. Send without --attachment, or use local mode.");
+      throw new Error("Self-hosted API send does not support attachments yet. Send without --attachment, or use local mode.");
     }
     if (input.scheduledAt) {
-      throw new Error("Scheduling is not available in cloud mode. Send without --schedule, or use local mode.");
+      throw new Error("Scheduling is not available in self-hosted API mode. Send without --schedule, or use local mode.");
     }
     const mailboxId = input.mailboxId ?? await this.resolveCloudMailboxId({ address: input.from });
-    if (!mailboxId) throw new Error("cloud send requires a mailboxId (or a `from` matching a cloud mailbox)");
+    if (!mailboxId) throw new Error("self-hosted API send requires a mailboxId (or a `from` matching a self-hosted mailbox)");
     const toList = input.to.split(",").map((value) => value.trim()).filter(Boolean);
     const ccList = input.cc?.split(",").map((value) => value.trim()).filter(Boolean);
     const bccList = input.bcc?.split(",").map((value) => value.trim()).filter(Boolean);

@@ -108,3 +108,29 @@ describe("no private platform package boundary", () => {
     expect(privateCloudHits(files)).toEqual([]);
   });
 });
+
+describe("package lifecycle script safety", () => {
+  it("keeps package scripts from deleting HOME or unguarded temp homes", () => {
+    const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as {
+      scripts?: Record<string, string>;
+    };
+    const scripts = pkg.scripts ?? {};
+    const lifecycleText = Object.entries(scripts)
+      .map(([name, script]) => `${name}: ${script}`)
+      .join("\n");
+
+    expect(scripts.prepublishOnly).toBe("bash scripts/prepublish-check.sh");
+    expect(lifecycleText).not.toMatch(/rm\s+-rf\s+(--\s+)?["']?\$HOME\b/);
+    expect(lifecycleText).not.toContain('rm -rf "$tmp_home"');
+  });
+
+  it("guards prepublish temp-home cleanup to the mktemp directory prefix", () => {
+    const script = readFileSync(join(root, "scripts", "prepublish-check.sh"), "utf8");
+
+    expect(script).toContain('mktemp -d "$tmp_root/emails-prepublish.XXXXXX"');
+    expect(script).toContain('"$tmp_home" == "$tmp_root"/emails-prepublish.*');
+    expect(script).toContain('rm -rf -- "$tmp_home"');
+    expect(script).toContain("Refusing to remove unsafe tmp_home");
+    expect(script).not.toMatch(/rm\s+-rf\s+(--\s+)?["']?\$HOME\b/);
+  });
+});

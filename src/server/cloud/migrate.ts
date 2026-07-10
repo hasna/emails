@@ -1,7 +1,7 @@
-// Migration runner for the Mailery self_hosted cloud Postgres schema.
+// Migration runner for the Emails self_hosted Postgres schema.
 //
 // Used by the one-shot deploy migration task (`emails db migrate`) and by the
-// `emails db status` command. PURE REMOTE (A1): runs against cloud Postgres.
+// `emails db status` command. Runs against the self_hosted Postgres database.
 
 import { MigrationLedger } from "../../generated/storage-kit/index.js";
 import { getCloudPool, closeCloudPool, isCloudMode } from "./env.js";
@@ -16,7 +16,7 @@ export interface MigrateOutcome {
 function assertCloud(): void {
   if (!isCloudMode()) {
     throw new Error(
-      "emails db migrate requires cloud mode. Set HASNA_MAILERY_STORAGE_MODE=cloud and " +
+      "emails db migrate requires self_hosted mode. Set HASNA_MAILERY_STORAGE_MODE=self_hosted and " +
         "HASNA_MAILERY_DATABASE_URL (or provide DATABASE_URL). Local mode uses SQLite and needs no migration runner.",
     );
   }

@@ -1,5 +1,5 @@
-// End-to-end proof that the resource repositories route WRITES to the cloud /v1
-// API in cloud mode (not the local SQLite island) — the write half of the
+// End-to-end proof that the resource repositories route WRITES to the self-hosted
+// /v1 API in self_hosted mode (not the local SQLite island) — the write half of the
 // split-brain fix. Reads were already routed (see cloud-resource-routing.test.ts);
 // this covers createOwner, createGroup, and contact suppress/unsuppress, plus the
 // deliberate fail-loud for send-key creation (the cloud store holds no secret
@@ -100,6 +100,10 @@ console.log("PORT " + server.port);
 let proc: Subprocess;
 let baseUrl: string;
 
+function setEnv(name: string, value: string): void {
+  process.env[name] = value;
+}
+
 beforeAll(async () => {
   proc = Bun.spawn(["bun", "-e", SERVER_CODE], { stdout: "pipe", stderr: "inherit" });
   const reader = proc.stdout.getReader();
@@ -120,9 +124,9 @@ beforeAll(async () => {
 afterAll(() => proc?.kill());
 
 beforeEach(() => {
-  process.env.HASNA_MAILERY_STORAGE_MODE = "cloud";
-  process.env.HASNA_MAILERY_API_URL = baseUrl;
-  process.env.HASNA_MAILERY_API_KEY = "test_key";
+  setEnv("HASNA_MAILERY_STORAGE_MODE", "self_hosted");
+  setEnv("HASNA_MAILERY_API_URL", baseUrl);
+  setEnv("HASNA_MAILERY_API_KEY", "test_key");
   resetCloudConfigCache();
 });
 
@@ -133,7 +137,7 @@ afterEach(() => {
   resetCloudConfigCache();
 });
 
-describe("resource repos route writes to cloud in cloud mode", () => {
+describe("resource repos route writes to the self-hosted API in self_hosted mode", () => {
   test("createOwner POSTs to /v1/owners and appears in cloud listOwners", () => {
     const o = createOwner({ type: "agent", name: "Writer Agent" });
     expect(o.id).toStartWith("o");

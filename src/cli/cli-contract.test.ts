@@ -477,10 +477,6 @@ describe("CLI JSON contracts", () => {
       readiness: { send_ready: false, receive_ready: false },
     });
 
-    const cloudEnv = {
-      ...env,
-      MAILERY_MODE: "cloud",
-    };
     const selfHosted = expectCliJsonOk<{
       id: string;
       domain: string;
@@ -493,12 +489,12 @@ describe("CLI JSON contracts", () => {
         inbound_evidence_ready: boolean;
         inbound_evidence: { live_s3_sources: number };
       };
-    }>(runCli(["--json", "domains", "status", "selfhosted.example.com"], cloudEnv));
+    }>(runCli(["--json", "domains", "status", "selfhosted.example.com"], env));
 
     expect(selfHosted).toMatchObject({
       id: seeded.selfHostedDomainId,
       domain: "selfhosted.example.com",
-      mode: "cloud",
+      mode: "local",
       domain_type: "self_hosted",
       source_of_truth: "postgres",
       readiness: {

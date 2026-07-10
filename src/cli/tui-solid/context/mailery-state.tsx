@@ -566,7 +566,7 @@ function createMaileryStore(initialMailbox?: Mailbox) {
     async pullNow() {
       // Auto-pull is LOCAL S3 ingestion; cloud reads the API through the seam, so
       // pulling is a no-op there (mirrors the CLI/MCP mode gating).
-      if (ds.mode !== "local") return { pulled: 0, ok: true, configured: false, reason: "cloud mode" };
+      if (ds.mode !== "local") return { pulled: 0, ok: true, configured: false, reason: "self-hosted API mode" };
       if (state.busyPull) return { pulled: 0, ok: false, configured: false, reason: "Pull already running" };
       setState("busyPull", true);
       try {

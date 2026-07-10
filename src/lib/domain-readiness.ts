@@ -15,7 +15,7 @@ export interface DomainReadiness {
   inbound_evidence_ready: boolean;
   ready_addresses: number;
   inbound_evidence: {
-    mode?: "local" | "self_hosted" | "cloud";
+    mode?: "local" | "self_hosted";
     source_of_truth?: DomainSourceOfTruth;
     inbound_status?: DomainRouteStatus;
     live_s3_sources: number;
@@ -27,7 +27,7 @@ export interface DomainReadiness {
 
 export interface DomainReadinessSignals {
   ready_addresses?: number;
-  mode?: "local" | "self_hosted" | "cloud";
+  mode?: "local" | "self_hosted";
   source_of_truth?: DomainSourceOfTruth;
   inbound_status?: DomainRouteStatus;
   live_s3_sources?: number;
@@ -56,7 +56,7 @@ export function assessDomainReadiness(
   const liveS3Sources = signals.live_s3_sources ?? 0;
   const inboundBuckets = signals.inbound_buckets ?? 0;
   const selfHostedSource = sourceOfTruth === "postgres" || (mode === "self_hosted" && sourceOfTruth !== "local" && sourceOfTruth !== "cloud");
-  const cloudSource = sourceOfTruth === "cloud" || (mode === "cloud" && sourceOfTruth !== "local" && sourceOfTruth !== "postgres");
+  const sharedSource = selfHostedSource || sourceOfTruth === "cloud";
   const inboundEvidenceReady = selfHostedSource ? liveS3Sources > 0 : true;
   const inboundLifecycleReady = inboundStatus === "ready";
   const provisioningReceiveReady = provisioning?.provisioning_status === "ready" || provisioning?.provisioning_status === "inbound_ready";
@@ -89,11 +89,9 @@ export function assessDomainReadiness(
   }
 
   const sendReady = ok(domain.dkim_status) && ok(domain.spf_status);
-  const receiveReady = selfHostedSource
+  const receiveReady = sharedSource
     ? inboundLifecycleReady && inboundEvidenceReady
-    : cloudSource
-      ? inboundLifecycleReady
-      : inboundLifecycleReady || readyAddresses > 0 || provisioningReceiveReady;
+    : inboundLifecycleReady || readyAddresses > 0 || provisioningReceiveReady;
 
   if (!sendReady) {
     fix_commands.push(`emails domain dns ${domain.domain}`);

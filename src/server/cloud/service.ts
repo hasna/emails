@@ -51,7 +51,7 @@ export interface CloudServiceDeps {
   version: string;
 }
 
-const MODE = "cloud" as const;
+const MODE = "self_hosted" as const;
 
 function json(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {

@@ -31,6 +31,10 @@ let tmpHome = "";
 let providerId = "";
 let setup: TestRendererSetup | null = null;
 
+function setEnv(name: string, value: string): void {
+  process.env[name] = value;
+}
+
 function Harness(props: { initialMailbox?: "inbox" | "unread" | "starred" | "sent" | "archived" | "spam" | "trash" }) {
   const renderer = useRenderer();
   const keymap = createDefaultOpenTuiKeymap(renderer);
@@ -470,18 +474,18 @@ describe("Mailery Solid TUI", () => {
     expect(frame()).toContain("Pull Now");
   });
 
-  it("hides the Pull toolbar action and command in cloud mode", async () => {
-    process.env["MAILERY_MODE"] = "cloud";
+  it("hides the Pull toolbar action and command in self_hosted mode", async () => {
+    setEnv("MAILERY_MODE", "self_hosted");
     resetMailDataSource();
     await renderApp();
 
-    // Cloud keeps the other toolbar actions but drops the manual Pull button.
+    // The self-hosted API keeps the other toolbar actions but drops the manual Pull button.
     const toolbar = toolbarLine();
     expect(toolbar).toContain("Digest");
     expect(toolbar).toContain("Newest first");
     expect(toolbar).not.toContain("Pull");
 
-    // The command palette must not expose "Pull Now" in cloud mode.
+    // The command palette must not expose "Pull Now" in self_hosted mode.
     await key("p", { ctrl: true });
     expect(frame()).toContain("Shortcuts");
     await typeText("Pull");

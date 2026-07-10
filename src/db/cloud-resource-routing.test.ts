@@ -1,9 +1,9 @@
-// End-to-end proof that the resource repositories route reads to the cloud /v1
-// API in cloud mode (not the local SQLite island), and FAIL CLOSED when the
+// End-to-end proof that the resource repositories route reads to the self-hosted
+// /v1 API in self_hosted mode (not the local SQLite island), and FAIL CLOSED when the
 // endpoint is absent — the split-brain fix. A stub /v1 server runs OUT OF
 // PROCESS (the repo layer's cloud client is synchronous curl, which cannot reach
 // an in-process Bun.serve), and the local DB is left empty so any local read
-// would return [] and could not masquerade as the cloud rows asserted below.
+// would return [] and could not masquerade as the API rows asserted below.
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import type { Subprocess } from "bun";
@@ -37,6 +37,10 @@ console.log("PORT " + server.port);
 let proc: Subprocess;
 let baseUrl: string;
 
+function setEnv(name: string, value: string): void {
+  process.env[name] = value;
+}
+
 beforeAll(async () => {
   proc = Bun.spawn(["bun", "-e", SERVER_CODE], { stdout: "pipe", stderr: "inherit" });
   const reader = proc.stdout.getReader();
@@ -57,9 +61,9 @@ beforeAll(async () => {
 afterAll(() => proc?.kill());
 
 beforeEach(() => {
-  process.env.HASNA_MAILERY_STORAGE_MODE = "cloud";
-  process.env.HASNA_MAILERY_API_URL = baseUrl;
-  process.env.HASNA_MAILERY_API_KEY = "test_key";
+  setEnv("HASNA_MAILERY_STORAGE_MODE", "self_hosted");
+  setEnv("HASNA_MAILERY_API_URL", baseUrl);
+  setEnv("HASNA_MAILERY_API_KEY", "test_key");
   resetCloudConfigCache();
 });
 
@@ -70,7 +74,7 @@ afterEach(() => {
   resetCloudConfigCache();
 });
 
-describe("resource repos route reads to cloud in cloud mode", () => {
+describe("resource repos route reads to the self-hosted API in self_hosted mode", () => {
   test("listContacts returns cloud rows", () => {
     const rows = listContacts();
     expect(rows).toHaveLength(1);

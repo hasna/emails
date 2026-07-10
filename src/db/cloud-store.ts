@@ -1,8 +1,9 @@
-// Cloud HTTP storage bridge — makes `self_hosted` mode real for the client.
+// HTTP storage bridge — makes `self_hosted` mode real for the client.
 //
-// When the client-flip contract resolves to cloud (mode=self_hosted/cloud AND
-// HASNA_MAILERY_API_URL + HASNA_MAILERY_API_KEY are set), the repository layer
-// (src/db/*.ts) routes ALL reads AND writes to the app's cloud HTTP API
+// When the client-flip contract resolves to self_hosted
+// (HASNA_MAILERY_API_URL + HASNA_MAILERY_API_KEY are set, with optional
+// HASNA_MAILERY_STORAGE_MODE=self_hosted), the repository layer (src/db/*.ts)
+// routes ALL reads AND writes to the app's self-hosted HTTP API
 // (`<API_URL>/v1/<resource>`) with the bearer key — NOT the local SQLite store,
 // NOT a DSN. This mirrors the resource-CRUD vocabulary of the Hasna Service
 // Contract v1 that `@hasna/contracts`'s `createHasnaStorageClient` speaks:
@@ -27,7 +28,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const APP = "mailery";
+const APP = "emails";
 const TOKEN = "MAILERY";
 
 export class CloudHttpError extends Error {
@@ -47,7 +48,7 @@ interface CloudConfig {
   apiKey: string;
 }
 
-const DEPRECATED_CLOUD_ALIASES = new Set(["remote", "hybrid", "self_hosted", "selfhosted", "self-hosted"]);
+const REMOVED_PRODUCT_MODES = new Set(["cloud", "mailery_cloud", "remote", "hybrid"]);
 
 function firstEnv(keys: string[]): string | undefined {
   for (const key of keys) {
@@ -57,13 +58,18 @@ function firstEnv(keys: string[]): string | undefined {
   return undefined;
 }
 
-function normalizeMode(raw: string | undefined): "cloud" | "local" | null {
+function normalizeMode(raw: string | undefined): "self_hosted" | "local" | null {
   if (!raw) return null;
   const v = raw.trim().toLowerCase().replace(/-/g, "_");
   if (v === "local") return "local";
-  if (v === "cloud") return "cloud";
-  if (DEPRECATED_CLOUD_ALIASES.has(v)) return "cloud";
-  return null;
+  if (v === "self_hosted" || v === "selfhosted") return "self_hosted";
+  if (REMOVED_PRODUCT_MODES.has(v)) {
+    throw new Error(
+      `${APP}: unsupported mode '${raw}'. Cloud, remote, and hybrid product modes were removed from Hasna OSS. ` +
+        "Use self_hosted with an API URL and API key, or use local.",
+    );
+  }
+  throw new Error(`${APP}: unknown mode '${raw}'. Use local or self_hosted.`);
 }
 
 function toV1BaseUrl(apiUrl: string): string {
@@ -83,9 +89,9 @@ let _cachedSignature: string | null = null;
 let _cachedConfig: CloudConfig | null | undefined;
 
 /**
- * Resolve the cloud config from the client-flip env, or null for local mode.
- * Fail-closed: if cloud is requested (mode=self_hosted/cloud) but the API URL or
- * key is missing, this THROWS rather than silently reading local data.
+ * Resolve the self-hosted API config from the client-flip env, or null for local mode.
+ * Fail-closed: if self_hosted is requested but the API URL or key is missing,
+ * this THROWS rather than silently reading local data.
  */
 export function resolveCloudConfig(): CloudConfig | null {
   const modeRaw = firstEnv([
@@ -120,39 +126,29 @@ function computeConfig(
   // URL/key happen to be present in the environment.
   if (mode === "local") return null;
 
-  // Engage the cloud API client when the mode is explicitly cloud/self_hosted,
-  // OR when BOTH the API URL and key are set. The latter is the fleet
-  // client-flip contract: `HASNA_<APP>_API_URL` + `HASNA_<APP>_API_KEY` imply
-  // cloud even with no `*_STORAGE_MODE`/`*_MODE` set — parity with
-  // `@hasna/contracts` >= 0.5.1 `resolveClientTransport`, and matching what the
-  // flip writes (URL + key, no storage-mode var).
-  const cloudRequested = mode === "cloud" || Boolean(apiUrl && apiKey);
-  if (!cloudRequested) return null;
+  // Engage the self-hosted API client when the mode is explicitly self_hosted,
+  // OR when any API URL/key setting is present. Missing pieces fail closed so a
+  // shared deployment never silently drifts onto the machine-local SQLite store.
+  const selfHostedRequested = mode === "self_hosted" || Boolean(apiUrl || apiKey);
+  if (!selfHostedRequested) return null;
 
-  // Cloud requested but NEITHER URL nor key is set: not an API-client flip
-  // (e.g. mode=cloud alongside a legacy config the machine wrapper still
-  // exports) — fall through to the app's existing local/legacy path rather
-  // than erroring.
-  if (!apiUrl && !apiKey) return null;
-
-  // Partial API config -> fail closed (no silent drift onto the wrong dataset).
   if (!apiKey) {
     throw new Error(
-      `${APP}: cloud API URL is set (HASNA_${TOKEN}_API_URL) but no API key. ` +
-        `Set HASNA_${TOKEN}_API_KEY to route to the cloud, or unset the URL to use the local store.`,
+      `${APP}: self_hosted API URL is set (HASNA_${TOKEN}_API_URL) but no API key. ` +
+        `Set HASNA_${TOKEN}_API_KEY to route to self_hosted, or unset the URL to use local.`,
     );
   }
   if (!apiUrl) {
     throw new Error(
-      `${APP}: cloud API key is set (HASNA_${TOKEN}_API_KEY) but no API URL. ` +
-        `Set HASNA_${TOKEN}_API_URL=https://${APP}.hasna.xyz.`,
+      `${APP}: self_hosted API key is set (HASNA_${TOKEN}_API_KEY) but no API URL. ` +
+        `Set HASNA_${TOKEN}_API_URL to the self-hosted API base URL.`,
     );
   }
 
   return { baseUrl: toV1BaseUrl(apiUrl), apiKey };
 }
 
-/** True when the client is flipped to the cloud HTTP API. */
+/** True when the client is flipped to the self-hosted HTTP API. */
 export function isCloudMode(): boolean {
   return resolveCloudConfig() !== null;
 }
@@ -189,7 +185,7 @@ function maxTimeSeconds(): number { return positiveIntEnv("HASNA_MAILERY_HTTP_TI
  */
 export class CloudTransportError extends Error {
   constructor(readonly method: string, readonly path: string, detail: string) {
-    super(`Cannot reach mailery cloud for ${method} ${path}: ${detail}`);
+    super(`Cannot reach emails self_hosted API for ${method} ${path}: ${detail}`);
     this.name = "CloudTransportError";
   }
 }
@@ -198,7 +194,7 @@ function httpRequest(config: CloudConfig, method: string, path: string, body?: u
   const url = `${config.baseUrl}${path}`;
   const connectTimeout = connectTimeoutSeconds();
   const maxTime = maxTimeSeconds();
-  const dir = mkdtempSync(join(tmpdir(), "mailery-cloud-"));
+  const dir = mkdtempSync(join(tmpdir(), "emails-self-hosted-"));
   const cfgPath = join(dir, "curl.cfg");
   try {
     const lines = [

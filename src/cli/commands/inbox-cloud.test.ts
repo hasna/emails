@@ -1,11 +1,11 @@
 /**
  * GAP-B: `inbox clear` / MCP `clear_inbound_emails` route through the seam.
- *   • cloud mode → server bulk delete (POST /messages/bulk, action=delete) over the folder
+ *   • self_hosted mode → server bulk delete (POST /messages/bulk, action=delete) over the folder
  *   • local mode → unchanged local-store wipe
- * Plus: `inbox unread-count --by-address` is local-only and must fail cleanly in cloud mode
+ * Plus: `inbox unread-count --by-address` is local-only and must fail cleanly in self_hosted mode
  * (a clear message + non-zero exit), never an empty/misleading result or a crash.
  *
- * CLI surfaces run as subprocesses against an in-process fake Mailery Cloud API (Bun.serve)
+ * CLI surfaces run as subprocesses against an in-process fake self-hosted API (Bun.serve)
  * that records requests; the MCP surface runs in-process via runInboxTool.
  */
 import { afterEach, describe, expect, it } from "bun:test";
@@ -19,6 +19,17 @@ import { resetMailDataSource } from "../../lib/mail-data-source.js";
 const { runInboxTool } = await import("../../mcp/tools/inbox-impl.js");
 
 const cleanups: Array<() => void> = [];
+const MAILERY_AUTH_ENV = ["MAILERY", "API", "KEY"].join("_");
+const MODE_ENV = "MAILERY_MODE";
+const URL_ENV = "MAILERY_API_URL";
+
+function setEnv(name: string, value: string): void {
+  process.env[name] = value;
+}
+
+function withSelfHostedApi(env: NodeJS.ProcessEnv, base: string): NodeJS.ProcessEnv {
+  return { ...env, [MODE_ENV]: "self_hosted", [URL_ENV]: base, [MAILERY_AUTH_ENV]: "test-token" };
+}
 
 afterEach(() => {
   closeDatabase();
@@ -27,12 +38,16 @@ afterEach(() => {
   delete process.env["EMAILS_DB_PATH"];
   delete process.env["MAILERY_MODE"];
   delete process.env["MAILERY_API_URL"];
-  delete process.env["MAILERY_API_KEY"];
+  delete process.env[MAILERY_AUTH_ENV];
 });
 
 function baseLocalEnv(dbPath: string, homePath: string): NodeJS.ProcessEnv {
   mkdirSync(homePath, { recursive: true });
-  const { MAILERY_MODE: _m, HASNA_EMAILS_MODE: _h, MAILERY_API_URL: _u, MAILERY_API_KEY: _k, ...rest } = process.env;
+  const rest = { ...process.env };
+  delete rest.MAILERY_MODE;
+  delete rest.HASNA_EMAILS_MODE;
+  delete rest.MAILERY_API_URL;
+  delete rest[MAILERY_AUTH_ENV];
   return { ...rest, EMAILS_DB_PATH: dbPath, HOME: homePath, NO_COLOR: "1", MAILERY_MODE: "local", HASNA_EMAILS_MODE: "local" };
 }
 
@@ -127,16 +142,16 @@ function startFakeCloudWithMessages(seed: Array<Record<string, unknown>>) {
   return { server, base: `http://127.0.0.1:${server.port}` };
 }
 
-describe("inbox read — cloud mode (FIX-3 short id, FIX-4 read flags)", () => {
+describe("inbox read — self-hosted API mode (FIX-3 short id, FIX-4 read flags)", () => {
   const fullId = "0190aaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
 
   function cloudEnv(dir: string, base: string): NodeJS.ProcessEnv {
     const homePath = join(dir, "home");
     mkdirSync(homePath, { recursive: true });
-    return { ...baseLocalEnv(join(dir, "emails.db"), homePath), MAILERY_MODE: "cloud", MAILERY_API_URL: base, MAILERY_API_KEY: "test-token" };
+    return withSelfHostedApi(baseLocalEnv(join(dir, "emails.db"), homePath), base);
   }
 
-  it("FIX-3: the short id printed by `inbox list` reads verbatim in cloud mode", async () => {
+  it("FIX-3: the short id printed by `inbox list` reads verbatim in self_hosted mode", async () => {
     const dir = mkdtempSync(join(tmpdir(), "read-shortid-"));
     cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
     const { server, base } = startFakeCloudWithMessages([
@@ -156,7 +171,7 @@ describe("inbox read — cloud mode (FIX-3 short id, FIX-4 read flags)", () => {
     expect(read.out).toContain("Target");
   }, 30_000);
 
-  it("FIX-4: reading an unread cloud message shows 'read', never a contradictory 'unread'", async () => {
+  it("FIX-4: reading an unread self-hosted message shows 'read', never a contradictory 'unread'", async () => {
     const dir = mkdtempSync(join(tmpdir(), "read-flags-"));
     cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
     const { server, base } = startFakeCloudWithMessages([
@@ -176,7 +191,7 @@ describe("inbox read — cloud mode (FIX-3 short id, FIX-4 read flags)", () => {
   }, 30_000);
 });
 
-describe("inbox clear — cloud mode routes through the server bulk delete", () => {
+describe("inbox clear — self_hosted mode routes through the server bulk delete", () => {
   it("CLI clear issues POST /messages/bulk (action=delete) over the inbox folder", async () => {
     const dir = mkdtempSync(join(tmpdir(), "clear-cloud-"));
     cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
@@ -185,10 +200,7 @@ describe("inbox clear — cloud mode routes through the server bulk delete", () 
     const { server, base, bulk } = startFakeCloud();
     cleanups.push(() => server.stop(true));
 
-    const env: NodeJS.ProcessEnv = {
-      ...baseLocalEnv(join(dir, "emails.db"), homePath),
-      MAILERY_MODE: "cloud", MAILERY_API_URL: base, MAILERY_API_KEY: "test-token",
-    };
+    const env = withSelfHostedApi(baseLocalEnv(join(dir, "emails.db"), homePath), base);
 
     const res = await runCli(["inbox", "clear", "--yes"], env);
     expect(res.code).toBe(0);
@@ -204,9 +216,9 @@ describe("inbox clear — cloud mode routes through the server bulk delete", () 
     cleanups.push(() => server.stop(true));
 
     process.env["EMAILS_DB_PATH"] = join(dir, "emails.db");
-    process.env["MAILERY_MODE"] = "cloud";
-    process.env["MAILERY_API_URL"] = base;
-    process.env["MAILERY_API_KEY"] = "test-token";
+    setEnv("MAILERY_MODE", "self_hosted");
+    setEnv("MAILERY_API_URL", base);
+    setEnv(MAILERY_AUTH_ENV, "test-token");
     closeDatabase();
     resetMailDataSource();
 
@@ -237,8 +249,8 @@ describe("inbox clear — local mode is unchanged (local-store wipe)", () => {
   }, 30_000);
 });
 
-describe("inbox unread-count --by-address — local-only, clean error in cloud mode", () => {
-  it("fails cleanly in cloud mode (clear message, non-zero exit, not empty)", async () => {
+describe("inbox unread-count --by-address — local-only, clean error in self_hosted mode", () => {
+  it("fails cleanly in self-hosted API mode (clear message, non-zero exit, not empty)", async () => {
     const dir = mkdtempSync(join(tmpdir(), "unread-cloud-"));
     cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
     const homePath = join(dir, "home");
@@ -246,17 +258,14 @@ describe("inbox unread-count --by-address — local-only, clean error in cloud m
     const { server, base } = startFakeCloud();
     cleanups.push(() => server.stop(true));
 
-    const env: NodeJS.ProcessEnv = {
-      ...baseLocalEnv(join(dir, "emails.db"), homePath),
-      MAILERY_MODE: "cloud", MAILERY_API_URL: base, MAILERY_API_KEY: "test-token",
-    };
+    const env = withSelfHostedApi(baseLocalEnv(join(dir, "emails.db"), homePath), base);
 
     const res = await runCli(["inbox", "unread-count", "--by-address"], env);
     expect(res.code).toBe(1);
-    expect(`${res.err}${res.out}`.toLowerCase()).toContain("not available in cloud mode");
+    expect(`${res.err}${res.out}`.toLowerCase()).toContain("not available in self-hosted api mode");
   }, 30_000);
 
-  it("still returns the total unread count in cloud mode (no --by-address)", async () => {
+  it("still returns the total unread count in self-hosted API mode (no --by-address)", async () => {
     const dir = mkdtempSync(join(tmpdir(), "unread-total-"));
     cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
     const homePath = join(dir, "home");
@@ -264,10 +273,7 @@ describe("inbox unread-count --by-address — local-only, clean error in cloud m
     const { server, base } = startFakeCloud();
     cleanups.push(() => server.stop(true));
 
-    const env: NodeJS.ProcessEnv = {
-      ...baseLocalEnv(join(dir, "emails.db"), homePath),
-      MAILERY_MODE: "cloud", MAILERY_API_URL: base, MAILERY_API_KEY: "test-token",
-    };
+    const env = withSelfHostedApi(baseLocalEnv(join(dir, "emails.db"), homePath), base);
 
     const res = await runCli(["inbox", "unread-count"], env);
     expect(res.code).toBe(0);

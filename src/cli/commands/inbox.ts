@@ -80,7 +80,7 @@ function splitAddresses(value: string | null | undefined): string[] {
 }
 
 // A read/detail projection built from the seam (TuiMessage + MessageBody) so the CLI
-// renders identically in local and cloud mode.
+// renders identically in local and self-hosted API mode.
 function seamMessageDetail(msg: TuiMessage, body: MessageBody | null): SeamMailDetail {
   const attachments = (body?.attachments ?? []).map((att) => ({
     filename: att.filename,
@@ -159,9 +159,9 @@ function mailboxSourceFromOptions(opts: { source?: string; provider?: string; ad
 }
 
 async function runAutoPull(opts: { s3?: boolean; limit?: number }) {
-  // Auto-pull is LOCAL S3 ingestion. In cloud mode the API is the source of truth and
+  // Auto-pull is LOCAL S3 ingestion. In self-hosted API mode the API is the source of truth and
   // each poll re-reads it through the seam, so there is nothing to pull.
-  if (resolveMailDataSource().mode !== "local") return { pulled: 0, ok: true, configured: false, reason: "cloud mode" };
+  if (resolveMailDataSource().mode !== "local") return { pulled: 0, ok: true, configured: false, reason: "self-hosted API mode" };
   const { autoPull } = await import("../tui/autopull.js");
   return autoPull(opts);
 }
@@ -475,10 +475,10 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
           return;
         }
         // --by-address is a local-only SQL rollup over inbound_recipients; there is no
-        // server endpoint for it. In cloud mode fail cleanly instead of querying the
+        // server endpoint for it. In self-hosted API mode fail cleanly instead of querying the
         // empty local DB (which would misleadingly report zero unread).
         if (resolveMailDataSource().mode !== "local") {
-          handleError(new Error("`inbox unread-count --by-address` is not available in cloud mode. Use `emails inbox unread-count` for the total unread count."));
+          handleError(new Error("`inbox unread-count --by-address` is not available in self-hosted API mode. Use `emails inbox unread-count` for the total unread count."));
           return;
         }
         const db = getDatabase();

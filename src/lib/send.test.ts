@@ -11,10 +11,17 @@ import { createEmail } from "../db/emails.js";
 import { assertDomainOutboundReady, MAX_ATTACHMENT_COUNT, MAX_ATTACHMENT_SIZE_BYTES, sendWithFailover } from "./send.js";
 
 let providerId: string;
+
+function setEnv(name: string, value: string): void {
+  process.env[name] = value;
+}
+
 beforeEach(() => {
   process.env["EMAILS_DB_PATH"] = ":memory:";
-  process.env["MAILERY_MODE"] = "local";
+  setEnv("MAILERY_MODE", "local");
   delete process.env["HASNA_EMAILS_DATABASE_URL"];
+  delete process.env["HASNA_MAILERY_API_URL"];
+  delete process.env["HASNA_MAILERY_API_KEY"];
   delete process.env["EMAILS_DATABASE_URL"];
   delete process.env["HASNA_EMAILS_STORAGE_MODE"];
   delete process.env["EMAILS_STORAGE_MODE"];
@@ -26,6 +33,8 @@ afterEach(() => {
   delete process.env["EMAILS_DB_PATH"];
   delete process.env["MAILERY_MODE"];
   delete process.env["HASNA_EMAILS_DATABASE_URL"];
+  delete process.env["HASNA_MAILERY_API_URL"];
+  delete process.env["HASNA_MAILERY_API_KEY"];
   delete process.env["EMAILS_DATABASE_URL"];
   delete process.env["HASNA_EMAILS_STORAGE_MODE"];
   delete process.env["EMAILS_STORAGE_MODE"];
@@ -192,17 +201,17 @@ describe("sendWithFailover — shared send safety guards", () => {
     )).not.toThrow();
   });
 
-  it("cloud mode delegates outbound sends to the Mailery Cloud API state", () => {
-    process.env["MAILERY_MODE"] = "cloud";
-    const sesProvider = createProvider({ name: "ses-cloud-cache", type: "ses", region: "us-east-1" });
+  it("self_hosted mode delegates outbound sends to the self-hosted API state", () => {
+    setEnv("MAILERY_MODE", "self_hosted");
+    const sesProvider = createProvider({ name: "ses-self-hosted-cache", type: "ses", region: "us-east-1" });
 
     expect(() => assertDomainOutboundReady(
       getProvider(sesProvider.id)!,
       { from: "sender@example.com", to: "next@x.com", subject: "hi", text: "yo" },
-    )).toThrow(/Cloud mode delegates outbound sends/i);
+    )).toThrow(/Self-hosted mode delegates outbound sends/i);
     expect(() => assertDomainOutboundReady(
       getProvider(providerId)!,
       { from: "sender@example.test", to: "next@x.com", subject: "hi", text: "yo" },
-    )).toThrow(/Cloud mode delegates outbound sends/i);
+    )).toThrow(/Self-hosted mode delegates outbound sends/i);
   });
 });

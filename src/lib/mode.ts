@@ -1,7 +1,7 @@
 import { loadConfig, saveConfig } from "./config.js";
 
-export type MaileryMode = "local" | "cloud";
-export type MaileryModeLabel = "Local" | "Mailery Cloud";
+export type MaileryMode = "local" | "self_hosted";
+export type MaileryModeLabel = "Local" | "Self-hosted";
 
 export const MAILERY_MODE_ENV = "MAILERY_MODE";
 export const HASNA_EMAILS_MODE_ENV = "HASNA_EMAILS_MODE";
@@ -42,23 +42,31 @@ export function labelForMaileryMode(mode: MaileryMode): MaileryModeLabel {
   switch (mode) {
     case "local":
       return "Local";
-    case "cloud":
-      return "Mailery Cloud";
+    case "self_hosted":
+      return "Self-hosted";
   }
 }
 
-// There are exactly two modes: `local` (SQLite) and `cloud` (API client — a
-// self-hosted server is just `cloud` pointed at a private base URL). The legacy
-// `self_hosted` / `remote` / `hybrid` values are accepted as deprecated aliases
-// for `cloud`.
+function unsupportedModeError(value: string): Error {
+  return new Error(
+    `Unsupported Emails mode: ${value}. Cloud, remote, and hybrid product modes were removed from Hasna OSS. ` +
+      "Use local or self_hosted.",
+  );
+}
+
+// Hasna OSS supports exactly two product modes: `local` (machine-local SQLite)
+// and `self_hosted` (shared deployment reached with an API URL + key). Cloud,
+// remote, and hybrid product modes are intentionally rejected in OSS.
 export function normalizeMaileryMode(value: string): { mode: MaileryMode; deprecatedAlias: string | null } {
   const normalized = value.trim().toLowerCase().replace(/-/g, "_");
   if (normalized === "local") return { mode: "local", deprecatedAlias: null };
-  if (normalized === "cloud" || normalized === "mailery_cloud") return { mode: "cloud", deprecatedAlias: null };
-  if (normalized === "self_hosted" || normalized === "remote" || normalized === "hybrid") {
-    return { mode: "cloud", deprecatedAlias: normalized };
+  if (normalized === "self_hosted" || normalized === "selfhosted") {
+    return { mode: "self_hosted", deprecatedAlias: null };
   }
-  throw new Error(`Unknown Mailery mode: ${value}. Use local or cloud.`);
+  if (normalized === "cloud" || normalized === "mailery_cloud" || normalized === "remote" || normalized === "hybrid") {
+    throw unsupportedModeError(value);
+  }
+  throw new Error(`Unknown Emails mode: ${value}. Use local or self_hosted.`);
 }
 
 function findConfiguredMode(config: Record<string, unknown>): { key: string; value: string } | null {
@@ -70,20 +78,10 @@ function findConfiguredMode(config: Record<string, unknown>): { key: string; val
   return null;
 }
 
-function warningFor(source: MaileryModeSource, deprecatedAlias: string | null, migratedConfig: boolean, mode: MaileryMode): string | null {
-  if (!deprecatedAlias && !migratedConfig) return null;
-  const oldValue = deprecatedAlias ?? source.value ?? "";
+function warningFor(source: MaileryModeSource, migratedConfig: boolean, mode: MaileryMode): string | null {
+  if (!migratedConfig) return null;
   if (source.kind === "config") {
-    if (migratedConfig && deprecatedAlias) {
-      return `Migrated deprecated Mailery mode '${oldValue}' from config to '${MAILERY_MODE_CONFIG_KEY}=${mode}'.`;
-    }
-    if (migratedConfig) {
-      return `Migrated deprecated Mailery mode config key '${source.name}' to '${MAILERY_MODE_CONFIG_KEY}=${mode}'.`;
-    }
-    return `Deprecated Mailery mode '${oldValue}' in config is treated as '${mode}'.`;
-  }
-  if (source.kind === "env") {
-    return `Deprecated Mailery mode '${oldValue}' from ${source.name} is treated as '${mode}'. Set ${MAILERY_MODE_ENV}=${mode} instead.`;
+    return `Migrated legacy Emails mode config key '${source.name}' to '${MAILERY_MODE_CONFIG_KEY}=${mode}'.`;
   }
   return null;
 }
@@ -103,7 +101,7 @@ export function resolveMaileryMode(opts: ResolveMaileryModeOptions = {}): Mailer
       label: labelForMaileryMode(normalized.mode),
       source,
       migratedConfig: false,
-      warning: warningFor(source, normalized.deprecatedAlias, false, normalized.mode),
+      warning: warningFor(source, false, normalized.mode),
     };
   }
 
@@ -112,7 +110,7 @@ export function resolveMaileryMode(opts: ResolveMaileryModeOptions = {}): Mailer
   if (configured) {
     const normalized = normalizeMaileryMode(configured.value);
     let migratedConfig = false;
-    if (opts.migrateConfig && (configured.key !== MAILERY_MODE_CONFIG_KEY || normalized.deprecatedAlias)) {
+    if (opts.migrateConfig && configured.key !== MAILERY_MODE_CONFIG_KEY) {
       const next = { ...config };
       next[MAILERY_MODE_CONFIG_KEY] = normalized.mode;
       for (const key of LEGACY_MODE_CONFIG_KEYS) delete next[key];
@@ -125,7 +123,7 @@ export function resolveMaileryMode(opts: ResolveMaileryModeOptions = {}): Mailer
       label: labelForMaileryMode(normalized.mode),
       source,
       migratedConfig,
-      warning: warningFor(source, normalized.deprecatedAlias, migratedConfig, normalized.mode),
+      warning: warningFor(source, migratedConfig, normalized.mode),
     };
   }
 

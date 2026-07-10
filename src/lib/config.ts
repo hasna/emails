@@ -269,10 +269,10 @@ export function getInboundAttachmentStorageConfig(): InboundAttachmentStorageCon
     ?? process.env["EMAILS_INBOUND_S3_BUCKET"];
   // Mode-based (no self_hosted/remote/hybrid or *_DATABASE_URL env heuristic).
   //   local  -> attachments live on the local filesystem by default.
-  //   cloud  -> the server owns attachments; the thin client never keeps them on the
+  //   self_hosted -> the server owns attachments; the thin client never keeps them on the
   //             local filesystem — it uses S3 when a bucket is configured, else none
   //             (an explicit "local"/"s3" is coerced to that safe pair).
-  const cloud = getMaileryMode() === "cloud";
+  const cloud = getMaileryMode() === "self_hosted";
   const cloudStorage: AttachmentStorage = configuredBucket || inboundBucket ? "s3" : "none";
   const effectiveStorage = cloud
     ? (configuredStorage === "local" || configuredStorage === "s3" ? cloudStorage : configuredStorage)

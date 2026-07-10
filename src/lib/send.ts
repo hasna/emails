@@ -72,8 +72,8 @@ function domainLifecycleFix(domainName: string, provider: Provider): string {
 export function assertDomainOutboundReady(provider: Provider, opts: SendEmailOptions, db?: Database): void {
   const mode = resolveMaileryMode().mode;
 
-  if (mode === "cloud") {
-    throw new Error(`Mailery Cloud mode delegates outbound sends to the hosted Mailery Cloud API. Local provider send is disabled for ${providerRef(provider)}.`);
+  if (mode === "self_hosted") {
+    throw new Error(`Self-hosted mode delegates outbound sends to the self-hosted API. Local provider send is disabled for ${providerRef(provider)}.`);
   }
 
   // Sandbox is the explicit local/test provider. It must remain usable in OSS

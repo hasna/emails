@@ -8,43 +8,40 @@
 // generated kit has zero runtime dependency on the contracts package. Keep
 // this in lockstep with the contract; regenerate the kit to pick up changes.
 //
-// Amendment A1 (PURE REMOTE): there are exactly two runtime modes.
+// Hasna OSS has exactly two product modes.
 //   - `local` : SQLite at ~/.hasna/<name>/<name>.db is authoritative.
-//   - `cloud` : reads AND writes go directly to the app's cloud Postgres.
-// There is NO sync engine, NO cache-as-mode, and NO hybrid/remote/self_hosted
-// runtime. The legacy words `remote`, `hybrid`, and `self_hosted` are accepted
-// only as deprecated *aliases* that normalize to `cloud`.
+//   - `self_hosted` : shared deployment state is authoritative.
+// There is NO SaaS/cloud/hybrid product mode in OSS.
 
-export const STORAGE_MODES = ["local", "cloud"] as const;
+export const STORAGE_MODES = ["local", "self_hosted"] as const;
 export type StorageMode = (typeof STORAGE_MODES)[number];
 
-export const DEPRECATED_STORAGE_MODE_ALIASES = [
-  "remote",
-  "hybrid",
-  "self_hosted",
-] as const;
+const REMOVED_STORAGE_MODES = new Set(["cloud", "mailery_cloud", "remote", "hybrid"]);
 
 export type Env = Record<string, string | undefined>;
 
 export interface StorageModeNormalization {
   mode: StorageMode;
-  /** The deprecated alias that was normalized to `cloud`, if any. */
+  /** No deprecated mode aliases normalize to an active product mode. */
   deprecatedAlias: string | null;
 }
 
-/**
- * Normalize a raw storage-mode string to the `local | cloud` runtime enum.
- * Accepts deprecated aliases (`remote`, `hybrid`, `self_hosted`) and maps them
- * to `cloud`. Throws on any other value.
- */
+function unsupportedStorageModeError(value: string): Error {
+  return new Error(
+    `Unsupported storage mode: ${value}. Cloud, remote, and hybrid product modes were removed from Hasna OSS. ` +
+      "Use local or self_hosted.",
+  );
+}
+
+/** Normalize a raw storage-mode string to the `local | self_hosted` runtime enum. */
 export function normalizeStorageMode(value: string): StorageModeNormalization {
   const normalized = value.trim().toLowerCase().replace(/-/g, "_");
   if (normalized === "local") return { mode: "local", deprecatedAlias: null };
-  if (normalized === "cloud") return { mode: "cloud", deprecatedAlias: null };
-  if ((DEPRECATED_STORAGE_MODE_ALIASES as readonly string[]).includes(normalized)) {
-    return { mode: "cloud", deprecatedAlias: normalized };
+  if (normalized === "self_hosted" || normalized === "selfhosted") {
+    return { mode: "self_hosted", deprecatedAlias: null };
   }
-  throw new Error(`Unknown storage mode: ${value}. Use local or cloud.`);
+  if (REMOVED_STORAGE_MODES.has(normalized)) throw unsupportedStorageModeError(value);
+  throw new Error(`Unknown storage mode: ${value}. Use local or self_hosted.`);
 }
 
 /** Upper-snake env token for an app name, e.g. `todos` -> `TODOS`. */
@@ -112,13 +109,8 @@ export function resolveStorageMode(name: string, env: Env = process.env): Storag
 
   const { mode, deprecatedAlias } = normalizeStorageMode(modeHit.value);
   const warnings: string[] = [];
-  if (deprecatedAlias) {
-    warnings.push(
-      `Deprecated storage mode '${deprecatedAlias}' from ${modeHit.key} is treated as 'cloud'. Set ${modeKeys[0]}=cloud instead.`,
-    );
-  }
-  if (mode === "cloud" && !databaseUrlPresent) {
-    warnings.push(`cloud mode needs ${databaseUrlKeys[0]} (PURE REMOTE: reads and writes go to cloud Postgres).`);
+  if (mode === "self_hosted" && !databaseUrlPresent) {
+    warnings.push(`self_hosted mode needs ${databaseUrlKeys[0]}.`);
   }
   if (modeHit.key !== modeKeys[0]) {
     warnings.push(`Using alias env ${modeHit.key}; the canonical key is ${modeKeys[0]}.`);

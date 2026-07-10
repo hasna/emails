@@ -71,20 +71,20 @@ function req(method: string, path: string, opts: { token?: string; body?: unknow
   });
 }
 
-describe("mailery cloud service", () => {
+describe("emails self_hosted service", () => {
   test("GET /health returns 200 with status/version/mode", async () => {
     const res = await handleCloudRequest(deps(), req("GET", "/health"));
     expect(res?.status).toBe(200);
     const body = await res!.json();
     expect(body.status).toBe("ok");
     expect(body.version).toBe("9.9.9");
-    expect(body.mode).toBe("cloud");
+    expect(body.mode).toBe("self_hosted");
   });
 
   test("GET /version returns the version+mode shape", async () => {
     const res = await handleCloudRequest(deps(), req("GET", "/version"));
     const body = await res!.json();
-    expect(body).toMatchObject({ status: "ok", version: "9.9.9", mode: "cloud", name: "mailery" });
+    expect(body).toMatchObject({ status: "ok", version: "9.9.9", mode: "self_hosted", name: "mailery" });
   });
 
   test("unknown non-v1 path falls through (null)", async () => {

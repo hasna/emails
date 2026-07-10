@@ -1,7 +1,7 @@
-// Environment bootstrap for the Mailery self_hosted cloud service.
+// Environment bootstrap for the Emails self_hosted service.
 //
-// Amendment A1 (PURE REMOTE): in `cloud` mode the serve process reads AND writes
-// the shared cloud Postgres directly — there is no sync engine or local cache.
+// In `self_hosted` mode the serve process reads AND writes the shared Postgres
+// directly — there is no sync engine or local cache.
 //
 // The deploy platform (hasna-app Terraform module) can inject the DSN and the
 // API-key signing material under generic names (DATABASE_URL /
@@ -10,7 +10,7 @@
 // HASNA_MAILERY_API_SIGNING_KEY). `normalizeCloudEnv()` bridges the two so the
 // service works no matter which convention the environment uses.
 
-import { createCloudPoolFromEnv, type CloudPoolFromEnv } from "../../generated/storage-kit/index.js";
+import { createCloudPoolFromEnv, normalizeStorageMode, type CloudPoolFromEnv } from "../../generated/storage-kit/index.js";
 
 /** Storage/auth app slug for env-key resolution (HASNA_MAILERY_*). */
 export const CLOUD_APP = "mailery";
@@ -22,8 +22,8 @@ const MODE_ENV = "HASNA_MAILERY_STORAGE_MODE";
 
 /**
  * Fill the canonical HASNA_MAILERY_* keys from the generic platform-injected
- * env vars when they are absent, and default the storage mode to `cloud` once a
- * DSN is present. Idempotent; never overwrites an explicit value.
+ * env vars when they are absent, and default the storage mode to `self_hosted`
+ * once a DSN is present. Idempotent; never overwrites an explicit value.
  */
 export function normalizeCloudEnv(env: NodeJS.ProcessEnv = process.env): void {
   if (!env[APP_DSN_ENV] && env["DATABASE_URL"]) {
@@ -35,19 +35,24 @@ export function normalizeCloudEnv(env: NodeJS.ProcessEnv = process.env): void {
   // A DSN is only meaningful in cloud mode; default it so operators don't have
   // to set both the URL and the mode.
   if (env[APP_DSN_ENV] && !env[MODE_ENV]) {
-    env[MODE_ENV] = "cloud";
+    env[MODE_ENV] = "self_hosted";
   }
 }
 
 /**
- * True when the service should run as the PURE-REMOTE cloud API (Postgres) as
- * opposed to the local SQLite dashboard. Cloud mode requires a database URL.
+ * True when the service should run as the self_hosted API (Postgres) as opposed
+ * to the local SQLite dashboard. self_hosted mode requires a database URL.
  */
 export function isCloudMode(env: NodeJS.ProcessEnv = process.env): boolean {
   normalizeCloudEnv(env);
-  const mode = (env[MODE_ENV] ?? "").trim().toLowerCase();
-  const cloudMode = mode === "cloud" || mode === "remote" || mode === "self_hosted" || mode === "hybrid";
-  return cloudMode && Boolean(env[APP_DSN_ENV]);
+  const rawMode = (env[MODE_ENV] ?? "").trim();
+  if (!rawMode) return false;
+  const { mode } = normalizeStorageMode(rawMode);
+  if (mode === "local") return false;
+  if (!env[APP_DSN_ENV]) {
+    throw new Error(`${CLOUD_APP} self_hosted mode requires ${APP_DSN_ENV} (or DATABASE_URL).`);
+  }
+  return true;
 }
 
 /** Resolve the HMAC signing secret for API-key verification. Throws if unset. */
@@ -56,7 +61,7 @@ export function requireSigningSecret(env: NodeJS.ProcessEnv = process.env): stri
   const secret = (env[SIGNING_ENV] ?? env[SHARED_SIGNING_ENV] ?? "").trim();
   if (!secret) {
     throw new Error(
-      `Mailery cloud service requires an API-key signing secret. Set ${SIGNING_ENV} ` +
+      `Emails self_hosted service requires an API-key signing secret. Set ${SIGNING_ENV} ` +
         `(or the shared ${SHARED_SIGNING_ENV}).`,
     );
   }
@@ -65,7 +70,7 @@ export function requireSigningSecret(env: NodeJS.ProcessEnv = process.env): stri
 
 let cachedPool: CloudPoolFromEnv | null = null;
 
-/** Build (once) the cloud Postgres pool from the environment. */
+/** Build (once) the self-hosted Postgres pool from the environment. */
 export function getCloudPool(env: NodeJS.ProcessEnv = process.env): CloudPoolFromEnv {
   normalizeCloudEnv(env);
   if (!cachedPool) {

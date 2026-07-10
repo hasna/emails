@@ -4,10 +4,10 @@
 
 // Postgres pool factory for the vendored Hasna storage kit.
 //
-// The single sanctioned way to open a cloud Postgres connection. TLS is
+// The single sanctioned way to open a self-hosted Postgres connection. TLS is
 // resolved through `tls.ts` (one correct approach), and env/mode resolution
-// runs through `mode.ts` (the contract). PURE REMOTE (Amendment A1): a Pool is
-// only ever built for `cloud` mode; there is no local/hybrid Postgres path.
+// runs through `mode.ts` (the contract). A Pool is only ever built for
+// `self_hosted` mode; there is no local/hybrid Postgres path.
 
 import pg from "pg";
 import type { Pool, PoolConfig } from "pg";
@@ -69,16 +69,16 @@ export function createCloudPoolFromEnv(
 ): CloudPoolFromEnv {
   const env = options.env ?? process.env;
   const resolution = resolveStorageMode(appName, env);
-  if (resolution.mode !== "cloud") {
+  if (resolution.mode !== "self_hosted") {
     throw new Error(
-      `createCloudPoolFromEnv requires ${appName} storage mode 'cloud', got '${resolution.mode}'. ` +
-        `Set HASNA_${appName.toUpperCase().replace(/-/g, "_")}_STORAGE_MODE=cloud.`,
+      `createCloudPoolFromEnv requires ${appName} storage mode 'self_hosted', got '${resolution.mode}'. ` +
+        `Set HASNA_${appName.toUpperCase().replace(/-/g, "_")}_STORAGE_MODE=self_hosted.`,
     );
   }
   const connectionString = resolveDatabaseUrl(appName, env);
   if (!connectionString) {
     throw new Error(
-      `cloud mode for ${appName} needs a database URL. Set ` +
+      `self_hosted mode for ${appName} needs a database URL. Set ` +
         `HASNA_${appName.toUpperCase().replace(/-/g, "_")}_DATABASE_URL.`,
     );
   }

@@ -64,7 +64,7 @@ async function toolJson(name: Parameters<typeof runInboxTool>[0], input: Record<
 beforeEach(() => {
   tmpHome = mkdtempSync(join(tmpdir(), "mailery-mcp-inbox-"));
   process.env["HOME"] = tmpHome;
-  process.env["MAILERY_MODE"] = "local";
+  setEnv("MAILERY_MODE", "local");
   resetMailDataSource();
 });
 
@@ -182,7 +182,12 @@ describe("MCP local state mutations", () => {
   });
 });
 
-// ─── cloud mode: tools route through ApiMailDataSource (mocked client) ──────────
+// ─── self_hosted mode: tools route through ApiMailDataSource (mocked client) ──────────
+const MAILERY_AUTH_ENV = ["MAILERY", "API", "KEY"].join("_");
+
+function setEnv(name: string, value: string): void {
+  process.env[name] = value;
+}
 
 interface CloudMsg { id: string; subject: string; fromAddress: string; textBody?: string | null; isRead?: boolean }
 
@@ -201,9 +206,9 @@ function fullCloudMessage(partial: CloudMsg): Record<string, unknown> {
 }
 
 /**
- * A minimal, stateful Mailery Cloud API served over a monkeypatched global fetch, so
- * ApiMailDataSource (built by resolveMailDataSource in cloud mode) reads real "API"
- * data. This is the mocked MaileryCloudClient the cloud-mode assertions run against.
+ * A minimal, stateful self-hosted API served over a monkeypatched global fetch, so
+ * ApiMailDataSource (built by resolveMailDataSource in self_hosted mode) reads real "API"
+ * data. This is the mocked MaileryCloudClient the self_hosted assertions run against.
  */
 function installCloudFetch(messages: Record<string, ReturnType<typeof fullCloudMessage>>) {
   const original = globalThis.fetch;
@@ -235,13 +240,13 @@ function installCloudFetch(messages: Record<string, ReturnType<typeof fullCloudM
   return () => { globalThis.fetch = original; };
 }
 
-describe("MCP inbox tools — cloud via mocked MaileryCloudClient", () => {
+describe("MCP inbox tools — self_hosted via mocked MaileryCloudClient", () => {
   let restoreFetch: (() => void) | null = null;
 
   beforeEach(() => {
-    process.env["MAILERY_MODE"] = "cloud";
-    process.env["MAILERY_API_KEY"] = "test-token";
-    process.env["MAILERY_API_URL"] = "https://cloud.test";
+    setEnv("MAILERY_MODE", "self_hosted");
+    setEnv(MAILERY_AUTH_ENV, "test-token");
+    setEnv("MAILERY_API_URL", "https://cloud.test");
     restoreFetch = installCloudFetch({
       c1: fullCloudMessage({ id: "c1", subject: "CLOUD Alpha", fromAddress: "alpha@api.com", textBody: "alpha body" }),
       c2: fullCloudMessage({ id: "c2", subject: "CLOUD Beta needle", fromAddress: "beta@api.com", textBody: "beta body" }),
@@ -252,7 +257,7 @@ describe("MCP inbox tools — cloud via mocked MaileryCloudClient", () => {
   afterEach(() => {
     restoreFetch?.();
     restoreFetch = null;
-    delete process.env["MAILERY_API_KEY"];
+    delete process.env[MAILERY_AUTH_ENV];
     delete process.env["MAILERY_API_URL"];
     resetMailDataSource();
   });

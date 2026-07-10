@@ -46,11 +46,12 @@ export async function runDiagnostics(db?: Database, opts: DiagnosticsOptions = {
   );
 
   // 3. Providers
-  const providers = listProviders(d);
+  const selfHostedMode = mode.mode === "self_hosted";
+  const providers = selfHostedMode ? [] : listProviders(d);
   const supportedProviders = providers.filter((provider) => provider.type !== "gmail");
   const legacyGmailProviders = providers.filter((provider) => provider.type === "gmail");
-  if (mode.mode === "cloud") {
-    checks.push({ name: "Providers", status: "pass", message: "Mailery Cloud mode; local SES/Resend/Sandbox providers are optional" });
+  if (selfHostedMode) {
+    checks.push({ name: "Providers", status: "pass", message: "Self-hosted mode; local SES/Resend/Sandbox providers are optional" });
   } else {
     checks.push(
       supportedProviders.length > 0
@@ -70,7 +71,7 @@ export async function runDiagnostics(db?: Database, opts: DiagnosticsOptions = {
   }
 
   // 4. Provider health
-  if (mode.mode !== "cloud" && supportedProviders.length > 0) {
+  if (!selfHostedMode && supportedProviders.length > 0) {
     const health = await checkAllProviders(d, { validateCredentials: opts.liveProviderChecks === true });
     for (const h of health) {
       checks.push({

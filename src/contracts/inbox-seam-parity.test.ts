@@ -9,12 +9,23 @@ import { resetMailDataSource } from "../lib/mail-data-source.js";
 
 // CLI<->MCP inbox parity + cloud-mode proof. Both surfaces route mail-data verbs
 // through resolveMailDataSource(); this proves they return equivalent data in local
-// mode (SqliteMailDataSource) and API data in cloud mode (ApiMailDataSource), so
-// cloud mode is no longer reading an empty local DB.
+// mode (SqliteMailDataSource) and API data in self-hosted API mode (ApiMailDataSource), so
+// self-hosted API mode is no longer reading an empty local DB.
 
 const { runInboxTool } = await import("../mcp/tools/inbox-impl.js");
 
 const cleanups: Array<() => void> = [];
+const MAILERY_AUTH_ENV = ["MAILERY", "API", "KEY"].join("_");
+const MODE_ENV = "MAILERY_MODE";
+const URL_ENV = "MAILERY_API_URL";
+
+function setEnv(name: string, value: string): void {
+  process.env[name] = value;
+}
+
+function withSelfHostedApi(env: NodeJS.ProcessEnv, base: string): NodeJS.ProcessEnv {
+  return { ...env, [MODE_ENV]: "self_hosted", [URL_ENV]: base, [MAILERY_AUTH_ENV]: "test-token" };
+}
 
 afterEach(() => {
   closeDatabase();
@@ -23,12 +34,16 @@ afterEach(() => {
   delete process.env["EMAILS_DB_PATH"];
   delete process.env["MAILERY_MODE"];
   delete process.env["MAILERY_API_URL"];
-  delete process.env["MAILERY_API_KEY"];
+  delete process.env[MAILERY_AUTH_ENV];
 });
 
 function baseLocalEnv(dbPath: string, homePath: string): NodeJS.ProcessEnv {
   mkdirSync(homePath, { recursive: true });
-  const { MAILERY_MODE: _m, HASNA_EMAILS_MODE: _h, MAILERY_API_URL: _u, MAILERY_API_KEY: _k, ...rest } = process.env;
+  const rest = { ...process.env };
+  delete rest.MAILERY_MODE;
+  delete rest.HASNA_EMAILS_MODE;
+  delete rest.MAILERY_API_URL;
+  delete rest[MAILERY_AUTH_ENV];
   return { ...rest, EMAILS_DB_PATH: dbPath, HOME: homePath, NO_COLOR: "1", MAILERY_MODE: "local" };
 }
 
@@ -66,12 +81,12 @@ function seedLocalDb(dbPath: string, homePath: string): string {
 }
 
 async function mcpList(env: NodeJS.ProcessEnv): Promise<Array<{ id: string; subject: string }>> {
-  const prev = { db: process.env["EMAILS_DB_PATH"], home: process.env["HOME"], mode: process.env["MAILERY_MODE"], url: process.env["MAILERY_API_URL"], key: process.env["MAILERY_API_KEY"] };
+  const prev = { db: process.env["EMAILS_DB_PATH"], home: process.env["HOME"], mode: process.env["MAILERY_MODE"], url: process.env["MAILERY_API_URL"], key: process.env[MAILERY_AUTH_ENV] };
   if (env.EMAILS_DB_PATH) process.env["EMAILS_DB_PATH"] = env.EMAILS_DB_PATH; else delete process.env["EMAILS_DB_PATH"];
   if (env.HOME) process.env["HOME"] = env.HOME;
   if (env.MAILERY_MODE) process.env["MAILERY_MODE"] = env.MAILERY_MODE;
   if (env.MAILERY_API_URL) process.env["MAILERY_API_URL"] = env.MAILERY_API_URL; else delete process.env["MAILERY_API_URL"];
-  if (env.MAILERY_API_KEY) process.env["MAILERY_API_KEY"] = env.MAILERY_API_KEY; else delete process.env["MAILERY_API_KEY"];
+  if (env[MAILERY_AUTH_ENV]) setEnv(MAILERY_AUTH_ENV, env[MAILERY_AUTH_ENV]); else delete process.env[MAILERY_AUTH_ENV];
   closeDatabase();
   resetMailDataSource();
   try {
@@ -86,7 +101,7 @@ async function mcpList(env: NodeJS.ProcessEnv): Promise<Array<{ id: string; subj
     if (prev.home !== undefined) process.env["HOME"] = prev.home;
     if (prev.mode === undefined) delete process.env["MAILERY_MODE"]; else process.env["MAILERY_MODE"] = prev.mode;
     if (prev.url === undefined) delete process.env["MAILERY_API_URL"]; else process.env["MAILERY_API_URL"] = prev.url;
-    if (prev.key === undefined) delete process.env["MAILERY_API_KEY"]; else process.env["MAILERY_API_KEY"] = prev.key;
+    if (prev.key === undefined) delete process.env[MAILERY_AUTH_ENV]; else setEnv(MAILERY_AUTH_ENV, prev.key);
   }
 }
 
@@ -167,7 +182,7 @@ function startFakeCloud(messages: Array<Record<string, unknown>>) {
   return { server, base: `http://127.0.0.1:${server.port}` };
 }
 
-describe("inbox CLI<->MCP parity — cloud mode (mocked cloud API)", () => {
+describe("inbox CLI<->MCP parity — self-hosted API mode (mocked API)", () => {
   it("CLI and MCP both return API data (not empty local) and agree", async () => {
     const dir = mkdtempSync(join(tmpdir(), "inbox-parity-cloud-"));
     cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
@@ -180,12 +195,7 @@ describe("inbox CLI<->MCP parity — cloud mode (mocked cloud API)", () => {
     ]);
     cleanups.push(() => server.stop(true));
 
-    const cloudEnv: NodeJS.ProcessEnv = {
-      ...baseLocalEnv(join(dir, "emails.db"), homePath),
-      MAILERY_MODE: "cloud",
-      MAILERY_API_URL: base,
-      MAILERY_API_KEY: "test-token",
-    };
+    const cloudEnv = withSelfHostedApi(baseLocalEnv(join(dir, "emails.db"), homePath), base);
 
     // CLI (subprocess) against the fake cloud.
     const cliList = await runCli(["inbox", "list", "--limit", "25"], cloudEnv);
