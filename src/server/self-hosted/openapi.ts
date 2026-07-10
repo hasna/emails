@@ -57,6 +57,8 @@ const messageSchema = {
     headers: { type: "object", additionalProperties: true },
     attachments: { type: "array", items: { type: "object", additionalProperties: true } },
     source_id: { type: "string", nullable: true, description: "Stable upstream id used for idempotent upsert" },
+    send_state: { type: "string", description: "none | pending | sending | sent | uncertain" },
+    send_started_at: { type: "string", format: "date-time", nullable: true },
     created_at: { type: "string", format: "date-time" },
     updated_at: { type: "string", format: "date-time" },
   },
@@ -279,8 +281,22 @@ export const emailsSelfHostedOpenApi: OpenApiDocument = {
                   subject: { type: "string" },
                   text: { type: "string" },
                   html: { type: "string" },
+                  attachments: {
+                    type: "array",
+                    maxItems: 5,
+                    items: {
+                      type: "object",
+                      properties: {
+                        filename: { type: "string" },
+                        content: { type: "string", description: "Base64-encoded attachment content" },
+                        content_type: { type: "string" },
+                      },
+                      required: ["filename", "content", "content_type"],
+                    },
+                  },
+                  idempotency_key: { type: "string", maxLength: 200 },
                 },
-                required: ["from", "to", "subject"],
+                required: ["from", "to", "subject", "idempotency_key"],
               },
             },
           },
@@ -299,12 +315,22 @@ export const emailsSelfHostedOpenApi: OpenApiDocument = {
       patch: {
         operationId: "updateMessage",
         parameters: [...idParam],
-        requestBody: { content: { "application/json": { schema: { type: "object", properties: { status: { type: "string" }, provider_message_id: { type: "string", nullable: true } } } } } },
+        requestBody: { content: { "application/json": { schema: { type: "object", properties: { status: { type: "string" }, provider_message_id: { type: "string", nullable: true }, is_read: { type: "boolean" }, is_starred: { type: "boolean" }, archived: { type: "boolean" }, add_label: { type: "string" }, remove_label: { type: "string" } } } } } },
         responses: { "200": { content: { "application/json": { schema: { type: "object", properties: { message: { $ref: "#/components/schemas/Message" } } } } } } },
       },
       delete: {
         operationId: "deleteMessage",
         parameters: [...idParam],
+        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+      },
+    },
+    "/v1/messages/{id}/attachments/{index}": {
+      get: {
+        operationId: "getMessageAttachment",
+        parameters: [
+          ...idParam,
+          { name: "index", in: "path", required: true, schema: { type: "integer", minimum: 0 } },
+        ],
         responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
       },
     },

@@ -1,6 +1,6 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, it, test } from "bun:test";
 import { mintApiKey, verifyApiKey } from "@hasna/contracts/auth";
-import type { TypedQueryClient } from "../../generated/storage-kit/index.js";
+import type { TypedQueryClient } from "../../storage-kit/index.js";
 import { EmailsSelfHostedStore } from "./store.js";
 import { handleSelfHostedRequest, type SelfHostedServiceDeps } from "./service.js";
 import { emailsSelfHostedMigrations } from "./migrations.js";
@@ -12,6 +12,7 @@ const COLS = [
   "id", "direction", "from_addr", "to_addrs", "cc_addrs", "subject", "body_text",
   "body_html", "status", "provider_message_id", "message_id", "in_reply_to",
   "received_at", "is_read", "is_starred", "labels", "headers", "attachments", "source_id",
+  "idempotency_key", "send_payload_hash", "send_state", "send_started_at",
 ];
 
 /**
@@ -48,6 +49,44 @@ function messagesClient(): { client: TypedQueryClient; rows: Record<string, unkn
       return [] as T[];
     },
     async get<T>(sql: string, params?: readonly unknown[]): Promise<T | null> {
+      if (sql.includes("attachments ->")) {
+        const row = rows.find((item) => item["id"] === (params ?? [])[0]);
+        const raw = row?.["attachments"];
+        const attachments = Array.isArray(raw) ? raw : typeof raw === "string" ? JSON.parse(raw) as unknown[] : [];
+        return ({ attachment: attachments[Number((params ?? [])[1])] ?? null } as unknown as T);
+      }
+      if (sql.startsWith("INSERT INTO messages") && sql.includes("idempotency_key")) {
+        const incoming = rowFromParams(params ?? []);
+        const duplicate = rows.find((row) => row["idempotency_key"] === incoming["idempotency_key"]);
+        if (duplicate) return null;
+        rows.push(incoming);
+        return incoming as unknown as T;
+      }
+      if (sql.includes("FROM messages WHERE idempotency_key")) {
+        return (rows.find((row) => row["idempotency_key"] === (params ?? [])[0]) as unknown as T) ?? null;
+      }
+      if (sql.startsWith("UPDATE messages SET send_state = 'sending'")) {
+        const row = rows.find((item) => item["id"] === (params ?? [])[0] && item["send_state"] === "pending");
+        if (!row) return null;
+        row["send_state"] = "sending";
+        row["send_started_at"] = new Date().toISOString();
+        return row as unknown as T;
+      }
+      if (sql.startsWith("UPDATE messages SET send_state = 'sent'")) {
+        const row = rows.find((item) => item["id"] === (params ?? [])[0]);
+        if (!row) return null;
+        row["send_state"] = "sent";
+        row["status"] = "sent";
+        row["provider_message_id"] = (params ?? [])[1];
+        return row as unknown as T;
+      }
+      if (sql.startsWith("UPDATE messages SET send_state = 'uncertain'")) {
+        const row = rows.find((item) => item["id"] === (params ?? [])[0]);
+        if (!row || row["send_state"] === "sent") return null;
+        row["send_state"] = "uncertain";
+        row["status"] = "uncertain";
+        return row as unknown as T;
+      }
       if (sql.includes("FROM messages WHERE id")) {
         const id = (params ?? [])[0];
         return (rows.find((r) => r["id"] === id) as unknown as T) ?? null;
@@ -123,10 +162,10 @@ const INBOUND = {
 describe("Emails self-hosted inbound messages", () => {
   test("migration set includes the inbound schema migration", () => {
     const ids = emailsSelfHostedMigrations().map((m) => m.id);
-    expect(ids).toContain("0002_emails_messages_inbound");
+    expect(ids).toContain("0002_mailery_messages_inbound");
     // Inbound must come after the core message table.
-    expect(ids.indexOf("0002_emails_messages_inbound")).toBeGreaterThan(
-      ids.indexOf("0001_emails_selfhosted_core"),
+    expect(ids.indexOf("0002_mailery_messages_inbound")).toBeGreaterThan(
+      ids.indexOf("0001_mailery_selfhosted_core"),
     );
   });
 
@@ -180,6 +219,24 @@ describe("Emails self-hosted inbound messages", () => {
     expect(msgs.map((m: { source_id: string }) => m.source_id)).toEqual(["newer", "older"]);
   });
 
+  test("keeps attachment bytes out of message reads and serves them from the authenticated attachment route", async () => {
+    const d = deps();
+    const content = Buffer.from("attachment body").toString("base64");
+    const created = await handleSelfHostedRequest(d, post({
+      ...INBOUND,
+      source_id: "attachment-source",
+      attachments: [{ filename: "invoice.txt", content_type: "text/plain", size: 15, content_base64: content }],
+    }));
+    const message = (await created!.json()).message;
+    expect(message.attachments[0].content_base64).toBeUndefined();
+    const attachment = await handleSelfHostedRequest(d, new Request(
+      `http://svc/v1/messages/${encodeURIComponent(message.id)}/attachments/0`,
+      { headers: { "x-api-key": writeToken() } },
+    ));
+    expect(attachment?.status).toBe(200);
+    expect((await attachment!.json()).attachment.content_base64).toBe(content);
+  });
+
   test("outbound ledger-only writes are rejected", async () => {
     const res = await handleSelfHostedRequest(
       deps(),
@@ -196,11 +253,134 @@ describe("Emails self-hosted inbound messages", () => {
     const res = await handleSelfHostedRequest(d, new Request("http://svc/v1/messages/send", {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-api-key": writeToken() },
-      body: JSON.stringify({ from: "me@example.com", to: ["you@example.com"], subject: "hi", text: "yo" }),
+      body: JSON.stringify({ from: "me@example.com", to: ["you@example.com"], subject: "hi", text: "yo", idempotency_key: "send-1" }),
     }));
     expect(res?.status).toBe(202);
     expect(sent).toHaveLength(1);
     expect((await res!.json()).message.provider_message_id).toBe("ses-message-1");
+  });
+
+  it("returns the same completed intent on retry without sending twice", async () => {
+    const d = deps();
+    let sends = 0;
+    d.sender = { provider: "ses", send: async () => { sends++; return "ses-once"; } };
+    const request = () => new Request("http://svc/v1/messages/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": writeToken() },
+      body: JSON.stringify({ from: "me@example.com", to: ["you@example.com"], subject: "once", idempotency_key: "stable-key" }),
+    });
+    const first = await handleSelfHostedRequest(d, request());
+    const second = await handleSelfHostedRequest(d, request());
+    expect(first?.status).toBe(202);
+    expect(second?.status).toBe(200);
+    const replay = await second!.json();
+    expect(replay.idempotent_replay).toBe(true);
+    expect(replay.message.idempotency_key).toBeUndefined();
+    expect(replay.message.send_payload_hash).toBeUndefined();
+    expect(sends).toBe(1);
+  });
+
+  it("resumes a durable pending intent left by a crash before provider claim", async () => {
+    const d = deps();
+    const reserve = d.store.reserveSendIntent.bind(d.store);
+    d.store.reserveSendIntent = async (input) => {
+      const result = await reserve(input);
+      return { record: result.record, created: false };
+    };
+    let sends = 0;
+    d.sender = { provider: "ses", send: async () => { sends++; return "ses-resumed"; } };
+    const res = await handleSelfHostedRequest(d, new Request("http://svc/v1/messages/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": writeToken() },
+      body: JSON.stringify({ from: "me@example.com", to: ["you@example.com"], subject: "resume", idempotency_key: "pending-key" }),
+    }));
+    expect(res?.status).toBe(202);
+    expect(sends).toBe(1);
+  });
+
+  it("refuses to reuse an idempotency key for a different payload", async () => {
+    const d = deps();
+    const send = (subject: string) => handleSelfHostedRequest(d, new Request("http://svc/v1/messages/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": writeToken() },
+      body: JSON.stringify({ from: "me@example.com", to: ["you@example.com"], subject, idempotency_key: "conflict-key" }),
+    }));
+    expect((await send("first"))?.status).toBe(202);
+    const conflict = await send("different");
+    expect(conflict?.status).toBe(409);
+    expect((await conflict!.json()).retry_safe).toBe(false);
+  });
+
+  it("marks an expired sending lease uncertain instead of replaying the provider", async () => {
+    const d = deps();
+    const reserve = d.store.reserveSendIntent.bind(d.store);
+    d.store.reserveSendIntent = async (input) => {
+      const result = await reserve(input);
+      const claimed = await d.store.claimSendIntent(result.record.id);
+      return { record: { ...claimed!, send_started_at: "2000-01-01T00:00:00.000Z" }, created: false };
+    };
+    let sends = 0;
+    d.sender = { provider: "ses", send: async () => { sends++; return "must-not-send"; } };
+    const res = await handleSelfHostedRequest(d, new Request("http://svc/v1/messages/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": writeToken() },
+      body: JSON.stringify({ from: "me@example.com", to: ["you@example.com"], subject: "stale", idempotency_key: "stale-key" }),
+    }));
+    expect(res?.status).toBe(409);
+    expect((await res!.json()).retry_safe).toBe(false);
+    expect(sends).toBe(0);
+  });
+
+  it("rejects malformed or oversized inline attachments before reserving a send", async () => {
+    const d = deps();
+    const send = (content: string) => handleSelfHostedRequest(d, new Request("http://svc/v1/messages/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": writeToken() },
+      body: JSON.stringify({
+        from: "me@example.com", to: ["you@example.com"], subject: "attachment", idempotency_key: crypto.randomUUID(),
+        attachments: [{ filename: "x.bin", content }],
+      }),
+    }));
+    expect((await send("not-base64"))?.status).toBe(400);
+    expect((await send(Buffer.alloc(513 * 1024).toString("base64")))?.status).toBe(400);
+  });
+
+  it("concurrent duplicate sends invoke the provider at most once", async () => {
+    const d = deps();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let sends = 0;
+    d.sender = { provider: "ses", send: async () => { sends++; await gate; return "ses-concurrent"; } };
+    const request = () => new Request("http://svc/v1/messages/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": writeToken() },
+      body: JSON.stringify({ from: "me@example.com", to: ["you@example.com"], subject: "race", idempotency_key: "race-key" }),
+    });
+    const first = handleSelfHostedRequest(d, request());
+    await Bun.sleep(1);
+    const second = await handleSelfHostedRequest(d, request());
+    release();
+    const firstResult = await first;
+    expect(firstResult?.status).toBe(202);
+    expect(second?.status).toBe(202);
+    expect((await second!.json()).in_progress).toBe(true);
+    expect(sends).toBe(1);
+  });
+
+  it("marks provider-success ledger failures uncertain and never reports retry-safe", async () => {
+    const d = deps();
+    d.sender = { provider: "ses", send: async () => "provider-accepted" };
+    d.store.completeSendIntent = async () => { throw new Error("database write failed"); };
+    const res = await handleSelfHostedRequest(d, new Request("http://svc/v1/messages/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": writeToken() },
+      body: JSON.stringify({ from: "me@example.com", to: ["you@example.com"], subject: "crash", idempotency_key: "crash-key" }),
+    }));
+    const body = await res!.json();
+    expect(res?.status).toBe(502);
+    expect(body.error).toContain("ledger finalization failed");
+    expect(body.retry_safe).toBe(false);
+    expect(body.message.send_state).toBe("uncertain");
   });
 
   test("POST still requires from and to", async () => {

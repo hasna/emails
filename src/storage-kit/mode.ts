@@ -1,4 +1,4 @@
-// Emails-owned mode adapter for the vendored Postgres helpers.
+// Emails-owned mode adapter for the product Postgres helpers.
 // The product has exactly two modes and intentionally accepts no aliases.
 
 export const STORAGE_MODES = ["local", "self_hosted"] as const;

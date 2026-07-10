@@ -2,7 +2,7 @@ import { ApiKeyStore } from "@hasna/contracts/auth";
 import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
 import { closeSelfHostedPool, getSelfHostedPool, requireSigningSecret } from "../../server/self-hosted/env.js";
-import { issueSelfHostedApiKey, listSelfHostedApiKeys, revokeSelfHostedApiKey } from "../../server/self-hosted/keys.js";
+import { issueSelfHostedApiKey, listSelfHostedApiKeys, revokeSelfHostedApiKey, rotateToEmailsApiKey } from "../../server/self-hosted/keys.js";
 import { handleError } from "../utils.js";
 
 async function keyStore(): Promise<{ store: ApiKeyStore; signingSecret: string }> {
@@ -46,6 +46,32 @@ export function registerSelfHostedCommands(program: Command, output: (data: unkn
         const { store } = await keyStore();
         const records = await listSelfHostedApiKeys(store);
         output(records, records.length ? records.map((record) => `${record.kid}  ${record.scopes.join(",")}  ${record.revokedAt ? "revoked" : "active"}`).join("\n") : chalk.dim("No API keys."));
+      } catch (error) {
+        handleError(error);
+      } finally {
+        await closeSelfHostedPool();
+      }
+    });
+
+  key.command("rotate")
+    .description("Mint an Emails key while retaining active legacy keys for rollback")
+    .option("--scope <scope...>", "Granted scope(s)", ["emails:*"])
+    .option("--ttl-days <days>", "Expiry in days", "90")
+    .option("--agent <name>", "Optional key subject")
+    .action(async (opts: { scope: string[]; ttlDays: string; agent?: string }) => {
+      try {
+        const { store, signingSecret } = await keyStore();
+        const result = await rotateToEmailsApiKey(store, signingSecret, {
+          scopes: opts.scope,
+          ttlDays: Number(opts.ttlDays),
+          agent: opts.agent,
+        });
+        const data = {
+          token: result.minted.token,
+          kid: result.minted.kid,
+          retainedLegacyKids: result.retainedLegacyKids,
+        };
+        output(data, `${chalk.green("Emails API key created. Save this token now; it will not be shown again:")}\n${result.minted.token}\n\nLegacy rollback keys retained: ${result.retainedLegacyKids.length}`);
       } catch (error) {
         handleError(error);
       } finally {

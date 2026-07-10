@@ -13,6 +13,10 @@ import { json, badRequest } from "./helpers.js";
 import { getInboundBuckets, loadConfig } from "../../lib/config.js";
 import { emitEmailsEventBestEffort } from "../../lib/emails-events.js";
 import { verifySnsStructure } from "../../lib/webhook-events.js";
+import { snsMessageAllowed, snsPolicyFromEnv, verifyAwsSnsSignature } from "../../lib/sns-signature.js";
+import { getDatabase } from "../../db/database.js";
+import { getWebhookReceipt, recordWebhookReceipt } from "../../db/webhook-receipts.js";
+import { readBoundedRequestText, RouteBodyTooLargeError } from "./request-body.js";
 
 /** Injected fetch so confirmation is testable. */
 export type FetchLike = (url: string) => Promise<unknown>;
@@ -29,19 +33,16 @@ function configuredWebhookSecret(): string | undefined {
   return (config["ses_inbound_webhook_secret"] as string | undefined)
     ?? (config["emails_inbound_webhook_secret"] as string | undefined)
     ?? process.env["EMAILS_SES_INBOUND_WEBHOOK_SECRET"]
-    ?? process.env["EMAILS_SES_INBOUND_WEBHOOK_SECRET"]
     ?? process.env["EMAILS_INBOUND_WEBHOOK_SECRET"];
 }
 
 function requireWebhookSecret(): boolean {
-  const raw = process.env["EMAILS_REQUIRE_SES_INBOUND_SECRET"]
-    ?? process.env["EMAILS_REQUIRE_SES_INBOUND_SECRET"];
+  const raw = process.env["EMAILS_REQUIRE_SES_INBOUND_SECRET"];
   return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
 }
 
 function requestWebhookSecret(req: Request): string | null {
-  const direct = req.headers.get("x-emails-webhook-secret")
-    ?? req.headers.get("x-emails-webhook-secret");
+  const direct = req.headers.get("x-emails-webhook-secret");
   if (direct) return direct;
   const auth = req.headers.get("authorization") ?? "";
   const match = auth.match(/^Bearer\s+(.+)$/i);
@@ -52,12 +53,23 @@ export async function handleInboundWebhook(
   req: Request,
   path: string,
   method: string,
-  deps?: { fetchUrl?: FetchLike; sync?: (bucket: string, prefix: string | undefined, region: string | undefined, opts?: { keys?: string[]; providerId?: string }) => Promise<{ synced: number }> },
+  deps?: {
+    fetchUrl?: FetchLike;
+    verifySns?: (body: Record<string, unknown>) => Promise<boolean>;
+    sync?: (bucket: string, prefix: string | undefined, region: string | undefined, opts?: { keys?: string[]; providerId?: string }) => Promise<{ synced: number }>;
+  },
 ): Promise<Response | null> {
   if (path !== "/webhook/ses-inbound" || method !== "POST") return null;
 
   let body: Record<string, unknown>;
-  try { body = (await req.json()) as Record<string, unknown>; } catch { return badRequest("Invalid JSON"); }
+  try {
+    const parsed = JSON.parse(await readBoundedRequestText(req)) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return badRequest("Invalid JSON object");
+    body = parsed as Record<string, unknown>;
+  } catch (error) {
+    if (error instanceof RouteBodyTooLargeError) return json({ error: "Request body too large" }, 413);
+    return badRequest("Invalid JSON");
+  }
 
   const secret = configuredWebhookSecret();
   if (secret || requireWebhookSecret()) {
@@ -65,8 +77,20 @@ export async function handleInboundWebhook(
     if (requestWebhookSecret(req) !== secret) return json({ error: "Invalid webhook secret" }, 401);
   }
   if (!verifySnsStructure(body)) return badRequest("Invalid SNS payload");
+  let policy;
+  try { policy = snsPolicyFromEnv(); } catch (error) {
+    return json({ error: error instanceof Error ? error.message : "SNS allowlist is not configured" }, 503);
+  }
+  if (!snsMessageAllowed(body, policy)) return json({ error: "SNS topic or account is not allowed" }, 401);
+  const signatureValid = await (deps?.verifySns ?? verifyAwsSnsSignature)(body).catch(() => false);
+  if (!signatureValid) return json({ error: "Invalid SNS signature" }, 401);
 
   const type = body["Type"] ?? req.headers.get("x-amz-sns-message-type");
+  const eventId = typeof body["MessageId"] === "string" ? body["MessageId"] : "";
+  if (!eventId) return badRequest("SNS MessageId is required");
+  const db = getDatabase();
+  const existing = getWebhookReceipt("sns", eventId, db);
+  if (existing) return json({ ok: true, duplicate: true, message_id: eventId });
 
   // 1. Auto-confirm the SNS subscription — but only fetch genuine AWS SNS
   //    confirmation URLs (host-pinned to sns.<region>.amazonaws.com over HTTPS)
@@ -77,6 +101,7 @@ export async function handleInboundWebhook(
     }
     const fetchUrl = deps?.fetchUrl ?? (async (u: string) => { await fetch(u); });
     await fetchUrl(body["SubscribeURL"] as string);
+    recordWebhookReceipt("sns", eventId, String(body["TopicArn"] ?? ""), db);
     return json({ ok: true, confirmed: true });
   }
 
@@ -125,6 +150,7 @@ export async function handleInboundWebhook(
       },
     });
     const result = await sync(bucket, prefix, region, { keys: exactKeys, providerId });
+    recordWebhookReceipt("sns", eventId, note.messageId ?? null, db);
     return json({ ok: true, synced: result.synced, message_id: note.messageId, object_key: objectKey ?? null });
   }
 

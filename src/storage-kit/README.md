@@ -1,10 +1,8 @@
-# Vendored Hasna storage kit
+# Emails Postgres storage utilities
 
-**Generated — do not edit.** This directory is stamped into the repo by
-[`@hasna/contracts`](https://github.com/hasna/contracts) and verified in CI.
-
-- Regenerate: `bunx @hasna/contracts vendor-kit`
-- Verify (CI): `bunx @hasna/contracts vendor-kit --check` — fails on stale or hand-edited files.
+This is a product-owned fork of the original Hasna storage-kit template. It is
+maintained and tested in this repository; it is intentionally not presented as
+generated or compatible with `vendor-kit --check`.
 
 ## What it is
 
@@ -36,6 +34,6 @@ mode there is no Postgres pool at all; SQLite is authoritative.
 Point `PGSSLROOTCERT` at the Amazon RDS global bundle to verify:
 <https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem>
 
-## Peer dependency
+## Runtime dependency
 
-Requires `pg` (and `@types/pg` for TypeScript) in the host repo.
+Requires `pg` (and `@types/pg` for TypeScript during development).

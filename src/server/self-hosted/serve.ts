@@ -1,6 +1,6 @@
 // Bootstraps and runs the Emails self-hosted service (Bun.serve).
 //
-// Wires the vendored storage-kit Postgres pool, the API-key verifier
+// Wires the product-owned Postgres pool, the API-key verifier
 // (@hasna/contracts/auth), the migration set, and the request handler together.
 
 import { verifyApiKey, ApiKeyStore, type ApiKeyVerifier } from "@hasna/contracts/auth";

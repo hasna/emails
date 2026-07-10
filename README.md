@@ -21,8 +21,9 @@ Emails has exactly two modes: `local` and `self_hosted`. Local mode keeps SQLite
 ## Quick Start
 
 ```bash
-# Add a provider (SES or Resend)
-emails provider add --name production-ses --type ses --region us-east-1 --access-key ... --secret-key ...
+# Add a provider (SES or Resend). Prefer an AWS profile locally or the
+# deployment IAM role in self-hosted AWS; avoid storing long-lived AWS keys.
+AWS_PROFILE=emails-operator emails provider add --name production-ses --type ses --region us-east-1
 emails provider add --name production-resend --type resend --api-key ...
 
 # Set up a domain (buy + DNS + SES in one command)
@@ -95,6 +96,10 @@ its SHA-256 hash plus lifecycle metadata is stored in Postgres. Inspect metadata
 with `emails self-hosted key list` and immediately disable a key with
 `emails self-hosted key revoke <kid> --reason "rotation"`. The service denies
 validly signed but unrecorded keys.
+
+`emails self-hosted key rotate` issues an Emails key while retaining the active
+Mailery-era key for rollback. Verify clients on the new key, then explicitly
+revoke the old key after the rollback window closes.
 
 ## Emails UI (`emails ui`)
 
@@ -345,11 +350,26 @@ emails inbox watch                        # auto-delivers new mail in real-time 
 ```
 
 Alternatively, point an SNS HTTP subscription at `POST /webhook/ses-inbound` on
-`emails serve` auto-confirms the subscription and syncs on each notification.
+`emails serve`. Configure `EMAILS_SNS_TOPIC_ARNS` and
+`EMAILS_AWS_ACCOUNT_IDS`; the route verifies the AWS signature and exact
+allowlists before it confirms or syncs a notification.
 
 ## Self-Hosted Runtime (PostgreSQL/S3/SES)
 
 The server uses operator-owned Postgres and provider accounts. A client must configure `EMAILS_MODE=self_hosted`, `EMAILS_SELF_HOSTED_URL`, and `EMAILS_SELF_HOSTED_API_KEY`. The service requires `EMAILS_DATABASE_URL`, `EMAILS_API_SIGNING_KEY`, and `EMAILS_SEND_PROVIDER=ses|resend`. SES uses the deployment IAM role; Resend uses `RESEND_API_KEY`.
+
+Expose the service through an HTTPS reverse proxy or load balancer with edge
+rate limits, the 1 MiB request limit, bounded upstream timeouts, and network
+rules that keep Postgres and the container port private. The generated client
+rejects remote plaintext HTTP. Self-hosted sends require an idempotency key and
+support at most five inline attachments (512 KiB each, 768 KiB total);
+scheduled sends are not implemented by the self-hosted API. Mailbox read,
+star, archive, label, delete, bulk-by-explicit-id, and authenticated attachment
+retrieval are supported.
+
+For an operator retry, reuse the same `emails send --idempotency-key <key>`.
+Changing the payload under that key is rejected, and an uncertain provider
+outcome must be reconciled before another send.
 
 ```bash
 export EMAILS_MODE=self_hosted

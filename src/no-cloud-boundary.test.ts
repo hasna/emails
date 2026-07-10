@@ -3,6 +3,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { extname, join, relative } from "node:path";
 import pkg from "../package.json" with { type: "json" };
 import { normalizeEmailsMode } from "./lib/mode.js";
+import { hostedControlPlaneFindings } from "../scripts/no-cloud-scan-lib.mjs";
 
 const root = join(import.meta.dir, "..");
 const roots = [
@@ -22,7 +23,7 @@ const roots = [
   "web",
 ] as const;
 const textExtensions = new Set([".css", ".html", ".js", ".json", ".md", ".mjs", ".swift", ".ts", ".tsx", ".yaml", ".yml"]);
-const excluded = new Set(["src/no-cloud-boundary.test.ts"]);
+const excluded = new Set(["src/no-cloud-boundary.test.ts", "src/no-cloud-artifact-scan.test.ts"]);
 
 function files(path: string): string[] {
   if (!existsSync(path)) return [];
@@ -82,6 +83,10 @@ describe("no hosted control plane", () => {
   });
 
   it("contains no active SaaS, fleet, or cloud-prefixed implementation vocabulary", () => {
-    expect(activeHits(/\b(?:saas|fleet)\b|\bcloud_/i, ["src/lib/mode.ts"])).toEqual([]);
+    const findings = scannedFiles()
+      .filter((path) => !/\.test\.[cm]?[jt]sx?$/.test(path))
+      .flatMap((path) => hostedControlPlaneFindings(readFileSync(path, "utf8"), relative(root, path))
+        .map((reason) => `${relative(root, path)}: ${reason}`));
+    expect(findings).toEqual([]);
   });
 });

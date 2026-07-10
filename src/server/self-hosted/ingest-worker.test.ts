@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { processInboundNotification, type IngestDeps } from "./ingest-worker.js";
+import { processInboundNotification, shouldDeleteIngestResult, validateIngestWorkerConfig, type IngestDeps } from "./ingest-worker.js";
 import type { MessageInput, MessageRecord } from "./store.js";
 
 const OBJECT_KEY = "inbound/hasna.com/msgkey123";
@@ -55,6 +55,20 @@ function makeDeps(overrides: Partial<IngestDeps> & { existing?: string | null } 
 }
 
 describe("processInboundNotification", () => {
+  it("requires all durable worker configuration before startup", () => {
+    expect(() => validateIngestWorkerConfig({ bucket: BUCKET, databaseUrl: "postgres://example" })).toThrow(/QUEUE_URL/);
+    expect(() => validateIngestWorkerConfig({ queueUrl: "https://sqs.example/q", databaseUrl: "postgres://example" })).toThrow(/S3_BUCKET/);
+    expect(() => validateIngestWorkerConfig({ queueUrl: "https://sqs.example/q", bucket: BUCKET })).toThrow(/DATABASE_URL/);
+    expect(() => validateIngestWorkerConfig({ queueUrl: "https://sqs.example/q", bucket: BUCKET, databaseUrl: "postgres://example" })).not.toThrow();
+  });
+
+  it("deletes only terminal success and duplicate results", () => {
+    expect(shouldDeleteIngestResult({ status: "ingested" })).toBe(true);
+    expect(shouldDeleteIngestResult({ status: "duplicate" })).toBe(true);
+    expect(shouldDeleteIngestResult({ status: "skipped" })).toBe(false);
+    expect(shouldDeleteIngestResult({ status: "error" })).toBe(false);
+  });
+
   it("ingests a new inbound message keyed on the S3 object key", async () => {
     const { deps, upserts, fetched } = makeDeps();
     const r = await processInboundNotification(deps, sesNotification, BUCKET);
@@ -88,11 +102,20 @@ describe("processInboundNotification", () => {
     expect(upserts).toEqual([]);
   });
 
-  it("skips notifications with no object key (nothing to fetch)", async () => {
+  it("leaves notifications with no object key for redrive/DLQ", async () => {
     const { deps } = makeDeps();
     const r = await processInboundNotification(deps, JSON.stringify({ hello: "world" }), BUCKET);
-    expect(r.status).toBe("skipped");
+    expect(r.status).toBe("error");
     expect(r.reason).toBe("no_object_key");
+    expect(shouldDeleteIngestResult(r)).toBe(false);
+  });
+
+  it("does not trust a notification bucket and fails when worker bucket is missing", async () => {
+    const { deps, fetched } = makeDeps();
+    const r = await processInboundNotification(deps, sesNotification, undefined);
+    expect(r).toMatchObject({ status: "error", reason: "no_bucket" });
+    expect(fetched).toEqual([]);
+    expect(shouldDeleteIngestResult(r)).toBe(false);
   });
 
   it("falls back to the SES timestamp when the mail has no Date header", async () => {
@@ -112,5 +135,6 @@ describe("processInboundNotification", () => {
     const r = await processInboundNotification(deps, sesNotification, BUCKET);
     expect(r.status).toBe("error");
     expect(r.error).toContain("AccessDenied");
+    expect(shouldDeleteIngestResult(r)).toBe(false);
   });
 });

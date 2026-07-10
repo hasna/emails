@@ -1,5 +1,6 @@
 import { parseResendWebhook, parseSesWebhook, verifyResendSignature, verifySnsStructure } from "./webhook-events.js";
 import type { WebhookEvent } from "./webhook-events.js";
+import { snsMessageAllowed, snsPolicyFromEnv, verifyAwsSnsSignature } from "./sns-signature.js";
 
 export {
   parseResendWebhook,
@@ -8,6 +9,34 @@ export {
   verifySnsStructure,
 } from "./webhook-events.js";
 export type { WebhookEvent } from "./webhook-events.js";
+
+const MAX_WEBHOOK_BODY_BYTES = 1024 * 1024;
+
+async function readBoundedWebhookBody(req: Request): Promise<string> {
+  const declared = Number(req.headers.get("content-length") ?? "0");
+  if (Number.isFinite(declared) && declared > MAX_WEBHOOK_BODY_BYTES) throw new RangeError("webhook body too large");
+  const reader = req.body?.getReader();
+  if (!reader) return "";
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > MAX_WEBHOOK_BODY_BYTES) {
+      await reader.cancel();
+      throw new RangeError("webhook body too large");
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(bytes);
+}
 
 function colorEventType(type: string, chalk: typeof import("chalk").default): string {
   switch (type) {
@@ -38,39 +67,38 @@ export function createWebhookServer(port: number, providerId?: string, webhookSe
       let body: any;
 
       try {
-        bodyText = await req.text();
+        bodyText = await readBoundedWebhookBody(req);
         body = JSON.parse(bodyText);
-      } catch {
+      } catch (error) {
+        if (error instanceof RangeError) return new Response("Payload too large", { status: 413 });
         return new Response("Invalid JSON", { status: 400 });
       }
 
       if (url.pathname === "/webhook/resend") {
-        // Verify Resend signature if secret is configured
-        if (webhookSecret) {
-          const webhookId = req.headers.get("svix-id");
-          if (webhookId && seenWebhookIds.has(webhookId)) {
-            return new Response("Webhook already processed", { status: 409 });
-          }
-          const headers: Record<string, string | null> = {
-            "svix-id": webhookId,
-            "svix-timestamp": req.headers.get("svix-timestamp"),
-            "svix-signature": req.headers.get("svix-signature"),
-          };
-          const valid = await verifyResendSignature(bodyText, headers, webhookSecret).catch(() => false);
-          if (!valid) return new Response("Invalid signature", { status: 401 });
-          if (webhookId) {
-            seenWebhookIds.add(webhookId);
-            if (seenWebhookIds.size > maxRememberedWebhookIds) {
-              const oldest = seenWebhookIds.values().next().value;
-              if (oldest) seenWebhookIds.delete(oldest);
-            }
-          }
+        if (!webhookSecret) return new Response("Resend webhook secret is not configured", { status: 503 });
+        const webhookId = req.headers.get("svix-id");
+        if (webhookId && seenWebhookIds.has(webhookId)) {
+          return new Response("Webhook already processed", { status: 200 });
         }
+        const headers: Record<string, string | null> = {
+          "svix-id": webhookId,
+          "svix-timestamp": req.headers.get("svix-timestamp"),
+          "svix-signature": req.headers.get("svix-signature"),
+        };
+        const valid = await verifyResendSignature(bodyText, headers, webhookSecret).catch(() => false);
+        if (!valid) return new Response("Invalid signature", { status: 401 });
         event = parseResendWebhook(body);
       } else if (url.pathname === "/webhook/ses") {
-        // Verify SNS structure
         if (!verifySnsStructure(body)) return new Response("Invalid SNS payload", { status: 400 });
-        event = parseSesWebhook(body);
+        let policy;
+        try { policy = snsPolicyFromEnv(); } catch { return new Response("SNS allowlist is not configured", { status: 503 }); }
+        if (!snsMessageAllowed(body, policy)) return new Response("SNS topic or account is not allowed", { status: 401 });
+        if (!(await verifyAwsSnsSignature(body).catch(() => false))) return new Response("Invalid SNS signature", { status: 401 });
+        let inner: unknown = body;
+        if (body.Type === "Notification" && typeof body.Message === "string") {
+          try { inner = JSON.parse(body.Message); } catch { return new Response("Invalid SNS Message", { status: 400 }); }
+        }
+        event = parseSesWebhook(inner);
       } else {
         return new Response("Not found", { status: 404 });
       }
@@ -79,15 +107,16 @@ export function createWebhookServer(port: number, providerId?: string, webhookSe
         return new Response("Unrecognized event type", { status: 200 });
       }
 
-      // Determine provider ID — use provided one or try to find from path
-      const pId = providerId || "webhook";
+      // Durable persistence must be associated with an explicit provider.
+      if (!providerId) return new Response("A provider id is required for durable webhook persistence", { status: 503 });
+      const pId = providerId;
 
       try {
-        const [{ getDatabase }, { upsertEvent }] = await Promise.all([
+        const [{ getDatabase }, { upsertEventWithResult }] = await Promise.all([
           import("../db/database.js"),
           import("../db/events.js"),
         ]);
-        upsertEvent(
+        const result = upsertEventWithResult(
           {
             provider_id: pId,
             provider_event_id: event.provider_event_id,
@@ -98,8 +127,16 @@ export function createWebhookServer(port: number, providerId?: string, webhookSe
           },
           getDatabase(),
         );
+        if (result.created) {
+          const webhookId = req.headers.get("svix-id") ?? event.provider_event_id;
+          seenWebhookIds.add(webhookId);
+          if (seenWebhookIds.size > maxRememberedWebhookIds) {
+            const oldest = seenWebhookIds.values().next().value;
+            if (oldest) seenWebhookIds.delete(oldest);
+          }
+        }
       } catch {
-        // If provider_id doesn't exist in providers table, just log
+        return new Response("Webhook persistence failed", { status: 500 });
       }
 
       const timestamp = new Date().toLocaleTimeString();

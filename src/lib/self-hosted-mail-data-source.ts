@@ -4,7 +4,7 @@
 //   GET    /v1/messages?limit&offset   -> { messages: [ <row>, ... ] }
 //   GET    /v1/messages/<id>           -> { message: <row> } | 404
 //   POST   /v1/messages                -> { message: <row> }
-//   PATCH  /v1/messages/<id>           -> { message: <row> }  (status only today)
+//   PATCH  /v1/messages/<id>           -> { message: <row> }
 //   DELETE /v1/messages/<id>           -> 200 | 404
 // Rows are snake_case and carry the full inbound projection: direction,
 // from_addr, to_addrs[], cc_addrs[], subject, body_text, body_html, status,
@@ -21,6 +21,9 @@
 
 import { resolveSelfHostedConfig } from "../db/self-hosted-store.js";
 import type { AttachmentPath } from "../db/inbound.js";
+import { chmodSync, closeSync, constants, mkdirSync, openSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { createHash } from "node:crypto";
 import {
   type ConversationBodyOptions,
   type LabelSummary,
@@ -79,6 +82,7 @@ interface V1Message {
   is_starred?: boolean;
   labels?: string[] | null;
   headers?: Record<string, unknown> | null;
+  attachments?: Array<{ filename?: string; content_type?: string; size?: number }> | null;
   created_at?: string | null;
   updated_at?: string | null;
 }
@@ -269,6 +273,11 @@ export class SelfHostedMailDataSource implements MailDataSource {
   private scanCache: { at: number; rows: V1Message[] } | null = null;
 
   constructor(options: SelfHostedMailDataSourceOptions) {
+    const url = new URL(options.baseUrl);
+    const loopback = url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]" || url.hostname === "::1";
+    if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) {
+      throw new Error("Self-hosted Emails requires HTTPS except for loopback development URLs.");
+    }
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
     this.apiKey = options.apiKey;
     this.now = options.now ?? Date.now;
@@ -459,9 +468,44 @@ export class SelfHostedMailDataSource implements MailDataSource {
     return [{ item: v1ToThreadMessage(m), body: v1ToMessageBody(m) }];
   }
 
-  async getAttachmentPaths(_id: string): Promise<AttachmentPath[]> {
-    // The self-hosted serve does not expose attachment blobs over /v1 yet.
-    return [];
+  async getAttachmentPaths(id: string): Promise<AttachmentPath[]> {
+    const message = await this.getRaw(id);
+    const metadata = Array.isArray(message?.attachments) ? message.attachments : [];
+    if (metadata.length === 0) return [];
+    const home = process.env["HOME"] ?? process.cwd();
+    const safeMessageId = createHash("sha256").update(id).digest("hex");
+    const directory = join(home, ".hasna", "emails", "attachments", "self-hosted", safeMessageId);
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    const paths: AttachmentPath[] = [];
+    for (let index = 0; index < metadata.length; index++) {
+      const { status, json } = await this.request("GET", `/messages/${encodeURIComponent(id)}/attachments/${index}`);
+      if (status < 200 || status >= 300) throw new Error(`self-hosted emails: attachment ${index} unavailable (HTTP ${status})`);
+      const attachment = (json as { attachment?: Record<string, unknown> } | null)?.attachment;
+      if (!attachment || typeof attachment["content_base64"] !== "string") throw new Error(`self-hosted emails: attachment ${index} has no content`);
+      const encoded = attachment["content_base64"];
+      if (encoded.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) {
+        throw new Error(`self-hosted emails: attachment ${index} has invalid base64 content`);
+      }
+      const bytes = Buffer.from(encoded, "base64");
+      if (bytes.toString("base64") !== encoded) throw new Error(`self-hosted emails: attachment ${index} has invalid base64 content`);
+      const rawName = String(attachment["filename"] ?? `attachment-${index + 1}`);
+      const filename = rawName.replace(/[^A-Za-z0-9._-]+/g, "_").replace(/^\.+/, "") || `attachment-${index + 1}`;
+      const localPath = join(directory, `${index + 1}-${filename}`);
+      const fd = openSync(
+        localPath,
+        constants.O_CREAT | constants.O_TRUNC | constants.O_WRONLY | constants.O_NOFOLLOW,
+        0o600,
+      );
+      try { writeFileSync(fd, bytes); } finally { closeSync(fd); }
+      chmodSync(localPath, 0o600);
+      paths.push({
+        filename: rawName,
+        content_type: String(attachment["content_type"] ?? "application/octet-stream"),
+        size: Number(attachment["size"] ?? 0) || 0,
+        local_path: localPath,
+      });
+    }
+    return paths;
   }
 
   async listLabelSummaries(opts?: ListLabelSummaryOptions): Promise<LabelSummary[]> {
@@ -527,32 +571,37 @@ export class SelfHostedMailDataSource implements MailDataSource {
 
   // ── writes ─────────────────────────────────────────────────────────────
 
-  // The self-hosted serve's PATCH persists only `status`/`provider_message_id`
-  // today. Marking read is best-effort so `inbox read` still works; it does not
-  // yet persist server-side.
+  // Mailbox mutations are persisted by the self-hosted serve.
   async setRead(id: string, read: boolean): Promise<void> {
     this.invalidate();
-    try {
-      await this.request("PATCH", `/messages/${encodeURIComponent(id)}`, { is_read: read });
-    } catch {
-      // best-effort: do not fail the read flow if the serve can't persist yet.
-    }
+    const { status } = await this.request("PATCH", `/messages/${encodeURIComponent(id)}`, { is_read: read });
+    if (status < 200 || status >= 300) throw new Error(`self-hosted emails: mark read failed (HTTP ${status})`);
   }
 
-  async setArchived(_id: string, _archived: boolean): Promise<void> {
-    throw new Error("Archiving is not yet supported on the self-hosted emails serve (/v1 PATCH persists status only).");
+  async setArchived(id: string, archived: boolean): Promise<void> {
+    this.invalidate();
+    const { status } = await this.request("PATCH", `/messages/${encodeURIComponent(id)}`, { archived });
+    if (status < 200 || status >= 300) throw new Error(`self-hosted emails: archive update failed (HTTP ${status})`);
   }
 
-  async setStarred(_id: string, _starred: boolean): Promise<void> {
-    throw new Error("Starring is not yet supported on the self-hosted emails serve (/v1 PATCH persists status only).");
+  async setStarred(id: string, starred: boolean): Promise<void> {
+    this.invalidate();
+    const { status } = await this.request("PATCH", `/messages/${encodeURIComponent(id)}`, { is_starred: starred });
+    if (status < 200 || status >= 300) throw new Error(`self-hosted emails: star update failed (HTTP ${status})`);
   }
 
-  async addLabel(_id: string, _label: string): Promise<string[]> {
-    throw new Error("Labels are not yet supported on the self-hosted emails serve (/v1 PATCH persists status only).");
+  async addLabel(id: string, label: string): Promise<string[]> {
+    this.invalidate();
+    const { status, json } = await this.request("PATCH", `/messages/${encodeURIComponent(id)}`, { add_label: label });
+    if (status < 200 || status >= 300) throw new Error(`self-hosted emails: add label failed (HTTP ${status})`);
+    return labelsOf((json as { message?: V1Message } | null)?.message ?? {} as V1Message);
   }
 
-  async removeLabel(_id: string, _label: string): Promise<string[]> {
-    throw new Error("Labels are not yet supported on the self-hosted emails serve (/v1 PATCH persists status only).");
+  async removeLabel(id: string, label: string): Promise<string[]> {
+    this.invalidate();
+    const { status, json } = await this.request("PATCH", `/messages/${encodeURIComponent(id)}`, { remove_label: label });
+    if (status < 200 || status >= 300) throw new Error(`self-hosted emails: remove label failed (HTTP ${status})`);
+    return labelsOf((json as { message?: V1Message } | null)?.message ?? {} as V1Message);
   }
 
   async deleteMessage(id: string): Promise<void> {
@@ -565,22 +614,25 @@ export class SelfHostedMailDataSource implements MailDataSource {
 
   async bulk(input: MailBulkInput): Promise<MailBulkResult> {
     const action = input.action;
-    if (action !== "delete") {
-      throw new Error(`Bulk '${action}' is not yet supported on the self-hosted emails serve.`);
-    }
     const ids = input.ids ?? [];
     let affected = 0;
     for (const id of ids) {
-      await this.deleteMessage(id);
+      if (action === "delete") await this.deleteMessage(id);
+      else if (action === "read") await this.setRead(id, true);
+      else if (action === "unread") await this.setRead(id, false);
+      else if (action === "archive") await this.setArchived(id, true);
+      else if (action === "unarchive") await this.setArchived(id, false);
+      else if (action === "star") await this.setStarred(id, true);
+      else if (action === "unstar") await this.setStarred(id, false);
+      else if (action === "label" && input.label) await this.addLabel(id, input.label);
+      else if (action === "unlabel" && input.label) await this.removeLabel(id, input.label);
+      else throw new Error(`Bulk '${action}' is not supported on the self-hosted emails serve.`);
       affected += 1;
     }
     return { action, affected, matched: ids.length, hasMore: false, nextCursor: null };
   }
 
   async send(input: MailSendInput): Promise<MailSendResult> {
-    if (input.attachments && input.attachments.length > 0) {
-      throw new Error("Attachments are not yet supported when sending through the self-hosted emails serve.");
-    }
     if (input.scheduledAt) {
       throw new Error("Scheduled send is not supported on the self-hosted emails serve.");
     }
@@ -593,7 +645,9 @@ export class SelfHostedMailDataSource implements MailDataSource {
       subject: input.subject,
       text: input.body,
       html,
+      idempotency_key: input.idempotencyKey ?? crypto.randomUUID(),
     };
+    if (input.attachments?.length) body["attachments"] = input.attachments;
     if (input.cc) body["cc"] = input.cc.split(",").map((v) => v.trim()).filter(Boolean);
     if (input.bcc) body["bcc"] = input.bcc.split(",").map((v) => v.trim()).filter(Boolean);
     if (input.replyTo) body["reply_to"] = input.replyTo;

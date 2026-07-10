@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { hashToken, verifyApiKeyToken, type ApiKeyRecord, type MintedApiKey } from "@hasna/contracts/auth";
-import { issueSelfHostedApiKey, listSelfHostedApiKeys, revokeSelfHostedApiKey } from "./keys.js";
+import { issueSelfHostedApiKey, listSelfHostedApiKeys, revokeSelfHostedApiKey, rotateToEmailsApiKey } from "./keys.js";
 
 const SIGNING_SECRET = "a-test-signing-secret-that-is-long-enough";
 
@@ -23,7 +23,11 @@ function memoryStore() {
         createdBy: createdBy ?? null,
       });
     },
-    async list() { return [...rows.values()]; },
+    async list(options?: { app?: string; includeRevoked?: boolean }) {
+      return [...rows.values()].filter((row) =>
+        (!options?.app || row.app === options.app)
+        && (options?.includeRevoked || !row.revokedAt));
+    },
     async revoke(kid: string, reason?: string) {
       const row = rows.get(kid);
       if (!row) return false;
@@ -57,5 +61,18 @@ describe("self-hosted API key lifecycle", () => {
     expect(await revokeSelfHostedApiKey(store, minted.kid, "rotation")).toBe(true);
     expect(store.rows.get(minted.kid)).toMatchObject({ revokedReason: "rotation" });
     expect(await revokeSelfHostedApiKey(store, "missing")).toBe(false);
+  });
+
+  test("rotation mints an Emails key without revoking the rollback key", async () => {
+    const store = memoryStore();
+    store.rows.set("legacy-kid", {
+      kid: "legacy-kid", app: "mailery", agent: null, scopes: ["mailery:*"], tokenHash: "hash-only",
+      issuedAt: new Date().toISOString(), expiresAt: null, revokedAt: null, revokedReason: null,
+      lastUsedAt: null, createdBy: "old-cli",
+    });
+    const result = await rotateToEmailsApiKey(store, SIGNING_SECRET);
+    expect(result.minted.claims.app).toBe("emails");
+    expect(result.retainedLegacyKids).toEqual(["legacy-kid"]);
+    expect(store.rows.get("legacy-kid")?.revokedAt).toBeNull();
   });
 });

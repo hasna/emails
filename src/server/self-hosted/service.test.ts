@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { mintApiKey, verifyApiKey } from "@hasna/contracts/auth";
-import type { TypedQueryClient } from "../../generated/storage-kit/index.js";
+import type { TypedQueryClient } from "../../storage-kit/index.js";
 import { EmailsSelfHostedStore } from "./store.js";
 import { handleSelfHostedRequest, type SelfHostedServiceDeps } from "./service.js";
 import { emailsSelfHostedMigrations } from "./migrations.js";

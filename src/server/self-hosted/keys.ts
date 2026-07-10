@@ -77,3 +77,13 @@ export async function revokeSelfHostedApiKey(
   if (!normalized) throw new Error("A key id is required.");
   return store.revoke(normalized, reason);
 }
+
+export async function rotateToEmailsApiKey(
+  store: SelfHostedKeyStore,
+  signingSecret: string,
+  options: { scopes?: string[]; ttlDays?: number | null; agent?: string; createdBy?: string } = {},
+): Promise<{ minted: MintedApiKey; retainedLegacyKids: string[] }> {
+  const legacy = await store.list({ app: "mailery", includeRevoked: false });
+  const minted = await issueSelfHostedApiKey(store, signingSecret, options);
+  return { minted, retainedLegacyKids: legacy.map((record) => record.kid) };
+}

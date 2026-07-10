@@ -2,8 +2,14 @@
 
 All notable changes to `@hasna/emails` are documented here.
 
+## [Unreleased]
+
+- rebuild the product as local-first and operator-owned AWS self-hosting, with no Hasna SaaS control plane.
+- add durable idempotent self-hosted sends, authenticated attachment retrieval, mailbox mutations, signed replay-safe webhooks, and additive Mailery-to-Emails compatibility bridges.
+- harden deployment with separate migration/runtime database roles, readiness health checks, immutable container/action pins, and explicit local/self-hosted mode validation.
+
 ## [0.6.117] - 2026-07-09
-- chore: rename package back to `@hasna/emails` and free the `emails`/`emails-mcp`/`emails-serve` bins for the separate self_hosted CLI (`@hasnatools/emails`). Remaining bins: `emails`, `emails-mcp`, `emails-serve`. The Emails product/brand name, `emails.co`, and self_hosted API-key app id are unchanged.
+- chore: rename package back to `@hasna/emails` and free the `mailery`/`mailery-mcp`/`mailery-serve` bins for the separate cloud CLI (`@hasnatools/mailery`). Remaining bins: `emails`, `emails-mcp`, `emails-serve`. The Mailery product/brand name, `mailery.co`, and cloud API-key app id are unchanged.
 
 ## [0.6.69] - 2026-06-29
 - fix: block raw S3 bucket sync when configured child prefixes could bypass retired source lifecycle rules.

@@ -6,6 +6,9 @@ import {
 } from "./self-hosted-mail-data-source.js";
 import { resetSelfHostedConfigCache } from "../db/self-hosted-store.js";
 import { resetMailDataSource, resolveMailDataSource } from "./mail-data-source.js";
+import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 // A self-hosted /v1 message row (snake_case, as the API returns).
 function v1(id: string, over: Record<string, unknown> = {}): Record<string, unknown> {
@@ -49,7 +52,8 @@ function fakeServe(initial: Array<Record<string, unknown>>): { fetchImpl: SelfHo
       const offset = Number(u.searchParams.get("offset") ?? "0");
       return ordered.slice(offset, offset + limit);
     };
-    const idMatch = u.pathname.match(/^\/v1\/messages\/(.+)$/);
+    const attachmentMatch = u.pathname.match(/^\/v1\/messages\/(.+)\/attachments\/(\d+)$/);
+    const idMatch = u.pathname.match(/^\/v1\/messages\/([^/]+)$/);
     if (u.pathname === "/v1/messages" && method === "GET") return ok({ messages: list() });
     if (u.pathname === "/v1/messages/send" && method === "POST") {
       const body = JSON.parse(String(init.body));
@@ -59,11 +63,40 @@ function fakeServe(initial: Array<Record<string, unknown>>): { fetchImpl: SelfHo
       rows.set(id, rec);
       return ok({ message: rec }, 201);
     }
+    if (attachmentMatch && method === "GET") {
+      const id = decodeURIComponent(attachmentMatch[1]!);
+      const row = rows.get(id);
+      const index = Number(attachmentMatch[2]);
+      const metadata = Array.isArray(row?.["attachments"]) ? row!["attachments"] as Record<string, unknown>[] : [];
+      const contents = Array.isArray(row?.["_attachment_contents"]) ? row!["_attachment_contents"] as string[] : [];
+      return metadata[index] && contents[index]
+        ? ok({ attachment: { ...metadata[index], content_base64: contents[index] } })
+        : ok({ error: "not found" }, 404);
+    }
     if (idMatch) {
       const id = decodeURIComponent(idMatch[1]!);
       if (method === "GET") return rows.has(id) ? ok({ message: rows.get(id) }) : ok({ error: "not found" }, 404);
       if (method === "DELETE") { const had = rows.delete(id); deleted.push(id); return had ? ok({ deleted: true }) : ok({ error: "not found" }, 404); }
-      if (method === "PATCH") return rows.has(id) ? ok({ message: rows.get(id) }) : ok({ error: "not found" }, 404);
+      if (method === "PATCH") {
+        const row = rows.get(id);
+        if (!row) return ok({ error: "not found" }, 404);
+        const body = JSON.parse(String(init.body ?? "{}")) as Record<string, unknown>;
+        if (typeof body["is_read"] === "boolean") row["is_read"] = body["is_read"];
+        if (typeof body["is_starred"] === "boolean") row["is_starred"] = body["is_starred"];
+        const labels = Array.isArray(row["labels"]) ? [...row["labels"] as string[]] : [];
+        if (typeof body["archived"] === "boolean") {
+          const next = labels.filter((label) => label !== "archived");
+          if (body["archived"]) next.push("archived");
+          row["labels"] = next;
+        }
+        if (typeof body["add_label"] === "string" && !labels.includes(body["add_label"])) {
+          row["labels"] = [...labels, body["add_label"]];
+        }
+        if (typeof body["remove_label"] === "string") {
+          row["labels"] = labels.filter((label) => label !== body["remove_label"]);
+        }
+        return ok({ message: row });
+      }
     }
     return ok({ error: "not found" }, 404);
   };
@@ -86,6 +119,13 @@ afterEach(() => {
 });
 
 describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
+  it("rejects remote plaintext HTTP before retaining an API key", () => {
+    expect(() => new SelfHostedMailDataSource({ baseUrl: "http://emails.example/v1", apiKey: "must-not-leak" }))
+      .toThrow(/requires HTTPS/);
+    expect(() => new SelfHostedMailDataSource({ baseUrl: "http://localhost:8080/v1", apiKey: "local" }))
+      .not.toThrow();
+  });
+
   it("lists inbox mapping snake_case rows to TuiMessage, newest first", async () => {
     const { ds } = make([v1("2"), v1("5"), v1("3")]);
     const msgs = await ds.listMailbox("inbox");
@@ -158,10 +198,56 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     expect(cands.map((c) => c.id)).toEqual(["2"]);
   });
 
-  it("throws honestly for writes the self-hosted serve cannot persist yet", async () => {
-    const { ds } = make([v1("2")]);
-    await expect(ds.setStarred("2", true)).rejects.toThrow(/not yet supported/);
-    await expect(ds.addLabel("2", "x")).rejects.toThrow(/not yet supported/);
+  it("persists mailbox mutations through the self-hosted serve", async () => {
+    const { ds, serve } = make([v1("2")]);
+    await ds.setRead("2", true);
+    await ds.setStarred("2", true);
+    expect(await ds.addLabel("2", "x")).toContain("x");
+    await ds.setArchived("2", true);
+    expect(serve.rows.get("2")).toMatchObject({ is_read: true, is_starred: true });
+    expect(serve.rows.get("2")?.["labels"]).toEqual(expect.arrayContaining(["x", "archived"]));
+    expect(await ds.removeLabel("2", "x")).not.toContain("x");
+  });
+
+  it("supports explicit-id bulk mutations and rejects scheduled sends honestly", async () => {
+    const { ds, serve } = make([v1("2"), v1("3")]);
+    const result = await ds.bulk({ action: "read", ids: ["2", "3"] });
+    expect(result).toMatchObject({ affected: 2, matched: 2 });
+    expect(serve.rows.get("2")?.["is_read"]).toBe(true);
+    expect(serve.rows.get("3")?.["is_read"]).toBe(true);
+    await expect(ds.send({
+      to: "a@example.com",
+      from: "me@example.com",
+      subject: "later",
+      body: "body",
+      scheduledAt: "2030-01-01T00:00:00.000Z",
+    })).rejects.toThrow(/Scheduled send is not supported/);
+    expect(serve.posted).toHaveLength(0);
+  });
+
+  it("retrieves attachments into a hashed, traversal-safe directory with mode 0600", async () => {
+    const home = mkdtempSync(join(tmpdir(), "emails-attachment-test-"));
+    const previousHome = process.env["HOME"];
+    process.env["HOME"] = home;
+    try {
+      const id = "..%2F..%2Foperator-secret";
+      const { ds } = make([v1(id, {
+        attachments: [{ filename: "../../secret.txt", content_type: "text/plain", size: 5 }],
+        _attachment_contents: [Buffer.from("hello").toString("base64")],
+      })]);
+      const paths = await ds.getAttachmentPaths(id);
+      expect(paths).toHaveLength(1);
+      const localPath = paths[0]!.local_path;
+      expect(localPath.startsWith(join(home, ".hasna", "emails", "attachments", "self-hosted"))).toBe(true);
+      expect(localPath).not.toContain("operator-secret");
+      expect(localPath).not.toContain("../");
+      expect(readFileSync(localPath, "utf8")).toBe("hello");
+      expect(statSync(localPath).mode & 0o777).toBe(0o600);
+    } finally {
+      if (previousHome === undefined) delete process.env["HOME"];
+      else process.env["HOME"] = previousHome;
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   it("fails fast and loud (never hangs) when the serve stalls past the timeout", async () => {

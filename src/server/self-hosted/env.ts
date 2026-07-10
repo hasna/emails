@@ -1,4 +1,5 @@
-import { createPgPool, createQueryClient, type PoolQueryClient } from "../../generated/storage-kit/index.js";
+import { createPgPool, createQueryClient, type PoolQueryClient } from "../../storage-kit/index.js";
+import { assertNoLegacyHostedEnvironment } from "../../lib/mode.js";
 
 export const SELF_HOSTED_APP = "emails";
 export const SELF_HOSTED_MODE_ENV = "EMAILS_MODE";
@@ -20,6 +21,7 @@ export interface SelfHostedPool {
 }
 
 export function assertSelfHostedEnvironment(env: NodeJS.ProcessEnv = process.env): void {
+  assertNoLegacyHostedEnvironment(env);
   for (const key of REMOVED_ENV_KEYS) {
     if (env[key]?.trim()) {
       throw new Error(

@@ -3,7 +3,7 @@
 // Used by the one-shot deploy migration task (`emails db migrate`) and by the
 // `emails db status` command. Runs directly against operator-owned Postgres.
 
-import { MigrationLedger } from "../../generated/storage-kit/index.js";
+import { MigrationLedger } from "../../storage-kit/index.js";
 import { getSelfHostedPool, closeSelfHostedPool, isSelfHostedMode } from "./env.js";
 import { emailsSelfHostedMigrations } from "./migrations.js";
 

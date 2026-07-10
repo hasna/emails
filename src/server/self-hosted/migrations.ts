@@ -1,15 +1,15 @@
 // Schema migrations for the Emails self_hosted service (Postgres).
 //
-// These run through the vendored storage kit's MigrationLedger (checksummed,
+// These run through the product-owned migration ledger (checksummed,
 // idempotent, drift/downgrade-guarded). They own ONLY the tables the
 // self_hosted /v1 API manages in the operator-owned database.
 
-import { defineMigration, type Migration } from "../../generated/storage-kit/index.js";
+import { defineMigration, type Migration } from "../../storage-kit/index.js";
 import { apiKeyMigrations } from "@hasna/contracts/auth";
 
 /** Emails self_hosted domain schema: sending domains, addresses, message ledger. */
 const CORE_SCHEMA = defineMigration(
-  "0001_emails_selfhosted_core",
+  "0001_mailery_selfhosted_core",
   `
   CREATE TABLE IF NOT EXISTS domains (
     id          TEXT PRIMARY KEY,
@@ -67,7 +67,7 @@ const CORE_SCHEMA = defineMigration(
  * import never creates duplicates.
  */
 const INBOUND_SCHEMA = defineMigration(
-  "0002_emails_messages_inbound",
+  "0002_mailery_messages_inbound",
   `
   ALTER TABLE messages ADD COLUMN IF NOT EXISTS direction   TEXT NOT NULL DEFAULT 'outbound';
   ALTER TABLE messages ADD COLUMN IF NOT EXISTS cc_addrs    JSONB NOT NULL DEFAULT '[]'::jsonb;
@@ -99,7 +99,7 @@ const INBOUND_SCHEMA = defineMigration(
  * full address CRUD — including verify — round-trips through /v1/addresses.
  */
 const ADDRESS_VERIFIED_SCHEMA = defineMigration(
-  "0003_emails_addresses_verified",
+  "0003_mailery_addresses_verified",
   `
   ALTER TABLE addresses ADD COLUMN IF NOT EXISTS verified BOOLEAN NOT NULL DEFAULT FALSE;
   `,
@@ -114,7 +114,7 @@ const ADDRESS_VERIFIED_SCHEMA = defineMigration(
  * (split-brain). Nullable: NULL means "no quota" (the CLI's `quota <id> none`).
  */
 const ADDRESS_QUOTA_SCHEMA = defineMigration(
-  "0004_emails_addresses_daily_quota",
+  "0004_mailery_addresses_daily_quota",
   `
   ALTER TABLE addresses ADD COLUMN IF NOT EXISTS daily_quota INTEGER;
   `,
@@ -131,7 +131,7 @@ const ADDRESS_QUOTA_SCHEMA = defineMigration(
  * columns only: provider credentials and send-key hashes are never stored here.
  */
 const RESOURCE_SCHEMA = defineMigration(
-  "0005_emails_selfhosted_resources",
+  "0005_mailery_selfhosted_resources",
   `
   CREATE TABLE IF NOT EXISTS contacts (
     id               TEXT PRIMARY KEY,
@@ -147,7 +147,7 @@ const RESOURCE_SCHEMA = defineMigration(
   );
   CREATE INDEX IF NOT EXISTS contacts_suppressed_idx ON contacts (suppressed);
 
-  CREATE TABLE IF NOT EXISTS self_hosted_providers (
+  CREATE TABLE IF NOT EXISTS cloud_providers (
     id          TEXT PRIMARY KEY,
     name        TEXT NOT NULL,
     type        TEXT NOT NULL,
@@ -232,6 +232,39 @@ const RESOURCE_SCHEMA = defineMigration(
   `,
 );
 
+/**
+ * Additive rename bridge. The first five migration ids and SQL bodies shipped
+ * under the old product name and must remain checksum-stable for upgrades.
+ * Fresh databases run those historical migrations and immediately cross this
+ * bridge; existing databases retain every provider row while adopting the new
+ * table name.
+ */
+const EMAILS_RENAME_BRIDGE = defineMigration(
+  "0006_emails_rename_bridge",
+  `
+  DO $$
+  BEGIN
+    IF to_regclass('public.cloud_providers') IS NOT NULL
+       AND to_regclass('public.self_hosted_providers') IS NULL THEN
+      ALTER TABLE cloud_providers RENAME TO self_hosted_providers;
+    ELSIF to_regclass('public.cloud_providers') IS NOT NULL
+       AND to_regclass('public.self_hosted_providers') IS NOT NULL THEN
+      INSERT INTO self_hosted_providers (id, name, type, region, active, created_at, updated_at)
+      SELECT id, name, type, region, active, created_at, updated_at FROM cloud_providers
+      ON CONFLICT (id) DO NOTHING;
+      DROP TABLE cloud_providers;
+    END IF;
+  END $$;
+
+  ALTER TABLE messages ADD COLUMN IF NOT EXISTS idempotency_key TEXT;
+  ALTER TABLE messages ADD COLUMN IF NOT EXISTS send_payload_hash TEXT;
+  ALTER TABLE messages ADD COLUMN IF NOT EXISTS send_state TEXT NOT NULL DEFAULT 'none';
+  ALTER TABLE messages ADD COLUMN IF NOT EXISTS send_started_at TIMESTAMPTZ;
+  CREATE UNIQUE INDEX IF NOT EXISTS messages_idempotency_key_uidx
+    ON messages (idempotency_key) WHERE idempotency_key IS NOT NULL;
+  `,
+);
+
 /** All migrations, in order: api-keys table (auth), the core schema, inbound. */
 export function emailsSelfHostedMigrations(): Migration[] {
   const authMigrations = apiKeyMigrations().map((m) => defineMigration(m.id, m.sql));
@@ -242,5 +275,6 @@ export function emailsSelfHostedMigrations(): Migration[] {
     ADDRESS_VERIFIED_SCHEMA,
     ADDRESS_QUOTA_SCHEMA,
     RESOURCE_SCHEMA,
+    EMAILS_RENAME_BRIDGE,
   ];
 }

@@ -1,6 +1,24 @@
-import { describe, it, expect } from "bun:test";
+import { afterEach, beforeEach, describe, it, expect } from "bun:test";
 import { handleInboundWebhook } from "./inbound-webhook.js";
 import { setConfigValue } from "../../lib/config.js";
+import { closeDatabase, resetDatabase } from "../../db/database.js";
+
+const TOPIC_ARN = "arn:aws:sns:us-east-1:123456789012:emails-inbound";
+let snsSequence = 0;
+
+beforeEach(() => {
+  process.env["EMAILS_DB_PATH"] = ":memory:";
+  process.env["EMAILS_SNS_TOPIC_ARNS"] = TOPIC_ARN;
+  process.env["EMAILS_AWS_ACCOUNT_IDS"] = "123456789012";
+  resetDatabase();
+});
+
+afterEach(() => {
+  closeDatabase();
+  delete process.env["EMAILS_DB_PATH"];
+  delete process.env["EMAILS_SNS_TOPIC_ARNS"];
+  delete process.env["EMAILS_AWS_ACCOUNT_IDS"];
+});
 
 const sesNotification = JSON.stringify({
   notificationType: "Received",
@@ -12,19 +30,42 @@ function post(body: unknown, headers: Record<string, string> = {}): Request {
   return new Request("http://x/webhook/ses-inbound", { method: "POST", headers: { "Content-Type": "application/json", ...headers }, body: JSON.stringify(body) });
 }
 
+function sns(body: Record<string, unknown>): Record<string, unknown> {
+  return {
+    MessageId: `sns-test-${++snsSequence}`,
+    TopicArn: TOPIC_ARN,
+    Signature: "test-signature",
+    SignatureVersion: "2",
+    SigningCertURL: "https://sns.us-east-1.amazonaws.com/SimpleNotificationService-test.pem",
+    Timestamp: new Date().toISOString(),
+    ...body,
+  };
+}
+
+const verified = { verifySns: async () => true };
+
 describe("inbound webhook", () => {
   it("returns null for unrelated paths", async () => {
     const r = await handleInboundWebhook(new Request("http://x/api/whatever", { method: "POST" }), "/api/whatever", "POST");
     expect(r).toBeNull();
   });
 
+  it("rejects oversized bodies before SNS verification", async () => {
+    const res = await handleInboundWebhook(new Request("http://x/webhook/ses-inbound", {
+      method: "POST",
+      headers: { "content-length": String(1024 * 1024 + 1) },
+      body: "{}",
+    }), "/webhook/ses-inbound", "POST", verified);
+    expect(res!.status).toBe(413);
+  });
+
   it("auto-confirms an SNS subscription by fetching a genuine AWS SubscribeURL", async () => {
     const fetched: string[] = [];
     const url = "https://sns.us-east-1.amazonaws.com/?Action=ConfirmSubscription&Token=abc";
     const res = await handleInboundWebhook(
-      post({ Type: "SubscriptionConfirmation", SubscribeURL: url }),
+      post(sns({ Type: "SubscriptionConfirmation", SubscribeURL: url })),
       "/webhook/ses-inbound", "POST",
-      { fetchUrl: async (u) => { fetched.push(u); } },
+      { ...verified, fetchUrl: async (u) => { fetched.push(u); } },
     );
     expect(res!.status).toBe(200);
     expect(await res!.json()).toEqual({ ok: true, confirmed: true });
@@ -34,9 +75,9 @@ describe("inbound webhook", () => {
   it("syncs a notification using the CONFIGURED bucket, never the payload bucket", async () => {
     const calls: Array<{ bucket: string }> = [];
     const res = await handleInboundWebhook(
-      post(JSON.parse(sesNotification)),
+      post(sns({ Type: "Notification", Message: sesNotification })),
       "/webhook/ses-inbound", "POST",
-      { sync: async (bucket) => { calls.push({ bucket }); return { synced: 1 }; } },
+      { ...verified, sync: async (bucket) => { calls.push({ bucket }); return { synced: 1 }; } },
     );
     const body = await res!.json();
     // If a bucket is configured, sync runs with IT (not the payload's "acme-inbound");
@@ -58,9 +99,10 @@ describe("inbound webhook", () => {
     try {
       let synced = 0;
       const res = await handleInboundWebhook(
-        post({ Type: "Notification", Message: sesNotification }),
+        post(sns({ Type: "Notification", Message: sesNotification })),
         "/webhook/ses-inbound", "POST",
         {
+          ...verified,
           sync: async (bucket, prefix, region, opts) => {
             expect(bucket).toBe("configured-inbound");
             expect(prefix).toBe("inbound/");
@@ -84,9 +126,9 @@ describe("inbound webhook", () => {
 
   it("ignores an unrecognized notification gracefully", async () => {
     const res = await handleInboundWebhook(
-      post({ Type: "Notification", Message: JSON.stringify({ hello: "world" }) }),
+      post(sns({ Type: "Notification", Message: JSON.stringify({ hello: "world" }) })),
       "/webhook/ses-inbound", "POST",
-      { sync: async () => ({ synced: 0 }) },
+      { ...verified, sync: async () => ({ synced: 0 }) },
     );
     expect((await res!.json()).ignored).toBeTruthy();
   });
@@ -98,9 +140,9 @@ describe("inbound webhook", () => {
     try {
       let synced = 0;
       const res = await handleInboundWebhook(
-        post({ Type: "Notification", Message: sesNotification }),
+        post(sns({ Type: "Notification", Message: sesNotification })),
         "/webhook/ses-inbound", "POST",
-        { sync: async () => { synced++; return { synced: 1 }; } },
+        { ...verified, sync: async () => { synced++; return { synced: 1 }; } },
       );
       expect(await res!.json()).toMatchObject({
         ok: true,
@@ -117,12 +159,32 @@ describe("inbound webhook", () => {
 });
 
 describe("inbound webhook — security hardening", () => {
+  it("rejects an unverified notification before sync", async () => {
+    let synced = 0;
+    const res = await handleInboundWebhook(
+      post(sns({ Type: "Notification", Message: sesNotification })),
+      "/webhook/ses-inbound", "POST",
+      { verifySns: async () => false, sync: async () => { synced++; return { synced: 1 }; } },
+    );
+    expect(res!.status).toBe(401);
+    expect(synced).toBe(0);
+  });
+
+  it("rejects a topic outside the exact allowlist", async () => {
+    const res = await handleInboundWebhook(
+      post(sns({ Type: "Notification", TopicArn: "arn:aws:sns:us-east-1:999999999999:evil", Message: sesNotification })),
+      "/webhook/ses-inbound", "POST",
+      verified,
+    );
+    expect(res!.status).toBe(401);
+  });
+
   it("rejects a non-AWS SubscribeURL (anti-SSRF)", async () => {
     const fetched: string[] = [];
     const res = await handleInboundWebhook(
-      post({ Type: "SubscriptionConfirmation", SubscribeURL: "http://169.254.169.254/latest/meta-data/" }),
+      post(sns({ Type: "SubscriptionConfirmation", SubscribeURL: "http://169.254.169.254/latest/meta-data/" })),
       "/webhook/ses-inbound", "POST",
-      { fetchUrl: async (u) => { fetched.push(u); } },
+      { ...verified, fetchUrl: async (u) => { fetched.push(u); } },
     );
     expect(res!.status).toBe(400);
     expect(fetched).toEqual([]); // never fetched
@@ -131,9 +193,9 @@ describe("inbound webhook — security hardening", () => {
   it("accepts a genuine AWS SNS SubscribeURL", async () => {
     const fetched: string[] = [];
     const res = await handleInboundWebhook(
-      post({ Type: "SubscriptionConfirmation", SubscribeURL: "https://sns.us-east-1.amazonaws.com/?Action=ConfirmSubscription&x=1" }),
+      post(sns({ Type: "SubscriptionConfirmation", SubscribeURL: "https://sns.us-east-1.amazonaws.com/?Action=ConfirmSubscription&x=1" })),
       "/webhook/ses-inbound", "POST",
-      { fetchUrl: async (u) => { fetched.push(u); } },
+      { ...verified, fetchUrl: async (u) => { fetched.push(u); } },
     );
     expect(res!.status).toBe(200);
     expect(fetched).toHaveLength(1);
@@ -143,13 +205,47 @@ describe("inbound webhook — security hardening", () => {
     const seen: string[] = [];
     // config has no inbound bucket in test → should ignore the payload bucket and report no bucket
     const res = await handleInboundWebhook(
-      post(JSON.parse(sesNotification)),
+      post(sns({ Type: "Notification", Message: sesNotification })),
       "/webhook/ses-inbound", "POST",
-      { sync: async (bucket) => { seen.push(bucket); return { synced: 1 }; } },
+      { ...verified, sync: async (bucket) => { seen.push(bucket); return { synced: 1 }; } },
     );
     const body = await res!.json();
     // acme-inbound from the payload must NOT have been used
     expect(seen).not.toContain("acme-inbound");
+  });
+
+  it("acknowledges a duplicate only after a successful sync", async () => {
+    setConfigValue("inbound_s3_bucket", "configured-inbound");
+    setConfigValue("inbound_s3_prefix", "inbound/");
+    try {
+      const notification = sns({ Type: "Notification", Message: sesNotification });
+      let synced = 0;
+      const deps = { ...verified, sync: async () => { synced++; return { synced: 1 }; } };
+      const first = await handleInboundWebhook(post(notification), "/webhook/ses-inbound", "POST", deps);
+      const second = await handleInboundWebhook(post(notification), "/webhook/ses-inbound", "POST", deps);
+      expect(first!.status).toBe(200);
+      expect((await second!.json()).duplicate).toBe(true);
+      expect(synced).toBe(1);
+    } finally {
+      setConfigValue("inbound_s3_bucket", undefined);
+      setConfigValue("inbound_s3_prefix", undefined);
+    }
+  });
+
+  it("does not record a failed sync as processed", async () => {
+    setConfigValue("inbound_s3_bucket", "configured-inbound");
+    setConfigValue("inbound_s3_prefix", "inbound/");
+    try {
+      const notification = sns({ Type: "Notification", Message: sesNotification });
+      let attempts = 0;
+      const deps = { ...verified, sync: async () => { attempts++; throw new Error("sync failed"); } };
+      await expect(handleInboundWebhook(post(notification), "/webhook/ses-inbound", "POST", deps)).rejects.toThrow("sync failed");
+      await expect(handleInboundWebhook(post(notification), "/webhook/ses-inbound", "POST", deps)).rejects.toThrow("sync failed");
+      expect(attempts).toBe(2);
+    } finally {
+      setConfigValue("inbound_s3_bucket", undefined);
+      setConfigValue("inbound_s3_prefix", undefined);
+    }
   });
 });
 

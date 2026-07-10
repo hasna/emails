@@ -168,8 +168,7 @@ export function registerSendCommands(program: Command, _output: (data: unknown, 
             console.log(`  ${chalk.dim("Subject:")} ${subject}`);
             if (htmlBody) console.log(`  ${chalk.dim("Body:")}    HTML (${htmlBody.length} chars)`);
             else if (textBody) console.log(`  ${chalk.dim("Body:")}    ${textBody.slice(0, 100)}${textBody.length > 100 ? "..." : ""}`);
-            // Be honest: self_hosted send fails closed on these, so a real send would NOT succeed.
-            if (attachments.length) console.log(chalk.yellow(`  Attachments: ${attachments.length} file(s) — NOT supported by self_hosted send (a real send would fail)`));
+            if (attachments.length) console.log(chalk.dim(`  Attachments: ${attachments.length} inline file(s); self-hosted caps are 5 files, 512KiB each, 768KiB total`));
             if (opts.schedule) console.log(chalk.yellow(`  Schedule:    ${opts.schedule} — scheduling is not available in self_hosted mode (a real send would fail)`));
             console.log(chalk.yellow("\n  [NOT SENT] Use without --dry-run to send.\n"));
             return;
@@ -187,6 +186,7 @@ export function registerSendCommands(program: Command, _output: (data: unknown, 
             replyToId: (opts as Record<string, unknown>).inReplyTo as string | undefined,
             attachments: attachments.length > 0 ? attachments : undefined,
             scheduledAt: opts.schedule,
+            idempotencyKey: (opts as Record<string, unknown>).idempotencyKey as string | undefined,
           });
           incrementSendCounts(allRecipients, db);
           console.log(chalk.green(`✓ Email sent to ${toAddresses.join(", ")}`));

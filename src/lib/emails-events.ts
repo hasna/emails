@@ -4,6 +4,17 @@ import { getDataDir } from "../db/database.js";
 
 export const EMAILS_EVENT_SOURCE = "emails";
 export const EMAILS_EVENT_SCHEMA_VERSION = "emails.v1";
+/** Historical values remain readable during the rename cutover. New writes use Emails only. */
+export const LEGACY_MAILERY_EVENT_SOURCE = "mailery";
+export const LEGACY_MAILERY_EVENT_SCHEMA_VERSION = "mailery.v1";
+
+export function isEmailsEventSource(value: string): boolean {
+  return value === EMAILS_EVENT_SOURCE || value === LEGACY_MAILERY_EVENT_SOURCE;
+}
+
+export function normalizeEmailsEventType(value: string): string {
+  return value.startsWith("mailery.") ? `emails.${value.slice("mailery.".length)}` : value;
+}
 
 export type EmailsEventType =
   | "emails.inbound.received"

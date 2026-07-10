@@ -57,8 +57,8 @@ export interface IngestResult {
  * without AWS or a database.
  *
  * Returns a status the caller uses to decide whether to delete the SQS message:
- * `ingested` / `duplicate` / `skipped` are terminal (delete); `error` means
- * leave it for redelivery.
+ * Only `ingested` / `duplicate` are terminal (delete); malformed or incomplete
+ * notifications are errors and remain for SQS redrive/DLQ inspection.
  */
 export async function processInboundNotification(
   deps: IngestDeps,
@@ -66,9 +66,9 @@ export async function processInboundNotification(
   defaultBucket: string | undefined,
 ): Promise<IngestResult> {
   const note = parseSesNotification(body);
-  if (!note || !note.objectKey) return { status: "skipped", reason: "no_object_key" };
-  const bucket = note.bucket ?? defaultBucket;
-  if (!bucket) return { status: "skipped", reason: "no_bucket" };
+  if (!note || !note.objectKey) return { status: "error", reason: "no_object_key", error: "notification has no S3 object key" };
+  const bucket = defaultBucket;
+  if (!bucket) return { status: "error", reason: "no_bucket", error: "worker has no configured inbound bucket" };
   const key = note.objectKey;
 
   try {
@@ -114,12 +114,25 @@ interface WorkerOptions {
   visibilityTimeout?: number;
 }
 
+export function validateIngestWorkerConfig(config: {
+  queueUrl?: string;
+  bucket?: string;
+  databaseUrl?: string;
+}): void {
+  if (!config.queueUrl) throw new Error("ingest worker requires EMAILS_INGEST_QUEUE_URL");
+  if (!config.bucket) throw new Error("ingest worker requires EMAILS_INGEST_S3_BUCKET");
+  if (!config.databaseUrl) throw new Error("ingest worker requires EMAILS_DATABASE_URL");
+}
+
+export function shouldDeleteIngestResult(result: IngestResult): boolean {
+  return result.status === "ingested" || result.status === "duplicate";
+}
+
 /**
  * Run the ingest worker loop until SIGTERM/SIGINT. Reads its wiring from the
  * environment:
  *   EMAILS_INGEST_QUEUE_URL   (required) — the SQS queue to consume
- *   EMAILS_INGEST_S3_BUCKET   (optional) — fallback bucket when a notification
- *                                           omits it (SES always includes it)
+ *   EMAILS_INGEST_S3_BUCKET   (required) — operator-owned inbound bucket
  *   AWS_REGION                 (default us-east-1)
  *   EMAILS_DATABASE_URL        (required) — self-hosted Postgres DSN
  */
@@ -131,12 +144,9 @@ export async function runIngestWorker(options: WorkerOptions = {}): Promise<void
   const waitTimeSeconds = options.waitTimeSeconds ?? 20;
   const visibilityTimeout = options.visibilityTimeout ?? 120;
 
-  if (!queueUrl) {
-    throw new Error("ingest worker requires EMAILS_INGEST_QUEUE_URL");
-  }
-  if (!process.env["EMAILS_DATABASE_URL"]) {
-    throw new Error("ingest worker requires EMAILS_DATABASE_URL");
-  }
+  validateIngestWorkerConfig({ queueUrl, bucket: defaultBucket, databaseUrl: process.env["EMAILS_DATABASE_URL"] });
+  const configuredQueueUrl = queueUrl!;
+  const configuredBucket = defaultBucket!;
 
   const { client } = getSelfHostedPool();
   const store = new EmailsSelfHostedStore(client);
@@ -167,8 +177,8 @@ export async function runIngestWorker(options: WorkerOptions = {}): Promise<void
   const counts = { ingested: 0, duplicate: 0, skipped: 0, error: 0 };
   let lastReport = Date.now();
   console.log(
-    `[ingest] starting: queue=${queueUrl.split("/").pop()} region=${region} ` +
-      `bucket=${defaultBucket ?? "(from notification)"}`,
+    `[ingest] starting: queue=${configuredQueueUrl.split("/").pop()} region=${region} ` +
+      `bucket=${configuredBucket}`,
   );
 
   while (running) {
@@ -176,7 +186,7 @@ export async function runIngestWorker(options: WorkerOptions = {}): Promise<void
     try {
       const out = await sqs.send(
         new ReceiveMessageCommand({
-          QueueUrl: queueUrl,
+          QueueUrl: configuredQueueUrl,
           MaxNumberOfMessages: maxMessages,
           WaitTimeSeconds: waitTimeSeconds,
           VisibilityTimeout: visibilityTimeout,
@@ -191,17 +201,17 @@ export async function runIngestWorker(options: WorkerOptions = {}): Promise<void
 
     for (const m of messages) {
       if (!running) break;
-      const result = await processInboundNotification(deps, m.Body ?? "", defaultBucket);
+      const result = await processInboundNotification(deps, m.Body ?? "", configuredBucket);
       counts[result.status]++;
 
-      if (result.status === "error") {
+      if (!shouldDeleteIngestResult(result)) {
         console.error(`[ingest] error key=${result.key ?? "-"}: ${result.error} (left for redelivery)`);
         continue; // do NOT delete — SQS redelivers, then DLQ after maxReceiveCount
       }
 
       if (m.ReceiptHandle) {
         try {
-          await sqs.send(new DeleteMessageCommand({ QueueUrl: queueUrl, ReceiptHandle: m.ReceiptHandle }));
+          await sqs.send(new DeleteMessageCommand({ QueueUrl: configuredQueueUrl, ReceiptHandle: m.ReceiptHandle }));
         } catch (err) {
           console.error(`[ingest] delete failed key=${result.key ?? "-"}: ${err instanceof Error ? err.message : String(err)}`);
         }

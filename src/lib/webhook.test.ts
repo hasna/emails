@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { readFileSync } from "node:fs";
 import { parseResendWebhook, parseSesWebhook, createWebhookServer } from "./webhook.js";
 import { closeDatabase, resetDatabase } from "../db/database.js";
+import { createProvider } from "../db/providers.js";
 
 // ─── createWebhookServer helpers ─────────────────────────────────────────────
 
@@ -34,6 +35,24 @@ async function signResendWebhook(id: string, timestamp: string, body: string, se
   return `v1,${Buffer.from(signature).toString("base64")}`;
 }
 
+const WEBHOOK_SECRET = `whsec_${Buffer.from("webhook-server-test-secret").toString("base64")}`;
+
+async function postSignedResend(url: string, body: unknown, id = crypto.randomUUID(), secret = WEBHOOK_SECRET): Promise<Response> {
+  const raw = JSON.stringify(body);
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  const signature = await signResendWebhook(id, timestamp, raw, secret);
+  return fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "svix-id": id,
+      "svix-timestamp": timestamp,
+      "svix-signature": signature,
+    },
+    body: raw,
+  });
+}
+
 // ─── createWebhookServer tests ────────────────────────────────────────────────
 
 describe("webhook module startup contract", () => {
@@ -60,7 +79,8 @@ describe("createWebhookServer", () => {
     process.env["EMAILS_DB_PATH"] = ":memory:";
     resetDatabase();
     port = randomPort();
-    server = createWebhookServer(port);
+    const provider = createProvider({ name: "Webhook test", type: "resend", active: true });
+    server = createWebhookServer(port, provider.id, WEBHOOK_SECRET);
     base = `http://localhost:${port}`;
   });
 
@@ -68,6 +88,8 @@ describe("createWebhookServer", () => {
     server.stop(true);
     closeDatabase();
     delete process.env["EMAILS_DB_PATH"];
+    delete process.env["EMAILS_SNS_TOPIC_ARNS"];
+    delete process.env["EMAILS_AWS_ACCOUNT_IDS"];
   });
 
   it("returns 404 for unknown path", async () => {
@@ -98,15 +120,16 @@ describe("createWebhookServer", () => {
         created_at: "2025-01-15T10:00:00Z",
       },
     };
-    const res = await post(`${base}/webhook/resend`, payload);
+    const res = await postSignedResend(`${base}/webhook/resend`, payload);
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("OK");
   });
 
-  it("accepts a signed Resend webhook once and rejects an exact replay", async () => {
+  it("accepts a signed Resend webhook once and acknowledges an exact replay", async () => {
     server.stop(true);
     const secret = `whsec_${Buffer.from("replay-test-secret").toString("base64")}`;
-    server = createWebhookServer(port, undefined, secret);
+    const provider = createProvider({ name: "Replay test", type: "resend", active: true });
+    server = createWebhookServer(port, provider.id, secret);
     const body = JSON.stringify({
       type: "email.delivered",
       data: {
@@ -130,35 +153,36 @@ describe("createWebhookServer", () => {
     });
 
     expect((await request()).status).toBe(200);
-    expect((await request()).status).toBe(409);
+    expect((await request()).status).toBe(200);
   });
 
-  it("accepts a valid SES Delivery payload and returns 200", async () => {
+  it("rejects an SES delivery that cannot be cryptographically verified", async () => {
+    process.env["EMAILS_SNS_TOPIC_ARNS"] = "arn:aws:sns:us-east-1:123456789012:emails";
+    process.env["EMAILS_AWS_ACCOUNT_IDS"] = "123456789012";
     const payload = {
-      notificationType: "Delivery",
-      mail: {
-        messageId: "ses-msg-webhook-001",
-        destination: ["user@example.com"],
-        timestamp: "2025-01-15T10:00:00Z",
-      },
+      Type: "Notification",
+      MessageId: "sns-unverified-1",
+      TopicArn: "arn:aws:sns:us-east-1:123456789012:emails",
+      SignatureVersion: "2",
+      Signature: "invalid",
+      SigningCertURL: "https://sns.us-east-1.amazonaws.com/SimpleNotificationService-test.pem",
+      Timestamp: new Date().toISOString(),
+      Message: JSON.stringify({ notificationType: "Delivery", mail: { messageId: "ses-msg-webhook-001" } }),
     };
     const res = await post(`${base}/webhook/ses`, payload);
-    expect(res.status).toBe(200);
-    expect(await res.text()).toBe("OK");
+    expect(res.status).toBe(401);
   });
 
   it("returns 200 with 'Unrecognized event type' for unknown Resend type", async () => {
-    const res = await post(`${base}/webhook/resend`, { type: "email.unknown", data: {} });
+    const res = await postSignedResend(`${base}/webhook/resend`, { type: "email.unknown", data: {} });
     expect(res.status).toBe(200);
     const text = await res.text();
     expect(text).toContain("Unrecognized");
   });
 
-  it("returns 200 with 'Unrecognized event type' for unknown SES notification type", async () => {
-    const res = await post(`${base}/webhook/ses`, { notificationType: "Unknown", mail: {} });
-    expect(res.status).toBe(200);
-    const text = await res.text();
-    expect(text).toContain("Unrecognized");
+  it("fails closed when the SNS allowlist is absent", async () => {
+    const res = await post(`${base}/webhook/ses`, { Type: "Notification" });
+    expect(res.status).toBe(503);
   });
 
   it("uses provided providerId when constructing the server", async () => {
@@ -166,7 +190,7 @@ describe("createWebhookServer", () => {
     closeDatabase();
     resetDatabase();
     const p2 = randomPort() + 50;
-    const s2 = createWebhookServer(p2, "my-provider-id");
+    const s2 = createWebhookServer(p2, "my-provider-id", WEBHOOK_SECRET);
     try {
       const payload = {
         type: "email.delivered",
@@ -176,9 +200,8 @@ describe("createWebhookServer", () => {
           created_at: "2025-01-15T10:00:00Z",
         },
       };
-      // The upsertEvent call will fail silently (no provider in DB) — but server responds 200
-      const res = await post(`http://localhost:${p2}/webhook/resend`, payload);
-      expect(res.status).toBe(200);
+      const res = await postSignedResend(`http://localhost:${p2}/webhook/resend`, payload);
+      expect(res.status).toBe(500);
     } finally {
       s2.stop(true);
     }
@@ -186,7 +209,7 @@ describe("createWebhookServer", () => {
 
   it("server stops cleanly after test", async () => {
     // Verify server is running first
-    const res = await post(`${base}/webhook/resend`, {
+    const res = await postSignedResend(`${base}/webhook/resend`, {
       type: "email.delivered",
       data: { email_id: "stop-test", to: ["a@b.com"], created_at: new Date().toISOString() },
     });
@@ -194,6 +217,14 @@ describe("createWebhookServer", () => {
     // server.stop() is called in afterEach — no assertion needed here,
     // but we ensure no unhandled error is thrown
     expect(() => server.stop(true)).not.toThrow();
+  });
+
+  it("does not remember an event when persistence fails", async () => {
+    server.stop(true);
+    server = createWebhookServer(port, "missing-provider", WEBHOOK_SECRET);
+    const payload = { type: "email.delivered", data: { email_id: "retry-after-failure", to: ["x@example.com"] } };
+    expect((await postSignedResend(`${base}/webhook/resend`, payload, "retry-event")).status).toBe(500);
+    expect((await postSignedResend(`${base}/webhook/resend`, payload, "retry-event")).status).toBe(500);
   });
 });
 

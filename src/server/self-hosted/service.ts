@@ -5,12 +5,13 @@
 // Hasna API key (@hasna/contracts/auth) scoped to `emails:read` / `emails:write`.
 //
 // All data operations hit the operator-owned Postgres via the
-// store, which wraps the vendored storage kit's typed client.
+// store, which wraps the product-owned storage utilities' typed client.
 
 import type { ApiKeyVerifier, ApiKeyPrincipal } from "@hasna/contracts/auth";
-import type { TypedQueryClient, Migration } from "../../generated/storage-kit/index.js";
-import { checkHealth } from "../../generated/storage-kit/index.js";
-import { EmailsSelfHostedStore } from "./store.js";
+import { createHash } from "node:crypto";
+import type { TypedQueryClient, Migration } from "../../storage-kit/index.js";
+import { checkHealth } from "../../storage-kit/index.js";
+import { EmailsSelfHostedStore, IdempotencyKeyConflictError, type MessageRecord } from "./store.js";
 import { emailsSelfHostedOpenApi } from "./openapi.js";
 import { resourceSpecForPath } from "./resources.js";
 import type { SelfHostedSender } from "./sender.js";
@@ -62,6 +63,31 @@ function json(status: number, body: unknown): Response {
     status,
     headers: { "Content-Type": "application/json" },
   });
+}
+
+function publicMessage(record: MessageRecord): Omit<MessageRecord, "idempotency_key" | "send_payload_hash"> {
+  const { idempotency_key: _key, send_payload_hash: _hash, ...safe } = record;
+  return safe;
+}
+
+function sendPayloadHash(value: Record<string, unknown>): string {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
+function decodeStrictBase64(value: string): Buffer {
+  if (!value || value.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(value)) {
+    throw new Error("attachment content must be canonical base64");
+  }
+  const decoded = Buffer.from(value, "base64");
+  if (decoded.toString("base64") !== value) throw new Error("attachment content must be canonical base64");
+  return decoded;
+}
+
+function sendLeaseExpired(record: MessageRecord, now = Date.now()): boolean {
+  const started = record.send_started_at ? Date.parse(record.send_started_at) : NaN;
+  const configured = Number(process.env["EMAILS_SEND_LEASE_SECONDS"] ?? "300");
+  const leaseMs = (Number.isFinite(configured) && configured > 0 ? configured : 300) * 1000;
+  return Number.isFinite(started) && now - started >= leaseMs;
 }
 
 /**
@@ -349,8 +375,8 @@ export async function handleSelfHostedRequest(
     }
 
     // /v1/messages/send — the only outbound create path. It invokes the
-    // operator-selected provider before writing the ledger, so an API success
-    // can never mean "recorded but not actually sent".
+    // operator-selected provider only after atomically persisting and claiming
+    // an idempotent send intent.
     if (path === "/v1/messages/send") {
       if (method !== "POST") return json(405, { error: "method not allowed" });
       const auth = await authenticate(deps, req, url, write);
@@ -363,31 +389,145 @@ export async function handleSelfHostedRequest(
       const subject = String(body.subject ?? "").trim();
       if (!subject) return json(400, { error: "subject is required" });
 
+      const idempotencyKey = typeof body.idempotency_key === "string" ? body.idempotency_key.trim() : "";
+      if (!idempotencyKey || idempotencyKey.length > 200) {
+        return json(400, { error: "idempotency_key is required and must be at most 200 characters" });
+      }
       const cc = asStringArray(body.cc);
       const bcc = asStringArray(body.bcc);
-      const messageId = await deps.sender.send({
-        provider_id: `self-hosted-${deps.sender.provider}`,
+      const rawAttachments = asArray(body.attachments) ?? [];
+      if (rawAttachments.length > 5) return json(400, { error: "at most 5 inline attachments are allowed" });
+      let attachments: Array<{ filename: string; content: string; content_type: string }>;
+      try {
+        let totalAttachmentBytes = 0;
+        attachments = rawAttachments.map((value, index) => {
+          if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`attachment ${index} must be an object`);
+          const item = value as Record<string, unknown>;
+          const content = typeof item.content === "string" ? item.content : "";
+          const bytes = decodeStrictBase64(content).byteLength;
+          totalAttachmentBytes += bytes;
+          if (!content || bytes > 512 * 1024) {
+            throw new Error(`attachment ${index} requires base64 content no larger than 512KiB`);
+          }
+          if (totalAttachmentBytes > 768 * 1024) {
+            throw new Error("inline attachments may total at most 768KiB");
+          }
+          return {
+            filename: String(item.filename ?? `attachment-${index + 1}`),
+            content,
+            content_type: String(item.content_type ?? "application/octet-stream"),
+          };
+        });
+      } catch (error) {
+        return json(400, { error: error instanceof Error ? error.message : "invalid attachment" });
+      }
+      const payload = {
         from,
         to,
-        cc: cc.length ? cc : undefined,
-        bcc: bcc.length ? bcc : undefined,
-        reply_to: typeof body.reply_to === "string" ? body.reply_to : undefined,
+        cc,
+        bcc,
+        reply_to: typeof body.reply_to === "string" ? body.reply_to : null,
         subject,
-        text: typeof body.text === "string" ? body.text : undefined,
-        html: typeof body.html === "string" ? body.html : undefined,
-      });
-      const created = await store.createMessage({
-        direction: "outbound",
-        from_addr: from,
-        to_addrs: to,
-        cc_addrs: cc,
-        subject,
-        body_text: typeof body.text === "string" ? body.text : null,
-        body_html: typeof body.html === "string" ? body.html : null,
-        status: "sent",
-        provider_message_id: messageId,
-      });
-      return json(202, { message: created, provider: deps.sender.provider });
+        text: typeof body.text === "string" ? body.text : null,
+        html: typeof body.html === "string" ? body.html : null,
+        attachments,
+        provider: deps.sender.provider,
+      };
+      let reserved;
+      try {
+        reserved = await store.reserveSendIntent({
+          direction: "outbound",
+          from_addr: from,
+          to_addrs: to,
+          cc_addrs: cc,
+          subject,
+          body_text: payload.text,
+          body_html: payload.html,
+          attachments: attachments.map(({ filename, content_type, content }) => ({
+            filename,
+            content_type,
+            size: Buffer.byteLength(content, "base64"),
+          })),
+          idempotency_key: idempotencyKey,
+          send_payload_hash: sendPayloadHash(payload),
+        });
+      } catch (error) {
+        if (error instanceof IdempotencyKeyConflictError) {
+          return json(409, { error: error.message, retry_safe: false });
+        }
+        throw error;
+      }
+
+      if (!reserved.created) {
+        if (reserved.record.send_state === "sent") {
+          return json(200, { message: publicMessage(reserved.record), provider: deps.sender.provider, idempotent_replay: true });
+        }
+        if (reserved.record.send_state === "sending") {
+          if (sendLeaseExpired(reserved.record)) {
+            const uncertain = await store.markSendUncertain(reserved.record.id).catch(() => null);
+            return json(409, {
+              error: "send lease expired with an uncertain provider outcome; reconcile before retrying",
+              message: publicMessage(uncertain ?? reserved.record),
+              retry_safe: false,
+            });
+          }
+          return json(202, { message: publicMessage(reserved.record), provider: deps.sender.provider, in_progress: true });
+        }
+        if (reserved.record.send_state !== "pending") {
+          return json(409, {
+            error: "send outcome is uncertain; reconcile the provider message before any retry",
+            message: publicMessage(reserved.record),
+            retry_safe: false,
+          });
+        }
+      }
+
+      const claimed = await store.claimSendIntent(reserved.record.id);
+      if (!claimed) {
+        const latest = await store.getMessage(reserved.record.id);
+        if (latest?.send_state === "sent") {
+          return json(200, { message: publicMessage(latest), provider: deps.sender.provider, idempotent_replay: true });
+        }
+        return json(202, {
+          message: publicMessage(latest ?? reserved.record),
+          provider: deps.sender.provider,
+          in_progress: true,
+        });
+      }
+
+      let messageId: string;
+      try {
+        messageId = await deps.sender.send({
+          provider_id: `self-hosted-${deps.sender.provider}`,
+          from,
+          to,
+          cc: cc.length ? cc : undefined,
+          bcc: bcc.length ? bcc : undefined,
+          reply_to: typeof body.reply_to === "string" ? body.reply_to : undefined,
+          subject,
+          text: typeof body.text === "string" ? body.text : undefined,
+          html: typeof body.html === "string" ? body.html : undefined,
+          attachments: attachments.length ? attachments : undefined,
+        });
+      } catch {
+        const uncertain = await store.markSendUncertain(claimed.id).catch(() => null);
+        return json(502, {
+          error: "send outcome is uncertain; reconcile the provider before retrying",
+          message: publicMessage(uncertain ?? claimed),
+          retry_safe: false,
+        });
+      }
+      try {
+        const completed = await store.completeSendIntent(claimed.id, messageId);
+        return json(202, { message: publicMessage(completed), provider: deps.sender.provider });
+      } catch {
+        const uncertain = await store.markSendUncertain(claimed.id).catch(() => null);
+        return json(502, {
+          error: "provider accepted the send but ledger finalization failed; reconciliation is required",
+          message: publicMessage(uncertain ?? claimed),
+          retry_safe: false,
+        });
+      }
     }
 
     // /v1/messages — inbound import and ledger reads. Outbound writes must use
@@ -398,12 +538,13 @@ export async function handleSelfHostedRequest(
         if (!auth.ok) return auth.response;
         const directionValue = url.searchParams.get("direction")?.trim().toLowerCase();
         const direction = directionValue === "inbound" || directionValue === "outbound" ? directionValue : undefined;
-        return json(200, { messages: await store.listMessages({
+        const messages = await store.listMessages({
           limit: queryInt(url, "limit"),
           offset: queryInt(url, "offset"),
           direction,
           to: url.searchParams.get("to") ?? undefined,
-        }) });
+        });
+        return json(200, { messages: messages.map(publicMessage) });
       }
       if (method === "POST") {
         const auth = await authenticate(deps, req, url, write);
@@ -451,12 +592,24 @@ export async function handleSelfHostedRequest(
         // import updates the existing row instead of creating a duplicate.
         if (input.source_id) {
           const { record, inserted } = await store.upsertMessage(input);
-          return json(inserted ? 201 : 200, { message: record });
+          return json(inserted ? 201 : 200, { message: publicMessage(record) });
         }
         const created = await store.createMessage(input);
-        return json(201, { message: created });
+        return json(201, { message: publicMessage(created) });
       }
       return json(405, { error: "method not allowed" });
+    }
+
+    const attachmentMatch = path.match(/^\/v1\/messages\/([^/]+)\/attachments\/(\d+)$/);
+    if (attachmentMatch) {
+      if (method !== "GET") return json(405, { error: "method not allowed" });
+      const auth = await authenticate(deps, req, url, read);
+      if (!auth.ok) return auth.response;
+      const attachment = await store.getMessageAttachment(
+        decodeURIComponent(attachmentMatch[1]!),
+        Number(attachmentMatch[2]),
+      );
+      return attachment ? json(200, { attachment }) : json(404, { error: "attachment not found" });
     }
 
     const messageMatch = path.match(/^\/v1\/messages\/([^/]+)$/);
@@ -466,7 +619,7 @@ export async function handleSelfHostedRequest(
         const auth = await authenticate(deps, req, url, read);
         if (!auth.ok) return auth.response;
         const rec = await store.getMessage(id);
-        return rec ? json(200, { message: rec }) : json(404, { error: "message not found" });
+        return rec ? json(200, { message: publicMessage(rec) }) : json(404, { error: "message not found" });
       }
       if (method === "PATCH" || method === "PUT") {
         const auth = await authenticate(deps, req, url, write);
@@ -475,8 +628,13 @@ export async function handleSelfHostedRequest(
         const rec = await store.updateMessageStatus(id, {
           status: body.status === undefined ? undefined : String(body.status),
           provider_message_id: body.provider_message_id === undefined ? undefined : (body.provider_message_id as string | null),
+          is_read: typeof body.is_read === "boolean" ? body.is_read : undefined,
+          is_starred: typeof body.is_starred === "boolean" ? body.is_starred : undefined,
+          archived: typeof body.archived === "boolean" ? body.archived : undefined,
+          add_label: typeof body.add_label === "string" ? body.add_label : undefined,
+          remove_label: typeof body.remove_label === "string" ? body.remove_label : undefined,
         });
-        return rec ? json(200, { message: rec }) : json(404, { error: "message not found" });
+        return rec ? json(200, { message: publicMessage(rec) }) : json(404, { error: "message not found" });
       }
       if (method === "DELETE") {
         const auth = await authenticate(deps, req, url, write);

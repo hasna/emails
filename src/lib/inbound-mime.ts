@@ -8,7 +8,7 @@
 //   - to/cc      = the parsed address list (bare addresses)
 //   - received_at = the message Date header (ISO), when present
 //   - headers    = a flat { lowercased-name: value } object
-//   - attachments = filename/content_type/size metadata only (no bytes)
+//   - attachments = metadata plus base64 bytes for authenticated retrieval
 //
 // This module is dependency-free apart from a lazily-imported `mailparser`, so
 // it is safe to import from the server bundle without dragging in the SQLite
@@ -25,6 +25,8 @@ export interface InboundAttachmentMeta {
   filename: string;
   content_type: string;
   size: number;
+  /** Base64 content persisted by self-hosted Postgres for authenticated retrieval. */
+  content_base64: string;
 }
 
 export interface NormalizedInboundEmail {
@@ -100,6 +102,7 @@ export async function parseInboundMime(raw: string | Buffer | Uint8Array): Promi
     filename: a.filename ?? "attachment",
     content_type: a.contentType ?? "application/octet-stream",
     size: typeof a.size === "number" ? a.size : 0,
+    content_base64: Buffer.from(a.content).toString("base64"),
   }));
 
   return {

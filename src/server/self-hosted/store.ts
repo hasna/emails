@@ -1,11 +1,11 @@
 // Postgres repository for the Emails self-hosted service.
 //
 // Amendment A1 (PURE REMOTE): every method reads/writes the self_hosted Postgres
-// directly through the vendored storage kit's typed query client. No cache, no
+// directly through the product-owned storage utilities' typed query client. No cache, no
 // local mirror.
 
 import { randomUUID } from "node:crypto";
-import type { TypedQueryClient } from "../../generated/storage-kit/index.js";
+import type { TypedQueryClient } from "../../storage-kit/index.js";
 import type { SelfHostedResourceSpec, ResourceColumn } from "./resources.js";
 
 export interface DomainRecord {
@@ -51,6 +51,10 @@ export interface MessageRecord {
   headers: Record<string, unknown>;
   attachments: unknown[];
   source_id: string | null;
+  idempotency_key: string | null;
+  send_payload_hash: string | null;
+  send_state: string;
+  send_started_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -76,13 +80,25 @@ export interface MessageInput {
   attachments?: unknown[];
   /** Stable upstream id; when set, writes upsert on it (idempotent re-runs). */
   source_id?: string | null;
+  idempotency_key?: string | null;
+  send_payload_hash?: string | null;
+  send_state?: string;
+  send_started_at?: string | null;
 }
 
 /** Columns selected for a message row (explicit so new columns are intentional). */
 const MESSAGE_COLUMNS =
   "id, direction, from_addr, to_addrs, cc_addrs, subject, body_text, body_html, status, " +
   "provider_message_id, message_id, in_reply_to, received_at, is_read, is_starred, labels, " +
-  "headers, attachments, source_id, created_at, updated_at";
+  "headers, attachments, source_id, idempotency_key, send_payload_hash, send_state, send_started_at, " +
+  "created_at, updated_at";
+
+export class IdempotencyKeyConflictError extends Error {
+  constructor() {
+    super("idempotency key was already used for a different send payload");
+    this.name = "IdempotencyKeyConflictError";
+  }
+}
 
 export interface ListOptions {
   limit?: number;
@@ -104,6 +120,13 @@ export interface MessageCountsRecord {
   trash: number;
   total: number;
   latest_received_at: string | null;
+}
+
+export interface StoredAttachment {
+  filename: string;
+  content_type: string;
+  size: number;
+  content_base64: string;
 }
 
 function clampLimit(limit: number | undefined): number {
@@ -172,16 +195,22 @@ function toIso(value: unknown): string | null {
 
 /** Coerce a raw DB row into a fully-typed MessageRecord (JSONB columns parsed). */
 function mapMessageRow(row: Record<string, unknown>): MessageRecord {
+  const attachments = toArray(row["attachments"]).map((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return item;
+    const { content_base64: _content, ...metadata } = item as Record<string, unknown>;
+    return metadata;
+  });
   return {
     ...(row as unknown as MessageRecord),
     to_addrs: toStringArray(row["to_addrs"]),
     cc_addrs: toStringArray(row["cc_addrs"]),
     labels: toStringArray(row["labels"]),
-    attachments: toArray(row["attachments"]),
+    attachments,
     headers: toObject(row["headers"]),
     is_read: Boolean(row["is_read"]),
     is_starred: Boolean(row["is_starred"]),
     received_at: toIso(row["received_at"]),
+    send_started_at: toIso(row["send_started_at"]),
     created_at: toIso(row["created_at"]) ?? "",
     updated_at: toIso(row["updated_at"]) ?? "",
   };
@@ -403,6 +432,26 @@ export class EmailsSelfHostedStore {
     return row ? mapMessageRow(row) : null;
   }
 
+  async getMessageAttachment(id: string, index: number): Promise<StoredAttachment | null> {
+    if (!Number.isInteger(index) || index < 0) return null;
+    const row = await this.client.get<{ attachment: unknown }>(
+      `SELECT attachments -> $2::int AS attachment FROM messages WHERE id = $1`,
+      [id, index],
+    );
+    const value = row?.attachment;
+    let attachment: unknown;
+    try { attachment = typeof value === "string" ? JSON.parse(value) : value; } catch { return null; }
+    if (!attachment || typeof attachment !== "object" || Array.isArray(attachment)) return null;
+    const record = attachment as Record<string, unknown>;
+    if (typeof record["content_base64"] !== "string") return null;
+    return {
+      filename: String(record["filename"] ?? `attachment-${index + 1}`),
+      content_type: String(record["content_type"] ?? "application/octet-stream"),
+      size: Number(record["size"] ?? 0) || 0,
+      content_base64: record["content_base64"],
+    };
+  }
+
   /**
    * Look up an existing message by a stable upstream key, matching EITHER the
    * `source_id` (this ingest path's idempotency key) OR the `message_id`
@@ -442,17 +491,21 @@ export class EmailsSelfHostedStore {
       JSON.stringify(input.headers ?? {}),
       JSON.stringify(input.attachments ?? []),
       input.source_id ?? null,
+      input.idempotency_key ?? null,
+      input.send_payload_hash ?? null,
+      input.send_state ?? "none",
+      input.send_started_at ?? null,
     ];
   }
 
   private static readonly INSERT_COLS =
     "id, direction, from_addr, to_addrs, cc_addrs, subject, body_text, body_html, status, " +
     "provider_message_id, message_id, in_reply_to, received_at, is_read, is_starred, labels, " +
-    "headers, attachments, source_id";
+    "headers, attachments, source_id, idempotency_key, send_payload_hash, send_state, send_started_at";
 
   private static readonly INSERT_VALUES =
     "$1, $2, $3, $4::jsonb, $5::jsonb, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, " +
-    "$16::jsonb, $17::jsonb, $18::jsonb, $19";
+    "$16::jsonb, $17::jsonb, $18::jsonb, $19, $20, $21, $22, $23";
 
   async createMessage(input: MessageInput): Promise<MessageRecord> {
     const row = await this.client.one<Record<string, unknown>>(
@@ -462,6 +515,58 @@ export class EmailsSelfHostedStore {
       this.messageInsertParams(input),
     );
     return mapMessageRow(row);
+  }
+
+  /** Persist a unique outbound intent before any provider side effect. */
+  async reserveSendIntent(
+    input: MessageInput & { idempotency_key: string; send_payload_hash: string },
+  ): Promise<{ record: MessageRecord; created: boolean }> {
+    const inserted = await this.client.get<Record<string, unknown>>(
+      `INSERT INTO messages (${EmailsSelfHostedStore.INSERT_COLS})
+       VALUES (${EmailsSelfHostedStore.INSERT_VALUES})
+       ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
+       RETURNING ${MESSAGE_COLUMNS}`,
+      this.messageInsertParams({ ...input, direction: "outbound", status: "queued", send_state: "pending" }),
+    );
+    if (inserted) return { record: mapMessageRow(inserted), created: true };
+    const existing = await this.client.get<Record<string, unknown>>(
+      `SELECT ${MESSAGE_COLUMNS} FROM messages WHERE idempotency_key = $1`,
+      [input.idempotency_key],
+    );
+    if (!existing) throw new Error("send intent conflict could not be reconciled");
+    const record = mapMessageRow(existing);
+    if (record.send_payload_hash !== input.send_payload_hash) throw new IdempotencyKeyConflictError();
+    return { record, created: false };
+  }
+
+  async claimSendIntent(id: string): Promise<MessageRecord | null> {
+    const row = await this.client.get<Record<string, unknown>>(
+      `UPDATE messages SET send_state = 'sending', send_started_at = now(), updated_at = now()
+       WHERE id = $1 AND send_state = 'pending'
+       RETURNING ${MESSAGE_COLUMNS}`,
+      [id],
+    );
+    return row ? mapMessageRow(row) : null;
+  }
+
+  async completeSendIntent(id: string, providerMessageId: string): Promise<MessageRecord> {
+    const row = await this.client.get<Record<string, unknown>>(
+      `UPDATE messages SET send_state = 'sent', status = 'sent', provider_message_id = $2, updated_at = now()
+       WHERE id = $1 RETURNING ${MESSAGE_COLUMNS}`,
+      [id, providerMessageId],
+    );
+    if (!row) throw new Error("send intent disappeared during completion");
+    return mapMessageRow(row);
+  }
+
+  async markSendUncertain(id: string): Promise<MessageRecord | null> {
+    const row = await this.client.get<Record<string, unknown>>(
+      `UPDATE messages SET send_state = 'uncertain', status = 'uncertain', updated_at = now()
+       WHERE id = $1 AND send_state <> 'sent'
+       RETURNING ${MESSAGE_COLUMNS}`,
+      [id],
+    );
+    return row ? mapMessageRow(row) : null;
   }
 
   /**
@@ -505,16 +610,41 @@ export class EmailsSelfHostedStore {
 
   async updateMessageStatus(
     id: string,
-    patch: { status?: string; provider_message_id?: string | null },
+    patch: {
+      status?: string;
+      provider_message_id?: string | null;
+      is_read?: boolean;
+      is_starred?: boolean;
+      archived?: boolean;
+      add_label?: string;
+      remove_label?: string;
+    },
   ): Promise<MessageRecord | null> {
+    const current = await this.getMessage(id);
+    if (!current) return null;
+    const labels = new Map(current.labels.map((label) => [label.toLowerCase(), label]));
+    if (patch.archived === true) labels.set("archived", "archived");
+    if (patch.archived === false) labels.delete("archived");
+    if (patch.add_label?.trim()) labels.set(patch.add_label.trim().toLowerCase(), patch.add_label.trim());
+    if (patch.remove_label?.trim()) labels.delete(patch.remove_label.trim().toLowerCase());
     const row = await this.client.get<Record<string, unknown>>(
       `UPDATE messages SET
          status              = COALESCE($2, status),
          provider_message_id = COALESCE($3, provider_message_id),
+         is_read             = COALESCE($4, is_read),
+         is_starred          = COALESCE($5, is_starred),
+         labels              = $6::jsonb,
          updated_at          = now()
        WHERE id = $1
        RETURNING ${MESSAGE_COLUMNS}`,
-      [id, patch.status ?? null, patch.provider_message_id ?? null],
+      [
+        id,
+        patch.status ?? null,
+        patch.provider_message_id ?? null,
+        patch.is_read ?? null,
+        patch.is_starred ?? null,
+        JSON.stringify([...labels.values()]),
+      ],
     );
     return row ? mapMessageRow(row) : null;
   }

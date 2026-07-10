@@ -6,7 +6,7 @@
 import { describe, expect, test } from "bun:test";
 import { mintApiKey } from "@hasna/contracts/auth";
 import { verifyApiKey } from "@hasna/contracts/auth";
-import type { TypedQueryClient } from "../../generated/storage-kit/index.js";
+import type { TypedQueryClient } from "../../storage-kit/index.js";
 import { EmailsSelfHostedStore } from "./store.js";
 import { handleSelfHostedRequest, type SelfHostedServiceDeps } from "./service.js";
 import { emailsSelfHostedMigrations } from "./migrations.js";
@@ -110,7 +110,22 @@ const writeToken = () => mintApiKey({ app: "emails", scopes: ["emails:*"], signi
 
 describe("self_hosted service generic resources", () => {
   test("migration 0005 is registered", () => {
-    expect(emailsSelfHostedMigrations().some((m) => m.id === "0005_emails_selfhosted_resources")).toBe(true);
+    expect(emailsSelfHostedMigrations().some((m) => m.id === "0005_mailery_selfhosted_resources")).toBe(true);
+    expect(emailsSelfHostedMigrations().some((m) => m.id === "0006_emails_rename_bridge")).toBe(true);
+  });
+
+  test("preserves the released Mailery migration ids and checksums before the rename bridge", () => {
+    const released = Object.fromEntries(emailsSelfHostedMigrations().map((migration) => [migration.id, migration.checksum]));
+    expect(released).toMatchObject({
+      "0001_mailery_selfhosted_core": "sha256:b2d71b0e1686d07c6e4da85edc46a43d1c8912b3e5a8c61043939c2c09de98ac",
+      "0002_mailery_messages_inbound": "sha256:729be8b0d4ee8267cf1443cfc60a11bbce8b0329a32af91934adf55ad3105373",
+      "0003_mailery_addresses_verified": "sha256:245244eae5dd0a2deadc7aeb6082a4aee44e0867e2b93d78965971837c532338",
+      "0004_mailery_addresses_daily_quota": "sha256:e590954b8c06c26f8a4f2f25074a6dcf6d10313534a519e803f3ae98d9c0d586",
+      "0005_mailery_selfhosted_resources": "sha256:04d715446f80b8f0f1926097c3837bbd83fe76ad7400f10eef70189d97651bbc",
+    });
+    const bridge = emailsSelfHostedMigrations().find((migration) => migration.id === "0006_emails_rename_bridge");
+    expect(bridge?.sql).toContain("ALTER TABLE cloud_providers RENAME TO self_hosted_providers");
+    expect(bridge?.sql).toContain("idempotency_key");
   });
 
   test("GET /v1/contacts requires auth (401)", async () => {

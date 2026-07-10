@@ -7,7 +7,7 @@ export interface Domain { "id": string; "domain": string; "status": string; "pro
 
 export interface Address { "id": string; "email": string; "domain"?: string | null; "display_name"?: string | null; "status": string; "created_at": string; "updated_at": string }
 
-export interface Message { "id": string; "direction": string; "from_addr": string; "to_addrs": Array<string>; "cc_addrs"?: Array<string>; "subject"?: string | null; "body_text"?: string | null; "body_html"?: string | null; "status": string; "provider_message_id"?: string | null; "message_id"?: string | null; "in_reply_to"?: string | null; "received_at"?: string | null; "is_read"?: boolean; "is_starred"?: boolean; "labels"?: Array<string>; "headers"?: Record<string, unknown>; "attachments"?: Array<Record<string, unknown>>; "source_id"?: string | null; "created_at": string; "updated_at": string }
+export interface Message { "id": string; "direction": string; "from_addr": string; "to_addrs": Array<string>; "cc_addrs"?: Array<string>; "subject"?: string | null; "body_text"?: string | null; "body_html"?: string | null; "status": string; "provider_message_id"?: string | null; "message_id"?: string | null; "in_reply_to"?: string | null; "received_at"?: string | null; "is_read"?: boolean; "is_starred"?: boolean; "labels"?: Array<string>; "headers"?: Record<string, unknown>; "attachments"?: Array<Record<string, unknown>>; "source_id"?: string | null; "send_state"?: string; "send_started_at"?: string | null; "created_at": string; "updated_at": string }
 
 export interface EmailsSelfHostClientOptions {
   /** Base URL, e.g. process.env.APP_API_URL. */
@@ -35,6 +35,14 @@ export class EmailsSelfHostClient {
 
   constructor(options: EmailsSelfHostClientOptions) {
     if (!options.baseUrl) throw new Error("EmailsSelfHostClient requires a baseUrl.");
+    const parsedBaseUrl = new URL(options.baseUrl);
+    const loopback = parsedBaseUrl.hostname === "localhost"
+      || parsedBaseUrl.hostname === "127.0.0.1"
+      || parsedBaseUrl.hostname === "[::1]"
+      || parsedBaseUrl.hostname === "::1";
+    if (parsedBaseUrl.protocol !== "https:" && !(parsedBaseUrl.protocol === "http:" && loopback)) {
+      throw new Error("EmailsSelfHostClient requires HTTPS except for loopback development URLs.");
+    }
     this.baseUrl = options.baseUrl.replace(/\/$/, "");
     this.apiKey = options.apiKey;
     this.fetchImpl = options.fetch ?? globalThis.fetch;
@@ -192,7 +200,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Send through the configured SES or Resend provider and persist the resulting ledger row */
-    async sendMessage(body: { "from": string; "to": Array<string>; "cc"?: Array<string>; "bcc"?: Array<string>; "reply_to"?: string; "subject": string; "text"?: string; "html"?: string }, init?: RequestInit): Promise<{ "message"?: Message; "provider"?: string }> {
+    async sendMessage(body: { "from": string; "to": Array<string>; "cc"?: Array<string>; "bcc"?: Array<string>; "reply_to"?: string; "subject": string; "text"?: string; "html"?: string; "attachments"?: Array<{ "filename": string; "content": string; "content_type": string }>; "idempotency_key": string }, init?: RequestInit): Promise<{ "message"?: Message; "provider"?: string }> {
       return this.request("POST", `/v1/messages/send`, {
         body,
         query: undefined,
@@ -216,9 +224,17 @@ export class EmailsSelfHostClient {
       });
     }
 
-    async updateMessage(id: string, body: { "status"?: string; "provider_message_id"?: string | null }, init?: RequestInit): Promise<{ "message"?: Message }> {
+    async updateMessage(id: string, body: { "status"?: string; "provider_message_id"?: string | null; "is_read"?: boolean; "is_starred"?: boolean; "archived"?: boolean; "add_label"?: string; "remove_label"?: string }, init?: RequestInit): Promise<{ "message"?: Message }> {
       return this.request("PATCH", `/v1/messages/${encodeURIComponent(String(id))}`, {
         body,
+        query: undefined,
+        init,
+      });
+    }
+
+    async getMessageAttachment(id: string, index: number, init?: RequestInit): Promise<Record<string, unknown>> {
+      return this.request("GET", `/v1/messages/${encodeURIComponent(String(id))}/attachments/${encodeURIComponent(String(index))}`, {
+        body: undefined,
         query: undefined,
         init,
       });

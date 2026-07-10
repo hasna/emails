@@ -118,7 +118,7 @@ export interface MailBulkResult {
   nextCursor: string | null;
 }
 
-/** A file attachment for a send. Self-hosted send does not carry these yet (see send()). */
+/** A base64 inline attachment for local/provider or bounded self-hosted send. */
 export interface MailSendAttachment {
   filename: string;
   /** base64-encoded content. */
@@ -148,10 +148,12 @@ export interface MailSendInput {
   replyToId?: string;
   /** Reply-To header address(es), comma-separated. */
   replyTo?: string;
-  /** File attachments. Self-hosted send rejects these until the server send endpoint carries them. */
+  /** File attachments. Self-hosted JSON send enforces its smaller documented caps. */
   attachments?: MailSendAttachment[];
   /** ISO-8601 schedule time. Self-hosted send rejects this (no server-side scheduling). */
   scheduledAt?: string;
+  /** Stable caller-provided key used to make self-hosted sends retry-safe. */
+  idempotencyKey?: string;
 }
 
 export interface MailSendResult {

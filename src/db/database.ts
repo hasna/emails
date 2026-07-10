@@ -273,8 +273,8 @@ function mailboxRecipientRowsSql(idSql: string, toAddressesSql: string): string 
              AND normalized.address NOT LIKE '%>%'
           UNION ALL
           SELECT ${idSql} AS inbound_email_id,
-                 'legacy-inbound@local.emails' AS address,
-                 'mbx:legacy-inbound@local.emails' AS mailbox_id
+                 'legacy-inbound@local.mailery' AS address,
+                 'mbx:legacy-inbound@local.mailery' AS mailbox_id
            WHERE NOT EXISTS (
              SELECT 1
                FROM (
@@ -438,8 +438,8 @@ const MAIL_ARCHITECTURE_BACKFILL_SQL = `
    GROUP BY recipient.address;
 
   INSERT OR IGNORE INTO mailboxes (id, address, display_name, status, created_at, updated_at)
-  SELECT 'mbx:legacy-inbound@local.emails',
-         'legacy-inbound@local.emails',
+  SELECT 'mbx:legacy-inbound@local.mailery',
+         'legacy-inbound@local.mailery',
          'Legacy inbound',
          'active',
          COALESCE(MIN(inbound.created_at), datetime('now')),
@@ -496,8 +496,8 @@ const MAIL_ARCHITECTURE_BACKFILL_SQL = `
       JOIN inbound_recipients recipient ON recipient.inbound_email_id = inbound.id
     UNION ALL
     SELECT inbound.id,
-           'legacy-inbound@local.emails',
-           'mbx:legacy-inbound@local.emails'
+           'legacy-inbound@local.mailery',
+           'mbx:legacy-inbound@local.mailery'
       FROM inbound_emails inbound
      WHERE NOT EXISTS (
        SELECT 1 FROM inbound_recipients recipient WHERE recipient.inbound_email_id = inbound.id
@@ -551,8 +551,8 @@ const MAIL_ARCHITECTURE_BACKFILL_SQL = `
       JOIN inbound_recipients recipient ON recipient.inbound_email_id = inbound.id
     UNION ALL
     SELECT inbound.id,
-           'legacy-inbound@local.emails',
-           'mbx:legacy-inbound@local.emails'
+           'legacy-inbound@local.mailery',
+           'mbx:legacy-inbound@local.mailery'
       FROM inbound_emails inbound
      WHERE NOT EXISTS (
        SELECT 1 FROM inbound_recipients recipient WHERE recipient.inbound_email_id = inbound.id
@@ -775,8 +775,8 @@ const MAIL_ARCHITECTURE_INBOUND_DELETE_TRIGGER_SQL = `
 `;
 
 const MAIL_ARCHITECTURE_STATE_RECONCILE_SQL = `
-  DROP TABLE IF EXISTS temp_emails_inbound_state_reconcile;
-  CREATE TEMP TABLE temp_emails_inbound_state_reconcile AS
+  DROP TABLE IF EXISTS temp_mailery_inbound_state_reconcile;
+  CREATE TEMP TABLE temp_mailery_inbound_state_reconcile AS
   SELECT COALESCE(mail_message_id, 'msg:inbound:' || id) AS mail_message_id,
          label_ids_json,
          is_read,
@@ -787,49 +787,49 @@ const MAIL_ARCHITECTURE_STATE_RECONCILE_SQL = `
          is_trash,
          is_sent
     FROM inbound_emails;
-  CREATE INDEX temp_emails_inbound_state_reconcile_message
-      ON temp_emails_inbound_state_reconcile(mail_message_id);
+  CREATE INDEX temp_mailery_inbound_state_reconcile_message
+      ON temp_mailery_inbound_state_reconcile(mail_message_id);
 
   UPDATE mailbox_message_state
      SET labels_json = (
            SELECT inbound_state.label_ids_json
-             FROM temp_emails_inbound_state_reconcile inbound_state
+             FROM temp_mailery_inbound_state_reconcile inbound_state
             WHERE inbound_state.mail_message_id = mailbox_message_state.mail_message_id
             LIMIT 1
          ),
          is_read = COALESCE((
            SELECT inbound_state.is_read
-             FROM temp_emails_inbound_state_reconcile inbound_state
+             FROM temp_mailery_inbound_state_reconcile inbound_state
             WHERE inbound_state.mail_message_id = mailbox_message_state.mail_message_id
             LIMIT 1
          ), is_read),
          read_at = (
            SELECT inbound_state.read_at
-             FROM temp_emails_inbound_state_reconcile inbound_state
+             FROM temp_mailery_inbound_state_reconcile inbound_state
             WHERE inbound_state.mail_message_id = mailbox_message_state.mail_message_id
             LIMIT 1
          ),
          is_archived = COALESCE((
            SELECT inbound_state.is_archived
-             FROM temp_emails_inbound_state_reconcile inbound_state
+             FROM temp_mailery_inbound_state_reconcile inbound_state
             WHERE inbound_state.mail_message_id = mailbox_message_state.mail_message_id
             LIMIT 1
          ), is_archived),
          is_starred = COALESCE((
            SELECT inbound_state.is_starred
-             FROM temp_emails_inbound_state_reconcile inbound_state
+             FROM temp_mailery_inbound_state_reconcile inbound_state
             WHERE inbound_state.mail_message_id = mailbox_message_state.mail_message_id
             LIMIT 1
          ), is_starred),
          is_spam = COALESCE((
            SELECT inbound_state.is_spam
-             FROM temp_emails_inbound_state_reconcile inbound_state
+             FROM temp_mailery_inbound_state_reconcile inbound_state
             WHERE inbound_state.mail_message_id = mailbox_message_state.mail_message_id
             LIMIT 1
          ), is_spam),
          is_trash = COALESCE((
            SELECT inbound_state.is_trash
-             FROM temp_emails_inbound_state_reconcile inbound_state
+             FROM temp_mailery_inbound_state_reconcile inbound_state
             WHERE inbound_state.mail_message_id = mailbox_message_state.mail_message_id
             LIMIT 1
          ), is_trash),
@@ -842,17 +842,17 @@ const MAIL_ARCHITECTURE_STATE_RECONCILE_SQL = `
                     WHEN COALESCE(inbound_state.is_archived, 0) = 1 THEN 'archive'
                     ELSE 'inbox'
                   END
-             FROM temp_emails_inbound_state_reconcile inbound_state
+             FROM temp_mailery_inbound_state_reconcile inbound_state
             WHERE inbound_state.mail_message_id = mailbox_message_state.mail_message_id
             LIMIT 1
          ), folder_id),
          updated_at = datetime('now')
    WHERE EXISTS (
      SELECT 1
-       FROM temp_emails_inbound_state_reconcile inbound_state
+       FROM temp_mailery_inbound_state_reconcile inbound_state
       WHERE inbound_state.mail_message_id = mailbox_message_state.mail_message_id
    );
-  DROP TABLE IF EXISTS temp_emails_inbound_state_reconcile;
+  DROP TABLE IF EXISTS temp_mailery_inbound_state_reconcile;
 `;
 
 const MAIL_ARCHITECTURE_REPAIR_SQL = `
@@ -1904,8 +1904,8 @@ const MIGRATIONS = [
 
   // Migration 45: per-domain readiness lifecycle and provider/DNS snapshots.
   `
-  ALTER TABLE domains ADD COLUMN domain_type TEXT NOT NULL DEFAULT 'self_hosted' CHECK(domain_type IN ('system','self_hosted','local_only'));
-  ALTER TABLE domains ADD COLUMN source_of_truth TEXT NOT NULL DEFAULT 'local' CHECK(source_of_truth IN ('local','postgres'));
+  ALTER TABLE domains ADD COLUMN domain_type TEXT NOT NULL DEFAULT 'self_hosted' CHECK(domain_type IN ('system','tenant','self_hosted','local_only'));
+  ALTER TABLE domains ADD COLUMN source_of_truth TEXT NOT NULL DEFAULT 'local' CHECK(source_of_truth IN ('local','postgres','cloud'));
   ALTER TABLE domains ADD COLUMN ownership_status TEXT NOT NULL DEFAULT 'pending' CHECK(ownership_status IN ('pending','verified','failed'));
   ALTER TABLE domains ADD COLUMN inbound_status TEXT NOT NULL DEFAULT 'pending' CHECK(inbound_status IN ('pending','ready','disabled','failed'));
   ALTER TABLE domains ADD COLUMN outbound_status TEXT NOT NULL DEFAULT 'pending' CHECK(outbound_status IN ('pending','ready','disabled','failed'));
@@ -1922,6 +1922,42 @@ const MIGRATIONS = [
   CREATE INDEX IF NOT EXISTS idx_domains_source_truth ON domains(source_of_truth);
   CREATE INDEX IF NOT EXISTS idx_domains_readiness ON domains(ownership_status, inbound_status, outbound_status);
   INSERT OR IGNORE INTO _migrations (id) VALUES (45);
+  `,
+
+  // Migration 46: additive Emails rename bridge. Historical migration bodies
+  // above remain byte-for-byte compatible with released Mailery databases.
+  `
+  INSERT OR IGNORE INTO mailboxes (id, address, display_name, owner_id, status, created_at, updated_at)
+  SELECT 'mbx:legacy-inbound@local.emails', 'legacy-inbound@local.emails', display_name,
+         owner_id, status, created_at, datetime('now')
+    FROM mailboxes
+   WHERE id = 'mbx:legacy-inbound@local.mailery';
+
+  UPDATE mail_folders
+     SET mailbox_id = 'mbx:legacy-inbound@local.emails'
+   WHERE mailbox_id = 'mbx:legacy-inbound@local.mailery';
+  UPDATE mailbox_sources
+     SET mailbox_id = 'mbx:legacy-inbound@local.emails'
+   WHERE mailbox_id = 'mbx:legacy-inbound@local.mailery';
+  UPDATE mailbox_message_state
+     SET mailbox_id = 'mbx:legacy-inbound@local.emails'
+   WHERE mailbox_id = 'mbx:legacy-inbound@local.mailery';
+  UPDATE inbound_emails
+     SET primary_mailbox_id = 'mbx:legacy-inbound@local.emails'
+   WHERE primary_mailbox_id = 'mbx:legacy-inbound@local.mailery';
+  DELETE FROM mailboxes WHERE id = 'mbx:legacy-inbound@local.mailery';
+
+  UPDATE domains SET domain_type = 'self_hosted' WHERE domain_type = 'tenant';
+  UPDATE domains SET source_of_truth = 'postgres' WHERE source_of_truth = 'cloud';
+
+  CREATE TABLE IF NOT EXISTS webhook_receipts (
+    provider TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    resource_id TEXT,
+    completed_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (provider, event_id)
+  );
+  INSERT OR IGNORE INTO _migrations (id) VALUES (46);
   `,
 ];
 
@@ -2020,6 +2056,13 @@ function ensureSchema(db: Database): void {
   ensureColumn("ALTER TABLE addresses ADD COLUMN next_check_at TEXT");
 
   const ensureProvTable = (sql: string) => { try { db.exec(sql); } catch {} };
+  ensureProvTable(`CREATE TABLE IF NOT EXISTS webhook_receipts (
+    provider TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    resource_id TEXT,
+    completed_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (provider, event_id)
+  )`);
   ensureProvTable(`CREATE TABLE IF NOT EXISTS provisioning_events (
     id TEXT PRIMARY KEY,
     entity_type TEXT NOT NULL,
