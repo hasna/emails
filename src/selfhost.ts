@@ -1,15 +1,15 @@
-// @generated from src/server/cloud/openapi.ts by scripts/generate-selfhost-sdk.ts — DO NOT EDIT.
+// @generated from src/server/self-hosted/openapi.ts by scripts/generate-selfhost-sdk.ts — DO NOT EDIT.
 // Regenerate: bun run scripts/generate-selfhost-sdk.ts
 // @generated from OpenAPI by @hasna/contracts SDK generator — DO NOT EDIT.
-// Source: Mailery Self-Hosted API 1.0.0
+// Source: Emails Self-Hosted API 1.0.0
 
 export interface Domain { "id": string; "domain": string; "status": string; "provider"?: string | null; "verified": boolean; "notes"?: string | null; "created_at": string; "updated_at": string }
 
 export interface Address { "id": string; "email": string; "domain"?: string | null; "display_name"?: string | null; "status": string; "created_at": string; "updated_at": string }
 
-export interface Message { "id": string; "from_addr": string; "to_addrs": Array<string>; "subject"?: string | null; "body_text"?: string | null; "body_html"?: string | null; "status": string; "provider_message_id"?: string | null; "created_at": string; "updated_at": string }
+export interface Message { "id": string; "direction": string; "from_addr": string; "to_addrs": Array<string>; "cc_addrs"?: Array<string>; "subject"?: string | null; "body_text"?: string | null; "body_html"?: string | null; "status": string; "provider_message_id"?: string | null; "message_id"?: string | null; "in_reply_to"?: string | null; "received_at"?: string | null; "is_read"?: boolean; "is_starred"?: boolean; "labels"?: Array<string>; "headers"?: Record<string, unknown>; "attachments"?: Array<Record<string, unknown>>; "source_id"?: string | null; "created_at": string; "updated_at": string }
 
-export interface MailerySelfHostClientOptions {
+export interface EmailsSelfHostClientOptions {
   /** Base URL, e.g. process.env.APP_API_URL. */
   baseUrl: string;
   /** API key, e.g. process.env.APP_API_KEY. Sent as the 'x-api-key' header. */
@@ -27,14 +27,14 @@ export class ApiError extends Error {
   }
 }
 
-export class MailerySelfHostClient {
+export class EmailsSelfHostClient {
   private readonly baseUrl: string;
   private readonly apiKey: string | undefined;
   private readonly fetchImpl: typeof fetch;
   private readonly baseHeaders: Record<string, string>;
 
-  constructor(options: MailerySelfHostClientOptions) {
-    if (!options.baseUrl) throw new Error("MailerySelfHostClient requires a baseUrl.");
+  constructor(options: EmailsSelfHostClientOptions) {
+    if (!options.baseUrl) throw new Error("EmailsSelfHostClient requires a baseUrl.");
     this.baseUrl = options.baseUrl.replace(/\/$/, "");
     this.apiKey = options.apiKey;
     this.fetchImpl = options.fetch ?? globalThis.fetch;
@@ -90,7 +90,7 @@ export class MailerySelfHostClient {
       });
     }
 
-    /** Register an email address (scope mailery:write) */
+    /** Register an email address (scope emails:write) */
     async createAddress(body: { "email": string; "display_name"?: string | null; "status"?: string }, init?: RequestInit): Promise<{ "address"?: Address }> {
       return this.request("POST", `/v1/addresses`, {
         body,
@@ -132,7 +132,7 @@ export class MailerySelfHostClient {
       });
     }
 
-    /** Register a sending domain (scope mailery:write) */
+    /** Register a sending domain (scope emails:write) */
     async createDomain(body: { "domain": string; "status"?: string; "provider"?: string | null; "verified"?: boolean; "notes"?: string | null }, init?: RequestInit): Promise<{ "domain"?: Domain }> {
       return this.request("POST", `/v1/domains`, {
         body,
@@ -165,7 +165,7 @@ export class MailerySelfHostClient {
       });
     }
 
-    async listMessages(query?: { "limit"?: number; "offset"?: number }, init?: RequestInit): Promise<{ "messages"?: Array<Message> }> {
+    async listMessages(query?: { "limit"?: number; "offset"?: number; "direction"?: "inbound" | "outbound"; "to"?: string }, init?: RequestInit): Promise<{ "messages"?: Array<Message> }> {
       return this.request("GET", `/v1/messages`, {
         body: undefined,
         query,
@@ -173,9 +173,27 @@ export class MailerySelfHostClient {
       });
     }
 
-    /** Record an outbound message in the ledger (scope mailery:write) */
-    async createMessage(body: { "from": string; "to": Array<string>; "subject"?: string | null; "text"?: string | null; "html"?: string | null; "status"?: string }, init?: RequestInit): Promise<{ "message"?: Message }> {
+    /** Import an inbound message. Supplying source_id makes the write idempotent. Scope emails:write. */
+    async createMessage(body: { "from": string; "to": Array<string>; "cc"?: Array<string>; "subject"?: string | null; "text"?: string | null; "html"?: string | null; "status"?: string; "direction": "inbound"; "received_at"?: string | null; "message_id"?: string | null; "in_reply_to"?: string | null; "is_read"?: boolean; "is_starred"?: boolean; "labels"?: Array<string>; "headers"?: Record<string, unknown>; "attachments"?: Array<Record<string, unknown>>; "provider_message_id"?: string | null; "source_id"?: string }, init?: RequestInit): Promise<{ "message"?: Message }> {
       return this.request("POST", `/v1/messages`, {
+        body,
+        query: undefined,
+        init,
+      });
+    }
+
+    /** Return server-side mailbox counts */
+    async getMessageCounts(init?: RequestInit): Promise<Record<string, unknown>> {
+      return this.request("GET", `/v1/messages/counts`, {
+        body: undefined,
+        query: undefined,
+        init,
+      });
+    }
+
+    /** Send through the configured SES or Resend provider and persist the resulting ledger row */
+    async sendMessage(body: { "from": string; "to": Array<string>; "cc"?: Array<string>; "bcc"?: Array<string>; "reply_to"?: string; "subject": string; "text"?: string; "html"?: string }, init?: RequestInit): Promise<{ "message"?: Message; "provider"?: string }> {
+      return this.request("POST", `/v1/messages/send`, {
         body,
         query: undefined,
         init,

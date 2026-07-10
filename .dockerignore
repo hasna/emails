@@ -1,0 +1,11 @@
+.git
+.github
+.build
+dist
+node_modules
+coverage
+*.db
+*.db-shm
+*.db-wal
+.env*
+.secrets*

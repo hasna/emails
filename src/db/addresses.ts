@@ -4,31 +4,31 @@ import type { AddressRow, AddressStatus, CreateAddressInput, EmailAddress } from
 import { AddressNotFoundError } from "../types/index.js";
 import { getDatabase, now, uuid } from "./database.js";
 import { safeOffset, safeOptionalLimit } from "./pagination.js";
-import { cloudStoreFor, isCloudMode, type CloudResourceStore } from "./cloud-store.js";
+import { selfHostedStoreFor, isSelfHostedMode, type SelfHostedResourceStore } from "./self-hosted-store.js";
 
 // ============================================================================
-// Cloud (self_hosted) routing
+// Self-hosted (self_hosted) routing
 // ============================================================================
 //
-// When the client-flip resolves to cloud (mode=self_hosted + HASNA_MAILERY_API_URL
-// + HASNA_MAILERY_API_KEY), the `addresses` resource is served by the app's cloud
+// When the client-flip resolves to selfHosted (mode=self_hosted + HASNA_EMAILS_API_URL
+// + EMAILS_SELF_HOSTED_API_KEY), the `addresses` resource is served by the app's selfHosted
 // HTTP API (<API_URL>/v1/addresses) instead of the local SQLite store — the same
 // cred-based gate the `domains` resource already uses. The `db` argument is
 // intentionally ignored for the routing decision: the CLI passes an explicit local
-// `getDatabase()` handle to every repo call, so keying on it would defeat cloud
-// routing. Tests never set the cloud env, so isCloudMode() is false there and the
+// `getDatabase()` handle to every repo call, so keying on it would defeat selfHosted
+// routing. Tests never set the selfHosted env, so isSelfHostedMode() is false there and the
 // local SQLite path is always used.
 export const ADDRESS_RESOURCE = "addresses";
 
-export function cloudAddresses(_db?: Database): CloudResourceStore | null {
-  if (!isCloudMode()) return null;
-  return cloudStoreFor(ADDRESS_RESOURCE);
+export function selfHostedAddresses(_db?: Database): SelfHostedResourceStore | null {
+  if (!isSelfHostedMode()) return null;
+  return selfHostedStoreFor(ADDRESS_RESOURCE);
 }
 
-/** Map a cloud API address entity to the local EmailAddress shape (defaults filled).
+/** Map a selfHosted API address entity to the local EmailAddress shape (defaults filled).
  *  The self-hosted /v1/addresses record carries {id, email, domain, display_name,
  *  status, created_at, updated_at}; provider/owner/quota are not modelled in the
- *  cloud, so they default to null (enrichment then resolves to "-" in the CLI). */
+ *  selfHosted, so they default to null (enrichment then resolves to "-" in the CLI). */
 export function apiToAddress(e: Record<string, unknown>): EmailAddress {
   const str = (v: unknown): string | null => (v == null ? null : String(v));
   const updatedAt = str(e["updated_at"]) ?? new Date().toISOString();
@@ -60,10 +60,10 @@ function rowToAddress(row: AddressRow): EmailAddress {
 }
 
 export function createAddress(input: CreateAddressInput, db?: Database): EmailAddress {
-  const cloud = cloudAddresses(db);
-  if (cloud) {
-    const created = apiToAddress(cloud.create({ email: input.email, display_name: input.display_name || null }));
-    // The cloud address model does not persist provider_id; carry the caller's
+  const selfHosted = selfHostedAddresses(db);
+  if (selfHosted) {
+    const created = apiToAddress(selfHosted.create({ email: input.email, display_name: input.display_name || null }));
+    // The selfHosted address model does not persist provider_id; carry the caller's
     // provider through on the returned entity so the command output is correct.
     return { ...created, provider_id: input.provider_id };
   }
@@ -82,9 +82,9 @@ export function createAddress(input: CreateAddressInput, db?: Database): EmailAd
 }
 
 export function getAddress(id: string, db?: Database): EmailAddress | null {
-  const cloud = cloudAddresses(db);
-  if (cloud) {
-    const e = cloud.get(id);
+  const selfHosted = selfHostedAddresses(db);
+  if (selfHosted) {
+    const e = selfHosted.get(id);
     return e ? apiToAddress(e) : null;
   }
   const d = db || getDatabase();
@@ -94,12 +94,12 @@ export function getAddress(id: string, db?: Database): EmailAddress | null {
 }
 
 export function getAddressByEmail(provider_id: string, email: string, db?: Database): EmailAddress | null {
-  const cloud = cloudAddresses(db);
-  if (cloud) {
-    // The cloud model keys addresses by email (no provider dimension). Match on
+  const selfHosted = selfHostedAddresses(db);
+  if (selfHosted) {
+    // The selfHosted model keys addresses by email (no provider dimension). Match on
     // email so `address add` dedup, get, and remove all resolve the same record.
     const target = email.trim().toLowerCase();
-    const found = cloud.list().map(apiToAddress).find((a) => a.email.trim().toLowerCase() === target);
+    const found = selfHosted.list().map(apiToAddress).find((a) => a.email.trim().toLowerCase() === target);
     return found ?? null;
   }
   const d = db || getDatabase();
@@ -109,10 +109,10 @@ export function getAddressByEmail(provider_id: string, email: string, db?: Datab
 }
 
 export function findAddressesByEmail(email: string, db?: Database): EmailAddress[] {
-  const cloud = cloudAddresses(db);
-  if (cloud) {
+  const selfHosted = selfHostedAddresses(db);
+  if (selfHosted) {
     const target = email.trim().toLowerCase();
-    return cloud
+    return selfHosted
       .list()
       .map(apiToAddress)
       .filter((a) => a.email.trim().toLowerCase() === target)
@@ -139,14 +139,14 @@ export interface AddressReadinessOptions extends ListAddressOptions {
 }
 
 export function listAddresses(provider_id?: string, db?: Database, opts?: ListAddressOptions): EmailAddress[] {
-  const cloud = cloudAddresses(db);
-  if (cloud) {
+  const selfHosted = selfHostedAddresses(db);
+  if (selfHosted) {
     const query: Record<string, string | number | undefined> = {};
     const lim = safeOptionalLimit(opts?.limit);
     if (lim !== null) query["limit"] = lim;
     const off = safeOffset(opts?.offset);
     if (off) query["offset"] = off;
-    let addresses = cloud.list(query).map(apiToAddress);
+    let addresses = selfHosted.list(query).map(apiToAddress);
     if (provider_id) addresses = addresses.filter((a) => a.provider_id === provider_id);
     addresses.sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
     if (lim !== null) addresses = addresses.slice(off, off + lim);
@@ -172,12 +172,12 @@ export function listAddresses(provider_id?: string, db?: Database, opts?: ListAd
 export function listAddressesByProviderIds(providerIds: Iterable<string>, db?: Database): EmailAddress[] {
   const ids = [...new Set([...providerIds].map((id) => id.trim()).filter(Boolean))];
   if (ids.length === 0) return [];
-  const cloud = cloudAddresses(db);
-  if (cloud) {
-    // Cloud does not model the provider dimension; filter the cloud address set
-    // by provider_id (empty cloud-side) rather than falling back to local SQLite.
+  const selfHosted = selfHostedAddresses(db);
+  if (selfHosted) {
+    // Self-hosted does not model the provider dimension; filter the selfHosted address set
+    // by provider_id (empty selfHosted-side) rather than falling back to local SQLite.
     const idSet = new Set(ids);
-    return cloud
+    return selfHosted
       .list()
       .map(apiToAddress)
       .filter((a) => idSet.has(a.provider_id));
@@ -230,7 +230,7 @@ function addressReadinessWhere(opts: AddressReadinessOptions | undefined, params
   const domainSendReady = `(${notBroken} AND d.dkim_status = 'verified' AND d.spf_status = 'verified')`;
   const lifecycleReceiveReady = "(d.inbound_status = 'ready')";
   const localDomainReceiveReady = `((${broken} AND ${readyAddresses} > 0) OR (${notBroken} AND (${readyAddresses} > 0 OR d.provisioning_status IN ('ready', 'inbound_ready') OR ${lifecycleReceiveReady})))`;
-  const domainReceiveReady = `(CASE WHEN d.source_of_truth IN ('postgres', 'cloud') THEN ${lifecycleReceiveReady} ELSE ${localDomainReceiveReady} END)`;
+  const domainReceiveReady = `(CASE WHEN d.source_of_truth = 'postgres' THEN ${lifecycleReceiveReady} ELSE ${localDomainReceiveReady} END)`;
   const addressSendReady = `(COALESCE(a.status, 'active') != 'suspended' AND (a.verified = 1 OR ${domainSendReady}))`;
   const addressReceiveReady = `(a.provisioning_status = 'ready' OR ${domainReceiveReady})`;
 
@@ -378,13 +378,13 @@ export function updateAddress(
   input: Partial<Pick<EmailAddress, "display_name" | "verified">>,
   db?: Database,
 ): EmailAddress {
-  const cloud = cloudAddresses(db);
-  if (cloud) {
-    if (!cloud.get(id)) throw new AddressNotFoundError(id);
+  const selfHosted = selfHostedAddresses(db);
+  if (selfHosted) {
+    if (!selfHosted.get(id)) throw new AddressNotFoundError(id);
     const patch: Record<string, unknown> = {};
     if (input.display_name !== undefined) patch["display_name"] = input.display_name || null;
     if (input.verified !== undefined) patch["verified"] = input.verified;
-    return apiToAddress(cloud.update(id, patch));
+    return apiToAddress(selfHosted.update(id, patch));
   }
 
   const d = db || getDatabase();
@@ -404,18 +404,18 @@ export function updateAddress(
 }
 
 export function deleteAddress(id: string, db?: Database): boolean {
-  const cloud = cloudAddresses(db);
-  if (cloud) return cloud.del(id);
+  const selfHosted = selfHostedAddresses(db);
+  if (selfHosted) return selfHosted.del(id);
   const d = db || getDatabase();
   const result = d.run("DELETE FROM addresses WHERE id = ?", [id]);
   return result.changes > 0;
 }
 
 export function markVerified(id: string, db?: Database): EmailAddress {
-  const cloud = cloudAddresses(db);
-  if (cloud) {
-    if (!cloud.get(id)) throw new AddressNotFoundError(id);
-    return apiToAddress(cloud.update(id, { verified: true }));
+  const selfHosted = selfHostedAddresses(db);
+  if (selfHosted) {
+    if (!selfHosted.get(id)) throw new AddressNotFoundError(id);
+    return apiToAddress(selfHosted.update(id, { verified: true }));
   }
 
   const d = db || getDatabase();

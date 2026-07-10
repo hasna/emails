@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Mailery</title>
+<title>Emails</title>
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -18,7 +18,7 @@
       <!-- Pane 1 — folders sidebar -->
       <aside class="sidebar">
         <div class="sidebar-top">
-          <span class="wordmark">Mailery</span>
+          <span class="wordmark">Emails</span>
         </div>
 
         <button class="compose-btn" id="compose-btn" type="button">
@@ -45,7 +45,7 @@
           <h2 class="threads-title" id="threads-title">Inbox</h2>
           <span class="threads-count" id="threads-count"></span>
           <span class="th-spacer"></span>
-          <button class="refresh-btn" id="refresh-btn" title="Pull new mail (mailery refresh)">
+          <button class="refresh-btn" id="refresh-btn" title="Pull new mail (emails refresh)">
             <svg viewBox="0 0 18 18" fill="none"><path d="M14.5 9a5.5 5.5 0 11-1.6-3.9M14.5 3.5v3h-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
           </button>
         </header>
@@ -124,7 +124,7 @@
           <div class="set-page-inner">
             <h1 class="set-title">Appearance</h1>
             <div class="set-sec-label">Theme</div>
-            <div class="set-sec-sub">Choose how Mailery looks. System follows your OS setting.</div>
+            <div class="set-sec-sub">Choose how Emails looks. System follows your OS setting.</div>
             <div class="theme-row" id="theme-row">
               <div class="theme-card" data-theme="system"><div class="theme-prev theme-prev-system"><div class="tp-card"><div class="tp-bar"><span class="tp-bl"></span><span class="tp-bl short"></span></div><div class="tp-body"><span class="tp-rl"></span><span class="tp-rl short"></span></div></div></div><div class="theme-name">System</div></div>
               <div class="theme-card" data-theme="light"><div class="theme-prev theme-prev-light"><div class="tp-card"><div class="tp-bar"><span class="tp-bl"></span><span class="tp-bl short"></span></div><div class="tp-body"><span class="tp-rl"></span><span class="tp-rl"></span><span class="tp-rl short"></span></div></div></div><div class="theme-name">Light</div></div>
@@ -137,15 +137,15 @@
             <h1 class="set-title">About</h1>
             <div class="about-head">
               <div class="about-badge"><svg viewBox="0 0 24 24" width="26" height="26" fill="none"><rect x="3.5" y="6" width="17" height="12.5" rx="1.8" stroke="#fff" stroke-width="1.7"/><path d="M4 7l8 6 8-6" stroke="#fff" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
-              <div class="about-name">Mailery</div>
+              <div class="about-name">Emails</div>
               <div class="about-ver">Version 1.0</div>
             </div>
             <div class="set-card">
               <div class="set-row"><div class="set-row-text"><div class="srt-name">This address</div><div class="srt-desc" id="about-address">—</div></div></div>
               <div class="set-row"><div class="set-row-text"><div class="srt-name">Local store</div><div class="srt-desc" id="about-db">~/.hasna/emails/emails.db</div></div></div>
-              <div class="set-row"><div class="set-row-text"><div class="srt-name">Conversations</div><div class="srt-desc">Read directly from the local SQLite store; mutations go through the mailery CLI.</div></div><span class="set-version" id="about-count">0</span></div>
+              <div class="set-row"><div class="set-row-text"><div class="srt-name">Conversations</div><div class="srt-desc">Read directly from the local SQLite store; mutations go through the emails CLI.</div></div><span class="set-version" id="about-count">0</span></div>
             </div>
-            <div class="about-foot">Mailery reads <code>inbound_emails</code> directly and mutates via the <code>mailery</code> CLI. Run <code>mailery refresh</code> to pull new mail.</div>
+            <div class="about-foot">Emails reads <code>inbound_emails</code> directly and mutates via the <code>emails</code> CLI. Run <code>emails refresh</code> to pull new mail.</div>
           </div>
         </section>
       </main>

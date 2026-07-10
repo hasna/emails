@@ -35,7 +35,7 @@ describe("mail architecture data model", () => {
       name: "SES S3 inbound",
       external_mailbox: "ops@example.com",
       status: "active",
-      settings: { bucket: "mailery-test-bucket", prefix: "inbound/example.com/" },
+      settings: { bucket: "emails-test-bucket", prefix: "inbound/example.com/" },
     }, db);
     const legacySource = createMailboxSource({
       mailbox_id: mailbox.id,
@@ -153,7 +153,7 @@ describe("mail architecture data model", () => {
           received_at, created_at
         )
         VALUES (
-          'inbound-existing', 'provider-ses', 'inbound/example.com/object-1', 's3://mailery-test/inbound/object-1',
+          'inbound-existing', 'provider-ses', 'inbound/example.com/object-1', 's3://emails-test/inbound/object-1',
           'sender@example.net', '["A@example.com","B@example.com"]', '[]',
           'Existing content', 'text body', '<p>html body</p>', '[]', '{"x-test":"yes"}', 123,
           '2026-01-02T00:00:00.000Z', '2026-01-02T00:00:00.000Z'
@@ -188,7 +188,7 @@ describe("mail architecture data model", () => {
         subject: "Existing content",
         text_body: null,
         html_body: null,
-        raw_s3_url: "s3://mailery-test/inbound/object-1",
+        raw_s3_url: "s3://emails-test/inbound/object-1",
       });
       expect(inbound.text_body).toBe("text body");
       expect(states).toEqual([
@@ -414,7 +414,7 @@ describe("mail architecture data model", () => {
       attachments: [],
       headers: { "message-id": "<multi-1@example.net>" },
       raw_size: 500,
-      raw_s3_url: "s3://mailery-test/inbound/multi-1",
+      raw_s3_url: "s3://emails-test/inbound/multi-1",
       received_at: "2026-02-01T00:00:00.000Z",
     }, db);
 
@@ -466,7 +466,7 @@ describe("mail architecture data model", () => {
       received_at: "2026-06-29T10:00:00.000Z",
     }, db);
 
-    const updated = backfillLegacyS3RawUrls([{ bucket: "mailery-test-bucket", providerId: provider.id }], db);
+    const updated = backfillLegacyS3RawUrls([{ bucket: "emails-test-bucket", providerId: provider.id }], db);
     const inbound = db
       .query("SELECT raw_s3_url, mail_message_id FROM inbound_emails WHERE id = ?")
       .get(stored.id) as { raw_s3_url: string; mail_message_id: string };
@@ -475,9 +475,9 @@ describe("mail architecture data model", () => {
       .get(inbound.mail_message_id) as { raw_s3_url: string };
 
     expect(updated).toBe(1);
-    expect(inbound.raw_s3_url).toBe("s3://mailery-test-bucket/inbound/example.com/object-key");
-    expect(message.raw_s3_url).toBe("s3://mailery-test-bucket/inbound/example.com/object-key");
-    expect(backfillLegacyS3RawUrls([{ bucket: "mailery-test-bucket", providerId: provider.id }], db)).toBe(0);
+    expect(inbound.raw_s3_url).toBe("s3://emails-test-bucket/inbound/example.com/object-key");
+    expect(message.raw_s3_url).toBe("s3://emails-test-bucket/inbound/example.com/object-key");
+    expect(backfillLegacyS3RawUrls([{ bucket: "emails-test-bucket", providerId: provider.id }], db)).toBe(0);
   });
 
   it("dedupes source keys per source while allowing the same key on another source", () => {

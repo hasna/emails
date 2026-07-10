@@ -1,8 +1,8 @@
-// Pure inbound-MIME normalizer shared by the local S3 sync and the cloud
+// Pure inbound-MIME normalizer shared by the local S3 sync and the self_hosted
 // ingest worker.
 //
 // Takes a raw RFC822 message (as fetched from the SES→S3 archive) and produces
-// the exact field shape the cloud message store expects for an *inbound* row,
+// the exact field shape the self_hosted message store expects for an *inbound* row,
 // mirroring the mapping the historical backfill used (`src/lib/s3-sync.ts`):
 //   - from_addr  = the full From header text ("Name <addr>")
 //   - to/cc      = the parsed address list (bare addresses)

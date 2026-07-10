@@ -1,7 +1,7 @@
 import { For, Show } from "solid-js";
 import { TextAttributes } from "@opentui/core";
 import { useTerminalDimensions } from "@opentui/solid";
-import { useMailery } from "../context/mailery-state.js";
+import { useEmails } from "../context/emails-state.js";
 import { labelColor, selectedForeground, useTheme } from "../context/theme.js";
 import { Button, EmptyState, Row } from "../ui/primitives.js";
 import { bareAddress, listDateTime, truncate } from "../../tui/format.js";
@@ -16,17 +16,17 @@ interface MailboxColumns {
   date: number;
 }
 
-function MessageRow(props: { message: ReturnType<typeof useMailery>["state"]["messages"][number]; selected: boolean; showTo: boolean; columns: MailboxColumns }) {
+function MessageRow(props: { message: ReturnType<typeof useEmails>["state"]["messages"][number]; selected: boolean; showTo: boolean; columns: MailboxColumns }) {
   const theme = useTheme();
-  const mailery = useMailery();
+  const emails = useEmails();
   const message = () => props.message;
   const unread = () => !message().is_read;
   const rowBg = () => props.selected ? theme.primary : undefined;
   const rowFg = () => props.selected ? selectedForeground(theme, rowBg()) : theme.text;
-  const dateText = () => listDateTime(message().date, mailery.state.now).padStart(props.columns.date);
+  const dateText = () => listDateTime(message().date, emails.state.now).padStart(props.columns.date);
 
   return (
-    <Row active={props.selected} onPress={() => mailery.actions.selectMessage(message().id)}>
+    <Row active={props.selected} onPress={() => emails.actions.selectMessage(message().id)}>
       <box flexDirection="row" width="100%" columnGap={1} backgroundColor={rowBg()}>
         <box width={2} flexShrink={0}>
           <Show when={isImportantMessage(message())}>
@@ -58,15 +58,15 @@ function MessageRow(props: { message: ReturnType<typeof useMailery>["state"]["me
 
 export function MailboxRoute() {
   const theme = useTheme();
-  const mailery = useMailery();
+  const emails = useEmails();
   const toast = useToast();
   const dimensions = useTerminalDimensions();
-  const showTo = () => !mailery.selectedAddress().address && dimensions().width >= 108;
+  const showTo = () => !emails.selectedAddress().address && dimensions().width >= 108;
   const contentWidth = () => Math.max(48, dimensions().width - sidebarWidth(dimensions().width) - 6);
   const emptyDetail = () => {
-    if (mailery.state.search && mailery.state.activeLabel) return "No messages match this search and label.";
-    if (mailery.state.search) return "No messages match this search.";
-    if (mailery.state.activeLabel) return `No messages match ${labelDisplayName(mailery.state.activeLabel)}.`;
+    if (emails.state.search && emails.state.activeLabel) return "No messages match this search and label.";
+    if (emails.state.search) return "No messages match this search.";
+    if (emails.state.activeLabel) return `No messages match ${labelDisplayName(emails.state.activeLabel)}.`;
     return "Pull mail or choose another inbox.";
   };
   const columns = (): MailboxColumns => {
@@ -97,7 +97,7 @@ export function MailboxRoute() {
   };
   const pullNow = async () => {
     toast.show({ title: "Pulling mail", message: "Syncing configured inboxes.", tone: "info" });
-    const result = await mailery.actions.pullNow();
+    const result = await emails.actions.pullNow();
     toast.show({
       title: result.ok ? "Pull complete" : "Pull failed",
       message: result.ok ? `${result.pulled} message${result.pulled === 1 ? "" : "s"} pulled.` : result.reason ?? "Pull could not run.",
@@ -109,27 +109,27 @@ export function MailboxRoute() {
     <box width="100%" height="100%" flexDirection="column" backgroundColor={theme.background} paddingTop={1} paddingLeft={2} paddingRight={2}>
       <box height={2} flexDirection="row" justifyContent="space-between">
         <box flexDirection="row" columnGap={1}>
-          <Button label={mailery.state.sort === "newest" ? "Newest first" : "Oldest first"} onPress={() => mailery.actions.cycleSort()} />
+          <Button label={emails.state.sort === "newest" ? "Newest first" : "Oldest first"} onPress={() => emails.actions.cycleSort()} />
           <Button
             label="Filter"
-            active={!!mailery.state.search || !!mailery.state.activeLabel || mailery.state.mailbox !== "inbox"}
-            onPress={() => mailery.actions.openDialog("filter")}
+            active={!!emails.state.search || !!emails.state.activeLabel || emails.state.mailbox !== "inbox"}
+            onPress={() => emails.actions.openDialog("filter")}
           />
           <Button
             label="Group"
-            active={mailery.state.groupMode !== "none"}
-            onPress={() => mailery.actions.openDialog("group")}
+            active={emails.state.groupMode !== "none"}
+            onPress={() => emails.actions.openDialog("group")}
           />
-          <Button label="Search" onPress={() => mailery.actions.openDialog("search")} />
-          <Button label="Digest" onPress={() => mailery.actions.openDialog("digest")} />
-          {/* Pull is LOCAL S3→SQLite ingestion. In cloud mode the server ingests and the
+          <Button label="Search" onPress={() => emails.actions.openDialog("search")} />
+          <Button label="Digest" onPress={() => emails.actions.openDialog("digest")} />
+          {/* Pull is LOCAL S3→SQLite ingestion. In self_hosted mode the server ingests and the
               client syncs via the automatic changesSince delta, so the manual Pull button is
               meaningless — render it only in local mode. */}
-          <Show when={mailery.mode === "local"}>
+          <Show when={emails.mode === "local"}>
             <Button label="Pull" onPress={() => void pullNow()} />
           </Show>
         </box>
-        <text fg={theme.textMuted}>Page {mailery.state.page + 1}</text>
+        <text fg={theme.textMuted}>Page {emails.state.page + 1}</text>
       </box>
 
       <box height={1} />
@@ -153,20 +153,20 @@ export function MailboxRoute() {
       </box>
 
       <Show
-        when={mailery.state.messages.length > 0}
+        when={emails.state.messages.length > 0}
         fallback={<EmptyState title="No messages" detail={emptyDetail()} />}
       >
         <scrollbox flexGrow={1} width="100%">
-          <For each={mailery.groupedMessages()}>
+          <For each={emails.groupedMessages()}>
             {(group) => (
               <>
-                <Show when={mailery.state.groupMode !== "none"}>
+                <Show when={emails.state.groupMode !== "none"}>
                   <box height={1} paddingLeft={1}>
                     <text fg={theme.textMuted}>{group.title}</text>
                   </box>
                 </Show>
                 <For each={group.messages}>
-                  {(message) => <MessageRow message={message} selected={mailery.state.selectedMessageId === message.id} showTo={showTo()} columns={columns()} />}
+                  {(message) => <MessageRow message={message} selected={emails.state.selectedMessageId === message.id} showTo={showTo()} columns={columns()} />}
                 </For>
               </>
             )}
@@ -176,23 +176,23 @@ export function MailboxRoute() {
 
       <box height={1} />
       <box height={2} flexDirection="row" columnGap={1}>
-        <Button label="Previous page" onPress={() => mailery.actions.page(-1)} />
-        <Button label="Next page" active={mailery.state.hasMore} onPress={() => mailery.actions.page(1)} />
-        <Button label="Open" onPress={() => mailery.actions.openMessage()} />
-        <Button label="Label" onPress={() => mailery.actions.openDialog("labels")} />
-        <Show when={mailery.state.search}>
-          <text fg={theme.textMuted}>Search: {mailery.state.search}</text>
+        <Button label="Previous page" onPress={() => emails.actions.page(-1)} />
+        <Button label="Next page" active={emails.state.hasMore} onPress={() => emails.actions.page(1)} />
+        <Button label="Open" onPress={() => emails.actions.openMessage()} />
+        <Button label="Label" onPress={() => emails.actions.openDialog("labels")} />
+        <Show when={emails.state.search}>
+          <text fg={theme.textMuted}>Search: {emails.state.search}</text>
         </Show>
-        <Show when={mailery.state.activeLabel}>
-          <text fg={theme.textMuted}>Label: {labelDisplayName(mailery.state.activeLabel!)}</text>
+        <Show when={emails.state.activeLabel}>
+          <text fg={theme.textMuted}>Label: {labelDisplayName(emails.state.activeLabel!)}</text>
         </Show>
-        <Show when={mailery.state.groupMode !== "none"}>
-          <text fg={theme.textMuted}>Group: {mailboxGroupModeLabel(mailery.state.groupMode)}</text>
+        <Show when={emails.state.groupMode !== "none"}>
+          <text fg={theme.textMuted}>Group: {mailboxGroupModeLabel(emails.state.groupMode)}</text>
         </Show>
       </box>
 
       <box height={1} flexDirection="row" columnGap={1}>
-        <For each={(mailery.selectedMessage()?.labels ?? []).slice(0, 8)}>
+        <For each={(emails.selectedMessage()?.labels ?? []).slice(0, 8)}>
           {(label) => (
             <box flexDirection="row" columnGap={1}>
               <text fg={labelColor(theme, label)}>■</text>

@@ -9,7 +9,7 @@
 // service can gate its `/ready` probe on pending migrations. These map to the
 // contract's health/ready/version response shapes.
 //
-// PURE REMOTE (Amendment A1): health checks the cloud Postgres directly.
+// PURE REMOTE (Amendment A1): health checks the self_hosted Postgres directly.
 
 import type { TypedQueryClient } from "./query.js";
 import { MigrationLedger, type Migration, type MigrationRunnerOptions } from "./migrations.js";

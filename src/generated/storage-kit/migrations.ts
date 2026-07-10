@@ -13,7 +13,7 @@
 //     guard),
 //   - `dryRun` reports the plan without mutating anything.
 //
-// PURE REMOTE (Amendment A1): migrations run against the cloud Postgres. There
+// PURE REMOTE (Amendment A1): migrations run against the self_hosted Postgres. There
 // is no local schema and no sync of ledger rows between machines.
 
 import { createHash } from "node:crypto";

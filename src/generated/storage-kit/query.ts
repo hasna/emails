@@ -15,7 +15,7 @@
 //   one     -> T                       (exactly one row, else throws)
 //   execute -> void                    (DDL / writes where rows are ignored)
 //
-// PURE REMOTE (Amendment A1): this wrapper reads and writes the same cloud
+// PURE REMOTE (Amendment A1): this wrapper reads and writes the same self_hosted
 // Postgres. There is no cache, no local mirror, and no merge — a `get()` hits
 // the database every time.
 

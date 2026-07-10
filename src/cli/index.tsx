@@ -4,12 +4,7 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { commandModulesFor, routeRootPromptArgs, shouldPrintVersionEarly, type CommandModule } from "./router.js";
-import { createMaileryEventsClient, getMaileryEventsDataDir } from "../lib/mailery-events.js";
-import { loadStagedCloudEnv } from "../lib/load-cloud-env.js";
-
-// Route to the self-hosted /v1 API when the fleet flip creds are staged
-// (~/.hasna/cloud/mailery.env), before any command reads the cloud config.
-loadStagedCloudEnv();
+import { createEmailsEventsClient, getEmailsEventsDataDir } from "../lib/emails-events.js";
 
 function getPackageVersion(): string {
   try {
@@ -54,8 +49,8 @@ async function loadCommandModule(module: CommandModule): Promise<RegisterFn> {
     case "project-panel": return (await import("./commands/status.js")).registerStatusCommands;
     case "daemon": return (await import("./commands/daemon.js")).registerDaemonCommands;
     case "browserplan": return (await import("./commands/browserplan.js")).registerBrowserPlanCommands;
-    case "cloud": return (await import("./commands/cloud.js")).registerCloudCommands;
     case "db": return (await import("./commands/db.js")).registerDbCommands;
+    case "self-hosted": return (await import("./commands/self-hosted.js")).registerSelfHostedCommands;
   }
   throw new Error(`Unknown command module: ${module}`);
 }
@@ -75,16 +70,16 @@ async function registerOptionalEventsCommands(program: Command): Promise<void> {
     }>;
     const events = await importer("@hasna/events/commander");
     const eventsOptions = {
-      source: "mailery",
-      dataDir: getMaileryEventsDataDir(),
-      createClient: createMaileryEventsClient,
+      source: "emails",
+      dataDir: getEmailsEventsDataDir(),
+      createClient: createEmailsEventsClient,
     };
     events.registerEventsCommands?.(program, eventsOptions);
     if (!program.commands.some((command) => command.name() === "webhooks")) {
       events.registerChannelCommands?.(program, { ...eventsOptions, channelsCommandName: "webhooks" });
     }
   } catch {
-    // The events integration is optional; keep the Mailery CLI usable when the
+    // The events integration is optional; keep the Emails CLI usable when the
     // companion package is not installed in a global/npm environment.
   }
 }
@@ -117,7 +112,7 @@ async function main(): Promise<void> {
 
   program
     .name("emails")
-    .description("Mailery email management CLI - send, receive, sync, and manage email via Resend, AWS SES, and Cloudflare")
+    .description("Emails email management CLI - send, receive, sync, and manage email locally or in your AWS account")
     .version(version)
     .option("--json", "Output JSON instead of formatted text")
     .option("-q, --quiet", "Suppress info output")

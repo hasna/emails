@@ -68,7 +68,7 @@ export function registerAwsCommands(program: Command, output: (data: unknown, fo
         console.log(chalk.dim("  Add this MX record to your DNS provider."));
         console.log(chalk.dim("  (For Cloudflare: emails domain setup-cloudflare ... will set it automatically)\n"));
 
-        console.log(chalk.dim("  To sync received mailery locally:"));
+        console.log(chalk.dim("  To sync received emails locally:"));
         console.log(chalk.dim(`    emails inbox sync-s3 --bucket ${bucket} --prefix ${result.s3_prefix}\n`));
 
         output(result, "");

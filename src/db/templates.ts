@@ -2,7 +2,7 @@ import type { Database } from "./database.js";
 import { getDatabase, uuid, now } from "./database.js";
 import { parseJsonObject } from "./json.js";
 import { safeOffset, safeOptionalLimit } from "./pagination.js";
-import { cloudResource, cloudListQuery, cloudPage, cobj, ciso, cstr, cstrOrNull } from "./cloud-resource.js";
+import { selfHostedResource, selfHostedListQuery, selfHostedPage, cobj, ciso, cstr, cstrOrNull } from "./self-hosted-resource.js";
 
 const TEMPLATE_RESOURCE = "templates";
 
@@ -127,12 +127,12 @@ export function createTemplate(
   },
   db?: Database,
 ): Template {
-  // Cloud mode: route the write to the /v1/templates API so a flipped client no
+  // Self-hosted mode: route the write to the /v1/templates API so a flipped client no
   // longer creates templates in the local SQLite island while `template list`
-  // reads the cloud (the split-brain bug). Reads already route via listTemplates().
-  const cloud = cloudResource(TEMPLATE_RESOURCE);
-  if (cloud) {
-    return apiToTemplate(cloud.create({
+  // reads the selfHosted (the split-brain bug). Reads already route via listTemplates().
+  const selfHosted = selfHostedResource(TEMPLATE_RESOURCE);
+  if (selfHosted) {
+    return apiToTemplate(selfHosted.create({
       name: input.name,
       subject_template: input.subject_template,
       html_template: input.html_template || null,
@@ -163,16 +163,16 @@ export function createTemplate(
 }
 
 export function getTemplate(nameOrId: string, db?: Database): Template | null {
-  // Cloud mode: resolve `template show`/`remove` (and every send-flow template
+  // Self-hosted mode: resolve `template show`/`remove` (and every send-flow template
   // lookup) against /v1/templates so a flipped client reads the SAME template a
-  // cloud `template add` wrote — not the local island (the read half of the
+  // selfHosted `template add` wrote — not the local island (the read half of the
   // split-brain the create path already closed). The API only exposes get-by-id,
-  // so a name lookup falls back to a bounded cloud list scan.
-  const cloud = cloudResource(TEMPLATE_RESOURCE);
-  if (cloud) {
-    const direct = cloud.get(nameOrId);
+  // so a name lookup falls back to a bounded selfHosted list scan.
+  const selfHosted = selfHostedResource(TEMPLATE_RESOURCE);
+  if (selfHosted) {
+    const direct = selfHosted.get(nameOrId);
     if (direct) return apiToTemplate(direct);
-    const match = cloud.list({ limit: 500 }).map(apiToTemplate).find((t) => t.name === nameOrId);
+    const match = selfHosted.list({ limit: 500 }).map(apiToTemplate).find((t) => t.name === nameOrId);
     return match ?? null;
   }
 
@@ -194,12 +194,12 @@ export function getTemplateByName(name: string, db?: Database): Template | null 
 }
 
 export function listTemplates(db?: Database, opts?: ListTemplateOptions): Template[] {
-  const cloud = cloudResource(TEMPLATE_RESOURCE);
-  if (cloud) {
-    const { query, limit, offset } = cloudListQuery(opts);
-    const rows = cloud.list(query).map(apiToTemplate);
+  const selfHosted = selfHostedResource(TEMPLATE_RESOURCE);
+  if (selfHosted) {
+    const { query, limit, offset } = selfHostedListQuery(opts);
+    const rows = selfHosted.list(query).map(apiToTemplate);
     rows.sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
-    return cloudPage(rows, limit, offset);
+    return selfHostedPage(rows, limit, offset);
   }
 
   const d = db || getDatabase();
@@ -212,12 +212,12 @@ export function listTemplates(db?: Database, opts?: ListTemplateOptions): Templa
 }
 
 export function listTemplateSummaries(db?: Database, opts?: ListTemplateOptions): TemplateSummary[] {
-  const cloud = cloudResource(TEMPLATE_RESOURCE);
-  if (cloud) {
-    const { query, limit, offset } = cloudListQuery(opts);
-    const rows = cloud.list(query).map(apiToTemplate).map(templateToSummary);
+  const selfHosted = selfHostedResource(TEMPLATE_RESOURCE);
+  if (selfHosted) {
+    const { query, limit, offset } = selfHostedListQuery(opts);
+    const rows = selfHosted.list(query).map(apiToTemplate).map(templateToSummary);
     rows.sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
-    return cloudPage(rows, limit, offset);
+    return selfHostedPage(rows, limit, offset);
   }
 
   const d = db || getDatabase();
@@ -230,13 +230,13 @@ export function listTemplateSummaries(db?: Database, opts?: ListTemplateOptions)
 }
 
 export function deleteTemplate(nameOrId: string, db?: Database): boolean {
-  // Cloud mode: `template remove` must delete the cloud record, not a local
+  // Self-hosted mode: `template remove` must delete the selfHosted record, not a local
   // copy. Resolve name -> id first (the API deletes by id only), then DELETE.
-  const cloud = cloudResource(TEMPLATE_RESOURCE);
-  if (cloud) {
+  const selfHosted = selfHostedResource(TEMPLATE_RESOURCE);
+  if (selfHosted) {
     const existing = getTemplate(nameOrId);
     if (!existing) return false;
-    return cloud.del(existing.id);
+    return selfHosted.del(existing.id);
   }
 
   const d = db || getDatabase();

@@ -11,7 +11,7 @@
 import { parseSesNotification } from "../../lib/inbound-realtime.js";
 import { json, badRequest } from "./helpers.js";
 import { getInboundBuckets, loadConfig } from "../../lib/config.js";
-import { emitMaileryEventBestEffort } from "../../lib/mailery-events.js";
+import { emitEmailsEventBestEffort } from "../../lib/emails-events.js";
 import { verifySnsStructure } from "../../lib/webhook-events.js";
 
 /** Injected fetch so confirmation is testable. */
@@ -27,20 +27,20 @@ export function isAwsSnsUrl(url: string): boolean {
 function configuredWebhookSecret(): string | undefined {
   const config = loadConfig();
   return (config["ses_inbound_webhook_secret"] as string | undefined)
-    ?? (config["mailery_inbound_webhook_secret"] as string | undefined)
-    ?? process.env["MAILERY_SES_INBOUND_WEBHOOK_SECRET"]
+    ?? (config["emails_inbound_webhook_secret"] as string | undefined)
     ?? process.env["EMAILS_SES_INBOUND_WEBHOOK_SECRET"]
-    ?? process.env["MAILERY_INBOUND_WEBHOOK_SECRET"];
+    ?? process.env["EMAILS_SES_INBOUND_WEBHOOK_SECRET"]
+    ?? process.env["EMAILS_INBOUND_WEBHOOK_SECRET"];
 }
 
 function requireWebhookSecret(): boolean {
-  const raw = process.env["MAILERY_REQUIRE_SES_INBOUND_SECRET"]
+  const raw = process.env["EMAILS_REQUIRE_SES_INBOUND_SECRET"]
     ?? process.env["EMAILS_REQUIRE_SES_INBOUND_SECRET"];
   return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
 }
 
 function requestWebhookSecret(req: Request): string | null {
-  const direct = req.headers.get("x-mailery-webhook-secret")
+  const direct = req.headers.get("x-emails-webhook-secret")
     ?? req.headers.get("x-emails-webhook-secret");
   if (direct) return direct;
   const auth = req.headers.get("authorization") ?? "";
@@ -105,11 +105,11 @@ export async function handleInboundWebhook(
       const { syncS3Inbox } = await import("../../lib/s3-sync.js");
       return syncS3Inbox({ bucket: b, prefix: p, region: r, providerId: syncOpts?.providerId, keys: syncOpts?.keys, limit: syncOpts?.keys?.length ?? 100 });
     });
-    emitMaileryEventBestEffort({
-      type: "mailery.inbound.sync.requested",
+    emitEmailsEventBestEffort({
+      type: "emails.inbound.sync.requested",
       subject: note.messageId,
       severity: "info",
-      dedupeKey: `mailery:inbound:ses-sync-requested:${note.messageId}`,
+      dedupeKey: `emails:inbound:ses-sync-requested:${note.messageId}`,
       message: "SES inbound notification requested mailbox sync",
       data: {
         message_id: note.messageId,

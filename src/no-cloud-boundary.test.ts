@@ -1,110 +1,87 @@
 import { describe, expect, it } from "bun:test";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { join, relative } from "node:path";
+import { extname, join, relative } from "node:path";
+import pkg from "../package.json" with { type: "json" };
+import { normalizeEmailsMode } from "./lib/mode.js";
 
 const root = join(import.meta.dir, "..");
-const PRIVATE_PLATFORM_PATTERNS = [
-  /@hasna\/cloud\b/,
-  new RegExp(`${["@hasna", "tools"].join("")}\\b`),
-  new RegExp(`${["platform", "mailery"].join("-")}\\b`),
-  /@hasna\/wallets\b/,
-  new RegExp(`\\b${["open", "cloud"].join("-")}\\b`),
-  new RegExp(`\\b${["cloud", "mcp"].join("-")}\\b`),
-  new RegExp(`\\b${["cloud", "tool"].join("-")}\\b`),
-  new RegExp(`\\b${["STRIPE", "SECRET", "KEY"].join("_")}\\b`),
-  new RegExp(`\\b${["STRIPE", "WEBHOOK", "SECRET"].join("_")}\\b`),
-  new RegExp(`\\b${["MAILERY", "ADMIN", "API", "KEY"].join("_")}\\b`),
-  new RegExp(`${["HASNA", "CLOUD", ""].join("_")}`),
-  new RegExp(`${["HASNA", "RDS"].join("_")}`),
-  new RegExp(`\\b${["rds", "cluster"].join("_")}\\b`, "i"),
-  new RegExp(`${["hasna", "xyz"].join("-")}`, "i"),
-  new RegExp(`${["hasna", "xyz"].join("/")}`, "i"),
-  new RegExp(`${["hasna", "studio"].join("-")}`, "i"),
-  new RegExp(`${["hasna", "studio"].join("")}`, "i"),
-  new RegExp(`${["HASNA", "XYZ", ""].join("_")}`, "i"),
-  new RegExp(`${["apps", "prod", "postgres"].join("-")}`, "i"),
-  new RegExp(`${["mailery", "postgres"].join("-")}`, "i"),
-  new RegExp(`${["mailery", "email", "archive"].join("-")}`, "i"),
-  new RegExp(`${["mailery", "archive"].join("-")}`, "i"),
-  new RegExp(`${["mailery", "self-hosted"].join("/")}`, "i"),
-  new RegExp(`${["mailery", "self-hosted", "postgres"].join("-")}`, "i"),
-  new RegExp(`${["mailery", "self-hosted", "emails", "prod"].join("/")}`, "i"),
-] as const;
-
-const SOURCE_ROOTS = [
+const roots = [
+  ".github",
   "AGENTS.md",
+  "Dockerfile",
   "Package.swift",
   "README.md",
   "Sources",
   "dashboard",
+  "docker-compose.yml",
   "docs",
-  "scripts",
+  "hasna.contract.json",
+  "package.json",
   "sdk",
   "src",
   "web",
 ] as const;
+const textExtensions = new Set([".css", ".html", ".js", ".json", ".md", ".mjs", ".swift", ".ts", ".tsx", ".yaml", ".yml"]);
+const excluded = new Set(["src/no-cloud-boundary.test.ts"]);
 
-const TEXT_EXTENSIONS = new Set([
-  ".cjs",
-  ".css",
-  ".js",
-  ".json",
-  ".jsx",
-  ".md",
-  ".mjs",
-  ".mts",
-  ".ts",
-  ".tsx",
-  ".txt",
-  ".yaml",
-  ".yml",
-]);
-
-function extension(path: string): string {
-  const index = path.lastIndexOf(".");
-  return index >= 0 ? path.slice(index) : "";
-}
-
-function collectFiles(path: string): string[] {
+function files(path: string): string[] {
   if (!existsSync(path)) return [];
   const stat = statSync(path);
-  if (stat.isFile()) return TEXT_EXTENSIONS.has(extension(path)) ? [path] : [];
+  if (stat.isFile()) return textExtensions.has(extname(path)) || path.endsWith("Dockerfile") ? [path] : [];
   if (!stat.isDirectory()) return [];
-
-  const files: string[] = [];
-  for (const entry of readdirSync(path)) {
-    if (entry === "dist" || entry === "node_modules") continue;
-    files.push(...collectFiles(join(path, entry)));
-  }
-  return files;
+  return readdirSync(path).flatMap((entry) => entry === "node_modules" || entry === "dist" ? [] : files(join(path, entry)));
 }
 
-function privateCloudHits(files: string[]): string[] {
-  const hits: string[] = [];
-  for (const file of files) {
-    const text = readFileSync(file, "utf8");
-    for (const pattern of PRIVATE_PLATFORM_PATTERNS) {
-      if (pattern.test(text)) {
-        hits.push(relative(root, file));
-        break;
-      }
+function scannedFiles(): string[] {
+  return roots.flatMap((entry) => files(join(root, entry))).filter((path) => !excluded.has(relative(root, path)));
+}
+
+function hits(pattern: RegExp): string[] {
+  return scannedFiles()
+    .filter((path) => pattern.test(readFileSync(path, "utf8")))
+    .map((path) => relative(root, path))
+    .sort();
+}
+
+function activeHits(pattern: RegExp, allowedFiles: string[] = []): string[] {
+  const allowed = new Set(allowedFiles);
+  return scannedFiles()
+    .filter((path) => !allowed.has(relative(root, path)))
+    .filter((path) => pattern.test(readFileSync(path, "utf8")))
+    .map((path) => relative(root, path))
+    .sort();
+}
+
+describe("no hosted control plane", () => {
+  it("ships exactly local and self_hosted modes without aliases", () => {
+    expect(normalizeEmailsMode("local")).toBe("local");
+    expect(normalizeEmailsMode("self_hosted")).toBe("self_hosted");
+    for (const value of ["cloud", "remote", "hybrid", "self-hosted", "selfhosted"]) {
+      expect(() => normalizeEmailsMode(value)).toThrow();
     }
-  }
-  return hits.sort();
-}
-
-describe("no private platform package boundary", () => {
-  it("keeps package metadata and lockfiles free of private platform packages", () => {
-    const files = ["package.json", "bun.lock"]
-      .map((file) => join(root, file))
-      .filter((file) => existsSync(file));
-
-    expect(privateCloudHits(files)).toEqual([]);
   });
 
-  it("keeps runtime source, SDK, and docs off private platform package names", () => {
-    const files = SOURCE_ROOTS.flatMap((entry) => collectFiles(join(root, entry)));
+  it("has no SaaS client, command, export, package bin, or fleet env loader", () => {
+    expect(existsSync(join(root, "src/cli/commands/cloud.ts"))).toBe(false);
+    expect(existsSync(join(root, "src/lib/mailery-cloud-client.ts"))).toBe(false);
+    expect(existsSync(join(root, "src/lib/load-cloud-env.ts"))).toBe(false);
+    expect((pkg.exports as Record<string, unknown>)["./cloud"]).toBeUndefined();
+    expect(Object.keys(pkg.bin)).toEqual(["emails", "emails-mcp", "emails-serve"]);
+    expect(Object.keys(pkg.bin).some((name) => name.toLowerCase().includes("mailery"))).toBe(false);
+  });
 
-    expect(privateCloudHits(files)).toEqual([]);
+  it("contains no hosted endpoint, account, billing, tenant, credit, or upload contract", () => {
+    expect(hits(/https?:\/\/(?:[^/]*\.)?(?:mailery\.co|emails\.hasna\.xyz)/i)).toEqual([]);
+    expect(hits(/\/(?:api\/v1\/(?:auth\/(?:login|signup)|signup|billing|checkout|portal|tenants?|credits?)|auth\/(?:login|signup)|signup)\b/i)).toEqual([]);
+    expect(hits(/\b(?:cloud_api_url|cloud_session_token|cloud_api_key|stripe_customer_id|tenant_id|credit_balance)\b/i)).toEqual([]);
+    expect(hits(/\bhasna-xyz\b|\/hasna\/deploy\/|789877399345/i)).toEqual([]);
+  });
+
+  it("does not encode a removed mode in runtime or deployment configuration", () => {
+    expect(hits(/(?:EMAILS|HASNA_EMAILS)_(?:STORAGE_)?MODE\s*[:=]\s*["']?(?:cloud|remote|hybrid)\b/i)).toEqual([]);
+  });
+
+  it("contains no active SaaS, fleet, or cloud-prefixed implementation vocabulary", () => {
+    expect(activeHits(/\b(?:saas|fleet)\b|\bcloud_/i, ["src/lib/mode.ts"])).toEqual([]);
   });
 });

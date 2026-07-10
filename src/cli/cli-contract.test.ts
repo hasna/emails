@@ -25,17 +25,17 @@ afterEach(() => {
 
 function isolatedEnv(dbPath: string, homePath: string): NodeJS.ProcessEnv {
   mkdirSync(homePath, { recursive: true });
-  const {
-    HASNA_EMAILS_DATABASE_URL: _canonicalDb,
-    EMAILS_DATABASE_URL: _fallbackDb,
-    HASNA_EMAILS_STORAGE_MODE: _canonicalMode,
-    EMAILS_STORAGE_MODE: _fallbackMode,
-    MAILERY_MODE: _maileryMode,
-    HASNA_EMAILS_MODE: _hasnaEmailsMode,
-    ...baseEnv
-  } = process.env;
+  const baseEnv = { ...process.env };
+  for (const key of [
+    "HASNA_EMAILS_DATABASE_URL", "EMAILS_DATABASE_URL", "EMAILS_STORAGE_MODE",
+    "HASNA_EMAILS_MODE", "MAILERY_MODE", "HASNA_MAILERY_MODE",
+    "MAILERY_STORAGE_MODE", "HASNA_MAILERY_STORAGE_MODE", "MAILERY_API_URL",
+    "MAILERY_API_KEY", "HASNA_MAILERY_API_URL", "HASNA_MAILERY_API_KEY",
+    "EMAILS_SELF_HOSTED_URL", "EMAILS_SELF_HOSTED_API_KEY",
+  ]) delete baseEnv[key];
   return {
     ...baseEnv,
+    EMAILS_MODE: "local",
     EMAILS_DB_PATH: dbPath,
     HOME: homePath,
     NO_COLOR: "1",
@@ -63,7 +63,7 @@ function stderrText(result: ReturnType<typeof runCli>): string {
 function expectCliJsonOk<T>(result: ReturnType<typeof runCli>): T {
   const stdout = stdoutText(result);
   const stderr = stderrText(result);
-  expect(result.exitCode).toBe(0);
+  expect(result.exitCode, stderr).toBe(0);
   expect(stderr).toBe("");
   return JSON.parse(stdout) as T;
 }
@@ -177,19 +177,19 @@ describe("CLI JSON contracts", () => {
     const dir = mkdtempSync(join(tmpdir(), "emails-cli-redaction-"));
     tempDirs.push(dir);
     const env = isolatedEnv(join(dir, "emails.db"), join(dir, "home"));
-    const connectionString = "postgres://mailery_user:sup3r-s3cret@db.internal:5432/mailery";
+    const connectionString = "postgres://emails_user:sup3r-s3cret@db.internal:5432/emails";
 
     // redaction.ts is the last line of defense: a connection string stored under
     // a sensitive key must be replaced with the redaction sentinel.
-    expect(redactSecrets({ cloud_session_token: connectionString })).toEqual({ cloud_session_token: "***" });
+    expect(redactSecrets({ resend_api_key: connectionString })).toEqual({ resend_api_key: "***" });
 
-    const set = runCli(["config", "set", "cloud_session_token", connectionString], env);
+    const set = runCli(["config", "set", "resend_api_key", connectionString], env);
     expect(set.exitCode).toBe(0);
     expect(stdoutText(set)).toContain("***");
     expect(stdoutText(set)).not.toContain(connectionString);
     expect(stdoutText(set)).not.toContain("sup3r-s3cret");
 
-    const get = runCli(["config", "get", "cloud_session_token"], env);
+    const get = runCli(["config", "get", "resend_api_key"], env);
     expect(get.exitCode).toBe(0);
     const getOut = stdoutText(get);
     expect(getOut).toContain("***");
@@ -215,7 +215,7 @@ describe("CLI JSON contracts", () => {
 
     const parsed = JSON.parse(stderr) as { error: { message: string; code: string; fix_commands: string[] } };
     expect(parsed.error.code).toBe("not_found");
-    expect(parsed.error.message).toContain("Could not resolve ID");
+    expect(parsed.error.message).toContain("Provider not found or ambiguous");
     expect(parsed.error.fix_commands).toContain("emails provider list --json");
   });
 
@@ -283,12 +283,12 @@ describe("CLI JSON contracts", () => {
     expect(stderr).not.toContain("CEREBRAS_API_KEY");
   });
 
-  it("prints JSON errors for unknown subcommands when JSON mode is enabled", () => {
+  it("rejects the removed cloud command with a JSON unknown-command error", () => {
     const dir = mkdtempSync(join(tmpdir(), "emails-cli-contract-"));
     tempDirs.push(dir);
     const env = isolatedEnv(join(dir, "emails.db"), join(dir, "home"));
 
-    const result = runCli(["--json", "cloud", "definitely-missing"], env);
+    const result = runCli(["--json", "cloud"], env);
     expect(result.exitCode).toBe(1);
     expect(stdoutText(result)).toBe("");
     const parsed = JSON.parse(stderrText(result)) as { error: { code: string; message: string } };
@@ -477,10 +477,6 @@ describe("CLI JSON contracts", () => {
       readiness: { send_ready: false, receive_ready: false },
     });
 
-    const cloudEnv = {
-      ...env,
-      MAILERY_MODE: "cloud",
-    };
     const selfHosted = expectCliJsonOk<{
       id: string;
       domain: string;
@@ -493,12 +489,12 @@ describe("CLI JSON contracts", () => {
         inbound_evidence_ready: boolean;
         inbound_evidence: { live_s3_sources: number };
       };
-    }>(runCli(["--json", "domains", "status", "selfhosted.example.com"], cloudEnv));
+    }>(runCli(["--json", "domains", "status", "selfhosted.example.com"], env));
 
     expect(selfHosted).toMatchObject({
       id: seeded.selfHostedDomainId,
       domain: "selfhosted.example.com",
-      mode: "cloud",
+      mode: "local",
       domain_type: "self_hosted",
       source_of_truth: "postgres",
       readiness: {
@@ -570,7 +566,7 @@ describe("CLI JSON contracts", () => {
     expect(count).toEqual({ count: 1 });
   });
 
-  it("prints a project panel contract from local Mailery state", () => {
+  it("prints a project panel contract from local Emails state", () => {
     const dir = mkdtempSync(join(tmpdir(), "emails-cli-contract-"));
     tempDirs.push(dir);
     const env = isolatedEnv(join(dir, "emails.db"), join(dir, "home"));
@@ -605,7 +601,7 @@ describe("CLI JSON contracts", () => {
 
     expect(panel.schema).toBe("hasna.project_panel.v1");
     expect(panel.projectId).toBe("swiss-bank-account");
-    expect(panel.provider.kind).toBe("mailery");
+    expect(panel.provider.kind).toBe("custom");
     expect(panel.metrics.find((metric) => metric.id === "inbox_unread")?.value).toBe(1);
     expect(panel.items.some((item) => item.id === seeded.inboundId)).toBe(true);
   });

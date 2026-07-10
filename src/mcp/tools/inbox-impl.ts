@@ -27,7 +27,7 @@ function inboxLimit(value: number | undefined, fallback: number): number {
 }
 
 async function runAutoPull(opts: { s3?: boolean; limit?: number }) {
-  // Auto-pull is LOCAL S3 ingestion. In cloud mode the API is the source of truth and
+  // Auto-pull is LOCAL S3 ingestion. In self_hosted mode the API is the source of truth and
   // each poll already re-reads it through the seam, so there is nothing to pull.
   if (resolveMailDataSource().mode !== "local") return { pulled: 0 };
   const { autoPull } = await import("../../cli/tui/autopull.js");
@@ -62,7 +62,7 @@ function mailboxSourceCliFlags(source: MailboxSource | undefined): string {
 }
 
 // Resolve a possibly-short id to a full id through the seam: local SQLite partial-id
-// resolution, or a bounded cloud prefix match (so a truncated id works in cloud too,
+// resolution, or a bounded self_hosted prefix match (so a truncated id works in self_hosted too,
 // matching the CLI).
 function resolveMailId(ds: MailDataSource, id: string): Promise<string> {
   return ds.resolveId(id);
@@ -83,7 +83,7 @@ function folderForListFlags(flags: { unread?: boolean; starred?: boolean; archiv
 }
 
 // The read/detail projection shared by get_inbound_email (and returned by the mail
-// mutation tools). Built from the seam's TuiMessage + MessageBody so cloud and local
+// mutation tools). Built from the seam's TuiMessage + MessageBody so self_hosted and local
 // yield the same shape.
 function messageDetail(msg: TuiMessage, body: MessageBody | null): Record<string, unknown> {
   return {
@@ -128,9 +128,9 @@ async function seamMessageOrThrow(ds: MailDataSource, id: string): Promise<TuiMe
 
 export function registerInboxTools(server: McpServer): void {
   // ─── INBOUND EMAILS ─────────────────────────────────────────────────────────
-  // The latest inbound email for an address, body-free, via the seam so cloud mode
+  // The latest inbound email for an address, body-free, via the seam so self_hosted mode
   // reads the API (not the empty local store). verificationCandidates already scopes
-  // to recipient (client-side in cloud), excludes sent, and orders newest-first.
+  // to recipient (client-side in self_hosted), excludes sent, and orders newest-first.
   const getLatestInboundEmailForAddress = async (
     address: string,
     filters: { since?: string; from?: string; subject?: string },
@@ -573,7 +573,7 @@ export function registerInboxTools(server: McpServer): void {
   },
   async ({ provider_id }) => {
     try {
-      // local: wipes the inbound store (optionally by provider). cloud: drains a
+      // local: wipes the inbound store (optionally by provider). self_hosted: drains a
       // server-side bulk delete over the inbox folder through the seam.
       const ds = resolveMailDataSource();
       const { cleared } = await ds.clear({ providerId: provider_id });

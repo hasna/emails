@@ -8,20 +8,20 @@
 
 ## What it is
 
-A canonical Postgres storage kit shared across the Hasna fleet:
+A canonical Postgres storage kit for self-hosted Emails deployments:
 
 | File            | Purpose                                                              |
 | --------------- | ------------------------------------------------------------------- |
-| `mode.ts`       | Storage-mode + env resolution (`local` \| `cloud`), per the contract |
+| `mode.ts`       | Storage-mode + env resolution (`local` \| `self_hosted`), per the contract |
 | `tls.ts`        | The one correct TLS approach (libpq `sslmode` semantics + RDS CA)    |
-| `pool.ts`       | `pg.Pool` factory with fleet-standard TLS                            |
+| `pool.ts`       | `pg.Pool` factory with consistent TLS                                |
 | `query.ts`      | Typed query wrapper (`query` / `many` / `get` / `one` / `execute`)   |
 | `migrations.ts` | `schema_migrations` ledger with sha256 checksums                     |
 | `health.ts`     | `checkHealth` (SELECT 1) and `checkReady` (migrated?) probes         |
 
 ## PURE REMOTE (Amendment A1)
 
-Cloud mode = reads **and** writes go directly to cloud Postgres. This kit
+Self-hosted mode = reads **and** writes go directly to self_hosted Postgres. This kit
 contains **no sync engine, no cache-as-mode, and no merge logic**. In `local`
 mode there is no Postgres pool at all; SQLite is authoritative.
 

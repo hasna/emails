@@ -6,7 +6,7 @@ import { assertSendAuthorized } from "../db/send-keys.js";
 import { canonicalSender } from "./email-address.js";
 import { getWarmingSchedule } from "../db/warming.js";
 import { getDomainByName } from "../db/domains.js";
-import { resolveMaileryMode } from "./mode.js";
+import { resolveEmailsMode } from "./mode.js";
 import { getTodayLimit, getTodaySentCount } from "./warming.js";
 import type { Provider, SendEmailOptions } from "../types/index.js";
 import type { Database } from "../db/database.js";
@@ -70,10 +70,10 @@ function domainLifecycleFix(domainName: string, provider: Provider): string {
 }
 
 export function assertDomainOutboundReady(provider: Provider, opts: SendEmailOptions, db?: Database): void {
-  const mode = resolveMaileryMode().mode;
+  const mode = resolveEmailsMode().mode;
 
-  if (mode === "cloud") {
-    throw new Error(`Mailery Cloud mode delegates outbound sends to the hosted Mailery Cloud API. Local provider send is disabled for ${providerRef(provider)}.`);
+  if (mode === "self_hosted") {
+    throw new Error(`Self-hosted sends must use the authenticated Emails service endpoint for ${providerRef(provider)}.`);
   }
 
   // Sandbox is the explicit local/test provider. It must remain usable in OSS

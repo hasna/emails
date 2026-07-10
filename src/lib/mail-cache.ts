@@ -1,4 +1,4 @@
-// Bounded, server-authoritative read-through cache for the cloud (thin-client)
+// Bounded, server-authoritative read-through cache for the self_hosted (thin-client)
 // mail data source. This is NOT a full mirror and NEVER a source of truth: it holds
 // a small, LRU+TTL-bounded window of what the client is currently looking at
 // (message list pages, opened bodies, group counts, mailbox/label lists) and lets

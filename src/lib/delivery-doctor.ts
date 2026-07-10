@@ -10,7 +10,7 @@ import { assessDomainReadiness } from "./domain-readiness.js";
 import { domainInboundReadinessSignals } from "./domain-inbound-evidence.js";
 import { enrichAddresses } from "./address-ownership.js";
 import { getInboundBuckets, loadConfig } from "./config.js";
-import { resolveMaileryMode } from "./mode.js";
+import { resolveEmailsMode } from "./mode.js";
 import type { MxAssessment } from "./mx-ownership.js";
 
 export interface DeliveryDoctorCheck {
@@ -101,7 +101,7 @@ export function diagnoseInboundDelivery(address: string, db: Database = getDatab
   }
 
   if (domainRows.length > 0) {
-    const mode = resolveMaileryMode();
+    const mode = resolveEmailsMode();
     for (const d of domainRows) {
       const readiness = assessDomainReadiness(d, domainProvisioning.get(d.id) ?? null, {
         ...domainInboundReadinessSignals(d, mode),

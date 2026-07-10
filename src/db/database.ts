@@ -4,16 +4,16 @@ export type { Database };
 import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { sqlEmailAddress, sqlEmailDomain } from "./email-address-sql.js";
-import { cloudStoreFor, isCloudMode } from "./cloud-store.js";
+import { selfHostedStoreFor, isSelfHostedMode } from "./self-hosted-store.js";
 
-// Resources whose repository is fully routed to the cloud HTTP API in
-// self_hosted mode. Only these route id-resolution to the cloud so it stays
+// Resources whose repository is fully routed to the selfHosted HTTP API in
+// self_hosted mode. Only these route id-resolution to the selfHosted so it stays
 // consistent with the repo layer; everything else stays local. `domains` and
 // `addresses` repos (src/db/domains.ts, src/db/addresses.ts + address-lifecycle)
-// route ALL reads/writes to the cloud store, so their id-resolution MUST also
-// resolve against the cloud dataset — otherwise a flipped machine resolves ids
+// route ALL reads/writes to the selfHosted store, so their id-resolution MUST also
+// resolve against the selfHosted dataset — otherwise a flipped machine resolves ids
 // against its empty local island (the split-brain bug this set exists to close).
-const CLOUD_BACKED_RESOURCES = new Set(["domains", "addresses"]);
+const SELF_HOSTED_BACKED_RESOURCES = new Set(["domains", "addresses"]);
 
 function isInMemoryDb(path: string): boolean {
   return path === ":memory:" || path.startsWith("file::memory:");
@@ -273,8 +273,8 @@ function mailboxRecipientRowsSql(idSql: string, toAddressesSql: string): string 
              AND normalized.address NOT LIKE '%>%'
           UNION ALL
           SELECT ${idSql} AS inbound_email_id,
-                 'legacy-inbound@local.mailery' AS address,
-                 'mbx:legacy-inbound@local.mailery' AS mailbox_id
+                 'legacy-inbound@local.emails' AS address,
+                 'mbx:legacy-inbound@local.emails' AS mailbox_id
            WHERE NOT EXISTS (
              SELECT 1
                FROM (
@@ -438,8 +438,8 @@ const MAIL_ARCHITECTURE_BACKFILL_SQL = `
    GROUP BY recipient.address;
 
   INSERT OR IGNORE INTO mailboxes (id, address, display_name, status, created_at, updated_at)
-  SELECT 'mbx:legacy-inbound@local.mailery',
-         'legacy-inbound@local.mailery',
+  SELECT 'mbx:legacy-inbound@local.emails',
+         'legacy-inbound@local.emails',
          'Legacy inbound',
          'active',
          COALESCE(MIN(inbound.created_at), datetime('now')),
@@ -496,8 +496,8 @@ const MAIL_ARCHITECTURE_BACKFILL_SQL = `
       JOIN inbound_recipients recipient ON recipient.inbound_email_id = inbound.id
     UNION ALL
     SELECT inbound.id,
-           'legacy-inbound@local.mailery',
-           'mbx:legacy-inbound@local.mailery'
+           'legacy-inbound@local.emails',
+           'mbx:legacy-inbound@local.emails'
       FROM inbound_emails inbound
      WHERE NOT EXISTS (
        SELECT 1 FROM inbound_recipients recipient WHERE recipient.inbound_email_id = inbound.id
@@ -551,8 +551,8 @@ const MAIL_ARCHITECTURE_BACKFILL_SQL = `
       JOIN inbound_recipients recipient ON recipient.inbound_email_id = inbound.id
     UNION ALL
     SELECT inbound.id,
-           'legacy-inbound@local.mailery',
-           'mbx:legacy-inbound@local.mailery'
+           'legacy-inbound@local.emails',
+           'mbx:legacy-inbound@local.emails'
       FROM inbound_emails inbound
      WHERE NOT EXISTS (
        SELECT 1 FROM inbound_recipients recipient WHERE recipient.inbound_email_id = inbound.id
@@ -775,8 +775,8 @@ const MAIL_ARCHITECTURE_INBOUND_DELETE_TRIGGER_SQL = `
 `;
 
 const MAIL_ARCHITECTURE_STATE_RECONCILE_SQL = `
-  DROP TABLE IF EXISTS temp_mailery_inbound_state_reconcile;
-  CREATE TEMP TABLE temp_mailery_inbound_state_reconcile AS
+  DROP TABLE IF EXISTS temp_emails_inbound_state_reconcile;
+  CREATE TEMP TABLE temp_emails_inbound_state_reconcile AS
   SELECT COALESCE(mail_message_id, 'msg:inbound:' || id) AS mail_message_id,
          label_ids_json,
          is_read,
@@ -787,49 +787,49 @@ const MAIL_ARCHITECTURE_STATE_RECONCILE_SQL = `
          is_trash,
          is_sent
     FROM inbound_emails;
-  CREATE INDEX temp_mailery_inbound_state_reconcile_message
-      ON temp_mailery_inbound_state_reconcile(mail_message_id);
+  CREATE INDEX temp_emails_inbound_state_reconcile_message
+      ON temp_emails_inbound_state_reconcile(mail_message_id);
 
   UPDATE mailbox_message_state
      SET labels_json = (
            SELECT inbound_state.label_ids_json
-             FROM temp_mailery_inbound_state_reconcile inbound_state
+             FROM temp_emails_inbound_state_reconcile inbound_state
             WHERE inbound_state.mail_message_id = mailbox_message_state.mail_message_id
             LIMIT 1
          ),
          is_read = COALESCE((
            SELECT inbound_state.is_read
-             FROM temp_mailery_inbound_state_reconcile inbound_state
+             FROM temp_emails_inbound_state_reconcile inbound_state
             WHERE inbound_state.mail_message_id = mailbox_message_state.mail_message_id
             LIMIT 1
          ), is_read),
          read_at = (
            SELECT inbound_state.read_at
-             FROM temp_mailery_inbound_state_reconcile inbound_state
+             FROM temp_emails_inbound_state_reconcile inbound_state
             WHERE inbound_state.mail_message_id = mailbox_message_state.mail_message_id
             LIMIT 1
          ),
          is_archived = COALESCE((
            SELECT inbound_state.is_archived
-             FROM temp_mailery_inbound_state_reconcile inbound_state
+             FROM temp_emails_inbound_state_reconcile inbound_state
             WHERE inbound_state.mail_message_id = mailbox_message_state.mail_message_id
             LIMIT 1
          ), is_archived),
          is_starred = COALESCE((
            SELECT inbound_state.is_starred
-             FROM temp_mailery_inbound_state_reconcile inbound_state
+             FROM temp_emails_inbound_state_reconcile inbound_state
             WHERE inbound_state.mail_message_id = mailbox_message_state.mail_message_id
             LIMIT 1
          ), is_starred),
          is_spam = COALESCE((
            SELECT inbound_state.is_spam
-             FROM temp_mailery_inbound_state_reconcile inbound_state
+             FROM temp_emails_inbound_state_reconcile inbound_state
             WHERE inbound_state.mail_message_id = mailbox_message_state.mail_message_id
             LIMIT 1
          ), is_spam),
          is_trash = COALESCE((
            SELECT inbound_state.is_trash
-             FROM temp_mailery_inbound_state_reconcile inbound_state
+             FROM temp_emails_inbound_state_reconcile inbound_state
             WHERE inbound_state.mail_message_id = mailbox_message_state.mail_message_id
             LIMIT 1
          ), is_trash),
@@ -842,17 +842,17 @@ const MAIL_ARCHITECTURE_STATE_RECONCILE_SQL = `
                     WHEN COALESCE(inbound_state.is_archived, 0) = 1 THEN 'archive'
                     ELSE 'inbox'
                   END
-             FROM temp_mailery_inbound_state_reconcile inbound_state
+             FROM temp_emails_inbound_state_reconcile inbound_state
             WHERE inbound_state.mail_message_id = mailbox_message_state.mail_message_id
             LIMIT 1
          ), folder_id),
          updated_at = datetime('now')
    WHERE EXISTS (
      SELECT 1
-       FROM temp_mailery_inbound_state_reconcile inbound_state
+       FROM temp_emails_inbound_state_reconcile inbound_state
       WHERE inbound_state.mail_message_id = mailbox_message_state.mail_message_id
    );
-  DROP TABLE IF EXISTS temp_mailery_inbound_state_reconcile;
+  DROP TABLE IF EXISTS temp_emails_inbound_state_reconcile;
 `;
 
 const MAIL_ARCHITECTURE_REPAIR_SQL = `
@@ -1557,7 +1557,7 @@ const MIGRATIONS = [
   INSERT OR IGNORE INTO _migrations (id) VALUES (19);
   `,
 
-  // Migration 20: tenancy — owners (human|agent) + address ownership/administration.
+  // Migration 20: ownership — owners (human|agent) + address ownership/administration.
   `
   CREATE TABLE IF NOT EXISTS owners (
     id TEXT PRIMARY KEY,
@@ -1699,7 +1699,7 @@ const MIGRATIONS = [
   `,
 
   // Migration 30: hot-path composite indexes for bounded list views.
-  // These match the query shapes used by Mailery UI, MCP list/export tools, and
+  // These match the query shapes used by Emails UI, MCP list/export tools, and
   // diagnostics: equality filters first, then the timestamp used for ordering.
   `
   CREATE INDEX IF NOT EXISTS idx_inbound_sent_read_arch_recv ON inbound_emails(is_sent, is_read, is_archived, received_at);
@@ -1758,7 +1758,7 @@ const MIGRATIONS = [
   INSERT OR IGNORE INTO _migrations (id) VALUES (35);
   `,
 
-  // Migration 36: normalized labels plus hot spam/trash flags for Mailery UI.
+  // Migration 36: normalized labels plus hot spam/trash flags for Emails UI.
   // Folder counts/listing must not json_each(label_ids_json) on large stores.
   `
   ALTER TABLE inbound_emails ADD COLUMN is_spam INTEGER NOT NULL DEFAULT 0;
@@ -1790,7 +1790,7 @@ const MIGRATIONS = [
   INSERT OR IGNORE INTO _migrations (id) VALUES (37);
   `,
 
-  // Migration 38: persistent Mailery email agents and per-email run ledger.
+  // Migration 38: persistent Emails email agents and per-email run ledger.
   `
   CREATE TABLE IF NOT EXISTS email_agent_settings (
     agent_key TEXT PRIMARY KEY,
@@ -1904,8 +1904,8 @@ const MIGRATIONS = [
 
   // Migration 45: per-domain readiness lifecycle and provider/DNS snapshots.
   `
-  ALTER TABLE domains ADD COLUMN domain_type TEXT NOT NULL DEFAULT 'self_hosted' CHECK(domain_type IN ('system','tenant','self_hosted','local_only'));
-  ALTER TABLE domains ADD COLUMN source_of_truth TEXT NOT NULL DEFAULT 'local' CHECK(source_of_truth IN ('local','postgres','cloud'));
+  ALTER TABLE domains ADD COLUMN domain_type TEXT NOT NULL DEFAULT 'self_hosted' CHECK(domain_type IN ('system','self_hosted','local_only'));
+  ALTER TABLE domains ADD COLUMN source_of_truth TEXT NOT NULL DEFAULT 'local' CHECK(source_of_truth IN ('local','postgres'));
   ALTER TABLE domains ADD COLUMN ownership_status TEXT NOT NULL DEFAULT 'pending' CHECK(ownership_status IN ('pending','verified','failed'));
   ALTER TABLE domains ADD COLUMN inbound_status TEXT NOT NULL DEFAULT 'pending' CHECK(inbound_status IN ('pending','ready','disabled','failed'));
   ALTER TABLE domains ADD COLUMN outbound_status TEXT NOT NULL DEFAULT 'pending' CHECK(outbound_status IN ('pending','ready','disabled','failed'));
@@ -2589,10 +2589,10 @@ export function resolvePartialId(db: Database, table: string, partialId: string)
     throw new Error(`resolvePartialId: refusing unknown table '${table}'`);
   }
 
-  // Cloud (self_hosted) mode: resolve ids for cloud-backed resources against the
-  // cloud HTTP API so CLI helpers (remove/get by id) operate on the cloud dataset.
-  if (CLOUD_BACKED_RESOURCES.has(table) && isCloudMode()) {
-    const store = cloudStoreFor(table);
+  // Self-hosted (self_hosted) mode: resolve ids for selfHosted-backed resources against the
+  // selfHosted HTTP API so CLI helpers (remove/get by id) operate on the selfHosted dataset.
+  if (SELF_HOSTED_BACKED_RESOURCES.has(table) && isSelfHostedMode()) {
+    const store = selfHostedStoreFor(table);
     if (store) {
       if (partialId.length >= 36) {
         return store.get(partialId) ? partialId : null;
@@ -2623,11 +2623,11 @@ export function listPartialIdMatches(db: Database, table: string, partialId: str
   }
   const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 6;
 
-  // Cloud (self_hosted) mode: match ambiguity previews against the cloud dataset
-  // for cloud-backed resources so id resolution never leaks or consults the
-  // local SQLite store when the client is routed to the cloud HTTP API.
-  if (CLOUD_BACKED_RESOURCES.has(table) && isCloudMode()) {
-    const store = cloudStoreFor(table);
+  // Self-hosted (self_hosted) mode: match ambiguity previews against the selfHosted dataset
+  // for selfHosted-backed resources so id resolution never leaks or consults the
+  // local SQLite store when the client is routed to the selfHosted HTTP API.
+  if (SELF_HOSTED_BACKED_RESOURCES.has(table) && isSelfHostedMode()) {
+    const store = selfHostedStoreFor(table);
     if (store) {
       return store
         .list({ limit: 1000 })

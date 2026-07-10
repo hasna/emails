@@ -1,11 +1,11 @@
 /**
  * GAP-A: `emails send` routes through the mail-data-source seam.
- *   • cloud mode  → server send API (POST /messages/send), never the local provider path
+ *   • self_hosted mode  → server send API (POST /messages/send), never the local provider path
  *   • local mode  → unchanged local provider path (writes a local sent ledger row)
  *
  * Both surfaces are exercised end-to-end via a CLI subprocess so the real routing
- * (CLI → resolveMailDataSource → {Api,Sqlite}MailDataSource) is under test. Cloud mode
- * runs against an in-process fake Mailery Cloud API (Bun.serve) that records requests.
+ * (CLI → resolveMailDataSource → {Api,Sqlite}MailDataSource) is under test. Self-hosted mode
+ * runs against an in-process fake Emails Self-hosted API (Bun.serve) that records requests.
  */
 import { afterEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
@@ -20,15 +20,15 @@ afterEach(() => {
   closeDatabase();
   for (const fn of cleanups.splice(0)) fn();
   delete process.env["EMAILS_DB_PATH"];
-  delete process.env["MAILERY_MODE"];
-  delete process.env["MAILERY_API_URL"];
-  delete process.env["MAILERY_API_KEY"];
+  delete process.env["EMAILS_MODE"];
+  delete process.env["EMAILS_SELF_HOSTED_URL"];
+  delete process.env["EMAILS_SELF_HOSTED_API_KEY"];
 });
 
 function baseLocalEnv(dbPath: string, homePath: string): NodeJS.ProcessEnv {
   mkdirSync(homePath, { recursive: true });
-  const { MAILERY_MODE: _m, HASNA_EMAILS_MODE: _h, MAILERY_API_URL: _u, MAILERY_API_KEY: _k, ...rest } = process.env;
-  return { ...rest, EMAILS_DB_PATH: dbPath, HOME: homePath, NO_COLOR: "1", MAILERY_MODE: "local", HASNA_EMAILS_MODE: "local" };
+  const { EMAILS_MODE: _m, HASNA_EMAILS_MODE: _h, EMAILS_SELF_HOSTED_URL: _u, EMAILS_SELF_HOSTED_API_KEY: _k, ...rest } = process.env;
+  return { ...rest, EMAILS_DB_PATH: dbPath, HOME: homePath, NO_COLOR: "1", EMAILS_MODE: "local", HASNA_EMAILS_MODE: "local" };
 }
 
 // Async spawn (never spawnSync): the in-process fake server must keep serving while the
@@ -56,7 +56,7 @@ function seedSandboxProvider(dbPath: string, homePath: string): void {
   }
 }
 
-function startFakeCloud() {
+function startFakeSelfHosted() {
   const sent: Array<Record<string, unknown>> = [];
   const server = Bun.serve({
     port: 0,
@@ -64,11 +64,10 @@ function startFakeCloud() {
       const url = new URL(req.url);
       const path = url.pathname;
       const j = (b: unknown, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
-      if (path === "/api/v1/mailboxes" && req.method === "GET") return j({ data: [{ id: "mbx_1", email: "agent@acme.com" }] });
-      if (path === "/api/v1/messages/send" && req.method === "POST") {
+      if (path === "/v1/messages/send" && req.method === "POST") {
         return req.json().then((body) => {
           sent.push(body as Record<string, unknown>);
-          return j({ id: "cloud_sent_1", provider_message_id: "prov-1", attachments: [] }, 202);
+          return j({ message: { id: "self_hosted_sent_1", message_id: "prov-1", attachments: [] } }, 201);
         });
       }
       return j({ data: [] });
@@ -77,35 +76,34 @@ function startFakeCloud() {
   return { server, base: `http://127.0.0.1:${server.port}`, sent };
 }
 
-describe("emails send — cloud mode routes through the server API", () => {
+describe("emails send — self_hosted mode routes through the server API", () => {
   it("POSTs to /messages/send with the resolved mailbox and never the local provider path", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "send-cloud-"));
+    const dir = mkdtempSync(join(tmpdir(), "send-self_hosted-"));
     cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
     const homePath = join(dir, "home");
     mkdirSync(homePath, { recursive: true });
 
-    const { server, base, sent } = startFakeCloud();
+    const { server, base, sent } = startFakeSelfHosted();
     cleanups.push(() => server.stop(true));
 
     const env: NodeJS.ProcessEnv = {
       ...baseLocalEnv(join(dir, "emails.db"), homePath),
-      MAILERY_MODE: "cloud",
-      MAILERY_API_URL: base,
-      MAILERY_API_KEY: "test-token",
+      EMAILS_MODE: "self_hosted",
+      EMAILS_SELF_HOSTED_URL: base,
+      EMAILS_SELF_HOSTED_API_KEY: "test-token",
     };
 
     const res = await runCli(["send", "--from", "agent@acme.com", "--to", "dest@ext.com", "--subject", "Hi", "--body", "Body text"], env);
 
     expect(res.code).toBe(0);
     expect(res.out).toContain("Email sent");
-    expect(res.out).toContain("prov-1");
     expect(sent).toHaveLength(1);
-    expect(sent[0]).toMatchObject({ mailboxId: "mbx_1", to: ["dest@ext.com"], subject: "Hi", text: "Body text" });
+    expect(sent[0]).toMatchObject({ from: "agent@acme.com", to: ["dest@ext.com"], subject: "Hi", text: "Body text" });
   }, 30_000);
 });
 
 describe("emails send — local mode is unchanged (local provider path)", () => {
-  it("sends via the sandbox provider and writes a local sent ledger row (no cloud)", async () => {
+  it("sends via the sandbox provider and writes a local sent ledger row (no self_hosted)", async () => {
     const dir = mkdtempSync(join(tmpdir(), "send-local-"));
     cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
     const dbPath = join(dir, "emails.db");
@@ -117,7 +115,7 @@ describe("emails send — local mode is unchanged (local provider path)", () => 
     expect(res.code).toBe(0);
     expect(res.out).toContain("Email sent");
 
-    // The local ledger row proves the local provider path ran (cloud send writes none).
+    // The local ledger row proves the local provider path ran (self_hosted send writes none).
     const sentList = await runCli(["--json", "inbox", "list", "--folder", "sent"], env);
     expect(sentList.code).toBe(0);
     const rows = JSON.parse(sentList.out) as Array<{ subject: string }>;

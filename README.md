@@ -1,39 +1,22 @@
 # @hasna/emails
 
-Mailery is an email management CLI + MCP server - send, receive, sync, and manage email via Resend, AWS SES, and Cloudflare-routed inbound mail.
+Emails is an email management CLI + MCP server - send, receive, sync, and manage email via Resend, AWS SES, and Cloudflare-routed inbound mail.
 
 [![npm](https://img.shields.io/npm/v/@hasna/emails)](https://www.npmjs.com/package/@hasna/emails)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
 ## Install
 
-Mailery is built for the Bun runtime. Install Bun 1.3 or newer before installing
-the CLI with npm.
+Emails is built for the Bun runtime. Install Bun 1.3 or newer, then install the
+CLI with Bun.
 
 ```bash
-npm install -g @hasna/emails
+bun install -g @hasna/emails
 ```
 
-## Open Core And Cloud
+## Deployment modes
 
-Users install the open-source package: `@hasna/emails`.
-
-Mailery stays local-first by default: local SQLite, local provider credentials,
-and local MCP. Self-hosted mode uses user-owned PostgreSQL/S3/SES as source of
-truth with local SQLite as a runtime cache. Mailery Cloud is an opt-in
-hosted source of truth at `https://mailery.co`; the same public CLI can sign up,
-create an agent API key, create a billing link, create hosted mailboxes, read
-hosted messages, generate hosted digests, and pull cloud mail into local SQLite.
-The per-domain readiness contract for local, self-hosted, and cloud operation
-lives in [`docs/DOMAIN_READINESS.md`](docs/DOMAIN_READINESS.md).
-
-The SaaS control plane is private Hasna Tools infrastructure. End users and
-open-source contributors should not install or depend on private Hasna Tools
-platform packages.
-
-`@hasna/emails` is the canonical package. It was briefly published as
-`@hasna/mailery`; that name has been retired here and freed for the separate
-Hasna Tools cloud CLI, so new installs and docs should use `@hasna/emails`.
+Emails has exactly two modes: `local` and `self_hosted`. Local mode keeps SQLite, files, and credentials on the current machine. Self-hosted mode connects to an Emails service deployed in user-owned infrastructure. Provider integrations always use user-supplied credentials; the package has no hosted account or control-plane service.
 
 ## Quick Start
 
@@ -45,7 +28,7 @@ emails provider add --name production-resend --type resend --api-key ...
 # Set up a domain (buy + DNS + SES in one command)
 emails domain setup example.com --provider <id> --email you@example.com ...
 
-# Or connect a domain you already own without buying or calling Mailery Cloud
+# Or connect a domain you already own without buying it
 emails domains connect example.com --provider <id> --source-of-truth local --dry-run
 emails domains connect example.com --provider <id> --source-of-truth postgres --dns-provider route53 --no-register-provider
 
@@ -73,51 +56,14 @@ emails inbox list --folder unread --source provider:<id>
 # Check sent email log
 emails email list
 
-# Use self-hosted PostgreSQL/S3/SES as source of truth
-emails self-hosted status
-emails self-hosted migrate-local
+# Operate a self-hosted PostgreSQL service
+EMAILS_MODE=self_hosted EMAILS_DATABASE_URL=postgres://... EMAILS_API_SIGNING_KEY=... emails db migrate
+EMAILS_MODE=self_hosted EMAILS_DATABASE_URL=postgres://... EMAILS_API_SIGNING_KEY=... emails self-hosted key create
 ```
-
-## Mailery Cloud
-
-Cloud commands are non-interactive enough for agents and CI. Use `--no-open`
-when creating billing links from a headless environment.
-
-```bash
-# Show the hosted service status
-emails cloud --api-url https://mailery.co status
-
-# Create or log into a hosted account, generate an agent API key, and create a
-# hosted billing link without opening a browser
-emails cloud setup \
-  --api-url https://mailery.co \
-  --email you@example.com \
-  --password "$MAILERY_PASSWORD" \
-  --api-key-name "Agent CLI" \
-  --scope mail_read mail_write billing_read \
-  --billing \
-  --no-open
-
-# Hosted mailbox and message workflow
-emails cloud mailbox add agent@example.com --provider manual
-emails cloud messages list --limit 20
-emails cloud messages pull --limit 20
-emails inbox list --limit 20
-
-# Billing and domains
-emails cloud billing overview
-emails cloud billing subscribe --plan starter --no-open
-emails cloud domain available example-agent-mail.com
-emails cloud domain setup example-agent-mail.com --address agent --catch-all --mx-migration-consent
-```
-
-The starter SaaS plan is currently `$10/month` and grants hosted credits. Domain
-setup can return DNS records in safe planning mode before any domain purchase or
-MX migration is performed.
 
 ## Domain Modes
 
-Mailery is a multi-domain aggregator. Every domain is tracked independently, so
+Emails is a multi-domain aggregator. Every domain is tracked independently, so
 DNS, inbound, outbound, and safety state belong to the domain, not to the app as
 a whole.
 
@@ -127,7 +73,6 @@ Use these setup paths:
 | --- | --- | --- |
 | `local` | The local SQLite/files install | `emails domains add` or `emails domains connect --source-of-truth local`; DNS checks are advisory unless using a real send/receive provider. |
 | `self_hosted` | Your PostgreSQL/S3/SES or equivalent infrastructure | `emails domains connect --source-of-truth postgres`, then publish the returned DNS tasks and enable inbound/outbound when evidence is ready. |
-| `cloud` | Mailery Cloud at `https://mailery.co` | `emails cloud domain setup`; SaaS billing and tenant checks are handled by the hosted control plane. |
 
 Authentication records are required only for the capability you enable:
 
@@ -139,12 +84,19 @@ Authentication records are required only for the capability you enable:
   aggregation, but it should be present before production sending and monitored
   before moving from `p=none` to stricter policies.
 
-For self-hosted migration, run `emails self-hosted migrate-local` once, switch
-to `MAILERY_MODE=self_hosted` with `HASNA_EMAILS_STORAGE_MODE=remote`, and treat
-PostgreSQL/S3 as the durable source of truth. Local SQLite is then only a runtime
-cache prepared from and flushed back to the self-hosted source.
+Self-hosted clients must set `EMAILS_MODE=self_hosted`,
+`EMAILS_SELF_HOSTED_URL`, and `EMAILS_SELF_HOSTED_API_KEY`. The service uses
+`EMAILS_DATABASE_URL` and `EMAILS_API_SIGNING_KEY`; Postgres is authoritative
+and there is no hybrid SQLite synchronization mode.
 
-## Mailery UI (`emails ui`)
+After applying migrations, issue client keys on the operator host with
+`emails self-hosted key create`. The plaintext token is displayed once and only
+its SHA-256 hash plus lifecycle metadata is stored in Postgres. Inspect metadata
+with `emails self-hosted key list` and immediately disable a key with
+`emails self-hosted key revoke <kid> --reason "rotation"`. The service denies
+validly signed but unrecorded keys.
+
+## Emails UI (`emails ui`)
 
 A full-screen OpenTUI mail client with a responsive dashboard shell. Wide
 terminals use a two-column admin layout with persistent navigation, mailbox
@@ -182,7 +134,7 @@ emails status            # redacted system status + next useful actions
 emails agent context     # agent-oriented context snapshot and workflows
 emails daemon            # background queue/realtime status and restart guidance
 emails logs tail         # local daemon/sync/inbound/scheduler log tails
-emails owner             # tenancy: register human/agent owners
+emails owner             # ownership: register human/agent owners
 emails alias             # per-domain aliases + catch-all routing
 emails forwarding        # app-level forwarding for locally received/synced mail
 emails sendkey           # scoped send keys (restrict an agent to its own addresses)
@@ -196,9 +148,7 @@ emails group             # recipient groups
 emails sequence          # drip sequences
 emails schedule          # scheduled emails: list, cancel, run
 emails triage            # AI triage: classify, prioritize, draft replies
-emails storage           # self-hosted PostgreSQL storage: status, migrate, migrate-local, push, pull
-emails self-hosted       # source-of-truth runtime setup/status/migrate commands
-emails cloud             # optional Mailery Cloud signup/login/billing/mailbox/message/digest/domain workflow
+emails db                # self-hosted PostgreSQL migration and status commands
 emails aws               # AWS setup: SES receipt rules, S3 inbound bucket
 emails config            # configuration (key=value)
 emails stats             # delivery statistics (--inbox for received mail)
@@ -211,7 +161,7 @@ emails mcp               # install MCP server
 
 ### Compact Output and Gradual Disclosure
 
-Mailery CLI commands are compact by default so agent terminals do not fill with
+Emails CLI commands are compact by default so agent terminals do not fill with
 large records. List and status commands show essential fields, bounded row
 counts, and hints for the next detail command. Use these flags when you need
 more:
@@ -240,7 +190,7 @@ their existing bounded summary page size for compatibility; use each tool's
 records. `emails://agent/context` is sampled for orientation; use
 `emails://agent/context/full` for the full redacted MCP resource.
 
-## Tenancy, aliases & scoped send keys
+## Principals, aliases and scoped send keys
 
 Every address can have an **owner** that is a human or an agent. A human-owned
 address must be administered by an agent (the agent operates it on the human's
@@ -297,7 +247,7 @@ intentional migrations after confirming mailbox ownership can move.
 
 ## MCP Server
 
-100+ tools for AI agents — send/read mail, provisioning, tenancy, aliases, scoped
+100+ tools for AI agents — send/read mail, provisioning, ownership, aliases, scoped
 send keys, inbound read-state, real-time sync, agent context, source-aware
 mailbox status, ownership lookup/assignment/transfer audit, and
 verification-code waiting.
@@ -330,7 +280,7 @@ emails-mcp
 - **Dashboard / management API** under `/api/*` (providers, domains, addresses, emails, stats).
 - **Authenticated programmatic API** under `/api/v1/*` for agents/apps, keyed on a
   scoped send key (`Authorization: Bearer esk_…`). Every call is scoped to the
-  key owner's addresses, so one caller can't act as another tenant:
+  key owner's addresses, so one caller cannot act as another principal:
 
 ```bash
 emails serve   # or: emails-serve   (HOST=0.0.0.0 to allow other machines)
@@ -399,77 +349,22 @@ Alternatively, point an SNS HTTP subscription at `POST /webhook/ses-inbound` on
 
 ## Self-Hosted Runtime (PostgreSQL/S3/SES)
 
-The canonical local/self-hosted/cloud runtime contract lives in
-[`docs/SELF_HOSTED_RUNTIME.md`](docs/SELF_HOSTED_RUNTIME.md). The per-domain
-aggregator and sending-readiness contract lives in
-[`docs/DOMAIN_READINESS.md`](docs/DOMAIN_READINESS.md). Together these documents
-are the source of truth for the active migration from local-authoritative mail to
-a self-hosted PostgreSQL/S3 runtime.
-
-Mailery is local-first. The public OSS default is local SQLite and files under
-`~/.hasna/emails/`, with no remote dependency. Self-hosted runtime is opt-in,
-and uses the `emails` slug for database URL compatibility: use
-`HASNA_EMAILS_DATABASE_URL`, not `HASNA_MAILERY_DATABASE_URL`.
-
-For managed or self-hosted PostgreSQL, set `HASNA_EMAILS_DATABASE_URL` to the
-database connection string without printing or committing it. Self-hosted
-installs can use the fallback `EMAILS_DATABASE_URL`.
-
-Mailery modes:
-
-- `local` - all reads/writes stay in local SQLite/files.
-- `self_hosted` - user/org-owned infrastructure. PostgreSQL is the source of
-  truth for provider, mailbox, message, label, send, and state rows. S3 stores
-  raw SES MIME and optional attachment objects. Local SQLite is a runtime cache
-  that is prepared from PostgreSQL and flushed back after CLI commands; long
-  running MCP/server processes flush periodically. For Hasna's own self-hosted
-  deployment this means AWS RDS plus SES/S3, but the concrete cluster, bucket,
-  and secret-path values live in private deployment secrets and are not package
-  defaults.
-- `cloud` - Hasna-operated Mailery Cloud SaaS at `https://mailery.co`.
-
-Deprecated `remote` and `hybrid` values are accepted as aliases only for the
-deployment mode (`MAILERY_MODE`, `HASNA_EMAILS_MODE`, or legacy config keys) and
-map to `self_hosted`. The lower-level storage sync mode remains separate:
-`HASNA_EMAILS_STORAGE_MODE=remote` means PostgreSQL source of truth with local
-runtime cache. `HASNA_EMAILS_STORAGE_MODE=hybrid` keeps local SQLite as source
-and only syncs when `emails storage pull`, `emails storage push`, or
-`emails storage sync --force` is run explicitly.
+The server uses operator-owned Postgres and provider accounts. A client must configure `EMAILS_MODE=self_hosted`, `EMAILS_SELF_HOSTED_URL`, and `EMAILS_SELF_HOSTED_API_KEY`. The service requires `EMAILS_DATABASE_URL`, `EMAILS_API_SIGNING_KEY`, and `EMAILS_SEND_PROVIDER=ses|resend`. SES uses the deployment IAM role; Resend uses `RESEND_API_KEY`.
 
 ```bash
-# Configure RDS/PostgreSQL
-export HASNA_EMAILS_DATABASE_URL="postgres://..."
-# Optional self-hosted fallback:
-# export EMAILS_DATABASE_URL="postgres://..."
+export EMAILS_MODE=self_hosted
+export EMAILS_SELF_HOSTED_URL="https://emails.example.com"
+export EMAILS_SELF_HOSTED_API_KEY="..."
 
-# Optional explicit mode; default is local without a DB URL, self_hosted with one.
-export MAILERY_MODE=self_hosted
-export HASNA_EMAILS_STORAGE_MODE=remote
-
-# Optional AWS/S3 settings for self-hosted inbound and attachments.
-# Use your own bucket names and account-specific secrets.
-export EMAILS_INBOUND_S3_BUCKET="your-mailery-inbound-bucket"
-emails config set attachment_storage s3
-emails config set attachment_s3_bucket "your-mailery-attachments-bucket"
-
-# Check source-of-truth runtime status
-emails self-hosted status
-
-# Apply PostgreSQL migrations
-emails self-hosted migrate
-
-# One-time local SQLite → self-hosted PostgreSQL migration
-emails self-hosted migrate-local
+# On the self-hosted server
+export EMAILS_DATABASE_URL="postgresql://..."
+export EMAILS_API_SIGNING_KEY="..."
+export EMAILS_SEND_PROVIDER=ses
+emails db migrate
+emails-serve
 ```
 
-Storage internals are intentionally kept off the default library entrypoint.
-Import them from the explicit subpath when building storage tooling:
-
-```ts
-import { getStorageStatus, prepareSelfHostedRuntimeCache } from "@hasna/emails/storage";
-```
-
-See `docs/SELF_HOSTED_RUNTIME.md` for the source-of-truth contract.
+There is no hybrid cache or bidirectional database synchronization mode.
 
 ## Data
 
@@ -487,7 +382,7 @@ emails-mcp --stdio             # stdio transport (one server per client)
 MCP_STDIO=1 emails-mcp         # same
 ```
 
-- Health: `GET http://127.0.0.1:8861/health` -> `{"status":"ok","name":"mailery"}`
+- Health: `GET http://127.0.0.1:8861/health` -> `{"status":"ok","name":"emails"}`
 - Override port with `MCP_HTTP_PORT` or `--port`
 
 ## License

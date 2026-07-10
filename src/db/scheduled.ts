@@ -2,7 +2,7 @@ import type { Database } from "./database.js";
 import { getDatabase, uuid, now } from "./database.js";
 import { parseJsonArray, parseJsonObject } from "./json.js";
 import { safeOffset, safeOptionalLimit } from "./pagination.js";
-import { cloudResource, cloudListQuery, cloudPage, carray, cobj, cstrArray, ciso, cstr, cstrOrNull } from "./cloud-resource.js";
+import { selfHostedResource, selfHostedListQuery, selfHostedPage, carray, cobj, cstrArray, ciso, cstr, cstrOrNull } from "./self-hosted-resource.js";
 
 const SCHEDULED_RESOURCE = "scheduled";
 
@@ -206,14 +206,14 @@ function isDatabase(value: unknown): value is Database {
 }
 
 export function listScheduledEmails(opts?: ListScheduledEmailOptions, db?: Database): ScheduledEmail[] {
-  const cloud = cloudResource(SCHEDULED_RESOURCE);
-  if (cloud) {
-    const { query, limit, offset } = cloudListQuery(opts);
+  const selfHosted = selfHostedResource(SCHEDULED_RESOURCE);
+  if (selfHosted) {
+    const { query, limit, offset } = selfHostedListQuery(opts);
     if (opts?.status) query["status"] = opts.status;
-    let rows = cloud.list(query).map(apiToScheduledEmail);
+    let rows = selfHosted.list(query).map(apiToScheduledEmail);
     if (opts?.status) rows = rows.filter((s) => s.status === opts.status);
     rows.sort((a, b) => (a.scheduled_at ?? "").localeCompare(b.scheduled_at ?? ""));
-    return cloudPage(rows, limit, offset);
+    return selfHostedPage(rows, limit, offset);
   }
 
   const d = db || getDatabase();
@@ -234,14 +234,14 @@ export function listScheduledEmails(opts?: ListScheduledEmailOptions, db?: Datab
 }
 
 export function listScheduledEmailSummaries(opts?: ListScheduledEmailOptions, db?: Database): ScheduledEmailSummary[] {
-  const cloud = cloudResource(SCHEDULED_RESOURCE);
-  if (cloud) {
-    const { query, limit, offset } = cloudListQuery(opts);
+  const selfHosted = selfHostedResource(SCHEDULED_RESOURCE);
+  if (selfHosted) {
+    const { query, limit, offset } = selfHostedListQuery(opts);
     if (opts?.status) query["status"] = opts.status;
-    let rows = cloud.list(query).map(apiToScheduledEmail).map(scheduledToSummary);
+    let rows = selfHosted.list(query).map(apiToScheduledEmail).map(scheduledToSummary);
     if (opts?.status) rows = rows.filter((s) => s.status === opts.status);
     rows.sort((a, b) => (a.scheduled_at ?? "").localeCompare(b.scheduled_at ?? ""));
-    return cloudPage(rows, limit, offset);
+    return selfHostedPage(rows, limit, offset);
   }
 
   const d = db || getDatabase();

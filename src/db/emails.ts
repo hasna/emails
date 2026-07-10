@@ -7,10 +7,10 @@ import { sqlEmailAddress } from "./email-address-sql.js";
 import { parseJsonArray, parseJsonObject } from "./json.js";
 import { safeOffset, safeOptionalLimit } from "./pagination.js";
 import { canonicalSender } from "../lib/email-address.js";
-import { cloudResource, cloudListQuery, cloudPage, carray, cstrArray, ciso, cnum, cstr, cstrOrNull } from "./cloud-resource.js";
+import { selfHostedResource, selfHostedListQuery, selfHostedPage, carray, cstrArray, ciso, cnum, cstr, cstrOrNull } from "./self-hosted-resource.js";
 
 // The outbound sent-ledger (`email list` / `log` / `search`) is backed by the
-// shared `/v1/messages` store in cloud mode. A cloud message row maps to the
+// shared `/v1/messages` store in selfHosted mode. A selfHosted message row maps to the
 // local Email shape; only outbound messages are surfaced as sent-log entries.
 const MESSAGE_RESOURCE = "messages";
 
@@ -25,7 +25,7 @@ function apiMessageToEmail(e: Record<string, unknown>): Email {
   const attachCount = cnum(e["attachment_count"], attachments.length);
   return {
     id: cstr(e["id"]),
-    provider_id: cstrOrNull(e["provider_id"]) ?? "cloud",
+    provider_id: cstrOrNull(e["provider_id"]) ?? "self_hosted",
     provider_message_id: cstrOrNull(e["provider_message_id"]),
     from_address: cstr(e["from_addr"] ?? e["from_address"]),
     to_addresses: cstrArray(e["to_addrs"] ?? e["to_addresses"]),
@@ -43,7 +43,7 @@ function apiMessageToEmail(e: Record<string, unknown>): Email {
   };
 }
 
-/** True when a cloud message row is an outbound (sent-ledger) entry. */
+/** True when a selfHosted message row is an outbound (sent-ledger) entry. */
 function isOutbound(e: Record<string, unknown>): boolean {
   const dir = cstr(e["direction"]).toLowerCase();
   return dir === "" || dir === "outbound" || dir === "sent";
@@ -130,9 +130,9 @@ export function createEmail(
 }
 
 export function getEmail(id: string, db?: Database): Email | null {
-  const cloud = cloudResource(MESSAGE_RESOURCE);
-  if (cloud) {
-    const rec = cloud.get(id);
+  const selfHosted = selfHostedResource(MESSAGE_RESOURCE);
+  if (selfHosted) {
+    const rec = selfHosted.get(id);
     return rec ? apiMessageToEmail(rec) : null;
   }
 
@@ -144,19 +144,19 @@ export function getEmail(id: string, db?: Database): Email | null {
 
 /**
  * Resolve a full or partial email id to a canonical id, routed through the
- * active Store. In cloud mode a full-length id is confirmed via the messages
- * `/v1` endpoint and a prefix is matched against the cloud message list; in
+ * active Store. In selfHosted mode a full-length id is confirmed via the messages
+ * `/v1` endpoint and a prefix is matched against the selfHosted message list; in
  * local mode it falls back to the SQLite partial-id resolver. This keeps
  * `show`/`replies` consistent with `list`/`search` instead of always reading
- * the (empty, in cloud mode) local `emails` table.
+ * the (empty, in selfHosted mode) local `emails` table.
  */
 export function resolveEmailId(id: string, db?: Database): string | null {
-  const cloud = cloudResource(MESSAGE_RESOURCE);
-  if (cloud) {
+  const selfHosted = selfHostedResource(MESSAGE_RESOURCE);
+  if (selfHosted) {
     const trimmed = id.trim();
     if (!trimmed) return null;
-    if (trimmed.length >= 36) return cloud.get(trimmed) ? trimmed : null;
-    const matches = cloud
+    if (trimmed.length >= 36) return selfHosted.get(trimmed) ? trimmed : null;
+    const matches = selfHosted
       .list({ limit: 1000 })
       .map((row) => cstr(row["id"]))
       .filter((mid) => mid.startsWith(trimmed));
@@ -167,10 +167,11 @@ export function resolveEmailId(id: string, db?: Database): string | null {
 }
 
 export function listEmails(filter: EmailFilter = {}, db?: Database): Email[] {
-  const cloud = cloudResource(MESSAGE_RESOURCE);
-  if (cloud) {
-    const { query, limit, offset } = cloudListQuery(filter);
-    let rows = cloud.list(query).filter(isOutbound).map(apiMessageToEmail);
+  const selfHosted = selfHostedResource(MESSAGE_RESOURCE);
+  if (selfHosted) {
+    const { query, limit, offset } = selfHostedListQuery(filter);
+    query["direction"] = "outbound";
+    let rows = selfHosted.list(query).filter(isOutbound).map(apiMessageToEmail);
     if (filter.provider_id) rows = rows.filter((e) => e.provider_id === filter.provider_id);
     if (filter.status) {
       const wanted = Array.isArray(filter.status) ? filter.status : [filter.status];
@@ -183,7 +184,7 @@ export function listEmails(filter: EmailFilter = {}, db?: Database): Email[] {
     if (filter.since) rows = rows.filter((e) => e.sent_at >= filter.since!);
     if (filter.until) rows = rows.filter((e) => e.sent_at <= filter.until!);
     rows.sort((a, b) => (b.sent_at ?? "").localeCompare(a.sent_at ?? ""));
-    return cloudPage(rows, limit, offset);
+    return selfHostedPage(rows, limit, offset);
   }
 
   const d = db || getDatabase();
@@ -239,11 +240,12 @@ export function listEmails(filter: EmailFilter = {}, db?: Database): Email[] {
 }
 
 export function searchEmails(query: string, opts?: { since?: string; limit?: number; offset?: number }, db?: Database): Email[] {
-  const cloud = cloudResource(MESSAGE_RESOURCE);
-  if (cloud) {
-    const { query: q, limit, offset } = cloudListQuery(opts);
+  const selfHosted = selfHostedResource(MESSAGE_RESOURCE);
+  if (selfHosted) {
+    const { query: q, limit, offset } = selfHostedListQuery(opts);
+    q["direction"] = "outbound";
     const needle = query.toLowerCase();
-    let rows = cloud.list(q).filter(isOutbound).map(apiMessageToEmail);
+    let rows = selfHosted.list(q).filter(isOutbound).map(apiMessageToEmail);
     rows = rows.filter((e) =>
       e.subject.toLowerCase().includes(needle) ||
       e.from_address.toLowerCase().includes(needle) ||
@@ -251,7 +253,7 @@ export function searchEmails(query: string, opts?: { since?: string; limit?: num
     );
     if (opts?.since) rows = rows.filter((e) => e.sent_at >= opts.since!);
     rows.sort((a, b) => (b.sent_at ?? "").localeCompare(a.sent_at ?? ""));
-    return cloudPage(rows, limit, offset);
+    return selfHostedPage(rows, limit, offset);
   }
 
   const d = db || getDatabase();

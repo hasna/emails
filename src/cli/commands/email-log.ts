@@ -281,7 +281,7 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
 
   // ─── SEARCH ─────────────────────────────────────────────────────────────────
   program.command("search <query>").description("Search email by subject, from, or to")
-    .option("--since <date>", "Show mailery since date (ISO 8601)")
+    .option("--since <date>", "Show emails since date (ISO 8601)")
     .option("--limit <n>", "Max results", "20")
     .option("--offset <n>", "Skip first N results", "0")
     .action((query: string, opts: { since?: string; limit?: string; offset?: string }) => {
@@ -451,8 +451,8 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
         if (preferredAddress) { fromEmail = preferredAddress; }
         else { handleError(new Error("No sender addresses configured for this provider. Add one with 'emails address add'")); }
         const ts = new Date().toISOString();
-        const subject = `Test from mailery \u2014 ${ts}`;
-        const text = `This is a test email sent via Mailery at ${ts}. Provider: ${provider!.name} (${provider!.type})`;
+        const subject = `Test from emails \u2014 ${ts}`;
+        const text = `This is a test email sent via Emails at ${ts}. Provider: ${provider!.name} (${provider!.type})`;
         const sendOpts = { from: fromEmail!, to: toEmail!, subject, text };
         const { sendWithFailover } = await import("../../lib/send.js");
         const { messageId, providerId: actualProviderId } = await sendWithFailover(resolvedProviderId!, sendOpts, db);
@@ -469,7 +469,7 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
     .command("export <type>")
     .description("Export emails or events (type: emails | events)")
     .option("--provider <id>", "Filter by provider ID")
-    .option("--from <email>", "Filter exported mailery by sender address")
+    .option("--from <email>", "Filter exported emails by sender address")
     .option("--since <date>", "Filter from date (ISO)")
     .option("--until <date>", "Filter until date (ISO)")
     .option("--limit <n>", "Maximum rows to export")

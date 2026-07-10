@@ -114,7 +114,7 @@ function runClipboardCommand(runtime: ClipboardRuntime, cmd: string[], text: str
 }
 
 function clipboardCommandTimeoutMs(runtime: ClipboardRuntime): number {
-  const raw = runtime.env["MAILERY_TUI_CLIPBOARD_COMMAND_TIMEOUT_MS"] || runtime.env["EMAILS_TUI_CLIPBOARD_COMMAND_TIMEOUT_MS"];
+  const raw = runtime.env["EMAILS_TUI_CLIPBOARD_COMMAND_TIMEOUT_MS"] || runtime.env["EMAILS_TUI_CLIPBOARD_COMMAND_TIMEOUT_MS"];
   const parsed = raw ? Number.parseInt(raw, 10) : DEFAULT_COMMAND_TIMEOUT_MS;
   return Number.isFinite(parsed) ? Math.max(250, parsed) : DEFAULT_COMMAND_TIMEOUT_MS;
 }
@@ -196,8 +196,8 @@ function tmuxEnvironmentHosts(runtime: ClipboardRuntime): string[] {
 
 export function sshClipboardHosts(env: NodeJS.ProcessEnv = process.env, discoveredHosts: string[] = []): string[] {
   const explicitHosts = [
-    ...splitHostList(env["MAILERY_TUI_CLIPBOARD_HOST"]),
-    ...splitHostList(env["MAILERY_TUI_CLIPBOARD_SSH_HOSTS"]),
+    ...splitHostList(env["EMAILS_TUI_CLIPBOARD_HOST"]),
+    ...splitHostList(env["EMAILS_TUI_CLIPBOARD_SSH_HOSTS"]),
     ...splitHostList(env["EMAILS_TUI_CLIPBOARD_HOST"]),
     ...splitHostList(env["EMAILS_TUI_CLIPBOARD_SSH_HOSTS"]),
   ];
@@ -214,7 +214,7 @@ export function sshClipboardHosts(env: NodeJS.ProcessEnv = process.env, discover
 }
 
 function sshClipboardCommands(env: NodeJS.ProcessEnv, discoveredHosts: string[] = []): string[][] {
-  const timeout = env["MAILERY_TUI_CLIPBOARD_SSH_TIMEOUT"] || env["EMAILS_TUI_CLIPBOARD_SSH_TIMEOUT"] || DEFAULT_SSH_TIMEOUT_SECONDS;
+  const timeout = env["EMAILS_TUI_CLIPBOARD_SSH_TIMEOUT"] || env["EMAILS_TUI_CLIPBOARD_SSH_TIMEOUT"] || DEFAULT_SSH_TIMEOUT_SECONDS;
   return sshClipboardHosts(env, discoveredHosts).map((host) => [
     "ssh",
     "-o", "BatchMode=yes",
@@ -227,7 +227,7 @@ function sshClipboardCommands(env: NodeJS.ProcessEnv, discoveredHosts: string[] 
 
 export function clipboardCommands(platform: NodeJS.Platform = process.platform, env: NodeJS.ProcessEnv = process.env, discoveredHosts: string[] = []): string[][] {
   const commands: string[][] = [];
-  const configured = (env["MAILERY_TUI_CLIPBOARD_COMMAND"] || env["EMAILS_TUI_CLIPBOARD_COMMAND"])?.trim();
+  const configured = (env["EMAILS_TUI_CLIPBOARD_COMMAND"] || env["EMAILS_TUI_CLIPBOARD_COMMAND"])?.trim();
   if (configured) commands.push(configured.split(/\s+/));
   if (platform === "darwin") commands.push(["pbcopy"]);
   commands.push(...sshClipboardCommands(env, discoveredHosts));
@@ -261,14 +261,14 @@ async function copyToTmuxBufferAsync(text: string, runtime: ClipboardRuntime): P
 }
 
 function osc52Preference(env: NodeJS.ProcessEnv): "always" | "never" | "auto" {
-  const raw = (env["MAILERY_TUI_CLIPBOARD_OSC52"] ?? env["EMAILS_TUI_CLIPBOARD_OSC52"] ?? "").trim().toLowerCase();
+  const raw = (env["EMAILS_TUI_CLIPBOARD_OSC52"] ?? env["EMAILS_TUI_CLIPBOARD_OSC52"] ?? "").trim().toLowerCase();
   if (raw === "always" || raw === "1" || raw === "true" || raw === "force") return "always";
   if (raw === "never" || raw === "0" || raw === "false" || raw === "off") return "never";
   return "auto";
 }
 
 function hasConfiguredCommand(env: NodeJS.ProcessEnv): boolean {
-  return !!(env["MAILERY_TUI_CLIPBOARD_COMMAND"] || env["EMAILS_TUI_CLIPBOARD_COMMAND"])?.trim();
+  return !!(env["EMAILS_TUI_CLIPBOARD_COMMAND"] || env["EMAILS_TUI_CLIPBOARD_COMMAND"])?.trim();
 }
 
 // True when the TUI runs over SSH/mosh (or inside a tmux session attached from a remote
@@ -285,7 +285,7 @@ export function isRemoteSession(env: NodeJS.ProcessEnv = process.env, discovered
 // terminal escape that the user's OWN terminal emulator interprets, so the copy lands on
 // the machine the user is physically at — the correct behavior over SSH. We prefer it for
 // remote sessions (unless an explicit command is configured), always when
-// MAILERY_TUI_CLIPBOARD_OSC52=always, and `never` disables it entirely.
+// EMAILS_TUI_CLIPBOARD_OSC52=always, and `never` disables it entirely.
 function shouldPreferOsc52(runtime: ClipboardRuntime, discoveredHosts: string[]): boolean {
   const mode = osc52Preference(runtime.env);
   if (mode === "never") return false;
@@ -296,7 +296,7 @@ function shouldPreferOsc52(runtime: ClipboardRuntime, discoveredHosts: string[])
 
 export function copyTextToClipboard(text: string, runtime: ClipboardRuntime = defaultRuntime()): ClipboardResult {
   if (!text.trim()) return { ok: false, error: "nothing to copy" };
-  if (runtime.env["MAILERY_TUI_CLIPBOARD_DRY_RUN"] === "1" || runtime.env["EMAILS_TUI_CLIPBOARD_DRY_RUN"] === "1") return { ok: true, method: "dry-run" };
+  if (runtime.env["EMAILS_TUI_CLIPBOARD_DRY_RUN"] === "1" || runtime.env["EMAILS_TUI_CLIPBOARD_DRY_RUN"] === "1") return { ok: true, method: "dry-run" };
 
   const discovered = tmuxEnvironmentHosts(runtime);
 
@@ -324,7 +324,7 @@ export function copyTextToClipboard(text: string, runtime: ClipboardRuntime = de
 
 export async function copyTextToClipboardAsync(text: string, runtime: ClipboardRuntime = defaultRuntime()): Promise<ClipboardResult> {
   if (!text.trim()) return { ok: false, error: "nothing to copy" };
-  if (runtime.env["MAILERY_TUI_CLIPBOARD_DRY_RUN"] === "1" || runtime.env["EMAILS_TUI_CLIPBOARD_DRY_RUN"] === "1") return { ok: true, method: "dry-run" };
+  if (runtime.env["EMAILS_TUI_CLIPBOARD_DRY_RUN"] === "1" || runtime.env["EMAILS_TUI_CLIPBOARD_DRY_RUN"] === "1") return { ok: true, method: "dry-run" };
 
   const discovered = tmuxEnvironmentHosts(runtime);
 

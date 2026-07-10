@@ -18,9 +18,9 @@ import {
 import { storeInboundEmail } from "../db/inbound.js";
 
 const RUNTIME_ENV = [
-  "MAILERY_MODE",
+  "EMAILS_MODE",
   "HASNA_EMAILS_MODE",
-  "HASNA_EMAILS_STORAGE_MODE",
+  "EMAILS_MODE",
   "EMAILS_DATABASE_URL",
   "HASNA_EMAILS_DATABASE_URL",
   "HASNA_EMAILS_DB_PATH",
@@ -31,7 +31,7 @@ let tempHome: string | undefined;
 
 beforeEach(() => {
   previousHome = process.env["HOME"];
-  tempHome = mkdtempSync(join(tmpdir(), "mailery-mcp-resources-test-home-"));
+  tempHome = mkdtempSync(join(tmpdir(), "emails-mcp-resources-test-home-"));
   process.env["HOME"] = tempHome;
   process.env["EMAILS_DB_PATH"] = ":memory:";
   for (const key of RUNTIME_ENV) delete process.env[key];

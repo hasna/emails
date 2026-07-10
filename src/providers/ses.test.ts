@@ -63,6 +63,8 @@ mock.module("@aws-sdk/client-sesv2", () => ({
   SendEmailCommand: MockSendEmailCommand,
   BatchGetMetricDataCommand: MockBatchGetMetricDataCommand,
   PutEmailIdentityMailFromAttributesCommand: MockPutEmailIdentityMailFromAttributesCommand,
+  GetAccountCommand: class { constructor(public input: unknown) {} },
+  PutAccountDetailsCommand: class { constructor(public input: unknown) {} },
 }));
 
 mock.module("@aws-sdk/client-ses", () => ({
@@ -70,6 +72,13 @@ mock.module("@aws-sdk/client-ses", () => ({
   GetIdentityVerificationAttributesCommand: MockGetIdentityVerificationAttributesCommand,
   VerifyDomainIdentityCommand: MockVerifyDomainIdentityCommand,
   VerifyDomainDkimCommand: MockVerifyDomainDkimCommand,
+  CreateReceiptRuleSetCommand: class { constructor(public input: unknown) {} },
+  SetActiveReceiptRuleSetCommand: class { constructor(public input: unknown) {} },
+  ListReceiptRuleSetsCommand: class { constructor(public input: unknown) {} },
+  CreateReceiptRuleCommand: class { constructor(public input: unknown) {} },
+  DescribeActiveReceiptRuleSetCommand: class { constructor(public input: unknown) {} },
+  DescribeReceiptRuleCommand: class { constructor(public input: unknown) {} },
+  UpdateReceiptRuleCommand: class { constructor(public input: unknown) {} },
 }));
 
 // Import after mock setup

@@ -4,7 +4,7 @@ import type { DnsRecord, Domain, DomainSourceOfTruth, DomainType, Provider } fro
 import chalk from "../../lib/chalk-lite.js";
 import { createDomain, listDomains, listUsableDomains, deleteDomain, findDomainsByName, getDomain, getDomainByName, moveDomainProvider, updateDnsStatus, updateDomainReadiness } from "../../db/domains.js";
 import { getProvider, listProviderNamesByIds } from "../../db/providers.js";
-import { isCloudMode } from "../../db/cloud-store.js";
+import { isSelfHostedMode } from "../../db/self-hosted-store.js";
 import { getDatabase, now } from "../../db/database.js";
 import { getAdapter } from "../../providers/index.js";
 import { formatDnsTable, generateDmarcRecord, generateSpfRecord } from "../../lib/dns.js";
@@ -15,7 +15,7 @@ import { formatWarmingStatus, generateWarmingPlan, getTodayLimit, getTodaySentCo
 import { listDomainProvisioningByIds, listReadyAddressCountsByDomains, setDomainProvisioning } from "../../db/provisioning.js";
 import { formatDomainReadinessState } from "../../lib/domain-readiness.js";
 import { normalizeRoute53RegistrationContact } from "../../lib/route53-contact.js";
-import { resolveMaileryMode } from "../../lib/mode.js";
+import { resolveEmailsMode } from "../../lib/mode.js";
 import {
   assessDomainLifecycleReadiness,
   buildDomainLifecycleSummary,
@@ -26,16 +26,15 @@ import {
 function normalizeDomainType(value: string | undefined): DomainType | undefined {
   if (!value) return undefined;
   const normalized = value.trim().toLowerCase().replace(/-/g, "_");
-  if (["system", "tenant", "self_hosted", "local_only"].includes(normalized)) return normalized as DomainType;
-  handleError(new Error(`Invalid domain type '${value}'. Use system, tenant, self_hosted, or local_only.`));
+  if (["system", "self_hosted", "local_only"].includes(normalized)) return normalized as DomainType;
+  handleError(new Error(`Invalid domain type '${value}'. Use system, self_hosted, or local_only.`));
 }
 
 function normalizeSourceOfTruth(value: string | undefined): DomainSourceOfTruth | undefined {
   if (!value) return undefined;
   const normalized = value.trim().toLowerCase().replace(/-/g, "_");
-  if (normalized === "postgres" || normalized === "local" || normalized === "cloud") return normalized;
-  if (normalized === "self_hosted" || normalized === "remote") return "postgres";
-  handleError(new Error(`Invalid source of truth '${value}'. Use local, postgres, or cloud.`));
+  if (normalized === "postgres" || normalized === "local") return normalized;
+  handleError(new Error(`Invalid source of truth '${value}'. Use local or postgres.`));
 }
 
 function normalizeDnsProvider(value: string | undefined): string {
@@ -224,31 +223,31 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     try {
       const db = getDatabase();
 
-      // Cloud (self_hosted) mode: the domain is created directly on the app's
-      // cloud HTTP API (<API_URL>/v1/domains). Providers are a local-only concept
-      // (the cloud API exposes no /v1/providers), so we do NOT resolve a local
+      // Self-hosted (self_hosted) mode: the domain is created directly on the app's
+      // self_hosted HTTP API (<API_URL>/v1/domains). Providers are a local-only concept
+      // (the self_hosted API exposes no /v1/providers), so we do NOT resolve a local
       // provider row or call a provider adapter — `--provider` is passed through
-      // as a label. This makes `domain add` a real cloud write, not a local one.
-      if (isCloudMode()) {
+      // as a label. This makes `domain add` a real self_hosted write, not a local one.
+      if (isSelfHostedMode()) {
         const existing = getDomainByName(opts.provider, domain, db);
-        const cloudMode = resolveMaileryMode();
-        const cloudDomainType = normalizeDomainType(opts.domainType) ?? "self_hosted";
+        const selfHostedMode = resolveEmailsMode();
+        const selfHostedDomainType = normalizeDomainType(opts.domainType) ?? "self_hosted";
         if (opts.dryRun) {
           output({
             dry_run: true,
             domain,
             provider_id: opts.provider,
-            mode: cloudMode.mode,
+            mode: selfHostedMode.mode,
             provider: null,
-            source_of_truth: "cloud",
-            domain_type: cloudDomainType,
+            source_of_truth: "postgres",
+            domain_type: selfHostedDomainType,
             existing: existing ? { id: existing.id, domain: existing.domain } : null,
             would_create_domain: !existing,
             would_call_provider: false,
             cli_equivalent: `emails ${commandPrefix} add ${domain} --provider ${opts.provider}`,
           }, existing
-            ? chalk.dim(`Domain already exists in cloud: ${domain} (${existing.id.slice(0, 8)})`)
-            : chalk.dim(`Would create ${domain} on the cloud API (provider label ${opts.provider}).`));
+            ? chalk.dim(`Domain already exists in self_hosted: ${domain} (${existing.id.slice(0, 8)})`)
+            : chalk.dim(`Would create ${domain} on the self_hosted API (provider label ${opts.provider}).`));
           return;
         }
         if (existing) {
@@ -256,7 +255,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
           return;
         }
         const created = createDomain(opts.provider, domain);
-        output(created, chalk.green(`✓ Domain added to cloud: ${domain} (${created.id.slice(0, 8)})`));
+        output(created, chalk.green(`✓ Domain added to self_hosted: ${domain} (${created.id.slice(0, 8)})`));
         return;
       }
 
@@ -264,7 +263,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
       const provider = getProvider(providerId, db);
       if (!provider) handleError(new Error(`Provider not found: ${opts.provider}`));
       const existing = getDomainByName(providerId, domain, db);
-      const mode = resolveMaileryMode();
+      const mode = resolveEmailsMode();
       const domainType = normalizeDomainType(opts.domainType) ?? "self_hosted";
       const sourceOfTruth = normalizeSourceOfTruth(opts.sourceOfTruth) ?? defaultDomainSourceOfTruth(mode.mode);
 
@@ -320,9 +319,9 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
       const providerId = resolveId("providers", opts.provider);
       const provider = getProvider(providerId, db);
       if (!provider) handleError(new Error(`Provider not found: ${opts.provider}`));
-      const mode = resolveMaileryMode();
+      const mode = resolveEmailsMode();
       const sourceOfTruth = normalizeSourceOfTruth(opts.sourceOfTruth) ?? defaultDomainSourceOfTruth(mode.mode);
-      const domainType = normalizeDomainType(opts.domainType) ?? (sourceOfTruth === "postgres" ? "self_hosted" : sourceOfTruth === "cloud" ? "tenant" : "local_only");
+      const domainType = normalizeDomainType(opts.domainType) ?? (sourceOfTruth === "postgres" ? "self_hosted" : "local_only");
       const dnsProvider = normalizeDnsProvider(opts.dnsProvider);
       const existing = getDomainByName(providerId, domain, db);
       const fallbackRecords = fallbackDomainDnsRecords(domain, provider!);
@@ -416,7 +415,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
       const domain = resolveDomainRecord(domainOrId, opts, db);
       const summary = buildDomainLifecycleSummary(domain, { db });
       if (!opts.force && !summary.readiness.receive_ready && !summary.readiness.inbound_evidence_ready) {
-        handleError(new Error(`Inbound cloud source is not configured for ${domain.domain}; run emails domain adopt ${domain.domain} --provider ${domain.provider_id} or pass --force after manual/provider setup.`));
+        handleError(new Error(`Inbound self_hosted source is not configured for ${domain.domain}; run emails domain adopt ${domain.domain} --provider ${domain.provider_id} or pass --force after manual/provider setup.`));
       }
       const updated = updateDomainReadiness(domain.id, {
         inbound_status: "ready",
@@ -684,8 +683,8 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .command("add <domain>")
     .description("Add a domain to a provider")
     .requiredOption("--provider <id>", "Provider ID")
-    .option("--domain-type <type>", "Domain type: system, tenant, self_hosted, or local_only")
-    .option("--source-of-truth <source>", "Source of truth: local, postgres, or cloud")
+    .option("--domain-type <type>", "Domain type: system, self_hosted, or local_only")
+    .option("--source-of-truth <source>", "Source of truth: local or postgres")
     .option("--dry-run", "Resolve inputs and show the planned change without calling the provider or writing to the DB")
     .action((domain: string, opts: { provider: string; dryRun?: boolean; domainType?: string; sourceOfTruth?: string }) => addDomainAction(domain, opts, "domains"));
 
@@ -693,8 +692,8 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .command("connect <domain>")
     .description("Connect an already-owned domain and generate DNS readiness tasks")
     .requiredOption("--provider <id>", "Provider ID")
-    .option("--domain-type <type>", "Domain type: system, tenant, self_hosted, or local_only")
-    .option("--source-of-truth <source>", "Source of truth: local, postgres, or cloud")
+    .option("--domain-type <type>", "Domain type: system, self_hosted, or local_only")
+    .option("--source-of-truth <source>", "Source of truth: local or postgres")
     .option("--dns-provider <provider>", "DNS provider label: manual, cloudflare, or route53", "manual")
     .option("--no-register-provider", "Do not call the mail provider to register the domain")
     .option("--dry-run", "Show the connection plan without calling the provider or writing to the DB")
@@ -742,8 +741,8 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .command("add <domain>")
     .description("Add a domain to a provider")
     .requiredOption("--provider <id>", "Provider ID")
-    .option("--domain-type <type>", "Domain type: system, tenant, self_hosted, or local_only")
-    .option("--source-of-truth <source>", "Source of truth: local, postgres, or cloud")
+    .option("--domain-type <type>", "Domain type: system, self_hosted, or local_only")
+    .option("--source-of-truth <source>", "Source of truth: local or postgres")
     .option("--dry-run", "Resolve inputs and show the planned change without calling the provider or writing to the DB")
     .action((domain: string, opts: { provider: string; dryRun?: boolean; domainType?: string; sourceOfTruth?: string }) => addDomainAction(domain, opts, "domain"));
 
@@ -751,8 +750,8 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .command("connect <domain>")
     .description("Connect an already-owned domain and generate DNS readiness tasks")
     .requiredOption("--provider <id>", "Provider ID")
-    .option("--domain-type <type>", "Domain type: system, tenant, self_hosted, or local_only")
-    .option("--source-of-truth <source>", "Source of truth: local, postgres, or cloud")
+    .option("--domain-type <type>", "Domain type: system, self_hosted, or local_only")
+    .option("--source-of-truth <source>", "Source of truth: local or postgres")
     .option("--dns-provider <provider>", "DNS provider label: manual, cloudflare, or route53", "manual")
     .option("--no-register-provider", "Do not call the mail provider to register the domain")
     .option("--dry-run", "Show the connection plan without calling the provider or writing to the DB")
@@ -791,7 +790,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
         await adapter.addDomain(domain);
         lines.push(chalk.green(`✓ SES identity ensured`));
 
-        // 2. Register in the mailery store.
+        // 2. Register in the emails store.
         const rec = getDomainByName(providerId, domain, db) ?? createDomain(providerId, domain, db);
         setDomainProvisioning(rec.id, {
           provisioning_status: "ses_identity_created",
@@ -799,7 +798,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
           send_provider: provider.type,
           last_error: null,
         }, db);
-        lines.push(chalk.green(`✓ Registered in Mailery (${rec.id.slice(0, 8)})`));
+        lines.push(chalk.green(`✓ Registered in Emails (${rec.id.slice(0, 8)})`));
 
         // 3. Record verification status.
         try {
@@ -933,7 +932,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
         const rows = domains.map((d) => {
           const provisioning = domainProvisioning.get(d.id) ?? null;
           const ready_addresses = readyAddressCounts.get(d.id) ?? 0;
-          const readiness = assessDomainLifecycleReadiness(d, resolveMaileryMode(), ready_addresses, provisioning);
+          const readiness = assessDomainLifecycleReadiness(d, resolveEmailsMode(), ready_addresses, provisioning);
           return {
             ...d,
             provider_name: providerNames.get(d.provider_id) ?? null,
@@ -1022,7 +1021,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
         const rows = domains.map((domain) => {
           const provisioning = domainProvisioning.get(domain.id) ?? null;
           const ready_addresses = readyAddressCounts.get(domain.id) ?? 0;
-          const readiness = assessDomainLifecycleReadiness(domain, resolveMaileryMode(), ready_addresses, provisioning);
+          const readiness = assessDomainLifecycleReadiness(domain, resolveEmailsMode(), ready_addresses, provisioning);
           return {
             ...domain,
             provider_name: providerNames.get(domain.provider_id) ?? null,

@@ -1,145 +1,121 @@
-import { loadConfig, saveConfig } from "./config.js";
+import { loadConfig } from "./config.js";
 
-export type MaileryMode = "local" | "cloud";
-export type MaileryModeLabel = "Local" | "Mailery Cloud";
+export type EmailsMode = "local" | "self_hosted";
+export type EmailsModeLabel = "Local" | "Self-hosted";
 
-export const MAILERY_MODE_ENV = "MAILERY_MODE";
+export const EMAILS_MODE_ENV = "EMAILS_MODE";
 export const HASNA_EMAILS_MODE_ENV = "HASNA_EMAILS_MODE";
-export const LEGACY_STORAGE_MODE_ENV = "HASNA_EMAILS_STORAGE_MODE";
-export const LEGACY_STORAGE_MODE_FALLBACK_ENV = "EMAILS_STORAGE_MODE";
-export const MAILERY_MODE_CONFIG_KEY = "mailery_mode";
-export const LEGACY_MODE_CONFIG_KEYS = ["mode", "storage_mode"] as const;
-export const MAILERY_MODE_ENV_KEYS = [
-  MAILERY_MODE_ENV,
-  HASNA_EMAILS_MODE_ENV,
+export const EMAILS_MODE_CONFIG_KEY = "emails_mode";
+export const EMAILS_MODE_ENV_KEYS = [EMAILS_MODE_ENV, HASNA_EMAILS_MODE_ENV] as const;
+
+const LEGACY_MODE_ENV_KEYS = [
+  "MAILERY_MODE",
+  "HASNA_MAILERY_MODE",
+  "MAILERY_STORAGE_MODE",
+  "HASNA_MAILERY_STORAGE_MODE",
+  "EMAILS_STORAGE_MODE",
+  "HASNA_EMAILS_STORAGE_MODE",
 ] as const;
 
-export interface MaileryModeSource {
+const LEGACY_HOSTED_ENV_KEYS = [
+  "MAILERY_API_URL",
+  "MAILERY_API_KEY",
+  "MAILERY_CLOUD_API_URL",
+  "MAILERY_CLOUD_TOKEN",
+  "HASNA_MAILERY_API_URL",
+  "HASNA_MAILERY_API_KEY",
+  "HASNA_MAILERY_ENV_FILE",
+] as const;
+
+const FORBIDDEN_MODE_VALUES = new Set([
+  "cloud",
+  "mailery_cloud",
+  "remote",
+  "hybrid",
+  "self-hosted",
+  "selfhosted",
+]);
+
+export interface EmailsModeSource {
   kind: "env" | "config" | "default";
   name: string | null;
   value: string | null;
 }
 
-export interface MaileryModeResolution {
-  mode: MaileryMode;
-  label: MaileryModeLabel;
-  source: MaileryModeSource;
-  deprecatedAlias: string | null;
-  migratedConfig: boolean;
-  warning: string | null;
+export interface EmailsModeResolution {
+  mode: EmailsMode;
+  label: EmailsModeLabel;
+  source: EmailsModeSource;
+  warning: null;
 }
 
-export interface ResolveMaileryModeOptions {
-  migrateConfig?: boolean;
+function migrationGuidance(source: string, value?: string): string {
+  const detail = value ? ` value '${value}'` : "";
+  return `${source}${detail} belongs to the removed hosted/legacy runtime. ` +
+    `Use ${EMAILS_MODE_ENV}=local, or set ${EMAILS_MODE_ENV}=self_hosted with ` +
+    "EMAILS_SELF_HOSTED_URL and EMAILS_SELF_HOSTED_API_KEY. No cloud, remote, or hybrid alias is supported.";
 }
 
-function readEnv(name: string): string | null {
-  const value = process.env[name]?.trim();
-  return value ? value : null;
-}
-
-export function labelForMaileryMode(mode: MaileryMode): MaileryModeLabel {
-  switch (mode) {
-    case "local":
-      return "Local";
-    case "cloud":
-      return "Mailery Cloud";
+export function assertNoLegacyHostedEnvironment(env: NodeJS.ProcessEnv = process.env): void {
+  for (const key of LEGACY_MODE_ENV_KEYS) {
+    const value = env[key]?.trim();
+    if (value) throw new Error(migrationGuidance(key, value));
+  }
+  for (const key of LEGACY_HOSTED_ENV_KEYS) {
+    if (env[key]?.trim()) throw new Error(migrationGuidance(key));
   }
 }
 
-// There are exactly two modes: `local` (SQLite) and `cloud` (API client — a
-// self-hosted server is just `cloud` pointed at a private base URL). The legacy
-// `self_hosted` / `remote` / `hybrid` values are accepted as deprecated aliases
-// for `cloud`.
-export function normalizeMaileryMode(value: string): { mode: MaileryMode; deprecatedAlias: string | null } {
-  const normalized = value.trim().toLowerCase().replace(/-/g, "_");
-  if (normalized === "local") return { mode: "local", deprecatedAlias: null };
-  if (normalized === "cloud" || normalized === "mailery_cloud") return { mode: "cloud", deprecatedAlias: null };
-  if (normalized === "self_hosted" || normalized === "remote" || normalized === "hybrid") {
-    return { mode: "cloud", deprecatedAlias: normalized };
-  }
-  throw new Error(`Unknown Mailery mode: ${value}. Use local or cloud.`);
+export function labelForEmailsMode(mode: EmailsMode): EmailsModeLabel {
+  return mode === "local" ? "Local" : "Self-hosted";
 }
 
-function findConfiguredMode(config: Record<string, unknown>): { key: string; value: string } | null {
-  const keys = [MAILERY_MODE_CONFIG_KEY, ...LEGACY_MODE_CONFIG_KEYS];
-  for (const key of keys) {
-    const value = config[key];
-    if (typeof value === "string" && value.trim()) return { key, value: value.trim() };
+export function normalizeEmailsMode(value: string): EmailsMode {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "local" || normalized === "self_hosted") return normalized;
+  if (FORBIDDEN_MODE_VALUES.has(normalized)) {
+    throw new Error(migrationGuidance(EMAILS_MODE_ENV, value));
   }
-  return null;
+  throw new Error(`Unknown Emails mode '${value}'. Use exactly local or self_hosted.`);
 }
 
-function warningFor(source: MaileryModeSource, deprecatedAlias: string | null, migratedConfig: boolean, mode: MaileryMode): string | null {
-  if (!deprecatedAlias && !migratedConfig) return null;
-  const oldValue = deprecatedAlias ?? source.value ?? "";
-  if (source.kind === "config") {
-    if (migratedConfig && deprecatedAlias) {
-      return `Migrated deprecated Mailery mode '${oldValue}' from config to '${MAILERY_MODE_CONFIG_KEY}=${mode}'.`;
-    }
-    if (migratedConfig) {
-      return `Migrated deprecated Mailery mode config key '${source.name}' to '${MAILERY_MODE_CONFIG_KEY}=${mode}'.`;
-    }
-    return `Deprecated Mailery mode '${oldValue}' in config is treated as '${mode}'.`;
-  }
-  if (source.kind === "env") {
-    return `Deprecated Mailery mode '${oldValue}' from ${source.name} is treated as '${mode}'. Set ${MAILERY_MODE_ENV}=${mode} instead.`;
-  }
-  return null;
-}
+export function resolveEmailsMode(env: NodeJS.ProcessEnv = process.env): EmailsModeResolution {
+  assertNoLegacyHostedEnvironment(env);
 
-function defaultMode(): MaileryMode {
-  return "local";
-}
-
-export function resolveMaileryMode(opts: ResolveMaileryModeOptions = {}): MaileryModeResolution {
-  for (const name of MAILERY_MODE_ENV_KEYS) {
-    const value = readEnv(name);
+  for (const name of EMAILS_MODE_ENV_KEYS) {
+    const value = env[name]?.trim();
     if (!value) continue;
-    const normalized = normalizeMaileryMode(value);
-    const source = { kind: "env" as const, name, value };
-    return {
-      ...normalized,
-      label: labelForMaileryMode(normalized.mode),
-      source,
-      migratedConfig: false,
-      warning: warningFor(source, normalized.deprecatedAlias, false, normalized.mode),
-    };
+    const mode = normalizeEmailsMode(value);
+    return { mode, label: labelForEmailsMode(mode), source: { kind: "env", name, value }, warning: null };
   }
 
   const config = loadConfig();
-  const configured = findConfiguredMode(config);
-  if (configured) {
-    const normalized = normalizeMaileryMode(configured.value);
-    let migratedConfig = false;
-    if (opts.migrateConfig && (configured.key !== MAILERY_MODE_CONFIG_KEY || normalized.deprecatedAlias)) {
-      const next = { ...config };
-      next[MAILERY_MODE_CONFIG_KEY] = normalized.mode;
-      for (const key of LEGACY_MODE_CONFIG_KEYS) delete next[key];
-      saveConfig(next);
-      migratedConfig = true;
+  for (const key of ["mailery_mode", "mode", "storage_mode"] as const) {
+    const value = config[key];
+    if (typeof value === "string" && value.trim()) {
+      throw new Error(migrationGuidance(`config key '${key}'`, value.trim()));
     }
-    const source = { kind: "config" as const, name: configured.key, value: configured.value };
+  }
+  const configured = config[EMAILS_MODE_CONFIG_KEY];
+  if (typeof configured === "string" && configured.trim()) {
+    const value = configured.trim();
+    const mode = normalizeEmailsMode(value);
     return {
-      ...normalized,
-      label: labelForMaileryMode(normalized.mode),
-      source,
-      migratedConfig,
-      warning: warningFor(source, normalized.deprecatedAlias, migratedConfig, normalized.mode),
+      mode,
+      label: labelForEmailsMode(mode),
+      source: { kind: "config", name: EMAILS_MODE_CONFIG_KEY, value },
+      warning: null,
     };
   }
 
-  const mode = defaultMode();
   return {
-    mode,
-    label: labelForMaileryMode(mode),
+    mode: "local",
+    label: "Local",
     source: { kind: "default", name: null, value: null },
-    deprecatedAlias: null,
-    migratedConfig: false,
     warning: null,
   };
 }
 
-export function getMaileryMode(): MaileryMode {
-  return resolveMaileryMode().mode;
+export function getEmailsMode(): EmailsMode {
+  return resolveEmailsMode().mode;
 }

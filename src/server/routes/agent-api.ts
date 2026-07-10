@@ -3,7 +3,7 @@
  *
  * Every route requires a scoped send key in `Authorization: Bearer esk_…`.
  * The key resolves to an owner; all operations are scoped to addresses that
- * owner owns or administers, so one caller can never act as another tenant.
+ * owner owns or administers, so one caller can never act as another principal.
  */
 import { verifySendKey, canOwnerSendFrom } from "../../db/send-keys.js";
 import { getOwner, assignAddressOwner, listAddressesByOwner, listAdministeredAddressesNotOwnedBy, getAddressOwnership } from "../../db/owners.js";

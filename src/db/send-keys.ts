@@ -1,7 +1,7 @@
 /**
  * Scoped send keys — a credential bound to one owner (an agent or human). A key
  * authorizes sending only from addresses that owner OWNS or ADMINISTERS, so an
- * agent issued a key cannot send as addresses belonging to other tenants.
+ * agent issued a key cannot send as addresses belonging to other principals.
  *
  * Tokens are shown once at creation; only their SHA-256 hash is stored.
  */
@@ -11,14 +11,14 @@ import { getDatabase, now, uuid } from "./database.js";
 import { getOwner, getAddressOwnership, type Owner } from "./owners.js";
 import { safeOffset, safeOptionalLimit } from "./pagination.js";
 import { canonicalSender } from "../lib/email-address.js";
-import { cloudResource, cloudListQuery, cloudPage, ciso, cstr, cstrOrNull } from "./cloud-resource.js";
+import { selfHostedResource, selfHostedListQuery, selfHostedPage, ciso, cstr, cstrOrNull } from "./self-hosted-resource.js";
 
 const TOKEN_PREFIX = "esk_";
 
 const SEND_KEY_RESOURCE = "send-keys";
 
-// The cloud `send-keys` resource is summary-only: the secret `key_hash` is NEVER
-// stored on or fetched by a client (token verification is server-side). A cloud
+// The selfHosted `send-keys` resource is summary-only: the secret `key_hash` is NEVER
+// stored on or fetched by a client (token verification is server-side). A selfHosted
 // send-key maps its key_hash to "" (display/enumeration only; auth uses
 // verifySendKey, which stays on the authoritative store).
 function apiToSendKeySummary(e: Record<string, unknown>): SendKeySummary {
@@ -85,18 +85,19 @@ function bareEmail(from: string): string {
 }
 
 export function createSendKey(ownerId: string, label?: string, db?: Database): { token: string; key: SendKey } {
-  // Cloud mode: FAIL LOUD instead of minting into the local SQLite island.
+  // Self-hosted mode: FAIL LOUD instead of minting into the local SQLite island.
   // A send key is a credential whose SHA-256 hash MUST live on the authoritative
-  // store that verifies it. The cloud `send_keys` resource is summary-only (no
+  // store that verifies it. The selfHosted `send_keys` resource is summary-only (no
   // key_hash column server-side), so a key minted locally can never be verified
-  // by the cloud server — `sendkey list` (cloud) would show nothing and sends
+  // by the selfHosted server — `sendkey list` (selfHosted) would show nothing and sends
   // authenticated by that token would be rejected. Rather than silently create
   // an unusable/split-brain key, refuse until the server exposes a dedicated
   // mint endpoint (POST /v1/send-keys that generates the token server-side,
   // stores the hash, and returns the token once).
-  if (cloudResource(SEND_KEY_RESOURCE)) {
+  if (selfHostedResource(SEND_KEY_RESOURCE)) {
     throw new Error(
-      "Creating a send key against the cloud API is not supported yet: the cloud store holds send-key metadata only (no secret hash), so a key minted here could not be verified by the server. This needs a server-side mint endpoint. To create a send key today, run against the local store (unset HASNA_MAILERY_API_URL/HASNA_MAILERY_API_KEY or set HASNA_MAILERY_STORAGE_MODE=local).",
+      "Creating a send key through the self-hosted metadata resource is not supported. " +
+        "Use an operator-issued service API key, or run with EMAILS_MODE=local for local send keys.",
     );
   }
   const d = db || getDatabase();
@@ -128,14 +129,14 @@ export function verifySendKey(token: string, db?: Database): SendKey | null {
 }
 
 export function listSendKeys(ownerId?: string, db?: Database, opts?: ListSendKeyOptions): SendKey[] {
-  const cloud = cloudResource(SEND_KEY_RESOURCE);
-  if (cloud) {
-    const { query, limit, offset } = cloudListQuery(opts);
+  const selfHosted = selfHostedResource(SEND_KEY_RESOURCE);
+  if (selfHosted) {
+    const { query, limit, offset } = selfHostedListQuery(opts);
     if (ownerId) query["owner_id"] = ownerId;
-    let rows = cloud.list(query).map((e) => ({ ...apiToSendKeySummary(e), key_hash: "" }) as SendKey);
+    let rows = selfHosted.list(query).map((e) => ({ ...apiToSendKeySummary(e), key_hash: "" }) as SendKey);
     if (ownerId) rows = rows.filter((k) => k.owner_id === ownerId);
     rows.sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
-    return cloudPage(rows, limit, offset);
+    return selfHostedPage(rows, limit, offset);
   }
 
   const d = db || getDatabase();
@@ -151,14 +152,14 @@ export function listSendKeys(ownerId?: string, db?: Database, opts?: ListSendKey
 }
 
 export function listSendKeySummaries(ownerId?: string, db?: Database, opts?: ListSendKeyOptions): SendKeySummary[] {
-  const cloud = cloudResource(SEND_KEY_RESOURCE);
-  if (cloud) {
-    const { query, limit, offset } = cloudListQuery(opts);
+  const selfHosted = selfHostedResource(SEND_KEY_RESOURCE);
+  if (selfHosted) {
+    const { query, limit, offset } = selfHostedListQuery(opts);
     if (ownerId) query["owner_id"] = ownerId;
-    let rows = cloud.list(query).map(apiToSendKeySummary);
+    let rows = selfHosted.list(query).map(apiToSendKeySummary);
     if (ownerId) rows = rows.filter((k) => k.owner_id === ownerId);
     rows.sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
-    return cloudPage(rows, limit, offset);
+    return selfHostedPage(rows, limit, offset);
   }
 
   const d = db || getDatabase();

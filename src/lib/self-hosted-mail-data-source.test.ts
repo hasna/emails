@@ -4,10 +4,10 @@ import {
   type SelfHostedFetch,
   resolveSelfHostedMailDataSource,
 } from "./self-hosted-mail-data-source.js";
-import { resetCloudConfigCache } from "../db/cloud-store.js";
+import { resetSelfHostedConfigCache } from "../db/self-hosted-store.js";
 import { resetMailDataSource, resolveMailDataSource } from "./mail-data-source.js";
 
-// A self-hosted /v1 message row (snake_case, as mailery.hasna.xyz returns).
+// A self-hosted /v1 message row (snake_case, as the API returns).
 function v1(id: string, over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     id,
@@ -51,7 +51,7 @@ function fakeServe(initial: Array<Record<string, unknown>>): { fetchImpl: SelfHo
     };
     const idMatch = u.pathname.match(/^\/v1\/messages\/(.+)$/);
     if (u.pathname === "/v1/messages" && method === "GET") return ok({ messages: list() });
-    if (u.pathname === "/v1/messages" && method === "POST") {
+    if (u.pathname === "/v1/messages/send" && method === "POST") {
       const body = JSON.parse(String(init.body));
       posted.push(body);
       const id = `posted-${posted.length}`;
@@ -72,17 +72,17 @@ function fakeServe(initial: Array<Record<string, unknown>>): { fetchImpl: SelfHo
 
 function make(rows: Array<Record<string, unknown>>): { ds: SelfHostedMailDataSource; serve: ReturnType<typeof fakeServe> } {
   const serve = fakeServe(rows);
-  const ds = new SelfHostedMailDataSource({ baseUrl: "https://mailery.hasna.xyz/v1", apiKey: "test-key", fetchImpl: serve.fetchImpl });
+  const ds = new SelfHostedMailDataSource({ baseUrl: "https://emails.example/v1", apiKey: "test-key", fetchImpl: serve.fetchImpl });
   return { ds, serve };
 }
 
 afterEach(() => {
   resetMailDataSource();
-  resetCloudConfigCache();
-  delete process.env["HASNA_MAILERY_API_URL"];
-  delete process.env["HASNA_MAILERY_API_KEY"];
-  delete process.env["MAILERY_API_URL"];
-  delete process.env["MAILERY_API_KEY"];
+  resetSelfHostedConfigCache();
+  delete process.env["EMAILS_MODE"];
+  delete process.env["HASNA_EMAILS_MODE"];
+  delete process.env["EMAILS_SELF_HOSTED_URL"];
+  delete process.env["EMAILS_SELF_HOSTED_API_KEY"];
 });
 
 describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
@@ -139,7 +139,7 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     expect(body?.cc).toBe("cc@x.com");
   });
 
-  it("sends via POST /messages and deletes via DELETE", async () => {
+  it("sends via POST /messages/send and deletes via DELETE", async () => {
     const { ds, serve } = make([]);
     const res = await ds.send({ to: "a@x.com, b@x.com", from: "me@hasna.com", subject: "hi", body: "yo", markdown: false });
     expect(res.id).toBe("posted-1");
@@ -180,7 +180,7 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
         }
       }) as unknown as ReturnType<SelfHostedFetch>;
     const ds = new SelfHostedMailDataSource({
-      baseUrl: "https://mailery.hasna.xyz/v1",
+      baseUrl: "https://emails.example/v1",
       apiKey: "test-key",
       fetchImpl: hangingFetch,
       timeoutMs: 25,
@@ -193,27 +193,21 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
 });
 
 describe("resolveMailDataSource — self-hosted seam selection", () => {
-  it("selects the self-hosted source only when HASNA_MAILERY_* creds are present", () => {
-    // The flip contract sets creds and NO mode var; an explicit `local` mode would
-    // (correctly) force local, so clear any inherited local override for this case.
-    delete process.env["MAILERY_MODE"];
-    delete process.env["HASNA_EMAILS_MODE"];
-    delete process.env["MAILERY_STORAGE_MODE"];
-    delete process.env["HASNA_EMAILS_STORAGE_MODE"];
-    process.env["HASNA_MAILERY_API_URL"] = "https://mailery.hasna.xyz";
-    process.env["HASNA_MAILERY_API_KEY"] = "k";
-    resetCloudConfigCache();
+  it("selects self_hosted only from explicit mode, URL, and key", () => {
+    process.env["EMAILS_MODE"] = "self_hosted";
+    process.env["EMAILS_SELF_HOSTED_URL"] = "https://emails.example";
+    process.env["EMAILS_SELF_HOSTED_API_KEY"] = "k";
+    resetSelfHostedConfigCache();
     resetMailDataSource();
     const ds = resolveMailDataSource();
     expect(ds.constructor.name).toBe("SelfHostedMailDataSource");
-    expect(ds.mode).toBe("cloud");
+    expect(ds.mode).toBe("self_hosted");
     expect(resolveSelfHostedMailDataSource()).toBeInstanceOf(SelfHostedMailDataSource);
   });
 
-  it("does NOT engage the self-hosted seam for the bare SaaS MAILERY_API_URL", () => {
-    process.env["MAILERY_API_URL"] = "https://mailery.co";
-    process.env["MAILERY_API_KEY"] = "k";
-    resetCloudConfigCache();
+  it("does not infer self_hosted from credentials when mode is local", () => {
+    process.env["EMAILS_MODE"] = "local";
+    resetSelfHostedConfigCache();
     resetMailDataSource();
     expect(resolveSelfHostedMailDataSource()).toBeNull();
   });

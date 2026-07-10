@@ -16,7 +16,7 @@ async function runBrowserPlanCommand(args: string[]) {
     data = d;
     out.push(String(formatted ?? ""));
   });
-  await program.parseAsync(["node", "mailery", ...args]);
+  await program.parseAsync(["node", "emails", ...args]);
   return { data, out: out.join("\n") };
 }
 

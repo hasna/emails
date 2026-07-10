@@ -1,122 +1,90 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { loadConfig, saveConfig } from "./config.js";
+import { saveConfig } from "./config.js";
 import {
+  EMAILS_MODE_CONFIG_KEY,
+  EMAILS_MODE_ENV,
   HASNA_EMAILS_MODE_ENV,
-  LEGACY_STORAGE_MODE_ENV,
-  MAILERY_MODE_CONFIG_KEY,
-  MAILERY_MODE_ENV,
-  normalizeMaileryMode,
-  resolveMaileryMode,
+  normalizeEmailsMode,
+  resolveEmailsMode,
 } from "./mode.js";
 
-const TMP_HOME = join("/tmp", `mailery-mode-test-${process.pid}`);
+const TMP_HOME = join("/tmp", `emails-mode-test-${process.pid}`);
 const ORIGINAL_HOME = process.env["HOME"];
-const MODE_ENV = [
-  MAILERY_MODE_ENV,
+const ENV_KEYS = [
+  EMAILS_MODE_ENV,
   HASNA_EMAILS_MODE_ENV,
-  LEGACY_STORAGE_MODE_ENV,
+  "MAILERY_MODE",
+  "HASNA_MAILERY_MODE",
+  "MAILERY_STORAGE_MODE",
+  "HASNA_MAILERY_STORAGE_MODE",
   "EMAILS_STORAGE_MODE",
-  "HASNA_EMAILS_DATABASE_URL",
-  "EMAILS_DATABASE_URL",
+  "EMAILS_MODE",
+  "MAILERY_API_URL",
+  "MAILERY_API_KEY",
+  "HASNA_MAILERY_API_URL",
+  "HASNA_MAILERY_API_KEY",
 ] as const;
 
 beforeEach(() => {
   mkdirSync(TMP_HOME, { recursive: true });
   process.env["HOME"] = TMP_HOME;
-  for (const key of MODE_ENV) delete process.env[key];
+  for (const key of ENV_KEYS) delete process.env[key];
 });
 
 afterEach(() => {
-  for (const key of MODE_ENV) delete process.env[key];
+  for (const key of ENV_KEYS) delete process.env[key];
   if (ORIGINAL_HOME === undefined) delete process.env["HOME"];
   else process.env["HOME"] = ORIGINAL_HOME;
   if (existsSync(TMP_HOME)) rmSync(TMP_HOME, { recursive: true, force: true });
 });
 
-describe("Mailery mode resolution", () => {
-  it("uses local as the OSS default", () => {
-    const resolved = resolveMaileryMode();
-    expect(resolved).toMatchObject({
+describe("Emails mode resolution", () => {
+  it("defaults to local", () => {
+    expect(resolveEmailsMode()).toEqual({
       mode: "local",
       label: "Local",
-      source: { kind: "default" },
+      source: { kind: "default", name: null, value: null },
       warning: null,
     });
   });
 
-  it("normalizes canonical and deprecated mode names", () => {
-    expect(normalizeMaileryMode("local")).toEqual({ mode: "local", deprecatedAlias: null });
-    expect(normalizeMaileryMode("cloud")).toEqual({ mode: "cloud", deprecatedAlias: null });
-    expect(normalizeMaileryMode("self-hosted")).toEqual({ mode: "cloud", deprecatedAlias: "self_hosted" });
-    expect(normalizeMaileryMode("remote")).toEqual({ mode: "cloud", deprecatedAlias: "remote" });
-    expect(normalizeMaileryMode("hybrid")).toEqual({ mode: "cloud", deprecatedAlias: "hybrid" });
+  it("accepts exactly local and self_hosted", () => {
+    expect(normalizeEmailsMode("local")).toBe("local");
+    expect(normalizeEmailsMode("self_hosted")).toBe("self_hosted");
+    for (const value of ["cloud", "remote", "hybrid", "self-hosted", "selfhosted"]) {
+      expect(() => normalizeEmailsMode(value)).toThrow("No cloud, remote, or hybrid alias is supported");
+    }
   });
 
-  it("normalizes deprecated deployment env aliases without mutating config", () => {
-    process.env["MAILERY_MODE"] = "remote";
-
-    const resolved = resolveMaileryMode({ migrateConfig: true });
-
-    expect(resolved.mode).toBe("cloud");
-    expect(resolved.warning).toContain("Deprecated Mailery mode 'remote'");
-    expect(resolved.warning).toContain("MAILERY_MODE=cloud");
-    expect(loadConfig()).toEqual({});
-  });
-
-  it("does not treat storage sync env as the Mailery deployment mode", () => {
-    process.env["HASNA_EMAILS_STORAGE_MODE"] = "remote";
-
-    const resolved = resolveMaileryMode({ migrateConfig: true });
-
-    expect(resolved.mode).toBe("local");
-    expect(resolved.warning).toBeNull();
-    expect(loadConfig()).toEqual({});
-  });
-
-  it("observes legacy config mode values without migrating on read", () => {
-    saveConfig({ storage_mode: "remote", other: "kept" });
-
-    const resolved = resolveMaileryMode();
-
-    expect(resolved).toMatchObject({
-      mode: "cloud",
-      migratedConfig: false,
+  it("resolves self_hosted only from an explicit Emails mode setting", () => {
+    process.env[EMAILS_MODE_ENV] = "self_hosted";
+    expect(resolveEmailsMode()).toMatchObject({
+      mode: "self_hosted",
+      label: "Self-hosted",
+      source: { kind: "env", name: EMAILS_MODE_ENV },
     });
-    expect(resolved.warning).toContain("Deprecated Mailery mode 'remote'");
-    expect(loadConfig()).toEqual({ storage_mode: "remote", other: "kept" });
   });
 
-  it("migrates legacy config mode values to mailery_mode=cloud", () => {
-    saveConfig({ storage_mode: "remote", other: "kept" });
-
-    const resolved = resolveMaileryMode({ migrateConfig: true });
-
-    expect(resolved).toMatchObject({
-      mode: "cloud",
-      migratedConfig: true,
-    });
-    expect(resolved.warning).toContain("Migrated deprecated Mailery mode 'remote'");
-    expect(loadConfig()).toEqual({ [MAILERY_MODE_CONFIG_KEY]: "cloud", other: "kept" });
+  it("rejects legacy Mailery and storage-mode environment variables", () => {
+    process.env["HASNA_MAILERY_STORAGE_MODE"] = "cloud";
+    expect(() => resolveEmailsMode()).toThrow("removed hosted/legacy runtime");
   });
 
-  it("migrates legacy config keys without treating canonical values as deprecated aliases", () => {
-    saveConfig({ mode: "cloud" });
-
-    const resolved = resolveMaileryMode({ migrateConfig: true });
-
-    expect(resolved).toMatchObject({
-      mode: "cloud",
-      migratedConfig: true,
-    });
-    expect(resolved.warning).toBe("Migrated deprecated Mailery mode config key 'mode' to 'mailery_mode=cloud'.");
-    expect(loadConfig()).toEqual({ [MAILERY_MODE_CONFIG_KEY]: "cloud" });
+  it("rejects inherited hosted API credentials instead of silently redirecting", () => {
+    process.env["HASNA_MAILERY_API_URL"] = "https://example.invalid";
+    process.env["HASNA_MAILERY_API_KEY"] = "not-a-real-key";
+    expect(() => resolveEmailsMode()).toThrow("HASNA_MAILERY_API_URL");
   });
 
-  it("rejects unknown mode values with canonical guidance", () => {
-    saveConfig({ mailery_mode: "remoteish" });
+  it("rejects legacy config keys with migration guidance", () => {
+    saveConfig({ storage_mode: "remote" });
+    expect(() => resolveEmailsMode()).toThrow("config key 'storage_mode'");
+  });
 
-    expect(() => resolveMaileryMode()).toThrow("Use local or cloud");
+  it("reads the canonical config key without rewriting it", () => {
+    saveConfig({ [EMAILS_MODE_CONFIG_KEY]: "self_hosted" });
+    expect(resolveEmailsMode()).toMatchObject({ mode: "self_hosted", source: { kind: "config" } });
   });
 });

@@ -41,7 +41,7 @@ export async function runSolidOpenTuiApp(initialMailbox?: Mailbox): Promise<void
       signalHandlers.push([signal, handler]);
       process.once(signal, handler);
     }
-    renderer.setTerminalTitle("Mailery");
+    renderer.setTerminalTitle("Emails");
     const destroyed = new Promise<void>((resolve) => renderer!.on("destroy", () => resolve()));
     await render(() => (
       <KeymapProvider keymap={keymap}>

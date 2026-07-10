@@ -8,15 +8,15 @@ import { writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { generateSdkFromOpenApi } from "@hasna/contracts/sdk";
-import { maileryCloudOpenApi } from "../src/server/cloud/openapi.js";
+import { emailsSelfHostedOpenApi } from "../src/server/self-hosted/openapi.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const generated = generateSdkFromOpenApi(maileryCloudOpenApi, {
-  className: "MailerySelfHostClient",
+const generated = generateSdkFromOpenApi(emailsSelfHostedOpenApi, {
+  className: "EmailsSelfHostClient",
   apiKeyHeader: "x-api-key",
 });
 
-const header = `// @generated from src/server/cloud/openapi.ts by scripts/generate-selfhost-sdk.ts — DO NOT EDIT.
+const header = `// @generated from src/server/self-hosted/openapi.ts by scripts/generate-selfhost-sdk.ts — DO NOT EDIT.
 // Regenerate: bun run scripts/generate-selfhost-sdk.ts
 `;
 const out = join(root, "src", "selfhost.ts");

@@ -13,7 +13,7 @@ import { getLatestActiveProvider } from "../../db/providers.js";
 import { getDatabase } from "../../db/database.js";
 import { json, badRequest } from "./helpers.js";
 import { verifyResendSignature } from "../../lib/webhook-events.js";
-import { emitMaileryEventBestEffort, inboundReceivedEventData } from "../../lib/mailery-events.js";
+import { emitEmailsEventBestEffort, inboundReceivedEventData } from "../../lib/emails-events.js";
 
 export async function handleResendWebhook(req: Request, path: string, method: string): Promise<Response | null> {
   if (path !== "/webhook/resend-inbound" || method !== "POST") return null;
@@ -56,11 +56,11 @@ export async function handleResendWebhook(req: Request, path: string, method: st
     received_at: parsed.received_at,
   }, db);
 
-  emitMaileryEventBestEffort({
-    type: "mailery.inbound.received",
+  emitEmailsEventBestEffort({
+    type: "emails.inbound.received",
     subject: stored.id,
     severity: "notice",
-    dedupeKey: `mailery:inbound:received:${stored.id}`,
+    dedupeKey: `emails:inbound:received:${stored.id}`,
     message: "Inbound email received from Resend",
     data: inboundReceivedEventData({
       emailId: stored.id,

@@ -4,18 +4,16 @@
 
 // TLS resolution for the vendored Hasna storage kit.
 //
-// ONE correct TLS approach for the whole fleet. This replaces the three drifted
+// One correct TLS approach for this deployment. This replaces drifted
 // variants that previously existed across repos, all of which hardcoded
 // `{ rejectUnauthorized: false }` for any TLS connection — that silently
 // disables certificate verification even when the caller asked for
-// `verify-full`, which defeats the point of TLS against a cloud database.
+// `verify-full`, which defeats the point of TLS against a self_hosted database.
 //
 // The rule here follows libpq `sslmode` semantics exactly:
 //   - disable / (no ssl param)  -> no TLS (ssl: undefined)
-//   - prefer / require          -> encrypt, do NOT verify the server cert
-//                                  (rejectUnauthorized: false) — this matches
-//                                  what libpq `require` means and is the AWS
-//                                  RDS default when no CA bundle is supplied.
+//   - prefer                    -> no explicit TLS policy (local development)
+//   - require                   -> encrypt and verify the server certificate
 //   - verify-ca / verify-full   -> encrypt AND verify against a CA bundle
 //                                  (rejectUnauthorized: true, ca: <bundle>).
 //                                  A CA bundle is REQUIRED; we throw if none is
@@ -105,10 +103,7 @@ export function resolveTlsConfig(
   const ca = loadCaBundle(options);
 
   if (mode === "require") {
-    // Encrypt but do not verify — libpq `require` semantics. If a CA bundle is
-    // available we still pin it (strictly better) while keeping verification
-    // relaxed so a rotated/regional RDS cert cannot hard-fail a `require` DSN.
-    return ca ? { rejectUnauthorized: false, ca } : { rejectUnauthorized: false };
+    return ca ? { rejectUnauthorized: true, ca } : { rejectUnauthorized: true };
   }
 
   // verify-ca / verify-full: verification is mandatory.

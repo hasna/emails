@@ -17,6 +17,23 @@ async function post(url: string, body: unknown): Promise<Response> {
   });
 }
 
+async function signResendWebhook(id: string, timestamp: string, body: string, secret: string): Promise<string> {
+  const secretBytes = Buffer.from(secret.replace(/^whsec_/, ""), "base64");
+  const key = await crypto.subtle.importKey(
+    "raw",
+    secretBytes,
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const signature = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    new TextEncoder().encode(`${id}.${timestamp}.${body}`),
+  );
+  return `v1,${Buffer.from(signature).toString("base64")}`;
+}
+
 // ─── createWebhookServer tests ────────────────────────────────────────────────
 
 describe("webhook module startup contract", () => {
@@ -84,6 +101,36 @@ describe("createWebhookServer", () => {
     const res = await post(`${base}/webhook/resend`, payload);
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("OK");
+  });
+
+  it("accepts a signed Resend webhook once and rejects an exact replay", async () => {
+    server.stop(true);
+    const secret = `whsec_${Buffer.from("replay-test-secret").toString("base64")}`;
+    server = createWebhookServer(port, undefined, secret);
+    const body = JSON.stringify({
+      type: "email.delivered",
+      data: {
+        email_id: "resend-replay-001",
+        to: ["user@example.com"],
+        created_at: "2025-01-15T10:00:00Z",
+      },
+    });
+    const id = "msg_replay_001";
+    const timestamp = String(Math.floor(Date.now() / 1000));
+    const signature = await signResendWebhook(id, timestamp, body, secret);
+    const request = () => fetch(`${base}/webhook/resend`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "svix-id": id,
+        "svix-timestamp": timestamp,
+        "svix-signature": signature,
+      },
+      body,
+    });
+
+    expect((await request()).status).toBe(200);
+    expect((await request()).status).toBe(409);
   });
 
   it("accepts a valid SES Delivery payload and returns 200", async () => {

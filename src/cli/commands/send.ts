@@ -30,7 +30,7 @@ const ATTACHMENT_MIME_TYPES: Record<string, string> = {
 };
 
 // Read + base64-encode attachment files, enforcing the count/size caps. Shared by the
-// local provider path and the cloud seam path so both validate identically.
+// local provider path and the self_hosted seam path so both validate identically.
 function readSendAttachments(paths: string[] | undefined): MailSendAttachment[] {
   if (!paths || paths.length === 0) return [];
   if (paths.length > MAX_ATTACHMENT_COUNT) {
@@ -153,24 +153,24 @@ export function registerSendCommands(program: Command, _output: (data: unknown, 
 
         if (!subject) handleError(new Error("Subject is required (use --subject or --template)"));
 
-        // ── cloud mode: send through the server API, not the local provider path ──────
+        // ── self_hosted mode: send through the server API, not the local provider path ──────
         // Local-only concerns (provider creds/warming/tracking/scheduling/threading
         // tables, local ledger) do not apply — the server owns sending. Route the
-        // composed message through the seam so cloud send is server-authoritative.
+        // composed message through the seam so self_hosted send is server-authoritative.
         const ds = resolveMailDataSource();
         if (ds.mode !== "local") {
           const attachments = readSendAttachments(opts.attachment);
           if ((opts as Record<string, unknown>).dryRun) {
-            console.log(chalk.bold("\n[DRY RUN] Would send (cloud):"));
+            console.log(chalk.bold("\n[DRY RUN] Would send (self_hosted):"));
             console.log(`  ${chalk.dim("From:")}    ${opts.from}`);
             console.log(`  ${chalk.dim("To:")}      ${toAddresses.join(", ")}`);
             if (opts.cc?.length) console.log(`  ${chalk.dim("CC:")}      ${opts.cc.join(", ")}`);
             console.log(`  ${chalk.dim("Subject:")} ${subject}`);
             if (htmlBody) console.log(`  ${chalk.dim("Body:")}    HTML (${htmlBody.length} chars)`);
             else if (textBody) console.log(`  ${chalk.dim("Body:")}    ${textBody.slice(0, 100)}${textBody.length > 100 ? "..." : ""}`);
-            // Be honest: cloud send fails closed on these, so a real send would NOT succeed.
-            if (attachments.length) console.log(chalk.yellow(`  Attachments: ${attachments.length} file(s) — NOT supported by cloud send (a real send would fail)`));
-            if (opts.schedule) console.log(chalk.yellow(`  Schedule:    ${opts.schedule} — scheduling is not available in cloud mode (a real send would fail)`));
+            // Be honest: self_hosted send fails closed on these, so a real send would NOT succeed.
+            if (attachments.length) console.log(chalk.yellow(`  Attachments: ${attachments.length} file(s) — NOT supported by self_hosted send (a real send would fail)`));
+            if (opts.schedule) console.log(chalk.yellow(`  Schedule:    ${opts.schedule} — scheduling is not available in self_hosted mode (a real send would fail)`));
             console.log(chalk.yellow("\n  [NOT SENT] Use without --dry-run to send.\n"));
             return;
           }

@@ -1,7 +1,7 @@
 import type { Domain } from "../types/index.js";
 import { getInboundBuckets } from "./config.js";
 import type { DomainReadinessSignals } from "./domain-readiness.js";
-import type { MaileryModeResolution } from "./mode.js";
+import type { EmailsModeResolution } from "./mode.js";
 import { listLiveS3Sources, type S3MailSource } from "./s3-sync.js";
 
 function normalizedPrefix(value: string | undefined): string {
@@ -16,7 +16,7 @@ export function listDomainLiveS3Sources(domain: Domain, sources: S3MailSource[] 
   });
 }
 
-export function domainInboundReadinessSignals(domain: Domain, mode: MaileryModeResolution): DomainReadinessSignals {
+export function domainInboundReadinessSignals(domain: Domain, mode: EmailsModeResolution): DomainReadinessSignals {
   const postgresSource = domain.source_of_truth === "postgres";
   if (!postgresSource) {
     return {

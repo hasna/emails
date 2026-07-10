@@ -1,32 +1,32 @@
 import { Show } from "solid-js";
 import { TextAttributes, type TextareaRenderable } from "@opentui/core";
 import { useKeyboard, useTerminalDimensions } from "@opentui/solid";
-import { useMailery } from "../context/mailery-state.js";
+import { useEmails } from "../context/emails-state.js";
 import { useTheme } from "../context/theme.js";
 import { Button } from "../ui/primitives.js";
 import { useToast } from "../context/toast.js";
 
 export function ComposeWindow() {
-  const mailery = useMailery();
+  const emails = useEmails();
   const theme = useTheme();
   const toast = useToast();
   const dimensions = useTerminalDimensions();
   let bodyInput: (TextareaRenderable & { plainText?: string }) | undefined;
 
   useKeyboard((key) => {
-    if (!mailery.state.compose) return;
+    if (!emails.state.compose) return;
     if (key.name === "escape") {
-      mailery.actions.closeCompose();
+      emails.actions.closeCompose();
       return;
     }
     if (key.name === "tab") {
-      mailery.actions.cycleComposeField(key.shift ? -1 : 1);
+      emails.actions.cycleComposeField(key.shift ? -1 : 1);
     }
   });
 
   const send = async () => {
     try {
-      await mailery.actions.sendCompose();
+      await emails.actions.sendCompose();
       toast.show({ title: "Sent", message: "Message sent successfully.", tone: "success" });
     } catch (error) {
       toast.show({ title: "Send failed", message: error instanceof Error ? error.message : String(error), tone: "error" });
@@ -34,7 +34,7 @@ export function ComposeWindow() {
   };
 
   return (
-    <Show when={mailery.state.compose}>
+    <Show when={emails.state.compose}>
       {(compose) => (
         <box
           position="absolute"
@@ -55,7 +55,7 @@ export function ComposeWindow() {
             <text fg={theme.text} attributes={TextAttributes.BOLD}>
               {compose().mode === "reply" ? "Reply" : compose().mode === "forward" ? "Forward" : "Compose"}
             </text>
-            <Button label="Close" onPress={() => mailery.actions.closeCompose()} />
+            <Button label="Close" onPress={() => emails.actions.closeCompose()} />
           </box>
           <input
             focused={compose().field === "from"}
@@ -68,7 +68,7 @@ export function ComposeWindow() {
             placeholderColor={theme.textMuted}
             cursorColor={theme.text}
             width="100%"
-            onInput={(value) => mailery.actions.patchCompose({ from: value, field: "from" })}
+            onInput={(value) => emails.actions.patchCompose({ from: value, field: "from" })}
           />
           <input
             focused={compose().field === "to"}
@@ -81,7 +81,7 @@ export function ComposeWindow() {
             placeholderColor={theme.textMuted}
             cursorColor={theme.text}
             width="100%"
-            onInput={(value) => mailery.actions.patchCompose({ to: value, field: "to" })}
+            onInput={(value) => emails.actions.patchCompose({ to: value, field: "to" })}
           />
           <input
             focused={compose().field === "subject"}
@@ -94,7 +94,7 @@ export function ComposeWindow() {
             placeholderColor={theme.textMuted}
             cursorColor={theme.text}
             width="100%"
-            onInput={(value) => mailery.actions.patchCompose({ subject: value, field: "subject" })}
+            onInput={(value) => emails.actions.patchCompose({ subject: value, field: "subject" })}
           />
           <textarea
             ref={(node) => {
@@ -112,12 +112,12 @@ export function ComposeWindow() {
             height="100%"
             width="100%"
             onContentChange={() => {
-              mailery.actions.patchCompose({ body: bodyInput?.plainText ?? "", field: "body" });
+              emails.actions.patchCompose({ body: bodyInput?.plainText ?? "", field: "body" });
             }}
           />
           <box height={1} flexDirection="row" columnGap={1}>
             <Button label="Send" active onPress={() => void send()} />
-            <Button label="Discard" onPress={() => mailery.actions.closeCompose()} />
+            <Button label="Discard" onPress={() => emails.actions.closeCompose()} />
             <text fg={theme.textMuted}>Markdown enabled</text>
           </box>
         </box>

@@ -17,8 +17,8 @@ export interface Provider {
 }
 
 export type DnsStatus = "pending" | "verified" | "failed";
-export type DomainType = "system" | "tenant" | "self_hosted" | "local_only";
-export type DomainSourceOfTruth = "local" | "postgres" | "cloud";
+export type DomainType = "system" | "self_hosted" | "local_only";
+export type DomainSourceOfTruth = "local" | "postgres";
 export type DomainOwnershipStatus = "pending" | "verified" | "failed";
 export type DomainRouteStatus = "pending" | "ready" | "disabled" | "failed";
 export type DomainMonitoringStatus = "none" | "monitoring" | "clean" | "risky";
@@ -75,7 +75,7 @@ export interface DomainReadiness {
   inbound_evidence_ready: boolean;
   ready_addresses: number;
   inbound_evidence: {
-    mode?: "local" | "self_hosted" | "cloud";
+    mode?: "local" | "self_hosted";
     source_of_truth?: DomainSourceOfTruth;
     inbound_status?: DomainRouteStatus;
     live_s3_sources: number;
@@ -96,8 +96,8 @@ export interface DomainLifecycleReadiness extends DomainReadiness {
 export interface DomainLifecycleSummary {
   id: string;
   domain: string;
-  mode: "local" | "self_hosted" | "cloud";
-  mode_label: "Local" | "Self-hosted" | "Mailery Cloud";
+  mode: "local" | "self_hosted";
+  mode_label: "Local" | "Self-hosted";
   source_of_truth: DomainSourceOfTruth;
   domain_type: DomainType;
   provider: Pick<Provider, "id" | "name" | "type" | "region" | "active"> | null;
