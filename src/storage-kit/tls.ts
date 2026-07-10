@@ -22,8 +22,9 @@
 // The RDS CA bundle is loaded (in priority order) from:
 //   1. an explicit `ca` string passed by the caller,
 //   2. an explicit `caCertPath` passed by the caller,
-//   3. `PGSSLROOTCERT` (libpq's standard env var),
-//   4. `NODE_EXTRA_CA_CERTS`.
+//   3. `EMAILS_DATABASE_CA_FILE` (the product-specific runtime setting),
+//   4. `PGSSLROOTCERT` (libpq's standard env var),
+//   5. `NODE_EXTRA_CA_CERTS`.
 // Download the Amazon RDS global bundle to one of those paths:
 //   https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem
 
@@ -37,7 +38,7 @@ export interface TlsResolveOptions {
   ca?: string;
   /** Path to a CA bundle PEM file, e.g. the Amazon RDS global bundle. */
   caCertPath?: string;
-  /** Environment used to discover PGSSLROOTCERT / NODE_EXTRA_CA_CERTS. */
+  /** Environment used to discover the supported CA bundle path settings. */
   env?: Record<string, string | undefined>;
 }
 
@@ -77,7 +78,11 @@ export function sslModeFromConnectionString(connectionString: string): SslMode {
 function loadCaBundle(options: TlsResolveOptions): string | null {
   const env = options.env ?? process.env;
   if (options.ca && options.ca.trim()) return options.ca;
-  const path = options.caCertPath ?? env.PGSSLROOTCERT ?? env.NODE_EXTRA_CA_CERTS;
+  const path =
+    options.caCertPath ??
+    env.EMAILS_DATABASE_CA_FILE ??
+    env.PGSSLROOTCERT ??
+    env.NODE_EXTRA_CA_CERTS;
   if (path && path.trim()) return readFileSync(path.trim(), "utf8");
   return null;
 }
@@ -108,7 +113,8 @@ export function resolveTlsConfig(
   // verify-ca / verify-full: verification is mandatory.
   if (!ca) {
     throw new Error(
-      `sslmode=${mode} requires a CA bundle. Set PGSSLROOTCERT (or pass caCertPath/ca) to the ` +
+      `sslmode=${mode} requires a CA bundle. Set EMAILS_DATABASE_CA_FILE, PGSSLROOTCERT, ` +
+        `NODE_EXTRA_CA_CERTS (or pass caCertPath/ca) to the ` +
         `Amazon RDS global bundle: https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem`,
     );
   }

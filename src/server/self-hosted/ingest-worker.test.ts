@@ -3,7 +3,7 @@ import { processInboundNotification, shouldDeleteIngestResult, validateIngestWor
 import type { MessageInput, MessageRecord } from "./store.js";
 
 const OBJECT_KEY = "inbound/hasna.com/msgkey123";
-const BUCKET = "hasna-emails-prod-inbound-638389534677";
+const BUCKET = "emails-inbound-123456789012";
 
 const sesNotification = JSON.stringify({
   notificationType: "Received",

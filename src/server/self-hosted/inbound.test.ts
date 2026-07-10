@@ -345,6 +345,42 @@ describe("Emails self-hosted inbound messages", () => {
     expect((await send(Buffer.alloc(513 * 1024).toString("base64")))?.status).toBe(400);
   });
 
+  it("rejects outbound header injection before reservation or provider send", async () => {
+    const d = deps();
+    let sends = 0;
+    let reservations = 0;
+    const reserve = d.store.reserveSendIntent.bind(d.store);
+    d.store.reserveSendIntent = async (input) => { reservations++; return reserve(input); };
+    d.sender = { provider: "ses", send: async () => { sends++; return "must-not-send"; } };
+    const attachment = {
+      filename: "safe.txt",
+      content: Buffer.from("safe").toString("base64"),
+      content_type: "text/plain",
+    };
+    const base = { from: "me@example.com", to: ["you@example.com"], subject: "safe", attachments: [attachment] };
+    const attacks = [
+      { from: "me@example.com\r\nBcc: victim@example.com" },
+      { to: ["you@example.com\nCc: victim@example.com"] },
+      { cc: ["copy@example.com\r\nBcc: victim@example.com"] },
+      { bcc: ["blind@example.com\r\nX-Evil: yes"] },
+      { subject: "safe\r\nBcc: victim@example.com" },
+      { reply_to: "reply@example.com\nBcc: victim@example.com" },
+      { attachments: [{ ...attachment, filename: "safe.txt\r\nBcc: victim@example.com" }] },
+      { attachments: [{ ...attachment, filename: "bad-\uD800-name.txt" }] },
+      { attachments: [{ ...attachment, content_type: "text/plain; name=evil" }] },
+    ];
+    for (const attack of attacks) {
+      const res = await handleSelfHostedRequest(d, new Request("http://svc/v1/messages/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-api-key": writeToken() },
+        body: JSON.stringify({ ...base, ...attack, idempotency_key: crypto.randomUUID() }),
+      }));
+      expect(res?.status).toBe(400);
+    }
+    expect(reservations).toBe(0);
+    expect(sends).toBe(0);
+  });
+
   it("concurrent duplicate sends invoke the provider at most once", async () => {
     const d = deps();
     let release!: () => void;

@@ -763,7 +763,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .description("Add an already-registered, SES-verified domain: register it, wire SES inbound (S3), add a catch-all, and optionally sync")
     .requiredOption("--provider <id>", "SES provider where the domain is verified")
     .option("--no-inbound", "Skip SES inbound (S3 receipt rule) setup")
-    .option("--bucket <name>", "Inbound S3 bucket (default: config, else hasna-emails-prod-inbound-<accountId>)")
+    .option("--bucket <name>", "Inbound S3 bucket (default: config, else emails-inbound-<accountId>)")
     .option("--region <region>", "AWS region (default: the provider's region)")
     .option("--catch-all <target>", "Route ALL mail for this domain to this address")
     .option("--sync", "Run an initial inbound sync after wiring")
@@ -824,7 +824,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
             const { STSClient, GetCallerIdentityCommand } = await import("@aws-sdk/client-sts");
             const sts = new STSClient({ region, credentials: accessKeyId && secretAccessKey ? { accessKeyId, secretAccessKey } : undefined });
             const acct = (await sts.send(new GetCallerIdentityCommand({}))).Account;
-            bucket = `hasna-emails-prod-inbound-${acct}`;
+            bucket = `emails-inbound-${acct}`;
           }
           const { setupInboundEmail } = await import("../../lib/aws-inbound.js");
           const r = await setupInboundEmail({ domain, bucket, region, accessKeyId, secretAccessKey });

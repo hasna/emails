@@ -13,8 +13,10 @@ const patterns = [
   ["hosted account route", /\/(?:api\/v1\/(?:auth\/(?:login|signup)|signup|billing|checkout|portal|tenants?|credits?)|auth\/(?:login|signup)|signup)\b/i],
   ["hosted data field", /\b(?:cloud_api_url|cloud_session_token|cloud_api_key|stripe_customer_id|tenant_id|credit_balance)\b/i],
   ["private deployment marker", /\bhasna-xyz\b|\/hasna\/deploy\/|789877399345/i],
+  ["retired inbound bucket prefix", /hasna-emails-prod-inbound/i],
   ["legacy hosted environment", new RegExp(legacyHostedEnvKeys.join("|"), "i")],
   ["hosted implementation vocabulary", /\b(?:saas|fleet)\b|cloud_/i],
+  ["hosted camel-case identifier", /(?:cloud|Cloud)(?:Provider|Client|Account|Tenant|Session|Api|API|Token|Credit|Billing|Fleet|Mode|Sync)[A-Za-z0-9_]*/],
 ];
 
 function stripExactCompatibilityBridges(content, path) {
@@ -32,7 +34,14 @@ function stripExactCompatibilityBridges(content, path) {
   // installations. Both migration ids are required so an unrelated occurrence
   // of the old identifier is never silently accepted.
   if (scanned.includes("0005_mailery_selfhosted_resources") && scanned.includes("0006_emails_rename_bridge")) {
-    scanned = scanned.replaceAll("cloud_providers", "legacy_providers");
+    const exactReleasedSql = [
+      "CREATE TABLE IF NOT EXISTS cloud_providers",
+      "to_regclass('public.cloud_providers')",
+      "ALTER TABLE cloud_providers RENAME TO self_hosted_providers",
+      "FROM cloud_providers",
+      "DROP TABLE cloud_providers",
+    ];
+    for (const sql of exactReleasedSql) scanned = scanned.replaceAll(sql, sql.replaceAll("cloud_providers", "legacy_providers"));
   }
 
   // CI explicitly unsets legacy variables to make the test environment

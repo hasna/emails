@@ -49,7 +49,12 @@ function colorEventType(type: string, chalk: typeof import("chalk").default): st
   }
 }
 
-export function createWebhookServer(port: number, providerId?: string, webhookSecret?: string) {
+export function createWebhookServer(
+  port: number,
+  providerId?: string,
+  webhookSecret?: string,
+  deps: { verifySns?: (body: Record<string, unknown>) => Promise<boolean> } = {},
+) {
   const maxRememberedWebhookIds = 10_000;
   const seenWebhookIds = new Set<string>();
 
@@ -77,9 +82,7 @@ export function createWebhookServer(port: number, providerId?: string, webhookSe
       if (url.pathname === "/webhook/resend") {
         if (!webhookSecret) return new Response("Resend webhook secret is not configured", { status: 503 });
         const webhookId = req.headers.get("svix-id");
-        if (webhookId && seenWebhookIds.has(webhookId)) {
-          return new Response("Webhook already processed", { status: 200 });
-        }
+        if (!webhookId) return new Response("Resend svix-id is required", { status: 400 });
         const headers: Record<string, string | null> = {
           "svix-id": webhookId,
           "svix-timestamp": req.headers.get("svix-timestamp"),
@@ -87,18 +90,21 @@ export function createWebhookServer(port: number, providerId?: string, webhookSe
         };
         const valid = await verifyResendSignature(bodyText, headers, webhookSecret).catch(() => false);
         if (!valid) return new Response("Invalid signature", { status: 401 });
-        event = parseResendWebhook(body);
+        if (seenWebhookIds.has(webhookId)) return new Response("Webhook already processed", { status: 200 });
+        event = parseResendWebhook(body, webhookId);
       } else if (url.pathname === "/webhook/ses") {
         if (!verifySnsStructure(body)) return new Response("Invalid SNS payload", { status: 400 });
         let policy;
         try { policy = snsPolicyFromEnv(); } catch { return new Response("SNS allowlist is not configured", { status: 503 }); }
         if (!snsMessageAllowed(body, policy)) return new Response("SNS topic or account is not allowed", { status: 401 });
-        if (!(await verifyAwsSnsSignature(body).catch(() => false))) return new Response("Invalid SNS signature", { status: 401 });
+        if (!(await (deps.verifySns ?? verifyAwsSnsSignature)(body).catch(() => false))) return new Response("Invalid SNS signature", { status: 401 });
+        const snsMessageId = typeof body.MessageId === "string" ? body.MessageId : "";
+        if (!snsMessageId) return new Response("SNS MessageId is required", { status: 400 });
         let inner: unknown = body;
         if (body.Type === "Notification" && typeof body.Message === "string") {
           try { inner = JSON.parse(body.Message); } catch { return new Response("Invalid SNS Message", { status: 400 }); }
         }
-        event = parseSesWebhook(inner);
+        event = parseSesWebhook(inner, snsMessageId);
       } else {
         return new Response("Not found", { status: 404 });
       }

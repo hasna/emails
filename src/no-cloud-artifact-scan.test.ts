@@ -15,5 +15,21 @@ describe("packed hosted-control-plane scanner", () => {
   it("detects hosted markers in arbitrary split chunks", () => {
     expect(hostedControlPlaneFindings("const x = 'CLOUD_SESSION_TOKEN'", "dist/chunk-ABC.js")).not.toEqual([]);
     expect(hostedControlPlaneFindings("fetch('https://api.mailery.co')", "dist/chunk-XYZ.js")).not.toEqual([]);
+    expect(hostedControlPlaneFindings("hasna-emails-prod-inbound-123456789012", "dist/chunk-BUCKET.js"))
+      .toContain("retired inbound bucket prefix");
+    expect(hostedControlPlaneFindings("resolveCloudflareAuth()", "dist/chunk-DNS.js"))
+      .not.toContain("hosted camel-case identifier");
+  });
+
+  it("does not let migration ids exempt active identifiers in the same bundle chunk", () => {
+    const poisoned = `
+      const released = "0005_mailery_selfhosted_resources";
+      const bridge = "0006_emails_rename_bridge";
+      CREATE TABLE IF NOT EXISTS cloud_providers;
+      const cloud_providers = fetchCloudProviders();
+    `;
+    const findings = hostedControlPlaneFindings(poisoned, "dist/chunk-migrations.js");
+    expect(findings).toContain("hosted implementation vocabulary");
+    expect(findings).toContain("hosted camel-case identifier");
   });
 });

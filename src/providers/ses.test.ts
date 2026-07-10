@@ -906,6 +906,63 @@ describe("SESAdapter.sendEmail", () => {
     expect(rawText).toContain("Content-Transfer-Encoding: base64");
   });
 
+  it("rejects control-character and MIME header injection before calling SES", async () => {
+    const base = {
+      from: "sender@example.com",
+      to: "recipient@example.com",
+      subject: "Safe",
+      text: "Body",
+      attachments: [{
+        filename: "safe.txt",
+        content: Buffer.from("safe").toString("base64"),
+        content_type: "text/plain",
+      }],
+    };
+    const attacks = [
+      { from: "sender@example.com\r\nBcc: victim@example.com" },
+      { to: "recipient@example.com\nCc: victim@example.com" },
+      { cc: "copy@example.com\r\nBcc: victim@example.com" },
+      { bcc: "blind@example.com\r\nX-Evil: yes" },
+      { subject: "Safe\r\nBcc: victim@example.com" },
+      { reply_to: "reply@example.com\nBcc: victim@example.com" },
+      { unsubscribe_url: "https://example.com/u\r\nBcc: victim@example.com" },
+      { headers: { "X-Test\r\nBcc": "victim@example.com" } },
+      { headers: { "X-Test": "ok\r\nBcc: victim@example.com" } },
+      { headers: { Subject: "spoofed" } },
+      { attachments: [{ ...base.attachments[0], filename: "safe.txt\r\nBcc: victim@example.com" }] },
+      { attachments: [{ ...base.attachments[0], filename: "bad-\uD800-name.txt" }] },
+      { attachments: [{ ...base.attachments[0], content_type: "text/plain\r\nBcc: victim@example.com" }] },
+    ];
+    for (const attack of attacks) {
+      const adapter = new SESAdapter(makeProvider());
+      await expect(adapter.sendEmail({ ...base, ...attack })).rejects.toThrow(/control|unsafe|type\/subtype|Unicode/);
+    }
+    expect(mockSend).not.toHaveBeenCalled();
+  });
+
+  it("encodes and quotes non-ASCII attachment filenames without creating new headers", async () => {
+    const adapter = new SESAdapter(makeProvider());
+    await adapter.sendEmail({
+      from: "sender@example.com",
+      to: "recipient@example.com",
+      subject: "Résumé attached",
+      text: "Body",
+      attachments: [{
+        filename: 'résumé "final".pdf',
+        content: Buffer.alloc(90, 1).toString("base64"),
+        content_type: "application/pdf",
+      }],
+    });
+    const cmd = mockSend.mock.calls[0]![0] as MockSendEmailCommand;
+    const rawText = (cmd.input as { Content: { Raw: { Data: Buffer } } }).Content.Raw.Data.toString("utf8");
+    expect(rawText).toContain("Subject: =?UTF-8?B?");
+    expect(rawText).toContain('filename="r_sum_ \\"final\\".pdf"');
+    expect(rawText).toContain("filename*=UTF-8''r%C3%A9sum%C3%A9%20%22final%22.pdf");
+    expect(rawText).not.toContain("\r\nBcc:");
+    const encodedBody = rawText.split("Content-Transfer-Encoding: base64\r\n\r\n")[1]!.split("\r\n--mixed_")[0]!;
+    expect(encodedBody.split("\r\n").every((line) => line.length <= 76)).toBe(true);
+  });
+
   it("returns empty string when MessageId is missing", async () => {
     mockSend.mockImplementation(async () => ({}));
 

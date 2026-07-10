@@ -20,6 +20,7 @@ interface ReadyResult {
   ok: boolean;
   latencyMs: number;
   pendingMigrations: string[];
+  migrationIssues: string[];
 }
 
 const MAX_JSON_BODY_BYTES = 1024 * 1024;
@@ -34,15 +35,27 @@ class RequestBodyTooLargeError extends Error {}
 async function readinessCheck(deps: SelfHostedServiceDeps): Promise<ReadyResult> {
   const start = Date.now();
   try {
-    const rows = await deps.client.many<{ id: string }>(`SELECT id FROM schema_migrations`);
-    const applied = new Set(rows.map((r) => r.id));
-    const pending = deps.migrations.filter((m) => !applied.has(m.id)).map((m) => m.id);
-    return { ok: pending.length === 0, latencyMs: Date.now() - start, pendingMigrations: pending };
+    const rows = await deps.client.many<{ id: string; checksum: string }>(`SELECT id, checksum FROM schema_migrations`);
+    const expected = new Map(deps.migrations.map((migration) => [migration.id, migration.checksum]));
+    const applied = new Map(rows.map((row) => [row.id, row.checksum]));
+    const pending = deps.migrations.filter((migration) => !applied.has(migration.id)).map((migration) => migration.id);
+    const drifted = rows
+      .filter((row) => expected.has(row.id) && expected.get(row.id) !== row.checksum)
+      .map((row) => `checksum mismatch: ${row.id}`);
+    const unknown = rows.filter((row) => !expected.has(row.id)).map((row) => `unknown migration: ${row.id}`);
+    const migrationIssues = [...drifted, ...unknown];
+    return {
+      ok: pending.length === 0 && migrationIssues.length === 0,
+      latencyMs: Date.now() - start,
+      pendingMigrations: pending,
+      migrationIssues,
+    };
   } catch {
     return {
       ok: false,
       latencyMs: Date.now() - start,
       pendingMigrations: [],
+      migrationIssues: ["migration ledger unavailable"],
     };
   }
 }
@@ -81,6 +94,23 @@ function decodeStrictBase64(value: string): Buffer {
   const decoded = Buffer.from(value, "base64");
   if (decoded.toString("base64") !== value) throw new Error("attachment content must be canonical base64");
   return decoded;
+}
+
+const MIME_TYPE_RE = /^[A-Za-z0-9!#$&^_.+~-]+\/[A-Za-z0-9!#$&^_.+~-]+$/;
+
+function safeHeaderValue(label: string, value: string): string {
+  if (/[\x00-\x1F\x7F]/.test(value)) throw new Error(`${label} contains forbidden control characters`);
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xD800 && code <= 0xDBFF) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xDC00 && next <= 0xDFFF)) throw new Error(`${label} contains non-well-formed Unicode`);
+      index++;
+    } else if (code >= 0xDC00 && code <= 0xDFFF) {
+      throw new Error(`${label} contains non-well-formed Unicode`);
+    }
+  }
+  return value;
 }
 
 function sendLeaseExpired(record: MessageRecord, now = Date.now()): boolean {
@@ -234,6 +264,7 @@ export async function handleSelfHostedRequest(
       mode: MODE,
       db: { ok: ready.ok, latencyMs: ready.latencyMs },
       pendingMigrations: ready.pendingMigrations,
+      migrationIssues: ready.migrationIssues,
     });
   }
 
@@ -399,6 +430,10 @@ export async function handleSelfHostedRequest(
       if (rawAttachments.length > 5) return json(400, { error: "at most 5 inline attachments are allowed" });
       let attachments: Array<{ filename: string; content: string; content_type: string }>;
       try {
+        safeHeaderValue("from", from);
+        for (const value of [...to, ...cc, ...bcc]) safeHeaderValue("recipient address", value);
+        safeHeaderValue("subject", subject);
+        if (typeof body.reply_to === "string") safeHeaderValue("reply_to", body.reply_to);
         let totalAttachmentBytes = 0;
         attachments = rawAttachments.map((value, index) => {
           if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`attachment ${index} must be an object`);
@@ -412,10 +447,14 @@ export async function handleSelfHostedRequest(
           if (totalAttachmentBytes > 768 * 1024) {
             throw new Error("inline attachments may total at most 768KiB");
           }
+          const filename = safeHeaderValue("attachment filename", String(item.filename ?? `attachment-${index + 1}`));
+          if (!filename.trim() || filename.length > 255) throw new Error(`attachment ${index} filename must be 1-255 characters`);
+          const contentType = safeHeaderValue("attachment content_type", String(item.content_type ?? "application/octet-stream"));
+          if (!MIME_TYPE_RE.test(contentType)) throw new Error(`attachment ${index} content_type must be a safe type/subtype token`);
           return {
-            filename: String(item.filename ?? `attachment-${index + 1}`),
+            filename,
             content,
-            content_type: String(item.content_type ?? "application/octet-stream"),
+            content_type: contentType,
           };
         });
       } catch (error) {

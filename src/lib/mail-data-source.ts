@@ -4,19 +4,16 @@
 //   • SqliteMailDataSource — `local` mode. A thin async wrapper over the EXISTING
 //     local read/write logic (src/db/inbound.ts + src/cli/tui/data.ts). It does not
 //     duplicate that logic; it calls it. SQLite stays the local source of truth.
-//   • ApiMailDataSource — `self_hosted` mode (incl. "self-hosted" = self_hosted pointed at a
-//     privately-hosted server via a configurable base URL). A thin HTTP client over
-//     EmailsCloudClient + a bounded, server-authoritative read cache (mail-cache).
-//     It is NOT a full mirror and holds NO DB credentials — it reads a small window
-//     and lets a JMAP-changesSince delta feed (listMessageChanges + tombstones,
-//     keyed off a watermark) invalidate exactly what changed. Writes bypass+invalidate.
+//   • SelfHostedMailDataSource — `self_hosted` mode pointed at an operator-owned
+//     server via a configurable HTTPS base URL. It holds no DB credentials and
+//     reads/writes only through the authenticated versioned HTTP API.
 //
 // The seam speaks the client's existing domain language (TuiMessage / Folder /
 // MailboxCounts / MessageBody / …) so the eventual rewire of the callers is minimal:
-// SqliteMailDataSource returns those types verbatim, and ApiMailDataSource translates
+// SqliteMailDataSource returns those types verbatim, and SelfHostedMailDataSource translates
 // self_hosted DTOs into them.
 //
-// This module is ADDITIVE: nothing here is wired into callers yet.
+// Callers resolve this seam once and stay independent of the selected backend.
 
 import { getDatabase, resolvePartialIdOrThrow } from "../db/database.js";
 import { getEmailsMode, type EmailsMode } from "./mode.js";

@@ -27,12 +27,24 @@ mode there is no Postgres pool at all; SQLite is authoritative.
 
 `tls.ts` follows libpq `sslmode` semantics exactly:
 
-- `require` — encrypt, do not verify (RDS default without a bundle)
+- `require` — encrypt and verify the server certificate against the configured
+  CA bundle or the runtime trust store; verification is never disabled
 - `verify-ca` / `verify-full` — encrypt **and** verify against a CA bundle
   (mandatory; throws if none is available)
 
-Point `PGSSLROOTCERT` at the Amazon RDS global bundle to verify:
-<https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem>
+The product container includes the Amazon RDS global CA bundle at
+`/opt/emails/certs/aws-rds-global-bundle.pem`. The image sets both
+`EMAILS_DATABASE_CA_FILE` and `NODE_EXTRA_CA_CERTS` to that path, so RDS works
+with certificate verification on first boot. The bundle is fetched from the
+[official AWS trust store](https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem)
+during the image build and is locked to the SHA-256 checksum recorded in the
+Dockerfile; an unexpected upstream change fails the build instead of silently
+changing the trust roots.
+
+Outside the product container, point `EMAILS_DATABASE_CA_FILE`,
+`PGSSLROOTCERT`, or `NODE_EXTRA_CA_CERTS` at a vetted CA bundle. An explicit
+`caCertPath` supplied to the storage API takes precedence over environment
+settings.
 
 ## Runtime dependency
 

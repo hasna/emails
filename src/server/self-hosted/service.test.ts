@@ -93,6 +93,41 @@ describe("Emails self-hosted service", () => {
     expect(await ready!.text()).not.toContain("super-secret");
   });
 
+  test("GET /ready requires exact migration ids and checksums", async () => {
+    const cases = [
+      {
+        name: "pending",
+        rows: emailsSelfHostedMigrations().slice(0, -1).map(({ id, checksum }) => ({ id, checksum })),
+        issue: "pendingMigrations",
+      },
+      {
+        name: "checksum drift",
+        rows: emailsSelfHostedMigrations().map(({ id, checksum }, index) => ({ id, checksum: index === 0 ? "sha256:drift" : checksum })),
+        issue: "checksum mismatch",
+      },
+      {
+        name: "unknown newer migration",
+        rows: [...emailsSelfHostedMigrations().map(({ id, checksum }) => ({ id, checksum })), { id: "9999_future", checksum: "sha256:future" }],
+        issue: "unknown migration",
+      },
+    ];
+    for (const scenario of cases) {
+      const d = deps();
+      d.client.many = async (sql) => sql.includes("schema_migrations") ? scenario.rows as never[] : [];
+      const res = await handleSelfHostedRequest(d, req("GET", "/ready"));
+      expect(res?.status).toBe(503);
+      const body = await res!.json();
+      expect(JSON.stringify(body)).toContain(scenario.issue);
+    }
+
+    const d = deps();
+    d.client.many = async (sql) => sql.includes("schema_migrations")
+      ? emailsSelfHostedMigrations().map(({ id, checksum }) => ({ id, checksum })) as never[]
+      : [];
+    const res = await handleSelfHostedRequest(d, req("GET", "/ready"));
+    expect(res?.status).toBe(200);
+  });
+
   test("GET /version returns the version+mode shape", async () => {
     const res = await handleSelfHostedRequest(deps(), req("GET", "/version"));
     const body = await res!.json();

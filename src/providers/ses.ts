@@ -262,6 +262,7 @@ export class SESAdapter implements ProviderAdapter {
   }
 
   async sendEmail(opts: SendEmailOptions): Promise<string> {
+    assertSafeEmailHeaders(opts);
     const toArr = Array.isArray(opts.to) ? opts.to : [opts.to];
     const ccArr = opts.cc ? (Array.isArray(opts.cc) ? opts.cc : [opts.cc]) : [];
     const bccArr = opts.bcc ? (Array.isArray(opts.bcc) ? opts.bcc : [opts.bcc]) : [];
@@ -403,6 +404,90 @@ export class SESAdapter implements ProviderAdapter {
   }
 }
 
+const MIME_TOKEN_RE = /^[A-Za-z0-9!#$&^_.+~-]+$/;
+const HEADER_NAME_RE = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+const RESERVED_RAW_HEADERS = new Set([
+  "from", "to", "cc", "bcc", "subject", "date", "mime-version",
+  "content-type", "content-disposition", "content-transfer-encoding", "reply-to",
+]);
+
+function assertHeaderValue(label: string, value: string): void {
+  if (!value.trim()) throw new Error(`${label} must not be empty`);
+  if (/[\x00-\x1F\x7F]/.test(value)) throw new Error(`${label} contains forbidden control characters`);
+  if (!isWellFormedUnicode(value)) throw new Error(`${label} contains non-well-formed Unicode`);
+}
+
+function isWellFormedUnicode(value: string): boolean {
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xD800 && code <= 0xDBFF) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xDC00 && next <= 0xDFFF)) return false;
+      index++;
+    } else if (code >= 0xDC00 && code <= 0xDFFF) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function assertContentType(value: string): void {
+  const [type, subtype, ...extra] = value.split("/");
+  if (extra.length > 0 || !type || !subtype || !MIME_TOKEN_RE.test(type) || !MIME_TOKEN_RE.test(subtype)) {
+    throw new Error("attachment content_type must be a safe type/subtype token");
+  }
+}
+
+function assertSafeEmailHeaders(opts: SendEmailOptions): void {
+  assertHeaderValue("from", opts.from);
+  for (const [label, values] of [
+    ["to", Array.isArray(opts.to) ? opts.to : [opts.to]],
+    ["cc", opts.cc ? (Array.isArray(opts.cc) ? opts.cc : [opts.cc]) : []],
+    ["bcc", opts.bcc ? (Array.isArray(opts.bcc) ? opts.bcc : [opts.bcc]) : []],
+  ] as const) {
+    for (const value of values) assertHeaderValue(label, value);
+  }
+  assertHeaderValue("subject", opts.subject);
+  if (opts.reply_to) assertHeaderValue("reply_to", opts.reply_to);
+  if (opts.unsubscribe_url) assertHeaderValue("unsubscribe_url", opts.unsubscribe_url);
+  for (const [name, value] of Object.entries(opts.headers ?? {})) {
+    if (!HEADER_NAME_RE.test(name) || RESERVED_RAW_HEADERS.has(name.toLowerCase())) {
+      throw new Error(`unsafe custom email header name: ${name}`);
+    }
+    assertHeaderValue(`header ${name}`, value);
+  }
+  for (const attachment of opts.attachments ?? []) {
+    assertHeaderValue("attachment filename", attachment.filename);
+    if (attachment.filename.length > 255) throw new Error("attachment filename must be at most 255 characters");
+    assertContentType(attachment.content_type);
+    if (!attachment.content || attachment.content.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(attachment.content)) {
+      throw new Error("attachment content must be canonical base64");
+    }
+    const decoded = Buffer.from(attachment.content, "base64");
+    if (decoded.toString("base64") !== attachment.content) throw new Error("attachment content must be canonical base64");
+  }
+}
+
+function encodeHeaderText(value: string): string {
+  return /^[\x20-\x7E]+$/.test(value)
+    ? value
+    : `=?UTF-8?B?${Buffer.from(value, "utf8").toString("base64")}?=`;
+}
+
+function filenameParameters(filename: string): { fallback: string; encoded: string } {
+  const leaf = filename.split(/[\\/]/).pop() || "attachment";
+  const fallback = leaf
+    .replace(/[^\x20-\x7E]/g, "_")
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"');
+  const encoded = encodeURIComponent(leaf).replace(/[!'()*]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
+  return { fallback, encoded };
+}
+
+function wrapBase64(value: string): string {
+  return value.match(/.{1,76}/g)?.join("\r\n") ?? "";
+}
+
 function buildRawMime(opts: SendEmailOptions): string {
   const toArr = Array.isArray(opts.to) ? opts.to : [opts.to];
   const rnd = () => crypto.randomUUID().replace(/-/g, "");
@@ -416,7 +501,7 @@ function buildRawMime(opts: SendEmailOptions): string {
     `From: ${opts.from}`,
     `To: ${toArr.join(", ")}`,
     ...(opts.cc ? [`Cc: ${(Array.isArray(opts.cc) ? opts.cc : [opts.cc]).join(", ")}`] : []),
-    `Subject: ${opts.subject}`,
+    `Subject: ${encodeHeaderText(opts.subject)}`,
     `Date: ${new Date().toUTCString()}`,
     `MIME-Version: 1.0`,
     ...(opts.reply_to ? [`Reply-To: ${opts.reply_to}`] : []),
@@ -449,10 +534,11 @@ function buildRawMime(opts: SendEmailOptions): string {
   const b = bodyBlock();
   lines.push(`--${mixedB}`, `Content-Type: ${b.ctype}`, "", ...b.lines, "");
   for (const a of opts.attachments ?? []) {
+    const filename = filenameParameters(a.filename);
     lines.push(`--${mixedB}`,
-      `Content-Type: ${a.content_type}; name="${a.filename}"`,
-      `Content-Disposition: attachment; filename="${a.filename}"`,
-      `Content-Transfer-Encoding: base64`, "", a.content, "");
+      `Content-Type: ${a.content_type}; name="${filename.fallback}"; name*=UTF-8''${filename.encoded}`,
+      `Content-Disposition: attachment; filename="${filename.fallback}"; filename*=UTF-8''${filename.encoded}`,
+      `Content-Transfer-Encoding: base64`, "", wrapBase64(a.content), "");
   }
   lines.push(`--${mixedB}--`);
   return lines.join("\r\n");

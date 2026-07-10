@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { parseResendWebhook, parseSesWebhook, createWebhookServer } from "./webhook.js";
 import { closeDatabase, resetDatabase } from "../db/database.js";
 import { createProvider } from "../db/providers.js";
+import { listEvents } from "../db/events.js";
 
 // ─── createWebhookServer helpers ─────────────────────────────────────────────
 
@@ -74,13 +75,15 @@ describe("createWebhookServer", () => {
   let server: ReturnType<typeof createWebhookServer>;
   let port: number;
   let base: string;
+  let providerId: string;
 
   beforeEach(() => {
     process.env["EMAILS_DB_PATH"] = ":memory:";
     resetDatabase();
     port = randomPort();
     const provider = createProvider({ name: "Webhook test", type: "resend", active: true });
-    server = createWebhookServer(port, provider.id, WEBHOOK_SECRET);
+    providerId = provider.id;
+    server = createWebhookServer(port, providerId, WEBHOOK_SECRET);
     base = `http://localhost:${port}`;
   });
 
@@ -156,7 +159,57 @@ describe("createWebhookServer", () => {
     expect((await request()).status).toBe(200);
   });
 
+  it("deduplicates Resend by signed svix-id across a server restart", async () => {
+    const payload = { type: "email.delivered", data: { to: ["user@example.com"] } };
+    expect((await postSignedResend(`${base}/webhook/resend`, payload, "svix-restart-1")).status).toBe(200);
+    server.stop(true);
+    server = createWebhookServer(port, providerId, WEBHOOK_SECRET);
+    expect((await postSignedResend(`${base}/webhook/resend`, payload, "svix-restart-1")).status).toBe(200);
+    const events = listEvents({ provider_id: providerId });
+    expect(events).toHaveLength(1);
+    expect(events[0]!.provider_event_id).toBe("svix-restart-1");
+  });
+
+  it("keeps distinct Resend event envelopes for the same provider message", async () => {
+    const delivered = { type: "email.delivered", data: { email_id: "same-message", to: ["user@example.com"] } };
+    const opened = { type: "email.opened", data: { email_id: "same-message", to: ["user@example.com"] } };
+    expect((await postSignedResend(`${base}/webhook/resend`, delivered, "svix-delivered")).status).toBe(200);
+    expect((await postSignedResend(`${base}/webhook/resend`, opened, "svix-opened")).status).toBe(200);
+    const events = listEvents({ provider_id: providerId });
+    expect(events).toHaveLength(2);
+    expect(new Set(events.map((event) => event.provider_event_id))).toEqual(new Set(["svix-delivered", "svix-opened"]));
+  });
+
+  it("deduplicates SES by the signed outer SNS MessageId across a server restart", async () => {
+    process.env["EMAILS_SNS_TOPIC_ARNS"] = "arn:aws:sns:us-east-1:123456789012:emails";
+    process.env["EMAILS_AWS_ACCOUNT_IDS"] = "123456789012";
+    const envelope = {
+      Type: "Notification",
+      MessageId: "sns-restart-1",
+      TopicArn: "arn:aws:sns:us-east-1:123456789012:emails",
+      SignatureVersion: "2",
+      Signature: "test",
+      SigningCertURL: "https://sns.us-east-1.amazonaws.com/SimpleNotificationService-test.pem",
+      Timestamp: new Date().toISOString(),
+      Message: JSON.stringify({
+        notificationType: "Delivery",
+        mail: { destination: ["user@example.com"], timestamp: "2026-07-10T10:00:00.000Z" },
+      }),
+    };
+    server.stop(true);
+    server = createWebhookServer(port, providerId, WEBHOOK_SECRET, { verifySns: async () => true });
+    expect((await post(`${base}/webhook/ses`, envelope)).status).toBe(200);
+    server.stop(true);
+    server = createWebhookServer(port, providerId, WEBHOOK_SECRET, { verifySns: async () => true });
+    expect((await post(`${base}/webhook/ses`, envelope)).status).toBe(200);
+    const events = listEvents({ provider_id: providerId });
+    expect(events).toHaveLength(1);
+    expect(events[0]!.provider_event_id).toBe("sns-restart-1");
+  });
+
   it("rejects an SES delivery that cannot be cryptographically verified", async () => {
+    server.stop(true);
+    server = createWebhookServer(port, providerId, WEBHOOK_SECRET, { verifySns: async () => false });
     process.env["EMAILS_SNS_TOPIC_ARNS"] = "arn:aws:sns:us-east-1:123456789012:emails";
     process.env["EMAILS_AWS_ACCOUNT_IDS"] = "123456789012";
     const payload = {
@@ -313,9 +366,7 @@ describe("parseResendWebhook", () => {
   it("handles missing data gracefully", () => {
     const body = { type: "email.delivered" };
     const event = parseResendWebhook(body);
-    expect(event).not.toBeNull();
-    expect(event!.type).toBe("delivered");
-    expect(event!.recipient).toBeUndefined();
+    expect(event).toBeNull();
   });
 });
 
@@ -377,9 +428,7 @@ describe("parseSesWebhook", () => {
   it("handles missing mail fields gracefully", () => {
     const body = { notificationType: "Delivery" };
     const event = parseSesWebhook(body);
-    expect(event).not.toBeNull();
-    expect(event!.type).toBe("delivered");
-    expect(event!.recipient).toBeUndefined();
+    expect(event).toBeNull();
   });
 });
 
