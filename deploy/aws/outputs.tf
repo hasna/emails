@@ -58,11 +58,6 @@ output "inbound_bucket_name" {
   value       = aws_s3_bucket.inbound.id
 }
 
-output "object_bucket_name" {
-  description = "Private S3 bucket for application-owned attachment objects."
-  value       = aws_s3_bucket.attachments.id
-}
-
 output "inbound_queue_url" {
   description = "SQS queue consumed by the inbound worker."
   value       = aws_sqs_queue.inbound.id
@@ -74,13 +69,23 @@ output "inbound_dlq_url" {
 }
 
 output "private_api_url" {
-  description = "Private API URL resolvable by clients connected to the VPC. Null when private discovery is disabled."
-  value       = var.enable_private_endpoint ? "http://api.${var.private_dns_namespace}:${local.api_port}" : null
+  description = "Private HTTPS API URL. Null unless the internal TLS endpoint is enabled."
+  value       = var.enable_private_endpoint ? "https://${var.private_service_domain}" : null
 }
 
 output "public_api_url" {
   description = "Public HTTPS API URL. Null unless the optional public endpoint is enabled."
   value       = var.enable_public_endpoint ? "https://${var.service_domain}" : null
+}
+
+output "load_balancer_access_log_bucket" {
+  description = "S3 access-log bucket for enabled public or private TLS endpoints."
+  value       = local.any_endpoint_enabled ? aws_s3_bucket.lb_logs[0].id : null
+}
+
+output "public_waf_arn" {
+  description = "WAF web ACL protecting the public endpoint."
+  value       = var.enable_public_endpoint ? aws_wafv2_web_acl.public[0].arn : null
 }
 
 output "ses_identity_verification_token" {

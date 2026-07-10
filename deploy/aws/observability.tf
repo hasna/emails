@@ -197,3 +197,25 @@ resource "aws_cloudwatch_metric_alarm" "public_unhealthy_targets" {
   alarm_actions = local.alarm_actions
   ok_actions    = local.alarm_actions
 }
+
+resource "aws_cloudwatch_metric_alarm" "private_unhealthy_targets" {
+  count = var.enable_private_endpoint ? 1 : 0
+
+  alarm_name          = "${var.name}-private-unhealthy-targets"
+  alarm_description   = "The private load balancer has unhealthy Emails targets."
+  namespace           = "AWS/ApplicationELB"
+  metric_name         = "UnHealthyHostCount"
+  statistic           = "Maximum"
+  period              = 60
+  evaluation_periods  = 2
+  comparison_operator = "GreaterThanThreshold"
+  threshold           = 0
+  treat_missing_data  = "notBreaching"
+
+  dimensions = {
+    LoadBalancer = aws_lb.private[0].arn_suffix
+    TargetGroup  = aws_lb_target_group.private[0].arn_suffix
+  }
+  alarm_actions = local.alarm_actions
+  ok_actions    = local.alarm_actions
+}

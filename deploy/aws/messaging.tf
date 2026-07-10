@@ -32,32 +32,37 @@ resource "aws_sns_topic" "inbound" {
 }
 
 data "aws_iam_policy_document" "inbound_topic" {
-  statement {
-    sid       = "AllowSESPublishFromOperatorAccount"
-    effect    = "Allow"
-    actions   = ["sns:Publish"]
-    resources = [aws_sns_topic.inbound.arn]
+  dynamic "statement" {
+    for_each = var.enable_ses_inbound ? [1] : []
+    content {
+      sid       = "AllowSESPublishFromOperatorAccount"
+      effect    = "Allow"
+      actions   = ["sns:Publish"]
+      resources = [aws_sns_topic.inbound.arn]
 
-    principals {
-      type        = "Service"
-      identifiers = ["ses.amazonaws.com"]
-    }
+      principals {
+        type        = "Service"
+        identifiers = ["ses.amazonaws.com"]
+      }
 
-    condition {
-      test     = "StringEquals"
-      variable = "aws:SourceAccount"
-      values   = [data.aws_caller_identity.current.account_id]
-    }
+      condition {
+        test     = "StringEquals"
+        variable = "aws:SourceAccount"
+        values   = [data.aws_caller_identity.current.account_id]
+      }
 
-    condition {
-      test     = "StringEquals"
-      variable = "aws:SourceArn"
-      values   = ["arn:${data.aws_partition.current.partition}:ses:${var.aws_region}:${data.aws_caller_identity.current.account_id}:receipt-rule-set/${var.name}-inbound:receipt-rule/${var.name}-store-and-notify"]
+      condition {
+        test     = "StringEquals"
+        variable = "aws:SourceArn"
+        values   = ["arn:${data.aws_partition.current.partition}:ses:${var.aws_region}:${data.aws_caller_identity.current.account_id}:receipt-rule-set/${var.name}-inbound:receipt-rule/${var.name}-store-and-notify"]
+      }
     }
   }
 }
 
 resource "aws_sns_topic_policy" "inbound" {
+  count = var.enable_ses_inbound ? 1 : 0
+
   arn    = aws_sns_topic.inbound.arn
   policy = data.aws_iam_policy_document.inbound_topic.json
 }

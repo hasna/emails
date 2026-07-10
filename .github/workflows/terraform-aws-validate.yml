@@ -1,0 +1,58 @@
+name: validate self-hosted AWS Terraform
+
+on:
+  pull_request:
+    paths:
+      - "deploy/aws/**"
+      - ".github/workflows/**"
+  push:
+    branches: [main]
+    paths:
+      - "deploy/aws/**"
+      - ".github/workflows/**"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: terraform-aws-validate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    defaults:
+      run:
+        working-directory: deploy/aws
+
+    env:
+      TF_IN_AUTOMATION: "true"
+      TF_INPUT: "false"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+        with:
+          terraform_version: 1.15.8
+          terraform_wrapper: false
+
+      - name: Initialize without backend or AWS credentials
+        run: terraform init -backend=false -lockfile=readonly
+
+      - name: Check formatting
+        run: terraform fmt -check -recursive
+
+      - name: Validate configuration
+        run: terraform validate
+
+      - name: Run mocked Terraform tests
+        run: terraform test -no-color
+
+      - name: Enforce static self-hosting contract
+        run: ./tests/static_contract.sh

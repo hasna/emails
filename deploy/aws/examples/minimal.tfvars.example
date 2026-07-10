@@ -12,7 +12,11 @@ secrets_ready        = false
 migrations_complete  = false
 enable_ses_inbound   = false
 enable_public_endpoint = false
-enable_nat_gateway     = false
+enable_private_endpoint = false
+enable_nat_gateway      = false
+
+# Required privacy decision before enable_ses_inbound can become true.
+# inbound_object_retention_days = 30
 
 tags = {
   Environment = "production"

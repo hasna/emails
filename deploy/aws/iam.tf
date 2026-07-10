@@ -7,6 +7,18 @@ data "aws_iam_policy_document" "ecs_tasks_assume" {
       type        = "Service"
       identifiers = ["ecs-tasks.amazonaws.com"]
     }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceAccount"
+      values   = [data.aws_caller_identity.current.account_id]
+    }
+
+    condition {
+      test     = "ArnLike"
+      variable = "aws:SourceArn"
+      values   = ["arn:${data.aws_partition.current.partition}:ecs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:*"]
+    }
   }
 }
 
@@ -67,36 +79,8 @@ resource "aws_iam_role" "api" {
 }
 
 data "aws_iam_policy_document" "api" {
-  statement {
-    sid       = "ListMailObjects"
-    effect    = "Allow"
-    actions   = ["s3:ListBucket"]
-    resources = [aws_s3_bucket.inbound.arn, aws_s3_bucket.attachments.arn]
-  }
-
-  statement {
-    sid       = "ReadInboundObjects"
-    effect    = "Allow"
-    actions   = ["s3:GetObject"]
-    resources = ["${aws_s3_bucket.inbound.arn}/*"]
-  }
-
-  statement {
-    sid       = "ManageAttachmentObjects"
-    effect    = "Allow"
-    actions   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
-    resources = ["${aws_s3_bucket.attachments.arn}/*"]
-  }
-
-  statement {
-    sid       = "UseDataKey"
-    effect    = "Allow"
-    actions   = ["kms:Decrypt", "kms:Encrypt", "kms:GenerateDataKey"]
-    resources = [aws_kms_key.this.arn]
-  }
-
   dynamic "statement" {
-    for_each = var.email_domain == null ? [] : [var.email_domain]
+    for_each = var.send_provider == "ses" && var.email_domain != null ? [var.email_domain] : []
     content {
       sid       = "SendThroughVerifiedIdentity"
       effect    = "Allow"
@@ -122,6 +106,8 @@ data "aws_iam_policy_document" "api" {
 }
 
 resource "aws_iam_role_policy" "api" {
+  count = var.email_domain != null || var.enable_execute_command ? 1 : 0
+
   name_prefix = "runtime-"
   role        = aws_iam_role.api.id
   policy      = data.aws_iam_policy_document.api.json
@@ -133,37 +119,49 @@ resource "aws_iam_role" "worker" {
 }
 
 data "aws_iam_policy_document" "worker" {
-  statement {
-    sid       = "ReadInboundBucket"
-    effect    = "Allow"
-    actions   = ["s3:ListBucket"]
-    resources = [aws_s3_bucket.inbound.arn]
+  dynamic "statement" {
+    for_each = var.enable_ses_inbound ? [1] : []
+    content {
+      sid       = "ReadInboundBucket"
+      effect    = "Allow"
+      actions   = ["s3:ListBucket"]
+      resources = [aws_s3_bucket.inbound.arn]
+    }
   }
 
-  statement {
-    sid       = "ReadInboundObjects"
-    effect    = "Allow"
-    actions   = ["s3:GetObject"]
-    resources = ["${aws_s3_bucket.inbound.arn}/*"]
+  dynamic "statement" {
+    for_each = var.enable_ses_inbound ? [1] : []
+    content {
+      sid       = "ReadInboundObjects"
+      effect    = "Allow"
+      actions   = ["s3:GetObject"]
+      resources = ["${aws_s3_bucket.inbound.arn}/*"]
+    }
   }
 
-  statement {
-    sid    = "ConsumeInboundQueue"
-    effect = "Allow"
-    actions = [
-      "sqs:ChangeMessageVisibility",
-      "sqs:DeleteMessage",
-      "sqs:GetQueueAttributes",
-      "sqs:ReceiveMessage",
-    ]
-    resources = [aws_sqs_queue.inbound.arn]
+  dynamic "statement" {
+    for_each = var.enable_ses_inbound ? [1] : []
+    content {
+      sid    = "ConsumeInboundQueue"
+      effect = "Allow"
+      actions = [
+        "sqs:ChangeMessageVisibility",
+        "sqs:DeleteMessage",
+        "sqs:GetQueueAttributes",
+        "sqs:ReceiveMessage",
+      ]
+      resources = [aws_sqs_queue.inbound.arn]
+    }
   }
 
-  statement {
-    sid       = "DecryptInboundData"
-    effect    = "Allow"
-    actions   = ["kms:Decrypt"]
-    resources = [aws_kms_key.this.arn]
+  dynamic "statement" {
+    for_each = var.enable_ses_inbound ? [1] : []
+    content {
+      sid       = "DecryptInboundData"
+      effect    = "Allow"
+      actions   = ["kms:Decrypt"]
+      resources = [aws_kms_key.this.arn]
+    }
   }
 
   dynamic "statement" {
@@ -183,6 +181,8 @@ data "aws_iam_policy_document" "worker" {
 }
 
 resource "aws_iam_role_policy" "worker" {
+  count = var.enable_ses_inbound || var.enable_execute_command ? 1 : 0
+
   name_prefix = "runtime-"
   role        = aws_iam_role.worker.id
   policy      = data.aws_iam_policy_document.worker.json

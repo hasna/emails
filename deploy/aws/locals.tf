@@ -4,6 +4,8 @@ locals {
 
   api_port = 8080
 
+  any_endpoint_enabled = var.enable_public_endpoint || var.enable_private_endpoint
+
   certificate_arn = var.certificate_arn != null ? var.certificate_arn : try(aws_acm_certificate_validation.api[0].certificate_arn, null)
 
   alarm_actions = var.alarm_notification_topic_arn == null ? [] : [var.alarm_notification_topic_arn]
@@ -15,6 +17,11 @@ locals {
 
   certificate_is_operator_owned = local.certificate_arn != null && startswith(
     local.certificate_arn,
+    "arn:${data.aws_partition.current.partition}:acm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:certificate/"
+  )
+
+  private_certificate_is_operator_owned = var.private_certificate_arn != null && startswith(
+    var.private_certificate_arn,
     "arn:${data.aws_partition.current.partition}:acm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:certificate/"
   )
 }

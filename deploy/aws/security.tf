@@ -35,54 +35,60 @@ data "aws_iam_policy_document" "kms" {
     }
   }
 
-  statement {
-    sid    = "SESInboundEncryption"
-    effect = "Allow"
-    actions = [
-      "kms:Decrypt",
-      "kms:GenerateDataKey*",
-    ]
-    resources = ["*"]
+  dynamic "statement" {
+    for_each = var.enable_ses_inbound ? [1] : []
+    content {
+      sid    = "SESInboundEncryption"
+      effect = "Allow"
+      actions = [
+        "kms:Decrypt",
+        "kms:GenerateDataKey*",
+      ]
+      resources = ["*"]
 
-    principals {
-      type        = "Service"
-      identifiers = ["ses.amazonaws.com"]
-    }
+      principals {
+        type        = "Service"
+        identifiers = ["ses.amazonaws.com"]
+      }
 
-    condition {
-      test     = "StringEquals"
-      variable = "aws:SourceAccount"
-      values   = [data.aws_caller_identity.current.account_id]
-    }
+      condition {
+        test     = "StringEquals"
+        variable = "aws:SourceAccount"
+        values   = [data.aws_caller_identity.current.account_id]
+      }
 
-    condition {
-      test     = "StringEquals"
-      variable = "aws:SourceArn"
-      values   = ["arn:${data.aws_partition.current.partition}:ses:${var.aws_region}:${data.aws_caller_identity.current.account_id}:receipt-rule-set/${var.name}-inbound:receipt-rule/${var.name}-store-and-notify"]
+      condition {
+        test     = "StringEquals"
+        variable = "aws:SourceArn"
+        values   = ["arn:${data.aws_partition.current.partition}:ses:${var.aws_region}:${data.aws_caller_identity.current.account_id}:receipt-rule-set/${var.name}-inbound:receipt-rule/${var.name}-store-and-notify"]
+      }
     }
   }
 
-  statement {
-    sid       = "SNSQueueEncryption"
-    effect    = "Allow"
-    actions   = ["kms:Decrypt", "kms:GenerateDataKey"]
-    resources = ["*"]
+  dynamic "statement" {
+    for_each = var.enable_ses_inbound ? [1] : []
+    content {
+      sid       = "SNSQueueEncryption"
+      effect    = "Allow"
+      actions   = ["kms:Decrypt", "kms:GenerateDataKey"]
+      resources = ["*"]
 
-    principals {
-      type        = "Service"
-      identifiers = ["sns.amazonaws.com"]
-    }
+      principals {
+        type        = "Service"
+        identifiers = ["sns.amazonaws.com"]
+      }
 
-    condition {
-      test     = "StringEquals"
-      variable = "aws:SourceAccount"
-      values   = [data.aws_caller_identity.current.account_id]
-    }
+      condition {
+        test     = "StringEquals"
+        variable = "aws:SourceAccount"
+        values   = [data.aws_caller_identity.current.account_id]
+      }
 
-    condition {
-      test     = "StringEquals"
-      variable = "aws:SourceArn"
-      values   = ["arn:${data.aws_partition.current.partition}:sns:${var.aws_region}:${data.aws_caller_identity.current.account_id}:${var.name}-inbound"]
+      condition {
+        test     = "StringEquals"
+        variable = "aws:SourceArn"
+        values   = ["arn:${data.aws_partition.current.partition}:sns:${var.aws_region}:${data.aws_caller_identity.current.account_id}:${var.name}-inbound"]
+      }
     }
   }
 }

@@ -35,59 +35,36 @@ resource "aws_ecs_cluster_capacity_providers" "this" {
   }
 }
 
-resource "aws_service_discovery_private_dns_namespace" "this" {
-  count = var.enable_private_endpoint ? 1 : 0
-
-  name        = var.private_dns_namespace
-  description = "Private Emails service discovery"
-  vpc         = aws_vpc.this.id
-}
-
-resource "aws_service_discovery_service" "api" {
-  count = var.enable_private_endpoint ? 1 : 0
-
-  name = "api"
-
-  dns_config {
-    namespace_id = aws_service_discovery_private_dns_namespace.this[0].id
-
-    dns_records {
-      ttl  = 30
-      type = "A"
-    }
-
-    routing_policy = "MULTIVALUE"
-  }
-
-  health_check_custom_config {
-    failure_threshold = 1
-  }
-}
-
 locals {
   common_environment = [
     { name = "AWS_REGION", value = var.aws_region },
     { name = "HOST", value = "0.0.0.0" },
+    { name = "HOME", value = "/tmp" },
     { name = "PORT", value = tostring(local.api_port) },
-    { name = "HASNA_EMAILS_MODE", value = "self_hosted" },
-    { name = "EMAILS_INBOUND_S3_BUCKET", value = aws_s3_bucket.inbound.id },
-    { name = "EMAILS_ARCHIVE_S3_BUCKET", value = aws_s3_bucket.attachments.id },
-    { name = "EMAILS_ARCHIVE_S3_REGION", value = var.aws_region },
-    { name = "MAILERY_INGEST_S3_BUCKET", value = aws_s3_bucket.inbound.id },
+    { name = "EMAILS_MODE", value = "self_hosted" },
   ]
 
+  api_environment = concat(local.common_environment, [
+    { name = "EMAILS_SEND_PROVIDER", value = var.send_provider },
+  ])
+
+  worker_environment = concat(local.common_environment, [
+    { name = "EMAILS_INGEST_QUEUE_URL", value = aws_sqs_queue.inbound.id },
+    { name = "EMAILS_INGEST_S3_BUCKET", value = aws_s3_bucket.inbound.id },
+  ])
+
   database_secret = {
-    name      = "DATABASE_URL"
+    name      = "EMAILS_DATABASE_URL"
     valueFrom = aws_secretsmanager_secret.database_url.arn
   }
 
   migration_database_secret = {
-    name      = "DATABASE_URL"
+    name      = "EMAILS_DATABASE_URL"
     valueFrom = aws_secretsmanager_secret.migration_database_url.arn
   }
 
   signing_secret = {
-    name      = "API_KEY_SIGNING_SECRET"
+    name      = "EMAILS_API_SIGNING_KEY"
     valueFrom = aws_secretsmanager_secret.api_signing_key.arn
   }
 }
@@ -106,16 +83,24 @@ resource "aws_ecs_task_definition" "api" {
     operating_system_family = "LINUX"
   }
 
+  volume { name = "tmp" }
+
   container_definitions = jsonencode([{
     name                   = "api"
     image                  = var.container_image
     essential              = true
     user                   = "bun"
-    readonlyRootFilesystem = false
-    command                = ["mailery-serve"]
+    readonlyRootFilesystem = true
+    command                = ["bun", "src/server/index.ts"]
     stopTimeout            = 120
-    environment            = local.common_environment
+    environment            = local.api_environment
     secrets                = [local.database_secret, local.signing_secret]
+    linuxParameters        = { initProcessEnabled = true }
+    mountPoints = [{
+      sourceVolume  = "tmp"
+      containerPath = "/tmp"
+      readOnly      = false
+    }]
     portMappings = [{
       name          = "http"
       containerPort = local.api_port
@@ -123,7 +108,7 @@ resource "aws_ecs_task_definition" "api" {
       protocol      = "tcp"
     }]
     healthCheck = {
-      command     = ["CMD-SHELL", "curl -fsS http://127.0.0.1:${local.api_port}/ready || exit 1"]
+      command     = ["CMD-SHELL", "bun -e \"const r=await fetch('http://127.0.0.1:${local.api_port}/ready');process.exit(r.ok?0:1)\""]
       interval    = 30
       timeout     = 5
       retries     = 3
@@ -154,18 +139,24 @@ resource "aws_ecs_task_definition" "worker" {
     operating_system_family = "LINUX"
   }
 
+  volume { name = "tmp" }
+
   container_definitions = jsonencode([{
     name                   = "worker"
     image                  = var.container_image
     essential              = true
     user                   = "bun"
-    readonlyRootFilesystem = false
-    command                = ["mailery-serve", "ingest-worker"]
+    readonlyRootFilesystem = true
+    command                = ["bun", "src/server/index.ts", "ingest-worker"]
     stopTimeout            = 120
-    environment = concat(local.common_environment, [
-      { name = "MAILERY_INGEST_QUEUE_URL", value = aws_sqs_queue.inbound.id },
-    ])
-    secrets = [local.database_secret]
+    environment            = local.worker_environment
+    secrets                = [local.database_secret]
+    linuxParameters        = { initProcessEnabled = true }
+    mountPoints = [{
+      sourceVolume  = "tmp"
+      containerPath = "/tmp"
+      readOnly      = false
+    }]
     logConfiguration = {
       logDriver = "awslogs"
       options = {
@@ -191,15 +182,23 @@ resource "aws_ecs_task_definition" "migration" {
     operating_system_family = "LINUX"
   }
 
+  volume { name = "tmp" }
+
   container_definitions = jsonencode([{
     name                   = "migration"
     image                  = var.container_image
     essential              = true
     user                   = "bun"
-    readonlyRootFilesystem = false
-    command                = ["mailery", "db", "migrate"]
+    readonlyRootFilesystem = true
+    command                = ["bun", "src/cli/index.tsx", "db", "migrate"]
     environment            = local.common_environment
     secrets                = [local.migration_database_secret]
+    linuxParameters        = { initProcessEnabled = true }
+    mountPoints = [{
+      sourceVolume  = "tmp"
+      containerPath = "/tmp"
+      readOnly      = false
+    }]
     logConfiguration = {
       logDriver = "awslogs"
       options = {
@@ -222,11 +221,16 @@ resource "aws_ecs_service" "api" {
     weight            = 1
   }
 
-  deployment_minimum_healthy_percent = var.api_desired_count == 1 ? 0 : 50
+  deployment_minimum_healthy_percent = 100
   deployment_maximum_percent         = 200
   enable_execute_command             = var.enable_execute_command
-  health_check_grace_period_seconds  = var.enable_public_endpoint ? 120 : null
-  wait_for_steady_state              = false
+  health_check_grace_period_seconds  = local.any_endpoint_enabled ? 120 : null
+  wait_for_steady_state              = true
+
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
 
   network_configuration {
     assign_public_ip = false
@@ -243,21 +247,40 @@ resource "aws_ecs_service" "api" {
     }
   }
 
-  dynamic "service_registries" {
+  dynamic "load_balancer" {
     for_each = var.enable_private_endpoint ? [1] : []
     content {
-      registry_arn = aws_service_discovery_service.api[0].arn
+      target_group_arn = aws_lb_target_group.private[0].arn
+      container_name   = "api"
+      container_port   = local.api_port
     }
   }
 
   lifecycle {
     precondition {
-      condition     = var.api_desired_count == 0 || (var.secrets_ready && var.migrations_complete && var.enable_nat_gateway && local.alarm_topic_is_operator_owned)
-      error_message = "Starting the API requires secrets_ready, migrations_complete, NAT egress, and an operator-owned alarm_notification_topic_arn."
+      condition = var.api_desired_count == 0 || (
+        var.secrets_ready &&
+        var.migrations_complete &&
+        var.enable_nat_gateway &&
+        local.alarm_topic_is_operator_owned &&
+        var.email_domain != null
+      )
+      error_message = "Starting the API requires populated secrets, completed migrations, NAT egress, an operator-owned alarm topic, and an SES email_domain."
     }
   }
 
-  depends_on = [aws_ecs_cluster_capacity_providers.this, aws_lb_listener.https]
+  timeouts {
+    create = "20m"
+    update = "20m"
+    delete = "20m"
+  }
+
+  depends_on = [
+    aws_ecs_cluster_capacity_providers.this,
+    aws_lb_listener.https,
+    aws_lb_listener.private_https,
+    aws_wafv2_web_acl_association.public,
+  ]
 }
 
 resource "aws_ecs_service" "worker" {
@@ -271,10 +294,15 @@ resource "aws_ecs_service" "worker" {
     weight            = 1
   }
 
-  deployment_minimum_healthy_percent = var.worker_desired_count == 1 ? 0 : 50
+  deployment_minimum_healthy_percent = 100
   deployment_maximum_percent         = 200
   enable_execute_command             = var.enable_execute_command
-  wait_for_steady_state              = false
+  wait_for_steady_state              = true
+
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
 
   network_configuration {
     assign_public_ip = false
@@ -284,9 +312,21 @@ resource "aws_ecs_service" "worker" {
 
   lifecycle {
     precondition {
-      condition     = var.worker_desired_count == 0 || (var.secrets_ready && var.migrations_complete && var.enable_nat_gateway && local.alarm_topic_is_operator_owned)
-      error_message = "Starting the worker requires secrets_ready, migrations_complete, NAT egress, and an operator-owned alarm_notification_topic_arn."
+      condition = var.worker_desired_count == 0 || (
+        var.secrets_ready &&
+        var.migrations_complete &&
+        var.enable_nat_gateway &&
+        local.alarm_topic_is_operator_owned &&
+        var.enable_ses_inbound
+      )
+      error_message = "Starting the worker requires populated secrets, completed migrations, NAT egress, an operator-owned alarm topic, and enabled SES inbound."
     }
+  }
+
+  timeouts {
+    create = "20m"
+    update = "20m"
+    delete = "20m"
   }
 
   depends_on = [aws_ecs_cluster_capacity_providers.this]

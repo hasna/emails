@@ -26,6 +26,18 @@ data "aws_iam_policy_document" "rds_monitoring_assume" {
       type        = "Service"
       identifiers = ["monitoring.rds.amazonaws.com"]
     }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceAccount"
+      values   = [data.aws_caller_identity.current.account_id]
+    }
+
+    condition {
+      test     = "ArnLike"
+      variable = "aws:SourceArn"
+      values   = ["arn:${data.aws_partition.current.partition}:rds:${var.aws_region}:${data.aws_caller_identity.current.account_id}:db:${var.name}"]
+    }
   }
 }
 

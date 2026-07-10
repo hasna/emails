@@ -113,23 +113,15 @@ resource "aws_security_group" "alb" {
   description = "Public HTTPS ingress for Emails"
   vpc_id      = aws_vpc.this.id
 
-  ingress {
-    description      = "HTTPS"
-    from_port        = 443
-    to_port          = 443
-    protocol         = "tcp"
-    cidr_blocks      = ["0.0.0.0/0"]
-    ipv6_cidr_blocks = ["::/0"]
-  }
+  lifecycle { create_before_destroy = true }
+}
 
-  ingress {
-    description      = "HTTP redirect"
-    from_port        = 80
-    to_port          = 80
-    protocol         = "tcp"
-    cidr_blocks      = ["0.0.0.0/0"]
-    ipv6_cidr_blocks = ["::/0"]
-  }
+resource "aws_security_group" "private_alb" {
+  count = var.enable_private_endpoint ? 1 : 0
+
+  name_prefix = "${var.name}-private-alb-"
+  description = "Operator-allowlisted private HTTPS ingress for Emails"
+  vpc_id      = aws_vpc.this.id
 
   lifecycle { create_before_destroy = true }
 }
@@ -139,42 +131,40 @@ resource "aws_security_group" "tasks" {
   description = "Emails Fargate tasks"
   vpc_id      = aws_vpc.this.id
 
-  dynamic "ingress" {
-    for_each = var.enable_private_endpoint ? [1] : []
-    content {
-      description = "Private API traffic from operator-connected VPC clients"
-      from_port   = local.api_port
-      to_port     = local.api_port
-      protocol    = "tcp"
-      cidr_blocks = [var.vpc_cidr]
-    }
-  }
-
-  egress {
-    description = "TLS to AWS APIs and external mail providers"
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  egress {
-    description = "DNS UDP"
-    from_port   = 53
-    to_port     = 53
-    protocol    = "udp"
-    cidr_blocks = [var.vpc_cidr]
-  }
-
-  egress {
-    description = "DNS TCP"
-    from_port   = 53
-    to_port     = 53
-    protocol    = "tcp"
-    cidr_blocks = [var.vpc_cidr]
-  }
-
   lifecycle { create_before_destroy = true }
+}
+
+resource "aws_vpc_security_group_ingress_rule" "alb_https_ipv4" {
+  count = var.enable_public_endpoint ? 1 : 0
+
+  security_group_id = aws_security_group.alb[0].id
+  description       = "HTTPS from IPv4"
+  from_port         = 443
+  to_port           = 443
+  ip_protocol       = "tcp"
+  cidr_ipv4         = "0.0.0.0/0"
+}
+
+resource "aws_vpc_security_group_ingress_rule" "alb_https_ipv6" {
+  count = var.enable_public_endpoint ? 1 : 0
+
+  security_group_id = aws_security_group.alb[0].id
+  description       = "HTTPS from IPv6"
+  from_port         = 443
+  to_port           = 443
+  ip_protocol       = "tcp"
+  cidr_ipv6         = "::/0"
+}
+
+resource "aws_vpc_security_group_ingress_rule" "private_alb_clients" {
+  for_each = var.enable_private_endpoint ? var.private_client_security_group_ids : []
+
+  security_group_id            = aws_security_group.private_alb[0].id
+  referenced_security_group_id = each.value
+  description                  = "HTTPS from operator-approved private client"
+  from_port                    = 443
+  to_port                      = 443
+  ip_protocol                  = "tcp"
 }
 
 resource "aws_vpc_security_group_egress_rule" "alb_tasks" {
@@ -197,6 +187,55 @@ resource "aws_vpc_security_group_ingress_rule" "tasks_alb" {
   from_port                    = local.api_port
   to_port                      = local.api_port
   ip_protocol                  = "tcp"
+}
+
+resource "aws_vpc_security_group_egress_rule" "private_alb_tasks" {
+  count = var.enable_private_endpoint ? 1 : 0
+
+  security_group_id            = aws_security_group.private_alb[0].id
+  referenced_security_group_id = aws_security_group.tasks.id
+  description                  = "API targets only"
+  from_port                    = local.api_port
+  to_port                      = local.api_port
+  ip_protocol                  = "tcp"
+}
+
+resource "aws_vpc_security_group_ingress_rule" "tasks_private_alb" {
+  count = var.enable_private_endpoint ? 1 : 0
+
+  security_group_id            = aws_security_group.tasks.id
+  referenced_security_group_id = aws_security_group.private_alb[0].id
+  description                  = "API traffic from internal TLS ALB"
+  from_port                    = local.api_port
+  to_port                      = local.api_port
+  ip_protocol                  = "tcp"
+}
+
+resource "aws_vpc_security_group_egress_rule" "tasks_https" {
+  security_group_id = aws_security_group.tasks.id
+  description       = "TLS to AWS APIs and operator-selected providers"
+  from_port         = 443
+  to_port           = 443
+  ip_protocol       = "tcp"
+  cidr_ipv4         = "0.0.0.0/0"
+}
+
+resource "aws_vpc_security_group_egress_rule" "tasks_dns_udp" {
+  security_group_id = aws_security_group.tasks.id
+  description       = "DNS UDP to VPC resolver"
+  from_port         = 53
+  to_port           = 53
+  ip_protocol       = "udp"
+  cidr_ipv4         = var.vpc_cidr
+}
+
+resource "aws_vpc_security_group_egress_rule" "tasks_dns_tcp" {
+  security_group_id = aws_security_group.tasks.id
+  description       = "DNS TCP to VPC resolver"
+  from_port         = 53
+  to_port           = 53
+  ip_protocol       = "tcp"
+  cidr_ipv4         = var.vpc_cidr
 }
 
 resource "aws_security_group" "database" {

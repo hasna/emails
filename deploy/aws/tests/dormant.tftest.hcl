@@ -69,11 +69,6 @@ mock_provider "aws" {
   }
 
   override_data {
-    target = data.aws_iam_policy_document.attachment_bucket
-    values = { json = "{\"Version\":\"2012-10-17\",\"Statement\":[]}" }
-  }
-
-  override_data {
     target = data.aws_iam_policy_document.inbound_topic
     values = { json = "{\"Version\":\"2012-10-17\",\"Statement\":[]}" }
   }
@@ -81,6 +76,53 @@ mock_provider "aws" {
   override_data {
     target = data.aws_iam_policy_document.inbound_queue
     values = { json = "{\"Version\":\"2012-10-17\",\"Statement\":[]}" }
+  }
+
+  override_data {
+    target = data.aws_iam_policy_document.lb_logs[0]
+    values = { json = "{\"Version\":\"2012-10-17\",\"Statement\":[]}" }
+  }
+
+  override_resource {
+    target          = aws_secretsmanager_secret.database_url
+    override_during = plan
+    values = {
+      arn = "arn:aws:secretsmanager:us-east-1:111122223333:secret:emails/database-url-test"
+    }
+  }
+
+  override_resource {
+    target          = aws_secretsmanager_secret.migration_database_url
+    override_during = plan
+    values = {
+      arn = "arn:aws:secretsmanager:us-east-1:111122223333:secret:emails/migration-database-url-test"
+    }
+  }
+
+  override_resource {
+    target          = aws_secretsmanager_secret.api_signing_key
+    override_during = plan
+    values = {
+      arn = "arn:aws:secretsmanager:us-east-1:111122223333:secret:emails/api-signing-key-test"
+    }
+  }
+
+  override_resource {
+    target          = aws_s3_bucket.inbound
+    override_during = plan
+    values = {
+      id  = "emails-111122223333-us-east-1-inbound"
+      arn = "arn:aws:s3:::emails-111122223333-us-east-1-inbound"
+    }
+  }
+
+  override_resource {
+    target          = aws_sqs_queue.inbound
+    override_during = plan
+    values = {
+      id  = "https://sqs.us-east-1.amazonaws.com/111122223333/emails-inbound"
+      arn = "arn:aws:sqs:us-east-1:111122223333:emails-inbound"
+    }
   }
 }
 
@@ -119,6 +161,71 @@ run "dormant_by_default" {
     condition     = length(aws_nat_gateway.this) == 0
     error_message = "A dormant deployment must not create billable NAT gateways."
   }
+
+  assert {
+    condition     = length(aws_lb.private) == 0
+    error_message = "The private TLS endpoint must be opt-in."
+  }
+
+  assert {
+    condition     = jsonencode(jsondecode(aws_ecs_task_definition.api.container_definitions)[0].command) == jsonencode(["bun", "src/server/index.ts"])
+    error_message = "The API command must use the image-native Emails server entrypoint."
+  }
+
+  assert {
+    condition     = jsonencode(jsondecode(aws_ecs_task_definition.worker.container_definitions)[0].command) == jsonencode(["bun", "src/server/index.ts", "ingest-worker"])
+    error_message = "The worker command must use the image-native Emails server entrypoint."
+  }
+
+  assert {
+    condition     = jsonencode(jsondecode(aws_ecs_task_definition.migration.container_definitions)[0].command) == jsonencode(["bun", "src/cli/index.tsx", "db", "migrate"])
+    error_message = "The migration command must use the image-native Emails CLI entrypoint."
+  }
+
+  assert {
+    condition = alltrue([
+      for definition in [
+        jsondecode(aws_ecs_task_definition.api.container_definitions)[0],
+        jsondecode(aws_ecs_task_definition.worker.container_definitions)[0],
+        jsondecode(aws_ecs_task_definition.migration.container_definitions)[0],
+        ] : definition.readonlyRootFilesystem && anytrue([
+          for mount in definition.mountPoints : mount.containerPath == "/tmp" && !mount.readOnly
+      ])
+    ])
+    error_message = "Every task must use a read-only root with writable /tmp."
+  }
+
+  assert {
+    condition = alltrue([
+      for definition in [
+        jsondecode(aws_ecs_task_definition.api.container_definitions)[0],
+        jsondecode(aws_ecs_task_definition.worker.container_definitions)[0],
+        jsondecode(aws_ecs_task_definition.migration.container_definitions)[0],
+        ] : alltrue([
+          for entry in concat(definition.environment, definition.secrets) :
+          !strcontains(entry.name, "MAILERY") &&
+          !contains(["DATABASE_URL", "API_KEY_SIGNING_SECRET"], entry.name)
+      ])
+    ])
+    error_message = "Task definitions must reject legacy and generic secret environment names."
+  }
+
+  assert {
+    condition = toset([
+      for entry in jsondecode(aws_ecs_task_definition.api.container_definitions)[0].secrets : entry.name
+    ]) == toset(["EMAILS_DATABASE_URL", "EMAILS_API_SIGNING_KEY"])
+    error_message = "The API must receive only canonical Emails secret environment names."
+  }
+
+  assert {
+    condition     = strcontains(jsondecode(aws_ecs_task_definition.api.container_definitions)[0].healthCheck.command[1], "bun -e") && strcontains(jsondecode(aws_ecs_task_definition.api.container_definitions)[0].healthCheck.command[1], "/ready")
+    error_message = "The API health check must use image-native Bun against /ready."
+  }
+
+  assert {
+    condition     = aws_ecs_service.api.deployment_minimum_healthy_percent == 100 && aws_ecs_service.api.deployment_circuit_breaker[0].rollback
+    error_message = "The API service must preserve capacity and enable circuit-breaker rollback."
+  }
 }
 
 run "activation_is_blocked_without_readiness" {
@@ -132,7 +239,6 @@ run "activation_is_blocked_without_readiness" {
   }
 
   expect_failures = [
-    check.activation_guard,
     aws_ecs_service.api,
   ]
 }
@@ -141,15 +247,19 @@ run "ready_activation_is_allowed" {
   command = plan
 
   variables {
-    aws_region                   = "us-east-1"
-    expected_account_id          = "111122223333"
-    container_image              = "registry.example/emails@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-    api_desired_count            = 2
-    worker_desired_count         = 1
-    secrets_ready                = true
-    migrations_complete          = true
-    enable_nat_gateway           = true
-    alarm_notification_topic_arn = "arn:aws:sns:us-east-1:111122223333:operator-alerts"
+    aws_region                    = "us-east-1"
+    expected_account_id           = "111122223333"
+    container_image               = "registry.example/emails@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    api_desired_count             = 2
+    worker_desired_count          = 1
+    secrets_ready                 = true
+    migrations_complete           = true
+    enable_nat_gateway            = true
+    alarm_notification_topic_arn  = "arn:aws:sns:us-east-1:111122223333:operator-alerts"
+    email_domain                  = "example.com"
+    enable_ses_inbound            = true
+    inbound_recipients            = ["example.com"]
+    inbound_object_retention_days = 30
   }
 
   assert {
@@ -172,15 +282,16 @@ run "optional_public_and_ses_resources" {
   command = plan
 
   variables {
-    aws_region             = "us-east-1"
-    expected_account_id    = "111122223333"
-    container_image        = "registry.example/emails@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-    enable_public_endpoint = true
-    service_domain         = "emails.example.com"
-    certificate_arn        = "arn:aws:acm:us-east-1:111122223333:certificate/00000000-0000-0000-0000-000000000000"
-    email_domain           = "example.com"
-    enable_ses_inbound     = true
-    inbound_recipients     = ["example.com"]
+    aws_region                    = "us-east-1"
+    expected_account_id           = "111122223333"
+    container_image               = "registry.example/emails@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    enable_public_endpoint        = true
+    service_domain                = "emails.example.com"
+    certificate_arn               = "arn:aws:acm:us-east-1:111122223333:certificate/00000000-0000-0000-0000-000000000000"
+    email_domain                  = "example.com"
+    enable_ses_inbound            = true
+    inbound_recipients            = ["example.com"]
+    inbound_object_retention_days = 30
   }
 
   assert {
@@ -191,5 +302,108 @@ run "optional_public_and_ses_resources" {
   assert {
     condition     = length(aws_ses_receipt_rule.inbound) == 1
     error_message = "SES inbound should create exactly one dormant receipt rule only when explicitly enabled."
+  }
+
+
+  assert {
+    condition     = length(aws_wafv2_web_acl.public) == 1 && length(aws_s3_bucket.lb_logs) == 1
+    error_message = "Public exposure must always create WAF rate limiting and access logging."
+  }
+}
+
+run "private_tls_endpoint" {
+  command = plan
+
+  variables {
+    aws_region                        = "us-east-1"
+    expected_account_id               = "111122223333"
+    container_image                   = "registry.example/emails@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    enable_private_endpoint           = true
+    private_service_domain            = "emails.internal.example.com"
+    private_certificate_arn           = "arn:aws:acm:us-east-1:111122223333:certificate/11111111-1111-1111-1111-111111111111"
+    private_client_security_group_ids = ["sg-0123456789abcdef0"]
+  }
+
+  assert {
+    condition     = length(aws_lb.private) == 1 && aws_lb.private[0].internal
+    error_message = "Private access must use an internal load balancer."
+  }
+
+  assert {
+    condition     = output.private_api_url == "https://emails.internal.example.com"
+    error_message = "Private clients must receive an HTTPS-only URL."
+  }
+
+  assert {
+    condition     = length(aws_vpc_security_group_ingress_rule.private_alb_clients) == 1
+    error_message = "Private TLS ingress must be restricted to explicit client security groups."
+  }
+}
+
+run "public_configuration_hard_fails" {
+  command = plan
+
+  variables {
+    aws_region             = "us-east-1"
+    expected_account_id    = "111122223333"
+    container_image        = "registry.example/emails@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    enable_public_endpoint = true
+  }
+
+  expect_failures = [var.enable_public_endpoint]
+}
+
+run "private_configuration_hard_fails" {
+  command = plan
+
+  variables {
+    aws_region              = "us-east-1"
+    expected_account_id     = "111122223333"
+    container_image         = "registry.example/emails@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    enable_private_endpoint = true
+  }
+
+  expect_failures = [var.enable_private_endpoint]
+}
+
+run "ses_retention_hard_fails" {
+  command = plan
+
+  variables {
+    aws_region          = "us-east-1"
+    expected_account_id = "111122223333"
+    container_image     = "registry.example/emails@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    email_domain        = "example.com"
+    enable_ses_inbound  = true
+    inbound_recipients  = ["example.com"]
+  }
+
+  expect_failures = [var.enable_ses_inbound]
+}
+
+run "mutable_image_hard_fails" {
+  command = plan
+
+  variables {
+    aws_region          = "us-east-1"
+    expected_account_id = "111122223333"
+    container_image     = "registry.example/emails:latest"
+  }
+
+  expect_failures = [var.container_image]
+}
+
+run "known_good_digest_is_plumbed_for_rollback" {
+  command = plan
+
+  variables {
+    aws_region          = "us-east-1"
+    expected_account_id = "111122223333"
+    container_image     = "registry.example/emails@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  }
+
+  assert {
+    condition     = strcontains(aws_ecs_task_definition.api.container_definitions, "@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+    error_message = "A previous known-good digest must flow into a rollback task definition."
   }
 }

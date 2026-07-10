@@ -90,6 +90,17 @@ variable "container_architecture" {
   }
 }
 
+variable "send_provider" {
+  description = "Outbound provider used by the AWS deployment. This module supports operator-owned SES only."
+  type        = string
+  default     = "ses"
+
+  validation {
+    condition     = var.send_provider == "ses"
+    error_message = "send_provider must be ses for this AWS deployment."
+  }
+}
+
 variable "api_cpu" {
   description = "Fargate CPU units for the API task."
   type        = number
@@ -149,7 +160,7 @@ variable "worker_desired_count" {
 }
 
 variable "secrets_ready" {
-  description = "Explicit operator acknowledgement that both Secrets Manager containers contain current values."
+  description = "Explicit operator acknowledgement that all three Secrets Manager containers contain current values."
   type        = bool
   default     = false
 }
@@ -226,10 +237,15 @@ variable "database_admin_security_group_ids" {
 }
 
 variable "inbound_object_retention_days" {
-  description = "Days before raw inbound MIME expires. Null retains it indefinitely."
+  description = "Days before raw inbound MIME expires. Required explicitly when SES inbound is enabled."
   type        = number
   default     = null
   nullable    = true
+
+  validation {
+    condition     = var.inbound_object_retention_days == null || (var.inbound_object_retention_days >= 1 && var.inbound_object_retention_days <= 3650)
+    error_message = "inbound_object_retention_days must be null or between 1 and 3650 days."
+  }
 }
 
 variable "noncurrent_object_retention_days" {
@@ -257,21 +273,75 @@ variable "sqs_max_receive_count" {
 }
 
 variable "enable_public_endpoint" {
-  description = "Create a public HTTPS ALB. False leaves the API private and unreachable from the internet."
+  description = "Create a WAF-protected public HTTPS ALB."
   type        = bool
   default     = false
+
+  validation {
+    condition = !var.enable_public_endpoint || (
+      var.service_domain != null &&
+      (var.certificate_arn != null || (var.create_certificate && var.hosted_zone_id != null))
+    )
+    error_message = "enable_public_endpoint requires service_domain and either certificate_arn or create_certificate=true with hosted_zone_id."
+  }
 }
 
 variable "enable_private_endpoint" {
-  description = "Register API tasks in a private Cloud Map namespace reachable only through the VPC or operator VPN."
+  description = "Create an internal HTTPS ALB restricted to explicit client security groups."
   type        = bool
-  default     = true
+  default     = false
+
+  validation {
+    condition = !var.enable_private_endpoint || (
+      var.private_service_domain != null &&
+      var.private_certificate_arn != null &&
+      length(var.private_client_security_group_ids) > 0
+    )
+    error_message = "enable_private_endpoint requires private_service_domain, private_certificate_arn, and at least one private_client_security_group_id."
+  }
 }
 
-variable "private_dns_namespace" {
-  description = "Private Cloud Map namespace used for API discovery inside the VPC."
+variable "private_service_domain" {
+  description = "Private TLS hostname for the internal ALB."
   type        = string
-  default     = "emails.internal"
+  default     = null
+  nullable    = true
+
+  validation {
+    condition     = var.private_service_domain == null || can(regex("^(?i:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:[.](?i:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))+$", var.private_service_domain))
+    error_message = "private_service_domain must be a valid fully qualified DNS name."
+  }
+}
+
+variable "private_certificate_arn" {
+  description = "Existing operator-owned ACM certificate ARN for private_service_domain."
+  type        = string
+  default     = null
+  nullable    = true
+}
+
+variable "private_client_security_group_ids" {
+  description = "Client security groups allowed to connect to the internal HTTPS ALB."
+  type        = set(string)
+  default     = []
+}
+
+variable "private_hosted_zone_id" {
+  description = "Optional operator-owned private Route53 hosted zone ID."
+  type        = string
+  default     = null
+  nullable    = true
+}
+
+variable "create_private_route53_record" {
+  description = "Create the private_service_domain alias in private_hosted_zone_id."
+  type        = bool
+  default     = false
+
+  validation {
+    condition     = !var.create_private_route53_record || (var.enable_private_endpoint && var.private_hosted_zone_id != null)
+    error_message = "create_private_route53_record requires enable_private_endpoint=true and private_hosted_zone_id."
+  }
 }
 
 variable "service_domain" {
@@ -316,6 +386,33 @@ variable "create_route53_records" {
   description = "Create API and SES identity records in hosted_zone_id."
   type        = bool
   default     = false
+
+  validation {
+    condition     = !var.create_route53_records || var.hosted_zone_id != null
+    error_message = "create_route53_records requires hosted_zone_id."
+  }
+}
+
+variable "public_rate_limit_per_5_minutes" {
+  description = "Required WAF per-IP request limit for the public endpoint."
+  type        = number
+  default     = 2000
+
+  validation {
+    condition     = var.public_rate_limit_per_5_minutes >= 100 && var.public_rate_limit_per_5_minutes <= 2000000000
+    error_message = "public_rate_limit_per_5_minutes must be between 100 and 2,000,000,000."
+  }
+}
+
+variable "load_balancer_log_retention_days" {
+  description = "Retention for public and private ALB access logs."
+  type        = number
+  default     = 90
+
+  validation {
+    condition     = var.load_balancer_log_retention_days >= 1 && var.load_balancer_log_retention_days <= 3650
+    error_message = "load_balancer_log_retention_days must be between 1 and 3650."
+  }
 }
 
 variable "email_domain" {
@@ -334,6 +431,15 @@ variable "enable_ses_inbound" {
   description = "Create a dormant SES receipt rule. Terraform never activates the account-global rule set."
   type        = bool
   default     = false
+
+  validation {
+    condition = !var.enable_ses_inbound || (
+      var.email_domain != null &&
+      length(var.inbound_recipients) > 0 &&
+      var.inbound_object_retention_days != null
+    )
+    error_message = "enable_ses_inbound requires email_domain, inbound_recipients, and explicit inbound_object_retention_days."
+  }
 }
 
 variable "inbound_recipients" {
