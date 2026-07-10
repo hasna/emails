@@ -36,12 +36,16 @@ resource "aws_ecs_cluster_capacity_providers" "this" {
 }
 
 locals {
+  database_ca_file = "/opt/emails/certs/aws-rds-global-bundle.pem"
+
   common_environment = [
     { name = "AWS_REGION", value = var.aws_region },
     { name = "HOST", value = "0.0.0.0" },
     { name = "HOME", value = "/tmp" },
     { name = "PORT", value = tostring(local.api_port) },
     { name = "EMAILS_MODE", value = "self_hosted" },
+    { name = "EMAILS_DATABASE_CA_FILE", value = local.database_ca_file },
+    { name = "NODE_EXTRA_CA_CERTS", value = local.database_ca_file },
   ]
 
   api_environment = concat(local.common_environment, [

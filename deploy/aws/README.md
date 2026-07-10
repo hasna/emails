@@ -33,6 +33,8 @@ EMAILS_API_SIGNING_KEY=<Secrets Manager injection>
 EMAILS_SEND_PROVIDER=ses
 EMAILS_INGEST_QUEUE_URL=<worker only>
 EMAILS_INGEST_S3_BUCKET=<worker only>
+EMAILS_DATABASE_CA_FILE=/opt/emails/certs/aws-rds-global-bundle.pem
+NODE_EXTRA_CA_CERTS=/opt/emails/certs/aws-rds-global-bundle.pem
 ```
 
 The user-facing CLI remains `emails`; the native commands above prevent ECS
@@ -148,8 +150,12 @@ Generate passwords outside Terraform and store TLS PostgreSQL URLs in:
 - `database_url_secret_arn` for the DML application role.
 
 Populate `api_signing_key_secret_arn` with at least 32 high-entropy characters.
-Use `sslmode=require` or stricter certificate verification. The module contains
-no secret-version resources because plaintext would remain in Terraform state.
+Both PostgreSQL URLs must use `sslmode=verify-full`. The canonical image pins
+the Amazon RDS global CA bundle at
+`/opt/emails/certs/aws-rds-global-bundle.pem`; every task definition points the
+product TLS resolver and Node at that file. RDS also enforces `rds.force_ssl=1`,
+so plaintext connections fail. The module contains no secret-version resources
+because plaintext would remain in Terraform state.
 
 Remove temporary database-administration ingress after bootstrap.
 

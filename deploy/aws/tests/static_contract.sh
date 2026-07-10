@@ -59,29 +59,45 @@ if rg -n '^check[[:space:]]+"' . --glob '*.tf'; then
   exit 1
 fi
 
-workflow="$repo/.github/workflows/terraform-aws-validate.yml"
+workflow_dir="$repo/.github/workflows"
+workflow="$workflow_dir/terraform-aws-validate.yml"
+product_workflow="$workflow_dir/ci.yml"
 test -f "$workflow" || { echo "CI-safe Terraform workflow missing" >&2; exit 1; }
+test -f "$product_workflow" || { echo "product CI workflow missing" >&2; exit 1; }
+
+workflow_count="$(find "$workflow_dir" -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) | wc -l | tr -d '[:space:]')"
+if [ "$workflow_count" != "2" ]; then
+  echo "only ci.yml and terraform-aws-validate.yml are allowed" >&2
+  exit 1
+fi
 
 rg -F -q '".github/workflows/**"' "$workflow" || {
   echo "workflow changes must trigger the static legacy-workflow guard" >&2
   exit 1
 }
 
-if rg -n 'id-token:|configure-aws-credentials|AWS_ACCOUNT_ID|role-to-assume' "$workflow"; then
-  echo "validation workflow must not request AWS credentials or OIDC" >&2
+if rg -n 'id-token:[[:space:]]*write|configure-aws-credentials|amazon-ecr-login|role-to-assume|aws configure' "$workflow_dir" --glob '*.y*ml'; then
+  echo "workflows must not request AWS credentials or OIDC" >&2
   exit 1
 fi
 
-uses_count="$(rg -c 'uses:' "$workflow")"
-pinned_uses_count="$(rg -c 'uses:[[:space:]]+[^@[:space:]]+@[0-9a-f]{40}([[:space:]]+#.*)?$' "$workflow")"
-if [ "$uses_count" != "$pinned_uses_count" ]; then
-  echo "every workflow action must be pinned to an immutable commit SHA" >&2
+if rg -n '^[[:space:]]*(AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN)[[:space:]]*:' "$workflow_dir" --glob '*.y*ml'; then
+  echo "workflows must not provide AWS credential environment values" >&2
   exit 1
 fi
 
-test ! -e "$repo/.github/workflows/deploy.yml" || {
-  echo "legacy fleet deployment workflow must be removed" >&2
+if rg -n '\b(terraform|tofu)[[:space:]]+(apply|destroy)\b|\b(npm|bun|pnpm|yarn)[[:space:]]+publish\b|ecs[[:space:]]+update-service' "$workflow_dir" --glob '*.y*ml'; then
+  echo "workflows must not apply, destroy, publish, or deploy" >&2
   exit 1
-}
+fi
+
+for allowed_workflow in "$workflow" "$product_workflow"; do
+  uses_count="$(rg -c 'uses:' "$allowed_workflow")"
+  pinned_uses_count="$(rg -c 'uses:[[:space:]]+[^@[:space:]]+@[0-9a-f]{40}([[:space:]]+#.*)?$' "$allowed_workflow")"
+  if [ "$uses_count" != "$pinned_uses_count" ]; then
+    echo "every workflow action must be pinned to an immutable commit SHA" >&2
+    exit 1
+  fi
+done
 
 echo "static self-hosting contract: pass"

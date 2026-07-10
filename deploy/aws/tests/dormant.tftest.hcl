@@ -188,6 +188,29 @@ run "dormant_by_default" {
         jsondecode(aws_ecs_task_definition.api.container_definitions)[0],
         jsondecode(aws_ecs_task_definition.worker.container_definitions)[0],
         jsondecode(aws_ecs_task_definition.migration.container_definitions)[0],
+        ] : lookup({
+          for entry in definition.environment : entry.name => entry.value
+          }, "EMAILS_DATABASE_CA_FILE", "") == "/opt/emails/certs/aws-rds-global-bundle.pem" && lookup({
+          for entry in definition.environment : entry.name => entry.value
+      }, "NODE_EXTRA_CA_CERTS", "") == "/opt/emails/certs/aws-rds-global-bundle.pem"
+    ])
+    error_message = "Every task must use the CA paths shipped by the canonical Emails image."
+  }
+
+  assert {
+    condition = one([
+      for parameter in aws_db_parameter_group.this.parameter : parameter.value
+      if parameter.name == "rds.force_ssl"
+    ]) == "1"
+    error_message = "RDS must reject plaintext PostgreSQL connections."
+  }
+
+  assert {
+    condition = alltrue([
+      for definition in [
+        jsondecode(aws_ecs_task_definition.api.container_definitions)[0],
+        jsondecode(aws_ecs_task_definition.worker.container_definitions)[0],
+        jsondecode(aws_ecs_task_definition.migration.container_definitions)[0],
         ] : definition.readonlyRootFilesystem && anytrue([
           for mount in definition.mountPoints : mount.containerPath == "/tmp" && !mount.readOnly
       ])

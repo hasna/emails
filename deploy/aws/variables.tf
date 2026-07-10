@@ -160,7 +160,7 @@ variable "worker_desired_count" {
 }
 
 variable "secrets_ready" {
-  description = "Explicit operator acknowledgement that all three Secrets Manager containers contain current values."
+  description = "Explicit operator acknowledgement that all three Secrets Manager containers contain current values and both PostgreSQL URLs use sslmode=verify-full with the image-bundled RDS CA."
   type        = bool
   default     = false
 }
