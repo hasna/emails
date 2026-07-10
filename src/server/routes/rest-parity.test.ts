@@ -643,8 +643,8 @@ describe("emails serve REST parity smoke", () => {
   });
 
   it("serves typed domain readiness summaries and mutations", async () => {
-    const previousMode = process.env["MAILERY_MODE"];
-    process.env["MAILERY_MODE"] = "local";
+    const previousMode = process.env["EMAILS_MODE"];
+    process.env["EMAILS_MODE"] = "local";
     try {
       const provider = createProvider({ name: "sandbox", type: "sandbox", active: true });
       const domain = createDomain(provider.id, "readiness.example.com");
@@ -674,8 +674,8 @@ describe("emails serve REST parity smoke", () => {
       const invalid = await call(`/api/domains/${domain.id}/readiness`, postJson(`/api/domains/${domain.id}/readiness`, { outbound_status: "bogus" }));
       expect(invalid.status).toBe(400);
     } finally {
-      if (previousMode === undefined) delete process.env["MAILERY_MODE"];
-      else process.env["MAILERY_MODE"] = previousMode;
+      if (previousMode === undefined) delete process.env["EMAILS_MODE"];
+      else process.env["EMAILS_MODE"] = previousMode;
     }
   });
 

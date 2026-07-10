@@ -13,10 +13,10 @@ import { assertDomainOutboundReady, MAX_ATTACHMENT_COUNT, MAX_ATTACHMENT_SIZE_BY
 let providerId: string;
 beforeEach(() => {
   process.env["EMAILS_DB_PATH"] = ":memory:";
-  process.env["MAILERY_MODE"] = "local";
+  process.env["EMAILS_MODE"] = "local";
   delete process.env["HASNA_EMAILS_DATABASE_URL"];
   delete process.env["EMAILS_DATABASE_URL"];
-  delete process.env["HASNA_EMAILS_STORAGE_MODE"];
+  delete process.env["EMAILS_MODE"];
   delete process.env["EMAILS_STORAGE_MODE"];
   resetDatabase();
   providerId = createProvider({ name: "sandbox", type: "sandbox" }).id;
@@ -24,10 +24,10 @@ beforeEach(() => {
 afterEach(() => {
   closeDatabase();
   delete process.env["EMAILS_DB_PATH"];
-  delete process.env["MAILERY_MODE"];
+  delete process.env["EMAILS_MODE"];
   delete process.env["HASNA_EMAILS_DATABASE_URL"];
   delete process.env["EMAILS_DATABASE_URL"];
-  delete process.env["HASNA_EMAILS_STORAGE_MODE"];
+  delete process.env["EMAILS_MODE"];
   delete process.env["EMAILS_STORAGE_MODE"];
 });
 
@@ -192,17 +192,18 @@ describe("sendWithFailover — shared send safety guards", () => {
     )).not.toThrow();
   });
 
-  it("cloud mode delegates outbound sends to the Mailery Cloud API state", () => {
-    process.env["MAILERY_MODE"] = "cloud";
-    const sesProvider = createProvider({ name: "ses-cloud-cache", type: "ses", region: "us-east-1" });
+  it("self_hosted mode delegates outbound sends to the Emails Self-hosted API state", () => {
+    const sesProvider = createProvider({ name: "ses-self_hosted-cache", type: "ses", region: "us-east-1" });
+    const sandboxProvider = getProvider(providerId)!;
+    process.env["EMAILS_MODE"] = "self_hosted";
 
     expect(() => assertDomainOutboundReady(
-      getProvider(sesProvider.id)!,
+      sesProvider,
       { from: "sender@example.com", to: "next@x.com", subject: "hi", text: "yo" },
-    )).toThrow(/Cloud mode delegates outbound sends/i);
+    )).toThrow(/Self-hosted sends must use/i);
     expect(() => assertDomainOutboundReady(
-      getProvider(providerId)!,
+      sandboxProvider,
       { from: "sender@example.test", to: "next@x.com", subject: "hi", text: "yo" },
-    )).toThrow(/Cloud mode delegates outbound sends/i);
+    )).toThrow(/Self-hosted sends must use/i);
   });
 });

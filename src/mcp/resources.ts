@@ -6,7 +6,7 @@ import { countValue } from "../db/scalars.js";
 import { assessDomainReadiness } from "../lib/domain-readiness.js";
 import { domainInboundReadinessSignals } from "../lib/domain-inbound-evidence.js";
 import { loadConfig } from "../lib/config.js";
-import { resolveMaileryMode } from "../lib/mode.js";
+import { resolveEmailsMode } from "../lib/mode.js";
 import { listMailboxSources, listMailboxStatus } from "../cli/tui/data.js";
 
 const RECENT_ERROR_LIMIT_PER_COMPONENT = 50;
@@ -44,7 +44,7 @@ export function domainsResourcePayload(db: Database = getDatabase()): Record<str
   const domains = visibleDomains.map((domain) => {
     const ready_addresses = readyAddressCounts.get(domain.id) ?? 0;
     const provisioning = domainProvisioning.get(domain.id) ?? null;
-    const mode = resolveMaileryMode();
+    const mode = resolveEmailsMode();
     return {
       ...domain,
       provisioning,
@@ -289,7 +289,7 @@ export function registerEmailResources(server: McpServer): void {
     "emails-mailboxes",
     "emails://mailboxes",
     {
-      title: "Mailery Mailboxes",
+      title: "Emails Mailboxes",
       description: "Folder counts for the active mailbox source of truth.",
       mimeType: "application/json",
     },
@@ -302,7 +302,7 @@ export function registerEmailResources(server: McpServer): void {
     "emails-sources",
     "emails://sources",
     {
-      title: "Mailery Sources",
+      title: "Emails Sources",
       description: "Ingestion streams with source-aware counts and legacy/orphaned badges.",
       mimeType: "application/json",
     },

@@ -69,8 +69,8 @@ function objectField(body: Record<string, unknown>, key: string): Record<string,
 
 function domainReadinessMutation(body: Record<string, unknown>): DomainReadinessMutationInput {
   return {
-    domain_type: enumField(body, "domain_type", ["system", "tenant", "self_hosted", "local_only"] as const),
-    source_of_truth: enumField(body, "source_of_truth", ["local", "postgres", "cloud"] as const),
+    domain_type: enumField(body, "domain_type", ["system", "self_hosted", "local_only"] as const),
+    source_of_truth: enumField(body, "source_of_truth", ["local", "postgres"] as const),
     ownership_status: enumField(body, "ownership_status", ["pending", "verified", "failed"] as const),
     inbound_status: enumField(body, "inbound_status", ["pending", "ready", "disabled", "failed"] as const),
     outbound_status: enumField(body, "outbound_status", ["pending", "ready", "disabled", "failed"] as const),

@@ -194,8 +194,8 @@ describe("updateDomainReadiness", () => {
   it("updates lifecycle fields, snapshots, and verification timestamps", () => {
     const d = createDomain(providerId, "example.com");
     const updated = updateDomainReadiness(d.id, {
-      domain_type: "tenant",
-      source_of_truth: "cloud",
+      domain_type: "self_hosted",
+      source_of_truth: "postgres",
       ownership_status: "verified",
       inbound_status: "ready",
       outbound_status: "ready",
@@ -208,8 +208,8 @@ describe("updateDomainReadiness", () => {
       last_monitored_at: "2026-07-02T00:03:00.000Z",
     });
 
-    expect(updated.domain_type).toBe("tenant");
-    expect(updated.source_of_truth).toBe("cloud");
+    expect(updated.domain_type).toBe("self_hosted");
+    expect(updated.source_of_truth).toBe("postgres");
     expect(updated.ownership_status).toBe("verified");
     expect(updated.inbound_status).toBe("ready");
     expect(updated.outbound_status).toBe("ready");

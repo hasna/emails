@@ -13,7 +13,6 @@ dist/
 .secrets
 .secrets/
 bun.lockb
-*.lock
 
 # macOS
 .DS_Store

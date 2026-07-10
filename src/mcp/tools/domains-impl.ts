@@ -3,7 +3,7 @@ import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { countUsableDomains, createDomain, listDomains, listUsableDomains, listDomainsByProviderAndNames, deleteDomain, findDomainsByName, getDomain, getDomainByName, updateDnsStatus } from '../../db/domains.js';
 import { countAddressesForReadiness, createAddress, listAddressEmails, listAddressesForReadiness, deleteAddress, getAddress, getAddressByEmail } from '../../db/addresses.js';
-import { isCloudMode } from '../../db/cloud-store.js';
+import { isSelfHostedMode } from '../../db/self-hosted-store.js';
 import { suspendAddress, activateAddress, setAddressQuota } from '../../db/address-lifecycle.js';
 import { createAlias, createCatchAll, removeAlias, getAlias, listAliases, resolveAlias } from '../../db/aliases.js';
 import { createSendKey, listSendKeySummaries, revokeSendKey, getSendKey, canOwnerSendFrom } from '../../db/send-keys.js';
@@ -17,7 +17,7 @@ import {
 } from '../../db/provisioning.js';
 import { assessDomainReadiness } from '../../lib/domain-readiness.js';
 import { domainInboundReadinessSignals } from '../../lib/domain-inbound-evidence.js';
-import { resolveMaileryMode } from '../../lib/mode.js';
+import { resolveEmailsMode } from '../../lib/mode.js';
 import { formatError, resolveId, DomainNotFoundError, AddressNotFoundError, ProviderNotFoundError } from '../helpers.js';
 
 const MAX_MCP_OWNER_HISTORY_LIMIT = 100;
@@ -70,7 +70,7 @@ export function registerDomainTools(server: McpServer): void {
 	      const domainProvisioningFor = (domainId: string) =>
 	        domainProvisioning.get(domainId) ?? null;
       const providerNames = listProviderNamesByIds(baseDomains.map((domain) => domain.provider_id));
-      const mode = resolveMaileryMode();
+      const mode = resolveEmailsMode();
 	      const domains = baseDomains.map((domain) => {
 	        const ready_addresses = readyAddressCount(domain.id);
 	        const provisioning = domainProvisioningFor(domain.id);
@@ -107,11 +107,11 @@ export function registerDomainTools(server: McpServer): void {
   },
   async ({ provider_id, domain }) => {
     try {
-      // Cloud (self_hosted) mode: create the domain directly on the cloud HTTP
+      // Self-hosted (self_hosted) mode: create the domain directly on the self_hosted HTTP
       // API. Providers are local-only, so `provider_id` is carried through as a
       // label rather than resolved against the local providers table or passed
-      // to a provider adapter. Mirrors the CLI `domain add` cloud passthrough.
-      if (isCloudMode()) {
+      // to a provider adapter. Mirrors the CLI `domain add` self_hosted passthrough.
+      if (isSelfHostedMode()) {
         const existing = getDomainByName(provider_id, domain);
         const d = existing ?? createDomain(provider_id, domain);
         return { content: [{ type: "text", text: JSON.stringify(d, null, 2) }] };
@@ -292,7 +292,7 @@ export function registerDomainTools(server: McpServer): void {
 	      const domainByProviderAndName = new Map(
 	        domains.map((domain) => [`${domain.provider_id}:${domain.domain.toLowerCase()}`, domain]),
 	      );
-      const mode = resolveMaileryMode();
+      const mode = resolveEmailsMode();
 	      const addresses = baseAddresses.map((address) => {
 	          const domainName = address.email.split("@")[1]?.toLowerCase() ?? "";
 	          const domain = domainByProviderAndName.get(`${address.provider_id}:${domainName}`) ?? null;
@@ -478,11 +478,11 @@ export function registerDomainTools(server: McpServer): void {
   },
   async ({ provider_id, email, display_name }) => {
     try {
-      // Cloud (self_hosted) mode: create the address directly on the cloud HTTP
+      // Self-hosted (self_hosted) mode: create the address directly on the self_hosted HTTP
       // API. Providers are local-only, so `provider_id` is carried through as a
       // label rather than resolved against the local providers table or passed
-      // to a provider adapter. Mirrors the CLI `address add` cloud passthrough.
-      if (isCloudMode()) {
+      // to a provider adapter. Mirrors the CLI `address add` self_hosted passthrough.
+      if (isSelfHostedMode()) {
         const existing = getAddressByEmail(provider_id, email);
         const addr = existing ?? createAddress({ provider_id, email, display_name });
         return { content: [{ type: "text", text: JSON.stringify(addr, null, 2) }] };

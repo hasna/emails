@@ -17,7 +17,7 @@ async function runStatusCommand(args: string[]) {
     data = payload;
     formatted = text;
   });
-  await program.parseAsync(["node", "mailery", ...args]);
+  await program.parseAsync(["node", "emails", ...args]);
   return { data, formatted };
 }
 
@@ -26,7 +26,7 @@ let tempHome: string | undefined;
 
 beforeEach(() => {
   previousHome = process.env["HOME"];
-  tempHome = mkdtempSync(join(tmpdir(), "mailery-status-test-home-"));
+  tempHome = mkdtempSync(join(tmpdir(), "emails-status-test-home-"));
   process.env["HOME"] = tempHome;
   process.env["EMAILS_DB_PATH"] = ":memory:";
   resetDatabase();
@@ -85,7 +85,7 @@ describe("managed agent CLI commands", () => {
     expect(list.formatted).toContain("provider: groq");
 
     const defaults = await runStatusCommand(["agent", "defaults"]);
-    expect(defaults.formatted).toContain("prompt boundary: mailery-managed-email-agent-v1");
+    expect(defaults.formatted).toContain("prompt boundary: emails-managed-email-agent-v1");
 
     const enabled = await runStatusCommand(["agent", "enable", "labeler", "--always-on", "--skip-network"]);
     expect(enabled.formatted).toContain("Labeler");
@@ -113,7 +113,7 @@ describe("managed agent CLI commands", () => {
 
     expect(digest.formatted).toContain("Today digest");
     expect(digest.formatted).toContain("Summary:");
-    expect(digest.formatted).toContain("provider: local local-mailery-digest");
+    expect(digest.formatted).toContain("provider: local local-emails-digest");
     expect(digest.data).toMatchObject({ period: "today", provider: "local", status: "ok" });
   });
 });

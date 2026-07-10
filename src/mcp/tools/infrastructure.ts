@@ -240,7 +240,7 @@ export function registerInfrastructureTools(server: McpServer): void {
     bucket: z.string().describe("S3 bucket name"),
     prefix: z.string().optional().describe("S3 key prefix (e.g. inbound/example.com/)"),
     region: z.string().optional().describe("AWS region (default: us-east-1)"),
-    provider_id: z.string().optional().describe("Associate mailery with this provider ID"),
+    provider_id: z.string().optional().describe("Associate emails with this provider ID"),
     limit: z.number().int().positive().max(MAX_MCP_S3_SYNC_LIMIT).optional().describe("Max emails per run (default: 100, max: 10000)"),
   },
   async ({ bucket, prefix, region, provider_id, limit }) => {

@@ -3,7 +3,7 @@ import { listProviders } from "../db/providers.js";
 import { countValue } from "../db/scalars.js";
 import { checkAllProviders } from "./health.js";
 import { loadConfig } from "./config.js";
-import { resolveMaileryMode } from "./mode.js";
+import { resolveEmailsMode } from "./mode.js";
 import { existsSync } from "fs";
 import { join } from "path";
 import type { Database } from "../db/database.js";
@@ -33,7 +33,7 @@ export async function runDiagnostics(db?: Database, opts: DiagnosticsOptions = {
   // 2. Config file
   const { getDataDir } = await import("../db/database.js");
   const configPath = join(getDataDir(), "config.json");
-  const mode = resolveMaileryMode();
+  const mode = resolveEmailsMode();
   checks.push({
     name: "Mode",
     status: mode.warning ? "warn" : "pass",
@@ -49,8 +49,8 @@ export async function runDiagnostics(db?: Database, opts: DiagnosticsOptions = {
   const providers = listProviders(d);
   const supportedProviders = providers.filter((provider) => provider.type !== "gmail");
   const legacyGmailProviders = providers.filter((provider) => provider.type === "gmail");
-  if (mode.mode === "cloud") {
-    checks.push({ name: "Providers", status: "pass", message: "Mailery Cloud mode; local SES/Resend/Sandbox providers are optional" });
+  if (mode.mode === "self_hosted") {
+    checks.push({ name: "Providers", status: "pass", message: "Self-hosted provider configuration is owned by the deployment operator" });
   } else {
     checks.push(
       supportedProviders.length > 0
@@ -70,7 +70,7 @@ export async function runDiagnostics(db?: Database, opts: DiagnosticsOptions = {
   }
 
   // 4. Provider health
-  if (mode.mode !== "cloud" && supportedProviders.length > 0) {
+  if (mode.mode !== "self_hosted" && supportedProviders.length > 0) {
     const health = await checkAllProviders(d, { validateCredentials: opts.liveProviderChecks === true });
     for (const h of health) {
       checks.push({

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Sync this repo to a macOS Mac and build the Mailery .app there. Run from spark02/spark01.
+# Sync this repo to a macOS Mac and build the Emails .app there. Run from spark02/spark01.
 #
 # A copycat of open-notes' run_on_apple03.sh. Defaults to apple03; override with
-# REMOTE_HOST. Also runs the Swift smoke harness (MailerySmoke) on the Mac first so a
+# REMOTE_HOST. Also runs the Swift smoke harness (EmailsSmoke) on the Mac first so a
 # broken core fails fast before assembling the bundle.
 #
 #   REMOTE_HOST=apple03 bash scripts/run_on_apple_mac.sh
@@ -21,11 +21,11 @@ rsync -az --delete \
   --exclude 'node_modules/' \
   "$REPO_ROOT/" "$REMOTE_HOST:$REMOTE_PATH/"
 
-echo "==> smoke test on $REMOTE_HOST (MailerySmoke)"
-ssh "$REMOTE_HOST" "cd '$REMOTE_PATH' && swift run -c release MailerySmoke"
+echo "==> smoke test on $REMOTE_HOST (EmailsSmoke)"
+ssh "$REMOTE_HOST" "cd '$REMOTE_PATH' && swift run -c release EmailsSmoke"
 
 echo "==> building on $REMOTE_HOST"
-ssh "$REMOTE_HOST" "cd '$REMOTE_PATH' && bash scripts/build_mailery_app.sh"
+ssh "$REMOTE_HOST" "cd '$REMOTE_PATH' && bash scripts/build_emails_app.sh"
 
 echo ""
-echo "Done. App built at $REMOTE_HOST:$REMOTE_PATH/dist/Mailery.app"
+echo "Done. App built at $REMOTE_HOST:$REMOTE_PATH/dist/Emails.app"

@@ -1,17 +1,17 @@
 import type { Database } from "./database.js";
 import type { CreateProviderInput, Provider, ProviderRow, ProviderSummary, ProviderType } from "../types/index.js";
 import { ProviderNotFoundError } from "../types/index.js";
-import { getDatabase, now, uuid } from "./database.js";
+import { getDatabase, now, uuid, resolvePartialId } from "./database.js";
 import { safeOffset, safeOptionalLimit } from "./pagination.js";
-import { cloudResource, cloudListQuery, cloudPage, cbool, ciso, cstr, cstrOrNull } from "./cloud-resource.js";
+import { selfHostedResource, selfHostedListQuery, selfHostedPage, cbool, ciso, cstr, cstrOrNull } from "./self-hosted-resource.js";
 
 const PROVIDER_RESOURCE = "providers";
 
-// The cloud `providers` resource carries only NON-SECRET metadata (id, name,
+// The selfHosted `providers` resource carries only NON-SECRET metadata (id, name,
 // type, region, active, timestamps) — provider credentials (api_key/secret_key/
 // oauth tokens) are never distributed to or fetched by a client. Secret columns
-// map to null; a flipped client uses cloud-side send (`/v1/send`), not local
-// provider secrets. So `provider list` shows the cloud inventory, not secrets.
+// map to null; a flipped client uses selfHosted-side send (`/v1/send`), not local
+// provider secrets. So `provider list` shows the selfHosted inventory, not secrets.
 function apiToProviderSummary(e: Record<string, unknown>): ProviderSummary {
   const updatedAt = ciso(e["updated_at"]);
   return {
@@ -94,6 +94,15 @@ function rowToProviderSummary(row: ProviderSummaryRow): ProviderSummary {
 }
 
 export function createProvider(input: CreateProviderInput, db?: Database): Provider {
+  const selfHosted = selfHostedResource(PROVIDER_RESOURCE);
+  if (selfHosted) {
+    return apiToProvider(selfHosted.create({
+      name: input.name,
+      type: input.type,
+      region: input.region || null,
+      active: true,
+    }));
+  }
   const d = db || getDatabase();
   const id = uuid();
   const timestamp = now();
@@ -125,10 +134,29 @@ export function createProvider(input: CreateProviderInput, db?: Database): Provi
 }
 
 export function getProvider(id: string, db?: Database): Provider | null {
+  const selfHosted = selfHostedResource(PROVIDER_RESOURCE);
+  if (selfHosted) {
+    const record = selfHosted.get(id);
+    return record ? apiToProvider(record) : null;
+  }
   const d = db || getDatabase();
   const row = d.query(`SELECT ${PROVIDER_COLUMNS} FROM providers WHERE id = ?`).get(id) as ProviderRow | null;
   if (!row) return null;
   return rowToProvider(row);
+}
+
+export function resolveProviderId(id: string, db?: Database): string | null {
+  const selfHosted = selfHostedResource(PROVIDER_RESOURCE);
+  if (selfHosted) {
+    const trimmed = id.trim();
+    if (!trimmed) return null;
+    if (trimmed.length >= 36) return selfHosted.get(trimmed) ? trimmed : null;
+    const matches = selfHosted.list({ limit: 1000 })
+      .map((row) => cstr(row["id"]))
+      .filter((providerId) => providerId.startsWith(trimmed));
+    return matches.length === 1 ? matches[0]! : null;
+  }
+  return resolvePartialId(db || getDatabase(), "providers", id);
 }
 
 export function getProviderByNameAndType(name: string, type: ProviderType, db?: Database): Provider | null {
@@ -143,12 +171,12 @@ export interface ListProviderOptions {
 }
 
 export function listProviders(db?: Database, opts?: ListProviderOptions): Provider[] {
-  const cloud = cloudResource(PROVIDER_RESOURCE);
-  if (cloud) {
-    const { query, limit, offset } = cloudListQuery(opts);
-    const rows = cloud.list(query).map(apiToProvider);
+  const selfHosted = selfHostedResource(PROVIDER_RESOURCE);
+  if (selfHosted) {
+    const { query, limit, offset } = selfHostedListQuery(opts);
+    const rows = selfHosted.list(query).map(apiToProvider);
     rows.sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
-    return cloudPage(rows, limit, offset);
+    return selfHostedPage(rows, limit, offset);
   }
 
   const d = db || getDatabase();
@@ -161,12 +189,12 @@ export function listProviders(db?: Database, opts?: ListProviderOptions): Provid
 }
 
 export function listProviderSummaries(db?: Database, opts?: ListProviderOptions): ProviderSummary[] {
-  const cloud = cloudResource(PROVIDER_RESOURCE);
-  if (cloud) {
-    const { query, limit, offset } = cloudListQuery(opts);
-    const rows = cloud.list(query).map(apiToProviderSummary);
+  const selfHosted = selfHostedResource(PROVIDER_RESOURCE);
+  if (selfHosted) {
+    const { query, limit, offset } = selfHostedListQuery(opts);
+    const rows = selfHosted.list(query).map(apiToProviderSummary);
     rows.sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
-    return cloudPage(rows, limit, offset);
+    return selfHostedPage(rows, limit, offset);
   }
 
   const d = db || getDatabase();
@@ -230,6 +258,15 @@ export function updateProvider(
   input: Partial<CreateProviderInput> & { active?: boolean },
   db?: Database,
 ): Provider {
+  const selfHosted = selfHostedResource(PROVIDER_RESOURCE);
+  if (selfHosted) {
+    const patch: Record<string, unknown> = {};
+    if (input.name !== undefined) patch["name"] = input.name;
+    if (input.type !== undefined) patch["type"] = input.type;
+    if (input.region !== undefined) patch["region"] = input.region || null;
+    if (input.active !== undefined) patch["active"] = input.active;
+    return apiToProvider(selfHosted.update(id, patch));
+  }
   const d = db || getDatabase();
   const provider = getProvider(id, d);
   if (!provider) throw new ProviderNotFoundError(id);
@@ -257,6 +294,8 @@ export function updateProvider(
 }
 
 export function deleteProvider(id: string, db?: Database): boolean {
+  const selfHosted = selfHostedResource(PROVIDER_RESOURCE);
+  if (selfHosted) return selfHosted.del(id);
   const d = db || getDatabase();
   const result = d.run("DELETE FROM providers WHERE id = ?", [id]);
   return result.changes > 0;

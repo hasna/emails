@@ -1,50 +1,39 @@
-# Mailery self_hosted service — ARM64 / Bun.
-#
-# Runs mailery-serve in cloud mode (PURE REMOTE, Amendment A1): the
-# API-key-authenticated /v1 surface + /health,/ready,/version probes, reading
-# and writing the shared cloud Postgres. The same image runs the one-shot
-# migration task via `mailery db migrate`.
-FROM --platform=linux/arm64 oven/bun:1.3 AS base
+# syntax=docker/dockerfile:1.7
+
+# Reproducible Emails self-hosted runtime. No deployment or account defaults are
+# embedded in the image; the operator supplies Postgres, auth, and provider config.
+FROM oven/bun:1.3.13-debian@sha256:e95356cb8e1de62ad69ab3bd3584ba947013d27650a226804d2fc0af4e17dac2 AS dependencies
 WORKDIR /app
 
-# RDS TLS: bake the Amazon RDS global CA bundle so verify-full DSNs
-# (pg-connection-string treats sslmode=require as verify-full) validate the
-# shared RDS cert chain. NODE_EXTRA_CA_CERTS adds it to Node's trust store.
-RUN apt-get update \
- && apt-get install -y --no-install-recommends curl ca-certificates \
- && curl -fsSL https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem \
-      -o /etc/ssl/certs/rds-global-bundle.pem \
- && rm -rf /var/lib/apt/lists/*
-ENV NODE_EXTRA_CA_CERTS=/etc/ssl/certs/rds-global-bundle.pem
+COPY package.json bun.lock ./
+RUN bun install --production --frozen-lockfile
 
-# Install dependencies first for layer caching. bun.lock is not tracked in this
-# repo, so resolve from package.json (production deps only).
-#
-# The runtime image runs only `mailery-serve` (cloud API) and `mailery db
-# migrate`; neither imports the workspace-local `file:` deps (e.g. the lazily
-# loaded MCP harness). Those paths are outside the build context and would make
-# `bun install` fail, so strip them from package.json first.
-COPY package.json ./
-COPY scripts/docker-prune-file-deps.mjs ./scripts/docker-prune-file-deps.mjs
-RUN bun scripts/docker-prune-file-deps.mjs && bun install --production
+FROM oven/bun:1.3.13-debian@sha256:e95356cb8e1de62ad69ab3bd3584ba947013d27650a226804d2fc0af4e17dac2 AS runtime
+WORKDIR /app
 
-# Application source (run directly with Bun — no build step needed).
-COPY tsconfig.json ./
-COPY src ./src
-
-# Console wrappers so `mailery` / `mailery-serve` resolve on PATH exactly as the
-# published bins do (the deploy migration task runs `mailery db migrate`).
-RUN printf '#!/bin/sh\nexec bun /app/src/cli/index.tsx "$@"\n' > /usr/local/bin/mailery \
- && printf '#!/bin/sh\nexec bun /app/src/server/index.ts "$@"\n' > /usr/local/bin/mailery-serve \
- && chmod +x /usr/local/bin/mailery /usr/local/bin/mailery-serve
-
-ENV PORT=8080 \
+ENV NODE_ENV=production \
+    EMAILS_MODE=self_hosted \
+    EMAILS_DATABASE_CA_FILE=/opt/emails/certs/aws-rds-global-bundle.pem \
+    NODE_EXTRA_CA_CERTS=/opt/emails/certs/aws-rds-global-bundle.pem \
     HOST=0.0.0.0 \
-    HASNA_MAILERY_STORAGE_MODE=cloud \
-    NODE_ENV=production
+    PORT=8080
 
+# Official Amazon RDS global trust bundle, content-pinned for reproducible and
+# fail-closed image builds. To rotate it, review the new AWS bundle and update
+# this checksum together with the TLS/container contract tests.
+ADD --checksum=sha256:e5bb2084ccf45087bda1c9bffdea0eb15ee67f0b91646106e466714f9de3c7e3 \
+    --chown=bun:bun --chmod=0444 \
+    https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem \
+    /opt/emails/certs/aws-rds-global-bundle.pem
+
+COPY --from=dependencies --chown=bun:bun /app/node_modules ./node_modules
+COPY --chown=bun:bun package.json tsconfig.json ./
+COPY --chown=bun:bun src ./src
+
+USER bun
 EXPOSE 8080
 
-# Default: run the HTTP service. The migration task overrides the command with
-# ["mailery","db","migrate"].
-CMD ["mailery-serve"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD ["bun", "-e", "const r=await fetch('http://127.0.0.1:8080/ready');process.exit(r.ok?0:1)"]
+
+CMD ["bun", "src/server/index.ts"]

@@ -1,7 +1,7 @@
 import type { Database } from "./database.js";
 import { getDatabase } from "./database.js";
 import { parseJsonObject } from "./json.js";
-import { cloudResource, cstrOrNull, cobj } from "./cloud-resource.js";
+import { selfHostedResource, cstrOrNull, cobj } from "./self-hosted-resource.js";
 
 const MESSAGE_RESOURCE = "messages";
 
@@ -41,9 +41,9 @@ export function getEmailContent(
   emailId: string,
   db?: Database,
 ): EmailContent | null {
-  const cloud = cloudResource(MESSAGE_RESOURCE);
-  if (cloud) {
-    const rec = cloud.get(emailId);
+  const selfHosted = selfHostedResource(MESSAGE_RESOURCE);
+  if (selfHosted) {
+    const rec = selfHosted.get(emailId);
     if (!rec) return null;
     const headers = cobj(rec["headers"]) as Record<string, string>;
     return {

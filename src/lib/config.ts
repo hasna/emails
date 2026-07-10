@@ -2,7 +2,7 @@ import { chmodSync, existsSync, readFileSync, writeFileSync, mkdirSync, statSync
 import { join } from "path";
 import { getDataDir } from "../db/database.js";
 import { resolveCloudflareAuth, type CloudflareAuth } from "./cloudflare-auth.js";
-import { getMaileryMode } from "./mode.js";
+import { getEmailsMode } from "./mode.js";
 
 // Lazy getters so tests can override HOME via process.env before calling
 function getConfigDir(): string { return getDataDir(); }
@@ -269,17 +269,17 @@ export function getInboundAttachmentStorageConfig(): InboundAttachmentStorageCon
     ?? process.env["EMAILS_INBOUND_S3_BUCKET"];
   // Mode-based (no self_hosted/remote/hybrid or *_DATABASE_URL env heuristic).
   //   local  -> attachments live on the local filesystem by default.
-  //   cloud  -> the server owns attachments; the thin client never keeps them on the
+  //   self_hosted -> the server owns attachments; the thin client never keeps them on the
   //             local filesystem — it uses S3 when a bucket is configured, else none
   //             (an explicit "local"/"s3" is coerced to that safe pair).
-  const cloud = getMaileryMode() === "cloud";
-  const cloudStorage: AttachmentStorage = configuredBucket || inboundBucket ? "s3" : "none";
-  const effectiveStorage = cloud
-    ? (configuredStorage === "local" || configuredStorage === "s3" ? cloudStorage : configuredStorage)
+  const selfHosted = getEmailsMode() === "self_hosted";
+  const selfHostedStorage: AttachmentStorage = configuredBucket || inboundBucket ? "s3" : "none";
+  const effectiveStorage = selfHosted
+    ? (configuredStorage === "local" || configuredStorage === "s3" ? selfHostedStorage : configuredStorage)
     : configuredStorage;
   return {
-    attachment_storage: effectiveStorage ?? (cloud ? cloudStorage : "local"),
-    s3_bucket: configuredBucket ?? (cloud ? inboundBucket : undefined),
+    attachment_storage: effectiveStorage ?? (selfHosted ? selfHostedStorage : "local"),
+    s3_bucket: configuredBucket ?? (selfHosted ? inboundBucket : undefined),
     s3_prefix: (config["attachment_s3_prefix"] as string | undefined)
       ?? (config["gmail_s3_prefix"] as string | undefined)
       ?? "emails",

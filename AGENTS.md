@@ -180,7 +180,7 @@ emails://recent-errors     → latest provisioning/source errors
 2. **Provider credentials**: Never expose credentials in code — they're stored in the local DB. When listing providers, credentials are automatically redacted (`"***"`).
 3. **Domain warming**: If a warming schedule is active for a domain, `send_email` will block at the daily limit. Use `get_warming_status(domain)` first.
 4. **Suppression**: Always check `list_contacts(suppressed=true)` before bulk sends.
-5. **Attachment limits**: Max 25MB per attachment, max 10 attachments.
+5. **Attachment limits**: Local/provider flows may allow up to 25MB per attachment and 10 attachments. The self-hosted JSON send API is intentionally smaller: 5 inline attachments, 512KiB each, 768KiB total.
 6. **Server binding**: `emails serve` defaults to `127.0.0.1:3900` (localhost only). Use `--host 0.0.0.0` to expose externally.
 
 ## Development
@@ -201,7 +201,7 @@ src/
 ├── cli/
 │   ├── index.tsx              # thin orchestrator (~65 lines)
 │   ├── utils.ts               # shared helpers
-│   ├── tui/                   # OpenTUI Mailery UI dashboard
+│   ├── tui/                   # OpenTUI Emails UI dashboard
 │   └── commands/              # modular command files
 │       ├── send.ts            # send, log, search, show, replies, conversation
 │       ├── provider.ts        # provider CRUD
@@ -221,7 +221,7 @@ src/
 │   ├── tracking.ts            # open/click pixel injection
 │   ├── inbound.ts             # MIME parsing + SMTP server
 │   ├── email-verify.ts        # MX + SMTP probe verification
-│   ├── address-ownership.ts   # owner/admin address tenancy helpers
+│   ├── address-ownership.ts   # owner/admin address authorization helpers
 │   ├── agent-context.ts       # redacted agent orientation snapshots
 │   └── ...
 ├── providers/                 # provider adapters

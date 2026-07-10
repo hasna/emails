@@ -20,7 +20,7 @@ import {
 } from "../db/provisioning.js";
 import { assessDomainReadiness, type DomainReadiness } from "./domain-readiness.js";
 import { domainInboundReadinessSignals } from "./domain-inbound-evidence.js";
-import { resolveMaileryMode, type MaileryModeResolution } from "./mode.js";
+import { resolveEmailsMode, type EmailsModeResolution } from "./mode.js";
 
 export type DomainReadinessProviderSummary = Pick<Provider, "id" | "name" | "type" | "region" | "active">;
 
@@ -43,8 +43,8 @@ export interface DomainDnsLifecycleStatus {
 export interface DomainLifecycleSummary {
   id: string;
   domain: string;
-  mode: MaileryModeResolution["mode"];
-  mode_label: MaileryModeResolution["label"];
+  mode: EmailsModeResolution["mode"];
+  mode_label: EmailsModeResolution["label"];
   source_of_truth: DomainSourceOfTruth;
   domain_type: DomainType;
   provider: DomainReadinessProviderSummary | null;
@@ -62,7 +62,7 @@ export interface DomainLifecycleSummary {
 
 export interface BuildDomainLifecycleSummaryOptions {
   db?: Database;
-  mode?: MaileryModeResolution;
+  mode?: EmailsModeResolution;
   provider?: Provider | null;
   provisioning?: DomainProvisioning | null;
   ready_addresses?: number;
@@ -71,13 +71,13 @@ export interface BuildDomainLifecycleSummaryOptions {
 export interface ListDomainLifecycleSummaryOptions extends ListDomainOptions {
   provider_id?: string;
   db?: Database;
-  mode?: MaileryModeResolution;
+  mode?: EmailsModeResolution;
 }
 
 export interface ResolveDomainLifecycleOptions {
   provider_id?: string;
   db?: Database;
-  mode?: MaileryModeResolution;
+  mode?: EmailsModeResolution;
 }
 
 export interface DomainReadinessMutationInput {
@@ -121,18 +121,18 @@ function providerSummary(provider: Provider | null): DomainReadinessProviderSumm
   };
 }
 
-function resolveMode(mode?: MaileryModeResolution): MaileryModeResolution {
-  return mode ?? resolveMaileryMode();
+function resolveMode(mode?: EmailsModeResolution): EmailsModeResolution {
+  return mode ?? resolveEmailsMode();
 }
 
-export function defaultDomainSourceOfTruth(mode: MaileryModeResolution["mode"]): DomainSourceOfTruth {
-  if (mode === "cloud") return "cloud";
+export function defaultDomainSourceOfTruth(mode: EmailsModeResolution["mode"]): DomainSourceOfTruth {
+  if (mode === "self_hosted") return "postgres";
   return "local";
 }
 
 export function assessDomainLifecycleReadiness(
   domain: Domain,
-  mode: MaileryModeResolution,
+  mode: EmailsModeResolution,
   readyAddresses: number,
   provisioning: DomainProvisioning | null,
 ): DomainReadiness {
@@ -317,7 +317,7 @@ export function updateDomainLifecycleReadiness(
 
   if (input.inbound_status === "ready") {
     if (!input.force && !before.readiness.receive_ready && !before.readiness.inbound_evidence_ready) {
-      throw new Error(`Inbound cloud source is not configured for ${domain.domain}; register an SES/S3 source or pass force after manual/provider setup.`);
+      throw new Error(`Inbound self_hosted source is not configured for ${domain.domain}; register an SES/S3 source or pass force after manual/provider setup.`);
     }
     update.last_inbound_check_at ??= timestamp;
   }

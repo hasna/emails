@@ -4,16 +4,16 @@ export type { Database };
 import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { sqlEmailAddress, sqlEmailDomain } from "./email-address-sql.js";
-import { cloudStoreFor, isCloudMode } from "./cloud-store.js";
+import { selfHostedStoreFor, isSelfHostedMode } from "./self-hosted-store.js";
 
-// Resources whose repository is fully routed to the cloud HTTP API in
-// self_hosted mode. Only these route id-resolution to the cloud so it stays
+// Resources whose repository is fully routed to the selfHosted HTTP API in
+// self_hosted mode. Only these route id-resolution to the selfHosted so it stays
 // consistent with the repo layer; everything else stays local. `domains` and
 // `addresses` repos (src/db/domains.ts, src/db/addresses.ts + address-lifecycle)
-// route ALL reads/writes to the cloud store, so their id-resolution MUST also
-// resolve against the cloud dataset — otherwise a flipped machine resolves ids
+// route ALL reads/writes to the selfHosted store, so their id-resolution MUST also
+// resolve against the selfHosted dataset — otherwise a flipped machine resolves ids
 // against its empty local island (the split-brain bug this set exists to close).
-const CLOUD_BACKED_RESOURCES = new Set(["domains", "addresses"]);
+const SELF_HOSTED_BACKED_RESOURCES = new Set(["domains", "addresses"]);
 
 function isInMemoryDb(path: string): boolean {
   return path === ":memory:" || path.startsWith("file::memory:");
@@ -1557,7 +1557,7 @@ const MIGRATIONS = [
   INSERT OR IGNORE INTO _migrations (id) VALUES (19);
   `,
 
-  // Migration 20: tenancy — owners (human|agent) + address ownership/administration.
+  // Migration 20: ownership — owners (human|agent) + address ownership/administration.
   `
   CREATE TABLE IF NOT EXISTS owners (
     id TEXT PRIMARY KEY,
@@ -1699,7 +1699,7 @@ const MIGRATIONS = [
   `,
 
   // Migration 30: hot-path composite indexes for bounded list views.
-  // These match the query shapes used by Mailery UI, MCP list/export tools, and
+  // These match the query shapes used by Emails UI, MCP list/export tools, and
   // diagnostics: equality filters first, then the timestamp used for ordering.
   `
   CREATE INDEX IF NOT EXISTS idx_inbound_sent_read_arch_recv ON inbound_emails(is_sent, is_read, is_archived, received_at);
@@ -1758,7 +1758,7 @@ const MIGRATIONS = [
   INSERT OR IGNORE INTO _migrations (id) VALUES (35);
   `,
 
-  // Migration 36: normalized labels plus hot spam/trash flags for Mailery UI.
+  // Migration 36: normalized labels plus hot spam/trash flags for Emails UI.
   // Folder counts/listing must not json_each(label_ids_json) on large stores.
   `
   ALTER TABLE inbound_emails ADD COLUMN is_spam INTEGER NOT NULL DEFAULT 0;
@@ -1790,7 +1790,7 @@ const MIGRATIONS = [
   INSERT OR IGNORE INTO _migrations (id) VALUES (37);
   `,
 
-  // Migration 38: persistent Mailery email agents and per-email run ledger.
+  // Migration 38: persistent Emails email agents and per-email run ledger.
   `
   CREATE TABLE IF NOT EXISTS email_agent_settings (
     agent_key TEXT PRIMARY KEY,
@@ -1923,6 +1923,42 @@ const MIGRATIONS = [
   CREATE INDEX IF NOT EXISTS idx_domains_readiness ON domains(ownership_status, inbound_status, outbound_status);
   INSERT OR IGNORE INTO _migrations (id) VALUES (45);
   `,
+
+  // Migration 46: additive Emails rename bridge. Historical migration bodies
+  // above remain byte-for-byte compatible with released Mailery databases.
+  `
+  INSERT OR IGNORE INTO mailboxes (id, address, display_name, owner_id, status, created_at, updated_at)
+  SELECT 'mbx:legacy-inbound@local.emails', 'legacy-inbound@local.emails', display_name,
+         owner_id, status, created_at, datetime('now')
+    FROM mailboxes
+   WHERE id = 'mbx:legacy-inbound@local.mailery';
+
+  UPDATE mail_folders
+     SET mailbox_id = 'mbx:legacy-inbound@local.emails'
+   WHERE mailbox_id = 'mbx:legacy-inbound@local.mailery';
+  UPDATE mailbox_sources
+     SET mailbox_id = 'mbx:legacy-inbound@local.emails'
+   WHERE mailbox_id = 'mbx:legacy-inbound@local.mailery';
+  UPDATE mailbox_message_state
+     SET mailbox_id = 'mbx:legacy-inbound@local.emails'
+   WHERE mailbox_id = 'mbx:legacy-inbound@local.mailery';
+  UPDATE inbound_emails
+     SET primary_mailbox_id = 'mbx:legacy-inbound@local.emails'
+   WHERE primary_mailbox_id = 'mbx:legacy-inbound@local.mailery';
+  DELETE FROM mailboxes WHERE id = 'mbx:legacy-inbound@local.mailery';
+
+  UPDATE domains SET domain_type = 'self_hosted' WHERE domain_type = 'tenant';
+  UPDATE domains SET source_of_truth = 'postgres' WHERE source_of_truth = 'cloud';
+
+  CREATE TABLE IF NOT EXISTS webhook_receipts (
+    provider TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    resource_id TEXT,
+    completed_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (provider, event_id)
+  );
+  INSERT OR IGNORE INTO _migrations (id) VALUES (46);
+  `,
 ];
 
 let _db: Database | null = null;
@@ -2020,6 +2056,13 @@ function ensureSchema(db: Database): void {
   ensureColumn("ALTER TABLE addresses ADD COLUMN next_check_at TEXT");
 
   const ensureProvTable = (sql: string) => { try { db.exec(sql); } catch {} };
+  ensureProvTable(`CREATE TABLE IF NOT EXISTS webhook_receipts (
+    provider TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    resource_id TEXT,
+    completed_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (provider, event_id)
+  )`);
   ensureProvTable(`CREATE TABLE IF NOT EXISTS provisioning_events (
     id TEXT PRIMARY KEY,
     entity_type TEXT NOT NULL,
@@ -2589,10 +2632,10 @@ export function resolvePartialId(db: Database, table: string, partialId: string)
     throw new Error(`resolvePartialId: refusing unknown table '${table}'`);
   }
 
-  // Cloud (self_hosted) mode: resolve ids for cloud-backed resources against the
-  // cloud HTTP API so CLI helpers (remove/get by id) operate on the cloud dataset.
-  if (CLOUD_BACKED_RESOURCES.has(table) && isCloudMode()) {
-    const store = cloudStoreFor(table);
+  // Self-hosted (self_hosted) mode: resolve ids for selfHosted-backed resources against the
+  // selfHosted HTTP API so CLI helpers (remove/get by id) operate on the selfHosted dataset.
+  if (SELF_HOSTED_BACKED_RESOURCES.has(table) && isSelfHostedMode()) {
+    const store = selfHostedStoreFor(table);
     if (store) {
       if (partialId.length >= 36) {
         return store.get(partialId) ? partialId : null;
@@ -2623,11 +2666,11 @@ export function listPartialIdMatches(db: Database, table: string, partialId: str
   }
   const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 6;
 
-  // Cloud (self_hosted) mode: match ambiguity previews against the cloud dataset
-  // for cloud-backed resources so id resolution never leaks or consults the
-  // local SQLite store when the client is routed to the cloud HTTP API.
-  if (CLOUD_BACKED_RESOURCES.has(table) && isCloudMode()) {
-    const store = cloudStoreFor(table);
+  // Self-hosted (self_hosted) mode: match ambiguity previews against the selfHosted dataset
+  // for selfHosted-backed resources so id resolution never leaks or consults the
+  // local SQLite store when the client is routed to the selfHosted HTTP API.
+  if (SELF_HOSTED_BACKED_RESOURCES.has(table) && isSelfHostedMode()) {
+    const store = selfHostedStoreFor(table);
     if (store) {
       return store
         .list({ limit: 1000 })

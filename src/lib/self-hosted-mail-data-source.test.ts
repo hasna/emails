@@ -4,10 +4,13 @@ import {
   type SelfHostedFetch,
   resolveSelfHostedMailDataSource,
 } from "./self-hosted-mail-data-source.js";
-import { resetCloudConfigCache } from "../db/cloud-store.js";
+import { resetSelfHostedConfigCache } from "../db/self-hosted-store.js";
 import { resetMailDataSource, resolveMailDataSource } from "./mail-data-source.js";
+import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-// A self-hosted /v1 message row (snake_case, as mailery.hasna.xyz returns).
+// A self-hosted /v1 message row (snake_case, as the API returns).
 function v1(id: string, over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     id,
@@ -49,9 +52,10 @@ function fakeServe(initial: Array<Record<string, unknown>>): { fetchImpl: SelfHo
       const offset = Number(u.searchParams.get("offset") ?? "0");
       return ordered.slice(offset, offset + limit);
     };
-    const idMatch = u.pathname.match(/^\/v1\/messages\/(.+)$/);
+    const attachmentMatch = u.pathname.match(/^\/v1\/messages\/(.+)\/attachments\/(\d+)$/);
+    const idMatch = u.pathname.match(/^\/v1\/messages\/([^/]+)$/);
     if (u.pathname === "/v1/messages" && method === "GET") return ok({ messages: list() });
-    if (u.pathname === "/v1/messages" && method === "POST") {
+    if (u.pathname === "/v1/messages/send" && method === "POST") {
       const body = JSON.parse(String(init.body));
       posted.push(body);
       const id = `posted-${posted.length}`;
@@ -59,11 +63,40 @@ function fakeServe(initial: Array<Record<string, unknown>>): { fetchImpl: SelfHo
       rows.set(id, rec);
       return ok({ message: rec }, 201);
     }
+    if (attachmentMatch && method === "GET") {
+      const id = decodeURIComponent(attachmentMatch[1]!);
+      const row = rows.get(id);
+      const index = Number(attachmentMatch[2]);
+      const metadata = Array.isArray(row?.["attachments"]) ? row!["attachments"] as Record<string, unknown>[] : [];
+      const contents = Array.isArray(row?.["_attachment_contents"]) ? row!["_attachment_contents"] as string[] : [];
+      return metadata[index] && contents[index]
+        ? ok({ attachment: { ...metadata[index], content_base64: contents[index] } })
+        : ok({ error: "not found" }, 404);
+    }
     if (idMatch) {
       const id = decodeURIComponent(idMatch[1]!);
       if (method === "GET") return rows.has(id) ? ok({ message: rows.get(id) }) : ok({ error: "not found" }, 404);
       if (method === "DELETE") { const had = rows.delete(id); deleted.push(id); return had ? ok({ deleted: true }) : ok({ error: "not found" }, 404); }
-      if (method === "PATCH") return rows.has(id) ? ok({ message: rows.get(id) }) : ok({ error: "not found" }, 404);
+      if (method === "PATCH") {
+        const row = rows.get(id);
+        if (!row) return ok({ error: "not found" }, 404);
+        const body = JSON.parse(String(init.body ?? "{}")) as Record<string, unknown>;
+        if (typeof body["is_read"] === "boolean") row["is_read"] = body["is_read"];
+        if (typeof body["is_starred"] === "boolean") row["is_starred"] = body["is_starred"];
+        const labels = Array.isArray(row["labels"]) ? [...row["labels"] as string[]] : [];
+        if (typeof body["archived"] === "boolean") {
+          const next = labels.filter((label) => label !== "archived");
+          if (body["archived"]) next.push("archived");
+          row["labels"] = next;
+        }
+        if (typeof body["add_label"] === "string" && !labels.includes(body["add_label"])) {
+          row["labels"] = [...labels, body["add_label"]];
+        }
+        if (typeof body["remove_label"] === "string") {
+          row["labels"] = labels.filter((label) => label !== body["remove_label"]);
+        }
+        return ok({ message: row });
+      }
     }
     return ok({ error: "not found" }, 404);
   };
@@ -72,20 +105,27 @@ function fakeServe(initial: Array<Record<string, unknown>>): { fetchImpl: SelfHo
 
 function make(rows: Array<Record<string, unknown>>): { ds: SelfHostedMailDataSource; serve: ReturnType<typeof fakeServe> } {
   const serve = fakeServe(rows);
-  const ds = new SelfHostedMailDataSource({ baseUrl: "https://mailery.hasna.xyz/v1", apiKey: "test-key", fetchImpl: serve.fetchImpl });
+  const ds = new SelfHostedMailDataSource({ baseUrl: "https://emails.example/v1", apiKey: "test-key", fetchImpl: serve.fetchImpl });
   return { ds, serve };
 }
 
 afterEach(() => {
   resetMailDataSource();
-  resetCloudConfigCache();
-  delete process.env["HASNA_MAILERY_API_URL"];
-  delete process.env["HASNA_MAILERY_API_KEY"];
-  delete process.env["MAILERY_API_URL"];
-  delete process.env["MAILERY_API_KEY"];
+  resetSelfHostedConfigCache();
+  delete process.env["EMAILS_MODE"];
+  delete process.env["HASNA_EMAILS_MODE"];
+  delete process.env["EMAILS_SELF_HOSTED_URL"];
+  delete process.env["EMAILS_SELF_HOSTED_API_KEY"];
 });
 
 describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
+  it("rejects remote plaintext HTTP before retaining an API key", () => {
+    expect(() => new SelfHostedMailDataSource({ baseUrl: "http://emails.example/v1", apiKey: "must-not-leak" }))
+      .toThrow(/requires HTTPS/);
+    expect(() => new SelfHostedMailDataSource({ baseUrl: "http://localhost:8080/v1", apiKey: "local" }))
+      .not.toThrow();
+  });
+
   it("lists inbox mapping snake_case rows to TuiMessage, newest first", async () => {
     const { ds } = make([v1("2"), v1("5"), v1("3")]);
     const msgs = await ds.listMailbox("inbox");
@@ -139,7 +179,7 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     expect(body?.cc).toBe("cc@x.com");
   });
 
-  it("sends via POST /messages and deletes via DELETE", async () => {
+  it("sends via POST /messages/send and deletes via DELETE", async () => {
     const { ds, serve } = make([]);
     const res = await ds.send({ to: "a@x.com, b@x.com", from: "me@hasna.com", subject: "hi", body: "yo", markdown: false });
     expect(res.id).toBe("posted-1");
@@ -158,10 +198,56 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     expect(cands.map((c) => c.id)).toEqual(["2"]);
   });
 
-  it("throws honestly for writes the self-hosted serve cannot persist yet", async () => {
-    const { ds } = make([v1("2")]);
-    await expect(ds.setStarred("2", true)).rejects.toThrow(/not yet supported/);
-    await expect(ds.addLabel("2", "x")).rejects.toThrow(/not yet supported/);
+  it("persists mailbox mutations through the self-hosted serve", async () => {
+    const { ds, serve } = make([v1("2")]);
+    await ds.setRead("2", true);
+    await ds.setStarred("2", true);
+    expect(await ds.addLabel("2", "x")).toContain("x");
+    await ds.setArchived("2", true);
+    expect(serve.rows.get("2")).toMatchObject({ is_read: true, is_starred: true });
+    expect(serve.rows.get("2")?.["labels"]).toEqual(expect.arrayContaining(["x", "archived"]));
+    expect(await ds.removeLabel("2", "x")).not.toContain("x");
+  });
+
+  it("supports explicit-id bulk mutations and rejects scheduled sends honestly", async () => {
+    const { ds, serve } = make([v1("2"), v1("3")]);
+    const result = await ds.bulk({ action: "read", ids: ["2", "3"] });
+    expect(result).toMatchObject({ affected: 2, matched: 2 });
+    expect(serve.rows.get("2")?.["is_read"]).toBe(true);
+    expect(serve.rows.get("3")?.["is_read"]).toBe(true);
+    await expect(ds.send({
+      to: "a@example.com",
+      from: "me@example.com",
+      subject: "later",
+      body: "body",
+      scheduledAt: "2030-01-01T00:00:00.000Z",
+    })).rejects.toThrow(/Scheduled send is not supported/);
+    expect(serve.posted).toHaveLength(0);
+  });
+
+  it("retrieves attachments into a hashed, traversal-safe directory with mode 0600", async () => {
+    const home = mkdtempSync(join(tmpdir(), "emails-attachment-test-"));
+    const previousHome = process.env["HOME"];
+    process.env["HOME"] = home;
+    try {
+      const id = "..%2F..%2Foperator-secret";
+      const { ds } = make([v1(id, {
+        attachments: [{ filename: "../../secret.txt", content_type: "text/plain", size: 5 }],
+        _attachment_contents: [Buffer.from("hello").toString("base64")],
+      })]);
+      const paths = await ds.getAttachmentPaths(id);
+      expect(paths).toHaveLength(1);
+      const localPath = paths[0]!.local_path;
+      expect(localPath.startsWith(join(home, ".hasna", "emails", "attachments", "self-hosted"))).toBe(true);
+      expect(localPath).not.toContain("operator-secret");
+      expect(localPath).not.toContain("../");
+      expect(readFileSync(localPath, "utf8")).toBe("hello");
+      expect(statSync(localPath).mode & 0o777).toBe(0o600);
+    } finally {
+      if (previousHome === undefined) delete process.env["HOME"];
+      else process.env["HOME"] = previousHome;
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   it("fails fast and loud (never hangs) when the serve stalls past the timeout", async () => {
@@ -180,7 +266,7 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
         }
       }) as unknown as ReturnType<SelfHostedFetch>;
     const ds = new SelfHostedMailDataSource({
-      baseUrl: "https://mailery.hasna.xyz/v1",
+      baseUrl: "https://emails.example/v1",
       apiKey: "test-key",
       fetchImpl: hangingFetch,
       timeoutMs: 25,
@@ -193,27 +279,21 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
 });
 
 describe("resolveMailDataSource — self-hosted seam selection", () => {
-  it("selects the self-hosted source only when HASNA_MAILERY_* creds are present", () => {
-    // The flip contract sets creds and NO mode var; an explicit `local` mode would
-    // (correctly) force local, so clear any inherited local override for this case.
-    delete process.env["MAILERY_MODE"];
-    delete process.env["HASNA_EMAILS_MODE"];
-    delete process.env["MAILERY_STORAGE_MODE"];
-    delete process.env["HASNA_EMAILS_STORAGE_MODE"];
-    process.env["HASNA_MAILERY_API_URL"] = "https://mailery.hasna.xyz";
-    process.env["HASNA_MAILERY_API_KEY"] = "k";
-    resetCloudConfigCache();
+  it("selects self_hosted only from explicit mode, URL, and key", () => {
+    process.env["EMAILS_MODE"] = "self_hosted";
+    process.env["EMAILS_SELF_HOSTED_URL"] = "https://emails.example";
+    process.env["EMAILS_SELF_HOSTED_API_KEY"] = "k";
+    resetSelfHostedConfigCache();
     resetMailDataSource();
     const ds = resolveMailDataSource();
     expect(ds.constructor.name).toBe("SelfHostedMailDataSource");
-    expect(ds.mode).toBe("cloud");
+    expect(ds.mode).toBe("self_hosted");
     expect(resolveSelfHostedMailDataSource()).toBeInstanceOf(SelfHostedMailDataSource);
   });
 
-  it("does NOT engage the self-hosted seam for the bare SaaS MAILERY_API_URL", () => {
-    process.env["MAILERY_API_URL"] = "https://mailery.co";
-    process.env["MAILERY_API_KEY"] = "k";
-    resetCloudConfigCache();
+  it("does not infer self_hosted from credentials when mode is local", () => {
+    process.env["EMAILS_MODE"] = "local";
+    resetSelfHostedConfigCache();
     resetMailDataSource();
     expect(resolveSelfHostedMailDataSource()).toBeNull();
   });

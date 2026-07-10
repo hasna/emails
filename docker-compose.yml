@@ -1,42 +1,69 @@
-# Local run of the Mailery self_hosted service against a Postgres.
-#
-#   HASNA_MAILERY_DATABASE_URL=postgres://... \
-#   HASNA_MAILERY_API_SIGNING_KEY=$(openssl rand -hex 32) \
-#   docker compose up
-#
-# In cloud mode the service is PURE REMOTE (Amendment A1): it reads/writes the
-# Postgres you point it at. A local `db` service is included for convenience;
-# point HASNA_MAILERY_DATABASE_URL at it or at your own Postgres.
+name: emails-self-hosted
+
 services:
-  mailery-serve:
+  emails-serve:
     build:
       context: .
       dockerfile: Dockerfile
-    platform: linux/arm64
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
     ports:
-      - "8080:8080"
+      - "127.0.0.1:${EMAILS_PORT:-8080}:8080"
     environment:
+      EMAILS_MODE: self_hosted
+      EMAILS_DATABASE_URL: "postgresql://${EMAILS_POSTGRES_RUNTIME_USER:-emails_runtime}:${EMAILS_POSTGRES_RUNTIME_PASSWORD:?set EMAILS_POSTGRES_RUNTIME_PASSWORD}@db:5432/${EMAILS_POSTGRES_DB:-emails}?sslmode=disable"
+      EMAILS_API_SIGNING_KEY: "${EMAILS_API_SIGNING_KEY:?set EMAILS_API_SIGNING_KEY (32+ characters)}"
+      EMAILS_SEND_PROVIDER: "${EMAILS_SEND_PROVIDER:-ses}"
+      EMAILS_AWS_REGION: "${EMAILS_AWS_REGION:-us-east-1}"
+      RESEND_API_KEY: "${RESEND_API_KEY:-}"
+      RESEND_WEBHOOK_SECRET: "${RESEND_WEBHOOK_SECRET:-}"
+      EMAILS_SNS_TOPIC_ARNS: "${EMAILS_SNS_TOPIC_ARNS:-}"
+      EMAILS_AWS_ACCOUNT_IDS: "${EMAILS_AWS_ACCOUNT_IDS:-}"
+      HOST: 0.0.0.0
       PORT: "8080"
-      HOST: "0.0.0.0"
-      HASNA_MAILERY_STORAGE_MODE: "cloud"
-      HASNA_MAILERY_DATABASE_URL: "${HASNA_MAILERY_DATABASE_URL:-postgres://mailery:mailery@db:5432/mailery?sslmode=disable}"
-      HASNA_MAILERY_API_SIGNING_KEY: "${HASNA_MAILERY_API_SIGNING_KEY:?set HASNA_MAILERY_API_SIGNING_KEY}"
     depends_on:
       db:
         condition: service_healthy
-    # Apply migrations, then serve.
-    command: ["sh", "-c", "mailery db migrate && exec mailery-serve"]
+      emails-migrate:
+        condition: service_completed_successfully
+    command: ["bun", "src/server/index.ts"]
+
+  emails-migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      EMAILS_MODE: self_hosted
+      EMAILS_DATABASE_URL: "postgresql://${EMAILS_POSTGRES_MIGRATOR_USER:-emails_migrator}:${EMAILS_POSTGRES_MIGRATOR_PASSWORD:?set EMAILS_POSTGRES_MIGRATOR_PASSWORD}@db:5432/${EMAILS_POSTGRES_DB:-emails}?sslmode=disable"
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["bun", "src/cli/index.tsx", "db", "migrate"]
+    restart: "no"
 
   db:
-    image: postgres:16-alpine
+    image: postgres:16.4-alpine3.20@sha256:5660c2cbfea50c7a9127d17dc4e48543eedd3d7a41a595a2dfa572471e37e64c
+    restart: unless-stopped
     environment:
-      POSTGRES_USER: mailery
-      POSTGRES_PASSWORD: mailery
-      POSTGRES_DB: mailery
-    ports:
-      - "5432:5432"
+      POSTGRES_USER: "${EMAILS_POSTGRES_MIGRATOR_USER:-emails_migrator}"
+      POSTGRES_PASSWORD: "${EMAILS_POSTGRES_MIGRATOR_PASSWORD:?set EMAILS_POSTGRES_MIGRATOR_PASSWORD}"
+      POSTGRES_DB: "${EMAILS_POSTGRES_DB:-emails}"
+      EMAILS_POSTGRES_RUNTIME_USER: "${EMAILS_POSTGRES_RUNTIME_USER:-emails_runtime}"
+      EMAILS_POSTGRES_RUNTIME_PASSWORD: "${EMAILS_POSTGRES_RUNTIME_PASSWORD:?set EMAILS_POSTGRES_RUNTIME_PASSWORD}"
+    volumes:
+      - emails-postgres:/var/lib/postgresql/data
+      - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U mailery"]
-      interval: 3s
+      test: ["CMD-SHELL", "pg_isready -U ${EMAILS_POSTGRES_MIGRATOR_USER:-emails_migrator} -d ${EMAILS_POSTGRES_DB:-emails}"]
+      interval: 5s
       timeout: 3s
       retries: 20
+      start_period: 10s
+
+volumes:
+  emails-postgres:

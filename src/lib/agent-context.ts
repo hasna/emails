@@ -11,7 +11,7 @@ import { domainInboundReadinessSignals } from "./domain-inbound-evidence.js";
 import { getInboundBuckets, loadConfig } from "./config.js";
 import { enrichAddresses, type EnrichedAddress } from "./address-ownership.js";
 import { resolveMailDataSource } from "./mail-data-source.js";
-import { resolveMaileryMode, type MaileryMode, type MaileryModeLabel, type MaileryModeSource } from "./mode.js";
+import { resolveEmailsMode, type EmailsMode, type EmailsModeLabel, type EmailsModeSource } from "./mode.js";
 import {
   listMailboxSources,
   listMailboxStatus,
@@ -26,9 +26,9 @@ const SOURCE_STATUS_LIMIT = 50;
 export interface EmailSystemStatus {
   generated_at: string;
   mode: {
-    current: MaileryMode;
-    label: MaileryModeLabel;
-    source: MaileryModeSource;
+    current: EmailsMode;
+    label: EmailsModeLabel;
+    source: EmailsModeSource;
     warning: string | null;
   };
   database: {
@@ -175,7 +175,7 @@ function domainSummary(db: Database): { total: number; send_ready: number; recei
   const domainIds = domains.map((domain) => domain.id);
   const domainProvisioning = listDomainProvisioningByIds(domainIds, db);
   const readyAddressesByDomain = listReadyAddressCountsByDomains(domainIds, db);
-  const mode = resolveMaileryMode();
+  const mode = resolveEmailsMode();
   let sendReady = 0;
   let receiveReady = 0;
   for (const domain of domains) {
@@ -225,7 +225,7 @@ function buildDomainReadiness(
   const domainIds = domains.map((domain) => domain.id);
   const domainProvisioning = listDomainProvisioningByIds(domainIds, db);
   const readyAddressesByDomain = listReadyAddressCountsByDomains(domainIds, db);
-  const mode = resolveMaileryMode();
+  const mode = resolveEmailsMode();
   return domains.map((domain) => {
     const readiness = assessDomainReadiness(domain, domainProvisioning.get(domain.id) ?? null, {
       ...domainInboundReadinessSignals(domain, mode),
@@ -258,7 +258,7 @@ function firstDomainFixCommand(
 }
 
 export function getEmailSystemStatus(db: Database = getDatabase()): EmailSystemStatus {
-  const mode = resolveMaileryMode();
+  const mode = resolveEmailsMode();
   const allProviders = listProviderSummaries(db);
   const providers = allProviders.filter((provider) => provider.type !== "gmail");
   const legacyGmailProviders = allProviders.filter((provider) => provider.type === "gmail");
@@ -362,7 +362,7 @@ export function getEmailSystemStatus(db: Database = getDatabase()): EmailSystemS
 }
 
 // The runtime status backs `emails status`, `emails agent context`, and the MCP
-// status resources/tools. In cloud mode the inbox/mailbox/source reads must come from
+// status resources/tools. In self_hosted mode the inbox/mailbox/source reads must come from
 // the API (not the empty local DB), so route those specific reads through the seam.
 // Provider/domain/address/provisioning state stays local — that is local config, not
 // message data. In local mode the seam resolves to SQLite, so the result is unchanged.
@@ -371,7 +371,7 @@ export async function getEmailSystemStatusForRuntime(
 ): Promise<EmailSystemStatus> {
   const status = getEmailSystemStatus(db);
   const ds = resolveMailDataSource();
-  if (ds.mode !== "cloud") return status;
+  if (ds.mode !== "self_hosted") return status;
 
   const [counts, mailboxes, sources] = await Promise.all([
     ds.mailboxCounts(),

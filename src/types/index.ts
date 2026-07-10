@@ -306,8 +306,8 @@ export interface UpsertMailboxMessageStateInput {
 
 // Domain types
 export type DnsStatus = "pending" | "verified" | "failed";
-export type DomainType = "system" | "tenant" | "self_hosted" | "local_only";
-export type DomainSourceOfTruth = "local" | "postgres" | "cloud";
+export type DomainType = "system" | "self_hosted" | "local_only";
+export type DomainSourceOfTruth = "local" | "postgres";
 export type DomainOwnershipStatus = "pending" | "verified" | "failed";
 export type DomainRouteStatus = "pending" | "ready" | "disabled" | "failed";
 export type DomainMonitoringStatus = "none" | "monitoring" | "clean" | "risky";

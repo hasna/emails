@@ -1,10 +1,10 @@
-/* Mailery web UI — 3-pane mail client (folders → threads → reader).
+/* Emails web UI — 3-pane mail client (folders → threads → reader).
  *
  * Dual-mode, exactly like open-notes:
  *   - In the native macOS app, the WKWebView host injects window.__BOOT__ =
  *     {threads, folders, thisAddress} at document-start and exposes the `mail` message
  *     handler. Mutations post to window.webkit.messageHandlers.mail; the host performs
- *     them via the `mailery` CLI and calls window.HasnaMail.hydrate(...) with fresh data.
+ *     them via the `emails` CLI and calls window.HasnaMail.hydrate(...) with fresh data.
  *   - In a plain browser (screenshots / dev), there is no bridge, so we fall back to
  *     sampleBoot() and apply mutations optimistically in-memory only.
  */
@@ -548,12 +548,12 @@
   }
   function initTheme() {
     let saved = "system";
-    try { saved = localStorage.getItem("mailery-theme") || "system"; } catch (e) {}
+    try { saved = localStorage.getItem("emails-theme") || "system"; } catch (e) {}
     applyTheme(saved);
     document.querySelectorAll(".theme-card").forEach((c) => {
       c.addEventListener("click", () => {
         const th = c.getAttribute("data-theme");
-        try { localStorage.setItem("mailery-theme", th); } catch (e) {}
+        try { localStorage.setItem("emails-theme", th); } catch (e) {}
         applyTheme(th);
       });
     });
@@ -611,11 +611,11 @@
     }, over);
     const threads = [
       {
-        id: "t1", subject: "Welcome to Mailery", participants: ["Alumia Team <team@alumia.co>", "andrei@hasna.com"],
-        snippet: "Thanks for trying Mailery — here's how to get started with your inbox.",
+        id: "t1", subject: "Welcome to Emails", participants: ["Alumia Team <team@alumia.co>", "andrei@hasna.com"],
+        snippet: "Thanks for trying Emails — here's how to get started with your inbox.",
         ts: now - 3600000, date: "", unread: 1, starred: false, hasAttachments: false,
         folders: { inbox: true, sent: false, archive: false, spam: false, trash: false, starred: false },
-        messages: [mk({ id: "m1", from: "Alumia Team <team@alumia.co>", to: ["andrei@hasna.com"], subject: "Welcome to Mailery", textBody: "Thanks for trying Mailery — here's how to get started with your inbox.\n\nReply to this email to test the round-trip.", snippet: "Thanks for trying Mailery", ts: now - 3600000, isRead: false })],
+        messages: [mk({ id: "m1", from: "Alumia Team <team@alumia.co>", to: ["andrei@hasna.com"], subject: "Welcome to Emails", textBody: "Thanks for trying Emails — here's how to get started with your inbox.\n\nReply to this email to test the round-trip.", snippet: "Thanks for trying Emails", ts: now - 3600000, isRead: false })],
       },
       {
         id: "t2", subject: "Invoice #1042", participants: ["Billing <billing@vendor.com>", "andrei@hasna.com"],

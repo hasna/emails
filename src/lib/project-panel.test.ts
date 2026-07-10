@@ -3,7 +3,7 @@ import { ProjectPanelSchema, SCHEMA_IDS } from "@hasna/contracts";
 import { closeDatabase, resetDatabase } from "../db/database.js";
 import { createProvider } from "../db/providers.js";
 import { storeInboundEmail } from "../db/inbound.js";
-import { createMaileryProjectPanel } from "./project-panel.js";
+import { createEmailsProjectPanel } from "./project-panel.js";
 
 const savedDbPath = process.env["EMAILS_DB_PATH"];
 
@@ -18,7 +18,7 @@ afterEach(() => {
   else process.env["EMAILS_DB_PATH"] = savedDbPath;
 });
 
-describe("createMaileryProjectPanel", () => {
+describe("createEmailsProjectPanel", () => {
   it("emits a contract-valid mailbox panel without email body or credential leakage", () => {
     const provider = createProvider({
       name: "Private SES",
@@ -44,16 +44,16 @@ describe("createMaileryProjectPanel", () => {
       received_at: "2026-06-29T00:00:00.000Z",
     });
 
-    const panel = createMaileryProjectPanel("Swiss Bank Account", { limit: 5 });
+    const panel = createEmailsProjectPanel("Swiss Bank Account", { limit: 5 });
     const serialized = JSON.stringify(panel);
 
     expect(ProjectPanelSchema.safeParse(panel).success).toBe(true);
     expect(panel.schema).toBe(SCHEMA_IDS.projectPanel);
     expect(panel.projectId).toBe("swiss-bank-account");
-    expect(panel.provider.kind).toBe("mailery");
+    expect(panel.provider.kind).toBe("custom");
     expect(panel.metrics.find((metric) => metric.id === "providers_active")?.value).toBe(1);
     expect(panel.metrics.find((metric) => metric.id === "inbox_unread")?.value).toBe(1);
-    expect(panel.items.some((item) => item.id === inbound.id && item.resourceRefs.some((ref) => ref.uri === `mailery://inbound/${inbound.id}`))).toBe(true);
+    expect(panel.items.some((item) => item.id === inbound.id && item.resourceRefs.some((ref) => ref.uri === `integration://emails/inbound/${inbound.id}`))).toBe(true);
     expect(serialized).toContain("Potential contract");
     expect(serialized).not.toContain("Sensitive body text");
     expect(serialized).not.toContain("provider-secret-value");
@@ -61,7 +61,7 @@ describe("createMaileryProjectPanel", () => {
   });
 
   it("emits empty state for an unconfigured workspace", () => {
-    const panel = createMaileryProjectPanel("Empty Mail Project");
+    const panel = createEmailsProjectPanel("Empty Mail Project");
 
     expect(ProjectPanelSchema.safeParse(panel).success).toBe(true);
     expect(panel.projectId).toBe("empty-mail-project");

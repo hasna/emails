@@ -37,7 +37,7 @@ export interface BrowserPlanIdentityStore {
 }
 
 export interface BrowserPlanIdentitySummary {
-  source: "mailery-owner" | "open-identities" | "fallback";
+  source: "emails-owner" | "open-identities" | "fallback";
   id: string | null;
   external_id: string | null;
   identifier: string | null;
@@ -212,7 +212,7 @@ export function defaultBrowserPlanIdentityStorePath(): string {
 }
 
 export function detectedBrowserPlanMachineId(): ResolvedMachineId {
-  const envValue = (process.env["MAILERY_MACHINE_ID"] || process.env["MACHINE_ID"] || "").trim();
+  const envValue = (process.env["EMAILS_MACHINE_ID"] || process.env["MACHINE_ID"] || "").trim();
   if (envValue) return { id: envValue, source: "env" };
 
   const host = hostname().split(".")[0]?.trim().toLowerCase() ?? "";
@@ -231,12 +231,12 @@ export function resolveBrowserPlanMachineId(
   if (opts.allowRequestedWhenUnknown !== false) return { id: normalizedRequested, source: "requested" };
   if (detected.source === "unknown") {
     throw new BrowserPlanMachineMismatchError(
-      `Cannot assert BrowserPlan machine '${normalizedRequested}' because this Mailery process has no MAILERY_MACHINE_ID/MACHINE_ID and hostname is not a fleet machine id`,
+      `Cannot assert BrowserPlan machine '${normalizedRequested}' because this Emails process has no EMAILS_MACHINE_ID/MACHINE_ID and hostname is not a managed machine id`,
     );
   }
   if (detected.id !== normalizedRequested) {
     throw new BrowserPlanMachineMismatchError(
-      `BrowserPlan machine assertion '${normalizedRequested}' does not match local Mailery machine '${detected.id}'`,
+      `BrowserPlan machine assertion '${normalizedRequested}' does not match local Emails machine '${detected.id}'`,
     );
   }
   return detected;
@@ -304,7 +304,7 @@ function identityFromOwner(address: EnrichedAddress): BrowserPlanIdentitySummary
   const owner = address.owner;
   const derived = deriveBrowserPlanIdentityFromEmail(owner.contact_email || address.email);
   return {
-    source: "mailery-owner",
+    source: "emails-owner",
     id: owner.id,
     external_id: owner.external_id,
     identifier: null,
@@ -609,7 +609,7 @@ function chooseReservationAddress(
     if (openIdentityMatches(opts.identity, openIdentity)) return address;
   }
   if (fallback) return fallback;
-  throw new BrowserPlanCapacityError("No unowned receive-ready Mailery address is available to reserve");
+  throw new BrowserPlanCapacityError("No unowned receive-ready Emails address is available to reserve");
 }
 
 export function reserveBrowserPlanAddress(opts: BrowserPlanReserveOptions): BrowserPlanReservationResult {

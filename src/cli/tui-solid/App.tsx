@@ -5,7 +5,7 @@ import type { Mailbox } from "../tui/data.js";
 import { copyTextToClipboardAsync } from "../tui/clipboard.js";
 import { startEventLoopWatchdog } from "../tui/watchdog.js";
 import { ThemeProvider, useTheme } from "./context/theme.js";
-import { MaileryProvider, useMailery } from "./context/mailery-state.js";
+import { EmailsProvider, useEmails } from "./context/emails-state.js";
 import { ToastProvider, ToastViewport, useToast } from "./context/toast.js";
 import { DialogProvider, DialogViewport } from "./context/dialog.js";
 import { CommandProvider } from "./context/commands.js";
@@ -13,7 +13,7 @@ import { Sidebar, sidebarWidth } from "./component/sidebar.js";
 import { MailboxRoute } from "./component/mailbox.js";
 import { ReaderRoute } from "./component/reader.js";
 import { ComposeWindow } from "./component/compose.js";
-import { MaileryDialogs } from "./component/dialogs.js";
+import { EmailsDialogs } from "./component/dialogs.js";
 import { DomainsRoute } from "./routes/workspace.js";
 import { useStaticBindings } from "./context/keymap.js";
 
@@ -30,12 +30,12 @@ function RuntimeWatchdog() {
 }
 
 function RoutedContent() {
-  const mailery = useMailery();
+  const emails = useEmails();
   return (
     <Switch fallback={<MailboxRoute />}>
-      <Match when={mailery.state.route === "mailbox"}><MailboxRoute /></Match>
-      <Match when={mailery.state.route === "reader"}><ReaderRoute /></Match>
-      <Match when={mailery.state.route === "domains"}><DomainsRoute /></Match>
+      <Match when={emails.state.route === "mailbox"}><MailboxRoute /></Match>
+      <Match when={emails.state.route === "reader"}><ReaderRoute /></Match>
+      <Match when={emails.state.route === "domains"}><DomainsRoute /></Match>
     </Switch>
   );
 }
@@ -80,7 +80,7 @@ function AppShell() {
         <RoutedContent />
       </box>
       <ComposeWindow />
-      <MaileryDialogs />
+      <EmailsDialogs />
       <DialogViewport />
       <ToastViewport />
     </box>
@@ -88,9 +88,9 @@ function AppShell() {
 }
 
 function ThemedApp(props: ParentProps) {
-  const mailery = useMailery();
+  const emails = useEmails();
   return (
-    <ThemeProvider mode={mailery.state.settings.theme}>
+    <ThemeProvider mode={emails.state.settings.theme}>
       {props.children}
     </ThemeProvider>
   );
@@ -98,7 +98,7 @@ function ThemedApp(props: ParentProps) {
 
 export function App(props: AppProps) {
   return (
-    <MaileryProvider initialMailbox={props.initialMailbox}>
+    <EmailsProvider initialMailbox={props.initialMailbox}>
       <RuntimeWatchdog />
       <ThemedApp>
         <ToastProvider>
@@ -109,6 +109,6 @@ export function App(props: AppProps) {
           </DialogProvider>
         </ToastProvider>
       </ThemedApp>
-    </MaileryProvider>
+    </EmailsProvider>
   );
 }

@@ -41,7 +41,7 @@ describe("config", () => {
   });
 
   it("stores config in a private directory and file", () => {
-    saveConfig({ cloud_session_token: "secret-session", cloud_api_key: "secret-key" });
+    saveConfig({ resend_api_key: "secret-key" });
     const dirMode = statSync(join(TMP_HOME, ".hasna", "emails")).mode & 0o777;
     const fileMode = statSync(join(TMP_HOME, ".hasna", "emails", "config.json")).mode & 0o777;
     expect(dirMode).toBe(0o700);
@@ -52,11 +52,11 @@ describe("config", () => {
     const dir = join(TMP_HOME, ".hasna", "emails");
     const configPath = join(dir, "config.json");
     mkdirSync(dir, { recursive: true, mode: 0o755 });
-    writeFileSync(configPath, JSON.stringify({ cloud_api_key: "secret-key" }), { mode: 0o644 });
+    writeFileSync(configPath, JSON.stringify({ resend_api_key: "secret-key" }), { mode: 0o644 });
     chmodSync(dir, 0o755);
     chmodSync(configPath, 0o644);
 
-    expect(loadConfig()["cloud_api_key"]).toBe("secret-key");
+    expect(loadConfig()["resend_api_key"]).toBe("secret-key");
     expect(statSync(dir).mode & 0o777).toBe(0o700);
     expect(statSync(configPath).mode & 0o777).toBe(0o600);
   });
@@ -150,9 +150,9 @@ describe("config", () => {
   });
 
   it("getInboundAttachmentStorageConfig defaults self-hosted attachments to S3 when a bucket is configured", () => {
-    const previousMode = process.env["MAILERY_MODE"];
+    const previousMode = process.env["EMAILS_MODE"];
     try {
-      process.env["MAILERY_MODE"] = "self_hosted";
+      process.env["EMAILS_MODE"] = "self_hosted";
       setConfigValue("inbound_s3_bucket", "self-hosted-inbound");
 
       expect(getInboundAttachmentStorageConfig()).toMatchObject({
@@ -162,15 +162,15 @@ describe("config", () => {
         s3_prefix: "emails",
       });
     } finally {
-      if (previousMode === undefined) delete process.env["MAILERY_MODE"];
-      else process.env["MAILERY_MODE"] = previousMode;
+      if (previousMode === undefined) delete process.env["EMAILS_MODE"];
+      else process.env["EMAILS_MODE"] = previousMode;
     }
   });
 
   it("getInboundAttachmentStorageConfig avoids local attachment files in self-hosted mode without a bucket", () => {
-    const previousMode = process.env["MAILERY_MODE"];
+    const previousMode = process.env["EMAILS_MODE"];
     try {
-      process.env["MAILERY_MODE"] = "self_hosted";
+      process.env["EMAILS_MODE"] = "self_hosted";
 
       expect(getInboundAttachmentStorageConfig()).toMatchObject({
         attachment_storage: "none",
@@ -178,15 +178,15 @@ describe("config", () => {
         s3_prefix: "emails",
       });
     } finally {
-      if (previousMode === undefined) delete process.env["MAILERY_MODE"];
-      else process.env["MAILERY_MODE"] = previousMode;
+      if (previousMode === undefined) delete process.env["EMAILS_MODE"];
+      else process.env["EMAILS_MODE"] = previousMode;
     }
   });
 
   it("getInboundAttachmentStorageConfig does not allow explicit local attachment storage in self-hosted mode", () => {
-    const previousMode = process.env["MAILERY_MODE"];
+    const previousMode = process.env["EMAILS_MODE"];
     try {
-      process.env["MAILERY_MODE"] = "self_hosted";
+      process.env["EMAILS_MODE"] = "self_hosted";
       setConfigValue("attachment_storage", "local");
       setConfigValue("attachment_s3_bucket", "self-hosted-attachments");
 
@@ -195,8 +195,8 @@ describe("config", () => {
         s3_bucket: "self-hosted-attachments",
       });
     } finally {
-      if (previousMode === undefined) delete process.env["MAILERY_MODE"];
-      else process.env["MAILERY_MODE"] = previousMode;
+      if (previousMode === undefined) delete process.env["EMAILS_MODE"];
+      else process.env["EMAILS_MODE"] = previousMode;
     }
   });
 
@@ -222,9 +222,9 @@ describe("config", () => {
   });
 
   it("getInboundAttachmentStorageConfig fails closed for explicit S3 storage without a bucket in self-hosted mode", () => {
-    const previousMode = process.env["MAILERY_MODE"];
+    const previousMode = process.env["EMAILS_MODE"];
     try {
-      process.env["MAILERY_MODE"] = "self_hosted";
+      process.env["EMAILS_MODE"] = "self_hosted";
       setConfigValue("attachment_storage", "s3");
 
       expect(getInboundAttachmentStorageConfig()).toMatchObject({
@@ -233,8 +233,8 @@ describe("config", () => {
         s3_prefix: "emails",
       });
     } finally {
-      if (previousMode === undefined) delete process.env["MAILERY_MODE"];
-      else process.env["MAILERY_MODE"] = previousMode;
+      if (previousMode === undefined) delete process.env["EMAILS_MODE"];
+      else process.env["EMAILS_MODE"] = previousMode;
     }
   });
 

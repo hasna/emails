@@ -19,11 +19,11 @@ let previousMode: string | undefined;
 
 beforeEach(() => {
   previousHome = process.env["HOME"];
-  previousMode = process.env["MAILERY_MODE"];
-  tempHome = mkdtempSync(join(tmpdir(), "mailery-readiness-service-"));
+  previousMode = process.env["EMAILS_MODE"];
+  tempHome = mkdtempSync(join(tmpdir(), "emails-readiness-service-"));
   process.env["HOME"] = tempHome;
   process.env["EMAILS_DB_PATH"] = ":memory:";
-  process.env["MAILERY_MODE"] = "self_hosted";
+  process.env["EMAILS_MODE"] = "local";
   resetDatabase();
 });
 
@@ -32,8 +32,8 @@ afterEach(() => {
   delete process.env["EMAILS_DB_PATH"];
   if (previousHome === undefined) delete process.env["HOME"];
   else process.env["HOME"] = previousHome;
-  if (previousMode === undefined) delete process.env["MAILERY_MODE"];
-  else process.env["MAILERY_MODE"] = previousMode;
+  if (previousMode === undefined) delete process.env["EMAILS_MODE"];
+  else process.env["EMAILS_MODE"] = previousMode;
   rmSync(tempHome, { recursive: true, force: true });
 });
 
@@ -53,10 +53,10 @@ describe("domain readiness service", () => {
     expect(before.readiness.inbound_evidence_ready).toBe(false);
     expect(before.next_actions).toContain("emails domain adopt example.com --provider <provider>");
 
-    expect(() => enableDomainInboundReadiness(domain.id)).toThrow("Inbound cloud source is not configured");
+    expect(() => enableDomainInboundReadiness(domain.id)).toThrow("Inbound self_hosted source is not configured");
 
     registerS3Source({
-      bucket: "mailery-inbound",
+      bucket: "emails-inbound",
       prefix: "inbound/example.com/",
       region: "us-east-1",
       providerId: provider.id,

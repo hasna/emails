@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Mailery Dashboard</title>
+  <title>Emails Dashboard</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -118,7 +118,7 @@
 <body>
 
 <nav>
-  <h1>Mailery</h1>
+  <h1>Emails</h1>
   <button onclick="location.href='/open-source'">Open Source</button>
   <button class="active" onclick="showPage('overview',this)">Overview</button>
   <button onclick="showPage('providers',this)">Providers</button>
@@ -1344,7 +1344,7 @@ function renderInlineText(value) {
     const href = normalizeWebUrl(url);
     if (!href) return escapeHtml(label);
     const index = markdownLinks.push({ label, url: href }) - 1;
-    return `__MAILERY_LINK_${index}__`;
+    return `__EMAILS_LINK_${index}__`;
   });
   html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
   html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
@@ -1353,7 +1353,7 @@ function renderInlineText(value) {
     if (!href) return `${lead}${escapeHtml(url)}`;
     return `${lead}<a href="${escapeAttr(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(href)}</a>`;
   });
-  html = html.replace(/__MAILERY_LINK_(\d+)__/g, (_m, index) => {
+  html = html.replace(/__EMAILS_LINK_(\d+)__/g, (_m, index) => {
     const link = markdownLinks[Number(index)];
     return link ? `<a href="${escapeAttr(link.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(link.label)}</a>` : '';
   });

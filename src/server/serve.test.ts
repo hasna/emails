@@ -33,7 +33,7 @@ describe("resolveDashboardStaticPath", () => {
   });
 
   it("maps clean page routes to matching html files", () => {
-    const dir = mkdtempSync(join(tmpdir(), "mailery-dashboard-"));
+    const dir = mkdtempSync(join(tmpdir(), "emails-dashboard-"));
     tempRoots.push(dir);
     writeFileSync(join(dir, "open-source.html"), "ok");
     expect(resolveDashboardStaticPath(dir, "/open-source")).toBe(join(dir, "open-source.html"));
@@ -43,11 +43,11 @@ describe("resolveDashboardStaticPath", () => {
     expect(resolveDashboardStaticPath(root, "/%E0%A4%A")).toBeNull();
   });
 
-  it("ships Mailery dashboard branding and inbound controls", () => {
+  it("ships Emails dashboard branding and inbound controls", () => {
     const dashboardPath = resolve(import.meta.dir, "../../dashboard/index.html");
     const openSourcePath = resolve(import.meta.dir, "../../dashboard/open-source.html");
     const dashboard = readFileSync(dashboardPath, "utf8");
-    expect(dashboard).toContain("<title>Mailery Dashboard</title>");
+    expect(dashboard).toContain("<title>Emails Dashboard</title>");
     expect(dashboard).toContain("openInboundFilter()");
     expect(dashboard).toContain("openInboundGroup()");
     expect(dashboard).toContain("openInboundDigest()");
@@ -195,15 +195,15 @@ describe("dashboard API browser-origin protection", () => {
 
   it("allows an explicitly configured remote dashboard host", () => {
     const previous = process.env["EMAILS_DASHBOARD_ALLOWED_ORIGINS"];
-    process.env["EMAILS_DASHBOARD_ALLOWED_ORIGINS"] = "http://mailery.example:3900";
+    process.env["EMAILS_DASHBOARD_ALLOWED_ORIGINS"] = "http://emails.example:3900";
     try {
-      const req = new Request("http://mailery.example:3900/api/providers", {
-        headers: { Origin: "http://mailery.example:3900" },
+      const req = new Request("http://emails.example:3900/api/providers", {
+        headers: { Origin: "http://emails.example:3900" },
       });
 
       expect(dashboardApiOriginAccess(req, new URL(req.url))).toMatchObject({
         allowed: true,
-        origin: "http://mailery.example:3900",
+        origin: "http://emails.example:3900",
       });
     } finally {
       if (previous === undefined) {

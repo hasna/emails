@@ -11,9 +11,9 @@ import type { Database } from "../db/database.js";
 
 beforeEach(() => {
   process.env["EMAILS_DB_PATH"] = ":memory:";
-  delete process.env["MAILERY_MODE"];
+  delete process.env["EMAILS_MODE"];
   delete process.env["HASNA_EMAILS_MODE"];
-  delete process.env["HASNA_EMAILS_STORAGE_MODE"];
+  delete process.env["EMAILS_MODE"];
   delete process.env["EMAILS_STORAGE_MODE"];
   resetDatabase();
 });
@@ -21,9 +21,9 @@ beforeEach(() => {
 afterEach(() => {
   closeDatabase();
   delete process.env["EMAILS_DB_PATH"];
-  delete process.env["MAILERY_MODE"];
+  delete process.env["EMAILS_MODE"];
   delete process.env["HASNA_EMAILS_MODE"];
-  delete process.env["HASNA_EMAILS_STORAGE_MODE"];
+  delete process.env["EMAILS_MODE"];
   delete process.env["EMAILS_STORAGE_MODE"];
 });
 
@@ -81,21 +81,6 @@ describe("runDiagnostics", () => {
     expect(provCheck).toMatchObject({ status: "warn" });
     expect(provCheck?.message).toContain("legacy Gmail import-only provider(s) skipped");
     expect(gmailHealth).toBeUndefined();
-  });
-
-  it("treats local providers as optional in Mailery Cloud mode", async () => {
-    process.env["MAILERY_MODE"] = "cloud";
-
-    const checks = await runDiagnostics();
-
-    expect(checks.find((c) => c.name === "Mode")).toMatchObject({
-      status: "pass",
-      message: "Mailery Cloud mode (cloud)",
-    });
-    expect(checks.find((c) => c.name === "Providers")).toMatchObject({
-      status: "pass",
-      message: "Mailery Cloud mode; local SES/Resend/Sandbox providers are optional",
-    });
   });
 
   it("checks domain verification status", async () => {

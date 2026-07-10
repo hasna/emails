@@ -1,0 +1,89 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.13
+      - name: Install locked dependencies
+        run: bun install --frozen-lockfile
+      - name: Test in isolated local mode
+        run: |
+          tmp_home="$(mktemp -d)"
+          trap 'rm -rf "$tmp_home"' EXIT
+          env -u MAILERY_MODE -u HASNA_MAILERY_MODE \
+            -u MAILERY_STORAGE_MODE -u HASNA_MAILERY_STORAGE_MODE \
+            -u EMAILS_STORAGE_MODE -u HASNA_EMAILS_STORAGE_MODE \
+            -u MAILERY_API_URL -u MAILERY_API_KEY \
+            -u HASNA_MAILERY_API_URL -u HASNA_MAILERY_API_KEY \
+            -u MAILERY_CLOUD_API_URL -u MAILERY_CLOUD_TOKEN \
+            -u HASNA_MAILERY_ENV_FILE -u HASNA_EMAILS_MODE \
+            -u EMAILS_SELF_HOSTED_URL -u EMAILS_SELF_HOSTED_API_KEY \
+            -u CLOUDFLARE_API_TOKEN -u CLOUDFLARE_API_KEY \
+            -u CLOUDFLARE_EMAIL -u CLOUDFLARE_ACCOUNT_ID \
+            -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN \
+            -u AWS_PROFILE -u AWS_DEFAULT_PROFILE -u AWS_ACCOUNT_ID \
+            -u AWS_REGION -u AWS_DEFAULT_REGION -u AWS_SHARED_CREDENTIALS_FILE \
+            -u AWS_CONFIG_FILE -u AWS_WEB_IDENTITY_TOKEN_FILE -u AWS_ROLE_ARN \
+            -u AWS_ROLE_SESSION_NAME -u AWS_CONTAINER_CREDENTIALS_RELATIVE_URI \
+            -u AWS_CONTAINER_CREDENTIALS_FULL_URI -u AWS_CONTAINER_AUTHORIZATION_TOKEN \
+            -u EMAILS_AWS_REGION -u EMAILS_SES_AWS_PROFILE \
+            -u RESEND_API_KEY -u RESEND_WEBHOOK_SECRET \
+            -u CEREBRAS_API_KEY -u GROQ_API_KEY \
+            -u BRANDSIGHT_API_KEY -u BRANDSIGHT_API_SECRET -u BRANDSIGHT_CUSTOMER_ID \
+            -u BRAVE_API_KEY -u BRAVE_SEARCH_API_KEY \
+            AWS_EC2_METADATA_DISABLED=true \
+            HOME="$tmp_home" EMAILS_MODE=local EMAILS_DB_PATH=:memory: bun test
+      - name: Build
+        run: bun run build
+      - name: Verify generated SDK is committed
+        run: |
+          bun run scripts/generate-selfhost-sdk.ts
+          git diff --exit-code -- src/selfhost.ts
+      - name: Verify hosted-control-plane boundary
+        run: |
+          bun run no-cloud:source
+          bun run no-cloud:pack
+      - name: Diff hygiene
+        run: git diff --check
+
+  selfhost-postgres:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16.4-alpine3.20@sha256:5660c2cbfea50c7a9127d17dc4e48543eedd3d7a41a595a2dfa572471e37e64c
+        env:
+          POSTGRES_USER: emails_test
+          POSTGRES_PASSWORD: emails_test
+          POSTGRES_DB: emails_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U emails_test -d emails_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.13
+      - run: bun install --frozen-lockfile
+      - name: Verify self-hosted Postgres migrations and idempotency
+        env:
+          EMAILS_TEST_POSTGRES_URL: postgresql://emails_test:emails_test@127.0.0.1:5432/emails_test?sslmode=disable
+        run: bun test src/server/self-hosted/postgres.integration.test.ts

@@ -46,7 +46,7 @@ export interface WebhookEvent {
   metadata?: Record<string, unknown>;
 }
 
-export function parseResendWebhook(body: any): WebhookEvent | null {
+export function parseResendWebhook(body: any, signedEnvelopeId?: string): WebhookEvent | null {
   const typeMap: Record<string, string> = {
     "email.delivered": "delivered",
     "email.bounced": "bounced",
@@ -56,8 +56,10 @@ export function parseResendWebhook(body: any): WebhookEvent | null {
   };
   const eventType = typeMap[body.type];
   if (!eventType) return null;
+  const providerEventId = signedEnvelopeId || body.data?.email_id;
+  if (!providerEventId) return null;
   return {
-    provider_event_id: body.data?.email_id || crypto.randomUUID(),
+    provider_event_id: providerEventId,
     type: eventType as WebhookEvent["type"],
     recipient: Array.isArray(body.data?.to) ? body.data.to[0] : body.data?.to,
     provider_message_id: body.data?.email_id,
@@ -66,7 +68,7 @@ export function parseResendWebhook(body: any): WebhookEvent | null {
   };
 }
 
-export function parseSesWebhook(body: any): WebhookEvent | null {
+export function parseSesWebhook(body: any, signedEnvelopeId?: string): WebhookEvent | null {
   const typeMap: Record<string, string> = {
     Delivery: "delivered",
     Bounce: "bounced",
@@ -75,9 +77,11 @@ export function parseSesWebhook(body: any): WebhookEvent | null {
   const eventType = typeMap[body.notificationType];
   if (!eventType) return null;
   const messageId = body.mail?.messageId;
+  const providerEventId = signedEnvelopeId || messageId;
+  if (!providerEventId) return null;
   const recipients = body.mail?.destination || [];
   return {
-    provider_event_id: body.mail?.messageId || crypto.randomUUID(),
+    provider_event_id: providerEventId,
     type: eventType as WebhookEvent["type"],
     recipient: recipients[0],
     provider_message_id: messageId,

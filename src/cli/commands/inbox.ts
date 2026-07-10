@@ -20,7 +20,7 @@ import { listAddressProvisioningByIds, listDomainProvisioningByIds, listReadyAdd
 import { sqlEmailAddress } from "../../db/email-address-sql.js";
 import { assessDomainReadiness } from "../../lib/domain-readiness.js";
 import { domainInboundReadinessSignals } from "../../lib/domain-inbound-evidence.js";
-import { resolveMaileryMode } from "../../lib/mode.js";
+import { resolveEmailsMode } from "../../lib/mode.js";
 import { resolveMailDataSource, type MailDataSource } from "../../lib/mail-data-source.js";
 import { readableMessageText, renderReadableEmailDocument } from "../tui/format.js";
 import type {
@@ -40,8 +40,8 @@ function resolveInboundEmailId(id: string): string {
 }
 
 // Resolve a possibly-short id (the 8-char id printed by `inbox list`) to a full id
-// through the seam: local SQLite partial-id resolution, or a bounded cloud prefix match
-// so the id shown by `inbox list` is usable verbatim in cloud read/mark/star/label.
+// through the seam: local SQLite partial-id resolution, or a bounded self_hosted prefix match
+// so the id shown by `inbox list` is usable verbatim in self_hosted read/mark/star/label.
 function resolveMailId(ds: MailDataSource, id: string): Promise<string> {
   return ds.resolveId(id);
 }
@@ -80,7 +80,7 @@ function splitAddresses(value: string | null | undefined): string[] {
 }
 
 // A read/detail projection built from the seam (TuiMessage + MessageBody) so the CLI
-// renders identically in local and cloud mode.
+// renders identically in local and self_hosted mode.
 function seamMessageDetail(msg: TuiMessage, body: MessageBody | null): SeamMailDetail {
   const attachments = (body?.attachments ?? []).map((att) => ({
     filename: att.filename,
@@ -93,7 +93,7 @@ function seamMessageDetail(msg: TuiMessage, body: MessageBody | null): SeamMailD
       ? { filename: att.filename, s3_url: att.location! }
       : { filename: att.filename, local_path: att.location! }));
   // A read message must not display the system `unread` label alongside the "read" flag
-  // (the cloud read flow fetches the message while unread, then marks it read without
+  // (the self_hosted read flow fetches the message while unread, then marks it read without
   // re-fetching its labels). Suppress it here so `Flags:` reads just "read" — parity with
   // local, which has no such label.
   const label_ids = msg.is_read
@@ -159,9 +159,9 @@ function mailboxSourceFromOptions(opts: { source?: string; provider?: string; ad
 }
 
 async function runAutoPull(opts: { s3?: boolean; limit?: number }) {
-  // Auto-pull is LOCAL S3 ingestion. In cloud mode the API is the source of truth and
+  // Auto-pull is LOCAL S3 ingestion. In self_hosted mode the API is the source of truth and
   // each poll re-reads it through the seam, so there is nothing to pull.
-  if (resolveMailDataSource().mode !== "local") return { pulled: 0, ok: true, configured: false, reason: "cloud mode" };
+  if (resolveMailDataSource().mode !== "local") return { pulled: 0, ok: true, configured: false, reason: "self_hosted mode" };
   const { autoPull } = await import("../tui/autopull.js");
   return autoPull(opts);
 }
@@ -475,10 +475,10 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
           return;
         }
         // --by-address is a local-only SQL rollup over inbound_recipients; there is no
-        // server endpoint for it. In cloud mode fail cleanly instead of querying the
+        // server endpoint for it. In self_hosted mode fail cleanly instead of querying the
         // empty local DB (which would misleadingly report zero unread).
         if (resolveMailDataSource().mode !== "local") {
-          handleError(new Error("`inbox unread-count --by-address` is not available in cloud mode. Use `emails inbox unread-count` for the total unread count."));
+          handleError(new Error("`inbox unread-count --by-address` is not available in self_hosted mode. Use `emails inbox unread-count` for the total unread count."));
           return;
         }
         const db = getDatabase();
@@ -560,7 +560,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
             }),
             domains: domainRows.map((domain) => {
               const readyAddresses = readyAddressCounts.get(domain.id) ?? 0;
-              const mode = resolveMaileryMode();
+              const mode = resolveEmailsMode();
               const readiness = assessDomainReadiness(domain, domainProvisioning.get(domain.id) ?? null, {
                 ...domainInboundReadinessSignals(domain, mode),
                 ready_addresses: readyAddresses,
@@ -808,7 +808,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     });
 
   // ─── READ-STATE / ARCHIVE / STAR / LABELS ─────────────────────────────────
-  // These commands write through the mail data source seam (local SQLite or cloud API).
+  // These commands write through the mail data source seam (local SQLite or self_hosted API).
 
   async function requireMessage(ds: MailDataSource, id: string): Promise<TuiMessage> {
     const msg = await ds.getMessage(await resolveMailId(ds, id));
@@ -930,11 +930,11 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
       try {
         const ds = resolveMailDataSource();
         const target = opts.provider ? `for provider ${opts.provider}` : "for all providers";
-        // Cloud mode deletes on the server (scoped to the inbox folder), so drop the
+        // Self-hosted mode deletes on the server (scoped to the inbox folder), so drop the
         // "local" wording; confirmation semantics are otherwise unchanged.
         const scope = ds.mode === "local" ? "local inbox emails" : "inbox emails";
         await confirmDestructiveAction(`Clear ${scope} ${target}?`, opts.yes);
-        // local: wipes the inbound store (optionally by provider). cloud: drains a bulk
+        // local: wipes the inbound store (optionally by provider). self_hosted: drains a bulk
         // delete over the inbox folder (scoped to the provider's mailbox when resolvable).
         const { cleared } = await ds.clear({ providerId: opts.provider });
         console.log(chalk.green(`✓ Cleared ${cleared} email(s)`));
@@ -1166,7 +1166,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         const { writeFileSync } = await import("node:fs");
         const { tmpdir } = await import("node:os");
         const { join: pathJoin } = await import("node:path");
-        const tmpFile = pathJoin(tmpdir(), `mailery-inbox-${resolvedId.slice(0, 8)}.html`);
+        const tmpFile = pathJoin(tmpdir(), `emails-inbox-${resolvedId.slice(0, 8)}.html`);
         writeFileSync(tmpFile, renderReadableEmailDocument({
           subject: body?.subject ?? msg.subject,
           from: body?.from ?? msg.from,

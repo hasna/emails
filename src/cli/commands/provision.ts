@@ -450,7 +450,7 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
   // ── roundtrip (acceptance test) ─────────────────────────────────────────
   cmd
     .command("roundtrip")
-    .description("Send N tokened mailery around a ring of addresses and confirm 100% receipt (via SES inbound → S3 → SQLite)")
+    .description("Send N tokened emails around a ring of addresses and confirm 100% receipt (via SES inbound → S3 → SQLite)")
     .requiredOption("--domain <domain>", "Domain whose addresses to test")
     .requiredOption("--provider <id>", "SES provider ID (sends + inbound association)")
     .option("--addresses <list>", "Comma-separated local parts", "one,two,three")

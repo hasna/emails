@@ -13,30 +13,30 @@ import { DomainNotFoundError } from "../types/index.js";
 import { getDatabase, now, uuid } from "./database.js";
 import { parseJsonObject } from "./json.js";
 import { safeOffset, safeOptionalLimit } from "./pagination.js";
-import { cloudStoreFor, isCloudMode, type CloudResourceStore } from "./cloud-store.js";
+import { selfHostedStoreFor, isSelfHostedMode, type SelfHostedResourceStore } from "./self-hosted-store.js";
 
 // ============================================================================
-// Cloud (self_hosted) routing
+// Self-hosted (self_hosted) routing
 // ============================================================================
 //
-// When the client-flip resolves to cloud (mode=self_hosted + HASNA_MAILERY_API_URL
-// + HASNA_MAILERY_API_KEY), the `domains` resource is served by the app's cloud
+// When the client-flip resolves to selfHosted (mode=self_hosted + HASNA_EMAILS_API_URL
+// + EMAILS_SELF_HOSTED_API_KEY), the `domains` resource is served by the app's selfHosted
 // HTTP API (<API_URL>/v1/domains) instead of the local SQLite store. An explicit
 // `db` argument always means "use this local database" (tests / tooling), so
-// cloud routing is skipped whenever a caller passes `db`.
+// selfHosted routing is skipped whenever a caller passes `db`.
 const DOMAIN_RESOURCE = "domains";
 
-// Route to the cloud store whenever the client is flipped to self_hosted. The
+// Route to the selfHosted store whenever the client is flipped to self_hosted. The
 // `db` argument is intentionally ignored here: the app's CLI passes an explicit
 // local `getDatabase()` handle to every repo call, so keying on it would defeat
-// cloud routing. Tests never set the cloud env, so isCloudMode() is false there
+// selfHosted routing. Tests never set the selfHosted env, so isSelfHostedMode() is false there
 // and the local SQLite path is always used.
-function cloudDomains(_db?: Database): CloudResourceStore | null {
-  if (!isCloudMode()) return null;
-  return cloudStoreFor(DOMAIN_RESOURCE);
+function selfHostedDomains(_db?: Database): SelfHostedResourceStore | null {
+  if (!isSelfHostedMode()) return null;
+  return selfHostedStoreFor(DOMAIN_RESOURCE);
 }
 
-/** Map a cloud API domain entity to the local rich Domain shape (defaults filled). */
+/** Map a selfHosted API domain entity to the local rich Domain shape (defaults filled). */
 function apiToDomain(e: Record<string, unknown>): Domain {
   const str = (v: unknown): string | null => (v == null ? null : String(v));
   const verified = Boolean(e["verified"]);
@@ -45,10 +45,10 @@ function apiToDomain(e: Record<string, unknown>): Domain {
   const createdAt = str(e["created_at"]) ?? updatedAt;
   return {
     id: String(e["id"]),
-    provider_id: str(e["provider"] ?? e["provider_id"]) ?? "cloud",
+    provider_id: str(e["provider"] ?? e["provider_id"]) ?? "self_hosted",
     domain: String(e["domain"] ?? ""),
     domain_type: "self_hosted",
-    source_of_truth: "cloud",
+    source_of_truth: "postgres",
     ownership_status: verified ? "verified" : "pending",
     inbound_status: "pending",
     outbound_status: "pending",
@@ -118,9 +118,9 @@ export function createDomain(
   domain: string,
   db?: Database,
 ): Domain {
-  const cloud = cloudDomains(db);
-  if (cloud) {
-    const created = cloud.create({ domain, provider: provider_id });
+  const selfHosted = selfHostedDomains(db);
+  if (selfHosted) {
+    const created = selfHosted.create({ domain, provider: provider_id });
     return apiToDomain(created);
   }
 
@@ -138,9 +138,9 @@ export function createDomain(
 }
 
 export function getDomain(id: string, db?: Database): Domain | null {
-  const cloud = cloudDomains(db);
-  if (cloud) {
-    const entity = cloud.get(id);
+  const selfHosted = selfHostedDomains(db);
+  if (selfHosted) {
+    const entity = selfHosted.get(id);
     return entity ? apiToDomain(entity) : null;
   }
 
@@ -151,12 +151,12 @@ export function getDomain(id: string, db?: Database): Domain | null {
 }
 
 export function getDomainByName(provider_id: string, domain: string, db?: Database): Domain | null {
-  const cloud = cloudDomains(db);
-  if (cloud) {
-    // Cloud is single-tenant per API key; match by domain name (provider is a
-    // local concept and is not part of the cloud domain identity).
+  const selfHosted = selfHostedDomains(db);
+  if (selfHosted) {
+    // A self-hosted deployment is one operator-owned instance; match by domain
+    // name because the local provider row is not part of the service identity.
     const name = domain.trim().toLowerCase();
-    const match = cloud
+    const match = selfHosted
       .list({ limit: 1000 })
       .map(apiToDomain)
       .find((dm) => dm.domain.toLowerCase() === name);
@@ -172,10 +172,10 @@ export function getDomainByName(provider_id: string, domain: string, db?: Databa
 }
 
 export function findDomainsByName(domain: string, db?: Database): Domain[] {
-  const cloud = cloudDomains(db);
-  if (cloud) {
+  const selfHosted = selfHostedDomains(db);
+  if (selfHosted) {
     const name = domain.trim().toLowerCase();
-    return cloud
+    return selfHosted
       .list({ limit: 1000 })
       .map(apiToDomain)
       .filter((dm) => dm.domain.toLowerCase() === name)
@@ -225,14 +225,14 @@ export interface UsableDomainOptions extends ListDomainOptions {
 }
 
 export function listDomains(provider_id?: string, db?: Database, opts?: ListDomainOptions): Domain[] {
-  const cloud = cloudDomains(db);
-  if (cloud) {
+  const selfHosted = selfHostedDomains(db);
+  if (selfHosted) {
     const query: Record<string, string | number | undefined> = {};
     const lim = safeOptionalLimit(opts?.limit);
     if (lim !== null) query["limit"] = lim;
     const off = safeOffset(opts?.offset);
     if (off) query["offset"] = off;
-    let domains = cloud.list(query).map(apiToDomain);
+    let domains = selfHosted.list(query).map(apiToDomain);
     if (provider_id) domains = domains.filter((dm) => dm.provider_id === provider_id);
     domains.sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
     if (lim !== null) domains = domains.slice(off, off + lim);
@@ -290,7 +290,7 @@ function usableDomainWhere(opts: UsableDomainOptions | undefined, params: SQLQue
   const sendReady = `(${notBroken} AND d.dkim_status = 'verified' AND d.spf_status = 'verified')`;
   const lifecycleReceiveReady = "(d.inbound_status = 'ready')";
   const localReceiveReady = `((${broken} AND ${readyAddresses} > 0) OR (${notBroken} AND (${readyAddresses} > 0 OR d.provisioning_status IN ('ready', 'inbound_ready') OR ${lifecycleReceiveReady})))`;
-  const receiveReady = `(CASE WHEN d.source_of_truth IN ('postgres', 'cloud') THEN ${lifecycleReceiveReady} ELSE ${localReceiveReady} END)`;
+  const receiveReady = `(CASE WHEN d.source_of_truth = 'postgres' THEN ${lifecycleReceiveReady} ELSE ${localReceiveReady} END)`;
 
   if (opts?.send && opts.receive) conditions.push(`(${sendReady} AND ${receiveReady})`);
   else if (opts?.send) conditions.push(sendReady);
@@ -339,14 +339,14 @@ export function updateDomain(
   input: Partial<Pick<Domain, "dkim_status" | "spf_status" | "dmarc_status" | "verified_at">>,
   db?: Database,
 ): Domain {
-  const cloud = cloudDomains(db);
-  if (cloud) {
-    const current = cloud.get(id);
+  const selfHosted = selfHostedDomains(db);
+  if (selfHosted) {
+    const current = selfHosted.get(id);
     if (!current) throw new DomainNotFoundError(id);
     const verified =
       input.verified_at != null ||
       (input.dkim_status === "verified" && input.spf_status === "verified" && input.dmarc_status === "verified");
-    const updated = verified ? cloud.update(id, { verified: true }) : current;
+    const updated = verified ? selfHosted.update(id, { verified: true }) : current;
     return apiToDomain(updated);
   }
 
@@ -390,12 +390,12 @@ export function updateDomainReadiness(
   input: DomainReadinessUpdate,
   db?: Database,
 ): Domain {
-  const cloud = cloudDomains(db);
-  if (cloud) {
-    // The cloud domain schema does not carry the local lifecycle/readiness
-    // fields; return the current cloud record so callers (e.g. `domain add`)
+  const selfHosted = selfHostedDomains(db);
+  if (selfHosted) {
+    // The selfHosted domain schema does not carry the local lifecycle/readiness
+    // fields; return the current selfHosted record so callers (e.g. `domain add`)
     // still get a valid Domain back.
-    const current = cloud.get(id);
+    const current = selfHosted.get(id);
     if (!current) throw new DomainNotFoundError(id);
     return apiToDomain(current);
   }
@@ -501,9 +501,9 @@ export function moveDomainProvider(id: string, toProviderId: string, db?: Databa
 }
 
 export function deleteDomain(id: string, db?: Database): boolean {
-  const cloud = cloudDomains(db);
-  if (cloud) {
-    return cloud.del(id);
+  const selfHosted = selfHostedDomains(db);
+  if (selfHosted) {
+    return selfHosted.del(id);
   }
 
   const d = db || getDatabase();
@@ -518,12 +518,12 @@ export function updateDnsStatus(
   dmarc: DnsStatus,
   db?: Database,
 ): Domain {
-  const cloud = cloudDomains(db);
-  if (cloud) {
-    const current = cloud.get(id);
+  const selfHosted = selfHostedDomains(db);
+  if (selfHosted) {
+    const current = selfHosted.get(id);
     if (!current) throw new DomainNotFoundError(id);
-    const allVerifiedCloud = dkim === "verified" && spf === "verified" && dmarc === "verified";
-    const updated = allVerifiedCloud ? cloud.update(id, { verified: true }) : current;
+    const allVerifiedSelfHosted = dkim === "verified" && spf === "verified" && dmarc === "verified";
+    const updated = allVerifiedSelfHosted ? selfHosted.update(id, { verified: true }) : current;
     return apiToDomain(updated);
   }
 

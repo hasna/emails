@@ -70,7 +70,7 @@ describe("tui clipboard", () => {
     const calls: string[] = [];
     const writes: string[] = [];
     const result = copyTextToClipboard("hello clipboard", {
-      env: { SSH_CLIENT: "100.100.226.69 54111 22", MAILERY_TUI_CLIPBOARD_OSC52: "never" },
+      env: { SSH_CLIENT: "100.100.226.69 54111 22", EMAILS_TUI_CLIPBOARD_OSC52: "never" },
       platform: "linux",
       stdoutIsTTY: true,
       writeStdout: (value) => writes.push(value),
@@ -109,7 +109,7 @@ describe("tui clipboard", () => {
     const calls: Array<{ cmd: string; timeoutMs: number | undefined }> = [];
     const writes: string[] = [];
     const result = await copyTextToClipboardAsync("hello async", {
-      env: { SSH_CLIENT: "100.100.226.69 54111 22", MAILERY_TUI_CLIPBOARD_OSC52: "never" },
+      env: { SSH_CLIENT: "100.100.226.69 54111 22", EMAILS_TUI_CLIPBOARD_OSC52: "never" },
       platform: "linux",
       stdoutIsTTY: true,
       writeStdout: (value) => writes.push(value),
@@ -133,7 +133,7 @@ describe("tui clipboard", () => {
     // used for the reverse-ssh pbcopy route.
     const calls: string[] = [];
     const result = copyTextToClipboard("hello from tmux", {
-      env: { TMUX: "/tmp/tmux-1000/default,1,0", MAILERY_TUI_CLIPBOARD_OSC52: "never" },
+      env: { TMUX: "/tmp/tmux-1000/default,1,0", EMAILS_TUI_CLIPBOARD_OSC52: "never" },
       platform: "linux",
       stdoutIsTTY: true,
       writeStdout: () => {},

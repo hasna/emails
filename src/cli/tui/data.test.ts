@@ -40,7 +40,7 @@ function seed(subject: string, opts: { read?: boolean; star?: boolean; archived?
 }
 
 beforeEach(() => {
-  tmpHome = mkdtempSync(join(tmpdir(), "mailery-tui-data-"));
+  tmpHome = mkdtempSync(join(tmpdir(), "emails-tui-data-"));
   process.env["HOME"] = tmpHome;
   process.env["EMAILS_DB_PATH"] = ":memory:";
   resetDatabase();

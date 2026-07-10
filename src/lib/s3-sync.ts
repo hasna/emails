@@ -18,7 +18,7 @@ import { loadConfig, saveConfig, getInboundAttachmentStorageConfig } from "./con
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Database } from "../db/database.js";
-import { emitMaileryEventBestEffort, inboundReceivedEventData } from "./mailery-events.js";
+import { emitEmailsEventBestEffort, inboundReceivedEventData } from "./emails-events.js";
 import { s3ObjectUrl } from "./s3-object.js";
 
 const MAIL_SOURCES_CONFIG_KEY = "mail_sources";
@@ -445,11 +445,11 @@ async function processS3Object(
     received_at: (parsed.date ?? new Date()).toISOString(),
   }, db);
 
-  emitMaileryEventBestEffort({
-    type: "mailery.inbound.received",
+  emitEmailsEventBestEffort({
+    type: "emails.inbound.received",
     subject: stored.id,
     severity: "notice",
-    dedupeKey: `mailery:inbound:received:${stored.id}`,
+    dedupeKey: `emails:inbound:received:${stored.id}`,
     message: `Inbound email received from SES/S3`,
     data: inboundReceivedEventData({
       emailId: stored.id,
@@ -507,11 +507,11 @@ async function processS3Object(
             ContentType: att.contentType ?? "application/octet-stream",
           }));
           paths.push({ filename: safeName, content_type: att.contentType ?? "", size: att.size ?? 0, s3_url: `s3://${syncConfig.s3_bucket}/${s3Key}` });
-          emitMaileryEventBestEffort({
-            type: "mailery.inbound.attachment.saved",
+          emitEmailsEventBestEffort({
+            type: "emails.inbound.attachment.saved",
             subject: stored.id,
             severity: "info",
-            dedupeKey: `mailery:inbound:attachment:${stored.id}:${safeName}`,
+            dedupeKey: `emails:inbound:attachment:${stored.id}:${safeName}`,
             message: "Inbound attachment stored",
             data: {
               email_id: stored.id,
@@ -531,11 +531,11 @@ async function processS3Object(
         const filePath = join(outputDir, safeName);
         writeFileSync(filePath, att.content);
         paths.push({ filename: safeName, content_type: att.contentType ?? "", size: att.size ?? 0, local_path: filePath });
-        emitMaileryEventBestEffort({
-          type: "mailery.inbound.attachment.saved",
+        emitEmailsEventBestEffort({
+          type: "emails.inbound.attachment.saved",
           subject: stored.id,
           severity: "info",
-          dedupeKey: `mailery:inbound:attachment:${stored.id}:${safeName}`,
+          dedupeKey: `emails:inbound:attachment:${stored.id}:${safeName}`,
           message: "Inbound attachment stored",
           data: {
             email_id: stored.id,

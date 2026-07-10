@@ -10,10 +10,10 @@ let testProvider: Provider;
 
 beforeEach(() => {
   process.env["EMAILS_DB_PATH"] = ":memory:";
-  process.env["MAILERY_MODE"] = "local";
+  process.env["EMAILS_MODE"] = "local";
   delete process.env["HASNA_EMAILS_DATABASE_URL"];
   delete process.env["EMAILS_DATABASE_URL"];
-  delete process.env["HASNA_EMAILS_STORAGE_MODE"];
+  delete process.env["EMAILS_MODE"];
   delete process.env["EMAILS_STORAGE_MODE"];
   resetDatabase();
   const db = getDatabase();
@@ -23,10 +23,10 @@ beforeEach(() => {
 afterEach(() => {
   closeDatabase();
   delete process.env["EMAILS_DB_PATH"];
-  delete process.env["MAILERY_MODE"];
+  delete process.env["EMAILS_MODE"];
   delete process.env["HASNA_EMAILS_DATABASE_URL"];
   delete process.env["EMAILS_DATABASE_URL"];
-  delete process.env["HASNA_EMAILS_STORAGE_MODE"];
+  delete process.env["EMAILS_MODE"];
   delete process.env["EMAILS_STORAGE_MODE"];
 });
 

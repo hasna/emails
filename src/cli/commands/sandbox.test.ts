@@ -20,7 +20,7 @@ async function runSandboxCommand(args: string[]) {
     logs.push(values.map(String).join(" "));
   };
   try {
-    await program.parseAsync(["node", "mailery", ...args]);
+    await program.parseAsync(["node", "emails", ...args]);
   } finally {
     console.log = originalLog;
   }
