@@ -60,4 +60,4 @@ jobs:
         run: terraform test -no-color
 
       - name: Enforce static self-hosting contract
-        run: ./tests/static_contract.sh
+        run: PATH=/usr/bin:/bin ./tests/static_contract.sh

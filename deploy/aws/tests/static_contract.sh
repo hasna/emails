@@ -5,56 +5,102 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 repo=$(CDPATH= cd -- "$root/../.." && pwd)
 cd "$root"
 
-if rg -n -i \
-  'hasna[.]xyz|mailery[.]co|MAILERY|HASNA_EMAILS|HASNA_MAILERY|API_KEY_SIGNING_SECRET' \
-  . \
-  --glob '!tests/**'; then
+if find . -type f \
+  ! -path './tests/*' \
+  ! -path './.terraform/*' \
+  -exec grep -Ein 'hasna[.]xyz|mailery[.]co|MAILERY|HASNA_EMAILS|HASNA_MAILERY|API_KEY_SIGNING_SECRET' {} \; \
+  | grep -q .; then
   echo "forbidden hosted-service coupling found" >&2
   exit 1
 fi
 
-if rg -n 'name[[:space:]]*=[[:space:]]*"DATABASE_URL"|\["mailery|\["mailery-serve' compute.tf; then
+if grep -En 'name[[:space:]]*=[[:space:]]*"DATABASE_URL"|\["mailery|\["mailery-serve' compute.tf >/dev/null; then
   echo "legacy command or generic secret environment found" >&2
   exit 1
 fi
 
+worker_statement_is_gated() {
+  awk -v wanted_sid="$1" '
+    function brace_delta(value, copy, opens, closes) {
+      copy = value
+      opens = gsub(/\{/, "", copy)
+      copy = value
+      closes = gsub(/\}/, "", copy)
+      return opens - closes
+    }
+
+    /^[[:space:]]*dynamic[[:space:]]+"statement"[[:space:]]*\{/ {
+      in_statement = 1
+      depth = 0
+      gated = 0
+      matched_sid = 0
+    }
+
+    in_statement {
+      if ($0 ~ /^[[:space:]]*for_each[[:space:]]*=[[:space:]]*var[.]enable_ses_inbound/) {
+        gated = 1
+      }
+      sid_pattern = "sid[[:space:]]*=[[:space:]]*\"" wanted_sid "\""
+      if ($0 ~ sid_pattern) {
+        matched_sid = 1
+      }
+      depth += brace_delta($0)
+      if (depth == 0) {
+        if (gated && matched_sid) {
+          found = 1
+        }
+        in_statement = 0
+      }
+    }
+
+    END { exit found ? 0 : 1 }
+  ' iam.tf
+}
+
 for sid in ReadInboundBucket ReadInboundObjects ConsumeInboundQueue DecryptInboundData; do
-  if ! rg -U -q "dynamic \"statement\" \\{[[:space:]]*for_each = var[.]enable_ses_inbound[^}]*sid[[:space:]]*=[[:space:]]*\"$sid\"" iam.tf; then
+  if ! worker_statement_is_gated "$sid"; then
     echo "worker permission $sid is not gated by enable_ses_inbound" >&2
     exit 1
   fi
 done
 
-if rg -n \
-  'arn:aws:[a-z0-9-]+:[a-z0-9-]*:[0-9]{12}' \
-  . \
-  --glob '!tests/**' \
-  --glob '!examples/**'; then
+if find . -type f \
+  ! -path './tests/*' \
+  ! -path './examples/*' \
+  ! -path './.terraform/*' \
+  -exec grep -En 'arn:aws:[a-z0-9-]+:[a-z0-9-]*:[0-9]{12}' {} \; \
+  | grep -q .; then
   echo "concrete AWS account ARN found outside test/example fixtures" >&2
   exit 1
 fi
 
-if rg -n 'resource[[:space:]]+"aws_ses_active_receipt_rule_set"' .; then
+if find . -type f -name '*.tf' \
+  -exec grep -En 'resource[[:space:]]+"aws_ses_active_receipt_rule_set"' {} \; \
+  | grep -q .; then
   echo "Terraform must not activate the account-global SES receipt rule set" >&2
   exit 1
 fi
 
-if rg -n 'resource[[:space:]]+"aws_secretsmanager_secret_version"' .; then
+if find . -type f -name '*.tf' \
+  -exec grep -En 'resource[[:space:]]+"aws_secretsmanager_secret_version"' {} \; \
+  | grep -q .; then
   echo "Terraform must not place secret values in state" >&2
   exit 1
 fi
 
-if rg -n '^[[:space:]]+(ingress|egress)[[:space:]]*\{' network.tf; then
+if grep -En '^[[:space:]]+(ingress|egress)[[:space:]]*\{' network.tf >/dev/null; then
   echo "inline security-group rules are forbidden; use standalone rule resources" >&2
   exit 1
 fi
 
-if rg -n 'http://' outputs.tf; then
+if grep -En 'http://' outputs.tf >/dev/null; then
   echo "client endpoint outputs must be HTTPS-only" >&2
   exit 1
 fi
 
-if rg -n '^check[[:space:]]+"' . --glob '*.tf'; then
+if find . -type f -name '*.tf' \
+  -exec grep -En '^check[[:space:]]+"' {} \; \
+  | grep -q .; then
   echo "nonblocking Terraform check blocks are forbidden for safety contracts" >&2
   exit 1
 fi
@@ -71,34 +117,37 @@ if [ "$workflow_count" != "2" ]; then
   exit 1
 fi
 
-rg -F -q '".github/workflows/**"' "$workflow" || {
+grep -Fq '".github/workflows/**"' "$workflow" || {
   echo "workflow changes must trigger the static legacy-workflow guard" >&2
   exit 1
 }
 
-rg -F -q 'terraform providers lock -platform=darwin_arm64 -platform=linux_amd64' "$workflow" || {
+grep -Fq 'terraform providers lock -platform=darwin_arm64 -platform=linux_amd64' "$workflow" || {
   echo "Terraform CI must verify both development and hosted-runner provider checksums" >&2
   exit 1
 }
 
-if rg -n 'id-token:[[:space:]]*write|configure-aws-credentials|amazon-ecr-login|role-to-assume|aws configure' "$workflow_dir" --glob '*.y*ml'; then
+if grep -En 'id-token:[[:space:]]*write|configure-aws-credentials|amazon-ecr-login|role-to-assume|aws configure' \
+  "$workflow" "$product_workflow" >/dev/null; then
   echo "workflows must not request AWS credentials or OIDC" >&2
   exit 1
 fi
 
-if rg -n '^[[:space:]]*(AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN)[[:space:]]*:' "$workflow_dir" --glob '*.y*ml'; then
+if grep -En '^[[:space:]]*(AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN)[[:space:]]*:' \
+  "$workflow" "$product_workflow" >/dev/null; then
   echo "workflows must not provide AWS credential environment values" >&2
   exit 1
 fi
 
-if rg -n '\b(terraform|tofu)[[:space:]]+(apply|destroy)\b|\b(npm|bun|pnpm|yarn)[[:space:]]+publish\b|ecs[[:space:]]+update-service' "$workflow_dir" --glob '*.y*ml'; then
+if grep -En '(^|[^[:alnum:]_])(terraform|tofu)[[:space:]]+(apply|destroy)([^[:alnum:]_-]|$)|(^|[^[:alnum:]_])(npm|bun|pnpm|yarn)[[:space:]]+publish([^[:alnum:]_-]|$)|ecs[[:space:]]+update-service' \
+  "$workflow" "$product_workflow" >/dev/null; then
   echo "workflows must not apply, destroy, publish, or deploy" >&2
   exit 1
 fi
 
 for allowed_workflow in "$workflow" "$product_workflow"; do
-  uses_count="$(rg -c 'uses:' "$allowed_workflow")"
-  pinned_uses_count="$(rg -c 'uses:[[:space:]]+[^@[:space:]]+@[0-9a-f]{40}([[:space:]]+#.*)?$' "$allowed_workflow")"
+  uses_count="$(grep -Ec 'uses:' "$allowed_workflow" || true)"
+  pinned_uses_count="$(grep -Ec 'uses:[[:space:]]+[^@[:space:]]+@[0-9a-f]{40}([[:space:]]+#.*)?$' "$allowed_workflow" || true)"
   if [ "$uses_count" != "$pinned_uses_count" ]; then
     echo "every workflow action must be pinned to an immutable commit SHA" >&2
     exit 1
