@@ -22,8 +22,10 @@ import {
   listReplyPromptParts,
   getReplyCount,
 } from "./inbound.js";
+import { clearEmailsTestEnv } from "../test/env.js";
 
 function makeDb(): Database {
+  clearEmailsTestEnv();
   resetDatabase();
   process.env["EMAILS_DB_PATH"] = ":memory:";
   const db = getDatabase();

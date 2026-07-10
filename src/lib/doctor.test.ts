@@ -8,23 +8,18 @@ import { suppressContact, upsertContact } from "../db/contacts.js";
 import { runDiagnostics, formatDiagnostics } from "./doctor.js";
 import type { DoctorCheck } from "./doctor.js";
 import type { Database } from "../db/database.js";
+import { clearEmailsTestEnv } from "../test/env.js";
 
 beforeEach(() => {
+  clearEmailsTestEnv();
   process.env["EMAILS_DB_PATH"] = ":memory:";
-  delete process.env["MAILERY_MODE"];
-  delete process.env["HASNA_EMAILS_MODE"];
-  delete process.env["HASNA_EMAILS_STORAGE_MODE"];
-  delete process.env["EMAILS_STORAGE_MODE"];
   resetDatabase();
 });
 
 afterEach(() => {
   closeDatabase();
   delete process.env["EMAILS_DB_PATH"];
-  delete process.env["MAILERY_MODE"];
-  delete process.env["HASNA_EMAILS_MODE"];
-  delete process.env["HASNA_EMAILS_STORAGE_MODE"];
-  delete process.env["EMAILS_STORAGE_MODE"];
+  clearEmailsTestEnv();
 });
 
 describe("runDiagnostics", () => {

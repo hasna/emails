@@ -10,6 +10,7 @@ import {
   deleteEmail,
 } from "./emails.js";
 import { EmailNotFoundError } from "../types/index.js";
+import { clearEmailsTestEnv } from "../test/env.js";
 
 let providerId: string;
 
@@ -21,6 +22,7 @@ const baseOpts = {
 };
 
 beforeEach(() => {
+  clearEmailsTestEnv();
   process.env["EMAILS_DB_PATH"] = ":memory:";
   resetDatabase();
   const p = createProvider({ name: "Test", type: "resend" });
@@ -30,6 +32,7 @@ beforeEach(() => {
 afterEach(() => {
   closeDatabase();
   delete process.env["EMAILS_DB_PATH"];
+  clearEmailsTestEnv();
 });
 
 describe("createEmail", () => {

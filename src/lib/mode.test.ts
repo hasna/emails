@@ -3,36 +3,27 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig, saveConfig } from "./config.js";
 import {
-  HASNA_EMAILS_MODE_ENV,
-  LEGACY_STORAGE_MODE_ENV,
   MAILERY_MODE_CONFIG_KEY,
-  MAILERY_MODE_ENV,
   normalizeMaileryMode,
   resolveMaileryMode,
 } from "./mode.js";
 import { resetCloudConfigCache } from "../db/cloud-store.js";
+import { clearEmailsTestEnv } from "../test/env.js";
 
 const TMP_HOME = join("/tmp", `mailery-mode-test-${process.pid}`);
 const ORIGINAL_HOME = process.env["HOME"];
-const MODE_ENV = [
-  MAILERY_MODE_ENV,
-  HASNA_EMAILS_MODE_ENV,
-  LEGACY_STORAGE_MODE_ENV,
-  "EMAILS_STORAGE_MODE",
-  "HASNA_EMAILS_DATABASE_URL",
-  "EMAILS_DATABASE_URL",
-  "HASNA_EMAILS_API_URL",
-  "HASNA_EMAILS_API_KEY",
-] as const;
-
 beforeEach(() => {
   mkdirSync(TMP_HOME, { recursive: true });
   process.env["HOME"] = TMP_HOME;
-  for (const key of MODE_ENV) delete process.env[key];
+  clearEmailsTestEnv();
+  delete process.env["HASNA_EMAILS_DATABASE_URL"];
+  delete process.env["EMAILS_DATABASE_URL"];
 });
 
 afterEach(() => {
-  for (const key of MODE_ENV) delete process.env[key];
+  clearEmailsTestEnv();
+  delete process.env["HASNA_EMAILS_DATABASE_URL"];
+  delete process.env["EMAILS_DATABASE_URL"];
   if (ORIGINAL_HOME === undefined) delete process.env["HOME"];
   else process.env["HOME"] = ORIGINAL_HOME;
   if (existsSync(TMP_HOME)) rmSync(TMP_HOME, { recursive: true, force: true });
