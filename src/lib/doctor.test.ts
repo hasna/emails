@@ -83,18 +83,18 @@ describe("runDiagnostics", () => {
     expect(gmailHealth).toBeUndefined();
   });
 
-  it("treats local providers as optional in Mailery Cloud mode", async () => {
+  it("treats local providers as optional in Cloud API mode", async () => {
     process.env["MAILERY_MODE"] = "cloud";
 
     const checks = await runDiagnostics();
 
     expect(checks.find((c) => c.name === "Mode")).toMatchObject({
       status: "pass",
-      message: "Mailery Cloud mode (cloud)",
+      message: "Cloud API mode (cloud)",
     });
     expect(checks.find((c) => c.name === "Providers")).toMatchObject({
       status: "pass",
-      message: "Mailery Cloud mode; local SES/Resend/Sandbox providers are optional",
+      message: "Cloud API mode; local SES/Resend/Sandbox providers are optional",
     });
   });
 

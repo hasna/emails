@@ -132,6 +132,8 @@ export function getGroupByName(name: string, db?: Database): Group | null {
   if (cloud) {
     const needle = name.trim();
     if (!needle) return null;
+    const direct = cloud.get(needle);
+    if (direct) return apiToGroup(direct);
     const groups = cloud.list({ limit: 1000 }).map(apiToGroup);
     return (
       groups.find((g) => g.name === needle) ??
@@ -165,7 +167,10 @@ export function listGroups(db?: Database, opts?: ListGroupOptions): Group[] {
 
 export function deleteGroup(id: string, db?: Database): boolean {
   const cloud = cloudResource(GROUP_RESOURCE);
-  if (cloud) return cloud.del(id);
+  if (cloud) {
+    const group = getGroupByName(id);
+    return group ? cloud.del(group.id) : false;
+  }
 
   const d = db || getDatabase();
   const result = d.run("DELETE FROM groups WHERE id = ?", [id]);

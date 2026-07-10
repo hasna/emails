@@ -1,7 +1,7 @@
 // Cloud HTTP storage bridge — makes `self_hosted` mode real for the client.
 //
 // When the client-flip contract resolves to cloud (mode=self_hosted/cloud AND
-// HASNA_MAILERY_API_URL + HASNA_MAILERY_API_KEY are set), the repository layer
+// HASNA_EMAILS_API_URL + HASNA_EMAILS_API_KEY are set), the repository layer
 // (src/db/*.ts) routes ALL reads AND writes to the app's cloud HTTP API
 // (`<API_URL>/v1/<resource>`) with the bearer key — NOT the local SQLite store,
 // NOT a DSN. This mirrors the resource-CRUD vocabulary of the Hasna Service
@@ -27,8 +27,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const APP = "mailery";
-const TOKEN = "MAILERY";
+const APP = "emails";
+const TOKEN = "EMAILS";
 
 export class CloudHttpError extends Error {
   constructor(
@@ -93,12 +93,15 @@ export function resolveCloudConfig(): CloudConfig | null {
     `HASNA_${TOKEN}_MODE`,
     `${TOKEN}_STORAGE_MODE`,
     `${TOKEN}_MODE`,
-    // Mailery's internal mode env (the app is also known as "emails").
-    "HASNA_EMAILS_STORAGE_MODE",
-    "HASNA_EMAILS_MODE",
+    // Legacy aliases kept only so existing deployments fail over without
+    // silently reading the wrong local store during the rename.
+    "HASNA_MAILERY_STORAGE_MODE",
+    "HASNA_MAILERY_MODE",
+    "MAILERY_STORAGE_MODE",
+    "MAILERY_MODE",
   ]);
-  const apiUrl = firstEnv([`HASNA_${TOKEN}_API_URL`, `${TOKEN}_API_URL`]);
-  const apiKey = firstEnv([`HASNA_${TOKEN}_API_KEY`, `${TOKEN}_API_KEY`]);
+  const apiUrl = firstEnv([`HASNA_${TOKEN}_API_URL`, `${TOKEN}_API_URL`, "HASNA_MAILERY_API_URL", "MAILERY_API_URL"]);
+  const apiKey = firstEnv([`HASNA_${TOKEN}_API_KEY`, `${TOKEN}_API_KEY`, "HASNA_MAILERY_API_KEY", "MAILERY_API_KEY"]);
 
   const signature = `${modeRaw ?? ""}|${apiUrl ?? ""}|${apiKey ? "k" : ""}`;
   if (signature === _cachedSignature && _cachedConfig !== undefined) return _cachedConfig ?? null;
@@ -178,8 +181,8 @@ function positiveIntEnv(name: string, fallback: number): number {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 // Resolved per-call so an env override always applies (and tests can shorten it).
-function connectTimeoutSeconds(): number { return positiveIntEnv("HASNA_MAILERY_HTTP_CONNECT_TIMEOUT", 10); }
-function maxTimeSeconds(): number { return positiveIntEnv("HASNA_MAILERY_HTTP_TIMEOUT", 30); }
+function connectTimeoutSeconds(): number { return positiveIntEnv("HASNA_EMAILS_HTTP_CONNECT_TIMEOUT", positiveIntEnv("HASNA_MAILERY_HTTP_CONNECT_TIMEOUT", 10)); }
+function maxTimeSeconds(): number { return positiveIntEnv("HASNA_EMAILS_HTTP_TIMEOUT", positiveIntEnv("HASNA_MAILERY_HTTP_TIMEOUT", 30)); }
 
 /**
  * Thrown when the curl transport itself fails (DNS/connect failure or a timeout)
@@ -189,7 +192,7 @@ function maxTimeSeconds(): number { return positiveIntEnv("HASNA_MAILERY_HTTP_TI
  */
 export class CloudTransportError extends Error {
   constructor(readonly method: string, readonly path: string, detail: string) {
-    super(`Cannot reach mailery cloud for ${method} ${path}: ${detail}`);
+    super(`Cannot reach emails API for ${method} ${path}: ${detail}`);
     this.name = "CloudTransportError";
   }
 }
@@ -198,7 +201,7 @@ function httpRequest(config: CloudConfig, method: string, path: string, body?: u
   const url = `${config.baseUrl}${path}`;
   const connectTimeout = connectTimeoutSeconds();
   const maxTime = maxTimeSeconds();
-  const dir = mkdtempSync(join(tmpdir(), "mailery-cloud-"));
+  const dir = mkdtempSync(join(tmpdir(), "emails-api-"));
   const cfgPath = join(dir, "curl.cfg");
   try {
     const lines = [

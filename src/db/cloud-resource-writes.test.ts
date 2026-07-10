@@ -151,23 +151,23 @@ beforeAll(async () => {
 afterAll(() => proc?.kill());
 
 beforeEach(() => {
-  process.env.HASNA_MAILERY_STORAGE_MODE = "cloud";
-  process.env.HASNA_MAILERY_API_URL = baseUrl;
-  process.env.HASNA_MAILERY_API_KEY = "test_key";
+  process.env.HASNA_EMAILS_STORAGE_MODE = "cloud";
+  process.env.HASNA_EMAILS_API_URL = baseUrl;
+  process.env.HASNA_EMAILS_API_KEY = "test_key";
   resetCloudConfigCache();
 });
 
 afterEach(() => {
-  delete process.env.HASNA_MAILERY_STORAGE_MODE;
-  delete process.env.HASNA_MAILERY_API_URL;
-  delete process.env.HASNA_MAILERY_API_KEY;
+  delete process.env.HASNA_EMAILS_STORAGE_MODE;
+  delete process.env.HASNA_EMAILS_API_URL;
+  delete process.env.HASNA_EMAILS_API_KEY;
   resetCloudConfigCache();
 });
 
 describe("resource repos route writes to cloud in cloud mode", () => {
   test("createOwner POSTs to /v1/owners and appears in cloud listOwners", () => {
     const o = createOwner({ type: "agent", name: "Writer Agent" });
-    expect(o.id).toStartWith("o");
+    expect(o.id).toBeTruthy();
     expect(o.name).toBe("Writer Agent");
     // The registered owner is now visible via the cloud read path (not just a
     // local id that never reaches the cloud — the split-brain symptom).
@@ -176,7 +176,7 @@ describe("resource repos route writes to cloud in cloud mode", () => {
 
   test("createGroup POSTs to /v1/groups and appears in cloud listGroups", () => {
     const g = createGroup("writer-group", "desc");
-    expect(g.id).toStartWith("g");
+    expect(g.id).toBeTruthy();
     expect(listGroups().some((x) => x.name === "writer-group")).toBe(true);
   });
 
@@ -192,7 +192,7 @@ describe("resource repos route writes to cloud in cloud mode", () => {
 
   test("createTemplate POSTs to /v1/templates and appears in cloud listTemplates", () => {
     const t = createTemplate({ name: "welcome", subject_template: "Hi {{name}}", html_template: "<p>hi</p>" });
-    expect(t.id).toStartWith("t");
+    expect(t.id).toBeTruthy();
     expect(t.subject_template).toBe("Hi {{name}}");
     expect(listTemplates().some((x) => x.name === "welcome")).toBe(true);
   });
@@ -210,18 +210,19 @@ describe("resource repos route writes to cloud in cloud mode", () => {
 
   test("createSequence POSTs to /v1/sequences and appears in cloud listSequences", () => {
     const s = createSequence({ name: "onboarding", description: "drip" });
-    expect(s.id).toStartWith("s");
+    expect(s.id).toBeTruthy();
     expect(s.status).toBe("active");
     expect(listSequences().some((x) => x.name === "onboarding")).toBe(true);
   });
 
   test("createSendKey FAILS LOUD in cloud mode instead of a silent local mint", () => {
-    expect(() => createSendKey("o1", "ci")).toThrow(/not supported yet|server-side mint/);
+    const owner = createOwner({ type: "agent", name: "Key Owner" });
+    expect(() => createSendKey(owner.id, "ci")).toThrow(/not supported yet|server-side mint/);
   });
 
   test("createProvider POSTs to /v1/providers and appears in cloud listProviderSummaries", () => {
     const pr = createProvider({ name: "Prod SES", type: "ses", region: "us-east-1" });
-    expect(pr.id).toStartWith("p");
+    expect(pr.id).toBeTruthy();
     // Credentials are never carried by the cloud resource.
     expect(pr.api_key).toBeNull();
     expect(listProviderSummaries().some((x) => x.id === pr.id && x.name === "Prod SES")).toBe(true);

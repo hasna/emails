@@ -21,6 +21,8 @@ const MODE_ENV = [
   "EMAILS_STORAGE_MODE",
   "HASNA_EMAILS_DATABASE_URL",
   "EMAILS_DATABASE_URL",
+  "HASNA_EMAILS_API_URL",
+  "HASNA_EMAILS_API_KEY",
 ] as const;
 
 beforeEach(() => {
@@ -48,16 +50,14 @@ describe("Mailery mode resolution", () => {
   });
 
   it("resolves the credential-only fleet flip (API URL + key, no *_MODE) as cloud", () => {
-    process.env["HASNA_MAILERY_API_URL"] = "https://mailery.hasna.xyz";
-    process.env["HASNA_MAILERY_API_KEY"] = "test_key";
+    process.env["HASNA_EMAILS_API_URL"] = "https://emails.hasna.xyz";
+    process.env["HASNA_EMAILS_API_KEY"] = "test_key";
     resetCloudConfigCache();
     try {
       const resolved = resolveMaileryMode();
       expect(resolved.mode).toBe("cloud");
-      expect(resolved.label).toBe("Mailery Cloud");
+      expect(resolved.label).toBe("Cloud API");
     } finally {
-      delete process.env["HASNA_MAILERY_API_URL"];
-      delete process.env["HASNA_MAILERY_API_KEY"];
       resetCloudConfigCache();
     }
   });

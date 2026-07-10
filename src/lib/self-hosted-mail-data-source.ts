@@ -25,7 +25,7 @@
 // (TuiMessage / MailboxCounts / MessageBody / …) so the CLI/MCP inbox reads the
 // SHARED cloud store instead of the machine-local SQLite island.
 //
-// SECRET SAFETY: the bearer key is resolved from HASNA_MAILERY_API_KEY (via
+// SECRET SAFETY: the bearer key is resolved from HASNA_EMAILS_API_KEY (via
 // resolveCloudConfig) and only ever placed in an in-process `Authorization`
 // header. It is never written to argv, logged, or embedded in an error message.
 
@@ -326,9 +326,9 @@ export class SelfHostedMailDataSource implements MailDataSource {
       res = await this.fetchImpl(`${this.baseUrl}${path}`, init);
     } catch (error) {
       if (timer.aborted || (error as Error)?.name === "TimeoutError" || (error as Error)?.name === "AbortError") {
-        throw new Error(`self-hosted mailery: ${method} ${path} timed out after ${this.timeoutMs}ms`);
+        throw new Error(`self-hosted emails API: ${method} ${path} timed out after ${this.timeoutMs}ms`);
       }
-      throw new Error(`self-hosted mailery: cannot reach ${this.baseUrl} for ${method} ${path}`);
+      throw new Error(`self-hosted emails API: cannot reach ${this.baseUrl} for ${method} ${path}`);
     }
     const text = await res.text();
     let json: unknown = null;
@@ -345,7 +345,7 @@ export class SelfHostedMailDataSource implements MailDataSource {
   private async listPage(limit: number, offset: number): Promise<V1Message[]> {
     const { status, json } = await this.request("GET", `/messages?limit=${limit}&offset=${offset}`);
     if (status < 200 || status >= 300) {
-      throw new Error(`self-hosted mailery: GET /messages failed (HTTP ${status})`);
+      throw new Error(`self-hosted emails API: GET /messages failed (HTTP ${status})`);
     }
     const list = (json as { messages?: unknown } | null)?.messages;
     return Array.isArray(list) ? (list as V1Message[]) : [];
@@ -380,7 +380,7 @@ export class SelfHostedMailDataSource implements MailDataSource {
       return null;
     }
     if (status < 200 || status >= 300) {
-      throw new Error(`self-hosted mailery: GET /messages/counts failed (HTTP ${status})`);
+      throw new Error(`self-hosted emails API: GET /messages/counts failed (HTTP ${status})`);
     }
     this.fastCaps = true;
     const c = (json as { counts?: V1Counts } | null)?.counts ?? (json as V1Counts | null);
@@ -401,7 +401,7 @@ export class SelfHostedMailDataSource implements MailDataSource {
     const q = `direction=inbound&to=${encodeURIComponent(target)}&limit=${PAGE_LIMIT}`;
     const { status, json } = await this.request("GET", `/messages?${q}`);
     if (status < 200 || status >= 300) {
-      throw new Error(`self-hosted mailery: GET /messages (filtered) failed (HTTP ${status})`);
+      throw new Error(`self-hosted emails API: GET /messages (filtered) failed (HTTP ${status})`);
     }
     const list = (json as { messages?: unknown } | null)?.messages;
     return Array.isArray(list) ? (list as V1Message[]) : [];
@@ -423,7 +423,7 @@ export class SelfHostedMailDataSource implements MailDataSource {
     const { status, json } = await this.request("GET", `/messages/${encodeURIComponent(id)}`);
     if (status === 404) return null;
     if (status < 200 || status >= 300) {
-      throw new Error(`self-hosted mailery: GET /messages/<id> failed (HTTP ${status})`);
+      throw new Error(`self-hosted emails API: GET /messages/<id> failed (HTTP ${status})`);
     }
     const wrapped = (json as { message?: V1Message } | null)?.message;
     return wrapped ?? (json && typeof json === "object" ? (json as V1Message) : null);
@@ -659,7 +659,7 @@ export class SelfHostedMailDataSource implements MailDataSource {
     this.invalidate();
     const { status } = await this.request("DELETE", `/messages/${encodeURIComponent(id)}`);
     if (status !== 404 && (status < 200 || status >= 300)) {
-      throw new Error(`self-hosted mailery: DELETE /messages/<id> failed (HTTP ${status})`);
+      throw new Error(`self-hosted emails API: DELETE /messages/<id> failed (HTTP ${status})`);
     }
   }
 
@@ -700,7 +700,7 @@ export class SelfHostedMailDataSource implements MailDataSource {
     this.invalidate();
     const { status, json } = await this.request("POST", "/messages", body);
     if (status < 200 || status >= 300) {
-      throw new Error(`self-hosted mailery: POST /messages (send) failed (HTTP ${status})`);
+      throw new Error(`self-hosted emails API: POST /messages (send) failed (HTTP ${status})`);
     }
     const rec = (json as { message?: V1Message } | null)?.message;
     const id = rec?.id ?? "";
@@ -723,16 +723,17 @@ export class SelfHostedMailDataSource implements MailDataSource {
 /**
  * Build a SelfHostedMailDataSource from the fleet flip env, or null.
  *
- * The self-hosted flip is defined SPECIFICALLY by the app-scoped
- * HASNA_MAILERY_API_URL + HASNA_MAILERY_API_KEY vars (the fleet client-flip
- * contract). The bare MAILERY_API_URL / MAILERY_API_KEY belong to the mailery.co
- * SaaS client (ApiMailDataSource) and must NOT engage the self-hosted seam — so
- * this returns null unless the HASNA_-scoped vars are both present. resolveCloudConfig
- * then applies /v1 normalization, fail-closed partial-config handling, and respects
- * an explicit `local` mode (returns null on rollback).
+ * The self-hosted flip is defined by the app-scoped HASNA_EMAILS_API_URL +
+ * HASNA_EMAILS_API_KEY vars. The legacy HASNA_MAILERY_* aliases are accepted
+ * only so already-flipped clients do not silently fall back to local data during
+ * the rename. Bare unscoped API vars do not engage this self-hosted seam.
+ * resolveCloudConfig then applies /v1 normalization, fail-closed partial-config
+ * handling, and respects an explicit `local` mode (returns null on rollback).
  */
 export function resolveSelfHostedMailDataSource(fetchImpl?: SelfHostedFetch): SelfHostedMailDataSource | null {
-  if (!process.env["HASNA_MAILERY_API_URL"] || !process.env["HASNA_MAILERY_API_KEY"]) return null;
+  const hasEmailsFlip = Boolean(process.env["HASNA_EMAILS_API_URL"] && process.env["HASNA_EMAILS_API_KEY"]);
+  const hasLegacyFlip = Boolean(process.env["HASNA_MAILERY_API_URL"] && process.env["HASNA_MAILERY_API_KEY"]);
+  if (!hasEmailsFlip && !hasLegacyFlip) return null;
   const config = resolveCloudConfig();
   if (!config) return null;
   return new SelfHostedMailDataSource({ baseUrl: config.baseUrl, apiKey: config.apiKey, fetchImpl });
