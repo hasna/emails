@@ -1,4 +1,4 @@
-// Generic /v1 resource registry for the Mailery self_hosted cloud service.
+// Generic /v1 resource registry for the Emails self-hosted service.
 //
 // The original service handled only domains/addresses/messages by hand. The
 // fleet client-flip needs the SAME resource CRUD vocabulary for the remaining

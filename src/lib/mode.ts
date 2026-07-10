@@ -1,16 +1,15 @@
 import { loadConfig, saveConfig } from "./config.js";
 
 export type MaileryMode = "local" | "cloud";
-export type MaileryModeLabel = "Local" | "Mailery Cloud";
+export type MaileryModeLabel = "Local" | "Self-hosted";
 
 export const MAILERY_MODE_ENV = "MAILERY_MODE";
 export const HASNA_EMAILS_MODE_ENV = "HASNA_EMAILS_MODE";
 export const LEGACY_STORAGE_MODE_ENV = "HASNA_EMAILS_STORAGE_MODE";
 export const LEGACY_STORAGE_MODE_FALLBACK_ENV = "EMAILS_STORAGE_MODE";
-export const MAILERY_MODE_CONFIG_KEY = "mailery_mode";
-export const LEGACY_MODE_CONFIG_KEYS = ["mode", "storage_mode"] as const;
+export const MAILERY_MODE_CONFIG_KEY = "emails_mode";
+export const LEGACY_MODE_CONFIG_KEYS = ["mailery_mode", "mode", "storage_mode"] as const;
 export const MAILERY_MODE_ENV_KEYS = [
-  MAILERY_MODE_ENV,
   HASNA_EMAILS_MODE_ENV,
 ] as const;
 
@@ -43,22 +42,19 @@ export function labelForMaileryMode(mode: MaileryMode): MaileryModeLabel {
     case "local":
       return "Local";
     case "cloud":
-      return "Mailery Cloud";
+      return "Self-hosted";
   }
 }
 
-// There are exactly two modes: `local` (SQLite) and `cloud` (API client — a
-// self-hosted server is just `cloud` pointed at a private base URL). The legacy
-// `self_hosted` / `remote` / `hybrid` values are accepted as deprecated aliases
-// for `cloud`.
+// OSS has exactly two supported modes: `local` (SQLite) and `self_hosted`
+// (API-key client pointed at an Emails service). The internal `cloud` value is
+// retained for compatibility with the existing storage seam.
 export function normalizeMaileryMode(value: string): { mode: MaileryMode; deprecatedAlias: string | null } {
   const normalized = value.trim().toLowerCase().replace(/-/g, "_");
   if (normalized === "local") return { mode: "local", deprecatedAlias: null };
-  if (normalized === "cloud" || normalized === "mailery_cloud") return { mode: "cloud", deprecatedAlias: null };
-  if (normalized === "self_hosted" || normalized === "remote" || normalized === "hybrid") {
-    return { mode: "cloud", deprecatedAlias: normalized };
-  }
-  throw new Error(`Unknown Mailery mode: ${value}. Use local or cloud.`);
+  if (normalized === "self_hosted") return { mode: "cloud", deprecatedAlias: null };
+  if (normalized === "cloud" || normalized === "mailery_cloud") return { mode: "cloud", deprecatedAlias: normalized };
+  throw new Error(`Unknown Emails mode: ${value}. Use local or self_hosted.`);
 }
 
 function findConfiguredMode(config: Record<string, unknown>): { key: string; value: string } | null {
@@ -75,15 +71,15 @@ function warningFor(source: MaileryModeSource, deprecatedAlias: string | null, m
   const oldValue = deprecatedAlias ?? source.value ?? "";
   if (source.kind === "config") {
     if (migratedConfig && deprecatedAlias) {
-      return `Migrated deprecated Mailery mode '${oldValue}' from config to '${MAILERY_MODE_CONFIG_KEY}=${mode}'.`;
+      return `Migrated deprecated Emails mode '${oldValue}' from config to '${MAILERY_MODE_CONFIG_KEY}=self_hosted'.`;
     }
     if (migratedConfig) {
-      return `Migrated deprecated Mailery mode config key '${source.name}' to '${MAILERY_MODE_CONFIG_KEY}=${mode}'.`;
+      return `Migrated deprecated Emails mode config key '${source.name}' to '${MAILERY_MODE_CONFIG_KEY}=self_hosted'.`;
     }
-    return `Deprecated Mailery mode '${oldValue}' in config is treated as '${mode}'.`;
+    return `Deprecated Emails mode '${oldValue}' in config is treated as 'self_hosted'.`;
   }
   if (source.kind === "env") {
-    return `Deprecated Mailery mode '${oldValue}' from ${source.name} is treated as '${mode}'. Set ${MAILERY_MODE_ENV}=${mode} instead.`;
+    return `Deprecated Emails mode '${oldValue}' from ${source.name} is treated as 'self_hosted'. Set ${HASNA_EMAILS_MODE_ENV}=self_hosted instead.`;
   }
   return null;
 }
@@ -114,7 +110,7 @@ export function resolveMaileryMode(opts: ResolveMaileryModeOptions = {}): Mailer
     let migratedConfig = false;
     if (opts.migrateConfig && (configured.key !== MAILERY_MODE_CONFIG_KEY || normalized.deprecatedAlias)) {
       const next = { ...config };
-      next[MAILERY_MODE_CONFIG_KEY] = normalized.mode;
+      next[MAILERY_MODE_CONFIG_KEY] = normalized.mode === "cloud" ? "self_hosted" : normalized.mode;
       for (const key of LEGACY_MODE_CONFIG_KEYS) delete next[key];
       saveConfig(next);
       migratedConfig = true;

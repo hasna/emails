@@ -224,11 +224,10 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     try {
       const db = getDatabase();
 
-      // Cloud (self_hosted) mode: the domain is created directly on the app's
-      // cloud HTTP API (<API_URL>/v1/domains). Providers are a local-only concept
-      // (the cloud API exposes no /v1/providers), so we do NOT resolve a local
-      // provider row or call a provider adapter — `--provider` is passed through
-      // as a label. This makes `domain add` a real cloud write, not a local one.
+      // Self-hosted service mode: the domain is created directly on the service
+      // HTTP API (<API_URL>/v1/domains). Providers are a local-only concept, so
+      // we do NOT resolve a local provider row or call a provider adapter.
+      // `--provider` is passed through as a label.
       if (isCloudMode()) {
         const existing = getDomainByName(opts.provider, domain, db);
         const cloudMode = resolveMaileryMode();
@@ -684,8 +683,8 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .command("add <domain>")
     .description("Add a domain to a provider")
     .requiredOption("--provider <id>", "Provider ID")
-    .option("--domain-type <type>", "Domain type: system, tenant, self_hosted, or local_only")
-    .option("--source-of-truth <source>", "Source of truth: local, postgres, or cloud")
+    .option("--domain-type <type>", "Domain type: self_hosted or local_only; system/tenant are legacy aliases")
+    .option("--source-of-truth <source>", "Source of truth: local or postgres")
     .option("--dry-run", "Resolve inputs and show the planned change without calling the provider or writing to the DB")
     .action((domain: string, opts: { provider: string; dryRun?: boolean; domainType?: string; sourceOfTruth?: string }) => addDomainAction(domain, opts, "domains"));
 
@@ -693,8 +692,8 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .command("connect <domain>")
     .description("Connect an already-owned domain and generate DNS readiness tasks")
     .requiredOption("--provider <id>", "Provider ID")
-    .option("--domain-type <type>", "Domain type: system, tenant, self_hosted, or local_only")
-    .option("--source-of-truth <source>", "Source of truth: local, postgres, or cloud")
+    .option("--domain-type <type>", "Domain type: self_hosted or local_only; system/tenant are legacy aliases")
+    .option("--source-of-truth <source>", "Source of truth: local or postgres")
     .option("--dns-provider <provider>", "DNS provider label: manual, cloudflare, or route53", "manual")
     .option("--no-register-provider", "Do not call the mail provider to register the domain")
     .option("--dry-run", "Show the connection plan without calling the provider or writing to the DB")
@@ -742,8 +741,8 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .command("add <domain>")
     .description("Add a domain to a provider")
     .requiredOption("--provider <id>", "Provider ID")
-    .option("--domain-type <type>", "Domain type: system, tenant, self_hosted, or local_only")
-    .option("--source-of-truth <source>", "Source of truth: local, postgres, or cloud")
+    .option("--domain-type <type>", "Domain type: self_hosted or local_only; system/tenant are legacy aliases")
+    .option("--source-of-truth <source>", "Source of truth: local or postgres")
     .option("--dry-run", "Resolve inputs and show the planned change without calling the provider or writing to the DB")
     .action((domain: string, opts: { provider: string; dryRun?: boolean; domainType?: string; sourceOfTruth?: string }) => addDomainAction(domain, opts, "domain"));
 
@@ -751,8 +750,8 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .command("connect <domain>")
     .description("Connect an already-owned domain and generate DNS readiness tasks")
     .requiredOption("--provider <id>", "Provider ID")
-    .option("--domain-type <type>", "Domain type: system, tenant, self_hosted, or local_only")
-    .option("--source-of-truth <source>", "Source of truth: local, postgres, or cloud")
+    .option("--domain-type <type>", "Domain type: self_hosted or local_only; system/tenant are legacy aliases")
+    .option("--source-of-truth <source>", "Source of truth: local or postgres")
     .option("--dns-provider <provider>", "DNS provider label: manual, cloudflare, or route53", "manual")
     .option("--no-register-provider", "Do not call the mail provider to register the domain")
     .option("--dry-run", "Show the connection plan without calling the provider or writing to the DB")

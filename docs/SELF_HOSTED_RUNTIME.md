@@ -1,53 +1,36 @@
-# Mailery Self-Hosted Runtime
+# Emails Self-Hosted Runtime
 
-Mailery has three deployment modes:
+Emails has exactly two OSS deployment modes:
 
 - `local`: local SQLite and local files are the source of truth.
-- `self_hosted`: user-owned PostgreSQL, S3, and SES are the source of truth.
-- `cloud`: Mailery Cloud API is the source of truth.
+- `self_hosted`: CLI, MCP, and API clients authenticate with an API key and talk to the self-hosted Emails service. The service owns email state in the shared cloud/Postgres deployment.
 
 The per-domain aggregator, inbound readiness, outbound readiness, and DNS
 authentication contract lives in [`DOMAIN_READINESS.md`](DOMAIN_READINESS.md).
 That contract is intentionally per domain: a domain can be inbound-ready without
 being outbound-ready, and DMARC is a sending-domain signal rather than a global
-Mailery app blocker.
-
-In `self_hosted` mode, PostgreSQL owns mailbox, message, label, provider, send,
-and state rows. S3 owns raw SES MIME objects and optional attachment objects.
-The local SQLite database is only a runtime cache so existing CLI, MCP, server,
-and TUI code can keep using the synchronous local store safely.
+Emails app blocker.
 
 ## Runtime Contract
 
-Configure self-hosted source-of-truth mode with:
+Configure self-hosted clients with the service URL and an API key issued by the
+operator:
 
 ```bash
-export HASNA_EMAILS_DATABASE_URL='<postgresql-connection-url>'
-export MAILERY_MODE=self_hosted
-export HASNA_EMAILS_STORAGE_MODE=remote
+export HASNA_EMAILS_MODE=self_hosted
+export HASNA_EMAILS_API_URL='<self-hosted-service-url>'
+export HASNA_EMAILS_API_KEY='<redacted-api-key>'
 ```
 
-`EMAILS_DATABASE_URL` remains a compatibility fallback. Do not print, commit,
-or paste connection strings.
+Do not print, commit, or paste API keys. The self-hosted service is the only
+source of truth in this mode: CLI commands, MCP tools, and API clients read and
+write email state through the API-key-authenticated service, and that service
+persists state in the shared cloud/Postgres deployment.
 
-The OSS package ships generic self-hosted placeholders only. Production
-operators must provide their own PostgreSQL cluster, database, S3 bucket, SES
-identity, and secret path values through environment variables or their private
-deployment system. Hasna's internal self-hosted deployment uses AWS RDS, SES,
-and S3, but its concrete resource names are intentionally not exported from the
-package or shown in public docs.
-
-When `HASNA_EMAILS_STORAGE_MODE=remote`, runtime commands:
-
-1. Pull configured runtime tables from PostgreSQL into the local cache.
-2. Execute the requested command against the cache.
-3. Flush changed cache tables back to PostgreSQL.
-
-Long-running MCP and HTTP server processes prepare the cache at startup and run
-periodic background flushes. `HASNA_EMAILS_STORAGE_MODE=hybrid` keeps the older
-explicit sync behavior where local SQLite remains the source and operators run
-`emails storage pull`, `emails storage push`, or `emails storage sync --force`
-manually.
+The OSS package must not present a mixed local/remote runtime as supported.
+Local SQLite remains the `local` mode source of truth only. In `self_hosted`
+mode, local-only mail is test/import data unless an operator explicitly migrates
+it into the self-hosted service.
 
 ## Commands
 
@@ -55,47 +38,16 @@ manually.
 emails self-hosted setup
 emails self-hosted status --json
 emails self-hosted migrate
-emails self-hosted migrate-local --json
-```
-
-`migrate-local` pushes existing local SQLite rows into self-hosted PostgreSQL.
-It does not pull first, because pulling would overwrite the local data being
-migrated.
-
-After a successful local-to-self-hosted migration, production/runtime commands
-should run with:
-
-```bash
-export MAILERY_MODE=self_hosted
-export HASNA_EMAILS_STORAGE_MODE=remote
-```
-
-At that point the local SQLite file is no longer the durable mailbox source of
-truth. It is recreated or refreshed from PostgreSQL, used as a command/runtime
-cache, and flushed back to PostgreSQL. Do not keep adding new production mail to
-local-only providers or local-only inbox sources after the migration unless the
-intent is explicitly test/import-only. Validate the cutover with:
-
-```bash
-emails self-hosted status --json
 emails domains list --json
 emails inbox sources --json
 ```
 
-The older storage commands remain available:
-
-```bash
-emails storage status
-emails storage migrate
-emails storage migrate-local
-emails storage pull
-emails storage push
-```
+`migrate` applies the self-hosted service schema. Local-to-service data movement
+is an operator-approved migration task, not an automatic mixed local/remote runtime.
 
 ## S3 And Attachments
 
-SES inbound writes raw MIME to S3. `emails inbox sync-s3` records `raw_s3_url`
-on inbound rows, stores attachment metadata, and, when configured, stores
-attachments in S3 as `s3://` URLs. In source-of-truth mode the S3 materialization
-tables are flushed to PostgreSQL after successful sync, so the local cache does
-not become the durable owner of raw mail or attachments.
+SES inbound may write raw MIME to S3, and attachment materialization may use S3
+behind the self-hosted service. The public OSS client contract is still the same:
+clients authenticate with an API key and read/write through the self-hosted
+Emails service; the service owns the shared Postgres/S3 state.

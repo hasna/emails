@@ -31,7 +31,6 @@ export const allCommandModules = [
   "status",
   "daemon",
   "browserplan",
-  "cloud",
   "db",
 ] as const;
 
@@ -96,7 +95,6 @@ export const knownCommandNames = new Set([
   "daemon",
   "logs",
   "browserplan",
-  "cloud",
   "db",
   // Event-integration commands registered dynamically from @hasna/events
   // (see registerOptionalEventsCommands). They must be recognized here so that
@@ -203,11 +201,10 @@ export function commandModulesFor(args: string[]): readonly CommandModule[] {
     case "daemon":
     case "logs": return ["daemon"];
     case "browserplan": return ["browserplan"];
-    case "cloud": return ["cloud"];
     case "db": return ["db"];
     // The event-integration commands are registered separately by
     // registerOptionalEventsCommands (from @hasna/events), so they need none of
-    // Mailery's own command modules loaded.
+    // Emails command modules loaded.
     case "events":
     case "channels":
     case "webhooks": return [];

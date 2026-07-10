@@ -88,7 +88,7 @@ function deps(): CloudServiceDeps {
   return {
     client,
     store: new MaileryCloudStore(client),
-    verifier: verifyApiKey({ app: "mailery", signingSecret: SIGNING_SECRET }),
+    verifier: verifyApiKey({ app: "emails", signingSecret: SIGNING_SECRET }),
     migrations: maileryCloudMigrations(),
     version: "9.9.9",
   };
@@ -104,8 +104,8 @@ function req(method: string, path: string, opts: { token?: string; body?: unknow
   });
 }
 
-const readToken = () => mintApiKey({ app: "mailery", scopes: ["mailery:read"], signingSecret: SIGNING_SECRET }).token;
-const writeToken = () => mintApiKey({ app: "mailery", scopes: ["mailery:*"], signingSecret: SIGNING_SECRET }).token;
+const readToken = () => mintApiKey({ app: "emails", scopes: ["emails:read"], signingSecret: SIGNING_SECRET }).token;
+const writeToken = () => mintApiKey({ app: "emails", scopes: ["emails:*"], signingSecret: SIGNING_SECRET }).token;
 
 describe("cloud service generic resources", () => {
   test("migration 0005 is registered", () => {

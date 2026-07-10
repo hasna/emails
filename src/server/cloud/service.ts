@@ -1,8 +1,8 @@
-// HTTP request handler for the Mailery self_hosted cloud service.
+// HTTP request handler for the Emails self-hosted service.
 //
 // Surfaces the fleet-standard operational probes (/health, /ready, /version)
 // plus the authenticated, versioned /v1 API. Every /v1 route requires a valid
-// Hasna API key (@hasna/contracts/auth) scoped to `mailery:read` / `mailery:write`.
+// Hasna API key (@hasna/contracts/auth) scoped to the Emails service.
 //
 // Amendment A1 (PURE REMOTE): all data operations hit the cloud Postgres via the
 // store, which wraps the vendored storage kit's typed client.
@@ -166,7 +166,7 @@ export async function handleCloudRequest(
       status: "ok",
       version: deps.version,
       mode: MODE,
-      name: "mailery",
+      name: "emails",
       db: { ok: health.ok, latencyMs: health.latencyMs, ...(health.error ? { error: health.error } : {}) },
     });
   }
@@ -184,7 +184,7 @@ export async function handleCloudRequest(
   }
 
   if (path === "/version") {
-    return json(200, { status: "ok", version: deps.version, mode: MODE, name: "mailery" });
+    return json(200, { status: "ok", version: deps.version, mode: MODE, name: "emails" });
   }
 
   if (path === "/openapi.json" || path === "/v1/openapi.json") {
@@ -194,8 +194,8 @@ export async function handleCloudRequest(
   if (!path.startsWith("/v1/") && path !== "/v1") return null;
 
   // ---- /v1 (authenticated) -----------------------------------------------
-  const read = ["mailery:read"];
-  const write = ["mailery:write"];
+  const read = ["emails:read"];
+  const write = ["emails:write"];
   const store = deps.store;
 
   try {

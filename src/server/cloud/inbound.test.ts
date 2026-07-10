@@ -81,14 +81,14 @@ function deps(): CloudServiceDeps {
   return {
     client,
     store: new MaileryCloudStore(client),
-    verifier: verifyApiKey({ app: "mailery", signingSecret: SIGNING_SECRET }),
+    verifier: verifyApiKey({ app: "emails", signingSecret: SIGNING_SECRET }),
     migrations: maileryCloudMigrations(),
     version: "9.9.9",
   };
 }
 
 function writeToken(): string {
-  return mintApiKey({ app: "mailery", scopes: ["mailery:*"], signingSecret: SIGNING_SECRET }).token;
+  return mintApiKey({ app: "emails", scopes: ["emails:*"], signingSecret: SIGNING_SECRET }).token;
 }
 
 function post(body: unknown, token = writeToken()): Request {
@@ -119,7 +119,7 @@ const INBOUND = {
   source_id: "local-row-1",
 };
 
-describe("mailery cloud inbound messages", () => {
+describe("emails self-hosted inbound messages", () => {
   test("migration set includes the inbound schema migration", () => {
     const ids = maileryCloudMigrations().map((m) => m.id);
     expect(ids).toContain("0002_mailery_messages_inbound");

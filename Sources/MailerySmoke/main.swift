@@ -2,7 +2,7 @@ import Foundation
 import SQLite3
 import MaileryCore
 
-// CLI smoke test for the Mailery mail store + CLI argv builder. Exits 0 on success, 1 on
+// CLI smoke test for the Emails mail store + CLI argv builder. Exits 0 on success, 1 on
 // failure. Used as the verification harness because XCTest / swift-testing are unavailable
 // under macOS Command Line Tools (no Xcode). Mirrors open-notes' OpenNotesSmoke.
 
@@ -61,7 +61,7 @@ func insert(_ db: OpaquePointer?, _ sql: String, _ values: [Any]) {
 // MARK: - build a fixture DB
 
 let tempDB = FileManager.default.temporaryDirectory
-    .appendingPathComponent("mailery-smoke-\(UUID().uuidString).db")
+    .appendingPathComponent("emails-smoke-\(UUID().uuidString).db")
 defer { try? FileManager.default.removeItem(at: tempDB) }
 
 var db: OpaquePointer?

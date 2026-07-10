@@ -14,7 +14,7 @@ const VALID_MAILBOXES: Mailbox[] = ["inbox", "unread", "starred", "sent", "archi
 export function registerUiCommand(program: Command, _output: (data: unknown, formatted: string) => void): void {
   program
     .command("ui")
-    .description("Open the Mailery UI")
+    .description("Open the Emails UI")
     .option("--mailbox <name>", "Start in: inbox | unread | starred | sent | archived | spam | trash (default: your saved setting)")
     .option("--clipboard-test [text]", "Copy test text using the same clipboard path as the UI")
     .action(async (opts: { mailbox?: string; clipboardTest?: string | boolean }) => {
@@ -34,7 +34,7 @@ export function registerUiCommand(program: Command, _output: (data: unknown, for
         return;
       }
       if (!process.stdin.isTTY || !process.stdout.isTTY) {
-        console.error(chalk.red("Mailery UI requires a TTY terminal."));
+        console.error(chalk.red("Emails UI requires a TTY terminal."));
         console.error(chalk.dim("Use `emails inbox list`, `emails inbox read <id>`, or `emails send` non-interactively."));
         process.exitCode = 1;
         return;

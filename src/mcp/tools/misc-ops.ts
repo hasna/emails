@@ -272,7 +272,7 @@ export function registerMiscOpsTools(server: McpServer): void {
 
   server.tool(
   "export_emails",
-  "Export mailery as CSV or JSON string",
+  "Export emails as CSV or JSON string",
   {
     format: z.enum(["csv", "json"]).optional().describe("Output format (default: json)"),
     provider_id: z.string().optional().describe("Filter by provider ID"),
@@ -346,7 +346,7 @@ export function registerMiscOpsTools(server: McpServer): void {
 
   server.tool(
   "batch_send",
-  "Send mailery to a list of recipients using a template. Each recipient gets personalized content.",
+  "Send emails to a list of recipients using a template. Each recipient gets personalized content.",
   {
     recipients: z.array(z.object({ email: z.string(), vars: z.record(z.string()).optional() })).describe("List of recipients with optional template variables"),
     template_name: z.string().describe("Template name to use"),

@@ -55,7 +55,7 @@ function deps(): CloudServiceDeps {
   return {
     client,
     store: new MaileryCloudStore(client),
-    verifier: verifyApiKey({ app: "mailery", signingSecret: SIGNING_SECRET }),
+    verifier: verifyApiKey({ app: "emails", signingSecret: SIGNING_SECRET }),
     migrations: maileryCloudMigrations(),
     version: "9.9.9",
   };
@@ -71,7 +71,7 @@ function req(method: string, path: string, opts: { token?: string; body?: unknow
   });
 }
 
-describe("mailery cloud service", () => {
+describe("emails self-hosted service", () => {
   test("GET /health returns 200 with status/version/mode", async () => {
     const res = await handleCloudRequest(deps(), req("GET", "/health"));
     expect(res?.status).toBe(200);
@@ -84,7 +84,7 @@ describe("mailery cloud service", () => {
   test("GET /version returns the version+mode shape", async () => {
     const res = await handleCloudRequest(deps(), req("GET", "/version"));
     const body = await res!.json();
-    expect(body).toMatchObject({ status: "ok", version: "9.9.9", mode: "cloud", name: "mailery" });
+    expect(body).toMatchObject({ status: "ok", version: "9.9.9", mode: "cloud", name: "emails" });
   });
 
   test("unknown non-v1 path falls through (null)", async () => {
@@ -99,14 +99,14 @@ describe("mailery cloud service", () => {
   });
 
   test("/v1 with a bad-signature key is rejected 401", async () => {
-    const forged = mintApiKey({ app: "mailery", scopes: ["mailery:read"], signingSecret: "a-different-signing-secret-16b+" }).token;
+    const forged = mintApiKey({ app: "emails", scopes: ["emails:read"], signingSecret: "a-different-signing-secret-16b+" }).token;
     const res = await handleCloudRequest(deps(), req("GET", "/v1/domains", { token: forged }));
     expect(res?.status).toBe(401);
   });
 
   test("read-scoped key can GET but not POST (403 insufficient scope)", async () => {
     const d = deps();
-    const readToken = mintApiKey({ app: "mailery", scopes: ["mailery:read"], signingSecret: SIGNING_SECRET }).token;
+    const readToken = mintApiKey({ app: "emails", scopes: ["emails:read"], signingSecret: SIGNING_SECRET }).token;
     const listRes = await handleCloudRequest(d, req("GET", "/v1/domains", { token: readToken }));
     expect(listRes?.status).toBe(200);
     const writeRes = await handleCloudRequest(d, req("POST", "/v1/domains", { token: readToken, body: { domain: "x.com" } }));
@@ -121,7 +121,7 @@ describe("mailery cloud service", () => {
 
   test("write-scoped key creates a domain (201) and it appears in the list", async () => {
     const d = deps();
-    const writeToken = mintApiKey({ app: "mailery", scopes: ["mailery:*"], signingSecret: SIGNING_SECRET }).token;
+    const writeToken = mintApiKey({ app: "emails", scopes: ["emails:*"], signingSecret: SIGNING_SECRET }).token;
     const create = await handleCloudRequest(d, req("POST", "/v1/domains", { token: writeToken, body: { domain: "Example.COM" } }));
     expect(create?.status).toBe(201);
     const created = (await create!.json()).domain;
@@ -131,7 +131,7 @@ describe("mailery cloud service", () => {
   });
 
   test("POST with missing required field returns 400", async () => {
-    const writeToken = mintApiKey({ app: "mailery", scopes: ["mailery:write"], signingSecret: SIGNING_SECRET }).token;
+    const writeToken = mintApiKey({ app: "emails", scopes: ["emails:write"], signingSecret: SIGNING_SECRET }).token;
     const res = await handleCloudRequest(deps(), req("POST", "/v1/domains", { token: writeToken, body: {} }));
     expect(res?.status).toBe(400);
   });

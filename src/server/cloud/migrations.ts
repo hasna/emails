@@ -1,14 +1,14 @@
-// Schema migrations for the Mailery self_hosted cloud service (Postgres).
+// Schema migrations for the Emails self-hosted service (Postgres).
 //
 // These run through the vendored storage kit's MigrationLedger (checksummed,
 // idempotent, drift/downgrade-guarded). They own ONLY the tables the
-// self_hosted /v1 API manages; they never touch the live mailery.co SaaS
-// database (a separate database on the shared cluster).
+// self_hosted /v1 API manages; they never touch the separate Hasna Tools
+// Mailery SaaS database.
 
 import { defineMigration, type Migration } from "../../generated/storage-kit/index.js";
 import { apiKeyMigrations } from "@hasna/contracts/auth";
 
-/** Mailery self_hosted domain schema: sending domains, addresses, message ledger. */
+/** Emails self-hosted domain schema: sending domains, addresses, message ledger. */
 const CORE_SCHEMA = defineMigration(
   "0001_mailery_selfhosted_core",
   `

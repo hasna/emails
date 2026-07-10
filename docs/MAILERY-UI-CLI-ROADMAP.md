@@ -1,4 +1,6 @@
-# Mailery UI + CLI Roadmap
+# Mailery UI + CLI Roadmap (Archived)
+
+Archival note: this document records historical pre-rename work. Active OSS package, CLI, MCP, API, and app surfaces are Emails (`@hasna/emails`, `emails`, `emails-mcp`, `emails-serve`).
 
 Created: 2026-06-18
 

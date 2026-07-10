@@ -10,23 +10,22 @@ if (args.includes("--version") || args.includes("-V")) {
 if (args.includes("--help") || args.includes("-h")) {
   console.log(`Usage: emails-serve [command] [options]
 
-Runs the Mailery HTTP service (or a background worker).
+Runs the Emails HTTP service (or a background worker).
 
 Commands:
   (default)          Run the HTTP service:
-                       - cloud mode (HASNA_MAILERY_STORAGE_MODE=cloud +
-                         HASNA_MAILERY_DATABASE_URL, or a platform-injected
-                         DATABASE_URL): the self_hosted PURE-REMOTE API
-                         (GET /health, /ready, /version and the API-key
-                         authenticated /v1 surface), binding 0.0.0.0.
+                       - self_hosted service mode: the API-key-authenticated
+                         /v1 surface (GET /health, /ready, /version plus
+                         domains, addresses, and messages) reads/writes the
+                         shared cloud/Postgres service, binding 0.0.0.0.
                        - local mode (default): the SQLite dashboard on 127.0.0.1.
-  ingest-worker      Run the SES-inbound ingestion worker: long-poll the SQS
-                     queue (MAILERY_INGEST_QUEUE_URL), fetch each archived raw
-                     message from S3, and write it to the cloud Postgres store.
+  ingest-worker      Run the SES-inbound ingestion worker: long-poll the queue,
+                     fetch each archived raw message from S3, and write it to
+                     the shared cloud/Postgres store.
 
 Options:
   --host <host>      Host to bind to
-  --port <port>      Port to listen on (default: cloud 8080 / local 3900)
+  --port <port>      Port to listen on (default: self_hosted 8080 / local 3900)
   -V, --version      output the version number
   -h, --help         display help`);
   process.exit(0);

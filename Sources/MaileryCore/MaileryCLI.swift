@@ -1,10 +1,10 @@
 import Foundation
 
-// MARK: - Mailery CLI bridge (mutations)
+// MARK: - Emails CLI bridge (mutations)
 //
-// Design split: MaileryCore READS the SQLite store directly (fast, no shell-out), but
+// Design split: MaileryCore reads the SQLite store directly (fast, no shell-out), but
 // every MUTATION (send / reply / mark-read / archive / star / label / refresh) is
-// delegated to the `mailery` CLI. The CLI owns provider auth, inbound refresh, threading
+// delegated to the `emails` CLI. The CLI owns provider auth, inbound refresh, threading
 // headers, and write-path invariants — re-implementing those in Swift would drift from
 // the source of truth and risk corrupting the shared DB. So the app never writes to
 // emails.db itself; it shells out.
@@ -72,32 +72,32 @@ public struct MaileryCLI: Sendable {
 
     // MARK: process runner
 
-    /// Resolve the `mailery` binary. Prefer absolute candidates, then fall back to
-    /// launching via `/usr/bin/env mailery` so a PATH install still works.
+    /// Resolve the `emails` binary. Prefer absolute candidates, then fall back to
+    /// launching via `/usr/bin/env emails` so a PATH install still works.
     static func resolveBinary() -> (launchPath: String, prefixArgs: [String])? {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let candidates = [
-            "\(home)/.bun/bin/mailery",
-            "/opt/homebrew/bin/mailery",
-            "/usr/local/bin/mailery",
-            "/usr/bin/mailery",
+            "\(home)/.bun/bin/emails",
+            "/opt/homebrew/bin/emails",
+            "/usr/local/bin/emails",
+            "/usr/bin/emails",
         ]
         for p in candidates where FileManager.default.isExecutableFile(atPath: p) {
             return (p, [])
         }
         // Fall back to env-resolution via PATH.
         if FileManager.default.isExecutableFile(atPath: "/usr/bin/env") {
-            return ("/usr/bin/env", ["mailery"])
+            return ("/usr/bin/env", ["emails"])
         }
         return nil
     }
 
-    /// Run `mailery <args>` synchronously. Returns ok=false (never throws) if the binary
+    /// Run `emails <args>` synchronously. Returns ok=false (never throws) if the binary
     /// is missing or the process exits non-zero, so the caller can surface a toast.
     @discardableResult
     public func run(_ args: [String]) -> Result {
         guard let (launchPath, prefix) = MaileryCLI.resolveBinary() else {
-            return Result(ok: false, output: "mailery CLI not found")
+            return Result(ok: false, output: "emails CLI not found")
         }
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: launchPath)
@@ -109,7 +109,7 @@ public struct MaileryCLI: Sendable {
             try proc.run()
             proc.waitUntilExit()
         } catch {
-            return Result(ok: false, output: "failed to launch mailery: \(error.localizedDescription)")
+            return Result(ok: false, output: "failed to launch emails: \(error.localizedDescription)")
         }
         let outData = out.fileHandleForReading.readDataToEndOfFile()
         let errData = err.fileHandleForReading.readDataToEndOfFile()

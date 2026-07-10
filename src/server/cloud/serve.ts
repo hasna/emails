@@ -1,4 +1,4 @@
-// Bootstraps and runs the Mailery self_hosted cloud service (Bun.serve).
+// Bootstraps and runs the Emails self-hosted service (Bun.serve).
 //
 // Wires the vendored storage-kit Postgres pool, the API-key verifier
 // (@hasna/contracts/auth), the migration set, and the request handler together.
@@ -56,7 +56,7 @@ export async function startCloudServer(
     },
   });
 
-  console.log(`Mailery cloud service (self_hosted, PURE REMOTE) listening on http://${hostname}:${server.port}`);
+  console.log(`Emails self-hosted service listening on http://${hostname}:${server.port}`);
   console.log(`  probes: GET /health  GET /ready  GET /version`);
   console.log(`  api:    /v1/domains  /v1/addresses  /v1/messages  (x-api-key required)`);
 

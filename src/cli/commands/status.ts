@@ -53,15 +53,15 @@ export function registerStatusCommands(program: Command, output: (data: unknown,
 
   program
     .command("project-panel")
-    .description("Emit a contract-valid project dashboard panel for Mailery")
-    .option("--project <project>", "Dashboard project slug or name", "mailery")
+    .description("Emit a contract-valid project dashboard panel for Emails")
+    .option("--project <project>", "Dashboard project slug or name", "emails")
     .option("--limit <n>", "Maximum panel items/resources", "20")
     .option("--contract", "Emit hasna.project_panel.v1 contract JSON")
     .option("--json", "Output JSON")
     .action(async (opts: { project?: string; limit?: string; contract?: boolean; json?: boolean }) => {
       try {
         const { createMaileryProjectPanel } = await import("../../lib/project-panel.js");
-        const panel = createMaileryProjectPanel(opts.project ?? "mailery", {
+        const panel = createMaileryProjectPanel(opts.project ?? "emails", {
           limit: parseCliPositiveIntOption(opts.limit, 20, 100),
         });
         if (opts.json || opts.contract) {
@@ -69,7 +69,7 @@ export function registerStatusCommands(program: Command, output: (data: unknown,
           return;
         }
         output(panel, [
-          "Mailery project panel",
+          "Emails project panel",
           `  Project: ${panel.projectId}`,
           `  State:   ${panel.state}`,
           `  ${panel.summary ?? "No summary."}`,
@@ -343,7 +343,7 @@ export function registerStatusCommands(program: Command, output: (data: unknown,
 
   addAgentPromptOptions(program
     .command("ask [prompt...]")
-    .description("Ask a read-only Mailery AI agent to inspect local email with tool calls"))
+    .description("Ask a read-only Emails AI agent to inspect local email with tool calls"))
     .action((promptParts: string[] | undefined, opts: AgentPromptOptions) => runAgentPrompt(promptParts, opts, output));
 }
 

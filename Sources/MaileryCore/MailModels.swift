@@ -23,7 +23,7 @@ public struct MailAttachment: Sendable, Equatable {
 
 public struct MailMessage: Sendable, Equatable {
     /// The row id. For `inbound` messages this is the `inbound_emails.id` that the
-    /// `mailery inbox …` CLI mutates. For `sent` messages (from the outbound `emails`
+    /// `emails inbox ...` CLI mutates. For `sent` messages (from the outbound `emails`
     /// log) this is `emails.id` and is read-only in the UI.
     public var id: String
     public var source: String          // "inbound" | "sent"

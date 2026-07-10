@@ -50,7 +50,7 @@ export async function runDiagnostics(db?: Database, opts: DiagnosticsOptions = {
   const supportedProviders = providers.filter((provider) => provider.type !== "gmail");
   const legacyGmailProviders = providers.filter((provider) => provider.type === "gmail");
   if (mode.mode === "cloud") {
-    checks.push({ name: "Providers", status: "pass", message: "Mailery Cloud mode; local SES/Resend/Sandbox providers are optional" });
+    checks.push({ name: "Providers", status: "pass", message: "Self-hosted service mode; local SES/Resend/Sandbox providers are optional" });
   } else {
     checks.push(
       supportedProviders.length > 0

@@ -1,35 +1,22 @@
-# Mailery Domain Readiness
+# Emails Domain Readiness
 
-Mailery is a multi-domain mail aggregator and sender. A Mailery install can
+Emails is a multi-domain mail aggregator and sender. An Emails install can
 manage many domains, and each domain has its own ownership, inbound, outbound,
 DNS, provider, and safety state. No single DMARC, DKIM, SPF, MX, or SES setting
 makes the whole app ready or not ready.
 
-This document is the canonical OSS contract for domain readiness. Platform
-wrappers such as Mailery Cloud can add tenant, billing, and provider automation
-on top of this contract, but they must not weaken the per-domain rules.
+This document is the canonical OSS contract for domain readiness.
 
 ## Deployment Modes
 
-Mailery has three user-visible modes.
+Emails has exactly two OSS user-visible modes.
 
-| Mode | Owner | Source of truth | Local storage role |
+| Mode | Owner | Source of truth | Client access |
 | --- | --- | --- | --- |
-| `local` | User machine | Local SQLite/files | Durable source of truth |
-| `self_hosted` | User or organization | User-owned PostgreSQL/S3/provider state | Runtime cache only |
-| `cloud` | Mailery Cloud SaaS | Mailery Cloud API/RDS/S3/provider state | Optional cache/pull target |
+| `local` | User machine | Local SQLite/files | Local CLI/MCP/API process |
+| `self_hosted` | User or organization | Self-hosted Emails service backed by shared cloud/Postgres state | API-key-authenticated CLI/MCP/API calls |
 
-`remote` and `hybrid` are legacy vocabulary and must not be used in new user
-interfaces for deployment mode. Compatibility code may continue accepting those
-values as aliases, but user-facing docs and CLI output should say `local`,
-`self_hosted`, and `cloud`.
-
-The lower-level storage sync mode is separate:
-
-- `HASNA_EMAILS_STORAGE_MODE=remote` means PostgreSQL is the source of truth and
-  local SQLite is a runtime cache.
-- `HASNA_EMAILS_STORAGE_MODE=hybrid` means local SQLite remains source of truth
-  and sync happens only when the operator runs explicit storage sync commands.
+Legacy aliases accepted by compatibility code are not supported OSS runtime modes. User-facing docs and CLI output should say `local` or `self_hosted`.
 
 ## Domain Types
 
@@ -37,14 +24,10 @@ Every domain belongs to exactly one operational scope.
 
 | Type | Example | Meaning |
 | --- | --- | --- |
-| System domain | `mailery.co` | Platform-owned mail for signup, login, billing, alerts, and system notifications. |
-| Tenant domain | `example.com` in Mailery Cloud | A customer or user domain managed by the SaaS control plane. |
-| Self-hosted domain | `example.com` in a user AWS account | A user-owned domain managed by the OSS package against user-owned infrastructure. |
+| Self-hosted domain | `example.com` in a user AWS account | A user-owned domain managed by the self-hosted Emails service. |
 | Local-only domain | `example.test` or imported mail | A local development or imported-mail domain with no provider readiness guarantee. |
 
-System domains must never be treated as a fallback sender for tenant domains.
-Tenant domains must never be allowed to send as another tenant or as the system
-domain. Self-hosted domains must not depend on Mailery Cloud to function.
+Self-hosted domains must not depend on a hosted SaaS control plane to function.
 
 ## Lifecycle
 
@@ -54,45 +37,41 @@ The canonical lifecycle is per domain:
 added -> ownership_verified -> inbound_ready -> outbound_ready -> monitored -> restricted
 ```
 
-`suspended` is a terminal or administrative state that can replace
-`restricted` when the domain must be fully disabled.
-
-The states mean:
+`suspended` is a terminal or administrative state that can replace `restricted`
+when the domain must be fully disabled.
 
 | State | Meaning |
 | --- | --- |
-| `added` | The domain row exists, but Mailery has not proven ownership or provider readiness. |
+| `added` | The domain row exists, but Emails has not proven ownership or provider readiness. |
 | `ownership_verified` | The operator or platform has proved control over the domain through DNS, provider identity, or explicit trusted configuration. |
 | `inbound_ready` | Mail for the domain can be received through the configured inbound provider and stored in the active source of truth. |
-| `outbound_ready` | Mailery may send with `From:` addresses on this domain through the configured provider. |
+| `outbound_ready` | Emails may send with `From:` addresses on this domain through the configured provider. |
 | `monitored` | Real outbound data is flowing and bounce, complaint, delivery, and authentication signals are being observed. |
 | `restricted` | The domain can still exist and receive mail, but one or more risky operations are disabled. |
 | `suspended` | The domain is disabled for both sending and operational changes until manual or automated remediation. |
 
 Inbound and outbound readiness are independent. A domain can aggregate inbound
 mail without being allowed to send. A send-only domain can send without moving
-root MX to Mailery, as long as provider and authentication requirements are met.
+root MX to Emails, as long as provider and authentication requirements are met.
 
 ## Readiness Signals
 
-Mailery should store and report these signals per domain.
+Emails should store and report these signals per domain.
 
 | Signal | Scope | Required for |
 | --- | --- | --- |
 | Ownership verification | Domain | Inbound and outbound setup beyond local-only/imported use |
-| MX routing | Domain | Inbound readiness when Mailery receives mail for the domain |
+| MX routing | Domain | Inbound readiness when Emails receives mail for the domain |
 | Provider inbound route | Domain/provider | Inbound readiness |
 | DKIM verification | Domain/provider | Outbound readiness |
 | SPF or custom MAIL FROM alignment | Domain/provider | Outbound readiness |
 | DMARC record | Domain | Monitoring and production-grade outbound posture |
-| SES/account production access | Provider/account | Real SaaS or self-hosted SES outbound at scale |
+| SES/account production access | Provider/account | Real self-hosted SES outbound at scale |
 | Bounce/complaint/reject events | Domain/provider | Monitored state and restriction automation |
-| Billing/subscription | Tenant/platform | SaaS outbound and hosted resource usage only |
 
 DMARC is intentionally listed as a domain signal, not an app signal. It should
-not block local mail viewing, self-hosted inbound aggregation, or SaaS inbound
-aggregation. It matters when Mailery sends from that domain and wants a
-production-grade sender posture.
+not block local mail viewing or self-hosted inbound aggregation. It matters when
+Emails sends from that domain and wants a production-grade sender posture.
 
 ## Mode-Specific Rules
 
@@ -112,9 +91,8 @@ Local mode may:
 Local mode must not:
 
 - silently claim a domain is production-ready;
-- send through a real provider without provider credentials and per-domain
-  outbound readiness;
-- require Mailery Cloud.
+- send through a real provider without provider credentials and per-domain outbound readiness;
+- require a hosted account.
 
 Typical local setup:
 
@@ -124,15 +102,15 @@ emails domains connect example.com --provider <provider-id> --source-of-truth lo
 emails domains status example.com --json
 ```
 
-For a local-only/imported-mail domain, DNS output is guidance. It becomes a
-hard send requirement only when the user chooses a real sending provider.
+For a local-only/imported-mail domain, DNS output is guidance. It becomes a hard
+send requirement only when the user chooses a real sending provider.
 
 ### Self-Hosted
 
-Self-hosted mode uses user-owned infrastructure. PostgreSQL owns rows for
-mailboxes, messages, domains, providers, send state, and operational state. S3
-owns raw inbound MIME and optional attachment materialization. Local SQLite is a
-runtime cache only when `HASNA_EMAILS_STORAGE_MODE=remote`.
+Self-hosted mode uses the self-hosted Emails service as the source of truth. The
+CLI, MCP server, and API clients authenticate with an API key and read/write
+email state through that service. The service stores domain, mailbox, message,
+provider, send, and operational state in the shared cloud/Postgres deployment.
 
 Self-hosted mode may use AWS RDS/S3/SES, but the OSS contract is not
 AWS-exclusive. AWS-specific helpers are implementation details for SES/S3
@@ -141,20 +119,19 @@ operators.
 Self-hosted mode must:
 
 - verify each domain independently;
-- store inbound and outbound readiness in the self-hosted source of truth;
+- store inbound and outbound readiness in the self-hosted service;
 - fail closed before sending from a domain that is not outbound-ready;
-- report whether local state is a cache or source of truth;
-- avoid storing operator-specific secret names, bucket names, or account IDs in
-  public defaults.
+- keep local SQLite out of the supported source-of-truth path;
+- avoid storing operator-specific secret names, bucket names, or account IDs in public defaults.
 
 Typical self-hosted setup:
 
 ```bash
-export HASNA_EMAILS_DATABASE_URL='<postgresql-connection-url>'
-export MAILERY_MODE=self_hosted
-export HASNA_EMAILS_STORAGE_MODE=remote
+export HASNA_EMAILS_MODE=self_hosted
+export HASNA_EMAILS_API_URL='<self-hosted-service-url>'
+export HASNA_EMAILS_API_KEY='<redacted-api-key>'
 
-emails self-hosted migrate
+emails self-hosted status --json
 emails domains connect example.com --provider <ses-id> --source-of-truth postgres --dns-provider route53 --no-register-provider
 emails domains dns example.com --json
 emails domains verify example.com
@@ -163,47 +140,10 @@ emails domains enable-outbound example.com
 ```
 
 `domains connect` is for domains the operator already owns. It does not require
-Mailery Cloud, and `--no-register-provider` keeps the command to local/source of
+a hosted account, and `--no-register-provider` keeps the command to source-of
 truth metadata plus DNS tasks when the provider identity already exists. Domain
-purchase remains a separate registrar action (`domain buy` / `domain setup`)
-and must be explicit.
-
-To migrate away from local-authoritative mail, run `emails self-hosted
-migrate-local` once before switching production commands to
-`HASNA_EMAILS_STORAGE_MODE=remote`. After that point, local SQLite must be
-treated as a runtime cache. Operators should validate `emails self-hosted
-status --json`, then use source-aware inbox/domain commands to confirm rows are
-read from the self-hosted source.
-
-### Cloud
-
-Cloud mode uses Mailery Cloud as the source of truth. The OSS CLI is a client of
-the hosted API. SaaS-specific concerns such as tenant isolation, subscription
-state, Stripe billing, hosted credits, platform SES production access, and
-platform-owned domains belong in the private platform wrapper.
-
-Cloud mode must:
-
-- keep `mailery.co` system mail separate from tenant domains;
-- expose per-tenant domain readiness through API/CLI;
-- block tenant outbound sending until the tenant domain is outbound-ready and
-  the tenant has the required billing/credit state;
-- allow inbound aggregation to be ready before outbound sending is ready;
-- keep `mail_mode=test` or equivalent provider-safe behavior until platform SES
-  production access and real-send checks pass.
-
-Typical cloud setup:
-
-```bash
-emails cloud setup --api-url https://mailery.co --email you@example.com --billing --no-open
-emails cloud domain available example.com
-emails cloud domain setup example.com --address agent --catch-all --mx-migration-consent
-emails cloud messages pull --limit 20
-```
-
-Cloud commands are the only path that should require Mailery Cloud tenant,
-billing, or hosted credit state. The OSS local and self-hosted paths must remain
-usable without a SaaS account.
+purchase remains a separate registrar action (`domain buy` / `domain setup`) and
+must be explicit.
 
 ## Sending Guard
 
@@ -216,93 +156,54 @@ load domain provider state
 require ownership_verified
 require outbound_ready
 require provider/account send capability
-require SaaS billing/credits only in cloud mode
 send or fail closed with the exact missing requirement
 ```
 
 The guard must reject:
 
 - sending as an unknown domain;
-- sending as a domain owned by a different tenant/provider scope;
-- sending as the platform system domain from tenant context;
+- sending as a domain owned by a different provider scope;
 - sending with DKIM/SPF/custom MAIL FROM missing when the provider requires it;
-- sending through SES when the active account is sandboxed and the target flow
-  requires production access.
+- sending through SES when the active account is sandboxed and the target flow requires production access.
 
-## DNS And Authentication
+## DNS Output Contract
 
-The DNS checker should report records and readiness per domain:
+Every domain readiness command or API should expose:
 
-- MX for inbound routing;
-- DKIM records for the selected provider;
-- SPF and custom MAIL FROM records for the selected provider;
-- DMARC policy and reporting destination;
-- provider-specific verification records;
-- current DNS authority and whether Mailery is allowed to apply changes.
+- required records;
+- current observed records;
+- missing records;
+- conflicting records;
+- exact next action;
+- whether the command is advisory, planned, or mutating.
 
-The checker should support two modes:
+DNS output must never silently overwrite MX records. Any MX migration requires
+explicit user consent and a preview of the previous records.
 
-- plan mode: generate records and risks without modifying DNS;
-- apply mode: modify DNS only when the operator explicitly configured an
-  authorized DNS provider.
+## Command/API Implications
 
-DMARC rollout should be staged per sending domain:
-
-```text
-p=none with rua -> monitor alignment and events -> p=quarantine -> p=reject
-```
-
-Mailery should recommend `p=none` for initial setup and should not move to
-`quarantine` or `reject` until the domain has clean real-send data.
-
-## CLI And API Contract
-
-The OSS CLI should converge on these user-facing verbs:
+These surfaces should read from the same readiness state:
 
 ```bash
-emails domains add example.com
-emails domains connect example.com --provider <provider-id> --source-of-truth local --dry-run
-emails domains connect example.com --provider <provider-id> --source-of-truth postgres --dns-provider route53 --no-register-provider
-emails domains list
 emails domains status example.com --json
 emails domains dns example.com --json
 emails domains verify example.com
-emails domains enable-inbound example.com
-emails domains enable-outbound example.com
-emails domains disable-outbound example.com
+emails domains connect example.com --provider <provider-id> --source-of-truth local --dry-run
+emails domains connect example.com --provider <provider-id> --source-of-truth postgres --dns-provider route53 --no-register-provider
+emails address usable --send
+emails agent context --json
 ```
 
-Existing singular commands such as `emails domain check` may remain as
-compatibility aliases, but new docs and machine-readable examples should prefer
-the plural `domains` surface.
-
-JSON output should include:
-
-- `mode`;
-- `domain`;
-- `domain_type`;
-- `source_of_truth`;
-- `ownership_status`;
-- `inbound_ready`;
-- `outbound_ready`;
-- `monitoring_status`;
-- `restricted`;
-- `provider`;
-- `dns_records`;
-- `missing_requirements`;
-- `next_actions`.
+MCP tools should expose the same state through domain/status resources and include
+`cli_equivalent` hints back to the `emails` commands.
 
 ## Completion Criteria
 
 The domain-readiness implementation is complete when:
 
-- local, self-hosted, and cloud vocabulary is consistent in docs and CLI output;
+- local and self-hosted vocabulary is consistent in docs and CLI output;
 - the OSS package can represent many domains with independent lifecycle state;
 - inbound and outbound readiness are independent;
 - all real send paths use the same fail-closed domain guard;
-- self-hosted mode proves local storage is cache-only when configured as remote
-  source of truth;
-- Mailery Cloud can layer tenant and billing gates on top without forking the
-  OSS readiness semantics;
-- tests cover DNS parsing, lifecycle transitions, send guard failures, and
-  source-of-truth behavior without requiring live secrets.
+- self-hosted mode proves CLI/MCP/API reads and writes use the API-key-authenticated service;
+- tests cover DNS parsing, lifecycle transitions, send guard failures, and source-of-truth behavior without requiring live secrets.

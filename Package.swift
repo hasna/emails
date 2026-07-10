@@ -1,20 +1,21 @@
 // swift-tools-version:6.0
 import PackageDescription
 
-// Mailery — native macOS desktop app for the Mailery email client.
+// Emails - native macOS desktop app for the Emails client.
 //
 // This Swift package lives ALONGSIDE the `@hasna/emails` TypeScript CLI in the same
 // repo. It is a UI copycat of open-notes' "Hasna Notes" app: a WKWebView shell
-// (MaileryApp) hosting an offline web UI (`web/`) and bridging real mail data from the
-// local Mailery SQLite store (`~/.hasna/emails/emails.db`).
+// hosting an offline web UI (`web/`) and bridging real mail data from the local
+// Emails SQLite store (`~/.hasna/emails/emails.db`).
 //
+// Internal legacy Swift target names retained for this patch:
 //   - MaileryCore  : reads inbound_emails/email_content/emails directly (read-only) and
 //                    builds the CLI argv used to mutate mail (send/reply/mark-read/…).
 //   - MaileryApp   : the WKWebView host (AppKit) — injects __BOOT__, bridges `mail`.
 //   - MailerySmoke : CLI smoke harness (TDD) — XCTest/swift-testing are unavailable
 //                    under Command Line Tools, so this is the verification harness.
 let package = Package(
-    name: "Mailery",
+    name: "Emails",
     platforms: [.macOS("26.0")],
     products: [
         .library(name: "MaileryCore", targets: ["MaileryCore"]),
@@ -32,7 +33,7 @@ let package = Package(
             path: "Sources/MailerySmoke"
         ),
         // Native macOS shell (WKWebView) hosting the bundled web UI. Depends on
-        // MaileryCore so it can read the on-disk SQLite mail store and bridge real mail
+        // the internal legacy MaileryCore target so it can read the on-disk SQLite mail store and bridge real mail
         // data into the web UI.
         .executableTarget(
             name: "MaileryApp",

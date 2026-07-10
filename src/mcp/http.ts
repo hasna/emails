@@ -4,7 +4,7 @@ import { DEFAULT_MCP_HTTP_PORT, isHttpMode, isStdioMode, MCP_NAME, resolveHttpPo
 
 export { DEFAULT_MCP_HTTP_PORT, isHttpMode, isStdioMode, MCP_NAME, resolveHttpPort };
 
-// mailery MCP HTTP transport — hand-wired onto `@hasna/mcp-harness` (the
+// Emails MCP HTTP transport — hand-wired onto `@hasna/mcp-harness` (the
 // hand-rolled `WebStandardStreamableHTTPServerTransport` wiring + health
 // payload shape are now shared). Public API (`handleMcpHttpRequest`,
 // `startHttpServer`, the exported constants) is unchanged so `server/index.ts`

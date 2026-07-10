@@ -1,4 +1,4 @@
-// Postgres repository for the Mailery self_hosted cloud service.
+// Postgres repository for the Emails self-hosted service.
 //
 // Amendment A1 (PURE REMOTE): every method reads/writes the cloud Postgres
 // directly through the vendored storage kit's typed query client. No cache, no

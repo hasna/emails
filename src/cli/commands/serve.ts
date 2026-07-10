@@ -99,7 +99,7 @@ export function registerServeCommands(program: Command, output: (data: unknown, 
   program
     .command("remove")
     .alias("uninstall")
-    .description("Uninstall the Mailery MCP from agent configs")
+    .description("Uninstall the Emails MCP from agent configs")
     .option("--claude", "Remove from Claude Code")
     .option("--codex", "Remove from Codex CLI (~/.codex/config.toml)")
     .option("--gemini", "Remove from Gemini CLI (~/.gemini/settings.json)")

@@ -1,7 +1,7 @@
-# BrowserPlan Mailery Contract
+# BrowserPlan Emails Contract
 
-Mailery is the email source for BrowserPlan profile creation. BrowserPlan should
-consume existing Mailery addresses and open-identities records; it must not
+Emails is the email source for BrowserPlan profile creation. BrowserPlan should
+consume existing Emails addresses and open-identities records; it must not
 create duplicate identities or email address rows.
 
 ## CLI
@@ -20,17 +20,17 @@ emails --json browserplan reserve hello@example.com \
 ```
 
 `reserve` requires an existing open-identities `id` or `identifier`. It creates
-or reuses a Mailery owner with `external_id` set to the stable open-identities
+or reuses a Emails owner with `external_id` set to the stable open-identities
 `id` when provided, falling back to `identifier` only when no `id` is supplied, then
 assigns one receive-ready address to that owner. It does not create an
 open-identities identity and does not create a new email address.
 
-If the selected Mailery address already matches a different open-identities
+If the selected Emails address already matches a different open-identities
 record by email, reservation fails with a conflict. Auto-pick skips addresses
 that already map to other identities and prefers an unowned ready address that
 maps to the requested identity when one exists.
 
-For human identities, pass `--administrator <mailery-owner-ref>` so the address
+For human identities, pass `--administrator <emails-owner-ref>` so the address
 can be administered by an agent owner.
 
 ## SDK
@@ -62,7 +62,7 @@ const reservation = reserveBrowserPlanAddress({
 identity-linked ready addresses, available unowned ready addresses, and per
 address identity metadata. Identity metadata is resolved in this order:
 
-1. Existing Mailery owner on the address.
+1. Existing Emails owner on the address.
 2. Matching email in the open-identities JSON store.
 3. Tentative fallback derived from the email local part.
 
@@ -71,7 +71,7 @@ open-identities store.
 
 SDK callers running centrally can pass `machineId` as a label while executing
 inside a `machines ssh` command. REST callers must treat `machine_id` as an
-assertion about the local Mailery process; it must match `MAILERY_MACHINE_ID`,
+assertion about the local Emails process; it must match `MAILERY_MACHINE_ID`,
 `MACHINE_ID`, or the fleet-style hostname.
 
 ## REST

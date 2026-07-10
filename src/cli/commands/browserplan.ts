@@ -52,7 +52,7 @@ function targetOption(opts: { target?: string }): number {
 export function registerBrowserPlanCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   const cmd = program
     .command("browserplan")
-    .description("Machine-scoped Mailery address contract for BrowserPlan profiles");
+    .description("Machine-scoped Emails address contract for BrowserPlan profiles");
 
   cmd
     .command("coverage")
@@ -120,7 +120,7 @@ export function registerBrowserPlanCommands(program: Command, output: (data: unk
     .command("reserve [email]")
     .description("Reserve a ready address for an existing BrowserPlan/open-identities identity")
     .option("--machine <id>", "Machine identifier")
-    .option("--address-id <id>", "Specific Mailery address ID to reserve when email is ambiguous")
+    .option("--address-id <id>", "Specific Emails address ID to reserve when email is ambiguous")
     .option("--identity-id <id>", "Existing open-identities ID")
     .option("--identity-identifier <identifier>", "Existing open-identities identifier, such as agent:name")
     .option("--identity-name <name>", "Identity full name")

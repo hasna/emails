@@ -201,7 +201,7 @@ src/
 ├── cli/
 │   ├── index.tsx              # thin orchestrator (~65 lines)
 │   ├── utils.ts               # shared helpers
-│   ├── tui/                   # OpenTUI Mailery UI dashboard
+│   ├── tui/                   # OpenTUI Emails UI dashboard
 │   └── commands/              # modular command files
 │       ├── send.ts            # send, log, search, show, replies, conversation
 │       ├── provider.ts        # provider CRUD

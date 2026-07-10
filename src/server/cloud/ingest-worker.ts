@@ -1,6 +1,6 @@
-// Cloud-side SES-inbound ingestion worker for the Mailery self_hosted service.
+// Self-hosted SES-inbound ingestion worker for the Emails service.
 //
-// Runs as a long-lived ECS task alongside the cloud API (`mailery-serve
+// Runs as a long-lived ECS task alongside the self-hosted API (`emails-serve
 // ingest-worker`). It long-polls a dedicated SQS queue that is fanned out from
 // the shared SES-inbound SNS topic, fetches each archived raw message from the
 // SES→S3 inbound bucket, normalizes it, and writes it to the SAME cloud
@@ -117,26 +117,26 @@ interface WorkerOptions {
 /**
  * Run the ingest worker loop until SIGTERM/SIGINT. Reads its wiring from the
  * environment:
- *   MAILERY_INGEST_QUEUE_URL   (required) — the SQS queue to consume
- *   MAILERY_INGEST_S3_BUCKET   (optional) — fallback bucket when a notification
+ *   EMAILS_INGEST_QUEUE_URL    (required) — the SQS queue to consume
+ *   EMAILS_INGEST_S3_BUCKET    (optional) — fallback bucket when a notification
  *                                           omits it (SES always includes it)
  *   AWS_REGION                 (default us-east-1)
- *   HASNA_MAILERY_DATABASE_URL (required) — cloud Postgres DSN (server-side)
+ *   HASNA_EMAILS_DATABASE_URL  (required) — shared cloud/Postgres DSN
  */
 export async function runIngestWorker(options: WorkerOptions = {}): Promise<void> {
   normalizeCloudEnv();
   const region = options.region ?? process.env["AWS_REGION"] ?? "us-east-1";
-  const queueUrl = options.queueUrl ?? process.env["MAILERY_INGEST_QUEUE_URL"];
-  const defaultBucket = options.bucket ?? process.env["MAILERY_INGEST_S3_BUCKET"];
+  const queueUrl = options.queueUrl ?? process.env["EMAILS_INGEST_QUEUE_URL"];
+  const defaultBucket = options.bucket ?? process.env["EMAILS_INGEST_S3_BUCKET"];
   const maxMessages = options.maxMessages ?? 10;
   const waitTimeSeconds = options.waitTimeSeconds ?? 20;
   const visibilityTimeout = options.visibilityTimeout ?? 120;
 
   if (!queueUrl) {
-    throw new Error("ingest worker requires MAILERY_INGEST_QUEUE_URL");
+    throw new Error("ingest worker requires EMAILS_INGEST_QUEUE_URL");
   }
-  if (!process.env["HASNA_MAILERY_DATABASE_URL"] && !process.env["DATABASE_URL"]) {
-    throw new Error("ingest worker requires a cloud Postgres DSN (HASNA_MAILERY_DATABASE_URL)");
+  if (!process.env["HASNA_EMAILS_DATABASE_URL"] && !process.env["DATABASE_URL"]) {
+    throw new Error("ingest worker requires a shared cloud/Postgres DSN (HASNA_EMAILS_DATABASE_URL)");
   }
 
   const { client } = getCloudPool();

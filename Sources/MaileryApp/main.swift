@@ -1,21 +1,21 @@
-// Mailery — native macOS shell hosting the bundled web UI in a WKWebView.
+// Emails - native macOS shell hosting the bundled web UI in a WKWebView.
 //
 // A UI copycat of open-notes' "Hasna Notes" app, retargeted to email. This shell:
 //   1. opens a hidden-titlebar window and loads web/index.html offline (file://),
 //   2. tags the document with the `native` body class so the web UI drops its
 //      desktop-frame chrome and fills the OS window edge-to-edge, and
-//   3. bridges REAL mail data between the local Mailery SQLite store (read via
+//   3. bridges REAL mail data between the local Emails SQLite store (read via
 //      MaileryCore.MailStore) and the web UI:
 //        - reads the store at launch and injects
 //          `window.__BOOT__ = { threads, folders, thisAddress }` as a document-start
 //          user script (available before the page's JS runs),
 //        - receives `{action, …}` messages on the `mail` message handler
 //          (markRead / archive / star / label / reply / send / refresh /
-//          shareAttachment), performs them via the `mailery` CLI, then pushes fresh
+//          shareAttachment), performs them via the `emails` CLI, then pushes fresh
 //          data back into the page via `window.HasnaMail.hydrate(...)`.
 //
 // Design split (see MaileryCore): reads go straight to SQLite; writes ALWAYS go through
-// the `mailery` CLI so provider auth, inbound refresh, and threading headers stay correct.
+// the `emails` CLI so provider auth, inbound refresh, and threading headers stay correct.
 import AppKit
 import WebKit
 import MaileryCore
@@ -119,7 +119,7 @@ final class MailBridge {
         return jsonString(payload)
     }
 
-    // MARK: mutations (delegated to the mailery CLI)
+    // MARK: mutations (delegated to the emails CLI)
 
     private func str(_ d: [String: Any], _ k: String) -> String { (d[k] as? String) ?? "" }
     private func bool(_ d: [String: Any], _ k: String) -> Bool { (d[k] as? Bool) ?? false }
@@ -131,7 +131,7 @@ final class MailBridge {
         return []
     }
 
-    /// Translate a JS payload into the `mailery` CLI argv. Pure + main-thread; returns nil
+    /// Translate a JS payload into the `emails` CLI argv. Pure + main-thread; returns nil
     /// for an unknown action. The argv ([String]) is Sendable, so it can cross to the
     /// background queue where the CLI actually runs (avoids capturing the non-Sendable
     /// payload dictionary in a @Sendable closure under Swift 6).
@@ -232,7 +232,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             backing: .buffered,
             defer: false
         )
-        window.title = "Mailery"
+        window.title = "Emails"
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
         window.isMovableByWindowBackground = true
@@ -282,12 +282,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         window.contentView = container
 
         guard let webDir = Bundle.main.resourceURL?.appendingPathComponent("web", isDirectory: true) else {
-            NSLog("Mailery: resourceURL is nil — cannot locate bundled web UI")
+            NSLog("Emails: resourceURL is nil — cannot locate bundled web UI")
             return
         }
         let index = webDir.appendingPathComponent("index.html")
-        NSLog("Mailery: loading \(index.path) exists=\(FileManager.default.fileExists(atPath: index.path))")
-        NSLog("Mailery: boot payload bytes=\(boot.utf8.count)")
+        NSLog("Emails: loading \(index.path) exists=\(FileManager.default.fileExists(atPath: index.path))")
+        NSLog("Emails: boot payload bytes=\(boot.utf8.count)")
         web.loadFileURL(index, allowingReadAccessTo: webDir)
 
         buildMenu()
@@ -298,21 +298,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     // MARK: navigation
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        NSLog("Mailery: didFinish navigation")
+        NSLog("Emails: didFinish navigation")
         webView.evaluateJavaScript("document.body && document.body.classList.add('native')", completionHandler: nil)
         // Diagnostic: count how many thread rows the page rendered. Proves REAL mail
         // (not the browser sample) reached the DOM.
         webView.evaluateJavaScript("document.querySelectorAll('.thread-row').length") { result, _ in
             let count = (result as? Int) ?? (result as? NSNumber)?.intValue ?? -1
-            NSLog("Mailery: rendered \(count) thread rows")
+            NSLog("Emails: rendered \(count) thread rows")
         }
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        NSLog("Mailery: didFail navigation: \(error.localizedDescription)")
+        NSLog("Emails: didFail navigation: \(error.localizedDescription)")
     }
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-        NSLog("Mailery: didFailProvisionalNavigation: \(error.localizedDescription)")
+        NSLog("Emails: didFailProvisionalNavigation: \(error.localizedDescription)")
     }
 
     // MARK: bridge (JS → Swift)
@@ -350,7 +350,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         // Destructive guard mirrors open-notes (trash/spam require confirmation).
         let destructive = ["trash", "spam"].contains(action)
         if destructive, (payload["confirmed"] as? Bool) != true, (payload["undo"] as? Bool) != true {
-            NSLog("Mailery: ignored unconfirmed destructive action '\(action)'")
+            NSLog("Emails: ignored unconfirmed destructive action '\(action)'")
             return
         }
 
@@ -358,7 +358,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         // Sendable [String] argv + plain strings cross to the background queue, where a fresh
         // CLI + store do the work (the CLI may hit the network for send/reply/refresh).
         guard let args = bridge.argv(for: payload) else {
-            NSLog("Mailery: unknown action '\(action)'")
+            NSLog("Emails: unknown action '\(action)'")
             return
         }
         let requestId = (payload["requestId"] as? String) ?? ""
@@ -424,9 +424,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         let appItem = NSMenuItem()
         main.addItem(appItem)
         let appMenu = NSMenu()
-        appMenu.addItem(withTitle: "Hide Mailery", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        appMenu.addItem(withTitle: "Hide Emails", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         appMenu.addItem(NSMenuItem.separator())
-        appMenu.addItem(withTitle: "Quit Mailery", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appMenu.addItem(withTitle: "Quit Emails", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu
 
         let winItem = NSMenuItem()

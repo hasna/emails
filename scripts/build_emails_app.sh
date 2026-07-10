@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
-# Build "Mailery" — the WKWebView macOS shell hosting the web UI — and assemble a
+# Build "Emails" — the WKWebView macOS shell hosting the web UI — and assemble a
 # launchable .app bundle. Run ON a macOS 26 Mac (Command Line Tools, no Xcode).
 #
-# A copycat of open-notes' build_hasnanotes.sh, retargeted to Mailery and with the AI
-# sidecar dropped (Mailery has no sidecar — it shells out to the `mailery` CLI instead).
+# A copycat of open-notes' build_hasnanotes.sh, retargeted to Emails and with the AI
+# sidecar dropped (Emails has no sidecar — it shells out to the `emails` CLI instead).
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+# Internal legacy Swift target name retained in this patch; the app bundle is Emails.
 TARGET_NAME="MaileryApp"
-APP_NAME="Mailery"
-EXEC_NAME="Mailery"
-BUNDLE_ID="com.hasna.mailery"
+APP_NAME="Emails"
+EXEC_NAME="Emails"
+BUNDLE_ID="com.hasna.emails"
 DIST="$REPO_ROOT/dist"
 APP="$DIST/$APP_NAME.app"
 CONTENTS="$APP/Contents"

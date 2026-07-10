@@ -83,18 +83,18 @@ describe("runDiagnostics", () => {
     expect(gmailHealth).toBeUndefined();
   });
 
-  it("treats local providers as optional in Mailery Cloud mode", async () => {
-    process.env["MAILERY_MODE"] = "cloud";
+  it("treats local providers as optional in self-hosted mode", async () => {
+    process.env["HASNA_EMAILS_MODE"] = "self_hosted";
 
     const checks = await runDiagnostics();
 
     expect(checks.find((c) => c.name === "Mode")).toMatchObject({
       status: "pass",
-      message: "Mailery Cloud mode (cloud)",
+      message: "Self-hosted mode (cloud)",
     });
     expect(checks.find((c) => c.name === "Providers")).toMatchObject({
       status: "pass",
-      message: "Mailery Cloud mode; local SES/Resend/Sandbox providers are optional",
+      message: "Self-hosted service mode; local SES/Resend/Sandbox providers are optional",
     });
   });
 

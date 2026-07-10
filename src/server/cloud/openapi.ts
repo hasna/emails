@@ -1,4 +1,4 @@
-// OpenAPI 3 description of the Mailery self_hosted cloud service (/v1).
+// OpenAPI 3 description of the Emails self-hosted service (/v1).
 //
 // This is the single source of truth for the service's public HTTP contract:
 // it is served at GET /openapi.json AND fed to @hasna/contracts' SDK generator
@@ -72,7 +72,7 @@ const idParam = [{ name: "id", in: "path", required: true, schema: { type: "stri
 
 export const maileryCloudOpenApi: OpenApiDocument = {
   openapi: "3.0.3",
-  info: { title: "Mailery Self-Hosted API", version: "1.0.0" },
+  info: { title: "Emails Self-Hosted API", version: "1.0.0" },
   paths: {
     "/health": {
       get: {
@@ -115,7 +115,7 @@ export const maileryCloudOpenApi: OpenApiDocument = {
       },
       post: {
         operationId: "createDomain",
-        summary: "Register a sending domain (scope mailery:write)",
+        summary: "Register a sending domain (scope emails:write)",
         requestBody: {
           required: true,
           content: {
@@ -172,7 +172,7 @@ export const maileryCloudOpenApi: OpenApiDocument = {
       },
       post: {
         operationId: "createAddress",
-        summary: "Register an email address (scope mailery:write)",
+        summary: "Register an email address (scope emails:write)",
         requestBody: {
           required: true,
           content: {
@@ -212,7 +212,7 @@ export const maileryCloudOpenApi: OpenApiDocument = {
         operationId: "createMessage",
         summary:
           "Record a message — outbound (sent ledger) or inbound (received mail). " +
-          "Supplying source_id makes the write idempotent (upsert). Scope mailery:write.",
+          "Supplying source_id makes the write idempotent (upsert). Scope emails:write.",
         requestBody: {
           required: true,
           content: {

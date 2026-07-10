@@ -3,10 +3,10 @@ import SQLite3
 
 // MARK: - Read-only mail store
 //
-// MaileryCore reads the local Mailery SQLite database directly (READ-ONLY). This is the
+// MaileryCore reads the local Emails SQLite database directly (READ-ONLY). This is the
 // fast path that powers the boot payload + every refresh: it never writes (all writes go
 // through `MaileryCLI`). Tables used:
-//   - inbound_emails  : received + synced-sent messages (the rows `mailery inbox` mutates)
+//   - inbound_emails  : received + synced-sent messages (the rows `emails inbox` mutates)
 //   - emails          : the outbound send log
 //   - email_content   : html/text bodies for the outbound log
 //   - addresses       : to resolve `thisAddress`

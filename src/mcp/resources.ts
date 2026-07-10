@@ -289,7 +289,7 @@ export function registerEmailResources(server: McpServer): void {
     "emails-mailboxes",
     "emails://mailboxes",
     {
-      title: "Mailery Mailboxes",
+      title: "Emails Mailboxes",
       description: "Folder counts for the active mailbox source of truth.",
       mimeType: "application/json",
     },
@@ -302,7 +302,7 @@ export function registerEmailResources(server: McpServer): void {
     "emails-sources",
     "emails://sources",
     {
-      title: "Mailery Sources",
+      title: "Emails Sources",
       description: "Ingestion streams with source-aware counts and legacy/orphaned badges.",
       mimeType: "application/json",
     },
