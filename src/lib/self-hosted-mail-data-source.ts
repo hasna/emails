@@ -201,15 +201,15 @@ function folderMatch(m: V1Message, folder: Mailbox): boolean {
     case "unread":
       return !outbound && !m.is_read && !archived && !spam && !trash;
     case "starred":
-      return Boolean(m.is_starred) && !trash;
+      return !outbound && Boolean(m.is_starred) && !archived && !spam && !trash;
     case "sent":
       return outbound;
     case "archived":
-      return archived;
+      return !outbound && archived && !spam && !trash;
     case "spam":
-      return spam;
+      return !outbound && spam;
     case "trash":
-      return trash;
+      return !outbound && trash;
     default:
       return false;
   }
@@ -323,13 +323,47 @@ export class SelfHostedMailDataSource implements MailDataSource {
     return { status: res.status, json };
   }
 
-  private async listPage(limit: number, offset: number): Promise<V1Message[]> {
-    const { status, json } = await this.request("GET", `/messages?limit=${limit}&offset=${offset}`);
+  private async listPage(
+    limit: number,
+    offset: number,
+    opts: { direction?: "inbound" | "outbound" } = {},
+  ): Promise<V1Message[]> {
+    const params = new URLSearchParams();
+    params.set("limit", String(limit));
+    params.set("offset", String(offset));
+    if (opts.direction) params.set("direction", opts.direction);
+    const { status, json } = await this.request("GET", `/messages?${params.toString()}`);
     if (status < 200 || status >= 300) {
       throw new Error(`self-hosted emails: GET /messages failed (HTTP ${status})`);
     }
     const list = (json as { messages?: unknown } | null)?.messages;
     return Array.isArray(list) ? (list as V1Message[]) : [];
+  }
+
+  private async serverStats(): Promise<{ counts: MailboxCounts; total: number; latestReceivedAt: string | null }> {
+    const { status, json } = await this.request("GET", "/messages/counts");
+    if (status < 200 || status >= 300) {
+      throw new Error(`self-hosted emails: GET /messages/counts failed (HTTP ${status})`);
+    }
+    const body = ((json as { counts?: unknown } | null)?.counts ?? json) as Record<string, unknown> | null;
+    const number = (key: string): number => {
+      const raw = body?.[key];
+      const parsed = typeof raw === "number" ? raw : Number(raw);
+      return Number.isFinite(parsed) ? parsed : 0;
+    };
+    return {
+      counts: {
+        inbox: number("inbox"),
+        unread: number("unread"),
+        starred: number("starred"),
+        sent: number("sent"),
+        archived: number("archived"),
+        spam: number("spam"),
+        trash: number("trash"),
+      },
+      total: number("total"),
+      latestReceivedAt: typeof body?.["latest_received_at"] === "string" ? body["latest_received_at"] : null,
+    };
   }
 
   // Full, TTL-cached scan (bounded). Reused across counts/status/search/labels
@@ -349,6 +383,23 @@ export class SelfHostedMailDataSource implements MailDataSource {
 
   private invalidate(): void {
     this.scanCache = null;
+  }
+
+  private async listFilteredMailboxPage(mailbox: Mailbox, opts?: MailboxListOptions): Promise<V1Message[]> {
+    const offset = opts?.offset && opts.offset > 0 ? opts.offset : 0;
+    const limit = opts?.limit && opts.limit > 0 ? opts.limit : 200;
+    const wanted = offset + limit;
+    const pageLimit = Math.min(PAGE_LIMIT, Math.max(50, wanted));
+    const direction = mailbox === "sent" ? "outbound" : "inbound";
+    const matches: V1Message[] = [];
+    for (let serverOffset = 0; serverOffset < MAX_SCAN_ROWS && matches.length < wanted; serverOffset += pageLimit) {
+      const page = await this.listPage(pageLimit, serverOffset, { direction });
+      for (const message of page) {
+        if (folderMatch(message, mailbox) && sourceMatch(message, opts?.source)) matches.push(message);
+      }
+      if (page.length < pageLimit) break;
+    }
+    return matches.slice(offset, offset + limit);
   }
 
   private async getRaw(id: string): Promise<V1Message | null> {
@@ -382,6 +433,9 @@ export class SelfHostedMailDataSource implements MailDataSource {
 
   async listMailbox(mailbox: Mailbox, opts?: MailboxListOptions): Promise<TuiMessage[]> {
     if (hasSourceScope(opts?.source) && !opts?.source?.address && !opts?.source?.domain) return [];
+    if (!opts?.search && !opts?.label && opts?.sort !== "oldest") {
+      return (await this.listFilteredMailboxPage(mailbox, opts)).map(v1ToTuiMessage);
+    }
     const rows = await this.scanAll();
     const label = opts?.label?.trim().toLowerCase();
     let filtered = rows.filter((m) =>
@@ -401,6 +455,7 @@ export class SelfHostedMailDataSource implements MailDataSource {
   }
 
   async mailboxCounts(opts?: { source?: MailboxSource }): Promise<MailboxCounts> {
+    if (!hasSourceScope(opts?.source)) return (await this.serverStats()).counts;
     const rows = await this.scanAll();
     const counts = emptyCounts();
     for (const m of rows) {
@@ -428,22 +483,17 @@ export class SelfHostedMailDataSource implements MailDataSource {
   async listMailboxSources(_opts?: ListMailboxSourcesOptions): Promise<MailboxSourceSummary[]> {
     // The self-hosted serve is a single shared store — expose it as one source so
     // `inbox sources` / status are informative rather than empty.
-    const counts = await this.mailboxCounts();
-    const rows = await this.scanAll();
-    const latest = rows.reduce<string | null>((max, m) => {
-      const d = messageDate(m);
-      return d && (max === null || d > max) ? d : max;
-    }, null);
-    const total = counts.inbox + counts.archived + counts.spam + counts.trash;
+    const { counts, latestReceivedAt } = await this.serverStats();
+    const receivedTotal = counts.inbox + counts.archived + counts.spam + counts.trash;
     return [{
       id: "self_hosted",
       label: "Self-hosted Emails",
       kind: "all",
       badges: ["self_hosted"],
       counts,
-      total,
+      total: receivedTotal,
       unread: counts.unread,
-      latestReceivedAt: latest,
+      latestReceivedAt,
     }];
   }
 

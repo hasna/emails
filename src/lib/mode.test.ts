@@ -21,6 +21,8 @@ const ENV_KEYS = [
   "HASNA_MAILERY_STORAGE_MODE",
   "EMAILS_STORAGE_MODE",
   "EMAILS_MODE",
+  "EMAILS_SELF_HOSTED_URL",
+  "EMAILS_SELF_HOSTED_API_KEY",
   "MAILERY_API_URL",
   "MAILERY_API_KEY",
   "HASNA_MAILERY_API_URL",
@@ -76,6 +78,32 @@ describe("Emails mode resolution", () => {
     process.env["HASNA_MAILERY_API_URL"] = "https://example.invalid";
     process.env["HASNA_MAILERY_API_KEY"] = "not-a-real-key";
     expect(() => resolveEmailsMode()).toThrow("HASNA_MAILERY_API_URL");
+  });
+
+  it("lets explicit Emails self_hosted client env override unrelated Mailery hosted credentials", () => {
+    process.env[EMAILS_MODE_ENV] = "self_hosted";
+    process.env["EMAILS_SELF_HOSTED_URL"] = "https://emails.example.invalid";
+    process.env["EMAILS_SELF_HOSTED_API_KEY"] = "not-a-real-key";
+    process.env["HASNA_MAILERY_API_URL"] = "https://mailery.example.invalid";
+    process.env["HASNA_MAILERY_API_KEY"] = "old-mailery-key";
+
+    expect(resolveEmailsMode()).toMatchObject({
+      mode: "self_hosted",
+      source: { kind: "env", name: EMAILS_MODE_ENV },
+    });
+  });
+
+  it("lets explicit Hasna-prefixed self_hosted client env override unrelated Mailery hosted credentials", () => {
+    process.env[HASNA_EMAILS_MODE_ENV] = "self_hosted";
+    process.env["EMAILS_SELF_HOSTED_URL"] = "https://emails.example.invalid";
+    process.env["EMAILS_SELF_HOSTED_API_KEY"] = "not-a-real-key";
+    process.env["HASNA_MAILERY_API_URL"] = "https://mailery.example.invalid";
+    process.env["HASNA_MAILERY_API_KEY"] = "old-mailery-key";
+
+    expect(resolveEmailsMode()).toMatchObject({
+      mode: "self_hosted",
+      source: { kind: "env", name: HASNA_EMAILS_MODE_ENV },
+    });
   });
 
   it("rejects legacy config keys with migration guidance", () => {

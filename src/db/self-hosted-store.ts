@@ -59,12 +59,14 @@ function toV1BaseUrl(apiUrl: string): string {
 
 let _cachedSignature: string | null = null;
 let _cachedConfig: SelfHostedConfig | null | undefined;
+let _resourceRoutingDisabledDepth = 0;
 
 /**
  * Resolve strict client configuration. Credentials never imply a mode and no
  * endpoint is supplied by the package.
  */
 export function resolveSelfHostedConfig(env: NodeJS.ProcessEnv = process.env): SelfHostedConfig | null {
+  if (_resourceRoutingDisabledDepth > 0) return null;
   const modeRaw = env["EMAILS_MODE"]?.trim() ?? env["HASNA_EMAILS_MODE"]?.trim();
   const apiUrl = env["EMAILS_SELF_HOSTED_URL"]?.trim();
   const apiKey = env["EMAILS_SELF_HOSTED_API_KEY"]?.trim();
@@ -120,6 +122,16 @@ export function isSelfHostedMode(): boolean {
 export function resetSelfHostedConfigCache(): void {
   _cachedSignature = null;
   _cachedConfig = undefined;
+}
+
+/** Run synchronous repository reads against local config even in self_hosted mode. */
+export function withSelfHostedResourceRoutingDisabled<T>(fn: () => T): T {
+  _resourceRoutingDisabledDepth += 1;
+  try {
+    return fn();
+  } finally {
+    _resourceRoutingDisabledDepth -= 1;
+  }
 }
 
 interface CurlResult {

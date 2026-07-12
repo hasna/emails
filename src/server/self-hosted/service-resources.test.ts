@@ -112,6 +112,9 @@ describe("self_hosted service generic resources", () => {
   test("migration 0005 is registered", () => {
     expect(emailsSelfHostedMigrations().some((m) => m.id === "0005_mailery_selfhosted_resources")).toBe(true);
     expect(emailsSelfHostedMigrations().some((m) => m.id === "0006_emails_rename_bridge")).toBe(true);
+    expect(emailsSelfHostedMigrations().some((m) => m.id === "0006b_emails_legacy_messages_backfill_prep")).toBe(true);
+    expect(emailsSelfHostedMigrations().some((m) => m.id === "0007_emails_legacy_messages_backfill")).toBe(true);
+    expect(emailsSelfHostedMigrations().some((m) => m.id === "0008_emails_legacy_messages_backfill_dedupe")).toBe(true);
   });
 
   test("preserves the released Mailery migration ids and checksums before the rename bridge", () => {
@@ -126,6 +129,35 @@ describe("self_hosted service generic resources", () => {
     const bridge = emailsSelfHostedMigrations().find((migration) => migration.id === "0006_emails_rename_bridge");
     expect(bridge?.sql).toContain("ALTER TABLE cloud_providers RENAME TO self_hosted_providers");
     expect(bridge?.sql).toContain("idempotency_key");
+    const ids = emailsSelfHostedMigrations().map((migration) => migration.id);
+    expect(ids.indexOf("0006b_emails_legacy_messages_backfill_prep")).toBeGreaterThan(
+      ids.indexOf("0006_emails_rename_bridge"),
+    );
+    expect(ids.indexOf("0007_emails_legacy_messages_backfill")).toBeGreaterThan(
+      ids.indexOf("0006b_emails_legacy_messages_backfill_prep"),
+    );
+    expect(ids.indexOf("0008_emails_legacy_messages_backfill_dedupe")).toBeGreaterThan(
+      ids.indexOf("0007_emails_legacy_messages_backfill"),
+    );
+  });
+
+  test("legacy backfill hardening preserves immutable 0007 and repairs around it", () => {
+    const migrations = Object.fromEntries(emailsSelfHostedMigrations().map((migration) => [migration.id, migration]));
+    const prep = migrations["0006b_emails_legacy_messages_backfill_prep"]!;
+    const backfill = migrations["0007_emails_legacy_messages_backfill"]!;
+    const dedupe = migrations["0008_emails_legacy_messages_backfill_dedupe"]!;
+
+    expect(prep.sql).toContain("pg_temp.emails_safe_jsonb_text");
+    expect(prep.sql).toContain("pg_temp.emails_safe_timestamptz_text");
+    expect(prep.sql).toContain("UPDATE inbound_emails");
+    expect(prep.sql).toContain("UPDATE emails");
+    expect(prep.sql).toContain("sent_at = COALESCE(");
+    expect(prep.sql).toContain("pg_temp.emails_safe_timestamptz_text(created_at::text)");
+    expect(prep.sql).toContain("pg_temp.emails_safe_timestamptz_text(updated_at::text)");
+    expect(backfill.checksum).toBe("sha256:1c345e0153002d820eb50ce2559d8155e2e1993520a120648d5c78f0fb7816b1");
+    expect(dedupe.sql).toContain("DELETE FROM messages legacy");
+    expect(dedupe.sql).toContain("existing.message_id = legacy.message_id");
+    expect(dedupe.sql).toContain("existing.id NOT LIKE 'legacy-inbound:%'");
   });
 
   test("GET /v1/contacts requires auth (401)", async () => {

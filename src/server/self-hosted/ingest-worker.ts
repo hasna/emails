@@ -51,26 +51,13 @@ export interface IngestResult {
   error?: string;
 }
 
-/**
- * Process a single SQS message body (a raw SES "Received" notification, with or
- * without an SNS envelope). Pure w.r.t. its injected deps so it is unit-testable
- * without AWS or a database.
- *
- * Returns a status the caller uses to decide whether to delete the SQS message:
- * Only `ingested` / `duplicate` are terminal (delete); malformed or incomplete
- * notifications are errors and remain for SQS redrive/DLQ inspection.
- */
-export async function processInboundNotification(
+export async function ingestS3Object(
   deps: IngestDeps,
-  body: string,
-  defaultBucket: string | undefined,
+  bucket: string,
+  key: string,
+  note: { recipients?: string[]; timestamp?: string } = {},
 ): Promise<IngestResult> {
-  const note = parseSesNotification(body);
-  if (!note || !note.objectKey) return { status: "error", reason: "no_object_key", error: "notification has no S3 object key" };
-  const bucket = defaultBucket;
-  if (!bucket) return { status: "error", reason: "no_bucket", error: "worker has no configured inbound bucket" };
-  const key = note.objectKey;
-
+  if (!bucket) return { status: "error", key, reason: "no_bucket", error: "worker has no configured inbound bucket" };
   try {
     if (await deps.store.findMessageIdByKey(key)) return { status: "duplicate", key };
 
@@ -103,6 +90,28 @@ export async function processInboundNotification(
   } catch (err) {
     return { status: "error", key, error: err instanceof Error ? err.message : String(err) };
   }
+}
+
+/**
+ * Process a single SQS message body (a raw SES "Received" notification, with or
+ * without an SNS envelope). Pure w.r.t. its injected deps so it is unit-testable
+ * without AWS or a database.
+ *
+ * Returns a status the caller uses to decide whether to delete the SQS message:
+ * Only `ingested` / `duplicate` are terminal (delete); malformed or incomplete
+ * notifications are errors and remain for SQS redrive/DLQ inspection.
+ */
+export async function processInboundNotification(
+  deps: IngestDeps,
+  body: string,
+  defaultBucket: string | undefined,
+): Promise<IngestResult> {
+  const note = parseSesNotification(body);
+  if (!note || !note.objectKey) return { status: "error", reason: "no_object_key", error: "notification has no S3 object key" };
+  const bucket = defaultBucket;
+  if (!bucket) return { status: "error", reason: "no_bucket", error: "worker has no configured inbound bucket" };
+  const key = note.objectKey;
+  return ingestS3Object(deps, bucket, key, { recipients: note.recipients, timestamp: note.timestamp });
 }
 
 interface WorkerOptions {
@@ -236,6 +245,74 @@ export async function runIngestWorker(options: WorkerOptions = {}): Promise<void
       `skipped=${counts.skipped} error=${counts.error}`,
   );
   await closeSelfHostedPool();
+}
+
+interface BackfillOptions {
+  bucket?: string;
+  prefix?: string;
+  region?: string;
+  limit?: number;
+}
+
+/**
+ * One-shot S3 listing backfill for existing SES raw objects. This is operator
+ * tooling for bootstrapping or repairing a self-hosted deployment; steady-state
+ * ingestion should use the SQS worker above.
+ */
+export async function runIngestS3Backfill(options: BackfillOptions = {}): Promise<void> {
+  const region = options.region ?? process.env["AWS_REGION"] ?? "us-east-1";
+  const bucket = options.bucket ?? process.env["EMAILS_INGEST_S3_BUCKET"];
+  const prefix = options.prefix ?? process.env["EMAILS_INGEST_S3_PREFIX"] ?? "";
+  const envLimit = Number(process.env["EMAILS_INGEST_BACKFILL_LIMIT"] ?? "0");
+  const limit = options.limit ?? (Number.isFinite(envLimit) && envLimit > 0 ? envLimit : undefined);
+  validateIngestWorkerConfig({
+    queueUrl: "backfill",
+    bucket,
+    databaseUrl: process.env["EMAILS_DATABASE_URL"],
+  });
+  const configuredBucket = bucket!;
+
+  const { client } = getSelfHostedPool();
+  const store = new EmailsSelfHostedStore(client);
+  const [{ S3Client, GetObjectCommand, ListObjectsV2Command }] = await Promise.all([import("@aws-sdk/client-s3")]);
+  const s3 = new S3Client({ region });
+  const fetchObject = async (objectBucket: string, key: string): Promise<Buffer> => {
+    const res = await s3.send(new GetObjectCommand({ Bucket: objectBucket, Key: key }));
+    if (!res.Body) throw new Error(`empty S3 object ${objectBucket}/${key}`);
+    const chunks: Uint8Array[] = [];
+    for await (const chunk of res.Body as AsyncIterable<Uint8Array>) chunks.push(chunk);
+    return Buffer.concat(chunks);
+  };
+  const deps: IngestDeps = { store, fetchObject, now: () => new Date().toISOString() };
+  const counts = { ingested: 0, duplicate: 0, skipped: 0, error: 0 };
+  let scanned = 0;
+  let continuationToken: string | undefined;
+  console.log(`[ingest-backfill] starting: region=${region} bucket=${configuredBucket} prefix=${prefix || "(none)"}`);
+  try {
+    do {
+      const listed = await s3.send(new ListObjectsV2Command({
+        Bucket: configuredBucket,
+        Prefix: prefix || undefined,
+        ContinuationToken: continuationToken,
+      }));
+      for (const object of listed.Contents ?? []) {
+        if (!object.Key) continue;
+        if (limit && scanned >= limit) break;
+        scanned++;
+        const result = await ingestS3Object(deps, configuredBucket, object.Key);
+        counts[result.status]++;
+        if (result.status === "error") {
+          console.error(`[ingest-backfill] error key=${result.key ?? object.Key}: ${result.error}`);
+        }
+      }
+      if (limit && scanned >= limit) break;
+      continuationToken = listed.IsTruncated ? listed.NextContinuationToken : undefined;
+    } while (continuationToken);
+    console.log(`[ingest-backfill] done scanned=${scanned} ingested=${counts.ingested} duplicate=${counts.duplicate} error=${counts.error}`);
+  } finally {
+    await closeSelfHostedPool();
+  }
+  if (counts.error > 0) process.exitCode = 1;
 }
 
 function sleep(ms: number): Promise<void> {

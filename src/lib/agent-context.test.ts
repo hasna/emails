@@ -9,7 +9,9 @@ import { createDomain, updateDnsStatus } from "../db/domains.js";
 import { storeInboundEmail, setInboundArchived, setInboundRead } from "../db/inbound.js";
 import { createOwner, assignAddressOwner } from "../db/owners.js";
 import { setAddressProvisioning, setDomainProvisioning } from "../db/provisioning.js";
-import { getEmailSystemStatus, getNextEmailAction } from "./agent-context.js";
+import { resetSelfHostedConfigCache } from "../db/self-hosted-store.js";
+import { resetMailDataSource } from "./mail-data-source.js";
+import { getEmailSystemStatus, getEmailSystemStatusForRuntime, getNextEmailAction } from "./agent-context.js";
 
 let previousHome: string | undefined;
 let tempHome: string | undefined;
@@ -25,6 +27,11 @@ beforeEach(() => {
 afterEach(() => {
   closeDatabase();
   delete process.env["EMAILS_DB_PATH"];
+  delete process.env["EMAILS_MODE"];
+  delete process.env["EMAILS_SELF_HOSTED_URL"];
+  delete process.env["EMAILS_SELF_HOSTED_API_KEY"];
+  resetMailDataSource();
+  resetSelfHostedConfigCache();
   if (previousHome === undefined) delete process.env["HOME"];
   else process.env["HOME"] = previousHome;
   if (tempHome) rmSync(tempHome, { recursive: true, force: true });
@@ -285,5 +292,42 @@ describe("agent context", () => {
     expect(queries.some((sql) => sql.includes("WHERE is_sent = 0"))).toBe(true);
     expect(queries.filter((sql) => sql.includes("COUNT(*) as count FROM inbound_emails"))).toHaveLength(0);
     expect(queries.filter((sql) => sql.includes("MAX(received_at) as latest FROM inbound_emails"))).toHaveLength(0);
+  });
+
+  it("uses received-mail totals for self-hosted runtime status", async () => {
+    const previousFetch = globalThis.fetch;
+    process.env["EMAILS_MODE"] = "self_hosted";
+    process.env["EMAILS_SELF_HOSTED_URL"] = "https://emails.example";
+    process.env["EMAILS_SELF_HOSTED_API_KEY"] = "not-a-real-key";
+    globalThis.fetch = (async (url: string | URL | Request) => {
+      const requestUrl = new URL(typeof url === "string" ? url : url instanceof URL ? url.href : url.url);
+      const body = requestUrl.pathname.endsWith("/messages/counts")
+        ? {
+            counts: {
+              inbox: 4,
+              unread: 3,
+              starred: 1,
+              sent: 2,
+              archived: 1,
+              spam: 1,
+              trash: 0,
+              total: 8,
+              latest_received_at: "2026-07-08T19:50:52.000Z",
+            },
+          }
+        : { messages: [] };
+      return new Response(JSON.stringify(body), { status: 200 });
+    }) as typeof fetch;
+
+    try {
+      const status = await getEmailSystemStatusForRuntime();
+      expect(status.inbox.total).toBe(6);
+      expect(status.inbox.unread).toBe(3);
+      expect(status.inbox.latest_received_at).toBe("2026-07-08T19:50:52.000Z");
+      expect(status.inbox.realtime).toMatchObject({ queue_configured: false, queue_url: null });
+      expect(status.sources.items[0]).toMatchObject({ id: "self_hosted", total: 6 });
+    } finally {
+      globalThis.fetch = previousFetch;
+    }
   });
 });

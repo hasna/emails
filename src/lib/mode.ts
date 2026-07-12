@@ -56,12 +56,28 @@ function migrationGuidance(source: string, value?: string): string {
     "EMAILS_SELF_HOSTED_URL and EMAILS_SELF_HOSTED_API_KEY. No cloud, remote, or hybrid alias is supported.";
 }
 
-export function assertNoLegacyHostedEnvironment(env: NodeJS.ProcessEnv = process.env): void {
+function hasExplicitSelfHostedClientEnv(env: NodeJS.ProcessEnv): boolean {
+  const explicitMode = EMAILS_MODE_ENV_KEYS.some((key) => env[key]?.trim() === "self_hosted");
+  return Boolean(
+    explicitMode &&
+      env["EMAILS_SELF_HOSTED_URL"]?.trim() &&
+      env["EMAILS_SELF_HOSTED_API_KEY"]?.trim(),
+  );
+}
+
+export function assertNoLegacyHostedEnvironment(
+  env: NodeJS.ProcessEnv = process.env,
+  options: { allowHostedApiEnvWithExplicitSelfHosted?: boolean } = {},
+): void {
   for (const key of LEGACY_MODE_ENV_KEYS) {
     const value = env[key]?.trim();
     if (value) throw new Error(migrationGuidance(key, value));
   }
+  const allowHostedApiEnv =
+    options.allowHostedApiEnvWithExplicitSelfHosted === true &&
+    hasExplicitSelfHostedClientEnv(env);
   for (const key of LEGACY_HOSTED_ENV_KEYS) {
+    if (allowHostedApiEnv) continue;
     if (env[key]?.trim()) throw new Error(migrationGuidance(key));
   }
 }
@@ -80,7 +96,7 @@ export function normalizeEmailsMode(value: string): EmailsMode {
 }
 
 export function resolveEmailsMode(env: NodeJS.ProcessEnv = process.env): EmailsModeResolution {
-  assertNoLegacyHostedEnvironment(env);
+  assertNoLegacyHostedEnvironment(env, { allowHostedApiEnvWithExplicitSelfHosted: true });
 
   for (const name of EMAILS_MODE_ENV_KEYS) {
     const value = env[name]?.trim();
