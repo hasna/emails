@@ -173,7 +173,7 @@ export class EmailsSelfHostClient {
       });
     }
 
-    async listMessages(query?: { "limit"?: number; "offset"?: number; "direction"?: "inbound" | "outbound"; "to"?: string }, init?: RequestInit): Promise<{ "messages"?: Array<Message> }> {
+    async listMessages(query?: { "limit"?: number; "offset"?: number; "direction"?: "inbound" | "outbound"; "to"?: string; "since"?: string }, init?: RequestInit): Promise<{ "messages"?: Array<Message> }> {
       return this.request("GET", `/v1/messages`, {
         body: undefined,
         query,

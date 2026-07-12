@@ -182,6 +182,14 @@ function queryInt(url: URL, key: string): number | undefined {
   return Number.isFinite(n) ? n : undefined;
 }
 
+function queryIsoDate(url: URL, key: string): { value?: string; error?: string } {
+  const raw = url.searchParams.get(key);
+  if (raw === null || raw.trim() === "") return {};
+  const time = Date.parse(raw);
+  if (!Number.isFinite(time)) return { error: `${key} must be a valid ISO date` };
+  return { value: new Date(time).toISOString() };
+}
+
 /** Coerce a JSON body value into a string[] (array, comma/whitespace-tolerant). */
 function asStringArray(value: unknown): string[] {
   if (Array.isArray(value)) return value.map((v) => String(v));
@@ -580,11 +588,14 @@ export async function handleSelfHostedRequest(
         if (!auth.ok) return auth.response;
         const directionValue = url.searchParams.get("direction")?.trim().toLowerCase();
         const direction = directionValue === "inbound" || directionValue === "outbound" ? directionValue : undefined;
+        const since = queryIsoDate(url, "since");
+        if (since.error) return json(400, { error: since.error });
         const messages = await store.listMessages({
           limit: queryInt(url, "limit"),
           offset: queryInt(url, "offset"),
           direction,
           to: url.searchParams.get("to") ?? undefined,
+          since: since.value,
         });
         return json(200, { messages: messages.map(publicMessage) });
       }

@@ -76,6 +76,14 @@ function fakeServe(initial: Array<Record<string, unknown>>): { fetchImpl: SelfHo
         String(b["received_at"]).localeCompare(String(a["received_at"])));
       const direction = u.searchParams.get("direction");
       if (direction) ordered = ordered.filter((row) => String(row["direction"] ?? "").toLowerCase() === direction);
+      const since = u.searchParams.get("since");
+      if (since) {
+        const cutoff = Date.parse(since);
+        ordered = ordered.filter((row) => {
+          const time = Date.parse(String(row["received_at"] ?? row["created_at"] ?? ""));
+          return Number.isFinite(time) && time >= cutoff;
+        });
+      }
       const limit = Number(u.searchParams.get("limit") ?? "500");
       const offset = Number(u.searchParams.get("offset") ?? "0");
       return ordered.slice(offset, offset + limit);
@@ -208,6 +216,23 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     expect(msgs).toHaveLength(1);
     expect(serve.requests.filter((request) => request.startsWith("GET /v1/messages?"))).toEqual([
       "GET /v1/messages?limit=50&offset=0&direction=inbound",
+    ]);
+  });
+
+  it("pushes timezone-aware since filters to the self-hosted server before pagination", async () => {
+    const { ds, serve } = make([
+      v1("old", { received_at: "2026-07-11T20:59:59.000Z" }),
+      v1("today", { received_at: "2026-07-11T21:30:00.000Z" }),
+    ]);
+
+    const msgs = await ds.listMailbox("inbox", {
+      since: "2026-07-12T00:00:00+03:00",
+      limit: 10,
+    });
+
+    expect(msgs.map((m) => m.id)).toEqual(["today"]);
+    expect(serve.requests.filter((request) => request.startsWith("GET /v1/messages?"))).toEqual([
+      "GET /v1/messages?limit=50&offset=0&direction=inbound&since=2026-07-11T21%3A00%3A00.000Z",
     ]);
   });
 

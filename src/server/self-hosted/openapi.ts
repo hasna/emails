@@ -211,6 +211,7 @@ export const emailsSelfHostedOpenApi: OpenApiDocument = {
           ...listParams,
           { name: "direction", in: "query", required: false, schema: { type: "string", enum: ["inbound", "outbound"] } },
           { name: "to", in: "query", required: false, schema: { type: "string" } },
+          { name: "since", in: "query", required: false, schema: { type: "string", format: "date-time" } },
         ],
         responses: { "200": { content: { "application/json": { schema: { type: "object", properties: { messages: { type: "array", items: { $ref: "#/components/schemas/Message" } } } } } } } },
       },

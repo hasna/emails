@@ -118,6 +118,23 @@ function messageDate(m: V1Message): string {
   return m.received_at || m.created_at || "";
 }
 
+function normalizeSince(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const time = Date.parse(value);
+  if (!Number.isFinite(time)) throw new Error(`Invalid date: ${value}`);
+  return new Date(time).toISOString();
+}
+
+function messageTime(m: V1Message): number {
+  const time = Date.parse(messageDate(m));
+  return Number.isFinite(time) ? time : Number.NEGATIVE_INFINITY;
+}
+
+function isOnOrAfter(m: V1Message, since: string | undefined): boolean {
+  if (!since) return true;
+  return messageTime(m) >= Date.parse(since);
+}
+
 function labelsOf(m: V1Message): string[] {
   return Array.isArray(m.labels) ? m.labels.filter((l): l is string => typeof l === "string") : [];
 }
@@ -326,12 +343,13 @@ export class SelfHostedMailDataSource implements MailDataSource {
   private async listPage(
     limit: number,
     offset: number,
-    opts: { direction?: "inbound" | "outbound" } = {},
+    opts: { direction?: "inbound" | "outbound"; since?: string } = {},
   ): Promise<V1Message[]> {
     const params = new URLSearchParams();
     params.set("limit", String(limit));
     params.set("offset", String(offset));
     if (opts.direction) params.set("direction", opts.direction);
+    if (opts.since) params.set("since", opts.since);
     const { status, json } = await this.request("GET", `/messages?${params.toString()}`);
     if (status < 200 || status >= 300) {
       throw new Error(`self-hosted emails: GET /messages failed (HTTP ${status})`);
@@ -391,9 +409,10 @@ export class SelfHostedMailDataSource implements MailDataSource {
     const wanted = offset + limit;
     const pageLimit = Math.min(PAGE_LIMIT, Math.max(50, wanted));
     const direction = mailbox === "sent" ? "outbound" : "inbound";
+    const since = normalizeSince(opts?.since);
     const matches: V1Message[] = [];
     for (let serverOffset = 0; serverOffset < MAX_SCAN_ROWS && matches.length < wanted; serverOffset += pageLimit) {
-      const page = await this.listPage(pageLimit, serverOffset, { direction });
+      const page = await this.listPage(pageLimit, serverOffset, { direction, since });
       for (const message of page) {
         if (folderMatch(message, mailbox) && sourceMatch(message, opts?.source)) matches.push(message);
       }
@@ -438,10 +457,12 @@ export class SelfHostedMailDataSource implements MailDataSource {
     }
     const rows = await this.scanAll();
     const label = opts?.label?.trim().toLowerCase();
+    const since = normalizeSince(opts?.since);
     let filtered = rows.filter((m) =>
       folderMatch(m, mailbox)
       && sourceMatch(m, opts?.source)
       && searchMatch(m, opts?.search)
+      && isOnOrAfter(m, since)
       && (!label || labelsOf(m).some((l) => l.trim().toLowerCase() === label)),
     );
     filtered.sort((a, b) => {
@@ -580,12 +601,12 @@ export class SelfHostedMailDataSource implements MailDataSource {
   async verificationCandidates(address: string, opts?: VerificationCodeCandidateOptions): Promise<VerificationCodeEmail[]> {
     const target = address.trim().toLowerCase();
     const rows = await this.scanAll();
-    const since = opts?.since;
+    const since = normalizeSince(opts?.since);
     const fromFilter = opts?.from?.trim().toLowerCase();
     const candidates = rows
       .filter((m) => (m.direction ?? "").toLowerCase() !== "outbound")
       .filter((m) => (m.to_addrs ?? []).map(bareEmail).includes(target))
-      .filter((m) => (!since || messageDate(m) >= since))
+      .filter((m) => isOnOrAfter(m, since))
       .filter((m) => (!fromFilter || (m.from_addr ?? "").toLowerCase().includes(fromFilter)))
       .sort((a, b) => messageDate(b).localeCompare(messageDate(a)));
     const limit = opts?.limit && opts.limit > 0 ? opts.limit : 50;
@@ -609,9 +630,9 @@ export class SelfHostedMailDataSource implements MailDataSource {
 
   async changesSince(opts?: MailChangesQuery): Promise<MailChanges> {
     const rows = await this.scanAll();
-    const since = opts?.since;
+    const since = normalizeSince(opts?.since);
     let messages = rows
-      .filter((m) => (!since || messageDate(m) >= since))
+      .filter((m) => isOnOrAfter(m, since))
       .sort((a, b) => messageDate(a).localeCompare(messageDate(b)));
     if (opts?.limit && opts.limit > 0) messages = messages.slice(-opts.limit);
     const tui = messages.map(v1ToTuiMessage);
