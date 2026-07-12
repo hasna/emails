@@ -14,7 +14,8 @@ describe("self-hosted container TLS contract", () => {
     expect(dockerfile).toContain(
       "https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem",
     );
-    expect(dockerfile).toContain("--chown=bun:bun --chmod=0444");
+    expect(dockerfile).toContain("--chown=root:root --chmod=0444");
+    expect(dockerfile).toContain("chown root:root /opt /opt/emails /opt/emails/certs");
   });
 
   test("configures the product runtime to use the bundled trust roots", () => {

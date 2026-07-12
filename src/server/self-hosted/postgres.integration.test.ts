@@ -10,12 +10,70 @@ const client = databaseUrl
 
 afterAll(async () => { await client?.close(); });
 
+async function resetPublicSchema(): Promise<void> {
+  await client!.execute("DROP SCHEMA IF EXISTS public CASCADE");
+  await client!.execute("CREATE SCHEMA public");
+}
+
 describe("self-hosted Postgres integration", () => {
-  it.skipIf(!client)("migrates a fresh database and enforces durable send idempotency", async () => {
+  it.skipIf(!client)("migrates dirty legacy rows and enforces durable send idempotency", async () => {
+    await resetPublicSchema();
+    await client!.execute(`
+      CREATE TABLE inbound_emails (
+        id TEXT PRIMARY KEY,
+        message_id TEXT,
+        from_address TEXT NOT NULL,
+        to_addresses TEXT NOT NULL DEFAULT '[]',
+        cc_addresses TEXT NOT NULL DEFAULT '[]',
+        subject TEXT NOT NULL DEFAULT '',
+        text_body TEXT,
+        html_body TEXT,
+        received_at TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE emails (
+        id TEXT PRIMARY KEY,
+        provider_message_id TEXT,
+        from_address TEXT NOT NULL,
+        to_addresses TEXT NOT NULL DEFAULT '[]',
+        cc_addresses TEXT NOT NULL DEFAULT '[]',
+        subject TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'sent',
+        sent_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      INSERT INTO inbound_emails (
+        id, message_id, from_address, to_addresses, cc_addresses, subject,
+        text_body, html_body, received_at, created_at
+      ) VALUES (
+        'in-dirty', 's3-key-dirty', 'sender@example.com', 'not-json', '{bad',
+        'legacy inbound', 'plain', '<p>html</p>', 'not-a-date', 'also-not-a-date'
+      );
+      INSERT INTO emails (
+        id, provider_message_id, from_address, to_addresses, cc_addresses,
+        subject, status, sent_at, created_at, updated_at
+      ) VALUES (
+        'sent-dirty', 'provider-dirty', 'sender@example.com', 'not-json', '{bad',
+        'legacy sent', 'sent', 'not-a-date', 'also-not-a-date', 'still-not-a-date'
+      );
+    `);
+
     const ledger = new MigrationLedger(client!, emailsSelfHostedMigrations());
     await ledger.migrate();
     const applied = await ledger.listApplied();
+    expect(applied.map((row) => row.id)).toContain("0006b_emails_legacy_messages_backfill_prep");
     expect(applied.map((row) => row.id)).toContain("0006_emails_rename_bridge");
+    expect(applied.map((row) => row.id)).toContain("0008_emails_legacy_messages_backfill_dedupe");
+
+    const legacyRows = await client!.many<{ id: string; direction: string; subject: string | null }>(
+      "SELECT id, direction, subject FROM messages WHERE id IN ($1, $2) ORDER BY id",
+      ["legacy-inbound:in-dirty", "legacy-sent:sent-dirty"],
+    );
+    expect(legacyRows).toEqual([
+      { id: "legacy-inbound:in-dirty", direction: "inbound", subject: "legacy inbound" },
+      { id: "legacy-sent:sent-dirty", direction: "outbound", subject: "legacy sent" },
+    ]);
 
     const store = new EmailsSelfHostedStore(client!);
     const key = `ci-${crypto.randomUUID()}`;

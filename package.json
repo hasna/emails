@@ -1,6 +1,6 @@
 {
   "name": "@hasna/emails",
-  "version": "0.6.118",
+  "version": "0.6.119",
   "description": "Emails local and self-hosted email management CLI, MCP server, and dashboard",
   "type": "module",
   "repository": {

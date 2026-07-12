@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { processInboundNotification, shouldDeleteIngestResult, validateIngestWorkerConfig, type IngestDeps } from "./ingest-worker.js";
+import { ingestS3Object, processInboundNotification, shouldDeleteIngestResult, validateIngestWorkerConfig, type IngestDeps } from "./ingest-worker.js";
 import type { MessageInput, MessageRecord } from "./store.js";
 
 const OBJECT_KEY = "inbound/hasna.com/msgkey123";
@@ -92,6 +92,20 @@ describe("processInboundNotification", () => {
     expect(w.received_at).toBe("2026-07-02T09:59:00.000Z");
     // The real RFC Message-ID is retained in headers, not lost.
     expect(w.headers?.["message-id"]).toContain("real-rfc-id@external.com");
+  });
+
+  it("ingests a listed S3 object directly for one-shot backfills", async () => {
+    const { deps, upserts, fetched } = makeDeps();
+    const r = await ingestS3Object(deps, BUCKET, OBJECT_KEY);
+
+    expect(r.status).toBe("ingested");
+    expect(fetched).toEqual([`${BUCKET}/${OBJECT_KEY}`]);
+    expect(upserts[0]).toMatchObject({
+      source_id: OBJECT_KEY,
+      message_id: OBJECT_KEY,
+      direction: "inbound",
+      status: "received",
+    });
   });
 
   it("skips (as duplicate) when the key already exists", async () => {

@@ -23,6 +23,8 @@ Commands:
   ingest-worker      Run the SES-inbound ingestion worker: long-poll the SQS
                      queue (EMAILS_INGEST_QUEUE_URL), fetch each archived raw
                      message from S3, and write it to self-hosted Postgres.
+  ingest-s3-backfill One-shot repair/backfill: list EMAILS_INGEST_S3_BUCKET /
+                     EMAILS_INGEST_S3_PREFIX and ingest existing raw objects.
 
 Options:
   --host <host>      Host to bind to
@@ -37,6 +39,9 @@ const mode = resolveEmailsMode().mode;
 if (args[0] === "ingest-worker") {
   const { runIngestWorker } = await import("./self-hosted/ingest-worker.js");
   await runIngestWorker();
+} else if (args[0] === "ingest-s3-backfill") {
+  const { runIngestS3Backfill } = await import("./self-hosted/ingest-worker.js");
+  await runIngestS3Backfill();
 } else if (mode === "self_hosted") {
   const { startSelfHostedServer } = await import("./self-hosted/serve.js");
   const port = process.env["PORT"] ? parseInt(process.env["PORT"], 10) : 8080;

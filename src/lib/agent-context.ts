@@ -12,6 +12,7 @@ import { getInboundBuckets, loadConfig } from "./config.js";
 import { enrichAddresses, type EnrichedAddress } from "./address-ownership.js";
 import { resolveMailDataSource } from "./mail-data-source.js";
 import { resolveEmailsMode, type EmailsMode, type EmailsModeLabel, type EmailsModeSource } from "./mode.js";
+import { withSelfHostedResourceRoutingDisabled } from "../db/self-hosted-store.js";
 import {
   listMailboxSources,
   listMailboxStatus,
@@ -365,8 +366,10 @@ export function getEmailSystemStatus(db: Database = getDatabase()): EmailSystemS
 export async function getEmailSystemStatusForRuntime(
   db: Database = getDatabase(),
 ): Promise<EmailSystemStatus> {
-  const status = getEmailSystemStatus(db);
   const ds = resolveMailDataSource();
+  const status = ds.mode === "self_hosted"
+    ? withSelfHostedResourceRoutingDisabled(() => getEmailSystemStatus(db))
+    : getEmailSystemStatus(db);
   if (ds.mode !== "self_hosted") return status;
 
   const [counts, mailboxes, sources] = await Promise.all([
@@ -374,6 +377,7 @@ export async function getEmailSystemStatusForRuntime(
     ds.listMailboxStatus(),
     ds.listMailboxSources({ limit: Math.max(SOURCE_STATUS_LIMIT + 1, 1000), includeLatest: false }),
   ]);
+  const primarySource = sources[0];
   const receivedTotal = counts.inbox + counts.archived + counts.spam + counts.trash;
   return {
     ...status,
@@ -381,6 +385,14 @@ export async function getEmailSystemStatusForRuntime(
       ...status.inbox,
       total: receivedTotal,
       unread: counts.unread,
+      latest_received_at: primarySource?.latestReceivedAt ?? null,
+      inbound_buckets: [],
+      realtime: {
+        queue_configured: false,
+        queue_url: null,
+        last_poll_at: null,
+        last_error: null,
+      },
     },
     mailboxes,
     sources: {

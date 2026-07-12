@@ -185,6 +185,7 @@ describe("Emails self-hosted service", () => {
       unread: 3,
       starred: 1,
       archived: 0,
+      spam: 0,
       trash: 0,
       total: 6,
       latest_received_at: "2026-07-10T10:00:00.000Z",

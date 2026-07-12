@@ -61,24 +61,59 @@ function v1(id: string, over: Record<string, unknown> = {}): Record<string, unkn
 }
 
 // A fake self-hosted /v1 serve backed by an in-memory row list.
-function fakeServe(initial: Array<Record<string, unknown>>): { fetchImpl: SelfHostedFetch; rows: Map<string, Record<string, unknown>>; posted: unknown[]; deleted: string[] } {
+function fakeServe(initial: Array<Record<string, unknown>>): { fetchImpl: SelfHostedFetch; rows: Map<string, Record<string, unknown>>; posted: unknown[]; deleted: string[]; requests: string[] } {
   const rows = new Map(initial.map((r) => [r["id"] as string, r]));
   const posted: unknown[] = [];
   const deleted: string[] = [];
+  const requests: string[] = [];
   const fetchImpl: SelfHostedFetch = async (url, init) => {
     const u = new URL(url);
     const method = (init.method ?? "GET").toUpperCase();
+    requests.push(`${method} ${u.pathname}${u.search}`);
     const ok = (body: unknown, status = 200) => ({ status, async text() { return JSON.stringify(body); } });
     const list = () => {
-      const ordered = [...rows.values()].sort((a, b) =>
+      let ordered = [...rows.values()].sort((a, b) =>
         String(b["received_at"]).localeCompare(String(a["received_at"])));
+      const direction = u.searchParams.get("direction");
+      if (direction) ordered = ordered.filter((row) => String(row["direction"] ?? "").toLowerCase() === direction);
       const limit = Number(u.searchParams.get("limit") ?? "500");
       const offset = Number(u.searchParams.get("offset") ?? "0");
       return ordered.slice(offset, offset + limit);
     };
+    const counts = () => {
+      const messages = [...rows.values()];
+      const hasLabel = (row: Record<string, unknown>, label: string) =>
+        Array.isArray(row["labels"]) && (row["labels"] as unknown[]).some((value) => String(value).toLowerCase() === label);
+      const isOutbound = (row: Record<string, unknown>) => String(row["direction"] ?? "").toLowerCase() === "outbound";
+      const inboxRows = messages.filter((row) =>
+        !isOutbound(row) && !hasLabel(row, "archived") && !hasLabel(row, "spam") && !hasLabel(row, "trash"));
+      const latest = messages.reduce<string | null>((max, row) => {
+        if (isOutbound(row)) return max;
+        const date = String(row["received_at"] ?? row["created_at"] ?? "");
+        return date && (max === null || date > max) ? date : max;
+      }, null);
+      return {
+        inbox: inboxRows.length,
+        unread: inboxRows.filter((row) => !row["is_read"]).length,
+        starred: messages.filter((row) =>
+          !isOutbound(row) &&
+          Boolean(row["is_starred"]) &&
+          !hasLabel(row, "archived") &&
+          !hasLabel(row, "spam") &&
+          !hasLabel(row, "trash")
+        ).length,
+        sent: messages.filter(isOutbound).length,
+        archived: messages.filter((row) => !isOutbound(row) && hasLabel(row, "archived") && !hasLabel(row, "spam") && !hasLabel(row, "trash")).length,
+        spam: messages.filter((row) => !isOutbound(row) && (hasLabel(row, "spam") || String(row["status"] ?? "").toLowerCase() === "spam")).length,
+        trash: messages.filter((row) => !isOutbound(row) && hasLabel(row, "trash")).length,
+        total: messages.length,
+        latest_received_at: latest,
+      };
+    };
     const attachmentMatch = u.pathname.match(/^\/v1\/messages\/(.+)\/attachments\/(\d+)$/);
     const idMatch = u.pathname.match(/^\/v1\/messages\/([^/]+)$/);
     if (u.pathname === "/v1/messages" && method === "GET") return ok({ messages: list() });
+    if (u.pathname === "/v1/messages/counts" && method === "GET") return ok({ counts: counts() });
     if (u.pathname === "/v1/messages/send" && method === "POST") {
       const body = JSON.parse(String(init.body));
       posted.push(body);
@@ -124,7 +159,7 @@ function fakeServe(initial: Array<Record<string, unknown>>): { fetchImpl: SelfHo
     }
     return ok({ error: "not found" }, 404);
   };
-  return { fetchImpl, rows, posted, deleted };
+  return { fetchImpl, rows, posted, deleted, requests };
 }
 
 function make(rows: Array<Record<string, unknown>>): { ds: SelfHostedMailDataSource; serve: ReturnType<typeof fakeServe> } {
@@ -164,6 +199,18 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     expect(top.kind).toBe("inbound");
   });
 
+  it("honors small inbox limits with one bounded server-side page", async () => {
+    const rows = Array.from({ length: 1000 }, (_, index) => v1(String(index), {
+      received_at: `2026-06-18T08:${String(index % 60).padStart(2, "0")}:00.000Z`,
+    }));
+    const { ds, serve } = make(rows);
+    const msgs = await ds.listMailbox("inbox", { limit: 1 });
+    expect(msgs).toHaveLength(1);
+    expect(serve.requests.filter((request) => request.startsWith("GET /v1/messages?"))).toEqual([
+      "GET /v1/messages?limit=50&offset=0&direction=inbound",
+    ]);
+  });
+
   it("filters the unread folder and honors a substring search", async () => {
     const { ds } = make([v1("2", { is_read: true }), v1("5"), v1("3", { subject: "Oana friend suggestion" })]);
     const unread = await ds.listMailbox("unread");
@@ -180,12 +227,60 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     expect(sent[0]!.kind).toBe("sent");
   });
 
+  it("keeps starred self-hosted mailbox semantics aligned with local received folders", async () => {
+    const { ds, serve } = make([
+      v1("1", { is_starred: true }),
+      v1("2", { is_starred: true, direction: "outbound" }),
+      v1("3", { is_starred: true, labels: ["archived"] }),
+      v1("4", { is_starred: true, labels: ["spam"] }),
+      v1("5", { is_starred: true, labels: ["trash"] }),
+    ]);
+
+    expect((await ds.listMailbox("starred")).map((m) => m.id)).toEqual(["1"]);
+    expect((await ds.mailboxCounts()).starred).toBe(1);
+    expect(serve.requests.filter((request) => request.startsWith("GET /v1/messages?"))).toEqual([
+      "GET /v1/messages?limit=200&offset=0&direction=inbound",
+    ]);
+  });
+
+  it("keeps archived self-hosted mailbox lists aligned with server count semantics", async () => {
+    const { ds } = make([
+      v1("1", { labels: ["archived"] }),
+      v1("2", { labels: ["archived", "spam"] }),
+      v1("3", { labels: ["archived", "trash"] }),
+      v1("4", { labels: ["archived"], direction: "outbound" }),
+      v1("5", { labels: ["spam"] }),
+      v1("6", { labels: ["trash"] }),
+    ]);
+
+    expect((await ds.listMailbox("archived")).map((m) => m.id)).toEqual(["1"]);
+    expect((await ds.listMailbox("spam")).map((m) => m.id).sort()).toEqual(["2", "5"]);
+    expect((await ds.listMailbox("trash")).map((m) => m.id).sort()).toEqual(["3", "6"]);
+    expect(await ds.mailboxCounts()).toMatchObject({ archived: 1, spam: 2, trash: 2, sent: 1 });
+  });
+
   it("computes mailbox counts across folders", async () => {
-    const { ds } = make([v1("2"), v1("3", { is_read: true }), v1("5", { is_starred: true })]);
+    const { ds, serve } = make([v1("2"), v1("3", { is_read: true }), v1("5", { is_starred: true })]);
     const counts = await ds.mailboxCounts();
     expect(counts.inbox).toBe(3);
     expect(counts.unread).toBe(2);
     expect(counts.starred).toBe(1);
+    expect(serve.requests).toEqual(["GET /v1/messages/counts"]);
+  });
+
+  it("reports self-hosted source totals as received mail, not global sent+received totals", async () => {
+    const { ds } = make([
+      v1("1"),
+      v1("2", { labels: ["archived"] }),
+      v1("3", { direction: "outbound" }),
+    ]);
+
+    const sources = await ds.listMailboxSources();
+    expect(sources[0]).toMatchObject({
+      id: "self_hosted",
+      total: 2,
+      counts: { inbox: 1, archived: 1, sent: 1 },
+    });
   });
 
   it("resolves a full id verbatim and a unique prefix by scan", async () => {

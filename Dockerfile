@@ -18,11 +18,15 @@ ENV NODE_ENV=production \
     HOST=0.0.0.0 \
     PORT=8080
 
+RUN mkdir -p /opt/emails/certs \
+    && chown root:root /opt /opt/emails /opt/emails/certs \
+    && chmod 0755 /opt /opt/emails /opt/emails/certs
+
 # Official Amazon RDS global trust bundle, content-pinned for reproducible and
 # fail-closed image builds. To rotate it, review the new AWS bundle and update
 # this checksum together with the TLS/container contract tests.
 ADD --checksum=sha256:e5bb2084ccf45087bda1c9bffdea0eb15ee67f0b91646106e466714f9de3c7e3 \
-    --chown=bun:bun --chmod=0444 \
+    --chown=root:root --chmod=0444 \
     https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem \
     /opt/emails/certs/aws-rds-global-bundle.pem
 
