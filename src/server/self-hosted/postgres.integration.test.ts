@@ -16,7 +16,7 @@ async function resetPublicSchema(): Promise<void> {
 }
 
 describe("self-hosted Postgres integration", () => {
-  it.skipIf(!client)("migrates dirty legacy rows and enforces durable send idempotency", async () => {
+  it.skipIf(!client)("migrates dirty text legacy rows and enforces durable send idempotency", async () => {
     await resetPublicSchema();
     await client!.execute(`
       CREATE TABLE inbound_emails (
@@ -92,5 +92,61 @@ describe("self-hosted Postgres integration", () => {
     const claimed = await store.claimSendIntent(first.record.id);
     expect(claimed?.send_state).toBe("sending");
     expect((await store.completeSendIntent(first.record.id, "provider-ci")).send_state).toBe("sent");
+  });
+
+  it.skipIf(!client)("migrates typed timestamp legacy rows without text-assignment failures", async () => {
+    await resetPublicSchema();
+    await client!.execute(`
+      CREATE TABLE inbound_emails (
+        id TEXT PRIMARY KEY,
+        message_id TEXT,
+        from_address TEXT NOT NULL,
+        to_addresses TEXT NOT NULL DEFAULT '[]',
+        cc_addresses TEXT NOT NULL DEFAULT '[]',
+        subject TEXT NOT NULL DEFAULT '',
+        text_body TEXT,
+        html_body TEXT,
+        received_at TIMESTAMPTZ NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL
+      );
+      CREATE TABLE emails (
+        id TEXT PRIMARY KEY,
+        provider_message_id TEXT,
+        from_address TEXT NOT NULL,
+        to_addresses TEXT NOT NULL DEFAULT '[]',
+        cc_addresses TEXT NOT NULL DEFAULT '[]',
+        subject TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'sent',
+        sent_at TIMESTAMPTZ NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL
+      );
+      INSERT INTO inbound_emails (
+        id, message_id, from_address, to_addresses, cc_addresses, subject,
+        text_body, html_body, received_at, created_at
+      ) VALUES (
+        'in-typed', 's3-key-typed', 'typed@example.com', '["to@example.com"]', '[]',
+        'typed inbound', 'plain', '<p>html</p>', '2026-07-12T12:00:00Z', '2026-07-12T12:00:01Z'
+      );
+      INSERT INTO emails (
+        id, provider_message_id, from_address, to_addresses, cc_addresses,
+        subject, status, sent_at, created_at, updated_at
+      ) VALUES (
+        'sent-typed', 'provider-typed', 'typed@example.com', '["to@example.com"]', '[]',
+        'typed sent', 'sent', '2026-07-12T12:01:00Z', '2026-07-12T12:01:01Z', '2026-07-12T12:01:02Z'
+      );
+    `);
+
+    const ledger = new MigrationLedger(client!, emailsSelfHostedMigrations());
+    await ledger.migrate();
+
+    const legacyRows = await client!.many<{ id: string; direction: string; subject: string | null }>(
+      "SELECT id, direction, subject FROM messages WHERE id IN ($1, $2) ORDER BY id",
+      ["legacy-inbound:in-typed", "legacy-sent:sent-typed"],
+    );
+    expect(legacyRows).toEqual([
+      { id: "legacy-inbound:in-typed", direction: "inbound", subject: "typed inbound" },
+      { id: "legacy-sent:sent-typed", direction: "outbound", subject: "typed sent" },
+    ]);
   });
 });
