@@ -9,7 +9,7 @@
 
 import type { ApiKeyVerifier, ApiKeyPrincipal } from "@hasna/contracts/auth";
 import { createHash } from "node:crypto";
-import type { TypedQueryClient, Migration } from "../../storage-kit/index.js";
+import { migrationAcceptsChecksum, type TypedQueryClient, type Migration } from "../../storage-kit/index.js";
 import { checkHealth } from "../../storage-kit/index.js";
 import { EmailsSelfHostedStore, IdempotencyKeyConflictError, type MessageRecord } from "./store.js";
 import { emailsSelfHostedOpenApi } from "./openapi.js";
@@ -40,7 +40,10 @@ async function readinessCheck(deps: SelfHostedServiceDeps): Promise<ReadyResult>
     const applied = new Map(rows.map((row) => [row.id, row.checksum]));
     const pending = deps.migrations.filter((migration) => !applied.has(migration.id)).map((migration) => migration.id);
     const drifted = rows
-      .filter((row) => expected.has(row.id) && expected.get(row.id) !== row.checksum)
+      .filter((row) => {
+        const migration = deps.migrations.find((item) => item.id === row.id);
+        return migration !== undefined && !migrationAcceptsChecksum(migration, row.checksum);
+      })
       .map((row) => `checksum mismatch: ${row.id}`);
     const unknown = rows.filter((row) => !expected.has(row.id)).map((row) => `unknown migration: ${row.id}`);
     const migrationIssues = [...drifted, ...unknown];

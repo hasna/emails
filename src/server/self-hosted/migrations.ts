@@ -4,7 +4,7 @@
 // idempotent, drift/downgrade-guarded). They own ONLY the tables the
 // self_hosted /v1 API manages in the operator-owned database.
 
-import { defineMigration, type Migration } from "../../storage-kit/index.js";
+import { defineMigration, withAcceptedMigrationChecksums, type Migration } from "../../storage-kit/index.js";
 import { apiKeyMigrations } from "@hasna/contracts/auth";
 
 /**
@@ -302,7 +302,7 @@ const EMAILS_RENAME_BRIDGE = defineMigration(
  * malformed legacy JSON/timestamp text so the historical casts in 0007 do not
  * abort the whole migration.
  */
-const LEGACY_MESSAGES_BACKFILL_PREP = defineMigration(
+const LEGACY_MESSAGES_BACKFILL_PREP = withAcceptedMigrationChecksums(defineMigration(
   "0006b_emails_legacy_messages_backfill_prep",
   `
   CREATE OR REPLACE FUNCTION pg_temp.emails_safe_jsonb_text(value TEXT, fallback JSONB)
@@ -325,8 +325,8 @@ const LEGACY_MESSAGES_BACKFILL_PREP = defineMigration(
   END;
   $fn$;
 
-  CREATE OR REPLACE FUNCTION pg_temp.emails_safe_timestamptz_text(value TEXT, fallback TEXT DEFAULT NULL)
-  RETURNS TEXT
+  CREATE OR REPLACE FUNCTION pg_temp.emails_safe_timestamptz_text(value TEXT, fallback TIMESTAMPTZ DEFAULT NULL)
+  RETURNS TIMESTAMPTZ
   LANGUAGE plpgsql
   AS $fn$
   DECLARE
@@ -336,7 +336,7 @@ const LEGACY_MESSAGES_BACKFILL_PREP = defineMigration(
       RETURN fallback;
     END IF;
     parsed := value::timestamptz;
-    RETURN parsed::text;
+    RETURN parsed;
   EXCEPTION WHEN others THEN
     RETURN fallback;
   END;
@@ -357,12 +357,12 @@ const LEGACY_MESSAGES_BACKFILL_PREP = defineMigration(
         received_at = COALESCE(
           pg_temp.emails_safe_timestamptz_text(received_at::text),
           pg_temp.emails_safe_timestamptz_text(created_at::text),
-          now()::text
+          now()
         ),
         created_at = COALESCE(
           pg_temp.emails_safe_timestamptz_text(created_at::text),
           pg_temp.emails_safe_timestamptz_text(received_at::text),
-          now()::text
+          now()
         );
     END IF;
 
@@ -380,23 +380,28 @@ const LEGACY_MESSAGES_BACKFILL_PREP = defineMigration(
           pg_temp.emails_safe_timestamptz_text(sent_at::text),
           pg_temp.emails_safe_timestamptz_text(created_at::text),
           pg_temp.emails_safe_timestamptz_text(updated_at::text),
-          now()::text
+          now()
         ),
         created_at = COALESCE(
           pg_temp.emails_safe_timestamptz_text(created_at::text),
           pg_temp.emails_safe_timestamptz_text(sent_at::text),
-          now()::text
+          now()
         ),
         updated_at = COALESCE(
           pg_temp.emails_safe_timestamptz_text(updated_at::text),
           pg_temp.emails_safe_timestamptz_text(sent_at::text),
           pg_temp.emails_safe_timestamptz_text(created_at::text),
-          now()::text
+          now()
         );
     END IF;
   END $$;
   `,
-);
+), [
+  // Published in @hasna/emails@0.6.119. Accepting it keeps databases that
+  // successfully applied the text-only repair compatible while pending or
+  // failed databases run the corrected TIMESTAMPTZ-safe body above.
+  "sha256:0418239e617335b948364101dfa9d55d401322c377c9999804429b6cc789de23",
+]);
 
 /**
  * Legacy local-store backfill into the self-hosted message ledger.

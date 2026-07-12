@@ -149,6 +149,11 @@ describe("self_hosted service generic resources", () => {
 
     expect(prep.sql).toContain("pg_temp.emails_safe_jsonb_text");
     expect(prep.sql).toContain("pg_temp.emails_safe_timestamptz_text");
+    expect(prep.sql).toContain("RETURNS TIMESTAMPTZ");
+    expect(prep.checksum).toBe("sha256:7dffe791bd15d152088530edc129f000f82c89bd80fa1fa133f1b08d52c3ce23");
+    expect(prep.acceptedChecksums).toContain(
+      "sha256:0418239e617335b948364101dfa9d55d401322c377c9999804429b6cc789de23",
+    );
     expect(prep.sql).toContain("UPDATE inbound_emails");
     expect(prep.sql).toContain("UPDATE emails");
     expect(prep.sql).toContain("sent_at = COALESCE(");

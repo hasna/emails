@@ -25,6 +25,7 @@ export interface Migration {
   readonly id: string;
   readonly sql: string;
   readonly checksum: string;
+  readonly acceptedChecksums?: readonly string[];
 }
 
 export type MigrationState = "already_applied" | "pending";
@@ -55,6 +56,23 @@ export function checksumSql(sql: string): string {
 /** Freeze a migration definition, computing its checksum from the SQL. */
 export function defineMigration(id: string, sql: string): Migration {
   return Object.freeze({ id, sql: sql.trim(), checksum: checksumSql(sql) });
+}
+
+/**
+ * Declare checksums from already-published migration bodies that remain valid
+ * for upgrade compatibility. Pending migrations still run the current SQL and
+ * record the current checksum.
+ */
+export function withAcceptedMigrationChecksums(
+  migration: Migration,
+  acceptedChecksums: readonly string[],
+): Migration {
+  const accepted = [...new Set(acceptedChecksums.filter((checksum) => checksum !== migration.checksum))];
+  return Object.freeze({ ...migration, acceptedChecksums: Object.freeze(accepted) });
+}
+
+export function migrationAcceptsChecksum(migration: Migration, checksum: string): boolean {
+  return migration.checksum === checksum || migration.acceptedChecksums?.includes(checksum) === true;
 }
 
 interface LedgerRow {
@@ -120,7 +138,7 @@ export class MigrationLedger {
     const appliedById = new Map(applied.map((row) => [row.id, row]));
     for (const migration of this.migrations) {
       const existing = appliedById.get(migration.id);
-      if (existing && existing.checksum !== migration.checksum) {
+      if (existing && !migrationAcceptsChecksum(migration, existing.checksum)) {
         throw new Error(
           `Migration checksum mismatch for '${migration.id}': the SQL changed after it was applied.`,
         );

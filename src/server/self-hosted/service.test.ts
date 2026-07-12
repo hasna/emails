@@ -128,6 +128,22 @@ describe("Emails self-hosted service", () => {
     expect(res?.status).toBe(200);
   });
 
+  test("GET /ready accepts the published 0006b compatibility checksum", async () => {
+    const d = deps();
+    d.client.many = async (sql) => sql.includes("schema_migrations")
+      ? emailsSelfHostedMigrations().map(({ id, checksum }) => ({
+        id,
+        checksum: id === "0006b_emails_legacy_messages_backfill_prep"
+          ? "sha256:0418239e617335b948364101dfa9d55d401322c377c9999804429b6cc789de23"
+          : checksum,
+      })) as never[]
+      : [];
+
+    const res = await handleSelfHostedRequest(d, req("GET", "/ready"));
+
+    expect(res?.status).toBe(200);
+  });
+
   test("GET /version returns the version+mode shape", async () => {
     const res = await handleSelfHostedRequest(deps(), req("GET", "/version"));
     const body = await res!.json();
