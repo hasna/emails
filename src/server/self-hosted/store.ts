@@ -108,6 +108,7 @@ export interface ListOptions {
 export interface ListMessagesOptions extends ListOptions {
   direction?: "inbound" | "outbound";
   to?: string;
+  since?: string;
 }
 
 export interface MessageCountsRecord {
@@ -374,6 +375,10 @@ export class EmailsSelfHostedStore {
     if (opts.to?.trim()) {
       params.push(`%${opts.to.trim().toLowerCase()}%`);
       where.push(`lower(to_addrs::text) LIKE $${params.length}`);
+    }
+    if (opts.since?.trim()) {
+      params.push(opts.since.trim());
+      where.push(`COALESCE(received_at, created_at) >= $${params.length}::timestamptz`);
     }
     const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
     params.push(clampLimit(opts.limit));

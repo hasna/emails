@@ -35,6 +35,19 @@ import type {
 const MAX_INBOX_CLI_LIMIT = 1000;
 const CLI_MAILBOXES = ["inbox", "unread", "starred", "sent", "archived", "spam", "trash"] as const satisfies readonly Mailbox[];
 
+function normalizeSinceOption(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const time = Date.parse(value);
+  if (!Number.isFinite(time)) throw new Error(`Invalid --since date: ${value}`);
+  return new Date(time).toISOString();
+}
+
+function messageOnOrAfter(message: TuiMessage, since: string | undefined): boolean {
+  if (!since) return true;
+  const time = Date.parse(message.date);
+  return Number.isFinite(time) && time >= Date.parse(since);
+}
+
 function resolveInboundEmailId(id: string): string {
   return resolvePartialIdOrThrow(getDatabase(), "inbound_emails", id);
 }
@@ -46,8 +59,8 @@ function resolveMailId(ds: MailDataSource, id: string): Promise<string> {
   return ds.resolveId(id);
 }
 
-// unread/starred/archived collapse to their folder view; read/since have no folder
-// equivalent and are applied client-side over the returned page.
+// unread/starred/archived collapse to their folder view; read has no folder
+// equivalent and is applied client-side over the returned page.
 function folderForListFlags(flags: { unread?: boolean; starred?: boolean; archived?: boolean }): Mailbox {
   if (flags.archived) return "archived";
   if (flags.starred) return "starred";
@@ -441,16 +454,18 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
           else if (!source.domain) source.domain = toFilter;
         }
         const ds = resolveMailDataSource();
+        const since = normalizeSinceOption(opts.since);
         let rows = await ds.listMailbox(folder, {
           source,
           limit,
           offset,
+          since,
           search: opts.search,
           label: opts.label,
         });
-        // read/since have no folder equivalent; apply them over the returned page.
+        // Keep a parsed-date guard in case an older data source ignores `since`.
         if (opts.read) rows = rows.filter((row) => row.is_read);
-        if (opts.since) rows = rows.filter((row) => row.date >= opts.since!);
+        if (since) rows = rows.filter((row) => messageOnOrAfter(row, since));
         if (rows.length === 0) {
           output([], chalk.dim("No mail found. Try `emails inbox sources`, `emails refresh`, or `emails inbox wait <address>`."));
           return;

@@ -66,6 +66,13 @@ function nonNegativeInt(value: unknown, fallback: number): number {
   return Number.isFinite(n) ? Math.max(0, Math.trunc(n)) : fallback;
 }
 
+function normalizeIsoDate(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const time = Date.parse(value);
+  if (!Number.isFinite(time)) throw new Error(`Invalid date: ${value}`);
+  return new Date(time).toISOString();
+}
+
 function isDatabase(value: unknown): value is Database {
   return typeof (value as { query?: unknown } | undefined)?.query === "function";
 }
@@ -376,6 +383,7 @@ function appSentSourceClause(src?: MailboxSource, search?: string, includeAppSen
 export interface MailboxListOptions {
   limit?: number;
   offset?: number;
+  since?: string;
   search?: string;
   label?: string;
   source?: MailboxSource;
@@ -388,6 +396,7 @@ export function listMailbox(mailbox: Mailbox, opts?: MailboxListOptions, db?: Da
   const limit = positiveInt(opts?.limit, 200);
   const offset = nonNegativeInt(opts?.offset, 0);
   const order = opts?.sort === "oldest" ? "ASC" : "DESC";
+  const since = normalizeIsoDate(opts?.since);
   let messages: TuiMessage[];
 
   const src = opts?.source;
@@ -399,13 +408,15 @@ export function listMailbox(mailbox: Mailbox, opts?: MailboxListOptions, db?: Da
     const senderSrc = senderSourceClause(src);
     const sentSearch = searchClause(opts?.search, ["subject", "from_address", "to_addresses", "text_body"]);
     const sentLabel = labelClause(opts?.label);
+    const appSinceSql = since ? " AND e.sent_at >= ?" : "";
+    const syncedSinceSql = since ? " AND received_at >= ?" : "";
     const branchLimit = limit + offset;
     const rows = d.query(
       `WITH app_sent AS (
          SELECT 'sent' AS kind, e.id, e.from_address, e.to_addresses, e.subject, e.sent_at AS date,
                 1 AS is_read, 0 AS is_starred, '[]' AS label_ids_json, e.thread_id, NULL AS provider_thread_id,
                 substr(c.text_body, 1, 140) AS snippet, e.attachment_count AS attachments
-         FROM emails e LEFT JOIN email_content c ON c.email_id = e.id${appSrc.sql}
+         FROM emails e LEFT JOIN email_content c ON c.email_id = e.id${appSrc.sql}${appSinceSql}
          ORDER BY e.sent_at ${order}
          LIMIT ?
        ),
@@ -414,7 +425,7 @@ export function listMailbox(mailbox: Mailbox, opts?: MailboxListOptions, db?: Da
                 is_read, is_starred, label_ids_json, thread_id, provider_thread_id, substr(text_body, 1, 140) AS snippet,
                 (CASE WHEN attachments_json IS NULL OR attachments_json = '[]' THEN 0
                       ELSE (LENGTH(attachments_json) - LENGTH(REPLACE(attachments_json, '"filename"', ''))) / LENGTH('"filename"') END) AS attachments
-         FROM inbound_emails WHERE is_sent = 1${senderSrc.sql}${sentSearch.sql}${sentLabel.sql}
+         FROM inbound_emails WHERE is_sent = 1${senderSrc.sql}${sentSearch.sql}${sentLabel.sql}${syncedSinceSql}
          ORDER BY received_at ${order}
          LIMIT ?
        )
@@ -423,13 +434,14 @@ export function listMailbox(mailbox: Mailbox, opts?: MailboxListOptions, db?: Da
          UNION ALL
          SELECT ${MAILBOX_UNION_COLS} FROM synced_sent
        ) ORDER BY date ${order} LIMIT ? OFFSET ?`,
-    ).all(...appSrc.params, branchLimit, ...senderSrc.params, ...sentSearch.params, ...sentLabel.params, branchLimit, limit, offset) as MailboxUnionRow[];
+    ).all(...appSrc.params, ...(since ? [since] : []), branchLimit, ...senderSrc.params, ...sentSearch.params, ...sentLabel.params, ...(since ? [since] : []), branchLimit, limit, offset) as MailboxUnionRow[];
     messages = rows.map((r) => liteToMessage(r, r.kind));
   } else {
     const inboundLabel = labelClause(opts?.label);
+    const sinceSql = since ? " AND received_at >= ?" : "";
     const rows = d.query(
-      `SELECT ${INBOUND_LITE_COLS} FROM inbound_emails WHERE ${FOLDER_WHERE[selectedMailbox]}${recipientSrc.sql}${inboundSearch.sql}${inboundLabel.sql} ORDER BY received_at ${order} LIMIT ? OFFSET ?`,
-    ).all(...recipientSrc.params, ...inboundSearch.params, ...inboundLabel.params, limit, offset) as LiteRow[];
+      `SELECT ${INBOUND_LITE_COLS} FROM inbound_emails WHERE ${FOLDER_WHERE[selectedMailbox]}${recipientSrc.sql}${inboundSearch.sql}${inboundLabel.sql}${sinceSql} ORDER BY received_at ${order} LIMIT ? OFFSET ?`,
+    ).all(...recipientSrc.params, ...inboundSearch.params, ...inboundLabel.params, ...(since ? [since] : []), limit, offset) as LiteRow[];
     messages = rows.map((r) => liteToMessage(r, "inbound"));
   }
 
