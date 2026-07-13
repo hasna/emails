@@ -11,7 +11,13 @@ import type { ApiKeyVerifier, ApiKeyPrincipal } from "@hasna/contracts/auth";
 import { createHash } from "node:crypto";
 import { migrationAcceptsChecksum, type TypedQueryClient, type Migration } from "../../storage-kit/index.js";
 import { checkHealth } from "../../storage-kit/index.js";
-import { EmailsSelfHostedStore, IdempotencyKeyConflictError, type MessageRecord } from "./store.js";
+import {
+  EmailsSelfHostedStore,
+  IdempotencyKeyConflictError,
+  type MessageRecord,
+  type DomainProvisioningPatch,
+  type AddressProvisioningPatch,
+} from "./store.js";
 import { emailsSelfHostedOpenApi } from "./openapi.js";
 import { resourceSpecForPath } from "./resources.js";
 import type { SelfHostedSender } from "./sender.js";
@@ -214,6 +220,47 @@ function asOptStringOrNull(value: unknown): string | null | undefined {
   return value === undefined ? undefined : (value as string | null);
 }
 
+/** Coerce a body value to string|null (null preserved) for a provisioning column. */
+function provStr(value: unknown): string | null {
+  return value === null ? null : String(value);
+}
+
+/**
+ * Extract the domain provisioning fields PRESENT in a PATCH body (mirrors the
+ * local domains provisioning columns). Absent keys are omitted so they stay
+ * untouched; an explicit null clears the column. `nameservers_json` (or the
+ * `nameservers` alias) is a string array.
+ */
+function extractDomainProvisioning(body: Record<string, unknown>): DomainProvisioningPatch {
+  const p: DomainProvisioningPatch = {};
+  if ("provisioning_status" in body) p.provisioning_status = String(body.provisioning_status);
+  if ("purchase_provider" in body) p.purchase_provider = provStr(body.purchase_provider);
+  if ("dns_provider" in body) p.dns_provider = String(body.dns_provider);
+  if ("send_provider" in body) p.send_provider = provStr(body.send_provider);
+  if ("cf_zone_id" in body) p.cf_zone_id = provStr(body.cf_zone_id);
+  if ("registrar" in body) p.registrar = provStr(body.registrar);
+  if ("nameservers_json" in body) p.nameservers_json = asStringArray(body.nameservers_json);
+  else if ("nameservers" in body) p.nameservers_json = asStringArray(body.nameservers);
+  if ("mail_from_domain" in body) p.mail_from_domain = provStr(body.mail_from_domain);
+  if ("last_error" in body) p.last_error = provStr(body.last_error);
+  if ("next_check_at" in body) p.next_check_at = provStr(body.next_check_at);
+  return p;
+}
+
+/** Extract the address provisioning fields PRESENT in a PATCH body. */
+function extractAddressProvisioning(body: Record<string, unknown>): AddressProvisioningPatch {
+  const p: AddressProvisioningPatch = {};
+  if ("domain_id" in body) p.domain_id = provStr(body.domain_id);
+  if ("receive_strategy" in body) p.receive_strategy = provStr(body.receive_strategy);
+  if ("forward_to" in body) p.forward_to = provStr(body.forward_to);
+  if ("routing_rule_id" in body) p.routing_rule_id = provStr(body.routing_rule_id);
+  if ("provisioning_status" in body) p.provisioning_status = String(body.provisioning_status);
+  if ("last_validated_at" in body) p.last_validated_at = provStr(body.last_validated_at);
+  if ("last_error" in body) p.last_error = provStr(body.last_error);
+  if ("next_check_at" in body) p.next_check_at = provStr(body.next_check_at);
+  return p;
+}
+
 interface AuthOk {
   ok: true;
   principal: ApiKeyPrincipal;
@@ -334,12 +381,16 @@ export async function handleSelfHostedRequest(
         const auth = await authenticate(deps, req, url, write);
         if (!auth.ok) return auth.response;
         const body = await readJsonBody(req);
-        const rec = await store.updateDomain(id, {
+        let rec = await store.updateDomain(id, {
           status: body.status === undefined ? undefined : String(body.status),
           provider: body.provider === undefined ? undefined : (body.provider as string | null),
           verified: typeof body.verified === "boolean" ? body.verified : undefined,
           notes: body.notes === undefined ? undefined : (body.notes as string | null),
         });
+        if (rec) {
+          const prov = extractDomainProvisioning(body);
+          if (Object.keys(prov).length > 0) rec = (await store.applyDomainProvisioning(id, prov)) ?? rec;
+        }
         return rec ? json(200, { domain: rec }) : json(404, { error: "domain not found" });
       }
       if (method === "DELETE") {
@@ -392,13 +443,17 @@ export async function handleSelfHostedRequest(
         const body = await readJsonBody(req);
         const quota = parseDailyQuota(body);
         if (quota.error) return json(400, { error: quota.error });
-        const rec = await store.updateAddress(id, {
+        let rec = await store.updateAddress(id, {
           display_name: body.display_name === undefined ? undefined : (body.display_name as string | null),
           status: body.status === undefined ? undefined : String(body.status),
           verified: typeof body.verified === "boolean" ? body.verified : undefined,
           dailyQuotaSet: quota.provided,
           daily_quota: quota.value,
         });
+        if (rec) {
+          const prov = extractAddressProvisioning(body);
+          if (Object.keys(prov).length > 0) rec = (await store.applyAddressProvisioning(id, prov)) ?? rec;
+        }
         return rec ? json(200, { address: rec }) : json(404, { error: "address not found" });
       }
       if (method === "DELETE") {
@@ -414,6 +469,17 @@ export async function handleSelfHostedRequest(
       const auth = await authenticate(deps, req, url, read);
       if (!auth.ok) return auth.response;
       return json(200, { counts: await store.messageCounts() });
+    }
+
+    // /v1/messages/threads — mail-view: subject-rolled-up conversation list.
+    // Handled BEFORE the single-message matcher so "threads" is not read as an id.
+    if (path === "/v1/messages/threads") {
+      if (method !== "GET") return json(405, { error: "method not allowed" });
+      const auth = await authenticate(deps, req, url, read);
+      if (!auth.ok) return auth.response;
+      return json(200, {
+        threads: await store.listThreads({ limit: queryInt(url, "limit"), offset: queryInt(url, "offset") }),
+      });
     }
 
     // /v1/messages/send — the only outbound create path. It invokes the
@@ -665,6 +731,16 @@ export async function handleSelfHostedRequest(
       return attachment ? json(200, { attachment }) : json(404, { error: "attachment not found" });
     }
 
+    // /v1/messages/{id}/raw — mail-view: reconstructed raw MIME for a message.
+    const rawMatch = path.match(/^\/v1\/messages\/([^/]+)\/raw$/);
+    if (rawMatch) {
+      if (method !== "GET") return json(405, { error: "method not allowed" });
+      const auth = await authenticate(deps, req, url, read);
+      if (!auth.ok) return auth.response;
+      const raw = await store.getMessageRaw(decodeURIComponent(rawMatch[1]!));
+      return raw ? json(200, raw) : json(404, { error: "message not found" });
+    }
+
     const messageMatch = path.match(/^\/v1\/messages\/([^/]+)$/);
     if (messageMatch) {
       const id = decodeURIComponent(messageMatch[1]!);
@@ -695,6 +771,16 @@ export async function handleSelfHostedRequest(
         return (await store.deleteMessage(id)) ? json(200, { deleted: true, id }) : json(404, { error: "message not found" });
       }
       return json(405, { error: "method not allowed" });
+    }
+
+    // /v1/mailboxes — mail-view: registered addresses as mailboxes, each with an
+    // inbound folder rollup, plus the global folder counts.
+    if (path === "/v1/mailboxes") {
+      if (method !== "GET") return json(405, { error: "method not allowed" });
+      const auth = await authenticate(deps, req, url, read);
+      if (!auth.ok) return auth.response;
+      const { mailboxes, counts } = await store.listMailboxes();
+      return json(200, { mailboxes, counts });
     }
 
     // ---- generic resources (contacts/providers/templates/groups/…) --------

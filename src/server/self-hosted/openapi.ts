@@ -15,6 +15,17 @@ const domainSchema = {
     provider: { type: "string", nullable: true },
     verified: { type: "boolean" },
     notes: { type: "string", nullable: true },
+    // Provisioning lifecycle state (mirrors the local domains provisioning columns).
+    provisioning_status: { type: "string" },
+    purchase_provider: { type: "string", nullable: true },
+    dns_provider: { type: "string" },
+    send_provider: { type: "string", nullable: true },
+    cf_zone_id: { type: "string", nullable: true },
+    registrar: { type: "string", nullable: true },
+    nameservers_json: { type: "array", items: { type: "string" } },
+    mail_from_domain: { type: "string", nullable: true },
+    last_error: { type: "string", nullable: true },
+    next_check_at: { type: "string", format: "date-time", nullable: true },
     created_at: { type: "string", format: "date-time" },
     updated_at: { type: "string", format: "date-time" },
   },
@@ -29,10 +40,74 @@ const addressSchema = {
     domain: { type: "string", nullable: true },
     display_name: { type: "string", nullable: true },
     status: { type: "string" },
+    verified: { type: "boolean" },
+    daily_quota: { type: "integer", nullable: true },
+    // Provisioning lifecycle state (mirrors the local addresses provisioning columns).
+    domain_id: { type: "string", nullable: true },
+    receive_strategy: { type: "string", nullable: true },
+    forward_to: { type: "string", nullable: true },
+    routing_rule_id: { type: "string", nullable: true },
+    provisioning_status: { type: "string" },
+    last_validated_at: { type: "string", format: "date-time", nullable: true },
+    last_error: { type: "string", nullable: true },
+    next_check_at: { type: "string", format: "date-time", nullable: true },
     created_at: { type: "string", format: "date-time" },
     updated_at: { type: "string", format: "date-time" },
   },
   required: ["id", "email", "status", "created_at", "updated_at"],
+} as const;
+
+// Provisioning fields accepted on a domain PATCH (all optional; null clears).
+const domainProvisioningProps = {
+  provisioning_status: { type: "string" },
+  purchase_provider: { type: "string", nullable: true },
+  dns_provider: { type: "string" },
+  send_provider: { type: "string", nullable: true },
+  cf_zone_id: { type: "string", nullable: true },
+  registrar: { type: "string", nullable: true },
+  nameservers_json: { type: "array", items: { type: "string" } },
+  mail_from_domain: { type: "string", nullable: true },
+  last_error: { type: "string", nullable: true },
+  next_check_at: { type: "string", format: "date-time", nullable: true },
+} as const;
+
+// Provisioning fields accepted on an address PATCH (all optional; null clears).
+const addressProvisioningProps = {
+  domain_id: { type: "string", nullable: true },
+  receive_strategy: { type: "string", nullable: true },
+  forward_to: { type: "string", nullable: true },
+  routing_rule_id: { type: "string", nullable: true },
+  provisioning_status: { type: "string" },
+  last_validated_at: { type: "string", format: "date-time", nullable: true },
+  last_error: { type: "string", nullable: true },
+  next_check_at: { type: "string", format: "date-time", nullable: true },
+} as const;
+
+const threadSchema = {
+  type: "object",
+  properties: {
+    thread_key: { type: "string", description: "Normalized (Re:/Fwd:-stripped) subject key" },
+    subject: { type: "string", nullable: true },
+    message_count: { type: "integer" },
+    unread_count: { type: "integer" },
+    last_message_at: { type: "string", format: "date-time", nullable: true },
+    first_message_at: { type: "string", format: "date-time", nullable: true },
+    participants: { type: "array", items: { type: "string" } },
+  },
+  required: ["thread_key", "message_count", "unread_count"],
+} as const;
+
+const mailboxSchema = {
+  type: "object",
+  properties: {
+    id: { type: "string" },
+    address: { type: "string" },
+    display_name: { type: "string", nullable: true },
+    status: { type: "string" },
+    total: { type: "integer" },
+    unread: { type: "integer" },
+  },
+  required: ["id", "address", "total", "unread"],
 } as const;
 
 const messageSchema = {
@@ -153,7 +228,7 @@ export const emailsSelfHostedOpenApi: OpenApiDocument = {
             "application/json": {
               schema: {
                 type: "object",
-                properties: { status: { type: "string" }, provider: { type: "string", nullable: true }, verified: { type: "boolean" }, notes: { type: "string", nullable: true } },
+                properties: { status: { type: "string" }, provider: { type: "string", nullable: true }, verified: { type: "boolean" }, notes: { type: "string", nullable: true }, ...domainProvisioningProps },
               },
             },
           },
@@ -195,7 +270,7 @@ export const emailsSelfHostedOpenApi: OpenApiDocument = {
       patch: {
         operationId: "updateAddress",
         parameters: [...idParam],
-        requestBody: { content: { "application/json": { schema: { type: "object", properties: { display_name: { type: "string", nullable: true }, status: { type: "string" } } } } } },
+        requestBody: { content: { "application/json": { schema: { type: "object", properties: { display_name: { type: "string", nullable: true }, status: { type: "string" }, verified: { type: "boolean" }, daily_quota: { type: "integer", nullable: true }, ...addressProvisioningProps } } } } },
         responses: { "200": { content: { "application/json": { schema: { type: "object", properties: { address: { $ref: "#/components/schemas/Address" } } } } } } },
       },
       delete: {
@@ -261,6 +336,14 @@ export const emailsSelfHostedOpenApi: OpenApiDocument = {
         operationId: "getMessageCounts",
         summary: "Return server-side mailbox counts",
         responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+      },
+    },
+    "/v1/messages/threads": {
+      get: {
+        operationId: "listThreads",
+        summary: "Mail-view: subject-rolled-up conversation list (newest activity first)",
+        parameters: [...listParams],
+        responses: { "200": { content: { "application/json": { schema: { type: "object", properties: { threads: { type: "array", items: { $ref: "#/components/schemas/Thread" } } } } } } } },
       },
     },
     "/v1/messages/send": {
@@ -335,12 +418,57 @@ export const emailsSelfHostedOpenApi: OpenApiDocument = {
         responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
       },
     },
+    "/v1/messages/{id}/raw": {
+      get: {
+        operationId: "getMessageRaw",
+        summary: "Mail-view: reconstructed raw MIME for a stored message",
+        parameters: [...idParam],
+        responses: {
+          "200": {
+            content: {
+              "application/json": {
+                schema: { type: "object", properties: { raw: { type: "string" }, message_id: { type: "string", nullable: true } }, required: ["raw"] },
+              },
+            },
+          },
+        },
+      },
+    },
+    "/v1/mailboxes": {
+      get: {
+        operationId: "listMailboxes",
+        summary: "Mail-view: registered addresses as mailboxes plus global folder counts",
+        responses: {
+          "200": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    mailboxes: { type: "array", items: { $ref: "#/components/schemas/Mailbox" } },
+                    counts: { type: "object", additionalProperties: true },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    // NOTE: the generic /v1 resource CRUD (contacts, providers, templates,
+    // groups, sequences, owners, send-keys, scheduled, aliases, forwarding,
+    // warming, triage, provisioning, sources, events, email-agents,
+    // email-agent-runs, email-digests) follows a uniform, registry-driven shape
+    // — list -> { items: [...] }; get/create/update -> the bare row;
+    // delete -> { deleted, id } — and is intentionally not enumerated here.
   },
   components: {
     schemas: {
       Domain: domainSchema as never,
       Address: addressSchema as never,
       Message: messageSchema as never,
+      Thread: threadSchema as never,
+      Mailbox: mailboxSchema as never,
     },
   },
 };
