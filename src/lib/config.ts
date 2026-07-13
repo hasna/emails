@@ -1,11 +1,16 @@
 import { chmodSync, existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from "fs";
 import { join } from "path";
-import { getDataDir } from "../db/database.js";
 import { resolveCloudflareAuth, type CloudflareAuth } from "./cloudflare-auth.js";
 import { getEmailsMode } from "./mode.js";
 
-// Lazy getters so tests can override HOME via process.env before calling
-function getConfigDir(): string { return getDataDir(); }
+// Self-hosted-only client: there is no local SQLite `getDataDir()` anymore, but the
+// thin client still keeps a local config/credentials file (Cloudflare/SES tokens,
+// inbound bucket + mail-source registry, default/failover providers). Resolve that
+// directory here without any dependency on the removed database module.
+function getConfigDir(): string {
+  const home = process.env["HOME"] || process.env["USERPROFILE"] || "~";
+  return join(home, ".hasna", "emails");
+}
 function getConfigPath(): string { return join(getConfigDir(), "config.json"); }
 const CONFIG_DIR_MODE = 0o700;
 const CONFIG_FILE_MODE = 0o600;

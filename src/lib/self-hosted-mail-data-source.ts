@@ -19,8 +19,8 @@
 // header. It is never written to argv, logged, or embedded in an error message.
 
 import { resolveSelfHostedConfig } from "../db/self-hosted-store.js";
-import type { AttachmentPath } from "../db/inbound.js";
 import {
+  type AttachmentPath,
   type ConversationBodyOptions,
   type LabelSummary,
   type ListLabelSummaryOptions,
@@ -39,7 +39,7 @@ import {
   type TuiThreadMessage,
   mailboxLabel,
   renderMarkdown,
-} from "../cli/tui/data.js";
+} from "./mail-types.js";
 import type {
   MailBulkInput,
   MailBulkResult,

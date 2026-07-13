@@ -1,5 +1,4 @@
-import type { Database } from "../db/database.js";
-import { getDatabase, resolvePartialId } from "../db/database.js";
+import { resolveResourceId } from "../db/self-hosted-store.js";
 import { findAddressesByEmail, getAddress, listAddresses, type ListAddressOptions } from "../db/addresses.js";
 import { listProviderNamesByIds } from "../db/providers.js";
 import {
@@ -28,26 +27,26 @@ export interface AddressOwnershipDetail {
   history: AddressOwnershipEvent[];
 }
 
-function resolveOwnerRef(ref: string, db: Database): Owner | null {
-  const partialId = resolvePartialId(db, "owners", ref);
-  return getOwnerByName(ref, db)
-    ?? getOwner(ref, db)
-    ?? (partialId ? getOwner(partialId, db) : null);
+function resolveOwnerRef(ref: string): Owner | null {
+  const partialId = resolveResourceId("owners", ref);
+  return getOwnerByName(ref)
+    ?? getOwner(ref)
+    ?? (partialId ? getOwner(partialId) : null);
 }
 
-export function resolveAddressRef(ref: string, db: Database = getDatabase()): EmailAddress {
+export function resolveAddressRef(ref: string): EmailAddress {
   const trimmed = ref.trim();
-  const exact = getAddress(trimmed, db);
+  const exact = getAddress(trimmed);
   if (exact) return exact;
 
-  const id = resolvePartialId(db, "addresses", trimmed);
+  const id = resolveResourceId("addresses", trimmed);
   if (id) {
-    const address = getAddress(id, db);
+    const address = getAddress(id);
     if (address) return address;
   }
 
   const lowered = trimmed.toLowerCase();
-  const matches = findAddressesByEmail(lowered, db);
+  const matches = findAddressesByEmail(lowered);
   if (matches.length === 1) return matches[0]!;
   if (matches.length > 1) {
     const ids = matches.map((address) => `${address.id.slice(0, 8)}:${address.provider_id.slice(0, 8)}`).join(", ");
@@ -56,10 +55,10 @@ export function resolveAddressRef(ref: string, db: Database = getDatabase()): Em
   throw new Error(`Address not found: ${trimmed}`);
 }
 
-export function enrichAddress(address: EmailAddress, db: Database = getDatabase()): EnrichedAddress {
-  const providers = listProviderNamesByIds([address.provider_id], db);
-  const owner = address.owner_id ? getOwner(address.owner_id, db) : null;
-  const administrator = address.administrator_id ? getOwner(address.administrator_id, db) : null;
+export function enrichAddress(address: EmailAddress): EnrichedAddress {
+  const providers = listProviderNamesByIds([address.provider_id]);
+  const owner = address.owner_id ? getOwner(address.owner_id) : null;
+  const administrator = address.administrator_id ? getOwner(address.administrator_id) : null;
   return {
     ...address,
     provider_name: providers.get(address.provider_id) ?? null,
@@ -68,11 +67,11 @@ export function enrichAddress(address: EmailAddress, db: Database = getDatabase(
   };
 }
 
-export function enrichAddresses(addresses: EmailAddress[], db: Database = getDatabase()): EnrichedAddress[] {
-  const providers = listProviderNamesByIds(addresses.map((address) => address.provider_id), db);
+export function enrichAddresses(addresses: EmailAddress[]): EnrichedAddress[] {
+  const providers = listProviderNamesByIds(addresses.map((address) => address.provider_id));
   const ownerIds = addresses.flatMap((address) => [address.owner_id, address.administrator_id])
     .filter((id): id is string => !!id);
-  const owners = listOwnersByIds(ownerIds, db);
+  const owners = listOwnersByIds(ownerIds);
   return addresses.map((address) => ({
     ...address,
     provider_name: providers.get(address.provider_id) ?? null,
@@ -81,13 +80,13 @@ export function enrichAddresses(addresses: EmailAddress[], db: Database = getDat
   }));
 }
 
-export function listEnrichedAddresses(providerId?: string, db: Database = getDatabase(), opts?: ListAddressOptions): EnrichedAddress[] {
-  return enrichAddresses(listAddresses(providerId, db, opts), db);
+export function listEnrichedAddresses(providerId?: string, opts?: ListAddressOptions): EnrichedAddress[] {
+  return enrichAddresses(listAddresses(providerId, opts));
 }
 
-export function getAddressOwnershipDetail(ref: string, db: Database = getDatabase()): AddressOwnershipDetail {
-  const address = resolveAddressRef(ref, db);
-  const enriched = enrichAddress(address, db);
+export function getAddressOwnershipDetail(ref: string): AddressOwnershipDetail {
+  const address = resolveAddressRef(ref);
+  const enriched = enrichAddress(address);
   return {
     address: enriched,
     ownership: enriched.owner
@@ -97,7 +96,7 @@ export function getAddressOwnershipDetail(ref: string, db: Database = getDatabas
           administrator_id: enriched.administrator?.id ?? enriched.owner.id,
         }
       : null,
-    history: listAddressOwnershipEvents(address.id, 10, db),
+    history: listAddressOwnershipEvents(address.id, 10),
   };
 }
 
@@ -105,14 +104,13 @@ export function setAddressOwnerByRef(
   addressRef: string,
   ownerRef: string,
   administratorRef?: string,
-  db: Database = getDatabase(),
 ): AddressOwnershipDetail {
-  const address = resolveAddressRef(addressRef, db);
-  const owner = resolveOwnerRef(ownerRef, db);
+  const address = resolveAddressRef(addressRef);
+  const owner = resolveOwnerRef(ownerRef);
   if (!owner) throw new Error(`Owner not found: ${ownerRef}`);
-  const administrator = administratorRef ? resolveOwnerRef(administratorRef, db) : null;
-  assignAddressOwner(address.id, owner.id, administrator?.id, db);
-  return getAddressOwnershipDetail(address.id, db);
+  const administrator = administratorRef ? resolveOwnerRef(administratorRef) : null;
+  assignAddressOwner(address.id, owner.id, administrator?.id);
+  return getAddressOwnershipDetail(address.id);
 }
 
 export function transferAddressOwnerByRef(
@@ -120,35 +118,32 @@ export function transferAddressOwnerByRef(
   ownerRef: string,
   administratorRef: string | undefined,
   options: { actor?: string; reason: string },
-  db: Database = getDatabase(),
 ): AddressOwnershipDetail {
-  const address = resolveAddressRef(addressRef, db);
-  const owner = resolveOwnerRef(ownerRef, db);
+  const address = resolveAddressRef(addressRef);
+  const owner = resolveOwnerRef(ownerRef);
   if (!owner) throw new Error(`Owner not found: ${ownerRef}`);
-  const administrator = administratorRef ? resolveOwnerRef(administratorRef, db) : null;
-  transferAddressOwner(address.id, owner.id, administrator?.id, options, db);
-  return getAddressOwnershipDetail(address.id, db);
+  const administrator = administratorRef ? resolveOwnerRef(administratorRef) : null;
+  transferAddressOwner(address.id, owner.id, administrator?.id, options);
+  return getAddressOwnershipDetail(address.id);
 }
 
 export function unassignAddressOwnerByRef(
   addressRef: string,
   options: { actor?: string; reason: string },
-  db: Database = getDatabase(),
 ): AddressOwnershipDetail {
-  const address = resolveAddressRef(addressRef, db);
-  unassignAddressOwner(address.id, options, db);
-  return getAddressOwnershipDetail(address.id, db);
+  const address = resolveAddressRef(addressRef);
+  unassignAddressOwner(address.id, options);
+  return getAddressOwnershipDetail(address.id);
 }
 
 export function getAddressOwnershipHistoryByRef(
   addressRef: string,
   limit = 20,
-  db: Database = getDatabase(),
 ): { address: EnrichedAddress; history: AddressOwnershipEvent[] } {
-  const address = resolveAddressRef(addressRef, db);
+  const address = resolveAddressRef(addressRef);
   return {
-    address: enrichAddress(address, db),
-    history: listAddressOwnershipEvents(address.id, limit, db),
+    address: enrichAddress(address),
+    history: listAddressOwnershipEvents(address.id, limit),
   };
 }
 

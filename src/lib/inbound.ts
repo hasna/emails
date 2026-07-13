@@ -1,6 +1,3 @@
-import { storeInboundEmail } from "../db/inbound.js";
-import { getDatabase } from "../db/database.js";
-
 export interface ParsedEmail {
   from_address: string;
   to_addresses: string[];
@@ -274,158 +271,15 @@ interface SmtpServer {
 }
 
 /**
- * Start a minimal SMTP server using Bun's TCP server.
- * Accepts DATA commands, parses the raw email, and stores to inbound_emails.
+ * Minimal SMTP receiver. It accepted DATA commands, parsed the raw MIME message
+ * (using the pure parser above), and stored the result into the local
+ * `inbound_emails` SQLite table. In the self-hosted client there is no local
+ * inbound store — the operator's server runs inbound receipt/ingestion — so this
+ * stub preserves the signature and fails loud. The MIME/webhook parsers above
+ * remain exported for reuse.
  */
-export function createSmtpServer(port: number, providerId?: string): SmtpServer {
-  const db = getDatabase();
-
-  const server = Bun.listen({
-    hostname: "0.0.0.0",
-    port,
-    socket: {
-      open(socket) {
-        (socket as unknown as SmtpSocket).state = {
-          stage: "greeting",
-          from: "",
-          to: [],
-          data: [],
-          collectingData: false,
-        };
-        socket.write("220 emails ESMTP ready\r\n");
-      },
-      data(socket, data) {
-        const s = socket as unknown as SmtpSocket;
-        const lines = data.toString().split(/\r?\n/);
-        for (const rawLine of lines) {
-          const line = rawLine.trimEnd();
-          if (!line) continue;
-          handleSmtpLine(socket, s.state, line, db, providerId);
-        }
-      },
-      error(_socket, error) {
-        process.stderr.write(`[SMTP] Socket error: ${error.message}\n`);
-      },
-      close() {
-        // Connection closed
-      },
-    },
-  });
-
-  process.stderr.write(`[SMTP] Listening on port ${port}\n`);
-
-  return {
-    stop() {
-      server.stop();
-    },
-  };
-}
-
-interface SmtpState {
-  stage: "greeting" | "ready" | "mail" | "rcpt" | "data" | "done";
-  from: string;
-  to: string[];
-  data: string[];
-  collectingData: boolean;
-}
-
-interface SmtpSocket {
-  state: SmtpState;
-  write(data: string): void;
-}
-
-function handleSmtpLine(
-  socket: { write(data: string): void },
-  state: SmtpState,
-  line: string,
-  db: ReturnType<typeof getDatabase>,
-  providerId?: string,
-): void {
-  const upper = line.toUpperCase();
-
-  if (state.collectingData) {
-    if (line === ".") {
-      // End of DATA
-      state.collectingData = false;
-      state.stage = "done";
-      const raw = state.data.join("\n");
-      try {
-        const parsed = parseMimeEmail(raw);
-        const stored = storeInboundEmail(
-          {
-            provider_id: providerId ?? null,
-            message_id: parsed.message_id,
-            in_reply_to_email_id: null,  // auto-detected from headers in storeInboundEmail
-            from_address: parsed.from_address || state.from,
-            to_addresses: parsed.to_addresses.length > 0 ? parsed.to_addresses : state.to,
-            cc_addresses: parsed.cc_addresses,
-            subject: parsed.subject,
-            text_body: parsed.text_body,
-            html_body: parsed.html_body,
-            attachments: [],
-            attachment_paths: [],
-            headers: parsed.headers,
-            raw_size: raw.length,
-            received_at: new Date().toISOString(),
-          },
-          db,
-        );
-        process.stderr.write(
-          `[SMTP] Received email from=${stored.from_address} to=${stored.to_addresses.join(",")} subject="${stored.subject}" id=${stored.id.slice(0, 8)}\n`,
-        );
-      } catch (err) {
-        process.stderr.write(`[SMTP] Failed to store email: ${err instanceof Error ? err.message : String(err)}\n`);
-      }
-      socket.write("250 OK: message queued\r\n");
-      // Reset for next message
-      state.stage = "ready";
-      state.from = "";
-      state.to = [];
-      state.data = [];
-    } else {
-      // Handle dot-stuffing: leading dot on non-terminating lines
-      state.data.push(line.startsWith("..") ? line.slice(1) : line);
-    }
-    return;
-  }
-
-  if (upper.startsWith("EHLO") || upper.startsWith("HELO")) {
-    state.stage = "ready";
-    socket.write("250-emails\r\n250-SIZE 10485760\r\n250 OK\r\n");
-  } else if (upper.startsWith("MAIL FROM:")) {
-    state.from = extractAngle(line.slice(10));
-    state.stage = "mail";
-    socket.write("250 OK\r\n");
-  } else if (upper.startsWith("RCPT TO:")) {
-    state.to.push(extractAngle(line.slice(8)));
-    state.stage = "rcpt";
-    socket.write("250 OK\r\n");
-  } else if (upper === "DATA") {
-    if (state.stage !== "rcpt" && state.stage !== "mail") {
-      socket.write("503 Bad sequence of commands\r\n");
-    } else {
-      state.stage = "data";
-      state.collectingData = true;
-      state.data = [];
-      socket.write("354 Start mail input; end with <CRLF>.<CRLF>\r\n");
-    }
-  } else if (upper === "QUIT") {
-    socket.write("221 Bye\r\n");
-  } else if (upper === "RSET") {
-    state.stage = "ready";
-    state.from = "";
-    state.to = [];
-    state.data = [];
-    state.collectingData = false;
-    socket.write("250 OK\r\n");
-  } else if (upper.startsWith("NOOP")) {
-    socket.write("250 OK\r\n");
-  } else {
-    socket.write("500 Command not recognized\r\n");
-  }
-}
-
-function extractAngle(s: string): string {
-  const match = s.trim().match(/<([^>]*)>/);
-  return match ? match[1]! : s.trim();
+export function createSmtpServer(_port: number, _providerId?: string): SmtpServer {
+  throw new Error(
+    "createSmtpServer is not available in the self-hosted client; inbound SMTP receipt and ingestion run on the self-hosted server.",
+  );
 }

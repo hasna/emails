@@ -1,6 +1,4 @@
-import { getDatabase, type Database } from "../db/database.js";
-import { normalizeEmailAddress, type InboundEmail } from "../db/inbound.js";
-import { safeLimit } from "../db/pagination.js";
+import { type InboundEmail } from "../db/inbound.js";
 
 export interface VerificationCodeEmail {
   id: string;
@@ -46,66 +44,20 @@ export function extractVerificationCodes(text: string): string[] {
     .map(([code]) => code);
 }
 
-function candidateFilterSql(
-  address: string,
-  archived: boolean,
-  filters: VerificationCodeCandidateOptions,
-): { conditions: string[]; params: (string | number)[] } {
-  const conditions = ["recipient.address = ?", "e.is_sent = 0", "e.is_archived = ?"];
-  const params: (string | number)[] = [address, archived ? 1 : 0];
-  if (filters.since) {
-    conditions.push("e.received_at >= ?");
-    params.push(filters.since);
-  }
-  const from = filters.from?.trim().toLowerCase();
-  if (from) {
-    conditions.push("LOWER(COALESCE(e.from_address, '')) LIKE ?");
-    params.push(`%${from}%`);
-  }
-  const subject = filters.subject?.trim().toLowerCase();
-  if (subject) {
-    conditions.push("LOWER(COALESCE(e.subject, '')) LIKE ?");
-    params.push(`%${subject}%`);
-  }
-  return { conditions, params };
-}
-
+// Verification-code candidates come from the inbound message store, which is a
+// server-side `/v1` resource in the self-hosted client. The routed candidate read
+// lives on the async data-source seam — `resolveMailDataSource().verificationCandidates(address, opts)`
+// (implemented by SelfHostedMailDataSource over `/v1`) — which callers use
+// directly. This synchronous SQLite helper has no local store to read, so it
+// fails loud rather than returning an empty list. `findVerificationCode` (below)
+// remains a pure matcher over whatever candidates the seam returns.
 export function listVerificationCodeCandidates(
-  address: string,
-  opts: VerificationCodeCandidateOptions = {},
-  db?: Database,
+  _address: string,
+  _opts: VerificationCodeCandidateOptions = {},
 ): VerificationCodeEmail[] {
-  const normalized = normalizeEmailAddress(address);
-  if (!normalized) return [];
-
-  const d = db || getDatabase();
-  const limit = safeLimit(opts.limit);
-  const active = candidateFilterSql(normalized, false, opts);
-  const archived = candidateFilterSql(normalized, true, opts);
-  const selected = "e.id, e.from_address, e.subject, e.text_body, e.html_body, e.received_at";
-
-  return d.query(`
-    WITH active AS (
-      SELECT ${selected}
-        FROM inbound_recipients recipient
-        JOIN inbound_emails e ON e.id = recipient.inbound_email_id
-       WHERE ${active.conditions.join(" AND ")}
-       ORDER BY e.received_at DESC
-       LIMIT ?
-    ),
-    archived AS (
-      SELECT ${selected}
-        FROM inbound_recipients recipient
-        JOIN inbound_emails e ON e.id = recipient.inbound_email_id
-       WHERE ${archived.conditions.join(" AND ")}
-       ORDER BY e.received_at DESC
-       LIMIT ?
-    )
-    SELECT * FROM active
-    UNION ALL
-    SELECT * FROM archived
-    ORDER BY received_at DESC
-  `).all(...active.params, limit, ...archived.params, limit) as VerificationCodeEmail[];
+  throw new Error(
+    "listVerificationCodeCandidates is not available in the self-hosted client; use resolveMailDataSource().verificationCandidates(...), which reads inbound messages over /v1.",
+  );
 }
 
 export function findVerificationCode<T extends VerificationCodeEmail = InboundEmail>(

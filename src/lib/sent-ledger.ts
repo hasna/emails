@@ -1,30 +1,37 @@
-import type { Database } from "../db/database.js";
 import type { Email, SendEmailOptions } from "../types/index.js";
-import { createEmail } from "../db/emails.js";
-import { storeEmailContent } from "../db/email-content.js";
-import { setEmailThreading, type EmailThreading } from "../db/threads.js";
+import type { EmailThreading } from "../db/threads.js";
+
+// The sent-mail ledger records outbound messages (and their content + threading)
+// into the local SQLite `emails`/`email_content`/`threads` tables. In the
+// self-hosted client the operator's server records sent mail when a message is
+// POSTed to the authenticated `/v1` send endpoint — the thin client keeps no
+// local ledger — so these entrypoints preserve their signatures/return types and
+// fail loud.
 
 export async function createSentEmailLedger(
-  providerId: string,
-  opts: SendEmailOptions,
-  providerMessageId?: string,
-  db?: Database,
+  _providerId: string,
+  _opts: SendEmailOptions,
+  _providerMessageId?: string,
 ): Promise<Email> {
-  return createEmail(providerId, opts, providerMessageId, db);
+  throw new Error(
+    "createSentEmailLedger is not available in the self-hosted client; sent mail is recorded on the self-hosted server when you send via /v1.",
+  );
 }
 
 export async function storeSentEmailContent(
-  emailId: string,
-  content: { html?: string; text?: string; headers?: Record<string, string> },
-  db?: Database,
+  _emailId: string,
+  _content: { html?: string; text?: string; headers?: Record<string, string> },
 ): Promise<void> {
-  storeEmailContent(emailId, content, db);
+  throw new Error(
+    "storeSentEmailContent is not available in the self-hosted client; sent mail content is stored on the self-hosted server.",
+  );
 }
 
 export async function setSentEmailThreading(
-  emailId: string,
-  threading: Partial<EmailThreading>,
-  db?: Database,
+  _emailId: string,
+  _threading: Partial<EmailThreading>,
 ): Promise<void> {
-  setEmailThreading(emailId, threading, db);
+  throw new Error(
+    "setSentEmailThreading is not available in the self-hosted client; sent mail threading is recorded on the self-hosted server.",
+  );
 }
