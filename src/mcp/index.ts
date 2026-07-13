@@ -7,7 +7,7 @@ import pkg from "../../package.json" with { type: "json" };
 function printHelp(): void {
   console.log(`Usage: emails-mcp [options]
 
-Runs the @hasna/emails MCP server. Transport: shared Streamable HTTP on 127.0.0.1
+Runs the @hasnaxyz/emails MCP server. Transport: shared Streamable HTTP on 127.0.0.1
 by default (one process, many agents); pass --stdio for a stdio server (one per client).
 
 Options:

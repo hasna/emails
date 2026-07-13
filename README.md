@@ -1,8 +1,7 @@
-# @hasna/emails
+# @hasnaxyz/emails
 
-Emails is an email management CLI + MCP server - send, receive, sync, and manage email via Resend, AWS SES, and Cloudflare-routed inbound mail.
+Hasna internal self-hosted email management CLI + MCP server - an API-only client that talks to the operator-owned `/v1` service to send, receive, sync, and manage email via Resend, AWS SES, and Cloudflare-routed inbound mail.
 
-[![npm](https://img.shields.io/npm/v/@hasna/emails)](https://www.npmjs.com/package/@hasna/emails)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
 ## Install
@@ -11,7 +10,7 @@ Emails is built for the Bun runtime. Install Bun 1.3 or newer, then install the
 CLI with Bun.
 
 ```bash
-bun install -g @hasna/emails
+bun install -g @hasnaxyz/emails
 ```
 
 ## Deployment modes
@@ -296,7 +295,7 @@ curl 'localhost:3900/api/mailboxes?source_id=legacy'
 
 ## Library API
 
-Import the stable local API from `@hasna/emails`. The public entrypoint covers
+Import the stable API from `@hasnaxyz/emails`. The public entrypoint covers
 provider/domain/address CRUD, sending, inbound storage and listing, templates,
 contacts and suppression, sequences, exports, ownership helpers, and scoped send
 keys.
@@ -314,7 +313,7 @@ import {
   createOwner,
   setAddressOwnerByRef,
   createSendKey,
-} from "@hasna/emails";
+} from "@hasnaxyz/emails";
 ```
 
 ## Inbound Email (AWS SES -> S3)

@@ -1,11 +1,11 @@
 {
-  "name": "@hasna/emails",
-  "version": "0.6.121",
-  "description": "Emails local and self-hosted email management CLI, MCP server, and dashboard",
+  "name": "@hasnaxyz/emails",
+  "version": "1.0.0",
+  "description": "Hasna internal self-hosted email management CLI and MCP server (API-only /v1 client)",
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/hasna/emails.git"
+    "url": "git+https://github.com/hasnaxyz/iapp-emails.git"
   },
   "bin": {
     "emails": "dist/cli/index.js",
@@ -55,7 +55,7 @@
   },
   "publishConfig": {
     "registry": "https://registry.npmjs.org",
-    "access": "public"
+    "access": "restricted"
   },
   "engines": {
     "bun": ">=1.3.0"

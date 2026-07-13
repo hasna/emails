@@ -1,4 +1,4 @@
-/** Public deployment-mode entry point for @hasna/emails/storage. */
+/** Public deployment-mode entry point for @hasnaxyz/emails/storage. */
 export {
   EMAILS_MODE_CONFIG_KEY,
   EMAILS_MODE_ENV,
