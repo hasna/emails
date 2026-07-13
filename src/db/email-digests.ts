@@ -1,7 +1,8 @@
-import type { Database } from "./database.js";
-import { getDatabase, now, uuid } from "./database.js";
-import { parseJsonArray, parseJsonObject } from "./json.js";
+import { now, uuid } from "./runtime.js";
 import { cappedLimit, safeOffset } from "./pagination.js";
+import { selfHostedResource, cnum, cobj, cstrArray, ciso, cstr, cstrOrNull } from "./self-hosted-resource.js";
+
+const DIGEST_RESOURCE = "email-digests";
 
 export type EmailDigestPeriod = "today" | "yesterday" | "last7" | "month";
 export type EmailDigestStatus = "ok" | "error";
@@ -108,95 +109,78 @@ function normalizeLabelCounts(value: Record<string, number> | undefined): Record
   return out;
 }
 
-function rowToDigest(row: Record<string, unknown>): EmailDigest {
-  const period = row.period as EmailDigestPeriod;
-  if (!PERIODS.has(period)) throw new Error(`Invalid digest period in database: ${String(row.period)}`);
-  const status = row.status as EmailDigestStatus;
-  if (!STATUSES.has(status)) throw new Error(`Invalid digest status in database: ${String(row.status)}`);
+function apiToDigest(e: Record<string, unknown>): EmailDigest {
+  const period = cstr(e["period"]) as EmailDigestPeriod;
+  if (!PERIODS.has(period)) throw new Error(`Invalid digest period in database: ${String(e["period"])}`);
+  const status = cstr(e["status"]) as EmailDigestStatus;
+  if (!STATUSES.has(status)) throw new Error(`Invalid digest status in database: ${String(e["status"])}`);
   return {
-    id: row.id as string,
+    id: cstr(e["id"]),
     period,
-    since: row.since as string,
-    until: row.until as string,
-    provider: row.provider as EmailDigestProvider,
-    model: row.model as string,
+    since: cstr(e["since"]),
+    until: cstr(e["until"]),
+    provider: cstr(e["provider"]) as EmailDigestProvider,
+    model: cstr(e["model"]),
     status,
-    message_count: Number(row.message_count ?? 0),
-    summary: (row.summary as string) || null,
-    highlights: parseJsonArray<string>(row.highlights_json as string | null | undefined),
-    action_items: parseJsonArray<string>(row.action_items_json as string | null | undefined),
-    important_email_ids: parseJsonArray<string>(row.important_email_ids_json as string | null | undefined),
-    label_counts: parseJsonObject<Record<string, number>>(row.label_counts_json as string | null | undefined),
-    error: (row.error as string) || null,
-    started_at: row.started_at as string,
-    completed_at: row.completed_at as string,
-    created_at: row.created_at as string,
+    message_count: cnum(e["message_count"]),
+    summary: cstrOrNull(e["summary"]) || null,
+    highlights: cstrArray(e["highlights"] ?? e["highlights_json"]),
+    action_items: cstrArray(e["action_items"] ?? e["action_items_json"]),
+    important_email_ids: cstrArray(e["important_email_ids"] ?? e["important_email_ids_json"]),
+    label_counts: cobj(e["label_counts"] ?? e["label_counts_json"]) as Record<string, number>,
+    error: cstrOrNull(e["error"]) || null,
+    started_at: cstr(e["started_at"]),
+    completed_at: cstr(e["completed_at"]),
+    created_at: ciso(e["created_at"]),
   };
 }
 
-export function saveEmailDigest(input: SaveEmailDigestInput, db?: Database): EmailDigest {
-  const d = db || getDatabase();
+export function saveEmailDigest(input: SaveEmailDigestInput): EmailDigest {
   const id = uuid();
   const startedAt = input.started_at ?? now();
   const completedAt = input.completed_at ?? now();
-  d.run(
-    `INSERT INTO email_digests
-       (id, period, since, until, provider, model, status, message_count, summary,
-        highlights_json, action_items_json, important_email_ids_json, label_counts_json,
-        error, started_at, completed_at, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      id,
-      input.period,
-      input.since,
-      input.until,
-      input.provider,
-      input.model,
-      input.status,
-      Math.max(0, Math.trunc(input.message_count)),
-      input.summary ?? null,
-      JSON.stringify(normalizeStringArray(input.highlights, 12)),
-      JSON.stringify(normalizeStringArray(input.action_items, 12)),
-      JSON.stringify(normalizeStringArray(input.important_email_ids, 30)),
-      JSON.stringify(normalizeLabelCounts(input.label_counts)),
-      input.error ?? null,
-      startedAt,
-      completedAt,
-      completedAt,
-    ],
-  );
-  return getEmailDigest(id, d)!;
+  const created = selfHostedResource(DIGEST_RESOURCE).create({
+    id,
+    period: input.period,
+    since: input.since,
+    until: input.until,
+    provider: input.provider,
+    model: input.model,
+    status: input.status,
+    message_count: Math.max(0, Math.trunc(input.message_count)),
+    summary: input.summary ?? null,
+    highlights_json: JSON.stringify(normalizeStringArray(input.highlights, 12)),
+    action_items_json: JSON.stringify(normalizeStringArray(input.action_items, 12)),
+    important_email_ids_json: JSON.stringify(normalizeStringArray(input.important_email_ids, 30)),
+    label_counts_json: JSON.stringify(normalizeLabelCounts(input.label_counts)),
+    error: input.error ?? null,
+    started_at: startedAt,
+    completed_at: completedAt,
+    created_at: completedAt,
+  });
+  return apiToDigest(created);
 }
 
-export function getEmailDigest(id: string, db?: Database): EmailDigest | null {
-  const d = db || getDatabase();
-  const row = d.query("SELECT * FROM email_digests WHERE id = ? LIMIT 1").get(id) as Record<string, unknown> | null;
-  return row ? rowToDigest(row) : null;
+export function getEmailDigest(id: string): EmailDigest | null {
+  const record = selfHostedResource(DIGEST_RESOURCE).get(id);
+  return record ? apiToDigest(record) : null;
 }
 
-export function getLatestEmailDigest(period: EmailDigestPeriod, db?: Database): EmailDigest | null {
-  const d = db || getDatabase();
-  const row = d
-    .query("SELECT * FROM email_digests WHERE period = ? AND status = 'ok' ORDER BY completed_at DESC LIMIT 1")
-    .get(period) as Record<string, unknown> | null;
-  return row ? rowToDigest(row) : null;
+export function getLatestEmailDigest(period: EmailDigestPeriod): EmailDigest | null {
+  const match = selfHostedResource(DIGEST_RESOURCE)
+    .list({ limit: 1000 })
+    .map(apiToDigest)
+    .filter((d) => d.period === period && d.status === "ok")
+    .sort((a, b) => (b.completed_at ?? "").localeCompare(a.completed_at ?? ""))[0];
+  return match ?? null;
 }
 
-export function listEmailDigests(opts: ListEmailDigestsOptions = {}, db?: Database): EmailDigest[] {
-  const d = db || getDatabase();
-  const where: string[] = [];
-  const params: string[] = [];
-  if (opts.period) {
-    where.push("period = ?");
-    params.push(opts.period);
-  }
-  if (opts.status) {
-    where.push("status = ?");
-    params.push(opts.status);
-  }
-  const sqlWhere = where.length ? `WHERE ${where.join(" AND ")}` : "";
-  const rows = d
-    .query(`SELECT * FROM email_digests ${sqlWhere} ORDER BY completed_at DESC LIMIT ? OFFSET ?`)
-    .all(...params, cappedLimit(opts.limit, 20, MAX_DIGEST_LIST_LIMIT), safeOffset(opts.offset)) as Record<string, unknown>[];
-  return rows.map(rowToDigest);
+export function listEmailDigests(opts: ListEmailDigestsOptions = {}): EmailDigest[] {
+  let rows = selfHostedResource(DIGEST_RESOURCE).list({ limit: 1000 }).map(apiToDigest);
+  if (opts.period) rows = rows.filter((d) => d.period === opts.period);
+  if (opts.status) rows = rows.filter((d) => d.status === opts.status);
+  rows.sort((a, b) => (b.completed_at ?? "").localeCompare(a.completed_at ?? ""));
+  const limit = cappedLimit(opts.limit, 20, MAX_DIGEST_LIST_LIMIT);
+  const offset = safeOffset(opts.offset);
+  return rows.slice(offset, offset + limit);
 }

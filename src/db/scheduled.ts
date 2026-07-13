@@ -1,10 +1,32 @@
-import type { Database } from "./database.js";
-import { getDatabase, uuid, now } from "./database.js";
-import { parseJsonArray, parseJsonObject } from "./json.js";
-import { safeOffset, safeOptionalLimit } from "./pagination.js";
+import { now, uuid } from "./runtime.js";
+import { safeOptionalLimit } from "./pagination.js";
 import { selfHostedResource, selfHostedListQuery, selfHostedPage, carray, cobj, cstrArray, ciso, cstr, cstrOrNull } from "./self-hosted-resource.js";
 
 const SCHEDULED_RESOURCE = "scheduled";
+
+export type ScheduledStatus = "pending" | "sent" | "cancelled" | "failed";
+
+export interface ScheduledEmail {
+  id: string;
+  provider_id: string;
+  from_address: string;
+  to_addresses: string[];
+  cc_addresses: string[];
+  bcc_addresses: string[];
+  reply_to: string | null;
+  subject: string;
+  html: string | null;
+  text_body: string | null;
+  attachments_json: unknown[];
+  template_name: string | null;
+  template_vars: Record<string, string> | null;
+  scheduled_at: string;
+  status: ScheduledStatus;
+  error: string | null;
+  created_at: string;
+}
+
+export type ScheduledEmailSummary = Omit<ScheduledEmail, "html" | "text_body" | "attachments_json" | "template_vars">;
 
 function apiToScheduledEmail(e: Record<string, unknown>): ScheduledEmail {
   return {
@@ -33,110 +55,6 @@ function scheduledToSummary(s: ScheduledEmail): ScheduledEmailSummary {
   return summary;
 }
 
-export type ScheduledStatus = "pending" | "sent" | "cancelled" | "failed";
-
-export interface ScheduledEmail {
-  id: string;
-  provider_id: string;
-  from_address: string;
-  to_addresses: string[];
-  cc_addresses: string[];
-  bcc_addresses: string[];
-  reply_to: string | null;
-  subject: string;
-  html: string | null;
-  text_body: string | null;
-  attachments_json: unknown[];
-  template_name: string | null;
-  template_vars: Record<string, string> | null;
-  scheduled_at: string;
-  status: ScheduledStatus;
-  error: string | null;
-  created_at: string;
-}
-
-export type ScheduledEmailSummary = Omit<ScheduledEmail, "html" | "text_body" | "attachments_json" | "template_vars">;
-
-interface ScheduledEmailRow {
-  id: string;
-  provider_id: string;
-  from_address: string;
-  to_addresses: string;
-  cc_addresses: string;
-  bcc_addresses: string;
-  reply_to: string | null;
-  subject: string;
-  html: string | null;
-  text_body: string | null;
-  attachments_json: string;
-  template_name: string | null;
-  template_vars: string | null;
-  scheduled_at: string;
-  status: string;
-  error: string | null;
-  created_at: string;
-}
-
-type ScheduledEmailSummaryRow = Omit<ScheduledEmailRow, "html" | "text_body" | "attachments_json" | "template_vars">;
-
-const SCHEDULED_EMAIL_COLUMNS = [
-  "id",
-  "provider_id",
-  "from_address",
-  "to_addresses",
-  "cc_addresses",
-  "bcc_addresses",
-  "reply_to",
-  "subject",
-  "html",
-  "text_body",
-  "attachments_json",
-  "template_name",
-  "template_vars",
-  "scheduled_at",
-  "status",
-  "error",
-  "created_at",
-].join(", ");
-
-const SCHEDULED_EMAIL_SUMMARY_COLUMNS = [
-  "id",
-  "provider_id",
-  "from_address",
-  "to_addresses",
-  "cc_addresses",
-  "bcc_addresses",
-  "reply_to",
-  "subject",
-  "template_name",
-  "scheduled_at",
-  "status",
-  "error",
-  "created_at",
-].join(", ");
-
-function rowToScheduledEmail(row: ScheduledEmailRow): ScheduledEmail {
-  return {
-    ...row,
-    to_addresses: parseJsonArray<string>(row.to_addresses),
-    cc_addresses: parseJsonArray<string>(row.cc_addresses),
-    bcc_addresses: parseJsonArray<string>(row.bcc_addresses),
-    attachments_json: parseJsonArray(row.attachments_json),
-    template_vars: row.template_vars ? parseJsonObject<Record<string, string>>(row.template_vars) : null,
-    status: row.status as ScheduledStatus,
-  };
-}
-
-function rowToScheduledEmailSummary(row: ScheduledEmailSummaryRow): ScheduledEmailSummary {
-  return {
-    ...row,
-    to_addresses: parseJsonArray<string>(row.to_addresses),
-    cc_addresses: parseJsonArray<string>(row.cc_addresses),
-    bcc_addresses: parseJsonArray<string>(row.bcc_addresses),
-    status: row.status as ScheduledStatus,
-  };
-}
-
 export function createScheduledEmail(
   input: {
     provider_id: string;
@@ -153,42 +71,33 @@ export function createScheduledEmail(
     template_vars?: Record<string, string>;
     scheduled_at: string;
   },
-  db?: Database,
 ): ScheduledEmail {
-  const d = db || getDatabase();
   const id = uuid();
   const timestamp = now();
-
-  d.run(
-    `INSERT INTO scheduled_emails (id, provider_id, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to, subject, html, text_body, attachments_json, template_name, template_vars, scheduled_at, status, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
-    [
-      id,
-      input.provider_id,
-      input.from_address,
-      JSON.stringify(input.to_addresses),
-      JSON.stringify(input.cc_addresses || []),
-      JSON.stringify(input.bcc_addresses || []),
-      input.reply_to || null,
-      input.subject,
-      input.html || null,
-      input.text_body || null,
-      JSON.stringify(input.attachments_json || []),
-      input.template_name || null,
-      input.template_vars ? JSON.stringify(input.template_vars) : null,
-      input.scheduled_at,
-      timestamp,
-    ],
-  );
-
-  return getScheduledEmail(id, d)!;
+  const created = selfHostedResource(SCHEDULED_RESOURCE).create({
+    id,
+    provider_id: input.provider_id,
+    from_address: input.from_address,
+    to_addresses: input.to_addresses,
+    cc_addresses: input.cc_addresses || [],
+    bcc_addresses: input.bcc_addresses || [],
+    reply_to: input.reply_to || null,
+    subject: input.subject,
+    html: input.html || null,
+    text_body: input.text_body || null,
+    attachments_json: input.attachments_json || [],
+    template_name: input.template_name || null,
+    template_vars: input.template_vars ?? null,
+    scheduled_at: input.scheduled_at,
+    status: "pending",
+    created_at: timestamp,
+  });
+  return apiToScheduledEmail(created);
 }
 
-export function getScheduledEmail(id: string, db?: Database): ScheduledEmail | null {
-  const d = db || getDatabase();
-  const row = d.query(`SELECT ${SCHEDULED_EMAIL_COLUMNS} FROM scheduled_emails WHERE id = ?`).get(id) as ScheduledEmailRow | null;
-  if (!row) return null;
-  return rowToScheduledEmail(row);
+export function getScheduledEmail(id: string): ScheduledEmail | null {
+  const record = selfHostedResource(SCHEDULED_RESOURCE).get(id);
+  return record ? apiToScheduledEmail(record) : null;
 }
 
 export interface ListScheduledEmailOptions {
@@ -201,98 +110,47 @@ export interface ListDueEmailOptions {
   limit?: number;
 }
 
-function isDatabase(value: unknown): value is Database {
-  return Boolean(value && typeof (value as { query?: unknown }).query === "function");
+export function listScheduledEmails(opts?: ListScheduledEmailOptions): ScheduledEmail[] {
+  const { query, limit, offset } = selfHostedListQuery(opts);
+  if (opts?.status) query["status"] = opts.status;
+  let rows = selfHostedResource(SCHEDULED_RESOURCE).list(query).map(apiToScheduledEmail);
+  if (opts?.status) rows = rows.filter((s) => s.status === opts.status);
+  rows.sort((a, b) => (a.scheduled_at ?? "").localeCompare(b.scheduled_at ?? ""));
+  return selfHostedPage(rows, limit, offset);
 }
 
-export function listScheduledEmails(opts?: ListScheduledEmailOptions, db?: Database): ScheduledEmail[] {
-  const selfHosted = selfHostedResource(SCHEDULED_RESOURCE);
-  if (selfHosted) {
-    const { query, limit, offset } = selfHostedListQuery(opts);
-    if (opts?.status) query["status"] = opts.status;
-    let rows = selfHosted.list(query).map(apiToScheduledEmail);
-    if (opts?.status) rows = rows.filter((s) => s.status === opts.status);
-    rows.sort((a, b) => (a.scheduled_at ?? "").localeCompare(b.scheduled_at ?? ""));
-    return selfHostedPage(rows, limit, offset);
-  }
-
-  const d = db || getDatabase();
-  const conditions: string[] = [];
-  const params: Array<string | number> = [];
-  if (opts?.status) {
-    conditions.push("status = ?");
-    params.push(opts.status);
-  }
-  const where = conditions.length > 0 ? ` WHERE ${conditions.join(" AND ")}` : "";
-  const limit = safeOptionalLimit(opts?.limit);
-  const offset = safeOffset(opts?.offset);
-  if (limit !== null) params.push(limit, offset);
-  const rows = d
-    .query(`SELECT ${SCHEDULED_EMAIL_COLUMNS} FROM scheduled_emails${where} ORDER BY scheduled_at ASC${limit !== null ? " LIMIT ? OFFSET ?" : ""}`)
-    .all(...params) as ScheduledEmailRow[];
-  return rows.map(rowToScheduledEmail);
+export function listScheduledEmailSummaries(opts?: ListScheduledEmailOptions): ScheduledEmailSummary[] {
+  const { query, limit, offset } = selfHostedListQuery(opts);
+  if (opts?.status) query["status"] = opts.status;
+  let rows = selfHostedResource(SCHEDULED_RESOURCE).list(query).map(apiToScheduledEmail).map(scheduledToSummary);
+  if (opts?.status) rows = rows.filter((s) => s.status === opts.status);
+  rows.sort((a, b) => (a.scheduled_at ?? "").localeCompare(b.scheduled_at ?? ""));
+  return selfHostedPage(rows, limit, offset);
 }
 
-export function listScheduledEmailSummaries(opts?: ListScheduledEmailOptions, db?: Database): ScheduledEmailSummary[] {
-  const selfHosted = selfHostedResource(SCHEDULED_RESOURCE);
-  if (selfHosted) {
-    const { query, limit, offset } = selfHostedListQuery(opts);
-    if (opts?.status) query["status"] = opts.status;
-    let rows = selfHosted.list(query).map(apiToScheduledEmail).map(scheduledToSummary);
-    if (opts?.status) rows = rows.filter((s) => s.status === opts.status);
-    rows.sort((a, b) => (a.scheduled_at ?? "").localeCompare(b.scheduled_at ?? ""));
-    return selfHostedPage(rows, limit, offset);
-  }
-
-  const d = db || getDatabase();
-  const conditions: string[] = [];
-  const params: Array<string | number> = [];
-  if (opts?.status) {
-    conditions.push("status = ?");
-    params.push(opts.status);
-  }
-  const where = conditions.length > 0 ? ` WHERE ${conditions.join(" AND ")}` : "";
-  const limit = safeOptionalLimit(opts?.limit);
-  const offset = safeOffset(opts?.offset);
-  if (limit !== null) params.push(limit, offset);
-  const rows = d
-    .query(`SELECT ${SCHEDULED_EMAIL_SUMMARY_COLUMNS} FROM scheduled_emails${where} ORDER BY scheduled_at ASC${limit !== null ? " LIMIT ? OFFSET ?" : ""}`)
-    .all(...params) as ScheduledEmailSummaryRow[];
-  return rows.map(rowToScheduledEmailSummary);
+export function cancelScheduledEmail(id: string): boolean {
+  const store = selfHostedResource(SCHEDULED_RESOURCE);
+  const record = store.get(id);
+  if (!record || cstr(record["status"]) !== "pending") return false;
+  store.update(id, { status: "cancelled" });
+  return true;
 }
 
-export function cancelScheduledEmail(id: string, db?: Database): boolean {
-  const d = db || getDatabase();
-  const result = d.run(
-    "UPDATE scheduled_emails SET status = 'cancelled' WHERE id = ? AND status = 'pending'",
-    [id],
-  );
-  return result.changes > 0;
-}
-
-export function getDueEmails(db?: Database): ScheduledEmail[];
-export function getDueEmails(opts?: ListDueEmailOptions, db?: Database): ScheduledEmail[];
-export function getDueEmails(optsOrDb?: ListDueEmailOptions | Database, maybeDb?: Database): ScheduledEmail[] {
-  const d = isDatabase(optsOrDb) ? optsOrDb : maybeDb || getDatabase();
-  const opts = isDatabase(optsOrDb) ? undefined : optsOrDb;
+export function getDueEmails(opts?: ListDueEmailOptions): ScheduledEmail[] {
   const currentTime = now();
   const limit = safeOptionalLimit(opts?.limit);
-  const params: Array<string | number> = [currentTime];
-  if (limit !== null) params.push(limit);
-  const rows = d
-    .query(`SELECT ${SCHEDULED_EMAIL_COLUMNS} FROM scheduled_emails
-      WHERE status = 'pending' AND scheduled_at <= ?
-      ORDER BY scheduled_at ASC, id ASC${limit !== null ? " LIMIT ?" : ""}`)
-    .all(...params) as ScheduledEmailRow[];
-  return rows.map(rowToScheduledEmail);
+  const rows = selfHostedResource(SCHEDULED_RESOURCE)
+    .list({ limit: 1000 })
+    .map(apiToScheduledEmail)
+    .filter((s) => s.status === "pending" && s.scheduled_at <= currentTime)
+    .sort((a, b) => (a.scheduled_at ?? "").localeCompare(b.scheduled_at ?? "") || a.id.localeCompare(b.id));
+  return limit === null ? rows : rows.slice(0, limit);
 }
 
-export function markSent(id: string, db?: Database): void {
-  const d = db || getDatabase();
-  d.run("UPDATE scheduled_emails SET status = 'sent' WHERE id = ?", [id]);
+export function markSent(id: string): void {
+  selfHostedResource(SCHEDULED_RESOURCE).update(id, { status: "sent" });
 }
 
-export function markFailed(id: string, error: string, db?: Database): void {
-  const d = db || getDatabase();
-  d.run("UPDATE scheduled_emails SET status = 'failed', error = ? WHERE id = ?", [error, id]);
+export function markFailed(id: string, error: string): void {
+  selfHostedResource(SCHEDULED_RESOURCE).update(id, { status: "failed", error });
 }

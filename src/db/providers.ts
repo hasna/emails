@@ -1,13 +1,9 @@
-import type { Database } from "./database.js";
-import type { CreateProviderInput, Provider, ProviderRow, ProviderSummary, ProviderType } from "../types/index.js";
+import type { CreateProviderInput, Provider, ProviderSummary, ProviderType } from "../types/index.js";
 import { ProviderNotFoundError } from "../types/index.js";
-import { getDatabase, now, uuid } from "./database.js";
-import { safeOffset, safeOptionalLimit } from "./pagination.js";
 import { selfHostedResource, selfHostedListQuery, selfHostedPage, cbool, ciso, cstr, cstrOrNull } from "./self-hosted-resource.js";
 
 const PROVIDER_RESOURCE = "providers";
 const SUPPORTED_PROVIDER_TYPES = ["resend", "ses", "sandbox"] as const;
-const SUPPORTED_PROVIDER_TYPE_SQL = "'resend', 'ses', 'sandbox'";
 
 function isSupportedProviderType(value: string): value is ProviderType {
   return (SUPPORTED_PROVIDER_TYPES as readonly string[]).includes(value);
@@ -19,11 +15,11 @@ function assertSupportedProviderType(value: string): asserts value is ProviderTy
   }
 }
 
-// The selfHosted `providers` resource carries only NON-SECRET metadata (id, name,
-// type, region, active, timestamps) — provider credentials (api_key/secret_key/
-// oauth tokens) are never distributed to or fetched by a client. Secret columns
-// map to null; a flipped client uses selfHosted-side send (`/v1/send`), not local
-// provider secrets. So `provider list` shows the selfHosted inventory, not secrets.
+// The self-hosted `providers` resource carries only NON-SECRET metadata (id,
+// name, type, region, active, timestamps) — provider credentials (api_key/
+// secret_key/oauth tokens) are never distributed to or fetched by a client.
+// Secret columns map to null; the client uses server-side send (`/v1/send`), not
+// local provider secrets.
 function apiToProviderSummary(e: Record<string, unknown>): ProviderSummary {
   const updatedAt = ciso(e["updated_at"]);
   const type = cstr(e["type"]);
@@ -53,141 +49,42 @@ function apiToProvider(e: Record<string, unknown>): Provider {
   };
 }
 
-function rowToProvider(row: ProviderRow): Provider {
-  assertSupportedProviderType(row.type);
-  return {
-    ...row,
-    active: !!row.active,
-    type: row.type,
-  };
+/** Bounded superset of providers restricted to supported types, mapped to Provider. */
+function listSupportedProviders(): Provider[] {
+  return selfHostedResource(PROVIDER_RESOURCE)
+    .list({ limit: 1000 })
+    .filter((row) => isSupportedProviderType(cstr(row["type"])))
+    .map(apiToProvider);
 }
 
-interface ProviderSummaryRow {
-  id: string;
-  name: string;
-  type: string;
-  region: string | null;
-  active: number;
-  created_at: string;
-  updated_at: string;
-}
-
-const PROVIDER_COLUMNS = [
-  "id",
-  "name",
-  "type",
-  "api_key",
-  "region",
-  "access_key",
-  "secret_key",
-  "oauth_client_id",
-  "oauth_client_secret",
-  "oauth_refresh_token",
-  "oauth_access_token",
-  "oauth_token_expiry",
-  "active",
-  "created_at",
-  "updated_at",
-].join(", ");
-
-const PROVIDER_SUMMARY_COLUMNS = [
-  "id",
-  "name",
-  "type",
-  "region",
-  "active",
-  "created_at",
-  "updated_at",
-].join(", ");
-
-function rowToProviderSummary(row: ProviderSummaryRow): ProviderSummary {
-  assertSupportedProviderType(row.type);
-  return {
-    ...row,
-    active: !!row.active,
-    type: row.type,
-  };
-}
-
-export function createProvider(input: CreateProviderInput, db?: Database): Provider {
+export function createProvider(input: CreateProviderInput): Provider {
   assertSupportedProviderType(input.type);
-  const selfHosted = selfHostedResource(PROVIDER_RESOURCE);
-  if (selfHosted) {
-    return apiToProvider(selfHosted.create({
-      name: input.name,
-      type: input.type,
-      region: input.region || null,
-      active: true,
-    }));
-  }
-  const d = db || getDatabase();
-  const id = uuid();
-  const timestamp = now();
-
-  d.run(
-    `INSERT INTO providers (id, name, type, api_key, region, access_key, secret_key,
-       oauth_client_id, oauth_client_secret, oauth_refresh_token, oauth_access_token, oauth_token_expiry,
-       active, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
-    [
-      id,
-      input.name,
-      input.type,
-      input.api_key || null,
-      input.region || null,
-      input.access_key || null,
-      input.secret_key || null,
-      null,
-      null,
-      null,
-      null,
-      null,
-      timestamp,
-      timestamp,
-    ],
-  );
-
-  return getProvider(id, d)!;
+  return apiToProvider(selfHostedResource(PROVIDER_RESOURCE).create({
+    name: input.name,
+    type: input.type,
+    region: input.region || null,
+    active: true,
+  }));
 }
 
-export function getProvider(id: string, db?: Database): Provider | null {
-  const selfHosted = selfHostedResource(PROVIDER_RESOURCE);
-  if (selfHosted) {
-    const record = selfHosted.get(id);
-    return record ? apiToProvider(record) : null;
-  }
-  const d = db || getDatabase();
-  const row = d.query(`SELECT ${PROVIDER_COLUMNS} FROM providers WHERE id = ? AND type IN (${SUPPORTED_PROVIDER_TYPE_SQL})`).get(id) as ProviderRow | null;
-  if (!row) return null;
-  return rowToProvider(row);
+export function getProvider(id: string): Provider | null {
+  const record = selfHostedResource(PROVIDER_RESOURCE).get(id);
+  return record ? apiToProvider(record) : null;
 }
 
-export function resolveProviderId(id: string, db?: Database): string | null {
-  const selfHosted = selfHostedResource(PROVIDER_RESOURCE);
-  if (selfHosted) {
-    const trimmed = id.trim();
-    if (!trimmed) return null;
-    if (trimmed.length >= 36) return selfHosted.get(trimmed) ? trimmed : null;
-    const matches = selfHosted.list({ limit: 1000 })
-      .map((row) => cstr(row["id"]))
-      .filter((providerId) => providerId.startsWith(trimmed));
-    return matches.length === 1 ? matches[0]! : null;
-  }
-  const d = db || getDatabase();
+export function resolveProviderId(id: string): string | null {
   const trimmed = id.trim();
   if (!trimmed) return null;
-  if (trimmed.length >= 36) {
-    const row = d.query(`SELECT id FROM providers WHERE id = ? AND type IN (${SUPPORTED_PROVIDER_TYPE_SQL})`).get(trimmed) as { id: string } | null;
-    return row?.id ?? null;
-  }
-  const rows = d.query(`SELECT id FROM providers WHERE id LIKE ? AND type IN (${SUPPORTED_PROVIDER_TYPE_SQL})`).all(`${trimmed}%`) as Array<{ id: string }>;
-  return rows.length === 1 ? rows[0]!.id : null;
+  const store = selfHostedResource(PROVIDER_RESOURCE);
+  if (trimmed.length >= 36) return store.get(trimmed) ? trimmed : null;
+  const matches = store.list({ limit: 1000 })
+    .map((row) => cstr(row["id"]))
+    .filter((providerId) => providerId.startsWith(trimmed));
+  return matches.length === 1 ? matches[0]! : null;
 }
 
-export function getProviderByNameAndType(name: string, type: ProviderType, db?: Database): Provider | null {
-  const d = db || getDatabase();
-  const row = d.query(`SELECT ${PROVIDER_COLUMNS} FROM providers WHERE name = ? AND type = ? AND type IN (${SUPPORTED_PROVIDER_TYPE_SQL})`).get(name, type) as ProviderRow | null;
-  return row ? rowToProvider(row) : null;
+export function getProviderByNameAndType(name: string, type: ProviderType): Provider | null {
+  return listSupportedProviders().find((p) => p.name === name && p.type === type) ?? null;
 }
 
 export interface ListProviderOptions {
@@ -195,146 +92,83 @@ export interface ListProviderOptions {
   offset?: number;
 }
 
-export function listProviders(db?: Database, opts?: ListProviderOptions): Provider[] {
-  const selfHosted = selfHostedResource(PROVIDER_RESOURCE);
-  if (selfHosted) {
-    const { query, limit, offset } = selfHostedListQuery(opts);
-    const rows = selfHosted.list(query)
-      .filter((row) => isSupportedProviderType(cstr(row["type"])))
-      .map(apiToProvider);
-    rows.sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
-    return selfHostedPage(rows, limit, offset);
+export function listProviders(opts?: ListProviderOptions): Provider[] {
+  const { query, limit, offset } = selfHostedListQuery(opts);
+  const rows = selfHostedResource(PROVIDER_RESOURCE).list(query)
+    .filter((row) => isSupportedProviderType(cstr(row["type"])))
+    .map(apiToProvider);
+  rows.sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
+  return selfHostedPage(rows, limit, offset);
+}
+
+export function listProviderSummaries(opts?: ListProviderOptions): ProviderSummary[] {
+  const { query, limit, offset } = selfHostedListQuery(opts);
+  const rows = selfHostedResource(PROVIDER_RESOURCE).list(query)
+    .filter((row) => isSupportedProviderType(cstr(row["type"])))
+    .map(apiToProviderSummary);
+  rows.sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
+  return selfHostedPage(rows, limit, offset);
+}
+
+export function listProviderNamesByIds(providerIds: Iterable<string>): Map<string, string> {
+  const ids = new Set([...providerIds].map((id) => id.trim()).filter(Boolean));
+  if (ids.size === 0) return new Map();
+  const map = new Map<string, string>();
+  for (const row of selfHostedResource(PROVIDER_RESOURCE).list({ limit: 1000 })) {
+    const id = cstr(row["id"]);
+    if (ids.has(id)) map.set(id, cstr(row["name"]));
   }
-
-  const d = db || getDatabase();
-  const limit = safeOptionalLimit(opts?.limit);
-  const offset = safeOffset(opts?.offset);
-  const rows = limit !== null
-    ? d.query(`SELECT ${PROVIDER_COLUMNS} FROM providers WHERE type IN (${SUPPORTED_PROVIDER_TYPE_SQL}) ORDER BY created_at DESC LIMIT ? OFFSET ?`).all(limit, offset) as ProviderRow[]
-    : d.query(`SELECT ${PROVIDER_COLUMNS} FROM providers WHERE type IN (${SUPPORTED_PROVIDER_TYPE_SQL}) ORDER BY created_at DESC`).all() as ProviderRow[];
-  return rows.map(rowToProvider);
+  return map;
 }
 
-export function listProviderSummaries(db?: Database, opts?: ListProviderOptions): ProviderSummary[] {
-  const selfHosted = selfHostedResource(PROVIDER_RESOURCE);
-  if (selfHosted) {
-    const { query, limit, offset } = selfHostedListQuery(opts);
-    const rows = selfHosted.list(query)
-      .filter((row) => isSupportedProviderType(cstr(row["type"])))
-      .map(apiToProviderSummary);
-    rows.sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
-    return selfHostedPage(rows, limit, offset);
-  }
-
-  const d = db || getDatabase();
-  const limit = safeOptionalLimit(opts?.limit);
-  const offset = safeOffset(opts?.offset);
-  const rows = limit !== null
-    ? d.query(`SELECT ${PROVIDER_SUMMARY_COLUMNS} FROM providers WHERE type IN (${SUPPORTED_PROVIDER_TYPE_SQL}) ORDER BY created_at DESC LIMIT ? OFFSET ?`).all(limit, offset) as ProviderSummaryRow[]
-    : d.query(`SELECT ${PROVIDER_SUMMARY_COLUMNS} FROM providers WHERE type IN (${SUPPORTED_PROVIDER_TYPE_SQL}) ORDER BY created_at DESC`).all() as ProviderSummaryRow[];
-  return rows.map(rowToProviderSummary);
+export function listActiveProviders(type?: ProviderType): Provider[] {
+  return listSupportedProviders()
+    .filter((p) => p.active && (type ? p.type === type : true))
+    .sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
 }
 
-export function listProviderNamesByIds(providerIds: Iterable<string>, db?: Database): Map<string, string> {
-  const ids = [...new Set([...providerIds].map((id) => id.trim()).filter(Boolean))];
-  if (ids.length === 0) return new Map();
-  const d = db || getDatabase();
-  const placeholders = ids.map(() => "?").join(", ");
-  const rows = d.query(`SELECT id, name FROM providers WHERE id IN (${placeholders})`).all(...ids) as Array<{ id: string; name: string }>;
-  return new Map(rows.map((row) => [row.id, row.name]));
+export function listActiveProviderSummaries(type?: ProviderType, opts?: ListProviderOptions): ProviderSummary[] {
+  const { limit: pageLimit, offset: pageOffset } = selfHostedListQuery({ limit: opts?.limit, offset: opts?.offset });
+  // listActiveProviders already returns fully-mapped Provider objects (a superset
+  // of ProviderSummary); do not re-map raw rows.
+  const rows: ProviderSummary[] = listActiveProviders(type);
+  return selfHostedPage(rows, pageLimit, pageOffset);
 }
 
-export function listActiveProviders(type?: ProviderType, db?: Database): Provider[] {
-  const d = db || getDatabase();
-  const rows = type
-    ? d.query(`SELECT ${PROVIDER_COLUMNS} FROM providers WHERE active = 1 AND type = ? AND type IN (${SUPPORTED_PROVIDER_TYPE_SQL}) ORDER BY created_at DESC`).all(type) as ProviderRow[]
-    : d.query(`SELECT ${PROVIDER_COLUMNS} FROM providers WHERE active = 1 AND type IN (${SUPPORTED_PROVIDER_TYPE_SQL}) ORDER BY created_at DESC`).all() as ProviderRow[];
-  return rows.map(rowToProvider);
+export function getLatestActiveProvider(type?: ProviderType): Provider | null {
+  return listActiveProviders(type)[0] ?? null;
 }
 
-export function listActiveProviderSummaries(type?: ProviderType, db?: Database, opts?: ListProviderOptions): ProviderSummary[] {
-  const d = db || getDatabase();
-  const limit = safeOptionalLimit(opts?.limit);
-  const offset = safeOffset(opts?.offset);
-  const rows = type
-    ? (limit !== null
-        ? d.query(`SELECT ${PROVIDER_SUMMARY_COLUMNS} FROM providers WHERE active = 1 AND type = ? AND type IN (${SUPPORTED_PROVIDER_TYPE_SQL}) ORDER BY created_at DESC LIMIT ? OFFSET ?`).all(type, limit, offset) as ProviderSummaryRow[]
-        : d.query(`SELECT ${PROVIDER_SUMMARY_COLUMNS} FROM providers WHERE active = 1 AND type = ? AND type IN (${SUPPORTED_PROVIDER_TYPE_SQL}) ORDER BY created_at DESC`).all(type) as ProviderSummaryRow[])
-    : (limit !== null
-        ? d.query(`SELECT ${PROVIDER_SUMMARY_COLUMNS} FROM providers WHERE active = 1 AND type IN (${SUPPORTED_PROVIDER_TYPE_SQL}) ORDER BY created_at DESC LIMIT ? OFFSET ?`).all(limit, offset) as ProviderSummaryRow[]
-        : d.query(`SELECT ${PROVIDER_SUMMARY_COLUMNS} FROM providers WHERE active = 1 AND type IN (${SUPPORTED_PROVIDER_TYPE_SQL}) ORDER BY created_at DESC`).all() as ProviderSummaryRow[]);
-  return rows.map(rowToProviderSummary);
-}
-
-export function getLatestActiveProvider(type?: ProviderType, db?: Database): Provider | null {
-  const d = db || getDatabase();
-  const row = type
-    ? d.query(`SELECT ${PROVIDER_COLUMNS} FROM providers WHERE active = 1 AND type = ? AND type IN (${SUPPORTED_PROVIDER_TYPE_SQL}) ORDER BY created_at DESC LIMIT 1`).get(type) as ProviderRow | null
-    : d.query(`SELECT ${PROVIDER_COLUMNS} FROM providers WHERE active = 1 AND type IN (${SUPPORTED_PROVIDER_TYPE_SQL}) ORDER BY created_at DESC LIMIT 1`).get() as ProviderRow | null;
-  return row ? rowToProvider(row) : null;
-}
-
-export function getLatestActiveProviderId(type?: ProviderType, db?: Database): string | null {
-  const d = db || getDatabase();
-  const row = type
-    ? d.query(`SELECT id FROM providers WHERE active = 1 AND type = ? AND type IN (${SUPPORTED_PROVIDER_TYPE_SQL}) ORDER BY created_at DESC LIMIT 1`).get(type) as { id: string } | null
-    : d.query(`SELECT id FROM providers WHERE active = 1 AND type IN (${SUPPORTED_PROVIDER_TYPE_SQL}) ORDER BY created_at DESC LIMIT 1`).get() as { id: string } | null;
-  return row?.id ?? null;
+export function getLatestActiveProviderId(type?: ProviderType): string | null {
+  return getLatestActiveProvider(type)?.id ?? null;
 }
 
 export function updateProvider(
   id: string,
   input: Partial<CreateProviderInput> & { active?: boolean },
-  db?: Database,
 ): Provider {
-  const selfHosted = selfHostedResource(PROVIDER_RESOURCE);
-  if (selfHosted) {
-    const patch: Record<string, unknown> = {};
-    if (input.name !== undefined) patch["name"] = input.name;
-    if (input.type !== undefined) {
-      assertSupportedProviderType(input.type);
-      patch["type"] = input.type;
-    }
-    if (input.region !== undefined) patch["region"] = input.region || null;
-    if (input.active !== undefined) patch["active"] = input.active;
-    return apiToProvider(selfHosted.update(id, patch));
-  }
-  const d = db || getDatabase();
-  const provider = getProvider(id, d);
-  if (!provider) throw new ProviderNotFoundError(id);
-
-  const sets: string[] = ["updated_at = ?"];
-  const params: (string | number | null)[] = [now()];
-
-  if (input.name !== undefined) { sets.push("name = ?"); params.push(input.name); }
+  const store = selfHostedResource(PROVIDER_RESOURCE);
+  if (!store.get(id)) throw new ProviderNotFoundError(id);
+  const patch: Record<string, unknown> = {};
+  if (input.name !== undefined) patch["name"] = input.name;
   if (input.type !== undefined) {
     assertSupportedProviderType(input.type);
-    sets.push("type = ?");
-    params.push(input.type);
+    patch["type"] = input.type;
   }
-  if (input.api_key !== undefined) { sets.push("api_key = ?"); params.push(input.api_key || null); }
-  if (input.region !== undefined) { sets.push("region = ?"); params.push(input.region || null); }
-  if (input.access_key !== undefined) { sets.push("access_key = ?"); params.push(input.access_key || null); }
-  if (input.secret_key !== undefined) { sets.push("secret_key = ?"); params.push(input.secret_key || null); }
-  if (input.active !== undefined) { sets.push("active = ?"); params.push(input.active ? 1 : 0); }
-
-  params.push(id);
-  d.run(`UPDATE providers SET ${sets.join(", ")} WHERE id = ?`, params);
-
-  return getProvider(id, d)!;
+  if (input.region !== undefined) patch["region"] = input.region || null;
+  if (input.active !== undefined) patch["active"] = input.active;
+  return apiToProvider(store.update(id, patch));
 }
 
-export function deleteProvider(id: string, db?: Database): boolean {
-  const selfHosted = selfHostedResource(PROVIDER_RESOURCE);
-  if (selfHosted) return selfHosted.del(id);
-  const d = db || getDatabase();
-  const result = d.run("DELETE FROM providers WHERE id = ?", [id]);
-  return result.changes > 0;
+export function deleteProvider(id: string): boolean {
+  return selfHostedResource(PROVIDER_RESOURCE).del(id);
 }
 
-export function getActiveProvider(db?: Database): Provider {
-  const d = db || getDatabase();
-  const row = d.query(`SELECT ${PROVIDER_COLUMNS} FROM providers WHERE active = 1 AND type IN (${SUPPORTED_PROVIDER_TYPE_SQL}) ORDER BY created_at LIMIT 1`).get() as ProviderRow | null;
-  if (!row) throw new ProviderNotFoundError("(no active provider)");
-  return rowToProvider(row);
+export function getActiveProvider(): Provider {
+  const active = listSupportedProviders()
+    .filter((p) => p.active)
+    .sort((a, b) => (a.created_at ?? "").localeCompare(b.created_at ?? ""));
+  const provider = active[0];
+  if (!provider) throw new ProviderNotFoundError("(no active provider)");
+  return provider;
 }

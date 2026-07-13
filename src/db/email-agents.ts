@@ -1,7 +1,13 @@
-import type { Database } from "./database.js";
-import { getDatabase, now, uuid } from "./database.js";
-import { parseJsonArray, parseJsonObject } from "./json.js";
+import { now, uuid } from "./runtime.js";
 import { cappedLimit, safeOffset } from "./pagination.js";
+import { selfHostedResource, cbool, cnum, cobj, cstrArray, ciso, cstr, cstrOrNull } from "./self-hosted-resource.js";
+
+// Agent SETTINGS are keyed on agent_key (categorizer/labeler/fraud), seeded
+// server-side; GET/PATCH/DELETE /v1/email-agents/<agent_key>, POST is an
+// idempotent upsert. The per-inbound RUN ledger is a SEPARATE uuid-keyed
+// resource.
+const EMAIL_AGENT_RESOURCE = "email-agents";
+const EMAIL_AGENT_RUN_RESOURCE = "email-agent-runs";
 
 export type EmailAgentKey = "categorizer" | "labeler" | "fraud";
 export type EmailAgentProvider = "external";
@@ -125,7 +131,6 @@ export const EMAIL_AGENT_DEFINITIONS: EmailAgentDefinition[] = [
 ];
 
 const MAX_AGENT_RUN_LIST_LIMIT = 500;
-const MAX_PENDING_LIMIT = 500;
 
 function assertAgentKey(value: string): asserts value is EmailAgentKey {
   if (!EMAIL_AGENT_DEFINITIONS.some((agent) => agent.key === value)) {
@@ -155,86 +160,69 @@ export function getEmailAgentDefinition(agentKey: EmailAgentKey): EmailAgentDefi
   return EMAIL_AGENT_DEFINITIONS.find((agent) => agent.key === agentKey)!;
 }
 
-function rowToSetting(row: Record<string, unknown>): EmailAgentSetting {
-  const agentKey = row.agent_key as string;
+function apiToSetting(e: Record<string, unknown>): EmailAgentSetting {
+  const agentKey = cstr(e["agent_key"]);
   assertAgentKey(agentKey);
   return {
     agent_key: agentKey,
-    enabled: !!row.enabled,
-    always_on: !!row.always_on,
-    provider: row.provider as EmailAgentProvider,
-    model: (row.model as string) || null,
-    apply_labels: !!row.apply_labels,
-    use_network_tools: !!row.use_network_tools,
-    config: parseJsonObject(row.config_json as string | null | undefined),
-    created_at: row.created_at as string,
-    updated_at: row.updated_at as string,
+    enabled: cbool(e["enabled"]),
+    always_on: cbool(e["always_on"]),
+    provider: cstr(e["provider"]) as EmailAgentProvider,
+    model: cstrOrNull(e["model"]) || null,
+    apply_labels: cbool(e["apply_labels"]),
+    use_network_tools: cbool(e["use_network_tools"]),
+    config: cobj(e["config"] ?? e["config_json"]),
+    created_at: ciso(e["created_at"]),
+    updated_at: ciso(e["updated_at"]),
   };
 }
 
-function rowToRun(row: Record<string, unknown>): EmailAgentRun {
-  const agentKey = row.agent_key as string;
+function apiToRun(e: Record<string, unknown>): EmailAgentRun {
+  const agentKey = cstr(e["agent_key"]);
   assertAgentKey(agentKey);
   return {
-    id: row.id as string,
+    id: cstr(e["id"]),
     agent_key: agentKey,
-    inbound_email_id: row.inbound_email_id as string,
-    provider: row.provider as EmailAgentProvider,
-    model: row.model as string,
-    status: row.status as EmailAgentRunStatus,
-    category: (row.category as string) || null,
-    labels: parseJsonArray<string>(row.labels_json as string | null | undefined),
-    priority: row.priority == null ? null : Number(row.priority),
-    confidence: row.confidence == null ? null : Number(row.confidence),
-    risk_score: row.risk_score == null ? null : Number(row.risk_score),
-    summary: (row.summary as string) || null,
-    reasoning: (row.reasoning as string) || null,
-    tool_calls: parseJsonArray<string>(row.tool_calls_json as string | null | undefined),
-    output: parseJsonObject(row.output_json as string | null | undefined),
-    error: (row.error as string) || null,
-    started_at: row.started_at as string,
-    completed_at: row.completed_at as string,
-    created_at: row.created_at as string,
+    inbound_email_id: cstr(e["inbound_email_id"]),
+    provider: cstr(e["provider"]) as EmailAgentProvider,
+    model: cstr(e["model"]),
+    status: cstr(e["status"]) as EmailAgentRunStatus,
+    category: cstrOrNull(e["category"]) || null,
+    labels: cstrArray(e["labels"] ?? e["labels_json"]),
+    priority: e["priority"] == null ? null : cnum(e["priority"]),
+    confidence: e["confidence"] == null ? null : cnum(e["confidence"]),
+    risk_score: e["risk_score"] == null ? null : cnum(e["risk_score"]),
+    summary: cstrOrNull(e["summary"]) || null,
+    reasoning: cstrOrNull(e["reasoning"]) || null,
+    tool_calls: cstrArray(e["tool_calls"] ?? e["tool_calls_json"]),
+    output: cobj(e["output"] ?? e["output_json"]),
+    error: cstrOrNull(e["error"]) || null,
+    started_at: cstr(e["started_at"]),
+    completed_at: cstr(e["completed_at"]),
+    created_at: cstr(e["created_at"]),
   };
 }
 
-export function ensureEmailAgentSettings(db?: Database): EmailAgentSetting[] {
-  const d = db || getDatabase();
-  const timestamp = now();
-  for (const agent of EMAIL_AGENT_DEFINITIONS) {
-    d.run(
-      `INSERT OR IGNORE INTO email_agent_settings
-       (agent_key, enabled, always_on, provider, model, apply_labels, use_network_tools, config_json, created_at, updated_at)
-       VALUES (?, 0, 0, 'external', ?, ?, 1, '{}', ?, ?)`,
-      [agent.key, agent.defaultModel, agent.appliesLabels ? 1 : 0, timestamp, timestamp],
-    );
-  }
-  return listEmailAgentSettings(d);
+export function ensureEmailAgentSettings(): EmailAgentSetting[] {
+  // Settings rows are seeded server-side; ensuring is a read.
+  return listEmailAgentSettings();
 }
 
-export function listEmailAgentSettings(db?: Database): EmailAgentSetting[] {
-  const d = db || getDatabase();
-  ensureEmailAgentSettingsRowsOnly(d);
-  const rows = d
-    .query("SELECT * FROM email_agent_settings ORDER BY agent_key ASC")
-    .all() as Record<string, unknown>[];
-  return rows.map(rowToSetting);
+export function listEmailAgentSettings(): EmailAgentSetting[] {
+  return selfHostedResource(EMAIL_AGENT_RESOURCE)
+    .list({ limit: 1000 })
+    .map(apiToSetting)
+    .sort((a, b) => a.agent_key.localeCompare(b.agent_key));
 }
 
-export function getEmailAgentSetting(agentKey: EmailAgentKey, db?: Database): EmailAgentSetting {
-  const d = db || getDatabase();
-  ensureEmailAgentSettingsRowsOnly(d);
-  const row = d
-    .query("SELECT * FROM email_agent_settings WHERE agent_key = ? LIMIT 1")
-    .get(agentKey) as Record<string, unknown> | null;
-  if (!row) throw new Error(`Email agent setting missing: ${agentKey}`);
-  return rowToSetting(row);
+export function getEmailAgentSetting(agentKey: EmailAgentKey): EmailAgentSetting {
+  const record = selfHostedResource(EMAIL_AGENT_RESOURCE).get(agentKey);
+  if (!record) throw new Error(`Email agent setting missing: ${agentKey}`);
+  return apiToSetting(record);
 }
 
-export function updateEmailAgentSetting(agentKey: EmailAgentKey, input: SaveEmailAgentSettingInput, db?: Database): EmailAgentSetting {
-  const d = db || getDatabase();
-  ensureEmailAgentSettingsRowsOnly(d);
-  const current = getEmailAgentSetting(agentKey, d);
+export function updateEmailAgentSetting(agentKey: EmailAgentKey, input: SaveEmailAgentSettingInput): EmailAgentSetting {
+  const current = getEmailAgentSetting(agentKey);
   const next = {
     enabled: input.enabled ?? current.enabled,
     always_on: input.always_on ?? current.always_on,
@@ -244,148 +232,85 @@ export function updateEmailAgentSetting(agentKey: EmailAgentKey, input: SaveEmai
     use_network_tools: input.use_network_tools ?? current.use_network_tools,
     config: input.config ? { ...current.config, ...input.config } : current.config,
   };
-  d.run(
-    `UPDATE email_agent_settings
-        SET enabled = ?,
-            always_on = ?,
-            provider = ?,
-            model = ?,
-            apply_labels = ?,
-            use_network_tools = ?,
-            config_json = ?,
-            updated_at = ?
-      WHERE agent_key = ?`,
-    [
-      next.enabled ? 1 : 0,
-      next.always_on ? 1 : 0,
-      next.provider,
-      next.model,
-      next.apply_labels ? 1 : 0,
-      next.use_network_tools ? 1 : 0,
-      JSON.stringify(next.config),
-      now(),
-      agentKey,
-    ],
-  );
-  return getEmailAgentSetting(agentKey, d);
+  const updated = selfHostedResource(EMAIL_AGENT_RESOURCE).update(agentKey, {
+    enabled: next.enabled,
+    always_on: next.always_on,
+    provider: next.provider,
+    model: next.model,
+    apply_labels: next.apply_labels,
+    use_network_tools: next.use_network_tools,
+    config_json: JSON.stringify(next.config),
+    updated_at: now(),
+  });
+  return apiToSetting(updated);
 }
 
-export function listEnabledAlwaysOnEmailAgents(db?: Database): EmailAgentSetting[] {
-  return listEmailAgentSettings(db).filter((setting) => setting.enabled && setting.always_on);
+export function listEnabledAlwaysOnEmailAgents(): EmailAgentSetting[] {
+  return listEmailAgentSettings().filter((setting) => setting.enabled && setting.always_on);
 }
 
-export function saveEmailAgentRun(input: SaveEmailAgentRunInput, db?: Database): EmailAgentRun {
-  const d = db || getDatabase();
+export function saveEmailAgentRun(input: SaveEmailAgentRunInput): EmailAgentRun {
+  const store = selfHostedResource(EMAIL_AGENT_RUN_RESOURCE);
+  // One run per (agent_key, inbound_email_id): replace any existing row.
+  const existing = store
+    .list({ limit: 1000 })
+    .map(apiToRun)
+    .filter((r) => r.agent_key === input.agent_key && r.inbound_email_id === input.inbound_email_id);
+  for (const r of existing) store.del(r.id);
+
+  const id = uuid();
   const startedAt = input.started_at ?? now();
   const completedAt = input.completed_at ?? now();
-  const id = uuid();
-  d.run(
-    `INSERT INTO email_agent_runs
-       (id, agent_key, inbound_email_id, provider, model, status, category, labels_json,
-        priority, confidence, risk_score, summary, reasoning, tool_calls_json, output_json,
-        error, started_at, completed_at, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(agent_key, inbound_email_id) DO UPDATE SET
-       id = excluded.id,
-       provider = excluded.provider,
-       model = excluded.model,
-       status = excluded.status,
-       category = excluded.category,
-       labels_json = excluded.labels_json,
-       priority = excluded.priority,
-       confidence = excluded.confidence,
-       risk_score = excluded.risk_score,
-       summary = excluded.summary,
-       reasoning = excluded.reasoning,
-       tool_calls_json = excluded.tool_calls_json,
-       output_json = excluded.output_json,
-       error = excluded.error,
-       started_at = excluded.started_at,
-       completed_at = excluded.completed_at`,
-    [
-      id,
-      input.agent_key,
-      input.inbound_email_id,
-      input.provider,
-      input.model,
-      input.status,
-      input.category ?? null,
-      JSON.stringify(normalizeLabels(input.labels ?? [])),
-      input.priority ?? null,
-      input.confidence ?? null,
-      input.risk_score ?? null,
-      input.summary ?? null,
-      input.reasoning ?? null,
-      JSON.stringify(input.tool_calls ?? []),
-      JSON.stringify(input.output ?? {}),
-      input.error ?? null,
-      startedAt,
-      completedAt,
-      completedAt,
-    ],
+  const created = store.create({
+    id,
+    agent_key: input.agent_key,
+    inbound_email_id: input.inbound_email_id,
+    provider: input.provider,
+    model: input.model,
+    status: input.status,
+    category: input.category ?? null,
+    labels_json: JSON.stringify(normalizeLabels(input.labels ?? [])),
+    priority: input.priority ?? null,
+    confidence: input.confidence ?? null,
+    risk_score: input.risk_score ?? null,
+    summary: input.summary ?? null,
+    reasoning: input.reasoning ?? null,
+    tool_calls_json: JSON.stringify(input.tool_calls ?? []),
+    output_json: JSON.stringify(input.output ?? {}),
+    error: input.error ?? null,
+    started_at: startedAt,
+    completed_at: completedAt,
+    created_at: completedAt,
+  });
+  return apiToRun(created);
+}
+
+export function getEmailAgentRun(agentKey: EmailAgentKey, inboundEmailId: string): EmailAgentRun | null {
+  const match = selfHostedResource(EMAIL_AGENT_RUN_RESOURCE)
+    .list({ limit: 1000 })
+    .map(apiToRun)
+    .find((r) => r.agent_key === agentKey && r.inbound_email_id === inboundEmailId);
+  return match ?? null;
+}
+
+export function listEmailAgentRuns(filter: EmailAgentRunFilter = {}): EmailAgentRun[] {
+  let rows = selfHostedResource(EMAIL_AGENT_RUN_RESOURCE).list({ limit: 1000 }).map(apiToRun);
+  if (filter.agent_key) rows = rows.filter((r) => r.agent_key === filter.agent_key);
+  if (filter.inbound_email_id) rows = rows.filter((r) => r.inbound_email_id === filter.inbound_email_id);
+  if (filter.status) rows = rows.filter((r) => r.status === filter.status);
+  rows.sort((a, b) => (b.completed_at ?? "").localeCompare(a.completed_at ?? ""));
+  const limit = cappedLimit(filter.limit, 50, MAX_AGENT_RUN_LIST_LIMIT);
+  const offset = safeOffset(filter.offset);
+  return rows.slice(offset, offset + limit);
+}
+
+export function listPendingInboundEmailsForAgent(_agentKey: EmailAgentKey, _limit = 50): PendingAgentEmail[] {
+  // Pending selection joins inbound_emails against the agent run ledger — the
+  // inbound message table is owned by the server, so there is no client-side
+  // /v1 equivalent for this scan.
+  throw new Error(
+    "listPendingInboundEmailsForAgent is not available in the self-hosted client; it runs on the self-hosted server.",
   );
-  return getEmailAgentRun(input.agent_key, input.inbound_email_id, d)!;
-}
-
-export function getEmailAgentRun(agentKey: EmailAgentKey, inboundEmailId: string, db?: Database): EmailAgentRun | null {
-  const d = db || getDatabase();
-  const row = d
-    .query("SELECT * FROM email_agent_runs WHERE agent_key = ? AND inbound_email_id = ? LIMIT 1")
-    .get(agentKey, inboundEmailId) as Record<string, unknown> | null;
-  return row ? rowToRun(row) : null;
-}
-
-export function listEmailAgentRuns(filter: EmailAgentRunFilter = {}, db?: Database): EmailAgentRun[] {
-  const d = db || getDatabase();
-  const conditions: string[] = [];
-  const params: string[] = [];
-  if (filter.agent_key) {
-    conditions.push("agent_key = ?");
-    params.push(filter.agent_key);
-  }
-  if (filter.inbound_email_id) {
-    conditions.push("inbound_email_id = ?");
-    params.push(filter.inbound_email_id);
-  }
-  if (filter.status) {
-    conditions.push("status = ?");
-    params.push(filter.status);
-  }
-  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
-  const rows = d
-    .query(`SELECT * FROM email_agent_runs ${where} ORDER BY completed_at DESC LIMIT ? OFFSET ?`)
-    .all(...params, cappedLimit(filter.limit, 50, MAX_AGENT_RUN_LIST_LIMIT), safeOffset(filter.offset)) as Record<string, unknown>[];
-  return rows.map(rowToRun);
-}
-
-export function listPendingInboundEmailsForAgent(agentKey: EmailAgentKey, limit = 50, db?: Database): PendingAgentEmail[] {
-  const d = db || getDatabase();
-  const normalizedLimit = cappedLimit(limit, 50, MAX_PENDING_LIMIT);
-  return d
-    .query(
-      `SELECT e.id, e.from_address, e.subject, e.created_at, e.received_at
-         FROM inbound_emails e
-         LEFT JOIN email_agent_runs r
-           ON r.inbound_email_id = e.id
-          AND r.agent_key = ?
-        WHERE e.is_sent = 0
-          AND (r.id IS NULL OR r.status = 'error')
-        ORDER BY e.created_at ASC, e.received_at ASC
-        LIMIT ?`,
-    )
-    .all(agentKey, normalizedLimit) as PendingAgentEmail[];
-}
-
-function ensureEmailAgentSettingsRowsOnly(db: Database): void {
-  const timestamp = now();
-  for (const agent of EMAIL_AGENT_DEFINITIONS) {
-    db.run(
-      `INSERT OR IGNORE INTO email_agent_settings
-       (agent_key, enabled, always_on, provider, model, apply_labels, use_network_tools, config_json, created_at, updated_at)
-       VALUES (?, 0, 0, 'external', ?, ?, 1, '{}', ?, ?)`,
-      [agent.key, agent.defaultModel, agent.appliesLabels ? 1 : 0, timestamp, timestamp],
-    );
-  }
 }
 
 function normalizeLabels(labels: string[]): string[] {
