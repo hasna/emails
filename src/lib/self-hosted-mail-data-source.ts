@@ -809,5 +809,7 @@ export class SelfHostedMailDataSource implements MailDataSource {
 export function resolveSelfHostedMailDataSource(fetchImpl?: SelfHostedFetch): SelfHostedMailDataSource | null {
   const config = resolveSelfHostedConfig();
   if (!config) return null;
-  return new SelfHostedMailDataSource({ baseUrl: config.baseUrl, apiKey: config.apiKey, fetchImpl });
+  // `apiKey` here is the Bearer credential slot — a user session token when
+  // present, else the operator API key (resolveSelfHostedConfig decides).
+  return new SelfHostedMailDataSource({ baseUrl: config.baseUrl, apiKey: config.credential, fetchImpl });
 }

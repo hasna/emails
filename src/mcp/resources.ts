@@ -5,6 +5,7 @@ import { assessDomainReadiness } from "../lib/domain-readiness.js";
 import { domainInboundReadinessSignals } from "../lib/domain-inbound-evidence.js";
 import { resolveEmailsMode } from "../lib/mode.js";
 import { resolveMailDataSource } from "../lib/mail-data-source.js";
+import { fetchIdentitySafe } from "../lib/whoami.js";
 
 const RECENT_ERROR_LIMIT_PER_COMPONENT = 50;
 const DOMAIN_RESOURCE_LIMIT = 50;
@@ -114,6 +115,9 @@ export async function agentContextResourcePayload(): Promise<Record<string, unkn
   const status = context["status"] as Record<string, unknown>;
   const domains = status["domains"] as { usable?: unknown[]; usable_limit?: number; usable_truncated?: boolean } | undefined;
   const addresses = status["addresses"] as { usable_from?: Array<Record<string, unknown>>; usable_from_limit?: number; usable_from_truncated?: boolean } | undefined;
+  // Identity/tenant context derived from the caller's credential (never a
+  // client-supplied tenant). Best-effort: null if /v1/me is unreachable.
+  const identity = fetchIdentitySafe();
   const allUsableDomains = Array.isArray(domains?.usable) ? domains.usable : [];
   const allUsableFrom = Array.isArray(addresses?.usable_from) ? addresses.usable_from : [];
   const usableDomains = allUsableDomains.slice(0, AGENT_CONTEXT_SAMPLE_LIMIT);
@@ -130,6 +134,16 @@ export async function agentContextResourcePayload(): Promise<Record<string, unkn
         verified: address["verified"],
       }));
   return {
+    identity: identity
+      ? {
+          principal_type: identity.principalType,
+          user: identity.user,
+          tenant: identity.tenant,
+          role: identity.role,
+          scopes: identity.scopes,
+          memberships: identity.memberships,
+        }
+      : null,
     status: {
       generated_at: status["generated_at"],
       database: status["database"],

@@ -27,6 +27,7 @@ import { getLatestActiveProviderId } from "../../db/providers.js";
 import { getInboundBuckets, loadConfig, saveConfig } from "../../lib/config.js";
 import { assessDomainReadiness } from "../../lib/domain-readiness.js";
 import { resolveEmailsMode } from "../../lib/mode.js";
+import { describeIdentity, fetchIdentitySafe, type IdentityContext } from "../../lib/whoami.js";
 import { listS3Sources } from "../../lib/s3-sync.js";
 import { normalizeThemeMode, type TuiThemeMode } from "./theme.js";
 import {
@@ -793,4 +794,36 @@ export function setSetting<K extends keyof TuiSettings>(key: K, value: TuiSettin
   };
   c[map[key]] = value as never;
   saveConfig(c);
+}
+
+// ── tenant / identity context (TUI header) ──────────────────────────────────
+//
+// The active organization is derived server-side from the bearer credential
+// (a user session token or the operator API key) via GET /v1/me. Cached briefly
+// so the reactive TUI does not issue a curl per render. Never throws — the header
+// falls back to a neutral label when identity is unavailable.
+
+export interface TenantContext {
+  identity: IdentityContext | null;
+  /** Short label for the header, e.g. "carol@hasna.com · acme (owner)". */
+  label: string;
+}
+
+const TENANT_CONTEXT_TTL_MS = 30_000;
+let tenantContextCache: { at: number; value: TenantContext } | null = null;
+
+export function getTenantContext(force = false): TenantContext {
+  const now = Date.now();
+  if (!force && tenantContextCache && now - tenantContextCache.at < TENANT_CONTEXT_TTL_MS) {
+    return tenantContextCache.value;
+  }
+  const identity = fetchIdentitySafe();
+  const value: TenantContext = { identity, label: describeIdentity(identity) };
+  tenantContextCache = { at: now, value };
+  return value;
+}
+
+/** Drop the cached tenant context (call after login/logout/switch-tenant). */
+export function resetTenantContextCache(): void {
+  tenantContextCache = null;
 }

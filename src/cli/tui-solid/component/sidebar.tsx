@@ -1,7 +1,8 @@
-import { For, Show, createSignal } from "solid-js";
+import { For, Show, createSignal, onMount } from "solid-js";
 import { TextAttributes, type MouseEvent } from "@opentui/core";
 import {
   MAIL_CATEGORY_LABELS,
+  getTenantContext,
   isMailCategoryLabel,
   labelDisplayName,
   labelNameAliases,
@@ -29,6 +30,18 @@ export function Sidebar() {
   const theme = useTheme();
   const emails = useEmails();
   const [open, setOpen] = createSignal({ mail: true, categories: true, labels: true, tools: true });
+  // Active organization, derived server-side from the credential (GET /v1/me).
+  // Fetched after mount so the synchronous transport never blocks first paint;
+  // stays empty when the caller is not signed in or the server is unreachable.
+  const [org, setOrg] = createSignal<string>("");
+  onMount(() => {
+    try {
+      const ctx = getTenantContext();
+      if (ctx.identity) setOrg(ctx.label);
+    } catch {
+      // Header simply omits the org line when identity is unavailable.
+    }
+  });
   const counts = () => emails.state.counts;
   const mailboxCount = (box: Mailbox) => counts()[box] ?? 0;
   const activeLabel = (label: string) => !!emails.state.activeLabel && labelNameKey(emails.state.activeLabel) === labelNameKey(label);
@@ -43,7 +56,7 @@ export function Sidebar() {
   return (
     <box width="100%" height="100%" flexDirection="column" backgroundColor={theme.backgroundPanel} paddingTop={1} paddingLeft={1} paddingRight={1}>
       <box
-        height={2}
+        height={org() ? 3 : 2}
         flexDirection="column"
         paddingLeft={1}
         onMouseUp={(event: MouseEvent) => {
@@ -53,6 +66,9 @@ export function Sidebar() {
       >
         <text fg={theme.text} attributes={TextAttributes.BOLD}>Emails</text>
         <text fg={theme.textMuted}>{emails.selectedAddress().label}</text>
+        <Show when={org()}>
+          <text fg={theme.textMuted}>{org()}</text>
+        </Show>
       </box>
 
       <SectionHeader label={open().mail ? "Mail" : "Mail +"} onPress={() => setOpen((value) => ({ ...value, mail: !value.mail }))} />

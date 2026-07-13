@@ -28,6 +28,7 @@ export const allCommandModules = [
   "daemon",
   "db",
   "self-hosted",
+  "auth",
 ] as const;
 
 export type CommandModule = typeof allCommandModules[number];
@@ -86,6 +87,9 @@ export const knownCommandNames = new Set([
   "logs",
   "db",
   "self-hosted",
+  "auth",
+  "keys",
+  "whoami",
 ]);
 
 export function routeRootPromptArgs(args: string[]): string[] {
@@ -158,6 +162,9 @@ export function commandModulesFor(args: string[]): readonly CommandModule[] {
     case "logs": return ["daemon"];
     case "db": return ["db"];
     case "self-hosted": return ["self-hosted"];
+    case "auth":
+    case "keys":
+    case "whoami": return ["auth"];
     default: return allCommandModules;
   }
 }

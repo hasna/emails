@@ -2,7 +2,13 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { EMAILS_CLIENT_ENV_SECRET_ENV, loadEmailsClientEnvSecret } from "./client-env.js";
+import {
+  EMAILS_CLIENT_ENV_SECRET_ENV,
+  EMAILS_SESSION_TOKEN_ENV,
+  clearClientEnvSessionToken,
+  loadEmailsClientEnvSecret,
+  persistClientEnvSessionToken,
+} from "./client-env.js";
 
 const ORIGINAL_PATH = process.env["PATH"];
 const ORIGINAL_HOME = process.env["HOME"];
@@ -10,6 +16,7 @@ const ENV_KEYS = [
   "EMAILS_MODE",
   "HASNA_EMAILS_MODE",
   EMAILS_CLIENT_ENV_SECRET_ENV,
+  EMAILS_SESSION_TOKEN_ENV,
   "EMAILS_SELF_HOSTED_URL",
   "EMAILS_SELF_HOSTED_API_KEY",
   "DATABASE_URL",
@@ -61,6 +68,45 @@ exit 2
   chmodSync(bin, 0o700);
   process.env["PATH"] = `${dir}:${ORIGINAL_PATH ?? ""}`;
   return envPath;
+}
+
+// A fake `secrets` that returns a fixed JSON blob for any `get`, else exits 2.
+function installStaticSecretsCommand(getJson: string): void {
+  const dir = mkdtempSync(join(tmpdir(), "emails-client-env-static-"));
+  tempDirs.push(dir);
+  const bin = join(dir, "secrets");
+  writeFileSync(bin, `#!/bin/sh
+if [ "$1" = "get" ]; then
+  printf '%s\\n' ${JSON.stringify(getJson)}
+  exit 0
+fi
+exit 2
+`);
+  chmodSync(bin, 0o700);
+  process.env["PATH"] = `${dir}:${ORIGINAL_PATH ?? ""}`;
+}
+
+// A fake `secrets` backed by a JSON file so get/set round-trips (persist tests).
+function installVaultBackedSecretsCommand(initialJson: string): string {
+  const dir = mkdtempSync(join(tmpdir(), "emails-client-env-vault-"));
+  tempDirs.push(dir);
+  const storePath = join(dir, "store.json");
+  writeFileSync(storePath, initialJson);
+  const bin = join(dir, "secrets");
+  writeFileSync(bin, `#!/bin/sh
+STORE=${JSON.stringify(storePath)}
+if [ "$1" = "get" ]; then
+  if [ -f "$STORE" ]; then cat "$STORE"; exit 0; else exit 2; fi
+fi
+if [ "$1" = "set" ]; then
+  printf '%s' "$3" > "$STORE"
+  exit 0
+fi
+exit 2
+`);
+  chmodSync(bin, 0o700);
+  process.env["PATH"] = `${dir}:${ORIGINAL_PATH ?? ""}`;
+  return storePath;
 }
 
 beforeEach(resetEnv);
@@ -123,6 +169,74 @@ describe("Emails client-env loader", () => {
     ]) {
       expect(childEnvKeys.has(key)).toBe(false);
     }
+  });
+
+  it("loads an optional EMAILS_SESSION_TOKEN from the vault entry when present", () => {
+    installStaticSecretsCommand(
+      '{"EMAILS_MODE":"self_hosted","EMAILS_SELF_HOSTED_URL":"https://emails.example.invalid",' +
+        '"EMAILS_SELF_HOSTED_API_KEY":"loaded-client-key","EMAILS_SESSION_TOKEN":"emss_from_vault"}',
+    );
+    process.env[EMAILS_CLIENT_ENV_SECRET_ENV] = "hasna/test/opensource/emails/prod/client-env";
+
+    const loaded = loadEmailsClientEnvSecret();
+
+    expect(loaded.ready).toBe(true);
+    expect(process.env[EMAILS_SESSION_TOKEN_ENV]).toBe("emss_from_vault");
+  });
+
+  it("accepts a session-token-only vault entry (no API key required)", () => {
+    installStaticSecretsCommand(
+      '{"EMAILS_MODE":"self_hosted","EMAILS_SELF_HOSTED_URL":"https://emails.example.invalid",' +
+        '"EMAILS_SESSION_TOKEN":"emss_only"}',
+    );
+    process.env[EMAILS_CLIENT_ENV_SECRET_ENV] = "hasna/test/opensource/emails/prod/client-env";
+
+    const loaded = loadEmailsClientEnvSecret();
+
+    expect(loaded.ready).toBe(true);
+    expect(process.env[EMAILS_SESSION_TOKEN_ENV]).toBe("emss_only");
+    expect(process.env["EMAILS_SELF_HOSTED_API_KEY"]).toBeUndefined();
+  });
+
+  it("fails loud when the vault entry has neither an API key nor a session token", () => {
+    installStaticSecretsCommand(
+      '{"EMAILS_MODE":"self_hosted","EMAILS_SELF_HOSTED_URL":"https://emails.example.invalid"}',
+    );
+    process.env[EMAILS_CLIENT_ENV_SECRET_ENV] = "hasna/test/opensource/emails/prod/client-env";
+
+    expect(() => loadEmailsClientEnvSecret()).toThrow("EMAILS_SELF_HOSTED_API_KEY or EMAILS_SESSION_TOKEN");
+  });
+
+  it("persists a session token into env and merges it into the vault entry", () => {
+    const storePath = installVaultBackedSecretsCommand(
+      '{"EMAILS_MODE":"self_hosted","EMAILS_SELF_HOSTED_URL":"https://emails.example.invalid","EMAILS_SELF_HOSTED_API_KEY":"op-key"}',
+    );
+    process.env[EMAILS_CLIENT_ENV_SECRET_ENV] = "hasna/test/opensource/emails/prod/client-env";
+
+    const result = persistClientEnvSessionToken("emss_new_session");
+
+    expect(result.scope).toBe("vault");
+    expect(process.env[EMAILS_SESSION_TOKEN_ENV]).toBe("emss_new_session");
+    const stored = JSON.parse(readFileSync(storePath, "utf8")) as Record<string, string>;
+    expect(stored[EMAILS_SESSION_TOKEN_ENV]).toBe("emss_new_session");
+    // The pre-existing keys are preserved through the merge.
+    expect(stored["EMAILS_SELF_HOSTED_API_KEY"]).toBe("op-key");
+    expect(stored["EMAILS_SELF_HOSTED_URL"]).toBe("https://emails.example.invalid");
+
+    // Clearing removes it from env and the vault entry.
+    const cleared = clearClientEnvSessionToken();
+    expect(cleared.scope).toBe("vault");
+    expect(process.env[EMAILS_SESSION_TOKEN_ENV]).toBeUndefined();
+    const after = JSON.parse(readFileSync(storePath, "utf8")) as Record<string, string>;
+    expect(after[EMAILS_SESSION_TOKEN_ENV]).toBeUndefined();
+    expect(after["EMAILS_SELF_HOSTED_API_KEY"]).toBe("op-key");
+  });
+
+  it("persists to the process env only when no vault pointer is configured", () => {
+    const result = persistClientEnvSessionToken("emss_process_only");
+    expect(result.scope).toBe("process");
+    expect(result.secretPath).toBeNull();
+    expect(process.env[EMAILS_SESSION_TOKEN_ENV]).toBe("emss_process_only");
   });
 
   it("passes secrets-tooling backend config through so the vault is reachable", () => {

@@ -16,7 +16,7 @@
 // is never logged or embedded in an error.
 
 import { spawnSync } from "node:child_process";
-import { loadEmailsClientEnvSecret } from "../lib/client-env.js";
+import { EMAILS_SESSION_TOKEN_ENV, loadEmailsClientEnvSecret } from "../lib/client-env.js";
 
 const APP = "emails";
 
@@ -34,7 +34,12 @@ export class SelfHostedHttpError extends Error {
 
 export interface SelfHostedConfig {
   baseUrl: string; // `<origin>/v1`
-  apiKey: string;
+  /**
+   * Bearer credential threaded into BOTH transports. A user session token
+   * (emss_…) when present, otherwise the operator API key. The client never
+   * sends a tenant — the server derives it from this credential.
+   */
+  credential: string;
 }
 
 function toV1BaseUrl(apiUrl: string): string {
@@ -72,37 +77,69 @@ export function resolveSelfHostedConfig(env: NodeJS.ProcessEnv = process.env): S
   const modeRaw = env["EMAILS_MODE"]?.trim() ?? env["HASNA_EMAILS_MODE"]?.trim();
   const apiUrl = env["EMAILS_SELF_HOSTED_URL"]?.trim();
   const apiKey = env["EMAILS_SELF_HOSTED_API_KEY"]?.trim();
+  const sessionToken = env[EMAILS_SESSION_TOKEN_ENV]?.trim();
+  // Prefer a user session token over the operator API key; the server maps
+  // whichever credential to its tenant. Tenant is never sent by the client.
+  const credential = sessionToken || apiKey;
 
-  const signature = `${modeRaw ?? ""}|${apiUrl ?? ""}|${apiKey ? "k" : ""}`;
+  const signature = `${modeRaw ?? ""}|${apiUrl ?? ""}|${sessionToken ? "s" : ""}${apiKey ? "k" : ""}`;
   if (signature === _cachedSignature && _cachedConfig) return _cachedConfig;
 
-  const config = computeConfig(modeRaw, apiUrl, apiKey);
+  const config = computeConfig(modeRaw, apiUrl, credential);
   _cachedSignature = signature;
   _cachedConfig = config;
   return config;
 }
 
-function computeConfig(
-  modeRaw: string | undefined,
-  apiUrl: string | undefined,
-  apiKey: string | undefined,
-): SelfHostedConfig {
+function assertSupportedMode(modeRaw: string | undefined): void {
   if (modeRaw && modeRaw !== "self_hosted") {
     throw new Error(
       `${APP}: unsupported EMAILS_MODE '${modeRaw}'. This client is self-hosted-only and the ` +
         `only supported mode is self_hosted. ${CONFIG_HELP}`,
     );
   }
-  if (!apiUrl || !apiKey) {
+}
+
+function computeConfig(
+  modeRaw: string | undefined,
+  apiUrl: string | undefined,
+  credential: string | undefined,
+): SelfHostedConfig {
+  assertSupportedMode(modeRaw);
+  if (!apiUrl || !credential) {
     const missing = [
       !apiUrl ? "EMAILS_SELF_HOSTED_URL" : null,
-      !apiKey ? "EMAILS_SELF_HOSTED_API_KEY" : null,
+      !credential ? "EMAILS_SELF_HOSTED_API_KEY or EMAILS_SESSION_TOKEN" : null,
     ].filter(Boolean).join(" and ");
     throw new Error(
       `${APP}: the self-hosted client is not configured (${missing} missing). ${CONFIG_HELP}`,
     );
   }
-  return { baseUrl: toV1BaseUrl(apiUrl), apiKey };
+  return { baseUrl: toV1BaseUrl(apiUrl), credential };
+}
+
+/**
+ * Resolve the `<origin>/v1` base URL WITHOUT requiring a credential. Used only
+ * by the unauthenticated auth endpoints (signup/login), where the caller may not
+ * hold a credential yet. A vault load failure caused solely by a missing
+ * credential is tolerated as long as the URL is present.
+ */
+function resolveSelfHostedBaseUrlLenient(env: NodeJS.ProcessEnv = process.env): string {
+  let loadError: unknown;
+  try {
+    loadEmailsClientEnvSecret(env);
+  } catch (error) {
+    loadError = error;
+  }
+  assertSupportedMode(env["EMAILS_MODE"]?.trim() ?? env["HASNA_EMAILS_MODE"]?.trim());
+  const apiUrl = env["EMAILS_SELF_HOSTED_URL"]?.trim();
+  if (!apiUrl) {
+    if (loadError) throw loadError;
+    throw new Error(
+      `${APP}: the self-hosted client is not configured (EMAILS_SELF_HOSTED_URL missing). ${CONFIG_HELP}`,
+    );
+  }
+  return toV1BaseUrl(apiUrl);
 }
 
 /** Reset the memoized config (tests flip env between cases). */
@@ -183,7 +220,6 @@ function httpRequest(config: SelfHostedConfig, method: string, path: string, bod
   const lines = [
     `url = ${curlConfigValue(url)}`,
     `request = ${curlConfigValue(method)}`,
-    `header = ${curlConfigValue(`Authorization: Bearer ${config.apiKey}`)}`,
     `header = ${curlConfigValue("Accept: application/json")}`,
     // Bounded, fail-loud transport (never hang indefinitely).
     `connect-timeout = ${connectTimeout}`,
@@ -191,6 +227,11 @@ function httpRequest(config: SelfHostedConfig, method: string, path: string, bod
     `silent`,
     `show-error`,
   ];
+  // Omit the Authorization header entirely when no credential is available (the
+  // unauthenticated /v1/auth/signup|login path); never send an empty Bearer.
+  if (config.credential) {
+    lines.push(`header = ${curlConfigValue(`Authorization: Bearer ${config.credential}`)}`);
+  }
   if (body !== undefined) {
     lines.push(`header = ${curlConfigValue("Content-Type: application/json")}`);
     lines.push(`data-binary = ${curlConfigValue(JSON.stringify(body))}`);
@@ -344,6 +385,50 @@ export function selfHostedStoreFor(resource: string): SelfHostedResourceStore {
       return true;
     },
   };
+}
+
+// ---- bespoke /v1 endpoints (auth, keys, me) -------------------------------
+//
+// Auth/session/key-management endpoints are NOT generic CRUD resources: they
+// return status-dependent shapes (401/403, needs_tenant, unverified, a token
+// shown once) that the CLI must branch on. This helper performs a single
+// authenticated (or, for signup/login, unauthenticated) call and returns the
+// raw status + parsed JSON. The Bearer credential is threaded from
+// resolveSelfHostedConfig and never logged.
+
+export interface SelfHostedApiResult {
+  status: number;
+  json: unknown;
+  bodyText: string;
+}
+
+export interface SelfHostedApiRequestOptions {
+  /**
+   * When false, resolve only the base URL and send no Authorization header —
+   * for the unauthenticated auth endpoints (signup/login). Defaults to true.
+   */
+  requireCredential?: boolean;
+}
+
+export function selfHostedApiRequest(
+  method: string,
+  path: string,
+  body?: unknown,
+  options: SelfHostedApiRequestOptions = {},
+): SelfHostedApiResult {
+  const requireCredential = options.requireCredential !== false;
+  let config: SelfHostedConfig;
+  if (requireCredential) {
+    config = resolveSelfHostedConfig();
+  } else {
+    // resolveSelfHostedBaseUrlLenient loads the vault entry, so env carries any
+    // available credential afterwards. Send it if present; otherwise none.
+    const baseUrl = resolveSelfHostedBaseUrlLenient();
+    const credential = process.env[EMAILS_SESSION_TOKEN_ENV]?.trim() || process.env["EMAILS_SELF_HOSTED_API_KEY"]?.trim() || "";
+    config = { baseUrl, credential };
+  }
+  const { status, body: text } = httpRequest(config, method, path, body);
+  return { status, json: parseJson(text), bodyText: text };
 }
 
 // ---- id resolution (self-hosted) ------------------------------------------

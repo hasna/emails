@@ -51,6 +51,18 @@ export interface V1Stub {
   list(resource: string): Promise<Array<Record<string, unknown>>>;
   /** Read the entire store back from the stub. */
   dump(): Promise<V1StubResources>;
+  /** Read the current email-verification token for an address (test helper). */
+  verifyToken(email: string): Promise<string | null>;
+  /** Mark a signed-up user verified without a token (fixture shortcut). */
+  markVerified(email: string): Promise<void>;
+  /** Seed a user with explicit memberships (multi-tenant fixtures). */
+  seedUser(user: {
+    email: string;
+    password: string;
+    name?: string;
+    verified?: boolean;
+    tenants?: Array<{ slug: string; name: string; role: string }>;
+  }): Promise<void>;
   /**
    * Point the client at this stub: EMAILS_MODE=self_hosted, EMAILS_SELF_HOSTED_URL,
    * EMAILS_SELF_HOSTED_API_KEY, then reset the config + mail-data-source caches.
@@ -73,6 +85,12 @@ let store = safeParse(process.env.V1_STUB_SEED);
 // Secret token -> send-key id map. Kept OUT of the store object so it is never
 // returned by __dump (a send token must never leave the server). Cleared on __reset.
 let sendTokens = {};
+// Auth state (multi-tenancy client tests). Kept OUT of the store/__dump so
+// passwords and session tokens never leave the server. Cleared on __reset.
+let authUsers = {};      // email -> { password, name, verified, tenants:[{slug,name,role}] }
+let sessions = {};       // emss_ token -> { email, tenant:{slug,name,role} }
+let verifyTokens = {};   // emiv_ token -> email
+let bootstrapped = false;
 
 function safeParse(raw) {
   if (!raw) return {};
@@ -99,6 +117,60 @@ function hasLabel(row, label) {
   return Array.isArray(row.labels) && row.labels.some(function (v) { return String(v).toLowerCase() === label; });
 }
 function isOutbound(row) { return String(row.direction || "").toLowerCase() === "outbound"; }
+
+// ── auth helpers (mirror the server: @hasna.<tld> allowlist, slug derivation) ──
+function isAllowedSignupEmail(email) {
+  return /^[^@\s]+@hasna\.[a-z0-9-]+$/i.test(String(email == null ? "" : email).trim());
+}
+function slugify(name) {
+  return String(name == null ? "" : name).trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "org";
+}
+function lastVerifyTokenFor(email) {
+  const target = String(email == null ? "" : email).trim().toLowerCase();
+  let found = null;
+  for (const token of Object.keys(verifyTokens)) {
+    if (String(verifyTokens[token]).toLowerCase() === target) found = token;
+  }
+  return found;
+}
+function bearerOf(req) {
+  const header = req.headers.get("authorization") || "";
+  return header.indexOf("Bearer ") === 0 ? header.slice(7) : "";
+}
+// Mirror the server's toPublicUser (store.ts): id/email/name/status/email_verified/created_at.
+function safeUser(email) {
+  const user = authUsers[email];
+  return {
+    id: "user-" + email,
+    email: email,
+    name: user ? user.name : null,
+    status: user ? (user.verified ? "active" : "unverified") : "active",
+    email_verified: user ? Boolean(user.verified) : false,
+    created_at: (user && user.created_at) || new Date(0).toISOString(),
+  };
+}
+// Mirror the server's toPublicTenant: { id, slug, name, status }.
+function publicTenant(t) {
+  return { id: "tenant-" + t.slug, slug: t.slug, name: t.name, status: "active" };
+}
+// Mirror the server's SCOPES_BY_ROLE.
+function scopesForRole(role) {
+  return role === "viewer" ? ["emails:read"] : ["emails:read", "emails:write"];
+}
+// Mint a session and build the server's login/switch-tenant success body.
+// The server INCLUDES the user on login but OMITS it on switch-tenant.
+function mintSession(email, tenant, includeUser) {
+  const token = "emss_" + crypto.randomUUID().replace(/-/g, "");
+  sessions[token] = { email: email, tenant: tenant };
+  const body = {
+    session_token: token,
+    expires_at: new Date(Date.now() + 30 * 86400000).toISOString(),
+    tenant: publicTenant(tenant),
+    role: tenant.role,
+  };
+  if (includeUser) body.user = safeUser(email);
+  return json(body);
+}
 
 // Send-key From-scope check, mirroring the server: an owner may send from an
 // address it OWNS or ADMINISTERS. Canonicalizes the From (a single angle-addr or a
@@ -190,14 +262,191 @@ const server = Bun.serve({
       const body = await req.json().catch(function () { return {}; });
       store = body && body.resources ? body.resources : {};
       sendTokens = {};
+      authUsers = {};
+      sessions = {};
+      verifyTokens = {};
+      bootstrapped = false;
       return json({ ok: true });
     }
     if (req.method === "GET" && parts[0] === "v1" && parts[1] === "__dump") {
       return json({ resources: store });
     }
+    // Test-only: read the current verification token for an email (the real
+    // server emails it; here the test needs it to drive verify-email).
+    if (req.method === "GET" && parts[0] === "v1" && parts[1] === "__verify_token") {
+      return json({ token: lastVerifyTokenFor(url.searchParams.get("email") || "") });
+    }
+    // Test-only: mark a user verified without a token (fixture shortcut).
+    if (req.method === "POST" && parts[0] === "v1" && parts[1] === "__verify_user") {
+      const body = await req.json().catch(function () { return {}; });
+      const email = String(body.email == null ? "" : body.email).trim().toLowerCase();
+      if (authUsers[email]) authUsers[email].verified = true;
+      return json({ ok: Boolean(authUsers[email]) });
+    }
+    // Test-only: seed a user with arbitrary memberships (multi-tenant fixtures).
+    if (req.method === "POST" && parts[0] === "v1" && parts[1] === "__seed_user") {
+      const body = await req.json().catch(function () { return {}; });
+      const email = String(body.email == null ? "" : body.email).trim().toLowerCase();
+      authUsers[email] = {
+        password: String(body.password == null ? "" : body.password),
+        name: body.name || null,
+        verified: body.verified !== false,
+        tenants: Array.isArray(body.tenants) ? body.tenants : [{ slug: "default", name: "Default Tenant", role: "owner" }],
+      };
+      return json({ ok: true });
+    }
 
-    if (KEY && req.headers.get("authorization") !== "Bearer " + KEY) return json({ error: "unauthorized" }, 401);
+    // ── auth: UNAUTHENTICATED endpoints (signup/login/verify) ──────────────
+    if (parts[0] === "v1" && parts[1] === "auth" && req.method === "POST") {
+      const authPath = parts.slice(2).join("/");
+      if (authPath === "signup") {
+        const body = await req.json().catch(function () { return {}; });
+        const email = String(body.email == null ? "" : body.email).trim().toLowerCase();
+        // Server shape: 200 generic { status, email, verification_required }. No
+        // session/user/tenant is returned at signup (design A2). Non-enumerating:
+        // a duplicate email returns the SAME generic 200 (no reveal, no new token).
+        const generic = json({ status: "verification_required", email: email, verification_required: true });
+        if (!isAllowedSignupEmail(email)) return json({ error: "signups are restricted", reason: "email_not_allowed" }, 403);
+        if (authUsers[email]) return generic;
+        const tenantName = String(body.tenant_name == null ? "" : body.tenant_name).trim() || "Org";
+        const slug = String(body.tenant_slug == null ? "" : body.tenant_slug).trim() || slugify(tenantName);
+        authUsers[email] = { password: String(body.password == null ? "" : body.password), name: body.name || null, verified: false, created_at: new Date().toISOString(), tenants: [{ slug: slug, name: tenantName, role: "owner" }] };
+        const vt = "emiv_" + crypto.randomUUID().replace(/-/g, "");
+        verifyTokens[vt] = email;
+        return generic;
+      }
+      if (authPath === "login") {
+        const body = await req.json().catch(function () { return {}; });
+        const email = String(body.email == null ? "" : body.email).trim().toLowerCase();
+        if (!isAllowedSignupEmail(email)) return json({ error: "login is restricted", reason: "email_not_allowed" }, 403);
+        const user = authUsers[email];
+        if (!user || user.password !== String(body.password == null ? "" : body.password)) return json({ error: "invalid email or password", reason: "invalid_credentials" }, 401);
+        if (!user.verified) return json({ error: "email is not verified", reason: "email_unverified" }, 403);
+        const wanted = String(body.tenant_slug == null ? "" : body.tenant_slug).trim().toLowerCase();
+        let tenant = null;
+        if (wanted) {
+          tenant = user.tenants.find(function (t) { return t.slug === wanted; }) || null;
+          if (!tenant) return json({ error: "you are not a member of that organization", reason: "not_a_member" }, 403);
+        } else if (user.tenants.length === 1) {
+          tenant = user.tenants[0];
+        } else {
+          return json({ needs_tenant: true, tenants: user.tenants.map(function (t) { return { slug: t.slug, name: t.name, role: t.role }; }) });
+        }
+        return mintSession(email, tenant, true);
+      }
+      if (authPath === "verify-email") {
+        const body = await req.json().catch(function () { return {}; });
+        const token = String(body.token == null ? "" : body.token);
+        const email = verifyTokens[token];
+        if (!email || !authUsers[email]) return json({ error: "verification link is invalid or expired", reason: "invalid_token" }, 400);
+        authUsers[email].verified = true;
+        delete verifyTokens[token];
+        return json({ verified: true, user: safeUser(email) });
+      }
+      if (authPath === "verify-email/resend") {
+        const body = await req.json().catch(function () { return {}; });
+        const email = String(body.email == null ? "" : body.email).trim().toLowerCase();
+        // Always the same generic 200 (no enumeration); only (re)issue a token for
+        // a real, unverified account.
+        if (authUsers[email] && !authUsers[email].verified) {
+          const vt = "emiv_" + crypto.randomUUID().replace(/-/g, "");
+          verifyTokens[vt] = email;
+        }
+        return json({ status: "verification_required", verification_required: true });
+      }
+      // logout / switch-tenant / bootstrap-owner require auth → fall through.
+    }
+
+    // Auth gate: accept the operator API key OR a valid user session token.
+    const bearer = bearerOf(req);
+    const isApiKey = Boolean(KEY) && bearer === KEY;
+    const session = sessions[bearer] || null;
+    if (KEY && !isApiKey && !session) return json({ error: "unauthorized" }, 401);
     if (parts[0] !== "v1" || !parts[1]) return json({ error: "not found" }, 404);
+
+    // ── auth: AUTHENTICATED endpoints ──────────────────────────────────────
+    if (parts[1] === "auth" && req.method === "POST") {
+      const authPath = parts.slice(2).join("/");
+      if (authPath === "logout") {
+        if (bearer) delete sessions[bearer];
+        return json({ logged_out: true });
+      }
+      if (authPath === "switch-tenant") {
+        // Server: a non-session principal (api key) gets 400 not_session.
+        if (!session) return json({ error: "not a session", reason: "not_session" }, 400);
+        const body = await req.json().catch(function () { return {}; });
+        const wanted = String(body.tenant_slug == null ? "" : body.tenant_slug).trim().toLowerCase();
+        if (!wanted) return json({ error: "tenant_slug is required" }, 400);
+        const user = authUsers[session.email];
+        const tenant = user ? user.tenants.find(function (t) { return t.slug === wanted; }) : null;
+        // Server distinguishes 404 (org unknown) from 403 (known but not a member);
+        // the stub only knows the caller's own orgs, so an unknown slug is 404.
+        if (!tenant) return json({ error: "organization not found", reason: "not_found" }, 404);
+        return mintSession(session.email, tenant, false);
+      }
+      if (authPath === "bootstrap-owner") {
+        if (!isApiKey) return json({ error: "bootstrap requires an api key", reason: "apikey_required" }, 403);
+        const body = await req.json().catch(function () { return {}; });
+        const email = String(body.email == null ? "" : body.email).trim().toLowerCase();
+        if (!isAllowedSignupEmail(email)) return json({ error: "owner email is restricted", reason: "email_not_allowed" }, 403);
+        if (bootstrapped) return json({ error: "this tenant already has an owner", reason: "owner_exists" }, 409);
+        const defaultTenant = { slug: "default", name: "Default Tenant", role: "owner" };
+        authUsers[email] = { password: String(body.password == null ? "" : body.password), name: body.name || null, verified: true, created_at: new Date().toISOString(), tenants: [defaultTenant] };
+        bootstrapped = true;
+        return json({ user: safeUser(email), tenant: publicTenant(defaultTenant) }, 201);
+      }
+    }
+
+    // GET /v1/me — identity/tenant context for the caller's credential.
+    // Mirrors the server: snake principal_type, full tenant (id/slug/name/status),
+    // derived scopes, and FLAT memberships rows (tenant_id, slug, name, role).
+    if (parts[1] === "me" && parts[2] === undefined && req.method === "GET") {
+      if (session) {
+        const user = authUsers[session.email];
+        return json({
+          principal_type: "user",
+          user: safeUser(session.email),
+          tenant: publicTenant(session.tenant),
+          role: session.tenant.role,
+          scopes: scopesForRole(session.tenant.role),
+          memberships: (user ? user.tenants : []).map(function (t) { return { tenant_id: "tenant-" + t.slug, slug: t.slug, name: t.name, role: t.role }; }),
+        });
+      }
+      return json({
+        principal_type: "apikey",
+        kid: "stub-operator-kid",
+        tenant: { id: "tenant-default", slug: "default", name: "Default Tenant", status: "active" },
+        scopes: ["emails:read", "emails:write"],
+      });
+    }
+
+    // Tenant-scoped API keys — /v1/keys (token shown once; never stored/dumped).
+    if (parts[1] === "keys") {
+      const tenantSlug = session ? session.tenant.slug : "default";
+      const kid = parts[2] !== undefined ? decodeURIComponent(parts[2]) : undefined;
+      if (kid === undefined && req.method === "GET") {
+        const list = rowsFor("keys")
+          .filter(function (k) { return k.tenant_slug === tenantSlug; })
+          .map(function (k) { return { kid: k.kid, scopes: k.scopes, revoked_at: k.revoked_at, created_at: k.created_at, expires_at: k.expires_at }; });
+        return json({ keys: list });
+      }
+      if (kid === undefined && req.method === "POST") {
+        const body = await req.json().catch(function () { return {}; });
+        const scopes = Array.isArray(body.scopes) ? body.scopes : ["emails:*"];
+        const token = "hasna_" + crypto.randomUUID().replace(/-/g, "");
+        const newKid = "kid_" + crypto.randomUUID().slice(0, 8);
+        const ttlDays = body.ttl_days == null ? null : Number(body.ttl_days);
+        const rec = { kid: newKid, scopes: scopes, tenant_slug: tenantSlug, revoked_at: null, created_at: new Date().toISOString(), expires_at: ttlDays ? new Date(Date.now() + ttlDays * 86400000).toISOString() : null };
+        rowsFor("keys").push(rec);
+        return json({ token: token, kid: newKid, scopes: scopes, expires_at: rec.expires_at }, 201);
+      }
+      if (kid !== undefined && req.method === "DELETE") {
+        const rec = rowsFor("keys").find(function (k) { return String(k.kid) === kid && k.tenant_slug === tenantSlug; });
+        if (!rec) return json({ error: "key not found", reason: "not_found" }, 404);
+        rec.revoked_at = new Date().toISOString();
+        return json({ revoked: true, kid: kid });
+      }
+    }
 
     const resource = parts[1];
     const sub = parts[2];
@@ -392,6 +641,28 @@ export async function startV1Stub(options: V1StubOptions = {}): Promise<V1Stub> 
       if (!res.ok) throw new Error(`v1-stub __dump failed: HTTP ${res.status}`);
       const body = (await res.json()) as { resources?: V1StubResources };
       return body.resources ?? {};
+    },
+    async verifyToken(email) {
+      const res = await fetch(`${baseUrl}/v1/__verify_token?email=${encodeURIComponent(email)}`);
+      if (!res.ok) throw new Error(`v1-stub __verify_token failed: HTTP ${res.status}`);
+      const body = (await res.json()) as { token?: string | null };
+      return body.token ?? null;
+    },
+    async markVerified(email) {
+      const res = await fetch(`${baseUrl}/v1/__verify_user`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email }),
+      });
+      if (!res.ok) throw new Error(`v1-stub __verify_user failed: HTTP ${res.status}`);
+    },
+    async seedUser(user) {
+      const res = await fetch(`${baseUrl}/v1/__seed_user`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(user),
+      });
+      if (!res.ok) throw new Error(`v1-stub __seed_user failed: HTTP ${res.status}`);
     },
     applyEnv() {
       process.env[MODE_ENV] = "self_hosted";
