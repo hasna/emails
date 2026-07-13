@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { closeDatabase, getDatabase, resetDatabase } from "../db/database.js";
 import { createProvider } from "../db/providers.js";
 import { getEmail } from "../db/emails.js";
@@ -6,7 +9,35 @@ import { createForwardingRule } from "../db/forwarding.js";
 import { storeInboundEmail } from "../db/inbound.js";
 import { processForwardingRules } from "./forwarding.js";
 
+const MODE_ENV_KEYS = [
+  "EMAILS_MODE",
+  "HASNA_EMAILS_MODE",
+  "EMAILS_SELF_HOSTED_URL",
+  "EMAILS_SELF_HOSTED_API_KEY",
+  "MAILERY_MODE",
+  "HASNA_MAILERY_MODE",
+  "MAILERY_STORAGE_MODE",
+  "HASNA_MAILERY_STORAGE_MODE",
+  "EMAILS_STORAGE_MODE",
+  "HASNA_EMAILS_STORAGE_MODE",
+  "MAILERY_API_URL",
+  "MAILERY_API_KEY",
+  "MAILERY_CLOUD_API_URL",
+  "MAILERY_CLOUD_TOKEN",
+  "HASNA_MAILERY_API_URL",
+  "HASNA_MAILERY_API_KEY",
+  "HASNA_MAILERY_ENV_FILE",
+  "HASNA_EMAILS_DB_PATH",
+] as const;
+
+let originalEnv: Partial<Record<typeof MODE_ENV_KEYS[number], string | undefined>> = {};
+
 beforeEach(() => {
+  originalEnv = {};
+  for (const key of MODE_ENV_KEYS) {
+    originalEnv[key] = process.env[key];
+    delete process.env[key];
+  }
   process.env["EMAILS_DB_PATH"] = ":memory:";
   resetDatabase();
 });
@@ -14,6 +45,12 @@ beforeEach(() => {
 afterEach(() => {
   closeDatabase();
   delete process.env["EMAILS_DB_PATH"];
+  for (const key of MODE_ENV_KEYS) {
+    const value = originalEnv[key];
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  originalEnv = {};
 });
 
 describe("processForwardingRules", () => {
@@ -66,5 +103,27 @@ describe("processForwardingRules", () => {
       provider_message_id: "provider-message-1",
       from_address: "user@example.com",
     });
+  });
+
+  it("fails closed in self_hosted mode before opening local forwarding state", async () => {
+    closeDatabase();
+    delete process.env["EMAILS_DB_PATH"];
+    delete process.env["HASNA_EMAILS_DB_PATH"];
+    const root = mkdtempSync(join(tmpdir(), "emails-forwarding-self-hosted-"));
+    const previousHome = process.env["HOME"];
+    const home = join(root, "home");
+    process.env["HOME"] = home;
+    process.env["EMAILS_MODE"] = "self_hosted";
+    process.env["EMAILS_SELF_HOSTED_URL"] = "https://emails.example.test";
+    process.env["EMAILS_SELF_HOSTED_API_KEY"] = "test-api-key";
+
+    try {
+      await expect(processForwardingRules()).rejects.toThrow("self_hosted API-only mode");
+      expect(existsSync(join(home, ".hasna", "emails", "emails.db"))).toBe(false);
+    } finally {
+      if (previousHome === undefined) delete process.env["HOME"];
+      else process.env["HOME"] = previousHome;
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

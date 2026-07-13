@@ -7,6 +7,7 @@ import {
   recordForwardingDelivery,
   type ForwardingRule,
 } from "../db/forwarding.js";
+import { getEmailsMode } from "./mode.js";
 import { createSentEmailLedger, storeSentEmailContent } from "./sent-ledger.js";
 import { sendWithFailover, type SendResult } from "./send.js";
 
@@ -37,6 +38,12 @@ export interface ForwardingRunResult {
 }
 
 export async function processForwardingRules(opts: ForwardingRunOptions = {}): Promise<ForwardingRunResult> {
+  if (getEmailsMode() === "self_hosted") {
+    throw new Error(
+      "`processForwardingRules` is disabled in self_hosted API-only mode because it reads local inbound bodies and writes a local sent ledger. " +
+        "Forwarding must run on an API-backed self-hosted route.",
+    );
+  }
   const db = opts.db ?? getDatabase();
   const pending = listPendingForwarding(opts.limit ?? 100, db, { backfill: opts.backfill });
   const result: ForwardingRunResult = { attempted: pending.length, sent: 0, failed: 0, skipped: 0, items: [] };

@@ -8,6 +8,7 @@ import { existsSync } from "fs";
 import { join } from "path";
 import type { Database } from "../db/database.js";
 import type { DoctorCheck } from "./diagnostics-format.js";
+import type { EmailsModeResolution } from "./mode.js";
 
 export { formatDiagnostics } from "./diagnostics-format.js";
 export type { DoctorCheck } from "./diagnostics-format.js";
@@ -16,8 +17,47 @@ export interface DiagnosticsOptions {
   liveProviderChecks?: boolean;
 }
 
+async function selfHostedDiagnostics(mode: EmailsModeResolution): Promise<DoctorCheck[]> {
+  const checks: DoctorCheck[] = [{
+    name: "Mode",
+    status: "pass",
+    message: `${mode.label} mode (${mode.mode})`,
+  }];
+
+  try {
+    const { resolveSelfHostedConfig } = await import("../db/self-hosted-store.js");
+    const config = resolveSelfHostedConfig();
+    checks.push({
+      name: "Self-hosted API",
+      status: config ? "pass" : "fail",
+      message: config
+        ? "Self-hosted client configuration is present. Local SQLite diagnostics are disabled in self_hosted API-only mode; probe the operator service with GET /health and GET /ready."
+        : "Self-hosted mode is selected, but the self-hosted API client configuration is incomplete. Set EMAILS_SELF_HOSTED_URL and EMAILS_SELF_HOSTED_API_KEY, then use the operator service /health and /ready probes.",
+    });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    checks.push({
+      name: "Self-hosted API",
+      status: "fail",
+      message: `Self-hosted API client configuration is not usable: ${detail}`,
+    });
+  }
+
+  checks.push({
+    name: "Local SQLite",
+    status: "warn",
+    message: "Skipped by design: self_hosted is API-only and must not open or create a local emails.db for diagnostics.",
+  });
+
+  return checks;
+}
+
 export async function runDiagnostics(db?: Database, opts: DiagnosticsOptions = {}): Promise<DoctorCheck[]> {
   const checks: DoctorCheck[] = [];
+  const mode = resolveEmailsMode();
+  if (mode.mode === "self_hosted") {
+    return selfHostedDiagnostics(mode);
+  }
   let d: Database;
 
   // 1. DB accessible
@@ -33,7 +73,6 @@ export async function runDiagnostics(db?: Database, opts: DiagnosticsOptions = {
   // 2. Config file
   const { getDataDir } = await import("../db/database.js");
   const configPath = join(getDataDir(), "config.json");
-  const mode = resolveEmailsMode();
   checks.push({
     name: "Mode",
     status: mode.warning ? "warn" : "pass",
@@ -47,26 +86,22 @@ export async function runDiagnostics(db?: Database, opts: DiagnosticsOptions = {
 
   // 3. Providers
   const providers = listProviders(d);
-  if (mode.mode === "self_hosted") {
-    checks.push({ name: "Providers", status: "pass", message: "Self-hosted provider configuration is owned by the deployment operator" });
-  } else {
-    checks.push(
-      providers.length > 0
-        ? {
-            name: "Providers",
-            status: "pass",
-            message: `${providers.length} provider(s) configured`,
-          }
-        : {
-            name: "Providers",
-            status: "warn",
-            message: "No providers configured",
-          },
-    );
-  }
+  checks.push(
+    providers.length > 0
+      ? {
+          name: "Providers",
+          status: "pass",
+          message: `${providers.length} provider(s) configured`,
+        }
+      : {
+          name: "Providers",
+          status: "warn",
+          message: "No providers configured",
+        },
+  );
 
   // 4. Provider health
-  if (mode.mode !== "self_hosted" && providers.length > 0) {
+  if (providers.length > 0) {
     const health = await checkAllProviders(d, { validateCredentials: opts.liveProviderChecks === true });
     for (const h of health) {
       checks.push({

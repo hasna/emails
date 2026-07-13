@@ -8,32 +8,49 @@ import { suppressContact, upsertContact } from "../db/contacts.js";
 import { runDiagnostics, formatDiagnostics } from "./doctor.js";
 import type { DoctorCheck } from "./doctor.js";
 import type { Database } from "../db/database.js";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { resetSelfHostedConfigCache } from "../db/self-hosted-store.js";
 
 let previousHome: string | undefined;
 let tempHome: string | undefined;
+
+const MODE_ENV_KEYS = [
+  "EMAILS_MODE",
+  "HASNA_EMAILS_MODE",
+  "EMAILS_STORAGE_MODE",
+  "HASNA_EMAILS_STORAGE_MODE",
+  "EMAILS_SELF_HOSTED_URL",
+  "EMAILS_SELF_HOSTED_API_KEY",
+  "MAILERY_MODE",
+  "HASNA_MAILERY_MODE",
+  "MAILERY_STORAGE_MODE",
+  "HASNA_MAILERY_STORAGE_MODE",
+  "MAILERY_API_URL",
+  "MAILERY_API_KEY",
+  "MAILERY_CLOUD_API_URL",
+  "MAILERY_CLOUD_TOKEN",
+  "HASNA_MAILERY_API_URL",
+  "HASNA_MAILERY_API_KEY",
+  "HASNA_MAILERY_ENV_FILE",
+] as const;
 
 beforeEach(() => {
   previousHome = process.env["HOME"];
   tempHome = mkdtempSync(join(tmpdir(), "emails-doctor-test-home-"));
   process.env["HOME"] = tempHome;
   process.env["EMAILS_DB_PATH"] = ":memory:";
-  delete process.env["EMAILS_MODE"];
-  delete process.env["HASNA_EMAILS_MODE"];
-  delete process.env["EMAILS_MODE"];
-  delete process.env["EMAILS_STORAGE_MODE"];
+  for (const key of MODE_ENV_KEYS) delete process.env[key];
+  resetSelfHostedConfigCache();
   resetDatabase();
 });
 
 afterEach(() => {
   closeDatabase();
   delete process.env["EMAILS_DB_PATH"];
-  delete process.env["EMAILS_MODE"];
-  delete process.env["HASNA_EMAILS_MODE"];
-  delete process.env["EMAILS_MODE"];
-  delete process.env["EMAILS_STORAGE_MODE"];
+  for (const key of MODE_ENV_KEYS) delete process.env[key];
+  resetSelfHostedConfigCache();
   if (previousHome === undefined) delete process.env["HOME"];
   else process.env["HOME"] = previousHome;
   if (tempHome) rmSync(tempHome, { recursive: true, force: true });
@@ -48,6 +65,23 @@ describe("runDiagnostics", () => {
     expect(dbCheck).toBeDefined();
     expect(dbCheck!.status).toBe("pass");
     expect(dbCheck!.message).toContain("accessible");
+  });
+
+  it("returns self-hosted operator guidance without creating a local database", async () => {
+    delete process.env["EMAILS_DB_PATH"];
+    process.env["EMAILS_MODE"] = "self_hosted";
+    process.env["EMAILS_SELF_HOSTED_URL"] = "http://127.0.0.1:3900";
+    process.env["EMAILS_SELF_HOSTED_API_KEY"] = "test-key";
+    resetSelfHostedConfigCache();
+
+    const checks = await runDiagnostics();
+    expect(checks.find((c) => c.name === "Mode")).toMatchObject({
+      status: "pass",
+      message: "Self-hosted mode (self_hosted)",
+    });
+    expect(checks.find((c) => c.name === "Self-hosted API")?.message).toContain("/health");
+    expect(checks.find((c) => c.name === "Local SQLite")?.message).toContain("must not open or create a local emails.db");
+    expect(existsSync(join(tempHome!, ".hasna", "emails", "emails.db"))).toBe(false);
   });
 
   it("returns a database failure instead of continuing with a broken handle", async () => {

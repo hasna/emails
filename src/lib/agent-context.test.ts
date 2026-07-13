@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDatabase, getDatabase, resetDatabase } from "../db/database.js";
@@ -13,11 +13,38 @@ import { resetSelfHostedConfigCache } from "../db/self-hosted-store.js";
 import { resetMailDataSource } from "./mail-data-source.js";
 import { getEmailSystemStatus, getEmailSystemStatusForRuntime, getNextEmailAction } from "./agent-context.js";
 
+const LEGACY_HOSTED_ENV_KEYS = [
+  "MAILERY_MODE",
+  "HASNA_MAILERY_MODE",
+  "MAILERY_STORAGE_MODE",
+  "HASNA_MAILERY_STORAGE_MODE",
+  "EMAILS_STORAGE_MODE",
+  "HASNA_EMAILS_STORAGE_MODE",
+  "MAILERY_API_URL",
+  "MAILERY_API_KEY",
+  "MAILERY_CLOUD_API_URL",
+  "MAILERY_CLOUD_TOKEN",
+  "HASNA_MAILERY_API_URL",
+  "HASNA_MAILERY_API_KEY",
+  "HASNA_MAILERY_ENV_FILE",
+] as const;
+
 let previousHome: string | undefined;
 let tempHome: string | undefined;
+let previousLegacyEnv: Partial<Record<typeof LEGACY_HOSTED_ENV_KEYS[number], string>>;
+
+function localDbPath(): string {
+  if (!tempHome) throw new Error("tempHome not initialized");
+  return join(tempHome, ".hasna", "emails", "emails.db");
+}
 
 beforeEach(() => {
   previousHome = process.env["HOME"];
+  previousLegacyEnv = {};
+  for (const key of LEGACY_HOSTED_ENV_KEYS) {
+    previousLegacyEnv[key] = process.env[key];
+    delete process.env[key];
+  }
   tempHome = mkdtempSync(join(tmpdir(), "emails-agent-context-test-home-"));
   process.env["HOME"] = tempHome;
   process.env["EMAILS_DB_PATH"] = ":memory:";
@@ -32,6 +59,11 @@ afterEach(() => {
   delete process.env["EMAILS_SELF_HOSTED_API_KEY"];
   resetMailDataSource();
   resetSelfHostedConfigCache();
+  for (const key of LEGACY_HOSTED_ENV_KEYS) {
+    const previous = previousLegacyEnv[key];
+    if (previous === undefined) delete process.env[key];
+    else process.env[key] = previous;
+  }
   if (previousHome === undefined) delete process.env["HOME"];
   else process.env["HOME"] = previousHome;
   if (tempHome) rmSync(tempHome, { recursive: true, force: true });
@@ -296,6 +328,7 @@ describe("agent context", () => {
 
   it("uses received-mail totals for self-hosted runtime status", async () => {
     const previousFetch = globalThis.fetch;
+    delete process.env["EMAILS_DB_PATH"];
     process.env["EMAILS_MODE"] = "self_hosted";
     process.env["EMAILS_SELF_HOSTED_URL"] = "https://emails.example";
     process.env["EMAILS_SELF_HOSTED_API_KEY"] = "not-a-real-key";
@@ -320,7 +353,10 @@ describe("agent context", () => {
     }) as typeof fetch;
 
     try {
+      expect(existsSync(localDbPath())).toBe(false);
       const status = await getEmailSystemStatusForRuntime();
+      expect(existsSync(localDbPath())).toBe(false);
+      expect(status.database.data_dir).toBeNull();
       expect(status.inbox.total).toBe(6);
       expect(status.inbox.unread).toBe(3);
       expect(status.inbox.latest_received_at).toBe("2026-07-08T19:50:52.000Z");

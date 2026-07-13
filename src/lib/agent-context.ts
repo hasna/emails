@@ -10,9 +10,8 @@ import { assessDomainReadiness } from "./domain-readiness.js";
 import { domainInboundReadinessSignals } from "./domain-inbound-evidence.js";
 import { getInboundBuckets, loadConfig } from "./config.js";
 import { enrichAddresses, type EnrichedAddress } from "./address-ownership.js";
-import { resolveMailDataSource } from "./mail-data-source.js";
+import { resolveMailDataSource, type MailDataSource } from "./mail-data-source.js";
 import { resolveEmailsMode, type EmailsMode, type EmailsModeLabel, type EmailsModeSource } from "./mode.js";
-import { withSelfHostedResourceRoutingDisabled } from "../db/self-hosted-store.js";
 import {
   listMailboxSources,
   listMailboxStatus,
@@ -33,7 +32,7 @@ export interface EmailSystemStatus {
     warning: string | null;
   };
   database: {
-    data_dir: string;
+    data_dir: string | null;
   };
   providers: {
     total: number;
@@ -358,20 +357,7 @@ export function getEmailSystemStatus(db: Database = getDatabase()): EmailSystemS
   };
 }
 
-// The runtime status backs `emails status`, `emails agent context`, and the MCP
-// status resources/tools. In self_hosted mode the inbox/mailbox/source reads must come from
-// the API (not the empty local DB), so route those specific reads through the seam.
-// Provider/domain/address/provisioning state stays local — that is local config, not
-// message data. In local mode the seam resolves to SQLite, so the result is unchanged.
-export async function getEmailSystemStatusForRuntime(
-  db: Database = getDatabase(),
-): Promise<EmailSystemStatus> {
-  const ds = resolveMailDataSource();
-  const status = ds.mode === "self_hosted"
-    ? withSelfHostedResourceRoutingDisabled(() => getEmailSystemStatus(db))
-    : getEmailSystemStatus(db);
-  if (ds.mode !== "self_hosted") return status;
-
+async function getSelfHostedRuntimeStatus(mode: ReturnType<typeof resolveEmailsMode>, ds: MailDataSource): Promise<EmailSystemStatus> {
   const [counts, mailboxes, sources] = await Promise.all([
     ds.mailboxCounts(),
     ds.listMailboxStatus(),
@@ -380,9 +366,40 @@ export async function getEmailSystemStatusForRuntime(
   const primarySource = sources[0];
   const receivedTotal = counts.inbox + counts.archived + counts.spam + counts.trash;
   return {
-    ...status,
+    generated_at: new Date().toISOString(),
+    mode: {
+      current: mode.mode,
+      label: mode.label,
+      source: mode.source,
+      warning: mode.warning,
+    },
+    database: {
+      data_dir: null,
+    },
+    providers: {
+      total: 0,
+      active: 0,
+      by_type: {},
+    },
+    domains: {
+      total: 0,
+      send_ready: 0,
+      receive_ready: 0,
+      usable: [],
+      usable_limit: DOMAIN_READINESS_LIMIT,
+      usable_truncated: false,
+    },
+    addresses: {
+      total: 0,
+      active: 0,
+      verified: 0,
+      owned: 0,
+      ready_to_receive: 0,
+      usable_from: [],
+      usable_from_limit: USABLE_FROM_LIMIT,
+      usable_from_truncated: false,
+    },
     inbox: {
-      ...status.inbox,
       total: receivedTotal,
       unread: counts.unread,
       latest_received_at: primarySource?.latestReceivedAt ?? null,
@@ -404,7 +421,33 @@ export async function getEmailSystemStatusForRuntime(
       limit: SOURCE_STATUS_LIMIT,
       truncated: sources.length > SOURCE_STATUS_LIMIT,
     },
+    provisioning: {
+      domains_pending: 0,
+      domains_failed: 0,
+      addresses_pending: 0,
+      addresses_failed: 0,
+    },
+    next_actions: [],
+    cli_equivalents: {
+      status: "emails status --json",
+      inbox_sync_status: "emails inbox sync-status --json",
+      provision_address: "emails address provision <email> --provider <provider>",
+      wait_code: "emails inbox wait-code <address> --timeout 120",
+      address_owner: "emails address owner <email-or-id>",
+    },
   };
+}
+
+// The runtime status backs `emails status`, `emails agent context`, and the MCP
+// status resources/tools. In self_hosted mode it must resolve the API source of
+// truth before any local database access and must not open the local SQLite DB.
+export async function getEmailSystemStatusForRuntime(
+  db?: Database,
+): Promise<EmailSystemStatus> {
+  const mode = resolveEmailsMode();
+  if (mode.mode !== "self_hosted") return getEmailSystemStatus(db ?? getDatabase());
+  const ds = resolveMailDataSource({ mode: mode.mode });
+  return getSelfHostedRuntimeStatus(mode, ds);
 }
 
 export function formatEmailSystemStatus(status: EmailSystemStatus): string {
@@ -501,13 +544,22 @@ export function getAgentContext(db: Database = getDatabase()): Record<string, un
 }
 
 export async function getAgentContextForRuntime(
-  db: Database = getDatabase(),
+  db?: Database,
 ): Promise<Record<string, unknown>> {
   return buildAgentContext(await getEmailSystemStatusForRuntime(db));
 }
 
 export function getNextEmailAction(goal?: string, db: Database = getDatabase()): Record<string, unknown> {
   const status = getEmailSystemStatus(db);
+  return nextEmailActionFromStatus(status, goal);
+}
+
+export async function getNextEmailActionForRuntime(goal?: string, db?: Database): Promise<Record<string, unknown>> {
+  const status = await getEmailSystemStatusForRuntime(db);
+  return nextEmailActionFromStatus(status, goal);
+}
+
+function nextEmailActionFromStatus(status: EmailSystemStatus, goal?: string): Record<string, unknown> {
   const normalized = goal?.toLowerCase() ?? "";
   if (normalized.includes("code") || normalized.includes("verification")) {
     return {
