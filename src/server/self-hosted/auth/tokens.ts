@@ -17,6 +17,8 @@ export const SESSION_TOKEN_PREFIX = "emss_";
 export const RESET_TOKEN_PREFIX = "emrt_";
 /** Invitation token prefix. */
 export const INVITE_TOKEN_PREFIX = "emiv_";
+/** Email-verification token prefix (design Addendum A2). */
+export const EMAIL_VERIFY_TOKEN_PREFIX = "emev_";
 
 /** Bytes of entropy per token. 32 bytes = 256 bits. */
 export const TOKEN_ENTROPY_BYTES = 32;
@@ -51,6 +53,11 @@ export function mintResetToken(): MintedToken {
 /** Mint an opaque invitation token (`emiv_…`) + its at-rest hash. */
 export function mintInviteToken(): MintedToken {
   return mint(INVITE_TOKEN_PREFIX);
+}
+
+/** Mint an opaque email-verification token (`emev_…`) + its at-rest hash. */
+export function mintEmailVerifyToken(): MintedToken {
+  return mint(EMAIL_VERIFY_TOKEN_PREFIX);
 }
 
 /**

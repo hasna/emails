@@ -9,6 +9,9 @@ import { emailsSelfHostedMigrations } from "./migrations.js";
 import { EmailsSelfHostedStore } from "./store.js";
 import { handleSelfHostedRequest, type SelfHostedServiceDeps } from "./service.js";
 import { buildSelfHostedSender } from "./sender.js";
+import { AuthStore } from "./auth/store.js";
+import { RateLimiter } from "./auth/rate-limit.js";
+import { buildAuthMailerConfig } from "./auth/mailer.js";
 
 /** Assemble the service dependencies from the environment. */
 export function buildSelfHostedService(version: string): SelfHostedServiceDeps {
@@ -34,6 +37,14 @@ export function buildSelfHostedService(version: string): SelfHostedServiceDeps {
     sender: buildSelfHostedSender(),
     migrations: emailsSelfHostedMigrations(),
     version,
+    // ---- multi-tenancy + auth (WI-2) ----
+    // AuthStore needs the pool client (transactions for signup/invite/reset).
+    authStore: new AuthStore(client),
+    keyStore: keys,
+    signingSecret,
+    rateLimiter: new RateLimiter(),
+    mailer: buildAuthMailerConfig(),
+    env: process.env,
   };
 }
 

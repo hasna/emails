@@ -24,6 +24,22 @@ export interface ResourceColumn {
   num?: boolean;
 }
 
+/**
+ * A body-supplied foreign-key column that references another tenant-scoped table.
+ * The tenant-scoped store rejects a create whose FK id resolves to a row in a
+ * DIFFERENT tenant (design adversarial fix M4). Only real cross-tenant references
+ * are blocked; a dangling/denormalized id (e.g. a free-text `provider_id` slug
+ * that is not a real row) is allowed, so loose usage is preserved.
+ */
+export interface ResourceForeignKey {
+  /** Column on THIS resource holding the referenced id. */
+  column: string;
+  /** Referenced Postgres table (must carry `tenant_id`). */
+  table: string;
+  /** Referenced key column (defaults to "id"). */
+  idColumn?: string;
+}
+
 export interface SelfHostedResourceSpec {
   /** URL path segment under /v1 (e.g. "send-keys"). */
   path: string;
@@ -43,6 +59,18 @@ export interface SelfHostedResourceSpec {
    * NOTHING) instead of minting an id.
    */
   idColumn?: string;
+  /**
+   * Tenant-scoping metadata (design §6 Layer 1 / WI-1b). EVERY resource is
+   * tenant-scoped by the store uniformly (each query filters/stamps `tenant_id`);
+   * these two fields carry the per-resource specifics that a blanket rule cannot.
+   *
+   * `compositeKey`: the natural key is unique PER TENANT, so the create upsert
+   * conflicts on `(tenant_id, idColumn)` rather than the id alone. Set for
+   * `email-agents` (PK became `(tenant_id, agent_key)` in migration 0012).
+   */
+  compositeKey?: boolean;
+  /** FK columns validated against the caller's tenant before insert (M4). */
+  foreignKeys?: ResourceForeignKey[];
 }
 
 export const SELF_HOSTED_RESOURCES: SelfHostedResourceSpec[] = [
@@ -114,6 +142,7 @@ export const SELF_HOSTED_RESOURCES: SelfHostedResourceSpec[] = [
     table: "send_keys",
     orderBy: "created_at DESC",
     filters: ["owner_id"],
+    foreignKeys: [{ column: "owner_id", table: "owners" }],
     columns: [
       { name: "owner_id" },
       { name: "prefix" },
@@ -127,6 +156,7 @@ export const SELF_HOSTED_RESOURCES: SelfHostedResourceSpec[] = [
     table: "scheduled_emails",
     orderBy: "scheduled_at ASC",
     filters: ["status"],
+    foreignKeys: [{ column: "provider_id", table: "self_hosted_providers" }],
     columns: [
       { name: "provider_id" },
       { name: "from_address" },
@@ -167,6 +197,7 @@ export const SELF_HOSTED_RESOURCES: SelfHostedResourceSpec[] = [
     table: "forwarding_rules",
     orderBy: "source_address ASC, target_address ASC",
     filters: ["source_address", "target_address", "mode"],
+    foreignKeys: [{ column: "provider_id", table: "self_hosted_providers" }],
     columns: [
       { name: "source_address" },
       { name: "target_address" },
@@ -182,6 +213,7 @@ export const SELF_HOSTED_RESOURCES: SelfHostedResourceSpec[] = [
     table: "warming_schedules",
     orderBy: "created_at DESC",
     filters: ["status", "domain"],
+    foreignKeys: [{ column: "provider_id", table: "self_hosted_providers" }],
     columns: [
       { name: "domain" },
       { name: "provider_id" },
@@ -231,6 +263,7 @@ export const SELF_HOSTED_RESOURCES: SelfHostedResourceSpec[] = [
     table: "mailbox_sources",
     orderBy: "status ASC, type ASC, created_at ASC",
     filters: ["mailbox_id", "provider_id", "type", "status"],
+    foreignKeys: [{ column: "provider_id", table: "self_hosted_providers" }],
     columns: [
       { name: "mailbox_id" },
       { name: "provider_id" },
@@ -250,6 +283,7 @@ export const SELF_HOSTED_RESOURCES: SelfHostedResourceSpec[] = [
     table: "events",
     orderBy: "occurred_at DESC",
     filters: ["email_id", "provider_id", "type", "recipient"],
+    foreignKeys: [{ column: "provider_id", table: "self_hosted_providers" }],
     columns: [
       { name: "email_id" },
       { name: "provider_id" },
@@ -266,6 +300,9 @@ export const SELF_HOSTED_RESOURCES: SelfHostedResourceSpec[] = [
     path: "email-agents",
     table: "email_agent_settings",
     idColumn: "agent_key",
+    // Natural key is unique PER TENANT (PK is (tenant_id, agent_key) after 0012),
+    // so the create upsert conflicts on the composite, not agent_key alone.
+    compositeKey: true,
     orderBy: "agent_key ASC",
     columns: [
       { name: "agent_key" },
@@ -341,6 +378,7 @@ export const SELF_HOSTED_RESOURCES: SelfHostedResourceSpec[] = [
     table: "group_members",
     orderBy: "added_at ASC, email ASC",
     filters: ["group_id", "email"],
+    foreignKeys: [{ column: "group_id", table: "contact_groups" }],
     columns: [
       { name: "group_id" },
       { name: "email" },
@@ -359,6 +397,7 @@ export const SELF_HOSTED_RESOURCES: SelfHostedResourceSpec[] = [
     table: "sequence_steps",
     orderBy: "step_number ASC",
     filters: ["sequence_id"],
+    foreignKeys: [{ column: "sequence_id", table: "sequences" }],
     columns: [
       { name: "sequence_id" },
       { name: "step_number", int: true },
@@ -375,6 +414,10 @@ export const SELF_HOSTED_RESOURCES: SelfHostedResourceSpec[] = [
     table: "sequence_enrollments",
     orderBy: "enrolled_at DESC",
     filters: ["sequence_id", "status"],
+    foreignKeys: [
+      { column: "sequence_id", table: "sequences" },
+      { column: "provider_id", table: "self_hosted_providers" },
+    ],
     columns: [
       { name: "sequence_id" },
       { name: "contact_email" },
@@ -396,6 +439,13 @@ export const SELF_HOSTED_RESOURCES: SelfHostedResourceSpec[] = [
     idColumn: "id",
     orderBy: "created_at DESC",
     filters: ["address_id", "action"],
+    foreignKeys: [
+      { column: "address_id", table: "addresses" },
+      { column: "owner_id", table: "owners" },
+      { column: "administrator_id", table: "owners" },
+      { column: "previous_owner_id", table: "owners" },
+      { column: "previous_administrator_id", table: "owners" },
+    ],
     columns: [
       { name: "id" },
       { name: "address_id" },
@@ -434,6 +484,7 @@ export const SELF_HOSTED_RESOURCES: SelfHostedResourceSpec[] = [
     table: "sandbox_emails",
     orderBy: "created_at DESC",
     filters: ["provider_id"],
+    foreignKeys: [{ column: "provider_id", table: "self_hosted_providers" }],
     columns: [
       { name: "provider_id" },
       { name: "from_address" },

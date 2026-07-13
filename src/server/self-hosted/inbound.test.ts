@@ -3,6 +3,7 @@ import { mintApiKey, verifyApiKey } from "@hasna/contracts/auth";
 import type { TypedQueryClient } from "../../storage-kit/index.js";
 import { EmailsSelfHostedStore } from "./store.js";
 import { handleSelfHostedRequest, type SelfHostedServiceDeps } from "./service.js";
+import { testAuthDeps, selfScopedStore } from "./auth/test-support.js";
 import { emailsSelfHostedMigrations } from "./migrations.js";
 
 const SIGNING_SECRET = "test-signing-secret-do-not-use-in-prod";
@@ -96,7 +97,7 @@ function messagesClient(): { client: TypedQueryClient; rows: Record<string, unkn
     async one<T>(sql: string, params?: readonly unknown[]): Promise<T> {
       if (sql.includes("INSERT INTO messages")) {
         const incoming = rowFromParams(params ?? []);
-        const isUpsert = sql.includes("ON CONFLICT (source_id)");
+        const isUpsert = sql.includes("ON CONFLICT") && sql.includes("source_id");
         if (isUpsert && incoming["source_id"] != null) {
           const existing = rows.find((r) => r["source_id"] === incoming["source_id"]);
           if (existing) {
@@ -119,11 +120,12 @@ function deps(): SelfHostedServiceDeps {
   const { client } = messagesClient();
   return {
     client,
-    store: new EmailsSelfHostedStore(client),
+    store: selfScopedStore(client),
     verifier: verifyApiKey({ app: "emails", signingSecret: SIGNING_SECRET }),
     sender: { provider: "ses", send: async () => "provider-message-id" },
     migrations: emailsSelfHostedMigrations(),
     version: "9.9.9",
+    ...testAuthDeps(client, SIGNING_SECRET),
   };
 }
 

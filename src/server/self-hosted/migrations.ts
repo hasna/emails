@@ -1431,6 +1431,22 @@ const TENANCY_IDENTITY_AND_BACKFILL = defineMigration(
   );
   CREATE INDEX IF NOT EXISTS password_reset_tokens_user_idx ON password_reset_tokens (user_id);
 
+  -- Email confirmation tokens (design Addendum A2). Signup creates the user
+  -- UNVERIFIED; login is refused until a token from this table is consumed. Like
+  -- every other auth table it holds only the sha256 token_hash (never the token),
+  -- is single-use (used_at) and short-TTL (expires_at), and is deliberately absent
+  -- from SELF_HOSTED_RESOURCES so no generic SELECT * path can reach it.
+  CREATE TABLE IF NOT EXISTS email_verification_tokens (
+    id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id    uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    email      citext NOT NULL,
+    token_hash text NOT NULL UNIQUE,
+    expires_at timestamptz NOT NULL,
+    used_at    timestamptz,
+    created_at timestamptz NOT NULL DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS email_verification_tokens_user_idx ON email_verification_tokens (user_id);
+
   -- Non-RLS resolution tables: read before a tenant GUC exists (design §6 H2/C1).
   -- inbound_domain_routes = the global single-tenant receive map (one physical
   -- domain -> exactly one tenant), used for envelope-recipient inbound routing.

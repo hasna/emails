@@ -3,6 +3,7 @@ import { mintApiKey, verifyApiKey } from "@hasna/contracts/auth";
 import type { TypedQueryClient } from "../../storage-kit/index.js";
 import { EmailsSelfHostedStore } from "./store.js";
 import { handleSelfHostedRequest, type SelfHostedServiceDeps } from "./service.js";
+import { testAuthDeps, selfScopedStore } from "./auth/test-support.js";
 import { emailsSelfHostedMigrations } from "./migrations.js";
 
 const SIGNING_SECRET = "test-signing-secret-do-not-use-in-prod";
@@ -20,7 +21,7 @@ function fakeClient(): { client: TypedQueryClient; calls: string[] } {
     async many<T>(sql: string, params?: readonly unknown[]): Promise<T[]> {
       calls.push(sql.trim().split("\n")[0]!.trim());
       if (sql.includes("SELECT 1")) return [{ ok: 1 } as unknown as T];
-      if (sql.startsWith("SELECT * FROM domains ORDER BY")) return domains as unknown as T[];
+      if (/SELECT \* FROM domains\b/i.test(sql)) return domains as unknown as T[];
       return [] as T[];
     },
     async get<T>(sql: string): Promise<T | null> {
@@ -54,11 +55,12 @@ function deps(): SelfHostedServiceDeps {
   const { client } = fakeClient();
   return {
     client,
-    store: new EmailsSelfHostedStore(client),
+    store: selfScopedStore(client),
     verifier: verifyApiKey({ app: "emails", signingSecret: SIGNING_SECRET }),
     sender: { provider: "ses", send: async () => "provider-message-id" },
     migrations: emailsSelfHostedMigrations(),
     version: "9.9.9",
+    ...testAuthDeps(client, SIGNING_SECRET),
   };
 }
 

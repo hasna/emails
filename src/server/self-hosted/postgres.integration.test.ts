@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { afterAll, describe, expect, it } from "bun:test";
 import { createPgPool, createQueryClient, MigrationLedger } from "../../storage-kit/index.js";
 import { DEFAULT_TENANT_ID, emailsSelfHostedMigrations } from "./migrations.js";
-import { EmailsSelfHostedStore } from "./store.js";
+import { EmailsSelfHostedStore, type TenantScopedStore } from "./store.js";
 import { resourceSpecForPath, SELF_HOSTED_RESOURCES } from "./resources.js";
 
 const databaseUrl = process.env["EMAILS_TEST_POSTGRES_URL"];
@@ -58,7 +58,7 @@ async function columnType(table: string, column: string): Promise<string | null>
  * (omitted since/until/subject/type/target_daily_volume), and jsonb->text.
  * Returns [] on success or a list of "resource: error" strings.
  */
-async function serverWriteFailures(store: EmailsSelfHostedStore): Promise<string[]> {
+async function serverWriteFailures(store: TenantScopedStore): Promise<string[]> {
   const R = (p: string) => resourceSpecForPath(p)!;
   const uid = () => crypto.randomUUID();
   const fails: string[] = [];
@@ -184,7 +184,7 @@ describe("self-hosted Postgres integration", () => {
       { id: "legacy-sent:sent-dirty", direction: "outbound", subject: "legacy sent" },
     ]);
 
-    const store = new EmailsSelfHostedStore(client!);
+    const store = new EmailsSelfHostedStore(client!).forTenant(DEFAULT_TENANT_ID);
     const key = `ci-${crypto.randomUUID()}`;
     const input = {
       from_addr: "sender@example.com",
@@ -262,7 +262,7 @@ describe("self-hosted Postgres integration", () => {
   it.skipIf(!client)("round-2 parity: new generic resources round-trip through real jsonb", async () => {
     await resetPublicSchema();
     await new MigrationLedger(client!, emailsSelfHostedMigrations()).migrate();
-    const store = new EmailsSelfHostedStore(client!);
+    const store = new EmailsSelfHostedStore(client!).forTenant(DEFAULT_TENANT_ID);
 
     // group-members: the client pre-serializes `vars`; confirm it round-trips
     // through a real jsonb column + node-pg (the crux of the double-encode path).
@@ -324,7 +324,7 @@ describe("self-hosted Postgres integration", () => {
   it.skipIf(!client)("round-2 parity: send-key mint/verify/revoke + address ownership authorization", async () => {
     await resetPublicSchema();
     await new MigrationLedger(client!, emailsSelfHostedMigrations()).migrate();
-    const store = new EmailsSelfHostedStore(client!);
+    const store = new EmailsSelfHostedStore(client!).forTenant(DEFAULT_TENANT_ID);
 
     // Ownership: assign an owner + agent administrator, then authorize sends.
     const address = await store.createAddress({ email: "mine@x.com" });
@@ -596,7 +596,7 @@ describe("self-hosted Postgres integration", () => {
 
     // CRITICAL: every representative server write now succeeds (checks/FKs/NOT
     // NULL/defaults/missing-cols/json all reconciled). Empty array == all passed.
-    const store = new EmailsSelfHostedStore(client!);
+    const store = new EmailsSelfHostedStore(client!).forTenant(DEFAULT_TENANT_ID);
     expect(await serverWriteFailures(store)).toEqual([]);
 
     // Idempotency: a second full run over the reconciled schema is a clean no-op.
@@ -630,7 +630,7 @@ describe("self-hosted Postgres integration", () => {
     // CRITICAL: the self-hosted server can write every resource against the real
     // reconciled schema (provider='external', in-progress agent runs, digests,
     // send keys, group members, ... — the writes that faulted deploys 2 and 3).
-    const store = new EmailsSelfHostedStore(client!);
+    const store = new EmailsSelfHostedStore(client!).forTenant(DEFAULT_TENANT_ID);
     expect(await serverWriteFailures(store)).toEqual([]);
 
     // Idempotent on a second run over the real schema.
@@ -658,7 +658,7 @@ describe("self-hosted Postgres integration", () => {
   ] as const;
   const IDENTITY_TABLES = [
     "tenants", "users", "memberships", "sessions", "api_key_tenants", "invitations",
-    "password_reset_tokens", "inbound_domain_routes", "send_key_tenants",
+    "password_reset_tokens", "email_verification_tokens", "inbound_domain_routes", "send_key_tenants",
   ] as const;
 
   async function indexExists(name: string): Promise<boolean> {

@@ -12,6 +12,7 @@ import { mintApiKey, verifyApiKey } from "@hasna/contracts/auth";
 import type { TypedQueryClient } from "../../storage-kit/index.js";
 import { EmailsSelfHostedStore } from "./store.js";
 import { handleSelfHostedRequest, type SelfHostedServiceDeps } from "./service.js";
+import { testAuthDeps, selfScopedStore } from "./auth/test-support.js";
 import { emailsSelfHostedMigrations } from "./migrations.js";
 
 const SIGNING_SECRET = "test-signing-secret-do-not-use-in-prod";
@@ -63,9 +64,12 @@ function tableClient(): TypedQueryClient {
       const t = tableOf(sql);
       const rows = tables.get(t) ?? [];
       if (/^\s*INSERT/i.test(sql)) {
-        const conflictKey = sql.match(/ON CONFLICT \(([a-z_]+)\)/i)?.[1];
+        // Conflict target may be composite (e.g. `(tenant_id, agent_key)`); a row
+        // conflicts only when EVERY target column matches.
+        const conflictCols = (sql.match(/ON CONFLICT \(([a-z_,\s]+)\)/i)?.[1] ?? "")
+          .split(",").map((c) => c.trim()).filter(Boolean);
         const row = buildInsertRow(sql, params ?? []);
-        if (conflictKey && rows.some((r) => r[conflictKey] === row[conflictKey])) return null; // DO NOTHING
+        if (conflictCols.length && rows.some((r) => conflictCols.every((c) => r[c] === row[c]))) return null; // DO NOTHING
         rows.push(row);
         tables.set(t, rows);
         return row as unknown as T;
@@ -102,11 +106,12 @@ function deps(): SelfHostedServiceDeps {
   const client = tableClient();
   return {
     client,
-    store: new EmailsSelfHostedStore(client),
+    store: selfScopedStore(client),
     verifier: verifyApiKey({ app: "emails", signingSecret: SIGNING_SECRET }),
     sender: { provider: "ses", send: async () => "provider-message-id" },
     migrations: emailsSelfHostedMigrations(),
     version: "9.9.9",
+    ...testAuthDeps(client, SIGNING_SECRET),
   };
 }
 

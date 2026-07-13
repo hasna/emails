@@ -369,24 +369,232 @@ function mapMessageListRow(row: Record<string, unknown>): MessageListRecord {
   return { ...safe, snippet: snippet || null };
 }
 
+// ---- shared, tenant-agnostic query helpers (module scope) -------------------
+// Extracted from the store classes so the unscoped base and the TenantScopedStore
+// share ONE implementation of encoding/SQL-shaping (no duplication drift).
+
+/** 23-column message insert list (tenant_id is appended by the scoped variant). */
+const MESSAGE_INSERT_COLS =
+  "id, direction, from_addr, to_addrs, cc_addrs, subject, body_text, body_html, status, " +
+  "provider_message_id, message_id, in_reply_to, received_at, is_read, is_starred, labels, " +
+  "headers, attachments, source_id, idempotency_key, send_payload_hash, send_state, send_started_at";
+
+const MESSAGE_INSERT_VALUES =
+  "$1, $2, $3, $4::jsonb, $5::jsonb, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, " +
+  "$16::jsonb, $17::jsonb, $18::jsonb, $19, $20, $21, $22, $23";
+
+/** Positional insert params (23) shared by createMessage/upsertMessage/reserveSendIntent. */
+function messageInsertParams(input: MessageInput): unknown[] {
+  return [
+    randomUUID(),
+    (input.direction ?? "outbound").trim() || "outbound",
+    input.from_addr.trim(),
+    JSON.stringify(input.to_addrs ?? []),
+    JSON.stringify(input.cc_addrs ?? []),
+    input.subject ?? null,
+    input.body_text ?? null,
+    input.body_html ?? null,
+    input.status ?? "queued",
+    input.provider_message_id ?? null,
+    input.message_id ?? null,
+    input.in_reply_to ?? null,
+    input.received_at ?? null,
+    input.is_read ?? false,
+    input.is_starred ?? false,
+    JSON.stringify(input.labels ?? []),
+    JSON.stringify(input.headers ?? {}),
+    JSON.stringify(input.attachments ?? []),
+    input.source_id ?? null,
+    input.idempotency_key ?? null,
+    input.send_payload_hash ?? null,
+    input.send_state ?? "none",
+    input.send_started_at ?? null,
+  ];
+}
+
+function hashSendToken(token: string): string {
+  return createHash("sha256").update(token, "utf8").digest("hex");
+}
+
+/** Extract the bare, lowercased address from a From value (drops display name). */
+function canonicalAddress(from: string): string {
+  const value = from.trim();
+  const angled = value.match(/<([^>]+)>/);
+  const bare = (angled ? angled[1]! : value).trim().toLowerCase();
+  return bare.includes("@") ? bare : "";
+}
+
+/** Coerce/encode a request value for a generic-resource column per its kind. */
+function encodeColumn(col: ResourceColumn, value: unknown): unknown {
+  if (value === undefined) return null;
+  if (col.json) return JSON.stringify(value ?? null);
+  if (col.bool) return Boolean(value);
+  if (col.int) {
+    const n = typeof value === "number" ? value : Number(value);
+    return Number.isFinite(n) ? Math.trunc(n) : 0;
+  }
+  if (col.num) {
+    const n = typeof value === "number" ? value : Number(value);
+    return Number.isFinite(n) ? n : 0;
+  }
+  return value ?? null;
+}
+
+/** Primary-key column for a spec (a server-minted `id` unless overridden). */
+function keyColumn(spec: SelfHostedResourceSpec): string {
+  return spec.idColumn ?? "id";
+}
+
+/**
+ * Raised when a request body references, by id, a row that belongs to a DIFFERENT
+ * tenant (design adversarial fix M4). Stamping `tenant_id` on the new row does
+ * NOT stop a cross-tenant FK reference, so the scoped store rejects it before the
+ * insert. The service maps this to a 404 (the id "does not exist" for this
+ * tenant — no cross-tenant existence is revealed).
+ */
+export class CrossTenantReferenceError extends Error {
+  constructor(public readonly column: string) {
+    super(`referenced ${column} does not belong to this tenant`);
+    this.name = "CrossTenantReferenceError";
+  }
+}
+
+/**
+ * Unscoped root store. Holds ONLY `forTenant()` plus the transitional
+ * background-worker methods (design §6 Layer 1). It deliberately exposes NO
+ * tenant-scoped data CRUD: a request handler is only ever handed a
+ * {@link TenantScopedStore}, so forgetting the tenant is a COMPILE error rather
+ * than a silent cross-tenant leak.
+ */
 export class EmailsSelfHostedStore {
   constructor(private readonly client: TypedQueryClient) {}
+
+  /**
+   * Enter a tenant scope. Every data-CRUD method lives on the returned type and
+   * injects `tenant_id` into every read/write (Layer 1, the primary isolation
+   * guarantee — design §6). This is the ONLY way a handler reaches tenant data.
+   */
+  forTenant(tenantId: string): TenantScopedStore {
+    if (!tenantId) throw new Error("forTenant requires a tenant id");
+    return new TenantScopedStore(this.client, tenantId);
+  }
+
+  // ---- transitional background-worker methods (design §6 x-cut #1 / §10) ----
+  //
+  // The SES-inbound ingest worker arrives with an event that carries NO
+  // credential and therefore no tenant yet (that is finding C1, resolved in
+  // P4/WI-4a by envelope-recipient routing through `inbound_domain_routes`).
+  // Until then these two UNTENANTED writes rely on the transitional `tenant_id`
+  // DEFAULT that migration 0012 adds (every row lands in the default tenant, no
+  // crash, no data loss). They are the ONLY data methods on the unscoped base;
+  // ALL credentialed /v1 traffic goes through forTenant(). Their ON CONFLICT
+  // targets are the legacy single-column uniques (0012 retains them), so this is
+  // wire-compatible with the pre-tenancy store during the deploy window.
+
+  /** Worker dedup: match an existing message by stable upstream key (untenanted). */
+  async findMessageIdByKey(key: string): Promise<string | null> {
+    if (!key) return null;
+    const row = await this.client.get<{ id: string }>(
+      `SELECT id FROM messages WHERE source_id = $1 OR message_id = $1 LIMIT 1`,
+      [key],
+    );
+    return row ? row.id : null;
+  }
+
+  /** Worker idempotent inbound write keyed on source_id (untenanted; DEFAULT tenant). */
+  async upsertMessage(input: MessageInput): Promise<{ record: MessageRecord; inserted: boolean }> {
+    if (!input.source_id) throw new Error("upsertMessage requires a source_id");
+    const row = await this.client.one<Record<string, unknown>>(
+      `INSERT INTO messages (${MESSAGE_INSERT_COLS})
+       VALUES (${MESSAGE_INSERT_VALUES})
+       ON CONFLICT (source_id) WHERE source_id IS NOT NULL DO UPDATE SET
+         ${MESSAGE_UPSERT_ASSIGNMENTS}
+       RETURNING ${MESSAGE_COLUMNS}, (xmax = 0) AS inserted`,
+      messageInsertParams(input),
+    );
+    return { record: mapMessageRow(row), inserted: Boolean(row["inserted"]) };
+  }
+}
+
+/** The EXCLUDED assignment list shared by both upsertMessage variants. */
+const MESSAGE_UPSERT_ASSIGNMENTS =
+  `direction           = EXCLUDED.direction,
+   from_addr           = EXCLUDED.from_addr,
+   to_addrs            = EXCLUDED.to_addrs,
+   cc_addrs            = EXCLUDED.cc_addrs,
+   subject             = EXCLUDED.subject,
+   body_text           = EXCLUDED.body_text,
+   body_html           = EXCLUDED.body_html,
+   status              = EXCLUDED.status,
+   provider_message_id = EXCLUDED.provider_message_id,
+   message_id          = EXCLUDED.message_id,
+   in_reply_to         = EXCLUDED.in_reply_to,
+   received_at         = EXCLUDED.received_at,
+   is_read             = EXCLUDED.is_read,
+   is_starred          = EXCLUDED.is_starred,
+   labels              = EXCLUDED.labels,
+   headers             = EXCLUDED.headers,
+   attachments         = EXCLUDED.attachments,
+   updated_at          = now()`;
+
+/**
+ * A store already bound to a single `tenantId`. EVERY method injects the tenant:
+ * reads gain `AND tenant_id = $tenant`, writes stamp it, and cross-tenant id
+ * references (M4) are rejected. This is design §6 Layer 1 — the isolation that
+ * holds unconditionally (no RLS dependency). Obtain one via `store.forTenant()`.
+ */
+export class TenantScopedStore {
+  constructor(
+    private readonly client: TypedQueryClient,
+    private readonly tenantId: string,
+  ) {}
+
+  /**
+   * Reject a body-supplied FK id that resolves to a row in ANOTHER tenant
+   * (design M4). Semantics: if the referenced row does not exist ANYWHERE we
+   * ALLOW it (the schema deliberately permits dangling/denormalized refs such as
+   * a free-text `provider_id="ses"` slug); we reject ONLY when the id names a real
+   * row owned by a different tenant — precisely the cross-tenant hole, without
+   * breaking loose references.
+   */
+  private async assertNotOtherTenant(
+    table: string,
+    id: unknown,
+    column: string,
+    idColumn = "id",
+  ): Promise<void> {
+    if (id === undefined || id === null || id === "") return;
+    const row = await this.client.get<{ tenant_id: string }>(
+      `SELECT tenant_id FROM ${table} WHERE ${idColumn} = $1`,
+      [String(id)],
+    );
+    if (row && row.tenant_id !== this.tenantId) throw new CrossTenantReferenceError(column);
+  }
 
   // ---- domains ------------------------------------------------------------
   async listDomains(opts: ListOptions = {}): Promise<DomainRecord[]> {
     return this.client.many<DomainRecord>(
-      `SELECT * FROM domains ORDER BY created_at DESC LIMIT $1 OFFSET $2`,
-      [clampLimit(opts.limit), clampOffset(opts.offset)],
+      `SELECT * FROM domains WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3`,
+      [this.tenantId, clampLimit(opts.limit), clampOffset(opts.offset)],
     );
   }
 
   async getDomain(id: string): Promise<DomainRecord | null> {
-    return this.client.get<DomainRecord>(`SELECT * FROM domains WHERE id = $1`, [id]);
+    return this.client.get<DomainRecord>(`SELECT * FROM domains WHERE id = $1 AND tenant_id = $2`, [
+      id,
+      this.tenantId,
+    ]);
   }
 
+  /**
+   * Look up a domain by name WITHIN the tenant (design M3 leak point): the POST
+   * 409 pre-check must be tenant-scoped, or it both leaks another tenant's domain
+   * and wrongly blocks per-tenant registration of the same name.
+   */
   async getDomainByName(domain: string): Promise<DomainRecord | null> {
-    return this.client.get<DomainRecord>(`SELECT * FROM domains WHERE domain = $1`, [
+    return this.client.get<DomainRecord>(`SELECT * FROM domains WHERE domain = $1 AND tenant_id = $2`, [
       domain.trim().toLowerCase(),
+      this.tenantId,
     ]);
   }
 
@@ -399,8 +607,8 @@ export class EmailsSelfHostedStore {
   }): Promise<DomainRecord> {
     const id = randomUUID();
     return this.client.one<DomainRecord>(
-      `INSERT INTO domains (id, domain, status, provider, verified, notes)
-       VALUES ($1, $2, $3, $4, $5, $6)
+      `INSERT INTO domains (id, domain, status, provider, verified, notes, tenant_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
        RETURNING *`,
       [
         id,
@@ -409,6 +617,7 @@ export class EmailsSelfHostedStore {
         input.provider ?? null,
         input.verified ?? false,
         input.notes ?? null,
+        this.tenantId,
       ],
     );
   }
@@ -424,7 +633,7 @@ export class EmailsSelfHostedStore {
          verified = COALESCE($4, verified),
          notes    = COALESCE($5, notes),
          updated_at = now()
-       WHERE id = $1
+       WHERE id = $1 AND tenant_id = $6
        RETURNING *`,
       [
         id,
@@ -432,14 +641,15 @@ export class EmailsSelfHostedStore {
         patch.provider ?? null,
         patch.verified ?? null,
         patch.notes ?? null,
+        this.tenantId,
       ],
     );
   }
 
   async deleteDomain(id: string): Promise<boolean> {
     const rows = await this.client.many<{ id: string }>(
-      `DELETE FROM domains WHERE id = $1 RETURNING id`,
-      [id],
+      `DELETE FROM domains WHERE id = $1 AND tenant_id = $2 RETURNING id`,
+      [id, this.tenantId],
     );
     return rows.length > 0;
   }
@@ -451,7 +661,7 @@ export class EmailsSelfHostedStore {
    */
   async applyDomainProvisioning(id: string, patch: DomainProvisioningPatch): Promise<DomainRecord | null> {
     const sets: string[] = [];
-    const params: unknown[] = [id];
+    const params: unknown[] = [id, this.tenantId];
     const set = (name: string, value: unknown, jsonb = false) => {
       params.push(jsonb ? JSON.stringify(value ?? null) : value ?? null);
       sets.push(jsonb ? `${name} = $${params.length}::jsonb` : `${name} = $${params.length}`);
@@ -469,7 +679,7 @@ export class EmailsSelfHostedStore {
     if (sets.length === 0) return this.getDomain(id);
     sets.push("updated_at = now()");
     return this.client.get<DomainRecord>(
-      `UPDATE domains SET ${sets.join(", ")} WHERE id = $1 RETURNING *`,
+      `UPDATE domains SET ${sets.join(", ")} WHERE id = $1 AND tenant_id = $2 RETURNING *`,
       params,
     );
   }
@@ -477,13 +687,16 @@ export class EmailsSelfHostedStore {
   // ---- addresses ----------------------------------------------------------
   async listAddresses(opts: ListOptions = {}): Promise<AddressRecord[]> {
     return this.client.many<AddressRecord>(
-      `SELECT * FROM addresses ORDER BY created_at DESC LIMIT $1 OFFSET $2`,
-      [clampLimit(opts.limit), clampOffset(opts.offset)],
+      `SELECT * FROM addresses WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3`,
+      [this.tenantId, clampLimit(opts.limit), clampOffset(opts.offset)],
     );
   }
 
   async getAddress(id: string): Promise<AddressRecord | null> {
-    return this.client.get<AddressRecord>(`SELECT * FROM addresses WHERE id = $1`, [id]);
+    return this.client.get<AddressRecord>(`SELECT * FROM addresses WHERE id = $1 AND tenant_id = $2`, [
+      id,
+      this.tenantId,
+    ]);
   }
 
   async createAddress(input: {
@@ -497,10 +710,10 @@ export class EmailsSelfHostedStore {
     const email = input.email.trim().toLowerCase();
     const domain = email.includes("@") ? email.slice(email.indexOf("@") + 1) : null;
     return this.client.one<AddressRecord>(
-      `INSERT INTO addresses (id, email, domain, display_name, status, verified, daily_quota)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `INSERT INTO addresses (id, email, domain, display_name, status, verified, daily_quota, tenant_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        RETURNING *`,
-      [id, email, domain, input.display_name ?? null, input.status ?? "active", input.verified ?? false, input.daily_quota ?? null],
+      [id, email, domain, input.display_name ?? null, input.status ?? "active", input.verified ?? false, input.daily_quota ?? null, this.tenantId],
     );
   }
 
@@ -524,7 +737,7 @@ export class EmailsSelfHostedStore {
          verified     = COALESCE($4, verified),
          daily_quota  = CASE WHEN $5 THEN $6 ELSE daily_quota END,
          updated_at   = now()
-       WHERE id = $1
+       WHERE id = $1 AND tenant_id = $7
        RETURNING *`,
       [
         id,
@@ -533,14 +746,15 @@ export class EmailsSelfHostedStore {
         patch.verified ?? null,
         patch.dailyQuotaSet ?? false,
         patch.dailyQuotaSet ? patch.daily_quota ?? null : null,
+        this.tenantId,
       ],
     );
   }
 
   async deleteAddress(id: string): Promise<boolean> {
     const rows = await this.client.many<{ id: string }>(
-      `DELETE FROM addresses WHERE id = $1 RETURNING id`,
-      [id],
+      `DELETE FROM addresses WHERE id = $1 AND tenant_id = $2 RETURNING id`,
+      [id, this.tenantId],
     );
     return rows.length > 0;
   }
@@ -551,7 +765,7 @@ export class EmailsSelfHostedStore {
    */
   async applyAddressProvisioning(id: string, patch: AddressProvisioningPatch): Promise<AddressRecord | null> {
     const sets: string[] = [];
-    const params: unknown[] = [id];
+    const params: unknown[] = [id, this.tenantId];
     const set = (name: string, value: unknown) => {
       params.push(value ?? null);
       sets.push(`${name} = $${params.length}`);
@@ -567,7 +781,7 @@ export class EmailsSelfHostedStore {
     if (sets.length === 0) return this.getAddress(id);
     sets.push("updated_at = now()");
     return this.client.get<AddressRecord>(
-      `UPDATE addresses SET ${sets.join(", ")} WHERE id = $1 RETURNING *`,
+      `UPDATE addresses SET ${sets.join(", ")} WHERE id = $1 AND tenant_id = $2 RETURNING *`,
       params,
     );
   }
@@ -575,11 +789,14 @@ export class EmailsSelfHostedStore {
   /**
    * Apply address ownership fields (migration 0011). Only keys PRESENT in
    * `patch` are written, so `null` explicitly clears (the client's unassign) while
-   * an absent key is left untouched.
+   * an absent key is left untouched. Owner/administrator ids that reference another
+   * tenant's owner are rejected (M4).
    */
   async applyAddressOwnership(id: string, patch: AddressOwnershipPatch): Promise<AddressRecord | null> {
+    if ("owner_id" in patch) await this.assertNotOtherTenant("owners", patch.owner_id, "owner_id");
+    if ("administrator_id" in patch) await this.assertNotOtherTenant("owners", patch.administrator_id, "administrator_id");
     const sets: string[] = [];
-    const params: unknown[] = [id];
+    const params: unknown[] = [id, this.tenantId];
     const set = (name: string, value: unknown) => {
       params.push(value ?? null);
       sets.push(`${name} = $${params.length}`);
@@ -589,7 +806,7 @@ export class EmailsSelfHostedStore {
     if (sets.length === 0) return this.getAddress(id);
     sets.push("updated_at = now()");
     return this.client.get<AddressRecord>(
-      `UPDATE addresses SET ${sets.join(", ")} WHERE id = $1 RETURNING *`,
+      `UPDATE addresses SET ${sets.join(", ")} WHERE id = $1 AND tenant_id = $2 RETURNING *`,
       params,
     );
   }
@@ -599,8 +816,8 @@ export class EmailsSelfHostedStore {
   // Ordering is by original receipt time when known, else insertion time, so an
   // imported inbox reads in true chronological order rather than import order.
   async listMessages(opts: ListMessagesOptions = {}): Promise<MessageListRecord[]> {
-    const where: string[] = [];
-    const params: unknown[] = [];
+    const where: string[] = ["tenant_id = $1"];
+    const params: unknown[] = [this.tenantId];
     if (opts.direction === "inbound") where.push(`lower(COALESCE(direction, '')) <> 'outbound'`);
     if (opts.direction === "outbound") where.push(`lower(COALESCE(direction, '')) = 'outbound'`);
     if (opts.to?.trim()) {
@@ -623,7 +840,7 @@ export class EmailsSelfHostedStore {
       params.push(opts.since.trim());
       where.push(`COALESCE(received_at, created_at) >= $${params.length}::timestamptz`);
     }
-    const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+    const whereSql = `WHERE ${where.join(" AND ")}`;
     params.push(clampLimit(opts.limit));
     const limitIndex = params.length;
     params.push(clampOffset(opts.offset));
@@ -646,6 +863,7 @@ export class EmailsSelfHostedStore {
            (labels @> '["trash"]'::jsonb) AS is_trash,
            is_read, is_starred, COALESCE(received_at, created_at) AS ts
          FROM messages
+         WHERE tenant_id = $1
        )
        SELECT
          count(*) FILTER (WHERE is_out) AS sent,
@@ -658,6 +876,7 @@ export class EmailsSelfHostedStore {
          count(*) AS total,
          max(ts) FILTER (WHERE NOT is_out) AS latest_received_at
        FROM m`,
+      [this.tenantId],
     );
     const number = (value: unknown): number => {
       const parsed = typeof value === "number" ? value : Number(value);
@@ -674,8 +893,8 @@ export class EmailsSelfHostedStore {
 
   async getMessage(id: string): Promise<MessageRecord | null> {
     const row = await this.client.get<Record<string, unknown>>(
-      `SELECT ${MESSAGE_COLUMNS} FROM messages WHERE id = $1`,
-      [id],
+      `SELECT ${MESSAGE_COLUMNS} FROM messages WHERE id = $1 AND tenant_id = $2`,
+      [id, this.tenantId],
     );
     return row ? mapMessageRow(row) : null;
   }
@@ -683,8 +902,8 @@ export class EmailsSelfHostedStore {
   async getMessageAttachment(id: string, index: number): Promise<StoredAttachment | null> {
     if (!Number.isInteger(index) || index < 0) return null;
     const row = await this.client.get<{ attachment: unknown }>(
-      `SELECT attachments -> $2::int AS attachment FROM messages WHERE id = $1`,
-      [id, index],
+      `SELECT attachments -> $2::int AS attachment FROM messages WHERE id = $1 AND tenant_id = $3`,
+      [id, index, this.tenantId],
     );
     const value = row?.attachment;
     let attachment: unknown;
@@ -701,85 +920,47 @@ export class EmailsSelfHostedStore {
   }
 
   /**
-   * Look up an existing message by a stable upstream key, matching EITHER the
-   * `source_id` (this ingest path's idempotency key) OR the `message_id`
-   * (the S3 object key stored by the history backfill). Returns the row id, or
-   * null. Used by the ingest worker to avoid re-inserting mail already present
-   * from the local→self_hosted history import, whose rows carry the same object key
-   * in `message_id` but a different `source_id`.
+   * Look up an existing message by a stable upstream key (source_id OR message_id)
+   * WITHIN the tenant (design M3 leak point). Returns the row id, or null.
    */
   async findMessageIdByKey(key: string): Promise<string | null> {
     if (!key) return null;
     const row = await this.client.get<{ id: string }>(
-      `SELECT id FROM messages WHERE source_id = $1 OR message_id = $1 LIMIT 1`,
-      [key],
+      `SELECT id FROM messages WHERE (source_id = $1 OR message_id = $1) AND tenant_id = $2 LIMIT 1`,
+      [key, this.tenantId],
     );
     return row ? row.id : null;
   }
 
-  /** Positional insert params shared by createMessage and upsertMessage. */
-  private messageInsertParams(input: MessageInput): unknown[] {
-    return [
-      randomUUID(),
-      (input.direction ?? "outbound").trim() || "outbound",
-      input.from_addr.trim(),
-      JSON.stringify(input.to_addrs ?? []),
-      JSON.stringify(input.cc_addrs ?? []),
-      input.subject ?? null,
-      input.body_text ?? null,
-      input.body_html ?? null,
-      input.status ?? "queued",
-      input.provider_message_id ?? null,
-      input.message_id ?? null,
-      input.in_reply_to ?? null,
-      input.received_at ?? null,
-      input.is_read ?? false,
-      input.is_starred ?? false,
-      JSON.stringify(input.labels ?? []),
-      JSON.stringify(input.headers ?? {}),
-      JSON.stringify(input.attachments ?? []),
-      input.source_id ?? null,
-      input.idempotency_key ?? null,
-      input.send_payload_hash ?? null,
-      input.send_state ?? "none",
-      input.send_started_at ?? null,
-    ];
-  }
-
-  private static readonly INSERT_COLS =
-    "id, direction, from_addr, to_addrs, cc_addrs, subject, body_text, body_html, status, " +
-    "provider_message_id, message_id, in_reply_to, received_at, is_read, is_starred, labels, " +
-    "headers, attachments, source_id, idempotency_key, send_payload_hash, send_state, send_started_at";
-
-  private static readonly INSERT_VALUES =
-    "$1, $2, $3, $4::jsonb, $5::jsonb, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, " +
-    "$16::jsonb, $17::jsonb, $18::jsonb, $19, $20, $21, $22, $23";
-
   async createMessage(input: MessageInput): Promise<MessageRecord> {
     const row = await this.client.one<Record<string, unknown>>(
-      `INSERT INTO messages (${EmailsSelfHostedStore.INSERT_COLS})
-       VALUES (${EmailsSelfHostedStore.INSERT_VALUES})
+      `INSERT INTO messages (${MESSAGE_INSERT_COLS}, tenant_id)
+       VALUES (${MESSAGE_INSERT_VALUES}, $24)
        RETURNING ${MESSAGE_COLUMNS}`,
-      this.messageInsertParams(input),
+      [...messageInsertParams(input), this.tenantId],
     );
     return mapMessageRow(row);
   }
 
-  /** Persist a unique outbound intent before any provider side effect. */
+  /**
+   * Persist a unique outbound intent before any provider side effect. Conflict
+   * target + fallback select are tenant-scoped (`(tenant_id, idempotency_key)`),
+   * so two tenants never observe each other's send-intent replay (design M3).
+   */
   async reserveSendIntent(
     input: MessageInput & { idempotency_key: string; send_payload_hash: string },
   ): Promise<{ record: MessageRecord; created: boolean }> {
     const inserted = await this.client.get<Record<string, unknown>>(
-      `INSERT INTO messages (${EmailsSelfHostedStore.INSERT_COLS})
-       VALUES (${EmailsSelfHostedStore.INSERT_VALUES})
-       ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
+      `INSERT INTO messages (${MESSAGE_INSERT_COLS}, tenant_id)
+       VALUES (${MESSAGE_INSERT_VALUES}, $24)
+       ON CONFLICT (tenant_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
        RETURNING ${MESSAGE_COLUMNS}`,
-      this.messageInsertParams({ ...input, direction: "outbound", status: "queued", send_state: "pending" }),
+      [...messageInsertParams({ ...input, direction: "outbound", status: "queued", send_state: "pending" }), this.tenantId],
     );
     if (inserted) return { record: mapMessageRow(inserted), created: true };
     const existing = await this.client.get<Record<string, unknown>>(
-      `SELECT ${MESSAGE_COLUMNS} FROM messages WHERE idempotency_key = $1`,
-      [input.idempotency_key],
+      `SELECT ${MESSAGE_COLUMNS} FROM messages WHERE idempotency_key = $1 AND tenant_id = $2`,
+      [input.idempotency_key, this.tenantId],
     );
     if (!existing) throw new Error("send intent conflict could not be reconciled");
     const record = mapMessageRow(existing);
@@ -790,9 +971,9 @@ export class EmailsSelfHostedStore {
   async claimSendIntent(id: string): Promise<MessageRecord | null> {
     const row = await this.client.get<Record<string, unknown>>(
       `UPDATE messages SET send_state = 'sending', send_started_at = now(), updated_at = now()
-       WHERE id = $1 AND send_state = 'pending'
+       WHERE id = $1 AND tenant_id = $2 AND send_state = 'pending'
        RETURNING ${MESSAGE_COLUMNS}`,
-      [id],
+      [id, this.tenantId],
     );
     return row ? mapMessageRow(row) : null;
   }
@@ -800,8 +981,8 @@ export class EmailsSelfHostedStore {
   async completeSendIntent(id: string, providerMessageId: string): Promise<MessageRecord> {
     const row = await this.client.get<Record<string, unknown>>(
       `UPDATE messages SET send_state = 'sent', status = 'sent', provider_message_id = $2, updated_at = now()
-       WHERE id = $1 RETURNING ${MESSAGE_COLUMNS}`,
-      [id, providerMessageId],
+       WHERE id = $1 AND tenant_id = $3 RETURNING ${MESSAGE_COLUMNS}`,
+      [id, providerMessageId, this.tenantId],
     );
     if (!row) throw new Error("send intent disappeared during completion");
     return mapMessageRow(row);
@@ -810,47 +991,29 @@ export class EmailsSelfHostedStore {
   async markSendUncertain(id: string): Promise<MessageRecord | null> {
     const row = await this.client.get<Record<string, unknown>>(
       `UPDATE messages SET send_state = 'uncertain', status = 'uncertain', updated_at = now()
-       WHERE id = $1 AND send_state <> 'sent'
+       WHERE id = $1 AND tenant_id = $2 AND send_state <> 'sent'
        RETURNING ${MESSAGE_COLUMNS}`,
-      [id],
+      [id, this.tenantId],
     );
     return row ? mapMessageRow(row) : null;
   }
 
   /**
-   * Idempotent write keyed on `source_id`: inserts a new row, or updates the
-   * existing row with the same source_id (so re-running an import never
-   * duplicates). Requires `source_id`. Returns whether a new row was inserted
-   * (Postgres `xmax = 0` distinguishes insert from update in an upsert).
+   * Idempotent write keyed on `(tenant_id, source_id)`: inserts a new row, or
+   * updates the existing row with the same source_id within this tenant (so
+   * re-running an import never duplicates and never touches another tenant's row).
    */
   async upsertMessage(input: MessageInput): Promise<{ record: MessageRecord; inserted: boolean }> {
     if (!input.source_id) {
       throw new Error("upsertMessage requires a source_id");
     }
     const row = await this.client.one<Record<string, unknown>>(
-      `INSERT INTO messages (${EmailsSelfHostedStore.INSERT_COLS})
-       VALUES (${EmailsSelfHostedStore.INSERT_VALUES})
-       ON CONFLICT (source_id) WHERE source_id IS NOT NULL DO UPDATE SET
-         direction           = EXCLUDED.direction,
-         from_addr           = EXCLUDED.from_addr,
-         to_addrs            = EXCLUDED.to_addrs,
-         cc_addrs            = EXCLUDED.cc_addrs,
-         subject             = EXCLUDED.subject,
-         body_text           = EXCLUDED.body_text,
-         body_html           = EXCLUDED.body_html,
-         status              = EXCLUDED.status,
-         provider_message_id = EXCLUDED.provider_message_id,
-         message_id          = EXCLUDED.message_id,
-         in_reply_to         = EXCLUDED.in_reply_to,
-         received_at         = EXCLUDED.received_at,
-         is_read             = EXCLUDED.is_read,
-         is_starred          = EXCLUDED.is_starred,
-         labels              = EXCLUDED.labels,
-         headers             = EXCLUDED.headers,
-         attachments         = EXCLUDED.attachments,
-         updated_at          = now()
+      `INSERT INTO messages (${MESSAGE_INSERT_COLS}, tenant_id)
+       VALUES (${MESSAGE_INSERT_VALUES}, $24)
+       ON CONFLICT (tenant_id, source_id) WHERE source_id IS NOT NULL DO UPDATE SET
+         ${MESSAGE_UPSERT_ASSIGNMENTS}
        RETURNING ${MESSAGE_COLUMNS}, (xmax = 0) AS inserted`,
-      this.messageInsertParams(input),
+      [...messageInsertParams(input), this.tenantId],
     );
     const inserted = Boolean(row["inserted"]);
     return { record: mapMessageRow(row), inserted };
@@ -883,7 +1046,7 @@ export class EmailsSelfHostedStore {
          is_starred          = COALESCE($5, is_starred),
          labels              = $6::jsonb,
          updated_at          = now()
-       WHERE id = $1
+       WHERE id = $1 AND tenant_id = $7
        RETURNING ${MESSAGE_COLUMNS}`,
       [
         id,
@@ -892,6 +1055,7 @@ export class EmailsSelfHostedStore {
         patch.is_read ?? null,
         patch.is_starred ?? null,
         JSON.stringify([...labels.values()]),
+        this.tenantId,
       ],
     );
     return row ? mapMessageRow(row) : null;
@@ -899,8 +1063,8 @@ export class EmailsSelfHostedStore {
 
   async deleteMessage(id: string): Promise<boolean> {
     const rows = await this.client.many<{ id: string }>(
-      `DELETE FROM messages WHERE id = $1 RETURNING id`,
-      [id],
+      `DELETE FROM messages WHERE id = $1 AND tenant_id = $2 RETURNING id`,
+      [id, this.tenantId],
     );
     return rows.length > 0;
   }
@@ -910,7 +1074,7 @@ export class EmailsSelfHostedStore {
   // The self-hosted `messages` table is a single unified inbound+outbound
   // ledger, so these are read-only rollups over it (not simple CRUD). Threads
   // are grouped by a normalized (Re:/Fwd:-stripped) subject key — the server
-  // keeps no thread_id column.
+  // keeps no thread_id column. Every rollup filters by tenant (design M3).
 
   /** Subject-rolled-up conversation list, newest activity first. */
   async listThreads(opts: ListOptions = {}): Promise<ThreadRollup[]> {
@@ -921,6 +1085,7 @@ export class EmailsSelfHostedStore {
            subject, from_addr, is_read, direction,
            COALESCE(received_at, created_at) AS ts
          FROM messages
+         WHERE tenant_id = $1
        )
        SELECT
          COALESCE(thread_key, '(no subject)') AS thread_key,
@@ -933,8 +1098,8 @@ export class EmailsSelfHostedStore {
        FROM t
        GROUP BY COALESCE(thread_key, '(no subject)')
        ORDER BY max(ts) DESC
-       LIMIT $1 OFFSET $2`,
-      [clampLimit(opts.limit), clampOffset(opts.offset)],
+       LIMIT $2 OFFSET $3`,
+      [this.tenantId, clampLimit(opts.limit), clampOffset(opts.offset)],
     );
     const num = (v: unknown): number => {
       const n = typeof v === "number" ? v : Number(v);
@@ -953,9 +1118,8 @@ export class EmailsSelfHostedStore {
 
   /**
    * Registered addresses as mailboxes, each with an inbound folder rollup, plus
-   * the global folder counts. Per-mailbox counts use the same recipient
-   * substring match as listMessages' `to` filter (consistent, tolerant of
-   * display-name forms).
+   * the global folder counts. Both the address list AND the joined message counts
+   * are tenant-scoped (design M3), so a mailbox never counts another tenant's mail.
    */
   async listMailboxes(): Promise<{ mailboxes: MailboxRollup[]; counts: MessageCountsRecord }> {
     const rows = await this.client.many<Record<string, unknown>>(
@@ -969,9 +1133,12 @@ export class EmailsSelfHostedStore {
        FROM addresses a
        LEFT JOIN messages m
          ON lower(COALESCE(m.direction, '')) <> 'outbound'
+        AND m.tenant_id = a.tenant_id
         AND lower(m.to_addrs::text) LIKE '%' || lower(a.email) || '%'
+       WHERE a.tenant_id = $1
        GROUP BY a.id, a.email, a.display_name, a.status
        ORDER BY a.email ASC`,
+      [this.tenantId],
     );
     const num = (v: unknown): number => {
       const n = typeof v === "number" ? v : Number(v);
@@ -999,44 +1166,23 @@ export class EmailsSelfHostedStore {
   // ---- generic resources (contacts/providers/templates/groups/…) ----------
   //
   // Table + column names come from the trusted SELF_HOSTED_RESOURCES registry (never
-  // user input); all VALUES are bound parameters. JSONB columns are cast so
-  // arrays/objects round-trip; the returned rows keep JSONB as parsed values.
-
-  /** Coerce/encode a request value for a column per its declared kind. */
-  private static encodeColumn(col: ResourceColumn, value: unknown): unknown {
-    if (value === undefined) return null;
-    if (col.json) return JSON.stringify(value ?? null);
-    if (col.bool) return Boolean(value);
-    if (col.int) {
-      const n = typeof value === "number" ? value : Number(value);
-      return Number.isFinite(n) ? Math.trunc(n) : 0;
-    }
-    if (col.num) {
-      const n = typeof value === "number" ? value : Number(value);
-      return Number.isFinite(n) ? n : 0;
-    }
-    return value ?? null;
-  }
-
-  /** Primary-key column for a spec (a server-minted `id` unless overridden). */
-  private static keyColumn(spec: SelfHostedResourceSpec): string {
-    return spec.idColumn ?? "id";
-  }
+  // user input); all VALUES are bound parameters. Every query filters/stamps
+  // `tenant_id` (Layer 1 across all 24 registry resources at one chokepoint).
 
   async listResource(
     spec: SelfHostedResourceSpec,
     opts: ListOptions & { filters?: Record<string, unknown> } = {},
   ): Promise<Record<string, unknown>[]> {
-    const params: unknown[] = [];
-    const where: string[] = [];
+    const params: unknown[] = [this.tenantId];
+    const where: string[] = ["tenant_id = $1"];
     for (const key of spec.filters ?? []) {
       const raw = opts.filters?.[key];
       if (raw === undefined) continue;
       const col = spec.columns.find((c) => c.name === key);
-      params.push(EmailsSelfHostedStore.encodeColumn(col ?? { name: key }, raw));
+      params.push(encodeColumn(col ?? { name: key }, raw));
       where.push(`${key} = $${params.length}`);
     }
-    const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+    const whereSql = `WHERE ${where.join(" AND ")}`;
     params.push(clampLimit(opts.limit), clampOffset(opts.offset));
     return this.client.many<Record<string, unknown>>(
       `SELECT * FROM ${spec.table} ${whereSql} ORDER BY ${spec.orderBy} LIMIT $${params.length - 1} OFFSET $${params.length}`,
@@ -1045,12 +1191,19 @@ export class EmailsSelfHostedStore {
   }
 
   async getResource(spec: SelfHostedResourceSpec, id: string): Promise<Record<string, unknown> | null> {
-    const key = EmailsSelfHostedStore.keyColumn(spec);
-    return this.client.get<Record<string, unknown>>(`SELECT * FROM ${spec.table} WHERE ${key} = $1`, [id]);
+    const key = keyColumn(spec);
+    return this.client.get<Record<string, unknown>>(
+      `SELECT * FROM ${spec.table} WHERE ${key} = $1 AND tenant_id = $2`,
+      [id, this.tenantId],
+    );
   }
 
   async createResource(spec: SelfHostedResourceSpec, body: Record<string, unknown>): Promise<Record<string, unknown>> {
-    const key = EmailsSelfHostedStore.keyColumn(spec);
+    // M4: a body-supplied FK id must not reference another tenant's row.
+    for (const fk of spec.foreignKeys ?? []) {
+      await this.assertNotOtherTenant(fk.table, body[fk.column], fk.column, fk.idColumn ?? "id");
+    }
+    const key = keyColumn(spec);
     const cols: string[] = [];
     const placeholders: string[] = [];
     const params: unknown[] = [];
@@ -1061,9 +1214,13 @@ export class EmailsSelfHostedStore {
       cols.push("id");
       placeholders.push("$1");
     }
+    // tenant_id is always stamped from the caller's scope, never from the body.
+    params.push(this.tenantId);
+    cols.push("tenant_id");
+    placeholders.push(`$${params.length}`);
     for (const col of spec.columns) {
       if (!(col.name in body)) continue;
-      params.push(EmailsSelfHostedStore.encodeColumn(col, body[col.name]));
+      params.push(encodeColumn(col, body[col.name]));
       cols.push(col.name);
       placeholders.push(col.json ? `$${params.length}::jsonb` : `$${params.length}`);
     }
@@ -1074,8 +1231,10 @@ export class EmailsSelfHostedStore {
     }
     // Natural-key: upsert-on-conflict so create is an idempotent "ensure". DO
     // NOTHING can return zero rows, so read (not one()) and fall back to select.
+    // A tenant-scoped natural key (email-agents) conflicts on (tenant_id, key).
+    const conflictTarget = spec.compositeKey ? `tenant_id, ${key}` : key;
     const inserted = await this.client.get<Record<string, unknown>>(
-      `${insertHead} ON CONFLICT (${key}) DO NOTHING RETURNING *`,
+      `${insertHead} ON CONFLICT (${conflictTarget}) DO NOTHING RETURNING *`,
       params,
     );
     if (inserted) return inserted;
@@ -1089,28 +1248,28 @@ export class EmailsSelfHostedStore {
     id: string,
     body: Record<string, unknown>,
   ): Promise<Record<string, unknown> | null> {
-    const key = EmailsSelfHostedStore.keyColumn(spec);
+    const key = keyColumn(spec);
     const sets: string[] = [];
-    const params: unknown[] = [id];
+    const params: unknown[] = [id, this.tenantId];
     for (const col of spec.columns) {
       if (!(col.name in body)) continue;
       if (col.name === key) continue; // never rewrite the primary key
-      params.push(EmailsSelfHostedStore.encodeColumn(col, body[col.name]));
+      params.push(encodeColumn(col, body[col.name]));
       sets.push(col.json ? `${col.name} = $${params.length}::jsonb` : `${col.name} = $${params.length}`);
     }
     if (sets.length === 0) return this.getResource(spec, id);
     sets.push("updated_at = now()");
     return this.client.get<Record<string, unknown>>(
-      `UPDATE ${spec.table} SET ${sets.join(", ")} WHERE ${key} = $1 RETURNING *`,
+      `UPDATE ${spec.table} SET ${sets.join(", ")} WHERE ${key} = $1 AND tenant_id = $2 RETURNING *`,
       params,
     );
   }
 
   async deleteResource(spec: SelfHostedResourceSpec, id: string): Promise<boolean> {
-    const key = EmailsSelfHostedStore.keyColumn(spec);
+    const key = keyColumn(spec);
     const rows = await this.client.many<{ id: string }>(
-      `DELETE FROM ${spec.table} WHERE ${key} = $1 RETURNING ${key} AS id`,
-      [id],
+      `DELETE FROM ${spec.table} WHERE ${key} = $1 AND tenant_id = $2 RETURNING ${key} AS id`,
+      [id, this.tenantId],
     );
     return rows.length > 0;
   }
@@ -1121,51 +1280,49 @@ export class EmailsSelfHostedStore {
   // ADMINISTERS. The secret material is a token shown ONCE at mint time; only its
   // SHA-256 hash is persisted, in the dedicated `send_key_secrets` table that is
   // NOT a generic /v1 resource — so no resource read path can ever return a hash.
-  // The `send_keys` table (a generic resource) stays summary-only.
-
-  private static hashSendToken(token: string): string {
-    return createHash("sha256").update(token, "utf8").digest("hex");
-  }
-
-  /** Extract the bare, lowercased address from a From value (drops display name). */
-  private static canonicalAddress(from: string): string {
-    const value = from.trim();
-    const angled = value.match(/<([^>]+)>/);
-    const bare = (angled ? angled[1]! : value).trim().toLowerCase();
-    return bare.includes("@") ? bare : "";
-  }
+  // The `send_keys` table (a generic resource) stays summary-only. All reads are
+  // tenant-scoped: a caller can only mint/verify/authorize keys in their own tenant.
 
   /**
-   * Mint a scoped send key for an owner. Returns the one-time token (never stored)
-   * plus the non-secret summary row. The `esk_` prefix matches the client's key
-   * format; the stored `prefix` is a short, non-secret display fragment.
+   * Mint a scoped send key for an owner IN THIS TENANT. Returns the one-time token
+   * (never stored) plus the non-secret summary row. Also writes the non-RLS
+   * `send_key_tenants` resolution map (design §6 H2) so P4 RLS can resolve the
+   * tenant from the token without reading the RLS-forced send_keys table.
    */
   async mintSendKey(input: { owner_id: string; label?: string | null }): Promise<{ token: string; key: SendKeyRecord }> {
+    // M4: owner_id must not reference another tenant's owner.
+    await this.assertNotOtherTenant("owners", input.owner_id, "owner_id");
     const token = `esk_${randomBytes(24).toString("base64url")}`;
     const prefix = token.slice(0, 12);
-    const keyHash = EmailsSelfHostedStore.hashSendToken(token);
+    const keyHash = hashSendToken(token);
     const id = randomUUID();
     const key = await this.client.one<SendKeyRecord>(
-      `INSERT INTO send_keys (id, owner_id, prefix, label)
-       VALUES ($1, $2, $3, $4)
+      `INSERT INTO send_keys (id, owner_id, prefix, label, tenant_id)
+       VALUES ($1, $2, $3, $4, $5)
        RETURNING id, owner_id, prefix, label, last_used_at, revoked_at, created_at, updated_at`,
-      [id, input.owner_id, prefix, input.label ?? null],
+      [id, input.owner_id, prefix, input.label ?? null, this.tenantId],
     );
     await this.client.execute(
       `INSERT INTO send_key_secrets (id, send_key_id, key_hash) VALUES ($1, $2, $3)`,
       [randomUUID(), id, keyHash],
     );
+    await this.client.execute(
+      `INSERT INTO send_key_tenants (send_key_id, tenant_id) VALUES ($1, $2) ON CONFLICT (send_key_id) DO NOTHING`,
+      [id, this.tenantId],
+    );
     return { token, key };
   }
 
   /**
-   * Resolve a token to its (non-revoked) send key, stamping `last_used_at`.
-   * Returns null for an unknown or revoked token. Never returns the hash.
+   * Resolve a token to its (non-revoked) send key WITHIN this tenant, stamping
+   * `last_used_at`. The `send_key_secrets` hash lookup is global (the token IS the
+   * credential), but the resolved `send_keys` row must belong to this tenant — a
+   * token minted for another tenant returns null (fail closed).
    */
   async verifySendKey(token: string): Promise<SendKeyRecord | null> {
     const value = token.trim();
     if (!value) return null;
-    const keyHash = EmailsSelfHostedStore.hashSendToken(value);
+    const keyHash = hashSendToken(value);
     const secret = await this.client.get<{ send_key_id: string }>(
       `SELECT send_key_id FROM send_key_secrets WHERE key_hash = $1`,
       [keyHash],
@@ -1173,29 +1330,29 @@ export class EmailsSelfHostedStore {
     if (!secret) return null;
     const key = await this.client.get<SendKeyRecord>(
       `SELECT id, owner_id, prefix, label, last_used_at, revoked_at, created_at, updated_at
-       FROM send_keys WHERE id = $1`,
-      [secret.send_key_id],
+       FROM send_keys WHERE id = $1 AND tenant_id = $2`,
+      [secret.send_key_id, this.tenantId],
     );
     if (!key || key.revoked_at) return null;
     const stamped = await this.client.get<SendKeyRecord>(
       `UPDATE send_keys SET last_used_at = now(), updated_at = now()
-       WHERE id = $1
+       WHERE id = $1 AND tenant_id = $2
        RETURNING id, owner_id, prefix, label, last_used_at, revoked_at, created_at, updated_at`,
-      [key.id],
+      [key.id, this.tenantId],
     );
     return stamped ?? key;
   }
 
-  /** Whether `ownerId` may send from `fromEmail` (owns or administers the address). */
+  /** Whether `ownerId` may send from `fromEmail` (owns or administers a tenant address). */
   async isOwnerAuthorizedFrom(ownerId: string, fromEmail: string): Promise<boolean> {
     if (!ownerId) return false;
-    const email = EmailsSelfHostedStore.canonicalAddress(fromEmail);
+    const email = canonicalAddress(fromEmail);
     if (!email) return false;
     const row = await this.client.get<{ one: number }>(
       `SELECT 1 AS one FROM addresses
-       WHERE lower(email) = $1 AND (owner_id = $2 OR administrator_id = $2)
+       WHERE lower(email) = $1 AND (owner_id = $2 OR administrator_id = $2) AND tenant_id = $3
        LIMIT 1`,
-      [email, ownerId],
+      [email, ownerId, this.tenantId],
     );
     return row !== null;
   }

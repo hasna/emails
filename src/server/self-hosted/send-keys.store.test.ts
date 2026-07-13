@@ -48,6 +48,9 @@ function sendKeyClient() {
     },
     async get<T>(sql: string, params?: readonly unknown[]): Promise<T | null> {
       const p = params ?? [];
+      // M4 assertNotOtherTenant: owner ids in these tests are not real owner rows,
+      // so the referenced-row lookup returns null (reference allowed).
+      if (/FROM owners WHERE id = \$1/i.test(sql)) return null as unknown as T | null;
       if (/FROM send_key_secrets WHERE key_hash = \$1/i.test(sql)) {
         const s = secrets.find((x) => x.key_hash === p[0]);
         return (s ? { send_key_id: s.send_key_id } : null) as unknown as T | null;
@@ -77,6 +80,8 @@ function sendKeyClient() {
         secrets.push({ id: String(p[0]), send_key_id: String(p[1]), key_hash: String(p[2]) });
         return;
       }
+      // send_key_tenants resolution map (design §6 H2) — no-op in this shim.
+      if (/INSERT INTO send_key_tenants/i.test(sql)) return;
       throw new Error(`execute() not emulated: ${sql}`);
     },
   };
@@ -87,7 +92,7 @@ function sendKeyClient() {
 describe("send keys: mint", () => {
   test("mint returns an esk_ token, persists only its hash, and never the token", async () => {
     const { client, sendKeys, secrets } = sendKeyClient();
-    const store = new EmailsSelfHostedStore(client);
+    const store = new EmailsSelfHostedStore(client).forTenant("00000000-0000-0000-0000-000000000001");
     const { token, key } = await store.mintSendKey({ owner_id: "o1", label: "ci" });
 
     expect(token.startsWith("esk_")).toBe(true);
@@ -107,7 +112,7 @@ describe("send keys: mint", () => {
 describe("send keys: verify", () => {
   test("a valid token resolves to its key and stamps last_used_at", async () => {
     const { client } = sendKeyClient();
-    const store = new EmailsSelfHostedStore(client);
+    const store = new EmailsSelfHostedStore(client).forTenant("00000000-0000-0000-0000-000000000001");
     const { token, key } = await store.mintSendKey({ owner_id: "o1" });
 
     const verified = await store.verifySendKey(token);
@@ -118,7 +123,7 @@ describe("send keys: verify", () => {
 
   test("an unknown or empty token returns null", async () => {
     const { client } = sendKeyClient();
-    const store = new EmailsSelfHostedStore(client);
+    const store = new EmailsSelfHostedStore(client).forTenant("00000000-0000-0000-0000-000000000001");
     await store.mintSendKey({ owner_id: "o1" });
     expect(await store.verifySendKey("esk_bogus")).toBeNull();
     expect(await store.verifySendKey("")).toBeNull();
@@ -126,7 +131,7 @@ describe("send keys: verify", () => {
 
   test("a revoked key does not verify", async () => {
     const { client, sendKeys } = sendKeyClient();
-    const store = new EmailsSelfHostedStore(client);
+    const store = new EmailsSelfHostedStore(client).forTenant("00000000-0000-0000-0000-000000000001");
     const { token } = await store.mintSendKey({ owner_id: "o1" });
     sendKeys[0]!.revoked_at = new Date().toISOString();
     expect(await store.verifySendKey(token)).toBeNull();
@@ -136,7 +141,7 @@ describe("send keys: verify", () => {
 describe("send keys: from-address authorization", () => {
   test("owner or administrator of the address is authorized; others are not", async () => {
     const { client, addresses } = sendKeyClient();
-    const store = new EmailsSelfHostedStore(client);
+    const store = new EmailsSelfHostedStore(client).forTenant("00000000-0000-0000-0000-000000000001");
     addresses.push({ id: "a1", email: "mine@x.com", owner_id: "o1", administrator_id: "agent1" });
 
     expect(await store.isOwnerAuthorizedFrom("o1", "mine@x.com")).toBe(true);

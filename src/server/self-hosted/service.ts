@@ -7,13 +7,15 @@
 // All data operations hit the operator-owned Postgres via the
 // store, which wraps the product-owned storage utilities' typed client.
 
-import type { ApiKeyVerifier, ApiKeyPrincipal } from "@hasna/contracts/auth";
+import type { ApiKeyVerifier } from "@hasna/contracts/auth";
 import { createHash } from "node:crypto";
 import { migrationAcceptsChecksum, type TypedQueryClient, type Migration } from "../../storage-kit/index.js";
 import { checkHealth } from "../../storage-kit/index.js";
 import {
   EmailsSelfHostedStore,
   IdempotencyKeyConflictError,
+  CrossTenantReferenceError,
+  type TenantScopedStore,
   type MessageListRecord,
   type MessageRecord,
   type DomainProvisioningPatch,
@@ -23,6 +25,15 @@ import {
 import { emailsSelfHostedOpenApi } from "./openapi.js";
 import { resourceSpecForPath } from "./resources.js";
 import type { SelfHostedSender } from "./sender.js";
+import {
+  resolveRequestContext,
+  handleAuthRoutes,
+  type RequestContext,
+} from "./auth/service.js";
+import type { AuthStore } from "./auth/store.js";
+import type { RateLimiter } from "./auth/rate-limit.js";
+import type { AuthMailerConfig } from "./auth/mailer.js";
+import type { SelfHostedKeyStore } from "./keys.js";
 
 interface ReadyResult {
   ok: boolean;
@@ -78,6 +89,13 @@ export interface SelfHostedServiceDeps {
   sender: SelfHostedSender;
   migrations: readonly Migration[];
   version: string;
+  // ---- multi-tenancy + auth (WI-2) ----
+  authStore: AuthStore;
+  keyStore: SelfHostedKeyStore;
+  signingSecret: string;
+  rateLimiter: RateLimiter;
+  mailer: AuthMailerConfig;
+  env?: NodeJS.ProcessEnv;
 }
 
 const MODE = "self_hosted" as const;
@@ -296,31 +314,31 @@ function extractAddressProvisioning(body: Record<string, unknown>): AddressProvi
 
 interface AuthOk {
   ok: true;
-  principal: ApiKeyPrincipal;
+  ctx: RequestContext;
+  /** The tenant-scoped store — the ONLY data surface a handler is given. */
+  store: TenantScopedStore;
 }
 interface AuthFail {
   ok: false;
   response: Response;
 }
 
+/**
+ * Authenticate a /v1 data request. REPLACES the old single-key `authenticate()`:
+ * resolves the credential to a tenant-bound context (session or api key) and
+ * hands back a `store.forTenant(ctx.tenantId)`. A handler can therefore ONLY
+ * touch data through the tenant-scoped store — tenant isolation is enforced by
+ * the type system (design §6 Layer 1). The tenant is NEVER a path/query/body param.
+ */
 async function authenticate(
   deps: SelfHostedServiceDeps,
   req: Request,
   url: URL,
   requiredScopes: string[],
 ): Promise<AuthOk | AuthFail> {
-  const decision = await deps.verifier.authenticate(req.headers, {
-    method: req.method,
-    path: url.pathname,
-    requiredScopes,
-  });
-  if (!decision.ok) {
-    return {
-      ok: false,
-      response: json(decision.status, { error: decision.message, reason: decision.reason }),
-    };
-  }
-  return { ok: true, principal: decision.principal };
+  const resolved = await resolveRequestContext(deps, req, url, requiredScopes);
+  if (!resolved.ok) return { ok: false, response: resolved.response };
+  return { ok: true, ctx: resolved.ctx, store: deps.store.forTenant(resolved.ctx.tenantId) };
 }
 
 /**
@@ -372,15 +390,19 @@ export async function handleSelfHostedRequest(
   // ---- /v1 (authenticated) -----------------------------------------------
   const read = ["emails:read"];
   const write = ["emails:write"];
-  const store = deps.store;
 
   try {
+    // Auth / tenant / membership / key routes are claimed FIRST (they run their
+    // own credential resolution + role gates). Returns null when not an auth path.
+    const authResponse = await handleAuthRoutes(deps, req, url);
+    if (authResponse) return authResponse;
+
     // /v1/domains
     if (path === "/v1/domains") {
       if (method === "GET") {
         const auth = await authenticate(deps, req, url, read);
         if (!auth.ok) return auth.response;
-        return json(200, { domains: await store.listDomains({ limit: queryInt(url, "limit"), offset: queryInt(url, "offset") }) });
+        return json(200, { domains: await auth.store.listDomains({ limit: queryInt(url, "limit"), offset: queryInt(url, "offset") }) });
       }
       if (method === "POST") {
         const auth = await authenticate(deps, req, url, write);
@@ -388,8 +410,8 @@ export async function handleSelfHostedRequest(
         const body = await readJsonBody(req);
         const domain = String(body.domain ?? "").trim();
         if (!domain) return json(400, { error: "domain is required" });
-        if (await store.getDomainByName(domain)) return json(409, { error: `domain ${domain} already exists` });
-        const created = await store.createDomain({
+        if (await auth.store.getDomainByName(domain)) return json(409, { error: `domain ${domain} already exists` });
+        const created = await auth.store.createDomain({
           domain,
           status: body.status ? String(body.status) : undefined,
           provider: body.provider === undefined ? undefined : (body.provider as string | null),
@@ -407,14 +429,14 @@ export async function handleSelfHostedRequest(
       if (method === "GET") {
         const auth = await authenticate(deps, req, url, read);
         if (!auth.ok) return auth.response;
-        const rec = await store.getDomain(id);
+        const rec = await auth.store.getDomain(id);
         return rec ? json(200, { domain: rec }) : json(404, { error: "domain not found" });
       }
       if (method === "PATCH" || method === "PUT") {
         const auth = await authenticate(deps, req, url, write);
         if (!auth.ok) return auth.response;
         const body = await readJsonBody(req);
-        let rec = await store.updateDomain(id, {
+        let rec = await auth.store.updateDomain(id, {
           status: body.status === undefined ? undefined : String(body.status),
           provider: body.provider === undefined ? undefined : (body.provider as string | null),
           verified: typeof body.verified === "boolean" ? body.verified : undefined,
@@ -422,14 +444,14 @@ export async function handleSelfHostedRequest(
         });
         if (rec) {
           const prov = extractDomainProvisioning(body);
-          if (Object.keys(prov).length > 0) rec = (await store.applyDomainProvisioning(id, prov)) ?? rec;
+          if (Object.keys(prov).length > 0) rec = (await auth.store.applyDomainProvisioning(id, prov)) ?? rec;
         }
         return rec ? json(200, { domain: rec }) : json(404, { error: "domain not found" });
       }
       if (method === "DELETE") {
         const auth = await authenticate(deps, req, url, write);
         if (!auth.ok) return auth.response;
-        return (await store.deleteDomain(id)) ? json(200, { deleted: true, id }) : json(404, { error: "domain not found" });
+        return (await auth.store.deleteDomain(id)) ? json(200, { deleted: true, id }) : json(404, { error: "domain not found" });
       }
       return json(405, { error: "method not allowed" });
     }
@@ -439,7 +461,7 @@ export async function handleSelfHostedRequest(
       if (method === "GET") {
         const auth = await authenticate(deps, req, url, read);
         if (!auth.ok) return auth.response;
-        return json(200, { addresses: await store.listAddresses({ limit: queryInt(url, "limit"), offset: queryInt(url, "offset") }) });
+        return json(200, { addresses: await auth.store.listAddresses({ limit: queryInt(url, "limit"), offset: queryInt(url, "offset") }) });
       }
       if (method === "POST") {
         const auth = await authenticate(deps, req, url, write);
@@ -449,7 +471,7 @@ export async function handleSelfHostedRequest(
         if (!email || !email.includes("@")) return json(400, { error: "a valid email is required" });
         const quota = parseDailyQuota(body);
         if (quota.error) return json(400, { error: quota.error });
-        const created = await store.createAddress({
+        const created = await auth.store.createAddress({
           email,
           display_name: body.display_name === undefined ? undefined : (body.display_name as string | null),
           status: body.status ? String(body.status) : undefined,
@@ -467,7 +489,7 @@ export async function handleSelfHostedRequest(
       if (method === "GET") {
         const auth = await authenticate(deps, req, url, read);
         if (!auth.ok) return auth.response;
-        const rec = await store.getAddress(id);
+        const rec = await auth.store.getAddress(id);
         return rec ? json(200, { address: rec }) : json(404, { error: "address not found" });
       }
       if (method === "PATCH" || method === "PUT") {
@@ -476,7 +498,7 @@ export async function handleSelfHostedRequest(
         const body = await readJsonBody(req);
         const quota = parseDailyQuota(body);
         if (quota.error) return json(400, { error: quota.error });
-        let rec = await store.updateAddress(id, {
+        let rec = await auth.store.updateAddress(id, {
           display_name: body.display_name === undefined ? undefined : (body.display_name as string | null),
           status: body.status === undefined ? undefined : String(body.status),
           verified: typeof body.verified === "boolean" ? body.verified : undefined,
@@ -485,16 +507,16 @@ export async function handleSelfHostedRequest(
         });
         if (rec) {
           const prov = extractAddressProvisioning(body);
-          if (Object.keys(prov).length > 0) rec = (await store.applyAddressProvisioning(id, prov)) ?? rec;
+          if (Object.keys(prov).length > 0) rec = (await auth.store.applyAddressProvisioning(id, prov)) ?? rec;
           const own = extractAddressOwnership(body);
-          if (Object.keys(own).length > 0) rec = (await store.applyAddressOwnership(id, own)) ?? rec;
+          if (Object.keys(own).length > 0) rec = (await auth.store.applyAddressOwnership(id, own)) ?? rec;
         }
         return rec ? json(200, { address: rec }) : json(404, { error: "address not found" });
       }
       if (method === "DELETE") {
         const auth = await authenticate(deps, req, url, write);
         if (!auth.ok) return auth.response;
-        return (await store.deleteAddress(id)) ? json(200, { deleted: true, id }) : json(404, { error: "address not found" });
+        return (await auth.store.deleteAddress(id)) ? json(200, { deleted: true, id }) : json(404, { error: "address not found" });
       }
       return json(405, { error: "method not allowed" });
     }
@@ -503,7 +525,7 @@ export async function handleSelfHostedRequest(
       if (method !== "GET") return json(405, { error: "method not allowed" });
       const auth = await authenticate(deps, req, url, read);
       if (!auth.ok) return auth.response;
-      return json(200, { counts: await store.messageCounts() });
+      return json(200, { counts: await auth.store.messageCounts() });
     }
 
     // /v1/messages/threads — mail-view: subject-rolled-up conversation list.
@@ -513,7 +535,7 @@ export async function handleSelfHostedRequest(
       const auth = await authenticate(deps, req, url, read);
       if (!auth.ok) return auth.response;
       return json(200, {
-        threads: await store.listThreads({ limit: queryInt(url, "limit"), offset: queryInt(url, "offset") }),
+        threads: await auth.store.listThreads({ limit: queryInt(url, "limit"), offset: queryInt(url, "offset") }),
       });
     }
 
@@ -586,7 +608,7 @@ export async function handleSelfHostedRequest(
       };
       let reserved;
       try {
-        reserved = await store.reserveSendIntent({
+        reserved = await auth.store.reserveSendIntent({
           direction: "outbound",
           from_addr: from,
           to_addrs: to,
@@ -615,7 +637,7 @@ export async function handleSelfHostedRequest(
         }
         if (reserved.record.send_state === "sending") {
           if (sendLeaseExpired(reserved.record)) {
-            const uncertain = await store.markSendUncertain(reserved.record.id).catch(() => null);
+            const uncertain = await auth.store.markSendUncertain(reserved.record.id).catch(() => null);
             return json(409, {
               error: "send lease expired with an uncertain provider outcome; reconcile before retrying",
               message: publicMessage(uncertain ?? reserved.record),
@@ -633,9 +655,9 @@ export async function handleSelfHostedRequest(
         }
       }
 
-      const claimed = await store.claimSendIntent(reserved.record.id);
+      const claimed = await auth.store.claimSendIntent(reserved.record.id);
       if (!claimed) {
-        const latest = await store.getMessage(reserved.record.id);
+        const latest = await auth.store.getMessage(reserved.record.id);
         if (latest?.send_state === "sent") {
           return json(200, { message: publicMessage(latest), provider: deps.sender.provider, idempotent_replay: true });
         }
@@ -661,7 +683,7 @@ export async function handleSelfHostedRequest(
           attachments: attachments.length ? attachments : undefined,
         });
       } catch {
-        const uncertain = await store.markSendUncertain(claimed.id).catch(() => null);
+        const uncertain = await auth.store.markSendUncertain(claimed.id).catch(() => null);
         return json(502, {
           error: "send outcome is uncertain; reconcile the provider before retrying",
           message: publicMessage(uncertain ?? claimed),
@@ -669,10 +691,10 @@ export async function handleSelfHostedRequest(
         });
       }
       try {
-        const completed = await store.completeSendIntent(claimed.id, messageId);
+        const completed = await auth.store.completeSendIntent(claimed.id, messageId);
         return json(202, { message: publicMessage(completed), provider: deps.sender.provider });
       } catch {
-        const uncertain = await store.markSendUncertain(claimed.id).catch(() => null);
+        const uncertain = await auth.store.markSendUncertain(claimed.id).catch(() => null);
         return json(502, {
           error: "provider accepted the send but ledger finalization failed; reconciliation is required",
           message: publicMessage(uncertain ?? claimed),
@@ -691,7 +713,7 @@ export async function handleSelfHostedRequest(
         const direction = directionValue === "inbound" || directionValue === "outbound" ? directionValue : undefined;
         const since = queryIsoDate(url, "since");
         if (since.error) return json(400, { error: since.error });
-        const messages = await store.listMessages({
+        const messages = await auth.store.listMessages({
           limit: queryInt(url, "limit"),
           offset: queryInt(url, "offset"),
           direction,
@@ -748,10 +770,10 @@ export async function handleSelfHostedRequest(
         // With a source_id the write is idempotent (upsert): re-running an
         // import updates the existing row instead of creating a duplicate.
         if (input.source_id) {
-          const { record, inserted } = await store.upsertMessage(input);
+          const { record, inserted } = await auth.store.upsertMessage(input);
           return json(inserted ? 201 : 200, { message: publicMessage(record) });
         }
-        const created = await store.createMessage(input);
+        const created = await auth.store.createMessage(input);
         return json(201, { message: publicMessage(created) });
       }
       return json(405, { error: "method not allowed" });
@@ -762,7 +784,7 @@ export async function handleSelfHostedRequest(
       if (method !== "GET") return json(405, { error: "method not allowed" });
       const auth = await authenticate(deps, req, url, read);
       if (!auth.ok) return auth.response;
-      const attachment = await store.getMessageAttachment(
+      const attachment = await auth.store.getMessageAttachment(
         decodeURIComponent(attachmentMatch[1]!),
         Number(attachmentMatch[2]),
       );
@@ -775,7 +797,7 @@ export async function handleSelfHostedRequest(
       if (method !== "GET") return json(405, { error: "method not allowed" });
       const auth = await authenticate(deps, req, url, read);
       if (!auth.ok) return auth.response;
-      const raw = await store.getMessageRaw(decodeURIComponent(rawMatch[1]!));
+      const raw = await auth.store.getMessageRaw(decodeURIComponent(rawMatch[1]!));
       return raw ? json(200, raw) : json(404, { error: "message not found" });
     }
 
@@ -785,14 +807,14 @@ export async function handleSelfHostedRequest(
       if (method === "GET") {
         const auth = await authenticate(deps, req, url, read);
         if (!auth.ok) return auth.response;
-        const rec = await store.getMessage(id);
+        const rec = await auth.store.getMessage(id);
         return rec ? json(200, { message: publicMessage(rec) }) : json(404, { error: "message not found" });
       }
       if (method === "PATCH" || method === "PUT") {
         const auth = await authenticate(deps, req, url, write);
         if (!auth.ok) return auth.response;
         const body = await readJsonBody(req);
-        const rec = await store.updateMessageStatus(id, {
+        const rec = await auth.store.updateMessageStatus(id, {
           status: body.status === undefined ? undefined : String(body.status),
           provider_message_id: body.provider_message_id === undefined ? undefined : (body.provider_message_id as string | null),
           is_read: typeof body.is_read === "boolean" ? body.is_read : undefined,
@@ -806,7 +828,7 @@ export async function handleSelfHostedRequest(
       if (method === "DELETE") {
         const auth = await authenticate(deps, req, url, write);
         if (!auth.ok) return auth.response;
-        return (await store.deleteMessage(id)) ? json(200, { deleted: true, id }) : json(404, { error: "message not found" });
+        return (await auth.store.deleteMessage(id)) ? json(200, { deleted: true, id }) : json(404, { error: "message not found" });
       }
       return json(405, { error: "method not allowed" });
     }
@@ -817,7 +839,7 @@ export async function handleSelfHostedRequest(
       if (method !== "GET") return json(405, { error: "method not allowed" });
       const auth = await authenticate(deps, req, url, read);
       if (!auth.ok) return auth.response;
-      const { mailboxes, counts } = await store.listMailboxes();
+      const { mailboxes, counts } = await auth.store.listMailboxes();
       return json(200, { mailboxes, counts });
     }
 
@@ -835,7 +857,7 @@ export async function handleSelfHostedRequest(
       const ownerId = String(body.owner_id ?? "").trim();
       if (!ownerId) return json(400, { error: "owner_id is required" });
       const label = body.label === undefined || body.label === null ? null : String(body.label);
-      const minted = await store.mintSendKey({ owner_id: ownerId, label });
+      const minted = await auth.store.mintSendKey({ owner_id: ownerId, label });
       return json(201, minted);
     }
 
@@ -849,14 +871,14 @@ export async function handleSelfHostedRequest(
       const body = await readJsonBody(req);
       const token = typeof body.token === "string" ? body.token : "";
       if (!token.trim()) return json(400, { error: "token is required" });
-      const key = await store.verifySendKey(token);
+      const key = await auth.store.verifySendKey(token);
       if (!key) return json(200, { valid: false, authorized: false, key: null });
       const from = typeof body.from === "string" ? body.from.trim() : "";
       // Default-deny: `authorized` reflects ONLY an actual from-address scope
       // check. With no `from` the caller is resolving the key (verifySendKey),
       // not making an authorization decision, so authorized stays false.
       if (!from) return json(200, { valid: true, authorized: false, key });
-      const authorized = key.owner_id ? await store.isOwnerAuthorizedFrom(key.owner_id, from) : false;
+      const authorized = key.owner_id ? await auth.store.isOwnerAuthorizedFrom(key.owner_id, from) : false;
       return json(200, { valid: true, authorized, key });
     }
 
@@ -875,7 +897,7 @@ export async function handleSelfHostedRequest(
               const v = url.searchParams.get(key);
               if (v !== null) filters[key] = v;
             }
-            const items = await store.listResource(spec, {
+            const items = await auth.store.listResource(spec, {
               limit: queryInt(url, "limit"),
               offset: queryInt(url, "offset"),
               filters,
@@ -886,27 +908,27 @@ export async function handleSelfHostedRequest(
             const auth = await authenticate(deps, req, url, write);
             if (!auth.ok) return auth.response;
             const body = await readJsonBody(req);
-            return json(201, await store.createResource(spec, body));
+            return json(201, await auth.store.createResource(spec, body));
           }
           return json(405, { error: "method not allowed" });
         }
         if (method === "GET") {
           const auth = await authenticate(deps, req, url, read);
           if (!auth.ok) return auth.response;
-          const rec = await store.getResource(spec, id);
+          const rec = await auth.store.getResource(spec, id);
           return rec ? json(200, rec) : json(404, { error: `${spec.path} not found` });
         }
         if (method === "PATCH" || method === "PUT") {
           const auth = await authenticate(deps, req, url, write);
           if (!auth.ok) return auth.response;
           const body = await readJsonBody(req);
-          const rec = await store.updateResource(spec, id, body);
+          const rec = await auth.store.updateResource(spec, id, body);
           return rec ? json(200, rec) : json(404, { error: `${spec.path} not found` });
         }
         if (method === "DELETE") {
           const auth = await authenticate(deps, req, url, write);
           if (!auth.ok) return auth.response;
-          return (await store.deleteResource(spec, id))
+          return (await auth.store.deleteResource(spec, id))
             ? json(200, { deleted: true, id })
             : json(404, { error: `${spec.path} not found` });
         }
@@ -918,6 +940,11 @@ export async function handleSelfHostedRequest(
   } catch (err) {
     if (err instanceof RequestBodyTooLargeError) {
       return json(413, { error: "request body too large" });
+    }
+    if (err instanceof CrossTenantReferenceError) {
+      // A body-supplied FK id pointing at another tenant's row: treat as "not
+      // found" for this tenant (no cross-tenant existence is revealed).
+      return json(404, { error: `referenced ${err.column} not found`, reason: "cross_tenant_reference" });
     }
     if (err instanceof SyntaxError || (err instanceof Error && err.message.includes("JSON"))) {
       return json(400, { error: `invalid request body: ${err.message}` });
