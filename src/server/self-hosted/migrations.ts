@@ -585,9 +585,43 @@ const LEGACY_MESSAGES_BACKFILL_DEDUPE = defineMigration(
  * (`SET ... updated_at = now()`) works uniformly even on the audit-style tables
  * whose local originals had only created_at.
  */
-const PARITY_RESOURCE_SCHEMA = defineMigration(
+const PARITY_RESOURCE_SCHEMA = withAcceptedMigrationChecksums(defineMigration(
   "0009_emails_selfhosted_parity_tables",
   `
+  -- Idempotent type reconcile for operator databases whose parity tables were
+  -- created ad-hoc OUTSIDE this migration ledger with SQLite-ported types (an
+  -- earlier backfill built them with INTEGER booleans + TEXT json). On those
+  -- databases every CREATE TABLE IF NOT EXISTS below is a no-op, so the columns
+  -- keep their legacy INTEGER type and the boolean seed/ops fail. This helper
+  -- converts a legacy INTEGER boolean column to a real BOOLEAN, preserving a
+  -- boolean default + NOT NULL (any stray NULL is coalesced to the default). It
+  -- is a guarded no-op when the column is already boolean (a fresh DB, where the
+  -- CREATE TABLE below makes it boolean) or absent, so it is safe on BOTH
+  -- drifted-prod and fresh databases.
+  CREATE OR REPLACE FUNCTION pg_temp.emails_reconcile_bool(tbl text, col text, default_bool boolean)
+  RETURNS void
+  LANGUAGE plpgsql
+  AS $fn$
+  DECLARE
+    current_type  text;
+    default_token text := CASE WHEN default_bool THEN 'true' ELSE 'false' END;
+    fallback_int  text := CASE WHEN default_bool THEN '1' ELSE '0' END;
+  BEGIN
+    SELECT data_type INTO current_type
+      FROM information_schema.columns
+     WHERE table_schema = 'public' AND table_name = tbl AND column_name = col;
+    IF current_type IS NULL OR current_type = 'boolean' THEN
+      RETURN;
+    END IF;
+    EXECUTE format('ALTER TABLE %I ALTER COLUMN %I DROP DEFAULT', tbl, col);
+    EXECUTE format(
+      'ALTER TABLE %I ALTER COLUMN %I TYPE boolean USING (COALESCE(%I::int, %s)::boolean)',
+      tbl, col, col, fallback_int);
+    EXECUTE format('ALTER TABLE %I ALTER COLUMN %I SET DEFAULT %s', tbl, col, default_token);
+    EXECUTE format('ALTER TABLE %I ALTER COLUMN %I SET NOT NULL', tbl, col);
+  END;
+  $fn$;
+
   CREATE TABLE IF NOT EXISTS aliases (
     id             TEXT PRIMARY KEY,
     domain         TEXT NOT NULL,
@@ -702,6 +736,23 @@ const PARITY_RESOURCE_SCHEMA = defineMigration(
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
   );
+  -- Reconcile any legacy INTEGER boolean columns to real BOOLEAN BEFORE the
+  -- boolean seed/ops below. No-op on a fresh DB (the CREATE TABLE statements
+  -- above already made these boolean) and on any table that pre-existed with the
+  -- correct type; only a drifted ad-hoc table is actually converted.
+  SELECT pg_temp.emails_reconcile_bool('aliases',              'protected',         false);
+  SELECT pg_temp.emails_reconcile_bool('forwarding_rules',     'enabled',           true);
+  SELECT pg_temp.emails_reconcile_bool('email_agent_settings', 'enabled',           false);
+  SELECT pg_temp.emails_reconcile_bool('email_agent_settings', 'always_on',         false);
+  SELECT pg_temp.emails_reconcile_bool('email_agent_settings', 'apply_labels',      true);
+  SELECT pg_temp.emails_reconcile_bool('email_agent_settings', 'use_network_tools', true);
+
+  -- Guarantee the ON CONFLICT (agent_key) arbiter exists even on an ad-hoc table
+  -- that was created without the PRIMARY KEY. Redundant-but-harmless on a fresh
+  -- DB (agent_key is already the primary key).
+  CREATE UNIQUE INDEX IF NOT EXISTS email_agent_settings_agent_key_uidx
+    ON email_agent_settings (agent_key);
+
   INSERT INTO email_agent_settings (agent_key, enabled, always_on, provider, model, apply_labels, use_network_tools, config_json)
   VALUES
     ('categorizer', FALSE, FALSE, 'external', 'external-summary', FALSE, TRUE, '{}'::jsonb),
@@ -757,7 +808,14 @@ const PARITY_RESOURCE_SCHEMA = defineMigration(
   );
   CREATE INDEX IF NOT EXISTS email_digests_period_completed_idx ON email_digests (period, status, completed_at);
   `,
-);
+), [
+  // Original 0009 body (before the drifted-schema type reconcile was added).
+  // Accepting it keeps any database that already applied that body on a fresh
+  // schema — where the CREATE TABLE statements created the columns as BOOLEAN,
+  // so the added reconcile is a pure no-op there — compatible, while databases
+  // where 0009 is still pending run the corrected reconcile-safe body above.
+  "sha256:9ed139ed978774cd0e7dd616a86328ad47d2ad3a118d980e87995a8819263450",
+]);
 
 /**
  * Provisioning lifecycle STATE columns on domains and addresses (the local

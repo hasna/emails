@@ -245,4 +245,190 @@ describe("self-hosted Postgres integration", () => {
     await client!.execute("UPDATE send_keys SET revoked_at = now() WHERE id = $1", [key.id]);
     expect(await store.verifySendKey(token)).toBeNull();
   });
+
+  // Regression for the production redeploy blocker: an earlier backfill created
+  // the parity tables ad-hoc OUTSIDE the migration ledger with SQLite-ported
+  // types (INTEGER booleans, TEXT json) and NO primary key on
+  // email_agent_settings.agent_key. Against that drifted schema, 0009's
+  // `CREATE TABLE IF NOT EXISTS` no-ops so the columns keep INTEGER, and the
+  // boolean seed `INSERT ... VALUES (..., FALSE, ...)` failed with
+  // `column "enabled" is of type integer but expression is of type boolean`.
+  // This test recreates the drift, then asserts the FULL migration set applies,
+  // reconciles the boolean columns, seeds the agent settings (defensive
+  // ON CONFLICT arbiter), leaves the text-json columns writable, and is
+  // idempotent on a second run.
+  it.skipIf(!client)("migrates the drifted ad-hoc (integer-boolean / text-json) prod schema", async () => {
+    await resetPublicSchema();
+
+    // Base tables domains/addresses pre-exist with the drifted 0010 columns as
+    // TEXT (nameservers_json / next_check_at), so 0010's ADD COLUMN IF NOT EXISTS
+    // must no-op safely rather than choke on the type mismatch.
+    await client!.execute(`
+      CREATE TABLE domains (
+        id TEXT PRIMARY KEY,
+        domain TEXT NOT NULL UNIQUE,
+        status TEXT NOT NULL DEFAULT 'pending',
+        provider TEXT,
+        verified BOOLEAN NOT NULL DEFAULT FALSE,
+        notes TEXT,
+        provisioning_status TEXT,
+        nameservers_json TEXT,
+        next_check_at TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE TABLE addresses (
+        id TEXT PRIMARY KEY,
+        email TEXT NOT NULL UNIQUE,
+        domain TEXT,
+        display_name TEXT,
+        status TEXT NOT NULL DEFAULT 'active',
+        verified BOOLEAN NOT NULL DEFAULT FALSE,
+        daily_quota INTEGER,
+        provisioning_status TEXT,
+        last_validated_at TEXT,
+        next_check_at TEXT,
+        owner_id TEXT,
+        administrator_id TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
+      -- Drifted ad-hoc parity tables: INTEGER booleans, TEXT json, and
+      -- email_agent_settings has NO primary key on agent_key (worst case).
+      CREATE TABLE aliases (
+        id TEXT PRIMARY KEY,
+        domain TEXT NOT NULL,
+        local_part TEXT NOT NULL,
+        target_address TEXT NOT NULL DEFAULT '',
+        protected INTEGER NOT NULL DEFAULT 0,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE TABLE forwarding_rules (
+        id TEXT PRIMARY KEY,
+        source_address TEXT NOT NULL,
+        target_address TEXT NOT NULL,
+        mode TEXT NOT NULL DEFAULT 'app-copy',
+        provider_id TEXT,
+        from_address TEXT,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE TABLE email_agent_settings (
+        agent_key TEXT,
+        enabled INTEGER NOT NULL DEFAULT 0,
+        always_on INTEGER NOT NULL DEFAULT 0,
+        provider TEXT NOT NULL DEFAULT 'external',
+        model TEXT,
+        apply_labels INTEGER DEFAULT 1,
+        use_network_tools INTEGER DEFAULT 1,
+        config_json TEXT NOT NULL DEFAULT '{}',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      -- A pre-existing row (legacy integer boolean + text json) must survive the
+      -- type reconcile intact: enabled=1 -> true, apply_labels NULL -> default.
+      INSERT INTO email_agent_settings (agent_key, enabled, always_on, apply_labels, use_network_tools, config_json)
+      VALUES ('categorizer', 1, 0, NULL, 1, '{"seeded":true}');
+
+      -- A couple of text-json parity tables that pre-exist too (proves
+      -- CREATE TABLE IF NOT EXISTS no-ops and the store tolerates TEXT json).
+      CREATE TABLE events (
+        id TEXT PRIMARY KEY,
+        email_id TEXT,
+        provider_id TEXT,
+        provider_event_id TEXT,
+        type TEXT NOT NULL,
+        recipient TEXT,
+        metadata TEXT NOT NULL DEFAULT '{}',
+        occurred_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE TABLE provisioning_events (
+        id TEXT PRIMARY KEY,
+        entity_type TEXT NOT NULL,
+        entity_id TEXT NOT NULL,
+        from_state TEXT,
+        to_state TEXT NOT NULL,
+        detail_json TEXT NOT NULL DEFAULT '{}',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+    `);
+
+    // (b) run the FULL migration set against the drifted schema.
+    const ledger = new MigrationLedger(client!, emailsSelfHostedMigrations());
+    await ledger.migrate();
+    const applied = (await ledger.listApplied()).map((row) => row.id);
+    expect(applied).toContain("0009_emails_selfhosted_parity_tables");
+    expect(applied).toContain("0010_emails_selfhosted_provisioning_columns");
+    expect(applied).toContain("0011_emails_selfhosted_parity_tables_2");
+
+    // (c) reconciled boolean columns end up the correct type.
+    const boolType = async (table: string, column: string): Promise<string | null> => {
+      const row = await client!.get<{ data_type: string }>(
+        `SELECT data_type FROM information_schema.columns
+         WHERE table_schema = 'public' AND table_name = $1 AND column_name = $2`,
+        [table, column],
+      );
+      return row?.data_type ?? null;
+    };
+    expect(await boolType("aliases", "protected")).toBe("boolean");
+    expect(await boolType("forwarding_rules", "enabled")).toBe("boolean");
+    expect(await boolType("email_agent_settings", "enabled")).toBe("boolean");
+    expect(await boolType("email_agent_settings", "always_on")).toBe("boolean");
+    expect(await boolType("email_agent_settings", "apply_labels")).toBe("boolean");
+    expect(await boolType("email_agent_settings", "use_network_tools")).toBe("boolean");
+    // JSON columns are intentionally LEFT as text (tolerated by the store); the
+    // migration must not needlessly rewrite them.
+    expect(await boolType("email_agent_settings", "config_json")).toBe("text");
+    expect(await boolType("events", "metadata")).toBe("text");
+
+    // The pre-existing legacy row survived the reconcile with correct values.
+    const seededRow = await client!.get<{ enabled: boolean; apply_labels: boolean; config_json: string }>(
+      `SELECT enabled, apply_labels, config_json FROM email_agent_settings WHERE agent_key = $1`,
+      ["categorizer"],
+    );
+    expect(seededRow?.enabled).toBe(true); // legacy 1 -> true
+    expect(seededRow?.apply_labels).toBe(true); // legacy NULL -> default true
+
+    // The boolean seed INSERT (the exact statement that failed in prod) applied:
+    // the two NEW agent rows exist alongside the preserved legacy one.
+    const settings = await client!.many<{ agent_key: string }>(
+      `SELECT agent_key FROM email_agent_settings ORDER BY agent_key`,
+    );
+    expect(settings.map((r) => r.agent_key)).toEqual(["categorizer", "fraud", "labeler"]);
+
+    // 0010 no-op'd cleanly over the drifted text columns.
+    expect(await boolType("domains", "nameservers_json")).toBe("text");
+    expect(await boolType("domains", "next_check_at")).toBe("text");
+
+    // The store round-trips through the reconciled boolean + tolerated text-json.
+    const store = new EmailsSelfHostedStore(client!);
+    const fwd = await store.createResource(resourceSpecForPath("forwarding")!, {
+      source_address: "a@x.com", target_address: "b@x.com", mode: "app-copy", enabled: true,
+    });
+    expect(fwd["enabled"]).toBe(true);
+    const evt = await store.createResource(resourceSpecForPath("events")!, {
+      email_id: "m1", provider_id: "ses", type: "delivery", recipient: "b@x.com",
+      metadata: { foo: "bar" }, occurred_at: "2026-07-13T00:00:00.000Z",
+    });
+    // metadata was written via `$n::jsonb` into a TEXT column; it round-trips.
+    expect(JSON.parse(String(evt["metadata"]))).toEqual({ foo: "bar" });
+    const agent = await store.updateResource(resourceSpecForPath("email-agents")!, "labeler", { enabled: true });
+    expect(agent?.["enabled"]).toBe(true);
+
+    // Idempotency: a second full run over the now-reconciled schema is a clean
+    // no-op (the guarded reconcile skips already-boolean columns; every CREATE /
+    // ADD / seed is IF NOT EXISTS / ON CONFLICT DO NOTHING).
+    await new MigrationLedger(client!, emailsSelfHostedMigrations()).migrate();
+    expect(await boolType("email_agent_settings", "enabled")).toBe("boolean");
+    const settingsAfter = await client!.many<{ agent_key: string }>(
+      `SELECT agent_key FROM email_agent_settings ORDER BY agent_key`,
+    );
+    expect(settingsAfter.map((r) => r.agent_key)).toEqual(["categorizer", "fraud", "labeler"]);
+  });
 });
