@@ -36,3 +36,4 @@ bun-debug.log*
 # Coverage
 coverage/
 .nyc_output/
+.prod-full-schema.sql
