@@ -10,15 +10,12 @@ export const allCommandModules = [
   "email-log",
   "sync",
   "serve",
-  "config",
   "templates",
   "contacts",
   "groups",
   "sequences",
-  "sandbox",
   "misc",
   "inbox",
-  "refresh",
   "provision",
   "owner",
   "alias",
@@ -57,14 +54,12 @@ export const knownCommandNames = new Set([
   "analytics",
   "serve",
   "mcp",
-  "config",
   "template",
   "preview",
   "contact",
   "contacts",
   "group",
   "sequence",
-  "sandbox",
   "schedule",
   "scheduled",
   "scheduler",
@@ -75,7 +70,6 @@ export const knownCommandNames = new Set([
   "verify-email",
   "inbox",
   "code",
-  "refresh",
   "provision",
   "owner",
   "alias",
@@ -132,14 +126,12 @@ export function commandModulesFor(args: string[]): readonly CommandModule[] {
     case "analytics": return ["sync"];
     case "serve":
     case "mcp": return ["serve"];
-    case "config": return ["config"];
     case "template":
     case "preview": return ["templates"];
     case "contact":
     case "contacts": return ["contacts"];
     case "group": return ["groups"];
     case "sequence": return ["sequences"];
-    case "sandbox": return ["sandbox"];
     case "schedule":
     case "scheduled":
     case "scheduler":
@@ -151,7 +143,6 @@ export function commandModulesFor(args: string[]): readonly CommandModule[] {
     case "inbox":
     case "code":
     case "links": return ["inbox"];
-    case "refresh": return ["refresh"];
     case "provision": return ["provision"];
     case "owner": return ["owner"];
     case "alias": return ["alias"];

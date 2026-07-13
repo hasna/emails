@@ -1,44 +1,45 @@
 import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
-import { createAddress, findAddressesByEmail, listAddressEmails, listAddresses, deleteAddress, getAddress, getAddressByEmail } from "../../db/addresses.js";
-import { getDomainByName } from "../../db/domains.js";
-import { suspendAddress, activateAddress, setAddressQuota, countSendsTodayByAddress } from "../../db/address-lifecycle.js";
-import { getProvider } from "../../db/providers.js";
-import { getDatabase } from "../../db/database.js";
-import { isSelfHostedMode } from "../../db/self-hosted-store.js";
-import { getAdapter } from "../../providers/index.js";
-import { colorDnsStatus, tableRow, truncate } from "../../lib/format.js";
+import { createAddress, findAddressesByEmail, listAddresses, deleteAddress, getAddress, getAddressByEmail } from "../../db/addresses.js";
+import { suspendAddress, activateAddress, setAddressQuota } from "../../db/address-lifecycle.js";
+import { tableRow, truncate } from "../../lib/format.js";
 import { confirmDestructiveAction, formatListHint, handleError, isCliVerboseOutput, parseCliListPage, resolveId } from "../utils.js";
-import { getAddressProvisioning, setAddressProvisioning } from "../../db/provisioning.js";
-import {
-  getAddressOwnershipDetail,
-  getAddressOwnershipHistoryByRef,
-  listEnrichedAddresses,
-  setAddressOwnerByRef,
-  suggestAddressLocalParts,
-  transferAddressOwnerByRef,
-  unassignAddressOwnerByRef,
-} from "../../lib/address-ownership.js";
 
-type ReceiveStrategy = "ses-s3" | "cf-routing" | "resend-webhook";
+/** Pure sender-address suggestions for a domain (no local state; excludes existing). */
+function suggestAddressLocalParts(domain: string, existingEmails: string[]): string[] {
+  const normalized = domain.trim().toLowerCase();
+  const used = new Set(
+    existingEmails
+      .map((email) => email.trim().toLowerCase())
+      .filter((email) => email.endsWith(`@${normalized}`))
+      .map((email) => email.split("@")[0]),
+  );
+  const candidates = [
+    "hello", "hi", "contact", "support", "team", "admin", "inbox",
+    "mail", "me", "bot", "agent", "verify", "accounts", "notify",
+  ];
+  return candidates.filter((local) => !used.has(local)).slice(0, 8).map((local) => `${local}@${normalized}`);
+}
 
-function selfHostedLocalOnly(command: string): void {
-  if (!isSelfHostedMode()) return;
-  handleError(new Error(
-    `\`${command}\` is local-mode-only and unavailable in self_hosted API-only mode. ` +
-      "Use the self-hosted server/operator API/workers for address lifecycle changes, " +
-      "or set EMAILS_MODE=local intentionally to use local SQLite/config state.",
-  ));
+// Address ownership (owner/admin/audit history) and the local address
+// provisioning orchestration (S3/SES receive setup, provisioning ledger) have
+// no /v1 equivalent in this self-hosted-only client: they are owned by the
+// self-hosted server. These commands are kept for discoverability but fail
+// loud.
+function serverOnly(command: string): never {
+  throw new Error(
+    `${command} is not available in the self-hosted client; it runs on the self-hosted server.`,
+  );
 }
 
 function resolveSelfHostedAddressId(ref: string): string {
   const exact = getAddress(ref);
   if (exact) return exact.id;
-  const matches = listAddresses(undefined, undefined, { limit: 1000 })
+  const matches = listAddresses(undefined, { limit: 1000 })
     .filter((address) => address.id.startsWith(ref));
   if (matches.length === 1) return matches[0]!.id;
   if (matches.length > 1) {
-    handleError(new Error(`Address ID is ambiguous in self_hosted mode: ${matches.map((address) => address.id.slice(0, 8)).join(", ")}`));
+    handleError(new Error(`Address ID is ambiguous: ${matches.map((address) => address.id.slice(0, 8)).join(", ")}`));
   }
   handleError(new Error(`Address not found: ${ref}`));
 }
@@ -48,96 +49,34 @@ export function registerAddressCommands(program: Command, output: (data: unknown
 
   const listAddressesAction = (opts: { provider?: string; limit?: string; offset?: string; verbose?: boolean }) => {
     try {
-      if (isSelfHostedMode()) {
-        const page = parseCliListPage(opts);
-        const addresses = listAddresses(opts.provider, undefined, page).map((address) => ({
-          ...address,
-          provider_name: null,
-          owner: null,
-          administrator: null,
-        }));
-        if (addresses.length === 0) {
-          output([], chalk.dim("No addresses configured."));
-          return;
-        }
-        const lines: string[] = [chalk.bold("\nAddresses:")];
-        lines.push(tableRow(
-          [chalk.bold("ID"), 8],
-          [chalk.bold("Email"), 36],
-          [chalk.bold("Provider"), 16],
-          [chalk.bold("State"), 10],
-          [chalk.bold("Owner"), 18],
-        ));
-        for (const a of addresses) {
-          const state = `${a.verified ? "verified" : "pending"}/${a.status}`;
-          lines.push(tableRow(
-            [chalk.cyan(a.id.slice(0, 8)), 8],
-            [truncate(a.email, 36), 36],
-            [truncate(a.provider_id || "self_hosted", 16), 16],
-            [state, 10],
-            ["-", 18],
-          ));
-        }
-        lines.push("");
-        lines.push(formatListHint({
-          shown: addresses.length,
-          limit: page.limit,
-          offset: page.offset,
-          noun: "address",
-          detailCommand: "use the self-hosted operator API for address lifecycle details",
-          verbose: opts.verbose || isCliVerboseOutput(),
-        }));
-        output(addresses, lines.join("\n"));
-        return;
-      }
-
-      const db = getDatabase();
-      const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
       const page = parseCliListPage(opts);
-      const addresses = listEnrichedAddresses(providerId, db, page);
+      const addresses = listAddresses(opts.provider, page).map((address) => ({
+        ...address,
+        provider_name: null,
+        owner: null,
+        administrator: null,
+      }));
       if (addresses.length === 0) {
         output([], chalk.dim("No addresses configured."));
         return;
       }
-      const verbose = opts.verbose || isCliVerboseOutput();
       const lines: string[] = [chalk.bold("\nAddresses:")];
-      if (verbose) {
-        const quotaCounts = countSendsTodayByAddress(
-          addresses.filter((address) => address.daily_quota !== null).map((address) => address.email),
-          db,
-        );
-        for (const a of addresses) {
-          const verified = a.verified ? colorDnsStatus("verified") : colorDnsStatus("pending");
-          const name = a.display_name ? ` (${a.display_name})` : "";
-          const status = a.status === "suspended" ? chalk.red("suspended") : chalk.green("active");
-          const quota = a.daily_quota !== null ? chalk.dim(`  quota ${quotaCounts.get(a.email.trim().toLowerCase()) ?? 0}/${a.daily_quota}/day`) : "";
-          const owner = a.owner
-            ? chalk.dim(`  owner ${a.owner.name} (${a.owner.type})`)
-            : chalk.dim("  owner none");
-          const administrator = a.administrator && (!a.owner || a.administrator.id !== a.owner.id)
-            ? chalk.dim(`  admin ${a.administrator.name}`)
-            : "";
-          lines.push(`  ${chalk.cyan(a.id.slice(0, 8))}  ${a.email}${name}  [${verified}] [${status}]${quota}${owner}${administrator}`);
-        }
-      } else {
+      lines.push(tableRow(
+        [chalk.bold("ID"), 8],
+        [chalk.bold("Email"), 36],
+        [chalk.bold("Provider"), 16],
+        [chalk.bold("State"), 10],
+        [chalk.bold("Owner"), 18],
+      ));
+      for (const a of addresses) {
+        const state = `${a.verified ? "verified" : "pending"}/${a.status}`;
         lines.push(tableRow(
-          [chalk.bold("ID"), 8],
-          [chalk.bold("Email"), 36],
-          [chalk.bold("Provider"), 16],
-          [chalk.bold("State"), 10],
-          [chalk.bold("Owner"), 18],
+          [chalk.cyan(a.id.slice(0, 8)), 8],
+          [truncate(a.email, 36), 36],
+          [truncate(a.provider_id || "self_hosted", 16), 16],
+          [state, 10],
+          ["-", 18],
         ));
-        for (const a of addresses) {
-          const state = `${a.verified ? "verified" : "pending"}/${a.status}`;
-          const owner = a.owner ? `${a.owner.name}${a.administrator && a.administrator.id !== a.owner.id ? `:${a.administrator.name}` : ""}` : "-";
-          lines.push(tableRow(
-            [chalk.cyan(a.id.slice(0, 8)), 8],
-            [truncate(a.email, 36), 36],
-            [truncate(a.provider_name ?? a.provider_id.slice(0, 8), 16), 16],
-            [state, 10],
-            [truncate(owner, 18), 18],
-          ));
-        }
       }
       lines.push("");
       lines.push(formatListHint({
@@ -145,8 +84,8 @@ export function registerAddressCommands(program: Command, output: (data: unknown
         limit: page.limit,
         offset: page.offset,
         noun: "address",
-        detailCommand: "use emails address owner <email-or-id> for ownership details",
-        verbose,
+        detailCommand: "use the self-hosted operator API for address lifecycle details",
+        verbose: opts.verbose || isCliVerboseOutput(),
       }));
       output(addresses, lines.join("\n"));
     } catch (e) {
@@ -170,37 +109,15 @@ export function registerAddressCommands(program: Command, output: (data: unknown
     .option("--name <displayName>", "Display name")
     .action(async (email: string, opts: { provider: string; name?: string }) => {
       try {
-        // Self-hosted (self_hosted) mode: addresses are created directly on the app's
-        // self_hosted HTTP API (<API_URL>/v1/addresses). Providers are a local-only
-        // concept (the self_hosted API exposes no /v1/providers), so we do NOT resolve
-        // a local provider row or invoke a provider adapter — `--provider` is
-        // carried through as a label. Mirrors `domain add`'s self_hosted passthrough so
-        // `address add` is a real self_hosted write that never touches the local store.
-        if (isSelfHostedMode()) {
-          const existing = getAddressByEmail(opts.provider, email);
-          if (existing) {
-            output(existing, chalk.green(`✓ Address already exists: ${email} (${existing.id.slice(0, 8)})`));
-            return;
-          }
-          const addr = createAddress({ provider_id: opts.provider, email, display_name: opts.name });
-          output(addr, chalk.green(`✓ Address added to self_hosted: ${email} (${addr.id.slice(0, 8)})`));
-          return;
-        }
-
-        const providerId = resolveId("providers", opts.provider);
-        const provider = getProvider(providerId);
-        if (!provider) handleError(new Error(`Provider not found: ${opts.provider}`));
-
-        const existing = getAddressByEmail(providerId, email);
+        // Addresses are created directly on the app's /v1/addresses API. Providers
+        // are a label carried through (the /v1 API exposes no /v1/providers), so we
+        // do NOT resolve a local provider row or invoke a provider adapter.
+        const existing = getAddressByEmail(opts.provider, email);
         if (existing) {
           output(existing, chalk.green(`✓ Address already exists: ${email} (${existing.id.slice(0, 8)})`));
           return;
         }
-
-        const adapter = getAdapter(provider!);
-        await adapter.addAddress(email);
-
-        const addr = createAddress({ provider_id: providerId, email, display_name: opts.name });
+        const addr = createAddress({ provider_id: opts.provider, email, display_name: opts.name });
         output(addr, chalk.green(`✓ Address added: ${email} (${addr.id.slice(0, 8)})`));
       } catch (e) {
         handleError(e);
@@ -219,31 +136,8 @@ export function registerAddressCommands(program: Command, output: (data: unknown
   addressCmd
     .command("owner <email-or-id>")
     .description("Show owner and administering agent for an address")
-    .action((ref: string) => {
-      try {
-        selfHostedLocalOnly("emails address owner");
-        const detail = getAddressOwnershipDetail(ref);
-        const owner = detail.address.owner;
-        const administrator = detail.address.administrator;
-        const lines = [chalk.bold(`\n${detail.address.email}`)];
-        lines.push(`  ID:       ${detail.address.id}`);
-        lines.push(`  Provider: ${detail.address.provider_name ?? detail.address.provider_id}`);
-        lines.push(owner
-          ? `  Owner:    ${owner.name} (${owner.type}) ${chalk.dim(owner.id)}`
-          : `  Owner:    ${chalk.dim("none")}`);
-        lines.push(administrator
-          ? `  Admin:    ${administrator.name} (${administrator.type}) ${chalk.dim(administrator.id)}`
-          : `  Admin:    ${chalk.dim("none")}`);
-        const lastChange = detail.history[0];
-        if (lastChange) {
-          lines.push(`  Changed:  ${lastChange.action} at ${lastChange.created_at}${lastChange.actor ? ` by ${lastChange.actor}` : ""}`);
-          if (lastChange.reason) lines.push(`  Reason:   ${lastChange.reason}`);
-        }
-        lines.push("");
-        output(detail, lines.join("\n"));
-      } catch (e) {
-        handleError(e);
-      }
+    .action(() => {
+      try { serverOnly("emails address owner"); } catch (e) { handleError(e); }
     });
 
   addressCmd
@@ -251,16 +145,8 @@ export function registerAddressCommands(program: Command, output: (data: unknown
     .description("Assign address ownership; human owners require an agent administrator")
     .requiredOption("--owner <name-or-id>", "Owner name, ID, or ID prefix")
     .option("--administrator <name-or-id>", "Administering agent name, ID, or ID prefix")
-    .action((ref: string, opts: { owner: string; administrator?: string }) => {
-      try {
-        selfHostedLocalOnly("emails address set-owner");
-        const detail = setAddressOwnerByRef(ref, opts.owner, opts.administrator);
-        const owner = detail.address.owner!;
-        const administrator = detail.address.administrator!;
-        output(detail, chalk.green(`✓ ${detail.address.email} owned by ${owner.name} (${owner.type}), administered by ${administrator.name}`));
-      } catch (e) {
-        handleError(e);
-      }
+    .action(() => {
+      try { serverOnly("emails address set-owner"); } catch (e) { handleError(e); }
     });
 
   addressCmd
@@ -271,18 +157,8 @@ export function registerAddressCommands(program: Command, output: (data: unknown
     .requiredOption("--reason <reason>", "Reason recorded in the ownership audit log")
     .option("--actor <actor>", "Actor recorded in the ownership audit log", "cli")
     .option("--yes", "Skip confirmation prompt")
-    .action(async (ref: string, opts: { owner: string; administrator?: string; reason: string; actor?: string; yes?: boolean }) => {
-      try {
-        selfHostedLocalOnly("emails address transfer-owner");
-        const before = getAddressOwnershipDetail(ref);
-        await confirmDestructiveAction(`Transfer owner for ${before.address.email} to ${opts.owner}?`, opts.yes);
-        const detail = transferAddressOwnerByRef(ref, opts.owner, opts.administrator, { actor: opts.actor, reason: opts.reason });
-        const owner = detail.address.owner!;
-        const administrator = detail.address.administrator!;
-        output(detail, chalk.green(`✓ ${detail.address.email} transferred to ${owner.name} (${owner.type}), administered by ${administrator.name}`));
-      } catch (e) {
-        handleError(e);
-      }
+    .action(async () => {
+      try { serverOnly("emails address transfer-owner"); } catch (e) { handleError(e); }
     });
 
   addressCmd
@@ -291,43 +167,16 @@ export function registerAddressCommands(program: Command, output: (data: unknown
     .requiredOption("--reason <reason>", "Reason recorded in the ownership audit log")
     .option("--actor <actor>", "Actor recorded in the ownership audit log", "cli")
     .option("--yes", "Skip confirmation prompt")
-    .action(async (ref: string, opts: { reason: string; actor?: string; yes?: boolean }) => {
-      try {
-        selfHostedLocalOnly("emails address unassign-owner");
-        const before = getAddressOwnershipDetail(ref);
-        await confirmDestructiveAction(`Clear owner/admin assignment for ${before.address.email}?`, opts.yes);
-        const detail = unassignAddressOwnerByRef(ref, { actor: opts.actor, reason: opts.reason });
-        output(detail, chalk.green(`✓ ${detail.address.email} is now unowned`));
-      } catch (e) {
-        handleError(e);
-      }
+    .action(async () => {
+      try { serverOnly("emails address unassign-owner"); } catch (e) { handleError(e); }
     });
 
   addressCmd
     .command("owner-history <email-or-id>")
     .description("Show ownership/admin change history for an address")
     .option("--limit <n>", "Maximum events to show", "20")
-    .action((ref: string, opts: { limit: string }) => {
-      try {
-        selfHostedLocalOnly("emails address owner-history");
-        const limit = Math.max(1, Math.min(100, parseInt(opts.limit, 10) || 20));
-        const detail = getAddressOwnershipHistoryByRef(ref, limit);
-        const lines = [chalk.bold(`\nOwnership history: ${detail.address.email}`)];
-        if (detail.history.length === 0) {
-          lines.push(chalk.dim("  No ownership changes recorded."));
-        } else {
-          for (const event of detail.history) {
-            const owner = event.owner_id ? event.owner_id.slice(0, 8) : "none";
-            const admin = event.administrator_id ? event.administrator_id.slice(0, 8) : "none";
-            lines.push(`  ${event.created_at}  ${event.action}  owner=${owner} admin=${admin}${event.actor ? ` actor=${event.actor}` : ""}`);
-            if (event.reason) lines.push(chalk.dim(`    ${event.reason}`));
-          }
-        }
-        lines.push("");
-        output(detail, lines.join("\n"));
-      } catch (e) {
-        handleError(e);
-      }
+    .action(() => {
+      try { serverOnly("emails address owner-history"); } catch (e) { handleError(e); }
     });
 
   addressCmd
@@ -337,9 +186,7 @@ export function registerAddressCommands(program: Command, output: (data: unknown
     .action((opts: { domain: string }) => {
       try {
         const domain = opts.domain.trim().toLowerCase();
-        const exists = isSelfHostedMode()
-          ? listAddresses(undefined, undefined, { limit: 1000 }).map((address) => address.email)
-          : listAddressEmails(undefined, getDatabase());
+        const exists = listAddresses(undefined, { limit: 1000 }).map((address) => address.email);
         const suggestions = suggestAddressLocalParts(domain, exists);
         output({ domain, suggestions }, suggestions.length ? suggestions.join("\n") : chalk.dim(`No obvious suggestions left for ${domain}.`));
       } catch (e) {
@@ -361,106 +208,8 @@ export function registerAddressCommands(program: Command, output: (data: unknown
     .option("--timeout <sec>", "Max seconds to wait when --wait is used", "120")
     .option("--interval <sec>", "Seconds between readiness checks when --wait is used", "5")
     .option("--bucket <name>", "Inbound S3 bucket for receive validation (defaults to config inbound_s3_bucket)")
-    .action(async (email: string, opts: {
-      provider: string;
-      domain?: string;
-      receive: string;
-      forwardTo?: string;
-      owner?: string;
-      administrator?: string;
-      dryRun?: boolean;
-      wait?: boolean;
-      timeout: string;
-      interval: string;
-      bucket?: string;
-    }) => {
-      try {
-        selfHostedLocalOnly("emails address provision");
-        const db = getDatabase();
-        const providerId = resolveId("providers", opts.provider);
-        const provider = getProvider(providerId);
-        if (!provider) handleError(new Error(`Provider not found: ${opts.provider}`));
-        const existing = getAddressByEmail(providerId, email, db);
-        const domainName = email.split("@")[1];
-        const domainId = opts.domain ? resolveId("domains", opts.domain) : (domainName ? getDomainByName(providerId, domainName, db)?.id ?? null : null);
-        const plannedProvisioning = {
-          domain_id: domainId,
-          receive_strategy: opts.receive as ReceiveStrategy,
-          forward_to: opts.forwardTo ?? null,
-          provisioning_status: "requested" as const,
-          next_check_at: new Date().toISOString(),
-        };
-
-        if (opts.dryRun) {
-          output({
-            dry_run: true,
-            id: existing?.id ?? null,
-            email,
-            provider_id: providerId,
-            domain_id: domainId,
-            receive: opts.receive,
-            existing: !!existing,
-            would_create_address: !existing,
-            would_update_provisioning: true,
-            would_assign_owner: !!opts.owner,
-            current_provisioning: existing ? getAddressProvisioning(existing.id, db) : null,
-            planned_provisioning: plannedProvisioning,
-            cli_equivalent: `emails address provision ${email} --provider ${opts.provider}${opts.owner ? ` --owner ${opts.owner}` : ""}${opts.wait ? " --wait" : ""} --json`,
-          }, existing
-            ? chalk.dim(`Would update provisioning for existing address ${email} (${existing.id.slice(0, 8)}).`)
-            : chalk.dim(`Would create ${email} and request ${opts.receive} receive provisioning.`));
-          return;
-        }
-
-        const addr = existing ?? createAddress({ provider_id: providerId, email }, db);
-
-        setAddressProvisioning(addr.id, plannedProvisioning, db);
-
-        let ownership = opts.owner ? setAddressOwnerByRef(addr.id, opts.owner, opts.administrator, db) : null;
-        let provisioning = getAddressProvisioning(addr.id, db);
-
-        if (opts.wait) {
-          const { getInboundConfig } = await import("../../lib/config.js");
-          const cfg = getInboundConfig();
-          if (cfg.profile) process.env["AWS_PROFILE"] = cfg.profile;
-          const bucket = opts.bucket ?? cfg.bucket;
-          if (!bucket) handleError(new Error("No inbound bucket: pass --bucket or set inbound_s3_bucket"));
-
-          const { makeAddressDeps } = await import("../../lib/provision/real-deps.js");
-          const { advanceAddress } = await import("../../lib/provision/orchestrator.js");
-          const deps = makeAddressDeps({ provider: provider!, inboundBucket: bucket!, region: cfg.region, db });
-          const deadline = Date.now() + Math.max(1, parseInt(opts.timeout, 10) || 120) * 1000;
-          const intervalMs = Math.max(1, parseInt(opts.interval, 10) || 5) * 1000;
-
-          while (Date.now() < deadline) {
-            provisioning = getAddressProvisioning(addr.id, db);
-            if (provisioning?.provisioning_status === "ready") break;
-            if (provisioning?.provisioning_status === "failed") {
-              handleError(new Error(`Address provisioning failed: ${provisioning.last_error ?? "unknown error"}`));
-            }
-            const res = await advanceAddress(addr.id, deps, { db, now: new Date().toISOString() });
-            provisioning = getAddressProvisioning(addr.id, db);
-            if (provisioning?.provisioning_status === "ready") break;
-            if (res.error || provisioning?.provisioning_status === "failed") {
-              handleError(new Error(`Address provisioning failed: ${res.error ?? provisioning?.last_error ?? "unknown error"}`));
-            }
-            await new Promise((resolve) => setTimeout(resolve, intervalMs));
-          }
-
-          provisioning = getAddressProvisioning(addr.id, db);
-          if (provisioning?.provisioning_status !== "ready") {
-            handleError(new Error(`Timed out waiting for ${email} to become ready (current=${provisioning?.provisioning_status ?? "unknown"})`));
-          }
-        }
-
-        ownership = ownership ?? getAddressOwnershipDetail(addr.id, db);
-        const readyText = provisioning?.provisioning_status === "ready"
-          ? chalk.green(`✓ address ${email} ready to receive (receive=${opts.receive})`)
-          : chalk.green(`✓ address ${email} requested (receive=${opts.receive})`) + chalk.dim(`\n  Finish now: emails address provision ${email} --provider ${opts.provider} --wait`);
-        output({ id: addr.id, email, receive: opts.receive, created: !existing, provisioning, ownership }, readyText);
-      } catch (e) {
-        handleError(e);
-      }
+    .action(async () => {
+      try { serverOnly("emails address provision"); } catch (e) { handleError(e); }
     });
 
   addressCmd
@@ -469,39 +218,14 @@ export function registerAddressCommands(program: Command, output: (data: unknown
     .option("--provider <id>", "Provider ID")
     .action(async (email: string, opts: { provider?: string }) => {
       try {
-        // Self-hosted (self_hosted) mode: providers are a local-only concept and the
-        // self_hosted API exposes no /v1/providers, so we cannot resolve a local
-        // provider row or invoke a provider adapter here (that path would fail
-        // with "Provider not found"). The self_hosted address record is the source of
-        // truth for verification state — report its `verified` flag directly.
-        // Mirrors `address add`'s self_hosted passthrough.
-        if (isSelfHostedMode()) {
-          const providerFilter = opts.provider;
-          const found = findAddressesByEmail(email).find(
-            (a) => !providerFilter || a.provider_id === providerFilter,
-          );
-          if (!found) handleError(new Error(`Address not found: ${email}`));
-          if (found!.verified) {
-            console.log(chalk.green(`✓ ${email} is verified`));
-          } else {
-            console.log(chalk.yellow(`⚠ ${email} is not yet verified`));
-          }
-          return;
-        }
-
-        const db = getDatabase();
-        const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
-        const found = findAddressesByEmail(email, db).find((a) => !providerId || a.provider_id === providerId);
+        // Providers are a label; the /v1 address record is the source of truth for
+        // verification state — report its `verified` flag directly.
+        const providerFilter = opts.provider;
+        const found = findAddressesByEmail(email).find(
+          (a) => !providerFilter || a.provider_id === providerFilter,
+        );
         if (!found) handleError(new Error(`Address not found: ${email}`));
-
-        const provider = getProvider(found!.provider_id);
-        if (!provider) handleError(new Error("Provider not found"));
-
-        const adapter = getAdapter(provider!);
-        const isVerified = await adapter.verifyAddress(email);
-
-        if (isVerified) {
-          db.run("UPDATE addresses SET verified = 1, updated_at = datetime('now') WHERE id = ?", [found!.id]);
+        if (found!.verified) {
           console.log(chalk.green(`✓ ${email} is verified`));
         } else {
           console.log(chalk.yellow(`⚠ ${email} is not yet verified`));
@@ -517,16 +241,7 @@ export function registerAddressCommands(program: Command, output: (data: unknown
     .option("--yes", "Skip confirmation prompt")
     .action(async (id: string, opts: { yes?: boolean }) => {
       try {
-        if (isSelfHostedMode()) {
-          const resolvedId = resolveSelfHostedAddressId(id);
-          const addr = getAddress(resolvedId);
-          if (!addr) handleError(new Error(`Address not found: ${id}`));
-          await confirmDestructiveAction(`Remove sender address ${addr.email}?`, opts.yes);
-          deleteAddress(resolvedId);
-          console.log(chalk.green(`✓ Address removed: ${addr.email}`));
-          return;
-        }
-        const resolvedId = resolveId("addresses", id);
+        const resolvedId = resolveSelfHostedAddressId(id);
         const addr = getAddress(resolvedId);
         if (!addr) handleError(new Error(`Address not found: ${id}`));
         await confirmDestructiveAction(`Remove sender address ${addr.email}?`, opts.yes);
@@ -542,7 +257,6 @@ export function registerAddressCommands(program: Command, output: (data: unknown
     .description("Suspend a sender address (blocks sending until reactivated)")
     .action((id: string) => {
       try {
-        selfHostedLocalOnly("emails address suspend");
         const resolvedId = resolveId("addresses", id);
         if (!getAddress(resolvedId)) handleError(new Error(`Address not found: ${id}`));
         const a = suspendAddress(resolvedId);
@@ -557,7 +271,6 @@ export function registerAddressCommands(program: Command, output: (data: unknown
     .description("Reactivate a suspended sender address")
     .action((id: string) => {
       try {
-        selfHostedLocalOnly("emails address activate");
         const resolvedId = resolveId("addresses", id);
         if (!getAddress(resolvedId)) handleError(new Error(`Address not found: ${id}`));
         const a = activateAddress(resolvedId);
@@ -572,7 +285,6 @@ export function registerAddressCommands(program: Command, output: (data: unknown
     .description("Set a daily send quota for an address (use 'none' to clear)")
     .action((id: string, perDay: string) => {
       try {
-        selfHostedLocalOnly("emails address quota");
         const resolvedId = resolveId("addresses", id);
         if (!getAddress(resolvedId)) handleError(new Error(`Address not found: ${id}`));
         const quota = /^(none|null|unlimited|0?)$/i.test(perDay) && perDay !== "0"

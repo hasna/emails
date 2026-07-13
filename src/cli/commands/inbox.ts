@@ -1,28 +1,11 @@
 import type { Command } from "commander";
 import type { EmailSystemStatus } from "../../lib/agent-context.js";
 import chalk from "../../lib/chalk-lite.js";
-import {
-  getInboundEmailSummary,
-  getReceivedInboundCount, getLatestReceivedInboundAt,
-  getUnreadCount, normalizeEmailAddress,
-} from "../../db/inbound.js";
-import { listProviderNamesByIds } from "../../db/providers.js";
-import { getDatabase, resolvePartialIdOrThrow } from "../../db/database.js";
 import { confirmDestructiveAction, handleError } from "../utils.js";
-import { enrichAddresses } from "../../lib/address-ownership.js";
 import { extractEmailLinks, formatEmailLinks, type ExtractedEmailLink } from "../../lib/email-links.js";
 import { formatAttachmentSize, mergeAttachmentDetails, type AttachmentDetail } from "../../lib/attachment-actions.js";
-import { openLocalTarget } from "../../lib/local-actions.js";
-import { resolveAlias } from "../../db/aliases.js";
-import { findAddressesByEmail } from "../../db/addresses.js";
-import { findDomainsByName } from "../../db/domains.js";
-import { listAddressProvisioningByIds, listDomainProvisioningByIds, listReadyAddressCountsByDomains } from "../../db/provisioning.js";
-import { sqlEmailAddress } from "../../db/email-address-sql.js";
-import { assessDomainReadiness } from "../../lib/domain-readiness.js";
-import { domainInboundReadinessSignals } from "../../lib/domain-inbound-evidence.js";
-import { resolveEmailsMode } from "../../lib/mode.js";
 import { resolveMailDataSource, type MailDataSource } from "../../lib/mail-data-source.js";
-import { readableMessageText, renderReadableEmailDocument } from "../tui/format.js";
+import { readableMessageText } from "../tui/format.js";
 import type {
   Mailbox,
   MailboxSource,
@@ -46,10 +29,6 @@ function messageOnOrAfter(message: TuiMessage, since: string | undefined): boole
   if (!since) return true;
   const time = Date.parse(message.date);
   return Number.isFinite(time) && time >= Date.parse(since);
-}
-
-function resolveInboundEmailId(id: string): string {
-  return resolvePartialIdOrThrow(getDatabase(), "inbound_emails", id);
 }
 
 // Resolve a possibly-short id (the 8-char id printed by `inbox list`) to a full id
@@ -171,28 +150,20 @@ function mailboxSourceFromOptions(opts: { source?: string; provider?: string; ad
   return source;
 }
 
-async function runAutoPull(opts: { s3?: boolean; limit?: number }) {
-  // Auto-pull is LOCAL S3 ingestion. In self_hosted mode the API is the source of truth and
-  // each poll re-reads it through the seam, so there is nothing to pull.
-  if (resolveMailDataSource().mode !== "local") return { pulled: 0, ok: true, configured: false, reason: "self_hosted mode" };
-  const { autoPull } = await import("../tui/autopull.js");
-  return autoPull(opts);
+async function runAutoPull(_opts: { s3?: boolean; limit?: number }) {
+  // Auto-pull was LOCAL S3 ingestion. This client is self-hosted-only: the /v1 API
+  // is the source of truth and each read re-fetches it, so there is nothing to pull.
+  return { pulled: 0, ok: true, configured: false, reason: "self_hosted mode" };
 }
 
-function failIfSelfHostedLocalIngestion(command: string): void {
-  if (resolveEmailsMode().mode !== "self_hosted") return;
+// Local S3/SES ingestion, realtime wiring, SMTP listeners and local routing
+// diagnostics have no /v1 equivalent in this self-hosted-only client: production
+// ingestion runs on the self-hosted API/worker. These commands are kept for
+// discoverability but fail loud. Use `emails inbox list/read/mark-read/status`
+// (API-backed) for the mail view.
+function serverOnly(command: string): never {
   throw new Error(
-    `\`emails inbox ${command}\` is unavailable in self_hosted mode because it starts local ingestion or listeners. ` +
-    "Production ingestion belongs to the self_hosted API/worker. Run the self-hosted worker/service ingestion path, or set EMAILS_MODE=local for explicit OSS local-mode ingestion.",
-  );
-}
-
-function failIfSelfHostedLocalInboxControl(command: string, reason: string): void {
-  if (resolveEmailsMode().mode !== "self_hosted") return;
-  throw new Error(
-    `\`emails inbox ${command}\` is unavailable in self_hosted API-only mode because it ${reason}. ` +
-    "Provision SES/SNS/SQS in the operator environment, then run `emails-serve ingest-worker` on the self-hosted server with EMAILS_INGEST_QUEUE_URL, EMAILS_INGEST_S3_BUCKET, and EMAILS_DATABASE_URL. " +
-    "Use API-backed `emails inbox sync-status`, `emails inbox mailboxes`, or `emails inbox sources` for client status; set EMAILS_MODE=local only for explicit local-mode realtime/S3 control.",
+    `emails inbox ${command} is not available in the self-hosted client; it runs on the self-hosted server.`,
   );
 }
 
@@ -506,39 +477,10 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
           output({ unread: counts.unread }, String(counts.unread));
           return;
         }
-        // --by-address is a local-only SQL rollup over inbound_recipients; there is no
-        // server endpoint for it. In self_hosted mode fail cleanly instead of querying the
-        // empty local DB (which would misleadingly report zero unread).
-        if (resolveMailDataSource().mode !== "local") {
-          handleError(new Error("`inbox unread-count --by-address` is not available in self_hosted mode. Use `emails inbox unread-count` for the total unread count."));
-          return;
-        }
-        const db = getDatabase();
-        const limit = parsePositiveIntOption(opts.limit, 50);
-        const offset = parseNonNegativeIntOption(opts.offset);
-        const recipientSql = sqlEmailAddress("r.address");
-        const rows = db.query(
-          `SELECT address, unread
-             FROM (
-               SELECT ${recipientSql} AS address, COUNT(*) AS unread
-                 FROM inbound_emails e
-                 JOIN inbound_recipients r ON r.inbound_email_id = e.id
-                WHERE e.is_sent = 0
-                  AND e.is_read = 0
-                  AND e.is_archived = 0
-                GROUP BY ${recipientSql}
-             )
-            WHERE instr(address, '@') > 1
-            ORDER BY unread DESC, address ASC
-            LIMIT ? OFFSET ?`,
-        ).all(limit, offset) as Array<{ address: string; unread: unknown }>;
-        const outputRows = rows
-          .map((row) => ({ address: row.address, unread: Number(row.unread) || 0 }))
-          .filter((row) => row.unread > 0);
-        const formatted = outputRows.length
-          ? outputRows.map((row) => `${row.address}\t${row.unread}`).join("\n")
-          : chalk.dim("No unread mail.");
-        output(outputRows, formatted);
+        // --by-address is a per-recipient rollup with no /v1 endpoint; it is
+        // served by the self-hosted server. Fail cleanly.
+        handleError(new Error("`inbox unread-count --by-address` is not available in the self-hosted client; it runs on the self-hosted server. Use `emails inbox unread-count` for the total unread count."));
+        return;
       } catch (e) {
         handleError(e);
       }
@@ -547,90 +489,8 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
   inboxCmd
     .command("explain <email-id>")
     .description("Explain local routing, recipient ownership, and source readiness for an inbound email")
-    .action((emailId: string) => {
-      try {
-        failIfSelfHostedLocalInboxControl("explain", "reads local SQLite routing metadata and address/domain readiness");
-        const db = getDatabase();
-        const fullId = resolveInboundEmailId(emailId);
-        const email = getInboundEmailSummary(fullId, db);
-        if (!email) handleError(new Error(`Email not found: ${emailId}`));
-        const routedRecipients = email!.to_addresses.map((recipient) => {
-          const normalized = normalizeEmailAddress(recipient) ?? recipient.toLowerCase();
-          const domainName = normalized.includes("@") ? normalized.split("@")[1] ?? "" : "";
-          return {
-            recipient: normalized,
-            aliasTarget: resolveAlias(normalized, db),
-            exactAddresses: findAddressesByEmail(normalized, db),
-            domainRows: domainName ? findDomainsByName(domainName, db) : [],
-          };
-        });
-        const allAddresses = routedRecipients.flatMap((recipient) => recipient.exactAddresses);
-        const allDomains = routedRecipients.flatMap((recipient) => recipient.domainRows);
-        const enrichedAddresses = new Map(enrichAddresses(allAddresses, db).map((address) => [address.id, address]));
-        const addressProvisioning = listAddressProvisioningByIds(allAddresses.map((address) => address.id), db);
-        const domainProvisioning = listDomainProvisioningByIds(allDomains.map((domain) => domain.id), db);
-        const readyAddressCounts = listReadyAddressCountsByDomains(allDomains.map((domain) => domain.id), db);
-        const providerNames = listProviderNamesByIds([
-          ...(email!.provider_id ? [email!.provider_id] : []),
-          ...allAddresses.map((address) => address.provider_id),
-          ...allDomains.map((domain) => domain.provider_id),
-        ], db);
-        const providerName = (providerId: string): string | null => providerNames.get(providerId) ?? null;
-        const recipients = routedRecipients.map(({ recipient, aliasTarget, exactAddresses, domainRows }) => {
-          return {
-            recipient,
-            alias_target: aliasTarget,
-            configured_addresses: exactAddresses.map((address) => {
-              const enriched = enrichedAddresses.get(address.id);
-              return {
-                id: address.id,
-                provider_id: address.provider_id,
-                provider_name: providerName(address.provider_id),
-                provisioning: addressProvisioning.get(address.id) ?? null,
-                owner: enriched?.owner ?? null,
-                administrator: enriched?.administrator ?? null,
-              };
-            }),
-            domains: domainRows.map((domain) => {
-              const readyAddresses = readyAddressCounts.get(domain.id) ?? 0;
-              const mode = resolveEmailsMode();
-              const readiness = assessDomainReadiness(domain, domainProvisioning.get(domain.id) ?? null, {
-                ...domainInboundReadinessSignals(domain, mode),
-                ready_addresses: readyAddresses,
-              });
-              return {
-                id: domain.id,
-                provider_id: domain.provider_id,
-                provider_name: providerName(domain.provider_id),
-                readiness,
-              };
-            }),
-          };
-        });
-        const result = {
-          email_id: email!.id,
-          provider_id: email!.provider_id,
-          message_id: email!.message_id,
-          from: email!.from_address,
-          subject: email!.subject,
-          received_at: email!.received_at,
-          recipients,
-        };
-        const lines = [chalk.bold(`\nRouting for ${email!.id.slice(0, 8)}`)];
-        lines.push(`  From:     ${email!.from_address}`);
-        lines.push(`  Subject:  ${email!.subject || "(no subject)"}`);
-        lines.push(`  Source:   ${email!.provider_id ? providerName(email!.provider_id) ?? email!.provider_id : "unknown/local"}`);
-        for (const recipient of recipients) {
-          lines.push(`\n  To:       ${recipient.recipient}`);
-          lines.push(`  Alias:    ${recipient.alias_target ?? chalk.dim("none")}`);
-          lines.push(`  Address:  ${recipient.configured_addresses.length ? recipient.configured_addresses.map((a) => `${a.id.slice(0, 8)}${a.owner ? ` owner=${a.owner.name}` : ""}`).join(", ") : chalk.dim("not configured")}`);
-          lines.push(`  Domain:   ${recipient.domains.length ? recipient.domains.map((d) => `${d.id.slice(0, 8)} ${d.readiness.state}`).join(", ") : chalk.dim("not configured")}`);
-        }
-        lines.push("");
-        output(result, lines.join("\n"));
-      } catch (e) {
-        handleError(e);
-      }
+    .action(() => {
+      try { serverOnly("explain"); } catch (e) { handleError(e); }
     });
 
   // ─── SEARCH ───────────────────────────────────────────────────────────────
@@ -737,15 +597,8 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .command("list")
     .alias("status")
     .description("List configured S3 ingestion sources")
-    .action(async () => {
-      try {
-        failIfSelfHostedLocalInboxControl("source list", "reads local S3 source config");
-        const { listS3Sources } = await import("../../lib/s3-sync.js");
-        const sources = listS3Sources();
-        output(sources, formatSourceList(sources));
-      } catch (e) {
-        handleError(e);
-      }
+    .action(() => {
+      try { serverOnly("source list"); } catch (e) { handleError(e); }
     });
 
   sourceCmd
@@ -758,45 +611,15 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .option("--name <name>", "Source display name")
     .option("--status <status>", "Source status: live | import | legacy | retired", "live")
     .option("--no-live-sync", "Register source but disable live sync")
-    .action(async (opts: { bucket: string; prefix?: string; region?: string; provider?: string; name?: string; status?: string; liveSync?: boolean }) => {
-      try {
-        failIfSelfHostedLocalInboxControl("source add-s3", "writes local S3 source config");
-        const [{ addInboundBucket }, { registerS3Source }] = await Promise.all([
-          import("../../lib/config.js"),
-          import("../../lib/s3-sync.js"),
-        ]);
-        const status = parseSourceStatus(opts.status);
-        const providerId = opts.provider ? resolvePartialIdOrThrow(getDatabase(), "providers", opts.provider) : undefined;
-        const source = registerS3Source({
-          bucket: opts.bucket,
-          prefix: opts.prefix,
-          region: opts.region,
-          providerId,
-          name: opts.name,
-          status,
-          liveSyncEnabled: opts.liveSync !== false && status === "live",
-        });
-        if (source.status === "live" && source.live_sync_enabled) {
-          addInboundBucket(source.bucket, source.region, source.provider_id);
-        }
-        output(source, chalk.green(`✓ S3 source ${source.id} is ${source.status}${source.live_sync_enabled ? " (live sync enabled)" : " (live sync disabled)"}`));
-      } catch (e) {
-        handleError(e);
-      }
+    .action(() => {
+      try { serverOnly("source add-s3"); } catch (e) { handleError(e); }
     });
 
   sourceCmd
     .command("retire <source>")
     .description("Retire an S3 source without deleting provider rows or mail")
-    .action(async (sourceRef: string) => {
-      try {
-        failIfSelfHostedLocalInboxControl("source retire", "writes local S3 source config");
-        const { retireS3Source } = await import("../../lib/s3-sync.js");
-        const retired = retireS3Source(sourceRef);
-        output(retired, chalk.green(`✓ Retired S3 source ${retired.id}`));
-      } catch (e) {
-        handleError(e);
-      }
+    .action(() => {
+      try { serverOnly("source retire"); } catch (e) { handleError(e); }
     });
 
   // ─── READ ─────────────────────────────────────────────────────────────────
@@ -972,12 +795,9 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
       try {
         const ds = resolveMailDataSource();
         const target = opts.provider ? `for provider ${opts.provider}` : "for all providers";
-        // Self-hosted mode deletes on the server (scoped to the inbox folder), so drop the
-        // "local" wording; confirmation semantics are otherwise unchanged.
-        const scope = ds.mode === "local" ? "local inbox emails" : "inbox emails";
-        await confirmDestructiveAction(`Clear ${scope} ${target}?`, opts.yes);
-        // local: wipes the inbound store (optionally by provider). self_hosted: drains a bulk
-        // delete over the inbox folder (scoped to the provider's mailbox when resolvable).
+        // Self-hosted deletes on the server: drains a bulk delete over the inbox
+        // folder (scoped to the provider's mailbox when resolvable).
+        await confirmDestructiveAction(`Clear inbox emails ${target}?`, opts.yes);
         const { cleared } = await ds.clear({ providerId: opts.provider });
         console.log(chalk.green(`✓ Cleared ${cleared} email(s)`));
       } catch (e) {
@@ -997,40 +817,8 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .option("--limit <n>", "Max emails per run", "100")
     .option("--profile <profile>", "AWS profile")
     .option("--force", "Allow syncing a retired or disabled S3 source")
-    .action(async (opts: { source?: string; bucket?: string; prefix?: string; region?: string; provider?: string; limit: string; profile?: string; force?: boolean }) => {
-      try {
-        failIfSelfHostedLocalIngestion("sync-s3");
-        const { getInboundConfig } = await import("../../lib/config.js");
-        const inbound = getInboundConfig();
-        const profile = opts.profile ?? inbound.profile;
-        if (profile) process.env["AWS_PROFILE"] = profile;
-        const bucket = opts.bucket ?? inbound.bucket;
-        const region = opts.region ?? inbound.region;
-        const prefix = opts.prefix ?? inbound.prefix;
-        if (!bucket && !opts.source) { handleError(new Error("No S3 bucket: pass --bucket, --source, or set 'emails config set inbound_s3_bucket <name>'")); return; }
-        const { syncS3Inbox } = await import("../../lib/s3-sync.js");
-        console.log(chalk.dim(`Syncing emails from ${opts.source ? `source ${opts.source}` : `s3://${bucket}/${prefix ?? ""}`}...`));
-        const result = await syncS3Inbox({
-          bucket,
-          prefix,
-          region,
-          providerId: opts.provider,
-          sourceId: opts.source,
-          forceSource: opts.force === true,
-          limit: parsePositiveIntOption(opts.limit, 100),
-        });
-        const lines = [chalk.bold("\nS3 sync complete:")];
-        lines.push(`  Synced:      ${chalk.green(String(result.synced))}`);
-        lines.push(`  Skipped:     ${chalk.dim(String(result.skipped))} (already stored)`);
-        if ((result.attachments_saved ?? 0) > 0) lines.push(`  Attachments: ${chalk.cyan(String(result.attachments_saved))}`);
-        if (result.errors.length > 0) lines.push(`  Errors:      ${chalk.red(String(result.errors.length))}`);
-        if (result.last_key) lines.push(chalk.dim(`  Last key:    ${result.last_key}`));
-        lines.push("");
-        output(result, lines.join("\n"));
-        if (result.errors.length > 0) {
-          for (const e of result.errors) console.log(chalk.yellow(`  ${e}`));
-        }
-      } catch (e) { handleError(e); }
+    .action(() => {
+      try { serverOnly("sync-s3"); } catch (e) { handleError(e); }
     });
 
   // ─── REAL-TIME INBOUND ────────────────────────────────────────────────────
@@ -1041,70 +829,15 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .option("--rule <name>", "SES receipt rule name (defaults to inbound-<domain>)")
     .option("--region <region>", "AWS region (defaults to config inbound_s3_region)")
     .option("--profile <profile>", "AWS profile")
-    .action(async (domain: string, opts: { ruleSet: string; rule?: string; region?: string; profile?: string }) => {
-      try {
-        failIfSelfHostedLocalInboxControl("setup-realtime", "wires local AWS realtime ingestion and writes local CLI config");
-        const { getInboundConfig, loadConfig, saveConfig } = await import("../../lib/config.js");
-        const inbound = getInboundConfig();
-        const profile = opts.profile ?? inbound.profile;
-        if (profile) process.env["AWS_PROFILE"] = profile;
-        const { setupRealtimeInbound } = await import("../../lib/inbound-realtime-aws.js");
-        const ruleName = opts.rule ?? `inbound-${domain.replace(/\./g, "-")}`;
-        console.log(chalk.dim(`Wiring real-time inbound for ${domain} (rule ${opts.ruleSet}/${ruleName})...`));
-        const result = await setupRealtimeInbound({
-          domain,
-          ruleSetName: opts.ruleSet,
-          ruleName,
-          region: opts.region ?? inbound.region,
-        });
-        // Persist the queue URL so `inbox watch` can find it with no args.
-        const config = loadConfig();
-        config["inbound_realtime_queue_url"] = result.queue_url;
-        config["inbound_realtime_topic_arn"] = result.topic_arn;
-        saveConfig(config);
-        const lines = [chalk.bold("\n✓ Real-time inbound wired:")];
-        lines.push(`  SNS topic:  ${chalk.cyan(result.topic_arn)}`);
-        lines.push(`  SQS queue:  ${chalk.cyan(result.queue_url)}`);
-        lines.push(`  SES rule:   ${result.rule_updated ? chalk.green("updated (TopicArn attached)") : chalk.yellow("not updated — attach TopicArn manually")}`);
-        lines.push(chalk.dim("\n  Now run:  emails inbox watch"));
-        output(result, lines.join("\n"));
-      } catch (e) { handleError(e); }
+    .action(() => {
+      try { serverOnly("setup-realtime"); } catch (e) { handleError(e); }
     });
 
   inboxCmd
     .command("realtime-status")
     .description("Show real-time inbound queue, bucket, and sync health")
-    .action(async () => {
-      try {
-        failIfSelfHostedLocalInboxControl("realtime-status", "reads local realtime config and local SQLite inbox counters");
-        const { loadConfig, getInboundBuckets } = await import("../../lib/config.js");
-        const config = loadConfig();
-        const db = getDatabase();
-        const buckets = getInboundBuckets();
-        const data = {
-          queue_url: config["inbound_realtime_queue_url"] ?? null,
-          topic_arn: config["inbound_realtime_topic_arn"] ?? null,
-          buckets,
-          total_inbound_emails: getReceivedInboundCount(undefined, db),
-          unread_inbound_emails: getUnreadCount(undefined, db),
-          last_received_at: getLatestReceivedInboundAt(db),
-          last_poll_at: config["inbound_realtime_last_poll_at"] ?? null,
-          last_error: config["inbound_realtime_last_error"] ?? null,
-        };
-        const lines = [chalk.bold("\nReal-time inbound status:")];
-        lines.push(`  Queue:       ${data.queue_url ? chalk.cyan(String(data.queue_url)) : chalk.yellow("not configured")}`);
-        lines.push(`  Topic:       ${data.topic_arn ? chalk.cyan(String(data.topic_arn)) : chalk.dim("not configured")}`);
-        lines.push(`  Buckets:     ${buckets.length > 0 ? chalk.green(String(buckets.length)) : chalk.yellow("0")}`);
-        for (const b of buckets) {
-          lines.push(`    - s3://${b.bucket} ${chalk.dim(b.region)}${b.providerId ? chalk.dim(` provider=${b.providerId.slice(0, 8)}`) : ""}`);
-        }
-        lines.push(`  Emails:      ${data.total_inbound_emails} total, ${data.unread_inbound_emails} unread`);
-        lines.push(`  Last mail:   ${data.last_received_at ? chalk.green(String(data.last_received_at)) : chalk.dim("never")}`);
-        lines.push(`  Last poll:   ${data.last_poll_at ? chalk.green(String(data.last_poll_at)) : chalk.dim("never")}`);
-        if (data.last_error) lines.push(`  Last error:  ${chalk.red(String(data.last_error))}`);
-        lines.push(chalk.dim("\n  Start watcher: emails inbox watch --all-buckets"));
-        output(data, lines.join("\n"));
-      } catch (e) { handleError(e); }
+    .action(() => {
+      try { serverOnly("realtime-status"); } catch (e) { handleError(e); }
     });
 
   inboxCmd
@@ -1118,64 +851,8 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .option("--profile <profile>", "AWS profile")
     .option("--once", "Poll a single time then exit (for testing)")
     .option("--all-buckets", "When a notification arrives, sync every configured inbound S3 bucket")
-    .action(async (opts: { queueUrl?: string; bucket?: string; prefix?: string; region?: string; provider?: string; profile?: string; once?: boolean; allBuckets?: boolean }) => {
-      try {
-        failIfSelfHostedLocalIngestion("watch");
-        const { getInboundConfig, loadConfig, saveConfig } = await import("../../lib/config.js");
-        const inbound = getInboundConfig();
-        const config = loadConfig();
-        const profile = opts.profile ?? inbound.profile;
-        if (profile) process.env["AWS_PROFILE"] = profile;
-        const queueUrl = opts.queueUrl ?? (config["inbound_realtime_queue_url"] as string | undefined);
-        const bucket = opts.bucket ?? inbound.bucket;
-        const region = opts.region ?? inbound.region;
-        const prefix = opts.prefix ?? inbound.prefix;
-        if (!queueUrl) { handleError(new Error("No SQS queue: run 'emails inbox setup-realtime <domain>' first or pass --queue-url")); return; }
-        if (!bucket) { handleError(new Error("No S3 bucket: pass --bucket or set inbound_s3_bucket")); return; }
-
-        const { makeSqsAdapter } = await import("../../lib/inbound-realtime-aws.js");
-        const { watchInboundOnce } = await import("../../lib/inbound-realtime.js");
-        const { syncS3Inbox } = await import("../../lib/s3-sync.js");
-        const sqs = makeSqsAdapter({ queueUrl, region });
-        const rememberPoll = (patch: Record<string, unknown> = {}) => {
-          const latest = loadConfig();
-          latest["inbound_realtime_last_poll_at"] = new Date().toISOString();
-          for (const [key, value] of Object.entries(patch)) latest[key] = value;
-          saveConfig(latest);
-        };
-        const sync = async () => {
-          if (opts.allBuckets) {
-            const r = await runAutoPull({ s3: true, limit: 1000 });
-            if (r.pulled > 0) console.log(chalk.green(`  ✓ ${r.pulled} new email(s) delivered across configured buckets`));
-            return { synced: r.pulled };
-          }
-          const r = await syncS3Inbox({ bucket, prefix, region, providerId: opts.provider, limit: 100 });
-          if (r.synced > 0) console.log(chalk.green(`  ✓ ${r.synced} new email(s) delivered`) + chalk.dim(` (${r.skipped} already stored)`));
-          return { synced: r.synced };
-        };
-
-        if (opts.once) {
-          const r = await watchInboundOnce(sqs, queueUrl, sync);
-          rememberPoll({ inbound_realtime_last_error: null, inbound_realtime_last_messages: r.messages });
-          output(r, r.triggered ? chalk.green(`✓ Processed ${r.messages} notification(s)`) : chalk.dim("No new mail."));
-          return;
-        }
-
-        console.log(chalk.green(`👀 Watching for inbound mail on ${queueUrl.split("/").pop()}`));
-        console.log(chalk.dim("   Press Ctrl+C to stop\n"));
-        // eslint-disable-next-line no-constant-condition
-        while (true) {
-          try {
-            const r = await watchInboundOnce(sqs, queueUrl, sync);
-            rememberPoll({ inbound_realtime_last_error: null, inbound_realtime_last_messages: r.messages });
-          } catch (e) {
-            const message = e instanceof Error ? e.message : String(e);
-            rememberPoll({ inbound_realtime_last_error: message });
-            console.error(chalk.yellow(`  poll error: ${message}`));
-            await new Promise((r) => setTimeout(r, 3000));
-          }
-        }
-      } catch (e) { handleError(e); }
+    .action(() => {
+      try { serverOnly("watch"); } catch (e) { handleError(e); }
     });
 
   // ─── LISTEN (SMTP) ────────────────────────────────────────────────────────
@@ -1184,63 +861,22 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .description("Start a local SMTP listener to receive inbound emails (dev/testing)")
     .option("--port <port>", "SMTP port to listen on", "2525")
     .option("--provider <id>", "Associate received emails with this provider ID")
-    .action(async (opts: { port?: string; provider?: string }) => {
-      try {
-        failIfSelfHostedLocalIngestion("listen");
-        const port = parseInt(opts.port ?? "2525", 10);
-        const { resolveId } = await import("../utils.js");
-        const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
-        const { createSmtpServer } = await import("../../lib/inbound.js");
-        console.log(chalk.green(`✓ SMTP listener started on port ${port}`));
-        if (providerId) console.log(chalk.dim(`  Provider: ${providerId}`));
-        console.log(chalk.dim("  Press Ctrl+C to stop\n"));
-        createSmtpServer(port, providerId);
-        process.stdin.resume();
-      } catch (e) { handleError(e); }
+    .action(() => {
+      try { serverOnly("listen"); } catch (e) { handleError(e); }
     });
 
   // ─── OPEN HTML ────────────────────────────────────────────────────────────
   inboxCmd
     .command("open <id>")
     .description("Open a readable local HTML view of a synced email in the browser")
-    .action(async (id: string) => {
+    .action(() => {
       try {
-        const ds = resolveMailDataSource();
-        if (ds.mode === "self_hosted") {
-          throw new Error("`emails inbox open` is unavailable in self_hosted mode because it writes a rendered HTML file locally. Use `emails inbox read <id>` for API-only terminal output until the self-hosted API exposes a safe browser-view endpoint.");
-        }
-        const resolvedId = await resolveMailId(ds, id);
-        const msg = await ds.getMessage(resolvedId);
-        if (!msg) { console.error(chalk.red(`Email not found: ${id}`)); process.exit(1); }
-        const body = await ds.getMessageBody(msg);
-        const { writeFileSync } = await import("node:fs");
-        const { tmpdir } = await import("node:os");
-        const { join: pathJoin } = await import("node:path");
-        const tmpFile = pathJoin(tmpdir(), `emails-inbox-${resolvedId.slice(0, 8)}.html`);
-        writeFileSync(tmpFile, renderReadableEmailDocument({
-          subject: body?.subject ?? msg.subject,
-          from: body?.from ?? msg.from,
-          to: splitAddresses(body?.to ?? msg.to),
-          date: body?.date ?? msg.date,
-          text: body?.text ?? null,
-          html: body?.html ?? null,
-        }), "utf8");
-        const opened = openLocalTarget(tmpFile);
-        const result = { path: tmpFile, file_url: opened.target?.file_url, opened: opened.ok, method: opened.method, error: opened.error };
-        const formatted = opened.ok
-          ? chalk.green(`Opened readable email view: ${tmpFile}`)
-          : `${chalk.yellow(`Saved readable email view: ${tmpFile}`)}\n${chalk.dim(opened.error ?? "Open command unavailable.")}`;
-        output(result, formatted);
+        throw new Error("emails inbox open is not available in the self-hosted client because it writes a rendered HTML file locally; it runs on the self-hosted server. Use `emails inbox read <id>` for API-backed terminal output.");
       } catch (e) { handleError(e); }
     });
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function parseSourceStatus(value: string | undefined): "live" | "import" | "legacy" | "retired" {
-  if (value === "live" || value === "import" || value === "legacy" || value === "retired") return value;
-  throw new Error("Source status must be one of: live, import, legacy, retired");
-}
 
 function formatInboxSyncStatus(status: EmailSystemStatus): string {
   const lines: string[] = [chalk.bold("\nInbox sync status:")];
@@ -1261,40 +897,6 @@ function formatInboxSyncStatus(status: EmailSystemStatus): string {
   if (status.inbox.realtime.last_error) lines.push(`  Last error:  ${chalk.red(status.inbox.realtime.last_error)}`);
   lines.push(chalk.dim("\n  Pull now: emails refresh"));
   lines.push(chalk.dim("  Watch realtime: emails inbox watch --all-buckets"));
-  lines.push("");
-  return lines.join("\n");
-}
-
-function formatSourceList(
-  sources: Array<{
-    id: string;
-    type: string;
-    name?: string;
-    status: string;
-    live_sync_enabled: boolean;
-    provider_id?: string;
-    profile?: string;
-    bucket?: string;
-    prefix?: string;
-    region?: string;
-  }>,
-): string {
-  const lines = [chalk.bold("\nInbox sources:")];
-  if (sources.length === 0) {
-    lines.push(chalk.dim("  No sources configured."));
-    lines.push("");
-    return lines.join("\n");
-  }
-  for (const source of sources) {
-    const live = source.status === "live" && source.live_sync_enabled
-      ? chalk.green("live")
-      : source.status === "retired"
-        ? chalk.yellow("retired")
-        : chalk.dim(source.live_sync_enabled ? source.status : `${source.status}/disabled`);
-    const detail = `s3://${source.bucket ?? "unknown"}/${source.prefix ?? ""} ${source.region ?? "us-east-1"}${source.provider_id ? ` provider=${source.provider_id.slice(0, 8)}` : ""}`;
-    lines.push(`  ${chalk.cyan(source.id)}  [${source.type}]  ${live}  ${source.name ?? ""}`);
-    lines.push(chalk.dim(`    ${detail}`));
-  }
   lines.push("");
   return lines.join("\n");
 }

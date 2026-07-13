@@ -1,116 +1,32 @@
 import type { Command } from "commander";
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-import chalk from "../../lib/chalk-lite.js";
-import { getDataDir, getDatabase } from "../../db/database.js";
-import { getProvisioningWorkSummary } from "../../db/provisioning.js";
 import { handleError } from "../utils.js";
-import { getEmailsMode } from "../../lib/mode.js";
 
-type LogComponent = "daemon" | "sync" | "inbound" | "scheduler" | "nightly";
-
-const LOG_FILES: Record<LogComponent, string[]> = {
-  daemon: ["daemon.log", "provision-daemon.log"],
-  sync: ["sync.log", "nightly-sync.log"],
-  inbound: ["inbound.log", "watch.log"],
-  scheduler: ["scheduler.log"],
-  nightly: ["nightly-sync.log"],
-};
-
-function failIfSelfHostedLocalDaemon(command: string): void {
-  if (getEmailsMode() !== "self_hosted") return;
+// Local daemon/log diagnostics (provisioning/realtime queue status, worker
+// restart guidance, local log tailing) have no /v1 equivalent: background
+// workers and their logs live on the self-hosted server. This client is
+// self-hosted-only, so these commands are kept for discoverability but fail
+// loud. Use the operator service /health and /ready probes instead.
+function serverOnly(command: string): never {
   throw new Error(
-    `\`${command}\` is local daemon/log diagnostics only and is disabled in self_hosted API-only mode. ` +
-      "Use the operator service /health or /ready probes, or set EMAILS_MODE=local intentionally to inspect local daemon state.",
+    `${command} is not available in the self-hosted client; it runs on the self-hosted server.`,
   );
 }
 
-async function daemonStatus() {
-  failIfSelfHostedLocalDaemon("emails daemon status");
-  const db = getDatabase();
-  const { getEmailSystemStatusForRuntime } = await import("../../lib/agent-context.js");
-  const now = new Date().toISOString();
-  const queue = getProvisioningWorkSummary(now, db);
-  const system = await getEmailSystemStatusForRuntime(db);
-  return {
-    generated_at: now,
-    queue: {
-      due_domains: queue.due_domains,
-      due_addresses: queue.due_addresses,
-      failed_domains: queue.failed_domains,
-      failed_addresses: queue.failed_addresses,
-    },
-    realtime: system.inbox.realtime,
-    start_commands: {
-      provisioner_once: "emails provision daemon --provider <provider> --bucket <bucket> --once",
-      provisioner_loop: "emails provision daemon --provider <provider> --bucket <bucket>",
-      realtime_watch: "emails inbox watch --all-buckets",
-    },
-  };
-}
-
-function formatDaemonStatus(status: Awaited<ReturnType<typeof daemonStatus>>): string {
-  const lines = [chalk.bold("\nDaemon status:")];
-  lines.push(`  Due work:   ${status.queue.due_domains} domain(s), ${status.queue.due_addresses} address(es)`);
-  lines.push(`  Failed:     ${status.queue.failed_domains} domain(s), ${status.queue.failed_addresses} address(es)`);
-  lines.push(`  Realtime:   ${status.realtime.queue_configured ? chalk.green("configured") : chalk.yellow("not configured")}`);
-  if (status.realtime.last_poll_at) lines.push(`  Last poll:  ${chalk.green(status.realtime.last_poll_at)}`);
-  if (status.realtime.last_error) lines.push(`  Last error: ${chalk.red(status.realtime.last_error)}`);
-  lines.push("");
-  lines.push(chalk.dim(`  Start provisioner: ${status.start_commands.provisioner_loop}`));
-  lines.push(chalk.dim(`  Start realtime:    ${status.start_commands.realtime_watch}`));
-  return lines.join("\n");
-}
-
-function readTail(component: LogComponent, lines: number): { component: LogComponent; files: Array<{ path: string; exists: boolean; text: string }> } {
-  const dir = getDataDir();
-  return {
-    component,
-    files: LOG_FILES[component].map((name) => {
-      const path = join(dir, name);
-      if (!existsSync(path)) return { path, exists: false, text: "" };
-      const text = readFileSync(path, "utf-8").split(/\r?\n/).slice(-Math.max(1, lines)).join("\n");
-      return { path, exists: true, text };
-    }),
-  };
-}
-
-export function registerDaemonCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
+export function registerDaemonCommands(program: Command, _output: (data: unknown, formatted: string) => void): void {
   const daemon = program.command("daemon").description("Inspect local email daemon and background worker health");
 
   daemon
     .command("status")
     .description("Show provisioning/realtime daemon queue status")
     .action(async () => {
-      try {
-        const status = await daemonStatus();
-        output(status, formatDaemonStatus(status));
-      } catch (e) {
-        handleError(e);
-      }
+      try { serverOnly("emails daemon status"); } catch (e) { handleError(e); }
     });
 
   daemon
     .command("restart")
     .description("Show restart guidance for configured email background workers")
     .action(async () => {
-      try {
-        failIfSelfHostedLocalDaemon("emails daemon restart");
-        const status = await daemonStatus();
-        const result = {
-          managed_process: false,
-          reason: "No built-in supervisor or PID file is configured for this package.",
-          start_commands: status.start_commands,
-          cli_equivalent: "emails daemon status --json",
-        };
-        output(result, [
-          chalk.yellow("No managed email daemon process is configured."),
-          chalk.dim(`Start provisioner: ${status.start_commands.provisioner_loop}`),
-          chalk.dim(`Start realtime:    ${status.start_commands.realtime_watch}`),
-        ].join("\n"));
-      } catch (e) {
-        handleError(e);
-      }
+      try { serverOnly("emails daemon restart"); } catch (e) { handleError(e); }
     });
 
   const logs = program.command("logs").description("Inspect local emails logs");
@@ -119,19 +35,7 @@ export function registerDaemonCommands(program: Command, output: (data: unknown,
     .description("Tail local emails logs")
     .option("--component <name>", "daemon | sync | inbound | scheduler | nightly", "daemon")
     .option("--lines <n>", "Lines to show from each file", "80")
-    .action((opts: { component: string; lines: string }) => {
-      try {
-        failIfSelfHostedLocalDaemon("emails logs tail");
-        const component = opts.component as LogComponent;
-        if (!LOG_FILES[component]) handleError(new Error(`Unknown log component: ${opts.component}`));
-        const result = readTail(component, parseInt(opts.lines, 10) || 80);
-        const existing = result.files.filter((file) => file.exists);
-        const formatted = existing.length
-          ? existing.map((file) => `${chalk.bold(file.path)}\n${file.text}`).join("\n\n")
-          : chalk.dim(`No local ${component} log files found in ${getDataDir()}.`);
-        output(result, formatted);
-      } catch (e) {
-        handleError(e);
-      }
+    .action(() => {
+      try { serverOnly("emails logs tail"); } catch (e) { handleError(e); }
     });
 }

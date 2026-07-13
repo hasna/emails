@@ -1,20 +1,11 @@
 import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
 import { createAlias, createCatchAll, setGlobalCatchAll, getGlobalCatchAll, ensureDefaultCatchAll, removeAlias, getAlias, listAliases, resolveAlias, CATCH_ALL, ALL_DOMAINS } from "../../db/aliases.js";
-import { resolveEmailsMode } from "../../lib/mode.js";
 import { formatListHint, handleError, isCliVerboseOutput, parseCliListPage } from "../utils.js";
 
 function display(a: { local_part: string; domain: string }): string {
   if (a.domain === ALL_DOMAINS) return "*@* (all domains)";
   return a.local_part === CATCH_ALL ? `*@${a.domain}` : `${a.local_part}@${a.domain}`;
-}
-
-function assertAliasLocalStateAllowed(command: string): void {
-  if (resolveEmailsMode().mode !== "self_hosted") return;
-  throw new Error(
-    `\`${command}\` manages local alias routing state and is disabled in self_hosted API-only mode. ` +
-      "Use the self-hosted Emails API for server-owned alias routing, or set EMAILS_MODE=local intentionally to use local SQLite alias state.",
-  );
 }
 
 export function registerAliasCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
@@ -25,7 +16,6 @@ export function registerAliasCommands(program: Command, output: (data: unknown, 
     .description("Route an alias address to a target, e.g. alias add hello@acme.com ops@acme.com")
     .action((alias: string, target: string) => {
       try {
-        assertAliasLocalStateAllowed("emails alias add");
         const a = createAlias(alias, target);
         output(a, chalk.green(`✓ ${display(a)} → ${a.target_address}`));
       } catch (e) { handleError(e); }
@@ -36,7 +26,6 @@ export function registerAliasCommands(program: Command, output: (data: unknown, 
     .description("Route every unmatched recipient on a domain to a target")
     .action((domain: string, target: string) => {
       try {
-        assertAliasLocalStateAllowed("emails alias catch-all");
         const a = createCatchAll(domain, target);
         output(a, chalk.green(`✓ catch-all *@${a.domain} → ${a.target_address}`));
       } catch (e) { handleError(e); }
@@ -47,7 +36,6 @@ export function registerAliasCommands(program: Command, output: (data: unknown, 
     .description("Set the protected GLOBAL catch-all (all domains) → target (never deletable)")
     .action((target: string) => {
       try {
-        assertAliasLocalStateAllowed("emails alias global");
         const a = setGlobalCatchAll(target);
         output(a, chalk.green(`✓ global catch-all (all domains) → ${a.target_address || "(keep, no forward)"}`));
       } catch (e) { handleError(e); }
@@ -62,10 +50,9 @@ export function registerAliasCommands(program: Command, output: (data: unknown, 
     .option("--verbose", "Show explanatory alias notes")
     .action((opts: { domain?: string; limit?: string; offset?: string; verbose?: boolean }) => {
       try {
-        assertAliasLocalStateAllowed("emails alias list");
         if (!opts.domain) ensureDefaultCatchAll(); // make sure the protected default exists
         const page = parseCliListPage(opts);
-        const aliases = listAliases(opts.domain, undefined, page);
+        const aliases = listAliases(opts.domain, page);
         if (aliases.length === 0) { output([], chalk.dim("No aliases configured.")); return; }
         const verbose = opts.verbose || isCliVerboseOutput();
         const lines = [chalk.bold("\nAliases:")];
@@ -94,7 +81,6 @@ export function registerAliasCommands(program: Command, output: (data: unknown, 
     .description("Remove an alias or catch-all by ID")
     .action((id: string) => {
       try {
-        assertAliasLocalStateAllowed("emails alias remove");
         const a = getAlias(id);
         if (!a) return handleError(new Error(`Alias not found: ${id}`));
         removeAlias(id);
@@ -107,7 +93,6 @@ export function registerAliasCommands(program: Command, output: (data: unknown, 
     .description("Show where a recipient address would be routed")
     .action((recipient: string) => {
       try {
-        assertAliasLocalStateAllowed("emails alias resolve");
         const target = resolveAlias(recipient);
         if (target) output({ recipient, target }, `${recipient} → ${chalk.green(target)}`);
         else output({ recipient, target: null }, chalk.dim(`${recipient} → (no alias; delivered as-is)`));

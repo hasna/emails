@@ -76,7 +76,7 @@ export function registerProviderCommands(program: Command, output: (data: unknow
     .action((opts: { limit?: string; offset?: string; verbose?: boolean }) => {
       try {
         const page = parseCliListPage(opts);
-        const providers = listProviderSummaries(undefined, page);
+        const providers = listProviderSummaries(page);
         if (providers.length === 0) {
           output([], chalk.dim("No providers configured. Use 'emails provider add' to add one."));
           return;

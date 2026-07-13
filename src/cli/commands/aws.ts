@@ -5,16 +5,6 @@
 import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
 import { handleError } from "../utils.js";
-import { isSelfHostedMode } from "../../db/self-hosted-store.js";
-
-function selfHostedLocalOnly(command: string): void {
-  if (!isSelfHostedMode()) return;
-  handleError(new Error(
-    `\`${command}\` is local-mode-only and unavailable in self_hosted API-only mode. ` +
-      "Use the self-hosted server/operator API/workers for inbound AWS setup, " +
-      "or set EMAILS_MODE=local intentionally to write local SQLite/config state.",
-  ));
-}
 
 export function registerAwsCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   const awsCmd = program.command("aws").description("AWS infrastructure setup for email (S3, SES receipt rules)");
@@ -27,83 +17,15 @@ export function registerAwsCommands(program: Command, output: (data: unknown, fo
     .requiredOption("--domain <domain>", "Domain to receive email for (e.g. example.com)")
     .option("--bucket <name>", "S3 bucket name (defaults to config inbound_s3_bucket)")
     .option("--region <region>", "AWS region (defaults to config inbound_s3_region or us-east-1)")
-	    .option("--prefix <prefix>", "S3 key prefix (default: inbound/<domain>/)")
-	    .option("--catch-all", "Also catch subdomains (*.example.com)")
-	    .option("--profile <profile>", "AWS profile name (uses env vars if not set)")
-	    .option("--provider <id>", "SES provider id for local source provenance")
-	    .action(async (opts: {
-	      domain: string; bucket?: string; region?: string;
-	      prefix?: string; catchAll?: boolean; profile?: string; provider?: string;
-	    }) => {
+    .option("--prefix <prefix>", "S3 key prefix (default: inbound/<domain>/)")
+    .option("--catch-all", "Also catch subdomains (*.example.com)")
+    .option("--profile <profile>", "AWS profile name (uses env vars if not set)")
+    .option("--provider <id>", "SES provider id for local source provenance")
+    .action(async () => {
       try {
-        selfHostedLocalOnly("emails aws setup-inbound");
-        const { getInboundConfig } = await import("../../lib/config.js");
-        const inbound = getInboundConfig();
-	        const profile = opts.profile ?? inbound.profile;
-	        if (profile) process.env["AWS_PROFILE"] = profile;
-	        const bucket = opts.bucket ?? inbound.bucket;
-	        const region = opts.region ?? inbound.region;
-	        if (!bucket) { handleError(new Error("No S3 bucket: pass --bucket or set 'emails config set inbound_s3_bucket <name>'")); return; }
-	        let providerId: string | undefined;
-	        if (opts.provider) {
-	          const { getDatabase, resolvePartialIdOrThrow } = await import("../../db/database.js");
-	          providerId = resolvePartialIdOrThrow(getDatabase(), "providers", opts.provider);
-	        }
-
-	        const { setupInboundEmail } = await import("../../lib/aws-inbound.js");
-
-        console.log(chalk.dim(`Setting up inbound email for ${opts.domain}...`));
-
-        console.log(chalk.dim(`  [1/3] Setting up S3 bucket: ${bucket}`));
-	        const result = await setupInboundEmail({
-	          domain: opts.domain,
-	          bucket,
-	          region,
-	          prefix: opts.prefix,
-	          catchAll: opts.catchAll,
-	        });
-	        const [{ addInboundBucket, setConfigValue }, { registerS3Source }] = await Promise.all([
-	          import("../../lib/config.js"),
-	          import("../../lib/s3-sync.js"),
-	        ]);
-	        if (profile) setConfigValue("inbound_s3_profile", profile);
-	        addInboundBucket(result.bucket, region, providerId);
-	        const source = registerS3Source({
-	          bucket: result.bucket,
-	          prefix: result.s3_prefix,
-	          region,
-	          providerId,
-	          name: `${opts.domain} SES/S3 inbound`,
-	          status: "live",
-	          liveSyncEnabled: true,
-	        });
-
-        console.log(chalk.green(result.bucket_created
-          ? `  ✓ S3 bucket created: ${result.bucket}`
-          : `  ✓ S3 bucket already exists: ${result.bucket}`));
-
-        console.log(chalk.dim("  [2/3] Configuring SES receipt rules..."));
-        console.log(chalk.green(result.rule_set_created
-          ? `  ✓ Receipt rule set created: ${result.rule_set}`
-          : `  ✓ Using rule set: ${result.rule_set}`));
-        console.log(chalk.green(result.rule_created
-          ? `  ✓ Receipt rule created: ${result.rule_name}`
-          : `  ✓ Receipt rule already exists: ${result.rule_name}`));
-
-        console.log(chalk.dim("  [3/3] Done\n"));
-
-        console.log(chalk.bold("Setup complete!"));
-        console.log(`\n  Emails to ${chalk.cyan(`*@${opts.domain}`)} → ${chalk.cyan(`s3://${result.bucket}/${result.s3_prefix}`)}\n`);
-
-        console.log(chalk.bold("  Required DNS records:"));
-        console.log(chalk.yellow(`\n    MX  ${opts.domain}  ${result.mx_record}\n`));
-        console.log(chalk.dim("  Add this MX record to your DNS provider."));
-        console.log(chalk.dim("  (For Cloudflare: emails domain setup-cloudflare ... will set it automatically)\n"));
-
-	        console.log(chalk.dim("  To sync received emails locally:"));
-	        console.log(chalk.dim(`    emails inbox sync-s3 --source ${source.id}\n`));
-
-	        output({ ...result, source }, "");
+        throw new Error(
+          "emails aws setup-inbound is not available in the self-hosted client; it runs on the self-hosted server.",
+        );
       } catch (e) { handleError(e); }
     });
 
