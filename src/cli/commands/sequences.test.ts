@@ -1,137 +1,58 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+// Self-hosted-ONLY: the sequences repo routes every read/write to `/v1/sequences`,
+// `/v1/sequence-steps`, and `/v1/sequence-enrollments`, so these tests drive the
+// REAL command against an out-of-process /v1 stub (see src/test-support/v1-stub.ts).
+// No local SQLite exists anymore; enrollments and steps are API-backed.
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { Command } from "commander";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { closeDatabase, getDatabase, resetDatabase } from "../../db/database.js";
-import { addStep, createSequence, enroll, unenroll } from "../../db/sequences.js";
-import { resetSelfHostedConfigCache } from "../../db/self-hosted-store.js";
+import { createSequence, enroll } from "../../db/sequences.js";
+import { startV1Stub, type V1Stub } from "../../test-support/v1-stub.js";
 import { registerSequenceCommands } from "./sequences.js";
 
-const ENV_KEYS = [
-  "HOME",
-  "EMAILS_DB_PATH",
-  "HASNA_EMAILS_DB_PATH",
-  "EMAILS_MODE",
-  "HASNA_EMAILS_MODE",
-  "EMAILS_SELF_HOSTED_URL",
-  "EMAILS_SELF_HOSTED_API_KEY",
-  "MAILERY_MODE",
-  "HASNA_MAILERY_MODE",
-  "MAILERY_STORAGE_MODE",
-  "HASNA_MAILERY_STORAGE_MODE",
-  "EMAILS_STORAGE_MODE",
-  "HASNA_EMAILS_STORAGE_MODE",
-  "MAILERY_API_URL",
-  "MAILERY_API_KEY",
-  "MAILERY_CLOUD_API_URL",
-  "MAILERY_CLOUD_TOKEN",
-  "HASNA_MAILERY_API_URL",
-  "HASNA_MAILERY_API_KEY",
-  "HASNA_MAILERY_ENV_FILE",
-] as const;
+let stub: V1Stub;
 
 async function runSequenceCommand(args: string[]) {
   const program = new Command();
   program.exitOverride();
   let data: unknown;
   const out: string[] = [];
+  const originalLog = console.log;
   registerSequenceCommands(program, (d, formatted) => {
     data = d;
     out.push(String(formatted ?? ""));
   });
-  await program.parseAsync(["node", "emails", ...args]);
-  return { data, out: out.join("\n") };
-}
-
-async function runSequenceCommandExpectingExit(args: string[]) {
-  const originalExit = process.exit;
-  const originalError = console.error;
-  const errors: string[] = [];
-  process.exit = ((code?: number) => {
-    throw new Error(`process.exit:${code ?? 0}`);
-  }) as typeof process.exit;
-  console.error = (...args: unknown[]) => {
-    errors.push(args.map(String).join(" "));
-  };
+  console.log = ((...values: unknown[]) => {
+    out.push(values.map(String).join(" "));
+  }) as typeof console.log;
   try {
-    await runSequenceCommand(args);
-    return { error: null, stderr: errors.join("\n") };
-  } catch (e) {
-    return { error: e instanceof Error ? e.message : String(e), stderr: errors.join("\n") };
+    await program.parseAsync(["node", "emails", ...args]);
+    return { data, out: out.join("\n") };
   } finally {
-    process.exit = originalExit;
-    console.error = originalError;
+    console.log = originalLog;
   }
 }
 
-async function withTempSelfHostedHome<T>(fn: (home: string) => Promise<T>): Promise<T> {
-  const saved = new Map<string, string | undefined>(ENV_KEYS.map((key) => [key, process.env[key]]));
-  const root = mkdtempSync(join(tmpdir(), "emails-sequence-self-hosted-"));
-  const home = join(root, "home");
-  closeDatabase();
-  resetDatabase();
-  process.env["HOME"] = home;
-  delete process.env["EMAILS_DB_PATH"];
-  delete process.env["HASNA_EMAILS_DB_PATH"];
-  delete process.env["HASNA_EMAILS_MODE"];
-  process.env["EMAILS_MODE"] = "self_hosted";
-  process.env["EMAILS_SELF_HOSTED_URL"] = "https://emails.example.test";
-  process.env["EMAILS_SELF_HOSTED_API_KEY"] = "test-api-key";
-  resetSelfHostedConfigCache();
-  try {
-    return await fn(home);
-  } finally {
-    closeDatabase();
-    resetDatabase();
-    resetSelfHostedConfigCache();
-    for (const key of ENV_KEYS) {
-      const value = saved.get(key);
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-    rmSync(root, { recursive: true, force: true });
-  }
-}
-
-function localDbPath(home: string): string {
-  return join(home, ".hasna", "emails", "emails.db");
-}
-
-beforeEach(() => {
-  process.env["EMAILS_DB_PATH"] = ":memory:";
-  delete process.env["EMAILS_MODE"];
-  delete process.env["HASNA_EMAILS_MODE"];
-  delete process.env["EMAILS_SELF_HOSTED_URL"];
-  delete process.env["EMAILS_SELF_HOSTED_API_KEY"];
-  for (const key of ENV_KEYS) {
-    if (key !== "HOME" && key !== "EMAILS_DB_PATH") delete process.env[key];
-  }
-  resetSelfHostedConfigCache();
-  resetDatabase();
+beforeAll(async () => {
+  stub = await startV1Stub();
 });
-
-afterEach(() => {
-  closeDatabase();
-  delete process.env["EMAILS_DB_PATH"];
-  delete process.env["EMAILS_MODE"];
-  delete process.env["HASNA_EMAILS_MODE"];
-  delete process.env["EMAILS_SELF_HOSTED_URL"];
-  delete process.env["EMAILS_SELF_HOSTED_API_KEY"];
-  for (const key of ENV_KEYS) {
-    if (key !== "HOME") delete process.env[key];
-  }
-  resetSelfHostedConfigCache();
+afterAll(() => stub.stop());
+beforeEach(async () => {
+  await stub.reset();
+  stub.applyEnv();
 });
+afterEach(() => stub.clearEnv());
 
 describe("sequence list command", () => {
   it("paginates sequences for human and structured output", async () => {
-    const db = getDatabase();
-    for (let i = 0; i < 5; i++) {
-      const sequence = createSequence({ name: `cli-sequence-${i}` });
-      const timestamp = `2026-01-0${i + 1}T00:00:00.000Z`;
-      db.run("UPDATE sequences SET created_at = ?, updated_at = ? WHERE id = ?", [timestamp, timestamp, sequence.id]);
-    }
+    await stub.seed({
+      sequences: [0, 1, 2, 3, 4].map((i) => ({
+        id: `seq-${i}`,
+        name: `cli-sequence-${i}`,
+        description: null,
+        status: "active",
+        created_at: `2026-01-0${i + 1}T00:00:00.000Z`,
+        updated_at: `2026-01-0${i + 1}T00:00:00.000Z`,
+      })),
+    });
 
     const result = await runSequenceCommand(["sequence", "list", "--limit", "2", "--offset", "1"]);
     const data = result.data as Array<{ name: string }>;
@@ -143,41 +64,37 @@ describe("sequence list command", () => {
 });
 
 describe("sequence show command", () => {
-  it("prints enrollment counts without loading every enrollment row", async () => {
-    const db = getDatabase();
-    const sequence = createSequence({ name: "cli-show-counts" });
-    addStep({ sequence_id: sequence.id, step_number: 1, delay_hours: 0, template_name: "welcome" });
-    enroll({ sequence_id: sequence.id, contact_email: "active-a@example.com" });
-    enroll({ sequence_id: sequence.id, contact_email: "active-b@example.com" });
-    enroll({ sequence_id: sequence.id, contact_email: "cancelled@example.com" });
-    unenroll(sequence.id, "cancelled@example.com");
-    enroll({ sequence_id: sequence.id, contact_email: "completed@example.com" });
-    db.run("UPDATE sequence_enrollments SET status = 'completed' WHERE sequence_id = ? AND contact_email = ?", [sequence.id, "completed@example.com"]);
+  it("prints enrollment counts from the API", async () => {
+    await stub.seed({
+      sequences: [{
+        id: "seq-show",
+        name: "cli-show-counts",
+        description: null,
+        status: "active",
+        created_at: "2026-01-01T00:00:00.000Z",
+        updated_at: "2026-01-01T00:00:00.000Z",
+      }],
+      "sequence-steps": [{
+        id: "step-1",
+        sequence_id: "seq-show",
+        step_number: 1,
+        delay_hours: 0,
+        template_name: "welcome",
+        from_address: null,
+        subject_override: null,
+        created_at: "2026-01-01T00:00:00.000Z",
+      }],
+      "sequence-enrollments": [
+        { id: "en-1", sequence_id: "seq-show", contact_email: "active-a@example.com", status: "active", current_step: 0, enrolled_at: "2026-01-01T00:00:00.000Z" },
+        { id: "en-2", sequence_id: "seq-show", contact_email: "active-b@example.com", status: "active", current_step: 0, enrolled_at: "2026-01-02T00:00:00.000Z" },
+        { id: "en-3", sequence_id: "seq-show", contact_email: "cancelled@example.com", status: "cancelled", current_step: 0, enrolled_at: "2026-01-03T00:00:00.000Z" },
+        { id: "en-4", sequence_id: "seq-show", contact_email: "completed@example.com", status: "completed", current_step: 1, enrolled_at: "2026-01-04T00:00:00.000Z" },
+      ],
+    });
 
-    const originalQuery = db.query;
-    const queries: string[] = [];
-    db.query = ((sql: string) => {
-      queries.push(sql);
-      return originalQuery.call(db, sql);
-    }) as typeof db.query;
+    const result = await runSequenceCommand(["sequence", "show", "cli-show-counts"]);
 
-    const originalLog = console.log;
-    const logs: string[] = [];
-    console.log = (...args: unknown[]) => {
-      logs.push(args.map(String).join(" "));
-    };
-
-    try {
-      await runSequenceCommand(["sequence", "show", "cli-show-counts"]);
-    } finally {
-      console.log = originalLog;
-      db.query = originalQuery;
-    }
-
-    expect(logs.join("\n")).toContain("Enrollments: 2 active / 4 total");
-    const enrollmentQueries = queries.filter((sql) => sql.includes("FROM sequence_enrollments"));
-    expect(enrollmentQueries.some((sql) => sql.includes("COUNT(*) AS total"))).toBe(true);
-    expect(enrollmentQueries.some((sql) => sql.includes("SELECT *"))).toBe(false);
+    expect(result.out).toContain("Enrollments: 2 active / 4 total");
   });
 });
 
@@ -199,24 +116,24 @@ describe("sequence enrollments command", () => {
   });
 
   it("filters by sequence and status before applying pagination", async () => {
-    const db = getDatabase();
-    const sequence = createSequence({ name: "cli-enrollment-page" });
-    const other = createSequence({ name: "cli-enrollment-noise" });
-    for (let i = 0; i < 5; i++) {
-      const email = `active-${i}@example.com`;
-      enroll({ sequence_id: sequence.id, contact_email: email });
-      db.run(
-        "UPDATE sequence_enrollments SET enrolled_at = ? WHERE sequence_id = ? AND contact_email = ?",
-        [`2026-01-0${i + 1}T00:00:00.000Z`, sequence.id, email],
-      );
-    }
-    enroll({ sequence_id: sequence.id, contact_email: "cancelled@example.com" });
-    unenroll(sequence.id, "cancelled@example.com");
-    db.run(
-      "UPDATE sequence_enrollments SET enrolled_at = ? WHERE sequence_id = ? AND contact_email = ?",
-      ["2026-01-10T00:00:00.000Z", sequence.id, "cancelled@example.com"],
-    );
-    enroll({ sequence_id: other.id, contact_email: "other@example.com" });
+    await stub.seed({
+      sequences: [
+        { id: "seq-page", name: "cli-enrollment-page", description: null, status: "active", created_at: "2026-01-01T00:00:00.000Z", updated_at: "2026-01-01T00:00:00.000Z" },
+        { id: "seq-noise", name: "cli-enrollment-noise", description: null, status: "active", created_at: "2026-01-01T00:00:00.000Z", updated_at: "2026-01-01T00:00:00.000Z" },
+      ],
+      "sequence-enrollments": [
+        ...[0, 1, 2, 3, 4].map((i) => ({
+          id: `en-active-${i}`,
+          sequence_id: "seq-page",
+          contact_email: `active-${i}@example.com`,
+          status: "active",
+          current_step: 0,
+          enrolled_at: `2026-01-0${i + 1}T00:00:00.000Z`,
+        })),
+        { id: "en-cancelled", sequence_id: "seq-page", contact_email: "cancelled@example.com", status: "cancelled", current_step: 0, enrolled_at: "2026-01-10T00:00:00.000Z" },
+        { id: "en-other", sequence_id: "seq-noise", contact_email: "other@example.com", status: "active", current_step: 0, enrolled_at: "2026-01-06T00:00:00.000Z" },
+      ],
+    });
 
     const result = await runSequenceCommand([
       "sequence",
@@ -235,42 +152,7 @@ describe("sequence enrollments command", () => {
       "active-3@example.com",
       "active-2@example.com",
     ]);
-    expect(data.every((enrollment) => enrollment.sequence_id === sequence.id)).toBe(true);
+    expect(data.every((enrollment) => enrollment.sequence_id === "seq-page")).toBe(true);
     expect(data.every((enrollment) => enrollment.status === "active")).toBe(true);
-  });
-
-  it("fails closed in self_hosted mode before reading local enrollments", async () => {
-    await withTempSelfHostedHome(async (home) => {
-      const result = await runSequenceCommandExpectingExit(["sequence", "enrollments"]);
-
-      expect(result.error).toBe("process.exit:1");
-      expect(result.stderr).toContain("self_hosted API-only mode");
-      expect(result.stderr).toContain("local sequence enrollment rows");
-      expect(existsSync(localDbPath(home))).toBe(false);
-    });
-  });
-});
-
-describe("sequence step command self_hosted guards", () => {
-  it("fails closed in self_hosted mode before writing local steps", async () => {
-    await withTempSelfHostedHome(async (home) => {
-      const result = await runSequenceCommandExpectingExit([
-        "sequence",
-        "step",
-        "add",
-        "api-sequence",
-        "--step",
-        "1",
-        "--delay",
-        "0",
-        "--template",
-        "welcome",
-      ]);
-
-      expect(result.error).toBe("process.exit:1");
-      expect(result.stderr).toContain("self_hosted API-only mode");
-      expect(result.stderr).toContain("local sequence step rows");
-      expect(existsSync(localDbPath(home))).toBe(false);
-    });
   });
 });

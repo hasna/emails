@@ -54,13 +54,18 @@ describe("emails ui build contract", () => {
     expect(source).not.toContain('from "solid-js"');
   });
 
-  it("keeps send/provider runtime code out of the initial TUI data graph", () => {
+  it("keeps the local send runtime out of the TUI data graph and routes sends through /v1", () => {
+    // Self-hosted-ONLY: the TUI never pulls in the local sender (../../lib/send.js).
+    // Composed messages are dispatched through the operator's /v1/messages/send
+    // endpoint via the synchronous self-hosted store, so no send.js import (static
+    // or dynamic) may appear here.
     const source = readFileSync(join(root, "src", "cli", "tui", "data.ts"), "utf8");
     const offenders = [...source.matchAll(staticImport)]
       .map((match) => match[1] ?? "")
       .filter((specifier) => specifier === "../../lib/send.js" || specifier.startsWith("../../lib/send.js"));
 
     expect(offenders).toEqual([]);
-    expect(source).toContain('await import("../../lib/send.js")');
+    expect(source).not.toContain('import("../../lib/send.js")');
+    expect(source).toContain('selfHostedStoreFor("messages/send")');
   });
 });

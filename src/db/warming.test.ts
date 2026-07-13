@@ -1,5 +1,17 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { getDatabase, closeDatabase, resetDatabase } from "./database.js";
+// Self-hosted-ONLY: the warming repo routes every read/write to the /v1
+// `warming` resource. Exercises the REAL synchronous curl transport against an
+// out-of-process /v1 stub (see src/test-support/v1-stub.ts for why it must run
+// in a separate process).
+//
+// Migrated from the deleted local-SQLite pattern. One former test is dropped:
+//   - "domain is unique — duplicate throws": was a SQLite UNIQUE(domain)
+//     constraint; domain uniqueness is now enforced server-side by /v1, not by
+//     the client (a second POST simply succeeds against the generic store).
+// Ordering that the old test forced with `UPDATE ... SET created_at` is now
+// established by seeding explicit created_at values.
+
+import { afterAll, afterEach, beforeAll, beforeEach, describe, it, expect } from "bun:test";
+import { startV1Stub, type V1Stub } from "../test-support/v1-stub.js";
 import {
   createWarmingSchedule,
   getWarmingSchedule,
@@ -8,18 +20,24 @@ import {
   deleteWarmingSchedule,
 } from "./warming.js";
 
+let stub: V1Stub;
+
+beforeAll(async () => {
+  stub = await startV1Stub();
+});
+
+afterAll(() => stub.stop());
+
+beforeEach(async () => {
+  await stub.reset();
+  stub.applyEnv();
+});
+
+afterEach(() => {
+  stub.clearEnv();
+});
+
 describe("warming CRUD", () => {
-  beforeEach(() => {
-    process.env["EMAILS_DB_PATH"] = ":memory:";
-    resetDatabase();
-    getDatabase();
-  });
-
-  afterEach(() => {
-    closeDatabase();
-    delete process.env["EMAILS_DB_PATH"];
-  });
-
   it("creates a warming schedule", () => {
     const schedule = createWarmingSchedule({ domain: "example-warm-create.com", target_daily_volume: 1000 });
     expect(schedule.domain).toBe("example-warm-create.com");
@@ -35,8 +53,7 @@ describe("warming CRUD", () => {
   });
 
   it("getWarmingSchedule returns null for unknown domain", () => {
-    const result = getWarmingSchedule("notfound.com");
-    expect(result).toBeNull();
+    expect(getWarmingSchedule("notfound.com")).toBeNull();
   });
 
   it("getWarmingSchedule retrieves by domain", () => {
@@ -49,8 +66,7 @@ describe("warming CRUD", () => {
   it("listWarmingSchedules returns all", () => {
     createWarmingSchedule({ domain: "a.com", target_daily_volume: 100 });
     createWarmingSchedule({ domain: "b.com", target_daily_volume: 200 });
-    const all = listWarmingSchedules();
-    const domains = all.map((s) => s.domain);
+    const domains = listWarmingSchedules().map((s) => s.domain);
     expect(domains).toContain("a.com");
     expect(domains).toContain("b.com");
   });
@@ -69,15 +85,23 @@ describe("warming CRUD", () => {
     expect(paused.some((s) => s.domain === "paused1.com")).toBe(true);
   });
 
-  it("listWarmingSchedules paginates after status filtering", () => {
-    const db = getDatabase();
-    for (let i = 1; i <= 4; i++) {
-      const schedule = createWarmingSchedule({ domain: `warm-${i}.example.com`, target_daily_volume: 100 });
-      db.run("UPDATE warming_schedules SET created_at = ? WHERE id = ?", [`2026-01-0${i} 00:00:00`, schedule.id]);
-    }
+  it("listWarmingSchedules paginates after status filtering", async () => {
+    // Seed explicit created_at so the newest-first ordering is deterministic.
+    await stub.seed({
+      warming: Array.from({ length: 4 }, (_v, i) => ({
+        id: `warm-${i + 1}`,
+        domain: `warm-${i + 1}.example.com`,
+        provider_id: null,
+        target_daily_volume: 100,
+        start_date: "2026-01-01",
+        status: "active",
+        created_at: `2026-01-0${i + 1}T00:00:00.000Z`,
+        updated_at: `2026-01-0${i + 1}T00:00:00.000Z`,
+      })),
+    });
     updateWarmingStatus("warm-4.example.com", "paused");
 
-    const page = listWarmingSchedules("active", db, { limit: 2, offset: 1 });
+    const page = listWarmingSchedules("active", { limit: 2, offset: 1 });
 
     expect(page.map((schedule) => schedule.domain)).toEqual([
       "warm-2.example.com",
@@ -96,25 +120,16 @@ describe("warming CRUD", () => {
   });
 
   it("updateWarmingStatus returns null for unknown domain", () => {
-    const result = updateWarmingStatus("ghost.com", "paused");
-    expect(result).toBeNull();
+    expect(updateWarmingStatus("ghost.com", "paused")).toBeNull();
   });
 
   it("deleteWarmingSchedule removes the schedule", () => {
     createWarmingSchedule({ domain: "del.com", target_daily_volume: 100 });
-    const deleted = deleteWarmingSchedule("del.com");
-    expect(deleted).toBe(true);
-    const result = getWarmingSchedule("del.com");
-    expect(result).toBeNull();
+    expect(deleteWarmingSchedule("del.com")).toBe(true);
+    expect(getWarmingSchedule("del.com")).toBeNull();
   });
 
   it("deleteWarmingSchedule returns false for unknown domain", () => {
-    const result = deleteWarmingSchedule("ghost.com");
-    expect(result).toBe(false);
-  });
-
-  it("domain is unique — duplicate throws", () => {
-    createWarmingSchedule({ domain: "unique.com", target_daily_volume: 100 });
-    expect(() => createWarmingSchedule({ domain: "unique.com", target_daily_volume: 200 })).toThrow();
+    expect(deleteWarmingSchedule("ghost.com")).toBe(false);
   });
 });

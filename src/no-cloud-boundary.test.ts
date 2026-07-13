@@ -54,10 +54,11 @@ function activeHits(pattern: RegExp, allowedFiles: string[] = []): string[] {
 }
 
 describe("no hosted control plane", () => {
-  it("ships exactly local and self_hosted modes without aliases", () => {
-    expect(normalizeEmailsMode("local")).toBe("local");
+  it("ships exactly the self_hosted mode without aliases or a local runtime", () => {
     expect(normalizeEmailsMode("self_hosted")).toBe("self_hosted");
-    for (const value of ["cloud", "remote", "hybrid", "self-hosted", "selfhosted"]) {
+    // The local SQLite runtime has been removed: this client is self-hosted-only,
+    // so every other mode value (including the legacy "local") fails loud.
+    for (const value of ["local", "cloud", "remote", "hybrid", "self-hosted", "selfhosted"]) {
       expect(() => normalizeEmailsMode(value)).toThrow();
     }
   });

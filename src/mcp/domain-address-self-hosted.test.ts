@@ -1,8 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { closeDatabase, resetDatabase } from "../db/database.js";
 import { resetSelfHostedConfigCache } from "../db/self-hosted-store.js";
 import { runDomainTool } from "./tools/domains-impl.js";
 
@@ -36,11 +35,6 @@ const ORIGINAL_ENV = new Map<string, string | undefined>(ENV_KEYS.map((key) => [
 
 let tempHome: string | null = null;
 let apiServer: ReturnType<typeof Bun.spawn> | null = null;
-
-function dbPath(): string {
-  if (!tempHome) throw new Error("tempHome not initialized");
-  return join(tempHome, ".hasna", "emails", "emails.db");
-}
 
 function resetEnv(): void {
   for (const key of ENV_KEYS) delete process.env[key];
@@ -154,11 +148,6 @@ beforeEach(async () => {
   resetEnv();
   tempHome = mkdtempSync(join(tmpdir(), "emails-mcp-domain-address-self-hosted-"));
   process.env["HOME"] = tempHome;
-  process.env["EMAILS_DB_PATH"] = ":memory:";
-  closeDatabase();
-  resetDatabase();
-  closeDatabase();
-  delete process.env["EMAILS_DB_PATH"];
   process.env["EMAILS_MODE"] = "self_hosted";
   process.env["EMAILS_SELF_HOSTED_URL"] = await startApi();
   process.env["EMAILS_SELF_HOSTED_API_KEY"] = API_KEY;
@@ -168,8 +157,6 @@ beforeEach(async () => {
 afterEach(() => {
   apiServer?.kill();
   apiServer = null;
-  closeDatabase();
-  resetDatabase();
   resetSelfHostedConfigCache();
   restoreEnv();
   if (ORIGINAL_HOME === undefined) delete process.env["HOME"];
@@ -180,8 +167,6 @@ afterEach(() => {
 
 describe("MCP domain/address self_hosted API-only guards", () => {
   it("routes domain and address listing tools through the API without creating local SQLite", async () => {
-    expect(existsSync(dbPath())).toBe(false);
-
     const domainList = parseResult<{
       domains: Array<{ id: string; domain: string }>;
       mode: string;
@@ -209,7 +194,6 @@ describe("MCP domain/address self_hosted API-only guards", () => {
       source: string;
     }>(await runDomainTool("verify_address", { address_id: "addr-ready" }));
 
-    expect(existsSync(dbPath())).toBe(false);
     expect(domainList).toMatchObject({
       mode: "self_hosted",
       source: "self_hosted_api",
@@ -258,7 +242,6 @@ describe("MCP domain/address self_hosted API-only guards", () => {
       const result = await runDomainTool(name, args);
       expect(result.isError).toBe(true);
       expect(result.content[0]?.text ?? "").toContain("self_hosted API-only mode");
-      expect(existsSync(dbPath())).toBe(false);
     }
   });
 });

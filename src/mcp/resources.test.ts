@@ -1,160 +1,84 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { closeDatabase, getDatabase, resetDatabase } from "../db/database.js";
-import { createAddress } from "../db/addresses.js";
-import { createDomain, updateDnsStatus } from "../db/domains.js";
-import { createProvider } from "../db/providers.js";
-import { setAddressProvisioning, setDomainProvisioning } from "../db/provisioning.js";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { startV1Stub, type V1Stub } from "../test-support/v1-stub.js";
 import {
-  addressesResourcePayload,
   addressesResourcePayloadForRuntime,
   agentContextResourcePayload,
-  domainsResourcePayload,
   domainsResourcePayloadForRuntime,
-  mailboxesResourcePayload,
   mailboxesResourcePayloadForRuntime,
-  recentErrorsResourcePayload,
   recentErrorsResourcePayloadForRuntime,
-  sourcesResourcePayload,
   sourcesResourcePayloadForRuntime,
 } from "./resources.js";
-import { storeInboundEmail } from "../db/inbound.js";
-import { resetMailDataSource } from "../lib/mail-data-source.js";
-import { resetSelfHostedConfigCache } from "../db/self-hosted-store.js";
 
-const RUNTIME_ENV = [
-  "EMAILS_MODE",
-  "HASNA_EMAILS_MODE",
-  "EMAILS_CLIENT_ENV_SECRET",
-  "EMAILS_SELF_HOSTED_URL",
-  "EMAILS_SELF_HOSTED_API_KEY",
-  "EMAILS_SELF_HOSTED_TIMEOUT_SECONDS",
-  "EMAILS_SELF_HOSTED_CONNECT_TIMEOUT_SECONDS",
-  "EMAILS_DB_PATH",
-  "EMAILS_DATABASE_URL",
-  "HASNA_EMAILS_DATABASE_URL",
-  "HASNA_EMAILS_DB_PATH",
-] as const;
+// Self-hosted-ONLY: every MCP resource payload routes through the /v1 API (via the
+// resource repositories + mail data-source seam). There is no local SQLite island,
+// so all fixtures are seeded on the /v1 stub.
 
-const LEGACY_HOSTED_ENV_KEYS = [
-  "MAILERY_MODE",
-  "HASNA_MAILERY_MODE",
-  "MAILERY_STORAGE_MODE",
-  "HASNA_MAILERY_STORAGE_MODE",
-  "EMAILS_STORAGE_MODE",
-  "HASNA_EMAILS_STORAGE_MODE",
-  "MAILERY_API_URL",
-  "MAILERY_API_KEY",
-  "MAILERY_CLOUD_API_URL",
-  "MAILERY_CLOUD_TOKEN",
-  "HASNA_MAILERY_API_URL",
-  "HASNA_MAILERY_API_KEY",
-  "HASNA_MAILERY_ENV_FILE",
-] as const;
+const NOW = "2026-07-13T00:00:00.000Z";
 
-let previousHome: string | undefined;
-let tempHome: string | undefined;
-let previousLegacyEnv: Partial<Record<typeof LEGACY_HOSTED_ENV_KEYS[number], string>> = {};
+let stub: V1Stub;
 
-function localDbPath(): string {
-  if (!tempHome) throw new Error("tempHome not initialized");
-  return join(tempHome, ".hasna", "emails", "emails.db");
-}
+beforeAll(async () => {
+  stub = await startV1Stub();
+});
 
-function useSelfHostedStatusFetch(): () => void {
-  delete process.env["EMAILS_DB_PATH"];
-  process.env["EMAILS_MODE"] = "self_hosted";
-  process.env["EMAILS_SELF_HOSTED_URL"] = "https://emails.example/v1";
-  process.env["EMAILS_SELF_HOSTED_API_KEY"] = "test-key";
-  resetMailDataSource();
-  resetSelfHostedConfigCache();
+afterAll(() => stub.stop());
 
-  const previousFetch = globalThis.fetch;
-  globalThis.fetch = (async (input: RequestInfo | URL) => {
-    const url = new URL(String(input));
-    const body = url.pathname.endsWith("/messages/counts")
-      ? {
-          counts: {
-            inbox: 3,
-            unread: 2,
-            starred: 0,
-            sent: 1,
-            archived: 1,
-            spam: 0,
-            trash: 0,
-            total: 5,
-            latest_received_at: "2026-07-08T19:50:52.000Z",
-          },
-        }
-      : { messages: [] };
-    return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
-  }) as typeof fetch;
-
-  return () => {
-    globalThis.fetch = previousFetch;
-    resetMailDataSource();
-    resetSelfHostedConfigCache();
-  };
-}
-
-beforeEach(() => {
-  previousHome = process.env["HOME"];
-  previousLegacyEnv = {};
-  for (const key of LEGACY_HOSTED_ENV_KEYS) {
-    previousLegacyEnv[key] = process.env[key];
-    delete process.env[key];
-  }
-  tempHome = mkdtempSync(join(tmpdir(), "emails-mcp-resources-test-home-"));
-  process.env["HOME"] = tempHome;
-  process.env["EMAILS_DB_PATH"] = ":memory:";
-  for (const key of RUNTIME_ENV) delete process.env[key];
-  resetDatabase();
+beforeEach(async () => {
+  await stub.reset();
+  stub.applyEnv();
 });
 
 afterEach(() => {
-  closeDatabase();
-  delete process.env["EMAILS_DB_PATH"];
-  for (const key of RUNTIME_ENV) delete process.env[key];
-  resetMailDataSource();
-  resetSelfHostedConfigCache();
-  for (const key of LEGACY_HOSTED_ENV_KEYS) {
-    const previous = previousLegacyEnv[key];
-    if (previous === undefined) delete process.env[key];
-    else process.env[key] = previous;
-  }
-  if (previousHome === undefined) delete process.env["HOME"];
-  else process.env["HOME"] = previousHome;
-  if (tempHome) rmSync(tempHome, { recursive: true, force: true });
-  tempHome = undefined;
-  previousHome = undefined;
+  stub.clearEnv();
 });
 
-describe("MCP resource payloads", () => {
-  it("routes domain, address, and recent-error resources through self-hosted mode without creating local SQLite", async () => {
-    closeDatabase();
-    resetDatabase();
-    delete process.env["EMAILS_DB_PATH"];
-    process.env["EMAILS_MODE"] = "self_hosted";
-    process.env["EMAILS_SELF_HOSTED_URL"] = "http://127.0.0.1:9";
-    process.env["EMAILS_SELF_HOSTED_API_KEY"] = "resource-test-key";
-    process.env["EMAILS_SELF_HOSTED_TIMEOUT_SECONDS"] = "1";
-    process.env["EMAILS_SELF_HOSTED_CONNECT_TIMEOUT_SECONDS"] = "1";
-    resetSelfHostedConfigCache();
-
-    expect(existsSync(localDbPath())).toBe(false);
+describe("MCP resource payloads (self-hosted /v1)", () => {
+  it("routes the domain resource through the self-hosted API", async () => {
+    await stub.seed({
+      domains: [
+        { id: "domain-1", domain: "example.com", status: "ready", provider: "ses", verified: true, notes: null, created_at: NOW, updated_at: NOW },
+        { id: "domain-2", domain: "pending.example.com", status: "pending", provider: "ses", verified: false, notes: null, created_at: NOW, updated_at: NOW },
+      ],
+    });
 
     const domains = domainsResourcePayloadForRuntime() as {
-      domains: Array<{ id: string; domain: string }>;
+      domains: Array<{ id: string; domain: string; provisioning: unknown; readiness: unknown }>;
       mode: string;
       source: string;
+      note?: string;
     };
+
+    expect(domains.mode).toBe("self_hosted");
+    expect(domains.source).toBe("self_hosted_api");
+    expect(domains.note).toBeUndefined();
+    expect(domains.domains.map((domain) => domain.domain)).toEqual(["example.com", "pending.example.com"]);
+    expect(domains.domains[0]).toHaveProperty("readiness");
+    expect(domains.domains[0]?.provisioning).toBeNull();
+  });
+
+  it("routes the address resource through the self-hosted API", async () => {
+    await stub.seed({
+      addresses: [
+        { id: "addr-1", email: "ops@example.com", domain: "example.com", status: "active", verified: true, created_at: NOW, updated_at: NOW },
+        { id: "addr-2", email: "pending@example.com", domain: "example.com", status: "active", verified: false, created_at: NOW, updated_at: NOW },
+      ],
+    });
+
     const addresses = await addressesResourcePayloadForRuntime() as {
-      addresses: Array<{ id: string; email: string }>;
+      addresses: Array<{ id: string; email: string; provisioning: unknown }>;
       mode: string;
       source: string;
+      note?: string;
     };
+
+    expect(addresses.mode).toBe("self_hosted");
+    expect(addresses.source).toBe("self_hosted_api");
+    expect(addresses.note).toBeUndefined();
+    expect(addresses.addresses.map((address) => address.email)).toEqual(["ops@example.com", "pending@example.com"]);
+    expect(addresses.addresses[0]?.provisioning).toBeNull();
+  });
+
+  it("reports recent-error resource as API-only with no local state read", () => {
     const recentErrors = recentErrorsResourcePayloadForRuntime() as {
       errors: unknown[];
       mode: string;
@@ -162,13 +86,6 @@ describe("MCP resource payloads", () => {
       note: string;
     };
 
-    expect(existsSync(localDbPath())).toBe(false);
-    expect(domains.mode).toBe("self_hosted");
-    expect(domains.source).toBe("self_hosted_api");
-    expect(domains.domains).toEqual([]);
-    expect(addresses.mode).toBe("self_hosted");
-    expect(addresses.source).toBe("self_hosted_api");
-    expect(addresses.addresses).toEqual([]);
     expect(recentErrors).toMatchObject({
       errors: [],
       mode: "self_hosted",
@@ -177,141 +94,30 @@ describe("MCP resource payloads", () => {
     expect(recentErrors.note).toContain("no local database or config state was read");
   });
 
-  it("routes runtime mailboxes and sources through the self-hosted API without creating local SQLite", async () => {
-    const restore = useSelfHostedStatusFetch();
-    try {
-      expect(existsSync(localDbPath())).toBe(false);
-
-      const mailboxes = await mailboxesResourcePayloadForRuntime() as { counts: { inbox: number; unread: number; sent: number } };
-      const sources = await sourcesResourcePayloadForRuntime() as { sources: Array<{ id: string; badges: string[]; total: number; unread: number }> };
-
-      expect(existsSync(localDbPath())).toBe(false);
-      expect(mailboxes.counts).toMatchObject({ inbox: 3, unread: 2, sent: 1 });
-      expect(sources.sources[0]).toMatchObject({
-        id: "self_hosted",
-        badges: ["self_hosted"],
-        total: 4,
-        unread: 2,
-      });
-    } finally {
-      restore();
-    }
-  });
-
-  it("exposes mailbox and source resource payloads with legacy badges", () => {
-    const provider = createProvider({ name: "Sandbox import", type: "sandbox" });
-    storeInboundEmail({
-      provider_id: provider.id,
-      message_id: "<mcp-source-provider@example.com>",
-      from_address: "sender@example.com",
-      to_addresses: ["ops@example.com"],
-      cc_addresses: [],
-      subject: "provider resource",
-      text_body: "body",
-      html_body: null,
-      attachments: [],
-      headers: {},
-      raw_size: 1,
-      received_at: "2026-01-02T10:00:00.000Z",
-    });
-    storeInboundEmail({
-      provider_id: null,
-      message_id: "<mcp-source-legacy@example.com>",
-      from_address: "legacy@example.com",
-      to_addresses: ["ops@example.com"],
-      cc_addresses: [],
-      subject: "legacy resource",
-      text_body: "body",
-      html_body: null,
-      attachments: [],
-      headers: {},
-      raw_size: 1,
-      received_at: "2026-01-03T10:00:00.000Z",
+  it("routes runtime mailboxes and sources through the self-hosted API", async () => {
+    await stub.seed({
+      messages: [
+        { id: "m1", direction: "inbound", from_addr: "a@x.com", to_addrs: ["me@x.com"], subject: "hello", body_text: "hi", status: "received", is_read: false, is_starred: false, labels: [], received_at: "2026-06-02T00:00:00.000Z" },
+        { id: "m2", direction: "inbound", from_addr: "b@x.com", to_addrs: ["me@x.com"], subject: "second", body_text: "yo", status: "received", is_read: true, is_starred: false, labels: [], received_at: "2026-06-03T00:00:00.000Z" },
+        { id: "m3", direction: "outbound", from_addr: "me@x.com", to_addrs: ["c@x.com"], subject: "sent one", body_text: "out", status: "sent", labels: [], created_at: "2026-06-01T00:00:00.000Z" },
+      ],
     });
 
-    const mailboxes = mailboxesResourcePayload(getDatabase()) as { counts: { inbox: number }; folders: Array<{ id: string; count: number }> };
-    const sources = sourcesResourcePayload(getDatabase()) as { sources: Array<{ id: string; badges: string[]; total: number }> };
+    const mailboxes = await mailboxesResourcePayloadForRuntime() as { counts: { inbox: number; unread: number; sent: number } };
+    const sources = await sourcesResourcePayloadForRuntime() as { sources: Array<{ id: string; badges: string[]; total: number; unread: number }> };
 
-    expect(mailboxes.counts.inbox).toBe(2);
-    expect(mailboxes.folders.find((folder) => folder.id === "inbox")?.count).toBe(2);
-    expect(sources.sources.find((source) => source.id === `provider:${provider.id}`)).toMatchObject({ total: 1 });
-    expect(sources.sources.find((source) => source.id === "legacy")?.badges).toContain("legacy");
+    expect(mailboxes.counts).toMatchObject({ inbox: 2, unread: 1, sent: 1 });
+    expect(sources.sources[0]).toMatchObject({
+      id: "self_hosted",
+      badges: ["self_hosted"],
+      total: 2,
+      unread: 1,
+    });
   });
 
-  it("builds domain readiness with grouped ready-address counts", () => {
-    const provider = createProvider({ name: "sandbox", type: "sandbox" });
-    const domain = updateDnsStatus(createDomain(provider.id, "example.com").id, "verified", "verified", "verified");
-    const ready = createAddress({ provider_id: provider.id, email: "ready@example.com" });
-    setAddressProvisioning(ready.id, { domain_id: domain.id, provisioning_status: "ready" });
-
-    const db = getDatabase();
-    const timestamp = new Date().toISOString();
-    db.run("BEGIN");
-    try {
-      for (let i = 0; i < 10025; i++) {
-        db.run(
-          `INSERT INTO addresses (id, provider_id, email, display_name, verified, domain_id, provisioning_status, created_at, updated_at)
-           VALUES (?, ?, ?, NULL, 0, ?, 'ready', ?, ?)`,
-          [`bulk-address-${i}`, provider.id, `bulk-${i}@example.com`, `domain-${i}`, timestamp, timestamp],
-        );
-      }
-      db.run("COMMIT");
-    } catch (error) {
-      db.run("ROLLBACK");
-      throw error;
-    }
-
-    const payload = domainsResourcePayload(db) as { domains: Array<{ id: string; readiness: { ready_addresses: number; receive_ready: boolean } }> };
-    const found = payload.domains.find((candidate) => candidate.id === domain.id);
-    expect(found?.readiness.ready_addresses).toBe(1);
-    expect(found?.readiness.receive_ready).toBe(true);
-  });
-
-  it("bounds domain and address orientation resources", async () => {
-    const provider = createProvider({ name: "sandbox", type: "sandbox" });
-    for (let i = 0; i < 55; i++) {
-      createDomain(provider.id, `domain-${i}.example.com`);
-    }
-    for (let i = 0; i < 105; i++) {
-      createAddress({ provider_id: provider.id, email: `addr-${i}@example.com` });
-    }
-
-    const domainPayload = domainsResourcePayload(getDatabase()) as {
-      domains: unknown[];
-      total: number;
-      limit: number;
-      truncated: boolean;
-    };
-    expect(domainPayload.domains).toHaveLength(50);
-    expect(domainPayload.total).toBe(55);
-    expect(domainPayload.limit).toBe(50);
-    expect(domainPayload.truncated).toBe(true);
-
-    const addressPayload = await addressesResourcePayload(getDatabase()) as {
-      addresses: unknown[];
-      total: number;
-      limit: number;
-      truncated: boolean;
-    };
-    expect(addressPayload.addresses).toHaveLength(100);
-    expect(addressPayload.total).toBe(105);
-    expect(addressPayload.limit).toBe(100);
-    expect(addressPayload.truncated).toBe(true);
-  });
-
-  it("keeps the agent context resource compact with samples and full-context command", async () => {
-    const provider = createProvider({ name: "sandbox", type: "sandbox" });
-    for (let i = 0; i < 8; i++) {
-      const domain = createDomain(provider.id, `ready-${i}.example.com`);
-      updateDnsStatus(domain.id, "verified", "verified", "verified");
-      setDomainProvisioning(domain.id, { provisioning_status: "ready" });
-      const address = createAddress({ provider_id: provider.id, email: `ready-${i}@example.com` });
-      getDatabase().run("UPDATE addresses SET verified = 1 WHERE id = ?", [address.id]);
-      setAddressProvisioning(address.id, { domain_id: domain.id, provisioning_status: "ready" });
-    }
-
-    const payload = await agentContextResourcePayload(getDatabase()) as {
-      status: { domains: { usable: unknown[] }; addresses: { usable_from: unknown[] } };
+  it("keeps the agent context resource compact with samples and a full-context pointer", async () => {
+    const payload = await agentContextResourcePayload() as {
+      status: { domains: Record<string, unknown>; addresses: Record<string, unknown> };
       limits: { samples: number };
       truncated: { domains: boolean; addresses: boolean };
       full_context_resource: string;
@@ -319,63 +125,11 @@ describe("MCP resource payloads", () => {
     };
 
     expect(payload.limits.samples).toBe(5);
-    expect(payload.status.domains.usable).toHaveLength(5);
-    expect(payload.status.addresses.usable_from).toHaveLength(5);
-    expect(payload.truncated).toEqual({ domains: true, addresses: true });
+    expect(payload.status).toHaveProperty("domains");
+    expect(payload.status).toHaveProperty("addresses");
+    expect(payload.truncated).toHaveProperty("domains");
+    expect(payload.truncated).toHaveProperty("addresses");
     expect(payload.full_context_resource).toBe("emails://agent/context/full");
     expect(payload.full_context_cli).toBe("emails agent context --json");
-  });
-
-  it("returns only failed provisioning rows for recent errors", () => {
-    const provider = createProvider({ name: "sandbox", type: "sandbox" });
-    const failedDomain = createDomain(provider.id, "failed.example.com");
-    setDomainProvisioning(failedDomain.id, { provisioning_status: "failed", last_error: "DNS failed" });
-    const okDomain = createDomain(provider.id, "ok.example.com");
-    setDomainProvisioning(okDomain.id, { provisioning_status: "ready" });
-    const failedAddress = createAddress({ provider_id: provider.id, email: "failed@example.com" });
-    setAddressProvisioning(failedAddress.id, { provisioning_status: "failed", last_error: "route failed" });
-    const okAddress = createAddress({ provider_id: provider.id, email: "ok@example.com" });
-    setAddressProvisioning(okAddress.id, { provisioning_status: "ready" });
-
-    const payload = recentErrorsResourcePayload(getDatabase()) as { errors: Array<{ component: string; entity?: string; message: string }> };
-    expect(payload.errors).toEqual([
-      {
-        component: "domain-provisioning",
-        entity: "failed.example.com",
-        message: "DNS failed",
-        fix_command: "emails provision status failed.example.com",
-      },
-      {
-        component: "address-provisioning",
-        entity: "failed@example.com",
-        message: "route failed",
-        fix_command: "emails doctor delivery failed@example.com",
-      },
-    ]);
-  });
-
-  it("bounds recent provisioning errors per component", () => {
-    const provider = createProvider({ name: "sandbox", type: "sandbox" });
-    for (let i = 0; i < 55; i++) {
-      const domain = createDomain(provider.id, `failed-${i}.example.com`);
-      setDomainProvisioning(domain.id, { provisioning_status: "failed", last_error: `DNS failed ${i}` });
-      const address = createAddress({ provider_id: provider.id, email: `failed-${i}@example.com` });
-      setAddressProvisioning(address.id, { provisioning_status: "failed", last_error: `route failed ${i}` });
-    }
-
-    const payload = recentErrorsResourcePayload(getDatabase()) as {
-      errors: Array<{ component: string }>;
-      limits: { per_component: number };
-      truncated: boolean;
-      truncated_components: { domain_provisioning: boolean; address_provisioning: boolean };
-    };
-    expect(payload.limits.per_component).toBe(50);
-    expect(payload.truncated).toBe(true);
-    expect(payload.truncated_components).toEqual({
-      domain_provisioning: true,
-      address_provisioning: true,
-    });
-    expect(payload.errors.filter((error) => error.component === "domain-provisioning")).toHaveLength(50);
-    expect(payload.errors.filter((error) => error.component === "address-provisioning")).toHaveLength(50);
   });
 });

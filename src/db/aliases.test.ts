@@ -1,13 +1,41 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { closeDatabase, resetDatabase } from "./database.js";
+// Self-hosted-ONLY: the aliases repo routes every read/write to the /v1
+// `aliases` API. This exercises the REAL synchronous curl transport against an
+// out-of-process /v1 stub (see src/test-support/v1-stub.ts).
+//
+// Migrated from the deleted local-SQLite pattern. Unlike the old local store,
+// nothing auto-seeds a protected global catch-all — the global "*" catch-all only
+// exists after setGlobalCatchAll()/ensureDefaultCatchAll() is called, so tests
+// create it explicitly where the assertions depend on it.
+//
+// Client-side behaviors that STILL live in the repo and are retained here:
+//   - upsert on duplicate (domain, local_part) (list-then-update, not a SQLite
+//     UNIQUE constraint),
+//   - the protected-catch-all delete refusal (removeAlias checks `protected`).
+
+import { afterAll, afterEach, beforeAll, beforeEach, describe, it, expect } from "bun:test";
+import { startV1Stub, type V1Stub } from "../test-support/v1-stub.js";
 import {
   createAlias, createCatchAll, removeAlias, getAlias,
   listAliases, resolveAlias, CATCH_ALL,
   setGlobalCatchAll, ensureDefaultCatchAll, listAliasesByTargets,
 } from "./aliases.js";
 
-beforeEach(() => { process.env["EMAILS_DB_PATH"] = ":memory:"; resetDatabase(); });
-afterEach(() => { closeDatabase(); delete process.env["EMAILS_DB_PATH"]; });
+let stub: V1Stub;
+
+beforeAll(async () => {
+  stub = await startV1Stub();
+});
+
+afterAll(() => stub.stop());
+
+beforeEach(async () => {
+  await stub.reset();
+  stub.applyEnv();
+});
+
+afterEach(() => {
+  stub.clearEnv();
+});
 
 describe("aliases", () => {
   it("creates an alias and resolves it to its target", () => {
@@ -68,8 +96,8 @@ describe("list / remove", () => {
   it("lists all and per-domain, and removes by id", () => {
     const a = createAlias("a@x.com", "t@x.com");
     createCatchAll("y.com", "t@y.com");
-    // exclude the default protected global catch-all that's always seeded
-    expect(listAliases().filter((x) => x.domain !== "*")).toHaveLength(2);
+    // No global catch-all is auto-seeded in the self-hosted model.
+    expect(listAliases()).toHaveLength(2);
     expect(listAliases("x.com")).toHaveLength(1);
     expect(removeAlias(a.id)).toBe(true);
     expect(getAlias(a.id)).toBeNull();
@@ -82,7 +110,8 @@ describe("list / remove", () => {
     createAlias("a@x.com", "t@x.com");
     createAlias("a@y.com", "t@y.com");
 
-    const page = listAliases(undefined, undefined, { limit: 2, offset: 1 });
+    // Order: global "*" first, then by domain, then local-part; offset 1 skips "*".
+    const page = listAliases(undefined, { limit: 2, offset: 1 });
 
     expect(page.map((alias) => `${alias.local_part}@${alias.domain}`)).toEqual([
       "a@x.com",
@@ -96,7 +125,7 @@ describe("list / remove", () => {
     createAlias("b@x.com", "t@x.com");
     createAlias("a@y.com", "t@y.com");
 
-    const page = listAliases("x.com", undefined, { limit: 2, offset: 1 });
+    const page = listAliases("x.com", { limit: 2, offset: 1 });
 
     expect(page.map((alias) => `${alias.local_part}@${alias.domain}`)).toEqual([
       "b@x.com",

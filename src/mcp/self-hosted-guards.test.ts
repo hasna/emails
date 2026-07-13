@@ -1,103 +1,12 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { startV1Stub, type V1Stub } from "../test-support/v1-stub.js";
 import { buildServer } from "./server.js";
-import { closeDatabase, resetDatabase } from "../db/database.js";
-import { resetSelfHostedConfigCache } from "../db/self-hosted-store.js";
-import { resetMailDataSource } from "../lib/mail-data-source.js";
 
-const API_KEY = "emails_test_key";
-const ENV_KEYS = [
-  "EMAILS_MODE",
-  "HASNA_EMAILS_MODE",
-  "EMAILS_DB_PATH",
-  "HASNA_EMAILS_DB_PATH",
-  "EMAILS_SELF_HOSTED_URL",
-  "EMAILS_SELF_HOSTED_API_KEY",
-  "EMAILS_CLIENT_ENV_SECRET",
-  "MAILERY_MODE",
-  "HASNA_MAILERY_MODE",
-  "MAILERY_STORAGE_MODE",
-  "HASNA_MAILERY_STORAGE_MODE",
-  "EMAILS_STORAGE_MODE",
-  "HASNA_EMAILS_STORAGE_MODE",
-  "MAILERY_API_URL",
-  "MAILERY_API_KEY",
-  "MAILERY_CLOUD_API_URL",
-  "MAILERY_CLOUD_TOKEN",
-  "HASNA_MAILERY_API_URL",
-  "HASNA_MAILERY_API_KEY",
-  "HASNA_MAILERY_ENV_FILE",
-] as const;
+// Self-hosted-ONLY: there is no local SQLite. These guards prove that send routes
+// through the /v1 stub and that local-state tools fail fast with the API-only guard
+// message (the guards still live in src/mcp/tools/{email-ops,misc-ops}.ts).
 
-const ORIGINAL_HOME = process.env["HOME"];
-const ORIGINAL_ENV = new Map<string, string | undefined>(ENV_KEYS.map((key) => [key, process.env[key]]));
-
-let tempHome: string | null = null;
-let apiServer: ReturnType<typeof Bun.serve> | null = null;
-let apiOrigin = "";
-let sentBodies: Array<Record<string, unknown>> = [];
-
-function resetEnv(): void {
-  for (const key of ENV_KEYS) delete process.env[key];
-}
-
-function restoreEnv(): void {
-  for (const key of ENV_KEYS) {
-    const value = ORIGINAL_ENV.get(key);
-    if (value === undefined) delete process.env[key];
-    else process.env[key] = value;
-  }
-}
-
-function dbPath(): string {
-  if (!tempHome) throw new Error("tempHome not initialized");
-  return join(tempHome, ".hasna", "emails", "emails.db");
-}
-
-function json(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "content-type": "application/json" },
-  });
-}
-
-function startApi(): void {
-  sentBodies = [];
-  apiServer = Bun.serve({
-    port: 0,
-    fetch: async (req) => {
-      const url = new URL(req.url);
-      if (req.headers.get("authorization") !== `Bearer ${API_KEY}`) {
-        return json({ error: "unauthorized" }, 401);
-      }
-      if (req.method === "POST" && url.pathname === "/v1/messages/send") {
-        const body = await req.json() as Record<string, unknown>;
-        sentBodies.push(body);
-        const now = new Date().toISOString();
-        return json({
-          message: {
-            id: "mcp-self-hosted-send-1",
-            message_id: "provider-message-1",
-            direction: "outbound",
-            from_addr: body.from,
-            to_addrs: body.to,
-            subject: body.subject,
-            body_text: body.text,
-            body_html: body.html,
-            is_read: true,
-            labels: [],
-            created_at: now,
-            updated_at: now,
-          },
-        });
-      }
-      return json({ error: "not found" }, 404);
-    },
-  });
-  apiOrigin = `http://127.0.0.1:${apiServer.port}`;
-}
+let stub: V1Stub;
 
 async function callTool(name: string, args: Record<string, unknown>) {
   const server = buildServer() as unknown as {
@@ -110,35 +19,23 @@ function resultText(result: { content: Array<{ text: string }> }): string {
   return result.content[0]?.text ?? "";
 }
 
-beforeEach(() => {
-  resetEnv();
-  tempHome = mkdtempSync(join(tmpdir(), "emails-mcp-self-hosted-"));
-  process.env["HOME"] = tempHome;
-  process.env["EMAILS_MODE"] = "self_hosted";
-  process.env["EMAILS_SELF_HOSTED_API_KEY"] = API_KEY;
-  startApi();
-  process.env["EMAILS_SELF_HOSTED_URL"] = apiOrigin;
-  resetSelfHostedConfigCache();
-  resetMailDataSource();
+beforeAll(async () => {
+  stub = await startV1Stub();
+});
+
+afterAll(() => stub.stop());
+
+beforeEach(async () => {
+  await stub.reset();
+  stub.applyEnv();
 });
 
 afterEach(() => {
-  apiServer?.stop(true);
-  apiServer = null;
-  apiOrigin = "";
-  closeDatabase();
-  resetDatabase();
-  resetMailDataSource();
-  resetSelfHostedConfigCache();
-  restoreEnv();
-  if (ORIGINAL_HOME === undefined) delete process.env["HOME"];
-  else process.env["HOME"] = ORIGINAL_HOME;
-  if (tempHome) rmSync(tempHome, { recursive: true, force: true });
-  tempHome = null;
+  stub.clearEnv();
 });
 
 describe("MCP self_hosted guards", () => {
-  it("routes send_email through the self-hosted API without creating a local DB", async () => {
+  it("routes send_email through the self-hosted API without touching a local DB", async () => {
     const result = await callTool("send_email", {
       from: "ops@example.com",
       to: ["user@example.com"],
@@ -148,32 +45,44 @@ describe("MCP self_hosted guards", () => {
     });
 
     expect(result.isError).not.toBe(true);
-    expect(JSON.parse(resultText(result))).toMatchObject({
-      success: true,
-      email_id: "mcp-self-hosted-send-1",
-      message_id: "provider-message-1",
-    });
-    expect(sentBodies).toHaveLength(1);
-    expect(sentBodies[0]).toMatchObject({
+    const payload = JSON.parse(resultText(result)) as { success: boolean; email_id: string; message_id: string };
+    expect(payload.success).toBe(true);
+    expect(payload.email_id.length).toBeGreaterThan(0);
+    expect(payload.message_id.length).toBeGreaterThan(0);
+
+    // The send persisted an outbound row on the /v1 store (not a local DB).
+    const messages = await stub.list("messages");
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      direction: "outbound",
       from: "ops@example.com",
       to: ["user@example.com"],
       subject: "Self-hosted MCP send",
       text: "hello",
       idempotency_key: "mcp-self-hosted-send",
     });
-    expect(existsSync(dbPath())).toBe(false);
   });
 
-  it("fails local-state MCP tools before creating a local DB in self_hosted mode", async () => {
+  it("fires the email-ops self_hosted API-only guard for local-only send options", async () => {
+    // send_email routes to /v1, but local-only options (e.g. provider_id) are
+    // rejected by the email-ops "self_hosted API-only mode" guard before any call.
+    const result = await callTool("send_email", {
+      from: "ops@example.com",
+      to: ["user@example.com"],
+      subject: "guarded",
+      text: "hi",
+      provider_id: "provider-1",
+    });
+    expect(result.isError).toBe(true);
+    expect(resultText(result)).toContain("self_hosted API-only mode");
+  });
+
+  it("fails self-hosted-client-only tools without touching a local DB", async () => {
+    // These read/write server-owned state; the self-hosted client refuses them.
     const cases: Array<[string, Record<string, unknown>]> = [
       ["batch_send", { recipients: [], template_name: "welcome", from_address: "ops@example.com" }],
       ["pull_events", {}],
       ["get_stats", {}],
-      ["get_email_content", { email_id: "email-1" }],
-      ["list_templates", {}],
-      ["list_sandbox_emails", {}],
-      ["run_doctor", {}],
-      ["export_emails", {}],
       ["sync_s3_inbox", { bucket: "inbound-bucket" }],
       ["provision_address", { email: "ops@example.com", provider_id: "provider-1" }],
       ["provision_status", {}],
@@ -182,8 +91,16 @@ describe("MCP self_hosted guards", () => {
     for (const [name, args] of cases) {
       const result = await callTool(name, args);
       expect(result.isError).toBe(true);
-      expect(resultText(result)).toContain("self_hosted API-only mode");
+      expect(resultText(result)).toContain("not available in the self-hosted client");
     }
-    expect(existsSync(dbPath())).toBe(false);
+  });
+
+  it("routes read tools through /v1 (empty store yields empty lists, no local DB)", async () => {
+    for (const name of ["list_templates", "list_sandbox_emails", "export_emails"]) {
+      const result = await callTool(name, {});
+      expect(result.isError).not.toBe(true);
+      const payload = JSON.parse(resultText(result)) as { items: unknown[] };
+      expect(payload.items).toEqual([]);
+    }
   });
 });

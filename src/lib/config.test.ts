@@ -12,20 +12,36 @@ import {
   CANONICAL_OPEN_EMAILS_RDS_SECRET_PATH,
   getCanonicalOpenEmailsRdsConfig,
 } from "./config.js";
+import { resetSelfHostedConfigCache } from "../db/self-hosted-store.js";
 
 // Use a temp dir unique per test run to isolate from real ~/.hasna/emails
 const TMP_HOME = join("/tmp", `emails-config-test-${process.pid}`);
 const origHome = process.env.HOME;
 
+// getInboundAttachmentStorageConfig resolves the client mode, which in this
+// self-hosted-only client MANDATES a configured endpoint (URL + API key). These
+// fake values only satisfy the presence check — no request is ever made — so the
+// mode always resolves to self_hosted. Set/cleared per test so nothing leaks
+// into sibling test files run in the same process.
+const SELF_HOSTED_URL = "https://emails.config.test";
+const SELF_HOSTED_KEY = "config-test-api-key";
+
 beforeEach(() => {
   mkdirSync(TMP_HOME, { recursive: true });
   process.env.HOME = TMP_HOME;
+  process.env.EMAILS_SELF_HOSTED_URL = SELF_HOSTED_URL;
+  process.env.EMAILS_SELF_HOSTED_API_KEY = SELF_HOSTED_KEY;
+  resetSelfHostedConfigCache();
 });
 
 afterEach(() => {
   if (origHome === undefined) delete process.env.HOME;
   else process.env.HOME = origHome;
   if (existsSync(TMP_HOME)) rmSync(TMP_HOME, { recursive: true, force: true });
+  delete process.env.EMAILS_MODE;
+  delete process.env.EMAILS_SELF_HOSTED_URL;
+  delete process.env.EMAILS_SELF_HOSTED_API_KEY;
+  resetSelfHostedConfigCache();
 });
 
 describe("config", () => {
@@ -139,9 +155,11 @@ describe("config", () => {
     expect(getFailoverProviderIds()).toEqual(["id1", "id2"]);
   });
 
-  it("getInboundAttachmentStorageConfig defaults local attachment storage", () => {
+  it("getInboundAttachmentStorageConfig defaults self-hosted attachments to none without a bucket", () => {
+    // This client is self-hosted-only: with no configured bucket the thin client
+    // never keeps attachments on the local filesystem, so the default is "none".
     expect(getInboundAttachmentStorageConfig()).toMatchObject({
-      attachment_storage: "local",
+      attachment_storage: "none",
       s3_region: "us-east-1",
       s3_prefix: "emails",
     });

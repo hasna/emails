@@ -1,150 +1,140 @@
-/**
- * GAP-A: `emails send` routes through the mail-data-source seam.
- *   • self_hosted mode  → server send API (POST /messages/send), never the local provider path
- *   • local mode  → unchanged local provider path (writes a local sent ledger row)
- *
- * Both surfaces are exercised end-to-end via a CLI subprocess so the real routing
- * (CLI → resolveMailDataSource → {Api,Sqlite}MailDataSource) is under test. Self-hosted mode
- * runs against an in-process fake Emails Self-hosted API (Bun.serve) that records requests.
- */
-import { afterEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdtempSync, mkdirSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { closeDatabase, resetDatabase } from "../../db/database.js";
-import { createProvider } from "../../db/providers.js";
+// Self-hosted-ONLY: `emails send` routes through the mail-data-source seam to the
+// server send API (POST /v1/messages/send). There is no local provider path or
+// local sent ledger anymore. These tests drive the REAL command in-process
+// against an out-of-process /v1 stub (see src/test-support/v1-stub.ts): a real
+// send records an outbound message, a dry-run records nothing, and the
+// self-hosted-unsupported paths (--to-group, scheduling) fail loud.
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { Command } from "commander";
+import { startV1Stub, type V1Stub } from "../../test-support/v1-stub.js";
+import { registerSendCommands } from "./send.js";
 
-const cleanups: Array<() => void> = [];
+let stub: V1Stub;
 
-afterEach(() => {
-  closeDatabase();
-  for (const fn of cleanups.splice(0)) fn();
-  delete process.env["EMAILS_DB_PATH"];
-  delete process.env["EMAILS_MODE"];
-  delete process.env["EMAILS_SELF_HOSTED_URL"];
-  delete process.env["EMAILS_SELF_HOSTED_API_KEY"];
-});
-
-function baseLocalEnv(dbPath: string, homePath: string): NodeJS.ProcessEnv {
-  mkdirSync(homePath, { recursive: true });
-  const {
-    EMAILS_MODE: _m,
-    HASNA_EMAILS_MODE: _h,
-    EMAILS_SELF_HOSTED_URL: _u,
-    EMAILS_SELF_HOSTED_API_KEY: _k,
-    MAILERY_MODE: _lm,
-    HASNA_MAILERY_MODE: _hlm,
-    MAILERY_STORAGE_MODE: _lsm,
-    HASNA_MAILERY_STORAGE_MODE: _hlsm,
-    EMAILS_STORAGE_MODE: _esm,
-    HASNA_EMAILS_STORAGE_MODE: _hesm,
-    MAILERY_API_URL: _lau,
-    MAILERY_API_KEY: _lak,
-    MAILERY_CLOUD_API_URL: _lcau,
-    MAILERY_CLOUD_TOKEN: _lct,
-    HASNA_MAILERY_API_URL: _hlau,
-    HASNA_MAILERY_API_KEY: _hlak,
-    HASNA_MAILERY_ENV_FILE: _hlef,
-    ...rest
-  } = process.env;
-  return { ...rest, EMAILS_DB_PATH: dbPath, HOME: homePath, NO_COLOR: "1", EMAILS_MODE: "local", HASNA_EMAILS_MODE: "local" };
-}
-
-// Async spawn (never spawnSync): the in-process fake server must keep serving while the
-// CLI subprocess runs, so the event loop cannot be blocked.
-async function runCli(args: string[], env: NodeJS.ProcessEnv): Promise<{ code: number; out: string; err: string }> {
-  const proc = Bun.spawn({ cmd: ["bun", "src/cli/index.tsx", ...args], cwd: process.cwd(), env, stdout: "pipe", stderr: "pipe" });
-  const [out, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
-  await proc.exited;
-  return { code: proc.exitCode ?? -1, out: out.trim(), err: err.trim() };
-}
-
-function seedSandboxProvider(dbPath: string, homePath: string): void {
-  const prevDb = process.env["EMAILS_DB_PATH"];
-  const prevHome = process.env["HOME"];
-  closeDatabase();
-  process.env["EMAILS_DB_PATH"] = dbPath;
-  process.env["HOME"] = homePath;
-  resetDatabase();
+async function runSendCommand(args: string[]) {
+  const program = new Command();
+  program.exitOverride();
+  const consoleLines: string[] = [];
+  const originalLog = console.log;
+  registerSendCommands(program, () => {});
+  console.log = (...values: unknown[]) => {
+    consoleLines.push(values.map(String).join(" "));
+  };
   try {
-    createProvider({ name: "sandbox", type: "sandbox", active: true });
+    await program.parseAsync(["node", "emails", ...args]);
   } finally {
-    closeDatabase();
-    if (prevDb === undefined) delete process.env["EMAILS_DB_PATH"]; else process.env["EMAILS_DB_PATH"] = prevDb;
-    if (prevHome === undefined) delete process.env["HOME"]; else process.env["HOME"] = prevHome;
+    console.log = originalLog;
   }
+  return { consoleOutput: consoleLines.join("\n") };
 }
 
-function startFakeSelfHosted() {
-  const sent: Array<Record<string, unknown>> = [];
-  const requests: string[] = [];
-  const server = Bun.serve({
-    port: 0,
-    fetch(req) {
-      const url = new URL(req.url);
-      const path = url.pathname;
-      requests.push(`${req.method} ${path}`);
-      const j = (b: unknown, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
-      if (path === "/v1/messages/send" && req.method === "POST") {
-        return req.json().then((body) => {
-          sent.push(body as Record<string, unknown>);
-          return j({ message: { id: "self_hosted_sent_1", message_id: "prov-1", attachments: [] } }, 201);
-        });
-      }
-      return j({ data: [] });
-    },
+async function runSendCommandExpectingExit(args: string[]): Promise<string> {
+  const errors: string[] = [];
+  const originalError = console.error;
+  const originalExit = process.exit;
+  (console as unknown as { error: (...v: unknown[]) => void }).error = (...values: unknown[]) => {
+    errors.push(values.map(String).join(" "));
+  };
+  (process as unknown as { exit: (code?: number) => never }).exit = ((code?: number) => {
+    throw new Error(`process.exit:${code ?? 0}`);
+  }) as never;
+  try {
+    await expect(runSendCommand(args)).rejects.toThrow(/process\.exit/);
+  } finally {
+    (console as unknown as { error: typeof originalError }).error = originalError;
+    (process as unknown as { exit: typeof originalExit }).exit = originalExit;
+  }
+  return errors.join("\n");
+}
+
+beforeAll(async () => {
+  stub = await startV1Stub();
+});
+afterAll(() => stub.stop());
+beforeEach(async () => {
+  await stub.reset();
+  stub.applyEnv();
+});
+afterEach(() => stub.clearEnv());
+
+describe("emails send — routes through the server send API", () => {
+  it("records an outbound message and reports success", async () => {
+    const result = await runSendCommand([
+      "send", "--from", "agent@acme.com", "--to", "dest@ext.com", "--subject", "Hi", "--body", "Body text",
+    ]);
+
+    expect(result.consoleOutput).toContain("Email sent to dest@ext.com");
+
+    const messages = await stub.list("messages");
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      direction: "outbound",
+      from: "agent@acme.com",
+      subject: "Hi",
+      text: "Body text",
+    });
+    expect(messages[0]!["to"]).toEqual(["dest@ext.com"]);
   });
-  return { server, base: `http://127.0.0.1:${server.port}`, sent, requests };
-}
 
-describe("emails send — self_hosted mode routes through the server API", () => {
-  it("POSTs to /messages/send with the resolved mailbox and never the local provider path", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "send-self_hosted-"));
-    cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
-    const homePath = join(dir, "home");
-    mkdirSync(homePath, { recursive: true });
+  it("sends to multiple recipients", async () => {
+    const result = await runSendCommand([
+      "send", "--from", "agent@acme.com", "--to", "a@ext.com", "b@ext.com", "--subject", "Hi", "--body", "x",
+    ]);
 
-    const { server, base, sent, requests } = startFakeSelfHosted();
-    cleanups.push(() => server.stop(true));
-    const dbPath = join(dir, "must-not-exist.db");
-
-    const env: NodeJS.ProcessEnv = {
-      ...baseLocalEnv(dbPath, homePath),
-      EMAILS_MODE: "self_hosted",
-      EMAILS_SELF_HOSTED_URL: base,
-      EMAILS_SELF_HOSTED_API_KEY: "test-token",
-    };
-
-    const res = await runCli(["send", "--from", "agent@acme.com", "--to", "dest@ext.com", "--subject", "Hi", "--body", "Body text"], env);
-
-    expect(res.code).toBe(0);
-    expect(res.out).toContain("Email sent");
-    expect(sent).toHaveLength(1);
-    expect(sent[0]).toMatchObject({ from: "agent@acme.com", to: ["dest@ext.com"], subject: "Hi", text: "Body text" });
-    expect(requests).toContain("GET /v1/contacts");
-    expect(requests).toContain("POST /v1/messages/send");
-    expect(existsSync(dbPath)).toBe(false);
-    expect(existsSync(join(homePath, ".hasna", "emails", "emails.db"))).toBe(false);
-  }, 30_000);
+    expect(result.consoleOutput).toContain("Email sent to a@ext.com, b@ext.com");
+    const messages = await stub.list("messages");
+    expect(messages).toHaveLength(1);
+    expect(messages[0]!["to"]).toEqual(["a@ext.com", "b@ext.com"]);
+  });
 });
 
-describe("emails send — local mode is unchanged (local provider path)", () => {
-  it("sends via the sandbox provider and writes a local sent ledger row (no self_hosted)", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "send-local-"));
-    cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
-    const dbPath = join(dir, "emails.db");
-    const homePath = join(dir, "home");
-    const env = baseLocalEnv(dbPath, homePath);
-    seedSandboxProvider(dbPath, homePath);
+describe("emails send — dry-run previews without sending", () => {
+  it("prints the preview and [NOT SENT] without recording a message", async () => {
+    const result = await runSendCommand([
+      "send", "--from", "agent@acme.com", "--to", "dest@ext.com", "--subject", "Hi", "--body", "Body text", "--dry-run",
+    ]);
 
-    const res = await runCli(["send", "--from", "me@example.com", "--to", "you@ext.com", "--subject", "Local Hi", "--body", "hello"], env);
-    expect(res.code).toBe(0);
-    expect(res.out).toContain("Email sent");
+    expect(result.consoleOutput).toContain("[DRY RUN]");
+    expect(result.consoleOutput).toContain("[NOT SENT]");
+    expect(await stub.list("messages")).toHaveLength(0);
+  });
 
-    // The local ledger row proves the local provider path ran (self_hosted send writes none).
-    const sentList = await runCli(["--json", "inbox", "list", "--folder", "sent"], env);
-    expect(sentList.code).toBe(0);
-    const rows = JSON.parse(sentList.out) as Array<{ subject: string }>;
-    expect(rows.map((r) => r.subject)).toContain("Local Hi");
-  }, 30_000);
+  it("warns that scheduling is unavailable during a dry-run", async () => {
+    const result = await runSendCommand([
+      "send", "--from", "agent@acme.com", "--to", "dest@ext.com", "--subject", "Hi", "--body", "x",
+      "--schedule", "2030-01-01T00:00:00Z", "--dry-run",
+    ]);
+
+    expect(result.consoleOutput).toContain("scheduling is not available in the self-hosted client");
+    expect(await stub.list("messages")).toHaveLength(0);
+  });
+});
+
+describe("emails send — self-hosted-unsupported paths fail loud", () => {
+  it("rejects --to-group (no server-side group fan-out)", async () => {
+    const errors = await runSendCommandExpectingExit([
+      "send", "--from", "agent@acme.com", "--to-group", "team", "--subject", "Hi", "--body", "x",
+    ]);
+
+    expect(errors).toContain("--to-group is not available in the self-hosted client");
+    expect(await stub.list("messages")).toHaveLength(0);
+  });
+
+  it("requires explicit recipients", async () => {
+    const errors = await runSendCommandExpectingExit([
+      "send", "--from", "agent@acme.com", "--subject", "Hi", "--body", "x",
+    ]);
+
+    expect(errors).toContain("No recipients specified");
+  });
+
+  it("rejects a real scheduled send (no server-side scheduling)", async () => {
+    const errors = await runSendCommandExpectingExit([
+      "send", "--from", "agent@acme.com", "--to", "dest@ext.com", "--subject", "Hi", "--body", "x",
+      "--schedule", "2030-01-01T00:00:00Z",
+    ]);
+
+    expect(errors).toContain("Scheduled send is not supported");
+    expect(await stub.list("messages")).toHaveLength(0);
+  });
 });

@@ -1,6 +1,15 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { closeDatabase, getDatabase, resetDatabase } from "./database.js";
-import { createProvider } from "./providers.js";
+// Self-hosted-ONLY: the owners repo routes owner CRUD to /v1/owners, address
+// ownership fields to /v1/addresses/<id>, and the audit trail to
+// /v1/address-ownership-events. Exercises the REAL curl transport against an
+// out-of-process /v1 stub (see src/test-support/v1-stub.ts).
+//
+// Migrated from the deleted local-SQLite pattern: former tests mutated
+// `db.run("UPDATE ... SET created_at ...")` to control ordering; here we seed
+// the /v1 rows with explicit created_at instead. The `listOwners`/
+// `listAddressesByOwner` pagination-option arity dropped its old `db` slot.
+
+import { afterAll, afterEach, beforeAll, beforeEach, describe, it, expect } from "bun:test";
+import { startV1Stub, type V1Stub } from "../test-support/v1-stub.js";
 import { createAddress } from "./addresses.js";
 import {
   createOwner, getOwner, getOwnerByName, listOwners,
@@ -9,13 +18,36 @@ import {
   listAddressOwnershipEvents, transferAddressOwner, unassignAddressOwner,
 } from "./owners.js";
 
-let providerId: string;
-beforeEach(() => {
-  process.env["EMAILS_DB_PATH"] = ":memory:";
-  resetDatabase();
-  providerId = createProvider({ name: "ses", type: "ses" }).id;
+let stub: V1Stub;
+
+beforeAll(async () => {
+  stub = await startV1Stub();
 });
-afterEach(() => { closeDatabase(); delete process.env["EMAILS_DB_PATH"]; });
+
+afterAll(() => stub.stop());
+
+beforeEach(async () => {
+  await stub.reset();
+  stub.applyEnv();
+});
+
+afterEach(() => {
+  stub.clearEnv();
+});
+
+/** Seed address rows (with explicit created_at for deterministic ordering). */
+function seededAddresses(rows: Array<{ id: string; email: string; created_at: string }>) {
+  return rows.map((r) => ({
+    id: r.id,
+    email: r.email,
+    status: "active",
+    verified: true,
+    owner_id: null,
+    administrator_id: null,
+    created_at: r.created_at,
+    updated_at: r.created_at,
+  }));
+}
 
 describe("owners", () => {
   it("registers a human and an agent owner", () => {
@@ -28,15 +60,20 @@ describe("owners", () => {
     expect(listOwners("agent").map((o) => o.name)).toContain("Tiberius");
   });
 
-  it("paginates owners after ordering newest first", () => {
-    const db = getDatabase();
-    for (let i = 0; i < 5; i++) {
-      const owner = createOwner({ type: "agent", name: `Owner ${i}` });
-      const timestamp = `2026-01-0${i + 1}T00:00:00.000Z`;
-      db.run("UPDATE owners SET created_at = ?, updated_at = ? WHERE id = ?", [timestamp, timestamp, owner.id]);
-    }
+  it("paginates owners after ordering newest first", async () => {
+    await stub.seed({
+      owners: Array.from({ length: 5 }, (_v, i) => ({
+        id: `owner-${i}`,
+        type: "agent",
+        name: `Owner ${i}`,
+        contact_email: null,
+        external_id: null,
+        created_at: `2026-01-0${i + 1}T00:00:00.000Z`,
+        updated_at: `2026-01-0${i + 1}T00:00:00.000Z`,
+      })),
+    });
 
-    const page = listOwners("agent", undefined, { limit: 2, offset: 1 });
+    const page = listOwners("agent", { limit: 2, offset: 1 });
 
     expect(page.map((owner) => owner.name)).toEqual(["Owner 3", "Owner 2"]);
   });
@@ -44,12 +81,17 @@ describe("owners", () => {
   it("rejects an invalid owner type", () => {
     expect(() => createOwner({ type: "robot" as never, name: "X" })).toThrow();
   });
+
+  it("rejects a duplicate external_id", () => {
+    createOwner({ type: "agent", name: "First", external_id: "dup" });
+    expect(() => createOwner({ type: "agent", name: "Second", external_id: "dup" })).toThrow(/external_id already exists/i);
+  });
 });
 
 describe("assignAddressOwner — human-owned must be agent-administered", () => {
   it("agent-owned address is self-administered (administrator = owner)", () => {
     const agent = createOwner({ type: "agent", name: "Caesar" });
-    const a = createAddress({ provider_id: providerId, email: "ops@x.com" });
+    const a = createAddress({ provider_id: "p1", email: "ops@x.com" });
     assignAddressOwner(a.id, agent.id);
     const own = getAddressOwnership(a.id)!;
     expect(own.owner_id).toBe(agent.id);
@@ -59,7 +101,7 @@ describe("assignAddressOwner — human-owned must be agent-administered", () => 
   it("human-owned address requires an agent administrator", () => {
     const human = createOwner({ type: "human", name: "Morgan" });
     const agent = createOwner({ type: "agent", name: "Tiberius" });
-    const a = createAddress({ provider_id: providerId, email: "morgan@x.com" });
+    const a = createAddress({ provider_id: "p1", email: "morgan@x.com" });
     // missing administrator → throws
     expect(() => assignAddressOwner(a.id, human.id)).toThrow(/human-owned.*agent administrator/i);
     // administrator must be an agent, not a human
@@ -74,8 +116,8 @@ describe("assignAddressOwner — human-owned must be agent-administered", () => 
   it("lists addresses by owner and by administrator", () => {
     const human = createOwner({ type: "human", name: "H" });
     const agent = createOwner({ type: "agent", name: "A" });
-    const a1 = createAddress({ provider_id: providerId, email: "h1@x.com" });
-    const a2 = createAddress({ provider_id: providerId, email: "h2@x.com" });
+    const a1 = createAddress({ provider_id: "p1", email: "h1@x.com" });
+    const a2 = createAddress({ provider_id: "p1", email: "h2@x.com" });
     assignAddressOwner(a1.id, human.id, agent.id);
     assignAddressOwner(a2.id, agent.id);
     expect(listAddressesByOwner(human.id).map((a) => a.email)).toEqual(["h1@x.com"]);
@@ -83,33 +125,31 @@ describe("assignAddressOwner — human-owned must be agent-administered", () => 
     expect(listAddressesByOwner(agent.id, "administrator").map((a) => a.email).sort()).toEqual(["h1@x.com", "h2@x.com"]);
   });
 
-  it("paginates owner addresses after ordering newest first", () => {
-    const db = getDatabase();
+  it("paginates owner addresses after ordering newest first", async () => {
+    await stub.seed({
+      addresses: seededAddresses(Array.from({ length: 5 }, (_v, i) => ({
+        id: `addr-${i}`, email: `address-${i}@x.com`, created_at: `2026-01-0${i + 1}T00:00:00.000Z`,
+      }))),
+    });
     const agent = createOwner({ type: "agent", name: "Paged" });
-    for (let i = 0; i < 5; i++) {
-      const address = createAddress({ provider_id: providerId, email: `address-${i}@x.com` });
-      assignAddressOwner(address.id, agent.id);
-      const timestamp = `2026-01-0${i + 1}T00:00:00.000Z`;
-      db.run("UPDATE addresses SET created_at = ?, updated_at = ? WHERE id = ?", [timestamp, timestamp, address.id]);
-    }
+    for (let i = 0; i < 5; i++) assignAddressOwner(`addr-${i}`, agent.id);
 
-    const page = listAddressesByOwner(agent.id, "owner", undefined, { limit: 2, offset: 1 });
+    const page = listAddressesByOwner(agent.id, "owner", { limit: 2, offset: 1 });
 
     expect(page.map((address) => address.email)).toEqual(["address-3@x.com", "address-2@x.com"]);
   });
 
-  it("paginates administered addresses after ordering newest first", () => {
-    const db = getDatabase();
+  it("paginates administered addresses after ordering newest first", async () => {
+    await stub.seed({
+      addresses: seededAddresses(Array.from({ length: 5 }, (_v, i) => ({
+        id: `admin-${i}`, email: `admin-${i}@x.com`, created_at: `2026-01-0${i + 1}T00:00:00.000Z`,
+      }))),
+    });
     const human = createOwner({ type: "human", name: "Paged Human" });
     const agent = createOwner({ type: "agent", name: "Paged Agent" });
-    for (let i = 0; i < 5; i++) {
-      const address = createAddress({ provider_id: providerId, email: `admin-${i}@x.com` });
-      assignAddressOwner(address.id, human.id, agent.id);
-      const timestamp = `2026-01-0${i + 1}T00:00:00.000Z`;
-      db.run("UPDATE addresses SET created_at = ?, updated_at = ? WHERE id = ?", [timestamp, timestamp, address.id]);
-    }
+    for (let i = 0; i < 5; i++) assignAddressOwner(`admin-${i}`, human.id, agent.id);
 
-    const page = listAddressesByOwner(agent.id, "administrator", undefined, { limit: 2, offset: 1 });
+    const page = listAddressesByOwner(agent.id, "administrator", { limit: 2, offset: 1 });
 
     expect(page.map((address) => address.email)).toEqual(["admin-3@x.com", "admin-2@x.com"]);
   });
@@ -117,8 +157,8 @@ describe("assignAddressOwner — human-owned must be agent-administered", () => 
   it("lists administered addresses without duplicating self-administered owned rows", () => {
     const human = createOwner({ type: "human", name: "H" });
     const agent = createOwner({ type: "agent", name: "A" });
-    const administered = createAddress({ provider_id: providerId, email: "human@x.com" });
-    const selfAdministered = createAddress({ provider_id: providerId, email: "agent@x.com" });
+    const administered = createAddress({ provider_id: "p1", email: "human@x.com" });
+    const selfAdministered = createAddress({ provider_id: "p1", email: "agent@x.com" });
     assignAddressOwner(administered.id, human.id, agent.id);
     assignAddressOwner(selfAdministered.id, agent.id);
 
@@ -128,8 +168,8 @@ describe("assignAddressOwner — human-owned must be agent-administered", () => 
   it("lists only address email strings by owner role", () => {
     const human = createOwner({ type: "human", name: "H" });
     const agent = createOwner({ type: "agent", name: "A" });
-    const a1 = createAddress({ provider_id: providerId, email: "h1@x.com" });
-    const a2 = createAddress({ provider_id: providerId, email: "h2@x.com" });
+    const a1 = createAddress({ provider_id: "p1", email: "h1@x.com" });
+    const a2 = createAddress({ provider_id: "p1", email: "h2@x.com" });
     assignAddressOwner(a1.id, human.id, agent.id);
     assignAddressOwner(a2.id, agent.id);
 
@@ -162,7 +202,7 @@ describe("assignAddressOwner — human-owned must be agent-administered", () => 
   });
 
   it("throws when owner does not exist", () => {
-    const a = createAddress({ provider_id: providerId, email: "z@x.com" });
+    const a = createAddress({ provider_id: "p1", email: "z@x.com" });
     expect(() => assignAddressOwner(a.id, "nonexistent")).toThrow(/owner not found/i);
   });
 });
@@ -171,7 +211,7 @@ describe("assignAddressOwner — anti-hijack", () => {
   it("refuses to reassign an address already owned by another owner", () => {
     const a1 = createOwner({ type: "agent", name: "Galba" });
     const a2 = createOwner({ type: "agent", name: "Vitellius" });
-    const addr = createAddress({ provider_id: providerId, email: "shared@x.com" });
+    const addr = createAddress({ provider_id: "p1", email: "shared@x.com" });
     assignAddressOwner(addr.id, a1.id);
     expect(() => assignAddressOwner(addr.id, a2.id)).toThrow(/already owned/i);
     // re-assigning to the same owner stays allowed (idempotent)
@@ -183,7 +223,7 @@ describe("address ownership audit", () => {
   it("records assign, transfer, and unassign events", () => {
     const first = createOwner({ type: "agent", name: "First" });
     const second = createOwner({ type: "agent", name: "Second" });
-    const addr = createAddress({ provider_id: providerId, email: "audit@x.com" });
+    const addr = createAddress({ provider_id: "p1", email: "audit@x.com" });
 
     assignAddressOwner(addr.id, first.id);
     transferAddressOwner(addr.id, second.id, undefined, { actor: "test", reason: "handoff" });
@@ -204,7 +244,7 @@ describe("address ownership audit", () => {
   it("requires a reason for transfer and unassign", () => {
     const first = createOwner({ type: "agent", name: "Reasoned" });
     const second = createOwner({ type: "agent", name: "Other" });
-    const addr = createAddress({ provider_id: providerId, email: "reason@x.com" });
+    const addr = createAddress({ provider_id: "p1", email: "reason@x.com" });
     assignAddressOwner(addr.id, first.id);
 
     expect(() => transferAddressOwner(addr.id, second.id, undefined, { reason: "" })).toThrow(/requires a reason/i);

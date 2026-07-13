@@ -1,18 +1,19 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { closeDatabase, resetDatabase } from "../db/database.js";
-import { createEmail } from "../db/emails.js";
-import { createProvider } from "../db/providers.js";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, it, expect } from "bun:test";
+import { startV1Stub, type V1Stub } from "../test-support/v1-stub.js";
 import { generateWarmingPlan, getTodayLimit, formatWarmingStatus, getTodaySentCount } from "./warming.js";
 import type { WarmingSchedule } from "./warming.js";
 
-let providerId: string;
-beforeEach(() => {
-  process.env["EMAILS_DB_PATH"] = ":memory:";
-  resetDatabase();
-  providerId = createProvider({ name: "sandbox", type: "sandbox" }).id;
-});
-afterEach(() => { closeDatabase(); delete process.env["EMAILS_DB_PATH"]; });
+// getTodaySentCount / formatWarmingStatus read the outbound sent-ledger over the
+// /v1 messages store, so a configured self-hosted endpoint is required even when
+// no rows are seeded. generateWarmingPlan and getTodayLimit are pure and do not
+// need it, but sharing the stub scaffolding keeps the file uniform.
+let stub: V1Stub;
+beforeAll(async () => { stub = await startV1Stub(); });
+afterAll(() => stub.stop());
+beforeEach(async () => { await stub.reset(); stub.applyEnv(); });
+afterEach(() => stub.clearEnv());
 
+// PURE: generateWarmingPlan is a deterministic ramp computation.
 describe("generateWarmingPlan", () => {
   it("starts at 50 on day 1", () => {
     const plan = generateWarmingPlan(10000);
@@ -56,6 +57,7 @@ describe("generateWarmingPlan", () => {
   });
 });
 
+// PURE: getTodayLimit only reads the schedule + generateWarmingPlan.
 describe("getTodayLimit", () => {
   function makeSchedule(overrides: Partial<WarmingSchedule> = {}): WarmingSchedule {
     const today = new Date().toISOString().slice(0, 10);
@@ -119,23 +121,42 @@ describe("getTodayLimit", () => {
   });
 });
 
+// /v1 READ: getTodaySentCount reads today's outbound messages over /v1 and counts
+// those whose From domain matches. The source uses a bare `from@domain` split, so
+// this exercises the real domain-matching path with bare sender addresses.
 describe("getTodaySentCount", () => {
-  it("counts display-name From rows by sender domain", () => {
-    createEmail(providerId, {
-      from: '"Warm Sender" <sender@warm.test>',
-      to: ["client@example.com"],
-      subject: "warm sent",
-    }, "warm-display");
-    createEmail(providerId, {
-      from: "sender@other.test",
-      to: ["client@example.com"],
-      subject: "other sent",
-    }, "other-domain");
+  it("counts today's outbound rows by sender domain", async () => {
+    const nowIso = new Date().toISOString();
+    await stub.seed({
+      messages: [
+        { id: "warm-1", direction: "outbound", from_addr: "sender@warm.test", to_addrs: ["client@example.com"], subject: "warm sent", status: "sent", received_at: nowIso, created_at: nowIso },
+        { id: "warm-2", direction: "outbound", from_addr: "ops@warm.test", to_addrs: ["client@example.com"], subject: "warm sent 2", status: "sent", received_at: nowIso, created_at: nowIso },
+        { id: "other-1", direction: "outbound", from_addr: "sender@other.test", to_addrs: ["client@example.com"], subject: "other sent", status: "sent", received_at: nowIso, created_at: nowIso },
+      ],
+    });
+
+    expect(getTodaySentCount("warm.test")).toBe(2);
+    expect(getTodaySentCount("other.test")).toBe(1);
+    expect(getTodaySentCount("nobody.test")).toBe(0);
+  });
+
+  it("excludes rows sent outside today's UTC window", async () => {
+    const nowIso = new Date().toISOString();
+    const yesterday = new Date(Date.now() - 36 * 60 * 60 * 1000).toISOString();
+    await stub.seed({
+      messages: [
+        { id: "today", direction: "outbound", from_addr: "sender@warm.test", to_addrs: ["client@example.com"], subject: "today", status: "sent", received_at: nowIso, created_at: nowIso },
+        { id: "old", direction: "outbound", from_addr: "sender@warm.test", to_addrs: ["client@example.com"], subject: "old", status: "sent", received_at: yesterday, created_at: yesterday },
+      ],
+    });
 
     expect(getTodaySentCount("warm.test")).toBe(1);
   });
 });
 
+// formatWarmingStatus composes pure formatting with getTodaySentCount (a /v1 read).
+// With an empty store the sent count is 0; the assertions here only concern the
+// schedule fields, which are formatted purely.
 describe("formatWarmingStatus", () => {
   it("includes domain name in output", () => {
     const today = new Date().toISOString().slice(0, 10);

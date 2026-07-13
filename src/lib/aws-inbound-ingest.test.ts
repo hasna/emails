@@ -15,6 +15,19 @@ function cmd(type: string) {
   };
 }
 
+// NOTE (cross-file mock isolation): bun's `mock.module` is PROCESS-GLOBAL and the
+// resolved module namespace is cached the first time it is imported. The sibling
+// file src/lib/aws-inbound.test.ts (out of scope for this migration) also mocks
+// "@aws-sdk/client-s3" with a DIFFERENT, incompatible shape (a configurable
+// `send` spy and no Get/PutBucketNotificationConfiguration commands). Whichever
+// file's test resolves the module first wins the single cached namespace for the
+// whole process; a `beforeEach` re-registration cannot bust an already-cached
+// namespace, and a shared superset cannot satisfy both (their `S3Client.send`
+// contracts differ). This file therefore passes standalone and within this
+// migration's test set; in a full `bun test` run where aws-inbound.test.ts
+// resolves the SDK first, the two orchestrator cases below fail. The real fix is
+// out of scope: migrate aws-inbound.test.ts too, or enable per-file test
+// isolation.
 mock.module("@aws-sdk/client-sqs", () => ({
   SQSClient: class {
     async send(c: { __type: string; input: Record<string, unknown> }) {
@@ -99,8 +112,8 @@ describe("buildIngestQueueStatement", () => {
 
 describe("cross-account grant statements", () => {
   it("consumer statement grants receive/delete to the role", () => {
-    const s = buildQueueConsumerStatement("arn:q", "arn:aws:iam::789877399345:role/emails-prod-task") as Record<string, unknown>;
-    expect(s["Principal"]).toEqual({ AWS: "arn:aws:iam::789877399345:role/emails-prod-task" });
+    const s = buildQueueConsumerStatement("arn:q", "arn:aws:iam::123456789012:role/emails-prod-task") as Record<string, unknown>;
+    expect(s["Principal"]).toEqual({ AWS: "arn:aws:iam::123456789012:role/emails-prod-task" });
     expect(s["Action"]).toContain("sqs:ReceiveMessage");
     expect(s["Action"]).toContain("sqs:DeleteMessage");
   });
@@ -182,7 +195,7 @@ describe("ensureInboundIngestPipeline — cross account", () => {
     existingBucketPolicy = JSON.stringify({ Version: "2012-10-17", Statement: [
       { Sid: "AllowSESPuts", Effect: "Allow", Principal: { Service: "ses.amazonaws.com" }, Action: "s3:PutObject", Resource: "arn:aws:s3:::b/inbound/*" },
     ] });
-    const roleArn = "arn:aws:iam::789877399345:role/emails-prod-task";
+    const roleArn = "arn:aws:iam::123456789012:role/emails-prod-task";
     const r = await ensureInboundIngestPipeline({
       bucket: "b", queueName: "emails-prod-ingest", region: "us-east-1", accountId: "638389534677", consumerRoleArn: roleArn,
     });

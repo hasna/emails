@@ -600,10 +600,12 @@ describe("resolveMailDataSource — self-hosted seam selection", () => {
     expect(resolveSelfHostedMailDataSource()).toBeInstanceOf(SelfHostedMailDataSource);
   });
 
-  it("does not infer self_hosted from credentials when mode is local", () => {
+  it("rejects an unsupported non-self_hosted mode instead of inferring a local seam", () => {
+    // This client is self-hosted-only: resolveMailDataSource is always self_hosted
+    // and there is no local-mode inference. An explicit legacy mode fails loud.
     process.env["EMAILS_MODE"] = "local";
     resetSelfHostedConfigCache();
     resetMailDataSource();
-    expect(resolveSelfHostedMailDataSource()).toBeNull();
+    expect(() => resolveSelfHostedMailDataSource()).toThrow(/self-hosted-only|unsupported EMAILS_MODE/i);
   });
 });

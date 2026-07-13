@@ -1,98 +1,83 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { closeDatabase, getDatabase, resetDatabase } from "../db/database.js";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { startV1Stub, type V1Stub } from "../test-support/v1-stub.js";
 import { createAddress } from "../db/addresses.js";
 import { createOwner, assignAddressOwner } from "../db/owners.js";
 import { createProvider } from "../db/providers.js";
 import { getAddressOwnershipDetail, listEnrichedAddresses, resolveAddressRef } from "./address-ownership.js";
 
-beforeEach(() => {
-  process.env["EMAILS_DB_PATH"] = ":memory:";
-  resetDatabase();
+// Address ownership enrichment reads addresses/owners/providers via the /v1 API.
+// NOTE on the self-hosted model: the self-hosted address record does NOT persist
+// provider_id (addresses have no server-side provider association), so
+// provider_name enrichment and provider-scoped listing are no longer meaningful
+// here — the previous local-SQLite assertions for those validated removed
+// behavior. What remains meaningful (and covered below) is owner/administrator
+// hydration and address resolution by id/email.
+
+let stub: V1Stub;
+
+beforeAll(async () => {
+  stub = await startV1Stub();
+});
+
+afterAll(() => stub.stop());
+
+beforeEach(async () => {
+  await stub.reset();
+  stub.applyEnv();
 });
 
 afterEach(() => {
-  closeDatabase();
-  delete process.env["EMAILS_DB_PATH"];
+  stub.clearEnv();
 });
 
 describe("address ownership enrichment", () => {
-  it("hydrates provider, owner, and administrator for the selected address list", () => {
-    const includedProvider = createProvider({ name: "included", type: "sandbox" });
-    const otherProvider = createProvider({ name: "other", type: "sandbox" });
+  it("hydrates owner and administrator for the address list", () => {
+    const provider = createProvider({ name: "included", type: "sandbox" });
     const human = createOwner({ type: "human", name: "human-user" });
     const agent = createOwner({ type: "agent", name: "agent-admin" });
-    const otherOwner = createOwner({ type: "agent", name: "other-owner" });
-    const included = createAddress({ provider_id: includedProvider.id, email: "human@example.com" });
-    const unrelated = createAddress({ provider_id: otherProvider.id, email: "other@example.com" });
+    const included = createAddress({ provider_id: provider.id, email: "human@example.com" });
     assignAddressOwner(included.id, human.id, agent.id);
-    assignAddressOwner(unrelated.id, otherOwner.id);
 
-    const addresses = listEnrichedAddresses(includedProvider.id);
+    const addresses = listEnrichedAddresses();
+    const found = addresses.find((a) => a.email === "human@example.com");
 
-    expect(addresses).toHaveLength(1);
-    expect(addresses[0]).toMatchObject({
+    expect(found).toBeDefined();
+    expect(found).toMatchObject({
       id: included.id,
       email: "human@example.com",
-      provider_name: "included",
       owner: { id: human.id, name: "human-user" },
       administrator: { id: agent.id, name: "agent-admin" },
     });
   });
 
-  it("hydrates single-address details without selecting provider credentials", () => {
-    const provider = createProvider({
-      name: "secret-provider",
-      type: "resend",
-      api_key: "re_secret",
-      access_key: "access-secret",
-      secret_key: "secret-secret",
-      oauth_client_secret: "oauth-secret",
-      oauth_refresh_token: "refresh-secret",
-    });
+  it("returns ownership detail with owner metadata for a single address", () => {
+    const provider = createProvider({ name: "ops-provider", type: "sandbox" });
     const owner = createOwner({ type: "agent", name: "ops-agent" });
     const address = createAddress({ provider_id: provider.id, email: "ops@example.com" });
     assignAddressOwner(address.id, owner.id);
 
-    const db = getDatabase();
-    const originalQuery = db.query;
-    const queries: string[] = [];
-    db.query = ((sql: string) => {
-      queries.push(sql);
-      return originalQuery.call(db, sql);
-    }) as typeof db.query;
+    const detail = getAddressOwnershipDetail(address.id);
 
-    try {
-      const detail = getAddressOwnershipDetail(address.id, db);
-
-      expect(detail.address.provider_name).toBe("secret-provider");
-      expect(detail.address.owner?.name).toBe("ops-agent");
-    } finally {
-      db.query = originalQuery;
-    }
-
-    const providerQueries = queries.filter((sql) => sql.includes("FROM providers"));
-    expect(providerQueries.length).toBeGreaterThan(0);
-    expect(providerQueries.join("\n")).not.toContain("SELECT *");
-    expect(providerQueries.join("\n")).not.toMatch(/\b(api_key|access_key|secret_key|oauth_client_secret|oauth_refresh_token|oauth_access_token)\b/);
+    expect(detail.address.email).toBe("ops@example.com");
+    expect(detail.address.owner?.name).toBe("ops-agent");
+    expect(detail.ownership).toMatchObject({ owner_id: owner.id, owner_type: "agent" });
   });
 
-  it("resolves exact address ids with one address lookup", () => {
+  it("resolves an exact address id back to its address", () => {
     const provider = createProvider({ name: "sandbox", type: "sandbox" });
     const address = createAddress({ provider_id: provider.id, email: "direct@example.com" });
-    const db = getDatabase();
-    const originalQuery = db.query;
-    const queries: string[] = [];
-    db.query = ((sql: string) => {
-      queries.push(sql);
-      return originalQuery.call(db, sql);
-    }) as typeof db.query;
 
-    try {
-      expect(resolveAddressRef(address.id, db).email).toBe("direct@example.com");
-    } finally {
-      db.query = originalQuery;
-    }
+    expect(resolveAddressRef(address.id).email).toBe("direct@example.com");
+  });
 
-    expect(queries.filter((sql) => sql.includes("SELECT * FROM addresses WHERE id = ?"))).toHaveLength(1);
+  it("resolves an address by its unique email", () => {
+    const provider = createProvider({ name: "sandbox", type: "sandbox" });
+    createAddress({ provider_id: provider.id, email: "unique@example.com" });
+
+    expect(resolveAddressRef("unique@example.com").email).toBe("unique@example.com");
+  });
+
+  it("throws for an unknown address ref", () => {
+    expect(() => resolveAddressRef("nope@example.com")).toThrow(/Address not found/);
   });
 });

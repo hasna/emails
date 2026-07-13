@@ -1,13 +1,20 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+// Self-hosted-ONLY: the address repo routes every read/write to `/v1/addresses`,
+// so these tests drive the REAL command against an out-of-process /v1 stub (see
+// src/test-support/v1-stub.ts). No local SQLite exists anymore. Ownership and
+// local provisioning have no /v1 equivalent — they run on the self-hosted server,
+// so those subcommands still fail loud (see the "server-only" block below).
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { Command } from "commander";
-import { closeDatabase, getDatabase, resetDatabase } from "../../db/database.js";
-import { createProvider } from "../../db/providers.js";
-import { createAddress, listAddresses } from "../../db/addresses.js";
-import { createOwner } from "../../db/owners.js";
-import { getAddressProvisioning } from "../../db/provisioning.js";
+import { createAddress } from "../../db/addresses.js";
+import { startV1Stub, type V1Stub } from "../../test-support/v1-stub.js";
 import { registerAddressCommands } from "./address.js";
 
+let stub: V1Stub;
+
 async function runAddressCommand(args: string[]) {
+  const originalLog = console.log;
+  const logs: string[] = [];
+  console.log = ((message?: unknown) => { logs.push(String(message ?? "")); }) as typeof console.log;
   const program = new Command();
   program.exitOverride();
   let data: unknown;
@@ -16,122 +23,91 @@ async function runAddressCommand(args: string[]) {
     data = d;
     out.push(String(formatted ?? ""));
   });
-  await program.parseAsync(["node", "emails", ...args]);
-  return { data, out: out.join("\n") };
+  try {
+    await program.parseAsync(["node", "emails", ...args]);
+    return { data, out: [...logs, ...out].join("\n") };
+  } finally {
+    console.log = originalLog;
+  }
 }
 
-beforeEach(() => {
-  process.env["EMAILS_DB_PATH"] = ":memory:";
-  resetDatabase();
+// Some address subcommands are owned by the self-hosted server and fail loud in
+// the client. handleError() logs to console.error then process.exit(1); stub both
+// so the exit becomes observable instead of tearing down the test runner.
+async function runAddressCommandExpectingExit(args: string[]) {
+  const originalExit = process.exit;
+  const originalError = console.error;
+  const errors: string[] = [];
+  console.error = ((message?: unknown) => { errors.push(String(message ?? "")); }) as typeof console.error;
+  process.exit = ((code?: number) => {
+    throw new Error(`process.exit:${code ?? 0}`);
+  }) as typeof process.exit;
+  try {
+    await runAddressCommand(args);
+    throw new Error("Expected command to exit");
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e), stderr: errors.join("\n") };
+  } finally {
+    process.exit = originalExit;
+    console.error = originalError;
+  }
+}
+
+beforeAll(async () => {
+  stub = await startV1Stub();
 });
-
-afterEach(() => {
-  closeDatabase();
-  delete process.env["EMAILS_DB_PATH"];
+afterAll(() => stub.stop());
+beforeEach(async () => {
+  await stub.reset();
+  stub.applyEnv();
 });
-
-describe("address ownership commands", () => {
-  it("shows and assigns an agent owner by address email", async () => {
-    const provider = createProvider({ name: "sandbox", type: "sandbox" });
-    createAddress({ provider_id: provider.id, email: "ops@example.com" });
-    createOwner({ type: "agent", name: "cli-agent" });
-
-    const set = await runAddressCommand(["address", "set-owner", "ops@example.com", "--owner", "cli-agent"]);
-    expect(set.out).toContain("owned by cli-agent");
-    expect(set.data).toMatchObject({ address: { email: "ops@example.com", owner: { name: "cli-agent" } } });
-
-    const owner = await runAddressCommand(["address", "owner", "ops@example.com"]);
-    expect(owner.out).toContain("Owner:");
-    expect(owner.data).toMatchObject({ address: { owner: { name: "cli-agent" } } });
-  });
-
-  it("enriches address list output with owner and administrator", async () => {
-    const provider = createProvider({ name: "sandbox", type: "sandbox" });
-    const address = createAddress({ provider_id: provider.id, email: "human@example.com" });
-    const human = createOwner({ type: "human", name: "human-user" });
-    const agent = createOwner({ type: "agent", name: "support-agent" });
-    getDatabase().run("UPDATE addresses SET owner_id = ?, administrator_id = ? WHERE id = ?", [human.id, agent.id, address.id]);
-
-    const compactList = await runAddressCommand(["address", "list"]);
-    expect(compactList.out).toContain("human-user");
-    expect(compactList.out).toContain("use --verbose");
-
-    const list = await runAddressCommand(["address", "list", "--verbose"]);
-    expect(list.out).toContain("owner human-user (human)");
-    expect(list.out).toContain("admin support-agent");
-    expect(list.data).toMatchObject([{ email: "human@example.com", owner: { name: "human-user" }, administrator: { name: "support-agent" } }]);
-  });
-
-  it("transfers, unassigns, and shows ownership history", async () => {
-    const provider = createProvider({ name: "sandbox", type: "sandbox" });
-    createAddress({ provider_id: provider.id, email: "move@example.com" });
-    createOwner({ type: "agent", name: "first-agent" });
-    createOwner({ type: "agent", name: "second-agent" });
-
-    await runAddressCommand(["address", "set-owner", "move@example.com", "--owner", "first-agent"]);
-
-    const transfer = await runAddressCommand([
-      "address", "transfer-owner", "move@example.com",
-      "--owner", "second-agent",
-      "--reason", "handoff",
-      "--actor", "test",
-      "--yes",
-    ]);
-    expect(transfer.out).toContain("transferred to second-agent");
-    expect(transfer.data).toMatchObject({ address: { owner: { name: "second-agent" } } });
-
-    const unassign = await runAddressCommand([
-      "address", "unassign-owner", "move@example.com",
-      "--reason", "retired",
-      "--actor", "test",
-      "--yes",
-    ]);
-    expect(unassign.out).toContain("is now unowned");
-    expect(unassign.data).toMatchObject({ address: { owner: null, administrator: null } });
-
-    const history = await runAddressCommand(["address", "owner-history", "move@example.com"]);
-    expect(history.out).toContain("Ownership history");
-    expect(history.out).toContain("unassign");
-    expect(history.out).toContain("transfer");
-    expect(history.data).toMatchObject({
-      history: [
-        { action: "unassign", reason: "retired", actor: "test" },
-        { action: "transfer", reason: "handoff", actor: "test" },
-        { action: "assign" },
-      ],
-    });
-  });
-});
+afterEach(() => stub.clearEnv());
 
 describe("address list command", () => {
   it("uses a compact implicit default and honors explicit limits", async () => {
-    const provider = createProvider({ name: "sandbox", type: "sandbox" });
-    const db = getDatabase();
+    const addresses = [];
     for (let i = 1; i <= 25; i++) {
-      const address = createAddress({ provider_id: provider.id, email: `bulk-${String(i).padStart(2, "0")}@example.com` });
-      db.run("UPDATE addresses SET created_at = ? WHERE id = ?", [`2026-01-${String(i).padStart(2, "0")} 00:00:00`, address.id]);
+      const stamp = `2026-01-${String(i).padStart(2, "0")}T00:00:00.000Z`;
+      addresses.push({
+        id: crypto.randomUUID(),
+        email: `bulk-${String(i).padStart(2, "0")}@example.com`,
+        provider_id: "prov-1",
+        status: "active",
+        verified: false,
+        created_at: stamp,
+        updated_at: stamp,
+      });
     }
+    await stub.seed({ addresses });
 
-    const compact = await runAddressCommand(["address", "list", "--provider", provider.id]);
+    const compact = await runAddressCommand(["address", "list", "--provider", "prov-1"]);
     expect(compact.data).toHaveLength(20);
     expect(compact.out).toContain("use --verbose");
     expect(compact.out).toContain("--offset 20");
 
-    const explicit = await runAddressCommand(["address", "list", "--provider", provider.id, "--limit", "25"]);
+    const explicit = await runAddressCommand(["address", "list", "--provider", "prov-1", "--limit", "25"]);
     expect(explicit.data).toHaveLength(25);
   });
 
   it("paginates enriched address output", async () => {
-    const provider = createProvider({ name: "sandbox", type: "sandbox" });
-    const db = getDatabase();
+    const addresses = [];
     for (let i = 1; i <= 4; i++) {
-      const address = createAddress({ provider_id: provider.id, email: `addr-${i}@example.com` });
-      db.run("UPDATE addresses SET created_at = ? WHERE id = ?", [`2026-01-0${i} 00:00:00`, address.id]);
+      const stamp = `2026-01-0${i}T00:00:00.000Z`;
+      addresses.push({
+        id: crypto.randomUUID(),
+        email: `addr-${i}@example.com`,
+        provider_id: "prov-1",
+        status: "active",
+        verified: false,
+        created_at: stamp,
+        updated_at: stamp,
+      });
     }
+    await stub.seed({ addresses });
 
     const result = await runAddressCommand([
       "address", "list",
-      "--provider", provider.id,
+      "--provider", "prov-1",
       "--limit", "2",
       "--offset", "1",
     ]);
@@ -145,83 +121,44 @@ describe("address list command", () => {
     ]);
   });
 
-  it("batches daily quota send counts for listed addresses", async () => {
-    const provider = createProvider({ name: "sandbox", type: "sandbox" });
-    const db = getDatabase();
-    const today = new Date().toISOString();
-    const first = createAddress({ provider_id: provider.id, email: "quota-a@example.com" });
-    const second = createAddress({ provider_id: provider.id, email: "quota-b@example.com" });
-    const third = createAddress({ provider_id: provider.id, email: "quota-c@example.com" });
-    db.run("UPDATE addresses SET daily_quota = 5 WHERE id IN (?, ?, ?)", [first.id, second.id, third.id]);
-    db.run(
-      `INSERT INTO emails (id, provider_id, from_address, subject, status, sent_at, created_at, updated_at)
-       VALUES ('sent-a-1', ?, ?, 'a', 'sent', ?, ?, ?)`,
-      [provider.id, '"Quota A" <quota-a@example.com>', today, today, today],
-    );
-    db.run(
-      `INSERT INTO emails (id, provider_id, from_address, subject, status, sent_at, created_at, updated_at)
-       VALUES ('sent-b-1', ?, ?, 'b', 'sent', ?, ?, ?), ('sent-b-2', ?, ?, 'b', 'sent', ?, ?, ?)`,
-      [provider.id, "quota-b@example.com", today, today, today, provider.id, "quota-b@example.com", today, today, today],
-    );
-
-    const originalQuery = db.query;
-    const queries: string[] = [];
-    db.query = ((sql: string) => {
-      queries.push(sql);
-      return originalQuery.call(db, sql);
-    }) as typeof db.query;
-
-    try {
-      const result = await runAddressCommand(["address", "list", "--provider", provider.id, "--limit", "10", "--verbose"]);
-
-      expect(result.out).toContain("quota 1/5/day");
-      expect(result.out).toContain("quota 2/5/day");
-      expect(result.out).toContain("quota 0/5/day");
-    } finally {
-      db.query = originalQuery;
-    }
-
-    const countQueries = queries.filter((sql) => sql.includes("COUNT(*) AS c") && sql.includes("FROM emails"));
-    expect(countQueries).toHaveLength(1);
-    expect(countQueries[0]).toContain(" IN (");
-    expect(countQueries[0]).toContain("GROUP BY");
+  it("reports an empty configuration", async () => {
+    const result = await runAddressCommand(["address", "list"]);
+    expect(result.data).toEqual([]);
+    expect(result.out).toContain("No addresses configured.");
   });
 });
 
-describe("address verify command", () => {
-  it("checks one exact address without loading every provider address", async () => {
-    const provider = createProvider({ name: "sandbox", type: "sandbox" });
-    const target = createAddress({ provider_id: provider.id, email: "target@example.com" });
-    for (let i = 0; i < 120; i++) {
-      createAddress({ provider_id: provider.id, email: `filler-${String(i).padStart(3, "0")}@example.com` });
-    }
+describe("address add / verify / suggest commands", () => {
+  it("adds a sender address through the /v1 API", async () => {
+    const added = await runAddressCommand(["address", "add", "ops@example.com", "--provider", "prov-1", "--name", "Ops"]);
+    expect(added.out).toContain("Address added: ops@example.com");
+    expect((added.data as { email: string }).email).toBe("ops@example.com");
+    expect((await stub.list("addresses")).map((a) => a["email"])).toContain("ops@example.com");
 
-    const db = getDatabase();
-    const originalQuery = db.query;
-    const queries: string[] = [];
-    db.query = ((sql: string) => {
-      queries.push(sql);
-      return originalQuery.call(db, sql);
-    }) as typeof db.query;
-
-    try {
-      await runAddressCommand(["address", "verify", "target@example.com", "--provider", provider.id]);
-    } finally {
-      db.query = originalQuery;
-    }
-
-    const row = db.query("SELECT verified FROM addresses WHERE id = ?").get(target.id) as { verified: number };
-    expect(row.verified).toBe(1);
-    expect(queries.some((sql) => sql.includes("WHERE email = ? COLLATE NOCASE"))).toBe(true);
-    expect(queries.some((sql) => sql.includes("FROM addresses WHERE provider_id = ? ORDER BY created_at DESC"))).toBe(false);
+    // Adding the same email again is idempotent (dedup by email over /v1).
+    const again = await runAddressCommand(["address", "add", "ops@example.com", "--provider", "prov-1"]);
+    expect(again.out).toContain("already exists");
+    expect((await stub.list("addresses")).filter((a) => a["email"] === "ops@example.com")).toHaveLength(1);
   });
-});
 
-describe("address suggest command", () => {
+  it("reports verification status from the /v1 record", async () => {
+    await stub.seed({
+      addresses: [
+        { id: crypto.randomUUID(), email: "verified@example.com", verified: true, status: "active", created_at: "2026-01-01T00:00:00.000Z", updated_at: "2026-01-01T00:00:00.000Z" },
+        { id: crypto.randomUUID(), email: "pending@example.com", verified: false, status: "active", created_at: "2026-01-02T00:00:00.000Z", updated_at: "2026-01-02T00:00:00.000Z" },
+      ],
+    });
+
+    const verified = await runAddressCommand(["address", "verify", "verified@example.com"]);
+    expect(verified.out).toContain("verified@example.com is verified");
+
+    const pending = await runAddressCommand(["address", "verify", "pending@example.com"]);
+    expect(pending.out).toContain("pending@example.com is not yet verified");
+  });
+
   it("suggests unused local parts for a domain", async () => {
-    const provider = createProvider({ name: "sandbox", type: "sandbox" });
-    createAddress({ provider_id: provider.id, email: "hello@example.com" });
-    createAddress({ provider_id: provider.id, email: "support@example.com" });
+    createAddress({ provider_id: "prov-1", email: "hello@example.com" });
+    createAddress({ provider_id: "prov-1", email: "support@example.com" });
 
     const result = await runAddressCommand(["address", "suggest", "--domain", "Example.com"]);
 
@@ -235,36 +172,57 @@ describe("address suggest command", () => {
   });
 });
 
-describe("address provision command", () => {
-  it("supports dry-run without mutating address or provisioning state", async () => {
-    const provider = createProvider({ name: "sandbox", type: "sandbox" });
-
-    const result = await runAddressCommand(["address", "provision", "dry@example.com", "--provider", provider.id, "--dry-run"]);
-
-    expect(result.data).toMatchObject({
-      dry_run: true,
-      email: "dry@example.com",
-      provider_id: provider.id,
-      existing: false,
-      would_create_address: true,
-      would_update_provisioning: true,
+describe("address remove / lifecycle commands", () => {
+  it("removes a sender address resolved by id prefix", async () => {
+    const id = "rm000000-1111-2222-3333-444444444444";
+    await stub.seed({
+      addresses: [{ id, email: "gone@example.com", status: "active", verified: false, created_at: "2026-01-01T00:00:00.000Z", updated_at: "2026-01-01T00:00:00.000Z" }],
     });
-    expect(listAddresses(undefined, getDatabase())).toHaveLength(0);
+
+    const result = await runAddressCommand(["address", "remove", "rm000000", "--yes"]);
+    expect(result.out).toContain("Address removed: gone@example.com");
+    expect((await stub.list("addresses")).some((a) => a["id"] === id)).toBe(false);
   });
 
-  it("is idempotent for repeated local address provisioning", async () => {
-    const provider = createProvider({ name: "sandbox", type: "sandbox" });
-
-    const first = await runAddressCommand(["address", "provision", "ops@example.com", "--provider", provider.id]);
-    const second = await runAddressCommand(["address", "provision", "ops@example.com", "--provider", provider.id]);
-
-    expect(first.data).toMatchObject({ email: "ops@example.com", created: true });
-    expect(second.data).toMatchObject({ email: "ops@example.com", created: false });
-    const addresses = listAddresses(undefined, getDatabase());
-    expect(addresses).toHaveLength(1);
-    expect(getAddressProvisioning(addresses[0]!.id, getDatabase())).toMatchObject({
-      provisioning_status: "requested",
-      receive_strategy: "ses-s3",
+  it("suspends, activates, and sets a daily quota via /v1 PATCH", async () => {
+    const id = crypto.randomUUID();
+    await stub.seed({
+      addresses: [{ id, email: "svc@example.com", status: "active", verified: true, created_at: "2026-01-01T00:00:00.000Z", updated_at: "2026-01-01T00:00:00.000Z" }],
     });
+
+    const suspended = await runAddressCommand(["address", "suspend", id]);
+    expect(suspended.out).toContain("Suspended svc@example.com");
+    expect((suspended.data as { status: string }).status).toBe("suspended");
+
+    const activated = await runAddressCommand(["address", "activate", id]);
+    expect(activated.out).toContain("Activated svc@example.com");
+    expect((activated.data as { status: string }).status).toBe("active");
+
+    const quota = await runAddressCommand(["address", "quota", id, "10"]);
+    expect(quota.out).toContain("Daily quota for svc@example.com: 10/day");
+    expect((quota.data as { daily_quota: number | null }).daily_quota).toBe(10);
+
+    const cleared = await runAddressCommand(["address", "quota", id, "none"]);
+    expect(cleared.out).toContain("Cleared daily quota for svc@example.com");
+    expect((cleared.data as { daily_quota: number | null }).daily_quota).toBeNull();
   });
+});
+
+describe("address server-only lifecycle commands still block", () => {
+  const blocked: Array<[string, string[]]> = [
+    ["emails address owner", ["address", "owner", "svc@example.com"]],
+    ["emails address set-owner", ["address", "set-owner", "svc@example.com", "--owner", "agent-x"]],
+    ["emails address transfer-owner", ["address", "transfer-owner", "svc@example.com", "--owner", "agent-x", "--reason", "handoff"]],
+    ["emails address unassign-owner", ["address", "unassign-owner", "svc@example.com", "--reason", "retired"]],
+    ["emails address owner-history", ["address", "owner-history", "svc@example.com"]],
+    ["emails address provision", ["address", "provision", "svc@example.com", "--provider", "prov-1"]],
+  ];
+
+  for (const [label, args] of blocked) {
+    it(`${label} exits with the self-hosted-server message`, async () => {
+      const result = await runAddressCommandExpectingExit(args);
+      expect(result.error).toBe("process.exit:1");
+      expect(result.stderr).toContain("is not available in the self-hosted client; it runs on the self-hosted server.");
+    });
+  }
 });

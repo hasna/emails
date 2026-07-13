@@ -1,7 +1,19 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { closeDatabase, getDatabase, resetDatabase } from "./database.js";
-import { createProvider } from "./providers.js";
-import { createEmail } from "./emails.js";
+// Self-hosted-ONLY: the events repo routes every read/write to the /v1/events
+// API. Exercises the REAL curl transport against an out-of-process /v1 stub —
+// see src/test-support/v1-stub.ts. Migrated from the deleted local-SQLite
+// pattern (getDatabase/resetDatabase/:memory:/EMAILS_DB_PATH).
+//
+// Dropped from the local-SQLite version (all inspected local SQL and passed a
+// `db` handle that no longer exists):
+//   - "returns newly created events without selecting the row back" (recordingDb
+//     Proxy, run/query counting).
+//   - "inserts new provider events without preselecting or reselecting rows"
+//     ("INSERT OR IGNORE INTO events" SQL-string inspection).
+//   The lean-projection assertion for summaries is retained functionally
+//   (metadata omitted from the EventSummary shape).
+
+import { afterAll, afterEach, beforeAll, beforeEach, describe, it, expect } from "bun:test";
+import { startV1Stub, type V1Stub } from "../test-support/v1-stub.js";
 import {
   createEvent,
   getEvent,
@@ -12,27 +24,24 @@ import {
   upsertEventWithResult,
 } from "./events.js";
 
-let providerId: string;
-let emailId: string;
+let stub: V1Stub;
 
-const baseOpts = {
-  from: "sender@example.com",
-  to: ["recipient@example.com"],
-  subject: "Test",
-};
+const providerId = "prov-1";
+const emailId = "email-1";
 
-beforeEach(() => {
-  process.env["EMAILS_DB_PATH"] = ":memory:";
-  resetDatabase();
-  const p = createProvider({ name: "Test", type: "resend" });
-  providerId = p.id;
-  const e = createEmail(providerId, baseOpts);
-  emailId = e.id;
+beforeAll(async () => {
+  stub = await startV1Stub();
+});
+
+afterAll(() => stub.stop());
+
+beforeEach(async () => {
+  await stub.reset();
+  stub.applyEnv();
 });
 
 afterEach(() => {
-  closeDatabase();
-  delete process.env["EMAILS_DB_PATH"];
+  stub.clearEnv();
 });
 
 describe("createEvent", () => {
@@ -51,42 +60,8 @@ describe("createEvent", () => {
     expect(ev.provider_id).toBe(providerId);
     expect(ev.provider_event_id).toBe("evt-001");
     expect(ev.recipient).toBe("recipient@example.com");
-  });
-
-  it("returns newly created events without selecting the row back", () => {
-    const db = getDatabase();
-    const queries: string[] = [];
-    const runs: string[] = [];
-    const recordingDb = new Proxy(db, {
-      get(target, prop, receiver) {
-        if (prop === "query") return (sql: string) => {
-          queries.push(sql);
-          return target.query(sql);
-        };
-        if (prop === "run") return (sql: string, ...args: unknown[]) => {
-          runs.push(sql);
-          return target.run(sql, ...args);
-        };
-        const value = Reflect.get(target, prop, receiver);
-        return typeof value === "function" ? value.bind(target) : value;
-      },
-    }) as typeof db;
-
-    const ev = createEvent({
-      email_id: emailId,
-      provider_id: providerId,
-      provider_event_id: "evt-no-reselect",
-      type: "delivered",
-      recipient: "recipient@example.com",
-      metadata: { ok: true },
-      occurred_at: "2026-01-01T00:00:00.000Z",
-    }, recordingDb);
-
-    expect(ev.provider_event_id).toBe("evt-no-reselect");
-    expect(ev.metadata).toEqual({ ok: true });
-    expect(runs).toHaveLength(1);
-    expect(queries.filter((sql) => sql.includes("SELECT * FROM events WHERE id = ?"))).toHaveLength(0);
-    expect(listEvents({ provider_id: providerId }, db).map((event) => event.provider_event_id)).toContain("evt-no-reselect");
+    // Round-trips through the /v1 store.
+    expect(getEvent(ev.id)!.provider_event_id).toBe("evt-001");
   });
 
   it("creates event without email_id (null)", () => {
@@ -106,6 +81,8 @@ describe("createEvent", () => {
       metadata: { url: "https://example.com" },
     });
     expect(ev.metadata).toEqual({ url: "https://example.com" });
+    // Metadata round-trips back through /v1 (stored as a JSON string, coerced back).
+    expect(getEvent(ev.id)!.metadata).toEqual({ url: "https://example.com" });
   });
 });
 
@@ -116,9 +93,22 @@ describe("listEvents", () => {
     expect(listEvents().length).toBe(2);
   });
 
-  it("tolerates malformed metadata JSON", () => {
-    const event = createEvent({ provider_id: providerId, type: "delivered", occurred_at: new Date().toISOString(), metadata: { ok: true } });
-    getDatabase().run("UPDATE events SET metadata = ? WHERE id = ?", ["not-json", event.id]);
+  it("coerces malformed metadata JSON to an empty object", async () => {
+    await stub.seed({
+      events: [
+        {
+          id: "evt-bad",
+          email_id: null,
+          provider_id: providerId,
+          provider_event_id: null,
+          type: "delivered",
+          recipient: null,
+          metadata: "not-json",
+          occurred_at: "2026-01-01T00:00:00.000Z",
+          created_at: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+    });
 
     const [found] = listEvents();
     expect(found?.metadata).toEqual({});
@@ -144,9 +134,8 @@ describe("listEvents", () => {
   });
 
   it("filters by provider_id", () => {
-    const p2 = createProvider({ name: "Other", type: "ses" });
     createEvent({ provider_id: providerId, type: "delivered", occurred_at: new Date().toISOString() });
-    createEvent({ provider_id: p2.id, type: "delivered", occurred_at: new Date().toISOString() });
+    createEvent({ provider_id: "prov-2", type: "delivered", occurred_at: new Date().toISOString() });
     expect(listEvents({ provider_id: providerId }).length).toBe(1);
   });
 
@@ -179,28 +168,16 @@ describe("listEvents", () => {
 });
 
 describe("listEventSummaries", () => {
-  it("uses a lean projection and omits metadata payloads", () => {
-    const db = getDatabase();
-    const queries: string[] = [];
-    const recordingDb = new Proxy(db, {
-      get(target, prop, receiver) {
-        if (prop === "query") return (sql: string) => {
-          queries.push(sql);
-          return target.query(sql);
-        };
-        const value = Reflect.get(target, prop, receiver);
-        return typeof value === "function" ? value.bind(target) : value;
-      },
-    }) as typeof db;
+  it("omits metadata payloads from the summary shape", () => {
     createEvent({
       provider_id: providerId,
       type: "clicked",
       recipient: "recipient@example.com",
       metadata: { url: "https://example.com/" + "large-metadata-".repeat(200) },
       occurred_at: "2026-01-01T00:00:00.000Z",
-    }, db);
+    });
 
-    const [summary] = listEventSummaries({ provider_id: providerId }, recordingDb);
+    const [summary] = listEventSummaries({ provider_id: providerId });
 
     expect(summary).toMatchObject({
       provider_id: providerId,
@@ -209,8 +186,6 @@ describe("listEventSummaries", () => {
     });
     expect("metadata" in summary!).toBe(false);
     expect(JSON.stringify(summary)).not.toContain("large-metadata");
-    expect(queries[0]).not.toContain("SELECT *");
-    expect(queries[0]).not.toMatch(/\bmetadata\b/);
   });
 
   it("paginates summaries", () => {
@@ -302,39 +277,6 @@ describe("upsertEvent", () => {
     expect(first.created).toBe(true);
     expect(second.created).toBe(false);
     expect(first.event.id).toBe(second.event.id);
-  });
-
-  it("inserts new provider events without preselecting or reselecting rows", () => {
-    const db = getDatabase();
-    const queries: string[] = [];
-    const runs: string[] = [];
-    const recordingDb = new Proxy(db, {
-      get(target, prop, receiver) {
-        if (prop === "query") return (sql: string) => {
-          queries.push(sql);
-          return target.query(sql);
-        };
-        if (prop === "run") return (sql: string, ...args: unknown[]) => {
-          runs.push(sql);
-          return target.run(sql, ...args);
-        };
-        const value = Reflect.get(target, prop, receiver);
-        return typeof value === "function" ? value.bind(target) : value;
-      },
-    }) as typeof db;
-
-    const result = upsertEventWithResult({
-      provider_id: providerId,
-      provider_event_id: "insert-fast-path",
-      type: "delivered",
-      occurred_at: "2026-01-01T00:00:00.000Z",
-    }, recordingDb);
-
-    expect(result.created).toBe(true);
-    expect(result.event.provider_event_id).toBe("insert-fast-path");
-    expect(runs.filter((sql) => sql.includes("INSERT OR IGNORE INTO events"))).toHaveLength(1);
-    expect(queries.filter((sql) => sql.includes("provider_event_id = ?"))).toHaveLength(0);
-    expect(queries.filter((sql) => sql.includes("SELECT * FROM events WHERE id = ?"))).toHaveLength(0);
   });
 
   it("creates separate events when no provider_event_id", () => {

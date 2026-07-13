@@ -1,37 +1,12 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { closeDatabase, resetDatabase } from "../db/database.js";
-import { resetSelfHostedConfigCache } from "../db/self-hosted-store.js";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { startV1Stub, type V1Stub } from "../test-support/v1-stub.js";
 import { buildServer } from "./server.js";
 
-const ENV_KEYS = [
-  "EMAILS_MODE",
-  "HASNA_EMAILS_MODE",
-  "EMAILS_DB_PATH",
-  "HASNA_EMAILS_DB_PATH",
-  "EMAILS_SELF_HOSTED_URL",
-  "EMAILS_SELF_HOSTED_API_KEY",
-] as const;
+// Self-hosted-ONLY: no local SQLite. Reply/prepare-inbox tools depend on local
+// state the self-hosted client does not own, so they are refused; get_next_action
+// routes through runtime status. All of it runs against the /v1 stub.
 
-const ORIGINAL_HOME = process.env["HOME"];
-const ORIGINAL_ENV = new Map<string, string | undefined>(ENV_KEYS.map((key) => [key, process.env[key]]));
-
-let tempHome: string | undefined;
-
-function restoreEnv(): void {
-  for (const key of ENV_KEYS) {
-    const value = ORIGINAL_ENV.get(key);
-    if (value === undefined) delete process.env[key];
-    else process.env[key] = value;
-  }
-}
-
-function dbPath(): string {
-  if (!tempHome) throw new Error("tempHome not initialized");
-  return join(tempHome, ".hasna", "emails", "emails.db");
-}
+let stub: V1Stub;
 
 async function callTool(name: string, args: Record<string, unknown>) {
   const server = buildServer() as unknown as {
@@ -44,45 +19,36 @@ function resultText(result: { content: Array<{ text: string }> }): string {
   return result.content[0]?.text ?? "";
 }
 
-beforeEach(() => {
-  for (const key of ENV_KEYS) delete process.env[key];
-  tempHome = mkdtempSync(join(tmpdir(), "emails-mcp-self-hosted-local-state-"));
-  process.env["HOME"] = tempHome;
-  process.env["EMAILS_MODE"] = "self_hosted";
-  process.env["EMAILS_SELF_HOSTED_URL"] = "http://127.0.0.1:3900";
-  process.env["EMAILS_SELF_HOSTED_API_KEY"] = "test-key";
-  resetSelfHostedConfigCache();
-  resetDatabase();
+beforeAll(async () => {
+  stub = await startV1Stub();
+});
+
+afterAll(() => stub.stop());
+
+beforeEach(async () => {
+  await stub.reset();
+  stub.applyEnv();
 });
 
 afterEach(() => {
-  closeDatabase();
-  resetDatabase();
-  resetSelfHostedConfigCache();
-  restoreEnv();
-  if (ORIGINAL_HOME === undefined) delete process.env["HOME"];
-  else process.env["HOME"] = ORIGINAL_HOME;
-  if (tempHome) rmSync(tempHome, { recursive: true, force: true });
-  tempHome = undefined;
+  stub.clearEnv();
 });
 
 describe("MCP self_hosted local-state guards", () => {
-  it("fails reply and prepare-inbox tools before creating a local emails DB", async () => {
+  it("refuses reply and prepare-inbox tools that need server-owned local state", async () => {
     for (const [name, args] of [
       ["list_replies", { email_id: "sent-email-1" }],
       ["prepare_inbox", { email: "ops@example.com", create_missing: true, provider_id: "provider-1" }],
     ] as const) {
       const result = await callTool(name, args);
       expect(result.isError).toBe(true);
-      expect(resultText(result)).toContain("self_hosted API-only mode");
-      expect(existsSync(dbPath())).toBe(false);
+      expect(resultText(result)).toContain("not available in the self-hosted client");
     }
   });
 
-  it("routes next-action through runtime status without creating a local emails DB", async () => {
+  it("routes next-action through runtime status (points at the wait-code flow)", async () => {
     const result = await callTool("get_next_action", { goal: "wait for a verification code" });
-    expect(result.isError).toBe(true);
-    expect(resultText(result)).toContain("/messages/counts");
-    expect(existsSync(dbPath())).toBe(false);
+    expect(result.isError).not.toBe(true);
+    expect(resultText(result)).toContain("wait-code");
   });
 });

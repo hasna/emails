@@ -126,17 +126,10 @@ describe("MCP startup contract", () => {
   });
 
   it("keeps email operation implementation dependencies lazy", () => {
+    // Self-hosted-only: email ops route through the mail-data-source seam (/v1),
+    // no local DB module is imported anymore.
     const lazyToolDeps = [
-      "../../db/emails.js",
-      "../../db/email-content.js",
-      "../../db/templates.js",
-      "../../db/contacts.js",
-      "../../db/scheduled.js",
-      "../../db/providers.js",
-      "../../db/warming.js",
-      "../../db/database.js",
-      "../../lib/stats.js",
-      "../../lib/warming.js",
+      "../../lib/mail-data-source.js",
       "../helpers.js",
     ];
     const source = readFileSync(join(toolsDir, "email-ops.ts"), "utf8");
@@ -154,10 +147,11 @@ describe("MCP startup contract", () => {
   });
 
   it("keeps sequence implementation dependencies lazy", () => {
+    // Self-hosted-only: sequences route through the /v1 resource store + mode guard.
     const lazyToolDeps = [
+      "../../db/self-hosted-store.js",
       "../../db/sequences.js",
-      "../../db/inbound.js",
-      "../../db/database.js",
+      "../../lib/mode.js",
       "../helpers.js",
     ];
     const source = readFileSync(join(toolsDir, "sequences.ts"), "utf8");
@@ -175,19 +169,15 @@ describe("MCP startup contract", () => {
   });
 
   it("keeps miscellaneous operation implementation dependencies lazy", () => {
+    // Self-hosted-only: misc ops route through the /v1 resource store + mode guard;
+    // the remaining heavy libs (analytics/doctor/export/email-verify) stay lazy.
     const lazyToolDeps = [
-      "../../db/groups.js",
-      "../../db/sandbox.js",
-      "../../db/database.js",
-      "../../db/templates.js",
-      "../../db/providers.js",
-      "../../db/contacts.js",
+      "../../db/self-hosted-store.js",
       "../../lib/analytics.js",
       "../../lib/doctor.js",
       "../../lib/export.js",
       "../../lib/email-verify.js",
-      "../../lib/sent-ledger.js",
-      "../../lib/send.js",
+      "../../lib/mode.js",
       "../helpers.js",
     ];
     const source = readFileSync(join(toolsDir, "misc-ops.ts"), "utf8");

@@ -1,142 +1,176 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { closeDatabase, getDatabase, resetDatabase } from "./database.js";
-import { createProvider } from "./providers.js";
+// Self-hosted-ONLY: scoped send keys. The `send-keys` /v1 resource is
+// summary-only — the secret `key_hash` is NEVER stored on or fetched by a
+// client, so minting and token verification have NO client-side equivalent and
+// FAIL LOUD (they run on the authoritative server). Exercises the REAL
+// synchronous curl transport against an out-of-process /v1 stub
+// (see src/test-support/v1-stub.ts).
+//
+// Migrated from the deleted local-SQLite pattern. Dropped tests covered deleted
+// local behavior:
+//   - local token mint + hash verification (issue/verify, revoked-no-longer-
+//     verifies via a live token, assertSendAuthorized success path): a
+//     client-minted key would be unverifiable, so createSendKey / verifySendKey
+//     / assertSendAuthorized now throw. Their fail-loud contract is asserted
+//     instead.
+//   - SQL-projection / hash-absence-in-SQL assertions inspected local SQL that
+//     no longer exists; the /v1 summary rows simply carry no key_hash.
+// List/get/revoke still route to /v1 and are seeded with explicit created_at for
+// deterministic ordering (the old `UPDATE ... SET created_at` is gone).
+
+import { afterAll, afterEach, beforeAll, beforeEach, describe, it, expect } from "bun:test";
+import { startV1Stub, type V1Stub } from "../test-support/v1-stub.js";
 import { createAddress } from "./addresses.js";
 import { createOwner, assignAddressOwner } from "./owners.js";
 import {
-  createSendKey, verifySendKey, listSendKeys, listSendKeysByOwners, listSendKeySummaries,
-  listSendKeySummariesByOwners, revokeSendKey,
+  createSendKey, verifySendKey, getSendKey, listSendKeys, listSendKeysByOwners,
+  listSendKeySummaries, listSendKeySummariesByOwners, revokeSendKey,
   canOwnerSendFrom, assertSendAuthorized,
 } from "./send-keys.js";
 
-let providerId: string;
-beforeEach(() => {
-  process.env["EMAILS_DB_PATH"] = ":memory:";
-  resetDatabase();
-  providerId = createProvider({ name: "ses", type: "ses" }).id;
+let stub: V1Stub;
+
+beforeAll(async () => {
+  stub = await startV1Stub();
 });
-afterEach(() => { closeDatabase(); delete process.env["EMAILS_DB_PATH"]; });
 
-describe("send keys — issue / verify", () => {
-  it("issues a token once and verifies it by hash", () => {
-    const agent = createOwner({ type: "agent", name: "Caesar" });
-    const { token, key } = createSendKey(agent.id, "ci");
-    expect(token).toMatch(/^esk_/);
-    expect(key.prefix).toBe(token.slice(0, 12));
-    expect(key.label).toBe("ci");
-    const v = verifySendKey(token);
-    expect(v?.id).toBe(key.id);
-    expect(v?.owner_id).toBe(agent.id);
+afterAll(() => stub.stop());
+
+beforeEach(async () => {
+  await stub.reset();
+  stub.applyEnv();
+});
+
+afterEach(() => {
+  stub.clearEnv();
+});
+
+const PROVIDER_ID = "provider-ses";
+
+/** A summary-shaped /v1 send-key row (no key_hash — the client never sees it). */
+function keyRow(overrides: Record<string, unknown>): Record<string, unknown> {
+  return {
+    id: overrides["id"],
+    owner_id: overrides["owner_id"],
+    prefix: overrides["prefix"] ?? "esk_00000000",
+    label: overrides["label"] ?? null,
+    created_at: overrides["created_at"] ?? "2026-01-01T00:00:00.000Z",
+    last_used_at: overrides["last_used_at"] ?? null,
+    revoked_at: overrides["revoked_at"] ?? null,
+  };
+}
+
+describe("send keys — fail-loud on client-side mint / verify", () => {
+  it("createSendKey is not available in the self-hosted client", () => {
+    expect(() => createSendKey("owner-1", "ci")).toThrow(
+      /not available in the self-hosted client|not supported|operator-issued service API key/,
+    );
   });
 
-  it("rejects an unknown or malformed token", () => {
-    expect(verifySendKey("esk_nope")).toBeNull();
-    expect(verifySendKey("garbage")).toBeNull();
+  it("verifySendKey is not available in the self-hosted client", () => {
+    expect(() => verifySendKey("esk_nope")).toThrow(/not available in the self-hosted client/);
+    expect(() => verifySendKey("garbage")).toThrow(/not available in the self-hosted client/);
   });
 
-  it("revoked keys no longer verify", () => {
-    const agent = createOwner({ type: "agent", name: "Nero" });
-    const { token, key } = createSendKey(agent.id);
-    expect(verifySendKey(token)).not.toBeNull();
-    revokeSendKey(key.id);
-    expect(verifySendKey(token)).toBeNull();
-    expect(listSendKeys(agent.id)[0]!.revoked_at).toBeTruthy();
+  it("assertSendAuthorized is not available in the self-hosted client", () => {
+    expect(() => assertSendAuthorized("esk_bogus", "ops@x.com")).toThrow(/not available in the self-hosted client/);
+  });
+});
+
+describe("send keys — /v1 reads, revoke, and listing", () => {
+  it("getSendKey returns a hash-free key by id, null for unknown", async () => {
+    await stub.seed({
+      "send-keys": [keyRow({ id: "k1", owner_id: "agent-1", prefix: "esk_abcdefgh", label: "ci" })],
+    });
+    const key = getSendKey("k1");
+    expect(key).not.toBeNull();
+    expect(key!.owner_id).toBe("agent-1");
+    expect(key!.prefix).toBe("esk_abcdefgh");
+    expect(key!.label).toBe("ci");
+    expect(key!.key_hash).toBe(""); // never exposed to the client
+    expect(getSendKey("missing")).toBeNull();
   });
 
-  it("lists keys for selected owners only", () => {
-    const first = createOwner({ type: "agent", name: "First" });
-    const second = createOwner({ type: "agent", name: "Second" });
-    const other = createOwner({ type: "agent", name: "Other" });
-    const firstKey = createSendKey(first.id, "first").key;
-    const secondKey = createSendKey(second.id, "second").key;
-    createSendKey(other.id, "other");
+  it("revokes a key once and reports the revoked timestamp", async () => {
+    await stub.seed({
+      "send-keys": [keyRow({ id: "k1", owner_id: "agent-1", label: "ci" })],
+    });
+    expect(revokeSendKey("k1")).toBe(true);
+    // Idempotent: a second revoke of an already-revoked key is a no-op.
+    expect(revokeSendKey("k1")).toBe(false);
+    expect(listSendKeys("agent-1")[0]!.revoked_at).toBeTruthy();
+  });
 
-    expect(listSendKeysByOwners([first.id, second.id, first.id]).map((key) => key.id).sort()).toEqual([
-      firstKey.id,
-      secondKey.id,
-    ].sort());
+  it("revokeSendKey returns false for an unknown id", async () => {
+    await stub.seed({ "send-keys": [] });
+    expect(revokeSendKey("missing")).toBe(false);
+  });
+
+  it("lists keys for selected owners only", async () => {
+    await stub.seed({
+      "send-keys": [
+        keyRow({ id: "kf", owner_id: "first", label: "first" }),
+        keyRow({ id: "ks", owner_id: "second", label: "second" }),
+        keyRow({ id: "ko", owner_id: "other", label: "other" }),
+      ],
+    });
+
+    expect(listSendKeysByOwners(["first", "second", "first"]).map((key) => key.id).sort()).toEqual(["kf", "ks"]);
     expect(listSendKeysByOwners([])).toEqual([]);
   });
 
-  it("lists hash-free key summaries for selected owners only", () => {
-    const db = getDatabase();
-    const queries: string[] = [];
-    const recordingDb = new Proxy(db, {
-      get(target, prop, receiver) {
-        if (prop === "query") return (sql: string) => {
-          queries.push(sql);
-          return target.query(sql);
-        };
-        const value = Reflect.get(target, prop, receiver);
-        return typeof value === "function" ? value.bind(target) : value;
-      },
-    }) as typeof db;
-    const first = createOwner({ type: "agent", name: "Summary First" }, db);
-    const second = createOwner({ type: "agent", name: "Summary Second" }, db);
-    const other = createOwner({ type: "agent", name: "Summary Other" }, db);
-    const firstKey = createSendKey(first.id, "first-summary", db).key;
-    const secondKey = createSendKey(second.id, "second-summary", db).key;
-    createSendKey(other.id, "other-summary", db);
+  it("lists hash-free key summaries for selected owners only", async () => {
+    await stub.seed({
+      "send-keys": [
+        keyRow({ id: "kf", owner_id: "first", label: "first" }),
+        keyRow({ id: "ks", owner_id: "second", label: "second" }),
+        keyRow({ id: "ko", owner_id: "other", label: "other" }),
+      ],
+    });
 
-    const summaries = listSendKeySummariesByOwners([first.id, second.id, first.id], recordingDb);
-
-    expect(summaries.map((key) => key.id).sort()).toEqual([firstKey.id, secondKey.id].sort());
+    const summaries = listSendKeySummariesByOwners(["first", "second", "first"]);
+    expect(summaries.map((key) => key.id).sort()).toEqual(["kf", "ks"]);
     expect(summaries.every((key) => !("key_hash" in key))).toBe(true);
-    expect(JSON.stringify(summaries)).not.toContain(firstKey.key_hash);
-    expect(queries[0]).not.toContain("SELECT *");
-    expect(queries[0]).not.toMatch(/\bkey_hash\b/);
-    expect(listSendKeySummariesByOwners([], recordingDb)).toEqual([]);
+    expect(listSendKeySummariesByOwners([])).toEqual([]);
   });
 
-  it("paginates send keys after ordering newest first", () => {
-    const db = getDatabase();
-    const agent = createOwner({ type: "agent", name: "Paged" });
-    for (let i = 0; i < 5; i++) {
-      const key = createSendKey(agent.id, `key-${i}`).key;
-      db.run("UPDATE send_keys SET created_at = ? WHERE id = ?", [`2026-01-0${i + 1}T00:00:00.000Z`, key.id]);
-    }
+  it("paginates send keys after ordering newest first", async () => {
+    await stub.seed({
+      "send-keys": Array.from({ length: 5 }, (_v, i) => keyRow({
+        id: `k-${i}`,
+        owner_id: "agent-1",
+        label: `key-${i}`,
+        created_at: `2026-01-0${i + 1}T00:00:00.000Z`,
+      })),
+    });
 
-    const page = listSendKeys(agent.id, undefined, { limit: 2, offset: 1 });
+    const page = listSendKeys("agent-1", { limit: 2, offset: 1 });
 
     expect(page.map((key) => key.label)).toEqual(["key-3", "key-2"]);
   });
 
-  it("paginates hash-free send key summaries", () => {
-    const db = getDatabase();
-    const queries: string[] = [];
-    const recordingDb = new Proxy(db, {
-      get(target, prop, receiver) {
-        if (prop === "query") return (sql: string) => {
-          queries.push(sql);
-          return target.query(sql);
-        };
-        const value = Reflect.get(target, prop, receiver);
-        return typeof value === "function" ? value.bind(target) : value;
-      },
-    }) as typeof db;
-    const agent = createOwner({ type: "agent", name: "Summary Paged" }, db);
-    const hashes: string[] = [];
-    for (let i = 0; i < 5; i++) {
-      const key = createSendKey(agent.id, `summary-${i}`, db).key;
-      hashes.push(key.key_hash);
-      db.run("UPDATE send_keys SET created_at = ? WHERE id = ?", [`2026-01-0${i + 1}T00:00:00.000Z`, key.id]);
-    }
+  it("paginates hash-free send key summaries", async () => {
+    await stub.seed({
+      "send-keys": Array.from({ length: 5 }, (_v, i) => keyRow({
+        id: `k-${i}`,
+        owner_id: "agent-1",
+        label: `summary-${i}`,
+        created_at: `2026-01-0${i + 1}T00:00:00.000Z`,
+      })),
+    });
 
-    const page = listSendKeySummaries(agent.id, recordingDb, { limit: 2, offset: 1 });
+    const page = listSendKeySummaries("agent-1", { limit: 2, offset: 1 });
 
     expect(page.map((key) => key.label)).toEqual(["summary-3", "summary-2"]);
     expect(page.every((key) => !("key_hash" in key))).toBe(true);
-    expect(hashes.some((hash) => JSON.stringify(page).includes(hash))).toBe(false);
-    expect(queries[0]).not.toMatch(/\bkey_hash\b/);
   });
 });
 
-describe("send keys — scope enforcement", () => {
+describe("send keys — scope enforcement (canOwnerSendFrom)", () => {
   it("agent can send from an address it owns, not from others", () => {
     const agent = createOwner({ type: "agent", name: "Brutus" });
-    const mine = createAddress({ provider_id: providerId, email: "ops@x.com" });
+    const mine = createAddress({ provider_id: PROVIDER_ID, email: "ops@x.com" });
     assignAddressOwner(mine.id, agent.id);
-    createAddress({ provider_id: providerId, email: "other@x.com" });
+    createAddress({ provider_id: PROVIDER_ID, email: "other@x.com" });
     expect(canOwnerSendFrom(agent.id, "ops@x.com")).toBe(true);
     expect(canOwnerSendFrom(agent.id, "other@x.com")).toBe(false);
     expect(canOwnerSendFrom(agent.id, "unregistered@x.com")).toBe(false);
@@ -145,34 +179,16 @@ describe("send keys — scope enforcement", () => {
   it("agent administering a human-owned address can send from it", () => {
     const human = createOwner({ type: "human", name: "Morgan" });
     const agent = createOwner({ type: "agent", name: "Tiberius" });
-    const addr = createAddress({ provider_id: providerId, email: "morgan@x.com" });
+    const addr = createAddress({ provider_id: PROVIDER_ID, email: "morgan@x.com" });
     assignAddressOwner(addr.id, human.id, agent.id);
     expect(canOwnerSendFrom(agent.id, "morgan@x.com")).toBe(true);
-  });
-
-  it("assertSendAuthorized throws for an out-of-scope from address", () => {
-    const agent = createOwner({ type: "agent", name: "Cato" });
-    const mine = createAddress({ provider_id: providerId, email: "ops@x.com" });
-    assignAddressOwner(mine.id, agent.id);
-    const { token } = createSendKey(agent.id);
-    expect(assertSendAuthorized(token, "ops@x.com").id).toBe(agent.id);
-    expect(() => assertSendAuthorized(token, "evil@x.com")).toThrow(/not authorized/i);
-    expect(() => assertSendAuthorized("esk_bogus", "ops@x.com")).toThrow(/invalid|revoked/i);
-  });
-
-  it("assertSendAuthorized accepts a From with a display name", () => {
-    const agent = createOwner({ type: "agent", name: "Livia" });
-    const mine = createAddress({ provider_id: providerId, email: "ops@x.com" });
-    assignAddressOwner(mine.id, agent.id);
-    const { token } = createSendKey(agent.id);
-    expect(assertSendAuthorized(token, "Ops Team <ops@x.com>").id).toBe(agent.id);
   });
 });
 
 describe("send keys — From-spoofing resistance", () => {
   it("denies a double angle-addr From even if the bracketed addr is owned", () => {
     const agent = createOwner({ type: "agent", name: "Galba" });
-    const mine = createAddress({ provider_id: providerId, email: "ops@x.com" });
+    const mine = createAddress({ provider_id: PROVIDER_ID, email: "ops@x.com" });
     assignAddressOwner(mine.id, agent.id);
     // attacker owns ops@x.com but smuggles victim@y.com as a second angle-addr
     expect(canOwnerSendFrom(agent.id, "x <ops@x.com> <victim@y.com>")).toBe(false);
@@ -180,7 +196,7 @@ describe("send keys — From-spoofing resistance", () => {
 
   it("matches case-insensitively on a clean From", () => {
     const agent = createOwner({ type: "agent", name: "Otho" });
-    const mine = createAddress({ provider_id: providerId, email: "ops@x.com" });
+    const mine = createAddress({ provider_id: PROVIDER_ID, email: "ops@x.com" });
     assignAddressOwner(mine.id, agent.id);
     expect(canOwnerSendFrom(agent.id, "OPS@X.COM")).toBe(true);
     expect(canOwnerSendFrom(agent.id, "Ops Team <Ops@X.com>")).toBe(true);

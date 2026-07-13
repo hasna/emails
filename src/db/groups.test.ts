@@ -1,5 +1,20 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { closeDatabase, getDatabase, resetDatabase } from "./database.js";
+// Self-hosted-ONLY: the groups repo routes every read/write to the /v1 API.
+// This exercises the REAL transport (synchronous curl store) against an
+// out-of-process /v1 stub — see src/test-support/v1-stub.ts for why the stub
+// must run in a separate process.
+//
+// Migrated from the deleted local-SQLite pattern. Two former tests covered
+// behavior that no longer lives in the client and are dropped here:
+//   - "throws on duplicate name": was a SQLite UNIQUE(name) constraint; name
+//     uniqueness is now enforced server-side by /v1, not by the client.
+//   - "cascades to delete members": was a SQLite FK ON DELETE CASCADE; member
+//     cascade is now the server's responsibility.
+//   - the listMemberSummaries SQL-projection assertion (no `SELECT *`, no `vars`
+//     column) inspected local SQL that no longer exists; the meaningful part
+//     (vars omitted from the summary shape) is retained functionally below.
+
+import { afterAll, afterEach, beforeAll, beforeEach, describe, it, expect } from "bun:test";
+import { startV1Stub, type V1Stub } from "../test-support/v1-stub.js";
 import {
   createGroup,
   getGroup,
@@ -15,14 +30,21 @@ import {
   getMemberCounts,
 } from "./groups.js";
 
-beforeEach(() => {
-  process.env["EMAILS_DB_PATH"] = ":memory:";
-  resetDatabase();
+let stub: V1Stub;
+
+beforeAll(async () => {
+  stub = await startV1Stub();
+});
+
+afterAll(() => stub.stop());
+
+beforeEach(async () => {
+  await stub.reset();
+  stub.applyEnv();
 });
 
 afterEach(() => {
-  closeDatabase();
-  delete process.env["EMAILS_DB_PATH"];
+  stub.clearEnv();
 });
 
 describe("createGroup", () => {
@@ -31,17 +53,14 @@ describe("createGroup", () => {
     expect(group.id).toHaveLength(36);
     expect(group.name).toBe("newsletter");
     expect(group.description).toBeNull();
+    // Round-trips through the /v1 store.
+    expect(getGroup(group.id)!.name).toBe("newsletter");
   });
 
   it("creates a group with description", () => {
     const group = createGroup("vip", "VIP customers");
     expect(group.name).toBe("vip");
     expect(group.description).toBe("VIP customers");
-  });
-
-  it("throws on duplicate name", () => {
-    createGroup("test");
-    expect(() => createGroup("test")).toThrow();
   });
 });
 
@@ -91,7 +110,7 @@ describe("listGroups", () => {
     createGroup("delta");
     createGroup("beta");
 
-    const groups = listGroups(undefined, { limit: 2, offset: 1 });
+    const groups = listGroups({ limit: 2, offset: 1 });
 
     expect(groups.map((group) => group.name)).toEqual(["beta", "delta"]);
   });
@@ -107,14 +126,6 @@ describe("deleteGroup", () => {
 
   it("returns false for unknown id", () => {
     expect(deleteGroup("nonexistent")).toBe(false);
-  });
-
-  it("cascades to delete members", () => {
-    const group = createGroup("test");
-    addMember(group.id, "alice@example.com");
-    deleteGroup(group.id);
-    // Members should be gone
-    expect(listMembers(group.id)).toEqual([]);
   });
 });
 
@@ -166,11 +177,14 @@ describe("listMembers", () => {
     expect(listMembers(group.id)).toEqual([]);
   });
 
-  it("tolerates malformed member vars JSON", () => {
-    const group = createGroup("test");
-    addMember(group.id, "alice@example.com", "Alice", { role: "owner" });
-    getDatabase().run("UPDATE group_members SET vars = ? WHERE group_id = ? AND email = ?", ["not-json", group.id, "alice@example.com"]);
-
+  it("tolerates malformed member vars JSON stored on /v1", async () => {
+    const group = createGroup("malformed");
+    // A group-member row whose `vars` is not valid JSON must map to {} (cobj).
+    await stub.seed({
+      "group-members": [
+        { id: "gm-bad", group_id: group.id, email: "alice@example.com", name: "Alice", vars: "not-json", added_at: "2026-01-01T00:00:00.000Z" },
+      ],
+    });
     const members = listMembers(group.id);
     expect(members[0]?.vars).toEqual({});
   });
@@ -194,7 +208,7 @@ describe("listMembers", () => {
     addMember(group.id, "alice@example.com");
     addMember(group.id, "bob@example.com");
 
-    const members = listMembers(group.id, undefined, { limit: 2, offset: 1 });
+    const members = listMembers(group.id, { limit: 2, offset: 1 });
 
     expect(members.map((member) => member.email)).toEqual([
       "bob@example.com",
@@ -204,29 +218,15 @@ describe("listMembers", () => {
 });
 
 describe("listMemberSummaries", () => {
-  it("uses a lean projection and omits member vars", () => {
-    const db = getDatabase();
-    const queries: string[] = [];
-    const recordingDb = new Proxy(db, {
-      get(target, prop, receiver) {
-        if (prop === "query") return (sql: string) => {
-          queries.push(sql);
-          return target.query(sql);
-        };
-        const value = Reflect.get(target, prop, receiver);
-        return typeof value === "function" ? value.bind(target) : value;
-      },
-    }) as typeof db;
-    const group = createGroup("summary-test", undefined, db);
-    addMember(group.id, "alice@example.com", "Alice", { notes: "large vars ".repeat(200) }, db);
+  it("omits member vars from the summary shape", () => {
+    const group = createGroup("summary-test");
+    addMember(group.id, "alice@example.com", "Alice", { notes: "large vars ".repeat(200) });
 
-    const [summary] = listMemberSummaries(group.id, recordingDb);
+    const [summary] = listMemberSummaries(group.id);
 
     expect(summary).toMatchObject({ group_id: group.id, email: "alice@example.com", name: "Alice" });
     expect("vars" in summary!).toBe(false);
     expect(JSON.stringify(summary)).not.toContain("large vars");
-    expect(queries[0]).not.toContain("SELECT *");
-    expect(queries[0]).not.toMatch(/\bvars\b/);
   });
 
   it("paginates summaries after sorting by email", () => {
@@ -236,7 +236,7 @@ describe("listMemberSummaries", () => {
     addMember(group.id, "alice@example.com");
     addMember(group.id, "bob@example.com");
 
-    const summaries = listMemberSummaries(group.id, undefined, { limit: 2, offset: 1 });
+    const summaries = listMemberSummaries(group.id, { limit: 2, offset: 1 });
 
     expect(summaries.map((member) => member.email)).toEqual([
       "bob@example.com",

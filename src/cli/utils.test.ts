@@ -1,6 +1,6 @@
-import { beforeEach, afterEach, describe, expect, it, mock } from "bun:test";
-import { closeDatabase, resetDatabase } from "../db/database.js";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
 import { createProvider } from "../db/providers.js";
+import { startV1Stub, type V1Stub } from "../test-support/v1-stub.js";
 import {
   configureCliRuntime,
   MAX_CLI_PAGE_LIMIT,
@@ -12,17 +12,21 @@ import {
   resolveId,
 } from "./utils.js";
 
+// Self-hosted-ONLY: id resolution routes through the operator /v1 API, so the
+// resolveId test drives the REAL command against an out-of-process /v1 stub.
+let stub: V1Stub;
+
+beforeAll(async () => {
+  stub = await startV1Stub();
+});
+afterAll(() => stub.stop());
+beforeEach(async () => {
+  await stub.reset();
+  stub.applyEnv();
+});
+afterEach(() => stub.clearEnv());
+
 describe("cli/utils", () => {
-  beforeEach(() => {
-    process.env["EMAILS_DB_PATH"] = ":memory:";
-    resetDatabase();
-  });
-
-  afterEach(() => {
-    closeDatabase();
-    delete process.env["EMAILS_DB_PATH"];
-  });
-
   it("parseDuration parses common units", () => {
     expect(parseDuration("30s")).toBe(30000);
     expect(parseDuration("5m")).toBe(300000);
@@ -74,7 +78,7 @@ describe("cli/utils", () => {
     }
   });
 
-  it("resolveId prints table-aware guidance when lookup fails", () => {
+  it("resolveId resolves an id prefix from the /v1 API and prints table-aware guidance when lookup fails", () => {
     const provider = createProvider({ name: "qa", type: "sandbox" });
 
     const logs: string[] = [];
@@ -91,7 +95,7 @@ describe("cli/utils", () => {
     (process as unknown as { exit: typeof exitSpy }).exit = exitSpy;
 
     try {
-      expect(() => resolveId("providers", provider.id.slice(0, 6))).not.toThrow();
+      expect(resolveId("providers", provider.id.slice(0, 6))).toBe(provider.id);
 
       expect(() => resolveId("providers", "missing-prefix")).toThrow("exit:1");
       expect(logs.join("\n")).toContain("table 'providers'");

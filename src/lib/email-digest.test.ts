@@ -1,55 +1,60 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { closeDatabase, getDatabase, resetDatabase } from "../db/database.js";
-import { getLatestEmailDigest } from "../db/email-digests.js";
-import { storeInboundEmail } from "../db/inbound.js";
-import { generateEmailDigest, loadEmailDigest, resolveEmailDigestWindow } from "./email-digest.js";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { startV1Stub, type V1Stub } from "../test-support/v1-stub.js";
+import {
+  generateEmailDigest,
+  loadEmailDigest,
+  resolveEmailDigestWindow,
+  formatEmailDigest,
+} from "./email-digest.js";
 
-let previousHome: string | undefined;
-let tempHome: string | undefined;
+// Digest generation reads the inbound message store + per-message AI agent runs,
+// which live on the self-hosted server, so generateEmailDigest is a loud stub.
+// loadEmailDigest still works: it reads the latest server-generated digest from
+// the /v1 email-digests resource, and only falls through to (server-side)
+// generation when no cached digest exists.
 
-beforeEach(() => {
-  previousHome = process.env["HOME"];
-  tempHome = mkdtempSync(join(tmpdir(), "emails-digest-test-home-"));
-  process.env["HOME"] = tempHome;
-  process.env["EMAILS_DB_PATH"] = ":memory:";
-  resetDatabase();
+let stub: V1Stub;
+
+beforeAll(async () => {
+  stub = await startV1Stub();
+});
+
+afterAll(() => stub.stop());
+
+beforeEach(async () => {
+  await stub.reset();
+  stub.applyEnv();
 });
 
 afterEach(() => {
-  closeDatabase();
-  delete process.env["EMAILS_DB_PATH"];
-  if (previousHome === undefined) delete process.env["HOME"];
-  else process.env["HOME"] = previousHome;
-  if (tempHome) rmSync(tempHome, { recursive: true, force: true });
-  tempHome = undefined;
-  previousHome = undefined;
+  stub.clearEnv();
 });
 
-function seedInbound(subject: string, received_at: string, labels: string[] = []) {
-  return storeInboundEmail({
-    provider_id: null,
-    message_id: `<${subject}@digest.test>`,
-    in_reply_to_email_id: null,
-    from_address: "Digest Sender <digest@example.com>",
-    to_addresses: ["me@example.com"],
-    cc_addresses: [],
-    subject,
-    text_body: `Body for ${subject}`,
-    html_body: null,
-    attachments: [],
-    attachment_paths: [],
-    label_ids: labels,
-    headers: {},
-    raw_size: 10,
-    received_at,
-  });
+function digestRow(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "digest-today-1",
+    period: "today",
+    since: "2026-06-18T00:00:00.000Z",
+    until: "2026-06-18T12:00:00.000Z",
+    provider: "local",
+    model: "local-emails-digest",
+    status: "ok",
+    message_count: 2,
+    summary: "2 inbound messages",
+    highlights: ["Important contract"],
+    action_items: [],
+    important_email_ids: ["email-1"],
+    label_counts: { important: 1 },
+    error: null,
+    started_at: "2026-06-18T12:00:00.000Z",
+    completed_at: "2026-06-18T12:00:00.000Z",
+    created_at: "2026-06-18T12:00:00.000Z",
+    ...overrides,
+  };
 }
 
-describe("email digest", () => {
-  it("resolves local digest windows", () => {
+describe("resolveEmailDigestWindow (pure)", () => {
+  it("resolves digest windows", () => {
     const at = new Date("2026-06-18T15:30:00.000Z");
     expect(resolveEmailDigestWindow("today", at)).toMatchObject({
       period: "today",
@@ -61,41 +66,85 @@ describe("email digest", () => {
     expect(month.period).toBe("month");
     expect(new Date(month.since).getTime()).toBeLessThan(new Date(month.until).getTime());
   });
+});
 
-  it("generates and loads a deterministic local digest", async () => {
-    seedInbound("Important contract", "2026-06-18T10:00:00.000Z", ["important", "action-required"]);
-    seedInbound("Newsletter", "2026-06-18T09:00:00.000Z", ["newsletter"]);
+describe("generateEmailDigest (self-hosted stub)", () => {
+  it("throws because digests are generated on the self-hosted server", async () => {
+    await expect(generateEmailDigest({ period: "today" })).rejects.toThrow(
+      /generateEmailDigest is not available in the self-hosted client/,
+    );
+  });
+});
 
-    const digest = await generateEmailDigest({
-      period: "today",
-      offline: true,
-      now: new Date("2026-06-18T12:00:00.000Z"),
-      db: getDatabase(),
+describe("loadEmailDigest", () => {
+  it("returns the latest server-generated digest from the /v1 email-digests resource", async () => {
+    await stub.seed({
+      "email-digests": [
+        digestRow({ id: "digest-old", completed_at: "2026-06-18T09:00:00.000Z" }),
+        digestRow({ id: "digest-new", completed_at: "2026-06-18T12:00:00.000Z" }),
+      ],
     });
 
-    expect(digest.provider).toBe("local");
-    expect(digest.message_count).toBe(2);
-    expect(digest.summary).toContain("2 inbound messages");
-    expect(digest.important_email_ids).toHaveLength(1);
-    expect(digest.label_counts.important).toBe(1);
-    expect(getLatestEmailDigest("today", getDatabase())?.id).toBe(digest.id);
-
-    const loaded = await loadEmailDigest({ period: "today", offline: true, db: getDatabase() });
-    expect(loaded.id).toBe(digest.id);
+    const loaded = await loadEmailDigest("today");
+    expect(loaded.id).toBe("digest-new");
+    expect(loaded.provider).toBe("local");
+    expect(loaded.message_count).toBe(2);
+    expect(loaded.important_email_ids).toEqual(["email-1"]);
+    expect(loaded.label_counts.important).toBe(1);
   });
 
-  it("fresh generation remains deterministic and local", async () => {
-    const email = seedInbound("Board meeting", "2026-06-18T10:00:00.000Z", ["important"]);
-
-    const digest = await generateEmailDigest({
-      period: "today",
-      now: new Date("2026-06-18T12:00:00.000Z"),
-      db: getDatabase(),
+  it("ignores non-ok digests and digests for other periods", async () => {
+    await stub.seed({
+      "email-digests": [
+        digestRow({ id: "digest-error", status: "error" }),
+        digestRow({ id: "digest-month", period: "month" }),
+      ],
     });
 
-    expect(digest.provider).toBe("local");
-    expect(digest.model).toBe("local-emails-digest");
-    expect(digest.summary).toContain("1 inbound message");
-    expect(digest.important_email_ids).toEqual([email.id]);
+    await expect(loadEmailDigest("today")).rejects.toThrow(
+      /generateEmailDigest is not available in the self-hosted client/,
+    );
+  });
+
+  it("falls through to (server-side) generation when no cached digest exists", async () => {
+    await expect(loadEmailDigest("today")).rejects.toThrow(
+      /generateEmailDigest is not available in the self-hosted client/,
+    );
+  });
+
+  it("bypasses the cache and delegates to generation when fresh is requested", async () => {
+    await stub.seed({ "email-digests": [digestRow()] });
+    await expect(loadEmailDigest({ period: "today", fresh: true })).rejects.toThrow(
+      /generateEmailDigest is not available in the self-hosted client/,
+    );
+  });
+});
+
+describe("formatEmailDigest (pure)", () => {
+  it("renders a readable digest", () => {
+    const out = formatEmailDigest({
+      id: "d1",
+      period: "today",
+      since: "2026-06-18T00:00:00.000Z",
+      until: "2026-06-18T12:00:00.000Z",
+      provider: "local",
+      model: "local-emails-digest",
+      status: "ok",
+      message_count: 2,
+      summary: "2 inbound messages",
+      highlights: ["Important contract"],
+      action_items: ["Reply to legal"],
+      important_email_ids: ["email-1"],
+      label_counts: { important: 1 },
+      error: null,
+      started_at: "2026-06-18T12:00:00.000Z",
+      completed_at: "2026-06-18T12:00:00.000Z",
+      created_at: "2026-06-18T12:00:00.000Z",
+    });
+    expect(out).toContain("Today digest");
+    expect(out).toContain("2 inbound messages");
+    expect(out).toContain("Important contract");
+    expect(out).toContain("Reply to legal");
+    expect(out).toContain("email-1");
   });
 });

@@ -1,26 +1,31 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { getDatabase, closeDatabase, resetDatabase } from "../db/database.js";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { startV1Stub, type V1Stub } from "../test-support/v1-stub.js";
 import { createProvider } from "../db/providers.js";
-import { getSandboxCount, listSandboxEmails } from "../db/sandbox.js";
+import { listSandboxEmails } from "../db/sandbox.js";
 import { SandboxAdapter } from "./sandbox.js";
+
+// SandboxAdapter.sendEmail and .getStats route through src/db/sandbox.ts, which
+// persists to the `sandbox-emails` /v1 resource; the remaining adapter methods
+// are pure no-ops. Everything is exercised against the out-of-process /v1 stub.
+let stub: V1Stub;
+
+beforeAll(async () => {
+  stub = await startV1Stub();
+});
+afterAll(() => stub.stop());
+
+beforeEach(async () => {
+  await stub.reset();
+  stub.applyEnv();
+});
+afterEach(() => stub.clearEnv());
 
 function makeSandboxProvider() {
   return createProvider({ name: "Sandbox Test", type: "sandbox" });
 }
 
-beforeEach(() => {
-  process.env["EMAILS_DB_PATH"] = ":memory:";
-  resetDatabase();
-  getDatabase(); // initialize schema
-});
-
-afterEach(() => {
-  closeDatabase();
-  delete process.env["EMAILS_DB_PATH"];
-});
-
 describe("SandboxAdapter.sendEmail", () => {
-  it("stores the email locally and returns its id", async () => {
+  it("stores the email over /v1 and returns its id", async () => {
     const provider = makeSandboxProvider();
     const adapter = new SandboxAdapter(provider);
 
@@ -33,8 +38,7 @@ describe("SandboxAdapter.sendEmail", () => {
 
     expect(id).toHaveLength(36);
 
-    const db = getDatabase();
-    const stored = listSandboxEmails(provider.id, 10, db);
+    const stored = listSandboxEmails(provider.id, 10);
     expect(stored.length).toBe(1);
     expect(stored[0]!.id).toBe(id);
     expect(stored[0]!.subject).toBe("Test subject");
@@ -57,8 +61,7 @@ describe("SandboxAdapter.sendEmail", () => {
       html: "<p>Hello</p>",
     });
 
-    const db = getDatabase();
-    const stored = listSandboxEmails(provider.id, 10, db);
+    const stored = listSandboxEmails(provider.id, 10);
     expect(stored[0]!.to_addresses).toEqual(["a@example.com", "b@example.com"]);
     expect(stored[0]!.cc_addresses).toEqual(["cc@example.com"]);
     expect(stored[0]!.bcc_addresses).toEqual(["bcc@example.com"]);
@@ -77,8 +80,7 @@ describe("SandboxAdapter.sendEmail", () => {
       reply_to: "reply@example.com",
     });
 
-    const db = getDatabase();
-    const stored = listSandboxEmails(provider.id, 10, db);
+    const stored = listSandboxEmails(provider.id, 10);
     expect(stored[0]!.reply_to).toBe("reply@example.com");
   });
 });
