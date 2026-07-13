@@ -404,7 +404,9 @@ describe("inbox label", () => {
     expect(out).toContain("label");
 
     const row = (await stub.list("messages")).find((m) => m["id"] === email.id);
-    expect(row?.["add_label"]).toBe("urgent");
+    // The server (and now the stub) rebuild the labels column from add_label —
+    // a raw add_label field is not persisted, the label lands in `labels`.
+    expect(row?.["labels"]).toContain("urgent");
   });
 });
 

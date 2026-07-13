@@ -619,15 +619,10 @@ function mutateInboundLabel(id: string, label: string, remove: boolean): Record<
   const store = messagesStore();
   const current = store.get(id);
   if (!current) throw new Error(`Inbound email not found: ${id}`);
-  const labels = v1Labels(current);
-  const normalized = normalizeInboundLabel(label);
-  const sameLabel = (value: string) => normalizeInboundLabel(value) === normalized;
-  const next = remove
-    ? labels.filter((l) => !sameLabel(l))
-    : labels.some(sameLabel)
-      ? labels
-      : [...labels, label];
-  return store.update(id, { labels: next });
+  // The self-hosted server rebuilds the labels column from add_label/remove_label
+  // (a raw `labels` array in a PATCH is IGNORED by updateMessageStatus), so send
+  // the delta — never the recomputed array — or the write is a silent no-op.
+  return store.update(id, remove ? { remove_label: label } : { add_label: label });
 }
 
 /** Add a label (no-op if already present). */

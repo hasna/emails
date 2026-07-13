@@ -287,7 +287,21 @@ const server = Bun.serve({
       const e = rows.find(function (r) { return String(r.id) === id; });
       if (!e) return json({ error: "not found" }, 404);
       const patch = await req.json().catch(function () { return {}; });
-      Object.assign(e, patch, { updated_at: new Date().toISOString() });
+      if (resource === "messages") {
+        // Mirror the real server updateMessageStatus: a raw labels array is
+        // IGNORED; the labels column is rebuilt from add_label/remove_label and
+        // the archived flag (guards the client label-write contract in tests).
+        var labels = Array.isArray(e.labels) ? e.labels.slice() : [];
+        var norm = function (v) { return String(v).trim().toLowerCase(); };
+        if (typeof patch.add_label === "string" && !labels.some(function (l) { return norm(l) === norm(patch.add_label); })) labels.push(patch.add_label);
+        if (typeof patch.remove_label === "string") labels = labels.filter(function (l) { return norm(l) !== norm(patch.remove_label); });
+        if (typeof patch.archived === "boolean") { labels = labels.filter(function (l) { return norm(l) !== "archived"; }); if (patch.archived) labels.push("archived"); }
+        var rest = Object.assign({}, patch);
+        delete rest.add_label; delete rest.remove_label; delete rest.labels;
+        Object.assign(e, rest, { labels: labels, updated_at: new Date().toISOString() });
+      } else {
+        Object.assign(e, patch, { updated_at: new Date().toISOString() });
+      }
       const wrap = {};
       wrap[singular(resource)] = e;
       return json(wrap);
