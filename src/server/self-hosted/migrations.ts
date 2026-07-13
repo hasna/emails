@@ -1341,6 +1341,146 @@ const TENANCY_IDENTITY_AND_BACKFILL = defineMigration(
   END;
   $fn$;
 
+  -- Collapse pre-existing DUPLICATE DATA on a soon-to-be composite-unique target
+  -- BEFORE its UNIQUE INDEX is built. Backfilling every row to one default tenant
+  -- turns any OLD global-unique collision into a WITHIN-tenant collision, so a DB
+  -- that carries duplicate data (prod does, on a subset of the 12 targets) would
+  -- fault the CREATE UNIQUE INDEX. This helper is generic over ALL targets (future
+  -- dup data is handled the same way), a STRICT no-op when a group has no dups, and
+  -- safe to re-run (after it runs once there are no dups left to find).
+  --
+  -- Survivor rule (deterministic + stable): within each (tenant_id, <natural key>)
+  -- group keep the row with (a) the MOST id-based dependents, then (b) the most
+  -- recent updated_at, then created_at, then (c) the lexicographically-lowest id.
+  -- Reparenting only ever MOVES a loser's dependents onto the survivor (the max),
+  -- so the survivor stays the max — the choice is invariant under the reparent.
+  --
+  -- refs describes the id-based reference graph to reparent, discovered from the
+  -- schema. These are LOOSE TEXT columns (the prod FKs were dropped in 0009 and a
+  -- fresh DB never declared them), so pg_constraint cannot be trusted to enumerate
+  -- them; the caller passes each edge explicitly as 'child_table:child_col', or, for
+  -- the POLYMORPHIC provisioning_events(entity_type, entity_id) audit rows, as
+  -- 'child_table:child_col:entity_type'. Messages reference addresses by email
+  -- STRING (from_addr/to_addrs), not id, so they are intentionally NOT reparented.
+  CREATE TEMP TABLE IF NOT EXISTS emails_dedup_plan (
+    parent      text NOT NULL,
+    loser_id    text NOT NULL,
+    survivor_id text NOT NULL
+  );
+
+  CREATE OR REPLACE FUNCTION pg_temp.emails_dedup(tbl text, natural_cols text[], refs text[])
+  RETURNS void
+  LANGUAGE plpgsql
+  AS $fn$
+  DECLARE
+    partition_sql text := 't.tenant_id';
+    dep_sql       text := '0';
+    ts_order      text := '';
+    spec          text;
+    parts         text[];
+    child_tbl     text;
+    child_col     text;
+    etype         text;
+  BEGIN
+    IF to_regclass('public.' || tbl) IS NULL THEN RETURN; END IF;
+
+    -- partition key = tenant_id + the natural-key columns
+    SELECT partition_sql || COALESCE(string_agg(', t.' || quote_ident(c), '' ORDER BY ord), '')
+      INTO partition_sql
+      FROM unnest(natural_cols) WITH ORDINALITY AS u(c, ord);
+
+    -- dependent-count expression across the reference graph (skip absent tables/cols)
+    FOREACH spec IN ARRAY refs LOOP
+      parts     := string_to_array(spec, ':');
+      child_tbl := parts[1];
+      child_col := parts[2];
+      etype     := parts[3];  -- NULL for a direct id ref; set for a polymorphic ref
+      IF to_regclass('public.' || child_tbl) IS NULL THEN CONTINUE; END IF;
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_attribute
+        WHERE attrelid = ('public.' || child_tbl)::regclass
+          AND attname = child_col AND attnum > 0 AND NOT attisdropped
+      ) THEN CONTINUE; END IF;
+      IF etype IS NULL THEN
+        dep_sql := dep_sql || format(
+          ' + COALESCE((SELECT count(*) FROM public.%I d WHERE d.%I = s.id), 0)',
+          child_tbl, child_col);
+      ELSE
+        dep_sql := dep_sql || format(
+          ' + COALESCE((SELECT count(*) FROM public.%I d WHERE d.entity_type = %L AND d.%I = s.id), 0)',
+          child_tbl, etype, child_col);
+      END IF;
+    END LOOP;
+
+    -- recency tiebreaks, only for timestamp columns that actually exist (drift-safe)
+    IF EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = ('public.' || tbl)::regclass
+                 AND attname = 'updated_at' AND attnum > 0 AND NOT attisdropped) THEN
+      ts_order := ts_order || 't.updated_at DESC NULLS LAST, ';
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = ('public.' || tbl)::regclass
+                 AND attname = 'created_at' AND attnum > 0 AND NOT attisdropped) THEN
+      ts_order := ts_order || 't.created_at DESC NULLS LAST, ';
+    END IF;
+
+    -- stage the loser -> survivor plan for this table (per-parent idempotent).
+    -- _dep is materialised in an inner select so the window ORDER BY is a plain
+    -- column reference; first_value over the same window yields the group survivor.
+    DELETE FROM pg_temp.emails_dedup_plan WHERE parent = tbl;
+    EXECUTE format($q$
+      INSERT INTO pg_temp.emails_dedup_plan (parent, loser_id, survivor_id)
+      SELECT %L, ranked.id, ranked.survivor
+      FROM (
+        SELECT t.id AS id,
+               first_value(t.id) OVER w AS survivor,
+               row_number()      OVER w AS rn
+        FROM (SELECT s.*, (%s) AS _dep FROM public.%I s) t
+        WINDOW w AS (PARTITION BY %s ORDER BY t._dep DESC, %s t.id ASC)
+      ) ranked
+      WHERE ranked.rn > 1 AND ranked.id IS NOT NULL AND ranked.survivor IS NOT NULL
+    $q$, tbl, dep_sql, tbl, partition_sql, ts_order);
+
+    IF NOT EXISTS (SELECT 1 FROM pg_temp.emails_dedup_plan WHERE parent = tbl) THEN
+      RETURN;  -- no duplicates: strict no-op
+    END IF;
+
+    -- reparent every id-based reference from the losers onto the survivor FIRST
+    FOREACH spec IN ARRAY refs LOOP
+      parts     := string_to_array(spec, ':');
+      child_tbl := parts[1];
+      child_col := parts[2];
+      etype     := parts[3];
+      IF to_regclass('public.' || child_tbl) IS NULL THEN CONTINUE; END IF;
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_attribute
+        WHERE attrelid = ('public.' || child_tbl)::regclass
+          AND attname = child_col AND attnum > 0 AND NOT attisdropped
+      ) THEN CONTINUE; END IF;
+      IF etype IS NULL THEN
+        EXECUTE format($q$
+          UPDATE public.%I d SET %I = p.survivor_id
+          FROM pg_temp.emails_dedup_plan p
+          WHERE p.parent = %L AND d.%I = p.loser_id
+        $q$, child_tbl, child_col, tbl, child_col);
+      ELSE
+        EXECUTE format($q$
+          UPDATE public.%I d SET %I = p.survivor_id
+          FROM pg_temp.emails_dedup_plan p
+          WHERE p.parent = %L AND d.entity_type = %L AND d.%I = p.loser_id
+        $q$, child_tbl, child_col, tbl, etype, child_col);
+      END IF;
+    END LOOP;
+
+    -- then delete the losers, now that nothing id-references them
+    EXECUTE format($q$
+      DELETE FROM public.%I t
+      USING pg_temp.emails_dedup_plan p
+      WHERE p.parent = %L AND t.id = p.loser_id
+    $q$, tbl, tbl);
+
+    DELETE FROM pg_temp.emails_dedup_plan WHERE parent = tbl;
+  END;
+  $fn$;
+
   -- ---- 1. identity + resolution tables (NOT tenant-scoped; §3.1) -------------
   -- These are read BEFORE a tenant is known (they resolve it), and they hold
   -- secrets (password_hash / token_hash). They are deliberately absent from
@@ -1507,36 +1647,58 @@ const TENANCY_IDENTITY_AND_BACKFILL = defineMigration(
   -- domains/addresses: the drifted PROD schema carries the old unique on
   -- (provider_id, <col>), NOT the fresh (<col>) — a different COLUMN SET, not just
   -- a different name — so drop BOTH variants.
+  -- Each swap: drop the old global unique (discovered by column set), DEDUP any
+  -- pre-existing (tenant_id, <natural key>) duplicate data (reparenting id-based
+  -- references onto the deterministic survivor first), then add the tenant-scoped
+  -- unique. The dedup runs BEFORE the CREATE UNIQUE INDEX and is a no-op when clean.
+  --
+  -- ORDER MATTERS across tables: a parent's dedup reparents CHILD *_id columns, and
+  -- that reparent can itself create a within-tenant duplicate in a child that is
+  -- ALSO a composite target (contact_groups -> group_members.group_id), so the
+  -- child must be deduped AFTER its parent. domains is deduped before addresses (it
+  -- reparents addresses.domain_id); contact_groups before group_members.
   SELECT pg_temp.emails_drop_unique('domains', ARRAY['domain']);
   SELECT pg_temp.emails_drop_unique('domains', ARRAY['provider_id','domain']);
+  SELECT pg_temp.emails_dedup('domains', ARRAY['domain'],
+    ARRAY['addresses:domain_id', 'provisioning_events:entity_id:domain']);
   SELECT pg_temp.emails_add_unique('domains', 'domains_tenant_domain_uidx', 'tenant_id, domain');
 
   SELECT pg_temp.emails_drop_unique('addresses', ARRAY['email']);
   SELECT pg_temp.emails_drop_unique('addresses', ARRAY['provider_id','email']);
+  SELECT pg_temp.emails_dedup('addresses', ARRAY['email'],
+    ARRAY['address_ownership_events:address_id', 'provisioning_events:entity_id:address']);
   SELECT pg_temp.emails_add_unique('addresses', 'addresses_tenant_email_uidx', 'tenant_id, email');
 
   SELECT pg_temp.emails_drop_unique('contacts', ARRAY['email']);
+  SELECT pg_temp.emails_dedup('contacts', ARRAY['email'], ARRAY[]::text[]);
   SELECT pg_temp.emails_add_unique('contacts', 'contacts_tenant_email_uidx', 'tenant_id, email');
 
   SELECT pg_temp.emails_drop_unique('templates', ARRAY['name']);
+  SELECT pg_temp.emails_dedup('templates', ARRAY['name'], ARRAY[]::text[]);
   SELECT pg_temp.emails_add_unique('templates', 'templates_tenant_name_uidx', 'tenant_id, name');
 
   SELECT pg_temp.emails_drop_unique('contact_groups', ARRAY['name']);
+  SELECT pg_temp.emails_dedup('contact_groups', ARRAY['name'], ARRAY['group_members:group_id']);
   SELECT pg_temp.emails_add_unique('contact_groups', 'contact_groups_tenant_name_uidx', 'tenant_id, name');
 
   SELECT pg_temp.emails_drop_unique('warming_schedules', ARRAY['domain']);
+  SELECT pg_temp.emails_dedup('warming_schedules', ARRAY['domain'], ARRAY[]::text[]);
   SELECT pg_temp.emails_add_unique('warming_schedules', 'warming_schedules_tenant_domain_uidx', 'tenant_id, domain');
 
   SELECT pg_temp.emails_drop_unique('aliases', ARRAY['domain','local_part']);
+  SELECT pg_temp.emails_dedup('aliases', ARRAY['domain','local_part'], ARRAY[]::text[]);
   SELECT pg_temp.emails_add_unique('aliases', 'aliases_tenant_domain_local_part_uidx', 'tenant_id, domain, local_part');
 
   SELECT pg_temp.emails_drop_unique('forwarding_rules', ARRAY['source_address','target_address','mode']);
+  SELECT pg_temp.emails_dedup('forwarding_rules', ARRAY['source_address','target_address','mode'], ARRAY[]::text[]);
   SELECT pg_temp.emails_add_unique('forwarding_rules', 'forwarding_rules_tenant_route_uidx', 'tenant_id, source_address, target_address, mode');
 
   SELECT pg_temp.emails_drop_unique('email_agent_runs', ARRAY['agent_key','inbound_email_id']);
+  SELECT pg_temp.emails_dedup('email_agent_runs', ARRAY['agent_key','inbound_email_id'], ARRAY[]::text[]);
   SELECT pg_temp.emails_add_unique('email_agent_runs', 'email_agent_runs_tenant_agent_inbound_uidx', 'tenant_id, agent_key, inbound_email_id');
 
   SELECT pg_temp.emails_drop_unique('group_members', ARRAY['group_id','email']);
+  SELECT pg_temp.emails_dedup('group_members', ARRAY['group_id','email'], ARRAY[]::text[]);
   SELECT pg_temp.emails_add_unique('group_members', 'group_members_tenant_group_email_uidx', 'tenant_id, group_id, email');
 
   -- messages: ADD the tenant-scoped partial uniques, but RETAIN the legacy
@@ -1554,13 +1716,11 @@ const TENANCY_IDENTITY_AND_BACKFILL = defineMigration(
   -- resolves; 0013 drops it when per-tenant re-seed lands.
   SELECT pg_temp.emails_set_pk('email_agent_settings', ARRAY['tenant_id','agent_key']);
 
-  -- webhook_receipts (§3.3 M2): no unique existed; dedupe pre-existing rows first,
-  -- keeping the newest per (tenant_id, provider, event_id), then add the unique.
-  DELETE FROM webhook_receipts a USING webhook_receipts b
-    WHERE a.tenant_id = b.tenant_id
-      AND a.provider = b.provider
-      AND a.event_id = b.event_id
-      AND a.ctid < b.ctid;
+  -- webhook_receipts (§3.3 M2): no unique existed, so pre-existing rows may already
+  -- duplicate (tenant_id, provider, event_id). Dedup via the same generic helper as
+  -- every other target (nothing id-references a receipt, so there is no reference
+  -- graph to reparent — it keeps the most-recent survivor), then add the unique.
+  SELECT pg_temp.emails_dedup('webhook_receipts', ARRAY['provider','event_id'], ARRAY[]::text[]);
   SELECT pg_temp.emails_add_unique('webhook_receipts', 'webhook_receipts_tenant_provider_event_uidx', 'tenant_id, provider, event_id');
 
   -- ---- 5. backfill credential/resolution maps to the default tenant ----------

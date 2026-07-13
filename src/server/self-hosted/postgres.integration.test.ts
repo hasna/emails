@@ -890,4 +890,202 @@ describe("self-hosted Postgres integration", () => {
     expect(await columnType("domains", "tenant_id")).toBe("uuid");
     expect((await primaryKeyColumns("email_agent_settings")).sort()).toEqual(["agent_key", "tenant_id"]);
   });
+
+  // ---- 0012 dedup: pre-existing DUPLICATE DATA on a composite target ----------
+  // Prod carries duplicate rows on a subset of the 12 composite-unique targets
+  // (two pre-tenancy domains/addresses that coexisted under the old
+  // (provider_id, <col>) unique but collide once every row is backfilled to ONE
+  // default tenant). The naive backfill + CREATE UNIQUE INDEX would fault. This
+  // fixture seeds representative duplicates — a domain dup and an address dup, each
+  // with id-based dependents to reparent — runs 0012, and asserts the deterministic
+  // survivor is kept, dependents are reparented (no orphaned references), losers are
+  // deleted, the composite unique is built, unrelated data is untouched, and a
+  // re-run of the whole 0012 body is a clean no-op.
+  it.skipIf(!client)("0012 dedups pre-existing duplicate data (deterministic survivor + FK reparent) before building the composite uniques", async () => {
+    await resetPublicSchema();
+
+    // Drifted prod-shaped base: domains/addresses carry the (provider_id, <col>)
+    // unique, which is exactly what let the duplicate rows coexist pre-tenancy.
+    await client!.execute(`
+      CREATE TABLE providers (id TEXT PRIMARY KEY);
+      CREATE TABLE domains (
+        id TEXT PRIMARY KEY,
+        provider_id TEXT NOT NULL REFERENCES providers(id),
+        domain TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        UNIQUE (provider_id, domain)
+      );
+      CREATE TABLE addresses (
+        id TEXT PRIMARY KEY,
+        provider_id TEXT NOT NULL REFERENCES providers(id),
+        email TEXT NOT NULL,
+        domain TEXT,
+        status TEXT NOT NULL DEFAULT 'active',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        UNIQUE (provider_id, email)
+      );
+      CREATE TABLE api_keys (
+        kid text PRIMARY KEY, app text NOT NULL, agent text, scopes jsonb NOT NULL,
+        token_hash text NOT NULL, issued_at timestamptz NOT NULL, expires_at timestamptz,
+        revoked_at timestamptz, revoked_reason text, last_used_at timestamptz,
+        created_by text, created_at timestamptz NOT NULL DEFAULT now()
+      );
+    `);
+
+    // Phase A: migrate everything EXCEPT 0012 (reconciles drift + creates the
+    // dependent tables: provisioning_events, address_ownership_events, messages).
+    const throughEleven = emailsSelfHostedMigrations().filter(
+      (m) => m.id !== "0012_emails_tenancy_identity_and_backfill",
+    );
+    await new MigrationLedger(client!, throughEleven).migrate();
+
+    // Seed the duplicate data + id-based dependents. tenant_id does not exist yet
+    // (0012 adds it), so every row backfills to the default tenant, turning the
+    // pre-tenancy (provider_id, <col>) coexistence into a within-tenant collision.
+    await client!.execute(`
+      INSERT INTO providers (id) VALUES ('p1'), ('p2'), ('p3');
+
+      -- DOMAIN dup: 'dup.example' x2. Survivor 'dom-keep' has the MOST dependents
+      -- (3 addresses); loser 'dom-orphan' is (near-)orphan but deliberately carries
+      -- ONE stray address (addresses.domain_id) + ONE provisioning audit row
+      -- (polymorphic provisioning_events.entity_id) that MUST be reparented, and is
+      -- the MORE RECENT row — so keeping 'dom-keep' proves dependent-count beats
+      -- recency. Different provider_id lets them coexist under the drifted unique.
+      INSERT INTO domains (id, provider_id, domain, status, updated_at) VALUES
+        ('dom-keep',   'p1', 'dup.example', 'ready',        '2026-06-22T00:00:00Z'),
+        ('dom-orphan', 'p2', 'dup.example', 'inbound_ready','2026-12-01T00:00:00Z'),
+        ('dom-solo',   'p1', 'solo.example','ready',        '2026-05-01T00:00:00Z');
+
+      -- ADDRESS dup: 'dupe@dup.example' x3 (survivor + two losers), all under
+      -- 'dom-keep'. Survivor 'addr-keep' has the MOST dependents (3 ownership
+      -- events); loser 'addr-l1' is the MOST RECENT and has 2 dependents (1
+      -- ownership + 1 provisioning-address) that must be reparented; loser
+      -- 'addr-l2' has none. Distinct provider_id lets them coexist pre-tenancy.
+      -- 'addr-od' is 'dom-orphan''s stray dependent; 'addr-solo' is unrelated.
+      INSERT INTO addresses (id, provider_id, email, domain_id, updated_at) VALUES
+        ('addr-keep', 'p1', 'dupe@dup.example', 'dom-keep',   '2026-03-01T00:00:00Z'),
+        ('addr-l1',   'p2', 'dupe@dup.example', 'dom-keep',   '2026-06-01T00:00:00Z'),
+        ('addr-l2',   'p3', 'dupe@dup.example', 'dom-keep',   '2026-01-01T00:00:00Z'),
+        ('addr-od',   'p1', 'orphan-dep@dup.example', 'dom-orphan', '2026-02-01T00:00:00Z'),
+        ('addr-solo', 'p1', 'solo@solo.example', 'dom-solo',  '2026-05-01T00:00:00Z');
+
+      -- id-based dependents that must survive the collapse by moving to the survivor.
+      INSERT INTO address_ownership_events (id, address_id, action) VALUES
+        ('oe-k1', 'addr-keep', 'assign'),
+        ('oe-k2', 'addr-keep', 'transfer'),
+        ('oe-k3', 'addr-keep', 'transfer'),
+        ('oe-l1', 'addr-l1',   'assign');
+      INSERT INTO provisioning_events (id, entity_type, entity_id, to_state) VALUES
+        ('pe-dom', 'domain',  'dom-orphan', 'inbound_ready'),
+        ('pe-adr', 'address', 'addr-l1',    'active');
+
+      -- Messages reference addresses by EMAIL STRING (not id): must be preserved
+      -- verbatim (never reparented, never deleted) across the dedup.
+      INSERT INTO messages (id, from_addr, direction, source_id, send_state) VALUES
+        ('msg-dup', 'dupe@dup.example', 'inbound', 'src-dup', 'none');
+
+      -- webhook_receipts (the 12th target): a (provider, event_id) dup with NO id
+      -- dependents — exercises the generic helper's empty-reference-graph path,
+      -- keeping the most-recently-updated survivor.
+      INSERT INTO webhook_receipts (id, provider, event_id, updated_at) VALUES
+        ('wr-keep', 'ses', 'evt-1', '2026-06-01T00:00:00Z'),
+        ('wr-drop', 'ses', 'evt-1', '2026-01-01T00:00:00Z');
+
+      INSERT INTO api_keys (kid, app, scopes, token_hash, issued_at)
+        VALUES ('kid-d', 'emails', '["emails:*"]'::jsonb, 'tok-d', now());
+    `);
+
+    // Baseline row counts to prove NO unrelated data is lost.
+    const countOf = async (sql: string): Promise<number> =>
+      (await client!.get<{ n: number }>(`SELECT count(*)::int AS n FROM ${sql}`))?.n ?? 0;
+    const beforeMessages = await countOf("messages");
+    const beforeOwnership = await countOf("address_ownership_events");
+    const beforeProvisioning = await countOf("provisioning_events");
+
+    // Phase B: run 0012.
+    const result = await new MigrationLedger(client!, emailsSelfHostedMigrations()).migrate();
+    expect(result.applied.map((r) => r.id)).toContain("0012_emails_tenancy_identity_and_backfill");
+
+    // ---- survivor chosen per the rule (dependent-count primary) --------------
+    const domRows = await client!.many<{ id: string }>(
+      `SELECT id FROM domains WHERE domain = 'dup.example'`);
+    expect(domRows.map((r) => r.id)).toEqual(["dom-keep"]); // loser deleted, survivor kept
+    const addrRows = await client!.many<{ id: string }>(
+      `SELECT id FROM addresses WHERE email = 'dupe@dup.example'`);
+    expect(addrRows.map((r) => r.id)).toEqual(["addr-keep"]);
+
+    // losers gone
+    for (const gone of ["dom-orphan"]) {
+      expect(await countOf(`domains WHERE id = '${gone}'`)).toBe(0);
+    }
+    for (const gone of ["addr-l1", "addr-l2"]) {
+      expect(await countOf(`addresses WHERE id = '${gone}'`)).toBe(0);
+    }
+
+    // ---- dependents reparented onto the survivor (no orphaned references) -----
+    // domains: the loser's stray address + provisioning audit row moved to the survivor.
+    expect((await client!.get<{ domain_id: string }>(
+      `SELECT domain_id FROM addresses WHERE id = 'addr-od'`))?.domain_id).toBe("dom-keep");
+    expect(await countOf(
+      `addresses WHERE domain_id IS NOT NULL AND domain_id NOT IN (SELECT id FROM domains)`)).toBe(0);
+    expect((await client!.get<{ entity_id: string }>(
+      `SELECT entity_id FROM provisioning_events WHERE id = 'pe-dom'`))?.entity_id).toBe("dom-keep");
+    expect(await countOf(
+      `provisioning_events WHERE entity_type = 'domain' AND entity_id NOT IN (SELECT id FROM domains)`)).toBe(0);
+
+    // addresses: the loser's ownership event + provisioning-address row moved over.
+    expect((await client!.get<{ address_id: string }>(
+      `SELECT address_id FROM address_ownership_events WHERE id = 'oe-l1'`))?.address_id).toBe("addr-keep");
+    expect(await countOf(`address_ownership_events WHERE address_id = 'addr-keep'`)).toBe(4);
+    expect(await countOf(
+      `address_ownership_events WHERE address_id NOT IN (SELECT id FROM addresses)`)).toBe(0);
+    expect((await client!.get<{ entity_id: string }>(
+      `SELECT entity_id FROM provisioning_events WHERE id = 'pe-adr'`))?.entity_id).toBe("addr-keep");
+    expect(await countOf(
+      `provisioning_events WHERE entity_type = 'address' AND entity_id NOT IN (SELECT id FROM addresses)`)).toBe(0);
+
+    // webhook_receipts (12th target, no reference graph): most-recent survivor kept.
+    expect((await client!.many<{ id: string }>(
+      `SELECT id FROM webhook_receipts WHERE provider = 'ses' AND event_id = 'evt-1'`))
+      .map((r) => r.id)).toEqual(["wr-keep"]);
+
+    // ---- composite unique indexes were created, and enforce within-tenant -----
+    expect(await indexExists("domains_tenant_domain_uidx")).toBe(true);
+    expect(await indexExists("addresses_tenant_email_uidx")).toBe(true);
+    expect(await indexExists("webhook_receipts_tenant_provider_event_uidx")).toBe(true);
+    let dupBlocked = false;
+    try {
+      await client!.execute(
+        `INSERT INTO domains (id, provider_id, domain, tenant_id) VALUES ('dom-x', 'p1', 'dup.example', '${DEFAULT_TENANT_ID}')`);
+    } catch { dupBlocked = true; }
+    expect(dupBlocked, "duplicate domain within tenant must be blocked post-dedup").toBe(true);
+
+    // ---- no unrelated data lost; string-based message ref preserved verbatim ---
+    expect(await countOf("domains WHERE id = 'dom-solo'")).toBe(1);
+    expect(await countOf("addresses WHERE id = 'addr-solo'")).toBe(1);
+    expect(await countOf("messages")).toBe(beforeMessages); // msg-dup survives
+    const msg = await client!.get<{ from_addr: string }>(
+      `SELECT from_addr FROM messages WHERE id = 'msg-dup'`);
+    expect(msg?.from_addr).toBe("dupe@dup.example"); // NOT reparented (string ref)
+    // Every dependent row is preserved (reparented, never dropped).
+    expect(await countOf("address_ownership_events")).toBe(beforeOwnership);
+    expect(await countOf("provisioning_events")).toBe(beforeProvisioning);
+
+    // ---- re-running the ENTIRE 0012 body is a clean, data-preserving no-op -----
+    const mig0012 = emailsSelfHostedMigrations().find(
+      (m) => m.id === "0012_emails_tenancy_identity_and_backfill")!;
+    await client!.execute(mig0012.sql); // idempotent: no dups remain to collapse
+    expect((await client!.many<{ id: string }>(
+      `SELECT id FROM domains WHERE domain = 'dup.example'`)).map((r) => r.id)).toEqual(["dom-keep"]);
+    expect((await client!.many<{ id: string }>(
+      `SELECT id FROM addresses WHERE email = 'dupe@dup.example'`)).map((r) => r.id)).toEqual(["addr-keep"]);
+    expect(await countOf(`address_ownership_events WHERE address_id = 'addr-keep'`)).toBe(4);
+    expect(await countOf("messages")).toBe(beforeMessages);
+    // A full ledger re-run remains a no-op too.
+    const rerun = await new MigrationLedger(client!, emailsSelfHostedMigrations()).migrate();
+    expect(rerun.plan.filter((p) => p.state === "pending")).toHaveLength(0);
+  });
 });
