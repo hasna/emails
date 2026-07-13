@@ -111,6 +111,15 @@ export function resetSelfHostedConfigCache(): void {
   _cachedConfig = null;
 }
 
+/**
+ * Compatibility shim. This client is self-hosted-ONLY, so this is always true.
+ * Retained only so external modules (e.g. the self-hosted server env/migrate)
+ * that still reference it keep compiling; new client code must not branch on it.
+ */
+export function isSelfHostedMode(): boolean {
+  return true;
+}
+
 interface CurlResult {
   status: number;
   body: string;
