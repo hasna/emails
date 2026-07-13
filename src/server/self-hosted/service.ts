@@ -11,7 +11,7 @@ import type { ApiKeyVerifier, ApiKeyPrincipal } from "@hasna/contracts/auth";
 import { createHash } from "node:crypto";
 import { migrationAcceptsChecksum, type TypedQueryClient, type Migration } from "../../storage-kit/index.js";
 import { checkHealth } from "../../storage-kit/index.js";
-import { EmailsSelfHostedStore, IdempotencyKeyConflictError, type MessageRecord } from "./store.js";
+import { EmailsSelfHostedStore, IdempotencyKeyConflictError, type MessageListRecord, type MessageRecord } from "./store.js";
 import { emailsSelfHostedOpenApi } from "./openapi.js";
 import { resourceSpecForPath } from "./resources.js";
 import type { SelfHostedSender } from "./sender.js";
@@ -84,6 +84,24 @@ function json(status: number, body: unknown): Response {
 function publicMessage(record: MessageRecord): Omit<MessageRecord, "idempotency_key" | "send_payload_hash"> {
   const { idempotency_key: _key, send_payload_hash: _hash, ...safe } = record;
   return safe;
+}
+
+function publicMessageListItem(record: MessageRecord | MessageListRecord): MessageListRecord {
+  const {
+    body_text: bodyText,
+    body_html: _bodyHtml,
+    idempotency_key: _key,
+    send_payload_hash: _hash,
+    snippet: providedSnippet,
+    ...safe
+  } = record as MessageRecord & { snippet?: string | null };
+  const rawSnippet = typeof providedSnippet === "string"
+    ? providedSnippet
+    : typeof bodyText === "string"
+      ? bodyText
+      : "";
+  const snippet = rawSnippet.replace(/\s+/g, " ").trim().slice(0, 500);
+  return { ...safe, snippet: snippet || null } as MessageListRecord;
 }
 
 function sendPayloadHash(value: Record<string, unknown>): string {
@@ -595,9 +613,12 @@ export async function handleSelfHostedRequest(
           offset: queryInt(url, "offset"),
           direction,
           to: url.searchParams.get("to") ?? undefined,
+          from: url.searchParams.get("from") ?? undefined,
+          subject: url.searchParams.get("subject") ?? undefined,
+          search: url.searchParams.get("search") ?? undefined,
           since: since.value,
         });
-        return json(200, { messages: messages.map(publicMessage) });
+        return json(200, { messages: messages.map(publicMessageListItem) });
       }
       if (method === "POST") {
         const auth = await authenticate(deps, req, url, write);

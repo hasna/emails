@@ -213,7 +213,7 @@ describe("Emails self-hosted service", () => {
     expect((await res!.json()).counts).toMatchObject({ inbox: 4, sent: 2, unread: 3, total: 6 });
   });
 
-  test("message list forwards direction, recipient, and since filters to the store", async () => {
+  test("message list forwards direction, recipient, search, and since filters to the store", async () => {
     const d = deps();
     let filters: unknown;
     d.store.listMessages = async (opts) => {
@@ -223,13 +223,16 @@ describe("Emails self-hosted service", () => {
     const token = mintApiKey({ app: "emails", scopes: ["emails:read"], signingSecret: SIGNING_SECRET }).token;
     const res = await handleSelfHostedRequest(
       d,
-      req("GET", "/v1/messages?direction=outbound&to=person%40example.com&since=2026-07-12T00%3A00%3A00%2B03%3A00&limit=7&offset=2", { token }),
+      req("GET", "/v1/messages?direction=outbound&to=person%40example.com&from=sender&subject=invoice&search=needle&since=2026-07-12T00%3A00%3A00%2B03%3A00&limit=7&offset=2", { token }),
     );
 
     expect(res?.status).toBe(200);
     expect(filters).toEqual({
       direction: "outbound",
       to: "person@example.com",
+      from: "sender",
+      subject: "invoice",
+      search: "needle",
       since: "2026-07-11T21:00:00.000Z",
       limit: 7,
       offset: 2,

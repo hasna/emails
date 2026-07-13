@@ -219,6 +219,32 @@ describe("Emails self-hosted inbound messages", () => {
     expect(msgs.map((m: { source_id: string }) => m.source_id)).toEqual(["newer", "older"]);
   });
 
+  test("GET /v1/messages omits full bodies while detail keeps them API-only", async () => {
+    const d = deps();
+    const created = await handleSelfHostedRequest(d, post({
+      ...INBOUND,
+      source_id: "lean-list",
+      text: `plain body ${"x".repeat(800)}`,
+      html: `<p>html body ${"x".repeat(800)}</p>`,
+    }));
+    const createdMessage = (await created!.json()).message;
+
+    const list = await handleSelfHostedRequest(d, req(d, "GET"));
+    const listed = (await list!.json()).messages[0];
+    expect(listed.body_text).toBeUndefined();
+    expect(listed.body_html).toBeUndefined();
+    expect(listed.snippet).toStartWith("plain body");
+    expect(listed.snippet.length).toBeLessThanOrEqual(500);
+
+    const detail = await handleSelfHostedRequest(d, new Request(
+      `http://svc/v1/messages/${encodeURIComponent(createdMessage.id)}`,
+      { headers: { "x-api-key": writeToken() } },
+    ));
+    const detailed = (await detail!.json()).message;
+    expect(detailed.body_text).toContain("plain body");
+    expect(detailed.body_html).toContain("html body");
+  });
+
   test("keeps attachment bytes out of message reads and serves them from the authenticated attachment route", async () => {
     const d = deps();
     const content = Buffer.from("attachment body").toString("base64");

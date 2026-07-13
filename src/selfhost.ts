@@ -7,6 +7,8 @@ export interface Domain { "id": string; "domain": string; "status": string; "pro
 
 export interface Address { "id": string; "email": string; "domain"?: string | null; "display_name"?: string | null; "status": string; "created_at": string; "updated_at": string }
 
+export interface MessageListItem { "id": string; "direction": string; "from_addr": string; "to_addrs": Array<string>; "cc_addrs"?: Array<string>; "subject"?: string | null; "snippet"?: string | null; "status": string; "provider_message_id"?: string | null; "message_id"?: string | null; "in_reply_to"?: string | null; "received_at"?: string | null; "is_read"?: boolean; "is_starred"?: boolean; "labels"?: Array<string>; "headers"?: Record<string, unknown>; "attachments"?: Array<Record<string, unknown>>; "source_id"?: string | null; "send_state"?: string; "send_started_at"?: string | null; "created_at": string; "updated_at": string }
+
 export interface Message { "id": string; "direction": string; "from_addr": string; "to_addrs": Array<string>; "cc_addrs"?: Array<string>; "subject"?: string | null; "body_text"?: string | null; "body_html"?: string | null; "status": string; "provider_message_id"?: string | null; "message_id"?: string | null; "in_reply_to"?: string | null; "received_at"?: string | null; "is_read"?: boolean; "is_starred"?: boolean; "labels"?: Array<string>; "headers"?: Record<string, unknown>; "attachments"?: Array<Record<string, unknown>>; "source_id"?: string | null; "send_state"?: string; "send_started_at"?: string | null; "created_at": string; "updated_at": string }
 
 export interface EmailsSelfHostClientOptions {
@@ -173,7 +175,7 @@ export class EmailsSelfHostClient {
       });
     }
 
-    async listMessages(query?: { "limit"?: number; "offset"?: number; "direction"?: "inbound" | "outbound"; "to"?: string; "since"?: string }, init?: RequestInit): Promise<{ "messages"?: Array<Message> }> {
+    async listMessages(query?: { "limit"?: number; "offset"?: number; "direction"?: "inbound" | "outbound"; "to"?: string; "from"?: string; "subject"?: string; "search"?: string; "since"?: string }, init?: RequestInit): Promise<{ "messages"?: Array<MessageListItem> }> {
       return this.request("GET", `/v1/messages`, {
         body: undefined,
         query,

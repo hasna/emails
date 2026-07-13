@@ -65,6 +65,35 @@ const messageSchema = {
   required: ["id", "direction", "from_addr", "to_addrs", "status", "created_at", "updated_at"],
 } as const;
 
+const messageListItemSchema = {
+  type: "object",
+  properties: {
+    id: { type: "string" },
+    direction: { type: "string", description: "outbound | inbound" },
+    from_addr: { type: "string" },
+    to_addrs: { type: "array", items: { type: "string" } },
+    cc_addrs: { type: "array", items: { type: "string" } },
+    subject: { type: "string", nullable: true },
+    snippet: { type: "string", nullable: true, description: "Short text preview; full bodies are available only from GET /v1/messages/{id}." },
+    status: { type: "string" },
+    provider_message_id: { type: "string", nullable: true },
+    message_id: { type: "string", nullable: true, description: "RFC 5322 Message-ID" },
+    in_reply_to: { type: "string", nullable: true },
+    received_at: { type: "string", format: "date-time", nullable: true, description: "Original receipt time (inbound)" },
+    is_read: { type: "boolean" },
+    is_starred: { type: "boolean" },
+    labels: { type: "array", items: { type: "string" } },
+    headers: { type: "object", additionalProperties: true },
+    attachments: { type: "array", items: { type: "object", additionalProperties: true } },
+    source_id: { type: "string", nullable: true, description: "Stable upstream id used for idempotent upsert" },
+    send_state: { type: "string", description: "none | pending | sending | sent | uncertain" },
+    send_started_at: { type: "string", format: "date-time", nullable: true },
+    created_at: { type: "string", format: "date-time" },
+    updated_at: { type: "string", format: "date-time" },
+  },
+  required: ["id", "direction", "from_addr", "to_addrs", "status", "created_at", "updated_at"],
+} as const;
+
 const listParams = [
   { name: "limit", in: "query", required: false, schema: { type: "integer" } },
   { name: "offset", in: "query", required: false, schema: { type: "integer" } },
@@ -211,9 +240,12 @@ export const emailsSelfHostedOpenApi: OpenApiDocument = {
           ...listParams,
           { name: "direction", in: "query", required: false, schema: { type: "string", enum: ["inbound", "outbound"] } },
           { name: "to", in: "query", required: false, schema: { type: "string" } },
+          { name: "from", in: "query", required: false, schema: { type: "string" } },
+          { name: "subject", in: "query", required: false, schema: { type: "string" } },
+          { name: "search", in: "query", required: false, schema: { type: "string" } },
           { name: "since", in: "query", required: false, schema: { type: "string", format: "date-time" } },
         ],
-        responses: { "200": { content: { "application/json": { schema: { type: "object", properties: { messages: { type: "array", items: { $ref: "#/components/schemas/Message" } } } } } } } },
+        responses: { "200": { content: { "application/json": { schema: { type: "object", properties: { messages: { type: "array", items: { $ref: "#/components/schemas/MessageListItem" } } } } } } } },
       },
       post: {
         operationId: "createMessage",
@@ -340,6 +372,7 @@ export const emailsSelfHostedOpenApi: OpenApiDocument = {
     schemas: {
       Domain: domainSchema as never,
       Address: addressSchema as never,
+      MessageListItem: messageListItemSchema as never,
       Message: messageSchema as never,
     },
   },

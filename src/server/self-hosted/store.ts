@@ -59,6 +59,10 @@ export interface MessageRecord {
   updated_at: string;
 }
 
+export interface MessageListRecord extends Omit<MessageRecord, "body_text" | "body_html" | "idempotency_key" | "send_payload_hash"> {
+  snippet: string | null;
+}
+
 /** Fields a caller may supply when writing a message (outbound or inbound). */
 export interface MessageInput {
   from_addr: string;
@@ -93,6 +97,12 @@ const MESSAGE_COLUMNS =
   "headers, attachments, source_id, idempotency_key, send_payload_hash, send_state, send_started_at, " +
   "created_at, updated_at";
 
+const MESSAGE_LIST_COLUMNS =
+  "id, direction, from_addr, to_addrs, cc_addrs, subject, status, " +
+  "provider_message_id, message_id, in_reply_to, received_at, is_read, is_starred, labels, " +
+  "headers, attachments, source_id, send_state, send_started_at, created_at, updated_at, " +
+  "NULLIF(left(regexp_replace(COALESCE(body_text, ''), '\\s+', ' ', 'g'), 500), '') AS snippet";
+
 export class IdempotencyKeyConflictError extends Error {
   constructor() {
     super("idempotency key was already used for a different send payload");
@@ -108,6 +118,9 @@ export interface ListOptions {
 export interface ListMessagesOptions extends ListOptions {
   direction?: "inbound" | "outbound";
   to?: string;
+  from?: string;
+  subject?: string;
+  search?: string;
   since?: string;
 }
 
@@ -215,6 +228,24 @@ function mapMessageRow(row: Record<string, unknown>): MessageRecord {
     created_at: toIso(row["created_at"]) ?? "",
     updated_at: toIso(row["updated_at"]) ?? "",
   };
+}
+
+function mapMessageListRow(row: Record<string, unknown>): MessageListRecord {
+  const full = mapMessageRow({
+    ...row,
+    body_text: null,
+    body_html: null,
+    idempotency_key: null,
+    send_payload_hash: null,
+  });
+  const { body_text: _bodyText, body_html: _bodyHtml, idempotency_key: _key, send_payload_hash: _hash, ...safe } = full;
+  const rawSnippet = typeof row["snippet"] === "string"
+    ? row["snippet"]
+    : typeof row["body_text"] === "string"
+      ? row["body_text"]
+      : "";
+  const snippet = rawSnippet.replace(/\s+/g, " ").trim().slice(0, 500);
+  return { ...safe, snippet: snippet || null };
 }
 
 export class EmailsSelfHostedStore {
@@ -367,7 +398,7 @@ export class EmailsSelfHostedStore {
   //
   // Ordering is by original receipt time when known, else insertion time, so an
   // imported inbox reads in true chronological order rather than import order.
-  async listMessages(opts: ListMessagesOptions = {}): Promise<MessageRecord[]> {
+  async listMessages(opts: ListMessagesOptions = {}): Promise<MessageListRecord[]> {
     const where: string[] = [];
     const params: unknown[] = [];
     if (opts.direction === "inbound") where.push(`lower(COALESCE(direction, '')) <> 'outbound'`);
@@ -375,6 +406,18 @@ export class EmailsSelfHostedStore {
     if (opts.to?.trim()) {
       params.push(`%${opts.to.trim().toLowerCase()}%`);
       where.push(`lower(to_addrs::text) LIKE $${params.length}`);
+    }
+    if (opts.from?.trim()) {
+      params.push(`%${opts.from.trim().toLowerCase()}%`);
+      where.push(`lower(COALESCE(from_addr, '')) LIKE $${params.length}`);
+    }
+    if (opts.subject?.trim()) {
+      params.push(`%${opts.subject.trim().toLowerCase()}%`);
+      where.push(`lower(COALESCE(subject, '')) LIKE $${params.length}`);
+    }
+    if (opts.search?.trim()) {
+      params.push(`%${opts.search.trim().toLowerCase()}%`);
+      where.push(`lower(concat_ws(' ', COALESCE(from_addr, ''), COALESCE(to_addrs::text, ''), COALESCE(subject, ''), COALESCE(body_text, ''))) LIKE $${params.length}`);
     }
     if (opts.since?.trim()) {
       params.push(opts.since.trim());
@@ -386,11 +429,11 @@ export class EmailsSelfHostedStore {
     params.push(clampOffset(opts.offset));
     const offsetIndex = params.length;
     const rows = await this.client.many<Record<string, unknown>>(
-      `SELECT ${MESSAGE_COLUMNS} FROM messages ${whereSql}
+      `SELECT ${MESSAGE_LIST_COLUMNS} FROM messages ${whereSql}
        ORDER BY COALESCE(received_at, created_at) DESC LIMIT $${limitIndex} OFFSET $${offsetIndex}`,
       params,
     );
-    return rows.map(mapMessageRow);
+    return rows.map(mapMessageListRow);
   }
 
   async messageCounts(): Promise<MessageCountsRecord> {
