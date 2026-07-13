@@ -20,6 +20,8 @@ export interface ResourceColumn {
   bool?: boolean;
   /** INTEGER column. */
   int?: boolean;
+  /** REAL / DOUBLE PRECISION column: value coerced to a finite number. */
+  num?: boolean;
 }
 
 export interface SelfHostedResourceSpec {
@@ -33,6 +35,14 @@ export interface SelfHostedResourceSpec {
   orderBy: string;
   /** Optional simple equality filters accepted as query params -> column. */
   filters?: string[];
+  /**
+   * Primary-key column for get/update/delete and the create conflict target.
+   * Defaults to "id" (a server-minted UUID). A resource whose natural key is NOT
+   * a UUID (e.g. email_agent_settings keyed by `agent_key`) sets this so generic
+   * CRUD addresses rows by that column and creates upsert on it (ON CONFLICT DO
+   * NOTHING) instead of minting an id.
+   */
+  idColumn?: string;
 }
 
 export const SELF_HOSTED_RESOURCES: SelfHostedResourceSpec[] = [
@@ -133,6 +143,189 @@ export const SELF_HOSTED_RESOURCES: SelfHostedResourceSpec[] = [
       { name: "scheduled_at" },
       { name: "status" },
       { name: "error" },
+    ],
+  },
+  // ---- self-hosted-only parity resources -----------------------------------
+  // Added so a self-hosted client covers EVERY resource the deleted local
+  // SQLite store carried. Columns mirror the local schema in snake_case.
+  {
+    // Per-domain aliases + catch-all routing (local table `aliases`).
+    path: "aliases",
+    table: "aliases",
+    orderBy: "domain ASC, local_part ASC",
+    filters: ["domain", "local_part", "target_address"],
+    columns: [
+      { name: "domain" },
+      { name: "local_part" },
+      { name: "target_address" },
+      { name: "protected", bool: true },
+    ],
+  },
+  {
+    // App-level inbound forwarding rules (local table `forwarding_rules`).
+    path: "forwarding",
+    table: "forwarding_rules",
+    orderBy: "source_address ASC, target_address ASC",
+    filters: ["source_address", "target_address", "mode"],
+    columns: [
+      { name: "source_address" },
+      { name: "target_address" },
+      { name: "mode" },
+      { name: "provider_id" },
+      { name: "from_address" },
+      { name: "enabled", bool: true },
+    ],
+  },
+  {
+    // Domain warm-up schedules (local table `warming_schedules`).
+    path: "warming",
+    table: "warming_schedules",
+    orderBy: "created_at DESC",
+    filters: ["status", "domain"],
+    columns: [
+      { name: "domain" },
+      { name: "provider_id" },
+      { name: "target_daily_volume", int: true },
+      { name: "start_date" },
+      { name: "status" },
+    ],
+  },
+  {
+    // Stored AI triage results (local table `email_triage`).
+    path: "triage",
+    table: "email_triage",
+    orderBy: "triaged_at DESC",
+    filters: ["label", "priority", "sentiment", "email_id", "inbound_email_id"],
+    columns: [
+      { name: "email_id" },
+      { name: "inbound_email_id" },
+      { name: "label" },
+      { name: "priority", int: true },
+      { name: "summary" },
+      { name: "sentiment" },
+      { name: "draft_reply" },
+      { name: "confidence", num: true },
+      { name: "model" },
+      { name: "triaged_at" },
+    ],
+  },
+  {
+    // Append-only domain/address provisioning audit (local table
+    // `provisioning_events`). Domain/address provisioning STATE fields live on
+    // the domains/addresses resources; this resource is the state-transition log.
+    path: "provisioning",
+    table: "provisioning_events",
+    orderBy: "created_at ASC",
+    filters: ["entity_type", "entity_id", "to_state"],
+    columns: [
+      { name: "entity_type" },
+      { name: "entity_id" },
+      { name: "from_state" },
+      { name: "to_state" },
+      { name: "detail_json", json: true },
+    ],
+  },
+  {
+    // S3 / inbound mailbox sources (local table `mailbox_sources`).
+    path: "sources",
+    table: "mailbox_sources",
+    orderBy: "status ASC, type ASC, created_at ASC",
+    filters: ["mailbox_id", "provider_id", "type", "status"],
+    columns: [
+      { name: "mailbox_id" },
+      { name: "provider_id" },
+      { name: "type" },
+      { name: "name" },
+      { name: "external_account_id" },
+      { name: "external_mailbox" },
+      { name: "status" },
+      { name: "settings_json", json: true },
+      { name: "provider_snapshot_json", json: true },
+      { name: "last_synced_at" },
+    ],
+  },
+  {
+    // Delivery/engagement events (local table `events`).
+    path: "events",
+    table: "events",
+    orderBy: "occurred_at DESC",
+    filters: ["email_id", "provider_id", "type", "recipient"],
+    columns: [
+      { name: "email_id" },
+      { name: "provider_id" },
+      { name: "provider_event_id" },
+      { name: "type" },
+      { name: "recipient" },
+      { name: "metadata", json: true },
+      { name: "occurred_at" },
+    ],
+  },
+  {
+    // Inbound AI agent settings (local table `email_agent_settings`). Natural
+    // key is `agent_key` (a small fixed enum), NOT a UUID — creates upsert on it.
+    path: "email-agents",
+    table: "email_agent_settings",
+    idColumn: "agent_key",
+    orderBy: "agent_key ASC",
+    columns: [
+      { name: "agent_key" },
+      { name: "enabled", bool: true },
+      { name: "always_on", bool: true },
+      { name: "provider" },
+      { name: "model" },
+      { name: "apply_labels", bool: true },
+      { name: "use_network_tools", bool: true },
+      { name: "config_json", json: true },
+    ],
+  },
+  {
+    // Per-inbound AI agent run ledger (local table `email_agent_runs`).
+    path: "email-agent-runs",
+    table: "email_agent_runs",
+    orderBy: "completed_at DESC",
+    filters: ["agent_key", "inbound_email_id", "status"],
+    columns: [
+      { name: "agent_key" },
+      { name: "inbound_email_id" },
+      { name: "provider" },
+      { name: "model" },
+      { name: "status" },
+      { name: "category" },
+      { name: "labels_json", json: true },
+      { name: "priority", int: true },
+      { name: "confidence", num: true },
+      { name: "risk_score", int: true },
+      { name: "summary" },
+      { name: "reasoning" },
+      { name: "tool_calls_json", json: true },
+      { name: "output_json", json: true },
+      { name: "error" },
+      { name: "started_at" },
+      { name: "completed_at" },
+    ],
+  },
+  {
+    // Persisted inbox digest snapshots (local table `email_digests`).
+    path: "email-digests",
+    table: "email_digests",
+    orderBy: "completed_at DESC",
+    filters: ["period", "status"],
+    columns: [
+      { name: "period" },
+      { name: "since" },
+      { name: "until" },
+      { name: "provider" },
+      { name: "model" },
+      { name: "status" },
+      { name: "message_count", int: true },
+      { name: "summary" },
+      { name: "highlights_json", json: true },
+      { name: "action_items_json", json: true },
+      { name: "important_email_ids_json", json: true },
+      { name: "label_counts_json", json: true },
+      { name: "error" },
+      { name: "started_at" },
+      { name: "completed_at" },
     ],
   },
 ];

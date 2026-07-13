@@ -15,8 +15,35 @@ export interface DomainRecord {
   provider: string | null;
   verified: boolean;
   notes: string | null;
+  // Provisioning lifecycle state (mirrors the local domains provisioning
+  // columns). Present once migration 0010 has run; optional so older/fake rows
+  // still satisfy the type.
+  provisioning_status?: string;
+  purchase_provider?: string | null;
+  dns_provider?: string;
+  send_provider?: string | null;
+  cf_zone_id?: string | null;
+  registrar?: string | null;
+  nameservers_json?: string[];
+  mail_from_domain?: string | null;
+  last_error?: string | null;
+  next_check_at?: string | null;
   created_at: string;
   updated_at: string;
+}
+
+/** Writable domain provisioning fields (a PATCH may set any subset). */
+export interface DomainProvisioningPatch {
+  provisioning_status?: string;
+  purchase_provider?: string | null;
+  dns_provider?: string;
+  send_provider?: string | null;
+  cf_zone_id?: string | null;
+  registrar?: string | null;
+  nameservers_json?: string[];
+  mail_from_domain?: string | null;
+  last_error?: string | null;
+  next_check_at?: string | null;
 }
 
 export interface AddressRecord {
@@ -27,8 +54,31 @@ export interface AddressRecord {
   status: string;
   verified: boolean;
   daily_quota: number | null;
+  // Provisioning lifecycle state (mirrors the local addresses provisioning
+  // columns). Present once migration 0010 has run; optional so older/fake rows
+  // still satisfy the type.
+  domain_id?: string | null;
+  receive_strategy?: string | null;
+  forward_to?: string | null;
+  routing_rule_id?: string | null;
+  provisioning_status?: string;
+  last_validated_at?: string | null;
+  last_error?: string | null;
+  next_check_at?: string | null;
   created_at: string;
   updated_at: string;
+}
+
+/** Writable address provisioning fields (a PATCH may set any subset). */
+export interface AddressProvisioningPatch {
+  domain_id?: string | null;
+  receive_strategy?: string | null;
+  forward_to?: string | null;
+  routing_rule_id?: string | null;
+  provisioning_status?: string;
+  last_validated_at?: string | null;
+  last_error?: string | null;
+  next_check_at?: string | null;
 }
 
 export interface MessageRecord {
@@ -141,6 +191,55 @@ export interface StoredAttachment {
   content_type: string;
   size: number;
   content_base64: string;
+}
+
+/** One subject-rolled-up conversation for the threads mail-view. */
+export interface ThreadRollup {
+  /** Normalized (Re:/Fwd:-stripped, lowercased) subject key that groups the thread. */
+  thread_key: string;
+  subject: string | null;
+  message_count: number;
+  unread_count: number;
+  last_message_at: string | null;
+  first_message_at: string | null;
+  participants: string[];
+}
+
+/** One mailbox (a registered address) with its inbound folder rollup. */
+export interface MailboxRollup {
+  id: string;
+  address: string;
+  display_name: string | null;
+  status: string;
+  total: number;
+  unread: number;
+}
+
+/** Reconstructed raw MIME for a stored message. */
+export interface MessageRaw {
+  raw: string;
+  message_id: string | null;
+}
+
+/** Assemble a minimal RFC 5322 message from a stored row (no original bytes kept). */
+function buildRawMime(rec: MessageRecord): string {
+  const h = rec.headers ?? {};
+  const lines: string[] = [];
+  const push = (name: string, value: unknown) => {
+    const v = value === null || value === undefined ? "" : String(value);
+    if (v.trim()) lines.push(`${name}: ${v.replace(/[\r\n]+/g, " ")}`);
+  };
+  push("Date", (h["Date"] as string) ?? rec.received_at ?? rec.created_at);
+  push("From", (h["From"] as string) ?? rec.from_addr);
+  push("To", (h["To"] as string) ?? rec.to_addrs.join(", "));
+  if (rec.cc_addrs.length) push("Cc", (h["Cc"] as string) ?? rec.cc_addrs.join(", "));
+  push("Subject", (h["Subject"] as string) ?? rec.subject);
+  push("Message-ID", rec.message_id ?? (h["Message-ID"] as string));
+  if (rec.in_reply_to) push("In-Reply-To", rec.in_reply_to);
+  const isHtml = !rec.body_text && !!rec.body_html;
+  push("Content-Type", isHtml ? "text/html; charset=utf-8" : "text/plain; charset=utf-8");
+  const body = rec.body_text ?? rec.body_html ?? "";
+  return `${lines.join("\r\n")}\r\n\r\n${body}`;
 }
 
 function clampLimit(limit: number | undefined): number {
@@ -323,6 +422,36 @@ export class EmailsSelfHostedStore {
     return rows.length > 0;
   }
 
+  /**
+   * Apply a subset of domain provisioning fields (migration 0010 columns). Only
+   * keys PRESENT in `patch` are written, so a null is an explicit clear while an
+   * absent key is left untouched. `nameservers_json` is a JSONB array.
+   */
+  async applyDomainProvisioning(id: string, patch: DomainProvisioningPatch): Promise<DomainRecord | null> {
+    const sets: string[] = [];
+    const params: unknown[] = [id];
+    const set = (name: string, value: unknown, jsonb = false) => {
+      params.push(jsonb ? JSON.stringify(value ?? null) : value ?? null);
+      sets.push(jsonb ? `${name} = $${params.length}::jsonb` : `${name} = $${params.length}`);
+    };
+    if ("provisioning_status" in patch) set("provisioning_status", patch.provisioning_status);
+    if ("purchase_provider" in patch) set("purchase_provider", patch.purchase_provider);
+    if ("dns_provider" in patch) set("dns_provider", patch.dns_provider);
+    if ("send_provider" in patch) set("send_provider", patch.send_provider);
+    if ("cf_zone_id" in patch) set("cf_zone_id", patch.cf_zone_id);
+    if ("registrar" in patch) set("registrar", patch.registrar);
+    if ("nameservers_json" in patch) set("nameservers_json", patch.nameservers_json ?? [], true);
+    if ("mail_from_domain" in patch) set("mail_from_domain", patch.mail_from_domain);
+    if ("last_error" in patch) set("last_error", patch.last_error);
+    if ("next_check_at" in patch) set("next_check_at", patch.next_check_at);
+    if (sets.length === 0) return this.getDomain(id);
+    sets.push("updated_at = now()");
+    return this.client.get<DomainRecord>(
+      `UPDATE domains SET ${sets.join(", ")} WHERE id = $1 RETURNING *`,
+      params,
+    );
+  }
+
   // ---- addresses ----------------------------------------------------------
   async listAddresses(opts: ListOptions = {}): Promise<AddressRecord[]> {
     return this.client.many<AddressRecord>(
@@ -392,6 +521,33 @@ export class EmailsSelfHostedStore {
       [id],
     );
     return rows.length > 0;
+  }
+
+  /**
+   * Apply a subset of address provisioning fields (migration 0010 columns).
+   * Only keys PRESENT in `patch` are written (null clears, absent leaves as-is).
+   */
+  async applyAddressProvisioning(id: string, patch: AddressProvisioningPatch): Promise<AddressRecord | null> {
+    const sets: string[] = [];
+    const params: unknown[] = [id];
+    const set = (name: string, value: unknown) => {
+      params.push(value ?? null);
+      sets.push(`${name} = $${params.length}`);
+    };
+    if ("domain_id" in patch) set("domain_id", patch.domain_id);
+    if ("receive_strategy" in patch) set("receive_strategy", patch.receive_strategy);
+    if ("forward_to" in patch) set("forward_to", patch.forward_to);
+    if ("routing_rule_id" in patch) set("routing_rule_id", patch.routing_rule_id);
+    if ("provisioning_status" in patch) set("provisioning_status", patch.provisioning_status);
+    if ("last_validated_at" in patch) set("last_validated_at", patch.last_validated_at);
+    if ("last_error" in patch) set("last_error", patch.last_error);
+    if ("next_check_at" in patch) set("next_check_at", patch.next_check_at);
+    if (sets.length === 0) return this.getAddress(id);
+    sets.push("updated_at = now()");
+    return this.client.get<AddressRecord>(
+      `UPDATE addresses SET ${sets.join(", ")} WHERE id = $1 RETURNING *`,
+      params,
+    );
   }
 
   // ---- messages (outbound ledger + inbound mail) -------------------------
@@ -705,6 +861,97 @@ export class EmailsSelfHostedStore {
     return rows.length > 0;
   }
 
+  // ---- mail-views (threads / mailboxes / raw) ----------------------------
+  //
+  // The self-hosted `messages` table is a single unified inbound+outbound
+  // ledger, so these are read-only rollups over it (not simple CRUD). Threads
+  // are grouped by a normalized (Re:/Fwd:-stripped) subject key — the server
+  // keeps no thread_id column.
+
+  /** Subject-rolled-up conversation list, newest activity first. */
+  async listThreads(opts: ListOptions = {}): Promise<ThreadRollup[]> {
+    const rows = await this.client.many<Record<string, unknown>>(
+      `WITH t AS (
+         SELECT
+           NULLIF(btrim(regexp_replace(lower(COALESCE(subject, '')), '^(\\s*(re|fwd|fw)\\s*:\\s*)+', '', 'g')), '') AS thread_key,
+           subject, from_addr, is_read, direction,
+           COALESCE(received_at, created_at) AS ts
+         FROM messages
+       )
+       SELECT
+         COALESCE(thread_key, '(no subject)') AS thread_key,
+         max(subject) AS subject,
+         count(*) AS message_count,
+         count(*) FILTER (WHERE is_read = false AND lower(COALESCE(direction, '')) <> 'outbound') AS unread_count,
+         max(ts) AS last_message_at,
+         min(ts) AS first_message_at,
+         array_agg(DISTINCT from_addr) AS participants
+       FROM t
+       GROUP BY COALESCE(thread_key, '(no subject)')
+       ORDER BY max(ts) DESC
+       LIMIT $1 OFFSET $2`,
+      [clampLimit(opts.limit), clampOffset(opts.offset)],
+    );
+    const num = (v: unknown): number => {
+      const n = typeof v === "number" ? v : Number(v);
+      return Number.isFinite(n) ? n : 0;
+    };
+    return rows.map((row) => ({
+      thread_key: String(row["thread_key"] ?? ""),
+      subject: row["subject"] === null || row["subject"] === undefined ? null : String(row["subject"]),
+      message_count: num(row["message_count"]),
+      unread_count: num(row["unread_count"]),
+      last_message_at: toIso(row["last_message_at"]),
+      first_message_at: toIso(row["first_message_at"]),
+      participants: toStringArray(row["participants"]),
+    }));
+  }
+
+  /**
+   * Registered addresses as mailboxes, each with an inbound folder rollup, plus
+   * the global folder counts. Per-mailbox counts use the same recipient
+   * substring match as listMessages' `to` filter (consistent, tolerant of
+   * display-name forms).
+   */
+  async listMailboxes(): Promise<{ mailboxes: MailboxRollup[]; counts: MessageCountsRecord }> {
+    const rows = await this.client.many<Record<string, unknown>>(
+      `SELECT
+         a.id AS id,
+         a.email AS address,
+         a.display_name AS display_name,
+         a.status AS status,
+         count(m.id) AS total,
+         count(m.id) FILTER (WHERE m.is_read = false) AS unread
+       FROM addresses a
+       LEFT JOIN messages m
+         ON lower(COALESCE(m.direction, '')) <> 'outbound'
+        AND lower(m.to_addrs::text) LIKE '%' || lower(a.email) || '%'
+       GROUP BY a.id, a.email, a.display_name, a.status
+       ORDER BY a.email ASC`,
+    );
+    const num = (v: unknown): number => {
+      const n = typeof v === "number" ? v : Number(v);
+      return Number.isFinite(n) ? n : 0;
+    };
+    const mailboxes: MailboxRollup[] = rows.map((row) => ({
+      id: String(row["id"] ?? ""),
+      address: String(row["address"] ?? ""),
+      display_name: row["display_name"] === null || row["display_name"] === undefined ? null : String(row["display_name"]),
+      status: String(row["status"] ?? ""),
+      total: num(row["total"]),
+      unread: num(row["unread"]),
+    }));
+    const counts = await this.messageCounts();
+    return { mailboxes, counts };
+  }
+
+  /** Reconstruct a minimal raw MIME representation for a stored message. */
+  async getMessageRaw(id: string): Promise<MessageRaw | null> {
+    const rec = await this.getMessage(id);
+    if (!rec) return null;
+    return { raw: buildRawMime(rec), message_id: rec.message_id };
+  }
+
   // ---- generic resources (contacts/providers/templates/groups/…) ----------
   //
   // Table + column names come from the trusted SELF_HOSTED_RESOURCES registry (never
@@ -720,7 +967,16 @@ export class EmailsSelfHostedStore {
       const n = typeof value === "number" ? value : Number(value);
       return Number.isFinite(n) ? Math.trunc(n) : 0;
     }
+    if (col.num) {
+      const n = typeof value === "number" ? value : Number(value);
+      return Number.isFinite(n) ? n : 0;
+    }
     return value ?? null;
+  }
+
+  /** Primary-key column for a spec (a server-minted `id` unless overridden). */
+  private static keyColumn(spec: SelfHostedResourceSpec): string {
+    return spec.idColumn ?? "id";
   }
 
   async listResource(
@@ -745,23 +1001,43 @@ export class EmailsSelfHostedStore {
   }
 
   async getResource(spec: SelfHostedResourceSpec, id: string): Promise<Record<string, unknown> | null> {
-    return this.client.get<Record<string, unknown>>(`SELECT * FROM ${spec.table} WHERE id = $1`, [id]);
+    const key = EmailsSelfHostedStore.keyColumn(spec);
+    return this.client.get<Record<string, unknown>>(`SELECT * FROM ${spec.table} WHERE ${key} = $1`, [id]);
   }
 
   async createResource(spec: SelfHostedResourceSpec, body: Record<string, unknown>): Promise<Record<string, unknown>> {
-    const cols = ["id"];
-    const placeholders = ["$1"];
-    const params: unknown[] = [randomUUID()];
+    const key = EmailsSelfHostedStore.keyColumn(spec);
+    const cols: string[] = [];
+    const placeholders: string[] = [];
+    const params: unknown[] = [];
+    // A UUID-keyed resource mints its own `id`. A natural-key resource (idColumn
+    // set) takes the key value from the body — it is not server-generated.
+    if (spec.idColumn === undefined) {
+      params.push(randomUUID());
+      cols.push("id");
+      placeholders.push("$1");
+    }
     for (const col of spec.columns) {
       if (!(col.name in body)) continue;
       params.push(EmailsSelfHostedStore.encodeColumn(col, body[col.name]));
       cols.push(col.name);
       placeholders.push(col.json ? `$${params.length}::jsonb` : `$${params.length}`);
     }
-    return this.client.one<Record<string, unknown>>(
-      `INSERT INTO ${spec.table} (${cols.join(", ")}) VALUES (${placeholders.join(", ")}) RETURNING *`,
+    const insertHead = `INSERT INTO ${spec.table} (${cols.join(", ")}) VALUES (${placeholders.join(", ")})`;
+    // UUID-keyed: a plain insert always returns exactly one row (unchanged path).
+    if (spec.idColumn === undefined) {
+      return this.client.one<Record<string, unknown>>(`${insertHead} RETURNING *`, params);
+    }
+    // Natural-key: upsert-on-conflict so create is an idempotent "ensure". DO
+    // NOTHING can return zero rows, so read (not one()) and fall back to select.
+    const inserted = await this.client.get<Record<string, unknown>>(
+      `${insertHead} ON CONFLICT (${key}) DO NOTHING RETURNING *`,
       params,
     );
+    if (inserted) return inserted;
+    const existing = await this.getResource(spec, String(body[key] ?? ""));
+    if (existing) return existing;
+    throw new Error(`create on ${spec.path} produced no row`);
   }
 
   async updateResource(
@@ -769,24 +1045,27 @@ export class EmailsSelfHostedStore {
     id: string,
     body: Record<string, unknown>,
   ): Promise<Record<string, unknown> | null> {
+    const key = EmailsSelfHostedStore.keyColumn(spec);
     const sets: string[] = [];
     const params: unknown[] = [id];
     for (const col of spec.columns) {
       if (!(col.name in body)) continue;
+      if (col.name === key) continue; // never rewrite the primary key
       params.push(EmailsSelfHostedStore.encodeColumn(col, body[col.name]));
       sets.push(col.json ? `${col.name} = $${params.length}::jsonb` : `${col.name} = $${params.length}`);
     }
     if (sets.length === 0) return this.getResource(spec, id);
     sets.push("updated_at = now()");
     return this.client.get<Record<string, unknown>>(
-      `UPDATE ${spec.table} SET ${sets.join(", ")} WHERE id = $1 RETURNING *`,
+      `UPDATE ${spec.table} SET ${sets.join(", ")} WHERE ${key} = $1 RETURNING *`,
       params,
     );
   }
 
   async deleteResource(spec: SelfHostedResourceSpec, id: string): Promise<boolean> {
+    const key = EmailsSelfHostedStore.keyColumn(spec);
     const rows = await this.client.many<{ id: string }>(
-      `DELETE FROM ${spec.table} WHERE id = $1 RETURNING id`,
+      `DELETE FROM ${spec.table} WHERE ${key} = $1 RETURNING ${key} AS id`,
       [id],
     );
     return rows.length > 0;
