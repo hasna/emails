@@ -1,10 +1,40 @@
 /**
- * Threading DB layer — read/write the threading fields on sent emails and
- * inbound emails, and resolve the parent of a reply by Message-ID.
+ * Threading DB layer — self-hosted-ONLY.
+ *
+ * The `/v1` message model has NO thread_id column: the operator's serve rolls
+ * conversations by NORMALIZED SUBJECT. There is therefore no local threading
+ * field to write, and no thread_id to look mail up by. Threading WRITES
+ * (setEmailThreading / setInboundThreadId) become graceful no-ops; threading
+ * READS map what /v1 does expose (message_id / in_reply_to / References header).
  */
-import type { Database } from "./database.js";
-import { getDatabase, now } from "./database.js";
-import { parseJsonArray } from "./json.js";
+import { parseReferences } from "../lib/threading.js";
+import { selfHostedResource, cstr, cstrOrNull, cobj } from "./self-hosted-resource.js";
+
+const MESSAGE_RESOURCE = "messages";
+
+// Bounded scan for id/message-id resolution (no thread_id to key on).
+const THREAD_SCAN_PAGE = 500;
+const THREAD_SCAN_CAP = 10000;
+
+function scanMessages(): Record<string, unknown>[] {
+  const store = selfHostedResource(MESSAGE_RESOURCE);
+  const rows: Record<string, unknown>[] = [];
+  for (let offset = 0; offset < THREAD_SCAN_CAP; offset += THREAD_SCAN_PAGE) {
+    const page = store.list({ limit: THREAD_SCAN_PAGE, offset });
+    rows.push(...page);
+    if (page.length < THREAD_SCAN_PAGE) break;
+  }
+  return rows;
+}
+
+function bareId(value: string): string {
+  return value.replace(/[<>]/g, "").trim();
+}
+
+function referencesOf(row: Record<string, unknown>): string[] {
+  const headers = cobj(row["headers"]);
+  return parseReferences(cstrOrNull(headers["References"]) ?? cstrOrNull(headers["references"]) ?? undefined);
+}
 
 export interface EmailThreading {
   message_id: string | null;
@@ -13,82 +43,86 @@ export interface EmailThreading {
   references: string[];
 }
 
-export function setEmailThreading(emailId: string, t: Partial<EmailThreading>, db?: Database): void {
-  const d = db || getDatabase();
-  const sets: string[] = ["updated_at = ?"]; const params: (string | null)[] = [now()];
-  if (t.message_id !== undefined) { sets.push("message_id = ?"); params.push(t.message_id); }
-  if (t.thread_id !== undefined) { sets.push("thread_id = ?"); params.push(t.thread_id); }
-  if (t.in_reply_to !== undefined) { sets.push("in_reply_to = ?"); params.push(t.in_reply_to); }
-  if (t.references !== undefined) { sets.push("references_json = ?"); params.push(JSON.stringify(t.references)); }
-  params.push(emailId);
-  d.run(`UPDATE emails SET ${sets.join(", ")} WHERE id = ?`, params);
-}
-
-export function getEmailThreading(emailId: string, db?: Database): EmailThreading | null {
-  const d = db || getDatabase();
-  const row = d.query("SELECT message_id, thread_id, in_reply_to, references_json FROM emails WHERE id = ?").get(emailId) as
-    { message_id: string | null; thread_id: string | null; in_reply_to: string | null; references_json: string | null } | null;
-  if (!row) return null;
-  return { message_id: row.message_id, thread_id: row.thread_id, in_reply_to: row.in_reply_to, references: parseJsonArray<string>(row.references_json) };
-}
-
 /**
- * Find a sent email by its RFC Message-ID (with or without angle brackets).
- * SES REWRITES our Message-ID to `<{provider_message_id}@email.amazonses.com>`,
- * so we also match the Message-ID's local-part (before @) against the stored
- * provider_message_id — that's how a received copy links back to our send.
+ * No-op: thread membership is derived by the self-hosted serve from the
+ * normalized subject, so there is no local threading field to write.
  */
-export function getEmailByMessageId(messageId: string, db?: Database): { id: string; thread_id: string | null; references: string[]; message_id: string | null } | null {
-  const d = db || getDatabase();
-  const bare = messageId.replace(/[<>]/g, "").trim();
-  const localPart = bare.split("@")[0] ?? bare;
-  const row = d.query(
-    `SELECT id, thread_id, references_json, message_id FROM emails
-     WHERE message_id = ? OR message_id = ? OR provider_message_id = ? OR provider_message_id = ? LIMIT 1`,
-  ).get(messageId, `<${bare}>`, bare, localPart) as { id: string; thread_id: string | null; references_json: string | null; message_id: string | null } | null;
+export function setEmailThreading(_emailId: string, _t: Partial<EmailThreading>): void {
+  // Intentionally empty — server-derived threading (no /v1 thread_id column).
+}
+
+export function getEmailThreading(emailId: string): EmailThreading | null {
+  const row = selfHostedResource(MESSAGE_RESOURCE).get(emailId);
   if (!row) return null;
-  return { id: row.id, thread_id: row.thread_id, references: parseJsonArray<string>(row.references_json), message_id: row.message_id };
+  return {
+    message_id: cstrOrNull(row["message_id"]),
+    thread_id: null,
+    in_reply_to: cstrOrNull(row["in_reply_to"]),
+    references: referencesOf(row),
+  };
 }
-
-export function setInboundThreadId(inboundId: string, threadId: string, db?: Database): void {
-  const d = db || getDatabase();
-  d.run("UPDATE inbound_emails SET thread_id = ? WHERE id = ?", [threadId, inboundId]);
-}
-
-/** All sent + received emails in a thread, ordered by time. */
-export function getThreadMessages(threadId: string, db?: Database): Array<{ kind: "sent" | "received"; id: string; from: string; subject: string; at: string }> {
-  const d = db || getDatabase();
-  const sent = d.query("SELECT id, from_address, subject, sent_at FROM emails WHERE thread_id = ?").all(threadId) as Array<{ id: string; from_address: string; subject: string; sent_at: string }>;
-  const recv = d.query("SELECT id, from_address, subject, received_at FROM inbound_emails WHERE thread_id = ?").all(threadId) as Array<{ id: string; from_address: string; subject: string; received_at: string }>;
-  const all = [
-    ...sent.map((r) => ({ kind: "sent" as const, id: r.id, from: r.from_address, subject: r.subject, at: r.sent_at })),
-    ...recv.map((r) => ({ kind: "received" as const, id: r.id, from: r.from_address, subject: r.subject, at: r.received_at })),
-  ];
-  return all.sort((a, b) => a.at.localeCompare(b.at));
-}
-
-import { parseReferences } from "../lib/threading.js";
 
 /**
- * Resolve the thread for an inbound email from its In-Reply-To / References
- * headers. If any referenced Message-ID matches one of our sent emails, return
- * that email's thread_id (and id); otherwise start a new thread.
+ * Find a message by its RFC Message-ID (with or without angle brackets). Also
+ * matches the Message-ID's local-part against the stored provider_message_id
+ * (SES rewrites Message-ID to `<{provider_message_id}@email.amazonses.com>`).
+ * Scans the bounded recent window because /v1 has no message-id index endpoint.
+ */
+export function getEmailByMessageId(
+  messageId: string,
+): { id: string; thread_id: string | null; references: string[]; message_id: string | null } | null {
+  const bare = bareId(messageId);
+  const localPart = bare.split("@")[0] ?? bare;
+  const match = scanMessages().find((row) => {
+    const mid = bareId(cstr(row["message_id"]));
+    const pmid = cstr(row["provider_message_id"]);
+    return (mid && (mid === bare || mid === messageId.trim())) || (pmid && (pmid === bare || pmid === localPart));
+  });
+  if (!match) return null;
+  return {
+    id: cstr(match["id"]),
+    thread_id: null,
+    references: referencesOf(match),
+    message_id: cstrOrNull(match["message_id"]),
+  };
+}
+
+/**
+ * No-op: there is no thread_id column over /v1 (thread membership is derived
+ * server-side by normalized subject). Kept for call-site compatibility.
+ */
+export function setInboundThreadId(_inboundId: string, _threadId: string): void {
+  // Intentionally empty — server-derived threading.
+}
+
+/**
+ * A thread's messages, ordered by time. The /v1 model has no thread_id to key
+ * on, so this cannot be resolved from an opaque local thread id; conversation
+ * grouping is derived by subject elsewhere (see cli/tui/data getConversation).
+ */
+export function getThreadMessages(
+  _threadId: string,
+): Array<{ kind: "sent" | "received"; id: string; from: string; subject: string; at: string }> {
+  return [];
+}
+
+/**
+ * Resolve the thread/parent for an inbound email from its In-Reply-To /
+ * References headers by matching a referenced Message-ID against a known
+ * message. thread_id is always the freshly-generated id (no server thread_id is
+ * exposed); parent linkage is best-effort over the bounded scan.
  */
 export function resolveThreadForInbound(
   headers: Record<string, string> | undefined,
   newThreadId: string,
-  db?: Database,
 ): { thread_id: string; parent_email_id: string | null } {
-  const d = db || getDatabase();
   const h = headers ?? {};
   const ownMsgId = h["Message-ID"] ?? h["message-id"] ?? h["Message-Id"] ?? "";
   const inReplyTo = h["In-Reply-To"] ?? h["in-reply-to"] ?? "";
   const refs = parseReferences(h["References"] ?? h["references"]);
-  // Own Message-ID first (the received copy of one of our sends shares it),
-  // then In-Reply-To, then References newest→oldest.
   const candidates = [ownMsgId, inReplyTo, ...refs.reverse()].map((s) => s.trim()).filter(Boolean);
   for (const c of candidates) {
-    const parent = getEmailByMessageId(c, d);
+    const parent = getEmailByMessageId(c);
     if (parent) {
       return { thread_id: parent.thread_id ?? newThreadId, parent_email_id: parent.id };
     }

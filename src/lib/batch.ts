@@ -1,11 +1,4 @@
-import { readFileSync } from "fs";
-import { getTemplateByName, renderTemplate } from "../db/templates.js";
-import { getSuppressedEmailSet, incrementSendCounts } from "../db/contacts.js";
-import { getDatabase } from "../db/database.js";
-import { parseCsv } from "./csv.js";
 import type { Provider } from "../types/index.js";
-import { createSentEmailLedger } from "./sent-ledger.js";
-import { assertDomainOutboundReady, sendWithFailover } from "./send.js";
 
 export { parseCsv } from "./csv.js";
 
@@ -17,7 +10,13 @@ export interface BatchResult {
   errors: { email: string; error: string }[];
 }
 
-export async function batchSend(opts: {
+// Batch send renders a local template per CSV row, checks the local contact
+// suppression list, sends through the local provider adapters (with failover),
+// and writes each result to the local sent-mail ledger. All of that is
+// server-side in the self-hosted client (sending goes through the authenticated
+// `/v1` send endpoint via the mail data source). This stub preserves the
+// signature/return type and fails loud.
+export async function batchSend(_opts: {
   csvPath: string;
   templateName: string;
   from: string;
@@ -28,63 +27,7 @@ export async function batchSend(opts: {
   /** @internal for testing — inject CSV content instead of reading from file */
   _csvContent?: string;
 }): Promise<BatchResult> {
-  const db = getDatabase();
-  const csvContent = opts._csvContent ?? readFileSync(opts.csvPath, "utf-8");
-  const rows = parseCsv(csvContent);
-
-  const template = getTemplateByName(opts.templateName, db);
-  if (!template) {
-    throw new Error(`Template not found: ${opts.templateName}`);
-  }
-
-  const adapter = opts._adapter;
-  const result: BatchResult = { total: rows.length, sent: 0, failed: 0, suppressed: 0, errors: [] };
-  const suppressedEmailSet = opts.force ? new Set<string>() : getSuppressedEmailSet(rows.map((row) => row["email"] ?? ""), db);
-  const sentEmails: string[] = [];
-
-  for (const row of rows) {
-    const email = row["email"];
-    if (!email) {
-      result.failed++;
-      result.errors.push({ email: "(missing)", error: "Row missing 'email' column" });
-      continue;
-    }
-
-    // Check suppression
-    if (!opts.force && suppressedEmailSet.has(email)) {
-      result.suppressed++;
-      continue;
-    }
-
-    try {
-      const vars = row as Record<string, string>;
-      const subject = renderTemplate(template.subject_template, vars);
-      const html = template.html_template ? renderTemplate(template.html_template, vars) : undefined;
-      const text = template.text_template ? renderTemplate(template.text_template, vars) : undefined;
-
-      const sendOpts = {
-        from: opts.from,
-        to: email,
-        subject,
-        html,
-        text,
-      };
-      assertDomainOutboundReady(opts.provider, sendOpts, db);
-
-      const sent = adapter
-        ? { providerId: opts.provider.id, messageId: await adapter.sendEmail(sendOpts) }
-        : await sendWithFailover(opts.provider.id, sendOpts, db);
-      await createSentEmailLedger(sent.providerId, sendOpts, sent.messageId, db);
-      sentEmails.push(email);
-
-      result.sent++;
-    } catch (err) {
-      result.failed++;
-      result.errors.push({ email, error: err instanceof Error ? err.message : String(err) });
-    }
-  }
-
-  incrementSendCounts(sentEmails, db);
-
-  return result;
+  throw new Error(
+    "batchSend is not available in the self-hosted client; template batch sending runs on the self-hosted server via the authenticated /v1 send endpoint.",
+  );
 }

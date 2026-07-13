@@ -20,16 +20,6 @@ function createCommands(): Accessor<EmailsCommand[]> {
   const emails = useEmails();
   const toast = useToast();
 
-  const pullNow = async () => {
-    toast.show({ title: "Pulling mail", message: "Syncing configured inboxes.", tone: "info" });
-    const result = await emails.actions.pullNow();
-    toast.show({
-      title: result.ok ? "Pull complete" : "Pull failed",
-      message: result.ok ? `${result.pulled} message${result.pulled === 1 ? "" : "s"} pulled.` : result.reason ?? "Pull could not run.",
-      tone: result.ok ? "success" : "error",
-    });
-  };
-
   return createMemo(() => [
     {
       id: "mailbox.open",
@@ -119,17 +109,8 @@ function createCommands(): Accessor<EmailsCommand[]> {
         toast.show({ title: "Refreshed", message: "Local mailbox state reloaded.", tone: "success" });
       },
     },
-    // Pull Now is LOCAL S3→SQLite ingestion. In self_hosted mode the server ingests and the
-    // client syncs via the automatic changesSince delta, so there is no manual pull —
-    // omit the command entirely so no self_hosted affordance (palette or shortcut) reaches it.
-    ...(emails.mode === "local"
-      ? [{
-          id: "pull.now",
-          title: "Pull Now",
-          category: "Mail",
-          run: pullNow,
-        } satisfies EmailsCommand]
-      : []),
+    // Pull Now was LOCAL S3->SQLite ingestion. The self-hosted client syncs via the
+    // automatic changesSince delta, so there is no manual pull command.
     ...MAILBOXES.map((mailbox): EmailsCommand => ({
       id: `mailbox.${mailbox}`,
       title: mailboxLabel(mailbox as Mailbox),

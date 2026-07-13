@@ -2,22 +2,29 @@
  * Provisioning DB layer — lifecycle fields for automated domain/address
  * provisioning plus an append-only audit trail (provisioning_events).
  *
- * The provisioning columns live on the existing `domains` and `addresses`
- * tables (added in migration 19). This module provides typed read/write access
- * to those columns and the daemon's "due work" queue, without disturbing the
- * existing domains.ts / addresses.ts APIs.
+ * Self-hosted-ONLY. The provisioning STATE fields live as columns on the
+ * `domains` and `addresses` entities and are read/written directly over
+ * `/v1/domains/<id>` and `/v1/addresses/<id>` (the local Domain/EmailAddress
+ * repo mappers intentionally drop these lifecycle columns, so this module reads
+ * the raw entities). The append-only event trail routes to `/v1/provisioning`.
+ * The daemon "due work" queue is derived client-side by listing domains and
+ * addresses and filtering on provisioning_status + next_check_at.
  */
 
-import type { Database } from "./database.js";
-import { getDatabase, now, uuid } from "./database.js";
+import { now, uuid } from "./runtime.js";
 import type { DomainState, AddressState } from "../lib/provision/state-machine.js";
-import { parseJsonArray, parseJsonObject } from "./json.js";
-import { countValue } from "./scalars.js";
+import { parseJsonArray } from "./json.js";
+import { selfHostedResource, cobj, ciso, cstr, cstrOrNull } from "./self-hosted-resource.js";
+
+const DOMAIN_RESOURCE = "domains";
+const ADDRESS_RESOURCE = "addresses";
+const PROVISIONING_RESOURCE = "provisioning";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 /** Terminal states never re-enter the daemon queue. */
 export const TERMINAL_STATES = ["ready", "failed", "none"] as const;
+const TERMINAL_SET = new Set<string>(TERMINAL_STATES);
 
 /**
  * Persisted provisioning status. The canonical state names come from the
@@ -90,169 +97,103 @@ export interface ProvisioningEvent {
 
 // ─── Domain provisioning ────────────────────────────────────────────────────
 
-interface DomainProvRow {
-  id?: string;
-  provisioning_status: string;
-  purchase_provider: string | null;
-  dns_provider: string;
-  send_provider: string | null;
-  cf_zone_id: string | null;
-  registrar: string | null;
-  nameservers_json: string;
-  mail_from_domain: string | null;
-  last_error: string | null;
-  next_check_at: string | null;
+function nameserversOf(e: Record<string, unknown>): string[] {
+  if (Array.isArray(e["nameservers"])) return e["nameservers"].map((x) => String(x));
+  return parseJsonArray<string>(cstrOrNull(e["nameservers_json"]));
 }
 
-function rowToDomainProvisioning(row: DomainProvRow): DomainProvisioning {
+function rowToDomainProvisioning(e: Record<string, unknown>): DomainProvisioning {
   return {
-    provisioning_status: row.provisioning_status as DomainProvisioningStatus,
-    purchase_provider: row.purchase_provider,
-    dns_provider: row.dns_provider,
-    send_provider: row.send_provider,
-    cf_zone_id: row.cf_zone_id,
-    registrar: row.registrar,
-    nameservers: safeJsonArray(row.nameservers_json),
-    mail_from_domain: row.mail_from_domain,
-    last_error: row.last_error,
-    next_check_at: row.next_check_at,
+    provisioning_status: (cstr(e["provisioning_status"]) || "none") as DomainProvisioningStatus,
+    purchase_provider: cstrOrNull(e["purchase_provider"]),
+    dns_provider: cstr(e["dns_provider"]),
+    send_provider: cstrOrNull(e["send_provider"]),
+    cf_zone_id: cstrOrNull(e["cf_zone_id"]),
+    registrar: cstrOrNull(e["registrar"]),
+    nameservers: nameserversOf(e),
+    mail_from_domain: cstrOrNull(e["mail_from_domain"]),
+    last_error: cstrOrNull(e["last_error"]),
+    next_check_at: cstrOrNull(e["next_check_at"]),
   };
 }
 
-export function getDomainProvisioning(id: string, db?: Database): DomainProvisioning | null {
-  const d = db || getDatabase();
-  const row = d
-    .query(
-      `SELECT provisioning_status, purchase_provider, dns_provider, send_provider,
-              cf_zone_id, registrar, nameservers_json, mail_from_domain, last_error, next_check_at
-       FROM domains WHERE id = ?`,
-    )
-    .get(id) as DomainProvRow | null;
-  if (!row) return null;
-  return rowToDomainProvisioning(row);
+export function getDomainProvisioning(id: string): DomainProvisioning | null {
+  const record = selfHostedResource(DOMAIN_RESOURCE).get(id);
+  if (!record) return null;
+  return rowToDomainProvisioning(record);
 }
 
-export function listDomainProvisioningById(db?: Database): Map<string, DomainProvisioning> {
-  const d = db || getDatabase();
-  const rows = d
-    .query(
-      `SELECT id, provisioning_status, purchase_provider, dns_provider, send_provider,
-              cf_zone_id, registrar, nameservers_json, mail_from_domain, last_error, next_check_at
-       FROM domains`,
-    )
-    .all() as Array<DomainProvRow & { id: string }>;
-  return new Map(rows.map((row) => [row.id, rowToDomainProvisioning(row)]));
+export function listDomainProvisioningById(): Map<string, DomainProvisioning> {
+  const rows = selfHostedResource(DOMAIN_RESOURCE).list({ limit: 1000 });
+  return new Map(rows.map((row) => [cstr(row["id"]), rowToDomainProvisioning(row)]));
 }
 
-export function listDomainProvisioningByIds(domainIds: Iterable<string>, db?: Database): Map<string, DomainProvisioning> {
-  const ids = [...new Set([...domainIds].map((id) => id.trim()).filter(Boolean))];
-  if (ids.length === 0) return new Map();
-  const d = db || getDatabase();
-  const placeholders = ids.map(() => "?").join(", ");
-  const rows = d
-    .query(
-      `SELECT id, provisioning_status, purchase_provider, dns_provider, send_provider,
-              cf_zone_id, registrar, nameservers_json, mail_from_domain, last_error, next_check_at
-       FROM domains
-       WHERE id IN (${placeholders})`,
-    )
-    .all(...ids) as Array<DomainProvRow & { id: string }>;
-  return new Map(rows.map((row) => [row.id, rowToDomainProvisioning(row)]));
+export function listDomainProvisioningByIds(domainIds: Iterable<string>): Map<string, DomainProvisioning> {
+  const ids = new Set([...domainIds].map((id) => id.trim()).filter(Boolean));
+  if (ids.size === 0) return new Map();
+  return new Map(
+    selfHostedResource(DOMAIN_RESOURCE)
+      .list({ limit: 1000 })
+      .filter((row) => ids.has(cstr(row["id"])))
+      .map((row) => [cstr(row["id"]), rowToDomainProvisioning(row)]),
+  );
 }
 
 export function setDomainProvisioning(
   id: string,
   input: DomainProvisioningInput,
-  db?: Database,
 ): DomainProvisioning | null {
-  const d = db || getDatabase();
-  const sets: string[] = ["updated_at = ?"];
-  const params: (string | null)[] = [now()];
-
-  const col = (name: string, value: string | null) => { sets.push(`${name} = ?`); params.push(value); };
-
-  if (input.provisioning_status !== undefined) col("provisioning_status", input.provisioning_status);
-  if (input.purchase_provider !== undefined) col("purchase_provider", input.purchase_provider);
-  if (input.dns_provider !== undefined) col("dns_provider", input.dns_provider);
-  if (input.send_provider !== undefined) col("send_provider", input.send_provider);
-  if (input.cf_zone_id !== undefined) col("cf_zone_id", input.cf_zone_id);
-  if (input.registrar !== undefined) col("registrar", input.registrar);
-  if (input.nameservers !== undefined) col("nameservers_json", JSON.stringify(input.nameservers));
-  if (input.mail_from_domain !== undefined) col("mail_from_domain", input.mail_from_domain);
-  if (input.last_error !== undefined) col("last_error", input.last_error);
-  if (input.next_check_at !== undefined) col("next_check_at", input.next_check_at);
-
-  params.push(id);
-  d.run(`UPDATE domains SET ${sets.join(", ")} WHERE id = ?`, params);
-  return getDomainProvisioning(id, d);
+  const patch: Record<string, unknown> = {};
+  if (input.provisioning_status !== undefined) patch["provisioning_status"] = input.provisioning_status;
+  if (input.purchase_provider !== undefined) patch["purchase_provider"] = input.purchase_provider;
+  if (input.dns_provider !== undefined) patch["dns_provider"] = input.dns_provider;
+  if (input.send_provider !== undefined) patch["send_provider"] = input.send_provider;
+  if (input.cf_zone_id !== undefined) patch["cf_zone_id"] = input.cf_zone_id;
+  if (input.registrar !== undefined) patch["registrar"] = input.registrar;
+  if (input.nameservers !== undefined) patch["nameservers_json"] = JSON.stringify(input.nameservers);
+  if (input.mail_from_domain !== undefined) patch["mail_from_domain"] = input.mail_from_domain;
+  if (input.last_error !== undefined) patch["last_error"] = input.last_error;
+  if (input.next_check_at !== undefined) patch["next_check_at"] = input.next_check_at;
+  patch["updated_at"] = now();
+  selfHostedResource(DOMAIN_RESOURCE).update(id, patch);
+  return getDomainProvisioning(id);
 }
 
 // ─── Address provisioning ───────────────────────────────────────────────────
 
-interface AddressProvRow {
-  id?: string;
-  domain_id: string | null;
-  receive_strategy: string | null;
-  forward_to: string | null;
-  routing_rule_id: string | null;
-  provisioning_status: string;
-  last_validated_at: string | null;
-  last_error: string | null;
-  next_check_at: string | null;
-}
-
-function rowToAddressProvisioning(row: AddressProvRow): AddressProvisioning {
+function rowToAddressProvisioning(e: Record<string, unknown>): AddressProvisioning {
   return {
-    domain_id: row.domain_id,
-    receive_strategy: row.receive_strategy as ReceiveStrategy | null,
-    forward_to: row.forward_to,
-    routing_rule_id: row.routing_rule_id,
-    provisioning_status: row.provisioning_status as AddressProvisioningStatus,
-    last_validated_at: row.last_validated_at,
-    last_error: row.last_error,
-    next_check_at: row.next_check_at,
+    domain_id: cstrOrNull(e["domain_id"]),
+    receive_strategy: cstrOrNull(e["receive_strategy"]) as ReceiveStrategy | null,
+    forward_to: cstrOrNull(e["forward_to"]),
+    routing_rule_id: cstrOrNull(e["routing_rule_id"]),
+    provisioning_status: (cstr(e["provisioning_status"]) || "none") as AddressProvisioningStatus,
+    last_validated_at: cstrOrNull(e["last_validated_at"]),
+    last_error: cstrOrNull(e["last_error"]),
+    next_check_at: cstrOrNull(e["next_check_at"]),
   };
 }
 
-export function getAddressProvisioning(id: string, db?: Database): AddressProvisioning | null {
-  const d = db || getDatabase();
-  const row = d
-    .query(
-      `SELECT domain_id, receive_strategy, forward_to, routing_rule_id,
-              provisioning_status, last_validated_at, last_error, next_check_at
-       FROM addresses WHERE id = ?`,
-    )
-    .get(id) as AddressProvRow | null;
-  if (!row) return null;
-  return rowToAddressProvisioning(row);
+export function getAddressProvisioning(id: string): AddressProvisioning | null {
+  const record = selfHostedResource(ADDRESS_RESOURCE).get(id);
+  if (!record) return null;
+  return rowToAddressProvisioning(record);
 }
 
-export function listAddressProvisioningById(db?: Database): Map<string, AddressProvisioning> {
-  const d = db || getDatabase();
-  const rows = d
-    .query(
-      `SELECT id, domain_id, receive_strategy, forward_to, routing_rule_id,
-              provisioning_status, last_validated_at, last_error, next_check_at
-       FROM addresses`,
-    )
-    .all() as Array<AddressProvRow & { id: string }>;
-  return new Map(rows.map((row) => [row.id, rowToAddressProvisioning(row)]));
+export function listAddressProvisioningById(): Map<string, AddressProvisioning> {
+  const rows = selfHostedResource(ADDRESS_RESOURCE).list({ limit: 1000 });
+  return new Map(rows.map((row) => [cstr(row["id"]), rowToAddressProvisioning(row)]));
 }
 
-export function listAddressProvisioningByIds(addressIds: Iterable<string>, db?: Database): Map<string, AddressProvisioning> {
-  const ids = [...new Set([...addressIds].map((id) => id.trim()).filter(Boolean))];
-  if (ids.length === 0) return new Map();
-  const d = db || getDatabase();
-  const placeholders = ids.map(() => "?").join(", ");
-  const rows = d
-    .query(
-      `SELECT id, domain_id, receive_strategy, forward_to, routing_rule_id,
-              provisioning_status, last_validated_at, last_error, next_check_at
-       FROM addresses
-       WHERE id IN (${placeholders})`,
-    )
-    .all(...ids) as Array<AddressProvRow & { id: string }>;
-  return new Map(rows.map((row) => [row.id, rowToAddressProvisioning(row)]));
+export function listAddressProvisioningByIds(addressIds: Iterable<string>): Map<string, AddressProvisioning> {
+  const ids = new Set([...addressIds].map((id) => id.trim()).filter(Boolean));
+  if (ids.size === 0) return new Map();
+  return new Map(
+    selfHostedResource(ADDRESS_RESOURCE)
+      .list({ limit: 1000 })
+      .filter((row) => ids.has(cstr(row["id"])))
+      .map((row) => [cstr(row["id"]), rowToAddressProvisioning(row)]),
+  );
 }
 
 export interface AddressProvisioningByDomain {
@@ -261,132 +202,93 @@ export interface AddressProvisioningByDomain {
   provisioning: AddressProvisioning;
 }
 
-function rowToAddressProvisioningByDomain(row: AddressProvRow & { id: string; email: string }): AddressProvisioningByDomain {
-  return { id: row.id, email: row.email, provisioning: rowToAddressProvisioning(row) };
+function rowToAddressProvisioningByDomain(row: Record<string, unknown>): AddressProvisioningByDomain {
+  return { id: cstr(row["id"]), email: cstr(row["email"]), provisioning: rowToAddressProvisioning(row) };
 }
 
-export function listAddressProvisioningByDomain(db?: Database): Map<string, AddressProvisioningByDomain[]> {
-  const d = db || getDatabase();
-  const rows = d
-    .query(
-      `SELECT id, email, domain_id, receive_strategy, forward_to, routing_rule_id,
-              provisioning_status, last_validated_at, last_error, next_check_at
-       FROM addresses
-       WHERE domain_id IS NOT NULL
-       ORDER BY created_at DESC`,
-    )
-    .all() as Array<AddressProvRow & { id: string; email: string }>;
+function groupAddressesByDomain(rows: Record<string, unknown>[]): Map<string, AddressProvisioningByDomain[]> {
+  const withDomain = rows
+    .filter((row) => cstrOrNull(row["domain_id"]))
+    .sort((a, b) => cstr(b["created_at"]).localeCompare(cstr(a["created_at"])));
   const byDomain = new Map<string, AddressProvisioningByDomain[]>();
-  for (const row of rows) {
-    if (!row.domain_id) continue;
-    const items = byDomain.get(row.domain_id) ?? [];
+  for (const row of withDomain) {
+    const domainId = cstrOrNull(row["domain_id"]);
+    if (!domainId) continue;
+    const items = byDomain.get(domainId) ?? [];
     items.push(rowToAddressProvisioningByDomain(row));
-    byDomain.set(row.domain_id, items);
+    byDomain.set(domainId, items);
   }
   return byDomain;
 }
 
-export function listAddressProvisioningByDomains(domainIds: Iterable<string>, db?: Database): Map<string, AddressProvisioningByDomain[]> {
-  const ids = [...new Set([...domainIds].map((id) => id.trim()).filter(Boolean))];
-  if (ids.length === 0) return new Map();
-  const d = db || getDatabase();
-  const placeholders = ids.map(() => "?").join(", ");
-  const rows = d
-    .query(
-      `SELECT id, email, domain_id, receive_strategy, forward_to, routing_rule_id,
-              provisioning_status, last_validated_at, last_error, next_check_at
-       FROM addresses
-       WHERE domain_id IN (${placeholders})
-       ORDER BY created_at DESC`,
-    )
-    .all(...ids) as Array<AddressProvRow & { id: string; email: string }>;
-  const byDomain = new Map<string, AddressProvisioningByDomain[]>();
-  for (const row of rows) {
-    if (!row.domain_id) continue;
-    const items = byDomain.get(row.domain_id) ?? [];
-    items.push(rowToAddressProvisioningByDomain(row));
-    byDomain.set(row.domain_id, items);
+export function listAddressProvisioningByDomain(): Map<string, AddressProvisioningByDomain[]> {
+  return groupAddressesByDomain(selfHostedResource(ADDRESS_RESOURCE).list({ limit: 1000 }));
+}
+
+export function listAddressProvisioningByDomains(domainIds: Iterable<string>): Map<string, AddressProvisioningByDomain[]> {
+  const ids = new Set([...domainIds].map((id) => id.trim()).filter(Boolean));
+  if (ids.size === 0) return new Map();
+  const rows = selfHostedResource(ADDRESS_RESOURCE)
+    .list({ limit: 1000 })
+    .filter((row) => {
+      const domainId = cstrOrNull(row["domain_id"]);
+      return domainId != null && ids.has(domainId);
+    });
+  return groupAddressesByDomain(rows);
+}
+
+export function listAddressProvisioningForDomain(domainId: string): AddressProvisioningByDomain[] {
+  return selfHostedResource(ADDRESS_RESOURCE)
+    .list({ limit: 1000 })
+    .filter((row) => cstrOrNull(row["domain_id"]) === domainId)
+    .sort((a, b) => cstr(b["created_at"]).localeCompare(cstr(a["created_at"])))
+    .map(rowToAddressProvisioningByDomain);
+}
+
+export function listReadyAddressCountsByDomain(): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const row of selfHostedResource(ADDRESS_RESOURCE).list({ limit: 1000 })) {
+    const domainId = cstrOrNull(row["domain_id"]);
+    if (!domainId || cstr(row["provisioning_status"]) !== "ready") continue;
+    counts.set(domainId, (counts.get(domainId) ?? 0) + 1);
   }
-  return byDomain;
+  return counts;
 }
 
-export function listAddressProvisioningForDomain(domainId: string, db?: Database): AddressProvisioningByDomain[] {
-  const d = db || getDatabase();
-  const rows = d
-    .query(
-      `SELECT id, email, domain_id, receive_strategy, forward_to, routing_rule_id,
-              provisioning_status, last_validated_at, last_error, next_check_at
-       FROM addresses
-       WHERE domain_id = ?
-       ORDER BY created_at DESC`,
-    )
-    .all(domainId) as Array<AddressProvRow & { id: string; email: string }>;
-  return rows.map(rowToAddressProvisioningByDomain);
+export function listReadyAddressCountsByDomains(domainIds: Iterable<string>): Map<string, number> {
+  const ids = new Set([...domainIds].map((id) => id.trim()).filter(Boolean));
+  if (ids.size === 0) return new Map();
+  const counts = new Map<string, number>();
+  for (const row of selfHostedResource(ADDRESS_RESOURCE).list({ limit: 1000 })) {
+    const domainId = cstrOrNull(row["domain_id"]);
+    if (!domainId || !ids.has(domainId) || cstr(row["provisioning_status"]) !== "ready") continue;
+    counts.set(domainId, (counts.get(domainId) ?? 0) + 1);
+  }
+  return counts;
 }
 
-export function listReadyAddressCountsByDomain(db?: Database): Map<string, number> {
-  const d = db || getDatabase();
-  const rows = d
-    .query(
-      `SELECT domain_id, COUNT(*) AS count
-       FROM addresses
-       WHERE domain_id IS NOT NULL AND provisioning_status = 'ready'
-       GROUP BY domain_id`,
-    )
-    .all() as Array<{ domain_id: string; count: unknown }>;
-  return new Map(rows.map((row) => [row.domain_id, countValue(row.count)]));
-}
-
-export function listReadyAddressCountsByDomains(domainIds: Iterable<string>, db?: Database): Map<string, number> {
-  const ids = [...new Set([...domainIds].map((id) => id.trim()).filter(Boolean))];
-  if (ids.length === 0) return new Map();
-  const d = db || getDatabase();
-  const placeholders = ids.map(() => "?").join(", ");
-  const rows = d
-    .query(
-      `SELECT domain_id, COUNT(*) AS count
-       FROM addresses
-       WHERE domain_id IN (${placeholders}) AND provisioning_status = 'ready'
-       GROUP BY domain_id`,
-    )
-    .all(...ids) as Array<{ domain_id: string; count: unknown }>;
-  return new Map(rows.map((row) => [row.domain_id, countValue(row.count)]));
-}
-
-export function countReadyAddressesForDomain(domainId: string, db?: Database): number {
-  const d = db || getDatabase();
-  const row = d
-    .query(
-      `SELECT COUNT(*) AS count
-       FROM addresses
-       WHERE domain_id = ? AND provisioning_status = 'ready'`,
-    )
-    .get(domainId) as { count: unknown } | null;
-  return countValue(row?.count);
+export function countReadyAddressesForDomain(domainId: string): number {
+  return selfHostedResource(ADDRESS_RESOURCE)
+    .list({ limit: 1000 })
+    .filter((row) => cstrOrNull(row["domain_id"]) === domainId && cstr(row["provisioning_status"]) === "ready").length;
 }
 
 export function setAddressProvisioning(
   id: string,
   input: AddressProvisioningInput,
-  db?: Database,
 ): AddressProvisioning | null {
-  const d = db || getDatabase();
-  const sets: string[] = ["updated_at = ?"];
-  const params: (string | null)[] = [now()];
-  const col = (name: string, value: string | null) => { sets.push(`${name} = ?`); params.push(value); };
-
-  if (input.domain_id !== undefined) col("domain_id", input.domain_id);
-  if (input.receive_strategy !== undefined) col("receive_strategy", input.receive_strategy);
-  if (input.forward_to !== undefined) col("forward_to", input.forward_to);
-  if (input.routing_rule_id !== undefined) col("routing_rule_id", input.routing_rule_id);
-  if (input.provisioning_status !== undefined) col("provisioning_status", input.provisioning_status);
-  if (input.last_validated_at !== undefined) col("last_validated_at", input.last_validated_at);
-  if (input.last_error !== undefined) col("last_error", input.last_error);
-  if (input.next_check_at !== undefined) col("next_check_at", input.next_check_at);
-
-  params.push(id);
-  d.run(`UPDATE addresses SET ${sets.join(", ")} WHERE id = ?`, params);
-  return getAddressProvisioning(id, d);
+  const patch: Record<string, unknown> = {};
+  if (input.domain_id !== undefined) patch["domain_id"] = input.domain_id;
+  if (input.receive_strategy !== undefined) patch["receive_strategy"] = input.receive_strategy;
+  if (input.forward_to !== undefined) patch["forward_to"] = input.forward_to;
+  if (input.routing_rule_id !== undefined) patch["routing_rule_id"] = input.routing_rule_id;
+  if (input.provisioning_status !== undefined) patch["provisioning_status"] = input.provisioning_status;
+  if (input.last_validated_at !== undefined) patch["last_validated_at"] = input.last_validated_at;
+  if (input.last_error !== undefined) patch["last_error"] = input.last_error;
+  if (input.next_check_at !== undefined) patch["next_check_at"] = input.next_check_at;
+  patch["updated_at"] = now();
+  selfHostedResource(ADDRESS_RESOURCE).update(id, patch);
+  return getAddressProvisioning(id);
 }
 
 // ─── Audit trail ────────────────────────────────────────────────────────────
@@ -397,79 +299,70 @@ export function recordProvisioningEvent(
   from_state: string | null,
   to_state: string,
   detail: Record<string, unknown> = {},
-  db?: Database,
 ): ProvisioningEvent {
-  const d = db || getDatabase();
   const id = uuid();
   const created_at = now();
-  d.run(
-    `INSERT INTO provisioning_events (id, entity_type, entity_id, from_state, to_state, detail_json, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    [id, entity_type, entity_id, from_state, to_state, JSON.stringify(detail), created_at],
-  );
+  selfHostedResource(PROVISIONING_RESOURCE).create({
+    id,
+    entity_type,
+    entity_id,
+    from_state,
+    to_state,
+    detail_json: JSON.stringify(detail),
+    created_at,
+  });
   return { id, entity_type, entity_id, from_state, to_state, detail, created_at };
-}
-
-interface ProvEventRow {
-  id: string;
-  entity_type: string;
-  entity_id: string;
-  from_state: string | null;
-  to_state: string;
-  detail_json: string;
-  created_at: string;
 }
 
 export function listProvisioningEvents(
   entity_type: "domain" | "address",
   entity_id: string,
-  db?: Database,
 ): ProvisioningEvent[] {
-  const d = db || getDatabase();
-  const rows = d
-    .query(
-      `SELECT * FROM provisioning_events WHERE entity_type = ? AND entity_id = ? ORDER BY created_at ASC, rowid ASC`,
-    )
-    .all(entity_type, entity_id) as ProvEventRow[];
-  return rows.map((r) => ({
-    id: r.id,
-    entity_type: r.entity_type as "domain" | "address",
-    entity_id: r.entity_id,
-    from_state: r.from_state,
-    to_state: r.to_state,
-    detail: safeJsonObject(r.detail_json),
-    created_at: r.created_at,
+  return selfHostedResource(PROVISIONING_RESOURCE)
+    .list({ limit: 1000 })
+    .filter((row) => cstr(row["entity_type"]) === entity_type && cstr(row["entity_id"]) === entity_id)
+    .map((row) => ({
+      id: cstr(row["id"]),
+      entity_type: cstr(row["entity_type"]) as "domain" | "address",
+      entity_id: cstr(row["entity_id"]),
+      from_state: cstrOrNull(row["from_state"]),
+      to_state: cstr(row["to_state"]),
+      detail: cobj(row["detail"] ?? row["detail_json"]),
+      created_at: ciso(row["created_at"]),
+    }))
+    .sort((a, b) => a.created_at.localeCompare(b.created_at));
+}
+
+// ─── Daemon queue (derived client-side) ─────────────────────────────────────
+
+interface DueRow {
+  id: string;
+  status: string;
+  next: string | null;
+}
+
+function dueRows(resource: string): DueRow[] {
+  return selfHostedResource(resource).list({ limit: 1000 }).map((row) => ({
+    id: cstr(row["id"]),
+    status: cstr(row["provisioning_status"]) || "none",
+    next: cstrOrNull(row["next_check_at"]),
   }));
 }
 
-// ─── Daemon queue ───────────────────────────────────────────────────────────
-
-const TERMINAL_SQL = "('ready','failed','none')";
-
-export function claimDueDomains(asOf?: string, db?: Database): { id: string }[] {
-  const d = db || getDatabase();
+function claimDue(resource: string, asOf?: string): { id: string }[] {
   const ts = asOf || now();
-  return d
-    .query(
-      `SELECT id FROM domains
-       WHERE provisioning_status NOT IN ${TERMINAL_SQL}
-         AND next_check_at IS NOT NULL AND next_check_at <= ?
-       ORDER BY next_check_at ASC`,
-    )
-    .all(ts) as { id: string }[];
+  return dueRows(resource)
+    .filter((r) => !TERMINAL_SET.has(r.status) && r.next != null && r.next <= ts)
+    .sort((a, b) => (a.next ?? "").localeCompare(b.next ?? ""))
+    .map((r) => ({ id: r.id }));
 }
 
-export function claimDueAddresses(asOf?: string, db?: Database): { id: string }[] {
-  const d = db || getDatabase();
-  const ts = asOf || now();
-  return d
-    .query(
-      `SELECT id FROM addresses
-       WHERE provisioning_status NOT IN ${TERMINAL_SQL}
-         AND next_check_at IS NOT NULL AND next_check_at <= ?
-       ORDER BY next_check_at ASC`,
-    )
-    .all(ts) as { id: string }[];
+export function claimDueDomains(asOf?: string): { id: string }[] {
+  return claimDue(DOMAIN_RESOURCE, asOf);
+}
+
+export function claimDueAddresses(asOf?: string): { id: string }[] {
+  return claimDue(ADDRESS_RESOURCE, asOf);
 }
 
 export interface ProvisioningWorkSummary {
@@ -479,31 +372,15 @@ export interface ProvisioningWorkSummary {
   failed_addresses: number;
 }
 
-export function getProvisioningWorkSummary(asOf?: string, db?: Database): ProvisioningWorkSummary {
-  const d = db || getDatabase();
+export function getProvisioningWorkSummary(asOf?: string): ProvisioningWorkSummary {
   const ts = asOf || now();
-  const row = d
-    .query(
-      `SELECT
-         (SELECT COUNT(*) FROM domains
-          WHERE provisioning_status NOT IN ${TERMINAL_SQL}
-            AND next_check_at IS NOT NULL AND next_check_at <= ?) AS due_domains,
-         (SELECT COUNT(*) FROM addresses
-          WHERE provisioning_status NOT IN ${TERMINAL_SQL}
-            AND next_check_at IS NOT NULL AND next_check_at <= ?) AS due_addresses,
-         (SELECT COUNT(*) FROM domains WHERE provisioning_status = 'failed') AS failed_domains,
-         (SELECT COUNT(*) FROM addresses WHERE provisioning_status = 'failed') AS failed_addresses`,
-    )
-    .get(ts, ts) as Record<keyof ProvisioningWorkSummary, unknown> | null;
+  const domains = dueRows(DOMAIN_RESOURCE);
+  const addresses = dueRows(ADDRESS_RESOURCE);
+  const isDue = (r: DueRow) => !TERMINAL_SET.has(r.status) && r.next != null && r.next <= ts;
   return {
-    due_domains: countValue(row?.due_domains),
-    due_addresses: countValue(row?.due_addresses),
-    failed_domains: countValue(row?.failed_domains),
-    failed_addresses: countValue(row?.failed_addresses),
+    due_domains: domains.filter(isDue).length,
+    due_addresses: addresses.filter(isDue).length,
+    failed_domains: domains.filter((r) => r.status === "failed").length,
+    failed_addresses: addresses.filter((r) => r.status === "failed").length,
   };
 }
-
-// ─── helpers ────────────────────────────────────────────────────────────────
-
-const safeJsonArray = parseJsonArray<string>;
-const safeJsonObject = parseJsonObject;

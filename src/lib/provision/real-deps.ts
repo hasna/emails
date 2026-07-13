@@ -14,7 +14,6 @@ import type { Provider } from "../../types/index.js";
 import { getAdapter } from "../../providers/index.js";
 import { getDomainProvisioning } from "../../db/provisioning.js";
 import { listInboundSubjectsForRecipient } from "../../db/inbound.js";
-import type { Database } from "../../db/database.js";
 import type { DomainDeps, AddressDeps } from "./orchestrator.js";
 import { runSelfRoundtrip } from "./roundtrip.js";
 
@@ -26,7 +25,6 @@ export interface RealDepsOptions {
   region?: string;
   addMx?: boolean;
   forceMxSwitch?: boolean;
-  db?: Database;
 }
 
 export function makeDomainDeps(opts: RealDepsOptions): DomainDeps {
@@ -104,7 +102,7 @@ export function makeAddressDeps(opts: RealDepsOptions): AddressDeps {
       const domain = ctx.email.split("@")[1]!;
       const prov = getDomainProvisioning(
         // not strictly needed; kept for parity
-        ctx.id, opts.db,
+        ctx.id,
       );
       void prov;
       const { sendWithFailover } = await import("../send.js");
@@ -117,10 +115,10 @@ export function makeAddressDeps(opts: RealDepsOptions): AddressDeps {
         {
           send: async ({ from, to, subject, text }) => {
             const sendOpts = { from, to, subject, text, html: `<p>${text}</p>` };
-            const r = await sendWithFailover(providerId, sendOpts, opts.db);
+            const r = await sendWithFailover(providerId, sendOpts);
             const { createSentEmailLedger, storeSentEmailContent } = await import("../sent-ledger.js");
-            const email = await createSentEmailLedger(r.providerId, sendOpts, r.messageId, opts.db);
-            await storeSentEmailContent(email.id, { html: sendOpts.html, text }, opts.db);
+            const email = await createSentEmailLedger(r.providerId, sendOpts, r.messageId);
+            await storeSentEmailContent(email.id, { html: sendOpts.html, text });
             await new Promise((res) => setTimeout(res, 1100));
             return { messageId: r.messageId };
           },
@@ -133,10 +131,8 @@ export function makeAddressDeps(opts: RealDepsOptions): AddressDeps {
               secretAccessKey: opts.provider.secret_key ?? undefined,
               limit: 1000,
               region,
-              db: opts.db,
             });
-            const db = opts.db ?? (await import("../../db/database.js")).getDatabase();
-            return listInboundSubjectsForRecipient(mailbox, { since: roundtripStartedAt, limit: 100 }, db);
+            return listInboundSubjectsForRecipient(mailbox, { since: roundtripStartedAt, limit: 100 });
           },
         },
         { address: ctx.email, count: 1, tokenPrefix: `VAL-${Date.now()}`, pollAttempts: 10, pollIntervalMs: 8000 },

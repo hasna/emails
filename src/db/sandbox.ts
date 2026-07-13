@@ -1,8 +1,9 @@
-import type { Database } from "./database.js";
 import type { Attachment } from "../types/index.js";
-import { getDatabase, uuid } from "./database.js";
-import { parseJsonArray, parseJsonObject } from "./json.js";
+import { now, uuid } from "./runtime.js";
 import { safeLimit, safeOffset } from "./pagination.js";
+import { selfHostedResource, carray, cobj, cstrArray, ciso, cstr, cstrOrNull } from "./self-hosted-resource.js";
+
+const SANDBOX_RESOURCE = "sandbox-emails";
 
 export interface SandboxEmail {
   id: string;
@@ -22,68 +23,27 @@ export interface SandboxEmail {
 
 export type SandboxEmailSummary = Omit<SandboxEmail, "html" | "text_body" | "headers">;
 
-interface SandboxEmailRow {
-  id: string;
-  provider_id: string;
-  from_address: string;
-  to_addresses: string;
-  cc_addresses: string;
-  bcc_addresses: string;
-  reply_to: string | null;
-  subject: string;
-  html: string | null;
-  text_body: string | null;
-  attachments_json: string;
-  headers_json: string;
-  created_at: string;
-}
-
-type SandboxEmailSummaryRow = Omit<SandboxEmailRow, "html" | "text_body" | "headers_json">;
-
-const SANDBOX_SUMMARY_COLS = `
-  id,
-  provider_id,
-  from_address,
-  to_addresses,
-  cc_addresses,
-  bcc_addresses,
-  reply_to,
-  subject,
-  attachments_json,
-  created_at
-`;
-
-function rowToEmail(row: SandboxEmailRow): SandboxEmail {
+function apiToSandbox(e: Record<string, unknown>): SandboxEmail {
   return {
-    id: row.id,
-    provider_id: row.provider_id,
-    from_address: row.from_address,
-    to_addresses: parseJsonArray<string>(row.to_addresses),
-    cc_addresses: parseJsonArray<string>(row.cc_addresses),
-    bcc_addresses: parseJsonArray<string>(row.bcc_addresses),
-    reply_to: row.reply_to,
-    subject: row.subject,
-    html: row.html,
-    text_body: row.text_body,
-    attachments: parseJsonArray<Attachment>(row.attachments_json),
-    headers: parseJsonObject<Record<string, string>>(row.headers_json),
-    created_at: row.created_at,
+    id: cstr(e["id"]),
+    provider_id: cstr(e["provider_id"]),
+    from_address: cstr(e["from_address"]),
+    to_addresses: cstrArray(e["to_addresses"]),
+    cc_addresses: cstrArray(e["cc_addresses"]),
+    bcc_addresses: cstrArray(e["bcc_addresses"]),
+    reply_to: cstrOrNull(e["reply_to"]),
+    subject: cstr(e["subject"]),
+    html: cstrOrNull(e["html"]),
+    text_body: cstrOrNull(e["text_body"]),
+    attachments: carray(e["attachments"] ?? e["attachments_json"]) as Attachment[],
+    headers: cobj(e["headers"] ?? e["headers_json"]) as Record<string, string>,
+    created_at: ciso(e["created_at"]),
   };
 }
 
-function rowToEmailSummary(row: SandboxEmailSummaryRow): SandboxEmailSummary {
-  return {
-    id: row.id,
-    provider_id: row.provider_id,
-    from_address: row.from_address,
-    to_addresses: parseJsonArray<string>(row.to_addresses),
-    cc_addresses: parseJsonArray<string>(row.cc_addresses),
-    bcc_addresses: parseJsonArray<string>(row.bcc_addresses),
-    reply_to: row.reply_to,
-    subject: row.subject,
-    attachments: parseJsonArray<Attachment>(row.attachments_json),
-    created_at: row.created_at,
-  };
+function toSandboxSummary(email: SandboxEmail): SandboxEmailSummary {
+  const { html: _html, text_body: _text, headers: _headers, ...summary } = email;
+  return summary;
 }
 
 export interface StoreSandboxEmailInput {
@@ -100,111 +60,59 @@ export interface StoreSandboxEmailInput {
   headers: Record<string, string>;
 }
 
-export function storeSandboxEmail(input: StoreSandboxEmailInput, db?: Database): SandboxEmail {
-  const d = db || getDatabase();
+export function storeSandboxEmail(input: StoreSandboxEmailInput): SandboxEmail {
   const id = uuid();
-
-  d.run(
-    `INSERT INTO sandbox_emails (id, provider_id, from_address, to_addresses, cc_addresses, bcc_addresses,
-       reply_to, subject, html, text_body, attachments_json, headers_json)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      id,
-      input.provider_id,
-      input.from_address,
-      JSON.stringify(input.to_addresses),
-      JSON.stringify(input.cc_addresses),
-      JSON.stringify(input.bcc_addresses),
-      input.reply_to,
-      input.subject,
-      input.html,
-      input.text_body,
-      JSON.stringify(input.attachments),
-      JSON.stringify(input.headers),
-    ],
-  );
-
-  const row = d.query("SELECT * FROM sandbox_emails WHERE id = ?").get(id) as SandboxEmailRow;
-  return rowToEmail(row);
+  const created = selfHostedResource(SANDBOX_RESOURCE).create({
+    id,
+    provider_id: input.provider_id,
+    from_address: input.from_address,
+    to_addresses: input.to_addresses,
+    cc_addresses: input.cc_addresses,
+    bcc_addresses: input.bcc_addresses,
+    reply_to: input.reply_to,
+    subject: input.subject,
+    html: input.html,
+    text_body: input.text_body,
+    attachments_json: JSON.stringify(input.attachments),
+    headers_json: JSON.stringify(input.headers),
+    created_at: now(),
+  });
+  return apiToSandbox(created);
 }
 
-export function listSandboxEmails(
-  providerId?: string,
-  limit = 50,
-  dbOrOffset?: Database | number,
-  maybeDb?: Database,
-): SandboxEmail[] {
-  const rawOffset = typeof dbOrOffset === "number" ? dbOrOffset : 0;
+function listSandbox(providerId: string | undefined, limit: number, offset: number): SandboxEmail[] {
   const normalizedLimit = safeLimit(limit);
-  const offset = safeOffset(rawOffset);
-  const d = typeof dbOrOffset === "number"
-    ? (maybeDb || getDatabase())
-    : (dbOrOffset || getDatabase());
-
-  let rows: SandboxEmailRow[];
-  if (providerId) {
-    rows = d.query(
-      "SELECT * FROM sandbox_emails WHERE provider_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
-    ).all(providerId, normalizedLimit, offset) as SandboxEmailRow[];
-  } else {
-    rows = d.query(
-      "SELECT * FROM sandbox_emails ORDER BY created_at DESC LIMIT ? OFFSET ?",
-    ).all(normalizedLimit, offset) as SandboxEmailRow[];
-  }
-  return rows.map(rowToEmail);
+  const off = safeOffset(offset);
+  let rows = selfHostedResource(SANDBOX_RESOURCE).list({ limit: 1000 }).map(apiToSandbox);
+  if (providerId) rows = rows.filter((e) => e.provider_id === providerId);
+  rows.sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
+  return rows.slice(off, off + normalizedLimit);
 }
 
-export function listSandboxEmailSummaries(
-  providerId?: string,
-  limit = 50,
-  dbOrOffset?: Database | number,
-  maybeDb?: Database,
-): SandboxEmailSummary[] {
-  const rawOffset = typeof dbOrOffset === "number" ? dbOrOffset : 0;
-  const normalizedLimit = safeLimit(limit);
-  const offset = safeOffset(rawOffset);
-  const d = typeof dbOrOffset === "number"
-    ? (maybeDb || getDatabase())
-    : (dbOrOffset || getDatabase());
-
-  let rows: SandboxEmailSummaryRow[];
-  if (providerId) {
-    rows = d.query(
-      `SELECT ${SANDBOX_SUMMARY_COLS} FROM sandbox_emails WHERE provider_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?`,
-    ).all(providerId, normalizedLimit, offset) as SandboxEmailSummaryRow[];
-  } else {
-    rows = d.query(
-      `SELECT ${SANDBOX_SUMMARY_COLS} FROM sandbox_emails ORDER BY created_at DESC LIMIT ? OFFSET ?`,
-    ).all(normalizedLimit, offset) as SandboxEmailSummaryRow[];
-  }
-  return rows.map(rowToEmailSummary);
+export function listSandboxEmails(providerId?: string, limit = 50, offset = 0): SandboxEmail[] {
+  return listSandbox(providerId, limit, offset);
 }
 
-export function getSandboxEmail(id: string, db?: Database): SandboxEmail | null {
-  const d = db || getDatabase();
-  const row = d.query("SELECT * FROM sandbox_emails WHERE id = ?").get(id) as SandboxEmailRow | null;
-  if (!row) return null;
-  return rowToEmail(row);
+export function listSandboxEmailSummaries(providerId?: string, limit = 50, offset = 0): SandboxEmailSummary[] {
+  return listSandbox(providerId, limit, offset).map(toSandboxSummary);
 }
 
-export function clearSandboxEmails(providerId?: string, db?: Database): number {
-  const d = db || getDatabase();
-  let result: { changes: number };
-  if (providerId) {
-    result = d.run("DELETE FROM sandbox_emails WHERE provider_id = ?", [providerId]);
-  } else {
-    result = d.run("DELETE FROM sandbox_emails");
-  }
-  return result.changes;
+export function getSandboxEmail(id: string): SandboxEmail | null {
+  const record = selfHostedResource(SANDBOX_RESOURCE).get(id);
+  return record ? apiToSandbox(record) : null;
 }
 
-export function getSandboxCount(providerId?: string, db?: Database): number {
-  const d = db || getDatabase();
-  let row: { count: number } | null;
-  if (providerId) {
-    row = d.query("SELECT COUNT(*) as count FROM sandbox_emails WHERE provider_id = ?").get(providerId) as { count: number } | null;
-  } else {
-    row = d.query("SELECT COUNT(*) as count FROM sandbox_emails").get() as { count: number } | null;
-  }
-  return row?.count ?? 0;
+export function clearSandboxEmails(providerId?: string): number {
+  const store = selfHostedResource(SANDBOX_RESOURCE);
+  const rows = store.list({ limit: 1000 }).map(apiToSandbox).filter((e) => (providerId ? e.provider_id === providerId : true));
+  let count = 0;
+  for (const e of rows) if (store.del(e.id)) count++;
+  return count;
+}
+
+export function getSandboxCount(providerId?: string): number {
+  return selfHostedResource(SANDBOX_RESOURCE)
+    .list({ limit: 1000 })
+    .map(apiToSandbox)
+    .filter((e) => (providerId ? e.provider_id === providerId : true)).length;
 }

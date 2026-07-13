@@ -1,22 +1,45 @@
-import type { Database } from "./database.js";
-import { getDatabase, uuid, now } from "./database.js";
-import { parseJsonArray, parseJsonObject } from "./json.js";
+// Inbound (received + imported-sent) mail repository — self-hosted-ONLY.
+//
+// Every read/write routes to the operator's `/v1/messages` API. There is no
+// local SQLite island. The `/v1` message row is snake_case and unifies inbound
+// and outbound mail:
+//   from_address <-> from_addr, to_addresses <-> to_addrs, cc_addresses <-> cc_addrs,
+//   text_body <-> body_text, html_body <-> body_html, label_ids <-> labels,
+//   is_sent <-> (direction === "outbound"). There is NO thread_id column
+//   (threads are server-derived by normalized subject), and no provider/owner
+//   dimension on a message — those local-only fields map to null/default.
+//
+// Filters/sorts/counts with no direct query surface fetch a bounded page window
+// and are applied in JS. Owner-scoped queries and local attachment-path writes
+// have no `/v1` equivalent and are stubbed per the self-hosted contract (rule 6).
+
 import { cappedLimit, safeLimit, safeOffset, safeOptionalLimit } from "./pagination.js";
+import { now, uuid } from "./runtime.js";
+import {
+  selfHostedResource,
+  carray,
+  cbool,
+  cnum,
+  cobj,
+  cstr,
+  cstrArray,
+  cstrOrNull,
+  ciso,
+} from "./self-hosted-resource.js";
+import type { AttachmentPath } from "../lib/mail-types.js";
+export type { AttachmentPath } from "../lib/mail-types.js";
+
+const MESSAGE_RESOURCE = "messages";
+
+// Bounded scan window for filters/counts/reply-resolution that have no direct
+// server query. Large enough for a real mailbox without an unbounded walk.
+const INBOUND_SCAN_PAGE = 500;
+const INBOUND_SCAN_CAP = 10000;
 
 export interface AttachmentMeta {
   filename: string;
   content_type: string;
   size: number;
-}
-
-export interface AttachmentPath {
-  filename: string;
-  content_type: string;
-  size: number;
-  /** Local file path, e.g. ~/.hasna/emails/attachments/<email_id>/filename */
-  local_path?: string;
-  /** S3 URL if uploaded, e.g. s3://bucket/emails/<email_id>/filename */
-  s3_url?: string;
 }
 
 export interface InboundEmail {
@@ -52,70 +75,98 @@ export interface InboundEmail {
 
 export type InboundEmailSummary = Omit<InboundEmail, "text_body" | "html_body" | "headers">;
 
-interface InboundEmailRow {
-  id: string;
-  provider_id: string | null;
-  message_id: string | null;
-  in_reply_to_email_id?: string | null;
-  provider_thread_id?: string | null;
-  thread_id?: string | null;
-  provider_history_id?: string | null;
-  provider_internal_date?: string | null;
-  label_ids_json?: string;
-  raw_s3_url?: string | null;
-  metadata_s3_url?: string | null;
-  from_address: string;
-  to_addresses: string;
-  cc_addresses: string;
-  subject: string;
-  text_body: string | null;
-  html_body: string | null;
-  attachments_json: string;
-  attachment_paths: string;
-  headers_json: string;
-  raw_size: number;
-  is_read?: number;
-  read_at?: string | null;
-  is_archived?: number;
-  is_starred?: number;
-  is_sent?: number;
-  received_at: string;
-  created_at: string;
+// ── /v1 message row helpers ────────────────────────────────────────────────
+
+function messagesStore() {
+  return selfHostedResource(MESSAGE_RESOURCE);
 }
 
-type InboundEmailSummaryRow = Omit<InboundEmailRow, "text_body" | "html_body" | "headers_json">;
-
-function sincePredicate(column: string): string {
-  return `julianday(${column}) >= julianday(?)`;
+function scanMessages(query: Record<string, string | number | boolean | undefined> = {}): Record<string, unknown>[] {
+  const store = messagesStore();
+  const rows: Record<string, unknown>[] = [];
+  for (let offset = 0; offset < INBOUND_SCAN_CAP; offset += INBOUND_SCAN_PAGE) {
+    const page = store.list({ ...query, limit: INBOUND_SCAN_PAGE, offset });
+    rows.push(...page);
+    if (page.length < INBOUND_SCAN_PAGE) break;
+  }
+  return rows;
 }
 
-const INBOUND_SUMMARY_COLS = `
-  id,
-  provider_id,
-  message_id,
-  in_reply_to_email_id,
-  provider_thread_id,
-  thread_id,
-  provider_history_id,
-  provider_internal_date,
-  label_ids_json,
-  raw_s3_url,
-  metadata_s3_url,
-  from_address,
-  to_addresses,
-  cc_addresses,
-  subject,
-  attachments_json,
-  attachment_paths,
-  raw_size,
-  is_read,
-  read_at,
-  is_archived,
-  is_starred,
-  is_sent,
-  received_at,
-  created_at
-`;
+function v1Labels(row: Record<string, unknown>): string[] {
+  return cstrArray(row["labels"]);
+}
+
+function v1IsOutbound(row: Record<string, unknown>): boolean {
+  return cstr(row["direction"]).toLowerCase() === "outbound";
+}
+
+function v1HasLabel(row: Record<string, unknown>, name: string): boolean {
+  return v1Labels(row).some((l) => l.trim().toLowerCase() === name);
+}
+
+/** Sort/compare key: received_at, falling back to created_at (empty if neither). */
+function v1MsgDate(row: Record<string, unknown>): string {
+  return cstrOrNull(row["received_at"]) ?? cstrOrNull(row["created_at"]) ?? "";
+}
+
+function v1Attachments(row: Record<string, unknown>): AttachmentMeta[] {
+  return carray(row["attachments"]).map((attachment, index) => {
+    const o = cobj(attachment);
+    return {
+      filename: cstr(o["filename"]) || `attachment-${index + 1}`,
+      content_type: cstr(o["content_type"]) || "application/octet-stream",
+      size: cnum(o["size"]),
+    };
+  });
+}
+
+function bareId(value: string): string {
+  return value.replace(/[<>]/g, "").trim();
+}
+
+function apiToInboundEmail(row: Record<string, unknown>): InboundEmail {
+  const isRead = cbool(row["is_read"]);
+  const outbound = v1IsOutbound(row);
+  const attachments = v1Attachments(row);
+  const receivedAt = cstrOrNull(row["received_at"]) ?? ciso(row["created_at"]);
+  return {
+    id: cstr(row["id"]),
+    provider_id: cstrOrNull(row["provider_id"]),
+    message_id: cstrOrNull(row["message_id"]),
+    in_reply_to_email_id: null,
+    provider_thread_id: null,
+    thread_id: null,
+    provider_history_id: null,
+    provider_internal_date: null,
+    label_ids: v1Labels(row),
+    raw_s3_url: null,
+    metadata_s3_url: null,
+    from_address: cstr(row["from_addr"]),
+    to_addresses: cstrArray(row["to_addrs"]),
+    cc_addresses: cstrArray(row["cc_addrs"]),
+    subject: cstr(row["subject"]),
+    text_body: cstrOrNull(row["body_text"]),
+    html_body: cstrOrNull(row["body_html"]),
+    attachments,
+    attachment_paths: attachments.map((a) => ({ filename: a.filename, content_type: a.content_type, size: a.size })),
+    headers: cobj(row["headers"]) as Record<string, string>,
+    raw_size: cnum(row["raw_size"]),
+    is_read: isRead,
+    read_at: isRead ? receivedAt : null,
+    is_archived: v1HasLabel(row, "archived"),
+    is_starred: cbool(row["is_starred"]),
+    is_sent: outbound,
+    received_at: receivedAt,
+    created_at: ciso(row["created_at"], receivedAt),
+  };
+}
+
+function apiToInboundEmailSummary(row: Record<string, unknown>): InboundEmailSummary {
+  const { text_body: _t, html_body: _h, headers: _hd, ...summary } = apiToInboundEmail(row);
+  return summary;
+}
+
+// ── pure address helpers (storage-independent) ─────────────────────────────
 
 export function normalizeEmailAddress(value: string | null | undefined): string | null {
   const raw = String(value ?? "").trim().toLowerCase();
@@ -140,84 +191,11 @@ export function inboundRecipientMatches(
   return domainSet.has(domain);
 }
 
-function rowToEmail(row: InboundEmailRow): InboundEmail {
-  return {
-    id: row.id,
-    provider_id: row.provider_id,
-    message_id: row.message_id,
-    in_reply_to_email_id: row.in_reply_to_email_id ?? null,
-    provider_thread_id: row.provider_thread_id ?? null,
-    thread_id: row.thread_id ?? null,
-    provider_history_id: row.provider_history_id ?? null,
-    provider_internal_date: row.provider_internal_date ?? null,
-    label_ids: parseJsonArray<string>(row.label_ids_json),
-    raw_s3_url: row.raw_s3_url ?? null,
-    metadata_s3_url: row.metadata_s3_url ?? null,
-    from_address: row.from_address,
-    to_addresses: parseJsonArray<string>(row.to_addresses),
-    cc_addresses: parseJsonArray<string>(row.cc_addresses),
-    subject: row.subject,
-    text_body: row.text_body,
-    html_body: row.html_body,
-    attachments: parseJsonArray<AttachmentMeta>(row.attachments_json),
-    attachment_paths: parseJsonArray<AttachmentPath>(row.attachment_paths),
-    headers: parseJsonObject(row.headers_json),
-    raw_size: row.raw_size,
-    is_read: !!row.is_read,
-    read_at: row.read_at ?? null,
-    is_archived: !!row.is_archived,
-    is_starred: !!row.is_starred,
-    is_sent: !!row.is_sent,
-    received_at: row.received_at,
-    created_at: row.created_at,
-  };
+function normalizeInboundLabel(label: string): string {
+  return label.trim().toLowerCase().replace(/\s+/g, "-").slice(0, 64);
 }
 
-function rowToEmailSummary(row: InboundEmailSummaryRow): InboundEmailSummary {
-  return {
-    id: row.id,
-    provider_id: row.provider_id,
-    message_id: row.message_id,
-    in_reply_to_email_id: row.in_reply_to_email_id ?? null,
-    provider_thread_id: row.provider_thread_id ?? null,
-    thread_id: row.thread_id ?? null,
-    provider_history_id: row.provider_history_id ?? null,
-    provider_internal_date: row.provider_internal_date ?? null,
-    label_ids: parseJsonArray<string>(row.label_ids_json),
-    raw_s3_url: row.raw_s3_url ?? null,
-    metadata_s3_url: row.metadata_s3_url ?? null,
-    from_address: row.from_address,
-    to_addresses: parseJsonArray<string>(row.to_addresses),
-    cc_addresses: parseJsonArray<string>(row.cc_addresses),
-    subject: row.subject,
-    attachments: parseJsonArray<AttachmentMeta>(row.attachments_json),
-    attachment_paths: parseJsonArray<AttachmentPath>(row.attachment_paths),
-    raw_size: row.raw_size,
-    is_read: !!row.is_read,
-    read_at: row.read_at ?? null,
-    is_archived: !!row.is_archived,
-    is_starred: !!row.is_starred,
-    is_sent: !!row.is_sent,
-    received_at: row.received_at,
-    created_at: row.created_at,
-  };
-}
-
-function detectReplyToEmailId(headers: Record<string, string>, d: Database): string | null {
-  // Check In-Reply-To and References headers for a known provider_message_id
-  const candidates: string[] = [];
-  const inReplyTo = headers["In-Reply-To"] || headers["in-reply-to"];
-  const references = headers["References"] || headers["references"];
-  if (inReplyTo) candidates.push(...inReplyTo.split(/\s+/).map(s => s.replace(/[<>]/g, "").trim()));
-  if (references) candidates.push(...references.split(/\s+/).map(s => s.replace(/[<>]/g, "").trim()));
-
-  for (const msgId of candidates) {
-    if (!msgId) continue;
-    const row = d.query("SELECT id FROM emails WHERE provider_message_id = ? LIMIT 1").get(msgId) as { id: string } | null;
-    if (row) return row.id;
-  }
-  return null;
-}
+// ── writes ─────────────────────────────────────────────────────────────────
 
 export function storeInboundEmail(
   input: Omit<
@@ -230,64 +208,42 @@ export function storeInboundEmail(
     "provider_thread_id" | "provider_history_id" | "provider_internal_date" |
     "label_ids" | "raw_s3_url" | "metadata_s3_url" | "thread_id"
   >>,
-  db?: Database,
 ): InboundEmail {
-  const d = db || getDatabase();
-  const id = uuid();
-  const timestamp = now();
-  const receivedAt = input.received_at || timestamp;
+  const labels = input.label_ids ?? [];
+  // Imported sent mail carries the SENT label — persist it as an outbound
+  // message so it lands in the Sent folder, not the inbox.
+  const isSent = labels.some((label) => label.trim().toLowerCase() === "sent");
+  const receivedAt = input.received_at || now();
   const attachmentPaths = (input as InboundEmail).attachment_paths ?? [];
 
-  // Auto-detect reply linkage from email headers
-  const replyToEmailId = input.in_reply_to_email_id ?? detectReplyToEmailId(input.headers, d);
-
-  // Imported sent mail can carry the SENT label — flag it so it
-  // lands in the Sent folder, not the inbox.
-  const isSent = (input.label_ids ?? []).some((label) => label.trim().toLowerCase() === "sent") ? 1 : 0;
-
-  d.run(
-    `INSERT INTO inbound_emails
-       (id, provider_id, message_id, in_reply_to_email_id, provider_thread_id, provider_history_id,
-        provider_internal_date, label_ids_json, raw_s3_url, metadata_s3_url, from_address, to_addresses, cc_addresses,
-        subject, text_body, html_body, attachments_json, attachment_paths, headers_json, raw_size, received_at, is_sent, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      id,
-      input.provider_id,
-      input.message_id,
-      replyToEmailId,
-      input.provider_thread_id ?? null,
-      input.provider_history_id ?? null,
-      input.provider_internal_date ?? null,
-      JSON.stringify(input.label_ids ?? []),
-      input.raw_s3_url ?? null,
-      input.metadata_s3_url ?? null,
-      input.from_address,
-      JSON.stringify(input.to_addresses),
-      JSON.stringify(input.cc_addresses),
-      input.subject,
-      input.text_body,
-      input.html_body,
-      JSON.stringify(input.attachments),
-      JSON.stringify(attachmentPaths),
-      JSON.stringify(input.headers),
-      input.raw_size,
-      receivedAt,
-      isSent,
-      timestamp,
-    ],
-  );
-
-  const stored: InboundEmail = {
-    id,
-    provider_id: input.provider_id,
+  const created = messagesStore().create({
+    id: uuid(),
+    direction: isSent ? "outbound" : "inbound",
+    from_addr: input.from_address,
+    to_addrs: input.to_addresses,
+    cc_addrs: input.cc_addresses,
+    subject: input.subject,
+    body_text: input.text_body,
+    body_html: input.html_body,
     message_id: input.message_id,
-    in_reply_to_email_id: replyToEmailId,
+    received_at: receivedAt,
+    labels,
+    headers: input.headers,
+    attachments: input.attachments,
+    created_at: now(),
+  });
+
+  const id = cstr(created["id"]) || uuid();
+  return {
+    id,
+    provider_id: input.provider_id ?? null,
+    message_id: input.message_id ?? null,
+    in_reply_to_email_id: input.in_reply_to_email_id ?? null,
     provider_thread_id: input.provider_thread_id ?? null,
-    thread_id: null,
+    thread_id: input.thread_id ?? null,
     provider_history_id: input.provider_history_id ?? null,
     provider_internal_date: input.provider_internal_date ?? null,
-    label_ids: input.label_ids ?? [],
+    label_ids: labels,
     raw_s3_url: input.raw_s3_url ?? null,
     metadata_s3_url: input.metadata_s3_url ?? null,
     from_address: input.from_address,
@@ -304,37 +260,20 @@ export function storeInboundEmail(
     read_at: null,
     is_archived: false,
     is_starred: false,
-    is_sent: !!isSent,
+    is_sent: isSent,
     received_at: receivedAt,
-    created_at: timestamp,
+    created_at: ciso(created["created_at"], receivedAt),
   };
-
-  // Auto-unenroll from active sequences if this is a reply (respects sequence-auto-unenroll config)
-  if (replyToEmailId && input.from_address) {
-    try {
-      // Check if this sender is enrolled in any active sequences
-      const enrollments = d
-        .query("SELECT id, sequence_id FROM sequence_enrollments WHERE contact_email = ? AND status = 'active'")
-        .all(input.from_address) as { id: string; sequence_id: string }[];
-      for (const e of enrollments) {
-        d.run(
-          "UPDATE sequence_enrollments SET status = 'cancelled', completed_at = ? WHERE id = ?",
-          [now(), e.id],
-        );
-        process.stderr.write(`[sequences] Auto-unenrolled ${input.from_address} from sequence ${e.sequence_id} (replied to email)\n`);
-      }
-    } catch {
-      // Non-fatal — sequence tables may not exist on all installs
-    }
-  }
-
-  return stored;
 }
 
-export function updateAttachmentPaths(id: string, paths: AttachmentPath[], db?: Database): void {
-  const d = db || getDatabase();
-  d.run("UPDATE inbound_emails SET attachment_paths = ? WHERE id = ?", [JSON.stringify(paths), id]);
+/** Local attachment-path bookkeeping has no /v1 field (attachments live on the server). */
+export function updateAttachmentPaths(_id: string, _paths: AttachmentPath[]): void {
+  throw new Error(
+    "updateAttachmentPaths is not available in the self-hosted client; it runs on the self-hosted server.",
+  );
 }
+
+// ── replies ─────────────────────────────────────────────────────────────────
 
 export interface ListRepliesOptions {
   limit?: number;
@@ -347,103 +286,95 @@ export interface ReplyPromptPart {
   text_body: string | null;
 }
 
-export function listReplies(emailId: string, db?: Database, opts?: ListRepliesOptions): InboundEmail[] {
-  const d = db || getDatabase();
+/** Messages that reply to `emailId`, matched by In-Reply-To against its Message-ID. */
+function repliesToEmail(emailId: string): Record<string, unknown>[] {
+  const target = messagesStore().get(emailId);
+  if (!target) return [];
+  const targetMsgId = bareId(cstr(target["message_id"]));
+  if (!targetMsgId) return [];
+  return scanMessages()
+    .filter((row) => {
+      const irt = bareId(cstr(row["in_reply_to"]));
+      return !!irt && irt === targetMsgId;
+    })
+    .sort((a, b) => v1MsgDate(a).localeCompare(v1MsgDate(b)));
+}
+
+export function listReplies(emailId: string, opts?: ListRepliesOptions): InboundEmail[] {
   const limit = safeOptionalLimit(opts?.limit);
   const offset = safeOffset(opts?.offset);
-  const params: Array<string | number> = [emailId];
-  if (limit !== null) params.push(limit, offset);
-  const rows = d
-    .query(`SELECT * FROM inbound_emails WHERE in_reply_to_email_id = ? ORDER BY received_at ASC${limit !== null ? " LIMIT ? OFFSET ?" : ""}`)
-    .all(...params) as InboundEmailRow[];
-  return rows.map(rowToEmail);
+  let rows = repliesToEmail(emailId);
+  if (limit !== null) rows = rows.slice(offset, offset + limit);
+  return rows.map(apiToInboundEmail);
 }
 
-export function listReplySummaries(emailId: string, db?: Database, opts?: ListRepliesOptions): InboundEmailSummary[] {
-  const d = db || getDatabase();
+export function listReplySummaries(emailId: string, opts?: ListRepliesOptions): InboundEmailSummary[] {
   const limit = safeOptionalLimit(opts?.limit);
   const offset = safeOffset(opts?.offset);
-  const params: Array<string | number> = [emailId];
-  if (limit !== null) params.push(limit, offset);
-  const rows = d
-    .query(`SELECT ${INBOUND_SUMMARY_COLS} FROM inbound_emails WHERE in_reply_to_email_id = ? ORDER BY received_at ASC${limit !== null ? " LIMIT ? OFFSET ?" : ""}`)
-    .all(...params) as InboundEmailSummaryRow[];
-  return rows.map(rowToEmailSummary);
+  let rows = repliesToEmail(emailId);
+  if (limit !== null) rows = rows.slice(offset, offset + limit);
+  return rows.map(apiToInboundEmailSummary);
 }
 
-export function listReplyPromptParts(emailId: string, db?: Database, opts?: ListRepliesOptions): ReplyPromptPart[] {
-  const d = db || getDatabase();
+export function listReplyPromptParts(emailId: string, opts?: ListRepliesOptions): ReplyPromptPart[] {
   const limit = safeOptionalLimit(opts?.limit);
   const offset = safeOffset(opts?.offset);
-  const params: Array<string | number> = [emailId];
-  if (limit !== null) params.push(limit, offset);
-  return d
-    .query(`SELECT from_address, subject, text_body FROM inbound_emails WHERE in_reply_to_email_id = ? ORDER BY received_at ASC${limit !== null ? " LIMIT ? OFFSET ?" : ""}`)
-    .all(...params) as ReplyPromptPart[];
+  let rows = repliesToEmail(emailId);
+  if (limit !== null) rows = rows.slice(offset, offset + limit);
+  return rows.map((row) => ({
+    from_address: cstr(row["from_addr"]),
+    subject: cstr(row["subject"]),
+    text_body: cstrOrNull(row["body_text"]),
+  }));
 }
 
-export function getReplyCount(emailId: string, db?: Database): number {
-  const d = db || getDatabase();
-  const result = d.query("SELECT COUNT(*) as count FROM inbound_emails WHERE in_reply_to_email_id = ?").get(emailId) as { count: number } | null;
-  return result?.count ?? 0;
+export function getReplyCount(emailId: string): number {
+  return repliesToEmail(emailId).length;
 }
 
-export function getInboundEmail(id: string, db?: Database): InboundEmail | null {
-  const d = db || getDatabase();
-  const row = d.query("SELECT * FROM inbound_emails WHERE id = ?").get(id) as InboundEmailRow | null;
+// ── single reads ─────────────────────────────────────────────────────────────
+
+export function getInboundEmail(id: string): InboundEmail | null {
+  const row = messagesStore().get(id);
+  return row ? apiToInboundEmail(row) : null;
+}
+
+export function getInboundEmailSummary(id: string): InboundEmailSummary | null {
+  const row = messagesStore().get(id);
+  return row ? apiToInboundEmailSummary(row) : null;
+}
+
+export function getInboundAttachmentPaths(id: string): AttachmentPath[] | null {
+  const row = messagesStore().get(id);
   if (!row) return null;
-  return rowToEmail(row);
-}
-
-export function getInboundEmailSummary(id: string, db?: Database): InboundEmailSummary | null {
-  const d = db || getDatabase();
-  const row = d
-    .query(`SELECT ${INBOUND_SUMMARY_COLS} FROM inbound_emails WHERE id = ?`)
-    .get(id) as InboundEmailSummaryRow | null;
-  if (!row) return null;
-  return rowToEmailSummary(row);
-}
-
-export function getInboundAttachmentPaths(id: string, db?: Database): AttachmentPath[] | null {
-  const d = db || getDatabase();
-  const row = d
-    .query("SELECT attachment_paths FROM inbound_emails WHERE id = ? LIMIT 1")
-    .get(id) as { attachment_paths: string | null } | null;
-  return row ? parseJsonArray<AttachmentPath>(row.attachment_paths) : null;
+  return v1Attachments(row).map((a) => ({ filename: a.filename, content_type: a.content_type, size: a.size }));
 }
 
 export function listInboundSubjectsForRecipient(
   recipient: string,
   opts?: { since?: string; limit?: number },
-  db?: Database,
 ): Array<{ subject: string }> {
   const normalized = normalizeEmailAddress(recipient);
   if (!normalized) return [];
-
-  const d = db || getDatabase();
   const limit = cappedLimit(opts?.limit, 100, 10000);
-  const conditions = [
-    "recipient.address = ?",
-    "inbound_emails.is_sent = 0",
-    "inbound_emails.is_archived = 0",
-  ];
-  const params: Array<string | number> = [normalized];
-
-  if (opts?.since) {
-    conditions.push(sincePredicate("inbound_emails.received_at"));
-    params.push(opts.since);
-  }
-  params.push(limit);
-
-  return d.query(
-    `SELECT inbound_emails.subject
-       FROM inbound_recipients recipient
-       JOIN inbound_emails ON inbound_emails.id = recipient.inbound_email_id
-      WHERE ${conditions.join(" AND ")}
-      ORDER BY inbound_emails.received_at DESC
-      LIMIT ?`,
-  ).all(...params) as Array<{ subject: string }>;
+  const since = opts?.since ? Date.parse(opts.since) : null;
+  return scanMessages()
+    .filter((row) => {
+      if (v1IsOutbound(row) || v1HasLabel(row, "archived")) return false;
+      const toAddrs = cstrArray(row["to_addrs"]).map((a) => normalizeEmailAddress(a)).filter((a): a is string => !!a);
+      if (!toAddrs.includes(normalized)) return false;
+      if (since != null) {
+        const t = Date.parse(v1MsgDate(row));
+        if (!(Number.isFinite(t) && t >= since)) return false;
+      }
+      return true;
+    })
+    .sort((a, b) => v1MsgDate(b).localeCompare(v1MsgDate(a)))
+    .slice(0, limit)
+    .map((row) => ({ subject: cstr(row["subject"]) }));
 }
+
+// ── list / filter ─────────────────────────────────────────────────────────────
 
 export interface ListInboundOpts {
   provider_id?: string;
@@ -474,407 +405,206 @@ export interface ListInboundOpts {
   recipientDomains?: string[];
 }
 
-function applyInboundFilters(opts: ListInboundOpts | undefined, conditions: string[], params: (string | number)[]): void {
-  if (opts?.provider_id) {
-    conditions.push("provider_id = ?");
-    params.push(opts.provider_id);
+// Note: `provider_id` scoping has no self-hosted equivalent (a message carries no
+// provider dimension over /v1); the filter is ignored rather than emptying views.
+function inboundRowMatches(row: Record<string, unknown>, opts: ListInboundOpts | undefined): boolean {
+  const outbound = v1IsOutbound(row);
+  const archived = v1HasLabel(row, "archived");
+
+  if (!opts?.includeSent) {
+    if (opts?.sent) { if (!outbound) return false; }
+    else if (outbound) return false;
   }
+  if (opts?.archived) { if (!archived) return false; }
+  else if (archived) return false;
+
+  if (opts?.unread && cbool(row["is_read"])) return false;
+  if (opts?.read && !cbool(row["is_read"])) return false;
+  if (opts?.starred && !cbool(row["is_starred"])) return false;
+
   if (opts?.since) {
-    conditions.push(sincePredicate("received_at"));
-    params.push(opts.since);
+    const t = Date.parse(v1MsgDate(row));
+    if (!(Number.isFinite(t) && t >= Date.parse(opts.since))) return false;
   }
-  if (opts?.unread) conditions.push("is_read = 0");
-  if (opts?.read) conditions.push("is_read = 1");
-  if (opts?.starred) conditions.push("is_starred = 1");
-  if (!opts?.includeSent) conditions.push(opts?.sent ? "is_sent = 1" : "is_sent = 0");
-  // Archived mail is hidden unless explicitly requested.
-  conditions.push(opts?.archived ? "is_archived = 1" : "is_archived = 0");
   if (opts?.label) {
-    conditions.push(`EXISTS (
-      SELECT 1
-        FROM inbound_labels label
-       WHERE label.inbound_email_id = inbound_emails.id
-         AND label.label = ?
-    )`);
-    params.push(normalizeInboundLabel(opts.label));
+    const want = normalizeInboundLabel(opts.label);
+    if (!v1Labels(row).some((l) => normalizeInboundLabel(l) === want)) return false;
   }
   const from = opts?.from?.trim().toLowerCase();
-  if (from) {
-    conditions.push("LOWER(COALESCE(inbound_emails.from_address, '')) LIKE ?");
-    params.push(`%${from}%`);
-  }
+  if (from && !cstr(row["from_addr"]).toLowerCase().includes(from)) return false;
   const subject = opts?.subject?.trim().toLowerCase();
-  if (subject) {
-    conditions.push("LOWER(COALESCE(inbound_emails.subject, '')) LIKE ?");
-    params.push(`%${subject}%`);
-  }
+  if (subject && !cstr(row["subject"]).toLowerCase().includes(subject)) return false;
   const search = opts?.search?.trim().toLowerCase();
   if (search) {
-    const like = `%${search}%`;
-    conditions.push(`(
-      LOWER(COALESCE(inbound_emails.subject, '')) LIKE ?
-      OR LOWER(COALESCE(inbound_emails.from_address, '')) LIKE ?
-      OR LOWER(COALESCE(inbound_emails.to_addresses, '')) LIKE ?
-      OR LOWER(COALESCE(inbound_emails.text_body, '')) LIKE ?
-    )`);
-    params.push(like, like, like, like);
+    const hay = [
+      cstr(row["from_addr"]),
+      cstrArray(row["to_addrs"]).join(" "),
+      cstr(row["subject"]),
+      cstr(row["body_text"]),
+      cstr(row["snippet"]),
+    ].join(" ").toLowerCase();
+    if (!hay.includes(search)) return false;
   }
-}
 
-function normalizeInboundLabel(label: string): string {
-  return label.trim().toLowerCase().replace(/\s+/g, "-").slice(0, 64);
-}
-
-function applyExplicitRecipientFilters(opts: ListInboundOpts | undefined, conditions: string[], params: (string | number)[]): void {
-  const requestedRecipients = (opts?.recipients ?? []).length > 0;
-  const requestedRecipientDomains = (opts?.recipientDomains ?? []).length > 0;
-  const recip = (opts?.recipients ?? []).map((r) => normalizeEmailAddress(r)).filter((r): r is string => !!r);
-  const recipDomains = (opts?.recipientDomains ?? []).map((d) => d.trim().toLowerCase()).filter(Boolean);
-  if ((requestedRecipients || requestedRecipientDomains) && recip.length === 0 && recipDomains.length === 0) {
-    conditions.push("0 = 1");
-  } else if (recip.length > 0 || recipDomains.length > 0) {
-    const ors: string[] = [];
-    if (recip.length > 0) {
-      ors.push(`recipient.address IN (${recip.map(() => "?").join(", ")})`);
-      params.push(...recip);
-    }
-    if (recipDomains.length > 0) {
-      ors.push(`recipient.domain IN (${recipDomains.map(() => "?").join(", ")})`);
-      params.push(...recipDomains);
-    }
-    conditions.push(`inbound_emails.id IN (
-      SELECT recipient.inbound_email_id
-        FROM inbound_recipients recipient
-       WHERE ${ors.join(" OR ")}
-    )`);
+  const reqRecip = (opts?.recipients ?? []).length > 0;
+  const reqDom = (opts?.recipientDomains ?? []).length > 0;
+  if (reqRecip || reqDom) {
+    const recip = (opts?.recipients ?? []).map((r) => normalizeEmailAddress(r)).filter((r): r is string => !!r);
+    const doms = (opts?.recipientDomains ?? []).map((d) => d.trim().toLowerCase()).filter(Boolean);
+    if (recip.length === 0 && doms.length === 0) return false;
+    const toAddrs = cstrArray(row["to_addrs"]).map((a) => normalizeEmailAddress(a)).filter((a): a is string => !!a);
+    const matchAddr = recip.length > 0 && toAddrs.some((a) => recip.includes(a));
+    const matchDom = doms.length > 0 && toAddrs.some((a) => {
+      const d = a.split("@").pop();
+      return d ? doms.includes(d) : false;
+    });
+    if (!matchAddr && !matchDom) return false;
   }
+  return true;
 }
 
-function ownerRecipientScopeSql(): string {
-  return `EXISTS (
-    SELECT 1
-    FROM inbound_recipients recipient
-    WHERE recipient.inbound_email_id = inbound_emails.id
-      AND (
-        EXISTS (
-          SELECT 1
-          FROM addresses scoped
-          WHERE (scoped.owner_id = ? OR scoped.administrator_id = ?)
-            AND recipient.address = LOWER(scoped.email)
-        )
-        OR EXISTS (
-          SELECT 1
-          FROM aliases al
-          JOIN addresses target ON LOWER(al.target_address) = LOWER(target.email)
-          WHERE (target.owner_id = ? OR target.administrator_id = ?)
-            AND al.local_part != '*'
-            AND recipient.address = LOWER(al.local_part || '@' || al.domain)
-        )
-        OR EXISTS (
-          SELECT 1
-          FROM aliases al
-          JOIN addresses target ON LOWER(al.target_address) = LOWER(target.email)
-          WHERE (target.owner_id = ? OR target.administrator_id = ?)
-            AND al.local_part = '*'
-            AND al.domain != '*'
-            AND recipient.domain = LOWER(al.domain)
-        )
-      )
-  )`;
-}
-
-function appendOwnerRecipientScope(ownerId: string, conditions: string[], params: (string | number)[]): void {
-  conditions.push(`(${ownerRecipientScopeSql()})`);
-  params.push(ownerId, ownerId, ownerId, ownerId, ownerId, ownerId);
-}
-
-export function listInboundEmails(
-  opts?: ListInboundOpts,
-  db?: Database,
-): InboundEmail[] {
-  const d = db || getDatabase();
+function listFilteredInbound(opts?: ListInboundOpts): Record<string, unknown>[] {
   const limit = safeLimit(opts?.limit);
   const offset = safeOffset(opts?.offset);
-  const conditions: string[] = [];
-  const params: (string | number)[] = [];
-
-  applyInboundFilters(opts, conditions, params);
-  applyExplicitRecipientFilters(opts, conditions, params);
-
-  const where = conditions.length > 0 ?
-    `WHERE ${conditions.join(" AND ")}` : "";
-  params.push(limit);
-  params.push(offset);
-
-  const rows = d
-    .query(`SELECT * FROM inbound_emails ${where} ORDER BY received_at DESC LIMIT ? OFFSET ?`)
-    .all(...params) as InboundEmailRow[];
-  return rows.map(rowToEmail);
+  return scanMessages()
+    .filter((row) => inboundRowMatches(row, opts))
+    .sort((a, b) => v1MsgDate(b).localeCompare(v1MsgDate(a)))
+    .slice(offset, offset + limit);
 }
 
-export function listInboundEmailSummaries(
-  opts?: ListInboundOpts,
-  db?: Database,
-): InboundEmailSummary[] {
-  const d = db || getDatabase();
-  const limit = safeLimit(opts?.limit);
-  const offset = safeOffset(opts?.offset);
-  const conditions: string[] = [];
-  const params: (string | number)[] = [];
-
-  applyInboundFilters(opts, conditions, params);
-  applyExplicitRecipientFilters(opts, conditions, params);
-
-  const where = conditions.length > 0 ?
-    `WHERE ${conditions.join(" AND ")}` : "";
-  params.push(limit);
-  params.push(offset);
-
-  const rows = d
-    .query(`SELECT ${INBOUND_SUMMARY_COLS} FROM inbound_emails ${where} ORDER BY received_at DESC LIMIT ? OFFSET ?`)
-    .all(...params) as InboundEmailSummaryRow[];
-  return rows.map(rowToEmailSummary);
+export function listInboundEmails(opts?: ListInboundOpts): InboundEmail[] {
+  return listFilteredInbound(opts).map(apiToInboundEmail);
 }
 
-export function listInboundEmailsForOwner(ownerId: string, opts?: Omit<ListInboundOpts, "recipients" | "recipientDomains">, db?: Database): InboundEmail[] {
-  const d = db || getDatabase();
-  const limit = safeLimit(opts?.limit);
-  const offset = safeOffset(opts?.offset);
-  const conditions: string[] = [];
-  const params: (string | number)[] = [];
-
-  applyInboundFilters(opts, conditions, params);
-  appendOwnerRecipientScope(ownerId, conditions, params);
-  params.push(limit, offset);
-
-  const rows = d
-    .query(`SELECT * FROM inbound_emails WHERE ${conditions.join(" AND ")} ORDER BY received_at DESC LIMIT ? OFFSET ?`)
-    .all(...params) as InboundEmailRow[];
-  return rows.map(rowToEmail);
+export function listInboundEmailSummaries(opts?: ListInboundOpts): InboundEmailSummary[] {
+  return listFilteredInbound(opts).map(apiToInboundEmailSummary);
 }
 
-export function listInboundEmailSummariesForOwner(ownerId: string, opts?: Omit<ListInboundOpts, "recipients" | "recipientDomains">, db?: Database): InboundEmailSummary[] {
-  const d = db || getDatabase();
-  const limit = safeLimit(opts?.limit);
-  const offset = safeOffset(opts?.offset);
-  const conditions: string[] = [];
-  const params: (string | number)[] = [];
-
-  applyInboundFilters(opts, conditions, params);
-  appendOwnerRecipientScope(ownerId, conditions, params);
-  params.push(limit, offset);
-
-  const rows = d
-    .query(`SELECT ${INBOUND_SUMMARY_COLS} FROM inbound_emails WHERE ${conditions.join(" AND ")} ORDER BY received_at DESC LIMIT ? OFFSET ?`)
-    .all(...params) as InboundEmailSummaryRow[];
-  return rows.map(rowToEmailSummary);
+// Owner-scoped queries resolve owner→address/alias joins that have no single /v1
+// mapping (ownership is server-side); stubbed per the self-hosted contract.
+export function listInboundEmailsForOwner(_ownerId: string, _opts?: Omit<ListInboundOpts, "recipients" | "recipientDomains">): InboundEmail[] {
+  throw new Error(
+    "listInboundEmailsForOwner is not available in the self-hosted client; it runs on the self-hosted server.",
+  );
 }
 
-export function inboundEmailBelongsToOwner(id: string, ownerId: string, db?: Database): boolean {
-  const d = db || getDatabase();
-  const params: (string | number)[] = [id];
-  const conditions = ["inbound_emails.id = ?"];
-  appendOwnerRecipientScope(ownerId, conditions, params);
-  const row = d.query(`SELECT 1 AS ok FROM inbound_emails WHERE ${conditions.join(" AND ")} LIMIT 1`).get(...params) as { ok: number } | null;
-  return !!row;
+export function listInboundEmailSummariesForOwner(_ownerId: string, _opts?: Omit<ListInboundOpts, "recipients" | "recipientDomains">): InboundEmailSummary[] {
+  throw new Error(
+    "listInboundEmailSummariesForOwner is not available in the self-hosted client; it runs on the self-hosted server.",
+  );
 }
 
-export function deleteInboundEmail(id: string, db?: Database): boolean {
-  const d = db || getDatabase();
-  const result = d.run("DELETE FROM inbound_emails WHERE id = ?", [id]);
-  return result.changes > 0;
+export function inboundEmailBelongsToOwner(_id: string, _ownerId: string): boolean {
+  throw new Error(
+    "inboundEmailBelongsToOwner is not available in the self-hosted client; it runs on the self-hosted server.",
+  );
 }
 
-export function clearInboundEmails(provider_id?: string, db?: Database): number {
-  const d = db || getDatabase();
-  const count = getInboundCount(provider_id, d);
-  if (provider_id) {
-    d.run("DELETE FROM inbound_emails WHERE provider_id = ?", [provider_id]);
-  } else {
-    d.run("DELETE FROM inbound_emails");
+// ── delete / clear ────────────────────────────────────────────────────────────
+
+export function deleteInboundEmail(id: string): boolean {
+  return messagesStore().del(id);
+}
+
+// Provider scoping cannot be expressed over /v1, so a provider-scoped clear is a
+// no-op (returns 0) rather than risking an over-broad delete of the shared store.
+export function clearInboundEmails(provider_id?: string): number {
+  if (provider_id) return 0;
+  const store = messagesStore();
+  const ids = scanMessages().map((row) => cstr(row["id"])).filter(Boolean);
+  let count = 0;
+  for (const id of ids) {
+    if (store.del(id)) count += 1;
   }
   return count;
 }
 
-export function getInboundCount(provider_id?: string, db?: Database): number {
-  const d = db || getDatabase();
-  let row: { count: number } | null;
-  if (provider_id) {
-    row = d
-      .query("SELECT COUNT(*) as count FROM inbound_emails WHERE provider_id = ?")
-      .get(provider_id) as { count: number } | null;
-  } else {
-    row = d.query("SELECT COUNT(*) as count FROM inbound_emails").get() as { count: number } | null;
+// ── counts ─────────────────────────────────────────────────────────────────────
+
+// provider_id scoping is ignored (no provider dimension over /v1); counts reflect
+// the whole operator-owned store.
+export function getInboundCount(_provider_id?: string): number {
+  return scanMessages().length;
+}
+
+export function getReceivedInboundCount(_provider_id?: string): number {
+  return scanMessages().filter((row) => !v1IsOutbound(row)).length;
+}
+
+export function getLatestInboundReceivedAt(): string | null {
+  let latest: string | null = null;
+  for (const row of scanMessages()) {
+    const d = v1MsgDate(row);
+    if (d && (latest === null || d > latest)) latest = d;
   }
-  return row?.count ?? 0;
+  return latest;
 }
 
-export function getReceivedInboundCount(provider_id?: string, db?: Database): number {
-  const d = db || getDatabase();
-  let row: { count: number } | null;
-  if (provider_id) {
-    row = d
-      .query("SELECT COUNT(*) as count FROM inbound_emails WHERE is_sent = 0 AND provider_id = ?")
-      .get(provider_id) as { count: number } | null;
-  } else {
-    row = d.query("SELECT COUNT(*) as count FROM inbound_emails WHERE is_sent = 0").get() as { count: number } | null;
+export function getLatestReceivedInboundAt(): string | null {
+  let latest: string | null = null;
+  for (const row of scanMessages()) {
+    if (v1IsOutbound(row)) continue;
+    const d = v1MsgDate(row);
+    if (d && (latest === null || d > latest)) latest = d;
   }
-  return row?.count ?? 0;
+  return latest;
 }
 
-export function getLatestInboundReceivedAt(db?: Database): string | null {
-  const d = db || getDatabase();
-  const row = d.query("SELECT MAX(received_at) as latest FROM inbound_emails").get() as { latest: string | null } | null;
-  return row?.latest ?? null;
+/** Count unread, non-archived received mail. */
+export function getUnreadCount(_provider_id?: string): number {
+  return scanMessages().filter((row) =>
+    !v1IsOutbound(row) && !cbool(row["is_read"]) && !v1HasLabel(row, "archived"),
+  ).length;
 }
 
-export function getLatestReceivedInboundAt(db?: Database): string | null {
-  const d = db || getDatabase();
-  const row = d.query("SELECT MAX(received_at) as latest FROM inbound_emails WHERE is_sent = 0").get() as { latest: string | null } | null;
-  return row?.latest ?? null;
+// ── read / archive / star flags ────────────────────────────────────────────────
+
+export function setInboundRead(id: string, read: boolean): InboundEmail {
+  return apiToInboundEmail(messagesStore().update(id, { is_read: read }));
 }
 
-// ── Local read-state / archive / star / labels (provider-independent) ──────────
-
-function requireInboundExists(id: string, d: Database): void {
-  const row = d.query("SELECT 1 AS ok FROM inbound_emails WHERE id = ? LIMIT 1").get(id) as { ok: number } | null;
-  if (!row) throw new Error(`Inbound email not found: ${id}`);
+export function setInboundReadSummary(id: string, read: boolean): InboundEmailSummary {
+  return apiToInboundEmailSummary(messagesStore().update(id, { is_read: read }));
 }
 
-function requireInboundLabels(id: string, d: Database): { label_ids_json?: string } {
-  const row = d.query("SELECT label_ids_json FROM inbound_emails WHERE id = ? LIMIT 1").get(id) as { label_ids_json?: string } | null;
-  if (!row) throw new Error(`Inbound email not found: ${id}`);
-  return row;
-}
-
-function inboundStateMessagePredicate(): string {
-  return "mail_message_id = COALESCE((SELECT mail_message_id FROM inbound_emails WHERE id = ?), 'msg:inbound:' || ?)";
-}
-
-function syncMailboxReadState(id: string, read: boolean, readAt: string | null, d: Database): void {
-  d.run(
-    `UPDATE mailbox_message_state
-        SET is_read = ?,
-            read_at = ?,
-            updated_at = ?
-      WHERE ${inboundStateMessagePredicate()}`,
-    [read ? 1 : 0, readAt, now(), id, id],
-  );
-}
-
-function syncMailboxArchivedState(id: string, archived: boolean, d: Database): void {
-  d.run(
-    `UPDATE mailbox_message_state
-        SET is_archived = ?,
-            folder_id = CASE
-              WHEN direction IN ('sent', 'outbound') THEN 'folder:' || mailbox_id || ':sent'
-              WHEN is_trash = 1 THEN 'folder:' || mailbox_id || ':trash'
-              WHEN is_spam = 1 THEN 'folder:' || mailbox_id || ':spam'
-              WHEN ? = 1 THEN 'folder:' || mailbox_id || ':archive'
-              ELSE 'folder:' || mailbox_id || ':inbox'
-            END,
-            updated_at = ?
-      WHERE ${inboundStateMessagePredicate()}`,
-    [archived ? 1 : 0, archived ? 1 : 0, now(), id, id],
-  );
-}
-
-function syncMailboxStarredState(id: string, starred: boolean, d: Database): void {
-  d.run(
-    `UPDATE mailbox_message_state
-        SET is_starred = ?,
-            updated_at = ?
-      WHERE ${inboundStateMessagePredicate()}`,
-    [starred ? 1 : 0, now(), id, id],
-  );
-}
-
-function syncMailboxLabelState(id: string, labels: string[], d: Database): void {
-  const isSpam = labels.some((label) => normalizeInboundLabel(label) === "spam");
-  const isTrash = labels.some((label) => normalizeInboundLabel(label) === "trash");
-  d.run(
-    `UPDATE mailbox_message_state
-        SET labels_json = ?,
-            is_spam = ?,
-            is_trash = ?,
-            folder_id = CASE
-              WHEN direction IN ('sent', 'outbound') THEN 'folder:' || mailbox_id || ':sent'
-              WHEN ? = 1 THEN 'folder:' || mailbox_id || ':trash'
-              WHEN ? = 1 THEN 'folder:' || mailbox_id || ':spam'
-              WHEN is_archived = 1 THEN 'folder:' || mailbox_id || ':archive'
-              ELSE 'folder:' || mailbox_id || ':inbox'
-            END,
-            updated_at = ?
-      WHERE ${inboundStateMessagePredicate()}`,
-    [JSON.stringify(labels), isSpam ? 1 : 0, isTrash ? 1 : 0, isTrash ? 1 : 0, isSpam ? 1 : 0, now(), id, id],
-  );
-}
-
-/** Mark an inbound email read (stamps read_at) or unread (clears it). */
-export function setInboundRead(id: string, read: boolean, db?: Database): InboundEmail {
-  const d = db || getDatabase();
-  setInboundReadFlag(id, read, d);
-  return getInboundEmail(id, d)!;
-}
-
-export function setInboundReadSummary(id: string, read: boolean, db?: Database): InboundEmailSummary {
-  const d = db || getDatabase();
-  setInboundReadFlag(id, read, d);
-  return getInboundEmailSummary(id, d)!;
-}
-
-export function setInboundReadFlag(id: string, read: boolean, db?: Database): boolean {
-  const d = db || getDatabase();
-  requireInboundExists(id, d);
-  const readAt = read ? now() : null;
-  d.run("UPDATE inbound_emails SET is_read = ?, read_at = ? WHERE id = ?", [read ? 1 : 0, readAt, id]);
-  syncMailboxReadState(id, read, readAt, d);
+export function setInboundReadFlag(id: string, read: boolean): boolean {
+  messagesStore().update(id, { is_read: read });
   return read;
 }
 
-export function setInboundArchived(id: string, archived: boolean, db?: Database): InboundEmail {
-  const d = db || getDatabase();
-  setInboundArchivedFlag(id, archived, d);
-  return getInboundEmail(id, d)!;
+export function setInboundArchived(id: string, archived: boolean): InboundEmail {
+  return apiToInboundEmail(messagesStore().update(id, { archived }));
 }
 
-export function setInboundArchivedSummary(id: string, archived: boolean, db?: Database): InboundEmailSummary {
-  const d = db || getDatabase();
-  setInboundArchivedFlag(id, archived, d);
-  return getInboundEmailSummary(id, d)!;
+export function setInboundArchivedSummary(id: string, archived: boolean): InboundEmailSummary {
+  return apiToInboundEmailSummary(messagesStore().update(id, { archived }));
 }
 
-export function setInboundArchivedFlag(id: string, archived: boolean, db?: Database): boolean {
-  const d = db || getDatabase();
-  requireInboundExists(id, d);
-  d.run("UPDATE inbound_emails SET is_archived = ? WHERE id = ?", [archived ? 1 : 0, id]);
-  syncMailboxArchivedState(id, archived, d);
+export function setInboundArchivedFlag(id: string, archived: boolean): boolean {
+  messagesStore().update(id, { archived });
   return archived;
 }
 
-export function setInboundStarred(id: string, starred: boolean, db?: Database): InboundEmail {
-  const d = db || getDatabase();
-  setInboundStarredFlag(id, starred, d);
-  return getInboundEmail(id, d)!;
+export function setInboundStarred(id: string, starred: boolean): InboundEmail {
+  return apiToInboundEmail(messagesStore().update(id, { is_starred: starred }));
 }
 
-export function setInboundStarredSummary(id: string, starred: boolean, db?: Database): InboundEmailSummary {
-  const d = db || getDatabase();
-  setInboundStarredFlag(id, starred, d);
-  return getInboundEmailSummary(id, d)!;
+export function setInboundStarredSummary(id: string, starred: boolean): InboundEmailSummary {
+  return apiToInboundEmailSummary(messagesStore().update(id, { is_starred: starred }));
 }
 
-export function setInboundStarredFlag(id: string, starred: boolean, db?: Database): boolean {
-  const d = db || getDatabase();
-  requireInboundExists(id, d);
-  d.run("UPDATE inbound_emails SET is_starred = ? WHERE id = ?", [starred ? 1 : 0, id]);
-  syncMailboxStarredState(id, starred, d);
+export function setInboundStarredFlag(id: string, starred: boolean): boolean {
+  messagesStore().update(id, { is_starred: starred });
   return starred;
 }
 
-function mutateInboundLabel(id: string, label: string, remove: boolean, d: Database): void {
-  const row = requireInboundLabels(id, d);
-  const labels = parseJsonArray<string>(row.label_ids_json);
+// ── labels ─────────────────────────────────────────────────────────────────────
+
+function mutateInboundLabel(id: string, label: string, remove: boolean): Record<string, unknown> {
+  const store = messagesStore();
+  const current = store.get(id);
+  if (!current) throw new Error(`Inbound email not found: ${id}`);
+  const labels = v1Labels(current);
   const normalized = normalizeInboundLabel(label);
   const sameLabel = (value: string) => normalizeInboundLabel(value) === normalized;
   const next = remove
@@ -882,42 +612,23 @@ function mutateInboundLabel(id: string, label: string, remove: boolean, d: Datab
     : labels.some(sameLabel)
       ? labels
       : [...labels, label];
-  d.run("UPDATE inbound_emails SET label_ids_json = ? WHERE id = ?", [JSON.stringify(next), id]);
-  syncMailboxLabelState(id, next, d);
+  return store.update(id, { labels: next });
 }
 
 /** Add a label (no-op if already present). */
-export function addInboundLabel(id: string, label: string, db?: Database): InboundEmail {
-  const d = db || getDatabase();
-  mutateInboundLabel(id, label, false, d);
-  return getInboundEmail(id, d)!;
+export function addInboundLabel(id: string, label: string): InboundEmail {
+  return apiToInboundEmail(mutateInboundLabel(id, label, false));
 }
 
-export function addInboundLabelSummary(id: string, label: string, db?: Database): InboundEmailSummary {
-  const d = db || getDatabase();
-  mutateInboundLabel(id, label, false, d);
-  return getInboundEmailSummary(id, d)!;
+export function addInboundLabelSummary(id: string, label: string): InboundEmailSummary {
+  return apiToInboundEmailSummary(mutateInboundLabel(id, label, false));
 }
 
 /** Remove a label (no-op if absent). */
-export function removeInboundLabel(id: string, label: string, db?: Database): InboundEmail {
-  const d = db || getDatabase();
-  mutateInboundLabel(id, label, true, d);
-  return getInboundEmail(id, d)!;
+export function removeInboundLabel(id: string, label: string): InboundEmail {
+  return apiToInboundEmail(mutateInboundLabel(id, label, true));
 }
 
-export function removeInboundLabelSummary(id: string, label: string, db?: Database): InboundEmailSummary {
-  const d = db || getDatabase();
-  mutateInboundLabel(id, label, true, d);
-  return getInboundEmailSummary(id, d)!;
-}
-
-/** Count unread, non-archived inbound mail (optionally scoped to a provider). */
-export function getUnreadCount(provider_id?: string, db?: Database): number {
-  const d = db || getDatabase();
-  const sql = provider_id
-    ? "SELECT COUNT(*) as count FROM inbound_emails WHERE is_sent = 0 AND is_read = 0 AND is_archived = 0 AND provider_id = ?"
-    : "SELECT COUNT(*) as count FROM inbound_emails WHERE is_sent = 0 AND is_read = 0 AND is_archived = 0";
-  const row = (provider_id ? d.query(sql).get(provider_id) : d.query(sql).get()) as { count: number } | null;
-  return row?.count ?? 0;
+export function removeInboundLabelSummary(id: string, label: string): InboundEmailSummary {
+  return apiToInboundEmailSummary(mutateInboundLabel(id, label, true));
 }

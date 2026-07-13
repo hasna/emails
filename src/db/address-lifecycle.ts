@@ -2,100 +2,57 @@
  * Address lifecycle — suspend / activate an address and enforce a per-address
  * daily send quota. An address that is `suspended` cannot send (and is excluded
  * from delivery); a `daily_quota` caps the number of sends per UTC day.
+ *
+ * Self-hosted-ONLY: status/quota transitions PATCH /v1/addresses/<id> via the
+ * addresses repo. The per-address daily send ledger (`emails`) is not part of
+ * the /v1 address model, so send counts resolve to 0 client-side (the server is
+ * authoritative for send accounting).
  */
-import type { Database } from "./database.js";
 import type { AddressStatus, EmailAddress } from "../types/index.js";
 import { AddressNotFoundError } from "../types/index.js";
-import { getDatabase, now } from "./database.js";
-import { apiToAddress, selfHostedAddresses, findAddressesByEmail, getAddress } from "./addresses.js";
-import { sqlEmailAddress } from "./email-address-sql.js";
+import { apiToAddress, selfHostedAddresses, findAddressesByEmail } from "./addresses.js";
 import { canonicalSender } from "../lib/email-address.js";
 
-function setStatus(id: string, status: AddressStatus, db?: Database): EmailAddress {
-  // Self-hosted (self_hosted) mode: the address registry lives in the shared selfHosted
-  // dataset, so status transitions MUST write there — writing to the local
-  // island would diverge from the operator-owned dataset (split-brain).
-  const selfHosted = selfHostedAddresses(db);
-  if (selfHosted) {
-    if (!selfHosted.get(id)) throw new AddressNotFoundError(id);
-    return apiToAddress(selfHosted.update(id, { status }));
-  }
-  const d = db || getDatabase();
-  if (!getAddress(id, d)) throw new AddressNotFoundError(id);
-  d.run("UPDATE addresses SET status = ?, updated_at = ? WHERE id = ?", [status, now(), id]);
-  return getAddress(id, d)!;
+function setStatus(id: string, status: AddressStatus): EmailAddress {
+  const store = selfHostedAddresses();
+  if (!store.get(id)) throw new AddressNotFoundError(id);
+  return apiToAddress(store.update(id, { status }));
 }
 
-export function suspendAddress(id: string, db?: Database): EmailAddress {
-  return setStatus(id, "suspended", db);
+export function suspendAddress(id: string): EmailAddress {
+  return setStatus(id, "suspended");
 }
 
-export function activateAddress(id: string, db?: Database): EmailAddress {
-  return setStatus(id, "active", db);
+export function activateAddress(id: string): EmailAddress {
+  return setStatus(id, "active");
 }
 
 /** Set (or clear, with null) the per-address daily send quota. */
-export function setAddressQuota(id: string, quota: number | null, db?: Database): EmailAddress {
+export function setAddressQuota(id: string, quota: number | null): EmailAddress {
   if (quota !== null && (!Number.isInteger(quota) || quota < 0)) {
     throw new Error(`Invalid daily quota: ${quota} (must be a non-negative integer or null)`);
   }
-  // Self-hosted (self_hosted) mode: persist the quota to the shared selfHosted dataset so
-  // it applies deployment-wide, not just on this machine's local island.
-  const selfHosted = selfHostedAddresses(db);
-  if (selfHosted) {
-    if (!selfHosted.get(id)) throw new AddressNotFoundError(id);
-    return apiToAddress(selfHosted.update(id, { daily_quota: quota }));
-  }
-  const d = db || getDatabase();
-  if (!getAddress(id, d)) throw new AddressNotFoundError(id);
-  d.run("UPDATE addresses SET daily_quota = ?, updated_at = ? WHERE id = ?", [quota, now(), id]);
-  return getAddress(id, d)!;
+  const store = selfHostedAddresses();
+  if (!store.get(id)) throw new AddressNotFoundError(id);
+  return apiToAddress(store.update(id, { daily_quota: quota }));
 }
 
 /** Count emails sent from `email` so far during the current UTC day. */
-export function countSendsToday(email: string, db?: Database): number {
-  // Self-hosted (self_hosted) mode: the per-address daily send ledger (`emails`) is
-  // not part of the selfHosted address model, so we return 0 rather than consulting
-  // the local island — reading local counts on a flipped machine would report
-  // stale/wrong usage (split-brain read).
-  if (selfHostedAddresses(db)) return 0;
-  const d = db || getDatabase();
-  const normalizedEmail = canonicalSender(email) ?? email.trim().toLowerCase();
-  const today = now().slice(0, 10); // YYYY-MM-DD (ISO sorts lexicographically)
-  const row = d.query(
-    `SELECT COUNT(*) AS c FROM emails WHERE ${sqlEmailAddress("from_address")} = ? AND sent_at LIKE ?`,
-  ).get(normalizedEmail, `${today}%`) as { c: number } | null;
-  return row?.c ?? 0;
+export function countSendsToday(_email: string): number {
+  // The per-address daily send ledger (`emails`) is not part of the /v1 address
+  // model; the server owns send accounting, so the client reports 0.
+  return 0;
 }
 
 /** Count today's sends for many addresses with one grouped query. */
-export function countSendsTodayByAddress(emails: Iterable<string>, db?: Database): Map<string, number> {
+export function countSendsTodayByAddress(emails: Iterable<string>): Map<string, number> {
   const normalized = [...new Set(
     [...emails]
       .map((email) => canonicalSender(email) ?? email.trim().toLowerCase())
       .filter(Boolean),
   )];
-  const counts = new Map(normalized.map((email) => [email, 0]));
-  if (normalized.length === 0) return counts;
-
-  // Self-hosted (self_hosted) mode: return zeroed counts without touching the local
-  // island (see countSendsToday) — the selfHosted address model has no per-address
-  // daily send ledger to count against.
-  if (selfHostedAddresses(db)) return counts;
-
-  const d = db || getDatabase();
-  const today = now().slice(0, 10);
-  const addressSql = sqlEmailAddress("from_address");
-  const placeholders = normalized.map(() => "?").join(", ");
-  const rows = d.query(
-    `SELECT ${addressSql} AS from_email, COUNT(*) AS c
-       FROM emails
-      WHERE ${addressSql} IN (${placeholders})
-        AND sent_at LIKE ?
-      GROUP BY ${addressSql}`,
-  ).all(...normalized, `${today}%`) as Array<{ from_email: string; c: unknown }>;
-  for (const row of rows) counts.set(row.from_email, Number(row.c) || 0);
-  return counts;
+  // Zeroed counts without a local ledger to count against (see countSendsToday).
+  return new Map(normalized.map((email) => [email, 0]));
 }
 
 export interface Sendability {
@@ -108,45 +65,20 @@ export interface Sendability {
  * unrestricted (sendable); a registered address is blocked if suspended or if
  * it has reached its daily quota.
  */
-export function getAddressSendability(email: string, db?: Database): Sendability {
+export function getAddressSendability(email: string): Sendability {
   const normalizedEmail = canonicalSender(email) ?? email.trim().toLowerCase();
 
-  // Self-hosted (self_hosted) mode: enforce suspension/quota against the shared selfHosted
-  // address dataset, never the local island (which is empty on a flipped
-  // machine and would wrongly allow every sender to send).
-  const selfHosted = selfHostedAddresses(db);
-  if (selfHosted) {
-    const matches = findAddressesByEmail(normalizedEmail, db);
-    if (matches.length === 0) return { sendable: true };
-    // A suspended record (any provider) takes precedence over an active one.
-    const record = matches.find((a) => a.status === "suspended") ?? matches[0]!;
-    if ((record.status ?? "active") === "suspended") {
-      return { sendable: false, reason: `Address ${normalizedEmail} is suspended` };
-    }
-    if (record.daily_quota !== null) {
-      const used = countSendsToday(normalizedEmail, db);
-      if (used >= record.daily_quota) {
-        return { sendable: false, reason: `Address ${normalizedEmail} reached its daily quota (${used}/${record.daily_quota})` };
-      }
-    }
-    return { sendable: true };
-  }
-
-  const d = db || getDatabase();
-  // Case-insensitive: a suspended `Ceo@x` must still block a send as `ceo@x`.
-  // A suspended row (any provider) takes precedence over an active one.
-  const row = d.query(
-    `SELECT status, daily_quota FROM addresses WHERE LOWER(email) = LOWER(?)
-     ORDER BY CASE WHEN status = 'suspended' THEN 0 ELSE 1 END, created_at DESC LIMIT 1`,
-  ).get(normalizedEmail) as { status: AddressStatus | null; daily_quota: number | null } | null;
-  if (!row) return { sendable: true };
-  if ((row.status ?? "active") === "suspended") {
+  const matches = findAddressesByEmail(normalizedEmail);
+  if (matches.length === 0) return { sendable: true };
+  // A suspended record (any provider) takes precedence over an active one.
+  const record = matches.find((a) => a.status === "suspended") ?? matches[0]!;
+  if ((record.status ?? "active") === "suspended") {
     return { sendable: false, reason: `Address ${normalizedEmail} is suspended` };
   }
-  if (row.daily_quota !== null) {
-    const used = countSendsToday(normalizedEmail, d);
-    if (used >= row.daily_quota) {
-      return { sendable: false, reason: `Address ${normalizedEmail} reached its daily quota (${used}/${row.daily_quota})` };
+  if (record.daily_quota !== null) {
+    const used = countSendsToday(normalizedEmail);
+    if (used >= record.daily_quota) {
+      return { sendable: false, reason: `Address ${normalizedEmail} reached its daily quota (${used}/${record.daily_quota})` };
     }
   }
   return { sendable: true };

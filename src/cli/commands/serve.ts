@@ -3,50 +3,22 @@ import chalk from "../../lib/chalk-lite.js";
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import pkg from "../../../package.json" with { type: "json" };
 import { getClaudeMcpInstallCommand, getClaudeMcpRemoveCommand, getCodexMcpConfig, getGeminiMcpConfig } from "../../lib/mcp-install.js";
-import { getEmailsMode } from "../../lib/mode.js";
 import { handleError } from "../utils.js";
-
-function failIfSelfHostedLocalServe(command: string): void {
-  if (getEmailsMode() !== "self_hosted") return;
-  throw new Error(
-    `\`${command}\` starts local HTTP/webhook/SMTP listeners and is unavailable in self_hosted API-only mode. ` +
-      "Use the operator `emails-serve` binary for the self-hosted service, or set EMAILS_MODE=local intentionally for the local dashboard/listeners.",
-  );
-}
 
 export function registerServeCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   // ─── SERVE ────────────────────────────────────────────────────────────────────
   program
     .command("serve")
-    .description("Start the HTTP server and dashboard")
-    .option("--port <port>", "Port to listen on", "3900")
-    .option("--host <host>", "Host to bind to (default: 127.0.0.1, use 0.0.0.0 for all interfaces)", "127.0.0.1")
-    .option("--webhook-port <port>", "Also start webhook listener on this port")
-    .option("--smtp-port <port>", "Also start SMTP inbound listener on this port")
-    .option("--all", "Start all listeners (HTTP :3900, webhook :9877, SMTP :2525)")
-    .option("--provider <id>", "Provider ID for inbound/webhook listeners")
-    .option("--webhook-secret <secret>", "Resend webhook signing secret (whsec_...) for signature verification")
-    .action(async (opts: { port?: string; host?: string; webhookPort?: string; smtpPort?: string; all?: boolean; provider?: string; webhookSecret?: string }) => {
-      failIfSelfHostedLocalServe("emails serve");
-      const { startServer } = await import("../../server/serve.js");
-      const port = parseInt(opts.port ?? "3900", 10);
-      const host = opts.host ?? "127.0.0.1";
-      await startServer(port, host);
-
-      const webhookPort = opts.all ? 9877 : (opts.webhookPort ? parseInt(opts.webhookPort, 10) : null);
-      const smtpPort = opts.all ? 2525 : (opts.smtpPort ? parseInt(opts.smtpPort, 10) : null);
-      if (webhookPort) {
-        const { createWebhookServer } = await import("../../lib/webhook.js");
-        createWebhookServer(webhookPort, opts.provider, opts.webhookSecret);
-        const securityNote = opts.webhookSecret ? chalk.green(" (signature verified)") : chalk.yellow(" (no signature verification)");
-        console.log(chalk.dim(`  Webhook listener on port ${webhookPort}`) + securityNote);
-      }
-      if (smtpPort) {
-        const { createSmtpServer } = await import("../../lib/inbound.js");
-        createSmtpServer(smtpPort, opts.provider);
-        console.log(chalk.dim(`  SMTP listener on port ${smtpPort}`));
-      }
+    .description("Start the self-hosted HTTP service")
+    .option("--port <port>", "Port to listen on", "8080")
+    .option("--host <host>", "Host to bind to (default: 0.0.0.0)", "0.0.0.0")
+    .action(async (opts: { port?: string; host?: string }) => {
+      const { startSelfHostedServer } = await import("../../server/self-hosted/serve.js");
+      const port = parseInt(opts.port ?? "8080", 10);
+      const host = opts.host ?? "0.0.0.0";
+      await startSelfHostedServer(pkg.version, port, host);
     });
 
   // ─── MCP ──────────────────────────────────────────────────────────────────────

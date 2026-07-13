@@ -15,15 +15,6 @@ async function toolError(error: unknown): Promise<ToolResult> {
   return { content: [{ type: "text", text: `Error: ${formatError(error)}` }], isError: true };
 }
 
-async function assertLocalStateAllowed(toolName: string, reason: string): Promise<void> {
-  const { getEmailsMode } = await import("../../lib/mode.js");
-  if (getEmailsMode() !== "self_hosted") return;
-  throw new Error(
-    `MCP tool ${toolName} is disabled in self_hosted API-only mode because ${reason}. ` +
-      "Use the self-hosted Emails API for server-owned state, or set EMAILS_MODE=local only for an explicit local store.",
-  );
-}
-
 async function isSelfHostedRuntimeMode(): Promise<boolean> {
   const { resolveEmailsMode } = await import("../../lib/mode.js");
   return resolveEmailsMode().mode === "self_hosted";
@@ -63,7 +54,7 @@ export function registerMiscOpsTools(server: McpServer): void {
     try {
       const selfHosted = await assertSelfHostedApiRouteReady("list_groups");
       const { listGroups, getMemberCounts } = await import('../../db/groups.js');
-      const groups = listGroups(undefined, { limit: limit ?? 100, offset: offset ?? 0 });
+      const groups = listGroups({ limit: limit ?? 100, offset: offset ?? 0 });
       const result = selfHosted
         ? groups
         : (() => {
@@ -178,7 +169,7 @@ export function registerMiscOpsTools(server: McpServer): void {
       const { getGroupByName, listMemberSummaries } = await import('../../db/groups.js');
       const group = getGroupByName(group_name);
       if (!group) throw new Error(`Group not found: ${group_name}`);
-      const members = listMemberSummaries(group.id, undefined, { limit: limit ?? 100, offset: offset ?? 0 });
+      const members = listMemberSummaries(group.id, { limit: limit ?? 100, offset: offset ?? 0 });
       return { content: [{ type: "text", text: JSON.stringify(members, null, 2) }] };
     } catch (e) {
       return toolError(e);
@@ -220,7 +211,6 @@ export function registerMiscOpsTools(server: McpServer): void {
   },
   async ({ provider_id, limit, offset }) => {
     try {
-      await assertLocalStateAllowed("list_sandbox_emails", "it reads local sandbox state");
       const { listSandboxEmailSummaries } = await import('../../db/sandbox.js');
       const { resolveId } = await import('../helpers.js');
       const resolvedId = provider_id ? resolveId("providers", provider_id) : undefined;
@@ -240,13 +230,10 @@ export function registerMiscOpsTools(server: McpServer): void {
   },
   async ({ id }) => {
     try {
-      await assertLocalStateAllowed("get_sandbox_email", "it reads local sandbox state");
-      const { getDatabase } = await import('../../db/database.js');
       const { getSandboxEmail } = await import('../../db/sandbox.js');
       const { resolveId } = await import('../helpers.js');
       const resolvedId = resolveId("sandbox_emails", id);
-      const db = getDatabase();
-      const email = getSandboxEmail(resolvedId, db);
+      const email = getSandboxEmail(resolvedId);
       if (!email) throw new Error(`Sandbox email not found: ${id}`);
       return { content: [{ type: "text", text: JSON.stringify(email, null, 2) }] };
     } catch (e) {
@@ -263,7 +250,6 @@ export function registerMiscOpsTools(server: McpServer): void {
   },
   async ({ provider_id }) => {
     try {
-      await assertLocalStateAllowed("clear_sandbox_emails", "it writes local sandbox state");
       const { clearSandboxEmails } = await import('../../db/sandbox.js');
       const { resolveId } = await import('../helpers.js');
       const resolvedId = provider_id ? resolveId("providers", provider_id) : undefined;
@@ -286,7 +272,6 @@ export function registerMiscOpsTools(server: McpServer): void {
   },
   async ({ provider_id, period }) => {
     try {
-      await assertLocalStateAllowed("get_analytics", "it reads local analytics tables");
       const { resolveId } = await import('../helpers.js');
       const resolvedId = provider_id ? resolveId("providers", provider_id) : undefined;
       const { getAnalytics } = await import("../../lib/analytics.js");
@@ -308,9 +293,8 @@ export function registerMiscOpsTools(server: McpServer): void {
   },
   async ({ live }) => {
     try {
-      await assertLocalStateAllowed("run_doctor", "it opens local diagnostics state before checking providers and domains");
       const { runDiagnostics } = await import("../../lib/doctor.js");
-      const checks = await runDiagnostics(undefined, { liveProviderChecks: live === true });
+      const checks = await runDiagnostics({ liveProviderChecks: live === true });
       return { content: [{ type: "text", text: JSON.stringify(checks, null, 2) }] };
     } catch (e) {
       return toolError(e);
@@ -334,7 +318,6 @@ export function registerMiscOpsTools(server: McpServer): void {
   },
   async ({ format, provider_id, from_address, since, until, limit, offset }) => {
     try {
-      await assertLocalStateAllowed("export_emails", "it exports local sent-message state");
       const { resolveId } = await import('../helpers.js');
       const resolvedId = provider_id ? resolveId("providers", provider_id) : undefined;
       const filters = { provider_id: resolvedId, from_address, since, until, limit: limit ?? 1000, offset: offset ?? 0 };
@@ -360,7 +343,6 @@ export function registerMiscOpsTools(server: McpServer): void {
   },
   async ({ format, provider_id, since, until, limit, offset }) => {
     try {
-      await assertLocalStateAllowed("export_events", "it exports local delivery-event state");
       const { resolveId } = await import('../helpers.js');
       const resolvedId = provider_id ? resolveId("providers", provider_id) : undefined;
       const filters = { provider_id: resolvedId, since, until, limit: limit ?? 1000, offset: offset ?? 0 };
@@ -406,46 +388,17 @@ export function registerMiscOpsTools(server: McpServer): void {
     provider_id: z.string().optional().describe("Provider ID (uses default if not specified)"),
     force: z.boolean().optional().describe("Send even to suppressed contacts"),
   },
-  async ({ recipients, template_name, from_address, provider_id, force }) => {
-    try {
-      await assertLocalStateAllowed("batch_send", "it reads local templates, suppression state, provider config, and writes local send ledgers");
-      const { getTemplate, renderTemplate } = await import("../../db/templates.js");
-      const template = getTemplate(template_name);
-      if (!template) throw new Error(`Template not found: ${template_name}`);
-      const { getActiveProvider, getProvider } = await import("../../db/providers.js");
-      const { getDatabase } = await import('../../db/database.js');
-      const { resolveId, ProviderNotFoundError } = await import('../helpers.js');
-      const db = getDatabase();
-      const resolvedProviderId = provider_id ? resolveId("providers", provider_id)
-        : getActiveProvider(db).id;
-      const provider = getProvider(resolvedProviderId, db);
-      if (!provider) throw new ProviderNotFoundError(resolvedProviderId);
-      const { getSuppressedEmailSet, incrementSendCounts } = await import("../../db/contacts.js");
-      const { createSentEmailLedger } = await import("../../lib/sent-ledger.js");
-      let sent = 0, skipped = 0, failed = 0;
-      const errors: string[] = [];
-      const suppressedEmailSet = force ? new Set<string>() : getSuppressedEmailSet(recipients.map((r) => r.email), db);
-      const sentEmails: string[] = [];
-      const { sendWithFailover } = await import("../../lib/send.js");
-      for (const r of recipients) {
-        if (!force && suppressedEmailSet.has(r.email)) { skipped++; continue; }
-        try {
-          const vars = r.vars ?? { email: r.email };
-          const subject = renderTemplate(template.subject_template, vars);
-          const html = template.html_template ? renderTemplate(template.html_template, vars) : undefined;
-          const text = template.text_template ? renderTemplate(template.text_template, vars) : undefined;
-          const sendOpts = { from: from_address, to: r.email, subject, html, text };
-          const { messageId, providerId: actualId } = await sendWithFailover(resolvedProviderId, sendOpts, db);
-          await createSentEmailLedger(actualId, sendOpts, messageId, db);
-          sentEmails.push(r.email);
-          sent++;
-        } catch (e) { failed++; errors.push(`${r.email}: ${e instanceof Error ? e.message : String(e)}`); }
-      }
-      incrementSendCounts(sentEmails, db);
-      return { content: [{ type: "text", text: JSON.stringify({ sent, skipped, failed, errors }, null, 2) }] };
-    } catch (e) {
-      return toolError(e);
-    }
+  async () => {
+    // Batch send depends on local provider adapters (failover) and local send
+    // ledgers; there is no client-side /v1 batch-send route (single sends go
+    // through send_email's API seam). Fail loud (rule 6).
+    return {
+      content: [{
+        type: "text",
+        text: "Error: batch_send is not available in the self-hosted client; template-driven batch sending runs on the self-hosted server. Use send_email for individual sends.",
+      }],
+      isError: true,
+    };
   },
   );
 }

@@ -6,19 +6,10 @@ function json(data: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
 }
 
-async function assertLocalStateAllowed(toolName: string, reason: string): Promise<void> {
-  const { getEmailsMode } = await import("../../lib/mode.js");
-  if (getEmailsMode() !== "self_hosted") return;
-  throw new Error(
-    `MCP tool ${toolName} is disabled in self_hosted API-only mode because ${reason}. ` +
-      "Use an API-backed self-hosted inbox preparation endpoint when it is available, or set EMAILS_MODE=local only for an explicit local store.",
-  );
-}
-
 export function registerAgentTools(server: McpServer): void {
   server.tool(
     "prepare_inbox",
-    "Prepare or diagnose a local inbox address. Creates local provisioning state only when create_missing=true and provider_id is supplied.",
+    "Prepare or diagnose an inbox address. Inbox address preparation, provisioning, and ownership run on the self-hosted server.",
     {
       email: z.string().describe("Inbox email address to prepare"),
       provider_id: z.string().optional().describe("Provider ID or prefix to use when creating a missing address"),
@@ -26,92 +17,19 @@ export function registerAgentTools(server: McpServer): void {
       forward_to: z.string().optional().describe("Forward target for cf-routing"),
       owner: z.string().optional().describe("Owner name, ID, or ID prefix to assign"),
       administrator: z.string().optional().describe("Administering agent name, ID, or ID prefix"),
-      create_missing: z.boolean().optional().describe("Create local address/provisioning state when no exact address exists"),
+      create_missing: z.boolean().optional().describe("Create address/provisioning state when no exact address exists"),
     },
-    async ({ email, provider_id, receive_strategy, forward_to, owner, administrator, create_missing }) => {
-      try {
-        await assertLocalStateAllowed("prepare_inbox", "it reads and writes local address, provisioning, ownership, and delivery-diagnosis state");
-        const [
-          { createAddress, findAddressesByEmail, getAddressByEmail },
-          { getDomainByName },
-          { getAddressProvisioning, setAddressProvisioning },
-          { getDatabase },
-          { getProvider },
-          { resolveId },
-          { diagnoseInboundDelivery },
-          { getAddressOwnershipDetail, setAddressOwnerByRef },
-        ] = await Promise.all([
-          import("../../db/addresses.js"),
-          import("../../db/domains.js"),
-          import("../../db/provisioning.js"),
-          import("../../db/database.js"),
-          import("../../db/providers.js"),
-          import("../helpers.js"),
-          import("../../lib/delivery-doctor.js"),
-          import("../../lib/address-ownership.js"),
-        ]);
-        const db = getDatabase();
-        const normalized = email.trim().toLowerCase();
-        if (!normalized.includes("@")) throw new Error("Expected a full email address");
-        const domainName = normalized.split("@")[1]!;
-        let created = false;
-        const blockers: string[] = [];
-        const next_commands: string[] = [];
-
-        let matches = findAddressesByEmail(normalized, db);
-        if (matches.length === 0 && create_missing) {
-          if (!provider_id) throw new Error("provider_id is required when create_missing=true");
-          const providerId = resolveId("providers", provider_id);
-          const provider = getProvider(providerId, db);
-          if (!provider) throw new Error(`Provider not found: ${provider_id}`);
-          const address = getAddressByEmail(providerId, normalized, db) ?? createAddress({ provider_id: providerId, email: normalized }, db);
-          const domainId = getDomainByName(providerId, domainName, db)?.id ?? null;
-          setAddressProvisioning(address.id, {
-            domain_id: domainId,
-            receive_strategy: receive_strategy ?? "ses-s3",
-            forward_to: forward_to ?? null,
-            provisioning_status: "requested",
-            next_check_at: new Date().toISOString(),
-          }, db);
-          created = true;
-          matches = [address];
-        }
-
-        if (matches.length === 0) {
-          blockers.push("No exact local address exists.");
-          next_commands.push(provider_id
-            ? `emails address provision ${normalized} --provider ${provider_id} --owner <owner>`
-            : `emails address provision ${normalized} --provider <provider> --owner <owner>`);
-        }
-
-        if (owner && matches.length === 1) {
-          setAddressOwnerByRef(matches[0]!.id, owner, administrator, db);
-        } else if (owner && matches.length > 1) {
-          blockers.push("Address exists on multiple providers; assign ownership by address ID.");
-        } else if (matches.length > 0 && !matches.some((address) => address.owner_id)) {
-          next_commands.push(`emails address set-owner ${matches[0]!.id} --owner <owner>`);
-        }
-
-        const addresses = matches.map((address) => ({
-          ...getAddressOwnershipDetail(address.id, db),
-          provisioning: getAddressProvisioning(address.id, db),
-        }));
-        const diagnosis = diagnoseInboundDelivery(normalized, db);
-        return json({
-          email: normalized,
-          created,
-          prepared: addresses.length > 0,
-          addresses,
-          blockers,
-          next_commands,
-          diagnosis,
-          cli_equivalent: provider_id
-            ? `emails address provision ${normalized} --provider ${provider_id}${owner ? ` --owner ${owner}` : ""} --json`
-            : `emails doctor delivery ${normalized} --json`,
-        });
-      } catch (e) {
-        return { content: [{ type: "text" as const, text: `Error: ${formatError(e)}` }], isError: true };
-      }
+    async () => {
+      // Inbox preparation orchestrates address/provisioning/ownership state that
+      // is owned by the self-hosted server; there is no local store to prepare
+      // and no client-side /v1 preparation endpoint. Fail loud (rule 6).
+      return {
+        content: [{
+          type: "text" as const,
+          text: "Error: prepare_inbox is not available in the self-hosted client; inbox address preparation, provisioning, and ownership run on the self-hosted server.",
+        }],
+        isError: true,
+      };
     },
   );
 

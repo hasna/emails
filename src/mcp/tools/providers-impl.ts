@@ -56,7 +56,7 @@ export async function runProviderTool(name: ProviderToolName, input: Record<stri
         const limit = typeof input["limit"] === "number" ? input["limit"] : undefined;
         const offset = typeof input["offset"] === "number" ? input["offset"] : undefined;
         const effectiveLimit = limit ?? 100;
-        const providers = listProviderSummaries(undefined, { limit: effectiveLimit, offset: offset ?? 0 });
+        const providers = listProviderSummaries({ limit: effectiveLimit, offset: offset ?? 0 });
         return json({
           providers: redactSecrets(providers),
           limit: effectiveLimit,

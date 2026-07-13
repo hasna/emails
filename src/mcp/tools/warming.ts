@@ -2,7 +2,6 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { createWarmingSchedule, getWarmingSchedule, listWarmingSchedules, updateWarmingStatus } from "../../db/warming.js";
 import { getTodayLimit, getTodaySentCount, generateWarmingPlan } from "../../lib/warming.js";
-import { getDatabase } from "../../db/database.js";
 import { formatError } from "../helpers.js";
 import { resolveEmailsMode } from "../../lib/mode.js";
 
@@ -45,9 +44,8 @@ export function registerWarmingTools(server: McpServer): void {
         assertWarmingLocalStateAllowed("get_warming_status");
         const schedule = getWarmingSchedule(domain);
         if (!schedule) throw new Error(`No warming schedule found for domain: ${domain}`);
-        const db = getDatabase();
         const today_limit = getTodayLimit(schedule);
-        const today_sent = getTodaySentCount(domain, db);
+        const today_sent = getTodaySentCount(domain);
         const startDate = new Date(schedule.start_date);
         const today = new Date();
         today.setHours(0, 0, 0, 0);
@@ -73,7 +71,7 @@ export function registerWarmingTools(server: McpServer): void {
         assertWarmingLocalStateAllowed("list_warming_schedules");
         const effectiveLimit = limit ?? 100;
         const effectiveOffset = offset ?? 0;
-        const rows = listWarmingSchedules(status, undefined, { limit: effectiveLimit + 1, offset: effectiveOffset });
+        const rows = listWarmingSchedules(status, { limit: effectiveLimit + 1, offset: effectiveOffset });
         const schedules = rows.slice(0, effectiveLimit);
         return { content: [{ type: "text", text: JSON.stringify({
           schedules,

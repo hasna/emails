@@ -7,7 +7,6 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { onCleanup } from "solid-js";
-import { closeDatabase, resetDatabase } from "../../db/database.js";
 import { createAddress, markVerified } from "../../db/addresses.js";
 import { createDomain } from "../../db/domains.js";
 import { saveEmailAgentRun } from "../../db/email-agents.js";
@@ -56,7 +55,6 @@ beforeEach(() => {
   delete process.env["EMAILS_SELF_HOSTED_URL"];
   delete process.env["EMAILS_SELF_HOSTED_API_KEY"];
   resetMailDataSource();
-  resetDatabase();
   providerId = createProvider({ name: "sandbox", type: "sandbox", active: true }).id;
   const address = createAddress({ provider_id: providerId, email: "ops@example.com" });
   markVerified(address.id);
@@ -69,7 +67,6 @@ beforeEach(() => {
 afterEach(() => {
   setup?.renderer.destroy();
   setup = null;
-  closeDatabase();
   delete process.env["EMAILS_MODE"];
   delete process.env["HASNA_EMAILS_MODE"];
   delete process.env["EMAILS_SELF_HOSTED_URL"];

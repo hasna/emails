@@ -1,22 +1,10 @@
-import type { Database } from "./database.js";
-import { getDatabase, uuid, now } from "./database.js";
+import { now, uuid } from "./runtime.js";
 import { safeOffset, safeOptionalLimit } from "./pagination.js";
-import { selfHostedResource, selfHostedListQuery, selfHostedPage, ciso, cstr, cstrOrNull } from "./self-hosted-resource.js";
+import { selfHostedResource, selfHostedListQuery, selfHostedPage, cnum, ciso, cstr, cstrOrNull } from "./self-hosted-resource.js";
 
 const SEQUENCE_RESOURCE = "sequences";
-
-function apiToSequence(e: Record<string, unknown>): Sequence {
-  const updatedAt = ciso(e["updated_at"]);
-  const status = cstr(e["status"]) || "active";
-  return {
-    id: cstr(e["id"]),
-    name: cstr(e["name"]),
-    description: cstrOrNull(e["description"]),
-    status: status as SequenceStatus,
-    created_at: ciso(e["created_at"], updatedAt),
-    updated_at: updatedAt,
-  };
-}
+const STEP_RESOURCE = "sequence-steps";
+const ENROLLMENT_RESOURCE = "sequence-enrollments";
 
 export type SequenceStatus = "active" | "paused" | "archived";
 export type EnrollmentStatus = "active" | "completed" | "cancelled";
@@ -76,135 +64,78 @@ export interface EnrollmentStatusCounts {
   total: number;
 }
 
-interface SequenceRow {
-  id: string;
-  name: string;
-  description: string | null;
-  status: string;
-  created_at: string;
-  updated_at: string;
+function apiToSequence(e: Record<string, unknown>): Sequence {
+  const updatedAt = ciso(e["updated_at"]);
+  return {
+    id: cstr(e["id"]),
+    name: cstr(e["name"]),
+    description: cstrOrNull(e["description"]),
+    status: (cstr(e["status"]) || "active") as SequenceStatus,
+    created_at: ciso(e["created_at"], updatedAt),
+    updated_at: updatedAt,
+  };
 }
 
-interface EnrollmentRow {
-  id: string;
-  sequence_id: string;
-  contact_email: string;
-  provider_id: string | null;
-  current_step: number;
-  status: string;
-  enrolled_at: string;
-  next_send_at: string | null;
-  completed_at: string | null;
+function apiToStep(e: Record<string, unknown>): SequenceStep {
+  return {
+    id: cstr(e["id"]),
+    sequence_id: cstr(e["sequence_id"]),
+    step_number: cnum(e["step_number"]),
+    delay_hours: cnum(e["delay_hours"]),
+    template_name: cstr(e["template_name"]),
+    from_address: cstrOrNull(e["from_address"]),
+    subject_override: cstrOrNull(e["subject_override"]),
+    created_at: ciso(e["created_at"]),
+  };
 }
 
-function rowToSequence(row: SequenceRow): Sequence {
-  return { ...row, status: row.status as SequenceStatus };
-}
-
-function rowToEnrollment(row: EnrollmentRow): SequenceEnrollment {
-  return { ...row, status: row.status as EnrollmentStatus };
-}
-
-function isDatabase(value: unknown): value is Database {
-  return Boolean(value && typeof (value as { query?: unknown }).query === "function");
+function apiToEnrollment(e: Record<string, unknown>): SequenceEnrollment {
+  return {
+    id: cstr(e["id"]),
+    sequence_id: cstr(e["sequence_id"]),
+    contact_email: cstr(e["contact_email"]),
+    provider_id: cstrOrNull(e["provider_id"]),
+    current_step: cnum(e["current_step"]),
+    status: (cstr(e["status"]) || "active") as EnrollmentStatus,
+    enrolled_at: ciso(e["enrolled_at"]),
+    next_send_at: cstrOrNull(e["next_send_at"]),
+    completed_at: cstrOrNull(e["completed_at"]),
+  };
 }
 
 // ─── SEQUENCES ────────────────────────────────────────────────────────────────
 
-export function createSequence(
-  input: { name: string; description?: string },
-  db?: Database,
-): Sequence {
-  // Self-hosted mode: route the write to the /v1/sequences API so a flipped client no
-  // longer creates sequences in the local SQLite island while `sequence list`
-  // reads the selfHosted (the split-brain bug). Reads already route via listSequences().
-  const selfHosted = selfHostedResource(SEQUENCE_RESOURCE);
-  if (selfHosted) {
-    return apiToSequence(selfHosted.create({
-      name: input.name,
-      description: input.description || null,
-      status: "active",
-    }));
-  }
-
-  const d = db || getDatabase();
-  const id = uuid();
-  const timestamp = now();
-
-  d.run(
-    `INSERT INTO sequences (id, name, description, status, created_at, updated_at)
-     VALUES (?, ?, ?, 'active', ?, ?)`,
-    [id, input.name, input.description || null, timestamp, timestamp],
-  );
-
-  return getSequence(id, d)!;
+export function createSequence(input: { name: string; description?: string }): Sequence {
+  return apiToSequence(selfHostedResource(SEQUENCE_RESOURCE).create({
+    name: input.name,
+    description: input.description || null,
+    status: "active",
+  }));
 }
 
-export function getSequence(nameOrId: string, db?: Database): Sequence | null {
-  const selfHosted = selfHostedResource(SEQUENCE_RESOURCE);
-  if (selfHosted) {
-    const direct = selfHosted.get(nameOrId);
-    if (direct) return apiToSequence(direct);
-    return selfHosted.list({ limit: 1000 }).map(apiToSequence)
-      .find((sequence) => sequence.name === nameOrId) ?? null;
-  }
-  const d = db || getDatabase();
-  let row = d.query("SELECT * FROM sequences WHERE id = ?").get(nameOrId) as SequenceRow | null;
-  if (!row) {
-    row = d.query("SELECT * FROM sequences WHERE name = ?").get(nameOrId) as SequenceRow | null;
-  }
-  if (!row) return null;
-  return rowToSequence(row);
+export function getSequence(nameOrId: string): Sequence | null {
+  const store = selfHostedResource(SEQUENCE_RESOURCE);
+  const direct = store.get(nameOrId);
+  if (direct) return apiToSequence(direct);
+  return store.list({ limit: 1000 }).map(apiToSequence).find((sequence) => sequence.name === nameOrId) ?? null;
 }
 
-export function listSequences(db?: Database, opts?: ListSequenceOptions): Sequence[] {
-  const selfHosted = selfHostedResource(SEQUENCE_RESOURCE);
-  if (selfHosted) {
-    const { query, limit, offset } = selfHostedListQuery(opts);
-    const rows = selfHosted.list(query).map(apiToSequence);
-    rows.sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
-    return selfHostedPage(rows, limit, offset);
-  }
-
-  const d = db || getDatabase();
-  const limit = safeOptionalLimit(opts?.limit);
-  const offset = safeOffset(opts?.offset);
-  const rows = limit !== null
-    ? d.query("SELECT * FROM sequences ORDER BY created_at DESC LIMIT ? OFFSET ?").all(limit, offset) as SequenceRow[]
-    : d.query("SELECT * FROM sequences ORDER BY created_at DESC").all() as SequenceRow[];
-  return rows.map(rowToSequence);
+export function listSequences(opts?: ListSequenceOptions): Sequence[] {
+  const { query, limit, offset } = selfHostedListQuery(opts);
+  const rows = selfHostedResource(SEQUENCE_RESOURCE).list(query).map(apiToSequence);
+  rows.sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
+  return selfHostedPage(rows, limit, offset);
 }
 
 export function updateSequence(
   id: string,
   updates: Partial<Pick<Sequence, "name" | "description" | "status">>,
-  db?: Database,
 ): Sequence {
-  const selfHosted = selfHostedResource(SEQUENCE_RESOURCE);
-  if (selfHosted) return apiToSequence(selfHosted.update(id, updates));
-  const d = db || getDatabase();
-  const seq = d.query("SELECT * FROM sequences WHERE id = ?").get(id) as SequenceRow | null;
-  if (!seq) throw new Error(`Sequence not found: ${id}`);
-
-  const name = updates.name ?? seq.name;
-  const description = updates.description !== undefined ? updates.description : seq.description;
-  const status = updates.status ?? seq.status;
-  const timestamp = now();
-
-  d.run(
-    "UPDATE sequences SET name = ?, description = ?, status = ?, updated_at = ? WHERE id = ?",
-    [name, description, status, timestamp, id],
-  );
-
-  return getSequence(id, d)!;
+  return apiToSequence(selfHostedResource(SEQUENCE_RESOURCE).update(id, updates));
 }
 
-export function deleteSequence(id: string, db?: Database): boolean {
-  const selfHosted = selfHostedResource(SEQUENCE_RESOURCE);
-  if (selfHosted) return selfHosted.del(id);
-  const d = db || getDatabase();
-  const result = d.run("DELETE FROM sequences WHERE id = ?", [id]);
-  return result.changes > 0;
+export function deleteSequence(id: string): boolean {
+  return selfHostedResource(SEQUENCE_RESOURCE).del(id);
 }
 
 // ─── STEPS ────────────────────────────────────────────────────────────────────
@@ -218,190 +149,142 @@ export function addStep(
     from_address?: string;
     subject_override?: string;
   },
-  db?: Database,
 ): SequenceStep {
-  const d = db || getDatabase();
   const id = uuid();
   const timestamp = now();
-
-  d.run(
-    `INSERT INTO sequence_steps (id, sequence_id, step_number, delay_hours, template_name, from_address, subject_override, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      id,
-      input.sequence_id,
-      input.step_number,
-      input.delay_hours,
-      input.template_name,
-      input.from_address || null,
-      input.subject_override || null,
-      timestamp,
-    ],
-  );
-
-  return d.query("SELECT * FROM sequence_steps WHERE id = ?").get(id) as SequenceStep;
+  return apiToStep(selfHostedResource(STEP_RESOURCE).create({
+    id,
+    sequence_id: input.sequence_id,
+    step_number: input.step_number,
+    delay_hours: input.delay_hours,
+    template_name: input.template_name,
+    from_address: input.from_address || null,
+    subject_override: input.subject_override || null,
+    created_at: timestamp,
+  }));
 }
 
-export function listSteps(sequence_id: string, db?: Database): SequenceStep[] {
-  const d = db || getDatabase();
-  return d
-    .query("SELECT * FROM sequence_steps WHERE sequence_id = ? ORDER BY step_number ASC")
-    .all(sequence_id) as SequenceStep[];
+export function listSteps(sequence_id: string): SequenceStep[] {
+  return selfHostedResource(STEP_RESOURCE)
+    .list({ limit: 1000 })
+    .map(apiToStep)
+    .filter((s) => s.sequence_id === sequence_id)
+    .sort((a, b) => a.step_number - b.step_number);
 }
 
-export function getStepAtIndex(sequence_id: string, index: number, db?: Database): SequenceStep | null {
-  const d = db || getDatabase();
-  const offset = safeOffset(index);
-  return (d
-    .query("SELECT * FROM sequence_steps WHERE sequence_id = ? ORDER BY step_number ASC LIMIT 1 OFFSET ?")
-    .get(sequence_id, offset) as SequenceStep | null) ?? null;
+export function getStepAtIndex(sequence_id: string, index: number): SequenceStep | null {
+  return listSteps(sequence_id)[safeOffset(index)] ?? null;
 }
 
-export function removeStep(id: string, db?: Database): boolean {
-  const d = db || getDatabase();
-  const result = d.run("DELETE FROM sequence_steps WHERE id = ?", [id]);
-  return result.changes > 0;
+export function removeStep(id: string): boolean {
+  return selfHostedResource(STEP_RESOURCE).del(id);
 }
 
 // ─── ENROLLMENTS ──────────────────────────────────────────────────────────────
 
 export function enroll(
   input: { sequence_id: string; contact_email: string; provider_id?: string },
-  db?: Database,
 ): SequenceEnrollment {
-  const d = db || getDatabase();
+  const store = selfHostedResource(ENROLLMENT_RESOURCE);
 
-  // Idempotent: return existing active enrollment if already enrolled
-  const existing = d
-    .query("SELECT * FROM sequence_enrollments WHERE sequence_id = ? AND contact_email = ?")
-    .get(input.sequence_id, input.contact_email) as EnrollmentRow | null;
-
-  if (existing) return rowToEnrollment(existing);
+  // Idempotent: return existing enrollment if already enrolled.
+  const existing = store
+    .list({ limit: 1000 })
+    .map(apiToEnrollment)
+    .find((e) => e.sequence_id === input.sequence_id && e.contact_email === input.contact_email);
+  if (existing) return existing;
 
   const id = uuid();
   const timestamp = now();
 
-  // Compute next_send_at based on first step's delay_hours
-  const firstStep = d
-    .query("SELECT delay_hours FROM sequence_steps WHERE sequence_id = ? ORDER BY step_number ASC LIMIT 1")
-    .get(input.sequence_id) as { delay_hours: number } | null;
-
+  // Compute next_send_at based on the first step's delay_hours.
+  const firstStep = listSteps(input.sequence_id)[0];
   const nextSendAt = firstStep
     ? new Date(Date.now() + firstStep.delay_hours * 3600 * 1000).toISOString()
     : null;
 
-  d.run(
-    `INSERT INTO sequence_enrollments (id, sequence_id, contact_email, provider_id, current_step, status, enrolled_at, next_send_at, completed_at)
-     VALUES (?, ?, ?, ?, 0, 'active', ?, ?, NULL)`,
-    [id, input.sequence_id, input.contact_email, input.provider_id || null, timestamp, nextSendAt],
-  );
-
-  return d
-    .query("SELECT * FROM sequence_enrollments WHERE id = ?")
-    .get(id) as SequenceEnrollment;
+  return apiToEnrollment(store.create({
+    id,
+    sequence_id: input.sequence_id,
+    contact_email: input.contact_email,
+    provider_id: input.provider_id || null,
+    current_step: 0,
+    status: "active",
+    enrolled_at: timestamp,
+    next_send_at: nextSendAt,
+    completed_at: null,
+  }));
 }
 
-export function unenroll(sequence_id: string, contact_email: string, db?: Database): boolean {
-  const d = db || getDatabase();
-  const result = d.run(
-    "UPDATE sequence_enrollments SET status = 'cancelled' WHERE sequence_id = ? AND contact_email = ? AND status = 'active'",
-    [sequence_id, contact_email],
-  );
-  return result.changes > 0;
+export function unenroll(sequence_id: string, contact_email: string): boolean {
+  const store = selfHostedResource(ENROLLMENT_RESOURCE);
+  const existing = store
+    .list({ limit: 1000 })
+    .map(apiToEnrollment)
+    .find((e) => e.sequence_id === sequence_id && e.contact_email === contact_email && e.status === "active");
+  if (!existing) return false;
+  store.update(existing.id, { status: "cancelled" });
+  return true;
 }
 
-export function listEnrollments(opts?: ListEnrollmentOptions, db?: Database): SequenceEnrollment[] {
-  const d = db || getDatabase();
-  const conditions: string[] = [];
-  const params: Array<string | number> = [];
-  if (opts?.sequence_id) {
-    conditions.push("sequence_id = ?");
-    params.push(opts.sequence_id);
-  }
-  if (opts?.status) {
-    conditions.push("status = ?");
-    params.push(opts.status);
-  }
-  const where = conditions.length > 0 ? ` WHERE ${conditions.join(" AND ")}` : "";
+export function listEnrollments(opts?: ListEnrollmentOptions): SequenceEnrollment[] {
+  let rows = selfHostedResource(ENROLLMENT_RESOURCE).list({ limit: 1000 }).map(apiToEnrollment);
+  if (opts?.sequence_id) rows = rows.filter((e) => e.sequence_id === opts.sequence_id);
+  if (opts?.status) rows = rows.filter((e) => e.status === opts.status);
+  rows.sort((a, b) => (b.enrolled_at ?? "").localeCompare(a.enrolled_at ?? ""));
   const limit = safeOptionalLimit(opts?.limit);
   const offset = safeOffset(opts?.offset);
-  if (limit !== null) params.push(limit, offset);
-  const rows = d
-    .query(`SELECT * FROM sequence_enrollments${where} ORDER BY enrolled_at DESC${limit !== null ? " LIMIT ? OFFSET ?" : ""}`)
-    .all(...params) as EnrollmentRow[];
-  return rows.map(rowToEnrollment);
+  return limit === null ? rows : rows.slice(offset, offset + limit);
 }
 
-export function countEnrollmentsByStatus(sequenceId: string, db?: Database): EnrollmentStatusCounts {
-  const d = db || getDatabase();
-  const row = d.query(
-    `SELECT
-       COUNT(*) AS total,
-       SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active,
-       SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed,
-       SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled
-     FROM sequence_enrollments
-     WHERE sequence_id = ?`,
-  ).get(sequenceId) as { total: unknown; active: unknown; completed: unknown; cancelled: unknown } | null;
-  return {
-    active: Number(row?.active) || 0,
-    completed: Number(row?.completed) || 0,
-    cancelled: Number(row?.cancelled) || 0,
-    total: Number(row?.total) || 0,
-  };
+export function countEnrollmentsByStatus(sequenceId: string): EnrollmentStatusCounts {
+  const rows = selfHostedResource(ENROLLMENT_RESOURCE)
+    .list({ limit: 1000 })
+    .map(apiToEnrollment)
+    .filter((e) => e.sequence_id === sequenceId);
+  const counts: EnrollmentStatusCounts = { active: 0, completed: 0, cancelled: 0, total: rows.length };
+  for (const e of rows) {
+    if (e.status === "active") counts.active++;
+    else if (e.status === "completed") counts.completed++;
+    else if (e.status === "cancelled") counts.cancelled++;
+  }
+  return counts;
 }
 
-export function getDueEnrollments(db?: Database): SequenceEnrollment[];
-export function getDueEnrollments(opts?: ListDueEnrollmentOptions, db?: Database): SequenceEnrollment[];
-export function getDueEnrollments(optsOrDb?: ListDueEnrollmentOptions | Database, maybeDb?: Database): SequenceEnrollment[] {
-  const d = isDatabase(optsOrDb) ? optsOrDb : maybeDb || getDatabase();
-  const opts = isDatabase(optsOrDb) ? undefined : optsOrDb;
+export function getDueEnrollments(opts?: ListDueEnrollmentOptions): SequenceEnrollment[] {
   const currentTime = now();
   const limit = safeOptionalLimit(opts?.limit);
-  const params: Array<string | number> = [currentTime];
-  if (limit !== null) params.push(limit);
-  const rows = d
-    .query(
-      `SELECT * FROM sequence_enrollments
-       WHERE status = 'active' AND next_send_at <= ?
-       ORDER BY next_send_at ASC, id ASC${limit !== null ? " LIMIT ?" : ""}`,
-    )
-    .all(...params) as EnrollmentRow[];
-  return rows.map(rowToEnrollment);
+  const rows = selfHostedResource(ENROLLMENT_RESOURCE)
+    .list({ limit: 1000 })
+    .map(apiToEnrollment)
+    .filter((e) => e.status === "active" && e.next_send_at !== null && e.next_send_at <= currentTime)
+    .sort((a, b) => (a.next_send_at ?? "").localeCompare(b.next_send_at ?? "") || a.id.localeCompare(b.id));
+  return limit === null ? rows : rows.slice(0, limit);
 }
 
-export function advanceEnrollment(enrollment_id: string, db?: Database): SequenceEnrollment | null {
-  const d = db || getDatabase();
-  const enrollment = d
-    .query("SELECT * FROM sequence_enrollments WHERE id = ?")
-    .get(enrollment_id) as EnrollmentRow | null;
-
-  if (!enrollment) return null;
+export function advanceEnrollment(enrollment_id: string): SequenceEnrollment | null {
+  const store = selfHostedResource(ENROLLMENT_RESOURCE);
+  const record = store.get(enrollment_id);
+  if (!record) return null;
+  const enrollment = apiToEnrollment(record);
 
   // current_step is a 0-based index into the sorted steps array.
-  // After sending the step at index current_step, advance to current_step+1.
   const nextIndex = enrollment.current_step + 1;
-
-  const nextStep = getStepAtIndex(enrollment.sequence_id, nextIndex, d);
+  const nextStep = getStepAtIndex(enrollment.sequence_id, nextIndex);
 
   if (!nextStep) {
-    // No more steps — mark as completed
-    const completedAt = now();
-    d.run(
-      "UPDATE sequence_enrollments SET status = 'completed', completed_at = ?, next_send_at = NULL, current_step = ? WHERE id = ?",
-      [completedAt, nextIndex, enrollment_id],
-    );
+    // No more steps — mark as completed.
+    store.update(enrollment_id, {
+      status: "completed",
+      completed_at: now(),
+      next_send_at: null,
+      current_step: nextIndex,
+    });
   } else {
-    // Advance to next step
     const nextSendAt = new Date(Date.now() + nextStep.delay_hours * 3600 * 1000).toISOString();
-    d.run(
-      "UPDATE sequence_enrollments SET current_step = ?, next_send_at = ? WHERE id = ?",
-      [nextIndex, nextSendAt, enrollment_id],
-    );
+    store.update(enrollment_id, { current_step: nextIndex, next_send_at: nextSendAt });
   }
 
-  const row = d
-    .query("SELECT * FROM sequence_enrollments WHERE id = ?")
-    .get(enrollment_id) as EnrollmentRow | null;
-  return row ? rowToEnrollment(row) : null;
+  const updated = store.get(enrollment_id);
+  return updated ? apiToEnrollment(updated) : null;
 }

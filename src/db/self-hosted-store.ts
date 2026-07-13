@@ -55,22 +55,26 @@ function toV1BaseUrl(apiUrl: string): string {
 }
 
 let _cachedSignature: string | null = null;
-let _cachedConfig: SelfHostedConfig | null | undefined;
-let _resourceRoutingDisabledDepth = 0;
+let _cachedConfig: SelfHostedConfig | null = null;
+
+const CONFIG_HELP =
+  "Configure the client via EMAILS_CLIENT_ENV_SECRET (an encrypted client env file), " +
+  "or set EMAILS_MODE=self_hosted with EMAILS_SELF_HOSTED_URL and EMAILS_SELF_HOSTED_API_KEY.";
 
 /**
- * Resolve strict client configuration. Credentials never imply a mode and no
- * endpoint is supplied by the package.
+ * Resolve strict client configuration. This client is self-hosted-ONLY: a fully
+ * configured self_hosted endpoint (base URL + API key) is MANDATORY. Missing or
+ * partial configuration fails loud — there is no local fallback and no endpoint
+ * is ever inferred by the package.
  */
-export function resolveSelfHostedConfig(env: NodeJS.ProcessEnv = process.env): SelfHostedConfig | null {
-  if (_resourceRoutingDisabledDepth > 0) return null;
+export function resolveSelfHostedConfig(env: NodeJS.ProcessEnv = process.env): SelfHostedConfig {
   loadEmailsClientEnvSecret(env);
   const modeRaw = env["EMAILS_MODE"]?.trim() ?? env["HASNA_EMAILS_MODE"]?.trim();
   const apiUrl = env["EMAILS_SELF_HOSTED_URL"]?.trim();
   const apiKey = env["EMAILS_SELF_HOSTED_API_KEY"]?.trim();
 
   const signature = `${modeRaw ?? ""}|${apiUrl ?? ""}|${apiKey ? "k" : ""}`;
-  if (signature === _cachedSignature && _cachedConfig !== undefined) return _cachedConfig ?? null;
+  if (signature === _cachedSignature && _cachedConfig) return _cachedConfig;
 
   const config = computeConfig(modeRaw, apiUrl, apiKey);
   _cachedSignature = signature;
@@ -82,57 +86,38 @@ function computeConfig(
   modeRaw: string | undefined,
   apiUrl: string | undefined,
   apiKey: string | undefined,
-): SelfHostedConfig | null {
-  if (modeRaw === "local") {
-    return null;
-  }
-  if (!modeRaw) {
-    if (apiUrl || apiKey) {
-      throw new Error(
-        "Self-hosted credentials were supplied without EMAILS_MODE=self_hosted. " +
-          "Set the mode explicitly or remove EMAILS_SELF_HOSTED_URL and EMAILS_SELF_HOSTED_API_KEY.",
-      );
-    }
-    return null;
-  }
-  if (modeRaw !== "self_hosted") {
+): SelfHostedConfig {
+  if (modeRaw && modeRaw !== "self_hosted") {
     throw new Error(
-      `Unsupported Emails mode '${modeRaw}'. Use exactly local or self_hosted; cloud, remote, and hybrid aliases were removed.`,
+      `${APP}: unsupported EMAILS_MODE '${modeRaw}'. This client is self-hosted-only and the ` +
+        `only supported mode is self_hosted. ${CONFIG_HELP}`,
     );
   }
-  if (!apiKey) {
+  if (!apiUrl || !apiKey) {
+    const missing = [
+      !apiUrl ? "EMAILS_SELF_HOSTED_URL" : null,
+      !apiKey ? "EMAILS_SELF_HOSTED_API_KEY" : null,
+    ].filter(Boolean).join(" and ");
     throw new Error(
-      `${APP}: self_hosted mode requires EMAILS_SELF_HOSTED_API_KEY.`,
+      `${APP}: the self-hosted client is not configured (${missing} missing). ${CONFIG_HELP}`,
     );
   }
-  if (!apiUrl) {
-    throw new Error(
-      `${APP}: self_hosted mode requires an operator-supplied EMAILS_SELF_HOSTED_URL.`,
-    );
-  }
-
   return { baseUrl: toV1BaseUrl(apiUrl), apiKey };
-}
-
-/** True only for explicit, completely configured self-hosted mode. */
-export function isSelfHostedMode(): boolean {
-  return resolveSelfHostedConfig() !== null;
 }
 
 /** Reset the memoized config (tests flip env between cases). */
 export function resetSelfHostedConfigCache(): void {
   _cachedSignature = null;
-  _cachedConfig = undefined;
+  _cachedConfig = null;
 }
 
-/** Run synchronous repository reads against local config even in self_hosted mode. */
-export function withSelfHostedResourceRoutingDisabled<T>(fn: () => T): T {
-  _resourceRoutingDisabledDepth += 1;
-  try {
-    return fn();
-  } finally {
-    _resourceRoutingDisabledDepth -= 1;
-  }
+/**
+ * Compatibility shim. This client is self-hosted-ONLY, so this is always true.
+ * Retained only so external modules (e.g. the self-hosted server env/migrate)
+ * that still reference it keep compiling; new client code must not branch on it.
+ */
+export function isSelfHostedMode(): boolean {
+  return true;
 }
 
 interface CurlResult {
@@ -316,12 +301,12 @@ function encodeQuery(query?: Record<string, string | number | boolean | undefine
 }
 
 /**
- * Return a self-hosted store for `resource`, or null in local mode. Invalid or
- * incomplete self-hosted configuration fails closed.
+ * Return a self-hosted store for `resource`. This client is self-hosted-only, so
+ * this always returns a store; missing/invalid configuration throws (fail loud)
+ * via resolveSelfHostedConfig().
  */
-export function selfHostedStoreFor(resource: string): SelfHostedResourceStore | null {
+export function selfHostedStoreFor(resource: string): SelfHostedResourceStore {
   const config = resolveSelfHostedConfig();
-  if (!config) return null;
   const clean = resource.replace(/^\/+|\/+$/g, "");
   const base = `/${clean}`;
   const singular = singularOf(clean);
@@ -359,4 +344,52 @@ export function selfHostedStoreFor(resource: string): SelfHostedResourceStore | 
       return true;
     },
   };
+}
+
+// ---- id resolution (self-hosted) ------------------------------------------
+//
+// Replaces the deleted local resolvePartialId family. A full 36-char id is
+// verified with a single GET; a shorter prefix is matched against a bounded
+// recent scan of the resource. All resolution routes to the /v1 API — never a
+// local island.
+
+const RESOLVE_SCAN_CAP = 1000;
+
+export function resolveResourceId(resource: string, partialId: string): string | null {
+  const value = partialId.trim();
+  if (!value) return null;
+  const store = selfHostedStoreFor(resource);
+  if (value.length >= 36) {
+    return store.get(value) ? value : null;
+  }
+  const matches = store
+    .list({ limit: RESOLVE_SCAN_CAP })
+    .map((row) => String((row as { id?: unknown }).id ?? ""))
+    .filter((id) => id.startsWith(value));
+  return matches.length === 1 ? matches[0]! : null;
+}
+
+export function listResourceIdMatches(resource: string, partialId: string, limit = 6): string[] {
+  const value = partialId.trim();
+  const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 6;
+  const store = selfHostedStoreFor(resource);
+  return store
+    .list({ limit: RESOLVE_SCAN_CAP })
+    .map((row) => String((row as { id?: unknown }).id ?? ""))
+    .filter((id) => id.startsWith(value))
+    .slice(0, safeLimit);
+}
+
+export function resolveResourceIdOrThrow(resource: string, partialId: string): string {
+  const value = partialId.trim();
+  if (!value) throw new Error(`Missing ID for resource '${resource}'.`);
+  const id = resolveResourceId(resource, value);
+  if (id) return id;
+  const matches = listResourceIdMatches(resource, value, 6);
+  if (matches.length === 0) {
+    throw new Error(`Could not resolve ID '${value}' in resource '${resource}'.`);
+  }
+  const preview = matches.slice(0, 5).join(", ");
+  const count = matches.length >= 6 ? "at least 6" : String(matches.length);
+  throw new Error(`Ambiguous ID '${value}' in resource '${resource}' (${count} matches): ${preview}`);
 }

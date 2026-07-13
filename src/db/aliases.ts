@@ -6,10 +6,14 @@
  * and can never be deleted, so no inbound is ever dropped.
  *
  * Resolution order: specific alias → domain catch-all → global catch-all.
+ *
+ * Self-hosted-ONLY: every read/write routes to the operator's `/v1/aliases` API.
  */
-import type { Database } from "./database.js";
-import { getDatabase, now, uuid } from "./database.js";
+import { now, uuid } from "./runtime.js";
 import { safeOffset, safeOptionalLimit } from "./pagination.js";
+import { selfHostedResource, cbool, ciso, cstr } from "./self-hosted-resource.js";
+
+const ALIAS_RESOURCE = "aliases";
 
 /** Sentinel local-part used to represent a catch-all. */
 export const CATCH_ALL = "*";
@@ -31,7 +35,18 @@ export interface ListAliasOptions {
   offset?: number;
 }
 
-interface AliasRow extends Omit<Alias, "protected"> { protected?: number }
+function apiToAlias(e: Record<string, unknown>): Alias {
+  const updatedAt = ciso(e["updated_at"]);
+  return {
+    id: cstr(e["id"]),
+    domain: cstr(e["domain"]),
+    local_part: cstr(e["local_part"]),
+    target_address: cstr(e["target_address"]),
+    protected: cbool(e["protected"]),
+    created_at: ciso(e["created_at"], updatedAt),
+    updated_at: updatedAt,
+  };
+}
 
 function splitAddress(address: string): { local_part: string; domain: string } {
   const at = address.lastIndexOf("@");
@@ -41,103 +56,103 @@ function splitAddress(address: string): { local_part: string; domain: string } {
   return { local_part: address.slice(0, at).toLowerCase(), domain: address.slice(at + 1).toLowerCase() };
 }
 
-function rowToAlias(row: AliasRow): Alias {
-  return { ...row, protected: !!row.protected };
+/** Default ordering: global catch-all first, then by domain, then local-part. */
+function compareAliases(a: Alias, b: Alias): number {
+  return (
+    Number(b.domain === "*") - Number(a.domain === "*") ||
+    a.domain.localeCompare(b.domain) ||
+    a.local_part.localeCompare(b.local_part)
+  );
 }
 
-function upsert(domain: string, localPart: string, target: string, db: Database, isProtected = false): Alias {
-  const d = db;
-  const existing = d.query("SELECT * FROM aliases WHERE domain = ? AND local_part = ?").get(domain, localPart) as AliasRow | null;
+function upsert(domain: string, localPart: string, target: string, isProtected = false): Alias {
+  const store = selfHostedResource(ALIAS_RESOURCE);
+  const existing = store.list({ limit: 1000 }).map(apiToAlias).find((a) => a.domain === domain && a.local_part === localPart);
   if (existing) {
-    d.run("UPDATE aliases SET target_address = ?, updated_at = ? WHERE id = ?", [target, now(), existing.id]);
-    return getAlias(existing.id, d)!;
+    return apiToAlias(store.update(existing.id, { target_address: target, updated_at: now() }));
   }
   const id = uuid();
   const ts = now();
-  d.run(
-    "INSERT INTO aliases (id, domain, local_part, target_address, protected, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-    [id, domain, localPart, target, isProtected ? 1 : 0, ts, ts],
-  );
-  return getAlias(id, d)!;
+  return apiToAlias(store.create({
+    id,
+    domain,
+    local_part: localPart,
+    target_address: target,
+    protected: isProtected,
+    created_at: ts,
+    updated_at: ts,
+  }));
 }
 
 /** Create (or update) a specific alias: `alias@domain` → `target`. */
-export function createAlias(aliasAddress: string, target: string, db?: Database): Alias {
-  const d = db || getDatabase();
+export function createAlias(aliasAddress: string, target: string): Alias {
   const { local_part, domain } = splitAddress(aliasAddress);
-  return upsert(domain, local_part, target.toLowerCase(), d);
+  return upsert(domain, local_part, target.toLowerCase());
 }
 
 /** Create (or update) a catch-all for `domain` → `target`. */
-export function createCatchAll(domain: string, target: string, db?: Database): Alias {
-  const d = db || getDatabase();
-  return upsert(domain.toLowerCase(), CATCH_ALL, target.toLowerCase(), d);
+export function createCatchAll(domain: string, target: string): Alias {
+  return upsert(domain.toLowerCase(), CATCH_ALL, target.toLowerCase());
 }
 
 /** Create (or update) the GLOBAL catch-all (all domains) → `target`. Protected. */
-export function setGlobalCatchAll(target: string, db?: Database): Alias {
-  const d = db || getDatabase();
-  return upsert(ALL_DOMAINS, CATCH_ALL, target.toLowerCase(), d, true);
+export function setGlobalCatchAll(target: string): Alias {
+  return upsert(ALL_DOMAINS, CATCH_ALL, target.toLowerCase(), true);
 }
 
 /**
  * Ensure the protected global catch-all exists (target defaults to empty = keep
  * everything, no rewrite). Idempotent — safe to call on every startup.
  */
-export function ensureDefaultCatchAll(db?: Database): Alias {
-  const d = db || getDatabase();
-  const existing = d.query("SELECT * FROM aliases WHERE domain = ? AND local_part = ?").get(ALL_DOMAINS, CATCH_ALL) as AliasRow | null;
-  if (existing) return rowToAlias(existing);
-  return upsert(ALL_DOMAINS, CATCH_ALL, "", d, true);
+export function ensureDefaultCatchAll(): Alias {
+  const existing = getGlobalCatchAll();
+  if (existing) return existing;
+  return upsert(ALL_DOMAINS, CATCH_ALL, "", true);
 }
 
-export function getGlobalCatchAll(db?: Database): Alias | null {
-  const d = db || getDatabase();
-  const row = d.query("SELECT * FROM aliases WHERE domain = ? AND local_part = ?").get(ALL_DOMAINS, CATCH_ALL) as AliasRow | null;
-  return row ? rowToAlias(row) : null;
+export function getGlobalCatchAll(): Alias | null {
+  const match = selfHostedResource(ALIAS_RESOURCE)
+    .list({ limit: 1000 })
+    .map(apiToAlias)
+    .find((a) => a.domain === ALL_DOMAINS && a.local_part === CATCH_ALL);
+  return match ?? null;
 }
 
-export function getAlias(id: string, db?: Database): Alias | null {
-  const d = db || getDatabase();
-  const row = d.query("SELECT * FROM aliases WHERE id = ?").get(id) as AliasRow | null;
-  return row ? rowToAlias(row) : null;
+export function getAlias(id: string): Alias | null {
+  const record = selfHostedResource(ALIAS_RESOURCE).get(id);
+  return record ? apiToAlias(record) : null;
 }
 
-export function listAliases(domain?: string, db?: Database, opts?: ListAliasOptions): Alias[] {
-  const d = db || getDatabase();
+export function listAliases(domain?: string, opts?: ListAliasOptions): Alias[] {
   const limit = safeOptionalLimit(opts?.limit);
   const offset = safeOffset(opts?.offset);
-  const rows = domain
-    ? (limit !== null
-        ? d.query("SELECT * FROM aliases WHERE domain = ? ORDER BY local_part LIMIT ? OFFSET ?").all(domain.toLowerCase(), limit, offset) as AliasRow[]
-        : d.query("SELECT * FROM aliases WHERE domain = ? ORDER BY local_part").all(domain.toLowerCase()) as AliasRow[])
-    : (limit !== null
-        ? d.query("SELECT * FROM aliases ORDER BY (domain='*') DESC, domain, local_part LIMIT ? OFFSET ?").all(limit, offset) as AliasRow[]
-        : d.query("SELECT * FROM aliases ORDER BY (domain='*') DESC, domain, local_part").all() as AliasRow[]);
-  return rows.map(rowToAlias);
+  let rows = selfHostedResource(ALIAS_RESOURCE).list({ limit: 1000 }).map(apiToAlias);
+  if (domain) {
+    const target = domain.toLowerCase();
+    rows = rows.filter((a) => a.domain === target).sort((a, b) => a.local_part.localeCompare(b.local_part));
+  } else {
+    rows.sort(compareAliases);
+  }
+  return limit === null ? rows : rows.slice(offset, offset + limit);
 }
 
 /** List aliases that route to any of the given target addresses. */
-export function listAliasesByTargets(targets: Iterable<string>, db?: Database): Alias[] {
-  const normalized = [...new Set([...targets].map((target) => target.trim().toLowerCase()).filter(Boolean))];
-  if (normalized.length === 0) return [];
-  const d = db || getDatabase();
-  const placeholders = normalized.map(() => "?").join(", ");
-  const rows = d.query(
-    `SELECT * FROM aliases
-     WHERE LOWER(target_address) IN (${placeholders})
-     ORDER BY (domain='*') DESC, domain, local_part`,
-  ).all(...normalized) as AliasRow[];
-  return rows.map(rowToAlias);
+export function listAliasesByTargets(targets: Iterable<string>): Alias[] {
+  const normalized = new Set([...targets].map((target) => target.trim().toLowerCase()).filter(Boolean));
+  if (normalized.size === 0) return [];
+  return selfHostedResource(ALIAS_RESOURCE)
+    .list({ limit: 1000 })
+    .map(apiToAlias)
+    .filter((a) => normalized.has(a.target_address.toLowerCase()))
+    .sort(compareAliases);
 }
 
 /** Remove an alias. Refuses to delete a protected one (the global catch-all). */
-export function removeAlias(id: string, db?: Database): boolean {
-  const d = db || getDatabase();
-  const a = getAlias(id, d);
+export function removeAlias(id: string): boolean {
+  const a = getAlias(id);
   if (!a) return false;
   if (a.protected) throw new Error("This catch-all is protected and cannot be deleted.");
-  return d.run("DELETE FROM aliases WHERE id = ?", [id]).changes > 0;
+  return selfHostedResource(ALIAS_RESOURCE).del(id);
 }
 
 /**
@@ -145,11 +160,11 @@ export function removeAlias(id: string, db?: Database): boolean {
  *   specific alias → domain catch-all → global catch-all.
  * Returns null when nothing matches (or the matched catch-all has no target).
  */
-export function resolveAlias(recipient: string, db?: Database): string | null {
-  const d = db || getDatabase();
+export function resolveAlias(recipient: string): string | null {
   let local_part: string, domain: string;
   try { ({ local_part, domain } = splitAddress(recipient)); } catch { return null; }
+  const rows = selfHostedResource(ALIAS_RESOURCE).list({ limit: 1000 }).map(apiToAlias);
   const q = (dom: string, lp: string) =>
-    (d.query("SELECT target_address FROM aliases WHERE domain = ? AND local_part = ?").get(dom, lp) as { target_address: string } | null)?.target_address || null;
+    rows.find((a) => a.domain === dom && a.local_part === lp)?.target_address || null;
   return q(domain, local_part) || q(domain, CATCH_ALL) || q(ALL_DOMAINS, CATCH_ALL) || null;
 }

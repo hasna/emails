@@ -1,6 +1,8 @@
-import type { Database } from "./database.js";
-import { getDatabase, uuid, now } from "./database.js";
+import { now, uuid } from "./runtime.js";
 import { safeLimit, safeOffset } from "./pagination.js";
+import { selfHostedResource, cnum, ciso, cstr, cstrOrNull } from "./self-hosted-resource.js";
+
+const TRIAGE_RESOURCE = "triage";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -55,226 +57,156 @@ export interface TriageStats {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-function rowToTriage(row: Record<string, unknown>): TriageResult {
+function apiToTriage(e: Record<string, unknown>): TriageResult {
   return {
-    id: row.id as string,
-    email_id: (row.email_id as string) || null,
-    inbound_email_id: (row.inbound_email_id as string) || null,
-    label: row.label as TriageLabel,
-    priority: row.priority as number,
-    summary: (row.summary as string) || null,
-    sentiment: (row.sentiment as TriageSentiment) || null,
-    draft_reply: (row.draft_reply as string) || null,
-    confidence: (row.confidence as number) ?? 0,
-    model: (row.model as string) || null,
-    triaged_at: row.triaged_at as string,
-    created_at: row.created_at as string,
+    id: cstr(e["id"]),
+    email_id: cstrOrNull(e["email_id"]) || null,
+    inbound_email_id: cstrOrNull(e["inbound_email_id"]) || null,
+    label: cstr(e["label"]) as TriageLabel,
+    priority: cnum(e["priority"]),
+    summary: cstrOrNull(e["summary"]) || null,
+    sentiment: (cstrOrNull(e["sentiment"]) || null) as TriageSentiment | null,
+    draft_reply: cstrOrNull(e["draft_reply"]) || null,
+    confidence: cnum(e["confidence"]),
+    model: cstrOrNull(e["model"]) || null,
+    triaged_at: ciso(e["triaged_at"]),
+    created_at: ciso(e["created_at"]),
   };
 }
 
-function rowToTriageSummary(row: Record<string, unknown>): TriageSummary {
-  const { draft_reply: _draftReply, ...summary } = rowToTriage(row);
+function toTriageSummary(t: TriageResult): TriageSummary {
+  const { draft_reply: _draftReply, ...summary } = t;
   return summary;
 }
 
-function triageWhere(filter?: TriageFilter): { where: string; params: (string | number)[] } {
-  const conditions: string[] = [];
-  const params: (string | number)[] = [];
-
-  if (filter?.label) {
-    conditions.push("label = ?");
-    params.push(filter.label);
-  }
-  if (filter?.priority) {
-    conditions.push("priority = ?");
-    params.push(filter.priority);
-  }
-  if (filter?.sentiment) {
-    conditions.push("sentiment = ?");
-    params.push(filter.sentiment);
-  }
-
-  return {
-    where: conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "",
-    params,
-  };
+function matchesTriageFilter(t: TriageResult, filter?: TriageFilter): boolean {
+  if (filter?.label && t.label !== filter.label) return false;
+  if (filter?.priority && t.priority !== filter.priority) return false;
+  if (filter?.sentiment && t.sentiment !== filter.sentiment) return false;
+  return true;
 }
-
-const TRIAGE_SUMMARY_COLS = [
-  "id",
-  "email_id",
-  "inbound_email_id",
-  "label",
-  "priority",
-  "summary",
-  "sentiment",
-  "confidence",
-  "model",
-  "triaged_at",
-  "created_at",
-].join(", ");
 
 // ─── CRUD ────────────────────────────────────────────────────────────────────
 
-export function saveTriage(input: SaveTriageInput, db?: Database): TriageResult {
-  const d = db || getDatabase();
-  const timestamp = now();
-
+export function saveTriage(input: SaveTriageInput): TriageResult {
   if (!input.email_id && !input.inbound_email_id) {
     throw new Error("Either email_id or inbound_email_id must be provided");
   }
+  const store = selfHostedResource(TRIAGE_RESOURCE);
 
-  // Upsert: delete existing triage for this email if any
-  if (input.email_id) {
-    d.run("DELETE FROM email_triage WHERE email_id = ?", [input.email_id]);
-  }
-  if (input.inbound_email_id) {
-    d.run("DELETE FROM email_triage WHERE inbound_email_id = ?", [input.inbound_email_id]);
+  // Upsert: delete existing triage for this email if any.
+  const all = store.list({ limit: 1000 }).map(apiToTriage);
+  for (const t of all) {
+    if (input.email_id && t.email_id === input.email_id) store.del(t.id);
+    else if (input.inbound_email_id && t.inbound_email_id === input.inbound_email_id) store.del(t.id);
   }
 
   const id = uuid();
-  d.run(
-    `INSERT INTO email_triage (id, email_id, inbound_email_id, label, priority, summary, sentiment, draft_reply, confidence, model, triaged_at, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      id,
-      input.email_id || null,
-      input.inbound_email_id || null,
-      input.label,
-      input.priority,
-      input.summary || null,
-      input.sentiment || null,
-      input.draft_reply || null,
-      input.confidence ?? 0,
-      input.model || null,
-      timestamp,
-      timestamp,
-    ],
-  );
-
-  return rowToTriage(
-    d.query("SELECT * FROM email_triage WHERE id = ?").get(id) as Record<string, unknown>,
-  );
+  const timestamp = now();
+  const created = store.create({
+    id,
+    email_id: input.email_id || null,
+    inbound_email_id: input.inbound_email_id || null,
+    label: input.label,
+    priority: input.priority,
+    summary: input.summary || null,
+    sentiment: input.sentiment || null,
+    draft_reply: input.draft_reply || null,
+    confidence: input.confidence ?? 0,
+    model: input.model || null,
+    triaged_at: timestamp,
+    created_at: timestamp,
+  });
+  return apiToTriage(created);
 }
 
 export function getTriage(
   emailId: string,
   type: "sent" | "inbound" = "sent",
-  db?: Database,
 ): TriageResult | null {
-  const d = db || getDatabase();
-  const col = type === "inbound" ? "inbound_email_id" : "email_id";
-  const row = d.query(`SELECT * FROM email_triage WHERE ${col} = ?`).get(emailId) as Record<string, unknown> | null;
-  return row ? rowToTriage(row) : null;
+  const match = selfHostedResource(TRIAGE_RESOURCE)
+    .list({ limit: 1000 })
+    .map(apiToTriage)
+    .find((t) => (type === "inbound" ? t.inbound_email_id : t.email_id) === emailId);
+  return match ?? null;
 }
 
-export function getTriageById(id: string, db?: Database): TriageResult | null {
-  const d = db || getDatabase();
-  const row = d.query("SELECT * FROM email_triage WHERE id = ?").get(id) as Record<string, unknown> | null;
-  return row ? rowToTriage(row) : null;
+export function getTriageById(id: string): TriageResult | null {
+  const record = selfHostedResource(TRIAGE_RESOURCE).get(id);
+  return record ? apiToTriage(record) : null;
 }
 
-export function listTriaged(filter?: TriageFilter, db?: Database): TriageResult[] {
-  const d = db || getDatabase();
-  const { where, params } = triageWhere(filter);
+export function listTriaged(filter?: TriageFilter): TriageResult[] {
   const limit = safeLimit(filter?.limit);
   const offset = safeOffset(filter?.offset);
-
-  const rows = d
-    .query(`SELECT * FROM email_triage ${where} ORDER BY triaged_at DESC LIMIT ? OFFSET ?`)
-    .all(...params, limit, offset) as Record<string, unknown>[];
-  return rows.map(rowToTriage);
+  const rows = selfHostedResource(TRIAGE_RESOURCE)
+    .list({ limit: 1000 })
+    .map(apiToTriage)
+    .filter((t) => matchesTriageFilter(t, filter))
+    .sort((a, b) => (b.triaged_at ?? "").localeCompare(a.triaged_at ?? ""));
+  return rows.slice(offset, offset + limit);
 }
 
-export function listTriagedSummaries(filter?: TriageFilter, db?: Database): TriageSummary[] {
-  const d = db || getDatabase();
-  const { where, params } = triageWhere(filter);
-  const limit = safeLimit(filter?.limit);
-  const offset = safeOffset(filter?.offset);
-
-  const rows = d
-    .query(`SELECT ${TRIAGE_SUMMARY_COLS} FROM email_triage ${where} ORDER BY triaged_at DESC LIMIT ? OFFSET ?`)
-    .all(...params, limit, offset) as Record<string, unknown>[];
-  return rows.map(rowToTriageSummary);
+export function listTriagedSummaries(filter?: TriageFilter): TriageSummary[] {
+  return listTriaged(filter).map(toTriageSummary);
 }
 
 export function getUntriaged(
-  type: "sent" | "inbound" = "sent",
-  limit = 20,
-  db?: Database,
+  _type: "sent" | "inbound" = "sent",
+  _limit = 20,
 ): { id: string; subject: string; from_address: string }[] {
-  const d = db || getDatabase();
-  const normalizedLimit = safeLimit(limit, 20);
-
-  if (type === "inbound") {
-    return d
-      .query(
-        `SELECT ie.id, ie.subject, ie.from_address
-         FROM inbound_emails ie
-         LEFT JOIN email_triage t ON t.inbound_email_id = ie.id
-         WHERE t.id IS NULL
-         ORDER BY ie.received_at DESC
-         LIMIT ?`,
-      )
-      .all(normalizedLimit) as { id: string; subject: string; from_address: string }[];
-  }
-
-  return d
-    .query(
-      `SELECT e.id, e.subject, e.from_address
-       FROM emails e
-       LEFT JOIN email_triage t ON t.email_id = e.id
-       WHERE t.id IS NULL
-       ORDER BY e.sent_at DESC
-       LIMIT ?`,
-    )
-    .all(normalizedLimit) as { id: string; subject: string; from_address: string }[];
+  // Selecting emails NOT yet triaged joins the triage table against the sent
+  // (`emails`) / inbound (`inbound_emails`) message tables — data owned by the
+  // server. There is no client-side /v1 equivalent for this cross-table scan.
+  throw new Error(
+    "getUntriaged is not available in the self-hosted client; it runs on the self-hosted server.",
+  );
 }
 
-export function deleteTriage(id: string, db?: Database): boolean {
-  const d = db || getDatabase();
-  const result = d.run("DELETE FROM email_triage WHERE id = ?", [id]);
-  return result.changes > 0;
+export function deleteTriage(id: string): boolean {
+  return selfHostedResource(TRIAGE_RESOURCE).del(id);
 }
 
-export function deleteTriageByEmail(emailId: string, type: "sent" | "inbound" = "sent", db?: Database): boolean {
-  const d = db || getDatabase();
-  const col = type === "inbound" ? "inbound_email_id" : "email_id";
-  const result = d.run(`DELETE FROM email_triage WHERE ${col} = ?`, [emailId]);
-  return result.changes > 0;
+export function deleteTriageByEmail(emailId: string, type: "sent" | "inbound" = "sent"): boolean {
+  const store = selfHostedResource(TRIAGE_RESOURCE);
+  const matches = store
+    .list({ limit: 1000 })
+    .map(apiToTriage)
+    .filter((t) => (type === "inbound" ? t.inbound_email_id : t.email_id) === emailId);
+  let deleted = false;
+  for (const t of matches) if (store.del(t.id)) deleted = true;
+  return deleted;
 }
 
-export function getTriageStats(db?: Database): TriageStats {
-  const d = db || getDatabase();
-
-  const total = (d.query("SELECT COUNT(*) as count FROM email_triage").get() as { count: number })?.count ?? 0;
-
-  const labelRows = d.query("SELECT label, COUNT(*) as count FROM email_triage GROUP BY label").all() as { label: string; count: number }[];
+export function getTriageStats(): TriageStats {
+  const rows = selfHostedResource(TRIAGE_RESOURCE).list({ limit: 1000 }).map(apiToTriage);
   const by_label: Record<string, number> = {};
-  for (const r of labelRows) by_label[r.label] = r.count;
-
-  const priorityRows = d.query("SELECT priority, COUNT(*) as count FROM email_triage GROUP BY priority").all() as { priority: number; count: number }[];
   const by_priority: Record<number, number> = {};
-  for (const r of priorityRows) by_priority[r.priority] = r.count;
-
-  const sentimentRows = d.query("SELECT sentiment, COUNT(*) as count FROM email_triage WHERE sentiment IS NOT NULL GROUP BY sentiment").all() as { sentiment: string; count: number }[];
   const by_sentiment: Record<string, number> = {};
-  for (const r of sentimentRows) by_sentiment[r.sentiment] = r.count;
-
-  const avgRow = d.query("SELECT AVG(priority) as avg_p, AVG(confidence) as avg_c FROM email_triage").get() as { avg_p: number | null; avg_c: number | null } | null;
-
+  let prioritySum = 0;
+  let confidenceSum = 0;
+  for (const t of rows) {
+    by_label[t.label] = (by_label[t.label] ?? 0) + 1;
+    by_priority[t.priority] = (by_priority[t.priority] ?? 0) + 1;
+    if (t.sentiment) by_sentiment[t.sentiment] = (by_sentiment[t.sentiment] ?? 0) + 1;
+    prioritySum += t.priority;
+    confidenceSum += t.confidence;
+  }
+  const total = rows.length;
   return {
     total,
     by_label,
     by_priority,
     by_sentiment,
-    avg_priority: avgRow?.avg_p ?? 0,
-    avg_confidence: avgRow?.avg_c ?? 0,
+    avg_priority: total > 0 ? prioritySum / total : 0,
+    avg_confidence: total > 0 ? confidenceSum / total : 0,
   };
 }
 
-export function clearTriage(db?: Database): number {
-  const d = db || getDatabase();
-  const result = d.run("DELETE FROM email_triage");
-  return result.changes;
+export function clearTriage(): number {
+  const store = selfHostedResource(TRIAGE_RESOURCE);
+  const all = store.list({ limit: 1000 }).map(apiToTriage);
+  let count = 0;
+  for (const t of all) if (store.del(t.id)) count++;
+  return count;
 }

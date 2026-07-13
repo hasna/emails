@@ -7,7 +7,6 @@ import { Button, EmptyState, Row } from "../ui/primitives.js";
 import { bareAddress, listDateTime, truncate } from "../../tui/format.js";
 import { isImportantMessage, labelDisplayName, mailboxGroupModeLabel } from "../../tui/data.js";
 import { sidebarWidth } from "./sidebar.js";
-import { useToast } from "../context/toast.js";
 
 interface MailboxColumns {
   from: number;
@@ -59,7 +58,6 @@ function MessageRow(props: { message: ReturnType<typeof useEmails>["state"]["mes
 export function MailboxRoute() {
   const theme = useTheme();
   const emails = useEmails();
-  const toast = useToast();
   const dimensions = useTerminalDimensions();
   const showTo = () => !emails.selectedAddress().address && dimensions().width >= 108;
   const contentWidth = () => Math.max(48, dimensions().width - sidebarWidth(dimensions().width) - 6);
@@ -95,16 +93,6 @@ export function MailboxRoute() {
       date,
     };
   };
-  const pullNow = async () => {
-    toast.show({ title: "Pulling mail", message: "Syncing configured inboxes.", tone: "info" });
-    const result = await emails.actions.pullNow();
-    toast.show({
-      title: result.ok ? "Pull complete" : "Pull failed",
-      message: result.ok ? `${result.pulled} message${result.pulled === 1 ? "" : "s"} pulled.` : result.reason ?? "Pull could not run.",
-      tone: result.ok ? "success" : "error",
-    });
-  };
-
   return (
     <box width="100%" height="100%" flexDirection="column" backgroundColor={theme.background} paddingTop={1} paddingLeft={2} paddingRight={2}>
       <box height={2} flexDirection="row" justifyContent="space-between">
@@ -123,12 +111,6 @@ export function MailboxRoute() {
 	          <Button label="Search" onPress={() => emails.actions.openDialog("search")} />
 	          <Button label="Sources" active={emails.state.selectedSourceId !== "all"} onPress={() => emails.actions.openDialog("source")} />
 	          <Button label="Digest" onPress={() => emails.actions.openDialog("digest")} />
-          {/* Pull is LOCAL S3→SQLite ingestion. In self_hosted mode the server ingests and the
-              client syncs via the automatic changesSince delta, so the manual Pull button is
-              meaningless — render it only in local mode. */}
-          <Show when={emails.mode === "local"}>
-            <Button label="Pull" onPress={() => void pullNow()} />
-          </Show>
         </box>
         <text fg={theme.textMuted}>Page {emails.state.page + 1}</text>
       </box>
