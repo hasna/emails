@@ -81,10 +81,14 @@ describe("Emails self-hosted client resolver", () => {
   beforeEach(clearEnv);
   afterEach(clearEnv);
 
-  test("unset env uses local mode", () => {
-    expect(resolveSelfHostedConfig()).toBeNull();
-    expect(isSelfHostedMode()).toBe(false);
-    expect(selfHostedStoreFor("domains")).toBeNull();
+  test("unset env fails loud: the client is not configured", () => {
+    // Self-hosted-ONLY: there is no local fallback. Missing config throws (never null).
+    expect(() => resolveSelfHostedConfig()).toThrow("not configured");
+    expect(() => resolveSelfHostedConfig()).toThrow("EMAILS_SELF_HOSTED_URL");
+    // The client is always self-hosted; there is no other mode.
+    expect(isSelfHostedMode()).toBe(true);
+    // Building a store resolves the mandatory config first, so it fails loud too.
+    expect(() => selfHostedStoreFor("domains")).toThrow("not configured");
   });
 
   test("requires explicit self_hosted mode, URL, and key", () => {
@@ -106,50 +110,52 @@ describe("Emails self-hosted client resolver", () => {
     expect(selfHostedStoreFor("domains")).not.toBeNull();
   });
 
-  test("explicit local mode does not load EMAILS_CLIENT_ENV_SECRET into resource routing", () => {
+  test("rejects the removed 'local' mode without loading EMAILS_CLIENT_ENV_SECRET", () => {
     installFakeSecrets('{"EMAILS_MODE":"self_hosted","EMAILS_SELF_HOSTED_URL":"https://emails.example","EMAILS_SELF_HOSTED_API_KEY":"test-token"}');
     process.env["EMAILS_MODE"] = "local";
 
-    expect(resolveSelfHostedConfig()).toBeNull();
-    expect(isSelfHostedMode()).toBe(false);
-    expect(selfHostedStoreFor("domains")).toBeNull();
+    // 'local' is a removed mode in the self-hosted-only client — fail loud.
+    expect(() => resolveSelfHostedConfig()).toThrow("unsupported EMAILS_MODE 'local'");
+    // The secret pointer is NOT resolved for an explicit local mode: env untouched.
     expect(process.env["EMAILS_SELF_HOSTED_URL"]).toBeUndefined();
     expect(process.env["EMAILS_SELF_HOSTED_API_KEY"]).toBeUndefined();
   });
 
-  test("legacy Mailery client env does not activate self-hosted resource routing", () => {
+  test("legacy Mailery client env is ignored (never configures the client)", () => {
     process.env["HASNA_MAILERY_API_URL"] = "https://legacy-mailery.example";
     process.env["HASNA_MAILERY_API_KEY"] = "legacy-token";
 
-    expect(resolveSelfHostedConfig()).toBeNull();
-    expect(isSelfHostedMode()).toBe(false);
-    expect(selfHostedStoreFor("domains")).toBeNull();
+    // Legacy hosted vars never supply EMAILS_SELF_HOSTED_URL/KEY — still unconfigured.
+    expect(() => resolveSelfHostedConfig()).toThrow("not configured");
+    expect(() => selfHostedStoreFor("domains")).toThrow("not configured");
   });
 
-  test("credentials do not imply a mode", () => {
+  test("credentials alone configure the client (mode is optional / implicit)", () => {
     process.env["EMAILS_SELF_HOSTED_URL"] = "https://emails.example";
     process.env["EMAILS_SELF_HOSTED_API_KEY"] = "test-key";
-    expect(() => resolveSelfHostedConfig()).toThrow("without EMAILS_MODE=self_hosted");
+    // Self-hosted-ONLY: URL + key are sufficient; EMAILS_MODE defaults to self_hosted.
+    expect(resolveSelfHostedConfig()?.baseUrl).toBe("https://emails.example/v1");
+    expect(isSelfHostedMode()).toBe(true);
+    expect(selfHostedStoreFor("domains")).not.toBeNull();
   });
 
-  test("explicit local mode ignores stale self-hosted credentials", () => {
+  test("rejects the removed 'local' mode even when credentials are present", () => {
     process.env["EMAILS_MODE"] = "local";
     process.env["EMAILS_SELF_HOSTED_URL"] = "https://stale-emails.example";
     process.env["EMAILS_SELF_HOSTED_API_KEY"] = "stale-key";
-    expect(resolveSelfHostedConfig()).toBeNull();
-    expect(isSelfHostedMode()).toBe(false);
+    expect(() => resolveSelfHostedConfig()).toThrow("unsupported EMAILS_MODE 'local'");
 
     clearEnv();
     process.env["HASNA_EMAILS_MODE"] = "local";
     process.env["EMAILS_SELF_HOSTED_URL"] = "https://stale-emails.example";
     process.env["EMAILS_SELF_HOSTED_API_KEY"] = "stale-key";
-    expect(resolveSelfHostedConfig()).toBeNull();
-    expect(isSelfHostedMode()).toBe(false);
+    expect(() => resolveSelfHostedConfig()).toThrow("unsupported EMAILS_MODE 'local'");
   });
 
-  test("rejects removed aliases and non-loopback plaintext HTTP", () => {
+  test("rejects removed mode aliases and non-loopback plaintext HTTP", () => {
     process.env["EMAILS_MODE"] = "cloud";
-    expect(() => resolveSelfHostedConfig()).toThrow("aliases were removed");
+    expect(() => resolveSelfHostedConfig()).toThrow("unsupported EMAILS_MODE 'cloud'");
+    expect(() => resolveSelfHostedConfig()).toThrow("self-hosted-only");
     process.env["EMAILS_MODE"] = "self_hosted";
     process.env["EMAILS_SELF_HOSTED_URL"] = "http://192.0.2.1:8080";
     process.env["EMAILS_SELF_HOSTED_API_KEY"] = "test-key";

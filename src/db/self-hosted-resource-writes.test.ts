@@ -185,6 +185,6 @@ describe("resource repos route writes to selfHosted in selfHosted mode", () => {
   });
 
   test("createSendKey FAILS LOUD in selfHosted mode instead of a silent local mint", () => {
-    expect(() => createSendKey("o1", "ci")).toThrow(/not supported|operator-issued service API key/);
+    expect(() => createSendKey("o1", "ci")).toThrow(/not available in the self-hosted client|not supported|operator-issued service API key/);
   });
 });
