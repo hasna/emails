@@ -867,3 +867,31 @@ per-operation `set_config` (H3, M1); until then it is documented as aspirational
 relied upon. Layer 3 (NOT NULL, no default) is sound. The one writeable leak (C1) is closed
 by envelope-only routing through a global single-tenant domain map.
 ```
+
+---
+
+## Addendum (owner requirements, 2026-07-13)
+
+### A1. Signup/login restricted to @hasna.<tld>
+Only email addresses whose domain matches `hasna.<tld>` may sign up OR log in
+(hasna.com, hasna.xyz, hasna.studio, etc.). Enforce with a single allowlist
+predicate `isAllowedSignupEmail(email)` — regex `^[^@]+@hasna\.[a-z0-9-]+$`
+(case-insensitive), applied at BOTH `/v1/auth/signup` and `/v1/auth/login`
+(reject non-matching with a generic 403, no enumeration). Make the allowed
+pattern configurable via env (`EMAILS_AUTH_ALLOWED_EMAIL_DOMAINS`, default
+`hasna.*`) so it can widen later without a code change. Applies to invitations
+too (cannot invite a non-hasna address).
+
+### A2. Email confirmation via the hasna-studio-alumia SES account
+Signup creates the user `unverified`; login is refused until verified. On signup
+(and a `/v1/auth/verify-email/resend`), send a confirmation email containing a
+single-use, short-TTL, hashed-at-rest email-verification token (reuse the
+`emiv_`/token pattern) with a verify link → `/v1/auth/verify-email` marks the
+user verified. Send via the app's existing SES sender (`SelfHostedSender`) using
+the **hasna-studio-alumia** SES account (638389534677 — where the app's SES
+identities already live), from a hasna-verified from-address
+(`EMAILS_AUTH_FROM`, e.g. `noreply@hasna.studio`). The server runs in
+xyz-infra, so sending via alumia SES is cross-account: prefer the app's normal
+outbound path (which already targets alumia SES) rather than new creds; if the
+send path needs an explicit account/region, thread it through. Never block
+signup on a transient send failure — record the token, surface a resend.

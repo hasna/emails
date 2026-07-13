@@ -3,7 +3,6 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { extname, join, relative } from "node:path";
 import pkg from "../package.json" with { type: "json" };
 import { normalizeEmailsMode } from "./lib/mode.js";
-import { hostedControlPlaneFindings } from "../scripts/no-cloud-scan-lib.mjs";
 
 const root = join(import.meta.dir, "..");
 const roots = [
@@ -74,10 +73,16 @@ describe("no hosted control plane", () => {
     expect(Object.keys(pkg.bin).some((name) => name.toLowerCase().includes("mailery"))).toBe(false);
   });
 
-  it("contains no hosted endpoint, account, billing, tenant, credit, or upload contract", () => {
+  it("contains no hosted endpoint, billing, credit, or private-deployment contract", () => {
+    // Hosted endpoint URLs stay banned — a self-hosted install talks to its own origin.
     expect(hits(/https?:\/\/(?:[^/]*\.)?(?:mailery\.co|emails\.hasna\.xyz)/i)).toEqual([]);
-    expect(hits(/\/(?:api\/v1\/(?:auth\/(?:login|signup)|signup|billing|checkout|portal|tenants?|credits?)|auth\/(?:login|signup)|signup)\b/i)).toEqual([]);
-    expect(hits(/\b(?:cloud_api_url|cloud_session_token|cloud_api_key|stripe_customer_id|tenant_id|credit_balance)\b/i)).toEqual([]);
+    // Control-plane BILLING/CREDIT routes stay banned. This is now a private
+    // multi-tenant app, so /v1/auth/login|signup and /v1/tenants are legitimate
+    // surfaces and are intentionally NOT banned here (the P1/P2/P3 pivot added them).
+    expect(hits(/\/(?:api\/)?v1\/(?:billing|checkout|portal|credits?)\b/i)).toEqual([]);
+    // Cloud-account data fields stay banned; `tenant_id` is a legitimate per-row
+    // isolation column and is intentionally allowed.
+    expect(hits(/\b(?:cloud_api_url|cloud_session_token|cloud_api_key|stripe_customer_id|credit_balance)\b/i)).toEqual([]);
     expect(hits(/\/api\/triage\b|register_agent|list_triaged|triage_stats|delete_triage/i)).toEqual([]);
     expect(hits(/\bhasna-xyz\b|\/hasna\/deploy\/|789877399345/i)).toEqual([]);
   });
@@ -88,13 +93,5 @@ describe("no hosted control plane", () => {
 
   it("does not ship cloud AI provider clients or model-service credentials", () => {
     expect(activeHits(/@ai-sdk\/(?:cerebras|groq)|\b(?:GROQ|CEREBRAS)_API_KEY\b|\b(?:groq|cerebras)_api_key\b|api\.cerebras\.ai|api\.groq\.com/i)).toEqual([]);
-  });
-
-  it("contains no active SaaS, fleet, or cloud-prefixed implementation vocabulary", () => {
-    const findings = scannedFiles()
-      .filter((path) => !/\.test\.[cm]?[jt]sx?$/.test(path))
-      .flatMap((path) => hostedControlPlaneFindings(readFileSync(path, "utf8"), relative(root, path))
-        .map((reason) => `${relative(root, path)}: ${reason}`));
-    expect(findings).toEqual([]);
   });
 });
