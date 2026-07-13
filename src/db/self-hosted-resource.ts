@@ -14,18 +14,15 @@
 // matching `/v1/<resource>` endpoint is deployed, the same call returns selfHosted
 // data. Local mode (isSelfHostedMode() === false) is entirely unaffected.
 
-import { selfHostedStoreFor, isSelfHostedMode, type SelfHostedResourceStore } from "./self-hosted-store.js";
+import { selfHostedStoreFor, type SelfHostedResourceStore } from "./self-hosted-store.js";
 import { safeOffset, safeOptionalLimit } from "./pagination.js";
 
 /**
- * Return a selfHosted-backed store for `resource` when the client is flipped to
- * selfHosted, else null (local mode — caller uses SQLite). An explicit local `db`
- * handle is intentionally ignored for routing: the CLI passes an explicit
- * `getDatabase()` to every repo call, so keying on it would defeat selfHosted
- * routing. Tests never set the selfHosted env, so this is null under test.
+ * Return the self-hosted-backed store for `resource`. This client is
+ * self-hosted-only: EVERY repository read/write routes to the app's `/v1` API.
+ * Missing or invalid configuration throws (fail loud) via selfHostedStoreFor().
  */
-export function selfHostedResource(resource: string): SelfHostedResourceStore | null {
-  if (!isSelfHostedMode()) return null;
+export function selfHostedResource(resource: string): SelfHostedResourceStore {
   return selfHostedStoreFor(resource);
 }
 

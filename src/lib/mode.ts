@@ -1,9 +1,12 @@
-import { loadConfig } from "./config.js";
+import { resolveSelfHostedConfig } from "../db/self-hosted-store.js";
 import { EMAILS_CLIENT_ENV_SECRET_ENV, loadEmailsClientEnvSecret } from "./client-env.js";
 export { EMAILS_CLIENT_ENV_SECRET_ENV } from "./client-env.js";
 
-export type EmailsMode = "local" | "self_hosted";
-export type EmailsModeLabel = "Local" | "Self-hosted";
+// This client is self-hosted-ONLY. There is a single mode; the local/SQLite
+// runtime has been removed. `EmailsMode` remains a named type so the many
+// call sites that reference it keep compiling.
+export type EmailsMode = "self_hosted";
+export type EmailsModeLabel = "Self-hosted";
 
 export const EMAILS_MODE_ENV = "EMAILS_MODE";
 export const HASNA_EMAILS_MODE_ENV = "HASNA_EMAILS_MODE";
@@ -29,15 +32,6 @@ const LEGACY_HOSTED_ENV_KEYS = [
   "HASNA_MAILERY_ENV_FILE",
 ] as const;
 
-const FORBIDDEN_MODE_VALUES = new Set([
-  "cloud",
-  "mailery_cloud",
-  "remote",
-  "hybrid",
-  "self-hosted",
-  "selfhosted",
-]);
-
 export interface EmailsModeSource {
   kind: "env" | "config" | "default";
   name: string | null;
@@ -51,45 +45,18 @@ export interface EmailsModeResolution {
   warning: null;
 }
 
-const LOCAL_CONFIG_MODE_KEYS = ["mailery_mode", "mode", "storage_mode", EMAILS_MODE_CONFIG_KEY] as const;
-
 function migrationGuidance(source: string, value?: string): string {
   const detail = value ? ` value '${value}'` : "";
   return `${source}${detail} belongs to the removed hosted/legacy runtime. ` +
-    `Use ${EMAILS_MODE_ENV}=local, or set ${EMAILS_MODE_ENV}=self_hosted with ` +
-    "EMAILS_SELF_HOSTED_URL and EMAILS_SELF_HOSTED_API_KEY. No cloud, remote, or hybrid alias is supported.";
+    `This client is self-hosted-only: set ${EMAILS_MODE_ENV}=self_hosted with ` +
+    "EMAILS_SELF_HOSTED_URL and EMAILS_SELF_HOSTED_API_KEY (or configure EMAILS_CLIENT_ENV_SECRET).";
 }
 
-function selfHostedConfigGuidance(source: string, value: string): string {
-  return `${source} value '${value}' cannot select self_hosted from local config. ` +
-    "Self-hosted clients must be API-only and configured through EMAILS_CLIENT_ENV_SECRET or " +
-    `${EMAILS_MODE_ENV}/${HASNA_EMAILS_MODE_ENV} with EMAILS_SELF_HOSTED_URL and EMAILS_SELF_HOSTED_API_KEY. ` +
-    `Remove the local config value, or set ${EMAILS_MODE_ENV}=local for explicit local config.`;
-}
-
-export function assertLocalConfigModeValueAllowed(key: string, value: unknown): void {
-  if (!LOCAL_CONFIG_MODE_KEYS.includes(key as typeof LOCAL_CONFIG_MODE_KEYS[number])) return;
-  if (typeof value !== "string" || !value.trim()) return;
-  const trimmed = value.trim();
-  const normalized = trimmed.toLowerCase();
-  if (normalized === "local") return;
-  if (normalized === "self_hosted") {
-    throw new Error(selfHostedConfigGuidance(`config key '${key}'`, trimmed));
-  }
-  throw new Error(migrationGuidance(`config key '${key}'`, trimmed));
-}
-
-export function assertLocalConfigAccessAllowed(command: string, env: NodeJS.ProcessEnv = process.env): void {
-  const resolution = resolveEmailsMode(env);
-  if (resolution.mode !== "self_hosted") return;
-  throw new Error(
-    `\`${command}\` reads or writes local config and is disabled in self_hosted API-only mode. ` +
-      "Use EMAILS_CLIENT_ENV_SECRET or canonical EMAILS_MODE/HASNA_EMAILS_MODE with " +
-      "EMAILS_SELF_HOSTED_URL and EMAILS_SELF_HOSTED_API_KEY for self_hosted clients. " +
-      "Set EMAILS_MODE=local only when intentionally managing explicit local config.",
-  );
-}
-
+/**
+ * Reject legacy hosted/cloud environment variables. Kept for callers that guard
+ * their entrypoints (src/storage.ts, the self-hosted server env). Legacy hosted
+ * URL/key variables are intentionally ignored (never select or redirect a run).
+ */
 export function assertNoLegacyHostedEnvironment(
   env: NodeJS.ProcessEnv = process.env,
   _options: { allowHostedApiEnvWithExplicitSelfHosted?: boolean } = {},
@@ -98,97 +65,45 @@ export function assertNoLegacyHostedEnvironment(
     const value = env[key]?.trim();
     if (value) throw new Error(migrationGuidance(key, value));
   }
-  // Legacy hosted URL/key variables are intentionally ignored. They must not
-  // select self_hosted, redirect a local run, or poison hermetic tests when
-  // present in a developer shell. Only canonical EMAILS_* client env controls
-  // the current local/self_hosted runtime.
   for (const key of LEGACY_HOSTED_ENV_KEYS) {
     void env[key];
   }
 }
 
-export function labelForEmailsMode(mode: EmailsMode): EmailsModeLabel {
-  return mode === "local" ? "Local" : "Self-hosted";
+export function labelForEmailsMode(_mode: EmailsMode): EmailsModeLabel {
+  return "Self-hosted";
 }
 
 export function normalizeEmailsMode(value: string): EmailsMode {
   const normalized = value.trim().toLowerCase();
-  if (normalized === "local" || normalized === "self_hosted") return normalized;
-  if (FORBIDDEN_MODE_VALUES.has(normalized)) {
-    throw new Error(migrationGuidance(EMAILS_MODE_ENV, value));
-  }
-  throw new Error(`Unknown Emails mode '${value}'. Use exactly local or self_hosted.`);
+  if (normalized === "self_hosted") return "self_hosted";
+  throw new Error(
+    `Unsupported ${EMAILS_MODE_ENV} '${value}'. This client is self-hosted-only; ` +
+      "the only supported mode is self_hosted.",
+  );
 }
 
+/**
+ * Resolve the client mode. The client is self-hosted-ONLY, so this validates
+ * that a complete self-hosted endpoint (EMAILS_SELF_HOSTED_URL +
+ * EMAILS_SELF_HOSTED_API_KEY, or EMAILS_CLIENT_ENV_SECRET) is configured and
+ * throws a loud, actionable error otherwise.
+ */
 export function resolveEmailsMode(env: NodeJS.ProcessEnv = process.env): EmailsModeResolution {
   const clientEnvSecret = loadEmailsClientEnvSecret(env);
-  assertNoLegacyHostedEnvironment(env, { allowHostedApiEnvWithExplicitSelfHosted: true });
-
-  for (const name of EMAILS_MODE_ENV_KEYS) {
-    const value = env[name]?.trim();
-    if (!value) continue;
-    const mode = normalizeEmailsMode(value);
-    return {
-      mode,
-      label: labelForEmailsMode(mode),
-      source: {
-        kind: "env",
-        name: clientEnvSecret.ready ? EMAILS_CLIENT_ENV_SECRET_ENV : name,
-        value: clientEnvSecret.ready ? clientEnvSecret.secretPath : value,
-      },
-      warning: null,
-    };
-  }
-
-  const config = loadConfig();
-  let localConfigSource: EmailsModeSource | null = null;
-  for (const key of ["mailery_mode", "mode", "storage_mode"] as const) {
-    const value = config[key];
-    if (typeof value === "string" && value.trim()) {
-      const trimmed = value.trim();
-      if (trimmed.toLowerCase() === "local") {
-        localConfigSource ??= { kind: "config", name: key, value: trimmed };
-        continue;
-      }
-      if (trimmed.toLowerCase() === "self_hosted") {
-        throw new Error(selfHostedConfigGuidance(`config key '${key}'`, trimmed));
-      }
-      throw new Error(migrationGuidance(`config key '${key}'`, trimmed));
-    }
-  }
-  const configured = config[EMAILS_MODE_CONFIG_KEY];
-  if (typeof configured === "string" && configured.trim()) {
-    const value = configured.trim();
-    const normalized = value.toLowerCase();
-    if (normalized === "self_hosted") {
-      throw new Error(selfHostedConfigGuidance(`config key '${EMAILS_MODE_CONFIG_KEY}'`, value));
-    }
-    if (FORBIDDEN_MODE_VALUES.has(normalized)) {
-      throw new Error(migrationGuidance(`config key '${EMAILS_MODE_CONFIG_KEY}'`, value));
-    }
-    if (normalized !== "local") {
-      throw new Error(`Unknown Emails mode '${value}' in config key '${EMAILS_MODE_CONFIG_KEY}'. Use local config only for local mode.`);
-    }
-    return {
-      mode: "local",
-      label: "Local",
-      source: { kind: "config", name: EMAILS_MODE_CONFIG_KEY, value },
-      warning: null,
-    };
-  }
-  if (localConfigSource) {
-    return {
-      mode: "local",
-      label: "Local",
-      source: localConfigSource,
-      warning: null,
-    };
-  }
-
+  assertNoLegacyHostedEnvironment(env);
+  const modeRaw = env[EMAILS_MODE_ENV]?.trim() ?? env[HASNA_EMAILS_MODE_ENV]?.trim();
+  if (modeRaw) normalizeEmailsMode(modeRaw);
+  // Mandatory configuration. Throws with EMAILS_CLIENT_ENV_SECRET / URL+KEY guidance.
+  resolveSelfHostedConfig(env);
   return {
-    mode: "local",
-    label: "Local",
-    source: { kind: "default", name: null, value: null },
+    mode: "self_hosted",
+    label: "Self-hosted",
+    source: {
+      kind: "env",
+      name: clientEnvSecret.ready ? EMAILS_CLIENT_ENV_SECRET_ENV : EMAILS_MODE_ENV,
+      value: clientEnvSecret.ready ? clientEnvSecret.secretPath : (modeRaw ?? "self_hosted"),
+    },
     warning: null,
   };
 }
