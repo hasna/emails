@@ -1,7 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
-const DEFAULT_MCP_REPLY_LIMIT = 20;
 const MAX_MCP_REPLY_LIMIT = 100;
 
 type ToolResult = {
@@ -52,7 +51,7 @@ export function registerSequenceTools(server: McpServer): void {
     try {
       await assertSelfHostedApiRouteReady("list_sequences");
       const { listSequences } = await import("../../db/sequences.js");
-      const sequences = listSequences(undefined, { limit: limit ?? 100, offset: offset ?? 0 });
+      const sequences = listSequences({ limit: limit ?? 100, offset: offset ?? 0 });
       return { content: [{ type: "text", text: JSON.stringify(sequences, null, 2) }] };
     } catch (e) {
       return toolError(e);
@@ -196,33 +195,16 @@ export function registerSequenceTools(server: McpServer): void {
     limit: z.number().int().positive().max(MAX_MCP_REPLY_LIMIT).optional().describe("Maximum replies to return (default 20, max 100)"),
     offset: z.number().int().min(0).optional().describe("Number of replies to skip"),
   },
-  async ({ email_id, limit, offset }) => {
-    try {
-      await assertSequenceSubledgerAllowed("list_replies", "it reads local inbound reply tables and no API-backed replies implementation exists yet");
-      const { getDatabase } = await import("../../db/database.js");
-      const { listReplySummaries, getReplyCount } = await import("../../db/inbound.js");
-      const { resolveId } = await import("../helpers.js");
-      const db = getDatabase();
-      const resolvedId = resolveId("emails", email_id);
-      const pageLimit = limit ?? DEFAULT_MCP_REPLY_LIMIT;
-      const pageOffset = offset ?? 0;
-      const replies = listReplySummaries(resolvedId, db, { limit: pageLimit, offset: pageOffset });
-      const count = getReplyCount(resolvedId, db);
-      return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            count,
-            replies,
-            limit: pageLimit,
-            offset: pageOffset,
-            truncated: pageOffset + pageLimit < count,
-          }, null, 2),
-        }],
-      };
-    } catch (e) {
-      return toolError(e);
-    }
+  async () => {
+    // Reply tracking reads local inbound reply tables; there is no API-backed
+    // replies implementation in the self-hosted client (rule 6). Fail loud.
+    return {
+      content: [{
+        type: "text",
+        text: "Error: list_replies is not available in the self-hosted client; inbound reply tracking runs on the self-hosted server.",
+      }],
+      isError: true,
+    };
   },
 );
 

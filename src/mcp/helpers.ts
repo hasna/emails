@@ -2,7 +2,7 @@
  * Shared utilities for MCP tool modules.
  */
 
-import { getDatabase, resolvePartialIdOrThrow } from "../db/database.js";
+import { resolveResourceIdOrThrow } from "../db/self-hosted-store.js";
 import {
   ProviderNotFoundError,
   DomainNotFoundError,
@@ -19,9 +19,18 @@ export function formatError(error: unknown): string {
   return String(error);
 }
 
+// The historical SQL table names callers pass, mapped to the operator's `/v1`
+// resource path. Ids resolve against the self-hosted API — this client has no
+// local database.
+const RESOLVE_ID_RESOURCE: Record<string, string> = {
+  emails: "messages",
+  scheduled_emails: "scheduled",
+  send_keys: "send-keys",
+};
+
 export function resolveId(table: string, partialId: string): string {
-  const db = getDatabase();
-  return resolvePartialIdOrThrow(db, table, partialId);
+  const resource = RESOLVE_ID_RESOURCE[table] ?? table;
+  return resolveResourceIdOrThrow(resource, partialId);
 }
 
 export { ProviderNotFoundError, DomainNotFoundError, AddressNotFoundError, EmailNotFoundError };

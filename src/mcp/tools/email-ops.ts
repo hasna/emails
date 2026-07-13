@@ -14,20 +14,11 @@ async function toolError(error: unknown): Promise<ToolResult> {
   return { content: [{ type: "text", text: `Error: ${formatError(error)}` }], isError: true };
 }
 
-async function isSelfHostedMode(): Promise<boolean> {
-  const { getEmailsMode } = await import("../../lib/mode.js");
-  return getEmailsMode() === "self_hosted";
-}
-
 function selfHostedLocalStateError(toolName: string, reason: string): Error {
   return new Error(
     `MCP tool ${toolName} is disabled in self_hosted API-only mode because ${reason}. ` +
       "Use the self-hosted Emails API for server-owned state, or set EMAILS_MODE=local only for an explicit local store.",
   );
-}
-
-async function assertLocalStateAllowed(toolName: string, reason: string): Promise<void> {
-  if (await isSelfHostedMode()) throw selfHostedLocalStateError(toolName, reason);
 }
 
 function addressList(value: string | string[] | undefined): string | undefined {
@@ -133,77 +124,9 @@ export function registerEmailOpsTools(server: McpServer): void {
   },
   async (input) => {
     try {
-      if (await isSelfHostedMode()) return await sendSelfHostedEmail(input);
-
-      const { getDatabase } = await import('../../db/database.js');
-      const { createSentEmailLedger, storeSentEmailContent } = await import('../../lib/sent-ledger.js');
-      const { getTemplate, renderTemplate } = await import('../../db/templates.js');
-      const { getActiveProvider, getProvider } = await import('../../db/providers.js');
-      const { getWarmingSchedule } = await import('../../db/warming.js');
-      const { getTodayLimit, getTodaySentCount } = await import('../../lib/warming.js');
-      const { resolveId, ProviderNotFoundError } = await import('../helpers.js');
-      const db = getDatabase();
-
-      // Resolve template
-      let subject = input.subject || "";
-      let html = input.html;
-      let text = input.text;
-
-      if (input.template) {
-        const tpl = getTemplate(input.template, db);
-        if (!tpl) throw new Error(`Template not found: ${input.template}`);
-        const vars = input.template_vars || {};
-        subject = renderTemplate(tpl.subject_template, vars);
-        if (tpl.html_template) html = renderTemplate(tpl.html_template, vars);
-        if (tpl.text_template) text = renderTemplate(tpl.text_template, vars);
-      }
-
-      if (!subject) throw new Error("Subject is required (provide subject or template)");
-
-      let providerId: string;
-
-      if (input.provider_id) {
-        providerId = resolveId("providers", input.provider_id);
-      } else {
-        const active = getActiveProvider(db);
-        providerId = active.id;
-      }
-
-      const provider = getProvider(providerId, db);
-      if (!provider) throw new ProviderNotFoundError(providerId);
-
-      // Check domain warming limits
-      const fromDomain = input.from?.split("@")[1];
-      if (fromDomain) {
-        const warmingSchedule = getWarmingSchedule(fromDomain, db);
-        if (warmingSchedule) {
-          const limit = getTodayLimit(warmingSchedule);
-          if (limit !== null) {
-            const sent = getTodaySentCount(fromDomain, db);
-            if (sent >= limit) {
-              throw new Error(`Warming limit reached for ${fromDomain}: ${sent}/${limit} emails sent today. Increase limit or wait until tomorrow.`);
-            }
-          }
-        }
-      }
-
-      const sendInput = { ...input, subject, html, text };
-      const { sendWithFailover } = await import('../../lib/send.js');
-      const { messageId, providerId: actualProviderId } = await sendWithFailover(providerId, sendInput, db);
-
-      const email = await createSentEmailLedger(actualProviderId, sendInput, messageId, db);
-
-      // Store email content
-      await storeSentEmailContent(email.id, { html, text }, db);
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({ success: true, email_id: email.id, message_id: messageId }, null, 2),
-          },
-        ],
-      };
+      // Self-hosted-only client: every send routes to the operator's API through
+      // the mail data-source seam. There is no local provider/ledger path.
+      return await sendSelfHostedEmail(input);
     } catch (e) {
       return toolError(e);
     }
@@ -228,7 +151,6 @@ export function registerEmailOpsTools(server: McpServer): void {
   },
   async (input) => {
     try {
-      await assertLocalStateAllowed("list_emails", "it reads local sent-message state");
       const { listEmails } = await import('../../db/emails.js');
       const { resolveId } = await import('../helpers.js');
       const resolvedProviderId = input.provider_id
@@ -258,7 +180,6 @@ export function registerEmailOpsTools(server: McpServer): void {
   },
   async ({ query, since, limit, offset }) => {
     try {
-      await assertLocalStateAllowed("search_emails", "it searches local sent-message state");
       const { searchEmails } = await import('../../db/emails.js');
       const emails = searchEmails(query, { since, limit: limit ?? 50, offset: offset ?? 0 });
       return { content: [{ type: "text", text: JSON.stringify(emails, null, 2) }] };
@@ -276,7 +197,6 @@ export function registerEmailOpsTools(server: McpServer): void {
   },
   async ({ email_id }) => {
     try {
-      await assertLocalStateAllowed("get_email", "it reads local sent-message state");
       const { getEmail } = await import('../../db/emails.js');
       const { resolveId, EmailNotFoundError } = await import('../helpers.js');
       const id = resolveId("emails", email_id);
@@ -297,7 +217,6 @@ export function registerEmailOpsTools(server: McpServer): void {
   },
   async ({ email_id }) => {
     try {
-      await assertLocalStateAllowed("get_email_content", "it reads local sent-message body content");
       const { getEmail } = await import('../../db/emails.js');
       const { getEmailContent } = await import('../../db/email-content.js');
       const { resolveId, EmailNotFoundError } = await import('../helpers.js');
@@ -327,7 +246,6 @@ export function registerEmailOpsTools(server: McpServer): void {
   },
   async ({ provider_id }) => {
     try {
-      await assertLocalStateAllowed("pull_events", "it pulls provider events into local SQLite");
       const { syncProvider, syncAll } = await import('../../lib/sync.js');
       const { resolveId } = await import('../helpers.js');
       let result: Record<string, number>;
@@ -356,7 +274,6 @@ export function registerEmailOpsTools(server: McpServer): void {
   },
   async ({ provider_id, period }) => {
     try {
-      await assertLocalStateAllowed("get_stats", "it reads local delivery statistics");
       const { getLocalStats } = await import('../../lib/stats.js');
       const { resolveId } = await import('../helpers.js');
       const resolvedId = provider_id ? resolveId("providers", provider_id) : undefined;
@@ -379,9 +296,8 @@ export function registerEmailOpsTools(server: McpServer): void {
   },
   async ({ limit, offset }) => {
     try {
-      await assertLocalStateAllowed("list_templates", "it reads local template state");
       const { listTemplateSummaries } = await import('../../db/templates.js');
-      const templates = listTemplateSummaries(undefined, { limit: limit ?? 100, offset: offset ?? 0 });
+      const templates = listTemplateSummaries({ limit: limit ?? 100, offset: offset ?? 0 });
       return { content: [{ type: "text", text: JSON.stringify(templates, null, 2) }] };
     } catch (e) {
       return toolError(e);
@@ -397,7 +313,6 @@ export function registerEmailOpsTools(server: McpServer): void {
   },
   async ({ name_or_id }) => {
     try {
-      await assertLocalStateAllowed("get_template", "it reads local template state");
       const { getTemplate } = await import('../../db/templates.js');
       const template = getTemplate(name_or_id);
       if (!template) throw new Error(`Template not found: ${name_or_id}`);
@@ -419,7 +334,6 @@ export function registerEmailOpsTools(server: McpServer): void {
   },
   async (input) => {
     try {
-      await assertLocalStateAllowed("add_template", "it writes local template state");
       const { createTemplate } = await import('../../db/templates.js');
       const template = createTemplate(input);
       return { content: [{ type: "text", text: JSON.stringify(template, null, 2) }] };
@@ -437,7 +351,6 @@ export function registerEmailOpsTools(server: McpServer): void {
   },
   async ({ name_or_id }) => {
     try {
-      await assertLocalStateAllowed("remove_template", "it writes local template state");
       const { deleteTemplate } = await import('../../db/templates.js');
       const deleted = deleteTemplate(name_or_id);
       if (!deleted) throw new Error(`Template not found: ${name_or_id}`);
@@ -460,7 +373,6 @@ export function registerEmailOpsTools(server: McpServer): void {
   },
   async ({ suppressed, limit, offset }) => {
     try {
-      await assertLocalStateAllowed("list_contacts", "it reads local contact state");
       const { listContacts } = await import('../../db/contacts.js');
       const contacts = listContacts({
         ...(suppressed !== undefined ? { suppressed } : {}),
@@ -482,7 +394,6 @@ export function registerEmailOpsTools(server: McpServer): void {
   },
   async ({ email }) => {
     try {
-      await assertLocalStateAllowed("suppress_contact", "it writes local contact suppression state");
       const { suppressContact } = await import('../../db/contacts.js');
       suppressContact(email);
       return { content: [{ type: "text", text: `Contact suppressed: ${email}` }] };
@@ -500,7 +411,6 @@ export function registerEmailOpsTools(server: McpServer): void {
   },
   async ({ email }) => {
     try {
-      await assertLocalStateAllowed("unsuppress_contact", "it writes local contact suppression state");
       const { unsuppressContact } = await import('../../db/contacts.js');
       unsuppressContact(email);
       return { content: [{ type: "text", text: `Contact unsuppressed: ${email}` }] };
@@ -532,18 +442,15 @@ export function registerEmailOpsTools(server: McpServer): void {
   },
   async (input) => {
     try {
-      await assertLocalStateAllowed("schedule_email", "it writes local scheduled-send state");
-      const { getDatabase } = await import('../../db/database.js');
       const { createScheduledEmail } = await import('../../db/scheduled.js');
       const { getTemplate, renderTemplate } = await import('../../db/templates.js');
       const { getActiveProvider } = await import('../../db/providers.js');
       const { resolveId } = await import('../helpers.js');
-      const db = getDatabase();
       let providerId: string;
       if (input.provider_id) {
         providerId = resolveId("providers", input.provider_id);
       } else {
-        const active = getActiveProvider(db);
+        const active = getActiveProvider();
         providerId = active.id;
       }
 
@@ -552,7 +459,7 @@ export function registerEmailOpsTools(server: McpServer): void {
       let html = input.html;
       let text = input.text;
       if (input.template) {
-        const tpl = getTemplate(input.template, db);
+        const tpl = getTemplate(input.template);
         if (!tpl) throw new Error(`Template not found: ${input.template}`);
         const vars = input.template_vars || {};
         subject = renderTemplate(tpl.subject_template, vars);
@@ -577,7 +484,7 @@ export function registerEmailOpsTools(server: McpServer): void {
         template_name: input.template,
         template_vars: input.template_vars,
         scheduled_at: input.scheduled_at,
-      }, db);
+      });
 
       return { content: [{ type: "text", text: JSON.stringify(scheduled, null, 2) }] };
     } catch (e) {
@@ -596,7 +503,6 @@ export function registerEmailOpsTools(server: McpServer): void {
   },
   async ({ status, limit, offset }) => {
     try {
-      await assertLocalStateAllowed("list_scheduled", "it reads local scheduled-send state");
       const { listScheduledEmailSummaries } = await import('../../db/scheduled.js');
       const emails = listScheduledEmailSummaries({
         ...(status ? { status } : {}),
@@ -618,7 +524,6 @@ export function registerEmailOpsTools(server: McpServer): void {
   },
   async ({ id }) => {
     try {
-      await assertLocalStateAllowed("cancel_scheduled", "it writes local scheduled-send state");
       const { cancelScheduledEmail } = await import('../../db/scheduled.js');
       const { resolveId } = await import('../helpers.js');
       const resolvedId = resolveId("scheduled_emails", id);

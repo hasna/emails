@@ -1,16 +1,10 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { getDatabase, type Database } from "../db/database.js";
 import { listAddresses } from "../db/addresses.js";
 import { listDomains } from "../db/domains.js";
-import { listAddressProvisioningByIds, listDomainProvisioningByIds, listReadyAddressCountsByDomains } from "../db/provisioning.js";
-import { countValue } from "../db/scalars.js";
-import { isSelfHostedMode } from "../db/self-hosted-store.js";
 import { assessDomainReadiness } from "../lib/domain-readiness.js";
 import { domainInboundReadinessSignals } from "../lib/domain-inbound-evidence.js";
-import { loadConfig } from "../lib/config.js";
 import { resolveEmailsMode } from "../lib/mode.js";
 import { resolveMailDataSource } from "../lib/mail-data-source.js";
-import { listMailboxSources, listMailboxStatus } from "../cli/tui/data.js";
 
 const RECENT_ERROR_LIMIT_PER_COMPONENT = 50;
 const DOMAIN_RESOURCE_LIMIT = 50;
@@ -27,25 +21,6 @@ function jsonResource(uri: string, value: unknown) {
   };
 }
 
-function countDomains(db: Database): number {
-  const row = db.query("SELECT COUNT(*) AS count FROM domains").get() as { count: unknown } | null;
-  return countValue(row?.count);
-}
-
-function countAddresses(db: Database): number {
-  const row = db.query("SELECT COUNT(*) AS count FROM addresses").get() as { count: unknown } | null;
-  return countValue(row?.count);
-}
-
-function selfHostedSelected(): boolean {
-  try {
-    return isSelfHostedMode();
-  } catch {
-    return process.env["EMAILS_MODE"]?.trim() === "self_hosted"
-      || process.env["HASNA_EMAILS_MODE"]?.trim() === "self_hosted";
-  }
-}
-
 function selfHostedApiStatus(error?: unknown): Record<string, unknown> {
   return {
     available: error === undefined,
@@ -53,43 +28,14 @@ function selfHostedApiStatus(error?: unknown): Record<string, unknown> {
   };
 }
 
-export function domainsResourcePayload(db: Database = getDatabase()): Record<string, unknown> {
-  const domainRows = listDomains(undefined, db, { limit: DOMAIN_RESOURCE_LIMIT + 1, offset: 0 });
-  const truncated = domainRows.length > DOMAIN_RESOURCE_LIMIT;
-  const visibleDomains = domainRows.slice(0, DOMAIN_RESOURCE_LIMIT);
-  const domainIds = visibleDomains.map((domain) => domain.id);
-  const readyAddressCounts = listReadyAddressCountsByDomains(domainIds, db);
-  const domainProvisioning = listDomainProvisioningByIds(domainIds, db);
-  const domains = visibleDomains.map((domain) => {
-    const ready_addresses = readyAddressCounts.get(domain.id) ?? 0;
-    const provisioning = domainProvisioning.get(domain.id) ?? null;
-    const mode = resolveEmailsMode();
-    return {
-      ...domain,
-      provisioning,
-      readiness: assessDomainReadiness(domain, provisioning, {
-        ...domainInboundReadinessSignals(domain, mode),
-        ready_addresses,
-      }),
-    };
-  });
-  return {
-    domains,
-    total: countDomains(db),
-    limit: DOMAIN_RESOURCE_LIMIT,
-    truncated,
-    mode: "local",
-    source: "local_sqlite",
-    cli_equivalent: `emails domain status --limit ${DOMAIN_RESOURCE_LIMIT} --json`,
-  };
-}
+// Self-hosted-ONLY resource payloads. Every read routes to the operator's `/v1`
+// API through the resource repositories and mail data-source seam; there is no
+// local SQLite island to fall back to.
 
-export function domainsResourcePayloadForRuntime(db?: Database): Record<string, unknown> {
-  if (!selfHostedSelected()) return domainsResourcePayload(db ?? getDatabase());
-
+export function domainsResourcePayloadForRuntime(): Record<string, unknown> {
   try {
     const mode = resolveEmailsMode();
-    const domainRows = listDomains(undefined, undefined, { limit: DOMAIN_RESOURCE_LIMIT + 1, offset: 0 });
+    const domainRows = listDomains(undefined, { limit: DOMAIN_RESOURCE_LIMIT + 1, offset: 0 });
     const truncated = domainRows.length > DOMAIN_RESOURCE_LIMIT;
     const domains = domainRows.slice(0, DOMAIN_RESOURCE_LIMIT).map((domain) => ({
       ...domain,
@@ -125,32 +71,9 @@ export function domainsResourcePayloadForRuntime(db?: Database): Record<string, 
   }
 }
 
-export async function addressesResourcePayload(db: Database = getDatabase()): Promise<Record<string, unknown>> {
-  const { listEnrichedAddresses } = await import("../lib/address-ownership.js");
-  const addressRows = listEnrichedAddresses(undefined, db, { limit: ADDRESS_RESOURCE_LIMIT + 1, offset: 0 });
-  const truncated = addressRows.length > ADDRESS_RESOURCE_LIMIT;
-  const visibleAddresses = addressRows.slice(0, ADDRESS_RESOURCE_LIMIT);
-  const addressProvisioning = listAddressProvisioningByIds(visibleAddresses.map((address) => address.id), db);
-  const addresses = visibleAddresses.map((address) => ({
-    ...address,
-    provisioning: addressProvisioning.get(address.id) ?? null,
-  }));
-  return {
-    addresses,
-    total: countAddresses(db),
-    limit: ADDRESS_RESOURCE_LIMIT,
-    truncated,
-    mode: "local",
-    source: "local_sqlite",
-    cli_equivalent: `emails address list --limit ${ADDRESS_RESOURCE_LIMIT} --json`,
-  };
-}
-
-export async function addressesResourcePayloadForRuntime(db?: Database): Promise<Record<string, unknown>> {
-  if (!selfHostedSelected()) return await addressesResourcePayload(db ?? getDatabase());
-
+export async function addressesResourcePayloadForRuntime(): Promise<Record<string, unknown>> {
   try {
-    const addressRows = listAddresses(undefined, undefined, { limit: ADDRESS_RESOURCE_LIMIT + 1, offset: 0 });
+    const addressRows = listAddresses(undefined, { limit: ADDRESS_RESOURCE_LIMIT + 1, offset: 0 });
     const truncated = addressRows.length > ADDRESS_RESOURCE_LIMIT;
     const addresses = addressRows.slice(0, ADDRESS_RESOURCE_LIMIT).map((address) => ({
       ...address,
@@ -185,9 +108,9 @@ export async function addressesResourcePayloadForRuntime(db?: Database): Promise
   }
 }
 
-export async function agentContextResourcePayload(db?: Database): Promise<Record<string, unknown>> {
+export async function agentContextResourcePayload(): Promise<Record<string, unknown>> {
   const { getAgentContextForRuntime } = await import("../lib/agent-context.js");
-  const context = await getAgentContextForRuntime(db);
+  const context = await getAgentContextForRuntime();
   const status = context["status"] as Record<string, unknown>;
   const domains = status["domains"] as { usable?: unknown[]; usable_limit?: number; usable_truncated?: boolean } | undefined;
   const addresses = status["addresses"] as { usable_from?: Array<Record<string, unknown>>; usable_from_limit?: number; usable_from_truncated?: boolean } | undefined;
@@ -242,104 +165,23 @@ export async function agentContextResourcePayload(db?: Database): Promise<Record
   };
 }
 
-export function mailboxesResourcePayload(db: Database = getDatabase()): Record<string, unknown> {
-  return {
-    ...listMailboxStatus(undefined, db),
-    cli_equivalent: "emails inbox mailboxes --json",
-  };
-}
-
-export async function mailboxesResourcePayloadForRuntime(db?: Database): Promise<Record<string, unknown>> {
+export async function mailboxesResourcePayloadForRuntime(): Promise<Record<string, unknown>> {
   const ds = resolveMailDataSource();
-  if (ds.mode === "local" && db) return mailboxesResourcePayload(db);
   return {
     ...(await ds.listMailboxStatus()),
     cli_equivalent: "emails inbox mailboxes --json",
   };
 }
 
-export function sourcesResourcePayload(db: Database = getDatabase()): Record<string, unknown> {
-  return {
-    sources: listMailboxSources({ limit: 100 }, db),
-    cli_equivalent: "emails inbox sources --json",
-  };
-}
-
-export async function sourcesResourcePayloadForRuntime(db?: Database): Promise<Record<string, unknown>> {
+export async function sourcesResourcePayloadForRuntime(): Promise<Record<string, unknown>> {
   const ds = resolveMailDataSource();
-  if (ds.mode === "local" && db) return sourcesResourcePayload(db);
   return {
     sources: await ds.listMailboxSources({ limit: 100 }),
     cli_equivalent: "emails inbox sources --json",
   };
 }
 
-interface FailedDomainProvisioningRow {
-  domain: string;
-  last_error: string | null;
-}
-
-interface FailedAddressProvisioningRow {
-  email: string;
-  last_error: string | null;
-}
-
-export function recentErrorsResourcePayload(db: Database = getDatabase()): Record<string, unknown> {
-  const config = loadConfig();
-  const realtimeError = typeof config["inbound_realtime_last_error"] === "string"
-    ? config["inbound_realtime_last_error"]
-    : null;
-  const domainRows = db
-    .query("SELECT domain, last_error FROM domains WHERE provisioning_status = 'failed' ORDER BY updated_at DESC LIMIT ?")
-    .all(RECENT_ERROR_LIMIT_PER_COMPONENT + 1) as FailedDomainProvisioningRow[];
-  const addressRows = db
-    .query("SELECT email, last_error FROM addresses WHERE provisioning_status = 'failed' ORDER BY updated_at DESC LIMIT ?")
-    .all(RECENT_ERROR_LIMIT_PER_COMPONENT + 1) as FailedAddressProvisioningRow[];
-  const domainErrorsTruncated = domainRows.length > RECENT_ERROR_LIMIT_PER_COMPONENT;
-  const addressErrorsTruncated = addressRows.length > RECENT_ERROR_LIMIT_PER_COMPONENT;
-  const domainErrors = domainRows
-    .slice(0, RECENT_ERROR_LIMIT_PER_COMPONENT)
-    .map(({ domain, last_error }) => ({
-      component: "domain-provisioning",
-      entity: domain,
-      message: last_error ?? "domain provisioning failed",
-      fix_command: `emails provision status ${domain}`,
-    }));
-  const addressErrors = addressRows
-    .slice(0, RECENT_ERROR_LIMIT_PER_COMPONENT)
-    .map(({ email, last_error }) => ({
-      component: "address-provisioning",
-      entity: email,
-      message: last_error ?? "address provisioning failed",
-      fix_command: `emails doctor delivery ${email}`,
-    }));
-  const errors = [
-    realtimeError ? {
-      component: "inbound-realtime",
-      message: realtimeError,
-      fix_command: "emails inbox sync-status",
-    } : null,
-    ...domainErrors,
-    ...addressErrors,
-  ].filter(Boolean);
-  return {
-    errors,
-    truncated: domainErrorsTruncated || addressErrorsTruncated,
-    limits: {
-      per_component: RECENT_ERROR_LIMIT_PER_COMPONENT,
-    },
-    truncated_components: {
-      domain_provisioning: domainErrorsTruncated,
-      address_provisioning: addressErrorsTruncated,
-    },
-    mode: "local",
-    source: "local_sqlite",
-    cli_equivalent: "emails status --json",
-  };
-}
-
-export function recentErrorsResourcePayloadForRuntime(db?: Database): Record<string, unknown> {
-  if (!selfHostedSelected()) return recentErrorsResourcePayload(db ?? getDatabase());
+export function recentErrorsResourcePayloadForRuntime(): Record<string, unknown> {
   return {
     errors: [],
     truncated: false,
