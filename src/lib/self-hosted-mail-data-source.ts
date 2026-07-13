@@ -1,15 +1,14 @@
 // SelfHostedMailDataSource maps the operator-configured Emails service onto the
 // common mailbox interface. The service speaks a versioned resource API — the
 // same shape `src/db/self-hosted-store.ts` already uses for `domains`:
-//   GET    /v1/messages?limit&offset   -> { messages: [ <row>, ... ] }
-//   GET    /v1/messages/<id>           -> { message: <row> } | 404
+//   GET    /v1/messages?limit&offset   -> { messages: [ <summary row>, ... ] }
+//   GET    /v1/messages/<id>           -> { message: <full row> } | 404
 //   POST   /v1/messages                -> { message: <row> }
 //   PATCH  /v1/messages/<id>           -> { message: <row> }
 //   DELETE /v1/messages/<id>           -> 200 | 404
-// Rows are snake_case and carry the full inbound projection: direction,
-// from_addr, to_addrs[], cc_addrs[], subject, body_text, body_html, status,
-// message_id, in_reply_to, received_at, is_read, is_starred, labels[], headers,
-// created_at, updated_at. Ordering is COALESCE(received_at, created_at) DESC.
+// Rows are snake_case. List rows carry metadata and a short `snippet`; detail
+// rows carry the full body_text/body_html projection. Ordering is
+// COALESCE(received_at, created_at) DESC.
 //
 // This backend maps that resource API onto the client's domain language
 // (TuiMessage / MailboxCounts / MessageBody / …) so the CLI/MCP inbox reads the
@@ -21,9 +20,6 @@
 
 import { resolveSelfHostedConfig } from "../db/self-hosted-store.js";
 import type { AttachmentPath } from "../db/inbound.js";
-import { chmodSync, closeSync, constants, mkdirSync, openSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { createHash } from "node:crypto";
 import {
   type ConversationBodyOptions,
   type LabelSummary,
@@ -71,6 +67,7 @@ interface V1Message {
   to_addrs?: string[] | null;
   cc_addrs?: string[] | null;
   subject?: string | null;
+  snippet?: string | null;
   body_text?: string | null;
   body_html?: string | null;
   status?: string | null;
@@ -94,7 +91,7 @@ export type SelfHostedFetch = (url: string, init: RequestInit) => Promise<{
 
 // A complete server id (uuidv7). Used verbatim; a shorter value is a prefix that
 // resolveId matches over a bounded recent scan.
-const FULL_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const FULL_ID_RE = /^(?:[A-Za-z0-9_-]+:)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // Page size for /v1 list reads.
 const PAGE_LIMIT = 500;
@@ -152,6 +149,7 @@ function visibleLabels(labels: string[], isRead: boolean): string[] {
 function v1ToTuiMessage(m: V1Message): TuiMessage {
   const isRead = Boolean(m.is_read);
   const outbound = (m.direction ?? "").toLowerCase() === "outbound";
+  const attachments = v1AttachmentMetadata(m).length;
   return {
     kind: outbound ? "sent" : "inbound",
     id: m.id,
@@ -162,12 +160,21 @@ function v1ToTuiMessage(m: V1Message): TuiMessage {
     is_read: outbound ? true : isRead,
     is_starred: Boolean(m.is_starred),
     labels: visibleLabels(labelsOf(m), isRead),
-    snippet: snippetOf(m.body_text),
+    snippet: snippetOf(m.snippet ?? m.body_text),
     thread_id: null,
     provider_thread_id: null,
-    attachments: 0,
+    attachments,
     sentByMe: outbound,
   };
+}
+
+function v1AttachmentMetadata(m: V1Message): AttachmentPath[] {
+  const metadata = Array.isArray(m.attachments) ? m.attachments : [];
+  return metadata.map((attachment, index) => ({
+    filename: String(attachment?.filename ?? `attachment-${index + 1}`),
+    content_type: String(attachment?.content_type ?? "application/octet-stream"),
+    size: Number(attachment?.size ?? 0) || 0,
+  }));
 }
 
 function v1ToMessageBody(m: V1Message): MessageBody {
@@ -187,7 +194,7 @@ function v1ToMessageBody(m: V1Message): MessageBody {
     html: m.body_html ?? null,
     summary: "",
     flags,
-    attachments: [],
+    attachments: v1AttachmentMetadata(m),
   };
 }
 
@@ -248,6 +255,13 @@ function sourceMatch(m: V1Message, source?: MailboxSource): boolean {
   // provider/s3/legacy/unknown scoping has no equivalent in the self-hosted
   // serve → narrow to nothing.
   return false;
+}
+
+function sourceServerFilterSets(source: MailboxSource | undefined): Array<{ to?: string; from?: string }> {
+  const address = source?.address?.trim().toLowerCase();
+  if (address) return [{ to: address }, { from: address }];
+  const domain = source?.domain?.trim().toLowerCase();
+  return domain ? [{ to: domain }] : [{}];
 }
 
 function searchMatch(m: V1Message, query?: string): boolean {
@@ -343,13 +357,24 @@ export class SelfHostedMailDataSource implements MailDataSource {
   private async listPage(
     limit: number,
     offset: number,
-    opts: { direction?: "inbound" | "outbound"; since?: string } = {},
+    opts: {
+      direction?: "inbound" | "outbound";
+      since?: string;
+      to?: string;
+      from?: string;
+      subject?: string;
+      search?: string;
+    } = {},
   ): Promise<V1Message[]> {
     const params = new URLSearchParams();
     params.set("limit", String(limit));
     params.set("offset", String(offset));
     if (opts.direction) params.set("direction", opts.direction);
     if (opts.since) params.set("since", opts.since);
+    if (opts.to) params.set("to", opts.to);
+    if (opts.from) params.set("from", opts.from);
+    if (opts.subject) params.set("subject", opts.subject);
+    if (opts.search) params.set("search", opts.search);
     const { status, json } = await this.request("GET", `/messages?${params.toString()}`);
     if (status < 200 || status >= 300) {
       throw new Error(`self-hosted emails: GET /messages failed (HTTP ${status})`);
@@ -403,6 +428,16 @@ export class SelfHostedMailDataSource implements MailDataSource {
     this.scanCache = null;
   }
 
+  private async searchMatchWithDetails(message: V1Message, search: string | undefined): Promise<{ message: V1Message; matches: boolean }> {
+    let candidate = message;
+    let matches = searchMatch(candidate, search);
+    if (!matches && search?.trim() && message.body_text == null) {
+      candidate = (await this.getRaw(message.id)) ?? message;
+      matches = searchMatch(candidate, search);
+    }
+    return { message: candidate, matches };
+  }
+
   private async listFilteredMailboxPage(mailbox: Mailbox, opts?: MailboxListOptions): Promise<V1Message[]> {
     const offset = opts?.offset && opts.offset > 0 ? opts.offset : 0;
     const limit = opts?.limit && opts.limit > 0 ? opts.limit : 200;
@@ -410,15 +445,50 @@ export class SelfHostedMailDataSource implements MailDataSource {
     const pageLimit = Math.min(PAGE_LIMIT, Math.max(50, wanted));
     const direction = mailbox === "sent" ? "outbound" : "inbound";
     const since = normalizeSince(opts?.since);
-    const matches: V1Message[] = [];
-    for (let serverOffset = 0; serverOffset < MAX_SCAN_ROWS && matches.length < wanted; serverOffset += pageLimit) {
-      const page = await this.listPage(pageLimit, serverOffset, { direction, since });
-      for (const message of page) {
-        if (folderMatch(message, mailbox) && sourceMatch(message, opts?.source)) matches.push(message);
+    const matches = new Map<string, V1Message>();
+    for (const sourceFilters of sourceServerFilterSets(opts?.source)) {
+      let filterMatches = 0;
+      for (let serverOffset = 0; serverOffset < MAX_SCAN_ROWS && filterMatches < wanted; serverOffset += pageLimit) {
+        const page = await this.listPage(pageLimit, serverOffset, {
+          direction,
+          since,
+          ...sourceFilters,
+          search: opts?.search,
+        });
+        for (const message of page) {
+          if (!folderMatch(message, mailbox) || !sourceMatch(message, opts?.source) || !isOnOrAfter(message, since)) continue;
+          const { message: candidate, matches: matchesSearch } = await this.searchMatchWithDetails(message, opts?.search);
+          if (matchesSearch) {
+            if (!matches.has(candidate.id)) filterMatches += 1;
+            matches.set(candidate.id, candidate);
+          }
+        }
+        if (page.length < pageLimit) break;
       }
-      if (page.length < pageLimit) break;
     }
-    return matches.slice(offset, offset + limit);
+    return [...matches.values()]
+      .sort((a, b) => messageDate(b).localeCompare(messageDate(a)))
+      .slice(offset, offset + limit);
+  }
+
+  private async scanSourceRows(source?: MailboxSource): Promise<V1Message[]> {
+    if (!hasSourceScope(source)) return this.scanAll();
+    if (!source?.address && !source?.domain) return [];
+
+    const seen = new Map<string, V1Message>();
+    const collect = async (filters: { direction?: "inbound" | "outbound"; to?: string; from?: string }) => {
+      for (let offset = 0; offset < MAX_SCAN_ROWS; offset += PAGE_LIMIT) {
+        const page = await this.listPage(PAGE_LIMIT, offset, filters);
+        for (const message of page) {
+          if (sourceMatch(message, source)) seen.set(message.id, message);
+        }
+        if (page.length < PAGE_LIMIT) break;
+      }
+    };
+
+    for (const filters of sourceServerFilterSets(source)) await collect(filters);
+
+    return [...seen.values()];
   }
 
   private async getRaw(id: string): Promise<V1Message | null> {
@@ -452,19 +522,22 @@ export class SelfHostedMailDataSource implements MailDataSource {
 
   async listMailbox(mailbox: Mailbox, opts?: MailboxListOptions): Promise<TuiMessage[]> {
     if (hasSourceScope(opts?.source) && !opts?.source?.address && !opts?.source?.domain) return [];
-    if (!opts?.search && !opts?.label && opts?.sort !== "oldest") {
+    if (!opts?.label && opts?.sort !== "oldest") {
       return (await this.listFilteredMailboxPage(mailbox, opts)).map(v1ToTuiMessage);
     }
     const rows = await this.scanAll();
     const label = opts?.label?.trim().toLowerCase();
     const since = normalizeSince(opts?.since);
-    let filtered = rows.filter((m) =>
-      folderMatch(m, mailbox)
-      && sourceMatch(m, opts?.source)
-      && searchMatch(m, opts?.search)
-      && isOnOrAfter(m, since)
-      && (!label || labelsOf(m).some((l) => l.trim().toLowerCase() === label)),
-    );
+    let filtered: V1Message[] = [];
+    for (const row of rows) {
+      if (!folderMatch(row, mailbox)
+        || !sourceMatch(row, opts?.source)
+        || !isOnOrAfter(row, since)
+        || (label && !labelsOf(row).some((l) => l.trim().toLowerCase() === label))
+      ) continue;
+      const { message, matches } = await this.searchMatchWithDetails(row, opts?.search);
+      if (matches) filtered.push(message);
+    }
     filtered.sort((a, b) => {
       const da = messageDate(a);
       const db = messageDate(b);
@@ -477,7 +550,7 @@ export class SelfHostedMailDataSource implements MailDataSource {
 
   async mailboxCounts(opts?: { source?: MailboxSource }): Promise<MailboxCounts> {
     if (!hasSourceScope(opts?.source)) return (await this.serverStats()).counts;
-    const rows = await this.scanAll();
+    const rows = await this.scanSourceRows(opts?.source);
     const counts = emptyCounts();
     for (const m of rows) {
       if (!sourceMatch(m, opts?.source)) continue;
@@ -541,42 +614,7 @@ export class SelfHostedMailDataSource implements MailDataSource {
 
   async getAttachmentPaths(id: string): Promise<AttachmentPath[]> {
     const message = await this.getRaw(id);
-    const metadata = Array.isArray(message?.attachments) ? message.attachments : [];
-    if (metadata.length === 0) return [];
-    const home = process.env["HOME"] ?? process.cwd();
-    const safeMessageId = createHash("sha256").update(id).digest("hex");
-    const directory = join(home, ".hasna", "emails", "attachments", "self-hosted", safeMessageId);
-    mkdirSync(directory, { recursive: true, mode: 0o700 });
-    const paths: AttachmentPath[] = [];
-    for (let index = 0; index < metadata.length; index++) {
-      const { status, json } = await this.request("GET", `/messages/${encodeURIComponent(id)}/attachments/${index}`);
-      if (status < 200 || status >= 300) throw new Error(`self-hosted emails: attachment ${index} unavailable (HTTP ${status})`);
-      const attachment = (json as { attachment?: Record<string, unknown> } | null)?.attachment;
-      if (!attachment || typeof attachment["content_base64"] !== "string") throw new Error(`self-hosted emails: attachment ${index} has no content`);
-      const encoded = attachment["content_base64"];
-      if (encoded.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) {
-        throw new Error(`self-hosted emails: attachment ${index} has invalid base64 content`);
-      }
-      const bytes = Buffer.from(encoded, "base64");
-      if (bytes.toString("base64") !== encoded) throw new Error(`self-hosted emails: attachment ${index} has invalid base64 content`);
-      const rawName = String(attachment["filename"] ?? `attachment-${index + 1}`);
-      const filename = rawName.replace(/[^A-Za-z0-9._-]+/g, "_").replace(/^\.+/, "") || `attachment-${index + 1}`;
-      const localPath = join(directory, `${index + 1}-${filename}`);
-      const fd = openSync(
-        localPath,
-        constants.O_CREAT | constants.O_TRUNC | constants.O_WRONLY | constants.O_NOFOLLOW,
-        0o600,
-      );
-      try { writeFileSync(fd, bytes); } finally { closeSync(fd); }
-      chmodSync(localPath, 0o600);
-      paths.push({
-        filename: rawName,
-        content_type: String(attachment["content_type"] ?? "application/octet-stream"),
-        size: Number(attachment["size"] ?? 0) || 0,
-        local_path: localPath,
-      });
-    }
-    return paths;
+    return message ? v1AttachmentMetadata(message) : [];
   }
 
   async listLabelSummaries(opts?: ListLabelSummaryOptions): Promise<LabelSummary[]> {
@@ -600,17 +638,36 @@ export class SelfHostedMailDataSource implements MailDataSource {
 
   async verificationCandidates(address: string, opts?: VerificationCodeCandidateOptions): Promise<VerificationCodeEmail[]> {
     const target = address.trim().toLowerCase();
-    const rows = await this.scanAll();
     const since = normalizeSince(opts?.since);
     const fromFilter = opts?.from?.trim().toLowerCase();
-    const candidates = rows
-      .filter((m) => (m.direction ?? "").toLowerCase() !== "outbound")
-      .filter((m) => (m.to_addrs ?? []).map(bareEmail).includes(target))
-      .filter((m) => isOnOrAfter(m, since))
-      .filter((m) => (!fromFilter || (m.from_addr ?? "").toLowerCase().includes(fromFilter)))
-      .sort((a, b) => messageDate(b).localeCompare(messageDate(a)));
+    const subjectFilter = opts?.subject?.trim().toLowerCase();
     const limit = opts?.limit && opts.limit > 0 ? opts.limit : 50;
-    return candidates.slice(0, limit).map((m) => ({
+    const candidates: V1Message[] = [];
+    const pageLimit = Math.min(PAGE_LIMIT, Math.max(50, limit));
+    for (let offset = 0; offset < MAX_SCAN_ROWS && candidates.length < limit; offset += pageLimit) {
+      const page = await this.listPage(pageLimit, offset, {
+        direction: "inbound",
+        to: target,
+        since,
+        from: opts?.from,
+        subject: opts?.subject,
+      });
+      for (const message of page) {
+        if ((message.direction ?? "").toLowerCase() === "outbound") continue;
+        if (!(message.to_addrs ?? []).map(bareEmail).includes(target)) continue;
+        if (!isOnOrAfter(message, since)) continue;
+        if (fromFilter && !(message.from_addr ?? "").toLowerCase().includes(fromFilter)) continue;
+        if (subjectFilter && !(message.subject ?? "").toLowerCase().includes(subjectFilter)) continue;
+        candidates.push(message);
+        if (candidates.length >= limit) break;
+      }
+      if (page.length < pageLimit) break;
+    }
+    const detailed: V1Message[] = [];
+    for (const candidate of candidates.slice(0, limit)) {
+      detailed.push((await this.getRaw(candidate.id)) ?? candidate);
+    }
+    return detailed.map((m) => ({
       id: m.id,
       from_address: m.from_addr ?? "",
       subject: m.subject ?? "",

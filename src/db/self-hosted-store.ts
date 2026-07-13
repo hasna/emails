@@ -11,15 +11,12 @@
 // without an await), so this bridge performs the HTTP call synchronously via a
 // spawned `curl`. Bun has no synchronous `fetch`.
 //
-// SAFETY: the API key is NEVER placed on the process argv (it would leak into
-// `ps`/monitoring). It is written to a 0600 curl config file that is deleted
-// immediately after the call. The key value is never logged or embedded in an
-// error.
+// SAFETY: the API key and request body are NEVER placed on process argv or in
+// local temp files. They are passed to `curl -K -` over stdin, and the key value
+// is never logged or embedded in an error.
 
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { loadEmailsClientEnvSecret } from "../lib/client-env.js";
 
 const APP = "emails";
 
@@ -67,6 +64,7 @@ let _resourceRoutingDisabledDepth = 0;
  */
 export function resolveSelfHostedConfig(env: NodeJS.ProcessEnv = process.env): SelfHostedConfig | null {
   if (_resourceRoutingDisabledDepth > 0) return null;
+  loadEmailsClientEnvSecret(env);
   const modeRaw = env["EMAILS_MODE"]?.trim() ?? env["HASNA_EMAILS_MODE"]?.trim();
   const apiUrl = env["EMAILS_SELF_HOSTED_URL"]?.trim();
   const apiKey = env["EMAILS_SELF_HOSTED_API_KEY"]?.trim();
@@ -85,7 +83,10 @@ function computeConfig(
   apiUrl: string | undefined,
   apiKey: string | undefined,
 ): SelfHostedConfig | null {
-  if (!modeRaw || modeRaw === "local") {
+  if (modeRaw === "local") {
+    return null;
+  }
+  if (!modeRaw) {
     if (apiUrl || apiKey) {
       throw new Error(
         "Self-hosted credentials were supplied without EMAILS_MODE=self_hosted. " +
@@ -162,61 +163,83 @@ export class SelfHostedTransportError extends Error {
   }
 }
 
+function curlConfigValue(value: string): string {
+  return JSON.stringify(value);
+}
+
+const CURL_ENV_ALLOWLIST = [
+  "PATH",
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "ALL_PROXY",
+  "NO_PROXY",
+  "http_proxy",
+  "https_proxy",
+  "all_proxy",
+  "no_proxy",
+  "CURL_CA_BUNDLE",
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
+] as const;
+
+function curlProcessEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const key of CURL_ENV_ALLOWLIST) {
+    const value = process.env[key];
+    if (value !== undefined) env[key] = value;
+  }
+  return env;
+}
+
 function httpRequest(config: SelfHostedConfig, method: string, path: string, body?: unknown): CurlResult {
   const url = `${config.baseUrl}${path}`;
   const connectTimeout = connectTimeoutSeconds();
   const maxTime = maxTimeSeconds();
-  const dir = mkdtempSync(join(tmpdir(), "emails-self-hosted-"));
-  const cfgPath = join(dir, "curl.cfg");
-  try {
-    const lines = [
-      `url = "${url}"`,
-      `request = "${method}"`,
-      `header = "Authorization: Bearer ${config.apiKey}"`,
-      `header = "Accept: application/json"`,
-      // Bounded, fail-loud transport (never hang indefinitely).
-      `connect-timeout = ${connectTimeout}`,
-      `max-time = ${maxTime}`,
-      `silent`,
-      `show-error`,
-    ];
-    if (body !== undefined) {
-      lines.push(`header = "Content-Type: application/json"`);
-      lines.push(`data-binary = "@${join(dir, "body.json")}"`);
-      writeFileSync(join(dir, "body.json"), JSON.stringify(body), { mode: 0o600 });
-    }
-    writeFileSync(cfgPath, lines.join("\n"), { mode: 0o600 });
-
-    const proc = spawnSync("curl", ["-K", cfgPath, "-w", "\n%{http_code}"], {
-      encoding: "utf-8",
-      maxBuffer: 128 * 1024 * 1024,
-      // Hard ceiling in case curl itself wedges: kill just past its own max-time.
-      timeout: (maxTime + connectTimeout + 5) * 1000,
-    });
-    if (proc.error) {
-      // spawnSync's own timeout (ETIMEDOUT) or a spawn failure — surface as a
-      // transport error, not a mysterious throw.
-      throw new SelfHostedTransportError(method, path, (proc.error as Error).message || "curl could not run");
-    }
-    const out = proc.stdout ?? "";
-    const nl = out.lastIndexOf("\n");
-    const statusStr = nl >= 0 ? out.slice(nl + 1).trim() : out.trim();
-    const bodyText = nl >= 0 ? out.slice(0, nl) : "";
-    const status = Number.parseInt(statusStr, 10);
-    // http_code 000 (or unparseable) means curl never got an HTTP response:
-    // connect failure or the connect/max-time budget elapsed. Fail LOUD so a
-    // read never silently degrades to an empty list with a success exit code.
-    if (!Number.isFinite(status) || status === 0) {
-      const stderr = (proc.stderr || "").trim();
-      const detail = proc.status === 28
-        ? `timed out after ${maxTime}s`
-        : (stderr || `curl exited ${proc.status ?? "unknown"}`);
-      throw new SelfHostedTransportError(method, path, detail);
-    }
-    return { status, body: bodyText };
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
+  const lines = [
+    `url = ${curlConfigValue(url)}`,
+    `request = ${curlConfigValue(method)}`,
+    `header = ${curlConfigValue(`Authorization: Bearer ${config.apiKey}`)}`,
+    `header = ${curlConfigValue("Accept: application/json")}`,
+    // Bounded, fail-loud transport (never hang indefinitely).
+    `connect-timeout = ${connectTimeout}`,
+    `max-time = ${maxTime}`,
+    `silent`,
+    `show-error`,
+  ];
+  if (body !== undefined) {
+    lines.push(`header = ${curlConfigValue("Content-Type: application/json")}`);
+    lines.push(`data-binary = ${curlConfigValue(JSON.stringify(body))}`);
   }
+
+  const proc = spawnSync("curl", ["-q", "-K", "-", "-w", "\n%{http_code}"], {
+    encoding: "utf-8",
+    env: curlProcessEnv(),
+    input: lines.join("\n"),
+    maxBuffer: 128 * 1024 * 1024,
+    // Hard ceiling in case curl itself wedges: kill just past its own max-time.
+    timeout: (maxTime + connectTimeout + 5) * 1000,
+  });
+  if (proc.error) {
+    // spawnSync's own timeout (ETIMEDOUT) or a spawn failure — surface as a
+    // transport error, not a mysterious throw.
+    throw new SelfHostedTransportError(method, path, (proc.error as Error).message || "curl could not run");
+  }
+  const out = proc.stdout ?? "";
+  const nl = out.lastIndexOf("\n");
+  const statusStr = nl >= 0 ? out.slice(nl + 1).trim() : out.trim();
+  const bodyText = nl >= 0 ? out.slice(0, nl) : "";
+  const status = Number.parseInt(statusStr, 10);
+  // http_code 000 (or unparseable) means curl never got an HTTP response:
+  // connect failure or the connect/max-time budget elapsed. Fail LOUD so a
+  // read never silently degrades to an empty list with a success exit code.
+  if (!Number.isFinite(status) || status === 0) {
+    const stderr = (proc.stderr || "").trim();
+    const detail = proc.status === 28
+      ? `timed out after ${maxTime}s`
+      : (stderr || `curl exited ${proc.status ?? "unknown"}`);
+    throw new SelfHostedTransportError(method, path, detail);
+  }
+  return { status, body: bodyText };
 }
 
 function parseJson(text: string): unknown {
