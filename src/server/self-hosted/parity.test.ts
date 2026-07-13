@@ -155,6 +155,31 @@ describe("self-hosted parity: new migrations", () => {
     expect(prov).toContain("ALTER TABLE domains ADD COLUMN IF NOT EXISTS provisioning_status");
     expect(prov).toContain("ALTER TABLE addresses ADD COLUMN IF NOT EXISTS domain_id");
   });
+
+  test("0011 appends after 0010 and creates the round-2 parity tables + ownership/secret columns", () => {
+    const list = emailsSelfHostedMigrations();
+    const ids = list.map((m) => m.id);
+    expect(ids).toContain("0011_emails_selfhosted_parity_tables_2");
+    expect(ids.indexOf("0011_emails_selfhosted_parity_tables_2")).toBeGreaterThan(
+      ids.indexOf("0010_emails_selfhosted_provisioning_columns"),
+    );
+    const sql = Object.fromEntries(list.map((m) => [m.id, m.sql]))["0011_emails_selfhosted_parity_tables_2"]!;
+    for (const table of [
+      "group_members",
+      "sequence_steps",
+      "sequence_enrollments",
+      "address_ownership_events",
+      "webhook_receipts",
+      "sandbox_emails",
+      "send_key_secrets",
+    ]) {
+      expect(sql).toContain(`CREATE TABLE IF NOT EXISTS ${table}`);
+    }
+    expect(sql).toContain("ALTER TABLE addresses ADD COLUMN IF NOT EXISTS owner_id");
+    expect(sql).toContain("ALTER TABLE addresses ADD COLUMN IF NOT EXISTS administrator_id");
+    // The send-key hash must NOT live on the generic-resource send_keys table.
+    expect(sql).not.toContain("ALTER TABLE send_keys ADD COLUMN IF NOT EXISTS key_hash");
+  });
 });
 
 describe("self-hosted parity: generic resource round-trips", () => {
@@ -429,5 +454,246 @@ describe("self-hosted parity: provisioning fields on domains/addresses", () => {
     expect(res?.status).toBe(200);
     expect(seen).toEqual({ provisioning_status: "ready", receive_strategy: "ses-s3", forward_to: null });
     expect((await res!.json()).address.provisioning_status).toBe("ready");
+  });
+});
+
+describe("self-hosted parity: round-2 generic resources", () => {
+  test("group-members create -> list -> get (vars round-trips) -> delete", async () => {
+    const d = deps();
+    const create = await handleSelfHostedRequest(d, req("POST", "/v1/group-members", {
+      token: writeToken(),
+      // The client pre-serializes vars (JSON.stringify) — mirror that here.
+      body: { group_id: "g1", email: "a@x.com", name: "Ada", vars: JSON.stringify({ team: "eng" }), added_at: "2026-07-13T00:00:00.000Z" },
+    }));
+    expect(create?.status).toBe(201);
+    const row = await create!.json();
+    expect(row.group_id).toBe("g1");
+    expect(row.email).toBe("a@x.com");
+    expect(typeof row.id).toBe("string");
+    expect(JSON.parse(String(row.vars))).toEqual({ team: "eng" });
+
+    const list = await handleSelfHostedRequest(d, req("GET", "/v1/group-members?group_id=g1", { token: readToken() }));
+    expect((await list!.json()).items).toHaveLength(1);
+
+    const get = await handleSelfHostedRequest(d, req("GET", `/v1/group-members/${row.id}`, { token: readToken() }));
+    expect((await get!.json()).email).toBe("a@x.com");
+
+    const del = await handleSelfHostedRequest(d, req("DELETE", `/v1/group-members/${row.id}`, { token: writeToken() }));
+    expect(del?.status).toBe(200);
+  });
+
+  test("sequence-steps keep step_number/delay_hours as integers", async () => {
+    const d = deps();
+    const create = await handleSelfHostedRequest(d, req("POST", "/v1/sequence-steps", {
+      token: writeToken(),
+      body: { sequence_id: "s1", step_number: 2, delay_hours: 48, template_name: "welcome", from_address: "s@x.com" },
+    }));
+    expect(create?.status).toBe(201);
+    const row = await create!.json();
+    expect(row.step_number).toBe(2);
+    expect(row.delay_hours).toBe(48);
+    expect(row.template_name).toBe("welcome");
+  });
+
+  test("sequence-enrollments round-trip current_step + status, filter by sequence_id", async () => {
+    const d = deps();
+    const create = await handleSelfHostedRequest(d, req("POST", "/v1/sequence-enrollments", {
+      token: writeToken(),
+      body: {
+        sequence_id: "s1", contact_email: "c@x.com", provider_id: "p1", current_step: 0,
+        status: "active", enrolled_at: "2026-07-13T00:00:00.000Z", next_send_at: null, completed_at: null,
+      },
+    }));
+    expect(create?.status).toBe(201);
+    const row = await create!.json();
+    expect(row.current_step).toBe(0);
+    expect(row.status).toBe("active");
+
+    const patch = await handleSelfHostedRequest(d, req("PATCH", `/v1/sequence-enrollments/${row.id}`, {
+      token: writeToken(),
+      body: { status: "cancelled" },
+    }));
+    expect((await patch!.json()).status).toBe("cancelled");
+
+    const list = await handleSelfHostedRequest(d, req("GET", "/v1/sequence-enrollments?sequence_id=s1", { token: readToken() }));
+    expect((await list!.json()).items).toHaveLength(1);
+  });
+
+  test("address-ownership-events honor the client-supplied id (create then GET by that id)", async () => {
+    const d = deps();
+    const clientId = "evt-1234";
+    const create = await handleSelfHostedRequest(d, req("POST", "/v1/address-ownership-events", {
+      token: writeToken(),
+      body: {
+        id: clientId, address_id: "a1", action: "assign", previous_owner_id: null,
+        previous_administrator_id: null, owner_id: "o1", administrator_id: "ag1", actor: "cli", reason: null,
+        created_at: "2026-07-13T00:00:00.000Z",
+      },
+    }));
+    expect(create?.status).toBe(201);
+    expect((await create!.json()).id).toBe(clientId);
+
+    // The client reads the event straight back by the id it minted — must resolve.
+    const get = await handleSelfHostedRequest(d, req("GET", `/v1/address-ownership-events/${clientId}`, { token: readToken() }));
+    expect(get?.status).toBe(200);
+    const row = await get!.json();
+    expect(row.action).toBe("assign");
+    expect(row.owner_id).toBe("o1");
+  });
+
+  test("webhook-receipts create + list (append-only ledger)", async () => {
+    const d = deps();
+    const create = await handleSelfHostedRequest(d, req("POST", "/v1/webhook-receipts", {
+      token: writeToken(),
+      body: { provider: "ses", event_id: "evt-9", resource_id: "msg-1", completed_at: "2026-07-13T00:00:00.000Z" },
+    }));
+    expect(create?.status).toBe(201);
+    const row = await create!.json();
+    expect(row.provider).toBe("ses");
+    expect(row.event_id).toBe("evt-9");
+    expect(typeof row.id).toBe("string");
+
+    const list = await handleSelfHostedRequest(d, req("GET", "/v1/webhook-receipts", { token: readToken() }));
+    expect((await list!.json()).items).toHaveLength(1);
+  });
+
+  test("sandbox-emails round-trip raw arrays + pre-serialized attachments/headers", async () => {
+    const d = deps();
+    const create = await handleSelfHostedRequest(d, req("POST", "/v1/sandbox-emails", {
+      token: writeToken(),
+      body: {
+        provider_id: "sandbox", from_address: "s@x.com",
+        to_addresses: ["a@x.com"], cc_addresses: [], bcc_addresses: [],
+        reply_to: null, subject: "Hi", html: "<p>hi</p>", text_body: "hi",
+        // to/cc/bcc are raw arrays; attachments/headers arrive pre-serialized.
+        attachments_json: JSON.stringify([{ filename: "a.txt" }]),
+        headers_json: JSON.stringify({ "X-Test": "1" }),
+        created_at: "2026-07-13T00:00:00.000Z",
+      },
+    }));
+    expect(create?.status).toBe(201);
+    const row = await create!.json();
+    expect(row.subject).toBe("Hi");
+    expect(row.to_addresses).toEqual(["a@x.com"]);
+    expect(JSON.parse(String(row.attachments_json))).toEqual([{ filename: "a.txt" }]);
+    expect(JSON.parse(String(row.headers_json))).toEqual({ "X-Test": "1" });
+
+    const list = await handleSelfHostedRequest(d, req("GET", "/v1/sandbox-emails?provider_id=sandbox", { token: readToken() }));
+    expect((await list!.json()).items).toHaveLength(1);
+  });
+});
+
+describe("self-hosted parity: address ownership over /v1/addresses", () => {
+  test("PATCH applies owner_id/administrator_id via applyAddressOwnership", async () => {
+    const d = deps();
+    d.store.updateAddress = async () => ({
+      id: "a1", email: "a@x.com", domain: "x.com", display_name: null, status: "active", verified: false, daily_quota: null,
+      created_at: "t", updated_at: "t",
+    });
+    let seen: unknown;
+    d.store.applyAddressOwnership = async (_id, patch) => {
+      seen = patch;
+      return { id: "a1", email: "a@x.com", domain: "x.com", display_name: null, status: "active", verified: false, daily_quota: null, owner_id: patch.owner_id ?? null, administrator_id: patch.administrator_id ?? null, created_at: "t", updated_at: "t" };
+    };
+    const res = await handleSelfHostedRequest(d, req("PATCH", "/v1/addresses/a1", {
+      token: writeToken(),
+      body: { owner_id: "o1", administrator_id: "ag1", updated_at: "ignored" },
+    }));
+    expect(res?.status).toBe(200);
+    expect(seen).toEqual({ owner_id: "o1", administrator_id: "ag1" });
+    expect((await res!.json()).address.owner_id).toBe("o1");
+  });
+
+  test("PATCH with explicit nulls clears ownership (the unassign path)", async () => {
+    const d = deps();
+    d.store.updateAddress = async () => ({
+      id: "a1", email: "a@x.com", domain: "x.com", display_name: null, status: "active", verified: false, daily_quota: null,
+      created_at: "t", updated_at: "t",
+    });
+    let seen: unknown;
+    d.store.applyAddressOwnership = async (_id, patch) => {
+      seen = patch;
+      return { id: "a1", email: "a@x.com", domain: "x.com", display_name: null, status: "active", verified: false, daily_quota: null, owner_id: null, administrator_id: null, created_at: "t", updated_at: "t" };
+    };
+    const res = await handleSelfHostedRequest(d, req("PATCH", "/v1/addresses/a1", {
+      token: writeToken(),
+      body: { owner_id: null, administrator_id: null },
+    }));
+    expect(res?.status).toBe(200);
+    expect(seen).toEqual({ owner_id: null, administrator_id: null });
+  });
+
+  test("store.applyAddressOwnership writes then clears the columns", async () => {
+    const d = deps();
+    const created = await d.store.createAddress({ email: "own@x.com" });
+    const assigned = await d.store.applyAddressOwnership(created.id, { owner_id: "o1", administrator_id: "ag1" });
+    expect(assigned?.owner_id).toBe("o1");
+    expect(assigned?.administrator_id).toBe("ag1");
+    const cleared = await d.store.applyAddressOwnership(created.id, { owner_id: null });
+    expect(cleared?.owner_id).toBeNull();
+  });
+});
+
+describe("self-hosted parity: scoped send-key mint/verify routing", () => {
+  test("POST /v1/send-keys/mint returns the one-time token + summary (not read as an id)", async () => {
+    const d = deps();
+    let seen: unknown;
+    d.store.mintSendKey = async (input) => {
+      seen = input;
+      return {
+        token: "esk_ONE_TIME",
+        key: { id: "k1", owner_id: input.owner_id, prefix: "esk_ONE_TIME", label: input.label ?? null, last_used_at: null, revoked_at: null, created_at: "t", updated_at: "t" },
+      };
+    };
+    // If routing fell through to the generic matcher, "mint" would be read as an id.
+    d.store.getResource = async () => { throw new Error("routed to generic getResource by mistake"); };
+    const res = await handleSelfHostedRequest(d, req("POST", "/v1/send-keys/mint", { token: writeToken(), body: { owner_id: "o1", label: "ci" } }));
+    expect(res?.status).toBe(201);
+    const body = await res!.json();
+    expect(body.token).toBe("esk_ONE_TIME");
+    expect(body.key.owner_id).toBe("o1");
+    expect(seen).toEqual({ owner_id: "o1", label: "ci" });
+  });
+
+  test("POST /v1/send-keys/mint requires owner_id and write scope", async () => {
+    const d = deps();
+    d.store.mintSendKey = async () => ({ token: "x", key: { id: "k", owner_id: "o", prefix: "x", label: null, last_used_at: null, revoked_at: null, created_at: "t", updated_at: "t" } });
+    const missing = await handleSelfHostedRequest(d, req("POST", "/v1/send-keys/mint", { token: writeToken(), body: {} }));
+    expect(missing?.status).toBe(400);
+    const forbidden = await handleSelfHostedRequest(d, req("POST", "/v1/send-keys/mint", { token: readToken(), body: { owner_id: "o1" } }));
+    expect(forbidden?.status).toBe(403);
+  });
+
+  test("POST /v1/send-keys/verify resolves a token and confirms from-address scope", async () => {
+    const d = deps();
+    d.store.verifySendKey = async (token) =>
+      token === "esk_ok"
+        ? { id: "k1", owner_id: "o1", prefix: "esk_ok", label: null, last_used_at: "t", revoked_at: null, created_at: "t", updated_at: "t" }
+        : null;
+    d.store.isOwnerAuthorizedFrom = async (ownerId, from) => ownerId === "o1" && from === "mine@x.com";
+
+    // No `from` => the key resolves (valid) but no scope check ran => default-deny.
+    const valid = await handleSelfHostedRequest(d, req("POST", "/v1/send-keys/verify", { token: writeToken(), body: { token: "esk_ok" } }));
+    expect(valid?.status).toBe(200);
+    expect(await valid!.json()).toMatchObject({ valid: true, authorized: false });
+
+    const owned = await handleSelfHostedRequest(d, req("POST", "/v1/send-keys/verify", { token: writeToken(), body: { token: "esk_ok", from: "mine@x.com" } }));
+    expect((await owned!.json()).authorized).toBe(true);
+
+    const foreign = await handleSelfHostedRequest(d, req("POST", "/v1/send-keys/verify", { token: writeToken(), body: { token: "esk_ok", from: "victim@x.com" } }));
+    expect((await foreign!.json()).authorized).toBe(false);
+
+    const bad = await handleSelfHostedRequest(d, req("POST", "/v1/send-keys/verify", { token: writeToken(), body: { token: "esk_bad" } }));
+    expect(await bad!.json()).toEqual({ valid: false, authorized: false, key: null });
+
+    const noToken = await handleSelfHostedRequest(d, req("POST", "/v1/send-keys/verify", { token: writeToken(), body: {} }));
+    expect(noToken?.status).toBe(400);
+  });
+
+  test("send-key verify rejects the read scope (it mutates last_used_at)", async () => {
+    const d = deps();
+    d.store.verifySendKey = async () => null;
+    const res = await handleSelfHostedRequest(d, req("POST", "/v1/send-keys/verify", { token: readToken(), body: { token: "esk_x" } }));
+    expect(res?.status).toBe(403);
   });
 });

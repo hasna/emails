@@ -487,12 +487,84 @@ export const emailsSelfHostedOpenApi: OpenApiDocument = {
         },
       },
     },
+    // Bespoke scoped-send-key endpoints. These are NOT part of the generic
+    // resource CRUD: the token and its hash live only on the server, so minting
+    // and verification are dedicated routes (the /v1/send-keys resource itself is
+    // summary-only and never returns a hash).
+    "/v1/send-keys/mint": {
+      post: {
+        operationId: "mintSendKey",
+        summary: "Issue a scoped send key; the token is returned ONCE and never stored",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: { owner_id: { type: "string" }, label: { type: "string", nullable: true } },
+                required: ["owner_id"],
+              },
+            },
+          },
+        },
+        responses: {
+          "201": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: { token: { type: "string" }, key: { type: "object", additionalProperties: true } },
+                  required: ["token", "key"],
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    "/v1/send-keys/verify": {
+      post: {
+        operationId: "verifySendKey",
+        summary: "Verify a send-key token and (optionally) that it may send from a given address",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: { token: { type: "string" }, from: { type: "string" } },
+                required: ["token"],
+              },
+            },
+          },
+        },
+        responses: {
+          "200": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    valid: { type: "boolean" },
+                    authorized: { type: "boolean" },
+                    key: { type: "object", additionalProperties: true, nullable: true },
+                  },
+                  required: ["valid", "authorized"],
+                },
+              },
+            },
+          },
+        },
+      },
+    },
     // NOTE: the generic /v1 resource CRUD (contacts, providers, templates,
     // groups, sequences, owners, send-keys, scheduled, aliases, forwarding,
     // warming, triage, provisioning, sources, events, email-agents,
-    // email-agent-runs, email-digests) follows a uniform, registry-driven shape
-    // — list -> { items: [...] }; get/create/update -> the bare row;
-    // delete -> { deleted, id } — and is intentionally not enumerated here.
+    // email-agent-runs, email-digests, group-members, sequence-steps,
+    // sequence-enrollments, address-ownership-events, webhook-receipts,
+    // sandbox-emails) follows a uniform, registry-driven shape — list ->
+    // { items: [...] }; get/create/update -> the bare row; delete ->
+    // { deleted, id } — and is intentionally not enumerated here.
   },
   components: {
     schemas: {

@@ -4,7 +4,7 @@
 // directly through the product-owned storage utilities' typed query client. No cache, no
 // local mirror.
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { TypedQueryClient } from "../../storage-kit/index.js";
 import type { SelfHostedResourceSpec, ResourceColumn } from "./resources.js";
 
@@ -54,6 +54,10 @@ export interface AddressRecord {
   status: string;
   verified: boolean;
   daily_quota: number | null;
+  // Ownership (migration 0011). An address is owned by a human OR agent owner and
+  // administered by an agent. Optional so older/fake rows still satisfy the type.
+  owner_id?: string | null;
+  administrator_id?: string | null;
   // Provisioning lifecycle state (mirrors the local addresses provisioning
   // columns). Present once migration 0010 has run; optional so older/fake rows
   // still satisfy the type.
@@ -79,6 +83,24 @@ export interface AddressProvisioningPatch {
   last_validated_at?: string | null;
   last_error?: string | null;
   next_check_at?: string | null;
+}
+
+/** Writable address ownership fields (a PATCH may set either; null clears). */
+export interface AddressOwnershipPatch {
+  owner_id?: string | null;
+  administrator_id?: string | null;
+}
+
+/** Non-secret projection of a scoped send key (never carries the key hash). */
+export interface SendKeyRecord {
+  id: string;
+  owner_id: string | null;
+  prefix: string | null;
+  label: string | null;
+  last_used_at: string | null;
+  revoked_at: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface MessageRecord {
@@ -542,6 +564,28 @@ export class EmailsSelfHostedStore {
     if ("last_validated_at" in patch) set("last_validated_at", patch.last_validated_at);
     if ("last_error" in patch) set("last_error", patch.last_error);
     if ("next_check_at" in patch) set("next_check_at", patch.next_check_at);
+    if (sets.length === 0) return this.getAddress(id);
+    sets.push("updated_at = now()");
+    return this.client.get<AddressRecord>(
+      `UPDATE addresses SET ${sets.join(", ")} WHERE id = $1 RETURNING *`,
+      params,
+    );
+  }
+
+  /**
+   * Apply address ownership fields (migration 0011). Only keys PRESENT in
+   * `patch` are written, so `null` explicitly clears (the client's unassign) while
+   * an absent key is left untouched.
+   */
+  async applyAddressOwnership(id: string, patch: AddressOwnershipPatch): Promise<AddressRecord | null> {
+    const sets: string[] = [];
+    const params: unknown[] = [id];
+    const set = (name: string, value: unknown) => {
+      params.push(value ?? null);
+      sets.push(`${name} = $${params.length}`);
+    };
+    if ("owner_id" in patch) set("owner_id", patch.owner_id);
+    if ("administrator_id" in patch) set("administrator_id", patch.administrator_id);
     if (sets.length === 0) return this.getAddress(id);
     sets.push("updated_at = now()");
     return this.client.get<AddressRecord>(
@@ -1069,5 +1113,90 @@ export class EmailsSelfHostedStore {
       [id],
     );
     return rows.length > 0;
+  }
+
+  // ---- scoped send keys (mint / verify / authorization) -------------------
+  //
+  // A send key authorizes sending only from addresses its owner OWNS or
+  // ADMINISTERS. The secret material is a token shown ONCE at mint time; only its
+  // SHA-256 hash is persisted, in the dedicated `send_key_secrets` table that is
+  // NOT a generic /v1 resource — so no resource read path can ever return a hash.
+  // The `send_keys` table (a generic resource) stays summary-only.
+
+  private static hashSendToken(token: string): string {
+    return createHash("sha256").update(token, "utf8").digest("hex");
+  }
+
+  /** Extract the bare, lowercased address from a From value (drops display name). */
+  private static canonicalAddress(from: string): string {
+    const value = from.trim();
+    const angled = value.match(/<([^>]+)>/);
+    const bare = (angled ? angled[1]! : value).trim().toLowerCase();
+    return bare.includes("@") ? bare : "";
+  }
+
+  /**
+   * Mint a scoped send key for an owner. Returns the one-time token (never stored)
+   * plus the non-secret summary row. The `esk_` prefix matches the client's key
+   * format; the stored `prefix` is a short, non-secret display fragment.
+   */
+  async mintSendKey(input: { owner_id: string; label?: string | null }): Promise<{ token: string; key: SendKeyRecord }> {
+    const token = `esk_${randomBytes(24).toString("base64url")}`;
+    const prefix = token.slice(0, 12);
+    const keyHash = EmailsSelfHostedStore.hashSendToken(token);
+    const id = randomUUID();
+    const key = await this.client.one<SendKeyRecord>(
+      `INSERT INTO send_keys (id, owner_id, prefix, label)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, owner_id, prefix, label, last_used_at, revoked_at, created_at, updated_at`,
+      [id, input.owner_id, prefix, input.label ?? null],
+    );
+    await this.client.execute(
+      `INSERT INTO send_key_secrets (id, send_key_id, key_hash) VALUES ($1, $2, $3)`,
+      [randomUUID(), id, keyHash],
+    );
+    return { token, key };
+  }
+
+  /**
+   * Resolve a token to its (non-revoked) send key, stamping `last_used_at`.
+   * Returns null for an unknown or revoked token. Never returns the hash.
+   */
+  async verifySendKey(token: string): Promise<SendKeyRecord | null> {
+    const value = token.trim();
+    if (!value) return null;
+    const keyHash = EmailsSelfHostedStore.hashSendToken(value);
+    const secret = await this.client.get<{ send_key_id: string }>(
+      `SELECT send_key_id FROM send_key_secrets WHERE key_hash = $1`,
+      [keyHash],
+    );
+    if (!secret) return null;
+    const key = await this.client.get<SendKeyRecord>(
+      `SELECT id, owner_id, prefix, label, last_used_at, revoked_at, created_at, updated_at
+       FROM send_keys WHERE id = $1`,
+      [secret.send_key_id],
+    );
+    if (!key || key.revoked_at) return null;
+    const stamped = await this.client.get<SendKeyRecord>(
+      `UPDATE send_keys SET last_used_at = now(), updated_at = now()
+       WHERE id = $1
+       RETURNING id, owner_id, prefix, label, last_used_at, revoked_at, created_at, updated_at`,
+      [key.id],
+    );
+    return stamped ?? key;
+  }
+
+  /** Whether `ownerId` may send from `fromEmail` (owns or administers the address). */
+  async isOwnerAuthorizedFrom(ownerId: string, fromEmail: string): Promise<boolean> {
+    if (!ownerId) return false;
+    const email = EmailsSelfHostedStore.canonicalAddress(fromEmail);
+    if (!email) return false;
+    const row = await this.client.get<{ one: number }>(
+      `SELECT 1 AS one FROM addresses
+       WHERE lower(email) = $1 AND (owner_id = $2 OR administrator_id = $2)
+       LIMIT 1`,
+      [email, ownerId],
+    );
+    return row !== null;
   }
 }

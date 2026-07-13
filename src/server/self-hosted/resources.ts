@@ -328,6 +328,127 @@ export const SELF_HOSTED_RESOURCES: SelfHostedResourceSpec[] = [
       { name: "completed_at" },
     ],
   },
+  // ---- self-hosted-only parity resources (round 2) --------------------------
+  // Every resource the self-hosted client routes to that had no server endpoint
+  // yet (it 404'd at runtime). Columns mirror the client's expected fields in
+  // snake_case; created_at/updated_at exist on every table so the generic
+  // updater (`SET ... updated_at = now()`) works even on the append-only ones.
+  {
+    // Contact-group membership (local table `group_members`). The local natural
+    // key was composite (group_id, email); the /v1 CRUD needs a single `id`, so
+    // the table carries a server-minted `id` PLUS a UNIQUE(group_id, email).
+    path: "group-members",
+    table: "group_members",
+    orderBy: "added_at ASC, email ASC",
+    filters: ["group_id", "email"],
+    columns: [
+      { name: "group_id" },
+      { name: "email" },
+      { name: "name" },
+      // The client sends `vars` pre-serialized (JSON.stringify), mirroring the
+      // original local SQLite TEXT column, so this is a TEXT column too: the JSON
+      // string round-trips verbatim and the client's `cobj` parses it. (Declaring
+      // it json here would double-encode into a jsonb string scalar.)
+      { name: "vars" },
+      { name: "added_at" },
+    ],
+  },
+  {
+    // Steps of a drip sequence (local table `sequence_steps`).
+    path: "sequence-steps",
+    table: "sequence_steps",
+    orderBy: "step_number ASC",
+    filters: ["sequence_id"],
+    columns: [
+      { name: "sequence_id" },
+      { name: "step_number", int: true },
+      { name: "delay_hours", int: true },
+      { name: "template_name" },
+      { name: "from_address" },
+      { name: "subject_override" },
+      { name: "created_at" },
+    ],
+  },
+  {
+    // Contact enrollments in a sequence (local table `sequence_enrollments`).
+    path: "sequence-enrollments",
+    table: "sequence_enrollments",
+    orderBy: "enrolled_at DESC",
+    filters: ["sequence_id", "status"],
+    columns: [
+      { name: "sequence_id" },
+      { name: "contact_email" },
+      { name: "provider_id" },
+      { name: "current_step", int: true },
+      { name: "status" },
+      { name: "enrolled_at" },
+      { name: "next_send_at" },
+      { name: "completed_at" },
+    ],
+  },
+  {
+    // Append-only address ownership audit trail (local table
+    // `address_ownership_events`). The client MINTS the event id and then reads
+    // it straight back by that id, so this resource honors the client-supplied
+    // `id` (idColumn) rather than server-minting a different one.
+    path: "address-ownership-events",
+    table: "address_ownership_events",
+    idColumn: "id",
+    orderBy: "created_at DESC",
+    filters: ["address_id", "action"],
+    columns: [
+      { name: "id" },
+      { name: "address_id" },
+      { name: "action" },
+      { name: "previous_owner_id" },
+      { name: "previous_administrator_id" },
+      { name: "owner_id" },
+      { name: "administrator_id" },
+      { name: "actor" },
+      { name: "reason" },
+      { name: "created_at" },
+    ],
+  },
+  {
+    // Webhook idempotency ledger (local table `webhook_receipts`). Append-only;
+    // the client dedupes by (provider, event_id) via a bounded list scan.
+    path: "webhook-receipts",
+    table: "webhook_receipts",
+    orderBy: "completed_at DESC",
+    filters: ["provider", "event_id"],
+    columns: [
+      { name: "provider" },
+      { name: "event_id" },
+      { name: "resource_id" },
+      { name: "completed_at" },
+    ],
+  },
+  {
+    // Captured outbound for the sandbox provider (local table `sandbox_emails`).
+    // to/cc/bcc arrive as raw arrays (jsonb, encoded once). attachments_json /
+    // headers_json arrive PRE-serialized from the client (mirroring the original
+    // SQLite TEXT columns), so they are TEXT here — the JSON string round-trips
+    // verbatim and the client's carray/cobj parse it (declaring them json would
+    // double-encode into a jsonb string scalar).
+    path: "sandbox-emails",
+    table: "sandbox_emails",
+    orderBy: "created_at DESC",
+    filters: ["provider_id"],
+    columns: [
+      { name: "provider_id" },
+      { name: "from_address" },
+      { name: "to_addresses", json: true },
+      { name: "cc_addresses", json: true },
+      { name: "bcc_addresses", json: true },
+      { name: "reply_to" },
+      { name: "subject" },
+      { name: "html" },
+      { name: "text_body" },
+      { name: "attachments_json" },
+      { name: "headers_json" },
+      { name: "created_at" },
+    ],
+  },
 ];
 
 export function resourceSpecForPath(path: string): SelfHostedResourceSpec | undefined {

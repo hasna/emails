@@ -795,6 +795,130 @@ const PROVISIONING_COLUMNS = defineMigration(
   `,
 );
 
+/**
+ * Self-hosted-only PARITY tables, round 2. Closes the remaining gaps where the
+ * self-hosted client routed a resource through the generic /v1 store that had no
+ * server table yet (it 404'd at runtime): contact-group membership, sequence
+ * steps + enrollments, the address-ownership audit trail, the webhook
+ * idempotency ledger, and captured sandbox outbound. Also adds the
+ * owner_id/administrator_id ownership columns the client PATCHes onto
+ * /v1/addresses, and a SEPARATE send_key_secrets table (never a /v1 resource) so
+ * the server can verify a send-key token without the generic `SELECT *` resource
+ * path ever exposing the hash. Every column mirrors the client's expected fields
+ * in snake_case; JSON columns are JSONB and every table carries
+ * created_at/updated_at so the generic updater works uniformly.
+ */
+const PARITY_RESOURCE_SCHEMA_2 = defineMigration(
+  "0011_emails_selfhosted_parity_tables_2",
+  `
+  CREATE TABLE IF NOT EXISTS group_members (
+    id          TEXT PRIMARY KEY,
+    group_id    TEXT NOT NULL,
+    email       TEXT NOT NULL,
+    name        TEXT,
+    -- TEXT (not jsonb): the client sends this pre-serialized, mirroring the
+    -- original local SQLite column; the JSON string is stored verbatim.
+    vars        TEXT NOT NULL DEFAULT '{}',
+    added_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(group_id, email)
+  );
+  CREATE INDEX IF NOT EXISTS group_members_group_idx ON group_members (group_id);
+
+  CREATE TABLE IF NOT EXISTS sequence_steps (
+    id               TEXT PRIMARY KEY,
+    sequence_id      TEXT NOT NULL,
+    step_number      INTEGER NOT NULL DEFAULT 0,
+    delay_hours      INTEGER NOT NULL DEFAULT 0,
+    template_name    TEXT NOT NULL DEFAULT '',
+    from_address     TEXT,
+    subject_override TEXT,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS sequence_steps_sequence_idx ON sequence_steps (sequence_id, step_number);
+
+  CREATE TABLE IF NOT EXISTS sequence_enrollments (
+    id            TEXT PRIMARY KEY,
+    sequence_id   TEXT NOT NULL,
+    contact_email TEXT NOT NULL,
+    provider_id   TEXT,
+    current_step  INTEGER NOT NULL DEFAULT 0,
+    status        TEXT NOT NULL DEFAULT 'active',
+    enrolled_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    next_send_at  TIMESTAMPTZ,
+    completed_at  TIMESTAMPTZ,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS sequence_enrollments_sequence_idx ON sequence_enrollments (sequence_id, status);
+  CREATE INDEX IF NOT EXISTS sequence_enrollments_due_idx ON sequence_enrollments (status, next_send_at);
+
+  CREATE TABLE IF NOT EXISTS address_ownership_events (
+    id                        TEXT PRIMARY KEY,
+    address_id                TEXT NOT NULL,
+    action                    TEXT NOT NULL,
+    previous_owner_id         TEXT,
+    previous_administrator_id TEXT,
+    owner_id                  TEXT,
+    administrator_id          TEXT,
+    actor                     TEXT,
+    reason                    TEXT,
+    created_at                TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at                TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS address_ownership_events_address_idx ON address_ownership_events (address_id, created_at);
+
+  CREATE TABLE IF NOT EXISTS webhook_receipts (
+    id           TEXT PRIMARY KEY,
+    provider     TEXT NOT NULL,
+    event_id     TEXT NOT NULL,
+    resource_id  TEXT,
+    completed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS webhook_receipts_lookup_idx ON webhook_receipts (provider, event_id);
+
+  CREATE TABLE IF NOT EXISTS sandbox_emails (
+    id               TEXT PRIMARY KEY,
+    provider_id      TEXT NOT NULL,
+    from_address     TEXT NOT NULL,
+    to_addresses     JSONB NOT NULL DEFAULT '[]'::jsonb,
+    cc_addresses     JSONB NOT NULL DEFAULT '[]'::jsonb,
+    bcc_addresses    JSONB NOT NULL DEFAULT '[]'::jsonb,
+    reply_to         TEXT,
+    subject          TEXT NOT NULL DEFAULT '',
+    html             TEXT,
+    text_body        TEXT,
+    -- TEXT (not jsonb): the client sends these pre-serialized, mirroring the
+    -- original local SQLite columns; the JSON string is stored verbatim.
+    attachments_json TEXT NOT NULL DEFAULT '[]',
+    headers_json     TEXT NOT NULL DEFAULT '{}',
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS sandbox_emails_provider_idx ON sandbox_emails (provider_id, created_at);
+
+  ALTER TABLE addresses ADD COLUMN IF NOT EXISTS owner_id TEXT;
+  ALTER TABLE addresses ADD COLUMN IF NOT EXISTS administrator_id TEXT;
+  CREATE INDEX IF NOT EXISTS addresses_owner_idx ON addresses (owner_id);
+  CREATE INDEX IF NOT EXISTS addresses_administrator_idx ON addresses (administrator_id);
+
+  -- Secret store for scoped send keys. Kept OUT of the generic /v1 resource
+  -- registry so no resource path can ever return a key hash: the send-keys
+  -- resource stays summary-only, and verification reads the hash here directly.
+  CREATE TABLE IF NOT EXISTS send_key_secrets (
+    id           TEXT PRIMARY KEY,
+    send_key_id  TEXT NOT NULL UNIQUE,
+    key_hash     TEXT NOT NULL UNIQUE,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS send_key_secrets_key_idx ON send_key_secrets (send_key_id);
+  `,
+);
+
 /** All migrations, in order: api-keys table (auth), the core schema, inbound. */
 export function emailsSelfHostedMigrations(): Migration[] {
   const authMigrations = apiKeyMigrations().map((m) => defineMigration(m.id, m.sql));
@@ -812,5 +936,6 @@ export function emailsSelfHostedMigrations(): Migration[] {
     LEGACY_MESSAGES_BACKFILL_DEDUPE,
     PARITY_RESOURCE_SCHEMA,
     PROVISIONING_COLUMNS,
+    PARITY_RESOURCE_SCHEMA_2,
   ];
 }

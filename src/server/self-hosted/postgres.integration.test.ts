@@ -2,6 +2,7 @@ import { afterAll, describe, expect, it } from "bun:test";
 import { createPgPool, createQueryClient, MigrationLedger } from "../../storage-kit/index.js";
 import { emailsSelfHostedMigrations } from "./migrations.js";
 import { EmailsSelfHostedStore } from "./store.js";
+import { resourceSpecForPath } from "./resources.js";
 
 const databaseUrl = process.env["EMAILS_TEST_POSTGRES_URL"];
 const client = databaseUrl
@@ -148,5 +149,100 @@ describe("self-hosted Postgres integration", () => {
       { id: "legacy-inbound:in-typed", direction: "inbound", subject: "typed inbound" },
       { id: "legacy-sent:sent-typed", direction: "outbound", subject: "typed sent" },
     ]);
+  });
+
+  it.skipIf(!client)("round-2 parity: new generic resources round-trip through real jsonb", async () => {
+    await resetPublicSchema();
+    await new MigrationLedger(client!, emailsSelfHostedMigrations()).migrate();
+    const store = new EmailsSelfHostedStore(client!);
+
+    // group-members: the client pre-serializes `vars`; confirm it round-trips
+    // through a real jsonb column + node-pg (the crux of the double-encode path).
+    const gmSpec = resourceSpecForPath("group-members")!;
+    const gm = await store.createResource(gmSpec, {
+      group_id: "g1", email: "a@x.com", name: "Ada",
+      vars: JSON.stringify({ team: "eng" }), added_at: "2026-07-13T00:00:00.000Z",
+    });
+    expect(typeof gm["id"]).toBe("string");
+    expect(JSON.parse(String(gm["vars"]))).toEqual({ team: "eng" });
+    const gmList = await store.listResource(gmSpec, { filters: { group_id: "g1" } });
+    expect(gmList).toHaveLength(1);
+
+    // sandbox-emails: raw arrays store native; pre-serialized json round-trips.
+    const sbSpec = resourceSpecForPath("sandbox-emails")!;
+    const sb = await store.createResource(sbSpec, {
+      provider_id: "sandbox", from_address: "s@x.com",
+      to_addresses: ["a@x.com"], cc_addresses: [], bcc_addresses: [],
+      reply_to: null, subject: "Hi", html: "<p>hi</p>", text_body: "hi",
+      attachments_json: JSON.stringify([{ filename: "a.txt" }]),
+      headers_json: JSON.stringify({ "X-Test": "1" }),
+      created_at: "2026-07-13T00:00:00.000Z",
+    });
+    expect(sb["to_addresses"]).toEqual(["a@x.com"]);
+    expect(JSON.parse(String(sb["attachments_json"]))).toEqual([{ filename: "a.txt" }]);
+    expect(JSON.parse(String(sb["headers_json"]))).toEqual({ "X-Test": "1" });
+
+    // address-ownership-events: the client-minted id must be honored (idColumn).
+    const aoSpec = resourceSpecForPath("address-ownership-events")!;
+    const eventId = `evt-${crypto.randomUUID()}`;
+    const created = await store.createResource(aoSpec, {
+      id: eventId, address_id: "a1", action: "assign", previous_owner_id: null,
+      previous_administrator_id: null, owner_id: "o1", administrator_id: "ag1",
+      actor: "cli", reason: null, created_at: "2026-07-13T00:00:00.000Z",
+    });
+    expect(created["id"]).toBe(eventId);
+    const fetched = await store.getResource(aoSpec, eventId);
+    expect(fetched?.["owner_id"]).toBe("o1");
+
+    // sequence steps + enrollments + webhook receipts persist and list.
+    const stepSpec = resourceSpecForPath("sequence-steps")!;
+    const step = await store.createResource(stepSpec, { sequence_id: "s1", step_number: 1, delay_hours: 24, template_name: "t" });
+    expect(step["step_number"]).toBe(1);
+    expect(step["delay_hours"]).toBe(24);
+
+    const enrSpec = resourceSpecForPath("sequence-enrollments")!;
+    const enr = await store.createResource(enrSpec, {
+      sequence_id: "s1", contact_email: "c@x.com", provider_id: null, current_step: 0,
+      status: "active", enrolled_at: "2026-07-13T00:00:00.000Z", next_send_at: null, completed_at: null,
+    });
+    const enrUpdated = await store.updateResource(enrSpec, String(enr["id"]), { status: "cancelled" });
+    expect(enrUpdated?.["status"]).toBe("cancelled");
+
+    const whSpec = resourceSpecForPath("webhook-receipts")!;
+    const wh = await store.createResource(whSpec, { provider: "ses", event_id: "e9", resource_id: "m1", completed_at: "2026-07-13T00:00:00.000Z" });
+    expect(wh["provider"]).toBe("ses");
+  });
+
+  it.skipIf(!client)("round-2 parity: send-key mint/verify/revoke + address ownership authorization", async () => {
+    await resetPublicSchema();
+    await new MigrationLedger(client!, emailsSelfHostedMigrations()).migrate();
+    const store = new EmailsSelfHostedStore(client!);
+
+    // Ownership: assign an owner + agent administrator, then authorize sends.
+    const address = await store.createAddress({ email: "mine@x.com" });
+    await store.applyAddressOwnership(address.id, { owner_id: "owner1", administrator_id: "agent1" });
+    expect(await store.isOwnerAuthorizedFrom("owner1", "Ops <mine@x.com>")).toBe(true);
+    expect(await store.isOwnerAuthorizedFrom("agent1", "mine@x.com")).toBe(true);
+    expect(await store.isOwnerAuthorizedFrom("other", "mine@x.com")).toBe(false);
+    expect(await store.isOwnerAuthorizedFrom("owner1", "victim@x.com")).toBe(false);
+    // Clearing ownership (unassign) revokes authorization.
+    await store.applyAddressOwnership(address.id, { owner_id: null, administrator_id: null });
+    expect(await store.isOwnerAuthorizedFrom("owner1", "mine@x.com")).toBe(false);
+
+    // Send-key mint → verify → revoke → verify fails. The hash is never on the
+    // generic send_keys resource row.
+    const { token, key } = await store.mintSendKey({ owner_id: "owner1", label: "ci" });
+    expect(token.startsWith("esk_")).toBe(true);
+    const skRow = await store.getResource(resourceSpecForPath("send-keys")!, key.id);
+    expect(skRow).not.toBeNull();
+    expect(skRow).not.toHaveProperty("key_hash");
+
+    const verified = await store.verifySendKey(token);
+    expect(verified?.id).toBe(key.id);
+    expect(verified?.last_used_at).toBeTruthy();
+    expect(await store.verifySendKey("esk_bogus")).toBeNull();
+
+    await client!.execute("UPDATE send_keys SET revoked_at = now() WHERE id = $1", [key.id]);
+    expect(await store.verifySendKey(token)).toBeNull();
   });
 });

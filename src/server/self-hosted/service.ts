@@ -18,6 +18,7 @@ import {
   type MessageRecord,
   type DomainProvisioningPatch,
   type AddressProvisioningPatch,
+  type AddressOwnershipPatch,
 } from "./store.js";
 import { emailsSelfHostedOpenApi } from "./openapi.js";
 import { resourceSpecForPath } from "./resources.js";
@@ -266,6 +267,19 @@ function extractDomainProvisioning(body: Record<string, unknown>): DomainProvisi
   return p;
 }
 
+/**
+ * Extract the address ownership fields PRESENT in a PATCH body. Absent keys are
+ * omitted (left untouched); an explicit null clears the column (the client's
+ * unassign). This is how the self-hosted client persists `assignAddressOwner` /
+ * `transferAddressOwner` / `unassignAddressOwner` over /v1/addresses/<id>.
+ */
+function extractAddressOwnership(body: Record<string, unknown>): AddressOwnershipPatch {
+  const p: AddressOwnershipPatch = {};
+  if ("owner_id" in body) p.owner_id = provStr(body.owner_id);
+  if ("administrator_id" in body) p.administrator_id = provStr(body.administrator_id);
+  return p;
+}
+
 /** Extract the address provisioning fields PRESENT in a PATCH body. */
 function extractAddressProvisioning(body: Record<string, unknown>): AddressProvisioningPatch {
   const p: AddressProvisioningPatch = {};
@@ -472,6 +486,8 @@ export async function handleSelfHostedRequest(
         if (rec) {
           const prov = extractAddressProvisioning(body);
           if (Object.keys(prov).length > 0) rec = (await store.applyAddressProvisioning(id, prov)) ?? rec;
+          const own = extractAddressOwnership(body);
+          if (Object.keys(own).length > 0) rec = (await store.applyAddressOwnership(id, own)) ?? rec;
         }
         return rec ? json(200, { address: rec }) : json(404, { error: "address not found" });
       }
@@ -803,6 +819,45 @@ export async function handleSelfHostedRequest(
       if (!auth.ok) return auth.response;
       const { mailboxes, counts } = await store.listMailboxes();
       return json(200, { mailboxes, counts });
+    }
+
+    // ---- scoped send keys: mint + verify ----------------------------------
+    // Handled BEFORE the generic resource matcher so "verify"/"mint" are not read
+    // as a send-keys id. The token and its hash live ONLY on the server; the
+    // generic /v1/send-keys resource stays summary-only.
+
+    // POST /v1/send-keys/mint — issue a scoped send key (token returned ONCE).
+    if (path === "/v1/send-keys/mint") {
+      if (method !== "POST") return json(405, { error: "method not allowed" });
+      const auth = await authenticate(deps, req, url, write);
+      if (!auth.ok) return auth.response;
+      const body = await readJsonBody(req);
+      const ownerId = String(body.owner_id ?? "").trim();
+      if (!ownerId) return json(400, { error: "owner_id is required" });
+      const label = body.label === undefined || body.label === null ? null : String(body.label);
+      const minted = await store.mintSendKey({ owner_id: ownerId, label });
+      return json(201, minted);
+    }
+
+    // POST /v1/send-keys/verify — resolve a token to its key and (optionally)
+    // confirm it is authorized to send from a given `from` address. The client
+    // never holds the key hash; verification (and last_used_at stamping) is here.
+    if (path === "/v1/send-keys/verify") {
+      if (method !== "POST") return json(405, { error: "method not allowed" });
+      const auth = await authenticate(deps, req, url, write);
+      if (!auth.ok) return auth.response;
+      const body = await readJsonBody(req);
+      const token = typeof body.token === "string" ? body.token : "";
+      if (!token.trim()) return json(400, { error: "token is required" });
+      const key = await store.verifySendKey(token);
+      if (!key) return json(200, { valid: false, authorized: false, key: null });
+      const from = typeof body.from === "string" ? body.from.trim() : "";
+      // Default-deny: `authorized` reflects ONLY an actual from-address scope
+      // check. With no `from` the caller is resolving the key (verifySendKey),
+      // not making an authorization decision, so authorized stays false.
+      if (!from) return json(200, { valid: true, authorized: false, key });
+      const authorized = key.owner_id ? await store.isOwnerAuthorizedFrom(key.owner_id, from) : false;
+      return json(200, { valid: true, authorized, key });
     }
 
     // ---- generic resources (contacts/providers/templates/groups/…) --------
