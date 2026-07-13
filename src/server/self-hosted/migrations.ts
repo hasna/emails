@@ -622,6 +622,96 @@ const PARITY_RESOURCE_SCHEMA = withAcceptedMigrationChecksums(defineMigration(
   END;
   $fn$;
 
+  -- Drop a restrictive legacy CONSTRAINT (CHECK or FOREIGN KEY) that a fresh
+  -- migration does not impose. The ad-hoc legacy tables carried enum/range CHECKs
+  -- (e.g. provider IN ('cerebras','groq'), forwarding mode = 'app-copy', triage /
+  -- status / period / event-type enums) AND foreign keys into legacy tables the
+  -- self-hosted-only server no longer uses (providers, groups, inbound_emails,
+  -- emails, mailboxes, ...). The new server writes values / ids those reject
+  -- (provider='external', a self_hosted_providers id, a message id, ...). A fresh
+  -- migration creates NONE of them, so reconciling the drifted tables to the fresh
+  -- schema means dropping them. Guarded on table existence so it is a pure no-op
+  -- on a fresh DB (or where the table is created by a later migration).
+  CREATE OR REPLACE FUNCTION pg_temp.emails_drop_constraint(tbl text, con text)
+  RETURNS void
+  LANGUAGE plpgsql
+  AS $fn$
+  BEGIN
+    IF to_regclass('public.' || tbl) IS NOT NULL THEN
+      EXECUTE format('ALTER TABLE public.%I DROP CONSTRAINT IF EXISTS %I', tbl, con);
+    END IF;
+  END;
+  $fn$;
+
+  -- Relax a legacy NOT NULL column that the fresh schema made nullable or does
+  -- not carry at all (e.g. domains/addresses.provider_id, send_keys.key_hash,
+  -- agent-run/digest started_at/completed_at). The new server never populates
+  -- those columns, so a legacy NOT NULL-without-default would reject its inserts.
+  -- Guarded on column existence; DROP NOT NULL is itself idempotent, so this is a
+  -- pure no-op on a fresh DB (column absent, or already nullable).
+  CREATE OR REPLACE FUNCTION pg_temp.emails_relax_not_null(tbl text, col text)
+  RETURNS void
+  LANGUAGE plpgsql
+  AS $fn$
+  BEGIN
+    IF EXISTS (
+      SELECT 1 FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = tbl AND column_name = col
+    ) THEN
+      EXECUTE format('ALTER TABLE public.%I ALTER COLUMN %I DROP NOT NULL', tbl, col);
+    END IF;
+  END;
+  $fn$;
+
+  -- Add a column the fresh schema carries but a legacy ad-hoc table is missing
+  -- (e.g. the audit-style tables that only had created_at now need updated_at for
+  -- the generic updater; legacy group_members lacked id/created_at/updated_at).
+  -- Guarded on table existence (ADD COLUMN IF NOT EXISTS handles the column), so
+  -- it is a pure no-op on a fresh DB or where the table is created later.
+  CREATE OR REPLACE FUNCTION pg_temp.emails_add_column(tbl text, col text, definition text)
+  RETURNS void
+  LANGUAGE plpgsql
+  AS $fn$
+  BEGIN
+    IF to_regclass('public.' || tbl) IS NOT NULL THEN
+      EXECUTE format('ALTER TABLE public.%I ADD COLUMN IF NOT EXISTS %I %s', tbl, col, definition);
+    END IF;
+  END;
+  $fn$;
+
+  -- Restore the fresh schema's DEFAULT on a legacy NOT NULL column that lost it,
+  -- so a server insert that omits the column gets the same value a fresh DB would
+  -- (rather than a NOT NULL violation). Two variants: a TEXT literal (quoted via
+  -- %L) and a raw SQL expression (e.g. now(), 0). Guarded on column existence;
+  -- no-op on a fresh DB (the default already matches).
+  CREATE OR REPLACE FUNCTION pg_temp.emails_set_text_default(tbl text, col text, val text)
+  RETURNS void
+  LANGUAGE plpgsql
+  AS $fn$
+  BEGIN
+    IF EXISTS (
+      SELECT 1 FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = tbl AND column_name = col
+    ) THEN
+      EXECUTE format('ALTER TABLE public.%I ALTER COLUMN %I SET DEFAULT %L', tbl, col, val);
+    END IF;
+  END;
+  $fn$;
+
+  CREATE OR REPLACE FUNCTION pg_temp.emails_set_expr_default(tbl text, col text, expr text)
+  RETURNS void
+  LANGUAGE plpgsql
+  AS $fn$
+  BEGIN
+    IF EXISTS (
+      SELECT 1 FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = tbl AND column_name = col
+    ) THEN
+      EXECUTE format('ALTER TABLE public.%I ALTER COLUMN %I SET DEFAULT %s', tbl, col, expr);
+    END IF;
+  END;
+  $fn$;
+
   CREATE TABLE IF NOT EXISTS aliases (
     id             TEXT PRIMARY KEY,
     domain         TEXT NOT NULL,
@@ -747,6 +837,113 @@ const PARITY_RESOURCE_SCHEMA = withAcceptedMigrationChecksums(defineMigration(
   SELECT pg_temp.emails_reconcile_bool('email_agent_settings', 'apply_labels',      true);
   SELECT pg_temp.emails_reconcile_bool('email_agent_settings', 'use_network_tools', true);
 
+  -- Drop the restrictive legacy CHECK constraints the ad-hoc tables carried but a
+  -- fresh migration does not impose. The self-hosted-only server writes values the
+  -- old enums reject (provider='external'/'local', additional triage labels,
+  -- digest periods, event types, mailbox source types, statuses, and modes beyond
+  -- 'app-copy'), so keeping them would fault the 0009 seed AND runtime writes.
+  SELECT pg_temp.emails_drop_constraint('domains',              'domains_dkim_status_check');
+  SELECT pg_temp.emails_drop_constraint('domains',              'domains_dmarc_status_check');
+  SELECT pg_temp.emails_drop_constraint('domains',              'domains_spf_status_check');
+  SELECT pg_temp.emails_drop_constraint('email_agent_settings', 'email_agent_settings_provider_check');
+  SELECT pg_temp.emails_drop_constraint('email_agent_runs',     'email_agent_runs_provider_check');
+  SELECT pg_temp.emails_drop_constraint('email_agent_runs',     'email_agent_runs_status_check');
+  SELECT pg_temp.emails_drop_constraint('email_agent_runs',     'email_agent_runs_priority_check');
+  SELECT pg_temp.emails_drop_constraint('email_agent_runs',     'email_agent_runs_risk_score_check');
+  SELECT pg_temp.emails_drop_constraint('email_digests',        'email_digests_provider_check');
+  SELECT pg_temp.emails_drop_constraint('email_digests',        'email_digests_period_check');
+  SELECT pg_temp.emails_drop_constraint('email_digests',        'email_digests_status_check');
+  SELECT pg_temp.emails_drop_constraint('email_triage',         'email_triage_label_check');
+  SELECT pg_temp.emails_drop_constraint('email_triage',         'email_triage_priority_check');
+  SELECT pg_temp.emails_drop_constraint('email_triage',         'email_triage_sentiment_check');
+  SELECT pg_temp.emails_drop_constraint('events',               'events_type_check');
+  SELECT pg_temp.emails_drop_constraint('forwarding_rules',     'forwarding_rules_mode_check');
+  SELECT pg_temp.emails_drop_constraint('mailbox_sources',      'mailbox_sources_status_check');
+  SELECT pg_temp.emails_drop_constraint('mailbox_sources',      'mailbox_sources_type_check');
+  SELECT pg_temp.emails_drop_constraint('scheduled_emails',     'scheduled_emails_status_check');
+  SELECT pg_temp.emails_drop_constraint('sequences',            'sequences_status_check');
+  SELECT pg_temp.emails_drop_constraint('sequence_enrollments', 'sequence_enrollments_status_check');
+  SELECT pg_temp.emails_drop_constraint('warming_schedules',    'warming_schedules_status_check');
+
+  -- Drop the legacy FOREIGN KEYs into tables the self-hosted-only server no longer
+  -- uses (providers, groups, inbound_emails, emails, mailboxes, ...). The server
+  -- writes ids that live elsewhere (self_hosted_providers, messages, contact_groups)
+  -- or are external, so these FKs reject its inserts. A fresh migration has none.
+  SELECT pg_temp.emails_drop_constraint('domains',                  'domains_provider_id_fkey');
+  SELECT pg_temp.emails_drop_constraint('addresses',                'addresses_provider_id_fkey');
+  SELECT pg_temp.emails_drop_constraint('send_keys',                'send_keys_owner_id_fkey');
+  SELECT pg_temp.emails_drop_constraint('scheduled_emails',         'scheduled_emails_provider_id_fkey');
+  SELECT pg_temp.emails_drop_constraint('forwarding_rules',         'forwarding_rules_provider_id_fkey');
+  SELECT pg_temp.emails_drop_constraint('warming_schedules',        'warming_schedules_provider_id_fkey');
+  SELECT pg_temp.emails_drop_constraint('email_triage',             'email_triage_email_id_fkey');
+  SELECT pg_temp.emails_drop_constraint('email_triage',             'email_triage_inbound_email_id_fkey');
+  SELECT pg_temp.emails_drop_constraint('email_agent_runs',         'email_agent_runs_inbound_email_id_fkey');
+  SELECT pg_temp.emails_drop_constraint('events',                   'events_email_id_fkey');
+  SELECT pg_temp.emails_drop_constraint('events',                   'events_provider_id_fkey');
+  SELECT pg_temp.emails_drop_constraint('mailbox_sources',          'mailbox_sources_mailbox_id_fkey');
+  SELECT pg_temp.emails_drop_constraint('mailbox_sources',          'mailbox_sources_provider_id_fkey');
+  SELECT pg_temp.emails_drop_constraint('sandbox_emails',           'sandbox_emails_provider_id_fkey');
+  SELECT pg_temp.emails_drop_constraint('sequence_steps',           'sequence_steps_sequence_id_fkey');
+  SELECT pg_temp.emails_drop_constraint('sequence_enrollments',     'sequence_enrollments_sequence_id_fkey');
+  SELECT pg_temp.emails_drop_constraint('sequence_enrollments',     'sequence_enrollments_provider_id_fkey');
+  SELECT pg_temp.emails_drop_constraint('group_members',            'group_members_group_id_fkey');
+  SELECT pg_temp.emails_drop_constraint('address_ownership_events', 'address_ownership_events_address_id_fkey');
+  SELECT pg_temp.emails_drop_constraint('address_ownership_events', 'address_ownership_events_owner_id_fkey');
+  SELECT pg_temp.emails_drop_constraint('address_ownership_events', 'address_ownership_events_administrator_id_fkey');
+  SELECT pg_temp.emails_drop_constraint('address_ownership_events', 'address_ownership_events_previous_owner_id_fkey');
+  SELECT pg_temp.emails_drop_constraint('address_ownership_events', 'address_ownership_events_previous_administrator_id_fkey');
+
+  -- Add columns the fresh schema carries but a legacy ad-hoc table is missing.
+  -- The audit-style tables only had created_at (the generic updater needs
+  -- updated_at); legacy group_members / sequence_enrollments lacked id/timestamps.
+  SELECT pg_temp.emails_add_column('address_ownership_events', 'updated_at', 'timestamptz NOT NULL DEFAULT now()');
+  SELECT pg_temp.emails_add_column('email_agent_runs',         'updated_at', 'timestamptz NOT NULL DEFAULT now()');
+  SELECT pg_temp.emails_add_column('email_digests',            'updated_at', 'timestamptz NOT NULL DEFAULT now()');
+  SELECT pg_temp.emails_add_column('email_triage',             'updated_at', 'timestamptz NOT NULL DEFAULT now()');
+  SELECT pg_temp.emails_add_column('events',                   'updated_at', 'timestamptz NOT NULL DEFAULT now()');
+  SELECT pg_temp.emails_add_column('provisioning_events',      'updated_at', 'timestamptz NOT NULL DEFAULT now()');
+  SELECT pg_temp.emails_add_column('sandbox_emails',           'updated_at', 'timestamptz NOT NULL DEFAULT now()');
+  SELECT pg_temp.emails_add_column('scheduled_emails',         'updated_at', 'timestamptz NOT NULL DEFAULT now()');
+  SELECT pg_temp.emails_add_column('send_keys',                'updated_at', 'timestamptz NOT NULL DEFAULT now()');
+  SELECT pg_temp.emails_add_column('sequence_steps',           'updated_at', 'timestamptz NOT NULL DEFAULT now()');
+  SELECT pg_temp.emails_add_column('sequence_enrollments',     'created_at', 'timestamptz NOT NULL DEFAULT now()');
+  SELECT pg_temp.emails_add_column('sequence_enrollments',     'updated_at', 'timestamptz NOT NULL DEFAULT now()');
+  SELECT pg_temp.emails_add_column('group_members',            'id',         'text');
+  SELECT pg_temp.emails_add_column('group_members',            'created_at', 'timestamptz NOT NULL DEFAULT now()');
+  SELECT pg_temp.emails_add_column('group_members',            'updated_at', 'timestamptz NOT NULL DEFAULT now()');
+
+  -- Relax legacy NOT NULL columns the fresh schema made nullable or dropped, so
+  -- server inserts that omit them (the new server never populates these) succeed.
+  SELECT pg_temp.emails_relax_not_null('domains',          'provider_id');
+  SELECT pg_temp.emails_relax_not_null('addresses',        'provider_id');
+  SELECT pg_temp.emails_relax_not_null('send_keys',        'key_hash');
+  SELECT pg_temp.emails_relax_not_null('send_keys',        'owner_id');
+  SELECT pg_temp.emails_relax_not_null('send_keys',        'prefix');
+  SELECT pg_temp.emails_relax_not_null('email_agent_runs', 'started_at');
+  SELECT pg_temp.emails_relax_not_null('email_agent_runs', 'completed_at');
+  SELECT pg_temp.emails_relax_not_null('email_digests',    'started_at');
+  SELECT pg_temp.emails_relax_not_null('email_digests',    'completed_at');
+  SELECT pg_temp.emails_relax_not_null('events',           'provider_id');
+  SELECT pg_temp.emails_relax_not_null('scheduled_emails', 'from_address');
+  SELECT pg_temp.emails_relax_not_null('scheduled_emails', 'provider_id');
+  SELECT pg_temp.emails_relax_not_null('scheduled_emails', 'scheduled_at');
+  SELECT pg_temp.emails_relax_not_null('warming_schedules', 'start_date');
+
+  -- Restore fresh-schema DEFAULTs on legacy NOT NULL columns that lost them, so a
+  -- server insert omitting the column gets the value a fresh DB would.
+  SELECT pg_temp.emails_set_text_default('aliases',          'target_address',      '');
+  SELECT pg_temp.emails_set_text_default('mailbox_sources',  'name',                '');
+  SELECT pg_temp.emails_set_text_default('owners',           'type',                'human');
+  SELECT pg_temp.emails_set_text_default('sandbox_emails',   'subject',             '');
+  SELECT pg_temp.emails_set_text_default('scheduled_emails', 'subject',             '');
+  SELECT pg_temp.emails_set_text_default('sequence_steps',   'template_name',       '');
+  SELECT pg_temp.emails_set_text_default('templates',        'subject_template',    '');
+  SELECT pg_temp.emails_set_expr_default('email_digests',    'since',               'now()');
+  SELECT pg_temp.emails_set_expr_default('email_digests',    'until',               'now()');
+  SELECT pg_temp.emails_set_expr_default('events',           'occurred_at',         'now()');
+  SELECT pg_temp.emails_set_expr_default('sequence_steps',   'step_number',         '0');
+  SELECT pg_temp.emails_set_expr_default('warming_schedules', 'target_daily_volume', '0');
+
   -- Guarantee the ON CONFLICT (agent_key) arbiter exists even on an ad-hoc table
   -- that was created without the PRIMARY KEY. Redundant-but-harmless on a fresh
   -- DB (agent_key is already the primary key).
@@ -809,12 +1006,17 @@ const PARITY_RESOURCE_SCHEMA = withAcceptedMigrationChecksums(defineMigration(
   CREATE INDEX IF NOT EXISTS email_digests_period_completed_idx ON email_digests (period, status, completed_at);
   `,
 ), [
-  // Original 0009 body (before the drifted-schema type reconcile was added).
-  // Accepting it keeps any database that already applied that body on a fresh
-  // schema — where the CREATE TABLE statements created the columns as BOOLEAN,
-  // so the added reconcile is a pure no-op there — compatible, while databases
-  // where 0009 is still pending run the corrected reconcile-safe body above.
+  // Prior 0009 bodies, accepted so any database that already applied one on a
+  // fresh schema — where the CREATE TABLE statements created every column as its
+  // fresh type, making the added reconcile a pure no-op — stays compatible.
+  // Databases where 0009 is still pending run the corrected reconcile-safe body
+  // above. (Neither prior body applied on the drifted prod schema: the original
+  // failed on the boolean seed, the round-1 body failed on the legacy CHECK.)
+  //
+  //   - Original body (before any drifted-schema reconcile).
   "sha256:9ed139ed978774cd0e7dd616a86328ad47d2ad3a118d980e87995a8819263450",
+  //   - Round-1 body (boolean reconcile only; published in fd06a18).
+  "sha256:1232715b3e81b43e7dc422f12aa458d767da2763063ce57c166ccede32bcb7b0",
 ]);
 
 /**
