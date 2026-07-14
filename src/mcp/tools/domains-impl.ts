@@ -162,7 +162,7 @@ export function registerDomainTools(server: McpServer): void {
           note: "Self-hosted readiness is derived only from API domain fields; no local provider, provisioning, or config state was read.",
           cli_equivalent: `emails domain usable${provider_id ? ` --provider ${provider_id}` : ""}${send ? " --send" : ""}${receive ? " --receive" : ""}${limit !== undefined ? ` --limit ${limit}` : ""}${offset !== undefined ? ` --offset ${offset}` : ""} --json`,
         }, null, 2) }] };
-      
+
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
     }
@@ -185,7 +185,7 @@ export function registerDomainTools(server: McpServer): void {
         const existing = getDomainByName(provider_id, domain);
         const d = existing ?? createDomain(provider_id, domain);
         return { content: [{ type: "text", text: JSON.stringify(d, null, 2) }] };
-      
+
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
     }
@@ -324,7 +324,7 @@ export function registerDomainTools(server: McpServer): void {
           note: "Self-hosted address enrichment uses only API address fields; no local provider or owner state was read.",
           cli_equivalent: `emails address list${provider_id ? ` --provider ${provider_id}` : ""}${limit !== undefined ? ` --limit ${limit}` : ""}${offset !== undefined ? ` --offset ${offset}` : ""} --json`,
         }, null, 2) }] };
-      
+
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
     }
@@ -390,7 +390,7 @@ export function registerDomainTools(server: McpServer): void {
           note: "Self-hosted readiness is derived only from API domain/address fields; no local provider, owner, provisioning, or config state was read.",
           cli_equivalent: `emails address list${provider_id ? ` --provider ${provider_id}` : ""}${limit !== undefined ? ` --limit ${limit}` : ""}${offset !== undefined ? ` --offset ${offset}` : ""} --json`,
         }, null, 2) }] };
-      
+
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
     }
@@ -550,7 +550,7 @@ export function registerDomainTools(server: McpServer): void {
         const existing = getAddressByEmail(provider_id, email);
         const addr = existing ?? createAddress({ provider_id, email, display_name });
         return { content: [{ type: "text", text: JSON.stringify(addr, null, 2) }] };
-      
+
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
     }
@@ -580,7 +580,7 @@ export function registerDomainTools(server: McpServer): void {
             },
           ],
         };
-      
+
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
     }
