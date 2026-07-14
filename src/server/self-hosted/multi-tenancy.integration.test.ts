@@ -122,14 +122,14 @@ function lastToken(sent: Captured[]): string {
 }
 
 /** Create a tenant + a signed api key bound to it. */
-async function makeTenant(slug: string): Promise<{ tenantId: string; token: string }> {
+async function makeTenant(slug: string): Promise<{ tenantId: string; token: string; kid: string }> {
   const t = await pgClient!.one<{ id: string }>(
     `INSERT INTO tenants (slug, name) VALUES ($1, $2) RETURNING id`,
     [slug, slug],
   );
   const minted = mintApiKey({ app: "emails", scopes: ["emails:*"], signingSecret: SIGNING_SECRET });
   await pgClient!.execute(`INSERT INTO api_key_tenants (kid, tenant_id) VALUES ($1, $2)`, [minted.kid, t.id]);
-  return { tenantId: t.id, token: minted.token };
+  return { tenantId: t.id, token: minted.token, kid: minted.kid };
 }
 
 async function createVerifiedUser(email: string, password: string, tenantId: string, role: string): Promise<string> {
@@ -670,13 +670,33 @@ describe.skipIf(!pgClient)("bootstrap-owner (api-key migration bridge)", () => {
 });
 
 describe.skipIf(!pgClient)("primary super-admin bootstrap", () => {
-  it("is operator-key-only, configured, idempotent, singleton, and audit-safe", async () => {
+  it("is pinned to one operator key, race-idempotent, singleton, and audit-safe", async () => {
     const { deps } = makeDeps();
     const tenant = await makeTenant("primary-super-admin");
-    deps.env = { ...process.env, EMAILS_PRIMARY_SUPER_ADMIN_EMAIL: "andrei@hasna.com" };
     const body = { email: "andrei@hasna.com", password: "test-only-password-93", name: "Andrei" };
-    const first = await call(deps, "POST", "/v1/auth/bootstrap-super-admin", { token: tenant.token, body });
-    expect(first.status).toBe(201);
+    deps.env = { ...process.env, EMAILS_PRIMARY_SUPER_ADMIN_EMAIL: "andrei@hasna.com" };
+    const unpinned = await call(deps, "POST", "/v1/auth/bootstrap-super-admin", { token: tenant.token, body });
+    expect(unpinned.status).toBe(503);
+    expect(unpinned.body.reason).toBe("bootstrap_not_configured");
+
+    deps.env = {
+      ...deps.env,
+      EMAILS_PRIMARY_SUPER_ADMIN_BOOTSTRAP_KID: tenant.kid,
+    };
+    const attacker = await makeTenant("primary-super-admin-attacker");
+    const crossTenantKey = await call(deps, "POST", "/v1/auth/bootstrap-super-admin", {
+      token: attacker.token,
+      body,
+    });
+    expect(crossTenantKey.status).toBe(403);
+    expect(crossTenantKey.body.reason).toBe("bootstrap_key_forbidden");
+
+    const raced = await Promise.all([
+      call(deps, "POST", "/v1/auth/bootstrap-super-admin", { token: tenant.token, body }),
+      call(deps, "POST", "/v1/auth/bootstrap-super-admin", { token: tenant.token, body }),
+    ]);
+    expect(raced.map((result) => result.status).sort()).toEqual([200, 201]);
+    const first = raced.find((result) => result.status === 201)!;
     expect(first.body.user).toMatchObject({
       email: "andrei@hasna.com",
       global_role: "super_admin",

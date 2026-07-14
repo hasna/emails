@@ -602,6 +602,12 @@ export function configuredPrimarySuperAdminEmail(source: NodeJS.ProcessEnv): str
   return value && /^[^@\s]+@[^@\s]+$/.test(value) ? value : null;
 }
 
+/** Pin bootstrap to one operator-managed API-key identifier (the KID is not secret). */
+export function configuredPrimarySuperAdminBootstrapKid(source: NodeJS.ProcessEnv): string | null {
+  const value = source["EMAILS_PRIMARY_SUPER_ADMIN_BOOTSTRAP_KID"]?.trim() ?? "";
+  return value || null;
+}
+
 /**
  * POST /v1/auth/bootstrap-super-admin — operator API-key-only, idempotent, and
  * pinned to EMAILS_PRIMARY_SUPER_ADMIN_EMAIL. Email matching is not itself an
@@ -614,8 +620,12 @@ async function handleBootstrapSuperAdmin(deps: AuthServiceDeps, req: Request, ur
     return json(403, { error: "bootstrap requires an operator api key", reason: "apikey_required" });
   }
   const configuredEmail = configuredPrimarySuperAdminEmail(env(deps));
-  if (!configuredEmail) {
+  const configuredActorKid = configuredPrimarySuperAdminBootstrapKid(env(deps));
+  if (!configuredEmail || !configuredActorKid) {
     return json(503, { error: "primary super-admin bootstrap is not configured", reason: "bootstrap_not_configured" });
+  }
+  if (resolved.ctx.kid !== configuredActorKid) {
+    return json(403, { error: "api key is not authorized for primary bootstrap", reason: "bootstrap_key_forbidden" });
   }
   const body = await readJsonBody(req);
   const requestedEmail = str(body.email).toLowerCase();

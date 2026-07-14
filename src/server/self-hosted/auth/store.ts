@@ -935,6 +935,10 @@ export class AuthStore {
   }): Promise<{ user: UserRow; created: boolean } | { error: "primary_exists" }> {
     const email = input.email.trim().toLowerCase();
     return this.client.transaction(async (tx) => {
+      // Serialize this one-time global operator action. Without this lock, two
+      // concurrent first calls can both observe an empty singleton before either
+      // inserts, turning an idempotent replay into a unique-constraint 500.
+      await tx.execute(`SELECT pg_advisory_xact_lock(hashtext('emails:primary-super-admin-bootstrap'))`);
       const incumbent = await tx.get<{ id: string; email: string }>(
         `SELECT id, email FROM users WHERE is_primary_super_admin = true FOR UPDATE`,
       );
