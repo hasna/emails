@@ -26,12 +26,8 @@ import { selfHostedStoreFor, isSelfHostedMode, type SelfHostedResourceStore } fr
 // selfHosted routing is skipped whenever a caller passes `db`.
 const DOMAIN_RESOURCE = "domains";
 
-// Route to the selfHosted store whenever the client is flipped to self_hosted. The
-// `db` argument is intentionally ignored here: the app's CLI passes an explicit
-// local `getDatabase()` handle to every repo call, so keying on it would defeat
-// selfHosted routing. Tests never set the selfHosted env, so isSelfHostedMode() is false there
-// and the local SQLite path is always used.
-function selfHostedDomains(_db?: Database): SelfHostedResourceStore | null {
+function selfHostedDomains(db?: Database): SelfHostedResourceStore | null {
+  if (db) return null;
   if (!isSelfHostedMode()) return null;
   return selfHostedStoreFor(DOMAIN_RESOURCE);
 }

@@ -15,16 +15,16 @@
 // data. Local mode (isSelfHostedMode() === false) is entirely unaffected.
 
 import { selfHostedStoreFor, isSelfHostedMode, type SelfHostedResourceStore } from "./self-hosted-store.js";
+import { isExplicitDatabaseRoute } from "./database-routing.js";
 import { safeOffset, safeOptionalLimit } from "./pagination.js";
 
 /**
  * Return a selfHosted-backed store for `resource` when the client is flipped to
- * selfHosted, else null (local mode — caller uses SQLite). An explicit local `db`
- * handle is intentionally ignored for routing: the CLI passes an explicit
- * `getDatabase()` to every repo call, so keying on it would defeat selfHosted
- * routing. Tests never set the selfHosted env, so this is null under test.
+ * selfHosted, else null (local mode — caller uses SQLite). Routed public calls
+ * with an explicit Database are scoped locally and never consult this store.
  */
 export function selfHostedResource(resource: string): SelfHostedResourceStore | null {
+  if (isExplicitDatabaseRoute()) return null;
   if (!isSelfHostedMode()) return null;
   return selfHostedStoreFor(resource);
 }

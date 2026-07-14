@@ -118,11 +118,26 @@ describe("public package entrypoint", () => {
   it("supports an isolated local SQLite lifecycle through the public root", () => {
     emails.closeDatabase();
     const db = emails.getDatabase(":memory:");
+    const savedClientEnv = new Map(
+      ["EMAILS_MODE", "EMAILS_SELF_HOSTED_URL", "EMAILS_SELF_HOSTED_API_KEY", "EMAILS_SESSION_TOKEN"]
+        .map((key) => [key, process.env[key]] as const),
+    );
     try {
+      process.env["EMAILS_MODE"] = "self_hosted";
+      delete process.env["EMAILS_SELF_HOSTED_URL"];
+      delete process.env["EMAILS_SELF_HOSTED_API_KEY"];
+      delete process.env["EMAILS_SESSION_TOKEN"];
+
       const provider = emails.runInTransaction(db, () =>
         emails.createProvider({ name: "library-local", type: "sandbox" }, db));
       const group = emails.createGroup("library-group", undefined, db);
+      const domain = emails.createDomain(provider.id, "library.example.test", db);
+      const address = emails.createAddress({ provider_id: provider.id, email: "sender@library.example.test" }, db);
       expect(emails.resolvePartialId(db, "providers", provider.id.slice(0, 12))).toBe(provider.id);
+      expect(emails.resolvePartialId(db, "domains", domain.id.slice(0, 12))).toBe(domain.id);
+      expect(emails.resolvePartialId(db, "addresses", address.id.slice(0, 12))).toBe(address.id);
+      expect(emails.listPartialIdMatches(db, "domains", domain.id.slice(0, 8))).toEqual([domain.id]);
+      expect(emails.listPartialIdMatches(db, "addresses", address.id.slice(0, 8))).toEqual([address.id]);
 
       // Switch the singleton to a separate database. Passing `db` must still
       // address the caller-owned database rather than silently using global state.
@@ -131,6 +146,10 @@ describe("public package entrypoint", () => {
       expect(emails.listProviders(db).map((item) => item.id)).toContain(provider.id);
       expect(emails.listGroups(db).map((item) => item.id)).toContain(group.id);
     } finally {
+      for (const [key, value] of savedClientEnv) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
       emails.closeDatabase();
       db.close();
     }

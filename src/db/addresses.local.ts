@@ -13,14 +13,12 @@ import { selfHostedStoreFor, isSelfHostedMode, type SelfHostedResourceStore } fr
 // When the client-flip resolves to selfHosted (mode=self_hosted + HASNA_EMAILS_API_URL
 // + EMAILS_SELF_HOSTED_API_KEY), the `addresses` resource is served by the app's selfHosted
 // HTTP API (<API_URL>/v1/addresses) instead of the local SQLite store — the same
-// cred-based gate the `domains` resource already uses. The `db` argument is
-// intentionally ignored for the routing decision: the CLI passes an explicit local
-// `getDatabase()` handle to every repo call, so keying on it would defeat selfHosted
-// routing. Tests never set the selfHosted env, so isSelfHostedMode() is false there and the
-// local SQLite path is always used.
+// cred-based gate the `domains` resource already uses. An explicit `db` selects
+// the caller-owned SQLite database and takes precedence over process-wide mode.
 export const ADDRESS_RESOURCE = "addresses";
 
-export function selfHostedAddresses(_db?: Database): SelfHostedResourceStore | null {
+export function selfHostedAddresses(db?: Database): SelfHostedResourceStore | null {
+  if (db) return null;
   if (!isSelfHostedMode()) return null;
   return selfHostedStoreFor(ADDRESS_RESOURCE);
 }

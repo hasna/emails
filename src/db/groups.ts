@@ -1,7 +1,7 @@
 import * as local from "./groups.local.js";
 import * as remote from "./groups.remote.js";
 import { isSelfHostedMode } from "./self-hosted-store.js";
-import { hasDatabaseArgument } from "./database-routing.js";
+import { hasDatabaseArgument, withExplicitDatabaseRoute } from "./database-routing.js";
 
 export type * from "./groups.local.js";
 
@@ -16,10 +16,10 @@ type RoutedFunction<K extends keyof typeof remote & keyof typeof local> = typeof
 
 function routed<K extends keyof typeof remote & keyof typeof local>(key: K): RoutedFunction<K> {
   return ((...args: unknown[]) => {
-    const implementation = (isSelfHostedMode() ? remote : hasDatabaseArgument(args) ? local : localCompat) as Record<string, unknown>;
+    const implementation = (hasDatabaseArgument(args) ? local : isSelfHostedMode() ? remote : localCompat) as Record<string, unknown>;
     const candidate = implementation[String(key)];
     if (typeof candidate !== "function") throw new Error(`groups.${String(key)} is unavailable in the selected mode.`);
-    return (candidate as (...values: unknown[]) => unknown)(...args);
+    return withExplicitDatabaseRoute(args, () => (candidate as (...values: unknown[]) => unknown)(...args));
   }) as RoutedFunction<K>;
 }
 
