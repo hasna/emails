@@ -34,6 +34,9 @@ EMAILS_SEND_PROVIDER=ses
 EMAILS_INGEST_QUEUE_URL=<worker only>
 EMAILS_INGEST_S3_BUCKET=<worker only>
 EMAILS_DATABASE_CA_FILE=/opt/emails/certs/aws-rds-global-bundle.pem
+# Optional paired bootstrap guard (API task only):
+EMAILS_PRIMARY_SUPER_ADMIN_EMAIL=<operator-pinned lowercase email>
+EMAILS_PRIMARY_SUPER_ADMIN_BOOTSTRAP_KID=<authorized non-secret API-key identifier>
 NODE_EXTRA_CA_CERTS=/opt/emails/certs/aws-rds-global-bundle.pem
 ```
 
@@ -156,6 +159,14 @@ the Amazon RDS global CA bundle at
 product TLS resolver and Node at that file. RDS also enforces `rds.force_ssl=1`,
 so plaintext connections fail. The module contains no secret-version resources
 because plaintext would remain in Terraform state.
+
+To prepare the one-time primary super-admin bootstrap, set both
+`primary_super_admin_email` and `primary_super_admin_bootstrap_kid`. The module
+rejects a half-configured pair and does not hardcode an operator identity. The
+KID is a non-secret identifier for one already provisioned API key; keep the
+corresponding token in the approved secret store and never put it in Terraform,
+task environment variables, plans, or logs. After the bootstrap call succeeds,
+prove the same call is idempotent and that a different KID is denied.
 
 Remove temporary database-administration ingress after bootstrap.
 

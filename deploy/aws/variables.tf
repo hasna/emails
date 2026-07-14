@@ -101,6 +101,38 @@ variable "send_provider" {
   }
 }
 
+variable "primary_super_admin_email" {
+  description = "Optional exact email pinned for the one-time primary super-admin bootstrap. Set together with primary_super_admin_bootstrap_kid; no user is hardcoded by this OSS module."
+  type        = string
+  default     = null
+  nullable    = true
+
+  validation {
+    condition = var.primary_super_admin_email == null || (
+      var.primary_super_admin_email == lower(trimspace(var.primary_super_admin_email)) &&
+      can(regex("^[^@[:space:]]+@[^@[:space:]]+[.][^@[:space:]]+$", var.primary_super_admin_email))
+    )
+    error_message = "primary_super_admin_email must be null or a trimmed lowercase email address."
+  }
+}
+
+variable "primary_super_admin_bootstrap_kid" {
+  description = "Optional non-secret API-key identifier authorized for the one-time primary super-admin bootstrap. Set together with primary_super_admin_email; never place the API token here."
+  type        = string
+  default     = null
+  nullable    = true
+
+  validation {
+    condition = var.primary_super_admin_bootstrap_kid == null || (
+      var.primary_super_admin_bootstrap_kid == trimspace(var.primary_super_admin_bootstrap_kid) &&
+      length(var.primary_super_admin_bootstrap_kid) >= 1 &&
+      length(var.primary_super_admin_bootstrap_kid) <= 256 &&
+      !can(regex("[[:space:]]", var.primary_super_admin_bootstrap_kid))
+    )
+    error_message = "primary_super_admin_bootstrap_kid must be null or a 1-256 character identifier without whitespace."
+  }
+}
+
 variable "api_cpu" {
   description = "Fargate CPU units for the API task."
   type        = number

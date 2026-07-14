@@ -266,6 +266,70 @@ run "activation_is_blocked_without_readiness" {
   ]
 }
 
+run "primary_super_admin_bootstrap_is_paired_and_api_only" {
+  command = plan
+
+  variables {
+    aws_region                        = "us-east-1"
+    expected_account_id               = "111122223333"
+    container_image                   = "registry.example/emails@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    primary_super_admin_email         = "owner@example.com"
+    primary_super_admin_bootstrap_kid = "operator-key-id"
+  }
+
+  assert {
+    condition = lookup({
+      for entry in jsondecode(aws_ecs_task_definition.api.container_definitions)[0].environment : entry.name => entry.value
+    }, "EMAILS_PRIMARY_SUPER_ADMIN_EMAIL", "") == "owner@example.com"
+    error_message = "The API task must receive the explicitly pinned primary super-admin email."
+  }
+
+  assert {
+    condition = lookup({
+      for entry in jsondecode(aws_ecs_task_definition.api.container_definitions)[0].environment : entry.name => entry.value
+    }, "EMAILS_PRIMARY_SUPER_ADMIN_BOOTSTRAP_KID", "") == "operator-key-id"
+    error_message = "The API task must receive the explicitly authorized bootstrap KID."
+  }
+
+  assert {
+    condition = alltrue([
+      for definition in [
+        jsondecode(aws_ecs_task_definition.worker.container_definitions)[0],
+        jsondecode(aws_ecs_task_definition.migration.container_definitions)[0],
+        ] : alltrue([
+          for entry in definition.environment : !startswith(entry.name, "EMAILS_PRIMARY_SUPER_ADMIN_")
+      ])
+    ])
+    error_message = "Primary super-admin bootstrap settings must be API-only."
+  }
+}
+
+run "primary_super_admin_email_without_kid_hard_fails" {
+  command = plan
+
+  variables {
+    aws_region                = "us-east-1"
+    expected_account_id       = "111122223333"
+    container_image           = "registry.example/emails@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    primary_super_admin_email = "owner@example.com"
+  }
+
+  expect_failures = [aws_ecs_task_definition.api]
+}
+
+run "primary_super_admin_kid_without_email_hard_fails" {
+  command = plan
+
+  variables {
+    aws_region                        = "us-east-1"
+    expected_account_id               = "111122223333"
+    container_image                   = "registry.example/emails@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    primary_super_admin_bootstrap_kid = "operator-key-id"
+  }
+
+  expect_failures = [aws_ecs_task_definition.api]
+}
+
 run "ready_activation_is_allowed" {
   command = plan
 

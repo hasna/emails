@@ -15,6 +15,11 @@ enable_public_endpoint = false
 enable_private_endpoint = false
 enable_nat_gateway      = false
 
+# Optional one-time primary-super-admin bootstrap guard. Set both to operator-
+# approved values; the KID is an identifier, never the API token itself.
+# primary_super_admin_email         = "owner@example.com"
+# primary_super_admin_bootstrap_kid = "operator-key-id"
+
 # Required privacy decision before enable_ses_inbound can become true.
 # inbound_object_retention_days = 30
 
