@@ -7,11 +7,21 @@ const legacyHostedEnvKeys = [
   "HASNA_MAILERY_API_KEY",
 ];
 
+// This is a PRIVATE, internal MULTI-TENANT app. Legitimate tenancy vocabulary
+// (tenants/users/auth/memberships/sessions, `tenant_id`, /v1/auth/*, /v1/tenants)
+// is ALLOWED — the deliberate P1/P2/P3 pivot added it on purpose. What must never
+// ship is a HOSTED cloud control plane: hardcoded account ids / hosted endpoint
+// URLs, bundled cloud-AI provider clients, and billing/credit/stripe surfaces.
 const patterns = [
   ["hosted package", /@hasna\/cloud\b/i],
   ["hosted endpoint", /https?:\/\/(?:[^/]*\.)?(?:mailery\.co|emails\.hasna\.xyz)/i],
-  ["hosted account route", /\/(?:api\/v1\/(?:auth\/(?:login|signup)|signup|billing|checkout|portal|tenants?|credits?)|auth\/(?:login|signup)|signup)\b/i],
-  ["hosted data field", /\b(?:cloud_api_url|cloud_session_token|cloud_api_key|stripe_customer_id|tenant_id|credit_balance)\b/i],
+  // Control-plane billing/credit routes only. Auth/login|signup and /v1/tenants
+  // are legitimate self-hosted multi-tenant routes and are intentionally allowed.
+  ["hosted billing route", /\/(?:api\/)?v1\/(?:billing|checkout|portal|credits?)\b/i],
+  // Cloud-account data fields only. `tenant_id` is a legitimate per-row isolation
+  // column here and is intentionally NOT flagged.
+  ["hosted data field", /\b(?:cloud_api_url|cloud_session_token|cloud_api_key|stripe_customer_id|credit_balance)\b/i],
+  ["cloud ai provider client", /@ai-sdk\/(?:cerebras|groq)\b|\b(?:GROQ|CEREBRAS)_API_KEY\b|api\.cerebras\.ai|api\.groq\.com/i],
   ["private deployment marker", /\bhasna-xyz\b|\/hasna\/deploy\/|789877399345/i],
   ["retired inbound bucket prefix", /hasna-emails-prod-inbound/i],
   ["legacy hosted environment", new RegExp(legacyHostedEnvKeys.join("|"), "i")],

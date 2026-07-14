@@ -1,6 +1,5 @@
 import { listEmails } from "../db/emails.js";
 import { listEvents } from "../db/events.js";
-import type { Database } from "../db/database.js";
 import type { EventType } from "../types/index.js";
 
 export const EXPORT_DEFAULT_LIMIT = 1000;
@@ -55,8 +54,8 @@ function csvCell(value: unknown): string {
   return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
-export function exportEmailsCsv(filters: EmailExportFilters, db?: Database): string {
-  const emails = listEmails(normalizeEmailFilters(filters), db);
+export function exportEmailsCsv(filters: EmailExportFilters): string {
+  const emails = listEmails(normalizeEmailFilters(filters));
   const header = "id,from,to,subject,status,sent_at";
   const rows = emails.map(e =>
     [e.id, e.from_address, e.to_addresses, e.subject, e.status, e.sent_at].map(csvCell).join(",")
@@ -64,17 +63,17 @@ export function exportEmailsCsv(filters: EmailExportFilters, db?: Database): str
   return [header, ...rows].join("\n");
 }
 
-export function exportEmailsJson(filters: EmailExportFilters, db?: Database): string {
-  return JSON.stringify(listEmails(normalizeEmailFilters(filters), db), null, 2);
+export function exportEmailsJson(filters: EmailExportFilters): string {
+  return JSON.stringify(listEmails(normalizeEmailFilters(filters)), null, 2);
 }
 
-export function exportEventsCsv(filters: EventExportFilters, db?: Database): string {
-  const events = listEvents(normalizeEventFilters(filters), db);
+export function exportEventsCsv(filters: EventExportFilters): string {
+  const events = listEvents(normalizeEventFilters(filters));
   const header = "id,email_id,type,recipient,occurred_at";
   const rows = events.map(e => [e.id, e.email_id || "", e.type, e.recipient || "", e.occurred_at].map(csvCell).join(","));
   return [header, ...rows].join("\n");
 }
 
-export function exportEventsJson(filters: EventExportFilters, db?: Database): string {
-  return JSON.stringify(listEvents(normalizeEventFilters(filters), db), null, 2);
+export function exportEventsJson(filters: EventExportFilters): string {
+  return JSON.stringify(listEvents(normalizeEventFilters(filters)), null, 2);
 }

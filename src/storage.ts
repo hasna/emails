@@ -1,4 +1,4 @@
-/** Public deployment-mode entry point for @hasna/emails/storage. */
+/** Public deployment-mode and local SQLite entry point for @hasna/emails/storage. */
 export {
   EMAILS_MODE_CONFIG_KEY,
   EMAILS_MODE_ENV,
@@ -9,6 +9,7 @@ export {
   labelForEmailsMode,
   normalizeEmailsMode,
   resolveEmailsMode,
+  resolveEmailsModeSelection,
 } from "./lib/mode.js";
 
 export type {
@@ -17,3 +18,17 @@ export type {
   EmailsModeResolution,
   EmailsModeSource,
 } from "./lib/mode.js";
+
+export {
+  closeDatabase,
+  databaseFileExists,
+  getDatabase,
+  getDatabasePath,
+  isDatabaseOpen,
+  listPartialIdMatches,
+  resetDatabase,
+  resolvePartialId,
+  resolvePartialIdOrThrow,
+  runInTransaction,
+} from "./db/database.js";
+export type { Database } from "./db/database.js";

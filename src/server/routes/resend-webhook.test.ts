@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { closeDatabase, resetDatabase, getDatabase } from "../../db/database.js";
-import { createProvider } from "../../db/providers.js";
-import { listInboundEmails } from "../../db/inbound.js";
+import { createProvider } from "../../db/providers.local.js";
+import { listInboundEmails } from "../../db/inbound.local.js";
 import { handleResendWebhook } from "./resend-webhook.js";
 
 const SECRET = `whsec_${Buffer.from("resend-route-test-secret").toString("base64")}`;

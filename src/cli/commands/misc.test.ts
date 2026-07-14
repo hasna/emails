@@ -1,24 +1,13 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+// Self-hosted-ONLY: the local scheduler/automation store, batch sender and local
+// diagnostics have no /v1 equivalent, so `schedule`/`scheduled`/`scheduler`,
+// `batch` and `doctor` now fail loud with the server-only message (see misc.ts).
+// `completion` stays a pure local command and is the meaningful positive path.
+// No local SQLite exists anymore, so there is no DB/temp-HOME setup here.
+import { describe, expect, it, mock } from "bun:test";
 import { Command } from "commander";
-import { closeDatabase, getDatabase, resetDatabase } from "../../db/database.js";
-import { createProvider } from "../../db/providers.js";
-import { createScheduledEmail, getScheduledEmail } from "../../db/scheduled.js";
-import { listSandboxEmails } from "../../db/sandbox.js";
-import { createTemplate } from "../../db/templates.js";
-import { addStep, createSequence, enroll, listEnrollments } from "../../db/sequences.js";
-import { registerMiscCommands, runSchedulerTick } from "./misc.js";
+import { registerMiscCommands, runSchedulerTick } from "./misc.remote.js";
 
-beforeEach(() => {
-  process.env["EMAILS_DB_PATH"] = ":memory:";
-  resetDatabase();
-});
-
-afterEach(() => {
-  closeDatabase();
-  delete process.env["EMAILS_DB_PATH"];
-});
-
-async function runMiscCommand(args: string[]) {
+async function runMiscCommand(args: string[]): Promise<string> {
   const program = new Command();
   program.exitOverride();
   const consoleLines: string[] = [];
@@ -37,74 +26,88 @@ async function runMiscCommand(args: string[]) {
   return consoleLines.join("\n");
 }
 
-describe("schedule list commands", () => {
-  it("renders scheduled-email summaries without exposing payload bodies", async () => {
-    const db = getDatabase();
-    const provider = createProvider({ name: "list-sandbox", type: "sandbox" }, db);
-    createScheduledEmail({
-      provider_id: provider.id,
-      from_address: "sender@example.com",
-      to_addresses: ["scheduled@example.com"],
-      subject: "Scheduled summary",
-      html: `<p>${"hidden html ".repeat(100)}</p>`,
-      text_body: "hidden text ".repeat(100),
-      attachments_json: [{ filename: "secret.txt", content: "hidden attachment".repeat(50) }],
-      template_vars: { hidden: "hidden template vars".repeat(50) },
-      scheduled_at: "2030-01-01T00:00:00.000Z",
-    }, db);
+async function runMiscCommandExpectingExit(args: string[]): Promise<string> {
+  const program = new Command();
+  program.exitOverride();
+  const errors: string[] = [];
+  const originalError = console.error;
+  const originalExit = process.exit;
+  const errorSpy = mock((msg: unknown) => {
+    errors.push(String(msg));
+  });
+  const exitSpy = mock((code?: number) => {
+    throw new Error(`exit:${code ?? 0}`);
+  });
+  registerMiscCommands(program, () => {});
+  (console as unknown as { error: typeof errorSpy }).error = errorSpy;
+  (process as unknown as { exit: typeof exitSpy }).exit = exitSpy;
+  try {
+    await expect(program.parseAsync(["node", "emails", ...args])).rejects.toThrow("exit:1");
+  } finally {
+    (console as unknown as { error: typeof originalError }).error = originalError;
+    (process as unknown as { exit: typeof originalExit }).exit = originalExit;
+  }
+  return errors.join("\n");
+}
 
-    const output = await runMiscCommand(["schedule", "list", "--limit", "1"]);
+describe("shell completion command", () => {
+  it("prints a bash completion script", async () => {
+    const output = await runMiscCommand(["completion", "bash"]);
+    expect(output).toContain("bash completion for emails");
+    expect(output).toContain("_emails_completion");
+  });
 
-    expect(output).toContain("Scheduled summary");
-    expect(output).toContain("scheduled@example.com");
-    expect(output).not.toContain("hidden html");
-    expect(output).not.toContain("hidden text");
-    expect(output).not.toContain("hidden attachment");
-    expect(output).not.toContain("hidden template vars");
+  it("prints a zsh completion script", async () => {
+    const output = await runMiscCommand(["completion", "zsh"]);
+    expect(output).toContain("#compdef emails");
+  });
+
+  it("prints a fish completion script", async () => {
+    const output = await runMiscCommand(["completion", "fish"]);
+    expect(output).toContain("fish completion for emails");
+  });
+
+  it("rejects an unsupported shell", async () => {
+    const errors = await runMiscCommandExpectingExit(["completion", "powershell"]);
+    expect(errors).toContain("Unsupported shell");
   });
 });
 
-describe("scheduler tick", () => {
-  it("processes scheduled emails and sequence enrollments through one shared tick", async () => {
-    const db = getDatabase();
-    const provider = createProvider({ name: "tick-sandbox", type: "sandbox" }, db);
-    const scheduled = createScheduledEmail({
-      provider_id: provider.id,
-      from_address: "sender@example.com",
-      to_addresses: ["scheduled@example.com"],
-      subject: "Scheduled smoke",
-      text_body: "scheduled body",
-      scheduled_at: "2000-01-01T00:00:00.000Z",
-    }, db);
+describe("verify-email command", () => {
+  it("reports an invalid format without any network lookup", async () => {
+    const output = await runMiscCommand(["verify-email", "not-an-email"]);
+    expect(output).toContain("Invalid email format");
+  });
+});
 
-    createTemplate({
-      name: "tick-template",
-      subject_template: "Welcome {{email}}",
-      text_template: "hello {{email}}",
-    }, db);
-    const sequence = createSequence({ name: "tick-sequence" }, db);
-    addStep({
-      sequence_id: sequence.id,
-      step_number: 1,
-      delay_hours: 0,
-      template_name: "tick-template",
-      from_address: "sender@example.com",
-    }, db);
-    const enrollment = enroll({ sequence_id: sequence.id, contact_email: "sequence@example.com", provider_id: provider.id }, db);
-    db.run("UPDATE sequence_enrollments SET next_send_at = ? WHERE id = ?", ["2000-01-01T00:00:00.000Z", enrollment.id]);
+describe("server-only scheduling, batch and diagnostics commands", () => {
+  const SERVER_ONLY = [
+    { name: "schedule list", args: ["schedule", "list"] },
+    { name: "schedule cancel", args: ["schedule", "cancel", "sched-1"] },
+    { name: "scheduled list", args: ["scheduled", "list"] },
+    { name: "scheduler", args: ["scheduler"] },
+    {
+      name: "batch",
+      args: ["batch", "--csv", "recipients.csv", "--template", "welcome", "--from", "sender@example.com"],
+    },
+    { name: "doctor", args: ["doctor"] },
+    { name: "doctor delivery", args: ["doctor", "delivery", "ops@example.com"] },
+  ] as const;
 
-    const logs: string[] = [];
-    const result = await runSchedulerTick({ scheduledLimit: 10, sequenceLimit: 10, log: (line) => logs.push(line) });
+  for (const { name, args } of SERVER_ONLY) {
+    it(`blocks emails ${name} in the self-hosted client`, async () => {
+      const errors = await runMiscCommandExpectingExit(args as unknown as string[]);
+      expect(errors).toContain(`emails ${name}`);
+      expect(errors).toContain("is not available in the self-hosted client");
+      expect(errors).toContain("it runs on the self-hosted server");
+    });
+  }
+});
 
-    expect(result.scheduled).toMatchObject({ attempted: 1, sent: 1, failed: 0 });
-    expect(result.sequences).toMatchObject({ attempted: 1, sent: 1, failed: 0 });
-    expect(getScheduledEmail(scheduled.id, db)?.status).toBe("sent");
-
-    const subjects = listSandboxEmails(provider.id, 10, db).map((email) => email.subject);
-    expect(subjects).toContain("Scheduled smoke");
-    expect(subjects).toContain("Welcome sequence@example.com");
-    expect(listEnrollments({ sequence_id: sequence.id }, db)[0]?.status).toBe("completed");
-    expect(logs.some((line) => line.includes("Sent scheduled email"))).toBe(true);
-    expect(logs.some((line) => line.includes("Sent sequence step"))).toBe(true);
+describe("runSchedulerTick", () => {
+  it("is server-only in the self-hosted client", async () => {
+    await expect(runSchedulerTick()).rejects.toThrow(
+      "emails schedule run is not available in the self-hosted client; it runs on the self-hosted server.",
+    );
   });
 });

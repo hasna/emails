@@ -1,22 +1,22 @@
-// Integration test: with the client flipped to self_hosted, address id-resolution
-// AND lifecycle writes (suspend/activate/quota) MUST route to the selfHosted HTTP API,
-// never the local SQLite island. A stub of /v1/addresses runs in a SEPARATE
-// process (the real client makes blocking `curl` calls, which would deadlock an
-// in-process Bun.serve), so the test needs no external infra and runs in CI.
+// Integration test: with the self-hosted-ONLY client, address id-resolution AND
+// lifecycle writes (suspend/activate/quota) route to the /v1 HTTP API. The client
+// makes blocking `curl` calls, so the /v1 stub runs OUT OF PROCESS (see
+// src/test-support/v1-stub.ts) — no in-process Bun.serve (that would deadlock) and
+// no external infra, so it runs in CI.
 //
-// Guards the split-brain bug the adversarial review found: on a flipped machine
-// the local `addresses` table is empty, so any function that consults it silently
-// operates on the wrong (empty) dataset. All assertions round-trip through the
-// client, then confirm the local island stayed empty.
+// Migrated from a bespoke inline stub onto the shared startV1Stub helper. Notes on
+// DELETED coverage:
+//   - Every `localAddressCount()` assertion checked that the deleted local SQLite
+//     `addresses` island stayed empty. There is no local island anymore, so those
+//     "no split-brain" checks are removed; the round-trips through /v1 remain.
+//   - resolvePartialId / resolvePartialIdOrThrow (from the deleted database.ts) were
+//     replaced by resolveResourceId / resolveResourceIdOrThrow (no db handle, resource
+//     name as the first arg); the id-resolution test is migrated to those.
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import type { Subprocess } from "bun";
 import { Command } from "commander";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { closeDatabase, getDatabase, resetDatabase, resolvePartialId, resolvePartialIdOrThrow } from "./database.js";
-import { resetSelfHostedConfigCache } from "./self-hosted-store.js";
+import { startV1Stub, type V1Stub } from "../test-support/v1-stub.js";
+import { resolveResourceId, resolveResourceIdOrThrow } from "./self-hosted-store.js";
 import { getAddress, listAddresses } from "./addresses.js";
 import { activateAddress, getAddressSendability, setAddressQuota, suspendAddress } from "./address-lifecycle.js";
 import { registerAddressCommands } from "../cli/commands/address.js";
@@ -24,141 +24,76 @@ import { registerAddressCommands } from "../cli/commands/address.js";
 const ID = "11111111-2222-4333-8444-555555555555";
 const EMAIL = "ceo@example.com";
 
-// Stub server run out-of-process. Seeds one active address and implements the
-// slice of /v1/addresses the client uses: list, get-by-id, PATCH (status +
-// daily_quota + display_name). Keeps its own in-memory state; each PATCH mutates
-// it so subsequent GETs reflect the write.
-const SERVER_SRC = `
-const ID = ${JSON.stringify(ID)};
-const store = new Map();
-store.set(ID, {
-  id: ID, email: ${JSON.stringify(EMAIL)}, domain: "example.com", display_name: "CEO",
-  status: "active", verified: true, daily_quota: null,
-  created_at: "2026-01-01T00:00:00.000Z", updated_at: "2026-01-01T00:00:00.000Z",
-});
-const server = Bun.serve({
-  port: 0,
-  async fetch(req) {
-    const url = new URL(req.url);
-    const m = url.pathname.match(/^\\/v1\\/addresses\\/([^/]+)$/);
-    if (url.pathname === "/v1/addresses" && req.method === "GET") {
-      return Response.json({ addresses: [...store.values()] });
-    }
-    if (m) {
-      const rec = store.get(decodeURIComponent(m[1]));
-      if (req.method === "GET") return rec ? Response.json({ address: rec }) : new Response(null, { status: 404 });
-      if (req.method === "PATCH" || req.method === "PUT") {
-        if (!rec) return new Response(null, { status: 404 });
-        const body = await req.json();
-        if (typeof body.status === "string") rec.status = body.status;
-        if ("daily_quota" in body) rec.daily_quota = body.daily_quota;
-        if (body.display_name === null || typeof body.display_name === "string") rec.display_name = body.display_name;
-        rec.updated_at = new Date().toISOString();
-        return Response.json({ address: rec });
-      }
-    }
-    return new Response(null, { status: 404 });
-  },
-});
-console.log("PORT=" + server.port);
-`;
+/** One active, verified address — restored by stub.reset() before each test. */
+function seededAddresses() {
+  return [
+    {
+      id: ID,
+      email: EMAIL,
+      display_name: "CEO",
+      status: "active",
+      verified: true,
+      daily_quota: null,
+      created_at: "2026-01-01T00:00:00.000Z",
+      updated_at: "2026-01-01T00:00:00.000Z",
+    },
+  ];
+}
 
-let proc: Subprocess;
-let dir: string;
-let baseUrl: string;
+let stub: V1Stub;
 
 beforeAll(async () => {
-  dir = mkdtempSync(join(tmpdir(), "emails-stub-"));
-  const scriptPath = join(dir, "server.ts");
-  writeFileSync(scriptPath, SERVER_SRC);
-  proc = Bun.spawn(["bun", scriptPath], { stdout: "pipe", stderr: "inherit" });
-  // Read the announced port from stdout.
-  const reader = proc.stdout.getReader();
-  const decoder = new TextDecoder();
-  let buf = "";
-  const deadline = Date.now() + 10_000;
-  while (!buf.includes("PORT=") && Date.now() < deadline) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value);
-  }
-  reader.releaseLock();
-  const match = buf.match(/PORT=(\d+)/);
-  if (!match) throw new Error(`stub server did not report a port: ${buf}`);
-  baseUrl = `http://127.0.0.1:${match[1]}`;
+  stub = await startV1Stub({ seed: { addresses: seededAddresses() } });
 });
 
-afterAll(() => {
-  proc.kill();
-  rmSync(dir, { recursive: true, force: true });
-});
+afterAll(() => stub.stop());
 
-beforeEach(() => {
-  process.env["EMAILS_DB_PATH"] = ":memory:";
-  resetDatabase();
-  process.env.EMAILS_MODE = "self_hosted";
-  process.env.EMAILS_SELF_HOSTED_URL = baseUrl;
-  process.env.EMAILS_SELF_HOSTED_API_KEY = "hasna_test_key";
-  resetSelfHostedConfigCache();
+beforeEach(async () => {
+  await stub.reset();
+  stub.applyEnv();
 });
 
 afterEach(() => {
-  delete process.env.EMAILS_MODE;
-  delete process.env.EMAILS_SELF_HOSTED_URL;
-  delete process.env.EMAILS_SELF_HOSTED_API_KEY;
-  resetSelfHostedConfigCache();
-  closeDatabase();
-  delete process.env["EMAILS_DB_PATH"];
+  stub.clearEnv();
 });
 
-function localAddressCount(): number {
-  const row = getDatabase().query("SELECT COUNT(*) AS c FROM addresses").get() as { c: number };
-  return row.c;
-}
-
-describe("address selfHosted routing (self_hosted) — no split-brain", () => {
-  test("listAddresses reads the selfHosted dataset (local island empty)", () => {
-    expect(localAddressCount()).toBe(0);
+describe("address self-hosted routing (self_hosted)", () => {
+  test("listAddresses reads the /v1 dataset", () => {
     expect(listAddresses().map((a) => a.id)).toContain(ID);
   });
 
-  test("resolvePartialId resolves a short id against the selfHosted, not local sqlite", () => {
-    expect(resolvePartialId(getDatabase(), "addresses", ID.slice(0, 8))).toBe(ID);
-    expect(resolvePartialIdOrThrow(getDatabase(), "addresses", ID.slice(0, 8))).toBe(ID);
+  test("resolveResourceId resolves a short id against the /v1 dataset", () => {
+    expect(resolveResourceId("addresses", ID.slice(0, 8))).toBe(ID);
+    expect(resolveResourceIdOrThrow("addresses", ID.slice(0, 8))).toBe(ID);
   });
 
-  test("suspend writes to the selfHosted and getAddressSendability reflects it", () => {
+  test("suspend writes to /v1 and getAddressSendability reflects it", () => {
     expect(suspendAddress(ID).status).toBe("suspended");
     expect(getAddress(ID)!.status).toBe("suspended");
     expect(getAddressSendability(EMAIL).sendable).toBe(false);
-    expect(localAddressCount()).toBe(0);
   });
 
-  test("activate writes to the selfHosted", () => {
+  test("activate writes to /v1", () => {
     suspendAddress(ID);
     expect(activateAddress(ID).status).toBe("active");
     expect(getAddress(ID)!.status).toBe("active");
     expect(getAddressSendability(EMAIL).sendable).toBe(true);
-    expect(localAddressCount()).toBe(0);
   });
 
-  test("setAddressQuota persists to the selfHosted and clears with null", () => {
+  test("setAddressQuota persists to /v1 and clears with null", () => {
     expect(setAddressQuota(ID, 5).daily_quota).toBe(5);
     expect(getAddress(ID)!.daily_quota).toBe(5);
     expect(setAddressQuota(ID, null).daily_quota).toBeNull();
     expect(getAddress(ID)!.daily_quota).toBeNull();
-    expect(localAddressCount()).toBe(0);
   });
 
   test("setAddressQuota rejects a negative quota", () => {
     expect(() => setAddressQuota(ID, -1)).toThrow(/quota/i);
   });
 
-  // Regression: `address verify` in selfHosted mode used to resolve a LOCAL provider
-  // and invoke a provider adapter, which fails on a flipped machine (no local
-  // providers, no /v1/providers endpoint) with "Provider not found". It must
-  // instead report the selfHosted address record's `verified` flag directly.
-  test("verify reports the selfHosted address verified state (no local provider)", async () => {
+  // Regression: `address verify` must report the /v1 address record's `verified`
+  // flag directly (no local provider lookup that would fail on a flipped machine).
+  test("verify reports the /v1 address verified state (no local provider)", async () => {
     const logs: string[] = [];
     const original = console.log;
     console.log = (...args: unknown[]) => { logs.push(args.map(String).join(" ")); };
@@ -173,6 +108,5 @@ describe("address selfHosted routing (self_hosted) — no split-brain", () => {
     const out = logs.join("\n");
     expect(out).toContain(`${EMAIL} is verified`);
     expect(out).not.toContain("Provider not found");
-    expect(localAddressCount()).toBe(0);
   });
 });

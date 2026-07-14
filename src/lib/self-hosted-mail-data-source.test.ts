@@ -6,7 +6,7 @@ import {
 } from "./self-hosted-mail-data-source.js";
 import { resetSelfHostedConfigCache } from "../db/self-hosted-store.js";
 import { resetMailDataSource, resolveMailDataSource } from "./mail-data-source.js";
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -60,8 +60,15 @@ function v1(id: string, over: Record<string, unknown> = {}): Record<string, unkn
   };
 }
 
+function bodyWithHiddenNeedle(needle = "deep-needle"): string {
+  return `${"filler ".repeat(90)}${needle}`;
+}
+
 // A fake self-hosted /v1 serve backed by an in-memory row list.
-function fakeServe(initial: Array<Record<string, unknown>>): { fetchImpl: SelfHostedFetch; rows: Map<string, Record<string, unknown>>; posted: unknown[]; deleted: string[]; requests: string[] } {
+function fakeServe(
+  initial: Array<Record<string, unknown>>,
+  options: { ignoreListFilters?: boolean; leanList?: boolean } = {},
+): { fetchImpl: SelfHostedFetch; rows: Map<string, Record<string, unknown>>; posted: unknown[]; deleted: string[]; requests: string[] } {
   const rows = new Map(initial.map((r) => [r["id"] as string, r]));
   const posted: unknown[] = [];
   const deleted: string[] = [];
@@ -71,22 +78,45 @@ function fakeServe(initial: Array<Record<string, unknown>>): { fetchImpl: SelfHo
     const method = (init.method ?? "GET").toUpperCase();
     requests.push(`${method} ${u.pathname}${u.search}`);
     const ok = (body: unknown, status = 200) => ({ status, async text() { return JSON.stringify(body); } });
+    const includes = (value: unknown, query: string | null): boolean =>
+      !query || String(value ?? "").toLowerCase().includes(query.toLowerCase());
     const list = () => {
       let ordered = [...rows.values()].sort((a, b) =>
         String(b["received_at"]).localeCompare(String(a["received_at"])));
-      const direction = u.searchParams.get("direction");
-      if (direction) ordered = ordered.filter((row) => String(row["direction"] ?? "").toLowerCase() === direction);
-      const since = u.searchParams.get("since");
-      if (since) {
-        const cutoff = Date.parse(since);
-        ordered = ordered.filter((row) => {
-          const time = Date.parse(String(row["received_at"] ?? row["created_at"] ?? ""));
-          return Number.isFinite(time) && time >= cutoff;
-        });
+      if (!options.ignoreListFilters) {
+        const direction = u.searchParams.get("direction");
+        if (direction) ordered = ordered.filter((row) => String(row["direction"] ?? "").toLowerCase() === direction);
+        const to = u.searchParams.get("to");
+        if (to) ordered = ordered.filter((row) => String(row["to_addrs"] ?? "").toLowerCase().includes(to.toLowerCase()));
+        ordered = ordered.filter((row) => includes(row["from_addr"], u.searchParams.get("from")));
+        ordered = ordered.filter((row) => includes(row["subject"], u.searchParams.get("subject")));
+        const search = u.searchParams.get("search");
+        if (search) {
+          ordered = ordered.filter((row) => {
+            const hay = [row["from_addr"], row["to_addrs"], row["subject"], row["body_text"]].join(" ").toLowerCase();
+            return hay.includes(search.toLowerCase());
+          });
+        }
+        const since = u.searchParams.get("since");
+        if (since) {
+          const cutoff = Date.parse(since);
+          ordered = ordered.filter((row) => {
+            const time = Date.parse(String(row["received_at"] ?? row["created_at"] ?? ""));
+            return Number.isFinite(time) && time >= cutoff;
+          });
+        }
       }
       const limit = Number(u.searchParams.get("limit") ?? "500");
       const offset = Number(u.searchParams.get("offset") ?? "0");
-      return ordered.slice(offset, offset + limit);
+      const page = ordered.slice(offset, offset + limit);
+      if (!options.leanList) return page;
+      return page.map((row) => {
+        const { body_text: bodyText, body_html: _bodyHtml, ...summary } = row;
+        return {
+          ...summary,
+          snippet: typeof bodyText === "string" ? bodyText.replace(/\s+/g, " ").trim().slice(0, 500) : null,
+        };
+      });
     };
     const counts = () => {
       const messages = [...rows.values()];
@@ -142,7 +172,15 @@ function fakeServe(initial: Array<Record<string, unknown>>): { fetchImpl: SelfHo
     }
     if (idMatch) {
       const id = decodeURIComponent(idMatch[1]!);
-      if (method === "GET") return rows.has(id) ? ok({ message: rows.get(id) }) : ok({ error: "not found" }, 404);
+      if (method === "GET") {
+        // Mirror the real server: an id may be a PREFIX. Exact id wins; else a
+        // unique startsWith match resolves; multiple -> 409; none -> 404.
+        if (rows.has(id)) return ok({ message: rows.get(id) });
+        const prefixed = [...rows.keys()].filter((key) => key.startsWith(id));
+        if (prefixed.length > 1) return ok({ error: "ambiguous message id prefix", reason: "ambiguous_id" }, 409);
+        if (prefixed.length === 1) return ok({ message: rows.get(prefixed[0]!) });
+        return ok({ error: "not found" }, 404);
+      }
       if (method === "DELETE") { const had = rows.delete(id); deleted.push(id); return had ? ok({ deleted: true }) : ok({ error: "not found" }, 404); }
       if (method === "PATCH") {
         const row = rows.get(id);
@@ -170,8 +208,11 @@ function fakeServe(initial: Array<Record<string, unknown>>): { fetchImpl: SelfHo
   return { fetchImpl, rows, posted, deleted, requests };
 }
 
-function make(rows: Array<Record<string, unknown>>): { ds: SelfHostedMailDataSource; serve: ReturnType<typeof fakeServe> } {
-  const serve = fakeServe(rows);
+function make(
+  rows: Array<Record<string, unknown>>,
+  options?: { ignoreListFilters?: boolean; leanList?: boolean },
+): { ds: SelfHostedMailDataSource; serve: ReturnType<typeof fakeServe> } {
+  const serve = fakeServe(rows, options);
   const ds = new SelfHostedMailDataSource({ baseUrl: "https://emails.example/v1", apiKey: "test-key", fetchImpl: serve.fetchImpl });
   return { ds, serve };
 }
@@ -237,11 +278,72 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
   });
 
   it("filters the unread folder and honors a substring search", async () => {
-    const { ds } = make([v1("2", { is_read: true }), v1("5"), v1("3", { subject: "Oana friend suggestion" })]);
+    const { ds, serve } = make([v1("2", { is_read: true }), v1("5"), v1("3", { subject: "Oana friend suggestion" })]);
     const unread = await ds.listMailbox("unread");
     expect(unread.map((m) => m.id).sort()).toEqual(["3", "5"]);
     const hits = await ds.listMailbox("inbox", { search: "oana" });
     expect(hits.map((m) => m.id)).toEqual(["3"]);
+    expect(serve.requests).toContain("GET /v1/messages?limit=200&offset=0&direction=inbound&search=oana");
+  });
+
+  it("locally verifies server-returned rows when a stale server ignores filters", async () => {
+    const { ds, serve } = make([
+      v1("wrong-to", { to_addrs: ["other@example.com"], subject: "needle", received_at: "2026-07-13T12:00:00.000Z" }),
+      v1("wrong-search", { to_addrs: ["target@example.com"], subject: "other", body_text: "other", received_at: "2026-07-13T11:00:00.000Z" }),
+      v1("match", { to_addrs: ["target@example.com"], subject: "needle", body_text: "body", received_at: "2026-07-13T10:00:00.000Z" }),
+      v1("old", { to_addrs: ["target@example.com"], subject: "needle", body_text: "body", received_at: "2026-07-10T10:00:00.000Z" }),
+    ], { ignoreListFilters: true });
+
+    const hits = await ds.listMailbox("inbox", {
+      source: { address: "target@example.com" },
+      search: "needle",
+      since: "2026-07-12T00:00:00.000Z",
+    });
+
+    expect(hits.map((m) => m.id)).toEqual(["match"]);
+    expect(serve.requests).toContain("GET /v1/messages?limit=200&offset=0&direction=inbound&since=2026-07-12T00%3A00%3A00.000Z&to=target%40example.com&search=needle");
+  });
+
+  it("hydrates lean rows before rejecting body-only search matches with label filters", async () => {
+    const { ds, serve } = make([
+      v1("body-only", {
+        subject: "No visible match",
+        body_text: bodyWithHiddenNeedle(),
+        labels: ["case"],
+        received_at: "2026-07-13T10:00:00.000Z",
+      }),
+      v1("other", {
+        subject: "Other",
+        body_text: "no match here",
+        labels: ["case"],
+        received_at: "2026-07-13T11:00:00.000Z",
+      }),
+    ], { leanList: true });
+
+    const hits = await ds.listMailbox("inbox", { label: "case", search: "deep-needle" });
+
+    expect(hits.map((m) => m.id)).toEqual(["body-only"]);
+    expect(serve.requests).toContain("GET /v1/messages/body-only");
+  });
+
+  it("hydrates lean rows before rejecting body-only search matches on oldest scans", async () => {
+    const { ds, serve } = make([
+      v1("newer", {
+        subject: "Newer",
+        body_text: "no match here",
+        received_at: "2026-07-13T11:00:00.000Z",
+      }),
+      v1("older-body-only", {
+        subject: "Older",
+        body_text: bodyWithHiddenNeedle("oldest-needle"),
+        received_at: "2026-07-13T10:00:00.000Z",
+      }),
+    ], { leanList: true });
+
+    const hits = await ds.listMailbox("inbox", { sort: "oldest", search: "oldest-needle" });
+
+    expect(hits.map((m) => m.id)).toEqual(["older-body-only"]);
+    expect(serve.requests).toContain("GET /v1/messages/older-body-only");
   });
 
   it("separates sent (outbound) from inbox", async () => {
@@ -293,6 +395,23 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     expect(serve.requests).toEqual(["GET /v1/messages/counts"]);
   });
 
+  it("uses source-filtered reads for mailbox counts instead of a global scan", async () => {
+    const { ds, serve } = make([
+      v1("in", { to_addrs: ["target@example.com"] }),
+      v1("sent-from", { direction: "outbound", from_addr: "target@example.com", to_addrs: ["client@example.com"] }),
+      v1("sent-to", { direction: "outbound", from_addr: "me@example.com", to_addrs: ["target@example.com"] }),
+      v1("other", { to_addrs: ["other@example.com"] }),
+    ]);
+
+    const counts = await ds.mailboxCounts({ source: { address: "target@example.com" } });
+
+    expect(counts).toMatchObject({ inbox: 1, sent: 2 });
+    expect(serve.requests.filter((request) => request.startsWith("GET /v1/messages?"))).toEqual([
+      "GET /v1/messages?limit=500&offset=0&to=target%40example.com",
+      "GET /v1/messages?limit=500&offset=0&from=target%40example.com",
+    ]);
+  });
+
   it("reports self-hosted source totals as received mail, not global sent+received totals", async () => {
     const { ds } = make([
       v1("1"),
@@ -308,11 +427,65 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     });
   });
 
-  it("resolves a full id verbatim and a unique prefix by scan", async () => {
+  it("resolves a full id verbatim with NO request", async () => {
     const full = "31f40200-dc2c-48ba-a348-ed7d4414381e";
-    const { ds } = make([v1("2"), { ...v1("9"), id: full }]);
+    const { ds, serve } = make([v1("2"), { ...v1("9"), id: full }]);
     expect(await ds.resolveId(full)).toBe(full);
+    expect(await ds.resolveId(`legacy-inbound:${full}`)).toBe(`legacy-inbound:${full}`);
+    // A full id never touches the network.
+    expect(serve.requests).toEqual([]);
+  });
+
+  it("resolves a unique prefix with ONE server GET and NEVER scans the inbox", async () => {
+    const full = "31f40200-dc2c-48ba-a348-ed7d4414381e";
+    // Many rows so a scanAll() (the old behavior) would be obvious as a page fetch.
+    const rows = Array.from({ length: 40 }, (_, i) => v1(String(i + 10)));
+    const { ds, serve } = make([...rows, { ...v1("9"), id: full }]);
     expect(await ds.resolveId("31f40200")).toBe(full);
+    // Exactly one GET, and it is the by-id prefix lookup — no `?limit=…&offset=…`
+    // list page was ever fetched (the whole-inbox scan is gone).
+    expect(serve.requests).toEqual(["GET /v1/messages/31f40200"]);
+    expect(serve.requests.some((r) => r.startsWith("GET /v1/messages?"))).toBe(false);
+  });
+
+  it("resolveId of an unknown prefix does ONE GET and hands back the input (clean 404)", async () => {
+    const { ds, serve } = make([v1("2"), v1("5")]);
+    expect(await ds.resolveId("deadbeef")).toBe("deadbeef");
+    expect(serve.requests).toEqual(["GET /v1/messages/deadbeef"]);
+  });
+
+  it("resolveId throws a clear error when a prefix is ambiguous (server 409)", async () => {
+    const { ds } = make([{ ...v1("2"), id: "abc11111" }, { ...v1("5"), id: "abc22222" }]);
+    await expect(ds.resolveId("abc")).rejects.toThrow(/Ambiguous email id prefix/);
+  });
+
+  it("getMessageWithBody fetches the message AND body in a SINGLE round-trip", async () => {
+    const { ds, serve } = make([v1("5", { body_text: "hello world", cc_addrs: ["cc@x.com"] })]);
+    const result = await ds.getMessageWithBody("5");
+    expect(result?.msg.subject).toBe("subject 5");
+    expect(result?.body.text).toBe("hello world");
+    expect(result?.body.cc).toBe("cc@x.com");
+    // One and only one row read — not getMessage()+getMessageBody() (two).
+    expect(serve.requests).toEqual(["GET /v1/messages/5"]);
+  });
+
+  it("getMessageWithBody resolves a short id prefix and returns null on no match", async () => {
+    const full = "aa11bb22-cc33-dd44-ee55-ff6600112233";
+    const { ds } = make([{ ...v1("9"), id: full, body_text: "prefixed body" }]);
+    const hit = await ds.getMessageWithBody("aa11bb22");
+    expect(hit?.msg.id).toBe(full);
+    expect(hit?.body.text).toBe("prefixed body");
+    expect(await ds.getMessageWithBody("nomatch0")).toBeNull();
+  });
+
+  it("reads provider-prefixed full ids directly without a resolving scan", async () => {
+    const prefixed = "legacy-inbound:31f40200-dc2c-48ba-a348-ed7d4414381e";
+    const { ds, serve } = make([{ ...v1("9"), id: prefixed, subject: "prefixed direct" }]);
+
+    expect((await ds.getMessage(prefixed))?.subject).toBe("prefixed direct");
+    expect(serve.requests).toEqual([
+      "GET /v1/messages/legacy-inbound%3A31f40200-dc2c-48ba-a348-ed7d4414381e",
+    ]);
   });
 
   it("gets a message + body by id", async () => {
@@ -335,12 +508,49 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
   });
 
   it("returns verification candidates scoped to the recipient address", async () => {
-    const { ds } = make([
+    const { ds, serve } = make([
       v1("2", { to_addrs: ["andrei@hasna.com"], subject: "code 123456" }),
       v1("3", { to_addrs: ["other@hasna.com"], subject: "nope" }),
     ]);
     const cands = await ds.verificationCandidates("andrei@hasna.com");
     expect(cands.map((c) => c.id)).toEqual(["2"]);
+    expect(serve.requests).toContain("GET /v1/messages?limit=50&offset=0&direction=inbound&to=andrei%40hasna.com");
+  });
+
+  it("pushes verification sender and subject filters to the self-hosted server", async () => {
+    const { ds, serve } = make([
+      v1("2", { from_addr: "ChatGPT <noreply@tm.openai.com>", to_addrs: ["andrei@hasna.com"], subject: "Your ChatGPT code", body_text: "code 123456" }),
+      v1("3", { from_addr: "Other <nope@example.com>", to_addrs: ["andrei@hasna.com"], subject: "Your ChatGPT code", body_text: "code 999999" }),
+    ]);
+    const latest = await ds.findLatest("andrei@hasna.com", { from: "openai", subject: "ChatGPT" });
+    expect(latest?.email.id).toBe("2");
+    expect(serve.requests).toContain("GET /v1/messages?limit=50&offset=0&direction=inbound&to=andrei%40hasna.com&from=openai&subject=ChatGPT");
+  });
+
+  it("fetches message detail for verification bodies when list rows are lean", async () => {
+    const { ds, serve } = make([
+      v1("2", { from_addr: "ChatGPT <noreply@tm.openai.com>", to_addrs: ["andrei@hasna.com"], subject: "Your ChatGPT code", body_text: "code 123456", body_html: "<p>code 123456</p>" }),
+    ], { leanList: true });
+
+    const latest = await ds.findLatest("andrei@hasna.com", { from: "openai", subject: "ChatGPT" });
+
+    expect(latest?.code).toBe("123456");
+    expect(serve.requests).toContain("GET /v1/messages?limit=50&offset=0&direction=inbound&to=andrei%40hasna.com&from=openai&subject=ChatGPT");
+    expect(serve.requests).toContain("GET /v1/messages/2");
+  });
+
+  it("locally verifies verification filters when a stale server ignores them", async () => {
+    const { ds, serve } = make([
+      v1("newer-wrong-subject", { from_addr: "ChatGPT <noreply@tm.openai.com>", to_addrs: ["andrei@hasna.com"], subject: "Marketing", body_text: "code 999999", received_at: "2026-07-13T12:00:00.000Z" }),
+      v1("right", { from_addr: "ChatGPT <noreply@tm.openai.com>", to_addrs: ["andrei@hasna.com"], subject: "Your ChatGPT code", body_text: "code 123456", received_at: "2026-07-13T11:00:00.000Z" }),
+      v1("wrong-to", { from_addr: "ChatGPT <noreply@tm.openai.com>", to_addrs: ["other@hasna.com"], subject: "Your ChatGPT code", body_text: "code 111111", received_at: "2026-07-13T10:00:00.000Z" }),
+    ], { ignoreListFilters: true });
+
+    const latest = await ds.findLatest("andrei@hasna.com", { from: "openai", subject: "ChatGPT" });
+
+    expect(latest?.email.id).toBe("right");
+    expect(latest?.code).toBe("123456");
+    expect(serve.requests).toContain("GET /v1/messages?limit=50&offset=0&direction=inbound&to=andrei%40hasna.com&from=openai&subject=ChatGPT");
   });
 
   it("persists mailbox mutations through the self-hosted serve", async () => {
@@ -370,24 +580,25 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     expect(serve.posted).toHaveLength(0);
   });
 
-  it("retrieves attachments into a hashed, traversal-safe directory with mode 0600", async () => {
+  it("keeps self-hosted attachment access metadata-only without local writes", async () => {
     const home = mkdtempSync(join(tmpdir(), "emails-attachment-test-"));
     const previousHome = process.env["HOME"];
     process.env["HOME"] = home;
     try {
       const id = "..%2F..%2Foperator-secret";
-      const { ds } = make([v1(id, {
+      const { ds, serve } = make([v1(id, {
         attachments: [{ filename: "../../secret.txt", content_type: "text/plain", size: 5 }],
         _attachment_contents: [Buffer.from("hello").toString("base64")],
       })]);
+      const msg = await ds.getMessage(id);
+      const body = await ds.getMessageBody(msg!);
       const paths = await ds.getAttachmentPaths(id);
-      expect(paths).toHaveLength(1);
-      const localPath = paths[0]!.local_path;
-      expect(localPath.startsWith(join(home, ".hasna", "emails", "attachments", "self-hosted"))).toBe(true);
-      expect(localPath).not.toContain("operator-secret");
-      expect(localPath).not.toContain("../");
-      expect(readFileSync(localPath, "utf8")).toBe("hello");
-      expect(statSync(localPath).mode & 0o777).toBe(0o600);
+      expect(body?.attachments).toEqual([{ filename: "../../secret.txt", content_type: "text/plain", size: 5 }]);
+      expect(paths).toEqual([{ filename: "../../secret.txt", content_type: "text/plain", size: 5 }]);
+      expect(paths[0]!.local_path).toBeUndefined();
+      expect(paths[0]!.s3_url).toBeUndefined();
+      expect(serve.requests.some((request) => request.includes("/attachments/"))).toBe(false);
+      expect(existsSync(join(home, ".hasna"))).toBe(false);
     } finally {
       if (previousHome === undefined) delete process.env["HOME"];
       else process.env["HOME"] = previousHome;
@@ -436,7 +647,7 @@ describe("resolveMailDataSource — self-hosted seam selection", () => {
     expect(resolveSelfHostedMailDataSource()).toBeInstanceOf(SelfHostedMailDataSource);
   });
 
-  it("does not infer self_hosted from credentials when mode is local", () => {
+  it("does not construct a self-hosted client while local mode is selected", () => {
     process.env["EMAILS_MODE"] = "local";
     resetSelfHostedConfigCache();
     resetMailDataSource();

@@ -1,15 +1,17 @@
-import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+// Self-hosted-ONLY: the domain repo routes every read/write to `/v1/domains`
+// (and providers to `/v1/providers`), so these tests drive the REAL command
+// against an out-of-process /v1 stub (see src/test-support/v1-stub.ts). The
+// deleted `../../db/database.js` and all local-SQLite seeding are gone.
+//
+// What is covered here (command-level behaviour on top of /v1):
+//   - `domain add` / `domains add` dry-run planning (no mutation)
+//   - `domain buy` Route 53 contact normalization (pure @hasna/domains, mocked)
+//   - `domain list` and `domain usable` pagination/filtering over /v1
+//   - `domain move-provider` writing through /v1 (server owns address moves)
+//   - the previously-local commands that now fail loud (server-owned)
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
 import { Command } from "commander";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { closeDatabase, getDatabase, resetDatabase } from "../../db/database.js";
-import { createAddress, getAddress } from "../../db/addresses.js";
-import { createDomain, getDomain, getDomainByName, listDomains, updateDnsStatus, updateDomainReadiness } from "../../db/domains.js";
-import { createProvider } from "../../db/providers.js";
-import { getDomainProvisioning, setDomainProvisioning } from "../../db/provisioning.js";
-import { createWarmingSchedule } from "../../db/warming.js";
-import { registerS3Source } from "../../lib/s3-sync.js";
+import { startV1Stub, type V1Stub } from "../../test-support/v1-stub.js";
 import { registerDomainCommands } from "./domain.js";
 
 const mockR53CheckAvailability = mock(async (domain: string) => ({
@@ -19,26 +21,13 @@ const mockR53CheckAvailability = mock(async (domain: string) => ({
   currency: "USD",
 }));
 const mockR53RegisterDomain = mock(async () => ({ operationId: "op-123" }));
-const mockR53GetRegistrationStatus = mock(async () => ({ status: "PENDING" }));
-const mockR53ListRegisteredDomains = mock(async () => []);
-const mockR53CreateHostedZone = mock(async (domain: string) => ({
-  id: "zone-123",
-  name: domain,
-  record_count: 0,
-  name_servers: ["ns1.example.net"],
-}));
-const mockR53FindHostedZoneByDomain = mock(async () => null);
-const mockR53UpsertRecords = mock(async () => undefined);
 
 mock.module("@hasna/domains", () => ({
   r53CheckAvailability: mockR53CheckAvailability,
   r53RegisterDomain: mockR53RegisterDomain,
-  r53GetRegistrationStatus: mockR53GetRegistrationStatus,
-  r53ListRegisteredDomains: mockR53ListRegisteredDomains,
-  r53CreateHostedZone: mockR53CreateHostedZone,
-  r53FindHostedZoneByDomain: mockR53FindHostedZoneByDomain,
-  r53UpsertRecords: mockR53UpsertRecords,
 }));
+
+let stub: V1Stub;
 
 async function runDomainCommand(args: string[]) {
   const program = new Command();
@@ -53,10 +42,33 @@ async function runDomainCommand(args: string[]) {
   return { data, out: out.join("\n") };
 }
 
-beforeEach(() => {
-  process.env["EMAILS_DB_PATH"] = ":memory:";
-  process.env["EMAILS_MODE"] = "local";
-  resetDatabase();
+// Server-owned subcommands call handleError() -> console.error + process.exit(1).
+async function runDomainCommandExpectingExit(args: string[]) {
+  const originalExit = process.exit;
+  const originalError = console.error;
+  const errors: string[] = [];
+  console.error = ((message?: unknown) => { errors.push(String(message ?? "")); }) as typeof console.error;
+  process.exit = ((code?: number) => {
+    throw new Error(`process.exit:${code ?? 0}`);
+  }) as typeof process.exit;
+  try {
+    await runDomainCommand(args);
+    throw new Error("Expected command to exit");
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e), stderr: errors.join("\n") };
+  } finally {
+    process.exit = originalExit;
+    console.error = originalError;
+  }
+}
+
+beforeAll(async () => {
+  stub = await startV1Stub();
+});
+afterAll(() => stub.stop());
+beforeEach(async () => {
+  await stub.reset();
+  stub.applyEnv();
   mockR53CheckAvailability.mockReset();
   mockR53CheckAvailability.mockImplementation(async (domain: string) => ({
     domain,
@@ -66,43 +78,22 @@ beforeEach(() => {
   }));
   mockR53RegisterDomain.mockReset();
   mockR53RegisterDomain.mockImplementation(async () => ({ operationId: "op-123" }));
-  mockR53GetRegistrationStatus.mockReset();
-  mockR53GetRegistrationStatus.mockImplementation(async () => ({ status: "PENDING" }));
-  mockR53ListRegisteredDomains.mockReset();
-  mockR53ListRegisteredDomains.mockImplementation(async () => []);
-  mockR53CreateHostedZone.mockReset();
-  mockR53CreateHostedZone.mockImplementation(async (domain: string) => ({
-    id: "zone-123",
-    name: domain,
-    record_count: 0,
-    name_servers: ["ns1.example.net"],
-  }));
-  mockR53FindHostedZoneByDomain.mockReset();
-  mockR53FindHostedZoneByDomain.mockImplementation(async () => null);
-  mockR53UpsertRecords.mockReset();
-  mockR53UpsertRecords.mockImplementation(async () => undefined);
 });
-
-afterEach(() => {
-  closeDatabase();
-  delete process.env["EMAILS_DB_PATH"];
-  delete process.env["EMAILS_MODE"];
-});
+afterEach(() => stub.clearEnv());
 
 describe("domain add command", () => {
   it("supports dry-run without mutating domain state", async () => {
-    const provider = createProvider({ name: "sandbox", type: "sandbox" });
-
-    const result = await runDomainCommand(["domain", "add", "example.com", "--provider", provider.id, "--dry-run"]);
+    const result = await runDomainCommand(["domain", "add", "example.com", "--provider", "sandbox", "--dry-run"]);
 
     expect(result.data).toMatchObject({
       dry_run: true,
       domain: "example.com",
-      provider_id: provider.id,
+      provider_id: "sandbox",
       would_create_domain: true,
-      would_call_provider: true,
+      // The self-hosted client never calls a provider adapter — the /v1 API owns creation.
+      would_call_provider: false,
     });
-    expect(listDomains(undefined, getDatabase())).toHaveLength(0);
+    expect(await stub.list("domains")).toHaveLength(0);
   });
 });
 
@@ -158,21 +149,25 @@ describe("domain buy command", () => {
 });
 
 describe("domain list command", () => {
-  it("paginates domain output", async () => {
-    const provider = createProvider({ name: "sandbox", type: "sandbox" });
-    const db = getDatabase();
-    for (let i = 1; i <= 4; i++) {
-      const domain = createDomain(provider.id, `domain-${i}.example.com`);
-      db.run("UPDATE domains SET created_at = ? WHERE id = ?", [`2026-01-0${i} 00:00:00`, domain.id]);
-    }
+  it("paginates domain output from /v1", async () => {
+    await stub.seed({
+      domains: [1, 2, 3, 4].map((i) => ({
+        id: `dom-${i}`,
+        domain: `domain-${i}.example.com`,
+        provider: "sandbox",
+        verified: false,
+        created_at: `2026-01-0${i}T00:00:00.000Z`,
+      })),
+    });
 
     const result = await runDomainCommand([
       "domain", "list",
-      "--provider", provider.id,
+      "--provider", "sandbox",
       "--limit", "2",
       "--offset", "1",
     ]);
 
+    // Newest-first ordering: 4, 3, 2, 1 -> offset 1, limit 2 -> 3, 2.
     expect(result.out).toContain("domain-3.example.com");
     expect(result.out).toContain("domain-2.example.com");
     expect(result.out).not.toContain("domain-4.example.com");
@@ -184,59 +179,10 @@ describe("domain list command", () => {
 });
 
 describe("domains lifecycle commands", () => {
-  it("lists domains with stable lifecycle JSON fields", async () => {
-    const provider = createProvider({ name: "sandbox", type: "sandbox" });
-    createDomain(provider.id, "example.com");
-
-    const result = await runDomainCommand(["domains", "list"]);
-
-    expect(result.out).toContain("Source");
-    expect(result.data).toMatchObject([
-      {
-        domain: "example.com",
-        mode: "local",
-        source_of_truth: "local",
-        domain_type: "self_hosted",
-        provider: { id: provider.id, name: "sandbox", type: "sandbox" },
-        ownership_status: "pending",
-        inbound_status: "pending",
-        outbound_status: "pending",
-        readiness: {
-          inbound_ready: false,
-          outbound_ready: false,
-        },
-      },
-    ]);
-  });
-
-  it("shows a single domain lifecycle status with missing requirements and next actions", async () => {
-    const provider = createProvider({ name: "sandbox", type: "sandbox" });
-    createDomain(provider.id, "example.com");
-
-    const result = await runDomainCommand(["domains", "status", "example.com"]);
-
-    expect(result.out).toContain("Source of truth");
-    expect(result.data).toMatchObject({
-      domain: "example.com",
-      mode: "local",
-      source_of_truth: "local",
-      missing_requirements: expect.arrayContaining([
-        "domain ownership is not verified",
-        "outbound sending is not enabled",
-      ]),
-      next_actions: expect.arrayContaining([
-        "emails domains dns example.com",
-        "emails domains verify example.com",
-      ]),
-    });
-  });
-
   it("supports plural add dry-run without mutating state", async () => {
-    const provider = createProvider({ name: "sandbox", type: "sandbox" });
-
     const result = await runDomainCommand([
       "domains", "add", "example.com",
-      "--provider", provider.id,
+      "--provider", "sandbox",
       "--source-of-truth", "postgres",
       "--dry-run",
     ]);
@@ -244,265 +190,77 @@ describe("domains lifecycle commands", () => {
     expect(result.data).toMatchObject({
       dry_run: true,
       domain: "example.com",
-      provider: { id: provider.id, name: "sandbox" },
+      provider_id: "sandbox",
       source_of_truth: "postgres",
       would_create_domain: true,
-      cli_equivalent: `emails domains add example.com --provider ${provider.id}`,
+      cli_equivalent: "emails domains add example.com --provider sandbox",
     });
-    expect(listDomains(undefined, getDatabase())).toHaveLength(0);
+    expect(await stub.list("domains")).toHaveLength(0);
   });
 
-  it("connects an owned domain with DNS tasks and lifecycle readiness", async () => {
-    const provider = createProvider({ name: "sandbox", type: "sandbox" });
-
-    const dryRun = await runDomainCommand([
-      "domains", "connect", "owned.example.com",
-      "--provider", provider.id,
-      "--source-of-truth", "postgres",
-      "--dns-provider", "cloudflare",
-      "--dry-run",
-    ]);
-
-    expect(dryRun.data).toMatchObject({
-      dry_run: true,
-      domain: "owned.example.com",
-      would_create_domain: true,
-      dns_provider: "cloudflare",
-      dns_tasks: expect.arrayContaining([
-        expect.objectContaining({ purpose: "SPF", check_command: "emails domain check owned.example.com" }),
-        expect.objectContaining({ purpose: "DMARC", verify_command: "emails domain verify owned.example.com" }),
-      ]),
-    });
-    expect(listDomains(undefined, getDatabase())).toHaveLength(0);
-
-    const connected = await runDomainCommand([
-      "domains", "connect", "owned.example.com",
-      "--provider", provider.id,
-      "--source-of-truth", "postgres",
-      "--dns-provider", "cloudflare",
-      "--no-register-provider",
-    ]);
-
-    expect(connected.data).toMatchObject({
-      domain: "owned.example.com",
-      created: true,
-      registered_with_provider: false,
-      source_of_truth: "postgres",
-      domain_type: "self_hosted",
-      dns_provider: "cloudflare",
-      dns_tasks: expect.arrayContaining([
-        expect.objectContaining({ purpose: "SPF", name: "owned.example.com" }),
-        expect.objectContaining({ purpose: "DMARC", name: "_dmarc.owned.example.com" }),
-      ]),
-      lifecycle: {
-        domain: "owned.example.com",
-        readiness: {
-          send_ready: false,
-          receive_ready: false,
-        },
-        next_actions: expect.arrayContaining([
-          "emails domains dns owned.example.com",
-          "emails domains verify owned.example.com",
-        ]),
-      },
-    });
-
-    const domain = getDomainByName(provider.id, "owned.example.com", getDatabase());
-    expect(domain).toMatchObject({
-      source_of_truth: "postgres",
-      domain_type: "self_hosted",
-      dns_records: {
-        dns_provider: "cloudflare",
-        expected_records: expect.any(Array),
-      },
-      provider_metadata: {
-        dns_setup: {
-          dns_provider: "cloudflare",
-          register_provider: false,
-        },
-      },
-    });
-    expect(getDomainProvisioning(domain!.id, getDatabase())).toMatchObject({
-      provisioning_status: "registered",
-      dns_provider: "cloudflare",
-      send_provider: "sandbox",
-    });
-  });
-
-  it("enables and disables per-domain inbound/outbound lifecycle states", async () => {
-    const provider = createProvider({ name: "ses-main", type: "ses", region: "us-east-1" });
-    const domain = createDomain(provider.id, "ready.example.com");
-    updateDnsStatus(domain.id, "verified", "verified", "verified");
-    setDomainProvisioning(domain.id, { provisioning_status: "ready", send_provider: "ses" });
-
-    const inbound = await runDomainCommand(["domains", "enable-inbound", "ready.example.com"]);
-    expect(inbound.data).toMatchObject({
-      domain: "ready.example.com",
-      inbound_status: "ready",
-      readiness: { inbound_ready: true },
-    });
-
-    const outbound = await runDomainCommand(["domains", "enable-outbound", "ready.example.com"]);
-    expect(outbound.data).toMatchObject({
-      domain: "ready.example.com",
-      outbound_status: "ready",
-      monitoring_status: "monitoring",
-      readiness: { outbound_ready: true },
-    });
-
-    const disabled = await runDomainCommand(["domains", "disable-outbound", "ready.example.com"]);
-    expect(disabled.data).toMatchObject({
-      domain: "ready.example.com",
-      outbound_status: "disabled",
-      readiness: { restricted: true },
-    });
-    expect(getDomain(domain.id, getDatabase())).toMatchObject({
-      inbound_status: "ready",
-      outbound_status: "disabled",
-    });
-  });
-
-  it("requires self-hosted domains to have SES/S3 source evidence before receive-ready status", async () => {
-    const previousHome = process.env["HOME"];
-    const tmpHome = mkdtempSync(join(tmpdir(), "emails-domain-test-"));
-    process.env["HOME"] = tmpHome;
-    try {
-      const provider = createProvider({ name: "ses-main", type: "ses", region: "us-east-1" });
-      const domain = createDomain(provider.id, "selfhosted.example.com");
-      updateDnsStatus(domain.id, "verified", "verified", "pending");
-      updateDomainReadiness(domain.id, {
-        source_of_truth: "postgres",
-        ownership_status: "verified",
-      });
-      setDomainProvisioning(domain.id, { provisioning_status: "ready", send_provider: "ses" });
-
-      const withoutSource = await runDomainCommand(["domains", "status", "selfhosted.example.com"]);
-      expect(withoutSource.data).toMatchObject({
-        domain: "selfhosted.example.com",
-        readiness: {
-          inbound_ready: false,
-          receive_ready: false,
-          inbound_evidence_ready: false,
-        },
-      });
-
-      const forcedWithoutSource = await runDomainCommand(["domains", "enable-inbound", "selfhosted.example.com", "--force"]);
-      expect(forcedWithoutSource.data).toMatchObject({
-        domain: "selfhosted.example.com",
-        inbound_status: "ready",
-        readiness: {
-          inbound_ready: false,
-          receive_ready: false,
-          inbound_evidence_ready: false,
-        },
-      });
-
-      registerS3Source({
-        bucket: "self-hosted-inbound",
-        prefix: "inbound/selfhosted.example.com/",
-        region: "us-east-1",
-        providerId: provider.id,
-        status: "live",
-        liveSyncEnabled: true,
-      });
-      const enabled = await runDomainCommand(["domains", "enable-inbound", "selfhosted.example.com"]);
-
-      expect(enabled.data).toMatchObject({
-        domain: "selfhosted.example.com",
-        inbound_status: "ready",
-        readiness: {
-          inbound_ready: true,
-          receive_ready: true,
-          inbound_evidence_ready: true,
-        },
-      });
-    } finally {
-      if (previousHome === undefined) delete process.env["HOME"];
-      else process.env["HOME"] = previousHome;
-      rmSync(tmpHome, { recursive: true, force: true });
+  it("fails loud on server-owned lifecycle mutations", async () => {
+    for (const args of [
+      ["domains", "connect", "owned.example.com", "--provider", "x"],
+      ["domains", "enable-inbound", "ready.example.com"],
+      ["domains", "enable-outbound", "ready.example.com"],
+      ["domains", "disable-outbound", "ready.example.com"],
+    ]) {
+      const result = await runDomainCommandExpectingExit(args);
+      expect(result.error).toBe("process.exit:1");
+      expect(result.stderr).toContain("is not available in the self-hosted client");
     }
   });
 });
 
 describe("domain move-provider command", () => {
-  it("moves a domain and matching address rows to another provider", async () => {
-    const from = createProvider({ name: "ses-sandbox", type: "ses", region: "us-east-1" });
-    const to = createProvider({ name: "ses-production", type: "ses", region: "us-east-1" });
-    const domain = createDomain(from.id, "example.com");
-    const address = createAddress({ provider_id: from.id, email: "hello@example.com" });
-    getDatabase().run("UPDATE addresses SET domain_id = ?, provisioning_status = 'ready' WHERE id = ?", [domain.id, address.id]);
+  it("moves a domain to another provider through /v1 (server owns address moves)", async () => {
+    await stub.seed({
+      providers: [
+        { id: "prov-source", name: "ses-sandbox", type: "ses", region: "us-east-1", active: true },
+        { id: "prov-target", name: "ses-production", type: "ses", region: "us-east-1", active: true },
+      ],
+      domains: [
+        { id: "dom-1", domain: "example.com", provider: "prov-source", verified: false },
+      ],
+    });
 
     const result = await runDomainCommand([
       "domain", "move-provider", "example.com",
-      "--from-provider", from.id,
-      "--to-provider", to.id,
+      "--from-provider", "prov-source",
+      "--to-provider", "prov-target",
       "--yes",
     ]);
 
     expect(result.data).toMatchObject({
-      domain: { provider_id: to.id, domain: "example.com" },
-      moved_addresses: 1,
+      domain: { provider_id: "prov-target", domain: "example.com" },
+      to_provider_name: "ses-production",
+      moved_addresses: 0,
     });
-    expect(listDomains(to.id, getDatabase())).toMatchObject([{ id: domain.id, domain: "example.com" }]);
-    expect(getAddress(address.id, getDatabase())).toMatchObject({
-      provider_id: to.id,
-      domain_id: domain.id,
-      email: "hello@example.com",
-    });
+    // The write reached /v1: the stored row now points at the new provider.
+    const stored = (await stub.list("domains")).find((d) => d["id"] === "dom-1");
+    expect(stored?.["provider"]).toBe("prov-target");
   });
 });
 
 describe("domain status command", () => {
-  it("paginates domains before computing readiness", async () => {
-    const provider = createProvider({ name: "ses-main", type: "ses", region: "us-east-1" });
-    const db = getDatabase();
-    for (let i = 1; i <= 4; i++) {
-      const domain = createDomain(provider.id, `domain-${i}.example.com`);
-      db.run("UPDATE domains SET created_at = ? WHERE id = ?", [`2026-01-0${i} 00:00:00`, domain.id]);
-      updateDnsStatus(domain.id, "verified", "verified", "verified");
-      setDomainProvisioning(domain.id, { provisioning_status: "ready", send_provider: "ses" });
-    }
-
-    const result = await runDomainCommand(["domain", "status", "--limit", "2", "--offset", "1"]);
-
-    expect(result.out).toContain("domain-3.example");
-    expect(result.out).toContain("domain-2.example");
-    expect(result.out).not.toContain("domain-4.example");
-    expect(result.data).toMatchObject([
-      { domain: "domain-3.example.com", readiness: { send_ready: true } },
-      { domain: "domain-2.example.com", readiness: { send_ready: true } },
-    ]);
-  });
-
-  it("shows provider names without changing readiness output", async () => {
-    const provider = createProvider({ name: "ses-main", type: "ses", region: "us-east-1" });
-    const domain = createDomain(provider.id, "ready.example.com");
-    updateDnsStatus(domain.id, "verified", "verified", "verified");
-    setDomainProvisioning(domain.id, { provisioning_status: "ready", send_provider: "ses" });
-
-    const result = await runDomainCommand(["domain", "status"]);
-
-    expect(result.out).toContain("ses-main");
-    expect(result.data).toMatchObject([
-      {
-        domain: "ready.example.com",
-        provider_name: "ses-main",
-        readiness: { send_ready: true, receive_ready: true },
-      },
-    ]);
+  it("fails loud — readiness is served by the self-hosted operator API", async () => {
+    const result = await runDomainCommandExpectingExit(["domain", "status"]);
+    expect(result.error).toBe("process.exit:1");
+    expect(result.stderr).toContain("emails domain status is not available in the self-hosted client");
   });
 });
 
 describe("domain usable command", () => {
-  it("paginates after readiness filtering", async () => {
-    const provider = createProvider({ name: "ses", type: "ses", region: "us-east-1" });
-    const db = getDatabase();
-    for (let i = 1; i <= 4; i++) {
-      const domain = createDomain(provider.id, `usable-${i}.example.com`);
-      db.run("UPDATE domains SET created_at = ? WHERE id = ?", [`2026-01-0${i} 00:00:00`, domain.id]);
-      updateDnsStatus(domain.id, "verified", "verified", "verified");
-      setDomainProvisioning(domain.id, { provisioning_status: "ready", send_provider: "ses" });
-    }
+  it("paginates verified domains from /v1", async () => {
+    await stub.seed({
+      domains: [1, 2, 3, 4].map((i) => ({
+        id: `use-${i}`,
+        domain: `usable-${i}.example.com`,
+        provider: "ses",
+        verified: true,
+        created_at: `2026-01-0${i}T00:00:00.000Z`,
+      })),
+    });
 
     const result = await runDomainCommand(["domain", "usable", "--send", "--limit", "2", "--offset", "1"]);
 
@@ -510,51 +268,33 @@ describe("domain usable command", () => {
     expect(result.out).toContain("usable-2.example.com");
     expect(result.out).not.toContain("usable-4.example.com");
     expect(result.data).toMatchObject([
-      { domain: "usable-3.example.com", readiness: { send_ready: true } },
-      { domain: "usable-2.example.com", readiness: { send_ready: true } },
+      { domain: "usable-3.example.com" },
+      { domain: "usable-2.example.com" },
     ]);
   });
 
-  it("filters by provider and includes provider names", async () => {
-    const firstProvider = createProvider({ name: "first-ses", type: "ses", region: "us-east-1" });
-    const secondProvider = createProvider({ name: "second-ses", type: "ses", region: "us-east-1" });
-    const first = createDomain(firstProvider.id, "first.example.com");
-    const second = createDomain(secondProvider.id, "second.example.com");
-    updateDnsStatus(first.id, "verified", "verified", "verified");
-    updateDnsStatus(second.id, "verified", "verified", "verified");
-    setDomainProvisioning(first.id, { provisioning_status: "ready", send_provider: "ses" });
-    setDomainProvisioning(second.id, { provisioning_status: "ready", send_provider: "ses" });
+  it("filters by provider label", async () => {
+    await stub.seed({
+      domains: [
+        { id: "d1", domain: "first.example.com", provider: "first-ses", verified: true, created_at: "2026-01-01T00:00:00.000Z" },
+        { id: "d2", domain: "second.example.com", provider: "second-ses", verified: true, created_at: "2026-01-02T00:00:00.000Z" },
+      ],
+    });
 
-    const result = await runDomainCommand(["domain", "usable", "--provider", firstProvider.id]);
+    const result = await runDomainCommand(["domain", "usable", "--provider", "first-ses"]);
 
-    expect(result.out).toContain("first-ses");
+    expect(result.out).toContain("first.example.com");
     expect(result.out).not.toContain("second.example.com");
     expect(result.data).toMatchObject([
-      {
-        domain: "first.example.com",
-        provider_name: "first-ses",
-        readiness: { send_ready: true, receive_ready: true },
-      },
+      { domain: "first.example.com", provider_id: "first-ses" },
     ]);
   });
 });
 
 describe("domain warm-list command", () => {
-  it("paginates warming schedule output", async () => {
-    const db = getDatabase();
-    for (let i = 1; i <= 4; i++) {
-      const schedule = createWarmingSchedule({ domain: `warm-${i}.example.com`, target_daily_volume: 100 });
-      db.run("UPDATE warming_schedules SET created_at = ? WHERE id = ?", [`2026-01-0${i} 00:00:00`, schedule.id]);
-    }
-
-    const result = await runDomainCommand(["domain", "warm-list", "--limit", "2", "--offset", "1"]);
-
-    expect(result.out).toContain("warm-3.example.com");
-    expect(result.out).toContain("warm-2.example.com");
-    expect(result.out).not.toContain("warm-4.example.com");
-    expect(result.data).toMatchObject([
-      { domain: "warm-3.example.com" },
-      { domain: "warm-2.example.com" },
-    ]);
+  it("fails loud — warming schedules live on the self-hosted server", async () => {
+    const result = await runDomainCommandExpectingExit(["domain", "warm-list"]);
+    expect(result.error).toBe("process.exit:1");
+    expect(result.stderr).toContain("emails domain warm-list is not available in the self-hosted client");
   });
 });

@@ -1,30 +1,18 @@
-import type { Database } from "../db/database.js";
-import type { Email, SendEmailOptions } from "../types/index.js";
-import { createEmail } from "../db/emails.js";
-import { storeEmailContent } from "../db/email-content.js";
-import { setEmailThreading, type EmailThreading } from "../db/threads.js";
+import * as local from "./sent-ledger.local.js";
+import * as remote from "./sent-ledger.remote.js";
+import { isSelfHostedMode } from "../db/self-hosted-store.js";
 
-export async function createSentEmailLedger(
-  providerId: string,
-  opts: SendEmailOptions,
-  providerMessageId?: string,
-  db?: Database,
-): Promise<Email> {
-  return createEmail(providerId, opts, providerMessageId, db);
+export type * from "./sent-ledger.local.js";
+
+function routed<K extends keyof typeof local>(key: K): typeof local[K] {
+  return ((...args: unknown[]) => {
+    const implementation = (isSelfHostedMode() ? remote : local) as Record<string, unknown>;
+    const candidate = implementation[String(key)];
+    if (typeof candidate !== "function") throw new Error(`sent-ledger.${String(key)} is unavailable in the selected mode.`);
+    return (candidate as (...values: unknown[]) => unknown)(...args);
+  }) as typeof local[K];
 }
 
-export async function storeSentEmailContent(
-  emailId: string,
-  content: { html?: string; text?: string; headers?: Record<string, string> },
-  db?: Database,
-): Promise<void> {
-  storeEmailContent(emailId, content, db);
-}
-
-export async function setSentEmailThreading(
-  emailId: string,
-  threading: Partial<EmailThreading>,
-  db?: Database,
-): Promise<void> {
-  setEmailThreading(emailId, threading, db);
-}
+export const createSentEmailLedger = routed("createSentEmailLedger");
+export const storeSentEmailContent = routed("storeSentEmailContent");
+export const setSentEmailThreading = routed("setSentEmailThreading");

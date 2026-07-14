@@ -1,6 +1,4 @@
-import type { Database } from "../db/database.js";
-import { getDatabase } from "../db/database.js";
-import { sqlEmailDomain } from "../db/email-address-sql.js";
+import { listEmails } from "../db/emails.js";
 
 export interface WarmingSchedule {
   id: string;
@@ -71,26 +69,30 @@ export function getTodayLimit(schedule: WarmingSchedule): number | null {
 
 /**
  * Get how many emails have been sent from a domain today.
+ *
+ * Sent mail is a `/v1`-backed resource (the emails repo routes to the operator's
+ * API), so this fetches today's outbound messages and counts those whose From
+ * domain matches — filtering client-side over the bounded superset the repo
+ * returns (the same pattern the other self-hosted repos use).
  */
-export function getTodaySentCount(domain: string, db?: Database): number {
-  const d = db || getDatabase();
+export function getTodaySentCount(domain: string): number {
   const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
-  const tomorrow = new Date(`${today}T00:00:00.000Z`);
+  const start = `${today}T00:00:00.000Z`;
+  const tomorrow = new Date(start);
   tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
-  const start = `${today}T00:00:00`;
-  const end = tomorrow.toISOString().slice(0, 19);
-  const result = d.query(
-    `SELECT COUNT(*) as count FROM emails WHERE ${sqlEmailDomain("from_address")} = ? AND sent_at >= ? AND sent_at < ?`,
-  ).get(domain.toLowerCase(), start, end) as { count: number } | null;
-  return result?.count ?? 0;
+  const end = tomorrow.toISOString();
+  const target = domain.trim().toLowerCase();
+  return listEmails({ since: start, until: end, limit: 1000 })
+    .filter((email) => (email.from_address ?? "").toLowerCase().split("@")[1]?.trim() === target)
+    .length;
 }
 
 /**
  * Format warming schedule status for terminal display.
  */
-export function formatWarmingStatus(schedule: WarmingSchedule, db?: Database): string {
+export function formatWarmingStatus(schedule: WarmingSchedule): string {
   const todayLimit = getTodayLimit(schedule);
-  const todaySent = getTodaySentCount(schedule.domain, db);
+  const todaySent = getTodaySentCount(schedule.domain);
 
   const startDate = new Date(schedule.start_date);
   const today = new Date();

@@ -41,7 +41,7 @@ export function registerSequenceCommands(program: Command, output: (data: unknow
     .action((opts: { limit?: string; offset?: string; verbose?: boolean }) => {
       try {
         const page = parseCliListPage(opts);
-        const seqs = listSequences(undefined, page);
+        const seqs = listSequences(page);
         if (seqs.length === 0) {
           output([], chalk.dim("No sequences. Use 'emails sequence create' to add one."));
           return;

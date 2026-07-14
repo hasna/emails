@@ -1,28 +1,44 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { closeDatabase, resetDatabase, getDatabase, uuid, now } from "./database.js";
-import { createProvider } from "./providers.js";
+// Self-hosted-ONLY: status/quota transitions PATCH /v1/addresses/<id> via the
+// addresses repo, and sendability reads the /v1 address record. The per-address
+// daily send ledger (`emails`) is NOT part of the /v1 address model, so send
+// accounting is server-owned and the client reports 0. Exercised against the
+// out-of-process /v1 stub (see src/test-support/v1-stub.ts).
+//
+// Migrated from the deleted local-SQLite pattern. Notes on DELETED coverage:
+//   - The former quota-enforcement tests ("over daily quota → not sendable",
+//     "counts display-name sent rows toward daily quota", "counts today's sends
+//     for many addresses with one grouped query", "countSendsToday ignores
+//     yesterday's sends") all relied on the LOCAL `emails` send ledger and on
+//     inspecting the emitted SQL ("GROUP BY", "sent_at LIKE"). That ledger and the
+//     SQL are gone; send accounting is server-owned. The replacement asserts the
+//     client-side zeroed accounting behavior directly.
+
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { startV1Stub, type V1Stub } from "../test-support/v1-stub.js";
 import { createAddress, getAddress } from "./addresses.js";
 import {
   suspendAddress, activateAddress, setAddressQuota,
   getAddressSendability, countSendsToday, countSendsTodayByAddress,
 } from "./address-lifecycle.js";
 
-let providerId: string;
-beforeEach(() => {
-  process.env["EMAILS_DB_PATH"] = ":memory:";
-  resetDatabase();
-  providerId = createProvider({ name: "ses", type: "ses" }).id;
-});
-afterEach(() => { closeDatabase(); delete process.env["EMAILS_DB_PATH"]; });
+const providerId = "prov-ses";
 
-function seedSend(from: string, at: string): void {
-  const d = getDatabase();
-  d.run(
-    `INSERT INTO emails (id, provider_id, from_address, subject, status, sent_at, created_at, updated_at)
-     VALUES (?, ?, ?, ?, 'sent', ?, ?, ?)`,
-    [uuid(), providerId, from, "hi", at, at, at],
-  );
-}
+let stub: V1Stub;
+
+beforeAll(async () => {
+  stub = await startV1Stub();
+});
+
+afterAll(() => stub.stop());
+
+beforeEach(async () => {
+  await stub.reset();
+  stub.applyEnv();
+});
+
+afterEach(() => {
+  stub.clearEnv();
+});
 
 describe("address lifecycle — suspend / activate", () => {
   it("new addresses default to active", () => {
@@ -57,7 +73,7 @@ describe("address lifecycle — quota", () => {
 
 describe("address lifecycle — sendability", () => {
   it("active, no quota → sendable", () => {
-    const a = createAddress({ provider_id: providerId, email: "a@x.com" });
+    createAddress({ provider_id: providerId, email: "a@x.com" });
     expect(getAddressSendability("a@x.com").sendable).toBe(true);
   });
 
@@ -73,61 +89,16 @@ describe("address lifecycle — sendability", () => {
     expect(s.reason).toMatch(/suspend/i);
   });
 
-  it("over daily quota → not sendable; under → sendable", () => {
+  it("send accounting is server-owned so the client counts zero", () => {
     const a = createAddress({ provider_id: providerId, email: "a@x.com" });
+    // A quota is stored, but the client has no local ledger to count against, so
+    // usage resolves to 0 and the address stays sendable (the server enforces the
+    // real quota during send).
     setAddressQuota(a.id, 2);
-    const today = now();
-    seedSend("a@x.com", today);
-    expect(getAddressSendability("a@x.com").sendable).toBe(true); // 1 < 2
-    seedSend("a@x.com", today);
-    const s = getAddressSendability("a@x.com");
-    expect(s.sendable).toBe(false); // 2 >= 2
-    expect(s.reason).toMatch(/quota/i);
-  });
-
-  it("counts display-name sent rows toward daily quota", () => {
-    const a = createAddress({ provider_id: providerId, email: "a@x.com" });
-    setAddressQuota(a.id, 1);
-    seedSend('"A Team" <a@x.com>', now());
-
-    expect(countSendsToday("a@x.com")).toBe(1);
-    expect(countSendsToday('"A Team" <a@x.com>')).toBe(1);
-    const s = getAddressSendability('"A Team" <a@x.com>');
-    expect(s.sendable).toBe(false);
-    expect(s.reason).toMatch(/quota/i);
-  });
-
-  it("counts today's sends for many addresses with one grouped query", () => {
-    seedSend('"A Team" <a@x.com>', now());
-    seedSend("b@x.com", now());
-    seedSend("b@x.com", now());
-    seedSend("c@x.com", "2020-01-01T10:00:00.000Z");
-
-    const db = getDatabase();
-    const originalQuery = db.query;
-    const queries: string[] = [];
-    db.query = ((sql: string) => {
-      queries.push(sql);
-      return originalQuery.call(db, sql);
-    }) as typeof db.query;
-
-    try {
-      const counts = countSendsTodayByAddress(["a@x.com", "b@x.com", "c@x.com"], db);
-      expect(counts.get("a@x.com")).toBe(1);
-      expect(counts.get("b@x.com")).toBe(2);
-      expect(counts.get("c@x.com")).toBe(0);
-    } finally {
-      db.query = originalQuery;
-    }
-
-    expect(queries).toHaveLength(1);
-    expect(queries[0]).toContain("GROUP BY");
-    expect(queries[0]).toContain("sent_at LIKE");
-  });
-
-  it("countSendsToday ignores yesterday's sends", () => {
-    seedSend("a@x.com", "2020-01-01T10:00:00.000Z");
     expect(countSendsToday("a@x.com")).toBe(0);
+    expect(countSendsToday('"A Team" <a@x.com>')).toBe(0);
+    expect([...countSendsTodayByAddress(["a@x.com", "b@x.com"]).values()]).toEqual([0, 0]);
+    expect(getAddressSendability("a@x.com").sendable).toBe(true);
   });
 });
 

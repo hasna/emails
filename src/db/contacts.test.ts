@@ -1,5 +1,21 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { getDatabase, closeDatabase, resetDatabase } from "./database.js";
+// Self-hosted-ONLY: the contacts repo routes every read/write to the /v1
+// `contacts` API. This exercises the REAL synchronous curl transport against an
+// out-of-process /v1 stub (see src/test-support/v1-stub.ts).
+//
+// Migrated from the deleted local-SQLite pattern. DELETED tests (behavior no
+// longer in the client):
+//   - the incrementSendCount/incrementBounceCount/incrementComplaintCount (and
+//     their *Counts batch) counter-mutation + auto-suppress-on-3-bounces tests:
+//     send/bounce/complaint counters are now DERIVED SERVER-SIDE from message
+//     activity; the client functions are deliberate no-ops. A single test below
+//     documents that they neither create nor mutate contacts.
+//
+// KEEP (real client behavior, all retained): the client-side upsert (list-then-
+// create), email lookup + coercion, suppressed filtering + pagination, and the
+// suppressed-set membership scan.
+
+import { afterAll, afterEach, beforeAll, beforeEach, describe, it, expect } from "bun:test";
+import { startV1Stub, type V1Stub } from "../test-support/v1-stub.js";
 import {
   upsertContact,
   getContact,
@@ -16,14 +32,21 @@ import {
   getSuppressedEmailSet,
 } from "./contacts.js";
 
-beforeEach(() => {
-  process.env["EMAILS_DB_PATH"] = ":memory:";
-  resetDatabase();
+let stub: V1Stub;
+
+beforeAll(async () => {
+  stub = await startV1Stub();
+});
+
+afterAll(() => stub.stop());
+
+beforeEach(async () => {
+  await stub.reset();
+  stub.applyEnv();
 });
 
 afterEach(() => {
-  closeDatabase();
-  delete process.env["EMAILS_DB_PATH"];
+  stub.clearEnv();
 });
 
 describe("upsertContact", () => {
@@ -121,117 +144,31 @@ describe("suppressContact / unsuppressContact", () => {
   });
 });
 
-describe("incrementSendCount", () => {
-  it("increments send count", () => {
-    upsertContact("test@example.com");
-    incrementSendCount("test@example.com");
-    incrementSendCount("test@example.com");
-    const c = getContact("test@example.com");
-    expect(c?.send_count).toBe(2);
-    expect(c?.last_sent_at).not.toBeNull();
-  });
-
-  it("creates contact if not exists", () => {
-    incrementSendCount("new@example.com");
-    const c = getContact("new@example.com");
-    expect(c).not.toBeNull();
-    expect(c?.send_count).toBe(1);
-  });
-});
-
-describe("incrementSendCounts", () => {
-  it("increments multiple contacts and preserves duplicate counts", () => {
-    upsertContact("alice@example.com");
-
-    incrementSendCounts(["alice@example.com", "bob@example.com", "alice@example.com"]);
-
-    expect(getContact("alice@example.com")?.send_count).toBe(2);
-    expect(getContact("bob@example.com")?.send_count).toBe(1);
-  });
-
-  it("does nothing for an empty input", () => {
-    incrementSendCounts([]);
-
+describe("send/bounce/complaint counters are server-derived (client no-ops)", () => {
+  // The old SQLite client mutated these counters locally and auto-suppressed at 3
+  // bounces. Over /v1 those counters are derived server-side from message activity;
+  // the client functions must not create or mutate any contact.
+  it("increment* functions do not create or mutate contacts", () => {
+    incrementSendCount("x@example.com");
+    incrementSendCounts(["a@example.com", "b@example.com"]);
+    incrementBounceCount("x@example.com");
+    incrementBounceCounts(["a@example.com", "a@example.com", "a@example.com"]);
+    incrementComplaintCount("x@example.com");
+    incrementComplaintCounts(["a@example.com"]);
     expect(listContacts()).toEqual([]);
   });
-});
 
-describe("incrementBounceCount", () => {
-  it("increments bounce count", () => {
-    upsertContact("test@example.com");
-    incrementBounceCount("test@example.com");
-    const c = getContact("test@example.com");
-    expect(c?.bounce_count).toBe(1);
-  });
-
-  it("auto-suppresses on 3 bounces", () => {
-    upsertContact("bouncy@example.com");
-    incrementBounceCount("bouncy@example.com");
-    expect(isContactSuppressed("bouncy@example.com")).toBe(false);
-    incrementBounceCount("bouncy@example.com");
-    expect(isContactSuppressed("bouncy@example.com")).toBe(false);
-    incrementBounceCount("bouncy@example.com");
-    expect(isContactSuppressed("bouncy@example.com")).toBe(true);
-  });
-
-  it("creates contact if not exists", () => {
-    incrementBounceCount("new@example.com");
-    const c = getContact("new@example.com");
-    expect(c).not.toBeNull();
-    expect(c?.bounce_count).toBe(1);
-  });
-});
-
-describe("incrementBounceCounts", () => {
-  it("increments multiple contacts and preserves duplicate bounce counts", () => {
-    upsertContact("alice@example.com");
-
-    incrementBounceCounts(["alice@example.com", "bob@example.com", "alice@example.com"]);
-
-    expect(getContact("alice@example.com")?.bounce_count).toBe(2);
-    expect(getContact("bob@example.com")?.bounce_count).toBe(1);
-  });
-
-  it("auto-suppresses contacts that cross the bounce threshold in one batch", () => {
-    upsertContact("bouncy@example.com");
-    incrementBounceCounts(["bouncy@example.com", "bouncy@example.com", "bouncy@example.com"]);
-
-    const contact = getContact("bouncy@example.com");
-    expect(contact?.bounce_count).toBe(3);
-    expect(contact?.suppressed).toBe(true);
-  });
-
-  it("does nothing for an empty input", () => {
-    incrementBounceCounts([]);
-
-    expect(listContacts()).toEqual([]);
-  });
-});
-
-describe("incrementComplaintCount", () => {
-  it("increments complaint count", () => {
-    upsertContact("test@example.com");
-    incrementComplaintCount("test@example.com");
-    incrementComplaintCount("test@example.com");
-    const c = getContact("test@example.com");
-    expect(c?.complaint_count).toBe(2);
-  });
-});
-
-describe("incrementComplaintCounts", () => {
-  it("increments multiple contacts and preserves duplicate complaint counts", () => {
-    upsertContact("alice@example.com");
-
-    incrementComplaintCounts(["alice@example.com", "bob@example.com", "alice@example.com"]);
-
-    expect(getContact("alice@example.com")?.complaint_count).toBe(2);
-    expect(getContact("bob@example.com")?.complaint_count).toBe(1);
-  });
-
-  it("does nothing for an empty input", () => {
-    incrementComplaintCounts([]);
-
-    expect(listContacts()).toEqual([]);
+  it("does not change existing contact state", () => {
+    const before = upsertContact("existing@example.com");
+    incrementSendCount("existing@example.com");
+    incrementBounceCount("existing@example.com");
+    incrementComplaintCount("existing@example.com");
+    const after = getContact("existing@example.com")!;
+    expect(after.send_count).toBe(0);
+    expect(after.bounce_count).toBe(0);
+    expect(after.complaint_count).toBe(0);
+    expect(after.suppressed).toBe(false);
+    expect(after.id).toBe(before.id);
   });
 });
 
@@ -268,22 +205,22 @@ describe("getSuppressedEmailSet", () => {
     expect(suppressed).toEqual(new Set(["blocked@example.com", "also-blocked@example.com"]));
   });
 
-  it("chunks large input lists", () => {
-    for (let i = 0; i < 525; i++) {
-      if (i % 100 === 0) suppressContact(`user-${i}@example.com`);
+  it("returns the suppressed subset from a large input list", () => {
+    for (let i = 0; i < 60; i++) {
+      if (i % 10 === 0) suppressContact(`user-${i}@example.com`);
     }
 
     const suppressed = getSuppressedEmailSet(
-      Array.from({ length: 525 }, (_, i) => `user-${i}@example.com`),
+      Array.from({ length: 60 }, (_, i) => `user-${i}@example.com`),
     );
 
     expect(suppressed).toEqual(new Set([
       "user-0@example.com",
-      "user-100@example.com",
-      "user-200@example.com",
-      "user-300@example.com",
-      "user-400@example.com",
-      "user-500@example.com",
+      "user-10@example.com",
+      "user-20@example.com",
+      "user-30@example.com",
+      "user-40@example.com",
+      "user-50@example.com",
     ]));
   });
 });

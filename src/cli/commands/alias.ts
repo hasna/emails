@@ -49,29 +49,31 @@ export function registerAliasCommands(program: Command, output: (data: unknown, 
     .option("--offset <n>", "Number of aliases to skip", "0")
     .option("--verbose", "Show explanatory alias notes")
     .action((opts: { domain?: string; limit?: string; offset?: string; verbose?: boolean }) => {
-      if (!opts.domain) ensureDefaultCatchAll(); // make sure the protected default exists
-      const page = parseCliListPage(opts);
-      const aliases = listAliases(opts.domain, undefined, page);
-      if (aliases.length === 0) { output([], chalk.dim("No aliases configured.")); return; }
-      const verbose = opts.verbose || isCliVerboseOutput();
-      const lines = [chalk.bold("\nAliases:")];
-      for (const a of aliases) {
-        const kind = a.protected ? chalk.green("[protected]") : a.local_part === CATCH_ALL ? chalk.magenta("[catch-all]") : "           ";
-        const target = a.target_address || chalk.dim("(keep, no forward)");
-        lines.push(`  ${chalk.cyan(a.id.slice(0, 8))} ${kind} ${display(a).padEnd(34)} → ${target}`);
-      }
-      const g = getGlobalCatchAll();
-      lines.push("");
-      lines.push(formatListHint({
-        shown: aliases.length,
-        limit: page.limit,
-        offset: page.offset,
-        noun: "alias",
-        detailCommand: "use emails alias resolve <recipient> to test routing",
-        verbose,
-      }));
-      if (verbose && g) lines.push(chalk.dim("\n  The global catch-all is protected — it catches mail for every domain and can't be deleted."));
-      output(aliases, lines.join("\n"));
+      try {
+        if (!opts.domain) ensureDefaultCatchAll(); // make sure the protected default exists
+        const page = parseCliListPage(opts);
+        const aliases = listAliases(opts.domain, page);
+        if (aliases.length === 0) { output([], chalk.dim("No aliases configured.")); return; }
+        const verbose = opts.verbose || isCliVerboseOutput();
+        const lines = [chalk.bold("\nAliases:")];
+        for (const a of aliases) {
+          const kind = a.protected ? chalk.green("[protected]") : a.local_part === CATCH_ALL ? chalk.magenta("[catch-all]") : "           ";
+          const target = a.target_address || chalk.dim("(keep, no forward)");
+          lines.push(`  ${chalk.cyan(a.id.slice(0, 8))} ${kind} ${display(a).padEnd(34)} → ${target}`);
+        }
+        const g = getGlobalCatchAll();
+        lines.push("");
+        lines.push(formatListHint({
+          shown: aliases.length,
+          limit: page.limit,
+          offset: page.offset,
+          noun: "alias",
+          detailCommand: "use emails alias resolve <recipient> to test routing",
+          verbose,
+        }));
+        if (verbose && g) lines.push(chalk.dim("\n  The global catch-all is protected — it catches mail for every domain and can't be deleted."));
+        output(aliases, lines.join("\n"));
+      } catch (e) { handleError(e); }
     });
 
   cmd
@@ -90,8 +92,10 @@ export function registerAliasCommands(program: Command, output: (data: unknown, 
     .command("resolve <recipient>")
     .description("Show where a recipient address would be routed")
     .action((recipient: string) => {
-      const target = resolveAlias(recipient);
-      if (target) output({ recipient, target }, `${recipient} → ${chalk.green(target)}`);
-      else output({ recipient, target: null }, chalk.dim(`${recipient} → (no alias; delivered as-is)`));
+      try {
+        const target = resolveAlias(recipient);
+        if (target) output({ recipient, target }, `${recipient} → ${chalk.green(target)}`);
+        else output({ recipient, target: null }, chalk.dim(`${recipient} → (no alias; delivered as-is)`));
+      } catch (e) { handleError(e); }
     });
 }

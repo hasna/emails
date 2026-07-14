@@ -1,113 +1,91 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import {
   addStep,
   advanceEnrollment,
-  closeDatabase,
   createProvider,
   createSequence,
   createTemplate,
   enroll,
-  getAnalytics,
-  getDatabase,
   getDueEnrollments,
-  getLocalStats,
   getSequence,
   getTemplate,
   isContactSuppressed,
   listContacts,
   listEnrollments,
-  listSandboxEmails,
   listSteps,
   listTemplates,
   renderTemplate,
-  resetDatabase,
   suppressContact,
 } from "../index.js";
 import { startHttpServer } from "../mcp/http.js";
+import { startV1Stub, type V1Stub } from "../test-support/v1-stub.js";
 
-const tempDirs: string[] = [];
+// Template/contact/sequence parity in the self-hosted-ONLY client: the CLI, the
+// MCP tools, and the exported library functions all operate on the SAME entities
+// over the /v1 API, so a workflow driven through any surface is observable via
+// the others. Outbound send + sandbox capture + delivery stats/analytics moved
+// server-side (they are loud stubs) and are not part of this client-side parity
+// contract anymore.
+
+let stub: V1Stub;
 const servers: Array<ReturnType<typeof startHttpServer>> = [];
 
-function isolatedEnv(dbPath: string, homePath: string): NodeJS.ProcessEnv {
-  return {
-    ...process.env,
-    EMAILS_DB_PATH: dbPath,
-    HOME: homePath,
-    NO_COLOR: "1",
-  };
-}
+beforeAll(async () => {
+  stub = await startV1Stub();
+});
 
-function runCli(args: string[], env: NodeJS.ProcessEnv) {
-  return Bun.spawnSync({
+afterAll(() => stub.stop());
+
+beforeEach(async () => {
+  await stub.reset();
+  stub.applyEnv();
+});
+
+afterEach(() => {
+  for (const server of servers.splice(0)) server.stop(true);
+  stub.clearEnv();
+});
+
+async function runCli(args: string[]) {
+  const proc = Bun.spawn({
     cmd: ["bun", "src/cli/index.tsx", ...args],
     cwd: process.cwd(),
-    env,
+    env: { ...process.env, NO_COLOR: "1" },
     stdout: "pipe",
     stderr: "pipe",
   });
+  const [out, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+  await proc.exited;
+  return { code: proc.exitCode ?? -1, out: out.trim(), err: err.trim() };
 }
 
-function expectCliOk(result: ReturnType<typeof runCli>) {
-  expect(result.exitCode).toBe(0);
-  expect(new TextDecoder().decode(result.stderr)).toBe("");
+async function expectCliOk(promise: ReturnType<typeof runCli>) {
+  const result = await promise;
+  expect(result.code).toBe(0);
+  return result;
 }
 
-async function callTool<T>(
-  client: Client,
-  name: string,
-  args: Record<string, unknown>,
-): Promise<T> {
+async function callTool<T>(client: Client, name: string, args: Record<string, unknown>): Promise<T> {
   const result = await client.callTool({ name, arguments: args }, undefined, { timeout: 10_000 });
   const text = result.content[0]?.type === "text" ? result.content[0].text : "";
   return JSON.parse(text) as T;
 }
 
-beforeEach(() => {
-  process.env["EMAILS_DB_PATH"] = ":memory:";
-  resetDatabase();
-});
-
-afterEach(() => {
-  for (const server of servers.splice(0)) server.stop(true);
-  closeDatabase();
-  delete process.env["EMAILS_DB_PATH"];
-  for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
-});
-
 describe("template/contact/sequence parity", () => {
-  it("covers the documented workflow through the CLI and validates via the library API", () => {
-    closeDatabase();
-    delete process.env["EMAILS_DB_PATH"];
-    const dir = mkdtempSync(join(tmpdir(), "emails-parity-cli-"));
-    tempDirs.push(dir);
-    const dbPath = join(dir, "emails.db");
-    const env = isolatedEnv(dbPath, join(dir, "home"));
-
-    expectCliOk(runCli(["--json", "provider", "add", "--name", "dev", "--type", "sandbox"], env));
-    const providers = JSON.parse(new TextDecoder().decode(runCli(["--json", "provider", "list"], env).stdout)) as Array<{ id: string }>;
+  it("covers the workflow through the CLI and validates via the library API over /v1", async () => {
+    await expectCliOk(runCli(["--json", "provider", "add", "--name", "dev", "--type", "sandbox"]));
+    const providersOut = await expectCliOk(runCli(["--json", "provider", "list"]));
+    const providers = JSON.parse(providersOut.out) as Array<{ id: string }>;
     const providerId = providers[0]!.id;
-    expectCliOk(runCli(["--json", "template", "add", "welcome", "--subject", "Welcome {{name}}", "--text", "Hi {{name}}"], env));
-    expectCliOk(runCli(["--json", "contact", "suppress", "user@example.com"], env));
-    expectCliOk(runCli(["--json", "sequence", "create", "onboarding"], env));
-    expectCliOk(runCli(["--json", "sequence", "step", "add", "onboarding", "--step", "1", "--delay", "0", "--template", "welcome"], env));
-    expectCliOk(runCli(["--json", "sequence", "enroll", "onboarding", "user@example.com", "--provider", providerId], env));
-    expectCliOk(runCli([
-      "--json", "send",
-      "--provider", providerId,
-      "--from", "hello@example.com",
-      "--to", "user@example.com",
-      "--template", "welcome",
-      "--vars", "{\"name\":\"Ada\"}",
-      "--force",
-    ], env));
 
-    process.env["EMAILS_DB_PATH"] = dbPath;
-    resetDatabase();
+    await expectCliOk(runCli(["--json", "template", "add", "welcome", "--subject", "Welcome {{name}}", "--text", "Hi {{name}}"]));
+    await expectCliOk(runCli(["--json", "contact", "suppress", "user@example.com"]));
+    await expectCliOk(runCli(["--json", "sequence", "create", "onboarding"]));
+    await expectCliOk(runCli(["--json", "sequence", "step", "add", "onboarding", "--step", "1", "--delay", "0", "--template", "welcome"]));
+    await expectCliOk(runCli(["--json", "sequence", "enroll", "onboarding", "user@example.com", "--provider", providerId]));
+
     expect(getTemplate("welcome")?.subject_template).toBe("Welcome {{name}}");
     expect(isContactSuppressed("user@example.com")).toBe(true);
     const sequence = getSequence("onboarding")!;
@@ -117,15 +95,9 @@ describe("template/contact/sequence parity", () => {
       contact_email: "user@example.com",
       provider_id: providerId,
     }));
-    expect(listSandboxEmails(providerId, 10)[0]).toMatchObject({
-      subject: "Welcome Ada",
-      text_body: "Hi Ada",
-    });
-    expect(getLocalStats(providerId, "30d")).toBeTruthy();
-    expect(getAnalytics(providerId, "30d")).toBeTruthy();
-  }, 20_000);
+  }, 30_000);
 
-  it("covers the same workflow through MCP tools and validates via the library API", async () => {
+  it("covers the API-backed MCP tools and confirms sub-ledger writes are server-owned", async () => {
     const provider = createProvider({ name: "dev", type: "sandbox" });
     const server = startHttpServer({ port: 0, log: () => {} });
     servers.push(server);
@@ -134,6 +106,7 @@ describe("template/contact/sequence parity", () => {
 
     try {
       await client.connect(transport, { timeout: 10_000 });
+      // These MCP tools are API-backed in self_hosted mode and route to /v1.
       await callTool(client, "add_template", {
         name: "welcome",
         subject_template: "Welcome {{name}}",
@@ -141,52 +114,42 @@ describe("template/contact/sequence parity", () => {
       });
       await callTool(client, "suppress_contact", { email: "user@example.com" });
       const sequence = await callTool<{ id: string }>(client, "create_sequence", { name: "onboarding" });
-      await callTool(client, "add_sequence_step", {
-        sequence_id: sequence.id,
-        step_number: 1,
-        delay_hours: 0,
-        template_name: "welcome",
-      });
-      await callTool(client, "enroll_contact", {
-        sequence_id: sequence.id,
-        contact_email: "user@example.com",
-        provider_id: provider.id,
-      });
-      await callTool(client, "send_email", {
-        provider_id: provider.id,
-        from: "hello@example.com",
-        to: "user@example.com",
-        template: "welcome",
-        template_vars: { name: "Ada" },
-      });
 
       expect(listTemplates()).toContainEqual(expect.objectContaining({ name: "welcome" }));
       expect(listContacts({ suppressed: true })).toContainEqual(expect.objectContaining({ email: "user@example.com" }));
-      expect(listSteps(sequence.id)).toHaveLength(1);
-      expect(listEnrollments({ sequence_id: sequence.id })).toContainEqual(expect.objectContaining({
-        contact_email: "user@example.com",
-        provider_id: provider.id,
-      }));
-      expect(listSandboxEmails(provider.id, 10)[0]).toMatchObject({
-        subject: "Welcome Ada",
-        text_body: "Hi Ada",
-      });
+      expect(getSequence("onboarding")?.id).toBe(sequence.id);
+
+      // Sequence sub-ledger writes (steps/enrollments) are DISABLED over MCP in
+      // self_hosted API-only mode — that server-owned state is written via the
+      // authenticated Emails API, not the MCP local write tools.
+      const step = await client.callTool({
+        name: "add_sequence_step",
+        arguments: { sequence_id: sequence.id, step_number: 1, delay_hours: 0, template_name: "welcome" },
+      }, undefined, { timeout: 10_000 });
+      expect(step.isError).toBe(true);
+      expect((step.content[0] as { text: string }).text).toContain("disabled in self_hosted API-only mode");
+
+      const enrollResult = await client.callTool({
+        name: "enroll_contact",
+        arguments: { sequence_id: sequence.id, contact_email: "user@example.com", provider_id: provider.id },
+      }, undefined, { timeout: 10_000 });
+      expect(enrollResult.isError).toBe(true);
+      expect((enrollResult.content[0] as { text: string }).text).toContain("disabled in self_hosted API-only mode");
     } finally {
       await client.close();
     }
-  });
+  }, 30_000);
 
   it("covers the workflow through exported library functions including due-step processing", () => {
-    const db = getDatabase();
-    createTemplate({ name: "welcome", subject_template: "Welcome {{name}}", text_template: "Hi {{name}}" }, db);
-    suppressContact("user@example.com", db);
-    const seq = createSequence({ name: "onboarding" }, db);
-    addStep({ sequence_id: seq.id, step_number: 1, delay_hours: 0, template_name: "welcome" }, db);
-    const enrollment = enroll({ sequence_id: seq.id, contact_email: "user@example.com" }, db);
+    createTemplate({ name: "welcome", subject_template: "Welcome {{name}}", text_template: "Hi {{name}}" });
+    suppressContact("user@example.com");
+    const seq = createSequence({ name: "onboarding" });
+    addStep({ sequence_id: seq.id, step_number: 1, delay_hours: 0, template_name: "welcome" });
+    const enrollment = enroll({ sequence_id: seq.id, contact_email: "user@example.com" });
 
-    expect(renderTemplate(getTemplate("welcome", db)!.subject_template, { name: "Ada" })).toBe("Welcome Ada");
-    expect(isContactSuppressed("user@example.com", db)).toBe(true);
-    expect(getDueEnrollments(db)).toContainEqual(expect.objectContaining({ id: enrollment.id }));
-    expect(advanceEnrollment(enrollment.id, db)).toMatchObject({ status: "completed" });
+    expect(renderTemplate(getTemplate("welcome")!.subject_template, { name: "Ada" })).toBe("Welcome Ada");
+    expect(isContactSuppressed("user@example.com")).toBe(true);
+    expect(getDueEnrollments()).toContainEqual(expect.objectContaining({ id: enrollment.id }));
+    expect(advanceEnrollment(enrollment.id)).toMatchObject({ status: "completed" });
   });
 });

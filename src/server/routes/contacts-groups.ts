@@ -1,10 +1,10 @@
 // API route handlers — contacts-groups.ts
-import { listContacts, suppressContact, unsuppressContact } from '../../db/contacts.js';
-import { listTemplateSummaries, getTemplate, createTemplate, deleteTemplate } from '../../db/templates.js';
-import { listGroups, createGroup, deleteGroup, getGroupByName, listMemberSummaries, getMember, addMember, removeMember } from '../../db/groups.js';
-import { listScheduledEmailSummaries, cancelScheduledEmail } from '../../db/scheduled.js';
-import { getEmailContent } from '../../db/email-content.js';
-import { getAnalytics } from '../../lib/analytics.js';
+import { listContacts, suppressContact, unsuppressContact } from '../../db/contacts.local.js';
+import { listTemplateSummaries, getTemplate, createTemplate, deleteTemplate } from '../../db/templates.local.js';
+import { listGroups, createGroup, deleteGroup, getGroupByName, listMemberSummaries, getMember, addMember, removeMember } from '../../db/groups.local.js';
+import { listScheduledEmailSummaries, cancelScheduledEmail } from '../../db/scheduled.local.js';
+import { getEmailContent } from '../../db/email-content.local.js';
+import { getAnalytics } from '../../lib/analytics.local.js';
 import { exportEmailsCsv, exportEmailsJson, exportEventsCsv, exportEventsJson } from '../../lib/export.js';
 import { json, notFound, badRequest, internalError, resolveId, resolveOptionalId, parseBody, queryInteger, queryPage } from './helpers.js';
 

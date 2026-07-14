@@ -1,6 +1,13 @@
 import { join } from "node:path";
 import { EventsClient, type EmitOptions, type EmitResult, type EventInput } from "@hasna/events";
-import { getDataDir } from "../db/database.js";
+
+// Self-hosted-only client: the local SQLite `getDataDir()` is gone, but the
+// workflow event log is a local append-only store independent of any database.
+// Resolve its base directory directly.
+function emailsDataDir(): string {
+  const home = process.env["HOME"] || process.env["USERPROFILE"] || "~";
+  return join(home, ".hasna", "emails");
+}
 
 export const EMAILS_EVENT_SOURCE = "emails";
 export const EMAILS_EVENT_SCHEMA_VERSION = "emails.v1";
@@ -33,7 +40,7 @@ export interface EmailsEventInput<TData extends Record<string, unknown> = Record
 }
 
 export function getEmailsEventsDataDir(): string {
-  return join(getDataDir(), "events");
+  return join(emailsDataDir(), "events");
 }
 
 export function createEmailsEventsClient(): EventsClient {

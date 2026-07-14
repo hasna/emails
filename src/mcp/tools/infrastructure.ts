@@ -4,7 +4,6 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { createDomain } from '../../db/domains.js';
 import { getProvider } from '../../db/providers.js';
 import { getAdapter } from '../../providers/index.js';
-import { getDatabase } from '../../db/database.js';
 import { loadConfig, getConfigValue, setConfigValue } from '../../lib/config.js';
 import { normalizeRoute53RegistrationContact } from '../../lib/route53-contact.js';
 import { formatError, resolveId, ProviderNotFoundError } from '../helpers.js';
@@ -333,17 +332,13 @@ export function registerInfrastructureTools(server: McpServer): void {
     email: z.string().optional(),
     category: z.enum(["bug", "feature", "general"]).optional(),
   },
-  async (params) => {
-    try {
-      const db = getDatabase();
-      const pkg = require("../../package.json");
-      db.run("INSERT INTO feedback (message, email, category, version) VALUES (?, ?, ?, ?)", [
-        params.message, params.email || null, params.category || "general", pkg.version,
-      ]);
-      return { content: [{ type: "text" as const, text: "Feedback saved. Thank you!" }] };
-    } catch (e) {
-      return { content: [{ type: "text" as const, text: String(e) }], isError: true };
-    }
+  async () => {
+    // Feedback was written to a local SQLite table with no /v1 equivalent in the
+    // self-hosted client. Fail loud (rule 6).
+    return {
+      content: [{ type: "text" as const, text: "Error: send_feedback is not available in the self-hosted client; feedback is collected by the self-hosted server." }],
+      isError: true,
+    };
   },
   );
 
@@ -359,27 +354,14 @@ export function registerInfrastructureTools(server: McpServer): void {
       add_mx: z.boolean().optional().describe("Also publish inbound MX (ses-s3 receive)"),
       force_mx_switch: z.boolean().optional().describe("Allow adding inbound MX when an existing provider already owns root MX"),
     },
-    async ({ domain, provider_id, send_provider, add_mx, force_mx_switch }) => {
-      try {
-        const db = getDatabase();
-        const resolvedProviderId = resolveId("providers", provider_id);
-        const provider = getProvider(resolvedProviderId);
-        if (!provider) throw new ProviderNotFoundError(provider_id);
-        if (add_mx) {
-          const { guardSesInboundMx } = await import("../../lib/mx-ownership.js");
-          await guardSesInboundMx(domain, !!force_mx_switch);
-        }
-        const { getDomainByName } = await import("../../db/domains.js");
-        const { setDomainProvisioning } = await import("../../db/provisioning.js");
-        const rec = getDomainByName(resolvedProviderId, domain, db) ?? createDomain(resolvedProviderId, domain, db);
-        setDomainProvisioning(rec.id, { provisioning_status: "ses_identity_created", send_provider: send_provider ?? "ses", dns_provider: "cloudflare" }, db);
-        const adapter = getAdapter(provider);
-        await adapter.addDomain(domain);
-        const { setupEmailDns } = await import("../../lib/cloudflare-dns.js");
-        const dns = await setupEmailDns({ domain, provider, addMx: !!add_mx, forceMxSwitch: !!force_mx_switch });
-        setDomainProvisioning(rec.id, { provisioning_status: "dns_published", next_check_at: new Date().toISOString() }, db);
-        return { content: [{ type: "text" as const, text: JSON.stringify({ domain, dns_provider: "cloudflare", records_published: dns.created, dns }, null, 2) }] };
-      } catch (e) { return { content: [{ type: "text" as const, text: `Error: ${formatError(e)}` }], isError: true }; }
+    async () => {
+      // Domain provisioning orchestrates local provisioning state plus provider
+      // (SES) and Cloudflare operations that the self-hosted server owns; there
+      // is no client-side /v1 provisioning route. Fail loud (rule 6).
+      return {
+        content: [{ type: "text" as const, text: "Error: provision_domain is not available in the self-hosted client; domain provisioning runs on the self-hosted server." }],
+        isError: true,
+      };
     },
   );
 
@@ -399,73 +381,14 @@ export function registerInfrastructureTools(server: McpServer): void {
       interval_seconds: z.number().int().positive().max(MAX_MCP_PROVISION_INTERVAL_SECONDS).optional().describe("Polling interval when wait=true (max 60)"),
       inbound_bucket: z.string().optional().describe("Inbound S3 bucket for receive validation"),
     },
-    async ({ email, provider_id, domain_id, receive_strategy, forward_to, owner, administrator, wait, timeout_seconds, interval_seconds, inbound_bucket }) => {
-      try {
-        const db = getDatabase();
-        const pid = resolveId("providers", provider_id);
-        const provider = getProvider(pid);
-        if (!provider) throw new ProviderNotFoundError(provider_id);
-        const { createAddress, getAddressByEmail } = await import("../../db/addresses.js");
-        const { getDomainByName } = await import("../../db/domains.js");
-        const { getAddressProvisioning, setAddressProvisioning } = await import("../../db/provisioning.js");
-        const addr = getAddressByEmail(pid, email, db) ?? createAddress({ provider_id: pid, email }, db);
-        const domainName = email.split("@")[1];
-        const domainId = domain_id ? resolveId("domains", domain_id) : (domainName ? getDomainByName(pid, domainName, db)?.id ?? null : null);
-        setAddressProvisioning(addr.id, {
-          domain_id: domainId,
-          receive_strategy: receive_strategy ?? "ses-s3",
-          forward_to: forward_to ?? null,
-          provisioning_status: "requested",
-          next_check_at: new Date().toISOString(),
-        }, db);
-        let ownership = null;
-        if (owner) {
-          const { setAddressOwnerByRef } = await import("../../lib/address-ownership.js");
-          ownership = setAddressOwnerByRef(addr.id, owner, administrator, db);
-        }
-
-        let provisioning = getAddressProvisioning(addr.id, db);
-        if (wait) {
-          const { getInboundConfig } = await import("../../lib/config.js");
-          const cfg = getInboundConfig();
-          if (cfg.profile) process.env["AWS_PROFILE"] = cfg.profile;
-          const bucket = inbound_bucket ?? cfg.bucket;
-          if (!bucket) throw new Error("No inbound bucket: pass inbound_bucket or set inbound_s3_bucket");
-          const { makeAddressDeps } = await import("../../lib/provision/real-deps.js");
-          const { advanceAddress } = await import("../../lib/provision/orchestrator.js");
-          const deps = makeAddressDeps({ provider, inboundBucket: bucket, region: cfg.region, db });
-          const deadline = Date.now() + (timeout_seconds ?? 120) * 1000;
-          const intervalMs = (interval_seconds ?? 5) * 1000;
-          while (Date.now() < deadline) {
-            provisioning = getAddressProvisioning(addr.id, db);
-            if (provisioning?.provisioning_status === "ready") break;
-            if (provisioning?.provisioning_status === "failed") {
-              throw new Error(`Address provisioning failed: ${provisioning.last_error ?? "unknown error"}`);
-            }
-            const res = await advanceAddress(addr.id, deps, { db, now: new Date().toISOString() });
-            provisioning = getAddressProvisioning(addr.id, db);
-            if (provisioning?.provisioning_status === "ready") break;
-            if (res.error || provisioning?.provisioning_status === "failed") {
-              throw new Error(`Address provisioning failed: ${res.error ?? provisioning?.last_error ?? "unknown error"}`);
-            }
-            await new Promise((resolve) => setTimeout(resolve, intervalMs));
-          }
-          provisioning = getAddressProvisioning(addr.id, db);
-          if (provisioning?.provisioning_status !== "ready") {
-            throw new Error(`Timed out waiting for ${email} to become ready (current=${provisioning?.provisioning_status ?? "unknown"})`);
-          }
-        }
-
-        return { content: [{ type: "text" as const, text: JSON.stringify({
-          id: addr.id,
-          email,
-          receive_strategy: receive_strategy ?? "ses-s3",
-          domain_id: domainId,
-          provisioning,
-          ownership,
-          cli_equivalent: `emails address provision ${email} --provider ${provider_id}${owner ? ` --owner ${owner}` : ""}${administrator ? ` --administrator ${administrator}` : ""}${wait ? " --wait" : ""} --json`,
-        }, null, 2) }] };
-      } catch (e) { return { content: [{ type: "text" as const, text: `Error: ${formatError(e)}` }], isError: true }; }
+    async () => {
+      // Address provisioning orchestrates local provisioning/ownership state plus
+      // SES/S3 operations owned by the self-hosted server; there is no client-side
+      // /v1 provisioning route. Fail loud (rule 6).
+      return {
+        content: [{ type: "text" as const, text: "Error: provision_address is not available in the self-hosted client; address provisioning runs on the self-hosted server." }],
+        isError: true,
+      };
     },
   );
 
@@ -549,26 +472,13 @@ export function registerInfrastructureTools(server: McpServer): void {
       limit: z.number().int().positive().max(1000).optional().describe("Maximum domains to return"),
       offset: z.number().int().min(0).optional().describe("Number of domains to skip"),
     },
-    async ({ domain, limit, offset }) => {
-      try {
-        const db = getDatabase();
-        const { findDomainsByName, listDomains } = await import("../../db/domains.js");
-        const {
-          listDomainProvisioningByIds,
-          listAddressProvisioningByDomains,
-        } = await import("../../db/provisioning.js");
-        const domains = domain ? findDomainsByName(domain, db) : listDomains(undefined, db, { limit: limit ?? 50, offset: offset ?? 0 });
-        const domainIds = domains.map((d) => d.id);
-        const domainProvisioning = listDomainProvisioningByIds(domainIds, db);
-        const addressProvisioning = listAddressProvisioningByDomains(domainIds, db);
-        const result = domains.map((d) => ({
-          domain: d.domain,
-          provisioning: domainProvisioning.get(d.id) ?? null,
-          addresses: (addressProvisioning.get(d.id) ?? [])
-            .map((a) => ({ email: a.email, provisioning: a.provisioning })),
-        }));
-        return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
-      } catch (e) { return { content: [{ type: "text" as const, text: `Error: ${formatError(e)}` }], isError: true }; }
+    async () => {
+      // Provisioning status is server-owned local provisioning state with no
+      // client-side /v1 route. Fail loud (rule 6).
+      return {
+        content: [{ type: "text" as const, text: "Error: provision_status is not available in the self-hosted client; provisioning status runs on the self-hosted server." }],
+        isError: true,
+      };
     },
   );
 

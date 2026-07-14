@@ -93,6 +93,31 @@ if grep -En '^[[:space:]]+(ingress|egress)[[:space:]]*\{' network.tf >/dev/null;
   exit 1
 fi
 
+rollback_assignments="$(grep -Fc 'rollback = var.enable_automatic_deployment_rollback' compute.tf || true)"
+if [ "$rollback_assignments" != "2" ]; then
+  echo "API and worker rollback must both use the explicit automatic-rollback gate" >&2
+  exit 1
+fi
+
+rollback_migration_guards="$(grep -Fc '!var.enable_automatic_deployment_rollback || var.migrations_complete' compute.tf || true)"
+if [ "$rollback_migration_guards" != "2" ]; then
+  echo "API and worker must both reject automatic rollback before migrations_complete" >&2
+  exit 1
+fi
+
+if ! awk '
+  /^variable "enable_automatic_deployment_rollback" \{/ { in_variable = 1; depth = 0; safe_default = 0 }
+  in_variable {
+    depth += gsub(/\{/, "{") - gsub(/\}/, "}")
+    if ($0 ~ /^[[:space:]]*default[[:space:]]*=[[:space:]]*false[[:space:]]*$/) safe_default = 1
+    if (depth == 0) exit safe_default ? 0 : 1
+  }
+  END { if (!in_variable) exit 1 }
+' variables.tf; then
+  echo "automatic deployment rollback must default to false for the sealed cutover" >&2
+  exit 1
+fi
+
 if grep -En 'http://' outputs.tf >/dev/null; then
   echo "client endpoint outputs must be HTTPS-only" >&2
   exit 1
@@ -152,6 +177,25 @@ for allowed_workflow in "$workflow" "$product_workflow"; do
     echo "every workflow action must be pinned to an immutable commit SHA" >&2
     exit 1
   fi
+done
+
+for runbook in "$repo/docs/DEPLOYMENT_CUTOVER.md" "$root/README.md"; do
+  for phrase in \
+    "migration 0016" \
+    "every old API, worker, ingest" \
+    "Drain and stop all of them" \
+    "new-code-compatible migrator" \
+    "Start only tenant-aware new-code writers" \
+    "pre-tenancy" \
+    "unscoped image" \
+    "Roll forward" \
+    "enable_automatic_deployment_rollback = false" \
+    "enable_automatic_deployment_rollback = true"; do
+    grep -Fiq "$phrase" "$runbook" || {
+      echo "tenant-sealing migration contract missing '$phrase' from $runbook" >&2
+      exit 1
+    }
+  done
 done
 
 echo "static self-hosting contract: pass"

@@ -1,6 +1,5 @@
-import type { Database } from "../db/database.js";
 import type { Domain, DomainMonitoringStatus, DomainOwnershipStatus, DomainRouteStatus, DomainSourceOfTruth, DomainType, Provider } from "../types/index.js";
-import { getDatabase, now } from "../db/database.js";
+import { now } from "../db/runtime.js";
 import {
   findDomainsByName,
   getDomain,
@@ -61,7 +60,6 @@ export interface DomainLifecycleSummary {
 }
 
 export interface BuildDomainLifecycleSummaryOptions {
-  db?: Database;
   mode?: EmailsModeResolution;
   provider?: Provider | null;
   provisioning?: DomainProvisioning | null;
@@ -70,13 +68,11 @@ export interface BuildDomainLifecycleSummaryOptions {
 
 export interface ListDomainLifecycleSummaryOptions extends ListDomainOptions {
   provider_id?: string;
-  db?: Database;
   mode?: EmailsModeResolution;
 }
 
 export interface ResolveDomainLifecycleOptions {
   provider_id?: string;
-  db?: Database;
   mode?: EmailsModeResolution;
 }
 
@@ -213,30 +209,28 @@ export function buildDomainLifecycleSummary(
   domain: Domain,
   opts: BuildDomainLifecycleSummaryOptions = {},
 ): DomainLifecycleSummary {
-  const db = opts.db ?? getDatabase();
   return lifecycleSummaryFromParts(domain, {
     mode: resolveMode(opts.mode),
-    provider: opts.provider === undefined ? getProvider(domain.provider_id, db) : opts.provider,
-    provisioning: opts.provisioning === undefined ? getDomainProvisioning(domain.id, db) : opts.provisioning,
-    ready_addresses: opts.ready_addresses ?? (listReadyAddressCountsByDomains([domain.id], db).get(domain.id) ?? 0),
+    provider: opts.provider === undefined ? getProvider(domain.provider_id) : opts.provider,
+    provisioning: opts.provisioning === undefined ? getDomainProvisioning(domain.id) : opts.provisioning,
+    ready_addresses: opts.ready_addresses ?? (listReadyAddressCountsByDomains([domain.id]).get(domain.id) ?? 0),
   });
 }
 
 export function buildDomainLifecycleSummaries(
   domains: Domain[],
-  opts: Pick<BuildDomainLifecycleSummaryOptions, "db" | "mode"> = {},
+  opts: Pick<BuildDomainLifecycleSummaryOptions, "mode"> = {},
 ): DomainLifecycleSummary[] {
   if (domains.length === 0) return [];
-  const db = opts.db ?? getDatabase();
   const mode = resolveMode(opts.mode);
   const domainIds = domains.map((domain) => domain.id);
-  const provisioningById = listDomainProvisioningByIds(domainIds, db);
-  const readyAddressesById = listReadyAddressCountsByDomains(domainIds, db);
+  const provisioningById = listDomainProvisioningByIds(domainIds);
+  const readyAddressesById = listReadyAddressCountsByDomains(domainIds);
   const providerById = new Map<string, Provider | null>();
 
   return domains.map((domain) => {
     if (!providerById.has(domain.provider_id)) {
-      providerById.set(domain.provider_id, getProvider(domain.provider_id, db));
+      providerById.set(domain.provider_id, getProvider(domain.provider_id));
     }
     return lifecycleSummaryFromParts(domain, {
       mode,
@@ -248,26 +242,24 @@ export function buildDomainLifecycleSummaries(
 }
 
 export function listDomainLifecycleSummaries(options: ListDomainLifecycleSummaryOptions = {}): DomainLifecycleSummary[] {
-  const db = options.db ?? getDatabase();
-  const domains = listDomains(options.provider_id, db, { limit: options.limit, offset: options.offset });
-  return buildDomainLifecycleSummaries(domains, { db, mode: options.mode });
+  const domains = listDomains(options.provider_id, { limit: options.limit, offset: options.offset });
+  return buildDomainLifecycleSummaries(domains, { mode: options.mode });
 }
 
 export function resolveDomainLifecycleRecord(
   domainOrId: string,
-  options: Pick<ResolveDomainLifecycleOptions, "provider_id" | "db"> = {},
+  options: Pick<ResolveDomainLifecycleOptions, "provider_id"> = {},
 ): Domain {
-  const db = options.db ?? getDatabase();
   if (options.provider_id) {
-    const domain = getDomainByName(options.provider_id, domainOrId, db);
+    const domain = getDomainByName(options.provider_id, domainOrId);
     if (!domain) throw new Error(`Domain not found for provider ${options.provider_id}: ${domainOrId}`);
     return domain;
   }
 
-  const byId = getDomain(domainOrId, db);
+  const byId = getDomain(domainOrId);
   if (byId) return byId;
 
-  const matches = findDomainsByName(domainOrId, db);
+  const matches = findDomainsByName(domainOrId);
   if (matches.length === 0) throw new Error(`Domain not found: ${domainOrId}`);
   if (matches.length > 1) {
     const choices = matches.map((domain) => `${domain.domain} provider=${domain.provider_id.slice(0, 8)}`).join(", ");
@@ -280,9 +272,8 @@ export function getDomainLifecycleSummary(
   domainOrId: string,
   options: ResolveDomainLifecycleOptions = {},
 ): DomainLifecycleSummary {
-  const db = options.db ?? getDatabase();
-  const domain = resolveDomainLifecycleRecord(domainOrId, { provider_id: options.provider_id, db });
-  return buildDomainLifecycleSummary(domain, { db, mode: options.mode });
+  const domain = resolveDomainLifecycleRecord(domainOrId, { provider_id: options.provider_id });
+  return buildDomainLifecycleSummary(domain, { mode: options.mode });
 }
 
 function toReadinessUpdate(input: DomainReadinessMutationInput): DomainReadinessUpdate {
@@ -309,9 +300,8 @@ export function updateDomainLifecycleReadiness(
   input: DomainReadinessMutationInput,
   options: ResolveDomainLifecycleOptions = {},
 ): DomainReadinessMutationResult {
-  const db = options.db ?? getDatabase();
-  const domain = resolveDomainLifecycleRecord(domainOrId, { provider_id: options.provider_id, db });
-  const before = buildDomainLifecycleSummary(domain, { db, mode: options.mode });
+  const domain = resolveDomainLifecycleRecord(domainOrId, { provider_id: options.provider_id });
+  const before = buildDomainLifecycleSummary(domain, { mode: options.mode });
   const update = toReadinessUpdate(input);
   const timestamp = now();
 
@@ -337,7 +327,7 @@ export function updateDomainLifecycleReadiness(
   }
 
   const updated = Object.keys(update).length > 0
-    ? updateDomainReadiness(domain.id, update, db)
+    ? updateDomainReadiness(domain.id, update)
     : domain;
 
   if (input.inbound_status === "ready") {
@@ -345,7 +335,7 @@ export function updateDomainLifecycleReadiness(
       provisioning_status: "inbound_ready",
       last_error: null,
       next_check_at: null,
-    }, db);
+    });
   }
 
   if (input.outbound_status === "ready" && domain.dkim_status === "verified" && domain.spf_status === "verified") {
@@ -353,13 +343,13 @@ export function updateDomainLifecycleReadiness(
       provisioning_status: "verified",
       last_error: null,
       next_check_at: null,
-    }, db);
+    });
   }
 
   return {
     before,
     updated,
-    after: buildDomainLifecycleSummary(updated, { db, mode: options.mode }),
+    after: buildDomainLifecycleSummary(updated, { mode: options.mode }),
   };
 }
 
@@ -384,10 +374,10 @@ export function disableDomainOutboundReadiness(
   return updateDomainLifecycleReadiness(domainOrId, { outbound_status: "disabled" }, options);
 }
 
-export function createDomainReadinessService(db: Database = getDatabase()): DomainReadinessService {
+export function createDomainReadinessService(): DomainReadinessService {
   return {
-    list: (options = {}) => listDomainLifecycleSummaries({ ...options, db }),
-    get: (domainOrId, options = {}) => getDomainLifecycleSummary(domainOrId, { ...options, db }),
-    update: (domainOrId, input, options = {}) => updateDomainLifecycleReadiness(domainOrId, input, { ...options, db }),
+    list: (options = {}) => listDomainLifecycleSummaries(options),
+    get: (domainOrId, options = {}) => getDomainLifecycleSummary(domainOrId, options),
+    update: (domainOrId, input, options = {}) => updateDomainLifecycleReadiness(domainOrId, input, options),
   };
 }

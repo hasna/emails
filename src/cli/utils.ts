@@ -1,6 +1,8 @@
 import chalk from "../lib/chalk-lite.js";
 import { createInterface } from "node:readline/promises";
-import { getDatabase, resolvePartialId } from "../db/database.js";
+import { resolveResourceId, listResourceIdMatches } from "../db/self-hosted-store.js";
+import { getDatabase, listPartialIdMatches, resolvePartialIdOrThrow } from "../db/database.js";
+import { getEmailsMode } from "../lib/mode.js";
 import { redactSecrets } from "../lib/redaction.js";
 
 const ID_ERROR_SUGGESTION_LIMIT = 5;
@@ -120,11 +122,42 @@ export function handleError(e: unknown): never {
   process.exit(1);
 }
 
+// Map the legacy SQL table names still passed by CLI commands to their /v1
+// resource path. Unknown names pass through unchanged.
+const TABLE_TO_RESOURCE: Record<string, string> = {
+  providers: "providers",
+  domains: "domains",
+  addresses: "addresses",
+  emails: "emails",
+  templates: "templates",
+  contacts: "contacts",
+  groups: "groups",
+  sequences: "sequences",
+  owners: "owners",
+  aliases: "aliases",
+  send_keys: "send-keys",
+  scheduled_emails: "scheduled",
+  forwarding_rules: "forwarding",
+  inbound_emails: "messages",
+  sandbox_emails: "sandbox_emails",
+};
+
+function resourceForTable(table: string): string {
+  return TABLE_TO_RESOURCE[table] ?? table;
+}
+
 export function resolveId(table: string, partialId: string): string {
-  const db = getDatabase();
-  const id = resolvePartialId(db, table, partialId);
+  if (getEmailsMode() === "local") {
+    try {
+      return resolvePartialIdOrThrow(getDatabase(), table, partialId);
+    } catch (error) {
+      handleError(error);
+    }
+  }
+  const resource = resourceForTable(table);
+  const id = resolveResourceId(resource, partialId);
   if (!id) {
-    const suggestions = getIdSuggestions(table, partialId);
+    const suggestions = getIdSuggestions(resource, partialId);
     const suggestionText = suggestions.length > 0
       ? `\nSimilar IDs in ${table}: ${suggestions.join(", ")}`
       : "";
@@ -133,15 +166,13 @@ export function resolveId(table: string, partialId: string): string {
   return id;
 }
 
-function getIdSuggestions(table: string, partialId: string): string[] {
-  const db = getDatabase();
+function getIdSuggestions(resource: string, partialId: string): string[] {
   try {
-    const rows = db
-      .query(`SELECT id FROM ${table} WHERE id LIKE ? ORDER BY created_at DESC LIMIT ?`)
-      .all(`${partialId}%`, ID_ERROR_SUGGESTION_LIMIT) as Array<{ id?: string }>;
-    return rows
-      .map((row) => row.id)
-      .filter((id): id is string => typeof id === "string" && id.length > 0);
+    if (getEmailsMode() === "local") {
+      const table = Object.entries(TABLE_TO_RESOURCE).find(([, mapped]) => mapped === resource)?.[0] ?? resource;
+      return listPartialIdMatches(getDatabase(), table, partialId, ID_ERROR_SUGGESTION_LIMIT);
+    }
+    return listResourceIdMatches(resource, partialId, ID_ERROR_SUGGESTION_LIMIT);
   } catch {
     return [];
   }

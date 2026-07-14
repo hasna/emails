@@ -1,20 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { createAddress } from "../../db/addresses.js";
-import { suppressContact, upsertContact } from "../../db/contacts.js";
+import { createAddress } from "../../db/addresses.local.js";
+import { suppressContact, upsertContact } from "../../db/contacts.local.js";
 import { closeDatabase, getDatabase, resetDatabase } from "../../db/database.js";
-import { createDomain, updateDnsStatus, updateDomainReadiness } from "../../db/domains.js";
-import { saveEmailAgentRun } from "../../db/email-agents.js";
-import { createEmail } from "../../db/emails.js";
-import { createEvent } from "../../db/events.js";
-import { addMember, createGroup } from "../../db/groups.js";
-import { storeInboundEmail } from "../../db/inbound.js";
-import { createProvider } from "../../db/providers.js";
-import { createScheduledEmail, markSent } from "../../db/scheduled.js";
-import { storeSandboxEmail } from "../../db/sandbox.js";
-import { createSequence, enroll, unenroll } from "../../db/sequences.js";
-import { createTemplate } from "../../db/templates.js";
-import { saveTriage } from "../../db/triage.js";
-import { createWarmingSchedule, updateWarmingStatus } from "../../db/warming.js";
+import { createDomain, updateDnsStatus, updateDomainReadiness } from "../../db/domains.local.js";
+import { saveEmailAgentRun } from "../../db/email-agents.local.js";
+import { createEmail } from "../../db/emails.local.js";
+import { createEvent } from "../../db/events.local.js";
+import { addMember, createGroup } from "../../db/groups.local.js";
+import { storeInboundEmail } from "../../db/inbound.local.js";
+import { createProvider } from "../../db/providers.local.js";
+import { createScheduledEmail, markSent } from "../../db/scheduled.local.js";
+import { storeSandboxEmail } from "../../db/sandbox.local.js";
+import { createSequence, enroll, unenroll } from "../../db/sequences.local.js";
+import { createTemplate } from "../../db/templates.local.js";
+import { saveTriage } from "../../db/triage.local.js";
+import { createWarmingSchedule, updateWarmingStatus } from "../../db/warming.local.js";
 import { handleApiRequest } from "../api-routes.js";
 
 async function call(path: string, init?: RequestInit): Promise<Response> {

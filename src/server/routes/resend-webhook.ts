@@ -6,10 +6,10 @@
  * Signature verification is mandatory whenever this route is enabled.
  */
 import { isResendInboundEvent, parseResendInboundEvent, type ResendInboundEvent } from "../../lib/resend-inbound.js";
-import { storeInboundEmail } from "../../db/inbound.js";
-import { getLatestActiveProvider } from "../../db/providers.js";
+import { storeInboundEmail } from "../../db/inbound.local.js";
+import { getLatestActiveProvider } from "../../db/providers.local.js";
 import { getDatabase, runInTransaction } from "../../db/database.js";
-import { getWebhookReceipt, recordWebhookReceipt } from "../../db/webhook-receipts.js";
+import { getWebhookReceipt, recordWebhookReceipt } from "../../db/webhook-receipts.local.js";
 import { json, badRequest } from "./helpers.js";
 import { verifyResendSignature } from "../../lib/webhook-events.js";
 import { emitEmailsEventBestEffort, inboundReceivedEventData } from "../../lib/emails-events.js";

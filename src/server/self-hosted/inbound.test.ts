@@ -3,6 +3,7 @@ import { mintApiKey, verifyApiKey } from "@hasna/contracts/auth";
 import type { TypedQueryClient } from "../../storage-kit/index.js";
 import { EmailsSelfHostedStore } from "./store.js";
 import { handleSelfHostedRequest, type SelfHostedServiceDeps } from "./service.js";
+import { testAuthDeps, selfScopedStore } from "./auth/test-support.js";
 import { emailsSelfHostedMigrations } from "./migrations.js";
 
 const SIGNING_SECRET = "test-signing-secret-do-not-use-in-prod";
@@ -96,7 +97,7 @@ function messagesClient(): { client: TypedQueryClient; rows: Record<string, unkn
     async one<T>(sql: string, params?: readonly unknown[]): Promise<T> {
       if (sql.includes("INSERT INTO messages")) {
         const incoming = rowFromParams(params ?? []);
-        const isUpsert = sql.includes("ON CONFLICT (source_id)");
+        const isUpsert = sql.includes("ON CONFLICT") && sql.includes("source_id");
         if (isUpsert && incoming["source_id"] != null) {
           const existing = rows.find((r) => r["source_id"] === incoming["source_id"]);
           if (existing) {
@@ -117,13 +118,20 @@ function messagesClient(): { client: TypedQueryClient; rows: Record<string, unkn
 
 function deps(): SelfHostedServiceDeps {
   const { client } = messagesClient();
+  const store = selfScopedStore(client);
+  // These message-state-machine tests isolate provider/idempotency behavior from
+  // the independently-covered outbound policy store. Explicitly allow by default;
+  // denial tests override this method below.
+  (store as unknown as { evaluateOutboundPolicy: () => Promise<{ allowed: true }> }).evaluateOutboundPolicy =
+    async () => ({ allowed: true });
   return {
     client,
-    store: new EmailsSelfHostedStore(client),
+    store,
     verifier: verifyApiKey({ app: "emails", signingSecret: SIGNING_SECRET }),
     sender: { provider: "ses", send: async () => "provider-message-id" },
     migrations: emailsSelfHostedMigrations(),
     version: "9.9.9",
+    ...testAuthDeps(client, SIGNING_SECRET),
   };
 }
 
@@ -219,6 +227,32 @@ describe("Emails self-hosted inbound messages", () => {
     expect(msgs.map((m: { source_id: string }) => m.source_id)).toEqual(["newer", "older"]);
   });
 
+  test("GET /v1/messages omits full bodies while detail keeps them API-only", async () => {
+    const d = deps();
+    const created = await handleSelfHostedRequest(d, post({
+      ...INBOUND,
+      source_id: "lean-list",
+      text: `plain body ${"x".repeat(800)}`,
+      html: `<p>html body ${"x".repeat(800)}</p>`,
+    }));
+    const createdMessage = (await created!.json()).message;
+
+    const list = await handleSelfHostedRequest(d, req(d, "GET"));
+    const listed = (await list!.json()).messages[0];
+    expect(listed.body_text).toBeUndefined();
+    expect(listed.body_html).toBeUndefined();
+    expect(listed.snippet).toStartWith("plain body");
+    expect(listed.snippet.length).toBeLessThanOrEqual(500);
+
+    const detail = await handleSelfHostedRequest(d, new Request(
+      `http://svc/v1/messages/${encodeURIComponent(createdMessage.id)}`,
+      { headers: { "x-api-key": writeToken() } },
+    ));
+    const detailed = (await detail!.json()).message;
+    expect(detailed.body_text).toContain("plain body");
+    expect(detailed.body_html).toContain("html body");
+  });
+
   test("keeps attachment bytes out of message reads and serves them from the authenticated attachment route", async () => {
     const d = deps();
     const content = Buffer.from("attachment body").toString("base64");
@@ -258,6 +292,35 @@ describe("Emails self-hosted inbound messages", () => {
     expect(res?.status).toBe(202);
     expect(sent).toHaveLength(1);
     expect((await res!.json()).message.provider_message_id).toBe("ses-message-1");
+  });
+
+  test("outbound policy denial is durably blocked before any provider side effect", async () => {
+    const d = deps();
+    let sends = 0;
+    d.sender = { provider: "ses", send: async () => { sends++; return "must-not-send"; } };
+    d.store.evaluateOutboundPolicy = async () => ({
+      allowed: false,
+      code: "recipient_suppressed",
+      message: "one or more recipients are suppressed",
+      status: 409,
+    });
+    d.store.markSendBlocked = async (id, reason) => {
+      const current = await d.store.getMessage(id);
+      return current ? { ...current, status: "blocked", send_state: "blocked", headers: { policy_denial: reason } } : null;
+    };
+    const res = await handleSelfHostedRequest(d, new Request("http://svc/v1/messages/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": writeToken() },
+      body: JSON.stringify({
+        from: "me@example.com",
+        to: ["blocked@example.com"],
+        subject: "must block",
+        idempotency_key: "blocked-policy-key",
+      }),
+    }));
+    expect(res?.status).toBe(409);
+    expect(await res!.json()).toMatchObject({ reason: "recipient_suppressed", retry_safe: false });
+    expect(sends).toBe(0);
   });
 
   it("returns the same completed intent on retry without sending twice", async () => {

@@ -44,7 +44,7 @@ export function registerSendKeyCommands(program: Command, output: (data: unknown
           ownerId = o.id;
         }
         const page = parseCliListPage(opts);
-        const keys = listSendKeySummaries(ownerId, undefined, page);
+        const keys = listSendKeySummaries(ownerId, page);
         if (keys.length === 0) { output([], chalk.dim("No send keys.")); return; }
         const ownerNames = listOwnerNamesByIds(keys.map((key) => key.owner_id));
         const lines = [chalk.bold("\nSend keys:")];

@@ -1,333 +1,99 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { closeDatabase, getDatabase, resetDatabase } from "../db/database.js";
-import { createProvider, updateProvider } from "../db/providers.js";
-import { createAddress, markVerified } from "../db/addresses.js";
-import { createDomain, updateDnsStatus } from "../db/domains.js";
-import { storeInboundEmail, setInboundArchived, setInboundRead } from "../db/inbound.js";
-import { createOwner, assignAddressOwner } from "../db/owners.js";
-import { setAddressProvisioning, setDomainProvisioning } from "../db/provisioning.js";
-import { resetSelfHostedConfigCache } from "../db/self-hosted-store.js";
-import { resetMailDataSource } from "./mail-data-source.js";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { startV1Stub, type V1Stub } from "../test-support/v1-stub.js";
 import { getEmailSystemStatus, getEmailSystemStatusForRuntime, getNextEmailAction } from "./agent-context.js";
 
-let previousHome: string | undefined;
-let tempHome: string | undefined;
+// The client is self-hosted-ONLY. getEmailSystemStatus / getEmailSystemStatusForRuntime
+// are now async and parameterless: they resolve the /v1 mail data source for the
+// inbox/mailbox/source summaries and report the former local-SQLite provider,
+// domain, address, and provisioning aggregates as empty (the operator server owns
+// those). The old tests that seeded providers/addresses/domains and asserted
+// non-empty aggregates, proxied `db.query`/`db.run` to assert SQL shape, or bulk-
+// inserted rows via `db.run` validated REMOVED local behavior and are dropped.
+// getNextEmailAction is likewise async now.
+let stub: V1Stub;
+beforeAll(async () => { stub = await startV1Stub(); });
+afterAll(() => stub.stop());
+beforeEach(async () => { await stub.reset(); stub.applyEnv(); });
+afterEach(() => stub.clearEnv());
 
-beforeEach(() => {
-  previousHome = process.env["HOME"];
-  tempHome = mkdtempSync(join(tmpdir(), "emails-agent-context-test-home-"));
-  process.env["HOME"] = tempHome;
-  process.env["EMAILS_DB_PATH"] = ":memory:";
-  resetDatabase();
-});
-
-afterEach(() => {
-  closeDatabase();
-  delete process.env["EMAILS_DB_PATH"];
-  delete process.env["EMAILS_MODE"];
-  delete process.env["EMAILS_SELF_HOSTED_URL"];
-  delete process.env["EMAILS_SELF_HOSTED_API_KEY"];
-  resetMailDataSource();
-  resetSelfHostedConfigCache();
-  if (previousHome === undefined) delete process.env["HOME"];
-  else process.env["HOME"] = previousHome;
-  if (tempHome) rmSync(tempHome, { recursive: true, force: true });
-  tempHome = undefined;
-  previousHome = undefined;
-});
+// A representative inbox: 4 inbox rows (3 unread), 1 archived, 1 spam, 1 sent.
+async function seedRepresentativeInbox(): Promise<void> {
+  await stub.seed({
+    messages: [
+      { id: "m1", direction: "inbound", from_addr: "a@x.com", to_addrs: ["ops@example.com"], subject: "one", status: "received", is_read: false, labels: [], received_at: "2026-07-01T00:00:00.000Z" },
+      { id: "m2", direction: "inbound", from_addr: "b@x.com", to_addrs: ["ops@example.com"], subject: "two", status: "received", is_read: false, labels: [], received_at: "2026-07-02T00:00:00.000Z" },
+      { id: "m3", direction: "inbound", from_addr: "c@x.com", to_addrs: ["ops@example.com"], subject: "three", status: "received", is_read: false, labels: [], received_at: "2026-07-03T00:00:00.000Z" },
+      { id: "m4", direction: "inbound", from_addr: "d@x.com", to_addrs: ["ops@example.com"], subject: "four", status: "received", is_read: true, labels: [], received_at: "2026-07-04T00:00:00.000Z" },
+      { id: "m5", direction: "inbound", from_addr: "e@x.com", to_addrs: ["ops@example.com"], subject: "arch", status: "received", is_read: true, labels: ["archived"], received_at: "2026-07-05T00:00:00.000Z" },
+      { id: "m6", direction: "inbound", from_addr: "f@x.com", to_addrs: ["ops@example.com"], subject: "junk", status: "received", is_read: true, labels: ["spam"], received_at: "2026-07-06T00:00:00.000Z" },
+      { id: "m7", direction: "outbound", from_addr: "ops@example.com", to_addrs: ["z@x.com"], subject: "sent one", status: "sent", labels: [], created_at: "2026-07-07T00:00:00.000Z" },
+    ],
+  });
+}
 
 describe("agent context", () => {
-  it("summarizes providers, verified senders, and ownership", () => {
-    const provider = createProvider({ name: "sandbox", type: "sandbox" });
-    const address = markVerified(createAddress({ provider_id: provider.id, email: "ops@example.com" }).id);
-    const owner = createOwner({ type: "agent", name: "agent" });
-    assignAddressOwner(address.id, owner.id);
+  it("summarizes inbox totals, unread, and latest timestamp from the /v1 messages store", async () => {
+    await seedRepresentativeInbox();
+    const status = await getEmailSystemStatus();
 
-    const status = getEmailSystemStatus();
-
-    expect(status.providers.total).toBe(1);
-    expect(status.addresses.total).toBe(1);
-    expect(status.addresses.owned).toBe(1);
-    expect(status.addresses.usable_from[0]?.email).toBe("ops@example.com");
+    // Received total = inbox + archived + spam + trash (4 + 1 + 1 + 0).
+    expect(status.inbox.total).toBe(6);
+    expect(status.inbox.unread).toBe(3);
+    // Latest received-at includes archived/spam inbound (m6 is newest inbound).
+    expect(status.inbox.latest_received_at).toBe("2026-07-06T00:00:00.000Z");
+    expect(status.mailboxes.counts.inbox).toBe(4);
+    expect(status.mailboxes.counts.unread).toBe(3);
+    expect(status.mailboxes.counts.sent).toBe(1);
   });
 
-  it("builds status from provider summaries without selecting credentials", () => {
-    const db = getDatabase();
-    createProvider({
-      name: "resend-prod",
-      type: "resend",
-      api_key: "re_secret",
-    }, db);
+  it("exposes the shared self-hosted store as a single ingestion source", async () => {
+    await seedRepresentativeInbox();
+    const status = await getEmailSystemStatus();
 
-    const queries: string[] = [];
-    const recordingDb = new Proxy(db, {
-      get(target, prop, receiver) {
-        if (prop !== "query") return Reflect.get(target, prop, receiver);
-        return (sql: string) => {
-          queries.push(sql);
-          return target.query(sql);
-        };
-      },
-    }) as typeof db;
-
-    const status = getEmailSystemStatus(recordingDb);
-    const providerQueries = queries.filter((sql) => sql.includes("FROM providers"));
-
-    expect(status.providers.total).toBe(1);
-    expect(status.providers.by_type.resend).toBe(1);
-    expect(providerQueries.length).toBeGreaterThan(0);
-    expect(providerQueries.join("\n")).not.toContain("SELECT *");
-    expect(providerQueries.join("\n")).not.toMatch(/\b(api_key|access_key|secret_key|oauth_client_secret|oauth_refresh_token|oauth_access_token)\b/);
+    expect(status.sources.total).toBe(1);
+    expect(status.sources.items[0]).toMatchObject({ id: "self_hosted", total: 6 });
+    expect(status.inbox.realtime).toMatchObject({ queue_configured: false, queue_url: null });
   });
 
-  it("summarizes large address tables without hydrating every address as a usable sender", () => {
-    const provider = createProvider({ name: "sandbox", type: "sandbox" });
-    const usable = markVerified(createAddress({ provider_id: provider.id, email: "usable@example.com" }).id);
-    const owner = createOwner({ type: "agent", name: "agent" });
-    assignAddressOwner(usable.id, owner.id);
-    setAddressProvisioning(usable.id, { provisioning_status: "ready" });
-    const suspended = markVerified(createAddress({ provider_id: provider.id, email: "suspended@example.com" }).id);
+  it("reports empty provider/domain/address/provisioning aggregates (operator-owned)", async () => {
+    await seedRepresentativeInbox();
+    const status = await getEmailSystemStatus();
 
-    const db = getDatabase();
-    db.run("UPDATE addresses SET status = 'suspended' WHERE id = ?", [suspended.id]);
-    const timestamp = new Date().toISOString();
-    db.run("BEGIN");
-    try {
-      for (let i = 0; i < 10025; i++) {
-        db.run(
-          `INSERT INTO addresses (id, provider_id, email, display_name, verified, created_at, updated_at)
-           VALUES (?, ?, ?, NULL, 0, ?, ?)`,
-          [`bulk-${i}`, provider.id, `bulk-${i}@example.com`, timestamp, timestamp],
-        );
-      }
-      db.run("COMMIT");
-    } catch (error) {
-      db.run("ROLLBACK");
-      throw error;
-    }
-
-    const status = getEmailSystemStatus(db);
-    expect(status.addresses.total).toBe(10027);
-    expect(status.addresses.active).toBe(10026);
-    expect(status.addresses.verified).toBe(2);
-    expect(status.addresses.owned).toBe(1);
-    expect(status.addresses.ready_to_receive).toBe(1);
-    expect(status.addresses.usable_from.map((address) => address.email)).toEqual(["usable@example.com"]);
-    expect(status.addresses.usable_from_truncated).toBe(false);
+    expect(status.providers.total).toBe(0);
+    expect(status.domains.total).toBe(0);
+    expect(status.domains.usable).toEqual([]);
+    expect(status.addresses.total).toBe(0);
+    expect(status.addresses.usable_from).toEqual([]);
+    expect(status.provisioning).toMatchObject({ domains_failed: 0, addresses_failed: 0 });
+    expect(status.next_actions).toEqual([]);
   });
 
-  it("caps the usable_from orientation list for many verified senders", () => {
-    const provider = createProvider({ name: "sandbox", type: "sandbox" });
-    for (let i = 0; i < 55; i++) {
-      const address = createAddress({ provider_id: provider.id, email: `usable-${i}@example.com` });
-      markVerified(address.id);
-    }
+  it("reports the newest inbound timestamp even when the newest mail is archived", async () => {
+    await stub.seed({
+      messages: [
+        { id: "a1", direction: "inbound", from_addr: "s@x.com", to_addrs: ["ops@example.com"], subject: "older", status: "received", is_read: false, labels: [], received_at: "2026-01-01T10:00:00.000Z" },
+        { id: "a2", direction: "inbound", from_addr: "s@x.com", to_addrs: ["ops@example.com"], subject: "newer archived", status: "received", is_read: true, labels: ["archived"], received_at: "2026-01-05T10:00:00.000Z" },
+      ],
+    });
 
-    const status = getEmailSystemStatus();
-
-    expect(status.addresses.verified).toBe(55);
-    expect(status.addresses.usable_from_limit).toBe(25);
-    expect(status.addresses.usable_from).toHaveLength(25);
-    expect(status.addresses.usable_from_truncated).toBe(true);
+    const status = await getEmailSystemStatus();
+    expect(status.inbox.latest_received_at).toBe("2026-01-05T10:00:00.000Z");
   });
 
-  it("summarizes large domain tables without returning every readiness row", () => {
-    const provider = createProvider({ name: "sandbox", type: "sandbox" });
-    const db = getDatabase();
-    for (let i = 0; i < 55; i++) {
-      const domain = updateDnsStatus(createDomain(provider.id, `ready-${i}.example.com`).id, "verified", "verified", "verified");
-      setDomainProvisioning(domain.id, { provisioning_status: "ready" });
-      db.run("UPDATE domains SET created_at = ? WHERE id = ?", [`2026-02-${String(i + 1).padStart(2, "0")} 00:00:00`, domain.id]);
-    }
+  it("resolves the API source for runtime status without opening a local database", async () => {
+    await seedRepresentativeInbox();
+    const status = await getEmailSystemStatusForRuntime();
 
-    const status = getEmailSystemStatus(db);
-
-    expect(status.domains.total).toBe(55);
-    expect(status.domains.send_ready).toBe(55);
-    expect(status.domains.receive_ready).toBe(55);
-    expect(status.domains.usable_limit).toBe(25);
-    expect(status.domains.usable).toHaveLength(25);
-    expect(status.domains.usable_truncated).toBe(true);
+    // No local SQLite island exists in the self-hosted client.
+    expect(status.database.data_dir).toBeNull();
+    expect(status.mode.current).toBe("self_hosted");
+    expect(status.inbox.total).toBe(6);
+    expect(status.inbox.unread).toBe(3);
+    expect(status.sources.items[0]).toMatchObject({ id: "self_hosted", total: 6 });
   });
 
-  it("finds a domain fix command outside the bounded readiness list", () => {
-    const provider = createProvider({ name: "sandbox", type: "sandbox" });
-    const db = getDatabase();
-    const old = createDomain(provider.id, "old-needs-dns.example.com");
-    db.run("UPDATE domains SET created_at = ? WHERE id = ?", ["2026-01-01 00:00:00", old.id]);
-
-    for (let i = 0; i < 30; i++) {
-      const domain = updateDnsStatus(createDomain(provider.id, `ready-${i}.example.com`).id, "verified", "verified", "verified");
-      setDomainProvisioning(domain.id, { provisioning_status: "ready" });
-      db.run("UPDATE domains SET created_at = ? WHERE id = ?", [`2026-02-${String(i + 1).padStart(2, "0")} 00:00:00`, domain.id]);
-    }
-
-    const status = getEmailSystemStatus(db);
-
-    expect(status.domains.usable.map((domain) => domain.domain)).not.toContain("old-needs-dns.example.com");
-    expect(status.next_actions).toContain("emails domain dns old-needs-dns.example.com");
-  });
-
-  it("suggests wait-code for verification goals", () => {
-    const next = getNextEmailAction("need verification code");
+  it("suggests wait-code for verification goals", async () => {
+    const next = await getNextEmailAction("need verification code");
     expect(next).toMatchObject({ command: "emails inbox wait-code <address> --timeout 120" });
-  });
-
-  it("reports the newest inbound timestamp even when older mail is archived", () => {
-    const older = storeInboundEmail({
-      provider_id: null,
-      message_id: "<older@example.com>",
-      from_address: "sender@example.com",
-      to_addresses: ["ops@example.com"],
-      cc_addresses: [],
-      subject: "older",
-      text_body: "older",
-      html_body: null,
-      attachments: [],
-      headers: {},
-      raw_size: 1,
-      received_at: "2026-01-01T10:00:00.000Z",
-    });
-    setInboundArchived(older.id, true);
-    storeInboundEmail({
-      provider_id: null,
-      message_id: "<newer@example.com>",
-      from_address: "sender@example.com",
-      to_addresses: ["ops@example.com"],
-      cc_addresses: [],
-      subject: "newer",
-      text_body: "newer",
-      html_body: null,
-      attachments: [],
-      headers: {},
-      raw_size: 1,
-      received_at: "2026-01-02T10:00:00.000Z",
-    });
-
-    expect(getEmailSystemStatus().inbox.latest_received_at).toBe("2026-01-02T10:00:00.000Z");
-  });
-
-  it("summarizes inbox totals, unread, and latest timestamp with one aggregate query", () => {
-    const db = getDatabase();
-    const read = storeInboundEmail({
-      provider_id: null,
-      message_id: "<read@example.com>",
-      from_address: "sender@example.com",
-      to_addresses: ["ops@example.com"],
-      cc_addresses: [],
-      subject: "read",
-      text_body: "read",
-      html_body: null,
-      attachments: [],
-      headers: {},
-      raw_size: 1,
-      received_at: "2026-01-01T10:00:00.000Z",
-    }, db);
-    setInboundRead(read.id, true, db);
-    const archived = storeInboundEmail({
-      provider_id: null,
-      message_id: "<archived@example.com>",
-      from_address: "sender@example.com",
-      to_addresses: ["ops@example.com"],
-      cc_addresses: [],
-      subject: "archived",
-      text_body: "archived",
-      html_body: null,
-      attachments: [],
-      headers: {},
-      raw_size: 1,
-      received_at: "2026-01-03T10:00:00.000Z",
-    }, db);
-    setInboundArchived(archived.id, true, db);
-    storeInboundEmail({
-      provider_id: null,
-      message_id: "<unread@example.com>",
-      from_address: "sender@example.com",
-      to_addresses: ["ops@example.com"],
-      cc_addresses: [],
-      subject: "unread",
-      text_body: "unread",
-      html_body: null,
-      attachments: [],
-      headers: {},
-      raw_size: 1,
-      received_at: "2026-01-02T10:00:00.000Z",
-    }, db);
-    storeInboundEmail({
-      provider_id: null,
-      message_id: "<sent@example.com>",
-      from_address: "ops@example.com",
-      to_addresses: ["sender@example.com"],
-      cc_addresses: [],
-      subject: "sent",
-      text_body: "sent",
-      html_body: null,
-      attachments: [],
-      headers: {},
-      label_ids: ["SENT"],
-      raw_size: 1,
-      received_at: "2026-01-04T10:00:00.000Z",
-    }, db);
-
-    const queries: string[] = [];
-    const recordingDb = new Proxy(db, {
-      get(target, prop, receiver) {
-        if (prop !== "query") return Reflect.get(target, prop, receiver);
-        return (sql: string) => {
-          queries.push(sql);
-          return target.query(sql);
-        };
-      },
-    }) as typeof db;
-
-    const status = getEmailSystemStatus(recordingDb);
-
-    expect(status.inbox.total).toBe(3);
-    expect(status.inbox.unread).toBe(1);
-    expect(status.inbox.latest_received_at).toBe("2026-01-03T10:00:00.000Z");
-    expect(queries.filter((sql) => sql.includes("COUNT(*) AS total") && sql.includes("MAX(received_at) AS latest_received_at"))).toHaveLength(1);
-    expect(queries.some((sql) => sql.includes("WHERE is_sent = 0"))).toBe(true);
-    expect(queries.filter((sql) => sql.includes("COUNT(*) as count FROM inbound_emails"))).toHaveLength(0);
-    expect(queries.filter((sql) => sql.includes("MAX(received_at) as latest FROM inbound_emails"))).toHaveLength(0);
-  });
-
-  it("uses received-mail totals for self-hosted runtime status", async () => {
-    const previousFetch = globalThis.fetch;
-    process.env["EMAILS_MODE"] = "self_hosted";
-    process.env["EMAILS_SELF_HOSTED_URL"] = "https://emails.example";
-    process.env["EMAILS_SELF_HOSTED_API_KEY"] = "not-a-real-key";
-    globalThis.fetch = (async (url: string | URL | Request) => {
-      const requestUrl = new URL(typeof url === "string" ? url : url instanceof URL ? url.href : url.url);
-      const body = requestUrl.pathname.endsWith("/messages/counts")
-        ? {
-            counts: {
-              inbox: 4,
-              unread: 3,
-              starred: 1,
-              sent: 2,
-              archived: 1,
-              spam: 1,
-              trash: 0,
-              total: 8,
-              latest_received_at: "2026-07-08T19:50:52.000Z",
-            },
-          }
-        : { messages: [] };
-      return new Response(JSON.stringify(body), { status: 200 });
-    }) as typeof fetch;
-
-    try {
-      const status = await getEmailSystemStatusForRuntime();
-      expect(status.inbox.total).toBe(6);
-      expect(status.inbox.unread).toBe(3);
-      expect(status.inbox.latest_received_at).toBe("2026-07-08T19:50:52.000Z");
-      expect(status.inbox.realtime).toMatchObject({ queue_configured: false, queue_url: null });
-      expect(status.sources.items[0]).toMatchObject({ id: "self_hosted", total: 6 });
-    } finally {
-      globalThis.fetch = previousFetch;
-    }
   });
 });

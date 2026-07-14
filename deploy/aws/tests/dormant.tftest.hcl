@@ -246,8 +246,12 @@ run "dormant_by_default" {
   }
 
   assert {
-    condition     = aws_ecs_service.api.deployment_minimum_healthy_percent == 100 && aws_ecs_service.api.deployment_circuit_breaker[0].rollback
-    error_message = "The API service must preserve capacity and enable circuit-breaker rollback."
+    condition = (
+      aws_ecs_service.api.deployment_minimum_healthy_percent == 100 &&
+      !aws_ecs_service.api.deployment_circuit_breaker[0].rollback &&
+      !aws_ecs_service.worker.deployment_circuit_breaker[0].rollback
+    )
+    error_message = "Automatic rollback must be safely disabled until a tenant-aware deployment is proven."
   }
 }
 
@@ -264,6 +268,86 @@ run "activation_is_blocked_without_readiness" {
   expect_failures = [
     aws_ecs_service.api,
   ]
+}
+
+run "automatic_rollback_is_blocked_before_migrations" {
+  command = plan
+
+  variables {
+    aws_region                           = "us-east-1"
+    expected_account_id                  = "111122223333"
+    container_image                      = "registry.example/emails@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    enable_automatic_deployment_rollback = true
+  }
+
+  expect_failures = [
+    aws_ecs_service.api,
+    aws_ecs_service.worker,
+  ]
+}
+
+run "primary_super_admin_bootstrap_is_paired_and_api_only" {
+  command = plan
+
+  variables {
+    aws_region                        = "us-east-1"
+    expected_account_id               = "111122223333"
+    container_image                   = "registry.example/emails@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    primary_super_admin_email         = "owner@example.com"
+    primary_super_admin_bootstrap_kid = "operator-key-id"
+  }
+
+  assert {
+    condition = lookup({
+      for entry in jsondecode(aws_ecs_task_definition.api.container_definitions)[0].environment : entry.name => entry.value
+    }, "EMAILS_PRIMARY_SUPER_ADMIN_EMAIL", "") == "owner@example.com"
+    error_message = "The API task must receive the explicitly pinned primary super-admin email."
+  }
+
+  assert {
+    condition = lookup({
+      for entry in jsondecode(aws_ecs_task_definition.api.container_definitions)[0].environment : entry.name => entry.value
+    }, "EMAILS_PRIMARY_SUPER_ADMIN_BOOTSTRAP_KID", "") == "operator-key-id"
+    error_message = "The API task must receive the explicitly authorized bootstrap KID."
+  }
+
+  assert {
+    condition = alltrue([
+      for definition in [
+        jsondecode(aws_ecs_task_definition.worker.container_definitions)[0],
+        jsondecode(aws_ecs_task_definition.migration.container_definitions)[0],
+        ] : alltrue([
+          for entry in definition.environment : !startswith(entry.name, "EMAILS_PRIMARY_SUPER_ADMIN_")
+      ])
+    ])
+    error_message = "Primary super-admin bootstrap settings must be API-only."
+  }
+}
+
+run "primary_super_admin_email_without_kid_hard_fails" {
+  command = plan
+
+  variables {
+    aws_region                = "us-east-1"
+    expected_account_id       = "111122223333"
+    container_image           = "registry.example/emails@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    primary_super_admin_email = "owner@example.com"
+  }
+
+  expect_failures = [aws_ecs_task_definition.api]
+}
+
+run "primary_super_admin_kid_without_email_hard_fails" {
+  command = plan
+
+  variables {
+    aws_region                        = "us-east-1"
+    expected_account_id               = "111122223333"
+    container_image                   = "registry.example/emails@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    primary_super_admin_bootstrap_kid = "operator-key-id"
+  }
+
+  expect_failures = [aws_ecs_task_definition.api]
 }
 
 run "ready_activation_is_allowed" {
@@ -298,6 +382,43 @@ run "ready_activation_is_allowed" {
   assert {
     condition     = length(aws_nat_gateway.this) == 2
     error_message = "The default production activation should provide one NAT gateway per AZ."
+  }
+
+  assert {
+    condition = (
+      !aws_ecs_service.api.deployment_circuit_breaker[0].rollback &&
+      !aws_ecs_service.worker.deployment_circuit_breaker[0].rollback
+    )
+    error_message = "The first tenant-aware activation must remain roll-forward-only by default."
+  }
+}
+
+run "tenant_aware_steady_state_enables_automatic_rollback" {
+  command = plan
+
+  variables {
+    aws_region                           = "us-east-1"
+    expected_account_id                  = "111122223333"
+    container_image                      = "registry.example/emails@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    api_desired_count                    = 2
+    worker_desired_count                 = 1
+    secrets_ready                        = true
+    migrations_complete                  = true
+    enable_nat_gateway                   = true
+    alarm_notification_topic_arn         = "arn:aws:sns:us-east-1:111122223333:operator-alerts"
+    email_domain                         = "example.com"
+    enable_ses_inbound                   = true
+    inbound_recipients                   = ["example.com"]
+    inbound_object_retention_days        = 30
+    enable_automatic_deployment_rollback = true
+  }
+
+  assert {
+    condition = (
+      aws_ecs_service.api.deployment_circuit_breaker[0].rollback &&
+      aws_ecs_service.worker.deployment_circuit_breaker[0].rollback
+    )
+    error_message = "An explicit tenant-aware steady-state acknowledgement must enable API and worker rollback together."
   }
 }
 

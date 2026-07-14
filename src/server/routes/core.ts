@@ -1,13 +1,13 @@
 // API route handlers — core.ts
-import { createProvider, listProviderSummaries, deleteProvider, getProvider, updateProvider } from '../../db/providers.js';
-import { createDomain, listDomains, deleteDomain, getDomain, updateDnsStatus } from '../../db/domains.js';
-import { createAddress, deleteAddress } from '../../db/addresses.js';
-import { listEmails, getEmail, searchEmails } from '../../db/emails.js';
-import { listSandboxEmailSummaries, getSandboxEmail, clearSandboxEmails } from '../../db/sandbox.js';
+import { createProvider, listProviderSummaries, deleteProvider, getProvider, updateProvider } from '../../db/providers.local.js';
+import { createDomain, listDomains, deleteDomain, getDomain, updateDnsStatus } from '../../db/domains.local.js';
+import { createAddress, deleteAddress } from '../../db/addresses.local.js';
+import { listEmails, getEmail, searchEmails } from '../../db/emails.local.js';
+import { listSandboxEmailSummaries, getSandboxEmail, clearSandboxEmails } from '../../db/sandbox.local.js';
 import { getDatabase } from '../../db/database.js';
-import { getEvent, listEventSummaries } from '../../db/events.js';
+import { getEvent, listEventSummaries } from '../../db/events.local.js';
 import { getAdapter } from '../../providers/index.js';
-import { getLocalStats } from '../../lib/stats.js';
+import { getLocalStats } from '../../lib/stats.local.js';
 import { listEnrichedAddresses } from '../../lib/address-ownership.js';
 import {
   getDomainLifecycleSummary,
@@ -235,7 +235,7 @@ if (path === "/api/addresses" && method === "GET") {
   try {
     const resolvedId = resolveOptionalId("providers", url.searchParams.get("provider_id"));
     const page = queryPage(url, 100);
-    return json(listEnrichedAddresses(resolvedId, getDatabase(), page));
+    return json(listEnrichedAddresses(resolvedId, page));
   } catch (e) { return internalError(e); }
 }
 

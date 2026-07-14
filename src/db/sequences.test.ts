@@ -1,5 +1,24 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { getDatabase, closeDatabase, resetDatabase } from "./database.js";
+// Self-hosted-ONLY: the sequences repo routes sequences / sequence-steps /
+// sequence-enrollments CRUD to the /v1 API. Exercises the REAL curl transport
+// against an out-of-process /v1 stub (generic CRUD for every resource) — see
+// src/test-support/v1-stub.ts. Migrated from the deleted local-SQLite pattern
+// (getDatabase/resetDatabase/:memory:/EMAILS_DB_PATH).
+//
+// Dropped from the local-SQLite version (behavior that no longer lives in the
+// client and is now the server's responsibility):
+//   - "throws on duplicate name" (sequences) — was a SQLite UNIQUE(name).
+//   - "throws on duplicate step_number in same sequence" — was a SQLite
+//     UNIQUE(sequence_id, step_number).
+//   - "cascade deletes steps on sequence delete" — was a SQLite FK ON DELETE
+//     CASCADE; deleteSequence no longer cascades client-side.
+//   - "fetches only the next step when advancing" — inspected the local SQL
+//     string ("LIMIT 1 OFFSET ?") via a recordingDb Proxy + a `db` handle that no
+//     longer exists.
+//   The countEnrollmentsByStatus SQL-projection assertion is retained
+//   functionally (correct counts) without the recordingDb/`db`-param inspection.
+
+import { afterAll, afterEach, beforeAll, beforeEach, describe, it, expect } from "bun:test";
+import { startV1Stub, type V1Stub } from "../test-support/v1-stub.js";
 import {
   createSequence,
   getSequence,
@@ -18,16 +37,43 @@ import {
   advanceEnrollment,
 } from "./sequences.js";
 
-beforeEach(() => {
-  process.env["EMAILS_DB_PATH"] = ":memory:";
-  resetDatabase();
-  getDatabase(); // initialize schema
+let stub: V1Stub;
+
+beforeAll(async () => {
+  stub = await startV1Stub();
+});
+
+afterAll(() => stub.stop());
+
+beforeEach(async () => {
+  await stub.reset();
+  stub.applyEnv();
 });
 
 afterEach(() => {
-  closeDatabase();
-  delete process.env["EMAILS_DB_PATH"];
+  stub.clearEnv();
 });
+
+/** A seeded /v1 sequence-enrollments row. */
+function enrollmentRow(row: {
+  id: string;
+  sequence_id: string;
+  contact_email: string;
+  status?: string;
+  enrolled_at?: string;
+  next_send_at?: string | null;
+  current_step?: number;
+}): Record<string, unknown> {
+  return {
+    provider_id: null,
+    current_step: 0,
+    status: "active",
+    enrolled_at: "2026-01-01T00:00:00.000Z",
+    next_send_at: null,
+    completed_at: null,
+    ...row,
+  };
+}
 
 // ─── createSequence ───────────────────────────────────────────────────────────
 
@@ -45,11 +91,6 @@ describe("createSequence", () => {
   it("creates a sequence with description", () => {
     const seq = createSequence({ name: "onboarding", description: "New user flow" });
     expect(seq.description).toBe("New user flow");
-  });
-
-  it("throws on duplicate name", () => {
-    createSequence({ name: "dup" });
-    expect(() => createSequence({ name: "dup" })).toThrow();
   });
 });
 
@@ -89,15 +130,19 @@ describe("listSequences", () => {
     expect(listSequences()).toHaveLength(0);
   });
 
-  it("paginates sequences after ordering newest first", () => {
-    const db = getDatabase();
-    for (let i = 0; i < 5; i++) {
-      const seq = createSequence({ name: `page-${i}` });
-      const timestamp = `2026-01-0${i + 1}T00:00:00.000Z`;
-      db.run("UPDATE sequences SET created_at = ?, updated_at = ? WHERE id = ?", [timestamp, timestamp, seq.id]);
-    }
+  it("paginates sequences after ordering newest first", async () => {
+    await stub.seed({
+      sequences: Array.from({ length: 5 }, (_v, i) => ({
+        id: `seq-${i}`,
+        name: `page-${i}`,
+        description: null,
+        status: "active",
+        created_at: `2026-01-0${i + 1}T00:00:00.000Z`,
+        updated_at: `2026-01-0${i + 1}T00:00:00.000Z`,
+      })),
+    });
 
-    const page = listSequences(undefined, { limit: 2, offset: 1 });
+    const page = listSequences({ limit: 2, offset: 1 });
 
     expect(page.map((seq) => seq.name)).toEqual(["page-3", "page-2"]);
   });
@@ -171,12 +216,6 @@ describe("addStep", () => {
     expect(step.from_address).toBe("hello@example.com");
     expect(step.subject_override).toBe("Custom subject");
   });
-
-  it("throws on duplicate step_number in same sequence", () => {
-    const seq = createSequence({ name: "step-dup" });
-    addStep({ sequence_id: seq.id, step_number: 1, delay_hours: 24, template_name: "t1" });
-    expect(() => addStep({ sequence_id: seq.id, step_number: 1, delay_hours: 48, template_name: "t2" })).toThrow();
-  });
 });
 
 describe("listSteps", () => {
@@ -249,7 +288,7 @@ describe("enroll", () => {
     expect(e.next_send_at).not.toBeNull();
     const nextSend = new Date(e.next_send_at!).getTime();
     const now = Date.now();
-    // Should be ~72 hours in future (within 5 second tolerance)
+    // Should be ~72 hours in future (within tolerance).
     expect(nextSend).toBeGreaterThan(now + 71 * 3600 * 1000);
     expect(nextSend).toBeLessThan(now + 73 * 3600 * 1000);
   });
@@ -300,121 +339,124 @@ describe("listEnrollments", () => {
     expect(listEnrollments({ status: "active" })).toHaveLength(0);
   });
 
-  it("filters enrollments before applying pagination", () => {
-    const db = getDatabase();
-    const seq = createSequence({ name: "enrollment-page" });
-    const other = createSequence({ name: "other-enrollment-page" });
-    for (let i = 0; i < 5; i++) {
-      const email = `active-${i}@example.com`;
-      enroll({ sequence_id: seq.id, contact_email: email });
-      db.run(
-        "UPDATE sequence_enrollments SET enrolled_at = ? WHERE sequence_id = ? AND contact_email = ?",
-        [`2026-01-0${i + 1}T00:00:00.000Z`, seq.id, email],
-      );
-    }
-    enroll({ sequence_id: seq.id, contact_email: "cancelled@example.com" });
-    unenroll(seq.id, "cancelled@example.com");
-    db.run(
-      "UPDATE sequence_enrollments SET enrolled_at = ? WHERE sequence_id = ? AND contact_email = ?",
-      ["2026-01-10T00:00:00.000Z", seq.id, "cancelled@example.com"],
-    );
-    enroll({ sequence_id: other.id, contact_email: "other@example.com" });
-    db.run(
-      "UPDATE sequence_enrollments SET enrolled_at = ? WHERE sequence_id = ? AND contact_email = ?",
-      ["2026-01-11T00:00:00.000Z", other.id, "other@example.com"],
-    );
+  it("filters enrollments before applying pagination", async () => {
+    await stub.seed({
+      "sequence-enrollments": [
+        ...Array.from({ length: 5 }, (_v, i) =>
+          enrollmentRow({
+            id: `active-${i}`,
+            sequence_id: "seq-1",
+            contact_email: `active-${i}@example.com`,
+            status: "active",
+            enrolled_at: `2026-01-0${i + 1}T00:00:00.000Z`,
+          }),
+        ),
+        enrollmentRow({
+          id: "cancelled-1",
+          sequence_id: "seq-1",
+          contact_email: "cancelled@example.com",
+          status: "cancelled",
+          enrolled_at: "2026-01-10T00:00:00.000Z",
+        }),
+        enrollmentRow({
+          id: "other-1",
+          sequence_id: "seq-2",
+          contact_email: "other@example.com",
+          status: "active",
+          enrolled_at: "2026-01-11T00:00:00.000Z",
+        }),
+      ],
+    });
 
-    const page = listEnrollments({ sequence_id: seq.id, status: "active", limit: 2, offset: 1 });
+    const page = listEnrollments({ sequence_id: "seq-1", status: "active", limit: 2, offset: 1 });
 
     expect(page.map((enrollment) => enrollment.contact_email)).toEqual([
       "active-3@example.com",
       "active-2@example.com",
     ]);
-    expect(page.every((enrollment) => enrollment.sequence_id === seq.id)).toBe(true);
+    expect(page.every((enrollment) => enrollment.sequence_id === "seq-1")).toBe(true);
     expect(page.every((enrollment) => enrollment.status === "active")).toBe(true);
   });
 });
 
 describe("countEnrollmentsByStatus", () => {
-  it("counts enrollment statuses without hydrating enrollment rows", () => {
-    const db = getDatabase();
-    const seq = createSequence({ name: "count-enrollments" });
-    enroll({ sequence_id: seq.id, contact_email: "active-a@example.com" });
-    enroll({ sequence_id: seq.id, contact_email: "active-b@example.com" });
-    enroll({ sequence_id: seq.id, contact_email: "cancelled@example.com" });
-    unenroll(seq.id, "cancelled@example.com");
-    enroll({ sequence_id: seq.id, contact_email: "completed@example.com" });
-    db.run("UPDATE sequence_enrollments SET status = 'completed' WHERE sequence_id = ? AND contact_email = ?", [seq.id, "completed@example.com"]);
+  it("counts enrollment statuses for a sequence", async () => {
+    await stub.seed({
+      "sequence-enrollments": [
+        enrollmentRow({ id: "e-a", sequence_id: "seq-1", contact_email: "active-a@example.com", status: "active" }),
+        enrollmentRow({ id: "e-b", sequence_id: "seq-1", contact_email: "active-b@example.com", status: "active" }),
+        enrollmentRow({ id: "e-c", sequence_id: "seq-1", contact_email: "cancelled@example.com", status: "cancelled" }),
+        enrollmentRow({ id: "e-d", sequence_id: "seq-1", contact_email: "completed@example.com", status: "completed" }),
+        // A different sequence's enrollment must not be counted.
+        enrollmentRow({ id: "e-e", sequence_id: "seq-2", contact_email: "other@example.com", status: "active" }),
+      ],
+    });
 
-    const queries: string[] = [];
-    const recordingDb = new Proxy(db, {
-      get(target, prop, receiver) {
-        if (prop === "query") return (sql: string) => {
-          queries.push(sql);
-          return target.query(sql);
-        };
-        const value = Reflect.get(target, prop, receiver);
-        return typeof value === "function" ? value.bind(target) : value;
-      },
-    }) as typeof db;
-
-    expect(countEnrollmentsByStatus(seq.id, recordingDb)).toEqual({
+    expect(countEnrollmentsByStatus("seq-1")).toEqual({
       active: 2,
       completed: 1,
       cancelled: 1,
       total: 4,
     });
-    expect(queries).toHaveLength(1);
-    expect(queries[0]).toContain("COUNT(*) AS total");
-    expect(queries[0]).not.toContain("SELECT *");
   });
 });
 
 // ─── getDueEnrollments ────────────────────────────────────────────────────────
 
 describe("getDueEnrollments", () => {
-  it("returns only active enrollments with next_send_at in the past", () => {
-    const db = getDatabase();
-    const seq = createSequence({ name: "due-seq" });
-    enroll({ sequence_id: seq.id, contact_email: "past@example.com" });
-
-    // Manually set next_send_at to past
-    db.run(
-      "UPDATE sequence_enrollments SET next_send_at = ? WHERE contact_email = ?",
-      [new Date(Date.now() - 1000).toISOString(), "past@example.com"],
-    );
-
-    enroll({ sequence_id: seq.id, contact_email: "future@example.com" });
-    // future enrollment has next_send_at in the future (default from delay_hours)
+  it("returns only active enrollments with next_send_at in the past", async () => {
+    await stub.seed({
+      "sequence-enrollments": [
+        enrollmentRow({
+          id: "due-past",
+          sequence_id: "seq-1",
+          contact_email: "past@example.com",
+          status: "active",
+          next_send_at: "2000-01-01T00:00:00.000Z",
+        }),
+        enrollmentRow({
+          id: "due-future",
+          sequence_id: "seq-1",
+          contact_email: "future@example.com",
+          status: "active",
+          next_send_at: "2099-01-01T00:00:00.000Z",
+        }),
+      ],
+    });
 
     const due = getDueEnrollments();
-    const emails = due.map(e => e.contact_email);
+    const emails = due.map((e) => e.contact_email);
     expect(emails).toContain("past@example.com");
     expect(emails).not.toContain("future@example.com");
   });
 
-  it("excludes cancelled enrollments", () => {
-    const db = getDatabase();
-    const seq = createSequence({ name: "cancelled-due" });
-    enroll({ sequence_id: seq.id, contact_email: "cancelled@example.com" });
-    db.run(
-      "UPDATE sequence_enrollments SET next_send_at = ?, status = 'cancelled' WHERE contact_email = ?",
-      [new Date(Date.now() - 1000).toISOString(), "cancelled@example.com"],
-    );
+  it("excludes cancelled enrollments", async () => {
+    await stub.seed({
+      "sequence-enrollments": [
+        enrollmentRow({
+          id: "cancelled-due",
+          sequence_id: "seq-1",
+          contact_email: "cancelled@example.com",
+          status: "cancelled",
+          next_send_at: "2000-01-01T00:00:00.000Z",
+        }),
+      ],
+    });
     expect(getDueEnrollments()).toHaveLength(0);
   });
 
-  it("limits due enrollments after ordering by next send time", () => {
-    const db = getDatabase();
-    const seq = createSequence({ name: "due-limit" });
-    for (let i = 0; i < 5; i++) {
-      const email = `due-${i}@example.com`;
-      enroll({ sequence_id: seq.id, contact_email: email });
-      db.run(
-        "UPDATE sequence_enrollments SET next_send_at = ? WHERE sequence_id = ? AND contact_email = ?",
-        [`2026-01-0${i + 1}T00:00:00.000Z`, seq.id, email],
-      );
-    }
+  it("limits due enrollments after ordering by next send time", async () => {
+    await stub.seed({
+      "sequence-enrollments": Array.from({ length: 5 }, (_v, i) =>
+        enrollmentRow({
+          id: `due-${i}`,
+          sequence_id: "seq-1",
+          contact_email: `due-${i}@example.com`,
+          status: "active",
+          next_send_at: `2000-01-0${i + 1}T00:00:00.000Z`,
+        }),
+      ),
+    });
 
     const due = getDueEnrollments({ limit: 2 });
 
@@ -444,7 +486,7 @@ describe("advanceEnrollment", () => {
     const seq = createSequence({ name: "complete-seq" });
     addStep({ sequence_id: seq.id, step_number: 1, delay_hours: 24, template_name: "t1" });
     const e = enroll({ sequence_id: seq.id, contact_email: "grace@example.com" });
-    // current_step is 0 (about to send step 1), advance moves to step 2 which doesn't exist
+    // current_step is 0 (about to send step 1); advance moves to step 2 which doesn't exist.
     const advanced = advanceEnrollment(e.id);
     expect(advanced?.status).toBe("completed");
     expect(advanced?.completed_at).not.toBeNull();
@@ -453,39 +495,5 @@ describe("advanceEnrollment", () => {
 
   it("returns null for unknown enrollment id", () => {
     expect(advanceEnrollment("bad-id")).toBeNull();
-  });
-
-  it("fetches only the next step when advancing", () => {
-    const db = getDatabase();
-    const seq = createSequence({ name: "advance-query-shape" });
-    addStep({ sequence_id: seq.id, step_number: 1, delay_hours: 24, template_name: "t1" });
-    addStep({ sequence_id: seq.id, step_number: 2, delay_hours: 48, template_name: "t2" });
-    addStep({ sequence_id: seq.id, step_number: 3, delay_hours: 72, template_name: "t3" });
-    const e = enroll({ sequence_id: seq.id, contact_email: "query@example.com" });
-    const queries: string[] = [];
-    const recordingDb = new Proxy(db, {
-      get(target, prop, receiver) {
-        if (prop === "query") return (sql: string) => {
-          queries.push(sql);
-          return target.query(sql);
-        };
-        const value = Reflect.get(target, prop, receiver);
-        return typeof value === "function" ? value.bind(target) : value;
-      },
-    }) as typeof db;
-
-    const advanced = advanceEnrollment(e.id, recordingDb);
-
-    expect(advanced?.current_step).toBe(1);
-    expect(queries.filter((sql) => sql.includes("FROM sequence_steps") && sql.includes("LIMIT 1 OFFSET ?"))).toHaveLength(1);
-    expect(queries.filter((sql) => sql.includes("FROM sequence_steps") && !sql.includes("LIMIT 1 OFFSET ?"))).toHaveLength(0);
-  });
-
-  it("cascade deletes steps on sequence delete", () => {
-    const seq = createSequence({ name: "cascade-seq" });
-    addStep({ sequence_id: seq.id, step_number: 1, delay_hours: 24, template_name: "t1" });
-    expect(listSteps(seq.id)).toHaveLength(1);
-    deleteSequence(seq.id);
-    expect(listSteps(seq.id)).toHaveLength(0);
   });
 });

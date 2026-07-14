@@ -11,15 +11,13 @@
 // without an await), so this bridge performs the HTTP call synchronously via a
 // spawned `curl`. Bun has no synchronous `fetch`.
 //
-// SAFETY: the API key is NEVER placed on the process argv (it would leak into
-// `ps`/monitoring). It is written to a 0600 curl config file that is deleted
-// immediately after the call. The key value is never logged or embedded in an
-// error.
+// SAFETY: the API key and request body are NEVER placed on process argv or in
+// local temp files. They are passed to `curl -K -` over stdin, and the key value
+// is never logged or embedded in an error.
 
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { EMAILS_SESSION_TOKEN_ENV, loadEmailsClientEnvSecret } from "../lib/client-env.js";
+import { getEmailsMode } from "../lib/mode.js";
 
 const APP = "emails";
 
@@ -37,7 +35,12 @@ export class SelfHostedHttpError extends Error {
 
 export interface SelfHostedConfig {
   baseUrl: string; // `<origin>/v1`
-  apiKey: string;
+  /**
+   * Bearer credential threaded into BOTH transports. A user session token
+   * (emss_…) when present, otherwise the operator API key. The client never
+   * sends a tenant — the server derives it from this credential.
+   */
+  credential: string;
 }
 
 function toV1BaseUrl(apiUrl: string): string {
@@ -58,80 +61,108 @@ function toV1BaseUrl(apiUrl: string): string {
 }
 
 let _cachedSignature: string | null = null;
-let _cachedConfig: SelfHostedConfig | null | undefined;
-let _resourceRoutingDisabledDepth = 0;
+let _cachedConfig: SelfHostedConfig | null = null;
+
+const CONFIG_HELP =
+  "Configure the client via EMAILS_CLIENT_ENV_SECRET (an encrypted client env file), " +
+  "or set EMAILS_MODE=self_hosted with EMAILS_SELF_HOSTED_URL and EMAILS_SELF_HOSTED_API_KEY.";
 
 /**
- * Resolve strict client configuration. Credentials never imply a mode and no
- * endpoint is supplied by the package.
+ * Resolve strict self-hosted client configuration. This function is called only
+ * after self_hosted has been selected; local mode never loads a client-env
+ * secret and never needs an HTTP endpoint.
  */
-export function resolveSelfHostedConfig(env: NodeJS.ProcessEnv = process.env): SelfHostedConfig | null {
-  if (_resourceRoutingDisabledDepth > 0) return null;
-  const modeRaw = env["EMAILS_MODE"]?.trim() ?? env["HASNA_EMAILS_MODE"]?.trim();
+export function resolveSelfHostedConfig(
+  env: NodeJS.ProcessEnv = process.env,
+  options: { selectedMode?: "self_hosted" } = {},
+): SelfHostedConfig {
+  let modeRaw = env["EMAILS_MODE"]?.trim() ?? env["HASNA_EMAILS_MODE"]?.trim() ?? options.selectedMode;
+  if (modeRaw === "local") {
+    throw new Error(`${APP}: self-hosted configuration was requested while EMAILS_MODE=local.`);
+  }
+  if (modeRaw === "self_hosted" || env["EMAILS_CLIENT_ENV_SECRET"]?.trim()) {
+    loadEmailsClientEnvSecret(env);
+    modeRaw = env["EMAILS_MODE"]?.trim() ?? env["HASNA_EMAILS_MODE"]?.trim() ?? options.selectedMode ?? modeRaw;
+  }
   const apiUrl = env["EMAILS_SELF_HOSTED_URL"]?.trim();
   const apiKey = env["EMAILS_SELF_HOSTED_API_KEY"]?.trim();
+  const sessionToken = env[EMAILS_SESSION_TOKEN_ENV]?.trim();
+  // Prefer a user session token over the operator API key; the server maps
+  // whichever credential to its tenant. Tenant is never sent by the client.
+  const credential = sessionToken || apiKey;
 
-  const signature = `${modeRaw ?? ""}|${apiUrl ?? ""}|${apiKey ? "k" : ""}`;
-  if (signature === _cachedSignature && _cachedConfig !== undefined) return _cachedConfig ?? null;
+  const signature = `${modeRaw ?? ""}|${apiUrl ?? ""}|${sessionToken ? "s" : ""}${apiKey ? "k" : ""}`;
+  if (signature === _cachedSignature && _cachedConfig) return _cachedConfig;
 
-  const config = computeConfig(modeRaw, apiUrl, apiKey);
+  const config = computeConfig(modeRaw, apiUrl, credential);
   _cachedSignature = signature;
   _cachedConfig = config;
   return config;
 }
 
+function assertSupportedMode(modeRaw: string | undefined): void {
+  if (modeRaw !== "self_hosted") {
+    const received = modeRaw ? `received '${modeRaw}'` : "no explicit mode was selected";
+    throw new Error(
+      `${APP}: self-hosted configuration requires EMAILS_MODE=self_hosted; ${received}. ${CONFIG_HELP}`,
+    );
+  }
+}
+
 function computeConfig(
   modeRaw: string | undefined,
   apiUrl: string | undefined,
-  apiKey: string | undefined,
-): SelfHostedConfig | null {
-  if (!modeRaw || modeRaw === "local") {
-    if (apiUrl || apiKey) {
-      throw new Error(
-        "Self-hosted credentials were supplied without EMAILS_MODE=self_hosted. " +
-          "Set the mode explicitly or remove EMAILS_SELF_HOSTED_URL and EMAILS_SELF_HOSTED_API_KEY.",
-      );
-    }
-    return null;
-  }
-  if (modeRaw !== "self_hosted") {
+  credential: string | undefined,
+): SelfHostedConfig {
+  assertSupportedMode(modeRaw);
+  if (!apiUrl || !credential) {
+    const missing = [
+      !apiUrl ? "EMAILS_SELF_HOSTED_URL" : null,
+      !credential ? "EMAILS_SELF_HOSTED_API_KEY or EMAILS_SESSION_TOKEN" : null,
+    ].filter(Boolean).join(" and ");
     throw new Error(
-      `Unsupported Emails mode '${modeRaw}'. Use exactly local or self_hosted; cloud, remote, and hybrid aliases were removed.`,
+      `${APP}: the self-hosted client is not configured (${missing} missing). ${CONFIG_HELP}`,
     );
   }
-  if (!apiKey) {
-    throw new Error(
-      `${APP}: self_hosted mode requires EMAILS_SELF_HOSTED_API_KEY.`,
-    );
-  }
-  if (!apiUrl) {
-    throw new Error(
-      `${APP}: self_hosted mode requires an operator-supplied EMAILS_SELF_HOSTED_URL.`,
-    );
-  }
-
-  return { baseUrl: toV1BaseUrl(apiUrl), apiKey };
+  return { baseUrl: toV1BaseUrl(apiUrl), credential };
 }
 
-/** True only for explicit, completely configured self-hosted mode. */
-export function isSelfHostedMode(): boolean {
-  return resolveSelfHostedConfig() !== null;
+/**
+ * Resolve the `<origin>/v1` base URL WITHOUT requiring a credential. Used only
+ * by the unauthenticated auth endpoints (signup/login), where the caller may not
+ * hold a credential yet. A vault load failure caused solely by a missing
+ * credential is tolerated as long as the URL is present.
+ */
+function resolveSelfHostedBaseUrlLenient(env: NodeJS.ProcessEnv = process.env): string {
+  let loadError: unknown;
+  try {
+    loadEmailsClientEnvSecret(env);
+  } catch (error) {
+    loadError = error;
+  }
+  assertSupportedMode(env["EMAILS_MODE"]?.trim() ?? env["HASNA_EMAILS_MODE"]?.trim());
+  const apiUrl = env["EMAILS_SELF_HOSTED_URL"]?.trim();
+  if (!apiUrl) {
+    if (loadError) throw loadError;
+    throw new Error(
+      `${APP}: the self-hosted client is not configured (EMAILS_SELF_HOSTED_URL missing). ${CONFIG_HELP}`,
+    );
+  }
+  return toV1BaseUrl(apiUrl);
 }
 
 /** Reset the memoized config (tests flip env between cases). */
 export function resetSelfHostedConfigCache(): void {
   _cachedSignature = null;
-  _cachedConfig = undefined;
+  _cachedConfig = null;
 }
 
-/** Run synchronous repository reads against local config even in self_hosted mode. */
-export function withSelfHostedResourceRoutingDisabled<T>(fn: () => T): T {
-  _resourceRoutingDisabledDepth += 1;
-  try {
-    return fn();
-  } finally {
-    _resourceRoutingDisabledDepth -= 1;
-  }
+/**
+ * Shared mode predicate for synchronous repositories. It resolves the same
+ * canonical process mode as the CLI/MCP data-source seam.
+ */
+export function isSelfHostedMode(): boolean {
+  return getEmailsMode() === "self_hosted";
 }
 
 interface CurlResult {
@@ -162,61 +193,87 @@ export class SelfHostedTransportError extends Error {
   }
 }
 
+function curlConfigValue(value: string): string {
+  return JSON.stringify(value);
+}
+
+const CURL_ENV_ALLOWLIST = [
+  "PATH",
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "ALL_PROXY",
+  "NO_PROXY",
+  "http_proxy",
+  "https_proxy",
+  "all_proxy",
+  "no_proxy",
+  "CURL_CA_BUNDLE",
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
+] as const;
+
+function curlProcessEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const key of CURL_ENV_ALLOWLIST) {
+    const value = process.env[key];
+    if (value !== undefined) env[key] = value;
+  }
+  return env;
+}
+
 function httpRequest(config: SelfHostedConfig, method: string, path: string, body?: unknown): CurlResult {
   const url = `${config.baseUrl}${path}`;
   const connectTimeout = connectTimeoutSeconds();
   const maxTime = maxTimeSeconds();
-  const dir = mkdtempSync(join(tmpdir(), "emails-self-hosted-"));
-  const cfgPath = join(dir, "curl.cfg");
-  try {
-    const lines = [
-      `url = "${url}"`,
-      `request = "${method}"`,
-      `header = "Authorization: Bearer ${config.apiKey}"`,
-      `header = "Accept: application/json"`,
-      // Bounded, fail-loud transport (never hang indefinitely).
-      `connect-timeout = ${connectTimeout}`,
-      `max-time = ${maxTime}`,
-      `silent`,
-      `show-error`,
-    ];
-    if (body !== undefined) {
-      lines.push(`header = "Content-Type: application/json"`);
-      lines.push(`data-binary = "@${join(dir, "body.json")}"`);
-      writeFileSync(join(dir, "body.json"), JSON.stringify(body), { mode: 0o600 });
-    }
-    writeFileSync(cfgPath, lines.join("\n"), { mode: 0o600 });
-
-    const proc = spawnSync("curl", ["-K", cfgPath, "-w", "\n%{http_code}"], {
-      encoding: "utf-8",
-      maxBuffer: 128 * 1024 * 1024,
-      // Hard ceiling in case curl itself wedges: kill just past its own max-time.
-      timeout: (maxTime + connectTimeout + 5) * 1000,
-    });
-    if (proc.error) {
-      // spawnSync's own timeout (ETIMEDOUT) or a spawn failure — surface as a
-      // transport error, not a mysterious throw.
-      throw new SelfHostedTransportError(method, path, (proc.error as Error).message || "curl could not run");
-    }
-    const out = proc.stdout ?? "";
-    const nl = out.lastIndexOf("\n");
-    const statusStr = nl >= 0 ? out.slice(nl + 1).trim() : out.trim();
-    const bodyText = nl >= 0 ? out.slice(0, nl) : "";
-    const status = Number.parseInt(statusStr, 10);
-    // http_code 000 (or unparseable) means curl never got an HTTP response:
-    // connect failure or the connect/max-time budget elapsed. Fail LOUD so a
-    // read never silently degrades to an empty list with a success exit code.
-    if (!Number.isFinite(status) || status === 0) {
-      const stderr = (proc.stderr || "").trim();
-      const detail = proc.status === 28
-        ? `timed out after ${maxTime}s`
-        : (stderr || `curl exited ${proc.status ?? "unknown"}`);
-      throw new SelfHostedTransportError(method, path, detail);
-    }
-    return { status, body: bodyText };
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
+  const lines = [
+    `url = ${curlConfigValue(url)}`,
+    `request = ${curlConfigValue(method)}`,
+    `header = ${curlConfigValue("Accept: application/json")}`,
+    // Bounded, fail-loud transport (never hang indefinitely).
+    `connect-timeout = ${connectTimeout}`,
+    `max-time = ${maxTime}`,
+    `silent`,
+    `show-error`,
+  ];
+  // Omit the Authorization header entirely when no credential is available (the
+  // unauthenticated /v1/auth/signup|login path); never send an empty Bearer.
+  if (config.credential) {
+    lines.push(`header = ${curlConfigValue(`Authorization: Bearer ${config.credential}`)}`);
   }
+  if (body !== undefined) {
+    lines.push(`header = ${curlConfigValue("Content-Type: application/json")}`);
+    lines.push(`data-binary = ${curlConfigValue(JSON.stringify(body))}`);
+  }
+
+  const proc = spawnSync("curl", ["-q", "-K", "-", "-w", "\n%{http_code}"], {
+    encoding: "utf-8",
+    env: curlProcessEnv(),
+    input: lines.join("\n"),
+    maxBuffer: 128 * 1024 * 1024,
+    // Hard ceiling in case curl itself wedges: kill just past its own max-time.
+    timeout: (maxTime + connectTimeout + 5) * 1000,
+  });
+  if (proc.error) {
+    // spawnSync's own timeout (ETIMEDOUT) or a spawn failure — surface as a
+    // transport error, not a mysterious throw.
+    throw new SelfHostedTransportError(method, path, (proc.error as Error).message || "curl could not run");
+  }
+  const out = proc.stdout ?? "";
+  const nl = out.lastIndexOf("\n");
+  const statusStr = nl >= 0 ? out.slice(nl + 1).trim() : out.trim();
+  const bodyText = nl >= 0 ? out.slice(0, nl) : "";
+  const status = Number.parseInt(statusStr, 10);
+  // http_code 000 (or unparseable) means curl never got an HTTP response:
+  // connect failure or the connect/max-time budget elapsed. Fail LOUD so a
+  // read never silently degrades to an empty list with a success exit code.
+  if (!Number.isFinite(status) || status === 0) {
+    const stderr = (proc.stderr || "").trim();
+    const detail = proc.status === 28
+      ? `timed out after ${maxTime}s`
+      : (stderr || `curl exited ${proc.status ?? "unknown"}`);
+    throw new SelfHostedTransportError(method, path, detail);
+  }
+  return { status, body: bodyText };
 }
 
 function parseJson(text: string): unknown {
@@ -293,12 +350,11 @@ function encodeQuery(query?: Record<string, string | number | boolean | undefine
 }
 
 /**
- * Return a self-hosted store for `resource`, or null in local mode. Invalid or
- * incomplete self-hosted configuration fails closed.
+ * Return a store for the self-hosted client path. Missing or invalid client
+ * configuration throws before any request is attempted.
  */
-export function selfHostedStoreFor(resource: string): SelfHostedResourceStore | null {
+export function selfHostedStoreFor(resource: string): SelfHostedResourceStore {
   const config = resolveSelfHostedConfig();
-  if (!config) return null;
   const clean = resource.replace(/^\/+|\/+$/g, "");
   const base = `/${clean}`;
   const singular = singularOf(clean);
@@ -336,4 +392,96 @@ export function selfHostedStoreFor(resource: string): SelfHostedResourceStore | 
       return true;
     },
   };
+}
+
+// ---- bespoke /v1 endpoints (auth, keys, me) -------------------------------
+//
+// Auth/session/key-management endpoints are NOT generic CRUD resources: they
+// return status-dependent shapes (401/403, needs_tenant, unverified, a token
+// shown once) that the CLI must branch on. This helper performs a single
+// authenticated (or, for signup/login, unauthenticated) call and returns the
+// raw status + parsed JSON. The Bearer credential is threaded from
+// resolveSelfHostedConfig and never logged.
+
+export interface SelfHostedApiResult {
+  status: number;
+  json: unknown;
+  bodyText: string;
+}
+
+export interface SelfHostedApiRequestOptions {
+  /**
+   * When false, resolve only the base URL and send no Authorization header —
+   * for the unauthenticated auth endpoints (signup/login). Defaults to true.
+   */
+  requireCredential?: boolean;
+}
+
+export function selfHostedApiRequest(
+  method: string,
+  path: string,
+  body?: unknown,
+  options: SelfHostedApiRequestOptions = {},
+): SelfHostedApiResult {
+  const requireCredential = options.requireCredential !== false;
+  let config: SelfHostedConfig;
+  if (requireCredential) {
+    config = resolveSelfHostedConfig();
+  } else {
+    // resolveSelfHostedBaseUrlLenient loads the vault entry, so env carries any
+    // available credential afterwards. Send it if present; otherwise none.
+    const baseUrl = resolveSelfHostedBaseUrlLenient();
+    const credential = process.env[EMAILS_SESSION_TOKEN_ENV]?.trim() || process.env["EMAILS_SELF_HOSTED_API_KEY"]?.trim() || "";
+    config = { baseUrl, credential };
+  }
+  const { status, body: text } = httpRequest(config, method, path, body);
+  return { status, json: parseJson(text), bodyText: text };
+}
+
+// ---- id resolution (self-hosted) ------------------------------------------
+//
+// Replaces the deleted local resolvePartialId family. A full 36-char id is
+// verified with a single GET; a shorter prefix is matched against a bounded
+// recent scan of the resource. All resolution routes to the /v1 API — never a
+// local island.
+
+const RESOLVE_SCAN_CAP = 1000;
+
+export function resolveResourceId(resource: string, partialId: string): string | null {
+  const value = partialId.trim();
+  if (!value) return null;
+  const store = selfHostedStoreFor(resource);
+  if (value.length >= 36) {
+    return store.get(value) ? value : null;
+  }
+  const matches = store
+    .list({ limit: RESOLVE_SCAN_CAP })
+    .map((row) => String((row as { id?: unknown }).id ?? ""))
+    .filter((id) => id.startsWith(value));
+  return matches.length === 1 ? matches[0]! : null;
+}
+
+export function listResourceIdMatches(resource: string, partialId: string, limit = 6): string[] {
+  const value = partialId.trim();
+  const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 6;
+  const store = selfHostedStoreFor(resource);
+  return store
+    .list({ limit: RESOLVE_SCAN_CAP })
+    .map((row) => String((row as { id?: unknown }).id ?? ""))
+    .filter((id) => id.startsWith(value))
+    .slice(0, safeLimit);
+}
+
+export function resolveResourceIdOrThrow(resource: string, partialId: string): string {
+  const value = partialId.trim();
+  if (!value) throw new Error(`Missing ID for resource '${resource}'.`);
+  const id = resolveResourceId(resource, value);
+  if (id) return id;
+  const matches = listResourceIdMatches(resource, value, 6);
+  if (matches.length === 0) {
+    throw new Error(`Could not resolve ID '${value}' in resource '${resource}'.`);
+  }
+  const preview = matches.slice(0, 5).join(", ");
+  const count = matches.length >= 6 ? "at least 6" : String(matches.length);
+  throw new Error(`Ambiguous ID '${value}' in resource '${resource}' (${count} matches): ${preview}`);
 }

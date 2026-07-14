@@ -1,8 +1,13 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+// Self-hosted-ONLY: the alias repo routes every read/write to `/v1/aliases`, so
+// these tests drive the REAL command against an out-of-process /v1 stub (see
+// src/test-support/v1-stub.ts). No local SQLite exists anymore.
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { Command } from "commander";
 import { createAlias, ensureDefaultCatchAll } from "../../db/aliases.js";
-import { closeDatabase, resetDatabase } from "../../db/database.js";
+import { startV1Stub, type V1Stub } from "../../test-support/v1-stub.js";
 import { registerAliasCommands } from "./alias.js";
+
+let stub: V1Stub;
 
 async function runAliasCommand(args: string[]) {
   const program = new Command();
@@ -17,15 +22,15 @@ async function runAliasCommand(args: string[]) {
   return { data, out: out.join("\n") };
 }
 
-beforeEach(() => {
-  process.env["EMAILS_DB_PATH"] = ":memory:";
-  resetDatabase();
+beforeAll(async () => {
+  stub = await startV1Stub();
 });
-
-afterEach(() => {
-  closeDatabase();
-  delete process.env["EMAILS_DB_PATH"];
+afterAll(() => stub.stop());
+beforeEach(async () => {
+  await stub.reset();
+  stub.applyEnv();
 });
+afterEach(() => stub.clearEnv());
 
 describe("alias list command", () => {
   it("paginates aliases for human and structured output", async () => {
@@ -59,5 +64,18 @@ describe("alias list command", () => {
       "c@x.com",
     ]);
     expect(result.out).not.toContain("a@y.com");
+  });
+
+  it("routes add/resolve/remove through the /v1 API", async () => {
+    const created = await runAliasCommand(["alias", "add", "hello@acme.com", "ops@acme.com"]);
+    const alias = created.data as { id: string; target_address: string };
+    expect(alias.target_address).toBe("ops@acme.com");
+    expect((await stub.list("aliases")).map((a) => a["local_part"])).toContain("hello");
+
+    const resolved = await runAliasCommand(["alias", "resolve", "hello@acme.com"]);
+    expect(resolved.data).toEqual({ recipient: "hello@acme.com", target: "ops@acme.com" });
+
+    await runAliasCommand(["alias", "remove", alias.id]);
+    expect((await stub.list("aliases")).some((a) => a["id"] === alias.id)).toBe(false);
   });
 });

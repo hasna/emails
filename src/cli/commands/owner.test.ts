@@ -1,10 +1,15 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+// Self-hosted-ONLY: owners route to `/v1/owners` and address ownership fields are
+// patched on `/v1/addresses`, so these tests drive the REAL command against an
+// out-of-process /v1 stub (see src/test-support/v1-stub.ts). No local SQLite
+// exists anymore.
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { Command } from "commander";
 import { createAddress } from "../../db/addresses.js";
-import { closeDatabase, getDatabase, resetDatabase } from "../../db/database.js";
 import { createOwner, assignAddressOwner } from "../../db/owners.js";
-import { createProvider } from "../../db/providers.js";
+import { startV1Stub, type V1Stub } from "../../test-support/v1-stub.js";
 import { registerOwnerCommands } from "./owner.js";
+
+let stub: V1Stub;
 
 async function runOwnerCommand(args: string[]) {
   const program = new Command();
@@ -19,24 +24,32 @@ async function runOwnerCommand(args: string[]) {
   return { data, out: out.join("\n") };
 }
 
-beforeEach(() => {
-  process.env["EMAILS_DB_PATH"] = ":memory:";
-  resetDatabase();
+beforeAll(async () => {
+  stub = await startV1Stub();
 });
-
-afterEach(() => {
-  closeDatabase();
-  delete process.env["EMAILS_DB_PATH"];
+afterAll(() => stub.stop());
+beforeEach(async () => {
+  await stub.reset();
+  stub.applyEnv();
 });
+afterEach(() => stub.clearEnv());
 
 describe("owner commands", () => {
   it("paginates owner list output", async () => {
-    const db = getDatabase();
+    const owners = [];
     for (let i = 0; i < 5; i++) {
-      const owner = createOwner({ type: "agent", name: `owner-${i}` });
-      const timestamp = `2026-01-0${i + 1}T00:00:00.000Z`;
-      db.run("UPDATE owners SET created_at = ?, updated_at = ? WHERE id = ?", [timestamp, timestamp, owner.id]);
+      const stamp = `2026-01-0${i + 1}T00:00:00.000Z`;
+      owners.push({
+        id: crypto.randomUUID(),
+        type: "agent",
+        name: `owner-${i}`,
+        contact_email: null,
+        external_id: null,
+        created_at: stamp,
+        updated_at: stamp,
+      });
     }
+    await stub.seed({ owners });
 
     const result = await runOwnerCommand(["owner", "list", "--type", "agent", "--limit", "2", "--offset", "1"]);
     const data = result.data as Array<{ name: string }>;
@@ -46,39 +59,50 @@ describe("owner commands", () => {
     expect(result.out).not.toContain("owner-4");
   });
 
-  it("lists owned addresses with provider, owner, and administrator details", async () => {
-    const provider = createProvider({ name: "sandbox", type: "sandbox" });
+  it("lists owned addresses with owner and administrator ids", async () => {
     const human = createOwner({ type: "human", name: "human-user" });
     const agent = createOwner({ type: "agent", name: "agent-admin" });
-    const address = createAddress({ provider_id: provider.id, email: "human@example.com" });
+    const address = createAddress({ provider_id: "prov-1", email: "human@example.com" });
     assignAddressOwner(address.id, human.id, agent.id);
 
     const result = await runOwnerCommand(["owner", "addresses", "human-user"]);
 
     expect(result.out).toContain("human-user owns");
-    expect(result.out).toContain("sandbox");
-    expect(result.out).toContain("owner=human-user(human)");
-    expect(result.out).toContain("admin=agent-admin");
+    expect(result.out).toContain("human@example.com");
+    expect(result.out).toContain(`owner=${human.id.slice(0, 8)}`);
+    expect(result.out).toContain(`admin=${agent.id.slice(0, 8)}`);
     expect(result.data).toMatchObject([
       {
         email: "human@example.com",
-        provider_name: "sandbox",
-        owner: { id: human.id, name: "human-user" },
-        administrator: { id: agent.id, name: "agent-admin" },
+        owner_id: human.id,
+        administrator_id: agent.id,
       },
     ]);
   });
 
-  it("paginates owner addresses before enrichment", async () => {
-    const db = getDatabase();
-    const provider = createProvider({ name: "sandbox", type: "sandbox" });
-    const agent = createOwner({ type: "agent", name: "paged-owner" });
+  it("paginates owner addresses", async () => {
+    const agentId = crypto.randomUUID();
+    const addresses = [];
     for (let i = 0; i < 5; i++) {
-      const address = createAddress({ provider_id: provider.id, email: `paged-${i}@example.com` });
-      assignAddressOwner(address.id, agent.id);
-      const timestamp = `2026-01-0${i + 1}T00:00:00.000Z`;
-      db.run("UPDATE addresses SET created_at = ?, updated_at = ? WHERE id = ?", [timestamp, timestamp, address.id]);
+      const stamp = `2026-01-0${i + 1}T00:00:00.000Z`;
+      addresses.push({
+        id: crypto.randomUUID(),
+        email: `paged-${i}@example.com`,
+        provider_id: "prov-1",
+        status: "active",
+        verified: false,
+        owner_id: agentId,
+        administrator_id: agentId,
+        created_at: stamp,
+        updated_at: stamp,
+      });
     }
+    await stub.seed({
+      owners: [
+        { id: agentId, type: "agent", name: "paged-owner", contact_email: null, external_id: null, created_at: "2026-01-01T00:00:00.000Z", updated_at: "2026-01-01T00:00:00.000Z" },
+      ],
+      addresses,
+    });
 
     const result = await runOwnerCommand(["owner", "addresses", "paged-owner", "--limit", "2", "--offset", "1"]);
     const data = result.data as Array<{ email: string }>;

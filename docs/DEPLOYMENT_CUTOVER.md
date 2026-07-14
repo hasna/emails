@@ -14,3 +14,26 @@ old API key remain valid during the rollback window. Apply the Emails bridge,
 mint a new key with `emails self-hosted key rotate`, move and verify clients,
 then revoke the old key explicitly. Do not delete or rewrite historical
 migration-ledger rows.
+
+## Tenant-sealing migration gate (0016)
+
+Before migration 0016, discover and inventory every old API, worker, ingest,
+backfill, scheduled, and one-off writer. Drain and stop all of them, then run a
+new-code-compatible migrator through 0016 and verify the migration ledger before
+starting any service. Start only tenant-aware new-code writers after the ledger
+check passes.
+
+For the AWS module, set `enable_automatic_deployment_rollback = false` before
+draining writers and keep it false through 0016 and the first tenant-aware API
+and worker activation. A failed activation must roll forward; ECS must not be
+allowed to restore an unknown previous deployment. After both services complete
+a tenant-aware deployment and pass verification, set
+`enable_automatic_deployment_rollback = true` in a separate reviewed apply.
+Terraform rejects enabling the gate before `migrations_complete`; setting it
+true is the operator's explicit acknowledgement that the previous completed API
+and worker deployment is tenant-aware and schema-compatible.
+
+After 0016 commits, a pre-tenancy or otherwise unscoped image is not a valid
+rollback target. Roll forward to a corrected tenant-aware image, or execute an
+operator-reviewed explicit schema recovery plan while every writer remains
+stopped.

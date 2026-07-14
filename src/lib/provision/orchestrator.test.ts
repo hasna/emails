@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { closeDatabase, resetDatabase } from "../../db/database.js";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { startV1Stub, type V1Stub } from "../../test-support/v1-stub.js";
 import { createProvider } from "../../db/providers.js";
 import { createDomain } from "../../db/domains.js";
 import { createAddress } from "../../db/addresses.js";
@@ -12,17 +12,24 @@ import {
 } from "../../db/provisioning.js";
 import { advanceDomain, advanceAddress, type DomainDeps, type AddressDeps } from "./orchestrator.js";
 
+// The orchestrator's advanceDomain/advanceAddress are async and read/write the
+// provisioning state that the self-hosted client persists on the /v1 domain,
+// address, and provisioning resources. They are exercised end-to-end against the
+// out-of-process /v1 stub; the injected DomainDeps/AddressDeps stay pure fakes.
+let stub: V1Stub;
 let providerId: string;
 
-beforeEach(() => {
-  process.env["EMAILS_DB_PATH"] = ":memory:";
-  resetDatabase();
+beforeAll(async () => {
+  stub = await startV1Stub();
+});
+afterAll(() => stub.stop());
+
+beforeEach(async () => {
+  await stub.reset();
+  stub.applyEnv();
   providerId = createProvider({ name: "ses", type: "ses" }).id;
 });
-afterEach(() => {
-  closeDatabase();
-  delete process.env["EMAILS_DB_PATH"];
-});
+afterEach(() => stub.clearEnv());
 
 function happyDomainDeps(overrides: Partial<DomainDeps> = {}): DomainDeps {
   return {

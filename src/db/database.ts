@@ -4,16 +4,6 @@ export type { Database };
 import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { sqlEmailAddress, sqlEmailDomain } from "./email-address-sql.js";
-import { selfHostedStoreFor, isSelfHostedMode } from "./self-hosted-store.js";
-
-// Resources whose repository is fully routed to the selfHosted HTTP API in
-// self_hosted mode. Only these route id-resolution to the selfHosted so it stays
-// consistent with the repo layer; everything else stays local. `domains` and
-// `addresses` repos (src/db/domains.ts, src/db/addresses.ts + address-lifecycle)
-// route ALL reads/writes to the selfHosted store, so their id-resolution MUST also
-// resolve against the selfHosted dataset — otherwise a flipped machine resolves ids
-// against its empty local island (the split-brain bug this set exists to close).
-const SELF_HOSTED_BACKED_RESOURCES = new Set(["domains", "addresses"]);
 
 function isInMemoryDb(path: string): boolean {
   return path === ":memory:" || path.startsWith("file::memory:");
@@ -2609,22 +2599,6 @@ export function resolvePartialId(db: Database, table: string, partialId: string)
     throw new Error(`resolvePartialId: refusing unknown table '${table}'`);
   }
 
-  // Self-hosted (self_hosted) mode: resolve ids for selfHosted-backed resources against the
-  // selfHosted HTTP API so CLI helpers (remove/get by id) operate on the selfHosted dataset.
-  if (SELF_HOSTED_BACKED_RESOURCES.has(table) && isSelfHostedMode()) {
-    const store = selfHostedStoreFor(table);
-    if (store) {
-      if (partialId.length >= 36) {
-        return store.get(partialId) ? partialId : null;
-      }
-      const matches = store
-        .list({ limit: 1000 })
-        .map((row) => String((row as { id?: unknown }).id ?? ""))
-        .filter((id) => id.startsWith(partialId));
-      return matches.length === 1 ? matches[0]! : null;
-    }
-  }
-
   if (partialId.length >= 36) {
     const row = db.query(`SELECT id FROM ${table} WHERE id = ?`).get(partialId) as { id: string } | null;
     return row?.id ?? null;
@@ -2642,20 +2616,6 @@ export function listPartialIdMatches(db: Database, table: string, partialId: str
     throw new Error(`resolvePartialId: refusing unknown table '${table}'`);
   }
   const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 6;
-
-  // Self-hosted (self_hosted) mode: match ambiguity previews against the selfHosted dataset
-  // for selfHosted-backed resources so id resolution never leaks or consults the
-  // local SQLite store when the client is routed to the selfHosted HTTP API.
-  if (SELF_HOSTED_BACKED_RESOURCES.has(table) && isSelfHostedMode()) {
-    const store = selfHostedStoreFor(table);
-    if (store) {
-      return store
-        .list({ limit: 1000 })
-        .map((row) => String((row as { id?: unknown }).id ?? ""))
-        .filter((id) => id.startsWith(partialId))
-        .slice(0, safeLimit);
-    }
-  }
 
   const rows = db
     .query(`SELECT id FROM ${table} WHERE id LIKE ? LIMIT ?`)

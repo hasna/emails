@@ -10,15 +10,12 @@ export const allCommandModules = [
   "email-log",
   "sync",
   "serve",
-  "config",
   "templates",
   "contacts",
   "groups",
   "sequences",
-  "sandbox",
   "misc",
   "inbox",
-  "refresh",
   "provision",
   "owner",
   "alias",
@@ -31,6 +28,7 @@ export const allCommandModules = [
   "daemon",
   "db",
   "self-hosted",
+  "auth",
 ] as const;
 
 export type CommandModule = typeof allCommandModules[number];
@@ -57,14 +55,12 @@ export const knownCommandNames = new Set([
   "analytics",
   "serve",
   "mcp",
-  "config",
   "template",
   "preview",
   "contact",
   "contacts",
   "group",
   "sequence",
-  "sandbox",
   "schedule",
   "scheduled",
   "scheduler",
@@ -75,7 +71,6 @@ export const knownCommandNames = new Set([
   "verify-email",
   "inbox",
   "code",
-  "refresh",
   "provision",
   "owner",
   "alias",
@@ -92,6 +87,9 @@ export const knownCommandNames = new Set([
   "logs",
   "db",
   "self-hosted",
+  "auth",
+  "keys",
+  "whoami",
 ]);
 
 export function routeRootPromptArgs(args: string[]): string[] {
@@ -132,14 +130,12 @@ export function commandModulesFor(args: string[]): readonly CommandModule[] {
     case "analytics": return ["sync"];
     case "serve":
     case "mcp": return ["serve"];
-    case "config": return ["config"];
     case "template":
     case "preview": return ["templates"];
     case "contact":
     case "contacts": return ["contacts"];
     case "group": return ["groups"];
     case "sequence": return ["sequences"];
-    case "sandbox": return ["sandbox"];
     case "schedule":
     case "scheduled":
     case "scheduler":
@@ -151,7 +147,6 @@ export function commandModulesFor(args: string[]): readonly CommandModule[] {
     case "inbox":
     case "code":
     case "links": return ["inbox"];
-    case "refresh": return ["refresh"];
     case "provision": return ["provision"];
     case "owner": return ["owner"];
     case "alias": return ["alias"];
@@ -167,6 +162,9 @@ export function commandModulesFor(args: string[]): readonly CommandModule[] {
     case "logs": return ["daemon"];
     case "db": return ["db"];
     case "self-hosted": return ["self-hosted"];
+    case "auth":
+    case "keys":
+    case "whoami": return ["auth"];
     default: return allCommandModules;
   }
 }

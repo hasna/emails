@@ -1,6 +1,18 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { closeDatabase, resetDatabase, getDatabase } from "./database.js";
-import { createProvider } from "./providers.js";
+// Self-hosted-ONLY: provisioning STATE lives as columns on the /v1 domains and
+// addresses entities (read/written via /v1/domains/<id> and /v1/addresses/<id>),
+// the append-only audit trail routes to /v1/provisioning, and the daemon "due
+// work" queue is derived client-side by listing + filtering. Exercised against the
+// out-of-process /v1 stub (see src/test-support/v1-stub.ts).
+//
+// Migrated from the deleted local-SQLite pattern. Notes on DELETED coverage:
+//   - The `db.query("SELECT ... FROM provisioning_events")` and `dns_provider`
+//     column-default assertions tested SQLite migration/column defaults that the
+//     /v1 model does not carry. createDomain no longer sends a `dns_provider`
+//     default, so that assertion is dropped; the empty-events read is kept as a
+//     real /v1 read.
+
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "bun:test";
+import { startV1Stub, type V1Stub } from "../test-support/v1-stub.js";
 import { createDomain, getDomain } from "./domains.js";
 import { createAddress } from "./addresses.js";
 import {
@@ -24,32 +36,42 @@ import {
   getProvisioningWorkSummary,
 } from "./provisioning.js";
 
-let providerId: string;
+// The self-hosted address model does not persist provider_id (it is carried
+// through on the returned entity), so a literal label is enough for these tests.
+const providerId = "prov-ses";
 
-beforeEach(() => {
-  process.env["EMAILS_DB_PATH"] = ":memory:";
-  resetDatabase();
-  const p = createProvider({ name: "Test", type: "ses" });
-  providerId = p.id;
+let stub: V1Stub;
+
+beforeAll(async () => {
+  stub = await startV1Stub();
+});
+
+afterAll(() => stub.stop());
+
+beforeEach(async () => {
+  await stub.reset();
+  stub.applyEnv();
 });
 
 afterEach(() => {
-  closeDatabase();
-  delete process.env["EMAILS_DB_PATH"];
+  stub.clearEnv();
 });
 
-describe("migration 19 — provisioning columns", () => {
-  it("domains have provisioning defaults (dns_provider=cloudflare, status=none)", () => {
+describe("provisioning defaults", () => {
+  it("domains map missing provisioning columns to safe defaults", () => {
     const d = createDomain(providerId, "example.com");
     const p = getDomainProvisioning(d.id)!;
+    // provisioning_status falls back to "none"; the /v1 domain entity carries no
+    // provisioning columns, so nameservers/cf_zone_id/next_check_at default empty.
+    // (The former `dns_provider === "cloudflare"` assertion was a SQLite column
+    // default that no longer exists over /v1.)
     expect(p.provisioning_status).toBe("none");
-    expect(p.dns_provider).toBe("cloudflare");
     expect(p.nameservers).toEqual([]);
     expect(p.cf_zone_id).toBeNull();
     expect(p.next_check_at).toBeNull();
   });
 
-  it("addresses have provisioning defaults", () => {
+  it("addresses map missing provisioning columns to safe defaults", () => {
     const a = createAddress({ provider_id: providerId, email: "andrew@example.com" });
     const p = getAddressProvisioning(a.id)!;
     expect(p.provisioning_status).toBe("none");
@@ -57,10 +79,9 @@ describe("migration 19 — provisioning columns", () => {
     expect(p.domain_id).toBeNull();
   });
 
-  it("provisioning_events table exists and is empty", () => {
-    const db = getDatabase();
-    const row = db.query("SELECT COUNT(*) as n FROM provisioning_events").get() as { n: number };
-    expect(row.n).toBe(0);
+  it("reads an empty provisioning event trail", () => {
+    const d = createDomain(providerId, "example.com");
+    expect(listProvisioningEvents("domain", d.id)).toEqual([]);
   });
 });
 
@@ -84,8 +105,6 @@ describe("setDomainProvisioning / getDomainProvisioning", () => {
     expect(p.cf_zone_id).toBe("zone123");
     expect(p.nameservers).toEqual(["a.ns.cloudflare.com", "b.ns.cloudflare.com"]);
     expect(p.mail_from_domain).toBe("mail.example.com");
-    // dns_provider stays cloudflare even when not set
-    expect(p.dns_provider).toBe("cloudflare");
   });
 
   it("records last_error and clears it", () => {

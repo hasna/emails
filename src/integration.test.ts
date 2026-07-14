@@ -1,42 +1,48 @@
 /**
- * Integration test - exercises the full Emails flow using sandbox provider.
- * Tests that CLI/DB/MCP layers work together correctly.
+ * Integration smoke — exercises the self-hosted-ONLY flow end to end against the
+ * /v1 API (via the out-of-process stub). It covers the pieces that still run
+ * client-side (sandbox capture, contacts/templates/sequences CRUD, pure warming
+ * math) and asserts that the operations that moved server-side (provider-adapter
+ * sends, delivery stats/analytics) fail loud. The previous local-SQLite raw-SQL
+ * flow, header-based reply linking, and bounce auto-suppression validated removed
+ * behavior and are gone.
  */
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { getDatabase, resetDatabase, closeDatabase } from "./db/database.js";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, it, expect } from "bun:test";
+import { startV1Stub, type V1Stub } from "./test-support/v1-stub.js";
 import { createProvider, getProvider } from "./db/providers.js";
-import { createEmail, getEmail, listEmails } from "./db/emails.js";
-import { createEvent } from "./db/events.js";
 import { createDomain, getDomainByName } from "./db/domains.js";
 import { createAddress } from "./db/addresses.js";
 import { SandboxAdapter } from "./providers/sandbox.js";
 import { listSandboxEmails, clearSandboxEmails } from "./db/sandbox.js";
-import { upsertContact, listContacts, isContactSuppressed } from "./db/contacts.js";
-import { createTemplate, renderTemplate } from "./db/templates.js";
-import { createSequence, addStep, enroll, getDueEnrollments, advanceEnrollment, listEnrollments } from "./db/sequences.js";
-import { createWarmingSchedule, getWarmingSchedule } from "./db/warming.js";
+import { upsertContact, isContactSuppressed, suppressContact } from "./db/contacts.js";
+import { createTemplate, getTemplate, renderTemplate } from "./db/templates.js";
+import { createSequence, addStep, enroll, advanceEnrollment } from "./db/sequences.js";
 import { getTodayLimit, generateWarmingPlan } from "./lib/warming.js";
-import { storeInboundEmail, listReplies, getReplyCount } from "./db/inbound.js";
+import { storeInboundEmail } from "./db/inbound.js";
 import { sendWithFailover } from "./lib/send.js";
 import { getLocalStats } from "./lib/stats.js";
 import { getAnalytics } from "./lib/analytics.js";
-import { exportEmailsJson, exportEventsCsv } from "./lib/export.js";
 
-beforeEach(() => {
-  process.env["EMAILS_DB_PATH"] = ":memory:";
-  resetDatabase();
-  getDatabase(); // trigger migrations
+let stub: V1Stub;
+
+beforeAll(async () => {
+  stub = await startV1Stub();
+});
+
+afterAll(() => stub.stop());
+
+beforeEach(async () => {
+  await stub.reset();
+  stub.applyEnv();
 });
 
 afterEach(() => {
-  closeDatabase();
-  delete process.env["EMAILS_DB_PATH"];
+  stub.clearEnv();
 });
 
-describe("full send flow (sandbox provider)", () => {
-  it("creates sandbox provider, sends email, captures in sandbox", async () => {
-    const db = getDatabase();
-    const provider = createProvider({ name: "dev", type: "sandbox" }, db);
+describe("sandbox capture flow (via /v1)", () => {
+  it("creates sandbox provider, sends email, captures in the sandbox store", async () => {
+    const provider = createProvider({ name: "dev", type: "sandbox" });
     expect(provider.type).toBe("sandbox");
 
     const adapter = new SandboxAdapter(provider);
@@ -54,78 +60,67 @@ describe("full send flow (sandbox provider)", () => {
     expect(captured[0]!.from_address).toBe("hello@example.com");
   });
 
-  it("sendWithFailover uses sandbox provider", async () => {
-    const db = getDatabase();
-    const provider = createProvider({ name: "dev", type: "sandbox" }, db);
-    const { messageId, providerId, usedFailover } = await sendWithFailover(provider.id, {
-      from: "a@example.com",
-      to: "b@test.com",
-      subject: "Failover test",
-      text: "Testing",
-    }, db);
-    expect(messageId).toBeTruthy();
-    expect(providerId).toBe(provider.id);
-    expect(usedFailover).toBe(false);
-  });
-
-  it("clears sandbox emails", () => {
-    const db = getDatabase();
-    const p = createProvider({ name: "dev", type: "sandbox" }, db);
-    const adapter = new SandboxAdapter(p);
-    // Manually insert via DB since sendEmail is async
-    db.run(`INSERT INTO sandbox_emails (id, provider_id, from_address, to_addresses, cc_addresses, subject) VALUES ('s1', ?, 'a@b.com', '[]', '[]', 'Test')`, [p.id]);
-    expect(listSandboxEmails()).length > 0;
-    clearSandboxEmails(undefined, db);
+  it("clears sandbox emails", async () => {
+    const provider = createProvider({ name: "dev", type: "sandbox" });
+    const adapter = new SandboxAdapter(provider);
+    await adapter.sendEmail({ from: "a@b.com", to: "c@d.com", subject: "Test", text: "x" });
+    expect(listSandboxEmails().length).toBeGreaterThan(0);
+    clearSandboxEmails();
     expect(listSandboxEmails().length).toBe(0);
   });
 });
 
-describe("contacts + suppression flow", () => {
-  it("auto-suppresses contact after 3 bounces", () => {
-    const db = getDatabase();
-    const { incrementBounceCount } = require("./db/contacts.js");
-    upsertContact("bouncy@test.com", db);
-    expect(isContactSuppressed("bouncy@test.com", db)).toBe(false);
-    incrementBounceCount("bouncy@test.com", db);
-    incrementBounceCount("bouncy@test.com", db);
-    incrementBounceCount("bouncy@test.com", db);
-    expect(isContactSuppressed("bouncy@test.com", db)).toBe(true);
+describe("outbound sending is server-side", () => {
+  it("sendWithFailover, getLocalStats, and getAnalytics fail loud in the client", async () => {
+    const provider = createProvider({ name: "dev", type: "sandbox" });
+    await expect(
+      sendWithFailover(provider.id, { from: "a@example.com", to: "b@test.com", subject: "x", text: "y" }),
+    ).rejects.toThrow(/not available in the self-hosted client/);
+    expect(() => getLocalStats(provider.id, "30d")).toThrow(/self-hosted server/);
+    expect(() => getAnalytics(provider.id, "30d")).toThrow(/self-hosted server/);
+  });
+});
+
+describe("contacts + suppression flow (via /v1)", () => {
+  it("suppresses a contact and reports suppression state", () => {
+    upsertContact("person@test.com");
+    expect(isContactSuppressed("person@test.com")).toBe(false);
+    suppressContact("person@test.com");
+    expect(isContactSuppressed("person@test.com")).toBe(true);
   });
 });
 
 describe("template rendering", () => {
-  it("renders template with variables", () => {
-    const db = getDatabase();
-    createTemplate({ name: "welcome", subject_template: "Hello {{name}}!", html_template: "<p>Hi {{name}}</p>" }, db);
-    const rendered = renderTemplate("Hello {{name}}!", { name: "Alice" });
-    expect(rendered).toBe("Hello Alice!");
+  it("renders a template with variables and round-trips through /v1", () => {
+    createTemplate({ name: "welcome", subject_template: "Hello {{name}}!", html_template: "<p>Hi {{name}}</p>" });
+    expect(getTemplate("welcome")?.subject_template).toBe("Hello {{name}}!");
+    expect(renderTemplate("Hello {{name}}!", { name: "Alice" })).toBe("Hello Alice!");
   });
 });
 
-describe("sequence enrollment flow", () => {
-  it("enrolls contact, advance through steps, completes", () => {
-    const db = getDatabase();
-    createTemplate({ name: "step1", subject_template: "Step 1", text_template: "Content 1" }, db);
-    createTemplate({ name: "step2", subject_template: "Step 2", text_template: "Content 2" }, db);
-    const seq = createSequence({ name: "test-seq" }, db);
-    addStep({ sequence_id: seq.id, step_number: 1, delay_hours: 0, template_name: "step1" }, db);
-    addStep({ sequence_id: seq.id, step_number: 2, delay_hours: 24, template_name: "step2" }, db);
+describe("sequence enrollment flow (via /v1)", () => {
+  it("enrolls a contact, advances through steps, and completes", () => {
+    createTemplate({ name: "step1", subject_template: "Step 1", text_template: "Content 1" });
+    createTemplate({ name: "step2", subject_template: "Step 2", text_template: "Content 2" });
+    const seq = createSequence({ name: "test-seq" });
+    addStep({ sequence_id: seq.id, step_number: 1, delay_hours: 0, template_name: "step1" });
+    addStep({ sequence_id: seq.id, step_number: 2, delay_hours: 24, template_name: "step2" });
 
-    const enrollment = enroll({ sequence_id: seq.id, contact_email: "user@test.com" }, db);
+    const enrollment = enroll({ sequence_id: seq.id, contact_email: "user@test.com" });
     expect(enrollment.status).toBe("active");
     expect(enrollment.current_step).toBe(0);
 
-    const advanced = advanceEnrollment(enrollment.id, db);
+    const advanced = advanceEnrollment(enrollment.id);
     expect(advanced?.current_step).toBe(1);
     expect(advanced?.status).toBe("active");
 
-    const completed = advanceEnrollment(enrollment.id, db);
+    const completed = advanceEnrollment(enrollment.id);
     expect(completed?.status).toBe("completed");
   });
 });
 
-describe("warming schedule flow", () => {
-  it("generates plan and returns today's limit on day 1", () => {
+describe("warming schedule math (pure)", () => {
+  it("generates a plan and returns today's limit on day 1", () => {
     const today = new Date().toISOString().slice(0, 10);
     const plan = generateWarmingPlan(10000);
     expect(plan[0]!.day).toBe(1);
@@ -141,59 +136,16 @@ describe("warming schedule flow", () => {
   });
 });
 
-describe("reply tracking flow", () => {
-  it("links inbound email to sent email via In-Reply-To header", () => {
-    const db = getDatabase();
-    // Insert a provider and sent email
-    const pId = "p-integ-1";
-    db.run(`INSERT INTO providers (id, name, type) VALUES (?, 'test', 'sandbox')`, [pId]);
-    const eId = "e-integ-1";
-    db.run(`INSERT INTO emails (id, provider_id, provider_message_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, status, sent_at, created_at, updated_at) VALUES (?, ?, 'msgid-integ-1', 'a@b.com', '[]', '[]', '[]', 'Hi', 'sent', datetime('now'), datetime('now'), datetime('now'))`, [eId, pId]);
+describe("provider/domain/address + inbound round-trip (via /v1)", () => {
+  it("persists setup entities and stores an inbound message", () => {
+    const provider = createProvider({ name: "dev", type: "sandbox" });
+    const domain = createDomain(provider.id, "example.com");
+    const address = createAddress({ provider_id: provider.id, email: "hello@example.com" });
+
+    expect(getProvider(provider.id)?.name).toBe("dev");
+    expect(getDomainByName(provider.id, domain.domain)?.id).toBe(domain.id);
 
     const inbound = storeInboundEmail({
-      provider_id: null, message_id: null, in_reply_to_email_id: null,
-      from_address: "user@test.com", to_addresses: ["a@b.com"], cc_addresses: [],
-      subject: "Re: Hi", text_body: "Thanks!", html_body: null,
-      attachments: [], headers: { "In-Reply-To": "<msgid-integ-1>" },
-      raw_size: 100, received_at: new Date().toISOString(),
-    }, db);
-
-    expect(inbound.in_reply_to_email_id).toBe(eId);
-    expect(getReplyCount(eId, db)).toBe(1);
-    expect(listReplies(eId, db).length).toBe(1);
-  });
-});
-
-describe("documented agent workflow smoke", () => {
-  it("covers setup, sandbox capture, inbound browsing, analytics, stats, and exports", async () => {
-    const db = getDatabase();
-    const provider = createProvider({ name: "dev", type: "sandbox" }, db);
-    const domain = createDomain(provider.id, "example.com", db);
-    const address = createAddress({ provider_id: provider.id, email: "hello@example.com" }, db);
-
-    const sent = await sendWithFailover(provider.id, {
-      from: address.email,
-      to: "user@example.net",
-      subject: "Workflow smoke",
-      text: "hello",
-    }, db);
-    expect(sent.providerId).toBe(provider.id);
-    expect(listSandboxEmails(provider.id, 10, db)).toHaveLength(1);
-
-    const email = createEmail(provider.id, {
-      from: address.email,
-      to: "user@example.net",
-      subject: "Workflow smoke",
-      text: "hello",
-    }, sent.messageId, db);
-    createEvent({
-      email_id: email.id,
-      provider_id: provider.id,
-      type: "delivered",
-      recipient: "user@example.net",
-      occurred_at: new Date().toISOString(),
-    }, db);
-    storeInboundEmail({
       provider_id: provider.id,
       message_id: "<workflow-inbound@example.net>",
       from_address: "user@example.net",
@@ -206,13 +158,9 @@ describe("documented agent workflow smoke", () => {
       headers: {},
       raw_size: 20,
       received_at: new Date().toISOString(),
-    }, db);
+    });
 
-    expect(getProvider(provider.id, db)?.name).toBe("dev");
-    expect(getDomainByName(provider.id, domain.domain, db)?.id).toBe(domain.id);
-    expect(getLocalStats(provider.id, "30d", db).sent).toBeGreaterThan(0);
-    expect(getAnalytics(provider.id, "30d", db).dailyVolume.length).toBeGreaterThan(0);
-    expect(exportEmailsJson({ provider_id: provider.id }, db)).toContain("Workflow smoke");
-    expect(exportEventsCsv({ provider_id: provider.id }, db)).toContain("delivered");
+    expect(inbound.id).toBeTruthy();
+    expect(inbound.subject).toBe("Re: Workflow smoke");
   });
 });

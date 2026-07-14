@@ -1,6 +1,17 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { closeDatabase, getDatabase, resetDatabase } from "./database.js";
-import { createProvider } from "./providers.js";
+// Self-hosted-ONLY: the emails (sent-ledger) repo routes every read/write to the
+// /v1/messages API. This exercises the REAL curl transport against an
+// out-of-process /v1 stub — see src/test-support/v1-stub.ts for why the stub
+// must run in a separate process. Migrated from the deleted local-SQLite pattern
+// (getDatabase/resetDatabase/:memory:/EMAILS_DB_PATH).
+//
+// Dropped from the local-SQLite version:
+//   - the two "lean projection / omits idempotency keys" tests inspected the
+//     local SQL string (recordingDb Proxy, `SELECT *`, column names) and passed a
+//     `db` handle that no longer exists. The meaningful part — idempotency_key is
+//     never surfaced on a mapped Email — is retained functionally below.
+
+import { afterAll, afterEach, beforeAll, beforeEach, describe, it, expect } from "bun:test";
+import { startV1Stub, type V1Stub } from "../test-support/v1-stub.js";
 import {
   createEmail,
   getEmail,
@@ -11,7 +22,9 @@ import {
 } from "./emails.js";
 import { EmailNotFoundError } from "../types/index.js";
 
-let providerId: string;
+let stub: V1Stub;
+
+const providerId = "prov-1";
 
 const baseOpts = {
   from: "sender@example.com",
@@ -20,16 +33,43 @@ const baseOpts = {
   text: "Hello world",
 };
 
-beforeEach(() => {
-  process.env["EMAILS_DB_PATH"] = ":memory:";
-  resetDatabase();
-  const p = createProvider({ name: "Test", type: "resend" });
-  providerId = p.id;
+/** An outbound /v1/messages row (with explicit created_at for deterministic ordering). */
+function outboundMessage(row: {
+  id: string;
+  subject?: string;
+  from_addr?: string;
+  to_addrs?: unknown;
+  cc_addrs?: unknown;
+  bcc_addrs?: unknown;
+  status?: string;
+  created_at: string;
+  provider_id?: string;
+  idempotency_key?: string;
+}): Record<string, unknown> {
+  return {
+    direction: "outbound",
+    from_addr: "sender@example.com",
+    to_addrs: ["recipient@example.com"],
+    subject: "Seeded",
+    status: "sent",
+    provider_id: providerId,
+    ...row,
+  };
+}
+
+beforeAll(async () => {
+  stub = await startV1Stub();
+});
+
+afterAll(() => stub.stop());
+
+beforeEach(async () => {
+  await stub.reset();
+  stub.applyEnv();
 });
 
 afterEach(() => {
-  closeDatabase();
-  delete process.env["EMAILS_DB_PATH"];
+  stub.clearEnv();
 });
 
 describe("createEmail", () => {
@@ -42,6 +82,8 @@ describe("createEmail", () => {
     expect(e.status).toBe("sent");
     expect(e.has_attachments).toBe(false);
     expect(e.attachment_count).toBe(0);
+    // Round-trips through the /v1 store.
+    expect(getEmail(e.id)!.subject).toBe("Test Subject");
   });
 
   it("stores multiple recipients", () => {
@@ -69,9 +111,11 @@ describe("createEmail", () => {
     expect(e.provider_message_id).toBe("msg-123");
   });
 
-  it("stores tags", () => {
-    const e = createEmail(providerId, { ...baseOpts, tags: { campaign: "welcome" } });
-    expect(e.tags).toEqual({ campaign: "welcome" });
+  it("round-trips tags through the /v1 store", () => {
+    const e = createEmail(providerId, { ...baseOpts, tags: { campaign: "launch", tier: "gold" } });
+    expect(e.tags).toEqual({ campaign: "launch", tier: "gold" });
+    // Tags survive a read-back (apiMessageToEmail maps the `tags` object).
+    expect(getEmail(e.id)!.tags).toEqual({ campaign: "launch", tier: "gold" });
   });
 });
 
@@ -82,14 +126,22 @@ describe("getEmail", () => {
     expect(found?.id).toBe(e.id);
   });
 
-  it("tolerates malformed recipient and tag JSON", () => {
-    const e = createEmail(providerId, { ...baseOpts, cc: ["cc@example.com"], bcc: ["bcc@example.com"], tags: { campaign: "x" } });
-    getDatabase().run(
-      "UPDATE emails SET to_addresses = ?, cc_addresses = ?, bcc_addresses = ?, tags = ? WHERE id = ?",
-      ["not-json", "{}", "not-json", "[]", e.id],
-    );
+  it("coerces malformed recipient JSON to empty arrays (missing tags → {})", async () => {
+    // A /v1 row whose address fields are non-array JSON must map to [] (cstrArray),
+    // and a row with no `tags` maps to {} (cobj of undefined).
+    await stub.seed({
+      messages: [
+        outboundMessage({
+          id: "malformed-1",
+          created_at: "2026-01-01T00:00:00.000Z",
+          to_addrs: "{}",
+          cc_addrs: "{}",
+          bcc_addrs: "{}",
+        }),
+      ],
+    });
 
-    const found = getEmail(e.id);
+    const found = getEmail("malformed-1");
     expect(found?.to_addresses).toEqual([]);
     expect(found?.cc_addresses).toEqual([]);
     expect(found?.bcc_addresses).toEqual([]);
@@ -109,9 +161,8 @@ describe("listEmails", () => {
   });
 
   it("filters by provider_id", () => {
-    const p2 = createProvider({ name: "Other", type: "ses" });
     createEmail(providerId, baseOpts);
-    createEmail(p2.id, baseOpts);
+    createEmail("prov-2", baseOpts);
     expect(listEmails({ provider_id: providerId }).length).toBe(1);
   });
 
@@ -162,29 +213,14 @@ describe("listEmails", () => {
     expect(listEmails({ limit: Number.POSITIVE_INFINITY, offset: Number.POSITIVE_INFINITY }).length).toBe(5);
   });
 
-  it("uses a lean projection and omits idempotency keys from list rows", () => {
-    const db = getDatabase();
+  it("never surfaces idempotency keys on list rows", () => {
     createEmail(providerId, { ...baseOpts, subject: "Sensitive key", idempotency_key: "dedupe-secret-key" });
-    const queries: string[] = [];
-    const recordingDb = new Proxy(db, {
-      get(target, prop, receiver) {
-        if (prop === "query") {
-          return (sql: string) => {
-            queries.push(sql);
-            return target.query(sql);
-          };
-        }
-        return Reflect.get(target, prop, receiver);
-      },
-    });
 
-    const [email] = listEmails({ limit: 1 }, recordingDb);
+    const [email] = listEmails({ limit: 1 });
 
     expect(email).toBeDefined();
     expect("idempotency_key" in email!).toBe(false);
     expect(JSON.stringify(email)).not.toContain("dedupe-secret-key");
-    expect(queries[0]).not.toContain("SELECT *");
-    expect(queries[0]).not.toContain("idempotency_key");
   });
 });
 
@@ -256,39 +292,30 @@ describe("searchEmails", () => {
     expect(searchEmails("Match", { limit: Number.POSITIVE_INFINITY }).length).toBe(5);
   });
 
-  it("supports offset paging after filtering", () => {
-    for (let i = 0; i < 4; i++) {
-      createEmail(providerId, { ...baseOpts, subject: `Paged Match ${i}` });
-    }
+  it("supports offset paging after filtering (newest first)", async () => {
+    await stub.seed({
+      messages: [0, 1, 2, 3].map((i) =>
+        outboundMessage({
+          id: `paged-${i}`,
+          subject: `Paged Match ${i}`,
+          created_at: `2026-01-0${i + 1}T00:00:00.000Z`,
+        }),
+      ),
+    });
 
     const results = searchEmails("Paged Match", { limit: 2, offset: 1 });
 
     expect(results.map((email) => email.subject)).toEqual(["Paged Match 2", "Paged Match 1"]);
   });
 
-  it("uses a lean projection and omits idempotency keys from search rows", () => {
-    const db = getDatabase();
+  it("never surfaces idempotency keys on search rows", () => {
     createEmail(providerId, { ...baseOpts, subject: "Find sensitive", idempotency_key: "search-dedupe-secret" });
-    const queries: string[] = [];
-    const recordingDb = new Proxy(db, {
-      get(target, prop, receiver) {
-        if (prop === "query") {
-          return (sql: string) => {
-            queries.push(sql);
-            return target.query(sql);
-          };
-        }
-        return Reflect.get(target, prop, receiver);
-      },
-    });
 
-    const [email] = searchEmails("sensitive", { limit: 1 }, recordingDb);
+    const [email] = searchEmails("sensitive", { limit: 1 });
 
     expect(email).toBeDefined();
     expect("idempotency_key" in email!).toBe(false);
     expect(JSON.stringify(email)).not.toContain("search-dedupe-secret");
-    expect(queries[0]).not.toContain("SELECT *");
-    expect(queries[0]).not.toContain("idempotency_key");
   });
 
   it("returns empty array for no matches", () => {
@@ -297,7 +324,7 @@ describe("searchEmails", () => {
     expect(results.length).toBe(0);
   });
 
-  it("is case-insensitive via LIKE", () => {
+  it("is case-insensitive", () => {
     createEmail(providerId, { ...baseOpts, subject: "IMPORTANT Notice" });
     const results = searchEmails("important");
     expect(results.length).toBe(1);

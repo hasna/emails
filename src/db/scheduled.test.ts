@@ -1,6 +1,15 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { getDatabase, closeDatabase, resetDatabase } from "./database.js";
-import { createProvider } from "./providers.js";
+// Self-hosted-ONLY: the scheduled-email repo routes every read/write to the
+// /v1/scheduled API. Exercises the REAL curl transport against an out-of-process
+// /v1 stub — see src/test-support/v1-stub.ts. Migrated from the deleted
+// local-SQLite pattern (getDatabase/resetDatabase/:memory:/EMAILS_DB_PATH).
+//
+// The former "lean projection" summary test inspected the local SQL string
+// (recordingDb Proxy, `SELECT *`, column names) and passed a `db` handle that no
+// longer exists; the meaningful part — bodies/attachments/template_vars omitted
+// from the summary shape — is retained functionally below.
+
+import { afterAll, afterEach, beforeAll, beforeEach, describe, it, expect } from "bun:test";
+import { startV1Stub, type V1Stub } from "../test-support/v1-stub.js";
 import {
   createScheduledEmail,
   getScheduledEmail,
@@ -12,20 +21,23 @@ import {
   markFailed,
 } from "./scheduled.js";
 
-let testProviderId: string;
+let stub: V1Stub;
 
-beforeEach(() => {
-  process.env["EMAILS_DB_PATH"] = ":memory:";
-  resetDatabase();
-  const db = getDatabase();
-  // Create a test provider
-  const provider = createProvider({ name: "test", type: "resend", api_key: "re_test" }, db);
-  testProviderId = provider.id;
+const testProviderId = "prov-1";
+
+beforeAll(async () => {
+  stub = await startV1Stub();
+});
+
+afterAll(() => stub.stop());
+
+beforeEach(async () => {
+  await stub.reset();
+  stub.applyEnv();
 });
 
 afterEach(() => {
-  closeDatabase();
-  delete process.env["EMAILS_DB_PATH"];
+  stub.clearEnv();
 });
 
 describe("createScheduledEmail", () => {
@@ -98,25 +110,28 @@ describe("getScheduledEmail", () => {
     expect(found!.id).toBe(created.id);
   });
 
-  it("tolerates malformed recipient, attachment, and template JSON", () => {
-    const db = getDatabase();
-    const created = createScheduledEmail({
-      provider_id: testProviderId,
-      from_address: "sender@example.com",
-      to_addresses: ["alice@example.com"],
-      cc_addresses: ["bob@example.com"],
-      bcc_addresses: ["charlie@example.com"],
-      subject: "Bad JSON",
-      attachments_json: [{ filename: "a.txt" }],
-      template_vars: { name: "Alice" },
-      scheduled_at: "2030-01-01T00:00:00.000Z",
+  it("coerces malformed recipient, attachment, and template JSON", async () => {
+    // A /v1 row with non-array/non-object JSON strings must map to []/[]/{}.
+    await stub.seed({
+      scheduled: [
+        {
+          id: "sched-bad",
+          provider_id: testProviderId,
+          from_address: "sender@example.com",
+          to_addresses: "{}",
+          cc_addresses: "{}",
+          bcc_addresses: "{}",
+          attachments_json: "not-json",
+          template_vars: "not-json",
+          subject: "Bad JSON",
+          status: "pending",
+          scheduled_at: "2030-01-01T00:00:00.000Z",
+          created_at: "2026-01-01T00:00:00.000Z",
+        },
+      ],
     });
-    db.run(
-      "UPDATE scheduled_emails SET to_addresses = ?, cc_addresses = ?, bcc_addresses = ?, attachments_json = ?, template_vars = ? WHERE id = ?",
-      ["not-json", "{}", "not-json", "not-json", "not-json", created.id],
-    );
 
-    const found = getScheduledEmail(created.id);
+    const found = getScheduledEmail("sched-bad");
     expect(found?.to_addresses).toEqual([]);
     expect(found?.cc_addresses).toEqual([]);
     expect(found?.bcc_addresses).toEqual([]);
@@ -134,7 +149,7 @@ describe("listScheduledEmails", () => {
     expect(listScheduledEmails()).toEqual([]);
   });
 
-  it("lists all scheduled emails", () => {
+  it("lists all scheduled emails ordered by scheduled_at ASC", () => {
     createScheduledEmail({
       provider_id: testProviderId,
       from_address: "sender@example.com",
@@ -152,7 +167,6 @@ describe("listScheduledEmails", () => {
 
     const all = listScheduledEmails();
     expect(all.length).toBe(2);
-    // Ordered by scheduled_at ASC
     expect(all[0]!.subject).toBe("Test 2");
     expect(all[1]!.subject).toBe("Test 1");
   });
@@ -212,8 +226,7 @@ describe("listScheduledEmails", () => {
 });
 
 describe("listScheduledEmailSummaries", () => {
-  it("uses a lean projection and omits bodies, attachments, and template vars", () => {
-    const db = getDatabase();
+  it("omits bodies, attachments, and template vars from the summary shape", () => {
     createScheduledEmail({
       provider_id: testProviderId,
       from_address: "sender@example.com",
@@ -225,21 +238,9 @@ describe("listScheduledEmailSummaries", () => {
       template_name: "welcome",
       template_vars: { secret: "large template vars".repeat(100) },
       scheduled_at: "2030-01-01T00:00:00.000Z",
-    }, db);
-    const queries: string[] = [];
-    const recordingDb = new Proxy(db, {
-      get(target, prop, receiver) {
-        if (prop === "query") {
-          return (sql: string) => {
-            queries.push(sql);
-            return target.query(sql);
-          };
-        }
-        return Reflect.get(target, prop, receiver);
-      },
     });
 
-    const [summary] = listScheduledEmailSummaries({ limit: 1 }, recordingDb);
+    const [summary] = listScheduledEmailSummaries({ limit: 1 });
 
     expect(summary).toBeDefined();
     expect(summary?.subject).toBe("Large scheduled payload");
@@ -250,9 +251,6 @@ describe("listScheduledEmailSummaries", () => {
     expect("template_vars" in summary!).toBe(false);
     expect(JSON.stringify(summary)).not.toContain("secret attachment");
     expect(JSON.stringify(summary)).not.toContain("large template vars");
-    expect(queries).toHaveLength(1);
-    expect(queries[0]).not.toContain("SELECT *");
-    expect(queries[0]).not.toMatch(/\b(html|text_body|attachments_json|template_vars)\b/);
   });
 
   it("filters and paginates summary rows", () => {
@@ -330,7 +328,6 @@ describe("cancelScheduledEmail", () => {
 
 describe("getDueEmails", () => {
   it("returns emails past their scheduled time", () => {
-    // Past time
     createScheduledEmail({
       provider_id: testProviderId,
       from_address: "sender@example.com",
@@ -338,7 +335,6 @@ describe("getDueEmails", () => {
       subject: "Past",
       scheduled_at: "2000-01-01T00:00:00.000Z",
     });
-    // Future time
     createScheduledEmail({
       provider_id: testProviderId,
       from_address: "sender@example.com",

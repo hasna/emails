@@ -1,8 +1,14 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+// Self-hosted-ONLY: the groups repo routes every read/write to `/v1/groups` and
+// `/v1/group-members`, so these tests drive the REAL command against an
+// out-of-process /v1 stub (see src/test-support/v1-stub.ts). No local SQLite
+// exists anymore, and member counts are computed from the API — not a local island.
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { Command } from "commander";
-import { closeDatabase, resetDatabase } from "../../db/database.js";
 import { addMember, createGroup } from "../../db/groups.js";
+import { startV1Stub, type V1Stub } from "../../test-support/v1-stub.js";
 import { registerGroupCommands } from "./groups.js";
+
+let stub: V1Stub;
 
 async function runGroupCommand(args: string[]) {
   const program = new Command();
@@ -17,15 +23,15 @@ async function runGroupCommand(args: string[]) {
   return { data, out: out.join("\n") };
 }
 
-beforeEach(() => {
-  process.env["EMAILS_DB_PATH"] = ":memory:";
-  resetDatabase();
+beforeAll(async () => {
+  stub = await startV1Stub();
 });
-
-afterEach(() => {
-  closeDatabase();
-  delete process.env["EMAILS_DB_PATH"];
+afterAll(() => stub.stop());
+beforeEach(async () => {
+  await stub.reset();
+  stub.applyEnv();
 });
+afterEach(() => stub.clearEnv());
 
 describe("group list command", () => {
   it("paginates groups and returns batched member counts", async () => {

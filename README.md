@@ -1,8 +1,7 @@
 # @hasna/emails
 
-Emails is an email management CLI + MCP server - send, receive, sync, and manage email via Resend, AWS SES, and Cloudflare-routed inbound mail.
+Open-source email infrastructure for local SQLite workflows and operator-owned self-hosted deployments, with a CLI, MCP server, library, dashboard, Resend, AWS SES, and Cloudflare-routed inbound mail.
 
-[![npm](https://img.shields.io/npm/v/@hasna/emails)](https://www.npmjs.com/package/@hasna/emails)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
 ## Install
@@ -287,7 +286,8 @@ emails-mcp
   no separate hosted-agent API surface in this OSS server.
 
 ```bash
-emails serve   # or: emails-serve   (HOST=0.0.0.0 to allow other machines)
+emails serve   # local dashboard on 127.0.0.1
+EMAILS_ALLOW_REMOTE=1 emails serve --host 0.0.0.0  # only behind an authenticating proxy/firewall
 
 curl localhost:3900/api/providers
 curl localhost:3900/api/sources
@@ -296,7 +296,7 @@ curl 'localhost:3900/api/mailboxes?source_id=legacy'
 
 ## Library API
 
-Import the stable local API from `@hasna/emails`. The public entrypoint covers
+Import the stable API from `@hasna/emails`. The public entrypoint covers
 provider/domain/address CRUD, sending, inbound storage and listing, templates,
 contacts and suppression, sequences, exports, ownership helpers, and scoped send
 keys.
@@ -314,7 +314,17 @@ import {
   createOwner,
   setAddressOwnerByRef,
   createSendKey,
+  getDatabase,
+  closeDatabase,
+  runInTransaction,
+  resolvePartialId,
 } from "@hasna/emails";
+
+const db = getDatabase();
+runInTransaction(db, () => {
+  // CRUD helpers accept an optional Database for isolated local workflows.
+});
+closeDatabase();
 ```
 
 ## Inbound Email (AWS SES -> S3)

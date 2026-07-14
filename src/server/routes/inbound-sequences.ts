@@ -1,13 +1,13 @@
 // API route handlers — inbound-sequences.ts
-import { listInboundEmailSummaries, getInboundEmail, clearInboundEmails, storeInboundEmail } from '../../db/inbound.js';
-import { parseResendInbound, parseMailgunInbound, parseMimeEmail } from '../../lib/inbound.js';
-import { createSequence, getSequence, listSequences, deleteSequence, addStep, listSteps, enroll, unenroll, listEnrollments, type EnrollmentStatus } from '../../db/sequences.js';
-import { createWarmingSchedule, getWarmingSchedule, listWarmingSchedules, updateWarmingStatus, deleteWarmingSchedule } from '../../db/warming.js';
+import { listInboundEmailSummaries, getInboundEmail, clearInboundEmails, storeInboundEmail } from '../../db/inbound.local.js';
+import { parseResendInbound, parseMailgunInbound, parseMimeEmail } from '../../lib/inbound.local.js';
+import { createSequence, getSequence, listSequences, deleteSequence, addStep, listSteps, enroll, unenroll, listEnrollments, type EnrollmentStatus } from '../../db/sequences.local.js';
+import { createWarmingSchedule, getWarmingSchedule, listWarmingSchedules, updateWarmingStatus, deleteWarmingSchedule } from '../../db/warming.local.js';
 import { getTodayLimit, getTodaySentCount } from '../../lib/warming.js';
-import { updateEmailStatus } from '../../db/emails.js';
-import { upsertEvent } from '../../db/events.js';
+import { updateEmailStatus } from '../../db/emails.local.js';
+import { upsertEvent } from '../../db/events.local.js';
 import { getDatabase } from '../../db/database.js';
-import { getLatestEmailDigest, normalizeEmailDigestPeriod } from '../../db/email-digests.js';
+import { getLatestEmailDigest, normalizeEmailDigestPeriod } from '../../db/email-digests.local.js';
 import { json, notFound, badRequest, internalError, resolveId, resolveIdStrict, resolveOptionalId, parseBody, checkRateLimit, tooManyRequests, queryInteger, queryPage } from './helpers.js';
 import {
   MAILBOXES,
@@ -311,7 +311,7 @@ if (inboundMatch && method === "GET") {
 if (path === "/api/doctor" && method === "GET") {
   try {
     const live = url.searchParams.get("live") === "true";
-    const { runDiagnostics } = await import('../../lib/doctor.js');
+    const { runDiagnostics } = await import('../../lib/doctor.local.js');
     const checks = await runDiagnostics(undefined, { liveProviderChecks: live });
     return json(checks);
   } catch (e) { return internalError(e); }
@@ -326,11 +326,11 @@ if (path === "/api/pull" && method === "POST") {
     let result: Record<string, number>;
     if (body.provider_id) {
       const id = resolveIdStrict("providers", String(body.provider_id));
-      const { syncProvider } = await import('../../lib/sync.js');
+      const { syncProvider } = await import('../../lib/sync.local.js');
       const count = await syncProvider(id);
       result = { [id]: count };
     } else {
-      const { syncAll } = await import('../../lib/sync.js');
+      const { syncAll } = await import('../../lib/sync.local.js');
       result = await syncAll();
     }
     return json(result);
@@ -343,7 +343,7 @@ if (path === "/api/digest" && method === "GET") {
     const period = normalizeEmailDigestPeriod(url.searchParams.get("period") ?? "today");
     const latest = getLatestEmailDigest(period);
     if (latest) return json(latest);
-    const { generateEmailDigest } = await import('../../lib/email-digest.js');
+    const { generateEmailDigest } = await import('../../lib/email-digest.local.js');
     return json(await generateEmailDigest({ period, offline: true }));
   } catch (e) { return internalError(e); }
 }

@@ -29,7 +29,7 @@ export function registerGroupCommands(program: Command, output: (data: unknown, 
     .action((opts: { limit?: string; offset?: string; verbose?: boolean }) => {
       try {
         const page = parseCliListPage(opts);
-        const groups = listGroups(undefined, page);
+        const groups = listGroups(page);
         if (groups.length === 0) {
           output([], chalk.dim("No groups configured. Use 'emails group create' to add one."));
           return;
@@ -42,9 +42,9 @@ export function registerGroupCommands(program: Command, output: (data: unknown, 
         const lines: string[] = [chalk.bold("\nGroups:")];
         const verbose = opts.verbose || isCliVerboseOutput();
         for (const g of groups) {
-          const count = counts.get(g.id) ?? 0;
+          const count = `${counts.get(g.id) ?? 0} members`;
           const desc = verbose && g.description ? chalk.dim(` — ${truncate(g.description, 80)}`) : "";
-          lines.push(`  ${chalk.cyan(g.id.slice(0, 8))}  ${g.name}  (${count} members)${desc}`);
+          lines.push(`  ${chalk.cyan(g.id.slice(0, 8))}  ${g.name}  (${count})${desc}`);
         }
         lines.push("");
         lines.push(formatListHint({
@@ -71,7 +71,7 @@ export function registerGroupCommands(program: Command, output: (data: unknown, 
         const group = getGroupByName(name);
         if (!group) handleError(new Error(`Group not found: ${name}`));
         const page = parseCliPage(opts);
-        const members = listMemberSummaries(group!.id, undefined, page);
+        const members = listMemberSummaries(group!.id, page);
         const memberCount = getMemberCount(group!.id);
         const lines: string[] = [chalk.bold(`\nGroup: ${group!.name}`)];
         if (group!.description) lines.push(chalk.dim(`  ${group!.description}`));
@@ -102,7 +102,7 @@ export function registerGroupCommands(program: Command, output: (data: unknown, 
         const group = getGroupByName(name);
         if (!group) handleError(new Error(`Group not found: ${name}`));
         const page = parseCliListPage(opts);
-        const members = listMemberSummaries(group!.id, undefined, page);
+        const members = listMemberSummaries(group!.id, page);
         if (members.length === 0) {
           output([], chalk.dim("No members."));
           return;

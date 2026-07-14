@@ -2,8 +2,16 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { createWarmingSchedule, getWarmingSchedule, listWarmingSchedules, updateWarmingStatus } from "../../db/warming.js";
 import { getTodayLimit, getTodaySentCount, generateWarmingPlan } from "../../lib/warming.js";
-import { getDatabase } from "../../db/database.js";
 import { formatError } from "../helpers.js";
+import { resolveEmailsMode } from "../../lib/mode.js";
+
+function assertWarmingLocalStateAllowed(toolName: string): void {
+  if (resolveEmailsMode().mode !== "self_hosted") return;
+  throw new Error(
+    `MCP tool ${toolName} is disabled in self_hosted API-only mode because it reads or writes local domain warming state. ` +
+      "Use the self-hosted Emails API/operator service for server-owned warming state, or set EMAILS_MODE=local only for an explicit local warming store.",
+  );
+}
 
 export function registerWarmingTools(server: McpServer): void {
   server.tool(
@@ -17,6 +25,7 @@ export function registerWarmingTools(server: McpServer): void {
     },
     async ({ domain, target_daily_volume, start_date, provider_id }) => {
       try {
+        assertWarmingLocalStateAllowed("create_warming_schedule");
         const schedule = createWarmingSchedule({ domain, target_daily_volume, start_date, provider_id });
         const plan = generateWarmingPlan(target_daily_volume);
         return { content: [{ type: "text", text: JSON.stringify({ schedule, plan_days: plan.length, final_day: plan[plan.length - 1]?.day }, null, 2) }] };
@@ -32,11 +41,11 @@ export function registerWarmingTools(server: McpServer): void {
     { domain: z.string().describe("Domain to check") },
     async ({ domain }) => {
       try {
+        assertWarmingLocalStateAllowed("get_warming_status");
         const schedule = getWarmingSchedule(domain);
         if (!schedule) throw new Error(`No warming schedule found for domain: ${domain}`);
-        const db = getDatabase();
         const today_limit = getTodayLimit(schedule);
-        const today_sent = getTodaySentCount(domain, db);
+        const today_sent = getTodaySentCount(domain);
         const startDate = new Date(schedule.start_date);
         const today = new Date();
         today.setHours(0, 0, 0, 0);
@@ -59,9 +68,10 @@ export function registerWarmingTools(server: McpServer): void {
     },
     async ({ status, limit, offset }) => {
       try {
+        assertWarmingLocalStateAllowed("list_warming_schedules");
         const effectiveLimit = limit ?? 100;
         const effectiveOffset = offset ?? 0;
-        const rows = listWarmingSchedules(status, undefined, { limit: effectiveLimit + 1, offset: effectiveOffset });
+        const rows = listWarmingSchedules(status, { limit: effectiveLimit + 1, offset: effectiveOffset });
         const schedules = rows.slice(0, effectiveLimit);
         return { content: [{ type: "text", text: JSON.stringify({
           schedules,
@@ -85,6 +95,7 @@ export function registerWarmingTools(server: McpServer): void {
     },
     async ({ domain, status }) => {
       try {
+        assertWarmingLocalStateAllowed("update_warming_status");
         const updated = updateWarmingStatus(domain, status);
         if (!updated) throw new Error(`No warming schedule found for domain: ${domain}`);
         return { content: [{ type: "text", text: JSON.stringify(updated, null, 2) }] };

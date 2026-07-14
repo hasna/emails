@@ -26,12 +26,10 @@ function inboxLimit(value: number | undefined, fallback: number): number {
   return cappedLimit(value, fallback, MAX_MCP_INBOX_LIMIT);
 }
 
-async function runAutoPull(opts: { s3?: boolean; limit?: number }) {
-  // Auto-pull is LOCAL S3 ingestion. In self_hosted mode the API is the source of truth and
-  // each poll already re-reads it through the seam, so there is nothing to pull.
-  if (resolveMailDataSource().mode !== "local") return { pulled: 0 };
-  const { autoPull } = await import("../../cli/tui/autopull.js");
-  return autoPull(opts);
+async function runAutoPull(_opts: { s3?: boolean; limit?: number }) {
+  // Auto-pull was LOCAL S3 ingestion. The self-hosted client re-reads the API through
+  // the seam on each poll, so there is nothing to pull.
+  return { pulled: 0 };
 }
 
 function jsonText(value: unknown) {

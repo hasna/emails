@@ -52,7 +52,7 @@ export function registerTemplateCommands(program: Command, output: (data: unknow
     .action((opts: { limit?: string; offset?: string; verbose?: boolean }) => {
       try {
         const page = parseCliListPage(opts);
-        const templates = listTemplateSummaries(undefined, page);
+        const templates = listTemplateSummaries(page);
         if (templates.length === 0) {
           output([], chalk.dim("No templates configured. Use 'emails template add' to create one."));
           return;

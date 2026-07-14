@@ -36,3 +36,8 @@ bun-debug.log*
 # Coverage
 coverage/
 .nyc_output/
+.prod-full-schema.sql
+
+# local agent scratch / one-off artifacts
+.claude/
+.prod-schema-drift.txt

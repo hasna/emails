@@ -18,4 +18,10 @@ describe("repository workflow safety", () => {
     expect(text).not.toMatch(/\b(?:terraform|tofu)\s+(?:apply|destroy)\b/i);
     expect(text).not.toMatch(/\b(?:npm|bun|pnpm|yarn)\s+publish\b/i);
   });
+
+  it("keeps both product CI jobs on the reviewed Bun toolchain", () => {
+    const ci = readFileSync(join(workflowDir, "ci.yml"), "utf8");
+    expect(ci.match(/bun-version:\s*1\.3\.14/g)).toHaveLength(2);
+    expect(ci).not.toContain("bun-version: 1.3.13");
+  });
 });

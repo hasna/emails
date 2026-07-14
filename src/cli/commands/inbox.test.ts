@@ -1,61 +1,69 @@
-/**
- * Tests for inbox CLI commands — tests the underlying DB/sync logic
- * exercised by `emails inbox` subcommands.
- */
-import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
-import { mkdirSync, rmSync, existsSync } from "node:fs";
-import { join } from "node:path";
-import { getDatabase, resetDatabase, closeDatabase, uuid } from "../../db/database.js";
-import { storeInboundEmail, listInboundEmails, getInboundEmail } from "../../db/inbound.js";
-import { createAddress } from "../../db/addresses.js";
-import { createDomain } from "../../db/domains.js";
-import { createProvider } from "../../db/providers.js";
-import { setAddressProvisioning, setDomainProvisioning } from "../../db/provisioning.js";
+// Self-hosted-ONLY: every `emails inbox` read/write routes to the operator
+// `/v1/messages` API, so these tests drive the REAL commands against an
+// out-of-process /v1 stub (see src/test-support/v1-stub.ts). There is no local
+// SQLite island anymore; a handful of ingestion/diagnostic subcommands are
+// server-only and fail closed with a clear message.
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { Command } from "commander";
+import { startV1Stub, type V1Stub } from "../../test-support/v1-stub.js";
+import {
+  storeInboundEmail,
+  listInboundEmails,
+  getInboundEmail,
+  type InboundEmail,
+} from "../../db/inbound.js";
+import { registerInboxCommands } from "./inbox.js";
 
-const mockAutoPull = mock(async () => ({ pulled: 0, ok: true, configured: true }));
-mock.module("../tui/autopull.js", () => ({ autoPull: mockAutoPull }));
+let stub: V1Stub;
+let seq = 0;
 
-const { registerInboxCommands } = await import("./inbox.js");
-const { Command } = await import("commander");
-const { getConfigValue } = await import("../../lib/config.js");
+type SeedOverrides = Partial<Parameters<typeof storeInboundEmail>[0]>;
 
-const TMP_HOME = join("/tmp", `emails-inbox-test-${process.pid}`);
-const origHome = process.env["HOME"];
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function setupDb() {
-  resetDatabase();
-  process.env["EMAILS_DB_PATH"] = ":memory:";
-  const db = getDatabase();
-  const providerId = uuid();
-  db.run(`INSERT INTO providers (id, name, type, active) VALUES (?, 'SES Test', 'ses', 1)`, [providerId]);
-  return { db, providerId };
+// Seed through the REAL inbound repo (POST /v1/messages). Call AFTER applyEnv().
+function seedEmail(overrides: SeedOverrides = {}): InboundEmail {
+  seq += 1;
+  return storeInboundEmail({
+    provider_id: null,
+    message_id: `msg-${seq}`,
+    in_reply_to_email_id: null,
+    from_address: `sender${seq}@example.com`,
+    to_addresses: ["me@example.com"],
+    cc_addresses: [],
+    subject: `Subject ${seq}`,
+    text_body: `Body content ${seq}`,
+    html_body: null,
+    attachments: [],
+    attachment_paths: [],
+    headers: {},
+    raw_size: 100,
+    received_at: new Date(Date.UTC(2026, 0, 1, 0, 0, seq)).toISOString(),
+    ...overrides,
+  });
 }
 
-function seedInboundEmails(providerId: string, count: number) {
-  const db = getDatabase();
-  const emails = [];
-  for (let i = 0; i < count; i++) {
-    const email = storeInboundEmail({
-      provider_id: providerId,
-      message_id: `msg-${i}`,
-      in_reply_to_email_id: null,
-      from_address: `sender${i}@example.com`,
-      to_addresses: ["me@example.com"],
-      cc_addresses: [],
-      subject: `Test Subject ${i}`,
-      text_body: `Body content for email ${i}`,
-      html_body: null,
-      attachments: [],
-      attachment_paths: [],
-      headers: {},
-      raw_size: 100,
-      received_at: new Date(2026, 2, 20 - i).toISOString(),
-    }, db);
-    emails.push(email);
-  }
-  return emails;
+// A raw /v1 message row for stub.seed({ messages }) when a test needs precise
+// flags (is_read/is_starred/labels/direction) the repo write cannot express.
+function msgRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  seq += 1;
+  const at = new Date(Date.UTC(2026, 0, 1, 0, 0, seq)).toISOString();
+  return {
+    id: crypto.randomUUID(),
+    direction: "inbound",
+    from_addr: `sender${seq}@example.com`,
+    to_addrs: ["me@example.com"],
+    cc_addrs: [],
+    subject: `Subject ${seq}`,
+    body_text: `Body ${seq}`,
+    body_html: null,
+    message_id: `mid-${seq}`,
+    received_at: at,
+    created_at: at,
+    is_read: false,
+    is_starred: false,
+    labels: [],
+    status: "received",
+    ...overrides,
+  };
 }
 
 async function runInboxCommand(args: string[]) {
@@ -71,6 +79,8 @@ async function runInboxCommand(args: string[]) {
   return { data, out: out.join("\n") };
 }
 
+// For BLOCK tests: override process.exit to throw and capture console.error so we
+// can assert the exit code and the exact server-only message.
 async function runInboxCommandExpectingExit(args: string[]) {
   const originalExit = process.exit;
   const originalError = console.error;
@@ -90,1020 +100,606 @@ async function runInboxCommandExpectingExit(args: string[]) {
   }
 }
 
-beforeEach(() => {
-  if (existsSync(TMP_HOME)) rmSync(TMP_HOME, { recursive: true, force: true });
-  mkdirSync(TMP_HOME, { recursive: true });
-  process.env["HOME"] = TMP_HOME;
-  mockAutoPull.mockReset();
-  mockAutoPull.mockImplementation(async () => ({ pulled: 0, ok: true, configured: true }));
+beforeAll(async () => {
+  stub = await startV1Stub();
 });
-
+afterAll(() => stub.stop());
+beforeEach(async () => {
+  await stub.reset();
+  stub.applyEnv();
+});
 afterEach(() => {
-  closeDatabase();
-  delete process.env["EMAILS_DB_PATH"];
+  stub.clearEnv();
   process.exitCode = 0;
-  delete process.env["AWS_ACCESS_KEY_ID"];
-  delete process.env["AWS_SECRET_ACCESS_KEY"];
-  if (origHome !== undefined) process.env["HOME"] = origHome;
-  else delete process.env["HOME"];
-  if (existsSync(TMP_HOME)) rmSync(TMP_HOME, { recursive: true, force: true });
 });
 
-// ─── inbox list (listInboundEmails) ──────────────────────────────────────────
+// ─── inbound repo round-trip (POST/GET /v1/messages) ─────────────────────────
 
-describe("inbox list — listInboundEmails", () => {
-  it("returns all synced emails", () => {
-    const { providerId } = setupDb();
-    seedInboundEmails(providerId, 3);
+describe("inbound repo over /v1", () => {
+  it("returns seeded received emails newest-first", () => {
+    seedEmail({ subject: "oldest", received_at: "2026-03-18T10:00:00.000Z" });
+    seedEmail({ subject: "middle", received_at: "2026-03-19T10:00:00.000Z" });
+    seedEmail({ subject: "newest", received_at: "2026-03-20T10:00:00.000Z" });
 
-    const emails = listInboundEmails({ provider_id: providerId });
-    expect(emails).toHaveLength(3);
+    const emails = listInboundEmails();
+    expect(emails.map((e) => e.subject)).toEqual(["newest", "middle", "oldest"]);
   });
 
-  it("respects limit option", () => {
-    const { providerId } = setupDb();
-    seedInboundEmails(providerId, 10);
-
-    const emails = listInboundEmails({ provider_id: providerId, limit: 3 });
-    expect(emails).toHaveLength(3);
+  it("respects the limit option", () => {
+    for (let i = 0; i < 10; i++) seedEmail({ received_at: `2026-03-${String(10 + i).padStart(2, "0")}T10:00:00.000Z` });
+    expect(listInboundEmails({ limit: 3 })).toHaveLength(3);
   });
 
-  it("filters by provider_id", () => {
-    const { db, providerId } = setupDb();
-    seedInboundEmails(providerId, 2);
+  it("filters by recipient address and by recipient domain", () => {
+    seedEmail({ subject: "to-primary", to_addresses: ["el@example.com"] });
+    seedEmail({ subject: "to-secondary", to_addresses: ["ap@example.net"] });
+    seedEmail({ subject: "to-display", to_addresses: ['"Display Name" <display@example.com>'] });
 
-    // Create a second provider and seed it
-    const otherId = uuid();
-    db.run(`INSERT INTO providers (id, name, type, active) VALUES (?, 'Other', 'ses', 1)`, [otherId]);
-    storeInboundEmail({
-      provider_id: otherId,
-      message_id: "other-msg",
-      in_reply_to_email_id: null,
-      from_address: "other@example.com",
-      to_addresses: ["me@example.com"],
-      cc_addresses: [],
-      subject: "Other email",
-      text_body: "Other body",
-      html_body: null,
-      attachments: [],
-      attachment_paths: [],
-      headers: {},
-      raw_size: 50,
-      received_at: new Date().toISOString(),
-    }, db);
-
-    const emails = listInboundEmails({ provider_id: providerId });
-    expect(emails.every(e => e.provider_id === providerId)).toBe(true);
-    expect(emails).toHaveLength(2);
-  });
-
-  it("filters by recipient address and by recipient domain (backs `inbox list --to`)", () => {
-    const { db, providerId } = setupDb();
-    const mk = (subject: string, to: string[]) => storeInboundEmail({
-      provider_id: providerId, message_id: `<${subject}@x>`, in_reply_to_email_id: null,
-      from_address: "openai@ext.com", to_addresses: to, cc_addresses: [], subject,
-      text_body: "b", html_body: null, attachments: [], attachment_paths: [], headers: {},
-      raw_size: 1, received_at: new Date().toISOString(),
-    }, db);
-    mk("to-primary", ["el@example.com"]);
-    mk("to-secondary", ["ap@example.net"]);
-    mk("to-display", ['"Display Name" <display@example.com>']);
-
-    // exact address
-    expect(listInboundEmails({ recipients: ["el@example.com"] }, db).map((e) => e.subject)).toEqual(["to-primary"]);
-    expect(listInboundEmails({ recipients: ["display@example.com"] }, db).map((e) => e.subject)).toEqual(["to-display"]);
-    // bare domain (catch-all routing) — case-insensitive
-    expect(listInboundEmails({ recipientDomains: ["EXAMPLE.COM"] }, db).map((e) => e.subject).sort()).toEqual(["to-display", "to-primary"]);
-    expect(listInboundEmails({ recipientDomains: ["example.net"] }, db).map((e) => e.subject)).toEqual(["to-secondary"]);
+    expect(listInboundEmails({ recipients: ["el@example.com"] }).map((e) => e.subject)).toEqual(["to-primary"]);
+    expect(listInboundEmails({ recipients: ["display@example.com"] }).map((e) => e.subject)).toEqual(["to-display"]);
+    expect(listInboundEmails({ recipientDomains: ["EXAMPLE.COM"] }).map((e) => e.subject).sort()).toEqual(["to-display", "to-primary"]);
+    expect(listInboundEmails({ recipientDomains: ["example.net"] }).map((e) => e.subject)).toEqual(["to-secondary"]);
   });
 
   it("filters by since date", () => {
-    const { providerId } = setupDb();
-    seedInboundEmails(providerId, 5); // emails dated Mar 20, 19, 18, 17, 16
+    seedEmail({ subject: "before", received_at: "2026-03-17T10:00:00.000Z" });
+    seedEmail({ subject: "on", received_at: "2026-03-19T10:00:00.000Z" });
+    seedEmail({ subject: "after", received_at: "2026-03-20T10:00:00.000Z" });
 
-    // Only emails from Mar 19 onward (2 emails: idx 0 = Mar 20, idx 1 = Mar 19)
-    const cutoff = new Date(2026, 2, 19).toISOString();
-    const emails = listInboundEmails({ provider_id: providerId, since: cutoff });
-    expect(emails.length).toBeLessThanOrEqual(2);
-    for (const e of emails) {
-      expect(new Date(e.received_at) >= new Date(cutoff)).toBe(true);
-    }
+    const cutoff = "2026-03-19T00:00:00.000Z";
+    const emails = listInboundEmails({ since: cutoff });
+    expect(emails.map((e) => e.subject)).toEqual(["after", "on"]);
+    for (const e of emails) expect(new Date(e.received_at) >= new Date(cutoff)).toBe(true);
   });
 
-  it("filters inbox list --since by timestamp instant for offset dates", async () => {
-    const { db, providerId } = setupDb();
-    storeInboundEmail({
-      provider_id: providerId,
-      message_id: "before-cutoff",
-      in_reply_to_email_id: null,
-      from_address: "before@example.com",
-      to_addresses: ["me@example.com"],
-      cc_addresses: [],
-      subject: "before cutoff",
-      text_body: "body",
-      html_body: null,
-      attachments: [],
-      attachment_paths: [],
-      headers: {},
-      raw_size: 1,
-      received_at: "2026-07-11T23:59:59+00:00",
-    }, db);
-    storeInboundEmail({
-      provider_id: providerId,
-      message_id: "offset-after-cutoff",
-      in_reply_to_email_id: null,
-      from_address: "after@example.com",
-      to_addresses: ["me@example.com"],
-      cc_addresses: [],
-      subject: "offset after cutoff",
-      text_body: "body",
-      html_body: null,
-      attachments: [],
-      attachment_paths: [],
-      headers: {},
-      raw_size: 1,
-      received_at: "2026-07-11T23:30:00-02:00",
-    }, db);
+  it("returns an empty array when there is no mail", () => {
+    expect(listInboundEmails()).toHaveLength(0);
+  });
+
+  it("round-trips a single email by id", () => {
+    const email = seedEmail({ subject: "round trip", text_body: "hello body" });
+    const fetched = getInboundEmail(email.id);
+    expect(fetched?.subject).toBe("round trip");
+    expect(fetched?.text_body).toBe("hello body");
+  });
+});
+
+// ─── inbox list ──────────────────────────────────────────────────────────────
+
+describe("inbox list", () => {
+  it("lists inbox mail newest-first", async () => {
+    seedEmail({ subject: "A", received_at: "2026-01-01T00:00:00.000Z" });
+    seedEmail({ subject: "B", received_at: "2026-01-02T00:00:00.000Z" });
+    seedEmail({ subject: "C", received_at: "2026-01-03T00:00:00.000Z" });
+
+    const { data, out } = await runInboxCommand(["inbox", "list"]);
+    expect((data as Array<{ subject: string }>).map((e) => e.subject)).toEqual(["C", "B", "A"]);
+    expect(out).toContain("Mailbox inbox");
+  });
+
+  it("respects --limit", async () => {
+    for (let i = 1; i <= 5; i++) seedEmail({ subject: `L${i}`, received_at: `2026-01-0${i}T00:00:00.000Z` });
+    const { data } = await runInboxCommand(["inbox", "list", "--limit", "2"]);
+    expect((data as Array<{ subject: string }>).map((e) => e.subject)).toEqual(["L5", "L4"]);
+  });
+
+  it("filters by --to address and by --to domain", async () => {
+    seedEmail({ subject: "el", to_addresses: ["el@elyratelier.com"] });
+    seedEmail({ subject: "ap", to_addresses: ["ap@example.net"] });
+
+    const byAddress = await runInboxCommand(["inbox", "list", "--to", "el@elyratelier.com"]);
+    expect((byAddress.data as Array<{ subject: string }>).map((e) => e.subject)).toEqual(["el"]);
+
+    const byDomain = await runInboxCommand(["inbox", "list", "--to", "elyratelier.com"]);
+    expect((byDomain.data as Array<{ subject: string }>).map((e) => e.subject)).toEqual(["el"]);
+  });
+
+  it("filters --since by timestamp instant across offset timezones", async () => {
+    seedEmail({ subject: "before cutoff", received_at: "2026-07-11T23:59:59+00:00" });
+    seedEmail({ subject: "offset after cutoff", received_at: "2026-07-11T23:30:00-02:00" });
 
     const { data } = await runInboxCommand(["inbox", "list", "--since", "2026-07-12T00:00:00.000Z"]);
-
-    expect((data as Array<{ subject: string }>).map((email) => email.subject)).toEqual(["offset after cutoff"]);
+    expect((data as Array<{ subject: string }>).map((e) => e.subject)).toEqual(["offset after cutoff"]);
   });
 
-  it("returns empty array when no emails", () => {
-    setupDb();
-    const emails = listInboundEmails();
-    expect(emails).toHaveLength(0);
+  it("shows only starred mail with --starred", async () => {
+    await stub.seed({ messages: [
+      msgRow({ subject: "plain", is_starred: false }),
+      msgRow({ subject: "flagged", is_starred: true }),
+    ] });
+
+    const { data } = await runInboxCommand(["inbox", "list", "--starred"]);
+    expect((data as Array<{ subject: string }>).map((e) => e.subject)).toEqual(["flagged"]);
   });
 
-  it("exposes source-aware mailbox status, listing, and search through the CLI", async () => {
-    const { db, providerId } = setupDb();
-    storeInboundEmail({
-      provider_id: providerId,
-      message_id: "source-cli-provider",
-      in_reply_to_email_id: null,
-      from_address: "sender@example.com",
-      to_addresses: ["ops@example.com"],
-      cc_addresses: [],
-      subject: "provider needle",
-      text_body: "body",
-      html_body: null,
-      attachments: [],
-      attachment_paths: [],
-      headers: {},
-      raw_size: 1,
-      received_at: "2026-01-02T10:00:00.000Z",
-    }, db);
-    storeInboundEmail({
-      provider_id: null,
-      message_id: "source-cli-legacy",
-      in_reply_to_email_id: null,
-      from_address: "legacy@example.com",
-      to_addresses: ["ops@example.com"],
-      cc_addresses: [],
-      subject: "legacy visible",
-      text_body: "needle body",
-      html_body: null,
-      attachments: [],
-      attachment_paths: [],
-      headers: {},
-      raw_size: 1,
-      received_at: "2026-01-03T10:00:00.000Z",
-    }, db);
+  it("shows only unread mail with --unread", async () => {
+    await stub.seed({ messages: [
+      msgRow({ subject: "read", is_read: true }),
+      msgRow({ subject: "unread", is_read: false }),
+    ] });
 
-    const sources = await runInboxCommand(["inbox", "sources"]);
-    expect((sources.data as Array<{ id: string; badges: string[] }>).find((source) => source.id === "legacy")?.badges).toContain("legacy");
-
-    const mailboxes = await runInboxCommand(["inbox", "mailboxes", "--source", "legacy"]);
-    expect((mailboxes.data as { counts: { inbox: number } }).counts.inbox).toBe(1);
-
-    const legacyList = await runInboxCommand(["inbox", "list", "--source", "legacy"]);
-    expect((legacyList.data as Array<{ subject: string }>).map((email) => email.subject)).toEqual(["legacy visible"]);
-
-    const providerSearch = await runInboxCommand(["inbox", "search", "needle", "--source", `provider:${providerId}`]);
-    expect((providerSearch.data as Array<{ subject: string }>).map((email) => email.subject)).toEqual(["provider needle"]);
+    const { data } = await runInboxCommand(["inbox", "list", "--unread"]);
+    expect((data as Array<{ subject: string }>).map((e) => e.subject)).toEqual(["unread"]);
   });
 
-  it("explains display-name recipients as normalized addresses", async () => {
-    const { db, providerId } = setupDb();
-    const email = storeInboundEmail({
-      provider_id: providerId,
-      message_id: "display-explain",
-      in_reply_to_email_id: null,
-      from_address: "sender@example.com",
-      to_addresses: ['"Me" <me@example.com>'],
-      cc_addresses: [],
-      subject: "Display explain",
-      text_body: "body",
-      html_body: null,
-      attachments: [],
-      attachment_paths: [],
-      headers: {},
-      raw_size: 100,
-      received_at: "2026-06-04T11:29:09.000Z",
-    }, db);
+  it("hides archived mail by default and shows it under --folder archived", async () => {
+    await stub.seed({ messages: [
+      msgRow({ subject: "normal" }),
+      msgRow({ subject: "filed", labels: ["archived"] }),
+    ] });
 
-    const { out } = await runInboxCommand(["inbox", "explain", email.id]);
+    const inbox = await runInboxCommand(["inbox", "list"]);
+    expect((inbox.data as Array<{ subject: string }>).map((e) => e.subject)).toEqual(["normal"]);
 
-    expect(out).toContain("To:       me@example.com");
+    const archived = await runInboxCommand(["inbox", "list", "--folder", "archived"]);
+    expect((archived.data as Array<{ subject: string }>).map((e) => e.subject)).toEqual(["filed"]);
   });
 
-  it("explains only matching address and domain configuration", async () => {
-    const { db, providerId } = setupDb();
-    const targetDomain = createDomain(providerId, "example.com", db);
-    const targetAddress = createAddress({ provider_id: providerId, email: "me@example.com" }, db);
-    const sameDomainAddress = createAddress({ provider_id: providerId, email: "other@example.com" }, db);
-    setDomainProvisioning(targetDomain.id, { provisioning_status: "ready" }, db);
-    setAddressProvisioning(targetAddress.id, { domain_id: targetDomain.id, provisioning_status: "ready" }, db);
-    setAddressProvisioning(sameDomainAddress.id, { domain_id: targetDomain.id, provisioning_status: "ready" }, db);
+  it("lists outbound mail under --folder sent", async () => {
+    await stub.seed({ messages: [
+      msgRow({ subject: "received" }),
+      msgRow({ subject: "outbound", direction: "outbound", labels: ["sent"] }),
+    ] });
 
-    const otherProvider = createProvider({ name: "Other", type: "ses" }, db);
-    const otherDomain = createDomain(otherProvider.id, "other.com", db);
-    const otherAddress = createAddress({ provider_id: otherProvider.id, email: "other@other.com" }, db);
-    setDomainProvisioning(otherDomain.id, { provisioning_status: "ready" }, db);
-    setAddressProvisioning(otherAddress.id, { domain_id: otherDomain.id, provisioning_status: "ready" }, db);
+    const { data } = await runInboxCommand(["inbox", "list", "--folder", "sent"]);
+    expect((data as Array<{ subject: string }>).map((e) => e.subject)).toEqual(["outbound"]);
+  });
 
-    const email = storeInboundEmail({
-      provider_id: providerId,
-      message_id: "scoped-explain",
-      in_reply_to_email_id: null,
-      from_address: "sender@example.com",
-      to_addresses: ['"Me" <ME@example.com>'],
-      cc_addresses: [],
-      subject: "Scoped explain",
-      text_body: "body",
-      html_body: null,
-      attachments: [],
-      attachment_paths: [],
-      headers: {},
-      raw_size: 100,
-      received_at: "2026-06-04T11:29:09.000Z",
-    }, db);
+  it("filters by --label", async () => {
+    await stub.seed({ messages: [
+      msgRow({ subject: "tagged", labels: ["work"] }),
+      msgRow({ subject: "untagged", labels: [] }),
+    ] });
 
-    const originalQuery = db.query;
-    const queries: string[] = [];
-    db.query = ((sql: string) => {
-      queries.push(sql);
-      return originalQuery.call(db, sql);
-    }) as typeof db.query;
+    const { data } = await runInboxCommand(["inbox", "list", "--label", "work"]);
+    expect((data as Array<{ subject: string }>).map((e) => e.subject)).toEqual(["tagged"]);
+  });
 
-    let resultData: unknown;
-    let out = "";
-    try {
-      const result = await runInboxCommand(["inbox", "explain", email.id]);
-      resultData = result.data;
-      out = result.out;
-    } finally {
-      db.query = originalQuery;
-    }
-    const data = resultData;
-    const result = data as {
-      recipients: Array<{
-        recipient: string;
-        configured_addresses: Array<{
-          id: string;
-          provider_name: string | null;
-          provisioning: { domain_id: string | null; provisioning_status: string } | null;
-        }>;
-        domains: Array<{
-          id: string;
-          provider_name: string | null;
-          readiness: { ready_addresses: number; receive_ready: boolean };
-        }>;
-      }>;
-    };
-
-    const recipient = result.recipients[0]!;
-    expect(recipient.recipient).toBe("me@example.com");
-    expect(recipient.configured_addresses.map((address) => address.id)).toEqual([targetAddress.id]);
-    expect(recipient.configured_addresses[0]?.provider_name).toBe("SES Test");
-    expect(recipient.configured_addresses[0]?.provisioning?.domain_id).toBe(targetDomain.id);
-    expect(recipient.domains.map((domain) => domain.id)).toEqual([targetDomain.id]);
-    expect(recipient.domains[0]?.provider_name).toBe("SES Test");
-    expect(recipient.domains[0]?.readiness.ready_addresses).toBe(2);
-    expect(recipient.domains[0]?.readiness.receive_ready).toBe(true);
-
-    const serialized = JSON.stringify(result);
-    expect(serialized).not.toContain(otherAddress.id);
-    expect(serialized).not.toContain(otherDomain.id);
-    expect(out).toContain(targetAddress.id.slice(0, 8));
-    expect(out).not.toContain(otherAddress.id.slice(0, 8));
-
-    const providerQueries = queries.filter((sql) => sql.includes("FROM providers"));
-    expect(providerQueries.join("\n")).not.toContain("SELECT *");
-    expect(providerQueries.join("\n")).not.toMatch(/\b(api_key|access_key|secret_key|oauth_client_secret|oauth_refresh_token|oauth_access_token)\b/);
-    const inboundQueries = queries.filter((sql) => sql.includes("FROM inbound_emails"));
-    expect(inboundQueries.join("\n")).not.toContain("SELECT *");
-    expect(inboundQueries.join("\n")).not.toMatch(/\b(text_body|html_body|headers_json)\b/);
-    expect(queries.some((sql) => sql.includes("FROM address_ownership_events"))).toBe(false);
-    expect(queries.some((sql) => sql.includes("FROM addresses") && sql.includes("WHERE id IN ("))).toBe(true);
-    expect(queries.some((sql) => sql.includes("FROM domains") && sql.includes("WHERE id IN ("))).toBe(true);
-    expect(queries.some((sql) => sql.includes("COUNT(*)") && sql.includes("domain_id IN ("))).toBe(true);
+  it("reports no mail when the mailbox is empty", async () => {
+    const { data, out } = await runInboxCommand(["inbox", "list"]);
+    expect(data).toEqual([]);
+    expect(out).toContain("No mail found");
   });
 });
 
-describe("inbox links", () => {
-  it("extracts links from an inbound email via inbox subcommand and top-level alias", async () => {
-    const { db, providerId } = setupDb();
-    const email = storeInboundEmail({
-      provider_id: providerId,
-      message_id: "links-msg",
-      in_reply_to_email_id: null,
-      from_address: "sender@example.com",
-      to_addresses: ["me@example.com"],
-      cc_addresses: [],
-      subject: "Links please",
-      text_body: "Plain link https://plain.example/path.",
-      html_body: `<p>Open <a href="https://Example.com/docs?x=1&amp;y=2">Docs</a></p>`,
-      attachments: [],
-      attachment_paths: [],
-      headers: {},
-      raw_size: 100,
-      received_at: "2026-06-16T10:00:00.000Z",
-    }, db);
+// ─── inbox search ────────────────────────────────────────────────────────────
 
-    const viaInbox = await runInboxCommand(["inbox", "links", email.id.slice(0, 8)]);
-    expect(viaInbox.out).toContain("Links for");
-    expect(viaInbox.out).toContain("https://Example.com/docs?x=1&y=2");
-    expect(viaInbox.out).toContain("https://plain.example/path");
-    expect(viaInbox.out).toContain("text: Docs");
-    expect((viaInbox.data as { links: unknown[] }).links).toHaveLength(2);
+describe("inbox search", () => {
+  it("matches subject/body substrings", async () => {
+    seedEmail({ subject: "Alpha needle", text_body: "body" });
+    seedEmail({ subject: "Beta plain", text_body: "unrelated" });
 
-    const viaAlias = await runInboxCommand(["links", email.id]);
-    expect((viaAlias.data as { links: Array<{ normalized_url: string }> }).links.map((link) => link.normalized_url)).toEqual([
-      "https://example.com/docs?x=1&y=2",
-      "https://plain.example/path",
-    ]);
+    const { data } = await runInboxCommand(["inbox", "search", "needle"]);
+    expect((data as Array<{ subject: string }>).map((e) => e.subject)).toEqual(["Alpha needle"]);
   });
 
-  it("keeps mailto links out unless --all is passed", async () => {
-    const { db, providerId } = setupDb();
-    const email = storeInboundEmail({
-      provider_id: providerId,
-      message_id: "mailto-msg",
-      in_reply_to_email_id: null,
-      from_address: "sender@example.com",
-      to_addresses: ["me@example.com"],
-      cc_addresses: [],
-      subject: "Mailto",
-      text_body: "mailto:ops@example.com and https://example.com",
-      html_body: null,
-      attachments: [],
-      attachment_paths: [],
-      headers: {},
-      raw_size: 100,
-      received_at: "2026-06-16T10:00:00.000Z",
-    }, db);
+  it("filters before applying the result limit", async () => {
+    seedEmail({ subject: "Recent plain", received_at: "2026-06-04T11:30:09.000Z" });
+    seedEmail({ subject: "Older match", received_at: "2026-06-04T11:29:09.000Z" });
 
-    const normal = await runInboxCommand(["inbox", "links", email.id]);
-    expect((normal.data as { links: Array<{ normalized_url: string }> }).links.map((link) => link.normalized_url)).toEqual(["https://example.com/"]);
-
-    const all = await runInboxCommand(["inbox", "links", email.id, "--all"]);
-    expect((all.data as { links: Array<{ normalized_url: string }> }).links.map((link) => link.normalized_url)).toEqual([
-      "mailto:ops@example.com",
-      "https://example.com/",
-    ]);
-  });
-});
-
-// ─── inbox search (local filter) ─────────────────────────────────────────────
-
-describe("inbox search — local filter", () => {
-  it("filters by subject substring", () => {
-    const { providerId } = setupDb();
-    seedInboundEmails(providerId, 5);
-
-    const q = "subject 2".toLowerCase();
-    const all = listInboundEmails({ provider_id: providerId, limit: 100 });
-    const results = all.filter(e => e.subject.toLowerCase().includes(q));
-    expect(results).toHaveLength(1);
-    expect(results[0]!.subject).toContain("2");
-  });
-
-  it("filters by from_address", () => {
-    const { providerId } = setupDb();
-    seedInboundEmails(providerId, 5);
-
-    const q = "sender3@example.com";
-    const all = listInboundEmails({ provider_id: providerId, limit: 100 });
-    const results = all.filter(e => e.from_address.toLowerCase().includes(q));
-    expect(results).toHaveLength(1);
-    expect(results[0]!.from_address).toBe("sender3@example.com");
-  });
-
-  it("filters by body text", () => {
-    const { providerId } = setupDb();
-    seedInboundEmails(providerId, 5);
-
-    const q = "body content for email 4";
-    const all = listInboundEmails({ provider_id: providerId, limit: 100 });
-    const results = all.filter(e => (e.text_body ?? "").toLowerCase().includes(q));
-    expect(results).toHaveLength(1);
-    expect(results[0]!.text_body).toContain("4");
-  });
-
-  it("returns empty for no match", () => {
-    const { providerId } = setupDb();
-    seedInboundEmails(providerId, 3);
-
-    const q = "zzz-no-match-zzz";
-    const all = listInboundEmails({ provider_id: providerId, limit: 100 });
-    const results = all.filter(e => e.subject.toLowerCase().includes(q) || e.from_address.toLowerCase().includes(q));
-    expect(results).toHaveLength(0);
-  });
-
-  it("searches before applying the result limit", async () => {
-    const { db, providerId } = setupDb();
-    storeInboundEmail({
-      provider_id: providerId,
-      message_id: "recent-unrelated",
-      in_reply_to_email_id: null,
-      from_address: "sender@example.com",
-      to_addresses: ["recent@example.com"],
-      cc_addresses: [],
-      subject: "Recent unrelated",
-      text_body: "body",
-      html_body: null,
-      attachments: [],
-      attachment_paths: [],
-      headers: {},
-      raw_size: 100,
-      received_at: "2026-06-04T11:30:09.000Z",
-    }, db);
-    storeInboundEmail({
-      provider_id: providerId,
-      message_id: "older-match",
-      in_reply_to_email_id: null,
-      from_address: "sender@example.com",
-      to_addresses: ["target@example.com"],
-      cc_addresses: [],
-      subject: "Older match",
-      text_body: "contains needle",
-      html_body: null,
-      attachments: [],
-      attachment_paths: [],
-      headers: {},
-      raw_size: 100,
-      received_at: "2026-06-04T11:29:09.000Z",
-    }, db);
-
-    // Search routes through the seam (subject/from/snippet scope), so match on the
-    // subject term; the filter must still run before the result limit is applied.
     const { data } = await runInboxCommand(["inbox", "search", "match", "--limit", "1"]);
-
-    expect((data as Array<{ subject: string }>).map((email) => email.subject)).toEqual(["Older match"]);
+    expect((data as Array<{ subject: string }>).map((e) => e.subject)).toEqual(["Older match"]);
   });
 
-  it("paginates local search results with offset after filtering", async () => {
-    const { db, providerId } = setupDb();
+  it("paginates results newest-first with offset", async () => {
     for (let i = 1; i <= 4; i++) {
-      storeInboundEmail({
-        provider_id: providerId,
-        message_id: `paged-search-${i}`,
-        in_reply_to_email_id: null,
-        from_address: "sender@example.com",
-        to_addresses: ["target@example.com"],
-        cc_addresses: [],
-        subject: `Paged needle ${i}`,
-        text_body: "contains needle",
-        html_body: null,
-        attachments: [],
-        attachment_paths: [],
-        headers: {},
-        raw_size: 100,
-        received_at: `2026-06-04T11:0${i}:00.000Z`,
-      }, db);
+      seedEmail({ subject: `needle ${i}`, received_at: `2026-06-04T11:0${i}:00.000Z` });
     }
-    storeInboundEmail({
-      provider_id: providerId,
-      message_id: "paged-search-unrelated",
-      in_reply_to_email_id: null,
-      from_address: "sender@example.com",
-      to_addresses: ["target@example.com"],
-      cc_addresses: [],
-      subject: "Newest unrelated",
-      text_body: "body",
-      html_body: null,
-      attachments: [],
-      attachment_paths: [],
-      headers: {},
-      raw_size: 100,
-      received_at: "2026-06-04T11:05:00.000Z",
-    }, db);
+    seedEmail({ subject: "Newest plain", received_at: "2026-06-04T11:09:00.000Z" });
 
     const { data } = await runInboxCommand(["inbox", "search", "needle", "--limit", "2", "--offset", "1"]);
-    const emails = data as Array<Record<string, unknown>>;
-
-    expect(emails.map((email) => email.subject)).toEqual([
-      "Paged needle 3",
-      "Paged needle 2",
-    ]);
-    expect(emails[0]).not.toHaveProperty("text_body");
-    expect(emails[0]).not.toHaveProperty("html_body");
-    expect(emails[0]).not.toHaveProperty("headers");
+    expect((data as Array<{ subject: string }>).map((e) => e.subject)).toEqual(["needle 3", "needle 2"]);
   });
 });
 
-describe("inbox source lifecycle", () => {
-	  it("lists and retires S3 sources without deleting local mail", async () => {
-    const { db, providerId } = setupDb();
-    const email = storeInboundEmail({
-      provider_id: providerId,
-      message_id: "source-retire-local",
-      in_reply_to_email_id: null,
-      from_address: "sender@example.com",
-      to_addresses: ["me@example.com"],
-      cc_addresses: [],
-      subject: "Source lifecycle local",
-      text_body: "still here",
-      html_body: null,
-      attachments: [],
-      attachment_paths: [],
-      headers: {},
-      raw_size: 100,
-      received_at: "2026-06-04T11:29:09.000Z",
-    }, db);
+// ─── inbox read ──────────────────────────────────────────────────────────────
 
-	    await runInboxCommand(["inbox", "source", "add-s3", "--bucket", "mail-bucket", "--prefix", "inbound/example.com/", "--provider", providerId]);
-	    expect(getConfigValue("inbound_s3_buckets")).toEqual([{ bucket: "mail-bucket", region: "us-east-1", providerId }]);
-	    const before = await runInboxCommand(["inbox", "source", "list"]);
-    expect((before.data as Array<{ type: string; status: string }>).map((source) => `${source.type}:${source.status}`).sort()).toEqual([
-      "s3:live",
-    ]);
-
-    const s3Source = (before.data as Array<{ id: string; type: string }>).find((source) => source.type === "s3")!;
-    await runInboxCommand(["inbox", "source", "retire", s3Source.id]);
-    const after = await runInboxCommand(["inbox", "source", "list"]);
-    const s3 = (after.data as Array<{ type: string; status: string; live_sync_enabled: boolean }>).find((source) => source.type === "s3")!;
-
-	    expect(s3).toMatchObject({ status: "retired", live_sync_enabled: false });
-	    expect(getInboundEmail(email.id, db)?.subject).toBe("Source lifecycle local");
-	  });
-
-  it("does not add disabled S3 sources to the refresh bucket list", async () => {
-    const { providerId } = setupDb();
-
-    await runInboxCommand([
-      "inbox", "source", "add-s3",
-      "--bucket", "disabled-bucket",
-      "--prefix", "inbound/example.com/",
-      "--provider", providerId,
-      "--no-live-sync",
-    ]);
-
-    expect(getConfigValue("inbound_s3_buckets")).toBeUndefined();
-  });
-	});
-
-describe("inbox code", () => {
-  it("prints the newest matching verification code only", async () => {
-    const { db, providerId } = setupDb();
-    storeInboundEmail({
-      provider_id: providerId,
-      message_id: "openai-code",
-      in_reply_to_email_id: null,
-      from_address: '"ChatGPT" <noreply@tm.openai.com>',
-      to_addresses: ["me@example.com"],
-      cc_addresses: [],
-      subject: "Your temporary ChatGPT verification code",
-      text_body: "Enter this temporary verification code to continue:\n\n492255",
-      html_body: null,
-      attachments: [],
-      attachment_paths: [],
-      headers: {},
-      raw_size: 100,
-      received_at: "2026-06-04T11:29:09.000Z",
-    }, db);
-    storeInboundEmail({
-      provider_id: providerId,
-      message_id: "openai-sent-code",
-      in_reply_to_email_id: null,
-      from_address: '"ChatGPT" <noreply@tm.openai.com>',
-      to_addresses: ["me@example.com"],
-      cc_addresses: [],
-      subject: "Your temporary ChatGPT verification code",
-      text_body: "Enter this temporary verification code to continue:\n\n999999",
-      html_body: null,
-      attachments: [],
-      attachment_paths: [],
-      headers: {},
-      label_ids: ["SENT"],
-      raw_size: 100,
-      received_at: "2026-06-04T11:30:09.000Z",
-    }, db);
-
-    const { out, data } = await runInboxCommand(["inbox", "code", "me@example.com", "--no-refresh", "--from", "openai"]);
-
-    expect(out).toBe("492255");
-    expect(data).toMatchObject({ code: "492255", confidence: "high" });
-  });
-
-  it("wait-code reuses code extraction and returns immediately when a match exists", async () => {
-    const { db, providerId } = setupDb();
-    storeInboundEmail({
-      provider_id: providerId,
-      message_id: "code-now",
-      in_reply_to_email_id: null,
-      from_address: "security@example.com",
-      to_addresses: ["me@example.com"],
-      cc_addresses: [],
-      subject: "Verification code",
-      text_body: "Your code is 123456",
-      html_body: null,
-      attachments: [],
-      attachment_paths: [],
-      headers: {},
-      raw_size: 100,
-      received_at: "2026-06-04T11:29:09.000Z",
-    }, db);
-
-    const { out, data } = await runInboxCommand(["inbox", "wait-code", "me@example.com", "--no-refresh", "--timeout", "1"]);
-
-    expect(out).toBe("123456");
-    expect(data).toMatchObject({ code: "123456", confidence: "high" });
-  });
-
-  it("wait-code checks local mail before refreshing", async () => {
-    const { db, providerId } = setupDb();
-    storeInboundEmail({
-      provider_id: providerId,
-      message_id: "code-local-first",
-      in_reply_to_email_id: null,
-      from_address: "security@example.com",
-      to_addresses: ["me@example.com"],
-      cc_addresses: [],
-      subject: "Verification code",
-      text_body: "Your code is 456789",
-      html_body: null,
-      attachments: [],
-      attachment_paths: [],
-      headers: {},
-      raw_size: 100,
-      received_at: "2026-06-04T11:29:09.000Z",
-    }, db);
-
-    const { out, data } = await runInboxCommand(["inbox", "wait-code", "me@example.com", "--timeout", "1"]);
-
-    expect(out).toBe("456789");
-    expect(data).toMatchObject({ code: "456789", confidence: "high" });
-    expect(mockAutoPull).toHaveBeenCalledTimes(0);
-  });
-
-  it("latest returns the newest matching local email", async () => {
-    const { db, providerId } = setupDb();
-    storeInboundEmail({
-      provider_id: providerId,
-      message_id: "latest-now",
-      in_reply_to_email_id: null,
-      from_address: "sender@example.com",
-      to_addresses: ["me@example.com"],
-      cc_addresses: [],
-      subject: "Latest local mail",
-      text_body: "body",
-      html_body: null,
-      attachments: [],
-      attachment_paths: [],
-      headers: {},
-      raw_size: 100,
-      received_at: "2026-06-04T11:29:09.000Z",
-    }, db);
-
-    const { out, data } = await runInboxCommand(["inbox", "latest", "me@example.com"]);
-
-    expect(out).toContain("Latest local mail");
-    expect(data).toMatchObject({ subject: "Latest local mail" });
-  });
-
-  it("latest applies from and subject filters before the result limit", async () => {
-    const { db, providerId } = setupDb();
-    storeInboundEmail({
-      provider_id: providerId,
-      message_id: "recent-noise",
-      in_reply_to_email_id: null,
-      from_address: "updates@example.com",
-      to_addresses: ["me@example.com"],
-      cc_addresses: [],
-      subject: "Recent noise",
-      text_body: "body",
-      html_body: null,
-      attachments: [],
-      attachment_paths: [],
-      headers: {},
-      raw_size: 100,
-      received_at: "2026-06-04T11:30:09.000Z",
-    }, db);
-    storeInboundEmail({
-      provider_id: providerId,
-      message_id: "older-target",
-      in_reply_to_email_id: null,
-      from_address: "security@example.com",
-      to_addresses: ["me@example.com"],
-      cc_addresses: [],
-      subject: "Target login alert",
-      text_body: "body",
-      html_body: null,
-      attachments: [],
-      attachment_paths: [],
-      headers: {},
-      raw_size: 100,
-      received_at: "2026-06-04T11:29:09.000Z",
-    }, db);
-
-    const { data } = await runInboxCommand([
-      "inbox",
-      "latest",
-      "me@example.com",
-      "--from",
-      "security",
-      "--subject",
-      "target",
-      "--limit",
-      "1",
-    ]);
-
-    expect(data).toMatchObject({ subject: "Target login alert", from_address: "security@example.com" });
-  });
-
-  it("unread-count groups unread messages by recipient address", async () => {
-    const { db, providerId } = setupDb();
-    storeInboundEmail({
-      provider_id: providerId,
-      message_id: "unread-one",
-      in_reply_to_email_id: null,
-      from_address: "sender@example.com",
-      to_addresses: ["one@example.com"],
-      cc_addresses: [],
-      subject: "Unread one",
-      text_body: "body",
-      html_body: null,
-      attachments: [],
-      attachment_paths: [],
-      headers: {},
-      raw_size: 100,
-      received_at: "2026-06-04T11:29:09.000Z",
-    }, db);
-    storeInboundEmail({
-      provider_id: providerId,
-      message_id: "unread-two",
-      in_reply_to_email_id: null,
-      from_address: "sender@example.com",
-      to_addresses: ["two@example.com"],
-      cc_addresses: [],
-      subject: "Unread two",
-      text_body: "body",
-      html_body: null,
-      attachments: [],
-      attachment_paths: [],
-      headers: {},
-      raw_size: 100,
-      received_at: "2026-06-04T11:30:09.000Z",
-    }, db);
-    storeInboundEmail({
-      provider_id: providerId,
-      message_id: "unread-display",
-      in_reply_to_email_id: null,
-      from_address: "sender@example.com",
-      to_addresses: ['"One" <one@example.com>'],
-      cc_addresses: [],
-      subject: "Unread display",
-      text_body: "body",
-      html_body: null,
-      attachments: [],
-      attachment_paths: [],
-      headers: {},
-      raw_size: 100,
-      received_at: "2026-06-04T11:31:09.000Z",
-    }, db);
-    storeInboundEmail({
-      provider_id: providerId,
-      message_id: "sent-one",
-      in_reply_to_email_id: null,
-      from_address: "sender@example.com",
-      to_addresses: ["one@example.com"],
-      cc_addresses: [],
-      subject: "Sent one",
-      text_body: "body",
-      html_body: null,
-      attachments: [],
-      attachment_paths: [],
-      headers: {},
-      label_ids: ["SENT"],
-      raw_size: 100,
-      received_at: "2026-06-04T11:32:09.000Z",
-    }, db);
-
-    const { data, out } = await runInboxCommand(["inbox", "unread-count", "--by-address"]);
-
-    expect(out).toContain("one@example.com");
-    expect(out).toContain("two@example.com");
-    expect(data).toEqual([
-      { address: "one@example.com", unread: 2 },
-      { address: "two@example.com", unread: 1 },
-    ]);
-  });
-
-  it("unread-count by address paginates grouped results in SQL", async () => {
-    const { db, providerId } = setupDb();
-    const counts = new Map([
-      ["alpha@example.com", 4],
-      ["bravo@example.com", 3],
-      ["charlie@example.com", 2],
-      ["delta@example.com", 1],
-    ]);
-    for (const [address, count] of counts) {
-      for (let i = 0; i < count; i++) {
-        storeInboundEmail({
-          provider_id: providerId,
-          message_id: `unread-page-${address}-${i}`,
-          in_reply_to_email_id: null,
-          from_address: "sender@example.com",
-          to_addresses: [i === 0 ? `"${address}" <${address}>` : address],
-          cc_addresses: [],
-          subject: `Unread page ${address} ${i}`,
-          text_body: "body",
-          html_body: null,
-          attachments: [],
-          attachment_paths: [],
-          headers: {},
-          raw_size: 100,
-          received_at: `2026-06-04T11:${String(20 + i).padStart(2, "0")}:09.000Z`,
-        }, db);
-      }
-    }
-
-    const originalQuery = db.query;
-    const queries: string[] = [];
-    db.query = ((sql: string) => {
-      queries.push(sql);
-      return originalQuery.call(db, sql);
-    }) as typeof db.query;
-
-    let data: unknown;
-    try {
-      data = (await runInboxCommand(["inbox", "unread-count", "--by-address", "--limit", "2", "--offset", "1"])).data;
-    } finally {
-      db.query = originalQuery;
-    }
-
-    expect(data).toEqual([
-      { address: "bravo@example.com", unread: 3 },
-      { address: "charlie@example.com", unread: 2 },
-    ]);
-    const unreadQuery = queries.find((sql) => sql.includes("inbound_recipients") && sql.includes("COUNT(*) AS unread"));
-    expect(unreadQuery).toBeTruthy();
-    expect(unreadQuery ?? "").toContain("GROUP BY");
-    expect(unreadQuery ?? "").toContain("LIMIT ? OFFSET ?");
-  });
-
-  it("realtime-status reports received inbox mail without synced SENT rows", async () => {
-    const { db, providerId } = setupDb();
-    storeInboundEmail({
-      provider_id: providerId,
-      message_id: "received-status",
-      in_reply_to_email_id: null,
-      from_address: "sender@example.com",
-      to_addresses: ["me@example.com"],
-      cc_addresses: [],
-      subject: "Received status",
-      text_body: "body",
-      html_body: null,
-      attachments: [],
-      attachment_paths: [],
-      headers: {},
-      raw_size: 100,
-      received_at: "2026-06-04T11:29:09.000Z",
-    }, db);
-    storeInboundEmail({
-      provider_id: providerId,
-      message_id: "sent-status",
-      in_reply_to_email_id: null,
-      from_address: "me@example.com",
-      to_addresses: ["client@example.com"],
-      cc_addresses: [],
-      subject: "Sent status",
-      text_body: "body",
-      html_body: null,
-      attachments: [],
-      attachment_paths: [],
-      headers: {},
-      label_ids: ["SENT"],
-      raw_size: 100,
-      received_at: "2026-06-04T11:30:09.000Z",
-    }, db);
-
-    const { data, out } = await runInboxCommand(["inbox", "realtime-status"]);
-
-    expect(data).toMatchObject({
-      total_inbound_emails: 1,
-      unread_inbound_emails: 1,
-      last_received_at: "2026-06-04T11:29:09.000Z",
+describe("inbox read", () => {
+  it("renders markdown-ish bodies as readable text", async () => {
+    const email = seedEmail({
+      subject: "Rendered body",
+      text_body: "# Heading\n\n- **hello**\n- [docs](https://example.com/start)",
     });
-    expect(out).toContain("1 total, 1 unread");
-    expect(out).toContain("2026-06-04T11:29:09.000Z");
-    expect(out).not.toContain("2026-06-04T11:30:09.000Z");
+
+    const { out } = await runInboxCommand(["inbox", "read", email.id, "--keep-unread"]);
+    expect(out).toContain("Heading");
+    expect(out).toContain("- hello");
+    expect(out).toContain("docs (https://example.com/start)");
+    expect(out).not.toContain("**hello**");
   });
 
-  it("mark-read returns a summary without body or header payloads", async () => {
-    const { db, providerId } = setupDb();
-    const email = storeInboundEmail({
-      provider_id: providerId,
-      message_id: "mark-read-summary",
-      in_reply_to_email_id: null,
-      from_address: "sender@example.com",
-      to_addresses: ["me@example.com"],
-      cc_addresses: [],
+  it("resolves a partial (8-char) id", async () => {
+    const email = seedEmail({ subject: "By prefix" });
+    const { data } = await runInboxCommand(["inbox", "read", email.id.slice(0, 8), "--keep-unread"]);
+    expect((data as { subject: string }).subject).toBe("By prefix");
+  });
+
+  it("marks the email read by default", async () => {
+    const email = seedEmail({ subject: "Mark on open" });
+    const { data } = await runInboxCommand(["inbox", "read", email.id]);
+    expect((data as { is_read: boolean }).is_read).toBe(true);
+    expect(getInboundEmail(email.id)?.is_read).toBe(true);
+  });
+
+  it("keeps the email unread with --keep-unread", async () => {
+    const email = seedEmail({ subject: "Stay unread" });
+    await runInboxCommand(["inbox", "read", email.id, "--keep-unread"]);
+    expect(getInboundEmail(email.id)?.is_read).toBe(false);
+  });
+
+  it("shows self-hosted attachments as metadata-only (no local download)", async () => {
+    const email = seedEmail({
+      subject: "With attachment",
+      attachments: [{ filename: "invoice.pdf", content_type: "application/pdf", size: 2048 }],
+    });
+
+    const { out } = await runInboxCommand(["inbox", "read", email.id, "--keep-unread"]);
+    expect(out).toContain("metadata only; no local download in self_hosted mode");
+    expect(out).not.toContain("emails inbox sync to download");
+  });
+});
+
+// ─── inbox mark-read / star / archive / label ────────────────────────────────
+
+describe("inbox mark-read", () => {
+  it("marks read and returns a summary without body/header payloads", async () => {
+    const email = seedEmail({
       subject: "Mark read summary",
       text_body: "large body ".repeat(1000),
       html_body: `<p>${"large html ".repeat(1000)}</p>`,
-      attachments: [],
-      attachment_paths: [],
       headers: { "x-large": "header" },
-      raw_size: 100,
-      received_at: "2026-06-04T11:29:09.000Z",
-    }, db);
+    });
 
     const { data, out } = await runInboxCommand(["inbox", "mark-read", email.id]);
     const row = data as Record<string, unknown>;
-
     expect(out).toContain("Marked read");
     expect(row.id).toBe(email.id);
     expect(row.is_read).toBe(true);
     expect(row).not.toHaveProperty("text_body");
     expect(row).not.toHaveProperty("html_body");
     expect(row).not.toHaveProperty("headers");
-    expect(getInboundEmail(email.id, db)?.is_read).toBe(true);
+    expect(getInboundEmail(email.id)?.is_read).toBe(true);
+  });
+
+  it("marks unread with --unread", async () => {
+    await stub.seed({ messages: [msgRow({ id: "11111111-1111-4111-8111-111111111111", subject: "Was read", is_read: true })] });
+    await runInboxCommand(["inbox", "mark-read", "11111111-1111-4111-8111-111111111111", "--unread"]);
+    expect(getInboundEmail("11111111-1111-4111-8111-111111111111")?.is_read).toBe(false);
   });
 });
 
-describe("inbox read", () => {
-  it("renders markdown-ish bodies as readable text", async () => {
-    const { db, providerId } = setupDb();
-    const email = storeInboundEmail({
-      provider_id: providerId,
-      message_id: "read-rendered",
-      in_reply_to_email_id: null,
-      from_address: "sender@example.com",
-      to_addresses: ["me@example.com"],
-      cc_addresses: [],
-      subject: "Rendered body",
-      text_body: "# Heading\n\n- **hello**\n- [docs](https://example.com/start)",
-      html_body: null,
-      attachments: [],
-      attachment_paths: [],
-      headers: {},
-      raw_size: 100,
+describe("inbox star", () => {
+  it("stars and unstars an email (round-trips through --starred)", async () => {
+    const email = seedEmail({ subject: "Star me" });
+
+    const starred = await runInboxCommand(["inbox", "star", email.id]);
+    expect(starred.out).toContain("Starred");
+    const listed = await runInboxCommand(["inbox", "list", "--starred"]);
+    expect((listed.data as Array<{ subject: string }>).map((e) => e.subject)).toEqual(["Star me"]);
+
+    const unstarred = await runInboxCommand(["inbox", "star", email.id, "--undo"]);
+    expect(unstarred.out).toContain("Unstarred");
+    expect(getInboundEmail(email.id)?.is_starred).toBe(false);
+  });
+});
+
+describe("inbox archive", () => {
+  it("archives an email through the /v1 API", async () => {
+    const email = seedEmail({ subject: "Archive me" });
+
+    const { out } = await runInboxCommand(["inbox", "archive", email.id]);
+    expect(out).toContain("Archived");
+    expect(out).toContain("Archive me");
+
+    const row = (await stub.list("messages")).find((m) => m["id"] === email.id);
+    expect(row?.["archived"]).toBe(true);
+  });
+});
+
+describe("inbox label", () => {
+  it("PATCHes an add-label request through the /v1 API", async () => {
+    const email = seedEmail({ subject: "Label me" });
+
+    const { out } = await runInboxCommand(["inbox", "label", email.id, "urgent"]);
+    expect(out).toContain("label");
+
+    const row = (await stub.list("messages")).find((m) => m["id"] === email.id);
+    // The server (and now the stub) rebuild the labels column from add_label —
+    // a raw add_label field is not persisted, the label lands in `labels`.
+    expect(row?.["labels"]).toContain("urgent");
+  });
+});
+
+// ─── inbox counts / status ───────────────────────────────────────────────────
+
+describe("inbox unread-count", () => {
+  it("returns the total unread count from /v1 counts", async () => {
+    await stub.seed({ messages: [
+      msgRow({ is_read: false }),
+      msgRow({ is_read: false }),
+      msgRow({ is_read: false }),
+      msgRow({ is_read: true }),
+      msgRow({ direction: "outbound", labels: ["sent"] }),
+    ] });
+
+    const { data, out } = await runInboxCommand(["inbox", "unread-count"]);
+    expect(data).toEqual({ unread: 3 });
+    expect(out).toBe("3");
+  });
+});
+
+describe("inbox mailboxes", () => {
+  it("reports folder counts from /v1 counts", async () => {
+    await stub.seed({ messages: [
+      msgRow({}),
+      msgRow({}),
+      msgRow({ labels: ["archived"] }),
+      msgRow({ direction: "outbound", labels: ["sent"] }),
+    ] });
+
+    const { data } = await runInboxCommand(["inbox", "mailboxes"]);
+    const counts = (data as { counts: { inbox: number; sent: number; archived: number } }).counts;
+    expect(counts.inbox).toBe(2);
+    expect(counts.sent).toBe(1);
+    expect(counts.archived).toBe(1);
+  });
+});
+
+describe("inbox sources", () => {
+  it("exposes the single self-hosted source with its counts", async () => {
+    await stub.seed({ messages: [msgRow({ is_read: false }), msgRow({ is_read: true })] });
+
+    const { data } = await runInboxCommand(["inbox", "sources"]);
+    const sources = data as Array<{ id: string; unread: number; counts: { inbox: number } }>;
+    expect(sources.map((s) => s.id)).toEqual(["self_hosted"]);
+    expect(sources[0]?.counts.inbox).toBe(2);
+    expect(sources[0]?.unread).toBe(1);
+  });
+});
+
+describe("inbox status / sync-status", () => {
+  it("derives inbox status from the /v1 counts endpoint", async () => {
+    await stub.seed({ messages: [
+      msgRow({ subject: "in-unread", received_at: "2026-07-01T00:00:00.000Z", is_read: false }),
+      msgRow({ subject: "in-read", received_at: "2026-07-02T00:00:00.000Z", is_read: true }),
+      msgRow({ subject: "arch", received_at: "2026-07-03T00:00:00.000Z", labels: ["archived"] }),
+      msgRow({ subject: "sent", received_at: "2026-07-04T00:00:00.000Z", direction: "outbound", labels: ["sent"] }),
+    ] });
+
+    const { data, out } = await runInboxCommand(["inbox", "status"]);
+    expect(data).toMatchObject({
+      total: 3,
+      unread: 1,
+      latest_received_at: "2026-07-03T00:00:00.000Z",
+    });
+    expect(out).toContain("Inbox sync status");
+  });
+
+  it("reports source-aware sync status from the /v1 counts endpoint", async () => {
+    await stub.seed({ messages: [
+      msgRow({ received_at: "2026-07-01T00:00:00.000Z", is_read: false }),
+      msgRow({ received_at: "2026-07-02T00:00:00.000Z", is_read: true }),
+      msgRow({ received_at: "2026-07-03T00:00:00.000Z", labels: ["archived"] }),
+      msgRow({ received_at: "2026-07-04T00:00:00.000Z", direction: "outbound", labels: ["sent"] }),
+    ] });
+
+    const { data } = await runInboxCommand(["inbox", "sync-status"]);
+    expect(data).toMatchObject({
+      inbox: { total: 3, unread: 1 },
+      mailboxes: { counts: { inbox: 2, sent: 1, archived: 1 } },
+      sources: { total: 1, legacy: 0, orphaned: 0 },
+    });
+  });
+});
+
+// ─── inbox code / wait-code / latest / wait ──────────────────────────────────
+
+describe("inbox code", () => {
+  it("prints the newest matching verification code, ignoring sent mail", async () => {
+    seedEmail({
+      from_address: '"ChatGPT" <noreply@tm.openai.com>',
+      subject: "Your temporary ChatGPT verification code",
+      text_body: "Enter this temporary verification code to continue:\n\n492255",
       received_at: "2026-06-04T11:29:09.000Z",
-    }, db);
+    });
+    seedEmail({
+      from_address: '"ChatGPT" <noreply@tm.openai.com>',
+      subject: "Your temporary ChatGPT verification code",
+      text_body: "Enter this temporary verification code to continue:\n\n999999",
+      received_at: "2026-06-04T11:30:09.000Z",
+      label_ids: ["SENT"],
+    });
 
-    const { out } = await runInboxCommand(["inbox", "read", email.id, "--keep-unread"]);
+    const { out, data } = await runInboxCommand(["inbox", "code", "me@example.com", "--no-refresh", "--from", "openai"]);
+    expect(out).toBe("492255");
+    expect(data).toMatchObject({ code: "492255", confidence: "high" });
+  });
 
-    expect(out).toContain("Heading");
-    expect(out).toContain("- hello");
-    expect(out).toContain("docs (https://example.com/start)");
-    expect(out).not.toContain("**hello**");
+  it("wait-code returns immediately when a match already exists", async () => {
+    seedEmail({
+      from_address: "security@example.com",
+      subject: "Verification code",
+      text_body: "Your code is 123456",
+      received_at: "2026-06-04T11:29:09.000Z",
+    });
+
+    const { out, data } = await runInboxCommand(["inbox", "wait-code", "me@example.com", "--no-refresh", "--timeout", "1"]);
+    expect(out).toBe("123456");
+    expect(data).toMatchObject({ code: "123456", confidence: "high" });
+  });
+
+  it("supports the top-level `code` alias", async () => {
+    seedEmail({
+      from_address: "security@example.com",
+      subject: "Login code",
+      text_body: "Your code is 654321",
+      received_at: "2026-06-04T11:29:09.000Z",
+    });
+
+    const { out } = await runInboxCommand(["code", "me@example.com", "--no-refresh"]);
+    expect(out).toBe("654321");
   });
 });
+
+describe("inbox latest / wait", () => {
+  it("latest returns the newest matching email", async () => {
+    seedEmail({ subject: "Older", received_at: "2026-06-04T11:00:00.000Z" });
+    seedEmail({ subject: "Latest local mail", received_at: "2026-06-04T11:29:09.000Z" });
+
+    const { out, data } = await runInboxCommand(["inbox", "latest", "me@example.com"]);
+    expect(out).toContain("Latest local mail");
+    expect(data).toMatchObject({ subject: "Latest local mail" });
+  });
+
+  it("latest applies from and subject filters", async () => {
+    seedEmail({
+      from_address: "updates@example.com",
+      subject: "Recent noise",
+      received_at: "2026-06-04T11:30:09.000Z",
+    });
+    seedEmail({
+      from_address: "security@example.com",
+      subject: "Target login alert",
+      received_at: "2026-06-04T11:29:09.000Z",
+    });
+
+    const { data } = await runInboxCommand([
+      "inbox", "latest", "me@example.com", "--from", "security", "--subject", "target", "--limit", "1",
+    ]);
+    expect(data).toMatchObject({ subject: "Target login alert", from_address: "security@example.com" });
+  });
+
+  it("wait returns the latest email when one is already present", async () => {
+    seedEmail({ subject: "Awaited", received_at: "2026-06-04T11:29:09.000Z" });
+
+    const { data } = await runInboxCommand(["inbox", "wait", "me@example.com", "--no-refresh", "--timeout", "1"]);
+    expect(data).toMatchObject({ subject: "Awaited" });
+  });
+});
+
+// ─── inbox links ─────────────────────────────────────────────────────────────
+
+describe("inbox links", () => {
+  it("extracts links via the subcommand and the top-level alias", async () => {
+    const email = seedEmail({
+      subject: "Links please",
+      text_body: "Plain link https://plain.example/path.",
+      html_body: `<p>Open <a href="https://Example.com/docs?x=1&amp;y=2">Docs</a></p>`,
+    });
+
+    const viaInbox = await runInboxCommand(["inbox", "links", email.id.slice(0, 8)]);
+    expect(viaInbox.out).toContain("Links for");
+    expect(viaInbox.out).toContain("https://Example.com/docs?x=1&y=2");
+    expect(viaInbox.out).toContain("https://plain.example/path");
+    expect((viaInbox.data as { links: unknown[] }).links).toHaveLength(2);
+
+    const viaAlias = await runInboxCommand(["links", email.id]);
+    expect((viaAlias.data as { links: Array<{ normalized_url: string }> }).links.map((l) => l.normalized_url)).toEqual([
+      "https://example.com/docs?x=1&y=2",
+      "https://plain.example/path",
+    ]);
+  });
+
+  it("keeps mailto links out unless --all is passed", async () => {
+    const email = seedEmail({
+      subject: "Mailto",
+      text_body: "mailto:ops@example.com and https://example.com",
+    });
+
+    const normal = await runInboxCommand(["inbox", "links", email.id]);
+    expect((normal.data as { links: Array<{ normalized_url: string }> }).links.map((l) => l.normalized_url)).toEqual([
+      "https://example.com/",
+    ]);
+
+    const all = await runInboxCommand(["inbox", "links", email.id, "--all"]);
+    expect((all.data as { links: Array<{ normalized_url: string }> }).links.map((l) => l.normalized_url)).toEqual([
+      "mailto:ops@example.com",
+      "https://example.com/",
+    ]);
+  });
+});
+
+// ─── inbox attachment ────────────────────────────────────────────────────────
 
 describe("inbox attachment", () => {
-  it("lists attachment paths by partial inbound id and filename", async () => {
-    const { db, providerId } = setupDb();
-    const email = storeInboundEmail({
-      provider_id: providerId,
-      message_id: "attachment-row",
-      in_reply_to_email_id: null,
-      from_address: "sender@example.com",
-      to_addresses: ["me@example.com"],
-      cc_addresses: [],
+  it("lists attachment metadata (no local paths in self-hosted mode)", async () => {
+    const email = seedEmail({
       subject: "Has attachments",
-      text_body: "large body ".repeat(1000),
-      html_body: `<p>${"large html ".repeat(1000)}</p>`,
       attachments: [
         { filename: "invoice.pdf", content_type: "application/pdf", size: 2048 },
         { filename: "notes.txt", content_type: "text/plain", size: 12 },
       ],
-      attachment_paths: [
-        { filename: "invoice.pdf", content_type: "application/pdf", size: 2048, local_path: "/tmp/invoice.pdf" },
-        { filename: "notes.txt", content_type: "text/plain", size: 12, local_path: "/tmp/notes.txt" },
-      ],
-      headers: { "x-large": "header" },
-      raw_size: 100,
-      received_at: "2026-06-04T11:29:09.000Z",
-    }, db);
+    });
 
     const { data, out } = await runInboxCommand(["inbox", "attachment", email.id.slice(0, 8), "--filename", "invoice.pdf"]);
-
     expect(data).toEqual([
-      {
-        filename: "invoice.pdf",
-        content_type: "application/pdf",
-        size: 2048,
-        location: "/tmp/invoice.pdf",
-        location_type: "local",
-        file_url: "file:///tmp/invoice.pdf",
-        openable: true,
-      },
+      { filename: "invoice.pdf", content_type: "application/pdf", size: 2048, openable: false },
     ]);
     expect(out).toContain("2 KB");
-    expect(out).toContain("file:///tmp/invoice.pdf");
+    expect(out).toContain("not downloaded");
   });
+});
+
+// ─── inbox delete / clear ────────────────────────────────────────────────────
+
+describe("inbox delete / clear", () => {
+  it("deletes a single email through the /v1 API", async () => {
+    const email = seedEmail({ subject: "Delete me" });
+    await runInboxCommand(["inbox", "delete", email.id, "--yes"]);
+    expect(getInboundEmail(email.id)).toBeNull();
+  });
+
+  it("clears the inbox through the /v1 API", async () => {
+    seedEmail({ subject: "one" });
+    seedEmail({ subject: "two" });
+    seedEmail({ subject: "three" });
+
+    await runInboxCommand(["inbox", "clear", "--yes"]);
+    expect(listInboundEmails()).toHaveLength(0);
+  });
+});
+
+// ─── server-only subcommands (fail closed) ───────────────────────────────────
+
+describe("inbox open blocks in the self-hosted client", () => {
+  it("fails closed pointing at `inbox read`", async () => {
+    const result = await runInboxCommandExpectingExit(["inbox", "open", "abc123"]);
+    expect(result.error).toBe("process.exit:1");
+    expect(result.stderr).toContain("emails inbox open is not available in the self-hosted client");
+    expect(result.stderr).toContain("emails inbox read <id>");
+  });
+});
+
+describe("inbox unread-count --by-address blocks in the self-hosted client", () => {
+  it("fails closed pointing at the total unread count", async () => {
+    const result = await runInboxCommandExpectingExit(["inbox", "unread-count", "--by-address"]);
+    expect(result.error).toBe("process.exit:1");
+    expect(result.stderr).toContain("inbox unread-count --by-address");
+    expect(result.stderr).toContain("not available in the self-hosted client");
+    expect(result.stderr).toContain("emails inbox unread-count");
+  });
+});
+
+describe("server-only ingestion/diagnostic subcommands", () => {
+  const cases: Array<{ label: string; args: string[]; command: string }> = [
+    { label: "explain", args: ["inbox", "explain", "31f40200"], command: "emails inbox explain" },
+    { label: "source list", args: ["inbox", "source", "list"], command: "emails inbox source list" },
+    { label: "source add-s3", args: ["inbox", "source", "add-s3", "--bucket", "mail-bucket"], command: "emails inbox source add-s3" },
+    { label: "source retire", args: ["inbox", "source", "retire", "s3-mail-bucket"], command: "emails inbox source retire" },
+    { label: "sync-s3", args: ["inbox", "sync-s3", "--bucket", "mail-bucket", "--limit", "1"], command: "emails inbox sync-s3" },
+    { label: "setup-realtime", args: ["inbox", "setup-realtime", "example.com"], command: "emails inbox setup-realtime" },
+    { label: "realtime-status", args: ["inbox", "realtime-status"], command: "emails inbox realtime-status" },
+    { label: "watch", args: ["inbox", "watch", "--once"], command: "emails inbox watch" },
+    { label: "listen", args: ["inbox", "listen", "--port", "2526"], command: "emails inbox listen" },
+  ];
+
+  for (const { label, args, command } of cases) {
+    it(`${label} fails closed with a server-only message`, async () => {
+      const result = await runInboxCommandExpectingExit(args);
+      expect(result.error).toBe("process.exit:1");
+      expect(result.stderr).toContain(command);
+      expect(result.stderr).toContain("is not available in the self-hosted client");
+      expect(result.stderr).toContain("it runs on the self-hosted server");
+    });
+  }
 });

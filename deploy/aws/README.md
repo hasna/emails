@@ -34,6 +34,9 @@ EMAILS_SEND_PROVIDER=ses
 EMAILS_INGEST_QUEUE_URL=<worker only>
 EMAILS_INGEST_S3_BUCKET=<worker only>
 EMAILS_DATABASE_CA_FILE=/opt/emails/certs/aws-rds-global-bundle.pem
+# Optional paired bootstrap guard (API task only):
+EMAILS_PRIMARY_SUPER_ADMIN_EMAIL=<operator-pinned lowercase email>
+EMAILS_PRIMARY_SUPER_ADMIN_BOOTSTRAP_KID=<authorized non-secret API-key identifier>
 NODE_EXTRA_CA_CERTS=/opt/emails/certs/aws-rds-global-bundle.pem
 ```
 
@@ -157,6 +160,14 @@ product TLS resolver and Node at that file. RDS also enforces `rds.force_ssl=1`,
 so plaintext connections fail. The module contains no secret-version resources
 because plaintext would remain in Terraform state.
 
+To prepare the one-time primary super-admin bootstrap, set both
+`primary_super_admin_email` and `primary_super_admin_bootstrap_kid`. The module
+rejects a half-configured pair and does not hardcode an operator identity. The
+KID is a non-secret identifier for one already provisioned API key; keep the
+corresponding token in the approved secret store and never put it in Terraform,
+task environment variables, plans, or logs. After the bootstrap call succeeds,
+prove the same call is idempotent and that a different KID is denied.
+
 Remove temporary database-administration ingress after bootstrap.
 
 ## 3. Migrate before starting services
@@ -164,6 +175,19 @@ Remove temporary database-administration ingress after bootstrap.
 Set `enable_nat_gateway = true` while desired counts remain zero. The private
 migration task needs egress to pull its image, read Secrets Manager, and publish
 logs.
+
+Before migration 0016, discover and inventory every old API, worker, ingest,
+backfill, scheduled, and one-off writer across ECS services, tasks, schedules,
+and external processes. Drain and stop all of them. Run only a
+new-code-compatible migrator through 0016, require exit code zero, and verify the
+migration ledger before starting anything. Start only tenant-aware new-code writers
+after the ledger check passes.
+
+Before draining any writer, apply with
+`enable_automatic_deployment_rollback = false`. Keep automatic rollback disabled
+through 0016 and the first tenant-aware API and worker activation. During this
+sealed cutover, a failed deployment is roll-forward-only because an ECS rollback
+could otherwise restore an unknown pre-tenancy task definition.
 
 Use these outputs to run one Fargate migration task:
 
@@ -226,17 +250,33 @@ silently destroy non-empty logs.
 Set:
 
 ```hcl
-secrets_ready                = true
-migrations_complete          = true
-enable_nat_gateway           = true
-alarm_notification_topic_arn = "arn:aws:sns:REGION:ACCOUNT:operator-alerts"
-email_domain                 = "example.com"
-api_desired_count            = 2
+secrets_ready                        = true
+migrations_complete                  = true
+enable_nat_gateway                   = true
+enable_automatic_deployment_rollback = false
+alarm_notification_topic_arn         = "arn:aws:sns:REGION:ACCOUNT:operator-alerts"
+email_domain                         = "example.com"
+api_desired_count                    = 2
 ```
 
 The ECS service requires 100% minimum healthy capacity, enables deployment
 circuit-breaker rollback, and makes Terraform wait for steady state with bounded
 timeouts. The health probe uses image-native Bun against `/ready`.
+
+After 0016 commits, never configure circuit-breaker or operator rollback to a
+pre-tenancy or otherwise unscoped image. A prior digest is eligible only when it
+is known to be tenant-aware and compatible with the migrated schema. Otherwise,
+roll forward to a corrected tenant-aware image, or execute an operator-reviewed
+explicit schema recovery plan while every writer remains stopped.
+
+After both API and worker complete a tenant-aware deployment and the checks below
+pass, set `enable_automatic_deployment_rollback = true` in a separate reviewed
+apply. From that point, ECS may automatically restore only the verified
+tenant-aware completed deployment. Re-disable the gate before any future
+schema-sealing migration whose previous binaries would be incompatible.
+Terraform rejects enabling the gate before `migrations_complete`; setting it
+true is the operator's explicit acknowledgement that the previous completed API
+and worker deployment is tenant-aware and schema-compatible.
 
 After apply, prove all of the following:
 
@@ -247,11 +287,12 @@ After apply, prove all of the following:
 5. an operator-created API key succeeds;
 6. alarms and ALB access logs arrive at their destinations.
 
-Keep the previous known-good digest and ECS task-definition revision. To roll
-back, restore the prior `container_image` digest, review the plan, apply it, and
-repeat the six checks. Exercise this digest rollback in staging before the first
-production cutover. Do not deregister old task definitions until the observation
-window and rollback drill are complete.
+After the gate is re-enabled, keep the previous tenant-aware known-good digest
+and ECS task-definition revision. To roll back, restore that compatible prior
+`container_image` digest, review the plan, apply it, and repeat the six checks.
+Exercise this compatible-image rollback in staging after the first tenant-aware
+production deployment. Do not deregister eligible task definitions until the
+observation window and rollback drill are complete.
 
 ## 6. SES sending
 

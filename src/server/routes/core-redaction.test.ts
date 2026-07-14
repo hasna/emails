@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { closeDatabase, getDatabase, resetDatabase } from "../../db/database.js";
-import { createProvider } from "../../db/providers.js";
+import { createProvider } from "../../db/providers.local.js";
 import { handle } from "./core.js";
 
 function call(path: string, init?: RequestInit) {

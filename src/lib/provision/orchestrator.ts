@@ -12,7 +12,6 @@
  *   - An error marked `{ fatal: true }` transitions the entity to `failed`.
  */
 
-import type { Database } from "../../db/database.js";
 import { getDomain } from "../../db/domains.js";
 import { getAddress } from "../../db/addresses.js";
 import {
@@ -71,7 +70,6 @@ export interface AdvanceOptions {
   now?: string;
   pollIntervalSec?: number;
   retryIntervalSec?: number;
-  db?: Database;
 }
 
 export interface AdvanceResult<S extends string, A extends string> {
@@ -105,14 +103,13 @@ export async function advanceDomain(
   deps: DomainDeps,
   opts: AdvanceOptions = {},
 ): Promise<AdvanceResult<DomainState, DomainAction>> {
-  const db = opts.db;
   const now = nowIso(opts);
   const pollInterval = opts.pollIntervalSec ?? 30;
   const retryInterval = opts.retryIntervalSec ?? 60;
 
-  const domain = getDomain(id, db);
+  const domain = getDomain(id);
   if (!domain) throw new Error(`domain ${id} not found`);
-  const provisioning = getDomainProvisioning(id, db)!;
+  const provisioning = getDomainProvisioning(id)!;
   const state = provisioning.provisioning_status as DomainState;
 
   if (state === ("none" as DomainState) || isDomainTerminal(state)) {
@@ -129,13 +126,13 @@ export async function advanceDomain(
     switch (action) {
       case "buy_or_skip": {
         const r = await deps.buyOrSkip(ctx);
-        setDomainProvisioning(id, { registrar: r.registrar, purchase_provider: r.registrar }, db);
+        setDomainProvisioning(id, { registrar: r.registrar, purchase_provider: r.registrar });
         data["registrar"] = r.registrar;
         break;
       }
       case "create_cf_zone": {
         const r = await deps.createCfZone(ctx);
-        setDomainProvisioning(id, { cf_zone_id: r.zoneId, nameservers: r.nameservers }, db);
+        setDomainProvisioning(id, { cf_zone_id: r.zoneId, nameservers: r.nameservers });
         data["zoneId"] = r.zoneId;
         break;
       }
@@ -145,12 +142,12 @@ export async function advanceDomain(
       }
       case "check_ns_propagation": {
         const r = await deps.checkNsPropagation(ctx);
-        if (!r.propagated) return reschedule(id, state, action, now, pollInterval, db);
+        if (!r.propagated) return reschedule(id, state, action, now, pollInterval);
         break;
       }
       case "create_ses_identity": {
         const r = await deps.createSesIdentity(ctx);
-        setDomainProvisioning(id, { mail_from_domain: r.mailFromDomain }, db);
+        setDomainProvisioning(id, { mail_from_domain: r.mailFromDomain });
         break;
       }
       case "publish_dns": {
@@ -160,7 +157,7 @@ export async function advanceDomain(
       }
       case "check_ses_verification": {
         const r = await deps.checkSesVerification(ctx);
-        if (!r.verified) return reschedule(id, state, action, now, pollInterval, db);
+        if (!r.verified) return reschedule(id, state, action, now, pollInterval);
         break;
       }
       case "setup_inbound": {
@@ -178,11 +175,11 @@ export async function advanceDomain(
       provisioning_status: next,
       last_error: null,
       next_check_at: terminal ? null : now,
-    }, db);
-    recordProvisioningEvent("domain", id, state, next, data, db);
+    });
+    recordProvisioningEvent("domain", id, state, next, data);
     return { id, from: state, to: next, action, advanced: true };
   } catch (err) {
-    return handleDomainError(id, state, action, err, now, retryInterval, db);
+    return handleDomainError(id, state, action, err, now, retryInterval);
   }
 }
 
@@ -192,9 +189,8 @@ function reschedule(
   action: DomainAction,
   now: string,
   intervalSec: number,
-  db?: Database,
 ): AdvanceResult<DomainState, DomainAction> {
-  setDomainProvisioning(id, { next_check_at: addSeconds(now, intervalSec) }, db);
+  setDomainProvisioning(id, { next_check_at: addSeconds(now, intervalSec) });
   return { id, from: state, to: state, action, advanced: false, polledNotReady: true };
 }
 
@@ -205,15 +201,14 @@ function handleDomainError(
   err: unknown,
   now: string,
   retryInterval: number,
-  db?: Database,
 ): AdvanceResult<DomainState, DomainAction> {
   const message = errMsg(err);
   if (isFatal(err)) {
-    setDomainProvisioning(id, { provisioning_status: "failed", last_error: message, next_check_at: null }, db);
-    recordProvisioningEvent("domain", id, state, "failed", { action, error: message }, db);
+    setDomainProvisioning(id, { provisioning_status: "failed", last_error: message, next_check_at: null });
+    recordProvisioningEvent("domain", id, state, "failed", { action, error: message });
     return { id, from: state, to: "failed", action, advanced: false, error: message };
   }
-  setDomainProvisioning(id, { last_error: message, next_check_at: addSeconds(now, retryInterval) }, db);
+  setDomainProvisioning(id, { last_error: message, next_check_at: addSeconds(now, retryInterval) });
   return { id, from: state, to: state, action, advanced: false, error: message };
 }
 
@@ -224,14 +219,13 @@ export async function advanceAddress(
   deps: AddressDeps,
   opts: AdvanceOptions = {},
 ): Promise<AdvanceResult<AddressState, AddressAction>> {
-  const db = opts.db;
   const now = nowIso(opts);
   const pollInterval = opts.pollIntervalSec ?? 30;
   const retryInterval = opts.retryIntervalSec ?? 60;
 
-  const address = getAddress(id, db);
+  const address = getAddress(id);
   if (!address) throw new Error(`address ${id} not found`);
-  const provisioning = getAddressProvisioning(id, db)!;
+  const provisioning = getAddressProvisioning(id)!;
   const state = provisioning.provisioning_status as AddressState;
 
   if (state === ("none" as AddressState) || isAddressTerminal(state)) {
@@ -247,14 +241,14 @@ export async function advanceAddress(
 
     if (action === "wire_receive") {
       const r = await deps.wireReceive(ctx);
-      setAddressProvisioning(id, { routing_rule_id: r.routingRuleId }, db);
+      setAddressProvisioning(id, { routing_rule_id: r.routingRuleId });
     } else if (action === "validate_roundtrip") {
       const r = await deps.validateRoundtrip(ctx);
       if (!r.validated) {
-        setAddressProvisioning(id, { next_check_at: addSeconds(now, pollInterval) }, db);
+        setAddressProvisioning(id, { next_check_at: addSeconds(now, pollInterval) });
         return { id, from: state, to: state, action, advanced: false, polledNotReady: true };
       }
-      setAddressProvisioning(id, { last_validated_at: now }, db);
+      setAddressProvisioning(id, { last_validated_at: now });
     }
 
     const terminal = isAddressTerminal(next);
@@ -262,17 +256,17 @@ export async function advanceAddress(
       provisioning_status: next,
       last_error: null,
       next_check_at: terminal ? null : now,
-    }, db);
-    recordProvisioningEvent("address", id, state, next, data, db);
+    });
+    recordProvisioningEvent("address", id, state, next, data);
     return { id, from: state, to: next, action, advanced: true };
   } catch (err) {
     const message = errMsg(err);
     if (isFatal(err)) {
-      setAddressProvisioning(id, { provisioning_status: "failed", last_error: message, next_check_at: null }, db);
-      recordProvisioningEvent("address", id, state, "failed", { action, error: message }, db);
+      setAddressProvisioning(id, { provisioning_status: "failed", last_error: message, next_check_at: null });
+      recordProvisioningEvent("address", id, state, "failed", { action, error: message });
       return { id, from: state, to: "failed", action, advanced: false, error: message };
     }
-    setAddressProvisioning(id, { last_error: message, next_check_at: addSeconds(now, retryInterval) }, db);
+    setAddressProvisioning(id, { last_error: message, next_check_at: addSeconds(now, retryInterval) });
     return { id, from: state, to: state, action, advanced: false, error: message };
   }
 }

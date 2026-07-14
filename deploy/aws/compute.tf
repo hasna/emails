@@ -48,9 +48,14 @@ locals {
     { name = "NODE_EXTRA_CA_CERTS", value = local.database_ca_file },
   ]
 
-  api_environment = concat(local.common_environment, [
-    { name = "EMAILS_SEND_PROVIDER", value = var.send_provider },
-  ])
+  api_environment = concat(
+    local.common_environment,
+    [{ name = "EMAILS_SEND_PROVIDER", value = var.send_provider }],
+    var.primary_super_admin_email == null || var.primary_super_admin_bootstrap_kid == null ? [] : [
+      { name = "EMAILS_PRIMARY_SUPER_ADMIN_EMAIL", value = var.primary_super_admin_email },
+      { name = "EMAILS_PRIMARY_SUPER_ADMIN_BOOTSTRAP_KID", value = var.primary_super_admin_bootstrap_kid },
+    ],
+  )
 
   worker_environment = concat(local.common_environment, [
     { name = "EMAILS_INGEST_QUEUE_URL", value = aws_sqs_queue.inbound.id },
@@ -85,6 +90,13 @@ resource "aws_ecs_task_definition" "api" {
   runtime_platform {
     cpu_architecture        = var.container_architecture
     operating_system_family = "LINUX"
+  }
+
+  lifecycle {
+    precondition {
+      condition     = (var.primary_super_admin_email == null) == (var.primary_super_admin_bootstrap_kid == null)
+      error_message = "primary_super_admin_email and primary_super_admin_bootstrap_kid must be configured together."
+    }
   }
 
   volume { name = "tmp" }
@@ -233,7 +245,7 @@ resource "aws_ecs_service" "api" {
 
   deployment_circuit_breaker {
     enable   = true
-    rollback = true
+    rollback = var.enable_automatic_deployment_rollback
   }
 
   network_configuration {
@@ -261,6 +273,11 @@ resource "aws_ecs_service" "api" {
   }
 
   lifecycle {
+    precondition {
+      condition     = !var.enable_automatic_deployment_rollback || var.migrations_complete
+      error_message = "Automatic rollback cannot be enabled before migrations_complete; keep the sealed cutover roll-forward-only."
+    }
+
     precondition {
       condition = var.api_desired_count == 0 || (
         var.secrets_ready &&
@@ -305,7 +322,7 @@ resource "aws_ecs_service" "worker" {
 
   deployment_circuit_breaker {
     enable   = true
-    rollback = true
+    rollback = var.enable_automatic_deployment_rollback
   }
 
   network_configuration {
@@ -315,6 +332,11 @@ resource "aws_ecs_service" "worker" {
   }
 
   lifecycle {
+    precondition {
+      condition     = !var.enable_automatic_deployment_rollback || var.migrations_complete
+      error_message = "Automatic rollback cannot be enabled before migrations_complete; keep the sealed cutover roll-forward-only."
+    }
+
     precondition {
       condition = var.worker_desired_count == 0 || (
         var.secrets_ready &&

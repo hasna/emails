@@ -26,15 +26,12 @@ async function loadCommandModule(module: CommandModule): Promise<RegisterFn> {
     case "email-log": return (await import("./commands/email-log.js")).registerEmailLogCommands;
     case "sync": return (await import("./commands/sync.js")).registerSyncCommands;
     case "serve": return (await import("./commands/serve.js")).registerServeCommands;
-    case "config": return (await import("./commands/config.js")).registerConfigCommands;
     case "templates": return (await import("./commands/templates.js")).registerTemplateCommands;
     case "contacts": return (await import("./commands/contacts.js")).registerContactCommands;
     case "groups": return (await import("./commands/groups.js")).registerGroupCommands;
     case "sequences": return (await import("./commands/sequences.js")).registerSequenceCommands;
-    case "sandbox": return (await import("./commands/sandbox.js")).registerSandboxCommands;
     case "misc": return (await import("./commands/misc.js")).registerMiscCommands;
     case "inbox": return (await import("./commands/inbox.js")).registerInboxCommands;
-    case "refresh": return (await import("./commands/refresh.js")).registerRefreshCommand;
     case "provision": return (await import("./commands/provision.js")).registerProvisionCommands;
     case "owner": return (await import("./commands/owner.js")).registerOwnerCommands;
     case "alias": return (await import("./commands/alias.js")).registerAliasCommands;
@@ -47,6 +44,7 @@ async function loadCommandModule(module: CommandModule): Promise<RegisterFn> {
     case "daemon": return (await import("./commands/daemon.js")).registerDaemonCommands;
     case "db": return (await import("./commands/db.js")).registerDbCommands;
     case "self-hosted": return (await import("./commands/self-hosted.js")).registerSelfHostedCommands;
+    case "auth": return (await import("./commands/auth.js")).registerAuthCommands;
   }
   throw new Error(`Unknown command module: ${module}`);
 }

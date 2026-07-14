@@ -3,6 +3,7 @@ import { mintApiKey, verifyApiKey } from "@hasna/contracts/auth";
 import type { TypedQueryClient } from "../../storage-kit/index.js";
 import { EmailsSelfHostedStore } from "./store.js";
 import { handleSelfHostedRequest, type SelfHostedServiceDeps } from "./service.js";
+import { testAuthDeps, selfScopedStore } from "./auth/test-support.js";
 import { emailsSelfHostedMigrations } from "./migrations.js";
 
 const SIGNING_SECRET = "test-signing-secret-do-not-use-in-prod";
@@ -20,11 +21,25 @@ function fakeClient(): { client: TypedQueryClient; calls: string[] } {
     async many<T>(sql: string, params?: readonly unknown[]): Promise<T[]> {
       calls.push(sql.trim().split("\n")[0]!.trim());
       if (sql.includes("SELECT 1")) return [{ ok: 1 } as unknown as T];
-      if (sql.startsWith("SELECT * FROM domains ORDER BY")) return domains as unknown as T[];
+      if (/SELECT \* FROM domains\b/i.test(sql)) return domains as unknown as T[];
       return [] as T[];
     },
-    async get<T>(sql: string): Promise<T | null> {
+    async get<T>(sql: string, params?: readonly unknown[]): Promise<T | null> {
       calls.push(sql.trim().split("\n")[0]!.trim());
+      if (sql.includes("INSERT INTO domains")) {
+        const rec = {
+          id: String((params ?? [])[0] ?? "generated-id"),
+          domain: String((params ?? [])[1] ?? ""),
+          status: String((params ?? [])[2] ?? "pending"),
+          provider: (params ?? [])[3] ?? null,
+          verified: Boolean((params ?? [])[4]),
+          notes: (params ?? [])[5] ?? null,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        };
+        domains.push(rec);
+        return rec as unknown as T;
+      }
       if (sql.includes("SELECT 1")) return { ok: 1 } as unknown as T;
       return null;
     },
@@ -54,11 +69,12 @@ function deps(): SelfHostedServiceDeps {
   const { client } = fakeClient();
   return {
     client,
-    store: new EmailsSelfHostedStore(client),
+    store: selfScopedStore(client),
     verifier: verifyApiKey({ app: "emails", signingSecret: SIGNING_SECRET }),
     sender: { provider: "ses", send: async () => "provider-message-id" },
     migrations: emailsSelfHostedMigrations(),
     version: "9.9.9",
+    ...testAuthDeps(client, SIGNING_SECRET),
   };
 }
 
@@ -213,7 +229,7 @@ describe("Emails self-hosted service", () => {
     expect((await res!.json()).counts).toMatchObject({ inbox: 4, sent: 2, unread: 3, total: 6 });
   });
 
-  test("message list forwards direction, recipient, and since filters to the store", async () => {
+  test("message list forwards direction, recipient, search, and since filters to the store", async () => {
     const d = deps();
     let filters: unknown;
     d.store.listMessages = async (opts) => {
@@ -223,13 +239,16 @@ describe("Emails self-hosted service", () => {
     const token = mintApiKey({ app: "emails", scopes: ["emails:read"], signingSecret: SIGNING_SECRET }).token;
     const res = await handleSelfHostedRequest(
       d,
-      req("GET", "/v1/messages?direction=outbound&to=person%40example.com&since=2026-07-12T00%3A00%3A00%2B03%3A00&limit=7&offset=2", { token }),
+      req("GET", "/v1/messages?direction=outbound&to=person%40example.com&from=sender&subject=invoice&search=needle&since=2026-07-12T00%3A00%3A00%2B03%3A00&limit=7&offset=2", { token }),
     );
 
     expect(res?.status).toBe(200);
     expect(filters).toEqual({
       direction: "outbound",
       to: "person@example.com",
+      from: "sender",
+      subject: "invoice",
+      search: "needle",
       since: "2026-07-11T21:00:00.000Z",
       limit: 7,
       offset: 2,

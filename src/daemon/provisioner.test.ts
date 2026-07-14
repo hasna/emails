@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { closeDatabase, resetDatabase } from "../db/database.js";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { startV1Stub, type V1Stub } from "../test-support/v1-stub.js";
 import { createProvider } from "../db/providers.js";
 import { createDomain } from "../db/domains.js";
 import { createAddress } from "../db/addresses.js";
@@ -12,17 +12,24 @@ import {
 import { reconcileTick } from "./provisioner.js";
 import type { DomainDeps, AddressDeps } from "../lib/provision/orchestrator.js";
 
+// reconcileTick derives its "due work" queue by listing the /v1 domains and
+// addresses and filtering on provisioning_status + next_check_at, then advances
+// each via the orchestrator. Exercise it end-to-end against the out-of-process
+// /v1 stub; the orchestrator side effects stay injected pure fakes.
+let stub: V1Stub;
 let providerId: string;
 
-beforeEach(() => {
-  process.env["EMAILS_DB_PATH"] = ":memory:";
-  resetDatabase();
+beforeAll(async () => {
+  stub = await startV1Stub();
+});
+afterAll(() => stub.stop());
+
+beforeEach(async () => {
+  await stub.reset();
+  stub.applyEnv();
   providerId = createProvider({ name: "ses", type: "ses" }).id;
 });
-afterEach(() => {
-  closeDatabase();
-  delete process.env["EMAILS_DB_PATH"];
-});
+afterEach(() => stub.clearEnv());
 
 function domainDeps(): DomainDeps {
   return {

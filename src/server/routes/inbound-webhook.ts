@@ -15,7 +15,7 @@ import { emitEmailsEventBestEffort } from "../../lib/emails-events.js";
 import { verifySnsStructure } from "../../lib/webhook-events.js";
 import { snsMessageAllowed, snsPolicyFromEnv, verifyAwsSnsSignature } from "../../lib/sns-signature.js";
 import { getDatabase } from "../../db/database.js";
-import { getWebhookReceipt, recordWebhookReceipt } from "../../db/webhook-receipts.js";
+import { getWebhookReceipt, recordWebhookReceipt } from "../../db/webhook-receipts.local.js";
 import { readBoundedRequestText, RouteBodyTooLargeError } from "./request-body.js";
 
 /** Injected fetch so confirmation is testable. */
@@ -127,7 +127,7 @@ export async function handleInboundWebhook(
     const exactKeys = objectKey ? [objectKey] : undefined;
 
     const sync = deps?.sync ?? (async (b: string, p: string | undefined, r: string | undefined, syncOpts?: { keys?: string[]; providerId?: string }) => {
-      const { syncS3Inbox } = await import("../../lib/s3-sync.js");
+      const { syncS3Inbox } = await import("../../lib/s3-sync.local.js");
       return syncS3Inbox({ bucket: b, prefix: p, region: r, providerId: syncOpts?.providerId, keys: syncOpts?.keys, limit: syncOpts?.keys?.length ?? 100 });
     });
     emitEmailsEventBestEffort({

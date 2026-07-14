@@ -1,7 +1,6 @@
 import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
 import { createOwner, getOwner, getOwnerByName, listOwners, listAddressesByOwner } from "../../db/owners.js";
-import { enrichAddresses } from "../../lib/address-ownership.js";
 import { formatListHint, handleError, isCliVerboseOutput, parseCliListPage } from "../utils.js";
 
 export function registerOwnerCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
@@ -29,7 +28,7 @@ export function registerOwnerCommands(program: Command, output: (data: unknown, 
     .option("--verbose", "Show expanded list hints")
     .action((opts: { type?: string; limit?: string; offset?: string; verbose?: boolean }) => {
       const page = parseCliListPage(opts);
-      const owners = listOwners(opts.type as "human" | "agent" | undefined, undefined, page);
+      const owners = listOwners(opts.type as "human" | "agent" | undefined, page);
       const text = owners.length
         ? [
           ...owners.map((o) => `  ${o.id.slice(0, 8)}  ${chalk.cyan(o.type)}  ${o.name}${o.contact_email ? ` <${o.contact_email}>` : ""}`),
@@ -59,13 +58,13 @@ export function registerOwnerCommands(program: Command, output: (data: unknown, 
       if (!o) return handleError(new Error(`Owner not found: ${owner}`));
       const role = opts.administered ? "administrator" : "owner";
       const page = parseCliListPage(opts);
-      const addrs = enrichAddresses(listAddressesByOwner(o.id, role, undefined, page));
+      const addrs = listAddressesByOwner(o.id, role, page);
       const text = addrs.length
         ? [
           ...addrs.map((a) => {
-          const ownerText = a.owner ? `owner=${a.owner.name}(${a.owner.type})` : "owner=none";
-          const adminText = a.administrator ? `admin=${a.administrator.name}` : "admin=none";
-          return `  ${a.email}  ${chalk.dim(a.provider_name ?? a.provider_id.slice(0, 8))}  ${chalk.dim(a.status)}  ${chalk.dim(ownerText)}  ${chalk.dim(adminText)}`;
+          const ownerText = a.owner_id ? `owner=${a.owner_id.slice(0, 8)}` : "owner=none";
+          const adminText = a.administrator_id ? `admin=${a.administrator_id.slice(0, 8)}` : "admin=none";
+          return `  ${a.email}  ${chalk.dim(a.provider_id.slice(0, 8))}  ${chalk.dim(a.status)}  ${chalk.dim(ownerText)}  ${chalk.dim(adminText)}`;
         }),
           "",
           formatListHint({

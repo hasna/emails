@@ -1,24 +1,8 @@
-import { getDatabase, getDataDir } from "../db/database.js";
-import type { Database } from "../db/database.js";
-import { listProviderSummaries } from "../db/providers.js";
-import { listDomains } from "../db/domains.js";
-import { listUsableSendingAddresses } from "../db/addresses.js";
-import { listDomainProvisioningByIds, listReadyAddressCountsByDomains } from "../db/provisioning.js";
-import { countValue } from "../db/scalars.js";
-import type { Domain } from "../types/index.js";
-import { assessDomainReadiness } from "./domain-readiness.js";
-import { domainInboundReadinessSignals } from "./domain-inbound-evidence.js";
-import { getInboundBuckets, loadConfig } from "./config.js";
-import { enrichAddresses, type EnrichedAddress } from "./address-ownership.js";
+import { getInboundBuckets } from "./config.js";
+import type { EnrichedAddress } from "./address-ownership.js";
 import { resolveMailDataSource } from "./mail-data-source.js";
 import { resolveEmailsMode, type EmailsMode, type EmailsModeLabel, type EmailsModeSource } from "./mode.js";
-import { withSelfHostedResourceRoutingDisabled } from "../db/self-hosted-store.js";
-import {
-  listMailboxSources,
-  listMailboxStatus,
-  type MailboxSourceSummary,
-  type MailboxStatusSummary,
-} from "../cli/tui/data.js";
+import type { MailboxSourceSummary, MailboxStatusSummary } from "./mail-types.js";
 
 const USABLE_FROM_LIMIT = 25;
 const DOMAIN_READINESS_LIMIT = 25;
@@ -33,7 +17,7 @@ export interface EmailSystemStatus {
     warning: string | null;
   };
   database: {
-    data_dir: string;
+    data_dir: string | null;
   };
   providers: {
     total: number;
@@ -101,195 +85,22 @@ export interface EmailSystemStatus {
   cli_equivalents: Record<string, string>;
 }
 
-type AgentProviderSummary = ReturnType<typeof listProviderSummaries>[number];
-
-function countByType(providers: AgentProviderSummary[]): Record<string, number> {
-  const counts: Record<string, number> = {};
-  for (const provider of providers) counts[provider.type] = (counts[provider.type] ?? 0) + 1;
-  return counts;
-}
-
-interface AddressSummaryRow {
-  total: unknown;
-  active: unknown;
-  verified: unknown;
-  owned: unknown;
-  ready_to_receive: unknown;
-}
-
-function addressSummary(db: Database): { total: number; active: number; verified: number; owned: number; ready_to_receive: number } {
-  const row = db
-    .query(
-      `SELECT
-         COUNT(*) AS total,
-         COALESCE(SUM(CASE WHEN COALESCE(status, 'active') != 'suspended' THEN 1 ELSE 0 END), 0) AS active,
-         COALESCE(SUM(CASE WHEN verified = 1 THEN 1 ELSE 0 END), 0) AS verified,
-         COALESCE(SUM(CASE WHEN owner_id IS NOT NULL THEN 1 ELSE 0 END), 0) AS owned,
-         COALESCE(SUM(CASE WHEN provisioning_status = 'ready' THEN 1 ELSE 0 END), 0) AS ready_to_receive
-       FROM addresses`,
-    )
-    .get() as AddressSummaryRow | null;
-  return {
-    total: countValue(row?.total),
-    active: countValue(row?.active),
-    verified: countValue(row?.verified),
-    owned: countValue(row?.owned),
-    ready_to_receive: countValue(row?.ready_to_receive),
-  };
-}
-
-interface ProvisioningSummaryRow {
-  domains_pending: unknown;
-  domains_failed: unknown;
-  addresses_pending: unknown;
-  addresses_failed: unknown;
-}
-
-function provisioningSummary(db: Database): EmailSystemStatus["provisioning"] {
-  const domainRow = db
-    .query(
-      `SELECT
-         COALESCE(SUM(CASE WHEN provisioning_status NOT IN ('ready', 'failed', 'none') THEN 1 ELSE 0 END), 0) AS domains_pending,
-         COALESCE(SUM(CASE WHEN provisioning_status = 'failed' THEN 1 ELSE 0 END), 0) AS domains_failed
-       FROM domains`,
-    )
-    .get() as Pick<ProvisioningSummaryRow, "domains_pending" | "domains_failed"> | null;
-  const addressRow = db
-    .query(
-      `SELECT
-         COALESCE(SUM(CASE WHEN provisioning_status NOT IN ('ready', 'failed', 'none') THEN 1 ELSE 0 END), 0) AS addresses_pending,
-         COALESCE(SUM(CASE WHEN provisioning_status = 'failed' THEN 1 ELSE 0 END), 0) AS addresses_failed
-       FROM addresses`,
-    )
-    .get() as Pick<ProvisioningSummaryRow, "addresses_pending" | "addresses_failed"> | null;
-  return {
-    domains_pending: countValue(domainRow?.domains_pending),
-    domains_failed: countValue(domainRow?.domains_failed),
-    addresses_pending: countValue(addressRow?.addresses_pending),
-    addresses_failed: countValue(addressRow?.addresses_failed),
-  };
-}
-
-function domainSummary(db: Database): { total: number; send_ready: number; receive_ready: number } {
-  const domains = listDomains(undefined, db);
-  const domainIds = domains.map((domain) => domain.id);
-  const domainProvisioning = listDomainProvisioningByIds(domainIds, db);
-  const readyAddressesByDomain = listReadyAddressCountsByDomains(domainIds, db);
+// The client is self-hosted-ONLY: the runtime system status resolves the API
+// source of truth (mailbox counts/status/sources over the `/v1` mail data
+// source) and never opens a local SQLite database. The rich provider/domain/
+// address/provisioning aggregates were local-SQLite views that the operator's
+// server now owns, so they are reported as empty here — the authoritative
+// numbers are served by the operator API and its own status endpoints.
+async function buildSystemStatus(): Promise<EmailSystemStatus> {
   const mode = resolveEmailsMode();
-  let sendReady = 0;
-  let receiveReady = 0;
-  for (const domain of domains) {
-    const readiness = assessDomainReadiness(domain, domainProvisioning.get(domain.id) ?? null, {
-      ...domainInboundReadinessSignals(domain, mode),
-      ready_addresses: readyAddressesByDomain.get(domain.id) ?? 0,
-    });
-    if (readiness.send_ready) sendReady += 1;
-    if (readiness.receive_ready) receiveReady += 1;
-  }
-  return {
-    total: domains.length,
-    send_ready: sendReady,
-    receive_ready: receiveReady,
-  };
-}
-
-interface InboxSummaryRow {
-  total: unknown;
-  unread: unknown;
-  latest_received_at: string | null;
-}
-
-function inboxSummary(db: Database): { total: number; unread: number; latest_received_at: string | null } {
-  const row = db
-    .query(
-      `SELECT
-         COUNT(*) AS total,
-         COALESCE(SUM(CASE WHEN is_read = 0 AND is_archived = 0 THEN 1 ELSE 0 END), 0) AS unread,
-         MAX(received_at) AS latest_received_at
-       FROM inbound_emails
-       WHERE is_sent = 0`,
-    )
-    .get() as InboxSummaryRow | null;
-  return {
-    total: countValue(row?.total),
-    unread: countValue(row?.unread),
-    latest_received_at: row?.latest_received_at ?? null,
-  };
-}
-
-function buildDomainReadiness(
-  domains: Domain[],
-  providersById: Map<string, AgentProviderSummary>,
-  db: Database,
-): EmailSystemStatus["domains"]["usable"] {
-  const domainIds = domains.map((domain) => domain.id);
-  const domainProvisioning = listDomainProvisioningByIds(domainIds, db);
-  const readyAddressesByDomain = listReadyAddressCountsByDomains(domainIds, db);
-  const mode = resolveEmailsMode();
-  return domains.map((domain) => {
-    const readiness = assessDomainReadiness(domain, domainProvisioning.get(domain.id) ?? null, {
-      ...domainInboundReadinessSignals(domain, mode),
-      ready_addresses: readyAddressesByDomain.get(domain.id) ?? 0,
-    });
-    return {
-      id: domain.id,
-      domain: domain.domain,
-      provider_id: domain.provider_id,
-      provider_name: providersById.get(domain.provider_id)?.name ?? null,
-      state: readiness.state,
-      send_ready: readiness.send_ready,
-      receive_ready: readiness.receive_ready,
-      ready_addresses: readiness.ready_addresses,
-      issues: readiness.issues,
-      fix_commands: readiness.fix_commands,
-    };
-  });
-}
-
-function firstDomainFixCommand(
-  providersById: Map<string, AgentProviderSummary>,
-  db: Database,
-): string | null {
-  for (const domain of buildDomainReadiness(listDomains(undefined, db), providersById, db)) {
-    const command = domain.fix_commands[0];
-    if (command) return command;
-  }
-  return null;
-}
-
-export function getEmailSystemStatus(db: Database = getDatabase()): EmailSystemStatus {
-  const mode = resolveEmailsMode();
-  const providers = listProviderSummaries(db);
-  const providersById = new Map(providers.map((provider) => [provider.id, provider]));
-  const config = loadConfig();
-  const inboundBuckets = getInboundBuckets();
-  const inboxCounts = inboxSummary(db);
-  const domainCounts = domainSummary(db);
-  const addressCounts = addressSummary(db);
-  const usableSenderRows = listUsableSendingAddresses(db, { limit: USABLE_FROM_LIMIT + 1 });
-  const usableFromTruncated = usableSenderRows.length > USABLE_FROM_LIMIT;
-  const usableFrom = enrichAddresses(usableSenderRows.slice(0, USABLE_FROM_LIMIT), db);
-  const domainRows = listDomains(undefined, db, { limit: DOMAIN_READINESS_LIMIT + 1, offset: 0 });
-  const domainReadinessTruncated = domainRows.length > DOMAIN_READINESS_LIMIT;
-  const domainReadiness = buildDomainReadiness(domainRows.slice(0, DOMAIN_READINESS_LIMIT), providersById, db);
-
-  const mailboxStatus = listMailboxStatus(undefined, db);
-  const sourceRows = listMailboxSources({ limit: Math.max(SOURCE_STATUS_LIMIT + 1, 1000) }, db);
-  const countedSources = sourceRows.filter((source) => source.kind !== "all");
-  const sourcesTruncated = countedSources.length > SOURCE_STATUS_LIMIT;
-  const visibleSources = sourceRows.slice(0, SOURCE_STATUS_LIMIT);
-
-  const provisioningRows = provisioningSummary(db);
-
-  const nextActions: string[] = [];
-  if (providers.length === 0) nextActions.push("emails provider add --help");
-  if (domainCounts.total === 0) nextActions.push("emails domain add --help");
-  if (addressCounts.total === 0) nextActions.push("emails address add --help");
-  if (visibleSources.filter((source) => source.kind !== "all").length === 0) nextActions.push("emails inbox sync-status");
-  const domainFixCommand = firstDomainFixCommand(providersById, db);
-  if (domainFixCommand) nextActions.push(domainFixCommand);
-  if (provisioningRows.addresses_failed > 0 || provisioningRows.domains_failed > 0) nextActions.push("emails provision status");
-
+  const ds = resolveMailDataSource();
+  const [counts, mailboxes, sources] = await Promise.all([
+    ds.mailboxCounts(),
+    ds.listMailboxStatus(),
+    ds.listMailboxSources({ limit: Math.max(SOURCE_STATUS_LIMIT + 1, 1000), includeLatest: false }),
+  ]);
+  const primarySource = sources[0];
+  const receivedTotal = counts.inbox + counts.archived + counts.spam + counts.trash;
   return {
     generated_at: new Date().toISOString(),
     mode: {
@@ -299,90 +110,32 @@ export function getEmailSystemStatus(db: Database = getDatabase()): EmailSystemS
       warning: mode.warning,
     },
     database: {
-      data_dir: getDataDir(),
+      data_dir: null,
     },
     providers: {
-      total: providers.length,
-      active: providers.filter((provider) => provider.active).length,
-      by_type: countByType(providers),
+      total: 0,
+      active: 0,
+      by_type: {},
     },
     domains: {
-      total: domainCounts.total,
-      send_ready: domainCounts.send_ready,
-      receive_ready: domainCounts.receive_ready,
-      usable: domainReadiness,
+      total: 0,
+      send_ready: 0,
+      receive_ready: 0,
+      usable: [],
       usable_limit: DOMAIN_READINESS_LIMIT,
-      usable_truncated: domainReadinessTruncated,
+      usable_truncated: false,
     },
     addresses: {
-      total: addressCounts.total,
-      active: addressCounts.active,
-      verified: addressCounts.verified,
-      owned: addressCounts.owned,
-      ready_to_receive: addressCounts.ready_to_receive,
-      usable_from: usableFrom,
+      total: 0,
+      active: 0,
+      verified: 0,
+      owned: 0,
+      ready_to_receive: 0,
+      usable_from: [],
       usable_from_limit: USABLE_FROM_LIMIT,
-      usable_from_truncated: usableFromTruncated,
+      usable_from_truncated: false,
     },
     inbox: {
-      total: inboxCounts.total,
-      unread: inboxCounts.unread,
-      latest_received_at: inboxCounts.latest_received_at,
-      inbound_buckets: inboundBuckets,
-      realtime: {
-        queue_configured: typeof config["inbound_realtime_queue_url"] === "string",
-        queue_url: typeof config["inbound_realtime_queue_url"] === "string" ? config["inbound_realtime_queue_url"] : null,
-        last_poll_at: typeof config["inbound_realtime_last_poll_at"] === "string" ? config["inbound_realtime_last_poll_at"] : null,
-        last_error: typeof config["inbound_realtime_last_error"] === "string" ? config["inbound_realtime_last_error"] : null,
-      },
-    },
-    mailboxes: mailboxStatus,
-    sources: {
-      total: countedSources.length,
-      active: countedSources.filter((source) => source.badges.includes("active") || source.badges.includes("configured")).length,
-      legacy: countedSources.filter((source) => source.badges.includes("legacy")).length,
-      orphaned: countedSources.filter((source) => source.badges.includes("orphaned")).length,
-      items: visibleSources,
-      limit: SOURCE_STATUS_LIMIT,
-      truncated: sourcesTruncated,
-    },
-    provisioning: provisioningRows,
-    next_actions: [...new Set(nextActions)].slice(0, 5),
-    cli_equivalents: {
-      status: "emails status --json",
-      inbox_sync_status: "emails inbox sync-status --json",
-      provision_address: "emails address provision <email> --provider <provider>",
-      wait_code: "emails inbox wait-code <address> --timeout 120",
-      address_owner: "emails address owner <email-or-id>",
-    },
-  };
-}
-
-// The runtime status backs `emails status`, `emails agent context`, and the MCP
-// status resources/tools. In self_hosted mode the inbox/mailbox/source reads must come from
-// the API (not the empty local DB), so route those specific reads through the seam.
-// Provider/domain/address/provisioning state stays local — that is local config, not
-// message data. In local mode the seam resolves to SQLite, so the result is unchanged.
-export async function getEmailSystemStatusForRuntime(
-  db: Database = getDatabase(),
-): Promise<EmailSystemStatus> {
-  const ds = resolveMailDataSource();
-  const status = ds.mode === "self_hosted"
-    ? withSelfHostedResourceRoutingDisabled(() => getEmailSystemStatus(db))
-    : getEmailSystemStatus(db);
-  if (ds.mode !== "self_hosted") return status;
-
-  const [counts, mailboxes, sources] = await Promise.all([
-    ds.mailboxCounts(),
-    ds.listMailboxStatus(),
-    ds.listMailboxSources({ limit: Math.max(SOURCE_STATUS_LIMIT + 1, 1000), includeLatest: false }),
-  ]);
-  const primarySource = sources[0];
-  const receivedTotal = counts.inbox + counts.archived + counts.spam + counts.trash;
-  return {
-    ...status,
-    inbox: {
-      ...status.inbox,
       total: receivedTotal,
       unread: counts.unread,
       latest_received_at: primarySource?.latestReceivedAt ?? null,
@@ -404,7 +157,32 @@ export async function getEmailSystemStatusForRuntime(
       limit: SOURCE_STATUS_LIMIT,
       truncated: sources.length > SOURCE_STATUS_LIMIT,
     },
+    provisioning: {
+      domains_pending: 0,
+      domains_failed: 0,
+      addresses_pending: 0,
+      addresses_failed: 0,
+    },
+    next_actions: [],
+    cli_equivalents: {
+      status: "emails status --json",
+      inbox_sync_status: "emails inbox sync-status --json",
+      provision_address: "emails address provision <email> --provider <provider>",
+      wait_code: "emails inbox wait-code <address> --timeout 120",
+      address_owner: "emails address owner <email-or-id>",
+    },
   };
+}
+
+export async function getEmailSystemStatus(): Promise<EmailSystemStatus> {
+  return buildSystemStatus();
+}
+
+// The runtime status backs `emails status`, `emails agent context`, and the MCP
+// status resources/tools. In the self-hosted client it resolves the API source
+// of truth and never opens a local database.
+export async function getEmailSystemStatusForRuntime(): Promise<EmailSystemStatus> {
+  return buildSystemStatus();
 }
 
 export function formatEmailSystemStatus(status: EmailSystemStatus): string {
@@ -496,18 +274,23 @@ function buildAgentContext(status: EmailSystemStatus): Record<string, unknown> {
   };
 }
 
-export function getAgentContext(db: Database = getDatabase()): Record<string, unknown> {
-  return buildAgentContext(getEmailSystemStatus(db));
+export async function getAgentContext(): Promise<Record<string, unknown>> {
+  return buildAgentContext(await buildSystemStatus());
 }
 
-export async function getAgentContextForRuntime(
-  db: Database = getDatabase(),
-): Promise<Record<string, unknown>> {
-  return buildAgentContext(await getEmailSystemStatusForRuntime(db));
+export async function getAgentContextForRuntime(): Promise<Record<string, unknown>> {
+  return buildAgentContext(await buildSystemStatus());
 }
 
-export function getNextEmailAction(goal?: string, db: Database = getDatabase()): Record<string, unknown> {
-  const status = getEmailSystemStatus(db);
+export async function getNextEmailAction(goal?: string): Promise<Record<string, unknown>> {
+  return nextEmailActionFromStatus(await buildSystemStatus(), goal);
+}
+
+export async function getNextEmailActionForRuntime(goal?: string): Promise<Record<string, unknown>> {
+  return nextEmailActionFromStatus(await buildSystemStatus(), goal);
+}
+
+function nextEmailActionFromStatus(status: EmailSystemStatus, goal?: string): Record<string, unknown> {
   const normalized = goal?.toLowerCase() ?? "";
   if (normalized.includes("code") || normalized.includes("verification")) {
     return {

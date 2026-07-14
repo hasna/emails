@@ -141,8 +141,22 @@ export {
   clearSandboxEmails, getSandboxCount,
 } from "./db/sandbox.js";
 
-// Database utilities
-export { getDatabase, closeDatabase, resetDatabase, runInTransaction, uuid, now, resolvePartialId } from "./db/database.js";
+// Runtime utilities and first-class local SQLite lifecycle.
+export { uuid, now } from "./db/runtime.js";
+export { resolveResourceId, resolveResourceIdOrThrow, listResourceIdMatches } from "./db/self-hosted-store.js";
+export {
+  closeDatabase,
+  databaseFileExists,
+  getDatabase,
+  getDatabasePath,
+  isDatabaseOpen,
+  listPartialIdMatches,
+  resetDatabase,
+  resolvePartialId,
+  resolvePartialIdOrThrow,
+  runInTransaction,
+} from "./db/database.js";
+export type { Database } from "./db/database.js";
 
 // Lib functions
 export { getLocalStats, formatStatsTable } from "./lib/stats.js";

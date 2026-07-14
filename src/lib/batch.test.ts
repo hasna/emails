@@ -1,34 +1,12 @@
-import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
-import { getDatabase, closeDatabase, resetDatabase } from "../db/database.js";
-import { createProvider } from "../db/providers.js";
-import { createTemplate } from "../db/templates.js";
-import { getContact, suppressContact } from "../db/contacts.js";
-import { parseCsv, batchSend } from "./batch.js";
+import { describe, it, expect } from "bun:test";
+import { parseCsv } from "./batch.js";
+import { batchSend } from "./batch.remote.js";
 import type { Provider } from "../types/index.js";
 
-let testProvider: Provider;
-
-beforeEach(() => {
-  process.env["EMAILS_DB_PATH"] = ":memory:";
-  process.env["EMAILS_MODE"] = "local";
-  delete process.env["HASNA_EMAILS_DATABASE_URL"];
-  delete process.env["EMAILS_DATABASE_URL"];
-  delete process.env["EMAILS_MODE"];
-  delete process.env["EMAILS_STORAGE_MODE"];
-  resetDatabase();
-  const db = getDatabase();
-  testProvider = createProvider({ name: "test", type: "sandbox" }, db);
-});
-
-afterEach(() => {
-  closeDatabase();
-  delete process.env["EMAILS_DB_PATH"];
-  delete process.env["EMAILS_MODE"];
-  delete process.env["HASNA_EMAILS_DATABASE_URL"];
-  delete process.env["EMAILS_DATABASE_URL"];
-  delete process.env["EMAILS_MODE"];
-  delete process.env["EMAILS_STORAGE_MODE"];
-});
+// parseCsv is a pure re-export of csv.js and still runs locally. batchSend now
+// runs on the self-hosted server (templates, suppression, provider adapters and
+// the sent-mail ledger are all server-side, sending goes through /v1), so it is
+// a loud stub.
 
 describe("parseCsv", () => {
   it("parses CSV with headers", () => {
@@ -62,173 +40,17 @@ describe("parseCsv", () => {
   });
 });
 
-describe("batchSend", () => {
-  it("sends emails from CSV using template", async () => {
-    createTemplate({
-      name: "welcome",
-      subject_template: "Hello {{name}}",
-      html_template: "<p>Welcome {{name}} from {{company}}</p>",
-    });
-
-    const csvContent = "email,name,company\nalice@example.com,Alice,Acme\nbob@example.com,Bob,Corp";
-    const mockSendEmail = mock(() => Promise.resolve("msg-123"));
-
-    const result = await batchSend({
-      csvPath: "/fake/path.csv",
-      templateName: "welcome",
-      from: "sender@example.com",
-      provider: testProvider,
-      _adapter: { sendEmail: mockSendEmail },
-      _csvContent: csvContent,
-    });
-
-    expect(result.total).toBe(2);
-    expect(result.sent).toBe(2);
-    expect(result.failed).toBe(0);
-    expect(result.suppressed).toBe(0);
-    expect(result.errors).toEqual([]);
-    expect(mockSendEmail).toHaveBeenCalledTimes(2);
-    expect(getContact("alice@example.com")?.send_count).toBe(1);
-    expect(getContact("bob@example.com")?.send_count).toBe(1);
-  });
-
-  it("skips suppressed contacts", async () => {
-    createTemplate({
-      name: "welcome",
-      subject_template: "Hello {{name}}",
-    });
-
-    suppressContact("alice@example.com");
-
-    const csvContent = "email,name\nalice@example.com,Alice\nbob@example.com,Bob";
-    const mockSendEmail = mock(() => Promise.resolve("msg-123"));
-
-    const result = await batchSend({
-      csvPath: "/fake/path.csv",
-      templateName: "welcome",
-      from: "sender@example.com",
-      provider: testProvider,
-      _adapter: { sendEmail: mockSendEmail },
-      _csvContent: csvContent,
-    });
-
-    expect(result.total).toBe(2);
-    expect(result.sent).toBe(1);
-    expect(result.suppressed).toBe(1);
-    expect(mockSendEmail).toHaveBeenCalledTimes(1);
-  });
-
-  it("sends to suppressed contacts with force flag", async () => {
-    createTemplate({
-      name: "welcome",
-      subject_template: "Hello {{name}}",
-    });
-
-    suppressContact("alice@example.com");
-
-    const csvContent = "email,name\nalice@example.com,Alice";
-    const mockSendEmail = mock(() => Promise.resolve("msg-123"));
-
-    const result = await batchSend({
-      csvPath: "/fake/path.csv",
-      templateName: "welcome",
-      from: "sender@example.com",
-      provider: testProvider,
-      force: true,
-      _adapter: { sendEmail: mockSendEmail },
-      _csvContent: csvContent,
-    });
-
-    expect(result.total).toBe(1);
-    expect(result.sent).toBe(1);
-    expect(result.suppressed).toBe(0);
-  });
-
-  it("throws if template not found", async () => {
+describe("batchSend (self-hosted stub)", () => {
+  it("throws because batch sending runs on the self-hosted server", async () => {
+    const provider = { id: "p1", name: "test", type: "sandbox" } as unknown as Provider;
     await expect(
       batchSend({
         csvPath: "/fake/path.csv",
-        templateName: "nonexistent",
+        templateName: "welcome",
         from: "sender@example.com",
-        provider: testProvider,
+        provider,
         _csvContent: "email\nalice@example.com",
       }),
-    ).rejects.toThrow("Template not found: nonexistent");
-  });
-
-  it("handles rows missing email column", async () => {
-    createTemplate({
-      name: "welcome",
-      subject_template: "Hello",
-    });
-
-    const csvContent = "name\nAlice";
-    const mockSendEmail = mock(() => Promise.resolve("msg-123"));
-
-    const result = await batchSend({
-      csvPath: "/fake/path.csv",
-      templateName: "welcome",
-      from: "sender@example.com",
-      provider: testProvider,
-      _adapter: { sendEmail: mockSendEmail },
-      _csvContent: csvContent,
-    });
-
-    expect(result.total).toBe(1);
-    expect(result.failed).toBe(1);
-    expect(result.errors[0]!.error).toContain("missing 'email' column");
-  });
-
-  it("tracks send failures", async () => {
-    createTemplate({
-      name: "welcome",
-      subject_template: "Hello",
-    });
-
-    const csvContent = "email\nalice@example.com\nbob@example.com";
-    let callCount = 0;
-    const mockSendEmail = mock(() => {
-      callCount++;
-      if (callCount === 1) return Promise.reject(new Error("Connection refused"));
-      return Promise.resolve("msg-123");
-    });
-
-    const result = await batchSend({
-      csvPath: "/fake/path.csv",
-      templateName: "welcome",
-      from: "sender@example.com",
-      provider: testProvider,
-      _adapter: { sendEmail: mockSendEmail },
-      _csvContent: csvContent,
-    });
-
-    expect(result.total).toBe(2);
-    expect(result.sent).toBe(1);
-    expect(result.failed).toBe(1);
-    expect(result.errors[0]!.email).toBe("alice@example.com");
-    expect(result.errors[0]!.error).toBe("Connection refused");
-  });
-
-  it("applies outbound domain guard before an injected adapter send", async () => {
-    createTemplate({
-      name: "welcome",
-      subject_template: "Hello",
-    });
-    const provider = createProvider({ name: "ses-real", type: "ses", region: "us-east-1" }, getDatabase());
-    const mockSendEmail = mock(() => Promise.resolve("msg-123"));
-
-    const result = await batchSend({
-      csvPath: "/fake/path.csv",
-      templateName: "welcome",
-      from: "sender@example.com",
-      provider,
-      _adapter: { sendEmail: mockSendEmail },
-      _csvContent: "email\nalice@example.com",
-    });
-
-    expect(result.sent).toBe(0);
-    expect(result.failed).toBe(1);
-    expect(result.errors[0]!.error).toContain("domain registration");
-    expect(mockSendEmail).not.toHaveBeenCalled();
+    ).rejects.toThrow(/batchSend is not available in the self-hosted client/);
   });
 });

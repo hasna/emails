@@ -15,6 +15,31 @@ async function toolError(error: unknown): Promise<ToolResult> {
   return { content: [{ type: "text", text: `Error: ${formatError(error)}` }], isError: true };
 }
 
+async function isSelfHostedRuntimeMode(): Promise<boolean> {
+  const { resolveEmailsMode } = await import("../../lib/mode.js");
+  return resolveEmailsMode().mode === "self_hosted";
+}
+
+async function assertSelfHostedApiRouteReady(toolName: string): Promise<boolean> {
+  if (!(await isSelfHostedRuntimeMode())) return false;
+  const { isSelfHostedMode } = await import("../../db/self-hosted-store.js");
+  if (!isSelfHostedMode()) {
+    throw new Error(
+      `MCP tool ${toolName} is API-backed in self_hosted mode and requires EMAILS_MODE=self_hosted with ` +
+        "EMAILS_SELF_HOSTED_URL and EMAILS_SELF_HOSTED_API_KEY. Set EMAILS_MODE=local only for an explicit local group store.",
+    );
+  }
+  return true;
+}
+
+async function assertGroupMemberStateAllowed(toolName: string, reason: string): Promise<void> {
+  if (!(await isSelfHostedRuntimeMode())) return;
+  throw new Error(
+    `MCP tool ${toolName} is disabled in self_hosted API-only mode because ${reason}. ` +
+      "Use the self-hosted Emails API for server-owned group member state, or set EMAILS_MODE=local only for an explicit local group-member ledger.",
+  );
+}
+
 export function registerMiscOpsTools(server: McpServer): void {
   // ─── GROUPS ─────────────────────────────────────────────────────────────────
 
@@ -27,13 +52,18 @@ export function registerMiscOpsTools(server: McpServer): void {
   },
   async ({ limit, offset }) => {
     try {
+      const selfHosted = await assertSelfHostedApiRouteReady("list_groups");
       const { listGroups, getMemberCounts } = await import('../../db/groups.js');
-      const groups = listGroups(undefined, { limit: limit ?? 100, offset: offset ?? 0 });
-      const counts = getMemberCounts(groups.map((group) => group.id));
-      const result = groups.map(g => ({
-        ...g,
-        member_count: counts.get(g.id) ?? 0,
-      }));
+      const groups = listGroups({ limit: limit ?? 100, offset: offset ?? 0 });
+      const result = selfHosted
+        ? groups
+        : (() => {
+            const counts = getMemberCounts(groups.map((group) => group.id));
+            return groups.map(g => ({
+              ...g,
+              member_count: counts.get(g.id) ?? 0,
+            }));
+          })();
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     } catch (e) {
       return toolError(e);
@@ -50,6 +80,7 @@ export function registerMiscOpsTools(server: McpServer): void {
   },
   async ({ name, description }) => {
     try {
+      await assertSelfHostedApiRouteReady("create_group");
       const { createGroup } = await import('../../db/groups.js');
       const group = createGroup(name, description);
       return { content: [{ type: "text", text: JSON.stringify(group, null, 2) }] };
@@ -67,6 +98,7 @@ export function registerMiscOpsTools(server: McpServer): void {
   },
   async ({ name }) => {
     try {
+      await assertSelfHostedApiRouteReady("delete_group");
       const { getGroupByName, deleteGroup } = await import('../../db/groups.js');
       const group = getGroupByName(name);
       if (!group) throw new Error(`Group not found: ${name}`);
@@ -89,6 +121,7 @@ export function registerMiscOpsTools(server: McpServer): void {
   },
   async ({ group_name, email, name, vars }) => {
     try {
+      await assertGroupMemberStateAllowed("add_group_member", "it writes local group member rows");
       const { getGroupByName, addMember } = await import('../../db/groups.js');
       const group = getGroupByName(group_name);
       if (!group) throw new Error(`Group not found: ${group_name}`);
@@ -109,6 +142,7 @@ export function registerMiscOpsTools(server: McpServer): void {
   },
   async ({ group_name, email }) => {
     try {
+      await assertGroupMemberStateAllowed("remove_group_member", "it writes local group member rows");
       const { getGroupByName, removeMember } = await import('../../db/groups.js');
       const group = getGroupByName(group_name);
       if (!group) throw new Error(`Group not found: ${group_name}`);
@@ -131,10 +165,11 @@ export function registerMiscOpsTools(server: McpServer): void {
   },
   async ({ group_name, limit, offset }) => {
     try {
+      await assertGroupMemberStateAllowed("list_group_members", "it reads local group member rows");
       const { getGroupByName, listMemberSummaries } = await import('../../db/groups.js');
       const group = getGroupByName(group_name);
       if (!group) throw new Error(`Group not found: ${group_name}`);
-      const members = listMemberSummaries(group.id, undefined, { limit: limit ?? 100, offset: offset ?? 0 });
+      const members = listMemberSummaries(group.id, { limit: limit ?? 100, offset: offset ?? 0 });
       return { content: [{ type: "text", text: JSON.stringify(members, null, 2) }] };
     } catch (e) {
       return toolError(e);
@@ -151,6 +186,7 @@ export function registerMiscOpsTools(server: McpServer): void {
   },
   async ({ group_name, email }) => {
     try {
+      await assertGroupMemberStateAllowed("get_group_member", "it reads local group member rows");
       const { getGroupByName, getMember } = await import('../../db/groups.js');
       const group = getGroupByName(group_name);
       if (!group) throw new Error(`Group not found: ${group_name}`);
@@ -194,12 +230,10 @@ export function registerMiscOpsTools(server: McpServer): void {
   },
   async ({ id }) => {
     try {
-      const { getDatabase } = await import('../../db/database.js');
       const { getSandboxEmail } = await import('../../db/sandbox.js');
       const { resolveId } = await import('../helpers.js');
       const resolvedId = resolveId("sandbox_emails", id);
-      const db = getDatabase();
-      const email = getSandboxEmail(resolvedId, db);
+      const email = getSandboxEmail(resolvedId);
       if (!email) throw new Error(`Sandbox email not found: ${id}`);
       return { content: [{ type: "text", text: JSON.stringify(email, null, 2) }] };
     } catch (e) {
@@ -260,7 +294,7 @@ export function registerMiscOpsTools(server: McpServer): void {
   async ({ live }) => {
     try {
       const { runDiagnostics } = await import("../../lib/doctor.js");
-      const checks = await runDiagnostics(undefined, { liveProviderChecks: live === true });
+      const checks = await runDiagnostics({ liveProviderChecks: live === true });
       return { content: [{ type: "text", text: JSON.stringify(checks, null, 2) }] };
     } catch (e) {
       return toolError(e);
@@ -354,45 +388,17 @@ export function registerMiscOpsTools(server: McpServer): void {
     provider_id: z.string().optional().describe("Provider ID (uses default if not specified)"),
     force: z.boolean().optional().describe("Send even to suppressed contacts"),
   },
-  async ({ recipients, template_name, from_address, provider_id, force }) => {
-    try {
-      const { getTemplate, renderTemplate } = await import("../../db/templates.js");
-      const template = getTemplate(template_name);
-      if (!template) throw new Error(`Template not found: ${template_name}`);
-      const { getActiveProvider, getProvider } = await import("../../db/providers.js");
-      const { getDatabase } = await import('../../db/database.js');
-      const { resolveId, ProviderNotFoundError } = await import('../helpers.js');
-      const db = getDatabase();
-      const resolvedProviderId = provider_id ? resolveId("providers", provider_id)
-        : getActiveProvider(db).id;
-      const provider = getProvider(resolvedProviderId, db);
-      if (!provider) throw new ProviderNotFoundError(resolvedProviderId);
-      const { getSuppressedEmailSet, incrementSendCounts } = await import("../../db/contacts.js");
-      const { createSentEmailLedger } = await import("../../lib/sent-ledger.js");
-      let sent = 0, skipped = 0, failed = 0;
-      const errors: string[] = [];
-      const suppressedEmailSet = force ? new Set<string>() : getSuppressedEmailSet(recipients.map((r) => r.email), db);
-      const sentEmails: string[] = [];
-      const { sendWithFailover } = await import("../../lib/send.js");
-      for (const r of recipients) {
-        if (!force && suppressedEmailSet.has(r.email)) { skipped++; continue; }
-        try {
-          const vars = r.vars ?? { email: r.email };
-          const subject = renderTemplate(template.subject_template, vars);
-          const html = template.html_template ? renderTemplate(template.html_template, vars) : undefined;
-          const text = template.text_template ? renderTemplate(template.text_template, vars) : undefined;
-          const sendOpts = { from: from_address, to: r.email, subject, html, text };
-          const { messageId, providerId: actualId } = await sendWithFailover(resolvedProviderId, sendOpts, db);
-          await createSentEmailLedger(actualId, sendOpts, messageId, db);
-          sentEmails.push(r.email);
-          sent++;
-        } catch (e) { failed++; errors.push(`${r.email}: ${e instanceof Error ? e.message : String(e)}`); }
-      }
-      incrementSendCounts(sentEmails, db);
-      return { content: [{ type: "text", text: JSON.stringify({ sent, skipped, failed, errors }, null, 2) }] };
-    } catch (e) {
-      return toolError(e);
-    }
+  async () => {
+    // Batch send depends on local provider adapters (failover) and local send
+    // ledgers; there is no client-side /v1 batch-send route (single sends go
+    // through send_email's API seam). Fail loud (rule 6).
+    return {
+      content: [{
+        type: "text",
+        text: "Error: batch_send is not available in the self-hosted client; template-driven batch sending runs on the self-hosted server. Use send_email for individual sends.",
+      }],
+      isError: true,
+    };
   },
   );
 }

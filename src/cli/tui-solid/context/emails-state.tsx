@@ -32,7 +32,6 @@ import {
   type TuiThreadBody,
 } from "../../tui/data.js";
 import { resolveMailDataSource } from "../../../lib/mail-data-source.js";
-import { autoPull } from "../../tui/autopull.js";
 import { extractEmailLinks, type ExtractedEmailLink } from "../../../lib/email-links.js";
 import { loadEmailDigest } from "../../../lib/email-digest.js";
 import type { EmailDigest, EmailDigestPeriod } from "../../../db/email-digests.js";
@@ -166,7 +165,8 @@ function createEmailsStore(initialMailbox?: Mailbox) {
   // modes; local-only concepts (domains, address picker, settings, threaded
   // conversation bodies) still read the local store directly.
   const ds = resolveMailDataSource();
-  const initialSources = ds.mode === "local" ? listSources().slice(0, 80) : [{ id: "all", label: "All sources" }];
+  // Self-hosted-only: sources come from the server; the local S3 source list is gone.
+  const initialSources = [{ id: "all", label: "All sources" }];
   const [state, setState] = createStore<EmailsState>({
     mailbox: clampMailbox(initialMailbox ?? settings.defaultMailbox),
     route: "mailbox",
@@ -273,7 +273,7 @@ function createEmailsStore(initialMailbox?: Mailbox) {
 	            ds.mailboxCounts({ source }),
 	            ds.listLabelSummaries({ limit: 80, search: state.labelSearch || undefined }),
 	          ]);
-	          const sources = ds.mode === "local" ? listSources().slice(0, 80) : [{ id: "all", label: "All sources" }];
+	          const sources = [{ id: "all", label: "All sources" }];
 	          setState({ addresses, counts, labels, sources: sources.length ? sources : [{ id: "all", label: "All sources" }] });
         } catch (error) {
           setState("lastError", error instanceof Error ? error.message : String(error));
@@ -599,24 +599,9 @@ function createEmailsStore(initialMailbox?: Mailbox) {
       reloadWorkspace();
     },
     async pullNow() {
-      // Auto-pull is LOCAL S3 ingestion; self_hosted reads the API through the seam, so
-      // pulling is a no-op there (mirrors the CLI/MCP mode gating).
-      if (ds.mode !== "local") return { pulled: 0, ok: true, configured: false, reason: "self_hosted mode" };
-      if (state.busyPull) return { pulled: 0, ok: false, configured: false, reason: "Pull already running" };
-	      setState("busyPull", true);
-	      try {
-	        const result = await autoPull({ limit: 1000, forwarding: true });
-	        await reload({ preserveSelection: true });
-	        if (!result.ok) setState("lastError", result.reason ?? "Pull failed");
-	        else setState("lastError", null);
-	        return result;
-	      } catch (error) {
-	        const reason = error instanceof Error ? error.message : String(error);
-	        setState("lastError", reason);
-	        return { pulled: 0, ok: false, configured: false, reason };
-	      } finally {
-	        setState("busyPull", false);
-	      }
+      // Auto-pull was LOCAL S3->SQLite ingestion. The self-hosted client reads the API
+      // through the seam (the automatic changesSince delta), so there is nothing to pull.
+      return { pulled: 0, ok: true, configured: false, reason: "self_hosted mode" };
     },
   };
 
