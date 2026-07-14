@@ -456,8 +456,15 @@ export interface ConversationBodyOptions {
 export interface ComposeInput {
   from: string;
   to: string;
+  cc?: string;
+  bcc?: string;
+  replyToAddress?: string;
   subject: string;
   body: string;
+  /** Explicit HTML body; otherwise markdown rendering follows `markdown`. */
+  html?: string;
+  attachments?: Array<{ filename: string; content: string; content_type: string }>;
+  idempotencyKey?: string;
   providerId?: string;
   markdown?: boolean;
   replyTo?: TuiMessage;
