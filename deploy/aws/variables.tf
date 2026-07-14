@@ -203,6 +203,12 @@ variable "migrations_complete" {
   default     = false
 }
 
+variable "enable_automatic_deployment_rollback" {
+  description = "Explicit acknowledgement that the previous completed API and worker deployment is proven tenant-aware and compatible with the current schema; enables ECS automatic rollback. Terraform rejects true before migrations_complete. Keep false through migration 0016 and the first tenant-aware activation."
+  type        = bool
+  default     = false
+}
+
 variable "enable_execute_command" {
   description = "Enable ECS Exec for operator diagnostics. Access is still controlled by IAM."
   type        = bool

@@ -245,7 +245,7 @@ resource "aws_ecs_service" "api" {
 
   deployment_circuit_breaker {
     enable   = true
-    rollback = true
+    rollback = var.enable_automatic_deployment_rollback
   }
 
   network_configuration {
@@ -273,6 +273,11 @@ resource "aws_ecs_service" "api" {
   }
 
   lifecycle {
+    precondition {
+      condition     = !var.enable_automatic_deployment_rollback || var.migrations_complete
+      error_message = "Automatic rollback cannot be enabled before migrations_complete; keep the sealed cutover roll-forward-only."
+    }
+
     precondition {
       condition = var.api_desired_count == 0 || (
         var.secrets_ready &&
@@ -317,7 +322,7 @@ resource "aws_ecs_service" "worker" {
 
   deployment_circuit_breaker {
     enable   = true
-    rollback = true
+    rollback = var.enable_automatic_deployment_rollback
   }
 
   network_configuration {
@@ -327,6 +332,11 @@ resource "aws_ecs_service" "worker" {
   }
 
   lifecycle {
+    precondition {
+      condition     = !var.enable_automatic_deployment_rollback || var.migrations_complete
+      error_message = "Automatic rollback cannot be enabled before migrations_complete; keep the sealed cutover roll-forward-only."
+    }
+
     precondition {
       condition = var.worker_desired_count == 0 || (
         var.secrets_ready &&

@@ -2,13 +2,30 @@
 
 # Reproducible Emails self-hosted runtime. No deployment or account defaults are
 # embedded in the image; the operator supplies Postgres, auth, and provider config.
-FROM oven/bun:1.3.13-debian@sha256:e95356cb8e1de62ad69ab3bd3584ba947013d27650a226804d2fc0af4e17dac2 AS dependencies
+ARG BUN_IMAGE=oven/bun:1.3.14@sha256:e10577f0db68676a7024391c6e5cb4b879ebd17188ab750cf10024a6d700e5c4
+ARG OPENSSL_VERSION=3.5.6-1~deb13u2
+
+FROM ${BUN_IMAGE} AS base
+ARG OPENSSL_VERSION
+# Apply Debian's fixed OpenSSL source package in one shared base so dependency
+# and runtime stages cannot drift. Exact pins and the assertion fail closed when
+# a mirror is stale or provides an incomplete security update.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+      "openssl=${OPENSSL_VERSION}" \
+      "libssl3t64=${OPENSSL_VERSION}" \
+      "openssl-provider-legacy=${OPENSSL_VERSION}" \
+    && dpkg-query -W openssl libssl3t64 openssl-provider-legacy \
+      | awk -v expected="${OPENSSL_VERSION}" '$2 != expected { exit 1 } END { if (NR != 3) exit 1 }' \
+    && rm -rf /var/lib/apt/lists/*
+
+FROM base AS dependencies
 WORKDIR /app
 
 COPY package.json bun.lock ./
 RUN bun install --production --frozen-lockfile
 
-FROM oven/bun:1.3.13-debian@sha256:e95356cb8e1de62ad69ab3bd3584ba947013d27650a226804d2fc0af4e17dac2 AS runtime
+FROM base AS runtime
 WORKDIR /app
 
 ENV NODE_ENV=production \

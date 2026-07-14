@@ -246,8 +246,12 @@ run "dormant_by_default" {
   }
 
   assert {
-    condition     = aws_ecs_service.api.deployment_minimum_healthy_percent == 100 && aws_ecs_service.api.deployment_circuit_breaker[0].rollback
-    error_message = "The API service must preserve capacity and enable circuit-breaker rollback."
+    condition = (
+      aws_ecs_service.api.deployment_minimum_healthy_percent == 100 &&
+      !aws_ecs_service.api.deployment_circuit_breaker[0].rollback &&
+      !aws_ecs_service.worker.deployment_circuit_breaker[0].rollback
+    )
+    error_message = "Automatic rollback must be safely disabled until a tenant-aware deployment is proven."
   }
 }
 
@@ -263,6 +267,22 @@ run "activation_is_blocked_without_readiness" {
 
   expect_failures = [
     aws_ecs_service.api,
+  ]
+}
+
+run "automatic_rollback_is_blocked_before_migrations" {
+  command = plan
+
+  variables {
+    aws_region                           = "us-east-1"
+    expected_account_id                  = "111122223333"
+    container_image                      = "registry.example/emails@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    enable_automatic_deployment_rollback = true
+  }
+
+  expect_failures = [
+    aws_ecs_service.api,
+    aws_ecs_service.worker,
   ]
 }
 
@@ -362,6 +382,43 @@ run "ready_activation_is_allowed" {
   assert {
     condition     = length(aws_nat_gateway.this) == 2
     error_message = "The default production activation should provide one NAT gateway per AZ."
+  }
+
+  assert {
+    condition = (
+      !aws_ecs_service.api.deployment_circuit_breaker[0].rollback &&
+      !aws_ecs_service.worker.deployment_circuit_breaker[0].rollback
+    )
+    error_message = "The first tenant-aware activation must remain roll-forward-only by default."
+  }
+}
+
+run "tenant_aware_steady_state_enables_automatic_rollback" {
+  command = plan
+
+  variables {
+    aws_region                           = "us-east-1"
+    expected_account_id                  = "111122223333"
+    container_image                      = "registry.example/emails@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    api_desired_count                    = 2
+    worker_desired_count                 = 1
+    secrets_ready                        = true
+    migrations_complete                  = true
+    enable_nat_gateway                   = true
+    alarm_notification_topic_arn         = "arn:aws:sns:us-east-1:111122223333:operator-alerts"
+    email_domain                         = "example.com"
+    enable_ses_inbound                   = true
+    inbound_recipients                   = ["example.com"]
+    inbound_object_retention_days        = 30
+    enable_automatic_deployment_rollback = true
+  }
+
+  assert {
+    condition = (
+      aws_ecs_service.api.deployment_circuit_breaker[0].rollback &&
+      aws_ecs_service.worker.deployment_circuit_breaker[0].rollback
+    )
+    error_message = "An explicit tenant-aware steady-state acknowledgement must enable API and worker rollback together."
   }
 }
 

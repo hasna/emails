@@ -183,6 +183,12 @@ new-code-compatible migrator through 0016, require exit code zero, and verify th
 migration ledger before starting anything. Start only tenant-aware new-code writers
 after the ledger check passes.
 
+Before draining any writer, apply with
+`enable_automatic_deployment_rollback = false`. Keep automatic rollback disabled
+through 0016 and the first tenant-aware API and worker activation. During this
+sealed cutover, a failed deployment is roll-forward-only because an ECS rollback
+could otherwise restore an unknown pre-tenancy task definition.
+
 Use these outputs to run one Fargate migration task:
 
 - `ecs_cluster_name`;
@@ -244,12 +250,13 @@ silently destroy non-empty logs.
 Set:
 
 ```hcl
-secrets_ready                = true
-migrations_complete          = true
-enable_nat_gateway           = true
-alarm_notification_topic_arn = "arn:aws:sns:REGION:ACCOUNT:operator-alerts"
-email_domain                 = "example.com"
-api_desired_count            = 2
+secrets_ready                        = true
+migrations_complete                  = true
+enable_nat_gateway                   = true
+enable_automatic_deployment_rollback = false
+alarm_notification_topic_arn         = "arn:aws:sns:REGION:ACCOUNT:operator-alerts"
+email_domain                         = "example.com"
+api_desired_count                    = 2
 ```
 
 The ECS service requires 100% minimum healthy capacity, enables deployment
@@ -262,6 +269,15 @@ is known to be tenant-aware and compatible with the migrated schema. Otherwise,
 roll forward to a corrected tenant-aware image, or execute an operator-reviewed
 explicit schema recovery plan while every writer remains stopped.
 
+After both API and worker complete a tenant-aware deployment and the checks below
+pass, set `enable_automatic_deployment_rollback = true` in a separate reviewed
+apply. From that point, ECS may automatically restore only the verified
+tenant-aware completed deployment. Re-disable the gate before any future
+schema-sealing migration whose previous binaries would be incompatible.
+Terraform rejects enabling the gate before `migrations_complete`; setting it
+true is the operator's explicit acknowledgement that the previous completed API
+and worker deployment is tenant-aware and schema-compatible.
+
 After apply, prove all of the following:
 
 1. the live task definition contains the approved image digest;
@@ -271,11 +287,12 @@ After apply, prove all of the following:
 5. an operator-created API key succeeds;
 6. alarms and ALB access logs arrive at their destinations.
 
-Keep the previous known-good digest and ECS task-definition revision. To roll
-back, restore the prior `container_image` digest, review the plan, apply it, and
-repeat the six checks. Exercise this digest rollback in staging before the first
-production cutover. Do not deregister old task definitions until the observation
-window and rollback drill are complete.
+After the gate is re-enabled, keep the previous tenant-aware known-good digest
+and ECS task-definition revision. To roll back, restore that compatible prior
+`container_image` digest, review the plan, apply it, and repeat the six checks.
+Exercise this compatible-image rollback in staging after the first tenant-aware
+production deployment. Do not deregister eligible task definitions until the
+observation window and rollback drill are complete.
 
 ## 6. SES sending
 

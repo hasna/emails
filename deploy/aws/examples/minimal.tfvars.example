@@ -14,6 +14,9 @@ enable_ses_inbound   = false
 enable_public_endpoint = false
 enable_private_endpoint = false
 enable_nat_gateway      = false
+# Keep false through migration 0016 and the first tenant-aware deployment.
+# Set true only after both API and worker have a verified tenant-aware completed deployment.
+enable_automatic_deployment_rollback = false
 
 # Optional one-time primary-super-admin bootstrap guard. Set both to operator-
 # approved values; the KID is an identifier, never the API token itself.
