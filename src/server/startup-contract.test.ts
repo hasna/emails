@@ -5,6 +5,7 @@ import { routeModulesFor } from "./api-routes.js";
 
 const routesDir = join(import.meta.dir, "routes");
 const apiRoutesFile = join(import.meta.dir, "api-routes.ts");
+const serverIndexFile = join(import.meta.dir, "index.ts");
 
 const heavyRouteImports = [
   "@aws-sdk/",
@@ -57,6 +58,41 @@ describe("server startup contract", () => {
     expect(combined).toContain("MAILERY_MODE");
     expect(combined).toContain("removed hosted/legacy runtime");
   });
+
+  it("selects the operator service without requiring self-hosted client credentials", () => {
+    const source = readFileSync(serverIndexFile, "utf8");
+    expect(source).toContain("resolveEmailsModeSelection");
+    expect(source).not.toMatch(/const mode = resolveEmailsMode\(\)\.mode/);
+  });
+
+  for (const command of ["ingest-worker", "ingest-s3-backfill"] as const) {
+    it(`${command} reaches operator validation without a client URL or API/session key`, () => {
+      const env = { ...process.env };
+      for (const key of ["EMAILS_SELF_HOSTED_URL", "EMAILS_SELF_HOSTED_API_KEY", "EMAILS_SESSION_TOKEN"]) {
+        delete env[key];
+      }
+      Object.assign(env, {
+        EMAILS_MODE: "self_hosted",
+        EMAILS_DATABASE_URL: "postgres://operator.invalid/emails",
+      });
+      if (command === "ingest-worker") {
+        env["EMAILS_INGEST_QUEUE_URL"] = "https://sqs.invalid/operator-queue";
+      }
+
+      const result = Bun.spawnSync({
+        cmd: ["bun", "src/server/index.ts", command],
+        cwd: join(import.meta.dir, "..", ".."),
+        env,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const combined = new TextDecoder().decode(result.stdout) + new TextDecoder().decode(result.stderr);
+      expect(result.exitCode).not.toBe(0);
+      expect(combined).toContain("EMAILS_INGEST_S3_BUCKET");
+      expect(combined).not.toContain("EMAILS_SELF_HOSTED_URL");
+      expect(combined).not.toContain("EMAILS_SELF_HOSTED_API_KEY");
+    });
+  }
 
   it("keeps route modules lazy behind the API dispatcher", () => {
     const source = readFileSync(apiRoutesFile, "utf8");

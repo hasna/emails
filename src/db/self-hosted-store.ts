@@ -72,14 +72,17 @@ const CONFIG_HELP =
  * after self_hosted has been selected; local mode never loads a client-env
  * secret and never needs an HTTP endpoint.
  */
-export function resolveSelfHostedConfig(env: NodeJS.ProcessEnv = process.env): SelfHostedConfig {
-  let modeRaw = env["EMAILS_MODE"]?.trim() ?? env["HASNA_EMAILS_MODE"]?.trim();
+export function resolveSelfHostedConfig(
+  env: NodeJS.ProcessEnv = process.env,
+  options: { selectedMode?: "self_hosted" } = {},
+): SelfHostedConfig {
+  let modeRaw = env["EMAILS_MODE"]?.trim() ?? env["HASNA_EMAILS_MODE"]?.trim() ?? options.selectedMode;
   if (modeRaw === "local") {
     throw new Error(`${APP}: self-hosted configuration was requested while EMAILS_MODE=local.`);
   }
   if (modeRaw === "self_hosted" || env["EMAILS_CLIENT_ENV_SECRET"]?.trim()) {
     loadEmailsClientEnvSecret(env);
-    modeRaw = env["EMAILS_MODE"]?.trim() ?? env["HASNA_EMAILS_MODE"]?.trim() ?? modeRaw;
+    modeRaw = env["EMAILS_MODE"]?.trim() ?? env["HASNA_EMAILS_MODE"]?.trim() ?? options.selectedMode ?? modeRaw;
   }
   const apiUrl = env["EMAILS_SELF_HOSTED_URL"]?.trim();
   const apiKey = env["EMAILS_SELF_HOSTED_API_KEY"]?.trim();
@@ -347,9 +350,8 @@ function encodeQuery(query?: Record<string, string | number | boolean | undefine
 }
 
 /**
- * Return a self-hosted store for `resource`. This client is self-hosted-only, so
- * this always returns a store; missing/invalid configuration throws (fail loud)
- * via resolveSelfHostedConfig().
+ * Return a store for the self-hosted client path. Missing or invalid client
+ * configuration throws before any request is attempted.
  */
 export function selfHostedStoreFor(resource: string): SelfHostedResourceStore {
   const config = resolveSelfHostedConfig();

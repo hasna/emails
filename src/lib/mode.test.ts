@@ -14,7 +14,9 @@ import {
   labelForEmailsMode,
   normalizeEmailsMode,
   resolveEmailsMode,
+  resolveEmailsModeSelection,
 } from "./mode.js";
+import { saveConfig } from "./config.js";
 
 const TMP_HOME = join("/tmp", `emails-mode-test-${process.pid}`);
 const ORIGINAL_HOME = process.env["HOME"];
@@ -194,6 +196,18 @@ describe("resolveEmailsMode — dual mode", () => {
     expect(resolveEmailsMode()).toMatchObject({ mode: "self_hosted", label: "Self-hosted" });
   });
 
+  it("resolves and validates a config-selected self_hosted client without requiring EMAILS_MODE", () => {
+    saveConfig({ emails_mode: "self_hosted" });
+    setSelfHostedCredentials();
+
+    expect(process.env[EMAILS_MODE_ENV]).toBeUndefined();
+    expect(resolveEmailsMode()).toMatchObject({
+      mode: "self_hosted",
+      label: "Self-hosted",
+      source: { kind: "config", name: "emails_mode", value: "self_hosted" },
+    });
+  });
+
   it("defaults to local when no endpoint is configured", () => {
     expect(resolveEmailsMode()).toMatchObject({ mode: "local", source: { kind: "default" } });
   });
@@ -243,6 +257,16 @@ describe("resolveEmailsMode — dual mode", () => {
 });
 
 describe("resolveEmailsMode — EMAILS_CLIENT_ENV_SECRET", () => {
+  it("selects operator mode from a client secret pointer without reading the secret", () => {
+    installFailingSecretsCommand();
+
+    expect(resolveEmailsModeSelection()).toMatchObject({
+      mode: "self_hosted",
+      source: { kind: "env", name: EMAILS_CLIENT_ENV_SECRET_ENV },
+    });
+    expect(process.env[EMAILS_MODE_ENV]).toBeUndefined();
+  });
+
   it("loads canonical self_hosted env from the client-env secret pointer", () => {
     installSelfHostedSecretsCommand();
 

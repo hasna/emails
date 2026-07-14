@@ -103,43 +103,26 @@ function resolution(mode: EmailsMode, source: EmailsModeSource): EmailsModeResol
   return { mode, label: labelForEmailsMode(mode), source, warning: null };
 }
 
-/**
- * Resolve one storage mode for the whole process. Local is the safe default and
- * never reads a client-env secret or self-hosted credential. Self-hosted mode is
- * explicit and fail-closed: selecting it validates URL + credential before any
- * caller can reach a repository.
- */
-export function resolveEmailsMode(env: NodeJS.ProcessEnv = process.env): EmailsModeResolution {
+/** Resolve the process mode without requiring client transport credentials. */
+export function resolveEmailsModeSelection(env: NodeJS.ProcessEnv = process.env): EmailsModeResolution {
   assertNoLegacyHostedEnvironment(env, { allowHostedApiEnvWithExplicitSelfHosted: true });
 
   for (const name of EMAILS_MODE_ENV_KEYS) {
     const value = env[name]?.trim();
     if (!value) continue;
     const mode = normalizeEmailsMode(value);
-    if (mode === "local") return resolution(mode, { kind: "env", name, value });
-
-    const clientEnvSecret = loadEmailsClientEnvSecret(env);
-    resolveSelfHostedConfig(env);
-    return resolution(mode, {
-      kind: "env",
-      name: clientEnvSecret.ready ? EMAILS_CLIENT_ENV_SECRET_ENV : name,
-      value: clientEnvSecret.ready ? clientEnvSecret.secretPath : value,
-    });
+    return resolution(mode, { kind: "env", name, value });
   }
 
-  // A secret pointer is itself an explicit self-hosted selection. Expand it
-  // only when local was not selected, then validate the resulting canonical env.
-  if (env[EMAILS_CLIENT_ENV_SECRET_ENV]?.trim()) {
-    const clientEnvSecret = loadEmailsClientEnvSecret(env);
-    const mode = normalizeEmailsMode(env[EMAILS_MODE_ENV]?.trim() ?? "self_hosted");
-    if (mode !== "self_hosted") {
-      throw new Error(`${EMAILS_CLIENT_ENV_SECRET_ENV} may only configure ${EMAILS_MODE_ENV}=self_hosted.`);
-    }
-    resolveSelfHostedConfig(env);
-    return resolution(mode, {
+  // A client secret pointer is itself an explicit self-hosted selection. Mode
+  // selection deliberately does not read it: operator startup must not depend
+  // on client credentials or secret-provider availability.
+  const clientEnvSecretPointer = env[EMAILS_CLIENT_ENV_SECRET_ENV]?.trim();
+  if (clientEnvSecretPointer) {
+    return resolution("self_hosted", {
       kind: "env",
       name: EMAILS_CLIENT_ENV_SECRET_ENV,
-      value: clientEnvSecret.secretPath,
+      value: clientEnvSecretPointer,
     });
   }
 
@@ -153,11 +136,30 @@ export function resolveEmailsMode(env: NodeJS.ProcessEnv = process.env): EmailsM
   const configured = config[EMAILS_MODE_CONFIG_KEY];
   if (typeof configured === "string" && configured.trim()) {
     const mode = normalizeEmailsMode(configured);
-    if (mode === "self_hosted") resolveSelfHostedConfig(env);
     return resolution(mode, { kind: "config", name: EMAILS_MODE_CONFIG_KEY, value: configured });
   }
 
   return resolution("local", { kind: "default", name: null, value: null });
+}
+
+/**
+ * Resolve one client data-source mode for the whole process. Local is the safe
+ * default and never reads a client credential. Self-hosted is explicit and
+ * fail-closed: URL + API/session credential are validated before repository,
+ * CLI, or MCP callers can reach the operator API.
+ */
+export function resolveEmailsMode(env: NodeJS.ProcessEnv = process.env): EmailsModeResolution {
+  const selected = resolveEmailsModeSelection(env);
+  if (selected.mode === "local") return selected;
+
+  const clientEnvSecret = loadEmailsClientEnvSecret(env);
+  resolveSelfHostedConfig(env, { selectedMode: "self_hosted" });
+  if (!clientEnvSecret.ready) return selected;
+  return resolution("self_hosted", {
+    kind: "env",
+    name: EMAILS_CLIENT_ENV_SECRET_ENV,
+    value: clientEnvSecret.secretPath,
+  });
 }
 
 export function getEmailsMode(): EmailsMode {
