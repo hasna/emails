@@ -53,6 +53,13 @@ function activeHits(pattern: RegExp, allowedFiles: string[] = []): string[] {
 }
 
 describe("no hosted control plane", () => {
+  it("uses the canonical public package name and documents the remote-bind guard", () => {
+    expect(hits(/@hasnaxyz\/emails/i)).toEqual([]);
+    const readme = readFileSync(join(root, "README.md"), "utf8");
+    expect(readme).toContain("EMAILS_ALLOW_REMOTE=1");
+    expect(readme).toContain("@hasna/emails");
+  });
+
   it("ships exactly local and self_hosted without hosted aliases", () => {
     expect(normalizeEmailsMode("local")).toBe("local");
     expect(normalizeEmailsMode("self_hosted")).toBe("self_hosted");

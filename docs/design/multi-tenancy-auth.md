@@ -1,7 +1,7 @@
-# Design: Multi-Tenancy + User Accounts + Signup/Login for `@hasnaxyz/emails`
+# Design: Multi-Tenancy + User Accounts + Signup/Login for `@hasna/emails`
 
 Status: DRAFT v2 (design only — no source modified). Author: Marcus (architect).
-Target branch: `feat/iapp-emails-self-hosted-only`. Repo: `open-emails`.
+Canonical package: `@hasna/emails`. Projects project and repository: `open-emails`.
 
 > **v2 incorporates an independent adversarial security review** (findings C1, H1-H3,
 > M1-M7, L1-L4). The corrections are folded inline and summarized in §14. Build agents:

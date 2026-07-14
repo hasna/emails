@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 // Regenerates the self_hosted API client from the serve's OpenAPI document.
 //   bun run scripts/generate-selfhost-sdk.ts
-// The output (src/selfhost.ts, exported as @hasnaxyz/emails/selfhost) is
+// The output (src/selfhost.ts, exported as @hasna/emails/selfhost) is
 // committed; CI can re-run this to verify it is in sync with openapi.ts.
 
 import { writeFileSync } from "node:fs";

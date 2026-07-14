@@ -12,7 +12,7 @@ export function registerServeCommands(program: Command, output: (data: unknown, 
     .command("serve")
     .description("Start the HTTP server and dashboard")
     .option("--port <port>", "Port to listen on", "3900")
-    .option("--host <host>", "Host to bind to (default: 127.0.0.1, use 0.0.0.0 for all interfaces)", "127.0.0.1")
+    .option("--host <host>", "Host to bind to (non-loopback requires EMAILS_ALLOW_REMOTE=1)", "127.0.0.1")
     .option("--webhook-port <port>", "Also start webhook listener on this port")
     .option("--smtp-port <port>", "Also start SMTP inbound listener on this port")
     .option("--all", "Start all listeners (HTTP :3900, webhook :9877, SMTP :2525)")

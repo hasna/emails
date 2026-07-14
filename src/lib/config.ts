@@ -3,10 +3,9 @@ import { join } from "path";
 import { resolveCloudflareAuth, type CloudflareAuth } from "./cloudflare-auth.js";
 import { getEmailsMode } from "./mode.js";
 
-// Self-hosted-only client: there is no local SQLite `getDataDir()` anymore, but the
-// thin client still keeps a local config/credentials file (Cloudflare/SES tokens,
-// inbound bucket + mail-source registry, default/failover providers). Resolve that
-// directory here without any dependency on the removed database module.
+// Both local and self-hosted client paths share this config/credentials file
+// (Cloudflare/SES tokens, inbound bucket + mail-source registry, and provider
+// defaults). Keep its path independent from opening the SQLite database.
 function getConfigDir(): string {
   const home = process.env["HOME"] || process.env["USERPROFILE"] || "~";
   return join(home, ".hasna", "emails");

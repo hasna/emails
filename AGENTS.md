@@ -181,7 +181,7 @@ emails://recent-errors     → latest provisioning/source errors
 3. **Domain warming**: If a warming schedule is active for a domain, `send_email` will block at the daily limit. Use `get_warming_status(domain)` first.
 4. **Suppression**: Always check `list_contacts(suppressed=true)` before bulk sends.
 5. **Attachment limits**: Local/provider flows may allow up to 25MB per attachment and 10 attachments. The self-hosted JSON send API is intentionally smaller: 5 inline attachments, 512KiB each, 768KiB total.
-6. **Server binding**: `emails serve` defaults to `127.0.0.1:3900` (localhost only). Use `--host 0.0.0.0` to expose externally.
+6. **Server binding**: `emails serve` defaults to `127.0.0.1:3900` (localhost only). External local-dashboard binding requires both `EMAILS_ALLOW_REMOTE=1` and `--host 0.0.0.0`, and should sit behind an authenticating proxy or firewall.
 
 ## Development
 
