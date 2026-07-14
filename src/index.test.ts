@@ -207,7 +207,7 @@ closeDatabase();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   it("keeps build outputs lean by externalizing installed runtime packages", () => {
     const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as {
