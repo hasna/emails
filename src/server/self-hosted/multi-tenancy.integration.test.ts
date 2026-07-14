@@ -251,6 +251,13 @@ describe.skipIf(!pgClient)("tenant isolation matrix (WI-5c, Layer 1)", () => {
     expect(bThreads.body.threads).toHaveLength(0);
   });
 
+  // NOTE: this exercises the Layer-1 (application) M4 control on the RLS-BYPASSED
+  // path — EMAILS_TEST_POSTGRES_URL connects as a superuser, which bypasses RLS, so
+  // assertNotOtherTenant can see the foreign-tenant row and return 404. Under
+  // enforced FORCE RLS in prod the same request returns 201 and produces a HARMLESS
+  // same-tenant-stamped dangling reference (RLS supersedes M4 — see store.ts
+  // assertNotOtherTenant); the substantive isolation guarantee (cross-tenant WRITE
+  // blocked at the DB layer) is proven in rls.integration.test.ts.
   it("M4: a body FK id referencing another tenant's row is rejected (404); a dangling id is allowed", async () => {
     const { deps } = makeDeps();
     const a = await makeTenant("fk-a");
@@ -280,6 +287,41 @@ describe.skipIf(!pgClient)("tenant isolation matrix (WI-5c, Layer 1)", () => {
     expect(asA.body.valid).toBe(true);
     const asB = await call(deps, "POST", "/v1/send-keys/verify", { token: b.token, body: { token } });
     expect(asB.body.valid).toBe(false);
+  });
+
+  it("send-keys resource is SUMMARY-ONLY: key_hash never appears in any /v1/send-keys response", async () => {
+    const { deps } = makeDeps();
+    const a = await makeTenant("sk-redact");
+    // Reproduce the drifted PROD shape: send_keys still carries a legacy secret
+    // column the fresh migrations don't create. A row is seeded with a REAL-looking
+    // hash so we can assert the exact secret value never escapes.
+    const secret = "sha256$deadbeefcafefeed_never_leak_this";
+    await pgClient!.execute(`ALTER TABLE send_keys ADD COLUMN IF NOT EXISTS key_hash text`);
+    const skId = crypto.randomUUID();
+    await pgClient!.execute(
+      `INSERT INTO send_keys (id, owner_id, key_hash, prefix, label, tenant_id)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [skId, "owner-redact", secret, "esk_redact01", "leaky", a.tenantId],
+    );
+
+    // GET /v1/send-keys (list) and GET /v1/send-keys/:id must both omit key_hash
+    // (and never surface the secret value anywhere in the serialized response),
+    // while still returning the non-secret summary fields.
+    const list = await call(deps, "GET", "/v1/send-keys", { token: a.token });
+    expect(list.status).toBe(200);
+    const seeded = list.body.items.find((i: any) => i.id === skId);
+    expect(seeded, "seeded key present in list").toBeTruthy();
+    expect(seeded).not.toHaveProperty("key_hash");
+    expect(seeded.prefix).toBe("esk_redact01");
+    expect(JSON.stringify(list.body)).not.toContain(secret);
+    expect(JSON.stringify(list.body)).not.toContain("key_hash");
+
+    const one = await call(deps, "GET", `/v1/send-keys/${skId}`, { token: a.token });
+    expect(one.status).toBe(200);
+    expect(one.body).not.toHaveProperty("key_hash");
+    expect(one.body.owner_id).toBe("owner-redact");
+    expect(JSON.stringify(one.body)).not.toContain(secret);
+    expect(JSON.stringify(one.body)).not.toContain("key_hash");
   });
 
   it("idempotency-key replay resolves within the tenant only", async () => {

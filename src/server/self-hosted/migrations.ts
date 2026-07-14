@@ -1747,6 +1747,137 @@ const TENANCY_IDENTITY_AND_BACKFILL = defineMigration(
   `,
 );
 
+/**
+ * 0013 — Row-Level Security backstop (design §6 Layer 2, §9 "0013" migration,
+ * adversarial fixes H1/H2/H3/M1). This is the defense-in-depth layer BELOW the
+ * typed scoped store (Layer 1, which already ships): even a handler that forgot to
+ * scope a query cannot cross a tenant boundary, because Postgres itself filters
+ * every row by the `app.current_tenant` GUC the scoped store sets per operation.
+ *
+ * ROLE MODEL (H1) — introspected against prod, NOT assumed. The serving role
+ * `emails_app` is `rolsuper = false, rolbypassrls = false` AND owns every table
+ * (all 57 public tables + schema `public`). A table owner bypasses RLS by default,
+ * so FORCE ROW LEVEL SECURITY is REQUIRED to subject the owner to its own policies
+ * — and FORCE is honored precisely BECAUSE the owner is neither a superuser nor
+ * BYPASSRLS. Therefore NO new role and NO second DSN are needed: the SAME
+ * `EMAILS_DATABASE_URL`/`emails_app` runs both migrate.ts (owner: can ENABLE/FORCE
+ * RLS + CREATE POLICY) and serve.ts (subject to the policy). serve.ts additionally
+ * asserts at boot that its role cannot bypass RLS (assertServingRoleCannotBypassRls)
+ * so this can never silently regress.
+ *
+ * POLICY (M1) — `current_setting('app.current_tenant', true)` returns '' (not an
+ * error) when the GUC is unset; `NULLIF(...,'')::uuid` turns that into NULL so the
+ * predicate `tenant_id = NULL` matches NOTHING ⇒ FAIL CLOSED (a query with no
+ * tenant context reads/writes zero rows). Casting '' directly would throw — the
+ * NULLIF guard is load-bearing. A USING-only policy also governs INSERT/UPDATE
+ * (Postgres defaults WITH CHECK to the USING expression), so a cross-tenant write
+ * is rejected at the DB layer too.
+ *
+ * TRANSITIONAL DEFAULT RETAINED. Unlike the design's fully-sealed 0013, the
+ * transitional `tenant_id DEFAULT` is KEPT here: the SES-inbound ingest worker
+ * still writes untenanted (its C1 envelope-recipient routing is a separate
+ * follow-up, WI-4a). The worker sets `app.current_tenant` to the DEFAULT tenant
+ * (store.workerClient), so its default-tenant writes satisfy the policy; dropping
+ * the default is deferred until that routing lands, so nothing breaks now.
+ *
+ * SAFETY: idempotent + drift-aware. ENABLE/FORCE are no-ops if already set; the
+ * policy is DROP-then-CREATE; index drops are guarded (and handle the case where a
+ * unique is constraint-backed rather than a bare index). Every step is guarded on
+ * table existence via to_regclass, so it is a clean no-op on a 2nd run or a
+ * partially-migrated DB (mirrors the 0009/0012 reconcile discipline).
+ */
+const TENANCY_RLS_AND_SEAL = defineMigration(
+  "0013_emails_tenancy_rls_and_seal",
+  `
+  -- ---- reconcile helpers (session-temp; 0012's are gone by now) --------------
+
+  -- Enable + FORCE RLS and (re)create the fail-closed tenant policy on a table.
+  -- Guarded on table existence; policy is dropped-then-created so a re-run is a
+  -- clean no-op. FORCE is what subjects the (non-superuser) OWNER to the policy.
+  CREATE OR REPLACE FUNCTION pg_temp.emails_enable_rls(tbl text)
+  RETURNS void
+  LANGUAGE plpgsql
+  AS $fn$
+  DECLARE
+    pol text := tbl || '_tenant_isolation';
+  BEGIN
+    IF to_regclass('public.' || tbl) IS NULL THEN RETURN; END IF;
+    EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', tbl);
+    EXECUTE format('ALTER TABLE public.%I FORCE ROW LEVEL SECURITY', tbl);
+    EXECUTE format('DROP POLICY IF EXISTS %I ON public.%I', pol, tbl);
+    EXECUTE format(
+      'CREATE POLICY %I ON public.%I USING (tenant_id = NULLIF(current_setting(''app.current_tenant'', true), '''')::uuid)',
+      pol, tbl);
+  END;
+  $fn$;
+
+  -- Drop a unique that is now superseded by its per-tenant composite. Handles
+  -- BOTH a bare unique index (how these were created) and, drift-defensively, a
+  -- unique backed by a table constraint. No-op when absent.
+  CREATE OR REPLACE FUNCTION pg_temp.emails_drop_superseded_unique(idx text)
+  RETURNS void
+  LANGUAGE plpgsql
+  AS $fn$
+  DECLARE
+    con  text;
+    rel  text;
+  BEGIN
+    SELECT c.conname, c.conrelid::regclass::text
+      INTO con, rel
+      FROM pg_constraint c
+      JOIN pg_class i ON i.oid = c.conindid
+     WHERE i.relname = idx;
+    IF con IS NOT NULL THEN
+      EXECUTE format('ALTER TABLE %s DROP CONSTRAINT IF EXISTS %I', rel, con);
+      RETURN;
+    END IF;
+    EXECUTE format('DROP INDEX IF EXISTS public.%I', idx);
+  END;
+  $fn$;
+
+  -- ---- 1. drop the 3 transitional single-column uniques (§9) ------------------
+  -- 0012 ADDED the per-tenant composites and RETAINED these so the pre-tenancy
+  -- store's single-column ON CONFLICT kept resolving during the deploy window.
+  -- The updated store now upserts on the composites, so the legacy uniques are
+  -- superseded and dropped here:
+  --   messages_idempotency_key_uidx        -> messages_tenant_idempotency_key_uidx
+  --   messages_source_id_uidx              -> messages_tenant_source_id_uidx
+  --   email_agent_settings_agent_key_uidx  -> PK (tenant_id, agent_key)
+  SELECT pg_temp.emails_drop_superseded_unique('messages_idempotency_key_uidx');
+  SELECT pg_temp.emails_drop_superseded_unique('messages_source_id_uidx');
+  SELECT pg_temp.emails_drop_superseded_unique('email_agent_settings_agent_key_uidx');
+
+  -- ---- 2. enable + FORCE RLS with the fail-closed policy on all 27 tables -----
+  SELECT pg_temp.emails_enable_rls('domains');
+  SELECT pg_temp.emails_enable_rls('addresses');
+  SELECT pg_temp.emails_enable_rls('messages');
+  SELECT pg_temp.emails_enable_rls('contacts');
+  SELECT pg_temp.emails_enable_rls('self_hosted_providers');
+  SELECT pg_temp.emails_enable_rls('templates');
+  SELECT pg_temp.emails_enable_rls('contact_groups');
+  SELECT pg_temp.emails_enable_rls('sequences');
+  SELECT pg_temp.emails_enable_rls('owners');
+  SELECT pg_temp.emails_enable_rls('send_keys');
+  SELECT pg_temp.emails_enable_rls('scheduled_emails');
+  SELECT pg_temp.emails_enable_rls('aliases');
+  SELECT pg_temp.emails_enable_rls('forwarding_rules');
+  SELECT pg_temp.emails_enable_rls('warming_schedules');
+  SELECT pg_temp.emails_enable_rls('email_triage');
+  SELECT pg_temp.emails_enable_rls('provisioning_events');
+  SELECT pg_temp.emails_enable_rls('mailbox_sources');
+  SELECT pg_temp.emails_enable_rls('events');
+  SELECT pg_temp.emails_enable_rls('email_agent_settings');
+  SELECT pg_temp.emails_enable_rls('email_agent_runs');
+  SELECT pg_temp.emails_enable_rls('email_digests');
+  SELECT pg_temp.emails_enable_rls('group_members');
+  SELECT pg_temp.emails_enable_rls('sequence_steps');
+  SELECT pg_temp.emails_enable_rls('sequence_enrollments');
+  SELECT pg_temp.emails_enable_rls('address_ownership_events');
+  SELECT pg_temp.emails_enable_rls('webhook_receipts');
+  SELECT pg_temp.emails_enable_rls('sandbox_emails');
+  `,
+);
+
 /** All migrations, in order: api-keys table (auth), the core schema, inbound. */
 export function emailsSelfHostedMigrations(): Migration[] {
   const authMigrations = apiKeyMigrations().map((m) => defineMigration(m.id, m.sql));
@@ -1766,5 +1897,6 @@ export function emailsSelfHostedMigrations(): Migration[] {
     PROVISIONING_COLUMNS,
     PARITY_RESOURCE_SCHEMA_2,
     TENANCY_IDENTITY_AND_BACKFILL,
+    TENANCY_RLS_AND_SEAL,
   ];
 }

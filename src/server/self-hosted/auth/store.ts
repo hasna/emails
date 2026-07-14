@@ -365,11 +365,12 @@ export class AuthStore {
 
   /**
    * Best-effort per-tenant seed of the default email-agent settings rows (design
-   * §5.1). NOTE: migration 0012 retains a LEGACY global unique on
-   * email_agent_settings(agent_key) transitionally (dropped in 0013/P4), so seeding
-   * a non-default tenant currently conflicts on that global index. This therefore
-   * swallows conflicts and NEVER fails signup; the default tenant already has its
-   * rows from the migration, and additional tenants get them once 0013 lands.
+   * §5.1). email_agent_settings is a tenant-scoped table under Row-Level Security
+   * (migration 0013), so the insert must run with `app.current_tenant` set to the
+   * target tenant IN THE SAME TRANSACTION — otherwise the RLS WITH CHECK policy
+   * rejects the write. The upsert conflicts on the composite (tenant_id, agent_key)
+   * PK (the legacy agent_key-alone unique is dropped in 0013). This is best-effort
+   * and swallows any failure so a transient seed error NEVER fails signup.
    */
   async seedTenantAgentSettings(tenantId: string): Promise<void> {
     const defaults: Array<{ agent_key: string; model: string }> = [
@@ -379,14 +380,24 @@ export class AuthStore {
     ];
     for (const d of defaults) {
       try {
-        await this.client.execute(
-          `INSERT INTO email_agent_settings (tenant_id, agent_key, enabled, always_on, provider, model, apply_labels, use_network_tools, config_json)
-           VALUES ($1, $2, false, false, 'external', $3, true, true, '{}'::jsonb)
-           ON CONFLICT (tenant_id, agent_key) DO NOTHING`,
-          [tenantId, d.agent_key, d.model],
+        await this.client.transaction(async (tx) => {
+          await tx.execute(`SELECT set_config('app.current_tenant', $1, true)`, [tenantId]);
+          await tx.execute(
+            `INSERT INTO email_agent_settings (tenant_id, agent_key, enabled, always_on, provider, model, apply_labels, use_network_tools, config_json)
+             VALUES ($1, $2, false, false, 'external', $3, true, true, '{}'::jsonb)
+             ON CONFLICT (tenant_id, agent_key) DO NOTHING`,
+            [tenantId, d.agent_key, d.model],
+          );
+        });
+      } catch (err) {
+        // Best-effort: never fail signup on a seed error (e.g. an in-memory test
+        // shim without transaction support, or a transient DB hiccup). Log it so a
+        // silent seeding regression (e.g. an RLS WITH CHECK misconfig) is at least
+        // observable — the message carries no secret material.
+        console.warn(
+          `[auth] seedTenantAgentSettings(${tenantId}, ${d.agent_key}) skipped: ` +
+            (err instanceof Error ? err.message.split("\n")[0] : String(err)),
         );
-      } catch {
-        // Legacy global unique (pre-0013) blocks non-default tenants; ignore.
       }
     }
   }

@@ -5,8 +5,67 @@
 // local mirror.
 
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import type { TypedQueryClient } from "../../storage-kit/index.js";
+import type { QueryResult, TypedQueryClient, PoolQueryClient } from "../../storage-kit/index.js";
+import type { QueryResultRow } from "pg";
 import type { SelfHostedResourceSpec, ResourceColumn } from "./resources.js";
+import { DEFAULT_TENANT_ID } from "./migrations.js";
+
+/** A live pool exposes `transaction()`; an in-memory unit-test shim does not. */
+function isTransactional(client: TypedQueryClient): client is PoolQueryClient {
+  return typeof (client as Partial<PoolQueryClient>).transaction === "function";
+}
+
+/**
+ * Wrap a query client so EVERY operation runs inside its own short transaction
+ * that first sets the `app.current_tenant` GUC (design §6 Layer 2 / adversarial
+ * fixes H3, M1). This is the per-operation counterpart the Postgres Row-Level
+ * Security policy (migration 0013) reads:
+ *
+ *   USING (tenant_id = NULLIF(current_setting('app.current_tenant', true), '')::uuid)
+ *
+ * Why `set_config(..., is_local=true)` INSIDE a transaction (never a bare `SET`):
+ * the value is transaction-local, so it is auto-reset on COMMIT/ROLLBACK and can
+ * NEVER bleed onto the next borrower of a pooled connection (design §12 "pooled
+ * SET LOCAL leakage").
+ *
+ * Why PER-OPERATION and not per-request (H3): `/v1/messages/send` is a deliberate
+ * multi-commit, exactly-once state machine (reserve -> claim -> provider HTTP ->
+ * complete). Each store call being its own transaction keeps every mutation
+ * atomic AND releases the pooled connection between calls, so nothing is ever held
+ * across the provider network hop (pool exhaustion / lost exactly-once on
+ * rollback). It is Layer 2's belt to Layer 1's braces — the scoped store already
+ * injects `tenant_id` into every query, so this adds the DB-enforced backstop.
+ *
+ * A non-transactional client (the hermetic in-memory test shims) is returned
+ * unchanged: RLS is a Postgres construct with no meaning for an in-memory fake,
+ * and the GUC round-trip would have nothing to talk to.
+ */
+function tenantScopedClient(client: TypedQueryClient, tenantId: string): TypedQueryClient {
+  if (!isTransactional(client)) return client;
+  const pool = client;
+  const withTenant = <T>(fn: (tx: TypedQueryClient) => Promise<T>): Promise<T> =>
+    pool.transaction(async (tx) => {
+      await tx.execute(`SELECT set_config('app.current_tenant', $1, true)`, [tenantId]);
+      return fn(tx);
+    });
+  return {
+    query<T extends QueryResultRow>(sql: string, params?: readonly unknown[]): Promise<QueryResult<T>> {
+      return withTenant((tx) => tx.query<T>(sql, params));
+    },
+    many<T extends QueryResultRow>(sql: string, params?: readonly unknown[]): Promise<T[]> {
+      return withTenant((tx) => tx.many<T>(sql, params));
+    },
+    get<T extends QueryResultRow>(sql: string, params?: readonly unknown[]): Promise<T | null> {
+      return withTenant((tx) => tx.get<T>(sql, params));
+    },
+    one<T extends QueryResultRow>(sql: string, params?: readonly unknown[]): Promise<T> {
+      return withTenant((tx) => tx.one<T>(sql, params));
+    },
+    execute(sql: string, params?: readonly unknown[]): Promise<void> {
+      return withTenant((tx) => tx.execute(sql, params));
+    },
+  };
+}
 
 export interface DomainRecord {
   id: string;
@@ -446,6 +505,23 @@ function keyColumn(spec: SelfHostedResourceSpec): string {
 }
 
 /**
+ * Strip a spec's `redactColumns` from a returned row IN PLACE. The generic read
+ * path is `SELECT *`, so a legacy/secret column the physical table happens to
+ * carry (e.g. the drifted `send_keys.key_hash`) would otherwise leak into the API
+ * response. A no-op for every resource that declares no redactColumns.
+ */
+function redactResourceRow<T extends Record<string, unknown> | null>(
+  spec: SelfHostedResourceSpec,
+  row: T,
+): T {
+  if (!row || !spec.redactColumns?.length) return row;
+  for (const col of spec.redactColumns) {
+    if (col in row) delete (row as Record<string, unknown>)[col];
+  }
+  return row;
+}
+
+/**
  * Raised when a request body references, by id, a row that belongs to a DIFFERENT
  * tenant (design adversarial fix M4). Stamping `tenant_id` on the new row does
  * NOT stop a cross-tenant FK reference, so the scoped store rejects it before the
@@ -476,7 +552,10 @@ export class EmailsSelfHostedStore {
    */
   forTenant(tenantId: string): TenantScopedStore {
     if (!tenantId) throw new Error("forTenant requires a tenant id");
-    return new TenantScopedStore(this.client, tenantId);
+    // Hand the scoped store a client that sets `app.current_tenant` per operation
+    // (Layer 2 RLS backstop). Layer 1 (the AND tenant_id = $tenant in every query)
+    // still holds unconditionally; this makes forgetting it a DB-enforced failure.
+    return new TenantScopedStore(tenantScopedClient(this.client, tenantId), tenantId);
   }
 
   // ---- transitional background-worker methods (design §6 x-cut #1 / §10) ----
@@ -487,27 +566,36 @@ export class EmailsSelfHostedStore {
   // Until then these two UNTENANTED writes rely on the transitional `tenant_id`
   // DEFAULT that migration 0012 adds (every row lands in the default tenant, no
   // crash, no data loss). They are the ONLY data methods on the unscoped base;
-  // ALL credentialed /v1 traffic goes through forTenant(). Their ON CONFLICT
-  // targets are the legacy single-column uniques (0012 retains them), so this is
-  // wire-compatible with the pre-tenancy store during the deploy window.
+  // ALL credentialed /v1 traffic goes through forTenant(). These two run in the
+  // DEFAULT tenant: the inbound event carries no credential, so until the C1
+  // envelope-recipient routing lands (WI-4a), every inbound message keeps landing
+  // in the default tenant (via the transitional tenant_id DEFAULT that 0012 added
+  // and 0013 KEEPS). Setting the GUC to the default tenant is what makes these
+  // writes pass the RLS policy that 0013 enables, and the ON CONFLICT target is the
+  // per-tenant composite (the legacy single-column uniques are dropped in 0013).
 
-  /** Worker dedup: match an existing message by stable upstream key (untenanted). */
+  /** The default-tenant scoping client for the untenanted worker paths. */
+  private workerClient(): TypedQueryClient {
+    return tenantScopedClient(this.client, DEFAULT_TENANT_ID);
+  }
+
+  /** Worker dedup: match an existing message by stable upstream key (default tenant). */
   async findMessageIdByKey(key: string): Promise<string | null> {
     if (!key) return null;
-    const row = await this.client.get<{ id: string }>(
+    const row = await this.workerClient().get<{ id: string }>(
       `SELECT id FROM messages WHERE source_id = $1 OR message_id = $1 LIMIT 1`,
       [key],
     );
     return row ? row.id : null;
   }
 
-  /** Worker idempotent inbound write keyed on source_id (untenanted; DEFAULT tenant). */
+  /** Worker idempotent inbound write keyed on source_id (default tenant). */
   async upsertMessage(input: MessageInput): Promise<{ record: MessageRecord; inserted: boolean }> {
     if (!input.source_id) throw new Error("upsertMessage requires a source_id");
-    const row = await this.client.one<Record<string, unknown>>(
+    const row = await this.workerClient().one<Record<string, unknown>>(
       `INSERT INTO messages (${MESSAGE_INSERT_COLS})
        VALUES (${MESSAGE_INSERT_VALUES})
-       ON CONFLICT (source_id) WHERE source_id IS NOT NULL DO UPDATE SET
+       ON CONFLICT (tenant_id, source_id) WHERE source_id IS NOT NULL DO UPDATE SET
          ${MESSAGE_UPSERT_ASSIGNMENTS}
        RETURNING ${MESSAGE_COLUMNS}, (xmax = 0) AS inserted`,
       messageInsertParams(input),
@@ -540,8 +628,11 @@ const MESSAGE_UPSERT_ASSIGNMENTS =
 /**
  * A store already bound to a single `tenantId`. EVERY method injects the tenant:
  * reads gain `AND tenant_id = $tenant`, writes stamp it, and cross-tenant id
- * references (M4) are rejected. This is design §6 Layer 1 — the isolation that
- * holds unconditionally (no RLS dependency). Obtain one via `store.forTenant()`.
+ * references (M4) are rejected while RLS is off/bypassed (see assertNotOtherTenant
+ * for the Layer-1/Layer-2 handoff). This is design §6 Layer 1 — the isolation that
+ * holds unconditionally (no RLS dependency). Obtain one via `store.forTenant()`,
+ * which also binds a per-operation `app.current_tenant` GUC for the Layer-2 RLS
+ * backstop (migration 0013).
  */
 export class TenantScopedStore {
   constructor(
@@ -556,6 +647,21 @@ export class TenantScopedStore {
    * a free-text `provider_id="ses"` slug); we reject ONLY when the id names a real
    * row owned by a different tenant — precisely the cross-tenant hole, without
    * breaking loose references.
+   *
+   * TWO-LAYER HANDOFF (important): this is a Layer-1 (application) control and is
+   * ACTIVE whenever RLS is off or bypassed — i.e. exactly when Layer 1 is the sole
+   * guarantee (pre-0013, or a misconfigured DB). Under enforced FORCE RLS (Layer 2,
+   * the prod posture), the probe below runs with the caller's `app.current_tenant`
+   * GUC set, so the RLS policy makes a foreign-tenant row INVISIBLE — this check
+   * then cannot fire. That is not a leak: RLS supersedes M4 here. A cross-tenant FK
+   * value can no longer create a cross-tenant *reference* — the new row is stamped
+   * (and WITH CHECK-verified) with the CALLER's tenant, and every read that would
+   * dereference the id is itself RLS-scoped, so no other-tenant data is ever
+   * exposed; the id simply becomes a harmless same-tenant dangling reference. (The
+   * probe cannot be made to see across tenants without a BYPASSRLS role, which we
+   * deliberately do not have — see serve.ts:assertServingRoleCannotBypassRls.) The
+   * observable change under RLS is only 404→201 for such a body; isolation is
+   * unaffected and is proven at the DB layer in rls.integration.test.ts.
    */
   private async assertNotOtherTenant(
     table: string,
@@ -1184,18 +1290,20 @@ export class TenantScopedStore {
     }
     const whereSql = `WHERE ${where.join(" AND ")}`;
     params.push(clampLimit(opts.limit), clampOffset(opts.offset));
-    return this.client.many<Record<string, unknown>>(
+    const rows = await this.client.many<Record<string, unknown>>(
       `SELECT * FROM ${spec.table} ${whereSql} ORDER BY ${spec.orderBy} LIMIT $${params.length - 1} OFFSET $${params.length}`,
       params,
     );
+    return rows.map((row) => redactResourceRow(spec, row));
   }
 
   async getResource(spec: SelfHostedResourceSpec, id: string): Promise<Record<string, unknown> | null> {
     const key = keyColumn(spec);
-    return this.client.get<Record<string, unknown>>(
+    const row = await this.client.get<Record<string, unknown>>(
       `SELECT * FROM ${spec.table} WHERE ${key} = $1 AND tenant_id = $2`,
       [id, this.tenantId],
     );
+    return redactResourceRow(spec, row);
   }
 
   async createResource(spec: SelfHostedResourceSpec, body: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -1227,7 +1335,7 @@ export class TenantScopedStore {
     const insertHead = `INSERT INTO ${spec.table} (${cols.join(", ")}) VALUES (${placeholders.join(", ")})`;
     // UUID-keyed: a plain insert always returns exactly one row (unchanged path).
     if (spec.idColumn === undefined) {
-      return this.client.one<Record<string, unknown>>(`${insertHead} RETURNING *`, params);
+      return redactResourceRow(spec, await this.client.one<Record<string, unknown>>(`${insertHead} RETURNING *`, params));
     }
     // Natural-key: upsert-on-conflict so create is an idempotent "ensure". DO
     // NOTHING can return zero rows, so read (not one()) and fall back to select.
@@ -1237,7 +1345,7 @@ export class TenantScopedStore {
       `${insertHead} ON CONFLICT (${conflictTarget}) DO NOTHING RETURNING *`,
       params,
     );
-    if (inserted) return inserted;
+    if (inserted) return redactResourceRow(spec, inserted);
     const existing = await this.getResource(spec, String(body[key] ?? ""));
     if (existing) return existing;
     throw new Error(`create on ${spec.path} produced no row`);
@@ -1259,9 +1367,12 @@ export class TenantScopedStore {
     }
     if (sets.length === 0) return this.getResource(spec, id);
     sets.push("updated_at = now()");
-    return this.client.get<Record<string, unknown>>(
-      `UPDATE ${spec.table} SET ${sets.join(", ")} WHERE ${key} = $1 AND tenant_id = $2 RETURNING *`,
-      params,
+    return redactResourceRow(
+      spec,
+      await this.client.get<Record<string, unknown>>(
+        `UPDATE ${spec.table} SET ${sets.join(", ")} WHERE ${key} = $1 AND tenant_id = $2 RETURNING *`,
+        params,
+      ),
     );
   }
 

@@ -34,6 +34,14 @@ function loadableDump(sql: string): string {
 
 afterAll(async () => { await client?.close(); });
 
+// The two "0012" tests below assert 0012's TRANSITIONAL end-state (the legacy
+// single-column uniques are retained; RLS is not yet on), so they migrate only
+// THROUGH 0012 — migration 0013 (which drops those uniques and enables RLS) has
+// its own dedicated coverage in rls.integration.test.ts.
+const TENANCY_MIGRATION_ID = "0012_emails_tenancy_identity_and_backfill";
+const RLS_MIGRATION_ID = "0013_emails_tenancy_rls_and_seal";
+const migrationsThrough0012 = () => emailsSelfHostedMigrations().filter((m) => m.id !== RLS_MIGRATION_ID);
+
 async function resetPublicSchema(): Promise<void> {
   await client!.execute("DROP SCHEMA IF EXISTS public CASCADE");
   await client!.execute("CREATE SCHEMA public");
@@ -764,7 +772,7 @@ describe("self-hosted Postgres integration", () => {
     // remaining tables). Then seed pre-tenancy rows into the migration-created
     // tables (messages) and the credential sources (api_keys/send_keys/domains).
     const throughEleven = emailsSelfHostedMigrations().filter(
-      (m) => m.id !== "0012_emails_tenancy_identity_and_backfill",
+      (m) => m.id !== TENANCY_MIGRATION_ID && m.id !== RLS_MIGRATION_ID,
     );
     await new MigrationLedger(client!, throughEleven).migrate();
 
@@ -782,8 +790,8 @@ describe("self-hosted Postgres integration", () => {
         VALUES ('kid-a', 'emails', '["emails:*"]'::jsonb, 'tok-hash-a', now());
     `);
 
-    // Phase B: run the full set — 0012 becomes the only pending migration.
-    const result = await new MigrationLedger(client!, emailsSelfHostedMigrations()).migrate();
+    // Phase B: run through 0012 — 0012 becomes the only pending migration.
+    const result = await new MigrationLedger(client!, migrationsThrough0012()).migrate();
     expect(result.plan.map((p) => p.migration.id)).toContain("0012_emails_tenancy_identity_and_backfill");
     expect(
       result.applied.map((r) => r.id),
@@ -884,8 +892,8 @@ describe("self-hosted Postgres integration", () => {
       expect(resourceTables.has(t), `${t} must not be a generic resource`).toBe(false);
     }
 
-    // 8. Idempotent: a 2nd full run is a clean no-op and invariants hold.
-    const rerun = await new MigrationLedger(client!, emailsSelfHostedMigrations()).migrate();
+    // 8. Idempotent: a 2nd run (through 0012) is a clean no-op and invariants hold.
+    const rerun = await new MigrationLedger(client!, migrationsThrough0012()).migrate();
     expect(rerun.plan.filter((p) => p.state === "pending")).toHaveLength(0);
     expect(await columnType("domains", "tenant_id")).toBe("uuid");
     expect((await primaryKeyColumns("email_agent_settings")).sort()).toEqual(["agent_key", "tenant_id"]);
@@ -938,7 +946,7 @@ describe("self-hosted Postgres integration", () => {
     // Phase A: migrate everything EXCEPT 0012 (reconciles drift + creates the
     // dependent tables: provisioning_events, address_ownership_events, messages).
     const throughEleven = emailsSelfHostedMigrations().filter(
-      (m) => m.id !== "0012_emails_tenancy_identity_and_backfill",
+      (m) => m.id !== TENANCY_MIGRATION_ID && m.id !== RLS_MIGRATION_ID,
     );
     await new MigrationLedger(client!, throughEleven).migrate();
 
@@ -1005,8 +1013,8 @@ describe("self-hosted Postgres integration", () => {
     const beforeOwnership = await countOf("address_ownership_events");
     const beforeProvisioning = await countOf("provisioning_events");
 
-    // Phase B: run 0012.
-    const result = await new MigrationLedger(client!, emailsSelfHostedMigrations()).migrate();
+    // Phase B: run 0012 (through 0012; 0013 is covered separately).
+    const result = await new MigrationLedger(client!, migrationsThrough0012()).migrate();
     expect(result.applied.map((r) => r.id)).toContain("0012_emails_tenancy_identity_and_backfill");
 
     // ---- survivor chosen per the rule (dependent-count primary) --------------
@@ -1084,8 +1092,8 @@ describe("self-hosted Postgres integration", () => {
       `SELECT id FROM addresses WHERE email = 'dupe@dup.example'`)).map((r) => r.id)).toEqual(["addr-keep"]);
     expect(await countOf(`address_ownership_events WHERE address_id = 'addr-keep'`)).toBe(4);
     expect(await countOf("messages")).toBe(beforeMessages);
-    // A full ledger re-run remains a no-op too.
-    const rerun = await new MigrationLedger(client!, emailsSelfHostedMigrations()).migrate();
+    // A ledger re-run (through 0012) remains a no-op too.
+    const rerun = await new MigrationLedger(client!, migrationsThrough0012()).migrate();
     expect(rerun.plan.filter((p) => p.state === "pending")).toHaveLength(0);
   });
 });

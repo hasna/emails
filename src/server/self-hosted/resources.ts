@@ -71,6 +71,15 @@ export interface SelfHostedResourceSpec {
   compositeKey?: boolean;
   /** FK columns validated against the caller's tenant before insert (M4). */
   foreignKeys?: ResourceForeignKey[];
+  /**
+   * Secret/legacy columns that MUST NEVER appear in a resource response. The
+   * generic read paths (`SELECT *`) would otherwise surface any column the
+   * physical table carries; these are stripped from every list/get/create/update
+   * projection so the resource stays SUMMARY-ONLY. Set for `send-keys`, whose
+   * drifted prod table still carries the legacy `key_hash` column (the real secret
+   * material lives in the non-resource `send_key_secrets` table).
+   */
+  redactColumns?: string[];
 }
 
 export const SELF_HOSTED_RESOURCES: SelfHostedResourceSpec[] = [
@@ -143,6 +152,11 @@ export const SELF_HOSTED_RESOURCES: SelfHostedResourceSpec[] = [
     orderBy: "created_at DESC",
     filters: ["owner_id"],
     foreignKeys: [{ column: "owner_id", table: "owners" }],
+    // SUMMARY-ONLY: the drifted prod `send_keys` table still carries a legacy
+    // `key_hash` column; the generic `SELECT *` read path must never surface it.
+    // The token/secret is minted via /v1/send-keys/mint and only its sha256 lives
+    // in the separate (non-resource) send_key_secrets table.
+    redactColumns: ["key_hash"],
     columns: [
       { name: "owner_id" },
       { name: "prefix" },
