@@ -1,83 +1,28 @@
-import { now, uuid } from "./runtime.js";
-import { safeOffset, safeOptionalLimit } from "./pagination.js";
-import { selfHostedResource, cnum, ciso, cstr, cstrOrNull } from "./self-hosted-resource.js";
-import type { WarmingSchedule } from "../lib/warming.js";
+import * as local from "./warming.local.js";
+import * as remote from "./warming.remote.js";
+import { isSelfHostedMode } from "./self-hosted-store.js";
+import { hasDatabaseArgument, withExplicitDatabaseRoute } from "./database-routing.js";
 
-const WARMING_RESOURCE = "warming";
+export type * from "./warming.local.js";
 
-function apiToSchedule(e: Record<string, unknown>): WarmingSchedule {
-  const updatedAt = ciso(e["updated_at"]);
-  return {
-    id: cstr(e["id"]),
-    domain: cstr(e["domain"]),
-    provider_id: cstrOrNull(e["provider_id"]),
-    target_daily_volume: cnum(e["target_daily_volume"]),
-    start_date: cstr(e["start_date"]),
-    status: (cstr(e["status"]) || "active") as WarmingSchedule["status"],
-    created_at: ciso(e["created_at"], updatedAt),
-    updated_at: updatedAt,
-  };
+const localCompat = {
+  ...local,
+  listWarmingSchedules: (status, opts) => local.listWarmingSchedules(status, undefined, opts),
+} as typeof remote;
+
+type RoutedFunction<K extends keyof typeof remote & keyof typeof local> = typeof local[K] & typeof remote[K];
+
+function routed<K extends keyof typeof remote & keyof typeof local>(key: K): RoutedFunction<K> {
+  return ((...args: unknown[]) => {
+    const implementation = (hasDatabaseArgument(args) ? local : isSelfHostedMode() ? remote : localCompat) as Record<string, unknown>;
+    const candidate = implementation[String(key)];
+    if (typeof candidate !== "function") throw new Error(`warming.${String(key)} is unavailable in the selected mode.`);
+    return withExplicitDatabaseRoute(args, () => (candidate as (...values: unknown[]) => unknown)(...args));
+  }) as RoutedFunction<K>;
 }
 
-export function createWarmingSchedule(
-  input: {
-    domain: string;
-    provider_id?: string;
-    target_daily_volume: number;
-    start_date?: string;
-  },
-): WarmingSchedule {
-  const id = uuid();
-  const timestamp = now();
-  const startDate = input.start_date ?? new Date().toISOString().slice(0, 10);
-  const created = selfHostedResource(WARMING_RESOURCE).create({
-    id,
-    domain: input.domain,
-    provider_id: input.provider_id ?? null,
-    target_daily_volume: input.target_daily_volume,
-    start_date: startDate,
-    status: "active",
-    created_at: timestamp,
-    updated_at: timestamp,
-  });
-  return apiToSchedule(created);
-}
-
-export function getWarmingSchedule(domain: string): WarmingSchedule | null {
-  const match = selfHostedResource(WARMING_RESOURCE)
-    .list({ limit: 1000 })
-    .map(apiToSchedule)
-    .find((s) => s.domain === domain);
-  return match ?? null;
-}
-
-export interface ListWarmingScheduleOptions {
-  limit?: number;
-  offset?: number;
-}
-
-export function listWarmingSchedules(status?: string, opts?: ListWarmingScheduleOptions): WarmingSchedule[] {
-  const limit = safeOptionalLimit(opts?.limit);
-  const offset = safeOffset(opts?.offset);
-  let rows = selfHostedResource(WARMING_RESOURCE).list({ limit: 1000 }).map(apiToSchedule);
-  if (status) rows = rows.filter((s) => s.status === status);
-  rows.sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
-  return limit === null ? rows : rows.slice(offset, offset + limit);
-}
-
-export function updateWarmingStatus(
-  domain: string,
-  status: "active" | "paused" | "completed",
-): WarmingSchedule | null {
-  const store = selfHostedResource(WARMING_RESOURCE);
-  const existing = store.list({ limit: 1000 }).map(apiToSchedule).find((s) => s.domain === domain);
-  if (!existing) return null;
-  return apiToSchedule(store.update(existing.id, { status, updated_at: now() }));
-}
-
-export function deleteWarmingSchedule(domain: string): boolean {
-  const store = selfHostedResource(WARMING_RESOURCE);
-  const existing = store.list({ limit: 1000 }).map(apiToSchedule).find((s) => s.domain === domain);
-  if (!existing) return false;
-  return store.del(existing.id);
-}
+export const createWarmingSchedule = routed("createWarmingSchedule");
+export const getWarmingSchedule = routed("getWarmingSchedule");
+export const listWarmingSchedules = routed("listWarmingSchedules");
+export const updateWarmingStatus = routed("updateWarmingStatus");
+export const deleteWarmingSchedule = routed("deleteWarmingSchedule");

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { syncProvider, syncAll } from "./sync.js";
+import { syncProvider, syncAll } from "./sync.remote.js";
 
 // Provider event sync (pulling remote delivery events and ingesting them into
 // the delivery events table, updating contact bounce/complaint counts) runs on

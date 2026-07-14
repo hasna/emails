@@ -3,12 +3,12 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  syncS3Inbox,
   registerS3Source,
   retireS3Source,
   listS3Sources,
   listLiveS3Sources,
 } from "./s3-sync.js";
+import { syncS3Inbox } from "./s3-sync.remote.js";
 
 // S3 → mailbox ingestion (syncS3Inbox) runs on the self-hosted server: the thin
 // client has no local inbound store to write into, so it is a loud stub. The S3

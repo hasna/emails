@@ -1,10 +1,12 @@
 import { describe, expect, it } from "bun:test";
 import {
-  diagnoseInboundDelivery,
-  diagnoseInboundDeliveryLive,
   formatDeliveryDoctorReport,
   type DeliveryDoctorReport,
 } from "./delivery-doctor.js";
+import {
+  diagnoseInboundDelivery,
+  diagnoseInboundDeliveryLive,
+} from "./delivery-doctor.remote.js";
 
 // Inbound delivery diagnosis inspects local delivery infrastructure (the inbound
 // message store, provisioning/readiness state, S3 ingestion sources, the realtime

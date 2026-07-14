@@ -53,11 +53,17 @@ function activeHits(pattern: RegExp, allowedFiles: string[] = []): string[] {
 }
 
 describe("no hosted control plane", () => {
-  it("ships exactly the self_hosted mode without aliases or a local runtime", () => {
+  it("uses the canonical public package name and documents the remote-bind guard", () => {
+    expect(hits(/@hasnaxyz\/emails/i)).toEqual([]);
+    const readme = readFileSync(join(root, "README.md"), "utf8");
+    expect(readme).toContain("EMAILS_ALLOW_REMOTE=1");
+    expect(readme).toContain("@hasna/emails");
+  });
+
+  it("ships exactly local and self_hosted without hosted aliases", () => {
+    expect(normalizeEmailsMode("local")).toBe("local");
     expect(normalizeEmailsMode("self_hosted")).toBe("self_hosted");
-    // The local SQLite runtime has been removed: this client is self-hosted-only,
-    // so every other mode value (including the legacy "local") fails loud.
-    for (const value of ["local", "cloud", "remote", "hybrid", "self-hosted", "selfhosted"]) {
+    for (const value of ["cloud", "remote", "hybrid", "self-hosted", "selfhosted"]) {
       expect(() => normalizeEmailsMode(value)).toThrow();
     }
   });

@@ -1,42 +1,24 @@
-// Email content (html/text/headers) storage — self-hosted-ONLY.
-//
-// The local `email_content` table is gone; a sent email's body lives on the
-// operator's `/v1/messages/<id>` record (body_text / body_html / headers). Reads
-// map that record onto the EmailContent shape; writes PATCH those fields.
+import * as local from "./email-content.local.js";
+import * as remote from "./email-content.remote.js";
+import { isSelfHostedMode } from "./self-hosted-store.js";
+import { hasDatabaseArgument, withExplicitDatabaseRoute } from "./database-routing.js";
 
-import { selfHostedResource, cstrOrNull, cobj } from "./self-hosted-resource.js";
+export type * from "./email-content.local.js";
 
-const MESSAGE_RESOURCE = "messages";
+const localCompat = {
+  ...local,
+} as typeof remote;
 
-export interface EmailContent {
-  email_id: string;
-  html: string | null;
-  text_body: string | null;
-  headers: Record<string, string>;
+type RoutedFunction<K extends keyof typeof remote & keyof typeof local> = typeof local[K] & typeof remote[K];
+
+function routed<K extends keyof typeof remote & keyof typeof local>(key: K): RoutedFunction<K> {
+  return ((...args: unknown[]) => {
+    const implementation = (hasDatabaseArgument(args) ? local : isSelfHostedMode() ? remote : localCompat) as Record<string, unknown>;
+    const candidate = implementation[String(key)];
+    if (typeof candidate !== "function") throw new Error(`email-content.${String(key)} is unavailable in the selected mode.`);
+    return withExplicitDatabaseRoute(args, () => (candidate as (...values: unknown[]) => unknown)(...args));
+  }) as RoutedFunction<K>;
 }
 
-/**
- * Persist a sent email's rendered body onto its `/v1/messages` record. Threads
- * and delivery are server-owned; this only mirrors the body/header projection.
- */
-export function storeEmailContent(
-  emailId: string,
-  content: { html?: string; text?: string; headers?: Record<string, string> },
-): void {
-  selfHostedResource(MESSAGE_RESOURCE).update(emailId, {
-    body_html: content.html ?? null,
-    body_text: content.text ?? null,
-    headers: content.headers ?? {},
-  });
-}
-
-export function getEmailContent(emailId: string): EmailContent | null {
-  const rec = selfHostedResource(MESSAGE_RESOURCE).get(emailId);
-  if (!rec) return null;
-  return {
-    email_id: emailId,
-    html: cstrOrNull(rec["body_html"] ?? rec["html"]),
-    text_body: cstrOrNull(rec["body_text"] ?? rec["text"]),
-    headers: cobj(rec["headers"]) as Record<string, string>,
-  };
-}
+export const storeEmailContent = routed("storeEmailContent");
+export const getEmailContent = routed("getEmailContent");

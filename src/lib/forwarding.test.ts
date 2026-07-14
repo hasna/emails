@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { processForwardingRules } from "./forwarding.js";
+import { processForwardingRules } from "./forwarding.remote.js";
 
 // App-level forwarding reads local inbound message bodies, sends copies through
 // provider adapters, and writes the sent-mail ledger + forwarding delivery

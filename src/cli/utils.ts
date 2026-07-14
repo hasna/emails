@@ -1,6 +1,8 @@
 import chalk from "../lib/chalk-lite.js";
 import { createInterface } from "node:readline/promises";
 import { resolveResourceId, listResourceIdMatches } from "../db/self-hosted-store.js";
+import { getDatabase, listPartialIdMatches, resolvePartialIdOrThrow } from "../db/database.js";
+import { getEmailsMode } from "../lib/mode.js";
 import { redactSecrets } from "../lib/redaction.js";
 
 const ID_ERROR_SUGGESTION_LIMIT = 5;
@@ -145,6 +147,13 @@ function resourceForTable(table: string): string {
 }
 
 export function resolveId(table: string, partialId: string): string {
+  if (getEmailsMode() === "local") {
+    try {
+      return resolvePartialIdOrThrow(getDatabase(), table, partialId);
+    } catch (error) {
+      handleError(error);
+    }
+  }
   const resource = resourceForTable(table);
   const id = resolveResourceId(resource, partialId);
   if (!id) {
@@ -159,6 +168,10 @@ export function resolveId(table: string, partialId: string): string {
 
 function getIdSuggestions(resource: string, partialId: string): string[] {
   try {
+    if (getEmailsMode() === "local") {
+      const table = Object.entries(TABLE_TO_RESOURCE).find(([, mapped]) => mapped === resource)?.[0] ?? resource;
+      return listPartialIdMatches(getDatabase(), table, partialId, ID_ERROR_SUGGESTION_LIMIT);
+    }
     return listResourceIdMatches(resource, partialId, ID_ERROR_SUGGESTION_LIMIT);
   } catch {
     return [];

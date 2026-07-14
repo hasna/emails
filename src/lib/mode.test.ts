@@ -1,10 +1,5 @@
-// mode.ts is the self-hosted-ONLY client mode resolver. There is a single mode
-// (`self_hosted`); the local/SQLite runtime and all config-file mode resolution
-// were removed. resolveEmailsMode() now REQUIRES a complete self-hosted endpoint
-// (EMAILS_SELF_HOSTED_URL + EMAILS_SELF_HOSTED_API_KEY, or an EMAILS_CLIENT_ENV_SECRET
-// pointer) and fails loud otherwise. These tests cover the happy path, the mandatory
-// config, rejection of removed modes/legacy env, and that no secret leaks or is
-// loaded for a removed mode.
+// Dual-mode resolver contract: local is the safe default and never loads remote
+// credentials; self_hosted is explicit and fails closed without URL + credential.
 
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { existsSync, mkdirSync, rmSync, writeFileSync, chmodSync } from "node:fs";
@@ -19,7 +14,9 @@ import {
   labelForEmailsMode,
   normalizeEmailsMode,
   resolveEmailsMode,
+  resolveEmailsModeSelection,
 } from "./mode.js";
+import { saveConfig } from "./config.js";
 
 const TMP_HOME = join("/tmp", `emails-mode-test-${process.pid}`);
 const ORIGINAL_HOME = process.env["HOME"];
@@ -115,21 +112,28 @@ afterEach(() => {
 });
 
 describe("normalizeEmailsMode", () => {
-  it("accepts only self_hosted (case-insensitive, trimmed)", () => {
+  it("accepts exactly local and self_hosted (case-insensitive, trimmed)", () => {
+    expect(normalizeEmailsMode("local")).toBe("local");
+    expect(normalizeEmailsMode("  LOCAL  ")).toBe("local");
     expect(normalizeEmailsMode("self_hosted")).toBe("self_hosted");
     expect(normalizeEmailsMode("  SELF_HOSTED  ")).toBe("self_hosted");
   });
 
-  it("rejects every other value with a self-hosted-only message", () => {
-    for (const value of ["local", "cloud", "remote", "hybrid", "self-hosted", "selfhosted"]) {
-      expect(() => normalizeEmailsMode(value)).toThrow("self-hosted-only");
+  it("rejects cloud, remote, hybrid, and spelling aliases", () => {
+    for (const value of ["cloud", "remote", "hybrid", "self-hosted", "selfhosted"]) {
+      expect(() => normalizeEmailsMode(value)).toThrow(/removed hosted|exactly local or self_hosted/);
     }
   });
 });
 
 describe("labelForEmailsMode / getEmailsMode", () => {
-  it("labels the single mode as Self-hosted", () => {
+  it("labels both canonical modes", () => {
+    expect(labelForEmailsMode("local")).toBe("Local");
     expect(labelForEmailsMode("self_hosted")).toBe("Self-hosted");
+  });
+
+  it("defaults to local without loading self-hosted configuration", () => {
+    expect(getEmailsMode()).toBe("local");
   });
 
   it("getEmailsMode returns self_hosted once configured", () => {
@@ -154,18 +158,18 @@ describe("assertNoLegacyHostedEnvironment", () => {
     }
   });
 
-  it("ignores legacy hosted API credentials (never throws on them)", () => {
+  it("rejects legacy hosted API credentials so they cannot select a backend", () => {
     const env = {
       MAILERY_API_URL: "https://legacy.example",
       MAILERY_API_KEY: "legacy",
       HASNA_MAILERY_API_URL: "https://legacy.example",
       HASNA_MAILERY_API_KEY: "legacy",
     } as NodeJS.ProcessEnv;
-    expect(() => assertNoLegacyHostedEnvironment(env)).not.toThrow();
+    expect(() => assertNoLegacyHostedEnvironment(env)).toThrow("removed hosted/legacy runtime");
   });
 });
 
-describe("resolveEmailsMode — self-hosted-only", () => {
+describe("resolveEmailsMode — dual mode", () => {
   it("resolves self_hosted from explicit mode + mandatory URL and key", () => {
     process.env[EMAILS_MODE_ENV] = "self_hosted";
     setSelfHostedCredentials();
@@ -177,12 +181,12 @@ describe("resolveEmailsMode — self-hosted-only", () => {
     });
   });
 
-  it("resolves self_hosted from credentials alone (mode is implicit)", () => {
+  it("does not infer self_hosted from credentials alone", () => {
     setSelfHostedCredentials();
     expect(resolveEmailsMode()).toMatchObject({
-      mode: "self_hosted",
-      label: "Self-hosted",
-      source: { kind: "env", name: EMAILS_MODE_ENV, value: "self_hosted" },
+      mode: "local",
+      label: "Local",
+      source: { kind: "default" },
     });
   });
 
@@ -192,9 +196,20 @@ describe("resolveEmailsMode — self-hosted-only", () => {
     expect(resolveEmailsMode()).toMatchObject({ mode: "self_hosted", label: "Self-hosted" });
   });
 
-  it("fails loud when no endpoint is configured", () => {
-    expect(() => resolveEmailsMode()).toThrow("not configured");
-    expect(() => resolveEmailsMode()).toThrow("EMAILS_SELF_HOSTED_URL");
+  it("resolves and validates a config-selected self_hosted client without requiring EMAILS_MODE", () => {
+    saveConfig({ emails_mode: "self_hosted" });
+    setSelfHostedCredentials();
+
+    expect(process.env[EMAILS_MODE_ENV]).toBeUndefined();
+    expect(resolveEmailsMode()).toMatchObject({
+      mode: "self_hosted",
+      label: "Self-hosted",
+      source: { kind: "config", name: "emails_mode", value: "self_hosted" },
+    });
+  });
+
+  it("defaults to local when no endpoint is configured", () => {
+    expect(resolveEmailsMode()).toMatchObject({ mode: "local", source: { kind: "default" } });
   });
 
   it("fails loud when the mode is set but URL/key are missing", () => {
@@ -202,10 +217,10 @@ describe("resolveEmailsMode — self-hosted-only", () => {
     expect(() => resolveEmailsMode()).toThrow("not configured");
   });
 
-  it("rejects the removed 'local' mode", () => {
+  it("accepts explicit local without consulting self-hosted credentials", () => {
     process.env[EMAILS_MODE_ENV] = "local";
     setSelfHostedCredentials();
-    expect(() => resolveEmailsMode()).toThrow("self-hosted-only");
+    expect(resolveEmailsMode()).toMatchObject({ mode: "local", source: { kind: "env", name: EMAILS_MODE_ENV } });
   });
 
   it("rejects removed cloud/remote/hybrid aliases", () => {
@@ -213,7 +228,7 @@ describe("resolveEmailsMode — self-hosted-only", () => {
       process.env[EMAILS_MODE_ENV] = value;
       setSelfHostedCredentials();
       resetSelfHostedConfigCache();
-      expect(() => resolveEmailsMode()).toThrow("self-hosted-only");
+      expect(() => resolveEmailsMode()).toThrow("removed hosted/legacy runtime");
     }
   });
 
@@ -223,11 +238,10 @@ describe("resolveEmailsMode — self-hosted-only", () => {
     expect(() => resolveEmailsMode()).toThrow("removed hosted/legacy runtime");
   });
 
-  it("ignores inherited hosted API credentials (they never configure the client)", () => {
+  it("rejects inherited hosted API credentials (they never configure the client)", () => {
     process.env["HASNA_MAILERY_API_URL"] = "https://example.invalid";
     process.env["HASNA_MAILERY_API_KEY"] = "not-a-real-key";
-    // With no EMAILS_SELF_HOSTED_* the client stays unconfigured — legacy creds are inert.
-    expect(() => resolveEmailsMode()).toThrow("not configured");
+    expect(() => resolveEmailsMode()).toThrow("removed hosted/legacy runtime");
   });
 
   it("lets an explicit self_hosted endpoint override unrelated Mailery hosted credentials", () => {
@@ -243,6 +257,16 @@ describe("resolveEmailsMode — self-hosted-only", () => {
 });
 
 describe("resolveEmailsMode — EMAILS_CLIENT_ENV_SECRET", () => {
+  it("selects operator mode from a client secret pointer without reading the secret", () => {
+    installFailingSecretsCommand();
+
+    expect(resolveEmailsModeSelection()).toMatchObject({
+      mode: "self_hosted",
+      source: { kind: "env", name: EMAILS_CLIENT_ENV_SECRET_ENV },
+    });
+    expect(process.env[EMAILS_MODE_ENV]).toBeUndefined();
+  });
+
   it("loads canonical self_hosted env from the client-env secret pointer", () => {
     installSelfHostedSecretsCommand();
 
@@ -265,12 +289,11 @@ describe("resolveEmailsMode — EMAILS_CLIENT_ENV_SECRET", () => {
     expect(resolution.source.value).toBe("hasna/xyz/opensource/emails/prod/client-env");
   });
 
-  it("never invokes the secrets loader for the removed 'local' mode", () => {
+  it("never invokes the secrets loader for local mode", () => {
     installFailingSecretsCommand();
     process.env[EMAILS_MODE_ENV] = "local";
 
-    // Must throw the self-hosted-only rejection, NOT the secrets shim's exit 42.
-    expect(() => resolveEmailsMode()).toThrow("self-hosted-only");
+    expect(resolveEmailsMode()).toMatchObject({ mode: "local", label: "Local" });
     // And the loader left the canonical credentials untouched.
     expect(process.env["EMAILS_SELF_HOSTED_URL"]).toBeUndefined();
     expect(process.env["EMAILS_SELF_HOSTED_API_KEY"]).toBeUndefined();

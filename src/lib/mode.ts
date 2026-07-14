@@ -1,12 +1,10 @@
 import { resolveSelfHostedConfig } from "../db/self-hosted-store.js";
+import { loadConfig } from "./config.js";
 import { EMAILS_CLIENT_ENV_SECRET_ENV, loadEmailsClientEnvSecret } from "./client-env.js";
 export { EMAILS_CLIENT_ENV_SECRET_ENV } from "./client-env.js";
 
-// This client is self-hosted-ONLY. There is a single mode; the local/SQLite
-// runtime has been removed. `EmailsMode` remains a named type so the many
-// call sites that reference it keep compiling.
-export type EmailsMode = "self_hosted";
-export type EmailsModeLabel = "Self-hosted";
+export type EmailsMode = "local" | "self_hosted";
+export type EmailsModeLabel = "Local" | "Self-hosted";
 
 export const EMAILS_MODE_ENV = "EMAILS_MODE";
 export const HASNA_EMAILS_MODE_ENV = "HASNA_EMAILS_MODE";
@@ -32,6 +30,15 @@ const LEGACY_HOSTED_ENV_KEYS = [
   "HASNA_MAILERY_ENV_FILE",
 ] as const;
 
+const FORBIDDEN_MODE_VALUES = new Set([
+  "cloud",
+  "mailery_cloud",
+  "remote",
+  "hybrid",
+  "self-hosted",
+  "selfhosted",
+]);
+
 export interface EmailsModeSource {
   kind: "env" | "config" | "default";
   name: string | null;
@@ -48,64 +55,111 @@ export interface EmailsModeResolution {
 function migrationGuidance(source: string, value?: string): string {
   const detail = value ? ` value '${value}'` : "";
   return `${source}${detail} belongs to the removed hosted/legacy runtime. ` +
-    `This client is self-hosted-only: set ${EMAILS_MODE_ENV}=self_hosted with ` +
-    "EMAILS_SELF_HOSTED_URL and EMAILS_SELF_HOSTED_API_KEY (or configure EMAILS_CLIENT_ENV_SECRET).";
+    `Use ${EMAILS_MODE_ENV}=local, or set ${EMAILS_MODE_ENV}=self_hosted with ` +
+    "EMAILS_SELF_HOSTED_URL and EMAILS_SELF_HOSTED_API_KEY (or EMAILS_CLIENT_ENV_SECRET). " +
+    "No cloud, remote, or hybrid alias is supported.";
 }
 
-/**
- * Reject legacy hosted/cloud environment variables. Kept for callers that guard
- * their entrypoints (src/storage.ts, the self-hosted server env). Legacy hosted
- * URL/key variables are intentionally ignored (never select or redirect a run).
- */
+function hasExplicitSelfHostedClientEnv(env: NodeJS.ProcessEnv): boolean {
+  const explicitMode = EMAILS_MODE_ENV_KEYS.some((key) => env[key]?.trim().toLowerCase() === "self_hosted");
+  return Boolean(
+    explicitMode &&
+      env["EMAILS_SELF_HOSTED_URL"]?.trim() &&
+      (env["EMAILS_SELF_HOSTED_API_KEY"]?.trim() || env["EMAILS_SESSION_TOKEN"]?.trim()),
+  );
+}
+
 export function assertNoLegacyHostedEnvironment(
   env: NodeJS.ProcessEnv = process.env,
-  _options: { allowHostedApiEnvWithExplicitSelfHosted?: boolean } = {},
+  options: { allowHostedApiEnvWithExplicitSelfHosted?: boolean } = {},
 ): void {
   for (const key of LEGACY_MODE_ENV_KEYS) {
     const value = env[key]?.trim();
     if (value) throw new Error(migrationGuidance(key, value));
   }
+  const allowHostedApiEnv =
+    options.allowHostedApiEnvWithExplicitSelfHosted === true &&
+    hasExplicitSelfHostedClientEnv(env);
   for (const key of LEGACY_HOSTED_ENV_KEYS) {
-    void env[key];
+    if (allowHostedApiEnv) continue;
+    if (env[key]?.trim()) throw new Error(migrationGuidance(key));
   }
 }
 
-export function labelForEmailsMode(_mode: EmailsMode): EmailsModeLabel {
-  return "Self-hosted";
+export function labelForEmailsMode(mode: EmailsMode): EmailsModeLabel {
+  return mode === "local" ? "Local" : "Self-hosted";
 }
 
 export function normalizeEmailsMode(value: string): EmailsMode {
   const normalized = value.trim().toLowerCase();
-  if (normalized === "self_hosted") return "self_hosted";
-  throw new Error(
-    `Unsupported ${EMAILS_MODE_ENV} '${value}'. This client is self-hosted-only; ` +
-      "the only supported mode is self_hosted.",
-  );
+  if (normalized === "local" || normalized === "self_hosted") return normalized;
+  if (FORBIDDEN_MODE_VALUES.has(normalized)) {
+    throw new Error(migrationGuidance(EMAILS_MODE_ENV, value));
+  }
+  throw new Error(`Unknown Emails mode '${value}'. Use exactly local or self_hosted.`);
+}
+
+function resolution(mode: EmailsMode, source: EmailsModeSource): EmailsModeResolution {
+  return { mode, label: labelForEmailsMode(mode), source, warning: null };
+}
+
+/** Resolve the process mode without requiring client transport credentials. */
+export function resolveEmailsModeSelection(env: NodeJS.ProcessEnv = process.env): EmailsModeResolution {
+  assertNoLegacyHostedEnvironment(env, { allowHostedApiEnvWithExplicitSelfHosted: true });
+
+  for (const name of EMAILS_MODE_ENV_KEYS) {
+    const value = env[name]?.trim();
+    if (!value) continue;
+    const mode = normalizeEmailsMode(value);
+    return resolution(mode, { kind: "env", name, value });
+  }
+
+  // A client secret pointer is itself an explicit self-hosted selection. Mode
+  // selection deliberately does not read it: operator startup must not depend
+  // on client credentials or secret-provider availability.
+  const clientEnvSecretPointer = env[EMAILS_CLIENT_ENV_SECRET_ENV]?.trim();
+  if (clientEnvSecretPointer) {
+    return resolution("self_hosted", {
+      kind: "env",
+      name: EMAILS_CLIENT_ENV_SECRET_ENV,
+      value: clientEnvSecretPointer,
+    });
+  }
+
+  const config = loadConfig();
+  for (const key of ["mailery_mode", "mode", "storage_mode"] as const) {
+    const value = config[key];
+    if (typeof value === "string" && value.trim()) {
+      throw new Error(migrationGuidance(`config key '${key}'`, value.trim()));
+    }
+  }
+  const configured = config[EMAILS_MODE_CONFIG_KEY];
+  if (typeof configured === "string" && configured.trim()) {
+    const mode = normalizeEmailsMode(configured);
+    return resolution(mode, { kind: "config", name: EMAILS_MODE_CONFIG_KEY, value: configured });
+  }
+
+  return resolution("local", { kind: "default", name: null, value: null });
 }
 
 /**
- * Resolve the client mode. The client is self-hosted-ONLY, so this validates
- * that a complete self-hosted endpoint (EMAILS_SELF_HOSTED_URL +
- * EMAILS_SELF_HOSTED_API_KEY, or EMAILS_CLIENT_ENV_SECRET) is configured and
- * throws a loud, actionable error otherwise.
+ * Resolve one client data-source mode for the whole process. Local is the safe
+ * default and never reads a client credential. Self-hosted is explicit and
+ * fail-closed: URL + API/session credential are validated before repository,
+ * CLI, or MCP callers can reach the operator API.
  */
 export function resolveEmailsMode(env: NodeJS.ProcessEnv = process.env): EmailsModeResolution {
+  const selected = resolveEmailsModeSelection(env);
+  if (selected.mode === "local") return selected;
+
   const clientEnvSecret = loadEmailsClientEnvSecret(env);
-  assertNoLegacyHostedEnvironment(env);
-  const modeRaw = env[EMAILS_MODE_ENV]?.trim() ?? env[HASNA_EMAILS_MODE_ENV]?.trim();
-  if (modeRaw) normalizeEmailsMode(modeRaw);
-  // Mandatory configuration. Throws with EMAILS_CLIENT_ENV_SECRET / URL+KEY guidance.
-  resolveSelfHostedConfig(env);
-  return {
-    mode: "self_hosted",
-    label: "Self-hosted",
-    source: {
-      kind: "env",
-      name: clientEnvSecret.ready ? EMAILS_CLIENT_ENV_SECRET_ENV : EMAILS_MODE_ENV,
-      value: clientEnvSecret.ready ? clientEnvSecret.secretPath : (modeRaw ?? "self_hosted"),
-    },
-    warning: null,
-  };
+  resolveSelfHostedConfig(env, { selectedMode: "self_hosted" });
+  if (!clientEnvSecret.ready) return selected;
+  return resolution("self_hosted", {
+    kind: "env",
+    name: EMAILS_CLIENT_ENV_SECRET_ENV,
+    value: clientEnvSecret.secretPath,
+  });
 }
 
 export function getEmailsMode(): EmailsMode {

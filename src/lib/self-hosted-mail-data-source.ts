@@ -19,6 +19,7 @@
 // header. It is never written to argv, logged, or embedded in an error message.
 
 import { resolveSelfHostedConfig } from "../db/self-hosted-store.js";
+import { getEmailsMode } from "./mode.js";
 import {
   type AttachmentPath,
   type ConversationBodyOptions,
@@ -815,6 +816,7 @@ export class SelfHostedMailDataSource implements MailDataSource {
  * No URL or credential implies a mode, and no package-owned endpoint exists.
  */
 export function resolveSelfHostedMailDataSource(fetchImpl?: SelfHostedFetch): SelfHostedMailDataSource | null {
+  if (getEmailsMode() !== "self_hosted") return null;
   const config = resolveSelfHostedConfig();
   if (!config) return null;
   // `apiKey` here is the Bearer credential slot — a user session token when

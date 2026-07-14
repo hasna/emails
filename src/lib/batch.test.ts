@@ -1,5 +1,6 @@
 import { describe, it, expect } from "bun:test";
-import { parseCsv, batchSend } from "./batch.js";
+import { parseCsv } from "./batch.js";
+import { batchSend } from "./batch.remote.js";
 import type { Provider } from "../types/index.js";
 
 // parseCsv is a pure re-export of csv.js and still runs locally. batchSend now

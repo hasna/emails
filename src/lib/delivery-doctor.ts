@@ -1,56 +1,18 @@
-import type { MxAssessment } from "./mx-ownership.js";
+import * as local from "./delivery-doctor.local.js";
+import * as remote from "./delivery-doctor.remote.js";
+import { getEmailsMode } from "./mode.js";
 
-export interface DeliveryDoctorCheck {
-  name: string;
-  status: "pass" | "warn" | "fail";
-  message: string;
-  fix_command?: string;
+export type * from "./delivery-doctor.local.js";
+
+function routed<K extends keyof typeof local>(key: K): typeof local[K] {
+  return ((...args: unknown[]) => {
+    const implementation = (getEmailsMode() === "self_hosted" ? remote : local) as Record<string, unknown>;
+    const candidate = implementation[String(key)];
+    if (typeof candidate !== "function") throw new Error(`delivery-doctor.${String(key)} is unavailable in the selected mode.`);
+    return candidate(...args);
+  }) as typeof local[K];
 }
 
-export interface DeliveryDoctorReport {
-  address: string;
-  domain: string | null;
-  alias_target: string | null;
-  recent_local_messages: number;
-  latest_received_at: string | null;
-  checks: DeliveryDoctorCheck[];
-  cli_equivalent: string;
-}
-
-export interface LiveDeliveryDoctorOptions {
-  inspectMx?: (domain: string) => Promise<MxAssessment>;
-}
-
-// Inbound delivery diagnosis inspects LOCAL delivery infrastructure — the local
-// inbound message store (recent mail), local provisioning/readiness state, the
-// configured S3 ingestion sources, and the realtime queue. In the self-hosted
-// client all of that lives on the operator's server, so these diagnostics run
-// server-side. The stubs preserve their signatures/return type and fail loud.
-export function diagnoseInboundDelivery(_address: string): DeliveryDoctorReport {
-  throw new Error(
-    "diagnoseInboundDelivery is not available in the self-hosted client; inbound delivery diagnostics run on the self-hosted server.",
-  );
-}
-
-export async function diagnoseInboundDeliveryLive(
-  _address: string,
-  _opts: LiveDeliveryDoctorOptions = {},
-): Promise<DeliveryDoctorReport> {
-  throw new Error(
-    "diagnoseInboundDeliveryLive is not available in the self-hosted client; inbound delivery diagnostics run on the self-hosted server.",
-  );
-}
-
-export function formatDeliveryDoctorReport(report: DeliveryDoctorReport): string {
-  const lines = [`Delivery diagnosis: ${report.address}`];
-  lines.push(`  Domain:   ${report.domain ?? "(none)"}`);
-  lines.push(`  Alias:    ${report.alias_target ?? "(none)"}`);
-  lines.push(`  Recent:   ${report.recent_local_messages}${report.latest_received_at ? `, latest ${report.latest_received_at}` : ""}`);
-  lines.push("");
-  for (const c of report.checks) {
-    const mark = c.status === "pass" ? "ok" : c.status === "warn" ? "warn" : "fail";
-    lines.push(`  [${mark}] ${c.name}: ${c.message}`);
-    if (c.fix_command) lines.push(`        fix: ${c.fix_command}`);
-  }
-  return lines.join("\n");
-}
+export const diagnoseInboundDelivery = routed("diagnoseInboundDelivery");
+export const diagnoseInboundDeliveryLive = routed("diagnoseInboundDeliveryLive");
+export const formatDeliveryDoctorReport = routed("formatDeliveryDoctorReport");

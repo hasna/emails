@@ -3,6 +3,8 @@
  */
 
 import { resolveResourceIdOrThrow } from "../db/self-hosted-store.js";
+import { getDatabase, resolvePartialIdOrThrow } from "../db/database.js";
+import { getEmailsMode } from "../lib/mode.js";
 import {
   ProviderNotFoundError,
   DomainNotFoundError,
@@ -29,6 +31,9 @@ const RESOLVE_ID_RESOURCE: Record<string, string> = {
 };
 
 export function resolveId(table: string, partialId: string): string {
+  if (getEmailsMode() === "local") {
+    return resolvePartialIdOrThrow(getDatabase(), table, partialId);
+  }
   const resource = RESOLVE_ID_RESOURCE[table] ?? table;
   return resolveResourceIdOrThrow(resource, partialId);
 }

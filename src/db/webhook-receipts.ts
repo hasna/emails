@@ -1,38 +1,24 @@
-import { now } from "./runtime.js";
-import { selfHostedResource, ciso, cstr, cstrOrNull } from "./self-hosted-resource.js";
+import * as local from "./webhook-receipts.local.js";
+import * as remote from "./webhook-receipts.remote.js";
+import { isSelfHostedMode } from "./self-hosted-store.js";
+import { hasDatabaseArgument, withExplicitDatabaseRoute } from "./database-routing.js";
 
-const WEBHOOK_RECEIPT_RESOURCE = "webhook-receipts";
+export type * from "./webhook-receipts.local.js";
 
-export interface WebhookReceipt {
-  provider: string;
-  event_id: string;
-  resource_id: string | null;
-  completed_at: string;
+const localCompat = {
+  ...local,
+} as typeof remote;
+
+type RoutedFunction<K extends keyof typeof remote & keyof typeof local> = typeof local[K] & typeof remote[K];
+
+function routed<K extends keyof typeof remote & keyof typeof local>(key: K): RoutedFunction<K> {
+  return ((...args: unknown[]) => {
+    const implementation = (hasDatabaseArgument(args) ? local : isSelfHostedMode() ? remote : localCompat) as Record<string, unknown>;
+    const candidate = implementation[String(key)];
+    if (typeof candidate !== "function") throw new Error(`webhook-receipts.${String(key)} is unavailable in the selected mode.`);
+    return withExplicitDatabaseRoute(args, () => (candidate as (...values: unknown[]) => unknown)(...args));
+  }) as RoutedFunction<K>;
 }
 
-function apiToReceipt(e: Record<string, unknown>): WebhookReceipt {
-  return {
-    provider: cstr(e["provider"]),
-    event_id: cstr(e["event_id"]),
-    resource_id: cstrOrNull(e["resource_id"]),
-    completed_at: ciso(e["completed_at"]),
-  };
-}
-
-export function getWebhookReceipt(provider: string, eventId: string): WebhookReceipt | null {
-  const match = selfHostedResource(WEBHOOK_RECEIPT_RESOURCE)
-    .list({ limit: 1000 })
-    .map(apiToReceipt)
-    .find((r) => r.provider === provider && r.event_id === eventId);
-  return match ?? null;
-}
-
-/** Call only after the associated persistence side effect has succeeded. */
-export function recordWebhookReceipt(provider: string, eventId: string, resourceId: string | null): void {
-  selfHostedResource(WEBHOOK_RECEIPT_RESOURCE).create({
-    provider,
-    event_id: eventId,
-    resource_id: resourceId,
-    completed_at: now(),
-  });
-}
+export const getWebhookReceipt = routed("getWebhookReceipt");
+export const recordWebhookReceipt = routed("recordWebhookReceipt");
