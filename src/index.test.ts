@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as emails from "./index.js";
@@ -81,6 +81,11 @@ describe("public package entrypoint", () => {
       "getInboundAttachmentStorageConfig",
       "listSandboxEmailSummaries",
       "listScheduledEmailSummaries",
+      "getDatabase",
+      "closeDatabase",
+      "resetDatabase",
+      "runInTransaction",
+      "resolvePartialId",
     ]) {
       expect(typeof (emails as Record<string, unknown>)[name]).toBe("function");
     }
@@ -90,18 +95,98 @@ describe("public package entrypoint", () => {
     }
   });
 
-  it("exposes only Emails mode helpers from the explicit storage subpath", async () => {
+  it("exposes Emails mode and first-class local SQLite helpers from the storage subpath", async () => {
     const storage = await import("./storage.js");
 
     expect(typeof storage.getEmailsMode).toBe("function");
     expect(typeof storage.resolveEmailsMode).toBe("function");
     expect(typeof storage.normalizeEmailsMode).toBe("function");
     expect(typeof storage.labelForEmailsMode).toBe("function");
+    expect(typeof storage.getDatabase).toBe("function");
+    expect(typeof storage.closeDatabase).toBe("function");
+    expect(typeof storage.resetDatabase).toBe("function");
+    expect(typeof storage.runInTransaction).toBe("function");
+    expect(typeof storage.resolvePartialId).toBe("function");
 
     // The self-hosted PostgreSQL/S3 mirror surface is gone; the storage subpath
     // must not resurrect any of the removed sync internals.
     for (const removed of ["PG_MIGRATIONS", "PgAdapterAsync", "getStorageStatus", "storagePush", "storagePull", "storageSync"]) {
       expect((storage as Record<string, unknown>)[removed]).toBeUndefined();
+    }
+  });
+
+  it("supports an isolated local SQLite lifecycle through the public root", () => {
+    emails.closeDatabase();
+    const db = emails.getDatabase(":memory:");
+    try {
+      const provider = emails.runInTransaction(db, () =>
+        emails.createProvider({ name: "library-local", type: "sandbox" }, db));
+      const group = emails.createGroup("library-group", undefined, db);
+      expect(emails.resolvePartialId(db, "providers", provider.id.slice(0, 12))).toBe(provider.id);
+
+      // Switch the singleton to a separate database. Passing `db` must still
+      // address the caller-owned database rather than silently using global state.
+      emails.resetDatabase();
+      emails.getDatabase(":memory:");
+      expect(emails.listProviders(db).map((item) => item.id)).toContain(provider.id);
+      expect(emails.listGroups(db).map((item) => item.id)).toContain(group.id);
+    } finally {
+      emails.closeDatabase();
+      db.close();
+    }
+  });
+
+  it("emits consumer declarations with optional Database injection", () => {
+    const dir = mkdtempSync(join(tmpdir(), "emails-local-types-"));
+    const typesDir = join(dir, "types");
+    try {
+      const emit = Bun.spawnSync({
+        cmd: ["bun", "x", "tsc", "--emitDeclarationOnly", "--outDir", typesDir],
+        cwd: root,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(emit.exitCode, emit.stderr.toString()).toBe(0);
+
+      writeFileSync(join(dir, "consumer.ts"), `
+import type { Database } from "bun:sqlite";
+import {
+  closeDatabase,
+  createProvider,
+  createGroup,
+  getDatabase,
+  getEmail,
+  listGroups,
+  listProviders,
+  resolvePartialId,
+  runInTransaction,
+} from "./types/index.js";
+import { getDatabase as getStorageDatabase } from "./types/storage.js";
+
+const db: Database = getDatabase(":memory:");
+const same: Database = getStorageDatabase(":memory:");
+createProvider({ name: "typed", type: "sandbox" }, db);
+createGroup("typed-group", undefined, db);
+getEmail("message-id", db);
+listGroups(db, { limit: 1 });
+listProviders(db, { limit: 1 });
+resolvePartialId(db, "providers", "abc");
+runInTransaction(db, () => same);
+closeDatabase();
+`);
+      const check = Bun.spawnSync({
+        cmd: [
+          "bun", "x", "tsc", "--noEmit", "--ignoreConfig", "--strict", "--skipLibCheck",
+          "--target", "esnext", "--module", "esnext", "--moduleResolution", "bundler",
+          "--types", "bun-types", join(dir, "consumer.ts"),
+        ],
+        cwd: root,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(check.exitCode, `${check.stdout.toString()}\n${check.stderr.toString()}`).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 

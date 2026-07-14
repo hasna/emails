@@ -1,6 +1,7 @@
 import * as local from "./templates.local.js";
 import * as remote from "./templates.remote.js";
 import { isSelfHostedMode } from "./self-hosted-store.js";
+import { hasDatabaseArgument } from "./database-routing.js";
 
 export type * from "./templates.local.js";
 
@@ -10,13 +11,15 @@ const localCompat = {
   listTemplateSummaries: (opts) => local.listTemplateSummaries(undefined, opts),
 } as typeof remote;
 
-function routed<K extends keyof typeof remote>(key: K): typeof remote[K] {
+type RoutedFunction<K extends keyof typeof remote & keyof typeof local> = typeof local[K] & typeof remote[K];
+
+function routed<K extends keyof typeof remote & keyof typeof local>(key: K): RoutedFunction<K> {
   return ((...args: unknown[]) => {
-    const implementation = (isSelfHostedMode() ? remote : localCompat) as Record<string, unknown>;
+    const implementation = (isSelfHostedMode() ? remote : hasDatabaseArgument(args) ? local : localCompat) as Record<string, unknown>;
     const candidate = implementation[String(key)];
     if (typeof candidate !== "function") throw new Error(`templates.${String(key)} is unavailable in the selected mode.`);
     return (candidate as (...values: unknown[]) => unknown)(...args);
-  }) as typeof remote[K];
+  }) as RoutedFunction<K>;
 }
 
 export const createTemplate = routed("createTemplate");
