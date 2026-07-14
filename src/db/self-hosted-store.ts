@@ -17,6 +17,7 @@
 
 import { spawnSync } from "node:child_process";
 import { EMAILS_SESSION_TOKEN_ENV, loadEmailsClientEnvSecret } from "../lib/client-env.js";
+import { getEmailsMode } from "../lib/mode.js";
 
 const APP = "emails";
 
@@ -67,14 +68,19 @@ const CONFIG_HELP =
   "or set EMAILS_MODE=self_hosted with EMAILS_SELF_HOSTED_URL and EMAILS_SELF_HOSTED_API_KEY.";
 
 /**
- * Resolve strict client configuration. This client is self-hosted-ONLY: a fully
- * configured self_hosted endpoint (base URL + API key) is MANDATORY. Missing or
- * partial configuration fails loud — there is no local fallback and no endpoint
- * is ever inferred by the package.
+ * Resolve strict self-hosted client configuration. This function is called only
+ * after self_hosted has been selected; local mode never loads a client-env
+ * secret and never needs an HTTP endpoint.
  */
 export function resolveSelfHostedConfig(env: NodeJS.ProcessEnv = process.env): SelfHostedConfig {
-  loadEmailsClientEnvSecret(env);
-  const modeRaw = env["EMAILS_MODE"]?.trim() ?? env["HASNA_EMAILS_MODE"]?.trim();
+  let modeRaw = env["EMAILS_MODE"]?.trim() ?? env["HASNA_EMAILS_MODE"]?.trim();
+  if (modeRaw === "local") {
+    throw new Error(`${APP}: self-hosted configuration was requested while EMAILS_MODE=local.`);
+  }
+  if (modeRaw === "self_hosted" || env["EMAILS_CLIENT_ENV_SECRET"]?.trim()) {
+    loadEmailsClientEnvSecret(env);
+    modeRaw = env["EMAILS_MODE"]?.trim() ?? env["HASNA_EMAILS_MODE"]?.trim() ?? modeRaw;
+  }
   const apiUrl = env["EMAILS_SELF_HOSTED_URL"]?.trim();
   const apiKey = env["EMAILS_SELF_HOSTED_API_KEY"]?.trim();
   const sessionToken = env[EMAILS_SESSION_TOKEN_ENV]?.trim();
@@ -92,10 +98,10 @@ export function resolveSelfHostedConfig(env: NodeJS.ProcessEnv = process.env): S
 }
 
 function assertSupportedMode(modeRaw: string | undefined): void {
-  if (modeRaw && modeRaw !== "self_hosted") {
+  if (modeRaw !== "self_hosted") {
+    const received = modeRaw ? `received '${modeRaw}'` : "no explicit mode was selected";
     throw new Error(
-      `${APP}: unsupported EMAILS_MODE '${modeRaw}'. This client is self-hosted-only and the ` +
-        `only supported mode is self_hosted. ${CONFIG_HELP}`,
+      `${APP}: self-hosted configuration requires EMAILS_MODE=self_hosted; ${received}. ${CONFIG_HELP}`,
     );
   }
 }
@@ -149,12 +155,11 @@ export function resetSelfHostedConfigCache(): void {
 }
 
 /**
- * Compatibility shim. This client is self-hosted-ONLY, so this is always true.
- * Retained only so external modules (e.g. the self-hosted server env/migrate)
- * that still reference it keep compiling; new client code must not branch on it.
+ * Shared mode predicate for synchronous repositories. It resolves the same
+ * canonical process mode as the CLI/MCP data-source seam.
  */
 export function isSelfHostedMode(): boolean {
-  return true;
+  return getEmailsMode() === "self_hosted";
 }
 
 interface CurlResult {

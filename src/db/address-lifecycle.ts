@@ -1,85 +1,25 @@
-/**
- * Address lifecycle — suspend / activate an address and enforce a per-address
- * daily send quota. An address that is `suspended` cannot send (and is excluded
- * from delivery); a `daily_quota` caps the number of sends per UTC day.
- *
- * Self-hosted-ONLY: status/quota transitions PATCH /v1/addresses/<id> via the
- * addresses repo. The per-address daily send ledger (`emails`) is not part of
- * the /v1 address model, so send counts resolve to 0 client-side (the server is
- * authoritative for send accounting).
- */
-import type { AddressStatus, EmailAddress } from "../types/index.js";
-import { AddressNotFoundError } from "../types/index.js";
-import { apiToAddress, selfHostedAddresses, findAddressesByEmail } from "./addresses.js";
-import { canonicalSender } from "../lib/email-address.js";
+import * as local from "./address-lifecycle.local.js";
+import * as remote from "./address-lifecycle.remote.js";
+import { isSelfHostedMode } from "./self-hosted-store.js";
 
-function setStatus(id: string, status: AddressStatus): EmailAddress {
-  const store = selfHostedAddresses();
-  if (!store.get(id)) throw new AddressNotFoundError(id);
-  return apiToAddress(store.update(id, { status }));
+export type * from "./address-lifecycle.local.js";
+
+const localCompat = {
+  ...local,
+} as typeof remote;
+
+function routed<K extends keyof typeof remote>(key: K): typeof remote[K] {
+  return ((...args: unknown[]) => {
+    const implementation = (isSelfHostedMode() ? remote : localCompat) as Record<string, unknown>;
+    const candidate = implementation[String(key)];
+    if (typeof candidate !== "function") throw new Error(`address-lifecycle.${String(key)} is unavailable in the selected mode.`);
+    return (candidate as (...values: unknown[]) => unknown)(...args);
+  }) as typeof remote[K];
 }
 
-export function suspendAddress(id: string): EmailAddress {
-  return setStatus(id, "suspended");
-}
-
-export function activateAddress(id: string): EmailAddress {
-  return setStatus(id, "active");
-}
-
-/** Set (or clear, with null) the per-address daily send quota. */
-export function setAddressQuota(id: string, quota: number | null): EmailAddress {
-  if (quota !== null && (!Number.isInteger(quota) || quota < 0)) {
-    throw new Error(`Invalid daily quota: ${quota} (must be a non-negative integer or null)`);
-  }
-  const store = selfHostedAddresses();
-  if (!store.get(id)) throw new AddressNotFoundError(id);
-  return apiToAddress(store.update(id, { daily_quota: quota }));
-}
-
-/** Count emails sent from `email` so far during the current UTC day. */
-export function countSendsToday(_email: string): number {
-  // The per-address daily send ledger (`emails`) is not part of the /v1 address
-  // model; the server owns send accounting, so the client reports 0.
-  return 0;
-}
-
-/** Count today's sends for many addresses with one grouped query. */
-export function countSendsTodayByAddress(emails: Iterable<string>): Map<string, number> {
-  const normalized = [...new Set(
-    [...emails]
-      .map((email) => canonicalSender(email) ?? email.trim().toLowerCase())
-      .filter(Boolean),
-  )];
-  // Zeroed counts without a local ledger to count against (see countSendsToday).
-  return new Map(normalized.map((email) => [email, 0]));
-}
-
-export interface Sendability {
-  sendable: boolean;
-  reason?: string;
-}
-
-/**
- * Whether `email` is allowed to send right now. Unregistered addresses are
- * unrestricted (sendable); a registered address is blocked if suspended or if
- * it has reached its daily quota.
- */
-export function getAddressSendability(email: string): Sendability {
-  const normalizedEmail = canonicalSender(email) ?? email.trim().toLowerCase();
-
-  const matches = findAddressesByEmail(normalizedEmail);
-  if (matches.length === 0) return { sendable: true };
-  // A suspended record (any provider) takes precedence over an active one.
-  const record = matches.find((a) => a.status === "suspended") ?? matches[0]!;
-  if ((record.status ?? "active") === "suspended") {
-    return { sendable: false, reason: `Address ${normalizedEmail} is suspended` };
-  }
-  if (record.daily_quota !== null) {
-    const used = countSendsToday(normalizedEmail);
-    if (used >= record.daily_quota) {
-      return { sendable: false, reason: `Address ${normalizedEmail} reached its daily quota (${used}/${record.daily_quota})` };
-    }
-  }
-  return { sendable: true };
-}
+export const suspendAddress = routed("suspendAddress");
+export const activateAddress = routed("activateAddress");
+export const setAddressQuota = routed("setAddressQuota");
+export const countSendsToday = routed("countSendsToday");
+export const countSendsTodayByAddress = routed("countSendsTodayByAddress");
+export const getAddressSendability = routed("getAddressSendability");
