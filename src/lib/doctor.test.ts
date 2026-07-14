@@ -62,8 +62,10 @@ afterEach(() => {
 });
 
 describe("runDiagnostics", () => {
-  it("throws loudly when the self-hosted client is not configured", async () => {
-    await expect(runDiagnostics()).rejects.toThrow(/self-hosted|not configured/i);
+  it("uses local SQLite diagnostics when no self-hosted client is configured", async () => {
+    const checks = await runDiagnostics();
+    expect(checks.find((c) => c.name === "Database")?.status).toBe("pass");
+    expect(checks.some((c) => c.name === "Providers")).toBe(true);
   });
 
   it("returns self-hosted operator guidance without creating a local database", async () => {

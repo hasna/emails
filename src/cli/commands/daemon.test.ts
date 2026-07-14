@@ -5,7 +5,7 @@
 // exists anymore, so there is no DB/temp-HOME setup here.
 import { describe, expect, it } from "bun:test";
 import { Command } from "commander";
-import { registerDaemonCommands } from "./daemon.js";
+import { registerDaemonCommands } from "./daemon.remote.js";
 
 async function runDaemonCommandExpectingExit(args: string[]) {
   const originalExit = process.exit;

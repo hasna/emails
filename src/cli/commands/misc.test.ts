@@ -5,7 +5,7 @@
 // No local SQLite exists anymore, so there is no DB/temp-HOME setup here.
 import { describe, expect, it, mock } from "bun:test";
 import { Command } from "commander";
-import { registerMiscCommands, runSchedulerTick } from "./misc.js";
+import { registerMiscCommands, runSchedulerTick } from "./misc.remote.js";
 
 async function runMiscCommand(args: string[]): Promise<string> {
   const program = new Command();

@@ -1,5 +1,6 @@
 import { describe, it, expect } from "bun:test";
-import { getLocalStats, formatStatsTable } from "./stats.js";
+import { formatStatsTable } from "./stats.js";
+import { getLocalStats } from "./stats.remote.js";
 
 // getLocalStats aggregates the delivery `events` table, which has no /v1
 // representation in the self-hosted client. It is now a loud stub; only the

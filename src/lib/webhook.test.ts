@@ -2,10 +2,10 @@ import { describe, it, expect } from "bun:test";
 import {
   parseResendWebhook,
   parseSesWebhook,
-  createWebhookServer,
   verifyResendSignature,
   verifySnsStructure,
 } from "./webhook.js";
+import { createWebhookServer } from "./webhook.remote.js";
 
 // The durable provider webhook receiver runs on the self-hosted server — it
 // persists delivery events into the server's events table. The client stub fails

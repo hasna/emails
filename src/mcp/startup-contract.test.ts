@@ -133,6 +133,8 @@ describe("MCP startup contract", () => {
       "../helpers.js",
     ];
     const source = readFileSync(join(toolsDir, "email-ops.ts"), "utf8");
+    const localSource = readFileSync(join(toolsDir, "email-ops.local.ts"), "utf8");
+    const remoteSource = readFileSync(join(toolsDir, "email-ops.remote.ts"), "utf8");
     const offenders: string[] = [];
 
     for (const match of source.matchAll(staticImport)) {
@@ -141,9 +143,10 @@ describe("MCP startup contract", () => {
     }
 
     expect(offenders).toEqual([]);
-    for (const specifier of lazyToolDeps) {
-      expect(hasDynamicImport(source, specifier)).toBe(true);
-    }
+    expect(source).toContain('from "./email-ops.local.js"');
+    expect(source).toContain('from "./email-ops.remote.js"');
+    expect(hasDynamicImport(localSource, "../helpers.js")).toBe(true);
+    for (const specifier of lazyToolDeps) expect(hasDynamicImport(remoteSource, specifier)).toBe(true);
   });
 
   it("keeps sequence implementation dependencies lazy", () => {

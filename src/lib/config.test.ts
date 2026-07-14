@@ -18,11 +18,8 @@ import { resetSelfHostedConfigCache } from "../db/self-hosted-store.js";
 const TMP_HOME = join("/tmp", `emails-config-test-${process.pid}`);
 const origHome = process.env.HOME;
 
-// getInboundAttachmentStorageConfig resolves the client mode, which in this
-// self-hosted-only client MANDATES a configured endpoint (URL + API key). These
-// fake values only satisfy the presence check — no request is ever made — so the
-// mode always resolves to self_hosted. Set/cleared per test so nothing leaks
-// into sibling test files run in the same process.
+// Endpoint credentials alone never select self_hosted mode. Tests explicitly
+// set EMAILS_MODE=self_hosted when exercising the remote attachment policy.
 const SELF_HOSTED_URL = "https://emails.config.test";
 const SELF_HOSTED_KEY = "config-test-api-key";
 
@@ -155,11 +152,9 @@ describe("config", () => {
     expect(getFailoverProviderIds()).toEqual(["id1", "id2"]);
   });
 
-  it("getInboundAttachmentStorageConfig defaults self-hosted attachments to none without a bucket", () => {
-    // This client is self-hosted-only: with no configured bucket the thin client
-    // never keeps attachments on the local filesystem, so the default is "none".
+  it("getInboundAttachmentStorageConfig defaults local attachments to the filesystem", () => {
     expect(getInboundAttachmentStorageConfig()).toMatchObject({
-      attachment_storage: "none",
+      attachment_storage: "local",
       s3_region: "us-east-1",
       s3_prefix: "emails",
     });

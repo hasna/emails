@@ -1,5 +1,6 @@
 import { describe, it, expect } from "bun:test";
-import { getAnalytics, formatAnalytics } from "./analytics.js";
+import { formatAnalytics } from "./analytics.js";
+import { getAnalytics } from "./analytics.remote.js";
 
 // The self-hosted client is server-side for aggregation: getAnalytics joins the
 // delivery `events` table, which has no /v1 representation. It is now a loud

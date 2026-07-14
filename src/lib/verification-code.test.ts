@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { extractVerificationCodes, findVerificationCode, listVerificationCodeCandidates } from "./verification-code.js";
+import { extractVerificationCodes, findVerificationCode, listVerificationCodeCandidates } from "./verification-code.remote.js";
 import { type InboundEmail } from "../db/inbound.js";
 
 function email(partial: Partial<InboundEmail>): InboundEmail {

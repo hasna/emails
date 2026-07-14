@@ -5,7 +5,7 @@
 // No local SQLite exists anymore, so there is no DB setup here.
 import { describe, expect, it } from "bun:test";
 import { Command } from "commander";
-import { registerInboundCommands } from "./inbound.js";
+import { registerInboundCommands } from "./inbound.remote.js";
 
 async function runInboundCommandExpectingExit(args: string[]) {
   const originalExit = process.exit;

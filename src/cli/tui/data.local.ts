@@ -28,7 +28,7 @@ import { getInboundBuckets, loadConfig, saveConfig } from "../../lib/config.js";
 import { assessDomainReadiness } from "../../lib/domain-readiness.js";
 import { domainInboundReadinessSignals } from "../../lib/domain-inbound-evidence.js";
 import { resolveEmailsMode } from "../../lib/mode.js";
-import { listS3Sources } from "../../lib/s3-sync.js";
+import { listS3Sources } from "../../lib/s3-sync.local.js";
 import { createSentEmailLedger, setSentEmailThreading, storeSentEmailContent } from "../../lib/sent-ledger.local.js";
 import { buildThreadingHeaders, generateMessageId, parseReferences } from "../../lib/threading.js";
 import { marked } from "marked";

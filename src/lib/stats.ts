@@ -1,25 +1,17 @@
-import type { Stats } from "../types/index.js";
+import * as local from "./stats.local.js";
+import * as remote from "./stats.remote.js";
+import { getEmailsMode } from "./mode.js";
 
-// Delivery statistics aggregate the local `events` table (delivered/bounced/
-// complained/opened/clicked). That table has NO `/v1` representation in the
-// self-hosted client — delivery events are recorded and aggregated on the
-// operator's server — so this stub fails loud rather than fabricating rates.
-export function getLocalStats(_providerId?: string, _period = "30d"): Stats {
-  throw new Error(
-    "getLocalStats is not available in the self-hosted client; it aggregates the delivery events table, which runs on the self-hosted server.",
-  );
+export type * from "./stats.local.js";
+
+function routed<K extends keyof typeof local>(key: K): typeof local[K] {
+  return ((...args: unknown[]) => {
+    const implementation = (getEmailsMode() === "self_hosted" ? remote : local) as Record<string, unknown>;
+    const candidate = implementation[String(key)];
+    if (typeof candidate !== "function") throw new Error(`stats.${String(key)} is unavailable in the selected mode.`);
+    return candidate(...args);
+  }) as typeof local[K];
 }
 
-export function formatStatsTable(stats: Stats): string {
-  const lines = [
-    `Provider: ${stats.provider_id}   Period: ${stats.period}`,
-    ``,
-    `  Sent:         ${stats.sent}`,
-    `  Delivered:    ${stats.delivered}  (${stats.delivery_rate.toFixed(1)}%)`,
-    `  Bounced:      ${stats.bounced}  (${stats.bounce_rate.toFixed(1)}%)`,
-    `  Complained:   ${stats.complained}`,
-    `  Opened:       ${stats.opened}  (${stats.open_rate.toFixed(1)}%)`,
-    `  Clicked:      ${stats.clicked}`,
-  ];
-  return lines.join("\n") + "\n";
-}
+export const getLocalStats = routed("getLocalStats");
+export const formatStatsTable = routed("formatStatsTable");
