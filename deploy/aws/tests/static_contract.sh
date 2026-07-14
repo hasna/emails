@@ -154,4 +154,21 @@ for allowed_workflow in "$workflow" "$product_workflow"; do
   fi
 done
 
+for runbook in "$repo/docs/DEPLOYMENT_CUTOVER.md" "$root/README.md"; do
+  for phrase in \
+    "migration 0016" \
+    "every old API, worker, ingest" \
+    "Drain and stop all of them" \
+    "new-code-compatible migrator" \
+    "Start only tenant-aware new-code writers" \
+    "pre-tenancy" \
+    "unscoped image" \
+    "Roll forward"; do
+    grep -Fiq "$phrase" "$runbook" || {
+      echo "tenant-sealing migration contract missing '$phrase' from $runbook" >&2
+      exit 1
+    }
+  done
+done
+
 echo "static self-hosting contract: pass"

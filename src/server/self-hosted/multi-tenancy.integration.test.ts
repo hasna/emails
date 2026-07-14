@@ -642,6 +642,55 @@ describe.skipIf(!pgClient)("Addendum A2: signup -> verify -> login (SES send moc
 });
 
 describe.skipIf(!pgClient)("multiple verified email identities", () => {
+  it("resends verification for an unverified alias after failed delivery and token expiry", async () => {
+    const { deps, sent } = makeDeps();
+    const primary = `identity-resend-${crypto.randomUUID()}@hasna.com`;
+    const alias = `identity-resend-alias-${crypto.randomUUID()}@hasna.com`;
+    const password = "sup3rsecret!";
+
+    const signup = await call(deps, "POST", "/v1/auth/signup", {
+      body: { email: primary, password, tenant_name: `Identity Resend ${crypto.randomUUID()}` },
+    });
+    expect(signup.status).toBe(200);
+    expect((await call(deps, "GET", `/v1/auth/verify-email?token=${encodeURIComponent(lastToken(sent))}`)).status).toBe(200);
+    const login = await call(deps, "POST", "/v1/auth/login", { body: { email: primary, password } });
+    expect(login.status).toBe(200);
+
+    const originalSend = deps.sender.send;
+    const sentBeforeAlias = sent.length;
+    let added: Awaited<ReturnType<typeof call>>;
+    try {
+      deps.sender.send = async () => {
+        throw new Error("simulated alias verification delivery failure");
+      };
+      added = await call(deps, "POST", "/v1/me/email-identities", {
+        token: login.body.session_token,
+        body: { email: alias },
+      });
+    } finally {
+      deps.sender.send = originalSend;
+    }
+    expect(added!.status).toBe(201);
+    expect(sent).toHaveLength(sentBeforeAlias);
+
+    const firstResend = await call(deps, "POST", "/v1/auth/verify-email/resend", { body: { email: alias } });
+    expect(firstResend.status).toBe(200);
+    expect(sent).toHaveLength(sentBeforeAlias + 1);
+    const expiredToken = lastToken(sent);
+    await pgClient!.execute(
+      `UPDATE email_verification_tokens SET expires_at = now() - interval '1 minute' WHERE email = $1`,
+      [alias],
+    );
+    expect((await call(deps, "GET", `/v1/auth/verify-email?token=${encodeURIComponent(expiredToken)}`)).status).toBe(400);
+
+    const secondResend = await call(deps, "POST", "/v1/auth/verify-email/resend", { body: { email: alias } });
+    expect(secondResend.status).toBe(200);
+    expect(sent).toHaveLength(sentBeforeAlias + 2);
+    const freshToken = lastToken(sent);
+    expect(freshToken).not.toBe(expiredToken);
+    expect((await call(deps, "GET", `/v1/auth/verify-email?token=${encodeURIComponent(freshToken)}`)).status).toBe(200);
+  });
+
   it("adds and verifies an alias, logs in through it, makes it primary, and protects the primary identity", async () => {
     const { deps, sent } = makeDeps();
     const primary = `identity-${crypto.randomUUID()}@hasna.com`;

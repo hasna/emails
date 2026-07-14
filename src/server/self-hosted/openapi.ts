@@ -25,7 +25,7 @@ const userSchema = {
     name: { type: "string", nullable: true },
     status: { type: "string" },
     email_verified: { type: "boolean" },
-    global_role: { type: "string", enum: ["user", "platform_admin"] },
+    global_role: { type: "string", enum: ["user", "super_admin"] },
     is_primary_super_admin: { type: "boolean" },
   },
   required: ["id", "email", "status"],

@@ -39,6 +39,13 @@ const REQUIRED_IDENTITY_PATHS = [
 ] as const;
 
 describe("self-hosted OpenAPI identity and authorization contract", () => {
+  it("publishes the runtime global-role vocabulary", () => {
+    const userSchema = emailsSelfHostedOpenApi.components?.schemas?.User as
+      | { properties?: { global_role?: { enum?: string[] } } }
+      | undefined;
+    expect(userSchema?.properties?.global_role?.enum).toEqual(["user", "super_admin"]);
+  });
+
   it("publishes every identity, tenancy, membership, invitation, and key route", () => {
     for (const path of REQUIRED_IDENTITY_PATHS) {
       expect(paths[path], path).toBeDefined();

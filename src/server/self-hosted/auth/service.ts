@@ -483,7 +483,7 @@ async function handleVerifyResend(deps: AuthServiceDeps, req: Request): Promise<
   const generic = json(200, { status: "verification_required", verification_required: true });
   if (!email || !isAllowedSignupEmail(email, env(deps))) return generic;
   const user = await deps.authStore.findUserByEmail(email);
-  if (user && !user.email_verified_at) {
+  if (user && !user.login_email_verified_at) {
     const verification = await deps.authStore.createEmailVerification(user.id, email);
     await sendVerificationEmail(deps.sender, deps.mailer, email, verification.token);
   }

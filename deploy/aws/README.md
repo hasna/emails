@@ -176,6 +176,13 @@ Set `enable_nat_gateway = true` while desired counts remain zero. The private
 migration task needs egress to pull its image, read Secrets Manager, and publish
 logs.
 
+Before migration 0016, discover and inventory every old API, worker, ingest,
+backfill, scheduled, and one-off writer across ECS services, tasks, schedules,
+and external processes. Drain and stop all of them. Run only a
+new-code-compatible migrator through 0016, require exit code zero, and verify the
+migration ledger before starting anything. Start only tenant-aware new-code writers
+after the ledger check passes.
+
 Use these outputs to run one Fargate migration task:
 
 - `ecs_cluster_name`;
@@ -248,6 +255,12 @@ api_desired_count            = 2
 The ECS service requires 100% minimum healthy capacity, enables deployment
 circuit-breaker rollback, and makes Terraform wait for steady state with bounded
 timeouts. The health probe uses image-native Bun against `/ready`.
+
+After 0016 commits, never configure circuit-breaker or operator rollback to a
+pre-tenancy or otherwise unscoped image. A prior digest is eligible only when it
+is known to be tenant-aware and compatible with the migrated schema. Otherwise,
+roll forward to a corrected tenant-aware image, or execute an operator-reviewed
+explicit schema recovery plan while every writer remains stopped.
 
 After apply, prove all of the following:
 

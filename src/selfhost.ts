@@ -3,7 +3,7 @@
 // @generated from OpenAPI by @hasna/contracts SDK generator — DO NOT EDIT.
 // Source: Emails Self-Hosted API 1.0.0
 
-export interface User { "id": string; "email": string; "name"?: string | null; "status": string; "email_verified"?: boolean; "global_role"?: "user" | "platform_admin"; "is_primary_super_admin"?: boolean }
+export interface User { "id": string; "email": string; "name"?: string | null; "status": string; "email_verified"?: boolean; "global_role"?: "user" | "super_admin"; "is_primary_super_admin"?: boolean }
 
 export interface Tenant { "id": string; "slug": string; "name": string; "status": string; "created_at"?: string; "updated_at"?: string }
 
