@@ -5,6 +5,71 @@
 // to emit the typed client in sdk/. Keep it in lockstep with service.ts.
 
 import type { OpenApiDocument } from "@hasna/contracts/sdk";
+import { SELF_HOSTED_RESOURCES, type ResourceColumn } from "./resources.js";
+
+type SecurityRequirement = Record<string, string[]>;
+type EmailsOpenApiDocument = OpenApiDocument & {
+  security?: SecurityRequirement[];
+  components?: NonNullable<OpenApiDocument["components"]> & {
+    securitySchemes?: Record<string, Record<string, unknown>>;
+  };
+};
+
+const publicOperation = { security: [] as SecurityRequirement[] } as const;
+
+const userSchema = {
+  type: "object",
+  properties: {
+    id: { type: "string", format: "uuid" },
+    email: { type: "string", format: "email" },
+    name: { type: "string", nullable: true },
+    status: { type: "string" },
+    email_verified: { type: "boolean" },
+    global_role: { type: "string", enum: ["user", "platform_admin"] },
+    is_primary_super_admin: { type: "boolean" },
+  },
+  required: ["id", "email", "status"],
+} as const;
+
+const tenantSchema = {
+  type: "object",
+  properties: {
+    id: { type: "string", format: "uuid" },
+    slug: { type: "string" },
+    name: { type: "string" },
+    status: { type: "string" },
+    created_at: { type: "string", format: "date-time" },
+    updated_at: { type: "string", format: "date-time" },
+  },
+  required: ["id", "slug", "name", "status"],
+} as const;
+
+const emailIdentitySchema = {
+  type: "object",
+  properties: {
+    id: { type: "string", format: "uuid" },
+    email: { type: "string", format: "email" },
+    is_primary: { type: "boolean" },
+    verified: { type: "boolean" },
+    created_at: { type: "string", format: "date-time" },
+  },
+  required: ["id", "email", "is_primary", "verified"],
+} as const;
+
+const membershipSchema = {
+  type: "object",
+  properties: {
+    id: { type: "string", format: "uuid" },
+    user_id: { type: "string", format: "uuid" },
+    tenant_id: { type: "string", format: "uuid" },
+    email: { type: "string", format: "email" },
+    name: { type: "string", nullable: true },
+    role: { type: "string", enum: ["owner", "admin", "member", "viewer"] },
+    status: { type: "string" },
+    created_at: { type: "string", format: "date-time" },
+  },
+  required: ["id", "role", "status"],
+} as const;
 
 const domainSchema = {
   type: "object",
@@ -176,12 +241,121 @@ const listParams = [
 
 const idParam = [{ name: "id", in: "path", required: true, schema: { type: "string" } }] as const;
 
-export const emailsSelfHostedOpenApi: OpenApiDocument = {
+function resourceColumnSchema(column: ResourceColumn): Record<string, unknown> {
+  if (column.bool) return { type: "boolean" };
+  if (column.int) return { type: "integer" };
+  if (column.num) return { type: "number" };
+  if (column.json) return {};
+  return { type: "string", nullable: true };
+}
+
+function resourceOperationName(path: string): string {
+  return path
+    .split("-")
+    .map((part) => `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`)
+    .join("");
+}
+
+const genericResourcePaths: Record<string, Record<string, unknown>> = {};
+
+for (const resource of SELF_HOSTED_RESOURCES) {
+  const name = resourceOperationName(resource.path);
+  const itemSchema = {
+    type: "object",
+    description: `Tenant-scoped ${resource.path} row.`,
+    properties: Object.fromEntries([
+      [resource.idColumn ?? "id", { type: "string" }],
+      ...resource.columns.map((column) => [column.name, resourceColumnSchema(column)]),
+      ["created_at", { type: "string", format: "date-time" }],
+      ["updated_at", { type: "string", format: "date-time" }],
+    ]),
+    additionalProperties: true,
+  };
+  const bodySchema = {
+    type: "object",
+    properties: Object.fromEntries(resource.columns.map((column) => [column.name, resourceColumnSchema(column)])),
+    additionalProperties: false,
+  };
+  const queryParameters = [
+    ...listParams,
+    ...(resource.filters ?? []).map((filter) => ({
+      name: filter,
+      in: "query",
+      required: false,
+      schema: resourceColumnSchema(resource.columns.find((column) => column.name === filter) ?? { name: filter }),
+    })),
+  ];
+
+  genericResourcePaths[`/v1/${resource.path}`] = {
+    get: {
+      operationId: `listResource${name}`,
+      summary: `List tenant-scoped ${resource.path}`,
+      parameters: queryParameters,
+      responses: {
+        "200": {
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: { items: { type: "array", items: itemSchema } },
+                required: ["items"],
+              },
+            },
+          },
+        },
+      },
+    },
+    post: {
+      operationId: `createResource${name}`,
+      summary: `Create a tenant-scoped ${resource.path} row`,
+      requestBody: { required: true, content: { "application/json": { schema: bodySchema } } },
+      responses: { "201": { content: { "application/json": { schema: itemSchema } } } },
+    },
+  };
+  genericResourcePaths[`/v1/${resource.path}/{id}`] = {
+    get: {
+      operationId: `getResource${name}`,
+      summary: `Get a tenant-scoped ${resource.path} row`,
+      parameters: idParam,
+      responses: { "200": { content: { "application/json": { schema: itemSchema } } } },
+    },
+    patch: {
+      operationId: `updateResource${name}`,
+      summary: `Update a tenant-scoped ${resource.path} row`,
+      parameters: idParam,
+      requestBody: { required: true, content: { "application/json": { schema: bodySchema } } },
+      responses: { "200": { content: { "application/json": { schema: itemSchema } } } },
+    },
+    delete: {
+      operationId: `deleteResource${name}`,
+      summary: `Delete a tenant-scoped ${resource.path} row`,
+      parameters: idParam,
+      responses: {
+        "200": {
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: { deleted: { type: "boolean" }, id: { type: "string" } },
+                required: ["deleted", "id"],
+              },
+            },
+          },
+        },
+      },
+    },
+  };
+}
+
+export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
   openapi: "3.0.3",
   info: { title: "Emails Self-Hosted API", version: "1.0.0" },
+  security: [{ apiKeyAuth: [] }, { bearerAuth: [] }],
   paths: {
+    ...genericResourcePaths,
     "/health": {
       get: {
+        ...publicOperation,
         operationId: "getHealth",
         summary: "Liveness probe with database reachability",
         responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
@@ -189,6 +363,7 @@ export const emailsSelfHostedOpenApi: OpenApiDocument = {
     },
     "/ready": {
       get: {
+        ...publicOperation,
         operationId: "getReady",
         summary: "Readiness probe (reachable and fully migrated)",
         responses: {
@@ -199,8 +374,471 @@ export const emailsSelfHostedOpenApi: OpenApiDocument = {
     },
     "/version": {
       get: {
+        ...publicOperation,
         operationId: "getVersion",
         summary: "Service version and mode",
+        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+      },
+    },
+    "/openapi.json": {
+      get: {
+        ...publicOperation,
+        operationId: "getOpenApiDocument",
+        summary: "Return this OpenAPI document",
+        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+      },
+    },
+    "/v1/openapi.json": {
+      get: {
+        ...publicOperation,
+        operationId: "getVersionedOpenApiDocument",
+        summary: "Return this OpenAPI document from the versioned API prefix",
+        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+      },
+    },
+    "/v1/auth/signup": {
+      post: {
+        ...publicOperation,
+        operationId: "signUp",
+        summary: "Create an unverified user and owner membership, then send email verification",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: {
+                  email: { type: "string", format: "email" },
+                  password: { type: "string", format: "password" },
+                  name: { type: "string", nullable: true },
+                  tenant_name: { type: "string" },
+                  tenant_slug: { type: "string", nullable: true },
+                },
+                required: ["email", "password", "tenant_name"],
+              },
+            },
+          },
+        },
+        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+      },
+    },
+    "/v1/auth/login": {
+      post: {
+        ...publicOperation,
+        operationId: "logIn",
+        summary: "Authenticate a verified user and create a tenant-bound session",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: {
+                  email: { type: "string", format: "email" },
+                  password: { type: "string", format: "password" },
+                  tenant_slug: { type: "string", nullable: true },
+                },
+                required: ["email", "password"],
+              },
+            },
+          },
+        },
+        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+      },
+    },
+    "/v1/auth/verify-email": {
+      get: {
+        ...publicOperation,
+        operationId: "verifyEmailLink",
+        summary: "Verify a user email from a query-string token",
+        parameters: [{ name: "token", in: "query", required: true, schema: { type: "string" } }],
+        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+      },
+      post: {
+        ...publicOperation,
+        operationId: "verifyEmailToken",
+        summary: "Verify a user email from a JSON token",
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object", properties: { token: { type: "string" } }, required: ["token"] } } },
+        },
+        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+      },
+    },
+    "/v1/auth/verify-email/resend": {
+      post: {
+        ...publicOperation,
+        operationId: "resendEmailVerification",
+        summary: "Request another verification message without revealing account existence",
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object", properties: { email: { type: "string", format: "email" } }, required: ["email"] } } },
+        },
+        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+      },
+    },
+    "/v1/auth/password/forgot": {
+      post: {
+        ...publicOperation,
+        operationId: "requestPasswordReset",
+        summary: "Request a password reset without revealing account existence",
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object", properties: { email: { type: "string", format: "email" } }, required: ["email"] } } },
+        },
+        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+      },
+    },
+    "/v1/auth/password/reset": {
+      post: {
+        ...publicOperation,
+        operationId: "resetPassword",
+        summary: "Consume a password-reset token and revoke existing sessions",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: { token: { type: "string" }, new_password: { type: "string", format: "password" } },
+                required: ["token", "new_password"],
+              },
+            },
+          },
+        },
+        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+      },
+    },
+    "/v1/invites/accept": {
+      post: {
+        ...publicOperation,
+        operationId: "acceptInvite",
+        summary: "Accept an invitation and create a tenant-bound session",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: {
+                  token: { type: "string" },
+                  password: { type: "string", format: "password", nullable: true },
+                  name: { type: "string", nullable: true },
+                },
+                required: ["token"],
+              },
+            },
+          },
+        },
+        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+      },
+    },
+    "/v1/auth/bootstrap-owner": {
+      post: {
+        operationId: "bootstrapOwner",
+        summary: "Create the first tenant owner using a tenant-bound operator API key",
+        description: "Migration bridge. User sessions are rejected and the tenant may not already have an owner.",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: {
+                  email: { type: "string", format: "email" },
+                  password: { type: "string", format: "password" },
+                  name: { type: "string", nullable: true },
+                },
+                required: ["email", "password"],
+              },
+            },
+          },
+        },
+        responses: { "201": { content: { "application/json": { schema: { type: "object" } } } } },
+      },
+    },
+    "/v1/auth/bootstrap-super-admin": {
+      post: {
+        operationId: "bootstrapPrimarySuperAdmin",
+        summary: "Idempotently register the configured primary platform super-admin",
+        description: "Requires the exact operator API-key KID configured by EMAILS_PRIMARY_SUPER_ADMIN_BOOTSTRAP_KID. The email is pinned by EMAILS_PRIMARY_SUPER_ADMIN_EMAIL and is not itself an authorization mechanism.",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: {
+                  email: { type: "string", format: "email", nullable: true },
+                  password: { type: "string", format: "password" },
+                  name: { type: "string", nullable: true },
+                },
+                required: ["password"],
+              },
+            },
+          },
+        },
+        responses: {
+          "200": { content: { "application/json": { schema: { type: "object" } } } },
+          "201": { content: { "application/json": { schema: { type: "object" } } } },
+        },
+      },
+    },
+    "/v1/auth/logout": {
+      post: {
+        operationId: "logOut",
+        summary: "Revoke the current user session",
+        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+      },
+    },
+    "/v1/auth/logout-all": {
+      post: {
+        operationId: "logOutAll",
+        summary: "Revoke every session for the current user",
+        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+      },
+    },
+    "/v1/auth/switch-tenant": {
+      post: {
+        operationId: "switchTenant",
+        summary: "Rotate the current user session into another tenant membership",
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object", properties: { tenant_slug: { type: "string" } }, required: ["tenant_slug"] } } },
+        },
+        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+      },
+    },
+    "/v1/me": {
+      get: {
+        operationId: "getCurrentPrincipal",
+        summary: "Return the authenticated user or API-key principal and active tenant",
+        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+      },
+    },
+    "/v1/me/email-identities": {
+      get: {
+        operationId: "listEmailIdentities",
+        summary: "List all login email identities for the current user",
+        responses: {
+          "200": {
+            content: {
+              "application/json": {
+                schema: { type: "object", properties: { email_identities: { type: "array", items: { $ref: "#/components/schemas/EmailIdentity" } } } },
+              },
+            },
+          },
+        },
+      },
+      post: {
+        operationId: "addEmailIdentity",
+        summary: "Add an email identity and send verification",
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object", properties: { email: { type: "string", format: "email" } }, required: ["email"] } } },
+        },
+        responses: { "201": { content: { "application/json": { schema: { type: "object" } } } } },
+      },
+    },
+    "/v1/me/email-identities/{id}": {
+      delete: {
+        operationId: "removeEmailIdentity",
+        summary: "Remove a non-primary email identity",
+        parameters: [...idParam],
+        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+      },
+    },
+    "/v1/me/email-identities/{id}/primary": {
+      post: {
+        operationId: "makePrimaryEmailIdentity",
+        summary: "Make a verified email identity primary",
+        parameters: [...idParam],
+        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+      },
+    },
+    "/v1/tenants": {
+      get: {
+        operationId: "listTenants",
+        summary: "List the current user's active tenant memberships",
+        responses: {
+          "200": { content: { "application/json": { schema: { type: "object", properties: { tenants: { type: "array", items: { $ref: "#/components/schemas/Tenant" } } } } } } },
+        },
+      },
+      post: {
+        operationId: "createTenant",
+        summary: "Create a tenant owned by the current user",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: { name: { type: "string" }, slug: { type: "string", nullable: true } },
+                required: ["name"],
+              },
+            },
+          },
+        },
+        responses: { "201": { content: { "application/json": { schema: { type: "object" } } } } },
+      },
+    },
+    "/v1/tenants/{id}": {
+      get: {
+        operationId: "getTenant",
+        parameters: [...idParam],
+        responses: { "200": { content: { "application/json": { schema: { type: "object", properties: { tenant: { $ref: "#/components/schemas/Tenant" } } } } } } },
+      },
+      patch: {
+        operationId: "updateTenant",
+        parameters: [...idParam],
+        requestBody: {
+          content: {
+            "application/json": {
+              schema: { type: "object", properties: { name: { type: "string" }, slug: { type: "string" }, status: { type: "string" } } },
+            },
+          },
+        },
+        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+      },
+      put: {
+        operationId: "replaceTenant",
+        summary: "Compatibility alias for tenant update",
+        parameters: [...idParam],
+        requestBody: {
+          content: {
+            "application/json": {
+              schema: { type: "object", properties: { name: { type: "string" }, slug: { type: "string" }, status: { type: "string" } } },
+            },
+          },
+        },
+        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+      },
+      delete: {
+        operationId: "suspendTenant",
+        summary: "Suspend a tenant; owner role required",
+        parameters: [...idParam],
+        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+      },
+    },
+    "/v1/tenants/{id}/members": {
+      get: {
+        operationId: "listTenantMembers",
+        summary: "List tenant memberships; owner or admin role required",
+        parameters: [...idParam],
+        responses: {
+          "200": {
+            content: {
+              "application/json": {
+                schema: { type: "object", properties: { members: { type: "array", items: { $ref: "#/components/schemas/Membership" } } } },
+              },
+            },
+          },
+        },
+      },
+    },
+    "/v1/tenants/{id}/invites": {
+      get: {
+        operationId: "listTenantInvites",
+        summary: "List outstanding tenant invitations; owner or admin role required",
+        parameters: [...idParam],
+        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+      },
+      post: {
+        operationId: "createTenantInvite",
+        summary: "Invite a user; only an owner may grant the owner role",
+        parameters: [...idParam],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: {
+                  email: { type: "string", format: "email" },
+                  role: { type: "string", enum: ["owner", "admin", "member"] },
+                },
+                required: ["email"],
+              },
+            },
+          },
+        },
+        responses: { "201": { content: { "application/json": { schema: { type: "object" } } } } },
+      },
+    },
+    "/v1/memberships/{id}": {
+      patch: {
+        operationId: "updateMembership",
+        summary: "Change a membership role under owner/admin role gates",
+        parameters: [...idParam],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: { role: { type: "string", enum: ["owner", "admin", "member", "viewer"] } },
+                required: ["role"],
+              },
+            },
+          },
+        },
+        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+      },
+      put: {
+        operationId: "replaceMembership",
+        summary: "Compatibility alias for membership role update",
+        parameters: [...idParam],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: { role: { type: "string", enum: ["owner", "admin", "member", "viewer"] } },
+                required: ["role"],
+              },
+            },
+          },
+        },
+        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+      },
+      delete: {
+        operationId: "removeMembership",
+        summary: "Remove a tenant membership under owner/admin role gates",
+        parameters: [...idParam],
+        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+      },
+    },
+    "/v1/keys": {
+      get: {
+        operationId: "listTenantKeys",
+        summary: "List tenant API-key metadata; owner or admin user session required",
+        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+      },
+      post: {
+        operationId: "createTenantKey",
+        summary: "Mint a tenant API key; plaintext token is returned once",
+        requestBody: {
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: {
+                  scopes: { type: "array", items: { type: "string" } },
+                  ttl_days: { type: "number", nullable: true },
+                },
+              },
+            },
+          },
+        },
+        responses: { "201": { content: { "application/json": { schema: { type: "object" } } } } },
+      },
+    },
+    "/v1/keys/{id}": {
+      delete: {
+        operationId: "revokeTenantKey",
+        summary: "Revoke a tenant API key; owner or admin user session required",
+        parameters: [...idParam],
         responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
       },
     },
@@ -382,6 +1020,7 @@ export const emailsSelfHostedOpenApi: OpenApiDocument = {
       post: {
         operationId: "sendMessage",
         summary: "Send through the configured SES or Resend provider and persist the resulting ledger row",
+        description: "Tenant API keys and owner/admin user sessions have tenant-wide send authority. Member sessions must supply a sender-scoped send_key authorized for the registered From address. Viewer sessions cannot send.",
         requestBody: {
           required: true,
           content: {
@@ -409,6 +1048,10 @@ export const emailsSelfHostedOpenApi: OpenApiDocument = {
                       },
                       required: ["filename", "content", "content_type"],
                     },
+                  },
+                  send_key: {
+                    type: "string",
+                    description: "Sender-scoped key required for member sessions; optional for tenant API keys and owner/admin sessions.",
                   },
                   idempotency_key: { type: "string", maxLength: 200 },
                 },
@@ -557,23 +1200,33 @@ export const emailsSelfHostedOpenApi: OpenApiDocument = {
         },
       },
     },
-    // NOTE: the generic /v1 resource CRUD (contacts, providers, templates,
-    // groups, sequences, owners, send-keys, scheduled, aliases, forwarding,
-    // warming, triage, provisioning, sources, events, email-agents,
-    // email-agent-runs, email-digests, group-members, sequence-steps,
-    // sequence-enrollments, address-ownership-events, webhook-receipts,
-    // sandbox-emails) follows a uniform, registry-driven shape — list ->
-    // { items: [...] }; get/create/update -> the bare row; delete ->
-    // { deleted, id } — and is intentionally not enumerated here.
   },
   components: {
     schemas: {
+      User: userSchema as never,
+      Tenant: tenantSchema as never,
+      EmailIdentity: emailIdentitySchema as never,
+      Membership: membershipSchema as never,
       Domain: domainSchema as never,
       Address: addressSchema as never,
       MessageListItem: messageListItemSchema as never,
       Message: messageSchema as never,
       Thread: threadSchema as never,
       Mailbox: mailboxSchema as never,
+    },
+    securitySchemes: {
+      apiKeyAuth: {
+        type: "apiKey",
+        in: "header",
+        name: "x-api-key",
+        description: "Tenant-bound hasna_ API key.",
+      },
+      bearerAuth: {
+        type: "http",
+        scheme: "bearer",
+        bearerFormat: "Opaque session or API key",
+        description: "Authorization: Bearer accepts an emss_ user session or tenant-bound hasna_ API key.",
+      },
     },
   },
 };
