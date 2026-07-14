@@ -47,6 +47,15 @@ jobs:
             HOME="$tmp_home" EMAILS_MODE=local EMAILS_DB_PATH=:memory: bun test
       - name: Build
         run: bun run build
+      - name: Verify canonical public package identity
+        run: |
+          bun -e '
+            import pkg from "./package.json" with { type: "json" };
+            if (pkg.name !== "@hasna/emails") throw new Error(`unexpected package name: ${pkg.name}`);
+            if (pkg.publishConfig?.access !== "public") throw new Error("npm package must publish with public access");
+            if (pkg.publishConfig?.registry !== "https://registry.npmjs.org") throw new Error("npm registry must be the public registry");
+            if (pkg.repository?.url !== "git+https://github.com/hasna/emails.git") throw new Error("repository provenance must be hasna/emails");
+          '
       - name: Verify generated SDK is committed
         run: |
           bun run scripts/generate-selfhost-sdk.ts
@@ -60,7 +69,7 @@ jobs:
 
   selfhost-postgres:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 25
     services:
       postgres:
         image: postgres:16.4-alpine3.20@sha256:5660c2cbfea50c7a9127d17dc4e48543eedd3d7a41a595a2dfa572471e37e64c
@@ -81,7 +90,11 @@ jobs:
         with:
           bun-version: 1.3.13
       - run: bun install --frozen-lockfile
-      - name: Verify self-hosted Postgres migrations and idempotency
+      - name: Verify self-hosted Postgres migrations, tenancy, RLS, and message IDs
         env:
           EMAILS_TEST_POSTGRES_URL: postgresql://emails_test:emails_test@127.0.0.1:5432/emails_test?sslmode=disable
-        run: bun test src/server/self-hosted/postgres.integration.test.ts
+        run: |
+          bun test src/server/self-hosted/postgres.integration.test.ts
+          bun test src/server/self-hosted/multi-tenancy.integration.test.ts
+          bun test src/server/self-hosted/message-id-resolution.integration.test.ts
+          bun test src/server/self-hosted/rls.integration.test.ts
