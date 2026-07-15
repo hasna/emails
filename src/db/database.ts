@@ -1,7 +1,17 @@
 import { Database } from "bun:sqlite";
 // Re-export so all db/lib modules import Database from here instead of bun:sqlite
 export type { Database };
-import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
+import {
+  chmodSync,
+  closeSync,
+  constants,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  statSync,
+} from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { sqlEmailAddress, sqlEmailDomain } from "./email-address-sql.js";
 
@@ -60,6 +70,25 @@ function ensureDir(filePath: string): void {
   const dir = dirname(resolve(filePath));
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true });
+  }
+}
+
+function ensurePrivateDatabaseFile(filePath: string): void {
+  if (isInMemoryDb(filePath) || process.platform === "win32") return;
+
+  // Create the file privately before SQLite opens it so custom paths never
+  // have a world-readable creation window. chmod also repairs older databases
+  // that were created with the process umask (commonly 0644).
+  const fd = openSync(filePath, constants.O_CREAT | constants.O_RDWR, 0o600);
+  closeSync(fd);
+  chmodSync(filePath, 0o600);
+}
+
+function ensurePrivateDatabaseSidecars(filePath: string): void {
+  if (isInMemoryDb(filePath) || process.platform === "win32") return;
+  for (const suffix of ["-wal", "-shm", "-journal"]) {
+    const sidecar = `${filePath}${suffix}`;
+    if (existsSync(sidecar)) chmodSync(sidecar, 0o600);
   }
 }
 
@@ -1944,6 +1973,7 @@ export function getDatabase(dbPath?: string): Database {
 
   const path = dbPath || getDbPath();
   ensureDir(path);
+  ensurePrivateDatabaseFile(path);
 
   _db = new Database(path);
 
@@ -1952,6 +1982,7 @@ export function getDatabase(dbPath?: string): Database {
   _db.run("PRAGMA foreign_keys = ON");
 
   runMigrations(_db);
+  ensurePrivateDatabaseSidecars(path);
 
   return _db;
 }
