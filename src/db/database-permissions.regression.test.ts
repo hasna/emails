@@ -7,6 +7,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   readdirSync,
   rmSync,
   statSync,
@@ -19,6 +20,7 @@ import {
   closeDatabase,
   databaseFileExists,
   getDatabase,
+  getDatabasePath,
   getDataDir,
   resetDatabase,
 } from "./database.js";
@@ -142,6 +144,20 @@ if (process.platform !== "win32") {
       expect(readdirSync(target)).toEqual([]);
     });
 
+    it("canonicalizes a system-style alias in HOME before appending app-owned directories", () => {
+      const canonicalHome = join(root, "canonical-home");
+      const aliasHome = join(root, "alias-home");
+      mkdirSync(canonicalHome, { mode: 0o700 });
+      symlinkSync(canonicalHome, aliasHome, "dir");
+      process.env.HOME = aliasHome;
+
+      const dataDir = getDataDir();
+
+      expect(dataDir).toBe(join(realpathSync(canonicalHome), ".hasna", "emails"));
+      expect(mode(join(canonicalHome, ".hasna"))).toBe(0o755);
+      expect(mode(dataDir)).toBe(0o700);
+    });
+
     it("creates private default directories from the Bun package postinstall hook", () => {
       const result = runPostinstall(root);
 
@@ -163,6 +179,19 @@ if (process.platform !== "win32") {
 
       expect(result.exitCode).toBe(0);
       expect([mode(hasnaDir), mode(dataDir)]).toEqual([0o755, 0o700]);
+    });
+
+    it("postinstall canonicalizes a system-style HOME alias and creates only under its target", () => {
+      const canonicalHome = join(root, "postinstall-canonical-home");
+      const aliasHome = join(root, "postinstall-alias-home");
+      mkdirSync(canonicalHome, { mode: 0o700 });
+      symlinkSync(canonicalHome, aliasHome, "dir");
+
+      const result = runPostinstall(aliasHome);
+
+      expect(result.exitCode).toBe(0);
+      expect(mode(join(canonicalHome, ".hasna"))).toBe(0o755);
+      expect(mode(join(canonicalHome, ".hasna", "emails"))).toBe(0o700);
     });
 
     it("postinstall rejects a symlink target without changing it", () => {
@@ -230,14 +259,82 @@ if (process.platform !== "win32") {
       });
     }
 
-    it("rejects a symlink used as the immediate custom database parent", () => {
+    it("canonicalizes an existing system-style alias used as the custom database parent", () => {
       const target = join(root, "custom-parent-target");
       const parent = join(root, "custom-parent-link");
+      const path = join(parent, "emails.db");
       mkdirSync(target, { mode: 0o755 });
       symlinkSync(target, parent, "dir");
+      const canonicalPath = join(realpathSync(target), "emails.db");
 
-      expect(() => getDatabase(join(parent, "emails.db"))).toThrow(/symbolic link|symlink/i);
-      expect(readdirSync(target)).toEqual([]);
+      getDatabase(path);
+
+      expect(existsSync(canonicalPath)).toBe(true);
+      expect(mode(canonicalPath)).toBe(0o600);
+    });
+
+    it("creates missing custom parents beneath the canonical target of a system-style alias", () => {
+      const target = join(root, "custom-missing-target");
+      const alias = join(root, "custom-missing-link");
+      const path = join(alias, "missing", "nested", "emails.db");
+      mkdirSync(target, { mode: 0o755 });
+      symlinkSync(target, alias, "dir");
+      const canonicalPath = join(realpathSync(target), "missing", "nested", "emails.db");
+
+      getDatabase(path);
+
+      expect(existsSync(canonicalPath)).toBe(true);
+      expect(mode(join(target, "missing"))).toBe(0o700);
+      expect(mode(join(target, "missing", "nested"))).toBe(0o700);
+      expect(mode(canonicalPath)).toBe(0o600);
+    });
+
+    it("reports and checks the actual canonical storage path", () => {
+      const target = join(root, "canonical-target");
+      const alias = join(root, "canonical-link");
+      mkdirSync(target, { mode: 0o755 });
+      symlinkSync(target, alias, "dir");
+      process.env.EMAILS_DB_PATH = join(alias, "emails.db");
+
+      const canonicalPath = getDatabasePath();
+      expect(canonicalPath).toBe(join(realpathSync(target), "emails.db"));
+      expect(databaseFileExists()).toBe(false);
+
+      getDatabase();
+
+      expect(databaseFileExists()).toBe(true);
+      expect(existsSync(canonicalPath)).toBe(true);
+      expect(mode(canonicalPath)).toBe(0o600);
+    });
+
+    it("does not return to an alias retargeted after SQLite opens the canonical path", () => {
+      const firstTarget = join(root, "retarget-first");
+      const secondTarget = join(root, "retarget-second");
+      const alias = join(root, "retarget-link");
+      const requestedPath = join(alias, "emails.db");
+      mkdirSync(firstTarget, { mode: 0o755 });
+      mkdirSync(secondTarget, { mode: 0o755 });
+      symlinkSync(firstTarget, alias, "dir");
+
+      const originalRun = BunDatabase.prototype.run;
+      let retargeted = false;
+      BunDatabase.prototype.run = function (...args: Parameters<typeof originalRun>) {
+        if (!retargeted) {
+          rmSync(alias);
+          symlinkSync(secondTarget, alias, "dir");
+          retargeted = true;
+        }
+        return originalRun.apply(this, args);
+      };
+
+      try {
+        getDatabase(requestedPath);
+      } finally {
+        BunDatabase.prototype.run = originalRun;
+      }
+
+      expect(existsSync(join(firstTarget, "emails.db"))).toBe(true);
+      expect(existsSync(join(secondTarget, "emails.db"))).toBe(false);
     });
 
     it("rejects a safe direct parent beneath an unsafe non-sticky writable ancestor", () => {

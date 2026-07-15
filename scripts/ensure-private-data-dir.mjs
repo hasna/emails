@@ -6,9 +6,10 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
+  realpathSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 
 function lstatIfExists(path) {
   try {
@@ -29,6 +30,23 @@ function directoryChain(path) {
     current = parent;
   }
   return chain.reverse();
+}
+
+function canonicalizeFromExistingAncestor(path) {
+  const resolvedPath = resolve(path);
+  const missingComponents = [];
+  let existingAncestor = resolvedPath;
+  while (!lstatIfExists(existingAncestor)) {
+    const parent = dirname(existingAncestor);
+    if (parent === existingAncestor) break;
+    missingComponents.push(basename(existingAncestor));
+    existingAncestor = parent;
+  }
+
+  const canonicalAncestor = realpathSync(existingAncestor);
+  return missingComponents.length === 0
+    ? canonicalAncestor
+    : join(canonicalAncestor, ...missingComponents.reverse());
 }
 
 function validateAncestorChain(path) {
@@ -119,8 +137,12 @@ function validateOwnedDirectory(path, expectedMode, repairMode) {
 
 if (process.platform !== "win32") {
   const home = process.env.HOME || process.env.USERPROFILE || homedir();
-  validateAncestorChain(home);
-  const hasnaDir = join(home, ".hasna");
+  // Canonicalize HOME once so stable aliases such as macOS /var and /tmp are
+  // accepted, then operate only beneath their canonical target. App-owned
+  // .hasna/emails components are still validated without following symlinks.
+  const canonicalHome = canonicalizeFromExistingAncestor(home);
+  validateAncestorChain(canonicalHome);
+  const hasnaDir = join(canonicalHome, ".hasna");
   // ~/.hasna is shared by Hasna applications. Preserve safe modes such as
   // 0755; only this package's own data directory is repaired to 0700.
   validateOwnedDirectory(hasnaDir, 0o755, false);

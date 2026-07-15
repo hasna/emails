@@ -11,11 +11,12 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
+  realpathSync,
   readdirSync,
   statSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { sqlEmailAddress, sqlEmailDomain } from "./email-address-sql.js";
 
 function isInMemoryDb(path: string): boolean {
@@ -65,6 +66,40 @@ function directoryChain(path: string): string[] {
     current = parent;
   }
   return chain.reverse();
+}
+
+/**
+ * Resolve the existing portion of a POSIX pathname exactly once, then keep
+ * all missing descendants beneath that canonical directory. This accepts
+ * stable system aliases such as macOS /var -> /private/var without using the
+ * alias again during creation, validation, or SQLite open.
+ */
+function canonicalizeFromExistingAncestor(path: string): string {
+  const resolvedPath = resolve(path);
+  if (process.platform === "win32") return resolvedPath;
+
+  const missingComponents: string[] = [];
+  let existingAncestor = resolvedPath;
+  while (lstatIfExists(existingAncestor) === null) {
+    const parent = dirname(existingAncestor);
+    if (parent === existingAncestor) break;
+    missingComponents.push(basename(existingAncestor));
+    existingAncestor = parent;
+  }
+
+  const canonicalAncestor = realpathSync(existingAncestor);
+  return missingComponents.length === 0
+    ? canonicalAncestor
+    : join(canonicalAncestor, ...missingComponents.reverse());
+}
+
+function canonicalizeDatabasePath(path: string): string {
+  const resolvedPath = resolve(path);
+  if (process.platform === "win32") return resolvedPath;
+
+  // Do not realpath the database artifact itself: it must remain visible to
+  // the O_NOFOLLOW/non-regular-file checks below.
+  return join(canonicalizeFromExistingAncestor(dirname(resolvedPath)), basename(resolvedPath));
 }
 
 function assertStableDirectory(stats: FileStats, path: string, kind: string): void {
@@ -295,11 +330,11 @@ function migrateLegacyDirectory(oldDir: string, newDir: string): void {
 
 export function getDataDir(): string {
   const home = process.env["HOME"] || process.env["USERPROFILE"] || homedir();
-  const hasnaDir = join(home, ".hasna");
-  const newDir = join(hasnaDir, "emails");
-  const oldDir = join(home, ".emails");
 
   if (process.platform === "win32") {
+    const hasnaDir = join(home, ".hasna");
+    const newDir = join(hasnaDir, "emails");
+    const oldDir = join(home, ".emails");
     // Keep Windows behavior non-breaking; POSIX ownership and mode bits do not
     // have the same security meaning there.
     if (existsSync(oldDir) && !existsSync(newDir)) {
@@ -314,6 +349,13 @@ export function getDataDir(): string {
     mkdirSync(newDir, { recursive: true });
     return newDir;
   }
+
+  // HOME may itself traverse a stable system alias. Canonicalize only HOME;
+  // .hasna and emails stay appended and therefore cannot be symlinked.
+  const canonicalHome = canonicalizeFromExistingAncestor(home);
+  const hasnaDir = join(canonicalHome, ".hasna");
+  const newDir = join(hasnaDir, "emails");
+  const oldDir = join(canonicalHome, ".emails");
 
   ensureSharedOwnedDirectory(hasnaDir);
   const shouldInspectLegacy = lstatIfExists(newDir) === null;
@@ -330,11 +372,17 @@ export function getDataDir(): string {
 function getDbPath(): string {
   // 1. Environment variable override (new)
   if (process.env["HASNA_EMAILS_DB_PATH"]) {
-    return process.env["HASNA_EMAILS_DB_PATH"];
+    const path = process.env["HASNA_EMAILS_DB_PATH"];
+    return isInMemoryDb(path) || process.platform === "win32"
+      ? path
+      : canonicalizeDatabasePath(path);
   }
   // 2. Environment variable override (backward compat, used for tests)
   if (process.env["EMAILS_DB_PATH"]) {
-    return process.env["EMAILS_DB_PATH"];
+    const path = process.env["EMAILS_DB_PATH"];
+    return isInMemoryDb(path) || process.platform === "win32"
+      ? path
+      : canonicalizeDatabasePath(path);
   }
   // 3. Default: ~/.hasna/emails/emails.db
   return join(getDataDir(), "emails.db");
@@ -2251,7 +2299,15 @@ export function getDatabase(dbPath?: string): Database {
   const requestedPath = dbPath || getDbPath();
   // Use the same normalized pathname for validation, private pre-creation,
   // and SQLite so lexical `..` segments cannot reintroduce an unchecked path.
-  const path = isInMemoryDb(requestedPath) ? requestedPath : resolve(requestedPath);
+  const path = isInMemoryDb(requestedPath)
+    ? requestedPath
+    : process.platform === "win32"
+      ? resolve(requestedPath)
+      // getDbPath already returns the one-time canonical POSIX path. An
+      // explicit argument has not crossed that boundary yet.
+      : dbPath
+        ? canonicalizeDatabasePath(requestedPath)
+        : requestedPath;
   ensureDir(path);
   ensurePrivateDatabaseArtifacts(path, true);
 
