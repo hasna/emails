@@ -18,7 +18,7 @@ describe("self-hosted container TLS contract", () => {
     expect(dockerfile).toContain("FROM ${BUN_IMAGE} AS base");
     expect(dockerfile).not.toMatch(/^FROM\s+--platform=/m);
     expect(dockerfile).toContain("FROM base AS dependencies");
-    expect(dockerfile).toContain("FROM base AS runtime");
+    expect(dockerfile).toContain("FROM scratch");
     expect(dockerfile).not.toMatch(/apt-get/);
     expect(dockerfile).not.toMatch(/\bdpkg\b/);
     expect(dockerfile).not.toMatch(/glibc/);
@@ -38,7 +38,45 @@ describe("self-hosted container TLS contract", () => {
       "https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem",
     );
     expect(dockerfile).toContain("--chown=root:root --chmod=0444");
-    expect(dockerfile).toContain("chown root:root /opt /opt/emails /opt/emails/certs");
+  });
+
+  test("locks runtime copy semantics and ownership", () => {
+    expect(dockerfile).toContain("COPY --from=runtime-files /runtime/usr/local/bin/bun /usr/local/bin/bun");
+    expect(dockerfile).toContain("COPY --from=runtime-files /runtime/usr/local/bin/bunx /usr/local/bin/bunx");
+    expect(dockerfile).toContain("COPY --from=runtime-files /runtime/usr/local/bin/node /usr/local/bin/node");
+    expect(dockerfile).toContain("COPY --chown=1000:1000 --from=build /app/node_modules ./node_modules");
+    expect(dockerfile).toContain("COPY --chown=1000:1000 --from=build /app/package.json /app/package.json");
+    expect(dockerfile).toContain("COPY --chown=1000:1000 --from=build /app/bun.lock /app/bun.lock");
+    expect(dockerfile).toContain("COPY --chown=1000:1000 --from=build /app/tsconfig.json /app/tsconfig.json");
+    expect(dockerfile).toContain("COPY --chown=1000:1000 --from=build /app/src ./src");
+    expect(dockerfile).toContain("COPY --from=runtime-files /runtime/home/bun /home/bun");
+    expect(dockerfile).toContain("COPY --from=runtime-files /runtime/app/data /app/data");
+  });
+
+  test("enforces exact runtime permissions and runtime user", () => {
+    expect(dockerfile).toContain("chmod 1777 /runtime/tmp");
+    expect(dockerfile).toContain("chmod 0700 /runtime/home/bun/.hasna/emails");
+    expect(dockerfile).toContain(
+      "chown -R 1000:1000 /runtime/home/bun /runtime/home/bun/.hasna/emails /runtime/app /runtime/app/data",
+    );
+    expect(dockerfile).toContain("USER 1000:1000");
+  });
+
+  test("exports explicit PATH and bun runtime shims", () => {
+    expect(dockerfile).toContain("PATH=/usr/local/bin");
+    expect(dockerfile).toContain("ln -sf bun /runtime/usr/local/bin/bunx");
+    expect(dockerfile).toContain("ln -sf bun /runtime/usr/local/bin/node");
+  });
+
+  test("removes permissive runtime fallback/copy behavior", () => {
+    expect(dockerfile).not.toContain("locale-archive");
+    expect(dockerfile).not.toContain("|| true");
+  });
+
+  test("keeps container entrypoint/cmd direct and healthcheck portable", () => {
+    expect(dockerfile).toContain('ENTRYPOINT ["/usr/local/bin/bun"]');
+    expect(dockerfile).toContain("CMD [\"src/server/index.ts\"]");
+    expect(dockerfile).toContain("process.env.PORT");
   });
 
   test("configures the product runtime to use the bundled trust roots", () => {
@@ -62,11 +100,11 @@ describe("self-hosted container install contract", () => {
     const postinstallScript = scriptMatch[1];
 
     const dependenciesStart = candidate.search(/^FROM\s+\S+\s+AS\s+dependencies\s*$/m);
-    const runtimeStart = candidate.search(/^FROM\s+\S+\s+AS\s+runtime\s*$/m);
-    if (dependenciesStart < 0 || runtimeStart <= dependenciesStart) return false;
+    const buildStart = candidate.search(/^FROM\s+\S+\s+AS\s+build\s*$/m);
+    if (dependenciesStart < 0 || buildStart <= dependenciesStart) return false;
 
     const stageLines = candidate
-      .slice(dependenciesStart, runtimeStart)
+      .slice(dependenciesStart, buildStart)
       .split("\n")
       .map((line) => line.trim());
     const installIndex = stageLines.indexOf("RUN bun install --production --frozen-lockfile");
@@ -94,7 +132,7 @@ describe("self-hosted container install contract", () => {
       hasSafePostinstallCopy(
         dockerfile
           .replace(`${safeCopy}\nRUN bun install`, "RUN bun install")
-          .replace("FROM base AS runtime\nWORKDIR /app", `FROM base AS runtime\nWORKDIR /app\n${safeCopy}`),
+          .replace("FROM base AS build\nWORKDIR /app", `FROM base AS build\nWORKDIR /app\n${safeCopy}`),
       ),
     ).toBeFalse();
   });

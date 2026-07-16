@@ -16,6 +16,73 @@ if grep -Eiq '(^|[[:space:]])(apt-get|\bdpkg\b|\bglibc\b|\bperl\b|\bsqlite\b|OPE
   exit 1
 fi
 
+if ! grep -Fxq 'FROM scratch' "$dockerfile"; then
+  echo "self-hosted container must end in a scratch runtime" >&2
+  exit 1
+fi
+
+if grep -Eq '^FROM[[:space:]]+base[[:space:]]+AS[[:space:]]+runtime[[:space:]]*$' "$dockerfile"; then
+  echo "self-hosted runtime must not keep a non-scratch intermediate final runtime stage" >&2
+  exit 1
+fi
+
+if grep -Fq 'locale-archive' "$dockerfile"; then
+  echo "self-hosted container may not include locale fallback copy steps" >&2
+  exit 1
+fi
+
+if grep -Fq '|| true' "$dockerfile"; then
+  echo "self-hosted container may not contain permissive fallback copy commands" >&2
+  exit 1
+fi
+
+if ! grep -Fq 'PATH=/usr/local/bin' "$dockerfile"; then
+  echo "self-hosted runtime must include /usr/local/bin on PATH" >&2
+  exit 1
+fi
+
+if ! grep -Fq 'ln -sf bun /runtime/usr/local/bin/bunx' "$dockerfile"; then
+  echo "self-hosted runtime must expose bunx shim" >&2
+  exit 1
+fi
+
+if ! grep -Fq 'ln -sf bun /runtime/usr/local/bin/node' "$dockerfile"; then
+  echo "self-hosted runtime must expose node shim" >&2
+  exit 1
+fi
+
+for required_copy in \
+  "COPY --from=runtime-files /runtime/usr/local/bin/bun /usr/local/bin/bun" \
+  "COPY --from=runtime-files /runtime/usr/local/bin/bunx /usr/local/bin/bunx" \
+  "COPY --from=runtime-files /runtime/usr/local/bin/node /usr/local/bin/node" \
+  "COPY --chown=1000:1000 --from=build /app/node_modules ./node_modules" \
+  "COPY --chown=1000:1000 --from=build /app/package.json /app/package.json" \
+  "COPY --chown=1000:1000 --from=build /app/bun.lock /app/bun.lock" \
+  "COPY --chown=1000:1000 --from=build /app/tsconfig.json /app/tsconfig.json" \
+  "COPY --chown=1000:1000 --from=build /app/src ./src" \
+  "COPY --from=runtime-files /runtime/home/bun /home/bun" \
+  "COPY --from=runtime-files /runtime/app/data /app/data"; do
+  if ! grep -Fq "$required_copy" "$dockerfile"; then
+    echo "missing required scratch runtime copy: $required_copy" >&2
+    exit 1
+  fi
+done
+
+if ! grep -Fq 'chmod 1777 /runtime/tmp' "$dockerfile" || ! grep -Fq 'chmod 0700 /runtime/home/bun/.hasna/emails' "$dockerfile"; then
+  echo "self-hosted runtime must harden tmp and private state permissions" >&2
+  exit 1
+fi
+
+if ! grep -Fq 'chown -R 1000:1000 /runtime/home/bun /runtime/home/bun/.hasna/emails /runtime/app /runtime/app/data' "$dockerfile"; then
+  echo "self-hosted runtime must chown runtime ownership for bun home and app data" >&2
+  exit 1
+fi
+
+if ! grep -Fq 'USER 1000:1000' "$dockerfile"; then
+  echo "self-hosted container must run as numeric user 1000:1000" >&2
+  exit 1
+fi
+
 if find . -type f \
   ! -path './tests/*' \
   ! -path './.terraform/*' \
