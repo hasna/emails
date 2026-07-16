@@ -3,6 +3,18 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 const dockerfile = readFileSync(resolve(import.meta.dir, "../Dockerfile"), "utf8");
+const ecsCompute = readFileSync(
+  resolve(import.meta.dir, "../deploy/aws/compute.tf"),
+  "utf8",
+);
+const compose = readFileSync(
+  resolve(import.meta.dir, "../docker-compose.yml"),
+  "utf8",
+);
+const cutoverRunbook = readFileSync(
+  resolve(import.meta.dir, "../docs/DEPLOYMENT_CUTOVER.md"),
+  "utf8",
+);
 const packageJson = JSON.parse(
   readFileSync(resolve(import.meta.dir, "../package.json"), "utf8"),
 );
@@ -82,6 +94,48 @@ describe("self-hosted container TLS contract", () => {
     expect(dockerfile).toContain('ENTRYPOINT ["/usr/local/bin/bun"]');
     expect(dockerfile).toContain("CMD [\"src/server/index.ts\"]");
     expect(dockerfile).toContain("process.env.PORT");
+  });
+
+  test("keeps ECS commands compatible with the Bun image entrypoint", () => {
+    expect(dockerfile).toContain('ENTRYPOINT ["/usr/local/bin/bun"]');
+    expect(ecsCompute).toContain('command                = ["src/server/index.ts"]');
+    expect(ecsCompute).toContain(
+      'command                = ["src/server/index.ts", "ingest-worker"]',
+    );
+    expect(ecsCompute).toContain(
+      'command                = ["src/cli/index.tsx", "db", "migrate"]',
+    );
+    expect(ecsCompute).not.toMatch(/^\s*command\s*=\s*\["bun",/m);
+  });
+
+  test("keeps Compose and cutover overrides compatible with the Bun image entrypoint", () => {
+    expect(compose).toContain('command: ["src/server/index.ts"]');
+    expect(compose).toContain(
+      'command: ["src/cli/index.tsx", "db", "migrate"]',
+    );
+    expect(cutoverRunbook).toContain(
+      '"command":["src/server/index.ts","inbound-provenance-fence"]',
+    );
+    expect(cutoverRunbook).toContain(
+      'command:["src/cli/index.tsx","--json","db","status"]',
+    );
+    expect(cutoverRunbook).toContain(
+      'command:["src/server/index.ts","inbound-provenance-audit","--since",$since]',
+    );
+    for (const source of [compose, cutoverRunbook]) {
+      expect(source).not.toMatch(
+        /(?:"command"|command)\s*:\s*\[\s*"bun"/,
+      );
+    }
+  });
+
+  test("keeps the ECS health check executable without a shell", () => {
+    expect(dockerfile).toContain("FROM scratch");
+    expect(ecsCompute).not.toContain('command     = ["CMD-SHELL"');
+    expect(ecsCompute).toContain(
+      'command     = ["CMD", "/usr/local/bin/bun", "-e",',
+    );
+    expect(ecsCompute).toContain("/ready");
   });
 
   test("configures the product runtime to use the bundled trust roots", () => {

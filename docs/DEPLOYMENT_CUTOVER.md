@@ -577,7 +577,7 @@ test "$API_ZERO_TASK_COUNT" = "0"
 # could otherwise commit after the cutoff while remaining outside the audit.
 # This exact release one-shot does not query migration 0017 tables and is safe
 # before the ledger advances.
-FENCE_OVERRIDES='{"containerOverrides":[{"name":"worker","command":["bun","src/server/index.ts","inbound-provenance-fence"]}]}'
+FENCE_OVERRIDES='{"containerOverrides":[{"name":"worker","command":["src/server/index.ts","inbound-provenance-fence"]}]}'
 FENCE_TASK="$(rehearsal_aws ecs run-task --region "$AWS_REGION" --cluster "$CLUSTER" \
   --launch-type FARGATE --task-definition "$WORKER_DEF" \
   --network-configuration "$NETWORK" --count 1 --overrides "$FENCE_OVERRIDES" \
@@ -629,7 +629,7 @@ MIGRATION_EXIT="$(jq -er --arg container "$MANIFEST_MIGRATION_CONTAINER_NAME" \
 test "$MIGRATION_EXIT" = "0"
 
 STATUS_OVERRIDES="$(jq -cn --arg container "$MANIFEST_MIGRATION_CONTAINER_NAME" \
-  '{containerOverrides:[{name:$container,command:["bun","src/cli/index.tsx","--json","db","status"]}]}')"
+  '{containerOverrides:[{name:$container,command:["src/cli/index.tsx","--json","db","status"]}]}')"
 STATUS_TASK="$(rehearsal_aws ecs run-task --region "$AWS_REGION" --cluster "$CLUSTER" \
   --launch-type FARGATE --task-definition "$MIGRATION_DEF" \
   --network-configuration "$NETWORK" --count 1 \
@@ -713,7 +713,7 @@ for attempt in $(seq 1 80); do
 done
 
 AUDIT_OVERRIDES="$(jq -cn --arg since "$FENCE_AT" \
-  '{containerOverrides:[{name:"worker",command:["bun","src/server/index.ts","inbound-provenance-audit","--since",$since]}]}')"
+  '{containerOverrides:[{name:"worker",command:["src/server/index.ts","inbound-provenance-audit","--since",$since]}]}')"
 AUDIT_TASK="$(rehearsal_aws ecs run-task --region "$AWS_REGION" --cluster "$CLUSTER" \
   --launch-type FARGATE --task-definition "$WORKER_DEF" \
   --network-configuration "$NETWORK" --count 1 --overrides "$AUDIT_OVERRIDES" \

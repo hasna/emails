@@ -89,6 +89,12 @@ if ! grep -Fq 'USER 1000:1000' "$dockerfile"; then
   exit 1
 fi
 
+if grep -Eq '"?command"?[[:space:]]*[:=][[:space:]]*\[[[:space:]]*"bun"' \
+  "$root/compute.tf" "$repo/docker-compose.yml" "$repo/docs/DEPLOYMENT_CUTOVER.md"; then
+  echo "container command overrides must not repeat the Bun image entrypoint" >&2
+  exit 1
+fi
+
 if find . -type f \
   ! -path './tests/*' \
   ! -path './.terraform/*' \
