@@ -3,6 +3,9 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 const dockerfile = readFileSync(resolve(import.meta.dir, "../Dockerfile"), "utf8");
+const packageJson = JSON.parse(
+  readFileSync(resolve(import.meta.dir, "../package.json"), "utf8"),
+);
 const bundlePath = "/opt/emails/certs/aws-rds-global-bundle.pem";
 const bundleSha256 = "e5bb2084ccf45087bda1c9bffdea0eb15ee67f0b91646106e466714f9de3c7e3";
 
@@ -42,5 +45,53 @@ describe("self-hosted container TLS contract", () => {
   test("never disables certificate verification", () => {
     expect(dockerfile).not.toContain("NODE_TLS_REJECT_UNAUTHORIZED=0");
     expect(dockerfile).not.toContain("rejectUnauthorized: false");
+  });
+});
+
+describe("self-hosted container install contract", () => {
+  function hasSafePostinstallCopy(candidate: string): boolean {
+    const postinstall = packageJson.scripts?.postinstall;
+    if (typeof postinstall !== "string") return false;
+
+    const scriptMatch = postinstall.match(/(?:^|\s)\.\/(scripts\/[^\s'"`]+)(?:\s|$)/);
+    if (!scriptMatch) return false;
+    const postinstallScript = scriptMatch[1];
+
+    const dependenciesStart = candidate.search(/^FROM\s+\S+\s+AS\s+dependencies\s*$/m);
+    const runtimeStart = candidate.search(/^FROM\s+\S+\s+AS\s+runtime\s*$/m);
+    if (dependenciesStart < 0 || runtimeStart <= dependenciesStart) return false;
+
+    const stageLines = candidate
+      .slice(dependenciesStart, runtimeStart)
+      .split("\n")
+      .map((line) => line.trim());
+    const installIndex = stageLines.indexOf("RUN bun install --production --frozen-lockfile");
+    const copyIndex = stageLines.indexOf(`COPY ${postinstallScript} ./${postinstallScript}`);
+    if (installIndex < 0 || copyIndex < 0 || copyIndex >= installIndex) return false;
+
+    const workdirIndex = stageLines.findLastIndex(
+      (line, index) => index < copyIndex && line.startsWith("WORKDIR "),
+    );
+    return stageLines[workdirIndex] === "WORKDIR /app";
+  }
+
+  test("copies the package postinstall script before the frozen production install", () => {
+    expect(hasSafePostinstallCopy(dockerfile)).toBeTrue();
+  });
+
+  test("rejects external-stage and wrong-stage copy bypasses", () => {
+    const safeCopy = "COPY scripts/ensure-private-data-dir.mjs ./scripts/ensure-private-data-dir.mjs";
+    expect(
+      hasSafePostinstallCopy(
+        dockerfile.replace(safeCopy, `COPY --from=base ${safeCopy.slice("COPY ".length)}`),
+      ),
+    ).toBeFalse();
+    expect(
+      hasSafePostinstallCopy(
+        dockerfile
+          .replace(`${safeCopy}\nRUN bun install`, "RUN bun install")
+          .replace("FROM base AS runtime\nWORKDIR /app", `FROM base AS runtime\nWORKDIR /app\n${safeCopy}`),
+      ),
+    ).toBeFalse();
   });
 });

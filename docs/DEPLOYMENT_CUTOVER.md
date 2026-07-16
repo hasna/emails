@@ -38,13 +38,13 @@ rollback target. Roll forward to a corrected tenant-aware image, or execute an
 operator-reviewed explicit schema recovery plan while every writer remains
 stopped.
 
-## Attachment-provenance migration gate (0017 / 1.2.4)
+## Attachment-provenance migration gate (0017)
 
-Migration 0017 is a forward-only production cutover. Package/image 1.2.3 does
+Migration 0017 is a forward-only production cutover. A pre-0017 release does
 not recognize the new immutable provenance ledger entry and is not a valid
 restart, scale-out, or rollback target after 0017 commits. This cutover requires
 controlled downtime. The old worker and API are both at zero before the ledger
-advances; SQS buffers new mail while no worker runs. Only the 1.2.4 worker is
+advances; SQS buffers new mail while no worker runs. Only the release worker is
 started after migration, and its privacy-safe provenance audit must exit zero
 before the API is started. Leave `enable_automatic_deployment_rollback = false`
 through the observation window.
@@ -65,16 +65,82 @@ actual live resources have been imported or adopted into authoritative state and
 an independently reviewed no-op plan proves complete ownership and zero drift.
 This document is never a substitute for that production plan.
 
+### Live plan input contract (non-executable)
+
+The separate live AWS CLI plan must fail closed unless an independently reviewed
+`LIVE_TOPOLOGY_MANIFEST` and its `LIVE_TOPOLOGY_SHA256` seal all of the inputs
+below. These are operator-supplied values, not defaults or public resource
+identifiers:
+
+- `LIVE_API_TASK_FAMILY`, `LIVE_WORKER_TASK_FAMILY`, and
+  `LIVE_MIGRATION_TASK_FAMILY` must identify the exact revisioned live task
+  definition families cloned for this cutover. The plan must also pin the exact
+  service names, container names, roles, secret references, queue, DLQ, bucket,
+  prefix, subnets, security groups, log groups, and database identity from the
+  live definitions.
+- `LIVE_RUNTIME_ARCHITECTURE` must equal `X86_64` for the reviewed live
+  topology. The image and all three cloned definitions must agree; an ARM image
+  or an implicit architecture is a hard failure.
+- `RELEASE_VERSION`, `RELEASE_COMMIT`, `SOURCE_ARCHIVE_SHA256`,
+  `LIVE_IMAGE_REPOSITORY`, `IMAGE_DIGEST`, and `LIVE_IMAGE_REFERENCE` must
+  identify one release. `IMAGE_DIGEST` is only the bare `sha256:` value;
+  `LIVE_IMAGE_REFERENCE` must equal `LIVE_IMAGE_REPOSITORY@IMAGE_DIGEST` and is
+  the only value passed to task definitions. Recompute the deterministic archive
+  SHA-256 from the exact commit, verify the package version at that commit, and
+  verify the image's immutable registry digest and OCI revision/version metadata.
+- `NO_SES_SMOKE_TASK_ROLE_ARN` must identify a reviewed smoke role that denies
+  `ses:SendEmail` and `ses:SendRawEmail`. Read-only smoke must use this role;
+  the normal task role is not acceptable merely because the operator promises
+  not to send.
+
+The reviewed live plan must enforce this order:
+
+1. Verify the manifest hash, caller account and region, exact API/worker/migration
+   families, roles and container identities, `X86_64`, deterministic archive
+   hash, full image reference and OCI metadata, current service definitions,
+   queue/DLQ relationship, and database-specific recovery artifact.
+2. Disable automatic rollback on both live services before any forward-only
+   migration or service stop. Preserve the previous definitions only as
+   pre-migration anchors; they are not rollback targets after 0017.
+3. Stop the worker first. Prove desired and running counts are zero, its task
+   list is empty, and the exact queue has three consecutive zero in-flight
+   reads. Require exact zero visible and in-flight messages on the exact DLQ.
+4. Stop the API second and prove both services have zero desired/running tasks
+   and empty task lists. Capture `FENCE_AT` from PostgreSQL only after this
+   zero-writer proof.
+5. Take or verify a database-specific snapshot, clone, or restore artifact for
+   the Emails database. Whole-instance recovery is forbidden when the database
+   service is shared. Run the release migration definition, require migration
+   and status exits of zero, valid checksums, `pending: []`, and 0017 applied.
+6. Start only the release worker, drain the exact queue to zero visible and
+   in-flight messages, keep the exact DLQ at zero, and require
+   `inbound-provenance-audit --since "$FENCE_AT"` to exit zero before the API.
+7. Start and smoke the release API with the no-SES role. Verify `/version`,
+   `/ready`, unauthenticated denial, authenticated tenant-scoped reads, and an
+   approved attachment hash without logging message or attachment content.
+8. Treat outbound sending and super-admin bootstrap as separate explicit approval
+   actions. Neither belongs in migration, worker drain, read-only
+   smoke, or API promotion. Bootstrap approval must name the one-time operator,
+   key id, idempotency proof, wrong-key denial, and post-bootstrap revocation.
+
+After 0017 begins, recovery is a compatible roll-forward or a database-specific
+restore while every writer is stopped. A pre-0017 release is never a recovery
+target, and automatic rollback remains disabled until a later reviewed change
+makes a completed compatible deployment the rollback target.
+
 The commands below are only an evidence-producing isolated rehearsal template.
 Run them from `deploy/aws` against a disposable, explicitly named rehearsal
-topology with a reviewed backend and tfvars. `IMAGE_124` is the reviewed immutable
-1.2.4 image digest, not a tag. Before the first Terraform plan, an operator must
-provide a reviewed topology manifest and its separately reviewed SHA-256. The
-preflight validates the manifest's exact schema, caller account and region,
-Terraform outputs, current ECS service and task-definition identities, and the
-queue/DLQ relationship. Any mismatch, AWS failure, or nonzero initial DLQ aborts.
+topology with a reviewed backend and tfvars. `IMAGE_DIGEST` is the reviewed bare
+digest; `IMAGE_REFERENCE` is the full immutable
+`IMAGE_REPOSITORY@IMAGE_DIGEST` value passed to Terraform. Before the first
+Terraform plan, an operator must provide a reviewed topology manifest and its
+separately reviewed SHA-256. The preflight validates the manifest's exact
+schema, release inputs, source commit, registry metadata, caller account and
+region, Terraform outputs, current ECS service and task-definition identities,
+and the queue/DLQ relationship. Any mismatch, AWS failure, or nonzero initial
+DLQ aborts.
 
-### 1. Prove topology, stage 1.2.4, stop every old writer, then save a database fence
+### 1. Prove topology, stage the release, stop every old writer, then save a database fence
 
 ```bash
 set -euo pipefail
@@ -84,9 +150,32 @@ set -euo pipefail
 : "${REHEARSAL_ACCOUNT_ID:?set the reviewed rehearsal AWS account ID}"
 : "${REHEARSAL_TOPOLOGY_MANIFEST:?set the path to the reviewed topology manifest}"
 : "${REHEARSAL_TOPOLOGY_SHA256:?set the separately reviewed manifest SHA-256}"
-: "${IMAGE_124:?set the reviewed immutable 1.2.4 image digest}"
+: "${SOURCE_CHECKOUT:?set the exact local source checkout}"
+: "${RELEASE_VERSION:?set the reviewed release version}"
+: "${RELEASE_COMMIT:?set the reviewed release commit}"
+: "${SOURCE_ARCHIVE_SHA256:?set the deterministic release archive SHA-256}"
+: "${IMAGE_REPOSITORY:?set the immutable image repository without a tag or digest}"
+: "${IMAGE_DIGEST:?set the reviewed bare sha256 release image digest}"
+: "${IMAGE_REFERENCE:?set the full IMAGE_REPOSITORY@IMAGE_DIGEST reference}"
 : "${TFVARS:?set the reviewed rehearsal tfvars path}"
 : "${AWS_REGION:?set the reviewed rehearsal AWS region}"
+
+printf '%s' "$RELEASE_VERSION" | grep -Eq '^[0-9]+[.][0-9]+[.][0-9]+([+-][0-9A-Za-z.-]+)?$'
+printf '%s' "$RELEASE_COMMIT" | grep -Eq '^[0-9a-f]{40}$'
+printf '%s' "$SOURCE_ARCHIVE_SHA256" | grep -Eq '^[0-9a-f]{64}$'
+printf '%s' "$IMAGE_REPOSITORY" | grep -Eq '^[^@[:space:]]+/[^@[:space:]]+$'
+printf '%s' "$IMAGE_DIGEST" | grep -Eq '^sha256:[0-9a-f]{64}$'
+test "$IMAGE_REFERENCE" = "${IMAGE_REPOSITORY}@${IMAGE_DIGEST}"
+
+SOURCE_HEAD="$(git -C "$SOURCE_CHECKOUT" rev-parse --verify 'HEAD^{commit}')"
+test "$SOURCE_HEAD" = "$RELEASE_COMMIT"
+SOURCE_PACKAGE_JSON="$(git -C "$SOURCE_CHECKOUT" show "$RELEASE_COMMIT:package.json")"
+jq -e --arg release_version "$RELEASE_VERSION" \
+  '.name == "@hasna/emails" and .version == $release_version' \
+  <<<"$SOURCE_PACKAGE_JSON" >/dev/null
+ACTUAL_SOURCE_ARCHIVE_SHA256="$(git -C "$SOURCE_CHECKOUT" archive --format=zip "$RELEASE_COMMIT" \
+  | sha256sum | awk '{print $1}')"
+test "$ACTUAL_SOURCE_ARCHIVE_SHA256" = "$SOURCE_ARCHIVE_SHA256"
 
 case "$REHEARSAL_TOPOLOGY_SHA256" in
   [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]\
@@ -102,17 +191,29 @@ esac
 ACTUAL_TOPOLOGY_SHA256="$(sha256sum -- "$REHEARSAL_TOPOLOGY_MANIFEST" | awk '{print $1}')"
 test "$ACTUAL_TOPOLOGY_SHA256" = "$REHEARSAL_TOPOLOGY_SHA256"
 
-EXPECTED_TOPOLOGY_KEYS='["account_id","api_service","api_task_definition","cluster","dlq_arn","dlq_url","environment","live","migration_task_definition","private_subnet_ids","purpose","queue_arn","queue_url","region","schema_version","task_security_group_id","worker_service","worker_task_definition"]'
-TOPOLOGY_JSON="$(jq -ceS --argjson expected_keys "$EXPECTED_TOPOLOGY_KEYS" '
+EXPECTED_TOPOLOGY_KEYS='["account_id","api_container_name","api_execution_role_arn","api_service","api_task_definition","api_task_role_arn","cluster","dlq_arn","dlq_url","environment","image_digest","image_reference","image_repository","live","migration_container_name","migration_execution_role_arn","migration_task_definition","migration_task_role_arn","private_subnet_ids","purpose","queue_arn","queue_url","region","release_commit","release_version","runtime_architecture","schema_version","source_archive_sha256","task_security_group_id","worker_container_name","worker_execution_role_arn","worker_service","worker_task_definition","worker_task_role_arn"]'
+TOPOLOGY_JSON="$(jq -ceS --argjson expected_keys "$EXPECTED_TOPOLOGY_KEYS" \
+  --arg release_version "$RELEASE_VERSION" --arg release_commit "$RELEASE_COMMIT" \
+  --arg source_archive_sha256 "$SOURCE_ARCHIVE_SHA256" \
+  --arg image_repository "$IMAGE_REPOSITORY" --arg image_digest "$IMAGE_DIGEST" \
+  --arg image_reference "$IMAGE_REFERENCE" '
   select(type == "object")
   | select((keys | sort) == $expected_keys)
   | select(.schema_version == 1 and .purpose == "isolated-rehearsal")
   | select(.environment == "rehearsal" and .live == false)
+  | select(.release_version == $release_version and .release_commit == $release_commit)
+  | select(.source_archive_sha256 == $source_archive_sha256)
+  | select(.image_repository == $image_repository and .image_digest == $image_digest)
+  | select(.image_reference == $image_reference)
+  | select(.runtime_architecture == "X86_64")
   | select(.account_id | type == "string" and test("^[0-9]{12}$"))
   | select(.region | type == "string" and test("^[a-z]{2}(-[a-z]+)+-[0-9]+$"))
   | select(all([
       .cluster, .api_service, .worker_service,
       .api_task_definition, .worker_task_definition, .migration_task_definition,
+      .api_container_name, .worker_container_name, .migration_container_name,
+      .api_task_role_arn, .worker_task_role_arn, .migration_task_role_arn,
+      .api_execution_role_arn, .worker_execution_role_arn, .migration_execution_role_arn,
       .queue_url, .queue_arn, .dlq_url, .dlq_arn, .task_security_group_id
     ][]; type == "string" and length > 0))
   | select(.private_subnet_ids | type == "array" and length > 0)
@@ -130,6 +231,15 @@ MANIFEST_WORKER_SERVICE="$(jq -r '.worker_service' <<<"$TOPOLOGY_JSON")"
 MANIFEST_API_TASK_DEFINITION="$(jq -r '.api_task_definition' <<<"$TOPOLOGY_JSON")"
 MANIFEST_WORKER_TASK_DEFINITION="$(jq -r '.worker_task_definition' <<<"$TOPOLOGY_JSON")"
 MANIFEST_MIGRATION_TASK_DEFINITION="$(jq -r '.migration_task_definition' <<<"$TOPOLOGY_JSON")"
+MANIFEST_API_CONTAINER_NAME="$(jq -r '.api_container_name' <<<"$TOPOLOGY_JSON")"
+MANIFEST_WORKER_CONTAINER_NAME="$(jq -r '.worker_container_name' <<<"$TOPOLOGY_JSON")"
+MANIFEST_MIGRATION_CONTAINER_NAME="$(jq -r '.migration_container_name' <<<"$TOPOLOGY_JSON")"
+MANIFEST_API_TASK_ROLE_ARN="$(jq -r '.api_task_role_arn' <<<"$TOPOLOGY_JSON")"
+MANIFEST_WORKER_TASK_ROLE_ARN="$(jq -r '.worker_task_role_arn' <<<"$TOPOLOGY_JSON")"
+MANIFEST_MIGRATION_TASK_ROLE_ARN="$(jq -r '.migration_task_role_arn' <<<"$TOPOLOGY_JSON")"
+MANIFEST_API_EXECUTION_ROLE_ARN="$(jq -r '.api_execution_role_arn' <<<"$TOPOLOGY_JSON")"
+MANIFEST_WORKER_EXECUTION_ROLE_ARN="$(jq -r '.worker_execution_role_arn' <<<"$TOPOLOGY_JSON")"
+MANIFEST_MIGRATION_EXECUTION_ROLE_ARN="$(jq -r '.migration_execution_role_arn' <<<"$TOPOLOGY_JSON")"
 MANIFEST_QUEUE_URL="$(jq -r '.queue_url' <<<"$TOPOLOGY_JSON")"
 MANIFEST_QUEUE_ARN="$(jq -r '.queue_arn' <<<"$TOPOLOGY_JSON")"
 MANIFEST_DLQ_URL="$(jq -r '.dlq_url' <<<"$TOPOLOGY_JSON")"
@@ -137,7 +247,7 @@ MANIFEST_DLQ_ARN="$(jq -r '.dlq_arn' <<<"$TOPOLOGY_JSON")"
 MANIFEST_SUBNETS="$(jq -cS '.private_subnet_ids | sort' <<<"$TOPOLOGY_JSON")"
 MANIFEST_TASK_SG="$(jq -r '.task_security_group_id' <<<"$TOPOLOGY_JSON")"
 
-test -n "$IMAGE_124"
+test -n "$IMAGE_REFERENCE"
 test -n "$TFVARS"
 test -n "$AWS_REGION"
 
@@ -223,12 +333,67 @@ WORKER_TASK_PREFLIGHT_JSON="$(aws ecs describe-task-definition --region "$AWS_RE
   --task-definition "$MANIFEST_WORKER_TASK_DEFINITION" --output json)"
 MIGRATION_TASK_PREFLIGHT_JSON="$(aws ecs describe-task-definition --region "$AWS_REGION" \
   --task-definition "$MANIFEST_MIGRATION_TASK_DEFINITION" --output json)"
-jq -e --arg expected "$MANIFEST_API_TASK_DEFINITION" \
-  '.taskDefinition.taskDefinitionArn == $expected' <<<"$API_TASK_PREFLIGHT_JSON" >/dev/null
-jq -e --arg expected "$MANIFEST_WORKER_TASK_DEFINITION" \
-  '.taskDefinition.taskDefinitionArn == $expected' <<<"$WORKER_TASK_PREFLIGHT_JSON" >/dev/null
-jq -e --arg expected "$MANIFEST_MIGRATION_TASK_DEFINITION" \
-  '.taskDefinition.taskDefinitionArn == $expected' <<<"$MIGRATION_TASK_PREFLIGHT_JSON" >/dev/null
+
+assert_task_identity() {
+  task_json="$1"
+  definition="$2"
+  task_role="$3"
+  execution_role="$4"
+  container_name="$5"
+  jq -e --arg definition "$definition" --arg task_role "$task_role" \
+    --arg execution_role "$execution_role" --arg container_name "$container_name" '
+    (.taskDefinition.taskDefinitionArn == $definition)
+    and (.taskDefinition.taskRoleArn == $task_role)
+    and (.taskDefinition.executionRoleArn == $execution_role)
+    and (.taskDefinition.containerDefinitions | length == 1)
+    and (.taskDefinition.containerDefinitions[0].name == $container_name)
+  ' <<<"$task_json" >/dev/null
+}
+
+assert_task_identity "$API_TASK_PREFLIGHT_JSON" "$MANIFEST_API_TASK_DEFINITION" \
+  "$MANIFEST_API_TASK_ROLE_ARN" "$MANIFEST_API_EXECUTION_ROLE_ARN" "$MANIFEST_API_CONTAINER_NAME"
+assert_task_identity "$WORKER_TASK_PREFLIGHT_JSON" "$MANIFEST_WORKER_TASK_DEFINITION" \
+  "$MANIFEST_WORKER_TASK_ROLE_ARN" "$MANIFEST_WORKER_EXECUTION_ROLE_ARN" "$MANIFEST_WORKER_CONTAINER_NAME"
+assert_task_identity "$MIGRATION_TASK_PREFLIGHT_JSON" "$MANIFEST_MIGRATION_TASK_DEFINITION" \
+  "$MANIFEST_MIGRATION_TASK_ROLE_ARN" "$MANIFEST_MIGRATION_EXECUTION_ROLE_ARN" \
+  "$MANIFEST_MIGRATION_CONTAINER_NAME"
+
+IMAGE_REGISTRY="${IMAGE_REPOSITORY%%/*}"
+ECR_REPOSITORY_NAME="${IMAGE_REPOSITORY#*/}"
+test "$ECR_REPOSITORY_NAME" != "$IMAGE_REPOSITORY"
+case "$IMAGE_REGISTRY" in
+  "${MANIFEST_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"|\
+  "${MANIFEST_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com.cn") ;;
+  *) printf '%s\n' "image repository is not in the reviewed account and region" >&2; exit 64 ;;
+esac
+
+IMAGE_DETAILS_JSON="$(rehearsal_aws ecr describe-images --region "$AWS_REGION" \
+  --registry-id "$MANIFEST_ACCOUNT_ID" --repository-name "$ECR_REPOSITORY_NAME" \
+  --image-ids "imageDigest=$IMAGE_DIGEST" --output json)"
+jq -e --arg image_digest "$IMAGE_DIGEST" '
+  (.imageDetails | length == 1)
+  and (.imageDetails[0].imageDigest == $image_digest)
+  and (.imageDetails[0].imageScanStatus.status == "COMPLETE")
+' <<<"$IMAGE_DETAILS_JSON" >/dev/null
+
+IMAGE_MANIFEST_JSON="$(rehearsal_aws ecr batch-get-image --region "$AWS_REGION" \
+  --registry-id "$MANIFEST_ACCOUNT_ID" --repository-name "$ECR_REPOSITORY_NAME" \
+  --image-ids "imageDigest=$IMAGE_DIGEST" \
+  --accepted-media-types application/vnd.oci.image.manifest.v1+json \
+    application/vnd.docker.distribution.manifest.v2+json \
+  --query 'images[0].imageManifest' --output text)"
+IMAGE_CONFIG_DIGEST="$(jq -er '.config.digest | select(test("^sha256:[0-9a-f]{64}$"))' \
+  <<<"$IMAGE_MANIFEST_JSON")"
+IMAGE_CONFIG_URL="$(rehearsal_aws ecr get-download-url-for-layer --region "$AWS_REGION" \
+  --registry-id "$MANIFEST_ACCOUNT_ID" --repository-name "$ECR_REPOSITORY_NAME" \
+  --layer-digest "$IMAGE_CONFIG_DIGEST" --query downloadUrl --output text)"
+IMAGE_CONFIG_JSON="$(curl --fail --silent --show-error "$IMAGE_CONFIG_URL")"
+jq -e --arg release_commit "$RELEASE_COMMIT" --arg release_version "$RELEASE_VERSION" '
+  (.architecture == "amd64")
+  and (.os == "linux")
+  and (.config.Labels["org.opencontainers.image.revision"] == $release_commit)
+  and (.config.Labels["org.opencontainers.image.version"] == $release_version)
+' <<<"$IMAGE_CONFIG_JSON" >/dev/null
 
 INITIAL_QUEUE_COUNTS="$(aws sqs get-queue-attributes --region "$AWS_REGION" --queue-url "$QUEUE_URL" \
   --attribute-names QueueArn RedrivePolicy ApproximateNumberOfMessages \
@@ -268,9 +433,10 @@ aws ecs describe-services --region "$AWS_REGION" --cluster "$CLUSTER" \
   --services "$WORKER_SERVICE" "$API_SERVICE" \
   --query 'services[].{service:serviceName,desired:desiredCount,running:runningCount,taskDefinition:taskDefinition,deployments:deployments}'
 
-# Register only reviewed 1.2.4 definitions. Neither service may be updated by
+# Register only reviewed release definitions. Neither service may be updated by
 # this targeted plan, and all desired counts remain unchanged at this point.
-rehearsal_terraform plan -var-file="$TFVARS" -var="container_image=$IMAGE_124" \
+rehearsal_terraform plan -var-file="$TFVARS" -var="container_image=$IMAGE_REFERENCE" \
+  -var="container_architecture=X86_64" \
   -var="enable_automatic_deployment_rollback=false" \
   -target=aws_ecs_task_definition.migration \
   -target=aws_ecs_task_definition.worker \
@@ -283,9 +449,70 @@ MIGRATION_DEF="$(terraform output -raw migration_task_definition_arn)"
 WORKER_DEF="$(terraform output -raw worker_task_definition_arn)"
 API_DEF="$(terraform output -raw api_task_definition_arn)"
 
+STAGED_MIGRATION_TASK_JSON="$(rehearsal_aws ecs describe-task-definition --region "$AWS_REGION" \
+  --task-definition "$MIGRATION_DEF" --output json)"
+STAGED_WORKER_TASK_JSON="$(rehearsal_aws ecs describe-task-definition --region "$AWS_REGION" \
+  --task-definition "$WORKER_DEF" --output json)"
+STAGED_API_TASK_JSON="$(rehearsal_aws ecs describe-task-definition --region "$AWS_REGION" \
+  --task-definition "$API_DEF" --output json)"
+
+assert_staged_task_definition() {
+  task_json="$1"
+  definition="$2"
+  task_role="$3"
+  execution_role="$4"
+  container_name="$5"
+  jq -e --arg definition "$definition" --arg task_role "$task_role" \
+    --arg execution_role "$execution_role" --arg container_name "$container_name" \
+    --arg image_reference "$IMAGE_REFERENCE" '
+    (.taskDefinition.taskDefinitionArn == $definition)
+    and (.taskDefinition.taskRoleArn == $task_role)
+    and (.taskDefinition.executionRoleArn == $execution_role)
+    and (.taskDefinition.runtimePlatform.cpuArchitecture == "X86_64")
+    and (.taskDefinition.runtimePlatform.operatingSystemFamily == "LINUX")
+    and (.taskDefinition.containerDefinitions | length == 1)
+    and (.taskDefinition.containerDefinitions[0].name == $container_name)
+    and (.taskDefinition.containerDefinitions[0].image == $image_reference)
+  ' <<<"$task_json" >/dev/null
+}
+
+assert_staged_task_definition "$STAGED_MIGRATION_TASK_JSON" "$MIGRATION_DEF" \
+  "$MANIFEST_MIGRATION_TASK_ROLE_ARN" "$MANIFEST_MIGRATION_EXECUTION_ROLE_ARN" \
+  "$MANIFEST_MIGRATION_CONTAINER_NAME"
+assert_staged_task_definition "$STAGED_WORKER_TASK_JSON" "$WORKER_DEF" \
+  "$MANIFEST_WORKER_TASK_ROLE_ARN" "$MANIFEST_WORKER_EXECUTION_ROLE_ARN" \
+  "$MANIFEST_WORKER_CONTAINER_NAME"
+assert_staged_task_definition "$STAGED_API_TASK_JSON" "$API_DEF" \
+  "$MANIFEST_API_TASK_ROLE_ARN" "$MANIFEST_API_EXECUTION_ROLE_ARN" \
+  "$MANIFEST_API_CONTAINER_NAME"
+
+ROLLBACK_DISABLE_WORKER_JSON="$(rehearsal_aws ecs update-service --region "$AWS_REGION" \
+  --cluster "$CLUSTER" --service "$WORKER_SERVICE" \
+  --deployment-configuration "deploymentCircuitBreaker={enable=true,rollback=false},minimumHealthyPercent=$WORKER_MIN,maximumPercent=$WORKER_MAX" \
+  --output json)"
+ROLLBACK_DISABLE_API_JSON="$(rehearsal_aws ecs update-service --region "$AWS_REGION" \
+  --cluster "$CLUSTER" --service "$API_SERVICE" \
+  --deployment-configuration "deploymentCircuitBreaker={enable=true,rollback=false},minimumHealthyPercent=$API_MIN,maximumPercent=$API_MAX" \
+  --output json)"
+jq -e '.service.deploymentConfiguration.deploymentCircuitBreaker.rollback == false' \
+  <<<"$ROLLBACK_DISABLE_WORKER_JSON" >/dev/null
+jq -e '.service.deploymentConfiguration.deploymentCircuitBreaker.rollback == false' \
+  <<<"$ROLLBACK_DISABLE_API_JSON" >/dev/null
+aws ecs wait services-stable --region "$AWS_REGION" --cluster "$CLUSTER" \
+  --services "$WORKER_SERVICE" "$API_SERVICE"
+
+ROLLBACK_DISABLED_JSON="$(aws ecs describe-services --region "$AWS_REGION" --cluster "$CLUSTER" \
+  --services "$WORKER_SERVICE" "$API_SERVICE" --output json)"
+jq -e --arg worker "$WORKER_SERVICE" --arg api "$API_SERVICE" '
+  (.failures | length) == 0
+  and (.services | length == 2)
+  and all(.services[];
+    (.serviceName == $worker or .serviceName == $api)
+    and .deploymentConfiguration.deploymentCircuitBreaker.rollback == false)
+' <<<"$ROLLBACK_DISABLED_JSON" >/dev/null
+
 rehearsal_aws ecs update-service --region "$AWS_REGION" --cluster "$CLUSTER" \
-  --service "$WORKER_SERVICE" --desired-count 0 \
-  --deployment-configuration "deploymentCircuitBreaker={enable=true,rollback=false},minimumHealthyPercent=$WORKER_MIN,maximumPercent=$WORKER_MAX"
+  --service "$WORKER_SERVICE" --desired-count 0
 aws ecs wait services-stable --region "$AWS_REGION" --cluster "$CLUSTER" \
   --services "$WORKER_SERVICE"
 
@@ -322,8 +549,7 @@ done
 test "$QUEUE_IN_FLIGHT_STABLE_READS" -ge 3
 
 rehearsal_aws ecs update-service --region "$AWS_REGION" --cluster "$CLUSTER" \
-  --service "$API_SERVICE" --desired-count 0 \
-  --deployment-configuration "deploymentCircuitBreaker={enable=true,rollback=false},minimumHealthyPercent=$API_MIN,maximumPercent=$API_MAX"
+  --service "$API_SERVICE" --desired-count 0
 aws ecs wait services-stable --region "$AWS_REGION" --cluster "$CLUSTER" \
   --services "$API_SERVICE"
 
@@ -349,7 +575,7 @@ test "$API_ZERO_TASK_COUNT" = "0"
 # task-list, and queue checks prove every old writer is gone. PostgreSQL fixes a
 # row's created_at default at transaction start, so a pre-fence old transaction
 # could otherwise commit after the cutoff while remaining outside the audit.
-# This exact 1.2.4 one-shot does not query migration 0017 tables and is safe
+# This exact release one-shot does not query migration 0017 tables and is safe
 # before the ledger advances.
 FENCE_OVERRIDES='{"containerOverrides":[{"name":"worker","command":["bun","src/server/index.ts","inbound-provenance-fence"]}]}'
 FENCE_TASK="$(rehearsal_aws ecs run-task --region "$AWS_REGION" --cluster "$CLUSTER" \
@@ -379,12 +605,12 @@ printf '%s\n' "$FENCE_JSON"
 The worker must first show desired/running zero, an empty service task list, and
 three consecutive zero in-flight SQS reads. Only then may the API stop. Both
 services must subsequently pass the same machine-readable desired/running-zero
-and empty-task-list checks before the 1.2.4 one-shot captures `FENCE_AT`. Record
+and empty-task-list checks before the release one-shot captures `FENCE_AT`. Record
 the service JSON, task counts, queue/DLQ counts, and PostgreSQL-derived cutoff.
 
 ### 2. Migrate and verify ledger 0017
 
-The three reviewed 1.2.4 definitions are already staged, every old task is
+The three reviewed release definitions are already staged, every old task is
 machine-proven absent, the stable queue in-flight gate passed, and only then was
 the database-clock fence recorded. Automatic rollback stays disabled.
 
@@ -396,28 +622,70 @@ MIGRATION_TASK="$(rehearsal_aws ecs run-task --region "$AWS_REGION" --cluster "$
   --network-configuration "$NETWORK" --count 1 \
   --query 'tasks[0].taskArn' --output text)"
 aws ecs wait tasks-stopped --region "$AWS_REGION" --cluster "$CLUSTER" --tasks "$MIGRATION_TASK"
-MIGRATION_EXIT="$(aws ecs describe-tasks --region "$AWS_REGION" --cluster "$CLUSTER" --tasks "$MIGRATION_TASK" \
-  --query 'tasks[0].containers[?name==`migration`].exitCode | [0]' --output text)"
+MIGRATION_TASK_JSON="$(aws ecs describe-tasks --region "$AWS_REGION" --cluster "$CLUSTER" \
+  --tasks "$MIGRATION_TASK" --output json)"
+MIGRATION_EXIT="$(jq -er --arg container "$MANIFEST_MIGRATION_CONTAINER_NAME" \
+  '.tasks[0].containers[] | select(.name == $container) | .exitCode' <<<"$MIGRATION_TASK_JSON")"
 test "$MIGRATION_EXIT" = "0"
 
+STATUS_OVERRIDES="$(jq -cn --arg container "$MANIFEST_MIGRATION_CONTAINER_NAME" \
+  '{containerOverrides:[{name:$container,command:["bun","src/cli/index.tsx","--json","db","status"]}]}')"
 STATUS_TASK="$(rehearsal_aws ecs run-task --region "$AWS_REGION" --cluster "$CLUSTER" \
   --launch-type FARGATE --task-definition "$MIGRATION_DEF" \
   --network-configuration "$NETWORK" --count 1 \
-  --overrides '{"containerOverrides":[{"name":"migration","command":["bun","src/cli/index.tsx","--json","db","status"]}]}' \
+  --overrides "$STATUS_OVERRIDES" \
   --query 'tasks[0].taskArn' --output text)"
 aws ecs wait tasks-stopped --region "$AWS_REGION" --cluster "$CLUSTER" --tasks "$STATUS_TASK"
-STATUS_EXIT="$(aws ecs describe-tasks --region "$AWS_REGION" --cluster "$CLUSTER" --tasks "$STATUS_TASK" \
-  --query 'tasks[0].containers[?name==`migration`].exitCode | [0]' --output text)"
+STATUS_TASK_JSON="$(aws ecs describe-tasks --region "$AWS_REGION" --cluster "$CLUSTER" \
+  --tasks "$STATUS_TASK" --output json)"
+STATUS_EXIT="$(jq -er --arg container "$MANIFEST_MIGRATION_CONTAINER_NAME" \
+  '.tasks[0].containers[] | select(.name == $container) | .exitCode' <<<"$STATUS_TASK_JSON")"
 test "$STATUS_EXIT" = "0"
-aws logs tail "/ecs/${CLUSTER}/migration" --region "$AWS_REGION" --since 15m
+
+MIGRATION_LOG_GROUP="$(jq -er --arg container "$MANIFEST_MIGRATION_CONTAINER_NAME" '
+  .taskDefinition.containerDefinitions[] | select(.name == $container)
+  | .logConfiguration.options["awslogs-group"]
+' <<<"$STAGED_MIGRATION_TASK_JSON")"
+MIGRATION_LOG_STREAM_PREFIX="$(jq -er --arg container "$MANIFEST_MIGRATION_CONTAINER_NAME" '
+  .taskDefinition.containerDefinitions[] | select(.name == $container)
+  | .logConfiguration.options["awslogs-stream-prefix"]
+' <<<"$STAGED_MIGRATION_TASK_JSON")"
+STATUS_TASK_ID="${STATUS_TASK##*/}"
+STATUS_LOG_STREAM="${MIGRATION_LOG_STREAM_PREFIX}/${MANIFEST_MIGRATION_CONTAINER_NAME}/${STATUS_TASK_ID}"
+STATUS_JSON=""
+for attempt in $(seq 1 12); do
+  STATUS_LOG_EVENTS="$(aws logs get-log-events --region "$AWS_REGION" \
+    --log-group-name "$MIGRATION_LOG_GROUP" --log-stream-name "$STATUS_LOG_STREAM" \
+    --start-from-head --output json)"
+  STATUS_JSON="$(jq -cer '
+    [.events[].message | fromjson?
+      | select((keys | sort) == ["alreadyApplied","applied","pending"])]
+    | select(length == 1) | .[0]
+  ' <<<"$STATUS_LOG_EVENTS" 2>/dev/null || true)"
+  test -n "$STATUS_JSON" && break
+  test "$attempt" -lt 12 || exit 1
+  sleep 5
+done
+jq -e '
+  ((keys | sort) == ["alreadyApplied","applied","pending"])
+  and (.applied | type == "array" and length == 0)
+  and (.pending | type == "array" and length == 0)
+  and (.alreadyApplied | type == "array" and all(.[]; type == "string"))
+  and (.alreadyApplied | index("0017_inbound_message_source_provenance") != null)
+' <<<"$STATUS_JSON" >/dev/null
+printf '%s\n' "$STATUS_JSON"
 ```
 
-Both tasks must exit zero. The status JSON must show `pending: []`, valid
-`schema_migrations` checksums, and
-`0017_inbound_message_source_provenance` in `alreadyApplied`. Do not restart or
-scale any 1.2.3 task after this point.
+Both tasks must exit zero, and the exact status task's exact CloudWatch stream
+must contain one object with only the source-defined `applied`, `alreadyApplied`,
+and `pending` fields. The machine gate requires `pending: []`, no dry-run
+applications, and `0017_inbound_message_source_provenance` in `alreadyApplied`.
+`emails db status --json` emits that object only after `MigrationLedger` validates
+every stored `schema_migrations` checksum; checksum drift exits before JSON and
+therefore cannot satisfy this gate. Do not restart or scale any pre-0017 release
+task after this point.
 
-### 3. Start only the 1.2.4 worker, drain the buffer, and audit
+### 3. Start only the release worker, drain the buffer, and audit
 
 The worker service starts from zero with the exact reviewed `WORKER_DEF`, so an
 old and new worker never overlap. The API remains at zero.
@@ -488,10 +756,11 @@ S3 bucket setting. The command performs read-only all-tenant queries under RLS,
 prints aggregate counts only, and exits nonzero for a missing or invalid binding.
 Any nonzero exit, nonzero DLQ count, worker error, wrong task definition, or unresolved
 cutoff-window row is a no-go: keep the API at zero, reconcile the affected raw
-objects only through reviewed 1.2.4 canonical S3 replay, and rerun the audit.
+objects only through the reviewed release's canonical S3 replay, and rerun the
+audit.
 Never patch message or provenance rows manually.
 
-### 4. Start the 1.2.4 API and reconcile Terraform
+### 4. Start the release API and reconcile Terraform
 
 ```bash
 set -euo pipefail
@@ -504,10 +773,19 @@ aws ecs wait services-stable --region "$AWS_REGION" --cluster "$CLUSTER" \
 aws ecs describe-services --region "$AWS_REGION" --cluster "$CLUSTER" \
   --services "$API_SERVICE" \
   --query 'services[0].{desired:desiredCount,running:runningCount,taskDefinition:taskDefinition,deployments:deployments}'
-curl --fail --silent --show-error "$EMAILS_API_URL/version"
-curl --fail --silent --show-error "$EMAILS_API_URL/ready"
+VERSION_JSON="$(curl --fail --silent --show-error "$EMAILS_API_URL/version")"
+jq -e --arg release_version "$RELEASE_VERSION" '
+  ((keys | sort) == ["mode","name","status","version"])
+  and (.status == "ok")
+  and (.name == "emails")
+  and (.mode == "self_hosted")
+  and (.version == $release_version)
+' <<<"$VERSION_JSON" >/dev/null
+READY_JSON="$(curl --fail --silent --show-error "$EMAILS_API_URL/ready")"
+printf '%s\n' "$VERSION_JSON" "$READY_JSON"
 
-rehearsal_terraform plan -var-file="$TFVARS" -var="container_image=$IMAGE_124" \
+rehearsal_terraform plan -var-file="$TFVARS" -var="container_image=$IMAGE_REFERENCE" \
+  -var="container_architecture=X86_64" \
   -var="worker_desired_count=$ORIGINAL_WORKER_COUNT" \
   -var="api_desired_count=$ORIGINAL_API_COUNT" \
   -var="enable_automatic_deployment_rollback=false" -out=0017-reconcile.tfplan
@@ -521,8 +799,9 @@ codes, queue/DLQ snapshots, `FENCE_AT`, aggregate audit JSON, `/version`,
 `/ready`, and CloudWatch locations.
 
 Rollback after ledger 0017 is always a compatible roll-forward. A failed API
-activation leaves the API at zero while the reviewed 1.2.4 worker continues to
-protect the queue, or both services may be returned to zero for investigation.
-Use only a corrected 1.2.4-or-newer image that recognizes 0017, repeat the
-definition, ledger, worker, audit, and API gates, and reconcile Terraform. The
-rollback image is never 1.2.3. Never remove or rewrite the 0017 ledger row.
+activation leaves the API at zero while the reviewed release worker continues
+to protect the queue, or both services may be returned to zero for
+investigation. Use only a corrected 0017-compatible image, repeat the
+definition, ledger, worker, audit, and API gates, and reconcile Terraform. A
+pre-0017 release is never a rollback image. Never remove or rewrite the 0017
+ledger row.
