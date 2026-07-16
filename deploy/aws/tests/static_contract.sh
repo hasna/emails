@@ -210,9 +210,42 @@ for runbook in "$repo/docs/DEPLOYMENT_CUTOVER.md" "$root/README.md"; do
 done
 
 cutover_text="$(tr '\n' ' ' < "$repo/docs/DEPLOYMENT_CUTOVER.md")"
+if grep -En '(^|[^[:digit:]])[[:digit:]]+[.][[:digit:]]+[.][[:digit:]]+([^[:digit:]]|$)|IMAGE_[[:digit:]]+' \
+  "$repo/docs/DEPLOYMENT_CUTOVER.md" >/dev/null; then
+  echo "0017 runbook must use release inputs instead of stale hardcoded release literals" >&2
+  exit 1
+fi
+
+for source_contract in \
+  'applied: string[]' \
+  'alreadyApplied: string[]' \
+  'pending: string[]' \
+  'const ledger = new MigrationLedger(client, migrations)' \
+  'const result = await ledger.migrate({ dryRun: opts.dryRun === true })'; do
+  grep -Fq "$source_contract" "$repo/src/server/self-hosted/migrate.ts" || {
+    echo "db status source contract missing '$source_contract'" >&2
+    exit 1
+  }
+done
+grep -Fq 'Migration checksum mismatch' "$repo/src/storage-kit/migrations.ts" || {
+  echo "db status must fail before JSON output when an applied checksum is invalid" >&2
+  exit 1
+}
+
 for phrase in \
   "migration 0017" \
-  "1.2.4" \
+  "SOURCE_CHECKOUT" \
+  "RELEASE_VERSION" \
+  "RELEASE_COMMIT" \
+  "SOURCE_ARCHIVE_SHA256" \
+  "IMAGE_REPOSITORY" \
+  "IMAGE_DIGEST" \
+  "IMAGE_REFERENCE" \
+  'test "$IMAGE_REFERENCE" = "${IMAGE_REPOSITORY}@${IMAGE_DIGEST}"' \
+  'git -C "$SOURCE_CHECKOUT" archive --format=zip "$RELEASE_COMMIT"' \
+  'git -C "$SOURCE_CHECKOUT" show "$RELEASE_COMMIT:package.json"' \
+  'org.opencontainers.image.revision' \
+  'org.opencontainers.image.version' \
   "controlled downtime" \
   "old worker and API are both at zero" \
   "SQS buffers" \
@@ -222,7 +255,12 @@ for phrase in \
   "INITIAL_DLQ_IN_FLIGHT" \
   "DLQ_STABLE_READS" \
   "FENCE_LOG_EVENTS" \
+  "STATUS_LOG_EVENTS" \
+  "STATUS_LOG_STREAM" \
   'select((keys | sort) == ["fence_at"])' \
+  'select((keys | sort) == ["alreadyApplied","applied","pending"])' \
+  '(.pending | type == "array" and length == 0)' \
+  '(.alreadyApplied | index("0017_inbound_message_source_provenance") != null)' \
   'test "$FENCE_EXIT" = "0"' \
   'test "$MIGRATION_EXIT" = "0"' \
   'test "$STATUS_EXIT" = "0"' \
@@ -233,10 +271,10 @@ for phrase in \
   'test "$FINAL_DLQ_IN_FLIGHT" = "0"' \
   "verify ledger 0017" \
   "inbound-provenance-audit" \
-  "only the 1.2.4 worker" \
+  "only the release worker" \
   "before the API" \
   "compatible roll-forward" \
-  "never 1.2.3"; do
+  "pre-0017 release"; do
   printf '%s\n' "$cutover_text" | grep -Fiq "$phrase" || {
     echo "0017 forward-only cutover contract missing '$phrase' from docs/DEPLOYMENT_CUTOVER.md" >&2
     exit 1
@@ -249,6 +287,29 @@ for phrase in \
   "Never run, copy, or paste" \
   "separately generated and independently reviewed AWS CLI plan" \
   "cloned from the exact live service task definitions" \
+  "LIVE_TOPOLOGY_MANIFEST" \
+  "LIVE_TOPOLOGY_SHA256" \
+  "LIVE_API_TASK_FAMILY" \
+  "LIVE_WORKER_TASK_FAMILY" \
+  "LIVE_MIGRATION_TASK_FAMILY" \
+  "LIVE_RUNTIME_ARCHITECTURE" \
+  "LIVE_IMAGE_REPOSITORY" \
+  "LIVE_IMAGE_REFERENCE" \
+  "MANIFEST_API_CONTAINER_NAME" \
+  "MANIFEST_WORKER_CONTAINER_NAME" \
+  "MANIFEST_MIGRATION_CONTAINER_NAME" \
+  "MANIFEST_API_TASK_ROLE_ARN" \
+  "MANIFEST_WORKER_TASK_ROLE_ARN" \
+  "MANIFEST_MIGRATION_TASK_ROLE_ARN" \
+  "MANIFEST_API_EXECUTION_ROLE_ARN" \
+  "MANIFEST_WORKER_EXECUTION_ROLE_ARN" \
+  "MANIFEST_MIGRATION_EXECUTION_ROLE_ARN" \
+  "X86_64" \
+  "database-specific" \
+  "NO_SES_SMOKE_TASK_ROLE_ARN" \
+  "outbound sending" \
+  "bootstrap" \
+  "separate explicit approval" \
   "imported or adopted" \
   "no-op plan" \
   "RUNBOOK_MODE" \
@@ -266,6 +327,28 @@ for phrase in \
   "rehearsal_aws"; do
   printf '%s\n' "$cutover_text" | grep -Fiq "$phrase" || {
     echo "0017 live-topology safety contract missing '$phrase' from docs/DEPLOYMENT_CUTOVER.md" >&2
+    exit 1
+  }
+done
+
+plan_count="$(grep -Fc 'rehearsal_terraform plan' "$repo/docs/DEPLOYMENT_CUTOVER.md")"
+image_plan_count="$(grep -Fc -- '-var="container_image=$IMAGE_REFERENCE"' "$repo/docs/DEPLOYMENT_CUTOVER.md")"
+architecture_plan_count="$(grep -Fc -- '-var="container_architecture=X86_64"' "$repo/docs/DEPLOYMENT_CUTOVER.md")"
+if test "$plan_count" -eq 0 || test "$image_plan_count" != "$plan_count" || \
+  test "$architecture_plan_count" != "$plan_count"; then
+  echo "every Terraform plan must use the full immutable image reference and X86_64" >&2
+  exit 1
+fi
+if grep -Fq -- '-var="container_image=$IMAGE_DIGEST"' "$repo/docs/DEPLOYMENT_CUTOVER.md"; then
+  echo "a bare digest must never be passed as Terraform container_image" >&2
+  exit 1
+fi
+for staged_assertion in \
+  'assert_staged_task_definition "$STAGED_MIGRATION_TASK_JSON" "$MIGRATION_DEF"' \
+  'assert_staged_task_definition "$STAGED_WORKER_TASK_JSON" "$WORKER_DEF"' \
+  'assert_staged_task_definition "$STAGED_API_TASK_JSON" "$API_DEF"'; do
+  test "$(grep -Fc "$staged_assertion" "$repo/docs/DEPLOYMENT_CUTOVER.md")" = "1" || {
+    echo "each staged migration, worker, and API definition needs one exact metadata assertion" >&2
     exit 1
   }
 done
@@ -304,7 +387,12 @@ done
 guard_line="$(grep -nF 'require_isolated_rehearsal() {' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
 manifest_hash_line="$(grep -nF 'sha256sum -- "$REHEARSAL_TOPOLOGY_MANIFEST"' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
 manifest_schema_line="$(grep -nF '(keys | sort) == $expected_keys' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
+source_package_line="$(grep -nF 'git -C "$SOURCE_CHECKOUT" show "$RELEASE_COMMIT:package.json"' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
+source_archive_line="$(grep -nF 'git -C "$SOURCE_CHECKOUT" archive --format=zip "$RELEASE_COMMIT"' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
 service_preflight_line="$(grep -nF 'SERVICE_PREFLIGHT_JSON=' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
+image_details_line="$(grep -nF 'IMAGE_DETAILS_JSON=' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
+image_config_line="$(grep -nF 'IMAGE_CONFIG_JSON=' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
+image_metadata_gate_line="$(grep -nF '.config.Labels["org.opencontainers.image.revision"] == $release_commit' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
 queue_identity_line="$(grep -nF 'deadLetterTargetArn == $dlq_arn' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
 initial_dlq_zero_line="$(grep -nF 'test "$INITIAL_DLQ_VISIBLE" = "0"' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
 first_plan_line="$(grep -nF 'rehearsal_terraform plan' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
@@ -313,7 +401,12 @@ for safety_line in \
   "$guard_line" \
   "$manifest_hash_line" \
   "$manifest_schema_line" \
+  "$source_package_line" \
+  "$source_archive_line" \
   "$service_preflight_line" \
+  "$image_details_line" \
+  "$image_config_line" \
+  "$image_metadata_gate_line" \
   "$queue_identity_line" \
   "$initial_dlq_zero_line"; do
   test -n "$safety_line" || {
@@ -343,6 +436,10 @@ if grep -Fq 'FENCE_AT="$(date ' "$repo/docs/DEPLOYMENT_CUTOVER.md"; then
 fi
 
 stage_line="$(grep -nF 'terraform apply 0017-definitions.tfplan' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
+staged_assert_line="$(grep -nF 'assert_staged_task_definition "$STAGED_MIGRATION_TASK_JSON"' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
+rollback_worker_disable_line="$(grep -nF 'ROLLBACK_DISABLE_WORKER_JSON=' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
+rollback_api_disable_line="$(grep -nF 'ROLLBACK_DISABLE_API_JSON=' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
+rollback_verified_line="$(grep -nF 'ROLLBACK_DISABLED_JSON=' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
 fence_line="$(grep -nF 'inbound-provenance-fence' "$repo/docs/DEPLOYMENT_CUTOVER.md" | tail -1 | cut -d: -f1)"
 worker_stop_line="$(grep -nF -- '--service "$WORKER_SERVICE" --desired-count 0' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
 worker_zero_line="$(grep -nF 'WORKER_ZERO_JSON=' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
@@ -354,6 +451,10 @@ worker_tasks_recheck_line="$(grep -nF 'test "$WORKER_ZERO_TASK_COUNT_AFTER_API" 
 api_tasks_zero_line="$(grep -nF 'test "$API_ZERO_TASK_COUNT" = "0"' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
 for ordered_line in \
   "$stage_line" \
+  "$staged_assert_line" \
+  "$rollback_worker_disable_line" \
+  "$rollback_api_disable_line" \
+  "$rollback_verified_line" \
   "$worker_stop_line" \
   "$worker_zero_line" \
   "$worker_tasks_zero_line" \
@@ -368,7 +469,11 @@ for ordered_line in \
     exit 1
   }
 done
-test "$stage_line" -lt "$worker_stop_line" \
+test "$stage_line" -lt "$staged_assert_line" \
+  && test "$staged_assert_line" -lt "$rollback_worker_disable_line" \
+  && test "$rollback_worker_disable_line" -lt "$rollback_api_disable_line" \
+  && test "$rollback_api_disable_line" -lt "$rollback_verified_line" \
+  && test "$rollback_verified_line" -lt "$worker_stop_line" \
   && test "$worker_stop_line" -lt "$worker_zero_line" \
   && test "$worker_zero_line" -lt "$worker_tasks_zero_line" \
   && test "$worker_tasks_zero_line" -lt "$queue_stable_zero_line" \
@@ -377,7 +482,53 @@ test "$stage_line" -lt "$worker_stop_line" \
   && test "$services_zero_line" -lt "$worker_tasks_recheck_line" \
   && test "$worker_tasks_recheck_line" -lt "$api_tasks_zero_line" \
   && test "$api_tasks_zero_line" -lt "$fence_line" || {
-  echo "0017 cutover must stage 1.2.4, prove the worker/queue/API zero, then capture the DB fence" >&2
+  echo "0017 cutover must stage the release, prove the worker/queue/API zero, then capture the DB fence" >&2
+  exit 1
+}
+
+migration_task_line="$(grep -nF 'MIGRATION_TASK=' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
+migration_exit_line="$(grep -nF 'test "$MIGRATION_EXIT" = "0"' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
+status_task_line="$(grep -nF 'STATUS_TASK=' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
+status_exit_line="$(grep -nF 'test "$STATUS_EXIT" = "0"' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
+status_json_line="$(grep -nF 'STATUS_JSON=' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
+status_gate_line="$(grep -nF 'index("0017_inbound_message_source_provenance") != null' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
+worker_start_line="$(grep -nF -- '--desired-count "$ORIGINAL_WORKER_COUNT"' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
+audit_exit_line="$(grep -nF 'test "$AUDIT_EXIT" = "0"' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
+api_start_line="$(grep -nF -- '--desired-count "$ORIGINAL_API_COUNT"' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
+version_json_line="$(grep -nF 'VERSION_JSON=' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
+version_gate_line="$(grep -nF '.version == $release_version' "$repo/docs/DEPLOYMENT_CUTOVER.md" | tail -1 | cut -d: -f1)"
+reconcile_plan_line="$(grep -nF 'rehearsal_terraform plan' "$repo/docs/DEPLOYMENT_CUTOVER.md" | tail -1 | cut -d: -f1)"
+for ordered_line in \
+  "$migration_task_line" \
+  "$migration_exit_line" \
+  "$status_task_line" \
+  "$status_exit_line" \
+  "$status_json_line" \
+  "$status_gate_line" \
+  "$worker_start_line" \
+  "$audit_exit_line" \
+  "$api_start_line" \
+  "$version_json_line" \
+  "$version_gate_line" \
+  "$reconcile_plan_line"; do
+  test -n "$ordered_line" || {
+    echo "0017 cutover is missing a migration, status, worker, audit, or API gate" >&2
+    exit 1
+  }
+done
+test "$fence_line" -lt "$migration_task_line" \
+  && test "$migration_task_line" -lt "$migration_exit_line" \
+  && test "$migration_exit_line" -lt "$status_task_line" \
+  && test "$status_task_line" -lt "$status_exit_line" \
+  && test "$status_exit_line" -lt "$status_json_line" \
+  && test "$status_json_line" -lt "$status_gate_line" \
+  && test "$status_gate_line" -lt "$worker_start_line" \
+  && test "$worker_start_line" -lt "$audit_exit_line" \
+  && test "$audit_exit_line" -lt "$api_start_line" \
+  && test "$api_start_line" -lt "$version_json_line" \
+  && test "$version_json_line" -lt "$version_gate_line" \
+  && test "$version_gate_line" -lt "$reconcile_plan_line" || {
+  echo "0017 cutover must run migration, status, release worker, audit, then API in order" >&2
   exit 1
 }
 
@@ -401,6 +552,11 @@ for command_phrase in \
   "--desired-count 0" \
   "deploymentCircuitBreaker={enable=true,rollback=false}" \
   "deploymentConfiguration.deploymentCircuitBreaker.rollback" \
+  "assert_staged_task_definition" \
+  '(.taskDefinition.runtimePlatform.cpuArchitecture == "X86_64")' \
+  '(.taskDefinition.containerDefinitions[0].image == $image_reference)' \
+  '(.taskDefinition.taskRoleArn == $task_role)' \
+  '(.taskDefinition.executionRoleArn == $execution_role)' \
   '--desired-count "$ORIGINAL_WORKER_COUNT"' \
   '--desired-count "$ORIGINAL_API_COUNT"' \
   "get-queue-attributes" \
@@ -408,6 +564,8 @@ for command_phrase in \
   '--arg since "$FENCE_AT"' \
   '"inbound-provenance-audit","--since",$since' \
   "schema_migrations" \
+  "VERSION_JSON" \
+  '(.version == $release_version)' \
   "/ready"; do
   grep -Fiq -- "$command_phrase" "$repo/docs/DEPLOYMENT_CUTOVER.md" || {
     echo "0017 cutover rehearsal missing '$command_phrase' from docs/DEPLOYMENT_CUTOVER.md" >&2
@@ -415,13 +573,9 @@ for command_phrase in \
   }
 done
 
-if grep -Fq "Keep the existing 1.2.3 tasks running" "$repo/docs/DEPLOYMENT_CUTOVER.md"; then
-  echo "0017 cutover must not overlap migration with incompatible 1.2.3 tasks" >&2
-  exit 1
-fi
-
-if grep -Fq "old task stays running until its 1.2.4 replacement is healthy" "$repo/docs/DEPLOYMENT_CUTOVER.md"; then
-  echo "0017 cutover must not roll 1.2.4 over a live 1.2.3 worker" >&2
+if grep -Eiq 'keep (the )?(existing|old|pre-0017).*(task|worker|API).*(running|live).*(migration|replacement)|old task stays running' \
+  "$repo/docs/DEPLOYMENT_CUTOVER.md"; then
+  echo "0017 cutover must not overlap migration or replacement with incompatible tasks" >&2
   exit 1
 fi
 

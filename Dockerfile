@@ -23,6 +23,7 @@ FROM base AS dependencies
 WORKDIR /app
 
 COPY package.json bun.lock ./
+COPY scripts/ensure-private-data-dir.mjs ./scripts/ensure-private-data-dir.mjs
 RUN bun install --production --frozen-lockfile
 
 FROM base AS runtime
