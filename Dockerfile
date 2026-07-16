@@ -22,7 +22,7 @@ COPY --chown=bun:bun src ./src
 
 FROM base AS runtime-files
 RUN mkdir -p /runtime/usr/local/bin /runtime/lib /runtime/usr/lib \
-    /runtime/opt/emails/certs /runtime/tmp /runtime/home/bun/.hasna/emails \
+    /runtime/opt/emails/certs /runtime/tmp /runtime/home/bun/.hasna/emails /runtime/etc \
     /runtime/app /runtime/app/data /runtime/home/bun \
     && cp -a /usr/local/bin/bun /runtime/usr/local/bin/bun \
     && ln -sf bun /runtime/usr/local/bin/bunx \
@@ -31,6 +31,9 @@ RUN mkdir -p /runtime/usr/local/bin /runtime/lib /runtime/usr/lib \
     && cp -a /lib/libc.musl-*.so.1 /runtime/lib/ \
     && cp -a /usr/lib/libgcc_s.so.1 /runtime/usr/lib/libgcc_s.so.1 \
     && cp -a /usr/lib/libstdc++.so.6* /runtime/usr/lib/ \
+    && printf '%s\n' 'bun:x:1000:1000:Bun:/home/bun:/sbin/nologin' > /runtime/etc/passwd \
+    && printf '%s\n' 'bun:x:1000:' > /runtime/etc/group \
+    && chmod 0644 /runtime/etc/passwd /runtime/etc/group \
     && chmod 1777 /runtime/tmp \
     && chmod 0700 /runtime/home/bun/.hasna/emails \
     && chown -R 1000:1000 /runtime/home/bun /runtime/home/bun/.hasna/emails /runtime/app /runtime/app/data
@@ -51,21 +54,9 @@ ENV HOME=/home/bun \
     HOST=0.0.0.0 \
     PORT=8080
 
-COPY --from=runtime-files /runtime/usr/local/bin/bun /usr/local/bin/bun
-COPY --from=runtime-files /runtime/usr/local/bin/bunx /usr/local/bin/bunx
-COPY --from=runtime-files /runtime/usr/local/bin/node /usr/local/bin/node
-COPY --from=runtime-files /runtime/lib/ld-musl-*.so.1 /lib/
-COPY --from=runtime-files /runtime/lib/libc.musl-*.so.1 /lib/
-COPY --from=runtime-files /runtime/usr/lib/libgcc_s.so.1 /usr/lib/libgcc_s.so.1
-COPY --from=runtime-files /runtime/usr/lib/libstdc++.so.6* /usr/lib/
-COPY --from=runtime-files /runtime/opt/emails/certs/aws-rds-global-bundle.pem /opt/emails/certs/aws-rds-global-bundle.pem
-COPY --from=runtime-files /runtime/tmp /tmp
-COPY --from=runtime-files /runtime/home/bun/.hasna/emails /home/bun/.hasna/emails
-COPY --from=runtime-files /runtime/app/data /app/data
+COPY --from=runtime-files /runtime/ /
 COPY --chown=1000:1000 --from=build /app/node_modules ./node_modules
 COPY --chown=1000:1000 --from=build /app/package.json /app/package.json
-COPY --chown=1000:1000 --from=build /app/bun.lock /app/bun.lock
-COPY --chown=1000:1000 --from=build /app/tsconfig.json /app/tsconfig.json
 COPY --chown=1000:1000 --from=build /app/src ./src
 
 WORKDIR /app

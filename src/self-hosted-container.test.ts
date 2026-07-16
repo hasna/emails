@@ -8,6 +8,11 @@ const packageJson = JSON.parse(
 );
 const bundlePath = "/opt/emails/certs/aws-rds-global-bundle.pem";
 const bundleSha256 = "e5bb2084ccf45087bda1c9bffdea0eb15ee67f0b91646106e466714f9de3c7e3";
+const runtimeFilesStage = dockerfile.slice(
+  dockerfile.indexOf("FROM base AS runtime-files"),
+  dockerfile.indexOf("FROM scratch"),
+);
+const scratchStage = dockerfile.slice(dockerfile.indexOf("FROM scratch"));
 
 describe("self-hosted container TLS contract", () => {
   test("pins a pinned Bun base with minimal Alpine stages", () => {
@@ -41,21 +46,19 @@ describe("self-hosted container TLS contract", () => {
   });
 
   test("locks runtime copy semantics and ownership", () => {
-    expect(dockerfile).toContain("COPY --from=runtime-files /runtime/usr/local/bin/bun /usr/local/bin/bun");
-    expect(dockerfile).toContain("COPY --from=runtime-files /runtime/usr/local/bin/bunx /usr/local/bin/bunx");
-    expect(dockerfile).toContain("COPY --from=runtime-files /runtime/usr/local/bin/node /usr/local/bin/node");
-    expect(dockerfile).toContain("COPY --chown=1000:1000 --from=build /app/node_modules ./node_modules");
-    expect(dockerfile).toContain("COPY --chown=1000:1000 --from=build /app/package.json /app/package.json");
-    expect(dockerfile).toContain("COPY --chown=1000:1000 --from=build /app/bun.lock /app/bun.lock");
-    expect(dockerfile).toContain("COPY --chown=1000:1000 --from=build /app/tsconfig.json /app/tsconfig.json");
-    expect(dockerfile).toContain("COPY --chown=1000:1000 --from=build /app/src ./src");
-    expect(dockerfile).toContain(
-      "COPY --from=runtime-files /runtime/home/bun/.hasna/emails /home/bun/.hasna/emails",
-    );
-    expect(dockerfile).toContain("COPY --from=runtime-files /runtime/app/data /app/data");
+    expect(scratchStage.match(/^COPY .+$/gm)).toEqual([
+      "COPY --from=runtime-files /runtime/ /",
+      "COPY --chown=1000:1000 --from=build /app/node_modules ./node_modules",
+      "COPY --chown=1000:1000 --from=build /app/package.json /app/package.json",
+      "COPY --chown=1000:1000 --from=build /app/src ./src",
+    ]);
   });
 
   test("enforces exact runtime permissions and runtime user", () => {
+    expect(runtimeFilesStage).toContain("/runtime/home/bun/.hasna/emails /runtime/etc");
+    expect(runtimeFilesStage).toContain("printf '%s\\n' 'bun:x:1000:1000:Bun:/home/bun:/sbin/nologin' > /runtime/etc/passwd");
+    expect(runtimeFilesStage).toContain("printf '%s\\n' 'bun:x:1000:' > /runtime/etc/group");
+    expect(runtimeFilesStage).toContain("chmod 0644 /runtime/etc/passwd /runtime/etc/group");
     expect(dockerfile).toContain("chmod 1777 /runtime/tmp");
     expect(dockerfile).toContain("chmod 0700 /runtime/home/bun/.hasna/emails");
     expect(dockerfile).toContain(

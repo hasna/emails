@@ -51,19 +51,25 @@ if ! grep -Fq 'ln -sf bun /runtime/usr/local/bin/node' "$dockerfile"; then
   exit 1
 fi
 
-for required_copy in \
-  "COPY --from=runtime-files /runtime/usr/local/bin/bun /usr/local/bin/bun" \
-  "COPY --from=runtime-files /runtime/usr/local/bin/bunx /usr/local/bin/bunx" \
-  "COPY --from=runtime-files /runtime/usr/local/bin/node /usr/local/bin/node" \
-  "COPY --chown=1000:1000 --from=build /app/node_modules ./node_modules" \
-  "COPY --chown=1000:1000 --from=build /app/package.json /app/package.json" \
-  "COPY --chown=1000:1000 --from=build /app/bun.lock /app/bun.lock" \
-  "COPY --chown=1000:1000 --from=build /app/tsconfig.json /app/tsconfig.json" \
-  "COPY --chown=1000:1000 --from=build /app/src ./src" \
-  "COPY --from=runtime-files /runtime/home/bun/.hasna/emails /home/bun/.hasna/emails" \
-  "COPY --from=runtime-files /runtime/app/data /app/data"; do
-  if ! grep -Fq "$required_copy" "$dockerfile"; then
-    echo "missing required scratch runtime copy: $required_copy" >&2
+expected_scratch_copies='COPY --from=runtime-files /runtime/ /
+COPY --chown=1000:1000 --from=build /app/node_modules ./node_modules
+COPY --chown=1000:1000 --from=build /app/package.json /app/package.json
+COPY --chown=1000:1000 --from=build /app/src ./src'
+actual_scratch_copies=$(awk '/^FROM scratch$/ { scratch = 1; next } scratch && /^COPY / { print }' "$dockerfile")
+if [ "$actual_scratch_copies" != "$expected_scratch_copies" ]; then
+  echo "scratch runtime COPY instructions must match the exact runtime and build allowlist" >&2
+  exit 1
+fi
+
+runtime_files_stage=$(awk '/^FROM base AS runtime-files$/ { runtime = 1 } /^FROM scratch$/ { runtime = 0 } runtime { print }' "$dockerfile")
+
+for runtime_identity in \
+  "/runtime/home/bun/.hasna/emails /runtime/etc" \
+  "printf '%s\\n' 'bun:x:1000:1000:Bun:/home/bun:/sbin/nologin' > /runtime/etc/passwd" \
+  "printf '%s\\n' 'bun:x:1000:' > /runtime/etc/group" \
+  "chmod 0644 /runtime/etc/passwd /runtime/etc/group"; do
+  if ! printf '%s\n' "$runtime_files_stage" | grep -Fq "$runtime_identity"; then
+    echo "missing required scratch runtime identity contract: $runtime_identity" >&2
     exit 1
   fi
 done
