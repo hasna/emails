@@ -58,6 +58,7 @@ docker run --rm --platform linux/amd64 --read-only "$image" src/server/index.ts 
 docker run --detach --platform linux/amd64 --read-only --name "$container" \
   --env EMAILS_MODE=local \
   --env EMAILS_DB_PATH=/tmp/emails.db \
+  --env EMAILS_ALLOW_REMOTE=1 \
   --env AWS_EC2_METADATA_DISABLED=true \
   "$image" >/dev/null
 
