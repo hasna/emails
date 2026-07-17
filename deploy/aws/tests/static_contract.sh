@@ -52,16 +52,37 @@ if ! grep -Fq 'ln -sf bun /runtime/usr/local/bin/node' "$dockerfile"; then
 fi
 
 expected_scratch_copies='COPY --from=runtime-files /runtime/ /
-COPY --chown=1000:1000 --from=build /app/node_modules ./node_modules
+COPY --chown=1000:1000 --from=build /app/node_modules /app/node_modules
 COPY --chown=1000:1000 --from=build /app/package.json /app/package.json
-COPY --chown=1000:1000 --from=build /app/src ./src'
+COPY --chown=1000:1000 --from=build /app/src /app/src'
 actual_scratch_copies=$(awk '/^FROM scratch$/ { scratch = 1; next } scratch && /^COPY / { print }' "$dockerfile")
 if [ "$actual_scratch_copies" != "$expected_scratch_copies" ]; then
   echo "scratch runtime COPY instructions must match the exact runtime and build allowlist" >&2
   exit 1
 fi
 
+for image_metadata_contract in \
+  'ARG VERSION=dev' \
+  'ARG REVISION=unknown' \
+  'org.opencontainers.image.source="https://github.com/hasna/emails"' \
+  'org.opencontainers.image.version="$VERSION"' \
+  'org.opencontainers.image.revision="$REVISION"'; do
+  if ! grep -Fq "$image_metadata_contract" "$dockerfile"; then
+    echo "missing immutable image metadata contract: $image_metadata_contract" >&2
+    exit 1
+  fi
+done
+
 runtime_files_stage=$(awk '/^FROM base AS runtime-files$/ { runtime = 1 } /^FROM scratch$/ { runtime = 0 } runtime { print }' "$dockerfile")
+
+for scanner_inventory_contract in \
+  'cp -a /etc/alpine-release /runtime/etc/alpine-release' \
+  'cp -a /lib/apk/db/installed /runtime/lib/apk/db/installed'; do
+  if ! printf '%s\n' "$runtime_files_stage" | grep -Fq "$scanner_inventory_contract"; then
+    echo "scratch runtime must preserve conservative Alpine scanner inventory: $scanner_inventory_contract" >&2
+    exit 1
+  fi
+done
 
 for runtime_identity in \
   "/runtime/home/bun/.hasna/emails /runtime/etc" \
@@ -76,6 +97,11 @@ done
 
 if ! grep -Fq 'chmod 1777 /runtime/tmp' "$dockerfile" || ! grep -Fq 'chmod 0700 /runtime/home/bun/.hasna/emails' "$dockerfile"; then
   echo "self-hosted runtime must harden tmp and private state permissions" >&2
+  exit 1
+fi
+
+if ! grep -Fq 'VOLUME ["/tmp"]' "$dockerfile"; then
+  echo "ECS /tmp mount must inherit image permissions through a Dockerfile VOLUME" >&2
   exit 1
 fi
 
@@ -481,6 +507,11 @@ source_package_line="$(grep -nF 'git -C "$SOURCE_CHECKOUT" show "$RELEASE_COMMIT
 source_archive_line="$(grep -nF 'git -C "$SOURCE_CHECKOUT" archive --format=zip "$RELEASE_COMMIT"' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
 service_preflight_line="$(grep -nF 'SERVICE_PREFLIGHT_JSON=' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
 image_details_line="$(grep -nF 'IMAGE_DETAILS_JSON=' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
+image_report_gate_line="$(grep -nF '.ArtifactName == $image_reference' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
+image_report_digest_line="$(grep -nF '.Metadata.RepoDigests | type == "array" and index($image_reference) != null' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
+image_severity_gate_line="$(grep -nF 'select(.Severity == "CRITICAL" or .Severity == "HIGH")' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
+image_sbom_gate_line="$(grep -nF '.bomFormat == "CycloneDX"' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
+image_sbom_digest_line="$(grep -nF 'aquasecurity:trivy:RepoDigest' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
 image_config_line="$(grep -nF 'IMAGE_CONFIG_JSON=' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
 image_metadata_gate_line="$(grep -nF '.config.Labels["org.opencontainers.image.revision"] == $release_commit' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
 queue_identity_line="$(grep -nF 'deadLetterTargetArn == $dlq_arn' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
@@ -495,6 +526,11 @@ for safety_line in \
   "$source_archive_line" \
   "$service_preflight_line" \
   "$image_details_line" \
+  "$image_report_gate_line" \
+  "$image_report_digest_line" \
+  "$image_severity_gate_line" \
+  "$image_sbom_gate_line" \
+  "$image_sbom_digest_line" \
   "$image_config_line" \
   "$image_metadata_gate_line" \
   "$queue_identity_line" \
@@ -507,6 +543,41 @@ for safety_line in \
     echo "0017 reviewed-topology preflight must complete before every executable planning or mutation path" >&2
     exit 1
   }
+done
+
+if ! grep -Fq './scripts/container-runtime-smoke.sh' "$repo/.github/workflows/ci.yml"; then
+  echo "CI must build and exercise the scratch runtime image" >&2
+  exit 1
+fi
+
+for scanner_contract in \
+  'aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25' \
+  'BUN_BASE_IMAGE: oven/bun:1.3.14-alpine@sha256:5acc90a93e91ff07bf72aa90a7c9f0fa189765aec90b47bdbf2152d2196383c0' \
+  'format: json' \
+  'format: cyclonedx' \
+  'list-all-pkgs: "true"' \
+  '.Metadata.OS.Family == "alpine"' \
+  'select(.Class == "os-pkgs") | .Packages[]?' \
+  'select(.Class == "lang-pkgs") | .Packages[]?' \
+  'trivy-bun-base-report.json' \
+  'image-ref: ${{ env.BUN_BASE_IMAGE }}' \
+  'severity: CRITICAL,HIGH' \
+  'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02'; do
+  if ! grep -Fq "$scanner_contract" "$repo/.github/workflows/ci.yml"; then
+    echo "missing pinned scanner/SBOM evidence contract: $scanner_contract" >&2
+    exit 1
+  fi
+done
+
+for exact_image_evidence in \
+  'IMAGE_SECURITY_REPORT' \
+  'IMAGE_SECURITY_REPORT_SHA256' \
+  'IMAGE_SBOM' \
+  'IMAGE_SBOM_SHA256'; do
+  if ! grep -Fq "$exact_image_evidence" "$repo/docs/DEPLOYMENT_CUTOVER.md"; then
+    echo "cutover must require exact-image scanner and SBOM evidence: $exact_image_evidence" >&2
+    exit 1
+  fi
 done
 
 if ! grep -Fq 'test "$FINAL_DLQ_VISIBLE" = "0"' "$repo/docs/DEPLOYMENT_CUTOVER.md" || \

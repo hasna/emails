@@ -157,6 +157,10 @@ set -euo pipefail
 : "${IMAGE_REPOSITORY:?set the immutable image repository without a tag or digest}"
 : "${IMAGE_DIGEST:?set the reviewed bare sha256 release image digest}"
 : "${IMAGE_REFERENCE:?set the full IMAGE_REPOSITORY@IMAGE_DIGEST reference}"
+: "${IMAGE_SECURITY_REPORT:?set the exact-image Trivy JSON report path}"
+: "${IMAGE_SECURITY_REPORT_SHA256:?set the reviewed Trivy report SHA-256}"
+: "${IMAGE_SBOM:?set the exact-image CycloneDX SBOM path}"
+: "${IMAGE_SBOM_SHA256:?set the reviewed CycloneDX SBOM SHA-256}"
 : "${TFVARS:?set the reviewed rehearsal tfvars path}"
 : "${AWS_REGION:?set the reviewed rehearsal AWS region}"
 
@@ -166,6 +170,12 @@ printf '%s' "$SOURCE_ARCHIVE_SHA256" | grep -Eq '^[0-9a-f]{64}$'
 printf '%s' "$IMAGE_REPOSITORY" | grep -Eq '^[^@[:space:]]+/[^@[:space:]]+$'
 printf '%s' "$IMAGE_DIGEST" | grep -Eq '^sha256:[0-9a-f]{64}$'
 test "$IMAGE_REFERENCE" = "${IMAGE_REPOSITORY}@${IMAGE_DIGEST}"
+printf '%s' "$IMAGE_SECURITY_REPORT_SHA256" | grep -Eq '^[0-9a-f]{64}$'
+printf '%s' "$IMAGE_SBOM_SHA256" | grep -Eq '^[0-9a-f]{64}$'
+test -s "$IMAGE_SECURITY_REPORT"
+test -s "$IMAGE_SBOM"
+test "$(sha256sum "$IMAGE_SECURITY_REPORT" | awk '{print $1}')" = "$IMAGE_SECURITY_REPORT_SHA256"
+test "$(sha256sum "$IMAGE_SBOM" | awk '{print $1}')" = "$IMAGE_SBOM_SHA256"
 
 SOURCE_HEAD="$(git -C "$SOURCE_CHECKOUT" rev-parse --verify 'HEAD^{commit}')"
 test "$SOURCE_HEAD" = "$RELEASE_COMMIT"
@@ -373,8 +383,32 @@ IMAGE_DETAILS_JSON="$(rehearsal_aws ecr describe-images --region "$AWS_REGION" \
 jq -e --arg image_digest "$IMAGE_DIGEST" '
   (.imageDetails | length == 1)
   and (.imageDetails[0].imageDigest == $image_digest)
-  and (.imageDetails[0].imageScanStatus.status == "COMPLETE")
 ' <<<"$IMAGE_DETAILS_JSON" >/dev/null
+
+# ECR Basic Scanning does not support scratch images, and its legacy summary
+# fields are not authoritative here. Require a pinned independent scanner report
+# and SBOM generated from the exact immutable registry reference instead.
+jq -e --arg image_reference "$IMAGE_REFERENCE" '
+  (.ArtifactName == $image_reference)
+  and (.Metadata | type == "object")
+  and (.Metadata.RepoDigests | type == "array" and index($image_reference) != null)
+  and (.Results | type == "array")
+  and (([.Results[]? | select(.Class == "os-pkgs") | .Packages[]?] | length) > 0)
+  and (([.Results[]? | select(.Class == "lang-pkgs") | .Packages[]?] | length) > 0)
+  and (([
+    .Results[]?.Vulnerabilities[]?
+    | select(.Severity == "CRITICAL" or .Severity == "HIGH")
+  ] | length) == 0)
+' "$IMAGE_SECURITY_REPORT" >/dev/null
+jq -e --arg image_reference "$IMAGE_REFERENCE" '
+  (.bomFormat == "CycloneDX")
+  and (.specVersion | type == "string")
+  and (.components | type == "array" and length > 0)
+  and (([
+    .metadata.component.properties[]?
+    | select(.name == "aquasecurity:trivy:RepoDigest" and .value == $image_reference)
+  ] | length) == 1)
+' "$IMAGE_SBOM" >/dev/null
 
 IMAGE_MANIFEST_JSON="$(rehearsal_aws ecr batch-get-image --region "$AWS_REGION" \
   --registry-id "$MANIFEST_ACCOUNT_ID" --repository-name "$ECR_REPOSITORY_NAME" \

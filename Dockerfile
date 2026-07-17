@@ -21,10 +21,12 @@ COPY package.json bun.lock tsconfig.json ./
 COPY --chown=bun:bun src ./src
 
 FROM base AS runtime-files
-RUN mkdir -p /runtime/usr/local/bin /runtime/lib /runtime/usr/lib \
+RUN mkdir -p /runtime/usr/local/bin /runtime/lib /runtime/lib/apk/db /runtime/usr/lib \
     /runtime/opt/emails/certs /runtime/tmp /runtime/home/bun/.hasna/emails /runtime/etc \
     /runtime/app /runtime/app/data /runtime/home/bun \
     && cp -a /usr/local/bin/bun /runtime/usr/local/bin/bun \
+    && cp -a /etc/alpine-release /runtime/etc/alpine-release \
+    && cp -a /lib/apk/db/installed /runtime/lib/apk/db/installed \
     && ln -sf bun /runtime/usr/local/bin/bunx \
     && ln -sf bun /runtime/usr/local/bin/node \
     && cp -a /lib/ld-musl-*.so.1 /runtime/lib/ \
@@ -45,6 +47,13 @@ ADD --checksum=sha256:e5bb2084ccf45087bda1c9bffdea0eb15ee67f0b91646106e466714f9d
 
 FROM scratch
 
+ARG VERSION=dev
+ARG REVISION=unknown
+
+LABEL org.opencontainers.image.source="https://github.com/hasna/emails" \
+      org.opencontainers.image.version="$VERSION" \
+      org.opencontainers.image.revision="$REVISION"
+
 ENV HOME=/home/bun \
     PATH=/usr/local/bin \
     EMAILS_MODE=self_hosted \
@@ -55,9 +64,9 @@ ENV HOME=/home/bun \
     PORT=8080
 
 COPY --from=runtime-files /runtime/ /
-COPY --chown=1000:1000 --from=build /app/node_modules ./node_modules
+COPY --chown=1000:1000 --from=build /app/node_modules /app/node_modules
 COPY --chown=1000:1000 --from=build /app/package.json /app/package.json
-COPY --chown=1000:1000 --from=build /app/src ./src
+COPY --chown=1000:1000 --from=build /app/src /app/src
 
 WORKDIR /app
 EXPOSE 8080
@@ -65,6 +74,7 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD ["/usr/local/bin/bun", "-e", "const port = Number(process.env.PORT || 8080); const r=await fetch(`http://127.0.0.1:${port}/ready`);process.exit(r.ok?0:1)"]
 
+VOLUME ["/tmp"]
 USER 1000:1000
 ENTRYPOINT ["/usr/local/bin/bun"]
 CMD ["src/server/index.ts"]

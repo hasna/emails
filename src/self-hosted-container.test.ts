@@ -45,6 +45,8 @@ describe("self-hosted container TLS contract", () => {
     expect(dockerfile).not.toMatch(/"libssl3t64=\$\{OPENSSL_VERSION\}"/);
     expect(dockerfile).not.toMatch(/"openssl-provider-legacy=\$\{OPENSSL_VERSION\}"/);
     expect(dockerfile).not.toMatch(/^FROM(?:\s+--platform=\S+)?\s+oven\/bun:(?:1|latest)(?:\s|$)/m);
+    expect(runtimeFilesStage).toContain("cp -a /etc/alpine-release /runtime/etc/alpine-release");
+    expect(runtimeFilesStage).toContain("cp -a /lib/apk/db/installed /runtime/lib/apk/db/installed");
   });
 
   test("pins the official RDS trust bundle by content digest", () => {
@@ -58,12 +60,19 @@ describe("self-hosted container TLS contract", () => {
   });
 
   test("locks runtime copy semantics and ownership", () => {
+    expect(scratchStage).toContain("ARG VERSION=dev");
+    expect(scratchStage).toContain("ARG REVISION=unknown");
+    expect(scratchStage).toContain('org.opencontainers.image.source="https://github.com/hasna/emails"');
+    expect(scratchStage).toContain('org.opencontainers.image.version="$VERSION"');
+    expect(scratchStage).toContain('org.opencontainers.image.revision="$REVISION"');
     expect(scratchStage.match(/^COPY .+$/gm)).toEqual([
       "COPY --from=runtime-files /runtime/ /",
-      "COPY --chown=1000:1000 --from=build /app/node_modules ./node_modules",
+      "COPY --chown=1000:1000 --from=build /app/node_modules /app/node_modules",
       "COPY --chown=1000:1000 --from=build /app/package.json /app/package.json",
-      "COPY --chown=1000:1000 --from=build /app/src ./src",
+      "COPY --chown=1000:1000 --from=build /app/src /app/src",
     ]);
+    expect(scratchStage).not.toContain("/app/node_modules ./node_modules");
+    expect(scratchStage).not.toContain("/app/src ./src");
   });
 
   test("enforces exact runtime permissions and runtime user", () => {
@@ -72,6 +81,7 @@ describe("self-hosted container TLS contract", () => {
     expect(runtimeFilesStage).toContain("printf '%s\\n' 'bun:x:1000:' > /runtime/etc/group");
     expect(runtimeFilesStage).toContain("chmod 0644 /runtime/etc/passwd /runtime/etc/group");
     expect(dockerfile).toContain("chmod 1777 /runtime/tmp");
+    expect(dockerfile).toContain('VOLUME ["/tmp"]');
     expect(dockerfile).toContain("chmod 0700 /runtime/home/bun/.hasna/emails");
     expect(dockerfile).toContain(
       "chown -R 1000:1000 /runtime/home/bun /runtime/home/bun/.hasna/emails /runtime/app /runtime/app/data",
