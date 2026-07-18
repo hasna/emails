@@ -312,6 +312,30 @@ describe("self-hosted container TLS contract", () => {
     }
   });
 
+  test("pins cutover recovery to the forward-only migration 0018 boundary", () => {
+    expect(cutoverRunbook).toContain(
+      "## Attachment-provenance and send-intent recovery migration gates (0017-0018)",
+    );
+    expect(cutoverRunbook).toMatch(
+      /Migration\s+0018 is the latest forward-only production cutover\./,
+    );
+    expect(cutoverRunbook).toMatch(
+      /A pre-0018 release, including 1\.2\.6, is not\s+a valid restart, scale-out, or rollback target after 0018 commits\./,
+    );
+    expect(cutoverRunbook).toMatch(
+      /Leave\s+`enable_automatic_deployment_rollback = false` through the observation window\./,
+    );
+    expect(cutoverRunbook).toContain(
+      '.alreadyApplied | index("0018_send_intent_recovery") != null',
+    );
+    expect(cutoverRunbook).toContain(
+      "Use only a corrected 0018-compatible image",
+    );
+    expect(cutoverRunbook).not.toContain(
+      "Use only a corrected 0017-compatible image",
+    );
+  });
+
   test("keeps the ECS health check executable without a shell", () => {
     expect(dockerfile).toContain("FROM scratch");
     expect(ecsCompute).not.toContain('command     = ["CMD-SHELL"');

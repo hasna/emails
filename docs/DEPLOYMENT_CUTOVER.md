@@ -38,16 +38,20 @@ rollback target. Roll forward to a corrected tenant-aware image, or execute an
 operator-reviewed explicit schema recovery plan while every writer remains
 stopped.
 
-## Attachment-provenance migration gate (0017)
+## Attachment-provenance and send-intent recovery migration gates (0017-0018)
 
-Migration 0017 is a forward-only production cutover. A pre-0017 release does
-not recognize the new immutable provenance ledger entry and is not a valid
-restart, scale-out, or rollback target after 0017 commits. This cutover requires
-controlled downtime. The old worker and API are both at zero before the ledger
-advances; SQS buffers new mail while no worker runs. Only the release worker is
-started after migration, and its privacy-safe provenance audit must exit zero
-before the API is started. Leave `enable_automatic_deployment_rollback = false`
-through the observation window.
+Migration 0017 introduces the immutable attachment-provenance ledger. Migration
+0018 is the latest forward-only production cutover. It adds durable send-intent
+recovery state, and older binaries reject its applied ledger row as an unknown
+migration and fail readiness closed. A pre-0018 release, including 1.2.6, is not
+a valid restart, scale-out, or rollback target after 0018 commits.
+
+This cutover requires controlled downtime. The old worker and API are both at
+zero before the ledger advances; SQS buffers new mail while no worker runs. Only
+the release worker from an image whose migration set recognizes both 0017 and
+0018 is started after migration, and its privacy-safe provenance audit must exit
+zero before the API is started. Leave
+`enable_automatic_deployment_rollback = false` through the observation window.
 
 > **Production hard stop:** this generic Terraform rehearsal is **UNUSABLE for
 > the actual live topology**. Never run, copy, or paste any command block below
@@ -101,7 +105,7 @@ The reviewed live plan must enforce this order:
    queue/DLQ relationship, and database-specific recovery artifact.
 2. Disable automatic rollback on both live services before any forward-only
    migration or service stop. Preserve the previous definitions only as
-   pre-migration anchors; they are not rollback targets after 0017.
+   pre-migration anchors; they are not rollback targets after 0018.
 3. Stop the worker first. Prove desired and running counts are zero, its task
    list is empty, and the exact queue has three consecutive zero in-flight
    reads. Require exact zero visible and in-flight messages on the exact DLQ.
@@ -111,7 +115,8 @@ The reviewed live plan must enforce this order:
 5. Take or verify a database-specific snapshot, clone, or restore artifact for
    the Emails database. Whole-instance recovery is forbidden when the database
    service is shared. Run the release migration definition, require migration
-   and status exits of zero, valid checksums, `pending: []`, and 0017 applied.
+   and status exits of zero, valid checksums, `pending: []`, and both 0017 and
+   0018 applied.
 6. Start only the release worker, drain the exact queue to zero visible and
    in-flight messages, keep the exact DLQ at zero, and require
    `inbound-provenance-audit --since "$FENCE_AT"` to exit zero before the API.
@@ -123,10 +128,12 @@ The reviewed live plan must enforce this order:
    smoke, or API promotion. Bootstrap approval must name the one-time operator,
    key id, idempotency proof, wrong-key denial, and post-bootstrap revocation.
 
-After 0017 begins, recovery is a compatible roll-forward or a database-specific
-restore while every writer is stopped. A pre-0017 release is never a recovery
-target, and automatic rollback remains disabled until a later reviewed change
-makes a completed compatible deployment the rollback target.
+After 0018 begins, the only application-image recovery target is an
+0018-compatible roll-forward. A database-specific restore while every writer is
+stopped is a separate, operator-reviewed disaster-recovery path, not an image
+rollback. A pre-0018 release is never a recovery target, and automatic rollback
+remains disabled until a later reviewed change makes a completed 0018-compatible
+deployment the rollback target.
 
 The commands below are only an evidence-producing isolated rehearsal template.
 Run them from `deploy/aws` against a disposable, explicitly named rehearsal
@@ -475,9 +482,9 @@ rehearsal_terraform plan -var-file="$TFVARS" -var="container_image=$IMAGE_REFERE
   -target=aws_ecs_task_definition.migration \
   -target=aws_ecs_task_definition.worker \
   -target=aws_ecs_task_definition.api \
-  -out=0017-definitions.tfplan
-terraform show 0017-definitions.tfplan
-rehearsal_terraform apply 0017-definitions.tfplan
+  -out=0018-definitions.tfplan
+terraform show 0018-definitions.tfplan
+rehearsal_terraform apply 0018-definitions.tfplan
 
 MIGRATION_DEF="$(terraform output -raw migration_task_definition_arn)"
 WORKER_DEF="$(terraform output -raw worker_task_definition_arn)"
@@ -609,8 +616,8 @@ test "$API_ZERO_TASK_COUNT" = "0"
 # task-list, and queue checks prove every old writer is gone. PostgreSQL fixes a
 # row's created_at default at transaction start, so a pre-fence old transaction
 # could otherwise commit after the cutoff while remaining outside the audit.
-# This exact release one-shot does not query migration 0017 tables and is safe
-# before the ledger advances.
+# This exact release one-shot does not query migration 0017 or 0018 tables and
+# is safe before the ledger advances.
 FENCE_OVERRIDES='{"containerOverrides":[{"name":"worker","command":["src/server/index.ts","inbound-provenance-fence"]}]}'
 FENCE_TASK="$(rehearsal_aws ecs run-task --region "$AWS_REGION" --cluster "$CLUSTER" \
   --launch-type FARGATE --task-definition "$WORKER_DEF" \
@@ -642,7 +649,7 @@ services must subsequently pass the same machine-readable desired/running-zero
 and empty-task-list checks before the release one-shot captures `FENCE_AT`. Record
 the service JSON, task counts, queue/DLQ counts, and PostgreSQL-derived cutoff.
 
-### 2. Migrate and verify ledger 0017
+### 2. Migrate and verify ledger 0018
 
 The three reviewed release definitions are already staged, every old task is
 machine-proven absent, the stable queue in-flight gate passed, and only then was
@@ -706,6 +713,7 @@ jq -e '
   and (.pending | type == "array" and length == 0)
   and (.alreadyApplied | type == "array" and all(.[]; type == "string"))
   and (.alreadyApplied | index("0017_inbound_message_source_provenance") != null)
+  and (.alreadyApplied | index("0018_send_intent_recovery") != null)
 ' <<<"$STATUS_JSON" >/dev/null
 printf '%s\n' "$STATUS_JSON"
 ```
@@ -713,10 +721,11 @@ printf '%s\n' "$STATUS_JSON"
 Both tasks must exit zero, and the exact status task's exact CloudWatch stream
 must contain one object with only the source-defined `applied`, `alreadyApplied`,
 and `pending` fields. The machine gate requires `pending: []`, no dry-run
-applications, and `0017_inbound_message_source_provenance` in `alreadyApplied`.
+applications, `0017_inbound_message_source_provenance` in `alreadyApplied`, and
+`0018_send_intent_recovery` in `alreadyApplied`.
 `emails db status --json` emits that object only after `MigrationLedger` validates
 every stored `schema_migrations` checksum; checksum drift exits before JSON and
-therefore cannot satisfy this gate. Do not restart or scale any pre-0017 release
+therefore cannot satisfy this gate. Do not restart or scale any pre-0018 release
 task after this point.
 
 ### 3. Start only the release worker, drain the buffer, and audit
@@ -822,9 +831,9 @@ rehearsal_terraform plan -var-file="$TFVARS" -var="container_image=$IMAGE_REFERE
   -var="container_architecture=X86_64" \
   -var="worker_desired_count=$ORIGINAL_WORKER_COUNT" \
   -var="api_desired_count=$ORIGINAL_API_COUNT" \
-  -var="enable_automatic_deployment_rollback=false" -out=0017-reconcile.tfplan
-terraform show 0017-reconcile.tfplan
-rehearsal_terraform apply 0017-reconcile.tfplan
+  -var="enable_automatic_deployment_rollback=false" -out=0018-reconcile.tfplan
+terraform show 0018-reconcile.tfplan
+rehearsal_terraform apply 0018-reconcile.tfplan
 ```
 
 The final un-targeted plan must contain no unexpected service, queue, schema, or
@@ -832,10 +841,10 @@ network change. Record the image digest, all task ARNs/definitions and exit
 codes, queue/DLQ snapshots, `FENCE_AT`, aggregate audit JSON, `/version`,
 `/ready`, and CloudWatch locations.
 
-Rollback after ledger 0017 is always a compatible roll-forward. A failed API
+Rollback after ledger 0018 is always a compatible roll-forward. A failed API
 activation leaves the API at zero while the reviewed release worker continues
 to protect the queue, or both services may be returned to zero for
-investigation. Use only a corrected 0017-compatible image, repeat the
+investigation. Use only a corrected 0018-compatible image, repeat the
 definition, ledger, worker, audit, and API gates, and reconcile Terraform. A
-pre-0017 release is never a rollback image. Never remove or rewrite the 0017
-ledger row.
+pre-0018 release, including 1.2.6, is never a rollback image. Never remove or
+rewrite the 0017 or 0018 ledger row.
