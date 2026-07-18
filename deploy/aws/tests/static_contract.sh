@@ -102,13 +102,18 @@ fi
 for exact_openssl_revision in \
   "'libcrypto3=3.5.7-r0'" \
   "'libssl3=3.5.7-r0'" \
-  "apk info --exists 'libcrypto3=3.5.7-r0'" \
-  "apk info --exists 'libssl3=3.5.7-r0'"; do
+  "apk info --installed 'libcrypto3=3.5.7-r0'" \
+  "apk info --installed 'libssl3=3.5.7-r0'"; do
   if ! grep -Fq "$exact_openssl_revision" "$dockerfile"; then
     echo "patched base must install and verify exact OpenSSL revisions: $exact_openssl_revision" >&2
     exit 1
   fi
 done
+
+if grep -Fq 'apk info --exists' "$dockerfile"; then
+  echo "patched base must not use the unsupported apk info --exists flag" >&2
+  exit 1
+fi
 
 if grep -Eq 'lib(crypto|ssl)3>=' "$dockerfile"; then
   echo "patched base OpenSSL constraints must be exact, not minimum floors" >&2

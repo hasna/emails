@@ -66,8 +66,9 @@ describe("self-hosted container TLS contract", () => {
     expect(baseStage).toContain("apk add --no-cache --upgrade");
     expect(baseStage).toContain("'libcrypto3=3.5.7-r0'");
     expect(baseStage).toContain("'libssl3=3.5.7-r0'");
-    expect(baseStage).toContain("apk info --exists 'libcrypto3=3.5.7-r0'");
-    expect(baseStage).toContain("apk info --exists 'libssl3=3.5.7-r0'");
+    expect(baseStage).toContain("apk info --installed 'libcrypto3=3.5.7-r0'");
+    expect(baseStage).toContain("apk info --installed 'libssl3=3.5.7-r0'");
+    expect(baseStage).not.toContain("apk info --exists");
     expect(baseStage).not.toContain("libcrypto3>=");
     expect(baseStage).not.toContain("libssl3>=");
     expect(baseStage).not.toMatch(/\bapk upgrade\b/);

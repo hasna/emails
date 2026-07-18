@@ -8,8 +8,8 @@ FROM ${BUN_IMAGE} AS base
 RUN apk add --no-cache --upgrade \
       'libcrypto3=3.5.7-r0' \
       'libssl3=3.5.7-r0' \
-    && apk info --exists 'libcrypto3=3.5.7-r0' \
-    && apk info --exists 'libssl3=3.5.7-r0'
+    && apk info --installed 'libcrypto3=3.5.7-r0' \
+    && apk info --installed 'libssl3=3.5.7-r0'
 
 FROM base AS dependencies
 WORKDIR /app
