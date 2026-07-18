@@ -5,6 +5,11 @@
 ARG BUN_IMAGE=oven/bun:1.3.14-alpine@sha256:5acc90a93e91ff07bf72aa90a7c9f0fa189765aec90b47bdbf2152d2196383c0
 
 FROM ${BUN_IMAGE} AS base
+RUN apk add --no-cache --upgrade \
+      'libcrypto3=3.5.7-r0' \
+      'libssl3=3.5.7-r0' \
+    && apk info --exists 'libcrypto3=3.5.7-r0' \
+    && apk info --exists 'libssl3=3.5.7-r0'
 
 FROM base AS dependencies
 WORKDIR /app
@@ -26,7 +31,7 @@ RUN mkdir -p /runtime/usr/local/bin /runtime/lib /runtime/lib/apk/db /runtime/us
     /runtime/app /runtime/app/data /runtime/home/bun \
     && cp -a /usr/local/bin/bun /runtime/usr/local/bin/bun \
     && cp -a /etc/alpine-release /runtime/etc/alpine-release \
-    && cp -a /lib/apk/db/installed /runtime/lib/apk/db/installed \
+    && awk 'BEGIN { RS = ""; order[1] = "libgcc"; order[2] = "libstdc++"; order[3] = "musl"; expected["libgcc"] = 1; expected["libstdc++"] = 1; expected["musl"] = 1 } { name = ""; line_count = split($0, lines, "\n"); for (line = 1; line <= line_count; line++) { if (substr(lines[line], 1, 2) == "P:") { name = substr(lines[line], 3); break } } if (name in expected) { if (name in records) { print "duplicate apk package record: " name > "/dev/stderr"; failed = 1 } records[name] = $0 } } END { for (position = 1; position <= 3; position++) { name = order[position]; if (!(name in records)) { print "missing apk package record: " name > "/dev/stderr"; failed = 1 } } if (failed) exit 1; for (position = 1; position <= 3; position++) { name = order[position]; printf "%s\n\n", records[name] } }' /lib/apk/db/installed > /runtime/lib/apk/db/installed \
     && ln -sf bun /runtime/usr/local/bin/bunx \
     && ln -sf bun /runtime/usr/local/bin/node \
     && cp -a /lib/ld-musl-*.so.1 /runtime/lib/ \

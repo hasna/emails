@@ -77,12 +77,43 @@ runtime_files_stage=$(awk '/^FROM base AS runtime-files$/ { runtime = 1 } /^FROM
 
 for scanner_inventory_contract in \
   'cp -a /etc/alpine-release /runtime/etc/alpine-release' \
-  'cp -a /lib/apk/db/installed /runtime/lib/apk/db/installed'; do
+  'order[1] = "libgcc"' \
+  'order[2] = "libstdc++"' \
+  'order[3] = "musl"' \
+  'expected["libgcc"] = 1' \
+  'expected["libstdc++"] = 1' \
+  'expected["musl"] = 1' \
+  'if (name in records)' \
+  'if (!(name in records))' \
+  'if (failed) exit 1' \
+  'printf "%s\n\n", records[name]' \
+  '/lib/apk/db/installed > /runtime/lib/apk/db/installed'; do
   if ! printf '%s\n' "$runtime_files_stage" | grep -Fq "$scanner_inventory_contract"; then
-    echo "scratch runtime must preserve conservative Alpine scanner inventory: $scanner_inventory_contract" >&2
+    echo "scratch runtime must preserve its exact Alpine scanner inventory: $scanner_inventory_contract" >&2
     exit 1
   fi
 done
+
+if printf '%s\n' "$runtime_files_stage" | grep -Fq 'cp -a /lib/apk/db/installed /runtime/lib/apk/db/installed'; then
+  echo "scratch runtime scanner inventory must exclude packages absent from the final image" >&2
+  exit 1
+fi
+
+for exact_openssl_revision in \
+  "'libcrypto3=3.5.7-r0'" \
+  "'libssl3=3.5.7-r0'" \
+  "apk info --exists 'libcrypto3=3.5.7-r0'" \
+  "apk info --exists 'libssl3=3.5.7-r0'"; do
+  if ! grep -Fq "$exact_openssl_revision" "$dockerfile"; then
+    echo "patched base must install and verify exact OpenSSL revisions: $exact_openssl_revision" >&2
+    exit 1
+  fi
+done
+
+if grep -Eq 'lib(crypto|ssl)3>=' "$dockerfile"; then
+  echo "patched base OpenSSL constraints must be exact, not minimum floors" >&2
+  exit 1
+fi
 
 for runtime_identity in \
   "/runtime/home/bun/.hasna/emails /runtime/etc" \
@@ -552,15 +583,17 @@ fi
 
 for scanner_contract in \
   'aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25' \
-  'BUN_BASE_IMAGE: oven/bun:1.3.14-alpine@sha256:5acc90a93e91ff07bf72aa90a7c9f0fa189765aec90b47bdbf2152d2196383c0' \
+  'BUN_UPSTREAM_IMAGE: oven/bun:1.3.14-alpine@sha256:5acc90a93e91ff07bf72aa90a7c9f0fa189765aec90b47bdbf2152d2196383c0' \
+  'CONTAINER_RUNTIME_PATCHED_BASE_IMAGE: hasna-emails-patched-bun-base:ci' \
   'format: json' \
   'format: cyclonedx' \
   'list-all-pkgs: "true"' \
   '.Metadata.OS.Family == "alpine"' \
   'select(.Class == "os-pkgs") | .Packages[]?' \
+  'select(.Class == "os-pkgs") | .Packages[]? | .Name] | unique | sort) == ["libgcc", "libstdc++", "musl"]' \
   'select(.Class == "lang-pkgs") | .Packages[]?' \
-  'trivy-bun-base-report.json' \
-  'image-ref: ${{ env.BUN_BASE_IMAGE }}' \
+  'trivy-patched-bun-base-report.json' \
+  'image-ref: ${{ env.CONTAINER_RUNTIME_PATCHED_BASE_IMAGE }}' \
   'severity: CRITICAL,HIGH' \
   'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02'; do
   if ! grep -Fq "$scanner_contract" "$repo/.github/workflows/ci.yml"; then

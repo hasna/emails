@@ -6,18 +6,26 @@ cd "$repo_root"
 
 revision="$(git rev-parse HEAD)"
 version="$(jq -er '.version' package.json)"
+upstream_image="${BUN_UPSTREAM_IMAGE:-oven/bun:1.3.14-alpine@sha256:5acc90a93e91ff07bf72aa90a7c9f0fa189765aec90b47bdbf2152d2196383c0}"
+patched_base_image="${CONTAINER_RUNTIME_PATCHED_BASE_IMAGE:-hasna-emails-patched-bun-base:${revision:0:12}}"
 image="${CONTAINER_RUNTIME_IMAGE:-hasna-emails-runtime-contract:${revision:0:12}}"
 container="hasna-emails-runtime-contract-${revision:0:12}-$$"
 
 cleanup() {
   docker rm -f "$container" >/dev/null 2>&1 || true
   if test "${CONTAINER_RUNTIME_KEEP_IMAGE:-0}" != "1"; then
-    docker image rm -f "$image" >/dev/null 2>&1 || true
+    docker image rm -f "$image" "$patched_base_image" >/dev/null 2>&1 || true
   fi
 }
 trap cleanup EXIT
 
 docker build --platform linux/amd64 \
+  --target base \
+  --tag "$patched_base_image" \
+  --build-arg "BUN_IMAGE=$upstream_image" .
+
+docker build --platform linux/amd64 \
+  --build-arg "BUN_IMAGE=$upstream_image" \
   --build-arg "VERSION=$version" \
   --build-arg "REVISION=$revision" \
   --tag "$image" .

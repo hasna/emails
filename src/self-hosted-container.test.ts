@@ -30,6 +30,10 @@ const packageJson = JSON.parse(
 );
 const bundlePath = "/opt/emails/certs/aws-rds-global-bundle.pem";
 const bundleSha256 = "e5bb2084ccf45087bda1c9bffdea0eb15ee67f0b91646106e466714f9de3c7e3";
+const baseStage = dockerfile.slice(
+  dockerfile.indexOf("FROM ${BUN_IMAGE} AS base"),
+  dockerfile.indexOf("FROM base AS dependencies"),
+);
 const runtimeFilesStage = dockerfile.slice(
   dockerfile.indexOf("FROM base AS runtime-files"),
   dockerfile.indexOf("FROM scratch"),
@@ -56,7 +60,53 @@ describe("self-hosted container TLS contract", () => {
     expect(dockerfile).not.toMatch(/"openssl-provider-legacy=\$\{OPENSSL_VERSION\}"/);
     expect(dockerfile).not.toMatch(/^FROM(?:\s+--platform=\S+)?\s+oven\/bun:(?:1|latest)(?:\s|$)/m);
     expect(runtimeFilesStage).toContain("cp -a /etc/alpine-release /runtime/etc/alpine-release");
-    expect(runtimeFilesStage).toContain("cp -a /lib/apk/db/installed /runtime/lib/apk/db/installed");
+  });
+
+  test("applies and verifies exact reproducible OpenSSL security revisions in the shared base", () => {
+    expect(baseStage).toContain("apk add --no-cache --upgrade");
+    expect(baseStage).toContain("'libcrypto3=3.5.7-r0'");
+    expect(baseStage).toContain("'libssl3=3.5.7-r0'");
+    expect(baseStage).toContain("apk info --exists 'libcrypto3=3.5.7-r0'");
+    expect(baseStage).toContain("apk info --exists 'libssl3=3.5.7-r0'");
+    expect(baseStage).not.toContain("libcrypto3>=");
+    expect(baseStage).not.toContain("libssl3>=");
+    expect(baseStage).not.toMatch(/\bapk upgrade\b/);
+    expect(baseStage).not.toContain("rm -rf /var/cache/apk");
+  });
+
+  test("publishes scanner inventory for exactly the OS libraries copied into scratch", () => {
+    expect(runtimeFilesStage).not.toContain(
+      "cp -a /lib/apk/db/installed /runtime/lib/apk/db/installed",
+    );
+    expect(runtimeFilesStage).toContain('order[1] = "libgcc"');
+    expect(runtimeFilesStage).toContain('order[2] = "libstdc++"');
+    expect(runtimeFilesStage).toContain('order[3] = "musl"');
+    expect(runtimeFilesStage).toContain('expected["libgcc"] = 1');
+    expect(runtimeFilesStage).toContain('expected["libstdc++"] = 1');
+    expect(runtimeFilesStage).toContain('expected["musl"] = 1');
+    expect(runtimeFilesStage).toContain("if (name in records)");
+    expect(runtimeFilesStage).toContain("if (!(name in records))");
+    expect(runtimeFilesStage).toContain("if (failed) exit 1");
+    expect(runtimeFilesStage).toContain('printf "%s\\n\\n", records[name]');
+    expect(runtimeFilesStage).toContain(
+      "/lib/apk/db/installed > /runtime/lib/apk/db/installed",
+    );
+    expect(runtimeFilesStage).not.toMatch(/expected\["(?:libcrypto3|libssl3)"\]/);
+  });
+
+  test("builds, retains, and cleans a separately tagged patched base target", () => {
+    expect(runtimeSmoke).toContain(
+      'patched_base_image="${CONTAINER_RUNTIME_PATCHED_BASE_IMAGE:-hasna-emails-patched-bun-base:${revision:0:12}}"',
+    );
+    expect(runtimeSmoke).toMatch(
+      /docker build --platform linux\/amd64 \\\n+\s+--target base \\\n+\s+--tag "\$patched_base_image" \\\n+\s+--build-arg "BUN_IMAGE=\$upstream_image" \./,
+    );
+    expect(runtimeSmoke).toContain(
+      'docker image rm -f "$image" "$patched_base_image" >/dev/null 2>&1 || true',
+    );
+    expect(runtimeSmoke.indexOf('--tag "$patched_base_image"')).toBeLessThan(
+      runtimeSmoke.indexOf('--tag "$image"'),
+    );
   });
 
   test("pins the official RDS trust bundle by content digest", () => {

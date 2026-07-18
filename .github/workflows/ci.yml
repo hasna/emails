@@ -14,7 +14,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
-      BUN_BASE_IMAGE: oven/bun:1.3.14-alpine@sha256:5acc90a93e91ff07bf72aa90a7c9f0fa189765aec90b47bdbf2152d2196383c0
+      BUN_UPSTREAM_IMAGE: oven/bun:1.3.14-alpine@sha256:5acc90a93e91ff07bf72aa90a7c9f0fa189765aec90b47bdbf2152d2196383c0
+      CONTAINER_RUNTIME_PATCHED_BASE_IMAGE: hasna-emails-patched-bun-base:ci
       CONTAINER_RUNTIME_IMAGE: hasna-emails-runtime-contract:ci
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -22,7 +23,7 @@ jobs:
         env:
           CONTAINER_RUNTIME_KEEP_IMAGE: "1"
         run: ./scripts/container-runtime-smoke.sh
-      - name: Generate vulnerability report
+      - name: Generate scratch runtime vulnerability report
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: hasna-emails-runtime-contract:ci
@@ -39,20 +40,28 @@ jobs:
             (.ArtifactType == "container_image")
             and (.Metadata.OS.Family == "alpine")
             and (.Metadata.OS.Name | type == "string" and length > 0)
-            and (([.Results[]? | select(.Class == "os-pkgs") | .Packages[]?] | length) > 0)
+            and (([.Results[]? | select(.Class == "os-pkgs") | .Packages[]? | .Name] | unique | sort) == ["libgcc", "libstdc++", "musl"])
             and (([.Results[]? | select(.Class == "lang-pkgs") | .Packages[]?] | length) > 0)
           ' trivy-vulnerability-report.json >/dev/null
-      - name: Generate pinned Bun base report
+      - name: Generate patched Bun base vulnerability report
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: ${{ env.BUN_BASE_IMAGE }}
+          image-ref: ${{ env.CONTAINER_RUNTIME_PATCHED_BASE_IMAGE }}
           format: json
-          output: trivy-bun-base-report.json
+          output: trivy-patched-bun-base-report.json
           exit-code: "0"
           ignore-unfixed: "false"
           list-all-pkgs: "true"
           vuln-type: os,library
           version: v0.70.0
+      - name: Require positive patched Bun base analyzer coverage
+        run: |
+          jq -e '
+            (.ArtifactType == "container_image")
+            and (.Metadata.OS.Family == "alpine")
+            and (.Metadata.OS.Name | type == "string" and length > 0)
+            and (([.Results[]? | select(.Class == "os-pkgs") | .Packages[]?] | length) > 0)
+          ' trivy-patched-bun-base-report.json >/dev/null
       - name: Generate CycloneDX SBOM
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
@@ -67,11 +76,11 @@ jobs:
           name: container-security-${{ github.sha }}
           path: |
             trivy-vulnerability-report.json
-            trivy-bun-base-report.json
+            trivy-patched-bun-base-report.json
             trivy.cdx.json
           if-no-files-found: error
           retention-days: 14
-      - name: Reject high or critical findings
+      - name: Reject high or critical scratch runtime findings
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: hasna-emails-runtime-contract:ci
@@ -81,19 +90,19 @@ jobs:
           vuln-type: os,library
           severity: CRITICAL,HIGH
           version: v0.70.0
-      - name: Reject high or critical pinned Bun base findings
+      - name: Reject high or critical patched Bun base findings
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: ${{ env.BUN_BASE_IMAGE }}
+          image-ref: ${{ env.CONTAINER_RUNTIME_PATCHED_BASE_IMAGE }}
           format: table
           exit-code: "1"
           ignore-unfixed: "false"
           vuln-type: os,library
           severity: CRITICAL,HIGH
           version: v0.70.0
-      - name: Remove smoke image
+      - name: Remove local smoke images
         if: always()
-        run: docker image rm -f hasna-emails-runtime-contract:ci || true
+        run: docker image rm -f hasna-emails-runtime-contract:ci hasna-emails-patched-bun-base:ci || true
 
   verify:
     runs-on: ubuntu-24.04
