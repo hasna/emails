@@ -72,7 +72,7 @@ WORKDIR /app
 EXPOSE 8080
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD ["/usr/local/bin/bun", "-e", "const port = Number(process.env.PORT || 8080); const r=await fetch(`http://127.0.0.1:${port}/ready`);process.exit(r.ok?0:1)"]
+  CMD ["/usr/local/bin/bun", "-e", "const port = Number(process.env.PORT || 8080); const mode = process.env.EMAILS_MODE?.trim().toLowerCase(); const path = mode === 'local' ? '/api/providers?limit=1' : '/ready'; const r=await fetch(`http://127.0.0.1:${port}${path}`);process.exit(r.ok?0:1)"]
 
 VOLUME ["/tmp"]
 USER 1000:1000

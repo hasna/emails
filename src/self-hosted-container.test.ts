@@ -3,6 +3,16 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 const dockerfile = readFileSync(resolve(import.meta.dir, "../Dockerfile"), "utf8");
+const runtimeSmoke = readFileSync(
+  resolve(import.meta.dir, "../scripts/container-runtime-smoke.sh"),
+  "utf8",
+);
+const healthcheckCommand = dockerfile.match(
+  /HEALTHCHECK[^\n]*\\\n\s*CMD (\[[^\n]+\])/,
+)?.[1];
+if (!healthcheckCommand) throw new Error("Dockerfile HEALTHCHECK command is missing");
+const healthcheckScript = (JSON.parse(healthcheckCommand) as string[])[2];
+if (!healthcheckScript) throw new Error("Dockerfile HEALTHCHECK script is missing");
 const ecsCompute = readFileSync(
   resolve(import.meta.dir, "../deploy/aws/compute.tf"),
   "utf8",
@@ -104,6 +114,42 @@ describe("self-hosted container TLS contract", () => {
     expect(dockerfile).toContain('ENTRYPOINT ["/usr/local/bin/bun"]');
     expect(dockerfile).toContain("CMD [\"src/server/index.ts\"]");
     expect(dockerfile).toContain("process.env.PORT");
+  });
+
+  test("uses a bounded SQLite-backed probe for every accepted local mode spelling", async () => {
+    expect(runtimeSmoke).toContain("--env EMAILS_MODE=local");
+    expect(runtimeSmoke).toContain(
+      'fetch("http://127.0.0.1:8080/api/providers?limit=1")',
+    );
+    expect(runtimeSmoke).not.toContain(
+      'fetch("http://127.0.0.1:8080/ready")',
+    );
+    expect(healthcheckScript).toContain("?.trim().toLowerCase()");
+
+    const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as new (
+      ...args: string[]
+    ) => (...args: unknown[]) => Promise<void>;
+    const selectedUrl = async (mode?: string) => {
+      let url: string | undefined;
+      let exitCode: number | undefined;
+      const env = mode === undefined ? { PORT: "8123" } : { EMAILS_MODE: mode, PORT: "8123" };
+      await new AsyncFunction("process", "fetch", healthcheckScript)(
+        { env, exit: (code: number) => { exitCode = code; } },
+        async (input: string) => {
+          url = input;
+          return { ok: true };
+        },
+      );
+      expect(exitCode).toBe(0);
+      return url;
+    };
+
+    for (const mode of ["local", "LOCAL", "  LOCAL  ", "LoCaL"]) {
+      expect(await selectedUrl(mode)).toBe("http://127.0.0.1:8123/api/providers?limit=1");
+    }
+    for (const mode of [undefined, "self_hosted", " SELF_HOSTED "]) {
+      expect(await selectedUrl(mode)).toBe("http://127.0.0.1:8123/ready");
+    }
   });
 
   test("keeps ECS commands compatible with the Bun image entrypoint", () => {

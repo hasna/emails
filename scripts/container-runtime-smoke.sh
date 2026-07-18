@@ -66,7 +66,7 @@ ready=0
 for _ in $(seq 1 30); do
   if docker run --rm --platform linux/amd64 --network "container:$container" \
     --entrypoint /usr/local/bin/bun "$image" -e '
-      const response = await fetch("http://127.0.0.1:8080/ready");
+      const response = await fetch("http://127.0.0.1:8080/api/providers?limit=1");
       if (!response.ok) process.exit(1);
     ' >/dev/null 2>&1; then
     ready=1
