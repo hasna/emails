@@ -107,8 +107,8 @@ describe("generated self-hosted SDK identity contract", () => {
         fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
           const request = new Request(input, init);
           requests.push(request);
-          if (request.method === "DELETE") {
-            return new Response(JSON.stringify({ deleted: true, id: exactMessageId }), {
+          if (request.method === "GET") {
+            return new Response(JSON.stringify({ message: { id: exactMessageId } }), {
               status: 200,
               headers: { "Content-Type": "application/json" },
             });
@@ -151,11 +151,42 @@ describe("generated self-hosted SDK identity contract", () => {
         message: { subject: "backward-compatible public message" },
       });
 
-      await client.deleteMessage(projection!.id);
+      await client.getMessage(projection!.id);
       expect(new URL(requests[1]!.url).pathname).toBe(`/v1/messages/${exactMessageId}`);
-      expect(requests[1]!.method).toBe("DELETE");
+      expect(requests[1]!.method).toBe("GET");
     });
   }
+
+  it("preserves pending intents returned by a failed policy-state transition", async () => {
+    const exactMessageId = "12345678-1234-4234-8234-123456789abc";
+    const client = new EmailsSelfHostClient({
+      baseUrl: "https://emails.example.test",
+      apiKey: "api-key-placeholder",
+      fetch: (async () => new Response(JSON.stringify({
+        error: "policy transition failed",
+        retry_safe: false,
+        message: { id: exactMessageId, send_state: "pending" },
+      }), {
+        status: 409,
+        headers: { "Content-Type": "application/json" },
+      })) as typeof fetch,
+    });
+    try {
+      await client.sendMessage({
+        from: "sender@example.test",
+        to: ["recipient@example.test"],
+        subject: "subject",
+        idempotency_key: "tenant-scoped-key",
+      });
+      throw new Error("expected ApiError");
+    } catch (error) {
+      expect(error).toBeInstanceOf(ApiError);
+      expect((error as ApiError).sendIntentMessage).toEqual({
+        id: exactMessageId,
+        send_state: "pending",
+      });
+    }
+  });
 
   it("rejects non-canonical ids and non-recovery states from error projections", async () => {
     const bodies = [

@@ -14,6 +14,7 @@ import { checkHealth } from "../../storage-kit/index.js";
 import {
   EmailsSelfHostedStore,
   IdempotencyKeyConflictError,
+  SendIntentDeletionForbiddenError,
   SendIntentTombstonedError,
   CrossTenantReferenceError,
   InboundDomainRouteConflictError,
@@ -1001,9 +1002,20 @@ export async function handleSelfHostedRequest(
         if (!auth.ok) return auth.response;
         const resolved = await resolveMessageIdOrError(auth.store, id);
         if (!resolved.ok) return resolved.response;
-        return (await auth.store.deleteMessage(resolved.id))
-          ? json(200, { deleted: true, id: resolved.id })
-          : json(404, { error: "message not found" });
+        try {
+          return (await auth.store.deleteMessage(resolved.id))
+            ? json(200, { deleted: true, id: resolved.id })
+            : json(404, { error: "message not found" });
+        } catch (error) {
+          if (error instanceof SendIntentDeletionForbiddenError) {
+            return json(409, {
+              error: error.message,
+              message: sendIntentMessage(error.record),
+              retry_safe: false,
+            });
+          }
+          throw error;
+        }
       }
       return json(405, { error: "method not allowed" });
     }

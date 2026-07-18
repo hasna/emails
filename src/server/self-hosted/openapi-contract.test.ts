@@ -99,7 +99,11 @@ describe("self-hosted OpenAPI identity and authorization contract", () => {
     expect(send?.description).toContain("owner/admin");
     expect(send?.responses).toHaveProperty("200");
     expect(send?.responses).toHaveProperty("202");
+    expect(send?.responses).toHaveProperty("400");
+    expect(send?.responses).toHaveProperty("401");
+    expect(send?.responses).toHaveProperty("403");
     expect(send?.responses).toHaveProperty("409");
+    expect(send?.responses).toHaveProperty("429");
     expect(send?.responses).toHaveProperty("502");
     const sendError = emailsSelfHostedOpenApi.components?.schemas?.SendMessageError as
       | { properties?: { message?: { oneOf?: Array<{ $ref?: string }>; nullable?: boolean } } }
@@ -129,7 +133,13 @@ describe("self-hosted OpenAPI identity and authorization contract", () => {
     expect(lookup?.operationId).toBe("lookupSendIntent");
     expect(cancel?.operationId).toBe("cancelSendIntent");
     expect(lookup?.responses).toHaveProperty("200");
+    expect(lookup?.responses).toHaveProperty("400");
+    expect(lookup?.responses).toHaveProperty("401");
+    expect(lookup?.responses).toHaveProperty("403");
     expect(cancel?.responses).toHaveProperty("200");
+    expect(cancel?.responses).toHaveProperty("400");
+    expect(cancel?.responses).toHaveProperty("401");
+    expect(cancel?.responses).toHaveProperty("403");
     expect(emailsSelfHostedOpenApi.components?.schemas?.SendIntentMessage).toMatchObject({
       type: "object",
       additionalProperties: false,
@@ -142,6 +152,15 @@ describe("self-hosted OpenAPI identity and authorization contract", () => {
         },
       },
     });
+  });
+
+  it("documents durable send-intent deletion refusal", () => {
+    const deletion = paths["/v1/messages/{id}"]?.delete;
+    expect(deletion?.responses).toHaveProperty("200");
+    expect(deletion?.responses).toHaveProperty("401");
+    expect(deletion?.responses).toHaveProperty("403");
+    expect(deletion?.responses).toHaveProperty("404");
+    expect(deletion?.responses).toHaveProperty("409");
   });
 
   it("publishes a bounded typed attachment-content operation", () => {

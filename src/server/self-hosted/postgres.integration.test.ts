@@ -10,6 +10,7 @@ import {
 import { DEFAULT_TENANT_ID, emailsSelfHostedMigrations } from "./migrations.js";
 import {
   EmailsSelfHostedStore,
+  SendIntentDeletionForbiddenError,
   SendIntentTombstonedError,
   type MessageInput,
   type TenantScopedStore,
@@ -292,6 +293,40 @@ describe("self-hosted Postgres integration", () => {
         message: { id: reserved.record.id, send_state: state },
       });
     }
+
+    const durableKey = `durable-delete-${crypto.randomUUID()}`;
+    const durable = await b.reserveSendIntent({ ...input, idempotency_key: durableKey });
+    expect((await b.claimSendIntent(durable.record.id))?.send_state).toBe("sending");
+    expect((await b.completeSendIntent(durable.record.id, "provider-durable")).send_state).toBe("sent");
+    await expect(b.deleteMessage(durable.record.id)).rejects.toBeInstanceOf(SendIntentDeletionForbiddenError);
+    const durableReplay = await b.reserveSendIntent({ ...input, idempotency_key: durableKey });
+    expect(durableReplay).toMatchObject({
+      created: false,
+      record: { id: durable.record.id, send_state: "sent" },
+    });
+
+    const inFlightKey = `in-flight-delete-${crypto.randomUUID()}`;
+    const inFlight = await b.reserveSendIntent({ ...input, idempotency_key: inFlightKey });
+    const [claimResult, deletionResult] = await Promise.allSettled([
+      b.claimSendIntent(inFlight.record.id),
+      b.deleteMessage(inFlight.record.id),
+    ]);
+    expect(claimResult.status).toBe("fulfilled");
+    if (claimResult.status === "fulfilled") expect(claimResult.value?.send_state).toBe("sending");
+    expect(deletionResult.status).toBe("rejected");
+    if (deletionResult.status === "rejected") {
+      expect(deletionResult.reason).toBeInstanceOf(SendIntentDeletionForbiddenError);
+    }
+    expect((await b.getMessage(inFlight.record.id))?.send_state).toBe("sending");
+
+    const inbound = await b.createMessage({
+      direction: "inbound",
+      from_addr: "inbound@example.test",
+      to_addrs: ["recipient@example.test"],
+      subject: "deletable inbound",
+    });
+    expect(await b.deleteMessage(inbound.id)).toBe(true);
+    expect(await b.getMessage(inbound.id)).toBeNull();
 
     const absentKey = `absent-${crypto.randomUUID()}`;
     expect(await a.cancelSendIntent(absentKey)).toMatchObject({

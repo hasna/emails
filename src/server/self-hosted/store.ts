@@ -285,6 +285,13 @@ export class SendIntentAtomicityUnavailableError extends Error {
   }
 }
 
+export class SendIntentDeletionForbiddenError extends Error {
+  constructor(public readonly record: MessageRecord) {
+    super("send-intent ledger rows cannot be deleted because their idempotency fence is durable");
+    this.name = "SendIntentDeletionForbiddenError";
+  }
+}
+
 export interface SendIntentLookupResult {
   found: boolean;
   tombstoned: boolean;
@@ -2243,11 +2250,21 @@ export class TenantScopedStore {
   }
 
   async deleteMessage(id: string): Promise<boolean> {
+    const current = await this.getMessage(id);
+    if (!current) return false;
+    if (current.idempotency_key) throw new SendIntentDeletionForbiddenError(current);
     const rows = await this.client.many<{ id: string }>(
-      `DELETE FROM messages WHERE id = $1 AND tenant_id = $2 RETURNING id`,
+      `DELETE FROM messages
+       WHERE id = $1 AND tenant_id = $2 AND idempotency_key IS NULL
+       RETURNING id`,
       [id, this.tenantId],
     );
-    return rows.length > 0;
+    if (rows.length > 0) return true;
+    // The idempotency key is immutable, but fail closed if a non-conforming
+    // concurrent writer attached one between the read and conditional delete.
+    const raced = await this.getMessage(id);
+    if (raced?.idempotency_key) throw new SendIntentDeletionForbiddenError(raced);
+    return false;
   }
 
   // ---- mail-views (threads / mailboxes / raw) ----------------------------

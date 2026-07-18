@@ -40,6 +40,13 @@ function messagesClient(): { client: TypedQueryClient; rows: Record<string, unkn
     },
     async many<T>(sql: string, _params?: readonly unknown[]): Promise<T[]> {
       if (sql.includes("SELECT 1")) return [{ ok: 1 } as unknown as T];
+      if (sql.startsWith("DELETE FROM messages")) {
+        const index = rows.findIndex((row) => row["id"] === (_params ?? [])[0]
+          && row["idempotency_key"] == null);
+        if (index < 0) return [] as T[];
+        const [deleted] = rows.splice(index, 1);
+        return [{ id: deleted!["id"] } as unknown as T];
+      }
       if (sql.includes("FROM messages")) {
         const sorted = [...rows].sort((a, b) => {
           const av = String(a["received_at"] ?? a["created_at"] ?? "");
@@ -534,6 +541,94 @@ describe("Emails self-hosted inbound messages", () => {
     expect(replay.message.idempotency_key).toBeUndefined();
     expect(replay.message.send_payload_hash).toBeUndefined();
     expect(sends).toBe(1);
+  });
+
+  it("refuses to delete a completed intent and preserves its replay fence", async () => {
+    const d = deps();
+    let sends = 0;
+    d.sender = { provider: "ses", send: async () => { sends++; return "ses-durable"; } };
+    const request = () => new Request("http://svc/v1/messages/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": writeToken() },
+      body: JSON.stringify({
+        from: "me@example.com",
+        to: ["you@example.com"],
+        subject: "durable",
+        idempotency_key: "durable-delete-key",
+      }),
+    });
+    const first = await handleSelfHostedRequest(d, request());
+    const firstBody = await first!.json();
+    const deletion = await handleSelfHostedRequest(d, new Request(
+      `http://svc/v1/messages/${firstBody.message.id}`,
+      { method: "DELETE", headers: { "x-api-key": writeToken() } },
+    ));
+    expect(deletion?.status).toBe(409);
+    expect(await deletion!.json()).toMatchObject({
+      retry_safe: false,
+      message: { id: firstBody.message.id, send_state: "sent" },
+    });
+    const replay = await handleSelfHostedRequest(d, request());
+    expect(replay?.status).toBe(200);
+    expect((await replay!.json()).idempotent_replay).toBe(true);
+    expect(sends).toBe(1);
+  });
+
+  it("refuses deletion while provider delivery is in flight", async () => {
+    const d = deps();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let sends = 0;
+    d.sender = {
+      provider: "ses",
+      send: async () => {
+        sends++;
+        await gate;
+        return "ses-in-flight";
+      },
+    };
+    const request = () => new Request("http://svc/v1/messages/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": writeToken() },
+      body: JSON.stringify({
+        from: "me@example.com",
+        to: ["you@example.com"],
+        subject: "in flight",
+        idempotency_key: "in-flight-delete-key",
+      }),
+    });
+    const first = handleSelfHostedRequest(d, request());
+    await Bun.sleep(1);
+    const intent = await d.store.getSendIntentByIdempotencyKey("in-flight-delete-key");
+    expect(intent?.send_state).toBe("sending");
+    const deletion = await handleSelfHostedRequest(d, new Request(
+      `http://svc/v1/messages/${intent!.id}`,
+      { method: "DELETE", headers: { "x-api-key": writeToken() } },
+    ));
+    expect(deletion?.status).toBe(409);
+    expect(await deletion!.json()).toMatchObject({
+      retry_safe: false,
+      message: { id: intent!.id, send_state: "sending" },
+    });
+    const concurrentRetry = await handleSelfHostedRequest(d, request());
+    expect(concurrentRetry?.status).toBe(202);
+    expect((await concurrentRetry!.json()).in_progress).toBe(true);
+    release();
+    expect((await first)?.status).toBe(202);
+    expect(sends).toBe(1);
+  });
+
+  it("keeps ordinary inbound messages deletable", async () => {
+    const d = deps();
+    const created = await handleSelfHostedRequest(d, post({ ...INBOUND, source_id: "delete-inbound" }));
+    const id = (await created!.json()).message.id as string;
+    const deletion = await handleSelfHostedRequest(d, new Request(
+      `http://svc/v1/messages/${id}`,
+      { method: "DELETE", headers: { "x-api-key": writeToken() } },
+    ));
+    expect(deletion?.status).toBe(200);
+    expect(await deletion!.json()).toEqual({ deleted: true, id });
+    expect(await d.store.getMessage(id)).toBeNull();
   });
 
   it("resumes a durable pending intent left by a crash before provider claim", async () => {
