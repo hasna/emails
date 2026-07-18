@@ -62,8 +62,25 @@ docker run --detach --platform linux/amd64 --read-only --name "$container" \
   --env AWS_EC2_METADATA_DISABLED=true \
   "$image" >/dev/null
 
+# Keep these values in lockstep with the image HEALTHCHECK. The readiness
+# budget covers its 20s cold-start period, two 30s health cadences, and two 5s
+# probe timeouts. Once the explicit route is ready, reuse that 90s envelope so
+# a transient unhealthy result can recover across at least two health cadences.
+image_health_interval_seconds=30
+image_health_timeout_seconds=5
+image_health_start_period_seconds=20
+readiness_poll_interval_seconds=1
+health_poll_interval_seconds=1
+readiness_wait_seconds=$((
+  image_health_start_period_seconds
+  + (2 * image_health_interval_seconds)
+  + (2 * image_health_timeout_seconds)
+))
+health_wait_seconds="$readiness_wait_seconds"
+
 ready=0
-for _ in $(seq 1 30); do
+readiness_attempts=$((readiness_wait_seconds / readiness_poll_interval_seconds))
+for _ in $(seq 1 "$readiness_attempts"); do
   if docker run --rm --platform linux/amd64 --network "container:$container" \
     --entrypoint /usr/local/bin/bun "$image" -e '
       const response = await fetch("http://127.0.0.1:8080/api/providers?limit=1");
@@ -72,7 +89,7 @@ for _ in $(seq 1 30); do
     ready=1
     break
   fi
-  sleep 1
+  sleep "$readiness_poll_interval_seconds"
 done
 
 if test "$ready" != "1"; then
@@ -81,15 +98,13 @@ if test "$ready" != "1"; then
 fi
 
 health="starting"
-for _ in $(seq 1 45); do
+health_attempts=$((health_wait_seconds / health_poll_interval_seconds))
+for _ in $(seq 1 "$health_attempts"); do
   health="$(docker inspect --format '{{.State.Health.Status}}' "$container")"
   if test "$health" = "healthy"; then
     break
   fi
-  if test "$health" = "unhealthy"; then
-    break
-  fi
-  sleep 2
+  sleep "$health_poll_interval_seconds"
 done
 
 if test "$health" != "healthy"; then

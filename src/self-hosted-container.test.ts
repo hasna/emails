@@ -152,6 +152,54 @@ describe("self-hosted container TLS contract", () => {
     }
   });
 
+  test("allows the readiness probe to outlive the image cold-start health cadence", () => {
+    const healthConfig = dockerfile.match(
+      /HEALTHCHECK --interval=(\d+)s --timeout=(\d+)s --start-period=(\d+)s/,
+    );
+    if (!healthConfig) throw new Error("Dockerfile health timing is missing");
+
+    const healthIntervalSeconds = Number(healthConfig[1]);
+    const healthTimeoutSeconds = Number(healthConfig[2]);
+    const healthStartPeriodSeconds = Number(healthConfig[3]);
+    const smokeTiming = Object.fromEntries(
+      [...runtimeSmoke.matchAll(
+        /^(image_health_(?:interval|timeout|start_period)_seconds)=(\d+)$/gm,
+      )].map((match) => [match[1], Number(match[2])]),
+    );
+
+    expect(smokeTiming).toEqual({
+      image_health_interval_seconds: healthIntervalSeconds,
+      image_health_timeout_seconds: healthTimeoutSeconds,
+      image_health_start_period_seconds: healthStartPeriodSeconds,
+    });
+    expect(runtimeSmoke).toMatch(
+      /readiness_wait_seconds=\$\(\(\s*image_health_start_period_seconds\s*\+ \(2 \* image_health_interval_seconds\)\s*\+ \(2 \* image_health_timeout_seconds\)\s*\)\)/,
+    );
+    expect(runtimeSmoke).toContain('health_wait_seconds="$readiness_wait_seconds"');
+
+    const readinessBudgetSeconds = healthStartPeriodSeconds
+      + (2 * healthIntervalSeconds)
+      + (2 * healthTimeoutSeconds);
+    const healthBudgetSeconds = readinessBudgetSeconds;
+
+    expect(readinessBudgetSeconds).toBe(90);
+    expect(healthBudgetSeconds).toBe(90);
+    expect(readinessBudgetSeconds).toBeGreaterThanOrEqual(
+      healthStartPeriodSeconds + healthIntervalSeconds,
+    );
+    expect(healthBudgetSeconds).toBeGreaterThan(healthIntervalSeconds);
+    expect(runtimeSmoke).toContain(
+      "readiness_attempts=$((readiness_wait_seconds / readiness_poll_interval_seconds))",
+    );
+    expect(runtimeSmoke).toContain(
+      "health_attempts=$((health_wait_seconds / health_poll_interval_seconds))",
+    );
+    expect(runtimeSmoke).not.toMatch(
+      /if test "\$health" = "unhealthy"; then\s*break\s*fi/,
+    );
+    expect(runtimeSmoke).toContain('if test "$health" != "healthy"; then');
+  });
+
   test("keeps ECS commands compatible with the Bun image entrypoint", () => {
     expect(dockerfile).toContain('ENTRYPOINT ["/usr/local/bin/bun"]');
     expect(ecsCompute).toContain('command                = ["src/server/index.ts"]');
