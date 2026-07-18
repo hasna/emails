@@ -19,6 +19,14 @@ export interface MessageListItem { "id": string; "direction": string; "from_addr
 
 export interface Message { "id": string; "direction": string; "from_addr": string; "to_addrs": Array<string>; "cc_addrs"?: Array<string>; "subject"?: string | null; "body_text"?: string | null; "body_html"?: string | null; "status": string; "provider_message_id"?: string | null; "message_id"?: string | null; "in_reply_to"?: string | null; "received_at"?: string | null; "is_read"?: boolean; "is_starred"?: boolean; "labels"?: Array<string>; "headers"?: Record<string, unknown>; "attachments"?: Array<Record<string, unknown>>; "source_id"?: string | null; "send_state"?: string; "send_started_at"?: string | null; "created_at": string; "updated_at": string }
 
+export interface SendIntentMessage { "id": string; "send_state": "none" | "pending" | "blocked" | "cancelled" | "sending" | "sent" | "uncertain" }
+
+export interface SendIntentLookup { "found": boolean; "tombstoned": boolean; "reconciliation_required": boolean; "message": SendIntentMessage | null }
+
+export interface SendIntentCancellation { "outcome": "tombstoned" | "cancelled" | "reconciliation_required"; "tombstoned": true; "reconciliation_required": boolean; "message": SendIntentMessage | null }
+
+export interface SendMessageError { "error": string; "retry_safe": boolean; "tombstoned"?: boolean; "message"?: Message | SendIntentMessage | null }
+
 export interface AttachmentContent { "filename": string; "content_type": string; "size": number; "content_base64": string }
 
 export interface Thread { "thread_key": string; "subject"?: string | null; "message_count": number; "unread_count": number; "last_message_at"?: string | null; "first_message_at"?: string | null; "participants"?: Array<string> }
@@ -38,10 +46,38 @@ export interface EmailsSelfHostClientOptions {
   headers?: Record<string, string>;
 }
 
+export type SendIntentRecoveryState = "blocked" | "cancelled" | "none" | "pending" | "sending" | "sent" | "uncertain";
+
+export interface SendIntentMessageProjection {
+  id: string;
+  send_state: SendIntentRecoveryState;
+}
+
+const SEND_INTENT_MESSAGE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const SEND_INTENT_RECOVERY_STATES = new Set<SendIntentRecoveryState>([
+  "blocked", "cancelled", "none", "pending", "sending", "sent", "uncertain",
+]);
+
+function parseSendIntentMessage(body: unknown): SendIntentMessageProjection | undefined {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return undefined;
+  const message = (body as Record<string, unknown>)["message"];
+  if (!message || typeof message !== "object" || Array.isArray(message)) return undefined;
+  const id = (message as Record<string, unknown>)["id"];
+  const sendState = (message as Record<string, unknown>)["send_state"];
+  if (typeof id !== "string" || !SEND_INTENT_MESSAGE_ID.test(id)) return undefined;
+  if (typeof sendState !== "string" || !SEND_INTENT_RECOVERY_STATES.has(sendState as SendIntentRecoveryState)) {
+    return undefined;
+  }
+  return { id, send_state: sendState as SendIntentRecoveryState };
+}
+
 export class ApiError extends Error {
+  readonly sendIntentMessage: SendIntentMessageProjection | undefined;
+
   constructor(readonly status: number, message: string, readonly body: unknown) {
     super(message);
     this.name = "ApiError";
+    this.sendIntentMessage = parseSendIntentMessage(body);
   }
 }
 
@@ -905,8 +941,26 @@ export class EmailsSelfHostClient {
     }
 
     /** Send through the configured SES or Resend provider and persist the resulting ledger row */
-    async sendMessage(body: { "from": string; "to": Array<string>; "cc"?: Array<string>; "bcc"?: Array<string>; "reply_to"?: string; "subject": string; "text"?: string; "html"?: string; "attachments"?: Array<{ "filename": string; "content": string; "content_type": string }>; "send_key"?: string; "idempotency_key": string }, init?: RequestInit): Promise<{ "message"?: Message; "provider"?: string }> {
+    async sendMessage(body: { "from": string; "to": Array<string>; "cc"?: Array<string>; "bcc"?: Array<string>; "reply_to"?: string; "subject": string; "text"?: string; "html"?: string; "attachments"?: Array<{ "filename": string; "content": string; "content_type": string }>; "send_key"?: string; "idempotency_key": string }, init?: RequestInit): Promise<{ "message": Message; "provider": string; "idempotent_replay"?: true; "in_progress"?: true }> {
       return this.request("POST", `/v1/messages/send`, {
+        body,
+        query: undefined,
+        init,
+      });
+    }
+
+    /** Tombstone a tenant-scoped send intent before provider delivery */
+    async cancelSendIntent(body: { "idempotency_key": string }, init?: RequestInit): Promise<{ "cancellation": SendIntentCancellation }> {
+      return this.request("POST", `/v1/messages/send-intents/cancel`, {
+        body,
+        query: undefined,
+        init,
+      });
+    }
+
+    /** Look up a tenant-scoped send intent without sending */
+    async lookupSendIntent(body: { "idempotency_key": string }, init?: RequestInit): Promise<{ "send_intent": SendIntentLookup }> {
+      return this.request("POST", `/v1/messages/send-intents/lookup`, {
         body,
         query: undefined,
         init,

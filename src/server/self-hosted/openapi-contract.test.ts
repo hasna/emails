@@ -97,6 +97,76 @@ describe("self-hosted OpenAPI identity and authorization contract", () => {
     expect(schema?.required).toEqual(expect.arrayContaining(["from", "to", "subject", "idempotency_key"]));
     expect(send?.description).toContain("Member sessions must supply");
     expect(send?.description).toContain("owner/admin");
+    expect(send?.responses).toHaveProperty("200");
+    expect(send?.responses).toHaveProperty("202");
+    expect(send?.responses).toHaveProperty("400");
+    expect(send?.responses).toHaveProperty("401");
+    expect(send?.responses).toHaveProperty("403");
+    expect(send?.responses).toHaveProperty("409");
+    expect(send?.responses).toHaveProperty("429");
+    expect(send?.responses).toHaveProperty("413");
+    expect(send?.responses).toHaveProperty("502");
+    const sendError = emailsSelfHostedOpenApi.components?.schemas?.SendMessageError as
+      | { properties?: { message?: { oneOf?: Array<{ $ref?: string }>; nullable?: boolean } } }
+      | undefined;
+    expect(sendError?.properties?.message).toMatchObject({
+      nullable: true,
+      oneOf: [
+        { $ref: "#/components/schemas/Message" },
+        { $ref: "#/components/schemas/SendIntentMessage" },
+      ],
+    });
+  });
+
+  it("publishes body-only send-intent recovery operations", () => {
+    const lookup = paths["/v1/messages/send-intents/lookup"]?.post;
+    const cancel = paths["/v1/messages/send-intents/cancel"]?.post;
+    for (const operation of [lookup, cancel]) {
+      const schema = operation?.requestBody?.content?.["application/json"]?.schema;
+      expect(schema?.required).toEqual(["idempotency_key"]);
+      expect(schema?.properties?.["idempotency_key"]).toMatchObject({
+        type: "string",
+        minLength: 1,
+        maxLength: 200,
+      });
+      expect(operation?.parameters).toBeUndefined();
+    }
+    expect(lookup?.operationId).toBe("lookupSendIntent");
+    expect(cancel?.operationId).toBe("cancelSendIntent");
+    expect(lookup?.responses).toHaveProperty("200");
+    expect(lookup?.responses).toHaveProperty("400");
+    expect(lookup?.responses).toHaveProperty("401");
+    expect(lookup?.responses).toHaveProperty("403");
+    expect(lookup?.responses).toHaveProperty("413");
+    expect(cancel?.responses).toHaveProperty("200");
+    expect(cancel?.responses).toHaveProperty("400");
+    expect(cancel?.responses).toHaveProperty("401");
+    expect(cancel?.responses).toHaveProperty("403");
+    expect(cancel?.responses).toHaveProperty("413");
+    expect(emailsSelfHostedOpenApi.components?.schemas?.SendIntentMessage).toMatchObject({
+      type: "object",
+      additionalProperties: false,
+      required: ["id", "send_state"],
+      properties: {
+        id: { type: "string" },
+        send_state: {
+          type: "string",
+          enum: ["none", "pending", "blocked", "cancelled", "sending", "sent", "uncertain"],
+        },
+      },
+    });
+  });
+
+  it("documents durable send-intent deletion refusal", () => {
+    const deletion = paths["/v1/messages/{id}"]?.delete;
+    expect(deletion?.responses).toHaveProperty("200");
+    expect(deletion?.responses).toHaveProperty("401");
+    expect(deletion?.responses).toHaveProperty("403");
+    expect(deletion?.responses).toHaveProperty("404");
+    expect(deletion?.responses).toHaveProperty("409");
+    expect(deletion?.responses?.["409"]?.content?.["application/json"]?.schema).toEqual({
+      $ref: "#/components/schemas/SendMessageError",
+    });
   });
 
   it("publishes a bounded typed attachment-content operation", () => {

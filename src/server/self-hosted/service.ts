@@ -14,6 +14,8 @@ import { checkHealth } from "../../storage-kit/index.js";
 import {
   EmailsSelfHostedStore,
   IdempotencyKeyConflictError,
+  SendIntentDeletionForbiddenError,
+  SendIntentTombstonedError,
   CrossTenantReferenceError,
   InboundDomainRouteConflictError,
   type TenantScopedStore,
@@ -115,6 +117,10 @@ function publicMessage(record: MessageRecord): Omit<MessageRecord, "idempotency_
   return safe;
 }
 
+function sendIntentMessage(record: MessageRecord): { id: string; send_state: string } {
+  return { id: record.id, send_state: record.send_state };
+}
+
 function publicMessageListItem(record: MessageRecord | MessageListRecord): MessageListRecord {
   const {
     body_text: bodyText,
@@ -161,6 +167,19 @@ function safeHeaderValue(label: string, value: string): string {
     }
   }
   return value;
+}
+
+function parseIdempotencyKey(value: unknown): { ok: true; value: string } | { ok: false; error: string } {
+  const key = typeof value === "string" ? value.trim() : "";
+  if (!key || key.length > 200) {
+    return { ok: false, error: "idempotency_key is required and must be at most 200 characters" };
+  }
+  try {
+    safeHeaderValue("idempotency_key", key);
+  } catch {
+    return { ok: false, error: "idempotency_key contains unsafe characters" };
+  }
+  return { ok: true, value: key };
 }
 
 function sendLeaseExpired(record: MessageRecord, now = Date.now()): boolean {
@@ -563,6 +582,38 @@ export async function handleSelfHostedRequest(
       });
     }
 
+    if (path === "/v1/messages/send-intents/lookup") {
+      if (method !== "POST") return json(405, { error: "method not allowed" });
+      const auth = await authenticate(deps, req, url, read);
+      if (!auth.ok) return auth.response;
+      const body = await readJsonBody(req);
+      const parsed = parseIdempotencyKey(body.idempotency_key);
+      if (!parsed.ok) return json(400, { error: parsed.error });
+      const result = await auth.store.lookupSendIntent(parsed.value);
+      return json(200, {
+        send_intent: {
+          ...result,
+          message: result.message ? sendIntentMessage(result.message) : null,
+        },
+      });
+    }
+
+    if (path === "/v1/messages/send-intents/cancel") {
+      if (method !== "POST") return json(405, { error: "method not allowed" });
+      const auth = await authenticate(deps, req, url, write);
+      if (!auth.ok) return auth.response;
+      const body = await readJsonBody(req);
+      const parsed = parseIdempotencyKey(body.idempotency_key);
+      if (!parsed.ok) return json(400, { error: parsed.error });
+      const result = await auth.store.cancelSendIntent(parsed.value);
+      return json(200, {
+        cancellation: {
+          ...result,
+          message: result.message ? sendIntentMessage(result.message) : null,
+        },
+      });
+    }
+
     // /v1/messages/send — the only outbound create path. It invokes the
     // operator-selected provider only after atomically persisting and claiming
     // an idempotent send intent.
@@ -588,10 +639,9 @@ export async function handleSelfHostedRequest(
       const subject = String(body.subject ?? "").trim();
       if (!subject) return json(400, { error: "subject is required" });
 
-      const idempotencyKey = typeof body.idempotency_key === "string" ? body.idempotency_key.trim() : "";
-      if (!idempotencyKey || idempotencyKey.length > 200) {
-        return json(400, { error: "idempotency_key is required and must be at most 200 characters" });
-      }
+      const parsedIdempotencyKey = parseIdempotencyKey(body.idempotency_key);
+      if (!parsedIdempotencyKey.ok) return json(400, { error: parsedIdempotencyKey.error });
+      const idempotencyKey = parsedIdempotencyKey.value;
       const rawAttachments = asArray(body.attachments) ?? [];
       if (rawAttachments.length > 5) return json(400, { error: "at most 5 inline attachments are allowed" });
       let attachments: Array<{ filename: string; content: string; content_type: string }>;
@@ -663,6 +713,14 @@ export async function handleSelfHostedRequest(
         if (error instanceof IdempotencyKeyConflictError) {
           return json(409, { error: error.message, retry_safe: false });
         }
+        if (error instanceof SendIntentTombstonedError) {
+          return json(409, {
+            error: error.message,
+            tombstoned: true,
+            message: error.record ? sendIntentMessage(error.record) : null,
+            retry_safe: false,
+          });
+        }
         throw error;
       }
 
@@ -720,6 +778,23 @@ export async function handleSelfHostedRequest(
         const latest = await auth.store.getMessage(reserved.record.id);
         if (latest?.send_state === "sent") {
           return json(200, { message: publicMessage(latest), provider: deps.sender.provider, idempotent_replay: true });
+        }
+        if (latest?.send_state === "cancelled") {
+          return json(409, {
+            error: "send intent is cancelled and cannot be sent",
+            tombstoned: true,
+            message: sendIntentMessage(latest),
+            retry_safe: false,
+          });
+        }
+        const recovery = await auth.store.lookupSendIntent(idempotencyKey);
+        if (recovery.tombstoned && !recovery.reconciliation_required) {
+          return json(409, {
+            error: "send intent is cancelled and cannot be sent",
+            tombstoned: true,
+            message: recovery.message ? sendIntentMessage(recovery.message) : null,
+            retry_safe: false,
+          });
         }
         return json(202, {
           message: publicMessage(latest ?? reserved.record),
@@ -927,9 +1002,20 @@ export async function handleSelfHostedRequest(
         if (!auth.ok) return auth.response;
         const resolved = await resolveMessageIdOrError(auth.store, id);
         if (!resolved.ok) return resolved.response;
-        return (await auth.store.deleteMessage(resolved.id))
-          ? json(200, { deleted: true, id: resolved.id })
-          : json(404, { error: "message not found" });
+        try {
+          return (await auth.store.deleteMessage(resolved.id))
+            ? json(200, { deleted: true, id: resolved.id })
+            : json(404, { error: "message not found" });
+        } catch (error) {
+          if (error instanceof SendIntentDeletionForbiddenError) {
+            return json(409, {
+              error: error.message,
+              message: sendIntentMessage(error.record),
+              retry_safe: false,
+            });
+          }
+          throw error;
+        }
       }
       return json(405, { error: "method not allowed" });
     }

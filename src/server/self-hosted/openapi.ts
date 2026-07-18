@@ -197,12 +197,74 @@ const messageSchema = {
     headers: { type: "object", additionalProperties: true },
     attachments: { type: "array", items: { type: "object", additionalProperties: true } },
     source_id: { type: "string", nullable: true, description: "Stable upstream id used for idempotent upsert" },
-    send_state: { type: "string", description: "none | pending | sending | sent | uncertain" },
+    send_state: { type: "string", description: "none | pending | sending | sent | uncertain | blocked | cancelled" },
     send_started_at: { type: "string", format: "date-time", nullable: true },
     created_at: { type: "string", format: "date-time" },
     updated_at: { type: "string", format: "date-time" },
   },
   required: ["id", "direction", "from_addr", "to_addrs", "status", "created_at", "updated_at"],
+} as const;
+
+const idempotencyKeyRequestSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    idempotency_key: { type: "string", minLength: 1, maxLength: 200 },
+  },
+  required: ["idempotency_key"],
+} as const;
+
+const sendIntentLookupSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    found: { type: "boolean" },
+    tombstoned: { type: "boolean" },
+    reconciliation_required: { type: "boolean" },
+    message: { $ref: "#/components/schemas/SendIntentMessage", nullable: true },
+  },
+  required: ["found", "tombstoned", "reconciliation_required", "message"],
+} as const;
+
+const sendIntentCancellationSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    outcome: { type: "string", enum: ["tombstoned", "cancelled", "reconciliation_required"] },
+    tombstoned: { type: "boolean", enum: [true] },
+    reconciliation_required: { type: "boolean" },
+    message: { $ref: "#/components/schemas/SendIntentMessage", nullable: true },
+  },
+  required: ["outcome", "tombstoned", "reconciliation_required", "message"],
+} as const;
+
+const sendMessageErrorSchema = {
+  type: "object",
+  additionalProperties: true,
+  properties: {
+    error: { type: "string" },
+    retry_safe: { type: "boolean" },
+    tombstoned: { type: "boolean" },
+    message: {
+      oneOf: [
+        { $ref: "#/components/schemas/Message" },
+        { $ref: "#/components/schemas/SendIntentMessage" },
+      ],
+      nullable: true,
+    },
+  },
+  required: ["error", "retry_safe"],
+} as const;
+
+const sendMessageResponseSchema = {
+  type: "object",
+  properties: {
+    message: { $ref: "#/components/schemas/Message" },
+    provider: { type: "string" },
+    idempotent_replay: { type: "boolean", enum: [true] },
+    in_progress: { type: "boolean", enum: [true] },
+  },
+  required: ["message", "provider"],
 } as const;
 
 const messageListItemSchema = {
@@ -226,7 +288,7 @@ const messageListItemSchema = {
     headers: { type: "object", additionalProperties: true },
     attachments: { type: "array", items: { type: "object", additionalProperties: true } },
     source_id: { type: "string", nullable: true, description: "Stable upstream id used for idempotent upsert" },
-    send_state: { type: "string", description: "none | pending | sending | sent | uncertain" },
+    send_state: { type: "string", description: "none | pending | sending | sent | uncertain | blocked | cancelled" },
     send_started_at: { type: "string", format: "date-time", nullable: true },
     created_at: { type: "string", format: "date-time" },
     updated_at: { type: "string", format: "date-time" },
@@ -1080,7 +1142,79 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
           },
         },
         responses: {
-          "202": { content: { "application/json": { schema: { type: "object", properties: { message: { $ref: "#/components/schemas/Message" }, provider: { type: "string" } } } } } },
+          "200": {
+            description: "Completed idempotent replay of an existing sent intent",
+            content: {
+              "application/json": {
+                schema: sendMessageResponseSchema,
+              },
+            },
+          },
+          "202": {
+            description: "Newly accepted send or an existing send still in progress",
+            content: { "application/json": { schema: sendMessageResponseSchema } },
+          },
+          "400": { description: "Invalid send request" },
+          "401": { description: "Authentication required" },
+          "403": { description: "Sender or tenant scope is not authorized" },
+          "409": { content: { "application/json": { schema: { $ref: "#/components/schemas/SendMessageError" } } } },
+          "429": { description: "Tenant or sender quota exceeded" },
+          "413": { description: "Request body exceeds the service limit" },
+          "502": { content: { "application/json": { schema: { $ref: "#/components/schemas/SendMessageError" } } } },
+        },
+      },
+    },
+    "/v1/messages/send-intents/lookup": {
+      post: {
+        operationId: "lookupSendIntent",
+        summary: "Look up a tenant-scoped send intent without sending",
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: idempotencyKeyRequestSchema } },
+        },
+        responses: {
+          "200": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: { send_intent: { $ref: "#/components/schemas/SendIntentLookup" } },
+                  required: ["send_intent"],
+                },
+              },
+            },
+          },
+          "400": { description: "Invalid idempotency key" },
+          "401": { description: "Authentication required" },
+          "403": { description: "Tenant read scope is not authorized" },
+          "413": { description: "Request body exceeds the service limit" },
+        },
+      },
+    },
+    "/v1/messages/send-intents/cancel": {
+      post: {
+        operationId: "cancelSendIntent",
+        summary: "Tombstone a tenant-scoped send intent before provider delivery",
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: idempotencyKeyRequestSchema } },
+        },
+        responses: {
+          "200": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: { cancellation: { $ref: "#/components/schemas/SendIntentCancellation" } },
+                  required: ["cancellation"],
+                },
+              },
+            },
+          },
+          "400": { description: "Invalid idempotency key" },
+          "401": { description: "Authentication required" },
+          "403": { description: "Tenant write scope is not authorized" },
+          "413": { description: "Request body exceeds the service limit" },
         },
       },
     },
@@ -1099,7 +1233,16 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
       delete: {
         operationId: "deleteMessage",
         parameters: [...idParam],
-        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+        responses: {
+          "200": { content: { "application/json": { schema: { type: "object" } } } },
+          "401": { description: "Authentication required" },
+          "403": { description: "Tenant write scope is not authorized" },
+          "404": { description: "Message not found" },
+          "409": {
+            description: "Durable send-intent ledger rows cannot be deleted",
+            content: { "application/json": { schema: { $ref: "#/components/schemas/SendMessageError" } } },
+          },
+        },
       },
     },
     "/v1/messages/{id}/attachments/{index}": {
@@ -1238,6 +1381,21 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
       Address: addressSchema as never,
       MessageListItem: messageListItemSchema as never,
       Message: messageSchema as never,
+      SendIntentMessage: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          id: { type: "string" },
+          send_state: {
+            type: "string",
+            enum: ["none", "pending", "blocked", "cancelled", "sending", "sent", "uncertain"],
+          },
+        },
+        required: ["id", "send_state"],
+      } as never,
+      SendIntentLookup: sendIntentLookupSchema as never,
+      SendIntentCancellation: sendIntentCancellationSchema as never,
+      SendMessageError: sendMessageErrorSchema as never,
       AttachmentContent: attachmentContentSchema as never,
       Thread: threadSchema as never,
       Mailbox: mailboxSchema as never,
