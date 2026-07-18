@@ -81,8 +81,7 @@ health_wait_seconds="$readiness_wait_seconds"
 ready=0
 readiness_attempts=$((readiness_wait_seconds / readiness_poll_interval_seconds))
 for _ in $(seq 1 "$readiness_attempts"); do
-  if docker run --rm --platform linux/amd64 --network "container:$container" \
-    --entrypoint /usr/local/bin/bun "$image" -e '
+  if docker exec "$container" /usr/local/bin/bun -e '
       const response = await fetch("http://127.0.0.1:8080/api/providers?limit=1");
       if (!response.ok) process.exit(1);
     ' >/dev/null 2>&1; then
@@ -93,6 +92,15 @@ for _ in $(seq 1 "$readiness_attempts"); do
 done
 
 if test "$ready" != "1"; then
+  docker exec "$container" /usr/local/bin/bun -e '
+    try {
+      const response = await fetch("http://127.0.0.1:8080/api/providers?limit=1");
+      console.error(`readiness probe status=${response.status}`);
+    } catch (error) {
+      console.error(`readiness probe error=${error instanceof Error ? error.name : "unknown"}`);
+    }
+  ' >&2 || true
+  docker inspect --format '{{json .State.Health}}' "$container" >&2 || true
   docker logs "$container" >&2 || true
   exit 1
 fi

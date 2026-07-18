@@ -152,6 +152,19 @@ describe("self-hosted container TLS contract", () => {
     }
   });
 
+  test("runs readiness inside the existing non-root service container", () => {
+    const readinessLoop = runtimeSmoke.slice(
+      runtimeSmoke.indexOf('for _ in $(seq 1 "$readiness_attempts"); do'),
+      runtimeSmoke.indexOf('if test "$ready" != "1"; then'),
+    );
+
+    expect(readinessLoop).toContain(
+      'if docker exec "$container" /usr/local/bin/bun -e \'',
+    );
+    expect(readinessLoop).not.toContain("docker run");
+    expect(readinessLoop).not.toContain('--network "container:$container"');
+  });
+
   test("allows the readiness probe to outlive the image cold-start health cadence", () => {
     const healthConfig = dockerfile.match(
       /HEALTHCHECK --interval=(\d+)s --timeout=(\d+)s --start-period=(\d+)s/,
