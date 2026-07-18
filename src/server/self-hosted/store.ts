@@ -306,6 +306,10 @@ export interface SendIntentCancellationResult {
   message: MessageRecord | null;
 }
 
+function sendIntentRequiresReconciliation(sendState: string): boolean {
+  return !["cancelled", "blocked", "pending"].includes(sendState);
+}
+
 export interface ListOptions {
   limit?: number;
   offset?: number;
@@ -1901,7 +1905,7 @@ export class TenantScopedStore {
       return {
         found: record !== null,
         tombstoned: tombstone !== null || record?.send_state === "cancelled",
-        reconciliation_required: record !== null && ["sending", "sent", "uncertain"].includes(record.send_state),
+        reconciliation_required: record !== null && sendIntentRequiresReconciliation(record.send_state),
         message: record,
       };
     });
@@ -1946,8 +1950,7 @@ export class TenantScopedStore {
         );
         if (cancelled) record = mapMessageRow(cancelled);
       }
-      const reconciliationRequired = ["sending", "sent", "uncertain"].includes(record.send_state)
-        || !["cancelled", "blocked", "pending"].includes(record.send_state);
+      const reconciliationRequired = sendIntentRequiresReconciliation(record.send_state);
       return {
         outcome: reconciliationRequired ? "reconciliation_required" : "cancelled",
         tombstoned: true,
