@@ -67,6 +67,68 @@ secureClientCode = replaceRequired(
   "    const response = await this.fetchImpl(url.toString(), { ...opts.init, method, headers, body: payload, redirect: \"error\" });\n",
   "redirect rejection",
 );
+secureClientCode = replaceRequired(
+  secureClientCode,
+  `export class ApiError extends Error {
+  constructor(readonly status: number, message: string, readonly body: unknown) {
+    super(message);
+    this.name = "ApiError";
+  }
+}`,
+  `export type SendIntentRecoveryState = "blocked" | "cancelled" | "sending" | "sent" | "uncertain";
+
+export interface SendIntentMessageProjection {
+  id: string;
+  send_state: SendIntentRecoveryState;
+}
+
+const SEND_INTENT_MESSAGE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const SEND_INTENT_RECOVERY_STATES = new Set<SendIntentRecoveryState>([
+  "blocked", "cancelled", "sending", "sent", "uncertain",
+]);
+
+function parseSendIntentMessage(body: unknown): SendIntentMessageProjection | undefined {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return undefined;
+  const message = (body as Record<string, unknown>)["message"];
+  if (!message || typeof message !== "object" || Array.isArray(message)) return undefined;
+  const id = (message as Record<string, unknown>)["id"];
+  const sendState = (message as Record<string, unknown>)["send_state"];
+  if (typeof id !== "string" || !SEND_INTENT_MESSAGE_ID.test(id)) return undefined;
+  if (typeof sendState !== "string" || !SEND_INTENT_RECOVERY_STATES.has(sendState as SendIntentRecoveryState)) {
+    return undefined;
+  }
+  return { id, send_state: sendState as SendIntentRecoveryState };
+}
+
+export class ApiError extends Error {
+  readonly sendIntentMessage: SendIntentMessageProjection | undefined;
+
+  constructor(readonly status: number, message: string, readonly body: unknown) {
+    super(message);
+    this.name = "ApiError";
+    this.sendIntentMessage = parseSendIntentMessage(body);
+  }
+}`,
+  "send-intent error projection",
+);
+secureClientCode = replaceRequired(
+  secureClientCode,
+  `export interface SendIntentLookup { "found": boolean; "tombstoned": boolean; "reconciliation_required": boolean; "message": SendIntentMessage }`,
+  `export interface SendIntentLookup { "found": boolean; "tombstoned": boolean; "reconciliation_required": boolean; "message": SendIntentMessage | null }`,
+  "nullable send-intent lookup message",
+);
+secureClientCode = replaceRequired(
+  secureClientCode,
+  `export interface SendIntentCancellation { "outcome": "tombstoned" | "cancelled" | "reconciliation_required"; "tombstoned": true; "reconciliation_required": boolean; "message": SendIntentMessage }`,
+  `export interface SendIntentCancellation { "outcome": "tombstoned" | "cancelled" | "reconciliation_required"; "tombstoned": true; "reconciliation_required": boolean; "message": SendIntentMessage | null }`,
+  "nullable send-intent cancellation message",
+);
+secureClientCode = replaceRequired(
+  secureClientCode,
+  `export interface SendMessageError { "error": string; "retry_safe": boolean; "tombstoned"?: boolean; "message"?: Message | SendIntentMessage }`,
+  `export interface SendMessageError { "error": string; "retry_safe": boolean; "tombstoned"?: boolean; "message"?: Message | SendIntentMessage | null }`,
+  "nullable send failure message",
+);
 
 const header = `// @generated from src/server/self-hosted/openapi.ts by scripts/generate-selfhost-sdk.ts — DO NOT EDIT.
 // Regenerate: bun run scripts/generate-selfhost-sdk.ts

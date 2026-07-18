@@ -36,7 +36,7 @@ const TENANT_A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
 const TENANT_B = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
 // Representative of every access shape: hand-written domains/messages, a generic
 // registry resource (contacts), and the composite-PK resource (email_agent_settings).
-const TABLES = ["domains", "contacts", "messages", "email_agent_settings"] as const;
+const TABLES = ["domains", "contacts", "messages", "email_agent_settings", "send_intent_tombstones"] as const;
 
 /** Run `fn` in one transaction AS the NOBYPASSRLS probe, optionally with the tenant GUC set. */
 async function asProbe<T>(tenantId: string | null, fn: (tx: TypedQueryClient) => Promise<T>): Promise<T> {
@@ -81,6 +81,11 @@ beforeAll(async () => {
   await pg.execute(
     `INSERT INTO email_agent_settings (tenant_id, agent_key, model) VALUES ($1,'labeler','m'), ($2,'labeler','m')`,
     [TENANT_A, TENANT_B],
+  );
+  await pg.execute(
+    `INSERT INTO send_intent_tombstones (tenant_id, idempotency_key_hash) VALUES
+       ($1, $3), ($2, $4)`,
+    [TENANT_A, TENANT_B, "a".repeat(64), "b".repeat(64)],
   );
 
   // The prod-faithful part: make a NOBYPASSRLS role the OWNER of the tables under
@@ -139,6 +144,14 @@ describe.skipIf(!pg)("Row-Level Security backstop (Layer 2, migration 0013)", ()
     await expect(
       asProbe(TENANT_A, (tx) =>
         tx.execute(`INSERT INTO messages (id, from_addr, tenant_id) VALUES ('msg-x','from@x.example',$1)`, [TENANT_B]),
+      ),
+    ).rejects.toThrow(rls);
+    await expect(
+      asProbe(TENANT_A, (tx) =>
+        tx.execute(
+          `INSERT INTO send_intent_tombstones (tenant_id, idempotency_key_hash) VALUES ($1, $2)`,
+          [TENANT_B, "c".repeat(64)],
+        ),
       ),
     ).rejects.toThrow(rls);
     // Re-homing an OWN row into tenant B (visible via USING, but WITH CHECK rejects the new tenant).
@@ -219,7 +232,7 @@ describe.skipIf(!pg)("Row-Level Security backstop (Layer 2, migration 0013)", ()
     expect(await countAsProbe(null, "contacts")).toBe(0);
   });
 
-  it("every one of the 27 tenant tables is RLS-enabled + FORCEd with a tenant policy", async () => {
+  it("every one of the 28 tenant tables is RLS-enabled + FORCEd with a tenant policy", async () => {
     // Guards the hand-maintained table list in migration 0013: a dropped/misspelled
     // entry would leave a table un-forced (a silent hole) with no other failing test.
     const ALL_TENANT_TABLES = [
@@ -228,7 +241,7 @@ describe.skipIf(!pg)("Row-Level Security backstop (Layer 2, migration 0013)", ()
       "forwarding_rules", "warming_schedules", "email_triage", "provisioning_events",
       "mailbox_sources", "events", "email_agent_settings", "email_agent_runs", "email_digests",
       "group_members", "sequence_steps", "sequence_enrollments", "address_ownership_events",
-      "webhook_receipts", "sandbox_emails",
+      "webhook_receipts", "sandbox_emails", "send_intent_tombstones",
     ];
     const flags = await pg!.many<{ relname: string; en: boolean; force: boolean }>(
       `SELECT c.relname, c.relrowsecurity AS en, c.relforcerowsecurity AS force
@@ -248,7 +261,24 @@ describe.skipIf(!pg)("Row-Level Security backstop (Layer 2, migration 0013)", ()
     );
     const noPolicy = ALL_TENANT_TABLES.filter((t) => !pols.find((p) => p.tablename === t));
     expect(noPolicy, "tables without a tenant policy").toEqual([]);
-    expect(ALL_TENANT_TABLES).toHaveLength(27);
+    expect(ALL_TENANT_TABLES).toHaveLength(28);
+  });
+
+  it("migration 0018 is internally idempotent and keeps explicit USING/WITH CHECK policy", async () => {
+    const recovery0018 = emailsSelfHostedMigrations().find((m) => m.id === "0018_send_intent_recovery")!;
+    await pg!.execute(recovery0018.sql);
+    await pg!.execute(recovery0018.sql);
+    const policy = await pg!.one<{ qual: string; with_check: string }>(
+      `SELECT pg_get_expr(polqual, polrelid) AS qual,
+              pg_get_expr(polwithcheck, polrelid) AS with_check
+       FROM pg_policy
+       WHERE polrelid = 'public.send_intent_tombstones'::regclass
+         AND polname = 'send_intent_tombstones_tenant_isolation'`,
+    );
+    expect(policy.qual).toContain("app.current_tenant");
+    expect(policy.with_check).toContain("app.current_tenant");
+    expect(await countAsProbe(null, "send_intent_tombstones")).toBe(0);
+    expect(await countAsProbe(TENANT_A, "send_intent_tombstones")).toBe(1);
   });
 
   it("migration 0013 is internally idempotent: re-executing its SQL is a clean no-op", async () => {

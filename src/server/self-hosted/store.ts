@@ -271,6 +271,34 @@ export class IdempotencyKeyConflictError extends Error {
   }
 }
 
+export class SendIntentTombstonedError extends Error {
+  constructor(public readonly record: MessageRecord | null = null) {
+    super("send intent is cancelled and cannot be sent");
+    this.name = "SendIntentTombstonedError";
+  }
+}
+
+export class SendIntentAtomicityUnavailableError extends Error {
+  constructor() {
+    super("send-intent recovery requires a transactional store");
+    this.name = "SendIntentAtomicityUnavailableError";
+  }
+}
+
+export interface SendIntentLookupResult {
+  found: boolean;
+  tombstoned: boolean;
+  reconciliation_required: boolean;
+  message: MessageRecord | null;
+}
+
+export interface SendIntentCancellationResult {
+  outcome: "tombstoned" | "cancelled" | "reconciliation_required";
+  tombstoned: true;
+  reconciliation_required: boolean;
+  message: MessageRecord | null;
+}
+
 export interface ListOptions {
   limit?: number;
   offset?: number;
@@ -733,7 +761,10 @@ export class InboundDomainRouteConflictError extends Error {
  * than a silent cross-tenant leak.
  */
 export class EmailsSelfHostedStore {
-  constructor(private readonly client: TypedQueryClient) {}
+  constructor(
+    private readonly client: TypedQueryClient,
+    private readonly options: { allowUnsafeTestTransactions?: boolean } = {},
+  ) {}
 
   /**
    * Enter a tenant scope. Every data-CRUD method lives on the returned type and
@@ -749,6 +780,7 @@ export class EmailsSelfHostedStore {
       tenantScopedClient(this.client, tenantId),
       tenantId,
       isTransactional(this.client) ? this.client : undefined,
+      this.options.allowUnsafeTestTransactions === true,
     );
   }
 
@@ -1065,7 +1097,54 @@ export class TenantScopedStore {
     private readonly client: TypedQueryClient,
     private readonly tenantId: string,
     private readonly atomicClient?: PoolQueryClient,
+    private readonly allowUnsafeTestTransactions = false,
   ) {}
+
+  private sendIntentKeyDigest(key: string): string {
+    return createHash("sha256")
+      .update("emails:send-intent:v1\0", "utf8")
+      .update(this.tenantId, "utf8")
+      .update("\0", "utf8")
+      .update(key, "utf8")
+      .digest("hex");
+  }
+
+  private assertSafeSendIntentKey(key: string): void {
+    if (!key || key.length > 200 || key !== key.trim() || /[\x00-\x1F\x7F]/.test(key)) {
+      throw new RangeError("idempotency key must be 1-200 safe characters");
+    }
+    for (let index = 0; index < key.length; index++) {
+      const code = key.charCodeAt(index);
+      if (code >= 0xD800 && code <= 0xDBFF) {
+        const next = key.charCodeAt(index + 1);
+        if (!(next >= 0xDC00 && next <= 0xDFFF)) {
+          throw new RangeError("idempotency key must be 1-200 safe characters");
+        }
+        index++;
+      } else if (code >= 0xDC00 && code <= 0xDFFF) {
+        throw new RangeError("idempotency key must be 1-200 safe characters");
+      }
+    }
+  }
+
+  private async withSendIntentKeyLock<T>(
+    key: string,
+    action: (client: TypedQueryClient, digest: string) => Promise<T>,
+  ): Promise<T> {
+    this.assertSafeSendIntentKey(key);
+    const digest = this.sendIntentKeyDigest(key);
+    if (!this.atomicClient) {
+      if (!this.allowUnsafeTestTransactions) throw new SendIntentAtomicityUnavailableError();
+      return action(this.client, digest);
+    }
+    return this.atomicClient.transaction(async (tx) => {
+      await tx.execute(`SELECT set_config('app.current_tenant', $1, true)`, [this.tenantId]);
+      // The digest, not the possibly-sensitive caller key, enters the advisory
+      // lock namespace. Hash collisions only serialize unrelated operations.
+      await tx.execute(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, [`${this.tenantId}:${digest}`]);
+      return action(tx, digest);
+    });
+  }
 
   /**
    * Reject a body-supplied FK id that resolves to a row in ANOTHER tenant
@@ -1799,6 +1878,78 @@ export class TenantScopedStore {
     return row ? mapMessageRow(row) : null;
   }
 
+  /** Non-sending tenant-scoped recovery lookup. The key is never returned. */
+  async lookupSendIntent(key: string): Promise<SendIntentLookupResult> {
+    return this.withSendIntentKeyLock(key, async (client, digest) => {
+      const row = await client.get<Record<string, unknown>>(
+        `SELECT ${MESSAGE_COLUMNS} FROM messages WHERE idempotency_key = $1 AND tenant_id = $2`,
+        [key, this.tenantId],
+      );
+      const tombstone = await client.get<{ found: boolean }>(
+        `SELECT true AS found FROM send_intent_tombstones
+         WHERE tenant_id = $1 AND idempotency_key_hash = $2`,
+        [this.tenantId, digest],
+      );
+      const record = row ? mapMessageRow(row) : null;
+      return {
+        found: record !== null,
+        tombstoned: tombstone !== null || record?.send_state === "cancelled",
+        reconciliation_required: record !== null && ["sending", "sent", "uncertain"].includes(record.send_state),
+        message: record,
+      };
+    });
+  }
+
+  /**
+   * Durable stop-before-send primitive. The tenant/key advisory lock serializes
+   * this with first reservation, while the message row lock serializes it with a
+   * concurrent claim. Once this returns, every later reservation/claim observes
+   * the tombstone before a provider call.
+   */
+  async cancelSendIntent(key: string): Promise<SendIntentCancellationResult> {
+    return this.withSendIntentKeyLock(key, async (client, digest) => {
+      await client.execute(
+        `INSERT INTO send_intent_tombstones (tenant_id, idempotency_key_hash)
+         VALUES ($1, $2)
+         ON CONFLICT (tenant_id, idempotency_key_hash) DO NOTHING`,
+        [this.tenantId, digest],
+      );
+      const existing = await client.get<Record<string, unknown>>(
+        `SELECT ${MESSAGE_COLUMNS} FROM messages
+         WHERE tenant_id = $1 AND idempotency_key = $2
+         FOR UPDATE`,
+        [this.tenantId, key],
+      );
+      if (!existing) {
+        return {
+          outcome: "tombstoned",
+          tombstoned: true,
+          reconciliation_required: false,
+          message: null,
+        };
+      }
+      let record = mapMessageRow(existing);
+      if (record.send_state === "pending" || record.send_state === "blocked") {
+        const cancelled = await client.get<Record<string, unknown>>(
+          `UPDATE messages
+           SET send_state = 'cancelled', status = 'cancelled', updated_at = now()
+           WHERE id = $1 AND tenant_id = $2 AND send_state IN ('pending', 'blocked')
+           RETURNING ${MESSAGE_COLUMNS}`,
+          [record.id, this.tenantId],
+        );
+        if (cancelled) record = mapMessageRow(cancelled);
+      }
+      const reconciliationRequired = ["sending", "sent", "uncertain"].includes(record.send_state)
+        || !["cancelled", "blocked", "pending"].includes(record.send_state);
+      return {
+        outcome: reconciliationRequired ? "reconciliation_required" : "cancelled",
+        tombstoned: true,
+        reconciliation_required: reconciliationRequired,
+        message: record,
+      };
+    });
+  }
+
   /**
    * Central outbound policy gate. It runs after the durable pending intent is
    * reserved, so that denials are auditable and quota counts include the current
@@ -1919,32 +2070,80 @@ export class TenantScopedStore {
   async reserveSendIntent(
     input: MessageInput & { idempotency_key: string; send_payload_hash: string },
   ): Promise<{ record: MessageRecord; created: boolean }> {
-    const inserted = await this.client.get<Record<string, unknown>>(
-      `INSERT INTO messages (${MESSAGE_INSERT_COLS}, tenant_id)
-       VALUES (${MESSAGE_INSERT_VALUES}, $24)
-       ON CONFLICT (tenant_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
-       RETURNING ${MESSAGE_COLUMNS}`,
-      [...messageInsertParams({ ...input, direction: "outbound", status: "queued", send_state: "pending" }), this.tenantId],
-    );
-    if (inserted) return { record: mapMessageRow(inserted), created: true };
-    const existing = await this.client.get<Record<string, unknown>>(
-      `SELECT ${MESSAGE_COLUMNS} FROM messages WHERE idempotency_key = $1 AND tenant_id = $2`,
-      [input.idempotency_key, this.tenantId],
-    );
-    if (!existing) throw new Error("send intent conflict could not be reconciled");
-    const record = mapMessageRow(existing);
-    if (record.send_payload_hash !== input.send_payload_hash) throw new IdempotencyKeyConflictError();
-    return { record, created: false };
+    return this.withSendIntentKeyLock(input.idempotency_key, async (client, digest) => {
+      const tombstone = await client.get<{ found: boolean }>(
+        `SELECT true AS found FROM send_intent_tombstones
+         WHERE tenant_id = $1 AND idempotency_key_hash = $2`,
+        [this.tenantId, digest],
+      );
+      if (tombstone) {
+        const record = await client.get<Record<string, unknown>>(
+          `SELECT ${MESSAGE_COLUMNS} FROM messages WHERE idempotency_key = $1 AND tenant_id = $2`,
+          [input.idempotency_key, this.tenantId],
+        );
+        throw new SendIntentTombstonedError(record ? mapMessageRow(record) : null);
+      }
+      const inserted = await client.get<Record<string, unknown>>(
+        `INSERT INTO messages (${MESSAGE_INSERT_COLS}, tenant_id)
+         VALUES (${MESSAGE_INSERT_VALUES}, $24)
+         ON CONFLICT (tenant_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
+         RETURNING ${MESSAGE_COLUMNS}`,
+        [...messageInsertParams({ ...input, direction: "outbound", status: "queued", send_state: "pending" }), this.tenantId],
+      );
+      if (inserted) return { record: mapMessageRow(inserted), created: true };
+      const existing = await client.get<Record<string, unknown>>(
+        `SELECT ${MESSAGE_COLUMNS} FROM messages WHERE idempotency_key = $1 AND tenant_id = $2`,
+        [input.idempotency_key, this.tenantId],
+      );
+      if (!existing) throw new Error("send intent conflict could not be reconciled");
+      const record = mapMessageRow(existing);
+      if (record.send_state === "cancelled") throw new SendIntentTombstonedError(record);
+      if (record.send_payload_hash !== input.send_payload_hash) throw new IdempotencyKeyConflictError();
+      return { record, created: false };
+    });
   }
 
   async claimSendIntent(id: string): Promise<MessageRecord | null> {
-    const row = await this.client.get<Record<string, unknown>>(
-      `UPDATE messages SET send_state = 'sending', send_started_at = now(), updated_at = now()
-       WHERE id = $1 AND tenant_id = $2 AND send_state = 'pending'
-       RETURNING ${MESSAGE_COLUMNS}`,
-      [id, this.tenantId],
-    );
-    return row ? mapMessageRow(row) : null;
+    const claim = async (client: TypedQueryClient): Promise<MessageRecord | null> => {
+      const pending = await client.get<{ idempotency_key: string | null }>(
+        `SELECT idempotency_key FROM messages
+         WHERE id = $1 AND tenant_id = $2 AND send_state = 'pending'`,
+        [id, this.tenantId],
+      );
+      if (!pending?.idempotency_key) return null;
+      const digest = this.sendIntentKeyDigest(pending.idempotency_key);
+      if (this.atomicClient) {
+        await client.execute(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, [`${this.tenantId}:${digest}`]);
+      }
+      const locked = await client.get<{ idempotency_key: string | null }>(
+        `SELECT idempotency_key FROM messages
+         WHERE id = $1 AND tenant_id = $2 AND send_state = 'pending'
+         FOR UPDATE`,
+        [id, this.tenantId],
+      );
+      if (locked?.idempotency_key !== pending.idempotency_key) return null;
+      const tombstone = await client.get<{ found: boolean }>(
+        `SELECT true AS found FROM send_intent_tombstones
+         WHERE tenant_id = $1 AND idempotency_key_hash = $2`,
+        [this.tenantId, digest],
+      );
+      if (tombstone) return null;
+      const row = await client.get<Record<string, unknown>>(
+        `UPDATE messages SET send_state = 'sending', send_started_at = now(), updated_at = now()
+         WHERE id = $1 AND tenant_id = $2 AND send_state = 'pending'
+         RETURNING ${MESSAGE_COLUMNS}`,
+        [id, this.tenantId],
+      );
+      return row ? mapMessageRow(row) : null;
+    };
+    if (!this.atomicClient) {
+      if (!this.allowUnsafeTestTransactions) throw new SendIntentAtomicityUnavailableError();
+      return claim(this.client);
+    }
+    return this.atomicClient.transaction(async (tx) => {
+      await tx.execute(`SELECT set_config('app.current_tenant', $1, true)`, [this.tenantId]);
+      return claim(tx);
+    });
   }
 
   async completeSendIntent(id: string, providerMessageId: string): Promise<MessageRecord> {

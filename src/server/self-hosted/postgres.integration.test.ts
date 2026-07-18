@@ -8,7 +8,12 @@ import {
   type TypedQueryClient,
 } from "../../storage-kit/index.js";
 import { DEFAULT_TENANT_ID, emailsSelfHostedMigrations } from "./migrations.js";
-import { EmailsSelfHostedStore, type MessageInput, type TenantScopedStore } from "./store.js";
+import {
+  EmailsSelfHostedStore,
+  SendIntentTombstonedError,
+  type MessageInput,
+  type TenantScopedStore,
+} from "./store.js";
 import { resourceSpecForPath, SELF_HOSTED_RESOURCES } from "./resources.js";
 
 const databaseUrl = process.env["EMAILS_TEST_POSTGRES_URL"];
@@ -226,6 +231,100 @@ describe("self-hosted Postgres integration", () => {
     const claimed = await store.claimSendIntent(first.record.id);
     expect(claimed?.send_state).toBe("sending");
     expect((await store.completeSendIntent(first.record.id, "provider-ci")).send_state).toBe("sent");
+  });
+
+  it.skipIf(!client)("atomically tombstones send intents with tenant isolation and real claim/cancel concurrency", async () => {
+    await resetPublicSchema();
+    await new MigrationLedger(client!, emailsSelfHostedMigrations()).migrate();
+    const root = new EmailsSelfHostedStore(client!);
+    const tenantA = DEFAULT_TENANT_ID;
+    const tenantB = "18181818-1818-4818-8818-181818181818";
+    await client!.execute(
+      `INSERT INTO tenants (id, slug, name) VALUES ($1, 'send-recovery-b', 'Send Recovery B')`,
+      [tenantB],
+    );
+    const key = `shared-${crypto.randomUUID()}`;
+    const input = {
+      from_addr: "sender@example.test",
+      to_addrs: ["recipient@example.test"],
+      subject: "concurrent recovery",
+      idempotency_key: key,
+      send_payload_hash: "payload-hash",
+    };
+    const a = root.forTenant(tenantA);
+    const b = root.forTenant(tenantB);
+    const pendingA = await a.reserveSendIntent(input);
+    const pendingB = await b.reserveSendIntent(input);
+
+    const [claimed, cancellation] = await Promise.all([
+      a.claimSendIntent(pendingA.record.id),
+      a.cancelSendIntent(key),
+    ]);
+    const providerCalls = claimed ? 1 : 0;
+    expect(
+      (providerCalls === 0
+        && cancellation.outcome === "cancelled"
+        && cancellation.reconciliation_required === false)
+      || (providerCalls === 1
+        && cancellation.outcome === "reconciliation_required"
+        && cancellation.reconciliation_required === true),
+    ).toBe(true);
+    expect(cancellation.message?.id).toBe(pendingA.record.id);
+
+    const repeated = await a.cancelSendIntent(key);
+    expect(repeated).toEqual(cancellation);
+    expect((await b.lookupSendIntent(key)).message?.id).toBe(pendingB.record.id);
+    expect((await b.lookupSendIntent(key)).tombstoned).toBe(false);
+
+    const deterministicStates = ["sending", "sent", "uncertain"] as const;
+    for (const state of deterministicStates) {
+      const stateKey = `${state}-${crypto.randomUUID()}`;
+      const reserved = await b.reserveSendIntent({ ...input, idempotency_key: stateKey });
+      const stateClaim = await b.claimSendIntent(reserved.record.id);
+      expect(stateClaim?.send_state).toBe("sending");
+      if (state === "sent") await b.completeSendIntent(reserved.record.id, `provider-${state}`);
+      if (state === "uncertain") await b.markSendUncertain(reserved.record.id);
+      const result = await b.cancelSendIntent(stateKey);
+      expect(result).toMatchObject({
+        outcome: "reconciliation_required",
+        tombstoned: true,
+        reconciliation_required: true,
+        message: { id: reserved.record.id, send_state: state },
+      });
+    }
+
+    const absentKey = `absent-${crypto.randomUUID()}`;
+    expect(await a.cancelSendIntent(absentKey)).toMatchObject({
+      outcome: "tombstoned",
+      tombstoned: true,
+      reconciliation_required: false,
+      message: null,
+    });
+    await expect(a.reserveSendIntent({ ...input, idempotency_key: absentKey }))
+      .rejects.toBeInstanceOf(SendIntentTombstonedError);
+
+    const stored = await client!.one<{ idempotency_key_hash: string }>(
+      `SELECT idempotency_key_hash FROM send_intent_tombstones
+       WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 1`,
+      [tenantA],
+    );
+    expect(stored.idempotency_key_hash).toMatch(/^[0-9a-f]{64}$/);
+    expect(stored.idempotency_key_hash).not.toContain(absentKey);
+
+    const table = await client!.one<{ relrowsecurity: boolean; relforcerowsecurity: boolean }>(
+      `SELECT relrowsecurity, relforcerowsecurity
+       FROM pg_class WHERE oid = 'public.send_intent_tombstones'::regclass`,
+    );
+    expect(table).toEqual({ relrowsecurity: true, relforcerowsecurity: true });
+    const policy = await client!.one<{ qual: string; with_check: string }>(
+      `SELECT pg_get_expr(polqual, polrelid) AS qual,
+              pg_get_expr(polwithcheck, polrelid) AS with_check
+       FROM pg_policy
+       WHERE polrelid = 'public.send_intent_tombstones'::regclass
+         AND polname = 'send_intent_tombstones_tenant_isolation'`,
+    );
+    expect(policy.qual).toContain("app.current_tenant");
+    expect(policy.with_check).toContain("app.current_tenant");
   });
 
   it.skipIf(!client)("migrates typed timestamp legacy rows without text-assignment failures", async () => {

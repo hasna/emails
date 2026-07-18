@@ -27,7 +27,7 @@ import type { SelfHostedKeyStore } from "../keys.js";
  * data methods are only reached at runtime (tests are not type-checked).
  */
 export function selfScopedStore(client: TypedQueryClient): EmailsSelfHostedStore {
-  const scoped = new EmailsSelfHostedStore(client).forTenant(DEFAULT_TENANT_ID);
+  const scoped = new EmailsSelfHostedStore(client, { allowUnsafeTestTransactions: true }).forTenant(DEFAULT_TENANT_ID);
   (scoped as unknown as { forTenant: () => unknown }).forTenant = () => scoped;
   return scoped as unknown as EmailsSelfHostedStore;
 }

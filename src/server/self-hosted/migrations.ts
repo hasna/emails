@@ -2098,6 +2098,35 @@ const INBOUND_MESSAGE_SOURCE_PROVENANCE = defineMigration(
   `,
 );
 
+/**
+ * 0018 — tenant-scoped send-intent cancellation tombstones.
+ *
+ * Only a SHA-256 digest of the bounded caller key is retained here. The message
+ * ledger keeps its existing compatibility column, while this table provides the
+ * independent durable stop signal needed to tombstone a key before any message
+ * exists. Runtime reservation/cancellation serialize on the same tenant+digest
+ * advisory lock; claim also checks this table while holding the message row lock.
+ */
+const SEND_INTENT_RECOVERY = defineMigration(
+  "0018_send_intent_recovery",
+  `
+  CREATE TABLE IF NOT EXISTS send_intent_tombstones (
+    tenant_id           uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    idempotency_key_hash text NOT NULL CHECK (idempotency_key_hash ~ '^[0-9a-f]{64}$'),
+    created_at          timestamptz NOT NULL DEFAULT now(),
+    updated_at          timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (tenant_id, idempotency_key_hash)
+  );
+
+  ALTER TABLE send_intent_tombstones ENABLE ROW LEVEL SECURITY;
+  ALTER TABLE send_intent_tombstones FORCE ROW LEVEL SECURITY;
+  DROP POLICY IF EXISTS send_intent_tombstones_tenant_isolation ON send_intent_tombstones;
+  CREATE POLICY send_intent_tombstones_tenant_isolation ON send_intent_tombstones
+    USING (tenant_id = NULLIF(current_setting('app.current_tenant', true), '')::uuid)
+    WITH CHECK (tenant_id = NULLIF(current_setting('app.current_tenant', true), '')::uuid);
+  `,
+);
+
 /** All migrations, in order: api-keys table (auth), the core schema, inbound. */
 export function emailsSelfHostedMigrations(): Migration[] {
   const authMigrations = apiKeyMigrations().map((m) => defineMigration(m.id, m.sql));
@@ -2122,5 +2151,6 @@ export function emailsSelfHostedMigrations(): Migration[] {
     USER_IDENTITIES_AND_PLATFORM_ADMIN,
     INBOUND_ROUTING_AND_QUARANTINE,
     INBOUND_MESSAGE_SOURCE_PROVENANCE,
+    SEND_INTENT_RECOVERY,
   ];
 }

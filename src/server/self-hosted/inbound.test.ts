@@ -20,8 +20,9 @@ const COLS = [
  * In-memory query client that models JUST the `messages` table well enough to
  * exercise insert, ON CONFLICT (source_id) upsert, list ordering, and get-by-id.
  */
-function messagesClient(): { client: TypedQueryClient; rows: Record<string, unknown>[] } {
+function messagesClient(): { client: TypedQueryClient; rows: Record<string, unknown>[]; tombstones: Set<string> } {
   const rows: Record<string, unknown>[] = [];
+  const tombstones = new Set<string>();
 
   function rowFromParams(params: readonly unknown[]): Record<string, unknown> {
     const r: Record<string, unknown> = {};
@@ -50,6 +51,9 @@ function messagesClient(): { client: TypedQueryClient; rows: Record<string, unkn
       return [] as T[];
     },
     async get<T>(sql: string, params?: readonly unknown[]): Promise<T | null> {
+      if (sql.includes("FROM send_intent_tombstones")) {
+        return (tombstones.has(String((params ?? [])[1])) ? { found: true } : null) as T | null;
+      }
       if (sql.includes("attachments ->")) {
         const row = rows.find((item) => item["id"] === (params ?? [])[0]);
         const raw = row?.["attachments"];
@@ -63,8 +67,13 @@ function messagesClient(): { client: TypedQueryClient; rows: Record<string, unkn
         rows.push(incoming);
         return incoming as unknown as T;
       }
-      if (sql.includes("FROM messages WHERE idempotency_key")) {
-        return (rows.find((row) => row["idempotency_key"] === (params ?? [])[0]) as unknown as T) ?? null;
+      if (sql.includes("FROM messages") && sql.includes("idempotency_key =")) {
+        const keyIndex = sql.includes("idempotency_key = $1") ? 0 : 1;
+        return (rows.find((row) => row["idempotency_key"] === (params ?? [])[keyIndex]) as unknown as T) ?? null;
+      }
+      if (sql.includes("SELECT idempotency_key FROM messages")) {
+        const row = rows.find((item) => item["id"] === (params ?? [])[0] && item["send_state"] === "pending");
+        return (row ? { idempotency_key: row["idempotency_key"] } : null) as T | null;
       }
       if (sql.startsWith("UPDATE messages SET send_state = 'sending'")) {
         const row = rows.find((item) => item["id"] === (params ?? [])[0] && item["send_state"] === "pending");
@@ -86,6 +95,14 @@ function messagesClient(): { client: TypedQueryClient; rows: Record<string, unkn
         if (!row || row["send_state"] === "sent") return null;
         row["send_state"] = "uncertain";
         row["status"] = "uncertain";
+        return row as unknown as T;
+      }
+      if (sql.includes("SET send_state = 'cancelled'")) {
+        const row = rows.find((item) => item["id"] === (params ?? [])[0]
+          && ["pending", "blocked"].includes(String(item["send_state"])));
+        if (!row) return null;
+        row["send_state"] = "cancelled";
+        row["status"] = "cancelled";
         return row as unknown as T;
       }
       if (sql.includes("FROM messages WHERE id")) {
@@ -111,9 +128,13 @@ function messagesClient(): { client: TypedQueryClient; rows: Record<string, unkn
       }
       throw new Error(`unexpected one() SQL: ${sql.slice(0, 40)}`);
     },
-    async execute() {},
+    async execute(sql, params) {
+      if (sql.startsWith("INSERT INTO send_intent_tombstones")) {
+        tombstones.add(String((params ?? [])[1]));
+      }
+    },
   };
-  return { client, rows };
+  return { client, rows, tombstones };
 }
 
 function deps(): SelfHostedServiceDeps {
@@ -175,6 +196,7 @@ describe("Emails self-hosted inbound messages", () => {
     expect(ids.indexOf("0002_mailery_messages_inbound")).toBeGreaterThan(
       ids.indexOf("0001_mailery_selfhosted_core"),
     );
+    expect(ids.at(-1)).toBe("0018_send_intent_recovery");
   });
 
   test("POST inbound preserves all fields and returns 201", async () => {
@@ -323,6 +345,146 @@ describe("Emails self-hosted inbound messages", () => {
     expect(res?.status).toBe(202);
     expect(sent).toHaveLength(1);
     expect((await res!.json()).message.provider_message_id).toBe("ses-message-1");
+  });
+
+  it("looks up and cancels send intents without invoking the provider", async () => {
+    const d = deps();
+    let sends = 0;
+    d.sender = { provider: "ses", send: async () => { sends++; return "must-not-send"; } };
+    const recovery = (operation: "lookup" | "cancel", key: string) => handleSelfHostedRequest(
+      d,
+      new Request(`http://svc/v1/messages/send-intents/${operation}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-api-key": writeToken() },
+        body: JSON.stringify({ idempotency_key: key }),
+      }),
+    );
+
+    const absent = await recovery("lookup", "recover-before-send");
+    expect(await absent!.json()).toEqual({
+      send_intent: { found: false, tombstoned: false, reconciliation_required: false, message: null },
+    });
+    const first = await recovery("cancel", "recover-before-send");
+    const second = await recovery("cancel", "recover-before-send");
+    expect(await first!.json()).toEqual({
+      cancellation: {
+        outcome: "tombstoned",
+        tombstoned: true,
+        reconciliation_required: false,
+        message: null,
+      },
+    });
+    expect(await second!.json()).toEqual({
+      cancellation: {
+        outcome: "tombstoned",
+        tombstoned: true,
+        reconciliation_required: false,
+        message: null,
+      },
+    });
+    const pendingKey = "recover-pending-intent";
+    const pending = await d.store.reserveSendIntent({
+      from_addr: "sender@example.test",
+      to_addrs: ["recipient@example.test"],
+      subject: "pending",
+      idempotency_key: pendingKey,
+      send_payload_hash: "pending-hash",
+    });
+    const found = await recovery("lookup", pendingKey);
+    const foundBody = await found!.json();
+    expect(foundBody).toEqual({
+      send_intent: {
+        found: true,
+        tombstoned: false,
+        reconciliation_required: false,
+        message: { id: pending.record.id, send_state: "pending" },
+      },
+    });
+    expect(JSON.stringify(foundBody)).not.toContain(pendingKey);
+    const pendingCancellation = await recovery("cancel", pendingKey);
+    const pendingCancellationBody = await pendingCancellation!.json();
+    expect(pendingCancellationBody).toEqual({
+      cancellation: {
+        outcome: "cancelled",
+        tombstoned: true,
+        reconciliation_required: false,
+        message: { id: pending.record.id, send_state: "cancelled" },
+      },
+    });
+    expect(JSON.stringify(pendingCancellationBody)).not.toContain(pendingKey);
+    expect(sends).toBe(0);
+  });
+
+  it("rejects a late send after a cancellation tombstone before provider I/O", async () => {
+    const d = deps();
+    let sends = 0;
+    d.sender = { provider: "ses", send: async () => { sends++; return "must-not-send"; } };
+    const headers = { "Content-Type": "application/json", "x-api-key": writeToken() };
+    const key = "tombstone-before-late-send";
+    const cancelled = await handleSelfHostedRequest(d, new Request("http://svc/v1/messages/send-intents/cancel", {
+      method: "POST", headers, body: JSON.stringify({ idempotency_key: key }),
+    }));
+    expect(cancelled?.status).toBe(200);
+    const late = await handleSelfHostedRequest(d, new Request("http://svc/v1/messages/send", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ from: "me@example.com", to: ["you@example.com"], subject: "late", idempotency_key: key }),
+    }));
+    expect(late?.status).toBe(409);
+    expect(await late!.json()).toEqual({
+      error: "send intent is cancelled and cannot be sent",
+      tombstoned: true,
+      message: null,
+      retry_safe: false,
+    });
+    expect(sends).toBe(0);
+  });
+
+  it("reports cancellation when it wins after reservation but before claim", async () => {
+    const d = deps();
+    let sends = 0;
+    const key = "cancel-between-reserve-and-claim";
+    d.sender = { provider: "ses", send: async () => { sends++; return "must-not-send"; } };
+    d.store.evaluateOutboundPolicy = async () => {
+      await d.store.cancelSendIntent(key);
+      return { allowed: true };
+    };
+    const res = await handleSelfHostedRequest(d, new Request("http://svc/v1/messages/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": writeToken() },
+      body: JSON.stringify({
+        from: "me@example.com",
+        to: ["you@example.com"],
+        subject: "cancel race",
+        idempotency_key: key,
+      }),
+    }));
+    const body = await res!.json();
+    expect(res?.status).toBe(409);
+    expect(body).toEqual({
+      error: "send intent is cancelled and cannot be sent",
+      tombstoned: true,
+      message: { id: expect.any(String), send_state: "cancelled" },
+      retry_safe: false,
+    });
+    expect(JSON.stringify(body)).not.toContain(key);
+    expect(sends).toBe(0);
+  });
+
+  it("validates recovery keys without reflecting them or invoking the provider", async () => {
+    const d = deps();
+    let sends = 0;
+    d.sender = { provider: "ses", send: async () => { sends++; return "must-not-send"; } };
+    for (const idempotencyKey of ["x".repeat(201), "unsafe\nkey", "\uD800"]) {
+      const res = await handleSelfHostedRequest(d, new Request("http://svc/v1/messages/send-intents/cancel", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-api-key": writeToken() },
+        body: JSON.stringify({ idempotency_key: idempotencyKey }),
+      }));
+      expect(res?.status).toBe(400);
+      expect(JSON.stringify(await res!.json())).not.toContain(idempotencyKey);
+    }
+    expect(sends).toBe(0);
   });
 
   test("outbound policy denial is durably blocked before any provider side effect", async () => {
