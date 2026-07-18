@@ -380,7 +380,9 @@ rejects remote plaintext HTTP. Self-hosted sends require an idempotency key and
 support at most five inline attachments (512 KiB each, 768 KiB total);
 scheduled sends are not implemented by the self-hosted API. Mailbox read,
 star, archive, label, delete, bulk-by-explicit-id, and authenticated attachment
-retrieval are supported.
+retrieval are supported. Outbound rows carrying a send idempotency key are a
+durable delivery ledger and return `409` on delete so their replay fence cannot
+be erased; ordinary inbound and non-idempotent rows remain deletable.
 
 For an operator retry, reuse the same `emails send --idempotency-key <key>`.
 Changing the payload under that key is rejected, and an uncertain provider

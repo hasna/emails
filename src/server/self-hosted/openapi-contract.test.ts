@@ -104,6 +104,7 @@ describe("self-hosted OpenAPI identity and authorization contract", () => {
     expect(send?.responses).toHaveProperty("403");
     expect(send?.responses).toHaveProperty("409");
     expect(send?.responses).toHaveProperty("429");
+    expect(send?.responses).toHaveProperty("413");
     expect(send?.responses).toHaveProperty("502");
     const sendError = emailsSelfHostedOpenApi.components?.schemas?.SendMessageError as
       | { properties?: { message?: { oneOf?: Array<{ $ref?: string }>; nullable?: boolean } } }
@@ -136,10 +137,12 @@ describe("self-hosted OpenAPI identity and authorization contract", () => {
     expect(lookup?.responses).toHaveProperty("400");
     expect(lookup?.responses).toHaveProperty("401");
     expect(lookup?.responses).toHaveProperty("403");
+    expect(lookup?.responses).toHaveProperty("413");
     expect(cancel?.responses).toHaveProperty("200");
     expect(cancel?.responses).toHaveProperty("400");
     expect(cancel?.responses).toHaveProperty("401");
     expect(cancel?.responses).toHaveProperty("403");
+    expect(cancel?.responses).toHaveProperty("413");
     expect(emailsSelfHostedOpenApi.components?.schemas?.SendIntentMessage).toMatchObject({
       type: "object",
       additionalProperties: false,
@@ -161,6 +164,9 @@ describe("self-hosted OpenAPI identity and authorization contract", () => {
     expect(deletion?.responses).toHaveProperty("403");
     expect(deletion?.responses).toHaveProperty("404");
     expect(deletion?.responses).toHaveProperty("409");
+    expect(deletion?.responses?.["409"]?.content?.["application/json"]?.schema).toEqual({
+      $ref: "#/components/schemas/SendMessageError",
+    });
   });
 
   it("publishes a bounded typed attachment-content operation", () => {
