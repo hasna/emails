@@ -54,10 +54,12 @@ function activeHits(pattern: RegExp, allowedFiles: string[] = []): string[] {
 
 describe("no hosted control plane", () => {
   it("uses the canonical public package name and documents the remote-bind guard", () => {
-    expect(hits(/@hasnaxyz\/emails/i)).toEqual([]);
+    // The published name moved to @hasna/mailery (repo hasna/mailery). Typo-squat
+    // variants of either brand stay banned.
+    expect(hits(/@hasnaxyz\/(?:emails|mailery)/i)).toEqual([]);
     const readme = readFileSync(join(root, "README.md"), "utf8");
-    expect(readme).toContain("EMAILS_ALLOW_REMOTE=1");
-    expect(readme).toContain("@hasna/emails");
+    expect(readme).toContain("MAILERY_ALLOW_REMOTE=1");
+    expect(readme).toContain("@hasna/mailery");
   });
 
   it("ships exactly local and self_hosted without hosted aliases", () => {
@@ -75,8 +77,17 @@ describe("no hosted control plane", () => {
     expect(existsSync(join(root, "src/cli/commands/triage.ts"))).toBe(false);
     expect(existsSync(join(root, "src/mcp/tools/triage.ts"))).toBe(false);
     expect((pkg.exports as Record<string, unknown>)["./cloud"]).toBeUndefined();
-    expect(Object.keys(pkg.bin)).toEqual(["emails", "emails-mcp", "emails-serve"]);
-    expect(Object.keys(pkg.bin).some((name) => name.toLowerCase().includes("mailery"))).toBe(false);
+    // Post-rename bin surface: canonical `mailery*` bins plus the `emails*`
+    // aliases kept for back-compat. Both sets must be present (existing installs
+    // that call `emails*` keep working; new installs get `mailery*`).
+    const bins = Object.keys(pkg.bin);
+    for (const name of ["mailery", "mailery-mcp", "mailery-serve"]) expect(bins).toContain(name);
+    for (const name of ["emails", "emails-mcp", "emails-serve"]) expect(bins).toContain(name);
+    // No OTHER (e.g. cloud/saas) bins sneak in.
+    expect(new Set(bins)).toEqual(new Set([
+      "mailery", "mailery-mcp", "mailery-serve",
+      "emails", "emails-mcp", "emails-serve",
+    ]));
   });
 
   it("contains no hosted endpoint, billing, credit, or private-deployment contract", () => {
@@ -94,6 +105,10 @@ describe("no hosted control plane", () => {
   });
 
   it("does not encode a removed mode in runtime or deployment configuration", () => {
+    // Shipped config/source must not hardcode a removed cloud/remote/hybrid mode
+    // value. (Rejection of MAILERY_MODE=cloud at runtime is covered by the mode
+    // resolver tests; test files deliberately set it to prove that rejection, so
+    // this static scan intentionally stays scoped to the EMAILS_ prefix.)
     expect(hits(/(?:EMAILS|HASNA_EMAILS)_(?:STORAGE_)?MODE\s*[:=]\s*["']?(?:cloud|remote|hybrid)\b/i)).toEqual([]);
   });
 

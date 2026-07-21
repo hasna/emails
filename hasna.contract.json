@@ -1,19 +1,20 @@
 {
   "$schema": "https://github.com/hasna/contracts/schema/hasna.service_contract.v1.json",
   "schema": "hasna.service_contract.v1",
-  "name": "emails",
+  "name": "mailery",
   "class": "service",
   "contractVersion": "v1",
   "kitVersion": "0.4.2",
-  "description": "Emails runs either locally with SQLite or self-hosted with operator-owned Postgres and provider credentials.",
-  "bins": ["emails", "emails-mcp", "emails-serve"],
+  "description": "Mailery runs either locally with SQLite or self-hosted with operator-owned Postgres and provider credentials.",
+  "bins": ["mailery", "mailery-mcp", "mailery-serve", "emails", "emails-mcp", "emails-serve"],
   "storage": {
     "mode": "self_hosted",
     "envPrefix": "EMAILS_",
     "sqlitePath": "~/.hasna/emails/emails.db"
   },
   "metadata": {
-    "apiKeyApp": "emails",
+    "apiKeyApp": "mailery",
+    "apiKeyAppAliases": ["emails"],
     "apiScopes": ["emails:read", "emails:write"],
     "databaseUrlEnv": "EMAILS_DATABASE_URL",
     "apiSigningKeyEnv": "EMAILS_API_SIGNING_KEY",
@@ -21,7 +22,7 @@
     "readyPath": "/ready",
     "versionPath": "/version",
     "openapiPath": "/openapi.json",
-    "migrateCommand": ["emails", "db", "migrate"],
+    "migrateCommand": ["mailery", "db", "migrate"],
     "automaticDeploy": false
   }
 }

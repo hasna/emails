@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { commandModulesFor, routeRootPromptArgs, shouldPrintVersionEarly, type CommandModule } from "./router.js";
+import { applyMaileryEnvCompat } from "../lib/env-compat.js";
 
 function getPackageVersion(): string {
   try {
@@ -63,6 +64,8 @@ function configureJsonCommanderErrors(command: Command): void {
 }
 
 async function main(): Promise<void> {
+  // Mirror MAILERY_* env onto the EMAILS_* names the code reads (dual-read).
+  applyMaileryEnvCompat();
   const version = getPackageVersion();
   const rawArgs = process.argv.slice(2);
   if (shouldPrintVersionEarly(rawArgs)) {
@@ -83,8 +86,8 @@ async function main(): Promise<void> {
   setLogLevel(quietRequested, verboseRequested);
 
   program
-    .name("emails")
-    .description("Emails email management CLI - send, receive, sync, and manage email locally or in your AWS account")
+    .name("mailery")
+    .description("Mailery email management CLI - send, receive, sync, and manage email locally or in your AWS account (the `emails` command is a back-compat alias)")
     .version(version)
     .option("--json", "Output JSON instead of formatted text")
     .option("-q, --quiet", "Suppress info output")

@@ -1,13 +1,16 @@
 {
-  "name": "@hasna/emails",
+  "name": "@hasna/mailery",
   "version": "1.2.7",
-  "description": "Local SQLite and self-hosted email management CLI, MCP server, and library",
+  "description": "Mailery — local SQLite and self-hosted email management CLI, MCP server, and library",
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/hasna/emails.git"
+    "url": "git+https://github.com/hasna/mailery.git"
   },
   "bin": {
+    "mailery": "dist/cli/index.js",
+    "mailery-mcp": "dist/mcp/index.js",
+    "mailery-serve": "dist/server/index.js",
     "emails": "dist/cli/index.js",
     "emails-mcp": "dist/mcp/index.js",
     "emails-serve": "dist/server/index.js"

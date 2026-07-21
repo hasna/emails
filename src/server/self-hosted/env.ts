@@ -1,14 +1,18 @@
 import { createPgPool, createQueryClient, type PoolQueryClient } from "../../storage-kit/index.js";
 import { assertNoLegacyHostedEnvironment } from "../../lib/mode.js";
 
-export const SELF_HOSTED_APP = "emails";
+// API-key app slug. The canonical slug moved "emails" -> "mailery" (brand
+// rename). Keys already issued under "emails" keep working: the verifier accepts
+// both (see SELF_HOSTED_APP_ALIASES + serve.ts).
+export const SELF_HOSTED_APP = "mailery";
+export const SELF_HOSTED_APP_ALIASES = ["emails"] as const;
 export const SELF_HOSTED_MODE_ENV = "EMAILS_MODE";
 export const SELF_HOSTED_DATABASE_ENV = "EMAILS_DATABASE_URL";
 export const SELF_HOSTED_SIGNING_ENV = "EMAILS_API_SIGNING_KEY";
 
+// Removed hosted-runtime vars kept rejected. The plain MODE keys (MAILERY_MODE /
+// HASNA_MAILERY_MODE) are NO LONGER here — they are canonical mode selectors now.
 const REMOVED_ENV_KEYS = [
-  "MAILERY_MODE",
-  "HASNA_MAILERY_MODE",
   "MAILERY_STORAGE_MODE",
   "HASNA_MAILERY_STORAGE_MODE",
   "HASNA_MAILERY_DATABASE_URL",

@@ -144,10 +144,8 @@ describe("labelForEmailsMode / getEmailsMode", () => {
 });
 
 describe("assertNoLegacyHostedEnvironment", () => {
-  it("throws on legacy mode/storage-mode env vars", () => {
+  it("throws on removed storage-mode env vars (both prefixes)", () => {
     for (const key of [
-      "MAILERY_MODE",
-      "HASNA_MAILERY_MODE",
       "MAILERY_STORAGE_MODE",
       "HASNA_MAILERY_STORAGE_MODE",
       "EMAILS_STORAGE_MODE",
@@ -155,6 +153,16 @@ describe("assertNoLegacyHostedEnvironment", () => {
     ]) {
       const env = { [key]: "cloud" } as NodeJS.ProcessEnv;
       expect(() => assertNoLegacyHostedEnvironment(env)).toThrow("removed hosted/legacy runtime");
+    }
+  });
+
+  it("does NOT reject the canonical MAILERY_MODE selector as legacy", () => {
+    // Post-rename, MAILERY_MODE is a first-class mode key (not a hosted-legacy
+    // var). local/self_hosted VALUES are accepted; only cloud/remote/hybrid
+    // VALUES are rejected (covered by resolveEmailsMode tests below).
+    for (const key of ["MAILERY_MODE", "HASNA_MAILERY_MODE"]) {
+      expect(() => assertNoLegacyHostedEnvironment({ [key]: "local" } as NodeJS.ProcessEnv)).not.toThrow();
+      expect(() => assertNoLegacyHostedEnvironment({ [key]: "self_hosted" } as NodeJS.ProcessEnv)).not.toThrow();
     }
   });
 
@@ -194,6 +202,25 @@ describe("resolveEmailsMode — dual mode", () => {
     process.env[HASNA_EMAILS_MODE_ENV] = "self_hosted";
     setSelfHostedCredentials();
     expect(resolveEmailsMode()).toMatchObject({ mode: "self_hosted", label: "Self-hosted" });
+  });
+
+  it("accepts the canonical MAILERY_MODE selector", () => {
+    process.env["MAILERY_MODE"] = "self_hosted";
+    setSelfHostedCredentials();
+    expect(resolveEmailsMode()).toMatchObject({
+      mode: "self_hosted",
+      source: { kind: "env", name: "MAILERY_MODE" },
+    });
+  });
+
+  it("rejects a cloud/remote/hybrid VALUE under MAILERY_MODE and names the key", () => {
+    for (const value of ["cloud", "remote", "hybrid"]) {
+      process.env["MAILERY_MODE"] = value;
+      setSelfHostedCredentials();
+      resetSelfHostedConfigCache();
+      expect(() => resolveEmailsMode()).toThrow("MAILERY_MODE");
+      expect(() => resolveEmailsMode()).toThrow("removed hosted/legacy runtime");
+    }
   });
 
   it("resolves and validates a config-selected self_hosted client without requiring EMAILS_MODE", () => {

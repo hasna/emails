@@ -6,20 +6,41 @@ export { EMAILS_CLIENT_ENV_SECRET_ENV } from "./client-env.js";
 export type EmailsMode = "local" | "self_hosted";
 export type EmailsModeLabel = "Local" | "Self-hosted";
 
+// Canonical mode selectors. The package's public prefix moved EMAILS_ -> MAILERY_
+// (repo/brand rename to mailery). Both prefixes are accepted; MAILERY_ is
+// canonical and wins when both are set (dual-read, prefer new). The EMAILS_
+// names remain as back-compat aliases so existing installs keep working.
 export const EMAILS_MODE_ENV = "EMAILS_MODE";
 export const HASNA_EMAILS_MODE_ENV = "HASNA_EMAILS_MODE";
+export const MAILERY_MODE_ENV = "MAILERY_MODE";
+export const HASNA_MAILERY_MODE_ENV = "HASNA_MAILERY_MODE";
 export const EMAILS_MODE_CONFIG_KEY = "emails_mode";
-export const EMAILS_MODE_ENV_KEYS = [EMAILS_MODE_ENV, HASNA_EMAILS_MODE_ENV] as const;
+export const EMAILS_MODE_ENV_KEYS = [
+  MAILERY_MODE_ENV,
+  HASNA_MAILERY_MODE_ENV,
+  EMAILS_MODE_ENV,
+  HASNA_EMAILS_MODE_ENV,
+] as const;
 
+// Removed *storage-mode* tiering (no cloud/remote/hybrid). Both prefixes are
+// rejected loudly. The plain MODE keys are deliberately NOT here: MAILERY_MODE /
+// EMAILS_MODE are the supported selectors and only accept local|self_hosted
+// (a cloud/remote/hybrid VALUE is still rejected by FORBIDDEN_MODE_VALUES).
+//
+// These arrays stay module-PRIVATE on purpose: exporting them would emit the
+// literal hosted key names into mode.d.ts, which the no-cloud artifact scan's
+// compatibility-bridge strip (keyed on the `NAME = [...]` form) does not cover.
+// The env-compat shim consumes the derived Set below instead.
 const LEGACY_MODE_ENV_KEYS = [
-  "MAILERY_MODE",
-  "HASNA_MAILERY_MODE",
   "MAILERY_STORAGE_MODE",
   "HASNA_MAILERY_STORAGE_MODE",
   "EMAILS_STORAGE_MODE",
   "HASNA_EMAILS_STORAGE_MODE",
 ] as const;
 
+// Hosted control-plane credential/endpoint vars. This OSS package is cloud-free
+// (a hosted Mailery cloud is platform-mailery's job), so these stay banned — the
+// MAILERY_* env compat shim never bridges them.
 const LEGACY_HOSTED_ENV_KEYS = [
   "MAILERY_API_URL",
   "MAILERY_API_KEY",
@@ -29,6 +50,18 @@ const LEGACY_HOSTED_ENV_KEYS = [
   "HASNA_MAILERY_API_KEY",
   "HASNA_MAILERY_ENV_FILE",
 ] as const;
+
+// MAILERY_-prefixed env names the compat shim must NEVER mirror onto an EMAILS_
+// alias (hosted control-plane creds + removed runtime knobs). Exported as an
+// opaque ReadonlySet VALUE so the .d.ts carries a type, not the literals. The
+// two HASNA_ self-hosted vars mirror env.ts REMOVED_ENV_KEYS (their canonical
+// HASNA_ rename is intentionally deferred).
+export const MAILERY_ENV_BRIDGE_DENYLIST: ReadonlySet<string> = new Set<string>([
+  ...LEGACY_HOSTED_ENV_KEYS,
+  ...LEGACY_MODE_ENV_KEYS,
+  "HASNA_MAILERY_DATABASE_URL",
+  "HASNA_MAILERY_API_SIGNING_KEY",
+]);
 
 const FORBIDDEN_MODE_VALUES = new Set([
   "cloud",
@@ -110,6 +143,9 @@ export function resolveEmailsModeSelection(env: NodeJS.ProcessEnv = process.env)
   for (const name of EMAILS_MODE_ENV_KEYS) {
     const value = env[name]?.trim();
     if (!value) continue;
+    // Report the exact offending key (e.g. MAILERY_MODE=cloud) rather than a
+    // generic label so the failure message is actionable.
+    if (FORBIDDEN_MODE_VALUES.has(value.toLowerCase())) throw new Error(migrationGuidance(name, value));
     const mode = normalizeEmailsMode(value);
     return resolution(mode, { kind: "env", name, value });
   }

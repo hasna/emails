@@ -145,10 +145,10 @@ jobs:
         run: |
           bun -e '
             import pkg from "./package.json" with { type: "json" };
-            if (pkg.name !== "@hasna/emails") throw new Error(`unexpected package name: ${pkg.name}`);
+            if (pkg.name !== "@hasna/mailery") throw new Error(`unexpected package name: ${pkg.name}`);
             if (pkg.publishConfig?.access !== "public") throw new Error("npm package must publish with public access");
             if (pkg.publishConfig?.registry !== "https://registry.npmjs.org") throw new Error("npm registry must be the public registry");
-            if (pkg.repository?.url !== "git+https://github.com/hasna/emails.git") throw new Error("repository provenance must be hasna/emails");
+            if (pkg.repository?.url !== "git+https://github.com/hasna/mailery.git") throw new Error("repository provenance must be hasna/mailery");
           '
       - name: Verify generated SDK is committed
         run: |

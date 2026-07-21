@@ -47,7 +47,7 @@ describe("self-hosted API key lifecycle", () => {
     });
     const row = store.rows.get(minted.kid)!;
 
-    expect(verifyApiKeyToken(minted.token, { expectedApp: "emails", signingSecret: SIGNING_SECRET }).ok).toBe(true);
+    expect(verifyApiKeyToken(minted.token, { expectedApp: "mailery", signingSecret: SIGNING_SECRET }).ok).toBe(true);
     expect(row.tokenHash).toBe(hashToken(minted.token));
     expect(JSON.stringify(row)).not.toContain(minted.token);
     expect(await listSelfHostedApiKeys(store)).toEqual([
@@ -63,16 +63,32 @@ describe("self-hosted API key lifecycle", () => {
     expect(await revokeSelfHostedApiKey(store, "missing")).toBe(false);
   });
 
-  test("rotation mints an Emails key without revoking the rollback key", async () => {
+  test("rotation mints a mailery key while retaining the legacy emails rollback key", async () => {
     const store = memoryStore();
+    // Post-rename the legacy alias slug is "emails"; rotation mints under the
+    // canonical "mailery" slug and reports the retained legacy kid without
+    // revoking it.
     store.rows.set("legacy-kid", {
-      kid: "legacy-kid", app: "mailery", agent: null, scopes: ["mailery:*"], tokenHash: "hash-only",
+      kid: "legacy-kid", app: "emails", agent: null, scopes: ["emails:*"], tokenHash: "hash-only",
       issuedAt: new Date().toISOString(), expiresAt: null, revokedAt: null, revokedReason: null,
       lastUsedAt: null, createdBy: "old-cli",
     });
     const result = await rotateToEmailsApiKey(store, SIGNING_SECRET);
-    expect(result.minted.claims.app).toBe("emails");
+    expect(result.minted.claims.app).toBe("mailery");
     expect(result.retainedLegacyKids).toEqual(["legacy-kid"]);
     expect(store.rows.get("legacy-kid")?.revokedAt).toBeNull();
+  });
+
+  test("lists keys across the canonical app and legacy aliases", async () => {
+    const store = memoryStore();
+    // A key minted before the rename (app "emails") stays visible to operators.
+    store.rows.set("legacy-kid", {
+      kid: "legacy-kid", app: "emails", agent: null, scopes: ["emails:*"], tokenHash: "hash-only",
+      issuedAt: new Date().toISOString(), expiresAt: null, revokedAt: null, revokedReason: null,
+      lastUsedAt: null, createdBy: "old-cli",
+    });
+    const minted = await issueSelfHostedApiKey(store, SIGNING_SECRET);
+    const kids = (await listSelfHostedApiKeys(store)).map((r) => r.kid).sort();
+    expect(kids).toEqual(["legacy-kid", minted.kid].sort());
   });
 });

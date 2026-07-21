@@ -4,7 +4,7 @@ import {
   type ApiKeyStore,
   type MintedApiKey,
 } from "@hasna/contracts/auth";
-import { SELF_HOSTED_APP } from "./env.js";
+import { SELF_HOSTED_APP, SELF_HOSTED_APP_ALIASES } from "./env.js";
 
 export type SelfHostedKeyStore = Pick<ApiKeyStore, "insertMinted" | "list" | "revoke">;
 
@@ -65,7 +65,19 @@ export async function issueSelfHostedApiKey(
 }
 
 export async function listSelfHostedApiKeys(store: SelfHostedKeyStore): Promise<PublicApiKeyRecord[]> {
-  return (await store.list({ app: SELF_HOSTED_APP, includeRevoked: true })).map(publicRecord);
+  // List keys under the canonical app AND every legacy alias so operators still
+  // see (and can revoke) keys issued before the "emails" -> "mailery" rename.
+  const apps = [SELF_HOSTED_APP, ...SELF_HOSTED_APP_ALIASES];
+  const seen = new Set<string>();
+  const records: PublicApiKeyRecord[] = [];
+  for (const app of apps) {
+    for (const record of await store.list({ app, includeRevoked: true })) {
+      if (seen.has(record.kid)) continue;
+      seen.add(record.kid);
+      records.push(publicRecord(record));
+    }
+  }
+  return records;
 }
 
 export async function revokeSelfHostedApiKey(
@@ -83,7 +95,15 @@ export async function rotateToEmailsApiKey(
   signingSecret: string,
   options: { scopes?: string[]; ttlDays?: number | null; agent?: string; createdBy?: string } = {},
 ): Promise<{ minted: MintedApiKey; retainedLegacyKids: string[] }> {
-  const legacy = await store.list({ app: "mailery", includeRevoked: false });
+  // Mint a fresh key under the canonical app slug and report any still-active
+  // keys minted under a legacy alias slug ("emails") so the operator knows what
+  // remains valid during the transition.
+  const retainedLegacyKids: string[] = [];
+  for (const app of SELF_HOSTED_APP_ALIASES) {
+    for (const record of await store.list({ app, includeRevoked: false })) {
+      retainedLegacyKids.push(record.kid);
+    }
+  }
   const minted = await issueSelfHostedApiKey(store, signingSecret, options);
-  return { minted, retainedLegacyKids: legacy.map((record) => record.kid) };
+  return { minted, retainedLegacyKids };
 }
