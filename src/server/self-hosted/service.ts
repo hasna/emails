@@ -385,6 +385,21 @@ async function resolveMessageIdOrError(
 }
 
 /**
+ * The canonical HTTP surface of this service is `/v1/...`. The native client
+ * targets `/api/v1/...`, so accept `/api/v1` as an ALIAS by stripping a single
+ * leading `/api` segment: `/api/v1/...` then routes byte-for-byte as `/v1/...`.
+ * Bare `/v1/...` is untouched (back-compat). Only the exact `/api/v1` prefix is
+ * rewritten; any other path (including `/health`, `/openapi.json`, `/api/...`
+ * that is not `/api/v1`) is returned unchanged.
+ */
+export function canonicalizeApiV1Pathname(pathname: string): string {
+  if (pathname === "/api/v1" || pathname.startsWith("/api/v1/")) {
+    return pathname.slice("/api".length);
+  }
+  return pathname;
+}
+
+/**
  * Route + handle a single request. Returns `null` when the path is not owned by
  * this service (so a caller can fall through to other handlers).
  */
@@ -393,6 +408,12 @@ export async function handleSelfHostedRequest(
   req: Request,
 ): Promise<Response | null> {
   const url = new URL(req.url);
+  // Normalize the `/api/v1` alias to `/v1` ONCE, at this single entry point that
+  // both computes the route path AND dispatches to the auth router
+  // (`handleAuthRoutes`) and `resolveRequestContext` (the verifier path). Rewrite
+  // the URL object in place so every downstream path check sees canonical `/v1`.
+  const canonicalPathname = canonicalizeApiV1Pathname(url.pathname);
+  if (canonicalPathname !== url.pathname) url.pathname = canonicalPathname;
   const path = url.pathname.replace(/\/+$/, "") || "/";
   const method = req.method.toUpperCase();
 
