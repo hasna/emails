@@ -151,9 +151,14 @@ if ! grep -Fq 'USER 1000:1000' "$dockerfile"; then
   exit 1
 fi
 
-if grep -Eq '"?command"?[[:space:]]*[:=][[:space:]]*\[[[:space:]]*"bun"' \
+if grep -Eq '"?command"?[[:space:]]*[:=][[:space:]]*\[[[:space:]]*"(bun|run|build|test|x|exec|repl|install|i|add|a|remove|rm|update|outdated|link|unlink|pm|patch|patch-commit|init|create|c|upgrade|audit|why|publish|info|deploy)"' \
   "$root/compute.tf" "$repo/docker-compose.yml" "$repo/docs/DEPLOYMENT_CUTOVER.md"; then
-  echo "container command overrides must not repeat the Bun image entrypoint" >&2
+  # ENTRYPOINT ["/usr/local/bin/bun"] means each command override is arguments to
+  # bun. A first token of "bun" or a Bun subcommand (e.g. "build") makes the image
+  # run "bun build src/server/index.ts", which bundles the server for the browser
+  # target and crashes on boot ("Browser build cannot import bun:sqlite"). Command
+  # overrides must be a runnable src/ entrypoint path, never a Bun subcommand.
+  echo "container command overrides must not hijack the Bun image entrypoint with a subcommand (e.g. build)" >&2
   exit 1
 fi
 

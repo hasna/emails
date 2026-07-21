@@ -291,6 +291,64 @@ describe("self-hosted container TLS contract", () => {
     expect(ecsCompute).not.toMatch(/^\s*command\s*=\s*\["bun",/m);
   });
 
+  test("never lets a container command hijack the Bun image entrypoint into a subcommand", () => {
+    // With ENTRYPOINT ["/usr/local/bin/bun"], every container command override is
+    // *arguments to bun*. If the effective first argument is a Bun subcommand
+    // (e.g. "build") or a duplicated "bun", the image silently stops running the
+    // server and instead invokes that subcommand. Both `bun build
+    // src/server/index.ts` and `bun bun src/server/index.ts` bundle the entrypoint
+    // for the default *browser* target, which pulls in bun:sqlite
+    // (src/db/database.ts), pg, and @hasna/events and aborts on boot with
+    // "Browser build cannot import ...". The runnable entrypoints all live under
+    // src/, so require every command override's first token to be a src/ path.
+    const reservedBunTokens = new Set([
+      "bun", "run", "build", "test", "x", "exec", "repl",
+      "install", "i", "add", "a", "remove", "rm", "update", "outdated",
+      "link", "unlink", "pm", "patch", "patch-commit", "init", "create", "c",
+      "upgrade", "audit", "why", "publish", "info", "deploy",
+    ]);
+
+    const commandFirstTokens: Array<{ source: string; token: string }> = [];
+
+    // Dockerfile main CMD. The HEALTHCHECK CMD is indented, so ^CMD skips it.
+    const dockerfileCmd = dockerfile.match(/^CMD\s*(\[[^\n]+\])/m)?.[1];
+    if (!dockerfileCmd) throw new Error("Dockerfile CMD is missing");
+    commandFirstTokens.push({
+      source: "Dockerfile CMD",
+      token: (JSON.parse(dockerfileCmd) as string[])[0] ?? "",
+    });
+
+    // ECS task definitions, Compose services, and the cutover run-task overrides.
+    // Skip Docker/ECS health checks, whose command array starts with CMD/CMD-SHELL.
+    for (const [source, text] of [
+      ["deploy/aws/compute.tf", ecsCompute],
+      ["docker-compose.yml", compose],
+      ["docs/DEPLOYMENT_CUTOVER.md", cutoverRunbook],
+    ] as const) {
+      for (const match of text.matchAll(/(?:"command"|command)\s*[:=]\s*\[\s*"([^"]+)"/g)) {
+        const token = match[1] ?? "";
+        if (token === "CMD" || token === "CMD-SHELL") continue;
+        commandFirstTokens.push({ source, token });
+      }
+    }
+
+    // Sanity: we actually parsed the known overrides (Dockerfile + 3 ECS + 2
+    // Compose + 3 cutover), so the guard cannot silently pass on a parse miss.
+    expect(commandFirstTokens.length).toBeGreaterThanOrEqual(9);
+
+    const isHijack = (token: string) => reservedBunTokens.has(token) || !token.startsWith("src/");
+    const hijacks = commandFirstTokens.filter(({ token }) => isHijack(token));
+    expect(hijacks).toEqual([]);
+
+    // Prove the guard is not vacuous: it must flag the exact tokens that
+    // reproduced the production boot crash and accept the real entrypoints.
+    expect(isHijack("build")).toBeTrue();
+    expect(isHijack("bun")).toBeTrue();
+    expect(isHijack("run")).toBeTrue();
+    expect(isHijack("src/server/index.ts")).toBeFalse();
+    expect(isHijack("src/cli/index.tsx")).toBeFalse();
+  });
+
   test("keeps Compose and cutover overrides compatible with the Bun image entrypoint", () => {
     expect(compose).toContain('command: ["src/server/index.ts"]');
     expect(compose).toContain(
