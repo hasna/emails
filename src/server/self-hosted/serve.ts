@@ -105,6 +105,7 @@ export async function startSelfHostedServer(
   console.log(`Emails self-hosted service listening on http://${hostname}:${server.port}`);
   console.log(`  probes: GET /health  GET /ready  GET /version`);
   console.log(`  api:    /v1/domains  /v1/addresses  /v1/messages  /v1/messages/send  (x-api-key required)`);
+  console.log(`  alias:  /api/v1/* is accepted as an alias for /v1/* (native client compatibility)`);
 
   return {
     port: server.port ?? port,
