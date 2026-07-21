@@ -1,9 +1,16 @@
 # Changelog
 
-All notable changes to `@hasna/emails` are documented here.
+All notable changes to `@hasna/mailery` (formerly `@hasna/emails`) are documented here.
 
 ## [Unreleased]
 
+- **BREAKING (aliased): rename `@hasna/emails` → `@hasna/mailery`** (repo/brand `open-emails` → `open-mailery`), mirroring the open-skills ↔ platform-skills split. Back-compat is preserved throughout, so existing installs keep working:
+  - bins: canonical `mailery`/`mailery-mcp`/`mailery-serve`, with `emails`/`emails-mcp`/`emails-serve` kept as aliases.
+  - env: prefix moved `EMAILS_*` → `MAILERY_*` via a startup dual-read shim (`MAILERY_*` wins, `EMAILS_*` still read as fallback). Hosted/cloud control-plane env vars (`MAILERY_API_URL`, `MAILERY_CLOUD_*`, `HASNA_MAILERY_ENV_FILE`, storage-mode, …) are intentionally NOT bridged and remain rejected — this stays a cloud-free OSS package.
+  - MCP: server/registration name → `mailery` (the `emails-mcp` bin alias keeps existing registrations working).
+  - self-hosted API keys: app slug → `mailery`; the verifier also accepts the legacy `emails` slug so already-issued keys keep authenticating.
+  - `MAILERY_MODE` is now a first-class mode selector (accepts `local`/`self_hosted`; `cloud`/`remote`/`hybrid` still rejected).
+  - Deferred follow-ups (unchanged in this release): the local data dir (`~/.hasna/emails`), the `emails://` MCP resource scheme, the internal `EMAILS_*` literals + docker/deploy env-var names, and the `emails:*` API scopes. The GitHub repo rename and npm publish are also deferred (owner go).
 - rebuild the product as local-first and operator-owned AWS self-hosting, with no Hasna SaaS control plane.
 - add durable idempotent self-hosted sends, authenticated attachment retrieval, mailbox mutations, signed replay-safe webhooks, and additive Mailery-to-Emails compatibility bridges.
 - harden deployment with separate migration/runtime database roles, readiness health checks, immutable container/action pins, and explicit local/self-hosted mode validation.

@@ -3,9 +3,10 @@
 // Wires the product-owned Postgres pool, the API-key verifier
 // (@hasna/contracts/auth), the migration set, and the request handler together.
 
-import { verifyApiKey, ApiKeyStore, type ApiKeyVerifier } from "@hasna/contracts/auth";
+import { ApiKeyStore, type ApiKeyVerifier } from "@hasna/contracts/auth";
 import type { TypedQueryClient } from "../../storage-kit/index.js";
-import { getSelfHostedPool, requireSigningSecret, SELF_HOSTED_APP } from "./env.js";
+import { getSelfHostedPool, requireSigningSecret, SELF_HOSTED_APP, SELF_HOSTED_APP_ALIASES } from "./env.js";
+import { verifyApiKeyWithAliases } from "./api-key-verifier.js";
 import { emailsSelfHostedMigrations } from "./migrations.js";
 import { EmailsSelfHostedStore } from "./store.js";
 import { handleSelfHostedRequest, type SelfHostedServiceDeps } from "./service.js";
@@ -19,18 +20,22 @@ export function buildSelfHostedService(version: string): SelfHostedServiceDeps {
   const { client } = getSelfHostedPool();
   const signingSecret = requireSigningSecret();
   const keys = new ApiKeyStore(client);
-  const verifier: ApiKeyVerifier = verifyApiKey({
-    app: SELF_HOSTED_APP,
-    signingSecret,
-    isRevoked: keys.statusChecker(),
-    audit: (e) => {
-      // Structured, secret-free audit line (kid + outcome only).
-      console.log(
-        `[api-auth] ${e.outcome} app=${e.app} kid=${e.kid ?? "-"} reason=${e.reason ?? "-"} ` +
-          `${e.method ?? "-"} ${e.path ?? "-"} status=${e.status}`,
-      );
+  // Accept the canonical "mailery" app slug AND the legacy "emails" alias so
+  // API keys issued before the rename keep authenticating (see env.ts).
+  const verifier: ApiKeyVerifier = verifyApiKeyWithAliases(
+    {
+      signingSecret,
+      isRevoked: keys.statusChecker(),
+      audit: (e) => {
+        // Structured, secret-free audit line (kid + outcome only).
+        console.log(
+          `[api-auth] ${e.outcome} app=${e.app} kid=${e.kid ?? "-"} reason=${e.reason ?? "-"} ` +
+            `${e.method ?? "-"} ${e.path ?? "-"} status=${e.status}`,
+        );
+      },
     },
-  });
+    [SELF_HOSTED_APP, ...SELF_HOSTED_APP_ALIASES],
+  );
   return {
     client,
     store: new EmailsSelfHostedStore(client),

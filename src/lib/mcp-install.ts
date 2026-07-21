@@ -1,5 +1,7 @@
-export const EMAILS_MCP_SERVER_NAME = "emails";
-export const EMAILS_MCP_COMMAND = "emails-mcp";
+// Canonical MCP registration name + command post-rename. Existing "emails"
+// registrations keep working because the emails-mcp bin is retained as an alias.
+export const EMAILS_MCP_SERVER_NAME = "mailery";
+export const EMAILS_MCP_COMMAND = "mailery-mcp";
 const EMAILS_MCP_STDIO_ARG = "--stdio";
 
 export interface McpInstallCommand {

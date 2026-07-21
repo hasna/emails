@@ -1,10 +1,12 @@
-# AGENTS.md - @hasna/emails
+# AGENTS.md - @hasna/mailery
 
-This file guides AI coding agents working with `@hasna/emails` - an email management CLI, MCP server, and library supporting Resend, AWS SES, and Cloudflare-routed inbound mail.
+This file guides AI coding agents working with `@hasna/mailery` - an email management CLI, MCP server, and library supporting Resend, AWS SES, and Cloudflare-routed inbound mail.
+
+> Renamed from `@hasna/emails`. Canonical bins are `mailery`/`mailery-mcp`/`mailery-serve`; the `emails*` bins remain as aliases. Env prefix is `MAILERY_*` (the `EMAILS_*` names are still read as a fallback). The local data dir (`~/.hasna/emails`) and the `emails://` MCP resource scheme are unchanged for now.
 
 ## What This Package Does
 
-`@hasna/emails` manages the full email lifecycle locally:
+`@hasna/mailery` manages the full email lifecycle locally:
 - **Send** transactional emails via Resend or SES
 - **Receive** inbound emails via SMTP listener or webhooks
 - **Track** delivery events, opens, clicks, replies

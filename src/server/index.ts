@@ -1,7 +1,11 @@
 #!/usr/bin/env bun
 import pkg from "../../package.json" with { type: "json" };
+import { applyMaileryEnvCompat } from "../lib/env-compat.js";
 import { resolveEmailsModeSelection } from "../lib/mode.js";
 import { resolveServerBindOptions } from "./bind-options.js";
+
+// Mirror MAILERY_* env onto the EMAILS_* names the code reads (dual-read).
+applyMaileryEnvCompat();
 
 const args = process.argv.slice(2);
 if (args.includes("--version") || args.includes("-V")) {

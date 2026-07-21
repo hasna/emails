@@ -1,14 +1,19 @@
 #!/usr/bin/env bun
 /**
- * Emails MCP server entry point.
+ * Mailery MCP server entry point.
  */
 import pkg from "../../package.json" with { type: "json" };
+import { applyMaileryEnvCompat } from "../lib/env-compat.js";
+
+// Mirror MAILERY_* env onto the EMAILS_* names the code reads (dual-read).
+applyMaileryEnvCompat();
 
 function printHelp(): void {
-  console.log(`Usage: emails-mcp [options]
+  console.log(`Usage: mailery-mcp [options]
 
-Runs the @hasna/emails MCP server. Transport: shared Streamable HTTP on 127.0.0.1
-by default (one process, many agents); pass --stdio for a stdio server (one per client).
+Runs the @hasna/mailery MCP server (the emails-mcp bin remains as a back-compat
+alias). Transport: shared Streamable HTTP on 127.0.0.1 by default (one process,
+many agents); pass --stdio for a stdio server (one per client).
 
 Options:
       --stdio        Serve MCP over stdio (one server per client) instead of HTTP
