@@ -26,6 +26,7 @@ import { parseSesNotification } from "../../lib/inbound-realtime.js";
 import { parseInboundMime } from "../../lib/inbound-mime.js";
 import { createHash } from "node:crypto";
 import { getSelfHostedPool, closeSelfHostedPool } from "./env.js";
+import { assertServingRoleCannotBypassRls } from "./rls-guard.js";
 import {
   EmailsSelfHostedStore,
   type InboundRouteResolution,
@@ -43,7 +44,10 @@ import {
 
 /** Minimal store surface the worker needs (kept narrow for testability). */
 export interface IngestStore {
-  resolveInboundRecipients(recipients: string[]): Promise<InboundRouteResolution>;
+  resolveInboundRecipients(
+    recipients: string[],
+    options?: { defaultTenantId?: string },
+  ): Promise<InboundRouteResolution>;
   quarantineInbound(input: {
     sourceId: string;
     bucket: string;
@@ -63,6 +67,12 @@ export interface IngestDeps {
   /** Fetch a raw RFC822 object from S3 as bytes. */
   fetchObject: (bucket: string, key: string) => Promise<Buffer>;
   now: () => string;
+  /**
+   * Optional default inbound tenant. When set, well-formed envelope recipients
+   * whose domain has no explicit `inbound_domain_routes` entry are routed to this
+   * tenant instead of quarantined (single-tenant self-hosted deployments).
+   */
+  defaultInboundTenantId?: string;
 }
 
 export type IngestStatus = "ingested" | "duplicate" | "quarantined" | "error";
@@ -87,7 +97,10 @@ export async function ingestS3Object(
   if (!bucket) return { status: "error", key, reason: "no_bucket", error: "worker has no configured inbound bucket" };
   try {
     const envelopeRecipients = note.recipients ?? [];
-    const route = await deps.store.resolveInboundRecipients(envelopeRecipients);
+    const route = await deps.store.resolveInboundRecipients(
+      envelopeRecipients,
+      deps.defaultInboundTenantId ? { defaultTenantId: deps.defaultInboundTenantId } : undefined,
+    );
     if (route.unresolved.length > 0 || route.groups.length === 0) {
       await deps.store.quarantineInbound({
         sourceId: key,
@@ -301,7 +314,15 @@ export async function runIngestWorker(options: WorkerOptions = {}): Promise<void
   const configuredBucket = defaultBucket!;
 
   const { client } = getSelfHostedPool();
+  // Fail closed: the inbound worker writes to a FORCE-RLS table. If it ever ran
+  // as a role that can bypass RLS, a missing/mismatched tenant context would NOT
+  // fail loudly — it would silently write cross-tenant. Refuse to start unless
+  // the serving role is subject to RLS (design §6 Layer 2 / H1). This is the same
+  // invariant serve.ts asserts; the headless worker had no such guard, which let
+  // an RLS-incompatible writer keep running through the 0016 cutover.
+  await assertServingRoleCannotBypassRls(client);
   const store = new EmailsSelfHostedStore(client);
+  const defaultInboundTenantId = process.env["EMAILS_INBOUND_DEFAULT_TENANT_ID"]?.trim() || undefined;
 
   const [{ SQSClient, ReceiveMessageCommand, DeleteMessageCommand }, { S3Client, GetObjectCommand }] =
     await Promise.all([import("@aws-sdk/client-sqs"), import("@aws-sdk/client-s3")]);
@@ -316,7 +337,12 @@ export async function runIngestWorker(options: WorkerOptions = {}): Promise<void
     return Buffer.concat(chunks);
   };
 
-  const deps: IngestDeps = { store, fetchObject, now: () => new Date().toISOString() };
+  const deps: IngestDeps = {
+    store,
+    fetchObject,
+    now: () => new Date().toISOString(),
+    ...(defaultInboundTenantId ? { defaultInboundTenantId } : {}),
+  };
 
   let running = true;
   const stop = (sig: string) => {
@@ -330,7 +356,7 @@ export async function runIngestWorker(options: WorkerOptions = {}): Promise<void
   let lastReport = Date.now();
   console.log(
     `[ingest] starting: queue=${configuredQueueUrl.split("/").pop()} region=${region} ` +
-      `bucket=${configuredBucket}`,
+      `bucket=${configuredBucket} defaultInboundTenant=${defaultInboundTenantId ?? "(none)"}`,
   );
 
   while (running) {
@@ -421,7 +447,9 @@ export async function runIngestS3Backfill(options: BackfillOptions = {}): Promis
   const configuredBucket = bucket!;
 
   const { client } = getSelfHostedPool();
+  await assertServingRoleCannotBypassRls(client);
   const store = new EmailsSelfHostedStore(client);
+  const defaultInboundTenantId = process.env["EMAILS_INBOUND_DEFAULT_TENANT_ID"]?.trim() || undefined;
   const [{ S3Client, GetObjectCommand, ListObjectsV2Command }] = await Promise.all([import("@aws-sdk/client-s3")]);
   const s3 = new S3Client({ region });
   const fetchObject = async (objectBucket: string, key: string): Promise<Buffer> => {
@@ -431,11 +459,16 @@ export async function runIngestS3Backfill(options: BackfillOptions = {}): Promis
     for await (const chunk of res.Body as AsyncIterable<Uint8Array>) chunks.push(chunk);
     return Buffer.concat(chunks);
   };
-  const deps: IngestDeps = { store, fetchObject, now: () => new Date().toISOString() };
+  const deps: IngestDeps = {
+    store,
+    fetchObject,
+    now: () => new Date().toISOString(),
+    ...(defaultInboundTenantId ? { defaultInboundTenantId } : {}),
+  };
   const counts = { ingested: 0, duplicate: 0, quarantined: 0, error: 0 };
   let scanned = 0;
   let continuationToken: string | undefined;
-  console.log(`[ingest-backfill] starting: region=${region} bucket=${configuredBucket} prefix=${prefix || "(none)"}`);
+  console.log(`[ingest-backfill] starting: region=${region} bucket=${configuredBucket} prefix=${prefix || "(none)"} defaultInboundTenant=${defaultInboundTenantId ?? "(none)"}`);
   try {
     do {
       const listed = await s3.send(new ListObjectsV2Command({

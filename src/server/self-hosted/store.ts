@@ -802,7 +802,10 @@ export class EmailsSelfHostedStore {
    * domain map. Header recipients are intentionally not accepted here. A route is
    * returned only for active tenants; everything else is explicitly unresolved.
    */
-  async resolveInboundRecipients(envelopeRecipients: string[]): Promise<InboundRouteResolution> {
+  async resolveInboundRecipients(
+    envelopeRecipients: string[],
+    options: { defaultTenantId?: string } = {},
+  ): Promise<InboundRouteResolution> {
     const normalized = [...new Set(envelopeRecipients.map(canonicalAddress).filter(Boolean))];
     const byDomain = new Map<string, string[]>();
     const unresolved: string[] = [];
@@ -828,9 +831,31 @@ export class EmailsSelfHostedStore {
       )
       : [];
     const routeByDomain = new Map(routes.map((row) => [row.domain.toLowerCase(), row.tenant_id]));
+
+    // Single-tenant self-hosted fallback. `inbound_domain_routes` is the global
+    // single-tenant receive map; when a deployment configures a default inbound
+    // tenant (EMAILS_INBOUND_DEFAULT_TENANT_ID), well-formed envelope recipients
+    // whose domain has no explicit route land in that tenant instead of being
+    // quarantined. This restores the pre-routing behavior where all inbound
+    // landed in the one tenant WITHOUT weakening RLS: the write path still stamps
+    // tenant_id and sets `app.current_tenant` for the resolved tenant, so FORCE
+    // RLS is fully satisfied. Malformed recipients (no domain) are never
+    // defaulted — they stay unresolved and quarantine. The fallback tenant must
+    // exist and be active, or it is ignored (routes-only behavior).
+    const defaultTenantId = options.defaultTenantId?.trim();
+    const hasUnroutedDomain = [...byDomain.keys()].some((domain) => !routeByDomain.get(domain));
+    let fallbackTenantId: string | null = null;
+    if (defaultTenantId && hasUnroutedDomain) {
+      const active = await this.client.get<{ id: string }>(
+        `SELECT id::text AS id FROM tenants WHERE id = $1::uuid AND status = 'active'`,
+        [defaultTenantId],
+      );
+      fallbackTenantId = active ? active.id : null;
+    }
+
     const grouped = new Map<string, string[]>();
     for (const [domain, recipients] of byDomain) {
-      const tenantId = routeByDomain.get(domain);
+      const tenantId = routeByDomain.get(domain) ?? fallbackTenantId;
       if (!tenantId) {
         unresolved.push(...recipients);
         continue;
