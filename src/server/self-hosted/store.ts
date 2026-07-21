@@ -844,8 +844,16 @@ export class EmailsSelfHostedStore {
     // exist and be active, or it is ignored (routes-only behavior).
     const defaultTenantId = options.defaultTenantId?.trim();
     const hasUnroutedDomain = [...byDomain.keys()].some((domain) => !routeByDomain.get(domain));
+    // Consult the default inbound tenant when either (a) some valid domain has no
+    // explicit route, or (b) the notification carried NO usable envelope recipient
+    // at all. Case (b) is the norm when the operator feeds the worker S3
+    // ObjectCreated events (object key, but no SES recipient list) rather than SES
+    // receipt notifications; the pre-routing worker handled these by writing every
+    // inbound message to the single tenant. The default tenant must exist and be
+    // active or it is ignored (routes-only behavior, i.e. quarantine).
+    const needsDefault = !!defaultTenantId && (hasUnroutedDomain || byDomain.size === 0);
     let fallbackTenantId: string | null = null;
-    if (defaultTenantId && hasUnroutedDomain) {
+    if (needsDefault) {
       const active = await this.client.get<{ id: string }>(
         `SELECT id::text AS id FROM tenants WHERE id = $1::uuid AND status = 'active'`,
         [defaultTenantId],
@@ -863,6 +871,12 @@ export class EmailsSelfHostedStore {
       const current = grouped.get(tenantId) ?? [];
       current.push(...recipients);
       grouped.set(tenantId, current);
+    }
+    // No usable envelope recipient at all (S3-event feed): still deliver to the
+    // default inbound tenant. The stored recipient list is taken from the parsed
+    // MIME by the caller, since the envelope gave us none.
+    if (grouped.size === 0 && fallbackTenantId) {
+      grouped.set(fallbackTenantId, []);
     }
     return {
       groups: [...grouped].map(([tenantId, recipients]) => ({ tenantId, recipients })),

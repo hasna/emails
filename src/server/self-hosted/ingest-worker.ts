@@ -209,9 +209,12 @@ export async function ingestS3Object(
       }
       const input: MessageInput = {
         from_addr: parsed.from_addr || "(unknown sender)",
-        // MIME To/Cc headers are sender-controlled. Tenant selection and the
-        // stored recipient list come only from the trusted SES envelope.
-        to_addrs: group.recipients,
+        // Tenant SELECTION never trusts MIME: it comes from the SES envelope or the
+        // configured default inbound tenant (see resolveInboundRecipients). The
+        // stored recipient list prefers the trusted envelope; only when the feed
+        // carried no envelope recipient (S3-event ingestion, default-tenant path)
+        // do we fall back to the parsed MIME To/Cc so the row is not left blank.
+        to_addrs: group.recipients.length > 0 ? group.recipients : parsed.to_addrs,
         cc_addrs: [],
         subject: parsed.subject || null,
         body_text: parsed.body_text,

@@ -81,6 +81,22 @@ describe("resolveInboundRecipients single-tenant fallback", () => {
     expect(res.unresolved).toEqual([]);
   });
 
+  test("routes a no-envelope-recipient notification (S3-event feed) to the default tenant", async () => {
+    const { store, tenantLookups } = makeStore({ routes: [], defaultTenantActive: true });
+    const res = await store.resolveInboundRecipients([], { defaultTenantId: DEFAULT_TENANT });
+    expect(res.groups).toEqual([{ tenantId: DEFAULT_TENANT, recipients: [] }]);
+    expect(res.unresolved).toEqual([]);
+    expect(tenantLookups).toEqual([DEFAULT_TENANT]);
+  });
+
+  test("quarantines a no-recipient notification when no default tenant is configured", async () => {
+    const { store, tenantLookups } = makeStore({ routes: [] });
+    const res = await store.resolveInboundRecipients([]);
+    expect(res.groups).toEqual([]);
+    expect(res.unresolved).toEqual([]);
+    expect(tenantLookups).toEqual([]);
+  });
+
   test("does not query the default tenant when every domain already has a route", async () => {
     const { store, tenantLookups } = makeStore({
       routes: [{ domain: "strober.com", tenant_id: ROUTED_TENANT }],
