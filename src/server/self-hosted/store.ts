@@ -402,14 +402,21 @@ export function encodeMessagesCursor(ts: string, id: string): string {
   return Buffer.from(JSON.stringify({ ts, id }), "utf8").toString("base64url");
 }
 
+// Exactly the shape encodeMessagesCursor mints (SQL to_char with microsecond
+// precision). Date.parse is NOT sufficient here: it accepts strings ("1",
+// "2026", "+010000-…") that Postgres rejects at the ::timestamptz cast, which
+// would surface as a 500 instead of the contract's 400.
+const CURSOR_TS_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/;
+
 export function decodeMessagesCursor(raw: string): { ts: string; id: string } | null {
+  if (raw.length === 0 || raw.length > 512) return null;
   try {
     const parsed = JSON.parse(Buffer.from(raw, "base64url").toString("utf8")) as {
       ts?: unknown;
       id?: unknown;
     };
     if (typeof parsed.ts !== "string" || typeof parsed.id !== "string" || parsed.id === "") return null;
-    if (!Number.isFinite(Date.parse(parsed.ts))) return null;
+    if (!CURSOR_TS_RE.test(parsed.ts) || !Number.isFinite(Date.parse(parsed.ts))) return null;
     return { ts: parsed.ts, id: parsed.id };
   } catch {
     return null;
@@ -537,7 +544,9 @@ function clampLimit(limit: number | undefined): number {
 
 function clampOffset(offset: number | undefined): number {
   if (!offset || Number.isNaN(offset) || offset < 0) return 0;
-  return Math.floor(offset);
+  // OFFSET walks (and discards) every skipped index entry, so an unbounded
+  // client-supplied value is a self-DoS knob. Deep paging belongs to cursors.
+  return Math.min(Math.floor(offset), 100_000);
 }
 
 /** Normalize a possibly-string JSONB column into a string[]. */
@@ -726,8 +735,11 @@ function mapMessageListRow(row: Record<string, unknown>): MessageListRecord {
     send_payload_hash: _hash,
     headers: _headers,
     attachments: _attachments,
+    // internal cursor column (mapMessageRow spreads the raw row) — must not
+    // leak into API items
+    cursor_ts: _cursorTs,
     ...safe
-  } = full;
+  } = full as MessageRecord & { cursor_ts?: string };
   const rawSnippet = typeof row["snippet"] === "string"
     ? row["snippet"]
     : typeof row["body_text"] === "string"
@@ -1627,12 +1639,15 @@ export class TenantScopedStore {
       );
     }
     // Keyset cursor: strictly-before in (ts DESC, id DESC) order, served by
-    // messages_tenant_ts_id_idx so a deep page costs the same as page one.
-    // Two clauses on purpose: under FORCE RLS Postgres treats a bare
-    // RowCompareExpr as leaky and demotes it to a per-row Filter (measured:
-    // 39ms scanning 100k rows). The redundant leakproof `<=` range bound is
-    // what performs the index SEEK; the row comparison then only discards
-    // rows tied on the cursor timestamp (measured: 0.2ms).
+    // messages_tenant_ts_id_idx so a deep page costs the same as page one
+    // (measured 0.3ms / 19 buffers at 60% depth under RLS). Two clauses on
+    // purpose: quals on plain columns are leak-safe, but the planner is only
+    // OBLIGED to seek on the simple `<=` OpExpr — on PG16 the row comparison
+    // also lands in the Index Cond, and where it does not, the `<=` bound
+    // still positions the scan and the row-compare merely filters rows tied
+    // on the cursor timestamp. (Quals on the COALESCE expression itself are
+    // demoted to per-row filters under FORCE RLS — that is why sort_ts is a
+    // real column; see migration 0019.)
     const cursor = opts.cursor ? decodeMessagesCursor(opts.cursor) : null;
     if (cursor) {
       params.push(cursor.ts);
@@ -1684,30 +1699,49 @@ export class TenantScopedStore {
 
     const domains = (opts.domains ?? []).map((d) => d.trim().toLowerCase()).filter(Boolean);
     if (domains.length > 0) {
-      const row = await this.client.get<Record<string, unknown>>(
-        `WITH per_message AS (
-           SELECT message_id,
-                  bool_or(is_out) AS is_out, bool_or(is_read) AS is_read,
-                  bool_or(is_starred) AS is_starred, bool_or(is_arch) AS is_arch,
-                  bool_or(is_spam) AS is_spam, bool_or(is_trash) AS is_trash,
-                  max(sort_ts) AS ts
+      // Single domain (the native client's case): the write-time
+      // first_for_domain marker guarantees one row per message, so this is a
+      // flat aggregate over one index range — no GROUP BY, O(1) memory.
+      // Multiple domains need the per-message rollup below to avoid counting
+      // a message once per matching domain; note its hash aggregate sizes
+      // with the domain's message count (~27MB for a 128k-row domain), so
+      // dominant multi-domain combinations want work_mem >= 32MB.
+      const sql =
+        domains.length === 1
+          ? `SELECT
+               count(*) FILTER (WHERE is_out) AS sent,
+               count(*) FILTER (WHERE NOT is_out AND NOT is_arch AND NOT is_spam AND NOT is_trash) AS inbox,
+               count(*) FILTER (WHERE NOT is_out AND NOT is_arch AND NOT is_spam AND NOT is_trash AND NOT is_read) AS unread,
+               count(*) FILTER (WHERE NOT is_out AND is_starred AND NOT is_arch AND NOT is_spam AND NOT is_trash) AS starred,
+               count(*) FILTER (WHERE NOT is_out AND is_arch AND NOT is_spam AND NOT is_trash) AS archived,
+               count(*) FILTER (WHERE NOT is_out AND is_spam) AS spam,
+               count(*) FILTER (WHERE NOT is_out AND is_trash) AS trash,
+               count(*) AS total,
+               max(sort_ts) FILTER (WHERE NOT is_out) AS latest_received_at
              FROM message_recipients
-            WHERE tenant_id = $1 AND domain = ANY($2)
-            GROUP BY message_id
-         )
-         SELECT
-           count(*) FILTER (WHERE is_out) AS sent,
-           count(*) FILTER (WHERE NOT is_out AND NOT is_arch AND NOT is_spam AND NOT is_trash) AS inbox,
-           count(*) FILTER (WHERE NOT is_out AND NOT is_arch AND NOT is_spam AND NOT is_trash AND NOT is_read) AS unread,
-           count(*) FILTER (WHERE NOT is_out AND is_starred AND NOT is_arch AND NOT is_spam AND NOT is_trash) AS starred,
-           count(*) FILTER (WHERE NOT is_out AND is_arch AND NOT is_spam AND NOT is_trash) AS archived,
-           count(*) FILTER (WHERE NOT is_out AND is_spam) AS spam,
-           count(*) FILTER (WHERE NOT is_out AND is_trash) AS trash,
-           count(*) AS total,
-           max(ts) FILTER (WHERE NOT is_out) AS latest_received_at
-         FROM per_message`,
-        [this.tenantId, domains],
-      );
+             WHERE tenant_id = $1 AND domain = ANY($2) AND first_for_domain`
+          : `WITH per_message AS (
+               SELECT message_id,
+                      bool_or(is_out) AS is_out, bool_or(is_read) AS is_read,
+                      bool_or(is_starred) AS is_starred, bool_or(is_arch) AS is_arch,
+                      bool_or(is_spam) AS is_spam, bool_or(is_trash) AS is_trash,
+                      max(sort_ts) AS ts
+                 FROM message_recipients
+                WHERE tenant_id = $1 AND domain = ANY($2) AND first_for_domain
+                GROUP BY message_id
+             )
+             SELECT
+               count(*) FILTER (WHERE is_out) AS sent,
+               count(*) FILTER (WHERE NOT is_out AND NOT is_arch AND NOT is_spam AND NOT is_trash) AS inbox,
+               count(*) FILTER (WHERE NOT is_out AND NOT is_arch AND NOT is_spam AND NOT is_trash AND NOT is_read) AS unread,
+               count(*) FILTER (WHERE NOT is_out AND is_starred AND NOT is_arch AND NOT is_spam AND NOT is_trash) AS starred,
+               count(*) FILTER (WHERE NOT is_out AND is_arch AND NOT is_spam AND NOT is_trash) AS archived,
+               count(*) FILTER (WHERE NOT is_out AND is_spam) AS spam,
+               count(*) FILTER (WHERE NOT is_out AND is_trash) AS trash,
+               count(*) AS total,
+               max(ts) FILTER (WHERE NOT is_out) AS latest_received_at
+             FROM per_message`;
+      const row = await this.client.get<Record<string, unknown>>(sql, [this.tenantId, domains]);
       return {
         inbox: number(row?.["inbox"]), unread: number(row?.["unread"]), starred: number(row?.["starred"]),
         sent: number(row?.["sent"]), archived: number(row?.["archived"]), spam: number(row?.["spam"]),

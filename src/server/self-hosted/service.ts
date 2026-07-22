@@ -949,9 +949,13 @@ export async function handleSelfHostedRequest(
         if (cursor && decodeMessagesCursor(cursor) === null) {
           return json(400, { error: "cursor is not a valid pagination cursor" });
         }
+        const offset = queryInt(url, "offset");
+        if (!cursor && offset !== undefined && offset > 100_000) {
+          return json(400, { error: "offset is limited to 100000; use cursor pagination for deep pages" });
+        }
         const page = await auth.store.listMessages({
           limit: queryInt(url, "limit"),
-          offset: queryInt(url, "offset"),
+          offset,
           direction,
           folder: (folderValue as MessageFolder | undefined) || undefined,
           cursor,

@@ -167,6 +167,23 @@ describe.skipIf(!pgClient)("inbox perf: keyset cursor pagination", () => {
     const { token } = await makeTenant(`perf-badcur-${RUN}`);
     const res = await call(deps, "GET", "/v1/messages?cursor=%00garbage", { token });
     expect(res.status).toBe(400);
+
+    // Timestamps Date.parse accepts but Postgres rejects at ::timestamptz —
+    // these must be 400s, never 500s from the cast.
+    for (const ts of ["1", "2026", "+010000-01-01T00:00:00.000Z", "2026-05-05T12:00:00.000Z"]) {
+      const crafted = Buffer.from(JSON.stringify({ ts, id: "x" }), "utf8").toString("base64url");
+      const bad = await call(deps, "GET", `/v1/messages?cursor=${encodeURIComponent(crafted)}`, { token });
+      expect(bad.status).toBe(400);
+    }
+  });
+
+  it("rejects offsets beyond 100000 with 400 (deep pages belong to cursors)", async () => {
+    const deps = makeDeps();
+    const { token } = await makeTenant(`perf-bigoff-${RUN}`);
+    const res = await call(deps, "GET", "/v1/messages?offset=100001", { token });
+    expect(res.status).toBe(400);
+    const ok = await call(deps, "GET", "/v1/messages?offset=100000", { token });
+    expect(ok.status).toBe(200);
   });
 });
 
@@ -317,6 +334,7 @@ describe.skipIf(!pgClient)("inbox perf: list payload contract", () => {
     expect(item.attachment_count).toBe(2);
     expect(item.headers).toBeUndefined();
     expect(item.attachments).toBeUndefined();
+    expect(item.cursor_ts).toBeUndefined(); // internal pagination column must not leak
 
     // the detail read still returns everything
     const detail = await call(deps, "GET", `/v1/messages/${item.id}`, { token });

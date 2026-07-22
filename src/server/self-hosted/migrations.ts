@@ -2149,11 +2149,14 @@ const SEND_INTENT_RECOVERY = defineMigration(
  * 5. A trigram GIN index over the exact `search` expression (guarded: only
  *    when pg_trgm is installable; the query stays correct without it).
  *
- * Deploy note: index builds here are transactional (the ledger runs each
- * migration body as one implicit transaction, so CREATE INDEX CONCURRENTLY
- * cannot be used). On a large live table, the two heavy indexes can be
- * pre-created with CREATE INDEX CONCURRENTLY using the same names BEFORE
- * deploying; `IF NOT EXISTS` then makes this migration's builds no-ops.
+ * Deploy note: this whole body is ONE transaction, and the GENERATED column
+ * rewrite takes ACCESS EXCLUSIVE on messages — so messages is unavailable to
+ * readers AND writers from the rewrite until commit (rewrite + index builds +
+ * recipient backfill + ANALYZE). Measured 6-8s wall at 168k rows locally;
+ * budget ~15-45s on RDS. SQS ingest buffers through it; queued HTTP reads
+ * stall briefly rather than error. CREATE INDEX CONCURRENTLY cannot be used
+ * inside the ledger's transactional bodies and is not worth a separate
+ * non-transactional migration at this table size.
  *
  * RLS: both new tables ENABLE + FORCE row security with the standard
  * tenant-isolation policy. The trigger runs in the writer's session, which
@@ -2241,10 +2244,20 @@ const INBOX_PERF_ROLLUPS = defineMigration(
     is_spam    boolean NOT NULL DEFAULT false,
     is_trash   boolean NOT NULL DEFAULT false,
     sort_ts    timestamptz NOT NULL,
+    -- exactly ONE row per (message, domain) carries true: write-time dedupe so
+    -- single-domain folder counts are a flat streaming aggregate instead of a
+    -- per-message GROUP BY (which hash-aggregated ~27MB for a dominant domain
+    -- and would spill to disk at the stock work_mem=4MB).
+    first_for_domain boolean NOT NULL DEFAULT false,
     PRIMARY KEY (tenant_id, message_id, email),
     FOREIGN KEY (tenant_id, message_id)
       REFERENCES messages (tenant_id, id) ON DELETE CASCADE
   );
+
+  -- Self-heal for databases that applied a pre-release draft of this
+  -- migration (CREATE TABLE IF NOT EXISTS would otherwise skip the column).
+  ALTER TABLE message_recipients
+    ADD COLUMN IF NOT EXISTS first_for_domain boolean NOT NULL DEFAULT false;
 
   ALTER TABLE message_recipients ENABLE ROW LEVEL SECURITY;
   ALTER TABLE message_recipients FORCE ROW LEVEL SECURITY;
@@ -2253,13 +2266,17 @@ const INBOX_PERF_ROLLUPS = defineMigration(
     USING (tenant_id = NULLIF(current_setting('app.current_tenant', true), '')::uuid)
     WITH CHECK (tenant_id = NULLIF(current_setting('app.current_tenant', true), '')::uuid);
 
-  -- ?domain= lookups + domain-scoped folder counts (index-only, streaming
-  -- GroupAggregate over (tenant, domain, message_id) order — no sort).
+  -- ?domain= lookups (EXISTS probes + rare-domain semi-joins) and
+  -- single-domain folder counts (index-only aggregate over the
+  -- first_for_domain rows).
   CREATE INDEX IF NOT EXISTS message_recipients_tenant_domain_idx
     ON message_recipients (tenant_id, domain, message_id)
-    INCLUDE (is_out, is_read, is_starred, is_arch, is_spam, is_trash, sort_ts);
+    INCLUDE (is_out, is_read, is_starred, is_arch, is_spam, is_trash, sort_ts, first_for_domain);
 
-  -- /v1/mailboxes per-address rollup (index-only, streaming by email).
+  -- /v1/mailboxes per-address rollup. NOTE (measured): at single-tenant scale
+  -- the planner correctly prefers a parallel seq scan of the whole table
+  -- (~43ms) over this index (~49ms); the index exists for multi-tenant
+  -- databases where the tenant_id prefix prunes other tenants' rows.
   CREATE INDEX IF NOT EXISTS message_recipients_tenant_email_idx
     ON message_recipients (tenant_id, email)
     INCLUDE (kind, is_out, is_read);
@@ -2297,24 +2314,32 @@ const INBOX_PERF_ROLLUPS = defineMigration(
     END IF;
 
     -- counters ---------------------------------------------------------------
+    -- The INSERT..SELECT..ORDER BY paths take counter row locks in sorted key
+    -- order. The UPDATE..FROM paths have no ordering guarantee (Postgres does
+    -- not promise UPDATE row-processing order), so a residual deadlock window
+    -- exists for concurrent multi-message transactions on one tenant; ingest
+    -- is a serial SQS worker today and a deadlocked delivery simply retries.
+    -- Every message write also serializes briefly on the tenant's counter
+    -- rows — acceptable at self-hosted scale, revisit before parallel bulk
+    -- import.
     IF TG_OP = 'INSERT' THEN
       INSERT INTO message_counters (tenant_id, key, value)
-      SELECT NEW.tenant_id, s, count(*) FROM unnest(new_slots) AS s GROUP BY s
+      SELECT NEW.tenant_id, s, count(*) FROM unnest(new_slots) AS s GROUP BY s ORDER BY s
       ON CONFLICT (tenant_id, key)
         DO UPDATE SET value = message_counters.value + EXCLUDED.value, updated_at = now();
     ELSIF TG_OP = 'DELETE' THEN
       UPDATE message_counters c
          SET value = GREATEST(c.value - d.n, 0), updated_at = now()
-        FROM (SELECT s, count(*)::bigint AS n FROM unnest(old_slots) AS s GROUP BY s) d
+        FROM (SELECT s, count(*)::bigint AS n FROM unnest(old_slots) AS s GROUP BY s ORDER BY s) d
        WHERE c.tenant_id = OLD.tenant_id AND c.key = d.s;
     ELSIF TG_OP = 'UPDATE'
       AND (old_slots IS DISTINCT FROM new_slots OR NEW.tenant_id IS DISTINCT FROM OLD.tenant_id) THEN
       UPDATE message_counters c
          SET value = GREATEST(c.value - d.n, 0), updated_at = now()
-        FROM (SELECT s, count(*)::bigint AS n FROM unnest(old_slots) AS s GROUP BY s) d
+        FROM (SELECT s, count(*)::bigint AS n FROM unnest(old_slots) AS s GROUP BY s ORDER BY s) d
        WHERE c.tenant_id = OLD.tenant_id AND c.key = d.s;
       INSERT INTO message_counters (tenant_id, key, value)
-      SELECT NEW.tenant_id, s, count(*) FROM unnest(new_slots) AS s GROUP BY s
+      SELECT NEW.tenant_id, s, count(*) FROM unnest(new_slots) AS s GROUP BY s ORDER BY s
       ON CONFLICT (tenant_id, key)
         DO UPDATE SET value = message_counters.value + EXCLUDED.value, updated_at = now();
     END IF;
@@ -2331,7 +2356,8 @@ const INBOX_PERF_ROLLUPS = defineMigration(
       END IF;
       INSERT INTO message_recipients
         (tenant_id, message_id, email, domain, kind,
-         is_out, is_read, is_starred, is_arch, is_spam, is_trash, sort_ts)
+         is_out, is_read, is_starred, is_arch, is_spam, is_trash, sort_ts,
+         first_for_domain)
       SELECT NEW.tenant_id, NEW.id, r.email, r.domain, r.kind,
              (lower(COALESCE(NEW.direction, '')) = 'outbound'),
              COALESCE(NEW.is_read, false),
@@ -2340,7 +2366,8 @@ const INBOX_PERF_ROLLUPS = defineMigration(
              (COALESCE(NEW.labels, '[]'::jsonb) @> '["spam"]'::jsonb
                OR lower(COALESCE(NEW.status, '')) = 'spam'),
              (COALESCE(NEW.labels, '[]'::jsonb) @> '["trash"]'::jsonb),
-             COALESCE(NEW.received_at, NEW.created_at)
+             COALESCE(NEW.received_at, NEW.created_at),
+             (row_number() OVER (PARTITION BY r.domain ORDER BY r.email) = 1)
         FROM (
           SELECT email, domain, max(kind) AS kind -- 'to' > 'cc': to-recipiency wins
             FROM (
@@ -2366,7 +2393,8 @@ const INBOX_PERF_ROLLUPS = defineMigration(
             is_out = EXCLUDED.is_out, is_read = EXCLUDED.is_read,
             is_starred = EXCLUDED.is_starred, is_arch = EXCLUDED.is_arch,
             is_spam = EXCLUDED.is_spam, is_trash = EXCLUDED.is_trash,
-            sort_ts = EXCLUDED.sort_ts;
+            sort_ts = EXCLUDED.sort_ts,
+            first_for_domain = EXCLUDED.first_for_domain;
     ELSIF TG_OP = 'UPDATE' THEN
       UPDATE message_recipients
          SET is_out = (lower(COALESCE(NEW.direction, '')) = 'outbound'),
@@ -2442,7 +2470,8 @@ const INBOX_PERF_ROLLUPS = defineMigration(
 
       INSERT INTO message_recipients
         (tenant_id, message_id, email, domain, kind,
-         is_out, is_read, is_starred, is_arch, is_spam, is_trash, sort_ts)
+         is_out, is_read, is_starred, is_arch, is_spam, is_trash, sort_ts,
+         first_for_domain)
       SELECT m.tenant_id, m.id, r.email, r.domain, r.kind,
              (lower(COALESCE(m.direction, '')) = 'outbound'),
              COALESCE(m.is_read, false),
@@ -2451,7 +2480,8 @@ const INBOX_PERF_ROLLUPS = defineMigration(
              (COALESCE(m.labels, '[]'::jsonb) @> '["spam"]'::jsonb
                OR lower(COALESCE(m.status, '')) = 'spam'),
              (COALESCE(m.labels, '[]'::jsonb) @> '["trash"]'::jsonb),
-             COALESCE(m.received_at, m.created_at)
+             COALESCE(m.received_at, m.created_at),
+             (row_number() OVER (PARTITION BY m.id, r.domain ORDER BY r.email) = 1)
         FROM messages m
         CROSS JOIN LATERAL (
           SELECT email, domain, max(kind) AS kind
@@ -2488,6 +2518,17 @@ const INBOX_PERF_ROLLUPS = defineMigration(
     PERFORM set_config('app.current_tenant', '', true);
   END
   $do$;
+
+  -- ---- 7. retire indexes with no remaining query path ------------------------
+  -- Verified against the full store surface: message ordering goes through
+  -- sort_ts (raw received_at is never filtered or ordered on), and
+  -- (tenant_id) is a prefix of messages_tenant_id_id_uidx and
+  -- messages_tenant_ts_id_idx. messages_created_idx and
+  -- messages_direction_idx are KEPT: the per-send quota check filters bare
+  -- "direction = 'outbound' AND created_at >= <today>" and attachment-repair
+  -- scans created_at ranges.
+  DROP INDEX IF EXISTS messages_received_idx;
+  DROP INDEX IF EXISTS messages_tenant_idx;
 
   ANALYZE messages;
   ANALYZE message_recipients;
