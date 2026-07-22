@@ -119,7 +119,7 @@ const MESSAGE = {
 
 const stubReads = (d: SelfHostedServiceDeps) => {
   const s = d.store as unknown as Record<string, unknown>;
-  s.listMessages = async () => [MESSAGE];
+  s.listMessages = async () => ({ items: [MESSAGE], next_cursor: null });
   s.messageCounts = async () => ({ inbox: 4, sent: 2, unread: 3, total: 6, archived: 0, drafts: 0 });
   s.listMailboxes = async () => ({
     mailboxes: [{ address: "dest@hasna.com", counts: { inbox: 1, unread: 1 } }],
