@@ -223,6 +223,14 @@ export async function handleAuthRoutes(deps: AuthServiceDeps, req: Request, url:
 
   try {
     // ---- unauthenticated auth endpoints ----------------------------------
+    // GET /v1/auth/providers — the native client probes this BEFORE login to
+    // decide which sign-in affordances to render. This self-hosted service only
+    // does email + password (no federated/device login), so it reports every
+    // optional provider as unavailable. Kept unauthenticated (the sign-in screen
+    // has no session yet) and side-effect-free.
+    if (path === "/v1/auth/providers" && method === "GET") {
+      return json(200, { google: false, device: false });
+    }
     if (path === "/v1/auth/signup" && method === "POST") return await handleSignup(deps, req);
     if (path === "/v1/auth/login" && method === "POST") return await handleLogin(deps, req);
     if (path === "/v1/auth/verify-email" && (method === "POST" || method === "GET")) return await handleVerifyEmail(deps, req, url);
@@ -291,6 +299,15 @@ export async function handleAuthRoutes(deps: AuthServiceDeps, req: Request, url:
     if (path === "/v1/keys") {
       if (method === "GET") return await handleListKeys(deps, req, url);
       if (method === "POST") return await handleCreateKey(deps, req, url);
+      return json(405, { error: "method not allowed" });
+    }
+    // POST /v1/keys/{id}/revoke — same effect as DELETE /v1/keys/{id}. Served so
+    // the native client's revoke verb (POST .../revoke) maps to a real handler
+    // without any method rewrite in the request normalizer. Matched BEFORE the
+    // bare `/v1/keys/{id}` matcher so "revoke" is never read as a key id.
+    const keyRevokeMatch = path.match(/^\/v1\/keys\/([^/]+)\/revoke$/);
+    if (keyRevokeMatch) {
+      if (method === "POST") return await handleRevokeKey(deps, req, url, decodeURIComponent(keyRevokeMatch[1]!));
       return json(405, { error: "method not allowed" });
     }
     const keyMatch = path.match(/^\/v1\/keys\/([^/]+)$/);

@@ -400,6 +400,35 @@ export function canonicalizeApiV1Pathname(pathname: string): string {
 }
 
 /**
+ * The native client speaks a slightly different DIALECT than this service's
+ * canonical `/v1` surface. It targets a few cloud-shaped segment names that map
+ * 1:1 onto existing self-hosted handlers. Normalize those segments (AFTER the
+ * `/api/v1` → `/v1` alias) so the client's paths route to the real handlers with
+ * NO change of HTTP method or response shape (pure path canonicalization):
+ *
+ *   client dialect               canonical self-hosted route
+ *   ------------------------     ---------------------------
+ *   GET  /v1/auth/me         ->  GET    /v1/me
+ *   GET  /v1/api-keys        ->  GET    /v1/keys        (list)
+ *   POST /v1/api-keys        ->  POST   /v1/keys        (create)
+ *   DELETE /v1/api-keys/{id} ->  DELETE /v1/keys/{id}   (delete)
+ *   POST /v1/api-keys/{id}/revoke -> POST /v1/keys/{id}/revoke (revoke)
+ *
+ * Bare canonical `/v1/me` and `/v1/keys*` are untouched (back-compat). This is a
+ * pure `string -> string` mapping so it stays trivially unit-testable and cannot
+ * alter method or body. The `/v1/keys/{id}/revoke` POST target is served by the
+ * auth router alongside the existing `DELETE /v1/keys/{id}`.
+ */
+export function canonicalizeClientDialectPathname(pathname: string): string {
+  if (pathname === "/v1/auth/me") return "/v1/me";
+  if (pathname === "/v1/api-keys") return "/v1/keys";
+  if (pathname.startsWith("/v1/api-keys/")) {
+    return `/v1/keys/${pathname.slice("/v1/api-keys/".length)}`;
+  }
+  return pathname;
+}
+
+/**
  * Route + handle a single request. Returns `null` when the path is not owned by
  * this service (so a caller can fall through to other handlers).
  */
@@ -414,6 +443,11 @@ export async function handleSelfHostedRequest(
   // the URL object in place so every downstream path check sees canonical `/v1`.
   const canonicalPathname = canonicalizeApiV1Pathname(url.pathname);
   if (canonicalPathname !== url.pathname) url.pathname = canonicalPathname;
+  // Then fold the native client's dialect segments (`/auth/me`, `/api-keys*`)
+  // onto their canonical `/v1` handlers. Pure path rewrite — method + body are
+  // untouched, so this stays a single normalization step at the one entry point.
+  const dialectPathname = canonicalizeClientDialectPathname(url.pathname);
+  if (dialectPathname !== url.pathname) url.pathname = dialectPathname;
   const path = url.pathname.replace(/\/+$/, "") || "/";
   const method = req.method.toUpperCase();
 
@@ -590,6 +624,17 @@ export async function handleSelfHostedRequest(
       const auth = await authenticate(deps, req, url, read);
       if (!auth.ok) return auth.response;
       return json(200, { counts: await auth.store.messageCounts() });
+    }
+
+    // /v1/messages/groups — the native client's folder-count source. Identical
+    // data to /v1/messages/counts, but returned UNWRAPPED (a flat
+    // `{ inbox, unread, starred, sent, archived, spam, trash, total }` object)
+    // because the client decodes the counts at the top level of this response.
+    if (path === "/v1/messages/groups") {
+      if (method !== "GET") return json(405, { error: "method not allowed" });
+      const auth = await authenticate(deps, req, url, read);
+      if (!auth.ok) return auth.response;
+      return json(200, await auth.store.messageCounts());
     }
 
     // /v1/messages/threads — mail-view: subject-rolled-up conversation list.
