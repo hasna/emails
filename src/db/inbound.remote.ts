@@ -110,7 +110,7 @@ function v1MsgDate(row: Record<string, unknown>): string {
 }
 
 function v1Attachments(row: Record<string, unknown>): AttachmentMeta[] {
-  return carray(row["attachments"]).map((attachment, index) => {
+  const metadata = carray(row["attachments"]).map((attachment, index) => {
     const o = cobj(attachment);
     return {
       filename: cstr(o["filename"]) || `attachment-${index + 1}`,
@@ -118,6 +118,16 @@ function v1Attachments(row: Record<string, unknown>): AttachmentMeta[] {
       size: cnum(o["size"]),
     };
   });
+  if (metadata.length > 0) return metadata;
+  // List rows carry only attachment_count (the metadata array moved to the
+  // single-message read): preserve COUNT semantics with placeholder entries;
+  // real filenames arrive when the caller fetches the full message.
+  const count = cnum(row["attachment_count"]);
+  return Array.from({ length: Number.isFinite(count) && count > 0 ? count : 0 }, (_, index) => ({
+    filename: `attachment-${index + 1}`,
+    content_type: "application/octet-stream",
+    size: 0,
+  }));
 }
 
 function bareId(value: string): string {

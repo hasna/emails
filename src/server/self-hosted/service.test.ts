@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { mintApiKey, verifyApiKey } from "@hasna/contracts/auth";
 import type { TypedQueryClient } from "../../storage-kit/index.js";
-import { EmailsSelfHostedStore } from "./store.js";
+import { EmailsSelfHostedStore, encodeMessagesCursor } from "./store.js";
 import { handleSelfHostedRequest, type SelfHostedServiceDeps } from "./service.js";
 import { testAuthDeps, selfScopedStore } from "./auth/test-support.js";
 import { emailsSelfHostedMigrations } from "./migrations.js";
@@ -234,7 +234,7 @@ describe("Emails self-hosted service", () => {
     let filters: unknown;
     d.store.listMessages = async (opts) => {
       filters = opts;
-      return [];
+      return { items: [], next_cursor: null };
     };
     const token = mintApiKey({ app: "emails", scopes: ["emails:read"], signingSecret: SIGNING_SECRET }).token;
     const res = await handleSelfHostedRequest(
@@ -253,6 +253,68 @@ describe("Emails self-hosted service", () => {
       limit: 7,
       offset: 2,
     });
+  });
+
+  test("message list forwards cursor, folder, q, and repeatable domain filters to the store", async () => {
+    const d = deps();
+    let filters: Record<string, unknown> | undefined;
+    d.store.listMessages = async (opts) => {
+      filters = opts as Record<string, unknown>;
+      return { items: [], next_cursor: null };
+    };
+    const cursor = encodeMessagesCursor("2026-07-20T10:00:00.000000Z", "some-id");
+    const token = mintApiKey({ app: "emails", scopes: ["emails:read"], signingSecret: SIGNING_SECRET }).token;
+    const res = await handleSelfHostedRequest(
+      d,
+      req(
+        "GET",
+        `/v1/messages?folder=inbox&q=needle&domain=hasna.com&domain=@Beepmedia.com,%20extra.org&cursor=${encodeURIComponent(cursor)}&limit=50`,
+        { token },
+      ),
+    );
+
+    expect(res?.status).toBe(200);
+    expect((await res!.json()).next_cursor).toBeNull();
+    expect(filters).toMatchObject({
+      folder: "inbox",
+      search: "needle",
+      cursor,
+      domains: ["hasna.com", "beepmedia.com", "extra.org"],
+      limit: 50,
+    });
+  });
+
+  test("message list rejects malformed cursors and unknown folders", async () => {
+    const token = mintApiKey({ app: "emails", scopes: ["emails:read"], signingSecret: SIGNING_SECRET }).token;
+    const badCursor = await handleSelfHostedRequest(
+      deps(),
+      req("GET", "/v1/messages?cursor=not-a-cursor", { token }),
+    );
+    expect(badCursor?.status).toBe(400);
+    const badFolder = await handleSelfHostedRequest(
+      deps(),
+      req("GET", "/v1/messages?folder=junk", { token }),
+    );
+    expect(badFolder?.status).toBe(400);
+  });
+
+  test("message groups and counts forward the domain scope to the store", async () => {
+    const d = deps();
+    const seen: unknown[] = [];
+    d.store.messageCounts = async (opts?: { domains?: string[] }) => {
+      seen.push(opts?.domains);
+      return {
+        inbox: 1, unread: 1, starred: 0, sent: 0, archived: 0, spam: 0, trash: 0, total: 1,
+        latest_received_at: null,
+      };
+    };
+    const token = mintApiKey({ app: "emails", scopes: ["emails:read"], signingSecret: SIGNING_SECRET }).token;
+    const groups = await handleSelfHostedRequest(d, req("GET", "/v1/messages/groups?domain=hasna.com", { token }));
+    expect(groups?.status).toBe(200);
+    expect((await groups!.json()).inbox).toBe(1);
+    const counts = await handleSelfHostedRequest(d, req("GET", "/v1/messages/counts", { token }));
+    expect(counts?.status).toBe(200);
+    expect(seen).toEqual([["hasna.com"], undefined]);
   });
 
   test("message list rejects invalid since filters", async () => {

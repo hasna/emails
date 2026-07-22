@@ -276,7 +276,7 @@ const messageListItemSchema = {
     to_addrs: { type: "array", items: { type: "string" } },
     cc_addrs: { type: "array", items: { type: "string" } },
     subject: { type: "string", nullable: true },
-    snippet: { type: "string", nullable: true, description: "Short text preview; full bodies are available only from GET /v1/messages/{id}." },
+    snippet: { type: "string", nullable: true, description: "Short text preview (<=140 chars); full bodies are available only from GET /v1/messages/{id}." },
     status: { type: "string" },
     provider_message_id: { type: "string", nullable: true },
     message_id: { type: "string", nullable: true, description: "RFC 5322 Message-ID" },
@@ -285,8 +285,7 @@ const messageListItemSchema = {
     is_read: { type: "boolean" },
     is_starred: { type: "boolean" },
     labels: { type: "array", items: { type: "string" } },
-    headers: { type: "object", additionalProperties: true },
-    attachments: { type: "array", items: { type: "object", additionalProperties: true } },
+    attachment_count: { type: "integer", description: "Attachment count; metadata and payloads come from GET /v1/messages/{id} and the attachment endpoints." },
     source_id: { type: "string", nullable: true, description: "Stable upstream id used for idempotent upsert" },
     send_state: { type: "string", description: "none | pending | sending | sent | uncertain | blocked | cancelled" },
     send_started_at: { type: "string", format: "date-time", nullable: true },
@@ -1032,14 +1031,18 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
         operationId: "listMessages",
         parameters: [
           ...listParams,
+          { name: "cursor", in: "query", required: false, schema: { type: "string" }, description: "Opaque keyset cursor from a previous page's next_cursor. Takes precedence over offset; pages are ordered by (received_at || created_at, id) descending." },
           { name: "direction", in: "query", required: false, schema: { type: "string", enum: ["inbound", "outbound"] } },
+          { name: "folder", in: "query", required: false, schema: { type: "string", enum: ["inbox", "starred", "sent", "archived", "spam", "trash"] }, description: "Server-side folder filter; same semantics as /v1/messages/groups counts." },
+          { name: "domain", in: "query", required: false, explode: true, schema: { type: "array", items: { type: "string" } }, description: "Repeatable. Only messages with a to/cc recipient at one of these domains." },
           { name: "to", in: "query", required: false, schema: { type: "string" } },
           { name: "from", in: "query", required: false, schema: { type: "string" } },
           { name: "subject", in: "query", required: false, schema: { type: "string" } },
+          { name: "q", in: "query", required: false, schema: { type: "string" }, description: "Full-text substring search over from/to/subject/body (alias of search)." },
           { name: "search", in: "query", required: false, schema: { type: "string" } },
           { name: "since", in: "query", required: false, schema: { type: "string", format: "date-time" } },
         ],
-        responses: { "200": { content: { "application/json": { schema: { type: "object", properties: { messages: { type: "array", items: { $ref: "#/components/schemas/MessageListItem" } } } } } } } },
+        responses: { "200": { content: { "application/json": { schema: { type: "object", properties: { messages: { type: "array", items: { $ref: "#/components/schemas/MessageListItem" } }, next_cursor: { type: "string", nullable: true, description: "Cursor for the next page; null when this page is the last." } } } } } } },
       },
       post: {
         operationId: "createMessage",
@@ -1086,7 +1089,20 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
       get: {
         operationId: "getMessageCounts",
         summary: "Return server-side mailbox counts",
+        parameters: [
+          { name: "domain", in: "query", required: false, explode: true, schema: { type: "array", items: { type: "string" } }, description: "Repeatable. Scope counts to mail with a to/cc recipient at one of these domains." },
+        ],
         responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+      },
+    },
+    "/v1/messages/groups": {
+      get: {
+        operationId: "getMessageGroups",
+        summary: "Folder counts, flat at the top level (native-client shape); same data as /v1/messages/counts",
+        parameters: [
+          { name: "domain", in: "query", required: false, explode: true, schema: { type: "array", items: { type: "string" } }, description: "Repeatable. Scope counts to mail with a to/cc recipient at one of these domains." },
+        ],
+        responses: { "200": { content: { "application/json": { schema: { type: "object", properties: { inbox: { type: "integer" }, unread: { type: "integer" }, starred: { type: "integer" }, sent: { type: "integer" }, archived: { type: "integer" }, spam: { type: "integer" }, trash: { type: "integer" }, total: { type: "integer" }, latest_received_at: { type: "string", format: "date-time", nullable: true } } } } } } },
       },
     },
     "/v1/messages/threads": {

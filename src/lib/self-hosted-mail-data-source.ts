@@ -86,6 +86,8 @@ interface V1Message {
   labels?: string[] | null;
   headers?: Record<string, unknown> | null;
   attachments?: Array<{ filename?: string; content_type?: string; size?: number }> | null;
+  /** List rows carry only the count; full metadata comes from the detail read. */
+  attachment_count?: number;
   created_at?: string | null;
   updated_at?: string | null;
 }
@@ -155,7 +157,8 @@ function visibleLabels(labels: string[], isRead: boolean): string[] {
 function v1ToTuiMessage(m: V1Message): TuiMessage {
   const isRead = Boolean(m.is_read);
   const outbound = (m.direction ?? "").toLowerCase() === "outbound";
-  const attachments = v1AttachmentMetadata(m).length;
+  const attachments =
+    typeof m.attachment_count === "number" ? m.attachment_count : v1AttachmentMetadata(m).length;
   return {
     kind: outbound ? "sent" : "inbound",
     id: m.id,

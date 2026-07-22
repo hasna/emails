@@ -37,6 +37,12 @@ const TENANT_B = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
 // Representative of every access shape: hand-written domains/messages, a generic
 // registry resource (contacts), and the composite-PK resource (email_agent_settings).
 const TABLES = ["domains", "contacts", "messages", "email_agent_settings", "send_intent_tombstones"] as const;
+// message_recipients/message_counters (0019) are trigger-maintained from
+// messages writes, so any role that can write messages must own/write them
+// too — and they must fail closed exactly like the tables they mirror. They
+// are asserted separately because their per-tenant row counts are derived
+// (N recipients per message / N counter keys), not 1:1 with the seed.
+const ROLLUP_TABLES = ["message_recipients", "message_counters"] as const;
 
 /** Run `fn` in one transaction AS the NOBYPASSRLS probe, optionally with the tenant GUC set. */
 async function asProbe<T>(tenantId: string | null, fn: (tx: TypedQueryClient) => Promise<T>): Promise<T> {
@@ -93,7 +99,7 @@ beforeAll(async () => {
   // non-superuser needs USAGE on the schema to resolve unqualified names.
   await pg.execute(`CREATE ROLE ${PROBE} NOLOGIN NOSUPERUSER NOBYPASSRLS`);
   await pg.execute(`GRANT USAGE ON SCHEMA public TO ${PROBE}`);
-  for (const t of TABLES) await pg.execute(`ALTER TABLE ${t} OWNER TO ${PROBE}`);
+  for (const t of [...TABLES, ...ROLLUP_TABLES]) await pg.execute(`ALTER TABLE ${t} OWNER TO ${PROBE}`);
 });
 
 afterAll(async () => {
@@ -107,11 +113,11 @@ afterAll(async () => {
 
 describe.skipIf(!pg)("Row-Level Security backstop (Layer 2, migration 0013)", () => {
   it("fails closed: with NO app.current_tenant GUC, the NOBYPASSRLS role sees zero rows", async () => {
-    for (const t of TABLES) {
+    for (const t of [...TABLES, ...ROLLUP_TABLES]) {
       expect(await countAsProbe(null, t), `${t} with unset GUC`).toBe(0);
     }
     // The explicit empty-string path (NULLIF(...,'')::uuid) must ALSO be zero.
-    for (const t of TABLES) {
+    for (const t of [...TABLES, ...ROLLUP_TABLES]) {
       const n = await asProbe("", async (tx) => (await tx.one<{ n: number }>(`SELECT count(*)::int AS n FROM ${t}`)).n);
       expect(n, `${t} with empty GUC`).toBe(0);
     }
@@ -121,6 +127,13 @@ describe.skipIf(!pg)("Row-Level Security backstop (Layer 2, migration 0013)", ()
     for (const t of TABLES) {
       expect(await countAsProbe(TENANT_A, t), `${t} visible to A`).toBe(1);
     }
+    // Rollup tables (0019): the seed messages have no recipients, so the
+    // trigger created only counter rows — and A must see ONLY A's.
+    expect(await countAsProbe(TENANT_A, "message_recipients"), "recipients visible to A").toBe(0);
+    const counterTenants = await asProbe(TENANT_A, (tx) =>
+      tx.many<{ tenant_id: string }>(`SELECT DISTINCT tenant_id::text AS tenant_id FROM message_counters`),
+    );
+    expect(counterTenants).toEqual([{ tenant_id: TENANT_A }]);
     // Content is A's, never B's.
     const domains = await asProbe(TENANT_A, (tx) => tx.many<{ id: string; domain: string }>(`SELECT id, domain FROM domains`));
     expect(domains).toEqual([{ id: "dom-a", domain: "a.example" }]);

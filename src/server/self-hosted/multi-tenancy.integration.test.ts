@@ -477,8 +477,8 @@ describe.skipIf(!pgClient)("envelope-only inbound tenant routing", () => {
       { recipients: [`alpha@${domainA}`, `beta@${domainB}`] },
     );
     expect(result).toMatchObject({ status: "ingested", tenant_ids: [a.tenantId, b.tenantId] });
-    expect((await deps.store.forTenant(a.tenantId).listMessages())[0]!.to_addrs).toEqual([`alpha@${domainA}`]);
-    expect((await deps.store.forTenant(b.tenantId).listMessages())[0]!.to_addrs).toEqual([`beta@${domainB}`]);
+    expect((await deps.store.forTenant(a.tenantId).listMessages()).items[0]!.to_addrs).toEqual([`alpha@${domainA}`]);
+    expect((await deps.store.forTenant(b.tenantId).listMessages()).items[0]!.to_addrs).toEqual([`beta@${domainB}`]);
 
     const rowsBeforeReplay = await pgClient!.many<{ row: Record<string, unknown> }>(
       `SELECT to_jsonb(messages) AS row FROM messages WHERE source_id = $1 ORDER BY tenant_id`,

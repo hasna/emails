@@ -18,6 +18,9 @@ import {
   SendIntentTombstonedError,
   CrossTenantReferenceError,
   InboundDomainRouteConflictError,
+  decodeMessagesCursor,
+  MESSAGE_FOLDERS,
+  type MessageFolder,
   type TenantScopedStore,
   type MessageListRecord,
   type MessageRecord,
@@ -127,16 +130,25 @@ function publicMessageListItem(record: MessageRecord | MessageListRecord): Messa
     body_html: _bodyHtml,
     idempotency_key: _key,
     send_payload_hash: _hash,
+    headers: _headers,
+    attachments,
     snippet: providedSnippet,
+    attachment_count: providedAttachmentCount,
     ...safe
-  } = record as MessageRecord & { snippet?: string | null };
+  } = record as MessageRecord & { snippet?: string | null; attachment_count?: number };
   const rawSnippet = typeof providedSnippet === "string"
     ? providedSnippet
     : typeof bodyText === "string"
       ? bodyText
       : "";
-  const snippet = rawSnippet.replace(/\s+/g, " ").trim().slice(0, 500);
-  return { ...safe, snippet: snippet || null } as MessageListRecord;
+  const snippet = rawSnippet.replace(/\s+/g, " ").trim().slice(0, 140);
+  const attachment_count =
+    typeof providedAttachmentCount === "number"
+      ? providedAttachmentCount
+      : Array.isArray(attachments)
+        ? attachments.length
+        : 0;
+  return { ...safe, snippet: snippet || null, attachment_count } as MessageListRecord;
 }
 
 function sendPayloadHash(value: Record<string, unknown>): string {
@@ -254,6 +266,19 @@ function queryIsoDate(url: URL, key: string): { value?: string; error?: string }
   const time = Date.parse(raw);
   if (!Number.isFinite(time)) return { error: `${key} must be a valid ISO date` };
   return { value: new Date(time).toISOString() };
+}
+
+/**
+ * Repeatable `?domain=` filter values (comma-splitting tolerated), normalized
+ * to bare lowercase domains. Values are always bound SQL parameters.
+ */
+function queryDomains(url: URL): string[] | undefined {
+  const domains = url.searchParams
+    .getAll("domain")
+    .flatMap((value) => value.split(","))
+    .map((value) => value.trim().toLowerCase().replace(/^@/, ""))
+    .filter(Boolean);
+  return domains.length > 0 ? domains : undefined;
 }
 
 /** Coerce a JSON body value into a string[] (array, comma/whitespace-tolerant). */
@@ -623,18 +648,20 @@ export async function handleSelfHostedRequest(
       if (method !== "GET") return json(405, { error: "method not allowed" });
       const auth = await authenticate(deps, req, url, read);
       if (!auth.ok) return auth.response;
-      return json(200, { counts: await auth.store.messageCounts() });
+      return json(200, { counts: await auth.store.messageCounts({ domains: queryDomains(url) }) });
     }
 
     // /v1/messages/groups — the native client's folder-count source. Identical
     // data to /v1/messages/counts, but returned UNWRAPPED (a flat
     // `{ inbox, unread, starred, sent, archived, spam, trash, total }` object)
     // because the client decodes the counts at the top level of this response.
+    // `?domain=` (repeatable) scopes the counts to mail addressed to those
+    // recipient domains — the same filter contract as GET /v1/messages.
     if (path === "/v1/messages/groups") {
       if (method !== "GET") return json(405, { error: "method not allowed" });
       const auth = await authenticate(deps, req, url, read);
       if (!auth.ok) return auth.response;
-      return json(200, await auth.store.messageCounts());
+      return json(200, await auth.store.messageCounts({ domains: queryDomains(url) }));
     }
 
     // /v1/messages/threads — mail-view: subject-rolled-up conversation list.
@@ -914,17 +941,36 @@ export async function handleSelfHostedRequest(
         const direction = directionValue === "inbound" || directionValue === "outbound" ? directionValue : undefined;
         const since = queryIsoDate(url, "since");
         if (since.error) return json(400, { error: since.error });
-        const messages = await auth.store.listMessages({
+        const folderValue = url.searchParams.get("folder")?.trim().toLowerCase();
+        if (folderValue && !MESSAGE_FOLDERS.includes(folderValue as MessageFolder)) {
+          return json(400, { error: `folder must be one of ${MESSAGE_FOLDERS.join(", ")}` });
+        }
+        const cursor = url.searchParams.get("cursor")?.trim() || undefined;
+        if (cursor && decodeMessagesCursor(cursor) === null) {
+          return json(400, { error: "cursor is not a valid pagination cursor" });
+        }
+        const offset = queryInt(url, "offset");
+        if (!cursor && offset !== undefined && offset > 100_000) {
+          return json(400, { error: "offset is limited to 100000; use cursor pagination for deep pages" });
+        }
+        const page = await auth.store.listMessages({
           limit: queryInt(url, "limit"),
-          offset: queryInt(url, "offset"),
+          offset,
           direction,
+          folder: (folderValue as MessageFolder | undefined) || undefined,
+          cursor,
+          domains: queryDomains(url),
           to: url.searchParams.get("to") ?? undefined,
           from: url.searchParams.get("from") ?? undefined,
           subject: url.searchParams.get("subject") ?? undefined,
-          search: url.searchParams.get("search") ?? undefined,
+          // `q` is the native-client spelling; `search` is the original one.
+          search: url.searchParams.get("q") ?? url.searchParams.get("search") ?? undefined,
           since: since.value,
         });
-        return json(200, { messages: messages.map(publicMessageListItem) });
+        return json(200, {
+          messages: page.items.map(publicMessageListItem),
+          next_cursor: page.next_cursor,
+        });
       }
       if (method === "POST") {
         const auth = await authenticate(deps, req, url, write);

@@ -15,7 +15,7 @@ export interface Domain { "id": string; "domain": string; "status": string; "pro
 
 export interface Address { "id": string; "email": string; "domain"?: string | null; "display_name"?: string | null; "status": string; "verified"?: boolean; "daily_quota"?: number | null; "domain_id"?: string | null; "receive_strategy"?: string | null; "forward_to"?: string | null; "routing_rule_id"?: string | null; "provisioning_status"?: string; "last_validated_at"?: string | null; "last_error"?: string | null; "next_check_at"?: string | null; "created_at": string; "updated_at": string }
 
-export interface MessageListItem { "id": string; "direction": string; "from_addr": string; "to_addrs": Array<string>; "cc_addrs"?: Array<string>; "subject"?: string | null; "snippet"?: string | null; "status": string; "provider_message_id"?: string | null; "message_id"?: string | null; "in_reply_to"?: string | null; "received_at"?: string | null; "is_read"?: boolean; "is_starred"?: boolean; "labels"?: Array<string>; "headers"?: Record<string, unknown>; "attachments"?: Array<Record<string, unknown>>; "source_id"?: string | null; "send_state"?: string; "send_started_at"?: string | null; "created_at": string; "updated_at": string }
+export interface MessageListItem { "id": string; "direction": string; "from_addr": string; "to_addrs": Array<string>; "cc_addrs"?: Array<string>; "subject"?: string | null; "snippet"?: string | null; "status": string; "provider_message_id"?: string | null; "message_id"?: string | null; "in_reply_to"?: string | null; "received_at"?: string | null; "is_read"?: boolean; "is_starred"?: boolean; "labels"?: Array<string>; "attachment_count"?: number; "source_id"?: string | null; "send_state"?: string; "send_started_at"?: string | null; "created_at": string; "updated_at": string }
 
 export interface Message { "id": string; "direction": string; "from_addr": string; "to_addrs": Array<string>; "cc_addrs"?: Array<string>; "subject"?: string | null; "body_text"?: string | null; "body_html"?: string | null; "status": string; "provider_message_id"?: string | null; "message_id"?: string | null; "in_reply_to"?: string | null; "received_at"?: string | null; "is_read"?: boolean; "is_starred"?: boolean; "labels"?: Array<string>; "headers"?: Record<string, unknown>; "attachments"?: Array<Record<string, unknown>>; "source_id"?: string | null; "send_state"?: string; "send_started_at"?: string | null; "created_at": string; "updated_at": string }
 
@@ -914,7 +914,7 @@ export class EmailsSelfHostClient {
       });
     }
 
-    async listMessages(query?: { "limit"?: number; "offset"?: number; "direction"?: "inbound" | "outbound"; "to"?: string; "from"?: string; "subject"?: string; "search"?: string; "since"?: string }, init?: RequestInit): Promise<{ "messages"?: Array<MessageListItem> }> {
+    async listMessages(query?: { "limit"?: number; "offset"?: number; "cursor"?: string; "direction"?: "inbound" | "outbound"; "folder"?: "inbox" | "starred" | "sent" | "archived" | "spam" | "trash"; "domain"?: Array<string>; "to"?: string; "from"?: string; "subject"?: string; "q"?: string; "search"?: string; "since"?: string }, init?: RequestInit): Promise<{ "messages"?: Array<MessageListItem>; "next_cursor"?: string | null }> {
       return this.request("GET", `/v1/messages`, {
         body: undefined,
         query,
@@ -932,10 +932,19 @@ export class EmailsSelfHostClient {
     }
 
     /** Return server-side mailbox counts */
-    async getMessageCounts(init?: RequestInit): Promise<Record<string, unknown>> {
+    async getMessageCounts(query?: { "domain"?: Array<string> }, init?: RequestInit): Promise<Record<string, unknown>> {
       return this.request("GET", `/v1/messages/counts`, {
         body: undefined,
-        query: undefined,
+        query,
+        init,
+      });
+    }
+
+    /** Folder counts, flat at the top level (native-client shape); same data as /v1/messages/counts */
+    async getMessageGroups(query?: { "domain"?: Array<string> }, init?: RequestInit): Promise<{ "inbox"?: number; "unread"?: number; "starred"?: number; "sent"?: number; "archived"?: number; "spam"?: number; "trash"?: number; "total"?: number; "latest_received_at"?: string | null }> {
+      return this.request("GET", `/v1/messages/groups`, {
+        body: undefined,
+        query,
         init,
       });
     }
