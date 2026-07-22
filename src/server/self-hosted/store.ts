@@ -220,8 +220,21 @@ export interface MessageRecord {
   updated_at: string;
 }
 
-export interface MessageListRecord extends Omit<MessageRecord, "body_text" | "body_html" | "idempotency_key" | "send_payload_hash"> {
+export interface MessageListRecord
+  extends Omit<
+    MessageRecord,
+    "body_text" | "body_html" | "idempotency_key" | "send_payload_hash" | "headers" | "attachments"
+  > {
   snippet: string | null;
+  /** Count only — full attachment metadata stays on the single-message read. */
+  attachment_count: number;
+}
+
+/** One keyset page of the message list. */
+export interface MessageListPage {
+  items: MessageListRecord[];
+  /** Opaque cursor for the next page, or null when this page is the last. */
+  next_cursor: string | null;
 }
 
 /** Fields a caller may supply when writing a message (outbound or inbound). */
@@ -258,11 +271,50 @@ const MESSAGE_COLUMNS =
   "headers, attachments, source_id, idempotency_key, send_payload_hash, send_state, send_started_at, " +
   "created_at, updated_at";
 
+/** List snippet budget. 140 chars keeps a 100-row page well under 100KB. */
+const MESSAGE_SNIPPET_CHARS = 140;
+
+// List rows are projected AFTER the LIMIT (the m-aliased outer select joins
+// back on the id page), so the snippet regex runs on <= limit rows instead of
+// every tenant row (measured ~870ms of a 954ms cold page on 168k rows).
+// `headers` and attachment bodies are deliberately absent from list rows —
+// they were ~73% of a 459KB page payload; the detail read keeps them.
 const MESSAGE_LIST_COLUMNS =
-  "id, direction, from_addr, to_addrs, cc_addrs, subject, status, " +
-  "provider_message_id, message_id, in_reply_to, received_at, is_read, is_starred, labels, " +
-  "headers, attachments, source_id, send_state, send_started_at, created_at, updated_at, " +
-  "NULLIF(left(regexp_replace(COALESCE(body_text, ''), '\\s+', ' ', 'g'), 500), '') AS snippet";
+  "m.id, m.direction, m.from_addr, m.to_addrs, m.cc_addrs, m.subject, m.status, " +
+  "m.provider_message_id, m.message_id, m.in_reply_to, m.received_at, m.is_read, m.is_starred, m.labels, " +
+  "m.source_id, m.send_state, m.send_started_at, m.created_at, m.updated_at, " +
+  `NULLIF(left(regexp_replace(COALESCE(m.body_text, ''), '\\s+', ' ', 'g'), ${MESSAGE_SNIPPET_CHARS}), '') AS snippet, ` +
+  "CASE WHEN jsonb_typeof(m.attachments) = 'array' THEN jsonb_array_length(m.attachments) ELSE 0 END AS attachment_count, " +
+  "to_char(m.sort_ts AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS cursor_ts";
+
+// ---- list ordering + folder predicates --------------------------------------
+// The ORDER BY column and every folder predicate below are index-backed
+// (migration 0019). sort_ts is the STORED GENERATED mirror of
+// COALESCE(received_at, created_at) — a plain column, because under FORCE RLS
+// Postgres demotes CoalesceExpr quals to per-row filters (leak-safety), which
+// would turn keyset seeks into O(depth) scans. Folder predicate SQL must stay
+// byte-identical to the partial index definitions (implication is textual).
+const MESSAGE_TS_EXPR = "sort_ts";
+const NOT_OUTBOUND_SQL = "lower(COALESCE(direction, '')) <> 'outbound'";
+const OUTBOUND_SQL = "lower(COALESCE(direction, '')) = 'outbound'";
+const ARCHIVED_SQL = `labels @> '["archived"]'::jsonb`;
+const SPAM_SQL = `(labels @> '["spam"]'::jsonb OR lower(COALESCE(status, '')) = 'spam')`;
+const TRASH_SQL = `labels @> '["trash"]'::jsonb`;
+
+const FOLDER_PREDICATES: Record<MessageFolder, readonly string[]> = {
+  inbox: [NOT_OUTBOUND_SQL, `NOT (${ARCHIVED_SQL})`, `NOT ${SPAM_SQL}`, `NOT (${TRASH_SQL})`],
+  starred: [
+    "is_starred = true",
+    NOT_OUTBOUND_SQL,
+    `NOT (${ARCHIVED_SQL})`,
+    `NOT ${SPAM_SQL}`,
+    `NOT (${TRASH_SQL})`,
+  ],
+  sent: [OUTBOUND_SQL],
+  archived: [ARCHIVED_SQL, NOT_OUTBOUND_SQL, `NOT ${SPAM_SQL}`, `NOT (${TRASH_SQL})`],
+  spam: [SPAM_SQL, NOT_OUTBOUND_SQL],
+  trash: [TRASH_SQL, NOT_OUTBOUND_SQL],
+};
 
 export class IdempotencyKeyConflictError extends Error {
   constructor() {
@@ -315,6 +367,18 @@ export interface ListOptions {
   offset?: number;
 }
 
+/** Server-side folder names; predicates mirror messageCounts() exactly. */
+export type MessageFolder = "inbox" | "starred" | "sent" | "archived" | "spam" | "trash";
+
+export const MESSAGE_FOLDERS: readonly MessageFolder[] = [
+  "inbox",
+  "starred",
+  "sent",
+  "archived",
+  "spam",
+  "trash",
+];
+
 export interface ListMessagesOptions extends ListOptions {
   direction?: "inbound" | "outbound";
   to?: string;
@@ -322,6 +386,34 @@ export interface ListMessagesOptions extends ListOptions {
   subject?: string;
   search?: string;
   since?: string;
+  /** Opaque keyset cursor (from a previous page's next_cursor). Wins over offset. */
+  cursor?: string;
+  /** Only messages with a recipient at one of these domains (lowercased). */
+  domains?: string[];
+  /** Server-side folder filter; same semantics as the folder counts. */
+  folder?: MessageFolder;
+}
+
+/**
+ * Keyset cursor codec. The timestamp is captured in SQL at full microsecond
+ * fidelity (a JS Date would truncate to ms and skip same-ms neighbours).
+ */
+export function encodeMessagesCursor(ts: string, id: string): string {
+  return Buffer.from(JSON.stringify({ ts, id }), "utf8").toString("base64url");
+}
+
+export function decodeMessagesCursor(raw: string): { ts: string; id: string } | null {
+  try {
+    const parsed = JSON.parse(Buffer.from(raw, "base64url").toString("utf8")) as {
+      ts?: unknown;
+      id?: unknown;
+    };
+    if (typeof parsed.ts !== "string" || typeof parsed.id !== "string" || parsed.id === "") return null;
+    if (!Number.isFinite(Date.parse(parsed.ts))) return null;
+    return { ts: parsed.ts, id: parsed.id };
+  } catch {
+    return null;
+  }
 }
 
 export interface MessageCountsRecord {
@@ -627,14 +719,23 @@ function mapMessageListRow(row: Record<string, unknown>): MessageListRecord {
     idempotency_key: null,
     send_payload_hash: null,
   });
-  const { body_text: _bodyText, body_html: _bodyHtml, idempotency_key: _key, send_payload_hash: _hash, ...safe } = full;
+  const {
+    body_text: _bodyText,
+    body_html: _bodyHtml,
+    idempotency_key: _key,
+    send_payload_hash: _hash,
+    headers: _headers,
+    attachments: _attachments,
+    ...safe
+  } = full;
   const rawSnippet = typeof row["snippet"] === "string"
     ? row["snippet"]
     : typeof row["body_text"] === "string"
       ? row["body_text"]
       : "";
-  const snippet = rawSnippet.replace(/\s+/g, " ").trim().slice(0, 500);
-  return { ...safe, snippet: snippet || null };
+  const snippet = rawSnippet.replace(/\s+/g, " ").trim().slice(0, MESSAGE_SNIPPET_CHARS);
+  const count = Number(row["attachment_count"]);
+  return { ...safe, snippet: snippet || null, attachment_count: Number.isFinite(count) ? count : 0 };
 }
 
 // ---- shared, tenant-agnostic query helpers (module scope) -------------------
@@ -1489,11 +1590,12 @@ export class TenantScopedStore {
   //
   // Ordering is by original receipt time when known, else insertion time, so an
   // imported inbox reads in true chronological order rather than import order.
-  async listMessages(opts: ListMessagesOptions = {}): Promise<MessageListRecord[]> {
+  async listMessages(opts: ListMessagesOptions = {}): Promise<MessageListPage> {
     const where: string[] = ["tenant_id = $1"];
     const params: unknown[] = [this.tenantId];
-    if (opts.direction === "inbound") where.push(`lower(COALESCE(direction, '')) <> 'outbound'`);
-    if (opts.direction === "outbound") where.push(`lower(COALESCE(direction, '')) = 'outbound'`);
+    if (opts.direction === "inbound") where.push(NOT_OUTBOUND_SQL);
+    if (opts.direction === "outbound") where.push(OUTBOUND_SQL);
+    if (opts.folder) for (const predicate of FOLDER_PREDICATES[opts.folder]) where.push(predicate);
     if (opts.to?.trim()) {
       params.push(`%${opts.to.trim().toLowerCase()}%`);
       where.push(`lower(to_addrs::text) LIKE $${params.length}`);
@@ -1508,60 +1610,133 @@ export class TenantScopedStore {
     }
     if (opts.search?.trim()) {
       params.push(`%${opts.search.trim().toLowerCase()}%`);
+      // Stays a scan by design: all text-search operators are non-LEAKPROOF,
+      // so under FORCE RLS (0013) no trigram/FTS index can serve this — see
+      // the measured note in migration 0019.
       where.push(`lower(concat_ws(' ', COALESCE(from_addr, ''), COALESCE(to_addrs::text, ''), COALESCE(subject, ''), COALESCE(body_text, ''))) LIKE $${params.length}`);
     }
     if (opts.since?.trim()) {
       params.push(opts.since.trim());
-      where.push(`COALESCE(received_at, created_at) >= $${params.length}::timestamptz`);
+      where.push(`${MESSAGE_TS_EXPR} >= $${params.length}::timestamptz`);
+    }
+    const domains = (opts.domains ?? []).map((d) => d.trim().toLowerCase()).filter(Boolean);
+    if (domains.length > 0) {
+      params.push(domains);
+      where.push(
+        `EXISTS (SELECT 1 FROM message_recipients r WHERE r.tenant_id = messages.tenant_id AND r.message_id = messages.id AND r.domain = ANY($${params.length}))`,
+      );
+    }
+    // Keyset cursor: strictly-before in (ts DESC, id DESC) order, served by
+    // messages_tenant_ts_id_idx so a deep page costs the same as page one.
+    // Two clauses on purpose: under FORCE RLS Postgres treats a bare
+    // RowCompareExpr as leaky and demotes it to a per-row Filter (measured:
+    // 39ms scanning 100k rows). The redundant leakproof `<=` range bound is
+    // what performs the index SEEK; the row comparison then only discards
+    // rows tied on the cursor timestamp (measured: 0.2ms).
+    const cursor = opts.cursor ? decodeMessagesCursor(opts.cursor) : null;
+    if (cursor) {
+      params.push(cursor.ts);
+      const tsIndex = params.length;
+      params.push(cursor.id);
+      where.push(`${MESSAGE_TS_EXPR} <= $${tsIndex}::timestamptz`);
+      where.push(`(${MESSAGE_TS_EXPR}, id) < ($${tsIndex}::timestamptz, $${params.length})`);
     }
     const whereSql = `WHERE ${where.join(" AND ")}`;
-    params.push(clampLimit(opts.limit));
+    const limit = clampLimit(opts.limit);
+    params.push(limit);
     const limitIndex = params.length;
-    params.push(clampOffset(opts.offset));
+    params.push(cursor ? 0 : clampOffset(opts.offset));
     const offsetIndex = params.length;
+    // Inner query pages ids in index order; the outer select projects (snippet
+    // regex, attachment count) only the surviving rows.
     const rows = await this.client.many<Record<string, unknown>>(
-      `SELECT ${MESSAGE_LIST_COLUMNS} FROM messages ${whereSql}
-       ORDER BY COALESCE(received_at, created_at) DESC LIMIT $${limitIndex} OFFSET $${offsetIndex}`,
+      `SELECT ${MESSAGE_LIST_COLUMNS}
+       FROM (
+         SELECT id FROM messages ${whereSql}
+         ORDER BY ${MESSAGE_TS_EXPR} DESC, id DESC LIMIT $${limitIndex} OFFSET $${offsetIndex}
+       ) page
+       JOIN messages m ON m.tenant_id = $1 AND m.id = page.id
+       ORDER BY m.sort_ts DESC, m.id DESC`,
       params,
     );
-    return rows.map(mapMessageListRow);
+    const last = rows.length === limit ? rows[rows.length - 1] : undefined;
+    const nextCursor =
+      last && typeof last["cursor_ts"] === "string" && typeof last["id"] === "string"
+        ? encodeMessagesCursor(last["cursor_ts"], last["id"])
+        : null;
+    return { items: rows.map(mapMessageListRow), next_cursor: nextCursor };
   }
 
-  async messageCounts(): Promise<MessageCountsRecord> {
-    const row = await this.client.get<Record<string, unknown>>(
-      `WITH m AS (
-         SELECT
-           (lower(COALESCE(direction, '')) = 'outbound') AS is_out,
-           (labels @> '["archived"]'::jsonb) AS is_arch,
-           (labels @> '["spam"]'::jsonb OR lower(COALESCE(status, '')) = 'spam') AS is_spam,
-           (labels @> '["trash"]'::jsonb) AS is_trash,
-           is_read, is_starred, COALESCE(received_at, created_at) AS ts
-         FROM messages
-         WHERE tenant_id = $1
-       )
-       SELECT
-         count(*) FILTER (WHERE is_out) AS sent,
-         count(*) FILTER (WHERE NOT is_out AND NOT is_arch AND NOT is_spam AND NOT is_trash) AS inbox,
-         count(*) FILTER (WHERE NOT is_out AND NOT is_arch AND NOT is_spam AND NOT is_trash AND NOT is_read) AS unread,
-         count(*) FILTER (WHERE NOT is_out AND is_starred AND NOT is_arch AND NOT is_spam AND NOT is_trash) AS starred,
-         count(*) FILTER (WHERE NOT is_out AND is_arch AND NOT is_spam AND NOT is_trash) AS archived,
-         count(*) FILTER (WHERE NOT is_out AND is_spam) AS spam,
-         count(*) FILTER (WHERE NOT is_out AND is_trash) AS trash,
-         count(*) AS total,
-         max(ts) FILTER (WHERE NOT is_out) AS latest_received_at
-       FROM m`,
-      [this.tenantId],
-    );
+  /**
+   * Folder counts. The un-scoped read is O(1) from `message_counters`
+   * (trigger-maintained, migration 0019) instead of the previous full tenant
+   * scan; `latest_received_at` is one probe of the ts index endpoint. With
+   * `domains`, counts are a per-message rollup of `message_recipients`
+   * (index-only over (tenant_id, domain, message_id) — streamed, not sorted).
+   */
+  async messageCounts(opts: { domains?: string[] } = {}): Promise<MessageCountsRecord> {
     const number = (value: unknown): number => {
       const parsed = typeof value === "number" ? value : Number(value);
       return Number.isFinite(parsed) ? parsed : 0;
     };
-    const latest = row?.["latest_received_at"];
+    const toLatest = (latest: unknown): string | null =>
+      latest instanceof Date ? latest.toISOString() : latest ? String(latest) : null;
+
+    const domains = (opts.domains ?? []).map((d) => d.trim().toLowerCase()).filter(Boolean);
+    if (domains.length > 0) {
+      const row = await this.client.get<Record<string, unknown>>(
+        `WITH per_message AS (
+           SELECT message_id,
+                  bool_or(is_out) AS is_out, bool_or(is_read) AS is_read,
+                  bool_or(is_starred) AS is_starred, bool_or(is_arch) AS is_arch,
+                  bool_or(is_spam) AS is_spam, bool_or(is_trash) AS is_trash,
+                  max(sort_ts) AS ts
+             FROM message_recipients
+            WHERE tenant_id = $1 AND domain = ANY($2)
+            GROUP BY message_id
+         )
+         SELECT
+           count(*) FILTER (WHERE is_out) AS sent,
+           count(*) FILTER (WHERE NOT is_out AND NOT is_arch AND NOT is_spam AND NOT is_trash) AS inbox,
+           count(*) FILTER (WHERE NOT is_out AND NOT is_arch AND NOT is_spam AND NOT is_trash AND NOT is_read) AS unread,
+           count(*) FILTER (WHERE NOT is_out AND is_starred AND NOT is_arch AND NOT is_spam AND NOT is_trash) AS starred,
+           count(*) FILTER (WHERE NOT is_out AND is_arch AND NOT is_spam AND NOT is_trash) AS archived,
+           count(*) FILTER (WHERE NOT is_out AND is_spam) AS spam,
+           count(*) FILTER (WHERE NOT is_out AND is_trash) AS trash,
+           count(*) AS total,
+           max(ts) FILTER (WHERE NOT is_out) AS latest_received_at
+         FROM per_message`,
+        [this.tenantId, domains],
+      );
+      return {
+        inbox: number(row?.["inbox"]), unread: number(row?.["unread"]), starred: number(row?.["starred"]),
+        sent: number(row?.["sent"]), archived: number(row?.["archived"]), spam: number(row?.["spam"]),
+        trash: number(row?.["trash"]), total: number(row?.["total"]),
+        latest_received_at: toLatest(row?.["latest_received_at"]),
+      };
+    }
+
+    const rows = await this.client.many<{ key: string; value: unknown }>(
+      `SELECT key, value FROM message_counters WHERE tenant_id = $1`,
+      [this.tenantId],
+    );
+    const counters = new Map(rows.map((r) => [r.key, number(r.value)]));
+    const latestRow = await this.client.get<{ ts: unknown }>(
+      `SELECT ${MESSAGE_TS_EXPR} AS ts FROM messages
+        WHERE tenant_id = $1 AND ${NOT_OUTBOUND_SQL}
+        ORDER BY ${MESSAGE_TS_EXPR} DESC, id DESC LIMIT 1`,
+      [this.tenantId],
+    );
     return {
-      inbox: number(row?.["inbox"]), unread: number(row?.["unread"]), starred: number(row?.["starred"]),
-      sent: number(row?.["sent"]), archived: number(row?.["archived"]), spam: number(row?.["spam"]),
-      trash: number(row?.["trash"]), total: number(row?.["total"]),
-      latest_received_at: latest instanceof Date ? latest.toISOString() : latest ? String(latest) : null,
+      inbox: counters.get("inbox") ?? 0,
+      unread: counters.get("unread") ?? 0,
+      starred: counters.get("starred") ?? 0,
+      sent: counters.get("sent") ?? 0,
+      archived: counters.get("archived") ?? 0,
+      spam: counters.get("spam") ?? 0,
+      trash: counters.get("trash") ?? 0,
+      total: counters.get("total") ?? 0,
+      latest_received_at: toLatest(latestRow?.["ts"]),
     };
   }
 
@@ -2323,21 +2498,30 @@ export class TenantScopedStore {
    * are tenant-scoped (design M3), so a mailbox never counts another tenant's mail.
    */
   async listMailboxes(): Promise<{ mailboxes: MailboxRollup[]; counts: MessageCountsRecord }> {
+    // Rolls up the parsed `message_recipients` table (migration 0019) instead
+    // of the previous `LIKE '%email%'` join over to_addrs::text, which was
+    // O(addresses x messages) — measured ~68s on 317 addresses x 168k rows
+    // (the /v1/mailboxes 502). kind = 'to' preserves the old semantics of
+    // counting only to-recipiency; parsing (vs substring match) also counts
+    // the `Display Name <email>` recipient forms correctly.
     const rows = await this.client.many<Record<string, unknown>>(
       `SELECT
          a.id AS id,
          a.email AS address,
          a.display_name AS display_name,
          a.status AS status,
-         count(m.id) AS total,
-         count(m.id) FILTER (WHERE m.is_read = false) AS unread
+         COALESCE(p.total, 0) AS total,
+         COALESCE(p.unread, 0) AS unread
        FROM addresses a
-       LEFT JOIN messages m
-         ON lower(COALESCE(m.direction, '')) <> 'outbound'
-        AND m.tenant_id = a.tenant_id
-        AND lower(m.to_addrs::text) LIKE '%' || lower(a.email) || '%'
+       LEFT JOIN (
+         SELECT email,
+                count(*) FILTER (WHERE kind = 'to' AND NOT is_out) AS total,
+                count(*) FILTER (WHERE kind = 'to' AND NOT is_out AND NOT is_read) AS unread
+           FROM message_recipients
+          WHERE tenant_id = $1
+          GROUP BY email
+       ) p ON p.email = lower(a.email)
        WHERE a.tenant_id = $1
-       GROUP BY a.id, a.email, a.display_name, a.status
        ORDER BY a.email ASC`,
       [this.tenantId],
     );

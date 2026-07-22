@@ -2127,6 +2127,374 @@ const SEND_INTENT_RECOVERY = defineMigration(
   `,
 );
 
+/**
+ * 0019 — inbox performance rollups for the 100k+ message account.
+ *
+ * Measured on the live 168k-row `messages` table, every inbox read was a full
+ * tenant scan: `/v1/mailboxes` was a ~68s LIKE-join (ALB 502), `/v1/messages`
+ * re-sorted the whole table per page (no index matches
+ * `COALESCE(received_at, created_at)`), and `/v1/messages/groups` re-counted
+ * 168k rows per call. This migration adds the read-path infrastructure:
+ *
+ * 1. `message_recipients` — one row per (message, parsed recipient email),
+ *    with the recipient's domain and denormalized folder flags. Powers the
+ *    `/v1/mailboxes` per-address rollup and the `?domain=` filter without
+ *    substring joins. Maintained by an AFTER trigger on `messages`.
+ * 2. `message_counters` — O(1) per-tenant folder counts (inbox/unread/…)
+ *    maintained by the same trigger; replaces the full-scan messageCounts.
+ * 3. `messages_tenant_ts_id_idx` — composite expression index matching the
+ *    list ORDER BY exactly; makes page reads + keyset cursors index-ordered.
+ * 4. Partial folder indexes (sent/starred/archived/spam/trash) whose
+ *    predicates textually match the store's folder WHERE clauses.
+ * 5. A trigram GIN index over the exact `search` expression (guarded: only
+ *    when pg_trgm is installable; the query stays correct without it).
+ *
+ * Deploy note: index builds here are transactional (the ledger runs each
+ * migration body as one implicit transaction, so CREATE INDEX CONCURRENTLY
+ * cannot be used). On a large live table, the two heavy indexes can be
+ * pre-created with CREATE INDEX CONCURRENTLY using the same names BEFORE
+ * deploying; `IF NOT EXISTS` then makes this migration's builds no-ops.
+ *
+ * RLS: both new tables ENABLE + FORCE row security with the standard
+ * tenant-isolation policy. The trigger runs in the writer's session, which
+ * already carries `app.current_tenant` (messages has FORCE RLS since 0013,
+ * so tenant-less writers are already impossible). The backfill loops tenants
+ * explicitly, same pattern as 0012/0013.
+ */
+const INBOX_PERF_ROLLUPS = defineMigration(
+  "0019_inbox_perf_rollups",
+  `
+  -- ---- 1. recipient parsing helpers ----------------------------------------
+  -- to_addrs/cc_addrs store raw RFC5322 strings ("Name" <a@b.c> or bare a@b.c);
+  -- >50% of live recipients carry a display name, so parse, never substring.
+  CREATE OR REPLACE FUNCTION emails_extract_address(raw text)
+  RETURNS text
+  LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE
+  AS $fn$
+    SELECT lower(substring(
+      CASE
+        WHEN raw LIKE '%<%' THEN COALESCE(substring(raw FROM '<([^<>]*)>'), raw)
+        ELSE raw
+      END
+      FROM '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]*[A-Za-z0-9]'))
+  $fn$;
+
+  CREATE OR REPLACE FUNCTION emails_extract_domain(raw text)
+  RETURNS text
+  LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE
+  AS $fn$
+    SELECT NULLIF(split_part(emails_extract_address(raw), '@', 2), '')
+  $fn$;
+
+  -- NOTE (measured, do not "optimize" this back in): a trigram GIN index on
+  -- the search expression was built and benched at 168k rows. It is provably
+  -- unusable here: every text-search operator (~~ / @@ / %) is non-LEAKPROOF,
+  -- and under the FORCE ROW LEVEL SECURITY sealed in 0013 Postgres refuses
+  -- non-leakproof index quals for the app role (superuser: 8.5ms bitmap scan;
+  -- app role: never, regardless of enable_seqscan/cost settings). ?q/?search
+  -- therefore stays on the parallel scan path, at parity with pre-0019.
+
+  -- Folder-slot classification. MUST stay semantically identical to the
+  -- store's messageCounts()/folder predicates.
+  CREATE OR REPLACE FUNCTION emails_folder_slots(
+    direction text, status text, labels jsonb, is_read boolean, is_starred boolean
+  )
+  RETURNS text[]
+  LANGUAGE sql IMMUTABLE PARALLEL SAFE
+  AS $fn$
+    WITH f AS (
+      SELECT
+        (lower(COALESCE(direction, '')) = 'outbound') AS is_out,
+        (COALESCE(labels, '[]'::jsonb) @> '["archived"]'::jsonb) AS is_arch,
+        (COALESCE(labels, '[]'::jsonb) @> '["spam"]'::jsonb
+          OR lower(COALESCE(status, '')) = 'spam') AS is_spam,
+        (COALESCE(labels, '[]'::jsonb) @> '["trash"]'::jsonb) AS is_trash
+    )
+    SELECT ARRAY['total']
+      || CASE WHEN is_out THEN ARRAY['sent'] ELSE ARRAY[]::text[] END
+      || CASE WHEN NOT is_out AND NOT is_arch AND NOT is_spam AND NOT is_trash
+              THEN ARRAY['inbox'] ELSE ARRAY[]::text[] END
+      || CASE WHEN NOT is_out AND NOT is_arch AND NOT is_spam AND NOT is_trash
+                   AND NOT COALESCE(is_read, false)
+              THEN ARRAY['unread'] ELSE ARRAY[]::text[] END
+      || CASE WHEN NOT is_out AND COALESCE(is_starred, false)
+                   AND NOT is_arch AND NOT is_spam AND NOT is_trash
+              THEN ARRAY['starred'] ELSE ARRAY[]::text[] END
+      || CASE WHEN NOT is_out AND is_arch AND NOT is_spam AND NOT is_trash
+              THEN ARRAY['archived'] ELSE ARRAY[]::text[] END
+      || CASE WHEN NOT is_out AND is_spam THEN ARRAY['spam'] ELSE ARRAY[]::text[] END
+      || CASE WHEN NOT is_out AND is_trash THEN ARRAY['trash'] ELSE ARRAY[]::text[] END
+    FROM f
+  $fn$;
+
+  -- ---- 2. message_recipients ------------------------------------------------
+  CREATE TABLE IF NOT EXISTS message_recipients (
+    tenant_id  uuid NOT NULL,
+    message_id text NOT NULL,
+    email      text NOT NULL,
+    domain     text NOT NULL,
+    kind       text NOT NULL DEFAULT 'to' CHECK (kind IN ('to', 'cc')),
+    is_out     boolean NOT NULL DEFAULT false,
+    is_read    boolean NOT NULL DEFAULT false,
+    is_starred boolean NOT NULL DEFAULT false,
+    is_arch    boolean NOT NULL DEFAULT false,
+    is_spam    boolean NOT NULL DEFAULT false,
+    is_trash   boolean NOT NULL DEFAULT false,
+    sort_ts    timestamptz NOT NULL,
+    PRIMARY KEY (tenant_id, message_id, email),
+    FOREIGN KEY (tenant_id, message_id)
+      REFERENCES messages (tenant_id, id) ON DELETE CASCADE
+  );
+
+  ALTER TABLE message_recipients ENABLE ROW LEVEL SECURITY;
+  ALTER TABLE message_recipients FORCE ROW LEVEL SECURITY;
+  DROP POLICY IF EXISTS message_recipients_tenant_isolation ON message_recipients;
+  CREATE POLICY message_recipients_tenant_isolation ON message_recipients
+    USING (tenant_id = NULLIF(current_setting('app.current_tenant', true), '')::uuid)
+    WITH CHECK (tenant_id = NULLIF(current_setting('app.current_tenant', true), '')::uuid);
+
+  -- ?domain= lookups + domain-scoped folder counts (index-only, streaming
+  -- GroupAggregate over (tenant, domain, message_id) order — no sort).
+  CREATE INDEX IF NOT EXISTS message_recipients_tenant_domain_idx
+    ON message_recipients (tenant_id, domain, message_id)
+    INCLUDE (is_out, is_read, is_starred, is_arch, is_spam, is_trash, sort_ts);
+
+  -- /v1/mailboxes per-address rollup (index-only, streaming by email).
+  CREATE INDEX IF NOT EXISTS message_recipients_tenant_email_idx
+    ON message_recipients (tenant_id, email)
+    INCLUDE (kind, is_out, is_read);
+
+  -- ---- 3. message_counters ---------------------------------------------------
+  CREATE TABLE IF NOT EXISTS message_counters (
+    tenant_id  uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    key        text NOT NULL,
+    value      bigint NOT NULL DEFAULT 0,
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (tenant_id, key)
+  );
+
+  ALTER TABLE message_counters ENABLE ROW LEVEL SECURITY;
+  ALTER TABLE message_counters FORCE ROW LEVEL SECURITY;
+  DROP POLICY IF EXISTS message_counters_tenant_isolation ON message_counters;
+  CREATE POLICY message_counters_tenant_isolation ON message_counters
+    USING (tenant_id = NULLIF(current_setting('app.current_tenant', true), '')::uuid)
+    WITH CHECK (tenant_id = NULLIF(current_setting('app.current_tenant', true), '')::uuid);
+
+  -- ---- 4. trigger: keep both rollups in sync with messages -------------------
+  CREATE OR REPLACE FUNCTION emails_messages_rollup_sync()
+  RETURNS trigger
+  LANGUAGE plpgsql
+  AS $fn$
+  DECLARE
+    old_slots text[];
+    new_slots text[];
+  BEGIN
+    IF TG_OP IN ('UPDATE', 'DELETE') THEN
+      old_slots := emails_folder_slots(OLD.direction, OLD.status, OLD.labels, OLD.is_read, OLD.is_starred);
+    END IF;
+    IF TG_OP IN ('INSERT', 'UPDATE') THEN
+      new_slots := emails_folder_slots(NEW.direction, NEW.status, NEW.labels, NEW.is_read, NEW.is_starred);
+    END IF;
+
+    -- counters ---------------------------------------------------------------
+    IF TG_OP = 'INSERT' THEN
+      INSERT INTO message_counters (tenant_id, key, value)
+      SELECT NEW.tenant_id, s, count(*) FROM unnest(new_slots) AS s GROUP BY s
+      ON CONFLICT (tenant_id, key)
+        DO UPDATE SET value = message_counters.value + EXCLUDED.value, updated_at = now();
+    ELSIF TG_OP = 'DELETE' THEN
+      UPDATE message_counters c
+         SET value = GREATEST(c.value - d.n, 0), updated_at = now()
+        FROM (SELECT s, count(*)::bigint AS n FROM unnest(old_slots) AS s GROUP BY s) d
+       WHERE c.tenant_id = OLD.tenant_id AND c.key = d.s;
+    ELSIF TG_OP = 'UPDATE'
+      AND (old_slots IS DISTINCT FROM new_slots OR NEW.tenant_id IS DISTINCT FROM OLD.tenant_id) THEN
+      UPDATE message_counters c
+         SET value = GREATEST(c.value - d.n, 0), updated_at = now()
+        FROM (SELECT s, count(*)::bigint AS n FROM unnest(old_slots) AS s GROUP BY s) d
+       WHERE c.tenant_id = OLD.tenant_id AND c.key = d.s;
+      INSERT INTO message_counters (tenant_id, key, value)
+      SELECT NEW.tenant_id, s, count(*) FROM unnest(new_slots) AS s GROUP BY s
+      ON CONFLICT (tenant_id, key)
+        DO UPDATE SET value = message_counters.value + EXCLUDED.value, updated_at = now();
+    END IF;
+
+    -- recipients ---------------------------------------------------------------
+    IF TG_OP = 'INSERT'
+       OR (TG_OP = 'UPDATE'
+           AND (NEW.to_addrs IS DISTINCT FROM OLD.to_addrs
+                OR NEW.cc_addrs IS DISTINCT FROM OLD.cc_addrs
+                OR NEW.tenant_id IS DISTINCT FROM OLD.tenant_id)) THEN
+      IF TG_OP = 'UPDATE' THEN
+        DELETE FROM message_recipients
+         WHERE tenant_id = OLD.tenant_id AND message_id = OLD.id;
+      END IF;
+      INSERT INTO message_recipients
+        (tenant_id, message_id, email, domain, kind,
+         is_out, is_read, is_starred, is_arch, is_spam, is_trash, sort_ts)
+      SELECT NEW.tenant_id, NEW.id, r.email, r.domain, r.kind,
+             (lower(COALESCE(NEW.direction, '')) = 'outbound'),
+             COALESCE(NEW.is_read, false),
+             COALESCE(NEW.is_starred, false),
+             (COALESCE(NEW.labels, '[]'::jsonb) @> '["archived"]'::jsonb),
+             (COALESCE(NEW.labels, '[]'::jsonb) @> '["spam"]'::jsonb
+               OR lower(COALESCE(NEW.status, '')) = 'spam'),
+             (COALESCE(NEW.labels, '[]'::jsonb) @> '["trash"]'::jsonb),
+             COALESCE(NEW.received_at, NEW.created_at)
+        FROM (
+          SELECT email, domain, max(kind) AS kind -- 'to' > 'cc': to-recipiency wins
+            FROM (
+              SELECT emails_extract_address(t.value) AS email,
+                     emails_extract_domain(t.value) AS domain,
+                     'to' AS kind
+                FROM jsonb_array_elements_text(
+                       CASE WHEN jsonb_typeof(NEW.to_addrs) = 'array'
+                            THEN NEW.to_addrs ELSE '[]'::jsonb END) AS t(value)
+              UNION ALL
+              SELECT emails_extract_address(c.value),
+                     emails_extract_domain(c.value),
+                     'cc'
+                FROM jsonb_array_elements_text(
+                       CASE WHEN jsonb_typeof(NEW.cc_addrs) = 'array'
+                            THEN NEW.cc_addrs ELSE '[]'::jsonb END) AS c(value)
+            ) x
+           WHERE email IS NOT NULL AND domain IS NOT NULL
+           GROUP BY email, domain
+        ) r
+      ON CONFLICT (tenant_id, message_id, email) DO UPDATE
+        SET domain = EXCLUDED.domain, kind = EXCLUDED.kind,
+            is_out = EXCLUDED.is_out, is_read = EXCLUDED.is_read,
+            is_starred = EXCLUDED.is_starred, is_arch = EXCLUDED.is_arch,
+            is_spam = EXCLUDED.is_spam, is_trash = EXCLUDED.is_trash,
+            sort_ts = EXCLUDED.sort_ts;
+    ELSIF TG_OP = 'UPDATE' THEN
+      UPDATE message_recipients
+         SET is_out = (lower(COALESCE(NEW.direction, '')) = 'outbound'),
+             is_read = COALESCE(NEW.is_read, false),
+             is_starred = COALESCE(NEW.is_starred, false),
+             is_arch = (COALESCE(NEW.labels, '[]'::jsonb) @> '["archived"]'::jsonb),
+             is_spam = (COALESCE(NEW.labels, '[]'::jsonb) @> '["spam"]'::jsonb
+                         OR lower(COALESCE(NEW.status, '')) = 'spam'),
+             is_trash = (COALESCE(NEW.labels, '[]'::jsonb) @> '["trash"]'::jsonb),
+             sort_ts = COALESCE(NEW.received_at, NEW.created_at)
+       WHERE tenant_id = NEW.tenant_id AND message_id = NEW.id
+         AND (is_out, is_read, is_starred, is_arch, is_spam, is_trash, sort_ts)
+             IS DISTINCT FROM
+             ((lower(COALESCE(NEW.direction, '')) = 'outbound'),
+              COALESCE(NEW.is_read, false),
+              COALESCE(NEW.is_starred, false),
+              (COALESCE(NEW.labels, '[]'::jsonb) @> '["archived"]'::jsonb),
+              (COALESCE(NEW.labels, '[]'::jsonb) @> '["spam"]'::jsonb
+                OR lower(COALESCE(NEW.status, '')) = 'spam'),
+              (COALESCE(NEW.labels, '[]'::jsonb) @> '["trash"]'::jsonb),
+              COALESCE(NEW.received_at, NEW.created_at));
+    END IF;
+
+    RETURN NULL;
+  END;
+  $fn$;
+
+  DROP TRIGGER IF EXISTS messages_rollup_sync ON messages;
+  CREATE TRIGGER messages_rollup_sync
+    AFTER INSERT OR UPDATE OR DELETE ON messages
+    FOR EACH ROW EXECUTE FUNCTION emails_messages_rollup_sync();
+
+  -- ---- 5. messages list ordering column + indexes -----------------------------
+  -- The list order is COALESCE(received_at, created_at) DESC. That expression
+  -- CANNOT drive index seeks under FORCE RLS: Postgres treats CoalesceExpr
+  -- (and RowCompareExpr) quals as leaky and demotes them to per-row filters
+  -- (measured: a mid-depth keyset cursor scanned 100k rows at 39ms instead of
+  -- seeking at 0.2ms). A STORED GENERATED column turns every cursor/since
+  -- qual into a plain-Var comparison (leakproof), and can never drift from
+  -- the expression it mirrors. The ADD COLUMN is a one-time table rewrite
+  -- under ACCESS EXCLUSIVE — see the deploy note.
+  ALTER TABLE messages ADD COLUMN IF NOT EXISTS sort_ts timestamptz
+    GENERATED ALWAYS AS (COALESCE(received_at, created_at)) STORED;
+
+  CREATE INDEX IF NOT EXISTS messages_tenant_ts_id_idx
+    ON messages (tenant_id, sort_ts DESC, id DESC);
+
+  -- Sparse folders: tiny partial indexes whose predicates textually match the
+  -- store's folder WHERE clauses (predicate implication needs exact clauses).
+  CREATE INDEX IF NOT EXISTS messages_tenant_sent_idx
+    ON messages (tenant_id, sort_ts DESC, id DESC)
+    WHERE lower(COALESCE(direction, '')) = 'outbound';
+  CREATE INDEX IF NOT EXISTS messages_tenant_starred_idx
+    ON messages (tenant_id, sort_ts DESC, id DESC)
+    WHERE is_starred = true;
+  CREATE INDEX IF NOT EXISTS messages_tenant_archived_idx
+    ON messages (tenant_id, sort_ts DESC, id DESC)
+    WHERE labels @> '["archived"]'::jsonb;
+  CREATE INDEX IF NOT EXISTS messages_tenant_spam_idx
+    ON messages (tenant_id, sort_ts DESC, id DESC)
+    WHERE (labels @> '["spam"]'::jsonb OR lower(COALESCE(status, '')) = 'spam');
+  CREATE INDEX IF NOT EXISTS messages_tenant_trash_idx
+    ON messages (tenant_id, sort_ts DESC, id DESC)
+    WHERE labels @> '["trash"]'::jsonb;
+
+  -- ---- 6. backfill (per tenant, same pattern as 0012/0013) -------------------
+  DO $do$
+  DECLARE
+    t record;
+  BEGIN
+    FOR t IN SELECT id FROM tenants ORDER BY id LOOP
+      PERFORM set_config('app.current_tenant', t.id::text, true);
+
+      INSERT INTO message_recipients
+        (tenant_id, message_id, email, domain, kind,
+         is_out, is_read, is_starred, is_arch, is_spam, is_trash, sort_ts)
+      SELECT m.tenant_id, m.id, r.email, r.domain, r.kind,
+             (lower(COALESCE(m.direction, '')) = 'outbound'),
+             COALESCE(m.is_read, false),
+             COALESCE(m.is_starred, false),
+             (COALESCE(m.labels, '[]'::jsonb) @> '["archived"]'::jsonb),
+             (COALESCE(m.labels, '[]'::jsonb) @> '["spam"]'::jsonb
+               OR lower(COALESCE(m.status, '')) = 'spam'),
+             (COALESCE(m.labels, '[]'::jsonb) @> '["trash"]'::jsonb),
+             COALESCE(m.received_at, m.created_at)
+        FROM messages m
+        CROSS JOIN LATERAL (
+          SELECT email, domain, max(kind) AS kind
+            FROM (
+              SELECT emails_extract_address(t2.value) AS email,
+                     emails_extract_domain(t2.value) AS domain,
+                     'to' AS kind
+                FROM jsonb_array_elements_text(
+                       CASE WHEN jsonb_typeof(m.to_addrs) = 'array'
+                            THEN m.to_addrs ELSE '[]'::jsonb END) AS t2(value)
+              UNION ALL
+              SELECT emails_extract_address(c2.value),
+                     emails_extract_domain(c2.value),
+                     'cc'
+                FROM jsonb_array_elements_text(
+                       CASE WHEN jsonb_typeof(m.cc_addrs) = 'array'
+                            THEN m.cc_addrs ELSE '[]'::jsonb END) AS c2(value)
+            ) x
+           WHERE email IS NOT NULL AND domain IS NOT NULL
+           GROUP BY email, domain
+        ) r
+       WHERE m.tenant_id = t.id
+      ON CONFLICT (tenant_id, message_id, email) DO NOTHING;
+
+      DELETE FROM message_counters WHERE tenant_id = t.id;
+      INSERT INTO message_counters (tenant_id, key, value)
+      SELECT t.id, s, count(*)
+        FROM messages m
+        CROSS JOIN LATERAL unnest(
+          emails_folder_slots(m.direction, m.status, m.labels, m.is_read, m.is_starred)) AS s
+       WHERE m.tenant_id = t.id
+       GROUP BY s;
+    END LOOP;
+    PERFORM set_config('app.current_tenant', '', true);
+  END
+  $do$;
+
+  ANALYZE messages;
+  ANALYZE message_recipients;
+  ANALYZE message_counters;
+  `,
+);
+
 /** All migrations, in order: api-keys table (auth), the core schema, inbound. */
 export function emailsSelfHostedMigrations(): Migration[] {
   const authMigrations = apiKeyMigrations().map((m) => defineMigration(m.id, m.sql));
@@ -2152,5 +2520,6 @@ export function emailsSelfHostedMigrations(): Migration[] {
     INBOUND_ROUTING_AND_QUARANTINE,
     INBOUND_MESSAGE_SOURCE_PROVENANCE,
     SEND_INTENT_RECOVERY,
+    INBOX_PERF_ROLLUPS,
   ];
 }

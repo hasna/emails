@@ -170,7 +170,11 @@ function v1RowToTuiMessage(row: Record<string, unknown>): TuiMessage {
     snippet: snippetOf(cstrOrNull(row["snippet"]) ?? cstrOrNull(row["body_text"])),
     thread_id: null,
     provider_thread_id: null,
-    attachments: v1AttachmentInfos(row).length,
+    // List rows carry attachment_count (full attachment metadata moved to the
+    // single-message read); older servers still ship the attachments array.
+    attachments: typeof row["attachment_count"] === "number"
+      ? row["attachment_count"]
+      : v1AttachmentInfos(row).length,
     sentByMe: outbound || labels.some((l) => l.trim().toLowerCase() === "sent"),
   };
 }
