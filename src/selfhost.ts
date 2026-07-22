@@ -914,7 +914,7 @@ export class EmailsSelfHostClient {
       });
     }
 
-    async listMessages(query?: { "limit"?: number; "offset"?: number; "cursor"?: string; "folder"?: "inbox" | "starred" | "sent" | "archived" | "spam" | "trash"; "domain"?: string | Array<string>; "direction"?: "inbound" | "outbound"; "to"?: string; "from"?: string; "subject"?: string; "q"?: string; "search"?: string; "since"?: string }, init?: RequestInit): Promise<{ "messages"?: Array<MessageListItem>; "next_cursor"?: string | null }> {
+    async listMessages(query?: { "limit"?: number; "offset"?: number; "cursor"?: string; "direction"?: "inbound" | "outbound"; "folder"?: "inbox" | "starred" | "sent" | "archived" | "spam" | "trash"; "domain"?: Array<string>; "to"?: string; "from"?: string; "subject"?: string; "q"?: string; "search"?: string; "since"?: string }, init?: RequestInit): Promise<{ "messages"?: Array<MessageListItem>; "next_cursor"?: string | null }> {
       return this.request("GET", `/v1/messages`, {
         body: undefined,
         query,
@@ -932,10 +932,19 @@ export class EmailsSelfHostClient {
     }
 
     /** Return server-side mailbox counts */
-    async getMessageCounts(init?: RequestInit): Promise<Record<string, unknown>> {
+    async getMessageCounts(query?: { "domain"?: Array<string> }, init?: RequestInit): Promise<Record<string, unknown>> {
       return this.request("GET", `/v1/messages/counts`, {
         body: undefined,
-        query: undefined,
+        query,
+        init,
+      });
+    }
+
+    /** Folder counts, flat at the top level (native-client shape); same data as /v1/messages/counts */
+    async getMessageGroups(query?: { "domain"?: Array<string> }, init?: RequestInit): Promise<{ "inbox"?: number; "unread"?: number; "starred"?: number; "sent"?: number; "archived"?: number; "spam"?: number; "trash"?: number; "total"?: number; "latest_received_at"?: string | null }> {
+      return this.request("GET", `/v1/messages/groups`, {
+        body: undefined,
+        query,
         init,
       });
     }
