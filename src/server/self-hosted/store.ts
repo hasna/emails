@@ -1040,7 +1040,10 @@ export class EmailsSelfHostedStore {
    * domain map. Header recipients are intentionally not accepted here. A route is
    * returned only for active tenants; everything else is explicitly unresolved.
    */
-  async resolveInboundRecipients(envelopeRecipients: string[]): Promise<InboundRouteResolution> {
+  async resolveInboundRecipients(
+    envelopeRecipients: string[],
+    options: { defaultTenantId?: string } = {},
+  ): Promise<InboundRouteResolution> {
     const normalized = [...new Set(envelopeRecipients.map(canonicalAddress).filter(Boolean))];
     const byDomain = new Map<string, string[]>();
     const unresolved: string[] = [];
@@ -1066,9 +1069,39 @@ export class EmailsSelfHostedStore {
       )
       : [];
     const routeByDomain = new Map(routes.map((row) => [row.domain.toLowerCase(), row.tenant_id]));
+
+    // Single-tenant self-hosted fallback. `inbound_domain_routes` is the global
+    // single-tenant receive map; when a deployment configures a default inbound
+    // tenant (EMAILS_INBOUND_DEFAULT_TENANT_ID), well-formed envelope recipients
+    // whose domain has no explicit route land in that tenant instead of being
+    // quarantined. This restores the pre-routing behavior where all inbound
+    // landed in the one tenant WITHOUT weakening RLS: the write path still stamps
+    // tenant_id and sets `app.current_tenant` for the resolved tenant, so FORCE
+    // RLS is fully satisfied. Malformed recipients (no domain) are never
+    // defaulted — they stay unresolved and quarantine. The fallback tenant must
+    // exist and be active, or it is ignored (routes-only behavior).
+    const defaultTenantId = options.defaultTenantId?.trim();
+    const hasUnroutedDomain = [...byDomain.keys()].some((domain) => !routeByDomain.get(domain));
+    // Consult the default inbound tenant when either (a) some valid domain has no
+    // explicit route, or (b) the notification carried NO usable envelope recipient
+    // at all. Case (b) is the norm when the operator feeds the worker S3
+    // ObjectCreated events (object key, but no SES recipient list) rather than SES
+    // receipt notifications; the pre-routing worker handled these by writing every
+    // inbound message to the single tenant. The default tenant must exist and be
+    // active or it is ignored (routes-only behavior, i.e. quarantine).
+    const needsDefault = !!defaultTenantId && (hasUnroutedDomain || byDomain.size === 0);
+    let fallbackTenantId: string | null = null;
+    if (needsDefault) {
+      const active = await this.client.get<{ id: string }>(
+        `SELECT id::text AS id FROM tenants WHERE id = $1::uuid AND status = 'active'`,
+        [defaultTenantId],
+      );
+      fallbackTenantId = active ? active.id : null;
+    }
+
     const grouped = new Map<string, string[]>();
     for (const [domain, recipients] of byDomain) {
-      const tenantId = routeByDomain.get(domain);
+      const tenantId = routeByDomain.get(domain) ?? fallbackTenantId;
       if (!tenantId) {
         unresolved.push(...recipients);
         continue;
@@ -1076,6 +1109,12 @@ export class EmailsSelfHostedStore {
       const current = grouped.get(tenantId) ?? [];
       current.push(...recipients);
       grouped.set(tenantId, current);
+    }
+    // No usable envelope recipient at all (S3-event feed): still deliver to the
+    // default inbound tenant. The stored recipient list is taken from the parsed
+    // MIME by the caller, since the envelope gave us none.
+    if (grouped.size === 0 && fallbackTenantId) {
+      grouped.set(fallbackTenantId, []);
     }
     return {
       groups: [...grouped].map(([tenantId, recipients]) => ({ tenantId, recipients })),
