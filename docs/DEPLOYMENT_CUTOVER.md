@@ -4,7 +4,7 @@ This repository intentionally has no automatic deployment workflow. Merging or
 tagging the repository cannot publish a package, push an image, or update AWS.
 
 Before a future `workflow_dispatch` deployment is introduced, an operator must
-provide an Emails-owned infrastructure manifest and least-privilege role in the
+provide a Mailery-owned infrastructure manifest and least-privilege role in the
 target user's AWS account. The workflow must use `APP=emails`, require an
 explicit environment approval, and must not contain a Hasna account ID, bucket,
 cluster, database URL, secret path, or default endpoint.
@@ -38,19 +38,21 @@ rollback target. Roll forward to a corrected tenant-aware image, or execute an
 operator-reviewed explicit schema recovery plan while every writer remains
 stopped.
 
-## Attachment-provenance and send-intent recovery migration gates (0017-0018)
+## Attachment provenance, send recovery, inbox rollups, and repair-ledger gates (0017-0020)
 
-Migration 0017 introduces the immutable attachment-provenance ledger. Migration
-0018 is the latest forward-only production cutover. It adds durable send-intent
-recovery state, and older binaries reject its applied ledger row as an unknown
-migration and fail readiness closed. A pre-0018 release, including 1.2.6, is not
-a valid restart, scale-out, or rollback target after 0018 commits.
+Migration 0017 introduces the immutable attachment-provenance ledger, 0018 adds
+durable send-intent recovery state, 0019 adds inbox performance rollups, and
+0020 adds the tenant-scoped checkpointed attachment-repair ledger. Migration
+0020 is the latest forward-only production cutover. Older binaries reject an
+unknown applied ledger row and fail readiness closed. A pre-0020 release is not
+a valid restart, scale-out, or rollback target after 0020 commits.
 
 This cutover requires controlled downtime. The old worker and API are both at
 zero before the ledger advances; SQS buffers new mail while no worker runs. Only
-the release worker from an image whose migration set recognizes both 0017 and
-0018 is started after migration, and its privacy-safe provenance audit must exit
-zero before the API is started. Leave
+controlled release one-shots may write during migration and approved attachment
+repair. The release worker is started only after migration and repair gates pass,
+from an image whose migration set recognizes 0017 through 0020, and its
+privacy-safe provenance audit must exit zero before the API is started. Leave
 `enable_automatic_deployment_rollback = false` through the observation window.
 
 > **Production hard stop:** this generic Terraform rehearsal is **UNUSABLE for
@@ -80,8 +82,10 @@ identifiers:
   `LIVE_MIGRATION_TASK_FAMILY` must identify the exact revisioned live task
   definition families cloned for this cutover. The plan must also pin the exact
   service names, container names, roles, secret references, queue, DLQ, bucket,
-  prefix, subnets, security groups, log groups, and database identity from the
-  live definitions.
+  prefix, subnets, security groups, log groups, database identity, and ALB
+  readiness URL from the live definitions and routing configuration. No live
+  account, resource, service, database, bucket, role, or endpoint identifier may
+  be hardcoded in the plan.
 - `LIVE_RUNTIME_ARCHITECTURE` must equal `X86_64` for the reviewed live
   topology. The image and all three cloned definitions must agree; an ARM image
   or an implicit architecture is a hard failure.
@@ -95,7 +99,10 @@ identifiers:
 - `NO_SES_SMOKE_TASK_ROLE_ARN` must identify a reviewed smoke role that denies
   `ses:SendEmail` and `ses:SendRawEmail`. Read-only smoke must use this role;
   the normal task role is not acceptable merely because the operator promises
-  not to send.
+  not to send. The smoke task must be cloned from the exact release API
+  definition, preserve its network and runtime identity, replace only the task
+  role and command required for the read-only checks, and never join the live
+  service.
 
 The reviewed live plan must enforce this order:
 
@@ -105,7 +112,7 @@ The reviewed live plan must enforce this order:
    queue/DLQ relationship, and database-specific recovery artifact.
 2. Disable automatic rollback on both live services before any forward-only
    migration or service stop. Preserve the previous definitions only as
-   pre-migration anchors; they are not rollback targets after 0018.
+   pre-migration anchors; they are not rollback targets after 0020.
 3. Stop the worker first. Prove desired and running counts are zero, its task
    list is empty, and the exact queue has three consecutive zero in-flight
    reads. Require exact zero visible and in-flight messages on the exact DLQ.
@@ -115,30 +122,49 @@ The reviewed live plan must enforce this order:
 5. Take or verify a database-specific snapshot, clone, or restore artifact for
    the Emails database. Whole-instance recovery is forbidden when the database
    service is shared. Run the release migration definition, require migration
-   and status exits of zero, valid checksums, `pending: []`, and both 0017 and
-   0018 applied.
-6. Start only the release worker, drain the exact queue to zero visible and
+   and status exits of zero, valid checksums, `pending: []`, and migrations 0017,
+   0018, 0019, and 0020 applied.
+6. While both services remain at zero, run attachment repair only as a reviewed
+   tenant-scoped, operator-only release maintenance operation. The manifest must use
+   exact canonical object keys, trusted recipient evidence, and the complete
+   tenant-scoped canary-message set. Run the ledger in its default dry-run mode
+   first; record `would_repair`, `retrying`, terminal `unavailable`, entry
+   counters, attempts, and checkpoint. Apply only the independently reviewed
+   manifest, resume bounded pages to completion, and return the maintenance task
+   to zero. The operation must use the configured canonical bucket, must not
+   list the bucket, and must not log source keys, recipients, payload bytes, or
+   internal errors.
+7. Start only the release worker, drain the exact queue to zero visible and
    in-flight messages, keep the exact DLQ at zero, and require
    `inbound-provenance-audit --since "$FENCE_AT"` to exit zero before the API.
-7. Start and smoke the release API with the no-SES role. Verify `/version`,
-   `/ready`, unauthenticated denial, authenticated tenant-scoped reads, and an
-   approved attachment hash without logging message or attachment content.
-8. Treat outbound sending and super-admin bootstrap as separate explicit approval
+8. Start the release API, then run smoke from the one-shot task carrying the
+   no-SES role. Verify `/version`, the configured live ALB `/ready` target,
+   unauthenticated denial, authenticated tenant-scoped reads, cursor-resumable
+   attachment inventory, and an approved attachment hash without logging
+   message or attachment content.
+9. Treat outbound sending and super-admin bootstrap as separate explicit approval
    actions. Neither belongs in migration, worker drain, read-only
    smoke, or API promotion. Bootstrap approval must name the one-time operator,
    key id, idempotency proof, wrong-key denial, and post-bootstrap revocation.
+10. Before retiring any former local runtime state, stop its writers and take a
+    fresh, checksummed, restore-tested backup of its database and attachment
+    data. Preserve that recovery artifact through the rollback window, then move
+    retired state to a recoverable quarantine and prove the old runtime does not
+    recreate it. Cutover success is not authority to delete backups.
 
-After 0018 begins, the only application-image recovery target is an
-0018-compatible roll-forward. A database-specific restore while every writer is
+After 0020 begins, the only application-image recovery target is a
+0020-compatible roll-forward. A database-specific restore while every writer is
 stopped is a separate, operator-reviewed disaster-recovery path, not an image
-rollback. A pre-0018 release is never a recovery target, and automatic rollback
-remains disabled until a later reviewed change makes a completed 0018-compatible
+rollback. A pre-0020 release is never a recovery target, and automatic rollback
+remains disabled until a later reviewed change makes a completed 0020-compatible
 deployment the rollback target.
 
 The commands below are only an evidence-producing isolated rehearsal template.
-Run them from `deploy/aws` against a disposable, explicitly named rehearsal
-topology with a reviewed backend and tfvars. `IMAGE_DIGEST` is the reviewed bare
-digest; `IMAGE_REFERENCE` is the full immutable
+They are never live-production instructions and must fail closed for any
+topology identified as live. Run them from `deploy/aws` only against a
+disposable, explicitly named rehearsal topology with a reviewed backend and
+tfvars. `IMAGE_DIGEST` is the reviewed bare digest; `IMAGE_REFERENCE` is the
+full immutable
 `IMAGE_REPOSITORY@IMAGE_DIGEST` value passed to Terraform. Before the first
 Terraform plan, an operator must provide a reviewed topology manifest and its
 separately reviewed SHA-256. The preflight validates the manifest's exact
@@ -170,6 +196,26 @@ set -euo pipefail
 : "${IMAGE_SBOM_SHA256:?set the reviewed CycloneDX SBOM SHA-256}"
 : "${TFVARS:?set the reviewed rehearsal tfvars path}"
 : "${AWS_REGION:?set the reviewed rehearsal AWS region}"
+: "${EMAILS_ALB_URL:?set the exact rehearsal ALB base URL}"
+: "${EMAILS_SMOKE_API_KEY:?set a tenant-scoped read-only rehearsal API key}"
+: "${BACKUP_SOURCE_SERVICE:?set the libpq service for the source Emails database}"
+: "${BACKUP_ADMIN_SERVICE:?set the libpq service allowed to recreate the isolated restore database}"
+: "${BACKUP_RESTORE_SERVICE:?set the libpq service for the isolated restore database}"
+: "${BACKUP_RESTORE_DATABASE:?set the isolated restore database name}"
+: "${BACKUP_FILE:?set the private database-specific backup path}"
+: "${BACKUP_RETENTION_DIR:?set the protected backup retention directory}"
+: "${BACKUP_RETAIN_UNTIL:?set the reviewed UTC retention deadline}"
+: "${REPAIR_MANIFEST_FILE:?set the private reviewed canonical repair manifest path}"
+: "${REPAIR_MANIFEST_SHA256:?set the reviewed canonical repair manifest SHA-256}"
+: "${REPAIR_MANIFEST_SECRET_ARN:?set the exact secret ARN carrying the canonical manifest}"
+: "${REPAIR_TASK_ROLE_ARN:?set the reviewed attachment-read role with explicit SES/ListBucket denies}"
+: "${REPAIR_EXECUTION_ROLE_ARN:?set the reviewed execution role for the DB and manifest secrets}"
+: "${REPAIR_TASK_FAMILY:?set the unique reviewed attachment repair task family}"
+: "${REPAIR_CONTAINER_NAME:?set the attachment repair container name}"
+: "${REPAIR_RESULT_FILE:?set a new private path for the aggregate-only apply result}"
+: "${NO_SES_SMOKE_TASK_DEFINITION:?set the exact reviewed no-SES smoke task definition}"
+: "${NO_SES_SMOKE_TASK_ROLE_ARN:?set the reviewed role that explicitly denies SES send actions}"
+: "${NO_SES_SMOKE_CONTAINER_NAME:?set the exact smoke container name}"
 
 printf '%s' "$RELEASE_VERSION" | grep -Eq '^[0-9]+[.][0-9]+[.][0-9]+([+-][0-9A-Za-z.-]+)?$'
 printf '%s' "$RELEASE_COMMIT" | grep -Eq '^[0-9a-f]{40}$'
@@ -183,12 +229,50 @@ test -s "$IMAGE_SECURITY_REPORT"
 test -s "$IMAGE_SBOM"
 test "$(sha256sum "$IMAGE_SECURITY_REPORT" | awk '{print $1}')" = "$IMAGE_SECURITY_REPORT_SHA256"
 test "$(sha256sum "$IMAGE_SBOM" | awk '{print $1}')" = "$IMAGE_SBOM_SHA256"
+printf '%s' "$REPAIR_MANIFEST_SHA256" | grep -Eq '^[0-9a-f]{64}$'
+printf '%s' "$REPAIR_TASK_FAMILY" | grep -Eq '^[A-Za-z0-9_-]{1,255}$'
+printf '%s' "$REPAIR_CONTAINER_NAME" | grep -Eq '^[A-Za-z0-9_-]{1,255}$'
+test -s "$REPAIR_MANIFEST_FILE"
+test "$(wc -c <"$REPAIR_MANIFEST_FILE")" -le 1048576
+REPAIR_MANIFEST_JSON="$(jq -ceS '
+  select(type == "object")
+  | select((keys | sort) == [
+      "apply_idempotency_key",
+      "dry_run_idempotency_key",
+      "entries",
+      "purpose",
+      "schema_version",
+      "tenant_id"
+    ])
+  | select(.schema_version == 1 and .purpose == "attachment-repair-ledger")
+  | select(.tenant_id
+      | type == "string"
+      and test("^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$"))
+  | select(.dry_run_idempotency_key
+      | type == "string" and length >= 1 and length <= 200
+      and test("^[!-~]+$"))
+  | select(.apply_idempotency_key
+      | type == "string" and length >= 1 and length <= 200
+      and test("^[!-~]+$"))
+  | select(.dry_run_idempotency_key != .apply_idempotency_key)
+  | select(.entries | type == "array" and length >= 1 and length <= 200)
+  | select(.entries | all(.[];
+      type == "object"
+      and (keys | sort) == ["canary_message_ids","object_key","recipients"]
+      and (.object_key | type == "string" and length > 0)
+      and (.recipients | type == "array" and length > 0
+        and all(.[]; type == "string" and length > 0))
+      and (.canary_message_ids | type == "array" and length > 0
+        and all(.[]; type == "string" and length > 0))))
+' "$REPAIR_MANIFEST_FILE")"
+test "$(printf '%s' "$REPAIR_MANIFEST_JSON" | sha256sum | awk '{print $1}')" = \
+  "$REPAIR_MANIFEST_SHA256"
 
 SOURCE_HEAD="$(git -C "$SOURCE_CHECKOUT" rev-parse --verify 'HEAD^{commit}')"
 test "$SOURCE_HEAD" = "$RELEASE_COMMIT"
 SOURCE_PACKAGE_JSON="$(git -C "$SOURCE_CHECKOUT" show "$RELEASE_COMMIT:package.json")"
 jq -e --arg release_version "$RELEASE_VERSION" \
-  '.name == "@hasna/emails" and .version == $release_version' \
+  '.name == "@hasna/mailery" and .version == $release_version' \
   <<<"$SOURCE_PACKAGE_JSON" >/dev/null
 ACTUAL_SOURCE_ARCHIVE_SHA256="$(git -C "$SOURCE_CHECKOUT" archive --format=zip "$RELEASE_COMMIT" \
   | sha256sum | awk '{print $1}')"
@@ -482,9 +566,9 @@ rehearsal_terraform plan -var-file="$TFVARS" -var="container_image=$IMAGE_REFERE
   -target=aws_ecs_task_definition.migration \
   -target=aws_ecs_task_definition.worker \
   -target=aws_ecs_task_definition.api \
-  -out=0018-definitions.tfplan
-terraform show 0018-definitions.tfplan
-rehearsal_terraform apply 0018-definitions.tfplan
+  -out=0020-definitions.tfplan
+terraform show 0020-definitions.tfplan
+rehearsal_terraform apply 0020-definitions.tfplan
 
 MIGRATION_DEF="$(terraform output -raw migration_task_definition_arn)"
 WORKER_DEF="$(terraform output -raw worker_task_definition_arn)"
@@ -616,7 +700,7 @@ test "$API_ZERO_TASK_COUNT" = "0"
 # task-list, and queue checks prove every old writer is gone. PostgreSQL fixes a
 # row's created_at default at transaction start, so a pre-fence old transaction
 # could otherwise commit after the cutoff while remaining outside the audit.
-# This exact release one-shot does not query migration 0017 or 0018 tables and
+# This exact release one-shot does not query migration 0017 through 0020 tables and
 # is safe before the ledger advances.
 FENCE_OVERRIDES='{"containerOverrides":[{"name":"worker","command":["src/server/index.ts","inbound-provenance-fence"]}]}'
 FENCE_TASK="$(rehearsal_aws ecs run-task --region "$AWS_REGION" --cluster "$CLUSTER" \
@@ -649,7 +733,72 @@ services must subsequently pass the same machine-readable desired/running-zero
 and empty-task-list checks before the release one-shot captures `FENCE_AT`. Record
 the service JSON, task counts, queue/DLQ counts, and PostgreSQL-derived cutoff.
 
-### 2. Migrate and verify ledger 0018
+### 1a. Create, checksum, restore-test, and retain the database-specific backup
+
+Both services and all one-shot writers remain at zero. The libpq service files
+referenced below must be mode 0600 or stricter and must not be printed.
+
+```bash
+set -euo pipefail
+umask 077
+
+printf '%s' "$BACKUP_RETAIN_UNTIL" |
+  grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'
+test "$(date -u -d "$BACKUP_RETAIN_UNTIL" +%s)" -gt "$(date -u +%s)"
+test ! -e "$BACKUP_FILE"
+for service_name in \
+  "$BACKUP_SOURCE_SERVICE" \
+  "$BACKUP_ADMIN_SERVICE" \
+  "$BACKUP_RESTORE_SERVICE"; do
+  printf '%s' "$service_name" | grep -Eq '^[A-Za-z0-9_.-]+$'
+done
+printf '%s' "$BACKUP_RESTORE_DATABASE" | grep -Eq '^[A-Za-z0-9_.-]+$'
+
+pg_dump --format=custom --no-owner --no-privileges \
+  --dbname="service=$BACKUP_SOURCE_SERVICE" --file="$BACKUP_FILE"
+BACKUP_SHA256_FILE="${BACKUP_FILE}.sha256"
+sha256sum -- "$BACKUP_FILE" >"$BACKUP_SHA256_FILE"
+sha256sum --check -- "$BACKUP_SHA256_FILE"
+
+dropdb --if-exists --maintenance-db="service=$BACKUP_ADMIN_SERVICE" \
+  -- "$BACKUP_RESTORE_DATABASE"
+createdb --maintenance-db="service=$BACKUP_ADMIN_SERVICE" \
+  -- "$BACKUP_RESTORE_DATABASE"
+pg_restore --exit-on-error --no-owner --no-privileges \
+  --dbname="service=$BACKUP_RESTORE_SERVICE" "$BACKUP_FILE"
+
+SOURCE_LEDGER_SHA256="$(
+  psql "service=$BACKUP_SOURCE_SERVICE" -XAt \
+    -c 'SELECT migration_id || chr(9) || checksum FROM schema_migrations ORDER BY migration_id' |
+    sha256sum | awk '{print $1}'
+)"
+RESTORE_LEDGER_SHA256="$(
+  psql "service=$BACKUP_RESTORE_SERVICE" -XAt \
+    -c 'SELECT migration_id || chr(9) || checksum FROM schema_migrations ORDER BY migration_id' |
+    sha256sum | awk '{print $1}'
+)"
+test "$SOURCE_LEDGER_SHA256" = "$RESTORE_LEDGER_SHA256"
+
+install -d -m 0700 -- "$BACKUP_RETENTION_DIR"
+RETAINED_BACKUP="$BACKUP_RETENTION_DIR/$(basename "$BACKUP_FILE")"
+RETAINED_SHA256_FILE="$BACKUP_RETENTION_DIR/$(basename "$BACKUP_SHA256_FILE")"
+test ! -e "$RETAINED_BACKUP"
+test ! -e "$RETAINED_SHA256_FILE"
+install -m 0600 -- "$BACKUP_FILE" "$RETAINED_BACKUP"
+(cd "$BACKUP_RETENTION_DIR" &&
+  sha256sum -- "$(basename "$RETAINED_BACKUP")" >"$(basename "$RETAINED_SHA256_FILE")")
+chmod 0600 -- "$RETAINED_SHA256_FILE"
+printf '%s\n' "$BACKUP_RETAIN_UNTIL" >"$BACKUP_RETENTION_DIR/retain-until"
+chmod 0600 -- "$BACKUP_RETENTION_DIR/retain-until"
+(cd "$BACKUP_RETENTION_DIR" &&
+  sha256sum --check -- "$(basename "$RETAINED_SHA256_FILE")")
+```
+
+The successful restore and exact migration-ledger hash equality are mandatory.
+The retained backup, checksum, and `retain-until` marker remain protected until
+the reviewed deadline; this procedure contains no deletion step.
+
+### 2. Migrate and verify ledger 0020
 
 The three reviewed release definitions are already staged, every old task is
 machine-proven absent, the stable queue in-flight gate passed, and only then was
@@ -714,6 +863,8 @@ jq -e '
   and (.alreadyApplied | type == "array" and all(.[]; type == "string"))
   and (.alreadyApplied | index("0017_inbound_message_source_provenance") != null)
   and (.alreadyApplied | index("0018_send_intent_recovery") != null)
+  and (.alreadyApplied | index("0019_inbox_perf_rollups") != null)
+  and (.alreadyApplied | index("0020_attachment_repair_ledger") != null)
 ' <<<"$STATUS_JSON" >/dev/null
 printf '%s\n' "$STATUS_JSON"
 ```
@@ -722,13 +873,485 @@ Both tasks must exit zero, and the exact status task's exact CloudWatch stream
 must contain one object with only the source-defined `applied`, `alreadyApplied`,
 and `pending` fields. The machine gate requires `pending: []`, no dry-run
 applications, `0017_inbound_message_source_provenance` in `alreadyApplied`, and
-`0018_send_intent_recovery` in `alreadyApplied`.
+`0018_send_intent_recovery`, `0019_inbox_perf_rollups`, and
+`0020_attachment_repair_ledger` in `alreadyApplied`.
 `emails db status --json` emits that object only after `MigrationLedger` validates
 every stored `schema_migrations` checksum; checksum drift exits before JSON and
-therefore cannot satisfy this gate. Do not restart or scale any pre-0018 release
+therefore cannot satisfy this gate. Do not restart or scale any pre-0020 release
 task after this point.
 
-### 3. Start only the release worker, drain the buffer, and audit
+### 3. Complete approved attachment repair with service writers stopped
+
+Both service desired counts must remain zero. Both services must also remain at
+running zero. There is no empty,
+`required: false`, or local-result waiver: this repair cutover requires the
+non-empty, exact-canary canonical manifest already hashed in preflight. Its raw
+secret value is never printed or placed in an ECS command override. The
+image-bundled `attachment-repair-ledger` command reads that secret, uses only
+the deployment-owned canonical inbound bucket, creates or resumes the
+tenant-scoped ledger, processes at most 25 entries per page and eight pages per
+task, and emits one aggregate-only JSON object. It never lists the bucket and
+never emits an object key, recipient, canary id, payload, database URL, secret,
+or internal error. The maintenance path must be the only database writer,
+and every task and both services must return to zero before worker activation.
+Operators must create the exact-canary manifest without `apply`, record a completed dry-run summary, then create the separately
+approved `apply: true` run and resume bounded pages until `pending == 0`.
+The aggregate promotion gate requires `repaired + would_repair + unavailable + pending == inventory_total` and the
+equivalent `entry_*` invariant.
+It must perform exact-key `GetObject` calls only: no bucket listing, payload logging, source-key logging, recipient logging,
+or caller-supplied bucket is permitted.
+
+The one-shot task is operator-only infrastructure, not an API route. Clone it
+from the exact reviewed release API task definition, replace the runtime role
+with the reviewed no-SES/no-ListBucket repair role, replace the execution role
+with one allowed to inject only the exact application DB and manifest secrets,
+remove API ports and health checks, add the canonical bucket copied from the
+reviewed release worker definition, and preserve the API definition's image,
+CPU, memory, network mode, X86_64 runtime, read-only filesystem, `/tmp` mount,
+logging, and image revision. The default command is intentionally incomplete;
+only the exact `run-task` overrides below can supply a phase and reviewed
+provenance. Inside Fargate, the command independently reads
+`ECS_CONTAINER_METADATA_URI_V4` and fails unless the live task ARN, derived task
+definition ARN, container image digest, and OCI image revision equal those
+reviewed inputs.
+
+```bash
+set -euo pipefail
+
+REPAIR_DATABASE_SECRET_ARN="$(jq -er --arg container "$MANIFEST_API_CONTAINER_NAME" '
+  .taskDefinition.containerDefinitions[]
+  | select(.name == $container)
+  | [.secrets[] | select(.name == "EMAILS_DATABASE_URL") | .valueFrom]
+  | select(length == 1) | .[0]
+' <<<"$STAGED_API_TASK_JSON")"
+REPAIR_CANONICAL_BUCKET="$(jq -er --arg container "$MANIFEST_WORKER_CONTAINER_NAME" '
+  .taskDefinition.containerDefinitions[]
+  | select(.name == $container)
+  | [.environment[]
+      | select(.name == "MAILERY_INGEST_S3_BUCKET"
+        or .name == "EMAILS_INGEST_S3_BUCKET")
+      | .value]
+  | select(length == 1 and .[0] != "") | .[0]
+' <<<"$STAGED_WORKER_TASK_JSON")"
+
+REPAIR_ROLE_DENIALS="$(aws iam simulate-principal-policy \
+  --policy-source-arn "$REPAIR_TASK_ROLE_ARN" \
+  --action-names ses:SendEmail ses:SendRawEmail s3:ListBucket --output json)"
+jq -e '
+  (.EvaluationResults | length == 3)
+  and all(.EvaluationResults[]; .EvalDecision == "explicitDeny")
+' <<<"$REPAIR_ROLE_DENIALS" >/dev/null
+
+REPAIR_SECRET_READS="$(aws iam simulate-principal-policy \
+  --policy-source-arn "$REPAIR_EXECUTION_ROLE_ARN" \
+  --action-names secretsmanager:GetSecretValue \
+  --resource-arns "$REPAIR_DATABASE_SECRET_ARN" "$REPAIR_MANIFEST_SECRET_ARN" \
+  --output json)"
+jq -e '
+  (.EvaluationResults | length == 2)
+  and all(.EvaluationResults[]; .EvalDecision == "allowed")
+' <<<"$REPAIR_SECRET_READS" >/dev/null
+
+REPAIR_TASK_INPUT="$(jq -ce \
+  --arg family "$REPAIR_TASK_FAMILY" \
+  --arg api_container "$MANIFEST_API_CONTAINER_NAME" \
+  --arg repair_container "$REPAIR_CONTAINER_NAME" \
+  --arg task_role "$REPAIR_TASK_ROLE_ARN" \
+  --arg execution_role "$REPAIR_EXECUTION_ROLE_ARN" \
+  --arg database_secret "$REPAIR_DATABASE_SECRET_ARN" \
+  --arg manifest_secret "$REPAIR_MANIFEST_SECRET_ARN" \
+  --arg canonical_bucket "$REPAIR_CANONICAL_BUCKET" \
+  --arg revision "$RELEASE_COMMIT" '
+  .taskDefinition
+  | del(
+      .taskDefinitionArn,
+      .revision,
+      .status,
+      .requiresAttributes,
+      .compatibilities,
+      .registeredAt,
+      .registeredBy,
+      .deregisteredAt
+    )
+  | .family = $family
+  | .taskRoleArn = $task_role
+  | .executionRoleArn = $execution_role
+  | .containerDefinitions = [
+      .containerDefinitions[]
+      | select(.name == $api_container)
+      | .name = $repair_container
+      | .command = ["src/server/index.ts","attachment-repair-ledger"]
+      | .environment = (
+          [.environment[]?
+            | select(.name != "MAILERY_INGEST_S3_BUCKET"
+              and .name != "EMAILS_INGEST_S3_BUCKET"
+              and .name != "EMAILS_IMAGE_REVISION")]
+          + [{
+              name:"EMAILS_INGEST_S3_BUCKET",
+              value:$canonical_bucket
+            },{
+              name:"EMAILS_IMAGE_REVISION",
+              value:$revision
+            }]
+        )
+      | .secrets = [
+          {name:"EMAILS_DATABASE_URL",valueFrom:$database_secret},
+          {name:"EMAILS_ATTACHMENT_REPAIR_MANIFEST",valueFrom:$manifest_secret}
+        ]
+      | del(.portMappings, .healthCheck)
+    ]
+' <<<"$STAGED_API_TASK_JSON")"
+
+REPAIR_TASK_DEFINITION_JSON="$(rehearsal_aws ecs register-task-definition \
+  --region "$AWS_REGION" --cli-input-json "$REPAIR_TASK_INPUT" --output json)"
+REPAIR_TASK_DEFINITION_ARN="$(jq -er '.taskDefinition.taskDefinitionArn' \
+  <<<"$REPAIR_TASK_DEFINITION_JSON")"
+
+jq -e \
+  --arg family "$REPAIR_TASK_FAMILY" \
+  --arg container "$REPAIR_CONTAINER_NAME" \
+  --arg image "$IMAGE_REFERENCE" \
+  --arg task_role "$REPAIR_TASK_ROLE_ARN" \
+  --arg execution_role "$REPAIR_EXECUTION_ROLE_ARN" \
+  --arg database_secret "$REPAIR_DATABASE_SECRET_ARN" \
+  --arg manifest_secret "$REPAIR_MANIFEST_SECRET_ARN" \
+  --arg canonical_bucket "$REPAIR_CANONICAL_BUCKET" \
+  --arg revision "$RELEASE_COMMIT" \
+  --argjson api "$STAGED_API_TASK_JSON" '
+  .taskDefinition.family == $family
+  and .taskDefinition.taskRoleArn == $task_role
+  and .taskDefinition.executionRoleArn == $execution_role
+  and .taskDefinition.networkMode == $api.taskDefinition.networkMode
+  and .taskDefinition.cpu == $api.taskDefinition.cpu
+  and .taskDefinition.memory == $api.taskDefinition.memory
+  and .taskDefinition.runtimePlatform.cpuArchitecture == "X86_64"
+  and .taskDefinition.runtimePlatform == $api.taskDefinition.runtimePlatform
+  and .taskDefinition.requiresCompatibilities == $api.taskDefinition.requiresCompatibilities
+  and (.taskDefinition.containerDefinitions | length) == 1
+  and (.taskDefinition.containerDefinitions[0] as $repair
+    | $repair.name == $container
+    and $repair.image == $image
+    and $repair.command == ["src/server/index.ts","attachment-repair-ledger"]
+    and $repair.readonlyRootFilesystem == true
+    and ($repair.portMappings | length) == 0
+    and ($repair | has("healthCheck") | not)
+    and ([$repair.environment[]
+      | select(.name == "EMAILS_INGEST_S3_BUCKET" and .value == $canonical_bucket)]
+      | length) == 1
+    and ([$repair.environment[]
+      | select(.name == "EMAILS_IMAGE_REVISION" and .value == $revision)]
+      | length) == 1
+    and ([$repair.secrets[] | {name,valueFrom}] | sort_by(.name)) == ([
+      {name:"EMAILS_DATABASE_URL",valueFrom:$database_secret},
+      {name:"EMAILS_ATTACHMENT_REPAIR_MANIFEST",valueFrom:$manifest_secret}
+    ] | sort_by(.name)))
+' <<<"$REPAIR_TASK_DEFINITION_JSON" >/dev/null
+
+REPAIR_LOG_GROUP="$(jq -er --arg container "$REPAIR_CONTAINER_NAME" '
+  .taskDefinition.containerDefinitions[]
+  | select(.name == $container)
+  | .logConfiguration.options["awslogs-group"]
+' <<<"$REPAIR_TASK_DEFINITION_JSON")"
+REPAIR_LOG_PREFIX="$(jq -er --arg container "$REPAIR_CONTAINER_NAME" '
+  .taskDefinition.containerDefinitions[]
+  | select(.name == $container)
+  | .logConfiguration.options["awslogs-stream-prefix"]
+' <<<"$REPAIR_TASK_DEFINITION_JSON")"
+
+run_repair_task() {
+  phase=$1
+  expected_run_id=$2
+  dry_run_id=$3
+  dry_run_result_sha256=$4
+
+  command_json="$(jq -cn \
+    --arg phase "$phase" \
+    --arg manifest_sha "$REPAIR_MANIFEST_SHA256" \
+    --arg definition "$REPAIR_TASK_DEFINITION_ARN" \
+    --arg digest "$IMAGE_DIGEST" \
+    --arg revision "$RELEASE_COMMIT" \
+    --arg container "$REPAIR_CONTAINER_NAME" \
+    --arg expected_run_id "$expected_run_id" \
+    --arg dry_run_id "$dry_run_id" \
+    --arg dry_run_result_sha256 "$dry_run_result_sha256" '
+    [
+      "src/server/index.ts",
+      "attachment-repair-ledger",
+      "--phase",$phase,
+      "--manifest-sha256",$manifest_sha,
+      "--page-limit","25",
+      "--max-pages","8",
+      "--task-definition-arn",$definition,
+      "--image-digest",$digest,
+      "--image-revision",$revision,
+      "--container-name",$container
+    ]
+    + if $expected_run_id == "" then []
+      else ["--expected-run-id",$expected_run_id] end
+    + if $phase == "apply" then [
+        "--dry-run-id",$dry_run_id,
+        "--dry-run-result-sha256",$dry_run_result_sha256
+      ] else [] end
+  ')"
+  overrides="$(jq -cn --arg container "$REPAIR_CONTAINER_NAME" \
+    --argjson command "$command_json" \
+    '{containerOverrides:[{name:$container,command:$command}]}')"
+
+  LAST_REPAIR_TASK_ARN="$(rehearsal_aws ecs run-task \
+    --region "$AWS_REGION" \
+    --cluster "$CLUSTER" \
+    --launch-type FARGATE \
+    --task-definition "$REPAIR_TASK_DEFINITION_ARN" \
+    --network-configuration "$NETWORK" \
+    --count 1 \
+    --overrides "$overrides" \
+    --query 'tasks[0].taskArn' \
+    --output text)"
+  test "$LAST_REPAIR_TASK_ARN" != "None"
+  aws ecs wait tasks-stopped --region "$AWS_REGION" --cluster "$CLUSTER" \
+    --tasks "$LAST_REPAIR_TASK_ARN"
+  LAST_REPAIR_TASK_JSON="$(aws ecs describe-tasks --region "$AWS_REGION" \
+    --cluster "$CLUSTER" --tasks "$LAST_REPAIR_TASK_ARN" --output json)"
+  test "$(jq -er '.tasks[0].taskArn' <<<"$LAST_REPAIR_TASK_JSON")" = \
+    "$LAST_REPAIR_TASK_ARN"
+  test "$(jq -er '.tasks[0].taskDefinitionArn' <<<"$LAST_REPAIR_TASK_JSON")" = \
+    "$REPAIR_TASK_DEFINITION_ARN"
+  LAST_REPAIR_EXIT="$(jq -er --arg container "$REPAIR_CONTAINER_NAME" '
+    .tasks[0].containers[]
+    | select(.name == $container)
+    | .exitCode
+  ' <<<"$LAST_REPAIR_TASK_JSON")"
+  test "$(jq -er --arg container "$REPAIR_CONTAINER_NAME" '
+    .tasks[0].containers[]
+    | select(.name == $container)
+    | .imageDigest
+  ' <<<"$LAST_REPAIR_TASK_JSON")" = "$IMAGE_DIGEST"
+
+  REPAIR_RUNNING_TASK_COUNT="$(aws ecs list-tasks --region "$AWS_REGION" \
+    --cluster "$CLUSTER" --family "$REPAIR_TASK_FAMILY" \
+    --desired-status RUNNING --query 'length(taskArns)' --output text)"
+  test "$REPAIR_RUNNING_TASK_COUNT" = "0"
+  REPAIR_SERVICES_ZERO_JSON="$(aws ecs describe-services --region "$AWS_REGION" \
+    --cluster "$CLUSTER" --services "$WORKER_SERVICE" "$API_SERVICE" --output json)"
+  jq -e '
+    (.failures | length) == 0
+    and (.services | length) == 2
+    and all(.services[]; .desiredCount == 0 and .runningCount == 0)
+  ' <<<"$REPAIR_SERVICES_ZERO_JSON" >/dev/null
+
+  repair_task_id="${LAST_REPAIR_TASK_ARN##*/}"
+  repair_log_stream="${REPAIR_LOG_PREFIX}/${REPAIR_CONTAINER_NAME}/${repair_task_id}"
+  LAST_REPAIR_REPORT=""
+  for log_attempt in $(seq 1 12); do
+    repair_log_events="$(aws logs get-log-events --region "$AWS_REGION" \
+      --log-group-name "$REPAIR_LOG_GROUP" \
+      --log-stream-name "$repair_log_stream" \
+      --start-from-head --output json)"
+    LAST_REPAIR_REPORT="$(jq -cer '
+      [.events[].message | fromjson?
+        | select(type == "object")
+        | select(.status == "pass" or .status == "fail")
+        | select(.failure_code == null
+          or (.failure_code | type == "string"))]
+      | select(length == 1) | .[0]
+    ' <<<"$repair_log_events" 2>/dev/null || true)"
+    test -n "$LAST_REPAIR_REPORT" && break
+    test "$log_attempt" -lt 12 || exit 1
+    sleep 5
+  done
+  jq -e \
+    --arg phase "$phase" \
+    --arg task_arn "$LAST_REPAIR_TASK_ARN" \
+    --arg definition "$REPAIR_TASK_DEFINITION_ARN" \
+    --arg container "$REPAIR_CONTAINER_NAME" \
+    --arg digest "$IMAGE_DIGEST" \
+    --arg revision "$RELEASE_COMMIT" \
+    --arg manifest_sha "$REPAIR_MANIFEST_SHA256" '
+    if (keys | sort) == ["failure_code","status"] then
+      .status == "fail" and (.failure_code | type == "string")
+    else
+      (keys | sort) == [
+        "container_name","failure_code","image_digest","image_revision",
+        "manifest_sha256","phase","repair","result_sha256","run_id",
+        "schema_version","status","task_arn","task_definition_arn"
+      ]
+      and .schema_version == 1
+      and .phase == $phase
+      and .task_arn == $task_arn
+      and .task_definition_arn == $definition
+      and .container_name == $container
+      and .image_digest == $digest
+      and .image_revision == $revision
+      and .manifest_sha256 == $manifest_sha
+      and (.run_id
+        | type == "string"
+        and test("^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$"))
+      and (.result_sha256
+        | type == "string"
+        and test("^[0-9a-f]{64}$"))
+    end
+  ' <<<"$LAST_REPAIR_REPORT" >/dev/null
+  if jq -e 'has("repair")' <<<"$LAST_REPAIR_REPORT" >/dev/null; then
+    reported_repair_json="$(jq -ceS '.repair' <<<"$LAST_REPAIR_REPORT")"
+    reported_result_sha256="$(printf '%s' "$reported_repair_json" |
+      sha256sum | awk '{print $1}')"
+    test "$reported_result_sha256" = \
+      "$(jq -er '.result_sha256' <<<"$LAST_REPAIR_REPORT")"
+  fi
+}
+
+DRY_RUN_ID=""
+DRY_RUN_RESULT_SHA256=""
+EXPECTED_DRY_RUN_ID=""
+for repair_attempt in $(seq 1 24); do
+  run_repair_task "dry-run" "$EXPECTED_DRY_RUN_ID" "" ""
+  if test "$LAST_REPAIR_EXIT" = "0"; then
+    jq -e '
+      .status == "pass"
+      and .failure_code == null
+      and .phase == "dry-run"
+      and .repair.apply == false
+      and .repair.status == "completed"
+      and .repair.unavailable == 0
+      and .repair.operator_action == 0
+      and .repair.entry_unavailable == 0
+      and .repair.entry_operator_action == 0
+      and .repair.pending == 0
+      and .repair.retrying == 0
+      and .repair.entry_pending == 0
+      and .repair.entry_retrying == 0
+    ' <<<"$LAST_REPAIR_REPORT" >/dev/null
+    DRY_RUN_ID="$(jq -er '.run_id' <<<"$LAST_REPAIR_REPORT")"
+    DRY_RUN_RESULT_SHA256="$(jq -er '.result_sha256' <<<"$LAST_REPAIR_REPORT")"
+    break
+  fi
+  test "$LAST_REPAIR_EXIT" = "75"
+  jq -e '.status == "fail" and .failure_code == "incomplete"' \
+    <<<"$LAST_REPAIR_REPORT" >/dev/null
+  EXPECTED_DRY_RUN_ID="$(jq -er '.run_id' <<<"$LAST_REPAIR_REPORT")"
+  test "$repair_attempt" -lt 24
+  sleep 5
+done
+test -n "$DRY_RUN_ID"
+test -n "$DRY_RUN_RESULT_SHA256"
+
+APPLY_RUN_ID=""
+EXPECTED_APPLY_RUN_ID=""
+for repair_attempt in $(seq 1 24); do
+  run_repair_task \
+    "apply" \
+    "$EXPECTED_APPLY_RUN_ID" \
+    "$DRY_RUN_ID" \
+    "$DRY_RUN_RESULT_SHA256"
+  if test "$LAST_REPAIR_EXIT" = "0"; then
+    jq -e '
+      .status == "pass"
+      and .failure_code == null
+      and .phase == "apply"
+    ' <<<"$LAST_REPAIR_REPORT" >/dev/null
+    APPLY_RUN_ID="$(jq -er '.run_id' <<<"$LAST_REPAIR_REPORT")"
+    break
+  fi
+  test "$LAST_REPAIR_EXIT" = "75"
+  jq -e '.status == "fail" and .failure_code == "incomplete"' \
+    <<<"$LAST_REPAIR_REPORT" >/dev/null
+  EXPECTED_APPLY_RUN_ID="$(jq -er '.run_id' <<<"$LAST_REPAIR_REPORT")"
+  test "$repair_attempt" -lt 24
+  sleep 5
+done
+test -n "$APPLY_RUN_ID"
+
+jq -e '
+  [
+    .repair.repaired,
+    .repair.would_repair,
+    .repair.unavailable,
+    .repair.operator_action,
+    .repair.pending,
+    .repair.retrying,
+    .repair.entry_repaired,
+    .repair.entry_would_repair,
+    .repair.entry_unavailable,
+    .repair.entry_operator_action,
+    .repair.entry_pending,
+    .repair.entry_retrying,
+    .repair.inventory_total,
+    .repair.entry_total,
+    .repair.checkpoint
+  ] | all(.[]; type == "number" and . >= 0 and floor == .)
+' <<<"$LAST_REPAIR_REPORT" >/dev/null
+REPAIR_REPAIRED="$(jq -er '.repair.repaired' <<<"$LAST_REPAIR_REPORT")"
+REPAIR_WOULD_REPAIR="$(jq -er '.repair.would_repair' <<<"$LAST_REPAIR_REPORT")"
+REPAIR_UNAVAILABLE="$(jq -er '.repair.unavailable' <<<"$LAST_REPAIR_REPORT")"
+REPAIR_OPERATOR_ACTION="$(jq -er '.repair.operator_action' <<<"$LAST_REPAIR_REPORT")"
+REPAIR_PENDING="$(jq -er '.repair.pending' <<<"$LAST_REPAIR_REPORT")"
+REPAIR_RETRYING="$(jq -er '.repair.retrying' <<<"$LAST_REPAIR_REPORT")"
+REPAIR_ENTRY_REPAIRED="$(jq -er '.repair.entry_repaired' <<<"$LAST_REPAIR_REPORT")"
+REPAIR_ENTRY_WOULD_REPAIR="$(jq -er '.repair.entry_would_repair' <<<"$LAST_REPAIR_REPORT")"
+REPAIR_ENTRY_UNAVAILABLE="$(jq -er '.repair.entry_unavailable' <<<"$LAST_REPAIR_REPORT")"
+REPAIR_ENTRY_OPERATOR_ACTION="$(jq -er '.repair.entry_operator_action' <<<"$LAST_REPAIR_REPORT")"
+REPAIR_ENTRY_PENDING="$(jq -er '.repair.entry_pending' <<<"$LAST_REPAIR_REPORT")"
+REPAIR_ENTRY_RETRYING="$(jq -er '.repair.entry_retrying' <<<"$LAST_REPAIR_REPORT")"
+REPAIR_INVENTORY_TOTAL="$(jq -er '.repair.inventory_total' <<<"$LAST_REPAIR_REPORT")"
+REPAIR_ENTRY_TOTAL="$(jq -er '.repair.entry_total' <<<"$LAST_REPAIR_REPORT")"
+REPAIR_CHECKPOINT="$(jq -er '.repair.checkpoint' <<<"$LAST_REPAIR_REPORT")"
+REPAIR_ACCOUNTED="$((REPAIR_REPAIRED + REPAIR_WOULD_REPAIR + REPAIR_UNAVAILABLE + REPAIR_PENDING))"
+REPAIR_ENTRY_ACCOUNTED="$((REPAIR_ENTRY_REPAIRED + REPAIR_ENTRY_WOULD_REPAIR + REPAIR_ENTRY_UNAVAILABLE + REPAIR_ENTRY_PENDING))"
+test "$REPAIR_UNAVAILABLE" = "0"
+test "$REPAIR_OPERATOR_ACTION" = "0"
+test "$REPAIR_PENDING" = "0"
+test "$REPAIR_RETRYING" = "0"
+test "$REPAIR_ENTRY_UNAVAILABLE" = "0"
+test "$REPAIR_ENTRY_OPERATOR_ACTION" = "0"
+test "$REPAIR_ENTRY_PENDING" = "0"
+test "$REPAIR_ENTRY_RETRYING" = "0"
+test "$REPAIR_WOULD_REPAIR" = "0"
+test "$REPAIR_ENTRY_WOULD_REPAIR" = "0"
+test "$REPAIR_ACCOUNTED" = "$REPAIR_INVENTORY_TOTAL"
+test "$REPAIR_ENTRY_ACCOUNTED" = "$REPAIR_ENTRY_TOTAL"
+test "$REPAIR_REPAIRED" = "$REPAIR_INVENTORY_TOTAL"
+test "$REPAIR_ENTRY_REPAIRED" = "$REPAIR_ENTRY_TOTAL"
+test "$REPAIR_CHECKPOINT" = "$REPAIR_ENTRY_TOTAL"
+
+umask 077
+test ! -e "$REPAIR_RESULT_FILE"
+test ! -L "$REPAIR_RESULT_FILE"
+set -C
+printf '%s\n' "$LAST_REPAIR_REPORT" >"$REPAIR_RESULT_FILE"
+set +C
+REPAIR_RESULT_FILE_SHA256="$(sha256sum -- "$REPAIR_RESULT_FILE" |
+  awk '{print $1}')"
+"$SOURCE_CHECKOUT/deploy/aws/verify_attachment_repair_result.sh" \
+  "$REPAIR_RESULT_FILE" \
+  "$REPAIR_RESULT_FILE_SHA256" \
+  "$LAST_REPAIR_TASK_ARN" \
+  "$REPAIR_TASK_DEFINITION_ARN" \
+  "$REPAIR_CONTAINER_NAME" \
+  "$IMAGE_DIGEST" \
+  "$RELEASE_COMMIT" \
+  "$REPAIR_MANIFEST_SHA256" \
+  "$APPLY_RUN_ID"
+
+FINAL_REPAIR_TASK_COUNT="$(aws ecs list-tasks --region "$AWS_REGION" \
+  --cluster "$CLUSTER" --family "$REPAIR_TASK_FAMILY" \
+  --desired-status RUNNING --query 'length(taskArns)' --output text)"
+test "$FINAL_REPAIR_TASK_COUNT" = "0"
+```
+
+Exit `75` is the only resumable nonzero outcome and means the bounded task
+stopped with checkpointed pending work. Every resume supplies the exact prior
+run id; an idempotency mismatch, task/image/manifest mismatch, config failure,
+invariant failure, unavailable entry, operator-action entry, or any other
+nonzero exit is a hard stop. The apply result is accepted only from the exact
+CloudWatch stream for the exact stopped task. Its inner result hash and outer
+file hash are recomputed, and
+`verify_attachment_repair_result.sh` binds them to the live task ARN, task
+definition ARN, container name, image digest, image revision, manifest hash,
+and run id. It also requires integer counters and exact zero for `unavailable`,
+`operator_action`, `entry_unavailable`, `entry_operator_action`, `pending`,
+`retrying`, `entry_pending`, and `entry_retrying`; there is no waiver.
+
+### 4. Start only the release worker, drain the buffer, and audit
 
 The worker service starts from zero with the exact reviewed `WORKER_DEF`, so an
 old and new worker never overlap. The API remains at zero.
@@ -762,10 +1385,47 @@ AUDIT_TASK="$(rehearsal_aws ecs run-task --region "$AWS_REGION" --cluster "$CLUS
   --network-configuration "$NETWORK" --count 1 --overrides "$AUDIT_OVERRIDES" \
   --query 'tasks[0].taskArn' --output text)"
 aws ecs wait tasks-stopped --region "$AWS_REGION" --cluster "$CLUSTER" --tasks "$AUDIT_TASK"
-AUDIT_EXIT="$(aws ecs describe-tasks --region "$AWS_REGION" --cluster "$CLUSTER" --tasks "$AUDIT_TASK" \
-  --query 'tasks[0].containers[?name==`worker`].exitCode | [0]' --output text)"
+AUDIT_TASK_JSON="$(aws ecs describe-tasks --region "$AWS_REGION" --cluster "$CLUSTER" \
+  --tasks "$AUDIT_TASK" --output json)"
+AUDIT_EXIT="$(jq -er --arg container "$MANIFEST_WORKER_CONTAINER_NAME" \
+  '.tasks[0].containers[] | select(.name == $container) | .exitCode' <<<"$AUDIT_TASK_JSON")"
 test "$AUDIT_EXIT" = "0"
-aws logs tail "/ecs/${CLUSTER}/worker" --region "$AWS_REGION" --since 15m
+test "$(jq -er '.tasks[0].taskDefinitionArn' <<<"$AUDIT_TASK_JSON")" = "$WORKER_DEF"
+
+AUDIT_LOG_GROUP="$(jq -er --arg container "$MANIFEST_WORKER_CONTAINER_NAME" '
+  .taskDefinition.containerDefinitions[] | select(.name == $container)
+  | .logConfiguration.options["awslogs-group"]
+' <<<"$STAGED_WORKER_TASK_JSON")"
+AUDIT_LOG_STREAM_PREFIX="$(jq -er --arg container "$MANIFEST_WORKER_CONTAINER_NAME" '
+  .taskDefinition.containerDefinitions[] | select(.name == $container)
+  | .logConfiguration.options["awslogs-stream-prefix"]
+' <<<"$STAGED_WORKER_TASK_JSON")"
+AUDIT_TASK_ID="${AUDIT_TASK##*/}"
+AUDIT_LOG_STREAM="${AUDIT_LOG_STREAM_PREFIX}/${MANIFEST_WORKER_CONTAINER_NAME}/${AUDIT_TASK_ID}"
+AUDIT_JSON=""
+for attempt in $(seq 1 12); do
+  AUDIT_LOG_EVENTS="$(aws logs get-log-events --region "$AWS_REGION" \
+    --log-group-name "$AUDIT_LOG_GROUP" --log-stream-name "$AUDIT_LOG_STREAM" \
+    --start-from-head --output json)"
+  AUDIT_JSON="$(jq -cer '
+    [.events[].message | fromjson?
+      | select((keys | sort) == ["candidate_messages","cutoff","gaps","invalid_provenance","missing_provenance","status","tenants_scanned","valid_provenance"])]
+    | select(length == 1) | .[0]
+  ' <<<"$AUDIT_LOG_EVENTS" 2>/dev/null || true)"
+  test -n "$AUDIT_JSON" && break
+  test "$attempt" -lt 12 || exit 1
+  sleep 5
+done
+jq -e --arg cutoff "$FENCE_AT" '
+  .status == "pass"
+  and .cutoff == $cutoff
+  and .gaps == 0
+  and .missing_provenance == 0
+  and .invalid_provenance == 0
+  and .tenants_scanned > 0
+  and .candidate_messages == .valid_provenance
+' <<<"$AUDIT_JSON" >/dev/null
+printf '%s\n' "$AUDIT_JSON"
 
 # SQS metrics are approximate, so require three identical bounded final reads.
 # Both DLQ dimensions must remain exactly zero; any DLQ item is a no-go.
@@ -803,7 +1463,7 @@ objects only through the reviewed release's canonical S3 replay, and rerun the
 audit.
 Never patch message or provenance rows manually.
 
-### 4. Start the release API and reconcile Terraform
+### 5. Start the release API and reconcile Terraform
 
 ```bash
 set -euo pipefail
@@ -816,7 +1476,7 @@ aws ecs wait services-stable --region "$AWS_REGION" --cluster "$CLUSTER" \
 aws ecs describe-services --region "$AWS_REGION" --cluster "$CLUSTER" \
   --services "$API_SERVICE" \
   --query 'services[0].{desired:desiredCount,running:runningCount,taskDefinition:taskDefinition,deployments:deployments}'
-VERSION_JSON="$(curl --fail --silent --show-error "$EMAILS_API_URL/version")"
+VERSION_JSON="$(curl --fail --silent --show-error "$EMAILS_ALB_URL/version")"
 jq -e --arg release_version "$RELEASE_VERSION" '
   ((keys | sort) == ["mode","name","status","version"])
   and (.status == "ok")
@@ -824,27 +1484,124 @@ jq -e --arg release_version "$RELEASE_VERSION" '
   and (.mode == "self_hosted")
   and (.version == $release_version)
 ' <<<"$VERSION_JSON" >/dev/null
-READY_JSON="$(curl --fail --silent --show-error "$EMAILS_API_URL/ready")"
+READY_JSON="$(curl --fail --silent --show-error "$EMAILS_ALB_URL/ready")"
+UNAUTH_STATUS="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+  "$EMAILS_ALB_URL/v1/attachments?limit=1")"
+test "$UNAUTH_STATUS" = "401"
+
+curl_config_escape() {
+  local value="$1"
+  case "$value" in
+    *$'\n'*|*$'\r'*) printf '%s\n' "curl config values cannot contain newlines" >&2; return 64 ;;
+  esac
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '%s' "$value"
+}
+SMOKE_HEADER="$(curl_config_escape "x-api-key: $EMAILS_SMOKE_API_KEY")"
+SMOKE_URL="$(curl_config_escape "$EMAILS_ALB_URL/v1/attachments?limit=1")"
+AUTH_ATTACHMENTS_JSON="$(
+  printf 'header = "%s"\nurl = "%s"\nsilent\nshow-error\nfail\n' \
+    "$SMOKE_HEADER" "$SMOKE_URL" |
+    curl --config -
+)"
+jq -e '
+  ((keys | sort) == ["items","next_cursor"])
+  and (.items | type == "array")
+  and (.next_cursor == null or (.next_cursor | type == "string"))
+  and ([.. | objects | has("content_base64")] | any | not)
+' <<<"$AUTH_ATTACHMENTS_JSON" >/dev/null
 printf '%s\n' "$VERSION_JSON" "$READY_JSON"
+
+NO_SES_SMOKE_DEF_JSON="$(aws ecs describe-task-definition --region "$AWS_REGION" \
+  --task-definition "$NO_SES_SMOKE_TASK_DEFINITION" --output json)"
+NO_SES_SMOKE_TASK_ROLE="$(jq -er '.taskDefinition.taskRoleArn' <<<"$NO_SES_SMOKE_DEF_JSON")"
+test "$NO_SES_SMOKE_TASK_ROLE" = "$NO_SES_SMOKE_TASK_ROLE_ARN"
+jq -e --arg image "$IMAGE_REFERENCE" \
+  --arg container "$NO_SES_SMOKE_CONTAINER_NAME" \
+  --arg execution_role "$MANIFEST_API_EXECUTION_ROLE_ARN" '
+  .taskDefinition.executionRoleArn == $execution_role
+  and .taskDefinition.networkMode == "awsvpc"
+  and .taskDefinition.runtimePlatform.cpuArchitecture == "X86_64"
+  and ([.taskDefinition.containerDefinitions[]
+    | select(.name == $container)
+    | select(.image == $image)
+    | select(.command == ["src/cli/index.tsx","--json","inbox","attachments","--limit","1"])]
+    | length) == 1
+' <<<"$NO_SES_SMOKE_DEF_JSON" >/dev/null
+NO_SES_SIMULATION="$(aws iam simulate-principal-policy \
+  --policy-source-arn "$NO_SES_SMOKE_TASK_ROLE_ARN" \
+  --action-names ses:SendEmail ses:SendRawEmail --output json)"
+jq -e '.EvaluationResults | length == 2
+  and all(.[]; .EvalDecision == "explicitDeny")' <<<"$NO_SES_SIMULATION" >/dev/null
+
+NO_SES_SMOKE_TASK="$(rehearsal_aws ecs run-task --region "$AWS_REGION" \
+  --cluster "$CLUSTER" --launch-type FARGATE \
+  --task-definition "$NO_SES_SMOKE_TASK_DEFINITION" \
+  --network-configuration "$NETWORK" --count 1 \
+  --query 'tasks[0].taskArn' --output text)"
+aws ecs wait tasks-stopped --region "$AWS_REGION" --cluster "$CLUSTER" \
+  --tasks "$NO_SES_SMOKE_TASK"
+NO_SES_SMOKE_TASK_JSON="$(aws ecs describe-tasks --region "$AWS_REGION" \
+  --cluster "$CLUSTER" --tasks "$NO_SES_SMOKE_TASK" --output json)"
+test "$(jq -er '.tasks[0].taskDefinitionArn' <<<"$NO_SES_SMOKE_TASK_JSON")" = \
+  "$(jq -er '.taskDefinition.taskDefinitionArn' <<<"$NO_SES_SMOKE_DEF_JSON")"
+NO_SES_SMOKE_EXIT="$(jq -er --arg container "$NO_SES_SMOKE_CONTAINER_NAME" \
+  '.tasks[0].containers[] | select(.name == $container) | .exitCode' \
+  <<<"$NO_SES_SMOKE_TASK_JSON")"
+test "$NO_SES_SMOKE_EXIT" = "0"
+
+NO_SES_LOG_GROUP="$(jq -er --arg container "$NO_SES_SMOKE_CONTAINER_NAME" '
+  .taskDefinition.containerDefinitions[] | select(.name == $container)
+  | .logConfiguration.options["awslogs-group"]
+' <<<"$NO_SES_SMOKE_DEF_JSON")"
+NO_SES_LOG_PREFIX="$(jq -er --arg container "$NO_SES_SMOKE_CONTAINER_NAME" '
+  .taskDefinition.containerDefinitions[] | select(.name == $container)
+  | .logConfiguration.options["awslogs-stream-prefix"]
+' <<<"$NO_SES_SMOKE_DEF_JSON")"
+NO_SES_SMOKE_TASK_ID="${NO_SES_SMOKE_TASK##*/}"
+NO_SES_LOG_STREAM="${NO_SES_LOG_PREFIX}/${NO_SES_SMOKE_CONTAINER_NAME}/${NO_SES_SMOKE_TASK_ID}"
+NO_SES_SMOKE_JSON=""
+for attempt in $(seq 1 12); do
+  NO_SES_LOG_EVENTS="$(aws logs get-log-events --region "$AWS_REGION" \
+    --log-group-name "$NO_SES_LOG_GROUP" --log-stream-name "$NO_SES_LOG_STREAM" \
+    --start-from-head --output json)"
+  NO_SES_SMOKE_JSON="$(jq -cer '
+    [.events[].message | fromjson?
+      | select((keys | sort) == ["items","next_cursor"])
+      | select(.items | type == "array")
+      | select(.next_cursor == null or (.next_cursor | type == "string"))
+      | select([.. | objects | has("content_base64")] | any | not)]
+    | select(length == 1) | .[0]
+  ' <<<"$NO_SES_LOG_EVENTS" 2>/dev/null || true)"
+  test -n "$NO_SES_SMOKE_JSON" && break
+  test "$attempt" -lt 12 || exit 1
+  sleep 5
+done
+printf '%s\n' "$NO_SES_SMOKE_JSON"
 
 rehearsal_terraform plan -var-file="$TFVARS" -var="container_image=$IMAGE_REFERENCE" \
   -var="container_architecture=X86_64" \
   -var="worker_desired_count=$ORIGINAL_WORKER_COUNT" \
   -var="api_desired_count=$ORIGINAL_API_COUNT" \
-  -var="enable_automatic_deployment_rollback=false" -out=0018-reconcile.tfplan
-terraform show 0018-reconcile.tfplan
-rehearsal_terraform apply 0018-reconcile.tfplan
+  -var="enable_automatic_deployment_rollback=false" -out=0020-reconcile.tfplan
+terraform show 0020-reconcile.tfplan
+rehearsal_terraform apply 0020-reconcile.tfplan
 ```
 
 The final un-targeted plan must contain no unexpected service, queue, schema, or
 network change. Record the image digest, all task ARNs/definitions and exit
 codes, queue/DLQ snapshots, `FENCE_AT`, aggregate audit JSON, `/version`,
-`/ready`, and CloudWatch locations.
+the ALB `/ready` response, unauthenticated denial, the authenticated
+tenant-scoped attachment-inventory smoke result, and CloudWatch locations.
+These shell-local rehearsal curls do not satisfy the production no-SES-role
+gate; the live plan must execute equivalent checks from the reviewed one-shot
+smoke task described above.
 
-Rollback after ledger 0018 is always a compatible roll-forward. A failed API
+Rollback after ledger 0020 is always a compatible roll-forward. A failed API
 activation leaves the API at zero while the reviewed release worker continues
 to protect the queue, or both services may be returned to zero for
-investigation. Use only a corrected 0018-compatible image, repeat the
+investigation. Use only a corrected 0020-compatible image, repeat the
 definition, ledger, worker, audit, and API gates, and reconcile Terraform. A
-pre-0018 release, including 1.2.6, is never a rollback image. Never remove or
-rewrite the 0017 or 0018 ledger row.
+pre-0020 release is never a rollback image. Never remove or rewrite the 0017,
+0018, 0019, or 0020 ledger row.

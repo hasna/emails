@@ -492,8 +492,15 @@ variable "inbound_object_prefix" {
   default     = "inbound/"
 
   validation {
-    condition     = !startswith(var.inbound_object_prefix, "/") && !strcontains(var.inbound_object_prefix, "..")
-    error_message = "inbound_object_prefix must be a relative S3 key prefix without '..'."
+    condition = (
+      length(var.inbound_object_prefix) > 1 &&
+      trimspace(var.inbound_object_prefix) == var.inbound_object_prefix &&
+      !startswith(var.inbound_object_prefix, "/") &&
+      endswith(var.inbound_object_prefix, "/") &&
+      !strcontains(var.inbound_object_prefix, "..") &&
+      can(regex("^[^[:cntrl:]]+/$", var.inbound_object_prefix))
+    )
+    error_message = "inbound_object_prefix must be a non-empty canonical relative S3 key prefix ending in '/' without whitespace edges, controls, or '..'."
   }
 }
 

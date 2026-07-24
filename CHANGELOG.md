@@ -4,6 +4,13 @@ All notable changes to `@hasna/mailery` (formerly `@hasna/emails`) are documente
 
 ## [Unreleased]
 
+- add cursor-based, metadata-only attachment inventory across the self-hosted
+  CLI/MCP contract, truthful unavailable-content and unknown-size responses,
+  and structured self-hosted configuration failures with no SQLite fallback.
+- add the tenant-scoped exact-canary attachment repair ledger and
+  recipient-less-only trusted S3-key routing fallback.
+- regenerate the canonical `@hasna/mailery/selfhost` SDK and align the
+  config-driven production cutover requirements through migration 0020.
 - **BREAKING (aliased): rename `@hasna/emails` → `@hasna/mailery`** (repo/brand `open-emails` → `open-mailery`), mirroring the open-skills ↔ platform-skills split. Back-compat is preserved throughout, so existing installs keep working:
   - bins: canonical `mailery`/`mailery-mcp`/`mailery-serve`, with `emails`/`emails-mcp`/`emails-serve` kept as aliases.
   - env: prefix moved `EMAILS_*` → `MAILERY_*` via a startup dual-read shim (`MAILERY_*` wins, `EMAILS_*` still read as fallback). Hosted/cloud control-plane env vars (`MAILERY_API_URL`, `MAILERY_CLOUD_*`, `HASNA_MAILERY_ENV_FILE`, storage-mode, …) are intentionally NOT bridged and remain rejected — this stays a cloud-free OSS package.

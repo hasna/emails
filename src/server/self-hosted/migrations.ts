@@ -2536,6 +2536,122 @@ const INBOX_PERF_ROLLUPS = defineMigration(
   `,
 );
 
+/**
+ * 0020 — resumable, tenant-scoped historical attachment-repair ledger.
+ *
+ * Repair manifests are explicit and bounded; this ledger never discovers or
+ * scans an uncheckpointed corpus. Object keys and routing evidence stay in the
+ * private entry table, while API responses expose only aggregate progress.
+ * Attachment payload bytes are never stored here.
+ */
+const ATTACHMENT_REPAIR_LEDGER = defineMigration(
+  "0020_attachment_repair_ledger",
+  `
+  CREATE TABLE IF NOT EXISTS attachment_repair_runs (
+    tenant_id            uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    id                   uuid NOT NULL,
+    idempotency_key_hash text NOT NULL CHECK (idempotency_key_hash ~ '^[0-9a-f]{64}$'),
+    request_hash         text NOT NULL CHECK (request_hash ~ '^[0-9a-f]{64}$'),
+    apply                boolean NOT NULL DEFAULT false,
+    status               text NOT NULL DEFAULT 'pending'
+                         CHECK (status IN ('pending', 'completed')),
+    entry_total          integer NOT NULL CHECK (entry_total > 0 AND entry_total <= 200),
+    inventory_total      integer NOT NULL CHECK (inventory_total > 0),
+    repaired             integer NOT NULL DEFAULT 0 CHECK (repaired >= 0),
+    would_repair         integer NOT NULL DEFAULT 0 CHECK (would_repair >= 0),
+    unavailable          integer NOT NULL DEFAULT 0 CHECK (unavailable >= 0),
+    operator_action      integer NOT NULL DEFAULT 0 CHECK (operator_action >= 0),
+    pending              integer NOT NULL CHECK (pending >= 0),
+    retrying             integer NOT NULL DEFAULT 0 CHECK (retrying >= 0),
+    entry_repaired       integer NOT NULL DEFAULT 0 CHECK (entry_repaired >= 0),
+    entry_would_repair   integer NOT NULL DEFAULT 0 CHECK (entry_would_repair >= 0),
+    entry_unavailable    integer NOT NULL DEFAULT 0 CHECK (entry_unavailable >= 0),
+    entry_operator_action integer NOT NULL DEFAULT 0 CHECK (entry_operator_action >= 0),
+    entry_pending        integer NOT NULL CHECK (entry_pending >= 0),
+    entry_retrying       integer NOT NULL DEFAULT 0 CHECK (entry_retrying >= 0),
+    attempts             integer NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    checkpoint           integer NOT NULL DEFAULT 0 CHECK (checkpoint >= 0),
+    byte_budget          bigint NOT NULL DEFAULT 536870912 CHECK (byte_budget > 0),
+    bytes_consumed       bigint NOT NULL DEFAULT 0 CHECK (
+                           bytes_consumed >= 0 AND bytes_consumed <= byte_budget
+                         ),
+    time_budget_ms       bigint NOT NULL DEFAULT 3600000 CHECK (time_budget_ms > 0),
+    deadline_at          timestamptz NOT NULL DEFAULT (now() + interval '1 hour'),
+    created_at           timestamptz NOT NULL DEFAULT now(),
+    updated_at           timestamptz NOT NULL DEFAULT now(),
+    completed_at         timestamptz,
+    PRIMARY KEY (tenant_id, id),
+    UNIQUE (tenant_id, idempotency_key_hash),
+    UNIQUE (tenant_id, request_hash),
+    CHECK (repaired + would_repair + unavailable + pending = inventory_total),
+    CHECK (entry_repaired + entry_would_repair + entry_unavailable + entry_pending = entry_total),
+    CHECK (operator_action <= unavailable),
+    CHECK (entry_operator_action <= entry_unavailable),
+    CHECK (retrying <= pending),
+    CHECK (entry_retrying <= entry_pending),
+    CHECK (checkpoint <= entry_total),
+    CHECK ((status = 'completed') = (entry_pending = 0)),
+    CHECK ((status = 'completed') = (completed_at IS NOT NULL))
+  );
+
+  CREATE TABLE IF NOT EXISTS attachment_repair_entries (
+    tenant_id          uuid NOT NULL,
+    run_id             uuid NOT NULL,
+    position           integer NOT NULL CHECK (position >= 0),
+    object_key         text NOT NULL CHECK (object_key <> ''),
+    recipients         jsonb NOT NULL CHECK (jsonb_typeof(recipients) = 'array'),
+    canary_message_ids jsonb NOT NULL CHECK (
+      jsonb_typeof(canary_message_ids) = 'array'
+      AND jsonb_array_length(canary_message_ids) > 0
+    ),
+    attachment_count   integer NOT NULL CHECK (attachment_count > 0),
+    status             text NOT NULL DEFAULT 'pending'
+                       CHECK (status IN ('pending', 'would_repair', 'repaired', 'unavailable')),
+    operator_action    boolean NOT NULL DEFAULT false,
+    attempts           integer NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    last_error_code    text CHECK (
+      last_error_code ~ '^[a-z][a-z0-9_]{0,63}$'
+    ),
+    last_attempt_at    timestamptz,
+    next_attempt_at    timestamptz NOT NULL DEFAULT now(),
+    claim_token        uuid,
+    lease_expires_at   timestamptz,
+    reserved_bytes     bigint NOT NULL DEFAULT 0 CHECK (reserved_bytes >= 0),
+    updated_at         timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (tenant_id, run_id, position),
+    UNIQUE (tenant_id, run_id, object_key),
+    FOREIGN KEY (tenant_id, run_id)
+      REFERENCES attachment_repair_runs (tenant_id, id) ON DELETE CASCADE,
+    CHECK (NOT operator_action OR status = 'unavailable'),
+    CHECK ((claim_token IS NULL) = (lease_expires_at IS NULL)),
+    CHECK ((claim_token IS NULL) = (reserved_bytes = 0)),
+    CHECK (status = 'pending' OR (
+      claim_token IS NULL AND lease_expires_at IS NULL AND reserved_bytes = 0
+    ))
+  );
+
+  CREATE INDEX IF NOT EXISTS attachment_repair_entries_pending_idx
+    ON attachment_repair_entries (
+      tenant_id, run_id, next_attempt_at, attempts, position
+    )
+    WHERE status = 'pending';
+
+  ALTER TABLE attachment_repair_runs ENABLE ROW LEVEL SECURITY;
+  ALTER TABLE attachment_repair_runs FORCE ROW LEVEL SECURITY;
+  DROP POLICY IF EXISTS attachment_repair_runs_tenant_isolation ON attachment_repair_runs;
+  CREATE POLICY attachment_repair_runs_tenant_isolation ON attachment_repair_runs
+    USING (tenant_id = NULLIF(current_setting('app.current_tenant', true), '')::uuid)
+    WITH CHECK (tenant_id = NULLIF(current_setting('app.current_tenant', true), '')::uuid);
+
+  ALTER TABLE attachment_repair_entries ENABLE ROW LEVEL SECURITY;
+  ALTER TABLE attachment_repair_entries FORCE ROW LEVEL SECURITY;
+  DROP POLICY IF EXISTS attachment_repair_entries_tenant_isolation ON attachment_repair_entries;
+  CREATE POLICY attachment_repair_entries_tenant_isolation ON attachment_repair_entries
+    USING (tenant_id = NULLIF(current_setting('app.current_tenant', true), '')::uuid)
+    WITH CHECK (tenant_id = NULLIF(current_setting('app.current_tenant', true), '')::uuid);
+  `,
+);
+
 /** All migrations, in order: api-keys table (auth), the core schema, inbound. */
 export function emailsSelfHostedMigrations(): Migration[] {
   const authMigrations = apiKeyMigrations().map((m) => defineMigration(m.id, m.sql));
@@ -2562,5 +2678,6 @@ export function emailsSelfHostedMigrations(): Migration[] {
     INBOUND_MESSAGE_SOURCE_PROVENANCE,
     SEND_INTENT_RECOVERY,
     INBOX_PERF_ROLLUPS,
+    ATTACHMENT_REPAIR_LEDGER,
   ];
 }

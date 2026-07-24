@@ -57,10 +57,19 @@ locals {
     ],
   )
 
-  worker_environment = concat(local.common_environment, [
-    { name = "EMAILS_INGEST_QUEUE_URL", value = aws_sqs_queue.inbound.id },
-    { name = "EMAILS_INGEST_S3_BUCKET", value = aws_s3_bucket.inbound.id },
-  ])
+  worker_environment = concat(
+    local.common_environment,
+    [
+      { name = "EMAILS_INGEST_QUEUE_URL", value = aws_sqs_queue.inbound.id },
+      { name = "EMAILS_INGEST_S3_BUCKET", value = aws_s3_bucket.inbound.id },
+    ],
+    var.enable_ses_inbound && var.email_domain != null ? [{
+      name = "EMAILS_INGEST_PREFIX_DOMAIN_MAP"
+      value = jsonencode({
+        (var.inbound_object_prefix) = lower(var.email_domain)
+      })
+    }] : [],
+  )
 
   database_secret = {
     name      = "EMAILS_DATABASE_URL"

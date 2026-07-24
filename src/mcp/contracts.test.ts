@@ -142,6 +142,12 @@ describe("MCP CLI equivalents", () => {
   });
 
   it("includes inbound attachment commands", () => {
+    expect(cliEquivalentForTool("list_attachments", {
+      limit: 25,
+      cursor: "opaque cursor",
+      direction: "inbound",
+      since: "2026-07-24T00:00:00.000Z",
+    })).toBe('emails inbox attachments --limit 25 --cursor "opaque cursor" --direction inbound --since 2026-07-24T00:00:00.000Z --json');
     expect(cliEquivalentForTool("get_attachment", { email_id: "abc123", filename: "invoice.pdf" }))
       .toBe("emails inbox attachment abc123 --filename invoice.pdf --json");
     expect(cliEquivalentForTool("download_attachment", {

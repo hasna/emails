@@ -5,6 +5,12 @@ import { confirmDestructiveAction, handleError } from "../utils.js";
 import { extractEmailLinks, formatEmailLinks, type ExtractedEmailLink } from "../../lib/email-links.js";
 import { formatAttachmentSize, mergeAttachmentDetails, type AttachmentDetail } from "../../lib/attachment-actions.js";
 import { MAX_ATTACHMENT_DOWNLOAD_BYTES, writeAttachmentFile } from "../../lib/attachment-download.js";
+import {
+  DEFAULT_ATTACHMENT_INVENTORY_LIMIT,
+  MAX_ATTACHMENT_INVENTORY_LIMIT,
+  listSelfHostedAttachments,
+  type SafeAttachmentInventoryPage,
+} from "../../lib/attachment-inventory.js";
 import { resolveMailDataSource, type MailDataSource } from "../../lib/mail-data-source.js";
 import { readableMessageText } from "../tui/format.js";
 import type {
@@ -740,6 +746,23 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
       } catch (e) { handleError(e); }
     });
 
+  // ─── ATTACHMENTS INVENTORY ────────────────────────────────────────────────
+  inboxCmd
+    .command("attachments")
+    .description("List one checkpointable page of self-hosted attachment metadata")
+    .option("--limit <n>", `Attachments per page (1-${MAX_ATTACHMENT_INVENTORY_LIMIT})`, String(DEFAULT_ATTACHMENT_INVENTORY_LIMIT))
+    .option("--cursor <cursor>", "Opaque next_cursor from a previous page")
+    .option("--direction <direction>", "Filter by inbound or outbound")
+    .option("--since <date>", "Only include attachments from messages on or after this date")
+    .action(async (opts: { limit?: string; cursor?: string; direction?: string; since?: string }) => {
+      try {
+        const page = await listSelfHostedAttachments(opts);
+        output(page, formatAttachmentInventoryPage(page));
+      } catch (e) {
+        handleError(e);
+      }
+    });
+
   // ─── ATTACHMENT ───────────────────────────────────────────────────────────
   inboxCmd
     .command("attachment <emailId>")
@@ -986,6 +1009,21 @@ function formatMailboxStatus(status: MailboxStatusSummary): string {
 
 interface AttMeta { filename: string; content_type: string; size: number }
 interface AttPath { filename: string; local_path?: string; s3_url?: string }
+
+function formatAttachmentInventoryPage(page: SafeAttachmentInventoryPage): string {
+  const lines = [chalk.bold(`\nAttachment inventory (${page.items.length}):`)];
+  for (const item of page.items) {
+    const size = item.size_bytes === null ? "unknown size" : formatAttachmentSize(item.size_bytes);
+    const availability = item.content_available ? " available" : " unavailable";
+    lines.push(
+      `  ${item.message_id.slice(0, 8)} [${item.attachment_index}] `
+      + `${item.filename ?? "(unnamed)"} `
+      + `${chalk.dim(`${size} · ${item.content_type ?? "application/octet-stream"}${availability}`)}`,
+    );
+  }
+  lines.push(`  ${chalk.dim("next_cursor:")} ${page.next_cursor ?? "null"}`, "");
+  return lines.join("\n");
+}
 
 function formatAttachmentDetailList(emailId: string, attachments: AttachmentDetail[]): string {
   const lines = [chalk.bold(`\nAttachments for ${emailId.slice(0, 8)}:`)];

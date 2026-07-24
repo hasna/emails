@@ -18,6 +18,8 @@ import {
   SendIntentTombstonedError,
   CrossTenantReferenceError,
   InboundDomainRouteConflictError,
+  AttachmentRepairIdempotencyConflictError,
+  AttachmentRepairQuotaExceededError,
   decodeMessagesCursor,
   decodeAttachmentsCursor,
   MAX_ATTACHMENT_BATCH_IDS,
@@ -30,10 +32,19 @@ import {
   type AddressProvisioningPatch,
   type AddressOwnershipPatch,
 } from "./store.js";
+import {
+  MAX_ATTACHMENT_REPAIR_PAGE_ITEMS,
+  normalizeAttachmentRepairManifestEntries,
+  processCanonicalS3AttachmentRepairPage,
+  resolveAttachmentRepairCanonicalBucket,
+  type AttachmentRepairLedgerRun,
+  type AttachmentRepairManifestEntry,
+} from "./attachment-repair.js";
 import { emailsSelfHostedOpenApi } from "./openapi.js";
 import { resourceSpecForPath } from "./resources.js";
 import type { SelfHostedSender } from "./sender.js";
 import {
+  isTenantOperator,
   resolveRequestContext,
   handleAuthRoutes,
   type RequestContext,
@@ -106,6 +117,14 @@ export interface SelfHostedServiceDeps {
   rateLimiter: RateLimiter;
   mailer: AuthMailerConfig;
   env?: NodeJS.ProcessEnv;
+  /** Test/embedding seam; production falls back to the canonical S3 adapter. */
+  attachmentRepair?: {
+    processPage(
+      store: TenantScopedStore,
+      runId: string,
+      limit: number,
+    ): Promise<AttachmentRepairLedgerRun>;
+  };
 }
 
 const MODE = "self_hosted" as const;
@@ -124,6 +143,29 @@ function publicMessage(record: MessageRecord): Omit<MessageRecord, "idempotency_
 
 function sendIntentMessage(record: MessageRecord): { id: string; send_state: string } {
   return { id: record.id, send_state: record.send_state };
+}
+
+function publicAttachmentRepair(run: AttachmentRepairLedgerRun) {
+  const { tenant_id: _tenantId, ...safe } = run;
+  return safe;
+}
+
+async function processAttachmentRepairRun(
+  deps: SelfHostedServiceDeps,
+  store: TenantScopedStore,
+  runId: string,
+  limit: number,
+): Promise<AttachmentRepairLedgerRun> {
+  if (deps.attachmentRepair) {
+    return deps.attachmentRepair.processPage(store, runId, limit);
+  }
+  return processCanonicalS3AttachmentRepairPage(
+    deps.store,
+    store,
+    runId,
+    limit,
+    deps.env ?? process.env,
+  );
 }
 
 function publicMessageListItem(record: MessageRecord | MessageListRecord): MessageListRecord {
@@ -196,6 +238,42 @@ function parseIdempotencyKey(value: unknown): { ok: true; value: string } | { ok
   return { ok: true, value: key };
 }
 
+function parseAttachmentRepairId(
+  value: string,
+): { ok: true; value: string } | { ok: false } {
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(value);
+  } catch {
+    return { ok: false };
+  }
+  return /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(decoded)
+    ? { ok: true, value: decoded.toLowerCase() }
+    : { ok: false };
+}
+
+function invalidAttachmentRepairIdResponse(): Response {
+  return json(400, {
+    error: "attachment repair id must be a UUID",
+    code: "invalid_attachment_repair_id",
+  });
+}
+
+function attachmentRepairNotConfiguredResponse(): Response {
+  return json(503, {
+    error: "attachment repair canonical source is not configured",
+    code: "attachment_repair_not_configured",
+  });
+}
+
+function unsupportedRequestFields(
+  body: Record<string, unknown>,
+  allowed: readonly string[],
+): string[] {
+  const allowlist = new Set(allowed);
+  return Object.keys(body).filter((key) => !allowlist.has(key)).sort();
+}
+
 function sendLeaseExpired(record: MessageRecord, now = Date.now()): boolean {
   const started = record.send_started_at ? Date.parse(record.send_started_at) : NaN;
   const configured = Number(process.env["EMAILS_SEND_LEASE_SECONDS"] ?? "300");
@@ -260,6 +338,24 @@ function queryInt(url: URL, key: string): number | undefined {
   if (raw === null) return undefined;
   const n = Number(raw);
   return Number.isFinite(n) ? n : undefined;
+}
+
+function queryCanonicalBoundedInt(
+  url: URL,
+  key: string,
+  minimum: number,
+  maximum: number,
+): { value?: number; error?: string } {
+  const raw = url.searchParams.get(key);
+  if (raw === null) return {};
+  if (!/^(?:0|[1-9][0-9]*)$/.test(raw)) {
+    return { error: `${key} must be a canonical integer between ${minimum} and ${maximum}` };
+  }
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
+    return { error: `${key} must be a canonical integer between ${minimum} and ${maximum}` };
+  }
+  return { value };
 }
 
 function queryIsoDate(url: URL, key: string): { value?: string; error?: string } {
@@ -388,6 +484,15 @@ async function authenticate(
   const resolved = await resolveRequestContext(deps, req, url, requiredScopes);
   if (!resolved.ok) return { ok: false, response: resolved.response };
   return { ok: true, ctx: resolved.ctx, store: deps.store.forTenant(resolved.ctx.tenantId) };
+}
+
+function requireTenantOperator(auth: AuthOk): Response | null {
+  return isTenantOperator(auth.ctx)
+    ? null
+    : json(403, {
+        error: "attachment repair requires a tenant owner, admin, or operator API key",
+        reason: "operator_required",
+      });
 }
 
 /**
@@ -1144,6 +1249,168 @@ export async function handleSelfHostedRequest(
       return json(200, { mailboxes, counts });
     }
 
+    // Explicit, bounded repair manifests only: the service never lists or scans
+    // an S3 bucket. Each entry retains the existing exact canary contract and is
+    // checkpointed before the next object is attempted.
+    if (path === "/v1/attachments/repairs") {
+      if (method !== "POST") return json(405, { error: "method not allowed" });
+      const auth = await authenticate(deps, req, url, write);
+      if (!auth.ok) return auth.response;
+      const operatorError = requireTenantOperator(auth);
+      if (operatorError) return operatorError;
+      const body = await readJsonBody(req);
+      const unsupported = unsupportedRequestFields(
+        body,
+        ["idempotency_key", "apply", "limit", "entries"],
+      );
+      if (unsupported.length > 0) {
+        return json(400, {
+          error: `attachment repair request contains unsupported fields: ${unsupported.join(", ")}`,
+          code: "invalid_repair_body",
+        });
+      }
+      const key = parseIdempotencyKey(body.idempotency_key);
+      if (!key.ok) return json(400, { error: key.error, code: "invalid_idempotency_key" });
+      if (body.apply !== undefined && typeof body.apply !== "boolean") {
+        return json(400, { error: "apply must be a boolean", code: "invalid_apply" });
+      }
+      if (!Array.isArray(body.entries)) {
+        return json(400, { error: "entries must be an array", code: "invalid_repair_manifest" });
+      }
+      let entries: AttachmentRepairManifestEntry[];
+      try {
+        entries = normalizeAttachmentRepairManifestEntries(
+          body.entries as AttachmentRepairManifestEntry[],
+        );
+      } catch (error) {
+        return json(400, {
+          error: error instanceof Error ? error.message : "invalid attachment repair manifest",
+          code: "invalid_repair_manifest",
+        });
+      }
+      const rawLimit = body.limit ?? MAX_ATTACHMENT_REPAIR_PAGE_ITEMS;
+      if (!Number.isSafeInteger(rawLimit)
+        || Number(rawLimit) <= 0
+        || Number(rawLimit) > MAX_ATTACHMENT_REPAIR_PAGE_ITEMS) {
+        return json(400, {
+          error: `limit must be between 1 and ${MAX_ATTACHMENT_REPAIR_PAGE_ITEMS}`,
+          code: "invalid_repair_limit",
+        });
+      }
+      try {
+        const canonicalBucket = resolveAttachmentRepairCanonicalBucket(
+          deps.env ?? process.env,
+        );
+        if (!canonicalBucket) {
+          return attachmentRepairNotConfiguredResponse();
+        }
+        const run = await auth.store.createOrGetAttachmentRepairRun({
+          idempotencyKey: key.value,
+          canonicalBucket,
+          apply: body.apply === true,
+          entries,
+        });
+        const updated = await processAttachmentRepairRun(
+          deps,
+          auth.store,
+          run.id,
+          Number(rawLimit),
+        );
+        return json(201, {
+          repair: publicAttachmentRepair(updated),
+          max_page_size: MAX_ATTACHMENT_REPAIR_PAGE_ITEMS,
+        });
+      } catch (error) {
+        if (error instanceof AttachmentRepairIdempotencyConflictError) {
+          return json(409, {
+            error: error.message,
+            code: "attachment_repair_idempotency_conflict",
+          });
+        }
+        if (error instanceof AttachmentRepairQuotaExceededError) {
+          return json(429, {
+            error: error.message,
+            code: "attachment_repair_quota_exceeded",
+            quota: error.code,
+            retryable: error.retryable,
+          });
+        }
+        if (error instanceof RangeError) {
+          return json(400, {
+            error: error.message,
+            code: "invalid_repair_manifest",
+          });
+        }
+        throw error;
+      }
+    }
+
+    const attachmentRepairResumeMatch = path.match(/^\/v1\/attachments\/repairs\/([^/]+)\/resume$/);
+    if (attachmentRepairResumeMatch) {
+      if (method !== "POST") return json(405, { error: "method not allowed" });
+      const auth = await authenticate(deps, req, url, write);
+      if (!auth.ok) return auth.response;
+      const operatorError = requireTenantOperator(auth);
+      if (operatorError) return operatorError;
+      const parsedRunId = parseAttachmentRepairId(attachmentRepairResumeMatch[1]!);
+      if (!parsedRunId.ok) return invalidAttachmentRepairIdResponse();
+      const body = await readJsonBody(req);
+      const unsupported = unsupportedRequestFields(body, ["limit"]);
+      if (unsupported.length > 0) {
+        return json(400, {
+          error: `attachment repair resume request contains unsupported fields: ${unsupported.join(", ")}`,
+          code: "invalid_repair_body",
+        });
+      }
+      const rawLimit = body.limit ?? MAX_ATTACHMENT_REPAIR_PAGE_ITEMS;
+      if (!Number.isSafeInteger(rawLimit)
+        || Number(rawLimit) <= 0
+        || Number(rawLimit) > MAX_ATTACHMENT_REPAIR_PAGE_ITEMS) {
+        return json(400, {
+          error: `limit must be between 1 and ${MAX_ATTACHMENT_REPAIR_PAGE_ITEMS}`,
+          code: "invalid_repair_limit",
+        });
+      }
+      const existing = await auth.store.getAttachmentRepairRun(parsedRunId.value);
+      if (!existing) {
+        return json(404, {
+          error: "attachment repair not found",
+          code: "attachment_repair_not_found",
+        });
+      }
+      if (!resolveAttachmentRepairCanonicalBucket(deps.env ?? process.env)) {
+        return attachmentRepairNotConfiguredResponse();
+      }
+      const updated = await processAttachmentRepairRun(
+        deps,
+        auth.store,
+        existing.id,
+        Number(rawLimit),
+      );
+      return json(200, {
+        repair: publicAttachmentRepair(updated),
+        max_page_size: MAX_ATTACHMENT_REPAIR_PAGE_ITEMS,
+      });
+    }
+
+    const attachmentRepairMatch = path.match(/^\/v1\/attachments\/repairs\/([^/]+)$/);
+    if (attachmentRepairMatch) {
+      if (method !== "GET") return json(405, { error: "method not allowed" });
+      const auth = await authenticate(deps, req, url, read);
+      if (!auth.ok) return auth.response;
+      const operatorError = requireTenantOperator(auth);
+      if (operatorError) return operatorError;
+      const parsedRunId = parseAttachmentRepairId(attachmentRepairMatch[1]!);
+      if (!parsedRunId.ok) return invalidAttachmentRepairIdResponse();
+      const run = await auth.store.getAttachmentRepairRun(parsedRunId.value);
+      return run
+        ? json(200, { repair: publicAttachmentRepair(run) })
+        : json(404, {
+            error: "attachment repair not found",
+            code: "attachment_repair_not_found",
+          });
+    }
+
     // /v1/attachments/batch — checkpointable batch attachment-metadata read for
     // an explicit, bounded list of message IDs (MP-00034). POST carries the id
     // list in the body (a scan of thousands of ids will not fit a query string),
@@ -1193,16 +1460,34 @@ export async function handleSelfHostedRequest(
       if (method !== "GET") return json(405, { error: "method not allowed" });
       const auth = await authenticate(deps, req, url, read);
       if (!auth.ok) return auth.response;
+      const limit = queryCanonicalBoundedInt(url, "limit", 1, 500);
+      if (limit.error) {
+        return json(400, { error: limit.error, code: "invalid_limit" });
+      }
       const cursor = url.searchParams.get("cursor")?.trim() || undefined;
       if (cursor && decodeAttachmentsCursor(cursor) === null) {
         return json(400, { error: "cursor is not a valid pagination cursor", code: "invalid_cursor" });
       }
-      const directionValue = url.searchParams.get("direction")?.trim().toLowerCase();
-      const direction = directionValue === "inbound" || directionValue === "outbound" ? directionValue : undefined;
+      const rawDirection = url.searchParams.get("direction");
+      const directionValue = rawDirection?.trim().toLowerCase();
+      if (rawDirection !== null
+        && directionValue !== "inbound"
+        && directionValue !== "outbound") {
+        return json(400, {
+          error: "direction must be inbound or outbound",
+          code: "invalid_direction",
+        });
+      }
+      const direction = directionValue as "inbound" | "outbound" | undefined;
       const since = queryIsoDate(url, "since");
-      if (since.error) return json(400, { error: since.error });
+      if (since.error) {
+        return json(400, {
+          error: since.error,
+          code: "invalid_since",
+        });
+      }
       const page = await auth.store.listAttachments({
-        limit: queryInt(url, "limit"),
+        limit: limit.value,
         cursor,
         direction,
         since: since.value,

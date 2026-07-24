@@ -75,7 +75,13 @@ async function main(): Promise<void> {
   const cliArgs = routeRootPromptArgs(rawArgs);
 
   const program = new Command();
-  const [{ setLogLevel }, { configureCliRuntime, emitJson, handleError }] = await Promise.all([
+  const [{ setLogLevel }, {
+    configureCliRuntime,
+    drainCliOutput,
+    emitJson,
+    finalizeCliOutput,
+    handleError,
+  }] = await Promise.all([
     import("../lib/logger.js"),
     import("./utils.js"),
   ]);
@@ -107,14 +113,16 @@ async function main(): Promise<void> {
     }
   }
 
-  await registerCommandsForArgs(program, output, cliArgs);
-
-  if (jsonRequested && !cliArgs.includes("--help") && !cliArgs.includes("-h")) {
-    configureJsonCommanderErrors(program);
-  }
-
   try {
+    await registerCommandsForArgs(program, output, cliArgs);
+
+    if (jsonRequested && !cliArgs.includes("--help") && !cliArgs.includes("-h")) {
+      configureJsonCommanderErrors(program);
+    }
+
     await program.parseAsync([process.argv[0] ?? "bun", process.argv[1] ?? "emails", ...cliArgs]);
+    finalizeCliOutput();
+    await drainCliOutput();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     handleError(new Error(message));

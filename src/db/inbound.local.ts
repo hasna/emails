@@ -476,6 +476,146 @@ export interface ListInboundOpts {
   recipientDomains?: string[];
 }
 
+export interface ListInboundInsertionsPageOptions {
+  receivedSince?: string;
+  limit?: number;
+  cursor?: string;
+}
+
+export interface InboundInsertionsPage {
+  items: InboundEmailSummary[];
+  cursor: string | null;
+}
+
+interface InboundInsertionsCursor {
+  v: 1;
+  received_at: string;
+  id: string;
+  received_since: string | null;
+}
+
+const MAX_INBOUND_INSERTION_PAGE_SIZE = 500;
+
+function normalizeInsertionSince(value: string | undefined): string | null {
+  if (value === undefined) return null;
+  if (!value.trim()) throw new RangeError("receivedSince must be a valid date-time");
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) {
+    throw new RangeError("receivedSince must be a valid date-time");
+  }
+  return new Date(timestamp).toISOString();
+}
+
+function insertionPageLimit(value: number | undefined): number {
+  if (value === undefined) return 200;
+  if (!Number.isSafeInteger(value) || value < 1 || value > MAX_INBOUND_INSERTION_PAGE_SIZE) {
+    throw new RangeError(
+      `insertion page limit must be an integer between 1 and ${MAX_INBOUND_INSERTION_PAGE_SIZE}`,
+    );
+  }
+  return value;
+}
+
+function encodeInboundInsertionsCursor(value: InboundInsertionsCursor): string {
+  return Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
+}
+
+function decodeInboundInsertionsCursor(
+  cursor: string,
+  receivedSince: string | null,
+): InboundInsertionsCursor {
+  if (!cursor || cursor.length > 2048 || !/^[A-Za-z0-9_-]+$/.test(cursor)) {
+    throw new RangeError("insertion cursor is malformed");
+  }
+  let decoded: string;
+  try {
+    decoded = Buffer.from(cursor, "base64url").toString("utf8");
+  } catch {
+    throw new RangeError("insertion cursor is malformed");
+  }
+  if (Buffer.from(decoded, "utf8").toString("base64url") !== cursor) {
+    throw new RangeError("insertion cursor is malformed");
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(decoded);
+  } catch {
+    throw new RangeError("insertion cursor is malformed");
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new RangeError("insertion cursor is malformed");
+  }
+  const candidate = value as Record<string, unknown>;
+  const keys = Object.keys(candidate).sort();
+  if (JSON.stringify(keys) !== JSON.stringify(["id", "received_at", "received_since", "v"])) {
+    throw new RangeError("insertion cursor is malformed");
+  }
+  if (candidate["v"] !== 1
+    || typeof candidate["received_at"] !== "string"
+    || !Number.isFinite(Date.parse(candidate["received_at"]))
+    || typeof candidate["id"] !== "string"
+    || !candidate["id"]
+    || (candidate["received_since"] !== null
+      && typeof candidate["received_since"] !== "string")
+    || candidate["received_since"] !== receivedSince) {
+    throw new RangeError("insertion cursor does not match this inventory query");
+  }
+  return candidate as unknown as InboundInsertionsCursor;
+}
+
+/**
+ * Deterministic keyset page for the explicitly insert-only public seam.
+ * Rows are ordered by (received_at DESC, id DESC); newer concurrent inserts
+ * stay ahead of an established cursor and therefore cannot replay into it.
+ */
+export function listInboundInsertionSummariesPage(
+  opts: ListInboundInsertionsPageOptions = {},
+  db?: Database,
+): InboundInsertionsPage {
+  const d = db || getDatabase();
+  const limit = insertionPageLimit(opts.limit);
+  const receivedSince = normalizeInsertionSince(opts.receivedSince);
+  const cursor = opts.cursor
+    ? decodeInboundInsertionsCursor(opts.cursor, receivedSince)
+    : null;
+  const conditions: string[] = ["is_sent = 0", "is_archived = 0"];
+  const params: Array<string | number> = [];
+  if (receivedSince) {
+    conditions.push(sincePredicate("received_at"));
+    params.push(receivedSince);
+  }
+  if (cursor) {
+    conditions.push(`(
+      julianday(received_at) < julianday(?)
+      OR (julianday(received_at) = julianday(?) AND id < ?)
+    )`);
+    params.push(cursor.received_at, cursor.received_at, cursor.id);
+  }
+  params.push(limit + 1);
+  const rows = d.query(
+    `SELECT ${INBOUND_SUMMARY_COLS}
+       FROM inbound_emails
+      WHERE ${conditions.join(" AND ")}
+      ORDER BY julianday(received_at) DESC, id DESC
+      LIMIT ?`,
+  ).all(...params) as InboundEmailSummaryRow[];
+  const pageRows = rows.slice(0, limit);
+  const hasMore = rows.length > limit;
+  const last = pageRows.at(-1);
+  const nextCursor = hasMore && last
+    ? encodeInboundInsertionsCursor({
+        v: 1,
+        received_at: last.received_at,
+        id: last.id,
+        received_since: receivedSince,
+      })
+    : null;
+  if (nextCursor !== null && nextCursor === opts.cursor) {
+    throw new Error("insertion cursor did not advance");
+  }
+  return { items: pageRows.map(rowToEmailSummary), cursor: nextCursor };
+}
+
 function applyInboundFilters(opts: ListInboundOpts | undefined, conditions: string[], params: (string | number)[]): void {
   if (opts?.provider_id) {
     conditions.push("provider_id = ?");

@@ -43,6 +43,9 @@ const TABLES = ["domains", "contacts", "messages", "email_agent_settings", "send
 // are asserted separately because their per-tenant row counts are derived
 // (N recipients per message / N counter keys), not 1:1 with the seed.
 const ROLLUP_TABLES = ["message_recipients", "message_counters"] as const;
+const REPAIR_TABLES = ["attachment_repair_runs", "attachment_repair_entries"] as const;
+const REPAIR_RUN_A = "11111111-1111-4111-8111-111111111111";
+const REPAIR_RUN_B = "22222222-2222-4222-8222-222222222222";
 
 /** Run `fn` in one transaction AS the NOBYPASSRLS probe, optionally with the tenant GUC set. */
 async function asProbe<T>(tenantId: string | null, fn: (tx: TypedQueryClient) => Promise<T>): Promise<T> {
@@ -93,13 +96,42 @@ beforeAll(async () => {
        ($1, $3), ($2, $4)`,
     [TENANT_A, TENANT_B, "a".repeat(64), "b".repeat(64)],
   );
+  await pg.execute(
+    `INSERT INTO attachment_repair_runs (
+       tenant_id, id, idempotency_key_hash, request_hash, status,
+       entry_total, inventory_total, pending, entry_pending
+     ) VALUES
+       ($1, $3::uuid, $5, $7, 'pending', 1, 1, 1, 1),
+       ($2, $4::uuid, $6, $8, 'pending', 1, 1, 1, 1)`,
+    [
+      TENANT_A,
+      TENANT_B,
+      REPAIR_RUN_A,
+      REPAIR_RUN_B,
+      "a".repeat(64),
+      "b".repeat(64),
+      "c".repeat(64),
+      "d".repeat(64),
+    ],
+  );
+  await pg.execute(
+    `INSERT INTO attachment_repair_entries (
+       tenant_id, run_id, position, object_key, recipients,
+       canary_message_ids, attachment_count
+     ) VALUES
+       ($1, $3::uuid, 0, 'source/a', '["a@example.test"]'::jsonb, '["message-a"]'::jsonb, 1),
+       ($2, $4::uuid, 0, 'source/b', '["b@example.test"]'::jsonb, '["message-b"]'::jsonb, 1)`,
+    [TENANT_A, TENANT_B, REPAIR_RUN_A, REPAIR_RUN_B],
+  );
 
   // The prod-faithful part: make a NOBYPASSRLS role the OWNER of the tables under
   // test, so FORCE ROW LEVEL SECURITY (set by 0013) actually constrains it. A
   // non-superuser needs USAGE on the schema to resolve unqualified names.
   await pg.execute(`CREATE ROLE ${PROBE} NOLOGIN NOSUPERUSER NOBYPASSRLS`);
   await pg.execute(`GRANT USAGE ON SCHEMA public TO ${PROBE}`);
-  for (const t of [...TABLES, ...ROLLUP_TABLES]) await pg.execute(`ALTER TABLE ${t} OWNER TO ${PROBE}`);
+  for (const t of [...TABLES, ...ROLLUP_TABLES, ...REPAIR_TABLES]) {
+    await pg.execute(`ALTER TABLE ${t} OWNER TO ${PROBE}`);
+  }
 });
 
 afterAll(async () => {
@@ -121,6 +153,33 @@ describe.skipIf(!pg)("Row-Level Security backstop (Layer 2, migration 0013)", ()
       const n = await asProbe("", async (tx) => (await tx.one<{ n: number }>(`SELECT count(*)::int AS n FROM ${t}`)).n);
       expect(n, `${t} with empty GUC`).toBe(0);
     }
+  });
+
+  it("explicitly isolates both repair-ledger tables with no GUC and a wrong valid tenant GUC", async () => {
+    for (const table of REPAIR_TABLES) {
+      expect(await countAsProbe(null, table), `${table} with unset GUC`).toBe(0);
+      expect(
+        await countAsProbe("cccccccc-cccc-4ccc-8ccc-cccccccccccc", table),
+        `${table} with wrong GUC`,
+      ).toBe(0);
+      expect(await countAsProbe(TENANT_A, table), `${table} visible to tenant A`).toBe(1);
+      expect(await countAsProbe(TENANT_B, table), `${table} visible to tenant B`).toBe(1);
+    }
+
+    const runAFromTenantB = await asProbe(TENANT_B, (tx) =>
+      tx.get<{ id: string }>(
+        `SELECT id::text AS id FROM attachment_repair_runs WHERE id = $1::uuid`,
+        [REPAIR_RUN_A],
+      ));
+    const entryAFromTenantB = await asProbe(TENANT_B, (tx) =>
+      tx.get<{ run_id: string }>(
+        `SELECT run_id::text AS run_id
+         FROM attachment_repair_entries
+         WHERE run_id = $1::uuid AND position = 0`,
+        [REPAIR_RUN_A],
+      ));
+    expect(runAFromTenantB).toBeNull();
+    expect(entryAFromTenantB).toBeNull();
   });
 
   it("isolates by tenant: GUC=A shows only A's rows; B's rows are invisible", async () => {

@@ -29,9 +29,13 @@ export interface SendMessageError { "error": string; "retry_safe": boolean; "tom
 
 export interface AttachmentContent { "filename": string; "content_type": string; "size": number; "content_base64": string }
 
-export interface AttachmentInventoryItem { "message_id": string; "attachment_index": number; "filename": string | null; "content_type": string | null; "size_bytes": number | null; "sha256": string | null; "direction"?: "inbound" | "outbound" | null; "received_at"?: string | null }
+export interface AttachmentUnavailableError { "error": string; "code": "attachment_content_unavailable"; "attachment": { "filename": string; "content_type": string; "size": number | null } }
 
-export interface AttachmentMeta { "attachment_index": number; "filename": string | null; "content_type": string | null; "size_bytes": number | null; "sha256": string | null }
+export interface AttachmentInventoryItem { "message_id": string; "attachment_index": number; "filename": string | null; "content_type": string | null; "size_bytes": number | null; "sha256": string | null; "content_available": boolean; "direction": "inbound" | "outbound" | null; "received_at": string | null }
+
+export interface AttachmentMeta { "attachment_index": number; "filename": string | null; "content_type": string | null; "size_bytes": number | null; "sha256": string | null; "content_available": boolean }
+
+export interface AttachmentRepairSummary { "id": string; "apply": boolean; "status": "pending" | "completed"; "entry_total": number; "inventory_total": number; "repaired": number; "would_repair": number; "unavailable": number; "operator_action": number; "pending": number; "retrying": number; "entry_repaired": number; "entry_would_repair": number; "entry_unavailable": number; "entry_operator_action": number; "entry_pending": number; "entry_retrying": number; "attempts": number; "checkpoint": number; "byte_budget": number; "bytes_consumed": number; "time_budget_ms": number; "deadline_at": string; "created_at": string; "updated_at": string; "completed_at": string | null }
 
 export interface Thread { "thread_key": string; "subject"?: string | null; "message_count": number; "unread_count": number; "last_message_at"?: string | null; "first_message_at"?: string | null; "participants"?: Array<string> }
 
@@ -303,6 +307,33 @@ export class EmailsSelfHostClient {
     /** Return attachment metadata for an explicit, bounded list of message IDs, keyed by message_id, so a large exact-once scan can checkpoint per batch. Read-only (scope emails:read); at most 200 ids per request. */
     async batchAttachments(body: { "message_ids": Array<string> }, init?: RequestInit): Promise<{ "by_message_id": Record<string, Array<AttachmentMeta>>; "unknown_ids": Array<string>; "max_batch_size": number }> {
       return this.request("POST", `/v1/attachments/batch`, {
+        body,
+        query: undefined,
+        init,
+      });
+    }
+
+    /** Create an idempotent bounded legacy attachment-repair manifest and process one checkpointed page. */
+    async createOrResumeAttachmentRepair(body: { "idempotency_key": string; "apply"?: boolean; "limit"?: number; "entries": Array<{ "object_key": string; "recipients": Array<string>; "canary_message_ids": Array<string> }> }, init?: RequestInit): Promise<{ "repair": AttachmentRepairSummary; "max_page_size": 25 }> {
+      return this.request("POST", `/v1/attachments/repairs`, {
+        body,
+        query: undefined,
+        init,
+      });
+    }
+
+    /** Read one tenant-scoped repair checkpoint and reconciled totals. */
+    async getAttachmentRepair(id: string, init?: RequestInit): Promise<{ "repair": AttachmentRepairSummary }> {
+      return this.request("GET", `/v1/attachments/repairs/${encodeURIComponent(String(id))}`, {
+        body: undefined,
+        query: undefined,
+        init,
+      });
+    }
+
+    /** Resume one bounded page from the first unfinished checkpoint. */
+    async resumeAttachmentRepair(id: string, body: { "limit"?: number }, init?: RequestInit): Promise<{ "repair": AttachmentRepairSummary; "max_page_size": 25 }> {
+      return this.request("POST", `/v1/attachments/repairs/${encodeURIComponent(String(id))}/resume`, {
         body,
         query: undefined,
         init,

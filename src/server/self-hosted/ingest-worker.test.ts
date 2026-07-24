@@ -2,10 +2,12 @@ import { describe, it, expect } from "bun:test";
 import { createHash } from "node:crypto";
 import {
   attachmentRepairResultSucceeded,
+  deriveKeyPathRecipients,
   finalizeInboundProvenanceAudit,
   finalizeAttachmentRepairCanary,
   ingestS3Object,
   inboundProvenanceAuditSucceeded,
+  parseInboundPrefixDomainMap,
   processInboundNotification,
   redactedInboundProvenanceAuditReport,
   redactedInboundProvenanceFenceReport,
@@ -40,6 +42,12 @@ const rawEmail = [
   `body text`,
   ``,
 ].join("\r\n");
+
+// A raw S3 ObjectCreated event (what the shared inbound plane delivers) — it has
+// the object key but NO envelope recipients, unlike an SES "Received" notification.
+function s3Event(key: string): string {
+  return JSON.stringify({ Records: [{ s3: { bucket: { name: BUCKET }, object: { key } } }] });
+}
 
 function makeDeps(overrides: Partial<IngestDeps> & {
   existing?: string | null;
@@ -94,6 +102,9 @@ function makeDeps(overrides: Partial<IngestDeps> & {
     now: () => "2026-07-02T12:00:00.000Z",
     ...(overrides.store ? { store: overrides.store } : {}),
     ...(overrides.fetchObject ? { fetchObject: overrides.fetchObject } : {}),
+    ...(overrides.prefixDomainMappings
+      ? { prefixDomainMappings: overrides.prefixDomainMappings }
+      : {}),
   };
   return { deps, upserts, fetched, quarantines, provenances };
 }
@@ -165,6 +176,154 @@ describe("processInboundNotification", () => {
       direction: "inbound",
       status: "received",
     });
+  });
+
+  it("routes a recipient-less S3 event only through a validated prefix/domain mapping", async () => {
+    const { deps, upserts, quarantines } = makeDeps({
+      prefixDomainMappings: parseInboundPrefixDomainMap(
+        JSON.stringify({ "inbound/": "adweb.com" }),
+      ),
+    });
+    const r = await processInboundNotification(deps, s3Event("inbound/msgkey-1"), BUCKET);
+
+    expect(r.status).toBe("ingested");
+    expect(quarantines).toEqual([]);
+    expect(upserts).toHaveLength(1);
+    // Recipient/tenant came from deployment-owned prefix configuration — NOT
+    // the S3 key or MIME To header.
+    expect(upserts[0]!.to_addrs).toEqual(["catchall@adweb.com"]);
+  });
+
+  it("fails closed for the default inbound/<id> key when no prefix/domain mapping is configured", async () => {
+    const { deps, upserts, quarantines } = makeDeps();
+    const routeCalls: string[][] = [];
+    deps.store.resolveInboundRecipients = async (recipients) => {
+      routeCalls.push([...recipients]);
+      return { groups: [], unresolved: recipients };
+    };
+
+    const r = await processInboundNotification(deps, s3Event("inbound/msgkey-no-map"), BUCKET);
+
+    expect(r).toMatchObject({ status: "quarantined", reason: "no_tenant_route" });
+    expect(routeCalls).toEqual([[]]);
+    expect(upserts).toEqual([]);
+    expect(quarantines).toEqual([
+      expect.objectContaining({
+        sourceId: "inbound/msgkey-no-map",
+        envelopeRecipients: [],
+        reason: "no_tenant_route",
+      }),
+    ]);
+  });
+
+  it("does not replace explicit unroutable envelope recipients with a key-path catch-all", async () => {
+    const { deps, upserts, quarantines } = makeDeps();
+    const routeCalls: string[][] = [];
+    deps.store.resolveInboundRecipients = async (recipients) => {
+      routeCalls.push([...recipients]);
+      if (recipients.length === 1 && recipients[0] === "catchall@adweb.com") {
+        return {
+          groups: [{ tenantId: "tenant-a", recipients }],
+          unresolved: [],
+        };
+      }
+      return { groups: [], unresolved: recipients };
+    };
+    const explicitEvent = JSON.stringify({
+      notificationType: "Received",
+      mail: { messageId: "msgkey-explicit" },
+      receipt: {
+        recipients: ["nobody@unrouted.example"],
+        action: {
+          type: "S3",
+          bucketName: BUCKET,
+          objectKey: "inbound/adweb.com/msgkey-explicit",
+        },
+      },
+    });
+
+    const r = await processInboundNotification(deps, explicitEvent, BUCKET);
+
+    expect(r.status).toBe("quarantined");
+    expect(r.reason).toBe("no_tenant_route");
+    expect(routeCalls).toEqual([["nobody@unrouted.example"]]);
+    expect(quarantines).toHaveLength(1);
+    expect(quarantines[0]).toMatchObject({
+      sourceId: "inbound/adweb.com/msgkey-explicit",
+      reason: "no_tenant_route",
+      envelopeRecipients: ["nobody@unrouted.example"],
+    });
+    expect(upserts).toEqual([]);
+  });
+
+  it("quarantines a recipient-less S3 event when the configured domain has no route", async () => {
+    const { deps, upserts } = makeDeps({
+      prefixDomainMappings: parseInboundPrefixDomainMap(
+        JSON.stringify({ "inbound/": "no-route.com" }),
+      ),
+      store: {
+        resolveInboundRecipients: async (recipients: string[]) => {
+          const matched = recipients.filter((rcpt) => rcpt.endsWith("@adweb.com"));
+          return {
+            groups: matched.map((rcpt) => ({ tenantId: "tenant-a", recipients: [rcpt] })),
+            unresolved: matched.length ? [] : recipients,
+          };
+        },
+        quarantineInbound: async () => {},
+        forTenant: () => ({
+          findMessageIdByKey: async () => null,
+          getInboundSourceProvenance: async () => null,
+          recordInboundSourceProvenance: async () => "recorded" as const,
+          createInboundMessageWithProvenance: async () => { throw new Error("must not create for an unrouted domain"); },
+        }),
+      } as unknown as IngestDeps["store"],
+    });
+
+    const r = await processInboundNotification(deps, s3Event("inbound/msgkey-2"), BUCKET);
+    expect(r.status).toBe("quarantined");
+    expect(r.reason).toBe("no_tenant_route");
+    expect(upserts).toEqual([]);
+  });
+
+  it("quarantines when the object key is outside every configured prefix", async () => {
+    const { deps, upserts, quarantines } = makeDeps({
+      prefixDomainMappings: parseInboundPrefixDomainMap(
+        JSON.stringify({ "trusted/": "adweb.com" }),
+      ),
+    });
+    const r = await processInboundNotification(deps, s3Event("inbound/msgkey-outside-prefix"), BUCKET);
+    expect(r.status).toBe("quarantined");
+    expect(r.reason).toBe("no_tenant_route");
+    expect(upserts).toEqual([]);
+    expect(quarantines).toHaveLength(1);
+  });
+
+  it("derives a catch-all recipient only from an exact configured prefix/domain mapping", () => {
+    const mappings = parseInboundPrefixDomainMap(JSON.stringify({
+      "inbound/": "adweb.com",
+      "partner/": "partner.example",
+    }));
+    expect(deriveKeyPathRecipients("inbound/abc123", mappings)).toEqual(["catchall@adweb.com"]);
+    expect(deriveKeyPathRecipients("partner/abc123", mappings)).toEqual(["catchall@partner.example"]);
+    expect(deriveKeyPathRecipients("other/adweb.com/abc123", mappings)).toEqual([]);
+    expect(deriveKeyPathRecipients("inbound/", mappings)).toEqual([]);
+    expect(deriveKeyPathRecipients("inbound/abc123", [])).toEqual([]);
+  });
+
+  it("rejects malformed, ambiguous, or non-canonical prefix/domain configuration", () => {
+    expect(parseInboundPrefixDomainMap(undefined)).toEqual([]);
+    expect(() => parseInboundPrefixDomainMap("[]")).toThrow(/JSON object/i);
+    expect(() => parseInboundPrefixDomainMap(" ".repeat(16_385))).toThrow(/bounded size/i);
+    expect(() => parseInboundPrefixDomainMap(JSON.stringify({ "inbound": "adweb.com" })))
+      .toThrow(/prefix/i);
+    expect(() => parseInboundPrefixDomainMap(JSON.stringify({ "inbound/\u0001": "adweb.com" })))
+      .toThrow(/prefix/i);
+    expect(() => parseInboundPrefixDomainMap(JSON.stringify({ "inbound/": "Adweb.COM" })))
+      .toThrow(/domain/i);
+    expect(() => parseInboundPrefixDomainMap(JSON.stringify({
+      "inbound/": "adweb.com",
+      "inbound/special/": "special.example",
+    }))).toThrow(/overlap|ambiguous/i);
   });
 
   it("persists a new message and its immutable provenance through one atomic store operation", async () => {

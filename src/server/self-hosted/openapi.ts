@@ -314,6 +314,26 @@ const attachmentContentResponseSchema = {
   required: ["attachment"],
 } as const;
 
+const attachmentUnavailableErrorSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    error: { type: "string" },
+    code: { type: "string", enum: ["attachment_content_unavailable"] },
+    attachment: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        filename: { type: "string" },
+        content_type: { type: "string" },
+        size: { type: "integer", minimum: 0, nullable: true },
+      },
+      required: ["filename", "content_type", "size"],
+    },
+  },
+  required: ["error", "code", "attachment"],
+} as const;
+
 const attachmentInventoryItemSchema = {
   type: "object",
   additionalProperties: false,
@@ -330,10 +350,25 @@ const attachmentInventoryItemSchema = {
     content_type: { type: "string", nullable: true },
     size_bytes: { type: "integer", nullable: true, minimum: 0 },
     sha256: { type: "string", nullable: true, description: "Content checksum when stored." },
+    content_available: {
+      type: "boolean",
+      description:
+        "True only when stored payload bytes are canonical base64, decode within the server limit, and match a valid declared byte size.",
+    },
     direction: { type: "string", nullable: true, enum: ["inbound", "outbound", null] },
     received_at: { type: "string", format: "date-time", nullable: true },
   },
-  required: ["message_id", "attachment_index", "filename", "content_type", "size_bytes", "sha256"],
+  required: [
+    "message_id",
+    "attachment_index",
+    "filename",
+    "content_type",
+    "size_bytes",
+    "sha256",
+    "content_available",
+    "direction",
+    "received_at",
+  ],
 } as const;
 
 const attachmentMetaSchema = {
@@ -346,8 +381,128 @@ const attachmentMetaSchema = {
     content_type: { type: "string", nullable: true },
     size_bytes: { type: "integer", nullable: true, minimum: 0 },
     sha256: { type: "string", nullable: true },
+    content_available: {
+      type: "boolean",
+      description:
+        "True only when stored payload bytes are canonical base64, decode within the server limit, and match a valid declared byte size.",
+    },
   },
-  required: ["attachment_index", "filename", "content_type", "size_bytes", "sha256"],
+  required: [
+    "attachment_index",
+    "filename",
+    "content_type",
+    "size_bytes",
+    "sha256",
+    "content_available",
+  ],
+} as const;
+
+const attachmentRepairManifestEntrySchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    object_key: { type: "string", minLength: 1 },
+    recipients: {
+      type: "array",
+      minItems: 1,
+      items: { type: "string", minLength: 1 },
+      description: "Trusted historical envelope-recipient routing evidence.",
+    },
+    canary_message_ids: {
+      type: "array",
+      minItems: 1,
+      items: { type: "string", minLength: 1 },
+      description: "Exact complete persisted message-ID set for this one source object.",
+    },
+  },
+  required: ["object_key", "recipients", "canary_message_ids"],
+} as const;
+
+const attachmentRepairSummarySchema = {
+  type: "object",
+  additionalProperties: false,
+  description:
+    "Tenant-scoped checkpoint ledger. inventory_total is the exact count of attachment payloads missing at manifest creation; already-present payloads are excluded. Attachment outcomes satisfy repaired + would_repair + unavailable + pending = inventory_total; entry_* outcomes satisfy the equivalent entry_total invariant. operator_action is the retry- or budget-exhausted subset of unavailable, and retrying is the attempted subset of pending. No source keys, recipients, error details, or payload bytes are returned.",
+  properties: {
+    id: { type: "string", format: "uuid" },
+    apply: { type: "boolean" },
+    status: { type: "string", enum: ["pending", "completed"] },
+    entry_total: { type: "integer", minimum: 1, maximum: 200 },
+    inventory_total: {
+      type: "integer",
+      minimum: 1,
+      description: "Attachment payloads missing at manifest creation.",
+    },
+    repaired: { type: "integer", minimum: 0 },
+    would_repair: { type: "integer", minimum: 0 },
+    unavailable: { type: "integer", minimum: 0 },
+    operator_action: {
+      type: "integer",
+      minimum: 0,
+      description: "Retry- or budget-exhausted attachment payloads requiring operator action; a subset of unavailable.",
+    },
+    pending: { type: "integer", minimum: 0 },
+    retrying: { type: "integer", minimum: 0 },
+    entry_repaired: { type: "integer", minimum: 0 },
+    entry_would_repair: { type: "integer", minimum: 0 },
+    entry_unavailable: { type: "integer", minimum: 0 },
+    entry_operator_action: {
+      type: "integer",
+      minimum: 0,
+      description: "Retry- or budget-exhausted manifest entries requiring operator action; a subset of entry_unavailable.",
+    },
+    entry_pending: { type: "integer", minimum: 0 },
+    entry_retrying: { type: "integer", minimum: 0 },
+    attempts: { type: "integer", minimum: 0 },
+    checkpoint: { type: "integer", minimum: 0 },
+    byte_budget: {
+      type: "integer",
+      minimum: 1,
+      description: "Durable source-byte budget for this repair run.",
+    },
+    bytes_consumed: {
+      type: "integer",
+      minimum: 0,
+      description: "Source bytes durably charged to this run.",
+    },
+    time_budget_ms: {
+      type: "integer",
+      minimum: 1,
+      description: "Wall-clock budget assigned when the run was created.",
+    },
+    deadline_at: { type: "string", format: "date-time" },
+    created_at: { type: "string", format: "date-time" },
+    updated_at: { type: "string", format: "date-time" },
+    completed_at: { type: "string", format: "date-time", nullable: true },
+  },
+  required: [
+    "id",
+    "apply",
+    "status",
+    "entry_total",
+    "inventory_total",
+    "repaired",
+    "would_repair",
+    "unavailable",
+    "operator_action",
+    "pending",
+    "retrying",
+    "entry_repaired",
+    "entry_would_repair",
+    "entry_unavailable",
+    "entry_operator_action",
+    "entry_pending",
+    "entry_retrying",
+    "attempts",
+    "checkpoint",
+    "byte_budget",
+    "bytes_consumed",
+    "time_budget_ms",
+    "deadline_at",
+    "created_at",
+    "updated_at",
+    "completed_at",
+  ],
 } as const;
 
 const listParams = [
@@ -356,6 +511,92 @@ const listParams = [
 ] as const;
 
 const idParam = [{ name: "id", in: "path", required: true, schema: { type: "string" } }] as const;
+const attachmentRepairIdParam = [{
+  name: "id",
+  in: "path",
+  required: true,
+  schema: { type: "string", format: "uuid" },
+}] as const;
+const invalidAttachmentRepairIdResponse = {
+  description: "Repair id is not a UUID",
+  content: {
+    "application/json": {
+      schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          error: { type: "string" },
+          code: { type: "string", enum: ["invalid_attachment_repair_id"] },
+        },
+        required: ["error", "code"],
+      },
+    },
+  },
+} as const;
+
+const invalidAttachmentInventoryQueryResponse = {
+  description: "Attachment cursor, direction, since filter, or page limit is invalid",
+  content: {
+    "application/json": {
+      schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          error: { type: "string" },
+          code: {
+            type: "string",
+            enum: ["invalid_cursor", "invalid_direction", "invalid_since", "invalid_limit"],
+          },
+        },
+        required: ["error", "code"],
+      },
+    },
+  },
+} as const;
+
+const invalidAttachmentRepairResumeResponse = {
+  description: "Repair id is not a UUID, the page limit is invalid, or the request body has unsupported fields",
+  content: {
+    "application/json": {
+      schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          error: { type: "string" },
+          code: {
+            type: "string",
+            enum: [
+              "invalid_attachment_repair_id",
+              "invalid_repair_limit",
+              "invalid_repair_body",
+            ],
+          },
+        },
+        required: ["error", "code"],
+      },
+    },
+  },
+} as const;
+
+const attachmentRepairNotConfiguredResponse = {
+  description: "Canonical attachment-repair source is not configured",
+  content: {
+    "application/json": {
+      schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          error: { type: "string" },
+          code: {
+            type: "string",
+            enum: ["attachment_repair_not_configured"],
+          },
+        },
+        required: ["error", "code"],
+      },
+    },
+  },
+} as const;
 
 function resourceColumnSchema(column: ResourceColumn): Record<string, unknown> {
   if (column.bool) return { type: "boolean" };
@@ -1309,7 +1550,14 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
           "200": { content: { "application/json": { schema: attachmentContentResponseSchema } } },
           "400": { description: "Invalid max_bytes attachment byte limit" },
           "404": { description: "Message or attachment index not found" },
-          "409": { description: "Attachment metadata exists but its content is not stored" },
+          "409": {
+            description: "Attachment metadata exists but its content is not stored",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/AttachmentUnavailableError" },
+              },
+            },
+          },
           "413": { description: "Attachment exceeds the requested or service byte limit" },
           "422": { description: "Stored attachment payload is malformed" },
         },
@@ -1321,7 +1569,7 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
         summary:
           "Read-only, tenant-scoped, keyset-paginated attachment-METADATA inventory across all messages. Exact-once and resumable via the opaque cursor; never returns content_base64. Scope emails:read.",
         parameters: [
-          { name: "limit", in: "query", required: false, schema: { type: "integer", minimum: 1, maximum: 500 }, description: "Page size (default 100, clamped to 500)." },
+          { name: "limit", in: "query", required: false, schema: { type: "integer", minimum: 1, maximum: 500 }, description: "Page size (default 100). Noncanonical or out-of-range values are rejected." },
           { name: "cursor", in: "query", required: false, schema: { type: "string" }, description: "Opaque keyset cursor from a previous page's next_cursor. Order is (sort_ts DESC, message_id DESC, attachment_index ASC); one attachment row is the finest resumable unit." },
           { name: "direction", in: "query", required: false, schema: { type: "string", enum: ["inbound", "outbound"] } },
           { name: "since", in: "query", required: false, schema: { type: "string", format: "date-time" }, description: "Only attachments on messages received/created at or after this instant." },
@@ -1341,7 +1589,10 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
               },
             },
           },
-          "400": { description: "Malformed cursor or invalid since filter" },
+          "400": {
+            description: "Malformed cursor, invalid since filter, invalid direction, or invalid limit",
+            content: invalidAttachmentInventoryQueryResponse.content,
+          },
         },
       },
     },
@@ -1385,6 +1636,186 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
             },
           },
           "400": { description: "message_ids missing, empty, malformed, or over the 200-id batch limit" },
+        },
+      },
+    },
+    "/v1/attachments/repairs": {
+      post: {
+        operationId: "createOrResumeAttachmentRepair",
+        summary:
+          "Create an idempotent bounded legacy attachment-repair manifest and process one checkpointed page.",
+        description:
+          "Requires a tenant owner or admin session, or an operator API key with emails:* scope. Dry-run is the default. The canonical S3 bucket is deployment-owned and cannot be supplied here. At manifest creation every exact canary must resolve in the authenticated tenant to the declared canonical object and have a non-empty repairable attachment inventory. This endpoint never lists a bucket and never returns source keys, recipients, or payload bytes.",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  idempotency_key: { type: "string", minLength: 1, maxLength: 200 },
+                  apply: { type: "boolean", default: false },
+                  limit: {
+                    type: "integer",
+                    minimum: 1,
+                    maximum: 25,
+                    default: 25,
+                    description: "Maximum manifest entries processed and checkpointed in this request.",
+                  },
+                  entries: {
+                    type: "array",
+                    minItems: 1,
+                    maxItems: 200,
+                    items: attachmentRepairManifestEntrySchema,
+                  },
+                },
+                required: ["idempotency_key", "entries"],
+              },
+            },
+          },
+        },
+        responses: {
+          "201": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  additionalProperties: false,
+                  properties: {
+                    repair: { $ref: "#/components/schemas/AttachmentRepairSummary" },
+                    max_page_size: { type: "integer", enum: [25] },
+                  },
+                  required: ["repair", "max_page_size"],
+                },
+              },
+            },
+          },
+          "400": {
+            description:
+              "Malformed, empty, duplicate, or over-limit manifest, invalid page limit, or unsupported top-level request fields",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  additionalProperties: false,
+                  properties: {
+                    error: { type: "string" },
+                    code: {
+                      type: "string",
+                      enum: [
+                        "invalid_idempotency_key",
+                        "invalid_apply",
+                        "invalid_repair_manifest",
+                        "invalid_repair_limit",
+                        "invalid_repair_body",
+                      ],
+                    },
+                  },
+                  required: ["error", "code"],
+                },
+              },
+            },
+          },
+          "401": { description: "Authentication required" },
+          "403": { description: "Tenant operator authorization is required" },
+          "409": { description: "Idempotency key already belongs to a different immutable manifest" },
+          "429": {
+            description: "The tenant's active or durable repair-ledger quota is exhausted",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  additionalProperties: false,
+                  properties: {
+                    error: { type: "string" },
+                    code: { type: "string", enum: ["attachment_repair_quota_exceeded"] },
+                    quota: {
+                      type: "string",
+                      enum: ["active_runs", "ledger_runs", "ledger_entries"],
+                    },
+                    retryable: { type: "boolean" },
+                  },
+                  required: ["error", "code", "quota", "retryable"],
+                },
+              },
+            },
+          },
+          "503": attachmentRepairNotConfiguredResponse,
+        },
+      },
+    },
+    "/v1/attachments/repairs/{id}": {
+      get: {
+        operationId: "getAttachmentRepair",
+        summary: "Read one tenant-scoped repair checkpoint and reconciled totals.",
+        description:
+          "Requires a tenant owner or admin session, or an operator API key with emails:* scope.",
+        parameters: [...attachmentRepairIdParam],
+        responses: {
+          "200": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  additionalProperties: false,
+                  properties: {
+                    repair: { $ref: "#/components/schemas/AttachmentRepairSummary" },
+                  },
+                  required: ["repair"],
+                },
+              },
+            },
+          },
+          "400": invalidAttachmentRepairIdResponse,
+          "401": { description: "Authentication required" },
+          "403": { description: "Tenant operator authorization is required" },
+          "404": { description: "Run does not exist in the authenticated tenant" },
+        },
+      },
+    },
+    "/v1/attachments/repairs/{id}/resume": {
+      post: {
+        operationId: "resumeAttachmentRepair",
+        summary: "Resume one bounded page from the first unfinished checkpoint.",
+        description:
+          "Requires a tenant owner or admin session, or an operator API key with emails:* scope.",
+        parameters: [...attachmentRepairIdParam],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  limit: { type: "integer", minimum: 1, maximum: 25, default: 25 },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  additionalProperties: false,
+                  properties: {
+                    repair: { $ref: "#/components/schemas/AttachmentRepairSummary" },
+                    max_page_size: { type: "integer", enum: [25] },
+                  },
+                  required: ["repair", "max_page_size"],
+                },
+              },
+            },
+          },
+          "400": invalidAttachmentRepairResumeResponse,
+          "401": { description: "Authentication required" },
+          "403": { description: "Tenant operator authorization is required" },
+          "404": { description: "Run does not exist in the authenticated tenant" },
+          "503": attachmentRepairNotConfiguredResponse,
         },
       },
     },
@@ -1522,8 +1953,10 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
       SendIntentCancellation: sendIntentCancellationSchema as never,
       SendMessageError: sendMessageErrorSchema as never,
       AttachmentContent: attachmentContentSchema as never,
+      AttachmentUnavailableError: attachmentUnavailableErrorSchema as never,
       AttachmentInventoryItem: attachmentInventoryItemSchema as never,
       AttachmentMeta: attachmentMetaSchema as never,
+      AttachmentRepairSummary: attachmentRepairSummarySchema as never,
       Thread: threadSchema as never,
       Mailbox: mailboxSchema as never,
     },

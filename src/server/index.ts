@@ -33,6 +33,10 @@ Commands:
   attachment-repair-canary
                      Exact-ID, exact-object attachment repair. Dry-run unless
                      --apply is passed; never inserts or updates other fields.
+  attachment-repair-ledger
+                     Operator-only, image-bundled checkpoint ledger maintenance.
+                     Reads one canonical secret manifest, proves ECS/image
+                     provenance, and emits aggregate JSON only.
   inbound-provenance-audit
                      Read-only all-tenant post-fence provenance audit. Emits
                      aggregate counts only and exits nonzero on any gap.
@@ -96,6 +100,10 @@ if (args[0] === "ingest-worker") {
     canaryMessageIds: repeated("--message-id"),
     apply: args.includes("--apply"),
   });
+} else if (args[0] === "attachment-repair-ledger") {
+  const { runAttachmentRepairMaintenanceCommand } =
+    await import("./self-hosted/attachment-repair-maintenance.js");
+  await runAttachmentRepairMaintenanceCommand(args.slice(1));
 } else if (args[0] === "inbound-provenance-audit") {
   const sinceValues = repeated("--since");
   if (args.length !== 3 || args[1] !== "--since" || sinceValues.length !== 1) {

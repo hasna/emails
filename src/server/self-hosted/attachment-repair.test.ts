@@ -4,8 +4,13 @@ import type { TypedQueryClient } from "../../storage-kit/index.js";
 import { emailsSelfHostedMigrations } from "./migrations.js";
 import { EmailsSelfHostedStore } from "./store.js";
 import {
+  AttachmentRepairTerminalSourceError,
+  MAX_ATTACHMENT_REPAIR_RAW_BYTES,
+  processCanonicalS3AttachmentRepairPage,
   repairExistingS3ObjectAttachments,
   type AttachmentRepairDeps,
+  type AttachmentRepairLedgerEntry,
+  type AttachmentRepairLedgerRun,
   type AttachmentRepairState,
 } from "./attachment-repair.js";
 
@@ -28,7 +33,8 @@ const canonicalProvenance = {
 function fixture(overrides: {
   state?: AttachmentRepairState | null;
   fetchError?: Error;
-  parsed?: typeof parsedAttachments;
+  parseError?: Error;
+  parsed?: unknown[];
   raw?: Buffer;
 } = {}) {
   let state = overrides.state === undefined
@@ -78,7 +84,10 @@ function fixture(overrides: {
       if (overrides.fetchError) throw overrides.fetchError;
       return overrides.raw ?? rawMime;
     },
-    parseMime: async () => ({ attachments: overrides.parsed ?? parsedAttachments }),
+    parseMime: async () => {
+      if (overrides.parseError) throw overrides.parseError;
+      return { attachments: overrides.parsed ?? parsedAttachments };
+    },
   };
   return { deps, before, row, writes: () => writes };
 }
@@ -276,6 +285,112 @@ describe("immutable inbound source provenance", () => {
 });
 
 describe("historical attachment repair", () => {
+  it("prefers MAILERY_INGEST_S3_BUCKET and falls back to EMAILS_INGEST_S3_BUCKET", async () => {
+    const run = {
+      id: "11111111-1111-4111-8111-111111111111",
+      tenant_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      apply: false,
+      status: "pending",
+      entry_total: 1,
+      inventory_total: 1,
+      repaired: 0,
+      would_repair: 0,
+      unavailable: 0,
+      operator_action: 0,
+      pending: 1,
+      retrying: 0,
+      entry_repaired: 0,
+      entry_would_repair: 0,
+      entry_unavailable: 0,
+      entry_operator_action: 0,
+      entry_pending: 1,
+      entry_retrying: 0,
+      attempts: 0,
+      checkpoint: 0,
+      created_at: "2026-07-24T00:00:00.000Z",
+      updated_at: "2026-07-24T00:00:00.000Z",
+      completed_at: null,
+    } satisfies AttachmentRepairLedgerRun;
+    const entry = {
+      tenant_id: run.tenant_id,
+      run_id: run.id,
+      position: 0,
+      object_key: "source/one",
+      recipients: ["one@example.test"],
+      canary_message_ids: ["message-1"],
+      attachment_count: 1,
+      status: "pending",
+      operator_action: false,
+      attempts: 1,
+      last_error_code: null,
+      last_attempt_at: "2026-07-24T00:00:00.000Z",
+      next_attempt_at: "2026-07-24T00:00:00.000Z",
+      claim_token: "22222222-2222-4222-8222-222222222222",
+      lease_expires_at: "2026-07-24T00:15:00.000Z",
+    } satisfies AttachmentRepairLedgerEntry;
+
+    for (const scenario of [
+      {
+        env: {
+          MAILERY_INGEST_S3_BUCKET: "mailery-canonical",
+          EMAILS_INGEST_S3_BUCKET: "legacy-canonical",
+        },
+        expected: "mailery-canonical",
+      },
+      {
+        env: { MAILERY_INGEST_S3_BUCKET: "mailery-canonical" },
+        expected: "mailery-canonical",
+      },
+      {
+        env: { EMAILS_INGEST_S3_BUCKET: "legacy-canonical" },
+        expected: "legacy-canonical",
+      },
+    ] as const) {
+      let observedBucket: string | undefined;
+      let reads = 0;
+      const tenantStore = {
+        getAttachmentRepairRun: async () => {
+          reads++;
+          return reads === 1
+            ? run
+            : {
+                ...run,
+                status: "completed",
+                unavailable: 1,
+                pending: 0,
+                entry_unavailable: 1,
+                entry_pending: 0,
+                attempts: 1,
+                checkpoint: 1,
+                completed_at: "2026-07-24T00:00:01.000Z",
+              } satisfies AttachmentRepairLedgerRun;
+        },
+        claimAttachmentRepairEntry: async () => entry,
+        recordAttachmentRepairEntryOutcome: async () => {},
+      };
+      const rootStore = {
+        resolveInboundRecipients: async () => ({
+          groups: [{ tenantId: run.tenant_id, recipients: ["one@example.test"] }],
+          unresolved: [],
+        }),
+        listAttachmentRepairBindings: async (bucket: string) => {
+          observedBucket = bucket;
+          return [];
+        },
+        replaceAttachmentPayloadsAtomically: async () => false,
+      };
+
+      await processCanonicalS3AttachmentRepairPage(
+        rootStore as never,
+        tenantStore as never,
+        run.id,
+        1,
+        scenario.env as NodeJS.ProcessEnv,
+      );
+      expect(observedBucket).toBe(scenario.expected);
+    }
+  });
+
   it("rejects duplicate normalized canary IDs before route, DB, or AWS reads", async () => {
     let reads = 0;
     let writes = 0;
@@ -366,12 +481,27 @@ describe("historical attachment repair", () => {
     expect(f.writes()).toBe(1);
   });
 
-  it("does not mutate when S3 is missing or parsed MIME does not match metadata", async () => {
-    const missing = fixture({ fetchError: new Error("NoSuchKey") });
+  it("terminalizes deterministic missing-source and immutable malformed-MIME failures", async () => {
+    const noSuchKey = new Error("The specified key does not exist");
+    noSuchKey.name = "NoSuchKey";
+    const missing = fixture({ fetchError: noSuchKey });
     const failed = await repairExistingS3ObjectAttachments(missing.deps, { ...input, apply: true });
-    expect(failed.items[0]?.status).toBe("error");
+    expect(failed.items[0]).toMatchObject({ status: "error", retryable: false });
     expect(missing.writes()).toBe(0);
     expect(missing.row).toEqual(missing.before);
+
+    const noBody = fixture({ fetchError: new Error("S3 object has no body") });
+    const absentBody = await repairExistingS3ObjectAttachments(noBody.deps, { ...input, apply: true });
+    expect(absentBody.items[0]).toMatchObject({ status: "error", retryable: false });
+    expect(noBody.writes()).toBe(0);
+
+    const malformedMime = fixture({ parseError: new Error("malformed MIME boundary") });
+    const malformedResult = await repairExistingS3ObjectAttachments(
+      malformedMime.deps,
+      { ...input, apply: true },
+    );
+    expect(malformedResult.items[0]).toMatchObject({ status: "error", retryable: false });
+    expect(malformedMime.writes()).toBe(0);
 
     const malformed = fixture({ parsed: [] });
     const mismatch = await repairExistingS3ObjectAttachments(malformed.deps, { ...input, apply: true });
@@ -380,10 +510,61 @@ describe("historical attachment repair", () => {
     expect(malformed.row).toEqual(malformed.before);
   });
 
+  it("counts only missing payloads and treats adapter-enforced source limits as terminal", async () => {
+    const completePayload = {
+      filename: "already.txt",
+      content_type: "text/plain",
+      size: 7,
+      content_base64: Buffer.from("already").toString("base64"),
+    };
+    const missingPayload = {
+      filename: "missing.txt",
+      content_type: "text/plain",
+      size: 7,
+    };
+    const mixed = fixture({
+      state: {
+        attachments: [completePayload, missingPayload],
+        provenance: canonicalProvenance,
+      },
+      parsed: [
+        completePayload,
+        {
+          ...missingPayload,
+          content_base64: Buffer.from("missing").toString("base64"),
+        },
+      ],
+    });
+    const dryRun = await repairExistingS3ObjectAttachments(mixed.deps, input);
+    expect(dryRun.items).toEqual([{
+      tenant_id: "tenant-a",
+      message_id: "message-1",
+      status: "would_repair",
+      attachments: 1,
+    }]);
+
+    const oversized = fixture({
+      fetchError: new AttachmentRepairTerminalSourceError(
+        "S3 object exceeds attachment repair source byte limit",
+        "source_byte_limit",
+      ),
+    });
+    const failed = await repairExistingS3ObjectAttachments(oversized.deps, input);
+    expect(failed.items[0]).toMatchObject({ status: "error", retryable: false });
+    expect(failed).toMatchObject({
+      source_bytes: MAX_ATTACHMENT_REPAIR_RAW_BYTES,
+      source_limit_exhausted: true,
+    });
+  });
+
   it("does not parse or mutate an oversized source object", async () => {
     const f = fixture();
     let parsed = false;
-    f.deps.fetchObject = async () => Buffer.from("ninebytes");
+    let requestedLimit: number | undefined;
+    f.deps.fetchObject = async (_bucket, _key, maxBytes) => {
+      requestedLimit = maxBytes;
+      return Buffer.from("ninebytes");
+    };
     f.deps.parseMime = async () => {
       parsed = true;
       return { attachments: parsedAttachments };
@@ -395,6 +576,10 @@ describe("historical attachment repair", () => {
       maxRawBytes: 8,
     });
     expect(result.items[0]?.status).toBe("error");
+    expect(result.items[0]?.retryable).toBe(false);
+    expect(result.source_bytes).toBe(9);
+    expect(result.source_limit_exhausted).toBe(true);
+    expect(requestedLimit).toBe(8);
     expect(parsed).toBe(false);
     expect(f.writes()).toBe(0);
     expect(f.row).toEqual(f.before);
@@ -415,6 +600,7 @@ describe("historical attachment repair", () => {
     unresolved.deps.resolveInboundRecipients = async () => ({ groups: [], unresolved: ["unknown@example.com"] });
     const denied = await repairExistingS3ObjectAttachments(unresolved.deps, { ...input, apply: true });
     expect(denied.items[0]?.status).toBe("error");
+    expect(denied.items[0]?.retryable).toBe(false);
     expect(unresolved.writes()).toBe(0);
 
     const ambiguous = fixture();
@@ -446,6 +632,41 @@ describe("historical attachment repair", () => {
 
     const result = await repairExistingS3ObjectAttachments(f.deps, { ...input, apply: true });
     expect(result.items.every((item) => item.status === "ambiguous_binding")).toBe(true);
+    expect(f.writes()).toBe(0);
+    expect(f.row).toEqual(f.before);
+  });
+
+  it("enforces an authenticated tenant fence before fetching or mutating a globally bound object", async () => {
+    const f = fixture();
+    let fetched = false;
+    f.deps.resolveInboundRecipients = async () => ({
+      groups: [{ tenantId: "tenant-b", recipients: ["foreign@example.com"] }],
+      unresolved: [],
+    });
+    f.deps.listAttachmentRepairBindings = async () => [{
+      tenantId: "tenant-b",
+      messageId: "foreign-message",
+      attachments: [{ filename: "invoice.txt", content_type: "text/plain", size: 5 }],
+      provenance: {
+        ...canonicalProvenance,
+        tenant_id: "tenant-b",
+        message_id: "foreign-message",
+      },
+    }];
+    f.deps.fetchObject = async () => {
+      fetched = true;
+      return rawMime;
+    };
+
+    const result = await repairExistingS3ObjectAttachments(f.deps, {
+      ...input,
+      recipients: ["foreign@example.com"],
+      canaryMessageIds: ["foreign-message"],
+      allowedTenantId: "tenant-a",
+      apply: true,
+    });
+    expect(result.items.every((item) => item.status === "ambiguous_binding")).toBe(true);
+    expect(fetched).toBe(false);
     expect(f.writes()).toBe(0);
     expect(f.row).toEqual(f.before);
   });

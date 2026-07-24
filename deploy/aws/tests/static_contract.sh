@@ -176,6 +176,22 @@ if grep -En 'name[[:space:]]*=[[:space:]]*"DATABASE_URL"|\["mailery|\["mailery-s
   exit 1
 fi
 
+if ! grep -F 'name = "EMAILS_INGEST_PREFIX_DOMAIN_MAP"' compute.tf >/dev/null \
+  || ! grep -F '(var.inbound_object_prefix) = lower(var.email_domain)' compute.tf >/dev/null; then
+  echo "worker must receive the validated Terraform prefix/domain routing map" >&2
+  exit 1
+fi
+for prefix_validation in \
+  'length(var.inbound_object_prefix) > 1' \
+  'trimspace(var.inbound_object_prefix) == var.inbound_object_prefix' \
+  'endswith(var.inbound_object_prefix, "/")' \
+  'can(regex("^[^[:cntrl:]]+/$", var.inbound_object_prefix))'; do
+  grep -F "$prefix_validation" variables.tf >/dev/null || {
+    echo "inbound_object_prefix must match the worker's canonical prefix contract: $prefix_validation" >&2
+    exit 1
+  }
+done
+
 worker_statement_is_gated() {
   awk -v wanted_sid="$1" '
     function brace_delta(value, copy, opens, closes) {
@@ -369,7 +385,7 @@ done
 cutover_text="$(tr '\n' ' ' < "$repo/docs/DEPLOYMENT_CUTOVER.md")"
 if grep -En '(^|[^[:digit:]])[[:digit:]]+[.][[:digit:]]+[.][[:digit:]]+([^[:digit:]]|$)|IMAGE_[[:digit:]]+' \
   "$repo/docs/DEPLOYMENT_CUTOVER.md" >/dev/null; then
-  echo "0017 runbook must use release inputs instead of stale hardcoded release literals" >&2
+  echo "0020 runbook must use release inputs instead of stale hardcoded release literals" >&2
   exit 1
 fi
 
@@ -426,14 +442,14 @@ for phrase in \
   'test "$INITIAL_DLQ_IN_FLIGHT" = "0"' \
   'test "$FINAL_DLQ_VISIBLE" = "0"' \
   'test "$FINAL_DLQ_IN_FLIGHT" = "0"' \
-  "verify ledger 0017" \
+  "verify ledger 0020" \
   "inbound-provenance-audit" \
   "only the release worker" \
   "before the API" \
   "compatible roll-forward" \
-  "pre-0017 release"; do
+  "pre-0020 release"; do
   printf '%s\n' "$cutover_text" | grep -Fiq "$phrase" || {
-    echo "0017 forward-only cutover contract missing '$phrase' from docs/DEPLOYMENT_CUTOVER.md" >&2
+    echo "0020 forward-only cutover contract missing '$phrase' from docs/DEPLOYMENT_CUTOVER.md" >&2
     exit 1
   }
 done
@@ -639,7 +655,7 @@ if grep -Fq 'FENCE_AT="$(date ' "$repo/docs/DEPLOYMENT_CUTOVER.md"; then
   exit 1
 fi
 
-stage_line="$(grep -nF 'terraform apply 0017-definitions.tfplan' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
+stage_line="$(grep -nF 'terraform apply 0020-definitions.tfplan' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
 staged_assert_line="$(grep -nF 'assert_staged_task_definition "$STAGED_MIGRATION_TASK_JSON"' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
 rollback_worker_disable_line="$(grep -nF 'ROLLBACK_DISABLE_WORKER_JSON=' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
 rollback_api_disable_line="$(grep -nF 'ROLLBACK_DISABLE_API_JSON=' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
@@ -669,7 +685,7 @@ for ordered_line in \
   "$api_tasks_zero_line" \
   "$fence_line"; do
   test -n "$ordered_line" || {
-    echo "0017 cutover is missing a machine-readable zero-writer gate" >&2
+    echo "0020 cutover is missing a machine-readable zero-writer gate" >&2
     exit 1
   }
 done
@@ -686,7 +702,7 @@ test "$stage_line" -lt "$staged_assert_line" \
   && test "$services_zero_line" -lt "$worker_tasks_recheck_line" \
   && test "$worker_tasks_recheck_line" -lt "$api_tasks_zero_line" \
   && test "$api_tasks_zero_line" -lt "$fence_line" || {
-  echo "0017 cutover must stage the release, prove the worker/queue/API zero, then capture the DB fence" >&2
+  echo "0020 cutover must stage the release, prove the worker/queue/API zero, then capture the DB fence" >&2
   exit 1
 }
 
@@ -716,7 +732,7 @@ for ordered_line in \
   "$version_gate_line" \
   "$reconcile_plan_line"; do
   test -n "$ordered_line" || {
-    echo "0017 cutover is missing a migration, status, worker, audit, or API gate" >&2
+    echo "0020 cutover is missing a migration, status, worker, audit, or API gate" >&2
     exit 1
   }
 done
@@ -732,7 +748,7 @@ test "$fence_line" -lt "$migration_task_line" \
   && test "$api_start_line" -lt "$version_json_line" \
   && test "$version_json_line" -lt "$version_gate_line" \
   && test "$version_gate_line" -lt "$reconcile_plan_line" || {
-  echo "0017 cutover must run migration, status, release worker, audit, then API in order" >&2
+  echo "0020 cutover must run migration, status, release worker, audit, then API in order" >&2
   exit 1
 }
 
@@ -744,7 +760,7 @@ for zero_assertion in \
   "--query 'length(taskArns)'" \
   'test "$CURRENT_QUEUE_IN_FLIGHT" = "0"'; do
   grep -Fq -- "$zero_assertion" "$repo/docs/DEPLOYMENT_CUTOVER.md" || {
-    echo "0017 cutover missing machine assertion '$zero_assertion'" >&2
+    echo "0020 cutover missing machine assertion '$zero_assertion'" >&2
     exit 1
   }
 done
@@ -772,15 +788,260 @@ for command_phrase in \
   '(.version == $release_version)' \
   "/ready"; do
   grep -Fiq -- "$command_phrase" "$repo/docs/DEPLOYMENT_CUTOVER.md" || {
-    echo "0017 cutover rehearsal missing '$command_phrase' from docs/DEPLOYMENT_CUTOVER.md" >&2
+    echo "0020 cutover rehearsal missing '$command_phrase' from docs/DEPLOYMENT_CUTOVER.md" >&2
     exit 1
   }
 done
 
-if grep -Eiq 'keep (the )?(existing|old|pre-0017).*(task|worker|API).*(running|live).*(migration|replacement)|old task stays running' \
+if grep -Eiq 'keep (the )?(existing|old|pre-0020).*(task|worker|API).*(running|live).*(migration|replacement)|old task stays running' \
   "$repo/docs/DEPLOYMENT_CUTOVER.md"; then
-  echo "0017 cutover must not overlap migration or replacement with incompatible tasks" >&2
+  echo "0020 cutover must not overlap migration or replacement with incompatible tasks" >&2
   exit 1
 fi
+
+maintenance_source="$repo/src/server/self-hosted/attachment-repair-maintenance.ts"
+for maintenance_contract in \
+  'EMAILS_ATTACHMENT_REPAIR_MANIFEST' \
+  'EMAILS_IMAGE_REVISION' \
+  'ECS_CONTAINER_METADATA_URI_V4' \
+  'attachment-repair-ledger' \
+  'MAX_ATTACHMENT_REPAIR_PAGE_ITEMS' \
+  'processCanonicalS3AttachmentRepairPage' \
+  'createOrGetAttachmentRepairRun' \
+  'dryRunResultSha256' \
+  'expectedTaskDefinitionArn' \
+  'expectedImageDigest' \
+  'expectedImageRevision' \
+  'operator_action' \
+  'entry_operator_action' \
+  'invariant_failure' \
+  'process.exitCode'; do
+  grep -Fq "$maintenance_contract" "$maintenance_source" || {
+    echo "image-bundled attachment repair maintenance contract is missing $maintenance_contract" >&2
+    exit 1
+  }
+done
+if grep -Eiq '@aws-sdk/client-ses|ses:SendEmail|ses:SendRawEmail|ListObjects|ListObjectsV2' \
+  "$maintenance_source"; then
+  echo "attachment repair maintenance command must not send mail or list the bucket" >&2
+  exit 1
+fi
+grep -Fq 'args[0] === "attachment-repair-ledger"' "$repo/src/server/index.ts" || {
+  echo "self-hosted image entrypoint must expose attachment-repair-ledger" >&2
+  exit 1
+}
+
+for repair_runbook_contract in \
+  'attachment-repair-ledger' \
+  'REPAIR_MANIFEST_SECRET_ARN' \
+  'REPAIR_MANIFEST_SHA256' \
+  'REPAIR_TASK_ROLE_ARN' \
+  'REPAIR_EXECUTION_ROLE_ARN' \
+  'REPAIR_TASK_DEFINITION_ARN' \
+  'REPAIR_RESULT_FILE_SHA256' \
+  'test ! -L "$REPAIR_RESULT_FILE"' \
+  'rehearsal_aws ecs register-task-definition' \
+  'LAST_REPAIR_TASK_ARN="$(rehearsal_aws ecs run-task' \
+  'aws ecs wait tasks-stopped' \
+  'aws ecs describe-tasks' \
+  'ECS_CONTAINER_METADATA_URI_V4' \
+  'imageDigest' \
+  'RELEASE_COMMIT' \
+  'DRY_RUN_RESULT_SHA256' \
+  '"--expected-run-id",$expected_run_id' \
+  'test "$LAST_REPAIR_EXIT" = "75"' \
+  'aws logs get-log-events' \
+  'FINAL_REPAIR_TASK_COUNT' \
+  'verify_attachment_repair_result.sh' \
+  'There is no empty' \
+  'there is no waiver'; do
+  grep -Fiq "$repair_runbook_contract" "$repo/docs/DEPLOYMENT_CUTOVER.md" || {
+    echo "attachment repair cutover contract missing '$repair_runbook_contract'" >&2
+    exit 1
+  }
+done
+if grep -Eiq 'required[[:space:]]*==[[:space:]]*false|repair[[:space:]]*==[[:space:]]*null|empty repair requirement' \
+  "$repo/docs/DEPLOYMENT_CUTOVER.md"; then
+  echo "attachment repair promotion must not retain an implicit empty-result waiver" >&2
+  exit 1
+fi
+if grep -Fq 'aws logs filter-log-events' "$repo/docs/DEPLOYMENT_CUTOVER.md"; then
+  echo "attachment repair evidence must come from the exact task log stream, not broad log filtering" >&2
+  exit 1
+fi
+
+repair_definition_line="$(grep -nF 'REPAIR_TASK_DEFINITION_JSON="$(rehearsal_aws ecs register-task-definition' \
+  "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
+repair_task_line="$(grep -nF 'LAST_REPAIR_TASK_ARN="$(rehearsal_aws ecs run-task' \
+  "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
+repair_result_gate_line="$(grep -nF '"$SOURCE_CHECKOUT/deploy/aws/verify_attachment_repair_result.sh"' \
+  "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
+test -n "$repair_definition_line" \
+  && test -n "$repair_task_line" \
+  && test -n "$repair_result_gate_line" \
+  && test "$status_gate_line" -lt "$repair_definition_line" \
+  && test "$repair_definition_line" -lt "$repair_task_line" \
+  && test "$repair_task_line" -lt "$repair_result_gate_line" \
+  && test "$repair_result_gate_line" -lt "$worker_start_line" || {
+  echo "attachment repair must run after ledger verification and pass before the worker starts" >&2
+  exit 1
+}
+
+repair_result_gate="$root/verify_attachment_repair_result.sh"
+if [ ! -x "$repair_result_gate" ]; then
+  echo "attachment repair promotion gate must be an executable deployment contract" >&2
+  exit 1
+fi
+for zero_gate in \
+  '.repair.unavailable == 0' \
+  '.repair.operator_action == 0' \
+  '.repair.entry_unavailable == 0' \
+  '.repair.entry_operator_action == 0' \
+  '.repair.pending == 0' \
+  '.repair.retrying == 0' \
+  '.repair.entry_pending == 0' \
+  '.repair.entry_retrying == 0'; do
+  grep -Fq "$zero_gate" "$repair_result_gate" || {
+    echo "attachment repair verifier is missing zero gate $zero_gate" >&2
+    exit 1
+  }
+done
+
+repair_fixture_dir=$(mktemp -d)
+trap 'rm -rf -- "$repair_fixture_dir"' EXIT HUP INT TERM
+repair_task_arn="arn:aws:ecs:eu-central-1:123456789012:task/rehearsal/44444444444444444444444444444444"
+repair_definition_arn="arn:aws:ecs:eu-central-1:123456789012:task-definition/rehearsal-api-attachment-repair:7"
+repair_container="attachment-repair"
+repair_image_digest="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+repair_image_revision="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+repair_manifest_sha="cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+repair_run_id="33333333-3333-4333-8333-333333333333"
+
+repair_json="$(jq -cnS --arg run_id "$repair_run_id" '{
+  apply:true,
+  attempts:1,
+  checkpoint:1,
+  completed_at:"2026-07-24T10:00:01.000Z",
+  created_at:"2026-07-24T10:00:00.000Z",
+  entry_operator_action:0,
+  entry_pending:0,
+  entry_repaired:1,
+  entry_retrying:0,
+  entry_total:1,
+  entry_unavailable:0,
+  entry_would_repair:0,
+  id:$run_id,
+  inventory_total:2,
+  operator_action:0,
+  pending:0,
+  repaired:2,
+  retrying:0,
+  status:"completed",
+  unavailable:0,
+  updated_at:"2026-07-24T10:00:01.000Z",
+  would_repair:0
+}')"
+repair_summary_sha="$(printf '%s' "$repair_json" | sha256sum | awk '{print $1}')"
+repair_success="$repair_fixture_dir/success.json"
+jq -cnS \
+  --arg container "$repair_container" \
+  --arg image_digest "$repair_image_digest" \
+  --arg image_revision "$repair_image_revision" \
+  --arg manifest_sha "$repair_manifest_sha" \
+  --argjson repair "$repair_json" \
+  --arg result_sha "$repair_summary_sha" \
+  --arg run_id "$repair_run_id" \
+  --arg task_arn "$repair_task_arn" \
+  --arg definition_arn "$repair_definition_arn" '{
+    container_name:$container,
+    failure_code:null,
+    image_digest:$image_digest,
+    image_revision:$image_revision,
+    manifest_sha256:$manifest_sha,
+    phase:"apply",
+    repair:$repair,
+    result_sha256:$result_sha,
+    run_id:$run_id,
+    schema_version:1,
+    status:"pass",
+    task_arn:$task_arn,
+    task_definition_arn:$definition_arn
+  }' >"$repair_success"
+repair_success_sha="$(sha256sum -- "$repair_success" | awk '{print $1}')"
+"$repair_result_gate" \
+  "$repair_success" "$repair_success_sha" \
+  "$repair_task_arn" "$repair_definition_arn" "$repair_container" \
+  "$repair_image_digest" "$repair_image_revision" "$repair_manifest_sha" \
+  "$repair_run_id"
+
+repair_gate_must_fail() {
+  if "$repair_result_gate" "$@" >/dev/null 2>&1; then
+    echo "attachment repair promotion gate accepted a negative fixture" >&2
+    exit 1
+  fi
+}
+
+repair_gate_must_fail \
+  "$repair_success" "$repair_success_sha" \
+  "${repair_task_arn}fabricated" "$repair_definition_arn" "$repair_container" \
+  "$repair_image_digest" "$repair_image_revision" "$repair_manifest_sha" \
+  "$repair_run_id"
+
+for nonzero_field in \
+  unavailable operator_action entry_unavailable entry_operator_action \
+  pending retrying entry_pending entry_retrying; do
+  fixture="$repair_fixture_dir/nonzero-$nonzero_field.json"
+  tampered_repair="$(jq -cS --arg field "$nonzero_field" \
+    '.repair[$field] = 1 | .repair' "$repair_success")"
+  tampered_result_sha="$(printf '%s' "$tampered_repair" | sha256sum | awk '{print $1}')"
+  jq -cS --arg field "$nonzero_field" --arg result_sha "$tampered_result_sha" \
+    '.repair[$field] = 1 | .result_sha256 = $result_sha' \
+    "$repair_success" >"$fixture"
+  fixture_sha="$(sha256sum -- "$fixture" | awk '{print $1}')"
+  repair_gate_must_fail \
+    "$fixture" "$fixture_sha" \
+    "$repair_task_arn" "$repair_definition_arn" "$repair_container" \
+    "$repair_image_digest" "$repair_image_revision" "$repair_manifest_sha" \
+    "$repair_run_id"
+done
+
+numeric_fixture="$repair_fixture_dir/string-zero.json"
+numeric_repair="$(jq -cS '.repair.unavailable = "0" | .repair' "$repair_success")"
+numeric_result_sha="$(printf '%s' "$numeric_repair" | sha256sum | awk '{print $1}')"
+jq -cS --arg result_sha "$numeric_result_sha" \
+  '.repair.unavailable = "0" | .result_sha256 = $result_sha' \
+  "$repair_success" >"$numeric_fixture"
+numeric_fixture_sha="$(sha256sum -- "$numeric_fixture" | awk '{print $1}')"
+repair_gate_must_fail \
+  "$numeric_fixture" "$numeric_fixture_sha" \
+  "$repair_task_arn" "$repair_definition_arn" "$repair_container" \
+  "$repair_image_digest" "$repair_image_revision" "$repair_manifest_sha" \
+  "$repair_run_id"
+
+provenance_fixture="$repair_fixture_dir/fabricated-provenance.json"
+jq -cS '.task_arn = "arn:aws:ecs:eu-central-1:123456789012:task/rehearsal/fabricated"' \
+  "$repair_success" >"$provenance_fixture"
+provenance_fixture_sha="$(sha256sum -- "$provenance_fixture" | awk '{print $1}')"
+repair_gate_must_fail \
+  "$provenance_fixture" "$provenance_fixture_sha" \
+  "$repair_task_arn" "$repair_definition_arn" "$repair_container" \
+  "$repair_image_digest" "$repair_image_revision" "$repair_manifest_sha" \
+  "$repair_run_id"
+
+hash_fixture="$repair_fixture_dir/bad-result-hash.json"
+jq -cS '.result_sha256 = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"' \
+  "$repair_success" >"$hash_fixture"
+hash_fixture_sha="$(sha256sum -- "$hash_fixture" | awk '{print $1}')"
+repair_gate_must_fail \
+  "$hash_fixture" "$hash_fixture_sha" \
+  "$repair_task_arn" "$repair_definition_arn" "$repair_container" \
+  "$repair_image_digest" "$repair_image_revision" "$repair_manifest_sha" \
+  "$repair_run_id"
+
+repair_gate_must_fail \
+  "$repair_success" "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" \
+  "$repair_task_arn" "$repair_definition_arn" "$repair_container" \
+  "$repair_image_digest" "$repair_image_revision" "$repair_manifest_sha" \
+  "$repair_run_id"
 
 echo "static self-hosting contract: pass"

@@ -63,6 +63,8 @@ export interface IngestDeps {
   /** Fetch a raw RFC822 object from S3 as bytes. */
   fetchObject: (bucket: string, key: string) => Promise<Buffer>;
   now: () => string;
+  /** Deployment-owned routing evidence for recipient-less S3 notifications. */
+  prefixDomainMappings?: readonly InboundPrefixDomainMapping[];
 }
 
 export type IngestStatus = "ingested" | "duplicate" | "quarantined" | "error";
@@ -78,6 +80,81 @@ export interface IngestResult {
   error?: string;
 }
 
+export interface InboundPrefixDomainMapping {
+  prefix: string;
+  domain: string;
+}
+
+const INBOUND_PREFIX_DOMAIN_MAP_MAX_BYTES = 16_384;
+const INBOUND_DOMAIN_RE =
+  /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
+
+/**
+ * Parse deployment-owned S3-prefix → recipient-domain routing evidence.
+ *
+ * The JSON object is intentionally strict and overlap-free so one object key
+ * can never select more than one domain. An absent mapping is valid, but then a
+ * recipient-less event fails closed instead of inferring authority from its key.
+ */
+export function parseInboundPrefixDomainMap(
+  raw: string | undefined,
+): InboundPrefixDomainMapping[] {
+  if (raw === undefined) return [];
+  if (Buffer.byteLength(raw, "utf8") > INBOUND_PREFIX_DOMAIN_MAP_MAX_BYTES) {
+    throw new Error("EMAILS_INGEST_PREFIX_DOMAIN_MAP exceeds its bounded size");
+  }
+  if (raw.trim() === "") return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error("EMAILS_INGEST_PREFIX_DOMAIN_MAP must be a JSON object");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("EMAILS_INGEST_PREFIX_DOMAIN_MAP must be a JSON object");
+  }
+  const mappings = Object.entries(parsed as Record<string, unknown>).map(([prefix, domain]) => {
+    if (typeof domain !== "string") {
+      throw new Error("EMAILS_INGEST_PREFIX_DOMAIN_MAP domains must be strings");
+    }
+    if (prefix.length === 0
+      || prefix !== prefix.trim()
+      || prefix.startsWith("/")
+      || !prefix.endsWith("/")
+      || /[\u0000-\u001F\u007F]/.test(prefix)
+      || prefix.split("/").some((segment) => segment === "." || segment === "..")
+    ) {
+      throw new Error("EMAILS_INGEST_PREFIX_DOMAIN_MAP contains an invalid S3 prefix");
+    }
+    if (domain !== domain.trim().toLowerCase() || !INBOUND_DOMAIN_RE.test(domain)) {
+      throw new Error("EMAILS_INGEST_PREFIX_DOMAIN_MAP contains a non-canonical domain");
+    }
+    return { prefix, domain };
+  }).sort((left, right) => left.prefix.localeCompare(right.prefix));
+  for (let index = 1; index < mappings.length; index += 1) {
+    const previous = mappings[index - 1]!;
+    const current = mappings[index]!;
+    if (current.prefix.startsWith(previous.prefix)) {
+      throw new Error("EMAILS_INGEST_PREFIX_DOMAIN_MAP contains overlapping ambiguous prefixes");
+    }
+  }
+  return mappings;
+}
+
+/**
+ * Recover a synthetic catch-all recipient only from exact deployment-owned
+ * prefix/domain configuration. The object key itself never supplies a domain.
+ */
+export function deriveKeyPathRecipients(
+  objectKey: string,
+  mappings: readonly InboundPrefixDomainMapping[],
+): string[] {
+  if (!objectKey || /[\u0000-\u001F\u007F]/.test(objectKey)) return [];
+  const mapping = mappings.find(({ prefix }) =>
+    objectKey.startsWith(prefix) && objectKey.length > prefix.length);
+  return mapping ? [`catchall@${mapping.domain}`] : [];
+}
+
 export async function ingestS3Object(
   deps: IngestDeps,
   bucket: string,
@@ -87,13 +164,29 @@ export async function ingestS3Object(
   if (!bucket) return { status: "error", key, reason: "no_bucket", error: "worker has no configured inbound bucket" };
   try {
     const envelopeRecipients = note.recipients ?? [];
-    const route = await deps.store.resolveInboundRecipients(envelopeRecipients);
+    let route = await deps.store.resolveInboundRecipients(envelopeRecipients);
+    let routedRecipients = envelopeRecipients;
+    // Fallback only when the notification carried no envelope recipients (a raw
+    // S3 ObjectCreated event has none). Explicit malformed, unresolved, or partial
+    // envelope evidence remains authoritative and must quarantine without
+    // substitution. Recipient-less recovery requires an exact deployment-owned
+    // prefix/domain mapping; the key path itself never supplies routing authority.
+    if (envelopeRecipients.length === 0 && route.groups.length === 0) {
+      const derived = deriveKeyPathRecipients(key, deps.prefixDomainMappings ?? []);
+      if (derived.length > 0) {
+        const derivedRoute = await deps.store.resolveInboundRecipients(derived);
+        if (derivedRoute.groups.length > 0) {
+          route = derivedRoute;
+          routedRecipients = derived;
+        }
+      }
+    }
     if (route.unresolved.length > 0 || route.groups.length === 0) {
       await deps.store.quarantineInbound({
         sourceId: key,
         bucket,
         objectKey: key,
-        envelopeRecipients,
+        envelopeRecipients: routedRecipients,
         reason: route.groups.length === 0 ? "no_tenant_route" : "partial_tenant_route",
         detail: route.unresolved.length > 0
           ? `${route.unresolved.length} unresolved envelope recipient(s)`
@@ -285,6 +378,7 @@ export function shouldDeleteIngestResult(result: IngestResult): boolean {
  * environment:
  *   EMAILS_INGEST_QUEUE_URL   (required) — the SQS queue to consume
  *   EMAILS_INGEST_S3_BUCKET   (required) — operator-owned inbound bucket
+ *   EMAILS_INGEST_PREFIX_DOMAIN_MAP — JSON object mapping trusted prefixes to domains
  *   AWS_REGION                 (default us-east-1)
  *   EMAILS_DATABASE_URL        (required) — self-hosted Postgres DSN
  */
@@ -292,6 +386,9 @@ export async function runIngestWorker(options: WorkerOptions = {}): Promise<void
   const region = options.region ?? process.env["AWS_REGION"] ?? "us-east-1";
   const queueUrl = options.queueUrl ?? process.env["EMAILS_INGEST_QUEUE_URL"];
   const defaultBucket = process.env["EMAILS_INGEST_S3_BUCKET"];
+  const prefixDomainMappings = parseInboundPrefixDomainMap(
+    process.env["EMAILS_INGEST_PREFIX_DOMAIN_MAP"],
+  );
   const maxMessages = options.maxMessages ?? 10;
   const waitTimeSeconds = options.waitTimeSeconds ?? 20;
   const visibilityTimeout = options.visibilityTimeout ?? 120;
@@ -316,7 +413,12 @@ export async function runIngestWorker(options: WorkerOptions = {}): Promise<void
     return Buffer.concat(chunks);
   };
 
-  const deps: IngestDeps = { store, fetchObject, now: () => new Date().toISOString() };
+  const deps: IngestDeps = {
+    store,
+    fetchObject,
+    now: () => new Date().toISOString(),
+    prefixDomainMappings,
+  };
 
   let running = true;
   const stop = (sig: string) => {
@@ -413,6 +515,9 @@ export async function runIngestS3Backfill(options: BackfillOptions = {}): Promis
     .split(",")
     .map((value) => value.trim())
     .filter(Boolean);
+  const prefixDomainMappings = parseInboundPrefixDomainMap(
+    process.env["EMAILS_INGEST_PREFIX_DOMAIN_MAP"],
+  );
   validateIngestWorkerConfig({
     queueUrl: "backfill",
     bucket,
@@ -431,7 +536,12 @@ export async function runIngestS3Backfill(options: BackfillOptions = {}): Promis
     for await (const chunk of res.Body as AsyncIterable<Uint8Array>) chunks.push(chunk);
     return Buffer.concat(chunks);
   };
-  const deps: IngestDeps = { store, fetchObject, now: () => new Date().toISOString() };
+  const deps: IngestDeps = {
+    store,
+    fetchObject,
+    now: () => new Date().toISOString(),
+    prefixDomainMappings,
+  };
   const counts = { ingested: 0, duplicate: 0, quarantined: 0, error: 0 };
   let scanned = 0;
   let continuationToken: string | undefined;

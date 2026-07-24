@@ -15,9 +15,17 @@ import {
   getInboundEmail,
   type InboundEmail,
 } from "../../db/inbound.js";
+import { resetSelfHostedConfigCache } from "../../db/self-hosted-store.js";
+import { saveConfig } from "../../lib/config.js";
 import { registerInboxCommands } from "./inbox.js";
 
 let stub: V1Stub;
+let attachmentInventoryServer: ReturnType<typeof Bun.serve>;
+let attachmentInventoryPages = new Map<string, {
+  items: Array<Record<string, unknown>>;
+  next_cursor: string | null;
+}>();
+let attachmentInventoryRequests: URL[] = [];
 let seq = 0;
 
 type SeedOverrides = Partial<Parameters<typeof storeInboundEmail>[0]>;
@@ -72,6 +80,7 @@ function msgRow(overrides: Record<string, unknown> = {}): Record<string, unknown
 async function runInboxCommand(args: string[]) {
   const program = new Command();
   program.exitOverride();
+  program.option("--json");
   let data: unknown;
   const out: string[] = [];
   registerInboxCommands(program, (d, formatted) => {
@@ -124,16 +133,45 @@ async function runInboxSubprocessExpectingExit(args: string[]) {
 
 beforeAll(async () => {
   stub = await startV1Stub();
+  attachmentInventoryServer = Bun.serve({
+    port: 0,
+    fetch(request) {
+      const url = new URL(request.url);
+      attachmentInventoryRequests.push(url);
+      if (url.pathname !== "/v1/attachments") {
+        return Response.json({ error: "not found" }, { status: 404 });
+      }
+      const cursor = url.searchParams.get("cursor") ?? "";
+      const page = attachmentInventoryPages.get(cursor);
+      if (!page) return Response.json({ error: "unexpected cursor" }, { status: 400 });
+      return Response.json(page);
+    },
+  });
 });
-afterAll(() => stub.stop());
+afterAll(() => {
+  stub.stop();
+  attachmentInventoryServer.stop(true);
+});
 beforeEach(async () => {
   await stub.reset();
   stub.applyEnv();
+  attachmentInventoryPages = new Map();
+  attachmentInventoryRequests = [];
 });
 afterEach(() => {
   stub.clearEnv();
   process.exitCode = 0;
 });
+
+function useAttachmentInventoryPages(
+  pages: Array<[cursor: string, page: { items: Array<Record<string, unknown>>; next_cursor: string | null }]>,
+): void {
+  attachmentInventoryPages = new Map(pages);
+  process.env.EMAILS_MODE = "self_hosted";
+  process.env.EMAILS_SELF_HOSTED_URL = `http://127.0.0.1:${attachmentInventoryServer.port}`;
+  process.env.EMAILS_SELF_HOSTED_API_KEY = "attachment-inventory-test-key";
+  resetSelfHostedConfigCache();
+}
 
 // ─── inbound repo round-trip (POST/GET /v1/messages) ─────────────────────────
 
@@ -638,6 +676,218 @@ describe("inbox links", () => {
       "mailto:ops@example.com",
       "https://example.com/",
     ]);
+  });
+});
+
+// ─── inbox attachments inventory ─────────────────────────────────────────────
+
+describe("inbox attachments", () => {
+  it("honors config-file-only self_hosted mode without opening usable SQLite", async () => {
+    attachmentInventoryPages = new Map([["", { items: [], next_cursor: null }]]);
+    const configHome = mkdtempSync(join(tmpdir(), "emails-config-only-inventory-"));
+    const poisonDbDir = mkdtempSync(join(tmpdir(), "emails-config-only-poison-db-"));
+    const previousHome = process.env.HOME;
+    const previousDbPath = process.env.EMAILS_DB_PATH;
+    const previousClientEnvSecret = process.env.EMAILS_CLIENT_ENV_SECRET;
+    const previousSessionToken = process.env.EMAILS_SESSION_TOKEN;
+    try {
+      process.env.HOME = configHome;
+      saveConfig({ emails_mode: "self_hosted" });
+      for (const key of ["MAILERY_MODE", "HASNA_MAILERY_MODE", "EMAILS_MODE", "HASNA_EMAILS_MODE"]) {
+        delete process.env[key];
+      }
+      delete process.env.EMAILS_CLIENT_ENV_SECRET;
+      delete process.env.EMAILS_SESSION_TOKEN;
+      process.env.EMAILS_SELF_HOSTED_URL = `http://127.0.0.1:${attachmentInventoryServer.port}`;
+      process.env.EMAILS_SELF_HOSTED_API_KEY = "attachment-inventory-test-key";
+      process.env.EMAILS_DB_PATH = poisonDbDir;
+      resetSelfHostedConfigCache();
+
+      const result = await runInboxCommand(["--json", "inbox", "attachments"]);
+
+      expect(result.data).toEqual({ items: [], next_cursor: null });
+      expect(attachmentInventoryRequests).toHaveLength(1);
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousDbPath === undefined) delete process.env.EMAILS_DB_PATH;
+      else process.env.EMAILS_DB_PATH = previousDbPath;
+      if (previousClientEnvSecret === undefined) delete process.env.EMAILS_CLIENT_ENV_SECRET;
+      else process.env.EMAILS_CLIENT_ENV_SECRET = previousClientEnvSecret;
+      if (previousSessionToken === undefined) delete process.env.EMAILS_SESSION_TOKEN;
+      else process.env.EMAILS_SESSION_TOKEN = previousSessionToken;
+      rmSync(configHome, { recursive: true, force: true });
+      rmSync(poisonDbDir, { recursive: true, force: true });
+      resetSelfHostedConfigCache();
+    }
+  });
+
+  it("returns one exact sanitized page envelope from the self-hosted inventory API", async () => {
+    useAttachmentInventoryPages([["", {
+      items: [{
+        message_id: "message-1",
+        attachment_index: 0,
+        filename: "invoice.pdf",
+        content_type: "application/pdf",
+        size_bytes: 2048,
+        sha256: "a".repeat(64),
+        content_available: true,
+        direction: "inbound",
+        received_at: "2026-07-24T08:00:00.000Z",
+        content_base64: "must-not-leak",
+        api_key: "must-not-leak",
+      }],
+      next_cursor: "opaque/+==",
+    }]]);
+    const poisonDbDir = mkdtempSync(join(tmpdir(), "emails-no-local-inventory-"));
+    const previousDbPath = process.env.EMAILS_DB_PATH;
+    process.env.EMAILS_DB_PATH = poisonDbDir;
+    try {
+      const { data } = await runInboxCommand([
+        "--json",
+        "inbox",
+        "attachments",
+        "--limit",
+        "1",
+        "--direction",
+        "inbound",
+        "--since",
+        "2026-07-24T10:00:00+02:00",
+      ]);
+      expect(data).toEqual({
+        items: [{
+          message_id: "message-1",
+          attachment_index: 0,
+          filename: "invoice.pdf",
+          content_type: "application/pdf",
+          size_bytes: 2048,
+          sha256: "a".repeat(64),
+          content_available: true,
+          direction: "inbound",
+          received_at: "2026-07-24T08:00:00.000Z",
+        }],
+        next_cursor: "opaque/+==",
+      });
+      expect(Object.keys(data as Record<string, unknown>).sort()).toEqual(["items", "next_cursor"]);
+      expect(JSON.stringify(data)).not.toContain("content_base64");
+      expect(JSON.stringify(data)).not.toContain("must-not-leak");
+      expect(attachmentInventoryRequests).toHaveLength(1);
+      expect(attachmentInventoryRequests[0]?.searchParams.get("limit")).toBe("1");
+      expect(attachmentInventoryRequests[0]?.searchParams.get("direction")).toBe("inbound");
+      expect(attachmentInventoryRequests[0]?.searchParams.get("since")).toBe("2026-07-24T08:00:00.000Z");
+    } finally {
+      if (previousDbPath === undefined) delete process.env.EMAILS_DB_PATH;
+      else process.env.EMAILS_DB_PATH = previousDbPath;
+      rmSync(poisonDbDir, { recursive: true, force: true });
+    }
+  });
+
+  it("passes the opaque next cursor unchanged and terminates with null", async () => {
+    useAttachmentInventoryPages([
+      ["", { items: [], next_cursor: "opaque/+==" }],
+      ["opaque/+==", { items: [], next_cursor: null }],
+    ]);
+
+    const first = await runInboxCommand(["inbox", "attachments", "--limit", "2"]);
+    expect(first.data).toEqual({ items: [], next_cursor: "opaque/+==" });
+
+    const second = await runInboxCommand([
+      "inbox",
+      "attachments",
+      "--limit",
+      "2",
+      "--cursor",
+      "opaque/+==",
+    ]);
+    expect(second.data).toEqual({ items: [], next_cursor: null });
+    expect(attachmentInventoryRequests.map((url) => url.searchParams.get("cursor"))).toEqual([null, "opaque/+=="]);
+  });
+
+  it("renders a null attachment size as an explicit unknown size", async () => {
+    useAttachmentInventoryPages([["", {
+      items: [{
+        message_id: "msg-null-size",
+        attachment_index: 0,
+        filename: "mystery.pdf",
+        content_type: "application/pdf",
+        size_bytes: null,
+        sha256: null,
+        content_available: false,
+        direction: "inbound",
+        received_at: "2026-07-24T08:00:00.000Z",
+      }],
+      next_cursor: null,
+    }]]);
+
+    const { out } = await runInboxCommand(["inbox", "attachments"]);
+    expect(out).toBe([
+      "",
+      "Attachment inventory (1):",
+      "  msg-null [0] mystery.pdf unknown size · application/pdf unavailable",
+      "  next_cursor: null",
+      "",
+    ].join("\n"));
+  });
+
+  it("rejects invalid limit, direction, and since values before calling the API", async () => {
+    useAttachmentInventoryPages([["", { items: [], next_cursor: null }]]);
+    const cases = [
+      { args: ["--limit", "0"], message: "limit" },
+      { args: ["--limit", "501"], message: "limit" },
+      { args: ["--limit", "1.5"], message: "limit" },
+      { args: ["--direction", "sideways"], message: "direction" },
+      { args: ["--since", "not-a-date"], message: "since" },
+    ];
+
+    for (const testCase of cases) {
+      attachmentInventoryRequests = [];
+      const result = await runInboxCommandExpectingExit(["inbox", "attachments", ...testCase.args]);
+      expect(result.error).toBe("process.exit:1");
+      expect(result.stderr.toLowerCase()).toContain(testCase.message);
+      expect(attachmentInventoryRequests).toHaveLength(0);
+    }
+  });
+
+  it("accepts canonical size strings and rejects invalid attachment sizes", async () => {
+    useAttachmentInventoryPages([["", {
+      items: [{
+        message_id: "message-canonical-size",
+        attachment_index: 0,
+        filename: "invoice.pdf",
+        content_type: "application/pdf",
+        size_bytes: "2048",
+        sha256: null,
+        content_available: true,
+        direction: "inbound",
+        received_at: "2026-07-24T08:00:00.000Z",
+      }],
+      next_cursor: null,
+    }]]);
+
+    expect((await runInboxCommand(["--json", "inbox", "attachments"])).data).toMatchObject({
+      items: [{ size_bytes: 2048 }],
+    });
+
+    for (const invalidSize of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1, "-1", "01", "1.0", " 1", "1 "]) {
+      useAttachmentInventoryPages([["", {
+        items: [{
+          message_id: "message-invalid-size",
+          attachment_index: 0,
+          filename: "invoice.pdf",
+          content_type: "application/pdf",
+          size_bytes: invalidSize,
+          sha256: null,
+          content_available: true,
+          direction: "inbound",
+          received_at: "2026-07-24T08:00:00.000Z",
+        }],
+        next_cursor: null,
+      }]]);
+
+      const result = await runInboxCommandExpectingExit(["--json", "inbox", "attachments"]);
+      expect(result.error).toBe("process.exit:1");
+      expect(result.stderr).toContain("size_bytes");
+    }
   });
 });
 

@@ -18,6 +18,11 @@ import { createPgPool, createQueryClient, MigrationLedger, type PoolQueryClient 
 import { emailsSelfHostedMigrations } from "./migrations.js";
 import { EmailsSelfHostedStore, MAX_ATTACHMENT_BATCH_IDS } from "./store.js";
 import { handleSelfHostedRequest, type SelfHostedServiceDeps } from "./service.js";
+import {
+  processAttachmentRepairPage,
+  type AttachmentRepairLedgerEntry,
+  type AttachmentRepairResult,
+} from "./attachment-repair.js";
 import { AuthStore } from "./auth/store.js";
 import { RateLimiter } from "./auth/rate-limit.js";
 import type { SelfHostedKeyStore } from "./keys.js";
@@ -285,7 +290,8 @@ describe.skipIf(!pgClient)("MP-00034 attachment inventory route", () => {
     const t = await makeTenant("inv-malformed");
     // Element 1 is a bare string (not an object); element 2 has a fractional
     // size. Both must still occupy their array position so attachment_index
-    // stays aligned with GET /v1/messages/{id}/attachments/{index}.
+    // stays aligned with GET /v1/messages/{id}/attachments/{index}; the
+    // fractional value is not a byte count and must remain unknown.
     const res = await call(deps, "POST", "/v1/messages", {
       token: t.token,
       body: {
@@ -308,11 +314,165 @@ describe.skipIf(!pgClient)("MP-00034 attachment inventory route", () => {
     expect(mine.map((i: any) => i.attachment_index)).toEqual([0, 1, 2]);
     expect(mine[0].filename).toBe("good.pdf");
     expect(mine[1]).toMatchObject({ filename: null, content_type: null, size_bytes: null, sha256: null });
-    expect(mine[2].size_bytes).toBe(1024); // fractional size floored, not a 500
+    expect(mine[2].size_bytes).toBeNull();
 
     // Inventory row count matches the per-ID truth (jsonb_array_length).
     const detail = await call(deps, "GET", `/v1/messages/${id}`, { token: t.token });
     expect(mine.length).toBe(detail.body.message.attachments.length);
+  });
+
+  it("reports truthful content availability and keeps legacy human-readable sizes unknown", async () => {
+    const deps = makeDeps();
+    const t = await makeTenant("inv-availability");
+    const res = await call(deps, "POST", "/v1/messages", {
+      token: t.token,
+      body: {
+        from: "s@ext.example",
+        to: ["me@iso.example"],
+        subject: "legacy attachment metadata",
+        text: "body",
+        received_at: "2026-05-21T00:00:00.000Z",
+        message_id: "<legacy-availability@ext>",
+        attachments: [
+          att("stored.txt", "text/plain", "hello", "a".repeat(64)),
+          {
+            filename: "stored-string-size.txt",
+            content_type: "text/plain",
+            size: "5",
+            content_base64: Buffer.from("hello").toString("base64"),
+          },
+          {
+            filename: "legacy.pdf",
+            content_type: "application/pdf",
+            size: "12.4 KB",
+            sha256: null,
+          },
+          {
+            filename: "unknown.bin",
+            content_type: "application/octet-stream",
+            size: " ",
+          },
+          {
+            filename: "leading-zero.bin",
+            content_type: "application/octet-stream",
+            size: "05",
+            content_base64: Buffer.from("hello").toString("base64"),
+          },
+          {
+            filename: "fractional.bin",
+            content_type: "application/octet-stream",
+            size: 1.5,
+            content_base64: Buffer.from("x").toString("base64"),
+          },
+          {
+            filename: "malformed-base64.bin",
+            content_type: "application/octet-stream",
+            size: 3,
+            content_base64: "not*base64",
+          },
+        ],
+      },
+    });
+    expect(res.status).toBe(201);
+    const id = res.body.message.id;
+
+    const inv = await call(deps, "GET", "/v1/attachments?limit=500", { token: t.token });
+    expect(inv.status).toBe(200);
+    const mine = inv.body.items.filter((item: any) => item.message_id === id);
+    expect(mine).toEqual([
+      expect.objectContaining({
+        attachment_index: 0,
+        filename: "stored.txt",
+        size_bytes: 5,
+        content_available: true,
+      }),
+      expect.objectContaining({
+        attachment_index: 1,
+        filename: "stored-string-size.txt",
+        size_bytes: 5,
+        content_available: true,
+      }),
+      expect.objectContaining({
+        attachment_index: 2,
+        filename: "legacy.pdf",
+        size_bytes: null,
+        content_available: false,
+      }),
+      expect.objectContaining({
+        attachment_index: 3,
+        filename: "unknown.bin",
+        size_bytes: null,
+        content_available: false,
+      }),
+      expect.objectContaining({
+        attachment_index: 4,
+        filename: "leading-zero.bin",
+        size_bytes: null,
+        content_available: false,
+      }),
+      expect.objectContaining({
+        attachment_index: 5,
+        filename: "fractional.bin",
+        size_bytes: null,
+        content_available: false,
+      }),
+      expect.objectContaining({
+        attachment_index: 6,
+        filename: "malformed-base64.bin",
+        size_bytes: 3,
+        content_available: false,
+      }),
+    ]);
+    expect(JSON.stringify(inv.body)).not.toContain("aGVsbG8=");
+    expect(JSON.stringify(inv.body)).not.toContain("content_base64");
+
+    const batch = await call(deps, "POST", "/v1/attachments/batch", {
+      token: t.token,
+      body: { message_ids: [id] },
+    });
+    expect(batch.body.by_message_id[id].map((item: any) => ({
+      size_bytes: item.size_bytes,
+      content_available: item.content_available,
+    }))).toEqual([
+      { size_bytes: 5, content_available: true },
+      { size_bytes: 5, content_available: true },
+      { size_bytes: null, content_available: false },
+      { size_bytes: null, content_available: false },
+      { size_bytes: null, content_available: false },
+      { size_bytes: null, content_available: false },
+      { size_bytes: 3, content_available: false },
+    ]);
+    expect(JSON.stringify(batch.body)).not.toContain("aGVsbG8=");
+    expect(JSON.stringify(batch.body)).not.toContain("content_base64");
+
+    const canonicalStringSize = await call(
+      deps,
+      "GET",
+      `/v1/messages/${id}/attachments/1`,
+      { token: t.token },
+    );
+    expect(canonicalStringSize.status).toBe(200);
+    expect(canonicalStringSize.body.attachment).toMatchObject({
+      filename: "stored-string-size.txt",
+      size: 5,
+      content_base64: Buffer.from("hello").toString("base64"),
+    });
+
+    const unavailable = await call(deps, "GET", `/v1/messages/${id}/attachments/2`, { token: t.token });
+    expect(unavailable.status).toBe(409);
+    expect(unavailable.body).toEqual({
+      error: "attachment content is not stored",
+      code: "attachment_content_unavailable",
+      attachment: {
+        filename: "legacy.pdf",
+        content_type: "application/pdf",
+        size: null,
+      },
+    });
+
+    const malformed = await call(deps, "GET", `/v1/messages/${id}/attachments/6`, { token: t.token });
+    expect(malformed.status).toBe(422);
+    expect(malformed.body.code).toBe("invalid_attachment_payload");
   });
 
   it("a concurrent insert ahead of the cursor does not dup or skip the in-flight scan", async () => {
@@ -359,7 +519,7 @@ describe.skipIf(!pgClient)("MP-00034 attachment batch-by-ids route", () => {
     expect(res.status).toBe(200);
     expect(res.body.max_batch_size).toBe(MAX_ATTACHMENT_BATCH_IDS);
     expect(res.body.by_message_id[id1].length).toBe(2);
-    expect(res.body.by_message_id[id1][0]).toEqual({ attachment_index: 0, filename: "r.pdf", content_type: "application/pdf", size_bytes: 1, sha256: "r.pdf".padEnd(64, "0").slice(0, 64) });
+    expect(res.body.by_message_id[id1][0]).toEqual({ attachment_index: 0, filename: "r.pdf", content_type: "application/pdf", size_bytes: 1, sha256: "r.pdf".padEnd(64, "0").slice(0, 64), content_available: true });
     expect("content_base64" in res.body.by_message_id[id1][0]).toBe(false);
     expect(res.body.by_message_id[id2]).toEqual([]);
     expect(res.body.unknown_ids).toEqual([bogus]);
@@ -409,5 +569,621 @@ describe.skipIf(!pgClient)("MP-00034 tenant isolation + malformed cursor", () =>
       expect(res.status).toBe(400);
       expect(res.body.code).toBe("invalid_cursor");
     }
+  });
+
+  it("an invalid direction is rejected instead of silently disabling the filter", async () => {
+    const deps = makeDeps();
+    const t = await makeTenant("bad-direction");
+    const response = await call(deps, "GET", "/v1/attachments?direction=sideways", {
+      token: t.token,
+    });
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({
+      error: "direction must be inbound or outbound",
+      code: "invalid_direction",
+    });
+  });
+});
+
+describe.skipIf(!pgClient)("checkpointed legacy attachment repair ledger", () => {
+  it("returns the documented 400 for malformed repair ids before PostgreSQL UUID casts", async () => {
+    const deps = makeDeps();
+    const tenant = await makeTenant("repair-ledger-invalid-id");
+
+    const read = await call(deps, "GET", "/v1/attachments/repairs/not-a-uuid", {
+      token: tenant.token,
+    });
+    const resume = await call(
+      deps,
+      "POST",
+      "/v1/attachments/repairs/not-a-uuid/resume",
+      { token: tenant.token, body: { limit: 1 } },
+    );
+
+    for (const response of [read, resume]) {
+      expect(response.status).toBe(400);
+      expect(response.body).toEqual({
+        error: "attachment repair id must be a UUID",
+        code: "invalid_attachment_repair_id",
+      });
+    }
+  });
+
+  it("rejects nonexistent, foreign-tenant, zero-attachment, and complete-only canaries at manifest creation", async () => {
+    const deps = makeDeps();
+    const canonicalBucket = "repair-manifest-validation";
+    deps.env = { ...process.env, EMAILS_INGEST_S3_BUCKET: canonicalBucket };
+    const tenantA = await makeTenant("repair-manifest-a");
+    const tenantB = await makeTenant("repair-manifest-b");
+    const zeroId = await importMsg(deps, tenantA.token, {
+      receivedAt: "2026-10-03T00:00:00.000Z",
+      attachments: [],
+    });
+    const completeId = await importMsg(deps, tenantA.token, {
+      receivedAt: "2026-10-04T00:00:00.000Z",
+      attachments: [att("complete.txt", "text/plain", "done")],
+    });
+    const foreignId = await importMsg(deps, tenantB.token, {
+      receivedAt: "2026-10-05T00:00:00.000Z",
+      attachments: [{ ...att("foreign.txt", "text/plain", "old"), content_base64: undefined } as never],
+    });
+    const bindings = [
+      { tenant: tenantA, messageId: zeroId, objectKey: "source/zero" },
+      { tenant: tenantA, messageId: completeId, objectKey: "source/complete" },
+      { tenant: tenantB, messageId: foreignId, objectKey: "source/foreign" },
+    ] as const;
+    for (const binding of bindings) {
+      await pgClient!.execute(
+        `UPDATE messages
+         SET source_id = $3, message_id = $3
+         WHERE tenant_id = $1::uuid AND id = $2`,
+        [binding.tenant.tenantId, binding.messageId, binding.objectKey],
+      );
+      expect(await deps.store.forTenant(binding.tenant.tenantId)
+        .recordInboundSourceProvenance({
+          messageId: binding.messageId,
+          bucket: canonicalBucket,
+          objectKey: binding.objectKey,
+          rawSha256: "b".repeat(64),
+          establishedVia: "canonical_replay",
+        })).toBe("recorded");
+    }
+
+    const cases = [
+      {
+        name: "missing",
+        objectKey: "source/missing",
+        messageId: crypto.randomUUID(),
+        error: /exactly match tenant-scoped canonical object bindings/i,
+      },
+      {
+        name: "foreign",
+        objectKey: "source/foreign",
+        messageId: foreignId,
+        error: /exactly match tenant-scoped canonical object bindings/i,
+      },
+      {
+        name: "zero",
+        objectKey: "source/zero",
+        messageId: zeroId,
+        error: /repairable attachment inventory/i,
+      },
+      {
+        name: "complete",
+        objectKey: "source/complete",
+        messageId: completeId,
+        error: /repairable attachment inventory/i,
+      },
+    ];
+    for (const scenario of cases) {
+      const response = await call(deps, "POST", "/v1/attachments/repairs", {
+        token: tenantA.token,
+        body: {
+          idempotency_key: `manifest-validation-${scenario.name}`,
+          entries: [{
+            object_key: scenario.objectKey,
+            recipients: ["one@example.test"],
+            canary_message_ids: [scenario.messageId],
+          }],
+        },
+      });
+      expect(response.status).toBe(400);
+      expect(response.body.code).toBe("invalid_repair_manifest");
+      expect(response.body.error).toMatch(scenario.error);
+      expect(JSON.stringify(response.body)).not.toContain(foreignId);
+    }
+  });
+
+  it("is tenant isolated, idempotent, ordered, resumable, and reconciles terminal totals", async () => {
+    const deps = makeDeps();
+    const tenantA = await makeTenant("repair-ledger-a");
+    const tenantB = await makeTenant("repair-ledger-b");
+    const canonicalBucket = "repair-ledger-canonical";
+    const firstId = await importMsg(deps, tenantA.token, {
+      receivedAt: "2026-10-02T00:00:00.000Z",
+      attachments: [
+        att("one.txt", "text/plain", "one"),
+        att("two.txt", "text/plain", "two"),
+      ],
+    });
+    const secondId = await importMsg(deps, tenantA.token, {
+      receivedAt: "2026-10-01T00:00:00.000Z",
+      attachments: [att("three.txt", "text/plain", "three")],
+    });
+    const storeA = deps.store.forTenant(tenantA.tenantId);
+    const storeB = deps.store.forTenant(tenantB.tenantId);
+    for (const [messageId, objectKey] of [
+      [firstId, "source/repair-one"],
+      [secondId, "source/repair-two"],
+    ] as const) {
+      await pgClient!.execute(
+        `UPDATE messages
+         SET source_id = $3,
+             message_id = $3,
+             attachments = (
+               SELECT jsonb_agg(
+                 CASE
+                   WHEN $3 = 'source/repair-one' AND item.ordinality = 1
+                     THEN item.value
+                   ELSE item.value - 'content_base64'
+                 END
+                 ORDER BY item.ordinality
+               )
+               FROM jsonb_array_elements(attachments) WITH ORDINALITY AS item(value, ordinality)
+             )
+         WHERE tenant_id = $1::uuid AND id = $2`,
+        [tenantA.tenantId, messageId, objectKey],
+      );
+      expect(await storeA.recordInboundSourceProvenance({
+        messageId,
+        bucket: canonicalBucket,
+        objectKey,
+        rawSha256: "a".repeat(64),
+        establishedVia: "canonical_replay",
+      })).toBe("recorded");
+    }
+    const manifest = {
+      idempotencyKey: "legacy-repair-integration-1",
+      canonicalBucket,
+      entries: [
+        {
+          object_key: "source/repair-one",
+          recipients: ["one@example.test"],
+          canary_message_ids: [firstId],
+        },
+        {
+          object_key: "source/repair-two",
+          recipients: ["two@example.test"],
+          canary_message_ids: [secondId],
+        },
+      ],
+    };
+
+    const created = await storeA.createOrGetAttachmentRepairRun(manifest);
+    expect(created).toMatchObject({
+      apply: false,
+      status: "pending",
+      entry_total: 2,
+      inventory_total: 2,
+      repaired: 0,
+      would_repair: 0,
+      unavailable: 0,
+      pending: 2,
+      retrying: 0,
+      entry_pending: 2,
+      checkpoint: 0,
+    });
+    const replay = await storeA.createOrGetAttachmentRepairRun(manifest);
+    expect(replay.id).toBe(created.id);
+    const freshKeyReplay = await storeA.createOrGetAttachmentRepairRun({
+      ...manifest,
+      idempotencyKey: "legacy-repair-integration-fresh-key",
+    });
+    expect(freshKeyReplay.id).toBe(created.id);
+    await expect(storeA.createOrGetAttachmentRepairRun({
+      ...manifest,
+      entries: [manifest.entries[0]!],
+    })).rejects.toThrow(/idempotency.*different manifest/i);
+    expect(await storeB.getAttachmentRepairRun(created.id)).toBeNull();
+
+    const firstPage = await storeA.listPendingAttachmentRepairEntries(created.id, 1);
+    expect(firstPage.map((entry) => entry.position)).toEqual([0]);
+    expect(JSON.stringify(firstPage)).not.toContain("content_base64");
+    const firstClaim = await storeA.claimAttachmentRepairEntry(created.id, 60_000);
+    expect(firstClaim).toMatchObject({ position: 0, attempts: 1 });
+    await storeA.recordAttachmentRepairEntryOutcome(
+      created.id,
+      0,
+      firstClaim!.claim_token!,
+      "pending",
+      "retryable_repair_error",
+    );
+    const retryable = await storeA.listPendingAttachmentRepairEntries(created.id, 2);
+    expect(retryable[0]?.position).toBe(1);
+    expect(retryable.find((entry) => entry.position === 0)).toMatchObject({
+      position: 0,
+      status: "pending",
+      attempts: 1,
+      last_error_code: "retryable_repair_error",
+    });
+    expect(retryable.find((entry) => entry.position === 0)?.last_attempt_at).not.toBeNull();
+    expect(await storeA.getAttachmentRepairRun(created.id)).toMatchObject({
+      status: "pending",
+      pending: 2,
+      retrying: 1,
+      entry_pending: 2,
+      entry_retrying: 1,
+      attempts: 1,
+      checkpoint: 0,
+    });
+    await pgClient!.execute(
+      `UPDATE attachment_repair_entries
+       SET next_attempt_at = now() - interval '1 second'
+       WHERE tenant_id = $1::uuid AND run_id = $2::uuid AND position = 0`,
+      [tenantA.tenantId, created.id],
+    );
+    const retryClaim = await storeA.claimAttachmentRepairEntry(created.id, 60_000);
+    expect(retryClaim).toMatchObject({ position: 0, attempts: 2 });
+    await storeA.recordAttachmentRepairEntryOutcome(
+      created.id,
+      0,
+      retryClaim!.claim_token!,
+      "repaired",
+    );
+    expect(await storeA.getAttachmentRepairRun(created.id)).toMatchObject({
+      status: "pending",
+      repaired: 1,
+      would_repair: 0,
+      unavailable: 0,
+      pending: 1,
+      entry_repaired: 1,
+      entry_pending: 1,
+      entry_retrying: 0,
+      attempts: 2,
+      checkpoint: 1,
+    });
+
+    const resumed = await storeA.listPendingAttachmentRepairEntries(created.id, 1);
+    expect(resumed.map((entry) => entry.position)).toEqual([1]);
+    const terminalClaim = await storeA.claimAttachmentRepairEntry(created.id, 60_000);
+    expect(terminalClaim).toMatchObject({ position: 1, attempts: 1 });
+    await storeA.recordAttachmentRepairEntryOutcome(
+      created.id,
+      1,
+      terminalClaim!.claim_token!,
+      "unavailable",
+    );
+    const terminal = await storeA.getAttachmentRepairRun(created.id);
+    expect(terminal).toMatchObject({
+      status: "completed",
+      inventory_total: 2,
+      repaired: 1,
+      would_repair: 0,
+      unavailable: 1,
+      pending: 0,
+      entry_repaired: 1,
+      entry_unavailable: 1,
+      entry_pending: 0,
+      entry_retrying: 0,
+      attempts: 3,
+      checkpoint: 2,
+    });
+    expect(terminal!.repaired + terminal!.would_repair + terminal!.unavailable + terminal!.pending)
+      .toBe(terminal!.inventory_total);
+    expect(await storeA.listPendingAttachmentRepairEntries(created.id, 1)).toEqual([]);
+  });
+
+  it("enforces tenant-local active and durable quotas and recovers an active slot after completion", async () => {
+    const deps = makeDeps();
+    const canonicalBucket = "repair-quota-canonical";
+    const tenantA = await makeTenant("repair-quota-a");
+    const tenantB = await makeTenant("repair-quota-b");
+    const constrained = new EmailsSelfHostedStore(pgClient!, {
+      attachmentRepairPolicy: {
+        maxActiveRunsPerTenant: 1,
+        maxLedgerRunsPerTenant: 2,
+        maxLedgerEntriesPerTenant: 4,
+        runByteBudget: 1024,
+        runTimeBudgetMs: 60_000,
+      },
+    });
+    const storeA = constrained.forTenant(tenantA.tenantId);
+    const storeB = constrained.forTenant(tenantB.tenantId);
+
+    const fixture = async (
+      tenant: { tenantId: string; token: string },
+      store: ReturnType<EmailsSelfHostedStore["forTenant"]>,
+      suffix: string,
+    ) => {
+      const messageId = await importMsg(deps, tenant.token, {
+        receivedAt: `2026-12-${suffix.padStart(2, "0")}T00:00:00.000Z`,
+        attachments: [{ ...att(`${suffix}.txt`, "text/plain", suffix), content_base64: undefined } as never],
+      });
+      const objectKey = `source/quota-${tenant.tenantId}-${suffix}`;
+      await pgClient!.execute(
+        `UPDATE messages SET source_id = $3, message_id = $3
+         WHERE tenant_id = $1::uuid AND id = $2`,
+        [tenant.tenantId, messageId, objectKey],
+      );
+      expect(await store.recordInboundSourceProvenance({
+        messageId,
+        bucket: canonicalBucket,
+        objectKey,
+        rawSha256: "d".repeat(64),
+        establishedVia: "canonical_replay",
+      })).toBe("recorded");
+      return {
+        idempotencyKey: `quota-${tenant.tenantId}-${suffix}`,
+        canonicalBucket,
+        entries: [{
+          object_key: objectKey,
+          recipients: [`${suffix}@example.test`],
+          canary_message_ids: [messageId],
+        }],
+      };
+    };
+
+    const a1Manifest = await fixture(tenantA, storeA, "1");
+    const a2Manifest = await fixture(tenantA, storeA, "2");
+    const a3Manifest = await fixture(tenantA, storeA, "3");
+    const b1Manifest = await fixture(tenantB, storeB, "4");
+    const a1 = await storeA.createOrGetAttachmentRepairRun(a1Manifest);
+
+    await expect(storeA.createOrGetAttachmentRepairRun(a2Manifest))
+      .rejects.toMatchObject({ code: "active_runs", retryable: true });
+    await expect(storeB.createOrGetAttachmentRepairRun(b1Manifest)).resolves.toMatchObject({
+      tenant_id: tenantB.tenantId,
+    });
+
+    const a1Claim = await storeA.claimAttachmentRepairEntry(a1.id, 60_000);
+    await storeA.recordAttachmentRepairEntryOutcome(
+      a1.id,
+      a1Claim!.position,
+      a1Claim!.claim_token!,
+      "unavailable",
+      "terminal_repair_error",
+      0,
+    );
+    const a2 = await storeA.createOrGetAttachmentRepairRun(a2Manifest);
+    const a2Claim = await storeA.claimAttachmentRepairEntry(a2.id, 60_000);
+    await storeA.recordAttachmentRepairEntryOutcome(
+      a2.id,
+      a2Claim!.position,
+      a2Claim!.claim_token!,
+      "unavailable",
+      "terminal_repair_error",
+      0,
+    );
+    await expect(storeA.createOrGetAttachmentRepairRun(a3Manifest))
+      .rejects.toMatchObject({ code: "ledger_runs", retryable: false });
+  });
+
+  it("charges byte reservations durably and terminalizes byte/time budget exhaustion for operator action", async () => {
+    const deps = makeDeps();
+    const canonicalBucket = "repair-budget-canonical";
+    const tenant = await makeTenant("repair-budget");
+    const constrained = new EmailsSelfHostedStore(pgClient!, {
+      attachmentRepairPolicy: {
+        maxActiveRunsPerTenant: 4,
+        maxLedgerRunsPerTenant: 10,
+        maxLedgerEntriesPerTenant: 20,
+        runByteBudget: 5,
+        runTimeBudgetMs: 60_000,
+      },
+    });
+    const store = constrained.forTenant(tenant.tenantId);
+
+    const createEntry = async (suffix: string) => {
+      const messageId = await importMsg(deps, tenant.token, {
+        receivedAt: `2027-01-0${suffix}T00:00:00.000Z`,
+        attachments: [{ ...att(`${suffix}.txt`, "text/plain", suffix), content_base64: undefined } as never],
+      });
+      const objectKey = `source/budget-${suffix}`;
+      await pgClient!.execute(
+        `UPDATE messages SET source_id = $3, message_id = $3
+         WHERE tenant_id = $1::uuid AND id = $2`,
+        [tenant.tenantId, messageId, objectKey],
+      );
+      expect(await store.recordInboundSourceProvenance({
+        messageId,
+        bucket: canonicalBucket,
+        objectKey,
+        rawSha256: "e".repeat(64),
+        establishedVia: "canonical_replay",
+      })).toBe("recorded");
+      return {
+        object_key: objectKey,
+        recipients: [`${suffix}@example.test`],
+        canary_message_ids: [messageId],
+      };
+    };
+
+    const byteRun = await store.createOrGetAttachmentRepairRun({
+      idempotencyKey: "byte-budget",
+      canonicalBucket,
+      entries: [await createEntry("1"), await createEntry("2")],
+    });
+    expect(byteRun).toMatchObject({
+      byte_budget: 5,
+      bytes_consumed: 0,
+      time_budget_ms: 60_000,
+    });
+    const first = await store.claimAttachmentRepairEntry(byteRun.id, 60_000);
+    expect(first).toMatchObject({ source_byte_limit: 5 });
+    expect(await store.getAttachmentRepairRun(byteRun.id)).toMatchObject({ bytes_consumed: 5 });
+    await store.recordAttachmentRepairEntryOutcome(
+      byteRun.id,
+      first!.position,
+      first!.claim_token!,
+      "repaired",
+      null,
+      2,
+    );
+    expect(await store.getAttachmentRepairRun(byteRun.id)).toMatchObject({ bytes_consumed: 2 });
+    const second = await store.claimAttachmentRepairEntry(byteRun.id, 60_000);
+    expect(second).toMatchObject({ source_byte_limit: 3 });
+    await store.recordAttachmentRepairEntryOutcome(
+      byteRun.id,
+      second!.position,
+      second!.claim_token!,
+      "unavailable",
+      "run_byte_budget_exhausted",
+      3,
+    );
+    expect(await store.getAttachmentRepairRun(byteRun.id)).toMatchObject({
+      status: "completed",
+      byte_budget: 5,
+      bytes_consumed: 5,
+      entry_operator_action: 1,
+      operator_action: 1,
+    });
+
+    const timeRun = await store.createOrGetAttachmentRepairRun({
+      idempotencyKey: "time-budget",
+      canonicalBucket,
+      entries: [await createEntry("3")],
+    });
+    const timeClaim = await store.claimAttachmentRepairEntry(timeRun.id, 60_000);
+    expect(timeClaim).not.toBeNull();
+    await pgClient!.execute(
+      `UPDATE attachment_repair_runs
+       SET deadline_at = now() - interval '1 millisecond'
+       WHERE tenant_id = $1::uuid AND id = $2::uuid`,
+      [tenant.tenantId, timeRun.id],
+    );
+    await store.recordAttachmentRepairEntryOutcome(
+      timeRun.id,
+      timeClaim!.position,
+      timeClaim!.claim_token!,
+      "repaired",
+      null,
+      0,
+    );
+    expect(await store.getAttachmentRepairRun(timeRun.id)).toMatchObject({
+      status: "completed",
+      entry_operator_action: 1,
+      operator_action: 1,
+      pending: 0,
+    });
+  });
+
+  it("leases one external attempt across simultaneous resumes and recovers an expired crash claim", async () => {
+    const deps = makeDeps();
+    const tenantA = await makeTenant("repair-lease-a");
+    const tenantB = await makeTenant("repair-lease-b");
+    const canonicalBucket = "repair-lease-canonical";
+    const storeA = deps.store.forTenant(tenantA.tenantId);
+    const storeB = deps.store.forTenant(tenantB.tenantId);
+
+    const createRepairableRun = async (suffix: string) => {
+      const messageId = await importMsg(deps, tenantA.token, {
+        receivedAt: `2026-11-0${suffix === "one" ? "1" : "2"}T00:00:00.000Z`,
+        attachments: [att(`${suffix}.txt`, "text/plain", suffix)],
+      });
+      const objectKey = `source/lease-${suffix}`;
+      await pgClient!.execute(
+        `UPDATE messages
+         SET source_id = $3,
+             message_id = $3,
+             attachments = (
+               SELECT jsonb_agg(item.value - 'content_base64' ORDER BY item.ordinality)
+               FROM jsonb_array_elements(attachments) WITH ORDINALITY AS item(value, ordinality)
+             )
+         WHERE tenant_id = $1::uuid AND id = $2`,
+        [tenantA.tenantId, messageId, objectKey],
+      );
+      expect(await storeA.recordInboundSourceProvenance({
+        messageId,
+        bucket: canonicalBucket,
+        objectKey,
+        rawSha256: "c".repeat(64),
+        establishedVia: "canonical_replay",
+      })).toBe("recorded");
+      return storeA.createOrGetAttachmentRepairRun({
+        idempotencyKey: `repair-lease-${suffix}`,
+        canonicalBucket,
+        entries: [{
+          object_key: objectKey,
+          recipients: [`${suffix}@example.test`],
+          canary_message_ids: [messageId],
+        }],
+      });
+    };
+    const resultFor = (
+      entry: AttachmentRepairLedgerEntry,
+      apply: boolean,
+    ): AttachmentRepairResult => ({
+      key: entry.object_key,
+      apply,
+      items: [{
+        tenant_id: entry.tenant_id,
+        message_id: entry.canary_message_ids[0],
+        status: "would_repair",
+        attachments: entry.attachment_count,
+      }],
+    });
+
+    const concurrentRun = await createRepairableRun("one");
+    let releaseFirst!: () => void;
+    let signalStarted!: () => void;
+    const firstStarted = new Promise<void>((resolve) => { signalStarted = resolve; });
+    const release = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    let externalAttempts = 0;
+    const repair = async (entry: AttachmentRepairLedgerEntry, apply: boolean) => {
+      externalAttempts++;
+      if (externalAttempts === 1) {
+        signalStarted();
+        await release;
+      }
+      return resultFor(entry, apply);
+    };
+
+    const firstResume = processAttachmentRepairPage(
+      { store: storeA, repair },
+      { runId: concurrentRun.id, limit: 1 },
+    );
+    await firstStarted;
+    const secondResume = processAttachmentRepairPage(
+      { store: storeA, repair },
+      { runId: concurrentRun.id, limit: 1 },
+    );
+    await secondResume;
+    releaseFirst();
+    await firstResume;
+
+    expect(externalAttempts).toBe(1);
+    expect(await storeA.getAttachmentRepairRun(concurrentRun.id)).toMatchObject({
+      status: "completed",
+      entry_would_repair: 1,
+    });
+
+    const crashRun = await createRepairableRun("two");
+    const claimed = await (storeA as any).claimAttachmentRepairEntry(crashRun.id, 60_000);
+    expect(claimed).toMatchObject({ run_id: crashRun.id, attempts: 1 });
+    expect(await (storeB as any).claimAttachmentRepairEntry(crashRun.id, 60_000)).toBeNull();
+    await pgClient!.execute(
+      `UPDATE attachment_repair_entries
+       SET lease_expires_at = now() - interval '1 second'
+       WHERE tenant_id = $1::uuid AND run_id = $2::uuid`,
+      [tenantA.tenantId, crashRun.id],
+    );
+
+    let recoveredAttempts = 0;
+    const recovered = await processAttachmentRepairPage({
+      store: storeA,
+      repair: async (entry, apply) => {
+        recoveredAttempts++;
+        return resultFor(entry, apply);
+      },
+    }, {
+      runId: crashRun.id,
+      limit: 1,
+    });
+    expect(recoveredAttempts).toBe(1);
+    expect(recovered).toMatchObject({
+      status: "completed",
+      entry_would_repair: 1,
+      attempts: 2,
+    });
   });
 });
