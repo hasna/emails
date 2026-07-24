@@ -513,9 +513,20 @@ describe("self-hosted container TLS contract", () => {
   });
 
   test("passes the deployment-owned inbound prefix mapping to the ingest worker", () => {
-    expect(ecsCompute).toContain('name = "EMAILS_INGEST_PREFIX_DOMAIN_MAP"');
+    expect(ecsCompute).toMatch(/name\s*=\s*"EMAILS_INGEST_PREFIX_DOMAIN_MAP"/);
     expect(ecsCompute).toMatch(
-      /jsonencode\(\{\s+\(var\.inbound_object_prefix\) = lower\(var\.email_domain\)\s+\}\)/,
+      /name\s*=\s*"EMAILS_INGEST_PREFIX_DOMAIN_MAP"[\s\S]*?value\s*=\s*local\.inbound_prefix_domain_map_json/,
+    );
+    expect(ecsCompute).toMatch(
+      /inbound_prefix_domain_map\s*=\s*\([\s\S]*length\(local\.inbound_prefix_domain_map_override\)\s*>\s*0[\s\S]*\?\s*local\.inbound_prefix_domain_map_override[\s\S]*:\s*local\.inbound_prefix_domain_map_legacy[\s\S]*\)/,
+    );
+    expect(ecsCompute).toContain("inbound_prefix_domain_map_override");
+    expect(ecsCompute).toContain("inbound_prefix_domain_map_legacy");
+    expect(awsVariables).toMatch(
+      /for prefix_index, prefix in sort\(keys\(var\.inbound_prefix_domain_map\)\)[\s\S]*?for other_index, other_prefix in sort\(keys\(var\.inbound_prefix_domain_map\)\)[\s\S]*?prefix_index == other_index \|\| !startswith\(prefix, other_prefix\)/,
+    );
+    expect(awsVariables).not.toMatch(
+      /for index, prefix in sort\(keys\(var\.inbound_prefix_domain_map\)\)[\s\S]*index == 0 \|\| !startswith\(prefix, sort\(keys\(var\.inbound_prefix_domain_map\)\)\[index - 1\]\)/,
     );
     expect(awsVariables).toContain('endswith(var.inbound_object_prefix, "/")');
     expect(awsVariables).toContain(
