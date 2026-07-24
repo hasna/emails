@@ -192,6 +192,51 @@ describe("MCP inbox tools — self_hosted via seam", () => {
     }
   });
 
+  it("keeps a legacy null-size 409 typed as unavailable without leaking its payload", async () => {
+    const id = crypto.randomUUID();
+    const dir = mkdtempSync(join(tmpdir(), "emails-mcp-attachment-"));
+    try {
+      await stub.seed({ messages: [{
+        id,
+        direction: "inbound",
+        from_addr: "sender@example.com",
+        to_addrs: ["me@example.com"],
+        subject: "legacy attachment",
+        status: "received",
+        received_at: new Date().toISOString(),
+        created_at: new Date().toISOString(),
+        is_read: false,
+        is_starred: false,
+        labels: [],
+        attachments: [{
+          filename: "legacy.pdf",
+          content_type: "application/pdf",
+          size: null,
+          diagnostic: "must-not-leak",
+        }],
+      }] });
+      const result = await runInboxTool("download_attachment", {
+        email_id: id,
+        index: 0,
+        output_dir: dir,
+        max_bytes: 16,
+      });
+      expect(result.isError).toBe(true);
+      expect(JSON.parse(result.content[0]!.text)).toEqual({
+        state: "content_unavailable",
+        index: 0,
+        filename: "legacy.pdf",
+        content_type: "application/pdf",
+        bytes: null,
+      });
+      expect(result.content[0]!.text).not.toContain("must-not-leak");
+      expect(result.content[0]!.text).not.toContain("content_base64");
+      expect(readdirSync(dir)).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("download_attachment rejects an abbreviated message id without creating a file", async () => {
     const id = crypto.randomUUID();
     const dir = mkdtempSync(join(tmpdir(), "emails-mcp-attachment-"));

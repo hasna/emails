@@ -940,6 +940,33 @@ describe("inbox attachment", () => {
     }
   });
 
+  it("keeps a legacy null-size 409 typed as unavailable without leaking its payload", async () => {
+    const id = crypto.randomUUID();
+    const dir = mkdtempSync(join(tmpdir(), "emails-cli-attachment-"));
+    try {
+      await stub.seed({ messages: [msgRow({
+        id,
+        attachments: [{
+          filename: "legacy.pdf",
+          content_type: "application/pdf",
+          size: null,
+          diagnostic: "must-not-leak",
+        }],
+      })] });
+      const result = await runInboxSubprocessExpectingExit([
+        "inbox", "attachment", id, "--download", "--index", "0", "--output-dir", dir,
+      ]);
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("metadata but no stored content");
+      expect(result.stderr).not.toContain("non-negative integer");
+      expect(result.stderr).not.toContain("must-not-leak");
+      expect(result.stdout).not.toContain("must-not-leak");
+      expect(readdirSync(dir)).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("requires an explicit single index before creating any download file", async () => {
     const id = crypto.randomUUID();
     const dir = mkdtempSync(join(tmpdir(), "emails-cli-attachment-"));

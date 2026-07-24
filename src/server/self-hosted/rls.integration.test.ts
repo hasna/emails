@@ -44,8 +44,11 @@ const TABLES = ["domains", "contacts", "messages", "email_agent_settings", "send
 // (N recipients per message / N counter keys), not 1:1 with the seed.
 const ROLLUP_TABLES = ["message_recipients", "message_counters"] as const;
 const REPAIR_TABLES = ["attachment_repair_runs", "attachment_repair_entries"] as const;
+const REPAIR_ALIAS_TABLES = ["attachment_repair_idempotency_keys"] as const;
 const REPAIR_RUN_A = "11111111-1111-4111-8111-111111111111";
 const REPAIR_RUN_B = "22222222-2222-4222-8222-222222222222";
+const REPAIR_ALIAS_HASH_A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const REPAIR_ALIAS_HASH_B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 /** Run `fn` in one transaction AS the NOBYPASSRLS probe, optionally with the tenant GUC set. */
 async function asProbe<T>(tenantId: string | null, fn: (tx: TypedQueryClient) => Promise<T>): Promise<T> {
@@ -115,6 +118,23 @@ beforeAll(async () => {
     ],
   );
   await pg.execute(
+    `INSERT INTO attachment_repair_idempotency_keys (
+       tenant_id, idempotency_key_hash, request_hash, run_id
+     ) VALUES
+       ($1, $3, $5, $7::uuid),
+       ($2, $4, $6, $8::uuid)`,
+    [
+      TENANT_A,
+      TENANT_B,
+      REPAIR_ALIAS_HASH_A,
+      REPAIR_ALIAS_HASH_B,
+      "c".repeat(64),
+      "d".repeat(64),
+      REPAIR_RUN_A,
+      REPAIR_RUN_B,
+    ],
+  );
+  await pg.execute(
     `INSERT INTO attachment_repair_entries (
        tenant_id, run_id, position, object_key, recipients,
        canary_message_ids, attachment_count
@@ -129,7 +149,7 @@ beforeAll(async () => {
   // non-superuser needs USAGE on the schema to resolve unqualified names.
   await pg.execute(`CREATE ROLE ${PROBE} NOLOGIN NOSUPERUSER NOBYPASSRLS`);
   await pg.execute(`GRANT USAGE ON SCHEMA public TO ${PROBE}`);
-  for (const t of [...TABLES, ...ROLLUP_TABLES, ...REPAIR_TABLES]) {
+  for (const t of [...TABLES, ...ROLLUP_TABLES, ...REPAIR_TABLES, ...REPAIR_ALIAS_TABLES]) {
     await pg.execute(`ALTER TABLE ${t} OWNER TO ${PROBE}`);
   }
 });
@@ -145,18 +165,18 @@ afterAll(async () => {
 
 describe.skipIf(!pg)("Row-Level Security backstop (Layer 2, migration 0013)", () => {
   it("fails closed: with NO app.current_tenant GUC, the NOBYPASSRLS role sees zero rows", async () => {
-    for (const t of [...TABLES, ...ROLLUP_TABLES]) {
+    for (const t of [...TABLES, ...ROLLUP_TABLES, ...REPAIR_TABLES, ...REPAIR_ALIAS_TABLES]) {
       expect(await countAsProbe(null, t), `${t} with unset GUC`).toBe(0);
     }
     // The explicit empty-string path (NULLIF(...,'')::uuid) must ALSO be zero.
-    for (const t of [...TABLES, ...ROLLUP_TABLES]) {
+    for (const t of [...TABLES, ...ROLLUP_TABLES, ...REPAIR_TABLES, ...REPAIR_ALIAS_TABLES]) {
       const n = await asProbe("", async (tx) => (await tx.one<{ n: number }>(`SELECT count(*)::int AS n FROM ${t}`)).n);
       expect(n, `${t} with empty GUC`).toBe(0);
     }
   });
 
-  it("explicitly isolates both repair-ledger tables with no GUC and a wrong valid tenant GUC", async () => {
-    for (const table of REPAIR_TABLES) {
+  it("explicitly isolates repair-ledger tables with no GUC and a wrong valid tenant GUC", async () => {
+    for (const table of [...REPAIR_TABLES, ...REPAIR_ALIAS_TABLES]) {
       expect(await countAsProbe(null, table), `${table} with unset GUC`).toBe(0);
       expect(
         await countAsProbe("cccccccc-cccc-4ccc-8ccc-cccccccccccc", table),
@@ -178,13 +198,32 @@ describe.skipIf(!pg)("Row-Level Security backstop (Layer 2, migration 0013)", ()
          WHERE run_id = $1::uuid AND position = 0`,
         [REPAIR_RUN_A],
       ));
+    const aliasAFromTenantB = await asProbe(TENANT_B, (tx) =>
+      tx.get<{ request_hash: string }>(
+        `SELECT request_hash
+         FROM attachment_repair_idempotency_keys
+         WHERE idempotency_key_hash = $1`,
+        [REPAIR_ALIAS_HASH_A],
+      ));
     expect(runAFromTenantB).toBeNull();
     expect(entryAFromTenantB).toBeNull();
+    expect(aliasAFromTenantB).toBeNull();
   });
 
   it("isolates by tenant: GUC=A shows only A's rows; B's rows are invisible", async () => {
     for (const t of TABLES) {
       expect(await countAsProbe(TENANT_A, t), `${t} visible to A`).toBe(1);
+    }
+    for (const t of REPAIR_ALIAS_TABLES) {
+      const aliases = await asProbe(TENANT_A, (tx) => tx.many<{ tenant_id: string }>(`SELECT tenant_id::text AS tenant_id FROM ${t}`));
+      expect(aliases).toEqual([{ tenant_id: TENANT_A }]);
+      const aliasFromTenantB = await asProbe(TENANT_A, (tx) =>
+        tx.get<{ request_hash: string }>(
+          `SELECT request_hash FROM attachment_repair_idempotency_keys WHERE idempotency_key_hash = $1`,
+          [REPAIR_ALIAS_HASH_B],
+        ),
+      );
+      expect(aliasFromTenantB).toBeNull();
     }
     // Rollup tables (0019): the seed messages have no recipients, so the
     // trigger created only counter rows — and A must see ONLY A's.
@@ -223,6 +262,16 @@ describe.skipIf(!pg)("Row-Level Security backstop (Layer 2, migration 0013)", ()
         tx.execute(
           `INSERT INTO send_intent_tombstones (tenant_id, idempotency_key_hash) VALUES ($1, $2)`,
           [TENANT_B, "c".repeat(64)],
+        ),
+      ),
+    ).rejects.toThrow(rls);
+    await expect(
+      asProbe(TENANT_A, (tx) =>
+        tx.execute(
+          `INSERT INTO attachment_repair_idempotency_keys
+           (tenant_id, idempotency_key_hash, request_hash, run_id)
+           VALUES ($1, $2, $3, $4::uuid)`,
+          [TENANT_B, REPAIR_ALIAS_HASH_B, "d".repeat(64), REPAIR_RUN_B],
         ),
       ),
     ).rejects.toThrow(rls);

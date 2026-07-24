@@ -976,6 +976,97 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     ]);
   });
 
+  it("fails closed when a raw cursor returns a full page without next_cursor", async () => {
+    const serve = compactCursorServe(new Map([
+      ["raw-server-cursor", {
+        messages: [v1("middle", { received_at: "2026-07-13T11:00:00.000Z" })],
+        nextCursor: undefined,
+      }],
+    ]));
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: serve.fetchImpl,
+    });
+
+    await expect(ds.listInsertionsSince({
+      receivedSince: "2026-07-13T00:00:00.000Z",
+      cursor: "raw-server-cursor",
+      limit: 1,
+    })).rejects.toThrow(/raw cursor pagination returned a full page without next_cursor/);
+    expect(serve.requests).toEqual([
+      "GET /v1/messages?limit=1&cursor=raw-server-cursor&since=2026-07-13T00%3A00%3A00.000Z",
+    ]);
+  });
+
+  it("accepts an empty raw cursor terminal page without a continuation cursor", async () => {
+    const serve = compactCursorServe(new Map([
+      ["raw-server-cursor", {
+        messages: [],
+        nextCursor: undefined,
+      }],
+    ]));
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: serve.fetchImpl,
+    });
+
+    const result = await ds.listInsertionsSince({
+      receivedSince: "2026-07-13T00:00:00.000Z",
+      cursor: "raw-server-cursor",
+      limit: 1,
+    });
+
+    expect(result).toEqual({
+      semantics: "insert_only",
+      insertions: [],
+      cursor: null,
+    });
+    expect(serve.requests).toEqual([
+      "GET /v1/messages?limit=1&cursor=raw-server-cursor&since=2026-07-13T00%3A00%3A00.000Z",
+    ]);
+  });
+
+  it("preserves numeric legacy-offset continuation from a numeric cursor", async () => {
+    const serve = legacyOffsetServe([
+      v1("newest", { received_at: "2026-07-20T00:00:00.000Z" }),
+      v1("middle", { received_at: "2026-07-19T00:00:00.000Z" }),
+      v1("oldest", { received_at: "2026-07-18T00:00:00.000Z" }),
+    ]);
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: serve.fetchImpl,
+    });
+    const cursor = encodedChangesCursor(2, {
+      version: 2,
+      serverCursor: null,
+      cycleAnchor: null,
+      cyclePower: 1,
+      cycleLength: 0,
+      pageCount: 0,
+      offset: 1,
+      since: null,
+    });
+
+    const first = await ds.listInsertionsSince({ cursor, limit: 1 });
+    const second = await ds.listInsertionsSince({ cursor: first.cursor ?? undefined, limit: 1 });
+    const third = await ds.listInsertionsSince({ cursor: second.cursor ?? undefined, limit: 1 });
+
+    expect(first.insertions.map((insertion) => insertion.id)).toEqual(["middle"]);
+    expect(second.insertions.map((insertion) => insertion.id)).toEqual(["oldest"]);
+    expect(third.insertions).toEqual([]);
+    expect(first.cursor).not.toBeNull();
+    expect(second.cursor).not.toBeNull();
+    expect(third.cursor).toBeNull();
+    expect(serve.requests.filter((request) => request.startsWith("GET /v1/messages?"))).toEqual([
+      "GET /v1/messages?limit=1&offset=1",
+      "GET /v1/messages?limit=1&offset=2",
+      "GET /v1/messages?limit=1&offset=3",
+    ]);
+  });
+
   it("resumes a bounded legacy v1 envelope and emits no compatibility truncation", async () => {
     const serve = compactCursorServe(new Map([
       ["legacy-server-cursor", {
@@ -1617,6 +1708,15 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
   it("returns an explicit metadata-only state and rejects malformed stored payloads", async () => {
     const { ds } = make([
       v1("metadata", { attachments: [{ filename: "invoice.pdf", content_type: "application/pdf", size: 12 }] }),
+      v1("legacy-null", {
+        attachments: [{
+          filename: "legacy.pdf",
+          content_type: "application/pdf",
+          size: null,
+          content_base64: "must-not-leak",
+          diagnostic: "must-not-leak",
+        }],
+      }),
       v1("malformed", {
         attachments: [{ filename: "bad.bin", content_type: "application/octet-stream", size: 3 }],
         _attachment_contents: ["%%%="],
@@ -1629,6 +1729,15 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
       content_type: "application/pdf",
       bytes: 12,
     });
+    const legacy = await ds.getAttachmentContent("legacy-null", 0, { maxBytes: 1024 });
+    expect(legacy).toEqual({
+      state: "content_unavailable",
+      index: 0,
+      filename: "legacy.pdf",
+      content_type: "application/pdf",
+      bytes: null,
+    });
+    expect(JSON.stringify(legacy)).not.toContain("must-not-leak");
     await expect(ds.getAttachmentContent("malformed", 0, { maxBytes: 1024 })).rejects.toThrow(/base64/i);
     expect(await ds.getAttachmentContent("metadata", 9, { maxBytes: 1024 })).toEqual({ state: "not_found", index: 9 });
   });

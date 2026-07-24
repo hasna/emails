@@ -361,6 +361,40 @@ deletes them; those do not reach the DLQ. Fetch, parse, or database errors remai
 on SQS and move to the DLQ after `sqs_max_receive_count` attempts. Raw MIME in S3
 is the recovery source.
 
+### 7.1 Recipient-less routing and routing-map migration from #49
+
+`ingest-worker` now resolves routing from an explicit deployment-owned
+`EMAILS_INGEST_PREFIX_DOMAIN_MAP` JSON map only.
+
+- Recipient-less events (no envelope recipients) may use the map as trusted fallback.
+- Events with explicit envelope recipients are never rewritten; unresolved or partial
+  explicit recipients are quarantined.
+- The worker rejects malformed/overlapping/ambiguous `EMAILS_INGEST_PREFIX_DOMAIN_MAP` values at startup.
+  Recipient-less events are quarantined only when the map is absent or when a
+  valid map has no matching prefix.
+
+`deploy/aws` now supports multi-domain map input and keeps legacy single-pair input
+compatibility:
+
+```hcl
+# New: deployment-owned multi-domain map
+inbound_prefix_domain_map = {
+  "inbound/prod/"       = "example.com"
+  "inbound/marketing/"  = "marketing.example"
+}
+
+# Legacy single-pair compatibility (only if override map is unset/empty)
+email_domain        = "example.com"
+inbound_object_prefix = "inbound/"
+```
+
+If `inbound_prefix_domain_map` is omitted, `null`, or empty, the module falls back to
+the legacy single-pair mapping path sourced from `email_domain` and
+`inbound_object_prefix`.
+
+These rules are explicit fail-closed semantics and deliberately supersede #49’s
+configless object-key-to-domain trust model.
+
 Activate `ses_receipt_rule_set_name` and publish `ses_inbound_mx_value` only in a
 separate approved mail-routing cutover. Disabling Terraform later does not undo
 DNS or an already active SES rule set.

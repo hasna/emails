@@ -176,21 +176,66 @@ if grep -En 'name[[:space:]]*=[[:space:]]*"DATABASE_URL"|\["mailery|\["mailery-s
   exit 1
 fi
 
-if ! grep -F 'name = "EMAILS_INGEST_PREFIX_DOMAIN_MAP"' compute.tf >/dev/null \
-  || ! grep -F '(var.inbound_object_prefix) = lower(var.email_domain)' compute.tf >/dev/null; then
+if ! grep -Eq 'name[[:space:]]*=[[:space:]]*"EMAILS_INGEST_PREFIX_DOMAIN_MAP"' compute.tf >/dev/null \
+  || ! grep -F 'inbound_prefix_domain_map_json' compute.tf >/dev/null; then
   echo "worker must receive the validated Terraform prefix/domain routing map" >&2
   exit 1
 fi
-for prefix_validation in \
-  'length(var.inbound_object_prefix) > 1' \
-  'trimspace(var.inbound_object_prefix) == var.inbound_object_prefix' \
-  'endswith(var.inbound_object_prefix, "/")' \
-  'can(regex("^[^[:cntrl:]]+/$", var.inbound_object_prefix))'; do
-  grep -F "$prefix_validation" variables.tf >/dev/null || {
-    echo "inbound_object_prefix must match the worker's canonical prefix contract: $prefix_validation" >&2
+for map_prefix_validation in \
+  'length(prefix) > 1' \
+  'trimspace(prefix) == prefix' \
+  'endswith(prefix, "/")' \
+  'can(regex("^[^[:cntrl:]]+/$", prefix))'; do
+  grep -F "$map_prefix_validation" variables.tf >/dev/null || {
+    echo "inbound_prefix_domain_map must match the worker's canonical prefix contract: $map_prefix_validation" >&2
     exit 1
   }
 done
+for map_domain_validation in \
+  'domain == lower(trimspace(domain))' \
+  'can(regex("^(?i:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:[.](?i:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))+$", domain))'; do
+  grep -F "$map_domain_validation" variables.tf >/dev/null || {
+    echo "inbound_prefix_domain_map must map canonical lowercase domains: $map_domain_validation" >&2
+    exit 1
+  }
+done
+
+if ! grep -F 'for prefix_index, prefix in sort(keys(var.inbound_prefix_domain_map))' variables.tf >/dev/null \
+  || ! grep -F 'for other_index, other_prefix in sort(keys(var.inbound_prefix_domain_map))' variables.tf >/dev/null \
+  || ! grep -F 'prefix_index == other_index || !startswith(prefix, other_prefix)' variables.tf >/dev/null \
+  || grep -F 'for index, prefix in sort(keys(var.inbound_prefix_domain_map))' variables.tf >/dev/null \
+  || grep -F 'index == 0 || !startswith(prefix, sort(keys(var.inbound_prefix_domain_map))[index - 1])' variables.tf >/dev/null; then
+  echo "inbound_prefix_domain_map must validate non-overlapping canonical prefixes with pairwise predicates" >&2
+  exit 1
+fi
+
+if ! printf '%s\n' 'a/' 'a/b/' 'a/c/' | awk '
+  BEGIN {
+    n = split("a/,a/b/,a/c/", map, ",");
+    overlap = 0;
+  }
+  {
+    prefixes[NR] = $1
+  }
+  END {
+    for (i = 1; i <= n; i++) {
+      for (j = 1; j <= n; j++) {
+        if (i == j) {
+          continue
+        }
+        if (substr(prefixes[j], 1, length(prefixes[i])) == prefixes[i]) {
+          overlap = 1
+        }
+      }
+    }
+    if (!overlap) {
+      exit 1
+    }
+  }
+' >/dev/null; then
+  echo "non-adjacent overlap counterexample (a/, a/b/, a/c/) must exist as a true overlap case" >&2
+  exit 1
+fi
 
 worker_statement_is_gated() {
   awk -v wanted_sid="$1" '
@@ -914,59 +959,14 @@ repair_definition_arn="arn:aws:ecs:eu-central-1:123456789012:task-definition/reh
 repair_container="attachment-repair"
 repair_image_digest="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 repair_image_revision="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-repair_manifest_sha="cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 repair_run_id="33333333-3333-4333-8333-333333333333"
 
-repair_json="$(jq -cnS --arg run_id "$repair_run_id" '{
-  apply:true,
-  attempts:1,
-  checkpoint:1,
-  completed_at:"2026-07-24T10:00:01.000Z",
-  created_at:"2026-07-24T10:00:00.000Z",
-  entry_operator_action:0,
-  entry_pending:0,
-  entry_repaired:1,
-  entry_retrying:0,
-  entry_total:1,
-  entry_unavailable:0,
-  entry_would_repair:0,
-  id:$run_id,
-  inventory_total:2,
-  operator_action:0,
-  pending:0,
-  repaired:2,
-  retrying:0,
-  status:"completed",
-  unavailable:0,
-  updated_at:"2026-07-24T10:00:01.000Z",
-  would_repair:0
-}')"
-repair_summary_sha="$(printf '%s' "$repair_json" | sha256sum | awk '{print $1}')"
-repair_success="$repair_fixture_dir/success.json"
-jq -cnS \
-  --arg container "$repair_container" \
-  --arg image_digest "$repair_image_digest" \
-  --arg image_revision "$repair_image_revision" \
-  --arg manifest_sha "$repair_manifest_sha" \
-  --argjson repair "$repair_json" \
-  --arg result_sha "$repair_summary_sha" \
-  --arg run_id "$repair_run_id" \
-  --arg task_arn "$repair_task_arn" \
-  --arg definition_arn "$repair_definition_arn" '{
-    container_name:$container,
-    failure_code:null,
-    image_digest:$image_digest,
-    image_revision:$image_revision,
-    manifest_sha256:$manifest_sha,
-    phase:"apply",
-    repair:$repair,
-    result_sha256:$result_sha,
-    run_id:$run_id,
-    schema_version:1,
-    status:"pass",
-    task_arn:$task_arn,
-    task_definition_arn:$definition_arn
-  }' >"$repair_success"
+repair_success="$root/tests/fixtures/attachment-repair-runtime-success.json"
+[ -f "$repair_success" ] && [ ! -L "$repair_success" ] || {
+  echo "attachment repair runtime success fixture is missing or unsafe" >&2
+  exit 1
+}
+repair_manifest_sha="$(jq -er '.manifest_sha256' "$repair_success")"
 repair_success_sha="$(sha256sum -- "$repair_success" | awk '{print $1}')"
 "$repair_result_gate" \
   "$repair_success" "$repair_success_sha" \
@@ -981,11 +981,68 @@ repair_gate_must_fail() {
   fi
 }
 
+repair_tamper_must_fail() {
+  fixture_name=$1
+  jq_filter=$2
+  tampered="$repair_fixture_dir/tampered-$fixture_name.json"
+  fixture="$repair_fixture_dir/$fixture_name.json"
+  jq -cS "$jq_filter" "$repair_success" >"$tampered"
+  tampered_repair="$(jq -cS '.repair' "$tampered")"
+  tampered_result_sha="$(printf '%s' "$tampered_repair" | sha256sum | awk '{print $1}')"
+  jq -cS --arg result_sha "$tampered_result_sha" \
+    '.result_sha256 = $result_sha' "$tampered" >"$fixture"
+  fixture_sha="$(sha256sum -- "$fixture" | awk '{print $1}')"
+  repair_gate_must_fail \
+    "$fixture" "$fixture_sha" \
+    "$repair_task_arn" "$repair_definition_arn" "$repair_container" \
+    "$repair_image_digest" "$repair_image_revision" "$repair_manifest_sha" \
+    "$repair_run_id"
+}
+
 repair_gate_must_fail \
   "$repair_success" "$repair_success_sha" \
   "${repair_task_arn}fabricated" "$repair_definition_arn" "$repair_container" \
   "$repair_image_digest" "$repair_image_revision" "$repair_manifest_sha" \
   "$repair_run_id"
+
+for required_budget_field in \
+  byte_budget bytes_consumed time_budget_ms deadline_at; do
+  repair_tamper_must_fail \
+    "missing-$required_budget_field" \
+    "del(.repair.$required_budget_field)"
+done
+
+for malformed_budget_field in \
+  byte_budget bytes_consumed time_budget_ms; do
+  repair_tamper_must_fail \
+    "malformed-$malformed_budget_field" \
+    ".repair.$malformed_budget_field = \"1\""
+done
+
+repair_tamper_must_fail "malformed-deadline-at" \
+  '.repair.deadline_at = "not-a-timestamp"'
+repair_tamper_must_fail "impossible-calendar-date" \
+  '(.repair.created_at, .repair.updated_at, .repair.completed_at, .repair.deadline_at) |= sub("2026-07-24"; "2026-02-31")'
+repair_tamper_must_fail "negative-bytes-consumed" \
+  '.repair.bytes_consumed = -1'
+repair_tamper_must_fail "zero-byte-budget" \
+  '.repair.byte_budget = 0'
+repair_tamper_must_fail "zero-time-budget" \
+  '.repair.time_budget_ms = 0'
+repair_tamper_must_fail "unsafe-byte-budget" \
+  '.repair.byte_budget = 9007199254740992'
+repair_tamper_must_fail "unsafe-time-budget" \
+  '.repair.time_budget_ms = 9007199254740992'
+repair_tamper_must_fail "byte-budget-exceeded" \
+  '.repair.bytes_consumed = (.repair.byte_budget + 1)'
+repair_tamper_must_fail "deadline-budget-inconsistent" \
+  '.repair.deadline_at = "2026-07-24T11:00:00.001Z"'
+repair_tamper_must_fail "completed-after-deadline" \
+  '.repair.completed_at = "2026-07-24T11:00:00.001Z"'
+repair_tamper_must_fail "updated-before-created" \
+  '.repair.updated_at = "2026-07-24T09:59:59.999Z"'
+repair_tamper_must_fail "fabricated-extra-key" \
+  '.repair.fabricated = 0'
 
 for nonzero_field in \
   unavailable operator_action entry_unavailable entry_operator_action \

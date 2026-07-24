@@ -118,6 +118,34 @@ describe("self-hosted OpenAPI identity and authorization contract", () => {
     });
   });
 
+  it("documents attachment defaults that align with send runtime behavior", () => {
+    const sendSchema = paths["/v1/messages/send"]?.post?.requestBody?.content?.["application/json"]?.schema;
+    const attachments = sendSchema?.properties?.attachments;
+    const attachmentItem = attachments?.items as
+      | { properties?: Record<string, { default?: string; description?: string; type?: string }>; required?: string[] }
+      | undefined;
+    expect(attachments).toMatchObject({
+      type: "array",
+      maxItems: 5,
+    });
+    expect(Array.isArray(attachmentItem?.required)).toBe(true);
+    expect(attachmentItem?.required).toEqual(["content"]);
+    expect(attachmentItem?.properties?.filename).toMatchObject({
+      type: "string",
+      default: "attachment-{n}",
+      description: expect.stringContaining("attachment-{n}"),
+    });
+    expect(attachmentItem?.properties?.content_type).toMatchObject({
+      type: "string",
+      default: "application/octet-stream",
+      description: expect.stringContaining("application/octet-stream"),
+    });
+    expect(attachmentItem?.properties?.content).toMatchObject({
+      type: "string",
+      description: "Base64-encoded attachment content",
+    });
+  });
+
   it("publishes body-only send-intent recovery operations", () => {
     const lookup = paths["/v1/messages/send-intents/lookup"]?.post;
     const cancel = paths["/v1/messages/send-intents/cancel"]?.post;

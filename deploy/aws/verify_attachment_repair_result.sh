@@ -61,6 +61,23 @@ jq -eS \
   --arg image_revision "$expected_image_revision" \
   --arg manifest_sha256 "$expected_manifest_sha256" \
   --arg run_id "$expected_run_id" '
+  def safe_nonnegative_integer:
+    type == "number"
+    and . >= 0
+    and . <= 9007199254740991
+    and floor == .;
+  def safe_positive_integer:
+    safe_nonnegative_integer and . > 0;
+  def utc_millis:
+    capture(
+      "^(?<base>[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9])\\.(?<millis>[0-9]{3})Z$"
+    ) as $parts
+    | ($parts.base + "Z" | fromdateiso8601) as $seconds
+    | select(
+        ($seconds | strftime("%Y-%m-%dT%H:%M:%SZ"))
+        == ($parts.base + "Z")
+      )
+    | ($seconds * 1000 + ($parts.millis | tonumber));
   select(type == "object")
   | select((keys | sort) == [
       "container_name",
@@ -91,9 +108,12 @@ jq -eS \
   | select((.repair | keys | sort) == [
       "apply",
       "attempts",
+      "byte_budget",
+      "bytes_consumed",
       "checkpoint",
       "completed_at",
       "created_at",
+      "deadline_at",
       "entry_operator_action",
       "entry_pending",
       "entry_repaired",
@@ -108,6 +128,7 @@ jq -eS \
       "repaired",
       "retrying",
       "status",
+      "time_budget_ms",
       "unavailable",
       "updated_at",
       "would_repair"
@@ -131,14 +152,26 @@ jq -eS \
       .repair.retrying,
       .repair.unavailable,
       .repair.would_repair
-    ] | all(.[]; type == "number" and . >= 0 and floor == .))
-  | select([
-      .repair.created_at,
-      .repair.updated_at,
-      .repair.completed_at
-    ] | all(.[];
-      type == "string"
-      and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z$")))
+    ] | all(.[]; safe_nonnegative_integer))
+  | select(.repair.byte_budget | safe_positive_integer)
+  | select(.repair.bytes_consumed | safe_nonnegative_integer)
+  | select(.repair.time_budget_ms | safe_positive_integer)
+  | select(.repair.bytes_consumed <= .repair.byte_budget)
+  | (.repair.created_at | utc_millis) as $created_at
+  | (.repair.updated_at | utc_millis) as $updated_at
+  | (.repair.completed_at | utc_millis) as $completed_at
+  | (.repair.deadline_at | utc_millis) as $deadline_at
+  | select($created_at <= $updated_at)
+  | select($updated_at <= $completed_at)
+  | select($completed_at <= $deadline_at)
+  | select($deadline_at - $created_at == .repair.time_budget_ms)
+  | select(.repair.entry_total > 0)
+  | select(.repair.inventory_total > 0)
+  | select(.repair.checkpoint <= .repair.entry_total)
+  | select(.repair.operator_action <= .repair.unavailable)
+  | select(.repair.entry_operator_action <= .repair.entry_unavailable)
+  | select(.repair.retrying <= .repair.pending)
+  | select(.repair.entry_retrying <= .repair.entry_pending)
   | select(.repair.unavailable == 0)
   | select(.repair.operator_action == 0)
   | select(.repair.entry_unavailable == 0)

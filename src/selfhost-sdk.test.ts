@@ -42,6 +42,30 @@ describe("generated self-hosted SDK identity contract", () => {
     expect(typeof client.createTenantKey).toBe("function");
   });
 
+  it("generates a send payload where attachment filename and content_type remain optional", async () => {
+    let request: Request | null = null;
+    const client = new EmailsSelfHostClient({
+      baseUrl: "https://emails.example.test",
+      apiKey: "api-key-placeholder",
+      fetch: okFetch((value) => { request = value; }),
+    });
+
+    await client.sendMessage({
+      from: "sender@example.test",
+      to: ["recipient@example.test"],
+      subject: "subject",
+      idempotency_key: "tenant-scoped-key",
+      attachments: [{ content: "ZmFrZQ==" }],
+    });
+    expect(await request?.json()).toEqual({
+      from: "sender@example.test",
+      to: ["recipient@example.test"],
+      subject: "subject",
+      idempotency_key: "tenant-scoped-key",
+      attachments: [{ content: "ZmFrZQ==" }],
+    });
+  });
+
   it("serializes the bounded attachment byte limit on the typed SDK operation", async () => {
     let request: Request | null = null;
     const client = new EmailsSelfHostClient({

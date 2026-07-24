@@ -293,6 +293,7 @@ describe("checkpointed attachment repair ledger", () => {
     expect(migration!.sql).toContain("last_error_code");
     expect(migration!.sql).toContain("last_attempt_at");
     expect(migration!.sql).toContain("UNIQUE (tenant_id, request_hash)");
+    expect(migration!.sql).toContain("UNIQUE (tenant_id, id, request_hash)");
     expect(migration!.sql).toContain("byte_budget");
     expect(migration!.sql).toContain("bytes_consumed");
     expect(migration!.sql).toContain("time_budget_ms");
@@ -301,6 +302,8 @@ describe("checkpointed attachment repair ledger", () => {
     expect(migration!.sql).toContain("ENABLE ROW LEVEL SECURITY");
     expect(migration!.sql).toContain("FORCE ROW LEVEL SECURITY");
     expect(migration!.sql).toContain("app.current_tenant");
+    expect(migration!.sql).toContain("FOREIGN KEY (tenant_id, run_id, request_hash)");
+    expect(migration!.sql).toContain("REFERENCES attachment_repair_runs (tenant_id, id, request_hash)");
     expect(migration!.sql).not.toContain("content_base64");
   });
 
@@ -752,6 +755,14 @@ describe("attachment repair ledger store boundary", () => {
 
   it("creates runs idempotently under a tenant lock and never stores raw payload bytes", async () => {
     const calls: Array<{ sql: string; params: readonly unknown[] }> = [];
+    const idempotencyAliases = new Map<string, { request_hash: string; run_id: string }>();
+    const runById = new Map<string, Record<string, unknown>>();
+    const runByTenantDigest = new Map<string, string>();
+    const runByTenantRequestHash = new Map<string, string>();
+    const digestKey = (tenantId: unknown, idempotencyDigest: unknown) =>
+      `${String(tenantId)}::${String(idempotencyDigest)}`;
+    const requestHashKey = (tenantId: unknown, requestHash: unknown) =>
+      `${String(tenantId)}::${String(requestHash)}`;
     const tx: TypedQueryClient = {
       async query() { return { rows: [], rowCount: 0 }; },
       async many<T>(sql: string, params: readonly unknown[] = []): Promise<T[]> {
@@ -778,34 +789,86 @@ describe("attachment repair ledger store boundary", () => {
       },
       async get<T>(sql: string, params: readonly unknown[] = []): Promise<T | null> {
         calls.push({ sql, params });
+        if (sql.includes("INSERT INTO attachment_repair_idempotency_keys")) {
+          const tenantId = String(params[0]);
+          const keyDigest = String(params[1]);
+          const requestHash = String(params[2]);
+          const runId = String(params[3]);
+          const key = digestKey(tenantId, keyDigest);
+          const existing = idempotencyAliases.get(key);
+          if (!existing || (existing.request_hash === requestHash && existing.run_id === runId)) {
+            const row = { request_hash: requestHash, run_id: runId };
+            idempotencyAliases.set(key, row);
+            return row as T;
+          }
+          return null;
+        }
+        if (sql.includes("FROM attachment_repair_idempotency_keys")) {
+          const key = digestKey(params[0], params[1]);
+          return idempotencyAliases.get(key) as T ?? null;
+        }
         if (sql.includes("INSERT INTO attachment_repair_runs")) {
-          return {
-            id: "run-1",
-            tenant_id: TENANT_A,
-            apply: false,
+          const tenantId = String(params[0]);
+          const storedRunId = "run-1";
+          const runId = String(params[1]);
+          const idempotencyDigest = String(params[2]);
+          const requestHash = String(params[3]);
+          const runDigest = digestKey(tenantId, idempotencyDigest);
+          if (runByTenantDigest.has(runDigest)) {
+            return null;
+          }
+          const row = {
+            id: storedRunId,
+            tenant_id: tenantId,
+            idempotency_key_hash: idempotencyDigest,
+            request_hash: requestHash,
+            apply: params[4] === true,
             status: "pending",
-            entry_total: 2,
-            inventory_total: 3,
+            entry_total: Number(params[5]),
+            inventory_total: Number(params[6]),
             repaired: 0,
             would_repair: 0,
             unavailable: 0,
-            pending: 3,
+            pending: Number(params[6]),
             retrying: 0,
             entry_repaired: 0,
             entry_would_repair: 0,
             entry_unavailable: 0,
-            entry_pending: 2,
+            entry_pending: Number(params[5]),
             entry_retrying: 0,
             attempts: 0,
             checkpoint: 0,
-            byte_budget: 1024,
+            byte_budget: Number(params[7]),
             bytes_consumed: 0,
-            time_budget_ms: 60_000,
+            time_budget_ms: Number(params[8]),
             deadline_at: "2026-07-24T00:01:00.000Z",
             created_at: "2026-07-24T00:00:00.000Z",
             updated_at: "2026-07-24T00:00:00.000Z",
             completed_at: null,
-          } as T;
+          } as Record<string, unknown>;
+          runByTenantDigest.set(runDigest, storedRunId);
+          runByTenantRequestHash.set(requestHashKey(tenantId, requestHash), storedRunId);
+          runById.set(storedRunId, row);
+          runById.set(runId, row);
+          return row as T;
+        }
+        if (sql.includes("FROM attachment_repair_runs") && sql.includes("id = $2::uuid")) {
+          return runById.get(String(params[1])) as T ?? null;
+        }
+        if (sql.includes("FROM attachment_repair_runs") && sql.includes("idempotency_key_hash = $2")) {
+          return runById.get(runByTenantDigest.get(digestKey(params[0], params[1]) ?? "") ?? "") as T ?? null;
+        }
+        if (sql.includes("FROM attachment_repair_runs")
+          && sql.includes("request_hash = $2")
+          && !sql.includes("(idempotency_key_hash = $2 OR request_hash = $3)")) {
+          return runById.get(runByTenantRequestHash.get(requestHashKey(params[0], params[1]) ?? "") ?? "") as T ?? null;
+        }
+        if (sql.includes("FROM attachment_repair_runs")
+          && sql.includes("(idempotency_key_hash = $2 OR request_hash = $3)")) {
+          const tenantId = String(params[0]);
+          const replayByDigest = runByTenantDigest.get(digestKey(tenantId, params[1]));
+          const replayByRequest = runByTenantRequestHash.get(requestHashKey(tenantId, params[2]));
+          return runById.get(replayByDigest ?? replayByRequest ?? "") as T ?? null;
         }
         return null;
       },

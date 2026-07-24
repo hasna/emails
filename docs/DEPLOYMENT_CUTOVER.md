@@ -3,6 +3,10 @@
 This repository intentionally has no automatic deployment workflow. Merging or
 tagging the repository cannot publish a package, push an image, or update AWS.
 
+Fast-uri quarantine remains external until 2026-07-26 10:42:54 Europe/Bucharest.
+Do not edit dependencies or dependency-lock files for that change until the date
+window closes.
+
 Before a future `workflow_dispatch` deployment is introduced, an operator must
 provide a Mailery-owned infrastructure manifest and least-privilege role in the
 target user's AWS account. The workflow must use `APP=emails`, require an
@@ -898,8 +902,17 @@ Operators must create the exact-canary manifest without `apply`, record a comple
 approved `apply: true` run and resume bounded pages until `pending == 0`.
 The aggregate promotion gate requires `repaired + would_repair + unavailable + pending == inventory_total` and the
 equivalent `entry_*` invariant.
+Replays with the same canonical manifest and the same phase key must be treated as
+resume-safe and must return the same durable tenant run; they must not create a
+duplicate attachment-repair run.
 It must perform exact-key `GetObject` calls only: no bucket listing, payload logging, source-key logging, recipient logging,
 or caller-supplied bucket is permitted.
+
+Durable repair-ledger ceilings are hard:
+`active runs = 2`, `ledger runs = 100`, and `ledger entries = 20,000` (tenant scope).
+There is no dependency edit or dependency-path command in this repo for pruning those
+completed rows. If a ceiling is reached, escalate to operator approval and source
+scope change; do not bypass quota checks or invent cleanup.
 
 The one-shot task is operator-only infrastructure, not an API route. Clone it
 from the exact reviewed release API task definition, replace the runtime role

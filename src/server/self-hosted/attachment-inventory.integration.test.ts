@@ -13,10 +13,15 @@
 //   - Malformed cursor -> 400.
 
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { createHash } from "node:crypto";
 import { mintApiKey, verifyApiKey } from "@hasna/contracts/auth";
 import { createPgPool, createQueryClient, MigrationLedger, type PoolQueryClient } from "../../storage-kit/index.js";
 import { emailsSelfHostedMigrations } from "./migrations.js";
-import { EmailsSelfHostedStore, MAX_ATTACHMENT_BATCH_IDS } from "./store.js";
+import {
+  AttachmentRepairIdempotencyConflictError,
+  EmailsSelfHostedStore,
+  MAX_ATTACHMENT_BATCH_IDS,
+} from "./store.js";
 import { handleSelfHostedRequest, type SelfHostedServiceDeps } from "./service.js";
 import {
   processAttachmentRepairPage,
@@ -93,6 +98,50 @@ async function importMsg(
   });
   expect(res.status).toBe(201);
   return res.body.message.id as string;
+}
+
+async function makeRepairableInboundMessage(
+  deps: SelfHostedServiceDeps,
+  tenant: { tenantId: string; token: string },
+  canonicalBucket: string,
+  suffix: string,
+): Promise<{ messageId: string; objectKey: string }> {
+  const safeDay = 1 + [...suffix].reduce((acc, ch) => (acc * 31 + ch.charCodeAt(0)) % 28, 0);
+  const receivedAt = `2026-11-${String(safeDay).padStart(2, "0")}T10:00:00.000Z`;
+  const messageId = await importMsg(deps, tenant.token, {
+    receivedAt,
+    attachments: [{ ...att(`repair-${suffix}.txt`, "text/plain", `body-${suffix}`), content_base64: undefined } as never],
+  });
+  const objectKey = `repair-${suffix}`;
+  await pgClient!.execute(
+    `UPDATE messages
+     SET source_id = $3,
+         message_id = $3,
+         attachments = (
+           SELECT jsonb_agg(item.value - 'content_base64' ORDER BY item.ordinality)
+           FROM jsonb_array_elements(attachments) WITH ORDINALITY AS item(value, ordinality)
+         )
+     WHERE tenant_id = $1::uuid AND id = $2`,
+    [tenant.tenantId, messageId, objectKey],
+  );
+  expect(await deps.store.forTenant(tenant.tenantId)
+    .recordInboundSourceProvenance({
+      messageId,
+      bucket: canonicalBucket,
+      objectKey,
+      rawSha256: "d".repeat(64),
+      establishedVia: "canonical_replay",
+    })).toBe("recorded");
+  return { messageId, objectKey };
+}
+
+function attachmentRepairIdempotencyDigest(tenantId: string, key: string): string {
+  return createHash("sha256")
+    .update("emails:attachment-repair:idempotency:v1\0", "utf8")
+    .update(tenantId, "utf8")
+    .update("\0", "utf8")
+    .update(key, "utf8")
+    .digest("hex");
 }
 
 /** Drain the full inventory with a small page size; return every item in order. */
@@ -607,6 +656,182 @@ describe.skipIf(!pgClient)("checkpointed legacy attachment repair ledger", () =>
         code: "invalid_attachment_repair_id",
       });
     }
+  });
+
+  it("creates attachment repair idempotency alias schema objects with tenant-scoped RLS", async () => {
+    const table = await pgClient!.one<{ relrowsecurity: boolean; relforcerowsecurity: boolean }>(
+      `SELECT relrowsecurity, relforcerowsecurity
+       FROM pg_class
+       WHERE oid = 'public.attachment_repair_idempotency_keys'::regclass`,
+    );
+    expect(table).toEqual({ relrowsecurity: true, relforcerowsecurity: true });
+
+    const policy = await pgClient!.one<{ qual: string; with_check: string }>(
+      `SELECT pg_get_expr(polqual, polrelid) AS qual,
+              pg_get_expr(polwithcheck, polrelid) AS with_check
+       FROM pg_policy
+       WHERE polrelid = 'public.attachment_repair_idempotency_keys'::regclass
+         AND polname = 'attachment_repair_idempotency_keys_tenant_isolation'`,
+    );
+    expect(policy.qual).toContain("app.current_tenant");
+    expect(policy.with_check).toContain("app.current_tenant");
+
+    const indexNames = await pgClient!.many<{ indexname: string }>(
+      `SELECT indexname FROM pg_indexes
+       WHERE schemaname = 'public' AND tablename = 'attachment_repair_idempotency_keys'`,
+    );
+    const names = indexNames.map((row) => row.indexname);
+    expect(names).toContain("attachment_repair_idempotency_keys_request_hash_idx");
+    expect(names).toContain("attachment_repair_idempotency_keys_run_id_idx");
+  });
+
+  it("binds alternate idempotency keys to an existing request and rejects conflicting manifests", async () => {
+    const deps = makeDeps();
+    const canonicalBucket = "repair-alias-binds";
+    const tenant = await makeTenant("repair-alias-binds");
+    const store = deps.store.forTenant(tenant.tenantId);
+    const first = await makeRepairableInboundMessage(deps, tenant, canonicalBucket, "A");
+    const second = await makeRepairableInboundMessage(deps, tenant, canonicalBucket, "B");
+
+    const base = await store.createOrGetAttachmentRepairRun({
+      idempotencyKey: "repair-run-bound",
+      canonicalBucket,
+      entries: [{
+        object_key: first.objectKey,
+        recipients: ["one@example.test"],
+        canary_message_ids: [first.messageId],
+      }],
+    });
+    const aliased = await store.createOrGetAttachmentRepairRun({
+      idempotencyKey: "repair-key-b",
+      canonicalBucket,
+      entries: [{
+        object_key: first.objectKey,
+        recipients: ["one@example.test"],
+        canary_message_ids: [first.messageId],
+      }],
+    });
+    expect(aliased.id).toBe(base.id);
+
+    const repeated = await store.createOrGetAttachmentRepairRun({
+      idempotencyKey: "repair-key-b",
+      canonicalBucket,
+      entries: [{
+        object_key: first.objectKey,
+        recipients: ["one@example.test"],
+        canary_message_ids: [first.messageId],
+      }],
+    });
+    expect(repeated.id).toBe(base.id);
+
+    const aliasDigest = attachmentRepairIdempotencyDigest(tenant.tenantId, "repair-key-b");
+    const aliasRow = await pgClient!.one<{ run_id: string; request_hash: string }>(
+      `SELECT run_id::text AS run_id, request_hash
+       FROM attachment_repair_idempotency_keys
+       WHERE tenant_id = $1::uuid AND idempotency_key_hash = $2`,
+      [tenant.tenantId, aliasDigest],
+    );
+    expect(aliasRow.run_id).toBe(base.id);
+    expect(aliasRow.request_hash).toHaveLength(64);
+
+    await expect(store.createOrGetAttachmentRepairRun({
+      idempotencyKey: "repair-key-b",
+      canonicalBucket,
+      entries: [{
+        object_key: second.objectKey,
+        recipients: ["two@example.test"],
+        canary_message_ids: [second.messageId],
+      }],
+    })).rejects.toBeInstanceOf(AttachmentRepairIdempotencyConflictError);
+  });
+
+  it("isolates attachment-repair idempotency aliases by tenant", async () => {
+    const deps = makeDeps();
+    const canonicalBucket = "repair-alias-cross-tenant";
+    const tenantA = await makeTenant("repair-alias-tenant-a");
+    const tenantB = await makeTenant("repair-alias-tenant-b");
+    const storeA = deps.store.forTenant(tenantA.tenantId);
+    const storeB = deps.store.forTenant(tenantB.tenantId);
+    const messageA = await makeRepairableInboundMessage(deps, tenantA, canonicalBucket, "A");
+    const messageB = await makeRepairableInboundMessage(deps, tenantB, canonicalBucket, "B");
+    const sharedKey = "repair-key-cross-tenant";
+
+    const aRun = await storeA.createOrGetAttachmentRepairRun({
+      idempotencyKey: sharedKey,
+      canonicalBucket,
+      entries: [{
+        object_key: messageA.objectKey,
+        recipients: ["a@example.test"],
+        canary_message_ids: [messageA.messageId],
+      }],
+    });
+    const bRun = await storeB.createOrGetAttachmentRepairRun({
+      idempotencyKey: sharedKey,
+      canonicalBucket,
+      entries: [{
+        object_key: messageB.objectKey,
+        recipients: ["b@example.test"],
+        canary_message_ids: [messageB.messageId],
+      }],
+    });
+    expect(aRun.id).not.toBe(bRun.id);
+
+    const aDigest = attachmentRepairIdempotencyDigest(tenantA.tenantId, sharedKey);
+    const bDigest = attachmentRepairIdempotencyDigest(tenantB.tenantId, sharedKey);
+    const aliases = await pgClient!.many<{ tenant_id: string; run_id: string }>(
+      `SELECT tenant_id::text AS tenant_id, run_id::text AS run_id
+       FROM attachment_repair_idempotency_keys
+       WHERE tenant_id IN ($1::uuid, $2::uuid)
+         AND idempotency_key_hash IN ($3, $4)`,
+      [tenantA.tenantId, tenantB.tenantId, aDigest, bDigest],
+    );
+    const byTenant = new Map(aliases.map((alias) => [alias.tenant_id, alias.run_id]));
+    expect(byTenant.get(tenantA.tenantId)).toBe(aRun.id);
+    expect(byTenant.get(tenantB.tenantId)).toBe(bRun.id);
+  });
+
+  it("keeps concurrent alternate-key races deterministic and persistent", async () => {
+    const deps = makeDeps();
+    const canonicalBucket = "repair-alias-race";
+    const tenant = await makeTenant("repair-alias-race");
+    const store = deps.store.forTenant(tenant.tenantId);
+    const first = await makeRepairableInboundMessage(deps, tenant, canonicalBucket, "one");
+    const second = await makeRepairableInboundMessage(deps, tenant, canonicalBucket, "two");
+    const key = "repair-key-race";
+
+    const manifestOne = {
+      idempotencyKey: key,
+      canonicalBucket,
+      entries: [{
+        object_key: first.objectKey,
+        recipients: ["one@example.test"],
+        canary_message_ids: [first.messageId],
+      }],
+    };
+    const manifestTwo = {
+      idempotencyKey: key,
+      canonicalBucket,
+      entries: [{
+        object_key: second.objectKey,
+        recipients: ["two@example.test"],
+        canary_message_ids: [second.messageId],
+      }],
+    };
+    const settled = await Promise.allSettled([
+      store.createOrGetAttachmentRepairRun(manifestOne),
+      store.createOrGetAttachmentRepairRun(manifestTwo),
+    ]);
+    expect(settled.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(settled.filter((result) => result.status === "rejected")).toHaveLength(1);
+
+    const winnerIndex = settled.findIndex((result) => result.status === "fulfilled");
+    const winnerManifest = winnerIndex === 0 ? manifestOne : manifestTwo;
+    const loserManifest = winnerIndex === 0 ? manifestTwo : manifestOne;
+    const winnerId = settled[winnerIndex]!.status === "fulfilled" ? settled[winnerIndex]!.value.id : "";
+    const winner = await store.createOrGetAttachmentRepairRun(winnerManifest);
+    expect(winner.id).toBe(winnerId);
+    await expect(store.createOrGetAttachmentRepairRun(loserManifest))
+      .rejects.toBeInstanceOf(AttachmentRepairIdempotencyConflictError);
   });
 
   it("rejects nonexistent, foreign-tenant, zero-attachment, and complete-only canaries at manifest creation", async () => {

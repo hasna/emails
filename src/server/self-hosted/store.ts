@@ -2356,6 +2356,65 @@ export class TenantScopedStore {
     return this.withAttachmentRepairLedgerLock(
       ["tenant-quota", idempotencyDigest, requestHash],
       async (client) => {
+      // Use `INSERT ... ON CONFLICT ... DO UPDATE ... WHERE` so a reinsert of the
+      // same key cannot clobber a row unless it is already the same request/run.
+      // The immediate persisted-row comparison is the final guardrail: it turns any
+      // concurrent replay that loses the conflict race into a deterministic
+      // ownership/idempotency conflict, instead of silently returning the wrong
+      // row binding.
+      const bindAlias = async (runId: string, boundRequestHash: string): Promise<void> => {
+        const alias = await client.get<{ request_hash: string; run_id: string }>(
+          `INSERT INTO attachment_repair_idempotency_keys (
+             tenant_id, idempotency_key_hash, request_hash, run_id
+           )
+           VALUES (
+             $1::uuid, $2, $3, $4::uuid
+           )
+           ON CONFLICT (tenant_id, idempotency_key_hash)
+           DO UPDATE SET
+             request_hash = attachment_repair_idempotency_keys.request_hash,
+             run_id = attachment_repair_idempotency_keys.run_id
+             WHERE attachment_repair_idempotency_keys.request_hash = $3
+               AND attachment_repair_idempotency_keys.run_id = $4::uuid
+           RETURNING request_hash, run_id::text AS run_id`,
+          [this.tenantId, idempotencyDigest, boundRequestHash, runId],
+        );
+        if (!alias || alias.request_hash !== boundRequestHash || alias.run_id !== runId) {
+          const persistedAlias = await client.get<{ request_hash: string; run_id: string }>(
+            `SELECT request_hash, run_id::text AS run_id
+             FROM attachment_repair_idempotency_keys
+             WHERE tenant_id = $1::uuid AND idempotency_key_hash = $2`,
+            [this.tenantId, idempotencyDigest],
+          );
+          if (!persistedAlias
+            || persistedAlias.request_hash !== boundRequestHash
+            || persistedAlias.run_id !== runId
+          ) {
+            throw new AttachmentRepairIdempotencyConflictError();
+          }
+        }
+      };
+      const alias = await client.get<{ request_hash: string; run_id: string }>(
+        `SELECT request_hash, run_id::text AS run_id
+         FROM attachment_repair_idempotency_keys
+         WHERE tenant_id = $1::uuid AND idempotency_key_hash = $2`,
+        [this.tenantId, idempotencyDigest],
+      );
+      if (alias) {
+        if (alias.request_hash !== requestHash) {
+          throw new AttachmentRepairIdempotencyConflictError();
+        }
+        const fromAlias = await client.get<Record<string, unknown>>(
+          `SELECT ${ATTACHMENT_REPAIR_RUN_COLUMNS}, request_hash
+           FROM attachment_repair_runs
+           WHERE tenant_id = $1::uuid AND id = $2::uuid`,
+          [this.tenantId, alias.run_id],
+        );
+        if (fromAlias && fromAlias.request_hash === requestHash) {
+          return mapAttachmentRepairRun(fromAlias);
+        }
+      }
+
       const existing = await client.get<Record<string, unknown>>(
         `SELECT ${ATTACHMENT_REPAIR_RUN_COLUMNS}, request_hash
          FROM attachment_repair_runs
@@ -2366,6 +2425,7 @@ export class TenantScopedStore {
         if (existing["request_hash"] !== requestHash) {
           throw new AttachmentRepairIdempotencyConflictError();
         }
+        await bindAlias(String(existing["id"]), String(existing["request_hash"]));
         return mapAttachmentRepairRun(existing);
       }
 
@@ -2375,7 +2435,10 @@ export class TenantScopedStore {
          WHERE tenant_id = $1::uuid AND request_hash = $2`,
         [this.tenantId, requestHash],
       );
-      if (duplicateRequest) return mapAttachmentRepairRun(duplicateRequest);
+      if (duplicateRequest) {
+        await bindAlias(String(duplicateRequest["id"]), requestHash);
+        return mapAttachmentRepairRun(duplicateRequest);
+      }
 
       const expiredRuns = await client.many<{ id: string }>(
         `SELECT id::text AS id
@@ -2537,8 +2600,10 @@ export class TenantScopedStore {
         if (!raced || raced["request_hash"] !== requestHash) {
           throw new AttachmentRepairIdempotencyConflictError();
         }
+        await bindAlias(String(raced["id"]), requestHash);
         return mapAttachmentRepairRun(raced);
       }
+      await bindAlias(runId, requestHash);
 
       await client.execute(
         `INSERT INTO attachment_repair_entries (

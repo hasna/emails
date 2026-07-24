@@ -59,8 +59,41 @@ describe("attachment download boundary", () => {
       content_type: "application/pdf",
       bytes: 123,
     });
+    expect(decodeAttachmentPayload({
+      code: "attachment_content_unavailable",
+      attachment: { filename: "legacy.pdf", content_type: "application/pdf", size: null },
+    }, 3, 1024)).toEqual({
+      state: "content_unavailable",
+      index: 3,
+      filename: "legacy.pdf",
+      content_type: "application/pdf",
+      bytes: null,
+    });
     expect(decodeAttachmentPayload({ code: "attachment_not_found" }, 2, 1024))
       .toEqual({ state: "not_found", index: 2 });
+  });
+
+  it("allows null size only for unavailable content and keeps present sizes strict", () => {
+    const unavailable = (size: unknown) => ({
+      code: "attachment_content_unavailable",
+      attachment: {
+        filename: "legacy.bin",
+        content_type: "application/octet-stream",
+        size,
+      },
+    });
+    for (const invalid of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1, "1"]) {
+      expect(() => decodeAttachmentPayload(unavailable(invalid), 0, 16))
+        .toThrow(/size.*non-negative integer/i);
+    }
+    expect(() => decodeAttachmentPayload({
+      attachment: {
+        filename: "legacy.bin",
+        content_type: "application/octet-stream",
+        size: null,
+        content_base64: "",
+      },
+    }, 0, 16)).toThrow(/size.*non-negative integer/i);
   });
 
   it("rejects malformed base64, declared-size drift, and oversized payloads", () => {

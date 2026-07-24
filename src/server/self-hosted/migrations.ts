@@ -2583,6 +2583,7 @@ const ATTACHMENT_REPAIR_LEDGER = defineMigration(
     PRIMARY KEY (tenant_id, id),
     UNIQUE (tenant_id, idempotency_key_hash),
     UNIQUE (tenant_id, request_hash),
+    UNIQUE (tenant_id, id, request_hash),
     CHECK (repaired + would_repair + unavailable + pending = inventory_total),
     CHECK (entry_repaired + entry_would_repair + entry_unavailable + entry_pending = entry_total),
     CHECK (operator_action <= unavailable),
@@ -2593,6 +2594,23 @@ const ATTACHMENT_REPAIR_LEDGER = defineMigration(
     CHECK ((status = 'completed') = (entry_pending = 0)),
     CHECK ((status = 'completed') = (completed_at IS NOT NULL))
   );
+
+  CREATE TABLE IF NOT EXISTS attachment_repair_idempotency_keys (
+    tenant_id            uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    idempotency_key_hash  text NOT NULL CHECK (idempotency_key_hash ~ '^[0-9a-f]{64}$'),
+    request_hash         text NOT NULL CHECK (request_hash ~ '^[0-9a-f]{64}$'),
+    run_id               uuid NOT NULL,
+    created_at           timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (tenant_id, idempotency_key_hash),
+    FOREIGN KEY (tenant_id, run_id, request_hash)
+      REFERENCES attachment_repair_runs (tenant_id, id, request_hash) ON DELETE CASCADE
+  );
+
+  CREATE INDEX IF NOT EXISTS attachment_repair_idempotency_keys_request_hash_idx
+    ON attachment_repair_idempotency_keys (tenant_id, request_hash);
+
+  CREATE INDEX IF NOT EXISTS attachment_repair_idempotency_keys_run_id_idx
+    ON attachment_repair_idempotency_keys (tenant_id, run_id);
 
   CREATE TABLE IF NOT EXISTS attachment_repair_entries (
     tenant_id          uuid NOT NULL,
@@ -2635,6 +2653,13 @@ const ATTACHMENT_REPAIR_LEDGER = defineMigration(
       tenant_id, run_id, next_attempt_at, attempts, position
     )
     WHERE status = 'pending';
+
+  ALTER TABLE attachment_repair_idempotency_keys ENABLE ROW LEVEL SECURITY;
+  ALTER TABLE attachment_repair_idempotency_keys FORCE ROW LEVEL SECURITY;
+  DROP POLICY IF EXISTS attachment_repair_idempotency_keys_tenant_isolation ON attachment_repair_idempotency_keys;
+  CREATE POLICY attachment_repair_idempotency_keys_tenant_isolation ON attachment_repair_idempotency_keys
+    USING (tenant_id = NULLIF(current_setting('app.current_tenant', true), '')::uuid)
+    WITH CHECK (tenant_id = NULLIF(current_setting('app.current_tenant', true), '')::uuid);
 
   ALTER TABLE attachment_repair_runs ENABLE ROW LEVEL SECURITY;
   ALTER TABLE attachment_repair_runs FORCE ROW LEVEL SECURITY;

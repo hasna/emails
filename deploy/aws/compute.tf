@@ -38,6 +38,24 @@ resource "aws_ecs_cluster_capacity_providers" "this" {
 locals {
   database_ca_file = "/opt/emails/certs/aws-rds-global-bundle.pem"
 
+  inbound_prefix_domain_map_override = var.inbound_prefix_domain_map == null ? {} : {
+    for prefix, domain in var.inbound_prefix_domain_map : trimspace(prefix) => lower(trimspace(domain))
+  }
+
+  inbound_prefix_domain_map_legacy = var.enable_ses_inbound && var.email_domain != null ? {
+    (var.inbound_object_prefix) = lower(var.email_domain)
+  } : {}
+
+  inbound_prefix_domain_map = (
+    length(local.inbound_prefix_domain_map_override) > 0
+    ? local.inbound_prefix_domain_map_override
+    : local.inbound_prefix_domain_map_legacy
+  )
+
+  inbound_prefix_domain_map_json = jsonencode({
+    for prefix in sort(keys(local.inbound_prefix_domain_map)) : prefix => local.inbound_prefix_domain_map[prefix]
+  })
+
   common_environment = [
     { name = "AWS_REGION", value = var.aws_region },
     { name = "HOST", value = "0.0.0.0" },
@@ -63,11 +81,9 @@ locals {
       { name = "EMAILS_INGEST_QUEUE_URL", value = aws_sqs_queue.inbound.id },
       { name = "EMAILS_INGEST_S3_BUCKET", value = aws_s3_bucket.inbound.id },
     ],
-    var.enable_ses_inbound && var.email_domain != null ? [{
-      name = "EMAILS_INGEST_PREFIX_DOMAIN_MAP"
-      value = jsonencode({
-        (var.inbound_object_prefix) = lower(var.email_domain)
-      })
+    var.enable_ses_inbound && length(local.inbound_prefix_domain_map) > 0 ? [{
+      name  = "EMAILS_INGEST_PREFIX_DOMAIN_MAP"
+      value = local.inbound_prefix_domain_map_json
     }] : [],
   )
 

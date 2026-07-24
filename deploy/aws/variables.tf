@@ -504,6 +504,40 @@ variable "inbound_object_prefix" {
   }
 }
 
+variable "inbound_prefix_domain_map" {
+  description = "Optional override map from inbound S3 prefixes to recipient domains used by the worker when messages are recipient-less."
+  type        = map(string)
+  default     = null
+  nullable    = true
+
+  validation {
+    condition = var.inbound_prefix_domain_map == null || (
+      alltrue([
+        for prefix, domain in var.inbound_prefix_domain_map : (
+          length(prefix) > 1 &&
+          trimspace(prefix) == prefix &&
+          !startswith(prefix, "/") &&
+          endswith(prefix, "/") &&
+          !strcontains(prefix, "..") &&
+          can(regex("^[^[:cntrl:]]+/$", prefix)) &&
+          domain == lower(trimspace(domain)) &&
+          can(regex("^(?i:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:[.](?i:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))+$", domain))
+        )
+      ]) &&
+      alltrue([
+        for prefix_index, prefix in sort(keys(var.inbound_prefix_domain_map)) : (
+          alltrue([
+            for other_index, other_prefix in sort(keys(var.inbound_prefix_domain_map)) : (
+              prefix_index == other_index || !startswith(prefix, other_prefix)
+            )
+          ])
+        )
+      ])
+    )
+    error_message = "inbound_prefix_domain_map must map canonical non-overlapping prefixes to lowercase canonical domains."
+  }
+}
+
 variable "alarm_notification_topic_arn" {
   description = "Existing operator-owned SNS topic ARN for alarms. Required before service counts can be non-zero."
   type        = string

@@ -1118,7 +1118,7 @@ export class SelfHostedMailDataSource implements MailDataSource {
       : undefined;
     let cursor = decodedCursor?.serverCursor ?? rawCursor;
     let legacyOffset = decodedCursor?.serverCursor === null ? decodedCursor.offset ?? undefined : undefined;
-    let consumedRows: number | null = decodedCursor ? decodedCursor.offset : 0;
+    let consumedRows: number | null = decodedCursor ? decodedCursor.offset : rawCursor ? null : 0;
     const since = decodedCursor ? decodedCursor.since ?? undefined : requestedSince;
     if (decodedCursor
       && requestedSince !== undefined
@@ -1145,6 +1145,12 @@ export class SelfHostedMailDataSource implements MailDataSource {
       const consumedAfterPage = consumedRows === null ? null : consumedRows + page.messages.length;
 
       if (page.nextCursor === undefined && page.messages.length === pageLimit) {
+        if (rawCursor) {
+          throw new Error(
+            "self-hosted emails: raw cursor pagination returned a full page without next_cursor; "
+            + "upgrade the server or rerun without cursor because the traversal depth is unknown",
+          );
+        }
         if (consumedAfterPage === null) {
           throw new Error(
             "self-hosted emails: a legacy page omitted next_cursor after a raw server cursor; "

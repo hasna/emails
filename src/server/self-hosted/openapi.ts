@@ -1416,11 +1416,16 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
                     items: {
                       type: "object",
                       properties: {
-                        filename: { type: "string" },
+                        filename: {
+                          type: "string",
+                          default: "attachment-{n}",
+                          description:
+                            "Defaults to `attachment-{n}` where n is the 1-based attachment index when omitted.",
+                        },
                         content: { type: "string", description: "Base64-encoded attachment content" },
-                        content_type: { type: "string" },
+                        content_type: { type: "string", default: "application/octet-stream", description: "Defaults to application/octet-stream when omitted." },
                       },
-                      required: ["filename", "content", "content_type"],
+                      required: ["content"],
                     },
                   },
                   send_key: {

@@ -1003,7 +1003,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Send through the configured SES or Resend provider and persist the resulting ledger row */
-    async sendMessage(body: { "from": string; "to": Array<string>; "cc"?: Array<string>; "bcc"?: Array<string>; "reply_to"?: string; "subject": string; "text"?: string; "html"?: string; "attachments"?: Array<{ "filename": string; "content": string; "content_type": string }>; "send_key"?: string; "idempotency_key": string }, init?: RequestInit): Promise<{ "message": Message; "provider": string; "idempotent_replay"?: true; "in_progress"?: true }> {
+    async sendMessage(body: { "from": string; "to": Array<string>; "cc"?: Array<string>; "bcc"?: Array<string>; "reply_to"?: string; "subject": string; "text"?: string; "html"?: string; "attachments"?: Array<{ "filename"?: string; "content": string; "content_type"?: string }>; "send_key"?: string; "idempotency_key": string }, init?: RequestInit): Promise<{ "message": Message; "provider": string; "idempotent_replay"?: true; "in_progress"?: true }> {
       return this.request("POST", `/v1/messages/send`, {
         body,
         query: undefined,
