@@ -667,6 +667,60 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     expect(res.warning).toBeUndefined();
   });
 
+  it("rejects --provider instead of silently ignoring it (the server owns the sender)", async () => {
+    // The flag was parsed and then dropped, so an operator who "re-pointed" a
+    // send at another SES provider got the old one with no warning at all.
+    let called = 0;
+    const serve: SelfHostedFetch = async () => {
+      called += 1;
+      return { status: 202, async text() { return JSON.stringify({ message: { id: "m" }, sent: true }); } };
+    };
+    const ds = new SelfHostedMailDataSource({ baseUrl: "https://emails.example/v1", apiKey: "k", fetchImpl: serve });
+    await expect(ds.send({
+      to: "x@hasna.com", from: "me@hasna.com", subject: "s", body: "b", providerId: "some-provider-id",
+    })).rejects.toThrow(/--provider is not supported in self_hosted mode/);
+    expect(called).toBe(0);
+  });
+
+  it("never turns a provider REJECT into a resolved send", async () => {
+    const serveReject: SelfHostedFetch = async () => ({
+      status: 422,
+      async text() {
+        return JSON.stringify({
+          error: "the provider rejected this message and NOTHING was sent — MessageRejected: not verified",
+          reason: "provider_rejected",
+          sent: false,
+          retry_safe: true,
+          message: { id: "m-rejected", send_state: "failed" },
+        });
+      },
+    });
+    const ds = new SelfHostedMailDataSource({ baseUrl: "https://emails.example/v1", apiKey: "k", fetchImpl: serveReject });
+    let resolved: unknown;
+    let rejected: unknown;
+    try { resolved = await ds.send({ to: "x@external.example", from: "me@hasna.com", subject: "s", body: "b" }); }
+    catch (error) { rejected = error; }
+    expect(resolved).toBeUndefined();
+    expect(String(rejected)).toContain("NOTHING was sent");
+  });
+
+  it("never turns an INDETERMINATE outcome into a resolved send", async () => {
+    const serveUnknown: SelfHostedFetch = async () => ({
+      status: 502,
+      async text() {
+        return JSON.stringify({
+          error: "the provider call failed without a definitive outcome; the message may or may not have been sent",
+          reason: "provider_outcome_uncertain",
+          sent: null,
+          retry_safe: false,
+        });
+      },
+    });
+    const ds = new SelfHostedMailDataSource({ baseUrl: "https://emails.example/v1", apiKey: "k", fetchImpl: serveUnknown });
+    await expect(ds.send({ to: "x@external.example", from: "me@hasna.com", subject: "s", body: "b" }))
+      .rejects.toThrow(/may or may not have been sent/);
+  });
+
   it("returns verification candidates scoped to the recipient address", async () => {
     const { ds, serve } = make([
       v1("2", { to_addrs: ["andrei@hasna.com"], subject: "code 123456" }),

@@ -36,11 +36,19 @@ export function buildSelfHostedService(version: string): SelfHostedServiceDeps {
     },
     [SELF_HOSTED_APP, ...SELF_HOSTED_APP_ALIASES],
   );
+  const sender = buildSelfHostedSender();
+  // Secret-free boot line: WHICH identity outbound mail is signed with. Without
+  // it, "the SES credentials are configured" was unverifiable from the running
+  // service — the 2026-07-25 sends went out under the deployment role while an
+  // operator believed a configured provider was in use.
+  console.log(
+    `[emails-self-hosted] outbound provider=${sender.provider} credentials=${sender.credentialSource ?? "unknown"}`,
+  );
   return {
     client,
     store: new EmailsSelfHostedStore(client),
     verifier,
-    sender: buildSelfHostedSender(),
+    sender,
     migrations: emailsSelfHostedMigrations(),
     version,
     // ---- multi-tenancy + auth (WI-2) ----

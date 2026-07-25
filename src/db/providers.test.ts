@@ -86,8 +86,8 @@ function prov(row: {
 }
 
 describe("createProvider", () => {
-  it("creates a resend provider without echoing credentials", () => {
-    const p = createProvider({ name: "Resend Prod", type: "resend", api_key: "re_abc123" });
+  it("creates a resend provider from metadata alone", () => {
+    const p = createProvider({ name: "Resend Prod", type: "resend" });
     expect(p.id).toHaveLength(36);
     expect(p.name).toBe("Resend Prod");
     expect(p.type).toBe("resend");
@@ -96,13 +96,34 @@ describe("createProvider", () => {
     expect(p.active).toBe(true);
   });
 
-  it("creates an SES provider (region kept, credentials dropped)", () => {
-    const p = createProvider({ name: "SES US", type: "ses", region: "us-east-1", access_key: "AKIA", secret_key: "secret" });
+  it("creates an SES provider (region kept, no credential columns)", () => {
+    const p = createProvider({ name: "SES US", type: "ses", region: "us-east-1" });
     expect(p.type).toBe("ses");
     expect(p.region).toBe("us-east-1");
     expect(p.access_key).toBeNull();
     expect(p.secret_key).toBeNull();
     expect(p.api_key).toBeNull();
+  });
+
+  it("REFUSES credentials instead of silently dropping them", () => {
+    // Before the 2026-07-25 fix these calls returned a happy provider row while
+    // discarding the credentials on the wire, and `provider add` then blamed the
+    // operator with "Provider credentials are invalid". Silence is the defect.
+    expect(() => createProvider({ name: "SES US", type: "ses", region: "us-east-1", access_key: "AKIAEXAMPLE", secret_key: "s3cr3t" }))
+      .toThrow(/does not store per-provider credentials \(access_key, secret_key\)/);
+    expect(() => createProvider({ name: "Resend Prod", type: "resend", api_key: "re_abc123" }))
+      .toThrow(/does not store per-provider credentials \(api_key\)/);
+  });
+
+  it("names the server-side environment variables the credentials belong in", () => {
+    expect(() => createProvider({ name: "SES US", type: "ses", access_key: "AKIAEXAMPLE", secret_key: "s3cr3t" }))
+      .toThrow(/EMAILS_SES_ACCESS_KEY_ID \+ EMAILS_SES_SECRET_ACCESS_KEY/);
+  });
+
+  it("REFUSES credentials on update too", () => {
+    const p = createProvider({ name: "SES US", type: "ses", region: "us-east-1" });
+    expect(() => updateProvider(p.id, { secret_key: "rotated" }))
+      .toThrow(/does not store per-provider credentials \(secret_key\)/);
   });
 
   it("returns null for optional fields when not provided", () => {

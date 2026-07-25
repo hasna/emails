@@ -825,6 +825,17 @@ export class SelfHostedMailDataSource implements MailDataSource {
     if (input.scheduledAt) {
       throw new Error("Scheduled send is not supported on the self-hosted emails serve.");
     }
+    if (input.providerId) {
+      // The /v1 send contract has no provider selector: the server sends with
+      // the single operator-configured provider (EMAILS_SEND_PROVIDER + its
+      // server-side credentials). Accepting the flag and ignoring it made an
+      // operator believe mail had been re-routed to another SES account when it
+      // had not.
+      throw new Error(
+        "--provider is not supported in self_hosted mode: the server selects the outbound provider "
+          + "(EMAILS_SEND_PROVIDER) and holds its credentials. Re-run without --provider.",
+      );
+    }
     const to = input.to.split(",").map((v) => v.trim()).filter(Boolean);
     const useMarkdown = input.markdown !== false;
     const html = input.html ?? (useMarkdown ? renderMarkdown(input.body) : undefined);

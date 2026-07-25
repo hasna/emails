@@ -170,6 +170,11 @@ export function registerSendCommands(program: Command, _output: (data: unknown, 
           html: htmlBody,
           markdown: false,
           replyTo: opts.replyTo,
+          // `--provider` used to be parsed and then dropped on the floor in BOTH
+          // modes. Thread it through: local honours it, self_hosted refuses it
+          // explicitly (the server chooses the sender), so it is never silently
+          // ignored again.
+          providerId: opts.provider,
           replyToId: (opts as Record<string, unknown>).inReplyTo as string | undefined,
           attachments: attachments.length > 0 ? attachments : undefined,
           scheduledAt: opts.schedule,
