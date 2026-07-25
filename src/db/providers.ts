@@ -23,6 +23,7 @@ function routed<K extends keyof typeof remote & keyof typeof local>(key: K): Rou
   }) as RoutedFunction<K>;
 }
 
+export const assertProviderCredentialsStorable = routed("assertProviderCredentialsStorable");
 export const createProvider = routed("createProvider");
 export const getProvider = routed("getProvider");
 export const resolveProviderId = routed("resolveProviderId");

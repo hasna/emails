@@ -17,31 +17,118 @@ import type { DnsRecord, DnsStatus, Provider, SendEmailOptions, Stats } from "..
 import { ProviderConfigError } from "../types/index.js";
 import type { ProviderAdapter, RemoteAddress, RemoteDomain, RemoteEvent } from "./interface.js";
 
+export interface SesStaticCredentials {
+  accessKeyId: string;
+  secretAccessKey: string;
+  sessionToken?: string;
+}
+
+/**
+ * Where the AWS credentials for a SES provider come from.
+ *
+ * `provider`  — the provider row itself carries an access key AND a secret key.
+ *               Those are used EXCLUSIVELY: they are never mixed with ambient
+ *               `AWS_*` values, because half-a-key-pair from each source
+ *               silently signs against the wrong account (the shape of the
+ *               2026-07-25 incident, where a provider added with the correct
+ *               credentials still sent through the deployment IAM role).
+ * `ambient`   — no provider credentials, but a complete static `AWS_*` pair is
+ *               present in the environment.
+ * `chain`     — nothing explicit: defer to the AWS SDK default chain (EC2/ECS
+ *               task role, SSO, shared config, …).
+ */
+export type SesCredentialSource = "provider" | "ambient" | "chain";
+
+export interface SesCredentialResolution {
+  source: SesCredentialSource;
+  credentials?: SesStaticCredentials;
+}
+
+/**
+ * Resolve which credentials a SES client must sign with. Exported so both the
+ * adapter and `provider add/update` validation agree on ONE rule — validating
+ * against a different identity than the one that will send is exactly how a
+ * provider could report "credentials valid" while sending from another account.
+ */
+export function resolveSesCredentials(
+  provider: Pick<Provider, "access_key" | "secret_key">,
+  env: NodeJS.ProcessEnv = process.env,
+): SesCredentialResolution {
+  const providerAccessKey = provider.access_key?.trim() || "";
+  const providerSecretKey = provider.secret_key?.trim() || "";
+  const envAccessKey = env["AWS_ACCESS_KEY_ID"]?.trim() || "";
+  const envSecretKey = env["AWS_SECRET_ACCESS_KEY"]?.trim() || "";
+  if (providerAccessKey || providerSecretKey) {
+    if (!providerAccessKey || !providerSecretKey) {
+      // One exception to the both-or-neither rule, and only one: the provider
+      // names the SAME access key id the environment already holds a complete
+      // pair for. That is not a mixed identity — it is the identity the
+      // operator asked for, spelled twice — and rows shaped like this predate
+      // the rule (pre-1.3.0 `provider add --access-key` without a secret relied
+      // on the environment). Anything else still refuses: completing half a
+      // pair from a DIFFERENT identity is what signs against the wrong account.
+      if (providerAccessKey && !providerSecretKey && envAccessKey === providerAccessKey && envSecretKey) {
+        const sessionToken = env["AWS_SESSION_TOKEN"]?.trim() || "";
+        return {
+          source: "ambient",
+          credentials: {
+            accessKeyId: envAccessKey,
+            secretAccessKey: envSecretKey,
+            ...(sessionToken ? { sessionToken } : {}),
+          },
+        };
+      }
+      throw new ProviderConfigError(
+        "SES provider credentials are incomplete: an access key and a secret key must be supplied together. " +
+          "Partial provider credentials are never completed from the environment, because that would sign with a mixed identity. " +
+          "Supply both with `emails provider update <id> --access-key … --secret-key …`, or clear both to fall back to the deployment role.",
+      );
+    }
+    return { source: "provider", credentials: { accessKeyId: providerAccessKey, secretAccessKey: providerSecretKey } };
+  }
+  if (envAccessKey && envSecretKey) {
+    const sessionToken = env["AWS_SESSION_TOKEN"]?.trim() || "";
+    return {
+      source: "ambient",
+      credentials: {
+        accessKeyId: envAccessKey,
+        secretAccessKey: envSecretKey,
+        ...(sessionToken ? { sessionToken } : {}),
+      },
+    };
+  }
+  return { source: "chain" };
+}
+
 export class SESAdapter implements ProviderAdapter {
   private client: SESv2Client;
   private classicClient: SESClassicClient;
   private providerId: string;
+  /** Which identity this adapter signs with — surfaced for diagnostics/logs. */
+  readonly credentialSource: SesCredentialSource;
+  private configurationSetName: string | undefined;
 
   constructor(provider: Provider) {
     const region = provider.region || process.env["AWS_REGION"] || "us-east-1";
-    const accessKeyId = provider.access_key || process.env["AWS_ACCESS_KEY_ID"];
-    const secretAccessKey = provider.secret_key || process.env["AWS_SECRET_ACCESS_KEY"];
 
     if (!region) {
       throw new ProviderConfigError("SES provider requires a region");
     }
 
+    const resolved = resolveSesCredentials(provider);
     const clientConfig: ConstructorParameters<typeof SESv2Client>[0] = { region };
     const classicClientConfig: ConstructorParameters<typeof SESClassicClient>[0] = { region };
 
-    if (accessKeyId && secretAccessKey) {
-      clientConfig.credentials = { accessKeyId, secretAccessKey };
-      classicClientConfig.credentials = { accessKeyId, secretAccessKey };
+    if (resolved.credentials) {
+      clientConfig.credentials = { ...resolved.credentials };
+      classicClientConfig.credentials = { ...resolved.credentials };
     }
 
     this.client = new SESv2Client(clientConfig);
     this.classicClient = new SESClassicClient(classicClientConfig);
     this.providerId = provider.id;
+    this.credentialSource = resolved.source;
+    this.configurationSetName = process.env["EMAILS_SES_CONFIGURATION_SET"]?.trim() || undefined;
   }
 
   async listDomains(): Promise<RemoteDomain[]> {
@@ -291,6 +378,7 @@ export class SESAdapter implements ProviderAdapter {
           Content: {
             Raw: { Data: Buffer.from(rawMessage) },
           },
+          ...(this.configurationSetName ? { ConfigurationSetName: this.configurationSetName } : {}),
         }),
       );
       return result.MessageId ?? "";
@@ -317,6 +405,7 @@ export class SESAdapter implements ProviderAdapter {
         EmailTags: opts.tags
           ? Object.entries(opts.tags).map(([Name, Value]) => ({ Name, Value }))
           : undefined,
+        ...(this.configurationSetName ? { ConfigurationSetName: this.configurationSetName } : {}),
       }),
     );
 

@@ -37,6 +37,7 @@ async function loadCommandModule(module: CommandModule): Promise<RegisterFn> {
     case "owner": return (await import("./commands/owner.js")).registerOwnerCommands;
     case "alias": return (await import("./commands/alias.js")).registerAliasCommands;
     case "sendkey": return (await import("./commands/sendkey.js")).registerSendKeyCommands;
+    case "send-intent": return (await import("./commands/send-intent.js")).registerSendIntentCommands;
     case "reply": return (await import("./commands/reply.js")).registerReplyCommand;
     case "forwarding": return (await import("./commands/forwarding.js")).registerForwardingCommands;
     case "ui": return (await import("./commands/ui.js")).registerUiCommand;
