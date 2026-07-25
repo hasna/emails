@@ -2,7 +2,7 @@
 
 All notable changes to `@hasna/emails` are documented here.
 
-## [Unreleased]
+## [1.3.0] - 2026-07-25
 
 - **fix(self-hosted): a message that provably left is no longer parked without the proof.** On the provider-accepted-then-ledger-write-failed path the row was written `send_state = 'uncertain'` with `provider_message_id = NULL`, even though the provider had just returned an id. `emails log` then rendered a delivered message in the not-delivered style, and because `reconcile --outcome sent` requires the provider message id, the only outcome an operator could actually record was `not_sent` — filing a delivered message as failed, the exact inversion this release exists to prevent. `markSendUncertain` now persists the provider message id and a `send_uncertain_reason` note on the row. Both tests that covered this path asserted the HTTP response only; they now assert the row and the reconcile round-trip.
 - fix(providers): an access-key-only SES provider row whose access key id matches a COMPLETE ambient pair resolves to that ambient identity instead of throwing. Rows in that shape predate the both-or-neither rule (`provider add --access-key` with no secret relied on the environment) and the identity is the same one named twice, not a mixed one. Every other partial pair — a different ambient identity, or no ambient secret at all — is still refused, and the error now names the exact remediation command.
