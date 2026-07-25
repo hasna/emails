@@ -23,13 +23,41 @@ data "aws_iam_policy_document" "ecs_tasks_assume" {
 }
 
 locals {
+  # An ECS `secrets[].valueFrom` may address a single JSON key inside a secret
+  # (`arn:...:secret:name-suffix:JSON_KEY:version-stage:version-id`), but that
+  # form is NOT a valid IAM resource ARN. Keep only the first seven
+  # colon-separated segments, which is the bare secret ARN, and de-duplicate:
+  # both credentials usually live in the same secret.
+  ses_secret_iam_arns = var.ses_access_key_id_secret_arn == null ? [] : distinct([
+    for arn in [
+      var.ses_access_key_id_secret_arn,
+      var.ses_secret_access_key_secret_arn,
+    ] : join(":", slice(split(":", arn), 0, 7))
+  ])
+
+  # Only needed when the SES credential secrets use a customer-managed key. The
+  # AWS-managed aws/secretsmanager key grants decryption through the secret
+  # itself, so the common case stays empty.
+  ses_credentials_kms_key_arns = var.ses_credentials_kms_key_arn == null ? [] : [
+    var.ses_credentials_kms_key_arn,
+  ]
+
   execution_secret_arns = {
-    api = [
+    # Only the API execution role may read the SES credentials. Giving them to
+    # the worker would let an SES-scoped principal replace its task role, which
+    # has no SQS or inbound-bucket access.
+    api = concat([
       aws_secretsmanager_secret.database_url.arn,
       aws_secretsmanager_secret.api_signing_key.arn,
-    ]
+    ], local.ses_secret_iam_arns)
     worker    = [aws_secretsmanager_secret.database_url.arn]
     migration = [aws_secretsmanager_secret.migration_database_url.arn]
+  }
+
+  execution_kms_key_arns = {
+    api       = concat([aws_kms_key.this.arn], local.ses_credentials_kms_key_arns)
+    worker    = [aws_kms_key.this.arn]
+    migration = [aws_kms_key.this.arn]
   }
 }
 
@@ -61,7 +89,7 @@ data "aws_iam_policy_document" "execution" {
     sid       = "DecryptRuntimeSecrets"
     effect    = "Allow"
     actions   = ["kms:Decrypt"]
-    resources = [aws_kms_key.this.arn]
+    resources = local.execution_kms_key_arns[each.key]
   }
 }
 
