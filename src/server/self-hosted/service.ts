@@ -693,6 +693,90 @@ export async function handleSelfHostedRequest(
       });
     }
 
+    // Enumerate the intents whose provider outcome was never established. This
+    // is the entry point for closing out an incident: without it an operator
+    // cannot even find the messages that need a decision.
+    if (path === "/v1/messages/send-intents/uncertain") {
+      if (method !== "GET") return json(405, { error: "method not allowed" });
+      const auth = await authenticate(deps, req, url, read);
+      if (!auth.ok) return auth.response;
+      const records = await auth.store.listUncertainSendIntents({
+        limit: queryInt(url, "limit"),
+        offset: queryInt(url, "offset"),
+      });
+      return json(200, {
+        uncertain: records.map(publicMessage),
+        count: records.length,
+      });
+    }
+
+    // Close out ONE uncertain intent against evidence the operator gathered
+    // from the provider (a message id, a delivery event, a metric window).
+    // Nothing here infers an outcome: the caller asserts it and the assertion,
+    // its evidence and its author are persisted on the row.
+    if (path === "/v1/messages/send-intents/reconcile") {
+      if (method !== "POST") return json(405, { error: "method not allowed" });
+      const auth = await authenticate(deps, req, url, write);
+      if (!auth.ok) return auth.response;
+      const body = await readJsonBody(req);
+      const messageId = String(body.message_id ?? "").trim();
+      if (!messageId) return json(400, { error: "message_id is required" });
+      const outcome = String(body.outcome ?? "").trim();
+      if (outcome !== "sent" && outcome !== "not_sent") {
+        return json(400, { error: "outcome must be 'sent' (it left the provider) or 'not_sent' (it did not)" });
+      }
+      const evidence = String(body.evidence ?? "").trim();
+      if (!evidence) {
+        return json(400, {
+          error: "evidence is required: record WHAT proves this outcome (provider message id, delivery event, metric window)",
+        });
+      }
+      const providerMessageId = typeof body.provider_message_id === "string" ? body.provider_message_id.trim() : "";
+      if (outcome === "sent" && !providerMessageId) {
+        return json(400, { error: "provider_message_id is required when reconciling an intent as sent" });
+      }
+      // Same resolution as every other message route: accept a short prefix and
+      // answer 404/409 for an unknown or ambiguous id instead of letting a
+      // malformed value reach the uuid column as a 500.
+      const resolvedId = await resolveMessageIdOrError(auth.store, messageId);
+      if (!resolvedId.ok) return resolvedId.response;
+      const existing = await auth.store.getMessage(resolvedId.id);
+      if (!existing) return json(404, { error: "message not found" });
+      if (existing.send_state !== "uncertain") {
+        // Refuse rather than overwrite: only an unknown outcome may be decided.
+        return json(409, {
+          error: `only an 'uncertain' send intent can be reconciled; this one is '${existing.send_state}'`,
+          reconciled: false,
+          message: publicMessage(existing),
+        });
+      }
+      let record;
+      try {
+        record = await auth.store.reconcileUncertainSendIntent(resolvedId.id, {
+          outcome,
+          providerMessageId: providerMessageId || null,
+          evidence,
+          // Who asserted the outcome — an opaque principal reference, never a
+          // credential. `kid` is the API key id, not the key material.
+          resolvedBy: auth.ctx.principalType === "user"
+            ? `user:${auth.ctx.userId ?? "unknown"}`
+            : `apikey:${auth.ctx.kid ?? "unknown"}`,
+        });
+      } catch (error) {
+        return json(400, { error: error instanceof Error ? error.message : "reconciliation rejected" });
+      }
+      if (!record) {
+        // Lost a race with a concurrent reconcile/send.
+        const latest = await auth.store.getMessage(resolvedId.id);
+        return json(409, {
+          error: "the send intent stopped being uncertain before it could be reconciled; re-read it and decide again",
+          reconciled: false,
+          ...(latest ? { message: publicMessage(latest) } : {}),
+        });
+      }
+      return json(200, { reconciled: true, outcome, message: publicMessage(record) });
+    }
+
     if (path === "/v1/messages/send-intents/cancel") {
       if (method !== "POST") return json(405, { error: "method not allowed" });
       const auth = await authenticate(deps, req, url, write);

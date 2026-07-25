@@ -25,7 +25,7 @@ export interface SendIntentLookup { "found": boolean; "tombstoned": boolean; "re
 
 export interface SendIntentCancellation { "outcome": "tombstoned" | "cancelled" | "reconciliation_required"; "tombstoned": true; "reconciliation_required": boolean; "message": SendIntentMessage | null }
 
-export interface SendMessageError { "error": string; "retry_safe": boolean; "tombstoned"?: boolean; "message"?: Message | SendIntentMessage | null }
+export interface SendMessageError { "error": string; "reason"?: string; "provider_error"?: string; "sent"?: boolean | null; "retry_safe": boolean; "tombstoned"?: boolean; "message"?: Message | SendIntentMessage | null }
 
 export interface AttachmentContent { "filename": string; "content_type": string; "size": number; "content_base64": string }
 
@@ -972,7 +972,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Send through the configured SES or Resend provider and persist the resulting ledger row */
-    async sendMessage(body: { "from": string; "to": Array<string>; "cc"?: Array<string>; "bcc"?: Array<string>; "reply_to"?: string; "subject": string; "text"?: string; "html"?: string; "attachments"?: Array<{ "filename": string; "content": string; "content_type": string }>; "send_key"?: string; "idempotency_key": string }, init?: RequestInit): Promise<{ "message": Message; "provider": string; "idempotent_replay"?: true; "in_progress"?: true }> {
+    async sendMessage(body: { "from": string; "to": Array<string>; "cc"?: Array<string>; "bcc"?: Array<string>; "reply_to"?: string; "subject": string; "text"?: string; "html"?: string; "attachments"?: Array<{ "filename": string; "content": string; "content_type": string }>; "send_key"?: string; "idempotency_key": string }, init?: RequestInit): Promise<{ "message": Message; "provider": string; "idempotent_replay"?: true; "in_progress"?: true; "sent"?: true; "provider_message_id"?: string; "warning"?: string; "retry_safe"?: boolean }> {
       return this.request("POST", `/v1/messages/send`, {
         body,
         query: undefined,
@@ -994,6 +994,24 @@ export class EmailsSelfHostClient {
       return this.request("POST", `/v1/messages/send-intents/lookup`, {
         body,
         query: undefined,
+        init,
+      });
+    }
+
+    /** Close out one uncertain send intent against operator evidence */
+    async reconcileSendIntent(body: { "message_id": string; "outcome": "sent" | "not_sent"; "provider_message_id"?: string | null; "evidence": string }, init?: RequestInit): Promise<{ "reconciled": true; "outcome": "sent" | "not_sent"; "message": Message }> {
+      return this.request("POST", `/v1/messages/send-intents/reconcile`, {
+        body,
+        query: undefined,
+        init,
+      });
+    }
+
+    /** List send intents whose provider outcome was never established */
+    async listUncertainSendIntents(query?: { "limit"?: number; "offset"?: number }, init?: RequestInit): Promise<{ "uncertain": Array<Message>; "count": number }> {
+      return this.request("GET", `/v1/messages/send-intents/uncertain`, {
+        body: undefined,
+        query,
         init,
       });
     }

@@ -1280,6 +1280,88 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
         },
       },
     },
+    "/v1/messages/send-intents/uncertain": {
+      get: {
+        operationId: "listUncertainSendIntents",
+        summary: "List send intents whose provider outcome was never established",
+        description:
+          "Outbound messages stuck in send_state='uncertain'. These are the only messages whose delivery is unknown; "
+          + "everything else is a proven send or a proven non-send.",
+        parameters: [
+          { name: "limit", in: "query", schema: { type: "integer" } },
+          { name: "offset", in: "query", schema: { type: "integer" } },
+        ],
+        responses: {
+          "200": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    uncertain: { type: "array", items: { $ref: "#/components/schemas/Message" } },
+                    count: { type: "integer" },
+                  },
+                  required: ["uncertain", "count"],
+                },
+              },
+            },
+          },
+          "401": { description: "Authentication required" },
+          "403": { description: "Tenant read scope is not authorized" },
+        },
+      },
+    },
+    "/v1/messages/send-intents/reconcile": {
+      post: {
+        operationId: "reconcileSendIntent",
+        summary: "Close out one uncertain send intent against operator evidence",
+        description:
+          "Records the TRUE outcome of a message whose provider result was never observed. Only an 'uncertain' intent "
+          + "may be reconciled; a proven outcome is never overwritten. Reconciling as 'sent' requires the provider "
+          + "message id that proves the message left.",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  message_id: { type: "string" },
+                  outcome: { type: "string", enum: ["sent", "not_sent"] },
+                  provider_message_id: { type: "string", nullable: true },
+                  evidence: { type: "string", description: "What proves this outcome. Persisted on the row." },
+                },
+                required: ["message_id", "outcome", "evidence"],
+              },
+            },
+          },
+        },
+        responses: {
+          "200": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    reconciled: { type: "boolean", enum: [true] },
+                    outcome: { type: "string", enum: ["sent", "not_sent"] },
+                    message: { $ref: "#/components/schemas/Message" },
+                  },
+                  required: ["reconciled", "outcome", "message"],
+                },
+              },
+            },
+          },
+          "400": { description: "Missing message_id/outcome/evidence, or provider_message_id for a 'sent' outcome" },
+          "401": { description: "Authentication required" },
+          "403": { description: "Tenant write scope is not authorized" },
+          "404": { description: "Message not found" },
+          "409": { description: "The send intent is not (or is no longer) uncertain" },
+          "413": { description: "Request body exceeds the service limit" },
+        },
+      },
+    },
     "/v1/messages/send-intents/cancel": {
       post: {
         operationId: "cancelSendIntent",

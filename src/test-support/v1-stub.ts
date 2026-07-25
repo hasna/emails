@@ -505,6 +505,30 @@ const server = Bun.serve({
       rowsFor("messages").push(rec);
       return json({ message: rec }, 201);
     }
+    // Send-intent reconciliation: enough of the real contract for CLI tests.
+    if (resource === "messages" && sub === "send-intents" && parts[3] === "uncertain" && req.method === "GET") {
+      const stuck = rowsFor("messages").filter(function (r) { return r.send_state === "uncertain"; });
+      return json({ uncertain: stuck, count: stuck.length });
+    }
+    if (resource === "messages" && sub === "send-intents" && parts[3] === "reconcile" && req.method === "POST") {
+      const body = await req.json().catch(function () { return {}; });
+      const target = rowsFor("messages").find(function (r) { return String(r.id) === String(body.message_id); });
+      if (!target) return json({ error: "message not found" }, 404);
+      if (target.send_state !== "uncertain") {
+        return json({ error: "only an 'uncertain' send intent can be reconciled; this one is '" + String(target.send_state) + "'", reconciled: false, message: target }, 409);
+      }
+      if (body.outcome === "sent") {
+        if (!body.provider_message_id) return json({ error: "provider_message_id is required when reconciling an intent as sent" }, 400);
+        target.send_state = "sent";
+        target.status = "sent";
+        target.provider_message_id = body.provider_message_id;
+      } else {
+        target.send_state = "failed";
+        target.status = "failed";
+      }
+      target.updated_at = new Date().toISOString();
+      return json({ reconciled: true, outcome: body.outcome, message: target });
+    }
     if (resource === "messages" && id === undefined && req.method === "GET") {
       return json({ messages: listMessages(url.searchParams) });
     }

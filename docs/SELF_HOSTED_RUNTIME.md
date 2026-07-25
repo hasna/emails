@@ -19,12 +19,62 @@ export EMAILS_MODE=self_hosted
 export EMAILS_DATABASE_URL="postgresql://..."
 export EMAILS_API_SIGNING_KEY="..." # 32+ characters
 export EMAILS_SEND_PROVIDER=ses     # or resend
-export EMAILS_AWS_REGION=us-east-1  # SES; use an IAM role
+export EMAILS_AWS_REGION=us-east-1
+# SES identity — pick ONE:
+#   (a) nothing: sign with the deployment IAM role of the account the service runs in
+#   (b) an explicit SES key pair, injected from your secret store:
+# export EMAILS_SES_ACCESS_KEY_ID="..."
+# export EMAILS_SES_SECRET_ACCESS_KEY="..."
+# export EMAILS_SES_CONFIGURATION_SET="..."  # optional; makes SES metrics attributable
 # export RESEND_API_KEY="..."       # required for Resend
 emails db migrate
 emails self-hosted key create
 emails-serve
 ```
+
+## Outbound SES credentials
+
+The service signs outbound SES calls with **one** identity, resolved at boot:
+
+1. `EMAILS_SES_ACCESS_KEY_ID` + `EMAILS_SES_SECRET_ACCESS_KEY` when both are set;
+2. otherwise the deployment IAM role (the AWS SDK default chain).
+
+Setting only one of the pair is a hard startup error — half a key pair would
+otherwise be completed from the ambient chain and sign with a mixed identity.
+
+The names are deliberately scoped rather than the generic `AWS_ACCESS_KEY_ID` /
+`AWS_SECRET_ACCESS_KEY`: the service's task/instance role may hold unrelated
+grants (S3 for inbound, SQS for the ingest worker), and the generic names would
+re-point every AWS client in the process, not just SES.
+
+Inject the values as **secret references** (AWS Secrets Manager / SSM / your
+secret store), never as plaintext deployment config, and never in the
+repository.
+
+The self-hosted `providers` resource stores non-secret metadata only
+(`name`, `type`, `region`, `active`). `emails provider add --access-key …`
+against a self-hosted server therefore **fails with an explicit error** naming
+these variables, instead of accepting the flags and dropping the values.
+
+## Reconciling an unknown send outcome
+
+If a provider call fails without a definitive answer (network error, provider
+5xx), the ledger row is marked `send_state = 'uncertain'`: the message may or
+may not have gone out. Those rows must be closed out against real provider
+evidence, one at a time:
+
+```bash
+emails send-intent uncertain
+emails send-intent reconcile <message-id> --outcome not-sent \
+  --evidence "no SES Send datapoint for this window"
+emails send-intent reconcile <message-id> --outcome sent \
+  --provider-message-id <ses-message-id> \
+  --evidence "SES delivery event for this MessageId"
+```
+
+Reconciliation only ever transitions an `uncertain` row; a proven outcome is
+never overwritten, and the evidence plus the resolving principal are persisted
+on the row.
 
 Run key management on the operator host with the same database and signing-key
 environment. `key create` persists only a token hash and metadata and displays
