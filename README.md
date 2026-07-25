@@ -45,7 +45,7 @@ emails domain setup-cloudflare example.com --provider <id>
 emails domain check example.com
 
 # SES send-only setup preserves existing MX, such as Google Workspace
-emails provision domain example.com --provider <ses-id> --dry-run
+emails domain adopt example.com --provider <ses-id> --no-inbound
 
 # Send an email
 emails send --from you@example.com --to them@example.com --subject "Hi" --body "Hello"
@@ -216,7 +216,7 @@ behalf); agent-owned addresses are self-administered.
 # Register owners and assign an address (human-owned, agent-administered)
 emails owner register Morgan --type human --email morgan@example.com
 emails owner register Atlas  --type agent
-emails provision address morgan@example.com --provider <ses-id> --owner Morgan --administrator Atlas
+emails address add morgan@example.com --provider <ses-id>
 emails address owner morgan@example.com
 emails address set-owner morgan@example.com --owner Morgan --administrator Atlas
 emails address transfer-owner morgan@example.com --owner Atlas --reason "handoff" --yes

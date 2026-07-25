@@ -119,7 +119,7 @@ export function diagnoseInboundDelivery(address: string, db: Database = getDatab
       "warn",
       "Domain",
       `${domain} is not configured locally.`,
-      `emails provision domain ${domain} --provider <provider> --dry-run`,
+      `emails domain adopt ${domain} --provider <provider>`,
     ));
   }
 

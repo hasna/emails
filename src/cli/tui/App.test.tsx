@@ -20,7 +20,7 @@ import { createDomain } from "../../db/domains.js";
 import { storeInboundEmail } from "../../db/inbound.js";
 import { createProvider } from "../../db/providers.js";
 import { toggleRead, type TuiMessage } from "./data.js";
-import { App } from "./App.js";
+import { App } from "../tui-solid/App.js";
 import { resolveAddressChoice } from "../tui-solid/context/emails-state.js";
 import { startV1Stub, type V1Stub } from "../../test-support/v1-stub.js";
 
