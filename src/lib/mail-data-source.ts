@@ -157,6 +157,12 @@ export interface MailSendInput {
 export interface MailSendResult {
   id: string;
   messageId: string;
+  /**
+   * Set when the message WAS sent but a post-send step failed (e.g. ledger
+   * finalization). The send succeeded and must not be retried; the warning
+   * tells the operator what still needs attention.
+   */
+  warning?: string;
 }
 
 /** Scope for a clear (bulk delete): local optionally scopes by provider. */

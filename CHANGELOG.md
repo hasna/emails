@@ -4,6 +4,12 @@ All notable changes to `@hasna/mailery` (formerly `@hasna/emails`) are documente
 
 ## [Unreleased]
 
+- **fix(self-hosted): a send failure now says what actually happened (2026-07-25 incident).** A synchronous provider reject (e.g. SES sandbox `MessageRejected` for any unverified/external recipient) was swallowed by a bare `catch`, marked `uncertain`, and answered with a generic 502 "send outcome is uncertain" — operators read it as an infra failure, retried, and duplicated ledger rows for mail that never left. Now:
+  - a definitive provider 4xx reject returns **422** with the REAL provider error, `reason: provider_rejected`, `sent: false`, `retry_safe: true`; the ledger row lands in the new `send_state = 'failed'` (no reconciliation required, excluded from quota usage);
+  - retrying the same `idempotency_key` after a definitive reject re-arms the SAME ledger row (never a duplicate) and can succeed;
+  - a provider success followed by a ledger-finalization failure returns **202 with `sent: true`, the provider message id, and an explicit warning** — a successful send never again presents as an error (this is what caused the triple-send of real client mail);
+  - an indeterminate failure (network / provider 5xx) stays 502 but now names the provider error, sets `sent: null`, and says the message may or may not have been sent; every provider send error is logged instead of discarded.
+- fix(cli): `emails log --json` now serializes `to`, `cc`, `cc_addresses`, `status`, and `send_state` (operators scripting against `to`/`cc` read null during the incident), and the table shows a Status column with non-delivered states highlighted — an `uncertain`/`failed` send no longer renders identically to a delivered one. `emails send` relays the server's error detail on failure and prints the sent-but-finalization-failed warning on success.
 - **BREAKING (aliased): rename `@hasna/emails` → `@hasna/mailery`** (repo/brand `open-emails` → `open-mailery`), mirroring the open-skills ↔ platform-skills split. Back-compat is preserved throughout, so existing installs keep working:
   - bins: canonical `mailery`/`mailery-mcp`/`mailery-serve`, with `emails`/`emails-mcp`/`emails-serve` kept as aliases.
   - env: prefix moved `EMAILS_*` → `MAILERY_*` via a startup dual-read shim (`MAILERY_*` wins, `EMAILS_*` still read as fallback). Hosted/cloud control-plane env vars (`MAILERY_API_URL`, `MAILERY_CLOUD_*`, `HASNA_MAILERY_ENV_FILE`, storage-mode, …) are intentionally NOT bridged and remain rejected — this stays a cloud-free OSS package.
