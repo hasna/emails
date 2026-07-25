@@ -27,6 +27,21 @@ export EMAILS_AWS_REGION=us-east-1
 # export EMAILS_SES_SECRET_ACCESS_KEY="..."
 # export EMAILS_SES_CONFIGURATION_SET="..."  # optional; makes SES metrics attributable
 # export RESEND_API_KEY="..."       # required for Resend
+#
+# SES credentials are resolved from the SERVER environment, never per provider:
+# `emails provider add --access-key/--secret-key` does not reach a self-hosted
+# server, and `emails send --provider` is ignored by the send route. When the
+# host has an instance/task role for a production-access SES account, set
+# nothing more. When production-access SES lives in a different account, supply
+# the sending IAM user's credentials to the server process:
+#
+#   export AWS_ACCESS_KEY_ID="..."            # repoints the SDK default chain
+#   export AWS_SECRET_ACCESS_KEY="..."
+#
+# On AWS these must be injected from a secret store by reference (see
+# deploy/aws/README.md, "Sending through SES in a different account"), never
+# written into a plaintext container `environment` block, a shell profile, or
+# the repository.
 emails db migrate
 emails self-hosted key create
 emails-serve

@@ -556,3 +556,125 @@ run "known_good_digest_is_plumbed_for_rollback" {
     error_message = "A previous known-good digest must flow into a rollback task definition."
   }
 }
+
+# --- Cross-account SES credentials -------------------------------------------
+#
+# The credential pair is both-or-neither. The task-definition precondition says
+# so, but a local that dereferences one of the ARNs is evaluated FIRST, so a
+# half-configured module must be proven to fail on the PRECONDITION and to fail
+# the same way in BOTH orders — not to blow up in `split(":", null)` before the
+# operator ever sees the real message.
+
+run "ses_credentials_injected_by_arn_reference_only" {
+  command = plan
+
+  variables {
+    aws_region                       = "us-east-1"
+    expected_account_id              = "111122223333"
+    container_image                  = "registry.example/emails@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ses_access_key_id_secret_arn     = "arn:aws:secretsmanager:us-east-1:111122223333:secret:emails/prod/runtime-env-AbCdEf:EMAILS_SES_ACCESS_KEY_ID::"
+    ses_secret_access_key_secret_arn = "arn:aws:secretsmanager:us-east-1:111122223333:secret:emails/prod/runtime-env-AbCdEf:EMAILS_SES_SECRET_ACCESS_KEY::"
+  }
+
+  assert {
+    condition = alltrue([
+      for name in ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "EMAILS_SES_ACCESS_KEY_ID", "EMAILS_SES_SECRET_ACCESS_KEY"] :
+      contains([
+        for entry in jsondecode(aws_ecs_task_definition.api.container_definitions)[0].secrets : entry.name
+      ], name)
+    ])
+    error_message = "Both SES credential name pairs must reach the API container through the `secrets` block."
+  }
+
+  assert {
+    condition = alltrue([
+      for entry in jsondecode(aws_ecs_task_definition.api.container_definitions)[0].secrets :
+      startswith(entry.valueFrom, "arn:aws:secretsmanager:")
+    ])
+    error_message = "Credentials must be ARN references; a literal value in the task definition would be plaintext."
+  }
+
+  # No credential may ever appear in the plaintext `environment` block.
+  assert {
+    condition = alltrue([
+      for entry in jsondecode(aws_ecs_task_definition.api.container_definitions)[0].environment :
+      !strcontains(upper(entry.name), "ACCESS_KEY") && !strcontains(upper(entry.name), "SECRET_KEY")
+    ])
+    error_message = "SES credentials must never be injected as plaintext environment entries."
+  }
+
+  # The worker's SES-blind task role is the reason inbound mail still works.
+  assert {
+    condition = alltrue([
+      for definition in [
+        jsondecode(aws_ecs_task_definition.worker.container_definitions)[0],
+        jsondecode(aws_ecs_task_definition.migration.container_definitions)[0],
+        ] : alltrue([
+          for entry in definition.secrets : !strcontains(upper(entry.name), "ACCESS_KEY")
+      ])
+    ])
+    error_message = "SES credentials are API-only: the ingest worker's own task role has the SQS and inbound-bucket access an SES-scoped principal lacks."
+  }
+
+  # The IAM grant must be the BARE secret ARN — a `:JSON_KEY::` suffix is not a
+  # valid IAM resource and would deny the execution role at task start.
+  assert {
+    condition     = alltrue([for arn in local.ses_secret_iam_arns : length(split(":", arn)) == 7])
+    error_message = "The execution-role grant must be the bare secret ARN, with any JSON-key suffix stripped."
+  }
+
+  # Both names read the same secret, so the grant is one entry, not two.
+  assert {
+    condition     = length(local.ses_secret_iam_arns) == 1
+    error_message = "Two references to the same secret must collapse to a single IAM resource."
+  }
+}
+
+run "ses_access_key_without_secret_key_hard_fails" {
+  command = plan
+
+  variables {
+    aws_region                   = "us-east-1"
+    expected_account_id          = "111122223333"
+    container_image              = "registry.example/emails@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ses_access_key_id_secret_arn = "arn:aws:secretsmanager:us-east-1:111122223333:secret:emails/prod/runtime-env-AbCdEf:EMAILS_SES_ACCESS_KEY_ID::"
+  }
+
+  expect_failures = [aws_ecs_task_definition.api]
+}
+
+run "ses_secret_key_without_access_key_hard_fails" {
+  command = plan
+
+  variables {
+    aws_region                       = "us-east-1"
+    expected_account_id              = "111122223333"
+    container_image                  = "registry.example/emails@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ses_secret_access_key_secret_arn = "arn:aws:secretsmanager:us-east-1:111122223333:secret:emails/prod/runtime-env-AbCdEf:EMAILS_SES_SECRET_ACCESS_KEY::"
+  }
+
+  expect_failures = [aws_ecs_task_definition.api]
+}
+
+run "no_ses_credentials_leaves_the_task_role_alone" {
+  command = plan
+
+  variables {
+    aws_region          = "us-east-1"
+    expected_account_id = "111122223333"
+    container_image     = "registry.example/emails@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  }
+
+  assert {
+    condition     = length(local.ses_secret_iam_arns) == 0
+    error_message = "Without SES credentials the execution role must gain no extra secret grant."
+  }
+
+  assert {
+    condition = alltrue([
+      for entry in jsondecode(aws_ecs_task_definition.api.container_definitions)[0].secrets :
+      !strcontains(upper(entry.name), "ACCESS_KEY")
+    ])
+    error_message = "The default deployment must keep signing with the API task role."
+  }
+}
