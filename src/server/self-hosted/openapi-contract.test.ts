@@ -105,6 +105,10 @@ describe("self-hosted OpenAPI identity and authorization contract", () => {
     expect(send?.responses).toHaveProperty("409");
     expect(send?.responses).toHaveProperty("429");
     expect(send?.responses).toHaveProperty("413");
+    // 422 = definitive provider reject (nothing was sent); 502 = indeterminate
+    // provider outcome (reconcile before retrying). They are different states
+    // and the contract keeps them distinguishable.
+    expect(send?.responses).toHaveProperty("422");
     expect(send?.responses).toHaveProperty("502");
     const sendError = emailsSelfHostedOpenApi.components?.schemas?.SendMessageError as
       | { properties?: { message?: { oneOf?: Array<{ $ref?: string }>; nullable?: boolean } } }

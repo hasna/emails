@@ -177,6 +177,9 @@ export function registerSendCommands(program: Command, _output: (data: unknown, 
         });
         console.log(chalk.green(`✓ Email sent to ${toAddresses.join(", ")}`));
         if (result.messageId) console.log(chalk.dim(`  Message ID: ${result.messageId}`));
+        // The message left the provider even though a post-send step failed —
+        // tell the operator NOT to re-send.
+        if (result.warning) console.log(chalk.yellow(`  ⚠ ${result.warning}`));
       } catch (e) {
         handleError(e);
       }

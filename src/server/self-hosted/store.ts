@@ -417,7 +417,10 @@ export interface SendIntentCancellationResult {
 }
 
 function sendIntentRequiresReconciliation(sendState: string): boolean {
-  return !["cancelled", "blocked", "pending"].includes(sendState);
+  // `failed` is a DEFINITIVE provider reject: the provider refused the request,
+  // so nothing was sent and there is nothing to reconcile — the intent is safe
+  // to re-attempt (see rearmFailedSendIntent).
+  return !["cancelled", "blocked", "pending", "failed"].includes(sendState);
 }
 
 export interface ListOptions {
@@ -2437,11 +2440,11 @@ export class TenantScopedStore {
         };
       }
       let record = mapMessageRow(existing);
-      if (record.send_state === "pending" || record.send_state === "blocked") {
+      if (record.send_state === "pending" || record.send_state === "blocked" || record.send_state === "failed") {
         const cancelled = await client.get<Record<string, unknown>>(
           `UPDATE messages
            SET send_state = 'cancelled', status = 'cancelled', updated_at = now()
-           WHERE id = $1 AND tenant_id = $2 AND send_state IN ('pending', 'blocked')
+           WHERE id = $1 AND tenant_id = $2 AND send_state IN ('pending', 'blocked', 'failed')
            RETURNING ${MESSAGE_COLUMNS}`,
           [record.id, this.tenantId],
         );
@@ -2661,6 +2664,41 @@ export class TenantScopedStore {
     );
     if (!row) throw new Error("send intent disappeared during completion");
     return mapMessageRow(row);
+  }
+
+  /**
+   * Record a DEFINITIVE provider reject: the provider answered 4xx, so nothing
+   * was sent. Unlike `uncertain`, a failed intent needs no reconciliation and
+   * may be re-attempted (rearmFailedSendIntent). The provider's error name is
+   * kept on the row for audit.
+   */
+  async markSendFailed(id: string, reason: string): Promise<MessageRecord | null> {
+    const row = await this.client.get<Record<string, unknown>>(
+      `UPDATE messages SET
+         send_state = 'failed', status = 'failed',
+         headers = COALESCE(headers, '{}'::jsonb) || jsonb_build_object('send_failure', $2::text),
+         updated_at = now()
+       WHERE id = $1 AND tenant_id = $3 AND send_state = 'sending'
+       RETURNING ${MESSAGE_COLUMNS}`,
+      [id, reason.slice(0, 600), this.tenantId],
+    );
+    return row ? mapMessageRow(row) : null;
+  }
+
+  /**
+   * Re-arm a definitively failed intent for another attempt on the SAME ledger
+   * row. Guarded on send_state = 'failed', so it can never resurrect a sent,
+   * cancelled, or uncertain intent; claimSendIntent then re-checks the
+   * tombstone before any provider call.
+   */
+  async rearmFailedSendIntent(id: string): Promise<MessageRecord | null> {
+    const row = await this.client.get<Record<string, unknown>>(
+      `UPDATE messages SET send_state = 'pending', status = 'queued', send_started_at = NULL, updated_at = now()
+       WHERE id = $1 AND tenant_id = $2 AND send_state = 'failed'
+       RETURNING ${MESSAGE_COLUMNS}`,
+      [id, this.tenantId],
+    );
+    return row ? mapMessageRow(row) : null;
   }
 
   async markSendUncertain(id: string): Promise<MessageRecord | null> {
