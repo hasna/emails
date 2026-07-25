@@ -83,8 +83,32 @@ describe("AWS module SES credential injection", () => {
     }
     expect(block).toContain("valueFrom = var.ses_access_key_id_secret_arn");
     expect(block).toContain("valueFrom = var.ses_secret_access_key_secret_arn");
-    // Absent configuration must leave the task definition byte-identical.
-    expect(block).toContain("var.ses_access_key_id_secret_arn == null ? [] :");
+    // Absent configuration must leave the task definition byte-identical, and
+    // the gate must name BOTH variables. Gating on one of them let the other be
+    // dereferenced while null.
+    expect(block).toMatch(/var\.ses_access_key_id_secret_arn == null[\s\S]*var\.ses_secret_access_key_secret_arn == null[\s\S]*\) \? \[\] :/);
+  });
+
+  // Source-text assertions cannot see an evaluation-order bug: with only
+  // `ses_access_key_id_secret_arn` set, `iam.tf` used to abort in
+  // `split(":", null)` BEFORE the task-definition precondition could report the
+  // real problem — and only in that one order. That is behaviour, so it is
+  // pinned in `deploy/aws/tests/dormant.tftest.hcl`
+  // (`ses_access_key_without_secret_key_hard_fails`,
+  // `ses_secret_key_without_access_key_hard_fails`), which runs a real plan.
+  test("the both-or-neither guard is exercised by a real plan, in both orders", () => {
+    const tftest = read("deploy/aws/tests/dormant.tftest.hcl");
+    for (const name of [
+      "ses_credentials_injected_by_arn_reference_only",
+      "ses_access_key_without_secret_key_hard_fails",
+      "ses_secret_key_without_access_key_hard_fails",
+      "no_ses_credentials_leaves_the_task_role_alone",
+    ]) {
+      expect(tftest).toContain(`run "${name}"`);
+    }
+    // Nothing may be dereferenced out of a possibly-null credential ARN before
+    // the precondition runs.
+    expect(assignment(iam, "ses_secret_iam_arns")).toContain("compact([");
   });
 
   test("never puts a SES credential in a plaintext environment block", () => {

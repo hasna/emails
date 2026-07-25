@@ -95,7 +95,12 @@ locals {
   # Injected into the API task only. The ingest worker keeps its own task role:
   # an SES-scoped principal has no SQS or inbound-bucket access, so handing it
   # these credentials would silently break inbound mail.
-  ses_credential_secrets = var.ses_access_key_id_secret_arn == null ? [] : [
+  # Emitted only when BOTH ARNs are present, in either order. A half-configured
+  # module produces no entries here and fails on the precondition below with the
+  # message that names the problem, instead of half a pair reaching the task.
+  ses_credential_secrets = (
+    var.ses_access_key_id_secret_arn == null || var.ses_secret_access_key_secret_arn == null
+    ) ? [] : [
     {
       name      = "AWS_ACCESS_KEY_ID"
       valueFrom = var.ses_access_key_id_secret_arn

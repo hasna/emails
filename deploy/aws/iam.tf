@@ -28,11 +28,18 @@ locals {
   # form is NOT a valid IAM resource ARN. Keep only the first seven
   # colon-separated segments, which is the bare secret ARN, and de-duplicate:
   # both credentials usually live in the same secret.
-  ses_secret_iam_arns = var.ses_access_key_id_secret_arn == null ? [] : distinct([
-    for arn in [
+  #
+  # `compact` rather than a null-check on ONE of the two variables: a
+  # half-configured module must reach the both-or-neither precondition on
+  # aws_ecs_task_definition.api and fail with that message. Dereferencing the
+  # other variable here instead threw `split(":", null)` first — and only in one
+  # of the two orders, so the guard silently did not exist for
+  # `ses_access_key_id_secret_arn` set alone.
+  ses_secret_iam_arns = distinct([
+    for arn in compact([
       var.ses_access_key_id_secret_arn,
       var.ses_secret_access_key_secret_arn,
-    ] : join(":", slice(split(":", arn), 0, 7))
+    ]) : join(":", slice(split(":", arn), 0, 7))
   ])
 
   # Only needed when the SES credential secrets use a customer-managed key. The
