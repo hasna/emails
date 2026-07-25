@@ -20,6 +20,9 @@
 //      so explicitly (`sent: null`, reconcile-before-retry).
 //   5. Replaying a completed intent returns the existing message (200,
 //      idempotent_replay) — never a second send.
+//   6. Every provider-accepted response — fresh success, idempotent replay,
+//      or finalization failure — carries top-level `sent: true` and the
+//      provider message id; a failed re-arm answers 503 `sent: false`.
 //
 // Gated on EMAILS_TEST_POSTGRES_URL like the other integration suites.
 
@@ -27,7 +30,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { mintApiKey, verifyApiKey } from "@hasna/contracts/auth";
 import { createPgPool, createQueryClient, MigrationLedger, type PoolQueryClient } from "../../storage-kit/index.js";
 import { emailsSelfHostedMigrations } from "./migrations.js";
-import { EmailsSelfHostedStore, type TenantScopedStore } from "./store.js";
+import { EmailsSelfHostedStore, TenantScopedStore } from "./store.js";
 import { handleSelfHostedRequest, type SelfHostedServiceDeps } from "./service.js";
 import { AuthStore } from "./auth/store.js";
 import { RateLimiter } from "./auth/rate-limit.js";
@@ -353,12 +356,71 @@ describe.skipIf(!pgClient)("send-failure semantics (2026-07-25 incident contract
     };
     const first = await call(deps, "POST", "/v1/messages/send", { token, body });
     expect(first.status).toBe(202);
+    // `sent` + the provider's id sit at the TOP level of every provider-accepted
+    // response, so a client checks one place regardless of which path answered.
+    expect(first.body.sent).toBe(true);
+    expect(first.body.provider_message_id).toBe("provider-once");
 
     const replay = await call(deps, "POST", "/v1/messages/send", { token, body });
     expect(replay.status).toBe(200);
     expect(replay.body.idempotent_replay).toBe(true);
     expect(replay.body.message.id).toBe(first.body.message.id);
+    expect(replay.body.sent).toBe(true);
+    expect(replay.body.provider_message_id).toBe("provider-once");
     expect(providerCalls).toBe(1);
+    expect(await rowCountByKey(key)).toBe(1);
+  });
+
+  it("a failed re-arm answers 503 sent:false (nothing was sent) instead of a generic 500 that hides the outcome", async () => {
+    let fail = true;
+    let providerCalls = 0;
+    const deps = makeDeps({
+      provider: "ses",
+      send: async () => {
+        providerCalls += 1;
+        if (fail) throw sesError("MessageRejected", "Email address is not verified.", 400, "client");
+        return "provider-after-rearm";
+      },
+    });
+    const { token } = await makeTenant("rearm-503");
+    await registerSender(deps, token, "rearm503.example", "sender@rearm503.example");
+
+    const key = `rearm-${crypto.randomUUID()}`;
+    const body = {
+      from: "sender@rearm503.example",
+      to: ["someone@external.example"],
+      subject: "rearm outage",
+      text: "body",
+      idempotency_key: key,
+    };
+    const first = await call(deps, "POST", "/v1/messages/send", { token, body });
+    expect(first.status).toBe(422);
+
+    // Simulate a DB outage hitting ONLY the re-arm step of the retry.
+    const original = TenantScopedStore.prototype.rearmFailedSendIntent;
+    TenantScopedStore.prototype.rearmFailedSendIntent = async () => {
+      throw new Error("simulated rearm outage");
+    };
+    let outage: { status: number; body: any };
+    try {
+      outage = await call(deps, "POST", "/v1/messages/send", { token, body });
+    } finally {
+      TenantScopedStore.prototype.rearmFailedSendIntent = original;
+    }
+    expect(outage.status).toBe(503);
+    expect(outage.body.sent).toBe(false);
+    expect(outage.body.reason).toBe("rearm_failed");
+    expect(outage.body.retry_safe).toBe(true);
+    expect(String(outage.body.error)).toMatch(/NOTHING was sent/);
+    // The provider was never invoked during the outage retry.
+    expect(providerCalls).toBe(1);
+
+    // With the store healthy again, the same key retries on the SAME row.
+    fail = false;
+    const second = await call(deps, "POST", "/v1/messages/send", { token, body });
+    expect(second.status).toBe(202);
+    expect(second.body.sent).toBe(true);
+    expect(second.body.provider_message_id).toBe("provider-after-rearm");
     expect(await rowCountByKey(key)).toBe(1);
   });
 });

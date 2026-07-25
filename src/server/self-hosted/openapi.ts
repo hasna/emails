@@ -275,8 +275,8 @@ const sendMessageResponseSchema = {
     provider: { type: "string" },
     idempotent_replay: { type: "boolean", enum: [true] },
     in_progress: { type: "boolean", enum: [true] },
-    sent: { type: "boolean", enum: [true], description: "Present when the provider accepted the message but ledger finalization failed: the message WAS sent" },
-    provider_message_id: { type: "string", description: "Provider message id, echoed when ledger finalization failed so the accepted send is still traceable" },
+    sent: { type: "boolean", enum: [true], description: "Present whenever the provider accepted the message (fresh success, idempotent replay of a sent intent, or a post-send finalization failure): the message WAS sent" },
+    provider_message_id: { type: "string", description: "Provider message id, present whenever the provider accepted the message — including when ledger finalization failed, so the accepted send stays traceable" },
     warning: { type: "string", description: "Set when the message was sent but a post-send step failed; the send must NOT be retried" },
     retry_safe: { type: "boolean" },
   },
@@ -1242,6 +1242,10 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
           },
           "429": { description: "Tenant or sender quota exceeded" },
           "413": { description: "Request body exceeds the service limit" },
+          "503": {
+            description: "A rejected intent could not be re-armed for retry (sent: false — nothing was sent); safe to retry later",
+            content: { "application/json": { schema: { $ref: "#/components/schemas/SendMessageError" } } },
+          },
           "502": {
             description: "The provider call ended without a definitive outcome (sent: null); reconcile before retrying",
             content: { "application/json": { schema: { $ref: "#/components/schemas/SendMessageError" } } },

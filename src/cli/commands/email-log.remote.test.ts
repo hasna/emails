@@ -8,7 +8,7 @@
 
 import { describe, expect, it } from "bun:test";
 import type { TuiMessage } from "../../lib/mail-types.js";
-import { formatSelfHostedSummaries, toSelfHostedSummary } from "./email-log.remote.js";
+import { formatSelfHostedDetail, formatSelfHostedSummaries, toSelfHostedSummary } from "./email-log.remote.js";
 
 function sentMessage(over: Partial<TuiMessage> = {}): TuiMessage {
   return {
@@ -50,6 +50,26 @@ describe("emails log --json summary", () => {
     expect(summary.cc_addresses).toEqual([]);
     expect(summary.status).toBeNull();
     expect(summary.send_state).toBeNull();
+  });
+
+  it("shows the send status in the single-message view (`emails show`) too", () => {
+    const detail = {
+      ...toSelfHostedSummary(sentMessage()),
+      text_body: "hello",
+      html_body: null,
+      flags: [],
+    };
+    const rendered = formatSelfHostedDetail(detail);
+    expect(rendered).toContain("Status:");
+    expect(rendered).toContain("uncertain");
+    // A delivered inbound message without ledger state shows no status line.
+    const plain = formatSelfHostedDetail({
+      ...toSelfHostedSummary(sentMessage({ status: undefined, send_state: undefined })),
+      text_body: null,
+      html_body: null,
+      flags: [],
+    });
+    expect(plain).not.toContain("Status:");
   });
 
   it("shows the send status in the table so an uncertain send can never render as delivered", () => {

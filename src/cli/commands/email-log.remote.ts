@@ -172,7 +172,7 @@ export function formatSelfHostedSummaries(rows: SelfHostedEmailSummary[], title:
   return lines.join("\n");
 }
 
-function formatSelfHostedDetail(email: SelfHostedEmailDetail): string {
+export function formatSelfHostedDetail(email: SelfHostedEmailDetail): string {
   const lines: string[] = [
     chalk.bold(`\nEmail: ${email.id}`),
     `  ${chalk.dim("Subject:")}  ${email.subject}`,
@@ -180,6 +180,15 @@ function formatSelfHostedDetail(email: SelfHostedEmailDetail): string {
     `  ${chalk.dim("To:")}       ${email.to_addresses.join(", ")}`,
   ];
   if (email.cc_addresses.length > 0) lines.push(`  ${chalk.dim("CC:")}       ${email.cc_addresses.join(", ")}`);
+  {
+    // The single-message view must expose the ledger truth too — hiding it is
+    // how the 2026-07-25 never-sent mail read as delivered.
+    const state = (email.send_state ?? email.status ?? "").trim();
+    if (state) {
+      const ok = ["sent", "delivered", "received"].includes(state);
+      lines.push(`  ${chalk.dim("Status:")}   ${ok ? state : chalk.yellow(state)}`);
+    }
+  }
   lines.push(`  ${chalk.dim("Kind:")}     ${email.kind}`);
   lines.push(`  ${chalk.dim("Date:")}     ${email.date}`);
   if (email.flags.length > 0) lines.push(`  ${chalk.dim("Flags:")}    ${email.flags.join(", ")}`);
