@@ -102,7 +102,7 @@ export function assessDomainReadiness(
       fix_commands.push(`emails inbox sync-s3 --source <source-id>`);
     } else {
       fix_commands.push(`emails domain check ${domain.domain}`);
-      fix_commands.push(`emails provision domain ${domain.domain} --provider <provider> --dry-run`);
+      fix_commands.push(`emails domain adopt ${domain.domain} --provider <provider>`);
     }
   }
 

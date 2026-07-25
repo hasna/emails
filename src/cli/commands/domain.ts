@@ -13,7 +13,7 @@ import { resolveEmailsMode } from "../../lib/mode.js";
 import { now } from "../../db/runtime.js";
 
 // Domain provisioning that requires provider adapters (live SES/Resend calls),
-// AWS/Cloudflare/BrandSight/Route53 DNS orchestration, live DNS/MX checks, the
+// AWS/Cloudflare/Route53 DNS orchestration, live DNS/MX checks, the
 // server-owned lifecycle-readiness ledger, or warming schedules has no /v1
 // equivalent in this self-hosted-only client — it runs on the self-hosted
 // server. Those commands are kept for discoverability but fail loud. Core
@@ -521,20 +521,6 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .option("--register-ses", "Register the domain with SES first if not already added")
     .option("--force-mx-switch", "Allow adding MX even when existing root MX belongs to another provider")
     .action(() => { try { serverOnly("emails domain setup-cloudflare"); } catch (e) { handleError(e); } });
-
-  domainCmd
-    .command("setup-brandsight <domain>")
-    .description("Auto-create DNS records in BrandSight/GCD for email sending and SES receiving")
-    .requiredOption("--provider <id>", "SES or Resend provider ID")
-    .option("--api-key <key>", "BrandSight API key (falls back to config/env)")
-    .option("--api-secret <secret>", "BrandSight API secret (falls back to config/env)")
-    .option("--customer-id <id>", "BrandSight customer ID (falls back to config/env)")
-    .option("--mx", "Also add SES inbound MX record for receiving email")
-    .option("--mail-from <subdomain>", "Custom SES MAIL FROM subdomain (default mail.<domain>)")
-    .option("--no-set-nameservers", "Do not switch the registrar nameservers to BrandSight/GCD")
-    .option("--remove-dnssec", "Remove stale registrar DNSSEC records before/while switching to unsigned BrandSight DNS")
-    .option("--force-mx-switch", "Allow adding SES inbound MX even when existing root MX belongs to another provider")
-    .action(() => { try { serverOnly("emails domain setup-brandsight"); } catch (e) { handleError(e); } });
 
   domainCmd
     .command("warm <domain>")

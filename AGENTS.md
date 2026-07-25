@@ -46,7 +46,7 @@ update_provider(id, ...)                  → update credentials
 add_domain(provider_id, domain)           → register domain with provider
 get_dns_records(domain)                   → get DKIM/SPF/DMARC records
 verify_domain(domain)                     → re-check DNS status
-provision_domain(domain, provider_id, add_mx?) → provision SES DNS; add_mx is guarded when root MX already belongs to another provider
+provision_domain(domain, provider_id, add_mx?) → NOT IMPLEMENTED in this build; use `emails domain adopt` + `emails aws setup-inbound`
 create_warming_schedule(domain, target)   → start gradual volume ramp-up
 get_warming_status(domain)                → check today's limit
 ```
@@ -147,11 +147,13 @@ emails://recent-errors     → latest provisioning/source errors
 ```
 
 ### Existing mailbox provider + SES sending
+> `emails provision *` is NOT implemented in this build (see `docs/PROVISIONING.md`).
+> Provisioning is manual.
 ```
 1. Run `emails domain check example.com` to detect current root MX ownership.
-2. Use `emails provision domain example.com --provider <ses-id> --dry-run`.
-3. Preserve root MX for send-only SES setup when Google Workspace or another mailbox provider already receives mail.
-4. Use `--add-mx --force-mx-switch` only for an intentional inbound migration to SES/S3.
+2. Use `emails domain adopt example.com --provider <ses-id>` for an already-registered, SES-verified domain.
+3. Preserve root MX for send-only SES setup when Google Workspace or another mailbox provider already receives mail: `emails domain adopt example.com --provider <ses-id> --no-inbound`.
+4. `emails domain adopt` refuses SES inbound wiring when public root MX belongs to another provider; pass `--force-mx-switch` only for an intentional inbound migration to SES/S3.
 ```
 
 ### Bulk campaign
@@ -209,7 +211,7 @@ src/
 │       ├── provider.ts        # provider CRUD
 │       ├── domain.ts          # domain + warming commands
 │       ├── sequences.ts       # drip campaigns
-│       ├── inbound.ts         # SMTP + inbound email management
+│       ├── inbox.ts           # SMTP listener + inbound email management
 │       └── ...                # provider/domain/inbox/address/provision/etc.
 ├── db/                        # SQLite CRUD modules
 │   ├── database.ts            # migrations + schema + legacy path migration

@@ -83,7 +83,10 @@ describe("assessDomainReadiness", () => {
     expect(ready.state).toBe("ready_to_send_and_receive");
   });
 
-  it("uses safe dry-run guidance when receive readiness is missing", () => {
+  it("points at a runnable command when receive readiness is missing", () => {
+    // Regression: this used to suggest `emails provision domain ... --dry-run`,
+    // a command that always throws (no provisioning orchestrator ships in any
+    // mode). Every fix_command must be something an operator can actually run.
     const readiness = assessDomainReadiness(
       { domain: "example.com", dkim_status: "verified", spf_status: "verified", dmarc_status: "verified" },
       null,
@@ -91,7 +94,7 @@ describe("assessDomainReadiness", () => {
 
     expect(readiness.receive_ready).toBe(false);
     expect(readiness.fix_commands).toContain("emails domain check example.com");
-    expect(readiness.fix_commands).toContain("emails provision domain example.com --provider <provider> --dry-run");
-    expect(readiness.fix_commands.join(" ")).not.toContain("domain adopt");
+    expect(readiness.fix_commands).toContain("emails domain adopt example.com --provider <provider>");
+    expect(readiness.fix_commands.join(" ")).not.toContain("emails provision");
   });
 });
