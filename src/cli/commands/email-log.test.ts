@@ -194,7 +194,7 @@ describe("email show — routes to /v1", () => {
 });
 
 describe("email thread / conversation / replies — routes to /v1", () => {
-  it("shows a sent message thread as a single-message conversation", async () => {
+  it("shows a lone sent message as a one-message thread", async () => {
     await seed([outbound("thr-1", "Thready", "2026-01-01T00:00:00.000Z", { body_text: "hi" })]);
 
     const { data, out } = await runEmailLogCommand(["email", "thread", "thr-1"]);
@@ -202,8 +202,9 @@ describe("email thread / conversation / replies — routes to /v1", () => {
 
     expect(result.messages).toHaveLength(1);
     expect(result.messages[0]).toMatchObject({ id: "thr-1", subject: "Thready", kind: "sent" });
+    expect(result.thread_id).toBe("thready");
     expect(out).toContain("Thread");
-    expect(out).toContain("1 message");
+    expect(out).toContain("1 of 1 message");
   });
 
   it("shows the conversation thread for an inbound message", async () => {
@@ -217,7 +218,7 @@ describe("email thread / conversation / replies — routes to /v1", () => {
     expect(out).toContain("Conversation thread");
   });
 
-  it("reports no replies for a sent message (replies are not thread-linked server-side)", async () => {
+  it("reports no replies for a sent message that genuinely has none", async () => {
     await seed([outbound("rep-1", "Sent", "2026-01-01T00:00:00.000Z", { body_text: "hi" })]);
 
     const { data } = await runEmailLogCommand(["email", "replies", "rep-1"]);
@@ -226,6 +227,80 @@ describe("email thread / conversation / replies — routes to /v1", () => {
     expect(result.total).toBe(0);
     expect(result.replies).toHaveLength(0);
     expect(result.has_more).toBe(false);
+  });
+
+  // The reported failure: mail was sent to an external accountant, the
+  // accountant replied twice, and `emails email replies <id>` printed
+  // "No replies." with {"replies":[],"total":0} because the remote seam
+  // answered the thread query with the one message it was handed.
+  it("finds the replies a sent message actually received", async () => {
+    await seed([
+      outbound("sent-1", "Declaratii TVA 06.2026", "2026-01-01T00:00:00.000Z", {
+        message_id: "<sent-1@hasna.com>",
+        body_text: "please find attached",
+      }),
+      inbound("reply-1", "Re: Declaratii TVA 06.2026", "2026-01-02T00:00:00.000Z", {
+        message_id: "<reply-1@kpmg.example>",
+        in_reply_to: "<sent-1@hasna.com>",
+      }),
+      inbound("reply-2", "RE: declaratii tva 06.2026", "2026-01-03T00:00:00.000Z", {
+        message_id: "<reply-2@kpmg.example>",
+        in_reply_to: "<reply-1@kpmg.example>",
+      }),
+      inbound("other", "Unrelated question", "2026-01-04T00:00:00.000Z"),
+    ]);
+
+    const { data, out } = await runEmailLogCommand(["email", "replies", "sent-1"]);
+    const result = data as { replies: Array<{ id: string }>; total: number; has_more: boolean };
+
+    expect(result.replies.map((r) => r.id)).toEqual(["reply-1", "reply-2"]);
+    expect(result.total).toBe(2);
+    expect(result.has_more).toBe(false);
+    expect(out).not.toContain("No replies");
+  });
+
+  it("renders the whole thread, not a permanent 1-message header", async () => {
+    await seed([
+      outbound("sent-2", "Q2 statements", "2026-02-01T00:00:00.000Z", { message_id: "<sent-2@hasna.com>" }),
+      inbound("reply-3", "Re: Q2 statements", "2026-02-02T00:00:00.000Z", { in_reply_to: "<sent-2@hasna.com>" }),
+    ]);
+
+    const { data, out } = await runEmailLogCommand(["email", "thread", "sent-2"]);
+    const result = data as { thread_id: string | null; messages: Array<{ id: string }>; total: number };
+
+    expect(result.messages.map((m) => m.id)).toEqual(["sent-2", "reply-3"]);
+    expect(result.total).toBe(2);
+    expect(result.thread_id).toBe("q2 statements");
+    expect(out).toContain("2 of 2 messages");
+    expect(out).toContain('"q2 statements"');
+  });
+
+  it("applies the --limit/--offset it advertises on thread instead of ignoring them", async () => {
+    await seed([
+      outbound("sent-3", "Payroll March", "2026-03-01T00:00:00.000Z", { message_id: "<sent-3@hasna.com>" }),
+      inbound("reply-4", "Re: Payroll March", "2026-03-02T00:00:00.000Z", { in_reply_to: "<sent-3@hasna.com>" }),
+      inbound("reply-5", "Re: Payroll March", "2026-03-03T00:00:00.000Z", { in_reply_to: "<sent-3@hasna.com>" }),
+    ]);
+
+    const { data } = await runEmailLogCommand(["email", "thread", "sent-3", "--limit", "1", "--offset", "1"]);
+    const result = data as { messages: Array<{ id: string }>; total: number; has_more: boolean };
+
+    expect(result.messages.map((m) => m.id)).toEqual(["reply-4"]);
+    expect(result.total).toBe(3);
+    expect(result.has_more).toBe(true);
+  });
+
+  it("never counts the selected inbound message as a reply to itself", async () => {
+    await seed([
+      inbound("root", "Bank reconciliation", "2026-04-01T00:00:00.000Z", { message_id: "<root@kpmg.example>" }),
+      inbound("follow", "Re: Bank reconciliation", "2026-04-02T00:00:00.000Z", { in_reply_to: "<root@kpmg.example>" }),
+    ]);
+
+    const { data } = await runEmailLogCommand(["replies", "root"]);
+    const result = data as { replies: Array<{ id: string }>; total: number };
+
+    expect(result.replies.map((r) => r.id)).toEqual(["follow"]);
+    expect(result.total).toBe(1);
   });
 });
 

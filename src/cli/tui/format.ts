@@ -36,6 +36,21 @@ export function pad(value: string, width: number): string {
   return truncate(value, width).padEnd(width);
 }
 
+const MAX_THREAD_ID_DISPLAY = 48;
+
+/**
+ * A thread id for a one-line header, quoted and bounded.
+ *
+ * A thread id is a uuid in local mode but the server's conversation key (a
+ * normalized subject) in self_hosted mode, so it must not be sliced to a fixed
+ * prefix: `thread declarat` named nothing a reader could act on. Returns "" for
+ * a message that has no conversation key, so callers can append it unguarded.
+ */
+export function formatThreadLabel(threadId: string | null | undefined): string {
+  if (!threadId) return "";
+  return ` "${truncate(threadId, MAX_THREAD_ID_DISPLAY)}"`;
+}
+
 /** Bare email from a "Name <a@b>" string. */
 export function bareAddress(value: string): string {
   const m = value.match(/<([^>]+)>/);

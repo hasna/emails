@@ -889,3 +889,189 @@ describe("resolveMailDataSource — self-hosted seam selection", () => {
     expect(resolveSelfHostedMailDataSource()).toBeNull();
   });
 });
+
+// ── conversation / thread projection ────────────────────────────────────────
+//
+// The self-hosted store has no thread_id column, so getConversation() used to
+// answer with the single message it was handed. Everything above that seam then
+// lied: `emails email replies <sent-id>` printed "No replies." for a message
+// that had them, and every thread header read "(1 message)".
+
+function threadRow(id: string, over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id,
+    direction: "inbound",
+    from_addr: `${id}@example.com`,
+    to_addrs: ["andrei@hasna.com"],
+    cc_addrs: [],
+    subject: "Declaratii TVA 06.2026",
+    body_text: `body of ${id}`,
+    body_html: null,
+    status: "received",
+    message_id: `<${id}@x>`,
+    in_reply_to: null,
+    received_at: "2026-07-01T08:00:00.000Z",
+    is_read: false,
+    is_starred: false,
+    labels: [],
+    headers: {},
+    ...over,
+  };
+}
+
+describe("SelfHostedMailDataSource — conversations", () => {
+  it("returns the whole conversation, oldest first, not just the selected message", async () => {
+    const { ds } = make([
+      threadRow("sent", { direction: "outbound", from_addr: "andrei@hasna.com", to_addrs: ["kpmg@example.com"], received_at: "2026-07-01T08:00:00.000Z" }),
+      threadRow("reply1", { subject: "Re: Declaratii TVA 06.2026", in_reply_to: "<sent@x>", received_at: "2026-07-01T09:00:00.000Z" }),
+      threadRow("reply2", { subject: "RE: declaratii tva 06.2026", in_reply_to: "<reply1@x>", received_at: "2026-07-01T10:00:00.000Z" }),
+      threadRow("unrelated", { subject: "Something else entirely", received_at: "2026-07-01T11:00:00.000Z" }),
+    ]);
+
+    const sent = (await ds.getMessage("sent"))!;
+    const conversation = await ds.getConversation(sent);
+
+    expect(conversation.map((m) => m.id)).toEqual(["sent", "reply1", "reply2"]);
+    expect(conversation[0]).toMatchObject({ kind: "sent", storage: "email" });
+    expect(conversation[1]).toMatchObject({ kind: "received", storage: "inbound" });
+  });
+
+  it("keeps a reply attached when its subject was edited but In-Reply-To still points at the thread", async () => {
+    const { ds } = make([
+      threadRow("root", { direction: "outbound", from_addr: "andrei@hasna.com", subject: "Invoice", received_at: "2026-07-01T08:00:00.000Z" }),
+      threadRow("edited", { subject: "Re: Invoice — revised numbers", in_reply_to: "<root@x>", received_at: "2026-07-01T09:00:00.000Z" }),
+    ]);
+
+    const root = (await ds.getMessage("root"))!;
+    expect((await ds.getConversation(root)).map((m) => m.id)).toEqual(["root", "edited"]);
+  });
+
+  it("follows a multi-hop reference chain even when the newest hop is seen first", async () => {
+    const { ds } = make([
+      threadRow("root", { direction: "outbound", subject: "Root", message_id: "<root@x>", received_at: "2026-07-01T08:00:00.000Z" }),
+      threadRow("hop1", { subject: "Re: Root revised", message_id: "<hop1@x>", in_reply_to: "<root@x>", received_at: "2026-07-01T09:00:00.000Z" }),
+      threadRow("hop2", { subject: "Re: Root revised again", message_id: "<hop2@x>", in_reply_to: "<hop1@x>", received_at: "2026-07-01T10:00:00.000Z" }),
+    ]);
+
+    const root = (await ds.getMessage("root"))!;
+    expect((await ds.getConversation(root)).map((m) => m.id)).toEqual(["root", "hop1", "hop2"]);
+  });
+
+  it("does not fabricate a thread out of every empty-subject message", async () => {
+    const { ds } = make([
+      threadRow("blank-a", { subject: "", received_at: "2026-07-01T08:00:00.000Z" }),
+      threadRow("blank-b", { subject: "", received_at: "2026-07-01T09:00:00.000Z" }),
+    ]);
+
+    const first = (await ds.getMessage("blank-a"))!;
+    expect(first.thread_id).toBeNull();
+    expect((await ds.getConversation(first)).map((m) => m.id)).toEqual(["blank-a"]);
+  });
+
+  it("names the conversation with the server's own thread key on every row", async () => {
+    const { ds } = make([
+      threadRow("sent", { direction: "outbound", subject: "Declaratii TVA 06.2026" }),
+      threadRow("reply1", { subject: "Re: Declaratii TVA 06.2026", in_reply_to: "<sent@x>" }),
+    ], { leanList: true });
+
+    const rows = await ds.listMailbox("inbox");
+    expect(rows.map((m) => m.thread_id)).toEqual(["declaratii tva 06.2026"]);
+    expect((await ds.getMessage("sent"))!.thread_id).toBe("declaratii tva 06.2026");
+  });
+
+  it("reads every thread body and windows to the newest N when a limit is given", async () => {
+    const { ds } = make([
+      threadRow("sent", { direction: "outbound", body_text: "please find attached", received_at: "2026-07-01T08:00:00.000Z" }),
+      threadRow("reply1", { subject: "Re: Declaratii TVA 06.2026", in_reply_to: "<sent@x>", body_text: "received, thanks", received_at: "2026-07-01T09:00:00.000Z" }),
+      threadRow("reply2", { subject: "Re: Declaratii TVA 06.2026", in_reply_to: "<reply1@x>", body_text: "one more question", received_at: "2026-07-01T10:00:00.000Z" }),
+    ], { leanList: true });
+
+    const sent = (await ds.getMessage("sent"))!;
+    const all = await ds.getConversationBodies(sent);
+    expect(all.map((entry) => entry.item.id)).toEqual(["sent", "reply1", "reply2"]);
+    expect(all.map((entry) => entry.body?.text)).toEqual(["please find attached", "received, thanks", "one more question"]);
+
+    const windowed = await ds.getConversationBodies(sent, { limit: 2 });
+    expect(windowed.map((entry) => entry.item.id)).toEqual(["reply1", "reply2"]);
+  });
+});
+
+// ── source scopes ───────────────────────────────────────────────────────────
+//
+// listMailboxSources() publishes exactly one source id, and the CLI tells the
+// operator to pass it to --source. Feeding it back used to return an empty
+// mailbox and all-zero folder counts — indistinguishable from an empty store.
+
+describe("SelfHostedMailDataSource — source scoping", () => {
+  it("round-trips the source id it publishes instead of narrowing to nothing", async () => {
+    const { ds } = make([v1("2"), v1("5")]);
+    const [source] = await ds.listMailboxSources();
+
+    const rows = await ds.listMailbox("inbox", { source: { sourceId: source!.id } });
+    expect(rows.map((m) => m.id)).toEqual(["5", "2"]);
+    expect((await ds.mailboxCounts({ source: { sourceId: source!.id } })).inbox).toBe(2);
+  });
+
+  it("accepts local mode's `all` source id as the same whole-store scope", async () => {
+    const { ds } = make([v1("2"), v1("5")]);
+    expect((await ds.listMailbox("inbox", { source: { sourceId: "all" } })).map((m) => m.id)).toEqual(["5", "2"]);
+  });
+
+  it("refuses provider/S3/legacy scopes with an actionable message instead of an empty mailbox", async () => {
+    const { ds } = make([v1("2"), v1("5")]);
+
+    for (const source of [
+      { providerId: "cred-1" },
+      { sourceId: "s3:mail-bucket", s3Bucket: "mail-bucket" },
+      { sourceId: "legacy", legacy: true },
+      { sourceId: "no-such-source" },
+    ]) {
+      await expect(ds.listMailbox("inbox", { source })).rejects.toThrow(/no ingestion-source or provider provenance/);
+      await expect(ds.mailboxCounts({ source })).rejects.toThrow(/--address <email> or --domain <domain>/);
+      await expect(ds.listMailboxStatus({ source })).rejects.toThrow(/emails inbox sources/);
+    }
+  });
+
+  it("refuses an unsupported scope on clear rather than deleting the whole store", async () => {
+    const { ds, serve } = make([v1("2"), v1("5")]);
+    await expect(ds.clear({ source: { providerId: "cred-1" } })).rejects.toThrow(/cannot be applied/);
+    expect(serve.deleted).toEqual([]);
+  });
+
+  it("still narrows on address and domain scopes", async () => {
+    const { ds } = make([
+      v1("2", { to_addrs: ["andrei@hasna.com"] }),
+      v1("5", { to_addrs: ["other@elsewhere.com"] }),
+    ]);
+    expect((await ds.listMailbox("inbox", { source: { address: "andrei@hasna.com" } })).map((m) => m.id)).toEqual(["2"]);
+    expect((await ds.listMailbox("inbox", { source: { domain: "elsewhere.com" } })).map((m) => m.id)).toEqual(["5"]);
+  });
+
+  it("honors the --search and --limit it is handed on listMailboxSources", async () => {
+    const { ds } = make([v1("2")]);
+    expect((await ds.listMailboxSources({ search: "self-hosted" })).map((s) => s.id)).toEqual(["self_hosted"]);
+    expect(await ds.listMailboxSources({ search: "s3-bucket-that-does-not-exist" })).toEqual([]);
+    expect(await ds.listMailboxSources({ limit: 0 })).toHaveLength(1);
+  });
+});
+
+// ── read filter paging ──────────────────────────────────────────────────────
+
+describe("SelfHostedMailDataSource — read filter", () => {
+  it("fills a page with read mail instead of filtering an already-paged result", async () => {
+    const rows = [
+      ...Array.from({ length: 60 }, (_, index) => v1(`u${index}`, {
+        is_read: false,
+        received_at: `2026-07-02T${String(index % 24).padStart(2, "0")}:00:00.000Z`,
+      })),
+      v1("read-new", { is_read: true, received_at: "2026-07-01T10:00:00.000Z" }),
+      v1("read-old", { is_read: true, received_at: "2026-07-01T09:00:00.000Z" }),
+      v1("read-oldest", { is_read: true, received_at: "2026-07-01T08:00:00.000Z" }),
+    ];
+    const { ds } = make(rows);
+
+    const page = await ds.listMailbox("inbox", { read: true, limit: 2 });
+    expect(page.map((m) => m.id)).toEqual(["read-new", "read-old"]);
+    expect(page.every((m) => m.is_read)).toBe(true);
+  });
+});

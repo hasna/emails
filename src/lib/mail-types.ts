@@ -165,6 +165,14 @@ export interface MailboxListOptions {
   label?: string;
   source?: MailboxSource;
   sort?: "newest" | "oldest";
+  /**
+   * Restrict to already-read mail. It is part of the LIST query (applied before
+   * `limit`/`offset`) — a caller-side filter over an already-paged result would
+   * return fewer than `limit` rows while more matching rows sit on the next page.
+   * `unread` has a folder of its own (see MAILBOXES), so only the read side needs
+   * a flag.
+   */
+  read?: boolean;
 }
 
 export interface MailboxCounts {

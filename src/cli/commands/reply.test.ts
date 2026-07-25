@@ -130,8 +130,12 @@ describe("reply command", () => {
 
     expect(data.subject).toBe("Re: Question");
     expect(data.to).toEqual(["ext@ext.com"]);
-    expect(data.thread_id).toBeNull();
+    // The self-hosted store has no thread_id column, but it does have a
+    // conversation key: the normalized subject GET /v1/messages/threads groups
+    // by. Reporting null here told every caller the reply belonged to no thread.
+    expect(data.thread_id).toBe("question");
     expect(result.out).toContain("replied to ext@ext.com");
+    expect(result.out).toContain('(thread "question")');
 
     const sent = await outboundRows();
     expect(sent).toHaveLength(1);

@@ -26,12 +26,6 @@ function normalizeSinceOption(value: string | undefined): string | undefined {
   return new Date(time).toISOString();
 }
 
-function messageOnOrAfter(message: TuiMessage, since: string | undefined): boolean {
-  if (!since) return true;
-  const time = Date.parse(message.date);
-  return Number.isFinite(time) && time >= Date.parse(since);
-}
-
 // Resolve a possibly-short id (the 8-char id printed by `inbox list`) to a full id
 // through the seam: local SQLite partial-id resolution, or a bounded self_hosted prefix match
 // so the id shown by `inbox list` is usable verbatim in self_hosted read/mark/star/label.
@@ -39,8 +33,9 @@ function resolveMailId(ds: MailDataSource, id: string): Promise<string> {
   return ds.resolveId(id);
 }
 
-// unread/starred/archived collapse to their folder view; read has no folder
-// equivalent and is applied client-side over the returned page.
+// unread/starred/archived collapse to their folder view; read has no folder of
+// its own and travels as MailboxListOptions.read so the seam applies it inside
+// the query rather than over an already-paged result.
 function folderForListFlags(flags: { unread?: boolean; starred?: boolean; archived?: boolean }): Mailbox {
   if (flags.archived) return "archived";
   if (flags.starred) return "starred";
@@ -418,8 +413,8 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
   inboxCmd
     .command("list")
     .description("List local mailbox mail")
-    .option("--provider <id>", "Credential/capability ID used as a provenance filter")
-    .option("--source <id>", "Filter by ingestion source ID from `emails inbox sources`")
+    .option("--provider <id>", "Not supported in self_hosted mode: /v1 messages carry no provider provenance")
+    .option("--source <id>", "Ingestion source ID from `emails inbox sources` (self_hosted exposes exactly one: self_hosted)")
     .option("--folder <folder>", "Folder to list: inbox, unread, starred, sent, archived, spam, trash", "inbox")
     .option("--address <address>", "Mailbox scope: exact recipient/sender address")
     .option("--domain <domain>", "Mailbox scope: recipient/sender domain")
@@ -450,19 +445,22 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         }
         const ds = resolveMailDataSource();
         const since = normalizeSinceOption(opts.since);
-        let rows = await ds.listMailbox(folder, {
+        // `read` and `since` go INTO the query. Post-filtering the returned page
+        // made `--limit 20 --read` hand back fewer than 20 rows while more
+        // matching rows waited on the next page.
+        const rows = await ds.listMailbox(folder, {
           source,
           limit,
           offset,
           since,
+          read: opts.read === true ? true : undefined,
           search: opts.search,
           label: opts.label,
         });
-        // Keep a parsed-date guard in case an older data source ignores `since`.
-        if (opts.read) rows = rows.filter((row) => row.is_read);
-        if (since) rows = rows.filter((row) => messageOnOrAfter(row, since));
         if (rows.length === 0) {
-          output([], chalk.dim("No mail found. Try `emails inbox sources`, `emails refresh`, or `emails inbox wait <address>`."));
+          // Every command named here is registered in self_hosted mode. `emails
+          // refresh` used to be suggested and does not exist in any mode.
+          output([], chalk.dim("No mail found. Try `emails inbox sources` for the scopes this store exposes, `emails inbox mailboxes` for folder counts, or `emails inbox wait <address>` to wait for new mail."));
           return;
         }
         output(rows, formatMailboxMessages(rows, `Mailbox ${folder}`));
@@ -504,14 +502,14 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
   inboxCmd
     .command("search <query>")
     .description("Search local mailbox mail")
-    .option("--provider <id>", "Credential/capability ID used as a provenance filter")
+    .option("--provider <id>", "Not supported in self_hosted mode: /v1 messages carry no provider provenance")
     .option("--folder <folder>", "Folder to search: inbox, unread, starred, sent, archived, spam, trash", "inbox")
     .option("--address <address>", "Mailbox scope: exact recipient/sender address")
     .option("--domain <domain>", "Mailbox scope: recipient/sender domain")
     .option("--label <label>", "Only mail carrying this label")
     .option("--limit <n>", "Max results", "20")
     .option("--offset <n>", "Skip first N local results", "0")
-    .option("--source <id>", "Local ingestion source ID")
+    .option("--source <id>", "Ingestion source ID from `emails inbox sources` (self_hosted exposes exactly one: self_hosted)")
     .action(async (query: string, opts: { provider?: string; folder?: string; address?: string; domain?: string; label?: string; limit?: string; offset?: string; source?: string }) => {
       try {
         const limit = parsePositiveIntOption(opts.limit, 20);
@@ -557,8 +555,8 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
   inboxCmd
     .command("mailboxes")
     .description("List folder counts for a mailbox scope or ingestion source")
-    .option("--source <id>", "Filter by ingestion source ID from `emails inbox sources`")
-    .option("--provider <id>", "Credential/capability ID used as a provenance filter")
+    .option("--source <id>", "Ingestion source ID from `emails inbox sources` (self_hosted exposes exactly one: self_hosted)")
+    .option("--provider <id>", "Not supported in self_hosted mode: /v1 messages carry no provider provenance")
     .option("--address <address>", "Mailbox scope: exact recipient/sender address")
     .option("--domain <domain>", "Mailbox scope: recipient/sender domain")
     .action(async (opts: { source?: string; provider?: string; address?: string; domain?: string }) => {

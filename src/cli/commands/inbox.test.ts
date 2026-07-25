@@ -562,6 +562,82 @@ describe("inbox sources", () => {
     expect(sources[0]?.counts.inbox).toBe(2);
     expect(sources[0]?.unread).toBe(1);
   });
+
+  it("honors --search instead of returning the unfiltered list", async () => {
+    await stub.seed({ messages: [msgRow({})] });
+
+    const matching = await runInboxCommand(["inbox", "sources", "--search", "self-hosted"]);
+    expect((matching.data as Array<{ id: string }>).map((s) => s.id)).toEqual(["self_hosted"]);
+
+    const missing = await runInboxCommand(["inbox", "sources", "--search", "s3-bucket-that-is-not-here"]);
+    expect(missing.data as unknown[]).toEqual([]);
+  });
+});
+
+// The self-inflicted trap: `inbox sources` prints id "self_hosted" and
+// `--source <id>` documents itself as taking that id back — but feeding it in
+// used to return an empty mailbox and all-zero folder counts, which reads
+// exactly like an empty store.
+describe("inbox source scoping", () => {
+  it("lists mail for the source id `inbox sources` prints", async () => {
+    await stub.seed({ messages: [msgRow({ subject: "scoped-a" }), msgRow({ subject: "scoped-b" })] });
+
+    const { data } = await runInboxCommand(["inbox", "list", "--source", "self_hosted"]);
+    expect((data as Array<{ subject: string }>).map((row) => row.subject).sort()).toEqual(["scoped-a", "scoped-b"]);
+  });
+
+  it("reports real folder counts for that source id", async () => {
+    await stub.seed({ messages: [msgRow({}), msgRow({}), msgRow({ direction: "outbound" })] });
+
+    const { data } = await runInboxCommand(["inbox", "mailboxes", "--source", "self_hosted"]);
+    const counts = (data as { counts: { inbox: number; sent: number } }).counts;
+    expect(counts.inbox).toBe(2);
+    expect(counts.sent).toBe(1);
+  });
+
+  it("refuses a provider scope with an actionable message instead of printing `No mail found`", async () => {
+    await stub.seed({ messages: [msgRow({})] });
+
+    const { stderr } = await runInboxCommandExpectingExit(["inbox", "list", "--provider", "cred-1"]);
+    expect(stderr).toContain("no ingestion-source or provider provenance");
+    expect(stderr).toContain("--address <email> or --domain <domain>");
+    expect(stderr).not.toContain("No mail found");
+  });
+
+  it("refuses an unknown ingestion source id rather than reporting an empty mailbox", async () => {
+    await stub.seed({ messages: [msgRow({})] });
+
+    const { stderr } = await runInboxCommandExpectingExit(["inbox", "mailboxes", "--source", "s3:mail-bucket"]);
+    expect(stderr).toContain("cannot be applied");
+  });
+
+  it("only suggests commands that exist when the mailbox really is empty", async () => {
+    const { out } = await runInboxCommand(["inbox", "list", "--address", "nobody@example.com"]);
+    expect(out).toContain("No mail found");
+    expect(out).toContain("emails inbox sources");
+    // `emails refresh` is not a registered command in any mode.
+    expect(out).not.toContain("emails refresh");
+  });
+});
+
+describe("inbox list --read", () => {
+  it("fills the page with read mail instead of filtering an already-paged result", async () => {
+    // More unread rows than one server page, all NEWER than the read ones, so a
+    // post-filter over page one yields nothing while read mail exists.
+    const unread = Array.from({ length: 60 }, (_, index) => msgRow({
+      subject: `unread-${index}`,
+      is_read: false,
+      received_at: new Date(Date.UTC(2026, 5, 2, 0, index)).toISOString(),
+    }));
+    const read = [
+      msgRow({ subject: "read-new", is_read: true, received_at: "2026-06-01T10:00:00.000Z" }),
+      msgRow({ subject: "read-old", is_read: true, received_at: "2026-06-01T09:00:00.000Z" }),
+    ];
+    await stub.seed({ messages: [...unread, ...read] });
+
+    const { data } = await runInboxCommand(["inbox", "list", "--read", "--limit", "2"]);
+    expect((data as Array<{ subject: string }>).map((row) => row.subject)).toEqual(["read-new", "read-old"]);
+  });
 });
 
 describe("inbox status / sync-status", () => {

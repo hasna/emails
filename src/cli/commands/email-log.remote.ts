@@ -10,7 +10,7 @@ import chalk from "../../lib/chalk-lite.js";
 import { resolveMailDataSource, type MailDataSource } from "../../lib/mail-data-source.js";
 import { handleError, parseCliPositiveIntOption, parseCliNonNegativeIntOption } from "../utils.js";
 import type { MessageBody, TuiMessage, TuiThreadMessage } from "../tui/data.js";
-import { readableMessageText } from "../tui/format.js";
+import { formatThreadLabel, readableMessageText } from "../tui/format.js";
 
 const DEFAULT_REPLY_LIMIT = 20;
 const MAX_REPLY_LIMIT = 200;
@@ -214,10 +214,31 @@ async function selfHostedConversation(ds: MailDataSource, id: string): Promise<{
   return { msg: msg!, messages };
 }
 
-function formatThreadMessages(rows: TuiThreadMessage[], header: string): string {
+/**
+ * The other messages of the conversation that came IN — i.e. the replies. The
+ * selected message is excluded even when it is itself inbound, so `replies <id>`
+ * never counts the message you asked about as a reply to itself.
+ *
+ * This is the whole inbound side of the conversation, not local mode's strict
+ * depth-1 `in_reply_to_email_id` children: the self-hosted rows expose the
+ * conversation, not a parent-child edge per message, and under-reporting a reply
+ * is the failure this replaces. The response SHAPE is identical to local's
+ * ({ replies, total, limit, offset, has_more }).
+ */
+function repliesInConversation(msg: TuiMessage, conversation: TuiThreadMessage[]): TuiThreadMessage[] {
+  return conversation.filter((entry) => entry.kind === "received" && entry.id !== msg.id);
+}
+
+function threadPage<T>(rows: T[], limit: number, offset: number): { items: T[]; total: number; has_more: boolean } {
+  const items = rows.slice(offset, offset + limit);
+  return { items, total: rows.length, has_more: offset + items.length < rows.length };
+}
+
+function formatThreadMessages(rows: TuiThreadMessage[], header: string, total = rows.length): string {
   const lines: string[] = [chalk.bold(`\n${header}`)];
   if (!rows.length) {
-    lines.push(chalk.dim("  No messages in this thread."));
+    // An empty PAGE of a non-empty thread is not an empty thread.
+    lines.push(chalk.dim(total > 0 ? "  No messages on this page of the thread." : "  No messages in this thread."));
     lines.push("");
     return lines.join("\n");
   }
@@ -292,33 +313,37 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
 
   emailCmd
     .command("replies <id>")
-    .description("Show replies received for a sent email")
+    .description("Show the inbound messages received in this email's conversation")
     .option("--limit <n>", "Max replies", String(DEFAULT_REPLY_LIMIT))
     .option("--offset <n>", "Skip first N replies", "0")
     .action(async (id: string, opts: ReplyPageOpts) => {
       try {
-        const { messages } = await selfHostedConversation(resolveMailDataSource(), id);
-        const received = messages.filter((m) => m.kind === "received");
+        const { msg, messages } = await selfHostedConversation(resolveMailDataSource(), id);
+        const received = repliesInConversation(msg, messages);
         const { limit, offset } = parseReplyPage(opts);
-        const total = received.length;
-        const pageItems = received.slice(offset, offset + limit);
+        const { items, total, has_more } = threadPage(received, limit, offset);
         output(
-          { replies: pageItems, total, limit, offset, has_more: offset + pageItems.length < total },
-          formatReplies(pageItems, total, limit, offset, ""),
+          { replies: items, total, limit, offset, has_more },
+          formatReplies(items, total, limit, offset, ""),
         );
       } catch (e) { handleError(e); }
     });
 
   emailCmd
     .command("thread <id>")
-    .description("Show the full conversation (sent + received), grouped by thread_id")
-    .option("--limit <n>", "Max reply bodies for fallback conversations", String(DEFAULT_REPLY_LIMIT))
-    .option("--offset <n>", "Skip first N fallback replies", "0")
-    .action(async (id: string) => {
+    .description("Show the full conversation (sent + received) this email belongs to")
+    .option("--limit <n>", "Max thread messages to show", String(DEFAULT_REPLY_LIMIT))
+    .option("--offset <n>", "Skip first N thread messages", "0")
+    .action(async (id: string, opts: ReplyPageOpts) => {
       try {
         const { msg, messages } = await selfHostedConversation(resolveMailDataSource(), id);
-        const header = `Thread${msg.thread_id ? ` ${msg.thread_id.slice(0, 8)}` : ""} (${messages.length} message${messages.length !== 1 ? "s" : ""})`;
-        output({ thread_id: msg.thread_id, messages }, formatThreadMessages(messages, header));
+        const { limit, offset } = parseReplyPage(opts);
+        const { items, total, has_more } = threadPage(messages, limit, offset);
+        const header = `Thread${formatThreadLabel(msg.thread_id)} (${items.length} of ${total} message${total !== 1 ? "s" : ""})`;
+        output(
+          { thread_id: msg.thread_id, messages: items, total, limit, offset, has_more },
+          formatThreadMessages(items, header, total),
+        );
       } catch (e) { handleError(e); }
     });
 
@@ -366,32 +391,36 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
     });
 
   // ─── REPLIES ─────────────────────────────────────────────────────────────────
-  program.command("replies <id>").description("Show replies received for a sent email")
+  program.command("replies <id>").description("Show the inbound messages received in this email's conversation")
     .option("--limit <n>", "Max replies", String(DEFAULT_REPLY_LIMIT))
     .option("--offset <n>", "Skip first N replies", "0")
     .action(async (id: string, opts: ReplyPageOpts) => {
       try {
-        const { messages } = await selfHostedConversation(resolveMailDataSource(), id);
-        const received = messages.filter((m) => m.kind === "received");
+        const { msg, messages } = await selfHostedConversation(resolveMailDataSource(), id);
+        const received = repliesInConversation(msg, messages);
         const { limit, offset } = parseReplyPage(opts);
-        const total = received.length;
-        const pageItems = received.slice(offset, offset + limit);
+        const { items, total, has_more } = threadPage(received, limit, offset);
         output(
-          { replies: pageItems, total, limit, offset, has_more: offset + pageItems.length < total },
-          formatReplies(pageItems, total, limit, offset, `email ${id.slice(0, 8)}`),
+          { replies: items, total, limit, offset, has_more },
+          formatReplies(items, total, limit, offset, `email ${id.slice(0, 8)}`),
         );
       } catch (e) { handleError(e); }
     });
 
   // ─── CONVERSATION ─────────────────────────────────────────────────────────────
   program.command("conversation <id>").description("Show full conversation thread for a sent email (email + all replies)")
-    .option("--limit <n>", "Max reply bodies", String(DEFAULT_REPLY_LIMIT))
-    .option("--offset <n>", "Skip first N replies", "0")
-    .action(async (id: string) => {
+    .option("--limit <n>", "Max thread messages to show", String(DEFAULT_REPLY_LIMIT))
+    .option("--offset <n>", "Skip first N thread messages", "0")
+    .action(async (id: string, opts: ReplyPageOpts) => {
       try {
         const { msg, messages } = await selfHostedConversation(resolveMailDataSource(), id);
-        const header = `Conversation thread${msg.thread_id ? ` ${msg.thread_id.slice(0, 8)}` : ""} (${messages.length} message${messages.length === 1 ? "" : "s"})`;
-        output({ thread_id: msg.thread_id, messages }, formatThreadMessages(messages, header));
+        const { limit, offset } = parseReplyPage(opts);
+        const { items, total, has_more } = threadPage(messages, limit, offset);
+        const header = `Conversation thread${formatThreadLabel(msg.thread_id)} (${items.length} of ${total} message${total === 1 ? "" : "s"})`;
+        output(
+          { thread_id: msg.thread_id, messages: items, total, limit, offset, has_more },
+          formatThreadMessages(items, header, total),
+        );
       } catch (e) { handleError(e); }
     });
 
