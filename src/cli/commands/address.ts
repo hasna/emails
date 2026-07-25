@@ -2,34 +2,55 @@ import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
 import { createAddress, findAddressesByEmail, listAddresses, deleteAddress, getAddress, getAddressByEmail } from "../../db/addresses.js";
 import { suspendAddress, activateAddress, setAddressQuota } from "../../db/address-lifecycle.js";
-import { tableRow, truncate } from "../../lib/format.js";
+import { colorDnsStatus, tableRow, truncate } from "../../lib/format.js";
 import { confirmDestructiveAction, formatListHint, handleError, isCliVerboseOutput, parseCliListPage, resolveId } from "../utils.js";
+import {
+  enrichAddresses,
+  getAddressOwnershipDetail,
+  getAddressOwnershipHistoryByRef,
+  setAddressOwnerByRef,
+  suggestAddressLocalParts,
+  transferAddressOwnerByRef,
+  unassignAddressOwnerByRef,
+} from "../../lib/address-ownership.js";
 
-/** Pure sender-address suggestions for a domain (no local state; excludes existing). */
-function suggestAddressLocalParts(domain: string, existingEmails: string[]): string[] {
-  const normalized = domain.trim().toLowerCase();
-  const used = new Set(
-    existingEmails
-      .map((email) => email.trim().toLowerCase())
-      .filter((email) => email.endsWith(`@${normalized}`))
-      .map((email) => email.split("@")[0]),
-  );
-  const candidates = [
-    "hello", "hi", "contact", "support", "team", "admin", "inbox",
-    "mail", "me", "bot", "agent", "verify", "accounts", "notify",
-  ];
-  return candidates.filter((local) => !used.has(local)).slice(0, 8).map((local) => `${local}@${normalized}`);
-}
-
-// Address ownership (owner/admin/audit history) and the local address
-// provisioning orchestration (S3/SES receive setup, provisioning ledger) have
-// no /v1 equivalent in this self-hosted-only client: they are owned by the
-// self-hosted server. These commands are kept for discoverability but fail
-// loud.
+// The local address PROVISIONING orchestration (S3/SES receive setup, the
+// provisioning ledger) is owned by the self-hosted server and has no client-side
+// equivalent, so `address provision` is kept for discoverability but fails loud.
+//
+// Address ownership is NOT in that category: `src/db/owners.ts` routes every
+// ownership read/write to `src/db/owners.remote.ts`, which serves them from
+// `/v1/owners`, `/v1/addresses/<id>` (owner_id/administrator_id) and
+// `/v1/address-ownership-events`. Those subcommands run against the API in both
+// modes.
 function serverOnly(command: string): never {
   throw new Error(
     `${command} is not available in the self-hosted client; it runs on the self-hosted server.`,
   );
+}
+
+/** Upper bound for `address owner-history --limit`, mirroring the repo cap. */
+const MAX_OWNER_HISTORY_LIMIT = 100;
+
+/**
+ * Provider label for display. The /v1 address entity carries no provider
+ * association, so an empty provider_id means "served by the self-hosted server"
+ * rather than "unknown provider".
+ */
+function providerLabel(address: { provider_name: string | null; provider_id: string }): string {
+  return address.provider_name ?? (address.provider_id || "self_hosted");
+}
+
+/**
+ * Describe the ownership an assign/transfer actually produced. Reads the
+ * hydrated owner rows, so the confirmation line can never claim an owner the
+ * server did not record.
+ */
+function describeOwnership(detail: { address: { owner: { name: string; type: string } | null; administrator: { name: string } | null } }): string {
+  const { owner, administrator } = detail.address;
+  if (!owner) return "has no owner recorded";
+  const adminText = administrator ? `, administered by ${administrator.name}` : "";
+  return `owned by ${owner.name} (${owner.type})${adminText}`;
 }
 
 function resolveSelfHostedAddressId(ref: string): string {
@@ -50,33 +71,53 @@ export function registerAddressCommands(program: Command, output: (data: unknown
   const listAddressesAction = (opts: { provider?: string; limit?: string; offset?: string; verbose?: boolean }) => {
     try {
       const page = parseCliListPage(opts);
-      const addresses = listAddresses(opts.provider, page).map((address) => ({
-        ...address,
-        provider_name: null,
-        owner: null,
-        administrator: null,
-      }));
+      // Hydrate owner/administrator/provider_name from the mode-routed repos
+      // instead of hardcoding nulls: an owned address must never be reported as
+      // unowned, in the table or in --json.
+      const addresses = enrichAddresses(listAddresses(opts.provider, page));
       if (addresses.length === 0) {
         output([], chalk.dim("No addresses configured."));
         return;
       }
+      const verbose = opts.verbose || isCliVerboseOutput();
       const lines: string[] = [chalk.bold("\nAddresses:")];
-      lines.push(tableRow(
-        [chalk.bold("ID"), 8],
-        [chalk.bold("Email"), 36],
-        [chalk.bold("Provider"), 16],
-        [chalk.bold("State"), 10],
-        [chalk.bold("Owner"), 18],
-      ));
-      for (const a of addresses) {
-        const state = `${a.verified ? "verified" : "pending"}/${a.status}`;
+      if (verbose) {
+        for (const a of addresses) {
+          const verifiedText = a.verified ? colorDnsStatus("verified") : colorDnsStatus("pending");
+          const name = a.display_name ? ` (${a.display_name})` : "";
+          const status = a.status === "suspended" ? chalk.red("suspended") : chalk.green("active");
+          // The daily send ledger is server-owned, so show the configured LIMIT
+          // only — never a client-side "used" count we cannot know.
+          const quota = a.daily_quota !== null ? chalk.dim(`  quota limit ${a.daily_quota}/day`) : "";
+          const owner = a.owner
+            ? chalk.dim(`  owner ${a.owner.name} (${a.owner.type})`)
+            : chalk.dim("  owner none");
+          const administrator = a.administrator && (!a.owner || a.administrator.id !== a.owner.id)
+            ? chalk.dim(`  admin ${a.administrator.name}`)
+            : "";
+          lines.push(`  ${chalk.cyan(a.id.slice(0, 8))}  ${a.email}${name}  [${verifiedText}] [${status}]${quota}${owner}${administrator}`);
+        }
+      } else {
         lines.push(tableRow(
-          [chalk.cyan(a.id.slice(0, 8)), 8],
-          [truncate(a.email, 36), 36],
-          [truncate(a.provider_id || "self_hosted", 16), 16],
-          [state, 10],
-          ["-", 18],
+          [chalk.bold("ID"), 8],
+          [chalk.bold("Email"), 36],
+          [chalk.bold("Provider"), 16],
+          [chalk.bold("State"), 10],
+          [chalk.bold("Owner"), 18],
         ));
+        for (const a of addresses) {
+          const state = `${a.verified ? "verified" : "pending"}/${a.status}`;
+          const owner = a.owner
+            ? `${a.owner.name}${a.administrator && a.administrator.id !== a.owner.id ? `:${a.administrator.name}` : ""}`
+            : "-";
+          lines.push(tableRow(
+            [chalk.cyan(a.id.slice(0, 8)), 8],
+            [truncate(a.email, 36), 36],
+            [truncate(providerLabel(a), 16), 16],
+            [state, 10],
+            [truncate(owner, 18), 18],
+          ));
+        }
       }
       lines.push("");
       lines.push(formatListHint({
@@ -84,8 +125,8 @@ export function registerAddressCommands(program: Command, output: (data: unknown
         limit: page.limit,
         offset: page.offset,
         noun: "address",
-        detailCommand: "use the self-hosted operator API for address lifecycle details",
-        verbose: opts.verbose || isCliVerboseOutput(),
+        detailCommand: "use emails address owner <email-or-id> for ownership details",
+        verbose,
       }));
       output(addresses, lines.join("\n"));
     } catch (e) {
@@ -136,8 +177,30 @@ export function registerAddressCommands(program: Command, output: (data: unknown
   addressCmd
     .command("owner <email-or-id>")
     .description("Show owner and administering agent for an address")
-    .action(() => {
-      try { serverOnly("emails address owner"); } catch (e) { handleError(e); }
+    .action((ref: string) => {
+      try {
+        const detail = getAddressOwnershipDetail(ref);
+        const owner = detail.address.owner;
+        const administrator = detail.address.administrator;
+        const lines = [chalk.bold(`\n${detail.address.email}`)];
+        lines.push(`  ID:       ${detail.address.id}`);
+        lines.push(`  Provider: ${providerLabel(detail.address)}`);
+        lines.push(owner
+          ? `  Owner:    ${owner.name} (${owner.type}) ${chalk.dim(owner.id)}`
+          : `  Owner:    ${chalk.dim("none")}`);
+        lines.push(administrator
+          ? `  Admin:    ${administrator.name} (${administrator.type}) ${chalk.dim(administrator.id)}`
+          : `  Admin:    ${chalk.dim("none")}`);
+        const lastChange = detail.history[0];
+        if (lastChange) {
+          lines.push(`  Changed:  ${lastChange.action} at ${lastChange.created_at}${lastChange.actor ? ` by ${lastChange.actor}` : ""}`);
+          if (lastChange.reason) lines.push(`  Reason:   ${lastChange.reason}`);
+        }
+        lines.push("");
+        output(detail, lines.join("\n"));
+      } catch (e) {
+        handleError(e);
+      }
     });
 
   addressCmd
@@ -145,8 +208,13 @@ export function registerAddressCommands(program: Command, output: (data: unknown
     .description("Assign address ownership; human owners require an agent administrator")
     .requiredOption("--owner <name-or-id>", "Owner name, ID, or ID prefix")
     .option("--administrator <name-or-id>", "Administering agent name, ID, or ID prefix")
-    .action(() => {
-      try { serverOnly("emails address set-owner"); } catch (e) { handleError(e); }
+    .action((ref: string, opts: { owner: string; administrator?: string }) => {
+      try {
+        const detail = setAddressOwnerByRef(ref, opts.owner, opts.administrator);
+        output(detail, chalk.green(`✓ ${detail.address.email} ${describeOwnership(detail)}`));
+      } catch (e) {
+        handleError(e);
+      }
     });
 
   addressCmd
@@ -157,8 +225,15 @@ export function registerAddressCommands(program: Command, output: (data: unknown
     .requiredOption("--reason <reason>", "Reason recorded in the ownership audit log")
     .option("--actor <actor>", "Actor recorded in the ownership audit log", "cli")
     .option("--yes", "Skip confirmation prompt")
-    .action(async () => {
-      try { serverOnly("emails address transfer-owner"); } catch (e) { handleError(e); }
+    .action(async (ref: string, opts: { owner: string; administrator?: string; reason: string; actor?: string; yes?: boolean }) => {
+      try {
+        const before = getAddressOwnershipDetail(ref);
+        await confirmDestructiveAction(`Transfer owner for ${before.address.email} to ${opts.owner}?`, opts.yes);
+        const detail = transferAddressOwnerByRef(ref, opts.owner, opts.administrator, { actor: opts.actor, reason: opts.reason });
+        output(detail, chalk.green(`✓ ${detail.address.email} transferred — ${describeOwnership(detail)}`));
+      } catch (e) {
+        handleError(e);
+      }
     });
 
   addressCmd
@@ -167,16 +242,41 @@ export function registerAddressCommands(program: Command, output: (data: unknown
     .requiredOption("--reason <reason>", "Reason recorded in the ownership audit log")
     .option("--actor <actor>", "Actor recorded in the ownership audit log", "cli")
     .option("--yes", "Skip confirmation prompt")
-    .action(async () => {
-      try { serverOnly("emails address unassign-owner"); } catch (e) { handleError(e); }
+    .action(async (ref: string, opts: { reason: string; actor?: string; yes?: boolean }) => {
+      try {
+        const before = getAddressOwnershipDetail(ref);
+        await confirmDestructiveAction(`Clear owner/admin assignment for ${before.address.email}?`, opts.yes);
+        const detail = unassignAddressOwnerByRef(ref, { actor: opts.actor, reason: opts.reason });
+        output(detail, chalk.green(`✓ ${detail.address.email} is now unowned`));
+      } catch (e) {
+        handleError(e);
+      }
     });
 
   addressCmd
     .command("owner-history <email-or-id>")
     .description("Show ownership/admin change history for an address")
     .option("--limit <n>", "Maximum events to show", "20")
-    .action(() => {
-      try { serverOnly("emails address owner-history"); } catch (e) { handleError(e); }
+    .action((ref: string, opts: { limit: string }) => {
+      try {
+        const limit = Math.max(1, Math.min(MAX_OWNER_HISTORY_LIMIT, Number.parseInt(opts.limit, 10) || 20));
+        const detail = getAddressOwnershipHistoryByRef(ref, limit);
+        const lines = [chalk.bold(`\nOwnership history: ${detail.address.email}`)];
+        if (detail.history.length === 0) {
+          lines.push(chalk.dim("  No ownership changes recorded."));
+        } else {
+          for (const event of detail.history) {
+            const owner = event.owner_id ? event.owner_id.slice(0, 8) : "none";
+            const admin = event.administrator_id ? event.administrator_id.slice(0, 8) : "none";
+            lines.push(`  ${event.created_at}  ${event.action}  owner=${owner} admin=${admin}${event.actor ? ` actor=${event.actor}` : ""}`);
+            if (event.reason) lines.push(chalk.dim(`    ${event.reason}`));
+          }
+        }
+        lines.push("");
+        output(detail, lines.join("\n"));
+      } catch (e) {
+        handleError(e);
+      }
     });
 
   addressCmd

@@ -77,6 +77,7 @@ interface V1Message {
   body_text?: string | null;
   body_html?: string | null;
   status?: string | null;
+  send_state?: string | null;
   provider_message_id?: string | null;
   message_id?: string | null;
   in_reply_to?: string | null;
@@ -170,6 +171,7 @@ function v1ToTuiMessage(m: V1Message): TuiMessage {
     id: m.id,
     from: m.from_addr ?? "",
     to: (m.to_addrs ?? []).join(", "),
+    cc: (m.cc_addrs ?? []).join(", "),
     subject: m.subject || "(no subject)",
     date: messageDate(m),
     is_read: outbound ? true : isRead,
@@ -180,6 +182,10 @@ function v1ToTuiMessage(m: V1Message): TuiMessage {
     provider_thread_id: null,
     attachments,
     sentByMe: outbound,
+    // Surface the ledger truth: a row stuck in `uncertain`/`failed` must never
+    // render identically to a delivered message (2026-07-25 incident).
+    ...(typeof m.status === "string" && m.status ? { status: m.status } : {}),
+    ...(typeof m.send_state === "string" && m.send_state ? { send_state: m.send_state } : {}),
   };
 }
 
@@ -819,6 +825,17 @@ export class SelfHostedMailDataSource implements MailDataSource {
     if (input.scheduledAt) {
       throw new Error("Scheduled send is not supported on the self-hosted emails serve.");
     }
+    if (input.providerId) {
+      // The /v1 send contract has no provider selector: the server sends with
+      // the single operator-configured provider (EMAILS_SEND_PROVIDER + its
+      // server-side credentials). Accepting the flag and ignoring it made an
+      // operator believe mail had been re-routed to another SES account when it
+      // had not.
+      throw new Error(
+        "--provider is not supported in self_hosted mode: the server selects the outbound provider "
+          + "(EMAILS_SEND_PROVIDER) and holds its credentials. Re-run without --provider.",
+      );
+    }
     const to = input.to.split(",").map((v) => v.trim()).filter(Boolean);
     const useMarkdown = input.markdown !== false;
     const html = input.html ?? (useMarkdown ? renderMarkdown(input.body) : undefined);
@@ -836,12 +853,34 @@ export class SelfHostedMailDataSource implements MailDataSource {
     if (input.replyTo) body["reply_to"] = input.replyTo;
     this.invalidate();
     const { status, json } = await this.request("POST", "/messages/send", body);
+    const payload = (json ?? {}) as {
+      message?: V1Message;
+      error?: unknown;
+      warning?: unknown;
+      sent?: unknown;
+      provider_message_id?: unknown;
+    };
     if (status < 200 || status >= 300) {
-      throw new Error(`self-hosted Emails: POST /messages/send failed (HTTP ${status})`);
+      // Relay the server's own diagnosis (e.g. the real provider reject and
+      // whether anything was sent) instead of a bare status code.
+      const detail = typeof payload.error === "string" && payload.error ? `: ${payload.error}` : "";
+      throw new Error(`self-hosted Emails: POST /messages/send failed (HTTP ${status})${detail}`);
     }
-    const rec = (json as { message?: V1Message } | null)?.message;
+    const rec = payload.message;
     const id = rec?.id ?? "";
-    return { id, messageId: rec?.message_id ?? id };
+    // Prefer the PROVIDER's message id (top-level echo first — it is present
+    // even when ledger finalization failed and the record row is stale) over
+    // the RFC Message-ID header, and only fall back to the ledger row id.
+    const providerMessageId = typeof payload.provider_message_id === "string" && payload.provider_message_id
+      ? payload.provider_message_id
+      : rec?.provider_message_id ?? null;
+    return {
+      id,
+      messageId: providerMessageId ?? rec?.message_id ?? id,
+      // A 2xx with a warning means the message WAS sent but a post-send step
+      // failed — success that the caller must see, never re-send.
+      ...(typeof payload.warning === "string" && payload.warning ? { warning: payload.warning } : {}),
+    };
   }
 
   async clear(filter?: MailClearFilter): Promise<MailClearResult> {
