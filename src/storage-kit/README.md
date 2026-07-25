@@ -6,11 +6,12 @@ generated or compatible with `vendor-kit --check`.
 
 ## What it is
 
-A canonical Postgres storage kit for self-hosted Emails deployments:
+A canonical Postgres storage kit for self-hosted Emails deployments. Mode and
+database-URL resolution are NOT part of it — those live in `src/lib/mode.ts` and
+`src/server/self-hosted/env.ts`.
 
 | File            | Purpose                                                              |
 | --------------- | ------------------------------------------------------------------- |
-| `mode.ts`       | Storage-mode + env resolution (`local` \| `self_hosted`), per the contract |
 | `tls.ts`        | The one correct TLS approach (libpq `sslmode` semantics + RDS CA)    |
 | `pool.ts`       | `pg.Pool` factory with consistent TLS                                |
 | `query.ts`      | Typed query wrapper (`query` / `many` / `get` / `one` / `execute`)   |

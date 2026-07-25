@@ -1,28 +1,27 @@
-# @hasna/mailery
+# @hasna/emails
 
 Open-source email infrastructure for local SQLite workflows and operator-owned self-hosted deployments, with a CLI, MCP server, library, dashboard, Resend, AWS SES, and Cloudflare-routed inbound mail.
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-> **Renamed from `@hasna/emails`.** The `mailery`, `mailery-mcp`, and
-> `mailery-serve` bins are canonical; the old `emails`, `emails-mcp`, and
-> `emails-serve` bins remain as aliases. The env prefix moved `EMAILS_*` →
-> `MAILERY_*` (both are read; `MAILERY_*` wins). Existing installs keep working.
-> This stays a **cloud-free** OSS package — a hosted Mailery cloud is a separate
-> product.
+> This package publishes as **`@hasna/emails`** and ships the `emails`,
+> `emails-mcp`, and `emails-serve` bins. `@hasna/mailery` on npm is the
+> abandoned 0.6.x line, and the `mailery*` bins belong to the separate cloud CLI
+> — neither is this package. The env prefix is `EMAILS_*`. This stays a
+> **cloud-free** OSS package: a hosted Mailery cloud is a separate product.
 
 ## Install
 
-Mailery is built for the Bun runtime. Install Bun 1.3 or newer, then install the
+Emails is built for the Bun runtime. Install Bun 1.3 or newer, then install the
 CLI with Bun.
 
 ```bash
-bun install -g @hasna/mailery
+bun install -g @hasna/emails
 ```
 
 ## Deployment modes
 
-Mailery has exactly two modes: `local` and `self_hosted`. Local mode keeps SQLite, files, and credentials on the current machine. Self-hosted mode connects to a Mailery service deployed in user-owned infrastructure. Provider integrations always use user-supplied credentials; the package has no hosted account or control-plane service.
+Emails has exactly two modes: `local` and `self_hosted`. Local mode keeps SQLite, files, and credentials on the current machine. Self-hosted mode connects to an Emails service deployed in user-owned infrastructure. Provider integrations always use user-supplied credentials; the package has no hosted account or control-plane service.
 
 ## Quick Start
 
@@ -300,9 +299,8 @@ emails-mcp
   no separate hosted-agent API surface in this OSS server.
 
 ```bash
-mailery serve   # local dashboard on 127.0.0.1 (the `emails serve` alias still works)
-MAILERY_ALLOW_REMOTE=1 mailery serve --host 0.0.0.0  # only behind an authenticating proxy/firewall
-# EMAILS_ALLOW_REMOTE=1 is still honored as a back-compat alias.
+emails serve   # local dashboard on 127.0.0.1
+EMAILS_ALLOW_REMOTE=1 emails serve --host 0.0.0.0  # only behind an authenticating proxy/firewall
 
 curl localhost:3900/api/providers
 curl localhost:3900/api/sources
@@ -311,7 +309,7 @@ curl 'localhost:3900/api/mailboxes?source_id=legacy'
 
 ## Library API
 
-Import the stable API from `@hasna/mailery`. The public entrypoint covers
+Import the stable API from `@hasna/emails`. The public entrypoint covers
 provider/domain/address CRUD, sending, inbound storage and listing, templates,
 contacts and suppression, sequences, exports, ownership helpers, and scoped send
 keys.
@@ -333,7 +331,7 @@ import {
   closeDatabase,
   runInTransaction,
   resolvePartialId,
-} from "@hasna/mailery";
+} from "@hasna/emails";
 
 const db = getDatabase();
 runInTransaction(db, () => {

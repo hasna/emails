@@ -20,8 +20,9 @@ export function buildSelfHostedService(version: string): SelfHostedServiceDeps {
   const { client } = getSelfHostedPool();
   const signingSecret = requireSigningSecret();
   const keys = new ApiKeyStore(client);
-  // Accept the canonical "mailery" app slug AND the legacy "emails" alias so
-  // API keys issued before the rename keep authenticating (see env.ts).
+  // Accept the canonical "emails" app slug AND every back-compat alias so
+  // keys minted while the unreleased "mailery" rename was deployed keep
+  // authenticating (see env.ts).
   const verifier: ApiKeyVerifier = verifyApiKeyWithAliases(
     {
       signingSecret,

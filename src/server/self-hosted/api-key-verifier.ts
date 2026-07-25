@@ -12,9 +12,9 @@ import {
  * Build an API-key verifier that authenticates the canonical app slug PLUS any
  * back-compat aliases.
  *
- * During the "emails" -> "mailery" app-slug rename, keys already minted under
- * the old slug must keep verifying, so the self-hosted server accepts both. The
- * first entry in `apps` is canonical and is reported as `verifier.app`.
+ * The canonical slug is "emails"; keys minted under the alias slug "mailery"
+ * (the unreleased rename) must keep verifying, so the self-hosted server accepts
+ * both. The first entry in `apps` is canonical and is reported as `verifier.app`.
  *
  * Verification is attempted per app in order: an `app_mismatch` (the token was
  * minted for a different slug) falls through to the next alias; ANY other

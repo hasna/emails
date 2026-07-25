@@ -65,8 +65,8 @@ export async function issueSelfHostedApiKey(
 }
 
 export async function listSelfHostedApiKeys(store: SelfHostedKeyStore): Promise<PublicApiKeyRecord[]> {
-  // List keys under the canonical app AND every legacy alias so operators still
-  // see (and can revoke) keys issued before the "emails" -> "mailery" rename.
+  // List keys under the canonical app AND every alias so operators still see
+  // (and can revoke) keys minted under the "mailery" slug.
   const apps = [SELF_HOSTED_APP, ...SELF_HOSTED_APP_ALIASES];
   const seen = new Set<string>();
   const records: PublicApiKeyRecord[] = [];
@@ -96,7 +96,7 @@ export async function rotateToEmailsApiKey(
   options: { scopes?: string[]; ttlDays?: number | null; agent?: string; createdBy?: string } = {},
 ): Promise<{ minted: MintedApiKey; retainedLegacyKids: string[] }> {
   // Mint a fresh key under the canonical app slug and report any still-active
-  // keys minted under a legacy alias slug ("emails") so the operator knows what
+  // keys minted under an alias slug ("mailery") so the operator knows what
   // remains valid during the transition.
   const retainedLegacyKids: string[] = [];
   for (const app of SELF_HOSTED_APP_ALIASES) {
