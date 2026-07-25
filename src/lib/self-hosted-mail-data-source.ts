@@ -857,9 +857,15 @@ export class SelfHostedMailDataSource implements MailDataSource {
     }
     const rec = payload.message;
     const id = rec?.id ?? "";
+    // Prefer the PROVIDER's message id (top-level echo first — it is present
+    // even when ledger finalization failed and the record row is stale) over
+    // the RFC Message-ID header, and only fall back to the ledger row id.
+    const providerMessageId = typeof payload.provider_message_id === "string" && payload.provider_message_id
+      ? payload.provider_message_id
+      : rec?.provider_message_id ?? null;
     return {
       id,
-      messageId: rec?.message_id ?? id,
+      messageId: providerMessageId ?? rec?.message_id ?? id,
       // A 2xx with a warning means the message WAS sent but a post-send step
       // failed — success that the caller must see, never re-send.
       ...(typeof payload.warning === "string" && payload.warning ? { warning: payload.warning } : {}),

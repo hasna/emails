@@ -646,6 +646,25 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     const res = await ds.send({ to: "x@external.example", from: "me@hasna.com", subject: "s", body: "b" });
     expect(res.id).toBe("m1");
     expect(res.warning).toMatch(/accepted/);
+    // The PROVIDER's id — the one that proves the send — must win over the RFC
+    // Message-ID header (the record row may be stale when finalization failed).
+    expect(res.messageId).toBe("prov-1");
+  });
+
+  it("reads the provider message id from the record when the server sends no top-level echo", async () => {
+    const serveRecOnly: SelfHostedFetch = async () => ({
+      status: 202,
+      async text() {
+        return JSON.stringify({
+          message: { id: "m2", message_id: "<m2@x>", provider_message_id: "prov-rec-2" },
+          provider: "ses",
+        });
+      },
+    });
+    const ds = new SelfHostedMailDataSource({ baseUrl: "https://emails.example/v1", apiKey: "k", fetchImpl: serveRecOnly });
+    const res = await ds.send({ to: "x@external.example", from: "me@hasna.com", subject: "s", body: "b" });
+    expect(res.messageId).toBe("prov-rec-2");
+    expect(res.warning).toBeUndefined();
   });
 
   it("returns verification candidates scoped to the recipient address", async () => {

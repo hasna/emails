@@ -110,6 +110,8 @@ describe("self-hosted OpenAPI identity and authorization contract", () => {
     // and the contract keeps them distinguishable.
     expect(send?.responses).toHaveProperty("422");
     expect(send?.responses).toHaveProperty("502");
+    // 503 = a rejected intent could not be re-armed (sent: false, retry later).
+    expect(send?.responses).toHaveProperty("503");
     const sendError = emailsSelfHostedOpenApi.components?.schemas?.SendMessageError as
       | { properties?: { message?: { oneOf?: Array<{ $ref?: string }>; nullable?: boolean } } }
       | undefined;

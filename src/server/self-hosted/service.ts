@@ -821,7 +821,15 @@ export async function handleSelfHostedRequest(
 
       if (!reserved.created) {
         if (reserved.record.send_state === "sent") {
-          return json(200, { message: publicMessage(reserved.record), provider: deps.sender.provider, idempotent_replay: true });
+          return json(200, {
+            message: publicMessage(reserved.record),
+            provider: deps.sender.provider,
+            idempotent_replay: true,
+            // The original attempt succeeded: say so at the top level, exactly
+            // like a fresh success, so callers have ONE place to check.
+            sent: true,
+            ...(reserved.record.provider_message_id ? { provider_message_id: reserved.record.provider_message_id } : {}),
+          });
         }
         if (reserved.record.send_state === "sending") {
           if (sendLeaseExpired(reserved.record)) {
@@ -844,8 +852,26 @@ export async function handleSelfHostedRequest(
         }
         if (reserved.record.send_state === "failed") {
           // A definitive provider reject sent NOTHING, so the same idempotency
-          // key may retry — on the SAME ledger row (never a duplicate).
-          const rearmed = await auth.store.rearmFailedSendIntent(reserved.record.id);
+          // key may retry — on the SAME ledger row (never a duplicate). If the
+          // re-arm itself fails, that is still PRE-provider: nothing was sent,
+          // and the response must say so instead of a generic 500 (which reads
+          // as "outcome unknown" — the exact ambiguity behind the incident).
+          let rearmed: MessageRecord | null = null;
+          try {
+            rearmed = await auth.store.rearmFailedSendIntent(reserved.record.id);
+          } catch (error) {
+            console.error("[emails-self-hosted] failed to re-arm a rejected send intent", {
+              message_id: reserved.record.id,
+              error: error instanceof Error ? `${error.name}: ${error.message}` : "UnknownError",
+            });
+            return json(503, {
+              error: "could not re-arm the previously rejected send intent; NOTHING was sent — retry later",
+              reason: "rearm_failed",
+              sent: false,
+              message: publicMessage(reserved.record),
+              retry_safe: true,
+            });
+          }
           if (rearmed) reserved = { record: rearmed, created: false };
         }
         if (reserved.record.send_state !== "pending") {
@@ -878,7 +904,13 @@ export async function handleSelfHostedRequest(
       if (!claimed) {
         const latest = await auth.store.getMessage(reserved.record.id);
         if (latest?.send_state === "sent") {
-          return json(200, { message: publicMessage(latest), provider: deps.sender.provider, idempotent_replay: true });
+          return json(200, {
+            message: publicMessage(latest),
+            provider: deps.sender.provider,
+            idempotent_replay: true,
+            sent: true,
+            ...(latest.provider_message_id ? { provider_message_id: latest.provider_message_id } : {}),
+          });
         }
         if (latest?.send_state === "cancelled") {
           return json(409, {
@@ -956,7 +988,16 @@ export async function handleSelfHostedRequest(
       }
       try {
         const completed = await auth.store.completeSendIntent(claimed.id, messageId);
-        return json(202, { message: publicMessage(completed), provider: deps.sender.provider });
+        // `sent` + `provider_message_id` sit at the top level on EVERY response
+        // where the provider accepted the message (here, on idempotent replays,
+        // and on the finalization-failure path below), so a client never has to
+        // guess what happened from the HTTP status alone.
+        return json(202, {
+          message: publicMessage(completed),
+          provider: deps.sender.provider,
+          sent: true,
+          provider_message_id: messageId,
+        });
       } catch (error) {
         // The provider ACCEPTED the message — it was sent. A post-send ledger
         // failure must therefore surface as SUCCESS with a warning: presenting
