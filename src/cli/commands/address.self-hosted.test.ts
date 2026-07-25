@@ -79,14 +79,77 @@ describe("address CLI — self-hosted (/v1) routing", () => {
     expect(out).toContain("No addresses configured.");
   });
 
-  it("blocks server-only address lifecycle commands", async () => {
+  it("blocks the server-owned provisioning orchestration", async () => {
     for (const args of [
       ["address", "provision", "agent@example.com", "--provider", "prov-1"],
-      ["address", "owner", "agent@example.com"],
     ]) {
       const result = await runAddressCommandExpectingExit(args);
       expect(result.error).toBe("process.exit:1");
       expect(result.stderr).toContain("is not available in the self-hosted client; it runs on the self-hosted server.");
     }
+  });
+
+  it("`address owner` answers from /v1 instead of refusing", async () => {
+    const addressId = crypto.randomUUID();
+    const ownerId = crypto.randomUUID();
+    await stub.seed({
+      addresses: [{
+        id: addressId,
+        email: "agent@example.com",
+        status: "active",
+        verified: true,
+        owner_id: ownerId,
+        administrator_id: ownerId,
+        created_at: "2026-01-01T00:00:00.000Z",
+        updated_at: "2026-01-01T00:00:00.000Z",
+      }],
+      owners: [{
+        id: ownerId,
+        type: "agent",
+        name: "ops-bot",
+        contact_email: null,
+        external_id: null,
+        created_at: "2026-01-01T00:00:00.000Z",
+        updated_at: "2026-01-01T00:00:00.000Z",
+      }],
+    });
+
+    const { data, out } = await runAddressCommand(["address", "owner", "agent@example.com"]);
+
+    expect(out).toContain("Owner:    ops-bot (agent)");
+    expect(data).toMatchObject({
+      address: { email: "agent@example.com", owner: { id: ownerId, name: "ops-bot" } },
+      ownership: { owner_id: ownerId, owner_type: "agent", administrator_id: ownerId },
+    });
+  });
+
+  it("`addresses` surfaces the owner recorded on the /v1 record", async () => {
+    const ownerId = crypto.randomUUID();
+    await stub.seed({
+      addresses: [{
+        id: crypto.randomUUID(),
+        email: "owned@example.com",
+        status: "active",
+        verified: true,
+        owner_id: ownerId,
+        administrator_id: ownerId,
+        created_at: "2026-01-01T00:00:00.000Z",
+        updated_at: "2026-01-01T00:00:00.000Z",
+      }],
+      owners: [{
+        id: ownerId,
+        type: "agent",
+        name: "ops-bot",
+        contact_email: null,
+        external_id: null,
+        created_at: "2026-01-01T00:00:00.000Z",
+        updated_at: "2026-01-01T00:00:00.000Z",
+      }],
+    });
+
+    const { data, out } = await runAddressCommand(["addresses"]);
+
+    expect(out).toContain("ops-bot");
+    expect(data).toMatchObject([{ email: "owned@example.com", owner: { id: ownerId, name: "ops-bot" } }]);
   });
 });
