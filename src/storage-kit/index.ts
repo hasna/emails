@@ -7,10 +7,7 @@
 // It is PURE REMOTE per Amendment A1: self_hosted mode reads AND writes go directly
 // to self_hosted Postgres. There is NO sync engine, NO cache-as-mode, and NO merge
 // logic anywhere in this kit.
-//
-export const KIT_VERSION = "0.4.2-emails.1";
 
-export * from "./mode.js";
 export * from "./tls.js";
 export * from "./query.js";
 export * from "./pool.js";

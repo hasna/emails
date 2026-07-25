@@ -156,13 +156,15 @@ describe("assertNoLegacyHostedEnvironment", () => {
     }
   });
 
-  it("does NOT reject the canonical MAILERY_MODE selector as legacy", () => {
-    // Post-rename, MAILERY_MODE is a first-class mode key (not a hosted-legacy
-    // var). local/self_hosted VALUES are accepted; only cloud/remote/hybrid
-    // VALUES are rejected (covered by resolveEmailsMode tests below).
+  it("rejects the MAILERY_MODE selectors whatever value they carry", () => {
+    // MAILERY_MODE / HASNA_MAILERY_MODE configured the removed Mailery runtime.
+    // Honouring one would start this package in a mode the operator never asked
+    // it for, so both are refused even for an otherwise-valid value.
     for (const key of ["MAILERY_MODE", "HASNA_MAILERY_MODE"]) {
-      expect(() => assertNoLegacyHostedEnvironment({ [key]: "local" } as NodeJS.ProcessEnv)).not.toThrow();
-      expect(() => assertNoLegacyHostedEnvironment({ [key]: "self_hosted" } as NodeJS.ProcessEnv)).not.toThrow();
+      for (const value of ["local", "self_hosted", "cloud"]) {
+        expect(() => assertNoLegacyHostedEnvironment({ [key]: value } as NodeJS.ProcessEnv))
+          .toThrow("removed hosted/legacy runtime");
+      }
     }
   });
 
@@ -204,17 +206,8 @@ describe("resolveEmailsMode — dual mode", () => {
     expect(resolveEmailsMode()).toMatchObject({ mode: "self_hosted", label: "Self-hosted" });
   });
 
-  it("accepts the canonical MAILERY_MODE selector", () => {
-    process.env["MAILERY_MODE"] = "self_hosted";
-    setSelfHostedCredentials();
-    expect(resolveEmailsMode()).toMatchObject({
-      mode: "self_hosted",
-      source: { kind: "env", name: "MAILERY_MODE" },
-    });
-  });
-
-  it("rejects a cloud/remote/hybrid VALUE under MAILERY_MODE and names the key", () => {
-    for (const value of ["cloud", "remote", "hybrid"]) {
+  it("rejects MAILERY_MODE and names the key", () => {
+    for (const value of ["self_hosted", "cloud", "remote", "hybrid"]) {
       process.env["MAILERY_MODE"] = value;
       setSelfHostedCredentials();
       resetSelfHostedConfigCache();
