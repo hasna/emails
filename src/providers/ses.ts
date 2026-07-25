@@ -56,17 +56,36 @@ export function resolveSesCredentials(
 ): SesCredentialResolution {
   const providerAccessKey = provider.access_key?.trim() || "";
   const providerSecretKey = provider.secret_key?.trim() || "";
+  const envAccessKey = env["AWS_ACCESS_KEY_ID"]?.trim() || "";
+  const envSecretKey = env["AWS_SECRET_ACCESS_KEY"]?.trim() || "";
   if (providerAccessKey || providerSecretKey) {
     if (!providerAccessKey || !providerSecretKey) {
+      // One exception to the both-or-neither rule, and only one: the provider
+      // names the SAME access key id the environment already holds a complete
+      // pair for. That is not a mixed identity — it is the identity the
+      // operator asked for, spelled twice — and rows shaped like this predate
+      // the rule (pre-1.3.0 `provider add --access-key` without a secret relied
+      // on the environment). Anything else still refuses: completing half a
+      // pair from a DIFFERENT identity is what signs against the wrong account.
+      if (providerAccessKey && !providerSecretKey && envAccessKey === providerAccessKey && envSecretKey) {
+        const sessionToken = env["AWS_SESSION_TOKEN"]?.trim() || "";
+        return {
+          source: "ambient",
+          credentials: {
+            accessKeyId: envAccessKey,
+            secretAccessKey: envSecretKey,
+            ...(sessionToken ? { sessionToken } : {}),
+          },
+        };
+      }
       throw new ProviderConfigError(
         "SES provider credentials are incomplete: an access key and a secret key must be supplied together. " +
-          "Partial provider credentials are never completed from the environment, because that would sign with a mixed identity.",
+          "Partial provider credentials are never completed from the environment, because that would sign with a mixed identity. " +
+          "Supply both with `emails provider update <id> --access-key … --secret-key …`, or clear both to fall back to the deployment role.",
       );
     }
     return { source: "provider", credentials: { accessKeyId: providerAccessKey, secretAccessKey: providerSecretKey } };
   }
-  const envAccessKey = env["AWS_ACCESS_KEY_ID"]?.trim() || "";
-  const envSecretKey = env["AWS_SECRET_ACCESS_KEY"]?.trim() || "";
   if (envAccessKey && envSecretKey) {
     const sessionToken = env["AWS_SESSION_TOKEN"]?.trim() || "";
     return {

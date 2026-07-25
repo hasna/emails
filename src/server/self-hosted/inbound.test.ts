@@ -97,11 +97,16 @@ function messagesClient(): { client: TypedQueryClient; rows: Record<string, unkn
         row["provider_message_id"] = (params ?? [])[1];
         return row as unknown as T;
       }
-      if (sql.startsWith("UPDATE messages SET send_state = 'uncertain'")) {
+      if (sql.startsWith("UPDATE messages") && sql.includes("send_state = 'uncertain'")) {
         const row = rows.find((item) => item["id"] === (params ?? [])[0]);
         if (!row || row["send_state"] === "sent") return null;
         row["send_state"] = "uncertain";
         row["status"] = "uncertain";
+        // $3 is the provider message id, present only when the provider
+        // accepted and the ledger write afterwards failed. It must survive:
+        // it is the evidence that the message left.
+        const providerMessageId = (params ?? [])[2];
+        if (providerMessageId != null) row["provider_message_id"] = providerMessageId;
         return row as unknown as T;
       }
       if (sql.includes("SET send_state = 'cancelled'")) {
@@ -786,6 +791,10 @@ describe("Emails self-hosted inbound messages", () => {
     expect(body.warning).toContain("do NOT retry");
     expect(body.retry_safe).toBe(false);
     expect(body.message.send_state).toBe("uncertain");
+    // …and the parked row keeps the provider id, the only proof it left. Without
+    // it the row can only be closed as `not_sent` — a delivered message filed
+    // as failed.
+    expect(body.message.provider_message_id).toBe("provider-accepted");
   });
 
   test("POST still requires from and to", async () => {

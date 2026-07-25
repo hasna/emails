@@ -36,6 +36,34 @@ describe("resolveSesCredentials", () => {
       .toThrow(/must be supplied together/);
   });
 
+  // Availability guard for rows that predate the both-or-neither rule: before
+  // 1.3.0, `provider add --access-key AKIA…` with no secret key sent fine as
+  // long as the environment held the matching pair. Refusing THAT is not a
+  // safety win, it is an outage — the identity is the same one, named twice.
+  it("accepts an access-key-only row when the environment holds the SAME identity's complete pair", () => {
+    const resolved = resolveSesCredentials(
+      { access_key: "AKIA-AMBIENT", secret_key: null },
+      AMBIENT,
+    );
+    expect(resolved.source).toBe("ambient");
+    expect(resolved.credentials).toEqual({
+      accessKeyId: "AKIA-AMBIENT",
+      secretAccessKey: "ambient-secret",
+    });
+  });
+
+  it("still refuses an access-key-only row when the ambient pair is a DIFFERENT identity", () => {
+    expect(() => resolveSesCredentials({ access_key: "AKIA-OTHER-ACCOUNT", secret_key: null }, AMBIENT))
+      .toThrow(/must be supplied together/);
+  });
+
+  it("still refuses an access-key-only row when the environment has no secret to match it", () => {
+    expect(() => resolveSesCredentials(
+      { access_key: "AKIA-AMBIENT", secret_key: null },
+      { AWS_ACCESS_KEY_ID: "AKIA-AMBIENT" } as NodeJS.ProcessEnv,
+    )).toThrow(ProviderConfigError);
+  });
+
   it("treats whitespace-only credentials as absent", () => {
     const resolved = resolveSesCredentials({ access_key: "   ", secret_key: "  " }, {});
     expect(resolved.source).toBe("chain");

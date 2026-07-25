@@ -2704,12 +2704,33 @@ export class TenantScopedStore {
     return row ? mapMessageRow(row) : null;
   }
 
-  async markSendUncertain(id: string): Promise<MessageRecord | null> {
+  /**
+   * Park an intent whose provider outcome could not be recorded.
+   *
+   * `providerMessageId` is supplied ONLY on the one path where the provider
+   * demonstrably accepted the message and the ledger write afterwards failed.
+   * It must survive on the row: it is the sole evidence that the message left,
+   * and `reconcileUncertainSendIntent` refuses an outcome of `sent` without it.
+   * Discarding it here is what would strand a delivered message with no way to
+   * close it out except by asserting `not_sent` — i.e. filing a delivered
+   * message as failed, the exact inversion this whole change exists to prevent.
+   */
+  async markSendUncertain(id: string, providerMessageId?: string | null): Promise<MessageRecord | null> {
+    const evidence = providerMessageId?.trim() || null;
     const row = await this.client.get<Record<string, unknown>>(
-      `UPDATE messages SET send_state = 'uncertain', status = 'uncertain', updated_at = now()
+      `UPDATE messages SET
+         send_state = 'uncertain', status = 'uncertain',
+         provider_message_id = COALESCE($3::text, provider_message_id),
+         headers = CASE WHEN $3::text IS NULL THEN headers
+           ELSE COALESCE(headers, '{}'::jsonb) || jsonb_build_object(
+             'send_uncertain_reason',
+             'the provider ACCEPTED this message (provider_message_id is present, so it was sent) but the ledger write that records it failed; reconcile as sent'
+           )
+         END,
+         updated_at = now()
        WHERE id = $1 AND tenant_id = $2 AND send_state <> 'sent'
        RETURNING ${MESSAGE_COLUMNS}`,
-      [id, this.tenantId],
+      [id, this.tenantId, evidence],
     );
     return row ? mapMessageRow(row) : null;
   }

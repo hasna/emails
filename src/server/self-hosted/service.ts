@@ -1093,7 +1093,12 @@ export async function handleSelfHostedRequest(
           provider_message_id: messageId,
           error: error instanceof Error ? `${error.name}: ${error.message}` : "UnknownError",
         });
-        const uncertain = await auth.store.markSendUncertain(claimed.id).catch(() => null);
+        // The provider id is the ONLY evidence this message left. Persist it on
+        // the parked row: `emails log`, the uncertain queue and
+        // `reconcile --outcome sent` all read it from there, and an uncertain
+        // row without it can only be closed as `not_sent` — filing a delivered
+        // message as failed.
+        const uncertain = await auth.store.markSendUncertain(claimed.id, messageId).catch(() => null);
         return json(202, {
           message: publicMessage(uncertain ?? claimed),
           provider: deps.sender.provider,
