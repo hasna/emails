@@ -97,11 +97,16 @@ function messagesClient(): { client: TypedQueryClient; rows: Record<string, unkn
         row["provider_message_id"] = (params ?? [])[1];
         return row as unknown as T;
       }
-      if (sql.startsWith("UPDATE messages SET send_state = 'uncertain'")) {
+      if (sql.startsWith("UPDATE messages") && sql.includes("send_state = 'uncertain'")) {
         const row = rows.find((item) => item["id"] === (params ?? [])[0]);
         if (!row || row["send_state"] === "sent") return null;
         row["send_state"] = "uncertain";
         row["status"] = "uncertain";
+        // $3 is the provider message id, present only when the provider
+        // accepted and the ledger write afterwards failed. It must survive:
+        // it is the evidence that the message left.
+        const providerMessageId = (params ?? [])[2];
+        if (providerMessageId != null) row["provider_message_id"] = providerMessageId;
         return row as unknown as T;
       }
       if (sql.includes("SET send_state = 'cancelled'")) {
@@ -766,7 +771,7 @@ describe("Emails self-hosted inbound messages", () => {
     expect(sends).toBe(1);
   });
 
-  it("marks provider-success ledger failures uncertain and never reports retry-safe", async () => {
+  it("reports provider-success ledger failures as SENT (202 + warning), still marked uncertain and never retry-safe", async () => {
     const d = deps();
     d.sender = { provider: "ses", send: async () => "provider-accepted" };
     d.store.completeSendIntent = async () => { throw new Error("database write failed"); };
@@ -776,10 +781,20 @@ describe("Emails self-hosted inbound messages", () => {
       body: JSON.stringify({ from: "me@example.com", to: ["you@example.com"], subject: "crash", idempotency_key: "crash-key" }),
     }));
     const body = await res!.json();
-    expect(res?.status).toBe(502);
-    expect(body.error).toContain("ledger finalization failed");
+    // The provider accepted the message, so this is a SUCCESS with a warning —
+    // presenting it as an error made operators re-send delivered mail
+    // (2026-07-25 incident). The ledger row still lands in `uncertain` for
+    // reconciliation, and retrying remains unsafe.
+    expect(res?.status).toBe(202);
+    expect(body.sent).toBe(true);
+    expect(body.provider_message_id).toBe("provider-accepted");
+    expect(body.warning).toContain("do NOT retry");
     expect(body.retry_safe).toBe(false);
     expect(body.message.send_state).toBe("uncertain");
+    // …and the parked row keeps the provider id, the only proof it left. Without
+    // it the row can only be closed as `not_sent` — a delivered message filed
+    // as failed.
+    expect(body.message.provider_message_id).toBe("provider-accepted");
   });
 
   test("POST still requires from and to", async () => {

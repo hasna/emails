@@ -114,7 +114,7 @@ export function sslNegotiationFromConnectionString(
  * `sslmode` query param and the legacy `ssl=true` boolean. Returns `disable`
  * when TLS is not requested.
  */
-export function sslModeFromConnectionString(connectionString: string): SslMode {
+function sslModeFromConnectionString(connectionString: string): SslMode {
   const values = tlsQueryValues(connectionString);
   const sslmode = values.get("sslmode")?.trim().toLowerCase();
   if (sslmode) {

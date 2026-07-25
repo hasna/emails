@@ -1,11 +1,13 @@
 // Self-hosted-ONLY: the address repo routes every read/write to `/v1/addresses`,
 // so these tests drive the REAL command against an out-of-process /v1 stub (see
-// src/test-support/v1-stub.ts). No local SQLite exists anymore. Ownership and
-// local provisioning have no /v1 equivalent — they run on the self-hosted server,
-// so those subcommands still fail loud (see the "server-only" block below).
+// src/test-support/v1-stub.ts). No local SQLite exists anymore. Ownership routes
+// over /v1 too (`/v1/owners`, owner_id/administrator_id on `/v1/addresses/<id>`,
+// `/v1/address-ownership-events`) and is covered below. Only the local
+// provisioning orchestration is server-owned and still fails loud.
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { Command } from "commander";
 import { createAddress } from "../../db/addresses.js";
+import { assignAddressOwner, createOwner } from "../../db/owners.js";
 import { startV1Stub, type V1Stub } from "../../test-support/v1-stub.js";
 import { registerAddressCommands } from "./address.js";
 
@@ -209,12 +211,9 @@ describe("address remove / lifecycle commands", () => {
 });
 
 describe("address server-only lifecycle commands still block", () => {
+  // Only the local provisioning orchestration (S3/SES receive setup + the
+  // provisioning ledger) is server-owned. Ownership is NOT — see below.
   const blocked: Array<[string, string[]]> = [
-    ["emails address owner", ["address", "owner", "svc@example.com"]],
-    ["emails address set-owner", ["address", "set-owner", "svc@example.com", "--owner", "agent-x"]],
-    ["emails address transfer-owner", ["address", "transfer-owner", "svc@example.com", "--owner", "agent-x", "--reason", "handoff"]],
-    ["emails address unassign-owner", ["address", "unassign-owner", "svc@example.com", "--reason", "retired"]],
-    ["emails address owner-history", ["address", "owner-history", "svc@example.com"]],
     ["emails address provision", ["address", "provision", "svc@example.com", "--provider", "prov-1"]],
   ];
 
@@ -225,4 +224,140 @@ describe("address server-only lifecycle commands still block", () => {
       expect(result.stderr).toContain("is not available in the self-hosted client; it runs on the self-hosted server.");
     });
   }
+});
+
+describe("address ownership commands over /v1", () => {
+  async function seedOwnedAddress() {
+    const address = createAddress({ provider_id: "prov-1", email: "svc@example.com" });
+    const human = createOwner({ type: "human", name: "ada" });
+    const agent = createOwner({ type: "agent", name: "ops-bot" });
+    return { address, human, agent };
+  }
+
+  it("set-owner assigns owner + administrator and persists them on the /v1 address", async () => {
+    const { address, human, agent } = await seedOwnedAddress();
+
+    const result = await runAddressCommand([
+      "address", "set-owner", "svc@example.com", "--owner", "ada", "--administrator", "ops-bot",
+    ]);
+
+    expect(result.out).toContain("svc@example.com owned by ada (human), administered by ops-bot");
+    expect(result.data).toMatchObject({
+      address: { email: "svc@example.com", owner: { id: human.id, name: "ada" }, administrator: { id: agent.id, name: "ops-bot" } },
+      ownership: { owner_id: human.id, owner_type: "human", administrator_id: agent.id },
+    });
+
+    const stored = (await stub.list("addresses")).find((a) => a["id"] === address.id);
+    expect(stored).toMatchObject({ owner_id: human.id, administrator_id: agent.id });
+  });
+
+  it("owner reports the assigned owner and administrator", async () => {
+    const { human, agent } = await seedOwnedAddress();
+    await runAddressCommand(["address", "set-owner", "svc@example.com", "--owner", "ada", "--administrator", "ops-bot"]);
+
+    const result = await runAddressCommand(["address", "owner", "svc@example.com"]);
+
+    expect(result.out).toContain("Owner:    ada (human)");
+    expect(result.out).toContain("Admin:    ops-bot (agent)");
+    expect(result.data).toMatchObject({
+      address: { owner: { id: human.id }, administrator: { id: agent.id } },
+      ownership: { owner_id: human.id, administrator_id: agent.id },
+    });
+  });
+
+  it("transfer-owner records the new owner plus an audit event", async () => {
+    await seedOwnedAddress();
+    createOwner({ type: "agent", name: "successor-bot" });
+    await runAddressCommand(["address", "set-owner", "svc@example.com", "--owner", "ada", "--administrator", "ops-bot"]);
+
+    const result = await runAddressCommand([
+      "address", "transfer-owner", "svc@example.com", "--owner", "successor-bot", "--reason", "handoff", "--yes",
+    ]);
+
+    expect(result.out).toContain("svc@example.com transferred — owned by successor-bot (agent)");
+    const events = await stub.list("address-ownership-events");
+    expect(events.map((e) => e["action"])).toContain("transfer");
+    expect(events.find((e) => e["action"] === "transfer")).toMatchObject({ reason: "handoff" });
+  });
+
+  it("unassign-owner clears ownership on the /v1 address", async () => {
+    const { address } = await seedOwnedAddress();
+    await runAddressCommand(["address", "set-owner", "svc@example.com", "--owner", "ada", "--administrator", "ops-bot"]);
+
+    const result = await runAddressCommand([
+      "address", "unassign-owner", "svc@example.com", "--reason", "retired", "--yes",
+    ]);
+
+    expect(result.out).toContain("svc@example.com is now unowned");
+    const stored = (await stub.list("addresses")).find((a) => a["id"] === address.id);
+    expect(stored?.["owner_id"] ?? null).toBeNull();
+    expect(stored?.["administrator_id"] ?? null).toBeNull();
+  });
+
+  it("owner-history lists the audit trail newest first", async () => {
+    await seedOwnedAddress();
+    await runAddressCommand(["address", "set-owner", "svc@example.com", "--owner", "ada", "--administrator", "ops-bot"]);
+    await runAddressCommand(["address", "unassign-owner", "svc@example.com", "--reason", "retired", "--yes"]);
+
+    const result = await runAddressCommand(["address", "owner-history", "svc@example.com"]);
+
+    const history = (result.data as { history: Array<{ action: string; reason: string | null }> }).history;
+    expect(history.map((e) => e.action)).toEqual(["unassign", "assign"]);
+    expect(result.out).toContain("unassign");
+    expect(result.out).toContain("retired");
+  });
+
+  it("owner-history reports an empty trail truthfully", async () => {
+    await seedOwnedAddress();
+
+    const result = await runAddressCommand(["address", "owner-history", "svc@example.com"]);
+
+    expect(result.out).toContain("No ownership changes recorded.");
+    expect((result.data as { history: unknown[] }).history).toEqual([]);
+  });
+
+  it("set-owner refuses a human owner without an agent administrator", async () => {
+    await seedOwnedAddress();
+
+    const result = await runAddressCommandExpectingExit(["address", "set-owner", "svc@example.com", "--owner", "ada"]);
+
+    expect(result.error).toBe("process.exit:1");
+    expect(result.stderr).toContain("human-owned address requires an agent administrator");
+  });
+});
+
+describe("address list reports real ownership", () => {
+  it("hydrates owner/administrator in the table and in --json", async () => {
+    const address = createAddress({ provider_id: "prov-1", email: "owned@example.com" });
+    const human = createOwner({ type: "human", name: "ada" });
+    const agent = createOwner({ type: "agent", name: "ops-bot" });
+    assignAddressOwner(address.id, human.id, agent.id);
+
+    const result = await runAddressCommand(["address", "list"]);
+
+    expect(result.data).toMatchObject([
+      { email: "owned@example.com", owner: { id: human.id, name: "ada" }, administrator: { id: agent.id, name: "ops-bot" } },
+    ]);
+    expect(result.out).toContain("ada:ops-bot");
+  });
+
+  it("--verbose shows owner and administrator instead of ignoring the flag", async () => {
+    const address = createAddress({ provider_id: "prov-1", email: "owned@example.com" });
+    const human = createOwner({ type: "human", name: "ada" });
+    const agent = createOwner({ type: "agent", name: "ops-bot" });
+    assignAddressOwner(address.id, human.id, agent.id);
+
+    const result = await runAddressCommand(["address", "list", "--verbose"]);
+
+    expect(result.out).toContain("owner ada (human)");
+    expect(result.out).toContain("admin ops-bot");
+  });
+
+  it("shows an unowned address as unowned", async () => {
+    createAddress({ provider_id: "prov-1", email: "free@example.com" });
+
+    const result = await runAddressCommand(["address", "list"]);
+
+    expect(result.data).toMatchObject([{ email: "free@example.com", owner: null, administrator: null }]);
+  });
 });

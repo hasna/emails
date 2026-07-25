@@ -397,6 +397,13 @@ export function registerDomainTools(server: McpServer): void {
   },
   );
 
+  // ─── ADDRESS OWNERSHIP ────────────────────────────────────────────────────────
+  // These five tools are NOT local-state tools. `src/lib/address-ownership.ts`
+  // reads and writes through `src/db/owners.ts`, which routes to
+  // `src/db/owners.remote.ts` in self_hosted mode: owners come from `/v1/owners`,
+  // owner_id/administrator_id are patched on `/v1/addresses/<id>`, and the audit
+  // trail is `/v1/address-ownership-events`. So they run in BOTH modes and carry
+  // no self_hosted guard.
   server.tool(
   "get_address_owner",
   "Show owner and administering agent for an address by email or ID.",
@@ -405,7 +412,6 @@ export function registerDomainTools(server: McpServer): void {
   },
   async ({ address }) => {
     try {
-      assertMcpLocalStateAllowed("get_address_owner", "it reads local address ownership rows");
       const { getAddressOwnershipDetail } = await import('../../lib/address-ownership.js');
       const detail = getAddressOwnershipDetail(address);
       return { content: [{ type: "text", text: JSON.stringify({
@@ -428,7 +434,6 @@ export function registerDomainTools(server: McpServer): void {
   },
   async ({ address, owner, administrator }) => {
     try {
-      assertMcpLocalStateAllowed("set_address_owner", "it writes local address ownership rows");
       const { setAddressOwnerByRef } = await import('../../lib/address-ownership.js');
       const detail = setAddressOwnerByRef(address, owner, administrator);
       return { content: [{ type: "text", text: JSON.stringify({
@@ -453,7 +458,6 @@ export function registerDomainTools(server: McpServer): void {
   },
   async ({ address, owner, administrator, reason, actor }) => {
     try {
-      assertMcpLocalStateAllowed("transfer_address_owner", "it writes local address ownership rows");
       const { transferAddressOwnerByRef } = await import('../../lib/address-ownership.js');
       const detail = transferAddressOwnerByRef(address, owner, administrator, { actor: actor ?? "mcp", reason });
       return { content: [{ type: "text", text: JSON.stringify({
@@ -476,7 +480,6 @@ export function registerDomainTools(server: McpServer): void {
   },
   async ({ address, reason, actor }) => {
     try {
-      assertMcpLocalStateAllowed("unassign_address_owner", "it writes local address ownership rows");
       const { unassignAddressOwnerByRef } = await import('../../lib/address-ownership.js');
       const detail = unassignAddressOwnerByRef(address, { actor: actor ?? "mcp", reason });
       return { content: [{ type: "text", text: JSON.stringify({
@@ -498,7 +501,6 @@ export function registerDomainTools(server: McpServer): void {
   },
   async ({ address, limit }) => {
     try {
-      assertMcpLocalStateAllowed("list_address_owner_history", "it reads local address ownership history rows");
       const { getAddressOwnershipHistoryByRef } = await import('../../lib/address-ownership.js');
       const detail = getAddressOwnershipHistoryByRef(address, limit ?? 20);
       return { content: [{ type: "text", text: JSON.stringify({

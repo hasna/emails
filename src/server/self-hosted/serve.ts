@@ -20,8 +20,9 @@ export function buildSelfHostedService(version: string): SelfHostedServiceDeps {
   const { client } = getSelfHostedPool();
   const signingSecret = requireSigningSecret();
   const keys = new ApiKeyStore(client);
-  // Accept the canonical "mailery" app slug AND the legacy "emails" alias so
-  // API keys issued before the rename keep authenticating (see env.ts).
+  // Accept the canonical "emails" app slug AND every back-compat alias so
+  // keys minted while the unreleased "mailery" rename was deployed keep
+  // authenticating (see env.ts).
   const verifier: ApiKeyVerifier = verifyApiKeyWithAliases(
     {
       signingSecret,
@@ -36,11 +37,19 @@ export function buildSelfHostedService(version: string): SelfHostedServiceDeps {
     },
     [SELF_HOSTED_APP, ...SELF_HOSTED_APP_ALIASES],
   );
+  const sender = buildSelfHostedSender();
+  // Secret-free boot line: WHICH identity outbound mail is signed with. Without
+  // it, "the SES credentials are configured" was unverifiable from the running
+  // service — the 2026-07-25 sends went out under the deployment role while an
+  // operator believed a configured provider was in use.
+  console.log(
+    `[emails-self-hosted] outbound provider=${sender.provider} credentials=${sender.credentialSource ?? "unknown"}`,
+  );
   return {
     client,
     store: new EmailsSelfHostedStore(client),
     verifier,
-    sender: buildSelfHostedSender(),
+    sender,
     migrations: emailsSelfHostedMigrations(),
     version,
     // ---- multi-tenancy + auth (WI-2) ----

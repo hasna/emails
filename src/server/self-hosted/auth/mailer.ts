@@ -1,16 +1,21 @@
 // Auth transactional email (email confirmation, password reset, invites).
 //
 // Design ref: Addendum A2. Confirmation/reset/invite mails are sent through the
-// app's EXISTING outbound path — `SelfHostedSender` (sender.ts) — which already
-// targets the hasna-studio-alumia SES account (AWS account 638389534677, where the
-// app's SES sending identities live), using the deployment IAM role and
-// EMAILS_AWS_REGION. We reuse that path rather than provisioning new credentials;
-// only the From identity is auth-specific (`EMAILS_AUTH_FROM`, a hasna-verified
-// address such as noreply@hasna.studio). If a deployment needs an explicit
-// account/region for these, thread it via EMAILS_AWS_REGION on the sender.
+// app's EXISTING outbound path — `SelfHostedSender` (sender.ts). Which AWS
+// account that path reaches is an OPERATOR/deployment decision, not something
+// this module (or any code here) can assert: sender.ts signs with
+// EMAILS_SES_ACCESS_KEY_ID/EMAILS_SES_SECRET_ACCESS_KEY when they are present in
+// the server environment, and otherwise with the deployment IAM role of
+// whatever account the process runs in. There is no cross-account assume-role
+// anywhere in this codebase.
 //
-// The server runs in xyz-infra and sends via alumia SES cross-account; that is the
-// operator's SES setup, transparent to this module (it only calls sender.send()).
+// (A previous version of this comment claimed the sender "already targets" a
+// specific SES account via the deployment role. It did not, and operators
+// trusted it — hence the explicit correction.)
+//
+// Only the From identity is auth-specific (`EMAILS_AUTH_FROM`, an address
+// verified in whichever SES account the sender actually signs into). Region
+// comes from EMAILS_AWS_REGION (falling back to AWS_REGION).
 //
 // Every send here is BEST-EFFORT and NEVER throws (design A2 + M7): signup/reset
 // must not fail on a transient SES error — the token is already persisted and a
