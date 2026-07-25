@@ -48,7 +48,7 @@ export interface TypedQueryClient {
 }
 
 /** Wrap any `PgExecutor` (a Pool, a PoolClient, or a test shim) with the typed vocabulary. */
-export function wrapExecutor(executor: PgExecutor): TypedQueryClient {
+function wrapExecutor(executor: PgExecutor): TypedQueryClient {
   return {
     async query<T extends QueryResultRow>(sql: string, params?: readonly unknown[]): Promise<QueryResult<T>> {
       const result = await executor.query<T>(sql, params);

@@ -10,27 +10,27 @@ function headers(token: string): Headers {
   return new Headers({ "x-api-key": token });
 }
 
-describe("verifyApiKeyWithAliases (emails -> mailery app rename)", () => {
+describe("verifyApiKeyWithAliases (canonical emails app + mailery alias)", () => {
   const verifier = verifyApiKeyWithAliases({ signingSecret: SIGNING }, APPS);
 
   it("reports the canonical app slug", () => {
-    expect(verifier.app).toBe("mailery");
-    expect(SELF_HOSTED_APP).toBe("mailery");
-    expect(SELF_HOSTED_APP_ALIASES).toContain("emails");
+    expect(verifier.app).toBe("emails");
+    expect(SELF_HOSTED_APP).toBe("emails");
+    expect(SELF_HOSTED_APP_ALIASES).toContain("mailery");
   });
 
-  it("accepts a key minted under the canonical mailery app", async () => {
-    const token = mintApiKey({ app: "mailery", scopes: ["emails:*"], signingSecret: SIGNING }).token;
-    const decision = await verifier.authenticate(headers(token));
-    expect(decision.ok).toBe(true);
-    if (decision.ok) expect(decision.principal.app).toBe("mailery");
-  });
-
-  it("accepts a legacy key minted under the emails alias", async () => {
+  it("accepts a key minted under the canonical emails app", async () => {
     const token = mintApiKey({ app: "emails", scopes: ["emails:*"], signingSecret: SIGNING }).token;
     const decision = await verifier.authenticate(headers(token));
     expect(decision.ok).toBe(true);
     if (decision.ok) expect(decision.principal.app).toBe("emails");
+  });
+
+  it("accepts a key minted under the mailery alias", async () => {
+    const token = mintApiKey({ app: "mailery", scopes: ["emails:*"], signingSecret: SIGNING }).token;
+    const decision = await verifier.authenticate(headers(token));
+    expect(decision.ok).toBe(true);
+    if (decision.ok) expect(decision.principal.app).toBe("mailery");
   });
 
   it("rejects a key minted for a foreign app", async () => {
@@ -42,14 +42,14 @@ describe("verifyApiKeyWithAliases (emails -> mailery app rename)", () => {
 
   it("returns a terminal failure without falling through to aliases", async () => {
     // Valid canonical app but wrong signature -> bad_signature, not app_mismatch.
-    const token = mintApiKey({ app: "mailery", scopes: ["emails:*"], signingSecret: "another-signing-secret-32-chars-xx!!" }).token;
+    const token = mintApiKey({ app: "emails", scopes: ["emails:*"], signingSecret: "another-signing-secret-32-chars-xx!!" }).token;
     const decision = await verifier.authenticate(headers(token));
     expect(decision.ok).toBe(false);
     if (!decision.ok) expect(decision.reason).toBe("bad_signature");
   });
 
-  it("denies a REVOKED legacy emails key and preserves its kid in the audit line", async () => {
-    const minted = mintApiKey({ app: "emails", scopes: ["emails:*"], signingSecret: SIGNING });
+  it("denies a REVOKED alias key and preserves its kid in the audit line", async () => {
+    const minted = mintApiKey({ app: "mailery", scopes: ["emails:*"], signingSecret: SIGNING });
     const events: { outcome: string; kid: string | null; reason: unknown }[] = [];
     const revoking = verifyApiKeyWithAliases(
       {
@@ -66,9 +66,9 @@ describe("verifyApiKeyWithAliases (emails -> mailery app rename)", () => {
   });
 
   it("falls through app_mismatch to a terminal failure raised at the alias verifier", async () => {
-    // A legacy emails token with a bad signature: mailery -> app_mismatch (fall
-    // through), then emails -> bad_signature (terminal, not app_mismatch).
-    const token = mintApiKey({ app: "emails", scopes: ["emails:*"], signingSecret: "another-signing-secret-32-chars-xx!!" }).token;
+    // A mailery-slug token with a bad signature: emails -> app_mismatch (fall
+    // through), then mailery -> bad_signature (terminal, not app_mismatch).
+    const token = mintApiKey({ app: "mailery", scopes: ["emails:*"], signingSecret: "another-signing-secret-32-chars-xx!!" }).token;
     const decision = await verifier.authenticate(headers(token));
     expect(decision.ok).toBe(false);
     if (!decision.ok) expect(decision.reason).toBe("bad_signature");
@@ -80,7 +80,7 @@ describe("verifyApiKeyWithAliases (emails -> mailery app rename)", () => {
       { signingSecret: SIGNING, audit: (e) => { outcomes.push(e.outcome); } },
       APPS,
     );
-    const token = mintApiKey({ app: "emails", scopes: ["emails:*"], signingSecret: SIGNING }).token;
+    const token = mintApiKey({ app: "mailery", scopes: ["emails:*"], signingSecret: SIGNING }).token;
     await audited.authenticate(headers(token));
     expect(outcomes).toEqual(["allow"]);
   });

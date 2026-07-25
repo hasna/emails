@@ -29,11 +29,15 @@ async function daemonStatus() {
       due_addresses: queue.due_addresses,
       failed_domains: queue.failed_domains,
       failed_addresses: queue.failed_addresses,
+      drainable: false,
     },
     realtime: system.inbox.realtime,
+    // The provisioning queue below is REPORTED but never drained: no
+    // provisioning reconciler ships in this build (`emails provision daemon`
+    // is not implemented). Advertising a start command for it told operators to
+    // run something that always throws, so it is gone; `queue.drainable`
+    // states the truth for scripts.
     start_commands: {
-      provisioner_once: "emails provision daemon --provider <provider> --bucket <bucket> --once",
-      provisioner_loop: "emails provision daemon --provider <provider> --bucket <bucket>",
       realtime_watch: "emails inbox watch --all-buckets",
     },
   };
@@ -47,7 +51,10 @@ function formatDaemonStatus(status: Awaited<ReturnType<typeof daemonStatus>>): s
   if (status.realtime.last_poll_at) lines.push(`  Last poll:  ${chalk.green(status.realtime.last_poll_at)}`);
   if (status.realtime.last_error) lines.push(`  Last error: ${chalk.red(status.realtime.last_error)}`);
   lines.push("");
-  lines.push(chalk.dim(`  Start provisioner: ${status.start_commands.provisioner_loop}`));
+  if (status.queue.due_domains > 0 || status.queue.failed_domains > 0 || status.queue.due_addresses > 0 || status.queue.failed_addresses > 0) {
+    lines.push(chalk.yellow("  No provisioning reconciler ships in this build; the queue above is not drained automatically."));
+    lines.push(chalk.dim("  Provision manually: emails domain adopt <domain> --provider <id>"));
+  }
   lines.push(chalk.dim(`  Start realtime:    ${status.start_commands.realtime_watch}`));
   return lines.join("\n");
 }
@@ -94,7 +101,6 @@ export function registerDaemonCommands(program: Command, output: (data: unknown,
         };
         output(result, [
           chalk.yellow("No managed email daemon process is configured."),
-          chalk.dim(`Start provisioner: ${status.start_commands.provisioner_loop}`),
           chalk.dim(`Start realtime:    ${status.start_commands.realtime_watch}`),
         ].join("\n"));
       } catch (e) {

@@ -63,6 +63,8 @@ export interface TuiMessage {
   id: string;
   from: string;
   to: string;
+  /** Comma-joined CC recipients; empty/undefined when the backend has none. */
+  cc?: string;
   subject: string;
   date: string;
   is_read: boolean;
@@ -74,6 +76,10 @@ export interface TuiMessage {
   attachments: number;
   /** True if I sent it (app-sent, or imported mail labelled SENT). */
   sentByMe: boolean;
+  /** Ledger status (e.g. sent | failed | uncertain); undefined when unreported. */
+  status?: string;
+  /** Send-intent state (self-hosted ledger); undefined when unreported. */
+  send_state?: string;
 }
 
 export interface TuiThreadMessage {

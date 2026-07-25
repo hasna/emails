@@ -19,10 +19,6 @@ export function colorDnsStatus(status: string): string {
   }
 }
 
-export function colorProvider(active: boolean, text: string): string {
-  return active ? ansi.green(text) : ansi.gray(text);
-}
-
 export function truncate(str: string, len: number): string {
   if (str.length <= len) return str;
   return str.slice(0, len - 1) + "\u2026";

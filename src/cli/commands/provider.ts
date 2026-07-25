@@ -1,8 +1,10 @@
 import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
-import { createProvider, listProviders, listProviderSummaries, deleteProvider, getProvider, resolveProviderId, updateProvider } from "../../db/providers.js";
+import { assertProviderCredentialsStorable, createProvider, listProviders, listProviderSummaries, deleteProvider, getProvider, resolveProviderId, updateProvider } from "../../db/providers.js";
 import { getAdapter } from "../../providers/index.js";
 import { log } from "../../lib/logger.js";
+import { getEmailsMode } from "../../lib/mode.js";
+import type { Provider } from "../../types/index.js";
 import { confirmDestructiveAction, formatListHint, handleError, isCliVerboseOutput, parseCliListPage } from "../utils.js";
 
 type SupportedProviderType = "resend" | "ses" | "sandbox";
@@ -11,6 +13,81 @@ function parseProviderType(value: string): SupportedProviderType {
   if (value === "resend" || value === "ses" || value === "sandbox") return value;
   handleError(new Error("Provider type must be 'resend', 'ses', or 'sandbox'"));
   return "sandbox";
+}
+
+interface ProviderCredentialInput {
+  name: string;
+  type: SupportedProviderType;
+  apiKey?: string;
+  region?: string;
+  accessKey?: string;
+  secretKey?: string;
+}
+
+/**
+ * An in-memory provider built from EXACTLY what the operator typed.
+ *
+ * Validation must exercise the supplied credentials, not whatever the persisted
+ * row happens to contain. In self_hosted mode the stored row carries no
+ * credentials at all, so validating it fell through to the CLI machine's
+ * ambient AWS chain and reported "Provider credentials are invalid" for
+ * credentials that were perfectly valid — the operator-facing half of the
+ * 2026-07-25 incident.
+ */
+function candidateProvider(input: ProviderCredentialInput): Provider {
+  const now = new Date().toISOString();
+  return {
+    id: "candidate",
+    name: input.name,
+    type: input.type,
+    api_key: input.apiKey?.trim() || null,
+    region: input.region?.trim() || null,
+    access_key: input.accessKey?.trim() || null,
+    secret_key: input.secretKey?.trim() || null,
+    oauth_client_id: null,
+    oauth_client_secret: null,
+    oauth_refresh_token: null,
+    oauth_access_token: null,
+    oauth_token_expiry: null,
+    active: true,
+    created_at: now,
+    updated_at: now,
+  };
+}
+
+/**
+ * Validate a candidate against the provider API.
+ *
+ * Returns a human-readable note when validation was deliberately NOT performed,
+ * so the command never implies an unverified provider was verified.
+ */
+async function validateProviderCandidate(
+  candidate: Provider,
+  opts: { skipValidation?: boolean },
+): Promise<{ validated: boolean; note?: string }> {
+  if (opts.skipValidation) return { validated: false, note: "credential validation skipped (--skip-validation)" };
+  if (candidate.type === "sandbox") return { validated: false };
+  const hasCredentials = Boolean(candidate.api_key || candidate.access_key || candidate.secret_key);
+  if (!hasCredentials && getEmailsMode() === "self_hosted") {
+    // Nothing was supplied and the SERVER holds the real credentials. Probing
+    // this machine's ambient AWS chain would tell the operator nothing about
+    // whether the server can send, so do not pretend it did.
+    return {
+      validated: false,
+      note: "credentials were not validated: in self_hosted mode the server signs outbound mail with its own "
+        + "environment credentials, which this client cannot reach",
+    };
+  }
+  const adapter = getAdapter(candidate);
+  await adapter.listDomains();
+  return { validated: true };
+}
+
+function credentialValidationError(error: unknown): Error {
+  const detail = error instanceof Error ? error.message : String(error);
+  return new Error(
+    `The supplied provider credentials were rejected by the provider API: ${detail}. Nothing was saved.`,
+  );
 }
 
 export function registerProviderCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
@@ -37,6 +114,35 @@ export function registerProviderCommands(program: Command, output: (data: unknow
     }) => {
       try {
         const type = parseProviderType(opts.type);
+        // Refuse credentials the selected backend cannot store BEFORE spending a
+        // provider round-trip validating them.
+        assertProviderCredentialsStorable({
+          name: opts.name,
+          type,
+          api_key: opts.apiKey,
+          region: opts.region,
+          access_key: opts.accessKey,
+          secret_key: opts.secretKey,
+        });
+        // Validate BEFORE persisting, and with the credentials the operator
+        // actually supplied. The old order (create → validate the stored row →
+        // delete on failure) both lied about why validation failed and left the
+        // deletion as the only cleanup.
+        const candidate = candidateProvider({
+          name: opts.name,
+          type,
+          apiKey: opts.apiKey,
+          region: opts.region,
+          accessKey: opts.accessKey,
+          secretKey: opts.secretKey,
+        });
+        let validation: { validated: boolean; note?: string };
+        try {
+          validation = await validateProviderCandidate(candidate, opts);
+        } catch (validationErr) {
+          return handleError(credentialValidationError(validationErr));
+        }
+
         const provider = createProvider({
           name: opts.name,
           type,
@@ -46,22 +152,14 @@ export function registerProviderCommands(program: Command, output: (data: unknow
           secret_key: opts.secretKey,
         });
 
-        if (!opts.skipValidation && type !== "sandbox") {
-          try {
-            const adapter = getAdapter(provider);
-            await adapter.listDomains();
-          } catch (validationErr) {
-            deleteProvider(provider.id);
-            handleError(new Error(`Provider credentials are invalid: ${validationErr instanceof Error ? validationErr.message : String(validationErr)}. Provider was not saved.`));
-          }
-        }
-
         if (type === "sandbox") {
           log.success(`✓ Sandbox provider created: ${provider.name} (${provider.id.slice(0, 8)})`);
           log.info(chalk.dim("  Emails sent to this provider are captured locally, not delivered."));
         } else {
           log.success(`✓ Provider created: ${provider.name} (${provider.id.slice(0, 8)})`);
+          if (validation.validated) log.info(chalk.dim("  Credentials validated against the provider API."));
         }
+        if (validation.note) log.info(chalk.yellow(`  ⚠ ${validation.note}`));
       } catch (e) {
         handleError(e);
       }
@@ -150,25 +248,30 @@ export function registerProviderCommands(program: Command, output: (data: unknow
         if (opts.accessKey !== undefined) updates.access_key = opts.accessKey;
         if (opts.secretKey !== undefined) updates.secret_key = opts.secretKey;
 
-        const updated = updateProvider(resolvedId, updates);
-
-        if (!opts.skipValidation && updated.type !== "sandbox") {
-          try {
-            const adapter = getAdapter(updated);
-            await adapter.listDomains();
-          } catch (validationErr) {
-            updateProvider(resolvedId, {
-              name: original.name,
-              api_key: original.api_key ?? undefined,
-              region: original.region ?? undefined,
-              access_key: original.access_key ?? undefined,
-              secret_key: original.secret_key ?? undefined,
-            });
-            handleError(new Error(`Provider credentials are invalid: ${validationErr instanceof Error ? validationErr.message : String(validationErr)}. Update was reverted.`));
-          }
+        assertProviderCredentialsStorable(updates as Partial<Parameters<typeof createProvider>[0]>);
+        // Same rule as `add`: verify the credentials that WOULD take effect,
+        // before anything is written, so a rejection never requires a revert
+        // and never blames the wrong identity.
+        const candidate = candidateProvider({
+          name: opts.name ?? original.name,
+          type: original.type as SupportedProviderType,
+          apiKey: opts.apiKey ?? original.api_key ?? undefined,
+          region: opts.region ?? original.region ?? undefined,
+          accessKey: opts.accessKey ?? original.access_key ?? undefined,
+          secretKey: opts.secretKey ?? original.secret_key ?? undefined,
+        });
+        let validation: { validated: boolean; note?: string };
+        try {
+          validation = await validateProviderCandidate(candidate, opts);
+        } catch (validationErr) {
+          return handleError(credentialValidationError(validationErr));
         }
 
+        const updated = updateProvider(resolvedId, updates);
+
         log.success(`✓ Provider updated: ${updated.name} (${updated.id.slice(0, 8)})`);
+        if (validation.validated) log.info(chalk.dim("  Credentials validated against the provider API."));
+        if (validation.note) log.info(chalk.yellow(`  ⚠ ${validation.note}`));
       } catch (e) {
         handleError(e);
       }

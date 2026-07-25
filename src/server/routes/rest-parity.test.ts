@@ -3,7 +3,6 @@ import { createAddress } from "../../db/addresses.local.js";
 import { suppressContact, upsertContact } from "../../db/contacts.local.js";
 import { closeDatabase, getDatabase, resetDatabase } from "../../db/database.js";
 import { createDomain, updateDnsStatus, updateDomainReadiness } from "../../db/domains.local.js";
-import { saveEmailAgentRun } from "../../db/email-agents.local.js";
 import { createEmail } from "../../db/emails.local.js";
 import { createEvent } from "../../db/events.local.js";
 import { addMember, createGroup } from "../../db/groups.local.js";
@@ -13,8 +12,8 @@ import { createScheduledEmail, markSent } from "../../db/scheduled.local.js";
 import { storeSandboxEmail } from "../../db/sandbox.local.js";
 import { createSequence, enroll, unenroll } from "../../db/sequences.local.js";
 import { createTemplate } from "../../db/templates.local.js";
-import { saveTriage } from "../../db/triage.local.js";
 import { createWarmingSchedule, updateWarmingStatus } from "../../db/warming.local.js";
+import { seedEmailAgentRun, seedTriage } from "../../test-support/legacy-mail-seed.js";
 import { handleApiRequest } from "../api-routes.js";
 
 async function call(path: string, init?: RequestInit): Promise<Response> {
@@ -133,14 +132,14 @@ describe("emails serve REST parity smoke", () => {
       raw_size: 4,
       received_at: "2026-02-03T00:00:00.000Z",
     });
-    saveTriage({
+    seedTriage({
       inbound_email_id: inboundEmail.id,
       label: "fyi",
       priority: 1,
       summary: "Legacy triage summary",
       confidence: 0.8,
     });
-    saveEmailAgentRun({
+    seedEmailAgentRun({
       agent_key: "categorizer",
       inbound_email_id: inboundEmail.id,
       provider: "external",
@@ -217,7 +216,7 @@ describe("emails serve REST parity smoke", () => {
       raw_size: 10,
       received_at: "2026-02-02T00:00:00.000Z",
     });
-    saveTriage({
+    seedTriage({
       inbound_email_id: inboundEmail.id,
       label: "fyi",
       priority: 2,
@@ -472,7 +471,7 @@ describe("emails serve REST parity smoke", () => {
         subject: `REST limit ${i}`,
         text: "hello",
       });
-      saveTriage({ email_id: email.id, label: "fyi", priority: 3 });
+      seedTriage({ email_id: email.id, label: "fyi", priority: 3 });
       storeInboundEmail({
         provider_id: provider.id,
         message_id: `<limit-${i}@example.com>`,

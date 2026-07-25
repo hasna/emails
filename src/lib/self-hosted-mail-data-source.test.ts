@@ -594,6 +594,133 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     expect(serve.deleted).toContain("posted-1");
   });
 
+  it("maps cc, status, and send_state onto sent list rows (the `emails log` projection)", async () => {
+    const { ds } = make([
+      v1("9", {
+        direction: "outbound",
+        from_addr: "andrei@hasna.com",
+        to_addrs: ["accountant@client.example"],
+        cc_addrs: ["copy@client.example", "second@client.example"],
+        status: "uncertain",
+        send_state: "uncertain",
+      }),
+    ]);
+    const [msg] = await ds.listMailbox("sent");
+    expect(msg?.to).toBe("accountant@client.example");
+    expect(msg?.cc).toBe("copy@client.example, second@client.example");
+    expect(msg?.status).toBe("uncertain");
+    expect(msg?.send_state).toBe("uncertain");
+  });
+
+  it("surfaces the server's error detail when a send fails (never just a bare HTTP status)", async () => {
+    const serveFail: SelfHostedFetch = async () => ({
+      status: 422,
+      async text() {
+        return JSON.stringify({
+          error: "the provider rejected this message; nothing was sent: Email address is not verified",
+          reason: "provider_rejected",
+          sent: false,
+          retry_safe: true,
+        });
+      },
+    });
+    const ds = new SelfHostedMailDataSource({ baseUrl: "https://emails.example/v1", apiKey: "k", fetchImpl: serveFail });
+    await expect(ds.send({ to: "x@external.example", from: "me@hasna.com", subject: "s", body: "b" }))
+      .rejects.toThrow(/Email address is not verified/);
+  });
+
+  it("returns a sent-with-warning response as SUCCESS carrying the warning (a sent message must never look failed)", async () => {
+    const serveWarn: SelfHostedFetch = async () => ({
+      status: 202,
+      async text() {
+        return JSON.stringify({
+          message: { id: "m1", message_id: "<m1@x>" },
+          provider: "ses",
+          sent: true,
+          provider_message_id: "prov-1",
+          warning: "the provider accepted this message (it was sent) but recording the final state failed; do not retry the send",
+        });
+      },
+    });
+    const ds = new SelfHostedMailDataSource({ baseUrl: "https://emails.example/v1", apiKey: "k", fetchImpl: serveWarn });
+    const res = await ds.send({ to: "x@external.example", from: "me@hasna.com", subject: "s", body: "b" });
+    expect(res.id).toBe("m1");
+    expect(res.warning).toMatch(/accepted/);
+    // The PROVIDER's id — the one that proves the send — must win over the RFC
+    // Message-ID header (the record row may be stale when finalization failed).
+    expect(res.messageId).toBe("prov-1");
+  });
+
+  it("reads the provider message id from the record when the server sends no top-level echo", async () => {
+    const serveRecOnly: SelfHostedFetch = async () => ({
+      status: 202,
+      async text() {
+        return JSON.stringify({
+          message: { id: "m2", message_id: "<m2@x>", provider_message_id: "prov-rec-2" },
+          provider: "ses",
+        });
+      },
+    });
+    const ds = new SelfHostedMailDataSource({ baseUrl: "https://emails.example/v1", apiKey: "k", fetchImpl: serveRecOnly });
+    const res = await ds.send({ to: "x@external.example", from: "me@hasna.com", subject: "s", body: "b" });
+    expect(res.messageId).toBe("prov-rec-2");
+    expect(res.warning).toBeUndefined();
+  });
+
+  it("rejects --provider instead of silently ignoring it (the server owns the sender)", async () => {
+    // The flag was parsed and then dropped, so an operator who "re-pointed" a
+    // send at another SES provider got the old one with no warning at all.
+    let called = 0;
+    const serve: SelfHostedFetch = async () => {
+      called += 1;
+      return { status: 202, async text() { return JSON.stringify({ message: { id: "m" }, sent: true }); } };
+    };
+    const ds = new SelfHostedMailDataSource({ baseUrl: "https://emails.example/v1", apiKey: "k", fetchImpl: serve });
+    await expect(ds.send({
+      to: "x@hasna.com", from: "me@hasna.com", subject: "s", body: "b", providerId: "some-provider-id",
+    })).rejects.toThrow(/--provider is not supported in self_hosted mode/);
+    expect(called).toBe(0);
+  });
+
+  it("never turns a provider REJECT into a resolved send", async () => {
+    const serveReject: SelfHostedFetch = async () => ({
+      status: 422,
+      async text() {
+        return JSON.stringify({
+          error: "the provider rejected this message and NOTHING was sent — MessageRejected: not verified",
+          reason: "provider_rejected",
+          sent: false,
+          retry_safe: true,
+          message: { id: "m-rejected", send_state: "failed" },
+        });
+      },
+    });
+    const ds = new SelfHostedMailDataSource({ baseUrl: "https://emails.example/v1", apiKey: "k", fetchImpl: serveReject });
+    let resolved: unknown;
+    let rejected: unknown;
+    try { resolved = await ds.send({ to: "x@external.example", from: "me@hasna.com", subject: "s", body: "b" }); }
+    catch (error) { rejected = error; }
+    expect(resolved).toBeUndefined();
+    expect(String(rejected)).toContain("NOTHING was sent");
+  });
+
+  it("never turns an INDETERMINATE outcome into a resolved send", async () => {
+    const serveUnknown: SelfHostedFetch = async () => ({
+      status: 502,
+      async text() {
+        return JSON.stringify({
+          error: "the provider call failed without a definitive outcome; the message may or may not have been sent",
+          reason: "provider_outcome_uncertain",
+          sent: null,
+          retry_safe: false,
+        });
+      },
+    });
+    const ds = new SelfHostedMailDataSource({ baseUrl: "https://emails.example/v1", apiKey: "k", fetchImpl: serveUnknown });
+    await expect(ds.send({ to: "x@external.example", from: "me@hasna.com", subject: "s", body: "b" }))
+      .rejects.toThrow(/may or may not have been sent/);
+  });
+
   it("returns verification candidates scoped to the recipient address", async () => {
     const { ds, serve } = make([
       v1("2", { to_addrs: ["andrei@hasna.com"], subject: "code 123456" }),
