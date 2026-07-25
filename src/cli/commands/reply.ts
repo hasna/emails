@@ -2,6 +2,7 @@ import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
 import { resolveMailDataSource } from "../../lib/mail-data-source.js";
 import { handleError } from "../utils.js";
+import { formatThreadLabel } from "../tui/format.js";
 
 function fwdPrefix(subject: string): string {
   return /^fwd?:/i.test(subject.trim()) ? subject : `Fwd: ${subject}`;
@@ -80,7 +81,9 @@ export function registerReplyCommand(program: Command, output: (data: unknown, f
           replyToId: id,
         });
         const threadId = msg.thread_id ?? null;
-        const suffix = threadId ? ` (thread ${threadId.slice(0, 8)})` : "";
+        // Not a fixed 8-char slice: in self_hosted mode the thread id is the
+        // server's conversation key (a normalized subject), not a uuid.
+        const suffix = threadId ? ` (thread${formatThreadLabel(threadId)})` : "";
         output({ id: result.id, thread_id: threadId, to: toArr, subject: defaults.subject },
           chalk.green(`✓ replied to ${toArr.join(", ")} — "${defaults.subject}"${suffix}`));
       } catch (e) { handleError(e); }

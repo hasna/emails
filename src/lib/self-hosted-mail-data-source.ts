@@ -115,10 +115,44 @@ const PAGE_LIMIT = 500;
 const MAX_SCAN_ROWS = 100_000;
 // How long a full scan is reused within one (short-lived) CLI/MCP invocation.
 const SCAN_TTL_MS = 15_000;
+// Hard cap on rows walked while collecting one conversation. The candidate read
+// is already narrowed server-side by the subject filter, so this only bounds a
+// pathological "everyone uses the same subject" store.
+const MAX_THREAD_CANDIDATE_ROWS = 2_000;
+
+// The synthetic source id `listMailboxSources()` publishes for the whole shared
+// store. `emails inbox sources` prints it and `--source <id>` must accept it
+// back — the round-trip is the contract, so it lives next to both ends of it.
+export const SELF_HOSTED_SOURCE_ID = "self_hosted";
+// The id local mode uses for the same "no narrowing" scope; accepted as an alias
+// so a script written against local mode keeps working here.
+const ALL_SOURCE_ID = "all";
 
 function bareEmail(value: string): string {
   const angled = value.match(/<([^>]+)>/);
   return (angled ? angled[1]! : value).trim().toLowerCase();
+}
+
+/** An RFC 5322 Message-ID without its angle brackets (same rule as db/inbound.remote.ts). */
+function bareMessageId(value: string | null | undefined): string {
+  return String(value ?? "").replace(/[<>]/g, "").trim();
+}
+
+// The conversation key of a subject. The self-hosted store has NO thread_id
+// column: its one server-side notion of a conversation is the normalized
+// (Re:/Fwd:-stripped, lower-cased, trimmed) subject that
+// `GET /v1/messages/threads` groups by — see store.listThreads, whose SQL this
+// mirrors expression-for-expression:
+//   NULLIF(btrim(regexp_replace(lower(COALESCE(subject,'')),
+//                               '^(\s*(re|fwd|fw)\s*:\s*)+', '', 'g')), '')
+// Keeping the two in lock-step is what makes this client's thread view agree
+// with the server's own thread rollup instead of inventing a third answer.
+const THREAD_SUBJECT_PREFIX_RE = /^(?:\s*(?:re|fwd|fw)\s*:\s*)+/;
+
+/** Normalized conversation key, or null when the subject is empty (no key exists). */
+export function threadKeyOfSubject(subject: string | null | undefined): string | null {
+  const stripped = String(subject ?? "").toLowerCase().replace(THREAD_SUBJECT_PREFIX_RE, "").trim();
+  return stripped || null;
 }
 
 function snippetOf(text: string | null | undefined): string {
@@ -178,7 +212,15 @@ function v1ToTuiMessage(m: V1Message): TuiMessage {
     is_starred: Boolean(m.is_starred),
     labels: visibleLabels(labelsOf(m), isRead),
     snippet: snippetOf(m.snippet ?? m.body_text),
-    thread_id: null,
+    // The conversation this row belongs to, named the way the server names it
+    // (the `thread_key` of GET /v1/messages/threads). Derived from the subject
+    // the row already carries, so it costs no extra round-trip and is present on
+    // list rows as well as detail reads. Null only when the subject is empty —
+    // there is genuinely no conversation key then, and lumping every empty
+    // subject under one id would be a fabricated grouping.
+    thread_id: threadKeyOfSubject(m.subject),
+    // Genuinely absent: the self-hosted store keeps no upstream/provider thread
+    // id column, so there is nothing truthful to project here.
     provider_thread_id: null,
     attachments,
     sentByMe: outbound,
@@ -230,14 +272,26 @@ function v1ToMessageBody(m: V1Message): MessageBody {
 }
 
 function v1ToThreadMessage(m: V1Message): TuiThreadMessage {
+  const outbound = (m.direction ?? "").toLowerCase() === "outbound";
   return {
-    kind: (m.direction ?? "").toLowerCase() === "outbound" ? "sent" : "received",
-    storage: "inbound",
+    kind: outbound ? "sent" : "received",
+    // Same storage mapping local mode uses (data.local getConversation): a sent
+    // message reads back through the sent-mail projection, everything else
+    // through the inbound one. Reporting "inbound" for an outbound row made
+    // threadItemToMessage() re-label our own sends as received mail.
+    storage: outbound ? "email" : "inbound",
     id: m.id,
     from: m.from_addr ?? "",
     subject: m.subject || "(no subject)",
     at: messageDate(m),
   };
+}
+
+// "Already read", using the SAME rule the row projection reports as `is_read`
+// (an outbound message is never unread), so `--read` can never hide a row that
+// the very same listing renders as read.
+function readMatch(m: V1Message): boolean {
+  return (m.direction ?? "").toLowerCase() === "outbound" || Boolean(m.is_read);
 }
 
 function emptyCounts(): MailboxCounts {
@@ -270,29 +324,78 @@ function folderMatch(m: V1Message, folder: Mailbox): boolean {
   }
 }
 
-// True when a source actually narrows the view (an unresolvable one yields nothing
-// rather than silently widening to the whole operator-owned store).
-function hasSourceScope(source?: MailboxSource): boolean {
-  return Boolean(source && (source.sourceId || source.providerId || source.address || source.domain || source.s3Bucket || source.legacy || source.unknown));
+/**
+ * The subset of a MailboxSource the self-hosted /v1 store can actually express.
+ * `undefined` means "the whole shared store" (no narrowing).
+ */
+interface SelfHostedScope {
+  address?: string;
+  domain?: string;
 }
 
-function sourceMatch(m: V1Message, source?: MailboxSource): boolean {
-  if (!hasSourceScope(source)) return true;
+/** Scope selectors that describe LOCAL ingestion provenance the /v1 store does not record. */
+function unsupportedScopeSelectors(source: MailboxSource): string[] {
+  const selectors: string[] = [];
+  const providerId = source.providerId?.trim();
+  const s3Bucket = source.s3Bucket?.trim();
+  if (providerId) selectors.push(`--provider ${providerId}`);
+  if (s3Bucket) selectors.push(`--source s3:${s3Bucket}`);
+  if (source.legacy) selectors.push("--source legacy");
+  return selectors;
+}
+
+/**
+ * Narrow a caller's MailboxSource to what the self-hosted serve can honour.
+ *
+ * A /v1 message row records WHO the mail was addressed to, never which local
+ * ingestion stream or provider credential carried it — that provenance only
+ * exists in local mode's SQLite. Previously every such scope silently collapsed
+ * to "match nothing", so `--provider <id>` printed "No mail found" and
+ * `inbox mailboxes --source <id>` printed all-zero folder counts for a store
+ * that was full of mail. Both are indistinguishable from a genuinely empty
+ * mailbox, so they are refused with a message that says what IS supported.
+ *
+ * The whole-store ids this backend itself publishes (`self_hosted`, plus local
+ * mode's `all`) resolve to no narrowing, so the id printed by
+ * `emails inbox sources` round-trips into `--source`.
+ */
+function selfHostedScopeOf(source?: MailboxSource): SelfHostedScope | undefined {
+  if (!source) return undefined;
+  const address = source.address?.trim().toLowerCase() || undefined;
+  const domain = source.domain?.trim().toLowerCase() || undefined;
+  const sourceId = source.sourceId?.trim() || undefined;
+  const wholeStore = !sourceId || sourceId === SELF_HOSTED_SOURCE_ID || sourceId === ALL_SOURCE_ID;
+
+  const unsupported = unsupportedScopeSelectors(source);
+  // An id that is neither a whole-store id nor a mailbox scope names an
+  // ingestion source this store does not have.
+  if (!wholeStore && unsupported.length === 0 && !address && !domain) {
+    unsupported.push(`--source ${sourceId}`);
+  }
+  if (source.unknown && unsupported.length === 0) unsupported.push(`--source ${sourceId ?? "<unknown>"}`);
+  if (unsupported.length > 0) {
+    throw new Error(
+      `Self-hosted mail is one shared store with no ingestion-source or provider provenance on its messages, `
+      + `so ${unsupported.join(" and ")} cannot be applied. Scope by mailbox instead `
+      + `(--address <email> or --domain <domain>), or use --source ${SELF_HOSTED_SOURCE_ID} for the whole store. `
+      + "`emails inbox sources` lists the scopes this store supports.",
+    );
+  }
+  if (!address && !domain) return undefined;
+  return { ...(address ? { address } : {}), ...(domain ? { domain } : {}) };
+}
+
+function scopeMatch(m: V1Message, scope?: SelfHostedScope): boolean {
+  if (!scope) return true;
   const recipients = (m.to_addrs ?? []).map(bareEmail);
-  const address = source?.address?.trim().toLowerCase();
-  if (address) return recipients.includes(address) || bareEmail(m.from_addr ?? "") === address;
-  const domain = source?.domain?.trim().toLowerCase();
-  if (domain) return recipients.some((r) => r.endsWith(`@${domain}`));
-  // provider/s3/legacy/unknown scoping has no equivalent in the self-hosted
-  // serve → narrow to nothing.
-  return false;
+  if (scope.address) return recipients.includes(scope.address) || bareEmail(m.from_addr ?? "") === scope.address;
+  if (scope.domain) return recipients.some((r) => r.endsWith(`@${scope.domain}`));
+  return true;
 }
 
-function sourceServerFilterSets(source: MailboxSource | undefined): Array<{ to?: string; from?: string }> {
-  const address = source?.address?.trim().toLowerCase();
-  if (address) return [{ to: address }, { from: address }];
-  const domain = source?.domain?.trim().toLowerCase();
-  return domain ? [{ to: domain }] : [{}];
+function scopeServerFilterSets(scope: SelfHostedScope | undefined): Array<{ to?: string; from?: string }> {
+  if (scope?.address) return [{ to: scope.address }, { from: scope.address }];
+  return scope?.domain ? [{ to: scope.domain }] : [{}];
 }
 
 function searchMatch(m: V1Message, query?: string): boolean {
@@ -475,7 +578,7 @@ export class SelfHostedMailDataSource implements MailDataSource {
     return { message: candidate, matches };
   }
 
-  private async listFilteredMailboxPage(mailbox: Mailbox, opts?: MailboxListOptions): Promise<V1Message[]> {
+  private async listFilteredMailboxPage(mailbox: Mailbox, scope: SelfHostedScope | undefined, opts?: MailboxListOptions): Promise<V1Message[]> {
     const offset = opts?.offset && opts.offset > 0 ? opts.offset : 0;
     const limit = opts?.limit && opts.limit > 0 ? opts.limit : 200;
     const wanted = offset + limit;
@@ -483,7 +586,7 @@ export class SelfHostedMailDataSource implements MailDataSource {
     const direction = mailbox === "sent" ? "outbound" : "inbound";
     const since = normalizeSince(opts?.since);
     const matches = new Map<string, V1Message>();
-    for (const sourceFilters of sourceServerFilterSets(opts?.source)) {
+    for (const sourceFilters of scopeServerFilterSets(scope)) {
       let filterMatches = 0;
       for (let serverOffset = 0; serverOffset < MAX_SCAN_ROWS && filterMatches < wanted; serverOffset += pageLimit) {
         const page = await this.listPage(pageLimit, serverOffset, {
@@ -493,7 +596,10 @@ export class SelfHostedMailDataSource implements MailDataSource {
           search: opts?.search,
         });
         for (const message of page) {
-          if (!folderMatch(message, mailbox) || !sourceMatch(message, opts?.source) || !isOnOrAfter(message, since)) continue;
+          if (!folderMatch(message, mailbox) || !scopeMatch(message, scope) || !isOnOrAfter(message, since)) continue;
+          // Part of the QUERY, not a post-filter over the page: applied here the
+          // walk keeps paging until `limit` matching rows exist.
+          if (opts?.read === true && !readMatch(message)) continue;
           const { message: candidate, matches: matchesSearch } = await this.searchMatchWithDetails(message, opts?.search);
           if (matchesSearch) {
             if (!matches.has(candidate.id)) filterMatches += 1;
@@ -508,24 +614,91 @@ export class SelfHostedMailDataSource implements MailDataSource {
       .slice(offset, offset + limit);
   }
 
-  private async scanSourceRows(source?: MailboxSource): Promise<V1Message[]> {
-    if (!hasSourceScope(source)) return this.scanAll();
-    if (!source?.address && !source?.domain) return [];
+  private async scanScopeRows(scope?: SelfHostedScope): Promise<V1Message[]> {
+    if (!scope) return this.scanAll();
 
     const seen = new Map<string, V1Message>();
     const collect = async (filters: { direction?: "inbound" | "outbound"; to?: string; from?: string }) => {
       for (let offset = 0; offset < MAX_SCAN_ROWS; offset += PAGE_LIMIT) {
         const page = await this.listPage(PAGE_LIMIT, offset, filters);
         for (const message of page) {
-          if (sourceMatch(message, source)) seen.set(message.id, message);
+          if (scopeMatch(message, scope)) seen.set(message.id, message);
         }
         if (page.length < PAGE_LIMIT) break;
       }
     };
 
-    for (const filters of sourceServerFilterSets(source)) await collect(filters);
+    for (const filters of scopeServerFilterSets(scope)) await collect(filters);
 
     return [...seen.values()];
+  }
+
+  /**
+   * Every message in the conversation `target` belongs to, oldest first.
+   *
+   * Two grouping rules, both grounded in data the serve actually returns:
+   *  1. the normalized subject key — the server's OWN conversation key (see
+   *     threadKeyOfSubject / store.listThreads), and
+   *  2. the RFC 5322 Message-ID <-> In-Reply-To links carried on every row, which
+   *     keep a reply attached even when its subject was edited.
+   *
+   * Candidates are narrowed SERVER-side by `?subject=` (a case-folded substring
+   * match, so it over-fetches "Re: …" and near-misses; LIKE metacharacters in a
+   * subject can only widen it further), then filtered here on exact key
+   * equality. That keeps one conversation read at one or two requests instead of
+   * the full-store scan the label/oldest paths pay.
+   *
+   * A message with an empty subject has no conversation key at all, so it stands
+   * alone — collapsing every empty-subject message into one thread would be a
+   * fabrication, not a thread.
+   */
+  private async conversationRows(target: V1Message): Promise<V1Message[]> {
+    const key = threadKeyOfSubject(target.subject);
+    const members = new Map<string, V1Message>([[target.id, target]]);
+    if (!key) return [...members.values()];
+
+    const candidates: V1Message[] = [];
+    for (let offset = 0; offset < MAX_THREAD_CANDIDATE_ROWS; offset += PAGE_LIMIT) {
+      const page = await this.listPage(Math.min(PAGE_LIMIT, MAX_THREAD_CANDIDATE_ROWS - offset), offset, { subject: key });
+      candidates.push(...page);
+      if (page.length < PAGE_LIMIT) break;
+    }
+
+    const unlinked: V1Message[] = [];
+    for (const candidate of candidates) {
+      if (candidate.id === target.id) continue;
+      if (threadKeyOfSubject(candidate.subject) === key) members.set(candidate.id, candidate);
+      else unlinked.push(candidate);
+    }
+
+    // Reference closure over the rows the subject read did NOT already claim: a
+    // reply whose subject was rewritten still points at a member's Message-ID.
+    // Runs to a fixpoint — one pass per link depth — bounded by the candidate
+    // count so a pathological chain cannot spin.
+    for (let pass = 0, remaining = unlinked.length; pass <= remaining && unlinked.length > 0; pass += 1) {
+      const memberMessageIds = new Set<string>();
+      const memberParentIds = new Set<string>();
+      for (const member of members.values()) {
+        const own = bareMessageId(member.message_id);
+        if (own) memberMessageIds.add(own);
+        const parent = bareMessageId(member.in_reply_to);
+        if (parent) memberParentIds.add(parent);
+      }
+      let added = false;
+      for (let index = unlinked.length - 1; index >= 0; index -= 1) {
+        const candidate = unlinked[index]!;
+        const own = bareMessageId(candidate.message_id);
+        const parent = bareMessageId(candidate.in_reply_to);
+        if ((parent && memberMessageIds.has(parent)) || (own && memberParentIds.has(own))) {
+          members.set(candidate.id, candidate);
+          unlinked.splice(index, 1);
+          added = true;
+        }
+      }
+      if (!added) break;
+    }
+
+    return [...members.values()].sort((a, b) => messageDate(a).localeCompare(messageDate(b)));
   }
 
   private async getRaw(id: string): Promise<V1Message | null> {
@@ -557,9 +730,9 @@ export class SelfHostedMailDataSource implements MailDataSource {
   }
 
   async listMailbox(mailbox: Mailbox, opts?: MailboxListOptions): Promise<TuiMessage[]> {
-    if (hasSourceScope(opts?.source) && !opts?.source?.address && !opts?.source?.domain) return [];
+    const scope = selfHostedScopeOf(opts?.source);
     if (!opts?.label && opts?.sort !== "oldest") {
-      return (await this.listFilteredMailboxPage(mailbox, opts)).map(v1ToTuiMessage);
+      return (await this.listFilteredMailboxPage(mailbox, scope, opts)).map(v1ToTuiMessage);
     }
     const rows = await this.scanAll();
     const label = opts?.label?.trim().toLowerCase();
@@ -567,8 +740,9 @@ export class SelfHostedMailDataSource implements MailDataSource {
     let filtered: V1Message[] = [];
     for (const row of rows) {
       if (!folderMatch(row, mailbox)
-        || !sourceMatch(row, opts?.source)
+        || !scopeMatch(row, scope)
         || !isOnOrAfter(row, since)
+        || (opts?.read === true && !readMatch(row))
         || (label && !labelsOf(row).some((l) => l.trim().toLowerCase() === label))
       ) continue;
       const { message, matches } = await this.searchMatchWithDetails(row, opts?.search);
@@ -585,11 +759,12 @@ export class SelfHostedMailDataSource implements MailDataSource {
   }
 
   async mailboxCounts(opts?: { source?: MailboxSource }): Promise<MailboxCounts> {
-    if (!hasSourceScope(opts?.source)) return (await this.serverStats()).counts;
-    const rows = await this.scanSourceRows(opts?.source);
+    const scope = selfHostedScopeOf(opts?.source);
+    if (!scope) return (await this.serverStats()).counts;
+    const rows = await this.scanScopeRows(scope);
     const counts = emptyCounts();
     for (const m of rows) {
-      if (!sourceMatch(m, opts?.source)) continue;
+      if (!scopeMatch(m, scope)) continue;
       for (const folder of MAILBOXES) {
         if (folderMatch(m, folder)) counts[folder] += 1;
       }
@@ -610,13 +785,13 @@ export class SelfHostedMailDataSource implements MailDataSource {
     };
   }
 
-  async listMailboxSources(_opts?: ListMailboxSourcesOptions): Promise<MailboxSourceSummary[]> {
+  async listMailboxSources(opts?: ListMailboxSourcesOptions): Promise<MailboxSourceSummary[]> {
     // The self-hosted serve is a single shared store — expose it as one source so
     // `inbox sources` / status are informative rather than empty.
     const { counts, latestReceivedAt } = await this.serverStats();
     const receivedTotal = counts.inbox + counts.archived + counts.spam + counts.trash;
-    return [{
-      id: "self_hosted",
+    const sources: MailboxSourceSummary[] = [{
+      id: SELF_HOSTED_SOURCE_ID,
       label: "Self-hosted Emails",
       kind: "all",
       badges: ["self_hosted"],
@@ -625,6 +800,16 @@ export class SelfHostedMailDataSource implements MailDataSource {
       unread: counts.unread,
       latestReceivedAt,
     }];
+    // `--search` / `--limit` are honoured over the same fields local mode matches
+    // (data.local listMailboxSources), so a caller that filters gets a filtered
+    // list rather than the full one served back unchanged.
+    const query = opts?.search?.trim().toLowerCase();
+    const filtered = query
+      ? sources.filter((source) => [source.id, source.label, source.kind, ...source.badges]
+        .some((value) => String(value ?? "").toLowerCase().includes(query)))
+      : sources;
+    const limit = opts?.limit && opts.limit > 0 ? opts.limit : 100;
+    return filtered.slice(0, limit);
   }
 
   async getMessage(id: string): Promise<TuiMessage | null> {
@@ -648,13 +833,26 @@ export class SelfHostedMailDataSource implements MailDataSource {
 
   async getConversation(msg: TuiMessage): Promise<TuiThreadMessage[]> {
     const m = await this.getRaw(msg.id);
-    return m ? [v1ToThreadMessage(m)] : [];
+    if (!m) return [];
+    return (await this.conversationRows(m)).map(v1ToThreadMessage);
   }
 
-  async getConversationBodies(msg: TuiMessage, _opts?: ConversationBodyOptions): Promise<TuiThreadBody[]> {
+  async getConversationBodies(msg: TuiMessage, opts?: ConversationBodyOptions): Promise<TuiThreadBody[]> {
     const m = await this.getRaw(msg.id);
     if (!m) return [];
-    return [{ item: v1ToThreadMessage(m), body: v1ToMessageBody(m) }];
+    const rows = await this.conversationRows(m);
+    // Same windowing as local mode: `limit` keeps the NEWEST N of the thread
+    // (data.local getConversationBodies), because a conversation is read from
+    // its most recent turn backwards.
+    const limit = opts?.limit && opts.limit > 0 ? opts.limit : undefined;
+    const windowed = limit && rows.length > limit ? rows.slice(-limit) : rows;
+    const bodies: TuiThreadBody[] = [];
+    for (const row of windowed) {
+      // List rows carry no body; re-read only the rows in the window.
+      const full = row.body_text == null && row.body_html == null ? (await this.getRaw(row.id)) ?? row : row;
+      bodies.push({ item: v1ToThreadMessage(full), body: v1ToMessageBody(full) });
+    }
+    return bodies;
   }
 
   async getAttachmentPaths(id: string): Promise<AttachmentPath[]> {
@@ -884,9 +1082,13 @@ export class SelfHostedMailDataSource implements MailDataSource {
   }
 
   async clear(filter?: MailClearFilter): Promise<MailClearResult> {
+    // Resolve the scope BEFORE the scan: an unsupported one must refuse, never
+    // widen. A silently-empty scope here would have deleted nothing while
+    // reporting success — and the reverse mistake would delete the whole store.
+    const scope = selfHostedScopeOf(filter?.source);
     const rows = await this.scanAll();
     const mailbox: Mailbox = filter?.mailbox ?? "inbox";
-    const targets = rows.filter((m) => folderMatch(m, mailbox) && sourceMatch(m, filter?.source));
+    const targets = rows.filter((m) => folderMatch(m, mailbox) && scopeMatch(m, scope));
     let cleared = 0;
     for (const m of targets) {
       await this.deleteMessage(m.id);
