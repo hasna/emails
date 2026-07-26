@@ -239,10 +239,62 @@ function stripExactCompatibilityBridges(content, path) {
   // bundles that import it for `version`.
   scanned = scanned.replace(/(?<![\w-])("?)author\1\s*:\s*"[^"]*"/g, 'author: "AUTHORSHIP_SENTINEL"');
 
-  // CI explicitly unsets legacy variables to make the test environment
-  // deterministic. Exempt only those `env -u NAME` tokens.
-  if (path.endsWith(".github/workflows/ci.yml")) {
-    for (const key of legacyHostedEnvKeys) scanned = scanned.replaceAll(`-u ${key}`, "-u LEGACY_HOSTED_SENTINEL");
+  // The two hermetic test launchers explicitly unset legacy variables to keep
+  // ambient operator configuration out of the test process. Exempt only exact,
+  // unquoted `-u NAME` arguments inside an `env` command on these two paths.
+  // Arbitrary mentions on either path, and the same command shape anywhere else,
+  // remain in scope.
+  if (path === ".github/workflows/ci.yml" || path === "scripts/run-hermetic-tests.sh") {
+    const lines = scanned.split(/(?<=\n)/);
+    let insideEnvCommand = false;
+    scanned = lines
+      .map((line) => {
+        const withoutNewline = line.replace(/\r?\n$/, "");
+        const trimmed = withoutNewline.trimStart();
+        if (!insideEnvCommand && !/^env(?:[ \t]|\\|$)/.test(trimmed)) return line;
+        insideEnvCommand = true;
+
+        let rewritten = "";
+        let quote = null;
+        for (let index = 0; index < line.length;) {
+          const char = line[index];
+          if (quote !== null) {
+            rewritten += char;
+            if (char === quote) quote = null;
+            else if (char === "\\" && quote === '"' && index + 1 < line.length) {
+              index += 1;
+              rewritten += line[index];
+            }
+            index += 1;
+            continue;
+          }
+          if (char === "'" || char === '"') {
+            quote = char;
+            rewritten += char;
+            index += 1;
+            continue;
+          }
+          if ((index === 0 || /\s/.test(line[index - 1])) && line.startsWith("-u", index) && /[ \t]/.test(line[index + 2] ?? "")) {
+            const keyStart = index + 2 + (line.slice(index + 2).match(/^[ \t]+/)?.[0].length ?? 0);
+            const key = legacyHostedEnvKeys.find(
+              (candidate) =>
+                line.startsWith(candidate, keyStart) &&
+                (keyStart + candidate.length === line.length || /[\s\\]/.test(line[keyStart + candidate.length] ?? "")),
+            );
+            if (key !== undefined) {
+              rewritten += line.slice(index, keyStart) + "LEGACY_HOSTED_SENTINEL";
+              index = keyStart + key.length;
+              continue;
+            }
+          }
+          rewritten += char;
+          index += 1;
+        }
+
+        if (!/\\[ \t]*$/.test(withoutNewline)) insideEnvCommand = false;
+        return rewritten;
+      })
+      .join("");
   }
   return scanned;
 }

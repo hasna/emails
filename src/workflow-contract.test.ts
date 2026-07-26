@@ -5,29 +5,40 @@ import { join } from "node:path";
 const workflowDir = join(import.meta.dir, "..", ".github", "workflows");
 const repositoryRoot = join(import.meta.dir, "..");
 
+function readWorkflow(name: string): string {
+  return readFileSync(join(workflowDir, name), "utf8");
+}
+
+function singleQuotedReadonly(workflow: string, name: string): string {
+  const matches = [...workflow.matchAll(new RegExp(`readonly ${name}='([^']*)'`, "g"))];
+  expect(matches, `${name} must be declared exactly once`).toHaveLength(1);
+  return matches[0]?.[1] ?? "";
+}
+
 describe("repository workflow safety", () => {
-  it("allows only product CI and credential-free Terraform validation", () => {
+  it("allows only product CI, credential-free Terraform validation, and package provenance", () => {
     const files = existsSync(workflowDir)
       ? readdirSync(workflowDir).filter((name) => /\.ya?ml$/.test(name)).sort()
       : [];
-    const text = files.map((name) => readFileSync(join(workflowDir, name), "utf8")).join("\n");
-    expect(files).toEqual(["ci.yml", "terraform-aws-validate.yml"]);
-    expect(text).not.toMatch(
+    expect(files).toEqual(["ci.yml", "package-provenance.yml", "terraform-aws-validate.yml"]);
+
+    const validationText = ["ci.yml", "terraform-aws-validate.yml"].map(readWorkflow).join("\n");
+    expect(validationText).not.toMatch(
       /configure-aws-credentials|aws-actions\/amazon-ecr|amazon-ecr-login|ecs update-service|aws configure|role-to-assume|id-token:\s*write/i,
     );
-    expect(text).not.toMatch(/^\s*(AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN)\s*:/m);
-    expect(text).not.toMatch(/\b(?:terraform|tofu)\s+(?:apply|destroy)\b/i);
-    expect(text).not.toMatch(/\b(?:npm|bun|pnpm|yarn)\s+publish\b/i);
+    expect(validationText).not.toMatch(/^\s*(AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN)\s*:/m);
+    expect(validationText).not.toMatch(/\b(?:terraform|tofu)\s+(?:apply|destroy)\b/i);
+    expect(validationText).not.toMatch(/\b(?:npm|bun|pnpm|yarn)\s+publish\b/i);
   });
 
   it("keeps both product CI jobs on the reviewed Bun toolchain", () => {
-    const ci = readFileSync(join(workflowDir, "ci.yml"), "utf8");
+    const ci = readWorkflow("ci.yml");
     expect(ci.match(/bun-version:\s*1\.3\.14/g)).toHaveLength(2);
     expect(ci).not.toContain("bun-version: 1.3.13");
   });
 
   it("scans the locally patched Bun base without weakening either vulnerability gate", () => {
-    const ci = readFileSync(join(workflowDir, "ci.yml"), "utf8");
+    const ci = readWorkflow("ci.yml");
     expect(ci).toContain(
       "BUN_UPSTREAM_IMAGE: oven/bun:1.3.14-alpine@sha256:5acc90a93e91ff07bf72aa90a7c9f0fa189765aec90b47bdbf2152d2196383c0",
     );
@@ -51,6 +62,158 @@ describe("repository workflow safety", () => {
     expect(ci).not.toMatch(/ignorefile|skip-files|skip-dirs|trivyignores|vex/i);
     expect(ci).toContain(
       "docker image rm -f hasna-emails-runtime-contract:ci hasna-emails-patched-bun-base:ci || true",
+    );
+
+    const workflow = readWorkflow("package-provenance.yml");
+    const tarballUrl = "https://registry.npmjs.org/@hasna/emails/-/emails-1.3.2.tgz";
+    const sourceRepository = "https://github.com/hasna/emails";
+    const sourceMergeCommit = "fe61a466a28115f33efda1ecc7632dbc7c6525c7";
+    const reviewedHeadCommit = "4330ff214f53a41de681d595d188861bb3d36e13";
+    const ciRunId = "30212897836";
+    const ciRunUrl = `https://github.com/hasna/emails/actions/runs/${ciRunId}`;
+    const sha256 = "8f5e166e73ae7aebeb49a5eeae6dd199d0be63a9931a35981373e67b9ccfe431";
+    const npmShasum = "87c933255f5e95e7db8bf30bb606e07c1132f01e";
+    const npmIntegrity =
+      "sha512-nGwS4AoZH2NwTV8Xoop2XupAubyq4bHuawYZX5itCjVwa/3U4hE6t+tBdnKZ9p72/BuUxmAL4iLEZ79eWlkCHg==";
+    const predicateType = "https://github.com/hasna/emails/attestations/npm-release-evidence/v1";
+    const attestAction = "actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6";
+
+    const triggerStart = workflow.indexOf('"on":');
+    const jobsStart = workflow.indexOf("jobs:");
+    expect(triggerStart).toBeGreaterThanOrEqual(0);
+    expect(jobsStart).toBeGreaterThan(triggerStart);
+    expect(workflow.slice(triggerStart, jobsStart)).toBe('"on":\n  workflow_dispatch:\n\n');
+    expect(workflow).not.toMatch(/^\s+inputs\s*:/m);
+
+    const jobIds = [...workflow.slice(jobsStart + "jobs:\n".length).matchAll(/^  ([A-Za-z0-9_-]+):$/gm)].map(
+      (match) => match[1],
+    );
+    expect(jobIds).toEqual(["attest-published-package"]);
+    expect(workflow.match(/if: github\.repository == 'hasna\/emails' && github\.ref == 'refs\/heads\/main'/g))
+      .toHaveLength(1);
+    expect(workflow).toContain("    runs-on: ubuntu-24.04");
+    expect(workflow).toContain("    timeout-minutes: 10");
+
+    const permissions = workflow.match(/^    permissions:\n((?:^      [a-z-]+: [a-z]+\n)+)/m)?.[1] ?? "";
+    expect(workflow.match(/^    permissions:/gm)).toHaveLength(1);
+    expect(permissions.trim().split("\n").map((line) => line.trim())).toEqual([
+      "contents: read",
+      "id-token: write",
+      "attestations: write",
+    ]);
+
+    expect([...workflow.matchAll(/^      - name: (.+)$/gm)].map((match) => match[1])).toEqual([
+      "Download and verify published tarball",
+      "Create release evidence predicate",
+      "Attest downloaded npm tarball",
+    ]);
+    const uses = [...workflow.matchAll(/^\s+uses:\s*(\S+)(?:\s+#.*)?$/gm)].map((match) => match[1]);
+    expect(uses).toEqual([attestAction]);
+    expect(workflow).not.toMatch(/actions\/checkout|secrets(?:\.|\[)|\$\{\{/i);
+
+    expect(singleQuotedReadonly(workflow, "artifact_dir")).toBe("attestation-input");
+    expect(singleQuotedReadonly(workflow, "tarball_url")).toBe(tarballUrl);
+    expect(singleQuotedReadonly(workflow, "expected_sha256")).toBe(sha256);
+    expect(singleQuotedReadonly(workflow, "expected_shasum")).toBe(npmShasum);
+    expect(singleQuotedReadonly(workflow, "expected_integrity")).toBe(npmIntegrity);
+    expect(singleQuotedReadonly(workflow, "predicate")).toBe("attestation-input/npm-release-evidence.json");
+
+    const predicateMatch = workflow.match(/cat >"\$predicate" <<'JSON'\n([\s\S]*?)\n          JSON/);
+    expect(predicateMatch, "the custom predicate heredoc must exist").not.toBeNull();
+    const predicateJson = (predicateMatch?.[1] ?? "")
+      .split("\n")
+      .map((line) => line.replace(/^          /, ""))
+      .join("\n");
+    expect(JSON.parse(predicateJson)).toEqual({
+      schemaVersion: 1,
+      kind: "npm-release-evidence",
+      package: {
+        ecosystem: "npm",
+        name: "@hasna/emails",
+        version: "1.3.2",
+        tarballUrl,
+        sha256,
+        npmShasum,
+        npmIntegrity,
+      },
+      sourceEvidence: {
+        repository: sourceRepository,
+        sourceMergeCommit,
+        reviewedHeadCommit,
+      },
+      mainCiEvidence: {
+        runId: ciRunId,
+        url: ciRunUrl,
+        workflow: ".github/workflows/ci.yml",
+        event: "push",
+        branch: "main",
+        headSha: sourceMergeCommit,
+        conclusion: "success",
+      },
+      attestationScope: {
+        evidenceType: "post-publication-association",
+        subjectOrigin: "downloaded-from-npm-registry",
+        subjectBuiltByThisWorkflow: false,
+        subjectPublishedByThisWorkflow: false,
+        statement:
+          "This workflow downloaded and digest-verified the npm tarball bytes, then attested the recorded release evidence. It did not build or publish the package.",
+      },
+    });
+
+    const requiredPredicateChecks = [
+      '.schemaVersion == 1',
+      '.kind == "npm-release-evidence"',
+      '.package.name == "@hasna/emails"',
+      '.package.version == "1.3.2"',
+      `.package.tarballUrl == "${tarballUrl}"`,
+      `.package.sha256 == "${sha256}"`,
+      `.package.npmShasum == "${npmShasum}"`,
+      `.package.npmIntegrity == "${npmIntegrity}"`,
+      `.sourceEvidence.repository == "${sourceRepository}"`,
+      `.sourceEvidence.sourceMergeCommit == "${sourceMergeCommit}"`,
+      `.sourceEvidence.reviewedHeadCommit == "${reviewedHeadCommit}"`,
+      `.mainCiEvidence.runId == "${ciRunId}"`,
+      `.mainCiEvidence.url == "${ciRunUrl}"`,
+      '.mainCiEvidence.workflow == ".github/workflows/ci.yml"',
+      '.mainCiEvidence.event == "push"',
+      '.mainCiEvidence.branch == "main"',
+      `.mainCiEvidence.headSha == "${sourceMergeCommit}"`,
+      '.mainCiEvidence.conclusion == "success"',
+      '.attestationScope.evidenceType == "post-publication-association"',
+      '.attestationScope.subjectOrigin == "downloaded-from-npm-registry"',
+      '.attestationScope.subjectBuiltByThisWorkflow == false',
+      '.attestationScope.subjectPublishedByThisWorkflow == false',
+    ];
+    for (const check of requiredPredicateChecks) expect(workflow).toContain(check);
+
+    expect(workflow).toContain(`          subject-path: attestation-input/emails-1.3.2.tgz`);
+    expect(workflow).toContain(`          predicate-type: ${predicateType}`);
+    expect(workflow).toContain("          predicate-path: attestation-input/npm-release-evidence.json");
+    expect(workflow).toContain("          push-to-registry: false");
+    expect(workflow).toContain("          create-storage-record: false");
+    expect(workflow).not.toMatch(/push-to-registry:\s*true|create-storage-record:\s*true/i);
+
+    expect(workflow.match(/\bcurl\b/g)).toHaveLength(1);
+    for (const marker of [
+      "curl --disable",
+      "--fail",
+      "--silent",
+      "--show-error",
+      "--proto '=https'",
+      "--proto-redir '=https'",
+      "--tlsv1.2",
+      "--connect-timeout 30",
+      "--max-time 300",
+      '--output "$artifact"',
+      '"$tarball_url"',
+    ]) {
+      expect(workflow).toContain(marker);
+    }
+    expect(workflow).not.toMatch(
+      /\b(?:wget|npm|bun|pnpm|yarn)\s+(?:publish|pack|view)|\b(?:gh\s+release|git\s+tag|docker\s+push|podman\s+push)|\b(?:aws|terraform|tofu|kubectl|helm)\b/i,
+    );
+    expect([...new Set([...workflow.matchAll(/https:\/\/[^"'\s]+/g)].map((match) => match[0]))].sort()).toEqual(
+      [ciRunUrl, predicateType, sourceRepository, tarballUrl].sort(),
     );
   });
 

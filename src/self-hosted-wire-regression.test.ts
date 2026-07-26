@@ -222,9 +222,9 @@ function applySelfHostedEnv(): void {
 }
 
 // `bun test` shares one process across every test file, and the harness sets
-// EMAILS_MODE=local exactly once for that process. Deleting these keys rather
+// local mode exactly once for that process. Deleting these keys rather
 // than restoring them leaves every file that runs after this one falling
-// through resolveEmailsModeSelection() to EMAILS_CLIENT_ENV_SECRET or the
+// through the mode resolver to EMAILS_CLIENT_ENV_SECRET or the
 // on-disk config, which resolves to self_hosted and fails unrelated suites.
 // Restore the values this process started with instead.
 const SELF_HOSTED_ENV_KEYS = [

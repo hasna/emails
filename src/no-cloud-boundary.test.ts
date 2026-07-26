@@ -148,6 +148,32 @@ describe("no hosted control plane", () => {
     // Allowances cover a small minority of the tree; everything else is enforced.
     const allowedCount = scanned.filter((path) => allowed.some((entry) => isSourceAllowed(entry, path))).length;
     expect(allowedCount * 2).toBeLessThan(scanned.length);
+
+    const exactBridge = [
+      "env \\",
+      "  -u MAILERY_CLOUD_API_URL \\",
+      "  -u HASNA_MAILERY_API_URL \\",
+      "  true",
+    ].join("\n");
+    for (const path of [".github/workflows/ci.yml", "scripts/run-hermetic-tests.sh"]) {
+      expect(sourceBoundaryFindings(exactBridge, path)).toEqual([]);
+      expect(sourceBoundaryFindings("echo MAILERY_CLOUD_API_URL", path)).toEqual([
+        "legacy hosted environment",
+        "hosted implementation vocabulary",
+      ]);
+      expect(sourceBoundaryFindings("env MAILERY_CLOUD_API_URL=value true", path)).toEqual([
+        "legacy hosted environment",
+        "hosted implementation vocabulary",
+      ]);
+      expect(sourceBoundaryFindings("printf '%s' 'env -u MAILERY_CLOUD_API_URL'", path)).toEqual([
+        "legacy hosted environment",
+        "hosted implementation vocabulary",
+      ]);
+    }
+    expect(sourceBoundaryFindings(exactBridge, "scripts/arbitrary.sh")).toEqual([
+      "legacy hosted environment",
+      "hosted implementation vocabulary",
+    ]);
   });
 
   it("contains no banned hosted-control-plane marker in any scanned file", () => {
