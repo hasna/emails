@@ -562,6 +562,43 @@ function terminalFailureCode(
   return null;
 }
 
+export interface AttachmentRepairReviewedDryRunProof {
+  tenantId: string;
+  runId: string;
+  resultSha256: string;
+}
+
+export type AttachmentRepairReviewedDryRunValidation =
+  | { ok: true }
+  | { ok: false; reason: "invariant_failure" | "review_mismatch" };
+
+/**
+ * Pure validation shared by the image-bundled maintenance lane and the public
+ * API apply gate. The result hash intentionally excludes tenant_id, so the
+ * explicit tenant comparison is part of the proof and must not be removed.
+ */
+export function validateAttachmentRepairReviewedDryRun(
+  run: AttachmentRepairLedgerRun | null,
+  proof: AttachmentRepairReviewedDryRunProof,
+): AttachmentRepairReviewedDryRunValidation {
+  if (!run
+    || !UUID_RE.test(proof.runId)
+    || !SHA256_RE.test(proof.resultSha256)) {
+    return { ok: false, reason: "review_mismatch" };
+  }
+  try {
+    validateRunInvariant(run, proof.tenantId);
+  } catch {
+    return { ok: false, reason: "invariant_failure" };
+  }
+  if (run.id.toLowerCase() !== proof.runId.toLowerCase()
+    || terminalFailureCode(run, "dry-run") !== null
+    || attachmentRepairRunResultSha256(run) !== proof.resultSha256) {
+    return { ok: false, reason: "review_mismatch" };
+  }
+  return { ok: true };
+}
+
 function reportFor(
   run: AttachmentRepairLedgerRun,
   options: AttachmentRepairMaintenanceOptions,
@@ -624,12 +661,17 @@ async function executeAttachmentRepairMaintenanceInner(
       if (!dryRun) {
         throw new AttachmentRepairMaintenanceError("provenance_failure");
       }
-      validateRunInvariant(dryRun, manifest.tenant_id);
-      const dryRunFailure = terminalFailureCode(dryRun, "dry-run");
-      if (dryRunFailure !== null
-        || attachmentRepairRunResultSha256(dryRun)
-          !== options.dryRunResultSha256) {
-        throw new AttachmentRepairMaintenanceError("provenance_failure");
+      const reviewedDryRun = validateAttachmentRepairReviewedDryRun(dryRun, {
+        tenantId: manifest.tenant_id,
+        runId: options.dryRunId!,
+        resultSha256: options.dryRunResultSha256!,
+      });
+      if (!reviewedDryRun.ok) {
+        throw new AttachmentRepairMaintenanceError(
+          reviewedDryRun.reason === "invariant_failure"
+            ? "invariant_failure"
+            : "provenance_failure",
+        );
       }
       let manifestDryRun: AttachmentRepairLedgerRun;
       try {
@@ -646,11 +688,20 @@ async function executeAttachmentRepairMaintenanceInner(
         }
         throw error;
       }
-      validateRunInvariant(manifestDryRun, manifest.tenant_id);
-      if (manifestDryRun.id !== dryRun.id
-        || attachmentRepairRunResultSha256(manifestDryRun)
-          !== options.dryRunResultSha256) {
-        throw new AttachmentRepairMaintenanceError("provenance_failure");
+      const replayedDryRun = validateAttachmentRepairReviewedDryRun(
+        manifestDryRun,
+        {
+          tenantId: manifest.tenant_id,
+          runId: dryRun.id,
+          resultSha256: options.dryRunResultSha256!,
+        },
+      );
+      if (!replayedDryRun.ok) {
+        throw new AttachmentRepairMaintenanceError(
+          replayedDryRun.reason === "invariant_failure"
+            ? "invariant_failure"
+            : "provenance_failure",
+        );
       }
     }
 

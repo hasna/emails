@@ -885,6 +885,20 @@ function canonicalJson(value: unknown): string {
   return JSON.stringify(value);
 }
 
+export function attachmentRepairRequestHash(
+  canonicalBucket: string,
+  normalizedEntries: readonly AttachmentRepairManifestEntry[],
+  apply: boolean,
+): string {
+  return createHash("sha256")
+    .update(canonicalJson({
+      apply,
+      canonical_bucket: canonicalBucket,
+      entries: normalizedEntries,
+    }), "utf8")
+    .digest("hex");
+}
+
 function repairBindingSnapshot(bindings: readonly InboundAttachmentRepairBinding[]): string {
   return canonicalJson([...bindings]
     .sort((left, right) => `${left.tenantId}\0${left.messageId}`.localeCompare(`${right.tenantId}\0${right.messageId}`))
@@ -2397,9 +2411,7 @@ export class TenantScopedStore {
       .update("\0", "utf8")
       .update(input.idempotencyKey, "utf8")
       .digest("hex");
-    const requestHash = createHash("sha256")
-      .update(canonicalJson({ apply, canonical_bucket: canonicalBucket, entries }), "utf8")
-      .digest("hex");
+    const requestHash = attachmentRepairRequestHash(canonicalBucket, entries, apply);
 
     return this.withAttachmentRepairLedgerLock(
       ["tenant-quota", idempotencyDigest, requestHash],
@@ -2672,6 +2684,35 @@ export class TenantScopedStore {
       );
       return mapAttachmentRepairRun(inserted);
     });
+  }
+
+  async attachmentRepairRunMatchesManifest(
+    runId: string,
+    input: {
+      canonicalBucket: string;
+      apply?: boolean;
+      entries: readonly AttachmentRepairManifestEntry[];
+    },
+  ): Promise<boolean> {
+    const canonicalBucket = input.canonicalBucket.trim();
+    if (!canonicalBucket) {
+      throw new RangeError("attachment repair requires the deployment canonical bucket");
+    }
+    const entries = normalizeAttachmentRepairManifestEntries(input.entries);
+    const apply = input.apply === true;
+    const requestHash = attachmentRepairRequestHash(canonicalBucket, entries, apply);
+    const row = await this.client.get<{ matches: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1
+         FROM attachment_repair_runs
+         WHERE tenant_id = $1::uuid
+           AND id = $2::uuid
+           AND request_hash = $3
+           AND apply = $4
+       ) AS matches`,
+      [this.tenantId, runId, requestHash, apply],
+    );
+    return row?.matches === true;
   }
 
   async getAttachmentRepairRun(runId: string): Promise<AttachmentRepairLedgerRun | null> {

@@ -434,6 +434,63 @@ const attachmentRepairManifestEntrySchema = {
   required: ["object_key", "recipients", "canary_message_ids"],
 } as const;
 
+const attachmentRepairRequestCommonProperties = {
+  idempotency_key: { type: "string", minLength: 1, maxLength: 200 },
+  limit: {
+    type: "integer",
+    minimum: 1,
+    maximum: 25,
+    default: 25,
+    description: "Maximum manifest entries processed and checkpointed in this request.",
+  },
+  entries: {
+    type: "array",
+    minItems: 1,
+    maxItems: 200,
+    items: attachmentRepairManifestEntrySchema,
+  },
+} as const;
+
+const attachmentRepairDryRunRequestSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    ...attachmentRepairRequestCommonProperties,
+    apply: { type: "boolean", enum: [false], default: false },
+  },
+  required: ["idempotency_key", "entries"],
+} as const;
+
+const attachmentRepairApplyRequestSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    ...attachmentRepairRequestCommonProperties,
+    apply: { type: "boolean", enum: [true] },
+    reviewed_dry_run_id: {
+      type: "string",
+      format: "uuid",
+      description:
+        "Exact completed dry-run ledger id reviewed for this tenant and manifest.",
+    },
+    reviewed_dry_run_result_sha256: {
+      type: "string",
+      minLength: 64,
+      maxLength: 64,
+      pattern: "^[0-9a-f]{64}$",
+      description:
+        "Lowercase SHA-256 of the recursively key-sorted canonical JSON for the reviewed public AttachmentRepairSummary.",
+    },
+  },
+  required: [
+    "idempotency_key",
+    "apply",
+    "entries",
+    "reviewed_dry_run_id",
+    "reviewed_dry_run_result_sha256",
+  ],
+} as const;
+
 const attachmentRepairSummarySchema = {
   type: "object",
   additionalProperties: false,
@@ -1759,32 +1816,16 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
         summary:
           "Create an idempotent bounded legacy attachment-repair manifest and process one checkpointed page.",
         description:
-          "Requires a tenant owner or admin session, or an operator API key with emails:* scope. Dry-run is the default. The canonical S3 bucket is deployment-owned and cannot be supplied here. At manifest creation every exact canary must resolve in the authenticated tenant to the declared canonical object and have a non-empty repairable attachment inventory. This endpoint never lists a bucket and never returns source keys, recipients, or payload bytes.",
+          "Requires a tenant owner or admin session, or an operator API key with emails:* scope. Dry-run is the default and rejects apply-proof fields. apply:true requires the exact reviewed dry-run id and its lowercase canonical result SHA-256. Before an apply ledger is created, the service proves that tenant-scoped dry run is completed with zero pending, retrying, unavailable, or operator-action item and entry totals, then checks the exact current manifest and deployment-owned canonical bucket against the reviewed dry-run ledger without creating or replaying a dry-run ledger. Review mismatches return a generic non-leaking 409 and never create or process an apply run. At manifest creation every exact canary must resolve in the authenticated tenant to the declared canonical object and have a non-empty repairable attachment inventory. This endpoint never lists a bucket and never returns source keys, recipients, or payload bytes.",
         requestBody: {
           required: true,
           content: {
             "application/json": {
               schema: {
-                type: "object",
-                additionalProperties: false,
-                properties: {
-                  idempotency_key: { type: "string", minLength: 1, maxLength: 200 },
-                  apply: { type: "boolean", default: false },
-                  limit: {
-                    type: "integer",
-                    minimum: 1,
-                    maximum: 25,
-                    default: 25,
-                    description: "Maximum manifest entries processed and checkpointed in this request.",
-                  },
-                  entries: {
-                    type: "array",
-                    minItems: 1,
-                    maxItems: 200,
-                    items: attachmentRepairManifestEntrySchema,
-                  },
-                },
-                required: ["idempotency_key", "entries"],
+                oneOf: [
+                  attachmentRepairDryRunRequestSchema,
+                  attachmentRepairApplyRequestSchema,
+                ],
               },
             },
           },
@@ -1807,7 +1848,7 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
           },
           "400": {
             description:
-              "Malformed, empty, duplicate, or over-limit manifest, invalid page limit, or unsupported top-level request fields",
+              "Malformed, empty, duplicate, or over-limit manifest, invalid page limit, malformed or ambiguous reviewed dry-run proof, or unsupported top-level request fields",
             content: {
               "application/json": {
                 schema: {
@@ -1823,6 +1864,7 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
                         "invalid_repair_manifest",
                         "invalid_repair_limit",
                         "invalid_repair_body",
+                        "invalid_repair_review",
                       ],
                     },
                   },
@@ -1833,7 +1875,29 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
           },
           "401": { description: "Authentication required" },
           "403": { description: "Tenant operator authorization is required" },
-          "409": { description: "Idempotency key already belongs to a different immutable manifest" },
+          "409": {
+            description:
+              "The idempotency key belongs to another immutable manifest, or the reviewed dry-run proof does not exactly match this tenant and current manifest",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  additionalProperties: false,
+                  properties: {
+                    error: { type: "string" },
+                    code: {
+                      type: "string",
+                      enum: [
+                        "attachment_repair_idempotency_conflict",
+                        "attachment_repair_review_mismatch",
+                      ],
+                    },
+                  },
+                  required: ["error", "code"],
+                },
+              },
+            },
+          },
           "429": {
             description: "The tenant's active or durable repair-ledger quota is exhausted",
             content: {
@@ -2058,7 +2122,7 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
           id: { type: "string" },
           send_state: {
             type: "string",
-            enum: ["none", "pending", "blocked", "cancelled", "sending", "sent", "uncertain"],
+            enum: ["none", "pending", "blocked", "cancelled", "sending", "sent", "failed", "uncertain"],
           },
         },
         required: ["id", "send_state"],

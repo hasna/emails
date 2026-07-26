@@ -437,8 +437,30 @@ inventory counters `repaired`, `would_repair`, `unavailable`, `pending`, and
 `retrying`, plus the matching `entry_*` counters, `attempts`, and `checkpoint`.
 `retrying` is the transient subset of `pending`; terminally invalid or
 unrepairable rows become `unavailable`. A malformed repair UUID returns HTTP
-`400` with code `invalid_attachment_repair_id`. Review a completed dry run and
-its exact canary manifest before creating an `apply: true` repair.
+`400` with code `invalid_attachment_repair_id`.
+
+An apply is fail-closed and must prove the exact reviewed dry run for the same
+tenant and current manifest:
+
+1. Create the dry run with a stable `idempotency_key`, omit `apply`, and do not
+   send any `reviewed_dry_run_*` fields.
+2. Resume/read it until `status` is `completed` and both item and entry totals
+   have zero `pending`, `retrying`, `unavailable`, and `operator_action`.
+3. Review the returned public `repair` summary and compute its lowercase
+   SHA-256 using recursively key-sorted canonical JSON (object keys sorted,
+   array order preserved). This is the same
+   `attachmentRepairRunResultSha256` calculation enforced by the service.
+4. Submit the same exact `entries` with a separate apply `idempotency_key`,
+   `apply: true`, and the two proof fields `reviewed_dry_run_id` and
+   `reviewed_dry_run_result_sha256`.
+
+Before creating the apply ledger, the service tenant-scopes the reviewed ID,
+checks the completed zero-failure result and hash, then recreates or looks up
+the reviewed dry run using the deployment-owned canonical bucket, the exact
+current entries, and `apply: false`. This manifest check is read-only and does
+not create an alias or consume repair quota. Any wrong tenant, ID, manifest,
+hash, or unfinished/failed result returns the same non-leaking HTTP `409`
+`attachment_repair_review_mismatch`; no apply run is created or processed.
 
 ### Recipient routing trust boundary
 

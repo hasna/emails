@@ -19,7 +19,7 @@ export interface MessageListItem { "id": string; "direction": string; "from_addr
 
 export interface Message { "id": string; "direction": string; "from_addr": string; "to_addrs": Array<string>; "cc_addrs"?: Array<string>; "subject"?: string | null; "body_text"?: string | null; "body_html"?: string | null; "status": string; "provider_message_id"?: string | null; "message_id"?: string | null; "in_reply_to"?: string | null; "received_at"?: string | null; "is_read"?: boolean; "is_starred"?: boolean; "labels"?: Array<string>; "headers"?: Record<string, unknown>; "attachments"?: Array<Record<string, unknown>>; "source_id"?: string | null; "send_state"?: string; "send_started_at"?: string | null; "created_at": string; "updated_at": string }
 
-export interface SendIntentMessage { "id": string; "send_state": "none" | "pending" | "blocked" | "cancelled" | "sending" | "sent" | "uncertain" }
+export interface SendIntentMessage { "id": string; "send_state": "none" | "pending" | "blocked" | "cancelled" | "sending" | "sent" | "failed" | "uncertain" }
 
 export interface SendIntentLookup { "found": boolean; "tombstoned": boolean; "reconciliation_required": boolean; "message": SendIntentMessage | null }
 
@@ -314,7 +314,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Create an idempotent bounded legacy attachment-repair manifest and process one checkpointed page. */
-    async createOrResumeAttachmentRepair(body: { "idempotency_key": string; "apply"?: boolean; "limit"?: number; "entries": Array<{ "object_key": string; "recipients": Array<string>; "canary_message_ids": Array<string> }> }, init?: RequestInit): Promise<{ "repair": AttachmentRepairSummary; "max_page_size": 25 }> {
+    async createOrResumeAttachmentRepair(body: { "idempotency_key": string; "limit"?: number; "entries": Array<{ "object_key": string; "recipients": Array<string>; "canary_message_ids": Array<string> }>; "apply"?: false } | { "idempotency_key": string; "limit"?: number; "entries": Array<{ "object_key": string; "recipients": Array<string>; "canary_message_ids": Array<string> }>; "apply": true; "reviewed_dry_run_id": string; "reviewed_dry_run_result_sha256": string }, init?: RequestInit): Promise<{ "repair": AttachmentRepairSummary; "max_page_size": 25 }> {
       return this.request("POST", `/v1/attachments/repairs`, {
         body,
         query: undefined,

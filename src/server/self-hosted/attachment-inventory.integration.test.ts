@@ -771,6 +771,79 @@ describe.skipIf(!pgClient)("checkpointed legacy attachment repair ledger", () =>
     expect(names).toContain("attachment_repair_idempotency_keys_run_id_idx");
   });
 
+  it("matches an exact repair manifest without mutating runs or idempotency aliases", async () => {
+    const deps = makeDeps();
+    const canonicalBucket = "repair-manifest-match";
+    const tenantA = await makeTenant("repair-manifest-match-a");
+    const tenantB = await makeTenant("repair-manifest-match-b");
+    const storeA = deps.store.forTenant(tenantA.tenantId);
+    const storeB = deps.store.forTenant(tenantB.tenantId);
+    const message = await makeRepairableInboundMessage(
+      deps,
+      tenantA,
+      canonicalBucket,
+      "manifest-match",
+    );
+    const entries = [{
+      object_key: message.objectKey,
+      recipients: ["one@example.test"],
+      canary_message_ids: [message.messageId],
+    }];
+    const run = await storeA.createOrGetAttachmentRepairRun({
+      idempotencyKey: "repair-manifest-match-key",
+      canonicalBucket,
+      apply: false,
+      entries,
+    });
+    const counts = async (tenantId: string) => pgClient!.one<{
+      run_count: number;
+      alias_count: number;
+    }>(
+      `SELECT
+         (SELECT count(*)::int
+          FROM attachment_repair_runs
+          WHERE tenant_id = $1::uuid) AS run_count,
+         (SELECT count(*)::int
+          FROM attachment_repair_idempotency_keys
+          WHERE tenant_id = $1::uuid) AS alias_count`,
+      [tenantId],
+    );
+    const beforeA = await counts(tenantA.tenantId);
+    const beforeB = await counts(tenantB.tenantId);
+
+    expect(await storeA.attachmentRepairRunMatchesManifest(run.id, {
+      canonicalBucket,
+      apply: false,
+      entries,
+    })).toBe(true);
+    expect(await storeA.attachmentRepairRunMatchesManifest(run.id, {
+      canonicalBucket,
+      apply: false,
+      entries: [{
+        ...entries[0]!,
+        recipients: ["different@example.test"],
+      }],
+    })).toBe(false);
+    expect(await storeA.attachmentRepairRunMatchesManifest(run.id, {
+      canonicalBucket: `${canonicalBucket}-different`,
+      apply: false,
+      entries,
+    })).toBe(false);
+    expect(await storeA.attachmentRepairRunMatchesManifest(run.id, {
+      canonicalBucket,
+      apply: true,
+      entries,
+    })).toBe(false);
+    expect(await storeB.attachmentRepairRunMatchesManifest(run.id, {
+      canonicalBucket,
+      apply: false,
+      entries,
+    })).toBe(false);
+
+    expect(await counts(tenantA.tenantId)).toEqual(beforeA);
+    expect(await counts(tenantB.tenantId)).toEqual(beforeB);
+  });
+
   it("binds alternate idempotency keys to an existing request and rejects conflicting manifests", async () => {
     const deps = makeDeps();
     const canonicalBucket = "repair-alias-binds";

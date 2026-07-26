@@ -40,6 +40,7 @@ import {
   type AttachmentRepairLedgerRun,
   type AttachmentRepairManifestEntry,
 } from "./attachment-repair.js";
+import { validateAttachmentRepairReviewedDryRun } from "./attachment-repair-maintenance.js";
 import { emailsSelfHostedOpenApi } from "./openapi.js";
 import { resourceSpecForPath } from "./resources.js";
 import { classifyProviderSendError, type SelfHostedSender } from "./sender.js";
@@ -247,9 +248,22 @@ function parseAttachmentRepairId(
   } catch {
     return { ok: false };
   }
-  return /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(decoded)
+  return ATTACHMENT_REPAIR_UUID_RE.test(decoded)
     ? { ok: true, value: decoded.toLowerCase() }
     : { ok: false };
+}
+
+const ATTACHMENT_REPAIR_UUID_RE =
+  /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
+const ATTACHMENT_REPAIR_REVIEW_SHA256_RE = /^[0-9a-f]{64}$/;
+const ATTACHMENT_REPAIR_REVIEW_FIELDS = [
+  "reviewed_dry_run_id",
+  "reviewed_dry_run_result_sha256",
+] as const;
+
+interface AttachmentRepairReviewProof {
+  runId: string;
+  resultSha256: string;
 }
 
 function invalidAttachmentRepairIdResponse(): Response {
@@ -257,6 +271,54 @@ function invalidAttachmentRepairIdResponse(): Response {
     error: "attachment repair id must be a UUID",
     code: "invalid_attachment_repair_id",
   });
+}
+
+function invalidAttachmentRepairReviewResponse(): Response {
+  return json(400, {
+    error: "attachment repair reviewed dry-run proof is invalid",
+    code: "invalid_repair_review",
+  });
+}
+
+function attachmentRepairReviewMismatchResponse(): Response {
+  return json(409, {
+    error: "attachment repair reviewed dry-run proof does not match",
+    code: "attachment_repair_review_mismatch",
+  });
+}
+
+function parseAttachmentRepairReviewProof(
+  body: Record<string, unknown>,
+  apply: boolean,
+):
+  | { ok: true; proof?: AttachmentRepairReviewProof }
+  | { ok: false; response: Response } {
+  const present = ATTACHMENT_REPAIR_REVIEW_FIELDS.filter(
+    (field) => Object.prototype.hasOwnProperty.call(body, field),
+  );
+  if (!apply) {
+    return present.length === 0
+      ? { ok: true }
+      : { ok: false, response: invalidAttachmentRepairReviewResponse() };
+  }
+  if (present.length !== ATTACHMENT_REPAIR_REVIEW_FIELDS.length) {
+    return { ok: false, response: invalidAttachmentRepairReviewResponse() };
+  }
+  const rawRunId = body.reviewed_dry_run_id;
+  const resultSha256 = body.reviewed_dry_run_result_sha256;
+  if (typeof rawRunId !== "string"
+    || !ATTACHMENT_REPAIR_UUID_RE.test(rawRunId)
+    || typeof resultSha256 !== "string"
+    || !ATTACHMENT_REPAIR_REVIEW_SHA256_RE.test(resultSha256)) {
+    return { ok: false, response: invalidAttachmentRepairReviewResponse() };
+  }
+  return {
+    ok: true,
+    proof: {
+      runId: rawRunId.toLowerCase(),
+      resultSha256,
+    },
+  };
 }
 
 function attachmentRepairNotConfiguredResponse(): Response {
@@ -1439,7 +1501,13 @@ export async function handleSelfHostedRequest(
       const body = await readJsonBody(req);
       const unsupported = unsupportedRequestFields(
         body,
-        ["idempotency_key", "apply", "limit", "entries"],
+        [
+          "idempotency_key",
+          "apply",
+          "limit",
+          "entries",
+          ...ATTACHMENT_REPAIR_REVIEW_FIELDS,
+        ],
       );
       if (unsupported.length > 0) {
         return json(400, {
@@ -1452,6 +1520,9 @@ export async function handleSelfHostedRequest(
       if (body.apply !== undefined && typeof body.apply !== "boolean") {
         return json(400, { error: "apply must be a boolean", code: "invalid_apply" });
       }
+      const apply = body.apply === true;
+      const reviewedProof = parseAttachmentRepairReviewProof(body, apply);
+      if (!reviewedProof.ok) return reviewedProof.response;
       if (!Array.isArray(body.entries)) {
         return json(400, { error: "entries must be an array", code: "invalid_repair_manifest" });
       }
@@ -1482,10 +1553,34 @@ export async function handleSelfHostedRequest(
         if (!canonicalBucket) {
           return attachmentRepairNotConfiguredResponse();
         }
+        if (reviewedProof.proof) {
+          const proof = reviewedProof.proof;
+          const reviewedRun = await auth.store.getAttachmentRepairRun(
+            proof.runId,
+          );
+          const reviewed = validateAttachmentRepairReviewedDryRun(
+            reviewedRun,
+            {
+              tenantId: auth.ctx.tenantId,
+              runId: proof.runId,
+              resultSha256: proof.resultSha256,
+            },
+          );
+          if (!reviewed.ok) return attachmentRepairReviewMismatchResponse();
+          const matches = await auth.store.attachmentRepairRunMatchesManifest(
+            proof.runId,
+            {
+              canonicalBucket,
+              apply: false,
+              entries,
+            },
+          );
+          if (!matches) return attachmentRepairReviewMismatchResponse();
+        }
         const run = await auth.store.createOrGetAttachmentRepairRun({
           idempotencyKey: key.value,
           canonicalBucket,
-          apply: body.apply === true,
+          apply,
           entries,
         });
         const updated = await processAttachmentRepairRun(

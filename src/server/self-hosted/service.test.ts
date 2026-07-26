@@ -2,10 +2,13 @@ import { describe, expect, test } from "bun:test";
 import { mintApiKey, verifyApiKey } from "@hasna/contracts/auth";
 import type { TypedQueryClient } from "../../storage-kit/index.js";
 import {
+  AttachmentRepairIdempotencyConflictError,
   AttachmentRepairQuotaExceededError,
   EmailsSelfHostedStore,
   encodeMessagesCursor,
+  type AttachmentRepairLedgerRun,
 } from "./store.js";
+import { attachmentRepairRunResultSha256 } from "./attachment-repair-maintenance.js";
 import { handleSelfHostedRequest, type SelfHostedServiceDeps } from "./service.js";
 import { testAuthDeps, selfScopedStore } from "./auth/test-support.js";
 import { emailsSelfHostedMigrations } from "./migrations.js";
@@ -91,6 +94,50 @@ function req(method: string, path: string, opts: { token?: string; body?: unknow
     headers,
     ...(opts.body !== undefined ? { body: JSON.stringify(opts.body) } : {}),
   });
+}
+
+const TEST_TENANT_ID = "00000000-0000-0000-0000-000000000001";
+const REVIEWED_DRY_RUN_ID = "22222222-2222-4222-8222-222222222222";
+const APPLY_REPAIR_RUN_ID = "33333333-3333-4333-8333-333333333333";
+const ATTACHMENT_REPAIR_ENTRIES = [{
+  object_key: "source/reviewed-one",
+  recipients: ["reviewed@example.test"],
+  canary_message_ids: ["reviewed-message-1"],
+}] as const;
+
+function attachmentRepairRun(
+  overrides: Partial<AttachmentRepairLedgerRun> = {},
+): AttachmentRepairLedgerRun {
+  return {
+    id: REVIEWED_DRY_RUN_ID,
+    tenant_id: TEST_TENANT_ID,
+    apply: false,
+    status: "completed",
+    entry_total: 1,
+    inventory_total: 1,
+    repaired: 0,
+    would_repair: 1,
+    unavailable: 0,
+    operator_action: 0,
+    pending: 0,
+    retrying: 0,
+    entry_repaired: 0,
+    entry_would_repair: 1,
+    entry_unavailable: 0,
+    entry_operator_action: 0,
+    entry_pending: 0,
+    entry_retrying: 0,
+    attempts: 1,
+    checkpoint: 1,
+    byte_budget: 1024,
+    bytes_consumed: 512,
+    time_budget_ms: 60_000,
+    deadline_at: "2026-07-24T00:01:00.000Z",
+    created_at: "2026-07-24T00:00:00.000Z",
+    updated_at: "2026-07-24T00:00:01.000Z",
+    completed_at: "2026-07-24T00:00:01.000Z",
+    ...overrides,
+  };
 }
 
 describe("Emails self-hosted service", () => {
@@ -339,6 +386,401 @@ describe("Emails self-hosted service", () => {
     }));
     expect(resume?.status).toBe(200);
     expect(calls.at(-1)).toEqual(["process", true, repairRunId, 1]);
+  });
+
+  test("attachment repair apply requires a complete well-formed review proof and dry-runs reject proof fields", async () => {
+    const token = mintApiKey({
+      app: "emails",
+      scopes: ["emails:*"],
+      signingSecret: SIGNING_SECRET,
+    }).token;
+    const validHash = attachmentRepairRunResultSha256(attachmentRepairRun());
+    const scenarios = [
+      {
+        name: "missing proof",
+        review: {},
+      },
+      {
+        name: "partial proof",
+        review: { reviewed_dry_run_id: REVIEWED_DRY_RUN_ID },
+      },
+      {
+        name: "proof id only",
+        review: {
+          reviewed_dry_run_id: REVIEWED_DRY_RUN_ID,
+        },
+      },
+      {
+        name: "proof hash only",
+        review: {
+          reviewed_dry_run_result_sha256: validHash,
+        },
+      },
+      {
+        name: "malformed id",
+        review: {
+          reviewed_dry_run_id: "not-a-uuid",
+          reviewed_dry_run_result_sha256: validHash,
+        },
+      },
+      {
+        name: "malformed hash",
+        review: {
+          reviewed_dry_run_id: REVIEWED_DRY_RUN_ID,
+          reviewed_dry_run_result_sha256: "A".repeat(64),
+        },
+      },
+      {
+        name: "proof on dry-run",
+        apply: false,
+        review: {
+          reviewed_dry_run_id: REVIEWED_DRY_RUN_ID,
+          reviewed_dry_run_result_sha256: validHash,
+        },
+      },
+      {
+        name: "hash proof on dry-run",
+        apply: false,
+        review: {
+          reviewed_dry_run_result_sha256: validHash,
+        },
+      },
+    ] as const;
+
+    for (const [index, scenario] of scenarios.entries()) {
+      const d = deps();
+      let reads = 0;
+      let matches = 0;
+      let creates = 0;
+      let processes = 0;
+      (d.store as any).getAttachmentRepairRun = async () => {
+        reads++;
+        throw new Error("review lookup must not start");
+      };
+      (d.store as any).attachmentRepairRunMatchesManifest = async () => {
+        matches++;
+        throw new Error("manifest match must not start");
+      };
+      (d.store as any).createOrGetAttachmentRepairRun = async () => {
+        creates++;
+        throw new Error("repair ledger must not be created");
+      };
+      d.attachmentRepair = {
+        processPage: async () => {
+          processes++;
+          throw new Error("repair processing must not start");
+        },
+      };
+
+      const response = await handleSelfHostedRequest(
+        d,
+        req("POST", "/v1/attachments/repairs", {
+          token,
+          body: {
+            idempotency_key: `apply-proof-${index}`,
+            apply: scenario.apply ?? true,
+            entries: ATTACHMENT_REPAIR_ENTRIES,
+            ...scenario.review,
+          },
+        }),
+      );
+
+      expect(response?.status, scenario.name).toBe(400);
+      const body = await response!.json();
+      expect(body, scenario.name).toEqual({
+        error: "attachment repair reviewed dry-run proof is invalid",
+        code: "invalid_repair_review",
+      });
+      expect(JSON.stringify(body), scenario.name).not.toContain("source/reviewed-one");
+      expect(reads, scenario.name).toBe(0);
+      expect(matches, scenario.name).toBe(0);
+      expect(creates, scenario.name).toBe(0);
+      expect(processes, scenario.name).toBe(0);
+    }
+  });
+
+  test("attachment repair apply rejects wrong, cross-tenant, unfinished, and failed reviewed runs without mutation", async () => {
+    const token = mintApiKey({
+      app: "emails",
+      scopes: ["emails:*"],
+      signingSecret: SIGNING_SECRET,
+    }).token;
+    const completed = attachmentRepairRun();
+    const unfinished = attachmentRepairRun({
+      status: "pending",
+      would_repair: 0,
+      pending: 1,
+      retrying: 1,
+      entry_would_repair: 0,
+      entry_pending: 1,
+      entry_retrying: 1,
+      checkpoint: 0,
+      completed_at: null,
+    });
+    const failed = attachmentRepairRun({
+      would_repair: 0,
+      unavailable: 1,
+      operator_action: 1,
+      entry_would_repair: 0,
+      entry_unavailable: 1,
+      entry_operator_action: 1,
+    });
+    const crossTenant = attachmentRepairRun({
+      tenant_id: "99999999-9999-4999-8999-999999999999",
+    });
+    const scenarios = [
+      {
+        name: "wrong id",
+        reviewedId: "44444444-4444-4444-8444-444444444444",
+        run: null,
+        hash: attachmentRepairRunResultSha256(completed),
+      },
+      {
+        name: "wrong hash",
+        reviewedId: REVIEWED_DRY_RUN_ID,
+        run: completed,
+        hash: "c".repeat(64),
+      },
+      {
+        name: "cross tenant",
+        reviewedId: REVIEWED_DRY_RUN_ID,
+        run: crossTenant,
+        hash: attachmentRepairRunResultSha256(crossTenant),
+      },
+      {
+        name: "unfinished",
+        reviewedId: REVIEWED_DRY_RUN_ID,
+        run: unfinished,
+        hash: attachmentRepairRunResultSha256(unfinished),
+      },
+      {
+        name: "failed",
+        reviewedId: REVIEWED_DRY_RUN_ID,
+        run: failed,
+        hash: attachmentRepairRunResultSha256(failed),
+      },
+    ] as const;
+
+    for (const [index, scenario] of scenarios.entries()) {
+      const d = deps();
+      const reads: string[] = [];
+      let matches = 0;
+      let creates = 0;
+      let processes = 0;
+      (d.store as any).getAttachmentRepairRun = async (id: string) => {
+        reads.push(id);
+        return scenario.run;
+      };
+      (d.store as any).attachmentRepairRunMatchesManifest = async () => {
+        matches++;
+        throw new Error("manifest match must not start");
+      };
+      (d.store as any).createOrGetAttachmentRepairRun = async () => {
+        creates++;
+        throw new Error("apply ledger must not be created");
+      };
+      d.attachmentRepair = {
+        processPage: async () => {
+          processes++;
+          throw new Error("apply processing must not start");
+        },
+      };
+
+      const response = await handleSelfHostedRequest(
+        d,
+        req("POST", "/v1/attachments/repairs", {
+          token,
+          body: {
+            idempotency_key: `review-mismatch-${index}`,
+            apply: true,
+            entries: ATTACHMENT_REPAIR_ENTRIES,
+            reviewed_dry_run_id: scenario.reviewedId,
+            reviewed_dry_run_result_sha256: scenario.hash,
+          },
+        }),
+      );
+
+      expect(response?.status, scenario.name).toBe(409);
+      expect(await response!.json(), scenario.name).toEqual({
+        error: "attachment repair reviewed dry-run proof does not match",
+        code: "attachment_repair_review_mismatch",
+      });
+      expect(reads, scenario.name).toEqual([scenario.reviewedId]);
+      expect(matches, scenario.name).toBe(0);
+      expect(creates, scenario.name).toBe(0);
+      expect(processes, scenario.name).toBe(0);
+    }
+  });
+
+  test("attachment repair apply rejects a current manifest that does not exactly match the reviewed run without mutation", async () => {
+    const token = mintApiKey({
+      app: "emails",
+      scopes: ["emails:*"],
+      signingSecret: SIGNING_SECRET,
+    }).token;
+    const reviewed = attachmentRepairRun();
+    const reviewedHash = attachmentRepairRunResultSha256(reviewed);
+    const entries = [{
+      object_key: "source/different",
+      recipients: ["different@example.test"],
+      canary_message_ids: ["different-message-1"],
+    }];
+    const d = deps();
+    const calls: unknown[] = [];
+    let creates = 0;
+    let processes = 0;
+    (d.store as any).getAttachmentRepairRun = async (id: string) => {
+      calls.push(["get", id]);
+      return reviewed;
+    };
+    (d.store as any).attachmentRepairRunMatchesManifest = async (
+      id: string,
+      input: Record<string, unknown>,
+    ) => {
+      calls.push(["matches", id, input]);
+      return false;
+    };
+    (d.store as any).createOrGetAttachmentRepairRun = async () => {
+      creates++;
+      throw new Error("apply ledger must not be created");
+    };
+    d.attachmentRepair = {
+      processPage: async () => {
+        processes++;
+        throw new Error("apply processing must not start");
+      },
+    };
+
+    const response = await handleSelfHostedRequest(
+      d,
+      req("POST", "/v1/attachments/repairs", {
+        token,
+        body: {
+          idempotency_key: "review-manifest-mismatch",
+          apply: true,
+          entries,
+          reviewed_dry_run_id: REVIEWED_DRY_RUN_ID,
+          reviewed_dry_run_result_sha256: reviewedHash,
+        },
+      }),
+    );
+
+    expect(response?.status).toBe(409);
+    const body = await response!.json();
+    expect(body).toEqual({
+      error: "attachment repair reviewed dry-run proof does not match",
+      code: "attachment_repair_review_mismatch",
+    });
+    expect(JSON.stringify(body)).not.toContain("source/");
+    expect(calls).toEqual([
+      ["get", REVIEWED_DRY_RUN_ID],
+      ["matches", REVIEWED_DRY_RUN_ID, {
+        canonicalBucket: "canonical-test-ingest",
+        apply: false,
+        entries,
+      }],
+    ]);
+    expect(creates).toBe(0);
+    expect(processes).toBe(0);
+  });
+
+  test("attachment repair apply proves the exact reviewed manifest before creating and processing the apply ledger", async () => {
+    const d = deps();
+    const token = mintApiKey({
+      app: "emails",
+      scopes: ["emails:*"],
+      signingSecret: SIGNING_SECRET,
+    }).token;
+    const reviewed = attachmentRepairRun();
+    const reviewedHash = attachmentRepairRunResultSha256(reviewed);
+    const applyPending = attachmentRepairRun({
+      id: APPLY_REPAIR_RUN_ID,
+      apply: true,
+      status: "pending",
+      would_repair: 0,
+      pending: 1,
+      entry_would_repair: 0,
+      entry_pending: 1,
+      attempts: 0,
+      checkpoint: 0,
+      bytes_consumed: 0,
+      completed_at: null,
+    });
+    const applyCompleted = attachmentRepairRun({
+      id: APPLY_REPAIR_RUN_ID,
+      apply: true,
+      repaired: 1,
+      would_repair: 0,
+      entry_repaired: 1,
+      entry_would_repair: 0,
+    });
+    const calls: unknown[] = [];
+    (d.store as any).getAttachmentRepairRun = async (id: string) => {
+      calls.push(["get", id]);
+      return reviewed;
+    };
+    (d.store as any).attachmentRepairRunMatchesManifest = async (
+      id: string,
+      input: Record<string, unknown>,
+    ) => {
+      calls.push(["matches", id, input]);
+      return true;
+    };
+    (d.store as any).createOrGetAttachmentRepairRun = async (
+      input: Record<string, unknown>,
+    ) => {
+      calls.push(["create", input]);
+      return input["apply"] === true ? applyPending : reviewed;
+    };
+    d.attachmentRepair = {
+      processPage: async (_store, runId, limit) => {
+        calls.push(["process", runId, limit]);
+        return applyCompleted;
+      },
+    };
+
+    const response = await handleSelfHostedRequest(
+      d,
+      req("POST", "/v1/attachments/repairs", {
+        token,
+        body: {
+          idempotency_key: "apply-reviewed-run",
+          apply: true,
+          limit: 1,
+          entries: ATTACHMENT_REPAIR_ENTRIES,
+          reviewed_dry_run_id: REVIEWED_DRY_RUN_ID,
+          reviewed_dry_run_result_sha256: reviewedHash,
+        },
+      }),
+    );
+
+    expect(response?.status).toBe(201);
+    expect(calls).toEqual([
+      ["get", REVIEWED_DRY_RUN_ID],
+      ["matches", REVIEWED_DRY_RUN_ID, {
+        canonicalBucket: "canonical-test-ingest",
+        apply: false,
+        entries: ATTACHMENT_REPAIR_ENTRIES,
+      }],
+      ["create", {
+        idempotencyKey: "apply-reviewed-run",
+        canonicalBucket: "canonical-test-ingest",
+        apply: true,
+        entries: ATTACHMENT_REPAIR_ENTRIES,
+      }],
+      ["process", APPLY_REPAIR_RUN_ID, 1],
+    ]);
+    const body = await response!.json();
+    expect(body.repair).toMatchObject({
+      id: APPLY_REPAIR_RUN_ID,
+      apply: true,
+      status: "completed",
+      repaired: 1,
+    });
+    expect(body.repair).not.toHaveProperty("tenant_id");
+    expect(JSON.stringify(body)).not.toContain("source/reviewed-one");
+    expect(JSON.stringify(body)).not.toContain("reviewed@example.test");
+    expect(JSON.stringify(body)).not.toContain("reviewed-message-1");
   });
 
   test("attachment repair is operator-only while owner/admin sessions and wildcard automation remain authorized", async () => {

@@ -117,8 +117,46 @@ describe("generated self-hosted SDK identity contract", () => {
   it("generates the bounded recovery-visible send-state union", () => {
     const generated = readFileSync(new URL("./selfhost.ts", import.meta.url), "utf8");
     expect(generated).toContain(
-      `export interface SendIntentMessage { "id": string; "send_state": "none" | "pending" | "blocked" | "cancelled" | "sending" | "sent" | "uncertain" }`,
+      `export interface SendIntentMessage { "id": string; "send_state": "none" | "pending" | "blocked" | "cancelled" | "sending" | "sent" | "failed" | "uncertain" }`,
     );
+  });
+
+  it("generates and sends the discriminated reviewed dry-run proof for attachment repair apply", async () => {
+    let request: Request | null = null;
+    const client = new EmailsSelfHostClient({
+      baseUrl: "https://emails.example.test",
+      apiKey: "api-key-placeholder",
+      fetch: okFetch((value) => { request = value; }),
+    });
+    const generated = readFileSync(new URL("./selfhost.ts", import.meta.url), "utf8");
+    expect(generated).toContain(`"apply"?: false`);
+    expect(generated).toContain(`"apply": true`);
+    expect(generated).toContain(`"reviewed_dry_run_id": string`);
+    expect(generated).toContain(`"reviewed_dry_run_result_sha256": string`);
+
+    await client.createOrResumeAttachmentRepair({
+      idempotency_key: "apply-key",
+      apply: true,
+      entries: [{
+        object_key: "source/one",
+        recipients: ["recipient@example.test"],
+        canary_message_ids: ["message-1"],
+      }],
+      reviewed_dry_run_id: "22222222-2222-4222-8222-222222222222",
+      reviewed_dry_run_result_sha256: "a".repeat(64),
+    });
+
+    expect(await request?.json()).toEqual({
+      idempotency_key: "apply-key",
+      apply: true,
+      entries: [{
+        object_key: "source/one",
+        recipients: ["recipient@example.test"],
+        canary_message_ids: ["message-1"],
+      }],
+      reviewed_dry_run_id: "22222222-2222-4222-8222-222222222222",
+      reviewed_dry_run_result_sha256: "a".repeat(64),
+    });
   });
 
   for (const status of [409, 502]) {

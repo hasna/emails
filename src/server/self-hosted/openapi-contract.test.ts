@@ -8,7 +8,17 @@ type Operation = {
   parameters?: Array<{ name?: string; in?: string; schema?: Record<string, unknown> }>;
   responses?: Record<string, unknown>;
   requestBody?: {
-    content?: Record<string, { schema?: { properties?: Record<string, unknown>; required?: string[] } }>;
+    content?: Record<string, {
+      schema?: {
+        properties?: Record<string, unknown>;
+        required?: string[];
+        oneOf?: Array<{
+          properties?: Record<string, unknown>;
+          required?: string[];
+          additionalProperties?: boolean;
+        }>;
+      };
+    }>;
   };
 };
 
@@ -185,7 +195,7 @@ describe("self-hosted OpenAPI identity and authorization contract", () => {
         id: { type: "string" },
         send_state: {
           type: "string",
-          enum: ["none", "pending", "blocked", "cancelled", "sending", "sent", "uncertain"],
+          enum: ["none", "pending", "blocked", "cancelled", "sending", "sent", "failed", "uncertain"],
         },
       },
     });
@@ -260,13 +270,58 @@ describe("self-hosted OpenAPI identity and authorization contract", () => {
     expect(paths["/v1/attachments/repairs/{id}/resume"]?.post?.operationId).toBe("resumeAttachmentRepair");
     const request = paths["/v1/attachments/repairs"]?.post?.requestBody
       ?.content?.["application/json"]?.schema;
-    expect(request?.properties?.apply).toMatchObject({ type: "boolean", default: false });
-    expect(Object.keys(request?.properties ?? {}).sort()).toEqual([
+    expect(request?.oneOf).toHaveLength(2);
+    const dryRunRequest = request?.oneOf?.find(
+      (variant) =>
+        (variant.properties?.apply as { enum?: boolean[] } | undefined)?.enum?.[0] === false,
+    );
+    const applyRequest = request?.oneOf?.find(
+      (variant) =>
+        (variant.properties?.apply as { enum?: boolean[] } | undefined)?.enum?.[0] === true,
+    );
+    expect(dryRunRequest?.additionalProperties).toBe(false);
+    expect(dryRunRequest?.properties?.apply).toMatchObject({
+      type: "boolean",
+      enum: [false],
+      default: false,
+    });
+    expect(Object.keys(dryRunRequest?.properties ?? {}).sort()).toEqual([
       "apply",
       "entries",
       "idempotency_key",
       "limit",
     ]);
+    expect(dryRunRequest?.required).toEqual(["idempotency_key", "entries"]);
+    expect(applyRequest?.additionalProperties).toBe(false);
+    expect(applyRequest?.properties?.apply).toMatchObject({
+      type: "boolean",
+      enum: [true],
+    });
+    expect(Object.keys(applyRequest?.properties ?? {}).sort()).toEqual([
+      "apply",
+      "entries",
+      "idempotency_key",
+      "limit",
+      "reviewed_dry_run_id",
+      "reviewed_dry_run_result_sha256",
+    ]);
+    expect(applyRequest?.required).toEqual([
+      "idempotency_key",
+      "apply",
+      "entries",
+      "reviewed_dry_run_id",
+      "reviewed_dry_run_result_sha256",
+    ]);
+    expect(applyRequest?.properties?.reviewed_dry_run_id).toMatchObject({
+      type: "string",
+      format: "uuid",
+    });
+    expect(applyRequest?.properties?.reviewed_dry_run_result_sha256).toMatchObject({
+      type: "string",
+      minLength: 64,
+      maxLength: 64,
+      pattern: "^[0-9a-f]{64}$",
+    });
     const resumeRequest = paths["/v1/attachments/repairs/{id}/resume"]?.post?.requestBody
       ?.content?.["application/json"]?.schema;
     expect(Object.keys(resumeRequest?.properties ?? {})).toEqual(["limit"]);
@@ -296,6 +351,17 @@ describe("self-hosted OpenAPI identity and authorization contract", () => {
     expect(paths["/v1/attachments/repairs"]?.post?.responses?.["429"]
       ?.content?.["application/json"]?.schema?.properties?.quota)
       .toMatchObject({ enum: ["active_runs", "ledger_runs", "ledger_entries"] });
+    expect(paths["/v1/attachments/repairs"]?.post?.responses?.["400"]
+      ?.content?.["application/json"]?.schema?.properties?.code)
+      .toMatchObject({ enum: expect.arrayContaining(["invalid_repair_review"]) });
+    expect(paths["/v1/attachments/repairs"]?.post?.responses?.["409"]
+      ?.content?.["application/json"]?.schema?.properties?.code)
+      .toMatchObject({
+        enum: [
+          "attachment_repair_idempotency_conflict",
+          "attachment_repair_review_mismatch",
+        ],
+      });
     const repairIdParameter = paths["/v1/attachments/repairs/{id}"]?.get?.parameters?.[0];
     expect(repairIdParameter?.schema).toMatchObject({ type: "string", format: "uuid" });
     expect(paths["/v1/attachments/repairs/{id}"]?.get?.responses?.["400"]
