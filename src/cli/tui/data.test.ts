@@ -315,8 +315,8 @@ describe("tui data — addresses / senders / domains", () => {
   it("lists All mailboxes plus configured active addresses", async () => {
     await stub.seed({
       addresses: [
-        { id: "addr-1", email: "ops@primary.test", display_name: "Ops", provider_id: "prov-1", status: "active", verified: true },
-        { id: "addr-2", email: "paused@primary.test", provider_id: "prov-1", status: "suspended", verified: false },
+        { id: "addr-1", email: "ops@primary.test", display_name: "Ops", provider_id: "prov-1", status: "active", verified: true, created_at: "2026-01-01T00:00:00.000Z", updated_at: "2026-01-01T00:00:00.000Z" },
+        { id: "addr-2", email: "paused@primary.test", provider_id: "prov-1", status: "suspended", verified: false, created_at: "2026-01-01T00:00:00.000Z", updated_at: "2026-01-01T00:00:00.000Z" },
       ],
     });
     bustScanCache();
@@ -331,7 +331,7 @@ describe("tui data — addresses / senders / domains", () => {
   it("resolves the default From and sender provider from /v1 addresses", async () => {
     await stub.seed({
       addresses: [
-        { id: "addr-v", email: "ops@acme.com", provider_id: "prov-acme", status: "active", verified: true },
+        { id: "addr-v", email: "ops@acme.com", provider_id: "prov-acme", status: "active", verified: true, created_at: "2026-01-01T00:00:00.000Z", updated_at: "2026-01-01T00:00:00.000Z" },
       ],
     });
 
@@ -342,7 +342,7 @@ describe("tui data — addresses / senders / domains", () => {
 
   it("summarizes domains from /v1", async () => {
     await stub.seed({
-      domains: [{ id: "dom-1", domain: "acme.com", provider: "self_hosted", verified: true }],
+      domains: [{ id: "dom-1", domain: "acme.com", provider: "self_hosted", status: "verified", verified: true, created_at: "2026-01-01T00:00:00.000Z", updated_at: "2026-01-01T00:00:00.000Z" }],
     });
 
     const summaries = listDomainSummaries();

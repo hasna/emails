@@ -69,12 +69,20 @@ function msgRow(overrides: Record<string, unknown> = {}): Record<string, unknown
     subject: `Subject ${seq}`,
     body_text: `Body ${seq}`,
     body_html: null,
+    provider_message_id: null,
     message_id: `mid-${seq}`,
+    in_reply_to: null,
     received_at: at,
     created_at: at,
+    updated_at: at,
     is_read: false,
     is_starred: false,
     labels: [],
+    headers: {},
+    attachments: [],
+    source_id: null,
+    send_state: "none",
+    send_started_at: null,
     status: "received",
     ...overrides,
   };
@@ -486,11 +494,11 @@ describe("inbox read", () => {
     expect(line("D394.pdf")).toContain("--index 1");
   });
 
-  it("keeps a primitive attachment gap visible without advertising it or shifting later indexes", async () => {
+  it("keeps a null attachment gap visible without advertising it or shifting later indexes", async () => {
     const id = crypto.randomUUID();
     await stub.seed({ messages: [msgRow({
       id,
-      subject: "Malformed attachment element",
+      subject: "Null attachment element",
       attachments: [
         {
           filename: "cover.png",
@@ -498,7 +506,7 @@ describe("inbox read", () => {
           size: 3,
           content_base64: "b25l",
         },
-        "not-an-object",
+        null,
         {
           filename: "D394.pdf",
           content_type: "application/pdf",
@@ -522,6 +530,45 @@ describe("inbox read", () => {
     expect(line("attachment-2")).not.toContain("--index 1");
     expect(line("D394.pdf")).toContain("--index 2");
     expect(out).toContain(`emails inbox attachment ${id} --index <n> --download --output-dir <dir>`);
+  });
+
+  it("fails closed on primitive or malformed-object attachment members without leaking them", async () => {
+    const cases = [
+      {
+        id: crypto.randomUUID(),
+        malformed: "must-not-leak-primitive",
+        path: "attachments[1]",
+      },
+      {
+        id: crypto.randomUUID(),
+        malformed: { filename: { diagnostic: "must-not-leak-object" } },
+        path: "attachments[1].filename",
+      },
+    ];
+    await stub.seed({
+      messages: cases.map(({ id, malformed }) => msgRow({
+        id,
+        subject: "Malformed attachment element",
+        attachments: [
+          { filename: "cover.png", content_type: "image/png", size: 3 },
+          malformed,
+          { filename: "D394.pdf", content_type: "application/pdf", size: 3 },
+        ],
+      })),
+    });
+
+    for (const testCase of cases) {
+      const result = await runInboxCommandExpectingExit([
+        "inbox",
+        "read",
+        testCase.id,
+        "--keep-unread",
+      ]);
+      expect(result.error).toBe("process.exit:1");
+      expect(result.stderr).toContain("invalid successful response");
+      expect(result.stderr).toContain(testCase.path);
+      expect(result.stderr).not.toContain("must-not-leak");
+    }
   });
 });
 
@@ -932,7 +979,7 @@ describe("inbox attachments", () => {
     }
   });
 
-  it("returns one exact sanitized page envelope from the self-hosted inventory API", async () => {
+  it("returns one exact strict page envelope from the self-hosted inventory API", async () => {
     useAttachmentInventoryPages([["", {
       items: [{
         message_id: "message-1",
@@ -944,8 +991,6 @@ describe("inbox attachments", () => {
         content_available: true,
         direction: "inbound",
         received_at: "2026-07-24T08:00:00.000Z",
-        content_base64: "must-not-leak",
-        api_key: "must-not-leak",
       }],
       next_cursor: "opaque/+==",
     }]]);
@@ -980,7 +1025,6 @@ describe("inbox attachments", () => {
       });
       expect(Object.keys(data as Record<string, unknown>).sort()).toEqual(["items", "next_cursor"]);
       expect(JSON.stringify(data)).not.toContain("content_base64");
-      expect(JSON.stringify(data)).not.toContain("must-not-leak");
       expect(attachmentInventoryRequests).toHaveLength(1);
       expect(attachmentInventoryRequests[0]?.searchParams.get("limit")).toBe("1");
       expect(attachmentInventoryRequests[0]?.searchParams.get("direction")).toBe("inbound");
@@ -990,6 +1034,30 @@ describe("inbox attachments", () => {
       else process.env.EMAILS_DB_PATH = previousDbPath;
       rmSync(poisonDbDir, { recursive: true, force: true });
     }
+  });
+
+  it("fails closed on unsupported inventory object fields without leaking them", async () => {
+    useAttachmentInventoryPages([["", {
+      items: [{
+        message_id: "message-1",
+        attachment_index: 0,
+        filename: "invoice.pdf",
+        content_type: "application/pdf",
+        size_bytes: 2048,
+        sha256: "a".repeat(64),
+        content_available: true,
+        direction: "inbound",
+        received_at: "2026-07-24T08:00:00.000Z",
+        content_base64: "must-not-leak",
+      }],
+      next_cursor: null,
+    }]]);
+
+    const result = await runInboxCommandExpectingExit(["--json", "inbox", "attachments"]);
+    expect(result.error).toBe("process.exit:1");
+    expect(result.stderr).toContain("invalid successful response");
+    expect(result.stderr).toContain("unsupported fields");
+    expect(result.stderr).not.toContain("must-not-leak");
   });
 
   it("passes the opaque next cursor unchanged and terminates with null", async () => {
@@ -1058,14 +1126,14 @@ describe("inbox attachments", () => {
     }
   });
 
-  it("accepts canonical size strings and rejects invalid attachment sizes", async () => {
+  it("accepts integer sizes and rejects non-integer attachment sizes", async () => {
     useAttachmentInventoryPages([["", {
       items: [{
-        message_id: "message-canonical-size",
+        message_id: "message-integer-size",
         attachment_index: 0,
         filename: "invoice.pdf",
         content_type: "application/pdf",
-        size_bytes: "2048",
+        size_bytes: 2048,
         sha256: null,
         content_available: true,
         direction: "inbound",
@@ -1078,7 +1146,7 @@ describe("inbox attachments", () => {
       items: [{ size_bytes: 2048 }],
     });
 
-    for (const invalidSize of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1, "-1", "01", "1.0", " 1", "1 "]) {
+    for (const invalidSize of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1, "2048", "-1", "01", "1.0", " 1", "1 "]) {
       useAttachmentInventoryPages([["", {
         items: [{
           message_id: "message-invalid-size",
@@ -1207,7 +1275,7 @@ describe("inbox attachment", () => {
     ]);
   });
 
-  it("does not fetch a primitive attachment gap and still downloads the later authenticated index", async () => {
+  it("does not fetch a null attachment gap and still downloads the later authenticated index", async () => {
     const id = crypto.randomUUID();
     const dir = mkdtempSync(join(tmpdir(), "emails-cli-attachment-gap-"));
     try {
@@ -1215,7 +1283,7 @@ describe("inbox attachment", () => {
         id,
         attachments: [
           { filename: "first.txt", content_type: "text/plain", size: 3, content_base64: "b25l" },
-          17,
+          null,
           { filename: "later.txt", content_type: "text/plain", size: 3, content_base64: "dHdv" },
         ],
       })] });
@@ -1250,14 +1318,14 @@ describe("inbox attachment", () => {
     }
   });
 
-  it("allows a legacy unknown attachment probe while an explicit malformed gap stays blocked", async () => {
+  it("allows a legacy unknown attachment probe while an explicit null gap stays blocked", async () => {
     const id = crypto.randomUUID();
     const dir = mkdtempSync(join(tmpdir(), "emails-cli-legacy-attachment-"));
     const row = msgRow({
       id,
       attachments: [
         { filename: "first.txt", content_type: "text/plain", size: 3, content_available: true },
-        17,
+        null,
         { filename: "legacy.txt", content_type: "text/plain", size: 3 },
       ],
     });
@@ -1372,7 +1440,6 @@ describe("inbox attachment", () => {
           filename: "legacy.pdf",
           content_type: "application/pdf",
           size: null,
-          diagnostic: "must-not-leak",
         }],
       })] });
       const result = await runInboxSubprocessExpectingExit([
@@ -1381,8 +1448,6 @@ describe("inbox attachment", () => {
       expect(result.exitCode).toBe(1);
       expect(result.stderr).toContain("metadata but no stored content");
       expect(result.stderr).not.toContain("non-negative integer");
-      expect(result.stderr).not.toContain("must-not-leak");
-      expect(result.stdout).not.toContain("must-not-leak");
       expect(readdirSync(dir)).toEqual([]);
     } finally {
       rmSync(dir, { recursive: true, force: true });

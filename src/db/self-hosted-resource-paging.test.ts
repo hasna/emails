@@ -29,6 +29,7 @@ import { listProviders } from "./providers.local.js";
 const SERVER_CODE = `
 const rows = [5, 4, 3, 2, 1].map((n) => ({
   id: "p" + n,
+  tenant_id: "00000000-0000-0000-0000-000000000001",
   name: "provider-" + n,
   type: "ses",
   region: "us-east-1",

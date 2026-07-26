@@ -54,12 +54,16 @@ describe("MCP self_hosted guards", () => {
     const messages = await stub.list("messages");
     expect(messages).toHaveLength(1);
     expect(messages[0]).toMatchObject({
+      id: payload.email_id,
       direction: "outbound",
-      from: "ops@example.com",
-      to: ["user@example.com"],
+      from_addr: "ops@example.com",
+      to_addrs: ["user@example.com"],
       subject: "Self-hosted MCP send",
-      text: "hello",
-      idempotency_key: "mcp-self-hosted-send",
+      body_text: "hello",
+      status: "sent",
+      send_state: "sent",
+      provider_message_id: payload.message_id,
+      message_id: "stub-1",
     });
   });
 

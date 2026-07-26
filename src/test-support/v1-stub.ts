@@ -113,11 +113,116 @@ export interface V1Stub {
 }
 
 const DEFAULT_API_KEY = "hasna_emails_stub_key_0123456789";
+const NOW_DEFAULT = "__v1_stub_now__";
+
+const V1_STUB_RESOURCE_SPECS = Object.fromEntries(
+  SELF_HOSTED_RESOURCES.map((spec) => [
+    spec.path,
+    {
+      idColumn: spec.idColumn ?? null,
+      columns: spec.columns.map((column) => ({
+        name: column.name,
+        bool: column.bool === true,
+        int: column.int === true,
+        num: column.num === true,
+        json: column.json === true,
+      })),
+    },
+  ]),
+);
+
+// Actual database defaults for every generic resource. Fields absent here have
+// no SQL default: the fixture factory still projects them as null (or the
+// registry-declared primitive zero value) because SELECT * returns every column.
+const V1_STUB_RESOURCE_DEFAULTS: Record<string, Record<string, unknown>> = {
+  contacts: { send_count: 0, bounce_count: 0, complaint_count: 0, suppressed: false },
+  providers: { active: true },
+  templates: { subject_template: "", metadata: {} },
+  groups: {},
+  sequences: { status: "active" },
+  owners: { type: "human" },
+  "send-keys": {},
+  scheduled: {
+    to_addresses: [],
+    cc_addresses: [],
+    bcc_addresses: [],
+    subject: "",
+    attachments_json: [],
+    status: "pending",
+  },
+  aliases: { target_address: "", protected: false },
+  forwarding: { mode: "app-copy", enabled: true },
+  warming: { target_daily_volume: 0, status: "active" },
+  triage: { priority: 3, confidence: 0, triaged_at: NOW_DEFAULT },
+  provisioning: { detail_json: {} },
+  sources: {
+    name: "",
+    status: "active",
+    settings_json: {},
+    provider_snapshot_json: {},
+  },
+  events: { metadata: {}, occurred_at: NOW_DEFAULT },
+  "email-agents": {
+    enabled: false,
+    always_on: false,
+    provider: "external",
+    apply_labels: true,
+    use_network_tools: true,
+    config_json: {},
+  },
+  "email-agent-runs": {
+    labels_json: [],
+    tool_calls_json: [],
+    output_json: {},
+  },
+  "email-digests": {
+    since: NOW_DEFAULT,
+    until: NOW_DEFAULT,
+    message_count: 0,
+    highlights_json: [],
+    action_items_json: [],
+    important_email_ids_json: [],
+    label_counts_json: {},
+  },
+  "group-members": { vars: "{}", added_at: NOW_DEFAULT },
+  "sequence-steps": {
+    step_number: 0,
+    delay_hours: 0,
+    template_name: "",
+    created_at: NOW_DEFAULT,
+  },
+  "sequence-enrollments": {
+    current_step: 0,
+    status: "active",
+    enrolled_at: NOW_DEFAULT,
+  },
+  "address-ownership-events": { created_at: NOW_DEFAULT },
+  "webhook-receipts": { completed_at: NOW_DEFAULT },
+  "sandbox-emails": {
+    to_addresses: [],
+    cc_addresses: [],
+    bcc_addresses: [],
+    subject: "",
+    attachments_json: "[]",
+    headers_json: "{}",
+    created_at: NOW_DEFAULT,
+  },
+};
+
+const missingResourceDefaults = SELF_HOSTED_RESOURCES
+  .map((spec) => spec.path)
+  .filter((path) => !(path in V1_STUB_RESOURCE_DEFAULTS));
+if (missingResourceDefaults.length > 0) {
+  throw new Error(`V1 stub defaults missing resources: ${missingResourceDefaults.join(", ")}`);
+}
 
 // The stub server. Kept free of backticks and `${}` so it embeds cleanly in this
 // module's template literal. Reads its key + seed from env; announces its port.
 const SERVER_SRC = String.raw`
 const KEY = process.env.V1_STUB_API_KEY || "";
+const DEFAULT_TENANT_ID = "00000000-0000-0000-0000-000000000001";
+const RESOURCE_SPECS = safeParse(process.env.V1_STUB_RESOURCE_SPECS);
+const RESOURCE_DEFAULTS = safeParse(process.env.V1_STUB_RESOURCE_DEFAULTS);
 let store = safeParse(process.env.V1_STUB_SEED);
 // Secret token -> send-key id map. Kept OUT of the store object so it is never
 // returned by __dump (a send token must never leave the server). Cleared on __reset.
@@ -156,6 +261,9 @@ function singular(r) {
 }
 function rowsFor(resource) {
   if (!Array.isArray(store[resource])) store[resource] = [];
+  store[resource] = store[resource].map(function (row) {
+    return normalizeResourceRow(resource, row);
+  });
   return store[resource];
 }
 // Apply the resource's DECLARED ORDER BY, the way the real generic list route does
@@ -215,6 +323,172 @@ function hasLabel(row, label) {
   return Array.isArray(row.labels) && row.labels.some(function (v) { return String(v).toLowerCase() === label; });
 }
 function isOutbound(row) { return String(row.direction || "").toLowerCase() === "outbound"; }
+function normalizeMessageRow(row) {
+  const source = row || {};
+  const now = source.created_at || new Date().toISOString();
+  return Object.assign({
+    id: crypto.randomUUID(),
+    direction: "inbound",
+    from_addr: "",
+    to_addrs: [],
+    cc_addrs: [],
+    subject: null,
+    body_text: null,
+    body_html: null,
+    status: "received",
+    provider_message_id: null,
+    message_id: null,
+    in_reply_to: null,
+    received_at: null,
+    is_read: false,
+    is_starred: false,
+    labels: [],
+    headers: {},
+    attachments: [],
+    source_id: null,
+    send_state: "none",
+    send_started_at: null,
+    created_at: now,
+    updated_at: now,
+  }, source, {
+    from_addr: source.from_addr === undefined ? (source.from_address || "") : source.from_addr,
+    to_addrs: source.to_addrs === undefined ? (Array.isArray(source.to_addresses) ? source.to_addresses : []) : source.to_addrs,
+    cc_addrs: source.cc_addrs === undefined ? (Array.isArray(source.cc_addresses) ? source.cc_addresses : []) : source.cc_addrs,
+    bcc_addrs: source.bcc_addrs === undefined ? (Array.isArray(source.bcc_addresses) ? source.bcc_addresses : []) : source.bcc_addrs,
+    received_at: source.received_at === undefined ? (source.sent_at || null) : source.received_at,
+  });
+}
+function normalizeGenericRow(row, defaults) {
+  const source = row || {};
+  const now = source.created_at || new Date().toISOString();
+  return Object.assign({
+    id: crypto.randomUUID(),
+    tenant_id: DEFAULT_TENANT_ID,
+    created_at: now,
+    updated_at: now,
+  }, defaults || {}, source);
+}
+function normalizeDomainRow(row) {
+  const source = row || {};
+  const domain = String(source.domain == null ? "" : source.domain).trim().toLowerCase();
+  return Object.assign(normalizeGenericRow(source, {
+    domain: domain,
+    status: "pending",
+    provider: null,
+    verified: false,
+    notes: null,
+    provisioning_status: "none",
+    purchase_provider: null,
+    dns_provider: "cloudflare",
+    send_provider: null,
+    cf_zone_id: null,
+    registrar: null,
+    nameservers_json: [],
+    mail_from_domain: null,
+    last_error: null,
+    next_check_at: null,
+  }), {
+    domain: domain,
+    nameservers_json: jsonArray(source.nameservers_json),
+  });
+}
+function normalizeAddressRow(row) {
+  const source = row || {};
+  const email = String(source.email == null ? "" : source.email).trim().toLowerCase();
+  const domain = email.includes("@") ? email.slice(email.indexOf("@") + 1) : null;
+  return Object.assign(normalizeGenericRow(source, {
+    email: email,
+    domain: domain,
+    display_name: null,
+    status: "active",
+    verified: false,
+    daily_quota: null,
+    owner_id: null,
+    administrator_id: null,
+    domain_id: null,
+    receive_strategy: null,
+    forward_to: null,
+    routing_rule_id: null,
+    provisioning_status: "none",
+    last_validated_at: null,
+    last_error: null,
+    next_check_at: null,
+  }), {
+    email: email,
+    domain: source.domain === undefined ? domain : source.domain,
+  });
+}
+function own(obj, key) {
+  return Object.prototype.hasOwnProperty.call(obj, key);
+}
+function fixtureDefault(value, now) {
+  if (value === "__v1_stub_now__") return now;
+  if (value && typeof value === "object") return JSON.parse(JSON.stringify(value));
+  return value;
+}
+function jsonArray(value) {
+  if (Array.isArray(value)) return value.slice();
+  if (typeof value !== "string") return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+function normalizeRegisteredResourceRow(resource, row) {
+  const spec = RESOURCE_SPECS[resource];
+  if (!spec || !Array.isArray(spec.columns)) return row;
+  const source = row || {};
+  const now = source.created_at || new Date().toISOString();
+  const key = spec.idColumn || "id";
+  const result = {
+    tenant_id: source.tenant_id || DEFAULT_TENANT_ID,
+    created_at: now,
+    updated_at: source.updated_at || now,
+  };
+  result[key] = source[key] == null
+    ? (key === "id" ? crypto.randomUUID() : "")
+    : source[key];
+  const defaults = RESOURCE_DEFAULTS[resource] || {};
+  for (const column of spec.columns) {
+    if (own(source, column.name)) continue;
+    if (own(defaults, column.name)) {
+      result[column.name] = fixtureDefault(defaults[column.name], now);
+    } else if (column.bool) {
+      result[column.name] = false;
+    } else if (column.int || column.num) {
+      result[column.name] = 0;
+    } else {
+      result[column.name] = null;
+    }
+  }
+  return Object.assign(result, source, {
+    tenant_id: source.tenant_id || DEFAULT_TENANT_ID,
+    created_at: source.created_at || now,
+    updated_at: source.updated_at || now,
+  });
+}
+function normalizeResourceRow(resource, row) {
+  if (resource === "domains") return normalizeDomainRow(row);
+  if (resource === "addresses") return normalizeAddressRow(row);
+  if (resource === "messages") return normalizeMessageRow(row);
+  return normalizeRegisteredResourceRow(resource, row);
+}
+function usesEntityEnvelope(resource) {
+  return resource === "domains" || resource === "addresses" || resource === "messages";
+}
+function resourceKey(resource) {
+  return RESOURCE_SPECS[resource] && RESOURCE_SPECS[resource].idColumn
+    ? RESOURCE_SPECS[resource].idColumn
+    : "id";
+}
+function itemNotFoundError(resource) {
+  if (resource === "domains") return "domain not found";
+  if (resource === "addresses") return "address not found";
+  if (resource === "messages") return "message not found";
+  return resource + " not found";
+}
 
 // ── auth helpers (mirror the server: domain allowlist, slug derivation) ─────────
 // The real server reads its allowlist from EMAILS_AUTH_ALLOWED_EMAIL_DOMAINS and
@@ -306,6 +580,26 @@ function isOwnerAuthorizedFrom(ownerId, from) {
   });
 }
 
+const MESSAGE_CURSOR_PREFIX = "v1-stub:";
+function encodeMessageOffsetCursor(offset) {
+  return MESSAGE_CURSOR_PREFIX + Buffer.from(JSON.stringify({ offset: offset }), "utf8").toString("base64url");
+}
+function decodeMessageOffsetCursor(raw) {
+  if (typeof raw !== "string" || !raw.startsWith(MESSAGE_CURSOR_PREFIX)) return null;
+  const encoded = raw.slice(MESSAGE_CURSOR_PREFIX.length);
+  if (!encoded || !/^[A-Za-z0-9_-]+$/.test(encoded)) return null;
+  try {
+    const decoded = Buffer.from(encoded, "base64url").toString("utf8");
+    if (Buffer.from(decoded, "utf8").toString("base64url") !== encoded) return null;
+    const parsed = JSON.parse(decoded);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    if (Object.keys(parsed).length !== 1 || !Object.prototype.hasOwnProperty.call(parsed, "offset")) return null;
+    return Number.isSafeInteger(parsed.offset) && parsed.offset >= 0 ? parsed.offset : null;
+  } catch {
+    return null;
+  }
+}
+
 function listMessages(params) {
   let ordered = rowsFor("messages").slice().sort(function (a, b) {
     return String(b.received_at || b.created_at || "").localeCompare(String(a.received_at || a.created_at || ""));
@@ -332,8 +626,15 @@ function listMessages(params) {
     });
   }
   const limit = Number(params.get("limit") || "500");
-  const offset = Number(params.get("offset") || "0");
-  return ordered.slice(offset, offset + limit).map(leanListRow);
+  const cursor = params.get("cursor");
+  const cursorOffset = cursor === null ? null : decodeMessageOffsetCursor(cursor);
+  if (cursor !== null && cursorOffset === null) return { error: "cursor is not a valid pagination cursor" };
+  const offset = cursorOffset === null ? Number(params.get("offset") || "0") : cursorOffset;
+  const messages = ordered.slice(offset, offset + limit).map(leanListRow);
+  return {
+    messages: messages,
+    next_cursor: messages.length === limit ? encodeMessageOffsetCursor(offset + messages.length) : null,
+  };
 }
 
 // A /v1 list row as the self-hosted serve actually returns it: bodies, headers
@@ -583,6 +884,7 @@ const server = Bun.serve({
           role: session.tenant.role,
           scopes: scopesForRole(session.tenant.role),
           memberships: (user ? user.tenants : []).map(function (t) { return { tenant_id: "tenant-" + t.slug, slug: t.slug, name: t.name, role: t.role }; }),
+          email_identities: [],
         });
       }
       return json({
@@ -632,13 +934,31 @@ const server = Bun.serve({
     if (resource === "messages" && sub === "send" && req.method === "POST") {
       const body = await req.json().catch(function () { return {}; });
       const now = new Date().toISOString();
-      const rec = Object.assign(
-        { id: crypto.randomUUID(), direction: "outbound", status: "sent", is_read: true, labels: [] },
-        body,
-        { message_id: "stub-" + (rowsFor("messages").length + 1), created_at: now, updated_at: now },
-      );
+      const providerMessageId = "stub-provider-" + (rowsFor("messages").length + 1);
+      const rec = normalizeMessageRow({
+        id: crypto.randomUUID(),
+        direction: "outbound",
+        from_addr: body.from || "",
+        to_addrs: Array.isArray(body.to) ? body.to : [],
+        cc_addrs: Array.isArray(body.cc) ? body.cc : [],
+        subject: body.subject == null ? null : String(body.subject),
+        body_text: typeof body.text === "string" ? body.text : null,
+        body_html: typeof body.html === "string" ? body.html : null,
+        status: "sent",
+        provider_message_id: providerMessageId,
+        message_id: "stub-" + (rowsFor("messages").length + 1),
+        is_read: true,
+        send_state: "sent",
+        created_at: now,
+        updated_at: now,
+      });
       rowsFor("messages").push(rec);
-      return json({ message: rec }, 201);
+      return json({
+        message: detailRow(rec),
+        provider: "stub",
+        sent: true,
+        provider_message_id: providerMessageId,
+      }, 202);
     }
     // Send-intent reconciliation: enough of the real contract for CLI tests.
     if (resource === "messages" && sub === "send-intents" && parts[3] === "uncertain" && req.method === "GET") {
@@ -665,7 +985,9 @@ const server = Bun.serve({
       return json({ reconciled: true, outcome: body.outcome, message: target });
     }
     if (resource === "messages" && id === undefined && req.method === "GET") {
-      return json({ messages: listMessages(url.searchParams) });
+      const page = listMessages(url.searchParams);
+      if (page.error) return json({ error: page.error }, 400);
+      return json(page);
     }
     if (resource === "messages" && id !== undefined && parts[3] === "attachments" && parts[4] !== undefined && req.method === "GET") {
       const all = rowsFor("messages");
@@ -701,7 +1023,7 @@ const server = Bun.serve({
         if (pref.length > 1) return json({ error: "ambiguous message id prefix", reason: "ambiguous_id" }, 409);
         rec = pref[0];
       }
-      if (!rec) return json({ error: "message not found" }, 404);
+      if (!rec) return json({ error: itemNotFoundError(resource) }, 404);
       return json({ message: detailRow(rec) });
     }
 
@@ -759,34 +1081,38 @@ const server = Bun.serve({
         const limit = Math.min(Math.max(1, Math.floor(Number(rawLimit))), 500);
         windowed = windowed.slice(0, limit);
       }
+      if (!usesEntityEnvelope(resource)) return json({ items: windowed });
       const out = {};
       out[resource] = windowed;
-      out.items = windowed;
       return json(out);
     }
     if (id === undefined && req.method === "POST") {
       const body = await req.json().catch(function () { return {}; });
       const now = new Date().toISOString();
-      const entity = Object.assign(
-        { id: body && body.id ? body.id : crypto.randomUUID() },
+      let entity = Object.assign(
         body,
         { created_at: (body && body.created_at) || now, updated_at: now },
       );
+      entity = normalizeResourceRow(resource, entity);
       rows.push(entity);
+      if (!usesEntityEnvelope(resource)) return json(entity, 201);
       const wrap = {};
       wrap[singular(resource)] = entity;
       return json(wrap, 201);
     }
     if (id !== undefined && req.method === "GET") {
-      const e = rows.find(function (r) { return String(r.id) === id; });
-      if (!e) return json({ error: "not found" }, 404);
+      const key = resourceKey(resource);
+      const e = rows.find(function (r) { return String(r[key]) === id; });
+      if (!e) return json({ error: itemNotFoundError(resource) }, 404);
+      if (!usesEntityEnvelope(resource)) return json(e);
       const wrap = {};
       wrap[singular(resource)] = e;
       return json(wrap);
     }
     if (id !== undefined && (req.method === "PATCH" || req.method === "PUT")) {
-      const e = rows.find(function (r) { return String(r.id) === id; });
-      if (!e) return json({ error: "not found" }, 404);
+      const key = resourceKey(resource);
+      const e = rows.find(function (r) { return String(r[key]) === id; });
+      if (!e) return json({ error: itemNotFoundError(resource) }, 404);
       const patch = await req.json().catch(function () { return {}; });
       if (resource === "messages") {
         // Mirror the real server updateMessageStatus: a raw labels array is
@@ -802,16 +1128,21 @@ const server = Bun.serve({
         Object.assign(e, rest, { labels: labels, updated_at: new Date().toISOString() });
       } else {
         Object.assign(e, patch, { updated_at: new Date().toISOString() });
+        if (resource === "domains" || resource === "addresses") {
+          Object.assign(e, normalizeResourceRow(resource, e));
+        }
       }
+      if (!usesEntityEnvelope(resource)) return json(e);
       const wrap = {};
       wrap[singular(resource)] = e;
       return json(wrap);
     }
     if (id !== undefined && req.method === "DELETE") {
-      const i = rows.findIndex(function (r) { return String(r.id) === id; });
-      if (i < 0) return json({ error: "not found" }, 404);
+      const key = resourceKey(resource);
+      const i = rows.findIndex(function (r) { return String(r[key]) === id; });
+      if (i < 0) return json({ error: itemNotFoundError(resource) }, 404);
       rows.splice(i, 1);
-      return json({ ok: true });
+      return json({ deleted: true, id: id });
     }
     return json({ error: "method not allowed" }, 405);
   },
@@ -822,6 +1153,8 @@ console.log("PORT=" + server.port);
 const MODE_ENV = "EMAILS_MODE";
 const URL_ENV = "EMAILS_SELF_HOSTED_URL";
 const KEY_ENV = "EMAILS_SELF_HOSTED_API_KEY";
+const SESSION_ENV = "EMAILS_SESSION_TOKEN";
+const CLIENT_ENV_SECRET_ENV = "EMAILS_CLIENT_ENV_SECRET";
 
 /**
  * Start an out-of-process /v1 stub server and return a handle for driving it.
@@ -837,12 +1170,15 @@ const KEY_ENV = "EMAILS_SELF_HOSTED_API_KEY";
 export async function startV1Stub(options: V1StubOptions = {}): Promise<V1Stub> {
   const apiKey = options.apiKey ?? DEFAULT_API_KEY;
   const initialSeed = JSON.stringify(options.seed ?? {});
+  let priorEnv: Record<string, string | undefined> | undefined;
 
   const proc = Bun.spawn(["bun", "-e", SERVER_SRC], {
     env: {
       ...process.env,
       V1_STUB_API_KEY: apiKey,
       V1_STUB_SEED: initialSeed,
+      V1_STUB_RESOURCE_SPECS: JSON.stringify(V1_STUB_RESOURCE_SPECS),
+      V1_STUB_RESOURCE_DEFAULTS: JSON.stringify(V1_STUB_RESOURCE_DEFAULTS),
       V1_STUB_LIST_ORDER: JSON.stringify(declaredListOrder()),
     },
     stdout: "pipe",
@@ -936,16 +1272,28 @@ export async function startV1Stub(options: V1StubOptions = {}): Promise<V1Stub> 
       if (!res.ok) throw new Error(`v1-stub __seed_user failed: HTTP ${res.status}`);
     },
     applyEnv() {
+      priorEnv = {
+        [MODE_ENV]: process.env[MODE_ENV],
+        [URL_ENV]: process.env[URL_ENV],
+        [KEY_ENV]: process.env[KEY_ENV],
+        [SESSION_ENV]: process.env[SESSION_ENV],
+        [CLIENT_ENV_SECRET_ENV]: process.env[CLIENT_ENV_SECRET_ENV],
+      };
       process.env[MODE_ENV] = "self_hosted";
       process.env[URL_ENV] = baseUrl;
       process.env[KEY_ENV] = apiKey;
+      delete process.env[SESSION_ENV];
+      delete process.env[CLIENT_ENV_SECRET_ENV];
       resetSelfHostedConfigCache();
       resetMailDataSource();
     },
     clearEnv() {
-      delete process.env[MODE_ENV];
-      delete process.env[URL_ENV];
-      delete process.env[KEY_ENV];
+      for (const key of [MODE_ENV, URL_ENV, KEY_ENV, SESSION_ENV, CLIENT_ENV_SECRET_ENV]) {
+        const value = priorEnv?.[key];
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      priorEnv = undefined;
       resetSelfHostedConfigCache();
       resetMailDataSource();
     },

@@ -1,6 +1,6 @@
 {
   "name": "@hasna/emails",
-  "version": "1.3.1",
+  "version": "1.3.2",
   "description": "Emails — local SQLite and self-hosted email management CLI, MCP server, and library",
   "type": "module",
   "repository": {
@@ -43,6 +43,7 @@
     "build:server": "bun build src/server/index.ts --outdir dist/server --target bun --packages external --splitting",
     "build:lib": "bun build src/index.ts src/storage.ts src/selfhost.ts --outdir dist --target bun --packages external --splitting",
     "build:types": "tsc --emitDeclarationOnly --outDir dist",
+    "test:selfhost-sdk-types": "tsc -p tsconfig.selfhost-sdk-type-tests.json",
     "test": "bun test",
     "no-cloud:source": "bun test src/no-cloud-boundary.test.ts src/no-cloud-artifact-scan.test.ts",
     "no-cloud:pack": "bun scripts/no-cloud-artifact-scan.mjs",

@@ -156,6 +156,11 @@ export interface MailSendResult {
   id: string;
   messageId: string;
   /**
+   * The same idempotent send is already being processed. The caller must not
+   * report delivery and must not retry with a different key.
+   */
+  inProgress?: true;
+  /**
    * Set when the message WAS sent but a post-send step failed (e.g. ledger
    * finalization). The send succeeded and must not be retried; the warning
    * tells the operator what still needs attention.

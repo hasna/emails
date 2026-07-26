@@ -126,6 +126,9 @@ jobs:
             -u MAILERY_CLOUD_API_URL -u MAILERY_CLOUD_TOKEN \
             -u HASNA_MAILERY_ENV_FILE -u HASNA_EMAILS_MODE \
             -u EMAILS_SELF_HOSTED_URL -u EMAILS_SELF_HOSTED_API_KEY \
+            -u EMAILS_CLIENT_ENV_SECRET -u EMAILS_SESSION_TOKEN \
+            -u DATABASE_URL -u EMAILS_DATABASE_URL -u EMAILS_TEST_DATABASE_URL \
+            -u EMAILS_POSTGRES_URL -u EMAILS_TEST_POSTGRES_URL \
             -u CLOUDFLARE_API_TOKEN -u CLOUDFLARE_API_KEY \
             -u CLOUDFLARE_EMAIL -u CLOUDFLARE_ACCOUNT_ID \
             -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN \
@@ -137,9 +140,25 @@ jobs:
             -u EMAILS_AWS_REGION -u EMAILS_SES_AWS_PROFILE \
             -u RESEND_API_KEY -u RESEND_WEBHOOK_SECRET \
             AWS_EC2_METADATA_DISABLED=true \
-            HOME="$tmp_home" EMAILS_MODE=local EMAILS_DB_PATH=:memory: bun test
+            HOME="$tmp_home" EMAILS_MODE=local EMAILS_DB_PATH=:memory: \
+            bash -euo pipefail <<'BASH'
+              mapfile -d '' -t test_files < <(
+                find . \
+                  \( -path './.git' -o -path './node_modules' -o -path './dist' \) -prune -o \
+                  -type f \( -name '*.test.ts' -o -name '*.test.tsx' \) \
+                  -print0 | sort -z
+              )
+              test "${#test_files[@]}" -gt 0
+              printf 'Running %d test files in isolated Bun processes\n' "${#test_files[@]}"
+              for test_file in "${test_files[@]}"; do
+                printf '\n=== %s ===\n' "$test_file"
+                bun test --max-concurrency 1 "$test_file"
+              done
+          BASH
       - name: Build
         run: bun run build
+      - name: Verify generated self-hosted SDK signatures
+        run: bun run test:selfhost-sdk-types
       - name: Verify canonical public package identity
         run: |
           bun -e '
@@ -152,7 +171,9 @@ jobs:
       - name: Verify generated SDK is committed
         run: |
           bun run scripts/generate-selfhost-sdk.ts
-          git diff --exit-code -- src/selfhost.ts
+          git diff --exit-code -- \
+            src/selfhost.ts \
+            src/lib/self-hosted-response-contracts.generated.ts
       - name: Verify hosted-control-plane boundary
         run: |
           bun run no-cloud:source

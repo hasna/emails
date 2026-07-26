@@ -17,6 +17,259 @@ type EmailsOpenApiDocument = OpenApiDocument & {
 
 const publicOperation = { security: [] as SecurityRequirement[] } as const;
 
+const roleSchema = {
+  type: "string",
+  enum: ["owner", "admin", "member", "viewer"],
+} as const;
+
+const trueSchema = { type: "boolean", enum: [true] } as const;
+
+const errorResponseSchema = {
+  type: "object",
+  additionalProperties: true,
+  properties: {
+    error: { type: "string", minLength: 1 },
+  },
+  required: ["error"],
+} as const;
+
+function errorResponse(description: string) {
+  return {
+    description,
+    content: {
+      "application/json": {
+        schema: { $ref: "#/components/schemas/ErrorResponse" },
+      },
+    },
+  };
+}
+
+function jsonResponse(description: string, schema: Record<string, unknown>) {
+  return {
+    description,
+    content: {
+      "application/json": { schema },
+    },
+  };
+}
+
+function exactErrorSchema(error: string, reason: string) {
+  return {
+    type: "object",
+    additionalProperties: true,
+    properties: {
+      error: { type: "string", enum: [error] },
+      reason: { type: "string", enum: [reason] },
+    },
+    required: ["error", "reason"],
+  } as const;
+}
+
+type ResponseSchema = Record<string, unknown>;
+type OpenApiResponse = {
+  description?: string;
+  content?: Record<string, { schema?: ResponseSchema }>;
+};
+type OpenApiOperation = {
+  operationId?: string;
+  security?: SecurityRequirement[];
+  requestBody?: unknown;
+  responses?: Record<string, OpenApiResponse>;
+};
+
+const closedErrorOnlySchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    error: { type: "string", minLength: 1 },
+  },
+  required: ["error"],
+} as const;
+
+const closedErrorReasonSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    error: { type: "string", minLength: 1 },
+    reason: { type: "string", minLength: 1 },
+  },
+  required: ["error", "reason"],
+} as const;
+
+function exactErrorOnlySchema(error: string) {
+  return {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      error: { type: "string", enum: [error] },
+    },
+    required: ["error"],
+  } as const;
+}
+
+function closedExactErrorSchema(error: string, reason: string) {
+  return {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      error: { type: "string", enum: [error] },
+      reason: { type: "string", enum: [reason] },
+    },
+    required: ["error", "reason"],
+  } as const;
+}
+
+function anyOfSchemas(...schemas: ResponseSchema[]): ResponseSchema {
+  const flattened = schemas.flatMap((schema) =>
+    Array.isArray(schema.anyOf)
+      ? schema.anyOf.filter((branch): branch is ResponseSchema =>
+          branch !== null && typeof branch === "object" && !Array.isArray(branch))
+      : [schema]);
+  const unique = flattened.filter((schema, index) =>
+    flattened.findIndex((candidate) => JSON.stringify(candidate) === JSON.stringify(schema)) === index);
+  return unique.length === 1 ? unique[0]! : { anyOf: unique };
+}
+
+function responseSchema(response: OpenApiResponse | undefined): ResponseSchema | undefined {
+  const schema = response?.content?.["application/json"]?.schema;
+  return schema && typeof schema === "object" && !Array.isArray(schema)
+    ? schema
+    : undefined;
+}
+
+function routineErrorResponse(description: string, schema: ResponseSchema): OpenApiResponse {
+  return {
+    description,
+    content: {
+      "application/json": { schema },
+    },
+  };
+}
+
+function setRoutineErrorResponse(
+  operation: OpenApiOperation,
+  status: number,
+  description: string,
+  schema: ResponseSchema,
+  mode: "merge" | "replace" = "merge",
+): void {
+  operation.responses ??= {};
+  const key = String(status);
+  const existing = operation.responses[key];
+  const existingSchema = responseSchema(existing);
+  operation.responses[key] = routineErrorResponse(
+    existing?.description ?? description,
+    mode === "merge" && existingSchema
+      ? anyOfSchemas(existingSchema, schema)
+      : schema,
+  );
+}
+
+const authenticationRequiredSchema = closedErrorReasonSchema;
+const authorizationRequiredSchema = closedErrorReasonSchema;
+const invalidRequestBodySchema = closedErrorOnlySchema;
+const requestBodyTooLargeSchema = exactErrorOnlySchema("request body too large");
+const internalErrorSchema = exactErrorOnlySchema("internal error");
+const crossTenantReferenceSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    error: { type: "string", minLength: 1 },
+    reason: { type: "string", enum: ["cross_tenant_reference"] },
+  },
+  required: ["error", "reason"],
+} as const;
+const inboundRouteConflictSchema = closedExactErrorSchema(
+  "inbound domain route is already claimed",
+  "inbound_route_conflict",
+);
+const rateLimitedSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    error: { type: "string", enum: ["too many requests"] },
+    reason: { type: "string", enum: ["rate_limited"] },
+    retry_after: { type: "number", minimum: 0 },
+  },
+  required: ["error", "reason", "retry_after"],
+} as const;
+const loginLockedSchema = closedExactErrorSchema(
+  "too many attempts; try again later",
+  "locked",
+);
+
+const signupForbiddenResponseSchema = exactErrorSchema(
+  "signups are restricted",
+  "email_not_allowed",
+);
+
+const loginForbiddenResponseSchema = {
+  oneOf: [
+    exactErrorSchema("login is restricted", "email_not_allowed"),
+    exactErrorSchema("email is not verified", "email_unverified"),
+    closedExactErrorSchema(
+      "your account is not a member of any organization",
+      "no_tenant",
+    ),
+    exactErrorSchema(
+      "you are not a member of that organization",
+      "not_a_member",
+    ),
+  ],
+} as const;
+
+const loginUnauthorizedResponseSchema = exactErrorSchema(
+  "invalid email or password",
+  "invalid_credentials",
+);
+
+const verifyEmailBadRequestResponseSchema = {
+  oneOf: [
+    {
+      type: "object",
+      additionalProperties: true,
+      properties: {
+        error: { type: "string", enum: ["token is required"] },
+      },
+      required: ["error"],
+    },
+    exactErrorSchema(
+      "verification link is invalid or expired",
+      "invalid_token",
+    ),
+  ],
+} as const;
+
+const switchTenantNotFoundResponseSchema = exactErrorSchema(
+  "organization not found",
+  "not_found",
+);
+
+const bootstrapOwnerConflictResponseSchema = {
+  oneOf: [
+    exactErrorSchema("this tenant already has an owner", "owner_exists"),
+    exactErrorSchema("an account with that email already exists", "email_taken"),
+  ],
+} as const;
+
+const deleteReceiptSchema = {
+  type: "object",
+  properties: {
+    deleted: trueSchema,
+    id: { type: "string" },
+  },
+  required: ["deleted", "id"],
+} as const;
+
+const removedReceiptSchema = {
+  type: "object",
+  properties: {
+    removed: trueSchema,
+    id: { type: "string" },
+  },
+  required: ["removed", "id"],
+} as const;
+
 const userSchema = {
   type: "object",
   properties: {
@@ -27,8 +280,18 @@ const userSchema = {
     email_verified: { type: "boolean" },
     global_role: { type: "string", enum: ["user", "super_admin"] },
     is_primary_super_admin: { type: "boolean" },
+    created_at: { type: "string", format: "date-time" },
   },
-  required: ["id", "email", "status"],
+  required: [
+    "id",
+    "email",
+    "name",
+    "status",
+    "email_verified",
+    "global_role",
+    "is_primary_super_admin",
+    "created_at",
+  ],
 } as const;
 
 const tenantSchema = {
@@ -38,10 +301,71 @@ const tenantSchema = {
     slug: { type: "string" },
     name: { type: "string" },
     status: { type: "string" },
-    created_at: { type: "string", format: "date-time" },
-    updated_at: { type: "string", format: "date-time" },
   },
   required: ["id", "slug", "name", "status"],
+} as const;
+
+const authRouteUserSchema = {
+  type: "object",
+  additionalProperties: true,
+  properties: {
+    ...userSchema.properties,
+    // Auth-route clients treat the identity as opaque. Production currently
+    // emits UUIDs, but compatible hermetic implementations may use another
+    // non-empty identifier.
+    id: { type: "string", minLength: 1 },
+  },
+  required: [
+    "id",
+    "email",
+    "name",
+    "status",
+    "email_verified",
+    "created_at",
+  ],
+} as const;
+
+const authRouteTenantSchema = {
+  type: "object",
+  additionalProperties: true,
+  properties: {
+    ...tenantSchema.properties,
+    id: { type: "string", minLength: 1 },
+  },
+  required: tenantSchema.required,
+} as const;
+
+const authRouteTenantReferenceSchema = {
+  oneOf: [
+    authRouteTenantSchema,
+    {
+      type: "object",
+      properties: { id: { type: "string", minLength: 1 } },
+      required: ["id"],
+    },
+  ],
+} as const;
+
+const tenantMembershipSummarySchema = {
+  type: "object",
+  properties: {
+    id: { type: "string", format: "uuid" },
+    slug: { type: "string" },
+    name: { type: "string" },
+    status: { type: "string" },
+    role: roleSchema,
+  },
+  required: ["id", "slug", "name", "status", "role"],
+} as const;
+
+const tenantChoiceSchema = {
+  type: "object",
+  properties: {
+    slug: { type: "string" },
+    name: { type: "string" },
+    role: roleSchema,
+  },
+  required: ["slug", "name", "role"],
 } as const;
 
 const emailIdentitySchema = {
@@ -61,14 +385,103 @@ const membershipSchema = {
   properties: {
     id: { type: "string", format: "uuid" },
     user_id: { type: "string", format: "uuid" },
-    tenant_id: { type: "string", format: "uuid" },
     email: { type: "string", format: "email" },
     name: { type: "string", nullable: true },
-    role: { type: "string", enum: ["owner", "admin", "member", "viewer"] },
+    role: roleSchema,
     status: { type: "string" },
     created_at: { type: "string", format: "date-time" },
   },
+  required: ["id", "user_id", "email", "name", "role", "status", "created_at"],
+} as const;
+
+const membershipSummarySchema = {
+  type: "object",
+  properties: {
+    id: { type: "string", format: "uuid" },
+    role: roleSchema,
+    status: { type: "string" },
+  },
   required: ["id", "role", "status"],
+} as const;
+
+const invitationSchema = {
+  type: "object",
+  properties: {
+    id: { type: "string", format: "uuid" },
+    email: { type: "string", format: "email" },
+    role: roleSchema,
+    expires_at: { type: "string", format: "date-time" },
+    accepted_at: { type: "string", format: "date-time", nullable: true },
+    created_at: { type: "string", format: "date-time" },
+  },
+  required: ["id", "email", "role", "expires_at", "accepted_at", "created_at"],
+} as const;
+
+const apiKeyMetadataSchema = {
+  type: "object",
+  properties: {
+    kid: { type: "string" },
+    app: { type: "string" },
+    agent: { type: "string", nullable: true },
+    scopes: { type: "array", items: { type: "string" } },
+    issued_at: { type: "string", format: "date-time" },
+    expires_at: { type: "string", format: "date-time", nullable: true },
+    revoked_at: { type: "string", format: "date-time", nullable: true },
+    last_used_at: { type: "string", format: "date-time", nullable: true },
+    created_by_user_id: { type: "string", format: "uuid", nullable: true },
+  },
+  required: [
+    "kid",
+    "app",
+    "agent",
+    "scopes",
+    "issued_at",
+    "expires_at",
+    "revoked_at",
+    "last_used_at",
+    "created_by_user_id",
+  ],
+} as const;
+
+const legacyApiKeyMetadataSchema = {
+  type: "object",
+  additionalProperties: true,
+  properties: {
+    ...apiKeyMetadataSchema.properties,
+    created_at: { type: "string", format: "date-time" },
+  },
+  required: ["kid", "scopes", "created_at", "expires_at", "revoked_at"],
+} as const;
+
+const tenantKeyListItemSchema = {
+  oneOf: [
+    { $ref: "#/components/schemas/ApiKeyMetadata" },
+    legacyApiKeyMetadataSchema,
+  ],
+} as const;
+
+const sendKeySchema = {
+  type: "object",
+  properties: {
+    id: { type: "string" },
+    owner_id: { type: "string", nullable: true },
+    prefix: { type: "string", nullable: true },
+    label: { type: "string", nullable: true },
+    last_used_at: { type: "string", format: "date-time", nullable: true },
+    revoked_at: { type: "string", format: "date-time", nullable: true },
+    created_at: { type: "string", format: "date-time" },
+    updated_at: { type: "string", format: "date-time" },
+  },
+  required: [
+    "id",
+    "owner_id",
+    "prefix",
+    "label",
+    "last_used_at",
+    "revoked_at",
+    "created_at",
+    "updated_at",
+  ],
 } as const;
 
 const domainSchema = {
@@ -107,6 +520,8 @@ const addressSchema = {
     status: { type: "string" },
     verified: { type: "boolean" },
     daily_quota: { type: "integer", nullable: true },
+    owner_id: { type: "string", nullable: true },
+    administrator_id: { type: "string", nullable: true },
     // Provisioning lifecycle state (mirrors the local addresses provisioning columns).
     domain_id: { type: "string", nullable: true },
     receive_strategy: { type: "string", nullable: true },
@@ -159,7 +574,15 @@ const threadSchema = {
     first_message_at: { type: "string", format: "date-time", nullable: true },
     participants: { type: "array", items: { type: "string" } },
   },
-  required: ["thread_key", "message_count", "unread_count"],
+  required: [
+    "thread_key",
+    "subject",
+    "message_count",
+    "unread_count",
+    "last_message_at",
+    "first_message_at",
+    "participants",
+  ],
 } as const;
 
 const mailboxSchema = {
@@ -172,7 +595,7 @@ const mailboxSchema = {
     total: { type: "integer" },
     unread: { type: "integer" },
   },
-  required: ["id", "address", "total", "unread"],
+  required: ["id", "address", "display_name", "status", "total", "unread"],
 } as const;
 
 /**
@@ -220,7 +643,7 @@ const resendWebhookEventSchema = {
 /** The uniform receiver acknowledgement. */
 const webhookReceiptSchema = {
   type: "object",
-  additionalProperties: false,
+  additionalProperties: true,
   properties: {
     ok: { type: "boolean" },
     duplicate: { type: "boolean", description: "The event id was already completed in every destination scope" },
@@ -260,7 +683,10 @@ const messageSchema = {
       type: "array",
       description:
         "Per-attachment metadata (filename, content_type, size) plus content_available — true when GET /v1/messages/{id}/attachments/{index} can return bytes, false for metadata-only rows such as legacy imports. content_base64 is never included here.",
-      items: { type: "object", additionalProperties: true },
+      items: {
+        $ref: "#/components/schemas/AttachmentMeta",
+        nullable: true,
+      },
     },
     source_id: { type: "string", nullable: true, description: "Stable upstream id used for idempotent upsert" },
     send_state: { type: "string", description: "none | pending | sending | sent | failed | uncertain | blocked | cancelled" },
@@ -268,7 +694,31 @@ const messageSchema = {
     created_at: { type: "string", format: "date-time" },
     updated_at: { type: "string", format: "date-time" },
   },
-  required: ["id", "direction", "from_addr", "to_addrs", "status", "created_at", "updated_at"],
+  required: [
+    "id",
+    "direction",
+    "from_addr",
+    "to_addrs",
+    "cc_addrs",
+    "subject",
+    "body_text",
+    "body_html",
+    "status",
+    "provider_message_id",
+    "message_id",
+    "in_reply_to",
+    "received_at",
+    "is_read",
+    "is_starred",
+    "labels",
+    "headers",
+    "attachments",
+    "source_id",
+    "send_state",
+    "send_started_at",
+    "created_at",
+    "updated_at",
+  ],
 } as const;
 
 const idempotencyKeyRequestSchema = {
@@ -282,7 +732,6 @@ const idempotencyKeyRequestSchema = {
 
 const sendIntentLookupSchema = {
   type: "object",
-  additionalProperties: false,
   properties: {
     found: { type: "boolean" },
     tombstoned: { type: "boolean" },
@@ -294,7 +743,6 @@ const sendIntentLookupSchema = {
 
 const sendIntentCancellationSchema = {
   type: "object",
-  additionalProperties: false,
   properties: {
     outcome: { type: "string", enum: ["tombstoned", "cancelled", "reconciliation_required"] },
     tombstoned: { type: "boolean", enum: [true] },
@@ -317,6 +765,7 @@ const sendMessageErrorSchema = {
       description: "What is KNOWN about the send: false = definitively not sent (provider rejected); null = indeterminate (reconcile before retrying)",
     },
     retry_safe: { type: "boolean" },
+    reconciliation_required: { type: "boolean" },
     tombstoned: { type: "boolean" },
     message: {
       oneOf: [
@@ -329,19 +778,72 @@ const sendMessageErrorSchema = {
   required: ["error", "retry_safe"],
 } as const;
 
-const sendMessageResponseSchema = {
+const providerOutcomeUncertainErrorSchema = {
+  type: "object",
+  additionalProperties: true,
+  properties: {
+    error: { type: "string", minLength: 1 },
+    reason: { type: "string", enum: ["provider_outcome_uncertain"] },
+    provider_error: { type: "string" },
+    sent: { type: "boolean", nullable: true, enum: [null] },
+    retry_safe: { type: "boolean", enum: [false] },
+    reconciliation_required: { type: "boolean", enum: [true] },
+    message: { $ref: "#/components/schemas/Message" },
+  },
+  required: [
+    "error",
+    "reason",
+    "sent",
+    "retry_safe",
+    "reconciliation_required",
+    "message",
+  ],
+} as const;
+
+const sendMessageReplayResponseSchema = {
   type: "object",
   properties: {
     message: { $ref: "#/components/schemas/Message" },
     provider: { type: "string" },
     idempotent_replay: { type: "boolean", enum: [true] },
-    in_progress: { type: "boolean", enum: [true] },
     sent: { type: "boolean", enum: [true], description: "Present whenever the provider accepted the message (fresh success, idempotent replay of a sent intent, or a post-send finalization failure): the message WAS sent" },
-    provider_message_id: { type: "string", description: "Provider message id, present whenever the provider accepted the message — including when ledger finalization failed, so the accepted send stays traceable" },
-    warning: { type: "string", description: "Set when the message was sent but a post-send step failed; the send must NOT be retried" },
-    retry_safe: { type: "boolean" },
+    provider_message_id: { type: "string", minLength: 1, description: "Provider message id, present whenever the provider accepted the message — including when ledger finalization failed, so the accepted send stays traceable" },
   },
-  required: ["message", "provider"],
+  required: ["message", "provider", "idempotent_replay", "sent", "provider_message_id"],
+} as const;
+
+const sendMessageAcceptedResponseSchema = {
+  oneOf: [
+    {
+      type: "object",
+      properties: {
+        message: { $ref: "#/components/schemas/Message" },
+        provider: { type: "string" },
+        in_progress: { type: "boolean", enum: [true] },
+      },
+      required: ["message", "provider", "in_progress"],
+    },
+    {
+      type: "object",
+      properties: {
+        message: { $ref: "#/components/schemas/Message" },
+        provider: { type: "string" },
+        sent: { type: "boolean", enum: [true] },
+        provider_message_id: { type: "string", minLength: 1 },
+        warning: {
+          type: "string",
+          description:
+            "Present only when the provider accepted the message but ledger finalization failed; the send must not be retried.",
+        },
+        retry_safe: {
+          type: "boolean",
+          enum: [false],
+          description: "Present with warning and always false.",
+        },
+      },
+      required: ["message", "provider", "sent", "provider_message_id"],
+    },
+  ],
 } as const;
 
 const messageListItemSchema = {
@@ -369,7 +871,29 @@ const messageListItemSchema = {
     created_at: { type: "string", format: "date-time" },
     updated_at: { type: "string", format: "date-time" },
   },
-  required: ["id", "direction", "from_addr", "to_addrs", "status", "created_at", "updated_at"],
+  required: [
+    "id",
+    "direction",
+    "from_addr",
+    "to_addrs",
+    "cc_addrs",
+    "subject",
+    "snippet",
+    "status",
+    "provider_message_id",
+    "message_id",
+    "in_reply_to",
+    "received_at",
+    "is_read",
+    "is_starred",
+    "labels",
+    "attachment_count",
+    "source_id",
+    "send_state",
+    "send_started_at",
+    "created_at",
+    "updated_at",
+  ],
 } as const;
 
 const attachmentContentSchema = {
@@ -449,6 +973,30 @@ const attachmentInventoryItemSchema = {
 } as const;
 
 const attachmentMetaSchema = {
+  type: "object",
+  additionalProperties: true,
+  description:
+    "Per-message attachment metadata. Historical rows may be partial, but known fields remain type-checked and content_base64 is excluded.",
+  properties: {
+    filename: { type: "string", nullable: true },
+    content_type: { type: "string", nullable: true },
+    size: {
+      oneOf: [
+        { type: "integer", minimum: 0 },
+        { type: "string" },
+      ],
+      nullable: true,
+    },
+    sha256: { type: "string", nullable: true },
+    content_available: {
+      type: "boolean",
+      description:
+        "True when the authenticated attachment-content route can return bytes, false when metadata exists without retrievable content; omitted by older serves.",
+    },
+  },
+} as const;
+
+const attachmentBatchMetaSchema = {
   type: "object",
   additionalProperties: false,
   description: "Per-message attachment metadata (batch mode). content_base64 is excluded.",
@@ -639,6 +1187,292 @@ const attachmentRepairSummarySchema = {
   ],
 } as const;
 
+const databaseProbeSchema = {
+  type: "object",
+  properties: {
+    ok: { type: "boolean" },
+    latencyMs: { type: "number", minimum: 0 },
+  },
+  required: ["ok", "latencyMs"],
+} as const;
+
+const healthResponseSchema = {
+  type: "object",
+  properties: {
+    status: { type: "string", enum: ["ok"] },
+    version: { type: "string" },
+    mode: { type: "string", enum: ["self_hosted"] },
+    name: { type: "string", enum: ["emails"] },
+    db: databaseProbeSchema,
+  },
+  required: ["status", "version", "mode", "name", "db"],
+} as const;
+
+function readyResponseSchema(status: "ready" | "not_ready", ok: true | false) {
+  return {
+    type: "object",
+    properties: {
+      status: { type: "string", enum: [status] },
+      version: { type: "string" },
+      mode: { type: "string", enum: ["self_hosted"] },
+      db: {
+        type: "object",
+        properties: {
+          ok: { type: "boolean", enum: [ok] },
+          latencyMs: { type: "number", minimum: 0 },
+        },
+        required: ["ok", "latencyMs"],
+      },
+      pendingMigrations: { type: "array", items: { type: "string" } },
+      migrationIssues: { type: "array", items: { type: "string" } },
+    },
+    required: [
+      "status",
+      "version",
+      "mode",
+      "db",
+      "pendingMigrations",
+      "migrationIssues",
+    ],
+  } as const;
+}
+
+const versionResponseSchema = {
+  type: "object",
+  properties: {
+    status: { type: "string", enum: ["ok"] },
+    version: { type: "string" },
+    mode: { type: "string", enum: ["self_hosted"] },
+    name: { type: "string", enum: ["emails"] },
+  },
+  required: ["status", "version", "mode", "name"],
+} as const;
+
+const openApiDocumentResponseSchema = {
+  type: "object",
+  additionalProperties: true,
+  properties: {
+    openapi: { type: "string" },
+    info: {
+      type: "object",
+      additionalProperties: true,
+      properties: {
+        title: { type: "string" },
+        version: { type: "string" },
+      },
+      required: ["title", "version"],
+    },
+    security: { type: "array", items: { type: "object", additionalProperties: true } },
+    paths: { type: "object", additionalProperties: true },
+    components: { type: "object", additionalProperties: true },
+  },
+  required: ["openapi", "info", "security", "paths", "components"],
+} as const;
+
+const authProvidersResponseSchema = {
+  type: "object",
+  properties: {
+    google: { type: "boolean", enum: [false] },
+    device: { type: "boolean", enum: [false] },
+  },
+  required: ["google", "device"],
+} as const;
+
+const signupResponseSchema = {
+  type: "object",
+  properties: {
+    status: { type: "string", enum: ["verification_required"] },
+    email: { type: "string", format: "email" },
+    verification_required: trueSchema,
+  },
+  required: ["status", "email", "verification_required"],
+} as const;
+
+const verificationRequiredResponseSchema = {
+  type: "object",
+  properties: {
+    status: { type: "string", enum: ["verification_required"] },
+    verification_required: trueSchema,
+  },
+  required: ["status", "verification_required"],
+} as const;
+
+const loginResponseSchema = {
+  oneOf: [
+    {
+      type: "object",
+      properties: {
+        needs_tenant: trueSchema,
+        tenants: {
+          type: "array",
+          minItems: 2,
+          items: { $ref: "#/components/schemas/TenantChoice" },
+        },
+      },
+      required: ["needs_tenant", "tenants"],
+    },
+    {
+      type: "object",
+      properties: {
+        session_token: { type: "string" },
+        expires_at: { type: "string", format: "date-time" },
+        user: authRouteUserSchema,
+        tenant: authRouteTenantSchema,
+        role: roleSchema,
+      },
+      required: ["session_token", "expires_at", "user", "tenant", "role"],
+    },
+  ],
+} as const;
+
+const verifiedEmailResponseSchema = {
+  type: "object",
+  properties: {
+    verified: trueSchema,
+    user: authRouteUserSchema,
+  },
+  required: ["verified", "user"],
+} as const;
+
+const passwordResetRequestedResponseSchema = {
+  type: "object",
+  properties: {
+    status: { type: "string", enum: ["reset_requested"] },
+  },
+  required: ["status"],
+} as const;
+
+const passwordResetResponseSchema = {
+  type: "object",
+  properties: { reset: trueSchema },
+  required: ["reset"],
+} as const;
+
+const inviteAcceptedResponseSchema = {
+  type: "object",
+  properties: {
+    session_token: { type: "string" },
+    expires_at: { type: "string", format: "date-time" },
+    user: { $ref: "#/components/schemas/User" },
+    tenant: { $ref: "#/components/schemas/Tenant", nullable: true },
+    role: roleSchema,
+  },
+  required: ["session_token", "expires_at", "user", "tenant", "role"],
+} as const;
+
+const bootstrapOwnerResponseSchema = {
+  type: "object",
+  properties: {
+    user: authRouteUserSchema,
+    tenant: { ...authRouteTenantSchema, nullable: true },
+  },
+  required: ["user", "tenant"],
+} as const;
+
+const bootstrapSuperAdminResponseSchema = {
+  type: "object",
+  properties: {
+    created: { type: "boolean" },
+    user: { $ref: "#/components/schemas/User" },
+    tenant: { $ref: "#/components/schemas/Tenant", nullable: true },
+  },
+  required: ["created", "user", "tenant"],
+} as const;
+
+const loggedOutResponseSchema = {
+  type: "object",
+  properties: { logged_out: trueSchema },
+  required: ["logged_out"],
+} as const;
+
+const tenantSwitchResponseSchema = {
+  type: "object",
+  properties: {
+    session_token: { type: "string" },
+    expires_at: { type: "string", format: "date-time" },
+    tenant: authRouteTenantSchema,
+    role: roleSchema,
+  },
+  required: ["session_token", "expires_at", "tenant", "role"],
+} as const;
+
+const currentPrincipalResponseSchema = {
+  oneOf: [
+    {
+      type: "object",
+      properties: {
+        principal_type: { type: "string", enum: ["apikey"] },
+        kid: { type: "string" },
+        tenant: authRouteTenantReferenceSchema,
+        scopes: { type: "array", items: { type: "string" } },
+      },
+      required: ["principal_type", "kid", "tenant", "scopes"],
+    },
+    {
+      type: "object",
+      properties: {
+        principal_type: { type: "string", enum: ["user"] },
+        user: { ...authRouteUserSchema, nullable: true },
+        tenant: authRouteTenantReferenceSchema,
+        role: roleSchema,
+        scopes: { type: "array", items: { type: "string" } },
+        memberships: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              tenant_id: { type: "string", minLength: 1 },
+              slug: { type: "string" },
+              name: { type: "string" },
+              role: roleSchema,
+            },
+            required: ["tenant_id", "slug", "name", "role"],
+          },
+        },
+        email_identities: {
+          type: "array",
+          items: { $ref: "#/components/schemas/EmailIdentity" },
+        },
+      },
+      required: [
+        "principal_type",
+        "user",
+        "tenant",
+        "role",
+        "scopes",
+        "memberships",
+        "email_identities",
+      ],
+    },
+  ],
+} as const;
+
+const messageCountsSchema = {
+  type: "object",
+  properties: {
+    inbox: { type: "integer", minimum: 0 },
+    unread: { type: "integer", minimum: 0 },
+    starred: { type: "integer", minimum: 0 },
+    sent: { type: "integer", minimum: 0 },
+    archived: { type: "integer", minimum: 0 },
+    spam: { type: "integer", minimum: 0 },
+    trash: { type: "integer", minimum: 0 },
+    total: { type: "integer", minimum: 0 },
+    latest_received_at: { type: "string", format: "date-time", nullable: true },
+  },
+  required: [
+    "inbox",
+    "unread",
+    "starred",
+    "sent",
+    "archived",
+    "spam",
+    "trash",
+    "total",
+    "latest_received_at",
+  ],
+} as const;
+
 // Both are CLAMPED, never rejected (src/server/self-hosted/store.ts clampLimit /
 // clampOffset), so a client asking for 1000 silently receives 500. Clients that page a
 // window rely on that, so it is documented rather than left to be rediscovered.
@@ -766,15 +1600,30 @@ const genericResourcePaths: Record<string, Record<string, unknown>> = {};
 
 for (const resource of SELF_HOSTED_RESOURCES) {
   const name = resourceOperationName(resource.path);
+  const key = resource.idColumn ?? "id";
+  const itemRequired = [
+    key,
+    "tenant_id",
+    ...resource.columns.map((column) => column.name),
+    "created_at",
+    "updated_at",
+  ].filter((value, index, values) => values.indexOf(value) === index);
   const itemSchema = {
     type: "object",
     description: `Tenant-scoped ${resource.path} row.`,
     properties: Object.fromEntries([
-      [resource.idColumn ?? "id", { type: "string" }],
       ...resource.columns.map((column) => [column.name, resourceColumnSchema(column)]),
+      [key, { type: "string" }],
+      ["tenant_id", { type: "string", format: "uuid" }],
       ["created_at", { type: "string", format: "date-time" }],
       ["updated_at", { type: "string", format: "date-time" }],
     ]),
+    required: itemRequired,
+    // The runtime currently selects physical rows with SELECT *. The registry
+    // defines the supported fields, but an operator-owned drifted table may
+    // carry additional non-secret columns until the store moves to an explicit
+    // projection. Keep this truthful rather than pretending those fields cannot
+    // appear; redactColumns still excludes known secret legacy columns.
     additionalProperties: true,
   };
   const bodySchema = {
@@ -832,6 +1681,13 @@ for (const resource of SELF_HOSTED_RESOURCES) {
       requestBody: { required: true, content: { "application/json": { schema: bodySchema } } },
       responses: { "200": { content: { "application/json": { schema: itemSchema } } } },
     },
+    put: {
+      operationId: `replaceResource${name}`,
+      summary: `Replace mutable fields on a tenant-scoped ${resource.path} row`,
+      parameters: idParam,
+      requestBody: { required: true, content: { "application/json": { schema: bodySchema } } },
+      responses: { "200": { content: { "application/json": { schema: itemSchema } } } },
+    },
     delete: {
       operationId: `deleteResource${name}`,
       summary: `Delete a tenant-scoped ${resource.path} row`,
@@ -841,9 +1697,7 @@ for (const resource of SELF_HOSTED_RESOURCES) {
           content: {
             "application/json": {
               schema: {
-                type: "object",
-                properties: { deleted: { type: "boolean" }, id: { type: "string" } },
-                required: ["deleted", "id"],
+                ...deleteReceiptSchema,
               },
             },
           },
@@ -851,6 +1705,396 @@ for (const resource of SELF_HOSTED_RESOURCES) {
       },
     },
   };
+}
+
+function operationAt(
+  document: EmailsOpenApiDocument,
+  path: string,
+  method: "get" | "post" | "put" | "patch" | "delete",
+): OpenApiOperation {
+  const operation = (document.paths?.[path] as Record<string, OpenApiOperation> | undefined)?.[method];
+  if (!operation) throw new Error(`OpenAPI routine-error target is missing: ${method.toUpperCase()} ${path}`);
+  return operation;
+}
+
+function addRoutineError(
+  document: EmailsOpenApiDocument,
+  path: string,
+  method: "get" | "post" | "put" | "patch" | "delete",
+  status: number,
+  description: string,
+  schema: ResponseSchema,
+  mode: "merge" | "replace" = "merge",
+): void {
+  setRoutineErrorResponse(operationAt(document, path, method), status, description, schema, mode);
+}
+
+function addRoutineErrorParity(document: EmailsOpenApiDocument): void {
+  const methods = new Set(["get", "post", "put", "patch", "delete"]);
+  for (const [path, pathItem] of Object.entries(document.paths ?? {})) {
+    for (const [method, operationValue] of Object.entries(pathItem as Record<string, unknown>)) {
+      if (!methods.has(method)) continue;
+      const operation = operationValue as OpenApiOperation;
+      const publicOperation = operation.security?.length === 0;
+      const protectedVersionedOperation = path.startsWith("/v1/") && !publicOperation;
+      const authHandlerOperation =
+        path === "/v1/me"
+        || path.startsWith("/v1/me/")
+        || path === "/v1/auth"
+        || path.startsWith("/v1/auth/")
+        || path === "/v1/tenants"
+        || path.startsWith("/v1/tenants/")
+        || path.startsWith("/v1/memberships/")
+        || path === "/v1/invites/accept"
+        || path === "/v1/keys"
+        || path.startsWith("/v1/keys/");
+
+      if (protectedVersionedOperation) {
+        setRoutineErrorResponse(
+          operation,
+          401,
+          "Authentication failed before the operation ran",
+          authenticationRequiredSchema,
+          "replace",
+        );
+        if (operation.operationId === "sendMessage") {
+          setRoutineErrorResponse(
+            operation,
+            403,
+            "Authentication, scope, or sender authorization failed",
+            anyOfSchemas(
+              authorizationRequiredSchema,
+              { $ref: "#/components/schemas/SendMessageError" },
+            ),
+            "replace",
+          );
+        } else {
+          setRoutineErrorResponse(
+            operation,
+            403,
+            "The authenticated principal is not authorized for this operation",
+            authorizationRequiredSchema,
+            "replace",
+          );
+        }
+        setRoutineErrorResponse(
+          operation,
+          500,
+          "The service failed without exposing internal detail",
+          internalErrorSchema,
+          "replace",
+        );
+      } else if (authHandlerOperation && path !== "/v1/auth/providers") {
+        setRoutineErrorResponse(
+          operation,
+          500,
+          "The auth service failed without exposing internal detail",
+          internalErrorSchema,
+          "replace",
+        );
+      }
+
+      if (operation.requestBody !== undefined) {
+        setRoutineErrorResponse(
+          operation,
+          400,
+          "The request body is malformed or fails operation validation",
+          invalidRequestBodySchema,
+        );
+        setRoutineErrorResponse(
+          operation,
+          413,
+          "The JSON request body exceeds the service limit",
+          requestBodyTooLargeSchema,
+          "replace",
+        );
+      }
+    }
+  }
+
+  for (const resource of SELF_HOSTED_RESOURCES) {
+    const collection = `/v1/${resource.path}`;
+    const item = `${collection}/{id}`;
+    const notFound = exactErrorOnlySchema(`${resource.path} not found`);
+    for (const method of ["get", "delete"] as const) {
+      addRoutineError(document, item, method, 404, `${resource.path} row not found`, notFound, "replace");
+    }
+    for (const method of ["patch", "put"] as const) {
+      addRoutineError(
+        document,
+        item,
+        method,
+        404,
+        `${resource.path} row or referenced row not found`,
+        resource.foreignKeys?.length
+          ? anyOfSchemas(notFound, crossTenantReferenceSchema)
+          : notFound,
+        "replace",
+      );
+    }
+    if (resource.foreignKeys?.length) {
+      addRoutineError(
+        document,
+        collection,
+        "post",
+        404,
+        "A referenced row belongs to another tenant",
+        crossTenantReferenceSchema,
+        "replace",
+      );
+    }
+  }
+
+  const rateLimitedOperations = [
+    ["/v1/auth/signup", "post"],
+    ["/v1/auth/verify-email/resend", "post"],
+    ["/v1/auth/password/forgot", "post"],
+    ["/v1/auth/password/reset", "post"],
+    ["/v1/tenants/{id}/invites", "post"],
+  ] as const;
+  for (const [path, method] of rateLimitedOperations) {
+    addRoutineError(document, path, method, 429, "The operation is rate limited", rateLimitedSchema, "replace");
+  }
+  addRoutineError(
+    document,
+    "/v1/auth/login",
+    "post",
+    429,
+    "Login is rate limited or the account is temporarily locked",
+    anyOfSchemas(rateLimitedSchema, loginLockedSchema),
+    "replace",
+  );
+
+  for (const [path, method] of [
+    ["/v1/auth/signup", "post"],
+    ["/v1/invites/accept", "post"],
+    ["/v1/auth/bootstrap-super-admin", "post"],
+    ["/v1/me/email-identities", "post"],
+    ["/v1/me/email-identities/{id}", "delete"],
+    ["/v1/me/email-identities/{id}/primary", "post"],
+    ["/v1/tenants", "post"],
+    ["/v1/tenants/{id}", "patch"],
+    ["/v1/tenants/{id}", "put"],
+    ["/v1/memberships/{id}", "patch"],
+    ["/v1/memberships/{id}", "put"],
+    ["/v1/memberships/{id}", "delete"],
+  ] as const) {
+    addRoutineError(
+      document,
+      path,
+      method,
+      409,
+      "The requested auth or tenancy state conflicts with durable state",
+      closedErrorReasonSchema,
+      "replace",
+    );
+  }
+
+  addRoutineError(
+    document,
+    "/v1/auth/bootstrap-super-admin",
+    "post",
+    503,
+    "Primary super-admin bootstrap is not configured",
+    exactErrorSchema(
+      "primary super-admin bootstrap is not configured",
+      "bootstrap_not_configured",
+    ),
+    "replace",
+  );
+
+  for (const path of ["/v1/auth/logout", "/v1/auth/logout-all"] as const) {
+    addRoutineError(
+      document,
+      path,
+      "post",
+      400,
+      "The supplied principal is not a user session",
+      closedExactErrorSchema("not a session", "not_session"),
+      "replace",
+    );
+  }
+
+  const organizationNotFoundSchema = anyOfSchemas(
+    exactErrorOnlySchema("organization not found"),
+    closedExactErrorSchema("organization not found", "not_found"),
+  );
+  addRoutineError(
+    document,
+    "/v1/auth/switch-tenant",
+    "post",
+    404,
+    "The organization does not exist or is inactive",
+    closedExactErrorSchema("organization not found", "not_found"),
+    "replace",
+  );
+  for (const [path, method] of [
+    ["/v1/tenants/{id}", "get"],
+    ["/v1/tenants/{id}", "patch"],
+    ["/v1/tenants/{id}", "put"],
+    ["/v1/tenants/{id}", "delete"],
+  ] as const) {
+    addRoutineError(
+      document,
+      path,
+      method,
+      404,
+      "The organization does not exist in the caller's scope",
+      organizationNotFoundSchema,
+      "replace",
+    );
+  }
+
+  const membershipNotFoundSchema = anyOfSchemas(
+    exactErrorOnlySchema("membership not found"),
+    closedExactErrorSchema("membership not found", "not_found"),
+  );
+  for (const method of ["patch", "put", "delete"] as const) {
+    addRoutineError(
+      document,
+      "/v1/memberships/{id}",
+      method,
+      404,
+      "The membership does not exist in the caller's scope",
+      membershipNotFoundSchema,
+      "replace",
+    );
+  }
+
+  const keyNotFoundSchema = anyOfSchemas(
+    exactErrorOnlySchema("key not found"),
+    closedExactErrorSchema("key not found", "not_found"),
+  );
+  addRoutineError(document, "/v1/keys/{id}", "delete", 404, "Key not found", keyNotFoundSchema, "replace");
+  addRoutineError(document, "/v1/keys/{id}/revoke", "post", 404, "Key not found", keyNotFoundSchema, "replace");
+
+  addRoutineError(
+    document,
+    "/v1/domains",
+    "post",
+    409,
+    "The domain already exists in the tenant or its inbound route is claimed",
+    anyOfSchemas(closedErrorOnlySchema, inboundRouteConflictSchema),
+    "replace",
+  );
+  for (const method of ["get", "patch", "put", "delete"] as const) {
+    addRoutineError(
+      document,
+      "/v1/domains/{id}",
+      method,
+      404,
+      "Domain not found",
+      exactErrorOnlySchema("domain not found"),
+      "replace",
+    );
+  }
+  for (const method of ["patch", "put"] as const) {
+    addRoutineError(
+      document,
+      "/v1/domains/{id}",
+      method,
+      409,
+      "The inbound domain route is already claimed",
+      inboundRouteConflictSchema,
+      "replace",
+    );
+  }
+
+  for (const method of ["get", "delete"] as const) {
+    addRoutineError(
+      document,
+      "/v1/addresses/{id}",
+      method,
+      404,
+      "Address not found",
+      exactErrorOnlySchema("address not found"),
+      "replace",
+    );
+  }
+  for (const method of ["patch", "put"] as const) {
+    addRoutineError(
+      document,
+      "/v1/addresses/{id}",
+      method,
+      404,
+      "Address or referenced owner not found",
+      anyOfSchemas(exactErrorOnlySchema("address not found"), crossTenantReferenceSchema),
+      "replace",
+    );
+  }
+
+  addRoutineError(
+    document,
+    "/v1/messages",
+    "get",
+    400,
+    "A message list query parameter is invalid",
+    closedErrorOnlySchema,
+    "replace",
+  );
+  addRoutineError(
+    document,
+    "/v1/messages",
+    "post",
+    409,
+    "Outbound messages must use the send operation",
+    exactErrorOnlySchema("outbound messages must be sent through POST /v1/messages/send"),
+    "replace",
+  );
+
+  const messageNotFoundSchema = exactErrorOnlySchema("message not found");
+  const ambiguousMessageSchema = closedExactErrorSchema(
+    "ambiguous message id prefix",
+    "ambiguous_id",
+  );
+  for (const method of ["get", "patch", "put"] as const) {
+    addRoutineError(
+      document,
+      "/v1/messages/{id}",
+      method,
+      404,
+      "Message not found",
+      messageNotFoundSchema,
+      "replace",
+    );
+    addRoutineError(
+      document,
+      "/v1/messages/{id}",
+      method,
+      409,
+      "Message id prefix is ambiguous",
+      ambiguousMessageSchema,
+      "replace",
+    );
+  }
+  addRoutineError(
+    document,
+    "/v1/messages/{id}/raw",
+    "get",
+    404,
+    "Message not found",
+    messageNotFoundSchema,
+    "replace",
+  );
+  addRoutineError(
+    document,
+    "/v1/messages/{id}/raw",
+    "get",
+    409,
+    "Message id prefix is ambiguous",
+    ambiguousMessageSchema,
+    "replace",
+  );
+
+  addRoutineError(
+    document,
+    "/v1/send-keys/mint",
+    "post",
+    404,
+    "The owner belongs to another tenant",
+    crossTenantReferenceSchema,
+    "replace",
+  );
 }
 
 export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
@@ -864,7 +2108,7 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
         ...publicOperation,
         operationId: "getHealth",
         summary: "Liveness probe with database reachability",
-        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+        responses: { "200": { content: { "application/json": { schema: healthResponseSchema } } } },
       },
     },
     "/ready": {
@@ -873,8 +2117,8 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
         operationId: "getReady",
         summary: "Readiness probe (reachable and fully migrated)",
         responses: {
-          "200": { content: { "application/json": { schema: { type: "object" } } } },
-          "503": { content: { "application/json": { schema: { type: "object" } } } },
+          "200": { content: { "application/json": { schema: readyResponseSchema("ready", true) } } },
+          "503": { content: { "application/json": { schema: readyResponseSchema("not_ready", false) } } },
         },
       },
     },
@@ -883,7 +2127,7 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
         ...publicOperation,
         operationId: "getVersion",
         summary: "Service version and mode",
-        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+        responses: { "200": { content: { "application/json": { schema: versionResponseSchema } } } },
       },
     },
     "/openapi.json": {
@@ -891,7 +2135,7 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
         ...publicOperation,
         operationId: "getOpenApiDocument",
         summary: "Return this OpenAPI document",
-        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+        responses: { "200": { content: { "application/json": { schema: openApiDocumentResponseSchema } } } },
       },
     },
     "/v1/openapi.json": {
@@ -899,7 +2143,21 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
         ...publicOperation,
         operationId: "getVersionedOpenApiDocument",
         summary: "Return this OpenAPI document from the versioned API prefix",
-        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+        responses: { "200": { content: { "application/json": { schema: openApiDocumentResponseSchema } } } },
+      },
+    },
+    "/v1/auth/providers": {
+      get: {
+        ...publicOperation,
+        operationId: "listAuthProviders",
+        summary: "Report optional self-hosted sign-in providers",
+        responses: {
+          "200": {
+            content: {
+              "application/json": { schema: authProvidersResponseSchema },
+            },
+          },
+        },
       },
     },
     "/v1/auth/signup": {
@@ -925,7 +2183,13 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
             },
           },
         },
-        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+        responses: {
+          "200": { content: { "application/json": { schema: signupResponseSchema } } },
+          "403": jsonResponse(
+            "The signup email is outside the configured Hasna address policy",
+            signupForbiddenResponseSchema,
+          ),
+        },
       },
     },
     "/v1/auth/login": {
@@ -949,7 +2213,17 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
             },
           },
         },
-        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+        responses: {
+          "200": { content: { "application/json": { schema: loginResponseSchema } } },
+          "401": jsonResponse(
+            "The supplied credentials are invalid",
+            loginUnauthorizedResponseSchema,
+          ),
+          "403": jsonResponse(
+            "The account is not eligible to start a session",
+            loginForbiddenResponseSchema,
+          ),
+        },
       },
     },
     "/v1/auth/verify-email": {
@@ -958,7 +2232,13 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
         operationId: "verifyEmailLink",
         summary: "Verify a user email from a query-string token",
         parameters: [{ name: "token", in: "query", required: true, schema: { type: "string" } }],
-        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+        responses: {
+          "200": { content: { "application/json": { schema: verifiedEmailResponseSchema } } },
+          "400": jsonResponse(
+            "The verification token is missing, invalid, expired, or already used",
+            verifyEmailBadRequestResponseSchema,
+          ),
+        },
       },
       post: {
         ...publicOperation,
@@ -968,7 +2248,13 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
           required: true,
           content: { "application/json": { schema: { type: "object", properties: { token: { type: "string" } }, required: ["token"] } } },
         },
-        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+        responses: {
+          "200": { content: { "application/json": { schema: verifiedEmailResponseSchema } } },
+          "400": jsonResponse(
+            "The verification token is missing, invalid, expired, or already used",
+            verifyEmailBadRequestResponseSchema,
+          ),
+        },
       },
     },
     "/v1/auth/verify-email/resend": {
@@ -980,7 +2266,7 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
           required: true,
           content: { "application/json": { schema: { type: "object", properties: { email: { type: "string", format: "email" } }, required: ["email"] } } },
         },
-        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+        responses: { "200": { content: { "application/json": { schema: verificationRequiredResponseSchema } } } },
       },
     },
     "/v1/auth/password/forgot": {
@@ -992,7 +2278,7 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
           required: true,
           content: { "application/json": { schema: { type: "object", properties: { email: { type: "string", format: "email" } }, required: ["email"] } } },
         },
-        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+        responses: { "200": { content: { "application/json": { schema: passwordResetRequestedResponseSchema } } } },
       },
     },
     "/v1/auth/password/reset": {
@@ -1012,7 +2298,7 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
             },
           },
         },
-        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+        responses: { "200": { content: { "application/json": { schema: passwordResetResponseSchema } } } },
       },
     },
     "/v1/invites/accept": {
@@ -1036,7 +2322,7 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
             },
           },
         },
-        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+        responses: { "200": { content: { "application/json": { schema: inviteAcceptedResponseSchema } } } },
       },
     },
     "/v1/auth/bootstrap-owner": {
@@ -1060,7 +2346,13 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
             },
           },
         },
-        responses: { "201": { content: { "application/json": { schema: { type: "object" } } } } },
+        responses: {
+          "201": { content: { "application/json": { schema: bootstrapOwnerResponseSchema } } },
+          "409": jsonResponse(
+            "The tenant already has an owner or the email is already registered",
+            bootstrapOwnerConflictResponseSchema,
+          ),
+        },
       },
     },
     "/v1/auth/bootstrap-super-admin": {
@@ -1085,8 +2377,8 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
           },
         },
         responses: {
-          "200": { content: { "application/json": { schema: { type: "object" } } } },
-          "201": { content: { "application/json": { schema: { type: "object" } } } },
+          "200": { content: { "application/json": { schema: bootstrapSuperAdminResponseSchema } } },
+          "201": { content: { "application/json": { schema: bootstrapSuperAdminResponseSchema } } },
         },
       },
     },
@@ -1094,14 +2386,14 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
       post: {
         operationId: "logOut",
         summary: "Revoke the current user session",
-        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+        responses: { "200": { content: { "application/json": { schema: loggedOutResponseSchema } } } },
       },
     },
     "/v1/auth/logout-all": {
       post: {
         operationId: "logOutAll",
         summary: "Revoke every session for the current user",
-        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+        responses: { "200": { content: { "application/json": { schema: loggedOutResponseSchema } } } },
       },
     },
     "/v1/auth/switch-tenant": {
@@ -1112,14 +2404,20 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
           required: true,
           content: { "application/json": { schema: { type: "object", properties: { tenant_slug: { type: "string" } }, required: ["tenant_slug"] } } },
         },
-        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+        responses: {
+          "200": { content: { "application/json": { schema: tenantSwitchResponseSchema } } },
+          "404": jsonResponse(
+            "The requested organization does not exist or is inactive",
+            switchTenantNotFoundResponseSchema,
+          ),
+        },
       },
     },
     "/v1/me": {
       get: {
         operationId: "getCurrentPrincipal",
         summary: "Return the authenticated user or API-key principal and active tenant",
-        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+        responses: { "200": { content: { "application/json": { schema: currentPrincipalResponseSchema } } } },
       },
     },
     "/v1/me/email-identities": {
@@ -1130,7 +2428,16 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
           "200": {
             content: {
               "application/json": {
-                schema: { type: "object", properties: { email_identities: { type: "array", items: { $ref: "#/components/schemas/EmailIdentity" } } } },
+                schema: {
+                  type: "object",
+                  properties: {
+                    email_identities: {
+                      type: "array",
+                      items: { $ref: "#/components/schemas/EmailIdentity" },
+                    },
+                  },
+                  required: ["email_identities"],
+                },
               },
             },
           },
@@ -1143,7 +2450,22 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
           required: true,
           content: { "application/json": { schema: { type: "object", properties: { email: { type: "string", format: "email" } }, required: ["email"] } } },
         },
-        responses: { "201": { content: { "application/json": { schema: { type: "object" } } } } },
+        responses: {
+          "201": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    email_identity: { $ref: "#/components/schemas/EmailIdentity" },
+                    verification_required: trueSchema,
+                  },
+                  required: ["email_identity", "verification_required"],
+                },
+              },
+            },
+          },
+        },
       },
     },
     "/v1/me/email-identities/{id}": {
@@ -1151,7 +2473,7 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
         operationId: "removeEmailIdentity",
         summary: "Remove a non-primary email identity",
         parameters: [...idParam],
-        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+        responses: { "200": { content: { "application/json": { schema: removedReceiptSchema } } } },
       },
     },
     "/v1/me/email-identities/{id}/primary": {
@@ -1159,7 +2481,21 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
         operationId: "makePrimaryEmailIdentity",
         summary: "Make a verified email identity primary",
         parameters: [...idParam],
-        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+        responses: {
+          "200": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    email_identity: { $ref: "#/components/schemas/EmailIdentity" },
+                  },
+                  required: ["email_identity"],
+                },
+              },
+            },
+          },
+        },
       },
     },
     "/v1/tenants": {
@@ -1167,7 +2503,22 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
         operationId: "listTenants",
         summary: "List the current user's active tenant memberships",
         responses: {
-          "200": { content: { "application/json": { schema: { type: "object", properties: { tenants: { type: "array", items: { $ref: "#/components/schemas/Tenant" } } } } } } },
+          "200": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    tenants: {
+                      type: "array",
+                      items: { $ref: "#/components/schemas/TenantMembershipSummary" },
+                    },
+                  },
+                  required: ["tenants"],
+                },
+              },
+            },
+          },
         },
       },
       post: {
@@ -1185,14 +2536,44 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
             },
           },
         },
-        responses: { "201": { content: { "application/json": { schema: { type: "object" } } } } },
+        responses: {
+          "201": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    tenant: { $ref: "#/components/schemas/Tenant" },
+                    role: roleSchema,
+                  },
+                  required: ["tenant", "role"],
+                },
+              },
+            },
+          },
+        },
       },
     },
     "/v1/tenants/{id}": {
       get: {
         operationId: "getTenant",
         parameters: [...idParam],
-        responses: { "200": { content: { "application/json": { schema: { type: "object", properties: { tenant: { $ref: "#/components/schemas/Tenant" } } } } } } },
+        responses: {
+          "200": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    tenant: { $ref: "#/components/schemas/Tenant" },
+                    role: roleSchema,
+                  },
+                  required: ["tenant"],
+                },
+              },
+            },
+          },
+        },
       },
       patch: {
         operationId: "updateTenant",
@@ -1204,7 +2585,19 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
             },
           },
         },
-        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+        responses: {
+          "200": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: { tenant: { $ref: "#/components/schemas/Tenant" } },
+                  required: ["tenant"],
+                },
+              },
+            },
+          },
+        },
       },
       put: {
         operationId: "replaceTenant",
@@ -1217,13 +2610,40 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
             },
           },
         },
-        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+        responses: {
+          "200": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: { tenant: { $ref: "#/components/schemas/Tenant" } },
+                  required: ["tenant"],
+                },
+              },
+            },
+          },
+        },
       },
       delete: {
         operationId: "suspendTenant",
         summary: "Suspend a tenant; owner role required",
         parameters: [...idParam],
-        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+        responses: {
+          "200": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    suspended: trueSchema,
+                    id: { type: "string", format: "uuid" },
+                  },
+                  required: ["suspended", "id"],
+                },
+              },
+            },
+          },
+        },
       },
     },
     "/v1/tenants/{id}/members": {
@@ -1235,7 +2655,16 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
           "200": {
             content: {
               "application/json": {
-                schema: { type: "object", properties: { members: { type: "array", items: { $ref: "#/components/schemas/Membership" } } } },
+                schema: {
+                  type: "object",
+                  properties: {
+                    members: {
+                      type: "array",
+                      items: { $ref: "#/components/schemas/Membership" },
+                    },
+                  },
+                  required: ["members"],
+                },
               },
             },
           },
@@ -1247,7 +2676,24 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
         operationId: "listTenantInvites",
         summary: "List outstanding tenant invitations; owner or admin role required",
         parameters: [...idParam],
-        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+        responses: {
+          "200": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    invites: {
+                      type: "array",
+                      items: { $ref: "#/components/schemas/Invitation" },
+                    },
+                  },
+                  required: ["invites"],
+                },
+              },
+            },
+          },
+        },
       },
       post: {
         operationId: "createTenantInvite",
@@ -1268,7 +2714,24 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
             },
           },
         },
-        responses: { "201": { content: { "application/json": { schema: { type: "object" } } } } },
+        responses: {
+          "201": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    invited: trueSchema,
+                    email: { type: "string", format: "email" },
+                    role: { type: "string", enum: ["owner", "admin", "member"] },
+                    expires_at: { type: "string", format: "date-time" },
+                  },
+                  required: ["invited", "email", "role", "expires_at"],
+                },
+              },
+            },
+          },
+        },
       },
     },
     "/v1/memberships/{id}": {
@@ -1288,7 +2751,21 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
             },
           },
         },
-        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+        responses: {
+          "200": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    membership: { $ref: "#/components/schemas/MembershipSummary" },
+                  },
+                  required: ["membership"],
+                },
+              },
+            },
+          },
+        },
       },
       put: {
         operationId: "replaceMembership",
@@ -1306,20 +2783,51 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
             },
           },
         },
-        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+        responses: {
+          "200": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    membership: { $ref: "#/components/schemas/MembershipSummary" },
+                  },
+                  required: ["membership"],
+                },
+              },
+            },
+          },
+        },
       },
       delete: {
         operationId: "removeMembership",
         summary: "Remove a tenant membership under owner/admin role gates",
         parameters: [...idParam],
-        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+        responses: { "200": { content: { "application/json": { schema: removedReceiptSchema } } } },
       },
     },
     "/v1/keys": {
       get: {
         operationId: "listTenantKeys",
         summary: "List tenant API-key metadata; owner or admin user session required",
-        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+        responses: {
+          "200": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    keys: {
+                      type: "array",
+                      items: tenantKeyListItemSchema,
+                    },
+                  },
+                  required: ["keys"],
+                },
+              },
+            },
+          },
+        },
       },
       post: {
         operationId: "createTenantKey",
@@ -1337,7 +2845,24 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
             },
           },
         },
-        responses: { "201": { content: { "application/json": { schema: { type: "object" } } } } },
+        responses: {
+          "201": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    token: { type: "string" },
+                    kid: { type: "string" },
+                    scopes: { type: "array", items: { type: "string" } },
+                    expires_at: { type: "string", format: "date-time", nullable: true },
+                  },
+                  required: ["token", "kid", "scopes", "expires_at"],
+                },
+              },
+            },
+          },
+        },
       },
     },
     "/v1/keys/{id}": {
@@ -1345,7 +2870,45 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
         operationId: "revokeTenantKey",
         summary: "Revoke a tenant API key; owner or admin user session required",
         parameters: [...idParam],
-        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+        responses: {
+          "200": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    revoked: trueSchema,
+                    kid: { type: "string" },
+                  },
+                  required: ["revoked", "kid"],
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    "/v1/keys/{id}/revoke": {
+      post: {
+        operationId: "revokeTenantKeyByPost",
+        summary: "Compatibility route for revoking a tenant API key",
+        parameters: [...idParam],
+        responses: {
+          "200": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    revoked: trueSchema,
+                    kid: { type: "string" },
+                  },
+                  required: ["revoked", "kid"],
+                },
+              },
+            },
+          },
+        },
       },
     },
     "/v1/domains": {
@@ -1357,7 +2920,16 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
           "200": {
             content: {
               "application/json": {
-                schema: { type: "object", properties: { domains: { type: "array", items: { $ref: "#/components/schemas/Domain" } } } },
+                schema: {
+                  type: "object",
+                  properties: {
+                    domains: {
+                      type: "array",
+                      items: { $ref: "#/components/schemas/Domain" },
+                    },
+                  },
+                  required: ["domains"],
+                },
               },
             },
           },
@@ -1384,14 +2956,38 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
             },
           },
         },
-        responses: { "201": { content: { "application/json": { schema: { type: "object", properties: { domain: { $ref: "#/components/schemas/Domain" } } } } } } },
+        responses: {
+          "201": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: { domain: { $ref: "#/components/schemas/Domain" } },
+                  required: ["domain"],
+                },
+              },
+            },
+          },
+        },
       },
     },
     "/v1/domains/{id}": {
       get: {
         operationId: "getDomain",
         parameters: [...idParam],
-        responses: { "200": { content: { "application/json": { schema: { type: "object", properties: { domain: { $ref: "#/components/schemas/Domain" } } } } } } },
+        responses: {
+          "200": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: { domain: { $ref: "#/components/schemas/Domain" } },
+                  required: ["domain"],
+                },
+              },
+            },
+          },
+        },
       },
       patch: {
         operationId: "updateDomain",
@@ -1406,19 +3002,75 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
             },
           },
         },
-        responses: { "200": { content: { "application/json": { schema: { type: "object", properties: { domain: { $ref: "#/components/schemas/Domain" } } } } } } },
+        responses: {
+          "200": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: { domain: { $ref: "#/components/schemas/Domain" } },
+                  required: ["domain"],
+                },
+              },
+            },
+          },
+        },
+      },
+      put: {
+        operationId: "replaceDomain",
+        parameters: [...idParam],
+        requestBody: {
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: { status: { type: "string" }, provider: { type: "string", nullable: true }, verified: { type: "boolean" }, notes: { type: "string", nullable: true }, ...domainProvisioningProps },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: { domain: { $ref: "#/components/schemas/Domain" } },
+                  required: ["domain"],
+                },
+              },
+            },
+          },
+        },
       },
       delete: {
         operationId: "deleteDomain",
         parameters: [...idParam],
-        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+        responses: { "200": { content: { "application/json": { schema: deleteReceiptSchema } } } },
       },
     },
     "/v1/addresses": {
       get: {
         operationId: "listAddresses",
         parameters: [...listParams],
-        responses: { "200": { content: { "application/json": { schema: { type: "object", properties: { addresses: { type: "array", items: { $ref: "#/components/schemas/Address" } } } } } } } },
+        responses: {
+          "200": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    addresses: {
+                      type: "array",
+                      items: { $ref: "#/components/schemas/Address" },
+                    },
+                  },
+                  required: ["addresses"],
+                },
+              },
+            },
+          },
+        },
       },
       post: {
         operationId: "createAddress",
@@ -1431,25 +3083,79 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
             },
           },
         },
-        responses: { "201": { content: { "application/json": { schema: { type: "object", properties: { address: { $ref: "#/components/schemas/Address" } } } } } } },
+        responses: {
+          "201": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: { address: { $ref: "#/components/schemas/Address" } },
+                  required: ["address"],
+                },
+              },
+            },
+          },
+        },
       },
     },
     "/v1/addresses/{id}": {
       get: {
         operationId: "getAddress",
         parameters: [...idParam],
-        responses: { "200": { content: { "application/json": { schema: { type: "object", properties: { address: { $ref: "#/components/schemas/Address" } } } } } } },
+        responses: {
+          "200": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: { address: { $ref: "#/components/schemas/Address" } },
+                  required: ["address"],
+                },
+              },
+            },
+          },
+        },
       },
       patch: {
         operationId: "updateAddress",
         parameters: [...idParam],
         requestBody: { content: { "application/json": { schema: { type: "object", properties: { display_name: { type: "string", nullable: true }, status: { type: "string" }, verified: { type: "boolean" }, daily_quota: { type: "integer", nullable: true }, ...addressProvisioningProps } } } } },
-        responses: { "200": { content: { "application/json": { schema: { type: "object", properties: { address: { $ref: "#/components/schemas/Address" } } } } } } },
+        responses: {
+          "200": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: { address: { $ref: "#/components/schemas/Address" } },
+                  required: ["address"],
+                },
+              },
+            },
+          },
+        },
+      },
+      put: {
+        operationId: "replaceAddress",
+        parameters: [...idParam],
+        requestBody: { content: { "application/json": { schema: { type: "object", properties: { display_name: { type: "string", nullable: true }, status: { type: "string" }, verified: { type: "boolean" }, daily_quota: { type: "integer", nullable: true }, ...addressProvisioningProps } } } } },
+        responses: {
+          "200": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: { address: { $ref: "#/components/schemas/Address" } },
+                  required: ["address"],
+                },
+              },
+            },
+          },
+        },
       },
       delete: {
         operationId: "deleteAddress",
         parameters: [...idParam],
-        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+        responses: { "200": { content: { "application/json": { schema: deleteReceiptSchema } } } },
       },
     },
     "/v1/messages": {
@@ -1468,7 +3174,29 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
           { name: "search", in: "query", required: false, schema: { type: "string" }, description: "Substring search over from/to/subject/body AND attachment filename/content_type." },
           { name: "since", in: "query", required: false, schema: { type: "string", format: "date-time" } },
         ],
-        responses: { "200": { content: { "application/json": { schema: { type: "object", properties: { messages: { type: "array", items: { $ref: "#/components/schemas/MessageListItem" } }, next_cursor: { type: "string", nullable: true, description: "Cursor for the next page; null when this page is the last." } } } } } } },
+        responses: {
+          "200": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    messages: {
+                      type: "array",
+                      items: { $ref: "#/components/schemas/MessageListItem" },
+                    },
+                    next_cursor: {
+                      type: "string",
+                      nullable: true,
+                      description: "Cursor for the next page; null when this page is the last.",
+                    },
+                  },
+                  required: ["messages", "next_cursor"],
+                },
+              },
+            },
+          },
+        },
       },
       post: {
         operationId: "createMessage",
@@ -1506,8 +3234,28 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
           },
         },
         responses: {
-          "200": { content: { "application/json": { schema: { type: "object", properties: { message: { $ref: "#/components/schemas/Message" } } } } } },
-          "201": { content: { "application/json": { schema: { type: "object", properties: { message: { $ref: "#/components/schemas/Message" } } } } } },
+          "200": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: { message: { $ref: "#/components/schemas/Message" } },
+                  required: ["message"],
+                },
+              },
+            },
+          },
+          "201": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: { message: { $ref: "#/components/schemas/Message" } },
+                  required: ["message"],
+                },
+              },
+            },
+          },
         },
       },
     },
@@ -1518,7 +3266,21 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
         parameters: [
           { name: "domain", in: "query", required: false, explode: true, schema: { type: "array", items: { type: "string" } }, description: "Repeatable. Scope counts to mail with a to/cc recipient at one of these domains." },
         ],
-        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+        responses: {
+          "200": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    counts: { $ref: "#/components/schemas/MessageCounts" },
+                  },
+                  required: ["counts"],
+                },
+              },
+            },
+          },
+        },
       },
     },
     "/v1/messages/groups": {
@@ -1528,7 +3290,15 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
         parameters: [
           { name: "domain", in: "query", required: false, explode: true, schema: { type: "array", items: { type: "string" } }, description: "Repeatable. Scope counts to mail with a to/cc recipient at one of these domains." },
         ],
-        responses: { "200": { content: { "application/json": { schema: { type: "object", properties: { inbox: { type: "integer" }, unread: { type: "integer" }, starred: { type: "integer" }, sent: { type: "integer" }, archived: { type: "integer" }, spam: { type: "integer" }, trash: { type: "integer" }, total: { type: "integer" }, latest_received_at: { type: "string", format: "date-time", nullable: true } } } } } } },
+        responses: {
+          "200": {
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/MessageCounts" },
+              },
+            },
+          },
+        },
       },
     },
     "/v1/messages/threads": {
@@ -1536,7 +3306,24 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
         operationId: "listThreads",
         summary: "Mail-view: subject-rolled-up conversation list (newest activity first)",
         parameters: [...listParams],
-        responses: { "200": { content: { "application/json": { schema: { type: "object", properties: { threads: { type: "array", items: { $ref: "#/components/schemas/Thread" } } } } } } } },
+        responses: {
+          "200": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    threads: {
+                      type: "array",
+                      items: { $ref: "#/components/schemas/Thread" },
+                    },
+                  },
+                  required: ["threads"],
+                },
+              },
+            },
+          },
+        },
       },
     },
     "/v1/messages/send": {
@@ -1593,31 +3380,31 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
             description: "Completed idempotent replay of an existing sent intent",
             content: {
               "application/json": {
-                schema: sendMessageResponseSchema,
+                schema: sendMessageReplayResponseSchema,
               },
             },
           },
           "202": {
             description: "Newly accepted send or an existing send still in progress",
-            content: { "application/json": { schema: sendMessageResponseSchema } },
+            content: { "application/json": { schema: sendMessageAcceptedResponseSchema } },
           },
-          "400": { description: "Invalid send request" },
-          "401": { description: "Authentication required" },
-          "403": { description: "Sender or tenant scope is not authorized" },
+          "400": errorResponse("Invalid send request"),
+          "401": errorResponse("Authentication required"),
+          "403": errorResponse("Sender or tenant scope is not authorized"),
           "409": { content: { "application/json": { schema: { $ref: "#/components/schemas/SendMessageError" } } } },
           "422": {
             description: "The provider definitively rejected the message (nothing was sent); the body carries the real provider error and sent:false",
             content: { "application/json": { schema: { $ref: "#/components/schemas/SendMessageError" } } },
           },
-          "429": { description: "Tenant or sender quota exceeded" },
-          "413": { description: "Request body exceeds the service limit" },
+          "429": errorResponse("Tenant or sender quota exceeded"),
+          "413": errorResponse("Request body exceeds the service limit"),
           "503": {
             description: "A rejected intent could not be re-armed for retry (sent: false — nothing was sent); safe to retry later",
             content: { "application/json": { schema: { $ref: "#/components/schemas/SendMessageError" } } },
           },
           "502": {
             description: "The provider call ended without a definitive outcome (sent: null); reconcile before retrying",
-            content: { "application/json": { schema: { $ref: "#/components/schemas/SendMessageError" } } },
+            content: { "application/json": { schema: providerOutcomeUncertainErrorSchema } },
           },
         },
       },
@@ -1642,10 +3429,10 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
               },
             },
           },
-          "400": { description: "Invalid idempotency key" },
-          "401": { description: "Authentication required" },
-          "403": { description: "Tenant read scope is not authorized" },
-          "413": { description: "Request body exceeds the service limit" },
+          "400": errorResponse("Invalid idempotency key"),
+          "401": errorResponse("Authentication required"),
+          "403": errorResponse("Tenant read scope is not authorized"),
+          "413": errorResponse("Request body exceeds the service limit"),
         },
       },
     },
@@ -1675,8 +3462,8 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
               },
             },
           },
-          "401": { description: "Authentication required" },
-          "403": { description: "Tenant read scope is not authorized" },
+          "401": errorResponse("Authentication required"),
+          "403": errorResponse("Tenant read scope is not authorized"),
         },
       },
     },
@@ -1722,12 +3509,12 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
               },
             },
           },
-          "400": { description: "Missing message_id/outcome/evidence, or provider_message_id for a 'sent' outcome" },
-          "401": { description: "Authentication required" },
-          "403": { description: "Tenant write scope is not authorized" },
-          "404": { description: "Message not found" },
-          "409": { description: "The send intent is not (or is no longer) uncertain" },
-          "413": { description: "Request body exceeds the service limit" },
+          "400": errorResponse("Missing message_id/outcome/evidence, or provider_message_id for a 'sent' outcome"),
+          "401": errorResponse("Authentication required"),
+          "403": errorResponse("Tenant write scope is not authorized"),
+          "404": errorResponse("Message not found"),
+          "409": errorResponse("The send intent is not (or is no longer) uncertain"),
+          "413": errorResponse("Request body exceeds the service limit"),
         },
       },
     },
@@ -1751,10 +3538,10 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
               },
             },
           },
-          "400": { description: "Invalid idempotency key" },
-          "401": { description: "Authentication required" },
-          "403": { description: "Tenant write scope is not authorized" },
-          "413": { description: "Request body exceeds the service limit" },
+          "400": errorResponse("Invalid idempotency key"),
+          "401": errorResponse("Authentication required"),
+          "403": errorResponse("Tenant write scope is not authorized"),
+          "413": errorResponse("Request body exceeds the service limit"),
         },
       },
     },
@@ -1762,22 +3549,66 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
       get: {
         operationId: "getMessage",
         parameters: [...idParam],
-        responses: { "200": { content: { "application/json": { schema: { type: "object", properties: { message: { $ref: "#/components/schemas/Message" } } } } } } },
+        responses: {
+          "200": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: { message: { $ref: "#/components/schemas/Message" } },
+                  required: ["message"],
+                },
+              },
+            },
+          },
+          "404": errorResponse("Message not found"),
+          "409": errorResponse("Message id prefix is ambiguous"),
+        },
       },
       patch: {
         operationId: "updateMessage",
         parameters: [...idParam],
         requestBody: { content: { "application/json": { schema: { type: "object", properties: { status: { type: "string" }, provider_message_id: { type: "string", nullable: true }, is_read: { type: "boolean" }, is_starred: { type: "boolean" }, archived: { type: "boolean" }, add_label: { type: "string" }, remove_label: { type: "string" } } } } } },
-        responses: { "200": { content: { "application/json": { schema: { type: "object", properties: { message: { $ref: "#/components/schemas/Message" } } } } } } },
+        responses: {
+          "200": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: { message: { $ref: "#/components/schemas/Message" } },
+                  required: ["message"],
+                },
+              },
+            },
+          },
+        },
+      },
+      put: {
+        operationId: "replaceMessage",
+        parameters: [...idParam],
+        requestBody: { content: { "application/json": { schema: { type: "object", properties: { status: { type: "string" }, provider_message_id: { type: "string", nullable: true }, is_read: { type: "boolean" }, is_starred: { type: "boolean" }, archived: { type: "boolean" }, add_label: { type: "string" }, remove_label: { type: "string" } } } } } },
+        responses: {
+          "200": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: { message: { $ref: "#/components/schemas/Message" } },
+                  required: ["message"],
+                },
+              },
+            },
+          },
+        },
       },
       delete: {
         operationId: "deleteMessage",
         parameters: [...idParam],
         responses: {
-          "200": { content: { "application/json": { schema: { type: "object" } } } },
-          "401": { description: "Authentication required" },
-          "403": { description: "Tenant write scope is not authorized" },
-          "404": { description: "Message not found" },
+          "200": { content: { "application/json": { schema: deleteReceiptSchema } } },
+          "401": errorResponse("Authentication required"),
+          "403": errorResponse("Tenant write scope is not authorized"),
+          "404": errorResponse("Message not found"),
           "409": {
             description: "Durable send-intent ledger rows cannot be deleted",
             content: { "application/json": { schema: { $ref: "#/components/schemas/SendMessageError" } } },
@@ -1795,8 +3626,8 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
         ],
         responses: {
           "200": { content: { "application/json": { schema: attachmentContentResponseSchema } } },
-          "400": { description: "Invalid max_bytes attachment byte limit" },
-          "404": { description: "Message or attachment index not found" },
+          "400": errorResponse("Invalid max_bytes attachment byte limit"),
+          "404": errorResponse("Message or attachment index not found"),
           "409": {
             description: "Attachment metadata exists but its content is not stored",
             content: {
@@ -1805,8 +3636,8 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
               },
             },
           },
-          "413": { description: "Attachment exceeds the requested or service byte limit" },
-          "422": { description: "Stored attachment payload is malformed" },
+          "413": errorResponse("Attachment exceeds the requested or service byte limit"),
+          "422": errorResponse("Stored attachment payload is malformed"),
         },
       },
     },
@@ -1871,7 +3702,10 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
                   properties: {
                     by_message_id: {
                       type: "object",
-                      additionalProperties: { type: "array", items: { $ref: "#/components/schemas/AttachmentMeta" } },
+                      additionalProperties: {
+                        type: "array",
+                        items: { $ref: "#/components/schemas/AttachmentBatchMeta" },
+                      },
                       description: "Attachment metadata keyed by message_id (only ids resolvable in this tenant).",
                     },
                     unknown_ids: { type: "array", items: { type: "string" }, description: "Requested ids not found in this tenant (nonexistent or foreign)." },
@@ -1882,7 +3716,7 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
               },
             },
           },
-          "400": { description: "message_ids missing, empty, malformed, or over the 200-id batch limit" },
+          "400": errorResponse("message_ids missing, empty, malformed, or over the 200-id batch limit"),
         },
       },
     },
@@ -1949,8 +3783,8 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
               },
             },
           },
-          "401": { description: "Authentication required" },
-          "403": { description: "Tenant operator authorization is required" },
+          "401": errorResponse("Authentication required"),
+          "403": errorResponse("Tenant operator authorization is required"),
           "409": {
             description:
               "The idempotency key belongs to another immutable manifest, or the reviewed dry-run proof does not exactly match this tenant and current manifest",
@@ -2022,9 +3856,9 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
             },
           },
           "400": invalidAttachmentRepairIdResponse,
-          "401": { description: "Authentication required" },
-          "403": { description: "Tenant operator authorization is required" },
-          "404": { description: "Run does not exist in the authenticated tenant" },
+          "401": errorResponse("Authentication required"),
+          "403": errorResponse("Tenant operator authorization is required"),
+          "404": errorResponse("Run does not exist in the authenticated tenant"),
         },
       },
     },
@@ -2066,9 +3900,9 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
             },
           },
           "400": invalidAttachmentRepairResumeResponse,
-          "401": { description: "Authentication required" },
-          "403": { description: "Tenant operator authorization is required" },
-          "404": { description: "Run does not exist in the authenticated tenant" },
+          "401": errorResponse("Authentication required"),
+          "403": errorResponse("Tenant operator authorization is required"),
+          "404": errorResponse("Run does not exist in the authenticated tenant"),
           "503": attachmentRepairNotConfiguredResponse,
         },
       },
@@ -2082,7 +3916,14 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
           "200": {
             content: {
               "application/json": {
-                schema: { type: "object", properties: { raw: { type: "string" }, message_id: { type: "string", nullable: true } }, required: ["raw"] },
+                schema: {
+                  type: "object",
+                  properties: {
+                    raw: { type: "string" },
+                    message_id: { type: "string", nullable: true },
+                  },
+                  required: ["raw", "message_id"],
+                },
               },
             },
           },
@@ -2101,8 +3942,9 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
                   type: "object",
                   properties: {
                     mailboxes: { type: "array", items: { $ref: "#/components/schemas/Mailbox" } },
-                    counts: { type: "object", additionalProperties: true },
+                    counts: { $ref: "#/components/schemas/MessageCounts" },
                   },
+                  required: ["mailboxes", "counts"],
                 },
               },
             },
@@ -2136,7 +3978,10 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
               "application/json": {
                 schema: {
                   type: "object",
-                  properties: { token: { type: "string" }, key: { type: "object", additionalProperties: true } },
+                  properties: {
+                    token: { type: "string" },
+                    key: { $ref: "#/components/schemas/SendKey" },
+                  },
                   required: ["token", "key"],
                 },
               },
@@ -2170,9 +4015,9 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
                   properties: {
                     valid: { type: "boolean" },
                     authorized: { type: "boolean" },
-                    key: { type: "object", additionalProperties: true, nullable: true },
+                    key: { $ref: "#/components/schemas/SendKey", nullable: true },
                   },
-                  required: ["valid", "authorized"],
+                  required: ["valid", "authorized", "key"],
                 },
               },
             },
@@ -2216,9 +4061,9 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
             },
           },
           "400": { description: "Malformed JSON, non-SNS payload, missing MessageId, or a non-AWS SubscribeURL" },
-          "401": { description: "Invalid SNS signature, or a topic/account outside the allowlist" },
+          "401": errorResponse("Invalid SNS signature, or a topic/account outside the allowlist"),
           "413": { description: "Request body exceeds the receiver's bound" },
-          "503": { description: "The SNS allowlist or the required shared secret is not configured" },
+          "503": errorResponse("The SNS allowlist or the required shared secret is not configured"),
         },
       },
     },
@@ -2255,23 +4100,31 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
             },
           },
           "400": { description: "Malformed JSON or no stable event id" },
-          "401": { description: "Invalid Svix signature" },
+          "401": errorResponse("Invalid Svix signature"),
           "413": { description: "Request body exceeds the receiver's bound" },
-          "503": { description: "RESEND_WEBHOOK_SECRET is not configured (fails closed)" },
+          "503": errorResponse("RESEND_WEBHOOK_SECRET is not configured (fails closed)"),
         },
       },
     },
   },
   components: {
     schemas: {
+      ErrorResponse: errorResponseSchema as never,
       User: userSchema as never,
       Tenant: tenantSchema as never,
+      TenantMembershipSummary: tenantMembershipSummarySchema as never,
+      TenantChoice: tenantChoiceSchema as never,
       EmailIdentity: emailIdentitySchema as never,
       Membership: membershipSchema as never,
+      MembershipSummary: membershipSummarySchema as never,
+      Invitation: invitationSchema as never,
+      ApiKeyMetadata: apiKeyMetadataSchema as never,
       Domain: domainSchema as never,
       Address: addressSchema as never,
+      SendKey: sendKeySchema as never,
       MessageListItem: messageListItemSchema as never,
       Message: messageSchema as never,
+      MessageCounts: messageCountsSchema as never,
       SendIntentMessage: {
         type: "object",
         additionalProperties: false,
@@ -2291,6 +4144,7 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
       AttachmentUnavailableError: attachmentUnavailableErrorSchema as never,
       AttachmentInventoryItem: attachmentInventoryItemSchema as never,
       AttachmentMeta: attachmentMetaSchema as never,
+      AttachmentBatchMeta: attachmentBatchMetaSchema as never,
       AttachmentRepairSummary: attachmentRepairSummarySchema as never,
       Thread: threadSchema as never,
       Mailbox: mailboxSchema as never,
@@ -2314,3 +4168,5 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
     },
   },
 };
+
+addRoutineErrorParity(emailsSelfHostedOpenApi);

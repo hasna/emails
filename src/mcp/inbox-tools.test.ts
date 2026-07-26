@@ -155,6 +155,46 @@ describe("MCP inbox tools — self_hosted via seam", () => {
     expect(detail.text_body).toBe("detail body here");
   });
 
+  it("fails closed on primitive or malformed-object attachment members without leaking them", async () => {
+    const now = new Date().toISOString();
+    const cases = [
+      { id: crypto.randomUUID(), malformed: "must-not-leak-primitive", path: "attachments[1]" },
+      {
+        id: crypto.randomUUID(),
+        malformed: { filename: { diagnostic: "must-not-leak-object" } },
+        path: "attachments[1].filename",
+      },
+    ];
+    await stub.seed({
+      messages: cases.map(({ id, malformed }) => ({
+        id,
+        direction: "inbound",
+        from_addr: "sender@example.com",
+        to_addrs: ["me@example.com"],
+        subject: "malformed attachment",
+        status: "received",
+        received_at: now,
+        created_at: now,
+        is_read: false,
+        is_starred: false,
+        labels: [],
+        attachments: [
+          { filename: "first.txt", content_type: "text/plain", size: 3 },
+          malformed,
+          { filename: "later.txt", content_type: "text/plain", size: 3 },
+        ],
+      })),
+    });
+
+    for (const testCase of cases) {
+      const result = await runInboxTool("get_inbound_email", { id: testCase.id });
+      expect(result.isError).toBe(true);
+      expect(result.content[0]?.text).toContain("invalid successful response");
+      expect(result.content[0]?.text).toContain(testCase.path);
+      expect(result.content[0]?.text).not.toContain("must-not-leak");
+    }
+  });
+
   it("mark_email_read flips read state and returns a body-free summary", async () => {
     const email = seedOne();
     const result = await toolJson("mark_email_read", { email_id: email.id });
@@ -212,7 +252,6 @@ describe("MCP inbox tools — self_hosted via seam", () => {
           filename: "legacy.pdf",
           content_type: "application/pdf",
           size: null,
-          diagnostic: "must-not-leak",
         }],
       }] });
       const result = await runInboxTool("download_attachment", {
@@ -229,8 +268,46 @@ describe("MCP inbox tools — self_hosted via seam", () => {
         content_type: "application/pdf",
         bytes: null,
       });
-      expect(result.content[0]!.text).not.toContain("must-not-leak");
       expect(result.content[0]!.text).not.toContain("content_base64");
+      expect(readdirSync(dir)).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed when the attachment-unavailable error contains unsupported fields", async () => {
+    const id = crypto.randomUUID();
+    const dir = mkdtempSync(join(tmpdir(), "emails-mcp-attachment-"));
+    try {
+      await stub.seed({ messages: [{
+        id,
+        direction: "inbound",
+        from_addr: "sender@example.com",
+        to_addrs: ["me@example.com"],
+        subject: "malformed legacy attachment",
+        status: "received",
+        received_at: new Date().toISOString(),
+        created_at: new Date().toISOString(),
+        is_read: false,
+        is_starred: false,
+        labels: [],
+        attachments: [{
+          filename: "legacy.pdf",
+          content_type: "application/pdf",
+          size: null,
+          diagnostic: "must-not-leak",
+        }],
+      }] });
+      const result = await runInboxTool("download_attachment", {
+        email_id: id,
+        index: 0,
+        output_dir: dir,
+        max_bytes: 16,
+      });
+      expect(result.isError).toBe(true);
+      expect(result.content[0]?.text).toContain("invalid error response");
+      expect(result.content[0]?.text).toContain("unsupported fields");
+      expect(result.content[0]?.text).not.toContain("must-not-leak");
       expect(readdirSync(dir)).toEqual([]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -306,7 +383,7 @@ describe("MCP list_attachments — self_hosted inventory API", () => {
     }
   });
 
-  it("returns the exact sanitized page shape without inline bytes or local SQLite fallback", async () => {
+  it("returns the exact strict page shape without local SQLite fallback", async () => {
     useAttachmentInventoryPages([["", {
       items: [{
         message_id: "message-1",
@@ -318,8 +395,6 @@ describe("MCP list_attachments — self_hosted inventory API", () => {
         content_available: false,
         direction: "outbound",
         received_at: "2026-07-24T08:00:00.000Z",
-        content_base64: "must-not-leak",
-        secret: "must-not-leak",
       }],
       next_cursor: "opaque/+==",
     }]]);
@@ -348,7 +423,6 @@ describe("MCP list_attachments — self_hosted inventory API", () => {
       });
       expect(Object.keys(result).sort()).toEqual(["items", "next_cursor"]);
       expect(JSON.stringify(result)).not.toContain("content_base64");
-      expect(JSON.stringify(result)).not.toContain("must-not-leak");
       expect(attachmentInventoryRequests).toHaveLength(1);
       expect(attachmentInventoryRequests[0]?.searchParams.get("limit")).toBe("1");
       expect(attachmentInventoryRequests[0]?.searchParams.get("direction")).toBe("outbound");
@@ -358,6 +432,30 @@ describe("MCP list_attachments — self_hosted inventory API", () => {
       else process.env.EMAILS_DB_PATH = previousDbPath;
       rmSync(poisonDbDir, { recursive: true, force: true });
     }
+  });
+
+  it("fails closed on unsupported inventory object fields without leaking them", async () => {
+    useAttachmentInventoryPages([["", {
+      items: [{
+        message_id: "message-1",
+        attachment_index: 0,
+        filename: "invoice.pdf",
+        content_type: "application/pdf",
+        size_bytes: 2048,
+        sha256: "b".repeat(64),
+        content_available: false,
+        direction: "outbound",
+        received_at: "2026-07-24T08:00:00.000Z",
+        content_base64: "must-not-leak",
+      }],
+      next_cursor: null,
+    }]]);
+
+    const result = await runInboxTool("list_attachments", {});
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toContain("invalid successful response");
+    expect(result.content[0]?.text).toContain("unsupported fields");
+    expect(result.content[0]?.text).not.toContain("must-not-leak");
   });
 
   it("continues with the opaque cursor unchanged and returns null at termination", async () => {
@@ -414,14 +512,14 @@ describe("MCP list_attachments — self_hosted inventory API", () => {
     }
   });
 
-  it("accepts canonical size strings and rejects invalid attachment sizes", async () => {
+  it("accepts integer sizes and rejects non-integer attachment sizes", async () => {
     useAttachmentInventoryPages([["", {
       items: [{
-        message_id: "message-canonical-size",
+        message_id: "message-integer-size",
         attachment_index: 0,
         filename: "invoice.pdf",
         content_type: "application/pdf",
-        size_bytes: "2048",
+        size_bytes: 2048,
         sha256: null,
         content_available: true,
         direction: "inbound",
@@ -434,7 +532,7 @@ describe("MCP list_attachments — self_hosted inventory API", () => {
       items: [{ size_bytes: 2048 }],
     });
 
-    for (const invalidSize of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1, "-1", "01", "1.0", " 1", "1 "]) {
+    for (const invalidSize of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1, "2048", "-1", "01", "1.0", " 1", "1 "]) {
       useAttachmentInventoryPages([["", {
         items: [{
           message_id: "message-invalid-size",

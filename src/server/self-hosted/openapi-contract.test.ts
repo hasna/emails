@@ -225,7 +225,17 @@ describe("self-hosted OpenAPI identity and authorization contract", () => {
       in: "query",
       schema: { type: "integer", minimum: 1, maximum: 25 * 1024 * 1024 },
     });
-    expect(Object.keys(operation?.responses ?? {})).toEqual(["200", "400", "404", "409", "413", "422"]);
+    expect(Object.keys(operation?.responses ?? {})).toEqual([
+      "200",
+      "400",
+      "401",
+      "403",
+      "404",
+      "409",
+      "413",
+      "422",
+      "500",
+    ]);
     expect(operation?.responses?.["400"]).toMatchObject({
       description: expect.stringContaining("max_bytes"),
     });
@@ -240,7 +250,10 @@ describe("self-hosted OpenAPI identity and authorization contract", () => {
     const inventory = emailsSelfHostedOpenApi.components?.schemas?.AttachmentInventoryItem as
       | { required?: string[]; properties?: Record<string, unknown> }
       | undefined;
-    const batch = emailsSelfHostedOpenApi.components?.schemas?.AttachmentMeta as
+    const batch = emailsSelfHostedOpenApi.components?.schemas?.AttachmentBatchMeta as
+      | { required?: string[]; properties?: Record<string, unknown> }
+      | undefined;
+    const message = emailsSelfHostedOpenApi.components?.schemas?.AttachmentMeta as
       | { required?: string[]; properties?: Record<string, unknown> }
       | undefined;
 
@@ -249,6 +262,9 @@ describe("self-hosted OpenAPI identity and authorization contract", () => {
       expect(schema?.properties?.content_available).toMatchObject({ type: "boolean" });
       expect(schema?.properties).not.toHaveProperty("content_base64");
     }
+    expect(message?.required).toBeUndefined();
+    expect(message?.properties?.content_available).toMatchObject({ type: "boolean" });
+    expect(message?.properties).not.toHaveProperty("content_base64");
     expect(paths["/v1/attachments"]?.get?.responses?.["400"]
       ?.content?.["application/json"]?.schema?.properties?.code)
       .toMatchObject({
@@ -351,8 +367,12 @@ describe("self-hosted OpenAPI identity and authorization contract", () => {
     expect(paths["/v1/attachments/repairs"]?.post?.responses?.["429"]
       ?.content?.["application/json"]?.schema?.properties?.quota)
       .toMatchObject({ enum: ["active_runs", "ledger_runs", "ledger_entries"] });
-    expect(paths["/v1/attachments/repairs"]?.post?.responses?.["400"]
-      ?.content?.["application/json"]?.schema?.properties?.code)
+    const repairBadRequest = paths["/v1/attachments/repairs"]?.post?.responses?.["400"]
+      ?.content?.["application/json"]?.schema;
+    const repairBadRequestVariant = repairBadRequest?.anyOf?.find(
+      (variant) => variant.properties?.code,
+    ) ?? repairBadRequest;
+    expect(repairBadRequestVariant?.properties?.code)
       .toMatchObject({ enum: expect.arrayContaining(["invalid_repair_review"]) });
     expect(paths["/v1/attachments/repairs"]?.post?.responses?.["409"]
       ?.content?.["application/json"]?.schema?.properties?.code)
@@ -367,8 +387,12 @@ describe("self-hosted OpenAPI identity and authorization contract", () => {
     expect(paths["/v1/attachments/repairs/{id}"]?.get?.responses?.["400"]
       ?.content?.["application/json"]?.schema?.properties?.code)
       .toMatchObject({ enum: ["invalid_attachment_repair_id"] });
-    expect(paths["/v1/attachments/repairs/{id}/resume"]?.post?.responses?.["400"]
-      ?.content?.["application/json"]?.schema?.properties?.code)
+    const resumeBadRequest = paths["/v1/attachments/repairs/{id}/resume"]?.post
+      ?.responses?.["400"]?.content?.["application/json"]?.schema;
+    const resumeBadRequestVariant = resumeBadRequest?.anyOf?.find(
+      (variant) => variant.properties?.code,
+    ) ?? resumeBadRequest;
+    expect(resumeBadRequestVariant?.properties?.code)
       .toMatchObject({
         enum: expect.arrayContaining([
           "invalid_attachment_repair_id",

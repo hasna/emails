@@ -353,6 +353,7 @@ describe.skipIf(!pgClient)("send-failure semantics (2026-07-25 incident contract
     expect(res.status).toBe(502);
     expect(res.body.sent).toBeNull();
     expect(res.body.retry_safe).toBe(false);
+    expect(res.body.reconciliation_required).toBe(true);
     expect(String(res.body.error)).toMatch(/may or may not have been sent/i);
     const row = await rowByKey(key);
     expect(row?.send_state).toBe("uncertain");
@@ -393,6 +394,50 @@ describe.skipIf(!pgClient)("send-failure semantics (2026-07-25 incident contract
     expect(replay.body.provider_message_id).toBe("provider-once");
     expect(providerCalls).toBe(1);
     expect(await rowCountByKey(key)).toBe(1);
+  });
+
+  it("never reports a sent replay when the ledger lacks provider proof", async () => {
+    let providerCalls = 0;
+    const deps = makeDeps({
+      provider: "ses",
+      send: async () => {
+        providerCalls += 1;
+        return "provider-proof";
+      },
+    });
+    const { token } = await makeTenant("replay-missing-proof");
+    await registerSender(
+      deps,
+      token,
+      "replaymissingproof.example",
+      "sender@replaymissingproof.example",
+    );
+
+    const key = `replay-missing-proof-${crypto.randomUUID()}`;
+    const body = {
+      from: "sender@replaymissingproof.example",
+      to: ["target@external.example"],
+      subject: "send once",
+      text: "body",
+      idempotency_key: key,
+    };
+    const first = await call(deps, "POST", "/v1/messages/send", { token, body });
+    expect(first.status).toBe(202);
+    await pgClient!.execute(
+      `UPDATE messages SET provider_message_id = NULL WHERE idempotency_key = $1`,
+      [key],
+    );
+
+    const replay = await call(deps, "POST", "/v1/messages/send", { token, body });
+    expect(replay.status).toBe(409);
+    expect(replay.body).toMatchObject({
+      reason: "provider_proof_missing",
+      sent: null,
+      retry_safe: false,
+      reconciliation_required: true,
+    });
+    expect(replay.body.idempotent_replay).toBeUndefined();
+    expect(providerCalls).toBe(1);
   });
 
   it("a failed re-arm answers 503 sent:false (nothing was sent) instead of a generic 500 that hides the outcome", async () => {

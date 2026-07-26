@@ -20,15 +20,16 @@ const SERVER_CODE = `
 const server = Bun.serve({ port: 0, fetch(req) {
   const p = new URL(req.url).pathname;
   const ok = (b) => new Response(JSON.stringify(b), { headers: { "Content-Type": "application/json" } });
-  if (p === "/v1/contacts") return ok({ items: [{ id: "c1", email: "selfHosted@example.com", name: "SelfHosted", send_count: 3, suppressed: false, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-02T00:00:00Z" }] });
-  if (p === "/v1/groups") return ok({ items: [{ id: "g1", name: "selfHosted-group", description: null, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" }] });
-  if (p === "/v1/owners") return ok({ items: [{ id: "o1", type: "agent", name: "SelfHosted Agent", contact_email: null, external_id: null, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" }] });
-  if (p === "/v1/providers") return ok({ items: [{ id: "p1", name: "selfHosted-ses", type: "ses", region: "us-east-1", active: true, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" }] });
-  if (p === "/v1/scheduled") return ok({ items: [{ id: "s1", provider_id: "p1", from_address: "a@x.com", to_addresses: ["b@x.com"], subject: "hi", scheduled_at: "2026-02-01T00:00:00Z", status: "pending", created_at: "2026-01-01T00:00:00Z" }] });
+  const tenantId = "12345678-1234-4234-8234-123456789abc";
+  if (p === "/v1/contacts") return ok({ items: [{ id: "c1", tenant_id: tenantId, email: "selfHosted@example.com", name: "SelfHosted", send_count: 3, bounce_count: 0, complaint_count: 0, last_sent_at: null, suppressed: false, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-02T00:00:00Z" }] });
+  if (p === "/v1/groups") return ok({ items: [{ id: "g1", tenant_id: tenantId, name: "selfHosted-group", description: null, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" }] });
+  if (p === "/v1/owners") return ok({ items: [{ id: "o1", tenant_id: tenantId, type: "agent", name: "SelfHosted Agent", contact_email: null, external_id: null, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" }] });
+  if (p === "/v1/providers") return ok({ items: [{ id: "p1", tenant_id: tenantId, name: "selfHosted-ses", type: "ses", region: "us-east-1", active: true, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" }] });
+  if (p === "/v1/scheduled") return ok({ items: [{ id: "s1", tenant_id: tenantId, provider_id: "p1", from_address: "a@x.com", to_addresses: ["b@x.com"], cc_addresses: [], bcc_addresses: [], reply_to: null, subject: "hi", html: null, text_body: null, attachments_json: [], template_name: null, template_vars: {}, scheduled_at: "2026-02-01T00:00:00Z", status: "pending", error: null, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" }] });
   if (p === "/v1/messages") return ok({ messages: [
-    { id: "m1", direction: "outbound", from_addr: "sender@x.com", to_addrs: ["rcpt@x.com"], subject: "Sent one", status: "sent", created_at: "2026-01-03T00:00:00Z" },
-    { id: "m2", direction: "inbound", from_addr: "them@x.com", to_addrs: ["me@x.com"], subject: "Received", status: "received", created_at: "2026-01-04T00:00:00Z", received_at: "2026-01-04T00:00:00Z" },
-  ] });
+    { id: "m1", direction: "outbound", from_addr: "sender@x.com", to_addrs: ["rcpt@x.com"], cc_addrs: [], subject: "Sent one", snippet: null, status: "sent", provider_message_id: null, message_id: null, in_reply_to: null, received_at: null, is_read: true, is_starred: false, labels: [], attachment_count: 0, source_id: null, send_state: "sent", send_started_at: null, created_at: "2026-01-03T00:00:00Z", updated_at: "2026-01-03T00:00:00Z" },
+    { id: "m2", direction: "inbound", from_addr: "them@x.com", to_addrs: ["me@x.com"], cc_addrs: [], subject: "Received", snippet: null, status: "received", provider_message_id: null, message_id: null, in_reply_to: null, received_at: "2026-01-04T00:00:00Z", is_read: false, is_starred: false, labels: [], attachment_count: 0, source_id: null, send_state: "none", send_started_at: null, created_at: "2026-01-04T00:00:00Z", updated_at: "2026-01-04T00:00:00Z" },
+  ], next_cursor: null });
   return new Response(JSON.stringify({ error: "not found" }), { status: 404, headers: { "Content-Type": "application/json" } });
 } });
 console.log("PORT " + server.port);

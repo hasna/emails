@@ -145,12 +145,13 @@ describe("emails send-intent reconcile", () => {
     expect((await stub.list("messages"))[0]?.send_state).toBe("uncertain");
   });
 
-  it("relays the server's refusal to overwrite a message that is no longer uncertain", async () => {
+  it("reports a rejected reconciliation without relaying the server body", async () => {
     await stub.seed({ messages: [message(SENT_ID, "sent")] });
     const result = await runCommandExpectingExit([
       "send-intent", "reconcile", SENT_ID, "--outcome", "not-sent", "--evidence", "x",
     ]);
-    expect(result.stderr).toContain("only an 'uncertain' send intent can be reconciled");
+    expect(result.stderr).toContain("Reconciliation failed (HTTP 409).");
+    expect(result.stderr).not.toContain("only an 'uncertain' send intent can be reconciled");
     expect((await stub.list("messages"))[0]?.send_state).toBe("sent");
   });
 });

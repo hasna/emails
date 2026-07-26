@@ -1,11 +1,103 @@
 import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
+import {
+  SELF_HOSTED_RESPONSE_COMPONENTS,
+  SELF_HOSTED_RESPONSE_CONTRACTS,
+} from "./lib/self-hosted-response-contracts.generated.js";
+import { SelfHostedWireResponseError } from "./lib/self-hosted-wire.js";
 import { ApiError, EmailsSelfHostClient } from "./selfhost.js";
+
+type JsonSchema = Record<string, unknown>;
+const RESPONSE_SECRET_MARKER = "credential-like-response-body-must-not-leak";
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function schemaSample(schema: JsonSchema): unknown {
+  const ref = schema["$ref"];
+  if (typeof ref === "string") {
+    const name = ref.slice("#/components/schemas/".length);
+    const component = SELF_HOSTED_RESPONSE_COMPONENTS[name];
+    if (!isRecord(component)) throw new Error(`missing response fixture component ${name}`);
+    return schemaSample(component);
+  }
+  if (Array.isArray(schema["enum"]) && schema["enum"].length > 0) return schema["enum"][0];
+  if (Array.isArray(schema["oneOf"]) && isRecord(schema["oneOf"].at(-1))) {
+    // Prefer the last branch: additive compatibility unions commonly put a
+    // narrower legacy shape last, avoiding overlap with a richer first branch.
+    return schemaSample(schema["oneOf"].at(-1) as JsonSchema);
+  }
+  if (Array.isArray(schema["anyOf"]) && isRecord(schema["anyOf"][0])) {
+    return schemaSample(schema["anyOf"][0]);
+  }
+  if (Array.isArray(schema["allOf"])) {
+    return schema["allOf"].reduce<Record<string, unknown>>((merged, branch) => {
+      const sample = isRecord(branch) ? schemaSample(branch) : undefined;
+      return isRecord(sample) ? { ...merged, ...sample } : merged;
+    }, {});
+  }
+  const type = schema["type"];
+  if (
+    type === "object"
+    || Array.isArray(schema["required"])
+    || isRecord(schema["properties"])
+  ) {
+    const properties = isRecord(schema["properties"]) ? schema["properties"] : {};
+    const required = Array.isArray(schema["required"]) ? schema["required"] : [];
+    return required.reduce<Record<string, unknown>>((sample, field) => {
+      if (typeof field === "string" && isRecord(properties[field])) {
+        sample[field] = schemaSample(properties[field]);
+      }
+      return sample;
+    }, {});
+  }
+  if (type === "array") return [];
+  if (type === "boolean") return false;
+  if (type === "integer" || type === "number") return schema["minimum"] ?? 0;
+  if (type === "string") {
+    if (schema["format"] === "date-time") return "2026-07-26T10:00:00.000Z";
+    if (schema["format"] === "uuid") return "12345678-1234-4234-8234-123456789abc";
+    if (schema["format"] === "email") return "fixture@example.test";
+    const pattern = typeof schema["pattern"] === "string" ? schema["pattern"] : "";
+    if (pattern.includes("{64}")) return "a".repeat(64);
+    const minLength = typeof schema["minLength"] === "number" ? schema["minLength"] : 1;
+    return "x".repeat(Math.max(1, minLength));
+  }
+  return null;
+}
+
+function contractMatchesPath(template: string, pathname: string): boolean {
+  const source = template
+    .split(/(\{[^}]+\})/g)
+    .map((part) => part.startsWith("{")
+      ? "[^/]+"
+      : part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join("");
+  return new RegExp(`^${source}$`).test(pathname);
+}
+
+function validResponseFor(request: Request): Response {
+  const pathname = new URL(request.url).pathname;
+  const contract = SELF_HOSTED_RESPONSE_CONTRACTS.find((candidate) =>
+    candidate.method === request.method
+    && contractMatchesPath(candidate.path, pathname));
+  if (!contract) throw new Error(`missing generated response fixture for ${request.method} ${pathname}`);
+  if (contract.schema !== null && !isRecord(contract.schema)) {
+    throw new Error(`invalid generated response fixture for ${request.method} ${pathname}`);
+  }
+  const body = contract.schema === null ? undefined : JSON.stringify(schemaSample(contract.schema));
+  return new Response(body, {
+    status: contract.status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
 
 function okFetch(capture: (request: Request) => void): typeof fetch {
   return (async (input: RequestInfo | URL, init?: RequestInit) => {
-    capture(new Request(input, init));
-    return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
+    const request = new Request(input, init);
+    capture(request);
+    return validResponseFor(request);
   }) as typeof fetch;
 }
 
@@ -86,7 +178,7 @@ describe("generated self-hosted SDK identity contract", () => {
       apiKey: "api-key-placeholder",
       fetch: (async (_input: RequestInfo | URL, init?: RequestInit) => {
         redirect = init?.redirect;
-        return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
+        return validResponseFor(new Request(_input, init));
       }) as typeof fetch,
     });
 
@@ -119,6 +211,56 @@ describe("generated self-hosted SDK identity contract", () => {
     expect(generated).toContain(
       `export interface SendIntentMessage { "id": string; "send_state": "none" | "pending" | "blocked" | "cancelled" | "sending" | "sent" | "failed" | "uncertain" }`,
     );
+  });
+
+  it("unions every successful send status and oneOf branch in the declaration", () => {
+    const generated = readFileSync(new URL("./selfhost.ts", import.meta.url), "utf8");
+    const signature = generated.match(
+      /async sendMessage\([^]*?\): Promise<([^]*?)> \{\n\s+return this\.request/,
+    )?.[1] ?? "";
+    expect(signature).toContain(`"idempotent_replay": true`);
+    expect(signature).toContain(`"in_progress": true`);
+    expect(signature).toContain(`"sent": true`);
+    expect(signature).toContain(`"provider_message_id": string`);
+  });
+
+  it("preserves nullable refs and route-specific auth schemas in generated declarations", () => {
+    const generated = readFileSync(new URL("./selfhost.ts", import.meta.url), "utf8");
+    expect(generated).toMatch(
+      /bootstrapPrimarySuperAdmin[^]*?Promise<\{ "created": boolean; "user": User; "tenant": Tenant \| null \}>/,
+    );
+    const principalSignature = generated.match(
+      /async getCurrentPrincipal[^\n]+/,
+    )?.[0] ?? "";
+    expect(principalSignature).toContain(`"principal_type": "user"`);
+    expect(principalSignature).toContain(`"global_role"?: "user" | "super_admin"`);
+    expect(principalSignature).toContain(`}) | null`);
+    expect(principalSignature).not.toContain(`"user": User | null`);
+    expect(generated).toMatch(
+      /verifySendKey[^]*?Promise<\{ "valid": boolean; "authorized": boolean; "key": SendKey \| null \}>/,
+    );
+  });
+
+  it("throws a wire-contract error for malformed raw non-2xx JSON before redaction", async () => {
+    const client = new EmailsSelfHostClient({
+      baseUrl: "https://emails.example.test",
+      apiKey: "api-key-placeholder",
+      fetch: (async () => new Response(JSON.stringify({
+        error: RESPONSE_SECRET_MARKER,
+        reason: "provider_outcome_uncertain",
+        sent: null,
+        retry_safe: true,
+      }), {
+        status: 502,
+        headers: { "Content-Type": "application/json" },
+      })) as typeof fetch,
+    });
+    await expect(client.sendMessage({
+      from: "sender@example.test",
+      to: ["recipient@example.test"],
+      subject: "subject",
+      idempotency_key: "tenant-scoped-key",
+    })).rejects.toBeInstanceOf(SelfHostedWireResponseError);
   });
 
   it("generates and sends the discriminated reviewed dry-run proof for attachment repair apply", async () => {
@@ -170,20 +312,35 @@ describe("generated self-hosted SDK identity contract", () => {
           const request = new Request(input, init);
           requests.push(request);
           if (request.method === "GET") {
-            return new Response(JSON.stringify({ message: { id: exactMessageId } }), {
+            const message = schemaSample(
+              SELF_HOSTED_RESPONSE_COMPONENTS["Message"] as JsonSchema,
+            ) as Record<string, unknown>;
+            return new Response(JSON.stringify({
+              message: { ...message, id: exactMessageId },
+            }), {
               status: 200,
               headers: { "Content-Type": "application/json" },
             });
           }
+          const message = status === 409
+            ? {
+              id: exactMessageId,
+              send_state: "sending",
+            }
+            : {
+              ...(schemaSample(
+                SELF_HOSTED_RESPONSE_COMPONENTS["Message"] as JsonSchema,
+              ) as Record<string, unknown>),
+              id: exactMessageId,
+              send_state: "uncertain",
+            };
           return new Response(JSON.stringify({
             error: "reconciliation required",
+            reason: status === 502 ? "provider_outcome_uncertain" : undefined,
+            sent: status === 502 ? null : undefined,
             retry_safe: false,
-            message: {
-              id: exactMessageId,
-              send_state: status === 409 ? "sending" : "uncertain",
-              from_addr: "sender@example.test",
-              subject: "backward-compatible public message",
-            },
+            reconciliation_required: status === 502 ? true : undefined,
+            message,
           }), {
             status,
             headers: { "Content-Type": "application/json" },
@@ -209,9 +366,19 @@ describe("generated self-hosted SDK identity contract", () => {
         id: exactMessageId,
         send_state: status === 409 ? "sending" : "uncertain",
       });
-      expect(rawBody).toMatchObject({
-        message: { subject: "backward-compatible public message" },
+      expect(rawBody).toEqual({
+        ...(status === 502 ? {
+          reason: "provider_outcome_uncertain",
+          sent: null,
+          reconciliation_required: true,
+        } : {}),
+        retry_safe: false,
+        message: {
+          id: exactMessageId,
+          send_state: status === 409 ? "sending" : "uncertain",
+        },
       });
+      expect(JSON.stringify(rawBody)).not.toContain("sender@example.test");
 
       await client.getMessage(projection!.id);
       expect(new URL(requests[1]!.url).pathname).toBe(`/v1/messages/${exactMessageId}`);
@@ -307,12 +474,120 @@ describe("generated self-hosted SDK identity contract", () => {
     }
   });
 
-  it("rejects non-canonical ids and non-recovery states from error projections", async () => {
-    const bodies = [
-      { message: { id: "../../not-a-message", send_state: "cancelled" } },
-      { message: { id: "12345678-1234-4234-8234-123456789abc", send_state: "attacker_state" } },
+  it("accepts declared routine CRUD and auth errors before projecting safe fields", async () => {
+    const cases: Array<{
+      status: number;
+      body: Record<string, unknown>;
+      invoke(client: EmailsSelfHostClient): Promise<unknown>;
+      projected: Record<string, unknown> | undefined;
+    }> = [
+      {
+        status: 404,
+        body: { error: "contacts not found" },
+        invoke: (client) => client.getResourceContacts("missing-contact"),
+        projected: undefined,
+      },
+      {
+        status: 429,
+        body: {
+          error: "too many requests",
+          reason: "rate_limited",
+          retry_after: 30,
+        },
+        invoke: (client) => client.logIn({
+          email: "user@example.test",
+          password: "password-placeholder",
+        }),
+        projected: { reason: "rate_limited", retry_after: 30 },
+      },
+      {
+        status: 400,
+        body: { error: "token is required" },
+        invoke: (client) => client.resetPassword({
+          token: "",
+          new_password: "password-placeholder",
+        }),
+        projected: undefined,
+      },
+      {
+        status: 400,
+        body: { error: "password must be at least 8 characters" },
+        invoke: (client) => client.bootstrapOwner({
+          email: "owner@example.test",
+          password: "short",
+        }),
+        projected: undefined,
+      },
+      {
+        status: 403,
+        body: {
+          error: "bootstrap requires an api key",
+          reason: "apikey_required",
+        },
+        invoke: (client) => client.bootstrapOwner({
+          email: "owner@example.test",
+          password: "password-placeholder",
+        }),
+        projected: { reason: "apikey_required" },
+      },
     ];
-    for (const body of bodies) {
+
+    for (const item of cases) {
+      const client = new EmailsSelfHostClient({
+        baseUrl: "https://emails.example.test",
+        apiKey: "api-key-placeholder",
+        fetch: (async () => new Response(JSON.stringify(item.body), {
+          status: item.status,
+          headers: { "Content-Type": "application/json" },
+        })) as typeof fetch,
+      });
+      try {
+        await item.invoke(client);
+        throw new Error("expected ApiError");
+      } catch (error) {
+        expect(error).toBeInstanceOf(ApiError);
+        expect((error as ApiError).status).toBe(item.status);
+        expect((error as ApiError).body).toEqual(item.projected);
+        expect(JSON.stringify((error as ApiError).body) ?? "").not.toContain("password-placeholder");
+      }
+    }
+  });
+
+  it("still fails closed for malformed declared errors and undeclared statuses", async () => {
+    for (const [status, body] of [
+      [404, { error: "wrong resource" }],
+      [418, { error: "contacts not found" }],
+    ] as const) {
+      const client = new EmailsSelfHostClient({
+        baseUrl: "https://emails.example.test",
+        apiKey: "api-key-placeholder",
+        fetch: (async () => new Response(JSON.stringify(body), {
+          status,
+          headers: { "Content-Type": "application/json" },
+        })) as typeof fetch,
+      });
+      await expect(client.getResourceContacts("missing-contact"))
+        .rejects.toBeInstanceOf(SelfHostedWireResponseError);
+    }
+  });
+
+  it("rejects non-canonical ids and non-recovery states from error projections", async () => {
+    const bodies: Array<[Record<string, unknown>, typeof ApiError | typeof SelfHostedWireResponseError]> = [
+      [{
+        error: "reconciliation required",
+        retry_safe: false,
+        message: { id: "../../not-a-message", send_state: "cancelled" },
+      }, ApiError],
+      [{
+        error: "reconciliation required",
+        retry_safe: false,
+        message: {
+          id: "12345678-1234-4234-8234-123456789abc",
+          send_state: "attacker_state",
+        },
+      }, SelfHostedWireResponseError],
+    ];
+    for (const [body, expectedError] of bodies) {
       const client = new EmailsSelfHostClient({
         baseUrl: "https://emails.example.test",
         apiKey: "api-key-placeholder",
@@ -330,8 +605,10 @@ describe("generated self-hosted SDK identity contract", () => {
         });
         throw new Error("expected ApiError");
       } catch (error) {
-        expect(error).toBeInstanceOf(ApiError);
-        expect((error as ApiError).sendIntentMessage).toBeUndefined();
+        expect(error).toBeInstanceOf(expectedError);
+        if (error instanceof ApiError) {
+          expect(error.sendIntentMessage).toBeUndefined();
+        }
       }
     }
   });

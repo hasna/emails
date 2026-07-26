@@ -78,7 +78,9 @@ describe("inbound read-state", () => {
   });
 
   it("throws on unknown id", () => {
-    expect(() => setInboundRead("nope", true)).toThrow(/not found/i);
+    expect(() => setInboundRead("nope", true)).toThrow(
+      /^Self-hosted PATCH \/messages\/nope failed: HTTP 404$/,
+    );
   });
 
   it("updates read and star flags and reflects them in reads", () => {
