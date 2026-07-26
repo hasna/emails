@@ -114,9 +114,16 @@ function buildNextActions(
   }
 
   if (isPositive(status.provisioning.domains_failed) || isPositive(status.provisioning.addresses_failed)) {
-    const failures = `${status.provisioning.domains_failed ?? 0} domain(s), ${status.provisioning.addresses_failed ?? 0} address(es)`;
-    push("emails provision status", `Provisioning failed for ${failures}.`);
+    // `?? 0` here would report an UNMEASURED half as zero failures inside the very
+    // reason string that exists to be believed. renderStatusCount says
+    // "unavailable" instead. `emails provision status` is deliberately NOT
+    // proposed: it throws notImplementedAnywhere() in every mode, so the only
+    // honest remedy is the command that shows the failed rows.
+    const domains = renderStatusCount(status.provisioning.domains_failed, status.provisioning.availability);
+    const addresses = renderStatusCount(status.provisioning.addresses_failed, status.provisioning.availability);
+    const failures = `${domains} domain(s), ${addresses} address(es)`;
     push("emails domain list --json", `Provisioning failed for ${failures}; inspect the rows directly.`);
+    push("emails address list --json", `Provisioning failed for ${failures}; inspect the address rows directly.`);
   }
 
   if (candidates.length === 0) {
@@ -309,7 +316,12 @@ export function formatEmailSystemStatus(status: EmailSystemStatus): string {
   if (status.inbox.realtime.last_error) lines.push(`  Last realtime error: ${status.inbox.realtime.last_error}`);
 
   if (isPositive(status.provisioning.domains_failed) || isPositive(status.provisioning.addresses_failed)) {
-    lines.push(`  Provisioning failures: ${status.provisioning.domains_failed} domain(s), ${status.provisioning.addresses_failed} address(es)`);
+    // Interpolating the raw field printed the literal string "null address(es)"
+    // whenever one half was measured and the other was not. renderStatusCount
+    // prints "unavailable" for a null and "≥N" for a lower bound.
+    const domains = renderStatusCount(status.provisioning.domains_failed, status.provisioning.availability);
+    const addresses = renderStatusCount(status.provisioning.addresses_failed, status.provisioning.availability);
+    lines.push(`  Provisioning failures: ${domains} domain(s), ${addresses} address(es)`);
   } else if (!status.provisioning.availability.available) {
     lines.push(`  Provisioning: ${renderStatusUnavailable(status.provisioning.availability)}`);
   }

@@ -61,6 +61,13 @@ export interface EnumerateOptions {
   pageSize?: number;
   /** Maximum pages to fetch before giving up and reporting incompleteness. */
   pageBudget?: number;
+  /**
+   * Extra query parameters sent with EVERY page, e.g. a resource's declared
+   * server-side filters (`src/server/self-hosted/resources.ts` `filters`).
+   * Narrowing the read server-side is what keeps a large table inside the page
+   * budget; `limit`/`offset` are owned by the pager and cannot be overridden.
+   */
+  query?: Record<string, string | number | boolean | undefined>;
 }
 
 function clampPageSize(value: number | undefined): number {
@@ -123,7 +130,7 @@ export function enumerateSelfHostedRows(
   });
 
   while (pages < budget) {
-    const page = store.list({ limit: pageSize, offset });
+    const page = store.list({ ...opts.query, limit: pageSize, offset });
     pages += 1;
     for (const row of page) {
       const id = row["id"] == null ? null : String(row["id"]);

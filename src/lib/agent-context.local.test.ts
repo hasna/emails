@@ -12,14 +12,22 @@
 //    true on every healthy install — a flag that is never green is a flag nobody
 //    reads. Structural limits belong to `limited`/`limitations`; `degraded` is
 //    reserved for read failures and lower-bound counts.
+//
+// 3. `next_actions` must only propose commands that RUN here. The self-hosted
+//    guard (agent-context.self-hosted.test.ts) had no local mirror, so the
+//    provisioning-failure branch proposed `emails provision status` in local mode
+//    — a command that throws notImplementedAnywhere() in every mode. Advice that
+//    refuses is the same defect class as a fabricated count.
 
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { closeDatabase, getDatabase, resetDatabase } from "../db/database.js";
 import { createProvider } from "../db/providers.local.js";
 import { createDomain } from "../db/domains.local.js";
 import { createAddress } from "../db/addresses.local.js";
+import { setDomainProvisioning } from "../db/provisioning.local.js";
 import { formatEmailSystemStatus, getEmailSystemStatus } from "./agent-context.js";
 import { statusGapClass } from "./status-availability.js";
+import { isCommandAvailableInMode } from "./status-commands.js";
 
 const SELF_HOSTED_ENV = ["EMAILS_SELF_HOSTED_URL", "EMAILS_SELF_HOSTED_API_KEY", "EMAILS_CLIENT_ENV_SECRET"] as const;
 const saved = new Map<string, string | undefined>();
@@ -50,6 +58,15 @@ function seed(): void {
   const provider = createProvider({ name: "Sandbox", type: "sandbox" }, db);
   createDomain(provider.id, "alpha.example", db);
   createAddress({ provider_id: provider.id, email: "ops@alpha.example" }, db);
+}
+
+/** Seed one domain whose provisioning FAILED — the branch that proposes a remedy. */
+function seedFailedProvisioning(): void {
+  const db = getDatabase();
+  const provider = createProvider({ name: "Sandbox", type: "sandbox" }, db);
+  const domain = createDomain(provider.id, "broken.example", db);
+  createAddress({ provider_id: provider.id, email: "ops@broken.example" }, db);
+  setDomainProvisioning(domain.id, { provisioning_status: "failed", last_error: "DNS never propagated" }, db);
 }
 
 describe("local status payload", () => {
@@ -104,5 +121,37 @@ describe("local status payload", () => {
     expect(status.degraded).toBe(false);
     // And next_actions is never a silent empty list.
     expect(status.next_actions.length).toBeGreaterThan(0);
+  });
+
+  // Mirror of the self-hosted guard in agent-context.self-hosted.test.ts. Without
+  // it the provisioning-failure branch proposed `emails provision status` here,
+  // which throws `... is not implemented in this build` in EVERY mode.
+  it("never proposes a command that refuses in local mode", async () => {
+    seedFailedProvisioning();
+    const status = await getEmailSystemStatus();
+
+    expect(status.provisioning.domains_failed).toBe(1);
+    // The failure IS surfaced — this is not "stay silent to stay honest".
+    expect(status.next_actions.some((action) => action.reason.includes("Provisioning failed"))).toBe(true);
+
+    for (const action of status.next_actions) {
+      if (action.command === null) continue;
+      expect(action.command).not.toBe("emails provision status");
+      expect(isCommandAvailableInMode(action.command, "local"), action.command).toBe(true);
+    }
+    expect(formatEmailSystemStatus(status)).not.toContain("emails provision status");
+  });
+
+  it("renders an unmeasured provisioning count as unavailable, never the word null", async () => {
+    seedFailedProvisioning();
+    const status = await getEmailSystemStatus();
+    // Self-hosted can measure domain failures without address failures; the
+    // renderer must not interpolate that null straight into the line.
+    status.provisioning.addresses_failed = null;
+
+    const rendered = formatEmailSystemStatus(status);
+    expect(rendered).toContain("Provisioning failures:");
+    expect(rendered).not.toContain("null address(es)");
+    expect(rendered).toContain("unavailable address(es)");
   });
 });

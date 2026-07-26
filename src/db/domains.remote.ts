@@ -10,6 +10,7 @@ import type {
 import { DomainNotFoundError } from "../types/index.js";
 import { safeOffset, safeOptionalLimit } from "./pagination.js";
 import { selfHostedResource } from "./self-hosted-resource.js";
+import { enumerateSelfHostedRows } from "./self-hosted-page.js";
 
 // ============================================================================
 // Self-hosted (self_hosted) routing — self-hosted-ONLY client
@@ -118,9 +119,13 @@ export interface UsableDomainOptions extends ListDomainOptions {
 export function listDomains(provider_id?: string, opts?: ListDomainOptions): Domain[] {
   const lim = safeOptionalLimit(opts?.limit);
   const off = safeOffset(opts?.offset);
-  const query: Record<string, string | number | undefined> = {};
-  if (lim !== null) query["limit"] = Math.max(1000, lim + off);
-  let domains = selfHostedResource(DOMAIN_RESOURCE).list(query).map(apiToDomain);
+  // Enumerate, do NOT single-call. The server clamps every page to 500 rows
+  // (store.ts clampLimit) and defaults to 100 when no limit is sent, so
+  // `domains list --limit 1000` quietly returned 500 rows as if that were the
+  // page, and `listDomains()` with no limit returned 100. The provider filter and
+  // the window below need the full row set anyway; a table that fits in one page
+  // still costs exactly one request.
+  let domains = enumerateSelfHostedRows(DOMAIN_RESOURCE).rows.map(apiToDomain);
   if (provider_id) domains = domains.filter((dm) => dm.provider_id === provider_id);
   domains.sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
   return lim === null ? domains : domains.slice(off, off + lim);

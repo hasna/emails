@@ -21,6 +21,7 @@
 //   - Control endpoints (unauthenticated so a beforeEach can always reset):
 //     POST /v1/__reset  { resources? }  -> replace the whole store (empty clears it)
 //     GET  /v1/__dump                   -> read the whole store back for assertions
+//     GET  /v1/__list_queries?resource= -> query strings of every list request made
 //
 // SAFETY: no secret is ever logged. The API key lives only in the subprocess env
 // and the Authorization header; the helper never prints it.
@@ -58,6 +59,12 @@ export interface V1Stub {
    * `/v1/sources` failure mode. `rotate: 0` restores stable order.
    */
   setListOrderInstability(rotate: number, resources?: string[]): Promise<void>;
+  /**
+   * Query strings (without the leading `?`) of every generic list request the
+   * client made for `resource`, in order. Use it to assert a filter was pushed
+   * SERVER-side rather than applied in memory over the whole table.
+   */
+  listQueries(resource: string): Promise<string[]>;
   /** Read the current email-verification token for an address (test helper). */
   verifyToken(email: string): Promise<string | null>;
   /** Mark a signed-up user verified without a token (fixture shortcut). */
@@ -101,6 +108,10 @@ let bootstrapped = false;
 // Non-total list-order emulation (see /v1/__list_order). 0 = stable order.
 let listRotate = 0;
 let listRotateResources = null;
+// Query string of every generic list request, per resource (see /v1/__list_queries).
+// Lets a test assert that a client pushed its filters SERVER-side instead of
+// dragging the whole table over and filtering in memory. Cleared on __reset.
+let listQueries = {};
 
 function safeParse(raw) {
   if (!raw) return {};
@@ -328,10 +339,17 @@ const server = Bun.serve({
       bootstrapped = false;
       listRotate = 0;
       listRotateResources = null;
+      listQueries = {};
       return json({ ok: true });
     }
     if (req.method === "GET" && parts[0] === "v1" && parts[1] === "__dump") {
       return json({ resources: store });
+    }
+    // Test-only: the query string of every generic list request for a resource, in
+    // order. A client that filters only in memory shows nothing but limit/offset.
+    if (req.method === "GET" && parts[0] === "v1" && parts[1] === "__list_queries") {
+      const resource = url.searchParams.get("resource") || "";
+      return json({ queries: listQueries[resource] || [] });
     }
     // Test-only: emulate a NON-TOTAL list ORDER BY. The real server sorts by
     // columns that are not unique (e.g. sources by status, type, created_at), and
@@ -648,6 +666,8 @@ const server = Bun.serve({
       // \`offset\` skips rows. Without this the stub handed back every row for any
       // limit, which hid the fact that a single \`.list({ limit: 1000 })\` can only
       // ever see 500 rows — the silent-truncation trap behind fabricated totals.
+      if (!Array.isArray(listQueries[resource])) listQueries[resource] = [];
+      listQueries[resource].push(url.search.replace(/^\?/, ""));
       const rawLimit = url.searchParams.get("limit");
       const rawOffset = url.searchParams.get("offset");
       const offset = rawOffset === null || Number.isNaN(Number(rawOffset)) || Number(rawOffset) < 0
@@ -801,6 +821,12 @@ export async function startV1Stub(options: V1StubOptions = {}): Promise<V1Stub> 
         body: JSON.stringify({ rotate, resources: resources ?? null }),
       });
       if (!res.ok) throw new Error(`v1-stub __list_order failed: HTTP ${res.status}`);
+    },
+    async listQueries(resource) {
+      const res = await fetch(`${baseUrl}/v1/__list_queries?resource=${encodeURIComponent(resource)}`);
+      if (!res.ok) throw new Error(`v1-stub __list_queries failed: HTTP ${res.status}`);
+      const body = (await res.json()) as { queries?: string[] };
+      return body.queries ?? [];
     },
     async verifyToken(email) {
       const res = await fetch(`${baseUrl}/v1/__verify_token?email=${encodeURIComponent(email)}`);

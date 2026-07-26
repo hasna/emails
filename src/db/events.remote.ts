@@ -2,9 +2,47 @@ import type { EmailEvent, EventFilter, EventSummary, EventType } from "../types/
 import { now, uuid } from "./runtime.js";
 import { safeOffset, safeOptionalLimit } from "./pagination.js";
 import { selfHostedResource, cobj, ciso, cstr, cstrOrNull } from "./self-hosted-resource.js";
-import { enumerateSelfHostedRows } from "./self-hosted-page.js";
+import { enumerateSelfHostedRows, type SelfHostedEnumeration } from "./self-hosted-page.js";
 
 const EVENT_RESOURCE = "events";
+
+/**
+ * The `/v1/events` filters the SERVER applies (src/server/self-hosted/resources.ts
+ * -> the `events` spec `filters`). `since`/`until` are NOT among them, so a
+ * time-ranged read still has to enumerate.
+ */
+function serverSideEventFilters(filter: EventFilter): Record<string, string | undefined> {
+  const query: Record<string, string | undefined> = {};
+  if (filter.email_id) query["email_id"] = filter.email_id;
+  if (filter.provider_id) query["provider_id"] = filter.provider_id;
+  // The server compares `type` for equality, so only a single type narrows there;
+  // a list of types stays a client-side filter.
+  if (typeof filter.type === "string") query["type"] = filter.type;
+  return query;
+}
+
+/**
+ * A partial enumeration must never be returned as if it were the whole set.
+ *
+ * `events` is the fastest-growing table in the system (one row per delivery, open
+ * and click), so it is the first to cross the pager's 20_000-row budget — and it
+ * is read by `export events` (MCP) and `GET /api/events`, which hand the caller a
+ * JSON/CSV file. Silently windowing a lower bound produces an export that LOOKS
+ * complete and is not: the same defect as publishing a de-duplicated page count as
+ * a total, with a bigger number.
+ */
+function assertCompleteEventEnumeration(enumeration: SelfHostedEnumeration): void {
+  if (enumeration.complete) return;
+  const cause = enumeration.exhausted
+    ? `the ${enumeration.pages}-page enumeration budget ran out`
+    : `the server's paging window shifted (${enumeration.duplicates} duplicate row(s) means rows were skipped)`;
+  throw new Error(
+    `Refusing to return a partial event list: ${cause}, so the ${enumeration.rows.length} row(s) read ` +
+      `are a LOWER BOUND, not the whole set — an export built from them would look complete and would not be. ` +
+      `Narrow the read with an email_id, provider_id or single type filter (GET /v1/events applies those ` +
+      `server-side), or read one message's events with 'emails show <id>'.`,
+  );
+}
 
 function apiToEvent(e: Record<string, unknown>): EmailEvent {
   return {
@@ -73,7 +111,14 @@ function listFilteredEvents(filter: EventFilter = {}): EmailEvent[] {
   // (the server clamps every page — see src/db/self-hosted-page.ts). With a single
   // call, an export of >500 events silently returned a short, plausible result.
   // The remaining `.list({ limit: 1000 })` call sites are tracked as follow-up.
-  let rows = enumerateSelfHostedRows(EVENT_RESOURCE).rows.map(apiToEvent);
+  //
+  // The declared filters go to the SERVER so a narrow read stays inside the page
+  // budget instead of dragging the whole table across the wire. They are applied
+  // client-side again below, so the result is identical against a server that
+  // ignores unknown query params (the convention in src/db/contacts.remote.ts).
+  const enumeration = enumerateSelfHostedRows(EVENT_RESOURCE, { query: serverSideEventFilters(filter) });
+  assertCompleteEventEnumeration(enumeration);
+  let rows = enumeration.rows.map(apiToEvent);
 
   if (filter.email_id) rows = rows.filter((e) => e.email_id === filter.email_id);
   if (filter.provider_id) rows = rows.filter((e) => e.provider_id === filter.provider_id);
