@@ -185,7 +185,6 @@ describe("domains lifecycle commands", () => {
     const result = await runDomainCommand([
       "domains", "add", "example.com",
       "--provider", "sandbox",
-      "--source-of-truth", "postgres",
       "--dry-run",
     ]);
 
@@ -193,11 +192,25 @@ describe("domains lifecycle commands", () => {
       dry_run: true,
       domain: "example.com",
       provider_id: "sandbox",
+      // Reported, not requested: the client always creates `/v1`-owned domains.
       source_of_truth: "postgres",
       would_create_domain: true,
       cli_equivalent: "emails domains add example.com --provider sandbox",
     });
     expect(await stub.list("domains")).toHaveLength(0);
+  });
+
+  // The flag was declared on all four of these and read by nothing: the action
+  // reports a hardcoded "postgres". Commander now rejects it, so the CLI can no
+  // longer accept an input it silently discards.
+  it("rejects --source-of-truth instead of silently discarding it", async () => {
+    for (const command of ["add", "connect"]) {
+      for (const noun of ["domain", "domains"]) {
+        await expect(runDomainCommand([
+          noun, command, "example.com", "--provider", "sandbox", "--source-of-truth", "postgres",
+        ])).rejects.toThrow(/unknown option '--source-of-truth'/);
+      }
+    }
   });
 
   it("fails loud on server-owned lifecycle mutations", async () => {
