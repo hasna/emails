@@ -18,6 +18,7 @@ import { basename, join } from "node:path";
 import {
   attachmentDownloadTestBoundary,
   decodeAttachmentPayload,
+  validateAttachmentMetadata,
   writeAttachmentFile,
 } from "./attachment-download.js";
 
@@ -118,6 +119,39 @@ describe("attachment download boundary", () => {
     expect(() => decodeAttachmentPayload(attachment("text/(plain)"), 0, 16)).toThrow(/MIME/i);
     expect(() => decodeAttachmentPayload(attachment("text/plain; charset=utf-8"), 0, 16)).toThrow(/MIME/i);
     expect(() => decodeAttachmentPayload(attachment("application/vnd.example+json"), 0, 16)).not.toThrow();
+  });
+
+  it("validates download metadata independently of payload bytes", () => {
+    expect(validateAttachmentMetadata({
+      filename: "invoice.txt",
+      content_type: "application/vnd.example+json",
+      size: 5,
+    })).toEqual({
+      filename: "invoice.txt",
+      content_type: "application/vnd.example+json",
+      size: 5,
+    });
+    expect(validateAttachmentMetadata({
+      filename: "legacy.pdf",
+      content_type: "application/pdf",
+      size: null,
+    }, { allowNullSize: true })).toMatchObject({ size: null });
+
+    for (const attachment of [
+      { content_type: "text/plain", size: 5 },
+      { filename: "", content_type: "text/plain", size: 5 },
+      { filename: 42, content_type: "text/plain", size: 5 },
+      { filename: "unsafe\u202Etxt.exe", content_type: "text/plain", size: 5 },
+      { filename: "invalid-mime.txt", content_type: "text/plain; charset=utf-8", size: 5 },
+      { filename: "missing-mime.txt", size: 5 },
+    ]) {
+      expect(() => validateAttachmentMetadata(attachment)).toThrow();
+    }
+    expect(() => validateAttachmentMetadata({
+      filename: "legacy.pdf",
+      content_type: "application/pdf",
+      size: null,
+    })).toThrow(/size/i);
   });
 
   it("rejects terminal C0/C1, ESC, and bidi-control filenames before display or write", () => {

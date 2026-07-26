@@ -17,6 +17,8 @@ import {
 } from "../../db/inbound.js";
 import { resetSelfHostedConfigCache } from "../../db/self-hosted-store.js";
 import { saveConfig } from "../../lib/config.js";
+import { mergeAttachmentDetails } from "../../lib/attachment-actions.js";
+import { filterAttachmentDetails } from "./inbox.remote.js";
 import { registerInboxCommands } from "./inbox.js";
 
 let stub: V1Stub;
@@ -1127,17 +1129,35 @@ describe("inbox attachment", () => {
     }
   });
 
-  it("reports the authenticated index of a later attachment, not its filter position", async () => {
-    const email = seedEmail({
-      subject: "Filtered index",
-      attachments: [
-        { filename: "invoice.pdf", content_type: "application/pdf", size: 2048 },
-        { filename: "notes.txt", content_type: "text/plain", size: 12 },
-      ],
-    });
+  it("filters non-download attachments by authenticated metadata index across display gaps", async () => {
+    const id = crypto.randomUUID();
+    const mergedDisplay = mergeAttachmentDetails([
+      { filename: "", content_type: "application/octet-stream", size: 0 },
+      { filename: "target.pdf", content_type: "application/pdf", size: 2048 },
+      { filename: "other.txt", content_type: "text/plain", size: 12 },
+    ]);
+    expect(mergedDisplay.map(({ filename, index }) => [filename, index])).toEqual([
+      ["target.pdf", 1],
+      ["other.txt", 2],
+    ]);
+    expect(filterAttachmentDetails(mergedDisplay, { index: 1 }).map(({ filename, index }) => [filename, index]))
+      .toEqual([["target.pdf", 1]]);
 
-    const { data } = await runInboxCommand(["inbox", "attachment", email.id.slice(0, 8), "--filename", "notes.txt"]);
-    expect((data as Array<{ index?: number }>)[0]!.index).toBe(1);
+    await stub.seed({ messages: [msgRow({
+      id,
+      attachments: [
+        { filename: "", content_type: "application/octet-stream", size: 0 },
+        { filename: "target.pdf", content_type: "application/pdf", size: 2048 },
+        { filename: "other.txt", content_type: "text/plain", size: 12 },
+      ],
+    })] });
+
+    // The unnamed metadata entry is omitted from the merged display array, so
+    // the merged detail's authenticated index must win over its display position.
+    const { data } = await runInboxCommand(["inbox", "attachment", id, "--index", "1"]);
+    expect((data as Array<{ filename: string; index?: number }>)).toEqual([
+      expect.objectContaining({ filename: "target.pdf", index: 1 }),
+    ]);
   });
 
   it("downloads a validated attachment to a collision-proof mode-0600 file", async () => {

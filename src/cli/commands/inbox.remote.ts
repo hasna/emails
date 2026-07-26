@@ -25,6 +25,16 @@ import type {
 const MAX_INBOX_CLI_LIMIT = 1000;
 const CLI_MAILBOXES = ["inbox", "unread", "starred", "sent", "archived", "spam", "trash"] as const satisfies readonly Mailbox[];
 
+export function filterAttachmentDetails(
+  details: readonly AttachmentDetail[],
+  opts: { filename?: string; index?: number },
+): AttachmentDetail[] {
+  return details.filter((detail) =>
+    (opts.filename === undefined || detail.filename === opts.filename)
+    && (opts.index === undefined || detail.index === opts.index),
+  );
+}
+
 function normalizeSinceOption(value: string | undefined): string | undefined {
   if (!value) return undefined;
   const time = Date.parse(value);
@@ -794,10 +804,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         if (opts.download && parsedIndex === undefined) {
           throw new Error("--download requires one explicit --index");
         }
-        const filtered = details.filter((detail, index) =>
-          (opts.filename === undefined || detail.filename === opts.filename)
-          && (parsedIndex === undefined || index === parsedIndex),
-        );
+        const filtered = filterAttachmentDetails(details, { filename: opts.filename, index: parsedIndex });
         if (filtered.length === 0) {
           if (opts.download) throw new Error("No stored attachment metadata matches the download selection");
           output([], chalk.dim("No attachments found for this email."));

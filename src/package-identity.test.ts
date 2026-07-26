@@ -10,16 +10,12 @@ const root = join(import.meta.dir, "..");
 
 // Canonical published identity.
 //
-// npm serves TWO distinct lines under the Hasna scope:
-//   @hasna/emails  — this package (latest 1.2.6), the line production deploys
-//                    as the `emails` bin at v1.2.7.
-//   @hasna/mailery — the ABANDONED 0.6.x line (last publish 0.6.116).
+// @hasna/emails is the canonical package for this repository and owns the
+// emails/emails-mcp/emails-serve bins. @hasna/mailery is an abandoned package
+// line and must not be revived by publishing this tree under that name.
 //
-// CHANGELOG [0.6.117] already renamed this package back to @hasna/emails and
-// freed the mailery/mailery-mcp/mailery-serve bins for the separate cloud CLI
-// (@hasnatools/mailery). Publishing this tree as @hasna/mailery would resurrect
-// the abandoned name, strand @hasna/emails at 1.2.6 for every existing install,
-// and collide with the cloud CLI's bins. These assertions pin the decision.
+// These assertions pin the package identity independently of release-version
+// history or the separate cloud CLI.
 const CANONICAL_PACKAGE = "@hasna/emails";
 const CANONICAL_REPOSITORY = "git+https://github.com/hasna/emails.git";
 const CANONICAL_BINS = ["emails", "emails-mcp", "emails-serve"];

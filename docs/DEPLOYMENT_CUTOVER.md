@@ -3,9 +3,10 @@
 This repository intentionally has no automatic deployment workflow. Merging or
 tagging the repository cannot publish a package, push an image, or update AWS.
 
-Fast-uri quarantine remains external until 2026-07-26 10:42:54 Europe/Bucharest.
-Do not edit dependencies or dependency-lock files for that change until the date
-window closes.
+The fast-uri quarantine is resolved: version 3.1.4 cleared the full seven-day
+managed quarantine window on 2026-07-26 10:42:54.497 Europe/Bucharest and is
+pinned in 1.3.1. Future third-party dependency changes remain subject to the
+managed quarantine process.
 
 Before a future `workflow_dispatch` deployment is introduced, an operator must
 provide a Mailery-owned infrastructure manifest and least-privilege role in the

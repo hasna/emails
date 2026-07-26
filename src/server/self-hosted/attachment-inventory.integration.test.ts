@@ -264,6 +264,50 @@ describe.skipIf(!pgClient)("MP-00034 attachment inventory route", () => {
     expect(available.body.attachment.content_base64).toBe(Buffer.from("CCCC").toString("base64"));
   });
 
+  it("does not advertise byte-valid attachments with invalid download metadata as available", async () => {
+    const deps = makeDeps();
+    const t = await makeTenant("inv-download-metadata");
+    const payload = Buffer.from("hello").toString("base64");
+    const id = await importMsg(deps, t.token, {
+      receivedAt: "2026-02-03T00:00:00.000Z",
+      attachments: [
+        att("valid.txt", "text/plain", "hello"),
+        { content_type: "text/plain", size: 5, content_base64: payload } as never,
+        { filename: "", content_type: "text/plain", size: 5, content_base64: payload } as never,
+        { filename: 42, content_type: "text/plain", size: 5, content_base64: payload } as never,
+        { filename: "unsafe\u202Etxt.exe", content_type: "text/plain", size: 5, content_base64: payload } as never,
+        { filename: "invalid-mime.txt", content_type: "text/plain; charset=utf-8", size: 5, content_base64: payload } as never,
+        { filename: "missing-mime.txt", size: 5, content_base64: payload } as never,
+      ],
+    });
+
+    const inventory = await call(deps, "GET", "/v1/attachments?limit=500", { token: t.token });
+    expect(inventory.status).toBe(200);
+    const items = inventory.body.items.filter((item: any) => item.message_id === id);
+    expect(items.map((item: any) => item.content_available)).toEqual([true, false, false, false, false, false, false]);
+
+    const batch = await call(deps, "POST", "/v1/attachments/batch", {
+      token: t.token,
+      body: { message_ids: [id] },
+    });
+    expect(batch.status).toBe(200);
+    expect(batch.body.by_message_id[id].map((item: any) => item.content_available))
+      .toEqual([true, false, false, false, false, false, false]);
+
+    const detail = await call(deps, "GET", `/v1/messages/${id}`, { token: t.token });
+    expect(detail.status).toBe(200);
+    expect(detail.body.message.attachments.map((item: any) => item.content_available))
+      .toEqual([true, false, false, false, false, false, false]);
+
+    const valid = await call(deps, "GET", `/v1/messages/${id}/attachments/0`, { token: t.token });
+    expect(valid.status).toBe(200);
+    for (const index of [1, 2, 3, 4, 5, 6]) {
+      const invalid = await call(deps, "GET", `/v1/messages/${id}/attachments/${index}`, { token: t.token });
+      expect(invalid.status).toBe(422);
+      expect(invalid.body.code).toBe("invalid_attachment_payload");
+    }
+  });
+
   it("paginates exact-once across attachments — no dup/skip, correct order", async () => {
     const deps = makeDeps();
     const t = await makeTenant("inv-keyset");

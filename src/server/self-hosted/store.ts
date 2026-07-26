@@ -12,6 +12,7 @@ import { canonicalSender } from "../../lib/email-address.js";
 import {
   MAX_ATTACHMENT_DOWNLOAD_BYTES,
   decodeAttachmentPayload,
+  validateAttachmentMetadata,
 } from "../../lib/attachment-download.js";
 
 /** A live pool exposes `transaction()`; an in-memory unit-test shim does not. */
@@ -1089,20 +1090,37 @@ function attachmentMetaOf(item: unknown, index: number): AttachmentMeta {
 /** Map one lateral inventory row (SQL already unnested + projected) into an item. */
 function mapAttachmentInventoryRow(row: Record<string, unknown>): AttachmentInventoryItem {
   const idx = Number(row["attachment_index"]);
+  const filename = typeof row["filename"] === "string" ? row["filename"] : null;
+  const contentType = typeof row["content_type"] === "string" ? row["content_type"] : null;
+  const sizeBytes = toSizeBytes(row["size_raw"]);
+  let metadataValid = false;
+  try {
+    validateAttachmentMetadata({
+      // `->>` converts any JSON scalar to text; preserve the authenticated
+      // download boundary's string-only contract with the SQL type flags.
+      filename: row["filename_is_string"] === false ? null : filename,
+      content_type: row["content_type_is_string"] === false ? null : contentType,
+      size: sizeBytes,
+    });
+    metadataValid = true;
+  } catch {
+    // The inventory intentionally reports malformed metadata but never promises
+    // a successful authenticated download for it.
+  }
   return {
     message_id: String(row["message_id"]),
     attachment_index: Number.isFinite(idx) ? idx : 0,
-    filename: typeof row["filename"] === "string" ? (row["filename"] as string) : null,
-    content_type: typeof row["content_type"] === "string" ? (row["content_type"] as string) : null,
+    filename,
+    content_type: contentType,
     // `size_raw` is the JSONB `size` as text (SQL `->>`); the SQL projection
     // preserves the original JSON type so only numeric safe integers and
     // canonical integer strings survive here.
-    size_bytes: toSizeBytes(row["size_raw"]),
+    size_bytes: sizeBytes,
     sha256: typeof row["sha256"] === "string" ? (row["sha256"] as string) : null,
     // SQL already applied the strict canonical-base64, byte-limit, and declared
-    // size predicate. `=== true` keeps a driver that hands back "t"/null from
-    // silently reading as available.
-    content_available: row["content_available"] === true,
+    // size predicate without projecting payload bytes. Reuse the strict metadata
+    // validator used by authenticated download, so this is a truthful prediction.
+    content_available: row["content_available"] === true && metadataValid,
     direction: typeof row["direction"] === "string" ? (row["direction"] as string) : null,
     received_at: toIso(row["received_at"]),
   };
@@ -2248,7 +2266,9 @@ export class TenantScopedStore {
          m.id AS message_id,
          (att.ord - 1)::int AS attachment_index,
          att.value ->> 'filename' AS filename,
+         jsonb_typeof(att.value -> 'filename') = 'string' AS filename_is_string,
          att.value ->> 'content_type' AS content_type,
+         jsonb_typeof(att.value -> 'content_type') = 'string' AS content_type_is_string,
          normalized.size_bytes AS size_raw,
          att.value ->> 'sha256' AS sha256,
          CASE

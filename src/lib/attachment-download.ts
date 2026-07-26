@@ -45,6 +45,12 @@ export interface SavedAttachment {
   path: string;
 }
 
+export interface ValidatedAttachmentMetadata {
+  filename: string;
+  content_type: string;
+  size: number | null;
+}
+
 function object(value: unknown, label: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${label} must be an object`);
@@ -89,15 +95,11 @@ export function validateAttachmentFilename(value: unknown): string {
   return wellFormedText(value, "attachment filename", 1024);
 }
 
-function attachmentMetadata(
+/** Validate metadata shared by authenticated download and metadata-only inventory reads. */
+export function validateAttachmentMetadata(
   value: unknown,
-  allowNullSize = false,
-): {
-  filename: string;
-  content_type: string;
-  size: number | null;
-  record: Record<string, unknown>;
-} {
+  options: { allowNullSize?: boolean } = {},
+): ValidatedAttachmentMetadata {
   const record = object(value, "attachment");
   const filename = validateAttachmentFilename(record["filename"]);
   const content_type = wellFormedText(record["content_type"], "attachment content type", 255);
@@ -105,13 +107,13 @@ function attachmentMetadata(
     throw new Error("attachment content type must be a valid MIME type");
   }
   const size = record["size"];
-  if (size === null && allowNullSize) {
-    return { filename, content_type, size: null, record };
+  if (size === null && options.allowNullSize) {
+    return { filename, content_type, size: null };
   }
   if (typeof size !== "number" || !Number.isSafeInteger(size) || size < 0) {
     throw new Error("attachment size must be a non-negative integer");
   }
-  return { filename, content_type, size, record };
+  return { filename, content_type, size };
 }
 
 function decodeCanonicalBase64(value: unknown, declaredSize: number, maxBytes: number): Uint8Array {
@@ -137,8 +139,9 @@ export function decodeAttachmentPayload(payload: unknown, index: number, maxByte
   const wrapper = object(payload, "attachment response");
   const code = wrapper["code"];
   if (code === "attachment_not_found") return { state: "not_found", index };
+  const attachment = object(wrapper["attachment"], "attachment");
   if (code === "attachment_content_unavailable") {
-    const meta = attachmentMetadata(wrapper["attachment"], true);
+    const meta = validateAttachmentMetadata(attachment, { allowNullSize: true });
     if (meta.size !== null && meta.size > limit) {
       throw new Error(`attachment exceeds byte limit ${limit}`);
     }
@@ -150,11 +153,11 @@ export function decodeAttachmentPayload(payload: unknown, index: number, maxByte
       bytes: meta.size,
     };
   }
-  const meta = attachmentMetadata(wrapper["attachment"]);
+  const meta = validateAttachmentMetadata(attachment);
   if (meta.size === null) {
     throw new Error("attachment size must be a non-negative integer");
   }
-  const data = decodeCanonicalBase64(meta.record["content_base64"], meta.size, limit);
+  const data = decodeCanonicalBase64(attachment["content_base64"], meta.size, limit);
   return {
     state: "available",
     index,
