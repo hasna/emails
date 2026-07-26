@@ -10,11 +10,35 @@ import { resetMailDataSource, resolveMailDataSource, SqliteMailDataSource } from
 
 const attachmentDirs: string[] = [];
 
+function clearMailModeEnv(): void {
+  for (const key of [
+    "EMAILS_MODE",
+    "MAILERY_MODE",
+    "HASNA_EMAILS_MODE",
+    "HASNA_MAILERY_MODE",
+    "EMAILS_SELF_HOSTED_URL",
+    "MAILERY_SELF_HOSTED_URL",
+    "HASNA_EMAILS_SELF_HOSTED_URL",
+    "HASNA_MAILERY_SELF_HOSTED_URL",
+    "EMAILS_SELF_HOSTED_API_KEY",
+    "MAILERY_SELF_HOSTED_API_KEY",
+    "HASNA_EMAILS_SELF_HOSTED_API_KEY",
+    "HASNA_MAILERY_SELF_HOSTED_API_KEY",
+    "EMAILS_API_KEY",
+    "MAILERY_API_KEY",
+    "HASNA_EMAILS_API_KEY",
+    "HASNA_MAILERY_API_KEY",
+    "EMAILS_CLIENT_ENV_SECRET",
+    "MAILERY_CLIENT_ENV_SECRET",
+  ]) {
+    delete process.env[key];
+  }
+}
+
 beforeEach(() => {
+  clearMailModeEnv();
   process.env["EMAILS_MODE"] = "local";
   process.env["EMAILS_DB_PATH"] = ":memory:";
-  delete process.env["EMAILS_SELF_HOSTED_URL"];
-  delete process.env["EMAILS_SELF_HOSTED_API_KEY"];
   resetDatabase();
   resetMailDataSource();
 });
@@ -23,7 +47,7 @@ afterEach(() => {
   closeDatabase();
   resetDatabase();
   resetMailDataSource();
-  delete process.env["EMAILS_MODE"];
+  clearMailModeEnv();
   delete process.env["EMAILS_DB_PATH"];
   for (const dir of attachmentDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
@@ -44,6 +68,25 @@ function seedInbound() {
     headers: { "Message-ID": "<local-source@example.test>" },
     raw_size: 32,
     received_at: "2026-07-14T10:00:00.000Z",
+  });
+}
+
+function seedInsertion(subject: string, receivedAt: string) {
+  return storeInboundEmail({
+    provider_id: null,
+    message_id: `<${subject}-${crypto.randomUUID()}@example.test>`,
+    in_reply_to_email_id: null,
+    from_address: "sender@example.test",
+    to_addresses: ["ops@example.test"],
+    cc_addresses: [],
+    subject,
+    text_body: subject,
+    html_body: null,
+    attachments: [],
+    attachment_paths: [],
+    headers: {},
+    raw_size: subject.length,
+    received_at: receivedAt,
   });
 }
 
@@ -112,6 +155,70 @@ describe("SqliteMailDataSource", () => {
     const stored = seedInbound();
     const found = await resolveMailDataSource().findLatest("ops@example.test");
     expect(found).toMatchObject({ code: "123456", email: { id: stored.id } });
+  });
+
+  it("paginates the insert-only seam deterministically without returning a terminal cursor early", async () => {
+    const receivedAt = "2026-07-20T10:00:00.000Z";
+    const rows = [
+      seedInsertion("insert-a", receivedAt),
+      seedInsertion("insert-b", receivedAt),
+      seedInsertion("insert-c", "2026-07-19T10:00:00.000Z"),
+    ];
+    const expectedIds = rows
+      .slice()
+      .sort((left, right) =>
+        right.received_at.localeCompare(left.received_at)
+        || right.id.localeCompare(left.id))
+      .map((row) => row.id);
+    const source = resolveMailDataSource();
+
+    const first = await source.listInsertionsSince({ limit: 1 });
+    expect(first.cursor).not.toBeNull();
+    const second = await source.listInsertionsSince({ limit: 1, cursor: first.cursor! });
+    expect(second.cursor).not.toBeNull();
+    const third = await source.listInsertionsSince({ limit: 1, cursor: second.cursor! });
+    expect(third.cursor).toBeNull();
+
+    expect([
+      first.insertions[0]?.id,
+      second.insertions[0]?.id,
+      third.insertions[0]?.id,
+    ]).toEqual(expectedIds);
+    expect(new Set([first.cursor, second.cursor]).size).toBe(2);
+  });
+
+  it("rejects malformed or query-mismatched insertion cursors instead of restarting or cycling", async () => {
+    seedInsertion("insert-cursor", "2026-07-20T10:00:00.000Z");
+    const source = resolveMailDataSource();
+    const first = await source.listInsertionsSince({
+      receivedSince: "2026-07-01T00:00:00.000Z",
+      limit: 1,
+    });
+
+    await expect(source.listInsertionsSince({ cursor: "not-a-cursor", limit: 1 }))
+      .rejects.toThrow(/cursor/i);
+    if (first.cursor) {
+      await expect(source.listInsertionsSince({
+        receivedSince: "2026-07-02T00:00:00.000Z",
+        cursor: first.cursor,
+        limit: 1,
+      })).rejects.toThrow(/cursor/i);
+    }
+  });
+
+  it("keeps a descending insertion walk monotonic when a newer row arrives between pages", async () => {
+    seedInsertion("original-new", "2026-07-20T10:00:00.000Z");
+    seedInsertion("original-old", "2026-07-19T10:00:00.000Z");
+    const source = resolveMailDataSource();
+    const first = await source.listInsertionsSince({ limit: 1 });
+    expect(first.cursor).not.toBeNull();
+
+    const insertedLater = seedInsertion("arrived-after-page-one", "2026-07-21T10:00:00.000Z");
+    const second = await source.listInsertionsSince({ limit: 10, cursor: first.cursor! });
+
+    expect(second.insertions.map((row) => row.subject)).toEqual(["original-old"]);
+    expect(second.insertions.some((row) => row.id === insertedLater.id)).toBe(false);
+    expect(second.cursor).toBeNull();
   });
 
   it("resolves a sanitized original filename through its indexed local path", async () => {

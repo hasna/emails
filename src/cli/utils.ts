@@ -1,4 +1,5 @@
 import chalk from "../lib/chalk-lite.js";
+import { writeSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { resolveResourceId, listResourceIdMatches } from "../db/self-hosted-store.js";
 import { getDatabase, listPartialIdMatches, resolvePartialIdOrThrow } from "../db/database.js";
@@ -6,18 +7,75 @@ import { getEmailsMode } from "../lib/mode.js";
 import { redactSecrets } from "../lib/redaction.js";
 
 const ID_ERROR_SUGGESTION_LIMIT = 5;
+const CLI_JSON_WRITE_CHUNK_BYTES = 16 * 1024;
 let jsonOutput = false;
 let verboseOutput = false;
 let jsonConsolePatched = false;
 let structuredJsonEmitted = false;
 const jsonStdoutLines: string[] = [];
 const jsonStderrLines: string[] = [];
-const originalConsoleLog = console.log.bind(console);
-const originalConsoleError = console.error.bind(console);
+let pendingJsonOutput = Promise.resolve();
+let jsonOutputFailure: Error | null = null;
 
 export const DEFAULT_CLI_PAGE_LIMIT = 50;
 export const MAX_CLI_PAGE_LIMIT = 1000;
 export const DEFAULT_COMPACT_CLI_PAGE_LIMIT = 20;
+
+function jsonDocument(data: unknown): string {
+  return `${JSON.stringify(redactSecrets(data), null, 2)}\n`;
+}
+
+function normalizeJsonOutputError(error: unknown): Error {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  if (code === "EPIPE" || code === "ERR_STREAM_DESTROYED") {
+    return new Error("CLI output pipe closed before the JSON document was fully written.");
+  }
+  return error instanceof Error ? error : new Error(String(error));
+}
+
+function writeJsonChunk(stream: NodeJS.WriteStream, chunk: Uint8Array): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (error?: unknown) => {
+      if (settled) return;
+      settled = true;
+      stream.off("error", onError);
+      if (error) reject(normalizeJsonOutputError(error));
+      else resolve();
+    };
+    const onError = (error: Error) => finish(error);
+    stream.once("error", onError);
+    stream.write(chunk, (error) => finish(error));
+  });
+}
+
+async function writeJsonDocument(stream: NodeJS.WriteStream, data: unknown): Promise<void> {
+  const document = Buffer.from(jsonDocument(data));
+  for (let offset = 0; offset < document.length; offset += CLI_JSON_WRITE_CHUNK_BYTES) {
+    await writeJsonChunk(stream, document.subarray(offset, offset + CLI_JSON_WRITE_CHUNK_BYTES));
+  }
+}
+
+function queueJsonDocument(stream: NodeJS.WriteStream, data: unknown): void {
+  pendingJsonOutput = pendingJsonOutput
+    .then(() => {
+      if (jsonOutputFailure) return;
+      return writeJsonDocument(stream, data);
+    })
+    .catch((error) => {
+      jsonOutputFailure ??= normalizeJsonOutputError(error);
+    });
+}
+
+function writeJsonDocumentSync(fd: number, data: unknown): void {
+  const buffer = Buffer.from(jsonDocument(data));
+  let offset = 0;
+  while (offset < buffer.length) {
+    const written = writeSync(fd, buffer, offset, buffer.length - offset);
+    if (written <= 0) throw new Error("CLI JSON output could not be written.");
+    offset += written;
+  }
+}
 
 export function configureCliRuntime(opts: { json?: boolean; verbose?: boolean }): void {
   jsonOutput = !!opts.json;
@@ -49,7 +107,11 @@ export function configureCliRuntime(opts: { json?: boolean; verbose?: boolean })
             output: jsonStdoutLines,
             errors: jsonStderrLines,
           };
-      originalConsoleLog(JSON.stringify(redactSecrets(payload), null, 2));
+      try {
+        writeJsonDocumentSync(process.stdout.fd, payload);
+      } catch {
+        // The process is already exiting; a closed stdout pipe has no consumer.
+      }
     });
   }
 }
@@ -74,10 +136,36 @@ function formatJsonConsoleArg(arg: unknown): string {
 
 export function emitJson(data: unknown): void {
   structuredJsonEmitted = true;
-  originalConsoleLog(JSON.stringify(redactSecrets(data), null, 2));
+  queueJsonDocument(process.stdout, data);
+}
+
+export function finalizeCliOutput(exitCode = process.exitCode ?? 0): void {
+  if (!jsonOutput || structuredJsonEmitted) return;
+  if (jsonStdoutLines.length === 0 && jsonStderrLines.length === 0) return;
+  const stderr = jsonStderrLines.join("\n").trim();
+  emitJson(exitCode !== 0
+    ? {
+        error: {
+          message: stderr || `Command failed with exit code ${exitCode}`,
+          code: errorCode(stderr || "Command failed"),
+          fix_commands: fixCommands(stderr || "Command failed"),
+          retryable: false,
+        },
+        output: jsonStdoutLines,
+      }
+    : {
+        output: jsonStdoutLines,
+        errors: jsonStderrLines,
+      });
+}
+
+export async function drainCliOutput(): Promise<void> {
+  await pendingJsonOutput;
+  if (jsonOutputFailure) throw jsonOutputFailure;
 }
 
 function errorCode(message: string): string {
+  if (/output pipe closed|EPIPE|broken pipe/i.test(message)) return "output_closed";
   if (/unknown command/i.test(message)) return "unknown_command";
   if (/could not resolve id|not found/i.test(message)) return "not_found";
   if (/requires|missing|required/i.test(message)) return "missing_required_input";
@@ -104,14 +192,18 @@ export function handleError(e: unknown): never {
   const message = e instanceof Error ? e.message : String(e);
   if (jsonOutput) {
     structuredJsonEmitted = true;
-    originalConsoleError(JSON.stringify(redactSecrets({
-      error: {
-        message,
-        code: errorCode(message),
-        fix_commands: fixCommands(message),
-        retryable: false,
-      },
-    }), null, 2));
+    try {
+      writeJsonDocumentSync(process.stderr.fd, {
+        error: {
+          message,
+          code: errorCode(message),
+          fix_commands: fixCommands(message),
+          retryable: false,
+        },
+      });
+    } catch {
+      // Preserve the deterministic nonzero exit even when stderr is also closed.
+    }
   } else {
     console.error(chalk.red(message));
   }

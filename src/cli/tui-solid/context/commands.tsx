@@ -109,8 +109,8 @@ function createCommands(): Accessor<EmailsCommand[]> {
         toast.show({ title: "Refreshed", message: "Local mailbox state reloaded.", tone: "success" });
       },
     },
-    // Pull Now was LOCAL S3->SQLite ingestion. The self-hosted client syncs via the
-    // automatic changesSince delta, so there is no manual pull command.
+    // Pull Now was LOCAL S3->SQLite ingestion. The self-hosted seam exposes insert-only
+    // inventory; edits and deletions are picked up by refresh, so there is no manual pull command.
     ...MAILBOXES.map((mailbox): EmailsCommand => ({
       id: `mailbox.${mailbox}`,
       title: mailboxLabel(mailbox as Mailbox),

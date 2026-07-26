@@ -12,6 +12,7 @@ import { canonicalSender } from "../../lib/email-address.js";
 import {
   MAX_ATTACHMENT_DOWNLOAD_BYTES,
   decodeAttachmentPayload,
+  validateAttachmentMetadata,
 } from "../../lib/attachment-download.js";
 
 /** A live pool exposes `transaction()`; an in-memory unit-test shim does not. */
@@ -251,7 +252,7 @@ export interface AttachmentInventoryItem {
   size_bytes: number | null;
   sha256: string | null;
   /**
-   * Whether stored payload bytes exist for this row — i.e. whether
+   * Whether valid stored payload bytes exist for this row — i.e. whether
    * GET /v1/messages/{id}/attachments/{index} can return content or will answer
    * 409 attachment_content_unavailable. Metadata alone is NOT proof of content:
    * the legacy import backfilled filename/content_type/size for messages whose
@@ -294,6 +295,190 @@ export interface ListAttachmentsOptions {
  * each a single `id = ANY($2)` probe. Oversized batches are rejected (400).
  */
 export const MAX_ATTACHMENT_BATCH_IDS = 200;
+export const MAX_ATTACHMENT_REPAIR_MANIFEST_ITEMS = 200;
+export const MAX_ATTACHMENT_REPAIR_PAGE_ITEMS = 25;
+export const MAX_ATTACHMENT_REPAIR_ATTEMPTS = 3;
+export const MAX_ATTACHMENT_REPAIR_SOURCE_BYTES = 128 * 1024 * 1024;
+export const ATTACHMENT_REPAIR_LEASE_MS = 15 * 60 * 1000;
+const ATTACHMENT_REPAIR_RETRY_BASE_MS = 5_000;
+const ATTACHMENT_REPAIR_RETRY_MAX_MS = 5 * 60 * 1000;
+
+export interface AttachmentRepairPolicy {
+  maxActiveRunsPerTenant: number;
+  maxLedgerRunsPerTenant: number;
+  maxLedgerEntriesPerTenant: number;
+  runByteBudget: number;
+  runTimeBudgetMs: number;
+}
+
+export const DEFAULT_ATTACHMENT_REPAIR_POLICY: Readonly<AttachmentRepairPolicy> = Object.freeze({
+  maxActiveRunsPerTenant: 2,
+  maxLedgerRunsPerTenant: 100,
+  maxLedgerEntriesPerTenant: 20_000,
+  runByteBudget: 512 * 1024 * 1024,
+  runTimeBudgetMs: 60 * 60 * 1000,
+});
+
+function attachmentRepairPolicy(
+  overrides: Partial<AttachmentRepairPolicy> | undefined,
+): AttachmentRepairPolicy {
+  const policy = { ...DEFAULT_ATTACHMENT_REPAIR_POLICY, ...overrides };
+  for (const [key, value] of Object.entries(policy)) {
+    if (!Number.isSafeInteger(value) || value <= 0) {
+      throw new RangeError(`attachment repair policy ${key} must be a positive safe integer`);
+    }
+  }
+  if (policy.maxActiveRunsPerTenant > policy.maxLedgerRunsPerTenant) {
+    throw new RangeError("attachment repair active-run quota cannot exceed the run-ledger quota");
+  }
+  return policy;
+}
+
+export interface AttachmentRepairManifestEntry {
+  object_key: string;
+  recipients: string[];
+  canary_message_ids: string[];
+}
+
+export interface AttachmentRepairCanarySnapshot {
+  tenant_id: string;
+  message_id: string;
+  object_key: string;
+  attachments: readonly unknown[];
+}
+
+export function normalizeAttachmentRepairManifestEntries(
+  values: readonly AttachmentRepairManifestEntry[],
+): AttachmentRepairManifestEntry[] {
+  if (values.length === 0 || values.length > MAX_ATTACHMENT_REPAIR_MANIFEST_ITEMS) {
+    throw new RangeError(
+      `attachment repair manifest must contain 1-${MAX_ATTACHMENT_REPAIR_MANIFEST_ITEMS} entries`,
+    );
+  }
+  const objectKeys = new Set<string>();
+  const messageIds = new Set<string>();
+  return values.map((entry) => {
+    if (!entry || typeof entry !== "object") {
+      throw new RangeError("attachment repair manifest entries must be objects");
+    }
+    const allowed = new Set(["object_key", "recipients", "canary_message_ids"]);
+    const unsupported = Object.keys(entry).filter((key) => !allowed.has(key));
+    if (unsupported.length > 0) {
+      throw new RangeError(
+        `attachment repair manifest contains unsupported fields: ${unsupported.join(", ")}`,
+      );
+    }
+    if (!Array.isArray(entry.recipients)
+      || entry.recipients.some((value) => typeof value !== "string" || !value.trim())) {
+      throw new RangeError("attachment repair recipients must contain only non-empty strings");
+    }
+    if (!Array.isArray(entry.canary_message_ids)
+      || entry.canary_message_ids.some((value) => typeof value !== "string" || !value.trim())) {
+      throw new RangeError("attachment repair canary_message_ids must contain only non-empty strings");
+    }
+    const objectKey = typeof entry.object_key === "string" ? entry.object_key.trim() : "";
+    const recipients = [...new Set(entry.recipients.map((value) => value.trim()))];
+    const canaryMessageIds = entry.canary_message_ids.map((value) => value.trim());
+    if (!objectKey || recipients.length === 0 || canaryMessageIds.length === 0) {
+      throw new RangeError(
+        "each attachment repair entry requires an object_key, recipients, and canary_message_ids",
+      );
+    }
+    if (objectKeys.has(objectKey)) {
+      throw new RangeError("attachment repair manifest rejects duplicate object_key values");
+    }
+    objectKeys.add(objectKey);
+    for (const messageId of canaryMessageIds) {
+      if (messageIds.has(messageId)) {
+        throw new RangeError("attachment repair manifest rejects duplicate canary message ids");
+      }
+      messageIds.add(messageId);
+    }
+    return {
+      object_key: objectKey,
+      recipients,
+      canary_message_ids: canaryMessageIds,
+    };
+  });
+}
+
+export type AttachmentRepairLedgerEntryStatus =
+  | "pending"
+  | "would_repair"
+  | "repaired"
+  | "unavailable";
+
+export interface AttachmentRepairLedgerEntry {
+  tenant_id: string;
+  run_id: string;
+  position: number;
+  object_key: string;
+  recipients: string[];
+  canary_message_ids: string[];
+  attachment_count: number;
+  status: AttachmentRepairLedgerEntryStatus;
+  operator_action: boolean;
+  attempts: number;
+  last_error_code: string | null;
+  last_attempt_at: string | null;
+  next_attempt_at: string;
+  claim_token: string | null;
+  lease_expires_at: string | null;
+  /** Durable per-attempt byte reservation charged before external source I/O. */
+  source_byte_limit: number;
+}
+
+export interface AttachmentRepairLedgerRun {
+  id: string;
+  tenant_id: string;
+  apply: boolean;
+  status: "pending" | "completed";
+  entry_total: number;
+  inventory_total: number;
+  repaired: number;
+  would_repair: number;
+  unavailable: number;
+  operator_action: number;
+  pending: number;
+  retrying: number;
+  entry_repaired: number;
+  entry_would_repair: number;
+  entry_unavailable: number;
+  entry_operator_action: number;
+  entry_pending: number;
+  entry_retrying: number;
+  attempts: number;
+  checkpoint: number;
+  byte_budget: number;
+  bytes_consumed: number;
+  time_budget_ms: number;
+  deadline_at: string;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
+}
+
+export class AttachmentRepairIdempotencyConflictError extends Error {
+  constructor() {
+    super("attachment repair idempotency key was already used for a different manifest");
+    this.name = "AttachmentRepairIdempotencyConflictError";
+  }
+}
+
+export type AttachmentRepairQuotaCode =
+  | "active_runs"
+  | "ledger_runs"
+  | "ledger_entries";
+
+export class AttachmentRepairQuotaExceededError extends Error {
+  constructor(
+    public readonly code: AttachmentRepairQuotaCode,
+    public readonly retryable: boolean,
+  ) {
+    super(`attachment repair ${code.replaceAll("_", " ")} quota exceeded`);
+    this.name = "AttachmentRepairQuotaExceededError";
+  }
+}
 
 /** Fields a caller may supply when writing a message (outbound or inbound). */
 export interface MessageInput {
@@ -539,7 +724,14 @@ export interface StoredAttachment {
 
 export type StoredAttachmentLookup =
   | { state: "available"; attachment: StoredAttachment }
-  | { state: "content_unavailable"; attachment: Omit<StoredAttachment, "content_base64"> }
+  | {
+      state: "content_unavailable";
+      attachment: {
+        filename: string;
+        content_type: string;
+        size: number | null;
+      };
+    }
   | { state: "invalid"; reason: string };
 
 export interface InboundSourceProvenance {
@@ -700,6 +892,40 @@ function canonicalJson(value: unknown): string {
   return JSON.stringify(value);
 }
 
+function attachmentMetadataOnly(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(attachmentMetadataOnly);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([key]) => key !== "content_base64")
+      .map(([key, item]) => [key, attachmentMetadataOnly(item)]),
+  );
+}
+
+export function attachmentRepairRequestHash(
+  canonicalBucket: string,
+  normalizedEntries: readonly AttachmentRepairManifestEntry[],
+  apply: boolean,
+  canarySnapshot: readonly AttachmentRepairCanarySnapshot[] = [],
+): string {
+  return createHash("sha256")
+    .update(canonicalJson({
+      apply,
+      canonical_bucket: canonicalBucket,
+      entries: normalizedEntries,
+      canary_attachment_state: canarySnapshot.map((snapshot) => ({
+        tenant_id: snapshot.tenant_id,
+        message_id: snapshot.message_id,
+        object_key: snapshot.object_key,
+        attachments: snapshot.attachments.map((attachment, attachmentIndex) => ({
+          attachment_index: attachmentIndex,
+          metadata: attachmentMetadataOnly(attachment),
+        })),
+      })),
+    }), "utf8")
+    .digest("hex");
+}
+
 function repairBindingSnapshot(bindings: readonly InboundAttachmentRepairBinding[]): string {
   return canonicalJson([...bindings]
     .sort((left, right) => `${left.tenantId}\0${left.messageId}`.localeCompare(`${right.tenantId}\0${right.messageId}`))
@@ -715,6 +941,13 @@ class AttachmentRepairConcurrentChangeError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "AttachmentRepairConcurrentChangeError";
+  }
+}
+
+export class AttachmentRepairReviewMismatchError extends Error {
+  constructor() {
+    super("attachment repair reviewed dry-run proof does not match");
+    this.name = "AttachmentRepairReviewMismatchError";
   }
 }
 
@@ -794,15 +1027,19 @@ function toIso(value: unknown): string | null {
 
 /** Coerce a raw DB row into a fully-typed MessageRecord (JSONB columns parsed). */
 function mapMessageRow(row: Record<string, unknown>): MessageRecord {
-  const attachments = toArray(row["attachments"]).map((item) => {
-    if (!item || typeof item !== "object" || Array.isArray(item)) return item;
-    const { content_base64: content, ...metadata } = item as Record<string, unknown>;
+  const attachments = toArray(row["attachments"]).map((item, index) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      // Preserve the authenticated array position, but never let a malformed
+      // scalar become a client placeholder with unknown/fetchable availability.
+      return { content_available: false };
+    }
+    const { content_base64: _content, ...metadata } = item as Record<string, unknown>;
     // `content_available` is DERIVED here, never echoed from the stored JSON: it
     // is exactly the predicate getMessageAttachment uses to decide between
     // serving bytes and answering 409 attachment_content_unavailable. Metadata
     // is not proof of content (legacy imports carry metadata only), so a reader
     // must be able to tell the two apart without attempting a download (#36).
-    return { ...metadata, content_available: typeof content === "string" };
+    return { ...metadata, content_available: attachmentContentAvailable(item, index) };
   });
   return {
     ...(row as unknown as MessageRecord),
@@ -850,11 +1087,18 @@ function mapMessageListRow(row: Record<string, unknown>): MessageListRecord {
   return { ...safe, snippet: snippet || null, attachment_count: Number.isFinite(count) ? count : 0 };
 }
 
-/** Normalize a `size` field (number or numeric string) to a non-negative integer, else null. */
+/**
+ * Normalize a machine-readable byte count to a non-negative integer.
+ * Human-readable legacy values ("12 KB", blank/unknown) deliberately stay null;
+ * interpreting them as bytes would manufacture false precision.
+ */
 function toSizeBytes(value: unknown): number | null {
-  if (value === null || value === undefined) return null;
-  const n = typeof value === "number" ? value : Number(value);
-  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : null;
+  if (typeof value === "number") {
+    return Number.isSafeInteger(value) && value >= 0 ? value : null;
+  }
+  if (typeof value !== "string" || !/^(?:0|[1-9]\d*)$/.test(value)) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : null;
 }
 
 /** Read one attachment-metadata field as a string, else null (never throws on malformed elements). */
@@ -862,6 +1106,22 @@ function attField(item: unknown, key: string): string | null {
   if (!item || typeof item !== "object" || Array.isArray(item)) return null;
   const value = (item as Record<string, unknown>)[key];
   return typeof value === "string" ? value : value == null ? null : String(value);
+}
+
+/** True only when the authenticated download endpoint can return these exact bytes. */
+function attachmentContentAvailable(item: unknown, index: number): boolean {
+  const attachment = item && typeof item === "object" && !Array.isArray(item)
+    ? item as Record<string, unknown>
+    : null;
+  const size = toSizeBytes(attachment?.["size"]);
+  if (!attachment || size === null || typeof attachment["content_base64"] !== "string") return false;
+  try {
+    return decodeAttachmentPayload({
+      attachment: { ...attachment, size },
+    }, index, MAX_ATTACHMENT_DOWNLOAD_BYTES).state === "available";
+  } catch {
+    return false;
+  }
 }
 
 /** Project one attachment array element into batch metadata (content_base64 excluded). */
@@ -875,33 +1135,173 @@ function attachmentMetaOf(item: unknown, index: number): AttachmentMeta {
     content_type: attField(item, "content_type"),
     size_bytes: toSizeBytes(record?.["size"]),
     sha256: attField(item, "sha256"),
-    // Same derivation as the per-ID read and the inventory scan: presence of a
-    // STRING content_base64 is the only thing that makes a payload fetchable.
-    content_available: typeof record?.["content_base64"] === "string",
+    content_available: attachmentContentAvailable(item, index),
   };
 }
 
 /** Map one lateral inventory row (SQL already unnested + projected) into an item. */
 function mapAttachmentInventoryRow(row: Record<string, unknown>): AttachmentInventoryItem {
   const idx = Number(row["attachment_index"]);
+  const filename = typeof row["filename"] === "string" ? row["filename"] : null;
+  const contentType = typeof row["content_type"] === "string" ? row["content_type"] : null;
+  const sizeBytes = toSizeBytes(row["size_raw"]);
+  let metadataValid = false;
+  try {
+    validateAttachmentMetadata({
+      // `->>` converts any JSON scalar to text; preserve the authenticated
+      // download boundary's string-only contract with the SQL type flags.
+      filename: row["filename_is_string"] === false ? null : filename,
+      content_type: row["content_type_is_string"] === false ? null : contentType,
+      size: sizeBytes,
+    });
+    metadataValid = true;
+  } catch {
+    // The inventory intentionally reports malformed metadata but never promises
+    // a successful authenticated download for it.
+  }
   return {
     message_id: String(row["message_id"]),
     attachment_index: Number.isFinite(idx) ? idx : 0,
-    filename: typeof row["filename"] === "string" ? (row["filename"] as string) : null,
-    content_type: typeof row["content_type"] === "string" ? (row["content_type"] as string) : null,
-    // `size_raw` is the JSONB `size` as text (SQL `->>`); toSizeBytes floors and
-    // guards it — tolerating fractions, numeric strings, and out-of-bigint-range
-    // values uniformly, and IDENTICALLY to the batch path's attachmentMetaOf, so
-    // the two endpoints never disagree and a poison size cannot 500 the scan.
-    size_bytes: toSizeBytes(row["size_raw"]),
+    filename,
+    content_type: contentType,
+    // `size_raw` is the JSONB `size` as text (SQL `->>`); the SQL projection
+    // preserves the original JSON type so only numeric safe integers and
+    // canonical integer strings survive here.
+    size_bytes: sizeBytes,
     sha256: typeof row["sha256"] === "string" ? (row["sha256"] as string) : null,
-    // SQL already applied the `jsonb_typeof(... ) = 'string'` predicate, which is
-    // the exact runtime check getMessageAttachment makes; `=== true` keeps a
-    // driver that hands back "t"/null from silently reading as available.
-    content_available: row["content_available"] === true,
+    // SQL already applied the strict canonical-base64, byte-limit, and declared
+    // size predicate without projecting payload bytes. Reuse the strict metadata
+    // validator used by authenticated download, so this is a truthful prediction.
+    content_available: row["content_available"] === true && metadataValid,
     direction: typeof row["direction"] === "string" ? (row["direction"] as string) : null,
     received_at: toIso(row["received_at"]),
   };
+}
+
+const ATTACHMENT_REPAIR_RUN_COLUMNS =
+  "id::text AS id, tenant_id::text AS tenant_id, apply, status, entry_total, inventory_total, " +
+  "repaired, would_repair, unavailable, operator_action, pending, retrying, " +
+  "entry_repaired, entry_would_repair, entry_unavailable, entry_operator_action, " +
+  "entry_pending, entry_retrying, attempts, " +
+  "checkpoint, byte_budget, bytes_consumed, time_budget_ms, deadline_at, " +
+  "created_at, updated_at, completed_at";
+
+function mapAttachmentRepairRun(row: Record<string, unknown>): AttachmentRepairLedgerRun {
+  const number = (value: unknown): number => {
+    const parsed = typeof value === "number" ? value : Number(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+  };
+  return {
+    id: String(row["id"]),
+    tenant_id: String(row["tenant_id"]),
+    apply: row["apply"] === true,
+    status: row["status"] === "completed" ? "completed" : "pending",
+    entry_total: number(row["entry_total"]),
+    inventory_total: number(row["inventory_total"]),
+    repaired: number(row["repaired"]),
+    would_repair: number(row["would_repair"]),
+    unavailable: number(row["unavailable"]),
+    operator_action: number(row["operator_action"]),
+    pending: number(row["pending"]),
+    retrying: number(row["retrying"]),
+    entry_repaired: number(row["entry_repaired"]),
+    entry_would_repair: number(row["entry_would_repair"]),
+    entry_unavailable: number(row["entry_unavailable"]),
+    entry_operator_action: number(row["entry_operator_action"]),
+    entry_pending: number(row["entry_pending"]),
+    entry_retrying: number(row["entry_retrying"]),
+    attempts: number(row["attempts"]),
+    checkpoint: number(row["checkpoint"]),
+    byte_budget: number(row["byte_budget"]),
+    bytes_consumed: number(row["bytes_consumed"]),
+    time_budget_ms: number(row["time_budget_ms"]),
+    deadline_at: toIso(row["deadline_at"]) ?? String(row["deadline_at"] ?? ""),
+    created_at: toIso(row["created_at"]) ?? String(row["created_at"] ?? ""),
+    updated_at: toIso(row["updated_at"]) ?? String(row["updated_at"] ?? ""),
+    completed_at: toIso(row["completed_at"]),
+  };
+}
+
+function mapAttachmentRepairEntry(row: Record<string, unknown>): AttachmentRepairLedgerEntry {
+  const status = row["status"];
+  const normalizedStatus: AttachmentRepairLedgerEntryStatus =
+    status === "would_repair" || status === "repaired" || status === "unavailable"
+      ? status
+      : "pending";
+  return {
+    tenant_id: String(row["tenant_id"]),
+    run_id: String(row["run_id"]),
+    position: Number(row["position"]),
+    object_key: String(row["object_key"]),
+    recipients: toArray(row["recipients"]).filter((value): value is string => typeof value === "string"),
+    canary_message_ids: toArray(row["canary_message_ids"]).filter(
+      (value): value is string => typeof value === "string",
+    ),
+    attachment_count: Number(row["attachment_count"]),
+    status: normalizedStatus,
+    operator_action: row["operator_action"] === true,
+    attempts: Number(row["attempts"]),
+    last_error_code: typeof row["last_error_code"] === "string" ? row["last_error_code"] : null,
+    last_attempt_at: toIso(row["last_attempt_at"]),
+    next_attempt_at: toIso(row["next_attempt_at"]) ?? String(row["next_attempt_at"] ?? ""),
+    claim_token: typeof row["claim_token"] === "string" ? row["claim_token"] : null,
+    lease_expires_at: toIso(row["lease_expires_at"]),
+    source_byte_limit: Number(row["reserved_bytes"] ?? 0),
+  };
+}
+
+async function reconcileAttachmentRepairRun(
+  client: TypedQueryClient,
+  tenantId: string,
+  runId: string,
+): Promise<void> {
+  await client.execute(
+    `WITH totals AS (
+       SELECT
+         COALESCE(sum(attachment_count) FILTER (WHERE status = 'repaired'), 0)::int AS repaired,
+         COALESCE(sum(attachment_count) FILTER (WHERE status = 'would_repair'), 0)::int AS would_repair,
+         COALESCE(sum(attachment_count) FILTER (WHERE status = 'unavailable'), 0)::int AS unavailable,
+         COALESCE(sum(attachment_count) FILTER (WHERE operator_action), 0)::int AS operator_action,
+         COALESCE(sum(attachment_count) FILTER (WHERE status = 'pending'), 0)::int AS pending,
+         COALESCE(sum(attachment_count) FILTER (
+           WHERE status = 'pending' AND attempts > 0
+         ), 0)::int AS retrying,
+         count(*) FILTER (WHERE status = 'repaired')::int AS entry_repaired,
+         count(*) FILTER (WHERE status = 'would_repair')::int AS entry_would_repair,
+         count(*) FILTER (WHERE status = 'unavailable')::int AS entry_unavailable,
+         count(*) FILTER (WHERE operator_action)::int AS entry_operator_action,
+         count(*) FILTER (WHERE status = 'pending')::int AS pending_entries,
+         count(*) FILTER (WHERE status = 'pending' AND attempts > 0)::int AS entry_retrying,
+         COALESCE(sum(attempts), 0)::int AS attempts,
+         min(position) FILTER (WHERE status = 'pending') AS first_pending
+       FROM attachment_repair_entries
+       WHERE tenant_id = $1::uuid AND run_id = $2::uuid
+     )
+     UPDATE attachment_repair_runs r
+     SET repaired = totals.repaired,
+         would_repair = totals.would_repair,
+         unavailable = totals.unavailable,
+         operator_action = totals.operator_action,
+         pending = totals.pending,
+         retrying = totals.retrying,
+         entry_repaired = totals.entry_repaired,
+         entry_would_repair = totals.entry_would_repair,
+         entry_unavailable = totals.entry_unavailable,
+         entry_operator_action = totals.entry_operator_action,
+         entry_pending = totals.pending_entries,
+         entry_retrying = totals.entry_retrying,
+         attempts = totals.attempts,
+         checkpoint = COALESCE(totals.first_pending, r.entry_total),
+         status = CASE WHEN totals.pending_entries = 0 THEN 'completed' ELSE 'pending' END,
+         completed_at = CASE
+           WHEN totals.pending_entries = 0 THEN COALESCE(r.completed_at, now())
+           ELSE NULL
+         END,
+         updated_at = now()
+     FROM totals
+     WHERE r.tenant_id = $1::uuid AND r.id = $2::uuid`,
+    [tenantId, runId],
+  );
 }
 
 // ---- shared, tenant-agnostic query helpers (module scope) -------------------
@@ -1041,7 +1441,10 @@ export class InboundDomainRouteConflictError extends Error {
 export class EmailsSelfHostedStore {
   constructor(
     private readonly client: TypedQueryClient,
-    private readonly options: { allowUnsafeTestTransactions?: boolean } = {},
+    private readonly options: {
+      allowUnsafeTestTransactions?: boolean;
+      attachmentRepairPolicy?: Partial<AttachmentRepairPolicy>;
+    } = {},
   ) {}
 
   /**
@@ -1059,6 +1462,7 @@ export class EmailsSelfHostedStore {
       tenantId,
       isTransactional(this.client) ? this.client : undefined,
       this.options.allowUnsafeTestTransactions === true,
+      attachmentRepairPolicy(this.options.attachmentRepairPolicy),
     );
   }
 
@@ -1376,6 +1780,7 @@ export class TenantScopedStore {
     private readonly tenantId: string,
     private readonly atomicClient?: PoolQueryClient,
     private readonly allowUnsafeTestTransactions = false,
+    private readonly repairPolicy: AttachmentRepairPolicy = attachmentRepairPolicy(undefined),
   ) {}
 
   private sendIntentKeyDigest(key: string): string {
@@ -1913,19 +2318,21 @@ export class TenantScopedStore {
          m.id AS message_id,
          (att.ord - 1)::int AS attachment_index,
          att.value ->> 'filename' AS filename,
+         jsonb_typeof(att.value -> 'filename') = 'string' AS filename_is_string,
          att.value ->> 'content_type' AS content_type,
-         att.value ->> 'size' AS size_raw,
+         jsonb_typeof(att.value -> 'content_type') = 'string' AS content_type_is_string,
+         normalized.size_bytes AS size_raw,
          att.value ->> 'sha256' AS sha256,
-         -- Deliberately jsonb_typeof, not the cheaper existence test
-         -- (att.value ? 'content_base64'): this must be the SAME predicate the
-         -- JS paths apply (typeof === "string"), or the inventory and the per-ID
-         -- read would disagree about a stored non-string payload — the exact
-         -- class of surface drift that shipped the 1.2.6 attachment_count bug.
-         -- Measured cost of the extract on a worst case of 200 rows x 1 MB of
-         -- base64: 149ms -> 280ms (existence-only would be 211ms). Live data is
-         -- ~98% metadata-only rows, where the key is absent and nothing is
-         -- copied, so the real scan pays almost none of that.
-         (jsonb_typeof(att.value -> 'content_base64') = 'string') AS content_available,
+         CASE
+           WHEN normalized.size_bytes IS NOT NULL
+             AND normalized.size_bytes <= ${MAX_ATTACHMENT_DOWNLOAD_BYTES}
+             AND normalized.payload IS NOT NULL
+             AND length(normalized.payload) <= ${Math.ceil(MAX_ATTACHMENT_DOWNLOAD_BYTES / 3) * 4}
+             AND normalized.payload ~ '^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$'
+           THEN octet_length(decode(normalized.payload, 'base64')) = normalized.size_bytes
+             AND replace(encode(decode(normalized.payload, 'base64'), 'base64'), E'\\n', '') = normalized.payload
+           ELSE false
+         END AS content_available,
          m.direction AS direction,
          m.received_at AS received_at,
          to_char(m.sort_ts AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_ts
@@ -1933,6 +2340,25 @@ export class TenantScopedStore {
        CROSS JOIN LATERAL jsonb_array_elements(
          CASE WHEN jsonb_typeof(m.attachments) = 'array' THEN m.attachments ELSE '[]'::jsonb END
        ) WITH ORDINALITY AS att(value, ord)
+       CROSS JOIN LATERAL (
+         SELECT
+           CASE
+             WHEN jsonb_typeof(att.value -> 'size') = 'number'
+               AND (att.value ->> 'size') ~ '^(?:0|[1-9][0-9]*)$'
+               AND (att.value ->> 'size')::numeric <= 9007199254740991
+             THEN (att.value ->> 'size')::bigint
+             WHEN jsonb_typeof(att.value -> 'size') = 'string'
+               AND (att.value ->> 'size') ~ '^(?:0|[1-9][0-9]*)$'
+               AND (att.value ->> 'size')::numeric <= 9007199254740991
+             THEN (att.value ->> 'size')::bigint
+             ELSE NULL
+           END AS size_bytes,
+           CASE
+             WHEN jsonb_typeof(att.value -> 'content_base64') = 'string'
+             THEN att.value ->> 'content_base64'
+             ELSE NULL
+           END AS payload
+       ) AS normalized
        WHERE ${where.join(" AND ")}
        ORDER BY m.sort_ts DESC, m.id DESC, (att.ord - 1) ASC
        LIMIT $${limitIndex}`,
@@ -1974,6 +2400,793 @@ export class TenantScopedStore {
     const found = new Set(rows.map((r) => r.id));
     const unknown = unique.filter((id) => !found.has(id));
     return { by_message_id: byId, unknown_ids: unknown };
+  }
+
+  private async withAttachmentRepairLedgerLock<T>(
+    lockDigests: readonly string[],
+    action: (client: TypedQueryClient) => Promise<T>,
+  ): Promise<T> {
+    if (!this.atomicClient) {
+      if (!this.allowUnsafeTestTransactions) {
+        throw new Error("attachment repair ledger requires a transactional store");
+      }
+      return action(this.client);
+    }
+    return this.atomicClient.transaction(async (tx) => {
+      await tx.execute(`SELECT set_config('app.current_tenant', $1, true)`, [this.tenantId]);
+      for (const digest of [...new Set(lockDigests)].sort()) {
+        await tx.execute(
+          `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+          [`${this.tenantId}:attachment-repair:${digest}`],
+        );
+      }
+      return action(tx);
+    });
+  }
+
+  private async prepareAttachmentRepairManifest(
+    client: TypedQueryClient,
+    canonicalBucket: string,
+    entries: readonly AttachmentRepairManifestEntry[],
+    lockRows: boolean,
+  ): Promise<{
+    ledgerEntries: Array<AttachmentRepairManifestEntry & {
+      position: number;
+      attachment_count: number;
+    }>;
+    canarySnapshot: AttachmentRepairCanarySnapshot[];
+  }> {
+    const objectKeys = entries.map((entry) => entry.object_key);
+    const messageIds = entries.flatMap((entry) => entry.canary_message_ids);
+    if (lockRows) {
+      await client.many(
+        `SELECT id
+         FROM messages
+         WHERE tenant_id = $1::uuid AND id = ANY($2::text[])
+         ORDER BY id
+         FOR SHARE`,
+        [this.tenantId, messageIds],
+      );
+      await client.many(
+        `SELECT m.id
+         FROM messages m
+         JOIN inbound_message_sources s
+           ON s.tenant_id = m.tenant_id AND s.message_id = m.id
+         WHERE m.tenant_id = $1::uuid
+           AND s.bucket = $2
+           AND s.object_key = ANY($3::text[])
+         ORDER BY m.id
+         FOR SHARE OF m, s`,
+        [this.tenantId, canonicalBucket, objectKeys],
+      );
+    }
+    const inventoryRows = await client.many<{
+      id: string;
+      object_key: string;
+      attachments_state: unknown;
+      attachment_count: number;
+      metadata_valid: boolean;
+      repairable: boolean;
+    }>(
+      `SELECT m.id, s.object_key,
+              COALESCE(
+                jsonb_agg(
+                  CASE
+                    WHEN jsonb_typeof(att.value) = 'object'
+                      THEN att.value - 'content_base64'
+                    ELSE att.value
+                  END
+                  ORDER BY att.ord
+                ) FILTER (WHERE att.ord IS NOT NULL),
+                '[]'::jsonb
+              ) AS attachments_state,
+              count(att.value) FILTER (
+                WHERE att.value IS NOT NULL
+                  AND jsonb_typeof(att.value -> 'content_base64') IS DISTINCT FROM 'string'
+              )::int AS attachment_count,
+              COALESCE(bool_and(
+                CASE
+                  WHEN att.value IS NULL OR jsonb_typeof(att.value) <> 'object' THEN false
+                  WHEN jsonb_typeof(att.value -> 'filename') IS DISTINCT FROM 'string'
+                    OR jsonb_typeof(att.value -> 'content_type') IS DISTINCT FROM 'string'
+                    OR jsonb_typeof(att.value -> 'size') IS DISTINCT FROM 'number' THEN false
+                  ELSE (att.value ->> 'size')::numeric >= 0
+                    AND (att.value ->> 'size')::numeric <= 9007199254740991
+                    AND mod((att.value ->> 'size')::numeric, 1) = 0
+                END
+              ), false) AS metadata_valid,
+              COALESCE(bool_or(
+                att.value IS NOT NULL
+                AND jsonb_typeof(att.value -> 'content_base64') IS DISTINCT FROM 'string'
+              ), false) AS repairable
+       FROM messages m
+       JOIN inbound_message_sources s
+         ON s.tenant_id = m.tenant_id AND s.message_id = m.id
+       LEFT JOIN LATERAL jsonb_array_elements(
+         CASE WHEN jsonb_typeof(m.attachments) = 'array'
+           THEN m.attachments ELSE '[]'::jsonb END
+       ) WITH ORDINALITY AS att(value, ord) ON true
+       WHERE m.tenant_id = $1::uuid
+         AND s.bucket = $2
+         AND s.object_key = ANY($3::text[])
+       GROUP BY m.id, s.object_key`,
+      [this.tenantId, canonicalBucket, objectKeys],
+    );
+    const ledgerEntries = entries.map((entry, position) => {
+      const rows = inventoryRows.filter((row) => row.object_key === entry.object_key);
+      const actualIds = new Set(rows.map((row) => row.id));
+      const exactCanary = actualIds.size === rows.length
+        && actualIds.size === entry.canary_message_ids.length
+        && entry.canary_message_ids.every((messageId) => actualIds.has(messageId));
+      if (!exactCanary) {
+        throw new RangeError(
+          "attachment repair canaries must exactly match tenant-scoped canonical object bindings",
+        );
+      }
+      if (rows.some((row) =>
+        Number(row.attachment_count) <= 0 || row.metadata_valid !== true || row.repairable !== true)) {
+        throw new RangeError(
+          "each attachment repair canary must have a repairable attachment inventory",
+        );
+      }
+      return {
+        ...entry,
+        position,
+        attachment_count: rows.reduce(
+          (total, row) => total + Number(row.attachment_count),
+          0,
+        ),
+      };
+    });
+    const rowByIdentity = new Map(
+      inventoryRows.map((row) => [`${row.object_key}\0${row.id}`, row]),
+    );
+    const canarySnapshot = entries.flatMap((entry) =>
+      entry.canary_message_ids.map((messageId) => {
+        const row = rowByIdentity.get(`${entry.object_key}\0${messageId}`);
+        if (!row) {
+          throw new RangeError(
+            "attachment repair canaries must exactly match tenant-scoped canonical object bindings",
+          );
+        }
+        return {
+          tenant_id: this.tenantId,
+          message_id: messageId,
+          object_key: entry.object_key,
+          attachments: toArray(row.attachments_state),
+        };
+      }));
+    return { ledgerEntries, canarySnapshot };
+  }
+
+  /**
+   * Create one immutable, bounded repair manifest or return its idempotent
+   * replay. The caller key is hashed and never stored. Repairable-payload
+   * inventory totals are captured from this tenant's current message rows in
+   * the same transaction; already-present payloads are not reported as work.
+   */
+  async createOrGetAttachmentRepairRun(input: {
+    idempotencyKey: string;
+    canonicalBucket: string;
+    apply?: boolean;
+    reviewedDryRunId?: string;
+    entries: readonly AttachmentRepairManifestEntry[];
+  }): Promise<AttachmentRepairLedgerRun> {
+    this.assertSafeSendIntentKey(input.idempotencyKey);
+    const canonicalBucket = input.canonicalBucket.trim();
+    if (!canonicalBucket) {
+      throw new RangeError("attachment repair requires the deployment canonical bucket");
+    }
+    const entries = normalizeAttachmentRepairManifestEntries(input.entries);
+    const apply = input.apply === true;
+    const reviewedDryRunId = input.reviewedDryRunId?.trim().toLowerCase();
+    if (apply && !reviewedDryRunId) {
+      throw new AttachmentRepairReviewMismatchError();
+    }
+    const idempotencyDigest = createHash("sha256")
+      .update("emails:attachment-repair:idempotency:v1\0", "utf8")
+      .update(this.tenantId, "utf8")
+      .update("\0", "utf8")
+      .update(input.idempotencyKey, "utf8")
+      .digest("hex");
+    const manifestLockDigest = attachmentRepairRequestHash(
+      canonicalBucket,
+      entries,
+      apply,
+    );
+
+    return this.withAttachmentRepairLedgerLock(
+      ["tenant-quota", idempotencyDigest, manifestLockDigest],
+      async (client) => {
+      const { ledgerEntries, canarySnapshot } =
+        await this.prepareAttachmentRepairManifest(
+          client,
+          canonicalBucket,
+          entries,
+          true,
+        );
+      const requestHash = attachmentRepairRequestHash(
+        canonicalBucket,
+        entries,
+        apply,
+        canarySnapshot,
+      );
+      if (apply) {
+        const reviewedRequestHash = attachmentRepairRequestHash(
+          canonicalBucket,
+          entries,
+          false,
+          canarySnapshot,
+        );
+        const reviewed = await client.get<{ matches: boolean }>(
+          `SELECT EXISTS (
+             SELECT 1
+             FROM attachment_repair_runs
+             WHERE tenant_id = $1::uuid
+               AND id = $2::uuid
+               AND request_hash = $3
+               AND apply = false
+               AND status = 'completed'
+           ) AS matches`,
+          [this.tenantId, reviewedDryRunId, reviewedRequestHash],
+        );
+        if (reviewed?.matches !== true) {
+          throw new AttachmentRepairReviewMismatchError();
+        }
+      }
+      // Use `INSERT ... ON CONFLICT ... DO UPDATE ... WHERE` so a reinsert of the
+      // same key cannot clobber a row unless it is already the same request/run.
+      // The immediate persisted-row comparison is the final guardrail: it turns any
+      // concurrent replay that loses the conflict race into a deterministic
+      // ownership/idempotency conflict, instead of silently returning the wrong
+      // row binding.
+      const bindAlias = async (runId: string, boundRequestHash: string): Promise<void> => {
+        const alias = await client.get<{ request_hash: string; run_id: string }>(
+          `INSERT INTO attachment_repair_idempotency_keys (
+             tenant_id, idempotency_key_hash, request_hash, run_id
+           )
+           VALUES (
+             $1::uuid, $2, $3, $4::uuid
+           )
+           ON CONFLICT (tenant_id, idempotency_key_hash)
+           DO UPDATE SET
+             request_hash = attachment_repair_idempotency_keys.request_hash,
+             run_id = attachment_repair_idempotency_keys.run_id
+             WHERE attachment_repair_idempotency_keys.request_hash = $3
+               AND attachment_repair_idempotency_keys.run_id = $4::uuid
+           RETURNING request_hash, run_id::text AS run_id`,
+          [this.tenantId, idempotencyDigest, boundRequestHash, runId],
+        );
+        if (!alias || alias.request_hash !== boundRequestHash || alias.run_id !== runId) {
+          const persistedAlias = await client.get<{ request_hash: string; run_id: string }>(
+            `SELECT request_hash, run_id::text AS run_id
+             FROM attachment_repair_idempotency_keys
+             WHERE tenant_id = $1::uuid AND idempotency_key_hash = $2`,
+            [this.tenantId, idempotencyDigest],
+          );
+          if (!persistedAlias
+            || persistedAlias.request_hash !== boundRequestHash
+            || persistedAlias.run_id !== runId
+          ) {
+            throw new AttachmentRepairIdempotencyConflictError();
+          }
+        }
+      };
+      const alias = await client.get<{ request_hash: string; run_id: string }>(
+        `SELECT request_hash, run_id::text AS run_id
+         FROM attachment_repair_idempotency_keys
+         WHERE tenant_id = $1::uuid AND idempotency_key_hash = $2`,
+        [this.tenantId, idempotencyDigest],
+      );
+      if (alias) {
+        if (alias.request_hash !== requestHash) {
+          throw new AttachmentRepairIdempotencyConflictError();
+        }
+        const fromAlias = await client.get<Record<string, unknown>>(
+          `SELECT ${ATTACHMENT_REPAIR_RUN_COLUMNS}, request_hash
+           FROM attachment_repair_runs
+           WHERE tenant_id = $1::uuid AND id = $2::uuid`,
+          [this.tenantId, alias.run_id],
+        );
+        if (fromAlias && fromAlias.request_hash === requestHash) {
+          return mapAttachmentRepairRun(fromAlias);
+        }
+      }
+
+      const existing = await client.get<Record<string, unknown>>(
+        `SELECT ${ATTACHMENT_REPAIR_RUN_COLUMNS}, request_hash
+         FROM attachment_repair_runs
+         WHERE tenant_id = $1::uuid AND idempotency_key_hash = $2`,
+        [this.tenantId, idempotencyDigest],
+      );
+      if (existing) {
+        if (existing["request_hash"] !== requestHash) {
+          throw new AttachmentRepairIdempotencyConflictError();
+        }
+        await bindAlias(String(existing["id"]), String(existing["request_hash"]));
+        return mapAttachmentRepairRun(existing);
+      }
+
+      const duplicateRequest = await client.get<Record<string, unknown>>(
+        `SELECT ${ATTACHMENT_REPAIR_RUN_COLUMNS}
+         FROM attachment_repair_runs
+         WHERE tenant_id = $1::uuid AND request_hash = $2`,
+        [this.tenantId, requestHash],
+      );
+      if (duplicateRequest) {
+        await bindAlias(String(duplicateRequest["id"]), requestHash);
+        return mapAttachmentRepairRun(duplicateRequest);
+      }
+
+      const expiredRuns = await client.many<{ id: string }>(
+        `SELECT id::text AS id
+         FROM attachment_repair_runs
+         WHERE tenant_id = $1::uuid
+           AND status = 'pending'
+           AND deadline_at <= now()
+         FOR UPDATE`,
+        [this.tenantId],
+      );
+      for (const expired of expiredRuns) {
+        await client.execute(
+          `UPDATE attachment_repair_entries
+           SET status = 'unavailable',
+               operator_action = true,
+               last_error_code = 'run_time_budget_exhausted',
+               claim_token = NULL,
+               lease_expires_at = NULL,
+               reserved_bytes = 0,
+               updated_at = now()
+           WHERE tenant_id = $1::uuid
+             AND run_id = $2::uuid
+             AND status = 'pending'
+             AND (claim_token IS NULL OR lease_expires_at <= now())`,
+          [this.tenantId, expired.id],
+        );
+        await reconcileAttachmentRepairRun(client, this.tenantId, expired.id);
+      }
+
+      const quota = await client.one<{
+        active_runs: number;
+        ledger_runs: number;
+        ledger_entries: number;
+      }>(
+        `SELECT
+           count(*) FILTER (WHERE status = 'pending')::int AS active_runs,
+           count(*)::int AS ledger_runs,
+           COALESCE(sum(entry_total), 0)::int AS ledger_entries
+         FROM attachment_repair_runs
+         WHERE tenant_id = $1::uuid`,
+        [this.tenantId],
+      );
+      if (Number(quota.active_runs) >= this.repairPolicy.maxActiveRunsPerTenant) {
+        throw new AttachmentRepairQuotaExceededError("active_runs", true);
+      }
+      if (Number(quota.ledger_runs) >= this.repairPolicy.maxLedgerRunsPerTenant) {
+        throw new AttachmentRepairQuotaExceededError("ledger_runs", false);
+      }
+      if (Number(quota.ledger_entries) + entries.length
+        > this.repairPolicy.maxLedgerEntriesPerTenant) {
+        throw new AttachmentRepairQuotaExceededError("ledger_entries", false);
+      }
+
+      const inventoryTotal = ledgerEntries.reduce(
+        (total, entry) => total + entry.attachment_count,
+        0,
+      );
+      const runId = randomUUID();
+      const inserted = await client.get<Record<string, unknown>>(
+        `INSERT INTO attachment_repair_runs (
+           tenant_id, id, idempotency_key_hash, request_hash, apply, status,
+           entry_total, inventory_total, pending, entry_pending,
+           byte_budget, time_budget_ms, deadline_at
+         ) VALUES (
+           $1::uuid, $2::uuid, $3, $4, $5, 'pending', $6, $7, $7, $6,
+           $8::bigint, $9::bigint, now() + ($9::bigint * interval '1 millisecond')
+         )
+         ON CONFLICT DO NOTHING
+         RETURNING ${ATTACHMENT_REPAIR_RUN_COLUMNS}`,
+        [
+          this.tenantId,
+          runId,
+          idempotencyDigest,
+          requestHash,
+          apply,
+          ledgerEntries.length,
+          inventoryTotal,
+          this.repairPolicy.runByteBudget,
+          this.repairPolicy.runTimeBudgetMs,
+        ],
+      );
+      if (!inserted) {
+        const raced = await client.get<Record<string, unknown>>(
+          `SELECT ${ATTACHMENT_REPAIR_RUN_COLUMNS}, request_hash
+           FROM attachment_repair_runs
+           WHERE tenant_id = $1::uuid
+             AND (idempotency_key_hash = $2 OR request_hash = $3)
+           ORDER BY (request_hash = $3) DESC
+           LIMIT 1`,
+          [this.tenantId, idempotencyDigest, requestHash],
+        );
+        if (!raced || raced["request_hash"] !== requestHash) {
+          throw new AttachmentRepairIdempotencyConflictError();
+        }
+        await bindAlias(String(raced["id"]), requestHash);
+        return mapAttachmentRepairRun(raced);
+      }
+      await bindAlias(runId, requestHash);
+
+      await client.execute(
+        `INSERT INTO attachment_repair_entries (
+           tenant_id, run_id, position, object_key, recipients,
+           canary_message_ids, attachment_count, status
+         )
+         SELECT $1::uuid, $2::uuid, item.position, item.object_key,
+                item.recipients, item.canary_message_ids,
+                item.attachment_count, 'pending'
+         FROM jsonb_to_recordset($3::jsonb) AS item(
+           position integer,
+           object_key text,
+           recipients jsonb,
+           canary_message_ids jsonb,
+           attachment_count integer
+         )`,
+        [this.tenantId, runId, JSON.stringify(ledgerEntries)],
+      );
+      return mapAttachmentRepairRun(inserted);
+    });
+  }
+
+  async attachmentRepairRunMatchesManifest(
+    runId: string,
+    input: {
+      canonicalBucket: string;
+      apply?: boolean;
+      entries: readonly AttachmentRepairManifestEntry[];
+    },
+  ): Promise<boolean> {
+    const canonicalBucket = input.canonicalBucket.trim();
+    if (!canonicalBucket) {
+      throw new RangeError("attachment repair requires the deployment canonical bucket");
+    }
+    const entries = normalizeAttachmentRepairManifestEntries(input.entries);
+    const apply = input.apply === true;
+    const manifestLockDigest = attachmentRepairRequestHash(
+      canonicalBucket,
+      entries,
+      apply,
+    );
+    return this.withAttachmentRepairLedgerLock(
+      [`review:${runId}`, manifestLockDigest],
+      async (client) => {
+        let canarySnapshot: AttachmentRepairCanarySnapshot[];
+        try {
+          ({ canarySnapshot } = await this.prepareAttachmentRepairManifest(
+            client,
+            canonicalBucket,
+            entries,
+            true,
+          ));
+        } catch (error) {
+          if (error instanceof RangeError) return false;
+          throw error;
+        }
+        const requestHash = attachmentRepairRequestHash(
+          canonicalBucket,
+          entries,
+          apply,
+          canarySnapshot,
+        );
+        const row = await client.get<{ matches: boolean }>(
+          `SELECT EXISTS (
+             SELECT 1
+             FROM attachment_repair_runs
+             WHERE tenant_id = $1::uuid
+               AND id = $2::uuid
+               AND request_hash = $3
+               AND apply = $4
+           ) AS matches`,
+          [this.tenantId, runId, requestHash, apply],
+        );
+        return row?.matches === true;
+      },
+    );
+  }
+
+  async getAttachmentRepairRun(runId: string): Promise<AttachmentRepairLedgerRun | null> {
+    const row = await this.client.get<Record<string, unknown>>(
+      `SELECT ${ATTACHMENT_REPAIR_RUN_COLUMNS}
+       FROM attachment_repair_runs
+       WHERE tenant_id = $1::uuid AND id = $2::uuid`,
+      [this.tenantId, runId],
+    );
+    return row ? mapAttachmentRepairRun(row) : null;
+  }
+
+  async listPendingAttachmentRepairEntries(
+    runId: string,
+    limit: number,
+  ): Promise<AttachmentRepairLedgerEntry[]> {
+    if (!Number.isSafeInteger(limit) || limit <= 0 || limit > MAX_ATTACHMENT_REPAIR_PAGE_ITEMS) {
+      throw new RangeError(
+        `attachment repair page limit must be between 1 and ${MAX_ATTACHMENT_REPAIR_PAGE_ITEMS}`,
+      );
+    }
+    const rows = await this.client.many<Record<string, unknown>>(
+      `SELECT tenant_id::text AS tenant_id, run_id::text AS run_id, position,
+              object_key, recipients, canary_message_ids, attachment_count, status,
+              operator_action, attempts, last_error_code, last_attempt_at,
+              next_attempt_at, claim_token::text AS claim_token, lease_expires_at
+       FROM attachment_repair_entries
+       WHERE tenant_id = $1::uuid AND run_id = $2::uuid AND status = 'pending'
+       ORDER BY next_attempt_at ASC, attempts ASC, position ASC
+       LIMIT $3`,
+      [this.tenantId, runId, limit],
+    );
+    return rows.map(mapAttachmentRepairEntry);
+  }
+
+  /**
+   * Atomically lease one eligible entry. The transaction ends before the
+   * caller performs S3 or MIME work; concurrent resumptions therefore observe
+   * the lease and cannot duplicate the same external attempt. Expired claims
+   * remain reclaimable, while exhausted expired claims become an aggregate-only
+   * operator-action terminal outcome.
+   */
+  async claimAttachmentRepairEntry(
+    runId: string,
+    leaseMs = ATTACHMENT_REPAIR_LEASE_MS,
+  ): Promise<AttachmentRepairLedgerEntry | null> {
+    if (!Number.isSafeInteger(leaseMs) || leaseMs <= 0 || leaseMs > 24 * 60 * 60 * 1000) {
+      throw new RangeError("attachment repair lease must be between 1 millisecond and 24 hours");
+    }
+    return this.withAttachmentRepairLedgerLock([runId], async (client) => {
+      const run = await client.get<{
+        id: string;
+        status: "pending" | "completed";
+        byte_budget: number;
+        bytes_consumed: number;
+        deadline_at: string;
+      }>(
+        `SELECT id::text AS id, status, byte_budget, bytes_consumed, deadline_at
+         FROM attachment_repair_runs
+         WHERE tenant_id = $1::uuid AND id = $2::uuid
+         FOR UPDATE`,
+        [this.tenantId, runId],
+      );
+      if (!run || run.status === "completed") return null;
+
+      if (Date.parse(String(run.deadline_at)) <= Date.now()) {
+        await client.execute(
+          `UPDATE attachment_repair_entries
+           SET status = 'unavailable',
+               operator_action = true,
+               last_error_code = 'run_time_budget_exhausted',
+               claim_token = NULL,
+               lease_expires_at = NULL,
+               reserved_bytes = 0,
+               updated_at = now()
+           WHERE tenant_id = $1::uuid
+             AND run_id = $2::uuid
+             AND status = 'pending'
+             AND (claim_token IS NULL OR lease_expires_at <= now())`,
+          [this.tenantId, runId],
+        );
+        await reconcileAttachmentRepairRun(client, this.tenantId, runId);
+        return null;
+      }
+
+      await client.execute(
+        `UPDATE attachment_repair_entries
+         SET status = 'unavailable',
+             operator_action = true,
+             last_error_code = 'retry_exhausted',
+             claim_token = NULL,
+             lease_expires_at = NULL,
+             reserved_bytes = 0,
+             updated_at = now()
+         WHERE tenant_id = $1::uuid
+           AND run_id = $2::uuid
+           AND status = 'pending'
+           AND attempts >= $3
+           AND (claim_token IS NULL OR lease_expires_at <= now())`,
+        [this.tenantId, runId, MAX_ATTACHMENT_REPAIR_ATTEMPTS],
+      );
+
+      const remainingBytes = Number(run.byte_budget) - Number(run.bytes_consumed);
+      if (!Number.isSafeInteger(remainingBytes) || remainingBytes <= 0) {
+        await client.execute(
+          `UPDATE attachment_repair_entries
+           SET status = 'unavailable',
+               operator_action = true,
+               last_error_code = 'run_byte_budget_exhausted',
+               claim_token = NULL,
+               lease_expires_at = NULL,
+               reserved_bytes = 0,
+               updated_at = now()
+           WHERE tenant_id = $1::uuid
+             AND run_id = $2::uuid
+             AND status = 'pending'
+             AND (claim_token IS NULL OR lease_expires_at <= now())`,
+          [this.tenantId, runId],
+        );
+        await reconcileAttachmentRepairRun(client, this.tenantId, runId);
+        return null;
+      }
+
+      const selected = await client.get<{ position: number }>(
+        `SELECT position
+         FROM attachment_repair_entries
+         WHERE tenant_id = $1::uuid
+           AND run_id = $2::uuid
+           AND status = 'pending'
+           AND attempts < $3
+           AND next_attempt_at <= now()
+           AND (claim_token IS NULL OR lease_expires_at <= now())
+         ORDER BY next_attempt_at ASC, attempts ASC, position ASC
+         FOR UPDATE SKIP LOCKED
+         LIMIT 1`,
+        [this.tenantId, runId, MAX_ATTACHMENT_REPAIR_ATTEMPTS],
+      );
+      if (!selected) {
+        await reconcileAttachmentRepairRun(client, this.tenantId, runId);
+        return null;
+      }
+
+      const claimToken = randomUUID();
+      const reservation = Math.min(MAX_ATTACHMENT_REPAIR_SOURCE_BYTES, remainingBytes);
+      await client.execute(
+        `UPDATE attachment_repair_runs
+         SET bytes_consumed = bytes_consumed + $3,
+             updated_at = now()
+         WHERE tenant_id = $1::uuid
+           AND id = $2::uuid
+           AND bytes_consumed + $3 <= byte_budget`,
+        [this.tenantId, runId, reservation],
+      );
+      const claimed = await client.get<Record<string, unknown>>(
+        `UPDATE attachment_repair_entries
+         SET attempts = attempts + 1,
+             last_attempt_at = now(),
+             claim_token = $4::uuid,
+             lease_expires_at = now() + ($5::double precision * interval '1 millisecond'),
+             reserved_bytes = $6,
+             updated_at = now()
+         WHERE tenant_id = $1::uuid
+           AND run_id = $2::uuid
+           AND position = $3
+         RETURNING tenant_id::text AS tenant_id, run_id::text AS run_id, position,
+                   object_key, recipients, canary_message_ids, attachment_count, status,
+                   operator_action, attempts, last_error_code, last_attempt_at,
+                   next_attempt_at, claim_token::text AS claim_token, lease_expires_at,
+                   reserved_bytes`,
+        [this.tenantId, runId, selected.position, claimToken, leaseMs, reservation],
+      );
+      await reconcileAttachmentRepairRun(client, this.tenantId, runId);
+      return claimed ? mapAttachmentRepairEntry(claimed) : null;
+    });
+  }
+
+  /**
+   * Checkpoint one bounded entry. Terminal entries are immutable/idempotent.
+   * Totals are recomputed from the item ledger under the run-row lock so
+   * repaired + would_repair + unavailable + pending always equals inventory,
+   * with retrying retained as a visible subset of pending work.
+   */
+  async recordAttachmentRepairEntryOutcome(
+    runId: string,
+    position: number,
+    claimToken: string,
+    status: AttachmentRepairLedgerEntryStatus,
+    errorCode: string | null = null,
+    sourceBytes?: number,
+  ): Promise<void> {
+    if (!Number.isSafeInteger(position) || position < 0) {
+      throw new RangeError("attachment repair position must be a non-negative integer");
+    }
+    if (!["pending", "would_repair", "repaired", "unavailable"].includes(status)) {
+      throw new RangeError("invalid attachment repair entry status");
+    }
+    if (errorCode !== null && !/^[a-z][a-z0-9_]{0,63}$/.test(errorCode)) {
+      throw new RangeError("invalid attachment repair error code");
+    }
+    if (status === "pending" && errorCode === null) {
+      throw new RangeError("retryable attachment repair outcomes require an error code");
+    }
+    if (!/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(claimToken)) {
+      throw new RangeError("attachment repair claim token must be a UUID");
+    }
+    await this.withAttachmentRepairLedgerLock([runId], async (client) => {
+      const run = await client.get<{ id: string; deadline_at: Date | string }>(
+        `SELECT id::text AS id, deadline_at
+         FROM attachment_repair_runs
+         WHERE tenant_id = $1::uuid AND id = $2::uuid
+         FOR UPDATE`,
+        [this.tenantId, runId],
+      );
+      if (!run) return;
+      const entry = await client.get<{
+        status: AttachmentRepairLedgerEntryStatus;
+        attempts: number;
+        claim_token: string | null;
+        reserved_bytes: number;
+      }>(
+        `SELECT status, attempts, claim_token::text AS claim_token, reserved_bytes
+         FROM attachment_repair_entries
+         WHERE tenant_id = $1::uuid AND run_id = $2::uuid AND position = $3
+         FOR UPDATE`,
+        [this.tenantId, runId, position],
+      );
+      if (!entry || entry.status !== "pending" || entry.claim_token !== claimToken) return;
+      const reservedBytes = Number(entry.reserved_bytes);
+      const validSourceAccounting = sourceBytes === undefined
+        || (Number.isSafeInteger(sourceBytes) && sourceBytes >= 0 && sourceBytes <= reservedBytes);
+      const accountedSourceBytes = sourceBytes === undefined || !validSourceAccounting
+        ? reservedBytes
+        : sourceBytes;
+      const refundBytes = reservedBytes - accountedSourceBytes;
+      const deadlineExpired = Date.parse(String(run.deadline_at)) <= Date.now();
+      const exhausted = !deadlineExpired && validSourceAccounting && status === "pending"
+        && Number(entry.attempts) >= MAX_ATTACHMENT_REPAIR_ATTEMPTS;
+      const finalStatus: AttachmentRepairLedgerEntryStatus = !validSourceAccounting || deadlineExpired || exhausted
+        ? "unavailable"
+        : status;
+      const finalErrorCode = !validSourceAccounting
+        ? "invalid_source_byte_accounting"
+        : deadlineExpired
+          ? "run_time_budget_exhausted"
+          : exhausted
+            ? "retry_exhausted"
+            : errorCode;
+      const operatorAction = !validSourceAccounting
+        || deadlineExpired
+        || exhausted
+        || finalErrorCode === "run_byte_budget_exhausted"
+        || finalErrorCode === "run_time_budget_exhausted";
+      const retryDelayMs = Math.min(
+        ATTACHMENT_REPAIR_RETRY_MAX_MS,
+        ATTACHMENT_REPAIR_RETRY_BASE_MS * 2 ** Math.max(0, Number(entry.attempts) - 1),
+      );
+      if (refundBytes > 0) {
+        await client.execute(
+          `UPDATE attachment_repair_runs
+           SET bytes_consumed = GREATEST(0, bytes_consumed - $3),
+               updated_at = now()
+           WHERE tenant_id = $1::uuid AND id = $2::uuid`,
+          [this.tenantId, runId, refundBytes],
+        );
+      }
+      await client.execute(
+        `UPDATE attachment_repair_entries
+         SET status = $4,
+             operator_action = $5,
+             last_error_code = $6,
+             next_attempt_at = CASE
+               WHEN $4 = 'pending'
+               THEN now() + ($7::double precision * interval '1 millisecond')
+               ELSE next_attempt_at
+             END,
+             claim_token = NULL,
+             lease_expires_at = NULL,
+             reserved_bytes = 0,
+             updated_at = now()
+         WHERE tenant_id = $1::uuid
+           AND run_id = $2::uuid
+           AND position = $3
+           AND claim_token = $8::uuid`,
+        [
+          this.tenantId,
+          runId,
+          position,
+          finalStatus,
+          operatorAction,
+          finalErrorCode,
+          retryDelayMs,
+          claimToken,
+        ],
+      );
+      await reconcileAttachmentRepairRun(client, this.tenantId, runId);
+    });
   }
 
   /**
@@ -2123,14 +3336,21 @@ export class TenantScopedStore {
     };
     if (typeof record["content_base64"] !== "string") {
       try {
-        const unavailable = decodeAttachmentPayload({ code: "attachment_content_unavailable", attachment: metadata }, index, maxBytes);
+        const size = toSizeBytes(record["size"]);
+        // Reuse the strict filename/content-type validation while substituting a
+        // validation-only size for legacy metadata whose byte count is unknown.
+        // The response preserves that uncertainty as null.
+        const unavailable = decodeAttachmentPayload({
+          code: "attachment_content_unavailable",
+          attachment: { ...metadata, size: size ?? 0 },
+        }, index, maxBytes);
         if (unavailable.state !== "content_unavailable") throw new Error("unexpected attachment state");
         return {
           state: "content_unavailable",
           attachment: {
             filename: unavailable.filename,
             content_type: unavailable.content_type,
-            size: unavailable.bytes,
+            size,
           },
         };
       } catch (error) {
@@ -2138,7 +3358,10 @@ export class TenantScopedStore {
       }
     }
     try {
-      const available = decodeAttachmentPayload({ attachment: record }, index, maxBytes);
+      const size = toSizeBytes(record["size"]);
+      if (size === null) throw new Error("attachment size must be a non-negative safe integer");
+      const normalized = { ...record, size };
+      const available = decodeAttachmentPayload({ attachment: normalized }, index, maxBytes);
       if (available.state !== "available") throw new Error("unexpected attachment state");
       return {
         state: "available",
