@@ -14,6 +14,23 @@ export type Folder = "inbox" | "unread" | "starred" | "sent" | "archived" | "spa
 export type Mailbox = Folder;
 
 export const FOLDERS: Folder[] = ["inbox", "unread", "starred", "sent", "archived", "spam", "trash"];
+
+/**
+ * Refusal text for a provider-scoped clear against the self-hosted store.
+ *
+ * A `/v1` message row has no provider dimension, so the scope is unexpressible.
+ * Both the `/v1` data-source seam and the routed repository raise THIS message
+ * rather than quietly dropping the scope: silently widening a destructive call
+ * from "one provider" to "the whole store" — while reporting a plausible count —
+ * is the failure mode this constant exists to prevent. Shared so the two
+ * self-hosted paths cannot drift.
+ */
+export const SELF_HOSTED_PROVIDER_CLEAR_UNSUPPORTED =
+  "Self-hosted mail is one shared store with no provider provenance on its messages, "
+  + "so a provider-scoped clear cannot be expressed. Refusing rather than clearing the "
+  + "whole store. To delete specific mail, delete the messages individually "
+  + "(`emails inbox delete <id>`). Dropping --provider would clear the ENTIRE store, "
+  + "which is almost certainly not what a provider-scoped request meant.";
 export const MAILBOXES: Mailbox[] = FOLDERS;
 
 export function normalizeMailbox(value: unknown): Mailbox {

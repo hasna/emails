@@ -26,7 +26,7 @@ import {
   cstrOrNull,
   ciso,
 } from "./self-hosted-resource.js";
-import type { AttachmentPath } from "../lib/mail-types.js";
+import { SELF_HOSTED_PROVIDER_CLEAR_UNSUPPORTED, type AttachmentPath } from "../lib/mail-types.js";
 export type { AttachmentPath } from "../lib/mail-types.js";
 
 const MESSAGE_RESOURCE = "messages";
@@ -532,10 +532,14 @@ export function deleteInboundEmail(id: string): boolean {
   return messagesStore().del(id);
 }
 
-// Provider scoping cannot be expressed over /v1, so a provider-scoped clear is a
-// no-op (returns 0) rather than risking an over-broad delete of the shared store.
+// Provider scoping cannot be expressed over /v1 (a /v1 message row has no
+// provider dimension). REFUSE rather than report a plausible number: returning 0
+// told the caller "nothing matched that provider" when the truth is "this store
+// cannot answer that question", and the same call shape against the local
+// backend really does delete a provider's mail. A destructive operation must not
+// change meaning with configuration, and must never silently widen.
 export function clearInboundEmails(provider_id?: string): number {
-  if (provider_id) return 0;
+  if (provider_id) throw new Error(SELF_HOSTED_PROVIDER_CLEAR_UNSUPPORTED);
   const store = messagesStore();
   const ids = scanMessages().map((row) => cstr(row["id"])).filter(Boolean);
   let count = 0;

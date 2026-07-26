@@ -40,6 +40,7 @@ import {
   type TuiThreadMessage,
   mailboxLabel,
   renderMarkdown,
+  SELF_HOSTED_PROVIDER_CLEAR_UNSUPPORTED,
 } from "./mail-types.js";
 import type {
   MailBulkInput,
@@ -1601,6 +1602,14 @@ export class SelfHostedMailDataSource implements MailDataSource {
     // Resolve the scope before the scan so unsupported provenance selectors
     // refuse rather than widening. The complete cursor walk is preflighted
     // before the first destructive request.
+    //
+    // `providerId` is one of those selectors: a /v1 message row carries no
+    // provider dimension, so the scope is unexpressible here — and dropping it
+    // silently would turn "clear one provider" into "clear the whole tenant
+    // folder" while reporting a plausible count. The local backend honours the
+    // same argument, so a silent widening would also make the guarantee depend
+    // on configuration. Refuse instead.
+    if (filter?.providerId) throw new Error(SELF_HOSTED_PROVIDER_CLEAR_UNSUPPORTED);
     const scope = selfHostedScopeOf(filter?.source);
     const mailbox: Mailbox = filter?.mailbox ?? "inbox";
     const targets = new Set<string>();

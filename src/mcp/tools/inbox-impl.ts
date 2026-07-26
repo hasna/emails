@@ -574,14 +574,17 @@ export function registerInboxTools(server: McpServer): void {
 
   server.tool(
   "clear_inbound_emails",
-  "Delete all inbound emails, optionally filtered by provider",
+  "Delete all inbound emails, optionally filtered by provider. In self-hosted mode a provider-scoped clear is REFUSED (messages carry no provider provenance) rather than widened to the whole store.",
   {
     provider_id: z.string().optional().describe("Only clear emails for this provider"),
   },
   async ({ provider_id }) => {
     try {
-      // local: wipes the inbound store (optionally by provider). self_hosted: drains a
-      // server-side bulk delete over the inbox folder through the seam.
+      // local: wipes the inbound store, scoped by provider when provider_id is
+      // given. self_hosted: drains a server-side bulk delete over the inbox
+      // folder, and REFUSES a provider_id outright (a /v1 message carries no
+      // provider dimension, so honouring the scope is impossible and dropping it
+      // would silently widen "clear one provider" to "clear the whole store").
       const ds = resolveMailDataSource();
       const { cleared } = await ds.clear({ providerId: provider_id });
       return { content: [{ type: "text", text: `Cleared ${cleared} inbound email(s)` }] };

@@ -891,7 +891,14 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         const ds = resolveMailDataSource();
         const target = opts.provider ? `for provider ${opts.provider}` : "for all providers";
         // Self-hosted deletes on the server: drains a bulk delete over the inbox
-        // folder (scoped to the provider's mailbox when resolvable).
+        // folder. A provider-scoped clear is REFUSED there (a /v1 message carries
+        // no provider dimension) — surface that BEFORE the confirmation prompt, so
+        // the operator is not asked to confirm a destructive action that cannot run.
+        if (opts.provider) {
+          const { SELF_HOSTED_PROVIDER_CLEAR_UNSUPPORTED } = await import("../../lib/mail-types.js");
+          const { getEmailsMode } = await import("../../lib/mode.js");
+          if (getEmailsMode() === "self_hosted") handleError(new Error(SELF_HOSTED_PROVIDER_CLEAR_UNSUPPORTED));
+        }
         await confirmDestructiveAction(`Clear inbox emails ${target}?`, opts.yes);
         const { cleared } = await ds.clear({ providerId: opts.provider });
         console.log(chalk.green(`✓ Cleared ${cleared} email(s)`));
