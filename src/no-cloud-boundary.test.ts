@@ -7,6 +7,7 @@ import { normalizeEmailsMode } from "./lib/mode.js";
 import {
   BOUNDARY_SCOPES,
   boundaryPatternTable,
+  extractExactLegacyHostedEnvUnsetBridge,
   isSkippableBinary,
   isSourceAllowed,
   sourceBoundaryFindings,
@@ -61,120 +62,14 @@ const legacyHostedEnvKeys = [
   "HASNA_MAILERY_API_KEY",
 ];
 
-const exactCompatibilityBridges = new Map([
-  [
-    ".github/workflows/ci.yml",
-    [
-      "      - name: Test in isolated local mode",
-      "        run: |",
-      '          tmp_home="$(mktemp -d)"',
-      "          trap 'rm -rf \"$tmp_home\"' EXIT",
-      "          env -u MAILERY_MODE -u HASNA_MAILERY_MODE \\",
-      "            -u MAILERY_STORAGE_MODE -u HASNA_MAILERY_STORAGE_MODE \\",
-      "            -u EMAILS_STORAGE_MODE -u HASNA_EMAILS_STORAGE_MODE \\",
-      "            -u MAILERY_API_URL -u MAILERY_API_KEY \\",
-      "            -u HASNA_MAILERY_API_URL -u HASNA_MAILERY_API_KEY \\",
-      "            -u MAILERY_CLOUD_API_URL -u MAILERY_CLOUD_TOKEN \\",
-      "            -u HASNA_MAILERY_ENV_FILE -u HASNA_EMAILS_MODE \\",
-      "            -u EMAILS_SELF_HOSTED_URL -u EMAILS_SELF_HOSTED_API_KEY \\",
-      "            -u EMAILS_CLIENT_ENV_SECRET -u EMAILS_SESSION_TOKEN \\",
-      "            -u DATABASE_URL -u EMAILS_DATABASE_URL -u EMAILS_TEST_DATABASE_URL \\",
-      "            -u EMAILS_POSTGRES_URL -u EMAILS_TEST_POSTGRES_URL \\",
-      "            -u CLOUDFLARE_API_TOKEN -u CLOUDFLARE_API_KEY \\",
-      "            -u CLOUDFLARE_EMAIL -u CLOUDFLARE_ACCOUNT_ID \\",
-      "            -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN \\",
-      "            -u AWS_PROFILE -u AWS_DEFAULT_PROFILE -u AWS_ACCOUNT_ID \\",
-      "            -u AWS_REGION -u AWS_DEFAULT_REGION -u AWS_SHARED_CREDENTIALS_FILE \\",
-      "            -u AWS_CONFIG_FILE -u AWS_WEB_IDENTITY_TOKEN_FILE -u AWS_ROLE_ARN \\",
-      "            -u AWS_ROLE_SESSION_NAME -u AWS_CONTAINER_CREDENTIALS_RELATIVE_URI \\",
-      "            -u AWS_CONTAINER_CREDENTIALS_FULL_URI -u AWS_CONTAINER_AUTHORIZATION_TOKEN \\",
-      "            -u EMAILS_AWS_REGION -u EMAILS_SES_AWS_PROFILE \\",
-      "            -u RESEND_API_KEY -u RESEND_WEBHOOK_SECRET \\",
-      "            AWS_EC2_METADATA_DISABLED=true \\",
-      '            HOME="$tmp_home" EMAILS_MODE=local EMAILS_DB_PATH=:memory: \\',
-      "            bash -euo pipefail <<'BASH'",
-    ].join("\n") + "\n",
-  ],
-  [
-    "scripts/run-hermetic-tests.sh",
-    [
-      "run_scrubbed() {",
-      '  local test_home="$1"',
-      "  shift",
-      "  env \\",
-      "    -u MAILERY_MODE -u HASNA_MAILERY_MODE \\",
-      "    -u MAILERY_STORAGE_MODE -u HASNA_MAILERY_STORAGE_MODE \\",
-      "    -u EMAILS_STORAGE_MODE -u HASNA_EMAILS_STORAGE_MODE \\",
-      "    -u MAILERY_API_URL -u MAILERY_API_KEY \\",
-      "    -u HASNA_MAILERY_API_URL -u HASNA_MAILERY_API_KEY \\",
-      "    -u HASNA_MAILERY_API_SIGNING_KEY -u HASNA_MAILERY_DATABASE_URL \\",
-      "    -u MAILERY_CLOUD_API_URL -u MAILERY_CLOUD_TOKEN \\",
-      "    -u HASNA_MAILERY_ENV_FILE -u HASNA_EMAILS_MODE \\",
-      "    -u HASNA_EMAILS_DB_PATH -u HASNA_EMAILS_DATABASE_URL \\",
-      "    -u EMAILS_SELF_HOSTED_URL -u EMAILS_SELF_HOSTED_API_KEY \\",
-      "    -u EMAILS_SELF_HOSTED_HTTP_CONNECT_TIMEOUT \\",
-      "    -u EMAILS_SELF_HOSTED_HTTP_TIMEOUT \\",
-      "    -u EMAILS_SELF_HOSTED_HTTP_MAX_RESPONSE_BYTES \\",
-      "    -u EMAILS_CLIENT_ENV_SECRET -u EMAILS_SESSION_TOKEN \\",
-      "    -u DATABASE_URL -u EMAILS_DATABASE_URL -u EMAILS_TEST_DATABASE_URL \\",
-      "    -u EMAILS_DATABASE_CA_FILE -u EMAILS_API_SIGNING_KEY \\",
-      "    -u EMAILS_POSTGRES_URL -u EMAILS_TEST_POSTGRES_URL \\",
-      "    -u EMAILS_PG_POOL_MAX -u EMAILS_SEND_LEASE_SECONDS \\",
-      "    -u EMAILS_SEND_PROVIDER \\",
-      "    -u EMAILS_SES_ACCESS_KEY_ID -u EMAILS_SES_SECRET_ACCESS_KEY \\",
-      "    -u EMAILS_SES_CONFIGURATION_SET -u EMAILS_SES_INBOUND_WEBHOOK_SECRET \\",
-      "    -u EMAILS_SNS_TOPIC_ARN -u EMAILS_SNS_TOPIC_ARNS \\",
-      "    -u EMAILS_AWS_ACCOUNT_ID -u EMAILS_AWS_ACCOUNT_IDS \\",
-      "    -u EMAILS_INBOUND_S3_BUCKET -u EMAILS_INBOUND_WEBHOOK_SECRET \\",
-      "    -u EMAILS_REQUIRE_SES_INBOUND_SECRET \\",
-      "    -u EMAILS_INGEST_QUEUE_URL -u EMAILS_INGEST_S3_BUCKET \\",
-      "    -u EMAILS_INGEST_S3_PREFIX -u EMAILS_INGEST_PREFIX_DOMAIN_MAP \\",
-      "    -u EMAILS_INGEST_BACKFILL_LIMIT -u EMAILS_INGEST_BACKFILL_RECIPIENTS \\",
-      "    -u EMAILS_ATTACHMENT_REPAIR_MANIFEST -u EMAILS_IMAGE_REVISION \\",
-      "    -u EMAILS_MCP_HTTP_TOKEN -u EMAILS_MCP_ALLOWED_HOSTS \\",
-      "    -u EMAILS_MCP_ALLOWED_ORIGINS -u MCP_HTTP_PORT \\",
-      "    -u EMAILS_ALLOW_REMOTE -u EMAILS_DASHBOARD_ALLOWED_ORIGINS \\",
-      "    -u HOST -u PORT -u USERPROFILE \\",
-      "    -u EMAILS_PUBLIC_BASE_URL -u EMAILS_AUTH_ALLOWED_EMAIL_DOMAINS \\",
-      "    -u EMAILS_AUTH_FROM -u EMAILS_AUTH_PRODUCT_NAME \\",
-      "    -u EMAILS_AUTH_VERIFY_URL_BASE -u EMAILS_AUTH_RESET_URL_BASE \\",
-      "    -u EMAILS_AUTH_INVITE_URL_BASE \\",
-      "    -u EMAILS_PRIMARY_SUPER_ADMIN_EMAIL \\",
-      "    -u EMAILS_PRIMARY_SUPER_ADMIN_BOOTSTRAP_KID \\",
-      "    -u EMAILS_EMAIL_VERIFY_TTL_HOURS -u EMAILS_INVITE_TTL_HOURS \\",
-      "    -u EMAILS_RESET_TTL_MINUTES -u EMAILS_SESSION_IDLE_TTL_DAYS \\",
-      "    -u EMAILS_SESSION_ABSOLUTE_TTL_DAYS -u EMAILS_TRUSTED_PROXY_HOPS \\",
-      "    -u EMAILS_JSON_OUTPUT \\",
-      "    -u EMAILS_TUI_THEME -u EMAILS_TUI_CLIPBOARD_COMMAND \\",
-      "    -u EMAILS_TUI_CLIPBOARD_COMMAND_TIMEOUT_MS \\",
-      "    -u EMAILS_TUI_CLIPBOARD_DRY_RUN -u EMAILS_TUI_CLIPBOARD_HOST \\",
-      "    -u EMAILS_TUI_CLIPBOARD_SSH_HOSTS \\",
-      "    -u EMAILS_TUI_CLIPBOARD_SSH_TIMEOUT -u EMAILS_TUI_CLIPBOARD_OSC52 \\",
-      "    -u OTUI_USE_ALTERNATE_SCREEN \\",
-      "    -u V1_STUB_ALLOWED_EMAIL_DOMAIN -u V1_STUB_API_KEY \\",
-      "    -u V1_STUB_LIST_ORDER -u V1_STUB_RESOURCE_DEFAULTS \\",
-      "    -u V1_STUB_RESOURCE_SPECS -u V1_STUB_SEED \\",
-      "    -u FORCE_COLOR -u ECS_CONTAINER_METADATA_URI_V4 \\",
-      "    -u CLOUDFLARE_API_TOKEN -u CLOUDFLARE_API_KEY \\",
-      "    -u CLOUDFLARE_EMAIL -u CLOUDFLARE_ACCOUNT_ID \\",
-      "    -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN \\",
-      "    -u AWS_PROFILE -u AWS_DEFAULT_PROFILE -u AWS_ACCOUNT_ID \\",
-      "    -u AWS_REGION -u AWS_DEFAULT_REGION -u AWS_SHARED_CREDENTIALS_FILE \\",
-      "    -u AWS_CONFIG_FILE -u AWS_WEB_IDENTITY_TOKEN_FILE -u AWS_ROLE_ARN \\",
-      "    -u AWS_ROLE_SESSION_NAME -u AWS_CONTAINER_CREDENTIALS_RELATIVE_URI \\",
-      "    -u AWS_CONTAINER_CREDENTIALS_FULL_URI -u AWS_CONTAINER_AUTHORIZATION_TOKEN \\",
-      "    -u EMAILS_AWS_REGION -u EMAILS_SES_AWS_PROFILE \\",
-      "    -u RESEND_API_KEY -u RESEND_WEBHOOK_SECRET \\",
-      "    AWS_EC2_METADATA_DISABLED=true \\",
-      "    NO_COLOR=1 \\",
-      '    PATH="$PATH" \\',
-      '    HOME="$test_home" \\',
-      "    EMAILS_MODE=local \\",
-      "    EMAILS_DB_PATH=:memory: \\",
-      '    "$@"',
-    ].join("\n") + "\n",
-  ],
-]);
+const exactCompatibilityBridgePath = "scripts/run-hermetic-tests.sh";
+
+function canonicalCompatibilityBridge(): string {
+  const source = readFileSync(join(root, exactCompatibilityBridgePath), "utf8");
+  const bridge = extractExactLegacyHostedEnvUnsetBridge(source, exactCompatibilityBridgePath);
+  expect(bridge).toBeDefined();
+  return bridge!;
+}
 
 function expectedLegacyFindings(key: string): string[] {
   return key.includes("CLOUD")
@@ -285,21 +180,20 @@ describe("no hosted control plane", () => {
     const allowedCount = scanned.filter((path) => allowed.some((entry) => isSourceAllowed(entry, path))).length;
     expect(allowedCount * 2).toBeLessThan(scanned.length);
 
-    for (const [path, exactBridge] of exactCompatibilityBridges) {
-      expect(sourceBoundaryFindings(exactBridge, path)).toEqual([]);
-      expect(sourceBoundaryFindings("echo MAILERY_CLOUD_API_URL", path)).toEqual([
-        "legacy hosted environment",
-        "hosted implementation vocabulary",
-      ]);
-      expect(sourceBoundaryFindings("env MAILERY_CLOUD_API_URL=value true", path)).toEqual([
-        "legacy hosted environment",
-        "hosted implementation vocabulary",
-      ]);
-      expect(sourceBoundaryFindings("printf '%s' 'env -u MAILERY_CLOUD_API_URL'", path)).toEqual([
-        "legacy hosted environment",
-        "hosted implementation vocabulary",
-      ]);
-    }
+    const exactBridge = canonicalCompatibilityBridge();
+    expect(sourceBoundaryFindings(exactBridge, exactCompatibilityBridgePath)).toEqual([]);
+    expect(sourceBoundaryFindings("echo MAILERY_CLOUD_API_URL", exactCompatibilityBridgePath)).toEqual([
+      "legacy hosted environment",
+      "hosted implementation vocabulary",
+    ]);
+    expect(sourceBoundaryFindings("env MAILERY_CLOUD_API_URL=value true", exactCompatibilityBridgePath)).toEqual([
+      "legacy hosted environment",
+      "hosted implementation vocabulary",
+    ]);
+    expect(sourceBoundaryFindings("printf '%s' 'env -u MAILERY_CLOUD_API_URL'", exactCompatibilityBridgePath)).toEqual([
+      "legacy hosted environment",
+      "hosted implementation vocabulary",
+    ]);
   });
 
   it("allows only the location- and syntax-exact legacy env-unset bridges", () => {
@@ -311,79 +205,95 @@ describe("no hosted control plane", () => {
       "  true",
     ].join("\n");
 
-    const expandedRunnerBridge = exactCompatibilityBridges.get("scripts/run-hermetic-tests.sh")!;
-    const runnerContent = readFileSync(join(root, "scripts/run-hermetic-tests.sh"), "utf8");
+    const path = exactCompatibilityBridgePath;
+    const expandedRunnerBridge = canonicalCompatibilityBridge();
+    const runnerContent = readFileSync(join(root, path), "utf8");
     const runnerBridgeStart = runnerContent.indexOf(expandedRunnerBridge);
     expect(runnerBridgeStart).toBeGreaterThanOrEqual(0);
     expect(runnerContent.indexOf(expandedRunnerBridge, runnerBridgeStart + expandedRunnerBridge.length)).toBe(-1);
+    expect(extractExactLegacyHostedEnvUnsetBridge(runnerContent, path)).toBe(expandedRunnerBridge);
     expect(expandedRunnerBridge).toContain("    -u HASNA_MAILERY_API_SIGNING_KEY -u HASNA_MAILERY_DATABASE_URL \\\n");
     expect(expandedRunnerBridge).toContain('    PATH="$PATH" \\\n');
 
-    for (const [path, exactBridge] of exactCompatibilityBridges) {
-      expect(sourceBoundaryFindings(exactBridge, path)).toEqual([]);
+    const exactBridge = expandedRunnerBridge;
+    expect(sourceBoundaryFindings(exactBridge, path)).toEqual([]);
 
-      // Reviewer bypass 1: a second unrelated env command on an allowed path.
-      expect(sourceBoundaryFindings(`${exactBridge}\n${arbitraryBridge}`, path)).toEqual([
-        "legacy hosted environment",
-        "hosted implementation vocabulary",
-      ]);
-      expect(sourceBoundaryFindings(`${exactBridge}\n${exactBridge}`, path)).toEqual([
-        "legacy hosted environment",
-        "hosted implementation vocabulary",
-      ]);
+    // Reviewer bypass 1: a second unrelated env command on an allowed path.
+    expect(sourceBoundaryFindings(`${exactBridge}\n${arbitraryBridge}`, path)).toEqual([
+      "legacy hosted environment",
+      "hosted implementation vocabulary",
+    ]);
+    expect(sourceBoundaryFindings(`${exactBridge}\n${exactBridge}`, path)).toEqual([
+      "legacy hosted environment",
+      "hosted implementation vocabulary",
+    ]);
 
-      // Reviewer bypass 2: env options appearing after option parsing has ended.
-      expect(sourceBoundaryFindings("env bash -c true -u MAILERY_CLOUD_API_URL ignored", path)).toEqual([
-        "legacy hosted environment",
-        "hosted implementation vocabulary",
-      ]);
+    // Reviewer bypass 2: env options appearing after option parsing has ended.
+    expect(sourceBoundaryFindings("env bash -c true -u MAILERY_CLOUD_API_URL ignored", path)).toEqual([
+      "legacy hosted environment",
+      "hosted implementation vocabulary",
+    ]);
 
-      // The same command text is not a bridge at an arbitrary location.
-      expect(sourceBoundaryFindings(arbitraryBridge, path)).toEqual([
-        "legacy hosted environment",
-        "hosted implementation vocabulary",
-      ]);
+    // The same command text is not a bridge at an arbitrary location.
+    expect(sourceBoundaryFindings(arbitraryBridge, path)).toEqual([
+      "legacy hosted environment",
+      "hosted implementation vocabulary",
+    ]);
 
-      // Reordering or injecting even a valid env option invalidates the bridge.
-      const reorderPattern =
-        path === "scripts/run-hermetic-tests.sh"
-          ? /(\s+-u HASNA_MAILERY_API_SIGNING_KEY -u HASNA_MAILERY_DATABASE_URL \\\n)(\s+-u MAILERY_CLOUD_API_URL -u MAILERY_CLOUD_TOKEN \\\n)/
-          : /(\s+-u HASNA_MAILERY_API_URL -u HASNA_MAILERY_API_KEY \\\n)(\s+-u MAILERY_CLOUD_API_URL -u MAILERY_CLOUD_TOKEN \\\n)/;
-      const reordered = exactBridge.replace(
-        reorderPattern,
-        "$2$1",
-      );
-      expect(reordered).not.toBe(exactBridge);
-      expect(sourceBoundaryFindings(reordered, path)).toEqual([
-        "legacy hosted environment",
-        "hosted implementation vocabulary",
-      ]);
-      const injected = exactBridge.replace(
-        /(\s+-u MAILERY_CLOUD_API_URL -u MAILERY_CLOUD_TOKEN \\\n)/,
-        "    -u UNRELATED_ENVIRONMENT_VARIABLE \\\n$1",
-      );
-      expect(injected).not.toBe(exactBridge);
-      expect(sourceBoundaryFindings(injected, path)).toEqual([
-        "legacy hosted environment",
-        "hosted implementation vocabulary",
-      ]);
-      const changedUtility =
-        path === ".github/workflows/ci.yml"
-          ? exactBridge.replace("            bash -euo pipefail <<'BASH'\n", "            bash -c true\n")
-          : exactBridge.replace('    "$@"\n', "    bash -c true\n");
-      expect(changedUtility).not.toBe(exactBridge);
-      expect(sourceBoundaryFindings(changedUtility, path)).toEqual([
-        "legacy hosted environment",
-        "hosted implementation vocabulary",
-      ]);
+    // Reordering or injecting even a valid env option invalidates the bridge.
+    const reordered = exactBridge.replace(
+      /(\s+-u HASNA_MAILERY_API_SIGNING_KEY -u HASNA_MAILERY_DATABASE_URL \\\n)(\s+-u MAILERY_CLOUD_API_URL -u MAILERY_CLOUD_TOKEN \\\n)/,
+      "$2$1",
+    );
+    expect(reordered).not.toBe(exactBridge);
+    expect(sourceBoundaryFindings(reordered, path)).toEqual([
+      "legacy hosted environment",
+      "hosted implementation vocabulary",
+    ]);
+    const injected = exactBridge.replace(
+      /(\s+-u MAILERY_CLOUD_API_URL -u MAILERY_CLOUD_TOKEN \\\n)/,
+      "    -u UNRELATED_ENVIRONMENT_VARIABLE \\\n$1",
+    );
+    expect(injected).not.toBe(exactBridge);
+    expect(sourceBoundaryFindings(injected, path)).toEqual([
+      "legacy hosted environment",
+      "hosted implementation vocabulary",
+    ]);
+    const changedUtility = exactBridge.replace('    "$@"\n', "    bash -c true\n");
+    expect(changedUtility).not.toBe(exactBridge);
+    expect(sourceBoundaryFindings(changedUtility, path)).toEqual([
+      "legacy hosted environment",
+      "hosted implementation vocabulary",
+    ]);
 
-      // Every retired key remains banned anywhere outside the one exact bridge.
-      for (const key of legacyHostedEnvKeys) {
-        expect(sourceBoundaryFindings(`${exactBridge}\necho ${key}`, path)).toEqual(expectedLegacyFindings(key));
-      }
+    const changedStart = exactBridge.replace("run_scrubbed() {\n", "run_scrubbed () {\n");
+    expect(changedStart).not.toBe(exactBridge);
+    expect(extractExactLegacyHostedEnvUnsetBridge(changedStart, path)).toBeUndefined();
+    expect(sourceBoundaryFindings(changedStart, path)).toEqual([
+      "legacy hosted environment",
+      "hosted implementation vocabulary",
+    ]);
+
+    // A harmless body change still invalidates the pinned digest, proving the
+    // acceptance is byte-exact rather than a partial option-list check.
+    const changedBody = exactBridge.replace("    NO_COLOR=1 \\\n", "    NO_COLOR=0 \\\n");
+    expect(changedBody).not.toBe(exactBridge);
+    expect(extractExactLegacyHostedEnvUnsetBridge(changedBody, path)).toBeUndefined();
+    expect(sourceBoundaryFindings(changedBody, path)).toEqual([
+      "legacy hosted environment",
+      "hosted implementation vocabulary",
+    ]);
+
+    // Every retired key remains banned anywhere outside the one exact bridge.
+    for (const key of legacyHostedEnvKeys) {
+      expect(sourceBoundaryFindings(`${exactBridge}\necho ${key}`, path)).toEqual(expectedLegacyFindings(key));
     }
 
-    expect(sourceBoundaryFindings(exactCompatibilityBridges.get(".github/workflows/ci.yml")!, "scripts/arbitrary.sh")).toEqual([
+    expect(sourceBoundaryFindings(exactBridge, ".github/workflows/ci.yml")).toEqual([
+      "legacy hosted environment",
+      "hosted implementation vocabulary",
+    ]);
+    expect(sourceBoundaryFindings(exactBridge, "scripts/arbitrary.sh")).toEqual([
       "legacy hosted environment",
       "hosted implementation vocabulary",
     ]);
