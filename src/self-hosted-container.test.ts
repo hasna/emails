@@ -105,7 +105,7 @@ describe("self-hosted container TLS contract", () => {
     expect(runtimeFilesStage).not.toMatch(/expected\["(?:libcrypto3|libssl3)"\]/);
   });
 
-  test("selects, propagates, and verifies an explicit supported container platform", () => {
+  test("selects, propagates, and verifies an explicit supported container platform and runtime architecture", () => {
     expect(runtimeSmoke).toContain(
       'patched_base_image="${CONTAINER_RUNTIME_PATCHED_BASE_IMAGE:-hasna-emails-patched-bun-base:${revision:0:12}}"',
     );
@@ -133,6 +133,15 @@ describe("self-hosted container TLS contract", () => {
     );
     expect(platformSelection).not.toContain(
       'test -n "$CONTAINER_RUNTIME_PLATFORM"',
+    );
+    expect(platformSelection).toMatch(
+      /case "\$platform" in\s+linux\/arm64\)\s+expected_bun_arch="arm64"\s+;;/,
+    );
+    expect(platformSelection).toMatch(
+      /linux\/amd64\)\s+expected_bun_arch="x64"\s+;;/,
+    );
+    expect(platformSelection).toMatch(
+      /\*\)\s+printf 'unsupported resolved container platform: %s\\n' "\$platform" >&2\s+exit 1/,
     );
 
     const buildIndexes = [
@@ -170,6 +179,35 @@ describe("self-hosted container TLS contract", () => {
     );
     expect(runtimeSmoke.indexOf('--tag "$patched_base_image"')).toBeLessThan(
       runtimeSmoke.indexOf('--tag "$image"'),
+    );
+
+    const runtimeProbeStart = runtimeSmoke.indexOf(
+      'docker run --rm --platform "$platform" --read-only',
+    );
+    const runtimeProbe = runtimeSmoke.slice(
+      runtimeProbeStart,
+      runtimeSmoke.indexOf(
+        'test "$(docker run --rm --platform "$platform"',
+        runtimeProbeStart,
+      ),
+    );
+    expect(runtimeProbe).toContain(
+      '--env "CONTAINER_RUNTIME_EXPECTED_BUN_ARCH=$expected_bun_arch"',
+    );
+    expect(runtimeProbe).toContain(
+      "const expectedArch = process.env.CONTAINER_RUNTIME_EXPECTED_BUN_ARCH;",
+    );
+    expect(runtimeProbe).toContain(
+      'if (expectedArch !== "arm64" && expectedArch !== "x64")',
+    );
+    expect(runtimeProbe).toContain(
+      "if (process.arch !== expectedArch)",
+    );
+    expect(runtimeProbe).toContain(
+      "runtime architecture mismatch: expected ${expectedArch}, got ${process.arch}",
+    );
+    expect(runtimeProbe).not.toContain(
+      'const expectedArch = "$expected_bun_arch"',
     );
   });
 

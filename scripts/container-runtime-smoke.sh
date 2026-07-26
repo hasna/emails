@@ -38,6 +38,19 @@ else
   esac
 fi
 
+case "$platform" in
+  linux/arm64)
+    expected_bun_arch="arm64"
+    ;;
+  linux/amd64)
+    expected_bun_arch="x64"
+    ;;
+  *)
+    printf 'unsupported resolved container platform: %s\n' "$platform" >&2
+    exit 1
+    ;;
+esac
+
 cleanup() {
   docker rm -f "$container" >/dev/null 2>&1 || true
   if test "${CONTAINER_RUNTIME_KEEP_IMAGE:-0}" != "1"; then
@@ -79,9 +92,17 @@ test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainer
 test "$(docker image inspect --format '{{json (index .Config.Volumes "/tmp")}}' "$image")" = '{}'
 
 docker run --rm --platform "$platform" --read-only \
+  --env "CONTAINER_RUNTIME_EXPECTED_BUN_ARCH=$expected_bun_arch" \
   --entrypoint /usr/local/bin/bun "$image" -e '
     import { access, stat, writeFile } from "node:fs/promises";
     import { rootCertificates } from "node:tls";
+    const expectedArch = process.env.CONTAINER_RUNTIME_EXPECTED_BUN_ARCH;
+    if (expectedArch !== "arm64" && expectedArch !== "x64") {
+      throw new Error(`unsupported expected runtime architecture: ${expectedArch ?? "unset"}`);
+    }
+    if (process.arch !== expectedArch) {
+      throw new Error(`runtime architecture mismatch: expected ${expectedArch}, got ${process.arch}`);
+    }
     if (process.cwd() !== "/app") throw new Error(`unexpected cwd: ${process.cwd()}`);
     if (process.getuid?.() !== 1000 || process.getgid?.() !== 1000) {
       throw new Error(`unexpected identity: ${process.getuid?.()}:${process.getgid?.()}`);

@@ -4,6 +4,7 @@ export BASH_ENV=/dev/null
 unset CONTAINER_RUNTIME_PLATFORM
 unset FAKE_DOCKER_FORCED_PATCHED_ARCH
 unset FAKE_DOCKER_FORCED_FINAL_ARCH
+unset FAKE_DOCKER_RUNTIME_ARCH
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 script="$repo_root/scripts/container-runtime-smoke.sh"
@@ -109,6 +110,29 @@ case "${1:-}" in
     esac
     ;;
   run)
+    expected_bun_arch=""
+    models_runtime_arch_check=0
+    for argument in "$@"; do
+      case "$argument" in
+        CONTAINER_RUNTIME_EXPECTED_BUN_ARCH=*)
+          expected_bun_arch="${argument#*=}"
+          ;;
+        *'if (process.arch !== expectedArch)'*)
+          models_runtime_arch_check=1
+          ;;
+      esac
+    done
+    if test "$models_runtime_arch_check" = "1"; then
+      if test -z "$expected_bun_arch"; then
+        printf 'runtime probe did not receive an expected Bun architecture\n' >&2
+        exit 2
+      fi
+      if test "${FAKE_DOCKER_RUNTIME_ARCH:-}" != "$expected_bun_arch"; then
+        printf 'runtime payload architecture mismatch: expected %s, got %s\n' \
+          "$expected_bun_arch" "${FAKE_DOCKER_RUNTIME_ARCH:-unset}" >&2
+        exit 1
+      fi
+    fi
     case " $* " in
       *' src/cli/index.tsx --version '*)
         printf '%s\n' "$FAKE_DOCKER_VERSION"
@@ -144,6 +168,7 @@ run_case() {
   local server_arch="$2"
   local expected_platform="$3"
   local override="${4:-}"
+  local expected_bun_arch
   local log="$test_root/$case_name.log"
   local state="$test_root/$case_name.state"
   local stdout="$test_root/$case_name.stdout"
@@ -162,6 +187,20 @@ run_case() {
     "CONTAINER_RUNTIME_PATCHED_BASE_IMAGE=$patched_image"
     "CONTAINER_RUNTIME_IMAGE=$final_image"
   )
+
+  case "$expected_platform" in
+    linux/arm64)
+      expected_bun_arch="arm64"
+      ;;
+    linux/amd64)
+      expected_bun_arch="x64"
+      ;;
+    *)
+      printf 'unsupported test platform: %s\n' "$expected_platform" >&2
+      return 1
+      ;;
+  esac
+  environment+=("FAKE_DOCKER_RUNTIME_ARCH=$expected_bun_arch")
 
   : >"$log"
   : >"$state"
@@ -292,5 +331,50 @@ if env \
 fi
 grep -F 'image platform mismatch for test-final:final-mismatch: requested linux/arm64, got linux/amd64' \
   "$final_mismatch_stderr" >/dev/null
+
+run_runtime_arch_spoof_case() {
+  local case_name="$1"
+  local server_arch="$2"
+  local expected_platform="$3"
+  local expected_image_arch="$4"
+  local expected_bun_arch="$5"
+  local runtime_arch="$6"
+  local log="$test_root/$case_name.log"
+  local state="$test_root/$case_name.state"
+  local stderr="$test_root/$case_name.stderr"
+  local patched_image="test-patched:$case_name"
+  local final_image="test-final:$case_name"
+
+  : >"$log"
+  : >"$state"
+  if env \
+    "PATH=$fake_bin:$PATH" \
+    "FAKE_DOCKER_LOG=$log" \
+    "FAKE_DOCKER_STATE=$state" \
+    "FAKE_DOCKER_SERVER_ARCH=$server_arch" \
+    "FAKE_DOCKER_PATCHED_IMAGE=$patched_image" \
+    "FAKE_DOCKER_FINAL_IMAGE=$final_image" \
+    "FAKE_DOCKER_RUNTIME_ARCH=$runtime_arch" \
+    "FAKE_DOCKER_REVISION=$revision" \
+    "FAKE_DOCKER_VERSION=$version" \
+    "CONTAINER_RUNTIME_PATCHED_BASE_IMAGE=$patched_image" \
+    "CONTAINER_RUNTIME_IMAGE=$final_image" \
+    "$script" >"$test_root/$case_name.stdout" 2>"$stderr"; then
+    printf '%s metadata-spoofed runtime architecture unexpectedly succeeded\n' "$case_name" >&2
+    exit 1
+  fi
+
+  grep -F "runtime payload architecture mismatch: expected $expected_bun_arch, got $runtime_arch" \
+    "$stderr" >/dev/null
+  test "$(grep -c "^$patched_image $expected_image_arch$" "$state")" = "1"
+  test "$(grep -c "^$final_image $expected_image_arch$" "$state")" = "1"
+  test "$(grep -c "^image inspect --format {{.Os}}/{{.Architecture}} $patched_image$" "$log")" = "1"
+  test "$(grep -c "^image inspect --format {{.Os}}/{{.Architecture}} $final_image$" "$log")" = "1"
+  test "$(grep -c -- "--platform $expected_platform" "$log")" -ge "3"
+  test "$(grep -c -- "--env CONTAINER_RUNTIME_EXPECTED_BUN_ARCH=$expected_bun_arch" "$log")" = "1"
+}
+
+run_runtime_arch_spoof_case spoof-arm64 aarch64 linux/arm64 arm64 arm64 x64
+run_runtime_arch_spoof_case spoof-amd64 amd64 linux/amd64 amd64 x64 arm64
 
 printf 'container runtime smoke platform tests passed\n'
