@@ -125,13 +125,6 @@ interface ScannedFile {
   content: string;
 }
 
-function stripExactModeAxisCompatibilityBridge(content: string, path: string): string {
-  if (path !== "scripts/run-hermetic-tests.sh") return content;
-  const retiredModeKey = "HASNA_EMAILS_" + "MODE";
-  const exactBridge = `    -u HASNA_MAILERY_ENV_FILE -u ${retiredModeKey} \\`;
-  return content.replace(exactBridge, "    -u HASNA_MAILERY_ENV_FILE -u RETIRED_MODE_SENTINEL \\");
-}
-
 // `git ls-files` IS the set of committed surfaces, which is the only set that can
 // carry the axis forward. Deriving the corpus from the index rather than from a
 // hand-written roots list is what keeps a rename, a new directory or a new file type
@@ -169,7 +162,7 @@ function scannedFiles(): ScannedFile[] {
     if (!statSync(join(root, path)).isFile()) continue;
     const buffer = readFileSync(join(root, path));
     if (isSkippableBinary(path, buffer)) continue;
-    files.push({ path, content: stripExactModeAxisCompatibilityBridge(buffer.toString("utf8"), path) });
+    files.push({ path, content: buffer.toString("utf8") });
   }
   // THE FLOOR LIVES HERE, not in one test. Every assertion that reads the corpus goes
   // through this function, so none of them can be run — by `-t`, by `it.skip`, or by a
@@ -206,14 +199,6 @@ describe("deployment-mode axis ratchet", () => {
     const kinds = new Set(scanned.map((file) => extname(file.path).toLowerCase() || "(extensionless)"));
     for (const kind of [".ts", ".tsx", ".mjs", ".md", ".tf", ".yml", ".json"]) expect(kinds).toContain(kind);
 
-    const retiredModeKey = "HASNA_EMAILS_" + "MODE";
-    const exactBridge = `    -u HASNA_MAILERY_ENV_FILE -u ${retiredModeKey} \\`;
-    const hermeticSource = readFileSync(join(root, "scripts/run-hermetic-tests.sh"), "utf8");
-    expect(hermeticSource).toContain(exactBridge);
-    expect(stripExactModeAxisCompatibilityBridge(hermeticSource, "scripts/run-hermetic-tests.sh")).not.toContain(exactBridge);
-    expect(stripExactModeAxisCompatibilityBridge(hermeticSource, "scripts/arbitrary.sh")).toBe(hermeticSource);
-    expect(stripExactModeAxisCompatibilityBridge(`echo ${retiredModeKey}`, "scripts/run-hermetic-tests.sh"))
-      .toBe(`echo ${retiredModeKey}`);
   });
 
   it("keeps the corpus exemption list minimal, live, and free of self-exemption", () => {
