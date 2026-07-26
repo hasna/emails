@@ -102,6 +102,67 @@ describe("getDatabase", () => {
     expect(receipts?.name).toBe("webhook_receipts");
   });
 
+  it("drops the canonical tables that were written by triggers and read by nothing", () => {
+    const db = getDatabase();
+    const names = (db.query("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[])
+      .map((t) => t.name);
+    // Derived entirely from inbound_emails, and no product query ever selected
+    // from either one. Dropped by migration 47.
+    expect(names).not.toContain("mail_folders");
+    expect(names).not.toContain("mailbox_message_state");
+    // `mailboxes` is the foreign-key parent of `mailbox_sources`, and
+    // `mailbox_sources` is read by the provider-delete guard below, so both stay.
+    expect(names).toContain("mailboxes");
+    expect(names).toContain("mailbox_sources");
+    const inboundColumns = (db.query("PRAGMA table_info(inbound_emails)").all() as { name: string }[])
+      .map((c) => c.name);
+    expect(inboundColumns).not.toContain("primary_mailbox_id");
+    expect(inboundColumns).not.toContain("primary_mailbox_source_id");
+  });
+
+  it("refuses to delete a provider that still has mail or source history", () => {
+    const db = getDatabase();
+    const providerId = uuid();
+    db.run(
+      "INSERT INTO providers (id, name, type, api_key, active, created_at, updated_at) VALUES (?,?,?,?,1,?,?)",
+      [providerId, "guarded", "resend", "k", now(), now()],
+    );
+    db.run(
+      `INSERT INTO inbound_emails (id, provider_id, message_id, from_address, to_addresses, cc_addresses,
+         subject, text_body, headers_json, attachments_json, label_ids_json, received_at, created_at)
+       VALUES (?,?,?,?,?,'[]',?,?,'{}','[]','[]',?,?)`,
+      [uuid(), providerId, "guard-1", "a@b.com", JSON.stringify(["ceo@x.com"]), "s", "t", now(), now()],
+    );
+
+    // The guard reads `mailbox_sources`, so that table has to keep being populated.
+    const sources = db.query("SELECT COUNT(*) AS count FROM mailbox_sources WHERE provider_id = ?")
+      .get(providerId) as { count: number };
+    expect(sources.count).toBeGreaterThan(0);
+    expect(() => db.run("DELETE FROM providers WHERE id = ?", [providerId]))
+      .toThrow(/mail\/source history/);
+  });
+
+  it("keeps the canonical message row aligned when an inbound email is deleted", () => {
+    const db = getDatabase();
+    const inboundId = uuid();
+    db.run(
+      `INSERT INTO inbound_emails (id, message_id, from_address, to_addresses, cc_addresses,
+         subject, text_body, headers_json, attachments_json, label_ids_json, received_at, created_at)
+       VALUES (?,?,?,?,'[]',?,?,'{}','[]','[]',?,?)`,
+      [inboundId, "align-1", "a@b.com", JSON.stringify(["ceo@x.com"]), "s", "t", now(), now()],
+    );
+    // Stands in for a row a released database already holds: nothing writes
+    // `mail_messages` any more, but the delete trigger still has to clean it up.
+    db.run("INSERT INTO mail_messages (id, subject, created_at, updated_at) VALUES (?,?,?,?)", [
+      `msg:inbound:${inboundId}`, "s", now(), now(),
+    ]);
+
+    db.run("DELETE FROM inbound_emails WHERE id = ?", [inboundId]);
+    const remaining = db.query("SELECT COUNT(*) AS count FROM mail_messages WHERE id = ?")
+      .get(`msg:inbound:${inboundId}`) as { count: number };
+    expect(remaining.count).toBe(0);
+  });
+
   it("creates hot-path composite indexes used by list and export queries", () => {
     const db = getDatabase();
     const expected = [
