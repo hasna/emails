@@ -8,7 +8,9 @@
 //   - `domain buy` Route 53 contact normalization (pure @hasna/domains, mocked)
 //   - `domain list` and `domain usable` pagination/filtering over /v1
 //   - `domain move-provider` writing through /v1 (server owns address moves)
-//   - the previously-local commands that now fail loud (server-owned)
+//   - `domain warm-list` reading the /v1 `warming` resource
+//   - the genuinely server-owned commands that fail loud (live DNS/provider
+//     orchestration and the lifecycle-readiness ledger)
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
 import { Command } from "commander";
 import { startV1Stub, type V1Stub } from "../../test-support/v1-stub.js";
@@ -292,9 +294,43 @@ describe("domain usable command", () => {
 });
 
 describe("domain warm-list command", () => {
-  it("fails loud — warming schedules live on the self-hosted server", async () => {
-    const result = await runDomainCommandExpectingExit(["domain", "warm-list"]);
+  it("lists warming schedules from /v1 with --status filtering and pagination", async () => {
+    await stub.seed({
+      warming: [1, 2, 3].map((i) => ({
+        id: `warm-${i}`,
+        domain: `warm-${i}.example.com`,
+        provider_id: null,
+        target_daily_volume: 100 * i,
+        start_date: "2026-01-01",
+        status: i === 3 ? "paused" : "active",
+        created_at: `2026-01-0${i}T00:00:00.000Z`,
+        updated_at: `2026-01-0${i}T00:00:00.000Z`,
+      })),
+    });
+
+    const all = await runDomainCommand(["domain", "warm-list"]);
+    // Newest-first, exactly like every other /v1-backed list command.
+    expect((all.data as Array<{ domain: string }>).map((row) => row.domain)).toEqual([
+      "warm-3.example.com",
+      "warm-2.example.com",
+      "warm-1.example.com",
+    ]);
+    expect(all.out).toContain("warm-1.example.com");
+    expect(all.out).toContain("Showing 3 warming schedules");
+
+    const active = await runDomainCommand(["domain", "warm-list", "--status", "active"]);
+    expect((active.data as Array<{ domain: string }>).map((row) => row.domain)).toEqual([
+      "warm-2.example.com",
+      "warm-1.example.com",
+    ]);
+
+    const page = await runDomainCommand(["domain", "warm-list", "--limit", "1", "--offset", "1"]);
+    expect((page.data as Array<{ domain: string }>).map((row) => row.domain)).toEqual(["warm-2.example.com"]);
+  });
+
+  it("rejects an unknown --status instead of returning everything", async () => {
+    const result = await runDomainCommandExpectingExit(["domain", "warm-list", "--status", "warming"]);
     expect(result.error).toBe("process.exit:1");
-    expect(result.stderr).toContain("emails domain warm-list is not available in the self-hosted client");
+    expect(result.stderr).toContain("Invalid --status 'warming'");
   });
 });
