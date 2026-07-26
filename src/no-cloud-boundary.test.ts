@@ -1,61 +1,34 @@
 import { describe, expect, it } from "bun:test";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { extname, join, relative } from "node:path";
+import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
+import { extname, join } from "node:path";
 import pkg from "../package.json" with { type: "json" };
 import { normalizeEmailsMode } from "./lib/mode.js";
 import {
-  ARTIFACT_SCOPE,
+  BOUNDARY_SCOPES,
   boundaryPatternTable,
-  SOURCE_SCOPE,
+  isSkippableBinary,
   sourceBoundaryFindings,
   sourceBoundaryPatterns,
 } from "../scripts/no-cloud-scan-lib.mjs";
 
 const root = join(import.meta.dir, "..");
 
-// Every committed surface that can carry a hosted-control-plane marker. A root
-// that is renamed, moved, or emptied must make this suite FAIL rather than
-// silently scan nothing — see "resolves every configured root" below.
-const roots = [
-  ".github",
-  "AGENTS.md",
-  "CHANGELOG.md",
-  "Dockerfile",
-  "README.md",
-  "bun.lock",
-  "dashboard",
-  "deploy",
-  "docker",
-  "docker-compose.yml",
-  "docs",
-  "hasna.contract.json",
-  "package.json",
-  "scripts",
-  "src",
-] as const;
-
-const textExtensions = new Set([
-  ".css",
-  ".example",
-  ".hcl",
-  ".html",
-  ".js",
-  ".json",
-  ".lock",
-  ".md",
-  ".mjs",
-  ".sh",
-  ".tf",
-  ".ts",
-  ".tsx",
-  ".yaml",
-  ".yml",
-]);
+// `git ls-files` IS the set of committed surfaces — the only set that can ship.
+// A hand-maintained roots/extensions allowlist is what made this guard vacuous:
+// four of its roots did not exist, and a new top-level file or a new extension was
+// silently uncovered. Deriving the set means a rename, a new directory and a new
+// file type are all covered with no edit here, and nothing can be quietly dropped.
+function trackedFiles(): string[] {
+  const output = execFileSync("git", ["ls-files", "-z"], { cwd: root, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+  return output.split("\0").filter((path) => path.length > 0);
+}
 
 // The ONLY files exempt from the source scan, and why. This test file is
-// deliberately NOT exempt: the ban list now lives in scripts/no-cloud-scan-lib.mjs,
-// so the guard is scanned by the guard. "keeps the exemption list minimal and
-// live" fails if this map grows or goes stale.
+// deliberately NOT exempt: the ban list lives in scripts/no-cloud-scan-lib.mjs, so
+// the guard is scanned by the guard. Per-pattern, per-file allowances live in that
+// table as `sourceAllowlist` — a whole-file exemption here is the blunt instrument
+// and "keeps the exemption list minimal and live" pins it to exactly these two.
 const excluded = new Map([
   [
     "scripts/no-cloud-scan-lib.mjs",
@@ -63,55 +36,41 @@ const excluded = new Map([
   ],
   [
     "src/no-cloud-artifact-scan.test.ts",
-    "poisoned fixtures that prove the scanner detects markers inside packed bundle chunks",
+    "positive-detection fixtures that prove every pattern still fires, plus the bundle-chunk poison cases",
   ],
 ]);
 
-// The scan currently reads ~563 files. A floor far above the vacuous case (an
-// unresolved root set reads 0 files and every assertion below holds trivially)
-// turns "the roots stopped resolving" into a loud failure.
-const MINIMUM_SCANNED_FILES = 400;
-
-function files(path: string): string[] {
-  if (!existsSync(path)) return [];
-  const stat = statSync(path);
-  if (stat.isFile()) return textExtensions.has(extname(path)) || path.endsWith("Dockerfile") ? [path] : [];
-  if (!stat.isDirectory()) return [];
-  return readdirSync(path).flatMap((entry) => (entry === "node_modules" || entry === "dist" ? [] : files(join(path, entry))));
-}
-
-function filesForRoot(entry: string): string[] {
-  return files(join(root, entry)).filter((path) => !excluded.has(relative(root, path)));
-}
-
-function scannedFiles(): string[] {
-  return roots.flatMap((entry) => filesForRoot(entry));
-}
+// 571 files are tracked today. A floor far above the vacuous case (an unresolved
+// file set is 0, and every assertion below holds trivially over it) makes "the scan
+// stopped resolving files" a loud failure instead of a green run over nothing.
+const MINIMUM_TRACKED_FILES = 400;
 
 function scannedPaths(): string[] {
-  return scannedFiles().map((path) => relative(root, path));
+  return trackedFiles()
+    .filter((path) => !excluded.has(path))
+    .filter((path) => !isSkippableBinary(path, readFileSync(join(root, path))));
 }
 
 describe("no hosted control plane", () => {
-  it("resolves every configured root to at least one scanned file", () => {
-    expect(roots.filter((entry) => !existsSync(join(root, entry)))).toEqual([]);
-    expect(roots.filter((entry) => filesForRoot(entry).length === 0)).toEqual([]);
-  });
-
-  it("scans a non-vacuous number of files", () => {
-    const scanned = new Set(scannedPaths());
-    expect(scanned.size).toBeGreaterThan(MINIMUM_SCANNED_FILES);
-    // Spot-check the roots and extensions most likely to be lost to a filter regression.
-    const markers = [
-      "src/lib/mode.ts",
-      "deploy/aws/compute.tf",
-      "deploy/aws/examples/backend.hcl.example",
-      "docker/postgres-init/001-runtime-role.sh",
-      "scripts/no-cloud-artifact-scan.mjs",
-      "bun.lock",
-      "CHANGELOG.md",
-    ];
-    expect(markers.filter((marker) => !scanned.has(marker))).toEqual([]);
+  it("scans every committed file, and a non-vacuous number of them", () => {
+    const tracked = trackedFiles();
+    const scanned = scannedPaths();
+    expect(tracked.length).toBeGreaterThan(MINIMUM_TRACKED_FILES);
+    // Nothing is dropped except the two declared exemptions: this repo commits no
+    // binary payloads, so the binary skip must currently remove zero files.
+    expect(tracked.length - scanned.length).toBe(excluded.size);
+    // Every scanned path must resolve — a stale index would otherwise read nothing.
+    expect(scanned.filter((path) => !existsSync(join(root, path)))).toEqual([]);
+    // Every committed file TYPE must be represented, derived from the tree rather
+    // than pinned to filenames, so a rename cannot shrink coverage and a legitimate
+    // `compute.tf` -> `ecs.tf` refactor does not fail the boundary guard. A new file
+    // type is covered automatically; a type disappearing entirely fails here.
+    const kindOf = (path: string) => extname(path).toLowerCase() || "(extensionless)";
+    const scannedKinds = new Set(scanned.map(kindOf));
+    expect([...new Set(tracked.map(kindOf))].filter((kind) => !scannedKinds.has(kind))).toEqual([]);
+    for (const kind of [".ts", ".tsx", ".tf", ".hcl", ".sh", ".mjs", ".md", ".yml", ".json", ".toml", ".lock", ".example", ".html", "(extensionless)"]) {
+      expect(scannedKinds).toContain(kind);
+    }
   });
 
   it("keeps the exemption list minimal and live", () => {
@@ -127,34 +86,24 @@ describe("no hosted control plane", () => {
 
   it("shares one ban list with the packed-artifact scanner", () => {
     // Both guards read scripts/no-cloud-scan-lib.mjs, so the lists cannot drift.
-    // Anything not enforced on both surfaces must carry a written exemption reason.
-    const oneSided = boundaryPatternTable
-      .filter((entry) => entry.scopes.length !== 2)
-      .map((entry) => ({
-        label: entry.label,
-        scopes: entry.scopes,
-        exempted: Object.keys(entry.exemptions ?? {}).sort(),
-      }));
-    expect(oneSided).toEqual([
-      { label: "legacy hosted environment", scopes: [ARTIFACT_SCOPE], exempted: [SOURCE_SCOPE] },
-      { label: "hosted implementation vocabulary", scopes: [ARTIFACT_SCOPE], exempted: [SOURCE_SCOPE] },
-    ]);
-    expect(sourceBoundaryPatterns.length).toBe(boundaryPatternTable.length - oneSided.length);
-    // Nothing is source-only: every source pattern is also enforced on the artifact.
-    for (const entry of boundaryPatternTable) expect(entry.scopes).toContain(ARTIFACT_SCOPE);
-  });
-
-  it("enforces the full source ban list", () => {
-    // Guard the guard: an accidental deletion from the shared table must fail here
-    // instead of quietly making the scan below weaker.
+    // Every pattern is enforced on BOTH surfaces; nothing is exempted wholesale.
+    expect(boundaryPatternTable.length).toBe(13);
+    expect(sourceBoundaryPatterns.length).toBe(boundaryPatternTable.length);
+    for (const entry of boundaryPatternTable) {
+      // Order-independent, and correct if a third surface is ever added.
+      expect(BOUNDARY_SCOPES.filter((scope: string) => !entry.scopes.includes(scope))).toEqual([]);
+      expect(entry.exemptions ?? {}).toEqual({});
+    }
     expect(sourceBoundaryPatterns.map((entry) => entry.label).sort()).toEqual([
       "cloud ai provider client",
       "hosted billing route",
       "hosted camel-case identifier",
       "hosted data field",
       "hosted endpoint",
+      "hosted implementation vocabulary",
       "hosted package",
       "hosted triage surface",
+      "legacy hosted environment",
       "private deployment marker",
       "removed mode in configuration",
       "retired inbound bucket prefix",
@@ -162,11 +111,63 @@ describe("no hosted control plane", () => {
     ]);
   });
 
+  it("keeps every per-file allowance narrow, justified, and live", () => {
+    const allowed = boundaryPatternTable.filter((entry) => (entry.sourceAllowlist ?? []).length > 0);
+    // Only these two patterns may name individual files, and only these files.
+    expect(
+      allowed.map((entry) => ({ label: entry.label, files: [...(entry.sourceAllowlist as string[])].sort() })),
+    ).toEqual([
+      {
+        label: "legacy hosted environment",
+        files: [
+          "src/cli/cli-contract.test.ts",
+          "src/cli/tui/autopull.test.ts",
+          "src/db/self-hosted-store.test.ts",
+          "src/lib/client-env.test.ts",
+          "src/lib/doctor.test.ts",
+          "src/lib/mode.test.ts",
+          "src/lib/self-hosted-mail-data-source.test.ts",
+          "src/mcp/domain-address-self-hosted.test.ts",
+        ],
+      },
+      {
+        label: "hosted implementation vocabulary",
+        files: [
+          "CHANGELOG.md",
+          "deploy/aws/README.md",
+          "deploy/aws/backend.tf",
+          "docs/design/multi-tenancy-auth.md",
+          "src/cli/tui/autopull.test.ts",
+          "src/lib/doctor.test.ts",
+          "src/lib/mode.test.ts",
+          "src/lib/self-hosted-mail-data-source.test.ts",
+          "src/mcp/domain-address-self-hosted.test.ts",
+        ],
+      },
+    ]);
+    const scanned = new Set(scannedPaths());
+    for (const entry of allowed) {
+      expect(typeof entry.allowlistReason).toBe("string");
+      expect((entry.allowlistReason as string).length).toBeGreaterThan(40);
+      for (const path of entry.sourceAllowlist as string[]) {
+        // A renamed or deleted allowance must fail, not silently stop applying.
+        expect(scanned.has(path)).toBe(true);
+        // And a DEAD allowance must fail too: if the file no longer trips the
+        // pattern, the allowance has to go rather than pre-authorise a future leak.
+        const content = readFileSync(join(root, path), "latin1");
+        expect(entry.pattern.test(content)).toBe(true);
+      }
+    }
+    // The allowances cover 15 of 569 scanned files; the rest are fully enforced.
+    const allowedFiles = new Set(allowed.flatMap((entry) => entry.sourceAllowlist as string[]));
+    expect(allowedFiles.size * 20).toBeLessThan(scanned.size);
+  });
+
   it("contains no banned hosted-control-plane marker in any scanned file", () => {
-    const findings = scannedFiles()
+    const findings = scannedPaths()
       .flatMap((path) => {
-        const rel = relative(root, path);
-        return sourceBoundaryFindings(readFileSync(path, "utf8"), rel).map((label) => `${rel}: ${label}`);
+        const content = readFileSync(join(root, path), "latin1");
+        return sourceBoundaryFindings(content, path).map((label) => `${path}: ${label}`);
       })
       .sort();
     expect(findings).toEqual([]);
@@ -176,9 +177,16 @@ describe("no hosted control plane", () => {
     const readme = readFileSync(join(root, "README.md"), "utf8");
     expect(readme).toContain("EMAILS_ALLOW_REMOTE=1");
     expect(readme).toContain("@hasna/emails");
-    // The typo-squat variants are banned tree-wide by the shared list above, which
-    // now also covers bun.lock — the lockfile is a scanned root.
     expect(pkg.name).toBe("@hasna/emails");
+    // bun.lock carried a stale typo-squat workspace name for releases, invisible
+    // because the lockfile was not scanned. `bun install`, `--force` and
+    // `--frozen-lockfile` all leave that field alone, so nothing in the toolchain
+    // catches the drift. Compare it to the manifest rather than to one spelling:
+    // the `typo-squat package name` pattern only covers the spellings it enumerates.
+    // (bun.lock is JSONC, so it is matched rather than JSON.parse'd.)
+    const lock = readFileSync(join(root, "bun.lock"), "utf8");
+    const lockName = /"workspaces"\s*:\s*\{\s*""\s*:\s*\{\s*"name"\s*:\s*"([^"]+)"/.exec(lock)?.[1];
+    expect(lockName).toBe(pkg.name);
   });
 
   it("ships exactly local and self_hosted without hosted aliases", () => {
@@ -189,7 +197,7 @@ describe("no hosted control plane", () => {
     }
   });
 
-  it("has no SaaS client, command, export, package bin, or fleet env loader", () => {
+  it("has no hosted client, command, export, package bin, or environment loader", () => {
     expect(existsSync(join(root, "src/cli/commands/cloud.ts"))).toBe(false);
     expect(existsSync(join(root, "src/lib/mailery-cloud-client.ts"))).toBe(false);
     expect(existsSync(join(root, "src/lib/load-cloud-env.ts"))).toBe(false);
@@ -197,7 +205,8 @@ describe("no hosted control plane", () => {
     expect(existsSync(join(root, "src/mcp/tools/triage.ts"))).toBe(false);
     expect((pkg.exports as Record<string, unknown>)["./cloud"]).toBeUndefined();
     expect(Object.keys(pkg.bin)).toEqual(["emails", "emails-mcp", "emails-serve"]);
-    // The `mailery*` bins belong to the separate cloud CLI and must stay free here.
+    // The `mailery*` bins belong to the separate hosted CLI (@hasnatools/mailery)
+    // and must stay free here.
     expect(Object.keys(pkg.bin).some((name) => name.toLowerCase().includes("mailery"))).toBe(false);
   });
 });
