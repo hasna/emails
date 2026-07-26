@@ -105,18 +105,86 @@ describe("self-hosted container TLS contract", () => {
     expect(runtimeFilesStage).not.toMatch(/expected\["(?:libcrypto3|libssl3)"\]/);
   });
 
-  test("builds, retains, and cleans a separately tagged patched base target", () => {
+  test("selects, propagates, and verifies an explicit supported container platform", () => {
     expect(runtimeSmoke).toContain(
       'patched_base_image="${CONTAINER_RUNTIME_PATCHED_BASE_IMAGE:-hasna-emails-patched-bun-base:${revision:0:12}}"',
     );
-    expect(runtimeSmoke).toMatch(
-      /docker build --platform linux\/amd64 \\\n+\s+--target base \\\n+\s+--tag "\$patched_base_image" \\\n+\s+--build-arg "BUN_IMAGE=\$upstream_image" \./,
+
+    const platformSelection = runtimeSmoke.slice(
+      runtimeSmoke.indexOf(
+        'if test "${CONTAINER_RUNTIME_PLATFORM+x}" = "x"; then',
+      ),
+      runtimeSmoke.indexOf("cleanup() {"),
     );
+    expect(platformSelection).toContain(
+      'if test "${CONTAINER_RUNTIME_PLATFORM+x}" = "x"; then',
+    );
+    expect(platformSelection).toMatch(
+      /case "\$CONTAINER_RUNTIME_PLATFORM" in\s+linux\/arm64 \| linux\/amd64\)\s+platform="\$CONTAINER_RUNTIME_PLATFORM"\s+;;\s+\*\)\s+printf 'unsupported CONTAINER_RUNTIME_PLATFORM: %s \(expected linux\/arm64 or linux\/amd64\)\\n' \\\s+"\$CONTAINER_RUNTIME_PLATFORM" >&2\s+exit 1/,
+    );
+    expect(platformSelection).toMatch(
+      /aarch64 \| arm64\)\s+platform="linux\/arm64"\s+;;/,
+    );
+    expect(platformSelection).toMatch(
+      /x86_64 \| amd64\)\s+platform="linux\/amd64"\s+;;/,
+    );
+    expect(platformSelection).toMatch(
+      /\*\)\s+printf 'unsupported Docker server architecture: %s\\n' "\$docker_server_arch" >&2\s+exit 1/,
+    );
+    expect(platformSelection).not.toContain(
+      'test -n "$CONTAINER_RUNTIME_PLATFORM"',
+    );
+
+    const buildIndexes = [
+      ...runtimeSmoke.matchAll(/docker build --platform "\$platform" \\/g),
+    ].map((match) => match.index);
+    expect([...runtimeSmoke.matchAll(/\bdocker build\b/g)]).toHaveLength(2);
+    expect(buildIndexes).toHaveLength(2);
+
+    const runCommands = [
+      ...runtimeSmoke.matchAll(
+        /\bdocker run --(?:rm|detach) --platform "\$platform"/g,
+      ),
+    ];
+    expect([...runtimeSmoke.matchAll(/\bdocker run\b/g)]).toHaveLength(4);
+    expect(runCommands).toHaveLength(4);
+
+    expect(runtimeSmoke).toContain(
+      "actual_platform=\"$(docker image inspect --format '{{.Os}}/{{.Architecture}}' \"$candidate_image\")\"",
+    );
+    expect(runtimeSmoke).toContain(
+      'if test "$actual_platform" != "$platform"; then',
+    );
+    const patchedPlatformCheck = runtimeSmoke.indexOf(
+      'assert_image_platform "$patched_base_image"',
+    );
+    const finalPlatformCheck = runtimeSmoke.indexOf(
+      'assert_image_platform "$image"',
+    );
+    expect(buildIndexes[0]).toBeLessThan(patchedPlatformCheck);
+    expect(patchedPlatformCheck).toBeLessThan(buildIndexes[1]);
+    expect(buildIndexes[1]).toBeLessThan(finalPlatformCheck);
+
     expect(runtimeSmoke).toContain(
       'docker image rm -f "$image" "$patched_base_image" >/dev/null 2>&1 || true',
     );
     expect(runtimeSmoke.indexOf('--tag "$patched_base_image"')).toBeLessThan(
       runtimeSmoke.indexOf('--tag "$image"'),
+    );
+  });
+
+  test("runs the fake-Docker platform regression in the Bun suite", () => {
+    const output = execFileSync(
+      "bash",
+      ["scripts/container-runtime-smoke.test.sh"],
+      {
+        cwd: resolve(import.meta.dir, ".."),
+        encoding: "utf8",
+        env: { ...process.env, BASH_ENV: "/dev/null" },
+      },
+    );
+    expect(output.trim()).toBe(
+      "container runtime smoke platform tests passed",
     );
   });
 
