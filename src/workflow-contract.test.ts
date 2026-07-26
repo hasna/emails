@@ -97,8 +97,16 @@ describe("repository workflow safety", () => {
       'git -C "$SOURCE_CHECKOUT" worktree add --detach "$RELEASE_WORKTREE" "$RELEASE_COMMIT"',
       'RELEASE_WORKTREE_COMMIT="$(git -C "$RELEASE_WORKTREE" rev-parse --verify \'HEAD^{commit}\')"',
       'test "$RELEASE_WORKTREE_COMMIT" = "$RELEASE_COMMIT"',
+      'RELEASE_HOME="$RELEASE_WORKTREE_PARENT/home"',
+      'RELEASE_XDG_CONFIG_HOME="$RELEASE_WORKTREE_PARENT/xdg-config"',
+      'RELEASE_XDG_CACHE_HOME="$RELEASE_WORKTREE_PARENT/xdg-cache"',
+      'mkdir -p -- "$RELEASE_HOME" "$RELEASE_XDG_CONFIG_HOME" "$RELEASE_XDG_CACHE_HOME"',
       'git -C "$RELEASE_WORKTREE" status --porcelain=v1 --untracked-files=all',
-      'bun install --frozen-lockfile',
+      'HOME="$RELEASE_HOME"',
+      'XDG_CONFIG_HOME="$RELEASE_XDG_CONFIG_HOME"',
+      'XDG_CACHE_HOME="$RELEASE_XDG_CACHE_HOME"',
+      'bun install --frozen-lockfile --ignore-scripts',
+      'test ! -e "$RELEASE_HOME/.hasna/emails"',
       'npm view "$NPM_PACKAGE@$RELEASE_VERSION" --json --registry "$NPM_REGISTRY"',
       "EXPECTED_NPM_TARBALL_URL",
       ".dist.integrity",
@@ -121,8 +129,10 @@ describe("repository workflow safety", () => {
     }
 
     expect(preflight).not.toMatch(
-      /NPM_PROVENANCE_PREDICATE_TYPE|NPM_ATTESTATIONS|resolvedDependencies|base64 --decode|:\s*"\$\{HOSTED_CI_WORKFLOW:|\.gitHead|--ignore-scripts|completed_at/,
+      /NPM_PROVENANCE_PREDICATE_TYPE|NPM_ATTESTATIONS|resolvedDependencies|base64 --decode|:\s*"\$\{HOSTED_CI_WORKFLOW:|\.gitHead|completed_at/,
     );
+    expect(preflight.match(/--ignore-scripts/g)).toHaveLength(1);
+    expect(preflight).not.toMatch(/npm pack[^\n]*--ignore-scripts|--ignore-scripts[^\n]*npm pack/);
     expect(preflight).not.toContain(
       'npm pack --json --pack-destination "$NPM_PACK_DIR" --registry "$NPM_REGISTRY" "$SOURCE_CHECKOUT"',
     );

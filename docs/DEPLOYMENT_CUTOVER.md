@@ -280,6 +280,10 @@ trap cleanup_release_preflight EXIT
 RELEASE_WORKTREE_PARENT="$(mktemp -d "${TMPDIR:-/tmp}/emails-release-worktree.XXXXXXXX")"
 NPM_PACK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/emails-release-pack.XXXXXXXX")"
 RELEASE_WORKTREE="$RELEASE_WORKTREE_PARENT/release-$RELEASE_COMMIT"
+RELEASE_HOME="$RELEASE_WORKTREE_PARENT/home"
+RELEASE_XDG_CONFIG_HOME="$RELEASE_WORKTREE_PARENT/xdg-config"
+RELEASE_XDG_CACHE_HOME="$RELEASE_WORKTREE_PARENT/xdg-cache"
+mkdir -p -- "$RELEASE_HOME" "$RELEASE_XDG_CONFIG_HOME" "$RELEASE_XDG_CACHE_HOME"
 git -C "$SOURCE_CHECKOUT" worktree add --detach "$RELEASE_WORKTREE" "$RELEASE_COMMIT"
 RELEASE_WORKTREE_COMMIT="$(git -C "$RELEASE_WORKTREE" rev-parse --verify 'HEAD^{commit}')"
 test "$RELEASE_WORKTREE_COMMIT" = "$RELEASE_COMMIT"
@@ -289,8 +293,12 @@ RELEASE_WORKTREE_CLEAN_BEFORE="$(
 test -z "$RELEASE_WORKTREE_CLEAN_BEFORE"
 (
   cd "$RELEASE_WORKTREE"
-  bun install --frozen-lockfile
+  HOME="$RELEASE_HOME" \
+  XDG_CONFIG_HOME="$RELEASE_XDG_CONFIG_HOME" \
+  XDG_CACHE_HOME="$RELEASE_XDG_CACHE_HOME" \
+    bun install --frozen-lockfile --ignore-scripts
 )
+test ! -e "$RELEASE_HOME/.hasna/emails"
 RELEASE_WORKTREE_CLEAN_AFTER_INSTALL="$(
   git -C "$RELEASE_WORKTREE" status --porcelain=v1 --untracked-files=all
 )"
@@ -314,8 +322,11 @@ jq -e \
 
 NPM_REGISTRY_INTEGRITY="$(jq -er '.dist.integrity' <<<"$NPM_RELEASE_JSON")"
 NPM_PACK_OUTPUT_FILE="$NPM_PACK_DIR/npm-pack-output.log"
-npm pack --json --pack-destination "$NPM_PACK_DIR" --registry "$NPM_REGISTRY" "$RELEASE_WORKTREE" \
-  >"$NPM_PACK_OUTPUT_FILE"
+HOME="$RELEASE_HOME" \
+XDG_CONFIG_HOME="$RELEASE_XDG_CONFIG_HOME" \
+XDG_CACHE_HOME="$RELEASE_XDG_CACHE_HOME" \
+  npm pack --json --pack-destination "$NPM_PACK_DIR" --registry "$NPM_REGISTRY" "$RELEASE_WORKTREE" \
+    >"$NPM_PACK_OUTPUT_FILE"
 NPM_PACK_JSON_START_LINE="$(
   grep -n '^\[$' "$NPM_PACK_OUTPUT_FILE" | tail -1 | cut -d: -f1
 )"

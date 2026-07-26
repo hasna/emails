@@ -471,8 +471,16 @@ for release_order_runbook in "$repo/docs/DEPLOYMENT_CUTOVER.md"; do
     'git -C "$SOURCE_CHECKOUT" worktree add --detach "$RELEASE_WORKTREE" "$RELEASE_COMMIT"' \
     'RELEASE_WORKTREE_COMMIT="$(git -C "$RELEASE_WORKTREE" rev-parse --verify '"'"'HEAD^{commit}'"'"')"' \
     'test "$RELEASE_WORKTREE_COMMIT" = "$RELEASE_COMMIT"' \
+    'RELEASE_HOME="$RELEASE_WORKTREE_PARENT/home"' \
+    'RELEASE_XDG_CONFIG_HOME="$RELEASE_WORKTREE_PARENT/xdg-config"' \
+    'RELEASE_XDG_CACHE_HOME="$RELEASE_WORKTREE_PARENT/xdg-cache"' \
+    'mkdir -p -- "$RELEASE_HOME" "$RELEASE_XDG_CONFIG_HOME" "$RELEASE_XDG_CACHE_HOME"' \
     'git -C "$RELEASE_WORKTREE" status --porcelain=v1 --untracked-files=all' \
-    'bun install --frozen-lockfile' \
+    'HOME="$RELEASE_HOME"' \
+    'XDG_CONFIG_HOME="$RELEASE_XDG_CONFIG_HOME"' \
+    'XDG_CACHE_HOME="$RELEASE_XDG_CACHE_HOME"' \
+    'bun install --frozen-lockfile --ignore-scripts' \
+    'test ! -e "$RELEASE_HOME/.hasna/emails"' \
     'npm view "$NPM_PACKAGE@$RELEASE_VERSION" --json --registry "$NPM_REGISTRY"' \
     "EXPECTED_NPM_TARBALL_URL" \
     ".dist.integrity" \
@@ -496,9 +504,20 @@ for release_order_runbook in "$repo/docs/DEPLOYMENT_CUTOVER.md"; do
     }
   done
 
-  if grep -Eq 'NPM_PROVENANCE_PREDICATE_TYPE|NPM_ATTESTATIONS|resolvedDependencies|base64 --decode|:[[:space:]]*"\$\{HOSTED_CI_WORKFLOW:|[.]gitHead|--ignore-scripts|completed_at' \
+  if grep -Eq 'NPM_PROVENANCE_PREDICATE_TYPE|NPM_ATTESTATIONS|resolvedDependencies|base64 --decode|:[[:space:]]*"\$\{HOSTED_CI_WORKFLOW:|[.]gitHead|completed_at' \
     "$release_order_runbook"; then
     echo "release-order contract must use registry artifact integrity, not unavailable publish provenance" >&2
+    exit 1
+  fi
+
+  if test "$(grep -Fo -- '--ignore-scripts' "$release_order_runbook" | wc -l)" -ne 1; then
+    echo "release-order contract must ignore scripts only during the isolated Bun install" >&2
+    exit 1
+  fi
+
+  if grep -E 'npm pack.*--ignore-scripts|--ignore-scripts.*npm pack' \
+    "$release_order_runbook" >/dev/null; then
+    echo "release-order npm pack must keep prepack and build lifecycle scripts enabled" >&2
     exit 1
   fi
 
