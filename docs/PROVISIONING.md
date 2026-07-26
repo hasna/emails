@@ -1,10 +1,27 @@
 # Email-address provisioning (open-emails)
 
+> **STATUS: NOT IMPLEMENTED in the shipped package.** Every `emails provision *`
+> command and every `provision_*` MCP tool fails loud. There is no local
+> provisioning orchestrator (it was unreachable from all shipped entrypoints and
+> was deleted) and the self-hosted server exposes no provisioning route and runs
+> no reconciler. The rest of this document describes the intended design, not
+> current behaviour. **Provisioning today is manual — see "What actually works"
+> below.**
+
 Give users and agents **real email addresses on domains we own**, fully
 automatically: buy the domain, wire DNS through Cloudflare, set up SES sending +
 receiving, create addresses, and verify by sending mail back and forth.
 
-## One command
+## What actually works today
+```
+emails domain adopt ours.com --provider <ses-id>   # register an already-verified domain + wire SES inbound (S3) + catch-all
+emails aws setup-inbound                           # create the S3 bucket + SES receipt rules
+emails address add andrew@ours.com --provider <ses-id>
+emails domain list --json                          # what is registered
+emails inbox sync-s3                               # pull inbound mail from the S3 bucket
+```
+
+## One command (design target — NOT implemented)
 ```
 emails provision domain ours.com --provider <ses-id> --add-mx   # SES identity + publish DNS in Cloudflare
 emails provision address andrew@ours.com --provider <ses-id> --receive ses-s3

@@ -4,7 +4,6 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { commandModulesFor, routeRootPromptArgs, shouldPrintVersionEarly, type CommandModule } from "./router.js";
-import { applyMaileryEnvCompat } from "../lib/env-compat.js";
 
 function getPackageVersion(): string {
   try {
@@ -37,6 +36,7 @@ async function loadCommandModule(module: CommandModule): Promise<RegisterFn> {
     case "owner": return (await import("./commands/owner.js")).registerOwnerCommands;
     case "alias": return (await import("./commands/alias.js")).registerAliasCommands;
     case "sendkey": return (await import("./commands/sendkey.js")).registerSendKeyCommands;
+    case "send-intent": return (await import("./commands/send-intent.js")).registerSendIntentCommands;
     case "reply": return (await import("./commands/reply.js")).registerReplyCommand;
     case "forwarding": return (await import("./commands/forwarding.js")).registerForwardingCommands;
     case "ui": return (await import("./commands/ui.js")).registerUiCommand;
@@ -64,8 +64,6 @@ function configureJsonCommanderErrors(command: Command): void {
 }
 
 async function main(): Promise<void> {
-  // Mirror MAILERY_* env onto the EMAILS_* names the code reads (dual-read).
-  applyMaileryEnvCompat();
   const version = getPackageVersion();
   const rawArgs = process.argv.slice(2);
   if (shouldPrintVersionEarly(rawArgs)) {
@@ -75,7 +73,13 @@ async function main(): Promise<void> {
   const cliArgs = routeRootPromptArgs(rawArgs);
 
   const program = new Command();
-  const [{ setLogLevel }, { configureCliRuntime, emitJson, handleError }] = await Promise.all([
+  const [{ setLogLevel }, {
+    configureCliRuntime,
+    drainCliOutput,
+    emitJson,
+    finalizeCliOutput,
+    handleError,
+  }] = await Promise.all([
     import("../lib/logger.js"),
     import("./utils.js"),
   ]);
@@ -86,8 +90,8 @@ async function main(): Promise<void> {
   setLogLevel(quietRequested, verboseRequested);
 
   program
-    .name("mailery")
-    .description("Mailery email management CLI - send, receive, sync, and manage email locally or in your AWS account (the `emails` command is a back-compat alias)")
+    .name("emails")
+    .description("Emails email management CLI - send, receive, sync, and manage email locally or in your AWS account")
     .version(version)
     .option("--json", "Output JSON instead of formatted text")
     .option("-q, --quiet", "Suppress info output")
@@ -107,14 +111,16 @@ async function main(): Promise<void> {
     }
   }
 
-  await registerCommandsForArgs(program, output, cliArgs);
-
-  if (jsonRequested && !cliArgs.includes("--help") && !cliArgs.includes("-h")) {
-    configureJsonCommanderErrors(program);
-  }
-
   try {
+    await registerCommandsForArgs(program, output, cliArgs);
+
+    if (jsonRequested && !cliArgs.includes("--help") && !cliArgs.includes("-h")) {
+      configureJsonCommanderErrors(program);
+    }
+
     await program.parseAsync([process.argv[0] ?? "bun", process.argv[1] ?? "emails", ...cliArgs]);
+    finalizeCliOutput();
+    await drainCliOutput();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     handleError(new Error(message));

@@ -1,6 +1,7 @@
 import type { CreateProviderInput, Provider, ProviderSummary, ProviderType } from "../types/index.js";
 import { ProviderNotFoundError } from "../types/index.js";
 import { selfHostedResource, selfHostedListQuery, selfHostedPage, cbool, ciso, cstr, cstrOrNull } from "./self-hosted-resource.js";
+import { assertNoProviderCredentials } from "./provider-credentials.js";
 
 const PROVIDER_RESOURCE = "providers";
 const SUPPORTED_PROVIDER_TYPES = ["resend", "ses", "sandbox"] as const;
@@ -57,8 +58,18 @@ function listSupportedProviders(): Provider[] {
     .map(apiToProvider);
 }
 
+/**
+ * The self-hosted `providers` resource has NO credential columns — the server
+ * schema stores `name/type/region/active` only. Refuse credentials loudly, and
+ * expose the check so a caller can fail fast BEFORE doing anything expensive.
+ */
+export function assertProviderCredentialsStorable(input: Partial<CreateProviderInput>): void {
+  assertNoProviderCredentials(input);
+}
+
 export function createProvider(input: CreateProviderInput): Provider {
   assertSupportedProviderType(input.type);
+  assertProviderCredentialsStorable(input);
   return apiToProvider(selfHostedResource(PROVIDER_RESOURCE).create({
     name: input.name,
     type: input.type,
@@ -147,6 +158,7 @@ export function updateProvider(
   id: string,
   input: Partial<CreateProviderInput> & { active?: boolean },
 ): Provider {
+  assertProviderCredentialsStorable(input);
   const store = selfHostedResource(PROVIDER_RESOURCE);
   if (!store.get(id)) throw new ProviderNotFoundError(id);
   const patch: Record<string, unknown> = {};

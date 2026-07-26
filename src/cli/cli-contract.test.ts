@@ -77,13 +77,30 @@ describe("CLI JSON contracts (self-hosted /v1)", () => {
   it("prints valid credential-free JSON for provider CRUD routed to /v1", () => {
     const env = cliEnv();
 
-    const add = runCli([
+    // Credentials cannot be stored by the self-hosted server, so the command
+    // must REFUSE them (and never echo them) rather than accept the flags and
+    // silently drop the values on the wire.
+    const refused = runCli([
       "provider", "add",
       "--name", "secret-ses",
       "--type", "ses",
       "--region", "us-east-1",
       "--access-key", "AKIA_CLI_SHOULD_NOT_LEAK",
       "--secret-key", "CLI_SECRET_SHOULD_NOT_LEAK",
+      "--skip-validation",
+    ], env);
+    expect(refused.exitCode).toBe(1);
+    const refusedText = `${stdoutText(refused)}\n${stderrText(refused)}`;
+    expect(refusedText).toContain("does not store per-provider credentials");
+    expect(refusedText).toContain("EMAILS_SES_ACCESS_KEY_ID");
+    expect(refusedText).not.toContain("AKIA_CLI_SHOULD_NOT_LEAK");
+    expect(refusedText).not.toContain("CLI_SECRET_SHOULD_NOT_LEAK");
+
+    const add = runCli([
+      "provider", "add",
+      "--name", "secret-ses",
+      "--type", "ses",
+      "--region", "us-east-1",
       "--skip-validation",
     ], env);
     expect(add.exitCode, stderrText(add)).toBe(0);
@@ -122,8 +139,8 @@ describe("CLI JSON contracts (self-hosted /v1)", () => {
       target: "claude",
       action: "install",
       command: "claude",
-      args: ["mcp", "add", "--transport", "stdio", "--scope", "user", "mailery", "--", "mailery-mcp", "--stdio"],
-      shell: "claude mcp add --transport stdio --scope user mailery -- mailery-mcp --stdio",
+      args: ["mcp", "add", "--transport", "stdio", "--scope", "user", "emails", "--", "emails-mcp", "--stdio"],
+      shell: "claude mcp add --transport stdio --scope user emails -- emails-mcp --stdio",
     });
   });
 

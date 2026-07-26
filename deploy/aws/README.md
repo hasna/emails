@@ -37,6 +37,11 @@ EMAILS_DATABASE_CA_FILE=/opt/emails/certs/aws-rds-global-bundle.pem
 # Optional paired bootstrap guard (API task only):
 EMAILS_PRIMARY_SUPER_ADMIN_EMAIL=<operator-pinned lowercase email>
 EMAILS_PRIMARY_SUPER_ADMIN_BOOTSTRAP_KID=<authorized non-secret API-key identifier>
+# Optional cross-account SES credentials (API task only, see "6. SES sending"):
+AWS_ACCESS_KEY_ID=<Secrets Manager injection>
+AWS_SECRET_ACCESS_KEY=<Secrets Manager injection>
+EMAILS_SES_ACCESS_KEY_ID=<Secrets Manager injection>
+EMAILS_SES_SECRET_ACCESS_KEY=<Secrets Manager injection>
 NODE_EXTRA_CA_CERTS=/opt/emails/certs/aws-rds-global-bundle.pem
 ```
 
@@ -183,18 +188,24 @@ new-code-compatible migrator through 0016, require exit code zero, and verify th
 migration ledger before starting anything. Start only tenant-aware new-code writers
 after the ledger check passes.
 
-Migration 0017 and the 1.2.4 attachment-provenance activation add a second,
-forward-only gate with controlled downtime. Disable automatic rollback, save a
-queue/DLQ snapshot and cutoff, scale the old ingest worker to zero, wait until
-both its running count and SQS in-flight count are zero, then scale the old API
-to zero. Only after both incompatible services are stopped may an isolated 1.2.4
-migration task apply 0017 and a second 1.2.4 `db status --json` task prove
-`pending: []`, the exact ledger ID, and valid checksums. Start only the 1.2.4
-worker, drain/reconcile the SQS buffer, and require the aggregate-only
-`inbound-provenance-audit --since <cutoff>` to exit zero before the API. The
-audit runs from the worker task definition because that definition carries the
-deployment-owned canonical bucket. The executable, evidence-producing commands
-are in `docs/DEPLOYMENT_CUTOVER.md`.
+Migrations 0017 through 0020 and the attachment-provenance activation add a
+second, forward-only gate with controlled downtime. Before draining, verify one
+immutable release exactly as `docs/DEPLOYMENT_CUTOVER.md` requires:
+`SOURCE_CHECKOUT` at `RELEASE_COMMIT` has package name `@hasna/emails` and
+version `RELEASE_VERSION`, its deterministic archive matches
+`SOURCE_ARCHIVE_SHA256`, and `IMAGE_REFERENCE` equals
+`IMAGE_REPOSITORY@IMAGE_DIGEST` with matching OCI revision/version metadata.
+Disable automatic rollback, save a queue/DLQ snapshot and cutoff, scale the old
+ingest worker to zero, wait until both its running count and SQS in-flight count
+are zero, then scale the old API to zero. Only after both incompatible services
+are stopped may isolated migration and `db status --json` tasks from that
+verified immutable release apply and verify migrations 0017 through 0020,
+`pending: []`, the exact ledger IDs, and valid checksums. Start only the worker
+from that same verified immutable release, drain/reconcile the SQS buffer, and
+require the aggregate-only `inbound-provenance-audit --since <cutoff>` to exit
+zero before the API. The audit runs from the worker task definition because that
+definition carries the deployment-owned canonical bucket. The executable,
+evidence-producing commands are in `docs/DEPLOYMENT_CUTOVER.md`.
 
 Before draining any writer, apply with
 `enable_automatic_deployment_rollback = false`. Keep automatic rollback disabled
@@ -282,13 +293,14 @@ is known to be tenant-aware and compatible with the migrated schema. Otherwise,
 roll forward to a corrected tenant-aware image, or execute an operator-reviewed
 explicit schema recovery plan while every writer remains stopped.
 
-After migration 0017 commits, 1.2.3 is never an eligible task restart,
-scale-out, automatic rollback, or operator rollback target. Recovery is a
-compatible roll-forward using a reviewed 1.2.4-or-newer image that recognizes
-the 0017 ledger. Start the compatible worker from zero, rerun the post-fence
-provenance audit, then start the API. Preserve the ledger row and keep
-`enable_automatic_deployment_rollback = false` until both 1.2.4 services and
-the complete cutover evidence pass.
+After migration 0020 commits, a pre-0020 release is never an eligible task
+restart, scale-out, automatic rollback, or operator rollback target. Recovery
+is a compatible roll-forward using the verified immutable release package,
+version, source, and image inputs above, from an image whose migration set
+recognizes 0017 through 0020. Start the compatible worker from zero, rerun the
+post-fence provenance audit, then start the API. Preserve the ledger rows and
+keep `enable_automatic_deployment_rollback = false` until both services from
+that same verified release and the complete cutover evidence pass.
 
 After both API and worker complete a tenant-aware deployment and the checks below
 pass, set `enable_automatic_deployment_rollback = true` in a separate reviewed
@@ -331,6 +343,53 @@ Before production sending:
 
 Infrastructure permission alone is not delivery proof.
 
+### Sending through SES in a different account
+
+By default the API task sends with its own task role, so SES must have production
+access **in the account running these tasks**. A sandbox account rejects every
+external recipient with `MessageRejected` before anything leaves.
+
+If your production-access SES lives in another account, there is no cross-account
+role path here: the sending principal has to be presented as credentials. Create
+an IAM user there scoped to `ses:*`/`sesv2:*`, put its access key id and secret
+access key in Secrets Manager **in the account running these tasks**, and pass
+the ARNs:
+
+```hcl
+ses_access_key_id_secret_arn     = "arn:aws:secretsmanager:us-east-1:<account>:secret:<name>:ACCESS_KEY_ID::"
+ses_secret_access_key_secret_arn = "arn:aws:secretsmanager:us-east-1:<account>:secret:<name>:SECRET_ACCESS_KEY::"
+# Only when those secrets use a customer-managed key:
+# ses_credentials_kms_key_arn = "arn:aws:kms:us-east-1:<account>:key/<id>"
+```
+
+Both are optional, must be set together, and carry **ARNs, never values** — no
+credential enters Terraform state, the plan output, or the plaintext
+`environment` block. The module injects four container variables from those two
+ARNs, all through the ECS `secrets` block, and extends only the API execution
+role's `secretsmanager:GetSecretValue` grant.
+
+`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` repoint the SDK default credential
+chain, which is what the shipped SES adapter falls back to;
+`EMAILS_SES_ACCESS_KEY_ID`/`EMAILS_SES_SECRET_ACCESS_KEY` are the scoped names
+read directly by the sender on images that support them. Once every image you run
+reads the scoped pair, prefer dropping the unscoped pair so the default chain
+returns to the task role.
+
+Scope and limits:
+
+- **API task only.** The ingest worker keeps its task role on purpose. An
+  SES-scoped principal has no SQS or inbound-bucket access, so giving it these
+  credentials would silently break inbound mail.
+- Setting them repoints *every* AWS SDK call in the API container, not just SES.
+  That is safe because the request path makes no S3 or SQS calls — verify this
+  still holds before adding AWS functionality to the API task.
+- ECS resolves `secrets` at task start. Rotating a value requires a new
+  deployment; and if you remove the secret while tasks still reference it, the
+  next replacement task fails with `ResourceInitializationError`.
+- Metric attribution: if that SES account is shared with other products, a bare
+  `AWS/SES` `Send`/`Delivery` sum does not prove *your* message left. Correlate
+  the returned SES `MessageId`, or give this deployment its own configuration set.
+
 ## 7. SES receiving and retention
 
 Receiving requires an explicit privacy/cost decision:
@@ -360,6 +419,40 @@ notifications without an S3 object key as terminal “skipped” messages and
 deletes them; those do not reach the DLQ. Fetch, parse, or database errors remain
 on SQS and move to the DLQ after `sqs_max_receive_count` attempts. Raw MIME in S3
 is the recovery source.
+
+### 7.1 Recipient-less routing and routing-map migration from #49
+
+`ingest-worker` now resolves routing from an explicit deployment-owned
+`EMAILS_INGEST_PREFIX_DOMAIN_MAP` JSON map only.
+
+- Recipient-less events (no envelope recipients) may use the map as trusted fallback.
+- Events with explicit envelope recipients are never rewritten; unresolved or partial
+  explicit recipients are quarantined.
+- The worker rejects malformed/overlapping/ambiguous `EMAILS_INGEST_PREFIX_DOMAIN_MAP` values at startup.
+  Recipient-less events are quarantined only when the map is absent or when a
+  valid map has no matching prefix.
+
+`deploy/aws` now supports multi-domain map input and keeps legacy single-pair input
+compatibility:
+
+```hcl
+# New: deployment-owned multi-domain map
+inbound_prefix_domain_map = {
+  "inbound/prod/"       = "example.com"
+  "inbound/marketing/"  = "marketing.example"
+}
+
+# Legacy single-pair compatibility (only if override map is unset/empty)
+email_domain        = "example.com"
+inbound_object_prefix = "inbound/"
+```
+
+If `inbound_prefix_domain_map` is omitted, `null`, or empty, the module falls back to
+the legacy single-pair mapping path sourced from `email_domain` and
+`inbound_object_prefix`.
+
+These rules are explicit fail-closed semantics and deliberately supersede #49’s
+configless object-key-to-domain trust model.
 
 Activate `ses_receipt_rule_set_name` and publish `ses_inbound_mx_value` only in a
 separate approved mail-routing cutover. Disabling Terraform later does not undo

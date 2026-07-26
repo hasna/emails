@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { parseMimeEmail, parseResendInbound, parseMailgunInbound } from "./inbound.js";
+import { parseMimeEmail, parseResendInbound, parseMailgunInbound } from "./inbound.local.js";
 
 const SIMPLE_TEXT_EMAIL = [
   "From: Sender Name <sender@example.com>",

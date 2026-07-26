@@ -84,14 +84,34 @@ describe("MCP self_hosted guards", () => {
       ["pull_events", {}],
       ["get_stats", {}],
       ["sync_s3_inbox", { bucket: "inbound-bucket" }],
-      ["provision_address", { email: "ops@example.com", provider_id: "provider-1" }],
-      ["provision_status", {}],
     ];
 
     for (const [name, args] of cases) {
       const result = await callTool(name, args);
       expect(result.isError).toBe(true);
       expect(resultText(result)).toContain("not available in the self-hosted client");
+    }
+  });
+
+  it("tells the truth about provisioning tools that no mode implements", async () => {
+    // The local provisioning orchestrator was unreachable dead code and is gone;
+    // the self-hosted server exposes no /v1 provisioning route. Claiming these
+    // "run on the self-hosted server" sent operators looking for a service that
+    // does not exist, so the error names the real, runnable alternative instead.
+    const cases: Array<[string, Record<string, unknown>, string]> = [
+      ["provision_address", { email: "ops@example.com", provider_id: "provider-1" }, "emails address add"],
+      ["provision_status", {}, "emails domain list --json"],
+      ["provision_domain", { domain: "example.com", provider_id: "provider-1" }, "emails domain adopt"],
+    ];
+
+    for (const [name, args, alternative] of cases) {
+      const result = await callTool(name, args);
+      expect(result.isError).toBe(true);
+      const text = resultText(result);
+      expect(text).toContain("is not implemented in this build");
+      expect(text).toContain(alternative);
+      expect(text).not.toContain("runs on the self-hosted server");
+      expect(text).not.toContain("not available in the self-hosted client");
     }
   });
 

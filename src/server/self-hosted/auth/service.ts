@@ -74,6 +74,19 @@ export function scopesForRole(role: Role): string[] {
   return SCOPES_BY_ROLE[role] ?? ["emails:read"];
 }
 
+/**
+ * Tenant maintenance is a narrower boundary than ordinary data writes.
+ * Interactive owners/admins retain their role-authorized automation path, while
+ * non-interactive operator automation must use the existing wildcard scope.
+ * A member's normal `emails:write` grant is intentionally insufficient.
+ */
+export function isTenantOperator(ctx: RequestContext): boolean {
+  if (ctx.principalType === "user") {
+    return ctx.role === "owner" || ctx.role === "admin";
+  }
+  return ctx.scopes.includes("emails:*");
+}
+
 export interface AuthServiceDeps {
   authStore: AuthStore;
   verifier: ApiKeyVerifier;

@@ -1367,20 +1367,6 @@ export function ensureMailArchitecture(db: Database): void {
   }
 }
 
-export function rebuildInboundLabelState(db?: Database): void {
-  const d = db || getDatabase();
-  d.exec(INBOUND_LABELS_SCHEMA_SQL);
-  d.exec("DELETE FROM inbound_labels");
-  d.exec(INBOUND_LABELS_BACKFILL_SQL);
-  d.exec(INBOUND_LABELS_FLAG_BACKFILL_SQL);
-}
-
-export function reconcileMailboxMessageState(db?: Database): void {
-  const d = db || getDatabase();
-  ensureMailArchitecture(d);
-  d.exec(MAIL_ARCHITECTURE_STATE_RECONCILE_SQL);
-}
-
 export function rebuildInboundCanonicalState(db?: Database): void {
   const d = db || getDatabase();
   ensureMailArchitecture(d);

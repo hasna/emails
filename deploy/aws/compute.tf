@@ -38,6 +38,24 @@ resource "aws_ecs_cluster_capacity_providers" "this" {
 locals {
   database_ca_file = "/opt/emails/certs/aws-rds-global-bundle.pem"
 
+  inbound_prefix_domain_map_override = var.inbound_prefix_domain_map == null ? {} : {
+    for prefix, domain in var.inbound_prefix_domain_map : trimspace(prefix) => lower(trimspace(domain))
+  }
+
+  inbound_prefix_domain_map_legacy = var.enable_ses_inbound && var.email_domain != null ? {
+    (var.inbound_object_prefix) = lower(var.email_domain)
+  } : {}
+
+  inbound_prefix_domain_map = (
+    length(local.inbound_prefix_domain_map_override) > 0
+    ? local.inbound_prefix_domain_map_override
+    : local.inbound_prefix_domain_map_legacy
+  )
+
+  inbound_prefix_domain_map_json = jsonencode({
+    for prefix in sort(keys(local.inbound_prefix_domain_map)) : prefix => local.inbound_prefix_domain_map[prefix]
+  })
+
   common_environment = [
     { name = "AWS_REGION", value = var.aws_region },
     { name = "HOST", value = "0.0.0.0" },
@@ -57,10 +75,17 @@ locals {
     ],
   )
 
-  worker_environment = concat(local.common_environment, [
-    { name = "EMAILS_INGEST_QUEUE_URL", value = aws_sqs_queue.inbound.id },
-    { name = "EMAILS_INGEST_S3_BUCKET", value = aws_s3_bucket.inbound.id },
-  ])
+  worker_environment = concat(
+    local.common_environment,
+    [
+      { name = "EMAILS_INGEST_QUEUE_URL", value = aws_sqs_queue.inbound.id },
+      { name = "EMAILS_INGEST_S3_BUCKET", value = aws_s3_bucket.inbound.id },
+    ],
+    var.enable_ses_inbound && length(local.inbound_prefix_domain_map) > 0 ? [{
+      name  = "EMAILS_INGEST_PREFIX_DOMAIN_MAP"
+      value = local.inbound_prefix_domain_map_json
+    }] : [],
+  )
 
   database_secret = {
     name      = "EMAILS_DATABASE_URL"
@@ -76,6 +101,48 @@ locals {
     name      = "EMAILS_API_SIGNING_KEY"
     valueFrom = aws_secretsmanager_secret.api_signing_key.arn
   }
+
+  # SES sending credentials, for deployments whose production-access SES account
+  # is NOT the account running these tasks. SES has no cross-account role path
+  # here, so the sending principal must be presented as credentials. Both name
+  # pairs read the same two operator-owned Secrets Manager entries:
+  #
+  #   AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
+  #     Repoint the SDK default credential chain. src/providers/ses.ts falls back
+  #     to these when the provider record carries no credentials, which is what
+  #     src/server/self-hosted/sender.ts produces, so this pair is what makes an
+  #     unmodified image send through the other account.
+  #   EMAILS_SES_ACCESS_KEY_ID / EMAILS_SES_SECRET_ACCESS_KEY
+  #     Scoped names, read directly by the sender on images that support them.
+  #     Prefer dropping the unscoped pair once every deployed image does, so the
+  #     default chain returns to the task role.
+  #
+  # Injected into the API task only. The ingest worker keeps its own task role:
+  # an SES-scoped principal has no SQS or inbound-bucket access, so handing it
+  # these credentials would silently break inbound mail.
+  # Emitted only when BOTH ARNs are present, in either order. A half-configured
+  # module produces no entries here and fails on the precondition below with the
+  # message that names the problem, instead of half a pair reaching the task.
+  ses_credential_secrets = (
+    var.ses_access_key_id_secret_arn == null || var.ses_secret_access_key_secret_arn == null
+    ) ? [] : [
+    {
+      name      = "AWS_ACCESS_KEY_ID"
+      valueFrom = var.ses_access_key_id_secret_arn
+    },
+    {
+      name      = "AWS_SECRET_ACCESS_KEY"
+      valueFrom = var.ses_secret_access_key_secret_arn
+    },
+    {
+      name      = "EMAILS_SES_ACCESS_KEY_ID"
+      valueFrom = var.ses_access_key_id_secret_arn
+    },
+    {
+      name      = "EMAILS_SES_SECRET_ACCESS_KEY"
+      valueFrom = var.ses_secret_access_key_secret_arn
+    },
+  ]
 }
 
 resource "aws_ecs_task_definition" "api" {
@@ -97,6 +164,13 @@ resource "aws_ecs_task_definition" "api" {
       condition     = (var.primary_super_admin_email == null) == (var.primary_super_admin_bootstrap_kid == null)
       error_message = "primary_super_admin_email and primary_super_admin_bootstrap_kid must be configured together."
     }
+
+    # Half a credential pair is worse than none: the task would start, look
+    # configured, and quietly keep sending through the task role's account.
+    precondition {
+      condition     = (var.ses_access_key_id_secret_arn == null) == (var.ses_secret_access_key_secret_arn == null)
+      error_message = "ses_access_key_id_secret_arn and ses_secret_access_key_secret_arn must be configured together."
+    }
   }
 
   volume { name = "tmp" }
@@ -110,7 +184,7 @@ resource "aws_ecs_task_definition" "api" {
     command                = ["src/server/index.ts"]
     stopTimeout            = 120
     environment            = local.api_environment
-    secrets                = [local.database_secret, local.signing_secret]
+    secrets                = concat([local.database_secret, local.signing_secret], local.ses_credential_secrets)
     linuxParameters        = { initProcessEnabled = true }
     mountPoints = [{
       sourceVolume  = "tmp"

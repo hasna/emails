@@ -64,7 +64,7 @@ function toMemberships(value: unknown): IdentityMembership[] {
 }
 
 /** Normalize a raw GET /v1/me body into an IdentityContext. */
-export function normalizeIdentity(raw: unknown): IdentityContext {
+function normalizeIdentity(raw: unknown): IdentityContext {
   const obj = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
   const principalRaw = str(obj["principalType"]) ?? str(obj["principal_type"]);
   const principalType: IdentityContext["principalType"] =

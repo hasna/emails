@@ -599,8 +599,8 @@ function createEmailsStore(initialMailbox?: Mailbox) {
       reloadWorkspace();
     },
     async pullNow() {
-      // Auto-pull was LOCAL S3->SQLite ingestion. The self-hosted client reads the API
-      // through the seam (the automatic changesSince delta), so there is nothing to pull.
+      // Auto-pull was LOCAL S3->SQLite ingestion. The self-hosted seam exposes only
+      // insert-only inventory; edits and deletions require a refresh, so there is nothing to pull.
       return { pulled: 0, ok: true, configured: false, reason: "self_hosted mode" };
     },
   };

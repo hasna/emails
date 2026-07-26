@@ -3,14 +3,23 @@ import { handleError } from "../utils.js";
 import type { MxAssessment } from "../../lib/mx-ownership.js";
 
 // Automated provisioning (SES identity/MAIL FROM, Cloudflare DNS, S3 inbound
-// receipt rules, the provisioning reconciler and round-trip acceptance tests)
-// is local orchestration with no /v1 equivalent: it runs on the self-hosted
-// server/operator workers. This client is self-hosted-only, so these commands
-// are kept for discoverability but fail loud. Domain adoption remains available
-// via `emails domain adopt`.
-function serverOnly(command: string): never {
+// receipt rules, the reconciler daemon and round-trip acceptance tests) does not
+// ship in ANY mode of this package. The local orchestrator was unreachable dead
+// code and has been removed; the self-hosted server exposes no /v1 provisioning
+// route and its container runs no reconciler. The commands stay registered so
+// scripts and `--help` get a truthful, actionable answer instead of a bare
+// "unknown command" — but the previous "it runs on the self-hosted server" text
+// was false in BOTH local and self_hosted mode and is gone.
+//
+// The supported path is manual: `emails domain adopt` registers an
+// already-verified domain and wires SES inbound, and `emails aws setup-inbound`
+// creates the S3 bucket + SES receipt rules.
+function notImplementedAnywhere(command: string): never {
   throw new Error(
-    `${command} is not available in the self-hosted client; it runs on the self-hosted server.`,
+    `${command} is not implemented in this build: there is no local provisioning ` +
+      `orchestrator and the self-hosted server exposes no provisioning route. ` +
+      `Register an already-verified domain with 'emails domain adopt <domain> --provider <id>' ` +
+      `and create the SES inbound bucket and receipt rules with 'emails aws setup-inbound'.`,
   );
 }
 
@@ -19,7 +28,9 @@ export interface ProvisionCommandDeps {
 }
 
 export function registerProvisionCommands(program: Command, _output: (data: unknown, formatted: string) => void, _deps: ProvisionCommandDeps = {}): void {
-  const cmd = program.command("provision").description("Automated domain + address provisioning");
+  const cmd = program
+    .command("provision")
+    .description("Automated domain + address provisioning — NOT IMPLEMENTED in this build; use 'emails domain adopt' and 'emails aws setup-inbound'");
 
   // ── status ────────────────────────────────────────────────────────────────
   cmd
@@ -29,7 +40,7 @@ export function registerProvisionCommands(program: Command, _output: (data: unkn
     .option("--offset <n>", "Number of domains to skip", "0")
     .option("--verbose", "Show all address provisioning rows per domain")
     .action(() => {
-      try { serverOnly("emails provision status"); } catch (e) { handleError(e); }
+      try { notImplementedAnywhere("emails provision status"); } catch (e) { handleError(e); }
     });
 
   // ── address create ─────────────────────────────────────────────────────────
@@ -48,7 +59,7 @@ export function registerProvisionCommands(program: Command, _output: (data: unkn
     .option("--interval <sec>", "Seconds between readiness checks when --wait is used", "5")
     .option("--bucket <name>", "Inbound S3 bucket for receive validation (defaults to config inbound_s3_bucket)")
     .action(async () => {
-      try { serverOnly("emails provision address"); } catch (e) { handleError(e); }
+      try { notImplementedAnywhere("emails provision address"); } catch (e) { handleError(e); }
     });
 
   // ── domain setup ─────────────────────────────────────────────────────────
@@ -64,7 +75,7 @@ export function registerProvisionCommands(program: Command, _output: (data: unkn
     .option("--wait", "Poll SES until the domain is verified for sending")
     .option("--timeout <sec>", "Max seconds to wait for verification", "600")
     .action(async () => {
-      try { serverOnly("emails provision domain"); } catch (e) { handleError(e); }
+      try { notImplementedAnywhere("emails provision domain"); } catch (e) { handleError(e); }
     });
 
   // ── up: full end-to-end orchestrator ─────────────────────────────────────
@@ -83,7 +94,7 @@ export function registerProvisionCommands(program: Command, _output: (data: unkn
     .option("--buy-if-needed", "Buy + delegate the domain first (via @hasna/domains SDK) if not already owned")
     .option("--purchase-profile <profile>", "AWS profile for the purchase (defaults to the current AWS_PROFILE or ambient credentials)")
     .action(async () => {
-      try { serverOnly("emails provision up"); } catch (e) { handleError(e); }
+      try { notImplementedAnywhere("emails provision up"); } catch (e) { handleError(e); }
     });
 
   // ── roundtrip (acceptance test) ─────────────────────────────────────────
@@ -100,7 +111,7 @@ export function registerProvisionCommands(program: Command, _output: (data: unkn
     .option("--poll-interval <ms>", "Receipt poll interval ms", "10000")
     .option("--throttle <ms>", "Delay between sends (SES sandbox = 1100)", "1100")
     .action(async () => {
-      try { serverOnly("emails provision roundtrip"); } catch (e) { handleError(e); }
+      try { notImplementedAnywhere("emails provision roundtrip"); } catch (e) { handleError(e); }
     });
 
   // ── daemon (reconciler loop) ─────────────────────────────────────────────
@@ -115,7 +126,7 @@ export function registerProvisionCommands(program: Command, _output: (data: unkn
     .option("--interval <sec>", "Seconds between ticks", "30")
     .option("--max-ticks <n>", "Stop after N ticks (default: unlimited)")
     .action(async () => {
-      try { serverOnly("emails provision daemon"); } catch (e) { handleError(e); }
+      try { notImplementedAnywhere("emails provision daemon"); } catch (e) { handleError(e); }
     });
 
   // ── retry ───────────────────────────────────────────────────────────────
@@ -124,6 +135,6 @@ export function registerProvisionCommands(program: Command, _output: (data: unkn
     .description("Re-queue a domain for the provisioning daemon (clear error, check now)")
     .option("--provider <id>", "Provider ID")
     .action(() => {
-      try { serverOnly("emails provision retry"); } catch (e) { handleError(e); }
+      try { notImplementedAnywhere("emails provision retry"); } catch (e) { handleError(e); }
     });
 }

@@ -177,11 +177,3 @@ export function labelColor(theme: TuiColorTheme, label: string): string {
   for (const ch of label) hash = (hash * 31 + ch.charCodeAt(0)) | 0;
   return theme.labelPalette[Math.abs(hash) % theme.labelPalette.length] ?? (typeof theme.primary === "string" ? theme.primary : "#fab283");
 }
-
-export function friendlyLabel(value: string): string {
-  return value
-    .trim()
-    .replace(/[_-]+/g, " ")
-    .replace(/\s+/g, " ")
-    .replace(/\b\w/g, (ch) => ch.toUpperCase());
-}

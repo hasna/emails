@@ -101,6 +101,41 @@ variable "send_provider" {
   }
 }
 
+variable "ses_access_key_id_secret_arn" {
+  description = "Optional Secrets Manager ARN holding the SES access key id, injected into the API container through the ECS `secrets` block. Set only when the production-access SES account differs from the account running these tasks; leave null to keep using the API task role. May include a `:JSON_KEY::` suffix. Set together with ses_secret_access_key_secret_arn. The value itself never enters Terraform state."
+  type        = string
+  default     = null
+  nullable    = true
+
+  validation {
+    condition = var.ses_access_key_id_secret_arn == null || can(
+      regex("^arn:aws[a-z-]*:secretsmanager:", var.ses_access_key_id_secret_arn)
+    )
+    error_message = "ses_access_key_id_secret_arn must be a Secrets Manager ARN, not a credential value."
+  }
+}
+
+variable "ses_secret_access_key_secret_arn" {
+  description = "Optional Secrets Manager ARN holding the SES secret access key. Set together with ses_access_key_id_secret_arn. May include a `:JSON_KEY::` suffix. The value itself never enters Terraform state."
+  type        = string
+  default     = null
+  nullable    = true
+
+  validation {
+    condition = var.ses_secret_access_key_secret_arn == null || can(
+      regex("^arn:aws[a-z-]*:secretsmanager:", var.ses_secret_access_key_secret_arn)
+    )
+    error_message = "ses_secret_access_key_secret_arn must be a Secrets Manager ARN, not a credential value."
+  }
+}
+
+variable "ses_credentials_kms_key_arn" {
+  description = "Optional KMS key ARN that encrypts the SES credential secrets. Required only when those secrets use a customer-managed key; the AWS-managed aws/secretsmanager key needs no extra grant. Without it the execution role cannot decrypt them and tasks fail to start with ResourceInitializationError."
+  type        = string
+  default     = null
+  nullable    = true
+}
+
 variable "primary_super_admin_email" {
   description = "Optional exact email pinned for the one-time primary super-admin bootstrap. Set together with primary_super_admin_bootstrap_kid; no user is hardcoded by this OSS module."
   type        = string
@@ -492,8 +527,49 @@ variable "inbound_object_prefix" {
   default     = "inbound/"
 
   validation {
-    condition     = !startswith(var.inbound_object_prefix, "/") && !strcontains(var.inbound_object_prefix, "..")
-    error_message = "inbound_object_prefix must be a relative S3 key prefix without '..'."
+    condition = (
+      length(var.inbound_object_prefix) > 1 &&
+      trimspace(var.inbound_object_prefix) == var.inbound_object_prefix &&
+      !startswith(var.inbound_object_prefix, "/") &&
+      endswith(var.inbound_object_prefix, "/") &&
+      !strcontains(var.inbound_object_prefix, "..") &&
+      can(regex("^[^[:cntrl:]]+/$", var.inbound_object_prefix))
+    )
+    error_message = "inbound_object_prefix must be a non-empty canonical relative S3 key prefix ending in '/' without whitespace edges, controls, or '..'."
+  }
+}
+
+variable "inbound_prefix_domain_map" {
+  description = "Optional override map from inbound S3 prefixes to recipient domains used by the worker when messages are recipient-less."
+  type        = map(string)
+  default     = null
+  nullable    = true
+
+  validation {
+    condition = var.inbound_prefix_domain_map == null || (
+      alltrue([
+        for prefix, domain in var.inbound_prefix_domain_map : (
+          length(prefix) > 1 &&
+          trimspace(prefix) == prefix &&
+          !startswith(prefix, "/") &&
+          endswith(prefix, "/") &&
+          !strcontains(prefix, "..") &&
+          can(regex("^[^[:cntrl:]]+/$", prefix)) &&
+          domain == lower(trimspace(domain)) &&
+          can(regex("^(?i:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:[.](?i:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))+$", domain))
+        )
+      ]) &&
+      alltrue([
+        for prefix_index, prefix in sort(keys(var.inbound_prefix_domain_map)) : (
+          alltrue([
+            for other_index, other_prefix in sort(keys(var.inbound_prefix_domain_map)) : (
+              prefix_index == other_index || !startswith(prefix, other_prefix)
+            )
+          ])
+        )
+      ])
+    )
+    error_message = "inbound_prefix_domain_map must map canonical non-overlapping prefixes to lowercase canonical domains."
   }
 }
 

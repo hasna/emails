@@ -9,6 +9,7 @@ import { resetMailDataSource, resolveMailDataSource } from "./mail-data-source.j
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 
 const LEGACY_ENV_KEYS = [
   "MAILERY_MODE",
@@ -64,10 +65,141 @@ function bodyWithHiddenNeedle(needle = "deep-needle"): string {
   return `${"filler ".repeat(90)}${needle}`;
 }
 
+function encodedChangesCursor(version: number, envelope: Record<string, unknown>): string {
+  return `emails-self-hosted:v${version}:${Buffer.from(JSON.stringify(envelope), "utf8").toString("base64url")}`;
+}
+
+function legacyBloomCollisionSequence(): string[] {
+  const filter = Buffer.alloc(2_048);
+  const bitCount = filter.length * 8;
+  const cursors: string[] = [];
+  for (let index = 0; index < 100_000; index += 1) {
+    const cursor = `unique-cursor-${String(index).padStart(6, "0")}`;
+    const digest = createHash("sha256").update(cursor, "utf8").digest();
+    const bits = Array.from(
+      { length: 6 },
+      (_, hashIndex) => digest.readUInt32BE(hashIndex * 4) % bitCount,
+    );
+    if (bits.every((bit) =>
+      (filter[Math.floor(bit / 8)]! & (1 << (bit % 8))) !== 0)) {
+      return [...cursors, cursor];
+    }
+    for (const bit of bits) {
+      const byte = Math.floor(bit / 8);
+      filter[byte] = filter[byte]! | (1 << (bit % 8));
+    }
+    cursors.push(cursor);
+  }
+  throw new Error("expected a deterministic collision inside the old 2KiB Bloom-filter horizon");
+}
+
+function pagedRows(count: number, prefix: string, over: Record<string, unknown> = {}): Array<Record<string, unknown>> {
+  const newest = Date.parse("2026-07-20T00:00:00.000Z");
+  return Array.from({ length: count }, (_, index) => v1(`${prefix}-${index}`, {
+    received_at: new Date(newest - index * 1000).toISOString(),
+    created_at: new Date(newest - index * 1000 + 1).toISOString(),
+    ...over,
+  }));
+}
+
+interface CompactCursorPage {
+  messages: Array<Record<string, unknown>>;
+  nextCursor: string | null | unknown;
+}
+
+function compactCursorServe(
+  pages: Map<string, CompactCursorPage>,
+): { fetchImpl: SelfHostedFetch; requests: string[]; deleted: string[] } {
+  const requests: string[] = [];
+  const deleted: string[] = [];
+  const fetchImpl: SelfHostedFetch = async (url, init) => {
+    const u = new URL(url);
+    const method = (init.method ?? "GET").toUpperCase();
+    requests.push(`${method} ${u.pathname}${u.search}`);
+    const ok = (body: unknown, status = 200) => ({ status, async text() { return JSON.stringify(body); } });
+    const idMatch = u.pathname.match(/^\/v1\/messages\/([^/]+)$/);
+    if (idMatch && method === "DELETE") {
+      deleted.push(decodeURIComponent(idMatch[1]!));
+      return ok({ deleted: true });
+    }
+    if (method !== "GET" || u.pathname !== "/v1/messages") return ok({ error: "not found" }, 404);
+    if (u.searchParams.has("offset")) {
+      return ok({ error: "offset is limited to 100000; use cursor pagination for deep pages" }, 400);
+    }
+    const cursor = u.searchParams.get("cursor") ?? "";
+    const page = pages.get(cursor);
+    if (!page) return ok({ error: "cursor is not a valid pagination cursor" }, 400);
+    return ok({ messages: page.messages, next_cursor: page.nextCursor });
+  };
+  return { fetchImpl, requests, deleted };
+}
+
+function legacyOffsetServe(
+  initial: Array<Record<string, unknown>>,
+  options: { ignoreListFilters?: boolean } = {},
+): {
+  fetchImpl: SelfHostedFetch;
+  rows: Map<string, Record<string, unknown>>;
+  requests: string[];
+  deleted: string[];
+} {
+  const rows = new Map(initial.map((row) => [String(row["id"]), row]));
+  const requests: string[] = [];
+  const deleted: string[] = [];
+  const fetchImpl: SelfHostedFetch = async (url, init) => {
+    const u = new URL(url);
+    const method = (init.method ?? "GET").toUpperCase();
+    requests.push(`${method} ${u.pathname}${u.search}`);
+    const ok = (body: unknown, status = 200) => ({ status, async text() { return JSON.stringify(body); } });
+    const idMatch = u.pathname.match(/^\/v1\/messages\/([^/]+)$/);
+    if (idMatch && method === "DELETE") {
+      const id = decodeURIComponent(idMatch[1]!);
+      const had = rows.delete(id);
+      deleted.push(id);
+      return had ? ok({ deleted: true }) : ok({ error: "not found" }, 404);
+    }
+    if (method !== "GET" || u.pathname !== "/v1/messages") return ok({ error: "not found" }, 404);
+    if (u.searchParams.has("cursor")) return ok({ error: "legacy server does not support cursors" }, 400);
+    const offset = Number(u.searchParams.get("offset") ?? "0");
+    if (offset > 100_000) {
+      return ok({ error: "offset is limited to 100000; use cursor pagination for deep pages" }, 400);
+    }
+    let ordered = [...rows.values()].sort((a, b) =>
+      String(b["received_at"] ?? b["created_at"] ?? "").localeCompare(
+        String(a["received_at"] ?? a["created_at"] ?? ""),
+      ));
+    if (!options.ignoreListFilters) {
+      const direction = u.searchParams.get("direction");
+      if (direction) ordered = ordered.filter((row) => String(row["direction"] ?? "").toLowerCase() === direction);
+      const to = u.searchParams.get("to")?.toLowerCase();
+      if (to) ordered = ordered.filter((row) => String(row["to_addrs"] ?? "").toLowerCase().includes(to));
+      const from = u.searchParams.get("from")?.toLowerCase();
+      if (from) ordered = ordered.filter((row) => String(row["from_addr"] ?? "").toLowerCase().includes(from));
+      const search = u.searchParams.get("search")?.toLowerCase();
+      if (search) {
+        ordered = ordered.filter((row) => {
+          const attachments = Array.isArray(row["attachments"]) ? row["attachments"] as Array<Record<string, unknown>> : [];
+          const hay = [
+            row["from_addr"],
+            row["to_addrs"],
+            row["subject"],
+            row["body_text"],
+            ...attachments.flatMap((attachment) => [attachment["filename"], attachment["content_type"]]),
+          ].join(" ").toLowerCase();
+          return hay.includes(search);
+        });
+      }
+    }
+    const limit = Number(u.searchParams.get("limit") ?? "500");
+    return ok({ messages: ordered.slice(offset, offset + limit) });
+  };
+  return { fetchImpl, rows, requests, deleted };
+}
+
 // A fake self-hosted /v1 serve backed by an in-memory row list.
 function fakeServe(
   initial: Array<Record<string, unknown>>,
-  options: { ignoreListFilters?: boolean; leanList?: boolean } = {},
+  options: { ignoreListFilters?: boolean; leanList?: boolean; partialAttachmentList?: boolean } = {},
 ): { fetchImpl: SelfHostedFetch; rows: Map<string, Record<string, unknown>>; posted: unknown[]; deleted: string[]; requests: string[] } {
   const rows = new Map(initial.map((r) => [r["id"] as string, r]));
   const posted: unknown[] = [];
@@ -80,7 +212,7 @@ function fakeServe(
     const ok = (body: unknown, status = 200) => ({ status, async text() { return JSON.stringify(body); } });
     const includes = (value: unknown, query: string | null): boolean =>
       !query || String(value ?? "").toLowerCase().includes(query.toLowerCase());
-    const list = () => {
+    const list = (): { messages: Array<Record<string, unknown>>; nextCursor: string | null } => {
       let ordered = [...rows.values()].sort((a, b) =>
         String(b["received_at"]).localeCompare(String(a["received_at"])));
       if (!options.ignoreListFilters) {
@@ -93,7 +225,14 @@ function fakeServe(
         const search = u.searchParams.get("search");
         if (search) {
           ordered = ordered.filter((row) => {
-            const hay = [row["from_addr"], row["to_addrs"], row["subject"], row["body_text"]].join(" ").toLowerCase();
+            const attachments = Array.isArray(row["attachments"]) ? row["attachments"] as Array<Record<string, unknown>> : [];
+            const hay = [
+              row["from_addr"],
+              row["to_addrs"],
+              row["subject"],
+              row["body_text"],
+              ...attachments.flatMap((attachment) => [attachment["filename"], attachment["content_type"]]),
+            ].join(" ").toLowerCase();
             return hay.includes(search.toLowerCase());
           });
         }
@@ -107,13 +246,12 @@ function fakeServe(
         }
       }
       const limit = Number(u.searchParams.get("limit") ?? "500");
-      const offset = Number(u.searchParams.get("offset") ?? "0");
+      const cursor = u.searchParams.get("cursor");
+      const offset = cursor?.startsWith("cursor:")
+        ? Number(cursor.slice("cursor:".length))
+        : Number(u.searchParams.get("offset") ?? "0");
       const page = ordered.slice(offset, offset + limit);
-      if (!options.leanList) return page;
-      // A lean list row is EXACTLY what the self-hosted serve returns since the
-      // keyset-cursor rework: bodies, headers and the attachments array are gone
-      // and the only attachment signal is the `attachment_count` integer.
-      return page.map((row) => {
+      const messages = options.leanList ? page.map((row) => {
         const {
           body_text: bodyText,
           body_html: _bodyHtml,
@@ -126,7 +264,20 @@ function fakeServe(
           snippet: typeof bodyText === "string" ? bodyText.replace(/\s+/g, " ").trim().slice(0, 500) : null,
           attachment_count: Array.isArray(attachments) ? attachments.length : 0,
         };
-      });
+      }) : options.partialAttachmentList ? page.map((row) => {
+        const attachments = Array.isArray(row["attachments"])
+          ? row["attachments"] as Array<Record<string, unknown>>
+          : [];
+        return {
+          ...row,
+          attachments: attachments.map((attachment) => ({ size: attachment["size"] })),
+          attachment_count: attachments.length,
+        };
+      }) : page;
+      return {
+        messages,
+        nextCursor: page.length === limit ? `cursor:${offset + page.length}` : null,
+      };
     };
     const counts = () => {
       const messages = [...rows.values()];
@@ -160,7 +311,10 @@ function fakeServe(
     };
     const attachmentMatch = u.pathname.match(/^\/v1\/messages\/(.+)\/attachments\/(\d+)$/);
     const idMatch = u.pathname.match(/^\/v1\/messages\/([^/]+)$/);
-    if (u.pathname === "/v1/messages" && method === "GET") return ok({ messages: list() });
+    if (u.pathname === "/v1/messages" && method === "GET") {
+      const page = list();
+      return ok({ messages: page.messages, next_cursor: page.nextCursor });
+    }
     if (u.pathname === "/v1/messages/counts" && method === "GET") return ok({ counts: counts() });
     if (u.pathname === "/v1/messages/send" && method === "POST") {
       const body = JSON.parse(String(init.body));
@@ -221,7 +375,7 @@ function fakeServe(
 
 function make(
   rows: Array<Record<string, unknown>>,
-  options?: { ignoreListFilters?: boolean; leanList?: boolean },
+  options?: { ignoreListFilters?: boolean; leanList?: boolean; partialAttachmentList?: boolean },
 ): { ds: SelfHostedMailDataSource; serve: ReturnType<typeof fakeServe> } {
   const serve = fakeServe(rows, options);
   const ds = new SelfHostedMailDataSource({ baseUrl: "https://emails.example/v1", apiKey: "test-key", fetchImpl: serve.fetchImpl });
@@ -335,6 +489,46 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     expect(body!.attachments.map((a) => a.filename)).toEqual(["attachment-1", "D394.pdf"]);
   });
 
+  it("keeps malformed attachment elements unavailable while preserving legacy unknown availability", async () => {
+    const { ds } = make([
+      v1("malformed", {
+        attachments: [
+          {
+            filename: "cover.png",
+            content_type: "image/png",
+            size: 10,
+            content_available: true,
+          },
+          "not-an-object" as never,
+          {
+            filename: "D394.pdf",
+            content_type: "application/pdf",
+            size: 28580,
+            content_available: true,
+          },
+          {
+            filename: "legacy.pdf",
+            content_type: "application/pdf",
+            size: 1024,
+          },
+        ],
+      }),
+    ]);
+
+    const [msg] = await ds.listMailbox("inbox");
+    const body = await ds.getMessageBody(msg!);
+    expect(body!.attachments.map((attachment) => ({
+      filename: attachment.filename,
+      content_available: attachment.content_available,
+    }))).toEqual([
+      { filename: "cover.png", content_available: true },
+      { filename: "attachment-2", content_available: false },
+      { filename: "D394.pdf", content_available: true },
+      { filename: "legacy.pdf", content_available: undefined },
+    ]);
+    expect(Object.hasOwn(body!.attachments[3]!, "content_available")).toBe(false);
+  });
+
   it("honors small inbox limits with one bounded server-side page", async () => {
     const rows = Array.from({ length: 1000 }, (_, index) => v1(String(index), {
       received_at: `2026-06-18T08:${String(index % 60).padStart(2, "0")}:00.000Z`,
@@ -343,7 +537,7 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     const msgs = await ds.listMailbox("inbox", { limit: 1 });
     expect(msgs).toHaveLength(1);
     expect(serve.requests.filter((request) => request.startsWith("GET /v1/messages?"))).toEqual([
-      "GET /v1/messages?limit=50&offset=0&direction=inbound",
+      "GET /v1/messages?limit=50&direction=inbound",
     ]);
   });
 
@@ -360,7 +554,7 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
 
     expect(msgs.map((m) => m.id)).toEqual(["today"]);
     expect(serve.requests.filter((request) => request.startsWith("GET /v1/messages?"))).toEqual([
-      "GET /v1/messages?limit=50&offset=0&direction=inbound&since=2026-07-11T21%3A00%3A00.000Z",
+      "GET /v1/messages?limit=50&direction=inbound&since=2026-07-11T21%3A00%3A00.000Z",
     ]);
   });
 
@@ -370,7 +564,7 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     expect(unread.map((m) => m.id).sort()).toEqual(["3", "5"]);
     const hits = await ds.listMailbox("inbox", { search: "oana" });
     expect(hits.map((m) => m.id)).toEqual(["3"]);
-    expect(serve.requests).toContain("GET /v1/messages?limit=200&offset=0&direction=inbound&search=oana");
+    expect(serve.requests).toContain("GET /v1/messages?limit=200&direction=inbound&search=oana");
   });
 
   it("locally verifies server-returned rows when a stale server ignores filters", async () => {
@@ -388,7 +582,7 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     });
 
     expect(hits.map((m) => m.id)).toEqual(["match"]);
-    expect(serve.requests).toContain("GET /v1/messages?limit=200&offset=0&direction=inbound&since=2026-07-12T00%3A00%3A00.000Z&to=target%40example.com&search=needle");
+    expect(serve.requests).toContain("GET /v1/messages?limit=200&direction=inbound&since=2026-07-12T00%3A00%3A00.000Z&to=target%40example.com&search=needle");
   });
 
   it("hydrates lean rows before rejecting body-only search matches with label filters", async () => {
@@ -433,6 +627,907 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     expect(serve.requests).toContain("GET /v1/messages/older-body-only");
   });
 
+  it("preserves attachment-only server search matches after local detail verification", async () => {
+    const { ds, serve } = make([
+      v1("attachment-only", {
+        subject: "Quarterly documents",
+        body_text: "No searchable invoice term in the body",
+        attachments: [{
+          filename: "Q3-reconciliation.xlsx",
+          content_type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          size: 42,
+          content_base64: "must-not-be-searched",
+        }],
+      }),
+      v1("other", {
+        subject: "Other",
+        body_text: "No match",
+        attachments: [{ filename: "notes.txt", content_type: "text/plain", size: 5 }],
+      }),
+    ], { ignoreListFilters: true, partialAttachmentList: true });
+
+    const byFilename = await ds.listMailbox("inbox", { search: "reconciliation.xlsx" });
+    const byContentType = await ds.listMailbox("inbox", { search: "spreadsheetml" });
+    const byPayload = await ds.listMailbox("inbox", { search: "must-not-be-searched" });
+
+    expect(byFilename.map((message) => message.id)).toEqual(["attachment-only"]);
+    expect(byContentType.map((message) => message.id)).toEqual(["attachment-only"]);
+    expect(byPayload).toEqual([]);
+    expect(serve.requests.filter((request) => request === "GET /v1/messages/attachment-only")).toHaveLength(3);
+    expect(serve.requests.filter((request) => request === "GET /v1/messages/other")).toHaveLength(3);
+  });
+
+  it("finds an attachment-only match on the final cursor page after detail hydration", async () => {
+    const rows = [
+      ...pagedRows(50, "attachment-miss", {
+        body_text: "No final attachment match",
+        attachments: [],
+      }),
+      v1("attachment-final", {
+        subject: "Final page fixture",
+        body_text: "No searchable filename in the body",
+        received_at: "2026-07-19T00:00:00.000Z",
+        attachments: [{
+          filename: "final-reconciliation.pdf",
+          content_type: "application/pdf",
+          size: 42,
+        }],
+      }),
+    ];
+    const { ds, serve } = make(rows, {
+      ignoreListFilters: true,
+      partialAttachmentList: true,
+    });
+
+    const messages = await ds.listMailbox("inbox", {
+      search: "final-reconciliation.pdf",
+      limit: 1,
+    });
+
+    expect(messages.map((message) => message.id)).toEqual(["attachment-final"]);
+    expect(serve.requests).toContain(
+      "GET /v1/messages?limit=50&cursor=cursor%3A50&direction=inbound&search=final-reconciliation.pdf",
+    );
+    expect(serve.requests).toContain("GET /v1/messages/attachment-final");
+  });
+
+  it("walks compact cursor pages past the legacy 100000-row boundary exactly once and stops on null", async () => {
+    const pages = new Map<string, CompactCursorPage>([
+      ["", {
+        messages: [v1("newest", {
+          labels: ["audit"],
+          received_at: "2026-07-13T12:00:00.000Z",
+        })],
+        nextCursor: "after-50000",
+      }],
+      ["after-50000", {
+        messages: [v1("middle", {
+          labels: ["audit"],
+          received_at: "2026-07-13T11:00:00.000Z",
+        })],
+        nextCursor: "after-100000",
+      }],
+      ["after-100000", {
+        messages: [v1("oldest", {
+          labels: ["audit"],
+          received_at: "2026-07-13T10:00:00.000Z",
+        })],
+        nextCursor: null,
+      }],
+    ]);
+    const serve = compactCursorServe(pages);
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: serve.fetchImpl,
+    });
+
+    const messages = await ds.listMailbox("inbox", {
+      label: "audit",
+      sort: "oldest",
+      limit: 3,
+    });
+
+    expect(messages.map((message) => message.id)).toEqual(["oldest", "middle", "newest"]);
+    expect(new Set(messages.map((message) => message.id)).size).toBe(3);
+    expect(serve.requests).toEqual([
+      "GET /v1/messages?limit=500&direction=inbound",
+      "GET /v1/messages?limit=500&cursor=after-50000&direction=inbound",
+      "GET /v1/messages?limit=500&cursor=after-100000&direction=inbound",
+    ]);
+  });
+
+  it("walks multiple full legacy offset pages for scoped counts and oldest reads", async () => {
+    const rows = pagedRows(1001, "legacy", {
+      to_addrs: ["target@example.com"],
+      labels: ["audit"],
+    });
+
+    const countServe = legacyOffsetServe(rows);
+    const countDs = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: countServe.fetchImpl,
+    });
+    const counts = await countDs.mailboxCounts({ source: { address: "target@example.com" } });
+    expect(counts.inbox).toBe(1001);
+    expect(countServe.requests.filter((request) => request.startsWith("GET /v1/messages?"))).toEqual([
+      "GET /v1/messages?limit=500&to=target%40example.com",
+      "GET /v1/messages?limit=500&offset=500&to=target%40example.com",
+      "GET /v1/messages?limit=500&offset=1000&to=target%40example.com",
+      "GET /v1/messages?limit=500&from=target%40example.com",
+    ]);
+
+    const oldestServe = legacyOffsetServe(rows);
+    const oldestDs = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: oldestServe.fetchImpl,
+    });
+    const oldest = await oldestDs.listMailbox("inbox", {
+      label: "audit",
+      sort: "oldest",
+      limit: 1,
+    });
+    expect(oldest.map((message) => message.id)).toEqual(["legacy-1000"]);
+    expect(oldestServe.requests.filter((request) => request.startsWith("GET /v1/messages?"))).toEqual([
+      "GET /v1/messages?limit=500&direction=inbound",
+      "GET /v1/messages?limit=500&offset=500&direction=inbound",
+      "GET /v1/messages?limit=500&offset=1000&direction=inbound",
+    ]);
+  });
+
+  it("keeps bounded newest-first legacy reads to one page", async () => {
+    const serve = legacyOffsetServe(pagedRows(1000, "legacy-bounded"));
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: serve.fetchImpl,
+    });
+
+    const messages = await ds.listMailbox("inbox", { limit: 1 });
+
+    expect(messages).toHaveLength(1);
+    expect(serve.requests.filter((request) => request.startsWith("GET /v1/messages?"))).toEqual([
+      "GET /v1/messages?limit=50&direction=inbound",
+    ]);
+  });
+
+  it("falls back from a current cursor page to the correct legacy offset", async () => {
+    const requests: string[] = [];
+    const fetchImpl: SelfHostedFetch = async (url) => {
+      const u = new URL(url);
+      requests.push(`${u.pathname}${u.search}`);
+      const cursor = u.searchParams.get("cursor");
+      const offset = Number(u.searchParams.get("offset") ?? "0");
+      const start = cursor === "after-first-page" ? 500 : offset;
+      const count = start < 1000 ? 500 : 1;
+      return {
+        status: 200,
+        async text() {
+          const body: Record<string, unknown> = {
+            messages: Array.from({ length: count }, (_, index) => ({
+              id: `mixed-${start + index}`,
+              direction: "inbound",
+              labels: ["audit"],
+              received_at: new Date(Date.parse("2026-07-20T00:00:00.000Z") - (start + index) * 1000).toISOString(),
+            })),
+          };
+          if (!cursor && offset === 0) body["next_cursor"] = "after-first-page";
+          return JSON.stringify(body);
+        },
+      };
+    };
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl,
+    });
+
+    const labels = await ds.listLabelSummaries();
+
+    expect(labels).toContainEqual({ name: "audit", count: 1001, popular: true });
+    expect(requests).toEqual([
+      "/v1/messages?limit=500",
+      "/v1/messages?limit=500&cursor=after-first-page",
+      "/v1/messages?limit=500&offset=1000",
+    ]);
+  });
+
+  it("continues a search across multiple full legacy offset pages", async () => {
+    const rows = pagedRows(101, "legacy-search");
+    rows[100]!["subject"] = "the deep legacy needle";
+    const serve = legacyOffsetServe(rows, { ignoreListFilters: true });
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: serve.fetchImpl,
+    });
+
+    const messages = await ds.listMailbox("inbox", { search: "deep legacy needle", limit: 1 });
+
+    expect(messages.map((message) => message.id)).toEqual(["legacy-search-100"]);
+    expect(serve.requests.filter((request) => request.startsWith("GET /v1/messages?"))).toEqual([
+      "GET /v1/messages?limit=50&direction=inbound&search=deep+legacy+needle",
+      "GET /v1/messages?limit=50&offset=50&direction=inbound&search=deep+legacy+needle",
+      "GET /v1/messages?limit=50&offset=100&direction=inbound&search=deep+legacy+needle",
+    ]);
+  });
+
+  it("preflights all legacy offset pages before clear mutates the mailbox", async () => {
+    const serve = legacyOffsetServe(pagedRows(1001, "legacy-clear"));
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: serve.fetchImpl,
+    });
+
+    const result = await ds.clear({ mailbox: "inbox" });
+
+    expect(result).toEqual({ cleared: 1001 });
+    expect(serve.rows.size).toBe(0);
+    expect(serve.deleted).toHaveLength(1001);
+    expect(serve.requests.filter((request) => request.startsWith("GET /v1/messages?"))).toEqual([
+      "GET /v1/messages?limit=500",
+      "GET /v1/messages?limit=500&offset=500",
+      "GET /v1/messages?limit=500&offset=1000",
+    ]);
+    expect(serve.requests.findIndex((request) => request.startsWith("DELETE ")))
+      .toBeGreaterThan(serve.requests.findIndex((request) => request.includes("offset=1000")));
+  });
+
+  it("fails explicitly instead of returning partial success at the legacy offset cap", async () => {
+    const requests: string[] = [];
+    const deleted: string[] = [];
+    const fetchImpl: SelfHostedFetch = async (url, init) => {
+      const u = new URL(url);
+      const method = (init.method ?? "GET").toUpperCase();
+      requests.push(`${method} ${u.pathname}${u.search}`);
+      const idMatch = u.pathname.match(/^\/v1\/messages\/([^/]+)$/);
+      if (idMatch && method === "DELETE") {
+        deleted.push(decodeURIComponent(idMatch[1]!));
+        return {
+          status: 200,
+          async text() { return JSON.stringify({ deleted: true }); },
+        };
+      }
+      const limit = Number(u.searchParams.get("limit") ?? "500");
+      const offset = Number(u.searchParams.get("offset") ?? "0");
+      return {
+        status: 200,
+        async text() {
+          return JSON.stringify({
+            messages: Array.from({ length: limit }, (_, index) => ({
+              id: `cap-${offset + index}`,
+              direction: "inbound",
+              labels: ["audit"],
+              received_at: "2026-07-13T00:00:00.000Z",
+            })),
+          });
+        },
+      };
+    };
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl,
+    });
+
+    await expect(ds.clear({ mailbox: "inbox" })).rejects.toThrow(/legacy.*offset.*100000.*cursor|upgrade.*cursor/i);
+    expect(requests.at(-1)).toBe("GET /v1/messages?limit=500&offset=100000");
+    expect(deleted).toEqual([]);
+  });
+
+  it("preserves the array search contract while following short cursor pages", async () => {
+    const serve = compactCursorServe(new Map([
+      ["", {
+        messages: [v1("newer-miss", {
+          subject: "not it",
+          body_text: "no match",
+          attachment_count: 0,
+          received_at: "2026-07-13T12:00:00.000Z",
+        })],
+        nextCursor: "after-100000",
+      }],
+      ["after-100000", {
+        messages: [v1("older-hit", {
+          subject: "needle",
+          attachment_count: 0,
+          received_at: "2026-07-13T10:00:00.000Z",
+        })],
+        nextCursor: null,
+      }],
+    ]));
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: serve.fetchImpl,
+    });
+
+    const messages = await ds.listMailbox("inbox", { search: "needle", limit: 1 });
+
+    expect(Array.isArray(messages)).toBe(true);
+    expect(messages.map((message) => message.id)).toEqual(["older-hit"]);
+    expect(serve.requests).toEqual([
+      "GET /v1/messages?limit=50&direction=inbound&search=needle",
+      "GET /v1/messages?limit=50&cursor=after-100000&direction=inbound&search=needle",
+    ]);
+  });
+
+  it("exposes an explicitly insert-only inventory page instead of a general mutation feed", async () => {
+    const serve = compactCursorServe(new Map([
+      ["", {
+        messages: [v1("inserted", { received_at: "2026-07-13T12:00:00.000Z" })],
+        nextCursor: null,
+      }],
+    ]));
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: serve.fetchImpl,
+    });
+
+    const page = await (ds as unknown as {
+      listInsertionsSince(input: { receivedSince: string; limit: number }): Promise<unknown>;
+    }).listInsertionsSince({
+      receivedSince: "2026-07-13T00:00:00.000Z",
+      limit: 1,
+    });
+
+    expect(page).toEqual({
+      semantics: "insert_only",
+      insertions: [expect.objectContaining({ id: "inserted" })],
+      cursor: null,
+    });
+    expect("changesSince" in ds).toBe(false);
+    expect(serve.requests).toEqual([
+      "GET /v1/messages?limit=1&since=2026-07-13T00%3A00%3A00.000Z",
+    ]);
+  });
+
+  it("keeps the insert-only received-time bound stable across cursor pages", async () => {
+    const serve = compactCursorServe(new Map([
+      ["", {
+        messages: [v1("newer", { received_at: "2026-07-13T12:00:00.000Z" })],
+        nextCursor: "next-page",
+      }],
+      ["next-page", {
+        messages: [v1("older", { received_at: "2026-07-13T11:00:00.000Z" })],
+        nextCursor: null,
+      }],
+    ]));
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: serve.fetchImpl,
+    });
+
+    const first = await ds.listInsertionsSince({
+      receivedSince: "2026-07-13T00:00:00.000Z",
+      limit: 1,
+    });
+    const second = await ds.listInsertionsSince({
+      receivedSince: "2026-07-13T00:00:00.000Z",
+      limit: 1,
+      cursor: first.cursor ?? undefined,
+    });
+
+    expect(first.semantics).toBe("insert_only");
+    expect(first.insertions.map((message) => message.id)).toEqual(["newer"]);
+    expect(first.cursor).not.toBe("next-page");
+    expect(first.cursor).toEqual(expect.any(String));
+    expect(second.insertions.map((message) => message.id)).toEqual(["older"]);
+    expect(second.cursor).toBeNull();
+    expect(serve.requests).toEqual([
+      "GET /v1/messages?limit=1&since=2026-07-13T00%3A00%3A00.000Z",
+      "GET /v1/messages?limit=1&cursor=next-page&since=2026-07-13T00%3A00%3A00.000Z",
+    ]);
+  });
+
+  it("rejects a changed received-time bound while resuming an inventory cursor", async () => {
+    const serve = compactCursorServe(new Map([
+      ["", {
+        messages: [v1("newer", { received_at: "2026-07-13T12:00:00.000Z" })],
+        nextCursor: "older-page",
+      }],
+      ["older-page", {
+        messages: [v1("older", { received_at: "2026-07-13T11:00:00.000Z" })],
+        nextCursor: null,
+      }],
+    ]));
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: serve.fetchImpl,
+    });
+
+    const first = await ds.listInsertionsSince({
+      receivedSince: "2026-07-13T00:00:00.000Z",
+      limit: 1,
+    });
+    await expect(ds.listInsertionsSince({
+      receivedSince: "2026-07-14T00:00:00.000Z",
+      cursor: first.cursor ?? undefined,
+      limit: 1,
+    })).rejects.toThrow(/receivedSince.*cursor|cursor.*receivedSince/i);
+
+    expect(serve.requests).toEqual([
+      "GET /v1/messages?limit=1&since=2026-07-13T00%3A00%3A00.000Z",
+    ]);
+  });
+
+  it("accepts a raw pre-envelope server cursor and wraps later continuation", async () => {
+    const serve = compactCursorServe(new Map([
+      ["raw-server-cursor", {
+        messages: [v1("middle", { received_at: "2026-07-13T11:00:00.000Z" })],
+        nextCursor: "next-server-cursor",
+      }],
+      ["next-server-cursor", {
+        messages: [v1("oldest", { received_at: "2026-07-13T10:00:00.000Z" })],
+        nextCursor: null,
+      }],
+    ]));
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: serve.fetchImpl,
+    });
+
+    const first = await ds.listInsertionsSince({
+      receivedSince: "2026-07-13T00:00:00.000Z",
+      cursor: "raw-server-cursor",
+      limit: 1,
+    });
+    const second = await ds.listInsertionsSince({
+      receivedSince: "2026-07-13T00:00:00.000Z",
+      cursor: first.cursor ?? undefined,
+      limit: 1,
+    });
+
+    expect(first.insertions.map((message) => message.id)).toEqual(["middle"]);
+    expect(first.cursor).not.toBe("next-server-cursor");
+    expect(second.insertions.map((message) => message.id)).toEqual(["oldest"]);
+    expect(serve.requests).toEqual([
+      "GET /v1/messages?limit=1&cursor=raw-server-cursor&since=2026-07-13T00%3A00%3A00.000Z",
+      "GET /v1/messages?limit=1&cursor=next-server-cursor&since=2026-07-13T00%3A00%3A00.000Z",
+    ]);
+  });
+
+  it("fails closed when a raw cursor returns a full page without next_cursor", async () => {
+    const serve = compactCursorServe(new Map([
+      ["raw-server-cursor", {
+        messages: [v1("middle", { received_at: "2026-07-13T11:00:00.000Z" })],
+        nextCursor: undefined,
+      }],
+    ]));
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: serve.fetchImpl,
+    });
+
+    await expect(ds.listInsertionsSince({
+      receivedSince: "2026-07-13T00:00:00.000Z",
+      cursor: "raw-server-cursor",
+      limit: 1,
+    })).rejects.toThrow(/raw cursor pagination returned a full page without next_cursor/);
+    expect(serve.requests).toEqual([
+      "GET /v1/messages?limit=1&cursor=raw-server-cursor&since=2026-07-13T00%3A00%3A00.000Z",
+    ]);
+  });
+
+  it("accepts an empty raw cursor terminal page without a continuation cursor", async () => {
+    const serve = compactCursorServe(new Map([
+      ["raw-server-cursor", {
+        messages: [],
+        nextCursor: undefined,
+      }],
+    ]));
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: serve.fetchImpl,
+    });
+
+    const result = await ds.listInsertionsSince({
+      receivedSince: "2026-07-13T00:00:00.000Z",
+      cursor: "raw-server-cursor",
+      limit: 1,
+    });
+
+    expect(result).toEqual({
+      semantics: "insert_only",
+      insertions: [],
+      cursor: null,
+    });
+    expect(serve.requests).toEqual([
+      "GET /v1/messages?limit=1&cursor=raw-server-cursor&since=2026-07-13T00%3A00%3A00.000Z",
+    ]);
+  });
+
+  it("preserves numeric legacy-offset continuation from a numeric cursor", async () => {
+    const serve = legacyOffsetServe([
+      v1("newest", { received_at: "2026-07-20T00:00:00.000Z" }),
+      v1("middle", { received_at: "2026-07-19T00:00:00.000Z" }),
+      v1("oldest", { received_at: "2026-07-18T00:00:00.000Z" }),
+    ]);
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: serve.fetchImpl,
+    });
+    const cursor = encodedChangesCursor(2, {
+      version: 2,
+      serverCursor: null,
+      cycleAnchor: null,
+      cyclePower: 1,
+      cycleLength: 0,
+      pageCount: 0,
+      offset: 1,
+      since: null,
+    });
+
+    const first = await ds.listInsertionsSince({ cursor, limit: 1 });
+    const second = await ds.listInsertionsSince({ cursor: first.cursor ?? undefined, limit: 1 });
+    const third = await ds.listInsertionsSince({ cursor: second.cursor ?? undefined, limit: 1 });
+
+    expect(first.insertions.map((insertion) => insertion.id)).toEqual(["middle"]);
+    expect(second.insertions.map((insertion) => insertion.id)).toEqual(["oldest"]);
+    expect(third.insertions).toEqual([]);
+    expect(first.cursor).not.toBeNull();
+    expect(second.cursor).not.toBeNull();
+    expect(third.cursor).toBeNull();
+    expect(serve.requests.filter((request) => request.startsWith("GET /v1/messages?"))).toEqual([
+      "GET /v1/messages?limit=1&offset=1",
+      "GET /v1/messages?limit=1&offset=2",
+      "GET /v1/messages?limit=1&offset=3",
+    ]);
+  });
+
+  it("resumes a bounded legacy v1 envelope and emits no compatibility truncation", async () => {
+    const serve = compactCursorServe(new Map([
+      ["legacy-server-cursor", {
+        messages: [v1("legacy-envelope-row", {
+          received_at: "2026-07-13T11:00:00.000Z",
+        })],
+        nextCursor: null,
+      }],
+    ]));
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: serve.fetchImpl,
+    });
+    const cursor = encodedChangesCursor(1, {
+      version: 1,
+      serverCursor: "legacy-server-cursor",
+      seenServerCursors: ["legacy-server-cursor"],
+      offset: 1,
+      since: "2026-07-13T00:00:00.000Z",
+      watermark: "2026-07-13T12:00:00.000Z",
+    });
+
+    const result = await ds.listInsertionsSince({ cursor, limit: 1 });
+
+    expect(result.insertions.map((message) => message.id)).toEqual(["legacy-envelope-row"]);
+    expect(result.cursor).toBeNull();
+    expect(serve.requests).toEqual([
+      "GET /v1/messages?limit=1&cursor=legacy-server-cursor&since=2026-07-13T00%3A00%3A00.000Z",
+    ]);
+  });
+
+  it("keeps exact insertion cursors bounded and does not reject unique cursors at the old Bloom collision", async () => {
+    const uniqueCursors = legacyBloomCollisionSequence();
+    const cursorPositions = new Map(uniqueCursors.map((cursor, index) => [cursor, index + 1]));
+    const requests: string[] = [];
+    const fetchImpl: SelfHostedFetch = async (url) => {
+      const u = new URL(url);
+      requests.push(`${u.pathname}${u.search}`);
+      const rawCursor = u.searchParams.get("cursor");
+      const page = rawCursor ? cursorPositions.get(rawCursor)! : 0;
+      const nextCursor = uniqueCursors[page] ?? null;
+      return {
+        status: 200,
+        async text() {
+          return JSON.stringify({
+            messages: [v1(`bounded-${page}`, {
+              received_at: new Date(Date.parse("2026-07-20T00:00:00.000Z") - page * 1000).toISOString(),
+            })],
+            next_cursor: nextCursor,
+          });
+        },
+      };
+    };
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl,
+    });
+
+    let cursor: string | undefined;
+    const lengths: number[] = [];
+    for (let page = 0; page < uniqueCursors.length; page++) {
+      const result = await ds.listInsertionsSince({ cursor, limit: 1 });
+      cursor = result.cursor ?? undefined;
+      expect(cursor).toEqual(expect.any(String));
+      lengths.push(cursor!.length);
+    }
+
+    expect(requests).toHaveLength(uniqueCursors.length);
+    expect(new Set(uniqueCursors).size).toBe(uniqueCursors.length);
+    expect(Math.max(...lengths)).toBeLessThanOrEqual(8192);
+  });
+
+  it("detects an exact server cursor cycle across separate insertion-page calls", async () => {
+    const serve = compactCursorServe(new Map([
+      ["", {
+        messages: [v1("first", { received_at: "2026-07-13T12:00:00.000Z" })],
+        nextCursor: "cursor-a",
+      }],
+      ["cursor-a", {
+        messages: [v1("second", { received_at: "2026-07-13T11:00:00.000Z" })],
+        nextCursor: "cursor-b",
+      }],
+      ["cursor-b", {
+        messages: [v1("duplicate-first", { received_at: "2026-07-13T12:00:00.000Z" })],
+        nextCursor: "cursor-a",
+      }],
+    ]));
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: serve.fetchImpl,
+    });
+
+    const first = await ds.listInsertionsSince({ limit: 1 });
+    const second = await ds.listInsertionsSince({ cursor: first.cursor ?? undefined, limit: 1 });
+    const third = await ds.listInsertionsSince({ cursor: second.cursor ?? undefined, limit: 1 });
+    await expect(ds.listInsertionsSince({ cursor: third.cursor ?? undefined, limit: 1 }))
+      .rejects.toThrow(/cursor repeated|did not advance/i);
+
+    expect(first.insertions.map((message) => message.id)).toEqual(["first"]);
+    expect(second.insertions.map((message) => message.id)).toEqual(["second"]);
+    expect(third.insertions.map((message) => message.id)).toEqual(["duplicate-first"]);
+    expect(serve.requests).toEqual([
+      "GET /v1/messages?limit=1",
+      "GET /v1/messages?limit=1&cursor=cursor-a",
+      "GET /v1/messages?limit=1&cursor=cursor-b",
+      "GET /v1/messages?limit=1&cursor=cursor-a",
+    ]);
+  });
+
+  it("rejects a malformed versioned insertion cursor before contacting the server", async () => {
+    const serve = compactCursorServe(new Map());
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: serve.fetchImpl,
+    });
+
+    await expect(ds.listInsertionsSince({
+      cursor: "emails-self-hosted:v1:not-base64-json",
+      limit: 1,
+    })).rejects.toThrow(/malformed changes cursor envelope/i);
+    expect(serve.requests).toEqual([]);
+  });
+
+  it("rejects oversized and schema-expanded insertion cursors before contacting the server", async () => {
+    const serve = compactCursorServe(new Map([
+      ["server-cursor", { messages: [], nextCursor: null }],
+    ]));
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: serve.fetchImpl,
+    });
+    const baseEnvelope = {
+      version: 1,
+      serverCursor: "server-cursor",
+      seenServerCursors: ["server-cursor"],
+      offset: 1,
+      since: null,
+      watermark: null,
+    };
+    const schemaExpanded = encodedChangesCursor(1, {
+      ...baseEnvelope,
+      attackerControlled: true,
+    });
+    const oversized = encodedChangesCursor(1, {
+      ...baseEnvelope,
+      seenServerCursors: Array.from(
+        { length: 2_000 },
+        (_, index) => `attacker-cursor-${index}`,
+      ),
+    });
+    const currentEnvelope = {
+      version: 2,
+      serverCursor: null,
+      cycleAnchor: null,
+      cyclePower: 1,
+      cycleLength: 0,
+      pageCount: 1,
+      offset: 1,
+      since: null,
+    };
+    const currentSchemaExpanded = encodedChangesCursor(2, {
+      ...currentEnvelope,
+      attackerControlled: true,
+    });
+    const currentOversized = encodedChangesCursor(2, {
+      ...currentEnvelope,
+      cycleAnchor: "A".repeat(7_000),
+    });
+    const currentPageCountOverflow = encodedChangesCursor(2, {
+      ...currentEnvelope,
+      pageCount: 100_001,
+    });
+
+    await expect(ds.listInsertionsSince({ cursor: schemaExpanded, limit: 1 }))
+      .rejects.toThrow(/malformed changes cursor envelope/i);
+    await expect(ds.listInsertionsSince({ cursor: oversized, limit: 1 }))
+      .rejects.toThrow(/malformed changes cursor envelope/i);
+    await expect(ds.listInsertionsSince({ cursor: currentSchemaExpanded, limit: 1 }))
+      .rejects.toThrow(/malformed changes cursor envelope/i);
+    await expect(ds.listInsertionsSince({ cursor: currentOversized, limit: 1 }))
+      .rejects.toThrow(/malformed changes cursor envelope/i);
+    await expect(ds.listInsertionsSince({ cursor: currentPageCountOverflow, limit: 1 }))
+      .rejects.toThrow(/malformed changes cursor envelope/i);
+    expect(serve.requests).toEqual([]);
+  });
+
+  it("fails explicitly instead of truncating when the insertion cursor page limit is exhausted", async () => {
+    const requests: string[] = [];
+    const fetchImpl: SelfHostedFetch = async (url) => {
+      requests.push(new URL(url).pathname + new URL(url).search);
+      return {
+        status: 200,
+        async text() {
+          return JSON.stringify({
+            messages: [v1("page-limit-row")],
+          });
+        },
+      };
+    };
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl,
+    });
+    const cursor = encodedChangesCursor(2, {
+      version: 2,
+      serverCursor: null,
+      cycleAnchor: null,
+      cyclePower: 1,
+      cycleLength: 0,
+      pageCount: 100_000,
+      offset: 1,
+      since: null,
+    });
+
+    await expect(ds.listInsertionsSince({ cursor, limit: 1 }))
+      .rejects.toThrow(/pagination exceeded.*100000-page safety limit/i);
+    expect(requests).toEqual(["/v1/messages?limit=1&offset=1"]);
+  });
+
+  it("propagates malformed caller cursors as server failures", async () => {
+    const serve = compactCursorServe(new Map([
+      ["", { messages: [], nextCursor: null }],
+    ]));
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: serve.fetchImpl,
+    });
+
+    await expect(ds.listInsertionsSince({ cursor: "not-a-server-cursor", limit: 1 }))
+      .rejects.toThrow(/HTTP 400/);
+    expect(serve.requests).toEqual([
+      "GET /v1/messages?limit=1&cursor=not-a-server-cursor",
+    ]);
+  });
+
+  it("allows a stale server to terminate a short page without next_cursor", async () => {
+    const serve = compactCursorServe(new Map([
+      ["", { messages: [v1("only")], nextCursor: undefined }],
+    ]));
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: serve.fetchImpl,
+    });
+
+    expect((await ds.listMailbox("inbox", { limit: 2 })).map((message) => message.id)).toEqual(["only"]);
+  });
+
+  it("returns an opaque legacy-offset continuation when next_cursor is omitted on a full insertion page", async () => {
+    const serve = legacyOffsetServe([
+      v1("newer", { received_at: "2026-07-13T12:00:00.000Z" }),
+      v1("older", { received_at: "2026-07-13T11:00:00.000Z" }),
+    ]);
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: serve.fetchImpl,
+    });
+
+    const first = await ds.listInsertionsSince({ limit: 1 });
+    const second = await ds.listInsertionsSince({ cursor: first.cursor ?? undefined, limit: 1 });
+    const third = await ds.listInsertionsSince({
+      cursor: second.cursor ?? undefined,
+      limit: 1,
+    });
+
+    expect(first.insertions.map((message) => message.id)).toEqual(["newer"]);
+    expect(first.cursor).toEqual(expect.any(String));
+    expect(second.insertions.map((message) => message.id)).toEqual(["older"]);
+    expect(second.cursor).toEqual(expect.any(String));
+    expect(third.insertions).toEqual([]);
+    expect(third.cursor).toBeNull();
+    expect(serve.requests.filter((request) => request.startsWith("GET /v1/messages?"))).toEqual([
+      "GET /v1/messages?limit=1",
+      "GET /v1/messages?limit=1&offset=1",
+      "GET /v1/messages?limit=1&offset=2",
+    ]);
+  });
+
+  it("fails closed when the server returns a malformed pagination cursor", async () => {
+    const serve = compactCursorServe(new Map([
+      ["", { messages: [v1("1", { labels: ["audit"] })], nextCursor: { not: "opaque-string" } }],
+    ]));
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: serve.fetchImpl,
+    });
+
+    await expect(ds.listLabelSummaries()).rejects.toThrow(/next_cursor/i);
+  });
+
+  it("fails closed when the server returns a blank opaque pagination cursor", async () => {
+    const serve = compactCursorServe(new Map([
+      ["", { messages: [v1("1", { labels: ["audit"] })], nextCursor: " " }],
+    ]));
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: serve.fetchImpl,
+    });
+
+    await expect(ds.listLabelSummaries()).rejects.toThrow(/next_cursor/i);
+  });
+
+  it("fails closed when a server cursor does not advance", async () => {
+    const serve = compactCursorServe(new Map([
+      ["", { messages: [v1("1", { labels: ["audit"] })], nextCursor: "stuck" }],
+      ["stuck", { messages: [v1("2", { labels: ["audit"] })], nextCursor: "stuck" }],
+    ]));
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: serve.fetchImpl,
+    });
+
+    await expect(ds.listLabelSummaries()).rejects.toThrow(/cursor.*advance|repeated.*cursor/i);
+    expect(serve.requests).toHaveLength(2);
+  });
+
+  it("detects a multi-page cursor cycle before clear performs any deletion", async () => {
+    const serve = compactCursorServe(new Map([
+      ["", { messages: [v1("first")], nextCursor: "cursor-a" }],
+      ["cursor-a", { messages: [v1("second")], nextCursor: "cursor-b" }],
+      ["cursor-b", { messages: [v1("cycle")], nextCursor: "cursor-a" }],
+    ]));
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: serve.fetchImpl,
+    });
+
+    await expect(ds.clear({ mailbox: "inbox" })).rejects.toThrow(/cursor.*advance|repeated.*cursor/i);
+    expect(serve.deleted).toEqual([]);
+    expect(serve.requests.filter((request) => request.startsWith("DELETE "))).toEqual([]);
+  });
+
   it("separates sent (outbound) from inbox", async () => {
     const { ds } = make([v1("2"), v1("5", { direction: "outbound" })]);
     expect((await ds.listMailbox("inbox")).map((m) => m.id)).toEqual(["2"]);
@@ -453,7 +1548,7 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     expect((await ds.listMailbox("starred")).map((m) => m.id)).toEqual(["1"]);
     expect((await ds.mailboxCounts()).starred).toBe(1);
     expect(serve.requests.filter((request) => request.startsWith("GET /v1/messages?"))).toEqual([
-      "GET /v1/messages?limit=200&offset=0&direction=inbound",
+      "GET /v1/messages?limit=200&direction=inbound",
     ]);
   });
 
@@ -487,15 +1582,16 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
       v1("in", { to_addrs: ["target@example.com"] }),
       v1("sent-from", { direction: "outbound", from_addr: "target@example.com", to_addrs: ["client@example.com"] }),
       v1("sent-to", { direction: "outbound", from_addr: "me@example.com", to_addrs: ["target@example.com"] }),
+      v1("sent-self", { direction: "outbound", from_addr: "target@example.com", to_addrs: ["target@example.com"] }),
       v1("other", { to_addrs: ["other@example.com"] }),
     ]);
 
     const counts = await ds.mailboxCounts({ source: { address: "target@example.com" } });
 
-    expect(counts).toMatchObject({ inbox: 1, sent: 2 });
+    expect(counts).toMatchObject({ inbox: 1, sent: 3 });
     expect(serve.requests.filter((request) => request.startsWith("GET /v1/messages?"))).toEqual([
-      "GET /v1/messages?limit=500&offset=0&to=target%40example.com",
-      "GET /v1/messages?limit=500&offset=0&from=target%40example.com",
+      "GET /v1/messages?limit=500&to=target%40example.com",
+      "GET /v1/messages?limit=500&from=target%40example.com",
     ]);
   });
 
@@ -667,6 +1763,60 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     expect(res.warning).toBeUndefined();
   });
 
+  it("rejects --provider instead of silently ignoring it (the server owns the sender)", async () => {
+    // The flag was parsed and then dropped, so an operator who "re-pointed" a
+    // send at another SES provider got the old one with no warning at all.
+    let called = 0;
+    const serve: SelfHostedFetch = async () => {
+      called += 1;
+      return { status: 202, async text() { return JSON.stringify({ message: { id: "m" }, sent: true }); } };
+    };
+    const ds = new SelfHostedMailDataSource({ baseUrl: "https://emails.example/v1", apiKey: "k", fetchImpl: serve });
+    await expect(ds.send({
+      to: "x@hasna.com", from: "me@hasna.com", subject: "s", body: "b", providerId: "some-provider-id",
+    })).rejects.toThrow(/--provider is not supported in self_hosted mode/);
+    expect(called).toBe(0);
+  });
+
+  it("never turns a provider REJECT into a resolved send", async () => {
+    const serveReject: SelfHostedFetch = async () => ({
+      status: 422,
+      async text() {
+        return JSON.stringify({
+          error: "the provider rejected this message and NOTHING was sent — MessageRejected: not verified",
+          reason: "provider_rejected",
+          sent: false,
+          retry_safe: true,
+          message: { id: "m-rejected", send_state: "failed" },
+        });
+      },
+    });
+    const ds = new SelfHostedMailDataSource({ baseUrl: "https://emails.example/v1", apiKey: "k", fetchImpl: serveReject });
+    let resolved: unknown;
+    let rejected: unknown;
+    try { resolved = await ds.send({ to: "x@external.example", from: "me@hasna.com", subject: "s", body: "b" }); }
+    catch (error) { rejected = error; }
+    expect(resolved).toBeUndefined();
+    expect(String(rejected)).toContain("NOTHING was sent");
+  });
+
+  it("never turns an INDETERMINATE outcome into a resolved send", async () => {
+    const serveUnknown: SelfHostedFetch = async () => ({
+      status: 502,
+      async text() {
+        return JSON.stringify({
+          error: "the provider call failed without a definitive outcome; the message may or may not have been sent",
+          reason: "provider_outcome_uncertain",
+          sent: null,
+          retry_safe: false,
+        });
+      },
+    });
+    const ds = new SelfHostedMailDataSource({ baseUrl: "https://emails.example/v1", apiKey: "k", fetchImpl: serveUnknown });
+    await expect(ds.send({ to: "x@external.example", from: "me@hasna.com", subject: "s", body: "b" }))
+      .rejects.toThrow(/may or may not have been sent/);
+  });
+
   it("returns verification candidates scoped to the recipient address", async () => {
     const { ds, serve } = make([
       v1("2", { to_addrs: ["andrei@hasna.com"], subject: "code 123456" }),
@@ -674,7 +1824,7 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     ]);
     const cands = await ds.verificationCandidates("andrei@hasna.com");
     expect(cands.map((c) => c.id)).toEqual(["2"]);
-    expect(serve.requests).toContain("GET /v1/messages?limit=50&offset=0&direction=inbound&to=andrei%40hasna.com");
+    expect(serve.requests).toContain("GET /v1/messages?limit=50&direction=inbound&to=andrei%40hasna.com");
   });
 
   it("pushes verification sender and subject filters to the self-hosted server", async () => {
@@ -684,7 +1834,7 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     ]);
     const latest = await ds.findLatest("andrei@hasna.com", { from: "openai", subject: "ChatGPT" });
     expect(latest?.email.id).toBe("2");
-    expect(serve.requests).toContain("GET /v1/messages?limit=50&offset=0&direction=inbound&to=andrei%40hasna.com&from=openai&subject=ChatGPT");
+    expect(serve.requests).toContain("GET /v1/messages?limit=50&direction=inbound&to=andrei%40hasna.com&from=openai&subject=ChatGPT");
   });
 
   it("fetches message detail for verification bodies when list rows are lean", async () => {
@@ -695,7 +1845,7 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     const latest = await ds.findLatest("andrei@hasna.com", { from: "openai", subject: "ChatGPT" });
 
     expect(latest?.code).toBe("123456");
-    expect(serve.requests).toContain("GET /v1/messages?limit=50&offset=0&direction=inbound&to=andrei%40hasna.com&from=openai&subject=ChatGPT");
+    expect(serve.requests).toContain("GET /v1/messages?limit=50&direction=inbound&to=andrei%40hasna.com&from=openai&subject=ChatGPT");
     expect(serve.requests).toContain("GET /v1/messages/2");
   });
 
@@ -710,7 +1860,7 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
 
     expect(latest?.email.id).toBe("right");
     expect(latest?.code).toBe("123456");
-    expect(serve.requests).toContain("GET /v1/messages?limit=50&offset=0&direction=inbound&to=andrei%40hasna.com&from=openai&subject=ChatGPT");
+    expect(serve.requests).toContain("GET /v1/messages?limit=50&direction=inbound&to=andrei%40hasna.com&from=openai&subject=ChatGPT");
   });
 
   it("persists mailbox mutations through the self-hosted serve", async () => {
@@ -768,8 +1918,16 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
       const msg = await ds.getMessage(id);
       const body = await ds.getMessageBody(msg!);
       const paths = await ds.getAttachmentPaths(id);
-      expect(body?.attachments).toEqual([{ filename: "../../secret.txt", content_type: "text/plain", size: 5 }]);
-      expect(paths).toEqual([{ filename: "../../secret.txt", content_type: "text/plain", size: 5 }]);
+      expect(body?.attachments).toEqual([{
+        filename: "../../secret.txt",
+        content_type: "text/plain",
+        size: 5,
+      }]);
+      expect(paths).toEqual([{
+        filename: "../../secret.txt",
+        content_type: "text/plain",
+        size: 5,
+      }]);
       expect(paths[0]!.local_path).toBeUndefined();
       expect(paths[0]!.s3_url).toBeUndefined();
       expect(serve.requests.some((request) => request.includes("/attachments/"))).toBe(false);
@@ -802,6 +1960,15 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
   it("returns an explicit metadata-only state and rejects malformed stored payloads", async () => {
     const { ds } = make([
       v1("metadata", { attachments: [{ filename: "invoice.pdf", content_type: "application/pdf", size: 12 }] }),
+      v1("legacy-null", {
+        attachments: [{
+          filename: "legacy.pdf",
+          content_type: "application/pdf",
+          size: null,
+          content_base64: "must-not-leak",
+          diagnostic: "must-not-leak",
+        }],
+      }),
       v1("malformed", {
         attachments: [{ filename: "bad.bin", content_type: "application/octet-stream", size: 3 }],
         _attachment_contents: ["%%%="],
@@ -814,6 +1981,15 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
       content_type: "application/pdf",
       bytes: 12,
     });
+    const legacy = await ds.getAttachmentContent("legacy-null", 0, { maxBytes: 1024 });
+    expect(legacy).toEqual({
+      state: "content_unavailable",
+      index: 0,
+      filename: "legacy.pdf",
+      content_type: "application/pdf",
+      bytes: null,
+    });
+    expect(JSON.stringify(legacy)).not.toContain("must-not-leak");
     await expect(ds.getAttachmentContent("malformed", 0, { maxBytes: 1024 })).rejects.toThrow(/base64/i);
     expect(await ds.getAttachmentContent("metadata", 9, { maxBytes: 1024 })).toEqual({ state: "not_found", index: 9 });
   });
@@ -821,8 +1997,9 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
   // #36: a historical record can expose attachment metadata while the payload
   // was never carried over. The serve reports that per entry; the mapper must
   // pass the verdict through to the body and the path list — and must NOT
-  // invent one when the serve stays silent (older serve => unknown, not gone).
-  it("surfaces the serve's metadata-only verdict on historical attachments without inventing one", async () => {
+  // keep an omitted legacy verdict unknown so callers may retain their historic
+  // probe behavior. Only an explicit false is authoritative unavailability.
+  it("surfaces explicit availability verdicts while preserving an omitted legacy verdict as unknown", async () => {
     const { ds } = make([
       v1("historical", {
         attachments: [
@@ -847,7 +2024,11 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     ]);
 
     const legacyServe = await ds.getAttachmentPaths("olderserve");
-    expect(legacyServe).toEqual([{ filename: "unknown.pdf", content_type: "application/pdf", size: 10 }]);
+    expect(legacyServe).toEqual([{
+      filename: "unknown.pdf",
+      content_type: "application/pdf",
+      size: 10,
+    }]);
     expect(Object.hasOwn(legacyServe[0]!, "content_available")).toBe(false);
   });
 
@@ -960,5 +2141,191 @@ describe("resolveMailDataSource — self-hosted seam selection", () => {
     resetSelfHostedConfigCache();
     resetMailDataSource();
     expect(resolveSelfHostedMailDataSource()).toBeNull();
+  });
+});
+
+// ── conversation / thread projection ────────────────────────────────────────
+//
+// The self-hosted store has no thread_id column, so getConversation() used to
+// answer with the single message it was handed. Everything above that seam then
+// lied: `emails email replies <sent-id>` printed "No replies." for a message
+// that had them, and every thread header read "(1 message)".
+
+function threadRow(id: string, over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id,
+    direction: "inbound",
+    from_addr: `${id}@example.com`,
+    to_addrs: ["andrei@hasna.com"],
+    cc_addrs: [],
+    subject: "Declaratii TVA 06.2026",
+    body_text: `body of ${id}`,
+    body_html: null,
+    status: "received",
+    message_id: `<${id}@x>`,
+    in_reply_to: null,
+    received_at: "2026-07-01T08:00:00.000Z",
+    is_read: false,
+    is_starred: false,
+    labels: [],
+    headers: {},
+    ...over,
+  };
+}
+
+describe("SelfHostedMailDataSource — conversations", () => {
+  it("returns the whole conversation, oldest first, not just the selected message", async () => {
+    const { ds } = make([
+      threadRow("sent", { direction: "outbound", from_addr: "andrei@hasna.com", to_addrs: ["kpmg@example.com"], received_at: "2026-07-01T08:00:00.000Z" }),
+      threadRow("reply1", { subject: "Re: Declaratii TVA 06.2026", in_reply_to: "<sent@x>", received_at: "2026-07-01T09:00:00.000Z" }),
+      threadRow("reply2", { subject: "RE: declaratii tva 06.2026", in_reply_to: "<reply1@x>", received_at: "2026-07-01T10:00:00.000Z" }),
+      threadRow("unrelated", { subject: "Something else entirely", received_at: "2026-07-01T11:00:00.000Z" }),
+    ]);
+
+    const sent = (await ds.getMessage("sent"))!;
+    const conversation = await ds.getConversation(sent);
+
+    expect(conversation.map((m) => m.id)).toEqual(["sent", "reply1", "reply2"]);
+    expect(conversation[0]).toMatchObject({ kind: "sent", storage: "email" });
+    expect(conversation[1]).toMatchObject({ kind: "received", storage: "inbound" });
+  });
+
+  it("keeps a reply attached when its subject was edited but In-Reply-To still points at the thread", async () => {
+    const { ds } = make([
+      threadRow("root", { direction: "outbound", from_addr: "andrei@hasna.com", subject: "Invoice", received_at: "2026-07-01T08:00:00.000Z" }),
+      threadRow("edited", { subject: "Re: Invoice — revised numbers", in_reply_to: "<root@x>", received_at: "2026-07-01T09:00:00.000Z" }),
+    ]);
+
+    const root = (await ds.getMessage("root"))!;
+    expect((await ds.getConversation(root)).map((m) => m.id)).toEqual(["root", "edited"]);
+  });
+
+  it("follows a multi-hop reference chain even when the newest hop is seen first", async () => {
+    const { ds } = make([
+      threadRow("root", { direction: "outbound", subject: "Root", message_id: "<root@x>", received_at: "2026-07-01T08:00:00.000Z" }),
+      threadRow("hop1", { subject: "Re: Root revised", message_id: "<hop1@x>", in_reply_to: "<root@x>", received_at: "2026-07-01T09:00:00.000Z" }),
+      threadRow("hop2", { subject: "Re: Root revised again", message_id: "<hop2@x>", in_reply_to: "<hop1@x>", received_at: "2026-07-01T10:00:00.000Z" }),
+    ]);
+
+    const root = (await ds.getMessage("root"))!;
+    expect((await ds.getConversation(root)).map((m) => m.id)).toEqual(["root", "hop1", "hop2"]);
+  });
+
+  it("does not fabricate a thread out of every empty-subject message", async () => {
+    const { ds } = make([
+      threadRow("blank-a", { subject: "", received_at: "2026-07-01T08:00:00.000Z" }),
+      threadRow("blank-b", { subject: "", received_at: "2026-07-01T09:00:00.000Z" }),
+    ]);
+
+    const first = (await ds.getMessage("blank-a"))!;
+    expect(first.thread_id).toBeNull();
+    expect((await ds.getConversation(first)).map((m) => m.id)).toEqual(["blank-a"]);
+  });
+
+  it("names the conversation with the server's own thread key on every row", async () => {
+    const { ds } = make([
+      threadRow("sent", { direction: "outbound", subject: "Declaratii TVA 06.2026" }),
+      threadRow("reply1", { subject: "Re: Declaratii TVA 06.2026", in_reply_to: "<sent@x>" }),
+    ], { leanList: true });
+
+    const rows = await ds.listMailbox("inbox");
+    expect(rows.map((m) => m.thread_id)).toEqual(["declaratii tva 06.2026"]);
+    expect((await ds.getMessage("sent"))!.thread_id).toBe("declaratii tva 06.2026");
+  });
+
+  it("reads every thread body and windows to the newest N when a limit is given", async () => {
+    const { ds } = make([
+      threadRow("sent", { direction: "outbound", body_text: "please find attached", received_at: "2026-07-01T08:00:00.000Z" }),
+      threadRow("reply1", { subject: "Re: Declaratii TVA 06.2026", in_reply_to: "<sent@x>", body_text: "received, thanks", received_at: "2026-07-01T09:00:00.000Z" }),
+      threadRow("reply2", { subject: "Re: Declaratii TVA 06.2026", in_reply_to: "<reply1@x>", body_text: "one more question", received_at: "2026-07-01T10:00:00.000Z" }),
+    ], { leanList: true });
+
+    const sent = (await ds.getMessage("sent"))!;
+    const all = await ds.getConversationBodies(sent);
+    expect(all.map((entry) => entry.item.id)).toEqual(["sent", "reply1", "reply2"]);
+    expect(all.map((entry) => entry.body?.text)).toEqual(["please find attached", "received, thanks", "one more question"]);
+
+    const windowed = await ds.getConversationBodies(sent, { limit: 2 });
+    expect(windowed.map((entry) => entry.item.id)).toEqual(["reply1", "reply2"]);
+  });
+});
+
+// ── source scopes ───────────────────────────────────────────────────────────
+//
+// listMailboxSources() publishes exactly one source id, and the CLI tells the
+// operator to pass it to --source. Feeding it back used to return an empty
+// mailbox and all-zero folder counts — indistinguishable from an empty store.
+
+describe("SelfHostedMailDataSource — source scoping", () => {
+  it("round-trips the source id it publishes instead of narrowing to nothing", async () => {
+    const { ds } = make([v1("2"), v1("5")]);
+    const [source] = await ds.listMailboxSources();
+
+    const rows = await ds.listMailbox("inbox", { source: { sourceId: source!.id } });
+    expect(rows.map((m) => m.id)).toEqual(["5", "2"]);
+    expect((await ds.mailboxCounts({ source: { sourceId: source!.id } })).inbox).toBe(2);
+  });
+
+  it("accepts local mode's `all` source id as the same whole-store scope", async () => {
+    const { ds } = make([v1("2"), v1("5")]);
+    expect((await ds.listMailbox("inbox", { source: { sourceId: "all" } })).map((m) => m.id)).toEqual(["5", "2"]);
+  });
+
+  it("refuses provider/S3/legacy scopes with an actionable message instead of an empty mailbox", async () => {
+    const { ds } = make([v1("2"), v1("5")]);
+
+    for (const source of [
+      { providerId: "cred-1" },
+      { sourceId: "s3:mail-bucket", s3Bucket: "mail-bucket" },
+      { sourceId: "legacy", legacy: true },
+      { sourceId: "no-such-source" },
+    ]) {
+      await expect(ds.listMailbox("inbox", { source })).rejects.toThrow(/no ingestion-source or provider provenance/);
+      await expect(ds.mailboxCounts({ source })).rejects.toThrow(/--address <email> or --domain <domain>/);
+      await expect(ds.listMailboxStatus({ source })).rejects.toThrow(/emails inbox sources/);
+    }
+  });
+
+  it("refuses an unsupported scope on clear rather than deleting the whole store", async () => {
+    const { ds, serve } = make([v1("2"), v1("5")]);
+    await expect(ds.clear({ source: { providerId: "cred-1" } })).rejects.toThrow(/cannot be applied/);
+    expect(serve.deleted).toEqual([]);
+  });
+
+  it("still narrows on address and domain scopes", async () => {
+    const { ds } = make([
+      v1("2", { to_addrs: ["andrei@hasna.com"] }),
+      v1("5", { to_addrs: ["other@elsewhere.com"] }),
+    ]);
+    expect((await ds.listMailbox("inbox", { source: { address: "andrei@hasna.com" } })).map((m) => m.id)).toEqual(["2"]);
+    expect((await ds.listMailbox("inbox", { source: { domain: "elsewhere.com" } })).map((m) => m.id)).toEqual(["5"]);
+  });
+
+  it("honors the --search and --limit it is handed on listMailboxSources", async () => {
+    const { ds } = make([v1("2")]);
+    expect((await ds.listMailboxSources({ search: "self-hosted" })).map((s) => s.id)).toEqual(["self_hosted"]);
+    expect(await ds.listMailboxSources({ search: "s3-bucket-that-does-not-exist" })).toEqual([]);
+    expect(await ds.listMailboxSources({ limit: 0 })).toHaveLength(1);
+  });
+});
+
+// ── read filter paging ──────────────────────────────────────────────────────
+
+describe("SelfHostedMailDataSource — read filter", () => {
+  it("fills a page with read mail instead of filtering an already-paged result", async () => {
+    const rows = [
+      ...Array.from({ length: 60 }, (_, index) => v1(`u${index}`, {
+        is_read: false,
+        received_at: `2026-07-02T${String(index % 24).padStart(2, "0")}:00:00.000Z`,
+      })),
+      v1("read-new", { is_read: true, received_at: "2026-07-01T10:00:00.000Z" }),
+      v1("read-old", { is_read: true, received_at: "2026-07-01T09:00:00.000Z" }),
+      v1("read-oldest", { is_read: true, received_at: "2026-07-01T08:00:00.000Z" }),
+    ];
+    const { ds } = make(rows);
+
+    const page = await ds.listMailbox("inbox", { read: true, limit: 2 });
+    expect(page.map((m) => m.id)).toEqual(["read-new", "read-old"]);
+    expect(page.every((m) => m.is_read)).toBe(true);
   });
 });

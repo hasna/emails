@@ -31,10 +31,38 @@ if (secureClientCode === generated.code) {
   throw new Error("generated SDK constructor shape changed; HTTPS policy was not injected");
 }
 
-function replaceRequired(source: string, needle: string, replacement: string, label: string): string {
-  const updated = source.replace(needle, replacement);
+function replaceRequired(source: string, needle: string | RegExp, replacement: string, label: string): string {
+  const updated = typeof needle === "string"
+    ? source.replace(needle, replacement)
+    : source.replace(needle, replacement);
   if (updated === source) throw new Error(`generated SDK shape changed; ${label} was not injected`);
   return updated;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Widen a generated interface's `message` property to `| null`.
+ *
+ * Anchored on the interface NAME and the property, not on the whole literal:
+ * adding a sibling field to a response schema (e.g. the send-failure
+ * `reason`/`provider_error`/`sent` triple) must not silently drop the
+ * nullability the wire contract actually has. A brittle whole-literal needle is
+ * what broke `bun run scripts/generate-selfhost-sdk.ts` on the first attempt at
+ * the 2026-07-25 send-semantics fix.
+ */
+function nullableMessageProperty(
+  source: string,
+  interfaceName: string,
+  messageType: string,
+  label: string,
+): string {
+  const pattern = new RegExp(
+    `(export interface ${escapeRegExp(interfaceName)} \\{[^{}]*?"message"\\??: ${escapeRegExp(messageType)})(\\s*[;}])`,
+  );
+  return replaceRequired(source, pattern, "$1 | null$2", label);
 }
 
 secureClientCode = replaceRequired(
@@ -75,7 +103,7 @@ secureClientCode = replaceRequired(
     this.name = "ApiError";
   }
 }`,
-  `export type SendIntentRecoveryState = "blocked" | "cancelled" | "none" | "pending" | "sending" | "sent" | "uncertain";
+  `export type SendIntentRecoveryState = "blocked" | "cancelled" | "failed" | "none" | "pending" | "sending" | "sent" | "uncertain";
 
 export interface SendIntentMessageProjection {
   id: string;
@@ -84,7 +112,7 @@ export interface SendIntentMessageProjection {
 
 const SEND_INTENT_MESSAGE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const SEND_INTENT_RECOVERY_STATES = new Set<SendIntentRecoveryState>([
-  "blocked", "cancelled", "none", "pending", "sending", "sent", "uncertain",
+  "blocked", "cancelled", "failed", "none", "pending", "sending", "sent", "uncertain",
 ]);
 
 function parseSendIntentMessage(body: unknown): SendIntentMessageProjection | undefined {
@@ -111,22 +139,22 @@ export class ApiError extends Error {
 }`,
   "send-intent error projection",
 );
-secureClientCode = replaceRequired(
+secureClientCode = nullableMessageProperty(
   secureClientCode,
-  `export interface SendIntentLookup { "found": boolean; "tombstoned": boolean; "reconciliation_required": boolean; "message": SendIntentMessage }`,
-  `export interface SendIntentLookup { "found": boolean; "tombstoned": boolean; "reconciliation_required": boolean; "message": SendIntentMessage | null }`,
+  "SendIntentLookup",
+  "SendIntentMessage",
   "nullable send-intent lookup message",
 );
-secureClientCode = replaceRequired(
+secureClientCode = nullableMessageProperty(
   secureClientCode,
-  `export interface SendIntentCancellation { "outcome": "tombstoned" | "cancelled" | "reconciliation_required"; "tombstoned": true; "reconciliation_required": boolean; "message": SendIntentMessage }`,
-  `export interface SendIntentCancellation { "outcome": "tombstoned" | "cancelled" | "reconciliation_required"; "tombstoned": true; "reconciliation_required": boolean; "message": SendIntentMessage | null }`,
+  "SendIntentCancellation",
+  "SendIntentMessage",
   "nullable send-intent cancellation message",
 );
-secureClientCode = replaceRequired(
+secureClientCode = nullableMessageProperty(
   secureClientCode,
-  `export interface SendMessageError { "error": string; "retry_safe": boolean; "tombstoned"?: boolean; "message"?: Message | SendIntentMessage }`,
-  `export interface SendMessageError { "error": string; "retry_safe": boolean; "tombstoned"?: boolean; "message"?: Message | SendIntentMessage | null }`,
+  "SendMessageError",
+  "Message | SendIntentMessage",
   "nullable send failure message",
 );
 

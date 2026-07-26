@@ -173,7 +173,10 @@ describe.skipIf(!pgClient)("send-failure semantics (2026-07-25 incident contract
         providerCalls += 1;
         throw sesError(
           "MessageRejected",
-          "Email address is not verified. The following identities failed the check in region US-EAST-1: ccordos@kpmg.com",
+          // Shape-faithful copy of the real SES error, with a reserved example
+          // address: this repo is public and must not publish a third party's
+          // mailbox.
+          "Email address is not verified. The following identities failed the check in region US-EAST-1: accountant@external.example",
           400,
           "client",
         );
@@ -187,7 +190,7 @@ describe.skipIf(!pgClient)("send-failure semantics (2026-07-25 incident contract
       token,
       body: {
         from: "sender@reject422.example",
-        to: ["external@kpmg-like.example"],
+        to: ["accountant@external.example"],
         subject: "external send",
         text: "body",
         idempotency_key: key,
@@ -301,6 +304,26 @@ describe.skipIf(!pgClient)("send-failure semantics (2026-07-25 incident contract
     expect(res.body.provider_message_id).toBe("provider-accepted-id");
     expect(String(res.body.warning)).toMatch(/sent|accepted/i);
     expect(res.body.retry_safe).toBe(false);
+
+    // The HTTP response is not where an operator looks a day later — the ROW is.
+    // A parked row that lost the provider id can only be reconciled as
+    // `not_sent`, which would file a delivered message as failed.
+    const row = await rowByKey(key);
+    expect(row?.send_state).toBe("uncertain");
+    expect(row?.provider_message_id).toBe("provider-accepted-id");
+
+    // And that evidence must be enough to close it out honestly as `sent`.
+    const reconciled = await call(deps, "POST", "/v1/messages/send-intents/reconcile", {
+      token,
+      body: {
+        message_id: row!.id,
+        outcome: "sent",
+        provider_message_id: row!.provider_message_id,
+        evidence: "provider returned this id before the ledger write failed",
+      },
+    });
+    expect(reconciled.status).toBe(200);
+    expect((await rowByKey(key))?.send_state).toBe("sent");
   });
 
   it("an indeterminate provider failure stays 502 and says the outcome is unknown (sent: null)", async () => {

@@ -97,11 +97,16 @@ function messagesClient(): { client: TypedQueryClient; rows: Record<string, unkn
         row["provider_message_id"] = (params ?? [])[1];
         return row as unknown as T;
       }
-      if (sql.startsWith("UPDATE messages SET send_state = 'uncertain'")) {
+      if (sql.startsWith("UPDATE messages") && sql.includes("send_state = 'uncertain'")) {
         const row = rows.find((item) => item["id"] === (params ?? [])[0]);
         if (!row || row["send_state"] === "sent") return null;
         row["send_state"] = "uncertain";
         row["status"] = "uncertain";
+        // $3 is the provider message id, present only when the provider
+        // accepted and the ledger write afterwards failed. It must survive:
+        // it is the evidence that the message left.
+        const providerMessageId = (params ?? [])[2];
+        if (providerMessageId != null) row["provider_message_id"] = providerMessageId;
         return row as unknown as T;
       }
       if (sql.includes("SET send_state = 'cancelled'")) {
@@ -204,7 +209,8 @@ describe("Emails self-hosted inbound messages", () => {
       ids.indexOf("0001_mailery_selfhosted_core"),
     );
     expect(ids).toContain("0018_send_intent_recovery");
-    expect(ids.at(-1)).toBe("0019_inbox_perf_rollups");
+    expect(ids).toContain("0019_inbox_perf_rollups");
+    expect(ids.at(-1)).toBe("0020_attachment_repair_ledger");
   });
 
   test("POST inbound preserves all fields and returns 201", async () => {
@@ -326,10 +332,10 @@ describe("Emails self-hosted inbound messages", () => {
     }));
     const message = (await created!.json()).message;
     // The detail read predicts each of those outcomes without a fetch: index 0
-    // is metadata-only, 1 and 2 have stored bytes (2's are malformed, which is a
-    // payload-validity problem, not an availability one).
+    // is metadata-only, index 1 has valid stored bytes, and index 2's malformed
+    // non-canonical base64 is truthfully unavailable.
     expect(message.attachments.map((a: { content_available: boolean }) => a.content_available))
-      .toEqual([false, true, true]);
+      .toEqual([false, true, false]);
     const get = (index: number, suffix = "") => handleSelfHostedRequest(d, new Request(
       `http://svc/v1/messages/${encodeURIComponent(message.id)}/attachments/${index}${suffix}`,
       { headers: { "x-api-key": writeToken() } },
@@ -341,6 +347,34 @@ describe("Emails self-hosted inbound messages", () => {
     expect((await get(99))?.status).toBe(404);
     expect((await get(1, "?max_bytes=4"))?.status).toBe(413);
     expect((await get(2))?.status).toBe(422);
+  });
+
+  test("preserves a primitive attachment gap without advertising content or shifting later indexes", async () => {
+    const d = deps();
+    const created = await handleSelfHostedRequest(d, post({
+      ...INBOUND,
+      source_id: "attachment-primitive-gap",
+      attachments: [
+        { filename: "first.txt", content_type: "text/plain", size: 3, content_base64: "b25l" },
+        17,
+        { filename: "later.txt", content_type: "text/plain", size: 3, content_base64: "dHdv" },
+      ],
+    }));
+    const message = (await created!.json()).message;
+    expect(message.attachments).toEqual([
+      { filename: "first.txt", content_type: "text/plain", size: 3, content_available: true },
+      { content_available: false },
+      { filename: "later.txt", content_type: "text/plain", size: 3, content_available: true },
+    ]);
+
+    const get = (index: number) => handleSelfHostedRequest(d, new Request(
+      `http://svc/v1/messages/${encodeURIComponent(message.id)}/attachments/${index}`,
+      { headers: { "x-api-key": writeToken() } },
+    ));
+    expect((await get(1))?.status).toBe(404);
+    const later = await get(2);
+    expect(later?.status).toBe(200);
+    expect((await later!.json()).attachment.filename).toBe("later.txt");
   });
 
   test("outbound ledger-only writes are rejected", async () => {
@@ -786,6 +820,10 @@ describe("Emails self-hosted inbound messages", () => {
     expect(body.warning).toContain("do NOT retry");
     expect(body.retry_safe).toBe(false);
     expect(body.message.send_state).toBe("uncertain");
+    // …and the parked row keeps the provider id, the only proof it left. Without
+    // it the row can only be closed as `not_sent` — a delivered message filed
+    // as failed.
+    expect(body.message.provider_message_id).toBe("provider-accepted");
   });
 
   test("POST still requires from and to", async () => {
