@@ -4,7 +4,7 @@ import { readFileSync, statSync } from "node:fs";
 import { basename, extname } from "node:path";
 import { resolveMailDataSource, type MailSendAttachment } from "../../lib/mail-data-source.js";
 import { getTemplate, renderTemplate } from "../../db/templates.js";
-import { getSuppressedEmailSet } from "../../db/contacts.js";
+import { suppressedRecipientsAmong } from "../../db/contacts.js";
 import { handleError } from "../utils.js";
 import { getEmailsMode } from "../../lib/mode.js";
 import {
@@ -70,7 +70,7 @@ export function registerSendCommands(program: Command, _output: (data: unknown, 
     .option("--provider <id>", "Provider ID (uses first active if not specified)")
     .option("--template <name>", "Use a template by name")
     .option("--vars <json>", "Template variables as JSON string")
-    .option("--force", "Send even if recipients are suppressed")
+    .option("--force", "Send even if recipients are suppressed (local mode only; the self-hosted server refuses regardless)")
     .option("--dry-run", "Preview what would be sent without actually sending")
     .option("--schedule <datetime>", "Schedule email for later (ISO 8601 datetime)")
     .option("--unsubscribe-url <url>", "Inject List-Unsubscribe headers (RFC 8058 one-click)")
@@ -95,6 +95,7 @@ export function registerSendCommands(program: Command, _output: (data: unknown, 
       template?: string;
       vars?: string;
       force?: boolean;
+      dryRun?: boolean;
       schedule?: string;
       trackOpens?: boolean;
       trackClicks?: boolean;
@@ -111,13 +112,41 @@ export function registerSendCommands(program: Command, _output: (data: unknown, 
         }
         if (toAddresses.length === 0) handleError(new Error("No recipients specified. Use --to or --to-group"));
 
-        // Check suppressed contacts
+        // Suppressed contacts. This used to print "Use --force to send anyway"
+        // and then FALL THROUGH with no return and no filtering, so a suppressed
+        // recipient was mailed whether or not --force was passed — and in local
+        // mode there is no second gate anywhere further down the chain. The
+        // suppression is now enforced here, where it is checked.
         const allRecipients = [...toAddresses, ...(opts.cc || []), ...(opts.bcc || [])];
-        const suppressedEmailSet = getSuppressedEmailSet(allRecipients);
-        const suppressedRecipients = allRecipients.filter((email) => suppressedEmailSet.has(email));
-        if (suppressedRecipients.length > 0 && !opts.force) {
-          console.log(chalk.yellow(`Warning: Suppressed recipients: ${suppressedRecipients.join(", ")}`));
-          console.log(chalk.dim("  Use --force to send anyway."));
+        // Canonical comparison (see db/contacts): `Blocked@ext.com` and
+        // `"Blocked Person <blocked@ext.com>"` are the same recipient as
+        // `blocked@ext.com`, and an exact string match let both forms through.
+        const suppressedRecipients = suppressedRecipientsAmong(allRecipients);
+        if (suppressedRecipients.length > 0) {
+          const list = suppressedRecipients.join(", ");
+          console.log(chalk.yellow(`Warning: Suppressed recipients: ${list}`));
+          if (opts.dryRun) {
+            // A dry run sends nothing, so it reports instead of refusing.
+            console.log(chalk.dim("  A real send would be refused; --force overrides in local mode only."));
+          } else if (!opts.force) {
+            handleError(new Error(
+              `Refusing to send to suppressed recipient(s): ${list}. `
+              + "Pass --force to send anyway, or clear the suppression with `emails contact unsuppress <email>`.",
+            ));
+          } else if (ds.mode === "self_hosted") {
+            // --force has always been dead on this path: it is never transmitted,
+            // and the server refuses a suppressed recipient unconditionally with
+            // 409 recipient_suppressed and offers no override. Say so here instead
+            // of spending a round-trip to arrive at a confusing 409.
+            handleError(new Error(
+              `--force cannot override suppression in self-hosted mode: the server refuses a send to a `
+              + `suppressed recipient (409 recipient_suppressed) and accepts no override. `
+              + "Clear the suppression first with `emails contact unsuppress <email>`. "
+              + `Suppressed recipient(s): ${list}.`,
+            ));
+          } else {
+            console.log(chalk.yellow("  --force: sending to the suppressed recipient(s) anyway."));
+          }
         }
 
         // Resolve body from --body, --body-file, or stdin pipe
@@ -153,7 +182,7 @@ export function registerSendCommands(program: Command, _output: (data: unknown, 
         // creds/warming/tracking/scheduling/threading tables, local ledger) do not
         // apply — the server owns sending.
         const attachments = readSendAttachments(opts.attachment);
-        if ((opts as Record<string, unknown>).dryRun) {
+        if (opts.dryRun) {
           // --dry-run PREDICTS the send, so every claim below must be true for the
           // mode that would actually run it. This block had no mode branch: in
           // local mode it announced "(self-hosted)", quoted the server's

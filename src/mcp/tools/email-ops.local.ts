@@ -75,6 +75,27 @@ export function registerEmailOpsTools(server: McpServer): void {
 
       if (!subject) throw new Error("Subject is required (provide subject or template)");
 
+      // Suppression is enforced HERE too, not only in `emails send`. This is the
+      // model-driven surface, it reaches the same local send path, and in local
+      // mode nothing downstream consults `contacts` — so without this an agent
+      // mails a hard-bounced/complained/unsubscribed address. There is
+      // deliberately no `force` parameter: an agent must not be able to override
+      // a suppression, and the self-hosted server refuses it regardless
+      // (409 recipient_suppressed).
+      const { suppressedRecipientsAmong } = await import('../../db/contacts.local.js');
+      const asList = (value: string | string[] | undefined): string[] =>
+        value === undefined ? [] : Array.isArray(value) ? value : String(value).split(",");
+      const recipients = [...asList(input.to), ...asList(input.cc), ...asList(input.bcc)]
+        .map((value) => value.trim())
+        .filter((value) => value !== "");
+      const suppressed = suppressedRecipientsAmong(recipients, db);
+      if (suppressed.length > 0) {
+        throw new Error(
+          `Refusing to send to suppressed recipient(s): ${suppressed.join(", ")}. `
+          + "Clear the suppression first (emails contact unsuppress <email>).",
+        );
+      }
+
       let providerId: string;
 
       if (input.provider_id) {

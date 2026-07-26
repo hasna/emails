@@ -1,5 +1,6 @@
 import type { Database } from "./database.js";
 import { getDatabase, uuid, now } from "./database.js";
+import { canonicalSender } from "../lib/email-address.js";
 import { safeOffset, safeOptionalLimit } from "./pagination.js";
 import {
   selfHostedResource,
@@ -76,7 +77,13 @@ function rowToContact(row: ContactRow): Contact {
  */
 function findSelfHostedContactByEmail(selfHosted: NonNullable<ReturnType<typeof selfHostedResource>>, email: string): Contact | null {
   const rows = selfHosted.list({ email, limit: 500 }).map(apiToContact);
-  return rows.find((c) => c.email === email) ?? null;
+  // Canonical comparison: the server stores whatever spelling it was given, and
+  // an exact match would miss a mixed-case or display-name form (which for a
+  // SUPPRESSION lookup means silently permitting the send).
+  const wanted = canonicalSender(email) ?? email.trim().toLowerCase();
+  return rows.find((c) => c.email === email)
+    ?? rows.find((c) => (canonicalSender(c.email) ?? c.email.trim().toLowerCase()) === wanted)
+    ?? null;
 }
 
 export function upsertContact(email: string, db?: Database): Contact {
@@ -285,16 +292,47 @@ export function isContactSuppressed(email: string, db?: Database): boolean {
   return row?.suppressed === 1;
 }
 
+/**
+ * Suppressed addresses among `emails`, matched CANONICALLY.
+ *
+ * A recipient may be written `Display Name <a@b.com>` or in a different case
+ * than the stored contact, and `contacts.email` has no `COLLATE NOCASE`. An
+ * exact string comparison therefore let either form slip straight past a
+ * suppression — while the self-hosted server, which canonicalizes both sides
+ * (`canonicalAddress` -> `canonicalSender`), refused the same send. Local
+ * enforcement must not be the weaker one.
+ *
+ * The returned set contains both the stored spelling and its canonical form, so
+ * a caller may test either; `suppressedRecipientsAmong` does the canonical test
+ * for them.
+ */
 export function getSuppressedEmailSet(emails: Iterable<string>, db?: Database): Set<string> {
-  const uniqueEmails = Array.from(new Set(emails));
   const suppressed = new Set<string>();
+  // Look up the address as typed AND its canonical form, so a display-name or
+  // mixed-case recipient still resolves to the stored contact.
+  const lookups = new Set<string>();
+  for (const raw of emails) {
+    if (typeof raw !== "string") continue;
+    const trimmed = raw.trim();
+    if (!trimmed) continue;
+    lookups.add(trimmed);
+    const canonical = canonicalSender(trimmed);
+    if (canonical) lookups.add(canonical);
+  }
+  const uniqueEmails = [...lookups];
   if (uniqueEmails.length === 0) return suppressed;
+
+  const record = (email: string) => {
+    suppressed.add(email);
+    const canonical = canonicalSender(email);
+    if (canonical) suppressed.add(canonical);
+  };
 
   const selfHosted = selfHostedResource(CONTACT_RESOURCE);
   if (selfHosted) {
     for (const email of uniqueEmails) {
       const contact = findSelfHostedContactByEmail(selfHosted, email);
-      if (contact?.suppressed) suppressed.add(contact.email);
+      if (contact?.suppressed) record(contact.email);
     }
     return suppressed;
   }
@@ -303,13 +341,31 @@ export function getSuppressedEmailSet(emails: Iterable<string>, db?: Database): 
   for (let i = 0; i < uniqueEmails.length; i += CONTACT_READ_CHUNK_SIZE) {
     const chunk = uniqueEmails.slice(i, i + CONTACT_READ_CHUNK_SIZE);
     const placeholders = chunk.map(() => "?").join(", ");
+    // `lower(email)` on BOTH sides: a contact stored as `Blocked@ext.com` must
+    // still suppress a send to `blocked@ext.com` and vice versa.
     const rows = d
-      .query(`SELECT email FROM contacts WHERE suppressed = 1 AND email IN (${placeholders})`)
-      .all(...chunk) as Array<{ email: string }>;
+      .query(`SELECT email FROM contacts WHERE suppressed = 1 AND lower(email) IN (${placeholders})`)
+      .all(...chunk.map((value) => value.toLowerCase())) as Array<{ email: string }>;
     for (const row of rows) {
-      suppressed.add(row.email);
+      record(row.email);
     }
   }
 
   return suppressed;
+}
+
+/**
+ * The subset of `recipients` that is suppressed, compared canonically and
+ * returned in the caller's original spelling (so a warning names what the
+ * operator typed). One helper so every send surface asks the same question.
+ */
+export function suppressedRecipientsAmong(recipients: Iterable<string>, db?: Database): string[] {
+  const list = [...recipients];
+  const suppressed = getSuppressedEmailSet(list, db);
+  if (suppressed.size === 0) return [];
+  return list.filter((recipient) => {
+    if (suppressed.has(recipient) || suppressed.has(recipient.trim())) return true;
+    const canonical = canonicalSender(recipient);
+    return canonical !== null && suppressed.has(canonical);
+  });
 }
