@@ -581,13 +581,23 @@ run "ses_credentials_injected_by_arn_reference_only" {
   }
 
   assert {
-    condition = alltrue([
-      for name in ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "EMAILS_SES_ACCESS_KEY_ID", "EMAILS_SES_SECRET_ACCESS_KEY"] :
-      contains([
-        for entry in jsondecode(aws_ecs_task_definition.api.container_definitions)[0].secrets : entry.name
-      ], name)
+    condition = toset([
+      for entry in jsondecode(aws_ecs_task_definition.api.container_definitions)[0].secrets : entry.name
+      ]) == toset([
+      "EMAILS_DATABASE_URL",
+      "EMAILS_API_SIGNING_KEY",
+      "EMAILS_SES_ACCESS_KEY_ID",
+      "EMAILS_SES_SECRET_ACCESS_KEY",
     ])
-    error_message = "Both SES credential name pairs must reach the API container through the `secrets` block."
+    error_message = "Only the scoped SES credential pair may reach the API container through the `secrets` block."
+  }
+
+  assert {
+    condition = alltrue([
+      for entry in jsondecode(aws_ecs_task_definition.api.container_definitions)[0].secrets :
+      !contains(["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"], entry.name)
+    ])
+    error_message = "The API must not receive generic AWS credential names that repoint every SDK client."
   }
 
   assert {
@@ -614,10 +624,16 @@ run "ses_credentials_injected_by_arn_reference_only" {
         jsondecode(aws_ecs_task_definition.worker.container_definitions)[0],
         jsondecode(aws_ecs_task_definition.migration.container_definitions)[0],
         ] : alltrue([
-          for entry in definition.secrets : !strcontains(upper(entry.name), "ACCESS_KEY")
+          for entry in definition.secrets :
+          !contains([
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "EMAILS_SES_ACCESS_KEY_ID",
+            "EMAILS_SES_SECRET_ACCESS_KEY",
+          ], entry.name)
       ])
     ])
-    error_message = "SES credentials are API-only: the ingest worker's own task role has the SQS and inbound-bucket access an SES-scoped principal lacks."
+    error_message = "SES credentials are API-only: worker and migration tasks must keep their own task roles."
   }
 
   # The IAM grant must be the BARE secret ARN — a `:JSON_KEY::` suffix is not a
@@ -677,7 +693,12 @@ run "no_ses_credentials_leaves_the_task_role_alone" {
   assert {
     condition = alltrue([
       for entry in jsondecode(aws_ecs_task_definition.api.container_definitions)[0].secrets :
-      !strcontains(upper(entry.name), "ACCESS_KEY")
+      !contains([
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "EMAILS_SES_ACCESS_KEY_ID",
+        "EMAILS_SES_SECRET_ACCESS_KEY",
+      ], entry.name)
     ])
     error_message = "The default deployment must keep signing with the API task role."
   }

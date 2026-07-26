@@ -114,18 +114,12 @@ locals {
 
   # SES sending credentials, for deployments whose production-access SES account
   # is NOT the account running these tasks. SES has no cross-account role path
-  # here, so the sending principal must be presented as credentials. Both name
-  # pairs read the same two operator-owned Secrets Manager entries:
+  # here, so the sending principal must be presented as credentials. Both
+  # entries read operator-owned Secrets Manager values through scoped names:
   #
-  #   AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
-  #     Repoint the SDK default credential chain. src/providers/ses.ts falls back
-  #     to these when the provider record carries no credentials, which is what
-  #     src/server/self-hosted/sender.ts produces, so this pair is what makes an
-  #     unmodified image send through the other account.
   #   EMAILS_SES_ACCESS_KEY_ID / EMAILS_SES_SECRET_ACCESS_KEY
-  #     Scoped names, read directly by the sender on images that support them.
-  #     Prefer dropping the unscoped pair once every deployed image does, so the
-  #     default chain returns to the task role.
+  #     Read directly by the self-hosted sender. Generic AWS credential names
+  #     are deliberately absent so unrelated SDK clients retain the task role.
   #
   # Injected into the API task only. The ingest worker keeps its own task role:
   # an SES-scoped principal has no SQS or inbound-bucket access, so handing it
@@ -136,14 +130,6 @@ locals {
   ses_credential_secrets = (
     var.ses_access_key_id_secret_arn == null || var.ses_secret_access_key_secret_arn == null
     ) ? [] : [
-    {
-      name      = "AWS_ACCESS_KEY_ID"
-      valueFrom = var.ses_access_key_id_secret_arn
-    },
-    {
-      name      = "AWS_SECRET_ACCESS_KEY"
-      valueFrom = var.ses_secret_access_key_secret_arn
-    },
     {
       name      = "EMAILS_SES_ACCESS_KEY_ID"
       valueFrom = var.ses_access_key_id_secret_arn
