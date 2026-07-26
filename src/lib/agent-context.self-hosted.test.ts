@@ -204,7 +204,18 @@ describe("honest-unavailable contract (G3)", () => {
   it("marks permanently-missing fields with stable machine codes on a healthy server", async () => {
     const status = await getEmailSystemStatus();
 
-    expect(status.degraded).toBe(true);
+    // A healthy server is NOT degraded: every structurally-absent field is a
+    // published LIMITATION, not a fault. `degraded` has to stay usable as a gate
+    // (`jq -e '.degraded == false'`), and a flag that is true on every healthy
+    // deployment carries no information at all.
+    expect(status.degraded).toBe(false);
+    expect(status.failures).toEqual([]);
+    expect(status.incomplete).toEqual([]);
+    expect(status.limited).toBe(true);
+    expect(status.limitations.length).toBeGreaterThan(0);
+    // Every unavailable path is accounted for as exactly one of the two kinds.
+    expect([...status.limitations, ...status.failures].sort()).toEqual(status.unavailable);
+
     expect(status.domains.send_ready).toBeNull();
     expect(status.domains.receive_ready).toBeNull();
     expect(status.addresses.usable_from).toBeNull();
@@ -220,7 +231,53 @@ describe("honest-unavailable contract (G3)", () => {
 
     for (const path of ["domains.send_ready", "addresses.usable_from", "inbox.inbound_buckets.items"]) {
       expect(status.unavailable).toContain(path);
+      expect(status.limitations).toContain(path);
     }
+  });
+
+  it("still prints the data-gap section when the payload is healthy but limited", async () => {
+    // The gap section must be driven by the GAPS, not by `degraded`: a healthy
+    // deployment has nulls, and hiding their reasons behind a green summary would
+    // reproduce the original defect at one remove.
+    const status = await getEmailSystemStatus();
+    const rendered = formatEmailSystemStatus(status);
+
+    expect(status.degraded).toBe(false);
+    expect(rendered).toContain("Data gaps");
+    expect(rendered).toContain("addresses.usable_from — server_route_absent:/v1/senders");
+    expect(rendered).not.toContain("Read failures");
+  });
+
+  it("degrades and bounds the count when the server's paging window shifts", async () => {
+    // Production /v1/sources: 3899 rows, ORDER BY status,type,created_at (not a
+    // total order), so limit/offset paging returned 426 duplicates and skipped 426
+    // rows. The client de-duplicated and published 3473 as `complete: true`.
+    // A shifting window must now produce an explicit LOWER BOUND.
+    const many = Array.from({ length: 1200 }, (_, index) => ({
+      id: `src-${String(index).padStart(5, "0")}`,
+      type: "ses-s3",
+      name: `source-${index}`,
+      status: "active",
+      last_synced_at: null,
+      created_at: NOW,
+      updated_at: NOW,
+    }));
+    await stub.seed({ providers: PROVIDERS, domains: DOMAINS, addresses: ADDRESSES, sources: many });
+    await stub.setListOrderInstability(7, ["sources"]);
+
+    const status = await getEmailSystemStatus();
+
+    expect(status.sources.configured.availability.available).toBe(true);
+    expect(status.sources.configured.availability.complete).toBe(false);
+    expect(status.sources.configured.availability.reason).toMatch(/^enumeration_unstable:/);
+    expect(status.sources.configured.total).not.toBeNull();
+    expect(status.sources.configured.total!).toBeLessThan(many.length);
+    expect(status.incomplete).toContain("sources.configured");
+    expect(status.degraded).toBe(true);
+
+    const rendered = formatEmailSystemStatus(status);
+    expect(rendered).toContain(`Configured sources: ≥${status.sources.configured.total}`);
+    expect(rendered).toContain("Lower bounds");
   });
 
   it("reports null (never 0) and a source_unreachable reason when the API cannot be read", async () => {

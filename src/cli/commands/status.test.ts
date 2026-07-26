@@ -100,6 +100,8 @@ describe("self-hosted status CLI commands", () => {
     const result = await runStatusCommand(["status"]);
     const payload = result.data as {
       degraded: boolean;
+      limited: boolean;
+      limitations: string[];
       unavailable: string[];
       gaps: Record<string, { reason: string; available: boolean }>;
       providers: { total: number | null; active: number | null; availability: { available: boolean } };
@@ -112,7 +114,11 @@ describe("self-hosted status CLI commands", () => {
     expect(payload.domains).toMatchObject({ total: 2, verified: 1, send_ready: null });
     expect(payload.addresses).toMatchObject({ total: 1, owned: 1, usable_from: null });
 
-    expect(payload.degraded).toBe(true);
+    // A healthy server is not `degraded`; the fields it cannot answer are
+    // published as structural limitations (see src/lib/status-availability.ts).
+    expect(payload.degraded).toBe(false);
+    expect(payload.limited).toBe(true);
+    expect(payload.limitations).toContain("addresses.usable_from");
     expect(payload.unavailable).toContain("addresses.usable_from");
     expect(payload.gaps["addresses.usable_from"]?.reason).toMatch(/^server_route_absent:\/v1\/senders/);
 

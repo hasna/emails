@@ -9,6 +9,7 @@ import {
   renderStatusCount,
   renderStatusUnavailable,
   scanStatusAvailability,
+  statusGapClass,
   statusAvailable,
   statusReasonCode,
   statusUnavailable,
@@ -35,6 +36,7 @@ describe("status availability primitives", () => {
       "source_unreachable",
       "not_applicable",
       "enumeration_cap_exceeded",
+      "enumeration_unstable",
     ]);
   });
 
@@ -62,6 +64,10 @@ describe("status availability primitives", () => {
     });
     expect(scan.unavailableBlocks).toEqual(["domains"]);
     expect(scan.incompleteBlocks).toEqual(["inbox.inbound_buckets"]);
+    // The scan also hands back each block's record so a caller can CLASSIFY the
+    // gap instead of assuming every gap means the same thing.
+    expect(statusGapClass(scan.availabilityByPath["domains"]?.reason)).toBe("failure");
+    expect(statusGapClass(scan.availabilityByPath["inbox.inbound_buckets"]?.reason)).toBeNull();
   });
 
   it("renders an unmeasured count as 'unavailable' and a bounded count with ≥", () => {
@@ -83,7 +89,11 @@ function nullPayload(): EmailSystemStatus {
     generated_at: "2026-07-01T00:00:00.000Z",
     mode: { current: "self_hosted", label: "Self-hosted", source: { kind: "env", name: "EMAILS_MODE", value: "self_hosted" }, warning: null },
     degraded: true,
+    limited: true,
     unavailable: ["addresses.usable_from", "domains.send_ready", "providers.total"],
+    // providers.total is a live read failure; the other two are structural.
+    failures: ["providers.total"],
+    limitations: ["addresses.usable_from", "domains.send_ready"],
     incomplete: ["addresses"],
     gaps: {
       "providers.total": unreachable,
@@ -138,19 +148,31 @@ describe("formatEmailSystemStatus with a null-heavy payload (G5)", () => {
     expect(rendered).toContain("≥500 total");
   });
 
-  it("lists every unavailable path with its reason in the Data gaps section", () => {
+  it("lists every unavailable path with its reason, split by what it means", () => {
     const status = nullPayload();
     const gapLines = formatStatusDataGaps(status).join("\n");
-    expect(gapLines).toContain("Data gaps (3):");
+    // A read failure is not filed next to a permanent limitation: one is an
+    // incident, the other is the shape of the deployment.
+    expect(gapLines).toContain("Read failures (1)");
+    expect(gapLines).toContain("providers.total — source_unreachable:GET /v1/providers -> HTTP 503");
+    expect(gapLines).toContain("Data gaps (2)");
     for (const path of status.unavailable) expect(gapLines).toContain(path);
     expect(gapLines).toContain("server_route_absent:/v1/senders");
-    expect(gapLines).toContain("counts shown with ≥ are lower bounds");
-    expect(rendered).toContain("Data gaps (3):");
+    expect(gapLines).toContain("Lower bounds (1)");
+    expect(rendered).toContain("Read failures (1)");
   });
 
-  it("prints nothing when the payload is fully measured", () => {
+  it("prints nothing only when there is genuinely nothing to report", () => {
     const status = nullPayload();
+    // `degraded: false` alone must NOT silence the section: a healthy deployment
+    // still has nulls, and hiding their reasons is the original defect one level up.
     status.degraded = false;
+    expect(formatStatusDataGaps(status)).not.toEqual([]);
+
+    status.unavailable = [];
+    status.failures = [];
+    status.limitations = [];
+    status.incomplete = [];
     expect(formatStatusDataGaps(status)).toEqual([]);
   });
 });

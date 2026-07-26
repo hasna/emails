@@ -33,6 +33,7 @@ import {
   renderStatusCount,
   renderStatusUnavailable,
   scanStatusAvailability,
+  statusGapClass,
   statusReasonCode,
   type StatusAvailability,
 } from "./status-availability.js";
@@ -182,12 +183,38 @@ async function buildSystemStatus(): Promise<EmailSystemStatus> {
 
   const scan = scanStatusAvailability(blocks);
   const unavailable = [...new Set([...Object.keys(facts.gaps), ...scan.unavailableBlocks])].sort();
+
+  // EVERY unavailable path carries its reason in `gaps`. The facts layer registers
+  // field-level paths; the scan finds BLOCK-level ones (`database`,
+  // `inbox.realtime`, …) whose reason lives on the block's own availability record.
+  // Merging them means `gaps[path]` resolves for every path in `unavailable` — a
+  // path listed as unavailable with no retrievable reason is just a nicer-looking
+  // silence.
+  const gaps: Record<string, StatusAvailability> = { ...facts.gaps };
+  for (const path of scan.unavailableBlocks) {
+    const availability = scan.availabilityByPath[path];
+    if (availability && !gaps[path]) gaps[path] = availability;
+  }
+
+  // CLASSIFY every gap; do not assume. An unclassifiable gap counts as a FAILURE,
+  // never as an expected limitation: guessing "expected" is how a real fault would
+  // get hidden behind a green `degraded: false`.
+  const limitations: string[] = [];
+  const failures: string[] = [];
+  for (const path of unavailable) {
+    if (statusGapClass(gaps[path]?.reason) === "structural") limitations.push(path);
+    else failures.push(path);
+  }
+
   const partial: Omit<EmailSystemStatus, "next_actions"> = {
     ...blocks,
-    degraded: unavailable.length > 0 || scan.incompleteBlocks.length > 0,
+    degraded: failures.length > 0 || scan.incompleteBlocks.length > 0,
+    limited: limitations.length > 0,
     unavailable,
+    limitations,
+    failures,
     incomplete: scan.incompleteBlocks,
-    gaps: facts.gaps,
+    gaps: Object.fromEntries(Object.entries(gaps).sort(([a], [b]) => a.localeCompare(b))),
   };
 
   return { ...partial, next_actions: buildNextActions(partial, mode.mode) };
@@ -299,19 +326,67 @@ export function formatEmailSystemStatus(status: EmailSystemStatus): string {
 }
 
 /**
+ * The gap signals that EVERY subset view of this payload must carry (the
+ * `inbox sync-status` CLI/MCP/resource views publish `inbox`/`sources` without
+ * the surrounding status).
+ *
+ * One function, one field list: the four subset call sites each used to enumerate
+ * their own selection of `degraded`/`unavailable`/`gaps`, so they all silently
+ * omitted `incomplete` — a subset consumer could therefore read
+ * `sources.configured.total` as a total when the assembler knew it was a lower
+ * bound. Adding a signal here reaches every view.
+ */
+export function statusGapSignals(status: EmailSystemStatus): {
+  degraded: boolean;
+  limited: boolean;
+  unavailable: string[];
+  failures: string[];
+  limitations: string[];
+  incomplete: string[];
+  gaps: Record<string, StatusAvailability>;
+} {
+  return {
+    degraded: status.degraded,
+    limited: status.limited,
+    unavailable: status.unavailable,
+    failures: status.failures,
+    limitations: status.limitations,
+    incomplete: status.incomplete,
+    gaps: status.gaps,
+  };
+}
+
+/**
  * The mandatory "Data gaps" section. Printed by every human renderer of this
  * payload so a missing measurement is impossible to read as a healthy zero.
+ *
+ * Gated on the GAPS THEMSELVES, never on `degraded`: `degraded` is false on a
+ * healthy deployment that still cannot answer some fields, and suppressing the
+ * section then would hide every `null` behind a green summary line — which is the
+ * defect, wearing a different hat.
  */
 export function formatStatusDataGaps(status: EmailSystemStatus): string[] {
-  if (!status.degraded) return [];
-  const lines: string[] = ["", `Data gaps (${status.unavailable.length}):`];
-  for (const path of status.unavailable) {
-    const reason = status.gaps[path]?.reason ?? "unavailable";
-    lines.push(`  ${path} — ${reason}`);
+  if (status.unavailable.length === 0 && status.incomplete.length === 0) return [];
+  const lines: string[] = [""];
+  const failures = status.failures;
+  if (failures.length > 0) {
+    lines.push(`Read failures (${failures.length}) — these numbers could not be measured:`);
+    for (const path of failures) {
+      lines.push(`  ${path} — ${status.gaps[path]?.reason ?? pathAvailability(status, path)?.reason ?? "unavailable"}`);
+    }
   }
-  for (const path of status.incomplete) {
-    const availability = pathAvailability(status, path);
-    lines.push(`  ${path} — ${availability?.reason ?? "enumeration_cap_exceeded"} (counts shown with ≥ are lower bounds)`);
+  if (status.incomplete.length > 0) {
+    lines.push(`Lower bounds (${status.incomplete.length}) — counts shown with ≥ are not totals:`);
+    for (const path of status.incomplete) {
+      const availability = pathAvailability(status, path);
+      lines.push(`  ${path} — ${availability?.reason ?? "enumeration_cap_exceeded"}`);
+    }
+  }
+  if (status.limitations.length > 0) {
+    lines.push(`Data gaps (${status.limitations.length}) — not answerable in ${status.mode.current} mode:`);
+    for (const path of status.limitations) {
+      lines.push(`  ${path} — ${status.gaps[path]?.reason ?? pathAvailability(status, path)?.reason ?? "unavailable"}`);
+    }
   }
   return lines;
 }

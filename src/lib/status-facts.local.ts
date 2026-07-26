@@ -5,9 +5,14 @@
 //
 // Local mode answers everything self_hosted cannot: it owns the domain readiness
 // columns (DKIM/SPF/DMARC + inbound/outbound route state), the usable-sender
-// query, the inbound S3 bucket list and the realtime queue config. The one field
-// it must still qualify is nothing — which is why `gaps` is normally empty here
-// and `degraded` is false.
+// query, the inbound S3 bucket list and the realtime queue config.
+//
+// It is NOT gap-free, and this module must not pretend otherwise: `sources.configured`
+// is a self-hosted server inventory that local mode has no equivalent for, so it is
+// always reported unavailable here (`not_applicable`). That is a STRUCTURAL limit —
+// it shows up in `limited`/`limitations`, not in `degraded` — see
+// src/lib/status-availability.ts (statusGapClass). On a healthy local install
+// `degraded` is false and `limited` is true.
 
 import { getDatabase, getDatabasePath, type Database } from "../db/database.js";
 import { dirname } from "node:path";

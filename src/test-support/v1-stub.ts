@@ -51,6 +51,13 @@ export interface V1Stub {
   list(resource: string): Promise<Array<Record<string, unknown>>>;
   /** Read the entire store back from the stub. */
   dump(): Promise<V1StubResources>;
+  /**
+   * Emulate a non-total list ORDER BY: before every list window the named
+   * resources (or all of them) are rotated by `rotate` positions, so a
+   * limit/offset pager sees duplicates and misses rows — the production
+   * `/v1/sources` failure mode. `rotate: 0` restores stable order.
+   */
+  setListOrderInstability(rotate: number, resources?: string[]): Promise<void>;
   /** Read the current email-verification token for an address (test helper). */
   verifyToken(email: string): Promise<string | null>;
   /** Mark a signed-up user verified without a token (fixture shortcut). */
@@ -91,6 +98,9 @@ let authUsers = {};      // email -> { password, name, verified, tenants:[{slug,
 let sessions = {};       // emss_ token -> { email, tenant:{slug,name,role} }
 let verifyTokens = {};   // emiv_ token -> email
 let bootstrapped = false;
+// Non-total list-order emulation (see /v1/__list_order). 0 = stable order.
+let listRotate = 0;
+let listRotateResources = null;
 
 function safeParse(raw) {
   if (!raw) return {};
@@ -108,6 +118,18 @@ function singular(r) {
 function rowsFor(resource) {
   if (!Array.isArray(store[resource])) store[resource] = [];
   return store[resource];
+}
+// Shift the backing array in place before a list window is taken, so successive
+// pages of one enumeration see different row positions (a non-total ORDER BY).
+function rotateForList(resource, rows) {
+  if (!listRotate) return rows;
+  if (listRotateResources && listRotateResources.indexOf(resource) < 0) return rows;
+  const n = rows.length;
+  if (n < 2) return rows;
+  const by = ((listRotate % n) + n) % n;
+  const moved = rows.splice(0, by);
+  for (const row of moved) rows.push(row);
+  return rows;
 }
 function includesText(value, query) {
   if (!query) return true;
@@ -304,10 +326,25 @@ const server = Bun.serve({
       sessions = {};
       verifyTokens = {};
       bootstrapped = false;
+      listRotate = 0;
+      listRotateResources = null;
       return json({ ok: true });
     }
     if (req.method === "GET" && parts[0] === "v1" && parts[1] === "__dump") {
       return json({ resources: store });
+    }
+    // Test-only: emulate a NON-TOTAL list ORDER BY. The real server sorts by
+    // columns that are not unique (e.g. sources by status, type, created_at), and
+    // Postgres may return tied rows in a different order per query — so a
+    // limit/offset pager can see the same row twice and never see others. Rotating
+    // the backing array by \`rotate\` before each list window reproduces exactly
+    // that, which is what makes the "3473 of 3899 rows, reported as a total" bug
+    // testable.
+    if (req.method === "POST" && parts[0] === "v1" && parts[1] === "__list_order") {
+      const body = await req.json().catch(function () { return {}; });
+      listRotate = Number(body.rotate || 0) || 0;
+      listRotateResources = Array.isArray(body.resources) ? body.resources : null;
+      return json({ ok: true, rotate: listRotate });
     }
     // Test-only: read the current verification token for an email (the real
     // server emails it; here the test needs it to drive verify-email).
@@ -616,6 +653,7 @@ const server = Bun.serve({
       const offset = rawOffset === null || Number.isNaN(Number(rawOffset)) || Number(rawOffset) < 0
         ? 0
         : Math.floor(Number(rawOffset));
+      rotateForList(resource, rows);
       let windowed = offset > 0 ? rows.slice(offset) : rows;
       if (rawLimit !== null && !Number.isNaN(Number(rawLimit))) {
         const limit = Math.min(Math.max(1, Math.floor(Number(rawLimit))), 500);
@@ -755,6 +793,14 @@ export async function startV1Stub(options: V1StubOptions = {}): Promise<V1Stub> 
       if (!res.ok) throw new Error(`v1-stub __dump failed: HTTP ${res.status}`);
       const body = (await res.json()) as { resources?: V1StubResources };
       return body.resources ?? {};
+    },
+    async setListOrderInstability(rotate, resources) {
+      const res = await fetch(`${baseUrl}/v1/__list_order`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ rotate, resources: resources ?? null }),
+      });
+      if (!res.ok) throw new Error(`v1-stub __list_order failed: HTTP ${res.status}`);
     },
     async verifyToken(email) {
       const res = await fetch(`${baseUrl}/v1/__verify_token?email=${encodeURIComponent(email)}`);

@@ -34,6 +34,10 @@ const STATUS_BUILDERS = [
   "mcp/resources.ts",
   "mcp/resources.local.ts",
   "mcp/resources.remote.ts",
+  // The enumeration the self-hosted counts are built on: a hardcoded
+  // `complete: true` there is the same lie as a hardcoded `total: 0` here — it was
+  // how 3473 of 3899 production rows got published as a total.
+  "db/self-hosted-page.ts",
 ] as const;
 
 /**
@@ -60,6 +64,15 @@ const COUNT_FIELDS = new Set([
   "verifiedDomains",
   "unread",
   "queue_configured",
+  // Claims ABOUT the measurement. `complete: true` asserts "this count is the
+  // whole table", `stable: true` asserts "the paging window never moved",
+  // `degraded`/`limited` assert "here is how much of this payload to trust" —
+  // each must be derived, never asserted.
+  "complete",
+  "stable",
+  "degraded",
+  "limited",
+  "duplicates",
 ]);
 
 /** Keys whose value is an INVENTORY. An empty inventory is a claim, not an omission. */
@@ -70,6 +83,8 @@ const LIST_FIELDS = new Set([
   "next_actions",
   "unavailable",
   "incomplete",
+  "limitations",
+  "failures",
 ]);
 
 /**
@@ -149,8 +164,10 @@ describe("status builders never hardcode a measurement (G4)", () => {
   // The registry is only a guard if it is complete: a new builder that skips it
   // would skip the scan entirely.
   it("registers every status-builder source file", () => {
-    const candidates = [...walkSourceFiles("lib"), ...walkSourceFiles("mcp")]
+    const candidates = [...walkSourceFiles("lib"), ...walkSourceFiles("mcp"), ...walkSourceFiles("db")]
       .filter((relative) =>
+        /(^|\/)self-hosted-page\.ts$/.test(relative)
+        ||
         /(^|\/)(agent-context|status-facts|status-types|status-availability|status-commands)[^/]*\.ts$/.test(relative)
         || /(^|\/)resources[^/]*\.ts$/.test(relative)
         || /(^|\/)inbox-sync-status-format\.ts$/.test(relative));

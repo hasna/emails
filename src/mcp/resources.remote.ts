@@ -256,15 +256,13 @@ export function registerEmailResources(server: McpServer): void {
       mimeType: "application/json",
     },
     async () => {
-      const { getEmailSystemStatusForRuntime } = await import("../lib/agent-context.js");
+      const { getEmailSystemStatusForRuntime, statusGapSignals } = await import("../lib/agent-context.js");
       const status = await getEmailSystemStatusForRuntime();
       // Carry the gap signals into the SUBSET too: a consumer that only reads
       // emails://inbox/sync-status must still be able to tell an unmeasured field
       // from a measured zero.
       return jsonResource("emails://inbox/sync-status", {
-        degraded: status.degraded,
-        unavailable: status.unavailable,
-        gaps: status.gaps,
+        ...statusGapSignals(status),
         inbox: status.inbox,
         mailboxes: status.mailboxes,
         sources: status.sources,

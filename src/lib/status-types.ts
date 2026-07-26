@@ -149,12 +149,30 @@ export interface EmailSystemStatus {
     warning: string | null;
   };
   /**
-   * true when ANY field is unavailable or any count is a lower bound. A script
-   * gates on one expression: `emails status --json | jq -e '.degraded == false'`.
+   * true when something went WRONG: a source that should have answered did not
+   * (`source_unreachable`), or a count is only a lower bound. It is deliberately
+   * NOT true merely because a field is structurally unanswerable in this mode —
+   * both modes always carry such fields, so an "any gap" definition would pin
+   * `degraded` to true forever and make the gate meaningless. Structural limits
+   * live in `limited` / `limitations`.
+   *
+   * A script gates on one expression:
+   *   `emails status --json | jq -e '.degraded == false'`
    */
   degraded: boolean;
+  /**
+   * true when at least one field cannot be answered in this mode BY DESIGN
+   * (`not_applicable`, `not_modelled_over_v1`, `server_route_absent`). Expected,
+   * permanent, and not an incident — but still published, because the fields it
+   * covers are `null` and a consumer must not read them as zeros.
+   */
+  limited: boolean;
   /** Dotted paths of every field/block that could not be answered. */
   unavailable: string[];
+  /** Dotted paths of the `unavailable` subset that is structural, not a fault. */
+  limitations: string[];
+  /** Dotted paths of the `unavailable` subset caused by a live read failure. */
+  failures: string[];
   /** Dotted paths of blocks whose numbers are lower bounds, not totals. */
   incomplete: string[];
   /** Dotted path -> why it is unavailable. Machines match on the reason's code prefix. */

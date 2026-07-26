@@ -588,15 +588,13 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .description("Show source-aware mailbox sync status")
     .action(async () => {
       try {
-        const { getEmailSystemStatusForRuntime } = await import("../../lib/agent-context.js");
+        const { getEmailSystemStatusForRuntime, statusGapSignals } = await import("../../lib/agent-context.js");
         const status = await getEmailSystemStatusForRuntime();
         // Carry the gap signals into the subset: a script reading only
         // `inbox sync-status --json` must still be able to tell an unmeasured
         // field from a measured zero.
         output({
-          degraded: status.degraded,
-          unavailable: status.unavailable,
-          gaps: status.gaps,
+          ...statusGapSignals(status),
           inbox: status.inbox,
           mailboxes: status.mailboxes,
           sources: status.sources,

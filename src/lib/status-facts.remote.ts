@@ -81,13 +81,17 @@ function readResource(resource: string): ResourceRead {
     };
   }
   if (!result.complete) {
-    // Honest lower bound: the numbers are real but not final.
+    // Honest lower bound: the numbers are real but not final. Two DIFFERENT
+    // reasons, never conflated — one is "I stopped early", the other is "the
+    // server handed me an inconsistent window, so rows I never saw exist".
+    const reason = result.stable
+      ? `enumeration_cap_exceeded:${result.pages} pages — counts are lower bounds, not totals`
+      : `enumeration_unstable:${result.duplicates} duplicate row(s) across ${result.pages} pages — `
+        + "the server's list order is not total under limit/offset paging, so at least that many "
+        + "rows were skipped; counts are lower bounds, not totals";
     return {
       rows: result.rows,
-      availability: {
-        ...statusAvailable(source, "client_enumeration", false),
-        reason: `enumeration_cap_exceeded:${result.pages} pages — counts are lower bounds, not totals`,
-      },
+      availability: { ...statusAvailable(source, "client_enumeration", false), reason },
     };
   }
   return { rows: result.rows, availability: statusAvailable(source, "client_enumeration", true) };

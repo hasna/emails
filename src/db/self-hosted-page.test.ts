@@ -74,6 +74,39 @@ describe("enumerateSelfHostedRows", () => {
     expect(result.rows).toHaveLength(300);
   });
 
+  // The SECOND count trap, found on production /v1/sources: the server's list
+  // ORDER BY was not a total order, so offset paging returned the same rows twice
+  // and skipped others. De-duplicating hid the skips and produced a confident
+  // UNDERcount: 3473 distinct rows reported as the total of a 3899-row table.
+  // Whenever the window shifts, the enumeration is a lower bound, not a total.
+  it("reports stable: false / complete: false when the paging window shifts", async () => {
+    await stub.seed({ addresses: rows(1200) });
+    await stub.setListOrderInstability(7, ["addresses"]);
+
+    const result = enumerateSelfHostedRows("addresses");
+
+    expect(result.duplicates).toBeGreaterThan(0);
+    expect(result.stable).toBe(false);
+    // The rows it DID see are real, but they are a subset...
+    expect(result.rows.length).toBeLessThan(1200);
+    // ...so the count must NOT be published as a total.
+    expect(result.complete).toBe(false);
+    // The pager reached a short page: "short page" alone must never imply complete.
+    expect(result.exhausted).toBe(false);
+  });
+
+  it("keeps stable: true and an exact total when the order is total", async () => {
+    await stub.seed({ addresses: rows(1200) });
+    await stub.setListOrderInstability(0);
+
+    const result = enumerateSelfHostedRows("addresses");
+
+    expect(result.duplicates).toBe(0);
+    expect(result.stable).toBe(true);
+    expect(result.complete).toBe(true);
+    expect(result.rows).toHaveLength(1200);
+  });
+
   it("throws instead of returning an empty page set when the endpoint is unreachable", async () => {
     // Fail LOUD: the caller must report `source_unreachable`, never count 0 rows.
     process.env["EMAILS_SELF_HOSTED_URL"] = "http://127.0.0.1:1";
