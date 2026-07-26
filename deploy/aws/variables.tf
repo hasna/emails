@@ -70,7 +70,7 @@ variable "enable_nat_gateway" {
 }
 
 variable "container_image" {
-  description = "Operator-built Emails image pinned by sha256 digest. Tags and mutable registry defaults are rejected."
+  description = "Operator-built Emails image pinned by sha256 digest. Tags and mutable registry defaults are rejected. When the cross-account SES secret ARN inputs are set, the image must implement the scoped EMAILS_SES_* credential contract."
   type        = string
 
   validation {

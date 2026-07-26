@@ -40,8 +40,6 @@ EMAILS_DATABASE_CA_FILE=/opt/emails/certs/aws-rds-global-bundle.pem
 EMAILS_PRIMARY_SUPER_ADMIN_EMAIL=<operator-pinned lowercase email>
 EMAILS_PRIMARY_SUPER_ADMIN_BOOTSTRAP_KID=<authorized non-secret API-key identifier>
 # Optional cross-account SES credentials (API task only, see "6. SES sending"):
-AWS_ACCESS_KEY_ID=<Secrets Manager injection>
-AWS_SECRET_ACCESS_KEY=<Secrets Manager injection>
 EMAILS_SES_ACCESS_KEY_ID=<Secrets Manager injection>
 EMAILS_SES_SECRET_ACCESS_KEY=<Secrets Manager injection>
 NODE_EXTRA_CA_CERTS=/opt/emails/certs/aws-rds-global-bundle.pem
@@ -366,25 +364,31 @@ ses_secret_access_key_secret_arn = "arn:aws:secretsmanager:us-east-1:<account>:s
 
 Both are optional, must be set together, and carry **ARNs, never values** — no
 credential enters Terraform state, the plan output, or the plaintext
-`environment` block. The module injects four container variables from those two
-ARNs, all through the ECS `secrets` block, and extends only the API execution
-role's `secretsmanager:GetSecretValue` grant.
+`environment` block. The module injects only
+`EMAILS_SES_ACCESS_KEY_ID`/`EMAILS_SES_SECRET_ACCESS_KEY` from those two ARNs,
+all through the ECS `secrets` block, and extends only the API execution role's
+`secretsmanager:GetSecretValue` grant. The self-hosted sender reads that scoped
+pair directly.
 
-`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` repoint the SDK default credential
-chain, which is what the shipped SES adapter falls back to;
-`EMAILS_SES_ACCESS_KEY_ID`/`EMAILS_SES_SECRET_ACCESS_KEY` are the scoped names
-read directly by the sender on images that support them. Once every image you run
-reads the scoped pair, prefer dropping the unscoped pair so the default chain
-returns to the task role.
+**Image compatibility:** setting these inputs requires an image implementing
+the scoped `EMAILS_SES_*` credential contract. Legacy images that read only the
+generic AWS credential names are incompatible. This module intentionally no
+longer injects those generic names, so upgrade the image before enabling the
+cross-account SES secret ARN inputs.
+
+The module deliberately does not inject `AWS_ACCESS_KEY_ID` or
+`AWS_SECRET_ACCESS_KEY`. Those generic names repoint the AWS SDK default
+credential chain for every client in the process. Unrelated AWS clients
+therefore continue using the API task role; when the scoped pair is absent, SES
+also uses that task-role default chain.
 
 Scope and limits:
 
 - **API task only.** The ingest worker keeps its task role on purpose. An
   SES-scoped principal has no SQS or inbound-bucket access, so giving it these
   credentials would silently break inbound mail.
-- Setting them repoints *every* AWS SDK call in the API container, not just SES.
-  That is safe because the request path makes no S3 or SQS calls — verify this
-  still holds before adding AWS functionality to the API task.
+- The scoped pair configures only the SES sender. It does not replace the
+  task-role default chain for other AWS SDK clients.
 - ECS resolves `secrets` at task start. Rotating a value requires a new
   deployment; and if you remove the secret while tasks still reference it, the
   next replacement task fails with `ResourceInitializationError`.

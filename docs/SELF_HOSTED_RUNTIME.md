@@ -35,10 +35,10 @@ export EMAILS_AWS_REGION=us-east-1
 # server, and `emails send --provider` is ignored by the send route. When the
 # host has an instance/task role for a production-access SES account, set
 # nothing more. When production-access SES lives in a different account, supply
-# the sending IAM user's credentials to the server process:
+# the sending IAM user's scoped credentials to the server process:
 #
-#   export AWS_ACCESS_KEY_ID="..."            # repoints the SDK default chain
-#   export AWS_SECRET_ACCESS_KEY="..."
+#   export EMAILS_SES_ACCESS_KEY_ID="..."
+#   export EMAILS_SES_SECRET_ACCESS_KEY="..."
 #
 # On AWS these must be injected from a secret store by reference (see
 # deploy/aws/README.md, "Sending through SES in a different account"), never
@@ -81,15 +81,24 @@ email copy) and `EMAILS_AUTH_VERIFY_URL_BASE` / `EMAILS_AUTH_RESET_URL_BASE` /
 The service signs outbound SES calls with **one** identity, resolved at boot:
 
 1. `EMAILS_SES_ACCESS_KEY_ID` + `EMAILS_SES_SECRET_ACCESS_KEY` when both are set;
-2. otherwise the deployment IAM role (the AWS SDK default chain).
+2. otherwise a complete, externally managed `AWS_ACCESS_KEY_ID` +
+   `AWS_SECRET_ACCESS_KEY` pair (and optional `AWS_SESSION_TOKEN`) is retained as
+   a legacy provider fallback for existing deployments;
+3. otherwise the AWS SDK default chain, normally the deployment task/instance
+   role.
 
-Setting only one of the pair is a hard startup error — half a key pair would
-otherwise be completed from the ambient chain and sign with a mixed identity.
+Setting only one scoped variable is a hard startup error — half a key pair
+would otherwise be completed from the ambient chain and sign with a mixed
+identity. A legacy generic pair must likewise be complete to act as the
+provider fallback.
 
 The names are deliberately scoped rather than the generic `AWS_ACCESS_KEY_ID` /
 `AWS_SECRET_ACCESS_KEY`: the service's task/instance role may hold unrelated
 grants (S3 for inbound, SQS for the ingest worker), and the generic names would
-re-point every AWS client in the process, not just SES.
+re-point every AWS client in the process, not just SES. The AWS deployment
+module therefore injects only the scoped names. Do not set the generic names
+merely to enable cross-account SES: use the scoped pair so unrelated AWS
+clients continue using the task/instance-role default chain.
 
 Inject the values as **secret references** (AWS Secrets Manager / SSM / your
 secret store), never as plaintext deployment config, and never in the
