@@ -284,11 +284,13 @@ describe("emails-mcp HTTP transport", () => {
     process.env["HOME"] = tmpHome;
 
     try {
-      await withClient("emails-mcp-config-redaction-test", async (client) => {
-        const setText = await callText(client, "set_config", { key: "cloudflare_api_token", value: "MCP_CONFIG_SECRET" });
-        expect(setText).toContain('"cloudflare_api_token": "***"');
-        expect(setText).not.toContain("MCP_CONFIG_SECRET");
+      // Planted through the OPERATOR path: `set_config` refuses credential keys
+      // outright now (see the set_config allowlist test), so the reader-side
+      // redaction contract is exercised against a token that is already on disk.
+      const { setConfigValue } = await import("../lib/config.js");
+      setConfigValue("cloudflare_api_token", "MCP_CONFIG_SECRET");
 
+      await withClient("emails-mcp-config-redaction-test", async (client) => {
         const getText = await callText(client, "get_config", { key: "cloudflare_api_token" });
         expect(getText).toContain('"cloudflare_api_token": "***"');
         expect(getText).not.toContain("MCP_CONFIG_SECRET");
@@ -296,6 +298,10 @@ describe("emails-mcp HTTP transport", () => {
         const listText = await callText(client, "list_config", {});
         expect(listText).toContain('"cloudflare_api_token": "***"');
         expect(listText).not.toContain("MCP_CONFIG_SECRET");
+
+        // And a permitted write still round-trips (unredacted — not a secret).
+        const setText = await callText(client, "set_config", { key: "default_provider", value: "agent-written" });
+        expect(setText).toContain('"default_provider": "agent-written"');
       });
     } finally {
       if (originalHome === undefined) delete process.env["HOME"];

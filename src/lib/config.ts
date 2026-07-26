@@ -2,6 +2,7 @@ import { chmodSync, existsSync, readFileSync, writeFileSync, mkdirSync, statSync
 import { join } from "path";
 import { resolveCloudflareAuth, type CloudflareAuth } from "./cloudflare-auth.js";
 import { getEmailsMode } from "./mode.js";
+import { isSensitiveKey } from "./redaction.js";
 
 // Both local and self-hosted client paths share this config/credentials file
 // (Cloudflare/SES tokens, inbound bucket + mail-source registry, and provider
@@ -133,6 +134,134 @@ export function setConfigValue(key: string, value: unknown): void {
   const config = loadConfig();
   config[key] = value;
   saveConfig(config);
+}
+
+// ─── Agent-writable config allowlist ──────────────────────────────────────────
+
+/**
+ * The ONLY config keys an untrusted agent surface (the MCP `set_config` tool)
+ * may write.
+ *
+ * `setConfigValue` itself stays unrestricted: it is the operator/library path,
+ * and the whole config file is deliberately writable by whoever owns the
+ * machine. The gate belongs at the agent boundary, because that surface is
+ * driven by model output. Without it, `set_config`'s bare `key: z.string()`
+ * accepted anything in the file, and `saveConfig` re-seeds the in-process cache
+ * so a write took effect immediately — most sharply for `emails_mode`, which
+ * decides whether the process talks to local SQLite or the operator's
+ * self-hosted API, mid-session.
+ *
+ * Deliberately EXCLUDED, and why:
+ *   - `emails_mode` (+ the `mode`/`storage_mode`/`mailery_mode` migration
+ *     trip-wires in lib/mode.ts): switches the datastore the process reads and
+ *     writes. Mode is an operator decision, made once, out of band.
+ *   - every credential/secret key (`cloudflare_api_token`, `cloudflare_api_key`,
+ *     `resend_api_key`, the `*_webhook_secret` keys, …): an agent that can write
+ *     a credential can point an integration at infrastructure it controls. Also
+ *     enforced structurally below via `isSensitiveKey`.
+ *   - `inbound_s3_buckets`: a structured list owned by `addInboundBucket`, which
+ *     merges and de-duplicates entries. A raw overwrite corrupts it.
+ *   - `inbound_realtime_*`: daemon runtime state, not operator configuration.
+ *   - the S3 and AWS WIRING keys — `attachment_storage`, `attachment_s3_*`,
+ *     `inbound_s3_bucket`/`_prefix`/`_region`/`_profile`, `ses_aws_profile`.
+ *     These name where mail and attachments come FROM and go TO, so they are
+ *     data-flow decisions an operator makes at provisioning time, not settings:
+ *       * `attachment_storage: "s3"` + `attachment_s3_bucket` makes the next
+ *         inbound sync PUT every attachment into a caller-named bucket under the
+ *         operator's ambient AWS credentials — an exfiltration sink.
+ *       * `inbound_s3_bucket` is folded into the list the background pullers walk
+ *         (`getInboundBuckets`), so one write makes the TUI auto-pull loop and the
+ *         operator's own `inbox sync-s3` ingest forged mail from a caller-named
+ *         bucket indefinitely, with no further tool call to notice.
+ *       * `attachment_storage: "none"` silently discards every inbound
+ *         attachment — agent-triggered data loss.
+ *     The equivalent one-shot operations remain available as explicit, logged
+ *     tool calls (`sync_s3_inbox` takes its own bucket/prefix/region), which is
+ *     the auditable shape; what is refused is making them the durable default.
+ *   - `cloudflare_account_id`: inert without a token, but it is DNS wiring by the
+ *     same rule.
+ *
+ * What remains is genuinely "settings": two alert thresholds, and two
+ * provider-selection keys that can only name provider rows that already exist
+ * (MCP's own `add_provider`/`update_provider` are the tools that create those,
+ * and they are unaffected by this allowlist).
+ */
+export const AGENT_WRITABLE_CONFIG_KEYS = [
+  "bounce-alert-threshold",
+  "complaint-alert-threshold",
+  "default_provider",
+  "failover-providers",
+] as const;
+
+export type AgentWritableConfigKey = (typeof AGENT_WRITABLE_CONFIG_KEYS)[number];
+
+const AGENT_WRITABLE_CONFIG_KEY_SET: ReadonlySet<string> = new Set(AGENT_WRITABLE_CONFIG_KEYS);
+
+/**
+ * Whether an agent surface may write `key`. Exact match on the trimmed name — a
+ * near-miss spelling would write a key nothing reads while still mutating the
+ * operator's config file, so it is refused too. `isSensitiveKey` is applied on
+ * top so a credential key can never become writable by being added to the list
+ * above.
+ */
+export function isAgentWritableConfigKey(key: string): boolean {
+  const normalized = key.trim();
+  if (!AGENT_WRITABLE_CONFIG_KEY_SET.has(normalized)) return false;
+  return !isSensitiveKey(normalized);
+}
+
+/** Refusal message naming what IS permitted, so the caller can self-correct. */
+export function agentConfigKeyRefusal(key: string): string {
+  return `Config key "${key}" is not writable through this tool. Permitted keys: `
+    + `${[...AGENT_WRITABLE_CONFIG_KEYS].join(", ")}. `
+    + `Mode selection (emails_mode), credential keys, and the S3/AWS data-flow keys `
+    + `are excluded on purpose. An operator sets those out of band — via the `
+    + `EMAILS_* environment variables, or by editing ~/.hasna/emails/config.json `
+    + `directly (this build registers no "emails config" command).`;
+}
+
+/**
+ * Per-key value validation.
+ *
+ * An allowlisted KEY with an arbitrary VALUE is still a way to break the
+ * install: the tool takes `value: z.string()`, JSON-parses it, and writes
+ * whatever falls out. `failover-providers` is `String()`-split by
+ * `getFailoverProviderIds`, so a JSON object there becomes garbage provider ids
+ * that only fail later, at send time.
+ */
+function validateAgentConfigValue(key: AgentWritableConfigKey, value: unknown): string | null {
+  switch (key) {
+    case "bounce-alert-threshold":
+    case "complaint-alert-threshold": {
+      const n = typeof value === "number" ? value : Number(value);
+      return Number.isFinite(n) && n >= 0
+        ? null
+        : `${key} must be a non-negative number.`;
+    }
+    case "default_provider":
+      return typeof value === "string" && value.trim() !== ""
+        ? null
+        : `${key} must be a non-empty provider id.`;
+    case "failover-providers": {
+      // Stored as the comma-separated string `getFailoverProviderIds` splits.
+      if (Array.isArray(value) && value.every((entry) => typeof entry === "string" && entry.trim() !== "")) return null;
+      return typeof value === "string" && value.trim() !== ""
+        ? null
+        : `${key} must be a comma-separated list of provider ids.`;
+    }
+  }
+}
+
+/**
+ * Write a config value on behalf of an agent surface. Throws on any key outside
+ * the allowlist, or any value the key cannot hold, instead of writing it.
+ */
+export function setAgentConfigValue(key: string, value: unknown): void {
+  if (!isAgentWritableConfigKey(key)) throw new Error(agentConfigKeyRefusal(key));
+  const normalized = key.trim() as AgentWritableConfigKey;
+  const invalid = validateAgentConfigValue(normalized, value);
+  if (invalid) throw new Error(invalid);
+  setConfigValue(normalized, Array.isArray(value) ? value.join(",") : value);
 }
 
 export function getDefaultProviderId(): string | undefined {

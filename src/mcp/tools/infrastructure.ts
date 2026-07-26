@@ -4,7 +4,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { createDomain } from '../../db/domains.js';
 import { getProvider } from '../../db/providers.js';
 import { getAdapter } from '../../providers/index.js';
-import { loadConfig, getConfigValue, setConfigValue } from '../../lib/config.js';
+import { AGENT_WRITABLE_CONFIG_KEYS, loadConfig, getConfigValue, setAgentConfigValue } from '../../lib/config.js';
 import { normalizeRoute53RegistrationContact } from '../../lib/route53-contact.js';
 import { resolveEmailsMode } from '../../lib/mode.js';
 import { formatError, resolveId, ProviderNotFoundError } from '../helpers.js';
@@ -343,18 +343,28 @@ export function registerInfrastructureTools(server: McpServer): void {
   },
   );
 
+  // The writable set is an ALLOWLIST (see lib/config.ts). `key: z.string()` used
+  // to accept any key in the config file, and `saveConfig` re-seeds the in-process
+  // cache so the write took effect immediately — including `emails_mode`, which
+  // switches the datastore this process talks to mid-session, and every
+  // credential-bearing key. The enum also publishes the permitted set in the tool
+  // schema, so a client is told up front rather than by a rejection.
   server.tool(
   "set_config",
-  "Set a configuration value. Known keys: attachment_storage (local|s3|none), attachment_s3_bucket, attachment_s3_prefix, attachment_s3_region, default_provider, failover-providers",
+  `Set a configuration value. Writable keys: ${AGENT_WRITABLE_CONFIG_KEYS.join(", ")}`
+    + " (attachment_storage: local|s3|none). Mode selection and credential keys are"
+    + " not writable here — an operator sets those outside the agent surface.",
   {
-    key: z.string().describe("Config key"),
+    key: z.enum(AGENT_WRITABLE_CONFIG_KEYS).describe(`Config key (one of: ${AGENT_WRITABLE_CONFIG_KEYS.join(", ")})`),
     value: z.string().describe("Config value (strings, numbers, or JSON)"),
   },
   async ({ key, value }) => {
     try {
       let parsed: unknown;
       try { parsed = JSON.parse(value); } catch { parsed = value; }
-      setConfigValue(key, parsed);
+      // Re-checked at the call, not only in the schema: the enum is the client's
+      // hint, this is the boundary.
+      setAgentConfigValue(key, parsed);
       return { content: [{ type: "text", text: JSON.stringify({ [key]: parsed }, null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
