@@ -2,14 +2,12 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { startV1Stub, type V1Stub } from "../test-support/v1-stub.js";
 import { getEmailSystemStatus, getEmailSystemStatusForRuntime, getNextEmailAction } from "./agent-context.js";
 
-// The client is self-hosted-ONLY. getEmailSystemStatus / getEmailSystemStatusForRuntime
-// are now async and parameterless: they resolve the /v1 mail data source for the
-// inbox/mailbox/source summaries and report the former local-SQLite provider,
-// domain, address, and provisioning aggregates as empty (the operator server owns
-// those). The old tests that seeded providers/addresses/domains and asserted
-// non-empty aggregates, proxied `db.query`/`db.run` to assert SQL shape, or bulk-
-// inserted rows via `db.run` validated REMOVED local behavior and are dropped.
-// getNextEmailAction is likewise async now.
+// The self-hosted status payload reads the operator's /v1 API. It used to
+// hardcode provider/domain/address/provisioning aggregates as zeros, and the test
+// that lived here ASSERTED those zeros — so the defect was green in CI. It is
+// replaced by src/lib/agent-context.self-hosted.test.ts (real counts, honest
+// unavailability) plus src/lib/status-fabrication-scan.test.ts (the class guard).
+// What stays here is the inbox/mailbox/source behaviour that was always real.
 let stub: V1Stub;
 beforeAll(async () => { stub = await startV1Stub(); });
 afterAll(() => stub.stop());
@@ -52,20 +50,12 @@ describe("agent context", () => {
 
     expect(status.sources.total).toBe(1);
     expect(status.sources.items[0]).toMatchObject({ id: "self_hosted", total: 6 });
-    expect(status.inbox.realtime).toMatchObject({ queue_configured: false, queue_url: null });
-  });
-
-  it("reports empty provider/domain/address/provisioning aggregates (operator-owned)", async () => {
-    await seedRepresentativeInbox();
-    const status = await getEmailSystemStatus();
-
-    expect(status.providers.total).toBe(0);
-    expect(status.domains.total).toBe(0);
-    expect(status.domains.usable).toEqual([]);
-    expect(status.addresses.total).toBe(0);
-    expect(status.addresses.usable_from).toEqual([]);
-    expect(status.provisioning).toMatchObject({ domains_failed: 0, addresses_failed: 0 });
-    expect(status.next_actions).toEqual([]);
+    // The realtime queue lives on the server: `queue_configured: false` would be a
+    // fabricated negative claim about the operator's ingestion.
+    expect(status.inbox.realtime.queue_configured).toBeNull();
+    expect(status.inbox.realtime.queue_url).toBeNull();
+    expect(status.inbox.realtime.availability.available).toBe(false);
+    expect(status.unavailable).toContain("inbox.realtime.queue_configured");
   });
 
   it("reports the newest inbound timestamp even when the newest mail is archived", async () => {
@@ -84,8 +74,11 @@ describe("agent context", () => {
     await seedRepresentativeInbox();
     const status = await getEmailSystemStatusForRuntime();
 
-    // No local SQLite island exists in the self-hosted client.
+    // No local SQLite island exists in the self-hosted client — and the null now
+    // carries a reason instead of standing on its own.
     expect(status.database.data_dir).toBeNull();
+    expect(status.gaps["database.data_dir"]?.reason)
+      .toMatch(/^not_applicable:local_database_absent_in_self_hosted/);
     expect(status.mode.current).toBe("self_hosted");
     expect(status.inbox.total).toBe(6);
     expect(status.inbox.unread).toBe(3);

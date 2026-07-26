@@ -79,6 +79,48 @@ describe("self-hosted status CLI commands", () => {
     expect(result.formatted).toContain("Mode:       self_hosted");
   });
 
+  // G5: the operator-facing path end to end. `emails status --json` must carry
+  // the gap signals AND real counts — the command used to emit hardcoded zeros
+  // for every provider/domain/address aggregate.
+  it("emits degraded/unavailable/gaps and REAL counts from the seeded server", async () => {
+    await stub.seed({
+      providers: [
+        { id: "p1", name: "SES prod", type: "ses", region: "us-east-1", active: true },
+        { id: "p2", name: "Sandbox", type: "sandbox", region: null, active: false },
+      ],
+      domains: [
+        { id: "d1", domain: "one.example", provider: "p1", verified: true, provisioning_status: "ready" },
+        { id: "d2", domain: "two.example", provider: "p1", verified: false, provisioning_status: "none" },
+      ],
+      addresses: [
+        { id: "a1", email: "ops@one.example", domain: "one.example", domain_id: "d1", status: "active", verified: true, owner_id: "o1", provisioning_status: "ready" },
+      ],
+    });
+
+    const result = await runStatusCommand(["status"]);
+    const payload = result.data as {
+      degraded: boolean;
+      unavailable: string[];
+      gaps: Record<string, { reason: string; available: boolean }>;
+      providers: { total: number | null; active: number | null; availability: { available: boolean } };
+      domains: { total: number | null; verified: number | null; send_ready: number | null };
+      addresses: { total: number | null; owned: number | null; usable_from: unknown };
+    };
+
+    expect(payload.providers).toMatchObject({ total: 2, active: 1 });
+    expect(payload.providers.availability.available).toBe(true);
+    expect(payload.domains).toMatchObject({ total: 2, verified: 1, send_ready: null });
+    expect(payload.addresses).toMatchObject({ total: 1, owned: 1, usable_from: null });
+
+    expect(payload.degraded).toBe(true);
+    expect(payload.unavailable).toContain("addresses.usable_from");
+    expect(payload.gaps["addresses.usable_from"]?.reason).toMatch(/^server_route_absent:\/v1\/senders/);
+
+    expect(result.formatted).toContain("Capabilities: 1/2 active provider credential(s)");
+    expect(result.formatted).not.toContain("0/0 active provider credential(s)");
+    expect(result.formatted).toContain("Data gaps");
+  });
+
   it("reports self-hosted inbox counts inside agent context", async () => {
     const result = await runStatusCommand(["agent", "context"]);
     expect(result.data).toMatchObject({

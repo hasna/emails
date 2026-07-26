@@ -606,9 +606,24 @@ const server = Bun.serve({
     const rows = rowsFor(resource);
 
     if (id === undefined && req.method === "GET") {
+      // Mirror the real server's list windowing (src/server/self-hosted/store.ts
+      // clampLimit/clampOffset): a supplied \`limit\` is CAPPED at 500, and
+      // \`offset\` skips rows. Without this the stub handed back every row for any
+      // limit, which hid the fact that a single \`.list({ limit: 1000 })\` can only
+      // ever see 500 rows — the silent-truncation trap behind fabricated totals.
+      const rawLimit = url.searchParams.get("limit");
+      const rawOffset = url.searchParams.get("offset");
+      const offset = rawOffset === null || Number.isNaN(Number(rawOffset)) || Number(rawOffset) < 0
+        ? 0
+        : Math.floor(Number(rawOffset));
+      let windowed = offset > 0 ? rows.slice(offset) : rows;
+      if (rawLimit !== null && !Number.isNaN(Number(rawLimit))) {
+        const limit = Math.min(Math.max(1, Math.floor(Number(rawLimit))), 500);
+        windowed = windowed.slice(0, limit);
+      }
       const out = {};
-      out[resource] = rows;
-      out.items = rows;
+      out[resource] = windowed;
+      out.items = windowed;
       return json(out);
     }
     if (id === undefined && req.method === "POST") {

@@ -2,6 +2,7 @@ import type { EmailEvent, EventFilter, EventSummary, EventType } from "../types/
 import { now, uuid } from "./runtime.js";
 import { safeOffset, safeOptionalLimit } from "./pagination.js";
 import { selfHostedResource, cobj, ciso, cstr, cstrOrNull } from "./self-hosted-resource.js";
+import { enumerateSelfHostedRows } from "./self-hosted-page.js";
 
 const EVENT_RESOURCE = "events";
 
@@ -67,7 +68,12 @@ export function createEvent(input: CreateEventInput): EmailEvent {
 }
 
 function listFilteredEvents(filter: EventFilter = {}): EmailEvent[] {
-  let rows = selfHostedResource(EVENT_RESOURCE).list({ limit: 1000 }).map(apiToEvent);
+  // Enumerate, do NOT single-call: the client-side filters + windowing below need
+  // the full row set, and one `.list({ limit: 1000 })` can only ever see 500 rows
+  // (the server clamps every page — see src/db/self-hosted-page.ts). With a single
+  // call, an export of >500 events silently returned a short, plausible result.
+  // The remaining `.list({ limit: 1000 })` call sites are tracked as follow-up.
+  let rows = enumerateSelfHostedRows(EVENT_RESOURCE).rows.map(apiToEvent);
 
   if (filter.email_id) rows = rows.filter((e) => e.email_id === filter.email_id);
   if (filter.provider_id) rows = rows.filter((e) => e.provider_id === filter.provider_id);

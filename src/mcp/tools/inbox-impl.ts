@@ -758,6 +758,9 @@ export function registerInboxTools(server: McpServer): void {
         const { getEmailSystemStatusForRuntime } = await import("../../lib/agent-context.js");
         const status = await getEmailSystemStatusForRuntime();
         return { content: [{ type: "text", text: JSON.stringify({
+          degraded: status.degraded,
+          unavailable: status.unavailable,
+          gaps: status.gaps,
           inbox: status.inbox,
           mailboxes: status.mailboxes,
           sources: status.sources,

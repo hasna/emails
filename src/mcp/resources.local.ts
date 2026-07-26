@@ -84,57 +84,15 @@ export async function addressesResourcePayload(db: Database = getDatabase()): Pr
 
 export async function agentContextResourcePayload(db: Database = getDatabase()): Promise<Record<string, unknown>> {
   void db;
-  const { getAgentContextForRuntime } = await import("../lib/agent-context.js");
+  const { getAgentContextForRuntime, sampleAgentContext } = await import("../lib/agent-context.js");
   const context = await getAgentContextForRuntime();
-  const status = context["status"] as Record<string, unknown>;
-  const domains = status["domains"] as { usable?: unknown[]; usable_limit?: number; usable_truncated?: boolean } | undefined;
-  const addresses = status["addresses"] as { usable_from?: Array<Record<string, unknown>>; usable_from_limit?: number; usable_from_truncated?: boolean } | undefined;
-  const allUsableDomains = Array.isArray(domains?.usable) ? domains.usable : [];
-  const allUsableFrom = Array.isArray(addresses?.usable_from) ? addresses.usable_from : [];
-  const usableDomains = allUsableDomains.slice(0, AGENT_CONTEXT_SAMPLE_LIMIT);
-  const usableFrom = allUsableFrom
-    .slice(0, AGENT_CONTEXT_SAMPLE_LIMIT)
-    .map((address) => ({
-        id: address["id"],
-        email: address["email"],
-        provider_id: address["provider_id"],
-        provider_name: address["provider_name"],
-        owner: address["owner"],
-        administrator: address["administrator"],
-        status: address["status"],
-        verified: address["verified"],
-      }));
+  const sample = sampleAgentContext(context, AGENT_CONTEXT_SAMPLE_LIMIT);
   return {
-    status: {
-      generated_at: status["generated_at"],
-      database: status["database"],
-      providers: status["providers"],
-      domains: {
-        ...(domains ?? {}),
-        usable: usableDomains,
-      },
-      addresses: {
-        ...(addresses ?? {}),
-        usable_from: usableFrom,
-      },
-      inbox: status["inbox"],
-      mailboxes: status["mailboxes"],
-      sources: status["sources"],
-      provisioning: status["provisioning"],
-      next_actions: status["next_actions"],
-      cli_equivalents: status["cli_equivalents"],
-    },
+    status: sample.status,
     workflows: context["workflows"],
     refresh_cadence: context["refresh_cadence"],
-    limits: {
-      samples: AGENT_CONTEXT_SAMPLE_LIMIT,
-      domain_full_limit: domains?.usable_limit ?? null,
-      address_full_limit: addresses?.usable_from_limit ?? null,
-    },
-    truncated: {
-      domains: Boolean(domains?.usable_truncated) || allUsableDomains.length > AGENT_CONTEXT_SAMPLE_LIMIT,
-      addresses: Boolean(addresses?.usable_from_truncated) || allUsableFrom.length > AGENT_CONTEXT_SAMPLE_LIMIT,
-    },
+    limits: sample.limits,
+    truncated: sample.truncated,
     full_context_resource: "emails://agent/context/full",
     full_context_cli: "emails agent context --json",
   };
@@ -280,6 +238,9 @@ export function registerEmailResources(server: McpServer): void {
       const { getEmailSystemStatusForRuntime } = await import("../lib/agent-context.js");
       const status = await getEmailSystemStatusForRuntime();
       return jsonResource("emails://inbox/sync-status", {
+        degraded: status.degraded,
+        unavailable: status.unavailable,
+        gaps: status.gaps,
         inbox: status.inbox,
         mailboxes: status.mailboxes,
         sources: status.sources,

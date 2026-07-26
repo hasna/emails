@@ -30,6 +30,7 @@ import {
   type AddressProvisioningPatch,
   type AddressOwnershipPatch,
 } from "./store.js";
+import { SELF_HOSTED_SEND_ATTACHMENT_LIMITS } from "../../lib/send-attachment-limits.js";
 import { emailsSelfHostedOpenApi } from "./openapi.js";
 import { resourceSpecForPath } from "./resources.js";
 import { classifyProviderSendError, type SelfHostedSender } from "./sender.js";
@@ -822,7 +823,9 @@ export async function handleSelfHostedRequest(
       if (!parsedIdempotencyKey.ok) return json(400, { error: parsedIdempotencyKey.error });
       const idempotencyKey = parsedIdempotencyKey.value;
       const rawAttachments = asArray(body.attachments) ?? [];
-      if (rawAttachments.length > 5) return json(400, { error: "at most 5 inline attachments are allowed" });
+      if (rawAttachments.length > SELF_HOSTED_SEND_ATTACHMENT_LIMITS.maxFiles) {
+        return json(400, { error: `at most ${SELF_HOSTED_SEND_ATTACHMENT_LIMITS.maxFiles} inline attachments are allowed` });
+      }
       let attachments: Array<{ filename: string; content: string; content_type: string }>;
       try {
         safeHeaderValue("from", from);
@@ -836,10 +839,10 @@ export async function handleSelfHostedRequest(
           const content = typeof item.content === "string" ? item.content : "";
           const bytes = decodeStrictBase64(content).byteLength;
           totalAttachmentBytes += bytes;
-          if (!content || bytes > 512 * 1024) {
+          if (!content || bytes > SELF_HOSTED_SEND_ATTACHMENT_LIMITS.maxBytesPerFile) {
             throw new Error(`attachment ${index} requires base64 content no larger than 512KiB`);
           }
-          if (totalAttachmentBytes > 768 * 1024) {
+          if (totalAttachmentBytes > SELF_HOSTED_SEND_ATTACHMENT_LIMITS.maxTotalBytes) {
             throw new Error("inline attachments may total at most 768KiB");
           }
           const filename = safeHeaderValue("attachment filename", String(item.filename ?? `attachment-${index + 1}`));

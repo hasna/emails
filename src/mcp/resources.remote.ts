@@ -1,11 +1,13 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { listAddresses } from "../db/addresses.js";
 import { listDomains } from "../db/domains.js";
+import { listDomainProvisioningByIds, listReadyAddressCountsByDomains } from "../db/provisioning.js";
 import { assessDomainReadiness } from "../lib/domain-readiness.js";
 import { domainInboundReadinessSignals } from "../lib/domain-inbound-evidence.js";
 import { resolveEmailsMode } from "../lib/mode.js";
 import { resolveMailDataSource } from "../lib/mail-data-source.js";
 import { fetchIdentitySafe } from "../lib/whoami.js";
+import { statusUnavailable } from "../lib/status-availability.js";
 
 const RECENT_ERROR_LIMIT_PER_COMPONENT = 50;
 const DOMAIN_RESOURCE_LIMIT = 50;
@@ -38,14 +40,25 @@ export function domainsResourcePayloadForRuntime(): Record<string, unknown> {
     const mode = resolveEmailsMode();
     const domainRows = listDomains(undefined, { limit: DOMAIN_RESOURCE_LIMIT + 1, offset: 0 });
     const truncated = domainRows.length > DOMAIN_RESOURCE_LIMIT;
-    const domains = domainRows.slice(0, DOMAIN_RESOURCE_LIMIT).map((domain) => ({
-      ...domain,
-      provisioning: null,
-      readiness: assessDomainReadiness(domain, null, {
-        ...domainInboundReadinessSignals(domain, mode),
-        ready_addresses: 0,
-      }),
-    }));
+    const sample = domainRows.slice(0, DOMAIN_RESOURCE_LIMIT);
+    // Real provisioning state and real ready-address counts: both are columns on
+    // the /v1 domain and address entities. Passing `null` provisioning and a
+    // hardcoded `ready_addresses: 0` here produced a fabricated readiness VERDICT
+    // that this resource then published to agents.
+    const sampleIds = sample.map((domain) => domain.id);
+    const provisioningById = listDomainProvisioningByIds(sampleIds);
+    const readyAddressesById = listReadyAddressCountsByDomains(sampleIds);
+    const domains = sample.map((domain) => {
+      const provisioning = provisioningById.get(domain.id) ?? null;
+      return {
+        ...domain,
+        provisioning,
+        readiness: assessDomainReadiness(domain, provisioning, {
+          ...domainInboundReadinessSignals(domain, mode),
+          ready_addresses: readyAddressesById.get(domain.id) ?? 0,
+        }),
+      };
+    });
     return {
       domains,
       total: null,
@@ -58,15 +71,25 @@ export function domainsResourcePayloadForRuntime(): Record<string, unknown> {
       cli_equivalent: `emails domain status --limit ${DOMAIN_RESOURCE_LIMIT} --json`,
     };
   } catch (error) {
+    // A read failure reports NOTHING, not an empty inventory with total 0: the
+    // success path above already publishes `total: null` when it cannot count, so
+    // the error path must not be the more confident of the two.
+    const availability = statusUnavailable(
+      "source_unreachable",
+      error instanceof Error ? error.message : String(error),
+      "self_hosted_api:/v1/domains",
+      "no local database or config state was read",
+    );
     return {
-      domains: [],
-      total: 0,
+      domains: null,
+      total: null,
+      total_source: "unavailable_source_unreachable",
+      availability,
       limit: DOMAIN_RESOURCE_LIMIT,
-      truncated: false,
+      truncated: null,
       mode: "self_hosted",
       source: "self_hosted_api",
       api: selfHostedApiStatus(error),
-      note: "Self-hosted API domain resource data is unavailable; no local database or config state was read.",
       cli_equivalent: `emails domain status --limit ${DOMAIN_RESOURCE_LIMIT} --json`,
     };
   }
@@ -95,44 +118,34 @@ export async function addressesResourcePayloadForRuntime(): Promise<Record<strin
       cli_equivalent: `emails address list --limit ${ADDRESS_RESOURCE_LIMIT} --json`,
     };
   } catch (error) {
+    const availability = statusUnavailable(
+      "source_unreachable",
+      error instanceof Error ? error.message : String(error),
+      "self_hosted_api:/v1/addresses",
+      "no local database or config state was read",
+    );
     return {
-      addresses: [],
-      total: 0,
+      addresses: null,
+      total: null,
+      total_source: "unavailable_source_unreachable",
+      availability,
       limit: ADDRESS_RESOURCE_LIMIT,
-      truncated: false,
+      truncated: null,
       mode: "self_hosted",
       source: "self_hosted_api",
       api: selfHostedApiStatus(error),
-      note: "Self-hosted API address resource data is unavailable; no local database or config state was read.",
       cli_equivalent: `emails address list --limit ${ADDRESS_RESOURCE_LIMIT} --json`,
     };
   }
 }
 
 export async function agentContextResourcePayload(): Promise<Record<string, unknown>> {
-  const { getAgentContextForRuntime } = await import("../lib/agent-context.js");
+  const { getAgentContextForRuntime, sampleAgentContext } = await import("../lib/agent-context.js");
   const context = await getAgentContextForRuntime();
-  const status = context["status"] as Record<string, unknown>;
-  const domains = status["domains"] as { usable?: unknown[]; usable_limit?: number; usable_truncated?: boolean } | undefined;
-  const addresses = status["addresses"] as { usable_from?: Array<Record<string, unknown>>; usable_from_limit?: number; usable_from_truncated?: boolean } | undefined;
+  const sample = sampleAgentContext(context, AGENT_CONTEXT_SAMPLE_LIMIT);
   // Identity/tenant context derived from the caller's credential (never a
   // client-supplied tenant). Best-effort: null if /v1/me is unreachable.
   const identity = fetchIdentitySafe();
-  const allUsableDomains = Array.isArray(domains?.usable) ? domains.usable : [];
-  const allUsableFrom = Array.isArray(addresses?.usable_from) ? addresses.usable_from : [];
-  const usableDomains = allUsableDomains.slice(0, AGENT_CONTEXT_SAMPLE_LIMIT);
-  const usableFrom = allUsableFrom
-    .slice(0, AGENT_CONTEXT_SAMPLE_LIMIT)
-    .map((address) => ({
-        id: address["id"],
-        email: address["email"],
-        provider_id: address["provider_id"],
-        provider_name: address["provider_name"],
-        owner: address["owner"],
-        administrator: address["administrator"],
-        status: address["status"],
-        verified: address["verified"],
-      }));
   return {
     identity: identity
       ? {
@@ -144,36 +157,11 @@ export async function agentContextResourcePayload(): Promise<Record<string, unkn
           memberships: identity.memberships,
         }
       : null,
-    status: {
-      generated_at: status["generated_at"],
-      database: status["database"],
-      providers: status["providers"],
-      domains: {
-        ...(domains ?? {}),
-        usable: usableDomains,
-      },
-      addresses: {
-        ...(addresses ?? {}),
-        usable_from: usableFrom,
-      },
-      inbox: status["inbox"],
-      mailboxes: status["mailboxes"],
-      sources: status["sources"],
-      provisioning: status["provisioning"],
-      next_actions: status["next_actions"],
-      cli_equivalents: status["cli_equivalents"],
-    },
+    status: sample.status,
     workflows: context["workflows"],
     refresh_cadence: context["refresh_cadence"],
-    limits: {
-      samples: AGENT_CONTEXT_SAMPLE_LIMIT,
-      domain_full_limit: domains?.usable_limit ?? null,
-      address_full_limit: addresses?.usable_from_limit ?? null,
-    },
-    truncated: {
-      domains: Boolean(domains?.usable_truncated) || allUsableDomains.length > AGENT_CONTEXT_SAMPLE_LIMIT,
-      addresses: Boolean(addresses?.usable_from_truncated) || allUsableFrom.length > AGENT_CONTEXT_SAMPLE_LIMIT,
-    },
+    limits: sample.limits,
+    truncated: sample.truncated,
     full_context_resource: "emails://agent/context/full",
     full_context_cli: "emails agent context --json",
   };
@@ -270,7 +258,13 @@ export function registerEmailResources(server: McpServer): void {
     async () => {
       const { getEmailSystemStatusForRuntime } = await import("../lib/agent-context.js");
       const status = await getEmailSystemStatusForRuntime();
+      // Carry the gap signals into the SUBSET too: a consumer that only reads
+      // emails://inbox/sync-status must still be able to tell an unmeasured field
+      // from a measured zero.
       return jsonResource("emails://inbox/sync-status", {
+        degraded: status.degraded,
+        unavailable: status.unavailable,
+        gaps: status.gaps,
         inbox: status.inbox,
         mailboxes: status.mailboxes,
         sources: status.sources,

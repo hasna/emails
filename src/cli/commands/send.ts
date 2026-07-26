@@ -6,9 +6,15 @@ import { resolveMailDataSource, type MailSendAttachment } from "../../lib/mail-d
 import { getTemplate, renderTemplate } from "../../db/templates.js";
 import { getSuppressedEmailSet } from "../../db/contacts.js";
 import { handleError } from "../utils.js";
+import { getEmailsMode } from "../../lib/mode.js";
+import {
+  describeSendAttachmentLimits,
+  LOCAL_SEND_ATTACHMENT_LIMITS,
+  SELF_HOSTED_SEND_ATTACHMENT_LIMITS,
+} from "../../lib/send-attachment-limits.js";
 
-const MAX_ATTACHMENT_SIZE = 25 * 1024 * 1024; // 25MB (Resend/SES limit)
-const MAX_ATTACHMENT_COUNT = 10;
+const MAX_ATTACHMENT_SIZE = LOCAL_SEND_ATTACHMENT_LIMITS.maxBytesPerFile;
+const MAX_ATTACHMENT_COUNT = LOCAL_SEND_ATTACHMENT_LIMITS.maxFiles;
 const ATTACHMENT_MIME_TYPES: Record<string, string> = {
   ".pdf": "application/pdf",
   ".txt": "text/plain",
@@ -148,15 +154,29 @@ export function registerSendCommands(program: Command, _output: (data: unknown, 
         // apply — the server owns sending.
         const attachments = readSendAttachments(opts.attachment);
         if ((opts as Record<string, unknown>).dryRun) {
-          console.log(chalk.bold("\n[DRY RUN] Would send (self-hosted):"));
+          // --dry-run PREDICTS the send, so every claim below must be true for the
+          // mode that would actually run it. This block had no mode branch: in
+          // local mode it announced "(self-hosted)", quoted the server's
+          // attachment caps, and predicted that scheduling would fail — none of
+          // which applies to a local send, which does support scheduling.
+          const mode = getEmailsMode();
+          const selfHosted = mode === "self_hosted";
+          const limits = selfHosted ? SELF_HOSTED_SEND_ATTACHMENT_LIMITS : LOCAL_SEND_ATTACHMENT_LIMITS;
+          console.log(chalk.bold(`\n[DRY RUN] Would send (${selfHosted ? "self-hosted" : "local"}):`));
           console.log(`  ${chalk.dim("From:")}    ${opts.from}`);
           console.log(`  ${chalk.dim("To:")}      ${toAddresses.join(", ")}`);
           if (opts.cc?.length) console.log(`  ${chalk.dim("CC:")}      ${opts.cc.join(", ")}`);
           console.log(`  ${chalk.dim("Subject:")} ${subject}`);
           if (htmlBody) console.log(`  ${chalk.dim("Body:")}    HTML (${htmlBody.length} chars)`);
           else if (textBody) console.log(`  ${chalk.dim("Body:")}    ${textBody.slice(0, 100)}${textBody.length > 100 ? "..." : ""}`);
-          if (attachments.length) console.log(chalk.dim(`  Attachments: ${attachments.length} inline file(s); self-hosted caps are 5 files, 512KiB each, 768KiB total`));
-          if (opts.schedule) console.log(chalk.yellow(`  Schedule:    ${opts.schedule} — scheduling is not available in the self-hosted client (a real send would fail)`));
+          if (attachments.length) {
+            console.log(chalk.dim(`  Attachments: ${attachments.length} inline file(s); ${mode} caps are ${describeSendAttachmentLimits(limits)}`));
+          }
+          if (opts.schedule) {
+            console.log(selfHosted
+              ? chalk.yellow(`  Schedule:    ${opts.schedule} — the self-hosted server does not accept a scheduled send (a real send would fail)`)
+              : chalk.dim(`  Schedule:    ${opts.schedule} — a real send enqueues this locally; use \`emails schedule list\` to inspect the queue`));
+          }
           console.log(chalk.yellow("\n  [NOT SENT] Use without --dry-run to send.\n"));
           return;
         }

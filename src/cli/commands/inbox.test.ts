@@ -666,12 +666,20 @@ describe("inbox status / sync-status", () => {
       msgRow({ received_at: "2026-07-04T00:00:00.000Z", direction: "outbound", labels: ["sent"] }),
     ] });
 
-    const { data } = await runInboxCommand(["inbox", "sync-status"]);
+    const { data, out } = await runInboxCommand(["inbox", "sync-status"]);
     expect(data).toMatchObject({
       inbox: { total: 3, unread: 1 },
       mailboxes: { counts: { inbox: 2, sent: 1, archived: 1 } },
-      sources: { total: 1, legacy: 0, orphaned: 0 },
+      // legacy/orphaned are NOT zero: the /v1 mail view carries no
+      // active/legacy/orphaned badges, so a 0 there was a fabricated
+      // classification of the operator's ingestion. null + a reason instead.
+      sources: { total: 1, legacy: null, orphaned: null },
     });
+    const payload = data as { sources: { legacy: number | null }; gaps: Record<string, { reason: string }> };
+    expect(payload.gaps["sources.legacy"]?.reason).toMatch(/^not_modelled_over_v1:source_classification/);
+    // The terminal must not paint a yellow "0" for buckets it never inspected.
+    expect(out).toContain("S3 buckets:  unavailable");
+    expect(out).toContain("Data gaps");
   });
 });
 

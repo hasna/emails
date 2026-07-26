@@ -2,7 +2,8 @@ import chalk from "../lib/chalk-lite.js";
 import { createInterface } from "node:readline/promises";
 import { resolveResourceId, listResourceIdMatches } from "../db/self-hosted-store.js";
 import { getDatabase, listPartialIdMatches, resolvePartialIdOrThrow } from "../db/database.js";
-import { getEmailsMode } from "../lib/mode.js";
+import { getEmailsMode, type EmailsMode } from "../lib/mode.js";
+import { keepAvailableCommands } from "../lib/status-commands.js";
 import { redactSecrets } from "../lib/redaction.js";
 
 const ID_ERROR_SUGGESTION_LIMIT = 5;
@@ -87,17 +88,46 @@ function errorCode(message: string): string {
   return "error";
 }
 
+/**
+ * Remediation commands attached to a JSON error.
+ *
+ * These are a PROMISE that the command runs. The old default,
+ * `["emails status --json", "emails doctor --json"]`, was emitted on every
+ * unmatched error in a mode where `emails doctor` refuses outright — so
+ * `emails doctor --json` failed and then told the caller to run
+ * `emails doctor --json`. Every suggestion is now filtered through the
+ * mode registry (src/lib/status-commands.ts) and anything unrunnable is dropped.
+ */
 function fixCommands(message: string): string[] {
   const lower = message.toLowerCase();
-  if (lower.includes("unknown command")) return ["emails --help"];
-  if (lower.includes("provider")) return ["emails provider list --json", "emails provider add --help"];
-  if (lower.includes("domain")) return ["emails domain list --json", "emails domain add --help"];
-  if (lower.includes("address")) return ["emails address list --json", "emails address provision --help"];
-  if (lower.includes("template")) return ["emails template list --json", "emails template add --help"];
-  if (lower.includes("sequence")) return ["emails sequence list --json", "emails sequence --help"];
-  if (lower.includes("inbound") || lower.includes("inbox")) return ["emails inbox sync-status --json", "emails doctor delivery <address> --json"];
-  if (lower.includes("--yes") || lower.includes("destructive")) return ["Re-run the same command with --yes after confirming the target ID"];
-  return ["emails status --json", "emails doctor --json"];
+  const candidates = ((): string[] => {
+    if (lower.includes("unknown command")) return ["emails --help"];
+    if (lower.includes("provider")) return ["emails provider list --json", "emails provider add --help"];
+    if (lower.includes("domain")) return ["emails domain list --json", "emails domain add --help"];
+    if (lower.includes("address")) return ["emails address list --json", "emails address provision --help"];
+    if (lower.includes("template")) return ["emails template list --json", "emails template add --help"];
+    if (lower.includes("sequence")) return ["emails sequence list --json", "emails sequence --help"];
+    if (lower.includes("inbound") || lower.includes("inbox")) {
+      return ["emails inbox sync-status --json", "emails doctor delivery <address> --json"];
+    }
+    if (lower.includes("--yes") || lower.includes("destructive")) {
+      return ["Re-run the same command with --yes after confirming the target ID"];
+    }
+    return ["emails status --json", "emails doctor --json"];
+  })();
+
+  let mode: EmailsMode;
+  try {
+    mode = getEmailsMode();
+  } catch {
+    // Mode resolution itself failed (e.g. the very error being reported). Do not
+    // guess a mode and do not promise a command we cannot vouch for.
+    return ["emails --help"];
+  }
+  const runnable = keepAvailableCommands(candidates, mode);
+  // Never return an empty list silently: an empty `fix_commands` reads as "there
+  // is nothing you can do". `emails --help` always runs.
+  return runnable.length > 0 ? runnable : ["emails --help"];
 }
 
 export function handleError(e: unknown): never {
