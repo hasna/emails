@@ -35,8 +35,8 @@ emails provider add --name production-resend --type resend --api-key ...
 emails domain setup example.com --provider <id> --email you@example.com ...
 
 # Or connect a domain you already own without buying it
-emails domains connect example.com --provider <id> --source-of-truth local --dry-run
-emails domains connect example.com --provider <id> --source-of-truth postgres --dns-provider route53 --no-register-provider
+emails domains connect example.com --provider <id> --dry-run
+emails domains connect example.com --provider <id> --dns-provider route53 --no-register-provider
 
 # Or configure DNS for an existing domain via Cloudflare
 emails domain setup-cloudflare example.com --provider <id>
@@ -75,10 +75,14 @@ a whole.
 
 Use these setup paths:
 
+The source of truth follows the mode; it is not a per-domain choice. A domain
+created or connected through this client is owned by the app's `/v1` database, so
+`source_of_truth` is reported as `postgres` and is not an input.
+
 | Mode | Who owns the mail source of truth | Domain setup path |
 | --- | --- | --- |
-| `local` | The local SQLite/files install | `emails domains add` or `emails domains connect --source-of-truth local`; DNS checks are advisory unless using a real send/receive provider. |
-| `self_hosted` | Your PostgreSQL/S3/SES or equivalent infrastructure | `emails domains connect --source-of-truth postgres`, then publish the returned DNS tasks and enable inbound/outbound when evidence is ready. |
+| `local` | The local SQLite/files install | `emails domains add`; DNS checks are advisory unless using a real send/receive provider. |
+| `self_hosted` | Your PostgreSQL/S3/SES or equivalent infrastructure | `emails domains connect`, then publish the returned DNS tasks and enable inbound/outbound when evidence is ready. |
 
 Authentication records are required only for the capability you enable:
 
