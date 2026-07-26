@@ -60,9 +60,20 @@ export interface SelfHostedEnumeration<T = Record<string, unknown>> {
    */
   duplicates: number;
   /**
-   * false => `duplicates > 0`, i.e. offset paging did not see a consistent
-   * snapshot. The de-duplicated `rows` are a subset of the real table, never the
-   * whole of it.
+   * true => a page did not begin on the row the previous page ended on, which
+   *         PROVES the window moved between requests.
+   *
+   * `duplicates` alone only catches the window moving BACKWARD (a row inserted
+   * above the cursor re-appears). A row DELETED above the cursor moves the window
+   * FORWARD: every unread row slides to a lower offset, the next page starts one row
+   * late, and the skipped row is never seen by anything — no duplicate is ever
+   * produced. Anchoring each page on a row already read catches both directions.
+   */
+  shifted: boolean;
+  /**
+   * false => the window moved under paging (`duplicates > 0` or `shifted`), so
+   * offset paging did not see a consistent snapshot. The rows are a subset of the
+   * real table, never the whole of it.
    */
   stable: boolean;
   /**
@@ -191,6 +202,9 @@ export function enumerateSelfHostedRows<T = Record<string, unknown>>(
   let offset = 0;
   let pages = 0;
   let duplicates = 0;
+  /** Id of the last row read, re-requested to prove the next page did not move. */
+  let anchorId: string | null = null;
+  let shifted = false;
   /** Raw rows the server has handed over, including duplicates and dropped rows. */
   let consumed = 0;
   // Proven by a SHORT page: the server had no more rows to give. This is the only
@@ -220,11 +234,37 @@ export function enumerateSelfHostedRows<T = Record<string, unknown>>(
   };
 
   while (pages < budget && !windowFull()) {
-    const wanted = nextRequestSize();
-    const page = store.list({ ...opts.query, limit: wanted, offset });
+    // Anchor every page after the first on the last row already read: ask for it
+    // again and require it back. Offset paging has no other way to notice that rows
+    // MOVED — a row inserted above the cursor shows up twice (a duplicate) but a row
+    // DELETED above the cursor silently skips one, and no duplicate ever appears. Once
+    // a shift is proven, anchoring stops: the read is already unstable, and continuing
+    // exactly as an unanchored pager would keeps `duplicates` meaning what it always
+    // meant. The anchor row costs one row of each page's capacity, so ask for one
+    // fewer — a request over the server's page cap would be clamped, and a clamped
+    // page looks exactly like the end of the table.
+    const anchored = anchorId !== null && !shifted;
+    const wanted = Math.min(nextRequestSize(), anchored ? pageSize - 1 : pageSize);
+    const requestOffset = anchored ? offset - 1 : offset;
+    const requestLimit = anchored ? wanted + 1 : wanted;
+    const page = store.list({ ...opts.query, limit: requestLimit, offset: requestOffset });
     pages += 1;
-    consumed += page.length;
-    for (const row of page) {
+
+    let fresh = page;
+    if (anchored) {
+      const firstId = page.length > 0 && page[0]!["id"] != null ? String(page[0]!["id"]) : null;
+      if (firstId === anchorId) {
+        fresh = page.slice(1);
+      } else {
+        // The window moved. Keep the whole page (none of it is the anchor) and carry
+        // on unanchored so the rest of the read behaves as it always did.
+        shifted = true;
+        offset = requestOffset;
+      }
+    }
+
+    consumed += fresh.length;
+    for (const row of fresh) {
       const id = row["id"] == null ? null : String(row["id"]);
       if (id !== null) {
         if (seen.has(id)) {
@@ -239,25 +279,34 @@ export function enumerateSelfHostedRows<T = Record<string, unknown>>(
       if (selected === null) continue;
       rows.push(selected);
     }
+
+    // Anchor the next page on the last row this one actually returned. A row with no
+    // id cannot be anchored on (nothing to match), so the read falls back to plain
+    // offset paging — the same blind spot de-duplication already has there.
+    const lastRow = fresh.length > 0 ? fresh[fresh.length - 1] : undefined;
+    anchorId = lastRow && lastRow["id"] != null ? String(lastRow["id"]) : null;
+
     // A page shorter than what we ASKED for (not than the page cap) is the end.
-    if (page.length < wanted) {
+    if (page.length < requestLimit) {
       reachedEnd = true;
       break;
     }
-    offset += page.length;
+    offset += fresh.length;
   }
 
   const filled = windowFull();
+  const stable = duplicates === 0 && !shifted;
   return {
     rows,
     // A short page alone is NOT completeness: it only proves the last window was
-    // partial. Completeness also requires that no window shifted (duplicates).
+    // partial. Completeness also requires that the window never moved.
     // A bounded stop is deliberately excluded — `filled`, not `complete`.
-    complete: reachedEnd && duplicates === 0,
+    complete: reachedEnd && stable,
     filled,
     pages,
     duplicates,
-    stable: duplicates === 0,
+    shifted,
+    stable,
     // The budget ran out only if the read neither reached the end nor filled its
     // window; stopping on a satisfied bound is not exhaustion.
     exhausted: !reachedEnd && !filled,

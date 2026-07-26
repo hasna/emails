@@ -180,9 +180,14 @@ function sortForList(resource, rows) {
         if (aNull && bNull) continue;
         return (aNull ? 1 : -1) * (term.desc ? -1 : 1);
       }
-      if (av === bv) continue;
+      // Three-way, so values that merely differ by TYPE but compare equal (1 vs "1")
+      // fall through to the next term instead of making the comparator inconsistent
+      // (returning 1 for both cmp(a,b) and cmp(b,a), which corrupts a sort).
       const bothNumbers = typeof av === "number" && typeof bv === "number";
-      const cmp = bothNumbers ? (av < bv ? -1 : 1) : (String(av) < String(bv) ? -1 : 1);
+      const l = bothNumbers ? (av as number) : String(av);
+      const r = bothNumbers ? (bv as number) : String(bv);
+      const cmp = l < r ? -1 : l > r ? 1 : 0;
+      if (cmp === 0) continue;
       return term.desc ? -cmp : cmp;
     }
     return 0;

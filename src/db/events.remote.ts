@@ -26,9 +26,15 @@ function serverSideEventFilters(filter: EventFilter): Record<string, string | un
  * different questions.
  *
  * `events` is the fastest-growing table in the system (one row per delivery, open
- * and click), so it is the first to cross the pager's 20_000-row budget — and it
- * is read by `export events` (MCP) and `GET /api/events`, which hand the caller a
- * JSON/CSV file.
+ * and click), so it is the first to cross the pager's 20_000-row budget. The reads
+ * that land here are `src/lib/export.ts` — reached by MCP `export_events`, the CLI
+ * `emails export events`, and `GET /api/export/events` — plus library consumers of
+ * `src/index.ts`. All of those hand the caller a JSON/CSV file, and all of them are
+ * BOUNDED: `normalizeEventFilters` always supplies a limit (1000 by default).
+ *
+ * (`GET /api/events` in src/server/routes/core.ts does NOT come through here — it
+ * imports from `events.local.js` directly — so the dashboard events tab is not a
+ * caller of this path. Do not re-add it to this list without checking that import.)
  *
  * UNBOUNDED ("give me everything"): only a complete enumeration can answer it.
  * Silently windowing a lower bound produces an export that LOOKS complete and is
@@ -37,20 +43,29 @@ function serverSideEventFilters(filter: EventFilter): Record<string, string | un
  *
  * BOUNDED ("give me the first N"): a full window IS the complete answer, because
  * the question never asked about the rest of the table. Refusing it was the
- * regression: the dashboard events tab asks for `?limit=100` and got a 500 once
- * the table outgrew the enumeration budget. A bounded read is therefore answered
- * when its window is FULL, or when the table ended first (then the short result is
- * genuinely the whole tail, not a truncation). It is still refused when the read
- * could neither fill the window nor reach the end, because a short page passed off
- * as the requested window silently skips rows.
+ * regression — every export above got a 500 once the table outgrew the enumeration
+ * budget. A bounded read is therefore answered when its window is FULL, or when the
+ * table ended first (then the short result is genuinely the whole tail, not a
+ * truncation).
+ *
+ * It is still refused when the read could neither fill the window nor reach the end,
+ * because a short page passed off as the requested window silently skips rows — and
+ * refused when the window MOVED while it was being filled (`stable`), because a full
+ * window assembled out of a moving one is missing rows it will never mention.
  */
 function assertHonestEventRead(enumeration: SelfHostedEnumeration<EmailEvent>, bound: number | null): void {
   if (bound === null ? enumeration.complete : (enumeration.filled || enumeration.complete) && enumeration.stable) {
     return;
   }
+  // A shift is proven either by a row coming back twice or by a page not starting
+  // where the previous one ended; name whichever evidence actually fired, because a
+  // deletion above the cursor skips rows without ever producing a duplicate.
+  const shiftEvidence = enumeration.duplicates > 0
+    ? `${enumeration.duplicates} duplicate row(s) means rows were skipped`
+    : `a page did not begin on the row the previous page ended on, so rows were skipped`;
   const cause = enumeration.exhausted
     ? `the ${enumeration.pages}-page enumeration budget ran out`
-    : `the server's paging window shifted (${enumeration.duplicates} duplicate row(s) means rows were skipped)`;
+    : `the server's paging window shifted (${shiftEvidence})`;
   if (bound === null) {
     throw new Error(
       `Refusing to return a partial event list: ${cause}, so the ${enumeration.rows.length} row(s) read ` +

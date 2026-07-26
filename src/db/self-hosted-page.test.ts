@@ -71,7 +71,11 @@ describe("enumerateSelfHostedRows", () => {
 
     expect(result.complete).toBe(false);
     expect(result.pages).toBe(3);
-    expect(result.rows).toHaveLength(300);
+    // 100 + 99 + 99: every page after the first re-reads the previous page's last row
+    // to prove the window did not move (see `shifted`), so one row of each page's
+    // capacity buys that proof. The point of the assertion is unchanged — the budget
+    // ran out, so this count is a lower bound and never a total.
+    expect(result.rows).toHaveLength(298);
   });
 
   // The SECOND count trap, found on production /v1/sources: the server's list
@@ -168,7 +172,8 @@ describe("enumerateSelfHostedRows with a bounded need", () => {
 
     const result = enumerateSelfHostedRows("addresses", { need: 900, pageSize: 100, pageBudget: 3 });
 
-    expect(result.rows).toHaveLength(300);
+    // 100 + 99 + 99 — one row per page after the first pays for the anchor.
+    expect(result.rows).toHaveLength(298);
     expect(result.filled).toBe(false);
     expect(result.complete).toBe(false);
     expect(result.exhausted).toBe(true);
@@ -191,6 +196,39 @@ describe("enumerateSelfHostedRows with a bounded need", () => {
     expect(result.rows).toEqual(
       Array.from({ length: 100 }, (_, index) => `addr-${String(index * 2).padStart(5, "0")}`),
     );
+  });
+
+  // De-duplication only catches the window moving BACKWARD. Moving FORWARD — a row
+  // deleted above the cursor — slides every unread row down one offset, so the next
+  // page starts one row late and the skipped row is seen by nobody. No duplicate is
+  // ever produced, so `duplicates` cannot be the only integrity signal.
+  it("proves a forward window shift that produces no duplicate at all", async () => {
+    await stub.seed({ addresses: rows(1200) });
+    await stub.setListOrderInstability(7, ["addresses"]);
+
+    const result = enumerateSelfHostedRows("addresses", { need: 1000 });
+
+    expect(result.shifted).toBe(true);
+    // The point: nothing came back twice, so the pre-existing signal saw nothing.
+    expect(result.duplicates).toBe(0);
+    expect(result.stable).toBe(false);
+    // It must NOT be publishable: the window looks full but skipped rows.
+    expect(result.complete).toBe(false);
+  });
+
+  it("keeps shifted false and the window full when the order really is total", async () => {
+    await stub.seed({ addresses: rows(1200) });
+
+    const result = enumerateSelfHostedRows("addresses", { need: 1000 });
+
+    expect(result.shifted).toBe(false);
+    expect(result.stable).toBe(true);
+    expect(result.filled).toBe(true);
+    expect(result.rows).toHaveLength(1000);
+    // Anchoring re-reads a row per page; it must never leak into the result.
+    expect(new Set(result.rows.map((row) => row["id"])).size).toBe(1000);
+    expect(result.rows[0]!["id"]).toBe("addr-00000");
+    expect(result.rows[999]!["id"]).toBe("addr-00999");
   });
 
   it("counts a dropped row as consumed so paging never re-reads it", async () => {

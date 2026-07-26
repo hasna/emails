@@ -15,10 +15,15 @@
 //      dragging the whole table across the wire.
 //
 // The refusal then over-reached: it applied to BOUNDED reads too, which never asked
-// about the rest of the table. The dashboard events tab requests `?limit=100` and
-// `export events` (MCP) defaults to `limit=1000`, so both returned a 500 rather than
-// a page once `events` outgrew the budget. A bounded read is now windowed
-// server-side and answered; only an unbounded one still has to prove completeness.
+// about the rest of the table. Every caller that reaches this path through
+// src/lib/export.ts — MCP `export_events`, CLI `emails export events`, and
+// `GET /api/export/events` — is bounded (`normalizeEventFilters` always supplies a
+// limit, 1000 by default), so all of them returned a 500 rather than a page once
+// `events` outgrew the budget. A bounded read is now windowed server-side and
+// answered; only an unbounded one still has to prove completeness.
+//
+// (`GET /api/events` is NOT one of those callers: src/server/routes/core.ts imports
+// from `events.local.js` and never reaches the remote path.)
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { startV1Stub, type V1Stub } from "../test-support/v1-stub.js";
@@ -141,9 +146,10 @@ describe("bounded self-hosted event reads", () => {
   // unbounded read has no way to prove it saw all of it.
   const SCAN_CAP = SELF_HOSTED_ENUMERATION_PAGE_BUDGET * SELF_HOSTED_SERVER_PAGE_MAX;
 
-  // THE REGRESSION. `?limit=100` is what the dashboard events tab sends and what
-  // `export events` normalizes to, and it used to enumerate the whole table and then
-  // refuse the result — a 500 on a read that never asked about the whole table.
+  // THE REGRESSION. A bounded read used to enumerate the whole table and then refuse
+  // the result — a 500 on a read that never asked about the whole table. `limit: 100`
+  // is the single-request shape; `limit: 1000` (the `export events` default) is
+  // covered separately below because it spans pages.
   it("serves a bounded read on a table past the scan cap, and still refuses an unbounded one", async () => {
     await stub.seed({ events: descendingEventRows(SCAN_CAP + 500) });
 
@@ -252,9 +258,10 @@ describe("bounded self-hosted event reads", () => {
     );
   });
 
-  // A bound that fits in ONE request is structurally immune to a shifting paging
-  // window: a single request sees a single snapshot, so there is no window to shift.
-  // The unbounded read over the same shifting table is still refused.
+  // A bound that fits in ONE request is genuinely immune to a shifting paging window:
+  // a single request sees a single snapshot, so there is no window to shift. That is a
+  // property of the single request, NOT of bounded reads in general — see the
+  // multi-page case below. The unbounded read over the same table is still refused.
   it("serves a single-request bounded read while the server's paging window shifts", async () => {
     await stub.seed({ events: descendingEventRows(1200) });
     await stub.setListOrderInstability(7, ["events"]);
@@ -263,6 +270,22 @@ describe("bounded self-hosted event reads", () => {
 
     expect(() => listEvents()).toThrow(/partial event list/);
     expect(() => listEvents()).toThrow(/paging window shifted/);
+  });
+
+  // A MULTI-page bounded read must refuse under a shifting window, and this is the
+  // case that a bound almost hid. `limit: 1000` is the `export events` default, so it
+  // spans two pages. The window moves FORWARD there, which skips rows without ever
+  // returning one twice: the read came back with a full-looking 1000 rows that were
+  // missing the seven most recent events, `duplicates === 0`, and nothing to fire on.
+  // Filling a window is only an answer if the window did not move underneath it.
+  it("refuses a multi-page bounded read when the window shifts without duplicating a row", async () => {
+    await stub.seed({ events: descendingEventRows(1200) });
+    await stub.setListOrderInstability(7, ["events"]);
+
+    expect(() => listEvents({ limit: 1000 })).toThrow(/partial event list/);
+    expect(() => listEvents({ limit: 1000 })).toThrow(/paging window shifted/);
+    // Detected by the page anchor, not by de-duplication — no row ever came back twice.
+    expect(() => listEvents({ limit: 1000 })).toThrow(/did not begin on the row the previous page ended on/);
   });
 
   // A bound is NOT a way around the guard. When a client-side filter starves the
@@ -278,8 +301,21 @@ describe("bounded self-hosted event reads", () => {
 
     expect(() => listEvents({ until, limit: 2000 })).toThrow(/partial event list/);
     expect(() => listEvents({ until, limit: 2000 })).toThrow(/budget ran out/);
-    // Named counts, so the caller can see how short the window fell.
-    expect(() => listEvents({ until, limit: 2000 })).toThrow(/1000 of the 2000 row/);
+    // The refusal names how short the window fell, so the caller sees a real
+    // shortfall and not just "failed". Asserted by shape rather than by a hard-coded
+    // count, which would only track how many rows a page happens to carry.
+    let refusal = "";
+    try {
+      listEvents({ until, limit: 2000 });
+    } catch (error) {
+      refusal = String(error);
+    }
+    const shortfall = refusal.match(/(\d+) of the 2000 row\(s\)/);
+    expect(shortfall).not.toBeNull();
+    const reached = Number(shortfall![1]);
+    // Real rows were read (never a fabricated zero) and the window really is short.
+    expect(reached).toBeGreaterThan(0);
+    expect(reached).toBeLessThan(2000);
 
     // Positive control: the same filter, bounded to what IS reachable, is answered —
     // the refusal above is about the unreachable rows, not a filter that matches

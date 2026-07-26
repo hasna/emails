@@ -578,9 +578,24 @@ const attachmentRepairSummarySchema = {
   ],
 } as const;
 
+// Both are CLAMPED, never rejected (src/server/self-hosted/store.ts clampLimit /
+// clampOffset), so a client asking for 1000 silently receives 500. Clients that page a
+// window rely on that, so it is documented rather than left to be rediscovered.
 const listParams = [
-  { name: "limit", in: "query", required: false, schema: { type: "integer" } },
-  { name: "offset", in: "query", required: false, schema: { type: "integer" } },
+  {
+    name: "limit",
+    in: "query",
+    required: false,
+    schema: { type: "integer" },
+    description: "Page size. Clamped to 500 (default 100); a larger value returns 500 rows rather than an error.",
+  },
+  {
+    name: "offset",
+    in: "query",
+    required: false,
+    schema: { type: "integer" },
+    description: "Rows to skip. Clamped to 100000; deep paging past that returns the same window rather than an error.",
+  },
 ] as const;
 
 const idParam = [{ name: "id", in: "path", required: true, schema: { type: "string" } }] as const;
