@@ -13,7 +13,6 @@
 
 import { now, uuid } from "./runtime.js";
 import type { DomainState, AddressState } from "../lib/provision/state-machine.js";
-import { parseJsonArray } from "./json.js";
 import { selfHostedResource, cobj, ciso, cstr, cstrOrNull } from "./self-hosted-resource.js";
 
 const DOMAIN_RESOURCE = "domains";
@@ -97,9 +96,25 @@ export interface ProvisioningEvent {
 
 // ─── Domain provisioning ────────────────────────────────────────────────────
 
+function stringArray(value: unknown, field: "nameservers_json" | "nameservers"): string[] {
+  let decoded: unknown = value;
+  if (typeof value === "string") {
+    try {
+      decoded = JSON.parse(value);
+    } catch {
+      throw new TypeError(`${field} must be a JSON array of strings`);
+    }
+  }
+  if (!Array.isArray(decoded) || !decoded.every((item): item is string => typeof item === "string")) {
+    throw new TypeError(`${field} must be an array of strings`);
+  }
+  return [...decoded];
+}
+
 function nameserversOf(e: Record<string, unknown>): string[] {
-  if (Array.isArray(e["nameservers"])) return e["nameservers"].map((x) => String(x));
-  return parseJsonArray<string>(cstrOrNull(e["nameservers_json"]));
+  if (e["nameservers_json"] != null) return stringArray(e["nameservers_json"], "nameservers_json");
+  if (e["nameservers"] != null) return stringArray(e["nameservers"], "nameservers");
+  return [];
 }
 
 function rowToDomainProvisioning(e: Record<string, unknown>): DomainProvisioning {

@@ -126,26 +126,28 @@ describe("getEmail", () => {
     expect(found?.id).toBe(e.id);
   });
 
-  it("coerces malformed recipient JSON to empty arrays (missing tags → {})", async () => {
-    // A /v1 row whose address fields are non-array JSON must map to [] (cstrArray),
-    // and a row with no `tags` maps to {} (cobj of undefined).
+  it("rejects malformed recipient arrays returned by /v1", async () => {
     await stub.seed({
       messages: [
         outboundMessage({
-          id: "malformed-1",
+          id: "malformed-to",
           created_at: "2026-01-01T00:00:00.000Z",
           to_addrs: "{}",
+        }),
+        outboundMessage({
+          id: "malformed-cc",
+          created_at: "2026-01-02T00:00:00.000Z",
           cc_addrs: "{}",
-          bcc_addrs: "{}",
         }),
       ],
     });
 
-    const found = getEmail("malformed-1");
-    expect(found?.to_addresses).toEqual([]);
-    expect(found?.cc_addresses).toEqual([]);
-    expect(found?.bcc_addresses).toEqual([]);
-    expect(found?.tags).toEqual({});
+    expect(() => getEmail("malformed-to")).toThrow(
+      /invalid successful response: body\.message\.to_addrs must be an array/i,
+    );
+    expect(() => getEmail("malformed-cc")).toThrow(
+      /invalid successful response: body\.message\.cc_addrs must be an array/i,
+    );
   });
 
   it("returns null for unknown id", () => {

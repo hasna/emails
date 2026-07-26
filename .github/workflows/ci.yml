@@ -140,6 +140,8 @@ jobs:
             HOME="$tmp_home" EMAILS_MODE=local EMAILS_DB_PATH=:memory: bun test
       - name: Build
         run: bun run build
+      - name: Verify generated self-hosted SDK signatures
+        run: bun run test:selfhost-sdk-types
       - name: Verify canonical public package identity
         run: |
           bun -e '
@@ -152,7 +154,9 @@ jobs:
       - name: Verify generated SDK is committed
         run: |
           bun run scripts/generate-selfhost-sdk.ts
-          git diff --exit-code -- src/selfhost.ts
+          git diff --exit-code -- \
+            src/selfhost.ts \
+            src/lib/self-hosted-response-contracts.generated.ts
       - name: Verify hosted-control-plane boundary
         run: |
           bun run no-cloud:source

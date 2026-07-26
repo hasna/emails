@@ -114,7 +114,7 @@ describe("getInboundEmail", () => {
     expect(getInboundEmail("nonexistent-id")).toBeNull();
   });
 
-  it("tolerates malformed attachment JSON stored on /v1", async () => {
+  it("rejects malformed attachment arrays returned by /v1", async () => {
     await stub.seed({
       messages: [
         {
@@ -130,9 +130,41 @@ describe("getInboundEmail", () => {
       ],
     });
 
-    expect(getInboundEmail("m-bad")?.attachment_paths).toEqual([]);
-    expect(listInboundEmails({})[0]?.attachment_paths).toEqual([]);
-    expect(getInboundAttachmentPaths("m-bad")).toEqual([]);
+    expect(() => getInboundEmail("m-bad")).toThrow(
+      /invalid successful response: body\.message\.attachments must be an array/i,
+    );
+    expect(() => getInboundAttachmentPaths("m-bad")).toThrow(
+      /invalid successful response: body\.message\.attachments must be an array/i,
+    );
+  });
+
+  it("preserves valid null attachment slots returned by /v1", async () => {
+    await stub.seed({
+      messages: [
+        {
+          id: "m-null-slot",
+          direction: "inbound",
+          from_addr: "sender@example.com",
+          to_addrs: ["receiver@example.com"],
+          subject: "Null attachment slot",
+          received_at: "2026-01-01T00:00:00.000Z",
+          created_at: "2026-01-01T00:00:00.000Z",
+          attachments: [
+            { filename: "first.pdf", content_type: "application/pdf", size: 10 },
+            null,
+            { filename: "third.txt", content_type: "text/plain", size: 30 },
+          ],
+        },
+      ],
+    });
+
+    const expectedPaths = [
+      { filename: "first.pdf", content_type: "application/pdf", size: 10 },
+      { filename: "attachment-2", content_type: "application/octet-stream", size: 0 },
+      { filename: "third.txt", content_type: "text/plain", size: 30 },
+    ];
+    expect(getInboundEmail("m-null-slot")?.attachment_paths).toEqual(expectedPaths);
+    expect(getInboundAttachmentPaths("m-null-slot")).toEqual(expectedPaths);
   });
 
   it("reads attachment metadata as attachment paths (no local_path server-side)", () => {

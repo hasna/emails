@@ -199,8 +199,6 @@ describe("emails-mcp HTTP transport", () => {
               content_available: false,
               direction: "outbound",
               received_at: "2026-07-24T08:00:00.000Z",
-              content_base64: "must-not-leak",
-              secret: "must-not-leak",
             }],
             next_cursor: "opaque/+==",
             api_key: "must-not-leak",
@@ -271,6 +269,63 @@ describe("emails-mcp HTTP transport", () => {
         });
         expect(requests.map((url) => url.searchParams.get("cursor"))).toEqual([null, "opaque/+=="]);
         expect(requests[0]?.searchParams.get("since")).toBe("2026-07-24T08:00:00.000Z");
+      });
+    } finally {
+      stub.applyEnv();
+      resetSelfHostedConfigCache();
+    }
+  });
+
+  it("fails closed and redacts unsupported attachment inventory fields", async () => {
+    const contentSentinel = "must-not-leak-content";
+    const secretSentinel = "must-not-leak-secret";
+    const inventoryServer = Bun.serve({
+      port: 0,
+      fetch(request) {
+        const url = new URL(request.url);
+        if (url.pathname !== "/v1/attachments") {
+          return Response.json({ error: "not found" }, { status: 404 });
+        }
+        return Response.json({
+          items: [{
+            message_id: "message-1",
+            attachment_index: 0,
+            filename: "invoice.pdf",
+            content_type: "application/pdf",
+            size_bytes: 2048,
+            sha256: "b".repeat(64),
+            content_available: false,
+            direction: "outbound",
+            received_at: "2026-07-24T08:00:00.000Z",
+            content_base64: contentSentinel,
+            secret: secretSentinel,
+          }],
+          next_cursor: null,
+        });
+      },
+    });
+    servers.push(inventoryServer);
+    process.env.EMAILS_MODE = "self_hosted";
+    process.env.EMAILS_SELF_HOSTED_URL = `http://127.0.0.1:${inventoryServer.port}`;
+    process.env.EMAILS_SELF_HOSTED_API_KEY = "attachment-inventory-http-test-key";
+    resetSelfHostedConfigCache();
+
+    try {
+      await withClient("emails-mcp-attachment-inventory-redaction-test", async (client) => {
+        const result = await client.callTool(
+          { name: "list_attachments", arguments: {} },
+          undefined,
+          { timeout: 10_000 },
+        );
+        expect(result.isError).toBe(true);
+        const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+        const payload = JSON.parse(text) as Record<string, unknown>;
+        expect(Object.keys(payload).sort()).toEqual(["cli_equivalent", "error"]);
+        expect(text).toContain("invalid successful response");
+        expect(text).toContain("unsupported fields");
+        for (const sensitive of ["content_base64", "secret", "must-not-leak", contentSentinel, secretSentinel]) {
+          expect(text).not.toContain(sensitive);
+        }
       });
     } finally {
       stub.applyEnv();

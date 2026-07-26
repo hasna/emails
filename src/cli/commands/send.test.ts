@@ -69,11 +69,14 @@ describe("emails send — routes through the server send API", () => {
     expect(messages).toHaveLength(1);
     expect(messages[0]).toMatchObject({
       direction: "outbound",
-      from: "agent@acme.com",
+      from_addr: "agent@acme.com",
+      to_addrs: ["dest@ext.com"],
       subject: "Hi",
-      text: "Body text",
+      body_text: "Body text",
+      status: "sent",
+      created_at: expect.any(String),
+      updated_at: expect.any(String),
     });
-    expect(messages[0]!["to"]).toEqual(["dest@ext.com"]);
   });
 
   it("sends to multiple recipients", async () => {
@@ -84,7 +87,16 @@ describe("emails send — routes through the server send API", () => {
     expect(result.consoleOutput).toContain("Email sent to a@ext.com, b@ext.com");
     const messages = await stub.list("messages");
     expect(messages).toHaveLength(1);
-    expect(messages[0]!["to"]).toEqual(["a@ext.com", "b@ext.com"]);
+    expect(messages[0]).toMatchObject({
+      direction: "outbound",
+      from_addr: "agent@acme.com",
+      to_addrs: ["a@ext.com", "b@ext.com"],
+      subject: "Hi",
+      body_text: "x",
+      status: "sent",
+      created_at: expect.any(String),
+      updated_at: expect.any(String),
+    });
   });
 });
 

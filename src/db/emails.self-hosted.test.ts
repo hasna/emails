@@ -40,7 +40,7 @@ const server = Bun.serve({
     if (req.headers.get("authorization") !== "Bearer " + KEY) return json({ error: "unauthorized" }, 401);
     if (parts[0] !== "v1" || parts[1] !== "messages") return json({ error: "not found" }, 404);
     const id = parts[2];
-    if (req.method === "GET" && !id) return json({ messages: [...rows.values()] });
+    if (req.method === "GET" && !id) return json({ messages: [...rows.values()], next_cursor: null });
     if (id && req.method === "GET") { const e = rows.get(id); return e ? json({ message: e }) : json({ error: "message not found" }, 404); }
     return json({ error: "method not allowed" }, 405);
   },
@@ -53,13 +53,28 @@ const MESSAGE = {
   direction: "outbound",
   from_addr: "sender@example.org",
   to_addrs: ["dest@example.com"],
+  cc_addrs: [],
+  bcc_addrs: [],
   subject: "SelfHosted show works",
+  snippet: "hello from the selfHosted store",
   body_text: "hello from the selfHosted store",
   body_html: "<p>hello from the selfHosted store</p>",
   headers: { "X-Test": "1" },
+  attachments: [],
+  attachment_count: 0,
   status: "sent",
+  provider_message_id: null,
+  message_id: null,
+  in_reply_to: null,
   received_at: "2026-07-08T12:00:00.000Z",
+  is_read: true,
+  is_starred: false,
+  labels: [],
+  source_id: null,
+  send_state: "sent",
+  send_started_at: null,
   created_at: "2026-07-08T12:00:00.000Z",
+  updated_at: "2026-07-08T12:00:00.000Z",
 };
 
 async function seed(messages: Record<string, unknown>[]): Promise<void> {

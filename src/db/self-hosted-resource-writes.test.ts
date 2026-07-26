@@ -29,6 +29,7 @@ const sendKeys = [];
 let seq = 0;
 const nid = (p) => p + (++seq);
 const now = "2026-01-01T00:00:00Z";
+const tenantId = "12345678-1234-4234-8234-123456789abc";
 const server = Bun.serve({ port: 0, async fetch(req) {
   const url = new URL(req.url);
   const p = url.pathname;
@@ -38,14 +39,14 @@ const server = Bun.serve({ port: 0, async fetch(req) {
 
   if (p === "/v1/owners" && m === "GET") return ok({ items: owners });
   if (p === "/v1/owners" && m === "POST") {
-    const o = { id: nid("o"), type: body.type, name: body.name, contact_email: body.contact_email ?? null, external_id: body.external_id ?? null, created_at: now, updated_at: now };
+    const o = { id: nid("o"), tenant_id: tenantId, type: body.type, name: body.name, contact_email: body.contact_email ?? null, external_id: body.external_id ?? null, created_at: now, updated_at: now };
     owners.push(o);
     return ok(o, 201);
   }
 
   if (p === "/v1/groups" && m === "GET") return ok({ items: groups });
   if (p === "/v1/groups" && m === "POST") {
-    const g = { id: nid("g"), name: body.name, description: body.description ?? null, created_at: now, updated_at: now };
+    const g = { id: nid("g"), tenant_id: tenantId, name: body.name, description: body.description ?? null, created_at: now, updated_at: now };
     groups.push(g);
     return ok(g, 201);
   }
@@ -56,38 +57,38 @@ const server = Bun.serve({ port: 0, async fetch(req) {
     return ok({ items });
   }
   if (p === "/v1/contacts" && m === "POST") {
-    const c = { id: nid("c"), email: body.email, name: body.name ?? null, send_count: 0, bounce_count: 0, complaint_count: 0, last_sent_at: null, suppressed: !!body.suppressed, created_at: now, updated_at: now };
+    const c = { id: nid("c"), tenant_id: tenantId, email: body.email, name: body.name ?? null, send_count: 0, bounce_count: 0, complaint_count: 0, last_sent_at: null, suppressed: !!body.suppressed, created_at: now, updated_at: now };
     contacts.push(c);
     return ok(c, 201);
   }
   if (p === "/v1/templates" && m === "GET") return ok({ items: templates });
   if (p === "/v1/templates" && m === "POST") {
-    const t = { id: nid("t"), name: body.name, subject_template: body.subject_template, html_template: body.html_template ?? null, text_template: body.text_template ?? null, metadata: body.metadata ?? {}, created_at: now, updated_at: now };
+    const t = { id: nid("t"), tenant_id: tenantId, name: body.name, subject_template: body.subject_template, html_template: body.html_template ?? null, text_template: body.text_template ?? null, metadata: body.metadata ?? {}, created_at: now, updated_at: now };
     templates.push(t);
     return ok(t, 201);
   }
   const tm = p.match(/^\\/v1\\/templates\\/([^/]+)$/);
   if (tm && m === "GET") {
     const t = templates.find((x) => x.id === tm[1]);
-    return t ? ok(t, 200) : ok({ error: "not found" }, 404);
+    return t ? ok(t, 200) : ok({ error: "templates not found" }, 404);
   }
   if (tm && m === "DELETE") {
     const i = templates.findIndex((x) => x.id === tm[1]);
-    if (i < 0) return ok({ error: "not found" }, 404);
+    if (i < 0) return ok({ error: "templates not found" }, 404);
     templates.splice(i, 1);
     return ok({ deleted: true, id: tm[1] }, 200);
   }
 
   if (p === "/v1/sequences" && m === "GET") return ok({ items: sequences });
   if (p === "/v1/sequences" && m === "POST") {
-    const s = { id: nid("s"), name: body.name, description: body.description ?? null, status: body.status ?? "active", created_at: now, updated_at: now };
+    const s = { id: nid("s"), tenant_id: tenantId, name: body.name, description: body.description ?? null, status: body.status ?? "active", created_at: now, updated_at: now };
     sequences.push(s);
     return ok(s, 201);
   }
 
   if (p === "/v1/send-keys" && m === "GET") return ok({ items: sendKeys });
   if (p === "/v1/send-keys/mint" && m === "POST") {
-    const k = { id: nid("sk"), owner_id: body.owner_id, prefix: "esk_stubpref", label: body.label ?? null, last_used_at: null, revoked_at: null, created_at: now, updated_at: now };
+    const k = { id: nid("sk"), tenant_id: tenantId, owner_id: body.owner_id, prefix: "esk_stubpref", label: body.label ?? null, last_used_at: null, revoked_at: null, created_at: now, updated_at: now };
     sendKeys.push(k);
     return ok({ token: "esk_stub_" + k.id, key: k }, 201);
   }
@@ -95,7 +96,7 @@ const server = Bun.serve({ port: 0, async fetch(req) {
   const cm = p.match(/^\\/v1\\/contacts\\/([^/]+)$/);
   if (cm && m === "PATCH") {
     const c = contacts.find((x) => x.id === cm[1]);
-    if (!c) return ok({ error: "not found" }, 404);
+    if (!c) return ok({ error: "contacts not found" }, 404);
     if ("suppressed" in body) c.suppressed = !!body.suppressed;
     return ok(c, 200);
   }

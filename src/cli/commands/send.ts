@@ -229,7 +229,11 @@ export function registerSendCommands(program: Command, _output: (data: unknown, 
           scheduledAt: opts.schedule,
           idempotencyKey: (opts as Record<string, unknown>).idempotencyKey as string | undefined,
         });
-        console.log(chalk.green(`✓ Email sent to ${toAddresses.join(", ")}`));
+        if (result.inProgress) {
+          console.log(chalk.yellow(`Send already in progress for ${toAddresses.join(", ")}; do not retry.`));
+        } else {
+          console.log(chalk.green(`✓ Email sent to ${toAddresses.join(", ")}`));
+        }
         if (result.messageId) console.log(chalk.dim(`  Message ID: ${result.messageId}`));
         // The message left the provider even though a post-send step failed —
         // tell the operator NOT to re-send.

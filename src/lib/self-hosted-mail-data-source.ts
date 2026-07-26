@@ -64,6 +64,15 @@ import {
   normalizeAttachmentByteLimit,
   type AttachmentContent,
 } from "./attachment-download.js";
+import {
+  DEFAULT_SELF_HOSTED_MAX_RESPONSE_BYTES,
+  parseSelfHostedErrorJson,
+  parseSelfHostedSuccessJson,
+  projectSelfHostedMailErrorBody,
+  readSelfHostedResponseText,
+  selfHostedTransportLimit,
+  validateSelfHostedMailSuccessResponse,
+} from "./self-hosted-wire.js";
 // ── the /v1 message row (snake_case, as the self-hosted serve returns) ────────
 
 interface V1Message {
@@ -94,6 +103,8 @@ interface V1Message {
 }
 
 export type SelfHostedFetch = (url: string, init: RequestInit) => Promise<{
+  body?: ReadableStream<Uint8Array> | null;
+  headers?: { get(name: string): string | null };
   status: number;
   text(): Promise<string>;
 }>;
@@ -758,6 +769,8 @@ export interface SelfHostedMailDataSourceOptions {
   now?: () => number;
   /** Per-request timeout in ms (default: EMAILS_SELF_HOSTED_HTTP_TIMEOUT or 30s). */
   timeoutMs?: number;
+  /** Maximum response bytes read before failing closed (default: 8 MiB). */
+  maxResponseBytes?: number;
 }
 
 export class SelfHostedMailDataSource implements MailDataSource {
@@ -767,6 +780,7 @@ export class SelfHostedMailDataSource implements MailDataSource {
   private readonly fetchImpl: SelfHostedFetch;
   private readonly now: () => number;
   private readonly timeoutMs: number;
+  private readonly maxResponseBytes: number;
   private scanCache: { at: number; rows: V1Message[] } | null = null;
 
   constructor(options: SelfHostedMailDataSourceOptions) {
@@ -778,7 +792,12 @@ export class SelfHostedMailDataSource implements MailDataSource {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
     this.apiKey = options.apiKey;
     this.now = options.now ?? Date.now;
-    this.timeoutMs = options.timeoutMs ?? selfHostedTimeoutMs();
+    this.timeoutMs = selfHostedTransportLimit(options.timeoutMs, selfHostedTimeoutMs(), "timeoutMs");
+    this.maxResponseBytes = selfHostedTransportLimit(
+      options.maxResponseBytes,
+      DEFAULT_SELF_HOSTED_MAX_RESPONSE_BYTES,
+      "maxResponseBytes",
+    );
     this.fetchImpl = options.fetchImpl
       ?? ((url, init) => fetch(url, init) as unknown as ReturnType<SelfHostedFetch>);
   }
@@ -814,14 +833,18 @@ export class SelfHostedMailDataSource implements MailDataSource {
     if (res.status >= 300 && res.status < 400) {
       throw new Error(`self-hosted emails: ${method} ${path} redirect refused`);
     }
-    const text = await res.text();
+    const text = await readSelfHostedResponseText(res, { method, path }, this.maxResponseBytes);
     let json: unknown = null;
-    if (text && text.trim()) {
-      try {
-        json = JSON.parse(text);
-      } catch {
-        json = null;
-      }
+    if (res.status >= 200 && res.status < 300) {
+      json = parseSelfHostedSuccessJson(text, { status: res.status, method, path });
+      validateSelfHostedMailSuccessResponse(method, path, res.status, json);
+    } else {
+      const parsed = parseSelfHostedErrorJson(text, {
+        status: res.status,
+        method,
+        path,
+      });
+      json = projectSelfHostedMailErrorBody(method, path, res.status, parsed);
     }
     return { status: res.status, json };
   }
@@ -1573,13 +1596,14 @@ export class SelfHostedMailDataSource implements MailDataSource {
       error?: unknown;
       warning?: unknown;
       sent?: unknown;
+      in_progress?: unknown;
       provider_message_id?: unknown;
     };
     if (status < 200 || status >= 300) {
-      // Relay the server's own diagnosis (e.g. the real provider reject and
-      // whether anything was sent) instead of a bare status code.
-      const detail = typeof payload.error === "string" && payload.error ? `: ${payload.error}` : "";
-      throw new Error(`self-hosted Emails: POST /messages/send failed (HTTP ${status})${detail}`);
+      const reason = typeof (json as Record<string, unknown> | null)?.["reason"] === "string"
+        ? ` (${String((json as Record<string, unknown>)["reason"])})`
+        : "";
+      throw new Error(`self-hosted Emails: POST /messages/send failed (HTTP ${status})${reason}`);
     }
     const rec = payload.message;
     const id = rec?.id ?? "";
@@ -1592,6 +1616,7 @@ export class SelfHostedMailDataSource implements MailDataSource {
     return {
       id,
       messageId: providerMessageId ?? rec?.message_id ?? id,
+      ...(payload.in_progress === true ? { inProgress: true as const } : {}),
       // A 2xx with a warning means the message WAS sent but a post-send step
       // failed — success that the caller must see, never re-send.
       ...(typeof payload.warning === "string" && payload.warning ? { warning: payload.warning } : {}),

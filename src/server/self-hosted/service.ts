@@ -58,6 +58,12 @@ import type { AuthMailerConfig } from "./auth/mailer.js";
 import type { SelfHostedKeyStore } from "./keys.js";
 import { canonicalSender } from "../../lib/email-address.js";
 import { normalizeAttachmentByteLimit } from "../../lib/attachment-download.js";
+import { canonicalizeSelfHostedPathname } from "../../lib/self-hosted-paths.js";
+
+export {
+  canonicalizeApiV1Pathname,
+  canonicalizeClientDialectPathname,
+} from "../../lib/self-hosted-paths.js";
 
 interface ReadyResult {
   ok: boolean;
@@ -142,6 +148,17 @@ function json(status: number, body: unknown): Response {
 function publicMessage(record: MessageRecord): Omit<MessageRecord, "idempotency_key" | "send_payload_hash"> {
   const { idempotency_key: _key, send_payload_hash: _hash, ...safe } = record;
   return safe;
+}
+
+function missingProviderProofResponse(record: MessageRecord): Response {
+  return json(409, {
+    error: "the send ledger says sent but has no provider message id; reconcile provider evidence before treating it as delivered",
+    reason: "provider_proof_missing",
+    sent: null,
+    message: publicMessage(record),
+    retry_safe: false,
+    reconciliation_required: true,
+  });
 }
 
 function sendIntentMessage(record: MessageRecord): { id: string; send_state: string } {
@@ -609,13 +626,6 @@ async function resolveMessageIdOrError(
  * rewritten; any other path (including `/health`, `/openapi.json`, `/api/...`
  * that is not `/api/v1`) is returned unchanged.
  */
-export function canonicalizeApiV1Pathname(pathname: string): string {
-  if (pathname === "/api/v1" || pathname.startsWith("/api/v1/")) {
-    return pathname.slice("/api".length);
-  }
-  return pathname;
-}
-
 /**
  * The native client speaks a slightly different DIALECT than this service's
  * canonical `/v1` surface. It targets a few cloud-shaped segment names that map
@@ -636,15 +646,6 @@ export function canonicalizeApiV1Pathname(pathname: string): string {
  * alter method or body. The `/v1/keys/{id}/revoke` POST target is served by the
  * auth router alongside the existing `DELETE /v1/keys/{id}`.
  */
-export function canonicalizeClientDialectPathname(pathname: string): string {
-  if (pathname === "/v1/auth/me") return "/v1/me";
-  if (pathname === "/v1/api-keys") return "/v1/keys";
-  if (pathname.startsWith("/v1/api-keys/")) {
-    return `/v1/keys/${pathname.slice("/v1/api-keys/".length)}`;
-  }
-  return pathname;
-}
-
 /**
  * Route + handle a single request. Returns `null` when the path is not owned by
  * this service (so a caller can fall through to other handlers).
@@ -665,13 +666,8 @@ export async function handleSelfHostedRequest(
   // both computes the route path AND dispatches to the auth router
   // (`handleAuthRoutes`) and `resolveRequestContext` (the verifier path). Rewrite
   // the URL object in place so every downstream path check sees canonical `/v1`.
-  const canonicalPathname = canonicalizeApiV1Pathname(url.pathname);
+  const canonicalPathname = canonicalizeSelfHostedPathname(url.pathname);
   if (canonicalPathname !== url.pathname) url.pathname = canonicalPathname;
-  // Then fold the native client's dialect segments (`/auth/me`, `/api-keys*`)
-  // onto their canonical `/v1` handlers. Pure path rewrite — method + body are
-  // untouched, so this stays a single normalization step at the one entry point.
-  const dialectPathname = canonicalizeClientDialectPathname(url.pathname);
-  if (dialectPathname !== url.pathname) url.pathname = dialectPathname;
   const path = url.pathname.replace(/\/+$/, "") || "/";
   const method = req.method.toUpperCase();
 
@@ -1113,6 +1109,9 @@ export async function handleSelfHostedRequest(
 
       if (!reserved.created) {
         if (reserved.record.send_state === "sent") {
+          if (!reserved.record.provider_message_id?.trim()) {
+            return missingProviderProofResponse(reserved.record);
+          }
           return json(200, {
             message: publicMessage(reserved.record),
             provider: deps.sender.provider,
@@ -1120,7 +1119,7 @@ export async function handleSelfHostedRequest(
             // The original attempt succeeded: say so at the top level, exactly
             // like a fresh success, so callers have ONE place to check.
             sent: true,
-            ...(reserved.record.provider_message_id ? { provider_message_id: reserved.record.provider_message_id } : {}),
+            provider_message_id: reserved.record.provider_message_id,
           });
         }
         if (reserved.record.send_state === "sending") {
@@ -1196,12 +1195,15 @@ export async function handleSelfHostedRequest(
       if (!claimed) {
         const latest = await auth.store.getMessage(reserved.record.id);
         if (latest?.send_state === "sent") {
+          if (!latest.provider_message_id?.trim()) {
+            return missingProviderProofResponse(latest);
+          }
           return json(200, {
             message: publicMessage(latest),
             provider: deps.sender.provider,
             idempotent_replay: true,
             sent: true,
-            ...(latest.provider_message_id ? { provider_message_id: latest.provider_message_id } : {}),
+            provider_message_id: latest.provider_message_id,
           });
         }
         if (latest?.send_state === "cancelled") {
@@ -1276,6 +1278,7 @@ export async function handleSelfHostedRequest(
           sent: null,
           message: publicMessage(uncertain ?? claimed),
           retry_safe: false,
+          reconciliation_required: true,
         });
       }
       try {
