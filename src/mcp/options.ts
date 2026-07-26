@@ -23,6 +23,13 @@ export function isStdioMode(argv: string[] = process.argv.slice(2)): boolean {
 export function resolveHttpPort(argv: string[] = process.argv.slice(2)): number {
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
+    if (arg === undefined) continue;
+    // `--port=8861` / `-p=8861`: the equals form used to be ignored outright,
+    // so the server silently listened on the default port instead of the one
+    // the operator asked for.
+    for (const prefix of ["--port=", "-p="]) {
+      if (arg.startsWith(prefix)) return parsePort(arg.slice(prefix.length), "port");
+    }
     if (arg === "--port" || arg === "-p") {
       const raw = argv[i + 1];
       if (!raw) throw new Error(`Invalid port: ${raw ?? ""}`);
@@ -36,7 +43,10 @@ export function resolveHttpPort(argv: string[] = process.argv.slice(2)): number 
 }
 
 function parsePort(raw: string, label: string): number {
-  const value = Number(raw);
+  const trimmed = raw.trim();
+  // Digits only: `Number()` alone accepts `0x2255`, `1e4`, and `+8861`.
+  if (!/^\d+$/.test(trimmed)) throw new Error(`Invalid ${label}: ${raw}`);
+  const value = Number(trimmed);
   if (!Number.isInteger(value) || value < 1 || value > 65535) {
     throw new Error(`Invalid ${label}: ${raw}`);
   }

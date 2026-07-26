@@ -4,6 +4,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { closeDatabase, resetDatabase } from "../db/database.js";
 import { createProvider } from "../db/providers.local.js";
 import { listSandboxEmails } from "../db/sandbox.local.js";
+import { mcpTestRequestInit, startTestMcpHttpServer } from "../test-support/mcp-http.js";
 import { startHttpServer } from "./http.js";
 import { buildServer } from "./server.js";
 
@@ -26,9 +27,9 @@ afterEach(() => {
 describe("MCP local mode", () => {
   it("sends and lists mail through SQLite and a sandbox provider", async () => {
     const provider = createProvider({ name: "mcp-local", type: "sandbox", active: true });
-    server = startHttpServer({ port: 0, log: () => {} });
+    server = startTestMcpHttpServer();
     const client = new Client({ name: "emails-local-mode-test", version: "1.0.0" }, { capabilities: {} });
-    const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${server.port}/mcp`));
+    const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${server.port}/mcp`), mcpTestRequestInit());
     await client.connect(transport, { timeout: 10_000 });
 
     try {
