@@ -22,25 +22,49 @@ function serverSideEventFilters(filter: EventFilter): Record<string, string | un
 }
 
 /**
- * A partial enumeration must never be returned as if it were the whole set.
+ * A read must be honest about the question it was asked, and there are two
+ * different questions.
  *
  * `events` is the fastest-growing table in the system (one row per delivery, open
  * and click), so it is the first to cross the pager's 20_000-row budget — and it
  * is read by `export events` (MCP) and `GET /api/events`, which hand the caller a
- * JSON/CSV file. Silently windowing a lower bound produces an export that LOOKS
- * complete and is not: the same defect as publishing a de-duplicated page count as
- * a total, with a bigger number.
+ * JSON/CSV file.
+ *
+ * UNBOUNDED ("give me everything"): only a complete enumeration can answer it.
+ * Silently windowing a lower bound produces an export that LOOKS complete and is
+ * not — the same defect as publishing a de-duplicated page count as a total, with
+ * a bigger number. That refusal is preserved exactly.
+ *
+ * BOUNDED ("give me the first N"): a full window IS the complete answer, because
+ * the question never asked about the rest of the table. Refusing it was the
+ * regression: the dashboard events tab asks for `?limit=100` and got a 500 once
+ * the table outgrew the enumeration budget. A bounded read is therefore answered
+ * when its window is FULL, or when the table ended first (then the short result is
+ * genuinely the whole tail, not a truncation). It is still refused when the read
+ * could neither fill the window nor reach the end, because a short page passed off
+ * as the requested window silently skips rows.
  */
-function assertCompleteEventEnumeration(enumeration: SelfHostedEnumeration): void {
-  if (enumeration.complete) return;
+function assertHonestEventRead(enumeration: SelfHostedEnumeration<EmailEvent>, bound: number | null): void {
+  if (bound === null ? enumeration.complete : (enumeration.filled || enumeration.complete) && enumeration.stable) {
+    return;
+  }
   const cause = enumeration.exhausted
     ? `the ${enumeration.pages}-page enumeration budget ran out`
     : `the server's paging window shifted (${enumeration.duplicates} duplicate row(s) means rows were skipped)`;
+  if (bound === null) {
+    throw new Error(
+      `Refusing to return a partial event list: ${cause}, so the ${enumeration.rows.length} row(s) read ` +
+        `are a LOWER BOUND, not the whole set — an export built from them would look complete and would not be. ` +
+        `Ask for a bounded page instead (a limit is windowed server-side by GET /v1/events), narrow the read with ` +
+        `an email_id, provider_id or single type filter (GET /v1/events applies those server-side), or read one ` +
+        `message's events with 'emails show <id>'.`,
+    );
+  }
   throw new Error(
-    `Refusing to return a partial event list: ${cause}, so the ${enumeration.rows.length} row(s) read ` +
-      `are a LOWER BOUND, not the whole set — an export built from them would look complete and would not be. ` +
-      `Narrow the read with an email_id, provider_id or single type filter (GET /v1/events applies those ` +
-      `server-side), or read one message's events with 'emails show <id>'.`,
+    `Refusing to return a partial event list: ${cause} with ${enumeration.rows.length} of the ${bound} row(s) ` +
+      `the requested window needs, so this result is SHORT, not the end of the table — a caller that treated it ` +
+      `as the window it asked for would silently skip rows. Retry, or narrow the read with an email_id, ` +
+      `provider_id or single type filter (GET /v1/events applies those server-side).`,
   );
 }
 
@@ -105,34 +129,64 @@ export function createEvent(input: CreateEventInput): EmailEvent {
   return event;
 }
 
-function listFilteredEvents(filter: EventFilter = {}): EmailEvent[] {
-  // Enumerate, do NOT single-call: the client-side filters + windowing below need
-  // the full row set, and one `.list({ limit: 1000 })` can only ever see 500 rows
-  // (the server clamps every page — see src/db/self-hosted-page.ts). With a single
-  // call, an export of >500 events silently returned a short, plausible result.
-  // The remaining `.list({ limit: 1000 })` call sites are tracked as follow-up.
-  //
-  // The declared filters go to the SERVER so a narrow read stays inside the page
-  // budget instead of dragging the whole table across the wire. They are applied
-  // client-side again below, so the result is identical against a server that
-  // ignores unknown query params (the convention in src/db/contacts.remote.ts).
-  const enumeration = enumerateSelfHostedRows(EVENT_RESOURCE, { query: serverSideEventFilters(filter) });
-  assertCompleteEventEnumeration(enumeration);
-  let rows = enumeration.rows.map(apiToEvent);
-
-  if (filter.email_id) rows = rows.filter((e) => e.email_id === filter.email_id);
-  if (filter.provider_id) rows = rows.filter((e) => e.provider_id === filter.provider_id);
+/**
+ * Every filter re-checked in the CLIENT.
+ *
+ * The declared `/v1/events` filters are sent to the server too, but as a BOUND on
+ * how much is read, never as the answer: re-checking here keeps the result
+ * identical against a server (or a stub) that ignores unknown query params, the
+ * convention in src/db/contacts.remote.ts. `since`/`until` and a multi-value `type`
+ * are not server filters at all, so for those this is the only check there is.
+ */
+function eventMatchesFilter(event: EmailEvent, filter: EventFilter): boolean {
+  if (filter.email_id && event.email_id !== filter.email_id) return false;
+  if (filter.provider_id && event.provider_id !== filter.provider_id) return false;
   if (filter.type) {
     const types = Array.isArray(filter.type) ? filter.type : [filter.type];
-    rows = rows.filter((e) => types.includes(e.type));
+    if (!types.includes(event.type)) return false;
   }
-  if (filter.since) rows = rows.filter((e) => e.occurred_at >= filter.since!);
-  if (filter.until) rows = rows.filter((e) => e.occurred_at <= filter.until!);
+  if (filter.since && event.occurred_at < filter.since) return false;
+  if (filter.until && event.occurred_at > filter.until) return false;
+  return true;
+}
 
-  rows.sort((a, b) => (b.occurred_at ?? "").localeCompare(a.occurred_at ?? ""));
-
+function listFilteredEvents(filter: EventFilter = {}): EmailEvent[] {
   const limit = safeOptionalLimit(filter.limit);
   const offset = safeOffset(filter.offset);
+  // A BOUNDED read is served by a bounded server-side scan. `GET /v1/events`
+  // already windows on limit/offset (store.ts listResource) and orders by
+  // `occurred_at DESC, id ASC` (resourceListOrderBy) — a TOTAL order — so the rows
+  // the pager collects up to the window's far edge ARE the caller's window, and it
+  // stops there instead of walking the whole table to find them.
+  //
+  // The far edge is `offset + limit` because the window is sliced locally after the
+  // client-side filters run. `need` is not a page size: the pager still caps every
+  // request at the server's 500-row page maximum and pages to reach the edge, so a
+  // window past row 500 comes back FULL. Sending `limit = offset + limit` in one
+  // shot — the older convention in selfHostedListQuery — would be clamped to 500
+  // and quietly under-fill, which is the same silent shortfall as a truncated
+  // export, just harder to notice.
+  //
+  // An UNBOUNDED read passes no `need` and so still has to enumerate the table and
+  // prove completeness before it may answer.
+  const enumeration = enumerateSelfHostedRows<EmailEvent>(EVENT_RESOURCE, {
+    query: serverSideEventFilters(filter),
+    ...(limit === null ? {} : { need: limit + offset }),
+    // Map and filter in ONE pass so a dropped row does not count toward the
+    // window: filtering after the fact would stop at N rows READ, leaving the
+    // window short of the N rows the caller asked to KEEP.
+    select: (row) => {
+      const event = apiToEvent(row);
+      return eventMatchesFilter(event, filter) ? event : null;
+    },
+  });
+  assertHonestEventRead(enumeration, limit === null ? null : limit + offset);
+
+  const rows = enumeration.rows;
+  // The server already sorts by `occurred_at DESC`; this is a no-op against it and
+  // keeps the ordering guaranteed against a server that does not.
+  rows.sort((a, b) => (b.occurred_at ?? "").localeCompare(a.occurred_at ?? ""));
+
   return limit === null ? rows : rows.slice(offset, offset + limit);
 }
 

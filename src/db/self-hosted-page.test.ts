@@ -116,3 +116,92 @@ describe("enumerateSelfHostedRows", () => {
     expect(() => enumerateSelfHostedRows("addresses")).toThrow();
   });
 });
+
+// A BOUNDED read — "the first N", not "everything". The completeness guard above is
+// the right answer to "everything" and the wrong answer to "the first N": a window is
+// complete for its own bound, and refusing it turns a page request into a 500.
+describe("enumerateSelfHostedRows with a bounded need", () => {
+  it("stops at the window and reports filled, without claiming completeness", async () => {
+    await stub.seed({ addresses: rows(1200) });
+
+    const result = enumerateSelfHostedRows("addresses", { need: 100 });
+
+    expect(result.rows).toHaveLength(100);
+    expect(result.filled).toBe(true);
+    // It stopped early, so it knows nothing about the rest of the table. `filled` and
+    // `complete` must never be conflated — that conflation is how a page becomes a
+    // "total".
+    expect(result.complete).toBe(false);
+    expect(result.exhausted).toBe(false);
+    // One request: it asked the server for exactly the window it needed.
+    expect(result.pages).toBe(1);
+  });
+
+  it("pages to fill a window wider than the server's page cap", async () => {
+    await stub.seed({ addresses: rows(1200) });
+
+    const result = enumerateSelfHostedRows("addresses", { need: 800 });
+
+    expect(result.rows).toHaveLength(800);
+    expect(result.filled).toBe(true);
+    // 800 > the 500-row server cap, so a single request could never have filled it.
+    expect(result.pages).toBeGreaterThan(1);
+    expect(new Set(result.rows.map((row) => row["id"])).size).toBe(800);
+    expect(result.rows[0]!["id"]).toBe("addr-00000");
+    expect(result.rows[799]!["id"]).toBe("addr-00799");
+  });
+
+  it("reports the end of the table rather than filled when the bound overshoots it", async () => {
+    await stub.seed({ addresses: rows(37) });
+
+    const result = enumerateSelfHostedRows("addresses", { need: 100 });
+
+    expect(result.rows).toHaveLength(37);
+    expect(result.filled).toBe(false);
+    // The table ended, so this short answer IS the whole set — a caller may return it.
+    expect(result.complete).toBe(true);
+    expect(result.exhausted).toBe(false);
+  });
+
+  it("reports neither filled nor complete when the budget runs out first", async () => {
+    await stub.seed({ addresses: rows(1200) });
+
+    const result = enumerateSelfHostedRows("addresses", { need: 900, pageSize: 100, pageBudget: 3 });
+
+    expect(result.rows).toHaveLength(300);
+    expect(result.filled).toBe(false);
+    expect(result.complete).toBe(false);
+    expect(result.exhausted).toBe(true);
+  });
+
+  // `select` maps and filters in one pass. A dropped row is still consumed — it was
+  // really there — but must not count toward the window, or the window comes back
+  // short of the rows the caller asked to KEEP.
+  it("fills the window with rows that pass select, not rows merely read", async () => {
+    await stub.seed({ addresses: rows(1200) });
+
+    const result = enumerateSelfHostedRows<string>("addresses", {
+      need: 100,
+      select: (row) => (row["verified"] === true ? String(row["id"]) : null),
+    });
+
+    expect(result.rows).toHaveLength(100);
+    expect(result.filled).toBe(true);
+    // Only every other row is verified, so >=200 rows had to be read to keep 100.
+    expect(result.rows).toEqual(
+      Array.from({ length: 100 }, (_, index) => `addr-${String(index * 2).padStart(5, "0")}`),
+    );
+  });
+
+  it("counts a dropped row as consumed so paging never re-reads it", async () => {
+    await stub.seed({ addresses: rows(1200) });
+
+    const result = enumerateSelfHostedRows<string>("addresses", {
+      select: (row) => (row["verified"] === true ? String(row["id"]) : null),
+    });
+
+    expect(result.rows).toHaveLength(600);
+    expect(result.complete).toBe(true);
+    expect(new Set(result.rows).size).toBe(600);
+  });
+});
