@@ -20,6 +20,16 @@ export function registerWarmingTools(server: McpServer): void {
     },
     async ({ domain, target_daily_volume, start_date, provider_id }) => {
       try {
+        // Same duplicate guard as `emails domain warm`: the /v1 store accepts a
+        // second POST for the same domain, which would leave two schedules and
+        // make which one the reads see arbitrary.
+        const existing = getWarmingSchedule(domain);
+        if (existing) {
+          throw new Error(
+            `${domain} already has a warming schedule (status ${existing.status}, target ${existing.target_daily_volume}/day, started ${existing.start_date}). ` +
+              "Use update_warming_status to change its state, or delete it first to retarget.",
+          );
+        }
         const schedule = createWarmingSchedule({ domain, target_daily_volume, start_date, provider_id });
         const plan = generateWarmingPlan(target_daily_volume);
         return { content: [{ type: "text", text: JSON.stringify({ schedule, plan_days: plan.length, final_day: plan[plan.length - 1]?.day }, null, 2) }] };

@@ -5,11 +5,12 @@
 // repository (src/db/warming.ts), the `warming_schedules` table, and the
 // /v1/warming routes all existed.
 //
-// These tests therefore spawn the REAL CLI (bun src/cli/index.tsx) against a
-// throwaway HOME + temp SQLite file rather than registering the commands
-// in-process: the bug class was "the source looks fine, the shipped binary
-// refuses", so the shipped binary is what gets asserted on. No live provider or
-// cloud credential is used — the env is scrubbed and the store is a temp file.
+// These tests therefore spawn the CLI as a real subprocess (bun src/cli/index.tsx,
+// the same entrypoint `bun run dev:cli` and every other live CLI test uses)
+// rather than registering the commands in-process: the bug class was "the source
+// looks fine, invoking the command refuses", so invoking the command is what gets
+// asserted on. No live provider or cloud credential is used — the env is scrubbed
+// and the store is a temp SQLite file.
 import { afterAll, describe, expect, it } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -112,9 +113,10 @@ function expectNoRetiredRefusal(text: string): void {
   for (const phrase of RETIRED_REFUSALS) expect(text).not.toContain(phrase);
 }
 
-function daysAgo(count: number): string {
+/** N days before today's UTC calendar date — the calendar the ramp is anchored on. */
+function utcDaysAgo(count: number): string {
   const date = new Date();
-  date.setDate(date.getDate() - count);
+  date.setUTCDate(date.getUTCDate() - count);
   return date.toISOString().slice(0, 10);
 }
 
@@ -127,7 +129,7 @@ describe("emails domain warm* (live, temp SQLite)", () => {
     const env = localWarmingEnv();
     // Started 6 days ago so the ramp is mid-flight and the day/limit math is
     // observable rather than always "day 1, limit 50".
-    const startDate = daysAgo(6);
+    const startDate = utcDaysAgo(6);
 
     // 1. warm — creates the schedule and reports the plan.
     const created = runJson<WarmStatusPayload & { plan_days: number; final_day: number }>(
@@ -142,17 +144,14 @@ describe("emails domain warm* (live, temp SQLite)", () => {
       provider_id: null,
     });
     expect(created.schedule.id).toBeTruthy();
-    // `start_date` is a bare calendar date and the ramp math mixes UTC parsing
-    // with local-midnight normalization, so the elapsed-day count is 7 or 8
-    // depending on the runner's UTC offset. Assert the window, not one value.
-    expect(created.current_day).toBeGreaterThanOrEqual(7);
-    expect(created.current_day).toBeLessThanOrEqual(8);
-    expect(created.final_day).toBe(created.total_days);
-    expect(created.total_days).toBeGreaterThan(created.current_day);
-    expect(created.progress_percent).toBe(Math.round((created.current_day / created.total_days) * 100));
-    // Mid-ramp: today's cap is a real number, above day 1's 50 and below target.
-    expect(created.today_limit).toBeGreaterThan(50);
-    expect(created.today_limit!).toBeLessThan(5000);
+    // Exact, in every timezone: the ramp is anchored on the UTC calendar date,
+    // the same anchor the self-hosted server enforces the cap with.
+    expect(created.current_day).toBe(7);
+    expect(created.total_days).toBe(15);
+    expect(created.final_day).toBe(15);
+    expect(created.progress_percent).toBe(47);
+    // Day 7 of a 5000/day ramp: 50 -> 100 -> 200 -> 400.
+    expect(created.today_limit).toBe(400);
     expect(created.today_sent).toBe(0);
 
     // 2. warm-status — reflects the schedule `warm` just created.
@@ -218,13 +217,32 @@ describe("emails domain warm* (live, temp SQLite)", () => {
     expect(completedStatus.schedule.status).toBe("completed");
     expect(completedStatus.today_limit).toBeNull();
 
-    // The state survived six separate processes: it is in the SQLite file, not memory.
+    // The state survived every separate process: it is in the SQLite file, not memory.
     const finalRows = runJson<WarmingSchedulePayload[]>(["domain", "warm-list"], env);
     expect(finalRows.map((row) => [row.domain, row.status]).sort()).toEqual([
       ["ramp.example.com", "completed"],
       ["second.example.com", "active"],
     ]);
-  }, 120_000);
+
+    // 7. warm-delete — the only way to retarget a domain, so `warm` works again after it.
+    const deleted = runJson<{ deleted: boolean; schedule: WarmingSchedulePayload }>(
+      ["domain", "warm-delete", "ramp.example.com", "--yes"],
+      env,
+    );
+    expect(deleted).toMatchObject({ deleted: true, schedule: { domain: "ramp.example.com" } });
+    expect(runJson<WarmingSchedulePayload[]>(["domain", "warm-list"], env).map((row) => row.domain))
+      .toEqual(["second.example.com"]);
+
+    const retargeted = runJson<WarmStatusPayload>(
+      ["domain", "warm", "ramp.example.com", "--target", "900"],
+      env,
+    );
+    expect(retargeted.schedule).toMatchObject({ target_daily_volume: 900, status: "active" });
+    // A brand-new ramp, not the old one resurrected.
+    expect(retargeted.schedule.id).not.toBe(created.schedule.id);
+    expect(retargeted.current_day).toBe(1);
+    expect(retargeted.today_limit).toBe(50);
+  }, 180_000);
 
   it("refuses to silently create a duplicate schedule for the same domain", () => {
     const env = localWarmingEnv();
@@ -232,18 +250,21 @@ describe("emails domain warm* (live, temp SQLite)", () => {
 
     const failure = runJsonError(["domain", "warm", "dup.example.com", "--target", "999"], env);
     expect(failure.error.message).toContain("already has a warming schedule");
+    // Every recovery path it names must exist as a real command.
     expect(failure.error.message).toContain("emails domain warm-status dup.example.com");
+    expect(failure.error.message).toContain("emails domain warm-delete dup.example.com");
     expectNoRetiredRefusal(failure.error.message);
 
-    // The original schedule is untouched.
+    // The original schedule is untouched and there is still exactly one.
     const status = runJson<WarmStatusPayload>(["domain", "warm-status", "dup.example.com"], env);
     expect(status.schedule.target_daily_volume).toBe(100);
-  }, 60_000);
+    expect(runJson<WarmingSchedulePayload[]>(["domain", "warm-list"], env)).toHaveLength(1);
+  }, 90_000);
 
   it("fails loud (and truthfully) when the domain has no schedule", () => {
     const env = localWarmingEnv();
 
-    for (const command of ["warm-status", "warm-pause", "warm-resume", "warm-complete"]) {
+    for (const command of ["warm-status", "warm-pause", "warm-resume", "warm-complete", "warm-delete"]) {
       const failure = runJsonError(["domain", command, "ghost.example.com"], env);
       expect(failure.error.code).toBe("not_found");
       expect(failure.error.message).toContain("Warming schedule not found for domain: ghost.example.com");
@@ -284,7 +305,7 @@ describe("emails domain warm* (live, temp SQLite)", () => {
     const env = localWarmingEnv();
     const help = runCli(["domain", "--help"], env);
     expect(help.exitCode, help.stderr).toBe(0);
-    for (const command of ["warm ", "warm-status", "warm-list", "warm-pause", "warm-resume", "warm-complete"]) {
+    for (const command of ["warm ", "warm-status", "warm-list", "warm-pause", "warm-resume", "warm-complete", "warm-delete"]) {
       expect(help.stdout).toContain(command);
     }
 
@@ -296,6 +317,7 @@ describe("emails domain warm* (live, temp SQLite)", () => {
       ["domain", "warm-pause", "truth.example.com"],
       ["domain", "warm-resume", "truth.example.com"],
       ["domain", "warm-complete", "truth.example.com"],
+      ["domain", "warm-delete", "truth.example.com", "--yes"],
     ];
     for (const args of invocations) {
       const result = runCli(args, env);

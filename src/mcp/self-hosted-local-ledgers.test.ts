@@ -83,6 +83,19 @@ describe("MCP self_hosted local ledger guards", () => {
     expect(JSON.parse(resultText(status)) as { today_limit: number | null }).toMatchObject({ today_limit: null });
   });
 
+  it("refuses a duplicate warming schedule, like the CLI twin", async () => {
+    // /v1 accepts a second POST for the same domain; without the pre-check the
+    // tool would leave two schedules and reads would pick one arbitrarily.
+    await callTool("create_warming_schedule", { domain: "dup.example.com", target_daily_volume: 100 });
+    const duplicate = await callTool("create_warming_schedule", { domain: "dup.example.com", target_daily_volume: 999 });
+
+    expect(duplicate.isError).toBe(true);
+    expect(resultText(duplicate)).toContain("already has a warming schedule");
+    const rows = await stub.list("warming");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.["target_daily_volume"]).toBe(100);
+  });
+
   it("fails local alias, group-member, and sequence subledger tools with the API-only guard", async () => {
     const cases: Array<[string, Record<string, unknown>]> = [
       ["list_aliases", {}],

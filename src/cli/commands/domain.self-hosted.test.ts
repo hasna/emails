@@ -138,11 +138,14 @@ describe("domain CLI — self-hosted (self_hosted) /v1 routing", () => {
     expect((await stub.list("warming")).map((row) => row["domain"])).toEqual(["ramp.example.com"]);
 
     const status = await runDomainCommand(["domain", "warm-status", "ramp.example.com"]);
-    expect(status.data).toMatchObject({ schedule: { domain: "ramp.example.com", status: "active" } });
-    // Day-1 cap for any target above 50. The day INDEX is not asserted: the ramp
-    // math normalizes a bare start date to local midnight, so it is 1 or 2
-    // depending on the runner's UTC offset.
-    expect(status.data).toMatchObject({ today_limit: 50, today_sent: 0 });
+    // The ramp is anchored on the UTC calendar date — the same anchor the server
+    // enforces the cap with — so day 1 is day 1 in every timezone.
+    expect(status.data).toMatchObject({
+      schedule: { domain: "ramp.example.com", status: "active" },
+      current_day: 1,
+      today_limit: 50,
+      today_sent: 0,
+    });
 
     const listed = await runDomainCommand(["domain", "warm-list"]);
     expect((listed.data as Array<{ domain: string }>).map((row) => row.domain)).toEqual(["ramp.example.com"]);
@@ -157,6 +160,22 @@ describe("domain CLI — self-hosted (self_hosted) /v1 routing", () => {
       // The transition reached the server, not just the in-process return value.
       expect((await stub.list("warming"))[0]?.["status"]).toBe(expected);
     }
+
+    const deleted = await runDomainCommand(["domain", "warm-delete", "ramp.example.com", "--yes"]);
+    expect(deleted.data).toMatchObject({ deleted: true, schedule: { domain: "ramp.example.com" } });
+    expect(await stub.list("warming")).toHaveLength(0);
+  });
+
+  it("refuses a duplicate warming schedule rather than writing a second row to /v1", async () => {
+    // /v1 has no client-side uniqueness check, so without the pre-check a second
+    // `warm` would leave two rows for one domain and reads would pick arbitrarily.
+    await runDomainCommand(["domain", "warm", "dup.example.com", "--target", "1000"]);
+    const result = await runDomainCommandExpectingExit(["domain", "warm", "dup.example.com", "--target", "2000"]);
+    expect(result.error).toBe("process.exit:1");
+    expect(result.stderr).toContain("already has a warming schedule");
+    const rows = await stub.list("warming");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.["target_daily_volume"]).toBe(1000);
   });
 
   it("fails loud when a warming command targets a domain with no schedule", async () => {

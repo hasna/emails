@@ -3,7 +3,7 @@ import { listInboundEmailSummaries, getInboundEmail, clearInboundEmails, storeIn
 import { parseResendInbound, parseMailgunInbound, parseMimeEmail } from '../../lib/inbound.local.js';
 import { createSequence, getSequence, listSequences, deleteSequence, addStep, listSteps, enroll, unenroll, listEnrollments, type EnrollmentStatus } from '../../db/sequences.local.js';
 import { createWarmingSchedule, getWarmingSchedule, listWarmingSchedules, updateWarmingStatus, deleteWarmingSchedule } from '../../db/warming.local.js';
-import { getTodayLimit, getTodaySentCount } from '../../lib/warming.js';
+import { describeWarmingProgress } from '../../lib/warming.js';
 import { updateEmailStatus } from '../../db/emails.local.js';
 import { upsertEvent } from '../../db/events.local.js';
 import { getDatabase } from '../../db/database.js';
@@ -491,13 +491,7 @@ if (warmingDomainMatch && method === "GET") {
     const domain = decodeURIComponent(warmingDomainMatch[1]!);
     const schedule = getWarmingSchedule(domain);
     if (!schedule) return notFound("Warming schedule not found");
-    const today_limit = getTodayLimit(schedule);
-    const today_sent = getTodaySentCount(domain);
-    const startDate = new Date(schedule.start_date);
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    startDate.setHours(0, 0, 0, 0);
-    const current_day = Math.max(1, Math.floor((today.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24)) + 1);
+    const { today_limit, today_sent, current_day } = describeWarmingProgress(schedule);
     return json({ schedule, today_limit, today_sent, current_day });
   } catch (e) { return internalError(e); }
 }

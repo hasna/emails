@@ -141,7 +141,7 @@ emails ui                # Mailbox UI - inbox, compose, domains, settings
 emails provider          # provider credentials/capabilities (ses, resend, sandbox)
 emails domain            # add/verify/buy/setup/dns/check domains
 emails domain warm       # domain warming schedules: warm, warm-status, warm-list,
-                         #   warm-pause, warm-resume, warm-complete
+                         #   warm-pause, warm-resume, warm-complete, warm-delete
 emails address           # manage sender addresses (add, suspend, activate, quota)
 emails status            # redacted system status + next useful actions
 emails agent context     # agent-oriented context snapshot and workflows
@@ -281,7 +281,14 @@ emails domain warm-list --status active --json
 emails domain warm-pause example.com                    # suspend the cap (deliverability issue)
 emails domain warm-resume example.com
 emails domain warm-complete example.com                 # graduated: no cap applies
+emails domain warm-delete example.com --yes             # remove it (needed to retarget)
 ```
+
+One schedule per domain: `warm` refuses to shadow an existing one. `--target` and
+`--start-date` are fixed at creation, so retargeting means `warm-delete` then
+`warm` again. The ramp is anchored on the **UTC** calendar date, the same anchor
+the self-hosted server enforces the cap with, so `warm-status` reports the limit
+that will actually be applied regardless of your machine's timezone.
 
 Schedules live in the `warming_schedules` store, so they work the same whether
 the client is on local SQLite or pointed at a self-hosted server (where the

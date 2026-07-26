@@ -6,8 +6,8 @@ import { getProvider } from "../../db/providers.js";
 import { createCatchAll, ensureDefaultCatchAll } from "../../db/aliases.js";
 import { setDomainProvisioning } from "../../db/provisioning.js";
 import { getAdapter } from "../../providers/index.js";
-import { createWarmingSchedule, getWarmingSchedule, listWarmingSchedules, updateWarmingStatus } from "../../db/warming.js";
-import { describeWarmingProgress, formatWarmingStatus, generateWarmingPlan, type WarmingSchedule } from "../../lib/warming.js";
+import { createWarmingSchedule, deleteWarmingSchedule, getWarmingSchedule, listWarmingSchedules, updateWarmingStatus } from "../../db/warming.js";
+import { describeWarmingProgress, formatWarmingStatus, generateWarmingPlan, getTodaySentCountsByDomain, type WarmingSchedule } from "../../lib/warming.js";
 import { colorDnsStatus, tableRow, truncate } from "../../lib/format.js";
 import { confirmDestructiveAction, formatListHint, handleError, isCliVerboseOutput, parseCliListPage, resolveId } from "../utils.js";
 import { normalizeRoute53RegistrationContact } from "../../lib/route53-contact.js";
@@ -566,11 +566,16 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
         if (opts.startDate && !/^\d{4}-\d{2}-\d{2}$/.test(opts.startDate)) {
           handleError(new Error(`Invalid --start-date '${opts.startDate}'. Use YYYY-MM-DD.`));
         }
+        // The /v1 store does not reject a duplicate domain client-side (SQLite
+        // does, with a raw UNIQUE error), so check first: a second POST would
+        // otherwise leave two schedules for one domain and whichever the reads
+        // happened to find would win.
         const existing = getWarmingSchedule(domain);
         if (existing) {
           handleError(new Error(
             `${domain} already has a warming schedule (status ${existing.status}, target ${existing.target_daily_volume}/day, started ${existing.start_date}). ` +
-              `Inspect it with 'emails domain warm-status ${domain}', or change state with 'emails domain warm-pause|warm-resume|warm-complete ${domain}'.`,
+              `Inspect it with 'emails domain warm-status ${domain}', change state with 'emails domain warm-pause|warm-resume|warm-complete ${domain}', ` +
+              `or retarget by removing it first: 'emails domain warm-delete ${domain}'.`,
           ));
         }
         const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
@@ -632,20 +637,27 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
           output([], chalk.dim("No warming schedules found."));
           return;
         }
+        // One ledger read for the whole page instead of one per row: in
+        // self-hosted mode each read is a synchronous curl spawn over today's
+        // messages, so a 20-row page used to cost 20 identical requests.
+        const sentByDomain = getTodaySentCountsByDomain(schedules.map((schedule) => schedule.domain));
         const lines: string[] = [""];
         lines.push(tableRow(
-          [chalk.bold("Domain"), 24],
-          [chalk.bold("Status"), 11],
+          [chalk.bold("Domain"), 20],
+          [chalk.bold("Status"), 10],
           [chalk.bold("Start Date"), 12],
           [chalk.bold("Target"), 10],
           [chalk.bold("Today's Limit"), 14],
           [chalk.bold("Sent Today"), 12],
         ));
         for (const schedule of schedules) {
-          const progress = describeWarmingProgress(schedule);
+          const progress = describeWarmingProgress(
+            schedule,
+            sentByDomain.get(schedule.domain.trim().toLowerCase()) ?? 0,
+          );
           lines.push(tableRow(
-            [truncate(schedule.domain, 24), 24],
-            [warmingStatusColor(schedule.status), 11],
+            [truncate(schedule.domain, 20), 20],
+            [warmingStatusColor(schedule.status), 10],
             [schedule.start_date, 12],
             [String(schedule.target_daily_volume), 10],
             [progress.today_limit !== null ? String(progress.today_limit) : chalk.dim("n/a"), 14],
@@ -693,6 +705,41 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
       "completed",
       chalk.green(`✓ Warming schedule completed for ${domain}; daily warming limits no longer apply`),
     ));
+
+  // The fifth warming repository operation. Without it there is no way to
+  // retarget a domain — `warm` refuses to shadow an existing schedule, and
+  // pause/resume/complete only move status — so the refusal above would name a
+  // recovery path that did not exist.
+  domainCmd
+    .command("warm-delete <domain>")
+    .description("Delete a domain warming schedule (removes the daily cap entirely)")
+    .option("--yes", "Skip confirmation prompt")
+    .action(async (domain: string, opts: { yes?: boolean }) => {
+      try {
+        const existing = getWarmingSchedule(domain);
+        if (!existing) {
+          handleError(new Error(
+            `Warming schedule not found for domain: ${domain}. Start one with 'emails domain warm ${domain} --target <n>'.`,
+          ));
+          return;
+        }
+        await confirmDestructiveAction(
+          `Delete the warming schedule for ${domain} (status ${existing.status}, target ${existing.target_daily_volume}/day)?`,
+          opts.yes,
+        );
+        if (!deleteWarmingSchedule(domain)) {
+          handleError(new Error(`Warming schedule for ${domain} could not be deleted.`));
+          return;
+        }
+        output(
+          { deleted: true, schedule: existing },
+          chalk.green(`✓ Warming schedule deleted for ${domain}`) + "\n" +
+            chalk.dim(`  Sends from ${domain} are no longer warming-capped. Start a new ramp with 'emails domain warm ${domain} --target <n>'.`),
+        );
+      } catch (e) {
+        handleError(e);
+      }
+    });
 
   // ─── DOMAIN PURCHASING (via @hasna/domains / Route 53) ───────────────────
 

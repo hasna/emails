@@ -42,20 +42,40 @@ export function generateWarmingPlan(targetDailyVolume: number): { day: number; l
 }
 
 /**
+ * 1-based day index of the ramp, anchored on the UTC calendar date.
+ *
+ * UTC, not local time, on purpose: the self-hosted server enforces the limit
+ * with `warmingLimit()` in src/server/self-hosted/store.ts, which anchors on
+ * `Date.UTC(...getUTCFullYear/Month/Date)`, and `getTodaySentCountsByDomain`
+ * below counts sent mail over a UTC day window. Normalizing to LOCAL midnight
+ * here (as this math used to) put the client one day ahead of the server for
+ * every operator at a non-zero UTC offset — reporting up to twice the limit the
+ * server would actually allow, on roughly half the days of a ramp.
+ *
+ * Returns null when `start_date` is missing or unparseable. That is reachable:
+ * SQLite declares `start_date` NOT NULL, but the Postgres schema relaxed it, and
+ * the /v1 client coerces null to "".
+ */
+export function warmingDayIndex(startDate: string, now: Date = new Date()): number | null {
+  if (!startDate) return null;
+  const start = new Date(startDate);
+  if (!Number.isFinite(start.getTime())) return null;
+  const todayUtc = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  const startUtc = Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate());
+  return Math.floor((todayUtc - startUtc) / 86_400_000) + 1;
+}
+
+/**
  * Get today's sending limit for a domain, given the warming schedule.
  * Returns null if no active schedule exists for the domain.
  */
 export function getTodayLimit(schedule: WarmingSchedule): number | null {
   if (schedule.status !== "active") return null;
 
-  const startDate = new Date(schedule.start_date);
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  startDate.setHours(0, 0, 0, 0);
-
-  const dayDiff = Math.floor((today.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24));
-  const currentDay = dayDiff + 1; // 1-based
-
+  const currentDay = warmingDayIndex(schedule.start_date);
+  // An unusable start date fails closed (0) rather than returning the full
+  // target: this value gates local sending, so "unknown" must not mean "go".
+  if (currentDay === null) return 0;
   if (currentDay < 1) return 0; // not started yet
 
   const plan = generateWarmingPlan(schedule.target_daily_volume);
@@ -68,23 +88,38 @@ export function getTodayLimit(schedule: WarmingSchedule): number | null {
 }
 
 /**
- * Get how many emails have been sent from a domain today.
+ * Count today's sent mail per sending domain in ONE ledger read.
  *
  * Sent mail is a `/v1`-backed resource (the emails repo routes to the operator's
- * API), so this fetches today's outbound messages and counts those whose From
- * domain matches — filtering client-side over the bounded superset the repo
- * returns (the same pattern the other self-hosted repos use).
+ * API), so this fetches today's outbound messages once and buckets them by From
+ * domain — filtering client-side over the bounded superset the repo returns (the
+ * same pattern the other self-hosted repos use). Listing N schedules therefore
+ * costs one request, not N.
+ *
+ * Every requested domain is present in the result, zero included.
  */
-export function getTodaySentCount(domain: string): number {
+export function getTodaySentCountsByDomain(domains: readonly string[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const domain of domains) {
+    const key = domain.trim().toLowerCase();
+    if (key) counts.set(key, 0);
+  }
+  if (counts.size === 0) return counts;
+
   const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
   const start = `${today}T00:00:00.000Z`;
   const tomorrow = new Date(start);
   tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
-  const end = tomorrow.toISOString();
-  const target = domain.trim().toLowerCase();
-  return listEmails({ since: start, until: end, limit: 1000 })
-    .filter((email) => (email.from_address ?? "").toLowerCase().split("@")[1]?.trim() === target)
-    .length;
+  for (const email of listEmails({ since: start, until: tomorrow.toISOString(), limit: 1000 })) {
+    const sender = (email.from_address ?? "").toLowerCase().split("@")[1]?.trim();
+    if (sender !== undefined && counts.has(sender)) counts.set(sender, counts.get(sender)! + 1);
+  }
+  return counts;
+}
+
+/** Get how many emails have been sent from a single domain today. */
+export function getTodaySentCount(domain: string): number {
+  return getTodaySentCountsByDomain([domain]).get(domain.trim().toLowerCase()) ?? 0;
 }
 
 export interface WarmingProgress {
@@ -100,17 +135,18 @@ export interface WarmingProgress {
 
 /**
  * Single source of truth for "where is this domain in its ramp" — shared by the
- * CLI (`emails domain warm*`), the MCP warming tools, and the terminal
- * formatter, so all three report the same day/limit/sent numbers. Performs the
- * two repository reads (today's limit needs the plan, today's count needs sent
- * mail) exactly once per call.
+ * CLI (`emails domain warm*`), the MCP warming tools, the local REST warming
+ * route, and the terminal formatter, so they all report the same numbers, and
+ * the same numbers the self-hosted server enforces.
+ *
+ * `todaySent` lets a caller listing many schedules pass a count it already
+ * batched via getTodaySentCountsByDomain instead of paying one ledger read
+ * per row.
  */
-export function describeWarmingProgress(schedule: WarmingSchedule): WarmingProgress {
-  const startDate = new Date(schedule.start_date);
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  startDate.setHours(0, 0, 0, 0);
-  const currentDay = Math.max(1, Math.floor((today.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24)) + 1);
+export function describeWarmingProgress(schedule: WarmingSchedule, todaySent?: number): WarmingProgress {
+  // An unusable start date reports day 1 (with a 0 limit from getTodayLimit)
+  // rather than propagating NaN into JSON output and rendered tables.
+  const currentDay = Math.max(1, warmingDayIndex(schedule.start_date) ?? 1);
 
   const plan = generateWarmingPlan(schedule.target_daily_volume);
   const totalDays = plan[plan.length - 1]?.day ?? 30;
@@ -120,7 +156,7 @@ export function describeWarmingProgress(schedule: WarmingSchedule): WarmingProgr
     total_days: totalDays,
     progress_percent: Math.min(100, Math.round((currentDay / totalDays) * 100)),
     today_limit: getTodayLimit(schedule),
-    today_sent: getTodaySentCount(schedule.domain),
+    today_sent: todaySent ?? getTodaySentCount(schedule.domain),
   };
 }
 
