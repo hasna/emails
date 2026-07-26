@@ -79,6 +79,12 @@ locals {
     var.auth_from_email == null ? [] : [
       { name = "EMAILS_AUTH_FROM", value = var.auth_from_email },
     ],
+    # Exactly one X-Forwarded-For-appending proxy (the ALB below) sits in front of
+    # the API task, so the client address the auth rate limits key on is the LAST
+    # XFF entry. Without this the service trusts no proxy and keys on the ALB's own
+    # address, collapsing every client into one shared rate-limit bucket. See
+    # docs/SELF_HOSTED_RUNTIME.md "Trusted proxy depth".
+    [{ name = "EMAILS_TRUSTED_PROXY_HOPS", value = "1" }],
     var.primary_super_admin_email == null || var.primary_super_admin_bootstrap_kid == null ? [] : [
       { name = "EMAILS_PRIMARY_SUPER_ADMIN_EMAIL", value = var.primary_super_admin_email },
       { name = "EMAILS_PRIMARY_SUPER_ADMIN_BOOTSTRAP_KID", value = var.primary_super_admin_bootstrap_kid },

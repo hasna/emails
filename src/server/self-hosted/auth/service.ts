@@ -33,6 +33,7 @@ import {
   type GlobalRole,
 } from "./store.js";
 import { RateLimiter } from "./rate-limit.js";
+import { resolveClientIp } from "./client-ip.js";
 import { isAllowedSignupEmail } from "./allowed-email.js";
 import {
   buildAuthMailerConfig,
@@ -173,13 +174,42 @@ export async function resolveRequestContext(
 
 const MAX_AUTH_BODY_BYTES = 64 * 1024;
 
+/**
+ * Read + parse a JSON body under a hard byte cap.
+ *
+ * The cap is enforced INCREMENTALLY while draining the stream, not after
+ * buffering: `Content-Length` is a client-supplied hint that a chunked request
+ * can omit or lie about, so checking only the header and then calling
+ * `req.text()` materialises the whole body in memory before the cap is ever
+ * consulted. This mirrors the `/v1` data path's reader in `../service.ts`.
+ */
 async function readJsonBody(req: Request): Promise<Record<string, unknown>> {
   const contentLength = Number(req.headers.get("content-length") ?? "0");
   if (Number.isFinite(contentLength) && contentLength > MAX_AUTH_BODY_BYTES) {
     throw new Error("request body too large");
   }
-  const text = await req.text();
-  if (text.length > MAX_AUTH_BODY_BYTES) throw new Error("request body too large");
+  const reader = req.body?.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  if (reader) {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > MAX_AUTH_BODY_BYTES) {
+        await reader.cancel();
+        throw new Error("request body too large");
+      }
+      chunks.push(value);
+    }
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  const text = new TextDecoder().decode(bytes);
   if (!text.trim()) return {};
   const parsed = JSON.parse(text);
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
@@ -188,10 +218,13 @@ async function readJsonBody(req: Request): Promise<Record<string, unknown>> {
   return parsed as Record<string, unknown>;
 }
 
-function clientIp(req: Request): string | null {
-  const fwd = req.headers.get("x-forwarded-for");
-  if (fwd) return fwd.split(",")[0]!.trim() || null;
-  return req.headers.get("x-real-ip")?.trim() || null;
+/**
+ * Rate-limit key for this request. Derived from the configured trusted-proxy
+ * depth (see `./client-ip.ts`) — NEVER from the leftmost `X-Forwarded-For`
+ * entry, which the client writes itself.
+ */
+function clientIp(deps: AuthServiceDeps, req: Request, socketAddress: string | null): string | null {
+  return resolveClientIp({ headers: req.headers, socketAddress, env: env(deps) });
 }
 
 function str(value: unknown): string {
@@ -221,7 +254,19 @@ function env(deps: AuthServiceDeps): NodeJS.ProcessEnv {
  * Handle an auth/tenant/membership/key route. Returns null when the path is NOT
  * owned by the auth service (so the caller falls through to the resource router).
  */
-export async function handleAuthRoutes(deps: AuthServiceDeps, req: Request, url: URL): Promise<Response | null> {
+export interface AuthRouteContext {
+  /** Socket peer address (`server.requestIP(req)?.address`). The only value a
+   * client cannot forge, and the anchor for every per-IP rate limit. */
+  socketAddress?: string | null;
+}
+
+export async function handleAuthRoutes(
+  deps: AuthServiceDeps,
+  req: Request,
+  url: URL,
+  context: AuthRouteContext = {},
+): Promise<Response | null> {
+  const socketAddress = context.socketAddress ?? null;
   const path = url.pathname.replace(/\/+$/, "") || "/";
   const method = req.method.toUpperCase();
 
@@ -244,13 +289,13 @@ export async function handleAuthRoutes(deps: AuthServiceDeps, req: Request, url:
     if (path === "/v1/auth/providers" && method === "GET") {
       return json(200, { google: false, device: false });
     }
-    if (path === "/v1/auth/signup" && method === "POST") return await handleSignup(deps, req);
-    if (path === "/v1/auth/login" && method === "POST") return await handleLogin(deps, req);
+    if (path === "/v1/auth/signup" && method === "POST") return await handleSignup(deps, req, socketAddress);
+    if (path === "/v1/auth/login" && method === "POST") return await handleLogin(deps, req, socketAddress);
     if (path === "/v1/auth/verify-email" && (method === "POST" || method === "GET")) return await handleVerifyEmail(deps, req, url);
-    if (path === "/v1/auth/verify-email/resend" && method === "POST") return await handleVerifyResend(deps, req);
-    if (path === "/v1/auth/password/forgot" && method === "POST") return await handleForgot(deps, req);
-    if (path === "/v1/auth/password/reset" && method === "POST") return await handleReset(deps, req);
-    if (path === "/v1/invites/accept" && method === "POST") return await handleAcceptInvite(deps, req);
+    if (path === "/v1/auth/verify-email/resend" && method === "POST") return await handleVerifyResend(deps, req, socketAddress);
+    if (path === "/v1/auth/password/forgot" && method === "POST") return await handleForgot(deps, req, socketAddress);
+    if (path === "/v1/auth/password/reset" && method === "POST") return await handleReset(deps, req, socketAddress);
+    if (path === "/v1/invites/accept" && method === "POST") return await handleAcceptInvite(deps, req, socketAddress);
     if (path === "/v1/auth/bootstrap-owner" && method === "POST") return await handleBootstrapOwner(deps, req, url);
     if (path === "/v1/auth/bootstrap-super-admin" && method === "POST") return await handleBootstrapSuperAdmin(deps, req, url);
 
@@ -270,7 +315,7 @@ export async function handleAuthRoutes(deps: AuthServiceDeps, req: Request, url:
     }
     if (path === "/v1/auth/logout" && method === "POST") return await handleLogout(deps, req, url);
     if (path === "/v1/auth/logout-all" && method === "POST") return await handleLogoutAll(deps, req, url);
-    if (path === "/v1/auth/switch-tenant" && method === "POST") return await handleSwitchTenant(deps, req, url);
+    if (path === "/v1/auth/switch-tenant" && method === "POST") return await handleSwitchTenant(deps, req, url, socketAddress);
 
     // tenants
     if (path === "/v1/tenants") {
@@ -357,10 +402,10 @@ export async function handleAuthRoutes(deps: AuthServiceDeps, req: Request, url:
  * fresh signup both return the SAME `verification_required` shape; the user must
  * confirm the email then log in (no session is issued at signup — A2).
  */
-async function handleSignup(deps: AuthServiceDeps, req: Request): Promise<Response> {
+async function handleSignup(deps: AuthServiceDeps, req: Request, socketAddress: string | null): Promise<Response> {
   const body = await readJsonBody(req);
   const email = str(body.email).toLowerCase();
-  const ip = clientIp(req);
+  const ip = clientIp(deps, req, socketAddress);
 
   const rl = deps.rateLimiter.checkAll("signup", [ip, email]);
   if (!rl.ok) return retryLater(rl.retryAfterSeconds);
@@ -416,11 +461,11 @@ async function handleSignup(deps: AuthServiceDeps, req: Request): Promise<Respon
  * session for the chosen/only tenant. Multi-tenant users without a `tenant_slug`
  * get `{needs_tenant:true, tenants:[…]}` and no session.
  */
-async function handleLogin(deps: AuthServiceDeps, req: Request): Promise<Response> {
+async function handleLogin(deps: AuthServiceDeps, req: Request, socketAddress: string | null): Promise<Response> {
   const body = await readJsonBody(req);
   const email = str(body.email).toLowerCase();
   const password = typeof body.password === "string" ? body.password : "";
-  const ip = clientIp(req);
+  const ip = clientIp(deps, req, socketAddress);
 
   const rl = deps.rateLimiter.checkAll("login", [ip, email]);
   if (!rl.ok) return retryLater(rl.retryAfterSeconds);
@@ -503,10 +548,10 @@ async function handleVerifyEmail(deps: AuthServiceDeps, req: Request, url: URL):
  * enumerating: always returns the same generic 200. Only actually sends when the
  * email maps to an unverified @hasna user.
  */
-async function handleVerifyResend(deps: AuthServiceDeps, req: Request): Promise<Response> {
+async function handleVerifyResend(deps: AuthServiceDeps, req: Request, socketAddress: string | null): Promise<Response> {
   const body = await readJsonBody(req);
   const email = str(body.email).toLowerCase();
-  const ip = clientIp(req);
+  const ip = clientIp(deps, req, socketAddress);
   const rl = deps.rateLimiter.checkAll("verify-resend", [ip, email]);
   if (!rl.ok) return retryLater(rl.retryAfterSeconds);
 
@@ -521,10 +566,10 @@ async function handleVerifyResend(deps: AuthServiceDeps, req: Request): Promise<
 }
 
 /** POST /v1/auth/password/forgot — always 200 (no enumeration); emails the token. */
-async function handleForgot(deps: AuthServiceDeps, req: Request): Promise<Response> {
+async function handleForgot(deps: AuthServiceDeps, req: Request, socketAddress: string | null): Promise<Response> {
   const body = await readJsonBody(req);
   const email = str(body.email).toLowerCase();
-  const ip = clientIp(req);
+  const ip = clientIp(deps, req, socketAddress);
   const rl = deps.rateLimiter.checkAll("forgot", [ip, email]);
   if (!rl.ok) return retryLater(rl.retryAfterSeconds);
 
@@ -539,24 +584,32 @@ async function handleForgot(deps: AuthServiceDeps, req: Request): Promise<Respon
   return generic;
 }
 
-/** POST /v1/auth/password/reset — consume token, rehash, revoke all sessions. */
-async function handleReset(deps: AuthServiceDeps, req: Request): Promise<Response> {
+/**
+ * POST /v1/auth/password/reset — consume token, rehash, revoke all sessions.
+ *
+ * The argon2id hash (~19 MiB and tens of ms of CPU) is computed LAZILY, inside
+ * the same transaction that claims the reset row, so it is only ever paid for a
+ * token that actually resolves. Hashing first turned this endpoint into an
+ * unauthenticated CPU/memory amplifier: a garbage token still bought the
+ * attacker a full argon2id run, and the per-IP limiter in front of it was itself
+ * keyed on a spoofable header.
+ */
+async function handleReset(deps: AuthServiceDeps, req: Request, socketAddress: string | null): Promise<Response> {
   const body = await readJsonBody(req);
   const token = str(body.token);
-  const ip = clientIp(req);
+  const ip = clientIp(deps, req, socketAddress);
   const rl = deps.rateLimiter.checkAll("reset", [ip]);
   if (!rl.ok) return retryLater(rl.retryAfterSeconds);
   if (!token) return json(400, { error: "token is required" });
   const pw = validatePassword(body.new_password);
   if (!pw.ok) return json(400, { error: pw.error });
-  const passwordHash = await hashPassword(pw.value);
-  const done = await deps.authStore.consumePasswordReset(token, passwordHash);
+  const done = await deps.authStore.consumePasswordReset(token, () => hashPassword(pw.value));
   if (!done) return json(400, { error: "reset link is invalid or expired", reason: "invalid_token" });
   return json(200, { reset: true });
 }
 
 /** POST /v1/invites/accept — join a tenant via invite; creates the user if new. */
-async function handleAcceptInvite(deps: AuthServiceDeps, req: Request): Promise<Response> {
+async function handleAcceptInvite(deps: AuthServiceDeps, req: Request, socketAddress: string | null): Promise<Response> {
   const body = await readJsonBody(req);
   const token = str(body.token);
   if (!token) return json(400, { error: "token is required" });
@@ -581,7 +634,7 @@ async function handleAcceptInvite(deps: AuthServiceDeps, req: Request): Promise<
   const tenant = await deps.authStore.getTenantById(result.tenantId);
   const session = await deps.authStore.createSession(result.user.id, result.tenantId, {
     userAgent: req.headers.get("user-agent"),
-    ip: clientIp(req),
+    ip: clientIp(deps, req, socketAddress),
   });
   return json(200, {
     session_token: session.token,
@@ -806,7 +859,7 @@ async function handleDeleteEmailIdentity(
     : json(409, { error: "primary or unknown email identity cannot be removed", reason: "identity_not_removable" });
 }
 
-async function handleSwitchTenant(deps: AuthServiceDeps, req: Request, url: URL): Promise<Response> {
+async function handleSwitchTenant(deps: AuthServiceDeps, req: Request, url: URL, socketAddress: string | null): Promise<Response> {
   const resolved = await resolveRequestContext(deps, req, url, ["emails:read"]);
   if (!resolved.ok) return resolved.response;
   const ctx = resolved.ctx;
@@ -823,7 +876,7 @@ async function handleSwitchTenant(deps: AuthServiceDeps, req: Request, url: URL)
   if (token) await deps.authStore.revokeSessionByToken(token);
   const session = await deps.authStore.createSession(ctx.userId, tenant.id, {
     userAgent: req.headers.get("user-agent"),
-    ip: clientIp(req),
+    ip: clientIp(deps, req, socketAddress),
   });
   return json(200, {
     session_token: session.token,

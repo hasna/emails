@@ -628,9 +628,16 @@ export function canonicalizeClientDialectPathname(pathname: string): string {
  * Route + handle a single request. Returns `null` when the path is not owned by
  * this service (so a caller can fall through to other handlers).
  */
+export interface SelfHostedRequestContext {
+  /** Socket peer address, e.g. `server.requestIP(req)?.address`. Anchors the
+   * per-IP auth rate limits, which must never key on a client-supplied header. */
+  socketAddress?: string | null;
+}
+
 export async function handleSelfHostedRequest(
   deps: SelfHostedServiceDeps,
   req: Request,
+  context: SelfHostedRequestContext = {},
 ): Promise<Response | null> {
   const url = new URL(req.url);
   // Normalize the `/api/v1` alias to `/v1` ONCE, at this single entry point that
@@ -688,7 +695,7 @@ export async function handleSelfHostedRequest(
   try {
     // Auth / tenant / membership / key routes are claimed FIRST (they run their
     // own credential resolution + role gates). Returns null when not an auth path.
-    const authResponse = await handleAuthRoutes(deps, req, url);
+    const authResponse = await handleAuthRoutes(deps, req, url, { socketAddress: context.socketAddress ?? null });
     if (authResponse) return authResponse;
 
     // /v1/domains

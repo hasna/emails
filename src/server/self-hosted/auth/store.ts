@@ -782,8 +782,13 @@ export class AuthStore {
   /**
    * Consume a reset token (single-use, unexpired), set the new argon2id hash, and
    * revoke ALL of the user's sessions. One transaction. Returns true on success.
+   *
+   * `newPasswordHash` is a FACTORY, not a value: argon2id costs ~19 MiB and tens
+   * of milliseconds, and it is only paid once the token row has actually been
+   * claimed. Passing a precomputed hash made this an unauthenticated CPU/memory
+   * amplifier — a garbage token still bought the caller a full argon2id run.
    */
-  async consumePasswordReset(token: string, newPasswordHash: string): Promise<boolean> {
+  async consumePasswordReset(token: string, newPasswordHash: () => Promise<string>): Promise<boolean> {
     const tokenHash = hashToken(token);
     const nowIso = this.iso();
     return this.client.transaction(async (tx) => {
@@ -794,9 +799,10 @@ export class AuthStore {
         [tokenHash, nowIso],
       );
       if (!row) return false;
+      const passwordHash = await newPasswordHash();
       await tx.execute(
         `UPDATE users SET password_hash = $2, failed_login_count = 0, locked_until = NULL, updated_at = now() WHERE id = $1`,
-        [row.user_id, newPasswordHash],
+        [row.user_id, passwordHash],
       );
       await tx.execute(`UPDATE sessions SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL`, [row.user_id]);
       return true;

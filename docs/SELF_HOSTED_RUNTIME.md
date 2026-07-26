@@ -157,6 +157,36 @@ mailbox-provider import backend is included in this OSS package.
 - Resend webhook signatures are mandatory. SES inbound requires a verified AWS
   SNS signature plus exact topic ARN and AWS account allowlists.
 
+### Trusted proxy depth (`EMAILS_TRUSTED_PROXY_HOPS`)
+
+The per-IP auth rate limits — login brute-force, signup/forgot throttles, and
+the throttle in front of the argon2id password-reset path — are keyed on the
+client address. `X-Forwarded-For` is **appended to** by each proxy, so its
+leftmost entry is whatever the client sent and is never trustworthy; only an
+entry counted from the right was written by a proxy you control.
+
+`EMAILS_TRUSTED_PROXY_HOPS` states how many appending proxies sit in front of
+`emails-serve`:
+
+| Value | Meaning |
+| --- | --- |
+| `0` (default) | Trust nothing. Forwarding headers are ignored and the socket peer address is used. |
+| `1` | One appending proxy — an AWS ALB, or a single Caddy/nginx. The client IP is the **last** `X-Forwarded-For` entry. |
+| `n` | `n` chained proxies. The client IP is the `n`th entry from the right. |
+
+**Set this to match your topology.** The default is deliberately the safe one, but
+it is not the accurate one for the canonical ALB deployment: leaving it at `0`
+behind an ALB collapses every client into the ALB's own address, so one shared
+bucket throttles all of them. The AWS module sets `EMAILS_TRUSTED_PROXY_HOPS=1`
+on the API task for exactly this reason.
+
+If the header carries fewer entries than the configured chain, it did not
+traverse that chain, so it is discarded and the socket peer address is used —
+stripping the header cannot buy an attacker a fresh rate-limit bucket. `X-Real-IP`
+is never trusted: it is a single-value header with no position a proxy is known to
+own. An operator whose proxy sets only `X-Real-IP` should leave the hop count at
+`0` and accept per-proxy granularity.
+
 ## Reproducible dependency pins
 
 The Dockerfile, Compose database image, and CI actions use immutable digests or
