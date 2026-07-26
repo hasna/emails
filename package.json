@@ -44,7 +44,7 @@
     "build:lib": "bun build src/index.ts src/storage.ts src/selfhost.ts --outdir dist --target bun --packages external --splitting",
     "build:types": "tsc --emitDeclarationOnly --outDir dist",
     "test": "bun test",
-    "no-cloud:source": "bun test src/no-cloud-boundary.test.ts",
+    "no-cloud:source": "bun test src/no-cloud-boundary.test.ts src/no-cloud-artifact-scan.test.ts",
     "no-cloud:pack": "bun scripts/no-cloud-artifact-scan.mjs",
     "pack:identity": "bun test src/self-hosted-container.test.ts --test-name-pattern \"packed manifest identities\"",
     "prepack": "bun run build && bun run no-cloud:source && bun run no-cloud:pack && bun run pack:identity",
