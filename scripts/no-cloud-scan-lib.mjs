@@ -84,7 +84,28 @@ const boundaryPatterns = [
   // dist/cli/ui-runtime-bundle.js. Each was found by running this guard, not
   // guessed. A NEW namespace of that shape will trip this rule, which is the safe
   // direction to fail.
-  { label: "vendor hostname", scopes: BOTH, pattern: /hasna\.(?!contract|service|emails|events)(?:[a-z]{2,24}|\*)/i },
+  //
+  // The `(?![a-z0-9-])` after the alternation is load-bearing. Without it the
+  // exemption is PREFIX-matched, so any hostname whose first label merely STARTS
+  // WITH one of the four words escapes the guard entirely: `hasna.emailservice.com`,
+  // `hasna.eventsource.io` and `hasna.servicedesk.net` all passed.
+  //
+  // The class is `[a-z0-9-]`, not `[a-z]`: digits and hyphens are legal DNS label
+  // characters, so a letters-only guard still let `hasna.emails2.com`,
+  // `hasna.service-desk.net` and `hasna.events-api.io` through. The exemption
+  // therefore covers a namespace only when the word ENDS there — the next character
+  // must be something no DNS label can continue with (`.`, `_`, a quote, or
+  // end-of-input). It does NOT cover anything that continues the word.
+  //
+  // Do NOT "simplify" this to a `\b` boundary. `_` is a word character, so
+  // `(?:service)\b` does not match in `hasna.service_contract.v1` — the exemption
+  // would stop applying and the guard would false-positive on a legitimate
+  // service-contract name. A negative character class is correct where `\b` is not.
+  {
+    label: "vendor hostname",
+    scopes: BOTH,
+    pattern: /hasna\.(?!(?:contract|service|emails|events)(?![a-z0-9-]))(?:[a-z]{2,24}|\*)/i,
+  },
   // Vendor account/environment names that identify private infrastructure.
   { label: "vendor infrastructure name", scopes: BOTH, pattern: /\balumia\b|\bxyz-infra\b/i },
   {
