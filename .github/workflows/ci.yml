@@ -136,7 +136,6 @@ jobs:
             -u AWS_CONTAINER_CREDENTIALS_FULL_URI -u AWS_CONTAINER_AUTHORIZATION_TOKEN \
             -u EMAILS_AWS_REGION -u EMAILS_SES_AWS_PROFILE \
             -u RESEND_API_KEY -u RESEND_WEBHOOK_SECRET \
-            -u BRANDSIGHT_API_KEY -u BRANDSIGHT_API_SECRET -u BRANDSIGHT_CUSTOMER_ID \
             AWS_EC2_METADATA_DISABLED=true \
             HOME="$tmp_home" EMAILS_MODE=local EMAILS_DB_PATH=:memory: bun test
       - name: Build
@@ -145,10 +144,10 @@ jobs:
         run: |
           bun -e '
             import pkg from "./package.json" with { type: "json" };
-            if (pkg.name !== "@hasna/mailery") throw new Error(`unexpected package name: ${pkg.name}`);
+            if (pkg.name !== "@hasna/emails") throw new Error(`unexpected package name: ${pkg.name}`);
             if (pkg.publishConfig?.access !== "public") throw new Error("npm package must publish with public access");
             if (pkg.publishConfig?.registry !== "https://registry.npmjs.org") throw new Error("npm registry must be the public registry");
-            if (pkg.repository?.url !== "git+https://github.com/hasna/mailery.git") throw new Error("repository provenance must be hasna/mailery");
+            if (pkg.repository?.url !== "git+https://github.com/hasna/emails.git") throw new Error("repository provenance must be hasna/emails");
           '
       - name: Verify generated SDK is committed
         run: |
@@ -184,7 +183,7 @@ jobs:
         with:
           bun-version: 1.3.14
       - run: bun install --frozen-lockfile
-      - name: Verify self-hosted Postgres migrations, tenancy, RLS, and message IDs
+      - name: Verify self-hosted Postgres migrations, tenancy, RLS, message IDs, and send semantics
         env:
           PGHOST: 127.0.0.1
           PGPORT: "5432"
@@ -194,8 +193,15 @@ jobs:
         run: |
           scheme=postgresql
           export EMAILS_TEST_POSTGRES_URL="${scheme}://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${PGDATABASE}?sslmode=disable"
-          bun test src/server/self-hosted/postgres.integration.test.ts
-          bun test src/server/self-hosted/multi-tenancy.integration.test.ts
-          bun test src/server/self-hosted/message-id-resolution.integration.test.ts
-          bun test src/server/self-hosted/rls.integration.test.ts
+          # ONE invocation: a sequence of `bun test` calls aborts at the first
+          # red suite under `set -e`, so the send-semantics suites below never
+          # ran and their failures were invisible. Running them together still
+          # fails the job on any failure, but reports every suite.
+          bun test \
+            src/server/self-hosted/postgres.integration.test.ts \
+            src/server/self-hosted/multi-tenancy.integration.test.ts \
+            src/server/self-hosted/message-id-resolution.integration.test.ts \
+            src/server/self-hosted/rls.integration.test.ts \
+            src/server/self-hosted/send-failure-semantics.integration.test.ts \
+            src/server/self-hosted/send-honesty-and-reconciliation.integration.test.ts
           bun test src/server/self-hosted/attachment-inventory.integration.test.ts

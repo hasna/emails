@@ -355,11 +355,11 @@ export function registerInfrastructureTools(server: McpServer): void {
       force_mx_switch: z.boolean().optional().describe("Allow adding inbound MX when an existing provider already owns root MX"),
     },
     async () => {
-      // Domain provisioning orchestrates local provisioning state plus provider
-      // (SES) and Cloudflare operations that the self-hosted server owns; there
-      // is no client-side /v1 provisioning route. Fail loud (rule 6).
+      // No provisioning orchestrator ships in ANY mode: the local one was
+      // unreachable dead code and has been removed, and the self-hosted server
+      // exposes no /v1 provisioning route. Fail loud with the truth (rule 6).
       return {
-        content: [{ type: "text" as const, text: "Error: provision_domain is not available in the self-hosted client; domain provisioning runs on the self-hosted server." }],
+        content: [{ type: "text" as const, text: "Error: provision_domain is not implemented in this build: there is no local provisioning orchestrator and the self-hosted server exposes no provisioning route. Register an already-verified domain with `emails domain adopt <domain> --provider <id>` and create the SES inbound bucket and receipt rules with `emails aws setup-inbound`." }],
         isError: true,
       };
     },
@@ -382,11 +382,10 @@ export function registerInfrastructureTools(server: McpServer): void {
       inbound_bucket: z.string().optional().describe("Inbound S3 bucket for receive validation"),
     },
     async () => {
-      // Address provisioning orchestrates local provisioning/ownership state plus
-      // SES/S3 operations owned by the self-hosted server; there is no client-side
-      // /v1 provisioning route. Fail loud (rule 6).
+      // No provisioning orchestrator ships in ANY mode (see provision_domain).
+      // Fail loud with the truth (rule 6).
       return {
-        content: [{ type: "text" as const, text: "Error: provision_address is not available in the self-hosted client; address provisioning runs on the self-hosted server." }],
+        content: [{ type: "text" as const, text: "Error: provision_address is not implemented in this build: there is no local provisioning orchestrator and the self-hosted server exposes no provisioning route. Create the address with `emails address add <email> --provider <id>`." }],
         isError: true,
       };
     },
@@ -473,10 +472,10 @@ export function registerInfrastructureTools(server: McpServer): void {
       offset: z.number().int().min(0).optional().describe("Number of domains to skip"),
     },
     async () => {
-      // Provisioning status is server-owned local provisioning state with no
-      // client-side /v1 route. Fail loud (rule 6).
+      // No provisioning orchestrator ships in ANY mode (see provision_domain).
+      // Fail loud with the truth (rule 6).
       return {
-        content: [{ type: "text" as const, text: "Error: provision_status is not available in the self-hosted client; provisioning status runs on the self-hosted server." }],
+        content: [{ type: "text" as const, text: "Error: provision_status is not implemented in this build: there is no local provisioning orchestrator and the self-hosted server exposes no provisioning route. List what is registered with `emails domain list --json` and `emails address list --json`." }],
         isError: true,
       };
     },

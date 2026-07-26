@@ -96,7 +96,7 @@ function metadata() {
     Revision: "7",
     Containers: [{
       Name: CONTAINER_NAME,
-      Image: `registry.example/mailery@${IMAGE_DIGEST}`,
+      Image: `registry.example/emails@${IMAGE_DIGEST}`,
       ImageID: IMAGE_DIGEST,
       Labels: { "org.opencontainers.image.revision": IMAGE_REVISION },
     }],

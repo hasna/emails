@@ -482,7 +482,7 @@ describe("Emails self-hosted service", () => {
     expect(processCalls).toBe(0);
   });
 
-  test("attachment repair create preflight prefers MAILERY_INGEST_S3_BUCKET and supports the legacy fallback", async () => {
+  test("attachment repair create preflight uses only EMAILS_INGEST_S3_BUCKET", async () => {
     const token = mintApiKey({
       app: "emails",
       scopes: ["emails:*"],
@@ -518,18 +518,14 @@ describe("Emails self-hosted service", () => {
     for (const scenario of [
       {
         env: {
-          MAILERY_INGEST_S3_BUCKET: "mailery-canonical",
-          EMAILS_INGEST_S3_BUCKET: "legacy-canonical",
+          MAILERY_INGEST_S3_BUCKET: "ignored-mailery-value",
+          EMAILS_INGEST_S3_BUCKET: "emails-canonical",
         },
-        expected: "mailery-canonical",
+        expected: "emails-canonical",
       },
       {
-        env: { MAILERY_INGEST_S3_BUCKET: "mailery-canonical" },
-        expected: "mailery-canonical",
-      },
-      {
-        env: { EMAILS_INGEST_S3_BUCKET: "legacy-canonical" },
-        expected: "legacy-canonical",
+        env: { EMAILS_INGEST_S3_BUCKET: "emails-canonical" },
+        expected: "emails-canonical",
       },
     ] as const) {
       const d = deps();
@@ -567,7 +563,7 @@ describe("Emails self-hosted service", () => {
 
   test("attachment repair resume returns the typed not-configured response before processing", async () => {
     const d = deps();
-    d.env = {};
+    d.env = { MAILERY_INGEST_S3_BUCKET: "ignored-mailery-value" };
     const repairRunId = "11111111-1111-4111-8111-111111111111";
     (d.store as any).getAttachmentRepairRun = async () => ({
       id: repairRunId,

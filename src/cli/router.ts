@@ -20,6 +20,7 @@ export const allCommandModules = [
   "owner",
   "alias",
   "sendkey",
+  "send-intent",
   "reply",
   "forwarding",
   "ui",
@@ -75,6 +76,7 @@ export const knownCommandNames = new Set([
   "owner",
   "alias",
   "sendkey",
+  "send-intent",
   "reply",
   "forward",
   "forwarding",
@@ -151,6 +153,7 @@ export function commandModulesFor(args: string[]): readonly CommandModule[] {
     case "owner": return ["owner"];
     case "alias": return ["alias"];
     case "sendkey": return ["sendkey"];
+    case "send-intent": return ["send-intent"];
     case "reply":
     case "forward": return ["reply"];
     case "forwarding": return ["forwarding"];

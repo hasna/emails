@@ -10,7 +10,7 @@ import chalk from "../../lib/chalk-lite.js";
 import { resolveMailDataSource, type MailDataSource } from "../../lib/mail-data-source.js";
 import { handleError, parseCliPositiveIntOption, parseCliNonNegativeIntOption } from "../utils.js";
 import type { MessageBody, TuiMessage, TuiThreadMessage } from "../tui/data.js";
-import { readableMessageText } from "../tui/format.js";
+import { formatThreadLabel, readableMessageText } from "../tui/format.js";
 
 const DEFAULT_REPLY_LIMIT = 20;
 const MAX_REPLY_LIMIT = 200;
@@ -29,11 +29,21 @@ interface SentLogPageOpts {
   offset?: string;
 }
 
-interface SelfHostedEmailSummary {
+export interface SelfHostedEmailSummary {
   id: string;
   kind: "inbound" | "sent";
   from_address: string;
+  /** Recipients — same content as to_addresses; kept under both keys because
+   * operators script against `to`/`cc` (they read null during the 2026-07-25
+   * incident) while `to_addresses` predates them. */
+  to: string[];
+  cc: string[];
   to_addresses: string[];
+  cc_addresses: string[];
+  /** Ledger status (sent | failed | uncertain | …); null when unreported. An
+   * uncertain/failed send must never serialize identically to a delivered one. */
+  status: string | null;
+  send_state: string | null;
   subject: string;
   date: string;
   is_read: boolean;
@@ -43,7 +53,6 @@ interface SelfHostedEmailSummary {
 }
 
 interface SelfHostedEmailDetail extends SelfHostedEmailSummary {
-  cc_addresses: string[];
   text_body: string | null;
   html_body: string | null;
   flags: string[];
@@ -83,12 +92,19 @@ function splitRecipients(value: string): string[] {
   return value.split(",").map((entry) => entry.trim()).filter(Boolean);
 }
 
-function toSelfHostedSummary(msg: TuiMessage): SelfHostedEmailSummary {
+export function toSelfHostedSummary(msg: TuiMessage): SelfHostedEmailSummary {
+  const to = splitRecipients(msg.to);
+  const cc = splitRecipients(msg.cc ?? "");
   return {
     id: msg.id,
     kind: msg.kind,
     from_address: msg.from,
-    to_addresses: splitRecipients(msg.to),
+    to,
+    cc,
+    to_addresses: to,
+    cc_addresses: cc,
+    status: msg.status ?? null,
+    send_state: msg.send_state ?? null,
     subject: msg.subject,
     date: msg.date,
     is_read: msg.is_read,
@@ -108,11 +124,15 @@ function toSelfHostedDetail(msg: TuiMessage, body: MessageBody | null): SelfHost
     ...labels,
     ...(body?.flags ?? []),
   ].filter((flag, index, list): flag is string => Boolean(flag) && list.indexOf(flag) === index);
+  const to = splitRecipients(body?.to ?? msg.to);
+  const cc = splitRecipients(body?.cc ?? msg.cc ?? "");
   return {
     ...toSelfHostedSummary({ ...msg, labels }),
     from_address: body?.from ?? msg.from,
-    to_addresses: splitRecipients(body?.to ?? msg.to),
-    cc_addresses: splitRecipients(body?.cc ?? ""),
+    to,
+    cc,
+    to_addresses: to,
+    cc_addresses: cc,
     subject: body?.subject ?? msg.subject,
     date: body?.date ?? msg.date,
     text_body: body?.text ?? null,
@@ -121,25 +141,38 @@ function toSelfHostedDetail(msg: TuiMessage, body: MessageBody | null): SelfHost
   };
 }
 
-function formatSelfHostedSummaries(rows: SelfHostedEmailSummary[], title: string): string {
+/** Status cell: highlight anything that is NOT a completed send. */
+function statusCell(row: SelfHostedEmailSummary): string {
+  const value = (row.send_state ?? row.status ?? "").trim();
+  if (!value) return "-";
+  return value;
+}
+
+export function formatSelfHostedSummaries(rows: SelfHostedEmailSummary[], title: string): string {
   if (rows.length === 0) return chalk.dim(`${title}: no messages found.`);
   const lines: string[] = [];
   lines.push(chalk.bold(`\n${title} (${rows.length})`));
-  lines.push(chalk.bold(`${"Date".padEnd(20)}  ${"From".padEnd(30)}  ${"To".padEnd(30)}  Subject`));
+  lines.push(chalk.bold(`${"Date".padEnd(20)}  ${"Status".padEnd(10)}  ${"From".padEnd(28)}  ${"To".padEnd(28)}  Subject`));
   lines.push(chalk.dim("─".repeat(116)));
   for (const row of rows) {
     const date = row.date ? new Date(row.date).toLocaleString().slice(0, 20) : "";
-    const from = row.from_address.length > 30 ? row.from_address.slice(0, 27) + "..." : row.from_address;
+    const rawStatus = statusCell(row);
+    const paddedStatus = rawStatus.length > 10 ? rawStatus.slice(0, 10) : rawStatus.padEnd(10);
+    // A send that is not `sent`/delivered/received must stand out — rendering
+    // `uncertain`/`failed` like delivered mail is what hid the 2026-07-25 defect.
+    const ok = ["sent", "delivered", "received", "-"].includes(rawStatus);
+    const status = ok ? paddedStatus : chalk.yellow(paddedStatus);
+    const from = row.from_address.length > 28 ? row.from_address.slice(0, 25) + "..." : row.from_address;
     const toRaw = row.to_addresses[0] ?? "";
-    const to = toRaw.length > 30 ? toRaw.slice(0, 27) + "..." : toRaw;
-    const subject = row.subject.length > 44 ? row.subject.slice(0, 41) + "..." : row.subject;
-    lines.push(`${date.padEnd(20)}  ${from.padEnd(30)}  ${to.padEnd(30)}  ${subject}`);
+    const to = toRaw.length > 28 ? toRaw.slice(0, 25) + "..." : toRaw;
+    const subject = row.subject.length > 42 ? row.subject.slice(0, 39) + "..." : row.subject;
+    lines.push(`${date.padEnd(20)}  ${status}  ${from.padEnd(28)}  ${to.padEnd(28)}  ${subject}`);
   }
   lines.push("");
   return lines.join("\n");
 }
 
-function formatSelfHostedDetail(email: SelfHostedEmailDetail): string {
+export function formatSelfHostedDetail(email: SelfHostedEmailDetail): string {
   const lines: string[] = [
     chalk.bold(`\nEmail: ${email.id}`),
     `  ${chalk.dim("Subject:")}  ${email.subject}`,
@@ -147,6 +180,15 @@ function formatSelfHostedDetail(email: SelfHostedEmailDetail): string {
     `  ${chalk.dim("To:")}       ${email.to_addresses.join(", ")}`,
   ];
   if (email.cc_addresses.length > 0) lines.push(`  ${chalk.dim("CC:")}       ${email.cc_addresses.join(", ")}`);
+  {
+    // The single-message view must expose the ledger truth too — hiding it is
+    // how the 2026-07-25 never-sent mail read as delivered.
+    const state = (email.send_state ?? email.status ?? "").trim();
+    if (state) {
+      const ok = ["sent", "delivered", "received"].includes(state);
+      lines.push(`  ${chalk.dim("Status:")}   ${ok ? state : chalk.yellow(state)}`);
+    }
+  }
   lines.push(`  ${chalk.dim("Kind:")}     ${email.kind}`);
   lines.push(`  ${chalk.dim("Date:")}     ${email.date}`);
   if (email.flags.length > 0) lines.push(`  ${chalk.dim("Flags:")}    ${email.flags.join(", ")}`);
@@ -214,10 +256,31 @@ async function selfHostedConversation(ds: MailDataSource, id: string): Promise<{
   return { msg: msg!, messages };
 }
 
-function formatThreadMessages(rows: TuiThreadMessage[], header: string): string {
+/**
+ * The other messages of the conversation that came IN — i.e. the replies. The
+ * selected message is excluded even when it is itself inbound, so `replies <id>`
+ * never counts the message you asked about as a reply to itself.
+ *
+ * This is the whole inbound side of the conversation, not local mode's strict
+ * depth-1 `in_reply_to_email_id` children: the self-hosted rows expose the
+ * conversation, not a parent-child edge per message, and under-reporting a reply
+ * is the failure this replaces. The response SHAPE is identical to local's
+ * ({ replies, total, limit, offset, has_more }).
+ */
+function repliesInConversation(msg: TuiMessage, conversation: TuiThreadMessage[]): TuiThreadMessage[] {
+  return conversation.filter((entry) => entry.kind === "received" && entry.id !== msg.id);
+}
+
+function threadPage<T>(rows: T[], limit: number, offset: number): { items: T[]; total: number; has_more: boolean } {
+  const items = rows.slice(offset, offset + limit);
+  return { items, total: rows.length, has_more: offset + items.length < rows.length };
+}
+
+function formatThreadMessages(rows: TuiThreadMessage[], header: string, total = rows.length): string {
   const lines: string[] = [chalk.bold(`\n${header}`)];
   if (!rows.length) {
-    lines.push(chalk.dim("  No messages in this thread."));
+    // An empty PAGE of a non-empty thread is not an empty thread.
+    lines.push(chalk.dim(total > 0 ? "  No messages on this page of the thread." : "  No messages in this thread."));
     lines.push("");
     return lines.join("\n");
   }
@@ -292,33 +355,37 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
 
   emailCmd
     .command("replies <id>")
-    .description("Show replies received for a sent email")
+    .description("Show the inbound messages received in this email's conversation")
     .option("--limit <n>", "Max replies", String(DEFAULT_REPLY_LIMIT))
     .option("--offset <n>", "Skip first N replies", "0")
     .action(async (id: string, opts: ReplyPageOpts) => {
       try {
-        const { messages } = await selfHostedConversation(resolveMailDataSource(), id);
-        const received = messages.filter((m) => m.kind === "received");
+        const { msg, messages } = await selfHostedConversation(resolveMailDataSource(), id);
+        const received = repliesInConversation(msg, messages);
         const { limit, offset } = parseReplyPage(opts);
-        const total = received.length;
-        const pageItems = received.slice(offset, offset + limit);
+        const { items, total, has_more } = threadPage(received, limit, offset);
         output(
-          { replies: pageItems, total, limit, offset, has_more: offset + pageItems.length < total },
-          formatReplies(pageItems, total, limit, offset, ""),
+          { replies: items, total, limit, offset, has_more },
+          formatReplies(items, total, limit, offset, ""),
         );
       } catch (e) { handleError(e); }
     });
 
   emailCmd
     .command("thread <id>")
-    .description("Show the full conversation (sent + received), grouped by thread_id")
-    .option("--limit <n>", "Max reply bodies for fallback conversations", String(DEFAULT_REPLY_LIMIT))
-    .option("--offset <n>", "Skip first N fallback replies", "0")
-    .action(async (id: string) => {
+    .description("Show the full conversation (sent + received) this email belongs to")
+    .option("--limit <n>", "Max thread messages to show", String(DEFAULT_REPLY_LIMIT))
+    .option("--offset <n>", "Skip first N thread messages", "0")
+    .action(async (id: string, opts: ReplyPageOpts) => {
       try {
         const { msg, messages } = await selfHostedConversation(resolveMailDataSource(), id);
-        const header = `Thread${msg.thread_id ? ` ${msg.thread_id.slice(0, 8)}` : ""} (${messages.length} message${messages.length !== 1 ? "s" : ""})`;
-        output({ thread_id: msg.thread_id, messages }, formatThreadMessages(messages, header));
+        const { limit, offset } = parseReplyPage(opts);
+        const { items, total, has_more } = threadPage(messages, limit, offset);
+        const header = `Thread${formatThreadLabel(msg.thread_id)} (${items.length} of ${total} message${total !== 1 ? "s" : ""})`;
+        output(
+          { thread_id: msg.thread_id, messages: items, total, limit, offset, has_more },
+          formatThreadMessages(items, header, total),
+        );
       } catch (e) { handleError(e); }
     });
 
@@ -366,32 +433,36 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
     });
 
   // ─── REPLIES ─────────────────────────────────────────────────────────────────
-  program.command("replies <id>").description("Show replies received for a sent email")
+  program.command("replies <id>").description("Show the inbound messages received in this email's conversation")
     .option("--limit <n>", "Max replies", String(DEFAULT_REPLY_LIMIT))
     .option("--offset <n>", "Skip first N replies", "0")
     .action(async (id: string, opts: ReplyPageOpts) => {
       try {
-        const { messages } = await selfHostedConversation(resolveMailDataSource(), id);
-        const received = messages.filter((m) => m.kind === "received");
+        const { msg, messages } = await selfHostedConversation(resolveMailDataSource(), id);
+        const received = repliesInConversation(msg, messages);
         const { limit, offset } = parseReplyPage(opts);
-        const total = received.length;
-        const pageItems = received.slice(offset, offset + limit);
+        const { items, total, has_more } = threadPage(received, limit, offset);
         output(
-          { replies: pageItems, total, limit, offset, has_more: offset + pageItems.length < total },
-          formatReplies(pageItems, total, limit, offset, `email ${id.slice(0, 8)}`),
+          { replies: items, total, limit, offset, has_more },
+          formatReplies(items, total, limit, offset, `email ${id.slice(0, 8)}`),
         );
       } catch (e) { handleError(e); }
     });
 
   // ─── CONVERSATION ─────────────────────────────────────────────────────────────
   program.command("conversation <id>").description("Show full conversation thread for a sent email (email + all replies)")
-    .option("--limit <n>", "Max reply bodies", String(DEFAULT_REPLY_LIMIT))
-    .option("--offset <n>", "Skip first N replies", "0")
-    .action(async (id: string) => {
+    .option("--limit <n>", "Max thread messages to show", String(DEFAULT_REPLY_LIMIT))
+    .option("--offset <n>", "Skip first N thread messages", "0")
+    .action(async (id: string, opts: ReplyPageOpts) => {
       try {
         const { msg, messages } = await selfHostedConversation(resolveMailDataSource(), id);
-        const header = `Conversation thread${msg.thread_id ? ` ${msg.thread_id.slice(0, 8)}` : ""} (${messages.length} message${messages.length === 1 ? "" : "s"})`;
-        output({ thread_id: msg.thread_id, messages }, formatThreadMessages(messages, header));
+        const { limit, offset } = parseReplyPage(opts);
+        const { items, total, has_more } = threadPage(messages, limit, offset);
+        const header = `Conversation thread${formatThreadLabel(msg.thread_id)} (${items.length} of ${total} message${total === 1 ? "" : "s"})`;
+        output(
+          { thread_id: msg.thread_id, messages: items, total, limit, offset, has_more },
+          formatThreadMessages(items, header, total),
+        );
       } catch (e) { handleError(e); }
     });
 

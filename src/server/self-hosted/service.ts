@@ -42,7 +42,7 @@ import {
 } from "./attachment-repair.js";
 import { emailsSelfHostedOpenApi } from "./openapi.js";
 import { resourceSpecForPath } from "./resources.js";
-import type { SelfHostedSender } from "./sender.js";
+import { classifyProviderSendError, type SelfHostedSender } from "./sender.js";
 import {
   isTenantOperator,
   resolveRequestContext,
@@ -798,6 +798,90 @@ export async function handleSelfHostedRequest(
       });
     }
 
+    // Enumerate the intents whose provider outcome was never established. This
+    // is the entry point for closing out an incident: without it an operator
+    // cannot even find the messages that need a decision.
+    if (path === "/v1/messages/send-intents/uncertain") {
+      if (method !== "GET") return json(405, { error: "method not allowed" });
+      const auth = await authenticate(deps, req, url, read);
+      if (!auth.ok) return auth.response;
+      const records = await auth.store.listUncertainSendIntents({
+        limit: queryInt(url, "limit"),
+        offset: queryInt(url, "offset"),
+      });
+      return json(200, {
+        uncertain: records.map(publicMessage),
+        count: records.length,
+      });
+    }
+
+    // Close out ONE uncertain intent against evidence the operator gathered
+    // from the provider (a message id, a delivery event, a metric window).
+    // Nothing here infers an outcome: the caller asserts it and the assertion,
+    // its evidence and its author are persisted on the row.
+    if (path === "/v1/messages/send-intents/reconcile") {
+      if (method !== "POST") return json(405, { error: "method not allowed" });
+      const auth = await authenticate(deps, req, url, write);
+      if (!auth.ok) return auth.response;
+      const body = await readJsonBody(req);
+      const messageId = String(body.message_id ?? "").trim();
+      if (!messageId) return json(400, { error: "message_id is required" });
+      const outcome = String(body.outcome ?? "").trim();
+      if (outcome !== "sent" && outcome !== "not_sent") {
+        return json(400, { error: "outcome must be 'sent' (it left the provider) or 'not_sent' (it did not)" });
+      }
+      const evidence = String(body.evidence ?? "").trim();
+      if (!evidence) {
+        return json(400, {
+          error: "evidence is required: record WHAT proves this outcome (provider message id, delivery event, metric window)",
+        });
+      }
+      const providerMessageId = typeof body.provider_message_id === "string" ? body.provider_message_id.trim() : "";
+      if (outcome === "sent" && !providerMessageId) {
+        return json(400, { error: "provider_message_id is required when reconciling an intent as sent" });
+      }
+      // Same resolution as every other message route: accept a short prefix and
+      // answer 404/409 for an unknown or ambiguous id instead of letting a
+      // malformed value reach the uuid column as a 500.
+      const resolvedId = await resolveMessageIdOrError(auth.store, messageId);
+      if (!resolvedId.ok) return resolvedId.response;
+      const existing = await auth.store.getMessage(resolvedId.id);
+      if (!existing) return json(404, { error: "message not found" });
+      if (existing.send_state !== "uncertain") {
+        // Refuse rather than overwrite: only an unknown outcome may be decided.
+        return json(409, {
+          error: `only an 'uncertain' send intent can be reconciled; this one is '${existing.send_state}'`,
+          reconciled: false,
+          message: publicMessage(existing),
+        });
+      }
+      let record;
+      try {
+        record = await auth.store.reconcileUncertainSendIntent(resolvedId.id, {
+          outcome,
+          providerMessageId: providerMessageId || null,
+          evidence,
+          // Who asserted the outcome — an opaque principal reference, never a
+          // credential. `kid` is the API key id, not the key material.
+          resolvedBy: auth.ctx.principalType === "user"
+            ? `user:${auth.ctx.userId ?? "unknown"}`
+            : `apikey:${auth.ctx.kid ?? "unknown"}`,
+        });
+      } catch (error) {
+        return json(400, { error: error instanceof Error ? error.message : "reconciliation rejected" });
+      }
+      if (!record) {
+        // Lost a race with a concurrent reconcile/send.
+        const latest = await auth.store.getMessage(resolvedId.id);
+        return json(409, {
+          error: "the send intent stopped being uncertain before it could be reconciled; re-read it and decide again",
+          reconciled: false,
+          ...(latest ? { message: publicMessage(latest) } : {}),
+        });
+      }
+      return json(200, { reconciled: true, outcome, message: publicMessage(record) });
+    }
+
     if (path === "/v1/messages/send-intents/cancel") {
       if (method !== "POST") return json(405, { error: "method not allowed" });
       const auth = await authenticate(deps, req, url, write);
@@ -926,7 +1010,15 @@ export async function handleSelfHostedRequest(
 
       if (!reserved.created) {
         if (reserved.record.send_state === "sent") {
-          return json(200, { message: publicMessage(reserved.record), provider: deps.sender.provider, idempotent_replay: true });
+          return json(200, {
+            message: publicMessage(reserved.record),
+            provider: deps.sender.provider,
+            idempotent_replay: true,
+            // The original attempt succeeded: say so at the top level, exactly
+            // like a fresh success, so callers have ONE place to check.
+            sent: true,
+            ...(reserved.record.provider_message_id ? { provider_message_id: reserved.record.provider_message_id } : {}),
+          });
         }
         if (reserved.record.send_state === "sending") {
           if (sendLeaseExpired(reserved.record)) {
@@ -946,6 +1038,30 @@ export async function handleSelfHostedRequest(
             message: publicMessage(reserved.record),
             retry_safe: false,
           });
+        }
+        if (reserved.record.send_state === "failed") {
+          // A definitive provider reject sent NOTHING, so the same idempotency
+          // key may retry — on the SAME ledger row (never a duplicate). If the
+          // re-arm itself fails, that is still PRE-provider: nothing was sent,
+          // and the response must say so instead of a generic 500 (which reads
+          // as "outcome unknown" — the exact ambiguity behind the incident).
+          let rearmed: MessageRecord | null = null;
+          try {
+            rearmed = await auth.store.rearmFailedSendIntent(reserved.record.id);
+          } catch (error) {
+            console.error("[emails-self-hosted] failed to re-arm a rejected send intent", {
+              message_id: reserved.record.id,
+              error: error instanceof Error ? `${error.name}: ${error.message}` : "UnknownError",
+            });
+            return json(503, {
+              error: "could not re-arm the previously rejected send intent; NOTHING was sent — retry later",
+              reason: "rearm_failed",
+              sent: false,
+              message: publicMessage(reserved.record),
+              retry_safe: true,
+            });
+          }
+          if (rearmed) reserved = { record: rearmed, created: false };
         }
         if (reserved.record.send_state !== "pending") {
           return json(409, {
@@ -977,7 +1093,13 @@ export async function handleSelfHostedRequest(
       if (!claimed) {
         const latest = await auth.store.getMessage(reserved.record.id);
         if (latest?.send_state === "sent") {
-          return json(200, { message: publicMessage(latest), provider: deps.sender.provider, idempotent_replay: true });
+          return json(200, {
+            message: publicMessage(latest),
+            provider: deps.sender.provider,
+            idempotent_replay: true,
+            sent: true,
+            ...(latest.provider_message_id ? { provider_message_id: latest.provider_message_id } : {}),
+          });
         }
         if (latest?.send_state === "cancelled") {
           return json(409, {
@@ -1017,22 +1139,78 @@ export async function handleSelfHostedRequest(
           html: typeof body.html === "string" ? body.html : undefined,
           attachments: attachments.length ? attachments : undefined,
         });
-      } catch {
+      } catch (error) {
+        // NEVER swallow the provider error (the 2026-07-25 incident): classify
+        // it, log it, and answer with what is actually KNOWN about the send.
+        const outcome = classifyProviderSendError(error);
+        console.error("[emails-self-hosted] provider send failed", {
+          message_id: claimed.id,
+          provider: deps.sender.provider,
+          outcome: outcome.kind,
+          provider_error: outcome.providerErrorName,
+          http_status: outcome.httpStatus ?? null,
+          detail: outcome.detail,
+        });
+        if (outcome.kind === "rejected") {
+          // The provider REFUSED the request (4xx): nothing was sent. This is
+          // a definitive failure — not "uncertain", and not a 502.
+          const failed = await auth.store.markSendFailed(claimed.id, outcome.providerErrorName).catch(() => null);
+          return json(422, {
+            error: `the provider rejected this message and NOTHING was sent — ${outcome.providerErrorName}: ${outcome.detail}`,
+            reason: "provider_rejected",
+            provider_error: outcome.providerErrorName,
+            sent: false,
+            message: publicMessage(failed ?? claimed),
+            retry_safe: true,
+          });
+        }
         const uncertain = await auth.store.markSendUncertain(claimed.id).catch(() => null);
         return json(502, {
-          error: "send outcome is uncertain; reconcile the provider before retrying",
+          error: `the provider call failed without a definitive outcome (${outcome.providerErrorName}: ${outcome.detail}); ` +
+            "the message may or may not have been sent — reconcile the provider before retrying",
+          reason: "provider_outcome_uncertain",
+          provider_error: outcome.providerErrorName,
+          sent: null,
           message: publicMessage(uncertain ?? claimed),
           retry_safe: false,
         });
       }
       try {
         const completed = await auth.store.completeSendIntent(claimed.id, messageId);
-        return json(202, { message: publicMessage(completed), provider: deps.sender.provider });
-      } catch {
-        const uncertain = await auth.store.markSendUncertain(claimed.id).catch(() => null);
-        return json(502, {
-          error: "provider accepted the send but ledger finalization failed; reconciliation is required",
+        // `sent` + `provider_message_id` sit at the top level on EVERY response
+        // where the provider accepted the message (here, on idempotent replays,
+        // and on the finalization-failure path below), so a client never has to
+        // guess what happened from the HTTP status alone.
+        return json(202, {
+          message: publicMessage(completed),
+          provider: deps.sender.provider,
+          sent: true,
+          provider_message_id: messageId,
+        });
+      } catch (error) {
+        // The provider ACCEPTED the message — it was sent. A post-send ledger
+        // failure must therefore surface as SUCCESS with a warning: presenting
+        // it as an error is what made operators retry and triple-send real
+        // client mail on 2026-07-25.
+        console.error("[emails-self-hosted] ledger finalization failed after provider accept", {
+          message_id: claimed.id,
+          provider: deps.sender.provider,
+          provider_message_id: messageId,
+          error: error instanceof Error ? `${error.name}: ${error.message}` : "UnknownError",
+        });
+        // The provider id is the ONLY evidence this message left. Persist it on
+        // the parked row: `emails log`, the uncertain queue and
+        // `reconcile --outcome sent` all read it from there, and an uncertain
+        // row without it can only be closed as `not_sent` — filing a delivered
+        // message as failed.
+        const uncertain = await auth.store.markSendUncertain(claimed.id, messageId).catch(() => null);
+        return json(202, {
           message: publicMessage(uncertain ?? claimed),
+          provider: deps.sender.provider,
+          provider_message_id: messageId,
+          sent: true,
+          warning: "the provider ACCEPTED this message (it was sent) but recording the final state failed; " +
+            "do NOT retry the send — reconcile the ledger row instead",
           retry_safe: false,
         });
       }

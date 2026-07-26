@@ -170,6 +170,11 @@ export function registerSendCommands(program: Command, _output: (data: unknown, 
           html: htmlBody,
           markdown: false,
           replyTo: opts.replyTo,
+          // `--provider` used to be parsed and then dropped on the floor in BOTH
+          // modes. Thread it through: local honours it, self_hosted refuses it
+          // explicitly (the server chooses the sender), so it is never silently
+          // ignored again.
+          providerId: opts.provider,
           replyToId: (opts as Record<string, unknown>).inReplyTo as string | undefined,
           attachments: attachments.length > 0 ? attachments : undefined,
           scheduledAt: opts.schedule,
@@ -177,6 +182,9 @@ export function registerSendCommands(program: Command, _output: (data: unknown, 
         });
         console.log(chalk.green(`✓ Email sent to ${toAddresses.join(", ")}`));
         if (result.messageId) console.log(chalk.dim(`  Message ID: ${result.messageId}`));
+        // The message left the provider even though a post-send step failed —
+        // tell the operator NOT to re-send.
+        if (result.warning) console.log(chalk.yellow(`  ⚠ ${result.warning}`));
       } catch (e) {
         handleError(e);
       }

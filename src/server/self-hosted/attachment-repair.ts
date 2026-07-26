@@ -130,9 +130,7 @@ export class AttachmentRepairTerminalSourceError extends Error {
 export function resolveAttachmentRepairCanonicalBucket(
   env: NodeJS.ProcessEnv,
 ): string | null {
-  return env["MAILERY_INGEST_S3_BUCKET"]?.trim()
-    || env["EMAILS_INGEST_S3_BUCKET"]?.trim()
-    || null;
+  return env["EMAILS_INGEST_S3_BUCKET"]?.trim() || null;
 }
 
 function terminalAttachmentSourceFailure(error: unknown): boolean {
@@ -648,8 +646,7 @@ export async function processCanonicalS3AttachmentRepairPage(
   const canonicalBucket = resolveAttachmentRepairCanonicalBucket(env);
   if (!canonicalBucket) {
     throw new Error(
-      "attachment repair requires MAILERY_INGEST_S3_BUCKET "
-      + "(or legacy EMAILS_INGEST_S3_BUCKET) as the canonical source",
+      "attachment repair requires EMAILS_INGEST_S3_BUCKET as the canonical source",
     );
   }
   const region = env["AWS_REGION"]?.trim() || "us-east-1";

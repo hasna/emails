@@ -4,20 +4,19 @@
 // Postgres pool factory for the Emails Postgres storage utilities.
 //
 // The single sanctioned way to open a self_hosted Postgres connection. TLS is
-// resolved through `tls.ts` (one correct approach), and env/mode resolution
-// runs through `mode.ts` (the contract). PURE REMOTE (Amendment A1): a Pool is
-// only ever built for `self_hosted` mode; there is no local/hybrid Postgres path.
+// resolved through `tls.ts` (one correct approach). Mode and database-URL
+// resolution belong to the callers' resolvers (src/lib/mode.ts and
+// src/server/self-hosted/env.ts). PURE REMOTE (Amendment A1): a Pool is only
+// ever built for `self_hosted` mode; there is no local/hybrid Postgres path.
 
 import pg from "pg";
 import type { Pool, PoolConfig } from "pg";
-import { resolveStorageMode, resolveDatabaseUrl } from "./mode.js";
 import {
   connectionStringWithoutTlsParameters,
   resolveTlsConfig,
   sslNegotiationFromConnectionString,
   type TlsResolveOptions,
 } from "./tls.js";
-import { createQueryClient, type PoolQueryClient } from "./query.js";
 
 export interface CreatePgPoolOptions extends TlsResolveOptions {
   connectionString: string;
@@ -50,58 +49,4 @@ export function createPgPool(options: CreatePgPoolOptions): Pool {
   if (options.applicationName !== undefined) config.application_name = options.applicationName;
 
   return new pg.Pool(config);
-}
-
-export interface CreateSelfHostedPoolFromEnvOptions extends TlsResolveOptions {
-  max?: number;
-  idleTimeoutMillis?: number;
-  connectionTimeoutMillis?: number;
-  applicationName?: string;
-}
-
-export interface SelfHostedPoolFromEnv {
-  client: PoolQueryClient;
-  connectionSource: string;
-}
-
-/**
- * Resolve mode + database URL from the environment and build a self_hosted pool.
- *
- * Throws when the resolved mode is not `self_hosted` (PURE REMOTE has no Postgres in
- * `local` mode) or when the database URL is missing. Never logs the URL.
- */
-export function createSelfHostedPoolFromEnv(
-  appName: string,
-  options: CreateSelfHostedPoolFromEnvOptions = {},
-): SelfHostedPoolFromEnv {
-  const env = options.env ?? process.env;
-  const resolution = resolveStorageMode(appName, env);
-  if (resolution.mode !== "self_hosted") {
-    throw new Error(
-      `createSelfHostedPoolFromEnv requires Emails mode 'self_hosted', got '${resolution.mode}'. ` +
-        "Set EMAILS_MODE=self_hosted.",
-    );
-  }
-  const connectionString = resolveDatabaseUrl(appName, env);
-  if (!connectionString) {
-    throw new Error(
-      `self_hosted mode for ${appName} needs EMAILS_DATABASE_URL.`,
-    );
-  }
-  const pool = createPgPool({
-    connectionString,
-    ...(options.ca !== undefined ? { ca: options.ca } : {}),
-    ...(options.caCertPath !== undefined ? { caCertPath: options.caCertPath } : {}),
-    env,
-    ...(options.max !== undefined ? { max: options.max } : {}),
-    ...(options.idleTimeoutMillis !== undefined ? { idleTimeoutMillis: options.idleTimeoutMillis } : {}),
-    ...(options.connectionTimeoutMillis !== undefined
-      ? { connectionTimeoutMillis: options.connectionTimeoutMillis }
-      : {}),
-    ...(options.applicationName !== undefined ? { applicationName: options.applicationName } : {}),
-  });
-  return {
-    client: createQueryClient(pool),
-    connectionSource: resolution.databaseUrlSource ?? "unknown",
-  };
 }

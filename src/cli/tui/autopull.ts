@@ -7,7 +7,6 @@
  * Entirely best-effort: missing config/creds is a silent no-op.
  */
 import { buildS3PullTargets } from "./autopull-targets.js";
-export { buildS3PullTargets } from "./autopull-targets.js";
 export type { S3PullTarget } from "./autopull-targets.js";
 
 export interface PullForwardingResult { attempted: number; sent: number; failed: number; skipped: number }

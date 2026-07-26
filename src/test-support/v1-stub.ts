@@ -243,6 +243,26 @@ function leanListRow(row) {
   return lean;
 }
 
+// A /v1 DETAIL row as the self-hosted serve actually returns it: the stored
+// attachment bytes are stripped and replaced by the derived content_available
+// flag (store.mapMessageRow). Returning the raw stored row here would let a
+// client that cannot tell metadata-only records from fetchable ones pass every
+// test and still advertise undownloadable bytes against the real serve — the
+// same fake-vs-serve gap that shipped the 1.2.6 attachment_count bug.
+function detailRow(row) {
+  const out = {};
+  for (const key of Object.keys(row)) out[key] = row[key];
+  if (!Array.isArray(row.attachments)) return out;
+  out.attachments = row.attachments.map(function (att) {
+    if (!att || typeof att !== "object" || Array.isArray(att)) return att;
+    const meta = {};
+    for (const key of Object.keys(att)) { if (key !== "content_base64") meta[key] = att[key]; }
+    meta.content_available = typeof att.content_base64 === "string";
+    return meta;
+  });
+  return out;
+}
+
 function messageCounts() {
   const messages = rowsFor("messages");
   const inboxRows = messages.filter(function (r) {
@@ -485,6 +505,30 @@ const server = Bun.serve({
       rowsFor("messages").push(rec);
       return json({ message: rec }, 201);
     }
+    // Send-intent reconciliation: enough of the real contract for CLI tests.
+    if (resource === "messages" && sub === "send-intents" && parts[3] === "uncertain" && req.method === "GET") {
+      const stuck = rowsFor("messages").filter(function (r) { return r.send_state === "uncertain"; });
+      return json({ uncertain: stuck, count: stuck.length });
+    }
+    if (resource === "messages" && sub === "send-intents" && parts[3] === "reconcile" && req.method === "POST") {
+      const body = await req.json().catch(function () { return {}; });
+      const target = rowsFor("messages").find(function (r) { return String(r.id) === String(body.message_id); });
+      if (!target) return json({ error: "message not found" }, 404);
+      if (target.send_state !== "uncertain") {
+        return json({ error: "only an 'uncertain' send intent can be reconciled; this one is '" + String(target.send_state) + "'", reconciled: false, message: target }, 409);
+      }
+      if (body.outcome === "sent") {
+        if (!body.provider_message_id) return json({ error: "provider_message_id is required when reconciling an intent as sent" }, 400);
+        target.send_state = "sent";
+        target.status = "sent";
+        target.provider_message_id = body.provider_message_id;
+      } else {
+        target.send_state = "failed";
+        target.status = "failed";
+      }
+      target.updated_at = new Date().toISOString();
+      return json({ reconciled: true, outcome: body.outcome, message: target });
+    }
     if (resource === "messages" && id === undefined && req.method === "GET") {
       return json({ messages: listMessages(url.searchParams) });
     }
@@ -523,7 +567,7 @@ const server = Bun.serve({
         rec = pref[0];
       }
       if (!rec) return json({ error: "message not found" }, 404);
-      return json({ message: rec });
+      return json({ message: detailRow(rec) });
     }
 
     // Scoped send keys: bespoke mint/verify (matched before the generic matcher so

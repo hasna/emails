@@ -37,6 +37,11 @@ EMAILS_DATABASE_CA_FILE=/opt/emails/certs/aws-rds-global-bundle.pem
 # Optional paired bootstrap guard (API task only):
 EMAILS_PRIMARY_SUPER_ADMIN_EMAIL=<operator-pinned lowercase email>
 EMAILS_PRIMARY_SUPER_ADMIN_BOOTSTRAP_KID=<authorized non-secret API-key identifier>
+# Optional cross-account SES credentials (API task only, see "6. SES sending"):
+AWS_ACCESS_KEY_ID=<Secrets Manager injection>
+AWS_SECRET_ACCESS_KEY=<Secrets Manager injection>
+EMAILS_SES_ACCESS_KEY_ID=<Secrets Manager injection>
+EMAILS_SES_SECRET_ACCESS_KEY=<Secrets Manager injection>
 NODE_EXTRA_CA_CERTS=/opt/emails/certs/aws-rds-global-bundle.pem
 ```
 
@@ -330,6 +335,53 @@ Before production sending:
 5. prove an authenticated API send reaches a controlled external inbox.
 
 Infrastructure permission alone is not delivery proof.
+
+### Sending through SES in a different account
+
+By default the API task sends with its own task role, so SES must have production
+access **in the account running these tasks**. A sandbox account rejects every
+external recipient with `MessageRejected` before anything leaves.
+
+If your production-access SES lives in another account, there is no cross-account
+role path here: the sending principal has to be presented as credentials. Create
+an IAM user there scoped to `ses:*`/`sesv2:*`, put its access key id and secret
+access key in Secrets Manager **in the account running these tasks**, and pass
+the ARNs:
+
+```hcl
+ses_access_key_id_secret_arn     = "arn:aws:secretsmanager:us-east-1:<account>:secret:<name>:ACCESS_KEY_ID::"
+ses_secret_access_key_secret_arn = "arn:aws:secretsmanager:us-east-1:<account>:secret:<name>:SECRET_ACCESS_KEY::"
+# Only when those secrets use a customer-managed key:
+# ses_credentials_kms_key_arn = "arn:aws:kms:us-east-1:<account>:key/<id>"
+```
+
+Both are optional, must be set together, and carry **ARNs, never values** — no
+credential enters Terraform state, the plan output, or the plaintext
+`environment` block. The module injects four container variables from those two
+ARNs, all through the ECS `secrets` block, and extends only the API execution
+role's `secretsmanager:GetSecretValue` grant.
+
+`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` repoint the SDK default credential
+chain, which is what the shipped SES adapter falls back to;
+`EMAILS_SES_ACCESS_KEY_ID`/`EMAILS_SES_SECRET_ACCESS_KEY` are the scoped names
+read directly by the sender on images that support them. Once every image you run
+reads the scoped pair, prefer dropping the unscoped pair so the default chain
+returns to the task role.
+
+Scope and limits:
+
+- **API task only.** The ingest worker keeps its task role on purpose. An
+  SES-scoped principal has no SQS or inbound-bucket access, so giving it these
+  credentials would silently break inbound mail.
+- Setting them repoints *every* AWS SDK call in the API container, not just SES.
+  That is safe because the request path makes no S3 or SQS calls — verify this
+  still holds before adding AWS functionality to the API task.
+- ECS resolves `secrets` at task start. Rotating a value requires a new
+  deployment; and if you remove the secret while tasks still reference it, the
+  next replacement task fails with `ResourceInitializationError`.
+- Metric attribution: if that SES account is shared with other products, a bare
+  `AWS/SES` `Send`/`Delivery` sum does not prove *your* message left. Correlate
+  the returned SES `MessageId`, or give this deployment its own configuration set.
 
 ## 7. SES receiving and retention
 

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import pg, { type Pool } from "pg";
 
 import { closeSelfHostedPool, getSelfHostedPool } from "../server/self-hosted/env.js";
-import { createPgPool, createSelfHostedPoolFromEnv } from "./pool.js";
+import { createPgPool } from "./pool.js";
 
 interface EffectiveConnectionParameters {
   ssl: unknown;
@@ -77,22 +77,6 @@ describe("effective pg TLS configuration", () => {
     const effective = effectiveConnectionParameters(pool);
     expect(effective.ssl).toEqual({ rejectUnauthorized: true, ca: "RDS CA" });
     expect(effective.sslnegotiation).toBe("direct");
-  });
-
-  test("the reusable self-hosted pool factory has the same effective TLS contract", () => {
-    const result = createSelfHostedPoolFromEnv("emails", {
-      env: {
-        EMAILS_MODE: "self_hosted",
-        EMAILS_DATABASE_URL: "postgresql://emails:password@db.example/emails?sslmode=verify-full",
-      },
-      ca: "RDS CA",
-    });
-    pools.push(result.client.pool);
-
-    expect(effectiveConnectionParameters(result.client.pool).ssl).toEqual({
-      rejectUnauthorized: true,
-      ca: "RDS CA",
-    });
   });
 
   test("the shared migration and runtime pool keeps the verified CA effective", () => {

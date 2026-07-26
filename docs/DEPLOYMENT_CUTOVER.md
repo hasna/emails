@@ -276,7 +276,7 @@ SOURCE_HEAD="$(git -C "$SOURCE_CHECKOUT" rev-parse --verify 'HEAD^{commit}')"
 test "$SOURCE_HEAD" = "$RELEASE_COMMIT"
 SOURCE_PACKAGE_JSON="$(git -C "$SOURCE_CHECKOUT" show "$RELEASE_COMMIT:package.json")"
 jq -e --arg release_version "$RELEASE_VERSION" \
-  '.name == "@hasna/mailery" and .version == $release_version' \
+  '.name == "@hasna/emails" and .version == $release_version' \
   <<<"$SOURCE_PACKAGE_JSON" >/dev/null
 ACTUAL_SOURCE_ARCHIVE_SHA256="$(git -C "$SOURCE_CHECKOUT" archive --format=zip "$RELEASE_COMMIT" \
   | sha256sum | awk '{print $1}')"
@@ -941,8 +941,7 @@ REPAIR_CANONICAL_BUCKET="$(jq -er --arg container "$MANIFEST_WORKER_CONTAINER_NA
   .taskDefinition.containerDefinitions[]
   | select(.name == $container)
   | [.environment[]
-      | select(.name == "MAILERY_INGEST_S3_BUCKET"
-        or .name == "EMAILS_INGEST_S3_BUCKET")
+      | select(.name == "EMAILS_INGEST_S3_BUCKET")
       | .value]
   | select(length == 1 and .[0] != "") | .[0]
 ' <<<"$STAGED_WORKER_TASK_JSON")"
@@ -996,8 +995,7 @@ REPAIR_TASK_INPUT="$(jq -ce \
       | .command = ["src/server/index.ts","attachment-repair-ledger"]
       | .environment = (
           [.environment[]?
-            | select(.name != "MAILERY_INGEST_S3_BUCKET"
-              and .name != "EMAILS_INGEST_S3_BUCKET"
+            | select(.name != "EMAILS_INGEST_S3_BUCKET"
               and .name != "EMAILS_IMAGE_REVISION")]
           + [{
               name:"EMAILS_INGEST_S3_BUCKET",

@@ -193,7 +193,7 @@ export function recentErrorsResourcePayload(db: Database = getDatabase()): Recor
       component: "domain-provisioning",
       entity: domain,
       message: last_error ?? "domain provisioning failed",
-      fix_command: `emails provision status ${domain}`,
+      fix_command: `emails domain adopt ${domain} --provider <provider>`,
     }));
   const addressErrors = addressRows
     .slice(0, RECENT_ERROR_LIMIT_PER_COMPONENT)

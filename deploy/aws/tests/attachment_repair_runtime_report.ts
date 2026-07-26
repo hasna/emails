@@ -104,7 +104,7 @@ export async function generateAttachmentRepairRuntimeReport(
       Revision: input.taskDefinitionArn.split(":").at(-1),
       Containers: [{
         Name: input.containerName,
-        Image: `registry.example/mailery@${input.imageDigest}`,
+        Image: `registry.example/emails@${input.imageDigest}`,
         ImageID: input.imageDigest,
         Labels: { "org.opencontainers.image.revision": input.imageRevision },
       }],

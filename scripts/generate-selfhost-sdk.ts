@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 // Regenerates the self_hosted API client from the serve's OpenAPI document.
 //   bun run scripts/generate-selfhost-sdk.ts
-// The output (src/selfhost.ts, exported as @hasna/mailery/selfhost) is
+// The output (src/selfhost.ts, exported as @hasna/emails/selfhost) is
 // committed; CI can re-run this to verify it is in sync with openapi.ts.
 
 import { writeFileSync } from "node:fs";
@@ -31,10 +31,38 @@ if (secureClientCode === generated.code) {
   throw new Error("generated SDK constructor shape changed; HTTPS policy was not injected");
 }
 
-function replaceRequired(source: string, needle: string, replacement: string, label: string): string {
-  const updated = source.replace(needle, replacement);
+function replaceRequired(source: string, needle: string | RegExp, replacement: string, label: string): string {
+  const updated = typeof needle === "string"
+    ? source.replace(needle, replacement)
+    : source.replace(needle, replacement);
   if (updated === source) throw new Error(`generated SDK shape changed; ${label} was not injected`);
   return updated;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Widen a generated interface's `message` property to `| null`.
+ *
+ * Anchored on the interface NAME and the property, not on the whole literal:
+ * adding a sibling field to a response schema (e.g. the send-failure
+ * `reason`/`provider_error`/`sent` triple) must not silently drop the
+ * nullability the wire contract actually has. A brittle whole-literal needle is
+ * what broke `bun run scripts/generate-selfhost-sdk.ts` on the first attempt at
+ * the 2026-07-25 send-semantics fix.
+ */
+function nullableMessageProperty(
+  source: string,
+  interfaceName: string,
+  messageType: string,
+  label: string,
+): string {
+  const pattern = new RegExp(
+    `(export interface ${escapeRegExp(interfaceName)} \\{[^{}]*?"message"\\??: ${escapeRegExp(messageType)})(\\s*[;}])`,
+  );
+  return replaceRequired(source, pattern, "$1 | null$2", label);
 }
 
 secureClientCode = replaceRequired(
@@ -111,22 +139,22 @@ export class ApiError extends Error {
 }`,
   "send-intent error projection",
 );
-secureClientCode = replaceRequired(
+secureClientCode = nullableMessageProperty(
   secureClientCode,
-  `export interface SendIntentLookup { "found": boolean; "tombstoned": boolean; "reconciliation_required": boolean; "message": SendIntentMessage }`,
-  `export interface SendIntentLookup { "found": boolean; "tombstoned": boolean; "reconciliation_required": boolean; "message": SendIntentMessage | null }`,
+  "SendIntentLookup",
+  "SendIntentMessage",
   "nullable send-intent lookup message",
 );
-secureClientCode = replaceRequired(
+secureClientCode = nullableMessageProperty(
   secureClientCode,
-  `export interface SendIntentCancellation { "outcome": "tombstoned" | "cancelled" | "reconciliation_required"; "tombstoned": true; "reconciliation_required": boolean; "message": SendIntentMessage }`,
-  `export interface SendIntentCancellation { "outcome": "tombstoned" | "cancelled" | "reconciliation_required"; "tombstoned": true; "reconciliation_required": boolean; "message": SendIntentMessage | null }`,
+  "SendIntentCancellation",
+  "SendIntentMessage",
   "nullable send-intent cancellation message",
 );
-secureClientCode = replaceRequired(
+secureClientCode = nullableMessageProperty(
   secureClientCode,
-  `export interface SendMessageError { "error": string; "retry_safe": boolean; "tombstoned"?: boolean; "message"?: Message | SendIntentMessage }`,
-  `export interface SendMessageError { "error": string; "retry_safe": boolean; "tombstoned"?: boolean; "message"?: Message | SendIntentMessage | null }`,
+  "SendMessageError",
+  "Message | SendIntentMessage",
   "nullable send failure message",
 );
 

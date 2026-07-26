@@ -8,6 +8,7 @@ import {
   MAX_ATTACHMENT_REPAIR_RAW_BYTES,
   processCanonicalS3AttachmentRepairPage,
   repairExistingS3ObjectAttachments,
+  resolveAttachmentRepairCanonicalBucket,
   type AttachmentRepairDeps,
   type AttachmentRepairLedgerEntry,
   type AttachmentRepairLedgerRun,
@@ -285,7 +286,7 @@ describe("immutable inbound source provenance", () => {
 });
 
 describe("historical attachment repair", () => {
-  it("prefers MAILERY_INGEST_S3_BUCKET and falls back to EMAILS_INGEST_S3_BUCKET", async () => {
+  it("uses only the canonical EMAILS_INGEST_S3_BUCKET deployment variable", async () => {
     const run = {
       id: "11111111-1111-4111-8111-111111111111",
       tenant_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -332,18 +333,14 @@ describe("historical attachment repair", () => {
     for (const scenario of [
       {
         env: {
-          MAILERY_INGEST_S3_BUCKET: "mailery-canonical",
-          EMAILS_INGEST_S3_BUCKET: "legacy-canonical",
+          MAILERY_INGEST_S3_BUCKET: "ignored-mailery-value",
+          EMAILS_INGEST_S3_BUCKET: "emails-canonical",
         },
-        expected: "mailery-canonical",
+        expected: "emails-canonical",
       },
       {
-        env: { MAILERY_INGEST_S3_BUCKET: "mailery-canonical" },
-        expected: "mailery-canonical",
-      },
-      {
-        env: { EMAILS_INGEST_S3_BUCKET: "legacy-canonical" },
-        expected: "legacy-canonical",
+        env: { EMAILS_INGEST_S3_BUCKET: "emails-canonical" },
+        expected: "emails-canonical",
       },
     ] as const) {
       let observedBucket: string | undefined;
@@ -389,6 +386,9 @@ describe("historical attachment repair", () => {
       );
       expect(observedBucket).toBe(scenario.expected);
     }
+    expect(resolveAttachmentRepairCanonicalBucket({
+      MAILERY_INGEST_S3_BUCKET: "ignored-mailery-value",
+    })).toBeNull();
   });
 
   it("rejects duplicate normalized canary IDs before route, DB, or AWS reads", async () => {

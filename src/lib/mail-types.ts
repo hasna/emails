@@ -63,6 +63,8 @@ export interface TuiMessage {
   id: string;
   from: string;
   to: string;
+  /** Comma-joined CC recipients; empty/undefined when the backend has none. */
+  cc?: string;
   subject: string;
   date: string;
   is_read: boolean;
@@ -74,6 +76,10 @@ export interface TuiMessage {
   attachments: number;
   /** True if I sent it (app-sent, or imported mail labelled SENT). */
   sentByMe: boolean;
+  /** Ledger status (e.g. sent | failed | uncertain); undefined when unreported. */
+  status?: string;
+  /** Send-intent state (self-hosted ledger); undefined when unreported. */
+  send_state?: string;
 }
 
 export interface TuiThreadMessage {
@@ -95,6 +101,12 @@ export interface AttachmentInfo {
   content_type: string;
   size: number;
   location?: string; // local path or s3:// url, if downloaded
+  /**
+   * Whether the backing store holds payload bytes. `undefined` = not reported
+   * (local mode, or a self-hosted serve predating the content_available
+   * contract) and must never be rendered as "unavailable".
+   */
+  content_available?: boolean;
 }
 
 /** Attachment path metadata as persisted with a message (from src/db/inbound.ts). */
@@ -159,6 +171,14 @@ export interface MailboxListOptions {
   label?: string;
   source?: MailboxSource;
   sort?: "newest" | "oldest";
+  /**
+   * Restrict to already-read mail. It is part of the LIST query (applied before
+   * `limit`/`offset`) — a caller-side filter over an already-paged result would
+   * return fewer than `limit` rows while more matching rows sit on the next page.
+   * `unread` has a folder of its own (see MAILBOXES), so only the read side needs
+   * a flag.
+   */
+  read?: boolean;
 }
 
 export interface MailboxCounts {

@@ -195,9 +195,14 @@ const messageSchema = {
     is_starred: { type: "boolean" },
     labels: { type: "array", items: { type: "string" } },
     headers: { type: "object", additionalProperties: true },
-    attachments: { type: "array", items: { type: "object", additionalProperties: true } },
+    attachments: {
+      type: "array",
+      description:
+        "Per-attachment metadata (filename, content_type, size) plus content_available — true when GET /v1/messages/{id}/attachments/{index} can return bytes, false for metadata-only rows such as legacy imports. content_base64 is never included here.",
+      items: { type: "object", additionalProperties: true },
+    },
     source_id: { type: "string", nullable: true, description: "Stable upstream id used for idempotent upsert" },
-    send_state: { type: "string", description: "none | pending | sending | sent | uncertain | blocked | cancelled" },
+    send_state: { type: "string", description: "none | pending | sending | sent | failed | uncertain | blocked | cancelled" },
     send_started_at: { type: "string", format: "date-time", nullable: true },
     created_at: { type: "string", format: "date-time" },
     updated_at: { type: "string", format: "date-time" },
@@ -243,6 +248,13 @@ const sendMessageErrorSchema = {
   additionalProperties: true,
   properties: {
     error: { type: "string" },
+    reason: { type: "string", description: "Machine-readable failure class, e.g. provider_rejected | provider_outcome_uncertain | a policy code" },
+    provider_error: { type: "string", description: "The provider SDK error name (e.g. MessageRejected) when the provider call failed" },
+    sent: {
+      type: "boolean",
+      nullable: true,
+      description: "What is KNOWN about the send: false = definitively not sent (provider rejected); null = indeterminate (reconcile before retrying)",
+    },
     retry_safe: { type: "boolean" },
     tombstoned: { type: "boolean" },
     message: {
@@ -263,6 +275,10 @@ const sendMessageResponseSchema = {
     provider: { type: "string" },
     idempotent_replay: { type: "boolean", enum: [true] },
     in_progress: { type: "boolean", enum: [true] },
+    sent: { type: "boolean", enum: [true], description: "Present whenever the provider accepted the message (fresh success, idempotent replay of a sent intent, or a post-send finalization failure): the message WAS sent" },
+    provider_message_id: { type: "string", description: "Provider message id, present whenever the provider accepted the message — including when ledger finalization failed, so the accepted send stays traceable" },
+    warning: { type: "string", description: "Set when the message was sent but a post-send step failed; the send must NOT be retried" },
+    retry_safe: { type: "boolean" },
   },
   required: ["message", "provider"],
 } as const;
@@ -287,7 +303,7 @@ const messageListItemSchema = {
     labels: { type: "array", items: { type: "string" } },
     attachment_count: { type: "integer", description: "Attachment count; metadata and payloads come from GET /v1/messages/{id} and the attachment endpoints." },
     source_id: { type: "string", nullable: true, description: "Stable upstream id used for idempotent upsert" },
-    send_state: { type: "string", description: "none | pending | sending | sent | uncertain | blocked | cancelled" },
+    send_state: { type: "string", description: "none | pending | sending | sent | failed | uncertain | blocked | cancelled" },
     send_started_at: { type: "string", format: "date-time", nullable: true },
     created_at: { type: "string", format: "date-time" },
     updated_at: { type: "string", format: "date-time" },
@@ -353,7 +369,7 @@ const attachmentInventoryItemSchema = {
     content_available: {
       type: "boolean",
       description:
-        "True only when stored payload bytes are canonical base64, decode within the server limit, and match a valid declared byte size.",
+        "True only when stored payload bytes are canonical base64, decode within the server limit, and match a valid declared byte size, so GET /v1/messages/{id}/attachments/{index} can return them; false answers 409 attachment_content_unavailable.",
     },
     direction: { type: "string", nullable: true, enum: ["inbound", "outbound", null] },
     received_at: { type: "string", format: "date-time", nullable: true },
@@ -384,7 +400,7 @@ const attachmentMetaSchema = {
     content_available: {
       type: "boolean",
       description:
-        "True only when stored payload bytes are canonical base64, decode within the server limit, and match a valid declared byte size.",
+        "True only when stored payload bytes are canonical base64, decode within the server limit, and match a valid declared byte size; false for metadata-only or malformed stored payloads.",
     },
   },
   required: [
@@ -1456,9 +1472,20 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
           "401": { description: "Authentication required" },
           "403": { description: "Sender or tenant scope is not authorized" },
           "409": { content: { "application/json": { schema: { $ref: "#/components/schemas/SendMessageError" } } } },
+          "422": {
+            description: "The provider definitively rejected the message (nothing was sent); the body carries the real provider error and sent:false",
+            content: { "application/json": { schema: { $ref: "#/components/schemas/SendMessageError" } } },
+          },
           "429": { description: "Tenant or sender quota exceeded" },
           "413": { description: "Request body exceeds the service limit" },
-          "502": { content: { "application/json": { schema: { $ref: "#/components/schemas/SendMessageError" } } } },
+          "503": {
+            description: "A rejected intent could not be re-armed for retry (sent: false — nothing was sent); safe to retry later",
+            content: { "application/json": { schema: { $ref: "#/components/schemas/SendMessageError" } } },
+          },
+          "502": {
+            description: "The provider call ended without a definitive outcome (sent: null); reconcile before retrying",
+            content: { "application/json": { schema: { $ref: "#/components/schemas/SendMessageError" } } },
+          },
         },
       },
     },
@@ -1485,6 +1512,88 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
           "400": { description: "Invalid idempotency key" },
           "401": { description: "Authentication required" },
           "403": { description: "Tenant read scope is not authorized" },
+          "413": { description: "Request body exceeds the service limit" },
+        },
+      },
+    },
+    "/v1/messages/send-intents/uncertain": {
+      get: {
+        operationId: "listUncertainSendIntents",
+        summary: "List send intents whose provider outcome was never established",
+        description:
+          "Outbound messages stuck in send_state='uncertain'. These are the only messages whose delivery is unknown; "
+          + "everything else is a proven send or a proven non-send.",
+        parameters: [
+          { name: "limit", in: "query", schema: { type: "integer" } },
+          { name: "offset", in: "query", schema: { type: "integer" } },
+        ],
+        responses: {
+          "200": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    uncertain: { type: "array", items: { $ref: "#/components/schemas/Message" } },
+                    count: { type: "integer" },
+                  },
+                  required: ["uncertain", "count"],
+                },
+              },
+            },
+          },
+          "401": { description: "Authentication required" },
+          "403": { description: "Tenant read scope is not authorized" },
+        },
+      },
+    },
+    "/v1/messages/send-intents/reconcile": {
+      post: {
+        operationId: "reconcileSendIntent",
+        summary: "Close out one uncertain send intent against operator evidence",
+        description:
+          "Records the TRUE outcome of a message whose provider result was never observed. Only an 'uncertain' intent "
+          + "may be reconciled; a proven outcome is never overwritten. Reconciling as 'sent' requires the provider "
+          + "message id that proves the message left.",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  message_id: { type: "string" },
+                  outcome: { type: "string", enum: ["sent", "not_sent"] },
+                  provider_message_id: { type: "string", nullable: true },
+                  evidence: { type: "string", description: "What proves this outcome. Persisted on the row." },
+                },
+                required: ["message_id", "outcome", "evidence"],
+              },
+            },
+          },
+        },
+        responses: {
+          "200": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    reconciled: { type: "boolean", enum: [true] },
+                    outcome: { type: "string", enum: ["sent", "not_sent"] },
+                    message: { $ref: "#/components/schemas/Message" },
+                  },
+                  required: ["reconciled", "outcome", "message"],
+                },
+              },
+            },
+          },
+          "400": { description: "Missing message_id/outcome/evidence, or provider_message_id for a 'sent' outcome" },
+          "401": { description: "Authentication required" },
+          "403": { description: "Tenant write scope is not authorized" },
+          "404": { description: "Message not found" },
+          "409": { description: "The send intent is not (or is no longer) uncertain" },
           "413": { description: "Request body exceeds the service limit" },
         },
       },

@@ -116,10 +116,6 @@ export function configureCliRuntime(opts: { json?: boolean; verbose?: boolean })
   }
 }
 
-export function isCliJsonOutput(): boolean {
-  return jsonOutput;
-}
-
 export function isCliVerboseOutput(): boolean {
   return verboseOutput;
 }
@@ -351,27 +347,6 @@ export function parseCliListPage(
     maxLimit,
   );
   return { ...page, compact };
-}
-
-export function stripAnsi(value: string): string {
-  return value.replace(/\x1b\[[0-9;]*m/g, "");
-}
-
-export function truncateCliText(value: unknown, max = 96): string {
-  const raw = String(value ?? "");
-  const singleLine = raw.replace(/\s+/g, " ").trim();
-  if (singleLine.length <= max) return singleLine;
-  return `${singleLine.slice(0, Math.max(0, max - 3))}...`;
-}
-
-export function summarizeCliValue(value: unknown, max = 96): string {
-  if (value === null) return "null";
-  if (value === undefined) return "unset";
-  if (typeof value === "string") return JSON.stringify(truncateCliText(value, max - 2));
-  if (typeof value === "number" || typeof value === "boolean") return String(value);
-  if (Array.isArray(value)) return `[${value.length} item${value.length === 1 ? "" : "s"}]`;
-  if (typeof value === "object") return `{${Object.keys(value as Record<string, unknown>).length} key${Object.keys(value as Record<string, unknown>).length === 1 ? "" : "s"}}`;
-  return truncateCliText(value, max);
 }
 
 export function formatListHint(opts: {

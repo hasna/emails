@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { Command } from "commander";
-import { closeDatabase, resetDatabase } from "../../db/database.js";
+import { closeDatabase, getDatabase, resetDatabase } from "../../db/database.js";
+import { createDomain } from "../../db/domains.local.js";
+import { createProvider } from "../../db/providers.local.js";
+import { setDomainProvisioning } from "../../db/provisioning.local.js";
 import { registerDaemonCommands } from "./daemon.local.js";
 
 async function runDaemonCommand(args: string[]) {
@@ -37,5 +40,30 @@ describe("daemon commands", () => {
     const result = await runDaemonCommand(["daemon", "restart"]);
     expect(result.out).toContain("No managed email daemon process");
     expect(result.data).toMatchObject({ managed_process: false });
+  });
+
+  // Regression: `daemon status` used to print
+  //   "Start provisioner: emails provision daemon --provider <p> --bucket <b>"
+  // and expose it as start_commands.provisioner_loop. That command's action is an
+  // unconditional throw — no reconciler ships in this build — so the status
+  // output told operators to run something that cannot work, while implying the
+  // queue below it would eventually drain.
+  it("never advertises a provisioning daemon and says the queue is not drained", async () => {
+    getDatabase();
+    const provider = createProvider({ name: "ses", type: "ses", active: true });
+    const domain = createDomain(provider.id, "due.example.com");
+    setDomainProvisioning(domain.id, {
+      provisioning_status: "ses_identity_created",
+      next_check_at: "2020-01-01T00:00:00.000Z",
+    });
+
+    const result = await runDaemonCommand(["daemon", "status"]);
+    expect(result.data).toMatchObject({ queue: { due_domains: 1, drainable: false } });
+    expect(result.data).not.toHaveProperty("start_commands.provisioner_loop");
+    expect(JSON.stringify(result.data)).not.toContain("emails provision");
+
+    expect(result.out).toContain("No provisioning reconciler ships in this build");
+    expect(result.out).toContain("emails domain adopt");
+    expect(result.out).not.toContain("emails provision");
   });
 });

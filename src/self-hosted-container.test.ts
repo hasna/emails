@@ -576,14 +576,14 @@ describe("self-hosted container install contract", () => {
     expect(hasSafePostinstallCopy(dockerfile)).toBeTrue();
   });
 
-  test("keeps lockfile and packed manifest identities on the canonical Mailery package and bins", () => {
-    expect(packageJson.name).toBe("@hasna/mailery");
-    expect(bunLockRootName).toBe("@hasna/mailery");
+  test("keeps lockfile and packed manifest identities on the canonical Emails package and bins", () => {
+    expect(packageJson.name).toBe("@hasna/emails");
+    expect(bunLockRootName).toBe("@hasna/emails");
     expect(packageJson.scripts?.["pack:identity"]).toContain("packed manifest");
     expect(packageJson.scripts?.prepack).toContain("bun run pack:identity");
     expect(packageJson.scripts?.prepublishOnly).toContain("bun run pack:identity");
 
-    const destination = mkdtempSync(resolve(tmpdir(), "mailery-pack-identity-"));
+    const destination = mkdtempSync(resolve(tmpdir(), "emails-pack-identity-"));
     try {
       const packedName = execFileSync("bun", [
         "pm",
@@ -604,11 +604,8 @@ describe("self-hosted container install contract", () => {
         ["-xOf", packedTarball, "package/package.json"],
         { encoding: "utf8" },
       ));
-      expect(packed.name).toBe("@hasna/mailery");
+      expect(packed.name).toBe("@hasna/emails");
       expect(packed.bin).toEqual({
-        mailery: "dist/cli/index.js",
-        "mailery-mcp": "dist/mcp/index.js",
-        "mailery-serve": "dist/server/index.js",
         emails: "dist/cli/index.js",
         "emails-mcp": "dist/mcp/index.js",
         "emails-serve": "dist/server/index.js",

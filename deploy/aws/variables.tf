@@ -101,6 +101,41 @@ variable "send_provider" {
   }
 }
 
+variable "ses_access_key_id_secret_arn" {
+  description = "Optional Secrets Manager ARN holding the SES access key id, injected into the API container through the ECS `secrets` block. Set only when the production-access SES account differs from the account running these tasks; leave null to keep using the API task role. May include a `:JSON_KEY::` suffix. Set together with ses_secret_access_key_secret_arn. The value itself never enters Terraform state."
+  type        = string
+  default     = null
+  nullable    = true
+
+  validation {
+    condition = var.ses_access_key_id_secret_arn == null || can(
+      regex("^arn:aws[a-z-]*:secretsmanager:", var.ses_access_key_id_secret_arn)
+    )
+    error_message = "ses_access_key_id_secret_arn must be a Secrets Manager ARN, not a credential value."
+  }
+}
+
+variable "ses_secret_access_key_secret_arn" {
+  description = "Optional Secrets Manager ARN holding the SES secret access key. Set together with ses_access_key_id_secret_arn. May include a `:JSON_KEY::` suffix. The value itself never enters Terraform state."
+  type        = string
+  default     = null
+  nullable    = true
+
+  validation {
+    condition = var.ses_secret_access_key_secret_arn == null || can(
+      regex("^arn:aws[a-z-]*:secretsmanager:", var.ses_secret_access_key_secret_arn)
+    )
+    error_message = "ses_secret_access_key_secret_arn must be a Secrets Manager ARN, not a credential value."
+  }
+}
+
+variable "ses_credentials_kms_key_arn" {
+  description = "Optional KMS key ARN that encrypts the SES credential secrets. Required only when those secrets use a customer-managed key; the AWS-managed aws/secretsmanager key needs no extra grant. Without it the execution role cannot decrypt them and tasks fail to start with ResourceInitializationError."
+  type        = string
+  default     = null
+  nullable    = true
+}
+
 variable "primary_super_admin_email" {
   description = "Optional exact email pinned for the one-time primary super-admin bootstrap. Set together with primary_super_admin_bootstrap_kid; no user is hardcoded by this OSS module."
   type        = string

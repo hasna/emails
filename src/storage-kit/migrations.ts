@@ -48,7 +48,7 @@ export interface MigrationResult {
 }
 
 /** Stable sha256 checksum for a migration's SQL text. */
-export function checksumSql(sql: string): string {
+function checksumSql(sql: string): string {
   const normalized = sql.trim().replace(/\r\n/g, "\n");
   return `sha256:${createHash("sha256").update(normalized).digest("hex")}`;
 }
@@ -168,13 +168,4 @@ export class MigrationLedger {
     }
     return { dryRun, applied: await this.readApplied(), plan };
   }
-}
-
-/** Convenience: build a ledger and run all pending migrations. */
-export function createMigrationLedger(
-  client: TypedQueryClient,
-  migrations: readonly Migration[],
-  options: MigrationRunnerOptions = {},
-): MigrationLedger {
-  return new MigrationLedger(client, migrations, options);
 }

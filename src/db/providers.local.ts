@@ -4,6 +4,7 @@ import { ProviderNotFoundError } from "../types/index.js";
 import { getDatabase, now, uuid } from "./database.js";
 import { safeOffset, safeOptionalLimit } from "./pagination.js";
 import { selfHostedResource, selfHostedListQuery, selfHostedPage, cbool, ciso, cstr, cstrOrNull } from "./self-hosted-resource.local.js";
+import { assertNoProviderCredentials } from "./provider-credentials.js";
 
 const PROVIDER_RESOURCE = "providers";
 const SUPPORTED_PROVIDER_TYPES = ["resend", "ses", "sandbox"] as const;
@@ -109,10 +110,19 @@ function rowToProviderSummary(row: ProviderSummaryRow): ProviderSummary {
   };
 }
 
+/**
+ * Local SQLite rows DO carry credentials, so nothing to refuse — except on the
+ * self-hosted compat branch below, which has nowhere to put them.
+ */
+export function assertProviderCredentialsStorable(input: Partial<CreateProviderInput>): void {
+  if (selfHostedResource(PROVIDER_RESOURCE)) assertNoProviderCredentials(input);
+}
+
 export function createProvider(input: CreateProviderInput, db?: Database): Provider {
   assertSupportedProviderType(input.type);
   const selfHosted = selfHostedResource(PROVIDER_RESOURCE);
   if (selfHosted) {
+    assertNoProviderCredentials(input);
     return apiToProvider(selfHosted.create({
       name: input.name,
       type: input.type,
@@ -289,6 +299,7 @@ export function updateProvider(
 ): Provider {
   const selfHosted = selfHostedResource(PROVIDER_RESOURCE);
   if (selfHosted) {
+    assertNoProviderCredentials(input);
     const patch: Record<string, unknown> = {};
     if (input.name !== undefined) patch["name"] = input.name;
     if (input.type !== undefined) {

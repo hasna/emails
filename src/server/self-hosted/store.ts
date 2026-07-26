@@ -250,6 +250,14 @@ export interface AttachmentInventoryItem {
   content_type: string | null;
   size_bytes: number | null;
   sha256: string | null;
+  /**
+   * Whether valid stored payload bytes exist for this row — i.e. whether
+   * GET /v1/messages/{id}/attachments/{index} can return content or will answer
+   * 409 attachment_content_unavailable. Metadata alone is NOT proof of content:
+   * the legacy import backfilled filename/content_type/size for messages whose
+   * bytes were never carried over. Without this discriminator a cataloging
+   * client has to attempt a download per row to learn the difference (#36).
+   */
   content_available: boolean;
   direction: string | null;
   received_at: string | null;
@@ -262,6 +270,7 @@ export interface AttachmentMeta {
   content_type: string | null;
   size_bytes: number | null;
   sha256: string | null;
+  /** See AttachmentInventoryItem.content_available — same meaning, same source. */
   content_available: boolean;
 }
 
@@ -584,8 +593,14 @@ export interface SendIntentCancellationResult {
   message: MessageRecord | null;
 }
 
+/** Cap on the operator evidence note stored with a reconciliation. */
+const SEND_RECONCILIATION_EVIDENCE_MAX_CHARS = 1000;
+
 function sendIntentRequiresReconciliation(sendState: string): boolean {
-  return !["cancelled", "blocked", "pending"].includes(sendState);
+  // `failed` is a DEFINITIVE provider reject: the provider refused the request,
+  // so nothing was sent and there is nothing to reconcile — the intent is safe
+  // to re-attempt (see rearmFailedSendIntent).
+  return !["cancelled", "blocked", "pending", "failed"].includes(sendState);
 }
 
 export interface ListOptions {
@@ -963,10 +978,15 @@ function toIso(value: unknown): string | null {
 
 /** Coerce a raw DB row into a fully-typed MessageRecord (JSONB columns parsed). */
 function mapMessageRow(row: Record<string, unknown>): MessageRecord {
-  const attachments = toArray(row["attachments"]).map((item) => {
+  const attachments = toArray(row["attachments"]).map((item, index) => {
     if (!item || typeof item !== "object" || Array.isArray(item)) return item;
     const { content_base64: _content, ...metadata } = item as Record<string, unknown>;
-    return metadata;
+    // `content_available` is DERIVED here, never echoed from the stored JSON: it
+    // is exactly the predicate getMessageAttachment uses to decide between
+    // serving bytes and answering 409 attachment_content_unavailable. Metadata
+    // is not proof of content (legacy imports carry metadata only), so a reader
+    // must be able to tell the two apart without attempting a download (#36).
+    return { ...metadata, content_available: attachmentContentAvailable(item, index) };
   });
   return {
     ...(row as unknown as MessageRecord),
@@ -1035,29 +1055,34 @@ function attField(item: unknown, key: string): string | null {
   return typeof value === "string" ? value : value == null ? null : String(value);
 }
 
-/** Project one attachment array element into batch metadata (content_base64 excluded). */
-function attachmentMetaOf(item: unknown, index: number): AttachmentMeta {
+/** True only when the authenticated download endpoint can return these exact bytes. */
+function attachmentContentAvailable(item: unknown, index: number): boolean {
   const attachment = item && typeof item === "object" && !Array.isArray(item)
     ? item as Record<string, unknown>
     : null;
   const size = toSizeBytes(attachment?.["size"]);
-  let contentAvailable = false;
-  if (attachment && size !== null && typeof attachment["content_base64"] === "string") {
-    try {
-      contentAvailable = decodeAttachmentPayload({
-        attachment: { ...attachment, size },
-      }, index, MAX_ATTACHMENT_DOWNLOAD_BYTES).state === "available";
-    } catch {
-      contentAvailable = false;
-    }
+  if (!attachment || size === null || typeof attachment["content_base64"] !== "string") return false;
+  try {
+    return decodeAttachmentPayload({
+      attachment: { ...attachment, size },
+    }, index, MAX_ATTACHMENT_DOWNLOAD_BYTES).state === "available";
+  } catch {
+    return false;
   }
+}
+
+/** Project one attachment array element into batch metadata (content_base64 excluded). */
+function attachmentMetaOf(item: unknown, index: number): AttachmentMeta {
+  const record = item && typeof item === "object" && !Array.isArray(item)
+    ? (item as Record<string, unknown>)
+    : undefined;
   return {
     attachment_index: index,
     filename: attField(item, "filename"),
     content_type: attField(item, "content_type"),
-    size_bytes: size,
+    size_bytes: toSizeBytes(record?.["size"]),
     sha256: attField(item, "sha256"),
-    content_available: contentAvailable,
+    content_available: attachmentContentAvailable(item, index),
   };
 }
 
@@ -1074,6 +1099,9 @@ function mapAttachmentInventoryRow(row: Record<string, unknown>): AttachmentInve
     // canonical integer strings survive here.
     size_bytes: toSizeBytes(row["size_raw"]),
     sha256: typeof row["sha256"] === "string" ? (row["sha256"] as string) : null,
+    // SQL already applied the strict canonical-base64, byte-limit, and declared
+    // size predicate. `=== true` keeps a driver that hands back "t"/null from
+    // silently reading as available.
     content_available: row["content_available"] === true,
     direction: typeof row["direction"] === "string" ? (row["direction"] as string) : null,
     received_at: toIso(row["received_at"]),
@@ -3399,11 +3427,11 @@ export class TenantScopedStore {
         };
       }
       let record = mapMessageRow(existing);
-      if (record.send_state === "pending" || record.send_state === "blocked") {
+      if (record.send_state === "pending" || record.send_state === "blocked" || record.send_state === "failed") {
         const cancelled = await client.get<Record<string, unknown>>(
           `UPDATE messages
            SET send_state = 'cancelled', status = 'cancelled', updated_at = now()
-           WHERE id = $1 AND tenant_id = $2 AND send_state IN ('pending', 'blocked')
+           WHERE id = $1 AND tenant_id = $2 AND send_state IN ('pending', 'blocked', 'failed')
            RETURNING ${MESSAGE_COLUMNS}`,
           [record.id, this.tenantId],
         );
@@ -3625,12 +3653,153 @@ export class TenantScopedStore {
     return mapMessageRow(row);
   }
 
-  async markSendUncertain(id: string): Promise<MessageRecord | null> {
+  /**
+   * Record a DEFINITIVE provider reject: the provider answered 4xx, so nothing
+   * was sent. Unlike `uncertain`, a failed intent needs no reconciliation and
+   * may be re-attempted (rearmFailedSendIntent). The provider's error name is
+   * kept on the row for audit.
+   */
+  async markSendFailed(id: string, reason: string): Promise<MessageRecord | null> {
     const row = await this.client.get<Record<string, unknown>>(
-      `UPDATE messages SET send_state = 'uncertain', status = 'uncertain', updated_at = now()
-       WHERE id = $1 AND tenant_id = $2 AND send_state <> 'sent'
+      `UPDATE messages SET
+         send_state = 'failed', status = 'failed',
+         headers = COALESCE(headers, '{}'::jsonb) || jsonb_build_object('send_failure', $2::text),
+         updated_at = now()
+       WHERE id = $1 AND tenant_id = $3 AND send_state = 'sending'
+       RETURNING ${MESSAGE_COLUMNS}`,
+      [id, reason.slice(0, 600), this.tenantId],
+    );
+    return row ? mapMessageRow(row) : null;
+  }
+
+  /**
+   * Re-arm a definitively failed intent for another attempt on the SAME ledger
+   * row. Guarded on send_state = 'failed', so it can never resurrect a sent,
+   * cancelled, or uncertain intent; claimSendIntent then re-checks the
+   * tombstone before any provider call.
+   */
+  async rearmFailedSendIntent(id: string): Promise<MessageRecord | null> {
+    const row = await this.client.get<Record<string, unknown>>(
+      `UPDATE messages SET send_state = 'pending', status = 'queued', send_started_at = NULL, updated_at = now()
+       WHERE id = $1 AND tenant_id = $2 AND send_state = 'failed'
        RETURNING ${MESSAGE_COLUMNS}`,
       [id, this.tenantId],
+    );
+    return row ? mapMessageRow(row) : null;
+  }
+
+  /**
+   * Park an intent whose provider outcome could not be recorded.
+   *
+   * `providerMessageId` is supplied ONLY on the one path where the provider
+   * demonstrably accepted the message and the ledger write afterwards failed.
+   * It must survive on the row: it is the sole evidence that the message left,
+   * and `reconcileUncertainSendIntent` refuses an outcome of `sent` without it.
+   * Discarding it here is what would strand a delivered message with no way to
+   * close it out except by asserting `not_sent` — i.e. filing a delivered
+   * message as failed, the exact inversion this whole change exists to prevent.
+   */
+  async markSendUncertain(id: string, providerMessageId?: string | null): Promise<MessageRecord | null> {
+    const evidence = providerMessageId?.trim() || null;
+    const row = await this.client.get<Record<string, unknown>>(
+      `UPDATE messages SET
+         send_state = 'uncertain', status = 'uncertain',
+         provider_message_id = COALESCE($3::text, provider_message_id),
+         headers = CASE WHEN $3::text IS NULL THEN headers
+           ELSE COALESCE(headers, '{}'::jsonb) || jsonb_build_object(
+             'send_uncertain_reason',
+             'the provider ACCEPTED this message (provider_message_id is present, so it was sent) but the ledger write that records it failed; reconcile as sent'
+           )
+         END,
+         updated_at = now()
+       WHERE id = $1 AND tenant_id = $2 AND send_state <> 'sent'
+       RETURNING ${MESSAGE_COLUMNS}`,
+      [id, this.tenantId, evidence],
+    );
+    return row ? mapMessageRow(row) : null;
+  }
+
+  /**
+   * Every send intent whose provider outcome was never established, oldest
+   * first (the order an operator reconciles them in). `uncertain` is the ONLY
+   * state that needs this: `failed` is a proven non-send and `sent` is a proven
+   * send.
+   */
+  async listUncertainSendIntents(opts: ListOptions = {}): Promise<MessageRecord[]> {
+    const limit = clampLimit(opts.limit);
+    const offset = clampOffset(opts.offset);
+    const rows = await this.client.many<Record<string, unknown>>(
+      `SELECT ${MESSAGE_COLUMNS} FROM messages
+       WHERE tenant_id = $1 AND send_state = 'uncertain'
+       ORDER BY created_at ASC, id ASC
+       LIMIT $2 OFFSET $3`,
+      [this.tenantId, limit, offset],
+    );
+    return rows.map(mapMessageRow);
+  }
+
+  /**
+   * Close out ONE uncertain send intent against operator-supplied evidence.
+   *
+   * Deliberately narrow:
+   *  • guarded on `send_state = 'uncertain'`, so it can never rewrite a proven
+   *    outcome, resurrect a cancelled intent, or race a live send;
+   *  • one row per call — bulk-marking a batch of unknown outcomes is how the
+   *    2026-07-25 messages became indistinguishable in the first place;
+   *  • the evidence string and the resolving principal are persisted on the row,
+   *    so a later reader can see WHY the state was asserted;
+   *  • `sent` requires a provider message id — the evidence that it left.
+   *
+   * Returns null when the row is absent or is no longer uncertain (the caller
+   * distinguishes the two by re-reading).
+   */
+  async reconcileUncertainSendIntent(
+    id: string,
+    resolution: {
+      outcome: "sent" | "not_sent";
+      providerMessageId?: string | null;
+      evidence: string;
+      resolvedBy?: string | null;
+    },
+  ): Promise<MessageRecord | null> {
+    const evidence = resolution.evidence.trim().slice(0, SEND_RECONCILIATION_EVIDENCE_MAX_CHARS);
+    if (!evidence) throw new Error("reconciliation requires a non-empty evidence note");
+    const resolvedAt = new Date().toISOString();
+    const resolvedBy = (resolution.resolvedBy ?? "").slice(0, 200) || null;
+    if (resolution.outcome === "sent") {
+      const providerMessageId = (resolution.providerMessageId ?? "").trim();
+      if (!providerMessageId) {
+        throw new Error("reconciling an uncertain intent as sent requires the provider message id that proves it");
+      }
+      const row = await this.client.get<Record<string, unknown>>(
+        `UPDATE messages SET
+           send_state = 'sent', status = 'sent',
+           provider_message_id = $2,
+           headers = COALESCE(headers, '{}'::jsonb) || jsonb_build_object(
+             'send_reconciliation', jsonb_build_object(
+               'outcome', 'sent', 'evidence', $3::text, 'resolved_at', $4::text, 'resolved_by', $5::text
+             )
+           ),
+           updated_at = now()
+         WHERE id = $1 AND tenant_id = $6 AND send_state = 'uncertain'
+         RETURNING ${MESSAGE_COLUMNS}`,
+        [id, providerMessageId.slice(0, 998), evidence, resolvedAt, resolvedBy, this.tenantId],
+      );
+      return row ? mapMessageRow(row) : null;
+    }
+    const row = await this.client.get<Record<string, unknown>>(
+      `UPDATE messages SET
+         send_state = 'failed', status = 'failed',
+         headers = COALESCE(headers, '{}'::jsonb) || jsonb_build_object(
+           'send_failure', 'reconciled_not_sent',
+           'send_reconciliation', jsonb_build_object(
+             'outcome', 'not_sent', 'evidence', $2::text, 'resolved_at', $3::text, 'resolved_by', $4::text
+           )
+         ),
+         updated_at = now()
+       WHERE id = $1 AND tenant_id = $5 AND send_state = 'uncertain'
+       RETURNING ${MESSAGE_COLUMNS}`,
+      [id, evidence, resolvedAt, resolvedBy, this.tenantId],
     );
     return row ? mapMessageRow(row) : null;
   }

@@ -274,10 +274,6 @@ function buildAgentContext(status: EmailSystemStatus): Record<string, unknown> {
   };
 }
 
-export async function getAgentContext(): Promise<Record<string, unknown>> {
-  return buildAgentContext(await buildSystemStatus());
-}
-
 export async function getAgentContextForRuntime(): Promise<Record<string, unknown>> {
   return buildAgentContext(await buildSystemStatus());
 }

@@ -1,6 +1,9 @@
 # PLAN — Automated Domain → Email Address Provisioning (open-emails)
 
-> Status: PLANNED (2026-06-02). Owner: agents. Companion plan: `open-domains/docs/PLAN-PROVISIONING.md`.
+> Status: NOT IMPLEMENTED (2026-07-25). Owner: agents. Companion plan: `open-domains/docs/PLAN-PROVISIONING.md`.
+> The orchestrator/daemon/round-trip modules this plan describes were built but never wired to any
+> shipped entrypoint, and were removed as dead code. `emails provision *` fails loud in every mode.
+> The BrandSight/GCD DNS client below was likewise removed (enterprise-contract-only, never reachable).
 > This plan turns open-emails into a system that **gives users and agents real email addresses on
 > domains we own**, fully automatically: buy/verify the domain, wire DNS through Cloudflare, set up
 > SES sending + receiving, create addresses, wait until everything is live, and validate by sending
