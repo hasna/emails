@@ -382,6 +382,34 @@ describe("self-hosted OpenAPI identity and authorization contract", () => {
     expect(JSON.stringify(paths["/v1/attachments/repairs"])).not.toContain("content_base64");
   });
 
+  it("publishes both provider webhook receivers as explicitly public routes", () => {
+    // These are the ONLY /v1 routes a provider (AWS SNS, Resend) calls, and a
+    // provider holds no Hasna API key: the contract must say so, or an operator
+    // reading the document would put an API-key gate in front of them and
+    // silently break inbound mail and delivery-event ingestion.
+    for (const path of ["/v1/webhooks/ses-inbound", "/v1/webhooks/resend-inbound"]) {
+      const operation = paths[path]?.post;
+      expect(operation, path).toBeDefined();
+      expect(operation?.security, path).toEqual([]);
+      // The receivers fail CLOSED when their verification material is missing.
+      expect(operation?.responses, path).toHaveProperty("401");
+      expect(operation?.responses, path).toHaveProperty("503");
+      expect(operation?.responses, path).toHaveProperty("413");
+      expect(operation?.responses, path).toHaveProperty("200");
+      // Only POST is served; nothing else may be documented on these paths.
+      expect(Object.keys(paths[path] ?? {}), path).toEqual(["post"]);
+    }
+    expect(paths["/v1/webhooks/ses-inbound"]?.post?.operationId).toBe("receiveSesInboundWebhook");
+    expect(paths["/v1/webhooks/resend-inbound"]?.post?.operationId).toBe("receiveResendInboundWebhook");
+    // The documented tenant-selection rule is the one the code implements.
+    expect(paths["/v1/webhooks/ses-inbound"]?.post?.description).toContain("never from a body field");
+    expect(paths["/v1/webhooks/resend-inbound"]?.post?.description).toContain("never");
+    expect(paths["/v1/webhooks/resend-inbound"]?.post?.description).toContain("fails CLOSED");
+    for (const schema of ["SnsNotification", "ResendWebhookEvent", "WebhookReceipt"]) {
+      expect(emailsSelfHostedOpenApi.components?.schemas?.[schema], schema).toBeDefined();
+    }
+  });
+
   it("enumerates every registry-backed resource in the generated contract", () => {
     for (const resource of SELF_HOSTED_RESOURCES) {
       const collection = paths[`/v1/${resource.path}`];
