@@ -598,6 +598,67 @@ const mailboxSchema = {
   required: ["id", "address", "display_name", "status", "total", "unread"],
 } as const;
 
+/**
+ * The AWS SNS envelope the SES receiver accepts. Additional properties are
+ * allowed on purpose: the envelope is verified by SIGNATURE over the canonical
+ * SNS fields, so pinning a closed shape here would reject valid AWS payloads
+ * without adding any security.
+ */
+const snsNotificationSchema = {
+  type: "object",
+  additionalProperties: true,
+  properties: {
+    Type: { type: "string", enum: ["Notification", "SubscriptionConfirmation"] },
+    MessageId: { type: "string", description: "Signed SNS message id; the idempotency key" },
+    TopicArn: { type: "string", description: "Must be in EMAILS_SNS_TOPIC_ARNS" },
+    Message: { type: "string", description: "Serialized SES notification (Received | Bounce | Complaint | Delivery)" },
+    Timestamp: { type: "string" },
+    Signature: { type: "string" },
+    SignatureVersion: { type: "string", enum: ["1", "2"] },
+    SigningCertURL: { type: "string", description: "Host-pinned to sns.<region>.amazonaws.com" },
+    SubscribeURL: { type: "string", description: "SubscriptionConfirmation only; host-pinned to sns.<region>.amazonaws.com" },
+    Token: { type: "string" },
+  },
+  required: ["MessageId", "Signature", "SignatureVersion", "SigningCertURL"],
+} as const;
+
+/** The Resend (Svix-signed) webhook body. Signed, so extra fields are allowed. */
+const resendWebhookEventSchema = {
+  type: "object",
+  additionalProperties: true,
+  properties: {
+    type: {
+      type: "string",
+      description:
+        "email.received | inbound.email.received route to inbound mail; "
+        + "email.delivered | email.bounced | email.complained | email.opened | email.clicked "
+        + "route to the delivery-outcome ledger.",
+    },
+    created_at: { type: "string", format: "date-time" },
+    data: { type: "object", additionalProperties: true },
+  },
+  required: ["type"],
+} as const;
+
+/** The uniform receiver acknowledgement. */
+const webhookReceiptSchema = {
+  type: "object",
+  additionalProperties: true,
+  properties: {
+    ok: { type: "boolean" },
+    duplicate: { type: "boolean", description: "The event id was already completed in every destination scope" },
+    confirmed: { type: "boolean", description: "An SNS subscription confirmation was fetched" },
+    ignored: { type: "string", description: "Accepted but not persisted, with the reason" },
+    synced: { type: "integer", minimum: 0, description: "Inbound objects newly stored" },
+    id: { type: "string", nullable: true, description: "Stored inbound message id" },
+    event_id: { type: "string", description: "Stored delivery-outcome row id" },
+    type: { type: "string", description: "delivered | bounced | complained | opened | clicked" },
+    message_id: { type: "string", nullable: true, description: "Provider message id" },
+    object_key: { type: "string", nullable: true, description: "S3 object key the notification referenced" },
+  },
+  required: ["ok"],
+} as const;
+
 const messageSchema = {
   type: "object",
   properties: {
@@ -1412,9 +1473,24 @@ const messageCountsSchema = {
   ],
 } as const;
 
+// Both are CLAMPED, never rejected (src/server/self-hosted/store.ts clampLimit /
+// clampOffset), so a client asking for 1000 silently receives 500. Clients that page a
+// window rely on that, so it is documented rather than left to be rediscovered.
 const listParams = [
-  { name: "limit", in: "query", required: false, schema: { type: "integer" } },
-  { name: "offset", in: "query", required: false, schema: { type: "integer" } },
+  {
+    name: "limit",
+    in: "query",
+    required: false,
+    schema: { type: "integer" },
+    description: "Page size. Clamped to 500 (default 100); a larger value returns 500 rows rather than an error.",
+  },
+  {
+    name: "offset",
+    in: "query",
+    required: false,
+    schema: { type: "integer" },
+    description: "Rows to skip. Clamped to 100000; deep paging past that returns the same window rather than an error.",
+  },
 ] as const;
 
 const idParam = [{ name: "id", in: "path", required: true, schema: { type: "string" } }] as const;
@@ -3949,6 +4025,87 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
         },
       },
     },
+    "/v1/webhooks/ses-inbound": {
+      post: {
+        operationId: "receiveSesInboundWebhook",
+        summary: "Receive an AWS SNS notification for SES inbound mail and delivery outcomes",
+        description:
+          "Provider-facing receiver for the SES inbound SNS topic. Carries NO Hasna API key: "
+          + "the caller is authenticated by the AWS SNS message signature (verified against the "
+          + "fetched SigningCertURL) plus an exact EMAILS_SNS_TOPIC_ARNS / EMAILS_AWS_ACCOUNT_IDS "
+          + "allowlist, and a SubscriptionConfirmation SubscribeURL is host-pinned to "
+          + "sns.<region>.amazonaws.com over HTTPS. A `Received` notification is ingested from the "
+          + "operator-configured EMAILS_INGEST_S3_BUCKET into the tenant's messages; a Bounce, "
+          + "Complaint, or Delivery notification is persisted to the tenant's events ledger. The "
+          + "tenant comes from the trusted envelope (recipients for inbound, the sender's verified "
+          + "domain for a delivery outcome) — never from a body field. Replays are idempotent via "
+          + "webhook_receipts.",
+        security: [] as SecurityRequirement[],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: { $ref: "#/components/schemas/SnsNotification" },
+            },
+          },
+        },
+        responses: {
+          "200": {
+            description:
+              "Accepted. `duplicate` marks a replay, `ignored` an accepted-but-unroutable "
+              + "notification, `synced` an inbound ingest, `event_id` a stored delivery outcome.",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/WebhookReceipt" },
+              },
+            },
+          },
+          "400": { description: "Malformed JSON, non-SNS payload, missing MessageId, or a non-AWS SubscribeURL" },
+          "401": errorResponse("Invalid SNS signature, or a topic/account outside the allowlist"),
+          "413": { description: "Request body exceeds the receiver's bound" },
+          "503": errorResponse("The SNS allowlist or the required shared secret is not configured"),
+        },
+      },
+    },
+    "/v1/webhooks/resend-inbound": {
+      post: {
+        operationId: "receiveResendInboundWebhook",
+        summary: "Receive a Resend webhook for inbound mail and delivery outcomes",
+        description:
+          "Provider-facing receiver for Resend webhooks. Carries NO Hasna API key: the caller is "
+          + "authenticated by the Svix HMAC over the raw body using RESEND_WEBHOOK_SECRET, and an "
+          + "unconfigured secret fails CLOSED with 503 rather than accepting an unsigned payload. "
+          + "An inbound event is written to the tenant's messages; a delivery/engagement event is "
+          + "written to the tenant's events ledger. The tenant comes from the signed envelope "
+          + "(recipients for inbound, the sender's verified domain for a delivery outcome) — never "
+          + "from a body field. Replays are idempotent via webhook_receipts.",
+        security: [] as SecurityRequirement[],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: { $ref: "#/components/schemas/ResendWebhookEvent" },
+            },
+          },
+        },
+        responses: {
+          "200": {
+            description:
+              "Accepted. `duplicate` marks a replay, `ignored` an accepted-but-unroutable event, "
+              + "`id` a stored inbound message, `event_id` a stored delivery outcome.",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/WebhookReceipt" },
+              },
+            },
+          },
+          "400": { description: "Malformed JSON or no stable event id" },
+          "401": errorResponse("Invalid Svix signature"),
+          "413": { description: "Request body exceeds the receiver's bound" },
+          "503": errorResponse("RESEND_WEBHOOK_SECRET is not configured (fails closed)"),
+        },
+      },
+    },
   },
   components: {
     schemas: {
@@ -3991,6 +4148,9 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
       AttachmentRepairSummary: attachmentRepairSummarySchema as never,
       Thread: threadSchema as never,
       Mailbox: mailboxSchema as never,
+      SnsNotification: snsNotificationSchema as never,
+      ResendWebhookEvent: resendWebhookEventSchema as never,
+      WebhookReceipt: webhookReceiptSchema as never,
     },
     securitySchemes: {
       apiKeyAuth: {

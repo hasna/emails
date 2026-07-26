@@ -35309,6 +35309,140 @@ export const SELF_HOSTED_RESPONSE_CONTRACTS: readonly SelfHostedResponseContract
     }
   },
   {
+    "method": "POST",
+    "operationId": "receiveResendInboundWebhook",
+    "path": "/v1/webhooks/resend-inbound",
+    "status": 200,
+    "schema": {
+      "$ref": "#/components/schemas/WebhookReceipt"
+    }
+  },
+  {
+    "method": "POST",
+    "operationId": "receiveResendInboundWebhook",
+    "path": "/v1/webhooks/resend-inbound",
+    "status": 400,
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "error"
+      ]
+    }
+  },
+  {
+    "method": "POST",
+    "operationId": "receiveResendInboundWebhook",
+    "path": "/v1/webhooks/resend-inbound",
+    "status": 401,
+    "schema": {
+      "$ref": "#/components/schemas/ErrorResponse"
+    }
+  },
+  {
+    "method": "POST",
+    "operationId": "receiveResendInboundWebhook",
+    "path": "/v1/webhooks/resend-inbound",
+    "status": 413,
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": "string",
+          "enum": [
+            "request body too large"
+          ]
+        }
+      },
+      "required": [
+        "error"
+      ]
+    }
+  },
+  {
+    "method": "POST",
+    "operationId": "receiveResendInboundWebhook",
+    "path": "/v1/webhooks/resend-inbound",
+    "status": 503,
+    "schema": {
+      "$ref": "#/components/schemas/ErrorResponse"
+    }
+  },
+  {
+    "method": "POST",
+    "operationId": "receiveSesInboundWebhook",
+    "path": "/v1/webhooks/ses-inbound",
+    "status": 200,
+    "schema": {
+      "$ref": "#/components/schemas/WebhookReceipt"
+    }
+  },
+  {
+    "method": "POST",
+    "operationId": "receiveSesInboundWebhook",
+    "path": "/v1/webhooks/ses-inbound",
+    "status": 400,
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "error"
+      ]
+    }
+  },
+  {
+    "method": "POST",
+    "operationId": "receiveSesInboundWebhook",
+    "path": "/v1/webhooks/ses-inbound",
+    "status": 401,
+    "schema": {
+      "$ref": "#/components/schemas/ErrorResponse"
+    }
+  },
+  {
+    "method": "POST",
+    "operationId": "receiveSesInboundWebhook",
+    "path": "/v1/webhooks/ses-inbound",
+    "status": 413,
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": "string",
+          "enum": [
+            "request body too large"
+          ]
+        }
+      },
+      "required": [
+        "error"
+      ]
+    }
+  },
+  {
+    "method": "POST",
+    "operationId": "receiveSesInboundWebhook",
+    "path": "/v1/webhooks/ses-inbound",
+    "status": 503,
+    "schema": {
+      "$ref": "#/components/schemas/ErrorResponse"
+    }
+  },
+  {
     "method": "GET",
     "operationId": "getVersion",
     "path": "/version",
@@ -36769,6 +36903,58 @@ export const SELF_HOSTED_RESPONSE_COMPONENTS: Readonly<Record<string, unknown>> 
       "global_role",
       "is_primary_super_admin",
       "created_at"
+    ]
+  },
+  "WebhookReceipt": {
+    "type": "object",
+    "additionalProperties": true,
+    "properties": {
+      "ok": {
+        "type": "boolean"
+      },
+      "duplicate": {
+        "type": "boolean",
+        "description": "The event id was already completed in every destination scope"
+      },
+      "confirmed": {
+        "type": "boolean",
+        "description": "An SNS subscription confirmation was fetched"
+      },
+      "ignored": {
+        "type": "string",
+        "description": "Accepted but not persisted, with the reason"
+      },
+      "synced": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "Inbound objects newly stored"
+      },
+      "id": {
+        "type": "string",
+        "nullable": true,
+        "description": "Stored inbound message id"
+      },
+      "event_id": {
+        "type": "string",
+        "description": "Stored delivery-outcome row id"
+      },
+      "type": {
+        "type": "string",
+        "description": "delivered | bounced | complained | opened | clicked"
+      },
+      "message_id": {
+        "type": "string",
+        "nullable": true,
+        "description": "Provider message id"
+      },
+      "object_key": {
+        "type": "string",
+        "nullable": true,
+        "description": "S3 object key the notification referenced"
+      }
+    },
+    "required": [
+      "ok"
     ]
   }
 };

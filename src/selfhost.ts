@@ -70,6 +70,12 @@ export interface Thread { "thread_key": string; "subject": string | null; "messa
 
 export interface Mailbox { "id": string; "address": string; "display_name": string | null; "status": string; "total": number; "unread": number }
 
+export interface SnsNotification { "Type"?: "Notification" | "SubscriptionConfirmation"; "MessageId": string; "TopicArn"?: string; "Message"?: string; "Timestamp"?: string; "Signature": string; "SignatureVersion": "1" | "2"; "SigningCertURL": string; "SubscribeURL"?: string; "Token"?: string }
+
+export interface ResendWebhookEvent { "type": string; "created_at"?: string; "data"?: Record<string, unknown> }
+
+export interface WebhookReceipt { "ok": boolean; "duplicate"?: boolean; "confirmed"?: boolean; "ignored"?: string; "synced"?: number; "id"?: string | null; "event_id"?: string; "type"?: string; "message_id"?: string | null; "object_key"?: string | null }
+
 export interface EmailsSelfHostClientOptions {
   /** Base URL, e.g. process.env.APP_API_URL. */
   baseUrl: string;
@@ -2160,6 +2166,24 @@ export class EmailsSelfHostClient {
     /** Update a tenant-scoped webhook-receipts row */
     async updateResourceWebhookReceipts(id: string, body: { "provider"?: string | null; "event_id"?: string | null; "resource_id"?: string | null; "completed_at"?: string | null }, init?: RequestInit): Promise<{ "provider": string | null; "event_id": string | null; "resource_id": string | null; "completed_at": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("PATCH", `/v1/webhook-receipts/${encodeURIComponent(String(id))}`, {
+        body,
+        query: undefined,
+        init,
+      });
+    }
+
+    /** Receive a Resend webhook for inbound mail and delivery outcomes */
+    async receiveResendInboundWebhook(body: ResendWebhookEvent, init?: RequestInit): Promise<WebhookReceipt> {
+      return this.request("POST", `/v1/webhooks/resend-inbound`, {
+        body,
+        query: undefined,
+        init,
+      });
+    }
+
+    /** Receive an AWS SNS notification for SES inbound mail and delivery outcomes */
+    async receiveSesInboundWebhook(body: SnsNotification, init?: RequestInit): Promise<WebhookReceipt> {
+      return this.request("POST", `/v1/webhooks/ses-inbound`, {
         body,
         query: undefined,
         init,

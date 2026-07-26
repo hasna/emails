@@ -45,6 +45,15 @@ import {
 import { validateAttachmentRepairReviewedDryRun } from "./attachment-repair-maintenance.js";
 import { emailsSelfHostedOpenApi } from "./openapi.js";
 import { resourceSpecForPath, type SelfHostedResourceSpec } from "./resources.js";
+import {
+  handleSelfHostedResendWebhook,
+  handleSelfHostedSesWebhook,
+  type FetchS3Object,
+} from "./webhooks.js";
+import {
+  RESEND_INBOUND_V1_WEBHOOK_PATH,
+  SES_INBOUND_V1_WEBHOOK_PATH,
+} from "../webhooks/receivers.js";
 import { classifyProviderSendError, type SelfHostedSender } from "./sender.js";
 import {
   isTenantOperator,
@@ -133,6 +142,17 @@ export interface SelfHostedServiceDeps {
       runId: string,
       limit: number,
     ): Promise<AttachmentRepairLedgerRun>;
+  };
+  /**
+   * Test/embedding seams for the provider webhook receivers. Production leaves
+   * these unset: S3 reads use the canonical client and SNS signatures are
+   * verified against the fetched AWS signing certificate.
+   */
+  webhooks?: {
+    fetchObject?: FetchS3Object;
+    verifySns?: (body: Record<string, unknown>) => Promise<boolean>;
+    fetchUrl?: (url: string) => Promise<unknown>;
+    now?: () => string;
   };
 }
 
@@ -710,6 +730,35 @@ export async function handleSelfHostedRequest(
   const write = ["emails:write"];
 
   try {
+    // ---- provider webhook receivers --------------------------------------
+    // Claimed BEFORE everything else, for two reasons.
+    //
+    // 1. These are the ONLY /v1 routes a provider (AWS SNS, Resend) calls, and a
+    //    provider holds no Hasna API key. They authenticate the CALLER
+    //    cryptographically instead — an AWS SNS message signature against the
+    //    fetched signing certificate plus an exact topic/account allowlist, or a
+    //    Svix HMAC over the raw body. Both fail closed. They must therefore not
+    //    pass through `authenticate`, and the tenant comes from the trusted
+    //    envelope (never a body field) via the global inbound domain map.
+    // 2. The generic resource matcher below only matches two path segments and
+    //    would resolve `webhooks` as a resource name (404, since no such
+    //    resource exists), the same hazard `send-keys/mint` and
+    //    `send-keys/verify` are registered ahead of it to avoid.
+    //
+    // Everything they persist lands in the operator's Postgres through
+    // `deps.store.forTenant(...)`; see ./webhooks.ts.
+    if (path === SES_INBOUND_V1_WEBHOOK_PATH || path === RESEND_INBOUND_V1_WEBHOOK_PATH) {
+      if (method !== "POST") return json(405, { error: "method not allowed" });
+      const webhookDeps = {
+        store: deps.store,
+        env: deps.env ?? process.env,
+        ...(deps.webhooks ?? {}),
+      };
+      return path === SES_INBOUND_V1_WEBHOOK_PATH
+        ? await handleSelfHostedSesWebhook(webhookDeps, req)
+        : await handleSelfHostedResendWebhook(webhookDeps, req);
+    }
+
     // Auth / tenant / membership / key routes are claimed FIRST (they run their
     // own credential resolution + role gates). Returns null when not an auth path.
     const authResponse = await handleAuthRoutes(deps, req, url, { socketAddress: context.socketAddress ?? null });

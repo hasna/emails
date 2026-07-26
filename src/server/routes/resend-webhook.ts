@@ -1,55 +1,34 @@
 /**
- * Resend inbound webhook — the receive half for the Resend provider. Point a
- * Resend inbound webhook at `POST /webhook/resend-inbound`. Resend inbound is
- * push (there's nothing to poll), so this is how Resend mail lands in the store.
+ * Resend webhook — LOCAL (SQLite) mount. Point a Resend webhook at
+ * `POST /webhook/resend-inbound`. Resend inbound is push (there is nothing to
+ * poll), so this is how Resend mail lands in the store; delivery outcomes
+ * (delivered / bounced / complained / opened / clicked) land in `events`.
  *
  * Signature verification is mandatory whenever this route is enabled.
+ *
+ * The receiver itself lives in ../webhooks/receivers.ts and is shared verbatim
+ * with the self-hosted `/v1` mount. This module supplies ONLY the local
+ * destination store: every write here goes through the `src/db/*.local.ts`
+ * SQLite repositories.
  */
-import { isResendInboundEvent, parseResendInboundEvent, type ResendInboundEvent } from "../../lib/resend-inbound.js";
-import { storeInboundEmail } from "../../db/inbound.local.js";
-import { getLatestActiveProvider } from "../../db/providers.local.js";
-import { getDatabase, runInTransaction } from "../../db/database.js";
-import { getWebhookReceipt, recordWebhookReceipt } from "../../db/webhook-receipts.local.js";
-import { json, badRequest } from "./helpers.js";
-import { verifyResendSignature } from "../../lib/webhook-events.js";
 import { emitEmailsEventBestEffort, inboundReceivedEventData } from "../../lib/emails-events.js";
-import { readBoundedRequestText, RouteBodyTooLargeError } from "./request-body.js";
+import {
+  receiveResendEvent,
+  RESEND_INBOUND_WEBHOOK_PATH,
+  type ResendInboundSink,
+} from "../webhooks/receivers.js";
+import { localWebhookReceiptLedger, recordLocalDeliveryEvent } from "./inbound-webhook.js";
 
-export async function handleResendWebhook(req: Request, path: string, method: string): Promise<Response | null> {
-  if (path !== "/webhook/resend-inbound" || method !== "POST") return null;
-
-  let raw: string;
-  try { raw = await readBoundedRequestText(req); } catch (error) {
-    if (error instanceof RouteBodyTooLargeError) return json({ error: "Request body too large" }, 413);
-    throw error;
-  }
-  let event: ResendInboundEvent;
-  try {
-    const parsed = JSON.parse(raw) as unknown;
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return badRequest("Invalid JSON object");
-    event = parsed as ResendInboundEvent;
-  } catch { return badRequest("Invalid JSON"); }
-
-  // An unconfigured route fails closed instead of accepting unsigned payloads.
-  const { loadConfig } = await import("../../lib/config.js");
-  const secret = (loadConfig()["resend_webhook_secret"] as string | undefined) ?? process.env["RESEND_WEBHOOK_SECRET"];
-  if (!secret) return json({ error: "Resend webhook secret is not configured" }, 503);
-  const headers: Record<string, string | null> = {};
-  req.headers.forEach((v, k) => { headers[k] = v; });
-  let valid = false;
-  try { valid = await verifyResendSignature(raw, headers, secret); } catch { valid = false; }
-  if (!valid) return json({ error: "Invalid signature" }, 401);
-
-  if (!isResendInboundEvent(event)) return json({ ok: true, ignored: `not an inbound event (${event.type ?? "?"})` });
-
-  const parsed = parseResendInboundEvent(event);
+const storeInboundLocally: ResendInboundSink = async (parsed, _routing, eventId) => {
+  const { getDatabase, runInTransaction } = await import("../../db/database.js");
+  const { storeInboundEmail } = await import("../../db/inbound.local.js");
+  const { getLatestActiveProvider } = await import("../../db/providers.local.js");
+  const { recordWebhookReceipt } = await import("../../db/webhook-receipts.local.js");
   const db = getDatabase();
   const resend = getLatestActiveProvider("resend", db);
-  const eventId = req.headers.get("svix-id") ?? parsed.provider_message_id;
-  if (!eventId) return badRequest("Resend webhook has no stable event id");
-  const existing = getWebhookReceipt("resend", eventId, db);
-  if (existing) return json({ ok: true, duplicate: true, id: existing.resource_id, message_id: parsed.provider_message_id });
 
+  // The message row and its idempotency receipt commit together: a receipt that
+  // outlived a rolled-back insert would acknowledge mail that was never stored.
   const stored = runInTransaction(db, () => {
     const inserted = storeInboundEmail({
       provider_id: resend?.id ?? null,
@@ -91,9 +70,24 @@ export async function handleResendWebhook(req: Request, path: string, method: st
     }),
     metadata: {
       provider: "resend",
-      webhook_type: event.type,
+      webhook_type: "inbound",
     },
   });
 
-  return json({ ok: true, id: stored.id, message_id: parsed.provider_message_id });
+  return { id: stored.id, receiptRecorded: true };
+};
+
+export async function handleResendWebhook(req: Request, path: string, method: string): Promise<Response | null> {
+  if (path !== RESEND_INBOUND_WEBHOOK_PATH || method !== "POST") return null;
+
+  return receiveResendEvent(req, {
+    ledger: localWebhookReceiptLedger(),
+    // An unconfigured route fails closed instead of accepting unsigned payloads.
+    webhookSecret: async () => {
+      const { loadConfig } = await import("../../lib/config.js");
+      return (loadConfig()["resend_webhook_secret"] as string | undefined) ?? process.env["RESEND_WEBHOOK_SECRET"];
+    },
+    storeInbound: storeInboundLocally,
+    recordDeliveryEvent: (event) => recordLocalDeliveryEvent("resend", event),
+  });
 }
