@@ -221,11 +221,30 @@ function applySelfHostedEnv(): void {
   resetMailDataSource();
 }
 
+// `bun test` shares one process across every test file, and the harness sets
+// EMAILS_MODE=local exactly once for that process. Deleting these keys rather
+// than restoring them leaves every file that runs after this one falling
+// through resolveEmailsModeSelection() to EMAILS_CLIENT_ENV_SECRET or the
+// on-disk config, which resolves to self_hosted and fails unrelated suites.
+// Restore the values this process started with instead.
+const SELF_HOSTED_ENV_KEYS = [
+  "EMAILS_MODE",
+  "EMAILS_SELF_HOSTED_URL",
+  "EMAILS_SELF_HOSTED_API_KEY",
+  "EMAILS_SELF_HOSTED_HTTP_MAX_RESPONSE_BYTES",
+] as const;
+
+// Captured at module load, before any test in this file mutates them.
+const INHERITED_SELF_HOSTED_ENV: Record<string, string | undefined> = Object.fromEntries(
+  SELF_HOSTED_ENV_KEYS.map((key) => [key, process.env[key]]),
+);
+
 function clearSelfHostedEnv(): void {
-  delete process.env["EMAILS_MODE"];
-  delete process.env["EMAILS_SELF_HOSTED_URL"];
-  delete process.env["EMAILS_SELF_HOSTED_API_KEY"];
-  delete process.env["EMAILS_SELF_HOSTED_HTTP_MAX_RESPONSE_BYTES"];
+  for (const key of SELF_HOSTED_ENV_KEYS) {
+    const inherited = INHERITED_SELF_HOSTED_ENV[key];
+    if (inherited === undefined) delete process.env[key];
+    else process.env[key] = inherited;
+  }
   resetSelfHostedConfigCache();
   resetMailDataSource();
 }

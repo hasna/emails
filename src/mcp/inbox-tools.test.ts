@@ -353,10 +353,20 @@ describe("MCP list_attachments — self_hosted inventory API", () => {
     const previousDbPath = process.env.EMAILS_DB_PATH;
     const previousClientEnvSecret = process.env.EMAILS_CLIENT_ENV_SECRET;
     const previousSessionToken = process.env.EMAILS_SESSION_TOKEN;
+    // This test must clear the mode keys to prove the on-disk config alone
+    // selects self_hosted, but `bun test` shares one process across every test
+    // file and the harness sets EMAILS_MODE=local once for it. Capture these so
+    // the `finally` can put them back, or later files inherit no mode at all.
+    const MODE_ENV_KEYS = ["MAILERY_MODE", "HASNA_MAILERY_MODE", "EMAILS_MODE", "HASNA_EMAILS_MODE"] as const;
+    const previousModeEnv: Record<string, string | undefined> = Object.fromEntries(
+      MODE_ENV_KEYS.map((key) => [key, process.env[key]]),
+    );
+    const previousSelfHostedUrl = process.env.EMAILS_SELF_HOSTED_URL;
+    const previousSelfHostedApiKey = process.env.EMAILS_SELF_HOSTED_API_KEY;
     try {
       process.env.HOME = configHome;
       saveConfig({ emails_mode: "self_hosted" });
-      for (const key of ["MAILERY_MODE", "HASNA_MAILERY_MODE", "EMAILS_MODE", "HASNA_EMAILS_MODE"]) {
+      for (const key of MODE_ENV_KEYS) {
         delete process.env[key];
       }
       delete process.env.EMAILS_CLIENT_ENV_SECRET;
@@ -377,6 +387,15 @@ describe("MCP list_attachments — self_hosted inventory API", () => {
       else process.env.EMAILS_CLIENT_ENV_SECRET = previousClientEnvSecret;
       if (previousSessionToken === undefined) delete process.env.EMAILS_SESSION_TOKEN;
       else process.env.EMAILS_SESSION_TOKEN = previousSessionToken;
+      for (const key of MODE_ENV_KEYS) {
+        const previous = previousModeEnv[key];
+        if (previous === undefined) delete process.env[key];
+        else process.env[key] = previous;
+      }
+      if (previousSelfHostedUrl === undefined) delete process.env.EMAILS_SELF_HOSTED_URL;
+      else process.env.EMAILS_SELF_HOSTED_URL = previousSelfHostedUrl;
+      if (previousSelfHostedApiKey === undefined) delete process.env.EMAILS_SELF_HOSTED_API_KEY;
+      else process.env.EMAILS_SELF_HOSTED_API_KEY = previousSelfHostedApiKey;
       rmSync(configHome, { recursive: true, force: true });
       rmSync(poisonDbDir, { recursive: true, force: true });
       resetSelfHostedConfigCache();
