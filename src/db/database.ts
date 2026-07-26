@@ -1962,8 +1962,14 @@ export function getDatabase(dbPath?: string): Database {
 
   const db = new Database(path);
   try {
-    db.run("PRAGMA journal_mode = WAL");
+    // busy_timeout FIRST. Converting a fresh database to WAL takes an exclusive
+    // lock, so when several processes open the same new database at once — which
+    // is exactly what the CLI does, one short-lived process per invocation —
+    // whichever loses the race fails immediately with SQLITE_BUSY unless a busy
+    // handler is already installed. Setting it afterwards is too late for the
+    // statement most likely to contend.
     db.run("PRAGMA busy_timeout = 5000");
+    db.run("PRAGMA journal_mode = WAL");
     db.run("PRAGMA foreign_keys = ON");
 
     runMigrations(db);
@@ -1977,7 +1983,7 @@ export function getDatabase(dbPath?: string): Database {
   }
 }
 
-function runMigrations(db: Database): void {
+function applyMigrations(db: Database): void {
   try {
     const result = db.query("SELECT MAX(id) as max_id FROM _migrations").get() as { max_id: number | null } | null;
     const currentLevel = result?.max_id ?? 0;
@@ -1998,8 +2004,73 @@ function runMigrations(db: Database): void {
       }
     }
   }
+}
 
-  ensureSchema(db);
+// Initialising a cold database applies ~200 migration statements plus ~140
+// idempotent schema probes. Left unbatched, SQLite commits — and fsyncs — each
+// one separately, which cost ~900ms on a local NVMe and several seconds on the
+// slower disks CI runners get; that latency, not the assertions, is what made
+// the file-backed database and live-CLI tests time out under load.
+//
+// Batching the whole sequence into one transaction turns those hundreds of
+// commits into a single one. It is purely a commit-boundary change: every
+// statement still runs in the same order, the per-statement `try`/`catch`
+// tolerance is preserved, and durability settings are untouched (no
+// `synchronous` downgrade), so an interrupted open still cannot observe a
+// half-applied schema. `runInTransaction` uses SAVEPOINTs, so callers nest
+// safely inside this transaction.
+function runMigrations(db: Database): void {
+  // BEGIN IMMEDIATE, never a bare BEGIN. A deferred BEGIN takes only a WAL read
+  // snapshot on the first statement below — `SELECT MAX(id) FROM _migrations` —
+  // and each DDL then has to upgrade that read transaction to a write one. If
+  // any other connection commits in between, the upgrade fails with
+  // SQLITE_BUSY_SNAPSHOT, and SQLite deliberately does NOT invoke the busy
+  // handler for it, so `busy_timeout` cannot absorb it. Because every statement
+  // here tolerates its own failure, the entire pass would be skipped while the
+  // now-read-only COMMIT still succeeded: the caller would be handed a silently
+  // un-migrated database, which is far worse than a slow one. Taking the write
+  // lock up front makes that race impossible — no other connection can commit
+  // while we hold it, and failure to acquire it surfaces as ordinary
+  // SQLITE_BUSY, which `busy_timeout` does absorb.
+  let batched = false;
+  try {
+    db.exec("BEGIN IMMEDIATE");
+    batched = true;
+  } catch {
+    // Either a caller already owns a transaction, or the write lock could not be
+    // taken. Apply unbatched, which is exactly the pre-batching behaviour.
+  }
+
+  if (!batched) {
+    applyMigrations(db);
+    ensureSchema(db);
+    return;
+  }
+
+  try {
+    applyMigrations(db);
+    ensureSchema(db);
+    db.exec("COMMIT");
+  } catch {
+    // The batch could not be committed. Discard it and rebuild one statement at
+    // a time. The reapply is level-based on purpose: replaying from zero would
+    // re-run migration 8, whose table-rebuild is destructive against data that
+    // is already migrated.
+    //
+    // Residual, for the error classes where SQLite ends the transaction itself
+    // (SQLITE_FULL, SQLITE_IOERR): statements after that point run in autocommit
+    // and durably record their sentinels, so `MAX(id)` can advance past a
+    // migration whose DDL was rolled back, and the level-based reapply will not
+    // revisit it. `ensureSchema` below is the designed backstop for exactly that
+    // gap, and it runs on every open.
+    try {
+      db.exec("ROLLBACK");
+    } catch {
+      // No transaction left to roll back.
+    }
+    applyMigrations(db);
+    ensureSchema(db);
+  }
 }
 
 function ensureSchema(db: Database): void {
