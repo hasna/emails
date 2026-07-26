@@ -28,6 +28,29 @@
 
 import { resetSelfHostedConfigCache } from "../db/self-hosted-store.js";
 import { resetMailDataSource } from "../lib/mail-data-source.js";
+import { SELF_HOSTED_RESOURCES, resourceListOrderBy } from "../server/self-hosted/resources.js";
+
+/**
+ * The ORDER BY the real generic list route applies to each `/v1/<resource>`, parsed
+ * into sort terms for the stub.
+ *
+ * Read from the server's own registry rather than restated here, so the stub can
+ * never drift from the order production actually returns. That matters because a
+ * client is allowed to page a window SERVER-side and trust the server to order
+ * first — against a stub that returned insertion order, such a client would look
+ * broken while being right, or look right while being broken.
+ */
+function declaredListOrder(): Record<string, Array<{ column: string; desc: boolean }>> {
+  const order: Record<string, Array<{ column: string; desc: boolean }>> = {};
+  for (const spec of SELF_HOSTED_RESOURCES) {
+    order[spec.path] = resourceListOrderBy(spec)
+      .split(",")
+      .map((term) => term.trim().split(/\s+/))
+      .filter((parts) => parts[0])
+      .map((parts) => ({ column: parts[0]!, desc: (parts[1] ?? "ASC").toUpperCase() === "DESC" }));
+  }
+  return order;
+}
 
 /** Seed data keyed by /v1 resource name (e.g. `{ domains: [...], messages: [...] }`). */
 export type V1StubResources = Record<string, Array<Record<string, unknown>>>;
@@ -108,6 +131,11 @@ let bootstrapped = false;
 // Non-total list-order emulation (see /v1/__list_order). 0 = stable order.
 let listRotate = 0;
 let listRotateResources = null;
+let listRotateCalls = {};
+// Declared ORDER BY per generic resource, injected from the server's own registry
+// (SELF_HOSTED_RESOURCES + resourceListOrderBy) so the stub orders lists the way the
+// real route does. Shape: { resource: [{ column, desc }, ...] }.
+const listOrder = safeParse(process.env.V1_STUB_LIST_ORDER);
 // Query string of every generic list request, per resource (see /v1/__list_queries).
 // Lets a test assert that a client pushed its filters SERVER-side instead of
 // dragging the whole table over and filtering in memory. Cleared on __reset.
@@ -130,17 +158,54 @@ function rowsFor(resource) {
   if (!Array.isArray(store[resource])) store[resource] = [];
   return store[resource];
 }
-// Shift the backing array in place before a list window is taken, so successive
-// pages of one enumeration see different row positions (a non-total ORDER BY).
+// Apply the resource's DECLARED ORDER BY, the way the real generic list route does
+// (store.ts listResource -> resourceListOrderBy). Without this the stub returned
+// insertion order, so any client that pages a window SERVER-side — trusting the
+// server to order first — could not be tested here at all: the stub would hand back
+// a differently-ordered window and a correct client would look broken. The order
+// terms come from the server's own registry (V1_STUB_LIST_ORDER), so the stub cannot
+// drift from it. Resources with a bespoke handler (messages) and non-registry paths
+// (domains/addresses) have no terms and keep insertion order.
+function sortForList(resource, rows) {
+  const terms = listOrder[resource];
+  if (!Array.isArray(terms) || terms.length === 0) return rows.slice();
+  return rows.slice().sort(function (a, b) {
+    for (const term of terms) {
+      const av = a[term.column];
+      const bv = b[term.column];
+      const aNull = av === null || av === undefined;
+      const bNull = bv === null || bv === undefined;
+      // Postgres default: NULLS LAST for ASC, NULLS FIRST for DESC.
+      if (aNull || bNull) {
+        if (aNull && bNull) continue;
+        return (aNull ? 1 : -1) * (term.desc ? -1 : 1);
+      }
+      // Three-way, so values that merely differ by TYPE but compare equal (1 vs "1")
+      // fall through to the next term instead of making the comparator inconsistent
+      // (returning 1 for both cmp(a,b) and cmp(b,a), which corrupts a sort).
+      const bothNumbers = typeof av === "number" && typeof bv === "number";
+      const l = bothNumbers ? (av as number) : String(av);
+      const r = bothNumbers ? (bv as number) : String(bv);
+      const cmp = l < r ? -1 : l > r ? 1 : 0;
+      if (cmp === 0) continue;
+      return term.desc ? -cmp : cmp;
+    }
+    return 0;
+  });
+}
+// Rotate the ORDERED rows before a list window is taken, so successive pages of one
+// enumeration see different row positions (a non-total ORDER BY). The rotation
+// accumulates across calls within one enumeration, which is what makes a pager see
+// duplicates and miss rows. It is applied to a copy (never the backing store) so the
+// declared order above stays the baseline every window is taken from.
 function rotateForList(resource, rows) {
   if (!listRotate) return rows;
   if (listRotateResources && listRotateResources.indexOf(resource) < 0) return rows;
   const n = rows.length;
   if (n < 2) return rows;
-  const by = ((listRotate % n) + n) % n;
-  const moved = rows.splice(0, by);
-  for (const row of moved) rows.push(row);
-  return rows;
+  listRotateCalls[resource] = (listRotateCalls[resource] || 0) + 1;
+  const by = (((listRotate * listRotateCalls[resource]) % n) + n) % n;
+  return rows.slice(by).concat(rows.slice(0, by));
 }
 function includesText(value, query) {
   if (!query) return true;
@@ -352,6 +417,7 @@ const server = Bun.serve({
       bootstrapped = false;
       listRotate = 0;
       listRotateResources = null;
+      listRotateCalls = {};
       listQueries = {};
       return json({ ok: true });
     }
@@ -375,6 +441,7 @@ const server = Bun.serve({
       const body = await req.json().catch(function () { return {}; });
       listRotate = Number(body.rotate || 0) || 0;
       listRotateResources = Array.isArray(body.resources) ? body.resources : null;
+      listRotateCalls = {};
       return json({ ok: true, rotate: listRotate });
     }
     // Test-only: read the current verification token for an email (the real
@@ -686,8 +753,8 @@ const server = Bun.serve({
       const offset = rawOffset === null || Number.isNaN(Number(rawOffset)) || Number(rawOffset) < 0
         ? 0
         : Math.floor(Number(rawOffset));
-      rotateForList(resource, rows);
-      let windowed = offset > 0 ? rows.slice(offset) : rows;
+      const ordered = rotateForList(resource, sortForList(resource, rows));
+      let windowed = offset > 0 ? ordered.slice(offset) : ordered;
       if (rawLimit !== null && !Number.isNaN(Number(rawLimit))) {
         const limit = Math.min(Math.max(1, Math.floor(Number(rawLimit))), 500);
         windowed = windowed.slice(0, limit);
@@ -772,7 +839,12 @@ export async function startV1Stub(options: V1StubOptions = {}): Promise<V1Stub> 
   const initialSeed = JSON.stringify(options.seed ?? {});
 
   const proc = Bun.spawn(["bun", "-e", SERVER_SRC], {
-    env: { ...process.env, V1_STUB_API_KEY: apiKey, V1_STUB_SEED: initialSeed },
+    env: {
+      ...process.env,
+      V1_STUB_API_KEY: apiKey,
+      V1_STUB_SEED: initialSeed,
+      V1_STUB_LIST_ORDER: JSON.stringify(declaredListOrder()),
+    },
     stdout: "pipe",
     stderr: "inherit",
   });
