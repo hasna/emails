@@ -26,7 +26,8 @@ jobs:
           readonly repository='hasna/emails'
           readonly source_merge_commit='fe61a466a28115f33efda1ecc7632dbc7c6525c7'
           readonly ci_run_id='30212897836'
-          readonly verification_dir="$(mktemp -d)"
+          verification_dir="$(mktemp -d)"
+          readonly verification_dir
           readonly commit_response="${verification_dir}/source-commit.json"
           readonly run_response="${verification_dir}/ci-run.json"
 

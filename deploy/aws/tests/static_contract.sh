@@ -382,7 +382,7 @@ if [ "$actual_workflows" != "$expected_workflows" ]; then
   exit 1
 fi
 
-expected_provenance_sha256='7e80be3eb71e5e4b2f99c80467f6230430eb79be2dd8d170233828076a378285'
+expected_provenance_sha256='706c636d7b60059f6e8ce52229bfb723c0c9a2c61cb4a462b3d6ead24a46232f'
 actual_provenance_sha256="$(sha256sum "$provenance_workflow" | awk '{ print $1 }')"
 if [ "$actual_provenance_sha256" != "$expected_provenance_sha256" ]; then
   echo "package provenance workflow must match the exact reviewed manual attestation artifact" >&2
@@ -518,7 +518,8 @@ for provenance_live_verification_contract in \
   "readonly ci_run_id='30212897836'" \
   'command -v gh >/dev/null' \
   'command -v jq >/dev/null' \
-  'readonly verification_dir="$(mktemp -d)"' \
+  'verification_dir="$(mktemp -d)"' \
+  'readonly verification_dir' \
   'trap cleanup_verification EXIT' \
   '"/repos/${repository}/commits/${source_merge_commit}"' \
   '"/repos/${repository}/actions/runs/${ci_run_id}"' \
@@ -537,6 +538,10 @@ for provenance_live_verification_contract in \
     exit 1
   }
 done
+if grep -Fq 'readonly verification_dir="$(mktemp -d)"' "$provenance_workflow"; then
+  echo "package provenance must preserve temporary-directory assignment failures" >&2
+  exit 1
+fi
 if [ "$(grep -Ec '^[[:space:]]*gh api[[:space:]]*\\$' "$provenance_workflow" || true)" != "2" ] \
   || [ "$(grep -Ec '^[[:space:]]*jq --exit-status' "$provenance_workflow" || true)" != "3" ]; then
   echo "package provenance must perform exactly two GitHub API reads and three jq validations" >&2

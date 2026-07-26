@@ -5,7 +5,7 @@ import { join } from "node:path";
 
 const workflowDir = join(import.meta.dir, "..", ".github", "workflows");
 const repositoryRoot = join(import.meta.dir, "..");
-const packageProvenanceWorkflowSha256 = "7e80be3eb71e5e4b2f99c80467f6230430eb79be2dd8d170233828076a378285";
+const packageProvenanceWorkflowSha256 = "706c636d7b60059f6e8ce52229bfb723c0c9a2c61cb4a462b3d6ead24a46232f";
 const unreleasedSectionSha256 = "40e9d4fc08e67cd4f7d38b053c5c9031dd3e8e403d68bc7e40f83a87bc00ba20";
 const release132Section = `## 1.3.2 (2026-07-26)
 
@@ -173,7 +173,8 @@ describe("repository workflow safety", () => {
     for (const liveVerificationContract of [
       "command -v gh >/dev/null",
       "command -v jq >/dev/null",
-      'readonly verification_dir="$(mktemp -d)"',
+      'verification_dir="$(mktemp -d)"',
+      "readonly verification_dir",
       "trap cleanup_verification EXIT",
       '"/repos/${repository}/commits/${source_merge_commit}"',
       '"/repos/${repository}/actions/runs/${ci_run_id}"',
@@ -192,6 +193,7 @@ describe("repository workflow safety", () => {
         liveVerificationContract,
       );
     }
+    expect(workflow).not.toContain('readonly verification_dir="$(mktemp -d)"');
 
     expect(singleQuotedReadonly(workflow, "artifact_dir")).toBe("attestation-input");
     expect(singleQuotedReadonly(workflow, "tarball_url")).toBe(tarballUrl);
