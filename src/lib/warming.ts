@@ -87,13 +87,25 @@ export function getTodaySentCount(domain: string): number {
     .length;
 }
 
-/**
- * Format warming schedule status for terminal display.
- */
-export function formatWarmingStatus(schedule: WarmingSchedule): string {
-  const todayLimit = getTodayLimit(schedule);
-  const todaySent = getTodaySentCount(schedule.domain);
+export interface WarmingProgress {
+  /** 1-based day index within the ramp, clamped to >= 1 before the start date. */
+  current_day: number;
+  /** Day on which the plan reaches the full target volume. */
+  total_days: number;
+  progress_percent: number;
+  /** null while the schedule is not active (paused/completed impose no cap). */
+  today_limit: number | null;
+  today_sent: number;
+}
 
+/**
+ * Single source of truth for "where is this domain in its ramp" — shared by the
+ * CLI (`emails domain warm*`), the MCP warming tools, and the terminal
+ * formatter, so all three report the same day/limit/sent numbers. Performs the
+ * two repository reads (today's limit needs the plan, today's count needs sent
+ * mail) exactly once per call.
+ */
+export function describeWarmingProgress(schedule: WarmingSchedule): WarmingProgress {
   const startDate = new Date(schedule.start_date);
   const today = new Date();
   today.setHours(0, 0, 0, 0);
@@ -102,12 +114,28 @@ export function formatWarmingStatus(schedule: WarmingSchedule): string {
 
   const plan = generateWarmingPlan(schedule.target_daily_volume);
   const totalDays = plan[plan.length - 1]?.day ?? 30;
-  const progress = Math.min(100, Math.round((currentDay / totalDays) * 100));
 
+  return {
+    current_day: currentDay,
+    total_days: totalDays,
+    progress_percent: Math.min(100, Math.round((currentDay / totalDays) * 100)),
+    today_limit: getTodayLimit(schedule),
+    today_sent: getTodaySentCount(schedule.domain),
+  };
+}
+
+/**
+ * Format warming schedule status for terminal display. Callers that already
+ * computed progress pass it in so the sent-mail read is not repeated.
+ */
+export function formatWarmingStatus(
+  schedule: WarmingSchedule,
+  progress: WarmingProgress = describeWarmingProgress(schedule),
+): string {
   return [
     `Domain: ${schedule.domain}`,
-    `Status: ${schedule.status} | Day ${currentDay}/${totalDays} (${progress}% complete)`,
-    `Today's limit: ${todayLimit ?? "unlimited"} | Sent today: ${todaySent}`,
+    `Status: ${schedule.status} | Day ${progress.current_day}/${progress.total_days} (${progress.progress_percent}% complete)`,
+    `Today's limit: ${progress.today_limit ?? "unlimited"} | Sent today: ${progress.today_sent}`,
     `Target: ${schedule.target_daily_volume}/day | Started: ${schedule.start_date}`,
   ].join("\n");
 }

@@ -140,6 +140,8 @@ controls. Folders: Inbox · Unread · Starred · Sent · Archived · Spam · Tra
 emails ui                # Mailbox UI - inbox, compose, domains, settings
 emails provider          # provider credentials/capabilities (ses, resend, sandbox)
 emails domain            # add/verify/buy/setup/dns/check domains
+emails domain warm       # domain warming schedules: warm, warm-status, warm-list,
+                         #   warm-pause, warm-resume, warm-complete
 emails address           # manage sender addresses (add, suspend, activate, quota)
 emails status            # redacted system status + next useful actions
 emails agent context     # agent-oriented context snapshot and workflows
@@ -261,6 +263,31 @@ emails address suspend <id>     # block sending from this address
 emails address activate <id>
 emails address quota <id> 200   # max 200 sends/day (use 'none' to clear)
 ```
+
+## Domain warming
+
+A new sending domain that jumps straight to full volume gets throttled or
+filtered. A warming schedule ramps it: 50/day on day 1, roughly doubling every
+two days until it reaches the target. While a schedule is `active`, sends from
+that domain are refused once the day's limit is reached; `paused` and `completed`
+schedules impose no cap.
+
+```bash
+emails domain warm example.com --target 5000            # start the ramp (today)
+emails domain warm example.com --target 5000 --start-date 2026-08-01
+emails domain warm-status example.com                   # day N/total, today's limit vs sent
+emails domain warm-list                                 # every schedule, one row each
+emails domain warm-list --status active --json
+emails domain warm-pause example.com                    # suspend the cap (deliverability issue)
+emails domain warm-resume example.com
+emails domain warm-complete example.com                 # graduated: no cap applies
+```
+
+Schedules live in the `warming_schedules` store, so they work the same whether
+the client is on local SQLite or pointed at a self-hosted server (where the
+server also enforces the limit on `/v1/messages/send`). The MCP twins are
+`create_warming_schedule`, `get_warming_status`, `list_warming_schedules`, and
+`update_warming_status`.
 
 ## DNS and inbound safety
 

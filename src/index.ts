@@ -311,8 +311,8 @@ export type { InboundEmail, InboundEmailSummary } from "./db/inbound.js";
 export {
   createWarmingSchedule, getWarmingSchedule, listWarmingSchedules, updateWarmingStatus, deleteWarmingSchedule,
 } from "./db/warming.js";
-export { generateWarmingPlan, getTodayLimit, getTodaySentCount, formatWarmingStatus } from "./lib/warming.js";
-export type { WarmingSchedule, WarmingDay } from "./lib/warming.js";
+export { describeWarmingProgress, generateWarmingPlan, getTodayLimit, getTodaySentCount, formatWarmingStatus } from "./lib/warming.js";
+export type { WarmingSchedule, WarmingDay, WarmingProgress } from "./lib/warming.js";
 
 export type { ForwardingRunOptions, ForwardingRunResult, ForwardingRunItem } from "./lib/forwarding.js";
 

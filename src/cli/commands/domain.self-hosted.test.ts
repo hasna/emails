@@ -3,11 +3,11 @@
 // src/test-support/v1-stub.ts). No local SQLite exists anymore — the deleted
 // `../../db/database.js` and the previously-embedded stand-in server are gone.
 //
-// Coverage here is the client-flip contract: `add`/`list`/`remove`/`status`
-// route reads AND writes to the self-hosted HTTP API (never a local island), id
-// PREFIX resolution scans the /v1 dataset, and the genuinely server-owned
-// subcommands (DNS/verify/warm/lifecycle mutations) still fail loud with the
-// current source message.
+// Coverage here is the client-flip contract: `add`/`list`/`remove`/`status` and
+// the `warm*` schedule commands route reads AND writes to the self-hosted HTTP
+// API (never a local island), id PREFIX resolution scans the /v1 dataset, and
+// the genuinely server-owned subcommands (live DNS/verify + lifecycle
+// mutations) still fail loud with the current source message.
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { Command } from "commander";
 import { startV1Stub, type V1Stub } from "../../test-support/v1-stub.js";
@@ -127,9 +127,49 @@ describe("domain CLI — self-hosted (self_hosted) /v1 routing", () => {
     expect((await serverDomains()).length).toBe(0);
   });
 
+  it("runs the warming lifecycle through the /v1 warming resource", async () => {
+    // Warming is NOT server-owned-only: /v1/warming exists and warming.remote.ts
+    // is a complete client, so the same six commands that work over local SQLite
+    // work here. Proven end to end against the stub's stored rows.
+    const created = await runDomainCommand(["domain", "warm", "ramp.example.com", "--target", "1000"]);
+    expect(created.data).toMatchObject({
+      schedule: { domain: "ramp.example.com", target_daily_volume: 1000, status: "active" },
+    });
+    expect((await stub.list("warming")).map((row) => row["domain"])).toEqual(["ramp.example.com"]);
+
+    const status = await runDomainCommand(["domain", "warm-status", "ramp.example.com"]);
+    expect(status.data).toMatchObject({ schedule: { domain: "ramp.example.com", status: "active" } });
+    // Day-1 cap for any target above 50. The day INDEX is not asserted: the ramp
+    // math normalizes a bare start date to local midnight, so it is 1 or 2
+    // depending on the runner's UTC offset.
+    expect(status.data).toMatchObject({ today_limit: 50, today_sent: 0 });
+
+    const listed = await runDomainCommand(["domain", "warm-list"]);
+    expect((listed.data as Array<{ domain: string }>).map((row) => row.domain)).toEqual(["ramp.example.com"]);
+
+    for (const [command, expected] of [
+      ["warm-pause", "paused"],
+      ["warm-resume", "active"],
+      ["warm-complete", "completed"],
+    ] as const) {
+      const result = await runDomainCommand(["domain", command, "ramp.example.com"]);
+      expect(result.data).toMatchObject({ domain: "ramp.example.com", status: expected });
+      // The transition reached the server, not just the in-process return value.
+      expect((await stub.list("warming"))[0]?.["status"]).toBe(expected);
+    }
+  });
+
+  it("fails loud when a warming command targets a domain with no schedule", async () => {
+    const result = await runDomainCommandExpectingExit(["domain", "warm-pause", "ghost.example.com"]);
+    expect(result.error).toBe("process.exit:1");
+    expect(result.stderr).toContain("Warming schedule not found for domain: ghost.example.com");
+    // The retired refusal was false in both directions; it must not come back.
+    expect(result.stderr).not.toContain("not available in the self-hosted client");
+  });
+
   it("blocks server-owned domain subcommands with the self-hosted client message", async () => {
-    // These have no /v1 equivalent (live DNS/provider orchestration, warming, and
-    // the server-owned lifecycle ledger) and must fail loud. Required options are
+    // These have no /v1 equivalent (live DNS/provider orchestration and the
+    // server-owned lifecycle ledger) and must fail loud. Required options are
     // supplied so commander reaches the action rather than erroring on parse.
     const blocked = [
       ["domain", "status"],
@@ -137,7 +177,6 @@ describe("domain CLI — self-hosted (self_hosted) /v1 routing", () => {
       ["domain", "dns", "ex.com"],
       ["domain", "verify", "ex.com"],
       ["domain", "check", "ex.com"],
-      ["domain", "warm-list"],
       ["domains", "connect", "ex.com", "--provider", "x"],
       ["domains", "dns", "ex.com"],
       ["domains", "verify", "ex.com"],

@@ -178,6 +178,9 @@ function errorCode(message: string): string {
 function fixCommands(message: string): string[] {
   const lower = message.toLowerCase();
   if (lower.includes("unknown command")) return ["emails --help"];
+  // Warming is checked before provider/domain: its failures mention both, but the
+  // actionable next step is always a `warm*` command.
+  if (lower.includes("warming")) return ["emails domain warm-list --json", "emails domain warm --help"];
   if (lower.includes("provider")) return ["emails provider list --json", "emails provider add --help"];
   if (lower.includes("domain")) return ["emails domain list --json", "emails domain add --help"];
   if (lower.includes("address")) return ["emails address list --json", "emails address provision --help"];

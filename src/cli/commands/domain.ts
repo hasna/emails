@@ -6,19 +6,22 @@ import { getProvider } from "../../db/providers.js";
 import { createCatchAll, ensureDefaultCatchAll } from "../../db/aliases.js";
 import { setDomainProvisioning } from "../../db/provisioning.js";
 import { getAdapter } from "../../providers/index.js";
-import { colorDnsStatus } from "../../lib/format.js";
+import { createWarmingSchedule, getWarmingSchedule, listWarmingSchedules, updateWarmingStatus } from "../../db/warming.js";
+import { describeWarmingProgress, formatWarmingStatus, generateWarmingPlan, type WarmingSchedule } from "../../lib/warming.js";
+import { colorDnsStatus, tableRow, truncate } from "../../lib/format.js";
 import { confirmDestructiveAction, formatListHint, handleError, isCliVerboseOutput, parseCliListPage, resolveId } from "../utils.js";
 import { normalizeRoute53RegistrationContact } from "../../lib/route53-contact.js";
 import { resolveEmailsMode } from "../../lib/mode.js";
 import { now } from "../../db/runtime.js";
 
 // Domain provisioning that requires provider adapters (live SES/Resend calls),
-// AWS/Cloudflare/Route53 DNS orchestration, live DNS/MX checks, the
-// server-owned lifecycle-readiness ledger, or warming schedules has no /v1
-// equivalent in this self-hosted-only client — it runs on the self-hosted
-// server. Those commands are kept for discoverability but fail loud. Core
-// domain CRUD (`add`/`list`/`remove`/`usable`/`move-provider`) and the operator
-// `adopt` command route through the /v1 API.
+// AWS/Cloudflare/Route53 DNS orchestration, live DNS/MX checks, or the
+// server-owned lifecycle-readiness ledger has no /v1 equivalent in this
+// self-hosted-only client — it runs on the self-hosted server. Those commands
+// are kept for discoverability but fail loud. Core domain CRUD
+// (`add`/`list`/`remove`/`usable`/`move-provider`), the warming schedule
+// commands (`warm*`), and the operator `adopt` command all route through the
+// warming/domain repositories, which resolve to local SQLite or the /v1 API.
 function serverOnly(command: string): never {
   throw new Error(
     `${command} is not available in the self-hosted client; it runs on the self-hosted server.`,
@@ -509,7 +512,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .option("--provider <id>", "Provider ID")
     .action(() => { try { serverOnly("emails domain check"); } catch (e) { handleError(e); } });
 
-  // ─── DNS / WARMING SETUP (server-side) ─────────────────────────────────────
+  // ─── DNS SETUP (server-side) ───────────────────────────────────────────────
 
   domainCmd
     .command("setup-cloudflare <domain>")
@@ -522,18 +525,94 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .option("--force-mx-switch", "Allow adding MX even when existing root MX belongs to another provider")
     .action(() => { try { serverOnly("emails domain setup-cloudflare"); } catch (e) { handleError(e); } });
 
+  // ─── DOMAIN WARMING ────────────────────────────────────────────────────────
+  // Warming schedules are a first-class repository resource (`warming_schedules`
+  // in SQLite, `/v1/warming` on the self-hosted server), so these commands call
+  // the warming repo directly and work in every configuration. The MCP tools in
+  // src/mcp/tools/warming.ts are the same calls over a different transport.
+
+  const warmingStatusColor = (status: WarmingSchedule["status"]): string =>
+    status === "active" ? chalk.green(status) : status === "paused" ? chalk.yellow(status) : chalk.dim(status);
+
+  // pause/resume/complete are the same repository write with a different target
+  // state, so they share one transition path: fail loud when the domain has no
+  // schedule, otherwise emit the updated row.
+  const transitionWarmingStatus = (domain: string, status: WarmingSchedule["status"], formatted: string) => {
+    try {
+      const updated = updateWarmingStatus(domain, status);
+      if (!updated) {
+        handleError(new Error(
+          `Warming schedule not found for domain: ${domain}. Start one with 'emails domain warm ${domain} --target <n>'.`,
+        ));
+        return;
+      }
+      output(updated, `${formatted}\n${chalk.dim(`  Details: emails domain warm-status ${domain}`)}`);
+    } catch (e) {
+      handleError(e);
+    }
+  };
+
   domainCmd
     .command("warm <domain>")
     .description("Start a warming schedule for a domain")
     .requiredOption("--target <n>", "Target daily send volume", parseInt)
     .option("--start-date <YYYY-MM-DD>", "Start date (default: today)")
     .option("--provider <id>", "Provider ID to associate")
-    .action(() => { try { serverOnly("emails domain warm"); } catch (e) { handleError(e); } });
+    .action((domain: string, opts: { target: number; startDate?: string; provider?: string }) => {
+      try {
+        if (!Number.isInteger(opts.target) || opts.target <= 0) {
+          handleError(new Error(`Invalid --target '${opts.target}'. Pass a positive whole daily send volume.`));
+        }
+        if (opts.startDate && !/^\d{4}-\d{2}-\d{2}$/.test(opts.startDate)) {
+          handleError(new Error(`Invalid --start-date '${opts.startDate}'. Use YYYY-MM-DD.`));
+        }
+        const existing = getWarmingSchedule(domain);
+        if (existing) {
+          handleError(new Error(
+            `${domain} already has a warming schedule (status ${existing.status}, target ${existing.target_daily_volume}/day, started ${existing.start_date}). ` +
+              `Inspect it with 'emails domain warm-status ${domain}', or change state with 'emails domain warm-pause|warm-resume|warm-complete ${domain}'.`,
+          ));
+        }
+        const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
+        const schedule = createWarmingSchedule({
+          domain,
+          provider_id: providerId,
+          target_daily_volume: opts.target,
+          start_date: opts.startDate,
+        });
+        const progress = describeWarmingProgress(schedule);
+        const plan = generateWarmingPlan(schedule.target_daily_volume);
+        output({ schedule, ...progress, plan_days: plan.length, final_day: progress.total_days }, [
+          chalk.green(`✓ Warming schedule created for ${domain}`),
+          formatWarmingStatus(schedule, progress),
+          chalk.dim(`\nWill reach target (${schedule.target_daily_volume}/day) in ${progress.total_days} days`),
+        ].join("\n"));
+      } catch (e) {
+        handleError(e);
+      }
+    });
 
   domainCmd
     .command("warm-status <domain>")
     .description("Show warming schedule status for a domain")
-    .action(() => { try { serverOnly("emails domain warm-status"); } catch (e) { handleError(e); } });
+    .action((domain: string) => {
+      try {
+        const schedule = getWarmingSchedule(domain);
+        if (!schedule) {
+          handleError(new Error(
+            `Warming schedule not found for domain: ${domain}. Start one with 'emails domain warm ${domain} --target <n>'.`,
+          ));
+          return;
+        }
+        const progress = describeWarmingProgress(schedule);
+        output(
+          { schedule, ...progress },
+          `\n${formatWarmingStatus(schedule, progress)}\n`,
+        );
+      } catch (e) {
+        handleError(e);
+      }
+    });
 
   domainCmd
     .command("warm-list")
@@ -542,22 +621,78 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .option("--limit <n>", "Maximum schedules to show (default 20 compact, 50 verbose/json)")
     .option("--offset <n>", "Number of schedules to skip", "0")
     .option("--verbose", "Show expanded list hints")
-    .action(() => { try { serverOnly("emails domain warm-list"); } catch (e) { handleError(e); } });
+    .action((opts: { status?: string; limit?: string; offset?: string; verbose?: boolean }) => {
+      try {
+        if (opts.status && !["active", "paused", "completed"].includes(opts.status)) {
+          handleError(new Error(`Invalid --status '${opts.status}'. Use active, paused, or completed.`));
+        }
+        const page = parseCliListPage(opts);
+        const schedules = listWarmingSchedules(opts.status, page);
+        if (schedules.length === 0) {
+          output([], chalk.dim("No warming schedules found."));
+          return;
+        }
+        const lines: string[] = [""];
+        lines.push(tableRow(
+          [chalk.bold("Domain"), 24],
+          [chalk.bold("Status"), 11],
+          [chalk.bold("Start Date"), 12],
+          [chalk.bold("Target"), 10],
+          [chalk.bold("Today's Limit"), 14],
+          [chalk.bold("Sent Today"), 12],
+        ));
+        for (const schedule of schedules) {
+          const progress = describeWarmingProgress(schedule);
+          lines.push(tableRow(
+            [truncate(schedule.domain, 24), 24],
+            [warmingStatusColor(schedule.status), 11],
+            [schedule.start_date, 12],
+            [String(schedule.target_daily_volume), 10],
+            [progress.today_limit !== null ? String(progress.today_limit) : chalk.dim("n/a"), 14],
+            [String(progress.today_sent), 12],
+          ));
+        }
+        lines.push("");
+        lines.push(formatListHint({
+          shown: schedules.length,
+          limit: page.limit,
+          offset: page.offset,
+          noun: "warming schedule",
+          detailCommand: "use emails domain warm-status <domain> for details",
+          verbose: opts.verbose || isCliVerboseOutput(),
+        }));
+        output(schedules, lines.join("\n"));
+      } catch (e) {
+        handleError(e);
+      }
+    });
 
   domainCmd
     .command("warm-pause <domain>")
     .description("Pause a domain warming schedule")
-    .action(() => { try { serverOnly("emails domain warm-pause"); } catch (e) { handleError(e); } });
+    .action((domain: string) => transitionWarmingStatus(
+      domain,
+      "paused",
+      chalk.yellow(`⏸ Warming schedule paused for ${domain}`),
+    ));
 
   domainCmd
     .command("warm-resume <domain>")
     .description("Resume a paused domain warming schedule")
-    .action(() => { try { serverOnly("emails domain warm-resume"); } catch (e) { handleError(e); } });
+    .action((domain: string) => transitionWarmingStatus(
+      domain,
+      "active",
+      chalk.green(`▶ Warming schedule resumed for ${domain}`),
+    ));
 
   domainCmd
     .command("warm-complete <domain>")
     .description("Mark a domain warming schedule as completed")
-    .action(() => { try { serverOnly("emails domain warm-complete"); } catch (e) { handleError(e); } });
+    .action((domain: string) => transitionWarmingStatus(
+      domain,
+      "completed",
+      chalk.green(`✓ Warming schedule completed for ${domain}; daily warming limits no longer apply`),
+    ));
 
   // ─── DOMAIN PURCHASING (via @hasna/domains / Route 53) ───────────────────
 

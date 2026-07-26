@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, it, expect } from "bun:test";
 import { startV1Stub, type V1Stub } from "../test-support/v1-stub.js";
-import { generateWarmingPlan, getTodayLimit, formatWarmingStatus, getTodaySentCount } from "./warming.js";
+import { describeWarmingProgress, generateWarmingPlan, getTodayLimit, formatWarmingStatus, getTodaySentCount } from "./warming.js";
 import type { WarmingSchedule } from "./warming.js";
 
 // getTodaySentCount / formatWarmingStatus read the outbound sent-ledger over the
@@ -154,6 +154,73 @@ describe("getTodaySentCount", () => {
   });
 });
 
+// describeWarmingProgress is the single ramp-position calculation shared by the
+// CLI (`emails domain warm*`), the MCP warming tools, and formatWarmingStatus, so
+// all three report identical day/limit/sent numbers.
+describe("describeWarmingProgress", () => {
+  function makeSchedule(overrides: Partial<WarmingSchedule> = {}): WarmingSchedule {
+    return {
+      id: "progress-id",
+      domain: "progress.test",
+      provider_id: null,
+      target_daily_volume: 5000,
+      start_date: new Date().toISOString().slice(0, 10),
+      status: "active",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      ...overrides,
+    };
+  }
+
+  // `start_date` is a bare calendar date, and the day count mixes UTC parsing
+  // with local-midnight normalization, so the elapsed-day figure can differ by
+  // one depending on the runner's UTC offset. These assert the window plus
+  // agreement with getTodayLimit, which is the property that matters.
+  it("starts at the beginning of the ramp on the start date", () => {
+    const plan = generateWarmingPlan(5000);
+    const progress = describeWarmingProgress(makeSchedule());
+    expect(progress.current_day).toBeGreaterThanOrEqual(1);
+    expect(progress.current_day).toBeLessThanOrEqual(2);
+    expect(progress.total_days).toBe(plan[plan.length - 1]!.day);
+    expect(progress.today_limit).toBe(50);
+    expect(progress.today_sent).toBe(0);
+    expect(progress.progress_percent).toBe(Math.round((progress.current_day / progress.total_days) * 100));
+  });
+
+  it("advances current_day with elapsed days and agrees with getTodayLimit", () => {
+    const startDate = new Date();
+    startDate.setDate(startDate.getDate() - 6);
+    const schedule = makeSchedule({ start_date: startDate.toISOString().slice(0, 10) });
+    const progress = describeWarmingProgress(schedule);
+    expect(progress.current_day).toBeGreaterThanOrEqual(7);
+    expect(progress.current_day).toBeLessThanOrEqual(8);
+    expect(progress.today_limit).toBe(getTodayLimit(schedule));
+    expect(progress.today_limit).toBeGreaterThan(50);
+  });
+
+  it("caps progress_percent at 100 once the ramp is behind schedule", () => {
+    const progress = describeWarmingProgress(makeSchedule({ start_date: "2020-01-01" }));
+    expect(progress.progress_percent).toBe(100);
+    expect(progress.today_limit).toBe(5000);
+  });
+
+  it("reports no limit for paused and completed schedules", () => {
+    expect(describeWarmingProgress(makeSchedule({ status: "paused" })).today_limit).toBeNull();
+    expect(describeWarmingProgress(makeSchedule({ status: "completed" })).today_limit).toBeNull();
+  });
+
+  it("counts today's sent mail for the schedule's own domain", async () => {
+    const nowIso = new Date().toISOString();
+    await stub.seed({
+      messages: [
+        { id: "p-1", direction: "outbound", from_addr: "a@progress.test", to_addrs: ["c@example.com"], subject: "s", status: "sent", received_at: nowIso, created_at: nowIso },
+        { id: "p-2", direction: "outbound", from_addr: "b@other.test", to_addrs: ["c@example.com"], subject: "s", status: "sent", received_at: nowIso, created_at: nowIso },
+      ],
+    });
+    expect(describeWarmingProgress(makeSchedule()).today_sent).toBe(1);
+  });
+});
+
 // formatWarmingStatus composes pure formatting with getTodaySentCount (a /v1 read).
 // With an empty store the sent count is 0; the assertions here only concern the
 // schedule fields, which are formatted purely.
@@ -190,5 +257,27 @@ describe("formatWarmingStatus", () => {
     };
     const output = formatWarmingStatus(schedule);
     expect(output).toContain("paused");
+  });
+
+  it("renders a caller-supplied progress snapshot without re-reading sent mail", () => {
+    const schedule: WarmingSchedule = {
+      id: "test3",
+      domain: "precomputed.com",
+      provider_id: null,
+      target_daily_volume: 800,
+      start_date: "2026-01-01",
+      status: "active",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    const output = formatWarmingStatus(schedule, {
+      current_day: 4,
+      total_days: 10,
+      progress_percent: 40,
+      today_limit: 100,
+      today_sent: 37,
+    });
+    expect(output).toContain("Day 4/10 (40% complete)");
+    expect(output).toContain("Today's limit: 100 | Sent today: 37");
   });
 });
