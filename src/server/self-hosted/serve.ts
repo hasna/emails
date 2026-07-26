@@ -90,8 +90,12 @@ export async function startSelfHostedServer(
   const server = Bun.serve({
     port,
     hostname,
-    fetch: async (req) => {
-      const response = await handleSelfHostedRequest(deps, req);
+    fetch: async (req, bunServer) => {
+      // The socket peer address is the only client identity a request cannot
+      // forge; the auth rate limits are anchored on it (see auth/client-ip.ts).
+      const response = await handleSelfHostedRequest(deps, req, {
+        socketAddress: bunServer.requestIP(req)?.address ?? null,
+      });
       if (response) return response;
       return new Response(JSON.stringify({ error: "not found" }), {
         status: 404,
