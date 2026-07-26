@@ -264,6 +264,10 @@ export {
   saveConfig,
   getConfigValue,
   setConfigValue,
+  setAgentConfigValue,
+  AGENT_WRITABLE_CONFIG_KEYS,
+  isAgentWritableConfigKey,
+  agentConfigKeyRefusal,
   getDefaultProviderId,
 } from "./lib/config.js";
 export { log, setLogLevel } from "./lib/logger.js";
