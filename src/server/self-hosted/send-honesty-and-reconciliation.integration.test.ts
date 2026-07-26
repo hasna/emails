@@ -26,6 +26,7 @@ import { EmailsSelfHostedStore, TenantScopedStore } from "./store.js";
 import { handleSelfHostedRequest, type SelfHostedServiceDeps } from "./service.js";
 import { AuthStore } from "./auth/store.js";
 import { RateLimiter } from "./auth/rate-limit.js";
+import { testAuthEnv } from "./auth/test-support.js";
 import type { AuthMailerConfig } from "./auth/mailer.js";
 import type { SelfHostedKeyStore } from "./keys.js";
 import type { SelfHostedSender } from "./sender.js";
@@ -45,7 +46,7 @@ const stubKeyStore: SelfHostedKeyStore = {
 };
 
 const MAILER: AuthMailerConfig = {
-  from: "noreply@hasna.studio",
+  from: "noreply@auth.example",
   verifyUrlBase: "https://app.test/verify",
   resetUrlBase: "https://app.test/reset",
   inviteUrlBase: "https://app.test/invite",
@@ -81,7 +82,7 @@ function makeDeps(sender: SelfHostedSender): SelfHostedServiceDeps {
       },
     }),
     mailer: MAILER,
-    env: process.env,
+    env: testAuthEnv(),
   };
 }
 
@@ -450,7 +451,7 @@ describe.skipIf(!pgClient)("C: uncertain sends can be found and closed out on ev
       body: {
         message_id: before.id,
         outcome: "not_sent",
-        evidence: "CloudWatch AWS/SES on 638389534677 shows zero Send in the window; no MessageId was ever returned",
+        evidence: "CloudWatch AWS/SES on 111122223333 shows zero Send in the window; no MessageId was ever returned",
       },
     });
 
@@ -494,7 +495,7 @@ describe.skipIf(!pgClient)("C: uncertain sends can be found and closed out on ev
         message_id: row.id,
         outcome: "sent",
         provider_message_id: "0100019xxxxxxxxx-ses-message-id",
-        evidence: "SES SNS Delivery event for this MessageId on account 638389534677",
+        evidence: "SES SNS Delivery event for this MessageId on account 111122223333",
       },
     });
     expect(ok.status).toBe(200);

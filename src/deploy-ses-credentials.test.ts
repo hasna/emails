@@ -128,7 +128,7 @@ describe("AWS module SES credential injection", () => {
     expect(api).toContain("secrets                = concat(");
 
     for (const other of ["worker", "migration"] as const) {
-      // The alumia-style SES principal is scoped to ses:*/sesv2:*; handing it to
+      // The SES-only principal is scoped to ses:*/sesv2:*; handing it to
       // the ingest worker would strip its SQS and inbound-bucket access and
       // silently break inbound mail.
       expect(containerDefinitions(other)).not.toContain("ses_credential_secrets");

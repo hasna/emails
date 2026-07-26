@@ -34,6 +34,7 @@ import { EmailsSelfHostedStore, TenantScopedStore } from "./store.js";
 import { handleSelfHostedRequest, type SelfHostedServiceDeps } from "./service.js";
 import { AuthStore } from "./auth/store.js";
 import { RateLimiter } from "./auth/rate-limit.js";
+import { testAuthEnv } from "./auth/test-support.js";
 import type { AuthMailerConfig } from "./auth/mailer.js";
 import type { SelfHostedKeyStore } from "./keys.js";
 import type { SelfHostedSender } from "./sender.js";
@@ -51,7 +52,7 @@ const stubKeyStore: SelfHostedKeyStore = {
 };
 
 const MAILER: AuthMailerConfig = {
-  from: "noreply@hasna.studio",
+  from: "noreply@auth.example",
   verifyUrlBase: "https://app.test/verify",
   resetUrlBase: "https://app.test/reset",
   inviteUrlBase: "https://app.test/invite",
@@ -88,7 +89,7 @@ function makeDeps(sender: SelfHostedSender): SelfHostedServiceDeps {
       },
     }),
     mailer: MAILER,
-    env: process.env,
+    env: testAuthEnv(),
   };
 }
 

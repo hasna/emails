@@ -105,7 +105,7 @@ const MESSAGE = {
   id: "msg_00000000000000000000000001",
   direction: "inbound",
   from_addr: "sender@example.com",
-  to_addrs: ["dest@hasna.com"],
+  to_addrs: ["dest@example.com"],
   subject: "hello",
   body_text: "world",
   status: "received",
@@ -122,7 +122,7 @@ const stubReads = (d: SelfHostedServiceDeps) => {
   s.listMessages = async () => ({ items: [MESSAGE], next_cursor: null });
   s.messageCounts = async () => ({ inbox: 4, sent: 2, unread: 3, total: 6, archived: 0, drafts: 0 });
   s.listMailboxes = async () => ({
-    mailboxes: [{ address: "dest@hasna.com", counts: { inbox: 1, unread: 1 } }],
+    mailboxes: [{ address: "dest@example.com", counts: { inbox: 1, unread: 1 } }],
     counts: { inbox: 1, unread: 1, sent: 0, archived: 0, total: 1 },
   });
   s.resolveMessageId = async (id: string) => ({ id });
@@ -153,7 +153,7 @@ describe("/api/v1 alias — pure path canonicalization", () => {
 describe("/api/v1 alias — route parity with /v1", () => {
   test("POST /api/v1/auth/login routes identically to /v1/auth/login", async () => {
     const result = await assertAliasParity("POST", "/auth/login", {
-      body: { email: "alias-test@hasna.com", password: "not-the-right-password" },
+      body: { email: "alias-test@example.com", password: "not-the-right-password" },
     });
     // Reached the login handler (fake client has no such user) — not the 404 fallthrough.
     expect(result.status).toBe(401);

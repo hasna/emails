@@ -13,9 +13,11 @@
 // specific SES account via the deployment role. It did not, and operators
 // trusted it — hence the explicit correction.)
 //
-// Only the From identity is auth-specific (`EMAILS_AUTH_FROM`, an address
-// verified in whichever SES account the sender actually signs into). Region
-// comes from EMAILS_AWS_REGION (falling back to AWS_REGION).
+// Only the From identity is auth-specific: `EMAILS_AUTH_FROM` is REQUIRED and
+// must name an address verified in whichever provider account the sender actually
+// signs into. This package ships no default identity — one would only be sendable
+// by whoever published the build. Region comes from EMAILS_AWS_REGION (falling
+// back to AWS_REGION).
 //
 // Every send here is BEST-EFFORT and NEVER throws (design A2 + M7): signup/reset
 // must not fail on a transient SES error — the token is already persisted and a
@@ -25,7 +27,11 @@
 import type { SelfHostedSender } from "../sender.js";
 
 export interface AuthMailerConfig {
-  /** From identity — a hasna-verified SES address (alumia account). */
+  /**
+   * From identity — a sender address verified in the operator's OWN provider
+   * account (the SES/Resend account `sender.ts` signs into). This package pins no
+   * address and no account: there is no default identity to inherit.
+   */
   from: string;
   /** Absolute base URL the client hits to verify email / reset password. */
   verifyUrlBase: string;
@@ -35,16 +41,24 @@ export interface AuthMailerConfig {
   productName: string;
 }
 
-const DEFAULT_AUTH_FROM = "noreply@hasna.studio";
+const EMAIL_ADDRESS_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 /**
- * Build the mailer config from the environment. `EMAILS_AUTH_FROM` defaults to a
- * hasna.studio identity in the alumia SES account. The link bases default to the
- * public base URL + the verify/reset endpoints; `EMAILS_AUTH_VERIFY_URL_BASE` /
+ * Build the mailer config from the environment. `EMAILS_AUTH_FROM` is REQUIRED and
+ * must be a sender identity verified in the operator's own provider account —
+ * there is no default, because a default would be an address only the publisher
+ * of the build can actually send from. The link bases default to the public base
+ * URL + the verify/reset endpoints; `EMAILS_AUTH_VERIFY_URL_BASE` /
  * `EMAILS_AUTH_RESET_URL_BASE` override them for a hosted UI.
  */
 export function buildAuthMailerConfig(env: NodeJS.ProcessEnv = process.env): AuthMailerConfig {
-  const from = env["EMAILS_AUTH_FROM"]?.trim() || DEFAULT_AUTH_FROM;
+  const from = env["EMAILS_AUTH_FROM"]?.trim();
+  if (!from) {
+    throw new Error("Emails auth mailer requires EMAILS_AUTH_FROM (a verified sender identity).");
+  }
+  if (!EMAIL_ADDRESS_RE.test(from)) {
+    throw new Error("EMAILS_AUTH_FROM must be a valid email address.");
+  }
   const publicBase = (env["EMAILS_PUBLIC_BASE_URL"]?.trim() || "").replace(/\/+$/, "");
   const verifyUrlBase =
     env["EMAILS_AUTH_VERIFY_URL_BASE"]?.trim() ||

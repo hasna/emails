@@ -88,7 +88,7 @@ describe("no hosted control plane", () => {
   it("shares one ban list with the packed-artifact scanner", () => {
     // Both guards read scripts/no-cloud-scan-lib.mjs, so the lists cannot drift.
     // Every pattern is enforced on BOTH surfaces; nothing is exempted wholesale.
-    expect(boundaryPatternTable.length).toBe(13);
+    expect(boundaryPatternTable.length).toBe(16);
     expect(sourceBoundaryPatterns.length).toBe(boundaryPatternTable.length);
     for (const entry of boundaryPatternTable) {
       // Order-independent, and correct if a third surface is ever added.
@@ -109,6 +109,14 @@ describe("no hosted control plane", () => {
       "removed mode in configuration",
       "retired inbound bucket prefix",
       "typo-squat package name",
+      // Operator-neutrality rules. They are in the SHARED table on purpose: an
+      // account id or an operator hostname leaks through Terraform, shell and
+      // container config just as easily as through TypeScript, and the source scan
+      // derives its file set from `git ls-files`, so `deploy/**`, `.tf`, `.hcl` and
+      // `.sh` are all covered with no second roots list to keep in step.
+      "vendor aws account id",
+      "vendor hostname",
+      "vendor infrastructure name",
     ]);
   });
 

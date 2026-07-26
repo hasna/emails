@@ -14,7 +14,8 @@ import { DEFAULT_TENANT_ID } from "../migrations.js";
 import { EmailsSelfHostedStore } from "../store.js";
 import { AuthStore } from "./store.js";
 import { RateLimiter } from "./rate-limit.js";
-import { buildAuthMailerConfig } from "./mailer.js";
+import { buildAuthMailerConfig, type AuthMailerConfig } from "./mailer.js";
+import { ALLOWED_EMAIL_DOMAINS_ENV } from "./allowed-email.js";
 import type { SelfHostedKeyStore } from "../keys.js";
 
 /**
@@ -56,6 +57,27 @@ export function withDefaultTenantResolution(client: TypedQueryClient): TypedQuer
   };
 }
 
+// The service ships NO default sender identity (auth/mailer.ts) and NO default
+// signup allowlist (auth/allowed-email.ts) — both are required operator config, so
+// every fixture must declare them. RFC 2606 documentation domains are used so no
+// real domain appears in the suite.
+
+/** Fixture auth sender identity (`EMAILS_AUTH_FROM` in a real deployment). */
+export const TEST_AUTH_FROM = "auth@example.com";
+
+/** Fixture signup/login/invite allowlist covering every test address. */
+export const TEST_ALLOWED_EMAIL_DOMAINS = "example.com";
+
+/** `process.env` plus the auth configuration the service requires, `extra` last. */
+export function testAuthEnv(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  return { ...process.env, [ALLOWED_EMAIL_DOMAINS_ENV]: TEST_ALLOWED_EMAIL_DOMAINS, ...extra };
+}
+
+/** The mailer config a fixture deployment would build from `testAuthEnv()`. */
+export function testAuthMailer(): AuthMailerConfig {
+  return buildAuthMailerConfig({ EMAILS_AUTH_FROM: TEST_AUTH_FROM });
+}
+
 /** The multi-tenancy auth deps for a fake-client unit test. */
 export function testAuthDeps(client: TypedQueryClient, signingSecret: string) {
   return {
@@ -63,7 +85,7 @@ export function testAuthDeps(client: TypedQueryClient, signingSecret: string) {
     keyStore: STUB_KEY_STORE,
     signingSecret,
     rateLimiter: new RateLimiter(),
-    mailer: buildAuthMailerConfig({}),
-    env: process.env,
+    mailer: testAuthMailer(),
+    env: testAuthEnv(),
   };
 }

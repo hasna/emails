@@ -118,9 +118,22 @@ function hasLabel(row, label) {
 }
 function isOutbound(row) { return String(row.direction || "").toLowerCase() === "outbound"; }
 
-// ── auth helpers (mirror the server: @hasna.<tld> allowlist, slug derivation) ──
+// ── auth helpers (mirror the server: domain allowlist, slug derivation) ─────────
+// The real server reads its allowlist from EMAILS_AUTH_ALLOWED_EMAIL_DOMAINS and
+// ships no default. This stub mirrors the SHAPE of that gate (anchored full match,
+// one domain) against the fixture domain below so client tests can exercise the
+// 403 path; V1_STUB_ALLOWED_EMAIL_DOMAIN lets a test point it somewhere else.
 function isAllowedSignupEmail(email) {
-  return /^[^@\s]+@hasna\.[a-z0-9-]+$/i.test(String(email == null ? "" : email).trim());
+  const domain = (process.env.V1_STUB_ALLOWED_EMAIL_DOMAIN || "example.com").toLowerCase();
+  // Escape EVERY metacharacter, like the server's globToDomainSource: escaping only
+  // the dot would let a configured value such as "example|evil" smuggle in an
+  // alternation that escapes both anchors. (The class is ordered so a dollar sign is
+  // never followed by an opening brace — this source is embedded in a String.raw
+  // template literal, where that pair would start an interpolation.)
+  const escaped = domain.replace(/[-.*+?^$(){}|[\]\\]/g, "\\$&");
+  const value = String(email == null ? "" : email).trim();
+  if (!value || value.length > 320) return false;
+  return new RegExp("^[^@\\s]+@" + escaped + "$", "i").test(value);
 }
 function slugify(name) {
   return String(name == null ? "" : name).trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "org";

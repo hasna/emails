@@ -21,6 +21,7 @@ import { EmailsSelfHostedStore, type TenantScopedStore } from "./store.js";
 import { handleSelfHostedRequest, type SelfHostedServiceDeps } from "./service.js";
 import { AuthStore } from "./auth/store.js";
 import { RateLimiter } from "./auth/rate-limit.js";
+import { testAuthEnv } from "./auth/test-support.js";
 import type { SelfHostedKeyStore } from "./keys.js";
 
 const SIGNING_SECRET = "test-signing-secret-do-not-use-in-prod-0123456789";
@@ -57,13 +58,13 @@ function makeDeps(): SelfHostedServiceDeps {
       },
     }),
     mailer: {
-      from: "noreply@hasna.studio",
+      from: "noreply@auth.example",
       verifyUrlBase: "https://app.test/verify",
       resetUrlBase: "https://app.test/reset",
       inviteUrlBase: "https://app.test/invite",
       productName: "Test Emails",
     },
-    env: process.env,
+    env: testAuthEnv(),
   };
 }
 

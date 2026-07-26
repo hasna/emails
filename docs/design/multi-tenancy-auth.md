@@ -922,26 +922,36 @@ idempotency/DB/API proof, local SQLite smoke, and self-hosted HTTPS smoke.
 
 ## Addendum (owner requirements, 2026-07-13)
 
-### A1. Signup/login restricted to @hasna.<tld>
-Only email addresses whose domain matches `hasna.<tld>` may sign up OR log in
-(hasna.com, hasna.xyz, hasna.studio, etc.). Enforce with a single allowlist
-predicate `isAllowedSignupEmail(email)` — regex `^[^@]+@hasna\.[a-z0-9-]+$`
-(case-insensitive), applied at BOTH `/v1/auth/signup` and `/v1/auth/login`
-(reject non-matching with a generic 403, no enumeration). Make the allowed
-pattern configurable via env (`EMAILS_AUTH_ALLOWED_EMAIL_DOMAINS`, default
-`hasna.*`) so it can widen later without a code change. Applies to invitations
-too (cannot invite a non-hasna address).
+### A1. Signup/login restricted to an operator-declared domain allowlist
+Only email addresses whose domain matches the deployment's configured allowlist
+may sign up OR log in. Enforce with a single allowlist predicate
+`isAllowedSignupEmail(email)` — a case-insensitive anchored
+`^[^@]+@(<domain>|…)$` built from the configured domain globs (`*` matches
+exactly one DNS label, so `example.*` allows `example.com` but not
+`sub.example.com`) — applied at BOTH `/v1/auth/signup` and `/v1/auth/login`
+(reject non-matching with a generic 403, no enumeration). The allowlist is
+`EMAILS_AUTH_ALLOWED_EMAIL_DOMAINS` and it is **required: there is no default
+domain**. This package is deployed by operators other than its publisher, so a
+built-in domain list would lock the auth surface to one organisation and reject
+every other operator's own staff behind the deliberately opaque 403, while a
+permit-all fallback would silently widen an existing deployment's signup surface
+on upgrade. `buildSelfHostedService` therefore asserts the variable at boot and
+refuses to start without it, naming it in the error. Applies to invitations too
+(cannot invite an address outside the allowlist).
 
-### A2. Email confirmation via the hasna-studio-alumia SES account
+### A2. Email confirmation through the operator's own sending account
 Signup creates the user `unverified`; login is refused until verified. On signup
 (and a `/v1/auth/verify-email/resend`), send a confirmation email containing a
 single-use, short-TTL, hashed-at-rest email-verification token (reuse the
 `emiv_`/token pattern) with a verify link → `/v1/auth/verify-email` marks the
-user verified. Send via the app's existing SES sender (`SelfHostedSender`) using
-the **hasna-studio-alumia** SES account (638389534677 — where the app's SES
-identities already live), from a hasna-verified from-address
-(`EMAILS_AUTH_FROM`, e.g. `noreply@hasna.studio`). The server runs in
-xyz-infra, so sending via alumia SES is cross-account: prefer the app's normal
-outbound path (which already targets alumia SES) rather than new creds; if the
-send path needs an explicit account/region, thread it through. Never block
-signup on a transient send failure — record the token, surface a resend.
+user verified. Send via the app's existing sender (`SelfHostedSender`), which
+signs with `EMAILS_SES_ACCESS_KEY_ID`/`EMAILS_SES_SECRET_ACCESS_KEY` when both
+are present and otherwise with the deployment IAM role of whichever account the
+process runs in — there is no cross-account assume-role in this codebase, so
+which account is reached is purely an operator/deployment decision. The from
+identity is `EMAILS_AUTH_FROM`, which is **required and has no default**: it must
+be an address verified in the operator's own sending account. If a deployment
+sends from an account other than the one it runs in, that is an operator concern
+(credentials or a verified identity in that account), not something this package
+encodes. Never block signup on a transient send failure — record the token,
+surface a resend.

@@ -433,7 +433,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .option("--limit <n>", "Max results", "20")
     .option("--offset <n>", "Skip first N emails", "0")
     .option("--search <query>", "Filter by subject/from/to/body")
-    .option("--to <addr-or-domain>", "Only mail addressed to this address or domain (e.g. el@elyratelier.com or elyratelier.com)")
+    .option("--to <addr-or-domain>", "Only mail addressed to this address or domain (e.g. you@example.com or example.com)")
     .option("--unread", "Only unread mail")
     .option("--read", "Only read mail")
     .option("--starred", "Only starred mail")

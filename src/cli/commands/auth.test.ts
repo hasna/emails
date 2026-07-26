@@ -4,7 +4,7 @@
 //
 // Coverage: signup → unverified (no token persisted, verification email issued),
 // login refused until verified, verify-email, login success persists a session
-// token that authenticates whoami, the @hasna.<tld> restriction (403), the
+// token that authenticates whoami, the email-domain allowlist restriction (403), the
 // needs_tenant → switch-tenant flow, logout, bootstrap, and tenant-scoped keys.
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { Command } from "commander";
@@ -78,33 +78,33 @@ describe("auth CLI — self-hosted /v1", () => {
   it("signup creates an unverified account, issues a verify token, persists no session", async () => {
     const { data } = await runAuth([
       "auth", "signup",
-      "--email", "alice@hasna.com", "--password", "s3cret-pw",
+      "--email", "alice@example.com", "--password", "s3cret-pw",
       "--tenant-name", "Acme", "--tenant-slug", "acme",
     ]);
     expect((data as { verification_required?: boolean }).verification_required).toBe(true);
     expect(process.env["EMAILS_SESSION_TOKEN"]).toBeUndefined();
     // A verification token exists to complete the flow.
-    expect(await stub.verifyToken("alice@hasna.com")).toBeTruthy();
+    expect(await stub.verifyToken("alice@example.com")).toBeTruthy();
   });
 
-  it("signup rejects a non-@hasna address with a clear 403 message", async () => {
+  it("signup rejects an address outside the allowed domains with a clear 403 message", async () => {
     const result = await runAuthExpectingExit([
       "auth", "signup",
       "--email", "mallory@gmail.com", "--password", "pw",
       "--tenant-name", "Evil", "--tenant-slug", "evil",
     ]);
     expect(result.error).toBe("process.exit:1");
-    expect(result.stderr).toContain("@hasna.");
+    expect(result.stderr).toContain("EMAILS_AUTH_ALLOWED_EMAIL_DOMAINS");
   });
 
   it("login is refused until the email is verified", async () => {
     await runAuth([
       "auth", "signup",
-      "--email", "bob@hasna.com", "--password", "pw-bob",
+      "--email", "bob@example.com", "--password", "pw-bob",
       "--tenant-name", "Bobco", "--tenant-slug", "bobco",
     ]);
     clearSessionEnv();
-    const result = await runAuthExpectingExit(["auth", "login", "--email", "bob@hasna.com", "--password", "pw-bob"]);
+    const result = await runAuthExpectingExit(["auth", "login", "--email", "bob@example.com", "--password", "pw-bob"]);
     expect(result.error).toBe("process.exit:1");
     expect(result.stderr.toLowerCase()).toContain("verif");
     expect(process.env["EMAILS_SESSION_TOKEN"]).toBeUndefined();
@@ -113,16 +113,16 @@ describe("auth CLI — self-hosted /v1", () => {
   it("verify-email then login persists a session token that authenticates whoami", async () => {
     await runAuth([
       "auth", "signup",
-      "--email", "carol@hasna.com", "--password", "pw-carol",
+      "--email", "carol@example.com", "--password", "pw-carol",
       "--tenant-name", "Carol Co", "--tenant-slug", "carolco",
     ]);
-    const token = await stub.verifyToken("carol@hasna.com");
+    const token = await stub.verifyToken("carol@example.com");
     expect(token).toBeTruthy();
     const verify = await runAuth(["auth", "verify-email", token!]);
     expect((verify.data as { verified?: boolean }).verified).toBe(true);
     clearSessionEnv();
 
-    const login = await runAuth(["auth", "login", "--email", "carol@hasna.com", "--password", "pw-carol"]);
+    const login = await runAuth(["auth", "login", "--email", "carol@example.com", "--password", "pw-carol"]);
     const loginData = login.data as { logged_in?: boolean; role?: string; tenant?: { slug?: string } };
     expect(loginData.logged_in).toBe(true);
     expect(loginData.role).toBe("owner");
@@ -136,21 +136,21 @@ describe("auth CLI — self-hosted /v1", () => {
     const who = await runAuth(["auth", "whoami"]);
     const id = who.data as { principalType?: string; user?: { email?: string }; tenant?: { slug?: string }; role?: string };
     expect(id.principalType).toBe("user");
-    expect(id.user?.email).toBe("carol@hasna.com");
+    expect(id.user?.email).toBe("carol@example.com");
     expect(id.tenant?.slug).toBe("carolco");
     expect(id.role).toBe("owner");
   });
 
   it("login with a wrong password fails with a generic message", async () => {
-    await signupAndVerify("dave@hasna.com", "right-pw", "Daveco", "daveco");
-    const result = await runAuthExpectingExit(["auth", "login", "--email", "dave@hasna.com", "--password", "wrong-pw"]);
+    await signupAndVerify("dave@example.com", "right-pw", "Daveco", "daveco");
+    const result = await runAuthExpectingExit(["auth", "login", "--email", "dave@example.com", "--password", "wrong-pw"]);
     expect(result.error).toBe("process.exit:1");
     expect(result.stderr).toContain("Invalid email or password");
   });
 
   it("login prompts for a tenant when the user belongs to several (non-interactive → clear error)", async () => {
     await stub.seedUser({
-      email: "multi@hasna.com",
+      email: "multi@example.com",
       password: "pw-multi",
       verified: true,
       tenants: [
@@ -158,7 +158,7 @@ describe("auth CLI — self-hosted /v1", () => {
         { slug: "two", name: "Org Two", role: "admin" },
       ],
     });
-    const result = await runAuthExpectingExit(["auth", "login", "--email", "multi@hasna.com", "--password", "pw-multi"]);
+    const result = await runAuthExpectingExit(["auth", "login", "--email", "multi@example.com", "--password", "pw-multi"]);
     expect(result.error).toBe("process.exit:1");
     expect(result.stderr).toContain("--tenant");
     expect(result.stderr).toContain("one");
@@ -167,7 +167,7 @@ describe("auth CLI — self-hosted /v1", () => {
 
   it("login --tenant selects the org directly for a multi-tenant user", async () => {
     await stub.seedUser({
-      email: "multi2@hasna.com",
+      email: "multi2@example.com",
       password: "pw",
       verified: true,
       tenants: [
@@ -175,7 +175,7 @@ describe("auth CLI — self-hosted /v1", () => {
         { slug: "beta", name: "Beta", role: "member" },
       ],
     });
-    const login = await runAuth(["auth", "login", "--email", "multi2@hasna.com", "--password", "pw", "--tenant", "beta"]);
+    const login = await runAuth(["auth", "login", "--email", "multi2@example.com", "--password", "pw", "--tenant", "beta"]);
     const data = login.data as { logged_in?: boolean; tenant?: { slug?: string }; role?: string };
     expect(data.logged_in).toBe(true);
     expect(data.tenant?.slug).toBe("beta");
@@ -184,7 +184,7 @@ describe("auth CLI — self-hosted /v1", () => {
 
   it("switch-tenant mints a new session for another org the user belongs to", async () => {
     await stub.seedUser({
-      email: "switch@hasna.com",
+      email: "switch@example.com",
       password: "pw",
       verified: true,
       tenants: [
@@ -192,7 +192,7 @@ describe("auth CLI — self-hosted /v1", () => {
         { slug: "work", name: "Work", role: "admin" },
       ],
     });
-    await runAuth(["auth", "login", "--email", "switch@hasna.com", "--password", "pw", "--tenant", "home"]);
+    await runAuth(["auth", "login", "--email", "switch@example.com", "--password", "pw", "--tenant", "home"]);
     const before = process.env["EMAILS_SESSION_TOKEN"];
     const switched = await runAuth(["auth", "switch-tenant", "work"]);
     expect((switched.data as { switched?: boolean }).switched).toBe(true);
@@ -205,16 +205,16 @@ describe("auth CLI — self-hosted /v1", () => {
   });
 
   it("switch-tenant to a non-member org is refused", async () => {
-    await signupAndVerify("solo@hasna.com", "pw", "Solo", "solo");
-    await runAuth(["auth", "login", "--email", "solo@hasna.com", "--password", "pw"]);
+    await signupAndVerify("solo@example.com", "pw", "Solo", "solo");
+    await runAuth(["auth", "login", "--email", "solo@example.com", "--password", "pw"]);
     const result = await runAuthExpectingExit(["auth", "switch-tenant", "nope"]);
     expect(result.error).toBe("process.exit:1");
     expect(result.stderr).toContain("nope");
   });
 
   it("logout clears the stored session token", async () => {
-    await signupAndVerify("gone@hasna.com", "pw", "Goneco", "goneco");
-    await runAuth(["auth", "login", "--email", "gone@hasna.com", "--password", "pw"]);
+    await signupAndVerify("gone@example.com", "pw", "Goneco", "goneco");
+    await runAuth(["auth", "login", "--email", "gone@example.com", "--password", "pw"]);
     expect(process.env["EMAILS_SESSION_TOKEN"]).toBeTruthy();
     const out = await runAuth(["auth", "logout"]);
     expect((out.data as { logged_out?: boolean }).logged_out).toBe(true);
@@ -224,13 +224,13 @@ describe("auth CLI — self-hosted /v1", () => {
   it("verify-email --resend issues a fresh token without erroring", async () => {
     await runAuth([
       "auth", "signup",
-      "--email", "resend@hasna.com", "--password", "pw",
+      "--email", "resend@example.com", "--password", "pw",
       "--tenant-name", "Resendco", "--tenant-slug", "resendco",
     ]);
     clearSessionEnv();
-    const out = await runAuth(["auth", "verify-email", "--resend", "--email", "resend@hasna.com"]);
+    const out = await runAuth(["auth", "verify-email", "--resend", "--email", "resend@example.com"]);
     expect((out.data as { resent?: boolean }).resent).toBe(true);
-    expect(await stub.verifyToken("resend@hasna.com")).toBeTruthy();
+    expect(await stub.verifyToken("resend@example.com")).toBeTruthy();
   });
 
   it("verify-email with a bad token fails clearly", async () => {
@@ -240,10 +240,10 @@ describe("auth CLI — self-hosted /v1", () => {
   });
 
   it("bootstrap uses the operator API key to create the first owner", async () => {
-    const out = await runAuth(["auth", "bootstrap", "--email", "operator@hasna.com", "--password", "pw-op"]);
+    const out = await runAuth(["auth", "bootstrap", "--email", "operator@example.com", "--password", "pw-op"]);
     expect((out.data as { bootstrapped?: boolean }).bootstrapped).toBe(true);
     // A second bootstrap is refused (owner already exists).
-    const again = await runAuthExpectingExit(["auth", "bootstrap", "--email", "other@hasna.com", "--password", "pw"]);
+    const again = await runAuthExpectingExit(["auth", "bootstrap", "--email", "other@example.com", "--password", "pw"]);
     expect(again.error).toBe("process.exit:1");
     expect(again.stderr.toLowerCase()).toContain("owner");
   });
@@ -276,12 +276,12 @@ describe("keys CLI — tenant-scoped /v1/keys", () => {
 
   it("keys are scoped to the active tenant of a user session", async () => {
     await stub.seedUser({
-      email: "keys@hasna.com",
+      email: "keys@example.com",
       password: "pw",
       verified: true,
       tenants: [{ slug: "keysorg", name: "Keys Org", role: "owner" }],
     });
-    await runAuth(["auth", "login", "--email", "keys@hasna.com", "--password", "pw", "--tenant", "keysorg"]);
+    await runAuth(["auth", "login", "--email", "keys@example.com", "--password", "pw", "--tenant", "keysorg"]);
     await runAuth(["keys", "create", "--scope", "emails:read"]);
     const listed = await runAuth(["keys", "list"]);
     expect((listed.data as unknown[]).length).toBe(1);
