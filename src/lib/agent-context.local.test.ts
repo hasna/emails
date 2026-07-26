@@ -19,7 +19,7 @@
 //    — a command that throws notImplementedAnywhere() in every mode. Advice that
 //    refuses is the same defect class as a fabricated count.
 
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { closeDatabase, getDatabase, resetDatabase } from "../db/database.js";
 import { createProvider } from "../db/providers.local.js";
 import { createDomain } from "../db/domains.local.js";
@@ -30,10 +30,22 @@ import { statusGapClass } from "./status-availability.js";
 import { isCommandAvailableInMode } from "./status-commands.js";
 import { cliRefusalFor } from "../test-support/cli-refusals.js";
 
+let INHERITED_PROCESS_ENV: NodeJS.ProcessEnv;
+function captureInheritedProcessEnv(): void {
+  INHERITED_PROCESS_ENV = { ...process.env };
+}
+function restoreInheritedProcessEnv(): void {
+  for (const key of Object.keys(process.env)) {
+    if (!Object.prototype.hasOwnProperty.call(INHERITED_PROCESS_ENV, key)) delete process.env[key];
+  }
+  Object.assign(process.env, INHERITED_PROCESS_ENV);
+}
+
 const SELF_HOSTED_ENV = ["EMAILS_SELF_HOSTED_URL", "EMAILS_SELF_HOSTED_API_KEY", "EMAILS_CLIENT_ENV_SECRET"] as const;
 const saved = new Map<string, string | undefined>();
 
 beforeEach(() => {
+  captureInheritedProcessEnv();
   for (const key of SELF_HOSTED_ENV) {
     saved.set(key, process.env[key]);
     delete process.env[key];
@@ -52,6 +64,7 @@ afterEach(() => {
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;
   }
+  restoreInheritedProcessEnv();
 });
 
 function seed(): void {

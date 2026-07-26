@@ -1,10 +1,21 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeAll, beforeEach, afterEach, afterAll } from "bun:test";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runDiagnostics, formatDiagnostics } from "./doctor.js";
 import type { DoctorCheck } from "./doctor.js";
 import { resetSelfHostedConfigCache } from "../db/self-hosted-store.js";
+
+let INHERITED_PROCESS_ENV: NodeJS.ProcessEnv;
+function captureInheritedProcessEnv(): void {
+  INHERITED_PROCESS_ENV = { ...process.env };
+}
+function restoreInheritedProcessEnv(): void {
+  for (const key of Object.keys(process.env)) {
+    if (!Object.prototype.hasOwnProperty.call(INHERITED_PROCESS_ENV, key)) delete process.env[key];
+  }
+  Object.assign(process.env, INHERITED_PROCESS_ENV);
+}
 
 // This client is self-hosted-ONLY: runDiagnostics no longer opens a local SQLite
 // database or counts providers/domains/addresses/contacts/templates (those live
@@ -44,6 +55,7 @@ function configureSelfHosted(): void {
 }
 
 beforeEach(() => {
+  captureInheritedProcessEnv();
   previousHome = process.env["HOME"];
   tempHome = mkdtempSync(join(tmpdir(), "emails-doctor-test-home-"));
   process.env["HOME"] = tempHome;
@@ -59,6 +71,7 @@ afterEach(() => {
   if (tempHome) rmSync(tempHome, { recursive: true, force: true });
   tempHome = undefined;
   previousHome = undefined;
+  restoreInheritedProcessEnv();
 });
 
 describe("runDiagnostics", () => {

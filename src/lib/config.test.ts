@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeAll, beforeEach, afterEach, afterAll } from "bun:test";
 import { chmodSync, mkdirSync, rmSync, existsSync, statSync, writeFileSync } from "fs";
 import { join } from "path";
 import {
@@ -14,9 +14,21 @@ import {
 } from "./config.js";
 import { resetSelfHostedConfigCache } from "../db/self-hosted-store.js";
 
+let INHERITED_PROCESS_ENV: NodeJS.ProcessEnv;
+let origHome: string | undefined;
+function captureInheritedProcessEnv(): void {
+  INHERITED_PROCESS_ENV = { ...process.env };
+  origHome = process.env.HOME;
+}
+function restoreInheritedProcessEnv(): void {
+  for (const key of Object.keys(process.env)) {
+    if (!Object.prototype.hasOwnProperty.call(INHERITED_PROCESS_ENV, key)) delete process.env[key];
+  }
+  Object.assign(process.env, INHERITED_PROCESS_ENV);
+}
+
 // Use a temp dir unique per test run to isolate from real ~/.hasna/emails
 const TMP_HOME = join("/tmp", `emails-config-test-${process.pid}`);
-const origHome = process.env.HOME;
 
 // Endpoint credentials alone never select self_hosted mode. Tests explicitly
 // set EMAILS_MODE=self_hosted when exercising the remote attachment policy.
@@ -24,6 +36,7 @@ const SELF_HOSTED_URL = "https://emails.config.test";
 const SELF_HOSTED_KEY = "config-test-api-key";
 
 beforeEach(() => {
+  captureInheritedProcessEnv();
   mkdirSync(TMP_HOME, { recursive: true });
   process.env.HOME = TMP_HOME;
   process.env.EMAILS_SELF_HOSTED_URL = SELF_HOSTED_URL;
@@ -39,6 +52,7 @@ afterEach(() => {
   delete process.env.EMAILS_SELF_HOSTED_URL;
   delete process.env.EMAILS_SELF_HOSTED_API_KEY;
   resetSelfHostedConfigCache();
+  restoreInheritedProcessEnv();
 });
 
 describe("config", () => {

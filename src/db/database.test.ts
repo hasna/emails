@@ -1,11 +1,23 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeAll, beforeEach, afterEach, afterAll } from "bun:test";
 import { chmodSync, existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getDatabase, closeDatabase, resetDatabase, uuid, now, resolvePartialId, resolvePartialIdOrThrow, listPartialIdMatches, runInTransaction } from "./database.js";
 import { sqlEmailAddress, sqlEmailDomain } from "./email-address-sql.js";
 
+let INHERITED_PROCESS_ENV: NodeJS.ProcessEnv;
+function captureInheritedProcessEnv(): void {
+  INHERITED_PROCESS_ENV = { ...process.env };
+}
+function restoreInheritedProcessEnv(): void {
+  for (const key of Object.keys(process.env)) {
+    if (!Object.prototype.hasOwnProperty.call(INHERITED_PROCESS_ENV, key)) delete process.env[key];
+  }
+  Object.assign(process.env, INHERITED_PROCESS_ENV);
+}
+
 beforeEach(() => {
+  captureInheritedProcessEnv();
   process.env["EMAILS_DB_PATH"] = ":memory:";
   resetDatabase();
 });
@@ -13,6 +25,7 @@ beforeEach(() => {
 afterEach(() => {
   closeDatabase();
   delete process.env["EMAILS_DB_PATH"];
+  restoreInheritedProcessEnv();
 });
 
 describe("getDatabase", () => {

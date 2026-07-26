@@ -16,6 +16,17 @@ import { listProviderSummaries } from "./providers.js";
 import { listScheduledEmails } from "./scheduled.js";
 import { listEmails, searchEmails } from "./emails.js";
 
+let INHERITED_PROCESS_ENV: NodeJS.ProcessEnv;
+function captureInheritedProcessEnv(): void {
+  INHERITED_PROCESS_ENV = { ...process.env };
+}
+function restoreInheritedProcessEnv(): void {
+  for (const key of Object.keys(process.env)) {
+    if (!Object.prototype.hasOwnProperty.call(INHERITED_PROCESS_ENV, key)) delete process.env[key];
+  }
+  Object.assign(process.env, INHERITED_PROCESS_ENV);
+}
+
 const SERVER_CODE = `
 const server = Bun.serve({ port: 0, fetch(req) {
   const p = new URL(req.url).pathname;
@@ -58,6 +69,7 @@ beforeAll(async () => {
 afterAll(() => proc?.kill());
 
 beforeEach(() => {
+  captureInheritedProcessEnv();
   process.env.EMAILS_MODE = "self_hosted";
   process.env.EMAILS_SELF_HOSTED_URL = baseUrl;
   process.env.EMAILS_SELF_HOSTED_API_KEY = "test_key";
@@ -69,6 +81,7 @@ afterEach(() => {
   delete process.env.EMAILS_SELF_HOSTED_URL;
   delete process.env.EMAILS_SELF_HOSTED_API_KEY;
   resetSelfHostedConfigCache();
+  restoreInheritedProcessEnv();
 });
 
 describe("resource repos route reads to selfHosted in selfHosted mode", () => {

@@ -1,5 +1,8 @@
-import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import type { Subprocess } from "bun";
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { join, relative } from "node:path";
+import ts from "typescript";
 import {
   SelfHostedHttpError,
   selfHostedStoreFor,
@@ -26,6 +29,370 @@ import { ApiError, EmailsSelfHostClient } from "./selfhost.js";
 
 const RESPONSE_SECRET_MARKER = "credential-like-response-body-must-not-leak";
 type JsonSchema = Record<string, unknown>;
+
+interface EnvCleanupFinding {
+  file: string;
+  line: number;
+  target: string;
+}
+
+function containsProcessEnvAccess(node: ts.Node): boolean {
+  let found = false;
+  const visit = (child: ts.Node): void => {
+    if (
+      (ts.isExpression(child) && processEnvTarget(child) !== null)
+      || (ts.isExpression(child) && isProcessEnvExpression(child))
+    ) {
+      found = true;
+      return;
+    }
+    ts.forEachChild(child, visit);
+  };
+  visit(node);
+  return found;
+}
+
+function processEnvTarget(expression: ts.Expression): string | null {
+  if (
+    ts.isPropertyAccessExpression(expression)
+    && ts.isPropertyAccessExpression(expression.expression)
+    && ts.isIdentifier(expression.expression.expression)
+    && expression.expression.expression.text === "process"
+    && expression.expression.name.text === "env"
+  ) {
+    return expression.name.text;
+  }
+  if (
+    ts.isElementAccessExpression(expression)
+    && ts.isPropertyAccessExpression(expression.expression)
+    && ts.isIdentifier(expression.expression.expression)
+    && expression.expression.expression.text === "process"
+    && expression.expression.name.text === "env"
+  ) {
+    if (expression.argumentExpression && ts.isStringLiteralLike(expression.argumentExpression)) {
+      return expression.argumentExpression.text;
+    }
+    return expression.argumentExpression?.getText() ?? "*";
+  }
+  return null;
+}
+
+function isProcessEnvExpression(expression: ts.Expression): boolean {
+  return (
+    ts.isPropertyAccessExpression(expression)
+    && ts.isIdentifier(expression.expression)
+    && expression.expression.text === "process"
+    && expression.name.text === "env"
+  );
+}
+
+function containsMatchingEnvAssignment(node: ts.Node | undefined, target: string): boolean {
+  if (!node) return false;
+  let matched = false;
+  const visit = (child: ts.Node): void => {
+    if (
+      ts.isBinaryExpression(child)
+      && child.operatorToken.kind === ts.SyntaxKind.EqualsToken
+      && processEnvTarget(child.left as ts.Expression) === target
+    ) {
+      matched = true;
+      return;
+    }
+    ts.forEachChild(child, visit);
+  };
+  visit(node);
+  return matched;
+}
+
+function isExactRestoreDelete(node: ts.DeleteExpression, cleanupRoot: ts.Node): boolean {
+  const target = processEnvTarget(node.expression);
+  if (!target) return true;
+  for (let current = node.parent; current && current !== cleanupRoot; current = current.parent) {
+    if (
+      ts.isIfStatement(current)
+      && current.thenStatement.pos <= node.pos
+      && node.end <= current.thenStatement.end
+      && /\bundefined\b/.test(current.expression.getText())
+      && containsMatchingEnvAssignment(current.elseStatement, target)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function environmentCleanupFindings(sourceText: string, file = "fixture.test.ts"): EnvCleanupFinding[] {
+  const source = ts.createSourceFile(file, sourceText, ts.ScriptTarget.Latest, true);
+  const functions = new Map<string, ts.FunctionLikeDeclaration>();
+  const cleanupRoots: ts.FunctionLikeDeclaration[] = [];
+  const beforeEachRoots: ts.FunctionLikeDeclaration[] = [];
+  const afterEachRoots: ts.FunctionLikeDeclaration[] = [];
+
+  const registerFunctions = (node: ts.Node): void => {
+    if (ts.isFunctionDeclaration(node) && node.name) functions.set(node.name.text, node);
+    if (
+      ts.isVariableDeclaration(node)
+      && ts.isIdentifier(node.name)
+      && node.initializer
+      && (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer))
+    ) {
+      functions.set(node.name.text, node.initializer);
+    }
+    if (
+      ts.isCallExpression(node)
+      && ts.isIdentifier(node.expression)
+      && (
+        node.expression.text === "beforeEach"
+        || node.expression.text === "afterEach"
+        || node.expression.text === "afterAll"
+      )
+    ) {
+      const callback = node.arguments[0];
+      if (callback && (ts.isArrowFunction(callback) || ts.isFunctionExpression(callback))) {
+        if (node.expression.text === "beforeEach") beforeEachRoots.push(callback);
+        else cleanupRoots.push(callback);
+        if (node.expression.text === "afterEach") afterEachRoots.push(callback);
+      } else if (callback && ts.isIdentifier(callback)) {
+        const referenced = functions.get(callback.text);
+        if (referenced) {
+          if (node.expression.text === "beforeEach") beforeEachRoots.push(referenced);
+          else cleanupRoots.push(referenced);
+          if (node.expression.text === "afterEach") afterEachRoots.push(referenced);
+        }
+      }
+    }
+    ts.forEachChild(node, registerFunctions);
+  };
+  registerFunctions(source);
+
+  const inheritedSnapshots = new Set<string>();
+  const visitedSnapshotFunctions = new Set<ts.FunctionLikeDeclaration>();
+  const registerSnapshotAssignments = (root: ts.FunctionLikeDeclaration): void => {
+    if (visitedSnapshotFunctions.has(root)) return;
+    visitedSnapshotFunctions.add(root);
+    const visit = (node: ts.Node): void => {
+      if (
+        ts.isBinaryExpression(node)
+        && node.operatorToken.kind === ts.SyntaxKind.EqualsToken
+        && ts.isIdentifier(node.left)
+        && ts.isObjectLiteralExpression(node.right)
+        && node.right.properties.some(
+          (property) => ts.isSpreadAssignment(property) && isProcessEnvExpression(property.expression),
+        )
+      ) inheritedSnapshots.add(node.left.text);
+      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
+        const referenced = functions.get(node.expression.text);
+        if (referenced) registerSnapshotAssignments(referenced);
+      }
+      ts.forEachChild(node, visit);
+    };
+    if (root.body) visit(root.body);
+  };
+  for (const root of beforeEachRoots) registerSnapshotAssignments(root);
+
+  const hasWholeProcessEnvRestore = (root: ts.FunctionLikeDeclaration): boolean => {
+    let guardedDelete = false;
+    let assignedSnapshot = false;
+    const visitedFunctions = new Set<ts.FunctionLikeDeclaration>();
+    const visitFunction = (cleanup: ts.FunctionLikeDeclaration): void => {
+      if (visitedFunctions.has(cleanup)) return;
+      visitedFunctions.add(cleanup);
+      const visit = (node: ts.Node): void => {
+        if (ts.isDeleteExpression(node) && processEnvTarget(node.expression)) {
+          for (let current = node.parent; current && current !== cleanup; current = current.parent) {
+            if (
+              ts.isIfStatement(current)
+              && [...inheritedSnapshots].some((name) => current.expression.getText().includes(name))
+            ) {
+              guardedDelete = true;
+              break;
+            }
+          }
+        }
+        if (
+          ts.isCallExpression(node)
+          && ts.isPropertyAccessExpression(node.expression)
+          && ts.isIdentifier(node.expression.expression)
+          && node.expression.expression.text === "Object"
+          && node.expression.name.text === "assign"
+          && node.arguments[0]
+          && isProcessEnvExpression(node.arguments[0])
+          && node.arguments[1]
+          && ts.isIdentifier(node.arguments[1])
+          && inheritedSnapshots.has(node.arguments[1].text)
+        ) {
+          assignedSnapshot = true;
+        }
+        if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
+          const referenced = functions.get(node.expression.text);
+          if (referenced) visitFunction(referenced);
+        }
+        ts.forEachChild(node, visit);
+      };
+      if (cleanup.body) visit(cleanup.body);
+    };
+    visitFunction(root);
+    return guardedDelete && assignedSnapshot;
+  };
+  const wholeProcessEnvRestoreRoots = new Set(
+    afterEachRoots.filter(hasWholeProcessEnvRestore),
+  );
+
+  const findings: EnvCleanupFinding[] = [];
+  const visited = new Set<ts.FunctionLikeDeclaration>();
+  const inspectCleanup = (cleanup: ts.FunctionLikeDeclaration): void => {
+    if (visited.has(cleanup)) return;
+    visited.add(cleanup);
+    const visit = (node: ts.Node): void => {
+      if (ts.isDeleteExpression(node)) {
+        const target = processEnvTarget(node.expression);
+        if (target && !isExactRestoreDelete(node, cleanup)) {
+          findings.push({
+            file,
+            line: source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1,
+            target,
+          });
+        }
+      }
+      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
+        const referenced = functions.get(node.expression.text);
+        if (referenced) inspectCleanup(referenced);
+      }
+      ts.forEachChild(node, visit);
+    };
+    if (cleanup.body) visit(cleanup.body);
+  };
+  for (const cleanup of cleanupRoots) {
+    if (!wholeProcessEnvRestoreRoots.has(cleanup)) inspectCleanup(cleanup);
+  }
+  return findings;
+}
+
+function moduleScopeEnvSnapshotFindings(
+  sourceText: string,
+  file = "fixture.test.ts",
+): EnvCleanupFinding[] {
+  const source = ts.createSourceFile(file, sourceText, ts.ScriptTarget.Latest, true);
+  let mutatesProcessEnv = false;
+  const detectMutation = (node: ts.Node): void => {
+    if (
+      (ts.isDeleteExpression(node) && processEnvTarget(node.expression) !== null)
+      || (
+        ts.isBinaryExpression(node)
+        && node.operatorToken.kind === ts.SyntaxKind.EqualsToken
+        && processEnvTarget(node.left as ts.Expression) !== null
+      )
+    ) {
+      mutatesProcessEnv = true;
+    }
+    ts.forEachChild(node, detectMutation);
+  };
+  detectMutation(source);
+  if (!mutatesProcessEnv) return [];
+
+  const findings: EnvCleanupFinding[] = [];
+  for (const statement of source.statements) {
+    if (!ts.isVariableStatement(statement)) continue;
+    for (const declaration of statement.declarationList.declarations) {
+      if (!declaration.initializer || !containsProcessEnvAccess(declaration.initializer)) continue;
+      findings.push({
+        file,
+        line: source.getLineAndCharacterOfPosition(declaration.getStart(source)).line + 1,
+        target: declaration.name.getText(source),
+      });
+    }
+  }
+  return findings;
+}
+
+function applyEnvInFinallyFindings(
+  sourceText: string,
+  file = "fixture.test.ts",
+): EnvCleanupFinding[] {
+  const source = ts.createSourceFile(file, sourceText, ts.ScriptTarget.Latest, true);
+  const findings: EnvCleanupFinding[] = [];
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isCallExpression(node)
+      && ts.isPropertyAccessExpression(node.expression)
+      && node.expression.name.text === "applyEnv"
+    ) {
+      for (let current = node.parent; current; current = current.parent) {
+        if (
+          ts.isBlock(current)
+          && ts.isTryStatement(current.parent)
+          && current.parent.finallyBlock === current
+        ) {
+          findings.push({
+            file,
+            line: source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1,
+            target: node.expression.getText(source),
+          });
+          break;
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return findings;
+}
+
+function walkSourceFiles(root: string, includeTests: boolean): string[] {
+  const files: string[] = [];
+  const visit = (directory: string): void => {
+    for (const name of readdirSync(directory)) {
+      const path = join(directory, name);
+      const stat = statSync(path);
+      if (stat.isDirectory()) {
+        visit(path);
+      } else if (/\.[cm]?[jt]sx?$/.test(name)) {
+        const isTest = /(?:\.test|_test|\.spec|_spec)\./.test(name);
+        if (isTest === includeTests) files.push(path);
+      }
+    }
+  };
+  visit(root);
+  return files.sort();
+}
+
+function activeRuntimeEnvKeys(repoRoot: string): string[] {
+  const keyPattern =
+    /["'`]((?:HASNA_)?(?:EMAILS|MAILERY)_[A-Z0-9_]+|AWS_[A-Z0-9_]+|CLOUDFLARE_[A-Z0-9_]+|RESEND_[A-Z0-9_]+|DATABASE_URL|MCP_HTTP_PORT|PORT|HOST|HOME|USERPROFILE|FORCE_COLOR|NO_COLOR|ECS_CONTAINER_METADATA_URI_V4)["'`]/g;
+  const keys = new Set<string>();
+  for (const path of walkSourceFiles(join(repoRoot, "src"), false)) {
+    const source = readFileSync(path, "utf8");
+    for (const match of source.matchAll(keyPattern)) keys.add(match[1]!);
+    const syntax = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true);
+    const visit = (node: ts.Node): void => {
+      if (
+        ts.isPropertyAccessExpression(node)
+        && isProcessEnvExpression(node.expression)
+      ) {
+        keys.add(node.name.text);
+      } else if (
+        ts.isElementAccessExpression(node)
+        && isProcessEnvExpression(node.expression)
+        && node.argumentExpression
+        && ts.isStringLiteralLike(node.argumentExpression)
+      ) {
+        keys.add(node.argumentExpression.text);
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(syntax);
+  }
+  return [...keys].sort();
+}
+
+function hermeticHarnessEnvKeys(source: string): Set<string> {
+  const keys = new Set<string>();
+  for (const match of source.matchAll(/(?:^|\s)-u\s+([A-Z][A-Z0-9_]*)/g)) keys.add(match[1]!);
+  for (const match of source.matchAll(/^\s*([A-Z][A-Z0-9_]*)=(?:"[^"]*"|'[^']*'|[^\s\\]+)\s*\\?$/gm)) {
+    keys.add(match[1]!);
+  }
+  return keys;
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -227,17 +594,15 @@ function applySelfHostedEnv(): void {
 // through the mode resolver to EMAILS_CLIENT_ENV_SECRET or the
 // on-disk config, which resolves to self_hosted and fails unrelated suites.
 // Restore the values this process started with instead.
+const MODE_ENV_KEY = ["EMAILS", "MODE"].join("_");
 const SELF_HOSTED_ENV_KEYS = [
-  "EMAILS_MODE",
+  MODE_ENV_KEY,
   "EMAILS_SELF_HOSTED_URL",
   "EMAILS_SELF_HOSTED_API_KEY",
   "EMAILS_SELF_HOSTED_HTTP_MAX_RESPONSE_BYTES",
 ] as const;
 
-// Captured at module load, before any test in this file mutates them.
-const INHERITED_SELF_HOSTED_ENV: Record<string, string | undefined> = Object.fromEntries(
-  SELF_HOSTED_ENV_KEYS.map((key) => [key, process.env[key]]),
-);
+let INHERITED_SELF_HOSTED_ENV: Record<string, string | undefined>;
 
 function clearSelfHostedEnv(): void {
   for (const key of SELF_HOSTED_ENV_KEYS) {
@@ -269,7 +634,114 @@ afterAll(() => {
   server?.kill();
 });
 
+beforeEach(() => {
+  INHERITED_SELF_HOSTED_ENV = Object.fromEntries(
+    SELF_HOSTED_ENV_KEYS.map((key) => [key, process.env[key]]),
+  );
+});
 afterEach(clearSelfHostedEnv);
+
+describe("shared-process environment hygiene", () => {
+  test("rejects delete-to-undefined cleanup while accepting exact prior-value restoration", () => {
+    const unsafe = `
+      import { afterEach } from "bun:test";
+      afterEach(() => {
+        delete process.env.${MODE_ENV_KEY};
+      });
+    `;
+    expect(environmentCleanupFindings(unsafe)).toEqual([
+      { file: "fixture.test.ts", line: 4, target: MODE_ENV_KEY },
+    ]);
+
+    const safe = `
+      import { afterEach, beforeEach } from "bun:test";
+      let inherited;
+      beforeEach(() => {
+        inherited = process.env.${MODE_ENV_KEY};
+      });
+      afterEach(() => {
+        if (inherited === undefined) delete process.env.${MODE_ENV_KEY};
+        else process.env.${MODE_ENV_KEY} = inherited;
+      });
+    `;
+    expect(environmentCleanupFindings(safe)).toEqual([]);
+
+    const unsafeModuleSnapshot = `
+      import { afterAll } from "bun:test";
+      const inherited = { ...process.env };
+      afterAll(() => {
+        for (const key of Object.keys(process.env)) {
+          if (!Object.prototype.hasOwnProperty.call(inherited, key)) delete process.env[key];
+        }
+        Object.assign(process.env, inherited);
+      });
+    `;
+    expect(environmentCleanupFindings(unsafeModuleSnapshot)).toEqual([
+      { file: "fixture.test.ts", line: 6, target: "key" },
+    ]);
+    expect(moduleScopeEnvSnapshotFindings(unsafeModuleSnapshot)).toEqual([
+      { file: "fixture.test.ts", line: 3, target: "inherited" },
+    ]);
+
+    const unsafeStubRebaseline = `
+      async function runWithTemporaryEndpoint() {
+        try {
+          await run();
+        } finally {
+          stub.applyEnv();
+        }
+      }
+    `;
+    expect(applyEnvInFinallyFindings(unsafeStubRebaseline)).toEqual([
+      { file: "fixture.test.ts", line: 6, target: "stub.applyEnv" },
+    ]);
+
+    const mixedCleanup = `
+      import { afterAll, afterEach, beforeEach } from "bun:test";
+      let inherited;
+      beforeEach(() => {
+        inherited = { ...process.env };
+      });
+      afterEach(() => {
+        for (const key of Object.keys(process.env)) {
+          if (!Object.prototype.hasOwnProperty.call(inherited, key)) delete process.env[key];
+        }
+        Object.assign(process.env, inherited);
+      });
+      afterAll(() => {
+        delete process.env.${MODE_ENV_KEY};
+      });
+    `;
+    expect(environmentCleanupFindings(mixedCleanup)).toEqual([
+      { file: "fixture.test.ts", line: 14, target: MODE_ENV_KEY },
+    ]);
+  });
+
+  test("requires every cleanup hook to restore process.env instead of deleting inherited values", () => {
+    const repoRoot = join(import.meta.dir, "..");
+    const findings: EnvCleanupFinding[] = [];
+    for (const path of walkSourceFiles(join(repoRoot, "src"), true)) {
+      const source = readFileSync(path, "utf8");
+      findings.push(
+        ...environmentCleanupFindings(source, relative(repoRoot, path)),
+        ...moduleScopeEnvSnapshotFindings(source, relative(repoRoot, path)),
+        ...applyEnvInFinallyFindings(source, relative(repoRoot, path)),
+      );
+    }
+    expect(findings).toEqual([]);
+  });
+
+  test("scrubs or fixes every active runtime environment input before the shared process starts", () => {
+    const repoRoot = join(import.meta.dir, "..");
+    const harness = readFileSync(join(repoRoot, "scripts", "run-hermetic-tests.sh"), "utf8");
+    const covered = hermeticHarnessEnvKeys(harness);
+    const missing = activeRuntimeEnvKeys(repoRoot).filter((key) => !covered.has(key));
+    expect(missing).toEqual([]);
+    expect(covered).toContain("EMAILS_SELF_HOSTED_HTTP_CONNECT_TIMEOUT");
+    expect(covered).toContain("EMAILS_SELF_HOSTED_HTTP_TIMEOUT");
+    expect(covered).toContain("EMAILS_SELF_HOSTED_HTTP_MAX_RESPONSE_BYTES");
+  });
+});
 
 describe("self-hosted successful-response wire contract", () => {
   test("generic stores reject malformed JSON instead of synthesizing an empty list", () => {

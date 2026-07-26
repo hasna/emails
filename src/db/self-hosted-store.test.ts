@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import {
   SelfHostedTransportError,
   selfHostedApiRequest,
@@ -13,6 +13,19 @@ import { SelfHostedWireResponseError } from "../lib/self-hosted-wire.js";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+let INHERITED_PROCESS_ENV: NodeJS.ProcessEnv;
+let ORIGINAL_PATH: string | undefined;
+function captureInheritedProcessEnv(): void {
+  INHERITED_PROCESS_ENV = { ...process.env };
+  ORIGINAL_PATH = process.env["PATH"];
+}
+function restoreInheritedProcessEnv(): void {
+  for (const key of Object.keys(process.env)) {
+    if (!Object.prototype.hasOwnProperty.call(INHERITED_PROCESS_ENV, key)) delete process.env[key];
+  }
+  Object.assign(process.env, INHERITED_PROCESS_ENV);
+}
 
 const KEYS = [
   "EMAILS_MODE",
@@ -39,7 +52,6 @@ const KEYS = [
   "AWS_PROFILE",
   "CLOUDFLARE_API_KEY",
 ];
-const ORIGINAL_PATH = process.env["PATH"];
 let tempDirs: string[] = [];
 
 function clearEnv(): void {
@@ -100,8 +112,14 @@ printf '\\n%s' "$STATUS"
 }
 
 describe("Emails self-hosted client resolver", () => {
-  beforeEach(clearEnv);
-  afterEach(clearEnv);
+  beforeEach(() => {
+    captureInheritedProcessEnv();
+    clearEnv();
+  });
+  afterEach(() => {
+    clearEnv();
+    restoreInheritedProcessEnv();
+  });
 
   test("unset env selects local and direct self-hosted resolution fails loud", () => {
     expect(isSelfHostedMode()).toBe(false);

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { closeDatabase, resetDatabase } from "../db/database.js";
@@ -8,9 +8,21 @@ import { mcpTestRequestInit, startTestMcpHttpServer } from "../test-support/mcp-
 import { startHttpServer } from "./http.js";
 import { buildServer } from "./server.js";
 
+let INHERITED_PROCESS_ENV: NodeJS.ProcessEnv;
+function captureInheritedProcessEnv(): void {
+  INHERITED_PROCESS_ENV = { ...process.env };
+}
+function restoreInheritedProcessEnv(): void {
+  for (const key of Object.keys(process.env)) {
+    if (!Object.prototype.hasOwnProperty.call(INHERITED_PROCESS_ENV, key)) delete process.env[key];
+  }
+  Object.assign(process.env, INHERITED_PROCESS_ENV);
+}
+
 let server: ReturnType<typeof startHttpServer> | null = null;
 
 beforeEach(() => {
+  captureInheritedProcessEnv();
   process.env["EMAILS_MODE"] = "local";
   process.env["EMAILS_DB_PATH"] = ":memory:";
   resetDatabase();
@@ -22,6 +34,7 @@ afterEach(() => {
   closeDatabase();
   delete process.env["EMAILS_MODE"];
   delete process.env["EMAILS_DB_PATH"];
+  restoreInheritedProcessEnv();
 });
 
 describe("MCP local mode", () => {

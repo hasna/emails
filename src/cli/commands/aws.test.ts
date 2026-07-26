@@ -2,7 +2,7 @@
 // is server-side orchestration with no /v1 equivalent, so it now fails loud with
 // the server-only message. `aws status` still runs locally against the SES API
 // (mocked here), so it keeps a positive test. No local SQLite exists anymore.
-import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
 import { Command } from "commander";
 
 const mockSesSend = mock(async (_cmd: unknown) => ({}) as Record<string, unknown>);
@@ -28,6 +28,17 @@ mock.module("@aws-sdk/client-s3", () => ({
 }));
 
 const { registerAwsCommands } = await import("./aws.js");
+
+let INHERITED_PROCESS_ENV: NodeJS.ProcessEnv;
+function captureInheritedProcessEnv(): void {
+  INHERITED_PROCESS_ENV = { ...process.env };
+}
+function restoreInheritedProcessEnv(): void {
+  for (const key of Object.keys(process.env)) {
+    if (!Object.prototype.hasOwnProperty.call(INHERITED_PROCESS_ENV, key)) delete process.env[key];
+  }
+  Object.assign(process.env, INHERITED_PROCESS_ENV);
+}
 
 async function runAws(args: string[]) {
   const lines: string[] = [];
@@ -65,6 +76,7 @@ async function runAwsExpectingExit(args: string[]) {
 }
 
 beforeEach(() => {
+  captureInheritedProcessEnv();
   mockSesSend.mockReset();
   mockS3Send.mockReset();
   mockS3Send.mockImplementation(async () => ({}));
@@ -86,6 +98,7 @@ beforeEach(() => {
 
 afterEach(() => {
   delete process.env["AWS_PROFILE"];
+  restoreInheritedProcessEnv();
 });
 
 describe("aws status command", () => {

@@ -17,6 +17,17 @@ import { getEmail, resolveEmailId } from "./emails.js";
 import { getEmailContent } from "./email-content.js";
 import { resetSelfHostedConfigCache } from "./self-hosted-store.js";
 
+let INHERITED_PROCESS_ENV: NodeJS.ProcessEnv;
+function captureInheritedProcessEnv(): void {
+  INHERITED_PROCESS_ENV = { ...process.env };
+}
+function restoreInheritedProcessEnv(): void {
+  for (const key of Object.keys(process.env)) {
+    if (!Object.prototype.hasOwnProperty.call(INHERITED_PROCESS_ENV, key)) delete process.env[key];
+  }
+  Object.assign(process.env, INHERITED_PROCESS_ENV);
+}
+
 const API_KEY = "hasna_emails_test_key_emails_1234567890";
 let serverProc: ReturnType<typeof Bun.spawn> | null = null;
 let serverDir = "";
@@ -115,6 +126,7 @@ afterAll(() => {
 
 describe("emails repo — selfHosted (self_hosted) routing", () => {
   beforeEach(() => {
+    captureInheritedProcessEnv();
     process.env["EMAILS_DB_PATH"] = ":memory:";
     process.env["EMAILS_MODE"] = "self_hosted";
     process.env["EMAILS_SELF_HOSTED_URL"] = baseOrigin;
@@ -126,6 +138,7 @@ describe("emails repo — selfHosted (self_hosted) routing", () => {
     delete process.env["EMAILS_SELF_HOSTED_URL"];
     delete process.env["EMAILS_SELF_HOSTED_API_KEY"];
     resetSelfHostedConfigCache();
+    restoreInheritedProcessEnv();
   });
 
   it("getEmail reads a message from the selfHosted API by full id", async () => {

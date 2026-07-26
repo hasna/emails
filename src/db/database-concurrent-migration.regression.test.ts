@@ -15,7 +15,7 @@
 // second process because the defect only exists BETWEEN connections — a
 // single-connection test cannot reach it, which is exactly why the rest of the
 // suite missed it.
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -23,7 +23,11 @@ import { join } from "node:path";
 import { closeDatabase, getDatabase, resetDatabase } from "./database.ts";
 
 const tempDirs: string[] = [];
-const previousDbPath = process.env["EMAILS_DB_PATH"];
+let previousDbPath: string | undefined;
+
+beforeEach(() => {
+  previousDbPath = process.env["EMAILS_DB_PATH"];
+});
 
 afterEach(() => {
   closeDatabase();

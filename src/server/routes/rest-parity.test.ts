@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { createAddress } from "../../db/addresses.local.js";
 import { suppressContact, upsertContact } from "../../db/contacts.local.js";
 import { closeDatabase, getDatabase, resetDatabase } from "../../db/database.js";
@@ -15,6 +15,17 @@ import { createTemplate } from "../../db/templates.local.js";
 import { createWarmingSchedule, updateWarmingStatus } from "../../db/warming.local.js";
 import { seedEmailAgentRun, seedTriage } from "../../test-support/legacy-mail-seed.js";
 import { handleApiRequest } from "../api-routes.js";
+
+let INHERITED_PROCESS_ENV: NodeJS.ProcessEnv;
+function captureInheritedProcessEnv(): void {
+  INHERITED_PROCESS_ENV = { ...process.env };
+}
+function restoreInheritedProcessEnv(): void {
+  for (const key of Object.keys(process.env)) {
+    if (!Object.prototype.hasOwnProperty.call(INHERITED_PROCESS_ENV, key)) delete process.env[key];
+  }
+  Object.assign(process.env, INHERITED_PROCESS_ENV);
+}
 
 async function call(path: string, init?: RequestInit): Promise<Response> {
   const req = new Request(`http://127.0.0.1:3900${path}`, init);
@@ -40,6 +51,7 @@ function postJson(path: string, body: unknown): RequestInit {
 }
 
 beforeEach(() => {
+  captureInheritedProcessEnv();
   process.env["EMAILS_DB_PATH"] = ":memory:";
   resetDatabase();
 });
@@ -47,6 +59,7 @@ beforeEach(() => {
 afterEach(() => {
   closeDatabase();
   delete process.env["EMAILS_DB_PATH"];
+  restoreInheritedProcessEnv();
 });
 
 describe("emails serve REST parity smoke", () => {
