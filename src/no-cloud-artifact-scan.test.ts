@@ -3,6 +3,7 @@ import {
   boundaryPatternTable,
   hostedControlPlaneFindings,
   isSkippableBinary,
+  isSourceAllowed,
   requiredPackedEntries,
   sourceBoundaryFindings,
 } from "../scripts/no-cloud-scan-lib.mjs";
@@ -42,16 +43,27 @@ describe("shared boundary pattern table", () => {
     }
   });
 
-  it("applies per-file source allowances only to the files that declare them", () => {
-    for (const entry of boundaryPatternTable) {
-      const allowlist = (entry.sourceAllowlist ?? []) as string[];
-      if (allowlist.length === 0) continue;
+  it("applies a source allowance only inside its declared paths, and never to the artifact", () => {
+    const allowed = boundaryPatternTable.filter((entry) => entry.sourceAllowance !== undefined);
+    expect(allowed.length).toBeGreaterThan(0);
+    for (const entry of allowed) {
       const fixture = positiveFixtures[entry.label] as string;
-      for (const path of allowlist) {
-        expect(sourceBoundaryFindings(fixture, path)).not.toContain(entry.label);
-        // The allowance is per-pattern, never a blanket pass for the file.
-        expect(hostedControlPlaneFindings(fixture, path)).toContain(entry.label);
+      // Inside the allowance: source is silent, the packed artifact never is.
+      const inside = entry.label === "legacy hosted environment" ? "src/lib/whatever.test.ts" : "CHANGELOG.md";
+      expect(isSourceAllowed(entry, inside)).toBe(true);
+      expect(sourceBoundaryFindings(fixture, inside)).not.toContain(entry.label);
+      expect(hostedControlPlaneFindings(fixture, inside)).toContain(entry.label);
+      // Outside it — i.e. product code — source still fires.
+      for (const outside of ["src/lib/hosted.ts", "src/server/index.ts", "Dockerfile"]) {
+        expect(isSourceAllowed(entry, outside)).toBe(false);
+        expect(sourceBoundaryFindings(fixture, outside)).toContain(entry.label);
       }
+    }
+    // Patterns with no allowance fire everywhere on both surfaces.
+    for (const entry of boundaryPatternTable.filter((candidate) => candidate.sourceAllowance === undefined)) {
+      const fixture = positiveFixtures[entry.label] as string;
+      expect(sourceBoundaryFindings(fixture, "src/lib/anything.test.ts")).toContain(entry.label);
+      expect(sourceBoundaryFindings(fixture, "CHANGELOG.md")).toContain(entry.label);
     }
   });
 });

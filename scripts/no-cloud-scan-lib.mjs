@@ -53,21 +53,18 @@ const boundaryPatterns = [
     scopes: BOTH,
     pattern: new RegExp(legacyHostedEnvKeys.join("|"), "i"),
     // `src/lib/mode.ts` (the rejection list) and `.github/workflows/ci.yml` (`env -u`)
-    // are handled by stripExactCompatibilityBridges and need no allowance. What remains
-    // is the suites that assert the rejection, which must spell the variables out.
-    allowlistReason:
-      "These suites assert that the retired variables are REJECTED, so each has to name them as an input. " +
-      "Every other source file, and every packed bundle chunk, is still checked.",
-    sourceAllowlist: [
-      "src/cli/cli-contract.test.ts",
-      "src/cli/tui/autopull.test.ts",
-      "src/db/self-hosted-store.test.ts",
-      "src/lib/client-env.test.ts",
-      "src/lib/doctor.test.ts",
-      "src/lib/mode.test.ts",
-      "src/lib/self-hosted-mail-data-source.test.ts",
-      "src/mcp/domain-address-self-hosted.test.ts",
-    ],
+    // are handled by stripExactCompatibilityBridges and need no allowance. What
+    // remains is suites that assert the rejection, which must spell the variables
+    // out. An EXACT path list was tried first and is wrong: `main` adds such suites
+    // continuously, so it went stale within a day and turned CI red for changes the
+    // guard had no opinion about. Scoped by shape instead — PRODUCT code naming a
+    // retired variable still fails, which is the property that matters.
+    sourceAllowance: {
+      reason:
+        "Test suites assert that the retired variables are REJECTED, so each has to name them as an input. " +
+        "Non-test source is still checked, as is every packed bundle chunk.",
+      paths: [/\.test\.ts$/],
+    },
   },
   {
     label: "hosted implementation vocabulary",
@@ -76,21 +73,14 @@ const boundaryPatterns = [
     // `src/lib/mode.ts`, `src/server/self-hosted/migrations.ts` and
     // `src/server/self-hosted/service-resources.test.ts` are handled by
     // stripExactCompatibilityBridges and need no allowance.
-    allowlistReason:
-      "Prose describing the pivot AWAY from a hosted SaaS/fleet (CHANGELOG, docs, the deploy README, and " +
-      "the Terraform comment asserting no vendor account), plus the suites that assert `MAILERY_CLOUD_*` " +
-      "inputs are rejected. Every other source file, and every packed bundle chunk, is still checked.",
-    sourceAllowlist: [
-      "CHANGELOG.md",
-      "deploy/aws/README.md",
-      "deploy/aws/backend.tf",
-      "docs/design/multi-tenancy-auth.md",
-      "src/cli/tui/autopull.test.ts",
-      "src/lib/doctor.test.ts",
-      "src/lib/mode.test.ts",
-      "src/lib/self-hosted-mail-data-source.test.ts",
-      "src/mcp/domain-address-self-hosted.test.ts",
-    ],
+    sourceAllowance: {
+      reason:
+        "Prose describing the pivot AWAY from a hosted SaaS/fleet (the changelog, design docs, the deploy " +
+        "README, and the Terraform comment asserting no vendor-owned account), plus the suites that assert " +
+        "`MAILERY_CLOUD_*` inputs are rejected. Non-test, non-prose source is still checked, as is every " +
+        "packed bundle chunk — and the packed README is checked, because allowances are source-only.",
+      paths: [/\.test\.ts$/, /^CHANGELOG\.md$/, /^docs\//, /^deploy\/aws\/README\.md$/, /^deploy\/aws\/backend\.tf$/],
+    },
   },
 ];
 
@@ -98,7 +88,7 @@ function assertBoundaryPatternTable(table) {
   if (!Array.isArray(table) || table.length === 0) throw new Error("the boundary pattern table is empty");
   const seen = new Set();
   for (const entry of table) {
-    const { label, pattern, scopes, exemptions = {}, sourceAllowlist = [], allowlistReason } = entry ?? {};
+    const { label, pattern, scopes, exemptions = {}, sourceAllowance } = entry ?? {};
     if (typeof label !== "string" || label.length === 0) throw new Error("boundary pattern is missing a label");
     if (seen.has(label)) throw new Error(`duplicate boundary pattern label: ${label}`);
     seen.add(label);
@@ -112,10 +102,22 @@ function assertBoundaryPatternTable(table) {
       if (typeof exemptions[scope] === "string" && exemptions[scope].trim().length > 0) continue;
       throw new Error(`boundary pattern ${label} is not enforced on the ${scope} surface and records no exemptions.${scope} reason`);
     }
-    if (!Array.isArray(sourceAllowlist)) throw new Error(`boundary pattern ${label} has a non-array sourceAllowlist`);
-    if (new Set(sourceAllowlist).size !== sourceAllowlist.length) throw new Error(`boundary pattern ${label} has a duplicate sourceAllowlist entry`);
-    if (sourceAllowlist.length > 0 && !(typeof allowlistReason === "string" && allowlistReason.trim().length > 0)) {
-      throw new Error(`boundary pattern ${label} allows ${sourceAllowlist.length} source file(s) and records no allowlistReason`);
+    if (sourceAllowance !== undefined) {
+      const { reason, paths } = sourceAllowance;
+      if (!(typeof reason === "string" && reason.trim().length > 0)) {
+        throw new Error(`boundary pattern ${label} declares a sourceAllowance and records no reason`);
+      }
+      if (!Array.isArray(paths) || paths.length === 0) throw new Error(`boundary pattern ${label} declares an empty sourceAllowance.paths`);
+      for (const matcher of paths) {
+        if (!(matcher instanceof RegExp)) throw new Error(`boundary pattern ${label} has a non-RegExp sourceAllowance path`);
+        // A matcher that accepts everything is a whole-scope exemption wearing a
+        // path-shaped disguise; the point of an allowance is that it is narrow.
+        for (const productPath of ["src/index.ts", "src/server/index.ts", "package.json"]) {
+          if (matcher.test(productPath)) {
+            throw new Error(`boundary pattern ${label} allows product code (${productPath}) via ${matcher}`);
+          }
+        }
+      }
     }
   }
   return table;
@@ -177,9 +179,14 @@ function stripExactCompatibilityBridges(content, path) {
 export function boundaryFindings(content, path, scope) {
   const scanned = stripExactCompatibilityBridges(content, path);
   return boundaryPatternsForScope(scope)
-    .filter((entry) => !(scope === SOURCE_SCOPE && (entry.sourceAllowlist ?? []).includes(path)))
+    .filter((entry) => !(scope === SOURCE_SCOPE && isSourceAllowed(entry, path)))
     .filter(({ pattern }) => pattern.test(scanned))
     .map(({ label }) => label);
+}
+
+/** True when `path` is inside this pattern's declared source allowance. */
+export function isSourceAllowed(entry, path) {
+  return (entry.sourceAllowance?.paths ?? []).some((matcher) => matcher.test(path));
 }
 
 export function hostedControlPlaneFindings(content, path = "artifact") {

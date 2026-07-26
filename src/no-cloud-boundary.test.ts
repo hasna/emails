@@ -8,6 +8,7 @@ import {
   BOUNDARY_SCOPES,
   boundaryPatternTable,
   isSkippableBinary,
+  isSourceAllowed,
   sourceBoundaryFindings,
   sourceBoundaryPatterns,
 } from "../scripts/no-cloud-scan-lib.mjs";
@@ -111,56 +112,34 @@ describe("no hosted control plane", () => {
     ]);
   });
 
-  it("keeps every per-file allowance narrow, justified, and live", () => {
-    const allowed = boundaryPatternTable.filter((entry) => (entry.sourceAllowlist ?? []).length > 0);
-    // Only these two patterns may name individual files, and only these files.
-    expect(
-      allowed.map((entry) => ({ label: entry.label, files: [...(entry.sourceAllowlist as string[])].sort() })),
-    ).toEqual([
-      {
-        label: "legacy hosted environment",
-        files: [
-          "src/cli/cli-contract.test.ts",
-          "src/cli/tui/autopull.test.ts",
-          "src/db/self-hosted-store.test.ts",
-          "src/lib/client-env.test.ts",
-          "src/lib/doctor.test.ts",
-          "src/lib/mode.test.ts",
-          "src/lib/self-hosted-mail-data-source.test.ts",
-          "src/mcp/domain-address-self-hosted.test.ts",
-        ],
-      },
-      {
-        label: "hosted implementation vocabulary",
-        files: [
-          "CHANGELOG.md",
-          "deploy/aws/README.md",
-          "deploy/aws/backend.tf",
-          "docs/design/multi-tenancy-auth.md",
-          "src/cli/tui/autopull.test.ts",
-          "src/lib/doctor.test.ts",
-          "src/lib/mode.test.ts",
-          "src/lib/self-hosted-mail-data-source.test.ts",
-          "src/mcp/domain-address-self-hosted.test.ts",
-        ],
-      },
+  it("keeps every source allowance narrow, justified, and live", () => {
+    const allowed = boundaryPatternTable.filter((entry) => entry.sourceAllowance !== undefined);
+    // Only these two patterns may exempt any source path at all.
+    expect(allowed.map((entry) => entry.label)).toEqual([
+      "legacy hosted environment",
+      "hosted implementation vocabulary",
     ]);
-    const scanned = new Set(scannedPaths());
+    const scanned = scannedPaths();
     for (const entry of allowed) {
-      expect(typeof entry.allowlistReason).toBe("string");
-      expect((entry.allowlistReason as string).length).toBeGreaterThan(40);
-      for (const path of entry.sourceAllowlist as string[]) {
-        // A renamed or deleted allowance must fail, not silently stop applying.
-        expect(scanned.has(path)).toBe(true);
-        // And a DEAD allowance must fail too: if the file no longer trips the
-        // pattern, the allowance has to go rather than pre-authorise a future leak.
-        const content = readFileSync(join(root, path), "latin1");
-        expect(entry.pattern.test(content)).toBe(true);
+      expect((entry.sourceAllowance.reason as string).length).toBeGreaterThan(40);
+      for (const matcher of entry.sourceAllowance.paths as RegExp[]) {
+        // A DEAD matcher must fail: if nothing it covers actually trips the pattern
+        // any more, the allowance has to go rather than pre-authorise a future leak.
+        const covered = scanned.filter((path) => matcher.test(path));
+        expect(covered.length).toBeGreaterThan(0);
+        const tripping = covered.filter((path) => entry.pattern.test(readFileSync(join(root, path), "latin1")));
+        expect(tripping.length).toBeGreaterThan(0);
+      }
+      // Product code is never allowed — the whole point of a path allowance is that
+      // it does not cover the code that ships. (`isSourceAllowed` is also asserted
+      // against these paths at import time.)
+      for (const productPath of ["src/index.ts", "src/server/index.ts", "src/lib/mode.ts", "package.json", "Dockerfile"]) {
+        expect(isSourceAllowed(entry, productPath)).toBe(false);
       }
     }
-    // The allowances cover 15 of 569 scanned files; the rest are fully enforced.
-    const allowedFiles = new Set(allowed.flatMap((entry) => entry.sourceAllowlist as string[]));
-    expect(allowedFiles.size * 20).toBeLessThan(scanned.size);
+    // Allowances cover a small minority of the tree; everything else is enforced.
+    const allowedCount = scanned.filter((path) => allowed.some((entry) => isSourceAllowed(entry, path))).length;
+    expect(allowedCount * 2).toBeLessThan(scanned.length);
   });
 
   it("contains no banned hosted-control-plane marker in any scanned file", () => {
