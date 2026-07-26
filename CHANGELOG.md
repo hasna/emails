@@ -4,6 +4,8 @@ All notable changes to `@hasna/emails` are documented here.
 
 ## [Unreleased]
 
+- scope AWS module cross-account SES credentials to `EMAILS_SES_*` only; generic `AWS_*` credentials are no longer injected, so unrelated SDK clients retain the task-role default chain.
+
 ## 1.3.2 (2026-07-26)
 
 - fail closed on malformed JSON, wrong response envelopes, and missing required

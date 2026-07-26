@@ -581,13 +581,23 @@ run "ses_credentials_injected_by_arn_reference_only" {
   }
 
   assert {
-    condition = alltrue([
-      for name in ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "EMAILS_SES_ACCESS_KEY_ID", "EMAILS_SES_SECRET_ACCESS_KEY"] :
-      contains([
-        for entry in jsondecode(aws_ecs_task_definition.api.container_definitions)[0].secrets : entry.name
-      ], name)
+    condition = toset([
+      for entry in jsondecode(aws_ecs_task_definition.api.container_definitions)[0].secrets : entry.name
+      ]) == toset([
+      "EMAILS_DATABASE_URL",
+      "EMAILS_API_SIGNING_KEY",
+      "EMAILS_SES_ACCESS_KEY_ID",
+      "EMAILS_SES_SECRET_ACCESS_KEY",
     ])
-    error_message = "Both SES credential name pairs must reach the API container through the `secrets` block."
+    error_message = "Only the scoped SES credential pair may reach the API container through the `secrets` block."
+  }
+
+  assert {
+    condition = alltrue([
+      for entry in jsondecode(aws_ecs_task_definition.api.container_definitions)[0].secrets :
+      !contains(["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"], entry.name)
+    ])
+    error_message = "The API must not receive generic AWS credential names that repoint every SDK client."
   }
 
   assert {
@@ -614,6 +624,10 @@ run "ses_credentials_injected_by_arn_reference_only" {
         jsondecode(aws_ecs_task_definition.worker.container_definitions)[0],
         jsondecode(aws_ecs_task_definition.migration.container_definitions)[0],
         ] : alltrue([
+          # Deliberately a PATTERN, not a list of the four names this module
+          # happens to inject today: any future secret whose name carries an
+          # access key must fail here too, without someone remembering to
+          # extend an allowlist.
           for entry in definition.secrets : !strcontains(upper(entry.name), "ACCESS_KEY")
       ])
     ])
@@ -676,6 +690,8 @@ run "no_ses_credentials_leaves_the_task_role_alone" {
 
   assert {
     condition = alltrue([
+      # A pattern, so a credential added under some other access-key name is
+      # caught here as well.
       for entry in jsondecode(aws_ecs_task_definition.api.container_definitions)[0].secrets :
       !strcontains(upper(entry.name), "ACCESS_KEY")
     ])

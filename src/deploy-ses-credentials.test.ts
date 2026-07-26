@@ -48,14 +48,19 @@ function containerDefinitions(taskDefinitionName: string): string {
   return compute.slice(start, next === -1 ? compute.length : next);
 }
 
-const SES_CREDENTIAL_ENV_NAMES = [
-  // Repoints the SDK default credential chain. Required by the shipped image,
-  // whose SES adapter reads AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY.
-  "AWS_ACCESS_KEY_ID",
-  "AWS_SECRET_ACCESS_KEY",
-  // Scoped names, read directly by the sender when present.
+const SCOPED_SES_CREDENTIAL_ENV_NAMES = [
   "EMAILS_SES_ACCESS_KEY_ID",
   "EMAILS_SES_SECRET_ACCESS_KEY",
+] as const;
+
+const GENERIC_AWS_CREDENTIAL_ENV_NAMES = [
+  "AWS_ACCESS_KEY_ID",
+  "AWS_SECRET_ACCESS_KEY",
+] as const;
+
+const SES_CREDENTIAL_ENV_NAMES = [
+  ...SCOPED_SES_CREDENTIAL_ENV_NAMES,
+  ...GENERIC_AWS_CREDENTIAL_ENV_NAMES,
 ] as const;
 
 describe("AWS module SES credential injection", () => {
@@ -76,10 +81,13 @@ describe("AWS module SES credential injection", () => {
     );
   });
 
-  test("injects both the default-chain and the scoped credential names by ARN", () => {
+  test("injects only the scoped SES credential names by ARN", () => {
     const block = assignment(compute, "ses_credential_secrets");
-    for (const name of SES_CREDENTIAL_ENV_NAMES) {
+    for (const name of SCOPED_SES_CREDENTIAL_ENV_NAMES) {
       expect(block).toContain(`name      = "${name}"`);
+    }
+    for (const name of GENERIC_AWS_CREDENTIAL_ENV_NAMES) {
+      expect(block).not.toContain(`name      = "${name}"`);
     }
     expect(block).toContain("valueFrom = var.ses_access_key_id_secret_arn");
     expect(block).toContain("valueFrom = var.ses_secret_access_key_secret_arn");
