@@ -9,18 +9,36 @@ describe("emails ui build contract", () => {
   it("keeps the main CLI external and builds a bundled TUI runtime", () => {
     const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as {
       scripts: Record<string, string>;
+      dependencies: Record<string, string>;
+      devDependencies: Record<string, string>;
     };
     const cliBuild = pkg.scripts["build:cli"] ?? "";
     const tuiRuntimeBuild = pkg.scripts["build:tui-runtime"] ?? "";
     const buildHelper = readFileSync(join(root, "scripts", "build-tui-runtime.ts"), "utf8");
+    const externalConfiguration = buildHelper.slice(
+      buildHelper.indexOf("const nativePackages"),
+      buildHelper.indexOf("const result"),
+    );
 
     expect(cliBuild).toContain("--packages external");
     expect(cliBuild).toContain("--splitting");
     expect(cliBuild).not.toContain("--packages bundle");
     expect(tuiRuntimeBuild).toContain("scripts/build-tui-runtime.ts");
+    expect(pkg.dependencies["@opentui/core"]).toBe("0.4.1");
+    expect(pkg.devDependencies["@opentui/core"]).toBeUndefined();
+    expect(pkg.devDependencies["@opentui/keymap"]).toBe("0.4.1");
+    expect(pkg.dependencies["@opentui/keymap"]).toBeUndefined();
+    expect(pkg.devDependencies["@opentui/solid"]).toBe("0.4.1");
+    expect(pkg.dependencies["@opentui/solid"]).toBeUndefined();
+    expect(pkg.devDependencies["solid-js"]).toBe("1.9.13");
+    expect(pkg.dependencies["solid-js"]).toBeUndefined();
     expect(buildHelper).toContain("src/cli/tui/runtime.tsx");
     expect(buildHelper).toContain("ui-runtime-bundle.[ext]");
     expect(buildHelper).not.toContain("--packages external");
+    expect(buildHelper).toContain('from "@opentui/solid/bun-plugin"');
+    expect(externalConfiguration).not.toContain("@opentui/keymap");
+    expect(externalConfiguration).not.toContain("@opentui/solid");
+    expect(externalConfiguration).not.toContain("solid-js");
     expect(buildHelper).toContain("createSolidTransformPlugin");
     expect(buildHelper).toContain('"@opentui/core-linux-arm64"');
     expect(buildHelper).toContain('"@opentui/core-darwin-arm64"');

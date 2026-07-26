@@ -19,7 +19,7 @@ export interface MessageListItem { "id": string; "direction": string; "from_addr
 
 export interface Message { "id": string; "direction": string; "from_addr": string; "to_addrs": Array<string>; "cc_addrs"?: Array<string>; "subject"?: string | null; "body_text"?: string | null; "body_html"?: string | null; "status": string; "provider_message_id"?: string | null; "message_id"?: string | null; "in_reply_to"?: string | null; "received_at"?: string | null; "is_read"?: boolean; "is_starred"?: boolean; "labels"?: Array<string>; "headers"?: Record<string, unknown>; "attachments"?: Array<Record<string, unknown>>; "source_id"?: string | null; "send_state"?: string; "send_started_at"?: string | null; "created_at": string; "updated_at": string }
 
-export interface SendIntentMessage { "id": string; "send_state": "none" | "pending" | "blocked" | "cancelled" | "sending" | "sent" | "uncertain" }
+export interface SendIntentMessage { "id": string; "send_state": "none" | "pending" | "blocked" | "cancelled" | "sending" | "sent" | "failed" | "uncertain" }
 
 export interface SendIntentLookup { "found": boolean; "tombstoned": boolean; "reconciliation_required": boolean; "message": SendIntentMessage | null }
 
@@ -29,9 +29,13 @@ export interface SendMessageError { "error": string; "reason"?: string; "provide
 
 export interface AttachmentContent { "filename": string; "content_type": string; "size": number; "content_base64": string }
 
-export interface AttachmentInventoryItem { "message_id": string; "attachment_index": number; "filename": string | null; "content_type": string | null; "size_bytes": number | null; "sha256": string | null; "content_available": boolean; "direction"?: "inbound" | "outbound" | null; "received_at"?: string | null }
+export interface AttachmentUnavailableError { "error": string; "code": "attachment_content_unavailable"; "attachment": { "filename": string; "content_type": string; "size": number | null } }
+
+export interface AttachmentInventoryItem { "message_id": string; "attachment_index": number; "filename": string | null; "content_type": string | null; "size_bytes": number | null; "sha256": string | null; "content_available": boolean; "direction": "inbound" | "outbound" | null; "received_at": string | null }
 
 export interface AttachmentMeta { "attachment_index": number; "filename": string | null; "content_type": string | null; "size_bytes": number | null; "sha256": string | null; "content_available": boolean }
+
+export interface AttachmentRepairSummary { "id": string; "apply": boolean; "status": "pending" | "completed"; "entry_total": number; "inventory_total": number; "repaired": number; "would_repair": number; "unavailable": number; "operator_action": number; "pending": number; "retrying": number; "entry_repaired": number; "entry_would_repair": number; "entry_unavailable": number; "entry_operator_action": number; "entry_pending": number; "entry_retrying": number; "attempts": number; "checkpoint": number; "byte_budget": number; "bytes_consumed": number; "time_budget_ms": number; "deadline_at": string; "created_at": string; "updated_at": string; "completed_at": string | null }
 
 export interface Thread { "thread_key": string; "subject"?: string | null; "message_count": number; "unread_count": number; "last_message_at"?: string | null; "first_message_at"?: string | null; "participants"?: Array<string> }
 
@@ -50,7 +54,7 @@ export interface EmailsSelfHostClientOptions {
   headers?: Record<string, string>;
 }
 
-export type SendIntentRecoveryState = "blocked" | "cancelled" | "none" | "pending" | "sending" | "sent" | "uncertain";
+export type SendIntentRecoveryState = "blocked" | "cancelled" | "failed" | "none" | "pending" | "sending" | "sent" | "uncertain";
 
 export interface SendIntentMessageProjection {
   id: string;
@@ -59,7 +63,7 @@ export interface SendIntentMessageProjection {
 
 const SEND_INTENT_MESSAGE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const SEND_INTENT_RECOVERY_STATES = new Set<SendIntentRecoveryState>([
-  "blocked", "cancelled", "none", "pending", "sending", "sent", "uncertain",
+  "blocked", "cancelled", "failed", "none", "pending", "sending", "sent", "uncertain",
 ]);
 
 function parseSendIntentMessage(body: unknown): SendIntentMessageProjection | undefined {
@@ -303,6 +307,33 @@ export class EmailsSelfHostClient {
     /** Return attachment metadata for an explicit, bounded list of message IDs, keyed by message_id, so a large exact-once scan can checkpoint per batch. Read-only (scope emails:read); at most 200 ids per request. */
     async batchAttachments(body: { "message_ids": Array<string> }, init?: RequestInit): Promise<{ "by_message_id": Record<string, Array<AttachmentMeta>>; "unknown_ids": Array<string>; "max_batch_size": number }> {
       return this.request("POST", `/v1/attachments/batch`, {
+        body,
+        query: undefined,
+        init,
+      });
+    }
+
+    /** Create an idempotent bounded legacy attachment-repair manifest and process one checkpointed page. */
+    async createOrResumeAttachmentRepair(body: { "idempotency_key": string; "limit"?: number; "entries": Array<{ "object_key": string; "recipients": Array<string>; "canary_message_ids": Array<string> }>; "apply"?: false } | { "idempotency_key": string; "limit"?: number; "entries": Array<{ "object_key": string; "recipients": Array<string>; "canary_message_ids": Array<string> }>; "apply": true; "reviewed_dry_run_id": string; "reviewed_dry_run_result_sha256": string }, init?: RequestInit): Promise<{ "repair": AttachmentRepairSummary; "max_page_size": 25 }> {
+      return this.request("POST", `/v1/attachments/repairs`, {
+        body,
+        query: undefined,
+        init,
+      });
+    }
+
+    /** Read one tenant-scoped repair checkpoint and reconciled totals. */
+    async getAttachmentRepair(id: string, init?: RequestInit): Promise<{ "repair": AttachmentRepairSummary }> {
+      return this.request("GET", `/v1/attachments/repairs/${encodeURIComponent(String(id))}`, {
+        body: undefined,
+        query: undefined,
+        init,
+      });
+    }
+
+    /** Resume one bounded page from the first unfinished checkpoint. */
+    async resumeAttachmentRepair(id: string, body: { "limit"?: number }, init?: RequestInit): Promise<{ "repair": AttachmentRepairSummary; "max_page_size": 25 }> {
+      return this.request("POST", `/v1/attachments/repairs/${encodeURIComponent(String(id))}/resume`, {
         body,
         query: undefined,
         init,
@@ -972,7 +1003,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Send through the configured SES or Resend provider and persist the resulting ledger row */
-    async sendMessage(body: { "from": string; "to": Array<string>; "cc"?: Array<string>; "bcc"?: Array<string>; "reply_to"?: string; "subject": string; "text"?: string; "html"?: string; "attachments"?: Array<{ "filename": string; "content": string; "content_type": string }>; "send_key"?: string; "idempotency_key": string }, init?: RequestInit): Promise<{ "message": Message; "provider": string; "idempotent_replay"?: true; "in_progress"?: true; "sent"?: true; "provider_message_id"?: string; "warning"?: string; "retry_safe"?: boolean }> {
+    async sendMessage(body: { "from": string; "to": Array<string>; "cc"?: Array<string>; "bcc"?: Array<string>; "reply_to"?: string; "subject": string; "text"?: string; "html"?: string; "attachments"?: Array<{ "filename"?: string; "content": string; "content_type"?: string }>; "send_key"?: string; "idempotency_key": string }, init?: RequestInit): Promise<{ "message": Message; "provider": string; "idempotent_replay"?: true; "in_progress"?: true; "sent"?: true; "provider_message_id"?: string; "warning"?: string; "retry_safe"?: boolean }> {
       return this.request("POST", `/v1/messages/send`, {
         body,
         query: undefined,

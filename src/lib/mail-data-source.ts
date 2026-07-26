@@ -17,7 +17,7 @@ import {
   getInboundAttachmentPaths,
   getInboundEmailSummary,
   type InboundEmailSummary,
-  listInboundEmailSummaries,
+  listInboundInsertionSummariesPage,
   removeInboundLabelSummary,
   setInboundArchivedFlag,
   setInboundReadFlag,
@@ -72,31 +72,29 @@ import { basename } from "node:path";
 
 export type MailDataSourceMode = EmailsMode;
 
-export interface MailChangesQuery {
-  /** Watermark: only messages created-or-changed at/after this ISO timestamp. */
-  since?: string;
-  /** Folder scope. */
-  mailbox?: Mailbox;
-  /** Source/mailbox scope. */
-  source?: MailboxSource;
+export interface MailInsertionsQuery {
+  /**
+   * Inclusive lower bound on the message's received timestamp.
+   *
+   * This is an insert-only inventory scan, not a mutation feed: edits and
+   * deletions are intentionally not represented.
+   */
+  receivedSince?: string;
   limit?: number;
   /**
-   * Continuation cursor from a prior MailChanges.cursor. When the delta feed had
-   * more than one call could drain, pass this back (with the SAME `since`) to resume
-   * with no gap.
+   * Continuation cursor from a prior MailInsertionsPage.cursor. Pass it back
+   * with the same `receivedSince` value to resume the same inventory walk.
    */
   cursor?: string;
 }
 
-export interface MailChanges {
-  /** Created-or-changed messages since the watermark (deduped by id). */
-  messages: TuiMessage[];
-  /** Ids tombstoned since the watermark. */
-  deletedIds: string[];
-  /** Continuation cursor if the delta feed had more (else null). */
+export interface MailInsertionsPage {
+  /** Explicit discriminator preventing this page from being treated as general sync. */
+  semantics: "insert_only";
+  /** Messages observed in this insert-only inventory window. */
+  insertions: TuiMessage[];
+  /** Continuation cursor if the inventory walk has more rows (else null). */
   cursor: string | null;
-  /** The advanced watermark to pass as `since` on the next call. */
-  watermark: string | null;
 }
 
 export interface MailBulkInput {
@@ -208,7 +206,13 @@ export interface MailDataSource {
   listLabelSummaries(opts?: ListLabelSummaryOptions): Promise<LabelSummary[]>;
   verificationCandidates(address: string, opts?: VerificationCodeCandidateOptions): Promise<VerificationCodeEmail[]>;
   findLatest(address: string, opts?: VerificationCodeCandidateOptions & { from?: string; subject?: string }): Promise<VerificationCodeMatch<VerificationCodeEmail> | null>;
-  changesSince(opts?: MailChangesQuery): Promise<MailChanges>;
+  /**
+   * List message insertions by received timestamp.
+   *
+   * This deliberately cannot be used as a general cache-sync contract:
+   * updates and tombstones are not available from the current backing stores.
+   */
+  listInsertionsSince(opts?: MailInsertionsQuery): Promise<MailInsertionsPage>;
 
   // writes
   setRead(id: string, read: boolean): Promise<void>;
@@ -397,14 +401,17 @@ export class SqliteMailDataSource implements MailDataSource {
     return findVerificationCode(candidates, { from: opts?.from, subject: opts?.subject });
   }
 
-  async changesSince(opts?: MailChangesQuery): Promise<MailChanges> {
-    const summaries = listInboundEmailSummaries({ since: opts?.since, limit: opts?.limit ?? 200 });
-    const messages = summaries.map(summaryToTuiMessage);
-    const watermark = messages.reduce<string | null>(
-      (max, msg) => max === null || msg.date > max ? msg.date : max,
-      opts?.since ?? null,
-    );
-    return { messages, deletedIds: [], cursor: null, watermark };
+  async listInsertionsSince(opts?: MailInsertionsQuery): Promise<MailInsertionsPage> {
+    const page = listInboundInsertionSummariesPage({
+      receivedSince: opts?.receivedSince,
+      limit: opts?.limit,
+      cursor: opts?.cursor,
+    });
+    return {
+      semantics: "insert_only",
+      insertions: page.items.map(summaryToTuiMessage),
+      cursor: page.cursor,
+    };
   }
 
   async setRead(id: string, read: boolean): Promise<void> { setInboundReadFlag(id, read); }

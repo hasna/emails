@@ -1,5 +1,9 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import {
+  DEFAULT_ATTACHMENT_INVENTORY_LIMIT,
+  MAX_ATTACHMENT_INVENTORY_LIMIT,
+} from "../../lib/attachment-inventory.js";
 
 const MAX_MCP_INBOX_LIMIT = 1000;
 const MAX_MCP_WAIT_TIMEOUT_SECONDS = 300;
@@ -24,6 +28,7 @@ type InboxToolName =
   | "archive_email"
   | "star_email"
   | "label_email"
+  | "list_attachments"
   | "get_attachment"
   | "download_attachment"
   | "search_inbound"
@@ -221,6 +226,19 @@ export function registerInboxTools(server: McpServer): void {
       remove: z.boolean().optional().describe("Remove the label instead of adding"),
     },
     handler("label_email"),
+  );
+
+  server.tool(
+    "list_attachments",
+    "List one checkpointable page of self-hosted attachment metadata. Returns {items,next_cursor,cli_equivalent}; items contain message_id, attachment_index, filename, content_type, size_bytes, sha256, content_available, direction, and received_at, never attachment content. Pass next_cursor back as cursor to resume.",
+    {
+      limit: z.number().int().positive().max(MAX_ATTACHMENT_INVENTORY_LIMIT).optional()
+        .describe(`Attachments per page (default ${DEFAULT_ATTACHMENT_INVENTORY_LIMIT}, max ${MAX_ATTACHMENT_INVENTORY_LIMIT})`),
+      cursor: z.string().min(1).optional().describe("Opaque next_cursor from a previous page; passed through unchanged"),
+      direction: z.enum(["inbound", "outbound"]).optional().describe("Filter by message direction"),
+      since: z.string().optional().describe("ISO 8601 date; only include attachments from messages on or after this time"),
+    },
+    handler("list_attachments"),
   );
 
   server.tool(
