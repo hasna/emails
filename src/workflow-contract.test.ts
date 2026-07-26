@@ -1,12 +1,59 @@
 import { describe, expect, it } from "bun:test";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 const workflowDir = join(import.meta.dir, "..", ".github", "workflows");
 const repositoryRoot = join(import.meta.dir, "..");
+const packageProvenanceWorkflowSha256 = "0849b75cbe8fb252c9c2b95ecce59b1f228144c9bcda62c64ba9aa62fbb13c0f";
+const unreleasedSectionSha256 = "40e9d4fc08e67cd4f7d38b053c5c9031dd3e8e403d68bc7e40f83a87bc00ba20";
+const release132Section = `## 1.3.2 (2026-07-26)
+
+- fail closed on malformed JSON, wrong response envelopes, and missing required
+  fields from successful self-hosted API responses before repositories, mailbox
+  status/context/sync projections, or the generated SDK can synthesize empty
+  rows, lists, or counts.
+- share one config-driven wire validator across the synchronous resource store,
+  asynchronous inbox data source, and generated \`@hasna/emails/selfhost\` client;
+  validation errors identify the endpoint and invalid field without including
+  credentials or response-body contents.`;
 
 function readWorkflow(name: string): string {
   return readFileSync(join(workflowDir, name), "utf8");
+}
+
+function textSha256(text: string): string {
+  return createHash("sha256").update(text).digest("hex");
+}
+
+function isCanonicalPackageProvenanceWorkflow(workflow: string): boolean {
+  return textSha256(workflow) === packageProvenanceWorkflowSha256;
+}
+
+function markdownSection(markdown: string, heading: string): string {
+  const start = markdown.indexOf(`${heading}\n`);
+  if (start < 0) return "";
+  const nextHeading = markdown.indexOf("\n## ", start + heading.length);
+  return markdown.slice(start, nextHeading < 0 ? markdown.length : nextHeading).trimEnd();
+}
+
+function hasCanonicalRelease132Boundary(changelog: string): boolean {
+  const unreleasedHeading = "## [Unreleased]";
+  const release132Heading = "## 1.3.2 (2026-07-26)";
+  const release131Heading = "## 1.3.1 (2026-07-26)";
+  const unreleasedIndex = changelog.indexOf(`${unreleasedHeading}\n`);
+  const release132Index = changelog.indexOf(`${release132Heading}\n`);
+  const release131Index = changelog.indexOf(`${release131Heading}\n`);
+
+  return (
+    unreleasedIndex >= 0 &&
+    release132Index > unreleasedIndex &&
+    release131Index > release132Index &&
+    changelog.match(/^## \[Unreleased\]$/gm)?.length === 1 &&
+    changelog.match(/^## 1\.3\.2 \(2026-07-26\)$/gm)?.length === 1 &&
+    textSha256(markdownSection(changelog, unreleasedHeading)) === unreleasedSectionSha256 &&
+    markdownSection(changelog, release132Heading) === release132Section
+  );
 }
 
 function singleQuotedReadonly(workflow: string, name: string): string {
@@ -65,6 +112,7 @@ describe("repository workflow safety", () => {
     );
 
     const workflow = readWorkflow("package-provenance.yml");
+    expect(textSha256(workflow)).toBe(packageProvenanceWorkflowSha256);
     const tarballUrl = "https://registry.npmjs.org/@hasna/emails/-/emails-1.3.2.tgz";
     const sourceRepository = "https://github.com/hasna/emails";
     const sourceMergeCommit = "fe61a466a28115f33efda1ecc7632dbc7c6525c7";
@@ -209,12 +257,108 @@ describe("repository workflow safety", () => {
     ]) {
       expect(workflow).toContain(marker);
     }
-    expect(workflow).not.toMatch(
-      /\b(?:wget|npm|bun|pnpm|yarn)\s+(?:publish|pack|view)|\b(?:gh\s+release|git\s+tag|docker\s+push|podman\s+push)|\b(?:aws|terraform|tofu|kubectl|helm)\b/i,
-    );
     expect([...new Set([...workflow.matchAll(/https:\/\/[^"'\s]+/g)].map((match) => match[0]))].sort()).toEqual(
       [ciRunUrl, predicateType, sourceRepository, tarballUrl].sort(),
     );
+  });
+
+  it("fails closed on every package provenance workflow change", () => {
+    const workflow = readWorkflow("package-provenance.yml");
+    expect(isCanonicalPackageProvenanceWorkflow(workflow)).toBe(true);
+
+    const adversarialFixtures = [
+      {
+        name: "npx npm publish alias",
+        workflow: workflow.replace(
+          "          umask 077\n",
+          '          umask 077\n          npx --yes npm@latest publish "$artifact"\n',
+        ),
+      },
+      {
+        name: "publish hidden behind a shell alias",
+        workflow: workflow.replace(
+          "          umask 077\n",
+          "          umask 077\n          alias release='npm publish'\n          release\n",
+        ),
+      },
+      {
+        name: "deploy hidden behind a repository script",
+        workflow: workflow.replace(
+          "          set -euo pipefail\n\n          readonly predicate=",
+          "          set -euo pipefail\n          bun run deploy\n\n          readonly predicate=",
+        ),
+      },
+      {
+        name: "added executable run step",
+        workflow: workflow.replace(
+          "      - name: Attest downloaded npm tarball\n",
+          "      - name: Unexpected executable action\n        shell: bash\n        run: echo unexpected\n\n      - name: Attest downloaded npm tarball\n",
+        ),
+      },
+      {
+        name: "added executable uses step",
+        workflow: workflow.replace(
+          "      - name: Attest downloaded npm tarball\n",
+          "      - name: Unexpected external action\n        uses: example/action@0123456789abcdef0123456789abcdef01234567\n\n      - name: Attest downloaded npm tarball\n",
+        ),
+      },
+      {
+        name: "trigger drift",
+        workflow: workflow.replace("  workflow_dispatch:\n", "  workflow_dispatch:\n  push:\n"),
+      },
+      {
+        name: "permission drift",
+        workflow: workflow.replace("      contents: read\n", "      contents: write\n"),
+      },
+      {
+        name: "action pin drift",
+        workflow: workflow.replace(
+          "actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6",
+          "actions/attest@0123456789abcdef0123456789abcdef01234567",
+        ),
+      },
+    ];
+
+    for (const fixture of adversarialFixtures) {
+      expect(fixture.workflow, `${fixture.name} fixture must change the workflow`).not.toBe(workflow);
+      expect(isCanonicalPackageProvenanceWorkflow(fixture.workflow), fixture.name).toBe(false);
+    }
+  });
+
+  it("keeps 1.3.2 at the exact changelog boundary with only its two release bullets", () => {
+    const changelog = readFileSync(join(repositoryRoot, "CHANGELOG.md"), "utf8");
+    expect(hasCanonicalRelease132Boundary(changelog)).toBe(true);
+
+    const adversarialFixtures = [
+      {
+        name: "unreleased entry drifted under 1.3.2",
+        changelog: changelog.replace(
+          "## 1.3.2 (2026-07-26)\n\n",
+          "## 1.3.2 (2026-07-26)\n\n- unrelated unreleased entry\n",
+        ),
+      },
+      {
+        name: "third release bullet added",
+        changelog: changelog.replace(
+          "  credentials or response-body contents.\n",
+          "  credentials or response-body contents.\n- unrelated third release bullet.\n",
+        ),
+      },
+      {
+        name: "release boundary moved into Unreleased",
+        changelog: changelog
+          .replace(`${release132Section}\n\n`, "")
+          .replace(
+            "## [Unreleased]\n\n",
+            `## [Unreleased]\n\n${release132Section}\n\n`,
+          ),
+      },
+    ];
+
+    for (const fixture of adversarialFixtures) {
+      expect(fixture.changelog, `${fixture.name} fixture must change the changelog`).not.toBe(changelog);
+      expect(hasCanonicalRelease132Boundary(fixture.changelog), fixture.name).toBe(false);
+    }
   });
 
   it("requires the exact merged and published commit before any AWS deployment", () => {

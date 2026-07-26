@@ -363,9 +363,11 @@ workflow_dir="$repo/.github/workflows"
 workflow="$workflow_dir/terraform-aws-validate.yml"
 product_workflow="$workflow_dir/ci.yml"
 provenance_workflow="$workflow_dir/package-provenance.yml"
+changelog="$repo/CHANGELOG.md"
 test -f "$workflow" || { echo "CI-safe Terraform workflow missing" >&2; exit 1; }
 test -f "$product_workflow" || { echo "product CI workflow missing" >&2; exit 1; }
 test -f "$provenance_workflow" || { echo "package provenance workflow missing" >&2; exit 1; }
+test -f "$changelog" || { echo "changelog missing" >&2; exit 1; }
 
 expected_workflows='ci.yml
 package-provenance.yml
@@ -377,6 +379,13 @@ actual_workflows="$(
 )"
 if [ "$actual_workflows" != "$expected_workflows" ]; then
   echo "only ci.yml, package-provenance.yml, and terraform-aws-validate.yml are allowed" >&2
+  exit 1
+fi
+
+expected_provenance_sha256='0849b75cbe8fb252c9c2b95ecce59b1f228144c9bcda62c64ba9aa62fbb13c0f'
+actual_provenance_sha256="$(sha256sum "$provenance_workflow" | awk '{ print $1 }')"
+if [ "$actual_provenance_sha256" != "$expected_provenance_sha256" ]; then
+  echo "package provenance workflow must match the exact reviewed manual attestation artifact" >&2
   exit 1
 fi
 
@@ -535,9 +544,45 @@ for provenance_predicate_contract in \
   }
 done
 
-if grep -Ein 'actions/checkout|secrets([.]|\[)|configure-aws-credentials|amazon-ecr-login|role-to-assume|(^|[^[:alnum:]_])(terraform|tofu)[[:space:]]+(apply|destroy)([^[:alnum:]_-]|$)|(^|[^[:alnum:]_])(npm|bun|pnpm|yarn)[[:space:]]+publish([^[:alnum:]_-]|$)|(^|[^[:alnum:]_])(docker|podman)[[:space:]]+push([^[:alnum:]_-]|$)|(^|[^[:alnum:]_])gh[[:space:]]+release([^[:alnum:]_-]|$)|(^|[^[:alnum:]_])git[[:space:]]+tag([^[:alnum:]_-]|$)|(^|[^[:alnum:]_])(aws|kubectl|helm)[[:space:]]+|ecs[[:space:]]+update-service|push-to-registry:[[:space:]]*true|create-storage-record:[[:space:]]*true' \
-  "$provenance_workflow" >/dev/null; then
-  echo "package provenance must not publish, deploy, assume cloud credentials, or read secrets" >&2
+release_132_section="$(
+  awk '
+    /^## 1[.]3[.]2 [(]2026-07-26[)]$/ { capture = 1 }
+    capture && /^## / && $0 != "## 1.3.2 (2026-07-26)" { exit }
+    capture { print }
+  ' "$changelog"
+)"
+unreleased_section="$(
+  awk '
+    /^## \[Unreleased\]$/ { capture = 1 }
+    capture && /^## / && $0 != "## [Unreleased]" { exit }
+    capture { print }
+  ' "$changelog"
+)"
+expected_release_132_section='## 1.3.2 (2026-07-26)
+
+- fail closed on malformed JSON, wrong response envelopes, and missing required
+  fields from successful self-hosted API responses before repositories, mailbox
+  status/context/sync projections, or the generated SDK can synthesize empty
+  rows, lists, or counts.
+- share one config-driven wire validator across the synchronous resource store,
+  asynchronous inbox data source, and generated `@hasna/emails/selfhost` client;
+  validation errors identify the endpoint and invalid field without including
+  credentials or response-body contents.'
+expected_unreleased_sha256='40e9d4fc08e67cd4f7d38b053c5c9031dd3e8e403d68bc7e40f83a87bc00ba20'
+actual_unreleased_sha256="$(printf '%s' "$unreleased_section" | sha256sum | awk '{ print $1 }')"
+unreleased_line="$(grep -Fn '## [Unreleased]' "$changelog" | cut -d: -f1)"
+release_132_line="$(grep -Fn '## 1.3.2 (2026-07-26)' "$changelog" | cut -d: -f1)"
+release_131_line="$(grep -Fn '## 1.3.1 (2026-07-26)' "$changelog" | cut -d: -f1)"
+if [ "$(grep -Fxc '## [Unreleased]' "$changelog" || true)" != "1" ] \
+  || [ "$(grep -Fxc '## 1.3.2 (2026-07-26)' "$changelog" || true)" != "1" ] \
+  || [ -z "$unreleased_line" ] \
+  || [ -z "$release_132_line" ] \
+  || [ -z "$release_131_line" ] \
+  || [ "$unreleased_line" -ge "$release_132_line" ] \
+  || [ "$release_132_line" -ge "$release_131_line" ] \
+  || [ "$actual_unreleased_sha256" != "$expected_unreleased_sha256" ] \
+  || [ "$release_132_section" != "$expected_release_132_section" ]; then
+  echo "1.3.2 changelog must contain exactly its two release bullets below the full Unreleased section" >&2
   exit 1
 fi
 
