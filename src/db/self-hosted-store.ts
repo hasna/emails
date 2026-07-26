@@ -438,6 +438,20 @@ export function selfHostedApiRequest(
   return { status, json: parseJson(text), bodyText: text };
 }
 
+/**
+ * Probe an ORIGIN-level operational route (`/health`, `/ready`, `/version`).
+ *
+ * These live at the service root, NOT under `/v1`, so they cannot be reached via
+ * selfHostedApiRequest (whose base URL already ends in `/v1`). Read-only and
+ * bounded by the same curl timeouts as every other call.
+ */
+export function selfHostedProbe(path: string): SelfHostedApiResult {
+  const config = resolveSelfHostedConfig();
+  const origin = config.baseUrl.replace(/\/v1$/, "");
+  const { status, body } = httpRequest({ baseUrl: origin, credential: config.credential }, "GET", path);
+  return { status, json: parseJson(body), bodyText: body };
+}
+
 // ---- id resolution (self-hosted) ------------------------------------------
 //
 // Replaces the deleted local resolvePartialId family. A full 36-char id is

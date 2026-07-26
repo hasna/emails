@@ -8,6 +8,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { QueryResult, TypedQueryClient, PoolQueryClient } from "../../storage-kit/index.js";
 import type { QueryResultRow } from "pg";
 import type { SelfHostedResourceSpec, ResourceColumn } from "./resources.js";
+import { resourceKeyColumn, resourceListOrderBy } from "./resources.js";
 import { canonicalSender } from "../../lib/email-address.js";
 import {
   MAX_ATTACHMENT_DOWNLOAD_BYTES,
@@ -1387,10 +1388,12 @@ function encodeColumn(col: ResourceColumn, value: unknown): unknown {
   return value ?? null;
 }
 
-/** Primary-key column for a spec (a server-minted `id` unless overridden). */
-function keyColumn(spec: SelfHostedResourceSpec): string {
-  return spec.idColumn ?? "id";
-}
+/**
+ * Primary-key column for a spec (a server-minted `id` unless overridden).
+ * Re-exported from the registry so the key used for addressing a row and the key
+ * used as the list ORDER BY tiebreaker can never drift apart.
+ */
+const keyColumn = resourceKeyColumn;
 
 /**
  * Strip a spec's `redactColumns` from a returned row IN PLACE. The generic read
@@ -1869,7 +1872,9 @@ export class TenantScopedStore {
   // ---- domains ------------------------------------------------------------
   async listDomains(opts: ListOptions = {}): Promise<DomainRecord[]> {
     return this.client.many<DomainRecord>(
-      `SELECT * FROM domains WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3`,
+      // `created_at DESC` alone is not unique, and a non-total sort makes LIMIT/OFFSET
+      // paging return duplicates while skipping rows (see resourceListOrderBy).
+      `SELECT * FROM domains WHERE tenant_id = $1 ORDER BY created_at DESC, id ASC LIMIT $2 OFFSET $3`,
       [this.tenantId, clampLimit(opts.limit), clampOffset(opts.offset)],
     );
   }
@@ -2033,7 +2038,8 @@ export class TenantScopedStore {
   // ---- addresses ----------------------------------------------------------
   async listAddresses(opts: ListOptions = {}): Promise<AddressRecord[]> {
     return this.client.many<AddressRecord>(
-      `SELECT * FROM addresses WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3`,
+      // Total order (see listDomains): the id tiebreaker keeps offset paging stable.
+      `SELECT * FROM addresses WHERE tenant_id = $1 ORDER BY created_at DESC, id ASC LIMIT $2 OFFSET $3`,
       [this.tenantId, clampLimit(opts.limit), clampOffset(opts.offset)],
     );
   }
@@ -4262,7 +4268,7 @@ export class TenantScopedStore {
     const whereSql = `WHERE ${where.join(" AND ")}`;
     params.push(clampLimit(opts.limit), clampOffset(opts.offset));
     const rows = await this.client.many<Record<string, unknown>>(
-      `SELECT * FROM ${spec.table} ${whereSql} ORDER BY ${spec.orderBy} LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      `SELECT * FROM ${spec.table} ${whereSql} ORDER BY ${resourceListOrderBy(spec)} LIMIT $${params.length - 1} OFFSET $${params.length}`,
       params,
     );
     return rows.map((row) => redactResourceRow(spec, row));

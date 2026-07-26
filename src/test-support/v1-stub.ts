@@ -21,6 +21,7 @@
 //   - Control endpoints (unauthenticated so a beforeEach can always reset):
 //     POST /v1/__reset  { resources? }  -> replace the whole store (empty clears it)
 //     GET  /v1/__dump                   -> read the whole store back for assertions
+//     GET  /v1/__list_queries?resource= -> query strings of every list request made
 //
 // SAFETY: no secret is ever logged. The API key lives only in the subprocess env
 // and the Authorization header; the helper never prints it.
@@ -51,6 +52,19 @@ export interface V1Stub {
   list(resource: string): Promise<Array<Record<string, unknown>>>;
   /** Read the entire store back from the stub. */
   dump(): Promise<V1StubResources>;
+  /**
+   * Emulate a non-total list ORDER BY: before every list window the named
+   * resources (or all of them) are rotated by `rotate` positions, so a
+   * limit/offset pager sees duplicates and misses rows — the production
+   * `/v1/sources` failure mode. `rotate: 0` restores stable order.
+   */
+  setListOrderInstability(rotate: number, resources?: string[]): Promise<void>;
+  /**
+   * Query strings (without the leading `?`) of every generic list request the
+   * client made for `resource`, in order. Use it to assert a filter was pushed
+   * SERVER-side rather than applied in memory over the whole table.
+   */
+  listQueries(resource: string): Promise<string[]>;
   /** Read the current email-verification token for an address (test helper). */
   verifyToken(email: string): Promise<string | null>;
   /** Mark a signed-up user verified without a token (fixture shortcut). */
@@ -91,6 +105,13 @@ let authUsers = {};      // email -> { password, name, verified, tenants:[{slug,
 let sessions = {};       // emss_ token -> { email, tenant:{slug,name,role} }
 let verifyTokens = {};   // emiv_ token -> email
 let bootstrapped = false;
+// Non-total list-order emulation (see /v1/__list_order). 0 = stable order.
+let listRotate = 0;
+let listRotateResources = null;
+// Query string of every generic list request, per resource (see /v1/__list_queries).
+// Lets a test assert that a client pushed its filters SERVER-side instead of
+// dragging the whole table over and filtering in memory. Cleared on __reset.
+let listQueries = {};
 
 function safeParse(raw) {
   if (!raw) return {};
@@ -108,6 +129,18 @@ function singular(r) {
 function rowsFor(resource) {
   if (!Array.isArray(store[resource])) store[resource] = [];
   return store[resource];
+}
+// Shift the backing array in place before a list window is taken, so successive
+// pages of one enumeration see different row positions (a non-total ORDER BY).
+function rotateForList(resource, rows) {
+  if (!listRotate) return rows;
+  if (listRotateResources && listRotateResources.indexOf(resource) < 0) return rows;
+  const n = rows.length;
+  if (n < 2) return rows;
+  const by = ((listRotate % n) + n) % n;
+  const moved = rows.splice(0, by);
+  for (const row of moved) rows.push(row);
+  return rows;
 }
 function includesText(value, query) {
   if (!query) return true;
@@ -317,10 +350,32 @@ const server = Bun.serve({
       sessions = {};
       verifyTokens = {};
       bootstrapped = false;
+      listRotate = 0;
+      listRotateResources = null;
+      listQueries = {};
       return json({ ok: true });
     }
     if (req.method === "GET" && parts[0] === "v1" && parts[1] === "__dump") {
       return json({ resources: store });
+    }
+    // Test-only: the query string of every generic list request for a resource, in
+    // order. A client that filters only in memory shows nothing but limit/offset.
+    if (req.method === "GET" && parts[0] === "v1" && parts[1] === "__list_queries") {
+      const resource = url.searchParams.get("resource") || "";
+      return json({ queries: listQueries[resource] || [] });
+    }
+    // Test-only: emulate a NON-TOTAL list ORDER BY. The real server sorts by
+    // columns that are not unique (e.g. sources by status, type, created_at), and
+    // Postgres may return tied rows in a different order per query — so a
+    // limit/offset pager can see the same row twice and never see others. Rotating
+    // the backing array by \`rotate\` before each list window reproduces exactly
+    // that, which is what makes the "3473 of 3899 rows, reported as a total" bug
+    // testable.
+    if (req.method === "POST" && parts[0] === "v1" && parts[1] === "__list_order") {
+      const body = await req.json().catch(function () { return {}; });
+      listRotate = Number(body.rotate || 0) || 0;
+      listRotateResources = Array.isArray(body.resources) ? body.resources : null;
+      return json({ ok: true, rotate: listRotate });
     }
     // Test-only: read the current verification token for an email (the real
     // server emails it; here the test needs it to drive verify-email).
@@ -619,9 +674,27 @@ const server = Bun.serve({
     const rows = rowsFor(resource);
 
     if (id === undefined && req.method === "GET") {
+      // Mirror the real server's list windowing (src/server/self-hosted/store.ts
+      // clampLimit/clampOffset): a supplied \`limit\` is CAPPED at 500, and
+      // \`offset\` skips rows. Without this the stub handed back every row for any
+      // limit, which hid the fact that a single \`.list({ limit: 1000 })\` can only
+      // ever see 500 rows — the silent-truncation trap behind fabricated totals.
+      if (!Array.isArray(listQueries[resource])) listQueries[resource] = [];
+      listQueries[resource].push(url.search.replace(/^\?/, ""));
+      const rawLimit = url.searchParams.get("limit");
+      const rawOffset = url.searchParams.get("offset");
+      const offset = rawOffset === null || Number.isNaN(Number(rawOffset)) || Number(rawOffset) < 0
+        ? 0
+        : Math.floor(Number(rawOffset));
+      rotateForList(resource, rows);
+      let windowed = offset > 0 ? rows.slice(offset) : rows;
+      if (rawLimit !== null && !Number.isNaN(Number(rawLimit))) {
+        const limit = Math.min(Math.max(1, Math.floor(Number(rawLimit))), 500);
+        windowed = windowed.slice(0, limit);
+      }
       const out = {};
-      out[resource] = rows;
-      out.items = rows;
+      out[resource] = windowed;
+      out.items = windowed;
       return json(out);
     }
     if (id === undefined && req.method === "POST") {
@@ -753,6 +826,20 @@ export async function startV1Stub(options: V1StubOptions = {}): Promise<V1Stub> 
       if (!res.ok) throw new Error(`v1-stub __dump failed: HTTP ${res.status}`);
       const body = (await res.json()) as { resources?: V1StubResources };
       return body.resources ?? {};
+    },
+    async setListOrderInstability(rotate, resources) {
+      const res = await fetch(`${baseUrl}/v1/__list_order`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ rotate, resources: resources ?? null }),
+      });
+      if (!res.ok) throw new Error(`v1-stub __list_order failed: HTTP ${res.status}`);
+    },
+    async listQueries(resource) {
+      const res = await fetch(`${baseUrl}/v1/__list_queries?resource=${encodeURIComponent(resource)}`);
+      if (!res.ok) throw new Error(`v1-stub __list_queries failed: HTTP ${res.status}`);
+      const body = (await res.json()) as { queries?: string[] };
+      return body.queries ?? [];
     },
     async verifyToken(email) {
       const res = await fetch(`${baseUrl}/v1/__verify_token?email=${encodeURIComponent(email)}`);

@@ -53,7 +53,10 @@ describe("MCP resource payloads (self-hosted /v1)", () => {
     expect(domains.note).toBeUndefined();
     expect(domains.domains.map((domain) => domain.domain)).toEqual(["example.com", "pending.example.com"]);
     expect(domains.domains[0]).toHaveProperty("readiness");
-    expect(domains.domains[0]?.provisioning).toBeNull();
+    // Provisioning is a REAL set of columns on the /v1 domain entity. This used
+    // to be hardcoded null, and `ready_addresses: 0` was hardcoded alongside it,
+    // which turned an unmeasured input into a published readiness verdict.
+    expect(domains.domains[0]?.provisioning).toMatchObject({ provisioning_status: "none" });
   });
 
   it("routes the address resource through the self-hosted API", async () => {
