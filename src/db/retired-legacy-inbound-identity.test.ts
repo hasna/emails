@@ -22,6 +22,10 @@ const RETIRED_ADDRESS = "legacy-inbound@local.mailery";
 const RETIRED_MAILBOX_ID = `mbx:${RETIRED_ADDRESS}`;
 const CURRENT_MAILBOX_ID = "mbx:legacy-inbound@local.emails";
 
+// Each case opens a real file-backed database twice, replaying every migration
+// both times. That is well past the 5s default on a loaded CI runner.
+const DOUBLE_OPEN_TIMEOUT_MS = 30_000;
+
 let root: string;
 let path: string;
 
@@ -81,7 +85,7 @@ describe("the retired local.mailery inbound identity", () => {
     expect(current).toMatchObject({ id: CURRENT_MAILBOX_ID });
     // Exactly one synthetic mailbox — not one per product name.
     expect(second.query("SELECT COUNT(*) AS count FROM mailboxes").get()).toMatchObject({ count: 1 });
-  });
+  }, DOUBLE_OPEN_TIMEOUT_MS);
 
   it("re-points a released database's source row instead of cascading it away", () => {
     // Stand in for a database that migration 46 renamed and the trigger then
@@ -127,7 +131,7 @@ describe("the retired local.mailery inbound identity", () => {
       .toThrow(/mail\/source history/);
     expect(upgraded.query("SELECT id FROM inbound_emails WHERE id = ?").get(inboundId))
       .toMatchObject({ id: inboundId });
-  });
+  }, DOUBLE_OPEN_TIMEOUT_MS);
 
   it("collapses a source recorded under both names onto the current identity", () => {
     const seed = getDatabase();
@@ -158,5 +162,5 @@ describe("the retired local.mailery inbound identity", () => {
     expect(upgraded.query("SELECT id FROM mailbox_sources").get())
       .toMatchObject({ id: `msrc:${CURRENT_MAILBOX_ID}:none:legacy_inbound` });
     expect(upgraded.query("SELECT COUNT(*) AS count FROM mailboxes").get()).toMatchObject({ count: 1 });
-  });
+  }, DOUBLE_OPEN_TIMEOUT_MS);
 });
