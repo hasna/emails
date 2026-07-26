@@ -80,6 +80,17 @@ export interface SelfHostedResourceSpec {
    * material lives in the non-resource `send_key_secrets` table).
    */
   redactColumns?: string[];
+  /**
+   * Generic WRITE verbs (POST / PATCH / PUT / DELETE) on this resource require a
+   * tenant owner/admin, or an operator API key — not merely `emails:write`.
+   *
+   * Set for resources whose columns decide WHO MAY ACT rather than what the
+   * tenant holds. The bespoke handlers for such an operation are role-gated, but
+   * the generic matcher would otherwise reach the same columns through
+   * `/v1/<path>/<id>` with plain `emails:write` and bypass that gate entirely.
+   * Reads stay on `emails:read` — this is about authority, not confidentiality.
+   */
+  writeRequiresOperator?: boolean;
 }
 
 export const SELF_HOSTED_RESOURCES: SelfHostedResourceSpec[] = [
@@ -152,6 +163,14 @@ export const SELF_HOSTED_RESOURCES: SelfHostedResourceSpec[] = [
     orderBy: "created_at DESC",
     filters: ["owner_id"],
     foreignKeys: [{ column: "owner_id", table: "owners" }],
+    // A send key decides which of the tenant's from-addresses its holder may send
+    // as, and `evaluateOutboundPolicy` reads `owner_id` LIVE at send time. So a
+    // generic `PATCH /v1/send-keys/<id> {"owner_id": …}` repoints an existing key
+    // at another owner — the exact escalation the role gate on
+    // `POST /v1/send-keys/mint` exists to stop, reached without touching /mint.
+    // `{"revoked_at": null}` likewise resurrects a revoked key, and a generic
+    // DELETE would let any member destroy another owner's key.
+    writeRequiresOperator: true,
     // SUMMARY-ONLY: the drifted prod `send_keys` table still carries a legacy
     // `key_hash` column; the generic `SELECT *` read path must never surface it.
     // The token/secret is minted via /v1/send-keys/mint and only its sha256 lives
@@ -448,6 +467,11 @@ export const SELF_HOSTED_RESOURCES: SelfHostedResourceSpec[] = [
     // `address_ownership_events`). The client MINTS the event id and then reads
     // it straight back by that id, so this resource honors the client-supplied
     // `id` (idColumn) rather than server-minting a different one.
+    // Writes are operator-gated for the same reason the PATCH /v1/addresses/<id>
+    // ownership fields are: this is the audit record OF that reassignment, and it
+    // carries an `actor` column. A member who can no longer reassign ownership
+    // must not be able to forge "reassigned by X" rows in the trail either.
+    writeRequiresOperator: true,
     path: "address-ownership-events",
     table: "address_ownership_events",
     idColumn: "id",

@@ -2041,7 +2041,7 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
     "/v1/send-keys/mint": {
       post: {
         operationId: "mintSendKey",
-        summary: "Issue a scoped send key; the token is returned ONCE and never stored",
+        summary: "Issue a scoped send key; the token is returned ONCE and never stored. Requires a tenant owner/admin session or an operator API key.",
         requestBody: {
           required: true,
           content: {

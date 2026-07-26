@@ -1349,7 +1349,7 @@ export class EmailsSelfHostClient {
       });
     }
 
-    /** Issue a scoped send key; the token is returned ONCE and never stored */
+    /** Issue a scoped send key; the token is returned ONCE and never stored. Requires a tenant owner/admin session or an operator API key. */
     async mintSendKey(body: { "owner_id": string; "label"?: string | null }, init?: RequestInit): Promise<{ "token": string; "key": Record<string, unknown> }> {
       return this.request("POST", `/v1/send-keys/mint`, {
         body,
