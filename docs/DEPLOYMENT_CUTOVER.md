@@ -227,9 +227,8 @@ jq -e --arg release_commit "$RELEASE_COMMIT" '
   and .merge_commit_sha == $release_commit
 ' <<<"$RELEASE_PR_JSON" >/dev/null
 
-HOSTED_CI_COMPLETED_AT_VALUES=()
 HOSTED_CI_UPDATED_AT_VALUES=()
-LATEST_HOSTED_CI_COMPLETION_EPOCH=0
+LATEST_HOSTED_CI_UPDATED_EPOCH=0
 for HOSTED_CI_WORKFLOW in "${HOSTED_CI_WORKFLOWS[@]}"; do
   HOSTED_CI_RUNS_JSON="$(
     gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$HOSTED_CI_WORKFLOW/runs?head_sha=$RELEASE_COMMIT&event=push&status=completed&per_page=100"
@@ -242,28 +241,61 @@ for HOSTED_CI_WORKFLOW in "${HOSTED_CI_WORKFLOWS[@]}"; do
           and .event == "push"
           and .status == "completed"
           and .conclusion == "success"
-          and (.completed_at | type == "string" and length > 0)
           and (.updated_at | type == "string" and length > 0))]
-    | sort_by(.completed_at, .updated_at, .id)
+    | sort_by(.updated_at, .id)
     | last
   ' <<<"$HOSTED_CI_RUNS_JSON")"
-  HOSTED_CI_COMPLETED_AT="$(jq -er '.completed_at' <<<"$MATCHED_HOSTED_CI_RUN_JSON")"
   HOSTED_CI_UPDATED_AT="$(jq -er '.updated_at' <<<"$MATCHED_HOSTED_CI_RUN_JSON")"
-  HOSTED_CI_COMPLETION_EPOCH="$(date -u -d "$HOSTED_CI_COMPLETED_AT" +%s)"
   HOSTED_CI_UPDATED_EPOCH="$(date -u -d "$HOSTED_CI_UPDATED_AT" +%s)"
-  test "$HOSTED_CI_UPDATED_EPOCH" -ge "$HOSTED_CI_COMPLETION_EPOCH"
-  HOSTED_CI_COMPLETED_AT_VALUES+=("$HOSTED_CI_COMPLETED_AT")
   HOSTED_CI_UPDATED_AT_VALUES+=("$HOSTED_CI_UPDATED_AT")
-  if test "$HOSTED_CI_COMPLETION_EPOCH" -gt "$LATEST_HOSTED_CI_COMPLETION_EPOCH"; then
-    LATEST_HOSTED_CI_COMPLETION_EPOCH="$HOSTED_CI_COMPLETION_EPOCH"
+  if test "$HOSTED_CI_UPDATED_EPOCH" -gt "$LATEST_HOSTED_CI_UPDATED_EPOCH"; then
+    LATEST_HOSTED_CI_UPDATED_EPOCH="$HOSTED_CI_UPDATED_EPOCH"
   fi
 done
-test "${#HOSTED_CI_COMPLETED_AT_VALUES[@]}" -eq 2
 test "${#HOSTED_CI_UPDATED_AT_VALUES[@]}" -eq 2
-test "$LATEST_HOSTED_CI_COMPLETION_EPOCH" -gt 0
+test "$LATEST_HOSTED_CI_UPDATED_EPOCH" -gt 0
 
-SOURCE_CHECKOUT_COMMIT="$(git -C "$SOURCE_CHECKOUT" rev-parse --verify 'HEAD^{commit}')"
-test "$SOURCE_CHECKOUT_COMMIT" = "$RELEASE_COMMIT"
+RELEASE_WORKTREE_PARENT=""
+RELEASE_WORKTREE=""
+NPM_PACK_DIR=""
+cleanup_release_preflight() {
+  cleanup_status=$?
+  trap - EXIT
+  if test -n "$RELEASE_WORKTREE" \
+    && git -C "$SOURCE_CHECKOUT" worktree list --porcelain \
+      | grep -Fxq "worktree $RELEASE_WORKTREE"; then
+    git -C "$SOURCE_CHECKOUT" worktree remove --force "$RELEASE_WORKTREE" \
+      || cleanup_status=1
+  fi
+  if test -n "$RELEASE_WORKTREE_PARENT" && test -d "$RELEASE_WORKTREE_PARENT"; then
+    rm -rf -- "$RELEASE_WORKTREE_PARENT" || cleanup_status=1
+  fi
+  if test -n "$NPM_PACK_DIR" && test -d "$NPM_PACK_DIR"; then
+    rm -rf -- "$NPM_PACK_DIR" || cleanup_status=1
+  fi
+  exit "$cleanup_status"
+}
+trap cleanup_release_preflight EXIT
+
+RELEASE_WORKTREE_PARENT="$(mktemp -d "${TMPDIR:-/tmp}/emails-release-worktree.XXXXXXXX")"
+NPM_PACK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/emails-release-pack.XXXXXXXX")"
+RELEASE_WORKTREE="$RELEASE_WORKTREE_PARENT/release-$RELEASE_COMMIT"
+git -C "$SOURCE_CHECKOUT" worktree add --detach "$RELEASE_WORKTREE" "$RELEASE_COMMIT"
+RELEASE_WORKTREE_COMMIT="$(git -C "$RELEASE_WORKTREE" rev-parse --verify 'HEAD^{commit}')"
+test "$RELEASE_WORKTREE_COMMIT" = "$RELEASE_COMMIT"
+RELEASE_WORKTREE_CLEAN_BEFORE="$(
+  git -C "$RELEASE_WORKTREE" status --porcelain=v1 --untracked-files=all
+)"
+test -z "$RELEASE_WORKTREE_CLEAN_BEFORE"
+(
+  cd "$RELEASE_WORKTREE"
+  bun install --frozen-lockfile
+)
+RELEASE_WORKTREE_CLEAN_AFTER_INSTALL="$(
+  git -C "$RELEASE_WORKTREE" status --porcelain=v1 --untracked-files=all
+)"
+test -z "$RELEASE_WORKTREE_CLEAN_AFTER_INSTALL"
+
 EXPECTED_NPM_TARBALL_URL="https://registry.npmjs.org/@hasna/emails/-/emails-${RELEASE_VERSION}.tgz"
 NPM_RELEASE_JSON="$(
   npm view "$NPM_PACKAGE@$RELEASE_VERSION" --json --registry "$NPM_REGISTRY"
@@ -281,10 +313,8 @@ jq -e \
 ' <<<"$NPM_RELEASE_JSON" >/dev/null
 
 NPM_REGISTRY_INTEGRITY="$(jq -er '.dist.integrity' <<<"$NPM_RELEASE_JSON")"
-NPM_PACK_DIR="$(mktemp -d)"
-trap 'rm -rf "$NPM_PACK_DIR"' EXIT
 NPM_PACK_OUTPUT_FILE="$NPM_PACK_DIR/npm-pack-output.log"
-npm pack --json --pack-destination "$NPM_PACK_DIR" --registry "$NPM_REGISTRY" "$SOURCE_CHECKOUT" \
+npm pack --json --pack-destination "$NPM_PACK_DIR" --registry "$NPM_REGISTRY" "$RELEASE_WORKTREE" \
   >"$NPM_PACK_OUTPUT_FILE"
 NPM_PACK_JSON_START_LINE="$(
   grep -n '^\[$' "$NPM_PACK_OUTPUT_FILE" | tail -1 | cut -d: -f1
@@ -305,13 +335,17 @@ jq -e \
 NPM_PACK_FILENAME="$(jq -er '.[0].filename' <<<"$NPM_PACK_JSON")"
 NPM_PACK_PATH="$NPM_PACK_DIR/$NPM_PACK_FILENAME"
 test -f "$NPM_PACK_PATH"
+RELEASE_WORKTREE_CLEAN_AFTER_PACK="$(
+  git -C "$RELEASE_WORKTREE" status --porcelain=v1 --untracked-files=all
+)"
+test -z "$RELEASE_WORKTREE_CLEAN_AFTER_PACK"
 
 NPM_TIME_JSON="$(npm view "$NPM_PACKAGE" time --json --registry "$NPM_REGISTRY")"
 NPM_PUBLISHED_AT="$(jq -er --arg release_version "$RELEASE_VERSION" '
   .[$release_version] | select(type == "string" and length > 0)
 ' <<<"$NPM_TIME_JSON")"
 NPM_PUBLISHED_EPOCH="$(date -u -d "$NPM_PUBLISHED_AT" +%s)"
-test "$NPM_PUBLISHED_EPOCH" -gt "$LATEST_HOSTED_CI_COMPLETION_EPOCH"
+test "$NPM_PUBLISHED_EPOCH" -gt "$LATEST_HOSTED_CI_UPDATED_EPOCH"
 ```
 
 ### 1. Prove topology, stage the release, stop every old writer, then save a database fence

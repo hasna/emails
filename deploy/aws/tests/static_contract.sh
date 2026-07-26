@@ -460,17 +460,25 @@ for release_order_runbook in "$repo/docs/DEPLOYMENT_CUTOVER.md"; do
     '.head_branch == "main"' \
     '.conclusion == "success"' \
     "MATCHED_HOSTED_CI_RUN_JSON" \
-    ".completed_at" \
     ".updated_at" \
-    "LATEST_HOSTED_CI_COMPLETION_EPOCH" \
-    'SOURCE_CHECKOUT_COMMIT="$(git -C "$SOURCE_CHECKOUT" rev-parse --verify '"'"'HEAD^{commit}'"'"')"' \
-    'test "$SOURCE_CHECKOUT_COMMIT" = "$RELEASE_COMMIT"' \
+    "LATEST_HOSTED_CI_UPDATED_EPOCH" \
+    'RELEASE_WORKTREE_PARENT="$(mktemp -d "${TMPDIR:-/tmp}/emails-release-worktree.XXXXXXXX")"' \
+    'NPM_PACK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/emails-release-pack.XXXXXXXX")"' \
+    "cleanup_release_preflight()" \
+    'git -C "$SOURCE_CHECKOUT" worktree remove --force "$RELEASE_WORKTREE"' \
+    'rm -rf -- "$RELEASE_WORKTREE_PARENT"' \
+    'rm -rf -- "$NPM_PACK_DIR"' \
+    'git -C "$SOURCE_CHECKOUT" worktree add --detach "$RELEASE_WORKTREE" "$RELEASE_COMMIT"' \
+    'RELEASE_WORKTREE_COMMIT="$(git -C "$RELEASE_WORKTREE" rev-parse --verify '"'"'HEAD^{commit}'"'"')"' \
+    'test "$RELEASE_WORKTREE_COMMIT" = "$RELEASE_COMMIT"' \
+    'git -C "$RELEASE_WORKTREE" status --porcelain=v1 --untracked-files=all' \
+    'bun install --frozen-lockfile' \
     'npm view "$NPM_PACKAGE@$RELEASE_VERSION" --json --registry "$NPM_REGISTRY"' \
     "EXPECTED_NPM_TARBALL_URL" \
     ".dist.integrity" \
     'test("^sha512-[A-Za-z0-9+/]+={0,2}$")' \
     '.dist.tarball == $tarball_url' \
-    'npm pack --json --pack-destination "$NPM_PACK_DIR" --registry "$NPM_REGISTRY" "$SOURCE_CHECKOUT"' \
+    'npm pack --json --pack-destination "$NPM_PACK_DIR" --registry "$NPM_REGISTRY" "$RELEASE_WORKTREE"' \
     "NPM_PACK_OUTPUT_FILE" \
     "NPM_PACK_JSON_START_LINE" \
     'tail -n +"$NPM_PACK_JSON_START_LINE"' \
@@ -479,7 +487,7 @@ for release_order_runbook in "$repo/docs/DEPLOYMENT_CUTOVER.md"; do
     'npm view "$NPM_PACKAGE" time --json --registry "$NPM_REGISTRY"' \
     "NPM_PUBLISHED_AT" \
     "NPM_PUBLISHED_EPOCH" \
-    'test "$NPM_PUBLISHED_EPOCH" -gt "$LATEST_HOSTED_CI_COMPLETION_EPOCH"' \
+    'test "$NPM_PUBLISHED_EPOCH" -gt "$LATEST_HOSTED_CI_UPDATED_EPOCH"' \
     "AWS deployment is prohibited" \
     "Manual publishing and AWS deployment remain separate, manual, PR-first actions."; do
     grep -Fq "$release_order_marker" "$release_order_runbook" || {
@@ -488,9 +496,21 @@ for release_order_runbook in "$repo/docs/DEPLOYMENT_CUTOVER.md"; do
     }
   done
 
-  if grep -Eq 'NPM_PROVENANCE_PREDICATE_TYPE|NPM_ATTESTATIONS|resolvedDependencies|base64 --decode|:[[:space:]]*"\$\{HOSTED_CI_WORKFLOW:|[.]gitHead|--ignore-scripts' \
+  if grep -Eq 'NPM_PROVENANCE_PREDICATE_TYPE|NPM_ATTESTATIONS|resolvedDependencies|base64 --decode|:[[:space:]]*"\$\{HOSTED_CI_WORKFLOW:|[.]gitHead|--ignore-scripts|completed_at' \
     "$release_order_runbook"; then
     echo "release-order contract must use registry artifact integrity, not unavailable publish provenance" >&2
+    exit 1
+  fi
+
+  if grep -Fq 'npm pack --json --pack-destination "$NPM_PACK_DIR" --registry "$NPM_REGISTRY" "$SOURCE_CHECKOUT"' \
+    "$release_order_runbook"; then
+    echo "release-order package integrity must come from the detached release worktree" >&2
+    exit 1
+  fi
+
+  if test "$(grep -Fc 'git -C "$RELEASE_WORKTREE" status --porcelain=v1 --untracked-files=all' \
+    "$release_order_runbook")" != "3"; then
+    echo "release-order detached worktree must be clean before install, after install, and after pack" >&2
     exit 1
   fi
 

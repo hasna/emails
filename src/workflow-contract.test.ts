@@ -86,17 +86,25 @@ describe("repository workflow safety", () => {
       '.head_branch == "main"',
       '.conclusion == "success"',
       "MATCHED_HOSTED_CI_RUN_JSON",
-      ".completed_at",
       ".updated_at",
-      "LATEST_HOSTED_CI_COMPLETION_EPOCH",
-      'SOURCE_CHECKOUT_COMMIT="$(git -C "$SOURCE_CHECKOUT" rev-parse --verify \'HEAD^{commit}\')"',
-      'test "$SOURCE_CHECKOUT_COMMIT" = "$RELEASE_COMMIT"',
+      "LATEST_HOSTED_CI_UPDATED_EPOCH",
+      'RELEASE_WORKTREE_PARENT="$(mktemp -d "${TMPDIR:-/tmp}/emails-release-worktree.XXXXXXXX")"',
+      'NPM_PACK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/emails-release-pack.XXXXXXXX")"',
+      "cleanup_release_preflight()",
+      'git -C "$SOURCE_CHECKOUT" worktree remove --force "$RELEASE_WORKTREE"',
+      'rm -rf -- "$RELEASE_WORKTREE_PARENT"',
+      'rm -rf -- "$NPM_PACK_DIR"',
+      'git -C "$SOURCE_CHECKOUT" worktree add --detach "$RELEASE_WORKTREE" "$RELEASE_COMMIT"',
+      'RELEASE_WORKTREE_COMMIT="$(git -C "$RELEASE_WORKTREE" rev-parse --verify \'HEAD^{commit}\')"',
+      'test "$RELEASE_WORKTREE_COMMIT" = "$RELEASE_COMMIT"',
+      'git -C "$RELEASE_WORKTREE" status --porcelain=v1 --untracked-files=all',
+      'bun install --frozen-lockfile',
       'npm view "$NPM_PACKAGE@$RELEASE_VERSION" --json --registry "$NPM_REGISTRY"',
       "EXPECTED_NPM_TARBALL_URL",
       ".dist.integrity",
       'test("^sha512-[A-Za-z0-9+/]+={0,2}$")',
       ".dist.tarball == $tarball_url",
-      'npm pack --json --pack-destination "$NPM_PACK_DIR" --registry "$NPM_REGISTRY" "$SOURCE_CHECKOUT"',
+      'npm pack --json --pack-destination "$NPM_PACK_DIR" --registry "$NPM_REGISTRY" "$RELEASE_WORKTREE"',
       "NPM_PACK_OUTPUT_FILE",
       "NPM_PACK_JSON_START_LINE",
       'tail -n +"$NPM_PACK_JSON_START_LINE"',
@@ -105,7 +113,7 @@ describe("repository workflow safety", () => {
       'npm view "$NPM_PACKAGE" time --json --registry "$NPM_REGISTRY"',
       "NPM_PUBLISHED_AT",
       "NPM_PUBLISHED_EPOCH",
-      'test "$NPM_PUBLISHED_EPOCH" -gt "$LATEST_HOSTED_CI_COMPLETION_EPOCH"',
+      'test "$NPM_PUBLISHED_EPOCH" -gt "$LATEST_HOSTED_CI_UPDATED_EPOCH"',
       "AWS deployment is prohibited",
       "Manual publishing and AWS deployment remain separate, manual, PR-first actions.",
     ]) {
@@ -113,8 +121,16 @@ describe("repository workflow safety", () => {
     }
 
     expect(preflight).not.toMatch(
-      /NPM_PROVENANCE_PREDICATE_TYPE|NPM_ATTESTATIONS|resolvedDependencies|base64 --decode|:\s*"\$\{HOSTED_CI_WORKFLOW:|\.gitHead|--ignore-scripts/,
+      /NPM_PROVENANCE_PREDICATE_TYPE|NPM_ATTESTATIONS|resolvedDependencies|base64 --decode|:\s*"\$\{HOSTED_CI_WORKFLOW:|\.gitHead|--ignore-scripts|completed_at/,
     );
+    expect(preflight).not.toContain(
+      'npm pack --json --pack-destination "$NPM_PACK_DIR" --registry "$NPM_REGISTRY" "$SOURCE_CHECKOUT"',
+    );
+    expect(
+      preflight.match(
+        /git -C "\$RELEASE_WORKTREE" status --porcelain=v1 --untracked-files=all/g,
+      ),
+    ).toHaveLength(3);
     for (const npmCommand of preflight.split("\n").filter((line) => /\bnpm (?:view|pack)\b/.test(line))) {
       expect(npmCommand).toContain('--registry "$NPM_REGISTRY"');
     }
