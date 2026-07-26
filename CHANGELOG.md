@@ -6,17 +6,6 @@ All notable changes to `@hasna/emails` are documented here.
 
 - scope AWS module cross-account SES credentials to `EMAILS_SES_*` only; generic `AWS_*` credentials are no longer injected, so unrelated SDK clients retain the task-role default chain.
 
-## 1.3.2 (2026-07-26)
-
-- fail closed on malformed JSON, wrong response envelopes, and missing required
-  fields from successful self-hosted API responses before repositories, mailbox
-  status/context/sync projections, or the generated SDK can synthesize empty
-  rows, lists, or counts.
-- share one config-driven wire validator across the synchronous resource store,
-  asynchronous inbox data source, and generated `@hasna/emails/selfhost` client;
-  validation errors identify the endpoint and invalid field without including
-  credentials or response-body contents.
-
 - **fix(status): the refusal registry is checked against the CLI, not against itself — `emails status` was still proposing a command that throws.** `src/lib/status-commands.ts` documented its source of truth as `grep -n 'serverOnly(' src/cli/commands/*.remote.ts`. That glob is wrong: `serverOnly()` is also defined and called in the SHARED modules `src/cli/commands/domain.ts` and `src/cli/commands/address.ts`, which `src/cli/index.tsx` loads in BOTH modes and whose helper throws unconditionally. Fifteen commands were missing from `NEVER_AVAILABLE_COMMANDS`, so `status-facts.remote.ts domainFixCommands` returned `emails domain status --json` for any failed/errored domain, `agent-context.ts buildNextActions` promoted `fix_commands[0]` into `next_actions`, and `isCommandAvailableInMode` waved it through — the exact "remedy that refuses" defect the registry exists to remove, reintroduced one command over. Local mode was hit the same way through `domain-readiness.ts` fix_commands (`emails domain check|dns|verify|setup-cloudflare`, all four unconditional refusals). Also fixed: `cli_equivalents.provision_address` and the `create_receive_address` workflow proposed `emails address provision` (refuses everywhere) — now `emails address add` plus an explicit `emails address set-owner` step, because `address add` takes only `--provider`/`--name` and the workflow was registering an owner it never attached; only one of the three workflow lists was mode-filtered, now all three are; and the `Usable domains:` footer and the MCP domains resource `cli_equivalent` both advertised `emails domain status`, now `emails domain list`.
 - **test(status): the two "never proposes a refused command" guards were self-referential and could not fail.** `agent-context.local.test.ts` asserted `isCommandAvailableInMode(action.command, "local") === true` — validating the payload against the same registry that filtered it, so a command missing from the registry passed the test and threw at the terminal. `agent-context.self-hosted.test.ts` only checked two hardcoded command names. Both now use `src/test-support/cli-refusals.ts`, which parses every `serverOnly(...)`/`notImplementedAnywhere(...)` call site out of `src/cli/commands/*.ts` — the CLI is the oracle, not the registry under test. New `src/lib/status-commands-coverage.test.ts` fails if the registry does not cover a scanned refusal, carries a positive control so it cannot pass over an empty scan, and carries a counter-control that the real remedies (`emails domain list --json`, `emails address add`, …) are still reported available, so "never propose a refusal" cannot be satisfied by proposing nothing. Against the pre-fix registry the new guards fail and name all fifteen missing commands plus `emails domain status --json (refused by emails domain status)`.
 - **fix(status): a lower bound is no longer reported as a read failure.** `statusGapClass` answers with three classes, and `agent-context.ts` tested only for `"structural"`, so the third — `"bound"` (`enumeration_cap_exceeded`/`enumeration_unstable`) — fell through into `failures[]`. A count the server DID answer was therefore published under `Read failures (N) — these numbers could not be measured` and in a field documented as "caused by a live read failure"; `gaps["domains.usable[].ready_addresses"]` hit this on every shifted address window. Bound gaps now join `incomplete[]` beside the block-level bounds, render under `Lower bounds`, and still set `degraded: true` — the caller asked for a total and got a floor.
@@ -52,6 +41,17 @@ All notable changes to `@hasna/emails` are documented here.
 - fix(mcp): dropped the `assertWarmingLocalStateAllowed` guard that disabled `create_warming_schedule`, `get_warming_status`, `list_warming_schedules`, and `update_warming_status` in self_hosted mode. `src/db/warming.remote.ts` is a complete `/v1/warming` client, so there was no local-only state to protect. `list_warming_schedules` advertises `cli_equivalent: "emails domain warm-list"`, which is now a command that can actually succeed — asserted in the suite. `create_warming_schedule` gained the same duplicate-domain guard as the CLI twin.
 - perf(cli): `emails domain warm-list` reads the sent-mail ledger **once per page** instead of once per row, via a new `getTodaySentCountsByDomain`. In self-hosted mode each read is a synchronous `curl` spawn over today's messages, so a default 20-row page cost 20 identical requests.
 - refactor(warming): ramp position (`current_day`, `total_days`, `progress_percent`, `today_limit`, `today_sent`) is computed once in `describeWarmingProgress` and shared by the CLI, the MCP tools, the local `GET /api/warming/:domain` route, and `formatWarmingStatus` — replacing four copies of the same date math, one of which had already drifted from the server. `formatWarmingStatus` and `describeWarmingProgress` accept precomputed inputs so a single command does not read the sent-mail ledger more than once.
+
+## 1.3.2 (2026-07-26)
+
+- fail closed on malformed JSON, wrong response envelopes, and missing required
+  fields from successful self-hosted API responses before repositories, mailbox
+  status/context/sync projections, or the generated SDK can synthesize empty
+  rows, lists, or counts.
+- share one config-driven wire validator across the synchronous resource store,
+  asynchronous inbox data source, and generated `@hasna/emails/selfhost` client;
+  validation errors identify the endpoint and invalid field without including
+  credentials or response-body contents.
 
 ## 1.3.1 (2026-07-26)
 
