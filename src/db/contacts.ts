@@ -33,3 +33,4 @@ export const incrementComplaintCount = routed("incrementComplaintCount");
 export const incrementComplaintCounts = routed("incrementComplaintCounts");
 export const isContactSuppressed = routed("isContactSuppressed");
 export const getSuppressedEmailSet = routed("getSuppressedEmailSet");
+export const suppressedRecipientsAmong = routed("suppressedRecipientsAmong");
