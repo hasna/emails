@@ -6,12 +6,63 @@ import { getProvider } from '../../db/providers.js';
 import { getAdapter } from '../../providers/index.js';
 import { loadConfig, getConfigValue, setConfigValue } from '../../lib/config.js';
 import { normalizeRoute53RegistrationContact } from '../../lib/route53-contact.js';
+import { resolveEmailsMode } from '../../lib/mode.js';
 import { formatError, resolveId, ProviderNotFoundError } from '../helpers.js';
 
 const MAX_MCP_S3_SYNC_LIMIT = 10000;
 const MAX_MCP_PROVISION_WAIT_SECONDS = 300;
 const MAX_MCP_PROVISION_INTERVAL_SECONDS = 60;
 const MAX_DOMAIN_REGISTRATION_YEARS = 10;
+
+/**
+ * Refuse SES/DNS/S3-mutating provisioning tools in self_hosted mode.
+ *
+ * In self_hosted mode `getProvider` returns a row whose secrets are nulled by
+ * policy (`db/providers.remote.ts`), so the SES adapter resolves credentials
+ * from the ambient `AWS_*` environment of the CLIENT machine
+ * (`providers/ses.ts`) and Cloudflare falls back to this client's token. A
+ * tenant member can therefore stand up a SES identity in their own AWS account,
+ * repoint a zone's DKIM/SPF/DMARC at it, and install receipt rules into their
+ * own bucket. Where the tool also calls `createDomain`, that lands in the
+ * OPERATOR's shared domain state as a domain the operator's SES cannot send
+ * from.
+ *
+ * The line this draws: tools that MUTATE SES identities, DNS records or SES
+ * receipt rules are refused. Read-only lookups and registrar-only operations
+ * (`check_domain_availability`, `register_domain`,
+ * `get_domain_registration_status`, `list_registered_domains`,
+ * `get_cloudflare_zone`) stay live — they touch no mail-delivery configuration
+ * and they back `emails domain available|buy|purchase-status|list-registered`,
+ * which still execute. Note `register_domain` does spend money in the ambient
+ * account; that is pre-existing behaviour of the `domain buy` surface and is
+ * deliberately left alone here rather than removed as a side effect.
+ *
+ * SCOPE WARNING — this does NOT close the class. The CLI twin `emails domain
+ * adopt` performs the same `addDomain` + `createDomain` + `setupInboundEmail`
+ * sequence in self_hosted mode with no mode guard (`cli/commands/domain.ts`),
+ * and is deliberately kept live there. Closing that requires pushing the policy
+ * down into `lib/aws-inbound.ts` / `lib/cloudflare-dns.ts` and the
+ * `adapter.addDomain` call sites, which is a separate change.
+ *
+ * The self-hosted server exposes no route that performs provisioning, so this
+ * refuses instead of claiming the work happens server-side. Local mode still
+ * runs the real thing.
+ *
+ * The wording deliberately avoids the words "credential", "auth" and
+ * "provider": `mcp/contracts.ts` classifies error codes and fix_commands by
+ * regex over the message, and those words would mislabel a mode refusal as an
+ * `auth_error` whose remedy points at provider credentials.
+ */
+function assertProvisioningInfraAllowed(toolName: string): void {
+  if (resolveEmailsMode().mode !== "self_hosted") return;
+  throw new Error(
+    `MCP tool ${toolName} is disabled in self_hosted mode: it would mutate cloud infrastructure ` +
+      "(SES identity, Cloudflare DNS records, SES receipt rules) using the ambient AWS/Cloudflare " +
+      "environment of this client machine while recording the result in the operator's shared " +
+      "domain state, and the self-hosted server exposes no route that performs provisioning. " +
+      "Run it in local mode (EMAILS_MODE=local) against cloud accounts this machine owns.",
+  );
+}
 
 export function registerInfrastructureTools(server: McpServer): void {
   // ─── DOMAIN PURCHASING (via @hasna/domains / Route 53) ───────────────────────
@@ -100,6 +151,7 @@ export function registerInfrastructureTools(server: McpServer): void {
   },
   async ({ domain, provider_id, contact, duration_years, add_mx, force_mx_switch }) => {
     try {
+      assertProvisioningInfraAllowed("setup_domain_for_email");
       const {
         r53CheckAvailability, r53RegisterDomain, r53GetRegistrationStatus,
         r53UpdateNameservers, cfEnsureZone, pollRegistrationUntilDone,
@@ -200,6 +252,7 @@ export function registerInfrastructureTools(server: McpServer): void {
   },
   async ({ domain, provider_id, cloudflare_token, add_mx, mx_server, register_domain, force_mx_switch }) => {
     try {
+      assertProvisioningInfraAllowed("setup_cloudflare_dns");
       const provider = getProvider(resolveId("providers", provider_id));
       if (!provider) throw new ProviderNotFoundError(provider_id);
       if (add_mx) {
@@ -263,6 +316,7 @@ export function registerInfrastructureTools(server: McpServer): void {
   },
   async ({ domain, bucket, region, prefix, catch_all }) => {
     try {
+      assertProvisioningInfraAllowed("setup_ses_inbound");
       const { setupInboundEmail } = await import("../../lib/aws-inbound.js");
       const result = await setupInboundEmail({ domain, bucket, region, prefix, catchAll: catch_all });
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
