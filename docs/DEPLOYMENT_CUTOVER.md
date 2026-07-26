@@ -178,6 +178,96 @@ region, Terraform outputs, current ECS service and task-definition identities,
 and the queue/DLQ relationship. Any mismatch, AWS failure, or nonzero initial
 DLQ aborts.
 
+## Fail-closed release-order preflight
+
+Manual publishing and AWS deployment remain separate, manual, PR-first actions.
+`RELEASE_COMMIT` is the merged pull-request commit, never the pull-request
+branch HEAD. Before any Terraform apply, ECS task, or service update, run these
+read-only release checks. With `set -euo pipefail`, any missing input, mismatch,
+API failure, unpublished package, registry artifact-integrity mismatch, or
+unsuccessful hosted CI exits nonzero. AWS deployment is prohibited when any
+check fails.
+
+```bash
+set -euo pipefail
+
+: "${SOURCE_CHECKOUT:?set the source checkout containing the merged commit}"
+: "${GITHUB_REPOSITORY:?set the reviewed owner/repository}"
+: "${RELEASE_PR_NUMBER:?set the merged pull-request number}"
+: "${RELEASE_VERSION:?set the reviewed package version}"
+: "${RELEASE_COMMIT:?set the exact merged pull-request commit}"
+: "${HOSTED_CI_WORKFLOW:?set the hosted CI workflow file, for example ci.yml}"
+: "${NPM_PACKAGE:?set the canonical npm package name}"
+
+test "$GITHUB_REPOSITORY" = "hasna/emails"
+test "$NPM_PACKAGE" = "@hasna/emails"
+test "$HOSTED_CI_WORKFLOW" = "ci.yml"
+printf '%s' "$RELEASE_PR_NUMBER" | grep -Eq '^[1-9][0-9]*$'
+printf '%s' "$RELEASE_VERSION" | grep -Eq '^[0-9]+[.][0-9]+[.][0-9]+([+-][0-9A-Za-z.-]+)?$'
+printf '%s' "$RELEASE_COMMIT" | grep -Eq '^[0-9a-f]{40}$'
+
+git -C "$SOURCE_CHECKOUT" fetch --quiet --no-tags origin main
+ORIGIN_MAIN_COMMIT="$(git -C "$SOURCE_CHECKOUT" rev-parse --verify 'refs/remotes/origin/main^{commit}')"
+git -C "$SOURCE_CHECKOUT" cat-file -e "$RELEASE_COMMIT^{commit}"
+git -C "$SOURCE_CHECKOUT" merge-base --is-ancestor "$RELEASE_COMMIT" "$ORIGIN_MAIN_COMMIT"
+
+RELEASE_PR_JSON="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$RELEASE_PR_NUMBER")"
+jq -e --arg release_commit "$RELEASE_COMMIT" '
+  .merged_at != null
+  and .base.ref == "main"
+  and .merge_commit_sha == $release_commit
+' <<<"$RELEASE_PR_JSON" >/dev/null
+
+HOSTED_CI_RUNS_JSON="$(
+  gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$HOSTED_CI_WORKFLOW/runs?head_sha=$RELEASE_COMMIT&event=push&status=completed&per_page=100"
+)"
+jq -e --arg release_commit "$RELEASE_COMMIT" '
+  any(.workflow_runs[]?;
+    .head_sha == $release_commit
+    and .event == "push"
+    and .status == "completed"
+    and .conclusion == "success")
+' <<<"$HOSTED_CI_RUNS_JSON" >/dev/null
+
+EXPECTED_NPM_TARBALL_URL="https://registry.npmjs.org/@hasna/emails/-/emails-${RELEASE_VERSION}.tgz"
+NPM_RELEASE_JSON="$(npm view "$NPM_PACKAGE@$RELEASE_VERSION" --json)"
+jq -e \
+  --arg npm_package "$NPM_PACKAGE" \
+  --arg release_version "$RELEASE_VERSION" \
+  --arg release_commit "$RELEASE_COMMIT" \
+  --arg tarball_url "$EXPECTED_NPM_TARBALL_URL" '
+  .name == $npm_package
+  and .version == $release_version
+  and .gitHead == $release_commit
+  and (.dist.integrity
+    | type == "string"
+    and test("^sha512-[A-Za-z0-9+/]+={0,2}$"))
+  and .dist.tarball == $tarball_url
+' <<<"$NPM_RELEASE_JSON" >/dev/null
+
+NPM_REGISTRY_INTEGRITY="$(jq -er '.dist.integrity' <<<"$NPM_RELEASE_JSON")"
+NPM_PACK_DIR="$(mktemp -d)"
+trap 'rm -rf "$NPM_PACK_DIR"' EXIT
+NPM_PACK_JSON="$(
+  npm pack --ignore-scripts --json --pack-destination "$NPM_PACK_DIR" \
+    "$NPM_PACKAGE@$RELEASE_VERSION"
+)"
+jq -e \
+  --arg npm_package "$NPM_PACKAGE" \
+  --arg release_version "$RELEASE_VERSION" \
+  --arg registry_integrity "$NPM_REGISTRY_INTEGRITY" '
+  type == "array"
+  and length == 1
+  and .[0].name == $npm_package
+  and .[0].version == $release_version
+  and .[0].integrity == $registry_integrity
+  and (.[0].filename | type == "string" and length > 0)
+' <<<"$NPM_PACK_JSON" >/dev/null
+NPM_PACK_FILENAME="$(jq -er '.[0].filename' <<<"$NPM_PACK_JSON")"
+NPM_PACK_PATH="$NPM_PACK_DIR/$NPM_PACK_FILENAME"
+test -f "$NPM_PACK_PATH"
+```
+
 ### 1. Prove topology, stage the release, stop every old writer, then save a database fence
 
 ```bash
@@ -273,8 +363,6 @@ REPAIR_MANIFEST_JSON="$(jq -ceS '
 test "$(printf '%s' "$REPAIR_MANIFEST_JSON" | sha256sum | awk '{print $1}')" = \
   "$REPAIR_MANIFEST_SHA256"
 
-SOURCE_HEAD="$(git -C "$SOURCE_CHECKOUT" rev-parse --verify 'HEAD^{commit}')"
-test "$SOURCE_HEAD" = "$RELEASE_COMMIT"
 SOURCE_PACKAGE_JSON="$(git -C "$SOURCE_CHECKOUT" show "$RELEASE_COMMIT:package.json")"
 jq -e --arg release_version "$RELEASE_VERSION" \
   '.name == "@hasna/emails" and .version == $release_version' \

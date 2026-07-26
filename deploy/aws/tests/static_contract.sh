@@ -428,13 +428,70 @@ for runbook in "$repo/docs/DEPLOYMENT_CUTOVER.md" "$root/README.md"; do
 done
 
 cutover_text="$(tr '\n' ' ' < "$repo/docs/DEPLOYMENT_CUTOVER.md")"
-for release_input_runbook in "$repo/docs/DEPLOYMENT_CUTOVER.md" "$root/README.md"; do
+for release_input_runbook in \
+  "$repo/docs/DEPLOYMENT_CUTOVER.md" \
+  "$root/README.md"; do
   if grep -En '(^|[^[:digit:]])[[:digit:]]+[.][[:digit:]]+[.][[:digit:]]+([^[:digit:]]|$)|IMAGE_[[:digit:]]+' \
     "$release_input_runbook" >/dev/null; then
     echo "0020 runbooks must use release inputs instead of stale hardcoded release literals" >&2
     exit 1
   fi
 done
+
+for release_order_runbook in "$repo/docs/DEPLOYMENT_CUTOVER.md"; do
+  for release_order_marker in \
+    "## Fail-closed release-order preflight" \
+    "RELEASE_PR_NUMBER" \
+    "HOSTED_CI_WORKFLOW" \
+    "NPM_PACKAGE" \
+    'git -C "$SOURCE_CHECKOUT" fetch --quiet --no-tags origin main' \
+    'git -C "$SOURCE_CHECKOUT" merge-base --is-ancestor "$RELEASE_COMMIT" "$ORIGIN_MAIN_COMMIT"' \
+    '.merge_commit_sha == $release_commit' \
+    'actions/workflows/$HOSTED_CI_WORKFLOW/runs?head_sha=$RELEASE_COMMIT' \
+    '.head_sha == $release_commit' \
+    '.conclusion == "success"' \
+    'npm view "$NPM_PACKAGE@$RELEASE_VERSION" --json' \
+    '.gitHead == $release_commit' \
+    "EXPECTED_NPM_TARBALL_URL" \
+    ".dist.integrity" \
+    'test("^sha512-[A-Za-z0-9+/]+={0,2}$")' \
+    '.dist.tarball == $tarball_url' \
+    'npm pack --ignore-scripts --json --pack-destination "$NPM_PACK_DIR"' \
+    '.integrity == $registry_integrity' \
+    'test -f "$NPM_PACK_PATH"' \
+    "AWS deployment is prohibited" \
+    "Manual publishing and AWS deployment remain separate, manual, PR-first actions."; do
+    grep -Fq "$release_order_marker" "$release_order_runbook" || {
+      echo "release-order contract missing '$release_order_marker' from $release_order_runbook" >&2
+      exit 1
+    }
+  done
+
+  if grep -Eq 'NPM_PROVENANCE_PREDICATE_TYPE|NPM_ATTESTATIONS|resolvedDependencies|base64 --decode' \
+    "$release_order_runbook"; then
+    echo "release-order contract must use registry artifact integrity, not unavailable publish provenance" >&2
+    exit 1
+  fi
+
+  if grep -Fq 'SOURCE_HEAD=' "$release_order_runbook"; then
+    echo "release-order contract must not use checkout or branch HEAD as release authority" >&2
+    exit 1
+  fi
+
+  release_order_preflight_line="$(
+    grep -nF '## Fail-closed release-order preflight' "$release_order_runbook" | head -1 | cut -d: -f1
+  )"
+  release_order_deploy_line="$(
+    grep -nE '## Manual AWS deployment|rehearsal_terraform apply|rehearsal_aws ecs (run-task|update-service)' \
+      "$release_order_runbook" | head -1 | cut -d: -f1
+  )"
+  test -n "$release_order_preflight_line" && test -n "$release_order_deploy_line" \
+    && test "$release_order_preflight_line" -lt "$release_order_deploy_line" || {
+      echo "release-order preflight must precede every AWS deployment boundary in $release_order_runbook" >&2
+      exit 1
+    }
+done
+
 for release_input in \
   "@hasna/emails" \
   "RELEASE_VERSION" \
