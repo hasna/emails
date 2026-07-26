@@ -130,17 +130,10 @@ const boundaryPatterns = [
     label: "hosted implementation vocabulary",
     scopes: BOTH,
     pattern: /\b(?:saas|fleet)\b|cloud_/i,
-    // `src/lib/mode.ts`, `src/server/self-hosted/migrations.ts` and
-    // `src/server/self-hosted/service-resources.test.ts` are handled by
-    // stripExactCompatibilityBridges and need no allowance.
-    sourceAllowance: {
-      reason:
-        "Prose describing the pivot AWAY from a hosted SaaS/fleet (the changelog, design docs, the deploy " +
-        "README, and the Terraform comment asserting no vendor-owned account), plus the suites that assert " +
-        "`MAILERY_CLOUD_*` inputs are rejected. Non-test, non-prose source is still checked, as is every " +
-        "packed bundle chunk — and the packed README is checked, because allowances are source-only.",
-      paths: [/\.test\.ts$/, /^CHANGELOG\.md$/, /^docs\//, /^deploy\/aws\/README\.md$/, /^deploy\/aws\/backend\.tf$/],
-    },
+    // Every legitimate source occurrence is handled content-exactly by
+    // stripExactCompatibilityBridges. There is deliberately no path allowance:
+    // new test fixtures, prose, or CHANGELOG entries must prove they are another
+    // narrow compatibility record instead of inheriting a directory-wide bypass.
   },
 ];
 
@@ -198,6 +191,161 @@ export const artifactBoundaryPatterns = boundaryPatternsForScope(ARTIFACT_SCOPE)
 /** Patterns enforced on the committed source tree. */
 export const sourceBoundaryPatterns = boundaryPatternsForScope(SOURCE_SCOPE);
 
+// These are the only source locations where retired hosted environment names
+// remain operationally necessary: they are unset before local tests start.
+// Include the surrounding structure plus the full option, assignment, and
+// utility sequence so a lookalike env command elsewhere in either file cannot
+// borrow this compatibility bridge.
+const exactLegacyHostedEnvUnsetBridges = new Map([
+  [
+    ".github/workflows/ci.yml",
+    [
+      "      - name: Test in isolated local mode",
+      "        run: |",
+      '          tmp_home="$(mktemp -d)"',
+      "          trap 'rm -rf \"$tmp_home\"' EXIT",
+      "          env -u MAILERY_MODE -u HASNA_MAILERY_MODE \\",
+      "            -u MAILERY_STORAGE_MODE -u HASNA_MAILERY_STORAGE_MODE \\",
+      "            -u EMAILS_STORAGE_MODE -u HASNA_EMAILS_STORAGE_MODE \\",
+      "            -u MAILERY_API_URL -u MAILERY_API_KEY \\",
+      "            -u HASNA_MAILERY_API_URL -u HASNA_MAILERY_API_KEY \\",
+      "            -u MAILERY_CLOUD_API_URL -u MAILERY_CLOUD_TOKEN \\",
+      "            -u HASNA_MAILERY_ENV_FILE -u HASNA_EMAILS_MODE \\",
+      "            -u EMAILS_SELF_HOSTED_URL -u EMAILS_SELF_HOSTED_API_KEY \\",
+      "            -u EMAILS_CLIENT_ENV_SECRET -u EMAILS_SESSION_TOKEN \\",
+      "            -u DATABASE_URL -u EMAILS_DATABASE_URL -u EMAILS_TEST_DATABASE_URL \\",
+      "            -u EMAILS_POSTGRES_URL -u EMAILS_TEST_POSTGRES_URL \\",
+      "            -u CLOUDFLARE_API_TOKEN -u CLOUDFLARE_API_KEY \\",
+      "            -u CLOUDFLARE_EMAIL -u CLOUDFLARE_ACCOUNT_ID \\",
+      "            -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN \\",
+      "            -u AWS_PROFILE -u AWS_DEFAULT_PROFILE -u AWS_ACCOUNT_ID \\",
+      "            -u AWS_REGION -u AWS_DEFAULT_REGION -u AWS_SHARED_CREDENTIALS_FILE \\",
+      "            -u AWS_CONFIG_FILE -u AWS_WEB_IDENTITY_TOKEN_FILE -u AWS_ROLE_ARN \\",
+      "            -u AWS_ROLE_SESSION_NAME -u AWS_CONTAINER_CREDENTIALS_RELATIVE_URI \\",
+      "            -u AWS_CONTAINER_CREDENTIALS_FULL_URI -u AWS_CONTAINER_AUTHORIZATION_TOKEN \\",
+      "            -u EMAILS_AWS_REGION -u EMAILS_SES_AWS_PROFILE \\",
+      "            -u RESEND_API_KEY -u RESEND_WEBHOOK_SECRET \\",
+      "            AWS_EC2_METADATA_DISABLED=true \\",
+      '            HOME="$tmp_home" EMAILS_MODE=local EMAILS_DB_PATH=:memory: \\',
+      "            bash -euo pipefail <<'BASH'",
+    ].join("\n") + "\n",
+  ],
+  [
+    "scripts/run-hermetic-tests.sh",
+    [
+      "run_scrubbed() {",
+      '  local test_home="$1"',
+      "  shift",
+      "  env \\",
+      "    -u MAILERY_MODE -u HASNA_MAILERY_MODE \\",
+      "    -u MAILERY_STORAGE_MODE -u HASNA_MAILERY_STORAGE_MODE \\",
+      "    -u EMAILS_STORAGE_MODE -u HASNA_EMAILS_STORAGE_MODE \\",
+      "    -u MAILERY_API_URL -u MAILERY_API_KEY \\",
+      "    -u HASNA_MAILERY_API_URL -u HASNA_MAILERY_API_KEY \\",
+      "    -u MAILERY_CLOUD_API_URL -u MAILERY_CLOUD_TOKEN \\",
+      "    -u HASNA_MAILERY_ENV_FILE -u HASNA_EMAILS_MODE \\",
+      "    -u EMAILS_SELF_HOSTED_URL -u EMAILS_SELF_HOSTED_API_KEY \\",
+      "    -u EMAILS_CLIENT_ENV_SECRET -u EMAILS_SESSION_TOKEN \\",
+      "    -u DATABASE_URL -u EMAILS_DATABASE_URL -u EMAILS_TEST_DATABASE_URL \\",
+      "    -u EMAILS_POSTGRES_URL -u EMAILS_TEST_POSTGRES_URL \\",
+      "    -u CLOUDFLARE_API_TOKEN -u CLOUDFLARE_API_KEY \\",
+      "    -u CLOUDFLARE_EMAIL -u CLOUDFLARE_ACCOUNT_ID \\",
+      "    -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN \\",
+      "    -u AWS_PROFILE -u AWS_DEFAULT_PROFILE -u AWS_ACCOUNT_ID \\",
+      "    -u AWS_REGION -u AWS_DEFAULT_REGION -u AWS_SHARED_CREDENTIALS_FILE \\",
+      "    -u AWS_CONFIG_FILE -u AWS_WEB_IDENTITY_TOKEN_FILE -u AWS_ROLE_ARN \\",
+      "    -u AWS_ROLE_SESSION_NAME -u AWS_CONTAINER_CREDENTIALS_RELATIVE_URI \\",
+      "    -u AWS_CONTAINER_CREDENTIALS_FULL_URI -u AWS_CONTAINER_AUTHORIZATION_TOKEN \\",
+      "    -u EMAILS_AWS_REGION -u EMAILS_SES_AWS_PROFILE \\",
+      "    -u RESEND_API_KEY -u RESEND_WEBHOOK_SECRET \\",
+      "    AWS_EC2_METADATA_DISABLED=true \\",
+      "    NO_COLOR=1 \\",
+      '    HOME="$test_home" \\',
+      "    EMAILS_MODE=local \\",
+      "    EMAILS_DB_PATH=:memory: \\",
+      '    "$@"',
+    ].join("\n") + "\n",
+  ],
+]);
+
+for (const [path, bridge] of exactLegacyHostedEnvUnsetBridges) {
+  for (const key of legacyHostedEnvKeys) {
+    const token = `-u ${key}`;
+    if (bridge.indexOf(token) < 0 || bridge.indexOf(token) !== bridge.lastIndexOf(token)) {
+      throw new Error(`exact compatibility bridge ${path} must contain ${token} exactly once`);
+    }
+  }
+}
+
+const exactHistoricalChangelogBridge = [
+  "- rebuild the product as local-first and operator-owned AWS self-hosting, with no Hasna SaaS control plane.",
+  "- add durable idempotent self-hosted sends, authenticated attachment retrieval, mailbox mutations, signed replay-safe webhooks, and explicit compatibility for previously issued API keys.",
+  "- harden deployment with separate migration/runtime database roles, readiness health checks, immutable container/action pins, and explicit local/self-hosted mode validation.",
+].join("\n") + "\n";
+
+// Historical and deployment prose may document the completed move away from a
+// hosted product. Preserve only the exact current paragraphs, including their
+// surrounding context, rather than allowing an entire file or directory.
+const exactHistoricalHostedVocabularyBridges = new Map([
+  [
+    "CHANGELOG.md",
+    {
+      content: exactHistoricalChangelogBridge,
+      tokens: ["SaaS"],
+    },
+  ],
+  [
+    "deploy/aws/README.md",
+    {
+      content: [
+        "# Emails on operator-owned AWS",
+        "",
+        "This Terraform root configuration deploys the Emails self-hosted service into",
+        "an AWS account controlled by the operator. It contains no maintainer account,",
+        "hostname, role, control plane, billing integration, fleet resource, or hosted",
+        "service endpoint.",
+      ].join("\n") + "\n",
+      tokens: ["fleet"],
+    },
+  ],
+  [
+    "deploy/aws/backend.tf",
+    {
+      content: [
+        "terraform {",
+        "  # Values are supplied by the operator with -backend-config. Nothing here",
+        "  # points at a vendor, fleet, or maintainer-owned account.",
+        '  backend "s3" {}',
+        "}",
+      ].join("\n") + "\n",
+      tokens: ["fleet"],
+    },
+  ],
+  [
+    "docs/design/multi-tenancy-auth.md",
+    {
+      content: [
+        "## 15. Implementation reconciliation (v3)",
+        "",
+        "The implementation now has exactly two deployment modes: local SQLite and",
+        "operator-owned `self_hosted` PostgreSQL. It has no hosted SaaS control plane and",
+        "no hybrid synchronization mode. Passing an explicit Bun `Database` handle to",
+        "the public library always selects that caller-owned SQLite database, even when",
+        "the process is otherwise configured as a self-hosted client.",
+      ].join("\n") + "\n",
+      tokens: ["SaaS"],
+    },
+  ],
+]);
+
+for (const [path, { content: bridge, tokens }] of exactHistoricalHostedVocabularyBridges) {
+  for (const token of tokens) {
+    if (bridge.indexOf(token) < 0 || bridge.indexOf(token) !== bridge.lastIndexOf(token)) {
+      throw new Error(`exact historical hosted-vocabulary bridge ${path} must contain ${token} exactly once`);
+    }
+  }
+}
+
 function stripExactCompatibilityBridges(content, path) {
   let scanned = content;
   // The mode resolver must retain these literal names only to reject old
@@ -239,62 +387,35 @@ function stripExactCompatibilityBridges(content, path) {
   // bundles that import it for `version`.
   scanned = scanned.replace(/(?<![\w-])("?)author\1\s*:\s*"[^"]*"/g, 'author: "AUTHORSHIP_SENTINEL"');
 
-  // The two hermetic test launchers explicitly unset legacy variables to keep
-  // ambient operator configuration out of the test process. Exempt only exact,
-  // unquoted `-u NAME` arguments inside an `env` command on these two paths.
-  // Arbitrary mentions on either path, and the same command shape anywhere else,
-  // remain in scope.
-  if (path === ".github/workflows/ci.yml" || path === "scripts/run-hermetic-tests.sh") {
-    const lines = scanned.split(/(?<=\n)/);
-    let insideEnvCommand = false;
-    scanned = lines
-      .map((line) => {
-        const withoutNewline = line.replace(/\r?\n$/, "");
-        const trimmed = withoutNewline.trimStart();
-        if (!insideEnvCommand && !/^env(?:[ \t]|\\|$)/.test(trimmed)) return line;
-        insideEnvCommand = true;
+  // Normalize exactly one byte-exact bridge at its structural location. A second
+  // bridge, a reordered/injected option, a different indentation, or any retired
+  // key after env reaches its utility does not match and therefore remains visible
+  // to the boundary patterns.
+  const exactBridge = exactLegacyHostedEnvUnsetBridges.get(path);
+  if (exactBridge !== undefined) {
+    const bridgeStart = scanned.indexOf(exactBridge);
+    if (bridgeStart >= 0 && scanned.indexOf(exactBridge, bridgeStart + exactBridge.length) < 0) {
+      let normalizedBridge = exactBridge;
+      for (const key of legacyHostedEnvKeys) {
+        normalizedBridge = normalizedBridge.replace(`-u ${key}`, "-u LEGACY_HOSTED_SENTINEL");
+      }
+      scanned = scanned.slice(0, bridgeStart) + normalizedBridge + scanned.slice(bridgeStart + exactBridge.length);
+    }
+  }
 
-        let rewritten = "";
-        let quote = null;
-        for (let index = 0; index < line.length;) {
-          const char = line[index];
-          if (quote !== null) {
-            rewritten += char;
-            if (char === quote) quote = null;
-            else if (char === "\\" && quote === '"' && index + 1 < line.length) {
-              index += 1;
-              rewritten += line[index];
-            }
-            index += 1;
-            continue;
-          }
-          if (char === "'" || char === '"') {
-            quote = char;
-            rewritten += char;
-            index += 1;
-            continue;
-          }
-          if ((index === 0 || /\s/.test(line[index - 1])) && line.startsWith("-u", index) && /[ \t]/.test(line[index + 2] ?? "")) {
-            const keyStart = index + 2 + (line.slice(index + 2).match(/^[ \t]+/)?.[0].length ?? 0);
-            const key = legacyHostedEnvKeys.find(
-              (candidate) =>
-                line.startsWith(candidate, keyStart) &&
-                (keyStart + candidate.length === line.length || /[\s\\]/.test(line[keyStart + candidate.length] ?? "")),
-            );
-            if (key !== undefined) {
-              rewritten += line.slice(index, keyStart) + "LEGACY_HOSTED_SENTINEL";
-              index = keyStart + key.length;
-              continue;
-            }
-          }
-          rewritten += char;
-          index += 1;
-        }
-
-        if (!/\\[ \t]*$/.test(withoutNewline)) insideEnvCommand = false;
-        return rewritten;
-      })
-      .join("");
+  const historicalBridge = exactHistoricalHostedVocabularyBridges.get(path);
+  const historicalBridgeStart = historicalBridge === undefined ? -1 : scanned.indexOf(historicalBridge.content);
+  if (historicalBridge !== undefined && historicalBridgeStart >= 0) {
+    const { content: bridge, tokens } = historicalBridge;
+    if (scanned.indexOf(bridge, historicalBridgeStart + bridge.length) >= 0) return scanned;
+    let normalizedHistoricalBridge = bridge;
+    for (const token of tokens) {
+      normalizedHistoricalBridge = normalizedHistoricalBridge.replace(token, "HISTORICAL_HOSTED_SENTINEL");
+    }
+    scanned =
+      scanned.slice(0, historicalBridgeStart) +
+      normalizedHistoricalBridge +
+      scanned.slice(historicalBridgeStart + bridge.length);
   }
   return scanned;
 }
@@ -305,7 +426,14 @@ function stripExactCompatibilityBridges(content, path) {
  * (source) or package-relative (artifact) for `sourceAllowlist` to resolve.
  */
 export function boundaryFindings(content, path, scope) {
-  const scanned = stripExactCompatibilityBridges(content, path);
+  let scanned = stripExactCompatibilityBridges(content, path);
+  // Source test suites must spell the retired environment inputs they reject.
+  // Remove only those exact variable-name tokens before the broader `cloud_`
+  // vocabulary rule runs. Artifact fixtures remain unmodified and must detect
+  // the same token, which is why this normalization is source-only.
+  if (scope === SOURCE_SCOPE && /\.test\.ts$/.test(path)) {
+    for (const key of legacyHostedEnvKeys) scanned = scanned.replaceAll(key, "LEGACY_HOSTED_SENTINEL");
+  }
   return boundaryPatternsForScope(scope)
     .filter((entry) => !(scope === SOURCE_SCOPE && isSourceAllowed(entry, path)))
     .filter(({ pattern }) => pattern.test(scanned))
