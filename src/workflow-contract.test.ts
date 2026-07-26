@@ -5,7 +5,7 @@ import { join } from "node:path";
 
 const workflowDir = join(import.meta.dir, "..", ".github", "workflows");
 const repositoryRoot = join(import.meta.dir, "..");
-const packageProvenanceWorkflowSha256 = "0849b75cbe8fb252c9c2b95ecce59b1f228144c9bcda62c64ba9aa62fbb13c0f";
+const packageProvenanceWorkflowSha256 = "7e80be3eb71e5e4b2f99c80467f6230430eb79be2dd8d170233828076a378285";
 const unreleasedSectionSha256 = "40e9d4fc08e67cd4f7d38b053c5c9031dd3e8e403d68bc7e40f83a87bc00ba20";
 const release132Section = `## 1.3.2 (2026-07-26)
 
@@ -145,19 +145,53 @@ describe("repository workflow safety", () => {
     const permissions = workflow.match(/^    permissions:\n((?:^      [a-z-]+: [a-z]+\n)+)/m)?.[1] ?? "";
     expect(workflow.match(/^    permissions:/gm)).toHaveLength(1);
     expect(permissions.trim().split("\n").map((line) => line.trim())).toEqual([
+      "actions: read",
       "contents: read",
       "id-token: write",
       "attestations: write",
     ]);
 
     expect([...workflow.matchAll(/^      - name: (.+)$/gm)].map((match) => match[1])).toEqual([
+      "Verify source and CI evidence",
       "Download and verify published tarball",
       "Create release evidence predicate",
       "Attest downloaded npm tarball",
     ]);
     const uses = [...workflow.matchAll(/^\s+uses:\s*(\S+)(?:\s+#.*)?$/gm)].map((match) => match[1]);
     expect(uses).toEqual([attestAction]);
-    expect(workflow).not.toMatch(/actions\/checkout|secrets(?:\.|\[)|\$\{\{/i);
+    expect(workflow).not.toMatch(/actions\/checkout|secrets(?:\.|\[)/i);
+    expect([...workflow.matchAll(/\$\{\{\s*([^}]+?)\s*\}\}/g)].map((match) => match[1])).toEqual([
+      "github.token",
+    ]);
+    expect(workflow.match(/^\s+GH_TOKEN:\s+\$\{\{ github\.token \}\}$/gm)).toHaveLength(1);
+
+    expect(singleQuotedReadonly(workflow, "repository")).toBe("hasna/emails");
+    expect(singleQuotedReadonly(workflow, "source_merge_commit")).toBe(sourceMergeCommit);
+    expect(singleQuotedReadonly(workflow, "ci_run_id")).toBe(ciRunId);
+    expect(workflow.match(/^\s+gh api\s*\\$/gm)).toHaveLength(2);
+    expect(workflow.match(/^\s+jq --exit-status/gm)).toHaveLength(3);
+    for (const liveVerificationContract of [
+      "command -v gh >/dev/null",
+      "command -v jq >/dev/null",
+      'readonly verification_dir="$(mktemp -d)"',
+      "trap cleanup_verification EXIT",
+      '"/repos/${repository}/commits/${source_merge_commit}"',
+      '"/repos/${repository}/actions/runs/${ci_run_id}"',
+      ".sha == $source_merge_commit",
+      ".id == $ci_run_id",
+      ".repository.full_name == $repository",
+      ".head_repository.full_name == $repository",
+      ".head_sha == $source_merge_commit",
+      '.status == "completed"',
+      '.conclusion == "success"',
+      '.event == "push"',
+      '.head_branch == "main"',
+      '.path == ".github/workflows/ci.yml"',
+    ]) {
+      expect(workflow, `live source/CI verification is missing ${liveVerificationContract}`).toContain(
+        liveVerificationContract,
+      );
+    }
 
     expect(singleQuotedReadonly(workflow, "artifact_dir")).toBe("attestation-input");
     expect(singleQuotedReadonly(workflow, "tarball_url")).toBe(tarballUrl);
@@ -315,6 +349,39 @@ describe("repository workflow safety", () => {
         workflow: workflow.replace(
           "actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6",
           "actions/attest@0123456789abcdef0123456789abcdef01234567",
+        ),
+      },
+      {
+        name: "source commit existence check bypassed",
+        workflow: workflow.replace("            '.sha == $source_merge_commit' \\\n", "            'true' \\\n"),
+      },
+      {
+        name: "CI success check bypassed",
+        workflow: workflow.replace(
+          '              .status == "completed" and\n              .conclusion == "success" and\n',
+          "              true and\n",
+        ),
+      },
+      {
+        name: "CI repository association check bypassed",
+        workflow: workflow.replace(
+          "              .repository.full_name == $repository and\n              .head_repository.full_name == $repository and\n",
+          "              true and\n",
+        ),
+      },
+      {
+        name: "Actions read permission removed",
+        workflow: workflow.replace("      actions: read\n", ""),
+      },
+      {
+        name: "token source changed to secrets context",
+        workflow: workflow.replace("${{ github.token }}", "${{ secrets.GITHUB_TOKEN }}"),
+      },
+      {
+        name: "token-bearing shell tracing enabled",
+        workflow: workflow.replace(
+          "          set -euo pipefail\n          umask 077\n\n          readonly repository=",
+          "          set -euxo pipefail\n          umask 077\n\n          readonly repository=",
         ),
       },
     ];

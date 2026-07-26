@@ -382,7 +382,7 @@ if [ "$actual_workflows" != "$expected_workflows" ]; then
   exit 1
 fi
 
-expected_provenance_sha256='0849b75cbe8fb252c9c2b95ecce59b1f228144c9bcda62c64ba9aa62fbb13c0f'
+expected_provenance_sha256='7e80be3eb71e5e4b2f99c80467f6230430eb79be2dd8d170233828076a378285'
 actual_provenance_sha256="$(sha256sum "$provenance_workflow" | awk '{ print $1 }')"
 if [ "$actual_provenance_sha256" != "$expected_provenance_sha256" ]; then
   echo "package provenance workflow must match the exact reviewed manual attestation artifact" >&2
@@ -477,17 +477,69 @@ provenance_permissions="$(
     capture { exit }
   ' "$provenance_workflow"
 )"
-expected_provenance_permissions='      contents: read
+expected_provenance_permissions='      actions: read
+      contents: read
       id-token: write
       attestations: write'
 if [ "$provenance_permissions" != "$expected_provenance_permissions" ]; then
-  echo "package provenance permissions must be limited to contents read and attestation identity writes" >&2
+  echo "package provenance permissions must be limited to actions/contents read and attestation identity writes" >&2
+  exit 1
+fi
+
+expected_provenance_steps='Verify source and CI evidence
+Download and verify published tarball
+Create release evidence predicate
+Attest downloaded npm tarball'
+actual_provenance_steps="$(
+  sed -n 's/^      - name: //p' "$provenance_workflow"
+)"
+if [ "$actual_provenance_steps" != "$expected_provenance_steps" ]; then
+  echo "package provenance must contain only the exact reviewed verification and attestation steps" >&2
   exit 1
 fi
 
 if [ "$(grep -Ec '^[[:space:]]+uses:' "$provenance_workflow" || true)" != "1" ] \
   || [ "$(grep -Fxc '        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0' "$provenance_workflow" || true)" != "1" ]; then
   echo "package provenance must use only the exact actions/attest v4.2.0 commit" >&2
+  exit 1
+fi
+
+if [ "$(grep -Fxc '          GH_TOKEN: ${{ github.token }}' "$provenance_workflow" || true)" != "1" ] \
+  || [ "$(grep -Eoc '\$\{\{[^}]+\}\}' "$provenance_workflow" || true)" != "1" ] \
+  || grep -Ein 'secrets([.]|\[)|set[[:space:]]+-x|printenv|(^|[[:space:]])env([[:space:]]|$)' \
+    "$provenance_workflow" >/dev/null; then
+  echo "package provenance must expose only github.token to gh without printing token-bearing environment" >&2
+  exit 1
+fi
+
+for provenance_live_verification_contract in \
+  "readonly repository='hasna/emails'" \
+  "readonly source_merge_commit='fe61a466a28115f33efda1ecc7632dbc7c6525c7'" \
+  "readonly ci_run_id='30212897836'" \
+  'command -v gh >/dev/null' \
+  'command -v jq >/dev/null' \
+  'readonly verification_dir="$(mktemp -d)"' \
+  'trap cleanup_verification EXIT' \
+  '"/repos/${repository}/commits/${source_merge_commit}"' \
+  '"/repos/${repository}/actions/runs/${ci_run_id}"' \
+  '.sha == $source_merge_commit' \
+  '.id == $ci_run_id' \
+  '.repository.full_name == $repository' \
+  '.head_repository.full_name == $repository' \
+  '.head_sha == $source_merge_commit' \
+  '.status == "completed"' \
+  '.conclusion == "success"' \
+  '.event == "push"' \
+  '.head_branch == "main"' \
+  '.path == ".github/workflows/ci.yml"'; do
+  grep -Fq -- "$provenance_live_verification_contract" "$provenance_workflow" || {
+    echo "package provenance live source/CI verification missing: $provenance_live_verification_contract" >&2
+    exit 1
+  }
+done
+if [ "$(grep -Ec '^[[:space:]]*gh api[[:space:]]*\\$' "$provenance_workflow" || true)" != "2" ] \
+  || [ "$(grep -Ec '^[[:space:]]*jq --exit-status' "$provenance_workflow" || true)" != "3" ]; then
+  echo "package provenance must perform exactly two GitHub API reads and three jq validations" >&2
   exit 1
 fi
 
