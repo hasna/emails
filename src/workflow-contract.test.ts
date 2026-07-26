@@ -68,13 +68,20 @@ describe("repository workflow safety", () => {
     const preflight = text.slice(preflightStart, deploymentStart);
     for (const marker of [
       "RELEASE_PR_NUMBER",
-      "HOSTED_CI_WORKFLOW",
       "NPM_PACKAGE",
+      "HOSTED_CI_WORKFLOWS=(ci.yml terraform-aws-validate.yml)",
+      'test "${#HOSTED_CI_WORKFLOWS[@]}" -eq 2',
+      'test "${HOSTED_CI_WORKFLOWS[0]}" = "ci.yml"',
+      'test "${HOSTED_CI_WORKFLOWS[1]}" = "terraform-aws-validate.yml"',
+      'for HOSTED_CI_WORKFLOW in "${HOSTED_CI_WORKFLOWS[@]}"; do',
+      'SOURCE_ORIGIN_URL="$(git -C "$SOURCE_CHECKOUT" remote get-url origin)"',
+      '"https://github.com/hasna/emails.git"|"git@github.com:hasna/emails.git"',
       'git -C "$SOURCE_CHECKOUT" fetch --quiet --no-tags origin main',
       'git -C "$SOURCE_CHECKOUT" merge-base --is-ancestor "$RELEASE_COMMIT" "$ORIGIN_MAIN_COMMIT"',
       ".merge_commit_sha == $release_commit",
       'actions/workflows/$HOSTED_CI_WORKFLOW/runs?head_sha=$RELEASE_COMMIT',
       ".head_sha == $release_commit",
+      '.head_branch == "main"',
       '.conclusion == "success"',
       'npm view "$NPM_PACKAGE@$RELEASE_VERSION" --json',
       ".gitHead == $release_commit",
@@ -92,7 +99,7 @@ describe("repository workflow safety", () => {
     }
 
     expect(preflight).not.toMatch(
-      /NPM_PROVENANCE_PREDICATE_TYPE|NPM_ATTESTATIONS|resolvedDependencies|base64 --decode/,
+      /NPM_PROVENANCE_PREDICATE_TYPE|NPM_ATTESTATIONS|resolvedDependencies|base64 --decode|:\s*"\$\{HOSTED_CI_WORKFLOW:/,
     );
     expect(text, `${runbook} must not treat checkout or branch HEAD as release authority`).not.toContain(
       "SOURCE_HEAD=",
