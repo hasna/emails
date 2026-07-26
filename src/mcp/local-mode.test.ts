@@ -5,6 +5,7 @@ import { closeDatabase, resetDatabase } from "../db/database.js";
 import { createProvider } from "../db/providers.local.js";
 import { listSandboxEmails } from "../db/sandbox.local.js";
 import { startHttpServer } from "./http.js";
+import { buildServer } from "./server.js";
 
 let server: ReturnType<typeof startHttpServer> | null = null;
 
@@ -53,6 +54,28 @@ describe("MCP local mode", () => {
       expect(listSandboxEmails(provider.id, 10)).toHaveLength(1);
     } finally {
       await client.close();
+    }
+  });
+
+  it("does not apply the self_hosted provisioning guard to infrastructure tools", async () => {
+    // The self_hosted refusal added for setup_domain_for_email / setup_cloudflare_dns
+    // must not leak into local mode, where these tools legitimately drive the
+    // operator's own cloud account. Passing an unresolvable provider id proves
+    // execution reached the real implementation (it fails at provider resolution,
+    // which happens *after* the mode guard) without making any cloud call.
+    const server = buildServer() as unknown as {
+      _registeredTools: Record<string, { handler: (input: Record<string, unknown>) => Promise<{ isError?: boolean; content: Array<{ type: string; text: string }> }> }>;
+    };
+
+    for (const name of ["setup_domain_for_email", "setup_cloudflare_dns"]) {
+      const result = await server._registeredTools[name]!.handler({
+        domain: "example.test",
+        provider_id: "no-such-provider",
+      });
+      expect(result.isError).toBe(true);
+      const text = result.content[0]?.text ?? "";
+      expect(text).not.toContain("disabled in self_hosted mode");
+      expect(text).toContain("Could not resolve ID 'no-such-provider' in table 'providers'");
     }
   });
 });

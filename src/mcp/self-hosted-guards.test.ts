@@ -115,6 +115,38 @@ describe("MCP self_hosted guards", () => {
     }
   });
 
+  it("refuses infrastructure-mutating provisioning tools instead of using client cloud credentials", async () => {
+    // In self_hosted mode `getProvider` returns a row whose secrets are nulled by
+    // policy, so the SES adapter would resolve credentials from the CLIENT's
+    // ambient AWS_* environment and Cloudflare from the client's token — while
+    // `createDomain` writes into the OPERATOR's shared domain state. That lets a
+    // tenant member stand up a SES identity in their own AWS account and record a
+    // domain the operator's SES cannot send from, so these refuse outright.
+    const cases: Array<[string, Record<string, unknown>]> = [
+      ["setup_domain_for_email", { domain: "attacker.example.com", provider_id: "provider-1", add_mx: true }],
+      ["setup_cloudflare_dns", { domain: "attacker.example.com", provider_id: "provider-1", register_domain: true }],
+      ["setup_ses_inbound", { domain: "attacker.example.com", bucket: "attacker-inbound" }],
+    ];
+
+    for (const [name, args] of cases) {
+      const result = await callTool(name, args);
+      expect(result.isError).toBe(true);
+      const text = resultText(result);
+      // This is the assertion that discriminates: with the guard removed these
+      // tools instead fail later, at provider resolution or at the first AWS
+      // call, so the refusal text cannot appear by accident.
+      expect(text).toContain(`MCP tool ${name} is disabled in self_hosted mode`);
+      expect(text).toContain("EMAILS_MODE=local");
+      // The refusal must not repeat the false claim that a server route exists.
+      expect(text).not.toContain("runs on the self-hosted server");
+      // ...nor mention credentials: mcp/contracts.ts classifies by regex over the
+      // message and would mislabel a mode refusal as an auth_error whose
+      // fix_commands point at provider credentials.
+      expect(text.toLowerCase()).not.toContain("credential");
+      expect((JSON.parse(text) as { error?: { code?: string } }).error?.code).not.toBe("auth_error");
+    }
+  });
+
   it("routes read tools through /v1 (empty store yields empty lists, no local DB)", async () => {
     for (const name of ["list_templates", "list_sandbox_emails", "export_emails"]) {
       const result = await callTool(name, {});
