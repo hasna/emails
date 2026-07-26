@@ -428,11 +428,26 @@ for runbook in "$repo/docs/DEPLOYMENT_CUTOVER.md" "$root/README.md"; do
 done
 
 cutover_text="$(tr '\n' ' ' < "$repo/docs/DEPLOYMENT_CUTOVER.md")"
-if grep -En '(^|[^[:digit:]])[[:digit:]]+[.][[:digit:]]+[.][[:digit:]]+([^[:digit:]]|$)|IMAGE_[[:digit:]]+' \
-  "$repo/docs/DEPLOYMENT_CUTOVER.md" >/dev/null; then
-  echo "0020 runbook must use release inputs instead of stale hardcoded release literals" >&2
-  exit 1
-fi
+for release_input_runbook in "$repo/docs/DEPLOYMENT_CUTOVER.md" "$root/README.md"; do
+  if grep -En '(^|[^[:digit:]])[[:digit:]]+[.][[:digit:]]+[.][[:digit:]]+([^[:digit:]]|$)|IMAGE_[[:digit:]]+' \
+    "$release_input_runbook" >/dev/null; then
+    echo "0020 runbooks must use release inputs instead of stale hardcoded release literals" >&2
+    exit 1
+  fi
+done
+for release_input in \
+  "@hasna/emails" \
+  "RELEASE_VERSION" \
+  "RELEASE_COMMIT" \
+  "SOURCE_ARCHIVE_SHA256" \
+  "IMAGE_REPOSITORY" \
+  "IMAGE_DIGEST" \
+  "IMAGE_REFERENCE"; do
+  grep -Fq "$release_input" "$root/README.md" || {
+    echo "AWS README must bind the 0020 cutover to verified immutable release input $release_input" >&2
+    exit 1
+  }
+done
 
 for source_contract in \
   'applied: string[]' \

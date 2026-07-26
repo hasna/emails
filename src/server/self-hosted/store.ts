@@ -994,7 +994,11 @@ function toIso(value: unknown): string | null {
 /** Coerce a raw DB row into a fully-typed MessageRecord (JSONB columns parsed). */
 function mapMessageRow(row: Record<string, unknown>): MessageRecord {
   const attachments = toArray(row["attachments"]).map((item, index) => {
-    if (!item || typeof item !== "object" || Array.isArray(item)) return item;
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      // Preserve the authenticated array position, but never let a malformed
+      // scalar become a client placeholder with unknown/fetchable availability.
+      return { content_available: false };
+    }
     const { content_base64: _content, ...metadata } = item as Record<string, unknown>;
     // `content_available` is DERIVED here, never echoed from the stored JSON: it
     // is exactly the predicate getMessageAttachment uses to decide between

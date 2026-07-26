@@ -484,6 +484,44 @@ describe("inbox read", () => {
     expect(line("attachment-1")).toContain("--index 0");
     expect(line("D394.pdf")).toContain("--index 1");
   });
+
+  it("keeps a primitive attachment gap visible without advertising it or shifting later indexes", async () => {
+    const id = crypto.randomUUID();
+    await stub.seed({ messages: [msgRow({
+      id,
+      subject: "Malformed attachment element",
+      attachments: [
+        {
+          filename: "cover.png",
+          content_type: "image/png",
+          size: 3,
+          content_base64: "b25l",
+        },
+        "not-an-object",
+        {
+          filename: "D394.pdf",
+          content_type: "application/pdf",
+          size: 3,
+          content_base64: "dHdv",
+        },
+      ],
+    })] });
+
+    const { data, out } = await runInboxCommand(["inbox", "read", id, "--keep-unread"]);
+    expect((data as { attachments: Array<{ filename: string; content_available?: boolean }> })
+      .attachments.map((attachment) => [attachment.filename, attachment.content_available]))
+      .toEqual([
+        ["cover.png", true],
+        ["attachment-2", false],
+        ["D394.pdf", true],
+      ]);
+    const line = (needle: string) => out.split("\n").find((value) => value.includes(needle)) ?? "";
+    expect(line("cover.png")).toContain("--index 0");
+    expect(line("attachment-2")).toContain("metadata only; payload not stored");
+    expect(line("attachment-2")).not.toContain("--index 1");
+    expect(line("D394.pdf")).toContain("--index 2");
+    expect(out).toContain(`emails inbox attachment ${id} --index <n> --download --output-dir <dir>`);
+  });
 });
 
 // ─── inbox mark-read / star / archive / label ────────────────────────────────
@@ -1158,6 +1196,49 @@ describe("inbox attachment", () => {
     expect((data as Array<{ filename: string; index?: number }>)).toEqual([
       expect.objectContaining({ filename: "target.pdf", index: 1 }),
     ]);
+  });
+
+  it("does not fetch a primitive attachment gap and still downloads the later authenticated index", async () => {
+    const id = crypto.randomUUID();
+    const dir = mkdtempSync(join(tmpdir(), "emails-cli-attachment-gap-"));
+    try {
+      await stub.seed({ messages: [msgRow({
+        id,
+        attachments: [
+          { filename: "first.txt", content_type: "text/plain", size: 3, content_base64: "b25l" },
+          17,
+          { filename: "later.txt", content_type: "text/plain", size: 3, content_base64: "dHdv" },
+        ],
+      })] });
+
+      const listed = await runInboxCommand(["inbox", "attachment", id]);
+      expect((listed.data as Array<{ filename: string; index?: number; content_available?: boolean }>)
+        .map((item) => [item.filename, item.index, item.content_available]))
+        .toEqual([
+          ["first.txt", 0, true],
+          ["attachment-2", 1, false],
+          ["later.txt", 2, true],
+        ]);
+
+      const rejected = await runInboxCommandExpectingExit([
+        "inbox", "attachment", id, "--download", "--index", "1", "--output-dir", dir,
+      ]);
+      expect(rejected.error).toBe("process.exit:1");
+      expect(rejected.stderr).toContain("not available for download");
+      expect(rejected.stderr).not.toContain("not found");
+      expect(readdirSync(dir)).toEqual([]);
+
+      const { data: saved } = await runInboxCommand([
+        "inbox", "attachment", id, "--download", "--index", "2", "--output-dir", dir,
+      ]);
+      expect((saved as Array<{ index: number; filename: string; bytes: number }>)[0]).toMatchObject({
+        index: 2,
+        filename: "later.txt",
+        bytes: 3,
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("downloads a validated attachment to a collision-proof mode-0600 file", async () => {

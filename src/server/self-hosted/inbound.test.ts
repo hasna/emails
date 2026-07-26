@@ -349,6 +349,34 @@ describe("Emails self-hosted inbound messages", () => {
     expect((await get(2))?.status).toBe(422);
   });
 
+  test("preserves a primitive attachment gap without advertising content or shifting later indexes", async () => {
+    const d = deps();
+    const created = await handleSelfHostedRequest(d, post({
+      ...INBOUND,
+      source_id: "attachment-primitive-gap",
+      attachments: [
+        { filename: "first.txt", content_type: "text/plain", size: 3, content_base64: "b25l" },
+        17,
+        { filename: "later.txt", content_type: "text/plain", size: 3, content_base64: "dHdv" },
+      ],
+    }));
+    const message = (await created!.json()).message;
+    expect(message.attachments).toEqual([
+      { filename: "first.txt", content_type: "text/plain", size: 3, content_available: true },
+      { content_available: false },
+      { filename: "later.txt", content_type: "text/plain", size: 3, content_available: true },
+    ]);
+
+    const get = (index: number) => handleSelfHostedRequest(d, new Request(
+      `http://svc/v1/messages/${encodeURIComponent(message.id)}/attachments/${index}`,
+      { headers: { "x-api-key": writeToken() } },
+    ));
+    expect((await get(1))?.status).toBe(404);
+    const later = await get(2);
+    expect(later?.status).toBe(200);
+    expect((await later!.json()).attachment.filename).toBe("later.txt");
+  });
+
   test("outbound ledger-only writes are rejected", async () => {
     const res = await handleSelfHostedRequest(
       deps(),

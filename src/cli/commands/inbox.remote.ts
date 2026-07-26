@@ -74,7 +74,12 @@ interface SeamMailDetail {
   text_body: string | null;
   html_body: string | null;
   summary: string;
-  attachments: Array<{ filename: string; content_type: string; size: number }>;
+  attachments: Array<{
+    filename: string;
+    content_type: string;
+    size: number;
+    content_available: boolean;
+  }>;
   attachment_paths: Array<{ filename: string; local_path?: string; s3_url?: string }>;
 }
 
@@ -90,11 +95,9 @@ function seamMessageDetail(msg: TuiMessage, body: MessageBody | null): SeamMailD
     filename: att.filename,
     content_type: att.content_type,
     size: att.size,
-    // Preserve the serve's stored-byte verdict (absent when not reported) so the
-    // renderer can stop advertising a download that cannot succeed (#36).
-    ...(typeof att.content_available === "boolean"
-      ? { content_available: att.content_available }
-      : {}),
+    // A fetch affordance requires an explicit positive verdict. Any malformed
+    // or older response that omitted availability fails closed.
+    content_available: att.content_available === true,
   }));
   const attachmentPaths = (body?.attachments ?? [])
     .filter((att) => att.location)
@@ -823,6 +826,11 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
             );
           if (selected.length === 0) throw new Error("No stored attachment metadata matches the download selection");
           if (selected.length !== 1) throw new Error("attachment download must select exactly one index");
+          if (selected[0]!.attachment.content_available !== true) {
+            throw new Error(
+              `Attachment index ${selected[0]!.index} has metadata but no stored content; it is not available for download`,
+            );
+          }
           const saved = [];
           for (const item of selected) {
             const content = await ds.getAttachmentContent(fullId, item.index, { maxBytes });
@@ -1048,7 +1056,7 @@ function formatAttachmentDetailList(emailId: string, attachments: AttachmentDeta
   for (const attachment of attachments) {
     const location = attachment.location
       ? attachment.location_type === "local" ? chalk.cyan(attachment.location) : chalk.blue(attachment.location)
-      : chalk.dim(attachment.content_available === false ? METADATA_ONLY_LABEL : "(not downloaded)");
+      : chalk.dim(attachment.content_available === true ? "(not downloaded)" : METADATA_ONLY_LABEL);
     lines.push(`  ${attachment.filename.padEnd(40)} ${chalk.dim(`${formatAttachmentSize(attachment.size)} · ${attachment.content_type}`)}  ${location}`);
     if (attachment.file_url) lines.push(`  ${chalk.dim("link:")} ${attachment.file_url}`);
   }
@@ -1085,20 +1093,17 @@ function formatEmailDetail(
     // The index comes from mergeAttachmentDetails (the metadata position), NEVER
     // from this loop: a nameless metadata entry is dropped from the display, so a
     // rendered position would advertise an index that downloads a DIFFERENT file.
-    // Only entries the serve confirms are NOT metadata-only get advertised as
-    // fetchable; an unreported (undefined) verdict keeps the previous wording.
-    const hasFetchableIndexes = atts.some((a) => a.index !== undefined && a.content_available !== false);
+    // Only entries the serve explicitly confirms are fetchable get a command.
+    const hasFetchableIndexes = atts.some((a) => a.index !== undefined && a.content_available === true);
     lines.push(chalk.yellow(`  📎 Attachments (${atts.length}):`));
     for (const a of atts) {
       const missingLocation = opts.mode === "self_hosted"
-        ? a.content_available === false
-          // Metadata is not proof of stored content: imports that carry only
-          // metadata answer the fetch with a "no stored content" error, so this
-          // row must not be presented as one command away from its bytes.
-          ? `  ${METADATA_ONLY_LABEL}`
-          : a.index !== undefined
+        ? a.content_available === true && a.index !== undefined
             ? `  (no local copy; fetch with --index ${a.index})`
-            : "  (no local copy and no download index)"
+            // Metadata is not proof of stored content: imports that carry only
+            // metadata answer the fetch with a "no stored content" error, so this
+            // row must not be presented as one command away from its bytes.
+            : `  ${METADATA_ONLY_LABEL}`
         : "  (run: emails inbox sync to download)";
       const loc = a.location ? `  ${a.location_type === "local" ? chalk.cyan(a.location) : chalk.blue(a.location)}` : chalk.dim(missingLocation);
       lines.push(`     ${a.filename.padEnd(44)} ${chalk.dim(`${formatAttachmentSize(a.size)} · ${a.content_type}`)}${loc}`);

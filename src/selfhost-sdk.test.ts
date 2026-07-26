@@ -250,6 +250,37 @@ describe("generated self-hosted SDK identity contract", () => {
     }
   });
 
+  it("preserves failed intents returned by a provider rejection", async () => {
+    const exactMessageId = "12345678-1234-4234-8234-123456789abc";
+    const client = new EmailsSelfHostClient({
+      baseUrl: "https://emails.example.test",
+      apiKey: "api-key-placeholder",
+      fetch: (async () => new Response(JSON.stringify({
+        error: "provider rejected message",
+        retry_safe: false,
+        message: { id: exactMessageId, send_state: "failed" },
+      }), {
+        status: 422,
+        headers: { "Content-Type": "application/json" },
+      })) as typeof fetch,
+    });
+    try {
+      await client.sendMessage({
+        from: "sender@example.test",
+        to: ["recipient@example.test"],
+        subject: "subject",
+        idempotency_key: "tenant-scoped-key",
+      });
+      throw new Error("expected ApiError");
+    } catch (error) {
+      expect(error).toBeInstanceOf(ApiError);
+      expect((error as ApiError).sendIntentMessage).toEqual({
+        id: exactMessageId,
+        send_state: "failed",
+      });
+    }
+  });
+
   it("preserves legacy none-state keyed intents for reconciliation", async () => {
     const exactMessageId = "12345678-1234-4234-8234-123456789abc";
     const client = new EmailsSelfHostClient({

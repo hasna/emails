@@ -188,18 +188,24 @@ new-code-compatible migrator through 0016, require exit code zero, and verify th
 migration ledger before starting anything. Start only tenant-aware new-code writers
 after the ledger check passes.
 
-Migration 0017 and the 1.2.4 attachment-provenance activation add a second,
-forward-only gate with controlled downtime. Disable automatic rollback, save a
-queue/DLQ snapshot and cutoff, scale the old ingest worker to zero, wait until
-both its running count and SQS in-flight count are zero, then scale the old API
-to zero. Only after both incompatible services are stopped may an isolated 1.2.4
-migration task apply 0017 and a second 1.2.4 `db status --json` task prove
-`pending: []`, the exact ledger ID, and valid checksums. Start only the 1.2.4
-worker, drain/reconcile the SQS buffer, and require the aggregate-only
-`inbound-provenance-audit --since <cutoff>` to exit zero before the API. The
-audit runs from the worker task definition because that definition carries the
-deployment-owned canonical bucket. The executable, evidence-producing commands
-are in `docs/DEPLOYMENT_CUTOVER.md`.
+Migrations 0017 through 0020 and the attachment-provenance activation add a
+second, forward-only gate with controlled downtime. Before draining, verify one
+immutable release exactly as `docs/DEPLOYMENT_CUTOVER.md` requires:
+`SOURCE_CHECKOUT` at `RELEASE_COMMIT` has package name `@hasna/emails` and
+version `RELEASE_VERSION`, its deterministic archive matches
+`SOURCE_ARCHIVE_SHA256`, and `IMAGE_REFERENCE` equals
+`IMAGE_REPOSITORY@IMAGE_DIGEST` with matching OCI revision/version metadata.
+Disable automatic rollback, save a queue/DLQ snapshot and cutoff, scale the old
+ingest worker to zero, wait until both its running count and SQS in-flight count
+are zero, then scale the old API to zero. Only after both incompatible services
+are stopped may isolated migration and `db status --json` tasks from that
+verified immutable release apply and verify migrations 0017 through 0020,
+`pending: []`, the exact ledger IDs, and valid checksums. Start only the worker
+from that same verified immutable release, drain/reconcile the SQS buffer, and
+require the aggregate-only `inbound-provenance-audit --since <cutoff>` to exit
+zero before the API. The audit runs from the worker task definition because that
+definition carries the deployment-owned canonical bucket. The executable,
+evidence-producing commands are in `docs/DEPLOYMENT_CUTOVER.md`.
 
 Before draining any writer, apply with
 `enable_automatic_deployment_rollback = false`. Keep automatic rollback disabled
@@ -287,13 +293,14 @@ is known to be tenant-aware and compatible with the migrated schema. Otherwise,
 roll forward to a corrected tenant-aware image, or execute an operator-reviewed
 explicit schema recovery plan while every writer remains stopped.
 
-After migration 0017 commits, 1.2.3 is never an eligible task restart,
-scale-out, automatic rollback, or operator rollback target. Recovery is a
-compatible roll-forward using a reviewed 1.2.4-or-newer image that recognizes
-the 0017 ledger. Start the compatible worker from zero, rerun the post-fence
-provenance audit, then start the API. Preserve the ledger row and keep
-`enable_automatic_deployment_rollback = false` until both 1.2.4 services and
-the complete cutover evidence pass.
+After migration 0020 commits, a pre-0020 release is never an eligible task
+restart, scale-out, automatic rollback, or operator rollback target. Recovery
+is a compatible roll-forward using the verified immutable release package,
+version, source, and image inputs above, from an image whose migration set
+recognizes 0017 through 0020. Start the compatible worker from zero, rerun the
+post-fence provenance audit, then start the API. Preserve the ledger rows and
+keep `enable_automatic_deployment_rollback = false` until both services from
+that same verified release and the complete cutover evidence pass.
 
 After both API and worker complete a tenant-aware deployment and the checks below
 pass, set `enable_automatic_deployment_rollback = true` in a separate reviewed

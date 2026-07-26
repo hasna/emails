@@ -54,7 +54,7 @@ export interface EmailsSelfHostClientOptions {
   headers?: Record<string, string>;
 }
 
-export type SendIntentRecoveryState = "blocked" | "cancelled" | "none" | "pending" | "sending" | "sent" | "uncertain";
+export type SendIntentRecoveryState = "blocked" | "cancelled" | "failed" | "none" | "pending" | "sending" | "sent" | "uncertain";
 
 export interface SendIntentMessageProjection {
   id: string;
@@ -63,7 +63,7 @@ export interface SendIntentMessageProjection {
 
 const SEND_INTENT_MESSAGE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const SEND_INTENT_RECOVERY_STATES = new Set<SendIntentRecoveryState>([
-  "blocked", "cancelled", "none", "pending", "sending", "sent", "uncertain",
+  "blocked", "cancelled", "failed", "none", "pending", "sending", "sent", "uncertain",
 ]);
 
 function parseSendIntentMessage(body: unknown): SendIntentMessageProjection | undefined {

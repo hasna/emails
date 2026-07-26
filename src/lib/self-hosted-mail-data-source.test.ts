@@ -489,6 +489,45 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     expect(body!.attachments.map((a) => a.filename)).toEqual(["attachment-1", "D394.pdf"]);
   });
 
+  it("keeps malformed and missing-availability attachment elements positional but unavailable", async () => {
+    const { ds } = make([
+      v1("malformed", {
+        attachments: [
+          {
+            filename: "cover.png",
+            content_type: "image/png",
+            size: 10,
+            content_available: true,
+          },
+          "not-an-object" as never,
+          {
+            filename: "D394.pdf",
+            content_type: "application/pdf",
+            size: 28580,
+            content_available: true,
+          },
+          {
+            filename: "legacy.pdf",
+            content_type: "application/pdf",
+            size: 1024,
+          },
+        ],
+      }),
+    ]);
+
+    const [msg] = await ds.listMailbox("inbox");
+    const body = await ds.getMessageBody(msg!);
+    expect(body!.attachments.map((attachment) => ({
+      filename: attachment.filename,
+      content_available: attachment.content_available,
+    }))).toEqual([
+      { filename: "cover.png", content_available: true },
+      { filename: "attachment-2", content_available: false },
+      { filename: "D394.pdf", content_available: true },
+      { filename: "legacy.pdf", content_available: false },
+    ]);
+  });
+
   it("honors small inbox limits with one bounded server-side page", async () => {
     const rows = Array.from({ length: 1000 }, (_, index) => v1(String(index), {
       received_at: `2026-06-18T08:${String(index % 60).padStart(2, "0")}:00.000Z`,
@@ -1878,8 +1917,18 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
       const msg = await ds.getMessage(id);
       const body = await ds.getMessageBody(msg!);
       const paths = await ds.getAttachmentPaths(id);
-      expect(body?.attachments).toEqual([{ filename: "../../secret.txt", content_type: "text/plain", size: 5 }]);
-      expect(paths).toEqual([{ filename: "../../secret.txt", content_type: "text/plain", size: 5 }]);
+      expect(body?.attachments).toEqual([{
+        filename: "../../secret.txt",
+        content_type: "text/plain",
+        size: 5,
+        content_available: false,
+      }]);
+      expect(paths).toEqual([{
+        filename: "../../secret.txt",
+        content_type: "text/plain",
+        size: 5,
+        content_available: false,
+      }]);
       expect(paths[0]!.local_path).toBeUndefined();
       expect(paths[0]!.s3_url).toBeUndefined();
       expect(serve.requests.some((request) => request.includes("/attachments/"))).toBe(false);
@@ -1949,8 +1998,9 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
   // #36: a historical record can expose attachment metadata while the payload
   // was never carried over. The serve reports that per entry; the mapper must
   // pass the verdict through to the body and the path list — and must NOT
-  // invent one when the serve stays silent (older serve => unknown, not gone).
-  it("surfaces the serve's metadata-only verdict on historical attachments without inventing one", async () => {
+  // default an omitted/malformed verdict closed so callers never advertise a
+  // fetch the server has not explicitly confirmed.
+  it("surfaces the serve's metadata-only verdict and defaults omitted availability closed", async () => {
     const { ds } = make([
       v1("historical", {
         attachments: [
@@ -1975,8 +2025,12 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     ]);
 
     const legacyServe = await ds.getAttachmentPaths("olderserve");
-    expect(legacyServe).toEqual([{ filename: "unknown.pdf", content_type: "application/pdf", size: 10 }]);
-    expect(Object.hasOwn(legacyServe[0]!, "content_available")).toBe(false);
+    expect(legacyServe).toEqual([{
+      filename: "unknown.pdf",
+      content_type: "application/pdf",
+      size: 10,
+      content_available: false,
+    }]);
   });
 
   it("refuses redirects before reading a response body or allowing fetch to forward the bearer header", async () => {

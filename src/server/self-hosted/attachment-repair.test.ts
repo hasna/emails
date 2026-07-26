@@ -469,6 +469,120 @@ describe("historical attachment repair", () => {
     expect(f.writes()).toBe(0);
   });
 
+  it("revalidates current attachment state after a reviewed dry-run before any apply mutation", async () => {
+    const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
+    const missingPayload = [{
+      filename: "invoice.txt",
+      content_type: "text/plain",
+      size: 5,
+    }];
+    let current = {
+      attachments: clone(missingPayload) as unknown[],
+      provenance: { ...canonicalProvenance },
+    };
+    let concurrentAttachments: unknown[] | null = null;
+    let bindingReads = 0;
+    let replaceCalls = 0;
+    let lastReplaceResult: boolean | null = null;
+    const deps: AttachmentRepairDeps = {
+      canonicalBucket: canonicalProvenance.bucket,
+      resolveInboundRecipients: async () => ({
+        groups: [{ tenantId: canonicalProvenance.tenant_id, recipients: ["owner@example.com"] }],
+        unresolved: [],
+      }),
+      listAttachmentRepairBindings: async () => {
+        bindingReads++;
+        return [{
+          tenantId: canonicalProvenance.tenant_id,
+          messageId: canonicalProvenance.message_id,
+          attachments: clone(current.attachments),
+          provenance: { ...current.provenance },
+        }];
+      },
+      replaceAttachmentPayloadsAtomically: async (bindings, updates) => {
+        replaceCalls++;
+        const binding = bindings[0];
+        const update = updates[0];
+        if (concurrentAttachments) {
+          current = {
+            ...current,
+            attachments: clone(concurrentAttachments),
+          };
+          concurrentAttachments = null;
+        }
+        const exactCurrentState = bindings.length === 1
+          && updates.length === 1
+          && binding !== undefined
+          && update !== undefined
+          && JSON.stringify(binding.provenance) === JSON.stringify(current.provenance)
+          && JSON.stringify(update.expected) === JSON.stringify(current.attachments);
+        if (!exactCurrentState || !update) {
+          lastReplaceResult = false;
+          return false;
+        }
+        current = {
+          ...current,
+          attachments: clone(update.replacement),
+        };
+        lastReplaceResult = true;
+        return true;
+      },
+      fetchObject: async () => rawMime,
+      parseMime: async () => ({ attachments: clone(parsedAttachments) }),
+    };
+
+    const reviewedDryRun = await repairExistingS3ObjectAttachments(deps, input);
+    expect(reviewedDryRun.items).toEqual([{
+      tenant_id: canonicalProvenance.tenant_id,
+      message_id: canonicalProvenance.message_id,
+      status: "would_repair",
+      attachments: 1,
+    }]);
+    expect(bindingReads).toBe(1);
+    expect(replaceCalls).toBe(0);
+
+    const changedMetadata = [{
+      ...missingPayload[0],
+      filename: "reviewed-state-was-replaced.txt",
+    }];
+    current = { ...current, attachments: clone(changedMetadata) };
+    const metadataMismatch = await repairExistingS3ObjectAttachments(deps, {
+      ...input,
+      apply: true,
+    });
+    expect(metadataMismatch.items[0]?.status).toBe("metadata_mismatch");
+    expect(bindingReads).toBe(2);
+    expect(replaceCalls).toBe(0);
+    expect(current.attachments).toEqual(changedMetadata);
+
+    current = { ...current, attachments: clone(parsedAttachments) };
+    const completed = await repairExistingS3ObjectAttachments(deps, {
+      ...input,
+      apply: true,
+    });
+    expect(completed.items[0]?.status).toBe("already_complete");
+    expect(bindingReads).toBe(3);
+    expect(replaceCalls).toBe(0);
+    expect(current.attachments).toEqual(parsedAttachments);
+
+    current = { ...current, attachments: clone(missingPayload) };
+    const concurrentState = [{
+      ...missingPayload[0],
+      filename: "concurrent-writer.txt",
+    }];
+    concurrentAttachments = clone(concurrentState);
+    const concurrent = await repairExistingS3ObjectAttachments(deps, {
+      ...input,
+      apply: true,
+    });
+    expect(concurrent.items[0]?.status).toBe("concurrent_change");
+    expect(bindingReads).toBe(4);
+    expect(replaceCalls).toBe(1);
+    expect(lastReplaceResult).toBe(false);
+    expect(current.attachments).toEqual(concurrentState);
+    expect(current.attachments).not.toEqual(parsedAttachments);
+  });
+
   it("updates only attachment payload and is idempotent", async () => {
     const f = fixture();
     const first = await repairExistingS3ObjectAttachments(f.deps, { ...input, apply: true });

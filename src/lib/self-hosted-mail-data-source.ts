@@ -85,13 +85,7 @@ interface V1Message {
   is_starred?: boolean;
   labels?: string[] | null;
   headers?: Record<string, unknown> | null;
-  attachments?: Array<{
-    filename?: string;
-    content_type?: string;
-    size?: number;
-    /** Serves >= the content_available contract report stored-byte presence. */
-    content_available?: boolean;
-  }> | null;
+  attachments?: unknown[] | null;
   /** List rows carry only the count; full metadata comes from the detail read. */
   attachment_count?: number;
   created_at?: string | null;
@@ -544,23 +538,30 @@ function v1ToTuiMessage(m: V1Message): TuiMessage {
   };
 }
 
+function attachmentRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
 function v1AttachmentMetadata(m: V1Message): AttachmentPath[] {
   const metadata = Array.isArray(m.attachments) ? m.attachments : [];
   // `||`, not `??`: inbound MIME parts routinely carry filename="" (unnamed
   // inline parts), and an empty name is dropped by every display merge, which
   // silently shifts the download indexes of everything after it. Placeholder
   // names keep each entry addressable — same rule as db/inbound.remote.ts.
-  return metadata.map((attachment, index) => ({
-    filename: String(attachment?.filename || `attachment-${index + 1}`),
-    content_type: String(attachment?.content_type || "application/octet-stream"),
-    size: Number(attachment?.size ?? 0) || 0,
-    // Only a BOOLEAN from the serve is a statement about stored bytes. An older
-    // serve omits the field entirely; leaving it undefined keeps that "unknown"
-    // and stops the renderer from declaring a fetchable payload unavailable.
-    ...(typeof attachment?.content_available === "boolean"
-      ? { content_available: attachment.content_available }
-      : {}),
-  }));
+  return metadata.map((attachment, index) => {
+    const record = attachmentRecord(attachment);
+    return {
+      filename: String(record?.filename || `attachment-${index + 1}`),
+      content_type: String(record?.content_type || "application/octet-stream"),
+      size: Number(record?.size ?? 0) || 0,
+      // Stored bytes are fetchable only when the serve explicitly says true.
+      // Malformed elements and legacy/partial responses that omit the verdict
+      // keep their authenticated position but fail closed.
+      content_available: record?.content_available === true,
+    };
+  });
 }
 
 function v1ToMessageBody(m: V1Message): MessageBody {
@@ -714,11 +715,12 @@ function scopeServerFilterSets(scope: SelfHostedScope | undefined): Array<{ to?:
 function sanitizedAttachmentSearchText(m: V1Message): string {
   if (!Array.isArray(m.attachments)) return "";
   return m.attachments.flatMap((attachment) => {
+    const record = attachmentRecord(attachment);
     const clean = (value: unknown): string =>
       typeof value === "string"
         ? value.replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim()
         : "";
-    return [clean(attachment?.filename), clean(attachment?.content_type)];
+    return [clean(record?.["filename"]), clean(record?.["content_type"])];
   }).filter(Boolean).join(" ");
 }
 
@@ -942,8 +944,10 @@ export class SelfHostedMailDataSource implements MailDataSource {
     let matches = searchMatch(candidate, search);
     const attachmentMetadata = Array.isArray(message.attachments) ? message.attachments : [];
     const attachmentMetadataCount = attachmentMetadata.length;
-    const attachmentSearchMetadataComplete = attachmentMetadata.every((attachment) =>
-      typeof attachment.filename === "string" && typeof attachment.content_type === "string");
+    const attachmentSearchMetadataComplete = attachmentMetadata.every((attachment) => {
+      const record = attachmentRecord(attachment);
+      return typeof record?.["filename"] === "string" && typeof record["content_type"] === "string";
+    });
     const attachmentMetadataComplete =
       message.attachment_count === 0
       || (typeof message.attachment_count === "number"

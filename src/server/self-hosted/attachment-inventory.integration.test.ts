@@ -447,6 +447,7 @@ describe.skipIf(!pgClient)("MP-00034 attachment inventory route", () => {
     const mine = inv.body.items.filter((i: any) => i.message_id === id);
     // All three positions surface; the malformed one is not silently dropped.
     expect(mine.map((i: any) => i.attachment_index)).toEqual([0, 1, 2]);
+    expect(mine.map((i: any) => i.content_available)).toEqual([true, false, false]);
     expect(mine[0].filename).toBe("good.pdf");
     expect(mine[1]).toMatchObject({ filename: null, content_type: null, size_bytes: null, sha256: null });
     expect(mine[2].size_bytes).toBeNull();
@@ -454,6 +455,11 @@ describe.skipIf(!pgClient)("MP-00034 attachment inventory route", () => {
     // Inventory row count matches the per-ID truth (jsonb_array_length).
     const detail = await call(deps, "GET", `/v1/messages/${id}`, { token: t.token });
     expect(mine.length).toBe(detail.body.message.attachments.length);
+    expect(detail.body.message.attachments.map((item: any) => item.content_available))
+      .toEqual([true, false, false]);
+    expect(detail.body.message.attachments[1]).toEqual({
+      content_available: false,
+    });
   });
 
   it("reports truthful content availability and keeps legacy human-readable sizes unknown", async () => {
