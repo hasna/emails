@@ -36,6 +36,7 @@ import { enumerateSelfHostedRows, type SelfHostedEnumeration } from "../db/self-
 import { SelfHostedHttpError } from "../db/self-hosted-store.js";
 import {
   statusAvailable,
+  statusReasonCode,
   statusUnavailable,
   type StatusAvailability,
 } from "./status-availability.js";
@@ -188,6 +189,12 @@ export function collectStatusFacts(input: StatusFactsInput): StatusFactsBundle {
   // ── domains ───────────────────────────────────────────────────────────────
   const domainsOk = domainsRead.availability.available;
   const addressesOk = addressesRead.availability.available;
+  // A per-domain ready-address count is an AGGREGATE over the whole address
+  // inventory, so it inherits that inventory's completeness — not the domain
+  // block's. `available` alone is not enough: a partial enumeration still
+  // returns rows, and every domain whose address rows fell in the skipped window
+  // would be counted down to a confident `0`.
+  const readyAddressesCountable = addressesOk && addressesRead.availability.complete !== false;
   const readyAddressesByDomain = new Map<string, number>();
   if (addressesOk) {
     for (const row of addressesRead.rows) {
@@ -210,6 +217,20 @@ export function collectStatusFacts(input: StatusFactsInput): StatusFactsBundle {
     sourceOf("addresses"),
     "per-domain ready-address counts are derived from the address inventory, which could not be read",
   );
+  // The address inventory answered, but not with every row. Unlike a block-level
+  // count, a per-domain aggregate cannot be published as a lower bound: a
+  // DomainStatusRow carries no availability record of its own, so renderers key
+  // the `≥` prefix off `domains.availability` — which is complete here — and the
+  // number would read as measured. A domain whose address rows all fell in the
+  // skipped window would render a flat `0`, i.e. the exact fabricated-count
+  // failure this module exists to remove.
+  const readyAddressesBoundGap = statusUnavailable(
+    statusReasonCode(addressesRead.availability.reason) ?? "enumeration_cap_exceeded",
+    "GET /v1/addresses",
+    sourceOf("addresses"),
+    "per-domain ready-address counts aggregate the whole address inventory, and that enumeration was "
+      + "incomplete, so an unseen domain would report a confident 0 rather than a lower bound",
+  );
 
   const sortedDomains = [...domainsRead.rows].sort((a, b) =>
     str(b["created_at"]).localeCompare(str(a["created_at"])));
@@ -225,7 +246,7 @@ export function collectStatusFacts(input: StatusFactsInput): StatusFactsBundle {
       state: null,
       send_ready: null,
       receive_ready: null,
-      ready_addresses: addressesOk ? (readyAddressesByDomain.get(id) ?? 0) : null,
+      ready_addresses: readyAddressesCountable ? (readyAddressesByDomain.get(id) ?? 0) : null,
       provisioning_status: strOrNull(row["provisioning_status"]),
       last_error: strOrNull(row["last_error"]),
       next_check_at: strOrNull(row["next_check_at"]),
@@ -237,7 +258,9 @@ export function collectStatusFacts(input: StatusFactsInput): StatusFactsBundle {
     gaps["domains.usable[].state"] = dnsEvidenceGap;
     gaps["domains.usable[].send_ready"] = dnsEvidenceGap;
     gaps["domains.usable[].receive_ready"] = dnsEvidenceGap;
-    if (!addressesOk) gaps["domains.usable[].ready_addresses"] = readyAddressesGap;
+    if (!readyAddressesCountable) {
+      gaps["domains.usable[].ready_addresses"] = addressesOk ? readyAddressesBoundGap : readyAddressesGap;
+    }
   }
 
   const domains = {

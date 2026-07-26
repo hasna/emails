@@ -280,6 +280,65 @@ describe("honest-unavailable contract (G3)", () => {
     expect(rendered).toContain("Lower bounds");
   });
 
+  it("nulls the per-domain ready-address count when the ADDRESS window shifts", async () => {
+    // The per-domain count is an aggregate over the address inventory, but it is
+    // published inside the DOMAINS block — whose own enumeration is complete. So
+    // an incomplete address read used to surface here as an exact-looking number
+    // with no `≥` and no gap entry, and any domain whose address rows fell in the
+    // skipped window rendered a confident `0`.
+    const many = Array.from({ length: 1200 }, (_, index) => ({
+      id: `addr-${String(index).padStart(5, "0")}`,
+      email: `user${index}@alpha.example`,
+      domain: "alpha.example",
+      domain_id: "dom-1",
+      status: "active",
+      verified: false,
+      owner_id: null,
+      provisioning_status: "ready",
+      created_at: NOW,
+      updated_at: NOW,
+    }));
+    await stub.seed({ providers: PROVIDERS, domains: DOMAINS, addresses: many, sources: SOURCES });
+    await stub.setListOrderInstability(7, ["addresses"]);
+
+    const status = await getEmailSystemStatus();
+
+    // Precondition: the address read is a lower bound, the domain read is not.
+    expect(status.addresses.availability.complete).toBe(false);
+    expect(status.addresses.availability.reason).toMatch(/^enumeration_unstable:/);
+    expect(status.incomplete).toContain("addresses");
+    expect(status.domains.availability.complete).toBe(true);
+    expect(status.degraded).toBe(true);
+
+    // Every sampled domain reports null, never a number the client never measured.
+    const usable = status.domains.usable ?? [];
+    expect(usable.length).toBeGreaterThan(0);
+    for (const row of usable) {
+      expect(row.ready_addresses, `${row.domain} must not publish an unmeasured count`).toBeNull();
+    }
+    // alpha.example owns all 1200 ready rows; beta/gamma own none. Without the
+    // gate the first publishes an undercount and the other two publish the same
+    // confident `0` a genuinely empty domain would — indistinguishable.
+    const alpha = usable.find((row) => row.domain === "alpha.example");
+    expect(alpha?.ready_addresses).toBeNull();
+
+    // ...and the null carries the address block's own reason, not a silence.
+    expect(status.gaps["domains.usable[].ready_addresses"]?.reason).toMatch(/^enumeration_unstable:/);
+    expect(status.unavailable).toContain("domains.usable[].ready_addresses");
+    expect(formatEmailSystemStatus(status)).toContain("domains.usable[].ready_addresses");
+  });
+
+  it("still publishes the per-domain ready-address count when the address read is complete", async () => {
+    // The gate must be driven by completeness, not by "addresses are big": a
+    // stable enumeration still yields a real, exact per-domain number.
+    const status = await getEmailSystemStatus();
+
+    expect(status.addresses.availability.complete).toBe(true);
+    const alpha = (status.domains.usable ?? []).find((row) => row.domain === "alpha.example");
+    expect(alpha?.ready_addresses).toBe(1);
+    expect(status.gaps["domains.usable[].ready_addresses"]).toBeUndefined();
+  });
+
   it("reports null (never 0) and a source_unreachable reason when the API cannot be read", async () => {
     // Point the client at a port nothing listens on: the reads MUST fail loudly
     // in the payload rather than degrade to zeros.
