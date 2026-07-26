@@ -18,6 +18,15 @@ enable_nat_gateway      = false
 # Set true only after both API and worker have a verified tenant-aware completed deployment.
 enable_automatic_deployment_rollback = false
 
+# Auth configuration for the API task. Both are REQUIRED before api_desired_count
+# can be raised above 0 (enforced by a precondition on aws_ecs_service.api): the API
+# fails closed at boot without them and this module ships neither a domain nor a
+# sender of its own. In the allowlist, `*` matches exactly one DNS label — so
+# "example.*" allows example.com and example.org but not sub.example.com, and
+# "*.*" is effectively permit-all.
+auth_allowed_email_domains = "example.com"
+auth_from_email            = "no-reply@example.com"
+
 # Optional one-time primary-super-admin bootstrap guard. Set both to operator-
 # approved values; the KID is an identifier, never the API token itself.
 # primary_super_admin_email         = "owner@example.com"

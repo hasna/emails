@@ -69,6 +69,16 @@ locals {
   api_environment = concat(
     local.common_environment,
     [{ name = "EMAILS_SEND_PROVIDER", value = var.send_provider }],
+    # The API refuses to boot without a signup/login/invite domain allowlist and a
+    # verified sender identity; this module ships neither, so an operator must
+    # supply their own. The activation precondition on aws_ecs_service.api makes
+    # them mandatory before api_desired_count can rise above 0.
+    var.auth_allowed_email_domains == null ? [] : [
+      { name = "EMAILS_AUTH_ALLOWED_EMAIL_DOMAINS", value = var.auth_allowed_email_domains },
+    ],
+    var.auth_from_email == null ? [] : [
+      { name = "EMAILS_AUTH_FROM", value = var.auth_from_email },
+    ],
     var.primary_super_admin_email == null || var.primary_super_admin_bootstrap_kid == null ? [] : [
       { name = "EMAILS_PRIMARY_SUPER_ADMIN_EMAIL", value = var.primary_super_admin_email },
       { name = "EMAILS_PRIMARY_SUPER_ADMIN_BOOTSTRAP_KID", value = var.primary_super_admin_bootstrap_kid },
@@ -352,15 +362,20 @@ resource "aws_ecs_service" "api" {
       error_message = "Automatic rollback cannot be enabled before migrations_complete; keep the sealed cutover roll-forward-only."
     }
 
+    # Without these two the API task starts and immediately crash-loops: both are
+    # required at boot and this module supplies no default for either. Gating here
+    # turns that into a plan-time error instead of a running-but-dead service.
     precondition {
       condition = var.api_desired_count == 0 || (
         var.secrets_ready &&
         var.migrations_complete &&
         var.enable_nat_gateway &&
         local.alarm_topic_is_operator_owned &&
-        var.email_domain != null
+        var.email_domain != null &&
+        var.auth_allowed_email_domains != null &&
+        var.auth_from_email != null
       )
-      error_message = "Starting the API requires populated secrets, completed migrations, NAT egress, an operator-owned alarm topic, and an SES email_domain."
+      error_message = "Starting the API requires populated secrets, completed migrations, NAT egress, an operator-owned alarm topic, an SES email_domain, auth_allowed_email_domains, and auth_from_email."
     }
   }
 

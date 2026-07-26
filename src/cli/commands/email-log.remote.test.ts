@@ -14,7 +14,7 @@ function sentMessage(over: Partial<TuiMessage> = {}): TuiMessage {
   return {
     kind: "sent",
     id: "0198c9a2-0000-7000-8000-000000000001",
-    from: "andrei@hasna.com",
+    from: "andrei@example.com",
     to: "accountant@client.example, second@client.example",
     cc: "copy@client.example",
     subject: "monthly documents",

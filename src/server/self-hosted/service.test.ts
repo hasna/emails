@@ -1426,7 +1426,7 @@ describe("Emails self-hosted service", () => {
       d,
       req(
         "GET",
-        `/v1/messages?folder=inbox&q=needle&domain=hasna.com&domain=@Beepmedia.com,%20extra.org&cursor=${encodeURIComponent(cursor)}&limit=50`,
+        `/v1/messages?folder=inbox&q=needle&domain=example.com&domain=@Beepmedia.com,%20extra.org&cursor=${encodeURIComponent(cursor)}&limit=50`,
         { token },
       ),
     );
@@ -1437,7 +1437,7 @@ describe("Emails self-hosted service", () => {
       folder: "inbox",
       search: "needle",
       cursor,
-      domains: ["hasna.com", "beepmedia.com", "extra.org"],
+      domains: ["example.com", "beepmedia.com", "extra.org"],
       limit: 50,
     });
   });
@@ -1467,12 +1467,12 @@ describe("Emails self-hosted service", () => {
       };
     };
     const token = mintApiKey({ app: "emails", scopes: ["emails:read"], signingSecret: SIGNING_SECRET }).token;
-    const groups = await handleSelfHostedRequest(d, req("GET", "/v1/messages/groups?domain=hasna.com", { token }));
+    const groups = await handleSelfHostedRequest(d, req("GET", "/v1/messages/groups?domain=example.com", { token }));
     expect(groups?.status).toBe(200);
     expect((await groups!.json()).inbox).toBe(1);
     const counts = await handleSelfHostedRequest(d, req("GET", "/v1/messages/counts", { token }));
     expect(counts?.status).toBe(200);
-    expect(seen).toEqual([["hasna.com"], undefined]);
+    expect(seen).toEqual([["example.com"], undefined]);
   });
 
   test("message list rejects invalid since filters", async () => {

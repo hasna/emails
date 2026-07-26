@@ -809,7 +809,7 @@ export function setSetting<K extends keyof TuiSettings>(key: K, value: TuiSettin
 
 export interface TenantContext {
   identity: IdentityContext | null;
-  /** Short label for the header, e.g. "carol@hasna.com · acme (owner)". */
+  /** Short label for the header, e.g. "carol@example.com · acme (owner)". */
   label: string;
 }
 

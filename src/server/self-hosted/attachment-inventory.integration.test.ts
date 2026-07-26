@@ -31,6 +31,7 @@ import {
 } from "./attachment-repair.js";
 import { AuthStore } from "./auth/store.js";
 import { RateLimiter } from "./auth/rate-limit.js";
+import { testAuthEnv } from "./auth/test-support.js";
 import type { SelfHostedKeyStore } from "./keys.js";
 import type { AuthMailerConfig } from "./auth/mailer.js";
 
@@ -41,7 +42,7 @@ const pgClient: PoolQueryClient | null = databaseUrl
   : null;
 
 const stubKeyStore: SelfHostedKeyStore = { insertMinted: async () => {}, list: async () => [], revoke: async () => false };
-const MAILER: AuthMailerConfig = { from: "n@hasna.studio", verifyUrlBase: "x", resetUrlBase: "x", inviteUrlBase: "x", productName: "t" };
+const MAILER: AuthMailerConfig = { from: "n@auth.example", verifyUrlBase: "x", resetUrlBase: "x", inviteUrlBase: "x", productName: "t" };
 
 function makeDeps(): SelfHostedServiceDeps {
   return {
@@ -56,7 +57,7 @@ function makeDeps(): SelfHostedServiceDeps {
     signingSecret: SIGNING_SECRET,
     rateLimiter: new RateLimiter({ rules: {} }),
     mailer: MAILER,
-    env: process.env,
+    env: testAuthEnv(),
   };
 }
 

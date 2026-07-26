@@ -142,7 +142,7 @@ function handleSignup(output: OutputFn) {
 
       const { status, json } = selfHostedApiRequest("POST", "/auth/signup", body, { requireCredential: false });
       if (status === 403) {
-        return handleError(new Error("Signup is restricted to @hasna.<tld> email addresses."));
+        return handleError(new Error("Signup is restricted to the email domains this deployment allows (server: EMAILS_AUTH_ALLOWED_EMAIL_DOMAINS)."));
       }
       if (status === 409) {
         // The server dedupes an existing EMAIL silently (generic 200), so a 409 here
@@ -239,7 +239,7 @@ function handleLogin(output: OutputFn) {
           if (reason === "not_a_member") {
             return handleError(new Error("You're not a member of that organization."));
           }
-          return handleError(new Error("Sign-in is restricted to @hasna.<tld> email addresses."));
+          return handleError(new Error("Sign-in is restricted to the email domains this deployment allows (server: EMAILS_AUTH_ALLOWED_EMAIL_DOMAINS)."));
         }
         if (status < 200 || status >= 300) {
           return handleError(new Error(bodyError(json, `Login failed (HTTP ${status}).`)));
@@ -409,7 +409,7 @@ function handleBootstrap(output: OutputFn) {
       // API-key auth: uses the operator's existing EMAILS_SELF_HOSTED_API_KEY.
       const { status, json } = selfHostedApiRequest("POST", "/auth/bootstrap-owner", body);
       if (status === 403 && bodyReason(json) === "email_not_allowed") {
-        return handleError(new Error("The owner email must be a @hasna.<tld> address."));
+        return handleError(new Error("The owner email must be in a domain this deployment allows (server: EMAILS_AUTH_ALLOWED_EMAIL_DOMAINS)."));
       }
       if (status === 401 || status === 403) {
         return handleError(
@@ -514,7 +514,7 @@ export function registerAuthCommands(program: Command, output: OutputFn): void {
   auth
     .command("signup")
     .description("Create a new organization and its owner account (email verification required)")
-    .option("--email <email>", "Owner email (must be @hasna.<tld>)")
+    .option("--email <email>", "Owner email (must match the server's allowed email domains)")
     .option("--password <password>", "Owner password (prompted if omitted)")
     .option("--name <name>", "Owner display name")
     .option("--tenant-name <name>", "Organization display name")
@@ -554,7 +554,7 @@ export function registerAuthCommands(program: Command, output: OutputFn): void {
   auth
     .command("bootstrap")
     .description("One-time: use the operator API key to create the first owner user")
-    .option("--email <email>", "Owner email (must be @hasna.<tld>)")
+    .option("--email <email>", "Owner email (must match the server's allowed email domains)")
     .option("--password <password>", "Owner password (prompted if omitted)")
     .option("--name <name>", "Owner display name")
     .action(handleBootstrap(output));

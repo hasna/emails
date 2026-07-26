@@ -92,7 +92,8 @@ Authentication records are required only for the capability you enable:
 
 Self-hosted clients must set `EMAILS_MODE=self_hosted`,
 `EMAILS_SELF_HOSTED_URL`, and `EMAILS_SELF_HOSTED_API_KEY`. The service uses
-`EMAILS_DATABASE_URL` and `EMAILS_API_SIGNING_KEY`; Postgres is authoritative
+`EMAILS_DATABASE_URL`, `EMAILS_API_SIGNING_KEY`,
+`EMAILS_AUTH_ALLOWED_EMAIL_DOMAINS`, and `EMAILS_AUTH_FROM`; Postgres is authoritative
 and there is no hybrid SQLite synchronization mode.
 
 After applying migrations, issue client keys on the operator host with
@@ -396,7 +397,9 @@ allowlists before it confirms or syncs a notification.
 
 ## Self-Hosted Runtime (PostgreSQL/S3/SES)
 
-The server uses operator-owned Postgres and provider accounts. A client must configure `EMAILS_MODE=self_hosted`, `EMAILS_SELF_HOSTED_URL`, and `EMAILS_SELF_HOSTED_API_KEY`. The service requires `EMAILS_DATABASE_URL`, `EMAILS_API_SIGNING_KEY`, and `EMAILS_SEND_PROVIDER=ses|resend`. SES uses the deployment IAM role; Resend uses `RESEND_API_KEY`.
+The server uses operator-owned Postgres and provider accounts. A client must configure `EMAILS_MODE=self_hosted`, `EMAILS_SELF_HOSTED_URL`, and `EMAILS_SELF_HOSTED_API_KEY`. The service requires `EMAILS_DATABASE_URL`, `EMAILS_API_SIGNING_KEY`, `EMAILS_SEND_PROVIDER=ses|resend`, `EMAILS_AUTH_ALLOWED_EMAIL_DOMAINS`, and `EMAILS_AUTH_FROM`. SES uses the deployment IAM role; Resend uses `RESEND_API_KEY`.
+
+`EMAILS_AUTH_ALLOWED_EMAIL_DOMAINS` is the allowlist of email domains that may sign up, log in, or be invited (comma- or space-separated globs, `*` matching one DNS label — e.g. `example.com` or `example.*`), and `EMAILS_AUTH_FROM` is the sender identity for confirmation/reset/invite mail. **Neither has a default and the service refuses to boot without them**: this package ships no domain and no sender of its own, so a default would either lock your auth surface to someone else's organisation or open signup to everyone. See [docs/SELF_HOSTED_RUNTIME.md](docs/SELF_HOSTED_RUNTIME.md).
 
 Self-hosted client commands fail closed when the mode, URL, or API key is
 missing or invalid. With `--json`, the CLI emits one structured error object on
@@ -481,6 +484,8 @@ export EMAILS_SELF_HOSTED_API_KEY="..."
 export EMAILS_DATABASE_URL="postgresql://..."
 export EMAILS_API_SIGNING_KEY="..."
 export EMAILS_SEND_PROVIDER=ses
+export EMAILS_AUTH_ALLOWED_EMAIL_DOMAINS="example.com"  # your own signup domains
+export EMAILS_AUTH_FROM="no-reply@example.com"          # a verified sender identity
 emails db migrate
 emails-serve
 ```

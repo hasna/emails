@@ -182,8 +182,8 @@ function post(body: unknown, token = writeToken()): Request {
 
 const INBOUND = {
   from: '"Facebook" <friendsuggestion@facebookmail.com>',
-  to: ["andrei@hasna.com"],
-  cc: ["team@hasna.com"],
+  to: ["andrei@example.com"],
+  cc: ["team@example.com"],
   subject: "Oana is a new friend suggestion",
   text: "plain body",
   html: "<p>html body</p>",
@@ -219,8 +219,8 @@ describe("Emails self-hosted inbound messages", () => {
     const msg = (await res!.json()).message;
     expect(msg.direction).toBe("inbound");
     expect(msg.from_addr).toBe(INBOUND.from);
-    expect(msg.to_addrs).toEqual(["andrei@hasna.com"]);
-    expect(msg.cc_addrs).toEqual(["team@hasna.com"]);
+    expect(msg.to_addrs).toEqual(["andrei@example.com"]);
+    expect(msg.cc_addrs).toEqual(["team@example.com"]);
     expect(msg.subject).toBe(INBOUND.subject);
     expect(msg.body_text).toBe("plain body");
     expect(msg.body_html).toBe("<p>html body</p>");
@@ -380,7 +380,7 @@ describe("Emails self-hosted inbound messages", () => {
   test("outbound ledger-only writes are rejected", async () => {
     const res = await handleSelfHostedRequest(
       deps(),
-      post({ from: "me@hasna.com", to: ["you@x.com"], subject: "hi", text: "yo" }),
+      post({ from: "me@example.com", to: ["you@x.com"], subject: "hi", text: "yo" }),
     );
     expect(res?.status).toBe(409);
     expect((await res!.json()).error).toContain("/v1/messages/send");

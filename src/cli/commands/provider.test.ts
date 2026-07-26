@@ -126,7 +126,7 @@ describe("provider add credential honesty (self_hosted)", () => {
     expect(before.out).toContain("No providers configured");
 
     const result = await runProviderCommandExpectingExit([
-      "provider", "add", "--name", "alumia-ses", "--type", "ses",
+      "provider", "add", "--name", "transactional-ses", "--type", "ses",
       "--region", "us-east-1", "--access-key", "AKIAEXAMPLE", "--secret-key", "s3cr3t",
     ]);
 

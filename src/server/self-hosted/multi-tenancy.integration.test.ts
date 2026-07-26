@@ -7,7 +7,8 @@
 //     keys), and the same natural key is reusable per tenant.
 //   - resolveRequestContext: session vs api-key dispatch; api key with NO tenant
 //     mapping fails closed (403); malformed/foreign credentials -> 401.
-//   - Addendum A1: signup/login/invite restricted to @hasna.<tld> (generic 403).
+//   - Addendum A1: signup/login/invite restricted to the configured email-domain
+//     allowlist (EMAILS_AUTH_ALLOWED_EMAIL_DOMAINS; generic 403).
 //   - Addendum A2: signup creates an UNVERIFIED user; login refused until the
 //     emailed verification token is consumed (SES send is mocked/captured).
 //   - M4: a body-supplied FK id pointing at another tenant's row is rejected.
@@ -22,6 +23,7 @@ import { EmailsSelfHostedStore } from "./store.js";
 import { handleSelfHostedRequest, type SelfHostedServiceDeps } from "./service.js";
 import { AuthStore } from "./auth/store.js";
 import { RateLimiter } from "./auth/rate-limit.js";
+import { testAuthEnv } from "./auth/test-support.js";
 import { hashPassword } from "./auth/password.js";
 import type { AuthMailerConfig } from "./auth/mailer.js";
 import type { SelfHostedKeyStore } from "./keys.js";
@@ -45,7 +47,7 @@ const stubKeyStore: SelfHostedKeyStore = {
 };
 
 const MAILER: AuthMailerConfig = {
-  from: "noreply@hasna.studio",
+  from: "noreply@auth.example",
   verifyUrlBase: "https://app.test/verify",
   resetUrlBase: "https://app.test/reset",
   inviteUrlBase: "https://app.test/invite",
@@ -93,7 +95,7 @@ function makeDeps(): { deps: SelfHostedServiceDeps; sent: Captured[] } {
       },
     }),
     mailer: MAILER,
-    env: process.env,
+    env: testAuthEnv(),
   };
   return { deps, sent };
 }
@@ -383,7 +385,7 @@ describe.skipIf(!pgClient)("central outbound enforcement", () => {
     expect(allowed.status).toBe(202);
     expect(sent).toHaveLength(1);
 
-    const memberEmail = `member-send-${crypto.randomUUID()}@hasna.com`;
+    const memberEmail = `member-send-${crypto.randomUUID()}@example.com`;
     await createVerifiedUser(memberEmail, "sup3rsecret!", tenant.tenantId, "member");
     const memberLogin = await call(deps, "POST", "/v1/auth/login", {
       body: { email: memberEmail, password: "sup3rsecret!" },
@@ -598,8 +600,8 @@ describe.skipIf(!pgClient)("envelope-only inbound tenant routing", () => {
   });
 });
 
-describe.skipIf(!pgClient)("Addendum A1: @hasna gate", () => {
-  it("signup with a non-hasna email is a generic 403", async () => {
+describe.skipIf(!pgClient)("Addendum A1: email-domain allowlist gate", () => {
+  it("signup outside the allowed domains is a generic 403", async () => {
     const { deps } = makeDeps();
     const res = await call(deps, "POST", "/v1/auth/signup", {
       body: { email: "intruder@gmail.com", password: "sup3rsecret!", tenant_name: "Evil" },
@@ -608,17 +610,17 @@ describe.skipIf(!pgClient)("Addendum A1: @hasna gate", () => {
     expect(res.body.reason).toBe("email_not_allowed");
   });
 
-  it("login with a non-hasna email is a generic 403", async () => {
+  it("login outside the allowed domains is a generic 403", async () => {
     const { deps } = makeDeps();
     const res = await call(deps, "POST", "/v1/auth/login", { body: { email: "x@gmail.com", password: "whatever12" } });
     expect(res.status).toBe(403);
     expect(res.body.reason).toBe("email_not_allowed");
   });
 
-  it("owner cannot invite a non-hasna address", async () => {
+  it("owner cannot invite an address outside the allowed domains", async () => {
     const { deps } = makeDeps();
     const t = await makeTenant("inv-gate");
-    const ownerEmail = `owner-${crypto.randomUUID()}@hasna.com`;
+    const ownerEmail = `owner-${crypto.randomUUID()}@example.com`;
     await createVerifiedUser(ownerEmail, "sup3rsecret!", t.tenantId, "owner");
     const login = await call(deps, "POST", "/v1/auth/login", { body: { email: ownerEmail, password: "sup3rsecret!" } });
     const session = login.body.session_token;
@@ -634,7 +636,7 @@ describe.skipIf(!pgClient)("Addendum A1: @hasna gate", () => {
 describe.skipIf(!pgClient)("Addendum A2: signup -> verify -> login (SES send mocked)", () => {
   it("creates an UNVERIFIED user, refuses login until the emailed token is consumed", async () => {
     const { deps, sent } = makeDeps();
-    const email = `founder-${crypto.randomUUID()}@hasna.com`;
+    const email = `founder-${crypto.randomUUID()}@example.com`;
     const password = "sup3rsecret!";
 
     const signup = await call(deps, "POST", "/v1/auth/signup", { body: { email, password, tenant_name: "Acme" } });
@@ -678,7 +680,7 @@ describe.skipIf(!pgClient)("Addendum A2: signup -> verify -> login (SES send moc
 
   it("resend issues a fresh confirmation email for an unverified user", async () => {
     const { deps, sent } = makeDeps();
-    const email = `resend-${crypto.randomUUID()}@hasna.com`;
+    const email = `resend-${crypto.randomUUID()}@example.com`;
     await call(deps, "POST", "/v1/auth/signup", { body: { email, password: "sup3rsecret!", tenant_name: "Re" } });
     expect(sent).toHaveLength(1);
     const resend = await call(deps, "POST", "/v1/auth/verify-email/resend", { body: { email } });
@@ -688,7 +690,7 @@ describe.skipIf(!pgClient)("Addendum A2: signup -> verify -> login (SES send moc
 
   it("signup never leaks whether an email already exists (generic response)", async () => {
     const { deps } = makeDeps();
-    const email = `dup-${crypto.randomUUID()}@hasna.com`;
+    const email = `dup-${crypto.randomUUID()}@example.com`;
     const first = await call(deps, "POST", "/v1/auth/signup", { body: { email, password: "sup3rsecret!", tenant_name: "Dup1" } });
     const second = await call(deps, "POST", "/v1/auth/signup", { body: { email, password: "sup3rsecret!", tenant_name: "Dup2" } });
     expect(first.status).toBe(200);
@@ -700,8 +702,8 @@ describe.skipIf(!pgClient)("Addendum A2: signup -> verify -> login (SES send moc
 describe.skipIf(!pgClient)("multiple verified email identities", () => {
   it("resends verification for an unverified alias after failed delivery and token expiry", async () => {
     const { deps, sent } = makeDeps();
-    const primary = `identity-resend-${crypto.randomUUID()}@hasna.com`;
-    const alias = `identity-resend-alias-${crypto.randomUUID()}@hasna.com`;
+    const primary = `identity-resend-${crypto.randomUUID()}@example.com`;
+    const alias = `identity-resend-alias-${crypto.randomUUID()}@example.com`;
     const password = "sup3rsecret!";
 
     const signup = await call(deps, "POST", "/v1/auth/signup", {
@@ -749,8 +751,8 @@ describe.skipIf(!pgClient)("multiple verified email identities", () => {
 
   it("adds and verifies an alias, logs in through it, makes it primary, and protects the primary identity", async () => {
     const { deps, sent } = makeDeps();
-    const primary = `identity-${crypto.randomUUID()}@hasna.com`;
-    const alias = `identity-alias-${crypto.randomUUID()}@hasna.com`;
+    const primary = `identity-${crypto.randomUUID()}@example.com`;
+    const alias = `identity-alias-${crypto.randomUUID()}@example.com`;
     const password = "sup3rsecret!";
     const signup = await call(deps, "POST", "/v1/auth/signup", {
       body: { email: primary, password, tenant_name: `Identity ${crypto.randomUUID()}` },
@@ -791,7 +793,7 @@ describe.skipIf(!pgClient)("role gates", () => {
   it("a viewer is read-only (write routes -> 403 insufficient_scope)", async () => {
     const { deps } = makeDeps();
     const t = await makeTenant("role-view");
-    const email = `viewer-${crypto.randomUUID()}@hasna.com`;
+    const email = `viewer-${crypto.randomUUID()}@example.com`;
     await createVerifiedUser(email, "sup3rsecret!", t.tenantId, "viewer");
     const login = await call(deps, "POST", "/v1/auth/login", { body: { email, password: "sup3rsecret!" } });
     const session = login.body.session_token;
@@ -806,7 +808,7 @@ describe.skipIf(!pgClient)("role gates", () => {
   it("the last owner cannot be demoted or removed", async () => {
     const { deps } = makeDeps();
     const t = await makeTenant("last-owner");
-    const email = `solo-${crypto.randomUUID()}@hasna.com`;
+    const email = `solo-${crypto.randomUUID()}@example.com`;
     await createVerifiedUser(email, "sup3rsecret!", t.tenantId, "owner");
     const login = await call(deps, "POST", "/v1/auth/login", { body: { email, password: "sup3rsecret!" } });
     const session = login.body.session_token;
@@ -824,18 +826,18 @@ describe.skipIf(!pgClient)("bootstrap-owner (api-key migration bridge)", () => {
   it("seeds the first owner once, then refuses", async () => {
     const { deps } = makeDeps();
     const t = await makeTenant("bootstrap");
-    const email = `boot-${crypto.randomUUID()}@hasna.com`;
+    const email = `boot-${crypto.randomUUID()}@example.com`;
     const first = await call(deps, "POST", "/v1/auth/bootstrap-owner", { token: t.token, body: { email, password: "sup3rsecret!" } });
     expect(first.status).toBe(201);
     // Owner can now log in (bootstrap creates a VERIFIED user).
     const login = await call(deps, "POST", "/v1/auth/login", { body: { email, password: "sup3rsecret!" } });
     expect(login.status).toBe(200);
     // A second bootstrap on the same tenant is refused.
-    const second = await call(deps, "POST", "/v1/auth/bootstrap-owner", { token: t.token, body: { email: `boot2-${crypto.randomUUID()}@hasna.com`, password: "sup3rsecret!" } });
+    const second = await call(deps, "POST", "/v1/auth/bootstrap-owner", { token: t.token, body: { email: `boot2-${crypto.randomUUID()}@example.com`, password: "sup3rsecret!" } });
     expect(second.status).toBe(409);
     expect(second.body.reason).toBe("owner_exists");
     // A session (non-key) cannot bootstrap.
-    const viaSession = await call(deps, "POST", "/v1/auth/bootstrap-owner", { token: login.body.session_token, body: { email: `x-${crypto.randomUUID()}@hasna.com`, password: "sup3rsecret!" } });
+    const viaSession = await call(deps, "POST", "/v1/auth/bootstrap-owner", { token: login.body.session_token, body: { email: `x-${crypto.randomUUID()}@example.com`, password: "sup3rsecret!" } });
     expect(viaSession.status).toBe(403);
   });
 });
@@ -844,8 +846,8 @@ describe.skipIf(!pgClient)("primary super-admin bootstrap", () => {
   it("is pinned to one operator key, race-idempotent, singleton, and audit-safe", async () => {
     const { deps } = makeDeps();
     const tenant = await makeTenant("primary-super-admin");
-    const body = { email: "andrei@hasna.com", password: "test-only-password-93", name: "Andrei" };
-    deps.env = { ...process.env, EMAILS_PRIMARY_SUPER_ADMIN_EMAIL: "andrei@hasna.com" };
+    const body = { email: "andrei@example.com", password: "test-only-password-93", name: "Andrei" };
+    deps.env = testAuthEnv({ EMAILS_PRIMARY_SUPER_ADMIN_EMAIL: "andrei@example.com" });
     const unpinned = await call(deps, "POST", "/v1/auth/bootstrap-super-admin", { token: tenant.token, body });
     expect(unpinned.status).toBe(503);
     expect(unpinned.body.reason).toBe("bootstrap_not_configured");
@@ -869,7 +871,7 @@ describe.skipIf(!pgClient)("primary super-admin bootstrap", () => {
     expect(raced.map((result) => result.status).sort()).toEqual([200, 201]);
     const first = raced.find((result) => result.status === 201)!;
     expect(first.body.user).toMatchObject({
-      email: "andrei@hasna.com",
+      email: "andrei@example.com",
       global_role: "super_admin",
       is_primary_super_admin: true,
     });
@@ -890,12 +892,12 @@ describe.skipIf(!pgClient)("primary super-admin bootstrap", () => {
 
     const mismatch = await call(deps, "POST", "/v1/auth/bootstrap-super-admin", {
       token: tenant.token,
-      body: { ...body, email: "someone-else@hasna.com" },
+      body: { ...body, email: "someone-else@example.com" },
     });
     expect(mismatch.status).toBe(403);
 
     const login = await call(deps, "POST", "/v1/auth/login", {
-      body: { email: "andrei@hasna.com", password: body.password },
+      body: { email: "andrei@example.com", password: body.password },
     });
     const viaSession = await call(deps, "POST", "/v1/auth/bootstrap-super-admin", {
       token: login.body.session_token,
@@ -909,7 +911,7 @@ describe.skipIf(!pgClient)("password reset + invite flows (SES mocked)", () => {
   it("forgot -> reset revokes sessions and sets a new password", async () => {
     const { deps, sent } = makeDeps();
     const t = await makeTenant("reset-flow");
-    const email = `reset-${crypto.randomUUID()}@hasna.com`;
+    const email = `reset-${crypto.randomUUID()}@example.com`;
     await createVerifiedUser(email, "oldpassword1", t.tenantId, "owner");
 
     const login = await call(deps, "POST", "/v1/auth/login", { body: { email, password: "oldpassword1" } });
@@ -934,11 +936,11 @@ describe.skipIf(!pgClient)("password reset + invite flows (SES mocked)", () => {
   it("invite -> accept creates the member and mints a session", async () => {
     const { deps, sent } = makeDeps();
     const t = await makeTenant("invite-flow");
-    const ownerEmail = `own-${crypto.randomUUID()}@hasna.com`;
+    const ownerEmail = `own-${crypto.randomUUID()}@example.com`;
     await createVerifiedUser(ownerEmail, "sup3rsecret!", t.tenantId, "owner");
     const ownerLogin = await call(deps, "POST", "/v1/auth/login", { body: { email: ownerEmail, password: "sup3rsecret!" } });
 
-    const inviteeEmail = `new-${crypto.randomUUID()}@hasna.com`;
+    const inviteeEmail = `new-${crypto.randomUUID()}@example.com`;
     const invite = await call(deps, "POST", `/v1/tenants/${t.tenantId}/invites`, {
       token: ownerLogin.body.session_token,
       body: { email: inviteeEmail, role: "member" },
@@ -972,7 +974,7 @@ describe.skipIf(!pgClient)("session lifecycle", () => {
   it("logout revokes only the current session; switch-tenant requires membership", async () => {
     const { deps } = makeDeps();
     const t1 = await makeTenant("sess-t1");
-    const email = `multi-${crypto.randomUUID()}@hasna.com`;
+    const email = `multi-${crypto.randomUUID()}@example.com`;
     await createVerifiedUser(email, "sup3rsecret!", t1.tenantId, "owner");
 
     const s1 = (await call(deps, "POST", "/v1/auth/login", { body: { email, password: "sup3rsecret!" } })).body.session_token;
@@ -1003,9 +1005,9 @@ describe.skipIf(!pgClient)("RBAC hardening (adversarial review fixes)", () => {
   it("H1: an admin cannot self-promote to owner, modify/remove an owner, or invite an owner", async () => {
     const { deps } = makeDeps();
     const t = await makeTenant("rbac-h1");
-    const ownerEmail = `owner-${crypto.randomUUID()}@hasna.com`;
-    const adminEmail = `admin-${crypto.randomUUID()}@hasna.com`;
-    const memberEmail = `member-${crypto.randomUUID()}@hasna.com`;
+    const ownerEmail = `owner-${crypto.randomUUID()}@example.com`;
+    const adminEmail = `admin-${crypto.randomUUID()}@example.com`;
+    const memberEmail = `member-${crypto.randomUUID()}@example.com`;
     await createVerifiedUser(ownerEmail, "sup3rsecret!", t.tenantId, "owner");
     await createVerifiedUser(adminEmail, "sup3rsecret!", t.tenantId, "admin");
     await createVerifiedUser(memberEmail, "sup3rsecret!", t.tenantId, "member");
@@ -1023,7 +1025,7 @@ describe.skipIf(!pgClient)("RBAC hardening (adversarial review fixes)", () => {
     // admin remove the owner -> 403
     expect((await call(deps, "DELETE", `/v1/memberships/${ownerMembership}`, { token: adminSession })).status).toBe(403);
     // admin invite a new owner -> 403
-    expect((await call(deps, "POST", `/v1/tenants/${t.tenantId}/invites`, { token: adminSession, body: { email: `x-${crypto.randomUUID()}@hasna.com`, role: "owner" } })).status).toBe(403);
+    expect((await call(deps, "POST", `/v1/tenants/${t.tenantId}/invites`, { token: adminSession, body: { email: `x-${crypto.randomUUID()}@example.com`, role: "owner" } })).status).toBe(403);
     // admin CAN promote a member to admin -> 200
     expect((await call(deps, "PATCH", `/v1/memberships/${memberMembership}`, { token: adminSession, body: { role: "admin" } })).status).toBe(200);
     // owner CAN promote the admin to owner -> 200
@@ -1033,17 +1035,17 @@ describe.skipIf(!pgClient)("RBAC hardening (adversarial review fixes)", () => {
   it("L2a: inviting an unsupported role (viewer) is a clean 400, not a 500", async () => {
     const { deps } = makeDeps();
     const t = await makeTenant("rbac-viewer-invite");
-    const ownerEmail = `owner-${crypto.randomUUID()}@hasna.com`;
+    const ownerEmail = `owner-${crypto.randomUUID()}@example.com`;
     await createVerifiedUser(ownerEmail, "sup3rsecret!", t.tenantId, "owner");
     const session = await loginSession(deps, ownerEmail, "sup3rsecret!");
-    const res = await call(deps, "POST", `/v1/tenants/${t.tenantId}/invites`, { token: session, body: { email: `v-${crypto.randomUUID()}@hasna.com`, role: "viewer" } });
+    const res = await call(deps, "POST", `/v1/tenants/${t.tenantId}/invites`, { token: session, body: { email: `v-${crypto.randomUUID()}@example.com`, role: "viewer" } });
     expect(res.status).toBe(400);
   });
 
   it("M2: suspending a tenant locks out its API keys (not just sessions)", async () => {
     const { deps } = makeDeps();
     const t = await makeTenant("rbac-suspend");
-    const ownerEmail = `owner-${crypto.randomUUID()}@hasna.com`;
+    const ownerEmail = `owner-${crypto.randomUUID()}@example.com`;
     await createVerifiedUser(ownerEmail, "sup3rsecret!", t.tenantId, "owner");
     const session = await loginSession(deps, ownerEmail, "sup3rsecret!");
 
@@ -1067,7 +1069,7 @@ describe.skipIf(!pgClient)("tenant-scoped key issuance (WI-2e)", () => {
     const depsWithKeys: SelfHostedServiceDeps = { ...deps, keyStore: realKeyStore };
 
     const t = await makeTenant("key-mint");
-    const email = `admin-${crypto.randomUUID()}@hasna.com`;
+    const email = `admin-${crypto.randomUUID()}@example.com`;
     await createVerifiedUser(email, "sup3rsecret!", t.tenantId, "owner");
     const login = await call(depsWithKeys, "POST", "/v1/auth/login", { body: { email, password: "sup3rsecret!" } });
     const session = login.body.session_token;

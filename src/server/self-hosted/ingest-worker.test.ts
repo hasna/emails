@@ -20,21 +20,21 @@ import {
 } from "./ingest-worker.js";
 import type { InboundSourceProvenance, MessageInput, MessageRecord } from "./store.js";
 
-const OBJECT_KEY = "inbound/hasna.com/msgkey123";
+const OBJECT_KEY = "inbound/example.com/msgkey123";
 const BUCKET = "emails-inbound-123456789012";
 
 const sesNotification = JSON.stringify({
   notificationType: "Received",
   mail: { messageId: "msgkey123", source: "alice@external.com", timestamp: "2026-07-02T10:00:00.000Z" },
   receipt: {
-    recipients: ["andrei@hasna.com"],
+    recipients: ["andrei@example.com"],
     action: { type: "S3", bucketName: BUCKET, objectKey: OBJECT_KEY },
   },
 });
 
 const rawEmail = [
   `From: Alice <alice@external.com>`,
-  `To: andrei@hasna.com`,
+  `To: andrei@example.com`,
   `Subject: Hello there`,
   `Message-ID: <real-rfc-id@external.com>`,
   `Date: Thu, 02 Jul 2026 09:59:00 +0000`,
@@ -155,7 +155,7 @@ describe("processInboundNotification", () => {
     expect(w.message_id).toBe(OBJECT_KEY);
     expect(w.direction).toBe("inbound");
     expect(w.status).toBe("received");
-    expect(w.to_addrs).toEqual(["andrei@hasna.com"]);
+    expect(w.to_addrs).toEqual(["andrei@example.com"]);
     expect(w.cc_addrs).toEqual([]);
     expect(w.from_addr).toContain("alice@external.com");
     // The Date header wins over the SES timestamp for received_at.
@@ -166,7 +166,7 @@ describe("processInboundNotification", () => {
 
   it("ingests a listed S3 object directly for one-shot backfills", async () => {
     const { deps, upserts, fetched } = makeDeps();
-    const r = await ingestS3Object(deps, BUCKET, OBJECT_KEY, { recipients: ["andrei@hasna.com"] });
+    const r = await ingestS3Object(deps, BUCKET, OBJECT_KEY, { recipients: ["andrei@example.com"] });
 
     expect(r.status).toBe("ingested");
     expect(fetched).toEqual([`${BUCKET}/${OBJECT_KEY}`]);
@@ -352,7 +352,7 @@ describe("processInboundNotification", () => {
       } as unknown as IngestDeps["store"],
     });
 
-    const result = await ingestS3Object(deps, BUCKET, OBJECT_KEY, { recipients: ["andrei@hasna.com"] });
+    const result = await ingestS3Object(deps, BUCKET, OBJECT_KEY, { recipients: ["andrei@example.com"] });
     expect(result).toMatchObject({ status: "ingested", id: "atomic-row", inserted: true });
     expect(atomicCalls).toBe(1);
   });
@@ -470,7 +470,7 @@ describe("processInboundNotification", () => {
     const { deps, upserts } = makeDeps({ fetchObject: async () => Buffer.from(spoofed) });
     const result = await processInboundNotification(deps, sesNotification, BUCKET);
     expect(result.status).toBe("ingested");
-    expect(upserts[0]!.to_addrs).toEqual(["andrei@hasna.com"]);
+    expect(upserts[0]!.to_addrs).toEqual(["andrei@example.com"]);
     expect(upserts[0]!.cc_addrs).toEqual([]);
   });
 
@@ -532,7 +532,7 @@ describe("processInboundNotification", () => {
     expect(fetched).toEqual([]);
     expect(upserts).toEqual([]);
     expect(captured).toHaveLength(1);
-    expect(captured[0]!.envelopeRecipients).toEqual(["andrei@hasna.com"]);
+    expect(captured[0]!.envelopeRecipients).toEqual(["andrei@example.com"]);
   });
 
   it("leaves notifications with no object key for redrive/DLQ", async () => {
@@ -552,7 +552,7 @@ describe("processInboundNotification", () => {
   });
 
   it("falls back to the SES timestamp when the mail has no Date header", async () => {
-    const noDate = [`From: a@b.com`, `To: andrei@hasna.com`, `Subject: x`, ``, `hi`, ``].join("\r\n");
+    const noDate = [`From: a@b.com`, `To: andrei@example.com`, `Subject: x`, ``, `hi`, ``].join("\r\n");
     const { deps, upserts } = makeDeps({ fetchObject: async () => Buffer.from(noDate) });
     const r = await processInboundNotification(deps, sesNotification, BUCKET);
     expect(r.status).toBe("ingested");
@@ -575,7 +575,7 @@ describe("processInboundNotification", () => {
 describe("attachment repair runner boundary", () => {
   const options = {
     objectKeys: [OBJECT_KEY],
-    recipients: ["andrei@hasna.com"],
+    recipients: ["andrei@example.com"],
     canaryMessageIds: ["message-1"],
   };
   const successful = {
@@ -621,7 +621,7 @@ describe("attachment repair runner boundary", () => {
       stdout: "pipe",
       stderr: "pipe",
     });
-    const common = ["--message-id", "message-1", "--recipient", "andrei@hasna.com", "--apply"];
+    const common = ["--message-id", "message-1", "--recipient", "andrei@example.com", "--apply"];
     const multiple = run(["--object-key", "one", "--object-key", "two", ...common]);
     expect(multiple.exitCode).not.toBe(0);
     expect(multiple.stderr.toString()).toContain("exactly one --object-key");
@@ -632,7 +632,7 @@ describe("attachment repair runner boundary", () => {
       "--object-key", "one",
       "--message-id", "message-1",
       "--message-id", " message-1 ",
-      "--recipient", "andrei@hasna.com",
+      "--recipient", "andrei@example.com",
       "--apply",
     ]);
     expect(duplicateIds.exitCode).not.toBe(0);

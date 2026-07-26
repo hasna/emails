@@ -101,6 +101,43 @@ variable "send_provider" {
   }
 }
 
+variable "auth_allowed_email_domains" {
+  description = "Signup/login/invite email-domain allowlist for the API task (EMAILS_AUTH_ALLOWED_EMAIL_DOMAINS). Comma- or space-separated domain globs of two or more labels, where `*` matches one DNS label (for example \"example.com\" or \"example.*\"). This module hardcodes no domain, and the API fails closed at boot without it, so it may be null only while api_desired_count is 0. Note that \"*.*\" is effectively permit-all."
+  type        = string
+  default     = null
+  nullable    = true
+
+  # A ternary, not `&&`: HCL's `&&` does not short-circuit, and `coalesce` rejects
+  # the empty string, so the naive form crashes on `auth_allowed_email_domains = ""`
+  # instead of returning this error_message. The per-entry shape is checked so a
+  # typo cannot produce a deny-all allowlist that boots clean and then refuses every
+  # real login behind the deliberately opaque 403.
+  validation {
+    condition = var.auth_allowed_email_domains == null ? true : (
+      length(trimspace(var.auth_allowed_email_domains)) > 0 &&
+      alltrue([
+        for glob in split(",", replace(trimspace(var.auth_allowed_email_domains), "/[[:space:]]+/", ",")) :
+        can(regex("^[a-z0-9*]([a-z0-9*-]*[a-z0-9*])?([.][a-z0-9*]([a-z0-9*-]*[a-z0-9*])?)+$", trimspace(glob)))
+      ])
+    )
+    error_message = "auth_allowed_email_domains must be null, or a comma/space-separated list of lowercase domain globs of two or more labels (for example \"example.com\" or \"example.*\")."
+  }
+}
+
+variable "auth_from_email" {
+  description = "Sender identity the auth flows send confirmation, password-reset and invite mail from (EMAILS_AUTH_FROM). Must be an address verified in the provider account these tasks actually sign into. This module hardcodes no address, and the API fails closed at boot without it, so it may be null only while api_desired_count is 0."
+  type        = string
+  default     = null
+  nullable    = true
+
+  validation {
+    condition = var.auth_from_email == null ? true : can(
+      regex("^[^@[:space:]]+@[^@[:space:]]+[.][^@[:space:]]+$", var.auth_from_email)
+    )
+    error_message = "auth_from_email must be null or a valid email address."
+  }
+}
+
 variable "ses_access_key_id_secret_arn" {
   description = "Optional Secrets Manager ARN holding the SES access key id, injected into the API container through the ECS `secrets` block. Set only when the production-access SES account differs from the account running these tasks; leave null to keep using the API task role. May include a `:JSON_KEY::` suffix. Set together with ses_secret_access_key_secret_arn. The value itself never enters Terraform state."
   type        = string

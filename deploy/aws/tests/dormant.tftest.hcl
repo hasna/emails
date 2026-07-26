@@ -372,6 +372,8 @@ run "ready_activation_is_allowed" {
     enable_ses_inbound            = true
     inbound_recipients            = ["example.com"]
     inbound_object_retention_days = 30
+    auth_allowed_email_domains    = "example.com"
+    auth_from_email               = "no-reply@example.com"
   }
 
   assert {
@@ -416,6 +418,8 @@ run "tenant_aware_steady_state_enables_automatic_rollback" {
     inbound_recipients                   = ["example.com"]
     inbound_object_retention_days        = 30
     enable_automatic_deployment_rollback = true
+    auth_allowed_email_domains           = "example.com"
+    auth_from_email                      = "no-reply@example.com"
   }
 
   assert {
@@ -677,4 +681,105 @@ run "no_ses_credentials_leaves_the_task_role_alone" {
     ])
     error_message = "The default deployment must keep signing with the API task role."
   }
+}
+
+run "api_activation_requires_the_signup_domain_allowlist" {
+  command = plan
+
+  variables {
+    aws_region                    = "us-east-1"
+    expected_account_id           = "111122223333"
+    container_image               = "registry.example/emails@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    api_desired_count             = 2
+    worker_desired_count          = 1
+    secrets_ready                 = true
+    migrations_complete           = true
+    enable_nat_gateway            = true
+    alarm_notification_topic_arn  = "arn:aws:sns:us-east-1:111122223333:operator-alerts"
+    email_domain                  = "example.com"
+    enable_ses_inbound            = true
+    inbound_recipients            = ["example.com"]
+    inbound_object_retention_days = 30
+    auth_from_email               = "no-reply@example.com"
+  }
+
+  # Without EMAILS_AUTH_ALLOWED_EMAIL_DOMAINS the API boots into a hard failure, so
+  # an otherwise-ready activation must be refused at plan time rather than producing
+  # a crash-looping service.
+  expect_failures = [
+    aws_ecs_service.api,
+  ]
+}
+
+run "api_activation_requires_the_auth_sender_identity" {
+  command = plan
+
+  variables {
+    aws_region                    = "us-east-1"
+    expected_account_id           = "111122223333"
+    container_image               = "registry.example/emails@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    api_desired_count             = 2
+    worker_desired_count          = 1
+    secrets_ready                 = true
+    migrations_complete           = true
+    enable_nat_gateway            = true
+    alarm_notification_topic_arn  = "arn:aws:sns:us-east-1:111122223333:operator-alerts"
+    email_domain                  = "example.com"
+    enable_ses_inbound            = true
+    inbound_recipients            = ["example.com"]
+    inbound_object_retention_days = 30
+    auth_allowed_email_domains    = "example.com"
+  }
+
+  expect_failures = [
+    aws_ecs_service.api,
+  ]
+}
+
+run "a_malformed_signup_domain_allowlist_hard_fails" {
+  command = plan
+
+  variables {
+    aws_region                 = "us-east-1"
+    expected_account_id        = "111122223333"
+    container_image            = "registry.example/emails@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    auth_allowed_email_domains = "not_a_domain"
+  }
+
+  # A single-label, quoted, underscored or address-shaped entry compiles to a regex
+  # that matches nothing, which reproduces the deny-all lockout this variable exists
+  # to prevent — caught here rather than at boot.
+  expect_failures = [
+    var.auth_allowed_email_domains,
+  ]
+}
+
+run "an_empty_signup_domain_allowlist_hard_fails" {
+  command = plan
+
+  variables {
+    aws_region                 = "us-east-1"
+    expected_account_id        = "111122223333"
+    container_image            = "registry.example/emails@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    auth_allowed_email_domains = ""
+  }
+
+  expect_failures = [
+    var.auth_allowed_email_domains,
+  ]
+}
+
+run "a_malformed_auth_sender_identity_hard_fails" {
+  command = plan
+
+  variables {
+    aws_region          = "us-east-1"
+    expected_account_id = "111122223333"
+    container_image     = "registry.example/emails@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    auth_from_email     = "not-an-address"
+  }
+
+  expect_failures = [
+    var.auth_from_email,
+  ]
 }
