@@ -1,6 +1,8 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { startV1Stub, type V1Stub } from "../test-support/v1-stub.js";
 import { listInboundEmails, storeInboundEmail } from "../db/inbound.js";
+import { resetSelfHostedConfigCache } from "../db/self-hosted-store.js";
+import { saveConfig } from "../lib/config.js";
 import { runInboxTool } from "./tools/inbox-impl.js";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -11,21 +13,56 @@ import { join } from "node:path";
 // self-hosted serve is a single shared store, so there is no per-provider scoping.
 
 let stub: V1Stub;
+let attachmentInventoryServer: ReturnType<typeof Bun.serve>;
+let attachmentInventoryPages = new Map<string, {
+  items: Array<Record<string, unknown>>;
+  next_cursor: string | null;
+}>();
+let attachmentInventoryRequests: URL[] = [];
 
 beforeAll(async () => {
   stub = await startV1Stub();
+  attachmentInventoryServer = Bun.serve({
+    port: 0,
+    fetch(request) {
+      const url = new URL(request.url);
+      attachmentInventoryRequests.push(url);
+      if (url.pathname !== "/v1/attachments") {
+        return Response.json({ error: "not found" }, { status: 404 });
+      }
+      const cursor = url.searchParams.get("cursor") ?? "";
+      const page = attachmentInventoryPages.get(cursor);
+      if (!page) return Response.json({ error: "unexpected cursor" }, { status: 400 });
+      return Response.json(page);
+    },
+  });
 });
 
-afterAll(() => stub.stop());
+afterAll(() => {
+  stub.stop();
+  attachmentInventoryServer.stop(true);
+});
 
 beforeEach(async () => {
   await stub.reset();
   stub.applyEnv();
+  attachmentInventoryPages = new Map();
+  attachmentInventoryRequests = [];
 });
 
 afterEach(() => {
   stub.clearEnv();
 });
+
+function useAttachmentInventoryPages(
+  pages: Array<[cursor: string, page: { items: Array<Record<string, unknown>>; next_cursor: string | null }]>,
+): void {
+  attachmentInventoryPages = new Map(pages);
+  process.env.EMAILS_MODE = "self_hosted";
+  process.env.EMAILS_SELF_HOSTED_URL = `http://127.0.0.1:${attachmentInventoryServer.port}`;
+  process.env.EMAILS_SELF_HOSTED_API_KEY = "attachment-inventory-test-key";
+  resetSelfHostedConfigCache();
+}
 
 function seed(n: number) {
   for (let i = 0; i < n; i++) {
@@ -155,6 +192,51 @@ describe("MCP inbox tools — self_hosted via seam", () => {
     }
   });
 
+  it("keeps a legacy null-size 409 typed as unavailable without leaking its payload", async () => {
+    const id = crypto.randomUUID();
+    const dir = mkdtempSync(join(tmpdir(), "emails-mcp-attachment-"));
+    try {
+      await stub.seed({ messages: [{
+        id,
+        direction: "inbound",
+        from_addr: "sender@example.com",
+        to_addrs: ["me@example.com"],
+        subject: "legacy attachment",
+        status: "received",
+        received_at: new Date().toISOString(),
+        created_at: new Date().toISOString(),
+        is_read: false,
+        is_starred: false,
+        labels: [],
+        attachments: [{
+          filename: "legacy.pdf",
+          content_type: "application/pdf",
+          size: null,
+          diagnostic: "must-not-leak",
+        }],
+      }] });
+      const result = await runInboxTool("download_attachment", {
+        email_id: id,
+        index: 0,
+        output_dir: dir,
+        max_bytes: 16,
+      });
+      expect(result.isError).toBe(true);
+      expect(JSON.parse(result.content[0]!.text)).toEqual({
+        state: "content_unavailable",
+        index: 0,
+        filename: "legacy.pdf",
+        content_type: "application/pdf",
+        bytes: null,
+      });
+      expect(result.content[0]!.text).not.toContain("must-not-leak");
+      expect(result.content[0]!.text).not.toContain("content_base64");
+      expect(readdirSync(dir)).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("download_attachment rejects an abbreviated message id without creating a file", async () => {
     const id = crypto.randomUUID();
     const dir = mkdtempSync(join(tmpdir(), "emails-mcp-attachment-"));
@@ -181,6 +263,196 @@ describe("MCP inbox tools — self_hosted via seam", () => {
       expect(readdirSync(dir)).toEqual([]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("MCP list_attachments — self_hosted inventory API", () => {
+  it("honors config-file-only self_hosted mode without opening usable SQLite", async () => {
+    attachmentInventoryPages = new Map([["", { items: [], next_cursor: null }]]);
+    const configHome = mkdtempSync(join(tmpdir(), "emails-mcp-config-only-inventory-"));
+    const poisonDbDir = mkdtempSync(join(tmpdir(), "emails-mcp-config-only-poison-db-"));
+    const previousHome = process.env.HOME;
+    const previousDbPath = process.env.EMAILS_DB_PATH;
+    const previousClientEnvSecret = process.env.EMAILS_CLIENT_ENV_SECRET;
+    const previousSessionToken = process.env.EMAILS_SESSION_TOKEN;
+    try {
+      process.env.HOME = configHome;
+      saveConfig({ emails_mode: "self_hosted" });
+      for (const key of ["MAILERY_MODE", "HASNA_MAILERY_MODE", "EMAILS_MODE", "HASNA_EMAILS_MODE"]) {
+        delete process.env[key];
+      }
+      delete process.env.EMAILS_CLIENT_ENV_SECRET;
+      delete process.env.EMAILS_SESSION_TOKEN;
+      process.env.EMAILS_SELF_HOSTED_URL = `http://127.0.0.1:${attachmentInventoryServer.port}`;
+      process.env.EMAILS_SELF_HOSTED_API_KEY = "attachment-inventory-test-key";
+      process.env.EMAILS_DB_PATH = poisonDbDir;
+      resetSelfHostedConfigCache();
+
+      expect(await toolJson("list_attachments", {})).toEqual({ items: [], next_cursor: null });
+      expect(attachmentInventoryRequests).toHaveLength(1);
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousDbPath === undefined) delete process.env.EMAILS_DB_PATH;
+      else process.env.EMAILS_DB_PATH = previousDbPath;
+      if (previousClientEnvSecret === undefined) delete process.env.EMAILS_CLIENT_ENV_SECRET;
+      else process.env.EMAILS_CLIENT_ENV_SECRET = previousClientEnvSecret;
+      if (previousSessionToken === undefined) delete process.env.EMAILS_SESSION_TOKEN;
+      else process.env.EMAILS_SESSION_TOKEN = previousSessionToken;
+      rmSync(configHome, { recursive: true, force: true });
+      rmSync(poisonDbDir, { recursive: true, force: true });
+      resetSelfHostedConfigCache();
+    }
+  });
+
+  it("returns the exact sanitized page shape without inline bytes or local SQLite fallback", async () => {
+    useAttachmentInventoryPages([["", {
+      items: [{
+        message_id: "message-1",
+        attachment_index: 0,
+        filename: "invoice.pdf",
+        content_type: "application/pdf",
+        size_bytes: 2048,
+        sha256: "b".repeat(64),
+        content_available: false,
+        direction: "outbound",
+        received_at: "2026-07-24T08:00:00.000Z",
+        content_base64: "must-not-leak",
+        secret: "must-not-leak",
+      }],
+      next_cursor: "opaque/+==",
+    }]]);
+    const poisonDbDir = mkdtempSync(join(tmpdir(), "emails-no-local-inventory-"));
+    const previousDbPath = process.env.EMAILS_DB_PATH;
+    process.env.EMAILS_DB_PATH = poisonDbDir;
+    try {
+      const result = await toolJson("list_attachments", {
+        limit: 1,
+        direction: "outbound",
+        since: "2026-07-24T10:00:00+02:00",
+      });
+      expect(result).toEqual({
+        items: [{
+          message_id: "message-1",
+          attachment_index: 0,
+          filename: "invoice.pdf",
+          content_type: "application/pdf",
+          size_bytes: 2048,
+          sha256: "b".repeat(64),
+          content_available: false,
+          direction: "outbound",
+          received_at: "2026-07-24T08:00:00.000Z",
+        }],
+        next_cursor: "opaque/+==",
+      });
+      expect(Object.keys(result).sort()).toEqual(["items", "next_cursor"]);
+      expect(JSON.stringify(result)).not.toContain("content_base64");
+      expect(JSON.stringify(result)).not.toContain("must-not-leak");
+      expect(attachmentInventoryRequests).toHaveLength(1);
+      expect(attachmentInventoryRequests[0]?.searchParams.get("limit")).toBe("1");
+      expect(attachmentInventoryRequests[0]?.searchParams.get("direction")).toBe("outbound");
+      expect(attachmentInventoryRequests[0]?.searchParams.get("since")).toBe("2026-07-24T08:00:00.000Z");
+    } finally {
+      if (previousDbPath === undefined) delete process.env.EMAILS_DB_PATH;
+      else process.env.EMAILS_DB_PATH = previousDbPath;
+      rmSync(poisonDbDir, { recursive: true, force: true });
+    }
+  });
+
+  it("continues with the opaque cursor unchanged and returns null at termination", async () => {
+    useAttachmentInventoryPages([
+      ["", { items: [], next_cursor: "opaque/+==" }],
+      ["opaque/+==", { items: [], next_cursor: null }],
+    ]);
+
+    const first = await toolJson("list_attachments", { limit: 2 });
+    expect(first).toEqual({ items: [], next_cursor: "opaque/+==" });
+
+    const second = await toolJson("list_attachments", { limit: 2, cursor: "opaque/+==" });
+    expect(second).toEqual({ items: [], next_cursor: null });
+    expect(attachmentInventoryRequests.map((url) => url.searchParams.get("cursor"))).toEqual([null, "opaque/+=="]);
+  });
+
+  it("fails closed when content_available is absent or non-boolean", async () => {
+    for (const contentAvailable of [undefined, "yes"]) {
+      const item: Record<string, unknown> = {
+        message_id: "message-1",
+        attachment_index: 0,
+        filename: "invoice.pdf",
+        content_type: "application/pdf",
+        size_bytes: 2048,
+        sha256: "b".repeat(64),
+        direction: "inbound",
+        received_at: "2026-07-24T08:00:00.000Z",
+      };
+      if (contentAvailable !== undefined) item["content_available"] = contentAvailable;
+      useAttachmentInventoryPages([["", { items: [item], next_cursor: null }]]);
+
+      const result = await runInboxTool("list_attachments", {});
+      expect(result.isError).toBe(true);
+      expect(result.content[0]?.text).toContain("content_available");
+    }
+  });
+
+  it("rejects invalid limit, direction, and since values before calling the API", async () => {
+    useAttachmentInventoryPages([["", { items: [], next_cursor: null }]]);
+    const cases = [
+      { input: { limit: 0 }, message: "limit" },
+      { input: { limit: 501 }, message: "limit" },
+      { input: { limit: 1.5 }, message: "limit" },
+      { input: { direction: "sideways" }, message: "direction" },
+      { input: { since: "not-a-date" }, message: "since" },
+    ];
+
+    for (const testCase of cases) {
+      attachmentInventoryRequests = [];
+      const result = await runInboxTool("list_attachments", testCase.input);
+      expect(result.isError).toBe(true);
+      expect(result.content[0]?.text.toLowerCase()).toContain(testCase.message);
+      expect(attachmentInventoryRequests).toHaveLength(0);
+    }
+  });
+
+  it("accepts canonical size strings and rejects invalid attachment sizes", async () => {
+    useAttachmentInventoryPages([["", {
+      items: [{
+        message_id: "message-canonical-size",
+        attachment_index: 0,
+        filename: "invoice.pdf",
+        content_type: "application/pdf",
+        size_bytes: "2048",
+        sha256: null,
+        content_available: true,
+        direction: "inbound",
+        received_at: "2026-07-24T08:00:00.000Z",
+      }],
+      next_cursor: null,
+    }]]);
+
+    expect(await toolJson("list_attachments", {})).toMatchObject({
+      items: [{ size_bytes: 2048 }],
+    });
+
+    for (const invalidSize of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1, "-1", "01", "1.0", " 1", "1 "]) {
+      useAttachmentInventoryPages([["", {
+        items: [{
+          message_id: "message-invalid-size",
+          attachment_index: 0,
+          filename: "invoice.pdf",
+          content_type: "application/pdf",
+          size_bytes: invalidSize,
+          sha256: null,
+          content_available: true,
+          direction: "inbound",
+          received_at: "2026-07-24T08:00:00.000Z",
+        }],
+        next_cursor: null,
+      }]]);
+
+      const result = await runInboxTool("list_attachments", {});
+      expect(result.isError).toBe(true);
+      expect(result.content[0]?.text).toContain("size_bytes");
     }
   });
 });

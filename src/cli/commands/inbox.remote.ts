@@ -5,6 +5,12 @@ import { confirmDestructiveAction, handleError } from "../utils.js";
 import { extractEmailLinks, formatEmailLinks, type ExtractedEmailLink } from "../../lib/email-links.js";
 import { formatAttachmentSize, mergeAttachmentDetails, type AttachmentDetail } from "../../lib/attachment-actions.js";
 import { MAX_ATTACHMENT_DOWNLOAD_BYTES, writeAttachmentFile } from "../../lib/attachment-download.js";
+import {
+  DEFAULT_ATTACHMENT_INVENTORY_LIMIT,
+  MAX_ATTACHMENT_INVENTORY_LIMIT,
+  listSelfHostedAttachments,
+  type SafeAttachmentInventoryPage,
+} from "../../lib/attachment-inventory.js";
 import { resolveMailDataSource, type MailDataSource } from "../../lib/mail-data-source.js";
 import { readableMessageText } from "../tui/format.js";
 import type {
@@ -18,6 +24,16 @@ import type {
 
 const MAX_INBOX_CLI_LIMIT = 1000;
 const CLI_MAILBOXES = ["inbox", "unread", "starred", "sent", "archived", "spam", "trash"] as const satisfies readonly Mailbox[];
+
+export function filterAttachmentDetails(
+  details: readonly AttachmentDetail[],
+  opts: { filename?: string; index?: number },
+): AttachmentDetail[] {
+  return details.filter((detail) =>
+    (opts.filename === undefined || detail.filename === opts.filename)
+    && (opts.index === undefined || detail.index === opts.index),
+  );
+}
 
 function normalizeSinceOption(value: string | undefined): string | undefined {
   if (!value) return undefined;
@@ -58,7 +74,12 @@ interface SeamMailDetail {
   text_body: string | null;
   html_body: string | null;
   summary: string;
-  attachments: Array<{ filename: string; content_type: string; size: number }>;
+  attachments: Array<{
+    filename: string;
+    content_type: string;
+    size: number;
+    content_available?: boolean;
+  }>;
   attachment_paths: Array<{ filename: string; local_path?: string; s3_url?: string }>;
 }
 
@@ -74,8 +95,6 @@ function seamMessageDetail(msg: TuiMessage, body: MessageBody | null): SeamMailD
     filename: att.filename,
     content_type: att.content_type,
     size: att.size,
-    // Preserve the serve's stored-byte verdict (absent when not reported) so the
-    // renderer can stop advertising a download that cannot succeed (#36).
     ...(typeof att.content_available === "boolean"
       ? { content_available: att.content_available }
       : {}),
@@ -752,6 +771,23 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
       } catch (e) { handleError(e); }
     });
 
+  // ─── ATTACHMENTS INVENTORY ────────────────────────────────────────────────
+  inboxCmd
+    .command("attachments")
+    .description("List one checkpointable page of self-hosted attachment metadata")
+    .option("--limit <n>", `Attachments per page (1-${MAX_ATTACHMENT_INVENTORY_LIMIT})`, String(DEFAULT_ATTACHMENT_INVENTORY_LIMIT))
+    .option("--cursor <cursor>", "Opaque next_cursor from a previous page")
+    .option("--direction <direction>", "Filter by inbound or outbound")
+    .option("--since <date>", "Only include attachments from messages on or after this date")
+    .action(async (opts: { limit?: string; cursor?: string; direction?: string; since?: string }) => {
+      try {
+        const page = await listSelfHostedAttachments(opts);
+        output(page, formatAttachmentInventoryPage(page));
+      } catch (e) {
+        handleError(e);
+      }
+    });
+
   // ─── ATTACHMENT ───────────────────────────────────────────────────────────
   inboxCmd
     .command("attachment <emailId>")
@@ -780,10 +816,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         if (opts.download && parsedIndex === undefined) {
           throw new Error("--download requires one explicit --index");
         }
-        const filtered = details.filter((detail, index) =>
-          (opts.filename === undefined || detail.filename === opts.filename)
-          && (parsedIndex === undefined || index === parsedIndex),
-        );
+        const filtered = filterAttachmentDetails(details, { filename: opts.filename, index: parsedIndex });
         if (filtered.length === 0) {
           if (opts.download) throw new Error("No stored attachment metadata matches the download selection");
           output([], chalk.dim("No attachments found for this email."));
@@ -802,6 +835,11 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
             );
           if (selected.length === 0) throw new Error("No stored attachment metadata matches the download selection");
           if (selected.length !== 1) throw new Error("attachment download must select exactly one index");
+          if (selected[0]!.attachment.content_available === false) {
+            throw new Error(
+              `Attachment index ${selected[0]!.index} has metadata but no stored content; it is not available for download`,
+            );
+          }
           const saved = [];
           for (const item of selected) {
             const content = await ds.getAttachmentContent(fullId, item.index, { maxBytes });
@@ -977,6 +1015,21 @@ function formatMailboxStatus(status: MailboxStatusSummary): string {
 interface AttMeta { filename: string; content_type: string; size: number; content_available?: boolean }
 interface AttPath { filename: string; local_path?: string; s3_url?: string }
 
+function formatAttachmentInventoryPage(page: SafeAttachmentInventoryPage): string {
+  const lines = [chalk.bold(`\nAttachment inventory (${page.items.length}):`)];
+  for (const item of page.items) {
+    const size = item.size_bytes === null ? "unknown size" : formatAttachmentSize(item.size_bytes);
+    const availability = item.content_available ? " available" : " unavailable";
+    lines.push(
+      `  ${item.message_id.slice(0, 8)} [${item.attachment_index}] `
+      + `${item.filename ?? "(unnamed)"} `
+      + `${chalk.dim(`${size} · ${item.content_type ?? "application/octet-stream"}${availability}`)}`,
+    );
+  }
+  lines.push(`  ${chalk.dim("next_cursor:")} ${page.next_cursor ?? "null"}`, "");
+  return lines.join("\n");
+}
+
 /**
  * Wording for an attachment the store has no bytes for. "(not downloaded)" and
  * "fetch with --index n" both read as "these bytes are one command away", which
@@ -1027,20 +1080,18 @@ function formatEmailDetail(
     // The index comes from mergeAttachmentDetails (the metadata position), NEVER
     // from this loop: a nameless metadata entry is dropped from the display, so a
     // rendered position would advertise an index that downloads a DIFFERENT file.
-    // Only entries the serve confirms are NOT metadata-only get advertised as
-    // fetchable; an unreported (undefined) verdict keeps the previous wording.
+    // Explicit false blocks. Older serves omit the verdict, so unknown entries
+    // retain the historic probe/download affordance.
     const hasFetchableIndexes = atts.some((a) => a.index !== undefined && a.content_available !== false);
     lines.push(chalk.yellow(`  📎 Attachments (${atts.length}):`));
     for (const a of atts) {
       const missingLocation = opts.mode === "self_hosted"
-        ? a.content_available === false
-          // Metadata is not proof of stored content: imports that carry only
-          // metadata answer the fetch with a "no stored content" error, so this
-          // row must not be presented as one command away from its bytes.
-          ? `  ${METADATA_ONLY_LABEL}`
-          : a.index !== undefined
+        ? a.content_available !== false && a.index !== undefined
             ? `  (no local copy; fetch with --index ${a.index})`
-            : "  (no local copy and no download index)"
+            // Metadata is not proof of stored content: imports that carry only
+            // metadata answer the fetch with a "no stored content" error, so this
+            // row must not be presented as one command away from its bytes.
+            : `  ${METADATA_ONLY_LABEL}`
         : "  (run: emails inbox sync to download)";
       const loc = a.location ? `  ${a.location_type === "local" ? chalk.cyan(a.location) : chalk.blue(a.location)}` : chalk.dim(missingLocation);
       lines.push(`     ${a.filename.padEnd(44)} ${chalk.dim(`${formatAttachmentSize(a.size)} · ${a.content_type}`)}${loc}`);

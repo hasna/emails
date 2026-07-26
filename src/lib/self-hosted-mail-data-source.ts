@@ -1,7 +1,7 @@
 // SelfHostedMailDataSource maps the operator-configured Emails service onto the
 // common mailbox interface. The service speaks a versioned resource API — the
 // same shape `src/db/self-hosted-store.ts` already uses for `domains`:
-//   GET    /v1/messages?limit&offset   -> { messages: [ <summary row>, ... ] }
+//   GET    /v1/messages?limit&cursor   -> { messages: [ <summary row>, ... ], next_cursor }
 //   GET    /v1/messages/<id>           -> { message: <full row> } | 404
 //   POST   /v1/messages                -> { message: <row> }
 //   PATCH  /v1/messages/<id>           -> { message: <row> }
@@ -44,11 +44,11 @@ import {
 import type {
   MailBulkInput,
   MailBulkResult,
-  MailChanges,
-  MailChangesQuery,
   MailClearFilter,
   MailClearResult,
   MailDataSource,
+  MailInsertionsPage,
+  MailInsertionsQuery,
   MailSendInput,
   MailSendResult,
 } from "./mail-data-source.js";
@@ -63,7 +63,6 @@ import {
   normalizeAttachmentByteLimit,
   type AttachmentContent,
 } from "./attachment-download.js";
-
 // ── the /v1 message row (snake_case, as the self-hosted serve returns) ────────
 
 interface V1Message {
@@ -86,13 +85,7 @@ interface V1Message {
   is_starred?: boolean;
   labels?: string[] | null;
   headers?: Record<string, unknown> | null;
-  attachments?: Array<{
-    filename?: string;
-    content_type?: string;
-    size?: number;
-    /** Serves >= the content_available contract report stored-byte presence. */
-    content_available?: boolean;
-  }> | null;
+  attachments?: unknown[] | null;
   /** List rows carry only the count; full metadata comes from the detail read. */
   attachment_count?: number;
   created_at?: string | null;
@@ -104,12 +97,81 @@ export type SelfHostedFetch = (url: string, init: RequestInit) => Promise<{
   text(): Promise<string>;
 }>;
 
+interface V1MessagePage {
+  messages: V1Message[];
+  /** Undefined means a successful legacy response omitted next_cursor. */
+  nextCursor: string | null | undefined;
+}
+
+interface V1MessagePagePosition {
+  cursor?: string;
+  offset?: number;
+}
+
+interface MailChangesCursorEnvelopeV2 {
+  version: 2;
+  /** Current-server keyset cursor; null means resume through legacy offset. */
+  serverCursor: string | null;
+  /** Brent-cycle anchor cursor; exact comparison, constant encoded size. */
+  cycleAnchor: string | null;
+  /** Current Brent-cycle comparison window, always a bounded power of two. */
+  cyclePower: number;
+  /** Number of transitions since cycleAnchor was last advanced. */
+  cycleLength: number;
+  /** Number of continuation pages traversed across all calls. */
+  pageCount: number;
+  /** Rows consumed from the original result set, or null for a raw cursor with unknown depth. */
+  offset: number | null;
+  /** Original stable lower bound for the whole cursor walk. */
+  since: string | null;
+}
+
+interface DecodedMailChangesCursor {
+  serverCursor: string | null;
+  cycleAnchor: string | null;
+  cyclePower: number;
+  cycleLength: number;
+  pageCount: number;
+  offset: number | null;
+  since: string | null;
+}
+
 // A complete server id (uuidv7). Used verbatim; a shorter value is a prefix that
-// resolveId matches over a bounded recent scan.
+// the server resolves with an indexed tenant-scoped lookup.
 const FULL_ID_RE = /^(?:[A-Za-z0-9_-]+:)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // Page size for /v1 list reads.
 const PAGE_LIMIT = 500;
+// Legacy servers use OFFSET and reject a starting offset beyond this value.
+const LEGACY_MAX_OFFSET = 100_000;
+const MAIL_CHANGES_CURSOR_NAMESPACE_PREFIX = "emails-self-hosted:v";
+const MAIL_CHANGES_CURSOR_V1_PREFIX = `${MAIL_CHANGES_CURSOR_NAMESPACE_PREFIX}1:`;
+const MAIL_CHANGES_CURSOR_V2_PREFIX = `${MAIL_CHANGES_CURSOR_NAMESPACE_PREFIX}2:`;
+const MAIL_CHANGES_CURSOR_MAX_ENCODED_CHARS = 8_192;
+const MAIL_CHANGES_CURSOR_MAX_DECODED_BYTES = 6_144;
+const MAIL_CHANGES_SERVER_CURSOR_MAX_BYTES = 1_024;
+const MAIL_CHANGES_CURSOR_MAX_PAGES = 100_000;
+const MAIL_CHANGES_CURSOR_MAX_CYCLE_POWER = 131_072;
+const MAIL_CHANGES_CURSOR_MAX_ROWS = MAIL_CHANGES_CURSOR_MAX_PAGES * PAGE_LIMIT;
+const MAIL_CHANGES_CURSOR_V1_MAX_SEEN = 256;
+const MAIL_CHANGES_CURSOR_V1_KEYS = [
+  "offset",
+  "seenServerCursors",
+  "serverCursor",
+  "since",
+  "version",
+  "watermark",
+] as const;
+const MAIL_CHANGES_CURSOR_V2_KEYS = [
+  "cycleAnchor",
+  "cycleLength",
+  "cyclePower",
+  "offset",
+  "pageCount",
+  "serverCursor",
+  "since",
+  "version",
+] as const;
 // Hard cap on rows walked for a full scan (counts/search/resolve). Large enough
 // to cover a real mailbox without an unbounded walk.
 const MAX_SCAN_ROWS = 100_000;
@@ -169,6 +231,251 @@ function normalizeSince(value: string | undefined): string | undefined {
   const time = Date.parse(value);
   if (!Number.isFinite(time)) throw new Error(`Invalid date: ${value}`);
   return new Date(time).toISOString();
+}
+
+function validCursorTimestamp(value: unknown, field: string): string | null {
+  if (value === null) return null;
+  if (typeof value !== "string" || value.length > 64) {
+    throw new Error(`self-hosted emails: malformed changes cursor ${field}`);
+  }
+  const time = Date.parse(value);
+  if (!Number.isFinite(time) || new Date(time).toISOString() !== value) {
+    throw new Error(`self-hosted emails: malformed changes cursor ${field}`);
+  }
+  return value;
+}
+
+function validServerCursor(value: unknown): value is string {
+  return typeof value === "string"
+    && value.trim().length > 0
+    && Buffer.byteLength(value, "utf8") <= MAIL_CHANGES_SERVER_CURSOR_MAX_BYTES
+    && !/[\u0000-\u001F\u007F]/.test(value);
+}
+
+function hasExactKeys(
+  value: Record<string, unknown>,
+  expected: readonly string[],
+): boolean {
+  const actual = Object.keys(value).sort();
+  return actual.length === expected.length
+    && actual.every((key, index) => key === expected[index]);
+}
+
+function decodeCursorEnvelopeJson(raw: string, prefix: string): Record<string, unknown> {
+  if (raw.length > MAIL_CHANGES_CURSOR_MAX_ENCODED_CHARS) {
+    throw new Error("changes cursor is too large");
+  }
+  const encoded = raw.slice(prefix.length);
+  if (!encoded || encoded.length % 4 === 1 || !/^[A-Za-z0-9_-]+$/.test(encoded)) {
+    throw new Error("changes cursor is not canonical base64url");
+  }
+  const decoded = Buffer.from(encoded, "base64url");
+  if (decoded.length > MAIL_CHANGES_CURSOR_MAX_DECODED_BYTES
+    || decoded.toString("base64url") !== encoded
+  ) {
+    throw new Error("changes cursor payload is too large or non-canonical");
+  }
+  const parsed = JSON.parse(decoded.toString("utf8")) as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("changes cursor payload is not an object");
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function validCursorOffset(value: unknown, serverCursor: string | null): number | null {
+  if (value === null) {
+    if (serverCursor === null) throw new Error("missing legacy offset");
+    return null;
+  }
+  if (!Number.isSafeInteger(value) || (value as number) < 0 || (value as number) > MAIL_CHANGES_CURSOR_MAX_ROWS) {
+    throw new Error("invalid offset");
+  }
+  const offset = value as number;
+  if (serverCursor === null && (offset === 0 || offset > LEGACY_MAX_OFFSET)) {
+    throw new Error("invalid legacy offset");
+  }
+  return offset;
+}
+
+function decodeLegacyMailChangesCursor(raw: string): DecodedMailChangesCursor {
+  const parsed = decodeCursorEnvelopeJson(raw, MAIL_CHANGES_CURSOR_V1_PREFIX);
+  if (!hasExactKeys(parsed, MAIL_CHANGES_CURSOR_V1_KEYS) || parsed["version"] !== 1) {
+    throw new Error("invalid legacy cursor schema");
+  }
+  const serverCursor = parsed["serverCursor"];
+  if (serverCursor !== null && !validServerCursor(serverCursor)) {
+    throw new Error("invalid server cursor");
+  }
+  const rawSeenServerCursors = parsed["seenServerCursors"];
+  if (!Array.isArray(rawSeenServerCursors)
+    || rawSeenServerCursors.length > MAIL_CHANGES_CURSOR_V1_MAX_SEEN
+  ) {
+    throw new Error("invalid seen server cursors");
+  }
+  const seenServerCursors = rawSeenServerCursors.map((cursor) => {
+    if (!validServerCursor(cursor)) throw new Error("invalid seen server cursor");
+    return cursor;
+  });
+  if (new Set(seenServerCursors).size !== seenServerCursors.length) {
+    throw new Error("duplicate seen server cursor");
+  }
+  if (serverCursor !== null && !seenServerCursors.includes(serverCursor)) {
+    throw new Error("current server cursor is not in cursor history");
+  }
+  let cycle = emptyCursorCycleState();
+  for (const cursor of seenServerCursors) {
+    cycle = advanceCursorCycle(cycle, cursor);
+  }
+  return {
+    serverCursor,
+    ...cycle,
+    pageCount: seenServerCursors.length,
+    offset: validCursorOffset(parsed["offset"], serverCursor),
+    since: validCursorTimestamp(parsed["since"], "since"),
+  };
+}
+
+interface CursorCycleState {
+  cycleAnchor: string | null;
+  cyclePower: number;
+  cycleLength: number;
+}
+
+function emptyCursorCycleState(): CursorCycleState {
+  return { cycleAnchor: null, cyclePower: 1, cycleLength: 0 };
+}
+
+function isPowerOfTwo(value: number): boolean {
+  return value > 0 && (value & (value - 1)) === 0;
+}
+
+/**
+ * Advance Brent's cycle detector by one opaque server cursor.
+ *
+ * The state is exact and constant-size: unlike a Bloom filter it cannot reject
+ * a unique cursor. The independent page cap remains the final bound for a
+ * non-cyclic but unending server.
+ */
+function advanceCursorCycle(state: CursorCycleState, nextCursor: string): CursorCycleState {
+  if (state.cycleAnchor === null) {
+    return { cycleAnchor: nextCursor, cyclePower: 1, cycleLength: 0 };
+  }
+  if (nextCursor === state.cycleAnchor) {
+    throw new Error("self-hosted emails: pagination cursor repeated or did not advance");
+  }
+  const nextLength = state.cycleLength + 1;
+  if (nextLength === state.cyclePower) {
+    return {
+      cycleAnchor: nextCursor,
+      cyclePower: Math.min(state.cyclePower * 2, MAIL_CHANGES_CURSOR_MAX_CYCLE_POWER),
+      cycleLength: 0,
+    };
+  }
+  return { ...state, cycleLength: nextLength };
+}
+
+function decodeCurrentMailChangesCursor(raw: string): DecodedMailChangesCursor {
+  const parsed = decodeCursorEnvelopeJson(raw, MAIL_CHANGES_CURSOR_V2_PREFIX);
+  if (!hasExactKeys(parsed, MAIL_CHANGES_CURSOR_V2_KEYS) || parsed["version"] !== 2) {
+    throw new Error("invalid cursor schema");
+  }
+  const serverCursor = parsed["serverCursor"];
+  if (serverCursor !== null && !validServerCursor(serverCursor)) {
+    throw new Error("invalid server cursor");
+  }
+  const pageCount = parsed["pageCount"];
+  if (!Number.isSafeInteger(pageCount)
+    || (pageCount as number) < 0
+    || (pageCount as number) > MAIL_CHANGES_CURSOR_MAX_PAGES
+  ) {
+    throw new Error("invalid page count");
+  }
+  const cycleAnchor = parsed["cycleAnchor"];
+  if (cycleAnchor !== null && !validServerCursor(cycleAnchor)) {
+    throw new Error("invalid cycle anchor");
+  }
+  const cyclePower = parsed["cyclePower"];
+  if (!Number.isSafeInteger(cyclePower)
+    || !isPowerOfTwo(cyclePower as number)
+    || (cyclePower as number) > MAIL_CHANGES_CURSOR_MAX_CYCLE_POWER
+  ) {
+    throw new Error("invalid cycle power");
+  }
+  const cycleLength = parsed["cycleLength"];
+  if (!Number.isSafeInteger(cycleLength)
+    || (cycleLength as number) < 0
+    || (cycleLength as number) >= (cyclePower as number)
+  ) {
+    throw new Error("invalid cycle length");
+  }
+  if (cycleAnchor === null
+    && (serverCursor !== null || cyclePower !== 1 || cycleLength !== 0)
+  ) {
+    throw new Error("invalid empty cycle state");
+  }
+  return {
+    serverCursor,
+    cycleAnchor,
+    cyclePower: cyclePower as number,
+    cycleLength: cycleLength as number,
+    pageCount: pageCount as number,
+    offset: validCursorOffset(parsed["offset"], serverCursor),
+    since: validCursorTimestamp(parsed["since"], "since"),
+  };
+}
+
+function encodeMailChangesCursor(state: DecodedMailChangesCursor): string {
+  const envelope: MailChangesCursorEnvelopeV2 = {
+    version: 2,
+    serverCursor: state.serverCursor,
+    cycleAnchor: state.cycleAnchor,
+    cyclePower: state.cyclePower,
+    cycleLength: state.cycleLength,
+    pageCount: state.pageCount,
+    offset: state.offset,
+    since: state.since,
+  };
+  const decoded = Buffer.from(JSON.stringify(envelope), "utf8");
+  if (decoded.length > MAIL_CHANGES_CURSOR_MAX_DECODED_BYTES) {
+    throw new Error("self-hosted emails: changes cursor exceeded its bounded size limit");
+  }
+  const encoded = `${MAIL_CHANGES_CURSOR_V2_PREFIX}${decoded.toString("base64url")}`;
+  if (encoded.length > MAIL_CHANGES_CURSOR_MAX_ENCODED_CHARS) {
+    throw new Error("self-hosted emails: changes cursor exceeded its bounded size limit");
+  }
+  return encoded;
+}
+
+function decodeMailChangesCursor(raw: string): DecodedMailChangesCursor | null {
+  if (!raw.startsWith(MAIL_CHANGES_CURSOR_NAMESPACE_PREFIX)) return null;
+  try {
+    if (raw.startsWith(MAIL_CHANGES_CURSOR_V2_PREFIX)) {
+      return decodeCurrentMailChangesCursor(raw);
+    }
+    if (raw.startsWith(MAIL_CHANGES_CURSOR_V1_PREFIX)) {
+      return decodeLegacyMailChangesCursor(raw);
+    }
+    throw new Error("unsupported changes cursor version");
+  } catch {
+    throw new Error("self-hosted emails: malformed changes cursor envelope");
+  }
+}
+
+function validateRawChangesCursor(raw: string): string {
+  if (!validServerCursor(raw)) {
+    throw new Error("self-hosted emails: malformed raw changes cursor");
+  }
+  return raw;
+}
+
+function nextCursorPageCount(pageCount: number): number {
+  const next = pageCount + 1;
+  if (next > MAIL_CHANGES_CURSOR_MAX_PAGES) {
+    throw new Error(
+      `self-hosted emails: pagination exceeded the ${MAIL_CHANGES_CURSOR_MAX_PAGES}-page safety limit`,
+    );
+  }
+  return next;
 }
 
 function messageTime(m: V1Message): number {
@@ -231,23 +538,34 @@ function v1ToTuiMessage(m: V1Message): TuiMessage {
   };
 }
 
+function attachmentRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
 function v1AttachmentMetadata(m: V1Message): AttachmentPath[] {
   const metadata = Array.isArray(m.attachments) ? m.attachments : [];
   // `||`, not `??`: inbound MIME parts routinely carry filename="" (unnamed
   // inline parts), and an empty name is dropped by every display merge, which
   // silently shifts the download indexes of everything after it. Placeholder
   // names keep each entry addressable — same rule as db/inbound.remote.ts.
-  return metadata.map((attachment, index) => ({
-    filename: String(attachment?.filename || `attachment-${index + 1}`),
-    content_type: String(attachment?.content_type || "application/octet-stream"),
-    size: Number(attachment?.size ?? 0) || 0,
-    // Only a BOOLEAN from the serve is a statement about stored bytes. An older
-    // serve omits the field entirely; leaving it undefined keeps that "unknown"
-    // and stops the renderer from declaring a fetchable payload unavailable.
-    ...(typeof attachment?.content_available === "boolean"
-      ? { content_available: attachment.content_available }
-      : {}),
-  }));
+  return metadata.map((attachment, index) => {
+    const record = attachmentRecord(attachment);
+    return {
+      filename: String(record?.filename || `attachment-${index + 1}`),
+      content_type: String(record?.content_type || "application/octet-stream"),
+      size: Number(record?.size ?? 0) || 0,
+      // A malformed array element is an explicit non-downloadable placeholder,
+      // preserving its authenticated index. A valid legacy object that omits
+      // the newer verdict remains unknown so callers may probe as before.
+      ...(record === null
+        ? { content_available: false }
+        : typeof record.content_available === "boolean"
+          ? { content_available: record.content_available }
+          : {}),
+    };
+  });
 }
 
 function v1ToMessageBody(m: V1Message): MessageBody {
@@ -398,6 +716,18 @@ function scopeServerFilterSets(scope: SelfHostedScope | undefined): Array<{ to?:
   return scope?.domain ? [{ to: scope.domain }] : [{}];
 }
 
+function sanitizedAttachmentSearchText(m: V1Message): string {
+  if (!Array.isArray(m.attachments)) return "";
+  return m.attachments.flatMap((attachment) => {
+    const record = attachmentRecord(attachment);
+    const clean = (value: unknown): string =>
+      typeof value === "string"
+        ? value.replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim()
+        : "";
+    return [clean(record?.["filename"]), clean(record?.["content_type"])];
+  }).filter(Boolean).join(" ");
+}
+
 function searchMatch(m: V1Message, query?: string): boolean {
   const q = query?.trim().toLowerCase();
   if (!q) return true;
@@ -406,6 +736,7 @@ function searchMatch(m: V1Message, query?: string): boolean {
     (m.to_addrs ?? []).join(" "),
     m.subject ?? "",
     m.body_text ?? "",
+    sanitizedAttachmentSearchText(m),
   ].join(" ").toLowerCase();
   return hay.includes(q);
 }
@@ -496,7 +827,7 @@ export class SelfHostedMailDataSource implements MailDataSource {
 
   private async listPage(
     limit: number,
-    offset: number,
+    position: V1MessagePagePosition = {},
     opts: {
       direction?: "inbound" | "outbound";
       since?: string;
@@ -505,10 +836,11 @@ export class SelfHostedMailDataSource implements MailDataSource {
       subject?: string;
       search?: string;
     } = {},
-  ): Promise<V1Message[]> {
+  ): Promise<V1MessagePage> {
     const params = new URLSearchParams();
     params.set("limit", String(limit));
-    params.set("offset", String(offset));
+    if (position.cursor) params.set("cursor", position.cursor);
+    else if (position.offset !== undefined && position.offset > 0) params.set("offset", String(position.offset));
     if (opts.direction) params.set("direction", opts.direction);
     if (opts.since) params.set("since", opts.since);
     if (opts.to) params.set("to", opts.to);
@@ -519,8 +851,70 @@ export class SelfHostedMailDataSource implements MailDataSource {
     if (status < 200 || status >= 300) {
       throw new Error(`self-hosted emails: GET /messages failed (HTTP ${status})`);
     }
-    const list = (json as { messages?: unknown } | null)?.messages;
-    return Array.isArray(list) ? (list as V1Message[]) : [];
+    const body = json as { messages?: unknown; next_cursor?: unknown } | null;
+    const messages = Array.isArray(body?.messages) ? (body.messages as V1Message[]) : [];
+    const nextCursor = body?.next_cursor;
+    if (nextCursor === undefined) return { messages, nextCursor };
+    if (nextCursor !== null && !validServerCursor(nextCursor)) {
+      throw new Error("self-hosted emails: GET /messages returned a malformed next_cursor");
+    }
+    return { messages, nextCursor };
+  }
+
+  private async *listPages(
+    limit: number,
+    opts: {
+      direction?: "inbound" | "outbound";
+      since?: string;
+      to?: string;
+      from?: string;
+      subject?: string;
+      search?: string;
+    } = {},
+  ): AsyncGenerator<V1Message[]> {
+    let cursor: string | undefined;
+    let legacyOffset: number | undefined;
+    let consumedRows = 0;
+    let cycle = emptyCursorCycleState();
+    let pageCount = 0;
+    while (true) {
+      const page = await this.listPage(limit, { cursor, offset: legacyOffset }, opts);
+      const consumedAfterPage = consumedRows + page.messages.length;
+
+      // Validate the continuation before exposing the page to a consumer.
+      // This is especially important for destructive consumers such as clear().
+      if (page.nextCursor === undefined
+        && page.messages.length === limit
+        && consumedAfterPage > LEGACY_MAX_OFFSET
+      ) {
+        throw new Error(
+          "self-hosted emails: legacy pagination reached offset cap 100000 on a full page; "
+          + "upgrade the server to cursor pagination instead of accepting partial results",
+        );
+      }
+      const hasContinuation = typeof page.nextCursor === "string"
+        || (page.nextCursor === undefined && page.messages.length === limit);
+      const continuationPageCount = hasContinuation
+        ? nextCursorPageCount(pageCount)
+        : pageCount;
+      if (typeof page.nextCursor === "string") {
+        cycle = advanceCursorCycle(cycle, page.nextCursor);
+      }
+
+      yield page.messages;
+      consumedRows = consumedAfterPage;
+      pageCount = continuationPageCount;
+
+      if (page.nextCursor === null) return;
+      if (typeof page.nextCursor === "string") {
+        cursor = page.nextCursor;
+        legacyOffset = undefined;
+        continue;
+      }
+      if (page.messages.length < limit) return;
+      cursor = undefined;
+      legacyOffset = consumedRows;
+    }
   }
 
   private async serverStats(): Promise<{ counts: MailboxCounts; total: number; latestReceivedAt: string | null }> {
@@ -549,16 +943,43 @@ export class SelfHostedMailDataSource implements MailDataSource {
     };
   }
 
-  // Full, TTL-cached scan (bounded). Reused across counts/status/search/labels
-  // within one short-lived invocation; writes reset it.
+  private async searchMatchWithDetails(message: V1Message, search: string | undefined): Promise<{ message: V1Message; matches: boolean }> {
+    let candidate = message;
+    let matches = searchMatch(candidate, search);
+    const attachmentMetadata = Array.isArray(message.attachments) ? message.attachments : [];
+    const attachmentMetadataCount = attachmentMetadata.length;
+    const attachmentSearchMetadataComplete = attachmentMetadata.every((attachment) => {
+      const record = attachmentRecord(attachment);
+      return typeof record?.["filename"] === "string" && typeof record["content_type"] === "string";
+    });
+    const attachmentMetadataComplete =
+      message.attachment_count === 0
+      || (typeof message.attachment_count === "number"
+        && attachmentMetadataCount >= message.attachment_count
+        && attachmentSearchMetadataComplete)
+      || (message.attachment_count === undefined
+        && Array.isArray(message.attachments)
+        && attachmentSearchMetadataComplete);
+    if (!matches && search?.trim() && (message.body_text == null || !attachmentMetadataComplete)) {
+      candidate = (await this.getRaw(message.id)) ?? message;
+      matches = searchMatch(candidate, search);
+    }
+    return { message: candidate, matches };
+  }
+
+  // Full, TTL-cached cursor walk. Writes invalidate it. Legacy offset servers
+  // fail closed at their 100000-row ceiling inside listPages().
   private async scanAll(): Promise<V1Message[]> {
     const cached = this.scanCache;
     if (cached && this.now() - cached.at < SCAN_TTL_MS) return cached.rows;
     const rows: V1Message[] = [];
-    for (let offset = 0; offset < MAX_SCAN_ROWS; offset += PAGE_LIMIT) {
-      const page = await this.listPage(PAGE_LIMIT, offset);
+    for await (const page of this.listPages(PAGE_LIMIT)) {
+      if (rows.length + page.length > MAX_SCAN_ROWS) {
+        throw new Error(
+          `self-hosted emails: full-store scan exceeded the ${MAX_SCAN_ROWS}-row safety limit`,
+        );
+      }
       rows.push(...page);
-      if (page.length < PAGE_LIMIT) break;
     }
     this.scanCache = { at: this.now(), rows };
     return rows;
@@ -568,16 +989,6 @@ export class SelfHostedMailDataSource implements MailDataSource {
     this.scanCache = null;
   }
 
-  private async searchMatchWithDetails(message: V1Message, search: string | undefined): Promise<{ message: V1Message; matches: boolean }> {
-    let candidate = message;
-    let matches = searchMatch(candidate, search);
-    if (!matches && search?.trim() && message.body_text == null) {
-      candidate = (await this.getRaw(message.id)) ?? message;
-      matches = searchMatch(candidate, search);
-    }
-    return { message: candidate, matches };
-  }
-
   private async listFilteredMailboxPage(mailbox: Mailbox, scope: SelfHostedScope | undefined, opts?: MailboxListOptions): Promise<V1Message[]> {
     const offset = opts?.offset && opts.offset > 0 ? opts.offset : 0;
     const limit = opts?.limit && opts.limit > 0 ? opts.limit : 200;
@@ -585,28 +996,65 @@ export class SelfHostedMailDataSource implements MailDataSource {
     const pageLimit = Math.min(PAGE_LIMIT, Math.max(50, wanted));
     const direction = mailbox === "sent" ? "outbound" : "inbound";
     const since = normalizeSince(opts?.since);
+    const label = opts?.label?.trim().toLowerCase();
+    const matchesLocally = async (message: V1Message): Promise<V1Message | null> => {
+      if (!folderMatch(message, mailbox)
+        || !scopeMatch(message, scope)
+        || !isOnOrAfter(message, since)
+        || (opts?.read === true && !readMatch(message))
+        || (label && !labelsOf(message).some((value) => value.trim().toLowerCase() === label))
+      ) return null;
+      const { message: candidate, matches } = await this.searchMatchWithDetails(message, opts?.search);
+      return matches ? candidate : null;
+    };
+
+    if (opts?.sort === "oldest") {
+      // The server is newest-first. Retain only the request-bounded oldest tail
+      // while walking the cursor chain, never the whole mailbox.
+      const tail: V1Message[] = [];
+      const filters = scopeServerFilterSets(scope);
+      // Address scopes need a to/from union. A single unfiltered cursor walk
+      // preserves global ordering and avoids duplicate rows across that union.
+      const sourceFilters = filters.length > 1 ? [{}] : filters;
+      for (const filtersForRequest of sourceFilters) {
+        for await (const page of this.listPages(PAGE_LIMIT, {
+          direction,
+          since,
+          ...filtersForRequest,
+          search: opts?.search,
+        })) {
+          for (const message of page) {
+            const candidate = await matchesLocally(message);
+            if (candidate) tail.push(candidate);
+          }
+          if (tail.length > wanted) {
+            tail.splice(0, tail.length - wanted);
+          }
+        }
+      }
+      return tail
+        .slice(-wanted)
+        .sort((a, b) => messageDate(a).localeCompare(messageDate(b)))
+        .slice(offset, offset + limit);
+    }
+
     const matches = new Map<string, V1Message>();
     for (const sourceFilters of scopeServerFilterSets(scope)) {
       let filterMatches = 0;
-      for (let serverOffset = 0; serverOffset < MAX_SCAN_ROWS && filterMatches < wanted; serverOffset += pageLimit) {
-        const page = await this.listPage(pageLimit, serverOffset, {
+      for await (const page of this.listPages(pageLimit, {
           direction,
           since,
           ...sourceFilters,
           search: opts?.search,
-        });
+      })) {
         for (const message of page) {
-          if (!folderMatch(message, mailbox) || !scopeMatch(message, scope) || !isOnOrAfter(message, since)) continue;
-          // Part of the QUERY, not a post-filter over the page: applied here the
-          // walk keeps paging until `limit` matching rows exist.
-          if (opts?.read === true && !readMatch(message)) continue;
-          const { message: candidate, matches: matchesSearch } = await this.searchMatchWithDetails(message, opts?.search);
-          if (matchesSearch) {
+          const candidate = await matchesLocally(message);
+          if (candidate) {
             if (!matches.has(candidate.id)) filterMatches += 1;
             matches.set(candidate.id, candidate);
           }
         }
-        if (page.length < pageLimit) break;
+        if (filterMatches >= wanted) break;
       }
     }
     return [...matches.values()]
@@ -619,12 +1067,15 @@ export class SelfHostedMailDataSource implements MailDataSource {
 
     const seen = new Map<string, V1Message>();
     const collect = async (filters: { direction?: "inbound" | "outbound"; to?: string; from?: string }) => {
-      for (let offset = 0; offset < MAX_SCAN_ROWS; offset += PAGE_LIMIT) {
-        const page = await this.listPage(PAGE_LIMIT, offset, filters);
+      for await (const page of this.listPages(PAGE_LIMIT, filters)) {
         for (const message of page) {
           if (scopeMatch(message, scope)) seen.set(message.id, message);
         }
-        if (page.length < PAGE_LIMIT) break;
+        if (seen.size > MAX_SCAN_ROWS) {
+          throw new Error(
+            `self-hosted emails: scoped scan exceeded the ${MAX_SCAN_ROWS}-row safety limit`,
+          );
+        }
       }
     };
 
@@ -658,10 +1109,12 @@ export class SelfHostedMailDataSource implements MailDataSource {
     if (!key) return [...members.values()];
 
     const candidates: V1Message[] = [];
-    for (let offset = 0; offset < MAX_THREAD_CANDIDATE_ROWS; offset += PAGE_LIMIT) {
-      const page = await this.listPage(Math.min(PAGE_LIMIT, MAX_THREAD_CANDIDATE_ROWS - offset), offset, { subject: key });
+    for await (const page of this.listPages(PAGE_LIMIT, { subject: key })) {
       candidates.push(...page);
-      if (page.length < PAGE_LIMIT) break;
+      if (candidates.length >= MAX_THREAD_CANDIDATE_ROWS) {
+        candidates.length = MAX_THREAD_CANDIDATE_ROWS;
+        break;
+      }
     }
 
     const unlinked: V1Message[] = [];
@@ -731,31 +1184,7 @@ export class SelfHostedMailDataSource implements MailDataSource {
 
   async listMailbox(mailbox: Mailbox, opts?: MailboxListOptions): Promise<TuiMessage[]> {
     const scope = selfHostedScopeOf(opts?.source);
-    if (!opts?.label && opts?.sort !== "oldest") {
-      return (await this.listFilteredMailboxPage(mailbox, scope, opts)).map(v1ToTuiMessage);
-    }
-    const rows = await this.scanAll();
-    const label = opts?.label?.trim().toLowerCase();
-    const since = normalizeSince(opts?.since);
-    let filtered: V1Message[] = [];
-    for (const row of rows) {
-      if (!folderMatch(row, mailbox)
-        || !scopeMatch(row, scope)
-        || !isOnOrAfter(row, since)
-        || (opts?.read === true && !readMatch(row))
-        || (label && !labelsOf(row).some((l) => l.trim().toLowerCase() === label))
-      ) continue;
-      const { message, matches } = await this.searchMatchWithDetails(row, opts?.search);
-      if (matches) filtered.push(message);
-    }
-    filtered.sort((a, b) => {
-      const da = messageDate(a);
-      const db = messageDate(b);
-      return opts?.sort === "oldest" ? da.localeCompare(db) : db.localeCompare(da);
-    });
-    const offset = opts?.offset && opts.offset > 0 ? opts.offset : 0;
-    const limit = opts?.limit && opts.limit > 0 ? opts.limit : 200;
-    return filtered.slice(offset, offset + limit).map(v1ToTuiMessage);
+    return (await this.listFilteredMailboxPage(mailbox, scope, opts)).map(v1ToTuiMessage);
   }
 
   async mailboxCounts(opts?: { source?: MailboxSource }): Promise<MailboxCounts> {
@@ -877,13 +1306,14 @@ export class SelfHostedMailDataSource implements MailDataSource {
   }
 
   async listLabelSummaries(opts?: ListLabelSummaryOptions): Promise<LabelSummary[]> {
-    const rows = await this.scanAll();
     const tally = new Map<string, number>();
-    for (const m of rows) {
-      for (const raw of labelsOf(m)) {
-        const name = raw.trim();
-        if (!name) continue;
-        tally.set(name, (tally.get(name) ?? 0) + 1);
+    for await (const page of this.listPages(PAGE_LIMIT)) {
+      for (const m of page) {
+        for (const raw of labelsOf(m)) {
+          const name = raw.trim();
+          if (!name) continue;
+          tally.set(name, (tally.get(name) ?? 0) + 1);
+        }
       }
     }
     const search = opts?.search?.trim().toLowerCase();
@@ -903,14 +1333,14 @@ export class SelfHostedMailDataSource implements MailDataSource {
     const limit = opts?.limit && opts.limit > 0 ? opts.limit : 50;
     const candidates: V1Message[] = [];
     const pageLimit = Math.min(PAGE_LIMIT, Math.max(50, limit));
-    for (let offset = 0; offset < MAX_SCAN_ROWS && candidates.length < limit; offset += pageLimit) {
-      const page = await this.listPage(pageLimit, offset, {
+    candidatePages:
+    for await (const page of this.listPages(pageLimit, {
         direction: "inbound",
         to: target,
         since,
         from: opts?.from,
         subject: opts?.subject,
-      });
+      })) {
       for (const message of page) {
         if ((message.direction ?? "").toLowerCase() === "outbound") continue;
         if (!(message.to_addrs ?? []).map(bareEmail).includes(target)) continue;
@@ -918,9 +1348,8 @@ export class SelfHostedMailDataSource implements MailDataSource {
         if (fromFilter && !(message.from_addr ?? "").toLowerCase().includes(fromFilter)) continue;
         if (subjectFilter && !(message.subject ?? "").toLowerCase().includes(subjectFilter)) continue;
         candidates.push(message);
-        if (candidates.length >= limit) break;
+        if (candidates.length >= limit) break candidatePages;
       }
-      if (page.length < pageLimit) break;
     }
     const detailed: V1Message[] = [];
     for (const candidate of candidates.slice(0, limit)) {
@@ -944,16 +1373,103 @@ export class SelfHostedMailDataSource implements MailDataSource {
     return findVerificationCode(candidates, { from: opts?.from, subject: opts?.subject });
   }
 
-  async changesSince(opts?: MailChangesQuery): Promise<MailChanges> {
-    const rows = await this.scanAll();
-    const since = normalizeSince(opts?.since);
-    let messages = rows
-      .filter((m) => isOnOrAfter(m, since))
-      .sort((a, b) => messageDate(a).localeCompare(messageDate(b)));
-    if (opts?.limit && opts.limit > 0) messages = messages.slice(-opts.limit);
-    const tui = messages.map(v1ToTuiMessage);
-    const watermark = tui.reduce<string | null>((max, m) => (max === null || m.date > max ? m.date : max), since ?? null);
-    return { messages: tui, deletedIds: [], cursor: null, watermark };
+  async listInsertionsSince(opts?: MailInsertionsQuery): Promise<MailInsertionsPage> {
+    const requestedSince = normalizeSince(opts?.receivedSince);
+    const limit = opts?.limit && opts.limit > 0 ? opts.limit : undefined;
+    const messages: V1Message[] = [];
+    const decodedCursor = opts?.cursor ? decodeMailChangesCursor(opts.cursor) : null;
+    const rawCursor = !decodedCursor && opts?.cursor
+      ? validateRawChangesCursor(opts.cursor)
+      : undefined;
+    let cursor = decodedCursor?.serverCursor ?? rawCursor;
+    let legacyOffset = decodedCursor?.serverCursor === null ? decodedCursor.offset ?? undefined : undefined;
+    let consumedRows: number | null = decodedCursor ? decodedCursor.offset : rawCursor ? null : 0;
+    const since = decodedCursor ? decodedCursor.since ?? undefined : requestedSince;
+    if (decodedCursor
+      && requestedSince !== undefined
+      && requestedSince !== decodedCursor.since
+    ) {
+      throw new Error(
+        "self-hosted emails: receivedSince must match the value bound to the insertion cursor",
+      );
+    }
+    let nextCursor: string | null = null;
+    let cycle: CursorCycleState = decodedCursor
+      ? {
+          cycleAnchor: decodedCursor.cycleAnchor,
+          cyclePower: decodedCursor.cyclePower,
+          cycleLength: decodedCursor.cycleLength,
+        }
+      : emptyCursorCycleState();
+    let pageCount = decodedCursor?.pageCount ?? 0;
+    if (rawCursor) cycle = advanceCursorCycle(cycle, rawCursor);
+    while (true) {
+      const remaining = limit === undefined ? PAGE_LIMIT : Math.max(1, limit - messages.length);
+      const pageLimit = Math.min(PAGE_LIMIT, remaining);
+      const page = await this.listPage(pageLimit, { cursor, offset: legacyOffset }, { since });
+      const consumedAfterPage = consumedRows === null ? null : consumedRows + page.messages.length;
+
+      if (page.nextCursor === undefined && page.messages.length === pageLimit) {
+        if (rawCursor) {
+          throw new Error(
+            "self-hosted emails: raw cursor pagination returned a full page without next_cursor; "
+            + "upgrade the server or rerun without cursor because the traversal depth is unknown",
+          );
+        }
+        if (consumedAfterPage === null) {
+          throw new Error(
+            "self-hosted emails: a legacy page omitted next_cursor after a raw server cursor; "
+            + "restart the scan without that cursor or upgrade the server",
+          );
+        }
+        if (consumedAfterPage > LEGACY_MAX_OFFSET) {
+          throw new Error(
+            "self-hosted emails: legacy pagination reached offset cap 100000 on a full page; "
+            + "upgrade the server to cursor pagination instead of accepting partial results",
+          );
+        }
+      }
+
+      for (const message of page.messages) {
+        if (!isOnOrAfter(message, since)) continue;
+        messages.push(message);
+      }
+      consumedRows = consumedAfterPage;
+
+      let nextServerCursor: string | undefined;
+      let nextLegacyOffset: number | undefined;
+      if (typeof page.nextCursor === "string") {
+        cycle = advanceCursorCycle(cycle, page.nextCursor);
+        nextServerCursor = page.nextCursor;
+      } else if (page.nextCursor === undefined && page.messages.length === pageLimit) {
+        nextLegacyOffset = consumedRows ?? undefined;
+      }
+
+      const hasContinuation = nextServerCursor !== undefined || nextLegacyOffset !== undefined;
+      if (!hasContinuation) {
+        nextCursor = null;
+        break;
+      }
+      const continuationPageCount = nextCursorPageCount(pageCount);
+      nextCursor = encodeMailChangesCursor({
+        serverCursor: nextServerCursor ?? null,
+        ...cycle,
+        pageCount: continuationPageCount,
+        offset: consumedRows,
+        since: since ?? null,
+      });
+      if (limit !== undefined && messages.length >= limit) break;
+
+      cursor = nextServerCursor;
+      legacyOffset = nextLegacyOffset;
+      pageCount = continuationPageCount;
+    }
+    messages.sort((a, b) => messageDate(a).localeCompare(messageDate(b)));
+    return {
+      semantics: "insert_only",
+      insertions: messages.map(v1ToTuiMessage),
+      cursor: nextCursor,
+    };
   }
 
   // ── writes ─────────────────────────────────────────────────────────────
@@ -1082,19 +1598,17 @@ export class SelfHostedMailDataSource implements MailDataSource {
   }
 
   async clear(filter?: MailClearFilter): Promise<MailClearResult> {
-    // Resolve the scope BEFORE the scan: an unsupported one must refuse, never
-    // widen. A silently-empty scope here would have deleted nothing while
-    // reporting success — and the reverse mistake would delete the whole store.
+    // Resolve the scope before the scan so unsupported provenance selectors
+    // refuse rather than widening. The complete cursor walk is preflighted
+    // before the first destructive request.
     const scope = selfHostedScopeOf(filter?.source);
-    const rows = await this.scanAll();
     const mailbox: Mailbox = filter?.mailbox ?? "inbox";
-    const targets = rows.filter((m) => folderMatch(m, mailbox) && scopeMatch(m, scope));
-    let cleared = 0;
-    for (const m of targets) {
-      await this.deleteMessage(m.id);
-      cleared += 1;
+    const targets = new Set<string>();
+    for (const message of await this.scanScopeRows(scope)) {
+      if (folderMatch(message, mailbox) && scopeMatch(message, scope)) targets.add(message.id);
     }
-    return { cleared };
+    for (const id of targets) await this.deleteMessage(id);
+    return { cleared: targets.size };
   }
 }
 

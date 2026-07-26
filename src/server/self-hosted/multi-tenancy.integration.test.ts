@@ -16,7 +16,6 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { mintApiKey } from "@hasna/contracts/auth";
-import { verifyApiKey } from "@hasna/contracts/auth";
 import { createPgPool, createQueryClient, MigrationLedger, type PoolQueryClient } from "../../storage-kit/index.js";
 import { DEFAULT_TENANT_ID, emailsSelfHostedMigrations } from "./migrations.js";
 import { EmailsSelfHostedStore } from "./store.js";
@@ -27,6 +26,8 @@ import { hashPassword } from "./auth/password.js";
 import type { AuthMailerConfig } from "./auth/mailer.js";
 import type { SelfHostedKeyStore } from "./keys.js";
 import { ingestS3Object, shouldDeleteIngestResult } from "./ingest-worker.js";
+import { verifyApiKeyWithAliases } from "./api-key-verifier.js";
+import { SELF_HOSTED_APP, SELF_HOSTED_APP_ALIASES } from "./env.js";
 
 const SIGNING_SECRET = "test-signing-secret-do-not-use-in-prod-0123456789";
 const databaseUrl = process.env["EMAILS_TEST_POSTGRES_URL"];
@@ -59,7 +60,10 @@ function makeDeps(): { deps: SelfHostedServiceDeps; sent: Captured[] } {
   const deps: SelfHostedServiceDeps = {
     client: pgClient!,
     store: new EmailsSelfHostedStore(pgClient!),
-    verifier: verifyApiKey({ app: "emails", signingSecret: SIGNING_SECRET }),
+    verifier: verifyApiKeyWithAliases(
+      { signingSecret: SIGNING_SECRET },
+      [SELF_HOSTED_APP, ...SELF_HOSTED_APP_ALIASES],
+    ),
     sender: {
       provider: "ses",
       send: async (opts) => {

@@ -18,6 +18,7 @@ import { basename, join } from "node:path";
 import {
   attachmentDownloadTestBoundary,
   decodeAttachmentPayload,
+  validateAttachmentMetadata,
   writeAttachmentFile,
 } from "./attachment-download.js";
 
@@ -59,8 +60,41 @@ describe("attachment download boundary", () => {
       content_type: "application/pdf",
       bytes: 123,
     });
+    expect(decodeAttachmentPayload({
+      code: "attachment_content_unavailable",
+      attachment: { filename: "legacy.pdf", content_type: "application/pdf", size: null },
+    }, 3, 1024)).toEqual({
+      state: "content_unavailable",
+      index: 3,
+      filename: "legacy.pdf",
+      content_type: "application/pdf",
+      bytes: null,
+    });
     expect(decodeAttachmentPayload({ code: "attachment_not_found" }, 2, 1024))
       .toEqual({ state: "not_found", index: 2 });
+  });
+
+  it("allows null size only for unavailable content and keeps present sizes strict", () => {
+    const unavailable = (size: unknown) => ({
+      code: "attachment_content_unavailable",
+      attachment: {
+        filename: "legacy.bin",
+        content_type: "application/octet-stream",
+        size,
+      },
+    });
+    for (const invalid of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1, "1"]) {
+      expect(() => decodeAttachmentPayload(unavailable(invalid), 0, 16))
+        .toThrow(/size.*non-negative integer/i);
+    }
+    expect(() => decodeAttachmentPayload({
+      attachment: {
+        filename: "legacy.bin",
+        content_type: "application/octet-stream",
+        size: null,
+        content_base64: "",
+      },
+    }, 0, 16)).toThrow(/size.*non-negative integer/i);
   });
 
   it("rejects malformed base64, declared-size drift, and oversized payloads", () => {
@@ -85,6 +119,39 @@ describe("attachment download boundary", () => {
     expect(() => decodeAttachmentPayload(attachment("text/(plain)"), 0, 16)).toThrow(/MIME/i);
     expect(() => decodeAttachmentPayload(attachment("text/plain; charset=utf-8"), 0, 16)).toThrow(/MIME/i);
     expect(() => decodeAttachmentPayload(attachment("application/vnd.example+json"), 0, 16)).not.toThrow();
+  });
+
+  it("validates download metadata independently of payload bytes", () => {
+    expect(validateAttachmentMetadata({
+      filename: "invoice.txt",
+      content_type: "application/vnd.example+json",
+      size: 5,
+    })).toEqual({
+      filename: "invoice.txt",
+      content_type: "application/vnd.example+json",
+      size: 5,
+    });
+    expect(validateAttachmentMetadata({
+      filename: "legacy.pdf",
+      content_type: "application/pdf",
+      size: null,
+    }, { allowNullSize: true })).toMatchObject({ size: null });
+
+    for (const attachment of [
+      { content_type: "text/plain", size: 5 },
+      { filename: "", content_type: "text/plain", size: 5 },
+      { filename: 42, content_type: "text/plain", size: 5 },
+      { filename: "unsafe\u202Etxt.exe", content_type: "text/plain", size: 5 },
+      { filename: "invalid-mime.txt", content_type: "text/plain; charset=utf-8", size: 5 },
+      { filename: "missing-mime.txt", size: 5 },
+    ]) {
+      expect(() => validateAttachmentMetadata(attachment)).toThrow();
+    }
+    expect(() => validateAttachmentMetadata({
+      filename: "legacy.pdf",
+      content_type: "application/pdf",
+      size: null,
+    })).toThrow(/size/i);
   });
 
   it("rejects terminal C0/C1, ESC, and bidi-control filenames before display or write", () => {

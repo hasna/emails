@@ -20,6 +20,21 @@ All notable changes to `@hasna/emails` are documented here.
 - fix(status): every path in `unavailable` now resolves in `gaps`. Block-level gaps (`database`, `inbox.realtime`, …) were listed as unavailable with their reason reachable only from the block itself, so `gaps[path]` returned undefined for them. The four `inbox sync-status` subset views (CLI, MCP tool, both MCP resources) each enumerated their own selection of gap fields and all four omitted `incomplete`; they now share `statusGapSignals(status)`, so a subset consumer cannot read a lower bound as a total.
 - **test: a regression guard for the whole class.** `src/lib/agent-context.self-hosted.test.ts` seeds the `/v1` stub and asserts exact counts, that the payload is not structurally the zeroed template, that `status.providers.total === listProviderSummaries().length` (the live contradiction, as a failing test), and that an unreachable source yields `null` + `source_unreachable` rather than `0`. `src/lib/status-fabrication-scan.test.ts` parses the TypeScript AST of every registered status builder and fails CI on any object-literal count initialised with a numeric literal or inventory initialised with `[]` (now including the completeness claims `complete`/`stable` on the enumeration itself) — against pre-fix code it pinpoints `agent-context.ts:116-144` and `resources.remote.ts:46/63/100`. The old test named "reports empty provider/domain/address/provisioning aggregates" asserted the fabrication and kept it green in CI; it is deleted. The `/v1` test stub now applies the server's real limit/offset windowing, so a test harness can no longer be more generous than the server it stands in for, and can be told to emulate a non-total list order so the duplicate-and-skip undercount is reproducible. `src/server/self-hosted/list-order.test.ts` fails if any resource pages over a non-unique sort, and `src/lib/agent-context.local.test.ts` covers local-mode counts, `degraded: false` on a healthy install, and the difference between a measured zero and an unmeasured field.
 
+## 1.3.1 (2026-07-26)
+
+### Security
+
+- pin `fast-uri` to 3.1.4, fixing CVE-2026-16221/GHSA-v2hh-gcrm-f6hx after the seven-day quarantine.
+- keep bundled OpenTUI Solid/keymap build inputs dev-only, so vulnerable `brace-expansion` is absent from production installs and runtime images, without suppression or a quarantine bypass.
+
+- add cursor-based, metadata-only attachment inventory across the self-hosted
+  CLI/MCP contract, truthful unavailable-content and unknown-size responses,
+  and structured self-hosted configuration failures with no SQLite fallback.
+- add the tenant-scoped exact-canary attachment repair ledger and
+  recipient-less-only trusted S3-key routing fallback.
+- regenerate the canonical `@hasna/emails/selfhost` SDK and align the
+  config-driven production cutover requirements through migration 0020.
+
 ## [1.3.0] - 2026-07-25
 
 - **fix(self-hosted): a message that provably left is no longer parked without the proof.** On the provider-accepted-then-ledger-write-failed path the row was written `send_state = 'uncertain'` with `provider_message_id = NULL`, even though the provider had just returned an id. `emails log` then rendered a delivered message in the not-delivered style, and because `reconcile --outcome sent` requires the provider message id, the only outcome an operator could actually record was `not_sent` — filing a delivered message as failed, the exact inversion this release exists to prevent. `markSendUncertain` now persists the provider message id and a `send_uncertain_reason` note on the row. Both tests that covered this path asserted the HTTP response only; they now assert the row and the reconcile round-trip.
@@ -51,7 +66,7 @@ All notable changes to `@hasna/emails` are documented here.
 - **fix: `emails domain setup-brandsight` is removed rather than advertised.** It was listed in `--help` with a full option set while its only implementation was unreachable, so it could never do anything but throw.
 - fix: `assessDomainReadiness` and `emails doctor delivery` suggested `emails provision domain … --dry-run` as a remediation; they now suggest `emails domain adopt`, which runs.
 - rebuild the product as local-first and operator-owned AWS self-hosting, with no Hasna SaaS control plane.
-- add durable idempotent self-hosted sends, authenticated attachment retrieval, mailbox mutations, signed replay-safe webhooks, and additive Mailery-to-Emails compatibility bridges.
+- add durable idempotent self-hosted sends, authenticated attachment retrieval, mailbox mutations, signed replay-safe webhooks, and explicit compatibility for previously issued API keys.
 - harden deployment with separate migration/runtime database roles, readiness health checks, immutable container/action pins, and explicit local/self-hosted mode validation.
 - fix: `inbox read` no longer claims self-hosted attachments cannot be downloaded. Each metadata entry now shows its authenticated download index and the exact `inbox attachment … --download` command. Messages ingested with their payload download immediately; metadata-only imports still answer with an explicit "no stored content" error, so the hint is an instruction, not a guarantee that the bytes exist.
 - fix: attachment download indexes are carried through `mergeAttachmentDetails` instead of being inferred from the rendered position. A metadata entry with an empty filename is skipped for display, so any renderer counting its own rows advertised an index that downloads a *different* attachment.

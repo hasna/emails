@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
 const dockerfile = readFileSync(resolve(import.meta.dir, "../Dockerfile"), "utf8");
@@ -17,6 +19,10 @@ const ecsCompute = readFileSync(
   resolve(import.meta.dir, "../deploy/aws/compute.tf"),
   "utf8",
 );
+const awsVariables = readFileSync(
+  resolve(import.meta.dir, "../deploy/aws/variables.tf"),
+  "utf8",
+);
 const compose = readFileSync(
   resolve(import.meta.dir, "../docker-compose.yml"),
   "utf8",
@@ -28,6 +34,10 @@ const cutoverRunbook = readFileSync(
 const packageJson = JSON.parse(
   readFileSync(resolve(import.meta.dir, "../package.json"), "utf8"),
 );
+const bunLockText = readFileSync(resolve(import.meta.dir, "../bun.lock"), "utf8");
+const bunLockRootName = bunLockText.match(
+  /"workspaces":\s*\{\s*"":\s*\{\s*"name":\s*"([^"]+)"/,
+)?.[1];
 const bundlePath = "/opt/emails/certs/aws-rds-global-bundle.pem";
 const bundleSha256 = "e5bb2084ccf45087bda1c9bffdea0eb15ee67f0b91646106e466714f9de3c7e3";
 const baseStage = dockerfile.slice(
@@ -370,27 +380,126 @@ describe("self-hosted container TLS contract", () => {
     }
   });
 
-  test("pins cutover recovery to the forward-only migration 0018 boundary", () => {
+  test("pins cutover recovery to the forward-only migration 0020 boundary", () => {
     expect(cutoverRunbook).toContain(
-      "## Attachment-provenance and send-intent recovery migration gates (0017-0018)",
+      "## Attachment provenance, send recovery, inbox rollups, and repair-ledger gates (0017-0020)",
     );
     expect(cutoverRunbook).toMatch(
-      /Migration\s+0018 is the latest forward-only production cutover\./,
+      /Migration\s+0020 is the latest forward-only production cutover\./,
     );
     expect(cutoverRunbook).toMatch(
-      /A pre-0018 release, including 1\.2\.6, is not\s+a valid restart, scale-out, or rollback target after 0018 commits\./,
+      /A pre-0020 release is not\s+a valid restart, scale-out, or rollback target after 0020 commits\./,
     );
     expect(cutoverRunbook).toMatch(
       /Leave\s+`enable_automatic_deployment_rollback = false` through the observation window\./,
     );
     expect(cutoverRunbook).toContain(
-      '.alreadyApplied | index("0018_send_intent_recovery") != null',
+      '((keys | sort) == ["alreadyApplied","applied","pending"])',
     );
     expect(cutoverRunbook).toContain(
-      "Use only a corrected 0018-compatible image",
+      'and (.applied | type == "array" and length == 0)',
+    );
+    expect(cutoverRunbook).toContain(
+      'and (.pending | type == "array" and length == 0)',
+    );
+    expect(cutoverRunbook).toContain(
+      'and (.alreadyApplied | type == "array" and all(.[]; type == "string"))',
+    );
+    for (const migrationId of [
+      "0017_inbound_message_source_provenance",
+      "0018_send_intent_recovery",
+      "0019_inbox_perf_rollups",
+      "0020_attachment_repair_ledger",
+    ]) {
+      expect(cutoverRunbook).toContain(
+        `.alreadyApplied | index("${migrationId}") != null`,
+      );
+    }
+    expect(cutoverRunbook).toMatch(
+      /`emails db status --json` emits that object only after `MigrationLedger` validates\s+every stored `schema_migrations` checksum;/,
+    );
+    expect(cutoverRunbook).toMatch(
+      /Both service desired counts must remain zero\..*The maintenance path must be the only database writer,/s,
+    );
+    expect(cutoverRunbook).toMatch(
+      /The manifest must use\s+exact canonical object keys, trusted recipient evidence, and the complete\s+tenant-scoped canary-message set\./,
+    );
+    expect(cutoverRunbook).toMatch(
+      /create the exact-canary manifest\s+without `apply`, record a completed dry-run summary, then create the separately\s+approved `apply: true` run and resume bounded pages until `pending == 0`\./,
+    );
+    expect(cutoverRunbook).toContain(
+      "`repaired + would_repair + unavailable + pending == inventory_total`",
+    );
+    expect(cutoverRunbook).toMatch(
+      /and the\s+equivalent `entry_\*` invariant\./,
+    );
+    expect(cutoverRunbook).toMatch(
+      /It must perform exact-key `GetObject` calls\s+only: no bucket listing, payload logging, source-key logging, recipient logging,\s+or caller-supplied bucket is permitted\./,
+    );
+    expect(cutoverRunbook).toMatch(
+      /`NO_SES_SMOKE_TASK_ROLE_ARN` must identify a reviewed smoke role that denies\s+`ses:SendEmail` and `ses:SendRawEmail`\./,
+    );
+    expect(cutoverRunbook).toMatch(
+      /These shell-local rehearsal curls do not satisfy the production no-SES-role\s+gate;/,
+    );
+    expect(cutoverRunbook).toMatch(
+      /Before retiring any former local runtime state, stop its writers and take a\s+fresh, checksummed, restore-tested backup of its database and attachment\s+data\./,
+    );
+    expect(cutoverRunbook).toContain(
+      "Cutover success is not authority to delete backups.",
+    );
+    for (const executableGate of [
+      'test "$REPAIR_PENDING" = "0"',
+      'test "$REPAIR_ENTRY_PENDING" = "0"',
+      'test "$REPAIR_ACCOUNTED" = "$REPAIR_INVENTORY_TOTAL"',
+      'test "$REPAIR_ENTRY_ACCOUNTED" = "$REPAIR_ENTRY_TOTAL"',
+      'all(.[]; type == "number" and . >= 0 and floor == .)',
+      'pg_dump --format=custom',
+      'sha256sum --check --',
+      'pg_restore --exit-on-error',
+      'BACKUP_RETAIN_UNTIL',
+      'RETAINED_SHA256_FILE',
+      'test ! -e "$RETAINED_BACKUP"',
+      'test "$NO_SES_SMOKE_TASK_ROLE" = "$NO_SES_SMOKE_TASK_ROLE_ARN"',
+      'test "$NO_SES_SMOKE_EXIT" = "0"',
+      '((keys | sort) == ["candidate_messages","cutoff","gaps","invalid_provenance","missing_provenance","status","tenants_scanned","valid_provenance"])',
+      '--arg cutoff "$FENCE_AT"',
+      "curl_config_escape",
+    ]) {
+      expect(cutoverRunbook).toContain(executableGate);
+    }
+    expect(cutoverRunbook).toMatch(
+      /curl_config_escape\(\)[\s\S]*case "\$value" in[\s\S]*\$'\\n'[\s\S]*\$'\\r'/,
+    );
+    expect(cutoverRunbook).not.toContain(
+      "printf 'header = \"x-api-key: %s\"",
+    );
+    expect(cutoverRunbook).toMatch(
+      /After 0020 begins, the only application-image recovery target is a\s+0020-compatible roll-forward\./,
+    );
+    expect(cutoverRunbook).toContain(
+      "Use only a corrected 0020-compatible image",
+    );
+    expect(cutoverRunbook).toMatch(
+      /Production hard stop:\*\* this generic Terraform rehearsal is \*\*UNUSABLE for\s+> the actual live topology\*\*\./,
+    );
+    expect(cutoverRunbook).toMatch(
+      /The commands below are only an evidence-producing isolated rehearsal template\.\s+They are never live-production instructions and must fail closed for any\s+topology identified as live\./,
+    );
+    expect(cutoverRunbook).toContain(
+      'select(.schema_version == 1 and .purpose == "isolated-rehearsal")',
+    );
+    expect(cutoverRunbook).toContain(
+      'select(.environment == "rehearsal" and .live == false)',
+    );
+    expect(cutoverRunbook).toMatch(
+      /Never remove or\s+rewrite the 0017,\s+0018, 0019, or 0020 ledger row\./,
     );
     expect(cutoverRunbook).not.toContain(
       "Use only a corrected 0017-compatible image",
+    );
+    expect(cutoverRunbook).not.toContain(
+      "Use only a corrected 0018-compatible image",
     );
   });
 
@@ -401,6 +510,28 @@ describe("self-hosted container TLS contract", () => {
       'command     = ["CMD", "/usr/local/bin/bun", "-e",',
     );
     expect(ecsCompute).toContain("/ready");
+  });
+
+  test("passes the deployment-owned inbound prefix mapping to the ingest worker", () => {
+    expect(ecsCompute).toMatch(/name\s*=\s*"EMAILS_INGEST_PREFIX_DOMAIN_MAP"/);
+    expect(ecsCompute).toMatch(
+      /name\s*=\s*"EMAILS_INGEST_PREFIX_DOMAIN_MAP"[\s\S]*?value\s*=\s*local\.inbound_prefix_domain_map_json/,
+    );
+    expect(ecsCompute).toMatch(
+      /inbound_prefix_domain_map\s*=\s*\([\s\S]*length\(local\.inbound_prefix_domain_map_override\)\s*>\s*0[\s\S]*\?\s*local\.inbound_prefix_domain_map_override[\s\S]*:\s*local\.inbound_prefix_domain_map_legacy[\s\S]*\)/,
+    );
+    expect(ecsCompute).toContain("inbound_prefix_domain_map_override");
+    expect(ecsCompute).toContain("inbound_prefix_domain_map_legacy");
+    expect(awsVariables).toMatch(
+      /for prefix_index, prefix in sort\(keys\(var\.inbound_prefix_domain_map\)\)[\s\S]*?for other_index, other_prefix in sort\(keys\(var\.inbound_prefix_domain_map\)\)[\s\S]*?prefix_index == other_index \|\| !startswith\(prefix, other_prefix\)/,
+    );
+    expect(awsVariables).not.toMatch(
+      /for index, prefix in sort\(keys\(var\.inbound_prefix_domain_map\)\)[\s\S]*index == 0 \|\| !startswith\(prefix, sort\(keys\(var\.inbound_prefix_domain_map\)\)\[index - 1\]\)/,
+    );
+    expect(awsVariables).toContain('endswith(var.inbound_object_prefix, "/")');
+    expect(awsVariables).toContain(
+      'trimspace(var.inbound_object_prefix) == var.inbound_object_prefix',
+    );
   });
 
   test("configures the product runtime to use the bundled trust roots", () => {
@@ -443,6 +574,45 @@ describe("self-hosted container install contract", () => {
 
   test("copies the package postinstall script before the frozen production install", () => {
     expect(hasSafePostinstallCopy(dockerfile)).toBeTrue();
+  });
+
+  test("keeps lockfile and packed manifest identities on the canonical Emails package and bins", () => {
+    expect(packageJson.name).toBe("@hasna/emails");
+    expect(bunLockRootName).toBe("@hasna/emails");
+    expect(packageJson.scripts?.["pack:identity"]).toContain("packed manifest");
+    expect(packageJson.scripts?.prepack).toContain("bun run pack:identity");
+    expect(packageJson.scripts?.prepublishOnly).toContain("bun run pack:identity");
+
+    const destination = mkdtempSync(resolve(tmpdir(), "emails-pack-identity-"));
+    try {
+      const packedName = execFileSync("bun", [
+        "pm",
+        "pack",
+        "--ignore-scripts",
+        "--destination",
+        destination,
+        "--quiet",
+      ], {
+        cwd: resolve(import.meta.dir, ".."),
+        encoding: "utf8",
+      }).trim().split(/\r?\n/).at(-1);
+      expect(packedName).toBeTruthy();
+      if (!packedName) throw new Error("bun pm pack did not return a tarball name");
+      const packedTarball = resolve(destination, packedName);
+      const packed = JSON.parse(execFileSync(
+        "tar",
+        ["-xOf", packedTarball, "package/package.json"],
+        { encoding: "utf8" },
+      ));
+      expect(packed.name).toBe("@hasna/emails");
+      expect(packed.bin).toEqual({
+        emails: "dist/cli/index.js",
+        "emails-mcp": "dist/mcp/index.js",
+        "emails-serve": "dist/server/index.js",
+      });
+    } finally {
+      rmSync(destination, { recursive: true, force: true });
+    }
   });
 
   test("rejects external-stage and wrong-stage copy bypasses", () => {

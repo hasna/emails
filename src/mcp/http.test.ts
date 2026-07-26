@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { resetSelfHostedConfigCache } from "../db/self-hosted-store.js";
 import { startV1Stub, type V1Stub } from "../test-support/v1-stub.js";
 
 // Self-hosted-ONLY: the MCP HTTP transport serves tools that route through the
@@ -81,6 +82,7 @@ describe("emails-mcp HTTP transport", () => {
       for (const name of [
         "prepare_inbox",
         "wait_for_code",
+        "list_attachments",
         "list_usable_from_addresses",
         "provision_address",
         "get_address_owner",
@@ -143,6 +145,8 @@ describe("emails-mcp HTTP transport", () => {
       expect(props("provision_address").interval_seconds?.maximum).toBe(60);
       expect(props("register_domain").duration_years?.maximum).toBe(10);
       expect(props("get_latest_inbound_email").limit?.description).toContain("latest returns one");
+      expect(props("list_attachments").limit?.maximum).toBe(500);
+      expect(props("list_attachments").cursor?.description).toContain("Opaque next_cursor");
       expect(props("list_replies").limit?.maximum).toBe(100);
     });
   });
@@ -169,6 +173,108 @@ describe("emails-mcp HTTP transport", () => {
       expect(text).not.toContain("MCP_SECRET_SHOULD_NOT_LEAK");
       expect(text).not.toContain("OAUTH_MCP_SHOULD_NOT_LEAK");
     });
+  });
+
+  it("publishes the wrapped list_attachments inventory contract without attachment content", async () => {
+    const requests: URL[] = [];
+    const inventoryServer = Bun.serve({
+      port: 0,
+      fetch(request) {
+        const url = new URL(request.url);
+        requests.push(url);
+        if (url.pathname !== "/v1/attachments") {
+          return Response.json({ error: "not found" }, { status: 404 });
+        }
+        const cursor = url.searchParams.get("cursor");
+        if (cursor === null) {
+          return Response.json({
+            items: [{
+              message_id: "message-1",
+              attachment_index: 0,
+              filename: "invoice.pdf",
+              content_type: "application/pdf",
+              size_bytes: 2048,
+              sha256: "b".repeat(64),
+              content_available: false,
+              direction: "outbound",
+              received_at: "2026-07-24T08:00:00.000Z",
+              content_base64: "must-not-leak",
+              secret: "must-not-leak",
+            }],
+            next_cursor: "opaque/+==",
+            api_key: "must-not-leak",
+          });
+        }
+        if (cursor === "opaque/+==") {
+          return Response.json({ items: [], next_cursor: null });
+        }
+        return Response.json({ error: "unexpected cursor" }, { status: 400 });
+      },
+    });
+    servers.push(inventoryServer);
+    process.env.EMAILS_MODE = "self_hosted";
+    process.env.EMAILS_SELF_HOSTED_URL = `http://127.0.0.1:${inventoryServer.port}`;
+    process.env.EMAILS_SELF_HOSTED_API_KEY = "attachment-inventory-http-test-key";
+    resetSelfHostedConfigCache();
+
+    try {
+      await withClient("emails-mcp-attachment-inventory-contract-test", async (client) => {
+        const tools = await client.listTools(undefined, { timeout: 10_000 });
+        const description = tools.tools.find((tool) => tool.name === "list_attachments")?.description ?? "";
+        expect(description).toContain("{items,next_cursor,cli_equivalent}");
+
+        const firstText = await callText(client, "list_attachments", {
+          limit: 1,
+          direction: "outbound",
+          since: "2026-07-24T10:00:00+02:00",
+        });
+        const first = JSON.parse(firstText) as Record<string, unknown>;
+        expect(Object.keys(first).sort()).toEqual(["cli_equivalent", "items", "next_cursor"]);
+        expect(first).toEqual({
+          items: [{
+            message_id: "message-1",
+            attachment_index: 0,
+            filename: "invoice.pdf",
+            content_type: "application/pdf",
+            size_bytes: 2048,
+            sha256: "b".repeat(64),
+            content_available: false,
+            direction: "outbound",
+            received_at: "2026-07-24T08:00:00.000Z",
+          }],
+          next_cursor: "opaque/+==",
+          cli_equivalent: "emails inbox attachments --limit 1 --direction outbound --since 2026-07-24T10:00:00+02:00 --json",
+        });
+        expect(Object.keys((first.items as Array<Record<string, unknown>>)[0]!).sort()).toEqual([
+          "attachment_index",
+          "content_available",
+          "content_type",
+          "direction",
+          "filename",
+          "message_id",
+          "received_at",
+          "sha256",
+          "size_bytes",
+        ]);
+        expect(firstText).not.toContain("content_base64");
+        expect(firstText).not.toContain("must-not-leak");
+
+        const secondText = await callText(client, "list_attachments", {
+          limit: 1,
+          cursor: "opaque/+==",
+        });
+        expect(JSON.parse(secondText)).toEqual({
+          items: [],
+          next_cursor: null,
+          cli_equivalent: "emails inbox attachments --limit 1 --cursor opaque/+== --json",
+        });
+        expect(requests.map((url) => url.searchParams.get("cursor"))).toEqual([null, "opaque/+=="]);
+        expect(requests[0]?.searchParams.get("since")).toBe("2026-07-24T08:00:00.000Z");
+      });
+    } finally {
+      stub.applyEnv();
+      resetSelfHostedConfigCache();
+    }
   });
 
   it("redacts sensitive config values in MCP tool results", async () => {

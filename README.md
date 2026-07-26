@@ -191,8 +191,20 @@ emails config list --verbose     # full redacted config values
 emails config keys --verbose     # include examples for every key
 emails email show <id>           # detail path for one sent email
 emails inbox read <id>           # detail path for one inbound email
+emails inbox attachments --limit 100 --direction inbound --json
+emails inbox attachments --cursor <opaque-next-cursor> --json
 emails inbox attachment <exact-id> --download --index 0 --output-dir ./attachments
 ```
+
+Self-hosted attachment inventory is cursor-based, not offset-based. Each page
+contains `items` and an opaque `next_cursor`; pass that cursor back unchanged to
+continue. Inventory rows contain only safe metadata:
+`message_id`, `attachment_index`, `filename`, `content_type`, `size_bytes`,
+`sha256`, `content_available`, `direction`, and `received_at`. A missing or
+unparseable size is `null` in JSON and is displayed as `unknown size`; it is
+never rewritten as zero. `content_available: false` means metadata exists but
+the stored bytes do not. Downloading that attachment returns HTTP `409` with
+code `attachment_content_unavailable`, rather than a successful empty file.
 
 Attachment byte downloads use descriptor-relative, no-overwrite writes so an
 output-directory symlink swap cannot redirect bytes. That secure filesystem
@@ -281,9 +293,16 @@ Useful source-aware surfaces:
 emails inbox sources --json
 emails inbox mailboxes --source provider:<id> --json
 emails inbox search invoice --folder sent --source provider:<id> --json
+emails inbox attachments --limit 100 --direction inbound --json
 curl 'localhost:3900/api/sources'
 curl 'localhost:3900/api/mailboxes?source_id=legacy'
 ```
+
+The MCP tool `list_attachments` accepts `limit`, opaque `cursor`, `direction`,
+and `since`. Its production transport envelope contains exactly `items`,
+`next_cursor`, and `cli_equivalent`; the latter is the equivalent compatibility
+CLI command, including the JSON flag, for auditability and handoff. Attachment
+content is never included in inventory output.
 
 ```bash
 emails-mcp
@@ -379,6 +398,11 @@ allowlists before it confirms or syncs a notification.
 
 The server uses operator-owned Postgres and provider accounts. A client must configure `EMAILS_MODE=self_hosted`, `EMAILS_SELF_HOSTED_URL`, and `EMAILS_SELF_HOSTED_API_KEY`. The service requires `EMAILS_DATABASE_URL`, `EMAILS_API_SIGNING_KEY`, and `EMAILS_SEND_PROVIDER=ses|resend`. SES uses the deployment IAM role; Resend uses `RESEND_API_KEY`.
 
+Self-hosted client commands fail closed when the mode, URL, or API key is
+missing or invalid. With `--json`, the CLI emits one structured error object on
+stderr, exits nonzero, and leaves stdout empty. It does not open, create, or
+fall back to the local SQLite database.
+
 Expose the service through an HTTPS reverse proxy or load balancer with edge
 rate limits, the 1 MiB request limit, bounded upstream timeouts, and network
 rules that keep Postgres and the container port private. The generated client
@@ -393,6 +417,60 @@ be erased; ordinary inbound and non-idempotent rows remain deletable.
 For an operator retry, reuse the same `emails send --idempotency-key <key>`.
 Changing the payload under that key is rejected, and an uncertain provider
 outcome must be reconciled before another send.
+
+### Legacy attachment repair
+
+The self-hosted repair ledger is tenant-scoped, bounded, idempotent, and
+checkpointed. Create a repair with
+`POST /v1/attachments/repairs`; omitting `apply` is a dry run. Each manifest
+entry may contain only `object_key`, `recipients`, and
+`canary_message_ids`. The canary IDs must be the exact complete set currently
+bound to that canonical object, not a sample. Caller-supplied buckets and raw
+payloads are rejected: the service uses only its configured canonical S3
+bucket, fetches only named object keys, never scans the bucket, and never emits
+object keys, recipients, payload bytes, or internal errors in the repair
+summary.
+
+Inspect a repair with `GET /v1/attachments/repairs/{id}` and resume one bounded
+page with `POST /v1/attachments/repairs/{id}/resume`. The response reports
+inventory counters `repaired`, `would_repair`, `unavailable`, `pending`, and
+`retrying`, plus the matching `entry_*` counters, `attempts`, and `checkpoint`.
+`retrying` is the transient subset of `pending`; terminally invalid or
+unrepairable rows become `unavailable`. A malformed repair UUID returns HTTP
+`400` with code `invalid_attachment_repair_id`.
+
+An apply is fail-closed and must prove the exact reviewed dry run for the same
+tenant and current manifest:
+
+1. Create the dry run with a stable `idempotency_key`, omit `apply`, and do not
+   send any `reviewed_dry_run_*` fields.
+2. Resume/read it until `status` is `completed` and both item and entry totals
+   have zero `pending`, `retrying`, `unavailable`, and `operator_action`.
+3. Review the returned public `repair` summary and compute its lowercase
+   SHA-256 using recursively key-sorted canonical JSON (object keys sorted,
+   array order preserved). This is the same
+   `attachmentRepairRunResultSha256` calculation enforced by the service.
+4. Submit the same exact `entries` with a separate apply `idempotency_key`,
+   `apply: true`, and the two proof fields `reviewed_dry_run_id` and
+   `reviewed_dry_run_result_sha256`.
+
+Before creating the apply ledger, the service tenant-scopes the reviewed ID,
+checks the completed zero-failure result and hash, then recreates or looks up
+the reviewed dry run using the deployment-owned canonical bucket, the exact
+current entries, and `apply: false`. This manifest check is read-only and does
+not create an alias or consume repair quota. Any wrong tenant, ID, manifest,
+hash, or unfinished/failed result returns the same non-leaking HTTP `409`
+`attachment_repair_review_mismatch`; no apply run is created or processed.
+
+### Recipient routing trust boundary
+
+For SES/S3 ingestion, explicit envelope recipients are authoritative. The
+worker may derive a catch-all address from the trusted SES-written S3 key path
+only when the notification contains no recipients and normal routing resolved
+no group. That derived address is still revalidated through tenant routing.
+Malformed, partial, or unresolved explicit recipients are quarantined and are
+never replaced by S3-key fallback. MIME `To`/`Cc` headers are
+sender-controlled and are never used to select a tenant.
 
 ```bash
 export EMAILS_MODE=self_hosted
@@ -411,7 +489,9 @@ There is no hybrid cache or bidirectional database synchronization mode.
 
 ## Data
 
-Stored in `~/.hasna/emails/` (SQLite + attachments).
+Local mode stores SQLite data and attachment files in `~/.hasna/emails/`.
+Self-hosted mode uses the operator-configured PostgreSQL and object-storage
+services and never falls back to that local directory.
 
 ## Transport
 

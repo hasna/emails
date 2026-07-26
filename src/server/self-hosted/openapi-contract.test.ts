@@ -8,7 +8,17 @@ type Operation = {
   parameters?: Array<{ name?: string; in?: string; schema?: Record<string, unknown> }>;
   responses?: Record<string, unknown>;
   requestBody?: {
-    content?: Record<string, { schema?: { properties?: Record<string, unknown>; required?: string[] } }>;
+    content?: Record<string, {
+      schema?: {
+        properties?: Record<string, unknown>;
+        required?: string[];
+        oneOf?: Array<{
+          properties?: Record<string, unknown>;
+          required?: string[];
+          additionalProperties?: boolean;
+        }>;
+      };
+    }>;
   };
 };
 
@@ -124,6 +134,34 @@ describe("self-hosted OpenAPI identity and authorization contract", () => {
     });
   });
 
+  it("documents attachment defaults that align with send runtime behavior", () => {
+    const sendSchema = paths["/v1/messages/send"]?.post?.requestBody?.content?.["application/json"]?.schema;
+    const attachments = sendSchema?.properties?.attachments;
+    const attachmentItem = attachments?.items as
+      | { properties?: Record<string, { default?: string; description?: string; type?: string }>; required?: string[] }
+      | undefined;
+    expect(attachments).toMatchObject({
+      type: "array",
+      maxItems: 5,
+    });
+    expect(Array.isArray(attachmentItem?.required)).toBe(true);
+    expect(attachmentItem?.required).toEqual(["content"]);
+    expect(attachmentItem?.properties?.filename).toMatchObject({
+      type: "string",
+      default: "attachment-{n}",
+      description: expect.stringContaining("attachment-{n}"),
+    });
+    expect(attachmentItem?.properties?.content_type).toMatchObject({
+      type: "string",
+      default: "application/octet-stream",
+      description: expect.stringContaining("application/octet-stream"),
+    });
+    expect(attachmentItem?.properties?.content).toMatchObject({
+      type: "string",
+      description: "Base64-encoded attachment content",
+    });
+  });
+
   it("publishes body-only send-intent recovery operations", () => {
     const lookup = paths["/v1/messages/send-intents/lookup"]?.post;
     const cancel = paths["/v1/messages/send-intents/cancel"]?.post;
@@ -157,7 +195,7 @@ describe("self-hosted OpenAPI identity and authorization contract", () => {
         id: { type: "string" },
         send_state: {
           type: "string",
-          enum: ["none", "pending", "blocked", "cancelled", "sending", "sent", "uncertain"],
+          enum: ["none", "pending", "blocked", "cancelled", "sending", "sent", "failed", "uncertain"],
         },
       },
     });
@@ -191,9 +229,157 @@ describe("self-hosted OpenAPI identity and authorization contract", () => {
     expect(operation?.responses?.["400"]).toMatchObject({
       description: expect.stringContaining("max_bytes"),
     });
+    expect(operation?.responses?.["409"]?.content?.["application/json"]?.schema)
+      .toEqual({ $ref: "#/components/schemas/AttachmentUnavailableError" });
     expect(schema?.additionalProperties).toBe(false);
     expect(schema?.required).toEqual(["filename", "content_type", "size", "content_base64"]);
     expect(schema?.properties).toHaveProperty("content_base64");
+  });
+
+  it("publishes availability-only inventory metadata and checkpointed repair operations", () => {
+    const inventory = emailsSelfHostedOpenApi.components?.schemas?.AttachmentInventoryItem as
+      | { required?: string[]; properties?: Record<string, unknown> }
+      | undefined;
+    const batch = emailsSelfHostedOpenApi.components?.schemas?.AttachmentMeta as
+      | { required?: string[]; properties?: Record<string, unknown> }
+      | undefined;
+
+    for (const schema of [inventory, batch]) {
+      expect(schema?.required).toContain("content_available");
+      expect(schema?.properties?.content_available).toMatchObject({ type: "boolean" });
+      expect(schema?.properties).not.toHaveProperty("content_base64");
+    }
+    expect(paths["/v1/attachments"]?.get?.responses?.["400"]
+      ?.content?.["application/json"]?.schema?.properties?.code)
+      .toMatchObject({
+        enum: ["invalid_cursor", "invalid_direction", "invalid_since", "invalid_limit"],
+      });
+    expect(inventory?.required).toEqual([
+      "message_id",
+      "attachment_index",
+      "filename",
+      "content_type",
+      "size_bytes",
+      "sha256",
+      "content_available",
+      "direction",
+      "received_at",
+    ]);
+    expect(paths["/v1/attachments/repairs"]?.post?.operationId).toBe("createOrResumeAttachmentRepair");
+    expect(paths["/v1/attachments/repairs/{id}"]?.get?.operationId).toBe("getAttachmentRepair");
+    expect(paths["/v1/attachments/repairs/{id}/resume"]?.post?.operationId).toBe("resumeAttachmentRepair");
+    const request = paths["/v1/attachments/repairs"]?.post?.requestBody
+      ?.content?.["application/json"]?.schema;
+    expect(request?.oneOf).toHaveLength(2);
+    const dryRunRequest = request?.oneOf?.find(
+      (variant) =>
+        (variant.properties?.apply as { enum?: boolean[] } | undefined)?.enum?.[0] === false,
+    );
+    const applyRequest = request?.oneOf?.find(
+      (variant) =>
+        (variant.properties?.apply as { enum?: boolean[] } | undefined)?.enum?.[0] === true,
+    );
+    expect(dryRunRequest?.additionalProperties).toBe(false);
+    expect(dryRunRequest?.properties?.apply).toMatchObject({
+      type: "boolean",
+      enum: [false],
+      default: false,
+    });
+    expect(Object.keys(dryRunRequest?.properties ?? {}).sort()).toEqual([
+      "apply",
+      "entries",
+      "idempotency_key",
+      "limit",
+    ]);
+    expect(dryRunRequest?.required).toEqual(["idempotency_key", "entries"]);
+    expect(applyRequest?.additionalProperties).toBe(false);
+    expect(applyRequest?.properties?.apply).toMatchObject({
+      type: "boolean",
+      enum: [true],
+    });
+    expect(Object.keys(applyRequest?.properties ?? {}).sort()).toEqual([
+      "apply",
+      "entries",
+      "idempotency_key",
+      "limit",
+      "reviewed_dry_run_id",
+      "reviewed_dry_run_result_sha256",
+    ]);
+    expect(applyRequest?.required).toEqual([
+      "idempotency_key",
+      "apply",
+      "entries",
+      "reviewed_dry_run_id",
+      "reviewed_dry_run_result_sha256",
+    ]);
+    expect(applyRequest?.properties?.reviewed_dry_run_id).toMatchObject({
+      type: "string",
+      format: "uuid",
+    });
+    expect(applyRequest?.properties?.reviewed_dry_run_result_sha256).toMatchObject({
+      type: "string",
+      minLength: 64,
+      maxLength: 64,
+      pattern: "^[0-9a-f]{64}$",
+    });
+    const resumeRequest = paths["/v1/attachments/repairs/{id}/resume"]?.post?.requestBody
+      ?.content?.["application/json"]?.schema;
+    expect(Object.keys(resumeRequest?.properties ?? {})).toEqual(["limit"]);
+    const summary = emailsSelfHostedOpenApi.components?.schemas?.AttachmentRepairSummary;
+    for (const field of [
+      "would_repair",
+      "operator_action",
+      "retrying",
+      "entry_repaired",
+      "entry_would_repair",
+      "entry_unavailable",
+      "entry_operator_action",
+      "entry_pending",
+      "entry_retrying",
+      "attempts",
+      "bytes_consumed",
+    ]) {
+      expect(summary?.required).toContain(field);
+      expect(summary?.properties?.[field]).toMatchObject({ type: "integer", minimum: 0 });
+    }
+    for (const field of ["byte_budget", "time_budget_ms"]) {
+      expect(summary?.required).toContain(field);
+      expect(summary?.properties?.[field]).toMatchObject({ type: "integer", minimum: 1 });
+    }
+    expect(summary?.required).toContain("deadline_at");
+    expect(summary?.properties?.deadline_at).toMatchObject({ type: "string", format: "date-time" });
+    expect(paths["/v1/attachments/repairs"]?.post?.responses?.["429"]
+      ?.content?.["application/json"]?.schema?.properties?.quota)
+      .toMatchObject({ enum: ["active_runs", "ledger_runs", "ledger_entries"] });
+    expect(paths["/v1/attachments/repairs"]?.post?.responses?.["400"]
+      ?.content?.["application/json"]?.schema?.properties?.code)
+      .toMatchObject({ enum: expect.arrayContaining(["invalid_repair_review"]) });
+    expect(paths["/v1/attachments/repairs"]?.post?.responses?.["409"]
+      ?.content?.["application/json"]?.schema?.properties?.code)
+      .toMatchObject({
+        enum: [
+          "attachment_repair_idempotency_conflict",
+          "attachment_repair_review_mismatch",
+        ],
+      });
+    const repairIdParameter = paths["/v1/attachments/repairs/{id}"]?.get?.parameters?.[0];
+    expect(repairIdParameter?.schema).toMatchObject({ type: "string", format: "uuid" });
+    expect(paths["/v1/attachments/repairs/{id}"]?.get?.responses?.["400"]
+      ?.content?.["application/json"]?.schema?.properties?.code)
+      .toMatchObject({ enum: ["invalid_attachment_repair_id"] });
+    expect(paths["/v1/attachments/repairs/{id}/resume"]?.post?.responses?.["400"]
+      ?.content?.["application/json"]?.schema?.properties?.code)
+      .toMatchObject({
+        enum: expect.arrayContaining([
+          "invalid_attachment_repair_id",
+          "invalid_repair_limit",
+          "invalid_repair_body",
+        ]),
+      });
+    expect(paths["/v1/attachments/repairs/{id}/resume"]?.post?.responses?.["503"]
+      ?.content?.["application/json"]?.schema?.properties?.code)
+      .toMatchObject({ enum: ["attachment_repair_not_configured"] });
+    expect(JSON.stringify(paths["/v1/attachments/repairs"])).not.toContain("content_base64");
   });
 
   it("enumerates every registry-backed resource in the generated contract", () => {
