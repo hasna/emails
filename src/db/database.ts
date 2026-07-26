@@ -600,6 +600,19 @@ function mailSourceTypeSql(providerTypeSql: string, rawS3Sql: string, metadataS3
   END`;
 }
 
+// Inbound mail whose `to` header has no parseable recipient is attributed to a
+// synthetic mailbox. `local.mailery` was that identity under the previous product
+// name; it is RETIRED. Migration 46 renamed it, but `ensureMailArchitecture` drops
+// and re-creates the inbound trigger on every `getDatabase()` call, so the
+// pre-rename literal embedded in that trigger re-minted the retired mailbox on the
+// very next open — splitting recipient-less mail across two mailboxes forever and
+// keeping a retired product identity permanently live. Single definition site so
+// the trigger, the backfill and the rename bridge cannot drift apart again.
+const LEGACY_INBOUND_ADDRESS = "legacy-inbound@local.emails";
+const LEGACY_INBOUND_MAILBOX_ID = `mbx:${LEGACY_INBOUND_ADDRESS}`;
+const RETIRED_LEGACY_INBOUND_ADDRESS = "legacy-inbound@local.mailery";
+const RETIRED_LEGACY_INBOUND_MAILBOX_ID = `mbx:${RETIRED_LEGACY_INBOUND_ADDRESS}`;
+
 function mailboxRecipientRowsSql(idSql: string, toAddressesSql: string): string {
   const addressSql = normalizedRecipientSql("j.value");
   return `SELECT ${idSql} AS inbound_email_id,
@@ -616,8 +629,8 @@ function mailboxRecipientRowsSql(idSql: string, toAddressesSql: string): string 
              AND normalized.address NOT LIKE '%>%'
           UNION ALL
           SELECT ${idSql} AS inbound_email_id,
-                 'legacy-inbound@local.mailery' AS address,
-                 'mbx:legacy-inbound@local.mailery' AS mailbox_id
+                 '${LEGACY_INBOUND_ADDRESS}' AS address,
+                 '${LEGACY_INBOUND_MAILBOX_ID}' AS mailbox_id
            WHERE NOT EXISTS (
              SELECT 1
                FROM (
@@ -729,8 +742,8 @@ const MAIL_ARCHITECTURE_BACKFILL_SQL = `
    GROUP BY recipient.address;
 
   INSERT OR IGNORE INTO mailboxes (id, address, display_name, status, created_at, updated_at)
-  SELECT 'mbx:legacy-inbound@local.mailery',
-         'legacy-inbound@local.mailery',
+  SELECT '${LEGACY_INBOUND_MAILBOX_ID}',
+         '${LEGACY_INBOUND_ADDRESS}',
          'Legacy inbound',
          'active',
          COALESCE(MIN(inbound.created_at), datetime('now')),
@@ -749,8 +762,8 @@ const MAIL_ARCHITECTURE_BACKFILL_SQL = `
       JOIN inbound_recipients recipient ON recipient.inbound_email_id = inbound.id
     UNION ALL
     SELECT inbound.id,
-           'legacy-inbound@local.mailery',
-           'mbx:legacy-inbound@local.mailery'
+           '${LEGACY_INBOUND_ADDRESS}',
+           '${LEGACY_INBOUND_MAILBOX_ID}'
       FROM inbound_emails inbound
      WHERE NOT EXISTS (
        SELECT 1 FROM inbound_recipients recipient WHERE recipient.inbound_email_id = inbound.id
@@ -852,6 +865,46 @@ const MAIL_ARCHITECTURE_INBOUND_DELETE_TRIGGER_SQL = `
               LIMIT 1
            );
   END;
+`;
+
+const RETIRED_LEGACY_INBOUND_BRIDGE_SQL = `
+  INSERT OR IGNORE INTO mailboxes (id, address, display_name, owner_id, status, created_at, updated_at)
+  SELECT '${LEGACY_INBOUND_MAILBOX_ID}', '${LEGACY_INBOUND_ADDRESS}',
+         COALESCE(display_name, 'Legacy inbound'), owner_id, status, created_at, datetime('now')
+    FROM mailboxes
+   WHERE id = '${RETIRED_LEGACY_INBOUND_MAILBOX_ID}';
+
+  -- Drop only sources whose re-keyed identity already exists: the same
+  -- provenance recorded twice, once under each name. Everything else is
+  -- re-pointed, never deleted.
+  DELETE FROM mailbox_sources
+   WHERE mailbox_id = '${RETIRED_LEGACY_INBOUND_MAILBOX_ID}'
+     AND EXISTS (
+       SELECT 1
+         FROM mailbox_sources other
+        WHERE other.id = replace(mailbox_sources.id,
+                                 '${RETIRED_LEGACY_INBOUND_ADDRESS}',
+                                 '${LEGACY_INBOUND_ADDRESS}')
+     );
+
+  -- The retired address is embedded in the source id and in external_mailbox,
+  -- not just in mailbox_id, so all three have to move together.
+  UPDATE mailbox_sources
+     SET id = replace(id, '${RETIRED_LEGACY_INBOUND_ADDRESS}', '${LEGACY_INBOUND_ADDRESS}'),
+         mailbox_id = '${LEGACY_INBOUND_MAILBOX_ID}',
+         external_mailbox = '${LEGACY_INBOUND_ADDRESS}',
+         updated_at = datetime('now')
+   WHERE mailbox_id = '${RETIRED_LEGACY_INBOUND_MAILBOX_ID}';
+
+  -- mailbox_sources.mailbox_id cascades on delete, so the retired mailbox is
+  -- only removed once nothing is still attributed to it. Leaving the row behind
+  -- is recoverable; cascading away source history is not.
+  DELETE FROM mailboxes
+   WHERE id = '${RETIRED_LEGACY_INBOUND_MAILBOX_ID}'
+     AND NOT EXISTS (
+       SELECT 1 FROM mailbox_sources
+        WHERE mailbox_id = '${RETIRED_LEGACY_INBOUND_MAILBOX_ID}'
+     );
 `;
 
 const S3_MESSAGE_ID_RAW_URL_BACKFILL_SQL = `
@@ -1847,16 +1900,7 @@ const MIGRATIONS = [
   // that already recorded 46 never replays this body, and one that has not yet
   // reached it drops those tables moments later.
   `
-  INSERT OR IGNORE INTO mailboxes (id, address, display_name, owner_id, status, created_at, updated_at)
-  SELECT 'mbx:legacy-inbound@local.emails', 'legacy-inbound@local.emails', display_name,
-         owner_id, status, created_at, datetime('now')
-    FROM mailboxes
-   WHERE id = 'mbx:legacy-inbound@local.mailery';
-
-  UPDATE mailbox_sources
-     SET mailbox_id = 'mbx:legacy-inbound@local.emails'
-   WHERE mailbox_id = 'mbx:legacy-inbound@local.mailery';
-  DELETE FROM mailboxes WHERE id = 'mbx:legacy-inbound@local.mailery';
+  ${RETIRED_LEGACY_INBOUND_BRIDGE_SQL}
 
   UPDATE domains SET domain_type = 'self_hosted' WHERE domain_type = 'tenant';
   UPDATE domains SET source_of_truth = 'postgres' WHERE source_of_truth = 'cloud';
@@ -1883,6 +1927,16 @@ const MIGRATIONS = [
   DROP TABLE IF EXISTS mailbox_message_state;
   DROP TABLE IF EXISTS mail_folders;
   INSERT OR IGNORE INTO _migrations (id) VALUES (47);
+  `,
+
+  // Migration 48: re-run the rename bridge. Migration 46 already retired
+  // `local.mailery`, but the inbound trigger re-minted it on the next
+  // `getDatabase()` call, so any database released between the two carries the
+  // retired identity again. The trigger no longer knows the retired literal, so
+  // this pass is terminal rather than a truce.
+  `
+  ${RETIRED_LEGACY_INBOUND_BRIDGE_SQL}
+  INSERT OR IGNORE INTO _migrations (id) VALUES (48);
   `,
 ];
 
