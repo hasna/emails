@@ -197,10 +197,12 @@ set -euo pipefail
 : "${RELEASE_VERSION:?set the reviewed package version}"
 : "${RELEASE_COMMIT:?set the exact merged pull-request commit}"
 : "${NPM_PACKAGE:?set the canonical npm package name}"
+: "${NPM_REGISTRY:?set the canonical public npm registry}"
 
 HOSTED_CI_WORKFLOWS=(ci.yml terraform-aws-validate.yml)
 test "$GITHUB_REPOSITORY" = "hasna/emails"
 test "$NPM_PACKAGE" = "@hasna/emails"
+test "$NPM_REGISTRY" = "https://registry.npmjs.org"
 test "${#HOSTED_CI_WORKFLOWS[@]}" -eq 2
 test "${HOSTED_CI_WORKFLOWS[0]}" = "ci.yml"
 test "${HOSTED_CI_WORKFLOWS[1]}" = "terraform-aws-validate.yml"
@@ -225,30 +227,53 @@ jq -e --arg release_commit "$RELEASE_COMMIT" '
   and .merge_commit_sha == $release_commit
 ' <<<"$RELEASE_PR_JSON" >/dev/null
 
+HOSTED_CI_COMPLETED_AT_VALUES=()
+HOSTED_CI_UPDATED_AT_VALUES=()
+LATEST_HOSTED_CI_COMPLETION_EPOCH=0
 for HOSTED_CI_WORKFLOW in "${HOSTED_CI_WORKFLOWS[@]}"; do
   HOSTED_CI_RUNS_JSON="$(
     gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$HOSTED_CI_WORKFLOW/runs?head_sha=$RELEASE_COMMIT&event=push&status=completed&per_page=100"
   )"
-  jq -e --arg release_commit "$RELEASE_COMMIT" '
-    any(.workflow_runs[]?;
-      .head_sha == $release_commit
-      and .head_branch == "main"
-      and .event == "push"
-      and .status == "completed"
-      and .conclusion == "success")
-  ' <<<"$HOSTED_CI_RUNS_JSON" >/dev/null
+  MATCHED_HOSTED_CI_RUN_JSON="$(jq -cer --arg release_commit "$RELEASE_COMMIT" '
+    [.workflow_runs[]?
+      | select(
+          .head_sha == $release_commit
+          and .head_branch == "main"
+          and .event == "push"
+          and .status == "completed"
+          and .conclusion == "success"
+          and (.completed_at | type == "string" and length > 0)
+          and (.updated_at | type == "string" and length > 0))]
+    | sort_by(.completed_at, .updated_at, .id)
+    | last
+  ' <<<"$HOSTED_CI_RUNS_JSON")"
+  HOSTED_CI_COMPLETED_AT="$(jq -er '.completed_at' <<<"$MATCHED_HOSTED_CI_RUN_JSON")"
+  HOSTED_CI_UPDATED_AT="$(jq -er '.updated_at' <<<"$MATCHED_HOSTED_CI_RUN_JSON")"
+  HOSTED_CI_COMPLETION_EPOCH="$(date -u -d "$HOSTED_CI_COMPLETED_AT" +%s)"
+  HOSTED_CI_UPDATED_EPOCH="$(date -u -d "$HOSTED_CI_UPDATED_AT" +%s)"
+  test "$HOSTED_CI_UPDATED_EPOCH" -ge "$HOSTED_CI_COMPLETION_EPOCH"
+  HOSTED_CI_COMPLETED_AT_VALUES+=("$HOSTED_CI_COMPLETED_AT")
+  HOSTED_CI_UPDATED_AT_VALUES+=("$HOSTED_CI_UPDATED_AT")
+  if test "$HOSTED_CI_COMPLETION_EPOCH" -gt "$LATEST_HOSTED_CI_COMPLETION_EPOCH"; then
+    LATEST_HOSTED_CI_COMPLETION_EPOCH="$HOSTED_CI_COMPLETION_EPOCH"
+  fi
 done
+test "${#HOSTED_CI_COMPLETED_AT_VALUES[@]}" -eq 2
+test "${#HOSTED_CI_UPDATED_AT_VALUES[@]}" -eq 2
+test "$LATEST_HOSTED_CI_COMPLETION_EPOCH" -gt 0
 
+SOURCE_CHECKOUT_COMMIT="$(git -C "$SOURCE_CHECKOUT" rev-parse --verify 'HEAD^{commit}')"
+test "$SOURCE_CHECKOUT_COMMIT" = "$RELEASE_COMMIT"
 EXPECTED_NPM_TARBALL_URL="https://registry.npmjs.org/@hasna/emails/-/emails-${RELEASE_VERSION}.tgz"
-NPM_RELEASE_JSON="$(npm view "$NPM_PACKAGE@$RELEASE_VERSION" --json)"
+NPM_RELEASE_JSON="$(
+  npm view "$NPM_PACKAGE@$RELEASE_VERSION" --json --registry "$NPM_REGISTRY"
+)"
 jq -e \
   --arg npm_package "$NPM_PACKAGE" \
   --arg release_version "$RELEASE_VERSION" \
-  --arg release_commit "$RELEASE_COMMIT" \
   --arg tarball_url "$EXPECTED_NPM_TARBALL_URL" '
   .name == $npm_package
   and .version == $release_version
-  and .gitHead == $release_commit
   and (.dist.integrity
     | type == "string"
     and test("^sha512-[A-Za-z0-9+/]+={0,2}$"))
@@ -258,10 +283,14 @@ jq -e \
 NPM_REGISTRY_INTEGRITY="$(jq -er '.dist.integrity' <<<"$NPM_RELEASE_JSON")"
 NPM_PACK_DIR="$(mktemp -d)"
 trap 'rm -rf "$NPM_PACK_DIR"' EXIT
-NPM_PACK_JSON="$(
-  npm pack --ignore-scripts --json --pack-destination "$NPM_PACK_DIR" \
-    "$NPM_PACKAGE@$RELEASE_VERSION"
+NPM_PACK_OUTPUT_FILE="$NPM_PACK_DIR/npm-pack-output.log"
+npm pack --json --pack-destination "$NPM_PACK_DIR" --registry "$NPM_REGISTRY" "$SOURCE_CHECKOUT" \
+  >"$NPM_PACK_OUTPUT_FILE"
+NPM_PACK_JSON_START_LINE="$(
+  grep -n '^\[$' "$NPM_PACK_OUTPUT_FILE" | tail -1 | cut -d: -f1
 )"
+test -n "$NPM_PACK_JSON_START_LINE"
+NPM_PACK_JSON="$(tail -n +"$NPM_PACK_JSON_START_LINE" "$NPM_PACK_OUTPUT_FILE")"
 jq -e \
   --arg npm_package "$NPM_PACKAGE" \
   --arg release_version "$RELEASE_VERSION" \
@@ -276,6 +305,13 @@ jq -e \
 NPM_PACK_FILENAME="$(jq -er '.[0].filename' <<<"$NPM_PACK_JSON")"
 NPM_PACK_PATH="$NPM_PACK_DIR/$NPM_PACK_FILENAME"
 test -f "$NPM_PACK_PATH"
+
+NPM_TIME_JSON="$(npm view "$NPM_PACKAGE" time --json --registry "$NPM_REGISTRY")"
+NPM_PUBLISHED_AT="$(jq -er --arg release_version "$RELEASE_VERSION" '
+  .[$release_version] | select(type == "string" and length > 0)
+' <<<"$NPM_TIME_JSON")"
+NPM_PUBLISHED_EPOCH="$(date -u -d "$NPM_PUBLISHED_AT" +%s)"
+test "$NPM_PUBLISHED_EPOCH" -gt "$LATEST_HOSTED_CI_COMPLETION_EPOCH"
 ```
 
 ### 1. Prove topology, stage the release, stop every old writer, then save a database fence

@@ -69,6 +69,8 @@ describe("repository workflow safety", () => {
     for (const marker of [
       "RELEASE_PR_NUMBER",
       "NPM_PACKAGE",
+      "NPM_REGISTRY",
+      'test "$NPM_REGISTRY" = "https://registry.npmjs.org"',
       "HOSTED_CI_WORKFLOWS=(ci.yml terraform-aws-validate.yml)",
       'test "${#HOSTED_CI_WORKFLOWS[@]}" -eq 2',
       'test "${HOSTED_CI_WORKFLOWS[0]}" = "ci.yml"',
@@ -83,15 +85,27 @@ describe("repository workflow safety", () => {
       ".head_sha == $release_commit",
       '.head_branch == "main"',
       '.conclusion == "success"',
-      'npm view "$NPM_PACKAGE@$RELEASE_VERSION" --json',
-      ".gitHead == $release_commit",
+      "MATCHED_HOSTED_CI_RUN_JSON",
+      ".completed_at",
+      ".updated_at",
+      "LATEST_HOSTED_CI_COMPLETION_EPOCH",
+      'SOURCE_CHECKOUT_COMMIT="$(git -C "$SOURCE_CHECKOUT" rev-parse --verify \'HEAD^{commit}\')"',
+      'test "$SOURCE_CHECKOUT_COMMIT" = "$RELEASE_COMMIT"',
+      'npm view "$NPM_PACKAGE@$RELEASE_VERSION" --json --registry "$NPM_REGISTRY"',
       "EXPECTED_NPM_TARBALL_URL",
       ".dist.integrity",
       'test("^sha512-[A-Za-z0-9+/]+={0,2}$")',
       ".dist.tarball == $tarball_url",
-      'npm pack --ignore-scripts --json --pack-destination "$NPM_PACK_DIR"',
+      'npm pack --json --pack-destination "$NPM_PACK_DIR" --registry "$NPM_REGISTRY" "$SOURCE_CHECKOUT"',
+      "NPM_PACK_OUTPUT_FILE",
+      "NPM_PACK_JSON_START_LINE",
+      'tail -n +"$NPM_PACK_JSON_START_LINE"',
       ".integrity == $registry_integrity",
       'test -f "$NPM_PACK_PATH"',
+      'npm view "$NPM_PACKAGE" time --json --registry "$NPM_REGISTRY"',
+      "NPM_PUBLISHED_AT",
+      "NPM_PUBLISHED_EPOCH",
+      'test "$NPM_PUBLISHED_EPOCH" -gt "$LATEST_HOSTED_CI_COMPLETION_EPOCH"',
       "AWS deployment is prohibited",
       "Manual publishing and AWS deployment remain separate, manual, PR-first actions.",
     ]) {
@@ -99,8 +113,11 @@ describe("repository workflow safety", () => {
     }
 
     expect(preflight).not.toMatch(
-      /NPM_PROVENANCE_PREDICATE_TYPE|NPM_ATTESTATIONS|resolvedDependencies|base64 --decode|:\s*"\$\{HOSTED_CI_WORKFLOW:/,
+      /NPM_PROVENANCE_PREDICATE_TYPE|NPM_ATTESTATIONS|resolvedDependencies|base64 --decode|:\s*"\$\{HOSTED_CI_WORKFLOW:|\.gitHead|--ignore-scripts/,
     );
+    for (const npmCommand of preflight.split("\n").filter((line) => /\bnpm (?:view|pack)\b/.test(line))) {
+      expect(npmCommand).toContain('--registry "$NPM_REGISTRY"');
+    }
     expect(text, `${runbook} must not treat checkout or branch HEAD as release authority`).not.toContain(
       "SOURCE_HEAD=",
     );
