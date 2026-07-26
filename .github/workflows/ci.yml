@@ -137,7 +137,7 @@ jobs:
             -u EMAILS_AWS_REGION -u EMAILS_SES_AWS_PROFILE \
             -u RESEND_API_KEY -u RESEND_WEBHOOK_SECRET \
             AWS_EC2_METADATA_DISABLED=true \
-            HOME="$tmp_home" EMAILS_MODE=local EMAILS_DB_PATH=:memory: bun test
+            HOME="$tmp_home" EMAILS_MODE=local EMAILS_DB_PATH=:memory: bun test --max-concurrency 1
       - name: Build
         run: bun run build
       - name: Verify generated self-hosted SDK signatures
