@@ -30,8 +30,8 @@ const ENV_KEYS = [
   "HASNA_MAILERY_ENV_FILE",
 ] as const;
 
-const ORIGINAL_HOME = process.env["HOME"];
-const ORIGINAL_ENV = new Map<string, string | undefined>(ENV_KEYS.map((key) => [key, process.env[key]]));
+let ORIGINAL_HOME: string | undefined;
+let ORIGINAL_ENV = new Map<string, string | undefined>();
 
 let tempHome: string | null = null;
 let apiServer: ReturnType<typeof Bun.spawn> | null = null;
@@ -145,6 +145,8 @@ function parseResult<T>(result: { content: Array<{ text: string }> }): T {
 }
 
 beforeEach(async () => {
+  ORIGINAL_HOME = process.env["HOME"];
+  ORIGINAL_ENV = new Map(ENV_KEYS.map((key) => [key, process.env[key]]));
   resetEnv();
   tempHome = mkdtempSync(join(tmpdir(), "emails-mcp-domain-address-self-hosted-"));
   process.env["HOME"] = tempHome;

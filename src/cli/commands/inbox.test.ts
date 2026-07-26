@@ -31,6 +31,13 @@ let attachmentInventoryPages = new Map<string, {
 let attachmentInventoryRequests: URL[] = [];
 let seq = 0;
 
+function restoreProcessEnv(inherited: NodeJS.ProcessEnv): void {
+  for (const key of Object.keys(process.env)) {
+    if (!Object.prototype.hasOwnProperty.call(inherited, key)) delete process.env[key];
+  }
+  Object.assign(process.env, inherited);
+}
+
 type SeedOverrides = Partial<Parameters<typeof storeInboundEmail>[0]>;
 
 // Seed through the REAL inbound repo (POST /v1/messages). Call AFTER applyEnv().
@@ -1355,6 +1362,7 @@ describe("inbox attachment", () => {
         return Response.json({ error: "not found" }, { status: 404 });
       },
     });
+    const inheritedProcessEnv = { ...process.env };
 
     try {
       process.env.EMAILS_MODE = "self_hosted";
@@ -1396,7 +1404,9 @@ describe("inbox attachment", () => {
       expect(readFileSync(join(dir, files[0]!), "utf8")).toBe("two");
     } finally {
       legacyServer.stop(true);
-      stub.applyEnv();
+      restoreProcessEnv(inheritedProcessEnv);
+      resetSelfHostedConfigCache();
+      resetMailDataSource();
       rmSync(dir, { recursive: true, force: true });
     }
   });

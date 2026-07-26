@@ -20,6 +20,17 @@ import { resetMailDataSource } from "../../lib/mail-data-source.js";
 import { startV1Stub, type V1Stub } from "../../test-support/v1-stub.js";
 import { registerSendCommands } from "./send.js";
 
+let INHERITED_PROCESS_ENV: NodeJS.ProcessEnv;
+function captureInheritedProcessEnv(): void {
+  INHERITED_PROCESS_ENV = { ...process.env };
+}
+function restoreInheritedProcessEnv(): void {
+  for (const key of Object.keys(process.env)) {
+    if (!Object.prototype.hasOwnProperty.call(INHERITED_PROCESS_ENV, key)) delete process.env[key];
+  }
+  Object.assign(process.env, INHERITED_PROCESS_ENV);
+}
+
 interface RunResult {
   consoleOutput: string;
   errorOutput: string;
@@ -69,6 +80,7 @@ describe("emails send — suppressed recipients (self-hosted)", () => {
   afterAll(() => stub.stop());
 
   beforeEach(async () => {
+    captureInheritedProcessEnv();
     await stub.seed({ contacts: [{ id: "c1", email: "blocked@ext.com", name: null, suppressed: true, send_count: 0 }] });
     stub.applyEnv();
     resetMailDataSource();
@@ -77,6 +89,7 @@ describe("emails send — suppressed recipients (self-hosted)", () => {
   afterEach(() => {
     stub.clearEnv();
     resetMailDataSource();
+    restoreInheritedProcessEnv();
   });
 
   it("refuses the send instead of mailing a suppressed recipient", async () => {
@@ -144,6 +157,7 @@ describe("emails send — suppressed recipients (local)", () => {
   let providerId: string;
 
   beforeEach(() => {
+    captureInheritedProcessEnv();
     process.env["EMAILS_MODE"] = "local";
     process.env["EMAILS_DB_PATH"] = ":memory:";
     resetDatabase();
@@ -157,6 +171,7 @@ describe("emails send — suppressed recipients (local)", () => {
     resetMailDataSource();
     delete process.env["EMAILS_MODE"];
     delete process.env["EMAILS_DB_PATH"];
+    restoreInheritedProcessEnv();
   });
 
   it("refuses the send instead of mailing a suppressed recipient", async () => {
@@ -199,6 +214,7 @@ describe("suppression matches the recipient canonically, not by exact string", (
   let providerId: string;
 
   beforeEach(() => {
+    captureInheritedProcessEnv();
     process.env["EMAILS_MODE"] = "local";
     process.env["EMAILS_DB_PATH"] = ":memory:";
     resetDatabase();
@@ -211,6 +227,7 @@ describe("suppression matches the recipient canonically, not by exact string", (
     resetMailDataSource();
     delete process.env["EMAILS_MODE"];
     delete process.env["EMAILS_DB_PATH"];
+    restoreInheritedProcessEnv();
   });
 
   // `contacts.email` has no COLLATE NOCASE and nothing canonicalized either
@@ -273,6 +290,7 @@ describe("reply, forward, and the MCP send tool refuse suppressed recipients too
   let providerId: string;
 
   beforeEach(() => {
+    captureInheritedProcessEnv();
     process.env["EMAILS_MODE"] = "local";
     process.env["EMAILS_DB_PATH"] = ":memory:";
     resetDatabase();
@@ -286,6 +304,7 @@ describe("reply, forward, and the MCP send tool refuse suppressed recipients too
     resetMailDataSource();
     delete process.env["EMAILS_MODE"];
     delete process.env["EMAILS_DB_PATH"];
+    restoreInheritedProcessEnv();
   });
 
   async function seedInbound(): Promise<string> {

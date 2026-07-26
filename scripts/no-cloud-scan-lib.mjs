@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 const legacyHostedEnvKeys = [
   "MAILERY_API_URL",
   "MAILERY_API_KEY",
@@ -130,17 +132,10 @@ const boundaryPatterns = [
     label: "hosted implementation vocabulary",
     scopes: BOTH,
     pattern: /\b(?:saas|fleet)\b|cloud_/i,
-    // `src/lib/mode.ts`, `src/server/self-hosted/migrations.ts` and
-    // `src/server/self-hosted/service-resources.test.ts` are handled by
-    // stripExactCompatibilityBridges and need no allowance.
-    sourceAllowance: {
-      reason:
-        "Prose describing the pivot AWAY from a hosted SaaS/fleet (the changelog, design docs, the deploy " +
-        "README, and the Terraform comment asserting no vendor-owned account), plus the suites that assert " +
-        "`MAILERY_CLOUD_*` inputs are rejected. Non-test, non-prose source is still checked, as is every " +
-        "packed bundle chunk — and the packed README is checked, because allowances are source-only.",
-      paths: [/\.test\.ts$/, /^CHANGELOG\.md$/, /^docs\//, /^deploy\/aws\/README\.md$/, /^deploy\/aws\/backend\.tf$/],
-    },
+    // Every legitimate source occurrence is handled content-exactly by
+    // stripExactCompatibilityBridges. There is deliberately no path allowance:
+    // new test fixtures, prose, or CHANGELOG entries must prove they are another
+    // narrow compatibility record instead of inheriting a directory-wide bypass.
   },
 ];
 
@@ -198,8 +193,134 @@ export const artifactBoundaryPatterns = boundaryPatternsForScope(ARTIFACT_SCOPE)
 /** Patterns enforced on the committed source tree. */
 export const sourceBoundaryPatterns = boundaryPatternsForScope(SOURCE_SCOPE);
 
+// The retired-name compatibility bridge has one canonical source location. Its
+// body is extracted from that source using unique structural anchors and accepted
+// only when the complete byte range retains this pinned digest. Keeping only the
+// anchors and hash here avoids making the guard another source of deployment-mode
+// configuration while still failing closed on insertion, reordering, utility
+// changes, duplicate anchors, or movement to another path.
+const exactLegacyHostedEnvUnsetBridgeSpec = {
+  path: "scripts/run-hermetic-tests.sh",
+  startAnchor: "run_scrubbed() {\n",
+  endAnchor: '    "$@"\n',
+  sha256: "13ad76c318041f74aa90fe5ddd9d09589119d171114eda3df2d315aa951f57d9",
+};
+
+function locateExactLegacyHostedEnvUnsetBridge(content, path) {
+  const spec = exactLegacyHostedEnvUnsetBridgeSpec;
+  if (path !== spec.path) return undefined;
+
+  const start = content.indexOf(spec.startAnchor);
+  if (start < 0 || content.indexOf(spec.startAnchor, start + spec.startAnchor.length) >= 0) return undefined;
+
+  const endAnchorStart = content.indexOf(spec.endAnchor, start + spec.startAnchor.length);
+  if (
+    endAnchorStart < 0 ||
+    content.indexOf(spec.endAnchor) !== endAnchorStart ||
+    content.indexOf(spec.endAnchor, endAnchorStart + spec.endAnchor.length) >= 0
+  ) {
+    return undefined;
+  }
+
+  const end = endAnchorStart + spec.endAnchor.length;
+  const bridge = content.slice(start, end);
+  if (createHash("sha256").update(bridge).digest("hex") !== spec.sha256) return undefined;
+
+  for (const key of legacyHostedEnvKeys) {
+    const token = `-u ${key}`;
+    if (bridge.indexOf(token) < 0 || bridge.indexOf(token) !== bridge.lastIndexOf(token)) {
+      return undefined;
+    }
+  }
+  return { content: bridge, start, end };
+}
+
+export function extractExactLegacyHostedEnvUnsetBridge(content, path) {
+  return locateExactLegacyHostedEnvUnsetBridge(content, path)?.content;
+}
+
+const exactHistoricalChangelogBridge = [
+  "- rebuild the product as local-first and operator-owned AWS self-hosting, with no Hasna SaaS control plane.",
+  "- add durable idempotent self-hosted sends, authenticated attachment retrieval, mailbox mutations, signed replay-safe webhooks, and explicit compatibility for previously issued API keys.",
+  "- harden deployment with separate migration/runtime database roles, readiness health checks, immutable container/action pins, and explicit local/self-hosted mode validation.",
+].join("\n") + "\n";
+
+// Historical and deployment prose may document the completed move away from a
+// hosted product. Preserve only the exact current paragraphs, including their
+// surrounding context, rather than allowing an entire file or directory.
+const exactHistoricalHostedVocabularyBridges = new Map([
+  [
+    "CHANGELOG.md",
+    {
+      content: exactHistoricalChangelogBridge,
+      tokens: ["SaaS"],
+    },
+  ],
+  [
+    "deploy/aws/README.md",
+    {
+      content: [
+        "# Emails on operator-owned AWS",
+        "",
+        "This Terraform root configuration deploys the Emails self-hosted service into",
+        "an AWS account controlled by the operator. It contains no maintainer account,",
+        "hostname, role, control plane, billing integration, fleet resource, or hosted",
+        "service endpoint.",
+      ].join("\n") + "\n",
+      tokens: ["fleet"],
+    },
+  ],
+  [
+    "deploy/aws/backend.tf",
+    {
+      content: [
+        "terraform {",
+        "  # Values are supplied by the operator with -backend-config. Nothing here",
+        "  # points at a vendor, fleet, or maintainer-owned account.",
+        '  backend "s3" {}',
+        "}",
+      ].join("\n") + "\n",
+      tokens: ["fleet"],
+    },
+  ],
+  [
+    "docs/design/multi-tenancy-auth.md",
+    {
+      content: [
+        "## 15. Implementation reconciliation (v3)",
+        "",
+        "The implementation now has exactly two deployment modes: local SQLite and",
+        "operator-owned `self_hosted` PostgreSQL. It has no hosted SaaS control plane and",
+        "no hybrid synchronization mode. Passing an explicit Bun `Database` handle to",
+        "the public library always selects that caller-owned SQLite database, even when",
+        "the process is otherwise configured as a self-hosted client.",
+      ].join("\n") + "\n",
+      tokens: ["SaaS"],
+    },
+  ],
+]);
+
+for (const [path, { content: bridge, tokens }] of exactHistoricalHostedVocabularyBridges) {
+  for (const token of tokens) {
+    if (bridge.indexOf(token) < 0 || bridge.indexOf(token) !== bridge.lastIndexOf(token)) {
+      throw new Error(`exact historical hosted-vocabulary bridge ${path} must contain ${token} exactly once`);
+    }
+  }
+}
+
 function stripExactCompatibilityBridges(content, path) {
   let scanned = content;
+  // Normalize only the uniquely anchored, byte-for-byte pinned canonical bridge.
+  // Any structural or content mismatch leaves every retired token visible.
+  const exactBridge = locateExactLegacyHostedEnvUnsetBridge(scanned, path);
+  if (exactBridge !== undefined) {
+    let normalizedBridge = exactBridge.content;
+    for (const key of legacyHostedEnvKeys) {
+      normalizedBridge = normalizedBridge.replace(`-u ${key}`, "-u LEGACY_HOSTED_SENTINEL");
+    }
+    scanned = scanned.slice(0, exactBridge.start) + normalizedBridge + scanned.slice(exactBridge.end);
+  }
+
   // The mode resolver must retain these literal names only to reject old
   // environments with actionable migration guidance. Do not exempt its file or
   // bundle chunk wholesale: only erase literals inside the named rejection list.
@@ -239,10 +360,19 @@ function stripExactCompatibilityBridges(content, path) {
   // bundles that import it for `version`.
   scanned = scanned.replace(/(?<![\w-])("?)author\1\s*:\s*"[^"]*"/g, 'author: "AUTHORSHIP_SENTINEL"');
 
-  // CI explicitly unsets legacy variables to make the test environment
-  // deterministic. Exempt only those `env -u NAME` tokens.
-  if (path.endsWith(".github/workflows/ci.yml")) {
-    for (const key of legacyHostedEnvKeys) scanned = scanned.replaceAll(`-u ${key}`, "-u LEGACY_HOSTED_SENTINEL");
+  const historicalBridge = exactHistoricalHostedVocabularyBridges.get(path);
+  const historicalBridgeStart = historicalBridge === undefined ? -1 : scanned.indexOf(historicalBridge.content);
+  if (historicalBridge !== undefined && historicalBridgeStart >= 0) {
+    const { content: bridge, tokens } = historicalBridge;
+    if (scanned.indexOf(bridge, historicalBridgeStart + bridge.length) >= 0) return scanned;
+    let normalizedHistoricalBridge = bridge;
+    for (const token of tokens) {
+      normalizedHistoricalBridge = normalizedHistoricalBridge.replace(token, "HISTORICAL_HOSTED_SENTINEL");
+    }
+    scanned =
+      scanned.slice(0, historicalBridgeStart) +
+      normalizedHistoricalBridge +
+      scanned.slice(historicalBridgeStart + bridge.length);
   }
   return scanned;
 }
@@ -253,7 +383,14 @@ function stripExactCompatibilityBridges(content, path) {
  * (source) or package-relative (artifact) for `sourceAllowlist` to resolve.
  */
 export function boundaryFindings(content, path, scope) {
-  const scanned = stripExactCompatibilityBridges(content, path);
+  let scanned = stripExactCompatibilityBridges(content, path);
+  // Source test suites must spell the retired environment inputs they reject.
+  // Remove only those exact variable-name tokens before the broader `cloud_`
+  // vocabulary rule runs. Artifact fixtures remain unmodified and must detect
+  // the same token, which is why this normalization is source-only.
+  if (scope === SOURCE_SCOPE && /\.test\.ts$/.test(path)) {
+    for (const key of legacyHostedEnvKeys) scanned = scanned.replaceAll(key, "LEGACY_HOSTED_SENTINEL");
+  }
   return boundaryPatternsForScope(scope)
     .filter((entry) => !(scope === SOURCE_SCOPE && isSourceAllowed(entry, path)))
     .filter(({ pattern }) => pattern.test(scanned))

@@ -11,6 +11,46 @@ patched_base_image="${CONTAINER_RUNTIME_PATCHED_BASE_IMAGE:-hasna-emails-patched
 image="${CONTAINER_RUNTIME_IMAGE:-hasna-emails-runtime-contract:${revision:0:12}}"
 container="hasna-emails-runtime-contract-${revision:0:12}-$$"
 
+if test "${CONTAINER_RUNTIME_PLATFORM+x}" = "x"; then
+  case "$CONTAINER_RUNTIME_PLATFORM" in
+    linux/arm64 | linux/amd64)
+      platform="$CONTAINER_RUNTIME_PLATFORM"
+      ;;
+    *)
+      printf 'unsupported CONTAINER_RUNTIME_PLATFORM: %s (expected linux/arm64 or linux/amd64)\n' \
+        "$CONTAINER_RUNTIME_PLATFORM" >&2
+      exit 1
+      ;;
+  esac
+else
+  docker_server_arch="$(docker info --format '{{.Architecture}}')"
+  case "$docker_server_arch" in
+    aarch64 | arm64)
+      platform="linux/arm64"
+      ;;
+    x86_64 | amd64)
+      platform="linux/amd64"
+      ;;
+    *)
+      printf 'unsupported Docker server architecture: %s\n' "$docker_server_arch" >&2
+      exit 1
+      ;;
+  esac
+fi
+
+case "$platform" in
+  linux/arm64)
+    expected_bun_arch="arm64"
+    ;;
+  linux/amd64)
+    expected_bun_arch="x64"
+    ;;
+  *)
+    printf 'unsupported resolved container platform: %s\n' "$platform" >&2
+    exit 1
+    ;;
+esac
+
 cleanup() {
   docker rm -f "$container" >/dev/null 2>&1 || true
   if test "${CONTAINER_RUNTIME_KEEP_IMAGE:-0}" != "1"; then
@@ -19,18 +59,30 @@ cleanup() {
 }
 trap cleanup EXIT
 
-docker build --platform linux/amd64 \
+assert_image_platform() {
+  local candidate_image="$1"
+  local actual_platform
+  actual_platform="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$candidate_image")"
+  if test "$actual_platform" != "$platform"; then
+    printf 'image platform mismatch for %s: requested %s, got %s\n' \
+      "$candidate_image" "$platform" "$actual_platform" >&2
+    return 1
+  fi
+}
+
+docker build --platform "$platform" \
   --target base \
   --tag "$patched_base_image" \
   --build-arg "BUN_IMAGE=$upstream_image" .
+assert_image_platform "$patched_base_image"
 
-docker build --platform linux/amd64 \
+docker build --platform "$platform" \
   --build-arg "BUN_IMAGE=$upstream_image" \
   --build-arg "VERSION=$version" \
   --build-arg "REVISION=$revision" \
   --tag "$image" .
+assert_image_platform "$image"
 
-test "$(docker image inspect --format '{{.Architecture}}' "$image")" = "amd64"
 test "$(docker image inspect --format '{{.Config.User}}' "$image")" = "1000:1000"
 test "$(docker image inspect --format '{{.Config.WorkingDir}}' "$image")" = "/app"
 test "$(docker image inspect --format '{{json .Config.Entrypoint}}' "$image")" = '["/usr/local/bin/bun"]'
@@ -39,10 +91,18 @@ test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainer
 test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' "$image")" = "$version"
 test "$(docker image inspect --format '{{json (index .Config.Volumes "/tmp")}}' "$image")" = '{}'
 
-docker run --rm --platform linux/amd64 --read-only \
+docker run --rm --platform "$platform" --read-only \
+  --env "CONTAINER_RUNTIME_EXPECTED_BUN_ARCH=$expected_bun_arch" \
   --entrypoint /usr/local/bin/bun "$image" -e '
     import { access, stat, writeFile } from "node:fs/promises";
     import { rootCertificates } from "node:tls";
+    const expectedArch = process.env.CONTAINER_RUNTIME_EXPECTED_BUN_ARCH;
+    if (expectedArch !== "arm64" && expectedArch !== "x64") {
+      throw new Error(`unsupported expected runtime architecture: ${expectedArch ?? "unset"}`);
+    }
+    if (process.arch !== expectedArch) {
+      throw new Error(`runtime architecture mismatch: expected ${expectedArch}, got ${process.arch}`);
+    }
     if (process.cwd() !== "/app") throw new Error(`unexpected cwd: ${process.cwd()}`);
     if (process.getuid?.() !== 1000 || process.getgid?.() !== 1000) {
       throw new Error(`unexpected identity: ${process.getuid?.()}:${process.getgid?.()}`);
@@ -59,11 +119,11 @@ docker run --rm --platform linux/amd64 --read-only \
     if (rootCertificates.length < 100) throw new Error("public TLS root store is unavailable");
   '
 
-test "$(docker run --rm --platform linux/amd64 --read-only "$image" src/cli/index.tsx --version)" = "$version"
-docker run --rm --platform linux/amd64 --read-only "$image" src/server/index.ts --help \
+test "$(docker run --rm --platform "$platform" --read-only "$image" src/cli/index.tsx --version)" = "$version"
+docker run --rm --platform "$platform" --read-only "$image" src/server/index.ts --help \
   | grep -F 'ingest-worker' >/dev/null
 
-docker run --detach --platform linux/amd64 --read-only --name "$container" \
+docker run --detach --platform "$platform" --read-only --name "$container" \
   --tmpfs /app/data:rw,noexec,nosuid,nodev,mode=0700,uid=1000,gid=1000 \
   --env EMAILS_MODE=local \
   --env EMAILS_DB_PATH=/app/data/emails.db \

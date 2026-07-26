@@ -198,6 +198,7 @@ describe("deployment-mode axis ratchet", () => {
     // presence, not proportion — one file of a kind satisfies it.
     const kinds = new Set(scanned.map((file) => extname(file.path).toLowerCase() || "(extensionless)"));
     for (const kind of [".ts", ".tsx", ".mjs", ".md", ".tf", ".yml", ".json"]) expect(kinds).toContain(kind);
+
   });
 
   it("keeps the corpus exemption list minimal, live, and free of self-exemption", () => {

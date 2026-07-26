@@ -24,6 +24,17 @@ import { App } from "../tui-solid/App.js";
 import { resolveAddressChoice } from "../tui-solid/context/emails-state.js";
 import { startV1Stub, type V1Stub } from "../../test-support/v1-stub.js";
 
+let INHERITED_PROCESS_ENV: NodeJS.ProcessEnv;
+function captureInheritedProcessEnv(): void {
+  INHERITED_PROCESS_ENV = { ...process.env };
+}
+function restoreInheritedProcessEnv(): void {
+  for (const key of Object.keys(process.env)) {
+    if (!Object.prototype.hasOwnProperty.call(INHERITED_PROCESS_ENV, key)) delete process.env[key];
+  }
+  Object.assign(process.env, INHERITED_PROCESS_ENV);
+}
+
 let stub: V1Stub;
 let savedHome: string | undefined;
 let tmpHome = "";
@@ -58,6 +69,7 @@ beforeAll(async () => {
 afterAll(() => stub.stop());
 
 beforeEach(async () => {
+  captureInheritedProcessEnv();
   process.env["EMAILS_TUI_DISABLE_THEME_PROBE"] = "1";
   process.env["EMAILS_TUI_CLIPBOARD_DRY_RUN"] = "1";
   savedHome = process.env["HOME"];
@@ -80,6 +92,7 @@ afterEach(() => {
   if (savedHome === undefined) delete process.env["HOME"];
   else process.env["HOME"] = savedHome;
   rmSync(tmpHome, { recursive: true, force: true });
+  restoreInheritedProcessEnv();
 });
 
 function seedMessage(

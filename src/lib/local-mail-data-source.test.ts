@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,6 +7,17 @@ import { createProvider } from "../db/providers.local.js";
 import { getSandboxCount } from "../db/sandbox.local.js";
 import { storeInboundEmail } from "../db/inbound.local.js";
 import { resetMailDataSource, resolveMailDataSource, SqliteMailDataSource } from "./mail-data-source.js";
+
+let INHERITED_PROCESS_ENV: NodeJS.ProcessEnv;
+function captureInheritedProcessEnv(): void {
+  INHERITED_PROCESS_ENV = { ...process.env };
+}
+function restoreInheritedProcessEnv(): void {
+  for (const key of Object.keys(process.env)) {
+    if (!Object.prototype.hasOwnProperty.call(INHERITED_PROCESS_ENV, key)) delete process.env[key];
+  }
+  Object.assign(process.env, INHERITED_PROCESS_ENV);
+}
 
 const attachmentDirs: string[] = [];
 
@@ -36,6 +47,7 @@ function clearMailModeEnv(): void {
 }
 
 beforeEach(() => {
+  captureInheritedProcessEnv();
   clearMailModeEnv();
   process.env["EMAILS_MODE"] = "local";
   process.env["EMAILS_DB_PATH"] = ":memory:";
@@ -50,6 +62,7 @@ afterEach(() => {
   clearMailModeEnv();
   delete process.env["EMAILS_DB_PATH"];
   for (const dir of attachmentDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  restoreInheritedProcessEnv();
 });
 
 function seedInbound() {

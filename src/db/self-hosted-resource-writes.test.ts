@@ -19,6 +19,17 @@ import { createSendKey } from "./send-keys.js";
 import { createTemplate, listTemplates, getTemplate, deleteTemplate } from "./templates.js";
 import { createSequence, listSequences } from "./sequences.js";
 
+let INHERITED_PROCESS_ENV: NodeJS.ProcessEnv;
+function captureInheritedProcessEnv(): void {
+  INHERITED_PROCESS_ENV = { ...process.env };
+}
+function restoreInheritedProcessEnv(): void {
+  for (const key of Object.keys(process.env)) {
+    if (!Object.prototype.hasOwnProperty.call(INHERITED_PROCESS_ENV, key)) delete process.env[key];
+  }
+  Object.assign(process.env, INHERITED_PROCESS_ENV);
+}
+
 const SERVER_CODE = `
 const owners = [];
 const groups = [];
@@ -129,6 +140,7 @@ beforeAll(async () => {
 afterAll(() => proc?.kill());
 
 beforeEach(() => {
+  captureInheritedProcessEnv();
   process.env.EMAILS_MODE = "self_hosted";
   process.env.EMAILS_SELF_HOSTED_URL = baseUrl;
   process.env.EMAILS_SELF_HOSTED_API_KEY = "test_key";
@@ -140,6 +152,7 @@ afterEach(() => {
   delete process.env.EMAILS_SELF_HOSTED_URL;
   delete process.env.EMAILS_SELF_HOSTED_API_KEY;
   resetSelfHostedConfigCache();
+  restoreInheritedProcessEnv();
 });
 
 describe("resource repos route writes to selfHosted in selfHosted mode", () => {

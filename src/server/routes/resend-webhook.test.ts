@@ -1,12 +1,24 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeAll, beforeEach, afterEach, afterAll } from "bun:test";
 import { closeDatabase, resetDatabase, getDatabase } from "../../db/database.js";
 import { createProvider } from "../../db/providers.local.js";
 import { listInboundEmails } from "../../db/inbound.local.js";
 import { handleResendWebhook } from "./resend-webhook.js";
 
+let INHERITED_PROCESS_ENV: NodeJS.ProcessEnv;
+function captureInheritedProcessEnv(): void {
+  INHERITED_PROCESS_ENV = { ...process.env };
+}
+function restoreInheritedProcessEnv(): void {
+  for (const key of Object.keys(process.env)) {
+    if (!Object.prototype.hasOwnProperty.call(INHERITED_PROCESS_ENV, key)) delete process.env[key];
+  }
+  Object.assign(process.env, INHERITED_PROCESS_ENV);
+}
+
 const SECRET = `whsec_${Buffer.from("resend-route-test-secret").toString("base64")}`;
 
 beforeEach(() => {
+  captureInheritedProcessEnv();
   process.env["EMAILS_DB_PATH"] = ":memory:";
   process.env["RESEND_WEBHOOK_SECRET"] = SECRET;
   resetDatabase();
@@ -18,6 +30,7 @@ afterEach(() => {
   delete process.env["RESEND_WEBHOOK_SECRET"];
   delete process.env["EMAILS_MODE"];
   delete process.env["HASNA_EMAILS_DATABASE_URL"];
+  restoreInheritedProcessEnv();
 });
 
 async function post(body: unknown, id = crypto.randomUUID()): Promise<Request> {

@@ -11,12 +11,23 @@
 // in-memory database is a fresh database on every open and cannot observe a
 // resurrection at all.
 
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
 import { closeDatabase, getDatabase, now, resetDatabase, uuid } from "./database.js";
+
+let INHERITED_PROCESS_ENV: NodeJS.ProcessEnv;
+function captureInheritedProcessEnv(): void {
+  INHERITED_PROCESS_ENV = { ...process.env };
+}
+function restoreInheritedProcessEnv(): void {
+  for (const key of Object.keys(process.env)) {
+    if (!Object.prototype.hasOwnProperty.call(INHERITED_PROCESS_ENV, key)) delete process.env[key];
+  }
+  Object.assign(process.env, INHERITED_PROCESS_ENV);
+}
 
 const RETIRED_ADDRESS = "legacy-inbound@local.mailery";
 const RETIRED_MAILBOX_ID = `mbx:${RETIRED_ADDRESS}`;
@@ -30,6 +41,7 @@ let root: string;
 let path: string;
 
 beforeEach(() => {
+  captureInheritedProcessEnv();
   root = mkdtempSync(join(tmpdir(), "emails-retired-identity-"));
   path = join(root, "emails.db");
   closeDatabase();
@@ -42,6 +54,7 @@ afterEach(() => {
   resetDatabase();
   delete process.env["EMAILS_DB_PATH"];
   rmSync(root, { recursive: true, force: true });
+  restoreInheritedProcessEnv();
 });
 
 /** Inbound mail whose `to` header has no parseable recipient. */

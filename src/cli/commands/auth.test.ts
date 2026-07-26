@@ -12,6 +12,17 @@ import { startV1Stub, type V1Stub } from "../../test-support/v1-stub.js";
 import { resetSelfHostedConfigCache } from "../../db/self-hosted-store.js";
 import { registerAuthCommands } from "./auth.js";
 
+let INHERITED_PROCESS_ENV: NodeJS.ProcessEnv;
+function captureInheritedProcessEnv(): void {
+  INHERITED_PROCESS_ENV = { ...process.env };
+}
+function restoreInheritedProcessEnv(): void {
+  for (const key of Object.keys(process.env)) {
+    if (!Object.prototype.hasOwnProperty.call(INHERITED_PROCESS_ENV, key)) delete process.env[key];
+  }
+  Object.assign(process.env, INHERITED_PROCESS_ENV);
+}
+
 let stub: V1Stub;
 
 async function runAuth(args: string[]) {
@@ -57,6 +68,7 @@ beforeAll(async () => {
 });
 afterAll(() => stub.stop());
 beforeEach(async () => {
+  captureInheritedProcessEnv();
   await stub.reset();
   stub.applyEnv();
   clearSessionEnv();
@@ -64,6 +76,7 @@ beforeEach(async () => {
 afterEach(() => {
   clearSessionEnv();
   stub.clearEnv();
+  restoreInheritedProcessEnv();
 });
 
 async function signupAndVerify(email: string, password: string, org: string, slug: string): Promise<void> {

@@ -24,6 +24,17 @@ import { selfHostedListQuery, selfHostedPage } from "./self-hosted-resource.loca
 // their mode gate — is only reachable from here.
 import { listProviders } from "./providers.local.js";
 
+let INHERITED_PROCESS_ENV: NodeJS.ProcessEnv;
+function captureInheritedProcessEnv(): void {
+  INHERITED_PROCESS_ENV = { ...process.env };
+}
+function restoreInheritedProcessEnv(): void {
+  for (const key of Object.keys(process.env)) {
+    if (!Object.prototype.hasOwnProperty.call(INHERITED_PROCESS_ENV, key)) delete process.env[key];
+  }
+  Object.assign(process.env, INHERITED_PROCESS_ENV);
+}
+
 // Five providers, newest first once the repo layer sorts by created_at DESC:
 // p5, p4, p3, p2, p1.
 const SERVER_CODE = `
@@ -77,6 +88,7 @@ beforeAll(async () => {
 afterAll(() => proc?.kill());
 
 beforeEach(() => {
+  captureInheritedProcessEnv();
   process.env.EMAILS_MODE = "self_hosted";
   process.env.EMAILS_SELF_HOSTED_URL = baseUrl;
   process.env.EMAILS_SELF_HOSTED_API_KEY = "test_key";
@@ -88,6 +100,7 @@ afterEach(() => {
   delete process.env.EMAILS_SELF_HOSTED_URL;
   delete process.env.EMAILS_SELF_HOSTED_API_KEY;
   resetSelfHostedConfigCache();
+  restoreInheritedProcessEnv();
 });
 
 describe("selfHostedListQuery windows the page exactly once", () => {

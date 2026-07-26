@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resetSelfHostedConfigCache } from "../db/self-hosted-store.js";
+import { resetMailDataSource } from "../lib/mail-data-source.js";
 import { mcpTestRequestInit, MCP_TEST_HTTP_TOKEN, startTestMcpHttpServer } from "../test-support/mcp-http.js";
 import { startV1Stub, type V1Stub } from "../test-support/v1-stub.js";
 
@@ -24,6 +25,13 @@ const { DEFAULT_MCP_HTTP_PORT, MCP_HTTP_ALLOWED_HOSTS_ENV, MCP_HTTP_TOKEN_ENV, M
 
 const servers: Array<ReturnType<typeof startHttpServer>> = [];
 let stub: V1Stub;
+
+function restoreProcessEnv(inherited: NodeJS.ProcessEnv): void {
+  for (const key of Object.keys(process.env)) {
+    if (!Object.prototype.hasOwnProperty.call(inherited, key)) delete process.env[key];
+  }
+  Object.assign(process.env, inherited);
+}
 
 async function withClient<T>(name: string, run: (client: InstanceType<typeof Client>) => Promise<T>): Promise<T> {
   const server = startTestMcpHttpServer();
@@ -211,6 +219,7 @@ describe("emails-mcp HTTP transport", () => {
       },
     });
     servers.push(inventoryServer);
+    const inheritedProcessEnv = { ...process.env };
     process.env.EMAILS_MODE = "self_hosted";
     process.env.EMAILS_SELF_HOSTED_URL = `http://127.0.0.1:${inventoryServer.port}`;
     process.env.EMAILS_SELF_HOSTED_API_KEY = "attachment-inventory-http-test-key";
@@ -271,8 +280,9 @@ describe("emails-mcp HTTP transport", () => {
         expect(requests[0]?.searchParams.get("since")).toBe("2026-07-24T08:00:00.000Z");
       });
     } finally {
-      stub.applyEnv();
+      restoreProcessEnv(inheritedProcessEnv);
       resetSelfHostedConfigCache();
+      resetMailDataSource();
     }
   });
 
@@ -305,6 +315,7 @@ describe("emails-mcp HTTP transport", () => {
       },
     });
     servers.push(inventoryServer);
+    const inheritedProcessEnv = { ...process.env };
     process.env.EMAILS_MODE = "self_hosted";
     process.env.EMAILS_SELF_HOSTED_URL = `http://127.0.0.1:${inventoryServer.port}`;
     process.env.EMAILS_SELF_HOSTED_API_KEY = "attachment-inventory-http-test-key";
@@ -328,8 +339,9 @@ describe("emails-mcp HTTP transport", () => {
         }
       });
     } finally {
-      stub.applyEnv();
+      restoreProcessEnv(inheritedProcessEnv);
       resetSelfHostedConfigCache();
+      resetMailDataSource();
     }
   });
 

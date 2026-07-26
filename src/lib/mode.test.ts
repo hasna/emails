@@ -1,7 +1,7 @@
 // Dual-mode resolver contract: local is the safe default and never loads remote
 // credentials; self_hosted is explicit and fails closed without URL + credential.
 
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { existsSync, mkdirSync, rmSync, writeFileSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { resetSelfHostedConfigCache } from "../db/self-hosted-store.js";
@@ -18,9 +18,22 @@ import {
 } from "./mode.js";
 import { saveConfig } from "./config.js";
 
+let INHERITED_PROCESS_ENV: NodeJS.ProcessEnv;
+let ORIGINAL_HOME: string | undefined;
+let ORIGINAL_PATH: string | undefined;
+function captureInheritedProcessEnv(): void {
+  INHERITED_PROCESS_ENV = { ...process.env };
+  ORIGINAL_HOME = process.env["HOME"];
+  ORIGINAL_PATH = process.env["PATH"];
+}
+function restoreInheritedProcessEnv(): void {
+  for (const key of Object.keys(process.env)) {
+    if (!Object.prototype.hasOwnProperty.call(INHERITED_PROCESS_ENV, key)) delete process.env[key];
+  }
+  Object.assign(process.env, INHERITED_PROCESS_ENV);
+}
+
 const TMP_HOME = join("/tmp", `emails-mode-test-${process.pid}`);
-const ORIGINAL_HOME = process.env["HOME"];
-const ORIGINAL_PATH = process.env["PATH"];
 
 const ENV_KEYS = [
   EMAILS_MODE_ENV,
@@ -93,6 +106,7 @@ exit 42
 }
 
 beforeEach(() => {
+  captureInheritedProcessEnv();
   mkdirSync(TMP_HOME, { recursive: true });
   process.env["HOME"] = TMP_HOME;
   for (const key of ENV_KEYS) delete process.env[key];
@@ -109,6 +123,7 @@ afterEach(() => {
   else process.env["PATH"] = ORIGINAL_PATH;
   if (existsSync(TMP_HOME)) rmSync(TMP_HOME, { recursive: true, force: true });
   resetSelfHostedConfigCache();
+  restoreInheritedProcessEnv();
 });
 
 describe("normalizeEmailsMode", () => {
