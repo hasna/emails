@@ -182,7 +182,9 @@ async function buildSystemStatus(): Promise<EmailSystemStatus> {
     cli_equivalents: {
       status: "emails status --json",
       inbox_sync_status: "emails inbox sync-status --json",
-      provision_address: "emails address provision <email> --provider <provider>",
+      // NOT `emails address provision`: src/cli/commands/address.ts serverOnly()s
+      // it in every mode. A cli_equivalent is a promise that the command runs.
+      provision_address: "emails address add <email> --provider <provider>",
       wait_code: "emails inbox wait-code <address> --timeout 120",
       address_owner: "emails address owner <email-or-id>",
     },
@@ -206,21 +208,35 @@ async function buildSystemStatus(): Promise<EmailSystemStatus> {
   // CLASSIFY every gap; do not assume. An unclassifiable gap counts as a FAILURE,
   // never as an expected limitation: guessing "expected" is how a real fault would
   // get hidden behind a green `degraded: false`.
+  //
+  // `statusGapClass` answers with THREE classes, and this loop used to test only
+  // for "structural", so the third — "bound" (enumeration_cap_exceeded /
+  // enumeration_unstable) — fell into `failures`. That put a number the source DID
+  // answer under "Read failures — these numbers could not be measured", and into a
+  // field documented as "caused by a live read failure". A lower bound is a
+  // successful read of a moving table; it belongs with the other lower bounds.
   const limitations: string[] = [];
   const failures: string[] = [];
+  const boundPaths: string[] = [];
   for (const path of unavailable) {
-    if (statusGapClass(gaps[path]?.reason) === "structural") limitations.push(path);
-    else failures.push(path);
+    switch (statusGapClass(gaps[path]?.reason)) {
+      case "structural": limitations.push(path); break;
+      case "bound": boundPaths.push(path); break;
+      default: failures.push(path); break;
+    }
   }
+  // Field-level bounds join the block-level ones the availability scan found.
+  const incomplete = [...new Set([...scan.incompleteBlocks, ...boundPaths])].sort();
 
   const partial: Omit<EmailSystemStatus, "next_actions"> = {
     ...blocks,
-    degraded: failures.length > 0 || scan.incompleteBlocks.length > 0,
+    // A bound still degrades: the caller asked for a total and got a floor.
+    degraded: failures.length > 0 || incomplete.length > 0,
     limited: limitations.length > 0,
     unavailable,
     limitations,
     failures,
-    incomplete: scan.incompleteBlocks,
+    incomplete,
     gaps: Object.fromEntries(Object.entries(gaps).sort(([a], [b]) => a.localeCompare(b))),
   };
 
@@ -440,7 +456,8 @@ export function formatAgentContextSummary(context: Record<string, unknown>): str
       lines.push(`    ${domain.domain} ${domain.state ?? domain.provisioning_status ?? "state unavailable"} ${send} ${receive}`);
     }
     if (usableDomains.length > 5 || status.domains.usable_truncated) {
-      lines.push(`    ... use emails domain status --limit ${status.domains.usable_limit} for the full readiness table`);
+      // `emails domain status` refuses in every mode (src/cli/commands/domain.ts).
+      lines.push(`    ... use emails domain list --json for the full readiness table (${status.domains.usable_limit} sampled here)`);
     }
   }
   const usableFrom = status.addresses.usable_from;
@@ -529,24 +546,36 @@ export function sampleAgentContext(
 }
 
 function buildAgentContext(status: EmailSystemStatus): Record<string, unknown> {
+  // EVERY workflow is filtered, not just one. Only `diagnose_missing_mail` was,
+  // so `create_receive_address` step 2 published `emails address provision`, which
+  // src/cli/commands/address.ts serverOnly()s in both modes — a workflow whose
+  // second step cannot be run is worse than no workflow.
+  const runnable = (steps: string[]): string[] => {
+    const mode = getEmailsMode();
+    return steps.filter((command) => isCommandAvailableInMode(command, mode));
+  };
   return {
     status,
     workflows: {
-      create_receive_address: [
+      create_receive_address: runnable([
         "emails owner register <name> --type agent",
-        "emails address provision <email> --provider <provider>",
+        // `address add` takes only --provider/--name (src/cli/commands/address.ts),
+        // so attaching the owner registered in step 1 is its own step — otherwise
+        // the workflow registers an owner and never uses it.
+        "emails address add <email> --provider <provider>",
+        "emails address set-owner <email> --owner <owner>",
         "emails inbox wait-code <email> --timeout 120",
-      ],
-      diagnose_missing_mail: [
+      ]),
+      diagnose_missing_mail: runnable([
         "emails status",
         "emails inbox sync-status",
         "emails inbox explain <email-id>",
         "emails doctor delivery <address>",
-      ].filter((command) => isCommandAvailableInMode(command, getEmailsMode())),
-      ownership: [
+      ]),
+      ownership: runnable([
         "emails address owner <email-or-id>",
         "emails address set-owner <email-or-id> --owner <owner> --administrator <agent>",
-      ],
+      ]),
     },
     refresh_cadence: {
       ui_local_reload_ms: 30000,

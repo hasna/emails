@@ -17,6 +17,8 @@
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { startV1Stub, type V1Stub } from "../test-support/v1-stub.js";
+import { cliRefusalFor } from "../test-support/cli-refusals.js";
+import { statusGapClass } from "./status-availability.js";
 import { getEmailSystemStatus, formatEmailSystemStatus } from "./agent-context.js";
 import { listProviderSummaries } from "../db/providers.js";
 import { listDomains } from "../db/domains.js";
@@ -140,10 +142,22 @@ describe("self-hosted status reports REAL server inventory (G1)", () => {
     // that actually runs in this mode (`emails provision status` refuses here).
     expect(status.next_actions.some((action) => action.reason.includes("Provisioning failed"))).toBe(true);
     for (const action of status.next_actions) {
-      expect(action.command).not.toBe("emails provision status");
-      expect(action.command).not.toBe("emails doctor --json");
       expect(action.reason.length).toBeGreaterThan(0);
     }
+    // ORACLE IS THE CLI, NOT THE REGISTRY. This used to check two hardcoded
+    // command names, so it could not see `emails domain status --json` — which
+    // status-facts.remote.ts domainFixCommands returned for exactly the failed
+    // domain seeded here, and which src/cli/commands/domain.ts serverOnly()s in
+    // every mode. cliRefusalFor() reads the CLI's own call sites.
+    const proposed = status.next_actions
+      .map((action) => action.command)
+      .filter((command): command is string => command !== null);
+    expect(proposed.length, "the guard must have commands to check").toBeGreaterThan(0);
+    const refused = proposed
+      .map((command) => ({ command, prefix: cliRefusalFor(command, "self_hosted") }))
+      .filter((entry) => entry.prefix !== null)
+      .map((entry) => `${entry.command} (refused by ${entry.prefix})`);
+    expect(refused, "next_actions proposes commands that throw in self_hosted mode").toEqual([]);
   });
 });
 
@@ -326,6 +340,24 @@ describe("honest-unavailable contract (G3)", () => {
     expect(status.gaps["domains.usable[].ready_addresses"]?.reason).toMatch(/^enumeration_unstable:/);
     expect(status.unavailable).toContain("domains.usable[].ready_addresses");
     expect(formatEmailSystemStatus(status)).toContain("domains.usable[].ready_addresses");
+
+    // A LOWER BOUND IS NOT A READ FAILURE. statusGapClass answers with three
+    // classes and the assembler tested only for "structural", so the third —
+    // "bound" — fell through into `failures`, i.e. a number the server DID answer
+    // was published under "Read failures - these numbers could not be measured".
+    // Classify it where it belongs.
+    expect(statusGapClass(status.gaps["domains.usable[].ready_addresses"]?.reason)).toBe("bound");
+    expect(status.incomplete).toContain("domains.usable[].ready_addresses");
+    expect(status.failures).not.toContain("domains.usable[].ready_addresses");
+    expect(status.limitations).not.toContain("domains.usable[].ready_addresses");
+    // Still degraded: the caller asked for a total and got a floor.
+    expect(status.degraded).toBe(true);
+    // Every failures[] entry really is a live read failure.
+    for (const path of status.failures) {
+      expect(statusGapClass(status.gaps[path]?.reason), path).toBe("failure");
+    }
+    const rendered = formatEmailSystemStatus(status);
+    expect(rendered).toContain("Lower bounds");
   });
 
   it("still publishes the per-domain ready-address count when the address read is complete", async () => {

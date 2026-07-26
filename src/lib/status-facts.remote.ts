@@ -141,7 +141,11 @@ function domainFixCommands(row: Record<string, unknown>): string[] {
   const name = str(row["domain"]);
   if (!name) return [];
   if (str(row["provisioning_status"]) === "failed" || strOrNull(row["last_error"])) {
-    return [`emails domain status --json`, `emails domain list --json`];
+    // NOT `emails domain status`: src/cli/commands/domain.ts serverOnly()s it
+    // unconditionally, and agent-context.ts promotes fix_commands[0] straight into
+    // `next_actions`. Proposing it made this module emit the refusal the whole
+    // status rework exists to stop. `domain list` reads the same rows and runs.
+    return [`emails domain list --json`, `emails address list --json`];
   }
   return [];
 }

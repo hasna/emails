@@ -28,6 +28,7 @@ import { setDomainProvisioning } from "../db/provisioning.local.js";
 import { formatEmailSystemStatus, getEmailSystemStatus } from "./agent-context.js";
 import { statusGapClass } from "./status-availability.js";
 import { isCommandAvailableInMode } from "./status-commands.js";
+import { cliRefusalFor } from "../test-support/cli-refusals.js";
 
 const SELF_HOSTED_ENV = ["EMAILS_SELF_HOSTED_URL", "EMAILS_SELF_HOSTED_API_KEY", "EMAILS_CLIENT_ENV_SECRET"] as const;
 const saved = new Map<string, string | undefined>();
@@ -134,11 +135,22 @@ describe("local status payload", () => {
     // The failure IS surfaced — this is not "stay silent to stay honest".
     expect(status.next_actions.some((action) => action.reason.includes("Provisioning failed"))).toBe(true);
 
-    for (const action of status.next_actions) {
-      if (action.command === null) continue;
-      expect(action.command).not.toBe("emails provision status");
-      expect(isCommandAvailableInMode(action.command, "local"), action.command).toBe(true);
-    }
+    // ORACLE IS THE CLI, NOT THE REGISTRY. This used to assert
+    // `isCommandAvailableInMode(action.command, "local")`, i.e. it validated the
+    // payload against the very registry that filtered it — so a command missing
+    // from the registry passed here and threw at the terminal. That is how
+    // `emails domain check` (src/cli/commands/domain.ts serverOnly(), reached via
+    // domain-readiness fix_commands) stayed green. cliRefusalFor() reads the
+    // CLI's own call sites.
+    const proposed = status.next_actions
+      .map((action) => action.command)
+      .filter((command): command is string => command !== null);
+    expect(proposed.length, "the guard must have commands to check").toBeGreaterThan(0);
+    const refused = proposed
+      .map((command) => ({ command, prefix: cliRefusalFor(command, "local") }))
+      .filter((entry) => entry.prefix !== null)
+      .map((entry) => `${entry.command} (refused by ${entry.prefix})`);
+    expect(refused, "next_actions proposes commands that throw in local mode").toEqual([]);
     expect(formatEmailSystemStatus(status)).not.toContain("emails provision status");
   });
 

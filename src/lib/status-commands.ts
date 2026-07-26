@@ -7,9 +7,18 @@
 // self_hosted mode ("... runs on the self-hosted server"). An agent following the
 // advice got a second failure and no closer to the truth.
 //
-// The self_hosted refusal list mirrors the `serverOnly(...)` call sites in the
-// `*.remote.ts` command modules. Keep them in sync: a command that starts
-// refusing must be added here, and this list is the only place that knows.
+// THE REGISTRY IS NOT THE SOURCE OF TRUTH — THE CLI IS. The first cut of this
+// module documented its source as `grep 'serverOnly(' src/cli/commands/*.remote.ts`,
+// and that glob is wrong: `serverOnly()` is also defined and called in the SHARED
+// modules src/cli/commands/domain.ts and src/cli/commands/address.ts, which
+// src/cli/index.tsx loads in BOTH modes and whose helper throws unconditionally.
+// Fifteen commands were therefore missing, so `emails status` against a server
+// with a failed domain proposed `emails domain status --json` — a refusal,
+// promoted into `next_actions` by the very code that exists to stop that.
+//
+// src/lib/status-commands-coverage.test.ts parses every refusal call site out of
+// src/cli/commands/*.ts and fails if this registry does not cover it. Add a
+// refusal to the CLI and the test names it; nothing here has to be remembered.
 //
 // A command that refuses in EVERY mode does not belong in a per-mode list. Put it
 // in NEVER_AVAILABLE_COMMANDS: a per-mode entry only removes the suggestion from
@@ -22,11 +31,35 @@ import type { EmailsMode } from "./mode.js";
 /**
  * Command prefixes that refuse in EVERY mode because the feature does not ship in
  * this build at all — neither the local orchestrator nor a `/v1` route exists.
- * Source of truth: the `notImplementedAnywhere(...)` call sites in
- * src/cli/commands/provision.ts.
+ *
+ * Source of truth: every `notImplementedAnywhere(...)` and `serverOnly(...)` call
+ * site in a SHARED command module (one that is not `*.remote.ts` / `*.local.ts`),
+ * because those helpers throw regardless of mode. Enforced by
+ * src/lib/status-commands-coverage.test.ts — do not hand-maintain this list
+ * against a remembered grep.
  */
 export const NEVER_AVAILABLE_COMMANDS: readonly string[] = [
+  // src/cli/commands/provision.ts — notImplementedAnywhere()
   "emails provision",
+  // src/cli/commands/address.ts — serverOnly()
+  "emails address provision",
+  // src/cli/commands/domain.ts — serverOnly(). Both the singular `domain` and the
+  // plural `domains` alias refuse, and `emails domain status` is the one that was
+  // reaching `next_actions`.
+  "emails domain check",
+  "emails domain connect",
+  "emails domain dns",
+  "emails domain setup",
+  "emails domain setup-cloudflare",
+  "emails domain status",
+  "emails domain verify",
+  "emails domains check",
+  "emails domains connect",
+  "emails domains disable-outbound",
+  "emails domains dns",
+  "emails domains enable-inbound",
+  "emails domains enable-outbound",
+  "emails domains verify",
 ];
 
 /**

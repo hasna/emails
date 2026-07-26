@@ -68,7 +68,7 @@ export function domainsResourcePayloadForRuntime(): Record<string, unknown> {
       mode: "self_hosted",
       source: "self_hosted_api",
       api: selfHostedApiStatus(),
-      cli_equivalent: `emails domain status --limit ${DOMAIN_RESOURCE_LIMIT} --json`,
+      cli_equivalent: `emails domain list --limit ${DOMAIN_RESOURCE_LIMIT} --json`,
     };
   } catch (error) {
     // A read failure reports NOTHING, not an empty inventory with total 0: the
@@ -90,7 +90,7 @@ export function domainsResourcePayloadForRuntime(): Record<string, unknown> {
       mode: "self_hosted",
       source: "self_hosted_api",
       api: selfHostedApiStatus(error),
-      cli_equivalent: `emails domain status --limit ${DOMAIN_RESOURCE_LIMIT} --json`,
+      cli_equivalent: `emails domain list --limit ${DOMAIN_RESOURCE_LIMIT} --json`,
     };
   }
 }
