@@ -765,6 +765,20 @@ describe("unsigned and wrongly-signed payloads are rejected and store nothing", 
     expect(storedRowCount(db, "messages")).toBe(0);
   });
 
+  test("a malformed inbound routing map fails closed with 503, not a 4xx", async () => {
+    // A deployment fault must stay retryable: a 4xx here would tell SNS to stop
+    // redelivering mail the deployment is only temporarily unable to route.
+    const { deps, db } = harness({ verifySns: alwaysVerified });
+    deps.env!["EMAILS_INGEST_PREFIX_DOMAIN_MAP"] = "{not json";
+    const response = await handleSelfHostedRequest(
+      deps,
+      snsRequest(snsEnvelope({ Type: "Notification", Message: sesReceived() })),
+    );
+    expect(response!.status).toBe(503);
+    expect(storedRowCount(db, "messages")).toBe(0);
+    expect(storedRowCount(db, "webhook_receipts")).toBe(0);
+  });
+
   test("an unconfigured SNS allowlist fails closed with 503", async () => {
     const { deps, db } = harness({ verifySns: alwaysVerified });
     delete deps.env!["EMAILS_SNS_TOPIC_ARNS"];

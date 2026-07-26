@@ -22,7 +22,12 @@
 // field can nominate a tenant.
 
 import { resourceSpecForPath } from "./resources.js";
-import { ingestS3Object, parseInboundPrefixDomainMap, type IngestDeps } from "./ingest-worker.js";
+import {
+  ingestS3Object,
+  parseInboundPrefixDomainMap,
+  type InboundPrefixDomainMapping,
+  type IngestDeps,
+} from "./ingest-worker.js";
 import type { EmailsSelfHostedStore, MessageInput, TenantScopedStore } from "./store.js";
 import {
   receiveResendEvent,
@@ -251,7 +256,10 @@ function selfHostedResendInboundSink(deps: SelfHostedWebhookDeps, ledger: SelfHo
 }
 
 /** SES ingest through the SAME S3→Postgres path the SQS worker uses. */
-function selfHostedSesIngest(deps: SelfHostedWebhookDeps) {
+function selfHostedSesIngest(
+  deps: SelfHostedWebhookDeps,
+  prefixDomainMappings: readonly InboundPrefixDomainMapping[],
+) {
   return async (request: SesIngestRequest): Promise<SesIngestResult> => {
     if (!request.objectKey) {
       return { synced: 0, ignored: "notification has no S3 object key" };
@@ -264,7 +272,7 @@ function selfHostedSesIngest(deps: SelfHostedWebhookDeps) {
       // The SAME deployment-owned routing evidence the SQS worker reads, so the
       // push and pull paths can never disagree about where a recipient-less
       // notification routes. An absent mapping still fails closed.
-      prefixDomainMappings: parseInboundPrefixDomainMap(env(deps)["EMAILS_INGEST_PREFIX_DOMAIN_MAP"]),
+      prefixDomainMappings,
     };
     const result = await ingestS3Object(ingestDeps, request.bucket, request.objectKey, {
       recipients: request.recipients,
@@ -286,13 +294,28 @@ function selfHostedSesIngest(deps: SelfHostedWebhookDeps) {
 }
 
 /** Handle `POST /v1/webhooks/ses-inbound`. */
-export function handleSelfHostedSesWebhook(deps: SelfHostedWebhookDeps, req: Request): Promise<Response> {
+export async function handleSelfHostedSesWebhook(
+  deps: SelfHostedWebhookDeps,
+  req: Request,
+): Promise<Response> {
+  // A malformed routing map is a DEPLOYMENT fault, so it fails closed as 503
+  // (retryable) rather than surfacing as a 4xx that tells the provider to stop
+  // redelivering mail this deployment is temporarily unable to route.
+  let prefixDomainMappings: readonly InboundPrefixDomainMapping[];
+  try {
+    prefixDomainMappings = parseInboundPrefixDomainMap(env(deps)["EMAILS_INGEST_PREFIX_DOMAIN_MAP"]);
+  } catch (error) {
+    return new Response(
+      JSON.stringify({ error: error instanceof Error ? error.message : "inbound routing map is invalid" }),
+      { status: 503, headers: { "Content-Type": "application/json" } },
+    );
+  }
   const ledger = new SelfHostedWebhookReceiptLedger(deps.store);
   return receiveSesNotification(req, {
     ledger,
     env: env(deps),
     inboundSource: () => selfHostedInboundSource(env(deps)),
-    ingest: selfHostedSesIngest(deps),
+    ingest: selfHostedSesIngest(deps, prefixDomainMappings),
     recordDeliveryEvent: selfHostedDeliveryEventSink(deps, ledger),
     verifySns: deps.verifySns,
     fetchUrl: deps.fetchUrl,
