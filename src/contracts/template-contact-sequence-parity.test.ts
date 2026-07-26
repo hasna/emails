@@ -20,6 +20,7 @@ import {
   suppressContact,
 } from "../index.js";
 import { startHttpServer } from "../mcp/http.js";
+import { mcpTestRequestInit, startTestMcpHttpServer } from "../test-support/mcp-http.js";
 import { startV1Stub, type V1Stub } from "../test-support/v1-stub.js";
 
 // Template/contact/sequence parity in the self-hosted-ONLY client: the CLI, the
@@ -99,10 +100,10 @@ describe("template/contact/sequence parity", () => {
 
   it("covers the API-backed MCP tools and confirms sub-ledger writes are server-owned", async () => {
     const provider = createProvider({ name: "dev", type: "sandbox" });
-    const server = startHttpServer({ port: 0, log: () => {} });
+    const server = startTestMcpHttpServer();
     servers.push(server);
     const client = new Client({ name: "emails-parity-test", version: "1.0.0" }, { capabilities: {} });
-    const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${server.port}/mcp`));
+    const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${server.port}/mcp`), mcpTestRequestInit());
 
     try {
       await client.connect(transport, { timeout: 10_000 });

@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resetSelfHostedConfigCache } from "../db/self-hosted-store.js";
+import { mcpTestRequestInit, MCP_TEST_HTTP_TOKEN, startTestMcpHttpServer } from "../test-support/mcp-http.js";
 import { startV1Stub, type V1Stub } from "../test-support/v1-stub.js";
 
 // Self-hosted-ONLY: the MCP HTTP transport serves tools that route through the
@@ -19,16 +20,16 @@ import { startV1Stub, type V1Stub } from "../test-support/v1-stub.js";
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 const { StreamableHTTPClientTransport } = await import("@modelcontextprotocol/sdk/client/streamableHttp.js");
 const { buildServer } = await import("./server.js");
-const { DEFAULT_MCP_HTTP_PORT, MCP_NAME, startHttpServer } = await import("./http.js");
+const { DEFAULT_MCP_HTTP_PORT, MCP_HTTP_ALLOWED_HOSTS_ENV, MCP_HTTP_TOKEN_ENV, MCP_NAME, startHttpServer } = await import("./http.js");
 
 const servers: Array<ReturnType<typeof startHttpServer>> = [];
 let stub: V1Stub;
 
 async function withClient<T>(name: string, run: (client: InstanceType<typeof Client>) => Promise<T>): Promise<T> {
-  const server = startHttpServer({ port: 0, log: () => {} });
+  const server = startTestMcpHttpServer();
   servers.push(server);
   const client = new Client({ name, version: "1.0.0" }, { capabilities: {} });
-  const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${server.port}/mcp`));
+  const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${server.port}/mcp`), mcpTestRequestInit());
   await client.connect(transport, { timeout: 10_000 });
   try {
     return await run(client);
@@ -63,7 +64,7 @@ afterEach(() => {
 describe("emails-mcp HTTP transport", () => {
   it("exposes health and serves MCP over Streamable HTTP", async () => {
     await stub.seed({ groups: [{ id: "g1", name: "api-group", description: null }] });
-    const server = startHttpServer({ port: 0, log: () => {} });
+    const server = startTestMcpHttpServer();
     servers.push(server);
 
     const baseUrl = `http://127.0.0.1:${server.port}`;
@@ -72,7 +73,7 @@ describe("emails-mcp HTTP transport", () => {
     expect(await health.json()).toEqual({ status: "ok", name: MCP_NAME });
 
     const client = new Client({ name: "emails-mcp-http-test", version: "1.0.0" }, { capabilities: {} });
-    const transport = new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`));
+    const transport = new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`), mcpTestRequestInit());
 
     try {
       await client.connect(transport, { timeout: 10_000 });
