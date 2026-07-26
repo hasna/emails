@@ -332,10 +332,10 @@ describe("Emails self-hosted inbound messages", () => {
     }));
     const message = (await created!.json()).message;
     // The detail read predicts each of those outcomes without a fetch: index 0
-    // is metadata-only, 1 and 2 have stored bytes (2's are malformed, which is a
-    // payload-validity problem, not an availability one).
+    // is metadata-only, index 1 has valid stored bytes, and index 2's malformed
+    // non-canonical base64 is truthfully unavailable.
     expect(message.attachments.map((a: { content_available: boolean }) => a.content_available))
-      .toEqual([false, true, true]);
+      .toEqual([false, true, false]);
     const get = (index: number, suffix = "") => handleSelfHostedRequest(d, new Request(
       `http://svc/v1/messages/${encodeURIComponent(message.id)}/attachments/${index}${suffix}`,
       { headers: { "x-api-key": writeToken() } },
