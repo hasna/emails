@@ -2,7 +2,12 @@
 
 All notable changes to `@hasna/emails` are documented here.
 
-## [Unreleased]
+## 1.3.1 (2026-07-26)
+
+### Security
+
+- pin `fast-uri` to 3.1.4, fixing CVE-2026-16221/GHSA-v2hh-gcrm-f6hx after the seven-day quarantine.
+- keep bundled OpenTUI Solid/keymap build inputs dev-only, so vulnerable `brace-expansion` is absent from production installs and runtime images, without suppression or a quarantine bypass.
 
 - add cursor-based, metadata-only attachment inventory across the self-hosted
   CLI/MCP contract, truthful unavailable-content and unknown-size responses,
