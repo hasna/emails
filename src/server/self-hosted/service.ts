@@ -44,7 +44,7 @@ import {
 } from "./attachment-repair.js";
 import { validateAttachmentRepairReviewedDryRun } from "./attachment-repair-maintenance.js";
 import { emailsSelfHostedOpenApi } from "./openapi.js";
-import { resourceSpecForPath } from "./resources.js";
+import { resourceSpecForPath, type SelfHostedResourceSpec } from "./resources.js";
 import { classifyProviderSendError, type SelfHostedSender } from "./sender.js";
 import {
   isTenantOperator,
@@ -550,11 +550,32 @@ async function authenticate(
   return { ok: true, ctx: resolved.ctx, store: deps.store.forTenant(resolved.ctx.tenantId) };
 }
 
-function requireTenantOperator(auth: AuthOk): Response | null {
+/**
+ * Gate an operation that changes WHO may act inside the tenant, not merely what
+ * data the tenant holds. `emails:write` is the ordinary data-write grant and
+ * every role down to `member` holds it, so it must never be sufficient on its
+ * own for a privilege-granting route: an interactive caller needs owner/admin,
+ * and non-interactive automation needs the wildcard operator scope.
+ */
+/**
+ * Apply a resource spec's `writeRequiresOperator` flag to a generic CRUD write.
+ *
+ * The generic `/v1/<resource>` matcher reaches the same columns the bespoke
+ * handlers guard. Without this, role-gating a bespoke route (send-key minting,
+ * address ownership) is decorative: the caller just uses the generic path
+ * instead. Driven off the spec rather than a path list here, so a new
+ * authority-bearing resource is gated where it is declared.
+ */
+function requireResourceWriteAuthority(auth: AuthOk, spec: SelfHostedResourceSpec): Response | null {
+  if (!spec.writeRequiresOperator) return null;
+  return requireTenantOperator(auth, `writing ${spec.path}`);
+}
+
+function requireTenantOperator(auth: AuthOk, operation = "attachment repair"): Response | null {
   return isTenantOperator(auth.ctx)
     ? null
     : json(403, {
-        error: "attachment repair requires a tenant owner, admin, or operator API key",
+        error: `${operation} requires a tenant owner, admin, or operator API key`,
         reason: "operator_required",
       });
 }
@@ -797,6 +818,15 @@ export async function handleSelfHostedRequest(
         const auth = await authenticate(deps, req, url, write);
         if (!auth.ok) return auth.response;
         const body = await readJsonBody(req);
+        // Reassigning owner_id/administrator_id decides who may send as this
+        // address — the same authority the send-key mint grants, so it takes the
+        // same gate. Checked BEFORE any write so a refused request leaves no
+        // partial update behind; the ordinary address fields stay writable with
+        // plain `emails:write`.
+        if ("owner_id" in body || "administrator_id" in body) {
+          const operatorError = requireTenantOperator(auth, "reassigning address ownership");
+          if (operatorError) return operatorError;
+        }
         const quota = parseDailyQuota(body);
         if (quota.error) return json(400, { error: quota.error });
         let rec = await auth.store.updateAddress(id, {
@@ -1789,10 +1819,21 @@ export async function handleSelfHostedRequest(
     // generic /v1/send-keys resource stays summary-only.
 
     // POST /v1/send-keys/mint — issue a scoped send key (token returned ONCE).
+    //
+    // Owner/admin (or an operator API key) ONLY. The send key is the control that
+    // decides which of the tenant's from-addresses a holder may send as, so
+    // minting one for a caller-supplied `owner_id` GRANTS send authority. With
+    // only `emails:write` — which `member` holds — a member could mint a key for
+    // another owner and send as that owner's addresses, i.e. mint their way
+    // around the very check the send key exists to enforce. `owners` rows carry
+    // no link back to `users`, so "the caller is that owner" is not expressible
+    // here; the role gate is the boundary that is.
     if (path === "/v1/send-keys/mint") {
       if (method !== "POST") return json(405, { error: "method not allowed" });
       const auth = await authenticate(deps, req, url, write);
       if (!auth.ok) return auth.response;
+      const operatorError = requireTenantOperator(auth, "minting a send key");
+      if (operatorError) return operatorError;
       const body = await readJsonBody(req);
       const ownerId = String(body.owner_id ?? "").trim();
       if (!ownerId) return json(400, { error: "owner_id is required" });
@@ -1847,6 +1888,8 @@ export async function handleSelfHostedRequest(
           if (method === "POST") {
             const auth = await authenticate(deps, req, url, write);
             if (!auth.ok) return auth.response;
+            const specError = requireResourceWriteAuthority(auth, spec);
+            if (specError) return specError;
             const body = await readJsonBody(req);
             return json(201, await auth.store.createResource(spec, body));
           }
@@ -1861,6 +1904,8 @@ export async function handleSelfHostedRequest(
         if (method === "PATCH" || method === "PUT") {
           const auth = await authenticate(deps, req, url, write);
           if (!auth.ok) return auth.response;
+          const specError = requireResourceWriteAuthority(auth, spec);
+          if (specError) return specError;
           const body = await readJsonBody(req);
           const rec = await auth.store.updateResource(spec, id, body);
           return rec ? json(200, rec) : json(404, { error: `${spec.path} not found` });
@@ -1868,6 +1913,8 @@ export async function handleSelfHostedRequest(
         if (method === "DELETE") {
           const auth = await authenticate(deps, req, url, write);
           if (!auth.ok) return auth.response;
+          const specError = requireResourceWriteAuthority(auth, spec);
+          if (specError) return specError;
           return (await auth.store.deleteResource(spec, id))
             ? json(200, { deleted: true, id })
             : json(404, { error: `${spec.path} not found` });
