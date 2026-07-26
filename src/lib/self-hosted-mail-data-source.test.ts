@@ -2292,6 +2292,38 @@ describe("SelfHostedMailDataSource — source scoping", () => {
     expect(serve.deleted).toEqual([]);
   });
 
+  // `filter.providerId` is the MailClearFilter field the MCP `clear_inbound_emails`
+  // tool actually populates (`ds.clear({ providerId: provider_id })`) — a DIFFERENT
+  // field from `filter.source.providerId` above. It used to be read by nobody, so
+  // "clear one provider" silently became "clear the whole tenant folder" and
+  // reported a plausible count for it.
+  it("refuses a provider-scoped clear instead of widening it to the whole store", async () => {
+    const { ds, serve } = make([v1("2"), v1("5")]);
+
+    await expect(ds.clear({ providerId: "cred-1" })).rejects.toThrow(/no provider provenance/);
+    await expect(ds.clear({ providerId: "cred-1" })).rejects.toThrow(/Refusing rather than clearing the whole store/);
+    // The whole point: nothing was deleted, and no count was invented.
+    expect(serve.deleted).toEqual([]);
+    expect(serve.rows.size).toBe(2);
+  });
+
+  it("refuses a provider-scoped clear regardless of the mailbox or address scope alongside it", async () => {
+    const { ds, serve } = make([v1("2", { to_addrs: ["andrei@example.com"] }), v1("5")]);
+
+    await expect(ds.clear({ providerId: "cred-1", mailbox: "trash" })).rejects.toThrow(/no provider provenance/);
+    await expect(ds.clear({ providerId: "cred-1", source: { address: "andrei@example.com" } }))
+      .rejects.toThrow(/no provider provenance/);
+    expect(serve.deleted).toEqual([]);
+    expect(serve.rows.size).toBe(2);
+  });
+
+  it("still clears the unscoped mailbox", async () => {
+    const { ds, serve } = make([v1("2"), v1("5")]);
+
+    expect(await ds.clear({ mailbox: "inbox" })).toEqual({ cleared: 2 });
+    expect(serve.deleted.sort()).toEqual(["2", "5"]);
+  });
+
   it("still narrows on address and domain scopes", async () => {
     const { ds } = make([
       v1("2", { to_addrs: ["andrei@example.com"] }),

@@ -1004,9 +1004,18 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         // Self-hosted mode deletes on the server (scoped to the inbox folder), so drop the
         // "local" wording; confirmation semantics are otherwise unchanged.
         const scope = ds.mode === "local" ? "local inbox emails" : "inbox emails";
+        // A provider-scoped clear is REFUSED in self_hosted mode (a /v1 message
+        // carries no provider dimension). Surface that BEFORE the confirmation
+        // prompt rather than after, so the operator is not asked to confirm a
+        // destructive action that cannot run.
+        if (opts.provider && ds.mode !== "local") {
+          const { SELF_HOSTED_PROVIDER_CLEAR_UNSUPPORTED } = await import("../../lib/mail-types.js");
+          handleError(new Error(SELF_HOSTED_PROVIDER_CLEAR_UNSUPPORTED));
+        }
         await confirmDestructiveAction(`Clear ${scope} ${target}?`, opts.yes);
-        // local: wipes the inbound store (optionally by provider). self_hosted: drains a bulk
-        // delete over the inbox folder (scoped to the provider's mailbox when resolvable).
+        // local: wipes the inbound store, scoped by provider when --provider is
+        // given. self_hosted: drains a bulk delete over the inbox folder, and
+        // refuses a provider scope outright (see above).
         const { cleared } = await ds.clear({ providerId: opts.provider });
         console.log(chalk.green(`✓ Cleared ${cleared} email(s)`));
       } catch (e) {

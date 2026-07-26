@@ -180,7 +180,7 @@ export function registerInboxTools(server: McpServer): void {
 
   server.tool(
     "clear_inbound_emails",
-    "Delete all inbound emails, optionally filtered by provider",
+    "Delete all inbound emails, optionally filtered by provider. In self-hosted mode a provider-scoped clear is REFUSED (messages carry no provider provenance) rather than widened to the whole store.",
     {
       provider_id: z.string().optional().describe("Only clear emails for this provider"),
     },
