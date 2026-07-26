@@ -169,9 +169,16 @@ function listFilteredEvents(filter: EventFilter = {}): EmailEvent[] {
   //
   // An UNBOUNDED read passes no `need` and so still has to enumerate the table and
   // prove completeness before it may answer.
+  //
+  // NOTE the dependency this creates: a bounded read trusts the SERVER's ordering,
+  // because the top of a window cannot be re-derived locally from a partial read.
+  // That is inherent to server-side paging, not a shortcut — and it is asserted, not
+  // assumed: src/db/events.remote.test.ts seeds rows in an order that disagrees with
+  // the declared one and still requires the 100 most recent back.
+  const need = limit === null ? null : limit + offset;
   const enumeration = enumerateSelfHostedRows<EmailEvent>(EVENT_RESOURCE, {
     query: serverSideEventFilters(filter),
-    ...(limit === null ? {} : { need: limit + offset }),
+    ...(need === null ? {} : { need }),
     // Map and filter in ONE pass so a dropped row does not count toward the
     // window: filtering after the fact would stop at N rows READ, leaving the
     // window short of the N rows the caller asked to KEEP.
@@ -180,11 +187,13 @@ function listFilteredEvents(filter: EventFilter = {}): EmailEvent[] {
       return eventMatchesFilter(event, filter) ? event : null;
     },
   });
-  assertHonestEventRead(enumeration, limit === null ? null : limit + offset);
+  assertHonestEventRead(enumeration, need);
 
   const rows = enumeration.rows;
-  // The server already sorts by `occurred_at DESC`; this is a no-op against it and
-  // keeps the ordering guaranteed against a server that does not.
+  // Order the rows this read actually holds. Against `/v1/events` this is a no-op
+  // (the server already returns `occurred_at DESC`); it is what makes the ORDER of a
+  // complete, unbounded read independent of the server. It cannot rescue a bounded
+  // read from a server that does not order — the wrong rows would already be in hand.
   rows.sort((a, b) => (b.occurred_at ?? "").localeCompare(a.occurred_at ?? ""));
 
   return limit === null ? rows : rows.slice(offset, offset + limit);

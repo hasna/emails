@@ -109,16 +109,15 @@ describe("self-hosted event listing", () => {
   });
 });
 
-// A fixture whose INSERTION order already IS `occurred_at DESC, id ASC` — exactly the
-// order `GET /v1/events` returns (resources.ts `events.orderBy` + resourceListOrderBy).
-// The stub windows its backing array without sorting, so agreeing with the real
-// server's order is what makes a server-side window checkable by IDENTITY here and
-// not merely by count: table row N is `evt-{N}` and is also the (N+1)-th most recent
-// event. `eventRows` above cannot do this — it repeats each `occurred_at` every 60
-// rows, so "the 100 most recent" is not even well defined in it.
-function descendingEventRows(count: number): Array<Record<string, unknown>> {
+// Rows whose id sequence runs newest-first, so `evt-{N}` is the (N+1)-th most recent
+// event under `/v1/events`'s declared `occurred_at DESC, id ASC` order. That makes a
+// server-side window checkable by IDENTITY and not merely by count: the window
+// [offset, offset+limit) must be exactly `evt-{offset}` .. `evt-{offset+limit-1}`.
+// `eventRows` above cannot do this — it repeats each `occurred_at` every 60 rows, so
+// "the 100 most recent" is not even well defined in it.
+function descendingEventRows(count: number, order: "newest-first" | "scrambled" = "newest-first"): Array<Record<string, unknown>> {
   const newest = Date.UTC(2026, 0, 1, 0, 0, 0);
-  return Array.from({ length: count }, (_, index) => {
+  const rows = Array.from({ length: count }, (_, index) => {
     const occurredAt = new Date(newest - index * 1000).toISOString();
     return {
       id: `evt-${String(index).padStart(6, "0")}`,
@@ -132,6 +131,9 @@ function descendingEventRows(count: number): Array<Record<string, unknown>> {
       created_at: occurredAt,
     };
   });
+  // `scrambled` seeds the SAME rows in an order no client may rely on, proving the
+  // window comes from the server's declared ORDER BY and not from insertion order.
+  return order === "scrambled" ? rows.slice().reverse() : rows;
 }
 
 describe("bounded self-hosted event reads", () => {
@@ -231,6 +233,23 @@ describe("bounded self-hosted event reads", () => {
     expect(rows).toHaveLength(60);
     expect(rows[0]!.id).toBe("evt-000000");
     expect(rows[59]!.id).toBe("evt-000059");
+  });
+
+  // A server-side window is only the caller's window if the SERVER ordered first, so
+  // that dependency is load-bearing and must be asserted, not assumed: the same rows
+  // inserted in the opposite order must still yield the 100 most recent.
+  it("takes the window from the server's declared order, not from insertion order", async () => {
+    await stub.seed({ events: descendingEventRows(1200, "scrambled") });
+
+    const page = listEvents({ limit: 100 });
+
+    expect(page).toHaveLength(100);
+    expect(page[0]!.id).toBe("evt-000000");
+    expect(page[99]!.id).toBe("evt-000099");
+    // Newest-first, strictly — not merely the right set of ids.
+    expect(page.map((event) => event.occurred_at)).toEqual(
+      [...page].sort((a, b) => b.occurred_at.localeCompare(a.occurred_at)).map((event) => event.occurred_at),
+    );
   });
 
   // A bound that fits in ONE request is structurally immune to a shifting paging

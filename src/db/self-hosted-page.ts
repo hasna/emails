@@ -77,10 +77,9 @@ export interface EnumerateOptions<T = Record<string, unknown>> {
   /** Rows per request. Clamped to the server maximum. */
   pageSize?: number;
   /**
-   * Maximum pages to fetch before giving up and reporting incompleteness. Honored
-   * exactly as given: a `need` that cannot be filled inside it comes back unfilled
-   * rather than overrunning the ceiling. Omit it to get the default budget, which a
-   * wider `need` is allowed to raise.
+   * Maximum pages to fetch before giving up and reporting incompleteness. A `need`
+   * that cannot be filled inside the budget comes back unfilled rather than
+   * overrunning it — the budget bounds this read no matter what was asked for.
    */
   pageBudget?: number;
   /**
@@ -125,18 +124,21 @@ function clampPageSize(value: number | undefined): number {
 }
 
 /**
- * Pages this read may fetch.
+ * Pages this read may fetch. An explicit `pageBudget` is honored as given; otherwise
+ * the default applies.
  *
- * An explicit `pageBudget` is a deliberate ceiling on wall-clock and memory, so it
- * is honored exactly as given even when the window cannot be filled inside it (the
- * read then reports itself unfilled rather than quietly outrunning the ceiling).
- * The DEFAULT budget is only a heuristic, so a bounded window wider than its reach
- * raises it: a read must never be refused for a bound the pager could have paged to.
+ * The budget is deliberately NOT raised to cover a wide `need`. It already reaches
+ * 20_000 rows, past every limit a caller can ask for, so the only windows it cannot
+ * reach are deep-OFFSET ones — and those are exactly the reads that should refuse.
+ * `offset` is unbounded at several entry points, so scaling the budget with
+ * `offset + limit` would let one request drive millions of synchronous page fetches
+ * (the server caps `offset` at 100_000 anyway, so the pages past that could not even
+ * return new rows). Deep paging belongs to cursors; an unreachable window gets an
+ * honest refusal instead of a self-inflicted stall.
  */
-function resolveBudget(pageBudget: number | undefined, need: number | null, pageSize: number): number {
-  if (pageBudget !== undefined && Number.isFinite(pageBudget) && pageBudget >= 1) return Math.floor(pageBudget);
-  if (need === null) return SELF_HOSTED_ENUMERATION_PAGE_BUDGET;
-  return Math.max(SELF_HOSTED_ENUMERATION_PAGE_BUDGET, Math.ceil(need / pageSize) + 1);
+function clampBudget(value: number | undefined): number {
+  if (!value || !Number.isFinite(value)) return SELF_HOSTED_ENUMERATION_PAGE_BUDGET;
+  return Math.max(1, Math.floor(value));
 }
 
 /** `null` => unbounded ("everything"), which is NOT the same as a bound of 0. */
@@ -183,7 +185,7 @@ export function enumerateSelfHostedRows<T = Record<string, unknown>>(
   const pageSize = clampPageSize(opts.pageSize);
   const need = clampNeed(opts.need);
   const select = opts.select;
-  const budget = resolveBudget(opts.pageBudget, need, pageSize);
+  const budget = clampBudget(opts.pageBudget);
   const rows: T[] = [];
   const seen = new Set<string>();
   let offset = 0;
