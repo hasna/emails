@@ -556,10 +556,14 @@ function v1AttachmentMetadata(m: V1Message): AttachmentPath[] {
       filename: String(record?.filename || `attachment-${index + 1}`),
       content_type: String(record?.content_type || "application/octet-stream"),
       size: Number(record?.size ?? 0) || 0,
-      // Stored bytes are fetchable only when the serve explicitly says true.
-      // Malformed elements and legacy/partial responses that omit the verdict
-      // keep their authenticated position but fail closed.
-      content_available: record?.content_available === true,
+      // A malformed array element is an explicit non-downloadable placeholder,
+      // preserving its authenticated index. A valid legacy object that omits
+      // the newer verdict remains unknown so callers may probe as before.
+      ...(record === null
+        ? { content_available: false }
+        : typeof record.content_available === "boolean"
+          ? { content_available: record.content_available }
+          : {}),
     };
   });
 }

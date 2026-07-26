@@ -307,6 +307,7 @@ describe("image-bundled attachment repair maintenance execution", () => {
         idempotencyKey: manifestObject.apply_idempotency_key,
         canonicalBucket: "canonical-inbound",
         apply: true,
+        reviewedDryRunId: DRY_RUN_ID,
         entries: manifestObject.entries,
       },
     ]);

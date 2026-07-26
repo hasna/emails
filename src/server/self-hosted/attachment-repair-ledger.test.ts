@@ -11,7 +11,10 @@ import {
   type AttachmentRepairLedgerStore,
   type AttachmentRepairResult,
 } from "./attachment-repair.js";
-import { EmailsSelfHostedStore } from "./store.js";
+import {
+  EmailsSelfHostedStore,
+  attachmentRepairRequestHash,
+} from "./store.js";
 
 const TENANT_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const TENANT_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -281,6 +284,80 @@ function repairRunStoreWithInventoryRows(rows: Record<string, unknown>[]) {
 }
 
 describe("checkpointed attachment repair ledger", () => {
+  it("binds request hashes to canonical payload-stripped per-canary attachment JSON", () => {
+    const entries = [{
+      object_key: "source/one",
+      recipients: ["one@example.test"],
+      canary_message_ids: ["message-1"],
+    }];
+    const base = [{
+      tenant_id: TENANT_A,
+      message_id: "message-1",
+      object_key: "source/one",
+      attachments: [{
+        filename: "one.txt",
+        content_type: "text/plain",
+        size: 3,
+        sha256: "a".repeat(64),
+        review_metadata: { beta: 2, alpha: 1 },
+        content_base64: "b25l",
+      }],
+    }];
+    const reorderedKeys = [{
+      object_key: "source/one",
+      message_id: "message-1",
+      tenant_id: TENANT_A,
+      attachments: [{
+        content_base64: "DIFFERENT-BYTES",
+        review_metadata: { alpha: 1, beta: 2 },
+        sha256: "a".repeat(64),
+        size: 3,
+        content_type: "text/plain",
+        filename: "one.txt",
+      }],
+    }];
+    const hash = attachmentRepairRequestHash("canonical-ingest", entries, false, base);
+    expect(attachmentRepairRequestHash(
+      "canonical-ingest",
+      entries,
+      false,
+      reorderedKeys,
+    )).toBe(hash);
+    expect(attachmentRepairRequestHash(
+      "canonical-ingest",
+      entries,
+      false,
+      [{
+        ...base[0]!,
+        attachments: [{ ...base[0]!.attachments[0]!, sha256: "b".repeat(64) }],
+      }],
+    )).not.toBe(hash);
+    expect(attachmentRepairRequestHash(
+      "canonical-ingest",
+      entries,
+      false,
+      [{
+        ...base[0]!,
+        attachments: [{
+          ...base[0]!.attachments[0]!,
+          review_metadata: { alpha: 1, beta: 3 },
+        }],
+      }],
+    )).not.toBe(hash);
+    expect(attachmentRepairRequestHash(
+      "canonical-ingest",
+      entries,
+      false,
+      [{
+        ...base[0]!,
+        attachments: [
+          { ...base[0]!.attachments[0]!, filename: "second.txt" },
+          base[0]!.attachments[0]!,
+        ],
+      }],
+    )).not.toBe(hash);
+  });
+
   it("defines a tenant-scoped, reconciled, bounded repair ledger migration", () => {
     const migration = emailsSelfHostedMigrations().find(
       (candidate) => candidate.id === "0020_attachment_repair_ledger",

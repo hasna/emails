@@ -78,7 +78,7 @@ interface SeamMailDetail {
     filename: string;
     content_type: string;
     size: number;
-    content_available: boolean;
+    content_available?: boolean;
   }>;
   attachment_paths: Array<{ filename: string; local_path?: string; s3_url?: string }>;
 }
@@ -95,9 +95,9 @@ function seamMessageDetail(msg: TuiMessage, body: MessageBody | null): SeamMailD
     filename: att.filename,
     content_type: att.content_type,
     size: att.size,
-    // A fetch affordance requires an explicit positive verdict. Any malformed
-    // or older response that omitted availability fails closed.
-    content_available: att.content_available === true,
+    ...(typeof att.content_available === "boolean"
+      ? { content_available: att.content_available }
+      : {}),
   }));
   const attachmentPaths = (body?.attachments ?? [])
     .filter((att) => att.location)
@@ -826,7 +826,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
             );
           if (selected.length === 0) throw new Error("No stored attachment metadata matches the download selection");
           if (selected.length !== 1) throw new Error("attachment download must select exactly one index");
-          if (selected[0]!.attachment.content_available !== true) {
+          if (selected[0]!.attachment.content_available === false) {
             throw new Error(
               `Attachment index ${selected[0]!.index} has metadata but no stored content; it is not available for download`,
             );
@@ -1056,7 +1056,7 @@ function formatAttachmentDetailList(emailId: string, attachments: AttachmentDeta
   for (const attachment of attachments) {
     const location = attachment.location
       ? attachment.location_type === "local" ? chalk.cyan(attachment.location) : chalk.blue(attachment.location)
-      : chalk.dim(attachment.content_available === true ? "(not downloaded)" : METADATA_ONLY_LABEL);
+      : chalk.dim(attachment.content_available === false ? METADATA_ONLY_LABEL : "(not downloaded)");
     lines.push(`  ${attachment.filename.padEnd(40)} ${chalk.dim(`${formatAttachmentSize(attachment.size)} · ${attachment.content_type}`)}  ${location}`);
     if (attachment.file_url) lines.push(`  ${chalk.dim("link:")} ${attachment.file_url}`);
   }
@@ -1093,12 +1093,13 @@ function formatEmailDetail(
     // The index comes from mergeAttachmentDetails (the metadata position), NEVER
     // from this loop: a nameless metadata entry is dropped from the display, so a
     // rendered position would advertise an index that downloads a DIFFERENT file.
-    // Only entries the serve explicitly confirms are fetchable get a command.
-    const hasFetchableIndexes = atts.some((a) => a.index !== undefined && a.content_available === true);
+    // Explicit false blocks. Older serves omit the verdict, so unknown entries
+    // retain the historic probe/download affordance.
+    const hasFetchableIndexes = atts.some((a) => a.index !== undefined && a.content_available !== false);
     lines.push(chalk.yellow(`  📎 Attachments (${atts.length}):`));
     for (const a of atts) {
       const missingLocation = opts.mode === "self_hosted"
-        ? a.content_available === true && a.index !== undefined
+        ? a.content_available !== false && a.index !== undefined
             ? `  (no local copy; fetch with --index ${a.index})`
             // Metadata is not proof of stored content: imports that carry only
             // metadata answer the fetch with a "no stored content" error, so this

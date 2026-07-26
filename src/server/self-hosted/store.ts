@@ -340,6 +340,13 @@ export interface AttachmentRepairManifestEntry {
   canary_message_ids: string[];
 }
 
+export interface AttachmentRepairCanarySnapshot {
+  tenant_id: string;
+  message_id: string;
+  object_key: string;
+  attachments: readonly unknown[];
+}
+
 export function normalizeAttachmentRepairManifestEntries(
   values: readonly AttachmentRepairManifestEntry[],
 ): AttachmentRepairManifestEntry[] {
@@ -885,16 +892,36 @@ function canonicalJson(value: unknown): string {
   return JSON.stringify(value);
 }
 
+function attachmentMetadataOnly(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(attachmentMetadataOnly);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([key]) => key !== "content_base64")
+      .map(([key, item]) => [key, attachmentMetadataOnly(item)]),
+  );
+}
+
 export function attachmentRepairRequestHash(
   canonicalBucket: string,
   normalizedEntries: readonly AttachmentRepairManifestEntry[],
   apply: boolean,
+  canarySnapshot: readonly AttachmentRepairCanarySnapshot[] = [],
 ): string {
   return createHash("sha256")
     .update(canonicalJson({
       apply,
       canonical_bucket: canonicalBucket,
       entries: normalizedEntries,
+      canary_attachment_state: canarySnapshot.map((snapshot) => ({
+        tenant_id: snapshot.tenant_id,
+        message_id: snapshot.message_id,
+        object_key: snapshot.object_key,
+        attachments: snapshot.attachments.map((attachment, attachmentIndex) => ({
+          attachment_index: attachmentIndex,
+          metadata: attachmentMetadataOnly(attachment),
+        })),
+      })),
     }), "utf8")
     .digest("hex");
 }
@@ -914,6 +941,13 @@ class AttachmentRepairConcurrentChangeError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "AttachmentRepairConcurrentChangeError";
+  }
+}
+
+export class AttachmentRepairReviewMismatchError extends Error {
+  constructor() {
+    super("attachment repair reviewed dry-run proof does not match");
+    this.name = "AttachmentRepairReviewMismatchError";
   }
 }
 
@@ -2390,6 +2424,141 @@ export class TenantScopedStore {
     });
   }
 
+  private async prepareAttachmentRepairManifest(
+    client: TypedQueryClient,
+    canonicalBucket: string,
+    entries: readonly AttachmentRepairManifestEntry[],
+    lockRows: boolean,
+  ): Promise<{
+    ledgerEntries: Array<AttachmentRepairManifestEntry & {
+      position: number;
+      attachment_count: number;
+    }>;
+    canarySnapshot: AttachmentRepairCanarySnapshot[];
+  }> {
+    const objectKeys = entries.map((entry) => entry.object_key);
+    const messageIds = entries.flatMap((entry) => entry.canary_message_ids);
+    if (lockRows) {
+      await client.many(
+        `SELECT id
+         FROM messages
+         WHERE tenant_id = $1::uuid AND id = ANY($2::text[])
+         ORDER BY id
+         FOR SHARE`,
+        [this.tenantId, messageIds],
+      );
+      await client.many(
+        `SELECT m.id
+         FROM messages m
+         JOIN inbound_message_sources s
+           ON s.tenant_id = m.tenant_id AND s.message_id = m.id
+         WHERE m.tenant_id = $1::uuid
+           AND s.bucket = $2
+           AND s.object_key = ANY($3::text[])
+         ORDER BY m.id
+         FOR SHARE OF m, s`,
+        [this.tenantId, canonicalBucket, objectKeys],
+      );
+    }
+    const inventoryRows = await client.many<{
+      id: string;
+      object_key: string;
+      attachments_state: unknown;
+      attachment_count: number;
+      metadata_valid: boolean;
+      repairable: boolean;
+    }>(
+      `SELECT m.id, s.object_key,
+              COALESCE(
+                jsonb_agg(
+                  CASE
+                    WHEN jsonb_typeof(att.value) = 'object'
+                      THEN att.value - 'content_base64'
+                    ELSE att.value
+                  END
+                  ORDER BY att.ord
+                ) FILTER (WHERE att.ord IS NOT NULL),
+                '[]'::jsonb
+              ) AS attachments_state,
+              count(att.value) FILTER (
+                WHERE att.value IS NOT NULL
+                  AND jsonb_typeof(att.value -> 'content_base64') IS DISTINCT FROM 'string'
+              )::int AS attachment_count,
+              COALESCE(bool_and(
+                CASE
+                  WHEN att.value IS NULL OR jsonb_typeof(att.value) <> 'object' THEN false
+                  WHEN jsonb_typeof(att.value -> 'filename') IS DISTINCT FROM 'string'
+                    OR jsonb_typeof(att.value -> 'content_type') IS DISTINCT FROM 'string'
+                    OR jsonb_typeof(att.value -> 'size') IS DISTINCT FROM 'number' THEN false
+                  ELSE (att.value ->> 'size')::numeric >= 0
+                    AND (att.value ->> 'size')::numeric <= 9007199254740991
+                    AND mod((att.value ->> 'size')::numeric, 1) = 0
+                END
+              ), false) AS metadata_valid,
+              COALESCE(bool_or(
+                att.value IS NOT NULL
+                AND jsonb_typeof(att.value -> 'content_base64') IS DISTINCT FROM 'string'
+              ), false) AS repairable
+       FROM messages m
+       JOIN inbound_message_sources s
+         ON s.tenant_id = m.tenant_id AND s.message_id = m.id
+       LEFT JOIN LATERAL jsonb_array_elements(
+         CASE WHEN jsonb_typeof(m.attachments) = 'array'
+           THEN m.attachments ELSE '[]'::jsonb END
+       ) WITH ORDINALITY AS att(value, ord) ON true
+       WHERE m.tenant_id = $1::uuid
+         AND s.bucket = $2
+         AND s.object_key = ANY($3::text[])
+       GROUP BY m.id, s.object_key`,
+      [this.tenantId, canonicalBucket, objectKeys],
+    );
+    const ledgerEntries = entries.map((entry, position) => {
+      const rows = inventoryRows.filter((row) => row.object_key === entry.object_key);
+      const actualIds = new Set(rows.map((row) => row.id));
+      const exactCanary = actualIds.size === rows.length
+        && actualIds.size === entry.canary_message_ids.length
+        && entry.canary_message_ids.every((messageId) => actualIds.has(messageId));
+      if (!exactCanary) {
+        throw new RangeError(
+          "attachment repair canaries must exactly match tenant-scoped canonical object bindings",
+        );
+      }
+      if (rows.some((row) =>
+        Number(row.attachment_count) <= 0 || row.metadata_valid !== true || row.repairable !== true)) {
+        throw new RangeError(
+          "each attachment repair canary must have a repairable attachment inventory",
+        );
+      }
+      return {
+        ...entry,
+        position,
+        attachment_count: rows.reduce(
+          (total, row) => total + Number(row.attachment_count),
+          0,
+        ),
+      };
+    });
+    const rowByIdentity = new Map(
+      inventoryRows.map((row) => [`${row.object_key}\0${row.id}`, row]),
+    );
+    const canarySnapshot = entries.flatMap((entry) =>
+      entry.canary_message_ids.map((messageId) => {
+        const row = rowByIdentity.get(`${entry.object_key}\0${messageId}`);
+        if (!row) {
+          throw new RangeError(
+            "attachment repair canaries must exactly match tenant-scoped canonical object bindings",
+          );
+        }
+        return {
+          tenant_id: this.tenantId,
+          message_id: messageId,
+          object_key: entry.object_key,
+          attachments: toArray(row.attachments_state),
+        };
+      }));
+    return { ledgerEntries, canarySnapshot };
+  }
+
   /**
    * Create one immutable, bounded repair manifest or return its idempotent
    * replay. The caller key is hashed and never stored. Repairable-payload
@@ -2400,6 +2569,7 @@ export class TenantScopedStore {
     idempotencyKey: string;
     canonicalBucket: string;
     apply?: boolean;
+    reviewedDryRunId?: string;
     entries: readonly AttachmentRepairManifestEntry[];
   }): Promise<AttachmentRepairLedgerRun> {
     this.assertSafeSendIntentKey(input.idempotencyKey);
@@ -2409,17 +2579,61 @@ export class TenantScopedStore {
     }
     const entries = normalizeAttachmentRepairManifestEntries(input.entries);
     const apply = input.apply === true;
+    const reviewedDryRunId = input.reviewedDryRunId?.trim().toLowerCase();
+    if (apply && !reviewedDryRunId) {
+      throw new AttachmentRepairReviewMismatchError();
+    }
     const idempotencyDigest = createHash("sha256")
       .update("emails:attachment-repair:idempotency:v1\0", "utf8")
       .update(this.tenantId, "utf8")
       .update("\0", "utf8")
       .update(input.idempotencyKey, "utf8")
       .digest("hex");
-    const requestHash = attachmentRepairRequestHash(canonicalBucket, entries, apply);
+    const manifestLockDigest = attachmentRepairRequestHash(
+      canonicalBucket,
+      entries,
+      apply,
+    );
 
     return this.withAttachmentRepairLedgerLock(
-      ["tenant-quota", idempotencyDigest, requestHash],
+      ["tenant-quota", idempotencyDigest, manifestLockDigest],
       async (client) => {
+      const { ledgerEntries, canarySnapshot } =
+        await this.prepareAttachmentRepairManifest(
+          client,
+          canonicalBucket,
+          entries,
+          true,
+        );
+      const requestHash = attachmentRepairRequestHash(
+        canonicalBucket,
+        entries,
+        apply,
+        canarySnapshot,
+      );
+      if (apply) {
+        const reviewedRequestHash = attachmentRepairRequestHash(
+          canonicalBucket,
+          entries,
+          false,
+          canarySnapshot,
+        );
+        const reviewed = await client.get<{ matches: boolean }>(
+          `SELECT EXISTS (
+             SELECT 1
+             FROM attachment_repair_runs
+             WHERE tenant_id = $1::uuid
+               AND id = $2::uuid
+               AND request_hash = $3
+               AND apply = false
+               AND status = 'completed'
+           ) AS matches`,
+          [this.tenantId, reviewedDryRunId, reviewedRequestHash],
+        );
+        if (reviewed?.matches !== true) {
+          throw new AttachmentRepairReviewMismatchError();
+        }
+      }
       // Use `INSERT ... ON CONFLICT ... DO UPDATE ... WHERE` so a reinsert of the
       // same key cannot clobber a row unless it is already the same request/run.
       // The immediate persisted-row comparison is the final guardrail: it turns any
@@ -2556,73 +2770,6 @@ export class TenantScopedStore {
         throw new AttachmentRepairQuotaExceededError("ledger_entries", false);
       }
 
-      const objectKeys = entries.map((entry) => entry.object_key);
-      const inventoryRows = await client.many<{
-        id: string;
-        object_key: string;
-        attachment_count: number;
-        metadata_valid: boolean;
-        repairable: boolean;
-      }>(
-        `SELECT m.id, s.object_key,
-                count(att.value) FILTER (
-                  WHERE att.value IS NOT NULL
-                    AND jsonb_typeof(att.value -> 'content_base64') IS DISTINCT FROM 'string'
-                )::int AS attachment_count,
-                COALESCE(bool_and(
-                  CASE
-                    WHEN att.value IS NULL OR jsonb_typeof(att.value) <> 'object' THEN false
-                    WHEN jsonb_typeof(att.value -> 'filename') IS DISTINCT FROM 'string'
-                      OR jsonb_typeof(att.value -> 'content_type') IS DISTINCT FROM 'string'
-                      OR jsonb_typeof(att.value -> 'size') IS DISTINCT FROM 'number' THEN false
-                    ELSE (att.value ->> 'size')::numeric >= 0
-                      AND (att.value ->> 'size')::numeric <= 9007199254740991
-                      AND mod((att.value ->> 'size')::numeric, 1) = 0
-                  END
-                ), false) AS metadata_valid,
-                COALESCE(bool_or(
-                  att.value IS NOT NULL
-                  AND jsonb_typeof(att.value -> 'content_base64') IS DISTINCT FROM 'string'
-                ), false) AS repairable
-         FROM messages m
-         JOIN inbound_message_sources s
-           ON s.tenant_id = m.tenant_id AND s.message_id = m.id
-         LEFT JOIN LATERAL jsonb_array_elements(
-           CASE WHEN jsonb_typeof(m.attachments) = 'array'
-             THEN m.attachments ELSE '[]'::jsonb END
-         ) AS att(value) ON true
-         WHERE m.tenant_id = $1::uuid
-           AND s.bucket = $2
-           AND s.object_key = ANY($3::text[])
-         GROUP BY m.id, s.object_key`,
-        [this.tenantId, canonicalBucket, objectKeys],
-      );
-      const ledgerEntries = entries.map((entry, position) => {
-        const rows = inventoryRows.filter((row) => row.object_key === entry.object_key);
-        const actualIds = new Set(rows.map((row) => row.id));
-        const exactCanary = actualIds.size === rows.length
-          && actualIds.size === entry.canary_message_ids.length
-          && entry.canary_message_ids.every((messageId) => actualIds.has(messageId));
-        if (!exactCanary) {
-          throw new RangeError(
-            "attachment repair canaries must exactly match tenant-scoped canonical object bindings",
-          );
-        }
-        if (rows.some((row) =>
-          Number(row.attachment_count) <= 0 || row.metadata_valid !== true || row.repairable !== true)) {
-          throw new RangeError(
-            "each attachment repair canary must have a repairable attachment inventory",
-          );
-        }
-        return {
-          ...entry,
-          position,
-          attachment_count: rows.reduce(
-            (total, row) => total + Number(row.attachment_count),
-            0,
-          ),
-        };
-      });
       const inventoryTotal = ledgerEntries.reduce(
         (total, entry) => total + entry.attachment_count,
         0,
@@ -2704,19 +2851,46 @@ export class TenantScopedStore {
     }
     const entries = normalizeAttachmentRepairManifestEntries(input.entries);
     const apply = input.apply === true;
-    const requestHash = attachmentRepairRequestHash(canonicalBucket, entries, apply);
-    const row = await this.client.get<{ matches: boolean }>(
-      `SELECT EXISTS (
-         SELECT 1
-         FROM attachment_repair_runs
-         WHERE tenant_id = $1::uuid
-           AND id = $2::uuid
-           AND request_hash = $3
-           AND apply = $4
-       ) AS matches`,
-      [this.tenantId, runId, requestHash, apply],
+    const manifestLockDigest = attachmentRepairRequestHash(
+      canonicalBucket,
+      entries,
+      apply,
     );
-    return row?.matches === true;
+    return this.withAttachmentRepairLedgerLock(
+      [`review:${runId}`, manifestLockDigest],
+      async (client) => {
+        let canarySnapshot: AttachmentRepairCanarySnapshot[];
+        try {
+          ({ canarySnapshot } = await this.prepareAttachmentRepairManifest(
+            client,
+            canonicalBucket,
+            entries,
+            true,
+          ));
+        } catch (error) {
+          if (error instanceof RangeError) return false;
+          throw error;
+        }
+        const requestHash = attachmentRepairRequestHash(
+          canonicalBucket,
+          entries,
+          apply,
+          canarySnapshot,
+        );
+        const row = await client.get<{ matches: boolean }>(
+          `SELECT EXISTS (
+             SELECT 1
+             FROM attachment_repair_runs
+             WHERE tenant_id = $1::uuid
+               AND id = $2::uuid
+               AND request_hash = $3
+               AND apply = $4
+           ) AS matches`,
+          [this.tenantId, runId, requestHash, apply],
+        );
+        return row?.matches === true;
+      },
+    );
   }
 
   async getAttachmentRepairRun(runId: string): Promise<AttachmentRepairLedgerRun | null> {

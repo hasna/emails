@@ -489,7 +489,7 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     expect(body!.attachments.map((a) => a.filename)).toEqual(["attachment-1", "D394.pdf"]);
   });
 
-  it("keeps malformed and missing-availability attachment elements positional but unavailable", async () => {
+  it("keeps malformed attachment elements unavailable while preserving legacy unknown availability", async () => {
     const { ds } = make([
       v1("malformed", {
         attachments: [
@@ -524,8 +524,9 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
       { filename: "cover.png", content_available: true },
       { filename: "attachment-2", content_available: false },
       { filename: "D394.pdf", content_available: true },
-      { filename: "legacy.pdf", content_available: false },
+      { filename: "legacy.pdf", content_available: undefined },
     ]);
+    expect(Object.hasOwn(body!.attachments[3]!, "content_available")).toBe(false);
   });
 
   it("honors small inbox limits with one bounded server-side page", async () => {
@@ -1921,13 +1922,11 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
         filename: "../../secret.txt",
         content_type: "text/plain",
         size: 5,
-        content_available: false,
       }]);
       expect(paths).toEqual([{
         filename: "../../secret.txt",
         content_type: "text/plain",
         size: 5,
-        content_available: false,
       }]);
       expect(paths[0]!.local_path).toBeUndefined();
       expect(paths[0]!.s3_url).toBeUndefined();
@@ -1998,9 +1997,9 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
   // #36: a historical record can expose attachment metadata while the payload
   // was never carried over. The serve reports that per entry; the mapper must
   // pass the verdict through to the body and the path list — and must NOT
-  // default an omitted/malformed verdict closed so callers never advertise a
-  // fetch the server has not explicitly confirmed.
-  it("surfaces the serve's metadata-only verdict and defaults omitted availability closed", async () => {
+  // keep an omitted legacy verdict unknown so callers may retain their historic
+  // probe behavior. Only an explicit false is authoritative unavailability.
+  it("surfaces explicit availability verdicts while preserving an omitted legacy verdict as unknown", async () => {
     const { ds } = make([
       v1("historical", {
         attachments: [
@@ -2029,8 +2028,8 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
       filename: "unknown.pdf",
       content_type: "application/pdf",
       size: 10,
-      content_available: false,
     }]);
+    expect(Object.hasOwn(legacyServe[0]!, "content_available")).toBe(false);
   });
 
   it("refuses redirects before reading a response body or allowing fetch to forward the bearer header", async () => {

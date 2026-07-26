@@ -20,6 +20,7 @@ import {
   InboundDomainRouteConflictError,
   AttachmentRepairIdempotencyConflictError,
   AttachmentRepairQuotaExceededError,
+  AttachmentRepairReviewMismatchError,
   decodeMessagesCursor,
   decodeAttachmentsCursor,
   MAX_ATTACHMENT_BATCH_IDS,
@@ -1581,6 +1582,7 @@ export async function handleSelfHostedRequest(
           idempotencyKey: key.value,
           canonicalBucket,
           apply,
+          reviewedDryRunId: reviewedProof.proof?.runId,
           entries,
         });
         const updated = await processAttachmentRepairRun(
@@ -1594,6 +1596,9 @@ export async function handleSelfHostedRequest(
           max_page_size: MAX_ATTACHMENT_REPAIR_PAGE_ITEMS,
         });
       } catch (error) {
+        if (error instanceof AttachmentRepairReviewMismatchError) {
+          return attachmentRepairReviewMismatchResponse();
+        }
         if (error instanceof AttachmentRepairIdempotencyConflictError) {
           return json(409, {
             error: error.message,

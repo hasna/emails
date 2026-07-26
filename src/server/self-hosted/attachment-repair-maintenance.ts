@@ -5,7 +5,10 @@ import {
   processCanonicalS3AttachmentRepairPage,
   resolveAttachmentRepairCanonicalBucket,
 } from "./attachment-repair.js";
-import { AttachmentRepairIdempotencyConflictError } from "./store.js";
+import {
+  AttachmentRepairIdempotencyConflictError,
+  AttachmentRepairReviewMismatchError,
+} from "./store.js";
 import type {
   AttachmentRepairLedgerRun,
   AttachmentRepairManifestEntry,
@@ -705,14 +708,25 @@ async function executeAttachmentRepairMaintenanceInner(
       }
     }
 
-    let repair = await context.tenantStore.createOrGetAttachmentRepairRun({
-      idempotencyKey: options.phase === "apply"
-        ? manifest.apply_idempotency_key
-        : manifest.dry_run_idempotency_key,
-      canonicalBucket,
-      apply: options.phase === "apply",
-      entries: manifest.entries,
-    });
+    let repair: AttachmentRepairLedgerRun;
+    try {
+      repair = await context.tenantStore.createOrGetAttachmentRepairRun({
+        idempotencyKey: options.phase === "apply"
+          ? manifest.apply_idempotency_key
+          : manifest.dry_run_idempotency_key,
+        canonicalBucket,
+        apply: options.phase === "apply",
+        reviewedDryRunId: options.phase === "apply"
+          ? options.dryRunId
+          : undefined,
+        entries: manifest.entries,
+      });
+    } catch (error) {
+      if (error instanceof AttachmentRepairReviewMismatchError) {
+        throw new AttachmentRepairMaintenanceError("provenance_failure");
+      }
+      throw error;
+    }
     if (options.expectedRunId && repair.id !== options.expectedRunId) {
       throw new AttachmentRepairMaintenanceError("provenance_failure");
     }

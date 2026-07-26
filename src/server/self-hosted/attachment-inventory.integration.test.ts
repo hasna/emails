@@ -23,6 +23,7 @@ import {
   MAX_ATTACHMENT_BATCH_IDS,
 } from "./store.js";
 import { handleSelfHostedRequest, type SelfHostedServiceDeps } from "./service.js";
+import { attachmentRepairRunResultSha256 } from "./attachment-repair-maintenance.js";
 import {
   processAttachmentRepairPage,
   type AttachmentRepairLedgerEntry,
@@ -133,6 +134,29 @@ async function makeRepairableInboundMessage(
       establishedVia: "canonical_replay",
     })).toBe("recorded");
   return { messageId, objectKey };
+}
+
+function completeAttachmentRepairRuns(deps: SelfHostedServiceDeps): void {
+  deps.attachmentRepair = {
+    processPage: async (store, runId, limit) => {
+      for (let processed = 0; processed < limit; processed++) {
+        const run = await store.getAttachmentRepairRun(runId);
+        const entry = await store.claimAttachmentRepairEntry(runId, 60_000);
+        if (!run || !entry) break;
+        await store.recordAttachmentRepairEntryOutcome(
+          runId,
+          entry.position,
+          entry.claim_token!,
+          run.apply ? "repaired" : "would_repair",
+          null,
+          0,
+        );
+      }
+      const completed = await store.getAttachmentRepairRun(runId);
+      if (!completed) throw new Error("attachment repair run disappeared");
+      return completed;
+    },
+  };
 }
 
 function attachmentRepairIdempotencyDigest(tenantId: string, key: string): string {
@@ -848,6 +872,185 @@ describe.skipIf(!pgClient)("checkpointed legacy attachment repair ledger", () =>
 
     expect(await counts(tenantA.tenantId)).toEqual(beforeA);
     expect(await counts(tenantB.tenantId)).toEqual(beforeB);
+  });
+
+  it("binds reviewed apply proof to exact metadata state and keeps later changes behind the full JSON CAS", async () => {
+    const runScenario = async (
+      suffix: string,
+      mutate?: (tenantId: string, messageId: string) => Promise<void>,
+    ) => {
+      const deps = makeDeps();
+      const canonicalBucket = `repair-exact-state-${suffix}`;
+      deps.env = { ...process.env, EMAILS_INGEST_S3_BUCKET: canonicalBucket };
+      completeAttachmentRepairRuns(deps);
+      const tenant = await makeTenant(`repair-exact-state-${suffix}`);
+      const message = await makeRepairableInboundMessage(
+        deps,
+        tenant,
+        canonicalBucket,
+        suffix,
+      );
+      await pgClient!.execute(
+        `UPDATE messages
+         SET attachments = jsonb_set(
+           attachments,
+           '{0,review_metadata}',
+           '{"alpha":1,"beta":2}'::jsonb,
+           true
+         )
+         WHERE tenant_id = $1::uuid AND id = $2`,
+        [tenant.tenantId, message.messageId],
+      );
+      const entries = [{
+        object_key: message.objectKey,
+        recipients: [`${suffix}@example.test`],
+        canary_message_ids: [message.messageId],
+      }];
+      const dryRunResponse = await call(deps, "POST", "/v1/attachments/repairs", {
+        token: tenant.token,
+        body: {
+          idempotency_key: `dry-${suffix}`,
+          apply: false,
+          entries,
+        },
+      });
+      expect(dryRunResponse.status).toBe(201);
+      expect(dryRunResponse.body.repair).toMatchObject({
+        apply: false,
+        status: "completed",
+        would_repair: 1,
+      });
+      const dryRun = await deps.store.forTenant(tenant.tenantId)
+        .getAttachmentRepairRun(dryRunResponse.body.repair.id);
+      expect(dryRun).not.toBeNull();
+      if (mutate) await mutate(tenant.tenantId, message.messageId);
+      const applyResponse = await call(deps, "POST", "/v1/attachments/repairs", {
+        token: tenant.token,
+        body: {
+          idempotency_key: `apply-${suffix}`,
+          apply: true,
+          entries,
+          reviewed_dry_run_id: dryRun!.id,
+          reviewed_dry_run_result_sha256: attachmentRepairRunResultSha256(dryRun!),
+        },
+      });
+      const applyCount = await pgClient!.one<{ count: number }>(
+        `SELECT count(*)::int AS count
+         FROM attachment_repair_runs
+         WHERE tenant_id = $1::uuid AND apply = true`,
+        [tenant.tenantId],
+      );
+      return {
+        applyCount: Number(applyCount.count),
+        applyResponse,
+        deps,
+        dryRun: dryRun!,
+        entries,
+        message,
+        tenant,
+      };
+    };
+
+    const unchanged = await runScenario("unchanged");
+    expect(unchanged.applyResponse.status).toBe(201);
+    expect(unchanged.applyResponse.body.repair).toMatchObject({
+      apply: true,
+      status: "completed",
+      repaired: 1,
+    });
+    expect(unchanged.applyCount).toBe(1);
+
+    const shaChanged = await runScenario("sha", async (tenantId, messageId) => {
+      await pgClient!.execute(
+        `UPDATE messages
+         SET attachments = jsonb_set(attachments, '{0,sha256}', to_jsonb($3::text), false)
+         WHERE tenant_id = $1::uuid AND id = $2`,
+        [tenantId, messageId, "b".repeat(64)],
+      );
+    });
+    expect(shaChanged.applyResponse.status).toBe(409);
+    expect(shaChanged.applyResponse.body).toEqual({
+      error: "attachment repair reviewed dry-run proof does not match",
+      code: "attachment_repair_review_mismatch",
+    });
+    expect(shaChanged.applyCount).toBe(0);
+
+    const arbitraryChanged = await runScenario(
+      "arbitrary",
+      async (tenantId, messageId) => {
+        await pgClient!.execute(
+          `UPDATE messages
+           SET attachments = jsonb_set(
+             attachments,
+             '{0,review_metadata,beta}',
+             '3'::jsonb,
+             false
+           )
+           WHERE tenant_id = $1::uuid AND id = $2`,
+          [tenantId, messageId],
+        );
+      },
+    );
+    expect(arbitraryChanged.applyResponse.status).toBe(409);
+    expect(arbitraryChanged.applyResponse.body).toEqual({
+      error: "attachment repair reviewed dry-run proof does not match",
+      code: "attachment_repair_review_mismatch",
+    });
+    expect(arbitraryChanged.applyCount).toBe(0);
+
+    const casDeps = makeDeps();
+    const canonicalBucket = "repair-exact-state-cas";
+    casDeps.env = { ...process.env, EMAILS_INGEST_S3_BUCKET: canonicalBucket };
+    completeAttachmentRepairRuns(casDeps);
+    const tenant = await makeTenant("repair-exact-state-cas");
+    const message = await makeRepairableInboundMessage(
+      casDeps,
+      tenant,
+      canonicalBucket,
+      "cas",
+    );
+    const entries = [{
+      object_key: message.objectKey,
+      recipients: ["cas@example.test"],
+      canary_message_ids: [message.messageId],
+    }];
+    const dryResponse = await call(casDeps, "POST", "/v1/attachments/repairs", {
+      token: tenant.token,
+      body: { idempotency_key: "dry-cas", apply: false, entries },
+    });
+    const dryRun = await casDeps.store.forTenant(tenant.tenantId)
+      .getAttachmentRepairRun(dryResponse.body.repair.id);
+    const bindings = await casDeps.store.listAttachmentRepairBindings(
+      canonicalBucket,
+      message.objectKey,
+    );
+    const applyRun = await casDeps.store.forTenant(tenant.tenantId)
+      .createOrGetAttachmentRepairRun({
+        idempotencyKey: "apply-cas",
+        canonicalBucket,
+        apply: true,
+        reviewedDryRunId: dryRun!.id,
+        entries,
+      });
+    expect(applyRun.apply).toBe(true);
+    await pgClient!.execute(
+      `UPDATE messages
+       SET attachments = jsonb_set(attachments, '{0,sha256}', to_jsonb($3::text), false)
+       WHERE tenant_id = $1::uuid AND id = $2`,
+      [tenant.tenantId, message.messageId, "c".repeat(64)],
+    );
+    expect(await casDeps.store.replaceAttachmentPayloadsAtomically(
+      bindings,
+      bindings.map((binding) => ({
+        tenantId: binding.tenantId,
+        messageId: binding.messageId,
+        expected: binding.attachments,
+        replacement: binding.attachments.map((attachment) => ({
+          ...(attachment as Record<string, unknown>),
+          content_base64: "Y2Fz",
+        })),
+      })),
+    )).toBe(false);
   });
 
   it("binds alternate idempotency keys to an existing request and rejects conflicting manifests", async () => {

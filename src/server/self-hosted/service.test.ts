@@ -4,6 +4,7 @@ import type { TypedQueryClient } from "../../storage-kit/index.js";
 import {
   AttachmentRepairIdempotencyConflictError,
   AttachmentRepairQuotaExceededError,
+  AttachmentRepairReviewMismatchError,
   EmailsSelfHostedStore,
   encodeMessagesCursor,
   type AttachmentRepairLedgerRun,
@@ -766,6 +767,7 @@ describe("Emails self-hosted service", () => {
         idempotencyKey: "apply-reviewed-run",
         canonicalBucket: "canonical-test-ingest",
         apply: true,
+        reviewedDryRunId: REVIEWED_DRY_RUN_ID,
         entries: ATTACHMENT_REPAIR_ENTRIES,
       }],
       ["process", APPLY_REPAIR_RUN_ID, 1],
@@ -781,6 +783,56 @@ describe("Emails self-hosted service", () => {
     expect(JSON.stringify(body)).not.toContain("source/reviewed-one");
     expect(JSON.stringify(body)).not.toContain("reviewed@example.test");
     expect(JSON.stringify(body)).not.toContain("reviewed-message-1");
+  });
+
+  test("attachment repair apply maps an exact-state change during creation to the generic review 409", async () => {
+    const d = deps();
+    const token = mintApiKey({
+      app: "emails",
+      scopes: ["emails:*"],
+      signingSecret: SIGNING_SECRET,
+    }).token;
+    const reviewed = attachmentRepairRun();
+    const reviewedHash = attachmentRepairRunResultSha256(reviewed);
+    let creates = 0;
+    let processes = 0;
+    (d.store as any).getAttachmentRepairRun = async () => reviewed;
+    (d.store as any).attachmentRepairRunMatchesManifest = async () => true;
+    (d.store as any).createOrGetAttachmentRepairRun = async (
+      input: Record<string, unknown>,
+    ) => {
+      creates++;
+      expect(input["reviewedDryRunId"]).toBe(REVIEWED_DRY_RUN_ID);
+      throw new AttachmentRepairReviewMismatchError();
+    };
+    d.attachmentRepair = {
+      processPage: async () => {
+        processes++;
+        throw new Error("repair processing must not start");
+      },
+    };
+
+    const response = await handleSelfHostedRequest(
+      d,
+      req("POST", "/v1/attachments/repairs", {
+        token,
+        body: {
+          idempotency_key: "apply-raced-review",
+          apply: true,
+          entries: ATTACHMENT_REPAIR_ENTRIES,
+          reviewed_dry_run_id: REVIEWED_DRY_RUN_ID,
+          reviewed_dry_run_result_sha256: reviewedHash,
+        },
+      }),
+    );
+
+    expect(response?.status).toBe(409);
+    expect(await response!.json()).toEqual({
+      error: "attachment repair reviewed dry-run proof does not match",
+      code: "attachment_repair_review_mismatch",
+    });
+    expect(creates).toBe(1);
+    expect(processes).toBe(0);
   });
 
   test("attachment repair is operator-only while owner/admin sessions and wildcard automation remain authorized", async () => {

@@ -18,6 +18,7 @@ import {
 import { resetSelfHostedConfigCache } from "../../db/self-hosted-store.js";
 import { saveConfig } from "../../lib/config.js";
 import { mergeAttachmentDetails } from "../../lib/attachment-actions.js";
+import { resetMailDataSource } from "../../lib/mail-data-source.js";
 import { filterAttachmentDetails } from "./inbox.remote.js";
 import { registerInboxCommands } from "./inbox.js";
 
@@ -1237,6 +1238,89 @@ describe("inbox attachment", () => {
         bytes: 3,
       });
     } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("allows a legacy unknown attachment probe while an explicit malformed gap stays blocked", async () => {
+    const id = crypto.randomUUID();
+    const dir = mkdtempSync(join(tmpdir(), "emails-cli-legacy-attachment-"));
+    const row = msgRow({
+      id,
+      attachments: [
+        { filename: "first.txt", content_type: "text/plain", size: 3, content_available: true },
+        17,
+        { filename: "legacy.txt", content_type: "text/plain", size: 3 },
+      ],
+    });
+    const attachmentRequests: string[] = [];
+    const legacyServer = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        const url = new URL(request.url);
+        if (request.method === "GET" && url.pathname === `/v1/messages/${id}`) {
+          return Response.json({ message: row });
+        }
+        if (request.method === "GET" && url.pathname.startsWith(`/v1/messages/${id}/attachments/`)) {
+          attachmentRequests.push(url.pathname);
+          if (url.pathname === `/v1/messages/${id}/attachments/2`) {
+            return Response.json({
+              attachment: {
+                filename: "legacy.txt",
+                content_type: "text/plain",
+                size: 3,
+                content_base64: "dHdv",
+              },
+            });
+          }
+          return Response.json({ code: "attachment_not_found" }, { status: 404 });
+        }
+        return Response.json({ error: "not found" }, { status: 404 });
+      },
+    });
+
+    try {
+      process.env.EMAILS_MODE = "self_hosted";
+      process.env.EMAILS_SELF_HOSTED_URL = `http://127.0.0.1:${legacyServer.port}`;
+      process.env.EMAILS_SELF_HOSTED_API_KEY = "legacy-attachment-test-key";
+      resetSelfHostedConfigCache();
+      resetMailDataSource();
+
+      const listed = await runInboxCommand(["inbox", "attachment", id]);
+      expect((listed.data as Array<{ filename: string; index?: number; content_available?: boolean }>)
+        .map((item) => [item.filename, item.index, item.content_available]))
+        .toEqual([
+          ["first.txt", 0, true],
+          ["attachment-2", 1, false],
+          ["legacy.txt", 2, undefined],
+        ]);
+      const read = await runInboxCommand(["inbox", "read", id, "--keep-unread"]);
+      const line = (needle: string) => read.out.split("\n").find((value) => value.includes(needle)) ?? "";
+      expect(line("attachment-2")).toContain("metadata only; payload not stored");
+      expect(line("attachment-2")).not.toContain("--index 1");
+      expect(line("legacy.txt")).toContain("fetch with --index 2");
+
+      const rejected = await runInboxSubprocessExpectingExit([
+        "inbox", "attachment", id, "--download", "--index", "1", "--output-dir", dir,
+      ]);
+      expect(rejected.exitCode).toBe(1);
+      expect(rejected.stderr).toContain("not available for download");
+      expect(attachmentRequests).not.toContain(`/v1/messages/${id}/attachments/1`);
+      expect(readdirSync(dir)).toEqual([]);
+
+      const downloaded = await runInboxSubprocessExpectingExit([
+        "inbox", "attachment", id, "--download", "--index", "2", "--output-dir", dir,
+      ]);
+      expect(downloaded.exitCode).toBe(0);
+      expect(downloaded.stderr).toBe("");
+      expect(attachmentRequests).toContain(`/v1/messages/${id}/attachments/2`);
+      const files = readdirSync(dir);
+      expect(files).toEqual(["legacy.txt"]);
+      expect(readFileSync(join(dir, files[0]!), "utf8")).toBe("two");
+    } finally {
+      legacyServer.stop(true);
+      stub.applyEnv();
       rmSync(dir, { recursive: true, force: true });
     }
   });
