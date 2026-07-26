@@ -140,7 +140,21 @@ jobs:
             -u EMAILS_AWS_REGION -u EMAILS_SES_AWS_PROFILE \
             -u RESEND_API_KEY -u RESEND_WEBHOOK_SECRET \
             AWS_EC2_METADATA_DISABLED=true \
-            HOME="$tmp_home" EMAILS_MODE=local EMAILS_DB_PATH=:memory: bun test --max-concurrency 1
+            HOME="$tmp_home" EMAILS_MODE=local EMAILS_DB_PATH=:memory: \
+            bash -euo pipefail <<'BASH'
+              mapfile -d '' -t test_files < <(
+                find . \
+                  \( -path './.git' -o -path './node_modules' -o -path './dist' \) -prune -o \
+                  -type f \( -name '*.test.ts' -o -name '*.test.tsx' \) \
+                  -print0 | sort -z
+              )
+              test "${#test_files[@]}" -gt 0
+              printf 'Running %d test files in isolated Bun processes\n' "${#test_files[@]}"
+              for test_file in "${test_files[@]}"; do
+                printf '\n=== %s ===\n' "$test_file"
+                bun test --max-concurrency 1 "$test_file"
+              done
+          BASH
       - name: Build
         run: bun run build
       - name: Verify generated self-hosted SDK signatures
