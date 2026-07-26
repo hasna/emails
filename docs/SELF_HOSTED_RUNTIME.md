@@ -19,6 +19,8 @@ export EMAILS_MODE=self_hosted
 export EMAILS_DATABASE_URL="postgresql://..."
 export EMAILS_API_SIGNING_KEY="..." # 32+ characters
 export EMAILS_SEND_PROVIDER=ses     # or resend
+export EMAILS_AUTH_ALLOWED_EMAIL_DOMAINS="example.com"   # required; your own domains
+export EMAILS_AUTH_FROM="no-reply@example.com"           # required; a verified sender identity
 export EMAILS_AWS_REGION=us-east-1
 # SES identity — pick ONE:
 #   (a) nothing: sign with the deployment IAM role of the account the service runs in
@@ -46,6 +48,33 @@ emails db migrate
 emails self-hosted key create
 emails-serve
 ```
+
+## Auth: signup domain allowlist and sender identity
+
+Two auth variables are **required** and have **no defaults** — the service refuses
+to boot without them, naming the missing one:
+
+| Variable | Purpose |
+| --- | --- |
+| `EMAILS_AUTH_ALLOWED_EMAIL_DOMAINS` | Comma- or space-separated allowlist of email domains permitted to sign up, log in, or be invited. `*` matches exactly one DNS label, so `example.*` allows `example.com` and `example.org` but not `sub.example.com`. |
+| `EMAILS_AUTH_FROM` | Sender identity for confirmation / password-reset / invite mail. Must be verified in the provider account the service actually signs into. |
+
+Neither ships a default on purpose. A built-in allowlist would pin every install
+to one organisation's domains and reject the operator's own staff with a
+deliberately opaque 403 (the gate never reveals whether an account exists, so a
+wrong allowlist looks like a broken login); a permit-all fallback would silently
+open signup on upgrade. Likewise, a default `EMAILS_AUTH_FROM` would only be
+sendable by whoever published the build.
+
+`*` matches exactly one DNS label, never a dot, so a subdomain can never sneak in
+through a wildcard. Two consequences worth stating: a single bare `*` is rejected
+(one label would allow `root@localhost`), and `*.*`, while accepted, is effectively
+**permit-all** — if that is what you want, say so deliberately.
+
+Related optional auth variables: `EMAILS_AUTH_PRODUCT_NAME` (name shown in the
+email copy) and `EMAILS_AUTH_VERIFY_URL_BASE` / `EMAILS_AUTH_RESET_URL_BASE` /
+`EMAILS_AUTH_INVITE_URL_BASE` (override the links, which otherwise derive from
+`EMAILS_PUBLIC_BASE_URL`).
 
 ## Outbound SES credentials
 

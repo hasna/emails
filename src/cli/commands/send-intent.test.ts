@@ -51,7 +51,7 @@ function message(id: string, sendState: string, extra: Record<string, unknown> =
   return {
     id,
     direction: "outbound",
-    from_addr: "andrei@hasna.com",
+    from_addr: "andrei@example.com",
     to_addrs: ["accountant@external.example"],
     subject: "Q2 invoices",
     status: sendState,
@@ -96,7 +96,7 @@ describe("emails send-intent reconcile", () => {
     const result = await runCommand([
       "send-intent", "reconcile", UNCERTAIN_ID,
       "--outcome", "not-sent",
-      "--evidence", "no SES Send datapoint on 638389534677 in the window",
+      "--evidence", "no SES Send datapoint on 111122223333 in the window",
     ]);
 
     expect(result.out).toContain("recorded as NOT SENT");

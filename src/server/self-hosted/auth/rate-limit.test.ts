@@ -36,9 +36,9 @@ describe("RateLimiter", () => {
   test("checkAll denies if ANY dimension is over the limit and records both", () => {
     let now = 0;
     const rl = new RateLimiter({ rules: { login: { limit: 1, windowMs: 1000 } }, now: () => now });
-    expect(rl.checkAll("login", ["ip", "user@hasna.com"]).ok).toBe(true);
+    expect(rl.checkAll("login", ["ip", "user@example.com"]).ok).toBe(true);
     // both dimensions now at their limit -> next call denied
-    expect(rl.checkAll("login", ["ip", "user@hasna.com"]).ok).toBe(false);
+    expect(rl.checkAll("login", ["ip", "user@example.com"]).ok).toBe(false);
   });
 
   test("unknown route is always allowed", () => {

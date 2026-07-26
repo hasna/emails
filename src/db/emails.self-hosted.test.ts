@@ -51,7 +51,7 @@ console.log("PORT=" + server.port);
 const MESSAGE = {
   id: "dad074f1-1111-2222-3333-444455556666",
   direction: "outbound",
-  from_addr: "sender@hasna.xyz",
+  from_addr: "sender@example.org",
   to_addrs: ["dest@example.com"],
   subject: "SelfHosted show works",
   body_text: "hello from the selfHosted store",

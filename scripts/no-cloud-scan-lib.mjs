@@ -48,6 +48,45 @@ const boundaryPatterns = [
   { label: "private deployment marker", scopes: BOTH, pattern: /\bhasna-xyz\b|\/hasna\/deploy\/|789877399345/i },
   { label: "retired inbound bucket prefix", scopes: BOTH, pattern: /hasna-emails-prod-inbound/i },
   { label: "hosted camel-case identifier", scopes: BOTH, pattern: /(?:cloud|Cloud)(?:Provider|Client|Account|Tenant|Session|Api|API|Token|Credit|Billing|Fleet|Mode|Sync)[A-Za-z0-9_]*/ },
+  // ── operator neutrality ─────────────────────────────────────────────────────
+  // A third party deploys this package into THEIR account with THEIR domains, so
+  // the publisher's infrastructure must never ship — not in bundled code, and not
+  // in the emitted `.d.ts` JSDoc, which `tsc --emitDeclarationOnly` preserves even
+  // though Bun strips comments from the `.js` bundles.
+  //
+  // These are enforced on the source surface too, which reaches Terraform, shell
+  // and container config: `deploy/**` is where an account id or an operator
+  // hostname is most likely to leak, and it is scanned because the source guard
+  // derives its file set from `git ls-files` rather than a roots allowlist.
+  //
+  // `\b[0-9]{12}\b` would be wrong for the account id: `-` is a word boundary, so
+  // that form false-positives on every UUID. `stripExactCompatibilityBridges`
+  // erases UUID-shaped tokens and long hex digests first, which lets this rule use
+  // plain digit bounds and therefore still catch the form account ids actually take
+  // in AWS resource names (`emails-<account>-us-east-1-inbound`,
+  // `role/<name>-<account>-task`, `/ecs/emails-<account>/api`) — all of which a
+  // hyphen-excluding lookaround would miss. The documented AWS placeholders
+  // (111122223333, 123456789012) and the 999999999999 negative fixture are excluded
+  // BY VALUE, never by exempting a file.
+  {
+    label: "vendor aws account id",
+    scopes: BOTH,
+    pattern: /(?<![0-9])(?!111122223333|123456789012|999999999999)[0-9]{12}(?![0-9])/,
+  },
+  // Any bare vendor hostname, including the `hasna.*` glob. The `hosted endpoint`
+  // pattern above only catches URL form, which is why a vendor From-identity
+  // default and a vendor signup-allowlist default both shipped.
+  //
+  // The lookahead exempts the four `hasna.<name>` identifiers that are NAMESPACES
+  // rather than hostnames: the service-contract names (`hasna.contract.json`,
+  // `hasna.service_contract.v1`), the macOS bundle id `com.hasna.emails`, and the
+  // `hasna.events` event-source id that `@hasna/events` bundles into
+  // dist/cli/ui-runtime-bundle.js. Each was found by running this guard, not
+  // guessed. A NEW namespace of that shape will trip this rule, which is the safe
+  // direction to fail.
+  { label: "vendor hostname", scopes: BOTH, pattern: /hasna\.(?!contract|service|emails|events)(?:[a-z]{2,24}|\*)/i },
+  // Vendor account/environment names that identify private infrastructure.
+  { label: "vendor infrastructure name", scopes: BOTH, pattern: /\balumia\b|\bxyz-infra\b/i },
   {
     label: "legacy hosted environment",
     scopes: BOTH,
@@ -162,6 +201,22 @@ function stripExactCompatibilityBridges(content, path) {
     ];
     for (const sql of exactReleasedSql) scanned = scanned.replaceAll(sql, sql.replaceAll("cloud_providers", "legacy_providers"));
   }
+
+  // UUID-shaped tokens (permissive char class: fixtures use ids like
+  // "rm000000-1111-2222-3333-444444444444") and long hex digests are erased so the
+  // `vendor aws account id` rule can use plain digit bounds. This is a SHAPE
+  // exemption, not a file exemption — a real account id in any of these positions
+  // still trips.
+  scanned = scanned.replace(/\b[0-9A-Za-z]{8}-[0-9A-Za-z]{4}-[0-9A-Za-z]{4}-[0-9A-Za-z]{4}-[0-9A-Za-z]{12}\b/g, "UUID_SENTINEL");
+  scanned = scanned.replace(/\b[0-9a-fA-F]{16,}\b/g, "HEX_SENTINEL");
+
+  // The npm `author` field is package AUTHORSHIP metadata, not deployment
+  // configuration: a maintainer's contact address legitimately names their own
+  // domain. Exempt exactly that ONE field value so `vendor hostname` keeps its
+  // teeth everywhere else. `(?<![\w-])` keeps `coauthor`/`co-author` in scope.
+  // Both spellings are needed: package.json itself, and the copy Bun inlines into
+  // bundles that import it for `version`.
+  scanned = scanned.replace(/(?<![\w-])("?)author\1\s*:\s*"[^"]*"/g, 'author: "AUTHORSHIP_SENTINEL"');
 
   // CI explicitly unsets legacy variables to make the test environment
   // deterministic. Exempt only those `env -u NAME` tokens.

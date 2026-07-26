@@ -19,6 +19,9 @@ services:
       EMAILS_DATABASE_URL: "postgresql://${EMAILS_POSTGRES_RUNTIME_USER:-emails_runtime}:${EMAILS_POSTGRES_RUNTIME_PASSWORD:?set EMAILS_POSTGRES_RUNTIME_PASSWORD}@db:5432/${EMAILS_POSTGRES_DB:-emails}?sslmode=disable"
       EMAILS_API_SIGNING_KEY: "${EMAILS_API_SIGNING_KEY:?set EMAILS_API_SIGNING_KEY (32+ characters)}"
       EMAILS_SEND_PROVIDER: "${EMAILS_SEND_PROVIDER:-ses}"
+      # No default allowlist ships: set your own signup/login/invite domains.
+      EMAILS_AUTH_ALLOWED_EMAIL_DOMAINS: "${EMAILS_AUTH_ALLOWED_EMAIL_DOMAINS:?set EMAILS_AUTH_ALLOWED_EMAIL_DOMAINS (e.g. example.com or example.*)}"
+      EMAILS_AUTH_FROM: "${EMAILS_AUTH_FROM:?set EMAILS_AUTH_FROM (a verified sender identity)}"
       EMAILS_AWS_REGION: "${EMAILS_AWS_REGION:-us-east-1}"
       RESEND_API_KEY: "${RESEND_API_KEY:-}"
       RESEND_WEBHOOK_SECRET: "${RESEND_WEBHOOK_SECRET:-}"

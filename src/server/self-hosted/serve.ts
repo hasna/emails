@@ -14,11 +14,20 @@ import { buildSelfHostedSender } from "./sender.js";
 import { AuthStore } from "./auth/store.js";
 import { RateLimiter } from "./auth/rate-limit.js";
 import { buildAuthMailerConfig } from "./auth/mailer.js";
+import { assertAllowedEmailDomainsConfigured } from "./auth/allowed-email.js";
 
 /** Assemble the service dependencies from the environment. */
 export function buildSelfHostedService(version: string): SelfHostedServiceDeps {
   const { client } = getSelfHostedPool();
   const signingSecret = requireSigningSecret();
+  // Fail closed at BOOT, before any request can reach the auth gates, and BEFORE
+  // any pool/sender/verifier is built: neither the signup/login/invite allowlist
+  // nor the auth sender identity has a default. An unconfigured deployment would
+  // otherwise reject its own operators with a deliberately opaque 403 that looks
+  // like a broken login. Both are resolved here, together, so an operator missing
+  // both does not need two boot cycles to learn the second variable's name.
+  assertAllowedEmailDomainsConfigured();
+  const mailer = buildAuthMailerConfig();
   const keys = new ApiKeyStore(client);
   // Accept the canonical "emails" app slug AND every back-compat alias so
   // keys minted while the unreleased "mailery" rename was deployed keep
@@ -58,7 +67,7 @@ export function buildSelfHostedService(version: string): SelfHostedServiceDeps {
     keyStore: keys,
     signingSecret,
     rateLimiter: new RateLimiter(),
-    mailer: buildAuthMailerConfig(),
+    mailer,
     env: process.env,
   };
 }

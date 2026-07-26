@@ -41,7 +41,7 @@ function v1(id: string, over: Record<string, unknown> = {}): Record<string, unkn
     id,
     direction: "inbound",
     from_addr: `"Sender ${id}" <s${id}@example.com>`,
-    to_addrs: ["andrei@hasna.com"],
+    to_addrs: ["andrei@example.com"],
     cc_addrs: [],
     subject: `subject ${id}`,
     body_text: `body of ${id}`,
@@ -406,7 +406,7 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     expect(msgs.map((m) => m.id)).toEqual(["5", "3", "2"]);
     const top = msgs[0]!;
     expect(top.from).toBe('"Sender 5" <s5@example.com>');
-    expect(top.to).toBe("andrei@hasna.com");
+    expect(top.to).toBe("andrei@example.com");
     expect(top.subject).toBe("subject 5");
     expect(top.date).toBe("2026-06-15T08:00:00.000Z");
     expect(top.is_read).toBe(false);
@@ -1682,7 +1682,7 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
 
   it("sends via POST /messages/send and deletes via DELETE", async () => {
     const { ds, serve } = make([]);
-    const res = await ds.send({ to: "a@x.com, b@x.com", from: "me@hasna.com", subject: "hi", body: "yo", markdown: false });
+    const res = await ds.send({ to: "a@x.com, b@x.com", from: "me@example.com", subject: "hi", body: "yo", markdown: false });
     expect(res.id).toBe("posted-1");
     expect(serve.posted).toHaveLength(1);
     expect((serve.posted[0] as { to: string[] }).to).toEqual(["a@x.com", "b@x.com"]);
@@ -1694,7 +1694,7 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     const { ds } = make([
       v1("9", {
         direction: "outbound",
-        from_addr: "andrei@hasna.com",
+        from_addr: "andrei@example.com",
         to_addrs: ["accountant@client.example"],
         cc_addrs: ["copy@client.example", "second@client.example"],
         status: "uncertain",
@@ -1721,7 +1721,7 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
       },
     });
     const ds = new SelfHostedMailDataSource({ baseUrl: "https://emails.example/v1", apiKey: "k", fetchImpl: serveFail });
-    await expect(ds.send({ to: "x@external.example", from: "me@hasna.com", subject: "s", body: "b" }))
+    await expect(ds.send({ to: "x@external.example", from: "me@example.com", subject: "s", body: "b" }))
       .rejects.toThrow(/Email address is not verified/);
   });
 
@@ -1739,7 +1739,7 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
       },
     });
     const ds = new SelfHostedMailDataSource({ baseUrl: "https://emails.example/v1", apiKey: "k", fetchImpl: serveWarn });
-    const res = await ds.send({ to: "x@external.example", from: "me@hasna.com", subject: "s", body: "b" });
+    const res = await ds.send({ to: "x@external.example", from: "me@example.com", subject: "s", body: "b" });
     expect(res.id).toBe("m1");
     expect(res.warning).toMatch(/accepted/);
     // The PROVIDER's id — the one that proves the send — must win over the RFC
@@ -1758,7 +1758,7 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
       },
     });
     const ds = new SelfHostedMailDataSource({ baseUrl: "https://emails.example/v1", apiKey: "k", fetchImpl: serveRecOnly });
-    const res = await ds.send({ to: "x@external.example", from: "me@hasna.com", subject: "s", body: "b" });
+    const res = await ds.send({ to: "x@external.example", from: "me@example.com", subject: "s", body: "b" });
     expect(res.messageId).toBe("prov-rec-2");
     expect(res.warning).toBeUndefined();
   });
@@ -1773,7 +1773,7 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     };
     const ds = new SelfHostedMailDataSource({ baseUrl: "https://emails.example/v1", apiKey: "k", fetchImpl: serve });
     await expect(ds.send({
-      to: "x@hasna.com", from: "me@hasna.com", subject: "s", body: "b", providerId: "some-provider-id",
+      to: "x@example.com", from: "me@example.com", subject: "s", body: "b", providerId: "some-provider-id",
     })).rejects.toThrow(/--provider is not supported in self_hosted mode/);
     expect(called).toBe(0);
   });
@@ -1794,7 +1794,7 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     const ds = new SelfHostedMailDataSource({ baseUrl: "https://emails.example/v1", apiKey: "k", fetchImpl: serveReject });
     let resolved: unknown;
     let rejected: unknown;
-    try { resolved = await ds.send({ to: "x@external.example", from: "me@hasna.com", subject: "s", body: "b" }); }
+    try { resolved = await ds.send({ to: "x@external.example", from: "me@example.com", subject: "s", body: "b" }); }
     catch (error) { rejected = error; }
     expect(resolved).toBeUndefined();
     expect(String(rejected)).toContain("NOTHING was sent");
@@ -1813,54 +1813,54 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
       },
     });
     const ds = new SelfHostedMailDataSource({ baseUrl: "https://emails.example/v1", apiKey: "k", fetchImpl: serveUnknown });
-    await expect(ds.send({ to: "x@external.example", from: "me@hasna.com", subject: "s", body: "b" }))
+    await expect(ds.send({ to: "x@external.example", from: "me@example.com", subject: "s", body: "b" }))
       .rejects.toThrow(/may or may not have been sent/);
   });
 
   it("returns verification candidates scoped to the recipient address", async () => {
     const { ds, serve } = make([
-      v1("2", { to_addrs: ["andrei@hasna.com"], subject: "code 123456" }),
-      v1("3", { to_addrs: ["other@hasna.com"], subject: "nope" }),
+      v1("2", { to_addrs: ["andrei@example.com"], subject: "code 123456" }),
+      v1("3", { to_addrs: ["other@example.com"], subject: "nope" }),
     ]);
-    const cands = await ds.verificationCandidates("andrei@hasna.com");
+    const cands = await ds.verificationCandidates("andrei@example.com");
     expect(cands.map((c) => c.id)).toEqual(["2"]);
-    expect(serve.requests).toContain("GET /v1/messages?limit=50&direction=inbound&to=andrei%40hasna.com");
+    expect(serve.requests).toContain("GET /v1/messages?limit=50&direction=inbound&to=andrei%40example.com");
   });
 
   it("pushes verification sender and subject filters to the self-hosted server", async () => {
     const { ds, serve } = make([
-      v1("2", { from_addr: "ChatGPT <noreply@tm.openai.com>", to_addrs: ["andrei@hasna.com"], subject: "Your ChatGPT code", body_text: "code 123456" }),
-      v1("3", { from_addr: "Other <nope@example.com>", to_addrs: ["andrei@hasna.com"], subject: "Your ChatGPT code", body_text: "code 999999" }),
+      v1("2", { from_addr: "ChatGPT <noreply@tm.openai.com>", to_addrs: ["andrei@example.com"], subject: "Your ChatGPT code", body_text: "code 123456" }),
+      v1("3", { from_addr: "Other <nope@example.com>", to_addrs: ["andrei@example.com"], subject: "Your ChatGPT code", body_text: "code 999999" }),
     ]);
-    const latest = await ds.findLatest("andrei@hasna.com", { from: "openai", subject: "ChatGPT" });
+    const latest = await ds.findLatest("andrei@example.com", { from: "openai", subject: "ChatGPT" });
     expect(latest?.email.id).toBe("2");
-    expect(serve.requests).toContain("GET /v1/messages?limit=50&direction=inbound&to=andrei%40hasna.com&from=openai&subject=ChatGPT");
+    expect(serve.requests).toContain("GET /v1/messages?limit=50&direction=inbound&to=andrei%40example.com&from=openai&subject=ChatGPT");
   });
 
   it("fetches message detail for verification bodies when list rows are lean", async () => {
     const { ds, serve } = make([
-      v1("2", { from_addr: "ChatGPT <noreply@tm.openai.com>", to_addrs: ["andrei@hasna.com"], subject: "Your ChatGPT code", body_text: "code 123456", body_html: "<p>code 123456</p>" }),
+      v1("2", { from_addr: "ChatGPT <noreply@tm.openai.com>", to_addrs: ["andrei@example.com"], subject: "Your ChatGPT code", body_text: "code 123456", body_html: "<p>code 123456</p>" }),
     ], { leanList: true });
 
-    const latest = await ds.findLatest("andrei@hasna.com", { from: "openai", subject: "ChatGPT" });
+    const latest = await ds.findLatest("andrei@example.com", { from: "openai", subject: "ChatGPT" });
 
     expect(latest?.code).toBe("123456");
-    expect(serve.requests).toContain("GET /v1/messages?limit=50&direction=inbound&to=andrei%40hasna.com&from=openai&subject=ChatGPT");
+    expect(serve.requests).toContain("GET /v1/messages?limit=50&direction=inbound&to=andrei%40example.com&from=openai&subject=ChatGPT");
     expect(serve.requests).toContain("GET /v1/messages/2");
   });
 
   it("locally verifies verification filters when a stale server ignores them", async () => {
     const { ds, serve } = make([
-      v1("newer-wrong-subject", { from_addr: "ChatGPT <noreply@tm.openai.com>", to_addrs: ["andrei@hasna.com"], subject: "Marketing", body_text: "code 999999", received_at: "2026-07-13T12:00:00.000Z" }),
-      v1("right", { from_addr: "ChatGPT <noreply@tm.openai.com>", to_addrs: ["andrei@hasna.com"], subject: "Your ChatGPT code", body_text: "code 123456", received_at: "2026-07-13T11:00:00.000Z" }),
-      v1("wrong-to", { from_addr: "ChatGPT <noreply@tm.openai.com>", to_addrs: ["other@hasna.com"], subject: "Your ChatGPT code", body_text: "code 111111", received_at: "2026-07-13T10:00:00.000Z" }),
+      v1("newer-wrong-subject", { from_addr: "ChatGPT <noreply@tm.openai.com>", to_addrs: ["andrei@example.com"], subject: "Marketing", body_text: "code 999999", received_at: "2026-07-13T12:00:00.000Z" }),
+      v1("right", { from_addr: "ChatGPT <noreply@tm.openai.com>", to_addrs: ["andrei@example.com"], subject: "Your ChatGPT code", body_text: "code 123456", received_at: "2026-07-13T11:00:00.000Z" }),
+      v1("wrong-to", { from_addr: "ChatGPT <noreply@tm.openai.com>", to_addrs: ["other@example.com"], subject: "Your ChatGPT code", body_text: "code 111111", received_at: "2026-07-13T10:00:00.000Z" }),
     ], { ignoreListFilters: true });
 
-    const latest = await ds.findLatest("andrei@hasna.com", { from: "openai", subject: "ChatGPT" });
+    const latest = await ds.findLatest("andrei@example.com", { from: "openai", subject: "ChatGPT" });
 
     expect(latest?.email.id).toBe("right");
     expect(latest?.code).toBe("123456");
-    expect(serve.requests).toContain("GET /v1/messages?limit=50&direction=inbound&to=andrei%40hasna.com&from=openai&subject=ChatGPT");
+    expect(serve.requests).toContain("GET /v1/messages?limit=50&direction=inbound&to=andrei%40example.com&from=openai&subject=ChatGPT");
   });
 
   it("persists mailbox mutations through the self-hosted serve", async () => {
@@ -2156,7 +2156,7 @@ function threadRow(id: string, over: Record<string, unknown> = {}): Record<strin
     id,
     direction: "inbound",
     from_addr: `${id}@example.com`,
-    to_addrs: ["andrei@hasna.com"],
+    to_addrs: ["andrei@example.com"],
     cc_addrs: [],
     subject: "Declaratii TVA 06.2026",
     body_text: `body of ${id}`,
@@ -2176,7 +2176,7 @@ function threadRow(id: string, over: Record<string, unknown> = {}): Record<strin
 describe("SelfHostedMailDataSource — conversations", () => {
   it("returns the whole conversation, oldest first, not just the selected message", async () => {
     const { ds } = make([
-      threadRow("sent", { direction: "outbound", from_addr: "andrei@hasna.com", to_addrs: ["kpmg@example.com"], received_at: "2026-07-01T08:00:00.000Z" }),
+      threadRow("sent", { direction: "outbound", from_addr: "andrei@example.com", to_addrs: ["kpmg@example.com"], received_at: "2026-07-01T08:00:00.000Z" }),
       threadRow("reply1", { subject: "Re: Declaratii TVA 06.2026", in_reply_to: "<sent@x>", received_at: "2026-07-01T09:00:00.000Z" }),
       threadRow("reply2", { subject: "RE: declaratii tva 06.2026", in_reply_to: "<reply1@x>", received_at: "2026-07-01T10:00:00.000Z" }),
       threadRow("unrelated", { subject: "Something else entirely", received_at: "2026-07-01T11:00:00.000Z" }),
@@ -2192,7 +2192,7 @@ describe("SelfHostedMailDataSource — conversations", () => {
 
   it("keeps a reply attached when its subject was edited but In-Reply-To still points at the thread", async () => {
     const { ds } = make([
-      threadRow("root", { direction: "outbound", from_addr: "andrei@hasna.com", subject: "Invoice", received_at: "2026-07-01T08:00:00.000Z" }),
+      threadRow("root", { direction: "outbound", from_addr: "andrei@example.com", subject: "Invoice", received_at: "2026-07-01T08:00:00.000Z" }),
       threadRow("edited", { subject: "Re: Invoice — revised numbers", in_reply_to: "<root@x>", received_at: "2026-07-01T09:00:00.000Z" }),
     ]);
 
@@ -2294,10 +2294,10 @@ describe("SelfHostedMailDataSource — source scoping", () => {
 
   it("still narrows on address and domain scopes", async () => {
     const { ds } = make([
-      v1("2", { to_addrs: ["andrei@hasna.com"] }),
+      v1("2", { to_addrs: ["andrei@example.com"] }),
       v1("5", { to_addrs: ["other@elsewhere.com"] }),
     ]);
-    expect((await ds.listMailbox("inbox", { source: { address: "andrei@hasna.com" } })).map((m) => m.id)).toEqual(["2"]);
+    expect((await ds.listMailbox("inbox", { source: { address: "andrei@example.com" } })).map((m) => m.id)).toEqual(["2"]);
     expect((await ds.listMailbox("inbox", { source: { domain: "elsewhere.com" } })).map((m) => m.id)).toEqual(["5"]);
   });
 

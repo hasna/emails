@@ -108,7 +108,7 @@ log show --last 2m --predicate 'eventMessage CONTAINS "Emails:"' --info
 A send goes through `emails send` (same argv the app builds):
 
 ```bash
-emails send --from andrei@hasna.com --to andrei@hasna.com \
+emails send --from you@example.com --to you@example.com \
   --subject "Emails test" --body "round-trip"
 ```
 

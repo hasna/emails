@@ -236,12 +236,12 @@ describe("email thread / conversation / replies — routes to /v1", () => {
   it("finds the replies a sent message actually received", async () => {
     await seed([
       outbound("sent-1", "Declaratii TVA 06.2026", "2026-01-01T00:00:00.000Z", {
-        message_id: "<sent-1@hasna.com>",
+        message_id: "<sent-1@example.com>",
         body_text: "please find attached",
       }),
       inbound("reply-1", "Re: Declaratii TVA 06.2026", "2026-01-02T00:00:00.000Z", {
         message_id: "<reply-1@kpmg.example>",
-        in_reply_to: "<sent-1@hasna.com>",
+        in_reply_to: "<sent-1@example.com>",
       }),
       inbound("reply-2", "RE: declaratii tva 06.2026", "2026-01-03T00:00:00.000Z", {
         message_id: "<reply-2@kpmg.example>",
@@ -261,8 +261,8 @@ describe("email thread / conversation / replies — routes to /v1", () => {
 
   it("renders the whole thread, not a permanent 1-message header", async () => {
     await seed([
-      outbound("sent-2", "Q2 statements", "2026-02-01T00:00:00.000Z", { message_id: "<sent-2@hasna.com>" }),
-      inbound("reply-3", "Re: Q2 statements", "2026-02-02T00:00:00.000Z", { in_reply_to: "<sent-2@hasna.com>" }),
+      outbound("sent-2", "Q2 statements", "2026-02-01T00:00:00.000Z", { message_id: "<sent-2@example.com>" }),
+      inbound("reply-3", "Re: Q2 statements", "2026-02-02T00:00:00.000Z", { in_reply_to: "<sent-2@example.com>" }),
     ]);
 
     const { data, out } = await runEmailLogCommand(["email", "thread", "sent-2"]);
@@ -277,9 +277,9 @@ describe("email thread / conversation / replies — routes to /v1", () => {
 
   it("applies the --limit/--offset it advertises on thread instead of ignoring them", async () => {
     await seed([
-      outbound("sent-3", "Payroll March", "2026-03-01T00:00:00.000Z", { message_id: "<sent-3@hasna.com>" }),
-      inbound("reply-4", "Re: Payroll March", "2026-03-02T00:00:00.000Z", { in_reply_to: "<sent-3@hasna.com>" }),
-      inbound("reply-5", "Re: Payroll March", "2026-03-03T00:00:00.000Z", { in_reply_to: "<sent-3@hasna.com>" }),
+      outbound("sent-3", "Payroll March", "2026-03-01T00:00:00.000Z", { message_id: "<sent-3@example.com>" }),
+      inbound("reply-4", "Re: Payroll March", "2026-03-02T00:00:00.000Z", { in_reply_to: "<sent-3@example.com>" }),
+      inbound("reply-5", "Re: Payroll March", "2026-03-03T00:00:00.000Z", { in_reply_to: "<sent-3@example.com>" }),
     ]);
 
     const { data } = await runEmailLogCommand(["email", "thread", "sent-3", "--limit", "1", "--offset", "1"]);
