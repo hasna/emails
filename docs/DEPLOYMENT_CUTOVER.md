@@ -3,9 +3,9 @@
 This repository intentionally has no automatic deployment workflow. Merging or
 tagging the repository cannot publish a package, push an image, or update AWS.
 
-The fast-uri quarantine is resolved: version 3.1.4 cleared the full seven-day
+The fast-uri quarantine is resolved: the eligible security update cleared the full seven-day
 managed quarantine window on 2026-07-26 10:42:54.497 Europe/Bucharest and is
-pinned in 1.3.1. Future third-party dependency changes remain subject to the
+pinned in the current package manifest and lockfile. Future third-party dependency changes remain subject to the
 managed quarantine process.
 
 Before a future `workflow_dispatch` deployment is introduced, an operator must
