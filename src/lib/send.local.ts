@@ -1,7 +1,11 @@
 import { getProvider } from "../db/providers.local.js";
 import { getAdapter } from "../providers/index.js";
 import { getFailoverProviderIds } from "./config.js";
-import { getAddressSendability } from "../db/address-lifecycle.local.js";
+// The FACADE, not an arm. This module used to import `address-lifecycle.local.js`
+// directly, which pinned the send gate to one arm's dataset regardless of where this
+// installation actually keeps its addresses. That family is collapsed: there is one
+// implementation, it reads through the store seam, and it is async.
+import { getAddressSendability } from "../db/address-lifecycle.js";
 import { assertSendAuthorized } from "../db/send-keys.local.js";
 import { canonicalSender } from "./email-address.js";
 import { getWarmingSchedule } from "../db/warming.local.js";
@@ -126,7 +130,16 @@ export async function sendWithFailover(
   // any provider is touched.
   if (opts.from) {
     const senderEmail = canonicalSender(opts.from) ?? opts.from;
-    const s = getAddressSendability(senderEmail, db);
+    // NO `db` HANDLE IS FORWARDED, and that is the one behaviour change here. The
+    // collapsed family's injectable is a STORE, not a database handle, and it defaults to
+    // the one this installation's storage configuration names. Every production caller of
+    // `sendWithFailover` passes `getDatabase()` — the same process-wide connection the
+    // SQLite store opens — so a local configuration reads exactly the rows it read before.
+    // A caller that hands in some OTHER database now has its sends gated against the
+    // configured store rather than against that handle, which is the correct answer to
+    // "may this address send": suspension and quota are properties of the installation,
+    // not of whichever connection a command happened to open.
+    const s = await getAddressSendability(senderEmail);
     if (!s.sendable) throw new Error(`Send blocked: ${s.reason}`);
   }
 

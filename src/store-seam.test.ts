@@ -508,11 +508,27 @@ describe("store seam", () => {
 
   it("maps one repository onto every src/db family", () => {
     const dbDir = join(import.meta.dir, "db");
-    const families = readdirSync(dbDir)
+    const modules = readdirSync(dbDir).filter((name) => name.endsWith(".ts") && !name.includes(".test."));
+
+    // THE ANTI-VACUITY FLOOR IS ON THE DIRECTORY READ, not on the number of arm files, and
+    // that is a correction rather than a relaxation. This test used to discover families by
+    // counting `*.local.ts` modules and required more than twenty of them — which was sound
+    // while every family had two arms, and stops being sound the moment a family is
+    // collapsed onto the seam: the arm count is SUPPOSED to fall to zero, so a floor under
+    // it has to be lowered by every collapse and is then reading a deliberately shrinking
+    // set as proof that the scan worked. The module count does not shrink that way (a
+    // collapse removes two arms and keeps the facade), so it is the honest floor.
+    expect(modules.length, "src/db was not read").toBeGreaterThan(40);
+
+    // Families that STILL have a local arm. Not the family list any more — a collapsed
+    // family has no arm and is still a family — but it is the set that must not contain a
+    // surprise: a new family added here with no repository on the seam is the regression
+    // this half catches.
+    const armFamilies = modules
       .filter((name) => name.endsWith(".local.ts"))
       .map((name) => name.slice(0, -".local.ts".length))
       .sort();
-    expect(families.length).toBeGreaterThan(20);
+    expect(armFamilies.length, "no local arms were found at all").toBeGreaterThan(0);
 
     // `self-hosted-resource` is routing infrastructure shared BY the families, not a
     // family: it owns no rows. It is the one exclusion, named here so adding another
@@ -543,10 +559,37 @@ describe("store seam", () => {
       warming: "warming",
       "webhook-receipts": "webhookReceipts",
     };
-    // No family may be forgotten, and no mapping may name a family that is gone.
-    expect(families.filter((family) => !notAFamily.includes(family)).sort()).toEqual(
-      Object.keys(familyToRepository).sort(),
-    );
+    // BOTH DIRECTIONS, because the single `toEqual` this replaces carried both and a
+    // collapse breaks it in only one of them.
+    //
+    // 1. NO FAMILY MAY BE FORGOTTEN. Every family that still has a local arm must have a
+    //    mapping. This is the direction that catches a family added to src/db with no
+    //    repository on the seam, and it is unchanged in force.
+    expect(
+      armFamilies.filter(
+        (family) => !notAFamily.includes(family) && !Object.hasOwn(familyToRepository, family),
+      ),
+      "a src/db family has no entry in this mapping",
+    ).toEqual([]);
+
+    // 2. NO MAPPING MAY NAME A FAMILY THAT IS GONE. This is the half the old `toEqual` gave
+    //    that a collapse would otherwise take away, restated against the family's MODULES
+    //    rather than against its arms: a family exists while it has a facade (`x.ts`) or any
+    //    arm (`x.<arm>.ts`), and it is gone when it has neither. So a mapping left behind
+    //    after a family is DELETED still fails here, while a mapping for a family that was
+    //    COLLAPSED — facade kept, arms removed — correctly passes.
+    expect(
+      Object.keys(familyToRepository).filter(
+        (family) => !modules.some((name) => name === `${family}.ts` || name.startsWith(`${family}.`)),
+      ),
+      "this mapping names a src/db family with no modules left",
+    ).toEqual([]);
+
+    // 3. THE FAMILY COUNT ITSELF MAY NOT SHRINK SILENTLY. A collapse removes ARMS, never a
+    //    family, so this floor is the one that stays put across the whole programme — and it
+    //    is what stops the two checks above from being satisfied by deleting entries from
+    //    both sides at once.
+    expect(Object.keys(familyToRepository).length, "a src/db family lost its mapping").toBeGreaterThan(20);
 
     const storeCode = stripComments(readFileSync(join(storeDir, "email-store.ts"), "utf8"));
     const declared = [...storeCode.matchAll(/^\s+readonly (\w+):\s*(\w+);/gm)].map(
