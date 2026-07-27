@@ -138,8 +138,9 @@ const root = join(import.meta.dir, "..");
  *   - status-facts moved `twoArmFamilies` and `remoteArmModules` by one, and
  *     `getEmailsModeReferences` and `resolveEmailsModeReferences` by two each; its own
  *     dispatch used neither the helper nor a dispatched export.
- *   - verification-code moves `twoArmFamilies` and `remoteArmModules` by one more (its two
- *     arms are deleted), `routedFacadeDefinitions` by one and `routedCallExpressions` by
+ *   - verification-code moves `twoArmFamilies` and `remoteArmModules` by one more, 39 -> 38
+ *     (its two
+ *     arms are deleted), `routedFacadeDefinitions` 29 -> 28 and `routedCallExpressions` by
  *     three (its facade's dispatch helper and its three dispatched exports), and
  *     `isSelfHostedModeReferences` by two (that facade's import of the client-side mode
  *     predicate and its one call).
@@ -151,8 +152,8 @@ const root = join(import.meta.dir, "..");
  * rather than to trust this sentence.
  */
 const CEILINGS: Record<string, number> = {
-  twoArmFamilies: 39,
-  remoteArmModules: 39,
+  twoArmFamilies: 38,
+  remoteArmModules: 38,
   routedFacadeDefinitions: 28,
   routedCallExpressions: 287,
   selfHostedResourceBranches: 47,

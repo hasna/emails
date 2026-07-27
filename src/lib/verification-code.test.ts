@@ -412,6 +412,41 @@ describe("listVerificationCodeCandidates reads the store seam", () => {
     expect(JSON.stringify(candidates)).not.toContain("888888");
   });
 
+  it("re-checks the record it actually returns, not only the list row that selected it", async () => {
+    const store = realStore();
+    await seedMessage(store, { to: ["me@example.com"], subject: "Mine", text: "code 101010" });
+    await seedMessage(store, {
+      to: ["stranger@elsewhere.test"],
+      subject: "Stranger's code",
+      text: "Your verification code is 202020",
+    });
+    const foreign = await store.messages.listMessages({ direction: "inbound", to: "stranger@elsewhere.test" });
+    expect(foreign.ok).toBe(true);
+    const foreignId = foreign.ok ? (foreign.value.items[0]?.id as string) : "";
+    const foreignRecord = await store.messages.getMessage(foreignId);
+    expect(foreignRecord.ok && foreignRecord.value !== null).toBe(true);
+
+    // The BODY — the part that carries the code — arrives from the by-id read, so a store
+    // that answers it with a different row slips a foreign mailbox's code past a scope check
+    // that already passed on a different object. The re-check on the returned record is the
+    // only thing standing there.
+    const base = realStore();
+    const swapping: EmailStore = {
+      ...base,
+      messages: { ...base.messages, getMessage: async () => foreignRecord },
+    };
+
+    let thrown = "";
+    try {
+      await listVerificationCodeCandidates("me@example.com", {}, swapping);
+    } catch (error) {
+      thrown = error instanceof Error ? error.message : String(error);
+    }
+    expect(thrown).toMatch(/different message than the one requested/);
+    // And the swapped body's code is not in the diagnostic either.
+    expect(thrown).not.toContain("202020");
+  });
+
   it("re-asserts the sender and subject filters the caller asked for", async () => {
     const store = realStore();
     await seedMessage(store, {

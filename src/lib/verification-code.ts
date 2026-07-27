@@ -191,6 +191,11 @@ function candidateRecipient(address: string): string {
 /**
  * Whether `row` is really addressed to `target`.
  *
+ * Deliberately typed on the two fields it reads rather than on `MessageListRecord`, so the
+ * SAME check can be applied to the full record that is actually handed back — see the
+ * detail re-assertion in the read below. Checking only the list row would leave the
+ * security property one indirection away from the object it is supposed to be about.
+ *
  * THE STORE'S `to` FILTER IS NOT THIS CHECK, and the difference matters here more than
  * anywhere else in the tree. Both stores implement it as a substring match — SQLite as
  * `lower(to_addrs_json) LIKE '%…%'`, the API as a query parameter on the message list —
@@ -203,7 +208,11 @@ function candidateRecipient(address: string): string {
  * populated from `to_addresses` alone, so there is no cc reachability to preserve and
  * adding it would widen the scope beyond either deleted arm.
  */
-function addressedTo(row: MessageListRecord, target: string): boolean {
+function addressedTo(row: Pick<MessageListRecord, "direction" | "to_addrs">, target: string): boolean {
+  // A sent message can quote a code the caller typed, so serving one as a received
+  // candidate would answer "what code did I receive?" with a code they sent. Re-asserted
+  // rather than trusted to the store's `direction` filter.
+  if (row.direction.trim().toLowerCase() === "outbound") return false;
   return row.to_addrs.map(normalizedAddress).includes(target);
 }
 
@@ -295,10 +304,6 @@ export async function listVerificationCodeCandidates(
     if (!listed.ok) throw storeRefusal("read the inbound mail addressed to a recipient", listed);
 
     for (const row of listed.value.items) {
-      // Re-asserted rather than trusted: a sent message can quote a code the user typed,
-      // so serving one as an inbound candidate would answer "what code did I receive?"
-      // with a code the caller sent.
-      if (row.direction.trim().toLowerCase() === "outbound") continue;
       if (!addressedTo(row, target)) continue;
       if (!matchesText(row.from_addr, fromFilter)) continue;
       if (!matchesText(row.subject, subjectFilter)) continue;
@@ -311,6 +316,20 @@ export async function listVerificationCodeCandidates(
       // A row listed and then absent is a concurrent delete, not a refusal: the store
       // answered both times. Skipping it is the honest projection of "it is gone".
       if (detail.value === null) continue;
+
+      // THE SCOPE CHECK IS RE-RUN ON THE RECORD THAT IS ACTUALLY RETURNED, not only on the
+      // list row that selected it. The body — the part that carries the code — arrives from
+      // this second call, so a store that answered a by-id read with a different row would
+      // otherwise slip a foreign mailbox's code past a check that had already passed on a
+      // different object. That is a FAULT and not a refusal: the store answered, and what
+      // it answered is not the message that was asked for, so skipping it quietly would
+      // hide a broken store instead of reporting one.
+      if (detail.value.id !== row.id || !addressedTo(detail.value, target)) {
+        throw new Error(
+          "This installation's store answered a message read with a different message than " +
+            "the one requested; refusing to treat it as a verification-code candidate",
+        );
+      }
 
       candidates.push(toCandidate(detail.value));
       if (candidates.length >= budget) return candidates;
