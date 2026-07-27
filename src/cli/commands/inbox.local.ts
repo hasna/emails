@@ -734,7 +734,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .description("List configured S3 ingestion sources")
     .action(async () => {
       try {
-        const { listS3Sources } = await import("../../lib/s3-sync.local.js");
+        const { listS3Sources } = await import("../../lib/s3-sync.js");
         const sources = listS3Sources();
         output(sources, formatSourceList(sources));
       } catch (e) {
@@ -756,7 +756,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
       try {
         const [{ addInboundBucket }, { registerS3Source }] = await Promise.all([
           import("../../lib/config.js"),
-          import("../../lib/s3-sync.local.js"),
+          import("../../lib/s3-sync.js"),
         ]);
         const status = parseSourceStatus(opts.status);
         const providerId = opts.provider ? resolvePartialIdOrThrow(getDatabase(), "providers", opts.provider) : undefined;
@@ -783,7 +783,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .description("Retire an S3 source without deleting provider rows or mail")
     .action(async (sourceRef: string) => {
       try {
-        const { retireS3Source } = await import("../../lib/s3-sync.local.js");
+        const { retireS3Source } = await import("../../lib/s3-sync.js");
         const retired = retireS3Source(sourceRef);
         output(retired, chalk.green(`✓ Retired S3 source ${retired.id}`));
       } catch (e) {
