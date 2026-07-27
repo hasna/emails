@@ -260,6 +260,43 @@ describe("createWebhookServer storage gate", () => {
     expect(existsSync(dataDirectory), "refusing created a local data directory anyway").toBe(false);
   });
 
+  it("REFUSES even when a STALE local database is sitting at the default path", async () => {
+    // The worst configuration main had, measured on main rather than assumed: an installation that
+    // moved from a local database to an Emails API and kept its old file answered 200 and wrote the
+    // delivery event into that stale file — so the provider was told "done" and never retried, and
+    // the row landed where nothing reads it. No fault is required for this; it is a clean migration.
+    const stale = join(home, ".hasna", "emails", "emails.db");
+    clearStoreSettings();
+    resetDatabase();
+    const seeded = getDatabase();
+    seeded.run(
+      "INSERT INTO providers (id, name, type, api_key, active, created_at, updated_at) VALUES (?, ?, 'resend', 'k', 1, ?, ?)",
+      [PROVIDER_ID, PROVIDER_ID, "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z"],
+    );
+    // Positive control on the FIXTURE: the stale file has to exist and be reachable, or the refusal
+    // below would be about an absent file rather than about the configuration.
+    expect(existsSync(stale), "the stale-database fixture was not created").toBe(true);
+    closeDatabase();
+
+    configureApiStore();
+    expect(() => createWebhookServer(0, PROVIDER_ID, WEBHOOK_SECRET)).toThrow(
+      /durable provider webhook receiver runs where the mail is stored/,
+    );
+
+    // Nothing was appended to it. Read through an independent handle, since the memoised one is
+    // closed — a read that silently opened a NEW empty database would assert nothing.
+    const independent = new Database(stale, { readonly: true });
+    try {
+      const rows = independent.query("SELECT COUNT(*) AS n FROM events").get() as { n: number };
+      expect(rows.n).toBe(0);
+      const providers = independent.query("SELECT COUNT(*) AS n FROM providers").get() as { n: number };
+      expect(providers.n, "the independent handle opened a different database").toBe(1);
+    } finally {
+      independent.close();
+    }
+    db = getDatabase();
+  });
+
   it("REFUSES a configuration that names two different local databases, naming both settings", () => {
     clearStoreSettings();
     process.env[DATABASE_PATH_SETTINGS[0]] = join(home, "one.db");

@@ -102,22 +102,33 @@
 //
 // | configuration                                | main                                      | now                         |
 // |----------------------------------------------|-------------------------------------------|-----------------------------|
-// | API storage, deployment word unset           | BOUND a listener and wrote events into a  | refuses, names the setting  |
-// |                                              | freshly CREATED, empty local SQLite file  |                             |
-// | word says local, stale API pointer exported  | as above                                  | refuses, names the setting  |
+// | API storage, no local file yet               | BOUND a listener, CREATED a phantom local | refuses, names the setting  |
+// |                                              | database, then 500 on every callback      |                             |
+// | API storage, STALE local file present        | BOUND a listener, answered 200, WROTE the | refuses, names the setting  |
+// |                                              | event into the stale file                 |                             |
+// | word says local, stale API pointer exported  | as one of the two above                   | refuses, names the setting  |
 // | both database-path settings, different files | ran on the documented precedence          | refuses as a contradiction  |
 // | storage resolves, data directory unsafe      | bound, then 500 on every callback         | refuses at construction     |
 // | word says server-side, NO storage setting    | THREW                                     | RUNS the receiver           |
 //
-// The first three CONVERGE with the families that already collapsed and already refuse
-// there (`src/db/forwarding`, `src/lib/forwarding`, `src/lib/status-facts`). The fourth is a
-// strict improvement in the direction that matters for a webhook: on main the port was
-// bound, so callbacks were ACCEPTED and then dropped one 500 at a time until the provider's
-// retry budget ran out and the events were lost for good; refusing to start leaves them
-// queued at the provider. The fifth is the mirror image of the first three and is the one to
-// read twice — a listener now starts where it previously threw. It is the correct answer for
-// that configuration (an unset storage setting IS a local SQLite installation, which is what
-// `planEmailStore` resolves), and it is the configuration the axis deletion removes.
+// THE FIRST TWO ARE MEASURED ON MAIN, NOT REASONED ABOUT, and they are different failures
+// worth separating. In the first, the phantom database has no `providers` row for the id the
+// CLI resolved out of the real store, and `events.provider_id` is a foreign key under
+// `PRAGMA foreign_keys = ON`, so every valid callback is answered 500 — the provider retries
+// until its budget drains and the delivery events are lost, while the CLI's own output said
+// the listener started. The second is the WORSE one and needs no fault at all: an
+// installation that moved from a local database to an Emails API and kept its old file
+// answers 200 and writes the event into that file, so the provider is told "done" and never
+// retries, and the row lands where nothing reads it. Both are pinned by cases in the suite.
+//
+// The first four CONVERGE with the families that already collapsed and already refuse there
+// (`src/db/forwarding`, `src/lib/forwarding`, `src/lib/status-facts`). The fifth is a strict
+// improvement in the direction that matters for a webhook: refusing to start leaves the
+// callbacks queued at the provider instead of draining its retry budget against a 500. The
+// sixth is the mirror image and is the one to read twice — a listener now starts where it
+// previously threw. It is the correct answer for that configuration (an unset storage setting
+// IS a local SQLite installation, which is what `planEmailStore` resolves), and it is the
+// configuration the axis deletion removes.
 //
 // WHAT THE CONSUMERS DO WITH THE REFUSAL, checked rather than assumed. `emails webhook
 // listen` (`src/cli/commands/email-log.local.ts`) already wraps the call and surfaces it
