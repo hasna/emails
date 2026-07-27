@@ -60,6 +60,18 @@ describe("mode-aware command availability", () => {
     }
   });
 
+  // `emails inbox unread-count` runs; only its `--by-address` rollup refuses, and
+  // that refusal is an inline throw the coverage scan cannot see. Both halves are
+  // asserted so neither the flag nor the bare command drifts.
+  it("distinguishes a flag-conditional refusal from the command that carries it", () => {
+    expect(isCommandAvailableInMode("emails inbox unread-count", "self_hosted")).toBe(true);
+    expect(isCommandAvailableInMode("emails inbox unread-count --json", "self_hosted")).toBe(true);
+    expect(isCommandAvailableInMode("emails inbox unread-count --by-address", "self_hosted")).toBe(false);
+    expect(isCommandAvailableInMode("emails inbox unread-count --by-address --limit 10", "self_hosted")).toBe(false);
+    // Local mode serves the rollup from SQL, so it must stay available there.
+    expect(isCommandAvailableInMode("emails inbox unread-count --by-address", "local")).toBe(true);
+  });
+
   // `emails provision *` throws notImplementedAnywhere() in BOTH modes
   // (src/cli/commands/provision.ts). Listing it only under self_hosted left
   // `emails status` proposing it in local mode, where it refuses just as hard.

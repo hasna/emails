@@ -79,6 +79,13 @@ export const SELF_HOSTED_REFUSED_COMMANDS: readonly string[] = [
   "emails inbox realtime-status",
   "emails inbox setup-realtime",
   "emails inbox sync-s3",
+  // A FLAG-conditional refusal: `emails inbox unread-count` runs, the
+  // `--by-address` rollup does not (no per-recipient counts route exists). It is
+  // listed because src/lib/status-commands-coverage.test.ts cannot see it — that
+  // scan reads `serverOnly("emails ...")` literals, and this one is an inline
+  // throw inside the action. Nothing proposes the flag today; the entry is here
+  // so that stays true by construction rather than by nobody having tried.
+  "emails inbox unread-count --by-address",
   "emails inbox watch",
   "emails monitor",
   "emails provider sync",
