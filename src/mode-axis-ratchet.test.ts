@@ -585,17 +585,22 @@ const root = join(import.meta.dir, "..");
  * eleven counts were identical before and after.
  */
 const CEILINGS: Record<string, number> = {
-  twoArmFamilies: 28,
-  remoteArmModules: 28,
-  routedFacadeDefinitions: 18,
-  routedCallExpressions: 244,
-  selfHostedResourceBranches: 44,
-  selfHostedResourceReferences: 180,
-  isSelfHostedModeReferences: 58,
-  getEmailsModeReferences: 60,
-  resolveEmailsModeReferences: 65,
-  normalizeEmailsModeReferences: 16,
-  emailsModeEnvReferences: 235,
+  // ZEROED ON PURPOSE, BEFORE A REBASE. Every one of these is a placeholder, and the guard
+  // cannot pass until each is replaced by a number MEASURED on the merged tree. That is the
+  // point: an inherited ceiling is the one failure this block keeps recording, because two
+  // sides that pinned the same value auto-merge with no conflict marker and the merged tree
+  // measures lower than either. Zeros make the silent case impossible to ship.
+  twoArmFamilies: 0,
+  remoteArmModules: 0,
+  routedFacadeDefinitions: 0,
+  routedCallExpressions: 0,
+  selfHostedResourceBranches: 0,
+  selfHostedResourceReferences: 0,
+  isSelfHostedModeReferences: 0,
+  getEmailsModeReferences: 0,
+  resolveEmailsModeReferences: 0,
+  normalizeEmailsModeReferences: 0,
+  emailsModeEnvReferences: 0,
 };
 
 // 624 files are tracked and 623 scanned today, totalling ~7.4M characters. The floors
