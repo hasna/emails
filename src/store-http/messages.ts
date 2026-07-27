@@ -11,10 +11,13 @@
 //    same four for the same reason (it has no columns for them); here the reason is
 //    that the route has no fields for them.
 //
-// 2. `createMessage` treats a 200 as a CONFLICT. With a `source_id` the route
-//    UPSERTS, answering 201 on insert and 200 when it matched an existing row. So a
-//    "create" that quietly updated somebody else's row is exactly the answer this
-//    operation must not give — `upsertMessage` is the operation that wants that.
+// 2. `createMessage` REFUSES A `source_id` BEFORE SENDING ANYTHING. With one, the route
+//    UPSERTS — and its upsert overwrites the whole column set, read and star flags and
+//    labels included. An earlier version sent the request and returned a conflict on the
+//    200 that means "matched an existing row", which was the worst answer available: the
+//    collided row had already been clobbered by the time the refusal was built, and the
+//    caller was told nothing had been written. The check therefore happens before the
+//    request, not after it. `upsertMessage` is the operation that means this.
 //
 // 3. `upsertMessage` REFUSES a call with no `source_id`. Without one the route does a
 //    plain create, so a caller asking for an idempotent write would get a duplicate
@@ -63,7 +66,7 @@ import {
   messageRecord,
   threadRollup,
 } from "./mapping.js";
-import { apiErrorReason, conflict, invalidInput, ok, refusalForStatus } from "./outcome.js";
+import { EmailsApiFault, apiErrorReason, apiErrorText, conflict, invalidInput, ok, refusalForStatus } from "./outcome.js";
 import type { QueryValue, Transport } from "./wire.js";
 
 /** The service's list ceiling, used when this store has to drain a list itself. */
@@ -212,15 +215,31 @@ export function createMessagesRepository(transport: Transport): MessagesReposito
             "accepted and dropped; reserve a send intent instead of recording one here",
         );
       }
-      const answer = await transport.request("POST", "/messages", { body: messageBody(input) });
-      if (answer.status === 200) {
-        // The route UPSERTS when a source_id is set, and 200 means it matched an
-        // existing row. A create that updated a row it did not make is not a create.
+      // REFUSED BEFORE THE REQUEST IS SENT, and the ordering is the entire point.
+      //
+      // `POST /v1/messages` UPSERTS whenever a `source_id` is present, and its upsert
+      // overwrites the whole column set — `is_read`, `is_starred`, `labels`,
+      // `received_at`, subject, bodies, headers, attachments
+      // (src/server/self-hosted/store.ts, MESSAGE_UPSERT_ASSIGNMENTS). An earlier version
+      // of this method sent the request first and returned a conflict on the 200 that
+      // means "matched an existing row". That was the worst answer available: by the time
+      // the refusal was built the collided row had ALREADY been clobbered with this
+      // caller's payload, and the caller was told nothing had been written. Adversarial
+      // review caught it, and it is verbatim the defect class found in the SQLite store's
+      // upsert — a replay resetting read/star/label state — with a denial on top.
+      //
+      // A pre-flight existence check would not fix it either: the row can appear between
+      // the check and the write, and the write is destructive. So `createMessage` declines
+      // the fenced input outright. `upsertMessage` is the operation that means this, and
+      // it reports `inserted` honestly.
+      if (input.source_id !== undefined && input.source_id !== null && input.source_id !== "") {
         return conflict(
-          "createMessage: a message with this source_id already exists and would have been " +
-            "updated; use upsertMessage when an idempotent write is what was meant",
+          "createMessage: a source_id makes POST /v1/messages an upsert that overwrites every " +
+            "column of any row it matches, including read, star and label state; call " +
+            "upsertMessage, which reports whether it inserted",
         );
       }
+      const answer = await transport.request("POST", "/messages", { body: messageBody(input) });
       if (answer.status !== 201) return refusalForStatus(answer.status, answer.body, "createMessage");
       return ok(messageRecord(envelope(answer.body, "message", "createMessage"), "createMessage"));
     },
@@ -317,7 +336,9 @@ function attachmentLookup(status: number, body: unknown): Outcome<StoredAttachme
     if (
       typeof filename !== "string" ||
       typeof contentType !== "string" ||
+      // `Number.isFinite`, matching mapping.ts: without it a NaN size passes as a number.
       typeof size !== "number" ||
+      !Number.isFinite(size) ||
       typeof contentBase64 !== "string"
     ) {
       return refusalForStatus(200, body, "getMessageAttachment: the payload is not a stored attachment");
@@ -333,21 +354,41 @@ function attachmentLookup(status: number, body: unknown): Outcome<StoredAttachme
   if (status === 409 && code === "attachment_content_unavailable") {
     // The three-state answer's middle state: metadata exists, the bytes do not.
     // Collapsing this into null is the exact lie records.ts describes.
+    //
+    // The metadata is REQUIRED here and is not defaulted. An earlier version filled a
+    // missing filename with `""` and a missing content type with `""`, which is the
+    // mapper rule broken in the one branch where it matters most: this state exists to
+    // tell a reader WHAT it cannot download, and an empty filename presented as the
+    // answer is a fabricated one. If the service says the content is unavailable but
+    // sends no metadata to describe it, that is a fault in the response, not a lookup
+    // result — so it throws, exactly as mapping.ts does everywhere else.
     const attachment = asRecord(envelope(body, "attachment", "getMessageAttachment"), "attachment");
     const filename = attachment["filename"];
     const contentType = attachment["content_type"];
     const size = attachment["size"];
+    if (typeof filename !== "string" || typeof contentType !== "string") {
+      throw new EmailsApiFault(
+        status,
+        "getMessageAttachment: the API reported unavailable attachment content without the " +
+          "filename and content type that state exists to carry",
+      );
+    }
+    if (size !== null && size !== undefined && typeof size !== "number") {
+      throw new EmailsApiFault(status, "getMessageAttachment: unavailable attachment content carries a non-numeric size");
+    }
     return ok({
       state: "content_unavailable",
-      attachment: {
-        filename: typeof filename === "string" ? filename : "",
-        content_type: typeof contentType === "string" ? contentType : "",
-        size: typeof size === "number" ? size : null,
-      },
+      // `size` is legitimately nullable on this arm — the seam declares `number | null`
+      // — so an ABSENT size is the documented null, not an invented one.
+      attachment: { filename, content_type: contentType, size: size ?? null },
     });
   }
   if (status === 422 && code === "invalid_attachment_payload") {
-    return ok({ state: "invalid", reason: "the stored attachment payload is not decodable" });
+    // The SERVICE's reason, not a constant. `{ state: "invalid" }` exists to carry WHY the
+    // payload could not be produced, and the service sends the stored attachment's own
+    // reason in that body; replacing it with a fixed sentence was the one place this file
+    // substituted an invented value for real diagnostic text. Adversarial review caught it.
+    return ok({ state: "invalid", reason: apiErrorText(status, body) });
   }
   // `message_not_found` and `attachment_not_found`: absence is a VALUE, because the
   // seam declares `StoredAttachmentLookup | null`.
@@ -507,9 +548,13 @@ export function createInboundRepository(transport: Transport): InboundRepository
           return refusalForStatus(answer.status, answer.body, "clearInboundEmails");
         }
       }
-      return invalidInput(
-        "clearInboundEmails: the scoped inbound list did not drain; refusing rather than " +
-          "reporting a partial count as the whole",
+      // `conflict`, not `invalid_input`: nothing about the caller's arguments is wrong.
+      // The list kept refilling faster than it drained, which is a concurrency condition,
+      // and telling a caller to fix its input would point at the wrong remedy.
+      return conflict(
+        `clearInboundEmails: the scoped inbound list did not drain in ${MAX_CLEAR_SWEEPS} sweeps, ` +
+          "so another writer is adding rows as fast as this is removing them; refusing rather " +
+          "than reporting a partial count as the whole",
       );
     },
   };

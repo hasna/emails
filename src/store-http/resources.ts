@@ -101,7 +101,16 @@ function createContractReader(transport: Transport): (path: string) => Promise<R
   return async (path: string): Promise<ResourceContract> => {
     const cached = contracts.get(path);
     if (cached) return cached;
-    document ??= fetchDocument();
+    // A FAILED fetch must not be cached. Memoising the promise itself meant one transient
+    // failure reading the contract poisoned every uniform-family write for the life of the
+    // store, replaying the same stale rejection. Adversarial review caught it.
+    if (document === null) {
+      const pending = fetchDocument();
+      document = pending;
+      pending.catch(() => {
+        if (document === pending) document = null;
+      });
+    }
     const paths = await document;
     const collection = paths[`/v1/${path}`];
     const columns = schemaProperties(asRecord(collection, `/v1/${path} contract`)["post"]);

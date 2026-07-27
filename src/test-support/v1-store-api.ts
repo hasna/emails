@@ -28,17 +28,36 @@
 // this fixture and the client agree on against the service's OWN OpenAPI document, so
 // the contract is pinned to the server rather than to this file.
 //
-// ONE DELIBERATE DIVERGENCE FROM THE REAL SERVICE, and it is the headline finding of
-// the work this fixture supports: `POST /v1/messages` here ACCEPTS an outbound
-// message. The real service answers 409 "outbound messages must be sent through POST
-// /v1/messages/send" for anything not inbound (service.ts:1453-1455), and that send
-// route dispatches real mail through a provider — so there is no way to RECORD an
-// outbound row without sending it. `createMessage` and `upsertMessage` are UNGATED on
-// the seam, so a store has no capability to declare false and no legal refusal, and
-// four conformance cases write outbound messages. This fixture therefore models the
-// route a later phase has to add. It is marked at the call site, listed in
-// `HTTP_STORE_MISSING_ROUTES`, and it is the one thing here a reader must not mistake
-// for something the API does today.
+// WHERE THIS FIXTURE DIVERGES FROM THE REAL SERVICE — the complete list, because a
+// fixture's divergences are exactly what its green result does not cover. Two of the three
+// were found by adversarial review rather than disclosed up front, which is the reason the
+// list is now stated as a list.
+//
+// 1. `POST /v1/messages` here ACCEPTS an outbound message. This is the headline finding of
+//    the work the fixture supports. The real service answers 409 "outbound messages must
+//    be sent through POST /v1/messages/send" for anything not inbound
+//    (service.ts:1453-1455), and that send route dispatches real mail through a provider —
+//    so there is no way to RECORD an outbound row without sending it. `createMessage` and
+//    `upsertMessage` are UNGATED on the seam, so a store has no capability to declare
+//    false and no legal refusal. FOUR conformance cases write outbound messages, so
+//    against `/v1` as it exists today the result is 36 passed / 8 refused / 4 FAILED, not
+//    40 / 8 / 0. Marked at the call site and listed in `HTTP_STORE_MISSING_ROUTES`.
+//
+// 2. NO ROLE MODEL. This fixture authenticates one bearer key and grants it everything.
+//    The real service gates three routes this store writes through behind a tenant
+//    owner/admin or an operator key: `POST /v1/send-keys/mint`, `PATCH /v1/send-keys/{id}`
+//    (`writeRequiresOperator` on the send-keys spec) and `PATCH /v1/addresses/{id}` when
+//    the body carries ownership fields. With a plain `emails:write` credential those
+//    answer 403, so `mintSendKey`, `revokeSendKey` and `applyAddressOwnership` would
+//    refuse — and the two ungated conformance cases that drive them would go red. The
+//    client's 403 mapping is unit-tested directly instead; this fixture is not evidence
+//    for those three operations.
+//
+// 3. `PATCH /v1/send-keys/{id}` IGNORES the `revoked_at` value it is sent, revoking with
+//    the store's own clock. The real service persists the client's timestamp verbatim
+//    (`revoked_at` is a writable column on the generic path). So the clock weakness that
+//    send-keys.ts documents at length — the revocation instant coming from the CLIENT — is
+//    not exercised end to end here.
 
 import { emailsSelfHostedOpenApi } from "../server/self-hosted/openapi.js";
 import { SELF_HOSTED_RESOURCES } from "../server/self-hosted/resources.js";
@@ -110,25 +129,24 @@ function notFound(name: string): Response {
 }
 
 /**
- * The message projection the service publishes.
+ * The message projection the service publishes: `idempotency_key` and
+ * `send_payload_hash` removed, and NOTHING ELSE.
  *
- * `idempotency_key` and `send_payload_hash` are stripped, matching `publicMessage`
- * (service.ts:167-170), and each attachment loses `content_base64` in favour of a
- * derived `content_available` — the same thing the service's detail read does. The
- * BYTES are still served, by the attachment route, from the unprojected record.
+ * Field-for-field `publicMessage` in src/server/self-hosted/service.ts, which destructures
+ * exactly those two keys away and returns the rest untouched.
+ *
+ * An earlier version of this function ALSO re-projected each attachment — stripping
+ * `content_base64` and adding a derived `content_available` — with a comment claiming the
+ * service did the same. It does not. That was an undocumented divergence with a false
+ * provenance note, in a fixture whose whole claim is that the route contract is the real
+ * one, and adversarial review caught it. Nothing depended on it: the attachment route
+ * serves bytes from the unprojected record either way, and `POST /v1/attachments/batch` is
+ * where per-attachment availability is reported.
  */
 function publicMessage(record: MessageRecord): Record<string, unknown> {
   const projected: Record<string, unknown> = { ...record };
   delete projected["idempotency_key"];
   delete projected["send_payload_hash"];
-  projected["attachments"] = record.attachments.map((element) => {
-    if (typeof element !== "object" || element === null || Array.isArray(element)) return element;
-    const attachment: Record<string, unknown> = { ...(element as Record<string, unknown>) };
-    const hasBytes = typeof attachment["content_base64"] === "string";
-    delete attachment["content_base64"];
-    attachment["content_available"] = hasBytes;
-    return attachment;
-  });
   return projected;
 }
 

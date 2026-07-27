@@ -73,6 +73,18 @@ export function unavailable(capability: CapabilityKey): Refusal {
  *
  * Carries no request body and no header: a thrown error is the thing most likely
  * to reach a log, and the credential travels in a header on every call.
+ *
+ * THE ONE CLASS IN THIS DIRECTORY, and it is deliberately not the construct the seam
+ * guard forbids. That rule bans a BASE CLASS FOR A REPOSITORY — a parent whose default
+ * method body can answer a call the child never implemented — because that is what
+ * turns a missing method into an inherited no-op instead of a `tsc` error. Every
+ * repository here is still a plain typed object literal with no parent and no supplied
+ * body. This is an error type: it declares no store operation, nothing implements it,
+ * and subclassing `Error` is how the rest of the repository spells a typed fault (see
+ * the eight in src/server/self-hosted/store.ts). `src/store-sqlite/` has no classes
+ * because it needs none — it lets database errors propagate unwrapped — whereas a
+ * transport has to distinguish "the API declined" from "the call never landed", and
+ * `instanceof` is what lets a caller and a test do that without matching on a string.
  */
 export class EmailsApiFault extends Error {
   readonly status: number;
@@ -132,9 +144,26 @@ export function refusalForStatus(status: number, body: unknown, what: string): R
     case 422:
       return invalidInput(detail);
     case 403:
-      // Every 403 the service sends is an authority decision about THIS request
-      // (`operator_required`, `insufficient_scope`, `forbidden`, `no_tenant`), which
-      // is what `scope_violation` names on the seam.
+      // NOT EVERY 403 IS A DECISION ABOUT THIS REQUEST, and an earlier version of this
+      // arm treated them all as refusals — which broke RULE 1 in the one way that hurts
+      // most. A credential with no tenant mapping answers 403 `no_tenant` on EVERY data
+      // route (src/server/self-hosted/auth/service.ts, and there is an integration test
+      // pinning it), so a store built with such a key refused every operation it was ever
+      // asked to perform, uniformly, with a plausible-looking typed refusal. That is
+      // precisely the misconfigured-store-indistinguishable-from-a-declining-one failure
+      // the top of this file says must never happen. Adversarial review caught it.
+      //
+      // The split is whether the answer is a property of the CREDENTIAL or of the
+      // REQUEST. `no_tenant`, `apikey_required` and `session_required` are properties of
+      // the credential: they do not vary by operation, no caller can act on them per
+      // call, and the remedy is to configure the store differently — faults.
+      // `operator_required`, `insufficient_scope`, `forbidden` and `email_not_allowed` DO
+      // vary by operation (ordinary writes succeed on a key that cannot mint a send key
+      // or reassign ownership), so they are genuine authority decisions about this
+      // request, and `scope_violation` is what the seam names them.
+      if (reason === "no_tenant" || reason === "apikey_required" || reason === "session_required") {
+        throw new EmailsApiFault(status, detail);
+      }
       return refuse("scope_violation", 403, detail);
     case 404:
       return notFound(detail);

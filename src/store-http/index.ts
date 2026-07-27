@@ -135,16 +135,24 @@ export const HTTP_STORE_MISSING_ROUTES: readonly MissingRoute[] = Object.freeze(
       ".../{id}/uncertain, .../{id}/rearm",
     today:
       "the four readable routes (lookup, cancel, reconcile, uncertain) exist; every WRITE that " +
-      "advances the ledger is internal to POST /v1/messages/send. Capability false, all twelve refuse.",
+      "advances the ledger is internal to POST /v1/messages/send. Capability false, all ten refuse " +
+      "(markSendBlocked and evaluateOutboundPolicy are the other two of the family's twelve, and are " +
+      "gated on outboundPolicy instead — see the next entry).",
   },
   {
     operations: ["evaluateOutboundPolicy", "getAddressSendability", "markSendBlocked", "isOwnerAuthorizedFrom"],
     capability: "outboundPolicy",
     wanted: "POST /v1/outbound-policy/evaluate, GET /v1/addresses/{id}/sendability",
     today:
-      "policy is evaluated only inside POST /v1/messages/send and never exposed. A prior client " +
+      "evaluateOutboundPolicy and getAddressSendability genuinely have NO route — policy is " +
+      "evaluated only inside POST /v1/messages/send and never exposed as a probe. A prior client " +
       "answered getAddressSendability from the address row with sent_today: 0 — a fabricated " +
-      "number for a question about quota. Capability false, all four refuse.",
+      "number for a question about quota. isOwnerAuthorizedFrom is the exception worth stating " +
+      "precisely, because an earlier version of this note got it wrong: POST /v1/send-keys/verify " +
+      "DOES answer an `authorized` field, so a route exists — but it answers only for a TOKEN it " +
+      "is handed, and this operation is asked about an OWNER ID. Serving it would mean minting a " +
+      "durable send key to answer a read-only question, which is a worse trade than refusing. " +
+      "The capability is all-or-nothing, so all four refuse.",
   },
   {
     operations: [

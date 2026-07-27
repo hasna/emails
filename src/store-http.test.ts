@@ -46,6 +46,7 @@ import {
   httpStoreDescriptor,
 } from "./store-http/index.js";
 import { EmailsApiFault } from "./store-http/outcome.js";
+import { createTransport, toV1BaseUrl, type FetchImplementation } from "./store-http/wire.js";
 import { RESOURCE_FAMILIES, RESOURCE_PATHS, ROUTES } from "./store-http/routes.js";
 import { createSqliteEmailStore } from "./store-sqlite/index.js";
 import { startV1StoreApi, type V1StoreApi } from "./test-support/v1-store-api.js";
@@ -318,6 +319,114 @@ describe("HttpEmailStore conformance", () => {
     expect(accepted.ok).toBe(true);
   });
 
+  it("refuses a createMessage carrying a source_id BEFORE it sends anything", async () => {
+    // The route upserts when a source_id is present, overwriting every column of any row
+    // it matches. An earlier version sent the request and refused on the 200 — so the
+    // collided row was already clobbered when the caller was told nothing had happened.
+    // This asserts the refusal AND that no request was made.
+    const subject = store();
+    // Warm the openapi fetch and settle the fixture's request count first.
+    await subject.contacts.list();
+    const before = api.requestCount();
+    const refused = await subject.messages.createMessage({
+      from_addr: "a@example.test",
+      to_addrs: ["b@example.test"],
+      subject: "fenced",
+      source_id: "some-upstream-id",
+    });
+    expect(refused.ok).toBe(false);
+    if (refused.ok) return;
+    expect(refused.code).toBe("conflict");
+    expect(refused.message).toContain("upsertMessage");
+    // NOT ONE REQUEST. This is the half that matters: a refusal issued after a
+    // destructive write is worse than no refusal at all.
+    expect(api.requestCount()).toBe(before);
+  });
+
+  it("preserves an ownership assignment when the patch field is undefined", async () => {
+    // `{ owner_id: undefined }` is legal for an optional field and is what a form handler
+    // produces from an unfilled input. It must PRESERVE. An earlier version tested
+    // `"owner_id" in patch` and coerced with `?? null`, so it silently UNASSIGNED the
+    // owner — while the SQLite arm preserved, making one seam operation behave two ways.
+    // The conformance case does not cover this input.
+    const subject = store();
+    const owner = await subject.owners.create({ type: "human", name: "keeper" });
+    expect(owner.ok).toBe(true);
+    if (!owner.ok) return;
+    const ownerId = String(owner.value["id"]);
+    // An address needs its domain registered first, as the conformance helper does.
+    const provider = await subject.providers.create({ name: `own-provider-${Date.now()}`, type: "sandbox" });
+    expect(provider.ok).toBe(true);
+    if (!provider.ok) return;
+    const domainName = `own-${Date.now()}.test`;
+    const registered = await subject.domains.createDomain({
+      domain: domainName,
+      provider: String(provider.value["id"]),
+    });
+    expect(registered.ok, `createDomain: ${JSON.stringify(registered)}`).toBe(true);
+    if (!registered.ok) return;
+    const created = await subject.addresses.createAddress({ email: `owner-check@${domainName}` });
+    expect(created.ok, `createAddress: ${JSON.stringify(created)}`).toBe(true);
+    if (!created.ok) return;
+    const assigned = await subject.addressLifecycle.applyAddressOwnership(created.value.id, { owner_id: ownerId });
+    expect(assigned.ok && assigned.value?.owner_id).toBe(ownerId);
+
+    const untouched = await subject.addressLifecycle.applyAddressOwnership(created.value.id, {
+      owner_id: undefined,
+    });
+    expect(untouched.ok).toBe(true);
+    const read = await subject.addresses.getAddress(created.value.id);
+    expect(read.ok && read.value?.owner_id, "an undefined owner_id must not clear the assignment").toBe(ownerId);
+
+    // And an explicit null still CLEARS — the other direction, without which "preserve"
+    // could be implemented by ignoring the field entirely.
+    await subject.addressLifecycle.applyAddressOwnership(created.value.id, { owner_id: null });
+    const cleared = await subject.addresses.getAddress(created.value.id);
+    expect(cleared.ok && cleared.value?.owner_id).toBeNull();
+  });
+
+  it("reports the three-state attachment lookup in all three states", async () => {
+    // Conformance only exercises "available". A client collapsing the 409 into ok(null)
+    // would pass all 48 cases, so the other two states are asserted directly.
+    const subject = store();
+    const withBytes = await subject.messages.createMessage({
+      direction: "inbound",
+      from_addr: "s@example.test",
+      to_addrs: ["r@example.test"],
+      subject: "three states",
+      received_at: new Date().toISOString(),
+      attachments: [
+        { filename: "has.txt", content_type: "text/plain", size: 19, content_base64: "Y29uZm9ybWFuY2UgcGF5bG9hZA==" },
+        { filename: "lost.txt", content_type: "text/plain", size: 4 },
+      ],
+    });
+    expect(withBytes.ok).toBe(true);
+    if (!withBytes.ok) return;
+
+    const available = await subject.emailContent.getMessageAttachment(withBytes.value.id, 0);
+    expect(available.ok).toBe(true);
+    if (!available.ok) return;
+    expect(available.value?.state).toBe("available");
+
+    // METADATA WITHOUT BYTES must report `content_unavailable`, never null: a caller has to
+    // tell "we lost the bytes" from "no such attachment".
+    const unavailable = await subject.emailContent.getMessageAttachment(withBytes.value.id, 1);
+    expect(unavailable.ok).toBe(true);
+    if (!unavailable.ok) return;
+    expect(unavailable.value?.state).toBe("content_unavailable");
+    if (unavailable.value?.state !== "content_unavailable") return;
+    // ...carrying the metadata that state exists to convey, not an invented blank.
+    expect(unavailable.value.attachment.filename).toBe("lost.txt");
+    expect(unavailable.value.attachment.content_type).toBe("text/plain");
+
+    // An index past the end, and an unknown message, are both ABSENCE — a value, because
+    // the seam declares `StoredAttachmentLookup | null`.
+    const missingIndex = await subject.emailContent.getMessageAttachment(withBytes.value.id, 9);
+    expect(missingIndex.ok && missingIndex.value).toBeNull();
+    const missingMessage = await subject.emailContent.getMessageAttachment(uuid(), 0);
+    expect(missingMessage.ok && missingMessage.value).toBeNull();
+  });
+
   it("refuses an upsert with no source_id rather than inserting a duplicate per replay", async () => {
     const subject = store();
     const refused = await subject.messages.upsertMessage({
@@ -332,15 +441,158 @@ describe("HttpEmailStore conformance", () => {
   });
 });
 
+// ---- the transport's two bounds ----------------------------------------------
+//
+// Driven through `createTransport` rather than through a store, because both bounds are
+// about what happens when the SERVICE misbehaves, and a well-behaved fixture cannot
+// produce either condition. Both were written wrong first and are tested because of it.
+
+describe("the HTTP transport's bounds", () => {
+  const oversized = (bytes: number): FetchImplementation => {
+    return async () =>
+      new Response("x".repeat(bytes), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+
+  it("stops a response at the ceiling instead of after exceeding it", async () => {
+    const transport = createTransport({
+      baseUrl: "http://127.0.0.1:1/v1",
+      credential: "k",
+      fetchImpl: oversized(4096),
+      maxResponseBytes: 512,
+    });
+    await expect(transport.request("GET", "/domains")).rejects.toThrow(EmailsApiFault);
+    // A body UNDER the ceiling still reads normally — the other direction of the bound,
+    // without which a ceiling of zero would pass this test.
+    const ok = createTransport({
+      baseUrl: "http://127.0.0.1:1/v1",
+      credential: "k",
+      fetchImpl: async () =>
+        new Response(JSON.stringify({ domains: [] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      maxResponseBytes: 512,
+    });
+    const answer = await ok.request("GET", "/domains");
+    expect(answer.status).toBe(200);
+    expect(answer.body).toEqual({ domains: [] });
+  });
+
+  /**
+   * A body that never arrives and NEVER HONOURS THE ABORT SIGNAL.
+   *
+   * The uncooperative half is the point. An earlier version of this test built a stalling
+   * stream that also ignored the signal, and the transport awaited `reader.read()`
+   * directly — so the deadline fired, nothing observed it, and the test hung the whole
+   * file instead of failing it. Adversarial review caught that, and the fix belonged in
+   * the transport rather than the stub: a deadline that only works when the injected
+   * `fetch` cooperates is not a deadline. So the stub here stays deliberately
+   * uncooperative, and the transport must still fail the call.
+   */
+  const stalling: FetchImplementation = async () =>
+    new Response(
+      new ReadableStream<Uint8Array>({
+        start(): void {
+          // Never enqueues, never closes, never listens for an abort.
+        },
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+
+  it("times out a response whose headers arrive and whose body then stalls", async () => {
+    const transport = createTransport({
+      baseUrl: "http://127.0.0.1:1/v1",
+      credential: "k",
+      fetchImpl: stalling,
+      timeoutMs: 150,
+    });
+    const started = Date.now();
+    // The TYPED fault, not merely "something threw": callers discriminate on it.
+    await expect(transport.request("GET", "/domains")).rejects.toThrow(EmailsApiFault);
+    // It failed because the deadline fired, not because it returned immediately.
+    expect(Date.now() - started).toBeGreaterThanOrEqual(100);
+    // And it did not hang: this assertion is only reached if the promise settled.
+    expect(Date.now() - started).toBeLessThan(5_000);
+  }, 10_000);
+
+  it("reports a mid-body failure as the typed fault rather than a raw error", async () => {
+    // The body read used to sit outside the try/catch that types transport failures, so a
+    // stream that errored mid-read escaped as a raw error while outcome.ts promised every
+    // network failure would arrive as `EmailsApiFault`.
+    const breaking: FetchImplementation = async () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller): void {
+            controller.enqueue(new TextEncoder().encode('{"domains":'));
+            controller.error(new Error("connection reset mid-body"));
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    const transport = createTransport({
+      baseUrl: "http://127.0.0.1:1/v1",
+      credential: "k",
+      fetchImpl: breaking,
+      timeoutMs: 5_000,
+    });
+    await expect(transport.request("GET", "/domains")).rejects.toThrow(EmailsApiFault);
+  }, 10_000);
+
+  it("splits 403 into a credential FAULT and a per-request refusal", async () => {
+    // Both directions of the rule in outcome.ts. A credential with no tenant mapping
+    // answers 403 `no_tenant` on EVERY data route, so folding that into a refusal made a
+    // misconfigured store answer "I cannot" to everything, invisibly — the exact failure
+    // RULE 1 exists to prevent. An authority decision that varies by operation
+    // (`operator_required`) is a genuine refusal. Neither direction had a test.
+    const answering = (body: unknown): FetchImplementation => {
+      return async () =>
+        new Response(JSON.stringify(body), { status: 403, headers: { "Content-Type": "application/json" } });
+    };
+
+    const misconfigured = createHttpEmailStore({
+      baseUrl: "http://127.0.0.1:1",
+      credential: "k",
+      fetchImpl: answering({ error: "api key is not bound to a tenant", reason: "no_tenant" }),
+    });
+    await expect(misconfigured.domains.listDomains()).rejects.toThrow(EmailsApiFault);
+
+    const underprivileged = createHttpEmailStore({
+      baseUrl: "http://127.0.0.1:1",
+      credential: "k",
+      fetchImpl: answering({
+        error: "minting a send key requires a tenant owner, admin, or operator API key",
+        reason: "operator_required",
+      }),
+    });
+    const refused = await underprivileged.sendKeys.mintSendKey({ owner_id: "o" });
+    expect(refused.ok, "an operator gate is a decision about this request, not a broken store").toBe(false);
+    if (refused.ok) return;
+    expect(refused.code).toBe("scope_violation");
+    expect(refused.status).toBe(403);
+  });
+
+  it("strips a credential and a query string out of the base URL it reports", () => {
+    const { requestBase, safeBase } = toV1BaseUrl("https://user:pw@mail.example.test/?a=b#c");
+    expect(requestBase).toBe("https://mail.example.test/v1");
+    expect(safeBase).toBe("https://mail.example.test");
+    // A configured URL that ALREADY ends in /v1 must not gain a second one.
+    expect(toV1BaseUrl("https://mail.example.test/v1").requestBase).toBe("https://mail.example.test/v1");
+    expect(toV1BaseUrl("https://mail.example.test/v1/").requestBase).toBe("https://mail.example.test/v1");
+  });
+});
+
 // ---- the routes are the service's own ----------------------------------------
 
 describe("the /v1 routes this store depends on", () => {
   /**
-   * The ONE route this store uses that the service does not offer.
+   * NO ROUTE IS EXCUSED. Every entry in `ROUTES` must appear in the service's own
+   * document, and this list being EMPTY is the strong form of that claim.
    *
-   * Named, reasoned and pinned rather than omitted from the table, so it shows up in
-   * review as a dependency on unbuilt server surface instead of disappearing. See
-   * `HTTP_STORE_MISSING_ROUTES` for the full accounting.
+   * It exists so that a future dependency on unbuilt server surface has to be NAMED here
+   * rather than quietly dropped from the route table — where it would escape the oracle
+   * entirely. See `HTTP_STORE_MISSING_ROUTES` for the operations `/v1` cannot serve; note
+   * that this check verifies a path and method EXIST, not that the route accepts every
+   * body, which is why the outbound-message gap is recorded there and not here.
    */
   const KNOWN_ABSENT: Array<{ method: string; template: string; why: string }> = [];
 
@@ -550,6 +802,25 @@ const NEUTERINGS: Neutering[] = [
           ...subject.addressLifecycle,
           async getAddressSendability() {
             return { ok: true, value: { sendable: true, reason: null, sent_today: 0, daily_quota: null } };
+          },
+        },
+      };
+    },
+  },
+  {
+    label: "getMessageRaw answers an empty envelope instead of the written MIME",
+    caseId: "messages/raw-mime-carries-the-written-headers",
+    detail: "raw must be a non-empty string",
+    break(subject: EmailStore): EmailStore {
+      // `rawMessage` was the one TRUE read capability with no control proving its case can
+      // go red. An empty string is the plausible wrong answer here: the call succeeds, the
+      // shape is right, and every header the caller asked about is gone.
+      return {
+        ...subject,
+        messages: {
+          ...subject.messages,
+          async getMessageRaw() {
+            return { ok: true, value: { raw: "", message_id: null } };
           },
         },
       };

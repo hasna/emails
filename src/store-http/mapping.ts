@@ -73,7 +73,23 @@ function requiredString(row: Record<string, unknown>, key: string, what: string)
   return value;
 }
 
+/**
+ * A field the seam declares REQUIRED but NULLABLE.
+ *
+ * ABSENCE IS A FAULT HERE, NOT A NULL, and the distinction is the whole reason this
+ * helper is separate from `optional()`. An earlier version returned null when the key was
+ * missing, which quietly invented the most consequential value in the record for several
+ * fields: an absent `revoked_at` read as "this send key is live", an absent `daily_quota`
+ * as "no send limit", an absent `provider_message_id` as "never dispatched". Those are
+ * plausible wrong answers arriving on a 200, which is the class this whole store exists
+ * to remove — and the file's own headline rule already forbade it. Adversarial review
+ * caught the inconsistency.
+ *
+ * A key that is PRESENT and null is the documented value and passes through. Fields the
+ * seam declares optional (`?`) never reach here; they go through `optional()`.
+ */
 function nullableString(row: Record<string, unknown>, key: string, what: string): string | null {
+  if (!(key in row)) fault(what, `no ${key}`);
   const value = row[key];
   if (value === null || value === undefined) return null;
   if (typeof value !== "string") fault(what, `a non-string ${key}`);
@@ -92,7 +108,9 @@ function requiredNumber(row: Record<string, unknown>, key: string, what: string)
   return value;
 }
 
+/** Required but nullable, numeric. Absence is a fault — see `nullableString`. */
 function nullableNumber(row: Record<string, unknown>, key: string, what: string): number | null {
+  if (!(key in row)) fault(what, `no ${key}`);
   const value = row[key];
   if (value === null || value === undefined) return null;
   if (typeof value !== "number" || !Number.isFinite(value)) fault(what, `a non-numeric ${key}`);

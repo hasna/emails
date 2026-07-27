@@ -39,7 +39,7 @@ import type {
 } from "../store/records.js";
 import type { Outcome } from "../store/outcome.js";
 import { addressRecord, asArrayOf, domainRecord, envelope } from "./mapping.js";
-import { ok, refusalForStatus, unavailable } from "./outcome.js";
+import { invalidInput, ok, refusalForStatus, unavailable } from "./outcome.js";
 import type { ResourceGateway } from "./resources.js";
 import type { QueryValue, Transport } from "./wire.js";
 
@@ -102,7 +102,22 @@ export function createDomainsRepository(transport: Transport): DomainsRepository
         // A short page is the last page. Only a FULL page can be followed by another.
         if (rows.length < MAX_PAGE) return ok(null);
       }
-      return ok(null);
+      // THE SCAN RAN OUT OF REACH, WHICH IS NOT THE SAME AS "NO SUCH DOMAIN".
+      //
+      // The service clamps `offset` at 100000, so a tenant holding more domains than that
+      // has rows this scan cannot address. An earlier version answered `ok(null)` here —
+      // reporting a domain unregistered because the CLIENT gave up looking, which is the
+      // plausible-wrong-answer failure the doc comment above forbids, reintroduced at the
+      // ceiling instead of at the first page. Adversarial review caught it.
+      //
+      // `clearInboundEmails` gets the analogous case right by refusing, and so does this:
+      // a caller told "I could not finish looking" can act on it, and a caller told "it
+      // does not exist" cannot.
+      return invalidInput(
+        `getDomainByName: scanned ${MAX_OFFSET} domains without finding ${domain} and the ` +
+          "service's offset ceiling allows no further pages, so absence cannot be established; " +
+          "this lookup needs a name filter on GET /v1/domains",
+      );
     },
 
     async createDomain(input: DomainInput): Promise<Outcome<DomainRecord>> {
@@ -244,9 +259,20 @@ export function createAddressLifecycleRepository(transport: Transport): AddressL
 
     async applyAddressOwnership(id: string, patch: AddressOwnershipPatch): Promise<Outcome<AddressRecord | null>> {
       const body: Record<string, unknown> = {};
-      // `null` CLEARS an assignment and must be sent; only an absent key is omitted.
-      if ("owner_id" in patch) body["owner_id"] = patch.owner_id ?? null;
-      if ("administrator_id" in patch) body["administrator_id"] = patch.administrator_id ?? null;
+      // `null` CLEARS an assignment and must be sent; only an ABSENT field is omitted, and
+      // `undefined` counts as absent.
+      //
+      // This used to test `"owner_id" in patch` and then coerce with `?? null`, which made
+      // `{ owner_id: undefined }` — legal TypeScript for an optional field, and what a
+      // form handler produces from an unfilled input — into an explicit CLEAR. The SQLite
+      // arm checks `!== undefined` and preserves, so the two implementations of one seam
+      // operation disagreed on the same input, and this side silently UNASSIGNED an owner.
+      // Ownership decides who may send as an address, which is why the service gates the
+      // write behind an operator check; a silent unassignment there is not a small bug.
+      // Adversarial review caught it, and the conformance case does not cover it: it
+      // exercises a real id and an explicit null, never `undefined`.
+      if (patch.owner_id !== undefined) body["owner_id"] = patch.owner_id;
+      if (patch.administrator_id !== undefined) body["administrator_id"] = patch.administrator_id;
       return patchAddress(transport, id, body, "applyAddressOwnership");
     },
 
