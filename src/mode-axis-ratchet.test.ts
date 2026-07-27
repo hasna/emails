@@ -472,12 +472,23 @@ const root = join(import.meta.dir, "..");
  *
  * SO ONLY TWO COUNTERS MOVE, and the seven-that-usually-move pattern does NOT apply here:
  *
- *   routedFacadeDefinitions  20 -> 19   the facade's `routed()` dispatch helper is deleted; the one
+ *   routedFacadeDefinitions  20 -> 19   the facade's mode-dispatch helper is deleted; the one
  *                                       remaining routed export is a plain async function with a
  *                                       dynamic import, which also stops every consumer that only
  *                                       wanted a source list from eval-loading the SQLite
  *                                       ingestion path and `@aws-sdk/client-s3` behind it
- *   routedCallExpressions   250 -> 246   four of the five dispatched exports are gone
+ *   routedCallExpressions   250 -> 245   the four dispatched registry exports are gone, and so is
+ *                                       the fifth's dispatch EXPRESSION: the one still-routed export
+ *                                       now picks its module with a plain conditional dynamic import
+ *                                       instead of going through the helper
+ *
+ * AND HERE IS THE UNCOMFORTABLE PART, MEASURED RATHER THAN GLOSSED: those two deltas are IDENTICAL
+ * to what the FULL collapse of this family measured on branch `p4/9e1ea854-s3-sync` (19 and 245).
+ * They have to be — both metrics count dispatch-helper SHAPES in module source, and this facade now
+ * contains none of them either way. So `routedFacadeDefinitions` and `routedCallExpressions` CANNOT
+ * distinguish a finished family from one whose ingestion is still routed through a dynamic import.
+ * `twoArmFamilies` and `remoteArmModules` are the two that can, and they are exactly the two that do
+ * NOT move here. Anyone reading this delta as completion should read those two first.
  *
  * NINE DO NOT MOVE, and each absence is the honest consequence of stopping halfway:
  *
@@ -509,7 +520,7 @@ const CEILINGS: Record<string, number> = {
   twoArmFamilies: 29,
   remoteArmModules: 29,
   routedFacadeDefinitions: 19,
-  routedCallExpressions: 246,
+  routedCallExpressions: 245,
   selfHostedResourceBranches: 44,
   selfHostedResourceReferences: 180,
   isSelfHostedModeReferences: 58,

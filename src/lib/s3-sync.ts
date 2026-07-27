@@ -248,8 +248,9 @@ export function retireS3Source(sourceIdOrBucket: string): S3MailSource {
  * has to satisfy.
  *
  * Written as a plain `async` function with a DYNAMIC import rather than through the deleted
- * `routed()` helper, for two reasons that are not stylistic. That helper existed to dispatch FIVE
- * exports through one indirection and there is now one; and it typed its result off the local arm's
+ * mode-dispatch helper this facade used to build, for two reasons that are not stylistic. That
+ * helper existed to dispatch FIVE exports through one indirection and there is now one; and it
+ * typed its result off the local arm's
  * namespace, which required a static `import * as local` — a module-eval-time load of the entire
  * SQLite ingestion path, and of `@aws-sdk/client-s3` behind it, for any consumer that only wanted
  * to list configured sources. Both arms were already `async` here, so the dynamic import costs
