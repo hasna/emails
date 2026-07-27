@@ -175,10 +175,17 @@ describe("MCP self_hosted guards", () => {
 
   it("fails self-hosted-client-only tools without touching a local DB", async () => {
     // These read/write server-owned state; the self-hosted client refuses them.
+    //
+    // `get_stats` USED TO BE IN THIS LIST and has moved to its own case below, because
+    // the refusal it asserted is no longer true rather than no longer checked. Delivery
+    // statistics collapsed to one implementation that measures them by enumerating the
+    // store the operator configured (src/lib/stats.ts), and every operation it needs —
+    // the delivery-event list and the outbound message stream — is served over `/v1`. A
+    // refusal here would now be a refusal of something this client demonstrably can do,
+    // which is what the case below demonstrates.
     const cases: Array<[string, Record<string, unknown>]> = [
       ["batch_send", { recipients: [], template_name: "welcome", from_address: "ops@example.com" }],
       ["pull_events", {}],
-      ["get_stats", {}],
       ["sync_s3_inbox", { bucket: "inbound-bucket" }],
     ];
 
@@ -187,6 +194,73 @@ describe("MCP self_hosted guards", () => {
       expect(result.isError).toBe(true);
       expect(resultText(result)).toContain("not available in the self-hosted client");
     }
+  });
+
+  it("MEASURES delivery statistics over /v1 instead of refusing them", async () => {
+    // The positive control for the refusal that came off the list above. It seeds the
+    // store through the API and requires real numbers back out of it — a case that
+    // asserted only "no longer refuses" would pass against a tool that answered zeros.
+    const day = 24 * 60 * 60 * 1000;
+    const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
+    await stub.seed({
+      events: [
+        { id: "ev-1", provider_id: "provider-1", type: "delivered", occurred_at: ago(day) },
+        { id: "ev-2", provider_id: "provider-1", type: "delivered", occurred_at: ago(2 * day) },
+        { id: "ev-3", provider_id: "provider-1", type: "bounced", occurred_at: ago(3 * day) },
+        // Outside a 30-day window, so "the window is applied" is measured rather than
+        // assumed.
+        { id: "ev-4", provider_id: "provider-1", type: "delivered", occurred_at: ago(90 * day) },
+      ],
+      messages: [
+        {
+          id: "msg-1",
+          direction: "outbound",
+          from_addr: "ops@example.com",
+          to_addrs: ["user@example.com"],
+          subject: "sent one",
+          status: "sent",
+          received_at: ago(day),
+        },
+        {
+          id: "msg-2",
+          direction: "outbound",
+          from_addr: "ops@example.com",
+          to_addrs: ["user@example.com"],
+          subject: "sent two",
+          status: "sent",
+          received_at: ago(2 * day),
+        },
+        // Outside the window on the outbound side too.
+        {
+          id: "msg-3",
+          direction: "outbound",
+          from_addr: "ops@example.com",
+          to_addrs: ["user@example.com"],
+          subject: "sent long ago",
+          status: "sent",
+          received_at: ago(120 * day),
+        },
+      ],
+    });
+
+    const result = await callTool("get_stats", { period: "30d" });
+    expect(result.isError).not.toBe(true);
+    const payload = JSON.parse(resultText(result)) as {
+      sent: number | null;
+      delivered: number | null;
+      bounced: number | null;
+      delivery_rate: number | null;
+      events_availability: { complete: boolean | null; source: string };
+      gaps: Record<string, unknown>;
+    };
+    expect(payload.delivered).toBe(2);
+    expect(payload.bounced).toBe(1);
+    expect(payload.sent).toBe(2);
+    expect(payload.delivery_rate).toBe(100);
+    // Both inventories were fully enumerated over HTTP, so nothing is a bound and nothing
+    // is refused.
+    expect(payload.events_availability.complete).toBe(true);
+    expect(payload.gaps).toEqual({});
   });
 
   it("tells the truth about provisioning tools that no mode implements", async () => {

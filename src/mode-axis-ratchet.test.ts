@@ -258,16 +258,38 @@ const root = join(import.meta.dir, "..");
  * five. Either way the number to lower is the one you MEASURED, on the combined tree, after
  * rebasing — and zeroing all eleven before measuring is what stops the previous pins from
  * anchoring the new ones.
+ *
+ * RE-MEASURED AND RE-PINNED AGAIN on the delivery-statistics collapse, by the procedure the
+ * two paragraphs above prescribe rather than by resolving what git showed. This is the fifth
+ * consecutive rebase on this block and it reproduced THE SILENT HALF twice over: on the
+ * rebase onto the analytics/digest tree only `routedCallExpressions` conflicted while four
+ * other counters auto-merged with no marker at the value both sides shared, and on this one
+ * `twoArmFamilies`, `remoteArmModules` and `routedFacadeDefinitions` auto-merged the same way.
+ * Every counter was therefore ZEROED and re-measured over the real `git ls-files` corpus of
+ * the MERGED tree, then measured again after this paragraph was written because this file is
+ * inside the corpus it scans.
+ *
+ * WHAT THIS COLLAPSE ITSELF MOVES, as the difference between the commit it merges into (where
+ * all eleven live counts equalled the ceilings declared above) and the merged tree:
+ * `twoArmFamilies` and `remoteArmModules` by one each (that family's two arms are deleted);
+ * `routedFacadeDefinitions` by one and `routedCallExpressions` by two (its facade held a
+ * dispatch helper and dispatched its two exports through it); and `getEmailsModeReferences` by
+ * two — that dispatcher read the process-wide setting directly rather than through the
+ * client-side predicate, which is also why `isSelfHostedModeReferences` does not move. Neither
+ * arm carried a resource branch, called either mode resolver, or named the environment
+ * variable, so the remaining five counters do not move.
+ *
+ * Corpus of this merged change: 660 tracked, 659 scanned, 8,970,424 characters.
  */
 const CEILINGS: Record<string, number> = {
-  twoArmFamilies: 34,
-  remoteArmModules: 34,
-  routedFacadeDefinitions: 25,
-  routedCallExpressions: 275,
+  twoArmFamilies: 33,
+  remoteArmModules: 33,
+  routedFacadeDefinitions: 24,
+  routedCallExpressions: 273,
   selfHostedResourceBranches: 47,
   selfHostedResourceReferences: 199,
   isSelfHostedModeReferences: 66,
-  getEmailsModeReferences: 64,
+  getEmailsModeReferences: 62,
   resolveEmailsModeReferences: 65,
   normalizeEmailsModeReferences: 16,
   emailsModeEnvReferences: 235,

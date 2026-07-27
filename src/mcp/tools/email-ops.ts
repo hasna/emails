@@ -409,7 +409,7 @@ export function registerEmailOpsTools(server: McpServer): void {
       const { getLocalStats } = await import('../../lib/stats.js');
       const { resolveId } = await import('../helpers.js');
       const resolvedId = provider_id ? resolveId("providers", provider_id) : undefined;
-      const stats = getLocalStats(resolvedId, period ?? "30d");
+      const stats = await getLocalStats(resolvedId, period ?? "30d");
       return { content: [{ type: "text", text: JSON.stringify(stats, null, 2) }] };
     } catch (e) {
       return toolError(e);
