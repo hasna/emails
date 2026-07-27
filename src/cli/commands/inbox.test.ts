@@ -1625,8 +1625,9 @@ describe("server-only ingestion/diagnostic subcommands", () => {
 //
 // `inbox source list/add-s3/retire` used to refuse in this mode while
 // `inbox sources` — one word apart — worked, an intra-file contradiction. The
-// registry is client config: src/lib/s3-sync.remote.ts implements all three
-// functions, and src/cli/tui/data.remote.ts already READS the same registry to
+// registry is client config: src/lib/s3-sync.ts implements all three functions as
+// ONE collapsed implementation (this used to name a second copy inside the now-
+// reduced src/lib/s3-sync.remote.ts), and src/cli/tui/data.remote.ts already READS the same registry to
 // resolve a `--source` ref. Only the INGESTION half (`sync-s3`) is server-owned,
 // and it still refuses (asserted above).
 //

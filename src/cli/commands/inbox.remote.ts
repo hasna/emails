@@ -184,10 +184,15 @@ async function runAutoPull(_opts: { s3?: boolean; limit?: number }) {
 // (API-backed) for the mail view.
 //
 // The `inbox source` LIFECYCLE (list/add-s3/retire) is not one of them. It is a
-// client-side registry held in this machine's config file, and
-// src/lib/s3-sync.remote.ts implements all three functions in full — the same
-// registry src/cli/tui/data.remote.ts already reads to resolve a `--source` ref
-// in this mode. Only the INGESTION half (`sync-s3`) is server-owned.
+// client-side registry held in this machine's config file, and src/lib/s3-sync.ts
+// implements all three functions in full — the same registry
+// src/cli/tui/data.remote.ts already reads to resolve a `--source` ref in this
+// mode. Only the INGESTION half (`sync-s3`) is server-owned.
+//
+// That registry USED to be a second copy inside src/lib/s3-sync.remote.ts, which is
+// what this comment named. It has collapsed to one implementation: it was never
+// storage, so the deployment word had nothing to decide between the two copies. The
+// ingestion is still mode-routed.
 function serverOnly(command: string): never {
   throw new Error(
     `emails inbox ${command} is not available in the self-hosted client; it runs on the self-hosted server.`,

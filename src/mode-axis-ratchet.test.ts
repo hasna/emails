@@ -456,12 +456,71 @@ const root = join(import.meta.dir, "..");
  * (500 files / 5,000,000 characters) cleared with room. Two files fewer than e7ef9c1, which is
  * exactly this family's two deleted arms; no test file was added, because its suite already
  * existed and was rewritten in place.
+ *
+ * RE-MEASURED AND RE-PINNED on the `src/lib/s3-sync` REGISTRY collapse — and this entry is the
+ * first PARTIAL one in this block, which is the thing a reader most needs to notice.
+ *
+ * ONLY FOUR OF THAT FAMILY'S FIVE EXPORTS COLLAPSED. `listS3Sources`, `listLiveS3Sources`,
+ * `registerS3Source` and `retireS3Source` never touched a database in either arm — they read and
+ * write a `mail_sources` array in the local CONFIG FILE, and the two arms' copies were
+ * character-for-character identical — so there was nothing for the deployment word to decide and
+ * they are now one implementation. `syncS3Inbox` is STILL ROUTED, and BOTH ARM MODULES REMAIN,
+ * because migrating that one onto the store seam loses five things the seam has no field or
+ * operation for, one of which is a data-safety regression (`inbound_emails.provider_id` would be
+ * NULL on every ingested row, which disarms `PROVIDER_DELETE_GUARD_SQL` and lets a provider DELETE
+ * through). It is sequenced after `src/db/inbound`.
+ *
+ * SO ONLY TWO COUNTERS MOVE, and the seven-that-usually-move pattern does NOT apply here:
+ *
+ *   routedFacadeDefinitions  20 -> 19   the facade's mode-dispatch helper is deleted; the one
+ *                                       remaining routed export is a plain async function with a
+ *                                       dynamic import, which also stops every consumer that only
+ *                                       wanted a source list from eval-loading the SQLite
+ *                                       ingestion path and `@aws-sdk/client-s3` behind it
+ *   routedCallExpressions   250 -> 245   the four dispatched registry exports are gone, and so is
+ *                                       the fifth's dispatch EXPRESSION: the one still-routed export
+ *                                       now picks its module with a plain conditional dynamic import
+ *                                       instead of going through the helper
+ *
+ * AND HERE IS THE UNCOMFORTABLE PART, MEASURED RATHER THAN GLOSSED: those two deltas are IDENTICAL
+ * to what the FULL collapse of this family measured on branch `p4/9e1ea854-s3-sync` (19 and 245).
+ * They have to be — both metrics count dispatch-helper SHAPES in module source, and this facade now
+ * contains none of them either way. So `routedFacadeDefinitions` and `routedCallExpressions` CANNOT
+ * distinguish a finished family from one whose ingestion is still routed through a dynamic import.
+ * `twoArmFamilies` and `remoteArmModules` are the two that can, and they are exactly the two that do
+ * NOT move here. Anyone reading this delta as completion should read those two first.
+ *
+ * NINE DO NOT MOVE, and each absence is the honest consequence of stopping halfway:
+ *
+ *   twoArmFamilies      29  both `s3-sync.local.ts` and `s3-sync.remote.ts` still exist. A reduced
+ *   remoteArmModules    29  `routedCallExpressions` must NOT be read as this family being done —
+ *                           these two are the counters that say it is not, and they are correct.
+ *   getEmailsModeReferences  62  the facade still imports the process-wide read and still calls it
+ *                                once, for the one export that is still routed.
+ *   isSelfHostedModeReferences 58 · resolveEmailsModeReferences 65 · normalizeEmailsModeReferences 16
+ *   selfHostedResourceBranches 44 · selfHostedResourceReferences 180 · emailsModeEnvReferences 235
+ *                           nothing in the registry half resolved, normalized or named the setting,
+ *                           and nothing in it reached the generic resource store.
+ *
+ * A SMALLER HONEST DELTA IS THE POINT. The full collapse of this family measured 28 · 28 · 19 · 245
+ * · 44 · 180 · 58 · 60 · 65 · 16 · 235 on branch `p4/9e1ea854-s3-sync`; those numbers are NOT
+ * carried across, because that tree also carried six probe-verified majors. All eleven were zeroed
+ * and the SPLIT tree measured from scratch.
+ *
+ * Pristine `a8aa241` verified independently over the real `git ls-files` corpus at 653 tracked /
+ * 652 scanned / 9,232,117 characters: all eleven live counts equalled the eleven ceilings it
+ * declared, ZERO slack. That is the baseline both deltas above are taken from. This tree: 653
+ * tracked / 652 scanned — the SAME file count, because the split adds and deletes no module.
+ *
+ * Procedure, unchanged: zero all eleven, measure the merged tree over the real corpus, pin what was
+ * measured, then measure AGAIN after writing this paragraph because this file sits inside the corpus
+ * it scans. That second measurement was taken and the eleven were unchanged.
  */
 const CEILINGS: Record<string, number> = {
   twoArmFamilies: 29,
   remoteArmModules: 29,
-  routedFacadeDefinitions: 20,
-  routedCallExpressions: 250,
+  routedFacadeDefinitions: 19,
+  routedCallExpressions: 245,
   selfHostedResourceBranches: 44,
   selfHostedResourceReferences: 180,
   isSelfHostedModeReferences: 58,
