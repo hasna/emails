@@ -316,15 +316,58 @@ const root = join(import.meta.dir, "..");
  *
  * Corpus of the merged change: 658 tracked, 657 scanned, 9,001,510 characters — two fewer
  * tracked files than main, which is exactly the two deleted arms.
+ *
+ * RE-MEASURED AND RE-PINNED AGAIN on the `src/db/email-digests` collapse — the persisted
+ * digest-ROW family. It is a different family from the digest MODULE re-pinned further up, and
+ * it is the one that module still imported its period parser from.
+ *
+ * WHAT THIS COLLAPSE MOVES, as the difference between the commit it was rebased onto (06b7f42,
+ * where all eleven live counts equalled the ceilings declared above — measured, not assumed)
+ * and the merged tree: `twoArmFamilies` 32 -> 31 and `remoteArmModules` 32 -> 31 (its two arms
+ * are deleted); `routedFacadeDefinitions` 23 -> 22 and `routedCallExpressions` 265 -> 259 (its
+ * facade held a dispatch helper and dispatched all SIX of its exports through it — and two of
+ * those six were PURE functions that touch no storage and were byte-identical in both arms, so
+ * the deployment word decided nothing about them at all); `isSelfHostedModeReferences`
+ * 64 -> 62 (the deleted facade imported the client-side predicate and called it once, which is
+ * also why `getEmailsModeReferences` does NOT move — this dispatcher went through the predicate
+ * rather than reading the process-wide setting directly); and `selfHostedResourceReferences`
+ * 192 -> 188 (the deleted second arm's four generic-resource calls).
+ * `selfHostedResourceBranches` does NOT move even though a `*.local.*` module was deleted:
+ * that metric counts the local arm asking whether it is really the local arm, and this one
+ * never did — it talked to SQLite directly. The two resolver counters, the parser counter and
+ * the env counter do not move either; neither arm resolved or named the setting, and the new
+ * suite needs no deployment-word setting to scrub because the collapsed module has no mode to
+ * read.
+ *
+ * RE-MEASURED AFTER THE FINAL REBASE RATHER THAN TRUSTING GIT'S MERGE — and this rebase is the
+ * most emphatic instance of the hazard recorded in this block so far, so it is worth the
+ * arithmetic. Git showed TWO conflict regions: the prose, and a ceiling region covering exactly
+ * `routedCallExpressions`, `selfHostedResourceBranches` and `selfHostedResourceReferences`.
+ * The other EIGHT counters auto-merged with no marker, because both sides had pinned them to
+ * the same numbers — and FOUR of those eight were wrong on the merged tree: `twoArmFamilies`
+ * (both sides 32, merged tree 31), `remoteArmModules` (both 32, merged 31),
+ * `routedFacadeDefinitions` (both 23, merged 22) and `isSelfHostedModeReferences` (both 64,
+ * merged 62). Resolving only what git asked about would therefore have shipped FIVE units of
+ * slack across four counters with `<=` green — a licence to re-add two arms, a facade
+ * dispatcher and two predicate reads. An absent conflict is not agreement.
+ *
+ * The procedure that produced the numbers below: keep BOTH sides' prose, set all eleven
+ * ceilings to zero, measure the merged tree over the real `git ls-files` corpus, pin what was
+ * measured, then measure again after writing this paragraph because this file sits inside the
+ * corpus it scans. The ceiling-and-comment edit contributes zero to every metric.
+ *
+ * Corpus of this change: 657 tracked, 656 scanned, 9,061,157 characters — both floors
+ * (500 files / 5,000,000 characters) cleared with room. One file fewer than 06b7f42: two arm
+ * modules deleted, one test file added.
  */
 const CEILINGS: Record<string, number> = {
-  twoArmFamilies: 32,
-  remoteArmModules: 32,
-  routedFacadeDefinitions: 23,
-  routedCallExpressions: 265,
+  twoArmFamilies: 31,
+  remoteArmModules: 31,
+  routedFacadeDefinitions: 22,
+  routedCallExpressions: 259,
   selfHostedResourceBranches: 45,
-  selfHostedResourceReferences: 192,
-  isSelfHostedModeReferences: 64,
+  selfHostedResourceReferences: 188,
+  isSelfHostedModeReferences: 62,
   getEmailsModeReferences: 62,
   resolveEmailsModeReferences: 65,
   normalizeEmailsModeReferences: 16,

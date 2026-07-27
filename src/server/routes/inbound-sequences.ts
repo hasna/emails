@@ -7,7 +7,7 @@ import { describeWarmingProgress } from '../../lib/warming.js';
 import { updateEmailStatus } from '../../db/emails.local.js';
 import { upsertEvent } from '../../db/events.local.js';
 import { getDatabase } from '../../db/database.js';
-import { getLatestEmailDigest, normalizeEmailDigestPeriod } from '../../db/email-digests.local.js';
+import { getLatestEmailDigest, normalizeEmailDigestPeriod } from '../../db/email-digests.js';
 import { json, notFound, badRequest, internalError, resolveId, resolveIdStrict, resolveOptionalId, parseBody, checkRateLimit, tooManyRequests, queryInteger, queryPage } from './helpers.js';
 import {
   MAILBOXES,
@@ -341,11 +341,14 @@ if (path === "/api/pull" && method === "POST") {
 if (path === "/api/digest" && method === "GET") {
   try {
     const period = normalizeEmailDigestPeriod(url.searchParams.get("period") ?? "today");
-    const latest = getLatestEmailDigest(period);
+    // BOTH digest reads in this handler now go through a collapsed facade, and that is the
+    // point of the change that brought this line here. Until it landed, the row read below
+    // still imported the digest ROW family's `.local` arm while the generation path
+    // imported the collapsed digest family — so on a contradictory storage configuration
+    // (which the resolution treats as a hard boot error) this route would 500 on the second
+    // read after succeeding on the first. One store answers both now.
+    const latest = await getLatestEmailDigest(period);
     if (latest) return json(latest);
-    // The digest family has ONE implementation behind this path; the `.local` arm this
-    // line used to import is deleted. It reads whichever store the storage configuration
-    // selects, which for this server is the same SQLite database the line above reads.
     const { generateEmailDigest } = await import('../../lib/email-digest.js');
     return json(await generateEmailDigest({ period, offline: true }));
   } catch (e) { return internalError(e); }
