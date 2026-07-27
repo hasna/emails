@@ -36,9 +36,25 @@ consistent, and nothing about this ruling requires renaming either.
 
 ## What this ruling does NOT ask you to do
 
-The rename it describes has already happened. It landed on 2026-07-11 in PR #21
-(`chore/rename-back-to-emails`, commits `8eac4ed` and `c19bf70`). Since then
-this package publishes as `@hasna/emails` and ships only `emails*` bins.
+The rename it describes has already happened — but only just, and not
+smoothly. An earlier version of this file claimed it "landed on 2026-07-11 in
+PR #21" and had been settled since. That was wrong on both counts. The
+published package name changed six times:
+
+| Commit | Date | Name |
+| --- | --- | --- |
+| `f303797` | 2026-03-12 | `@hasna/emails` |
+| `9a28e6a` | 2026-06-17 | `@hasna/mailery` |
+| `8eac4ed` | 2026-07-09 | `@hasna/emails` (PR #21) |
+| `a14a792` | 2026-07-13 | an `@hasnaxyz`-scoped variant (itself banned as a typo-squat) |
+| `39e292f` | 2026-07-14 | `@hasna/emails` |
+| `8b5c7d0` | 2026-07-21 | `@hasna/mailery` |
+| `80faf15` | 2026-07-25 | `@hasna/emails` |
+
+`80faf15` is the operative rename, and it is two days older than the ruling.
+So the owner ruling is not restating a long-settled fact — it is closing a
+question that genuinely kept reopening. Treat any instruction to rename this
+package *to* `@hasna/mailery` as superseded by the ruling, whatever its date.
 
 The word "mailery" still appears in this tree, and **almost all of those
 occurrences must stay**. They fall into three groups, none of which is
@@ -81,20 +97,47 @@ refused with a useful error.
 
 `hasnatools/platform-mailery` (private, `mailery.co`) and `hasnatools/mailery`
 (public, issues-only) belong to that separate product, and they keep the name.
-That separation is already enforced from both sides: `platform-mailery`'s
-commercial contract lists `@hasna/emails` as a non-dependency with a test
-asserting it is absent, and this repo stays cloud-free with the `mailery*` bin
-names deliberately left free for that product's CLI.
+That separation is enforced from both sides: at `platform-mailery` GitHub main
+`7ff7ca4` its only `@hasna/*` dependencies are `@hasna/domains` and
+`@hasna/feedback`, `docs/COMMERCIAL_CONTRACT.md` names `@hasna/emails` a
+non-dependency, and `src/contracts/commercial-contract.test.ts` asserts it is
+absent; this repo in turn stays cloud-free with the `mailery*` bin names left
+free for that product's CLI.
+
+**Check that against GitHub, not a local checkout.** The on-disk clone at
+`~/workspace/hasnatools/platform/platform-mailery` is dozens of commits stale,
+predates the contract, and still carries `"@hasna/mailery": "0.6.93"`. An
+adversarial reviewer read it and concluded — wrongly — that the two products
+are coupled.
 
 The practical consequence for this repo: **`@hasna/emails` has no hosted
-counterpart.** Its two deployment modes are `local` and `self_hosted`, both
-operator-owned. Do not describe `mailery.co` as the hosted version of this
-package, and do not add a client for it here.
+counterpart.** Its deployment modes are operator-owned. Do not describe
+`mailery.co` as the hosted version of this package, and do not add a client for
+it here.
+
+This supersedes, for this product only, the `mailery.co` example in the
+deployment doctrine (knowledge `k_mryqb555_2osk2w`), which cites it as the
+`platform-<name>` wrapper of an OSS product. The doctrine's two-mode model
+stands; its choice of example does not, because the ruling is newer.
 
 ## If you are an agent about to "fix" a naming inconsistency here
 
 Read this file first, then check whether the string you are about to change is
 a guard, a compatibility constant, or a banned-input name. If it is any of the
-three, leave it alone. Genuine residue is tracked separately; renaming a
-published package, a repository, or a deployed resource requires explicit owner
-approval for that specific step.
+three, leave it alone.
+
+Outside those three groups there are exactly three remaining prose uses, all
+reviewed and all deliberately kept, because each describes a historical fact
+rather than naming the product:
+
+- `README.md` and `docs/SELF_HOSTED_RUNTIME.md` — "the active Mailery-era key",
+  meaning the key minted under the `mailery` alias slug. Renaming the phrase
+  would obscure which key an operator has to rotate.
+- `docs/DEPLOYMENT_CUTOVER.md` — "released Mailery migration ids/checksums",
+  which is literally what those frozen IDs are.
+
+A fourth ("a Mailery-owned infrastructure manifest") was genuine residue and is
+fixed; infrastructure here is operator-owned, never Mailery's.
+
+Renaming a published package, a repository, or a deployed resource requires
+explicit owner approval for that specific step.
