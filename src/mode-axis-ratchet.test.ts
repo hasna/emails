@@ -190,16 +190,46 @@ const root = join(import.meta.dir, "..");
  * `getEmailsModeReferences` 70 -> 68, `resolveEmailsModeReferences` 69 -> 65,
  * `emailsModeEnvReferences` 238 -> 235. The other six were already exact and stay put. Corpus
  * of this change: 668 tracked, 667 scanned, 8,745,666 characters.
+ *
+ * RE-MEASURED AND RE-PINNED AGAIN on the `src/lib/email-digest` collapse, on top of the
+ * doctor re-pin above, which this rebase landed under.
+ *
+ * WHAT THIS COLLAPSE ITSELF MOVES, measured against the commit it was written on (b5edee9,
+ * where all eleven live counts equalled their declared ceilings): `twoArmFamilies` and
+ * `remoteArmModules` by one each (the digest family's two arms are deleted);
+ * `routedFacadeDefinitions` by one and `routedCallExpressions` by four (its facade held a
+ * dispatch helper and four dispatched exports); and `getEmailsModeReferences` by two — that
+ * dispatcher read the process-wide setting directly rather than through the client-side
+ * predicate, which is also why `isSelfHostedModeReferences` does not move. Its arms carried
+ * no resource branches, so neither `selfHostedResource*` counter moves.
+ *
+ * THE NUMBERS BELOW ARE THE COMBINED TREE'S, NOT A PER-METRIC MINIMUM, and two consecutive
+ * rebases here are exactly the case where the difference is visible. Sibling collapses in
+ * this phase lower OVERLAPPING counters, and each branch pins the count for its own tree —
+ * so the same number appearing on both sides is not agreement, it is two independent
+ * measurements of two different trees.
+ *
+ * THE SILENT HALF, WHICH IS THE PART WORTH RECORDING: when both sides pin a counter to the
+ * SAME value, git auto-merges the line with NO conflict marker, and the result is exactly the
+ * per-metric minimum. On the rebase onto the analytics collapse that happened to four of the
+ * eleven at once — `twoArmFamilies` and `remoteArmModules` (both sides 36, merged tree 35),
+ * `routedFacadeDefinitions` (both 27, merged tree 26) and `getEmailsModeReferences` (both 66,
+ * merged tree 64) — and only ONE counter conflicted loudly. A rebase that resolves the
+ * visible conflict and trusts the rest therefore ships five counters between one and two
+ * wide with the guard green. The only safe procedure is to RE-MEASURE every counter on the
+ * merged tree after every rebase, which is what produced the numbers below.
+ *
+ * Corpus of the merged change: 664 tracked, 663 scanned, 8,851,815 characters.
  */
 const CEILINGS: Record<string, number> = {
-  twoArmFamilies: 36,
-  remoteArmModules: 36,
-  routedFacadeDefinitions: 27,
-  routedCallExpressions: 285,
+  twoArmFamilies: 35,
+  remoteArmModules: 35,
+  routedFacadeDefinitions: 26,
+  routedCallExpressions: 281,
   selfHostedResourceBranches: 47,
   selfHostedResourceReferences: 199,
   isSelfHostedModeReferences: 68,
-  getEmailsModeReferences: 66,
+  getEmailsModeReferences: 64,
   resolveEmailsModeReferences: 65,
   normalizeEmailsModeReferences: 16,
   emailsModeEnvReferences: 235,
