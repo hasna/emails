@@ -363,6 +363,36 @@ describe("the abbreviated-provider scan", () => {
 // ─── the second write, and what happens when it refuses ───────────────────────
 
 describe("attachment locations recorded through the seam", () => {
+  // PARAMETERISED OVER BOTH STORES ON PURPOSE, because the mechanism is the part of this
+  // collapse most likely to be lost on the API path and not noticed: the location rides on
+  // `MessageInput.attachments`, which is `unknown[]`, so a service that whitelisted attachment
+  // FIELDS would drop it and answer 200. It does not — `messageWriteInput` passes the array
+  // through with a bare `asArray`, and the service's `publicMessage` removes only
+  // `idempotency_key` and `send_payload_hash`. (An earlier read of this file mistook
+  // `publicMessageListItem`, which DOES strip attachments, for `publicMessage`; that is the LIST
+  // projection, where `attachment_count` replaces them. The concern was wrong and is retracted
+  // here rather than left in a comment as a live worry.)
+  for (const harness of HARNESSES) {
+    it(`carries the recorded location through ${harness.name}`, async () => {
+      const store = harness.store();
+      const written = await store.messages.upsertMessage({
+        source_id: `s3://${BUCKET}/${PREFIX}probe`,
+        from_addr: "sender@example.test",
+        to_addrs: ["inbox@example.test"],
+        subject: "location round trip",
+        attachments: [
+          { index: 0, filename: "x.pdf", content_type: "application/pdf", size: 3, local_path: "/tmp/x.pdf" },
+        ],
+      });
+      if (!written.ok) throw new Error(`could not write: ${written.message}`);
+      const read = await store.messages.getMessage(written.value.record.id);
+      if (!read.ok || read.value === null) throw new Error("could not read back");
+      expect(read.value.attachments).toEqual([
+        { index: 0, filename: "x.pdf", content_type: "application/pdf", size: 3, local_path: "/tmp/x.pdf" },
+      ]);
+    });
+  }
+
   it("records where the bytes went, on the attachment record", async () => {
     const withAttachment = [
       "From: sender@example.test",
