@@ -1066,6 +1066,40 @@ function runS3MessageIdRawUrlBackfill(db: Database): void {
   }
 }
 
+/**
+ * Adopt the OLD S3 dedup key as the store seam's fence, once, for rows that predate it.
+ *
+ * See the call site in `ensureSchema` for why this exists and why each clause is required.
+ * Exported so a regression suite can drive it against a hand-built legacy table instead of
+ * having to reach it through a full schema bootstrap.
+ *
+ * @returns how many rows adopted a `source_id` on this call. Zero on an already-repaired
+ *   database, which is the normal steady state.
+ */
+export function backfillS3SourceIdsFromRawUrls(db: Database): number {
+  // A CORRELATED REFERENCE TO THE TABLE BEING UPDATED, by its own name rather than through an
+  // `UPDATE … AS alias`. Both are valid SQLite, and the unaliased form is the one whose meaning
+  // does not depend on the reader knowing which alias scope wins.
+  const result = db.run(
+    `UPDATE inbound_emails
+        SET source_id = raw_s3_url
+      WHERE source_id IS NULL
+        AND raw_s3_url LIKE 's3://%'
+        AND NOT EXISTS (
+          SELECT 1 FROM inbound_emails AS taken
+           WHERE taken.source_id = inbound_emails.raw_s3_url
+        )
+        AND id = (
+          SELECT earliest.id FROM inbound_emails AS earliest
+           WHERE earliest.raw_s3_url = inbound_emails.raw_s3_url
+             AND earliest.source_id IS NULL
+           ORDER BY earliest.created_at ASC, earliest.id ASC
+           LIMIT 1
+        )`,
+  );
+  return result.changes;
+}
+
 export function backfillLegacyS3RawUrls(sources: LegacyS3RawUrlSource[], db?: Database): number {
   const d = db || getDatabase();
   runS3MessageIdRawUrlBackfill(d);
@@ -2587,6 +2621,40 @@ function ensureSchema(db: Database): void {
   ensureColumn("ALTER TABLE domains ADD COLUMN notes TEXT");
   ensureIndex(`CREATE UNIQUE INDEX IF NOT EXISTS idx_inbound_source_id ON inbound_emails(source_id)
     WHERE source_id IS NOT NULL`);
+
+  // ADOPT THE OLD S3 DEDUP KEY AS THE NEW FENCE. Without this, collapsing `src/lib/s3-sync`
+  // onto the store seam would have RE-INGESTED EVERY MESSAGE ALREADY PULLED FROM S3.
+  //
+  // The deleted `s3-sync.local.ts` deduplicated by SELECTing `raw_s3_url`, a column the seam
+  // does not expose. The seam's idempotency fence is `upsertMessage`'s `source_id`, added
+  // NULLABLE just above with no backfill — so on any database populated before that collapse
+  // every S3-sourced row has `raw_s3_url` set and `source_id` NULL, the fence matches nothing,
+  // and the next `emails inbox pull-s3` inserts a second copy of the entire mailbox.
+  //
+  // Both halves of the statement are load-bearing:
+  //
+  //   * `LIKE 's3://%'` — ONLY S3-sourced rows. `source_id` means "the stable upstream id",
+  //     and a row that arrived by webhook or by IMAP has no S3 object behind it; giving it one
+  //     would let a later S3 sync match a message that never came from a bucket.
+  //   * the `NOT EXISTS` correlated guard — `raw_s3_url` is NOT uniquely indexed and duplicate
+  //     values do exist in the wild (the legacy `backfillLegacyS3RawUrls` repair above DERIVES
+  //     the column from `message_id`, and nothing stops two rows deriving the same URL). A bare
+  //     `UPDATE … SET source_id = raw_s3_url` would therefore violate the partial unique index
+  //     and abort. This claims the key for exactly ONE row per URL — the earliest by
+  //     `created_at`, then by `id` for a tie, so the choice is deterministic and not
+  //     clock-dependent — and leaves the later duplicates NULL. Those keep behaving exactly as
+  //     they do today: unfenced, and re-fetched once each, which is the pre-existing duplicate
+  //     situation rather than a new one.
+  //
+  // Idempotent (the `source_id IS NULL` predicate is self-limiting) and unconditional, so it
+  // needs no migration sentinel — see the note above about why raising the replay level here
+  // would take the retired-identity regression suite with it.
+  //
+  // NOT `ensureColumn` / `ensureIndex` / `ensureTable`: all three swallow their own exception,
+  // which is right for a statement whose only expected failure is "already applied" and wrong
+  // for a data repair. A swallowed failure here leaves the fence empty and the duplicate
+  // re-ingestion happens anyway, silently — so this one is allowed to throw.
+  backfillS3SourceIdsFromRawUrls(db);
 
   // Ensure email_triage table exists
   ensureTable(`CREATE TABLE IF NOT EXISTS email_triage (

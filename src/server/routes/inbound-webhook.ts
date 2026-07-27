@@ -139,7 +139,7 @@ export async function handleInboundWebhook(
     region: string | undefined,
     syncOpts?: { keys?: string[]; providerId?: string },
   ) => {
-    const { syncS3Inbox } = await import("../../lib/s3-sync.local.js");
+    const { syncS3Inbox } = await import("../../lib/s3-sync.js");
     return syncS3Inbox({
       bucket,
       prefix,

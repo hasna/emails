@@ -734,7 +734,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .description("List configured S3 ingestion sources")
     .action(async () => {
       try {
-        const { listS3Sources } = await import("../../lib/s3-sync.local.js");
+        const { listS3Sources } = await import("../../lib/s3-sync.js");
         const sources = listS3Sources();
         output(sources, formatSourceList(sources));
       } catch (e) {
@@ -756,7 +756,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
       try {
         const [{ addInboundBucket }, { registerS3Source }] = await Promise.all([
           import("../../lib/config.js"),
-          import("../../lib/s3-sync.local.js"),
+          import("../../lib/s3-sync.js"),
         ]);
         const status = parseSourceStatus(opts.status);
         const providerId = opts.provider ? resolvePartialIdOrThrow(getDatabase(), "providers", opts.provider) : undefined;
@@ -783,7 +783,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .description("Retire an S3 source without deleting provider rows or mail")
     .action(async (sourceRef: string) => {
       try {
-        const { retireS3Source } = await import("../../lib/s3-sync.local.js");
+        const { retireS3Source } = await import("../../lib/s3-sync.js");
         const retired = retireS3Source(sourceRef);
         output(retired, chalk.green(`✓ Retired S3 source ${retired.id}`));
       } catch (e) {
@@ -1048,7 +1048,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         const region = opts.region ?? inbound.region;
         const prefix = opts.prefix ?? inbound.prefix;
         if (!bucket && !opts.source) { handleError(new Error("No S3 bucket: pass --bucket, --source, or set 'emails config set inbound_s3_bucket <name>'")); return; }
-        const { syncS3Inbox } = await import("../../lib/s3-sync.local.js");
+        const { syncS3Inbox } = await import("../../lib/s3-sync.js");
         console.log(chalk.dim(`Syncing emails from ${opts.source ? `source ${opts.source}` : `s3://${bucket}/${prefix ?? ""}`}...`));
         const result = await syncS3Inbox({
           bucket,
@@ -1172,7 +1172,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
 
         const { makeSqsAdapter } = await import("../../lib/inbound-realtime-aws.js");
         const { watchInboundOnce } = await import("../../lib/inbound-realtime.js");
-        const { syncS3Inbox } = await import("../../lib/s3-sync.local.js");
+        const { syncS3Inbox } = await import("../../lib/s3-sync.js");
         const sqs = makeSqsAdapter({ queueUrl, region });
         const rememberPoll = (patch: Record<string, unknown> = {}) => {
           const latest = loadConfig();
