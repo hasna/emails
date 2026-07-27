@@ -583,24 +583,88 @@ const root = join(import.meta.dir, "..");
  * module already existed and was rewritten in place, so it adds no file. The character total was
  * measured with this paragraph in place, since editing it changes the corpus it describes; the
  * eleven counts were identical before and after.
+ *
+ * RE-MEASURED AND RE-PINNED AGAIN on the `src/db/aliases` collapse — per-domain aliases and
+ * catch-all routing. It is the largest single-family reduction in this phase so far, and the
+ * shape of it is worth reading rather than only the size.
+ *
+ * WHAT THIS COLLAPSE ITSELF MOVES, as the difference between the tree it merges into (55de52c,
+ * verified INDEPENDENTLY over the real `git ls-files` corpus at 653 tracked / 652 scanned /
+ * 9,314,203 characters, where all eleven live counts equalled the ceilings it declared, ZERO
+ * slack) and the merged tree:
+ *
+ *   twoArmFamilies               28 -> 27   both of the family's arm modules are deleted, so its
+ *   remoteArmModules             28 -> 27   facade has no siblings left. THESE TWO ARE THE PAIR
+ *                                           that says a family is finished; the s3-sync split
+ *                                           moved the next two by a full collapse's amounts
+ *                                           while both its arms survived.
+ *   routedFacadeDefinitions      18 -> 17   the facade's dispatch helper is deleted
+ *   routedCallExpressions       244 -> 234  it dispatched all TEN of its exports through that
+ *                                           helper — the largest dispatch table collapsed in
+ *                                           this programme
+ *   selfHostedResourceReferences 180 -> 173 the deleted second arm reached the generic resource
+ *                                           helper seven times: once per read or write, which is
+ *                                           also why every one of those operations answered out
+ *                                           of a single clamped page
+ *   isSelfHostedModeReferences    58 -> 56  the deleted facade imported the client-side mode
+ *                                           predicate and called it once
+ *
+ * FIVE DO NOT MOVE, and each absence is a fact rather than an omission.
+ * `selfHostedResourceBranches` stays at 44 even though a `*.local.*` module was deleted: that
+ * metric counts a local arm asking whether it is really the local arm, and this one never did —
+ * it talked to SQLite directly. `getEmailsModeReferences` stays at 60 and the two resolver/parser
+ * counters stay at 65 and 16, because this dispatcher went through the predicate rather than
+ * reading or parsing the process-wide setting. And `emailsModeEnvReferences` stays at 235,
+ * which took deliberate care: the most natural way to prove the deleted second arm's clamped-page
+ * defect is a test that SETS the deployment word and drives that arm, and such a test would have
+ * RAISED a counter that may only fall — the env metric is a plain substring match that no
+ * spelling escapes. Both rebuilt suites therefore name their storage through the resolution's OWN
+ * exported constants, and the two 520-alias cases prove the defect through the store seam instead.
+ *
+ * THE REBASE ONTO 55de52c IS THE QUIETEST FORM OF THIS BLOCK'S HAZARD, and it is worth the
+ * arithmetic because git offered NO conflict at all in the version that mattered. This branch had
+ * not touched this file through its first two commits, so its copy was byte-identical to 016da25's
+ * — meaning a rebase would have taken main's block WHOLESALE, with no marker, no question, and the
+ * guard green. Main pinned 28/28/18/244/44/180/58/60/65/16/235 for ITS tree; the merged tree
+ * measures 27/27/17/234/44/173/56/60/65/16/235. So doing nothing would have shipped SIX counters
+ * and TWENTY-TWO units of slack — one each on the two arm counters and the facade counter, TEN on
+ * the dispatch-call counter, SEVEN on the resource-helper counter and TWO on the predicate counter
+ * — a licence to re-add two arm modules, a facade dispatcher, ten dispatch sites, seven resource
+ * calls and two predicate reads. A per-metric minimum of the two sides gives main's own numbers
+ * exactly, so it would have shipped the same twenty-two.
+ *
+ * WHAT PREVENTED IT was the strongest form of the defence this block records, taken from the
+ * `src/lib/forwarding` collapse: all eleven ceilings were committed as LITERAL ZEROS in their own
+ * commit BEFORE the rebase, so the block could not merge silently and the guard could not pass
+ * until every number had been re-measured. The rebase then conflicted on exactly the eleven lines,
+ * which is the loud failure the procedure is designed to force. Then: keep both sides' prose, keep
+ * the zeros, measure the merged tree over the real corpus, pin what was measured, and measure
+ * AGAIN after writing this paragraph because this file sits inside the corpus it scans.
+ *
+ * That second measurement was taken and the eleven were unchanged. The prose above names the
+ * dispatch helper, the generic resource helper and the mode predicate BY ROLE and never as the
+ * tokens the scan counts, which is #128's lesson (a ceiling comment that spelled a dispatch call
+ * while describing its deletion measured 247 against a code-only truth of 245) and #130's
+ * independently (a paragraph about a guard named that guard as a call and pushed its own metric
+ * from 180 to 181).
+ *
+ * Corpus of this change: 651 tracked, 650 scanned, 9,394,416 characters — both floors
+ * (500 files / 5,000,000 characters) cleared with room. Two files fewer than 55de52c, which is
+ * exactly this family's two deleted arms; no test file was added, because both suites already
+ * existed and were rewritten in place.
  */
 const CEILINGS: Record<string, number> = {
-  // ZEROED ON PURPOSE, BEFORE A REBASE. Every one of these is a placeholder, and the guard
-  // cannot pass until each is replaced by a number MEASURED on the merged tree. That is the
-  // point: an inherited ceiling is the one failure this block keeps recording, because two
-  // sides that pinned the same value auto-merge with no conflict marker and the merged tree
-  // measures lower than either. Zeros make the silent case impossible to ship.
-  twoArmFamilies: 0,
-  remoteArmModules: 0,
-  routedFacadeDefinitions: 0,
-  routedCallExpressions: 0,
-  selfHostedResourceBranches: 0,
-  selfHostedResourceReferences: 0,
-  isSelfHostedModeReferences: 0,
-  getEmailsModeReferences: 0,
-  resolveEmailsModeReferences: 0,
-  normalizeEmailsModeReferences: 0,
-  emailsModeEnvReferences: 0,
+  twoArmFamilies: 27,
+  remoteArmModules: 27,
+  routedFacadeDefinitions: 17,
+  routedCallExpressions: 234,
+  selfHostedResourceBranches: 44,
+  selfHostedResourceReferences: 173,
+  isSelfHostedModeReferences: 56,
+  getEmailsModeReferences: 60,
+  resolveEmailsModeReferences: 65,
+  normalizeEmailsModeReferences: 16,
+  emailsModeEnvReferences: 235,
 };
 
 // 624 files are tracked and 623 scanned today, totalling ~7.4M characters. The floors
