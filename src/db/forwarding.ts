@@ -130,10 +130,14 @@
 // genuine retry. `src/db/forwarding.test.ts` pins the current behaviour under a name that says
 // it is a defect, so nobody can "fix" it silently in either direction.
 //
-// Related, and out of scope for the same reason: the `idempotency_key` built at
-// `src/lib/forwarding.local.ts:74` is consumed only by the sent-mail ledger AFTER the provider
-// call, and `createMessage` refuses an `idempotency_key` on both stores — so it fences nothing
-// on the send path today.
+// Related, and out of scope for the same reason: the `idempotency_key` the forwarding pipeline
+// builds (`src/lib/forwarding.ts`, which is now ONE implementation and no longer has a `.local`
+// arm to cite) is consumed only by the sent-mail ledger AFTER the provider call, and
+// `createMessage` refuses an `idempotency_key` on both stores — so it fences nothing on the
+// send path today. That pipeline's own header records what it does instead: it makes the key's
+// uselessness worse rather than harmless, because `createEmail` DOES honour the key, so the
+// second send of a duplicated pair reuses the first ledger row and the local ledger shows one
+// message for two delivered copies.
 //
 // WHAT REPLACES THE ARM CHOICE is the store's own answer. No branch on the store kind, on
 // the descriptor, or on the resolution plan. `src/store/` is untouched by this change.

@@ -177,9 +177,11 @@ describe("forwarding command", () => {
 
   it("runs the forwarding pipeline against local storage", async () => {
     // END TO END THROUGH THE CONSUMER SWAP. `emails forwarding run` reaches
-    // `src/lib/forwarding.local.ts`, which now imports the collapsed facade rather than the
-    // deleted `.local` arm, and calls both local-storage operations with the `Database` it
-    // already threads.
+    // `src/lib/forwarding.ts` — itself now ONE implementation, with both of its arms deleted —
+    // which imports the collapsed `src/db/forwarding` facade and calls both local-storage
+    // operations with the `Database` it already threads. Reaching this at all also exercises
+    // that pipeline's storage-configuration gate on its passing side, because
+    // `configureLocalStore()` names a local database.
     configureLocalStore();
     const empty = await runForwardingCommand(["forwarding", "run"]);
     expect(empty.data).toMatchObject({ attempted: 0, sent: 0, failed: 0, skipped: 0 });
