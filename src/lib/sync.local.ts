@@ -3,7 +3,8 @@ import { getProvider, listActiveProviderSummaries } from "../db/providers.local.
 import { upsertEventWithResult } from "../db/events.local.js";
 import { incrementBounceCounts, incrementComplaintCounts } from "../db/contacts.local.js";
 import { getAdapter } from "../providers/index.js";
-import { getLocalStats } from "./stats.local.js";
+import { getLocalStats } from "./stats.js";
+import { createSqliteEmailStore } from "../store-sqlite/index.js";
 import { getConfigValue } from "./config.js";
 import type { Database } from "../db/database.js";
 import type { ProviderAdapter, RemoteEvent } from "../providers/interface.js";
@@ -100,22 +101,62 @@ const STATUS_MAP: Partial<Record<RemoteEvent["type"], EmailStatus>> = {
   complained: "complained",
 };
 
-function checkAlerts(providerId: string, providerName: string, d: Database): void {
+/**
+ * Bounce / complaint threshold alerts after a sync.
+ *
+ * READS THROUGH THE STORE SEAM NOW, which changes two things a caller has to know about.
+ *
+ *   * A THRESHOLD THAT CANNOT BE EVALUATED IS ANNOUNCED, not skipped. `bounce_rate` is
+ *     provider-scoped and divides by the count of sent mail, which the seam cannot scope
+ *     to a provider (src/lib/stats.ts explains why), so a provider-scoped bounce RATE is
+ *     no longer measurable. Silently not alerting would read exactly like "your bounce
+ *     rate is fine", so the reason is printed instead.
+ *   * A LOWER BOUND IS STILL SAFE FOR A COUNT THRESHOLD, and only in that direction: if
+ *     the number of complaints we could enumerate already exceeds the threshold, so does
+ *     the true number. The comparison can therefore MISS an alert but can never invent
+ *     one, which is the right way round for this check.
+ */
+async function checkAlerts(providerId: string, providerName: string, d: Database): Promise<void> {
   const bounceThreshold = Number(getConfigValue("bounce-alert-threshold") ?? 0);
   const complaintThreshold = Number(getConfigValue("complaint-alert-threshold") ?? 0);
   if (!bounceThreshold && !complaintThreshold) return;
 
   try {
-    const stats = getLocalStats(providerId, "30d", d);
-    if (bounceThreshold && stats.bounce_rate > bounceThreshold) {
-      process.stderr.write(
-        `\n⚠️  ALERT [${providerName}]: Bounce rate ${stats.bounce_rate.toFixed(1)}% exceeds threshold ${bounceThreshold}% (last 30d)\n`,
-      );
+    // The sync's own connection, not the process-wide one: a caller that handed a database
+    // to `syncProvider` must have its alerts read the rows that sync just wrote.
+    const stats = await getLocalStats(providerId, "30d", createSqliteEmailStore({ database: d }));
+    const unmeasured = (field: string): string =>
+      stats.gaps[field]?.reason ?? "the configured store reported no value";
+
+    if (bounceThreshold) {
+      if (stats.bounce_rate === null) {
+        process.stderr.write(
+          `\n⚠️  [${providerName}]: the bounce-rate alert (threshold ${bounceThreshold}%, last 30d) could `
+            + `not be evaluated — ${unmeasured("bounce_rate")}\n`,
+        );
+      } else if (stats.bounce_rate > bounceThreshold) {
+        process.stderr.write(
+          `\n⚠️  ALERT [${providerName}]: Bounce rate ${stats.bounce_rate.toFixed(1)}% exceeds threshold ${bounceThreshold}% (last 30d)\n`,
+        );
+      }
     }
-    if (complaintThreshold && stats.complained > complaintThreshold) {
-      process.stderr.write(
-        `\n⚠️  ALERT [${providerName}]: Complaint rate ${(stats.complained / Math.max(stats.sent, 1) * 100).toFixed(2)}% exceeds threshold ${complaintThreshold}% (last 30d)\n`,
-      );
+    if (complaintThreshold) {
+      if (stats.complained === null) {
+        process.stderr.write(
+          `\n⚠️  [${providerName}]: the complaint alert (threshold ${complaintThreshold}, last 30d) could `
+            + `not be evaluated — ${unmeasured("complained")}\n`,
+        );
+      } else if (stats.complained > complaintThreshold) {
+        // The percentage is a separate question from the threshold: it needs the count of
+        // sent mail, which is not provider-scopable. The count that DID trip the alert is
+        // reported either way, so the alert never depends on the rate being available.
+        const share = stats.sent === null || stats.sent === 0
+          ? `rate unavailable — ${unmeasured("sent")}`
+          : `${(stats.complained / stats.sent * 100).toFixed(2)}%`;
+        process.stderr.write(
+          `\n⚠️  ALERT [${providerName}]: ${stats.complained} complaints (${share}) exceeds threshold ${complaintThreshold} (last 30d)\n`,
+        );
+      }
     }
   } catch {
     // Don't fail sync if alert check errors
@@ -193,7 +234,7 @@ export async function syncProvider(providerId: string, db?: Database, adapterOve
 
   // Check bounce/complaint thresholds after sync
   if (inserted > 0) {
-    checkAlerts(providerId, provider.name, d);
+    await checkAlerts(providerId, provider.name, d);
   }
 
   return inserted;

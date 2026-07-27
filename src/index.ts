@@ -161,6 +161,12 @@ export type { Database } from "./db/database.js";
 
 // Lib functions
 export { getLocalStats, formatStatsTable } from "./lib/stats.js";
+// `StatsReport` is what `getLocalStats` returns, and it is NOT `Stats` (below, from
+// src/types/index.ts, which stays the shape a provider adapter reports). Its counts and
+// rates are nullable, and it carries why: measured through the store seam, a figure is a
+// total, a lower bound, or absent with a reason. A consumer that cannot name the type
+// cannot narrow those nulls.
+export type { StatsEventType, StatsReport } from "./lib/stats.js";
 export { generateSpfRecord, generateDmarcRecord, formatDnsTable } from "./lib/dns.js";
 export { getAnalytics, formatAnalytics } from "./lib/analytics.js";
 export { parseCsv } from "./lib/csv.js";

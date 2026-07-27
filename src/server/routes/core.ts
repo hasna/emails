@@ -7,7 +7,7 @@ import { listSandboxEmailSummaries, getSandboxEmail, clearSandboxEmails } from '
 import { getDatabase } from '../../db/database.js';
 import { getEvent, listEventSummaries } from '../../db/events.local.js';
 import { getAdapter } from '../../providers/index.js';
-import { getLocalStats } from '../../lib/stats.local.js';
+import { getLocalStats } from '../../lib/stats.js';
 import { listEnrichedAddresses } from '../../lib/address-ownership.js';
 import {
   getDomainLifecycleSummary,
@@ -346,7 +346,7 @@ if (path === "/api/stats" && method === "GET") {
   try {
     const period = url.searchParams.get("period") ?? "30d";
     const resolvedId = resolveOptionalId("providers", url.searchParams.get("provider_id"));
-    const stats = getLocalStats(resolvedId, period);
+    const stats = await getLocalStats(resolvedId, period);
     return json(stats);
   } catch (e) { return internalError(e); }
 }

@@ -20,7 +20,6 @@ import { createSequence, addStep, enroll, advanceEnrollment } from "./db/sequenc
 import { getTodayLimit, generateWarmingPlan } from "./lib/warming.js";
 import { storeInboundEmail } from "./db/inbound.js";
 import { sendWithFailover } from "./lib/send.js";
-import { getLocalStats } from "./lib/stats.js";
 import { getAnalytics } from "./lib/analytics.js";
 
 let stub: V1Stub;
@@ -71,12 +70,17 @@ describe("sandbox capture flow (via /v1)", () => {
 });
 
 describe("outbound sending is server-side", () => {
-  it("sendWithFailover and getLocalStats fail loud in the client", async () => {
+  // `getLocalStats` USED TO BE ASSERTED HERE and no longer is, because the behaviour it
+  // asserted is deliberately gone: the delivery-statistics family has collapsed to one
+  // implementation that reads whichever store the operator configured (src/lib/stats.ts),
+  // so there is no client half left to fail loud. It is not untested — the equivalent
+  // coverage moved to src/lib/stats.test.ts, which runs the same measurements against BOTH
+  // stores, including one over real HTTP, and asserts the refusals it does still make.
+  it("sendWithFailover fails loud in the client", async () => {
     const provider = createProvider({ name: "dev", type: "sandbox" });
     await expect(
       sendWithFailover(provider.id, { from: "a@example.com", to: "b@test.com", subject: "x", text: "y" }),
     ).rejects.toThrow(/not available in the self-hosted client/);
-    expect(() => getLocalStats(provider.id, "30d")).toThrow(/self-hosted server/);
   });
 });
 

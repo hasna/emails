@@ -1,9 +1,10 @@
 import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
 import { listEmails } from "../../db/emails.local.js";
-import { getLocalStats, formatStatsTable } from "../../lib/stats.local.js";
+import { getLocalStats, formatStatsTable } from "../../lib/stats.js";
 import { getAnalytics, formatAnalytics } from "../../lib/analytics.js";
 import { colorStatus, truncate } from "../../lib/format.js";
+import { renderStatusCount } from "../../lib/status-availability.js";
 import { getDatabase } from "../../db/database.js";
 import { handleError, resolveId, parseDuration, padRight } from "../utils.js";
 
@@ -82,7 +83,9 @@ export function registerSyncCommands(program: Command, output: (data: unknown, f
     .option("--provider <id>", "Provider ID")
     .option("--period <period>", "Period: 7d, 30d, 90d", "30d")
     .option("--inbox", "Show inbound email stats instead of outbound")
-    .action((opts: { provider?: string; period?: string; inbox?: boolean }) => {
+    // Async because delivery statistics are now read through the store seam, whose
+    // operations are all asynchronous (src/store/repositories.ts rule 1).
+    .action(async (opts: { provider?: string; period?: string; inbox?: boolean }) => {
       try {
         if (opts.inbox) {
           const db = getDatabase();
@@ -121,7 +124,7 @@ export function registerSyncCommands(program: Command, output: (data: unknown, f
         }
 
         const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
-        const stats = getLocalStats(providerId, opts.period ?? "30d");
+        const stats = await getLocalStats(providerId, opts.period ?? "30d");
         output(stats, chalk.bold("\nEmail Stats:\n") + formatStatsTable(stats));
       } catch (e) {
         handleError(e);
@@ -138,18 +141,25 @@ export function registerSyncCommands(program: Command, output: (data: unknown, f
       const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
       const intervalSec = parseInt(opts.interval ?? "30", 10);
 
-      const render = () => {
+      // A count reached through the store seam may be a LOWER BOUND or may not have been
+      // measured at all, so both are rendered as such (`≥N` / `unavailable`) rather than
+      // as a bare number. `emails stats --json` carries the reason for every gap.
+      const pct = (value: number | null): string =>
+        value === null ? chalk.dim("(rate unavailable)") : `(${value.toFixed(1)}%)`;
+
+      const render = async () => {
         process.stdout.write("\x1Bc"); // Clear screen
         const now = new Date().toLocaleTimeString();
         console.log(chalk.bold(`Email Monitor  [${now}]  (Ctrl+C to exit)\n`));
 
         try {
-          const stats = getLocalStats(providerId, "7d");
+          const stats = await getLocalStats(providerId, "7d");
+          const events = stats.events_availability;
           console.log(chalk.bold("Last 7 days:"));
-          console.log(`  ${chalk.cyan("Sent")}:       ${stats.sent}`);
-          console.log(`  ${chalk.green("Delivered")}: ${stats.delivered}  (${stats.delivery_rate.toFixed(1)}%)`);
-          console.log(`  ${chalk.red("Bounced")}:   ${stats.bounced}  (${stats.bounce_rate.toFixed(1)}%)`);
-          console.log(`  ${chalk.yellow("Opened")}:    ${stats.opened}  (${stats.open_rate.toFixed(1)}%)`);
+          console.log(`  ${chalk.cyan("Sent")}:       ${renderStatusCount(stats.sent, stats.sent_availability)}`);
+          console.log(`  ${chalk.green("Delivered")}: ${renderStatusCount(stats.delivered, events)}  ${pct(stats.delivery_rate)}`);
+          console.log(`  ${chalk.red("Bounced")}:   ${renderStatusCount(stats.bounced, events)}  ${pct(stats.bounce_rate)}`);
+          console.log(`  ${chalk.yellow("Opened")}:    ${renderStatusCount(stats.opened, events)}  ${pct(stats.open_rate)}`);
           console.log();
 
           const emails = listEmails({ provider_id: providerId, limit: 5 });
@@ -165,8 +175,8 @@ export function registerSyncCommands(program: Command, output: (data: unknown, f
         }
       };
 
-      render();
-      const timer = setInterval(render, intervalSec * 1000);
+      void render();
+      const timer = setInterval(() => void render(), intervalSec * 1000);
 
       process.on("SIGINT", () => {
         clearInterval(timer);
