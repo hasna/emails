@@ -58,7 +58,9 @@ import type {
   VerificationCodeEmail,
   VerificationCodeMatch,
 } from "./verification-code.js";
-import { findVerificationCode, listVerificationCodeCandidates } from "./verification-code.local.js";
+// The FACADE, not an arm: the verification-code family has one implementation and its
+// candidate read goes through the store seam.
+import { findVerificationCode, listVerificationCodeCandidates } from "./verification-code.js";
 import {
   decodeAttachmentPayload,
   normalizeAttachmentByteLimit,

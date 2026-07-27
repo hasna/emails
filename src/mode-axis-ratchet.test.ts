@@ -125,36 +125,40 @@ const root = join(import.meta.dir, "..");
  * silent no-op — which is the correct failure. Re-measure and re-pin on rebase; do not
  * widen a number to make a merge easy.
  *
- * RE-PINNED AGAIN on the status-facts collapse, and the paragraph above is exactly why
- * it was needed. "Zero slack on all eleven" was true of the tree it was measured on and
- * stopped being true the moment two other changes merged on top of it without
- * re-measuring: by the time this block was rebased, FIVE metrics were carrying slack
- * again — `twoArmFamilies` and `remoteArmModules` one each, `selfHostedResourceReferences`
- * four, `getEmailsModeReferences` two, `emailsModeEnvReferences` one. None of that slack
- * was earned by this change; all of it is reclaimed here, because a ceiling above the
- * live count is a licence to re-add exactly as many branches as the gap is wide with the
- * guard still green.
+ * RE-PINNED AGAIN on the verification-code collapse, on top of the status-facts re-pin
+ * that this rebase landed beside. The paragraph above is exactly why both were needed:
+ * "zero slack on all eleven" is true of the tree it was measured on and stops being true
+ * the moment anything else merges without re-measuring. The status-facts pin had already
+ * reclaimed five metrics' worth of stale slack; this one re-measures the COMBINED tree,
+ * because two collapses that each lowered different counters would otherwise each leave
+ * the other's reductions unpinned.
  *
- * This collapse itself moves three: `twoArmFamilies` and `remoteArmModules` by one (the
- * status-facts family's two arms are deleted), `getEmailsModeReferences` by two and
- * `resolveEmailsModeReferences` by two (the deleted facade's dispatch read and the
- * deleted local arm's mode resolution, which fed the domain inbound-readiness signals).
- * Its own dispatch used neither the helper nor a dispatched export, so
- * `routedFacadeDefinitions` and `routedCallExpressions` do not move.
+ * The two collapses move DISJOINT sets of counters, which is why the merge is a real
+ * tightening rather than a pick-one:
+ *   - status-facts moved `twoArmFamilies` and `remoteArmModules` by one, and
+ *     `getEmailsModeReferences` and `resolveEmailsModeReferences` by two each; its own
+ *     dispatch used neither the helper nor a dispatched export.
+ *   - verification-code moves `twoArmFamilies` and `remoteArmModules` by one more, 39 -> 38
+ *     (its two
+ *     arms are deleted), `routedFacadeDefinitions` 29 -> 28 and `routedCallExpressions` by
+ *     three (its facade's dispatch helper and its three dispatched exports), and
+ *     `isSelfHostedModeReferences` by two (that facade's import of the client-side mode
+ *     predicate and its one call).
  *
- * Measured over the real `git ls-files` corpus of THIS commit: 668 tracked, 667 scanned,
- * 8,569,747 characters. The gap between what the tree contains and what the guard
- * permits is zero on all eleven again — and the way to keep it that way is to re-measure
- * on every rebase rather than to trust this sentence.
+ * Every number below is EXACTLY the count measured over the real `git ls-files` corpus of
+ * THIS commit, re-measured after this comment was written because this file is inside the
+ * corpus it scans. The gap between what the tree contains and what the guard permits is
+ * zero on all eleven — and the way to keep it that way is to re-measure on every rebase
+ * rather than to trust this sentence.
  */
 const CEILINGS: Record<string, number> = {
-  twoArmFamilies: 39,
-  remoteArmModules: 39,
-  routedFacadeDefinitions: 29,
-  routedCallExpressions: 290,
+  twoArmFamilies: 38,
+  remoteArmModules: 38,
+  routedFacadeDefinitions: 28,
+  routedCallExpressions: 287,
   selfHostedResourceBranches: 47,
   selfHostedResourceReferences: 199,
-  isSelfHostedModeReferences: 70,
+  isSelfHostedModeReferences: 68,
   getEmailsModeReferences: 70,
   resolveEmailsModeReferences: 69,
   normalizeEmailsModeReferences: 16,
