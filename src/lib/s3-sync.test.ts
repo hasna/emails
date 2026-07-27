@@ -448,6 +448,139 @@ describe("attachment locations recorded through the seam", () => {
     expect(readFileSync(String(attachments[0]!["local_path"]), "utf8")).toBe("PDF-BYTES");
   });
 
+  it("a RE-SYNC preserves the locations the first run recorded, and re-writes nothing", async () => {
+    // THE REGRESSION TEST FOR THE BLOCKER ADVERSARIAL REVIEW FOUND. The fencing upsert used to
+    // send a metadata-only attachment array; on an already-stored object that takes
+    // `upsertMessage`'s UPDATE branch and `updateValues` writes `attachments_json` whenever the
+    // input carries `attachments` — so every re-poll ERASED the locations the previous run wrote
+    // and then returned early, leaving the bytes on disk with nothing pointing at them. On every
+    // poll, not never. The existing re-run case could not see it because its message has no
+    // attachments, and the attachment case synced only once; this one is the intersection.
+    const withAttachment = [
+      "From: sender@example.test",
+      "To: inbox@example.test",
+      "Subject: survives a re-sync",
+      "Date: Mon, 06 Jul 2026 12:00:00 +0000",
+      'Content-Type: multipart/mixed; boundary="b1"',
+      "",
+      "--b1",
+      "Content-Type: text/plain; charset=utf-8",
+      "",
+      "see attached",
+      "--b1",
+      'Content-Type: application/pdf; name="invoice.pdf"',
+      "Content-Transfer-Encoding: base64",
+      'Content-Disposition: attachment; filename="invoice.pdf"',
+      "",
+      Buffer.from("PDF-BYTES").toString("base64"),
+      "--b1--",
+      "",
+    ].join("\r\n");
+    serveObjects({ [`${PREFIX}att`]: withAttachment });
+    const store = createSqliteEmailStore({ database: db, detail: "re-sync preserves locations" });
+
+    const first = await syncS3Inbox({ bucket: BUCKET, prefix: PREFIX, store });
+    expect(first.synced).toBe(1);
+    const listed = await store.messages.listMessages({ direction: "inbound", limit: 50 });
+    if (!listed.ok) throw new Error(`could not list: ${listed.message}`);
+    const id = listed.value.items.find((item) => item.subject === "survives a re-sync")!.id;
+    const before = await store.messages.getMessage(id);
+    if (!before.ok || before.value === null) throw new Error("could not read back");
+    const locationBefore = (before.value.attachments as Array<Record<string, unknown>>)[0]!["local_path"];
+    expect(typeof locationBefore).toBe("string");
+
+    const second = await syncS3Inbox({ bucket: BUCKET, prefix: PREFIX, store });
+    expect(second.skipped).toBe(1);
+    expect(second.synced).toBe(0);
+    // A skip must not have counted an attachment save either — nothing was written.
+    expect(second.attachments_saved).toBe(0);
+
+    const after = await store.messages.getMessage(id);
+    if (!after.ok || after.value === null) throw new Error("could not re-read");
+    const attachmentsAfter = after.value.attachments as Array<Record<string, unknown>>;
+    expect(attachmentsAfter).toHaveLength(1);
+    // THE ASSERTION THE DEFECT VIOLATED: the location is still there, byte-for-byte.
+    expect(attachmentsAfter[0]!["local_path"]).toBe(locationBefore);
+    expect(readFileSync(String(locationBefore), "utf8")).toBe("PDF-BYTES");
+  });
+
+  it("records the attachment array even when this installation stores no bytes", async () => {
+    // The decoration write is now the ONLY place `attachments` is written, so it must run even
+    // when `attachment_storage` is "none" and every entry is metadata-only. Skipping it then —
+    // which the first version of the fix did — would record a message that HAS an attachment as
+    // having none.
+    // Through the real config writer, not a hand-built path: the location of that file is
+    // `src/lib/config.ts`'s business, and a test that spells it out passes or fails on whether
+    // it guessed the path rather than on the behaviour under test.
+    const { loadConfig, saveConfig } = await import("./config.js");
+    saveConfig({ ...loadConfig(), attachment_storage: "none" });
+
+    const withAttachment = [
+      "From: sender@example.test",
+      "To: inbox@example.test",
+      "Subject: metadata only",
+      "Date: Mon, 06 Jul 2026 12:00:00 +0000",
+      'Content-Type: multipart/mixed; boundary="b1"',
+      "",
+      "--b1",
+      "Content-Type: text/plain",
+      "",
+      "body",
+      "--b1",
+      'Content-Type: text/plain; name="note.txt"',
+      'Content-Disposition: attachment; filename="note.txt"',
+      "",
+      "note",
+      "--b1--",
+      "",
+    ].join("\r\n");
+    serveObjects({ [`${PREFIX}none`]: withAttachment });
+    const store = createSqliteEmailStore({ database: db, detail: "storage none" });
+
+    const result = await syncS3Inbox({ bucket: BUCKET, prefix: PREFIX, store });
+    expect(result.synced).toBe(1);
+    expect(result.attachments_saved).toBe(0);
+
+    const listed = await store.messages.listMessages({ direction: "inbound", limit: 50 });
+    if (!listed.ok) throw new Error(`could not list: ${listed.message}`);
+    const row = listed.value.items.find((item) => item.subject === "metadata only");
+    const full = await store.messages.getMessage(row!.id);
+    if (!full.ok || full.value === null) throw new Error("could not read back");
+    const attachments = full.value.attachments as Array<Record<string, unknown>>;
+    expect(attachments).toHaveLength(1);
+    expect(attachments[0]!["filename"]).toBe("note.txt");
+    expect(attachments[0]!["local_path"]).toBeUndefined();
+    expect(attachments[0]!["s3_url"]).toBeUndefined();
+  });
+
+  it("bounds GetObject calls by the limit even when every object FAILS", async () => {
+    // Adversarial review measured 10 GetObject calls under `limit: 2` because budget was spent
+    // only on SUCCESS: a throw `continue`d without incrementing, so a prefix whose objects all
+    // fail downloaded every one of them on every poll. The deleted arm incremented before its
+    // `try` for exactly this reason.
+    const objects: Record<string, string> = {};
+    for (let i = 0; i < 10; i++) objects[`${PREFIX}f${i}`] = rawEmail({ subject: `f${i}` });
+    const stats = serveObjects(objects);
+    const base = createSqliteEmailStore({ database: db, detail: "all writes refuse" });
+    const store: EmailStore = {
+      ...base,
+      messages: {
+        ...base.messages,
+        upsertMessage: async (): Promise<Outcome<{ record: MessageRecord; inserted: boolean }>> => ({
+          ok: false,
+          code: "conflict",
+          message: "this fixture store refuses every write",
+          status: 409,
+        }),
+      },
+    };
+
+    const result = await syncS3Inbox({ bucket: BUCKET, prefix: PREFIX, limit: 2, store });
+    expect(result.synced).toBe(0);
+    expect(result.errors).toHaveLength(2);
+    expect(stats.getCalls).toHaveLength(2);
+  });
+
   it("RAISES when the location write refuses, rather than reporting a clean run", async () => {
     const withAttachment = [
       "From: sender@example.test",

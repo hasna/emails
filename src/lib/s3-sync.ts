@@ -830,10 +830,21 @@ async function processS3Object(
   const headerObj = flattenHeaders(parsed.headers);
   const subject = parsed.subject ?? "(no subject)";
   const receivedAt = (parsed.date ?? new Date()).toISOString();
-  // Metadata only on the fencing write. The bytes do not exist yet, so a location recorded
-  // here would name a file this run has not created.
-  const metadataOnly = attachmentPlans.map(attachmentMetadataOnly);
 
+  // NO `attachments` ON THE FENCING WRITE, AND THE OMISSION IS THE FIX FOR A REAL DEFECT.
+  //
+  // The first version of this function sent a metadata-only attachment array here. On an
+  // already-ingested object the fence takes `upsertMessage`'s UPDATE branch, and `updateValues`
+  // writes `attachments_json` whenever the input carries `attachments` — so every re-poll
+  // OVERWROTE the locations recorded by the previous run with metadata, and then returned early
+  // on `!inserted` so the decoration write never restored them. The bytes stayed on disk with
+  // nothing pointing at them: precisely the orphaning this family's attachment handling exists
+  // to prevent, happening on every poll rather than never. Adversarial review reproduced it.
+  //
+  // Omitting the field is what makes the fence non-destructive: `updateValues` only writes the
+  // columns the input actually carries, so a skip now leaves the attachment array exactly as the
+  // run that created it left it. The array is written ONCE, on the decoration pass below, which
+  // runs only for a row this call inserted.
   const fenced = await store.messages.upsertMessage({
     direction: "inbound",
     // `source_id` IS the fence. `message_id` keeps the same value the deleted arm wrote
@@ -846,7 +857,6 @@ async function processS3Object(
     subject,
     body_text: parsed.text ?? null,
     body_html: typeof parsed.html === "string" ? parsed.html : null,
-    attachments: metadataOnly,
     headers: headerObj,
     received_at: receivedAt,
   });
@@ -880,7 +890,7 @@ async function processS3Object(
       subject,
       receivedAt: stored.received_at ?? receivedAt,
       rawS3Url,
-      attachmentCount: metadataOnly.length,
+      attachmentCount: attachmentPlans.length,
     }),
     metadata: {
       bucket,
@@ -891,11 +901,14 @@ async function processS3Object(
   result.synced++;
   result.last_key = obj.key;
 
-  if (attachmentPlans.length === 0 || syncConfig.attachment_storage === "none") return true;
+  if (attachmentPlans.length === 0) return true;
 
   const recorded: RecordedAttachment[] = [];
-  let wroteAny = false;
   for (const attachment of attachmentPlans) {
+    if (syncConfig.attachment_storage === "none") {
+      recorded.push(attachmentMetadataOnly(attachment));
+      continue;
+    }
     if (syncConfig.attachment_storage === "s3") {
       if (!syncConfig.s3_bucket) {
         result.errors.push(`S3 upload ${attachment.storageLeaf}: attachment_s3_bucket is required when attachment_storage=s3`);
@@ -920,7 +933,7 @@ async function processS3Object(
           size: attachment.size,
           s3_url: uri,
         });
-        wroteAny = true;
+
         emitEmailsEventBestEffort({
           type: "emails.inbound.attachment.saved",
           subject: stored.id,
@@ -946,7 +959,7 @@ async function processS3Object(
       const outputDir = getAttachmentDir(stored.id);
       const path = storeLocalAttachment(attachment, outputDir);
       recorded.push(path);
-      wroteAny = true;
+
       emitEmailsEventBestEffort({
         type: "emails.inbound.attachment.saved",
         subject: stored.id,
@@ -970,9 +983,13 @@ async function processS3Object(
     result.attachments_saved++;
   }
 
-  // Only when a location actually exists. A second write that carried nothing new would be
-  // an UPDATE with no information in it.
-  if (wroteAny) {
+  // THE ONLY WRITE OF `attachments`, and it is unconditional once the message has any.
+  //
+  // It runs even when `attachment_storage` is "none" and every entry is metadata-only, because
+  // this is now the ONLY place the attachment array is recorded at all — the fence deliberately
+  // omits it (see above). Skipping this write when no bytes were stored would leave a message
+  // that HAS attachments recorded as having none.
+  {
     const decorated = await store.messages.upsertMessage({
       source_id: rawS3Url,
       from_addr: fromAddr,
@@ -1067,16 +1084,20 @@ export async function syncS3Inbox(opts: S3SyncOptions): Promise<S3SyncResult> {
 
     for (const obj of page.objects) {
       if (attemptedNewObjects >= limit) break;
-      let ingested: boolean;
+      // BUDGET IS SPENT ON THE ATTEMPT, NOT ON THE SUCCESS, and this is a defect fix. Counting
+      // only successes meant a prefix whose objects all FAIL consumed no budget and the run
+      // downloaded every one of them on every poll — adversarial review measured 10 GetObject
+      // calls under `limit: 2`. The deleted arm incremented before its `try` for this reason.
+      // A skip still costs nothing, which is what lets a bounded run make progress through a
+      // prefix that is mostly already ingested.
+      let ingested = false;
       try {
         ingested = await processS3Object(store, s3, s3Sdk, syncConfig, bucket, obj, result);
       } catch (e) {
         result.errors.push(`${obj.key}: ${String(e)}`);
+        attemptedNewObjects++;
         continue;
       }
-      // THE LIMIT COUNTS NEW OBJECTS, NOT OBJECTS SEEN — unchanged from the deleted arm, and
-      // it is what lets a bounded run make progress through a prefix that is mostly already
-      // ingested instead of spending its budget re-reading the same first N keys.
       if (ingested) attemptedNewObjects++;
     }
 
