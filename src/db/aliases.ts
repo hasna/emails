@@ -52,8 +52,16 @@
 //     SQLite's BINARY collation; the HTTP arm sorted in JavaScript with `localeCompare`. Those
 //     disagree on case and on accents — and `localeCompare` is LOCALE-DEPENDENT, so that arm's
 //     page boundaries moved with the process locale, which is not a property a paged list may
-//     have. The comparison below is code-unit order: the SQLite arm's behaviour, and
-//     deterministic everywhere.
+//     have. The comparison below is UTF-16 code-unit order, which is deterministic everywhere and
+//     agrees with the SQLite arm for every input either schema realistically holds.
+//
+//     IT IS NOT LITERALLY THAT ARM'S COLLATION, and the difference is stated rather than
+//     glossed because an earlier draft of this note claimed it was. BINARY is `memcmp` over
+//     UTF-8, i.e. code-POINT order; JavaScript's `<` is code-UNIT order, and the two disagree
+//     exactly when a supplementary-plane character (stored as a surrogate pair, `0xD800`-`0xDFFF`)
+//     is compared with a BMP character in `U+E000`-`U+FFFF`. A domain cannot contain either and a
+//     local-part realistically does not, so no reachable input separates them; the claim was
+//     wrong, not the choice. Adversarial review caught it.
 //  4. UNDECLARED WRITE COLUMNS. The deleted HTTP arm sent `id`, `created_at` and `updated_at`
 //     on create and `updated_at` on update. `/v1/aliases` declares FOUR writable columns —
 //     `domain`, `local_part`, `target_address`, `protected` — and its request schema is
@@ -119,10 +127,16 @@
 // WHAT REPLACES THE ARM CHOICE is the store's own answer. No branch on the store kind, on the
 // descriptor, or on the resolution plan. `src/store/` is untouched by this change.
 //
-// TWO GUARDS BELOW ARE UNREACHABLE BY CONSTRUCTION, named here so a reviewer does not have to
-// re-derive it and so nobody writes a test that only appears to cover them. Mutation testing
-// reverted every change in this file one at a time — 65 mutants over two rounds, the second round
-// covering the guards adversarial review added — and 63 were killed. These are the two survivors:
+// THREE GUARDS BELOW ARE UNREACHABLE OR REDUNDANT BY CONSTRUCTION, named here so a reviewer does
+// not have to re-derive it and so nobody writes a test that only appears to cover them.
+//
+// Mutation testing reverted every change in this file one at a time: 71 distinct mutants across
+// five rounds — the later rounds covering the guards adversarial review asked for, plus six probes
+// an independent reviewer chose rather than the author — and 68 were killed. THAT SECOND SET
+// MATTERS MORE THAN THE COUNT: it found two real gaps the author's own 65 did not (the LAST-`@`
+// split, which `indexOf` would silently reparse with no test objecting, and the filter
+// re-assertion, whose fixture returned exactly one row so "every row" was unpinned). Both are now
+// pinned. These are the three survivors:
 //
 //   1. `byRoute`'s `id` tiebreaker. `(domain, local_part)` is UNIQUE on SQLite and
 //      `(tenant_id, domain, local_part)` on Postgres, so no two readable aliases in one scope can
@@ -134,6 +148,10 @@
 //      catch-all writers pass the sentinel. The `!domain` half IS reachable — `createCatchAll("")`
 //      is what the guard was added for — and is covered. This half is defence for the next writer,
 //      and it costs one operator.
+//   3. `readAliases`'s empty-filter-map conditional, which is REDUNDANT rather than unreachable:
+//      both stores treat an empty map and no map identically, so removing the conditional changes
+//      nothing observable. It is kept as documentation of that equivalence, and named here so it is
+//      not mistaken for an untested branch.
 //
 // TWO OTHER GUARDS ARE UNREACHABLE THROUGH EITHER REAL STORE AND ARE STILL TESTED, which is a
 // different thing and worth distinguishing. `readOneAlias`'s "more than one row" fault sits
@@ -218,11 +236,17 @@ function rowText(value: unknown): string {
 /**
  * A required text column, or a fault.
  *
- * Used for the identity, the domain, the local-part and both timestamps: all five are
- * `NOT NULL` in both schemas and projected by both read paths, so an absent one means the store
- * answered with a row that is not an alias. Header note 6 records what the deleted arm did with
- * an absent timestamp instead. `target_address` is NOT read through this — see
- * `requiredTarget`.
+ * Used for the identity, the domain, the local-part and both timestamps: all five are `NOT NULL`
+ * in both schemas and projected by both read paths, so an absent one means the store answered with
+ * a row that is not an alias. Header note 6 records what the deleted arm did with an absent
+ * timestamp instead. `target_address` is NOT read through this — see `requiredTarget`.
+ *
+ * AN EMPTY STRING IS REJECTED TOO, which `NOT NULL` does not cover and which is therefore a
+ * DELIBERATE ADDITION rather than a consequence of the schema: an alias with no domain routes
+ * nothing, an alias with no local-part matches no recipient, and a timestamp of `''` is not a
+ * time. The deleted SQLite arm returned such a row as-is. `upsertAlias` refuses to WRITE one, so
+ * the only way to hold one is for another writer to have stored it — and `removeAlias`
+ * deliberately does not come through here, so it can still be deleted.
  */
 function requiredText(row: ResourceRow, column: string): string {
   const text = rowText(row[column]);
@@ -353,6 +377,12 @@ async function readAliases(
   matches: (alias: Alias) => boolean,
 ): Promise<Alias[]> {
   const enumeration = await enumerateStoreRows<ResourceRow>(
+    // The conditional is REDUNDANT BY CONSTRUCTION and kept as documentation rather than as
+    // defence: both stores no-op on an empty filter map (`src/store-http/resources.ts` only
+    // consults the contract when the map is non-empty, and `src/store-sqlite/resources.ts` builds
+    // no WHERE clause from no keys). It survives mutation for that reason, which adversarial
+    // review measured. It stays because "no filters" and "an empty filter map" are the same
+    // request only as long as both stores agree they are.
     (opts) => store.aliases.list({
       ...opts,
       ...(Object.keys(filters).length > 0 ? { filters } : {}),
@@ -573,6 +603,13 @@ export async function getGlobalCatchAll(store?: EmailStore): Promise<Alias | nul
  * such alias" is never confused with "I could not look".
  */
 export async function getAlias(id: string, store?: EmailStore): Promise<Alias | null> {
+  // A BLANK ID IS ABSENCE, ANSWERED WITHOUT TOUCHING THE STORE, and that is a divergence this
+  // module would otherwise have introduced. The SQLite arm answered `null` (`WHERE id = ''`
+  // matches nothing); an API store instead requests `GET /v1/aliases/`, the service strips the
+  // trailing slash and dispatches the LIST route, and the envelope that comes back is not a row —
+  // so the mapper faulted where the stronger arm answered. Both `emails alias remove ""` and MCP
+  // `remove_alias {alias_id: ""}` reach this. Adversarial review caught it.
+  if (!id) return null;
   const read = await storeFor(store).aliases.get(id);
   if (!read.ok) throw storeRefusal("read an alias", read);
   if (read.value === null) return null;
@@ -669,6 +706,8 @@ export async function listAliasesByTargets(
  */
 export async function removeAlias(id: string, store?: EmailStore): Promise<boolean> {
   const target = storeFor(store);
+  // A BLANK ID IS "NOTHING TO DELETE", for the reason `getAlias` gives.
+  if (!id) return false;
   // THE ROW IS READ WITHOUT BEING FULLY MAPPED, and that is deliberate rather than a shortcut.
   //
   // The only property this operation has to establish is whether the row is PROTECTED. Going

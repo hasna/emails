@@ -267,6 +267,36 @@ describe("createAlias / createCatchAll / setGlobalCatchAll", () => {
       expect(global.protected).toBe(true);
     });
 
+    it(`splits on the LAST @, so a multi-@ local part survives, on the ${name}`, async () => {
+      // Both deleted arms used `lastIndexOf("@")`, and nothing in the tree pinned it — an
+      // adversarial reviewer's probe showed that `indexOf` survived every case here, which would
+      // silently reparse `a@b@c.com` as `a` @ `b@c.com` and route a different recipient. A local
+      // part containing `@` is legal in a quoted address and is exactly the input that separates
+      // the two.
+      const store = makeStore();
+      const alias = await createAlias("a@b@c.com", "ops@c.com", store);
+      expect(alias.local_part).toBe("a@b");
+      expect(alias.domain).toBe("c.com");
+      expect(await resolveAlias("a@b@c.com", store)).toBe("ops@c.com");
+      // And the control: the other reading is NOT what happens.
+      expect(alias.local_part).not.toBe("a");
+      expect(alias.domain).not.toBe("b@c.com");
+    });
+
+    it(`answers absence for a blank id rather than faulting, on the ${name}`, async () => {
+      // The SQLite arm answered `null`/`false` (`WHERE id = ''` matches nothing). An API store
+      // instead requests `GET /v1/aliases/`, the service strips the trailing slash and dispatches
+      // the LIST route, and the envelope that comes back is not a row — so the mapper faulted
+      // where the stronger arm answered. Reachable from `emails alias remove ""` and MCP
+      // `remove_alias {alias_id: ""}`. Adversarial review caught it.
+      const store = makeStore();
+      await createAlias("a@x.com", "t@x.com", store);
+      expect(await getAlias("", store)).toBeNull();
+      expect(await removeAlias("", store)).toBe(false);
+      // And nothing was removed by the attempt.
+      expect(await listAliases("x.com", undefined, store)).toHaveLength(1);
+    });
+
     it(`refuses an unparseable alias address before touching the ${name}`, async () => {
       const store = makeStore();
       await expect(createAlias("acme.com", "ops@acme.com", store)).rejects.toThrow(
@@ -613,6 +643,28 @@ describe("listAliases", () => {
         return opts?.filters
           ? { ok: true, value: [syntheticRow(1, { domain: "somewhere-else.example" })] }
           : { ok: true, value: [] };
+      },
+    });
+    await expect(listAliases("x.com", undefined, store)).rejects.toThrow(/rows outside the filter/);
+  });
+
+  it("checks EVERY row of a filtered read, not just the first", async () => {
+    // A one-row fixture cannot tell "every row is checked" from "the first row is checked", and an
+    // adversarial reviewer's probe showed exactly that: narrowing the re-assertion to the first row
+    // survived. The superset a service returns for a filter it ignores is the WHOLE table, so the
+    // in-filter rows come first as often as not.
+    // A WELL-BEHAVED offset pager over a two-row table, so the enumeration COMPLETES and the
+    // failure is the filter check rather than a shifted window — the fault this case is not about.
+    const table = [
+      // In-filter, so a first-row-only check passes here …
+      syntheticRow(1, { domain: "x.com", local_part: "a" }),
+      // … and never looks at this one.
+      syntheticRow(2, { domain: "somewhere-else.example", local_part: "b" }),
+    ];
+    const store = storeWithAliases({
+      async list(opts): Promise<Outcome<ResourceRow[]>> {
+        const offset = opts?.offset ?? 0;
+        return { ok: true, value: table.slice(offset, offset + (opts?.limit ?? table.length)) };
       },
     });
     await expect(listAliases("x.com", undefined, store)).rejects.toThrow(/rows outside the filter/);
