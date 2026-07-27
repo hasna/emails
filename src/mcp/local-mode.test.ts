@@ -119,6 +119,9 @@ describe("MCP local mode", () => {
         expect(message).toContain("none are expected");
         expect(message).toContain("captures mail in the local store");
         expect(message).toContain("SES or Resend");
+        // The remedy has to be runnable: `emails domain move-provider` is wired to
+        // a real action, unlike most of the neighbouring domain subcommands.
+        expect(message).toContain("emails domain move-provider <domain> --to-provider <id>");
         // The exact regression: the old sentence, and the "not found" reading of it.
         expect(message).not.toContain("No DNS records found");
         expect(message).not.toContain("found");
