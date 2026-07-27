@@ -343,7 +343,10 @@ if (path === "/api/digest" && method === "GET") {
     const period = normalizeEmailDigestPeriod(url.searchParams.get("period") ?? "today");
     const latest = getLatestEmailDigest(period);
     if (latest) return json(latest);
-    const { generateEmailDigest } = await import('../../lib/email-digest.local.js');
+    // The digest family has ONE implementation behind this path; the `.local` arm this
+    // line used to import is deleted. It reads whichever store the storage configuration
+    // selects, which for this server is the same SQLite database the line above reads.
+    const { generateEmailDigest } = await import('../../lib/email-digest.js');
     return json(await generateEmailDigest({ period, offline: true }));
   } catch (e) { return internalError(e); }
 }
