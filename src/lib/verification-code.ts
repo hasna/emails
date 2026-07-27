@@ -248,6 +248,14 @@ function toCandidate(record: MessageRecord): VerificationCodeEmail {
  * question, the worst outcome is "no candidate" rather than "a code from a sender you did
  * not ask about".
  *
+ * `limit` IS A TOTAL, and the two deleted arms disagreed about that, so the choice is
+ * stated rather than inherited. The local arm applied its limit to each half of a
+ * `UNION ALL` over non-archived and archived rows, so it could return up to TWICE what was
+ * asked for — an artifact of how that query was written rather than a decision. The API arm
+ * capped the merged list at `limit`. The API arm's meaning is kept, because it is what the
+ * word means and because the rows the local arm returned beyond the total are, by the
+ * newest-first order, strictly older than the ones inside it.
+ *
  * @param store injected only by tests. There is exactly one production path, and it is
  *   `createConfiguredEmailStore()`; handing in a store lets a test exercise a refusal
  *   without an operator configuration behind it.
