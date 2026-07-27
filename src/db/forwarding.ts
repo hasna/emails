@@ -110,6 +110,31 @@
 // thrown error naming the operation and carrying the store's own code, status and message.
 // Nothing answers `[]`, `false` or `null` for a read or a write that did not happen.
 //
+// ─── ONE LIVE DEFECT THIS COLLAPSE INHERITS VERBATIM, NAMED RATHER THAN LEFT SILENT ───
+//
+// `recordForwardingDelivery` is an `INSERT OR REPLACE` keyed on `(rule_id, inbound_email_id)`,
+// while the pending-forward join excludes a pair only when its delivery row has
+// `status = 'sent'`. So a LATER `failed` REPLACES an EARLIER `sent`, the pair reads as pending
+// again, and the next run calls the provider a second time — a duplicate-mail generator. The
+// pipeline cannot normally produce that order on its own (a `sent` row makes the pair
+// invisible to the scan, so there is no second attempt to fail), but TWO CONCURRENT RUNS can:
+// both see the pair as pending, both send, one writes `sent` and the other writes `failed`, and
+// a third run sends again. Any direct caller of this export can produce it trivially.
+//
+// IT IS PRESERVED, NOT FIXED, and the reason is scope rather than doubt. Changing what a
+// published write does with an already-successful delivery is a product decision, not a
+// mode-axis refactor — the line `src/db/address-lifecycle.ts` drew for the unregistered-sender
+// case — and the correct fix is not a tweak here: it is the idempotency-fenced ledger the seam
+// widening described above would bring, where `sent` is TERMINAL for a pair. The wrong local
+// fix would be to widen the join to exclude `failed` rows too, which would strand every
+// genuine retry. `src/db/forwarding.test.ts` pins the current behaviour under a name that says
+// it is a defect, so nobody can "fix" it silently in either direction.
+//
+// Related, and out of scope for the same reason: the `idempotency_key` built at
+// `src/lib/forwarding.local.ts:74` is consumed only by the sent-mail ledger AFTER the provider
+// call, and `createMessage` refuses an `idempotency_key` on both stores — so it fences nothing
+// on the send path today.
+//
 // WHAT REPLACES THE ARM CHOICE is the store's own answer. No branch on the store kind, on
 // the descriptor, or on the resolution plan. `src/store/` is untouched by this change.
 //

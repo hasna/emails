@@ -1021,6 +1021,33 @@ describe("recordForwardingDelivery (local storage only)", () => {
     expect(rows.n).toBe(1);
   });
 
+  it("lets a later FAILURE overwrite an earlier SUCCESS — a live defect, pinned deliberately", async () => {
+    // THIS TEST ASSERTS THE WRONG ANSWER ON PURPOSE, so that neither direction of change is
+    // silent. `INSERT OR REPLACE` is keyed on `(rule_id, inbound_email_id)` and the pending join
+    // excludes a pair only for `status = 'sent'`, so replacing a `sent` row with a `failed` one
+    // makes the pair PENDING AGAIN and the next run calls the provider a second time. The
+    // pipeline cannot normally reach that order — a `sent` row hides the pair from the scan — but
+    // two concurrent runs can, and any direct caller of the export can.
+    //
+    // It is inherited rather than fixed because changing what a published write does with an
+    // already-successful delivery is a product decision, not a mode-axis refactor; the fix
+    // belongs in the idempotency-fenced ledger the seam widening would bring, where `sent` is
+    // TERMINAL for a pair. WIDENING THE JOIN INSTEAD WOULD BE WRONG: it would strand every
+    // genuine retry, which the case above this one exists to protect.
+    const ruleId = await seedRule("user@example.com", "2026-01-01 00:00:00");
+    const inboundId = seedInbound("user@example.com", "2026-01-02 00:00:00");
+
+    recordForwardingDelivery({ rule_id: ruleId, inbound_email_id: inboundId, status: "sent" }, db);
+    expect(listPendingForwarding(100, db)).toEqual([]);
+
+    recordForwardingDelivery({ rule_id: ruleId, inbound_email_id: inboundId, status: "failed", error: "later" }, db);
+    // The defect, stated as an assertion: the successful delivery is GONE from the ledger and the
+    // message is offered for forwarding again.
+    const ledger = db.query("SELECT status FROM forwarding_deliveries WHERE rule_id = ?").all(ruleId) as Array<{ status: string }>;
+    expect(ledger.map((r) => r.status)).toEqual(["failed"]);
+    expect(listPendingForwarding(100, db)).toHaveLength(1);
+  });
+
   it("refuses an out-of-enum status BEFORE writing anything", async () => {
     const ruleId = await seedRule("user@example.com", "2026-01-01 00:00:00");
     const inboundId = seedInbound("user@example.com", "2026-01-02 00:00:00");
