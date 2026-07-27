@@ -76,6 +76,19 @@ export function storeErrorMessage(error: unknown): string {
  * wrong and must never itself fail while reporting where its own files are, and the
  * forwarding pipeline has to name the contradiction in its refusal rather than surface a
  * bare path error.
+ *
+ * TWO DIFFERENT FAULTS ARRIVE AS `unresolved`, and a caller that phrases its own message must not
+ * conflate them: a CONFIGURATION that names two stores at once, and a configuration that is the
+ * unambiguous default whose DATA DIRECTORY is refused (an untrusted ancestor, a symlink). The
+ * `message` says which; "your settings contradict each other" is a misdiagnosis of the second.
+ *
+ * `env` SELECTS THE STORE BUT NOT THE PATH, which is an inconsistency carried over verbatim from
+ * the module this was extracted out of and is pinned by a test rather than fixed here.
+ * `planEmailStore(env)` honours the argument; `getDatabasePath()` reads `process.env` directly and
+ * takes no argument, so a path named ONLY in `env` decides THAT there is a local database and is
+ * then ignored when reporting WHICH one. Harmless today because both shipped callers pass
+ * `process.env` — closing it means giving the database layer an environment parameter, which is a
+ * change to a file with unrelated work in flight, so it is reported rather than made.
  */
 export function readStorageWiring(env: NodeJS.ProcessEnv): StorageWiring {
   try {

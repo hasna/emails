@@ -551,14 +551,26 @@ const root = join(import.meta.dir, "..");
  * paragraph because this file sits inside the corpus it scans. An absent conflict is not
  * agreement; it is the absence of a question. A per-metric minimum is not a measurement.
  *
- * Corpus of this change: 652 tracked, 651 scanned, 9,258,279 characters — both floors
- * (500 files / 5,000,000 characters) cleared with room. ONE file fewer than 4691c5d's 653, and
- * the arithmetic is worth spelling out because it is not "one arm": TWO arm modules are deleted
- * and ONE module is added (`src/lib/storage-wiring.ts`, the storage-configuration read extracted
- * out of `src/lib/status-facts.ts` so the pipeline and the status payload share one definition
- * site). The suite beside the collapsed module already existed and was rewritten in place, so it
- * adds no file. The character total was measured with this paragraph in place, since editing it
- * changes the corpus it describes; the eleven counts were identical before and after.
+ * A COUNTER ROSE ONCE DURING THIS CHANGE, and it was this comment's own subject matter that did
+ * it, so it is recorded rather than quietly corrected. A paragraph added to the collapsed module
+ * explaining which guard currently stops one configuration from sending mail named the routing
+ * helper AS A CALL, and `selfHostedResourceReferences` went 180 -> 181 — a prose sentence about a
+ * guard pushing that guard's own metric backwards, in a file inside the scanned corpus. Caught by
+ * re-measuring rather than by review. The sentence now spells the helper as a FILE PATH, which the
+ * pattern does not match, and the counter is back at 180. Two lessons for the next family: the
+ * corpus includes comments, and "I only edited a comment" is not a reason to skip the re-measure.
+ *
+ * Corpus of this change: 653 tracked, 652 scanned, 9,279,975 characters — both floors
+ * (500 files / 5,000,000 characters) cleared with room. The SAME tracked count as 4691c5d, and
+ * the arithmetic is worth spelling out because it is not "nothing moved": TWO arm modules are
+ * deleted and TWO are added — `src/lib/storage-wiring.ts`, the storage-configuration read
+ * extracted out of `src/lib/status-facts.ts` so the pipeline and the status payload share one
+ * definition site, and `src/lib/storage-wiring.test.ts`, which exists because a mutation run
+ * showed that inverting that module's in-memory discrimination survived the pipeline's own suite
+ * and was killed only by the status suite several layers away. The suite beside the collapsed
+ * module already existed and was rewritten in place, so it adds no file. The character total was
+ * measured with this paragraph in place, since editing it changes the corpus it describes; the
+ * eleven counts were identical before and after.
  */
 const CEILINGS: Record<string, number> = {
   twoArmFamilies: 0,

@@ -134,10 +134,11 @@
 // builds (`src/lib/forwarding.ts`, which is now ONE implementation and no longer has a `.local`
 // arm to cite) is consumed only by the sent-mail ledger AFTER the provider call, and
 // `createMessage` refuses an `idempotency_key` on both stores — so it fences nothing on the
-// send path today. That pipeline's own header records what it does instead: it makes the key's
-// uselessness worse rather than harmless, because `createEmail` DOES honour the key, so the
-// second send of a duplicated pair reuses the first ledger row and the local ledger shows one
-// message for two delivered copies.
+// send path today. It is WORSE than merely useless, and that is asserted in
+// `src/lib/forwarding.test.ts` rather than only described: `createEmail` DOES honour the key, so
+// the second send of a duplicated pair reuses the FIRST ledger row — the recipient gets two
+// copies and the local ledger shows one message, which erases the evidence on the only side that
+// could have reported it.
 //
 // WHAT REPLACES THE ARM CHOICE is the store's own answer. No branch on the store kind, on
 // the descriptor, or on the resolution plan. `src/store/` is untouched by this change.

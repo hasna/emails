@@ -66,6 +66,52 @@
 // in a `Database`. A caller that supplies one has STATED its storage, which is
 // `src/db/forwarding.ts`'s contract exactly, and gets today's behaviour unchanged.
 //
+// ─── WHERE THE GATE'S ANSWER DIFFERS FROM THE DELETED DISPATCHER'S, ENUMERATED ────────
+//
+// "THE REFUSAL IS PRESERVED" IS NOT THE SAME CLAIM AS "NOTHING CHANGED", and the difference
+// has to be written down rather than implied, because the two questions are asked of DIFFERENT
+// SETTINGS. The deleted dispatcher read the deployment word; the gate reads storage
+// configuration. They disagree in five configurations, and an adversarial review of this
+// change is what enumerated them:
+//
+//  1. API storage configured, deployment word UNSET. Was: the pipeline ran against a local
+//     database — usually an empty one it had just created — and reported nothing to forward.
+//     Now: refused. This is the whole point of the change.
+//  2. Deployment word says local, but a STALE client-secret pointer is exported (a common shell
+//     inheritance). Was: ran locally, because `src/lib/mode.ts` gives the word precedence over
+//     the pointer on purpose. Now: refused, because the resolver treats the pointer as naming
+//     API storage. The refusal names the setting, so this is recoverable rather than a mystery.
+//  3. BOTH database-path settings configured, naming different files. Was: ran, on the
+//     documented `HASNA_`-wins precedence. Now: refused as a contradiction.
+//  4. Storage resolves but the data directory is unsafe (an untrusted ancestor, a symlink).
+//     Was: the underlying path refusal surfaced raw. Now: the same message, wrapped in a
+//     refusal that says whether this installation forwards its own mail is not known.
+//  5. Deployment word says self-hosted, and NO storage setting names anything. Was: refused
+//     outright by the stub. Now: THE PIPELINE RUNS, against the default local database, because
+//     storage configuration names one and the word is no longer read.
+//
+// 1–4 align this pipeline with the two families that already collapsed and already refuse in
+// those configurations (`src/db/forwarding.ts` and `src/lib/status-facts.ts`), so they are
+// convergence rather than drift.
+//
+// 5 IS THE ONE A READER MUST NOT SKIP, AND IT CARRIES A TIME BOMB THAT IS NOT MINE TO DEFUSE.
+// No mail escapes today: `sendWithFailover` reaches `getProvider`, which refuses in that
+// configuration at `src/db/providers.local.ts` — and it refuses there through the shared
+// resource-routing helper (`src/db/self-hosted-resource.local.ts`), which is ONE OF THE 44 CALL
+// SITES THE `selfHostedResourceBranches` COUNTER IS DRIVING TO ZERO. (Spelled as a file path
+// rather than as a call, because the ratchet's pattern is that identifier followed by an open
+// parenthesis and this comment is inside the corpus it scans — writing it out would RAISE a
+// counter that may only fall. That is not a detail: it is how a comment about the guard becomes
+// a reason the guard's own metric moves backwards.) So the only thing standing between
+// configuration 5 and a real outbound send is a guard scheduled for deletion. WHOEVER COLLAPSES
+// `src/db/providers` MUST DECIDE WHAT
+// HAPPENS HERE, because after that collapse `getProvider` answers from the configured store —
+// the default local SQLite database in this configuration — and this pipeline reaches
+// `adapter.sendEmail` in a configuration that refused before. The safe orderings are: delete the
+// deployment word first (configuration 5 stops existing), or gate the send path on the same
+// storage question this module asks. It is stated here, in the module the mail would leave
+// from, rather than left for that collapse to discover.
+//
 // ─── THE DEDUP KEY IS UNCHANGED, WHICH IS THE ANSWER TO THE OBVIOUS RE-SEND QUESTION ──
 //
 // A collapse that moves an operation onto the seam can change WHICH COLUMN fences a repeat,
@@ -170,25 +216,34 @@
 //    the deleted arm's arithmetic preserved exactly and is recorded there rather than
 //    re-implemented here.
 //
-// ─── ONE GUARD BELOW IS UNREACHABLE BY CONSTRUCTION ──────────────────────────────────
+// ─── ONE REGION BELOW IS UNREACHABLE BY CONSTRUCTION ─────────────────────────────────
 //
 // Named here so a reviewer does not have to re-derive it and so nobody writes a test that only
 // APPEARS to cover it. Mutation testing reverted each change in this file and in
-// `src/lib/storage-wiring.ts` one at a time; 34 of 35 mutants were killed and this one survived:
+// `src/lib/storage-wiring.ts` one at a time: 35 mutants, 34 killed and 1 survived on the first
+// pass — and an adversarial review then showed one of the 34 was NOT killed, so the honest
+// count is 34 killed and one further mutant that only appeared to die. Both are recorded, and
+// the one that was hiding a weak assertion is now genuinely killed:
 //
-//   `if (!inbound)` — the "inbound email no longer exists" skip. The pending-forward scan JOINs
-//   `inbound_emails` and projects `inbound.id`, so every pair it returns names a row that
-//   existed; `getInboundEmail` then re-reads that row by primary key on the SAME connection two
-//   statements later. Nothing a single run can do makes it absent. It is defence against a
-//   CONCURRENT deleter, which is a real caller of `deleteInboundEmail` — so the branch stays,
-//   and the reason it cannot be killed is that a test would have to interleave two writers on
-//   one connection, which would assert the interleaving rather than this behaviour.
+//   1. `if (!inbound)` AND ITS WHOLE BODY — the "inbound email no longer exists" skip, its
+//      `skipped` counter and its item. The pending-forward scan JOINs `inbound_emails` and
+//      projects `inbound.id`, so every pair it returns names a row that existed;
+//      `getInboundEmail` then re-reads that row by primary key on the SAME connection two
+//      statements later. Nothing a single run can do makes it absent, so `status: "skipped"` is
+//      unobservable from this module's own tests. It is defence against a CONCURRENT deleter,
+//      which is a real caller of `deleteInboundEmail`, so the branch stays — and it cannot be
+//      killed without interleaving two writers on one connection, which would assert the
+//      interleaving rather than this behaviour.
+//   2. NOT unreachable, and the review was right to reject it: "the send seam receives the
+//      pipeline's own database" was asserted against `getDatabase()`'s MEMOISED handle, so the
+//      handle the test passed WAS the singleton and replacing the threaded one with a fresh
+//      `getDatabase()` left the suite green. The suite now passes a SECOND handle to the same
+//      file and asserts the seam receives that one, which kills it.
 //
-// Every other guard in this file is killed by a test. The mutation run also found TWO REAL
-// COVERAGE GAPS, both closed: nothing exercised the on-disk `database_file` shape of local
-// storage (every case configured `:memory:`, so deleting that branch stayed green), and nothing
-// exercised the DEFAULT limit of 100 (every case passed `limit` explicitly, so raising it to the
-// scan's own 1000 maximum was invisible).
+// The run also found TWO REAL COVERAGE GAPS, both closed: nothing exercised the on-disk
+// `database_file` shape of local storage (every case configured `:memory:`, so deleting that
+// branch of the gate stayed green), and nothing exercised the DEFAULT limit of 100 (every case
+// passed `limit` explicitly, so raising it to the scan's own 1000 maximum was invisible).
 
 import type { Database } from "../db/database.js";
 import { getDatabase } from "../db/database.js";
@@ -206,6 +261,7 @@ import { getLatestActiveProviderId } from "../db/providers.local.js";
 import { sendWithFailover, type SendResult } from "./send.local.js";
 import { createSentEmailLedger, storeSentEmailContent } from "./sent-ledger.local.js";
 import { readStorageWiring } from "./storage-wiring.js";
+import { API_BASE_URL_SETTING } from "../store-resolution.js";
 
 export interface ForwardingRunOptions {
   providerId?: string;
@@ -273,17 +329,28 @@ function configuredForwardingLedger(): Database {
       // did, through the same function.
       return getDatabase();
     case "api":
+      // THE SETTING IS NAMED, and that is not a refusal documenting its own bypass. Naming a
+      // variable to flip is forbidden when it would step around a CAPABILITY gate — an operation
+      // the store cannot perform. This is not that: the operator has told this installation where
+      // its mail lives, and where its mail lives is exactly what decides whether it can forward
+      // its own. `planEmailStore`'s own refusals name their settings for the same reason. It is
+      // read from the resolver's exported constant rather than spelled, so it cannot drift.
       throw new Error(
         "This installation reads its mail through an Emails API, so app-level forwarding belongs to "
           + "that service: the forwarding delivery ledger, the sent-mail ledger and the inbound message "
           + "bodies this pipeline needs exist only in a local database. Reporting nothing forwarded "
-          + "would be a claim about mail this side never looked at. Pass the local database explicitly "
-          + "to forward against one.",
+          + `would be a claim about mail this side never looked at. Unset ${API_BASE_URL_SETTING} to `
+          + "forward from a local database, or run forwarding on the service that owns the mail.",
       );
     case "unresolved":
+      // "DID NOT RESOLVE" RATHER THAN "DOES NOT NAME ONE STORE", because this arm catches TWO
+      // different faults and only one of them is about naming. `readStorageWiring` also lands here
+      // when the configuration is the unambiguous DEFAULT and the data directory itself is
+      // refused — an untrusted ancestor, a symlink — and telling that operator their settings
+      // contradict each other is a misdiagnosis. The resolver's own message says which it was.
       throw new Error(
-        "This installation's storage configuration does not name one store, so whether it forwards its "
-          + `own mail is not known: ${wiring.message}`,
+        "This installation's storage did not resolve to one store, so whether it forwards its own "
+          + `mail is not known: ${wiring.message}`,
       );
   }
 }

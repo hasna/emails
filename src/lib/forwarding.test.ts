@@ -20,16 +20,27 @@
 //     dispatch helper or the mode read: naming either identifier here would raise its own
 //     counter. The ratchet counts them tree-wide, this file included.
 //
+// AND FOR THE SAME REASON THIS SUITE CANNOT SCRUB THE DEPLOYMENT WORD FROM ITS ENVIRONMENT,
+// which has one measured consequence worth recording rather than discovering. Every storage
+// setting IS scrubbed by name, but an ambient deployment word still reaches the `*.local.*`
+// modules this pipeline calls into, and one of them refuses when it is set — so running this file
+// in the SAME process as another file that leaves that variable behind turns the two pinned-defect
+// cases red for a reason that is not in either file. Measured: all cases pass standalone, and
+// pass under the hermetic runner (`bun run test`, `--max-concurrency 1`) which isolates per file,
+// which is also how CI runs them. Naming the variable to defend against it would raise a counter
+// that may only fall, so the isolation is the defence and this paragraph is the record.
+//
 // `HOME` IS REDIRECTED IN EVERY CASE, and that is a safety property rather than tidiness. When
 // no database path is configured, the database layer resolves `~/.hasna/emails/emails.db` and
 // CREATES it. A case that asserts a refusal for an API-configured installation must not be
 // able to touch a developer's real mailbox on the way to failing.
 
+import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { closeDatabase, getDatabase, resetDatabase, type Database } from "../db/database.js";
+import { closeDatabase, getDatabase, resetDatabase } from "../db/database.js";
 import { createForwardingRule, recordForwardingDelivery } from "../db/forwarding.js";
 import {
   API_BASE_URL_SETTING,
@@ -206,11 +217,33 @@ describe("processForwardingRules storage gate", () => {
     process.env[API_CREDENTIAL_SETTINGS[0]] = "not-a-real-credential";
     process.env[DATABASE_PATH_SETTINGS[1]] = ":memory:";
 
-    await expect(processForwardingRules()).rejects.toThrow(/does not name one store/);
+    await expect(processForwardingRules()).rejects.toThrow(/did not resolve to one store/);
     // The refusal carries the resolver's own settings list, so the operator learns WHICH
     // settings contradict each other rather than that something is wrong.
     await expect(processForwardingRules()).rejects.toThrow(new RegExp(API_BASE_URL_SETTING));
     await expect(processForwardingRules()).rejects.toThrow(new RegExp(DATABASE_PATH_SETTINGS[1]));
+  });
+
+  it("names the setting to unset in the API refusal, so an operator can act on it", async () => {
+    // A refusal an operator cannot act on is a dead end. NONE of the four shipped consumers can
+    // pass a `Database`, so "supply local storage" is advice for library embedders only; the
+    // thing an operator can actually change is the setting that put the mail behind an API.
+    closeDatabase();
+    configureApiStore();
+    await expect(processForwardingRules()).rejects.toThrow(new RegExp(`Unset ${API_BASE_URL_SETTING}`));
+  });
+
+  it("runs against the DEFAULT local database when no path setting names one", async () => {
+    // The shape most installations have, and it was the one shape with no coverage: the cases
+    // above all set a path, which is a different branch of the database layer's resolution than
+    // the documented default. `HOME` is redirected, so the default lands in this case's own
+    // temporary directory rather than in a developer's real mailbox.
+    closeDatabase();
+    clearStoreSettings();
+    await expect(processForwardingRules()).resolves.toEqual({
+      attempted: 0, sent: 0, failed: 0, skipped: 0, items: [],
+    });
+    expect(existsSync(join(home, ".hasna", "emails", "emails.db"))).toBe(true);
   });
 
   it("runs against the local database the configuration names", async () => {
@@ -266,11 +299,8 @@ describe("processForwardingRules pipeline", () => {
 
     // THE INJECTION POINT'S THIRD ARGUMENT. The deleted HTTP arm declared a two-parameter
     // `send` and never called it, while the published type was the local three-parameter one.
-    // The handle the pipeline threads is asserted to be the SAME object, because a second
-    // handle would be a second database.
     expect(calls).toHaveLength(1);
     expect(calls[0]?.providerId).toBe(provider);
-    expect(calls[0]?.db, "the send seam must receive the pipeline's own database").toBe(db);
     expect(calls[0]?.opts).toMatchObject({
       from: "user@example.com",
       to: "archive@example.net",
@@ -293,6 +323,44 @@ describe("processForwardingRules pipeline", () => {
       .all(sentEmailId ?? "") as Array<{ text_body: string | null; html: string | null }>;
     expect(content, "the forwarded body must be recorded in the local ledger").toHaveLength(1);
     expect(content[0]?.text_body).toContain("---------- Forwarded message ----------");
+  });
+
+  it("threads the CALLER'S database through the pipeline, not the process-wide one", async () => {
+    // THIS CASE EXISTS BECAUSE THE OBVIOUS VERSION OF IT PROVED NOTHING. Asserting
+    // `calls[0].db === db` where `db` came from `getDatabase()` cannot fail: that function
+    // memoises ONE connection per process, so the handle a test hands in IS the singleton, and a
+    // mutant that ignores `opts.db` and reopens the configured database stayed green. An
+    // adversarial review caught it.
+    //
+    // So this passes a SECOND, INDEPENDENT handle to the same file — one `getDatabase()` cannot
+    // return — and asserts the send seam receives THAT one. Now "threads the caller's handle" and
+    // "reopens the configured database" are distinguishable.
+    const file = join(home, "threaded.db");
+    clearStoreSettings();
+    process.env[DATABASE_PATH_SETTINGS[1]] = file;
+    resetDatabase();
+    // The fixtures below seed through the module-level handle, so it has to be the one bound to
+    // this file rather than the in-memory one `beforeEach` opened.
+    db = getDatabase();
+    const migrated = db;
+    const second = new Database(file);
+    second.run("PRAGMA foreign_keys = ON");
+    expect(second, "the second handle must not be the memoised one").not.toBe(migrated);
+
+    seedProvider("p-1");
+    await seedRule("user@example.com", "archive@example.net", { providerId: "p-1" });
+    seedInbound("inbound-1", "user@example.com");
+    const calls: SendCall[] = [];
+
+    await expect(processForwardingRules({ db: second, send: recordingSend(calls) }))
+      .resolves.toMatchObject({ attempted: 1, sent: 1 });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.db, "the send seam must receive the handle the caller supplied").toBe(second);
+    expect(calls[0]?.db).not.toBe(migrated);
+    // And the ledger really landed through that handle rather than through the singleton.
+    const rows = second.query("SELECT status FROM forwarding_deliveries").all() as Array<{ status: string }>;
+    expect(rows).toEqual([{ status: "sent" }]);
+    second.close();
   });
 
   it("does not double-prefix a subject that already says it is a forward", async () => {
