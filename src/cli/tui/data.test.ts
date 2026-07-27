@@ -208,7 +208,7 @@ describe("tui data — labels", () => {
 });
 
 describe("tui data — body + conversation", () => {
-  it("reads a body with flags and attachments", () => {
+  it("reads a body with flags and attachments", async () => {
     const e = seed("hello", {
       star: true,
       attachments: [
@@ -216,7 +216,7 @@ describe("tui data — body + conversation", () => {
         { filename: "pic.png", content_type: "image/png", size: 512 },
       ],
     });
-    const b = getMessageBody({ kind: "inbound", id: e.id } as TuiMessage)!;
+    const b = (await getMessageBody({ kind: "inbound", id: e.id } as TuiMessage))!;
     expect(b.subject).toBe("hello");
     expect(b.text).toContain("body of hello");
     expect(b.flags).toContain("starred");

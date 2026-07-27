@@ -18,7 +18,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { closeDatabase, resetDatabase } from "../../db/database.js";
 import { suppressContact } from "../../db/contacts.local.js";
-import { getEmailContent } from "../../db/email-content.local.js";
+import { getEmailContent } from "../../db/email-content.js";
 import { createProvider } from "../../db/providers.local.js";
 import { listSandboxEmails } from "../../db/sandbox.local.js";
 import { createWarmingSchedule } from "../../db/warming.local.js";
@@ -215,7 +215,7 @@ describe("collapsed email-ops tool family", () => {
     expect(sent.isError).not.toBe(true);
     const payload = JSON.parse(text(sent)) as { success: boolean; email_id: string };
     expect(payload.success).toBe(true);
-    const content = getEmailContent(payload.email_id);
+    const content = await getEmailContent(payload.email_id);
     expect(content?.text_body).toBe("line one\nline two");
     expect(content?.html ?? null).toBeNull();
   });

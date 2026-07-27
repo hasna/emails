@@ -355,11 +355,29 @@ export function registerEmailOpsTools(server: McpServer): void {
       const id = resolveId("emails", email_id);
       const email = getEmail(id);
       if (!email) throw new EmailNotFoundError(id);
-      const content = getEmailContent(id);
+      // NO FABRICATED EMPTY CONTENT. The `|| { html: null, text_body: null, headers: {} }`
+      // that used to stand here rendered "there is no such message" as "this message has no
+      // body" — and it was reachable, because the old reader returned null whenever the
+      // local content ROW was missing. Null now means only "no such message", which
+      // `getEmail` above has already ruled out, so a null here is a genuine disagreement
+      // between two reads of the same store and is reported as one rather than smoothed over.
+      const content = await getEmailContent(id);
+      // NOT PHRASED AS A RACE, and that is a correction. `getEmail` above resolves its backend
+      // from the deployment word while this read resolves a store from configuration, so the
+      // likeliest cause of one read finding a message the other cannot is that they resolved
+      // DIFFERENT backends — not that the row vanished between two calls. Blaming a race would
+      // send an operator looking for concurrency where there is a misconfiguration.
+      if (!content) {
+        throw new Error(
+          `Message ${id} was found by the message read but has no body record. These two reads do ` +
+            "not necessarily resolve the same backend, so this is reported rather than answered " +
+            "with an empty body.",
+        );
+      }
       return {
         content: [{
           type: "text",
-          text: JSON.stringify({ email, content: content || { html: null, text_body: null, headers: {} } }, null, 2),
+          text: JSON.stringify({ email, content }, null, 2),
         }],
       };
     } catch (e) {

@@ -79,7 +79,31 @@ export {
   upsertEvent,
 } from "./db/events.js";
 
-export { storeEmailContent, getEmailContent } from "./db/email-content.js";
+// BOTH OF THESE CHANGED SHAPE, and this is a published entry point, so the break is stated
+// here rather than only in the commit that caused it.
+//
+//  * `getEmailContent` is ASYNC now. It reads through the store seam and every seam operation
+//    is a promise. This is the dangerous half of the break, because it fails QUIETLY in a
+//    consumer that does not await: `content.text_body` on a promise is `undefined`, and
+//    `if (content)` is always truthy, so a caller's "no body" branch becomes unreachable and a
+//    body renders as the text `undefined`. That is the fabricated-value failure mode this
+//    refactor exists to remove, so it must not go unannounced.
+//  * `storeEmailContent` now REFUSES, always, by throwing `EmailContentWriteUnsupportedError`.
+//    No store behind this package can write a body onto an existing message — see
+//    `src/db/email-content.ts` for the six checks and for what should replace it. The error
+//    TYPE is exported below precisely so a consumer can catch this and nothing else, rather
+//    than string-matching a message or catching every `Error`.
+//
+// Both need a MAJOR version at release. The version is deliberately not bumped in the change
+// that introduced them, and `CHANGELOG.md`'s `[Unreleased]` section is digest-frozen, so this
+// comment and the pull request are where the break is recorded.
+export {
+  storeEmailContent,
+  getEmailContent,
+  EmailContentWriteUnsupportedError,
+  type EmailContent,
+  type EmailContentInput,
+} from "./db/email-content.js";
 
 export {
   upsertContact, getContact, listContacts, suppressContact,
