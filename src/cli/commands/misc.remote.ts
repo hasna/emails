@@ -219,19 +219,23 @@ export function registerMiscCommands(program: Command, output: (data: unknown, f
     });
 
   // ─── DOCTOR ───────────────────────────────────────────────────────────────────
-  // src/lib/doctor.remote.ts actually probes the operator service (`/health`,
-  // `/ready`) and reports a parsed-but-unproven config as a WARN. That is the
-  // same implementation the MCP `run_doctor` tool already runs in this mode.
-  // `--live` is deliberately NOT registered in this arm. It means "validate the
-  // stored per-provider credentials against the provider's API", and this client
-  // holds none — the operator's server signs and sends, so src/lib/doctor.remote.ts
-  // names the parameter `_opts` and discards it. Advertising the flag and forwarding
-  // it made `emails doctor --live` byte-identical to `emails doctor`: accepted,
-  // documented, and silently ignored. A flag that cannot do what it says should not
-  // be offered; the local arm, which does hold credentials, still offers it.
+  // src/lib/doctor.ts is now ONE implementation for both command sets: it reads its
+  // resource facts through the store seam, so reachability comes from a SERVED READ
+  // rather than from a configuration that parsed. Same implementation the MCP
+  // `run_doctor` tool runs, and the same one src/cli/commands/misc.local.ts imports.
+  //
+  // It no longer probes `/health` and `/ready` — the seam has no readiness operation
+  // and reaching those endpoints would need the deployment-mode module the seam exists
+  // to remove. The report says so in a `Store readiness` check rather than dropping the
+  // subject, so the description below no longer claims the probe either.
+  //
+  // `--live` stays UNREGISTERED here. The reason it was left off this arm has widened
+  // rather than gone: it means "validate the stored per-provider credentials against the
+  // provider's API", and the store seam redacts credential columns in BOTH stores, so
+  // nothing behind either command set can honour it now. `emails provider status` does.
   const doctorCmd = program
     .command("doctor")
-    .description("Run system diagnostics (probes the self-hosted service /health and /ready)")
+    .description("Run system diagnostics (reads through the configured store)")
     .action(async () => {
       try {
         const { runDiagnostics, formatDiagnostics } = await import("../../lib/doctor.js");

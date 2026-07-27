@@ -311,7 +311,7 @@ if (inboundMatch && method === "GET") {
 if (path === "/api/doctor" && method === "GET") {
   try {
     const live = url.searchParams.get("live") === "true";
-    const { runDiagnostics } = await import('../../lib/doctor.local.js');
+    const { runDiagnostics } = await import('../../lib/doctor.js');
     const checks = await runDiagnostics(undefined, { liveProviderChecks: live });
     return json(checks);
   } catch (e) { return internalError(e); }

@@ -85,8 +85,8 @@ export const NEVER_AVAILABLE_COMMANDS: readonly string[] = [
 export const SELF_HOSTED_REFUSED_COMMANDS: readonly string[] = [
   "emails analytics",
   "emails batch",
-  // Only the delivery sub-diagnosis refuses; `emails doctor` itself probes the
-  // operator service (src/lib/doctor.remote.ts) and is a real remedy.
+  // Only the delivery sub-diagnosis refuses; `emails doctor` itself reads through
+  // the store seam (src/lib/doctor.ts) and is a real remedy.
   "emails doctor delivery",
   "emails inbox explain",
   "emails inbox listen",

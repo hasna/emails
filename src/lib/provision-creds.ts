@@ -9,13 +9,32 @@ import { resolveCloudflareAuth, describeCloudflareAuth } from "./cloudflare-auth
 
 export interface ProvisionCredStatus {
   provider: string;
-  configured: boolean;
-  status?: "pass" | "warn" | "fail";
+  /**
+   * Whether usable credentials are present. `"unknown"` when an input this answer depends
+   * on was itself unknown — see `aws_provider_credentials` below. A boolean here is a
+   * CLAIM, and `false` is as much of a claim as `true`.
+   */
+  configured: boolean | "unknown";
+  status?: "pass" | "warn" | "fail" | "unknown";
   detail: string;
 }
 
 export interface ProvisionCredConfig {
-  aws_provider_credentials?: boolean;
+  /**
+   * Whether this installation holds SES sending credentials on a stored provider row.
+   *
+   * `"unknown"` is a real, expected value and not a placeholder. The fact lives in the
+   * provider columns that the store seam REDACTS from the generic resource read
+   * (`REDACTED_COLUMNS` in src/store-sqlite/resources.ts; the API's resource routes are
+   * summary-only for the same reason), so a caller reading providers through the seam —
+   * which src/lib/doctor.ts now does — cannot observe it in either configuration.
+   *
+   * The type was widened rather than leaving the caller to pass one of the two booleans it
+   * had: `false` here prints "Set AWS_PROFILE or AWS_ACCESS_KEY_ID/SECRET" with status
+   * `fail` at an operator whose stored SES keys are perfectly fine, which is a fabricated
+   * negative in a credential check.
+   */
+  aws_provider_credentials?: boolean | "unknown";
   cloudflare_api_token?: string;
   cloudflare_api_key?: string;
   cloudflare_email?: string;
@@ -30,13 +49,20 @@ export function checkProvisionCredentials(
 
   // AWS (SES send/inbound + domain purchase via @hasna/domains), us-east-1.
   const hasEnvAws = !!(env["AWS_ACCESS_KEY_ID"] && env["AWS_SECRET_ACCESS_KEY"]) || !!env["AWS_PROFILE"];
-  const hasStoredSesProviderCredentials = !!config.aws_provider_credentials;
+  const storedSesProviderCredentials = config.aws_provider_credentials ?? false;
+  // Environment credentials are observable either way, so they still decide the answer on
+  // their own. The unknown only propagates when they are ABSENT — the one case where the
+  // verdict actually depended on the stored-credential fact.
+  const storedUnknown = !hasEnvAws && storedSesProviderCredentials === "unknown";
+  const hasStoredSesProviderCredentials = storedSesProviderCredentials === true;
   out.push({
     provider: "aws",
-    configured: hasEnvAws || hasStoredSesProviderCredentials,
-    status: hasEnvAws ? "pass" : hasStoredSesProviderCredentials ? "warn" : "fail",
+    configured: storedUnknown ? "unknown" : hasEnvAws || hasStoredSesProviderCredentials,
+    status: hasEnvAws ? "pass" : storedUnknown ? "unknown" : hasStoredSesProviderCredentials ? "warn" : "fail",
     detail: hasEnvAws
       ? `${env["AWS_PROFILE"] ? `profile:${env["AWS_PROFILE"]}` : "access-keys"} (us-east-1 for SES inbound + AWS domain purchase)`
+      : storedUnknown
+        ? "No AWS credentials in the environment, and whether SES credentials are stored on a provider row is not observable to the caller (the store seam redacts credential columns). Set AWS_PROFILE or AWS_ACCESS_KEY_ID/SECRET for AWS domain purchase/provisioning workflows, and run 'emails provider status' to validate stored SES credentials."
       : hasStoredSesProviderCredentials
         ? "Stored SES provider credentials found for SES send/inbound; set AWS_PROFILE or AWS_ACCESS_KEY_ID/SECRET for AWS domain purchase/provisioning workflows"
       : "Set AWS_PROFILE or AWS_ACCESS_KEY_ID/SECRET",

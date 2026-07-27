@@ -150,19 +150,41 @@ const root = join(import.meta.dir, "..");
  * corpus it scans. The gap between what the tree contains and what the guard permits is
  * zero on all eleven — and the way to keep it that way is to re-measure on every rebase
  * rather than to trust this sentence.
+ *
+ * RE-MEASURED AND RE-PINNED AGAIN on the `src/lib/doctor` collapse — the fourth rebase in a
+ * row where this block was a conflict, which is the mechanism working rather than failing.
+ * The numbers below were measured twice, as the paragraph above asks: once on the commit this
+ * change is BASED ON and once on its own staged tree. A ceiling inherited from a sibling
+ * branch is not evidence about the tree you are merging into.
+ *
+ * This collapse moves five. `twoArmFamilies` and `remoteArmModules` by one each (the doctor
+ * family's two arms are deleted); `getEmailsModeReferences` by two (the deleted facade's
+ * import and its one dispatch read); `resolveEmailsModeReferences` by four (BOTH deleted arms
+ * imported the resolver and each called it once); and `emailsModeEnvReferences` by three (the
+ * deleted family's test fixture had to scrub three deployment-word settings and no longer has
+ * a mode to set). Its facade dispatched inline rather than through the helper, so
+ * `routedFacadeDefinitions` and `routedCallExpressions` do not move.
+ *
+ * Base measurement, recorded because it is the half that a rebase invalidates: on b5edee9 all
+ * eleven live counts already equalled their declared ceilings, so nothing landed on top of the
+ * block above without re-pinning and there is no inherited slack to reclaim. Five ceilings move
+ * and all five are paid for here: `twoArmFamilies` 38 -> 37, `remoteArmModules` 38 -> 37,
+ * `getEmailsModeReferences` 70 -> 68, `resolveEmailsModeReferences` 69 -> 65,
+ * `emailsModeEnvReferences` 238 -> 235. The other six were already exact and stay put. Corpus
+ * of this change: 668 tracked, 667 scanned, 8,745,666 characters.
  */
 const CEILINGS: Record<string, number> = {
-  twoArmFamilies: 38,
-  remoteArmModules: 38,
+  twoArmFamilies: 37,
+  remoteArmModules: 37,
   routedFacadeDefinitions: 28,
   routedCallExpressions: 287,
   selfHostedResourceBranches: 47,
   selfHostedResourceReferences: 199,
   isSelfHostedModeReferences: 68,
-  getEmailsModeReferences: 70,
-  resolveEmailsModeReferences: 69,
+  getEmailsModeReferences: 68,
+  resolveEmailsModeReferences: 65,
   normalizeEmailsModeReferences: 16,
-  emailsModeEnvReferences: 238,
+  emailsModeEnvReferences: 235,
 };
 
 // 624 files are tracked and 623 scanned today, totalling ~7.4M characters. The floors

@@ -421,13 +421,23 @@ export function registerMiscCommands(program: Command, output: (data: unknown, f
     });
 
   // ─── DOCTOR ───────────────────────────────────────────────────────────────────
+  // src/lib/doctor.ts is ONE implementation now, shared with misc.remote.ts and the MCP
+  // `run_doctor` tool; it reads its resource facts through the store seam.
+  //
+  // `--live` STAYS REGISTERED but its help text no longer claims to validate anything, and
+  // that is the honest form rather than a compromise. The store seam redacts provider
+  // sending credentials in both stores, so nothing behind this command can validate a
+  // provider key any more; the report answers the request with an explicit "requested and
+  // not performed here" and names `emails provider status`, which does. The flag it is NOT
+  // allowed to become is the one misc.remote.ts refuses to register — accepted, documented,
+  // and silently ignored, with output byte-identical to running without it.
   const doctorCmd = program
     .command("doctor")
-    .description("Run system diagnostics")
-    .option("--live", "Validate provider credentials with live provider API calls")
+    .description("Run system diagnostics (reads through the configured store)")
+    .option("--live", "Ask for live provider credential validation (reported as not performed here — use 'emails provider status')")
     .action(async (opts: { live?: boolean }) => {
       try {
-        const { runDiagnostics, formatDiagnostics } = await import("../../lib/doctor.local.js");
+        const { runDiagnostics, formatDiagnostics } = await import("../../lib/doctor.js");
         const checks = await runDiagnostics(undefined, { liveProviderChecks: opts.live === true });
         output(checks, formatDiagnostics(checks));
       } catch (e) {
