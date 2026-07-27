@@ -298,6 +298,60 @@ describe("createAlias / createCatchAll / setGlobalCatchAll", () => {
     expect(touched).toBe(0);
   });
 
+  for (const [name, makeStore] of STORE_VARIANTS) {
+    it(`refuses to WRITE an alias with no domain, and writes nothing, on the ${name}`, async () => {
+      // A REGRESSION THIS FAMILY SHIPPED FOR ONE COMMIT, found by adversarial review and pinned
+      // here. `requiredText` faults on an empty `domain` on the way OUT, so a write that stored
+      // one committed a row this module then refused to read — and because `getAlias` maps the
+      // row, `removeAlias` could not delete it either: one `emails alias catch-all ""` made
+      // `emails alias list` fail forever with no published way to recover. `createAlias` cannot
+      // produce it and neither can `setGlobalCatchAll`; `createCatchAll("")` could, and so could
+      // MCP `add_catch_all` with an empty domain.
+      clearAliases();
+      const store = makeStore();
+      await expect(createCatchAll("", "ops@x.com", store)).rejects.toThrow(
+        /An alias needs a domain and a local part; received "\*"@""\./,
+      );
+      // THE HALF THAT MATTERS: nothing was written. A throw AFTER the insert is what the
+      // regression was.
+      expect(await storedRows(store)).toEqual([]);
+      // And the family still answers, rather than faulting on a row it left behind.
+      expect(await listAliases(undefined, undefined, store)).toEqual([]);
+    });
+  }
+
+  it("can DELETE a row it refuses to report, so an older version's write is recoverable", async () => {
+    // The companion to the case above, for a database that already holds such a row: the guard
+    // stops NEW ones, and this is the only way out for an old one. `removeAlias` therefore reads
+    // the row without mapping it and needs only the protected flag to decide.
+    clearAliases();
+    db.run(
+      "INSERT INTO aliases (id, domain, local_part, target_address, protected, created_at, updated_at)"
+        + " VALUES ('poison', '', '*', 'ops@x.com', 0, '2026-01-01', '2026-01-01')",
+    );
+    const store = sqliteStore();
+    // It is genuinely unreportable — the control that this case is about a row the mapper rejects.
+    await expect(getAlias("poison", store)).rejects.toThrow(/has no readable domain/);
+    await expect(listAliases(undefined, undefined, store)).rejects.toThrow(/has no readable domain/);
+
+    expect(await removeAlias("poison", store)).toBe(true);
+    // And the family answers again.
+    expect(await listAliases(undefined, undefined, store)).toEqual([]);
+  });
+
+  it("still refuses to delete a row whose protected flag cannot be read", async () => {
+    // The negative control for the case above: reading the row without mapping it must not
+    // become a way to delete something that might be the global catch-all.
+    clearAliases();
+    db.run(
+      "INSERT INTO aliases (id, domain, local_part, target_address, protected, created_at, updated_at)"
+        + " VALUES ('odd-flag', 'x.com', 'a', 'ops@x.com', 'no', '2026-01-01', '2026-01-01')",
+    );
+    const store = sqliteStore();
+    await expect(removeAlias("odd-flag", store)).rejects.toThrow(/refusing to guess whether it can be deleted/);
+    expect(await storedRows(store)).toHaveLength(1);
+  });
+
   it("sends ONLY the four writable columns, and never id or either timestamp", async () => {
     // THE DELETED HTTP ARM SENT `id`, `created_at` AND `updated_at` on create and `updated_at`
     // on update. `/v1/aliases` declares four writable columns behind
@@ -403,6 +457,17 @@ describe("listAliases", () => {
       const store = makeStore();
       await seedFour(store);
       expect((await listAliases("X.com", undefined, store)).map((a) => a.local_part)).toEqual(["a", "b"]);
+    });
+
+    it(`treats an EMPTY domain as no filter, on the ${name}`, async () => {
+      // BOTH DELETED ARMS TESTED THE ARGUMENT FOR TRUTHINESS, so `""` meant "the whole table".
+      // Testing for `undefined` instead made this answer `[]` — reachable through
+      // `emails alias list --domain ""` and the MCP tool — and the two arms AGREED here, so
+      // there was no stronger arm to resolve toward. Found by adversarial review.
+      const store = makeStore();
+      await seedFour(store);
+      expect(await listAliases("", undefined, store)).toHaveLength(4);
+      expect(await listAliases("", undefined, store)).toEqual(await listAliases(undefined, undefined, store));
     });
 
     it(`windows the sorted set and ignores an offset with no limit, on the ${name}`, async () => {
@@ -664,6 +729,27 @@ describe("getAlias / removeAlias", () => {
       },
     });
     await expect(getAlias("some-other-id", store)).rejects.toThrow(/a different row/);
+  });
+
+  it("refuses to DELETE a row the store answered a by-id read with instead", async () => {
+    // `removeAlias` reads the row itself rather than going through `getAlias` (so a row this
+    // module cannot report is still deletable), which means it needs its OWN id re-assertion —
+    // otherwise a store that answered a by-id read with another row would have that other row
+    // deleted, and the caller could not tell. A mutation run found this uncovered.
+    let deleted: string | null = null;
+    const store = storeWithAliases({
+      async get(): Promise<Outcome<ResourceRow | null>> {
+        return { ok: true, value: syntheticRow(7) };
+      },
+      async remove(id): Promise<Outcome<boolean>> {
+        deleted = id;
+        return { ok: true, value: true };
+      },
+    });
+    await expect(removeAlias("some-other-id", store)).rejects.toThrow(
+      /answered an alias read by id with a different row[\s\S]*refusing to delete it/,
+    );
+    expect(deleted, "the wrong alias was deleted").toBeNull();
   });
 
   it("reports a refused DELETE as refused rather than as an alias that was already gone", async () => {

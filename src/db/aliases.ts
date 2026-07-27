@@ -95,8 +95,8 @@
 // A REFUSAL IS NEVER AN ANSWER. Every store operation below turns a typed refusal into a
 // thrown error naming the operation and carrying the store's own code, status and message.
 // Nothing answers `[]`, `false` or `null` for a read or a write that did not happen — and in
-// particular `resolveAlias` answers `null` ONLY for a recipient the store looked for, across
-// the whole table, and did not find.
+// particular `resolveAlias` answers `null` ONLY for a recipient the store looked for — across the
+// whole of each filtered set it asked about, read to the end — and did not find.
 //
 // ─── ONE INHERITED DEFECT, NAMED RATHER THAN LEFT SILENT OR QUIETLY FIXED ────────────────
 //
@@ -119,16 +119,21 @@
 // WHAT REPLACES THE ARM CHOICE is the store's own answer. No branch on the store kind, on the
 // descriptor, or on the resolution plan. `src/store/` is untouched by this change.
 //
-// ONE GUARD BELOW IS UNREACHABLE BY CONSTRUCTION, named here so a reviewer does not have to
-// re-derive it and so nobody writes a test that only appears to cover it. Mutation testing
-// reverted every change in this file one at a time; 54 of 55 mutants were killed and this is the
-// one that survived:
+// TWO GUARDS BELOW ARE UNREACHABLE BY CONSTRUCTION, named here so a reviewer does not have to
+// re-derive it and so nobody writes a test that only appears to cover them. Mutation testing
+// reverted every change in this file one at a time — 65 mutants over two rounds, the second round
+// covering the guards adversarial review added — and 63 were killed. These are the two survivors:
 //
-//   `byRoute`'s `id` tiebreaker. `(domain, local_part)` is UNIQUE on SQLite and
-//   `(tenant_id, domain, local_part)` on Postgres, so no two readable aliases in one scope can
-//   tie on domain and local-part, and no input can reach the comparison. It stays because a page
-//   boundary over a non-total order can repeat or drop a row, and because the constraint is a
-//   schema fact that a migration can drop rather than a property of any type here.
+//   1. `byRoute`'s `id` tiebreaker. `(domain, local_part)` is UNIQUE on SQLite and
+//      `(tenant_id, domain, local_part)` on Postgres, so no two readable aliases in one scope can
+//      tie on domain and local-part, and no input can reach the comparison. It stays because a
+//      page boundary over a non-total order can repeat or drop a row, and because the constraint
+//      is a schema fact that a migration can drop rather than a property of any type here.
+//   2. `upsertAlias`'s `!localPart` half of the write guard. No export can reach it: `createAlias`
+//      gets its local-part from `splitAddress`, which cannot return an empty one, and the two
+//      catch-all writers pass the sentinel. The `!domain` half IS reachable — `createCatchAll("")`
+//      is what the guard was added for — and is covered. This half is defence for the next writer,
+//      and it costs one operator.
 //
 // TWO OTHER GUARDS ARE UNREACHABLE THROUGH EITHER REAL STORE AND ARE STILL TESTED, which is a
 // different thing and worth distinguishing. `readOneAlias`'s "more than one row" fault sits
@@ -167,7 +172,8 @@ export interface ListAliasOptions {
 }
 
 /**
- * Pages one alias enumeration may fetch, at 500 rows a page — 100_000 aliases.
+ * Pages one alias enumeration may fetch, at 500 rows a page — about 99,800 aliases (every page
+ * after the first re-requests the row it ended on, so it carries 499 fresh rows rather than 500).
  *
  * Deliberately far above the shared default (40 pages) because the reads below need the whole
  * filtered set to answer correctly: the list has to sort before it windows, the target lookup
@@ -391,6 +397,15 @@ async function readAliases(
  * `(tenant_id, domain, local_part)` on Postgres, so this is unreachable through either store
  * today; if it ever fires, two rows claim to route the same recipient and choosing between them
  * would silently send someone's mail to one of two places.
+ *
+ * THE COST, STATED RATHER THAN LEFT TO BE DISCOVERED: enumerating to an empty page is TWO store
+ * round trips per lookup even on a unique key, so `resolveAlias` costs up to six and
+ * `emails alias list` about ten against an API store where the deleted arm cost three or four.
+ * `src/lib/delivery-doctor.ts` performs the SAME three-step resolution with `limit: 1` and both
+ * filters pushed down — one request per step — and the difference is deliberate rather than an
+ * oversight: that module reports DIAGNOSTIC facts and may bound a read, while this one decides
+ * where a recipient's mail goes and may not confuse "the page I asked for was clamped" with "no
+ * such alias".
  */
 async function readOneAlias(
   store: EmailStore,
@@ -436,6 +451,27 @@ async function upsertAlias(
   target: string,
   isProtected: boolean,
 ): Promise<Alias> {
+  // THE ROW IS VALIDATED BEFORE IT IS SENT, TO THE SAME STANDARD THE READ PATH APPLIES.
+  //
+  // This is the one place the collapse was ASYMMETRIC and it was a real regression, found by
+  // adversarial review. `requiredText` faults on an empty `domain` or `local_part` on the way
+  // OUT, so a write that stored one committed a row this module then refused to read — and
+  // because `getAlias` maps the row, `removeAlias` could not delete it either. `createAlias`
+  // cannot produce it (`splitAddress` guarantees both halves) and `setGlobalCatchAll` cannot
+  // (both are the sentinel), but `createCatchAll("")` reached the store, and so did MCP
+  // `add_catch_all` with an empty domain. The deleted SQLite arm wrote the same row and
+  // TOLERATED it on read — its mapper was a spread with no validation — so the poison was
+  // invisible rather than absent.
+  //
+  // Validating the write is the fix rather than relaxing the read: a stored alias with no domain
+  // or no local-part routes nothing and can never match a recipient, so accepting it would be
+  // accepting a row that cannot mean anything. `removeAlias` is separately able to delete a row
+  // it refuses to REPORT, so a row an older version already wrote stays recoverable.
+  if (!domain || !localPart) {
+    throw new Error(
+      `An alias needs a domain and a local part; received ${JSON.stringify(localPart)}@${JSON.stringify(domain)}.`,
+    );
+  }
   const existing = await readOneAlias(store, "read this installation's aliases", domain, localPart);
   const written = existing
     ? await store.aliases.update(existing.id, { target_address: target })
@@ -515,7 +551,8 @@ export async function ensureDefaultCatchAll(store?: EmailStore): Promise<Alias> 
 /**
  * The global catch-all, or `null` when this installation has none.
  *
- * `null` here means the store looked at the WHOLE table and found nothing. The deleted HTTP arm
+ * `null` here means the store read the whole of the filtered set to the end and found nothing.
+ * The deleted HTTP arm
  * answered the same `null` after looking at one clamped page, so on an installation with more
  * than 500 aliases it reported no global catch-all while the row sat in the table (header
  * note 1).
@@ -573,7 +610,13 @@ export async function listAliases(
   opts?: ListAliasOptions,
   store?: EmailStore,
 ): Promise<Alias[]> {
-  const wanted = domain === undefined ? undefined : domain.toLowerCase();
+  // AN EMPTY DOMAIN MEANS "NO FILTER", which is what BOTH deleted arms did — each tested the
+  // argument for truthiness (`domain ? filtered : unfiltered`), not for `undefined`. Testing for
+  // `undefined` instead made `listAliases("")` filter on an empty domain and answer `[]`,
+  // reachable through `emails alias list --domain ""` and the MCP tool. The two arms AGREED here,
+  // so there is no stronger arm to resolve toward and changing it would have been a product
+  // decision smuggled into a mode-axis refactor. Found by adversarial review.
+  const wanted = domain ? domain.toLowerCase() : undefined;
   const aliases = await readAliases(
     storeFor(store),
     "list this installation's aliases",
@@ -591,6 +634,10 @@ export async function listAliases(
  *
  * AN EMPTY TARGET SET ANSWERS `[]` WITHOUT TOUCHING THE STORE, and that is a value rather than
  * a fabrication: no targets were asked about, so no alias can match. Both arms did this.
+ *
+ * NO PRODUCTION CALLER TODAY. The only caller in the tree is this family's own suite; the export
+ * is kept because a collapse may not change this family's published surface, so the cost note
+ * below is a property of the contract rather than a bill anyone is currently paying.
  *
  * `target_address` IS A DECLARED FILTER ON BOTH STORES AND IS DELIBERATELY NOT PUSHED DOWN.
  * Both deleted arms matched the STORED target case-INSENSITIVELY — the SQLite one with
@@ -622,9 +669,26 @@ export async function listAliasesByTargets(
  */
 export async function removeAlias(id: string, store?: EmailStore): Promise<boolean> {
   const target = storeFor(store);
-  const alias = await getAlias(id, target);
-  if (!alias) return false;
-  if (alias.protected) throw new Error("This catch-all is protected and cannot be deleted.");
+  // THE ROW IS READ WITHOUT BEING FULLY MAPPED, and that is deliberate rather than a shortcut.
+  //
+  // The only property this operation has to establish is whether the row is PROTECTED. Going
+  // through `getAlias` would additionally require every other column to be readable, which makes
+  // a corrupt row — one an older version of this module could write, see `upsertAlias` —
+  // impossible to delete through any published surface. `requiredProtected` still faults on a
+  // flag it cannot read, because deleting something that might be the global catch-all is the one
+  // mistake this function exists to prevent.
+  const read = await target.aliases.get(id);
+  if (!read.ok) throw storeRefusal("read an alias", read);
+  if (read.value === null) return false;
+  // The id is re-asserted for the reason `getAlias` gives: a by-id read answered with another row
+  // is a wrong result the caller cannot notice, and here it would delete the wrong alias.
+  if (rowText(read.value["id"]) !== id) {
+    throw new Error(
+      "This installation's store answered an alias read by id with a different row; "
+        + "refusing to delete it as the requested alias",
+    );
+  }
+  if (requiredProtected(read.value)) throw new Error("This catch-all is protected and cannot be deleted.");
   const removed = await target.aliases.remove(id);
   if (!removed.ok) throw storeRefusal("remove an alias", removed);
   return removed.value;

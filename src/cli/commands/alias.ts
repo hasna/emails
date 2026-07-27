@@ -33,7 +33,12 @@ export function registerAliasCommands(program: Command, output: (data: unknown, 
 
   cmd
     .command("global <target>")
-    .description("Set the protected GLOBAL catch-all (all domains) → target (never deletable)")
+    // "never deletable" was the old wording and it was not true of every row this command can
+    // reach: `setGlobalCatchAll` sets the protected flag when it CREATES the row and leaves it
+    // alone when it updates one, so a global catch-all another writer left unprotected stays
+    // deletable. `src/db/aliases.ts` records that as an inherited defect and pins it; the help
+    // text now describes what the command actually guarantees.
+    .description("Set the GLOBAL catch-all (all domains) → target; a catch-all created here is protected from deletion")
     .action(async (target: string) => {
       try {
         const a = await setGlobalCatchAll(target);

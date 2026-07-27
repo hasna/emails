@@ -648,10 +648,18 @@ const root = join(import.meta.dir, "..");
  * independently (a paragraph about a guard named that guard as a call and pushed its own metric
  * from 180 to 181).
  *
- * Corpus of this change: 651 tracked, 650 scanned, 9,394,416 characters — both floors
- * (500 files / 5,000,000 characters) cleared with room. Two files fewer than 55de52c, which is
- * exactly this family's two deleted arms; no test file was added, because both suites already
- * existed and were rewritten in place.
+ * Corpus of this change: 652 tracked, 651 scanned, 9,430,860 characters — both floors
+ * (500 files / 5,000,000 characters) cleared with room. ONE file fewer than 55de52c, and the
+ * arithmetic is worth spelling out: this family's two arms are deleted, and one test file is added
+ * — a suite for the CLI `inbox explain` handler, which adversarial review found was the only
+ * consumer whose call shape changed structurally and had no executable coverage at all. Both of
+ * this family's own suites already existed and were rewritten in place, so they add nothing.
+ *
+ * MEASURED THREE TIMES, because two later rounds of review fixes changed the corpus after the
+ * first pin: once when the ceilings were first measured on the merged tree, once after this
+ * paragraph was written, and once after the review fixes landed. All eleven counts were identical
+ * every time — the added file and every edited comment contribute ZERO to all eleven, verified
+ * per file rather than inferred from the total.
  */
 const CEILINGS: Record<string, number> = {
   twoArmFamilies: 27,
