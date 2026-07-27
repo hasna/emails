@@ -86,12 +86,33 @@ describe("refusal registry covers every CLI refusal call site", () => {
   });
 
   // The regression, named. These are the call sites the `*.remote.ts` glob missed.
+  //
+  // `emails domain check` was on this list until it was WIRED UP: its whole
+  // implementation already shipped in src/lib/dns-check.ts and no command reached
+  // it. It is asserted absent below rather than quietly dropped, so the day
+  // someone re-refuses it this test says so.
   it("sees the shared-module refusals the original grep could not", () => {
     const shared = refusals.filter((r) => r.shared).map((r) => r.command);
     expect(shared).toContain("emails domain status");
-    expect(shared).toContain("emails domain check");
     expect(shared).toContain("emails domain verify");
     expect(shared).toContain("emails address provision");
+  });
+
+  it("no longer counts the DNS commands that were wired to their libraries", () => {
+    const shared = refusals.filter((r) => r.shared).map((r) => r.command);
+    for (const wired of [
+      "emails domain check",
+      "emails domains check",
+      "emails domain dns",
+      "emails domains dns",
+    ]) {
+      expect(shared, `${wired} refuses again — is that intended?`).not.toContain(wired);
+      // And the registry must not still be suppressing them from every
+      // suggestion path: the coverage check above only fails in one direction.
+      for (const mode of ["local", "self_hosted"] as const) {
+        expect(isCommandAvailableInMode(`${wired} example.com`, mode), `${wired} in ${mode}`).toBe(true);
+      }
+    }
   });
 
   it("registers every unconditional refusal in NEVER_AVAILABLE_COMMANDS", () => {

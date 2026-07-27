@@ -37,26 +37,33 @@ import type { EmailsMode } from "./mode.js";
  * because those helpers throw regardless of mode. Enforced by
  * src/lib/status-commands-coverage.test.ts — do not hand-maintain this list
  * against a remembered grep.
+ *
+ * The enforcement runs in ONE direction: it fails when a refusal is missing
+ * here, not when an entry has no refusal left. So when a command is WIRED UP,
+ * its entry has to be deleted by hand or the command stays silently suppressed
+ * from `next_actions` and `fix_commands` while working perfectly.
  */
 export const NEVER_AVAILABLE_COMMANDS: readonly string[] = [
   // src/cli/commands/provision.ts — notImplementedAnywhere()
   "emails provision",
-  // src/cli/commands/address.ts — serverOnly()
+  // src/cli/commands/address.ts — notImplementedAnywhere()
   "emails address provision",
-  // src/cli/commands/domain.ts — serverOnly(). Both the singular `domain` and the
-  // plural `domains` alias refuse, and `emails domain status` is the one that was
-  // reaching `next_actions`.
-  "emails domain check",
+  // src/cli/commands/domain.ts — notImplementedAnywhere(). Both the singular
+  // `domain` and the plural `domains` alias refuse, and `emails domain status`
+  // is the one that was reaching `next_actions`.
+  //
+  // `domain check`, `domains check`, `domain dns` and `domains dns` are NOT here
+  // any more: they were wired to src/lib/dns.ts + src/lib/dns-check.ts +
+  // src/lib/mx-ownership.ts, which always implemented them, and are now the
+  // remedies several of the refusals below point at. Leaving them listed would
+  // have suppressed a working command from every suggestion path.
   "emails domain connect",
-  "emails domain dns",
   "emails domain setup",
   "emails domain setup-cloudflare",
   "emails domain status",
   "emails domain verify",
-  "emails domains check",
   "emails domains connect",
   "emails domains disable-outbound",
-  "emails domains dns",
   "emails domains enable-inbound",
   "emails domains enable-outbound",
   "emails domains verify",

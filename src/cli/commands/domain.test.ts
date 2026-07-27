@@ -213,7 +213,7 @@ describe("domains lifecycle commands", () => {
     }
   });
 
-  it("fails loud on server-owned lifecycle mutations", async () => {
+  it("fails loud on lifecycle mutations that do not ship, naming a real next step", async () => {
     for (const args of [
       ["domains", "connect", "owned.example.com", "--provider", "x"],
       ["domains", "enable-inbound", "ready.example.com"],
@@ -222,7 +222,12 @@ describe("domains lifecycle commands", () => {
     ]) {
       const result = await runDomainCommandExpectingExit(args);
       expect(result.error).toBe("process.exit:1");
-      expect(result.stderr).toContain("is not available in the self-hosted client");
+      expect(result.stderr).toContain("is not implemented in this build");
+      // Every refusal has to leave the operator somewhere to go, and the old
+      // one-line message left them with a server that has no such route.
+      expect(result.stderr).toMatch(/'emails [a-z]/);
+      expect(result.stderr).not.toContain("not available in the self-hosted client");
+      expect(result.stderr).not.toContain("runs on the self-hosted server");
     }
   });
 });
@@ -258,10 +263,70 @@ describe("domain move-provider command", () => {
 });
 
 describe("domain status command", () => {
-  it("fails loud — readiness is served by the self-hosted operator API", async () => {
+  // The refusal that was reaching `next_actions` via the status payload. It now
+  // says what is missing (nothing is wired to the readiness ledger) and points at
+  // two commands that run, instead of at a server route that does not exist.
+  it("fails loud without blaming a mode, and names commands that run", async () => {
     const result = await runDomainCommandExpectingExit(["domain", "status"]);
     expect(result.error).toBe("process.exit:1");
-    expect(result.stderr).toContain("emails domain status is not available in the self-hosted client");
+    expect(result.stderr).toContain("emails domain status is not implemented in this build");
+    expect(result.stderr).toContain("emails domains status [domain]");
+    expect(result.stderr).toContain("emails domain check <domain>");
+    expect(result.stderr).not.toContain("not available in the self-hosted client");
+  });
+});
+
+describe("domain dns command", () => {
+  // `domain dns` and `domain check` were unconditional refusals whose entire
+  // implementation already shipped in src/lib/dns.ts and src/lib/dns-check.ts —
+  // pure, tested, mode-free code that no command reached. `dns` resolves nothing
+  // over the network, so it is asserted here; `check` is asserted live in
+  // src/cli/unshipped-surface.test.ts.
+  it("returns the generic SPF/DMARC pair when no provider resolves", async () => {
+    const result = await runDomainCommand(["domain", "dns", "unregistered.example.com"]);
+    expect(result.data).toMatchObject({
+      domain: "unregistered.example.com",
+      provider_id: null,
+      records: [
+        { purpose: "SPF", type: "TXT", name: "unregistered.example.com" },
+        { purpose: "DMARC", type: "TXT", name: "_dmarc.unregistered.example.com" },
+      ],
+    });
+    // Silently omitting DKIM would read as "no DKIM required", so say it.
+    expect(result.out).toContain("No provider resolved");
+    expect(result.out).toContain("Pass --provider <id> to include the provider's DKIM records.");
+  });
+
+  it("refuses an unresolvable --provider instead of falling back to generic records", async () => {
+    const result = await runDomainCommandExpectingExit([
+      "domain", "dns", "example.com", "--provider", "does-not-exist",
+    ]);
+    expect(result.error).toBe("process.exit:1");
+    expect(result.stderr).not.toContain("v=spf1");
+  });
+
+  it("explains an EMPTY provider table instead of printing the unknown-provider fallback", async () => {
+    // A sandbox adapter returns [] BY DESIGN. Without the `DnsPublishingSupport`
+    // descriptor `formatDnsTable` can only print its ambiguous fallback, which reads
+    // as a failed lookup for a provider that has nothing to publish in the first
+    // place. This is the half of #103's dns.ts work the recovered CLI path did not
+    // reach: it called `formatDnsTable(records)` with no second argument, so the
+    // better message existed and only the MCP twin could produce it.
+    await stub.seed({
+      providers: [{ id: "prov-box", name: "sandbox-1", type: "sandbox", active: true }],
+      domains: [{ id: "dom-box", domain: "boxed.example.com", provider: "prov-box", verified: false }],
+    });
+
+    const result = await runDomainCommand(["domain", "dns", "boxed.example.com"]);
+
+    expect(result.data).toMatchObject({ domain: "boxed.example.com", provider_id: "prov-box", records: [] });
+    expect(result.out).toContain("No DNS records to publish, and none are expected");
+    expect(result.out).toContain("has no DKIM, SPF or DMARC of its own");
+    expect(result.out).toContain("emails domain move-provider <domain> --to-provider <id>");
+    // The ambiguous sentence is the thing being replaced, so it must be absent.
+    expect(result.out).not.toContain("No DNS records found.");
+    // A provider DID resolve, so the no-provider caveat must not fire.
+    expect(result.out).not.toContain("No provider resolved");
   });
 });
 

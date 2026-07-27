@@ -35,18 +35,16 @@ Emails has exactly two modes: `local` and `self_hosted`. Local mode keeps SQLite
 AWS_PROFILE=emails-operator emails provider add --name production-ses --type ses --region us-east-1
 emails provider add --name production-resend --type resend --api-key ...
 
-# Set up a domain (buy + DNS + SES in one command)
-emails domain setup example.com --provider <id> --email you@example.com ...
+# Register a domain you already own and have verified with the provider
+emails domain adopt example.com --provider <id>
 
-# Or connect a domain you already own without buying it
-emails domains connect example.com --provider <id> --dry-run
-emails domains connect example.com --provider <id> --dns-provider route53 --no-register-provider
-
-# Or configure DNS for an existing domain via Cloudflare
-emails domain setup-cloudflare example.com --provider <id>
-
-# Check public DNS before changing inbound routing
+# See the DNS records the domain must publish, then confirm what is live
+emails domain dns example.com --provider <id>
 emails domain check example.com
+
+# Buy a domain first, if you do not own one yet
+emails domain available example.com
+emails domain buy example.com --email you@example.com ...
 
 # SES send-only setup preserves existing MX, such as Google Workspace
 emails domain adopt example.com --provider <ses-id> --no-inbound
@@ -83,10 +81,17 @@ The source of truth follows the mode; it is not a per-domain choice. A domain
 created or connected through this client is owned by the app's `/v1` database, so
 `source_of_truth` is reported as `postgres` and is not an input.
 
-| Mode | Who owns the mail source of truth | Domain setup path |
-| --- | --- | --- |
-| `local` | The local SQLite/files install | `emails domains add`; DNS checks are advisory unless using a real send/receive provider. |
-| `self_hosted` | Your PostgreSQL/S3/SES or equivalent infrastructure | `emails domains connect`, then publish the returned DNS tasks and enable inbound/outbound when evidence is ready. |
+| Mode | Who owns the mail source of truth |
+| --- | --- |
+| `local` | The local SQLite/files install |
+| `self_hosted` | Your PostgreSQL/S3/SES or equivalent infrastructure |
+
+The domain setup path is the same either way, because none of it is served over
+the wire: `emails domain add` (or `emails domain adopt` for a domain the
+provider has already verified), then `emails domain dns <domain>` for the
+records to publish, then `emails domain check <domain>` to confirm what is live.
+`emails aws setup-inbound` creates the S3 bucket and SES receipt rules when the
+domain should also receive.
 
 Authentication records are required only for the capability you enable:
 
@@ -189,7 +194,7 @@ more:
 ```bash
 emails address list              # compact table
 emails address list --verbose    # expanded owner/admin/quota rows
-emails domain status --verbose   # includes per-domain issue and fix lines
+emails domains status            # per-domain records and DNS state
 emails provider list --limit 50  # explicit larger page
 emails contact list --suppressed # compact filtered contact list
 emails template show <name>      # detail path for template bodies
@@ -265,7 +270,8 @@ emails forwarding run --provider <provider-id>            # future mail only
 emails forwarding run --provider <provider-id> --backfill # intentionally include older synced mail
 
 # Address lifecycle
-emails address provision ops@example.com --provider <ses-id> --owner Atlas
+emails address add ops@example.com --provider <ses-id>
+emails address set-owner ops@example.com --owner Atlas
 emails address suggest --domain example.com
 emails address suspend <id>     # block sending from this address
 emails address activate <id>
@@ -312,9 +318,11 @@ SES send-only provisioning does not require changing root MX and is the safest
 path when an existing mailbox provider already receives mail.
 
 Publishing SES inbound MX is only for domains that should receive through
-SES/S3. Commands that can add SES inbound MX refuse to proceed when public MX
-already belongs to another provider. `--force-mx-switch` is available for
-intentional migrations after confirming mailbox ownership can move.
+SES/S3. `emails domain adopt` refuses to wire SES inbound when public MX already
+belongs to another provider; `--force-mx-switch` overrides it for intentional
+migrations after confirming mailbox ownership can move. `emails aws
+setup-inbound` writes no DNS at all — it prints the MX record for you to
+publish.
 
 ## MCP Server
 
