@@ -95,21 +95,46 @@ const root = join(import.meta.dir, "..");
  *  - `emailsModeEnvReferences` covers the whole tree, not just TypeScript: docs,
  *    the README, Terraform and compose all name the variable, and all of them have
  *    to stop.
- *  - `twoArmFamilies` (43) counts `x.ts` facades that still have two or more
- *    `x.<arm>.*` siblings. It happens to equal `remoteArmModules` today because every
- *    remote arm has a local sibling and a facade; they are not the same measurement
- *    and will diverge as families collapse one at a time.
+ *  - `twoArmFamilies` counts `x.ts` facades that still have two or more `x.<arm>.*`
+ *    siblings. It equalled `remoteArmModules` while every HTTP arm still had a local
+ *    sibling and a facade; they are not the same measurement and will diverge as
+ *    families collapse one at a time.
+ *
+ * TIGHTENED on the delivery-doctor collapse, and the reason is that `<=` leaves SLACK
+ * a regression can walk back through. A ceiling above the live count is a licence to
+ * re-add exactly as many branches as the gap is wide, with the guard still green — so
+ * every phase that lowers a count has to lower its ceiling to match, or it has only
+ * half-landed. Two prior collapses left slack behind: #108 (the batch family) left
+ * `twoArmFamilies` and `remoteArmModules` one wide each and `getEmailsModeReferences`
+ * two wide, and #83's own note above records `emailsModeEnvReferences` sitting three
+ * under its ceiling. All of it is reclaimed here.
+ *
+ * Every number below is now EXACTLY the count measured over the real `git ls-files`
+ * corpus of this commit (666 tracked / 665 scanned / 8,447,265 characters), so the gap
+ * between "what the tree contains" and "what the guard permits" is zero on all eleven.
+ * The delivery-doctor collapse itself is what moved four of them off the b3fdef5
+ * numbers: `twoArmFamilies` 42 -> 41 and `remoteArmModules` 42 -> 41 (its two arms are
+ * deleted), `routedFacadeDefinitions` 30 -> 29 and `routedCallExpressions` 293 -> 290
+ * (its facade's dispatch helper and three dispatched exports), plus
+ * `getEmailsModeReferences` 76 -> 74 (the facade's import and its one call) and
+ * `resolveEmailsModeReferences` 73 -> 71 (the local arm's import and its one call,
+ * which fed the domain inbound-readiness signals).
+ *
+ * A consequence worth stating for the next agent in this phase: with zero slack, a
+ * concurrent collapse that lands first makes this block a conflict rather than a
+ * silent no-op — which is the correct failure. Re-measure and re-pin on rebase; do not
+ * widen a number to make a merge easy.
  */
 const CEILINGS: Record<string, number> = {
-  twoArmFamilies: 43,
-  remoteArmModules: 43,
-  routedFacadeDefinitions: 30,
-  routedCallExpressions: 293,
+  twoArmFamilies: 41,
+  remoteArmModules: 41,
+  routedFacadeDefinitions: 29,
+  routedCallExpressions: 290,
   selfHostedResourceBranches: 47,
   selfHostedResourceReferences: 203,
   isSelfHostedModeReferences: 70,
-  getEmailsModeReferences: 78,
-  resolveEmailsModeReferences: 73,
+  getEmailsModeReferences: 74,
+  resolveEmailsModeReferences: 71,
   normalizeEmailsModeReferences: 16,
   emailsModeEnvReferences: 239,
 };
