@@ -145,6 +145,34 @@ export {
 } from "./db/send-keys.js";
 export type { SendKey, SendKeySummary } from "./db/send-keys.js";
 
+// EVERY VALUE EXPORTED BELOW CHANGED SHAPE, and this is a published entry point, so the break
+// is stated here rather than only in the commit that caused it. #124 recorded its breaks in this
+// file; #125 carried more of them and recorded none, because it never touched this file.
+//
+// The trap is that the seven exports did not move together. FIVE went through the store seam and
+// TWO stayed on raw SQLite and got stricter instead, so there is no single rule a consumer can
+// apply to this block.
+//
+//  * FIVE ARE ASYNC now — `createForwardingRule`, `getForwardingRule`, `listForwardingRules`,
+//    `setForwardingRuleEnabled`, `removeForwardingRule` — because they read and write through
+//    the store seam and every seam operation is a promise. This is the dangerous half, for the
+//    same reason as `getEmailContent` above: it fails QUIETLY in a consumer that does not await.
+//    `rule.enabled` on a promise is `undefined`, `if (rule)` is always truthy, so a "no such
+//    rule" branch becomes unreachable and a disabled rule reads as enabled.
+//  * THE SAME FIVE changed their SECOND PARAMETER TYPE from `Database` to `EmailStore`
+//    (`src/db/forwarding.ts:457,526,559,588,610`). Passing a `Database` handle — the documented
+//    way to scope these to one database, and the only way to scope them in a transaction — now
+//    passes a value of the wrong type.
+//  * `listPendingForwarding` and `recordForwardingDelivery` are still SYNCHRONOUS and still take
+//    a raw `Database`, but that argument is now REQUIRED (`:652-655`, `:701-703`). It used to be
+//    optional and defaulted to `getDatabase()`, so an existing no-argument call does not fail to
+//    compile in JS — it throws on a property access of `undefined` at runtime.
+//  * `listPendingForwarding` also lost its `limit = 100` default, so its FIRST argument is
+//    required too. A `listPendingForwarding()` call that worked now throws.
+//
+// All of it needs a MAJOR version at release. The version is deliberately not bumped in the
+// change that introduced them, and `CHANGELOG.md`'s `[Unreleased]` section is digest-frozen, so
+// this comment and the pull request are where the break is recorded.
 export {
   createForwardingRule, getForwardingRule, listForwardingRules,
   setForwardingRuleEnabled, removeForwardingRule, listPendingForwarding,
