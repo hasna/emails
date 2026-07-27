@@ -250,31 +250,32 @@ for (const harness of HARNESSES) {
       expect(stats.getCalls).toEqual([]);
     });
 
-    it("resolves an abbreviated provider id, and refuses an ambiguous one", async () => {
+    it("resolves an abbreviated provider id through the scan", async () => {
       const store = harness.store();
-      const full = await seedProvider(store, "ses-alpha", "abc11111-0000-4000-8000-000000000001");
+      // THE ID COMES FROM THE STORE. `providers.create` on the HTTP store REFUSES a
+      // caller-supplied `id` — correctly, and by name: "/v1/providers has no column id, and the
+      // write would have been accepted with that field silently dropped". So the abbreviation is
+      // derived from whatever the store minted rather than chosen here. (The ambiguity case
+      // cannot be built this way at all, and lives in the scan suite below where the page
+      // contents are controlled directly.)
+      const full = await seedProvider(store, "ses-alpha");
       serveObjects({ [`${PREFIX}obj-a`]: rawEmail({ subject: "abbreviated" }) });
 
-      const ok = await syncS3Inbox({ bucket: BUCKET, prefix: PREFIX, providerId: "abc11111", store });
-      expect(ok.synced).toBe(1);
-      expect(ok.unrecorded.some((note) => note.includes(full))).toBe(true);
+      const abbreviated = full.slice(0, 8);
+      expect(abbreviated.length).toBe(8);
+      expect(abbreviated).not.toBe(full);
 
-      await seedProvider(store, "ses-beta", "abc11111-0000-4000-8000-000000000002");
-      await expect(
-        syncS3Inbox({ bucket: BUCKET, prefix: PREFIX, providerId: "abc11111", store }),
-      ).rejects.toThrow(/Ambiguous provider id "abc11111"/);
+      const ok = await syncS3Inbox({ bucket: BUCKET, prefix: PREFIX, providerId: abbreviated, store });
+      expect(ok.synced).toBe(1);
+      // Resolved to the FULL id, not echoed back as the abbreviation the caller passed.
+      expect(ok.unrecorded.some((note) => note.includes(full))).toBe(true);
     });
   });
 }
 
-/** Create a provider through the store under test and return its id. */
-async function seedProvider(store: EmailStore, name: string, id?: string): Promise<string> {
-  const created = await store.providers.create({
-    ...(id === undefined ? {} : { id }),
-    name,
-    type: "ses",
-    active: 1,
-  });
+/** Create a provider through the store under test and return the id IT minted. */
+async function seedProvider(store: EmailStore, name: string): Promise<string> {
+  const created = await store.providers.create({ name, type: "ses", active: 1 });
   if (!created.ok) throw new Error(`could not seed a provider: ${created.message}`);
   const value = created.value["id"];
   if (typeof value !== "string" || value.length === 0) throw new Error("seeded provider has no id");
@@ -318,6 +319,20 @@ describe("the abbreviated-provider scan", () => {
     const result = await syncS3Inbox({ bucket: BUCKET, prefix: PREFIX, providerId: "target-", store });
     expect(result.synced).toBe(1);
     expect(result.unrecorded.some((note) => note.includes("target-9999"))).toBe(true);
+  });
+
+  it("refuses an ambiguous prefix instead of picking the first match", async () => {
+    serveObjects({ [`${PREFIX}obj-a`]: rawEmail({ subject: "ambiguous" }) });
+    const base = createSqliteEmailStore({ database: db, detail: "ambiguous base" });
+    // Two ids sharing a prefix. Neither store will mint such a pair on request — the HTTP store
+    // refuses a caller-supplied id outright — so the pages are supplied directly.
+    const store = shortPagingStore(base, [{ id: "abc11111-one" }, { id: "abc11111-two" }]);
+
+    // PICKING ONE WOULD SHOW THE OPERATOR THE WRONG PROVIDER, and answering "not found" would
+    // deny one that exists twice over.
+    await expect(
+      syncS3Inbox({ bucket: BUCKET, prefix: PREFIX, providerId: "abc11111", store }),
+    ).rejects.toThrow(/Ambiguous provider id "abc11111".*abc11111-one, abc11111-two/);
   });
 
   it("raises when the provider list refuses, instead of reporting the provider unknown", async () => {
