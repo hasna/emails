@@ -181,11 +181,6 @@ jobs:
           # red suite under `set -e`, so the send-semantics suites below never
           # ran and their failures were invisible. Running them together still
           # fails the job on any failure, but reports every suite.
-          #
-          # store-conformance runs LAST on purpose. It is the only suite here that
-          # does not drop `public` in `beforeAll` — it takes a fresh tenant per run
-          # instead, so it must not be followed by a suite that wipes the schema out
-          # from under it, and it inherits whatever the suites above migrated.
           bun test \
             src/server/self-hosted/postgres.integration.test.ts \
             src/server/self-hosted/multi-tenancy.integration.test.ts \
@@ -193,6 +188,17 @@ jobs:
             src/server/self-hosted/rls.integration.test.ts \
             src/server/self-hosted/send-failure-semantics.integration.test.ts \
             src/server/self-hosted/send-honesty-and-reconciliation.integration.test.ts \
-            src/server/self-hosted/webhooks.integration.test.ts \
-            src/server/self-hosted/store-conformance.integration.test.ts
+            src/server/self-hosted/webhooks.integration.test.ts
           bun test src/server/self-hosted/attachment-inventory.integration.test.ts
+          # store-conformance gets its OWN invocation, like attachment-inventory, and it
+          # is not a stylistic choice: every suite above drops schema `public` in its
+          # `beforeAll`, so folding this one in would make its correctness depend on
+          # `bun test` honouring the argument order — a property no assertion here checks.
+          # On its own it migrates whatever it finds and takes a fresh tenant per run, so
+          # nothing can wipe the schema out from under it.
+          #
+          # EMAILS_REQUIRE_POSTGRES_TESTS makes the suite assert its own reachability: the
+          # whole file is skipped when the connection string is absent, so without this
+          # flag a renamed variable or a broken service container would silently delete
+          # the real-service conformance evidence and leave the job green.
+          EMAILS_REQUIRE_POSTGRES_TESTS=1 bun test src/server/self-hosted/store-conformance.integration.test.ts

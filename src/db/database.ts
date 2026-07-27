@@ -369,20 +369,33 @@ export function getDataDir(): string {
   return newDir;
 }
 
+// A BLANK setting is not a configured path, and the value is used TRIMMED.
+//
+// Raw truthiness accepted `"   "` as a path and opened a database file named three
+// spaces in the working directory, while every diagnostic reported the default — and a
+// trailing newline (routine when a value arrives from a file or a secret store) opened a
+// second, differently-named file beside the intended one. `src/store-resolution.ts`
+// applies the same rule, and asserts that the two agree, so "which one is configured"
+// cannot mean two things in one process.
+function configuredDbPath(key: string): string | null {
+  const trimmed = process.env[key]?.trim();
+  return trimmed === undefined || trimmed === "" ? null : trimmed;
+}
+
 function getDbPath(): string {
   // 1. Environment variable override (new)
-  if (process.env["HASNA_EMAILS_DB_PATH"]) {
-    const path = process.env["HASNA_EMAILS_DB_PATH"];
-    return isInMemoryDb(path) || process.platform === "win32"
-      ? path
-      : canonicalizeDatabasePath(path);
+  const preferred = configuredDbPath("HASNA_EMAILS_DB_PATH");
+  if (preferred !== null) {
+    return isInMemoryDb(preferred) || process.platform === "win32"
+      ? preferred
+      : canonicalizeDatabasePath(preferred);
   }
   // 2. Environment variable override (backward compat, used for tests)
-  if (process.env["EMAILS_DB_PATH"]) {
-    const path = process.env["EMAILS_DB_PATH"];
-    return isInMemoryDb(path) || process.platform === "win32"
-      ? path
-      : canonicalizeDatabasePath(path);
+  const fallback = configuredDbPath("EMAILS_DB_PATH");
+  if (fallback !== null) {
+    return isInMemoryDb(fallback) || process.platform === "win32"
+      ? fallback
+      : canonicalizeDatabasePath(fallback);
   }
   // 3. Default
   return defaultDatabasePath();

@@ -36,7 +36,7 @@
 // discriminant: after construction nobody may ask what kind of store they have (see
 // src/store/descriptor.ts for what happened the last time a label like that existed).
 
-import { defaultDatabasePath, getDatabasePath } from "./db/database.js";
+import { defaultDatabasePath } from "./db/database.js";
 import { EMAILS_CLIENT_ENV_SECRET_ENV, EMAILS_SESSION_TOKEN_ENV } from "./lib/client-env.js";
 import type { EmailStore } from "./store/email-store.js";
 import { createHttpEmailStore } from "./store-http/index.js";
@@ -111,24 +111,79 @@ export type StorePlan =
     }
   | {
       readonly store: "api";
-      /** The configured origin, as given. Normalised by the store itself. */
+      /**
+       * The CREDENTIAL-FREE origin: userinfo, query and fragment stripped.
+       *
+       * A plan is the object most likely to reach a log line, and an operator who puts a
+       * token in the URL's userinfo would otherwise have it serialised with the plan.
+       * The credential is named by `credentialSetting` and read at construction.
+       */
       readonly baseUrl: string;
       readonly setting: string;
       /** Which setting carries the credential. NEVER the credential itself. */
       readonly credentialSetting: string;
     };
 
-/** A setting is configured when it is present and not blank. */
+/**
+ * A setting is configured when it is present and not blank, and its value is the TRIMMED
+ * text.
+ *
+ * Trimmed, not raw, because a value that reaches an environment variable through a file
+ * or a secret store routinely arrives with a trailing newline: raw, that newline goes
+ * into an `Authorization` header, and a raw `"   "` becomes a database file named three
+ * spaces in the working directory. `getDbPath()` in the database layer applies the same
+ * rule, which is what makes the two agree on what "configured" means as well as on which
+ * setting wins.
+ */
 function configured(env: NodeJS.ProcessEnv, key: string): string | null {
-  const value = env[key];
-  if (value === undefined) return null;
-  const trimmed = value.trim();
-  return trimmed === "" ? null : value;
+  const trimmed = env[key]?.trim();
+  return trimmed === undefined || trimmed === "" ? null : trimmed;
 }
 
 /** Every database-path setting that is configured, in precedence order. */
 function databasePathSettings(env: NodeJS.ProcessEnv): string[] {
   return DATABASE_PATH_SETTINGS.filter((key) => configured(env, key) !== null);
+}
+
+/**
+ * The configured API URL reduced to a credential-free `scheme://host[:port]`, or a boot
+ * error naming the setting.
+ *
+ * THE SCHEME CHECK IS THE LOAD-BEARING PART, and it is not defensive programming. `new
+ * URL("operator:t0ken@mail.example.test/v1")` parses — as the OPAQUE scheme `operator:`
+ * — so `username` and `password` are empty, nothing is stripped, and the token survives
+ * into every string derived from it, including the diagnostics detail that
+ * src/store/descriptor.ts requires to be safe to print. Requiring `http:` or `https:`
+ * is what makes the userinfo stripping below actually happen.
+ *
+ * A URL that does not parse is a configuration error, so it arrives as one: `new URL`
+ * would otherwise throw a bare `TypeError` naming no setting.
+ */
+function credentialFreeOrigin(value: string): string {
+  const reject = (why: string): never => {
+    throw new StoreConfigurationError(
+      `${API_BASE_URL_SETTING} ${why}. Set it to the service origin, for example ` +
+        "https://mail.example.com — the credential belongs in " +
+        `${API_CREDENTIAL_SETTINGS.join(" or ")}, not in the URL.`,
+      [API_BASE_URL_SETTING],
+    );
+  };
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    // The value is NOT quoted back: an operator who did put a token in it would have it
+    // echoed into whatever logged the boot failure.
+    return reject("is not a URL");
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return reject(`must be an http or https URL (it parsed as the "${parsed.protocol}" scheme)`);
+  }
+  parsed.username = "";
+  parsed.password = "";
+  parsed.search = "";
+  parsed.hash = "";
+  return parsed.toString().replace(/\/+$/, "").replace(/\/v1$/, "");
 }
 
 /**
@@ -161,7 +216,24 @@ export function planEmailStore(env: NodeJS.ProcessEnv = process.env): StorePlan 
     );
   }
 
-  // 2. A pointer whose payload has not been loaded. Refusing to guess, rather than
+  // 2. TWO DATABASE SETTINGS NAMING DIFFERENT FILES is the same contradiction in a
+  //    smaller box, and gets the same answer. The precedence between these two keys is
+  //    documented, but it answers "which one wins?" — and when they name different files
+  //    the question the operator actually asked is still "which one did you mean?".
+  //    Naming the SAME file twice is harmless and passes.
+  if (databaseKeys.length > 1) {
+    const paths = new Set(databaseKeys.map((key) => configured(env, key)));
+    if (paths.size > 1) {
+      throw new StoreConfigurationError(
+        `${databaseKeys.join(" and ")} are both set and name DIFFERENT database files, so ` +
+          "this installation has two configured local databases and no way to tell which " +
+          `one you meant. UNSET ONE. (Setting them to the same path is fine.)`,
+        databaseKeys,
+      );
+    }
+  }
+
+  // 3. A pointer whose payload has not been loaded. Refusing to guess, rather than
   //    falling through to SQLite under a configuration that names an API.
   if (apiBaseUrl === null && pointer !== null) {
     throw new StoreConfigurationError(
@@ -173,10 +245,11 @@ export function planEmailStore(env: NodeJS.ProcessEnv = process.env): StorePlan 
     );
   }
 
-  // 3. The API, which needs a credential. A URL with no credential cannot produce a
-  //    working store, and answering 401 on every operation would look exactly like a
-  //    store that legitimately declines everything.
+  // 4. The API, which needs a URL that parses and a credential. A URL with no credential
+  //    cannot produce a working store, and answering 401 on every operation would look
+  //    exactly like a store that legitimately declines everything.
   if (apiBaseUrl !== null) {
+    const origin = credentialFreeOrigin(apiBaseUrl);
     const credentialSetting = API_CREDENTIAL_SETTINGS.find((key) => configured(env, key) !== null);
     if (credentialSetting === undefined) {
       throw new StoreConfigurationError(
@@ -188,13 +261,13 @@ export function planEmailStore(env: NodeJS.ProcessEnv = process.env): StorePlan 
     }
     return Object.freeze({
       store: "api" as const,
-      baseUrl: apiBaseUrl,
+      baseUrl: origin,
       setting: API_BASE_URL_SETTING,
       credentialSetting,
     });
   }
 
-  // 4. The default: the local database. `setting` is null when nothing named it, which
+  // 5. The default: the local database. `setting` is null when nothing named it, which
   //    is the case a `doctor` line has to be able to report as "defaulted".
   const setting = databaseKeys[0] ?? null;
   const databasePath = setting === null ? defaultDatabasePath() : (configured(env, setting) as string);
@@ -219,11 +292,12 @@ export function createConfiguredEmailStore(): EmailStore {
   const plan = planEmailStore(process.env);
   switch (plan.store) {
     case "sqlite":
-      // `plan.databasePath` is NOT passed through. `getDatabase()` applies the same
-      // precedence this resolution reads, and it additionally canonicalises the value and
-      // memoises the connection — so the path it reports is the one the store's rows
-      // actually come from, and `plan.databasePath` (what the operator wrote) is not.
-      return createSqliteEmailStore({ detail: `SQLite at ${getDatabasePath()}` });
+      // NEITHER the plan's path NOR a re-derived one is passed as the diagnostics detail.
+      // `getDatabase()` applies the same precedence this resolution reads, canonicalises
+      // the value, and MEMOISES one connection per process — so any path computed here
+      // can name a file the store is not bound to. `createSqliteEmailStore` defaults the
+      // detail from the open connection's own filename instead, which cannot be wrong.
+      return createSqliteEmailStore();
     case "api":
       // `detail` is left to the store, which strips userinfo, query and fragment out of
       // the origin before it is printed. The credential is read here and never stored

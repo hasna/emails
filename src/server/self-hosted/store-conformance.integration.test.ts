@@ -56,6 +56,21 @@ const pgClient: PoolQueryClient | null = databaseUrl
   ? createQueryClient(createPgPool({ connectionString: databaseUrl, env: { PGSSLMODE: "disable" } }))
   : null;
 
+/**
+ * The flag the Postgres job sets to say "this suite MUST run here".
+ *
+ * Without it the whole file is `describe.skipIf(!pgClient)` and a green job proves
+ * nothing: rename the connection variable, drop the step, or break the service container,
+ * and the flagship evidence for this phase silently stops being checked while CI stays
+ * green. That is the exact failure mode this repository has already shipped twice — a
+ * pack guard that certified an empty tarball, ban patterns that matched nothing. So the
+ * job asserts its own presence, and the assertion lives OUTSIDE the skip.
+ *
+ * It is a dedicated flag rather than `CI`, because the hermetic suite also runs under CI
+ * and deliberately scrubs the connection string; keying on `CI` would make that job red.
+ */
+const REQUIRE_POSTGRES = process.env["EMAILS_REQUIRE_POSTGRES_TESTS"] === "1";
+
 // Every case is several HTTP round trips against Postgres, and the file runs the suite
 // three times.
 const SUITE_TIMEOUT_MS = 300_000;
@@ -124,6 +139,12 @@ function totals(report: ConformanceReport): { passed: number; refused: number; f
   };
 }
 
+// A COLD `migrate()` measured at ~6s on a loaded machine against bun's DEFAULT 5s hook
+// timeout, which made the file impossible to run on its own even though CI (where an
+// earlier suite has already migrated) sees ~3ms. The timeout is stated rather than
+// inherited.
+const BEFORE_ALL_TIMEOUT_MS = 120_000;
+
 beforeAll(async () => {
   if (!pgClient) return;
   await new MigrationLedger(pgClient, emailsSelfHostedMigrations()).migrate();
@@ -149,11 +170,30 @@ beforeAll(async () => {
     },
   });
   baseUrl = `http://127.0.0.1:${server.port}`;
-});
+}, BEFORE_ALL_TIMEOUT_MS);
 
 afterAll(async () => {
   server?.stop(true);
   await pgClient?.close();
+});
+
+// OUTSIDE THE SKIP, on purpose — this is the one assertion that cannot be silenced by the
+// condition that silences everything else in this file.
+describe("this suite is actually reachable where it is supposed to run", () => {
+  it("has a database when the job says it must", () => {
+    if (!REQUIRE_POSTGRES) {
+      // Locally and in the hermetic job the connection string is deliberately absent, and
+      // skipping is correct. Assert the pair is consistent rather than nothing.
+      expect(pgClient === null || databaseUrl !== undefined).toBe(true);
+      return;
+    }
+    expect(
+      databaseUrl,
+      "EMAILS_REQUIRE_POSTGRES_TESTS=1 but EMAILS_TEST_POSTGRES_URL is unset, so the whole " +
+        "real-service conformance run would have skipped and the job would still be green",
+    ).toBeTruthy();
+    expect(pgClient).not.toBeNull();
+  });
 });
 
 describe.skipIf(!pgClient)("HttpEmailStore conformance against the real /v1 service", () => {
@@ -218,6 +258,35 @@ describe.skipIf(!pgClient)("HttpEmailStore conformance against the real /v1 serv
         body: JSON.stringify({ from: `s-${RUN}@example.test`, to: [`r-${RUN}@example.test`], direction: "outbound" }),
       });
       expect(refused.status, "POST /v1/messages must keep refusing an outbound write").toBe(409);
+    },
+    SUITE_TIMEOUT_MS,
+  );
+
+  it(
+    "records twice with an empty source_id instead of answering 500 the second time",
+    async () => {
+      // The unique-index trap, against real Postgres, because it is the one place it can
+      // actually fire: an empty `source_id` stored verbatim satisfies `WHERE source_id IS
+      // NOT NULL`, so the SECOND identical write violated the partial unique index and the
+      // caller got `{"error":"internal error"}`. A fake query client cannot show this.
+      const store = await liveStore(`store-conformance-blank-fence-${RUN}`);
+      const write = () =>
+        store.messages.createMessage({
+          direction: "outbound",
+          from_addr: `blank-${RUN}@example.test`,
+          to_addrs: [`recipient-${RUN}@example.test`],
+          subject: "no fence at all",
+          source_id: "",
+        });
+      const first = await write();
+      expect(first.ok, `first write: ${JSON.stringify(first)}`).toBe(true);
+      const second = await write();
+      expect(second.ok, `second write: ${JSON.stringify(second)}`).toBe(true);
+      if (!first.ok || !second.ok) return;
+      // Two distinct rows, because an empty fence is no fence — not one row and not a fault.
+      expect(second.value.id).not.toBe(first.value.id);
+      expect(first.value.source_id).toBeNull();
+      expect(second.value.source_id).toBeNull();
     },
     SUITE_TIMEOUT_MS,
   );
