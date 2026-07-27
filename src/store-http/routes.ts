@@ -113,7 +113,11 @@ export const ROUTES: readonly RouteUse[] = Object.freeze([
     template: "/v1/messages",
     operations: ["listMessages", "listInbound", "clearInboundEmails"],
   },
-  { method: "POST", template: "/v1/messages", operations: ["createMessage", "upsertMessage"] },
+  // NOT `POST /v1/messages`. That route imports INBOUND mail only — it answers 409 for
+  // anything else, because an outbound row it created would have no provider invocation
+  // behind it — so it cannot serve two operations the seam leaves UNGATED. The record
+  // route is the one that persists a row in either direction and transmits nothing.
+  { method: "POST", template: "/v1/messages/record", operations: ["createMessage", "upsertMessage"] },
   { method: "GET", template: "/v1/messages/{id}", operations: ["getMessage", "resolveMessageId"] },
   {
     method: "PATCH",

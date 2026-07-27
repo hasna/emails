@@ -649,13 +649,80 @@ describe("the /v1 routes this store depends on", () => {
       expect(entry.wanted.length).toBeGreaterThan(0);
       expect(entry.today.length).toBeGreaterThan(0);
     }
-    // The entries that are NOT capability-shaped are the uncomfortable ones — ungated
-    // operations depending on surface that does not exist. At least one exists today
-    // (the outbound-record route), and this asserts the list keeps saying so rather
-    // than quietly losing the category.
+    // The entries that are NOT capability-shaped are the ungated operations, and the
+    // category must not quietly disappear — four of them remain, each one a cheaper verb
+    // this store composes around.
     expect(HTTP_STORE_MISSING_ROUTES.some((entry) => entry.capability === null)).toBe(true);
-    const outbound = HTTP_STORE_MISSING_ROUTES.find((entry) => entry.operations.includes("createMessage"));
-    expect(outbound?.capability, "the outbound-record gap must be recorded as capability-less").toBeNull();
+    // AND THE OUTBOUND-RECORD GAP IS CLOSED. It was the one entry in this list with no
+    // legal answer available: `createMessage`/`upsertMessage` are ungated, so there was
+    // no capability to declare false, and `/v1` had no route that recorded a message
+    // without sending it. `POST /v1/messages/record` serves them now, so no entry may
+    // name either operation again.
+    for (const operation of ["createMessage", "upsertMessage"]) {
+      const stale = HTTP_STORE_MISSING_ROUTES.filter((entry) => entry.operations.includes(operation));
+      expect(stale.map((entry) => entry.wanted), `${operation} is served and must not be listed as missing`).toEqual(
+        [],
+      );
+    }
+    // ...and the route table says so, pointing at the record route rather than at the
+    // inbound-only import route.
+    const writes = ROUTES.filter((route) => route.operations.includes("createMessage"));
+    expect(writes.map((route) => `${route.method} ${route.template}`)).toEqual(["POST /v1/messages/record"]);
+  });
+
+  it("records an outbound message through the record route, and the import route still refuses one", async () => {
+    // THE POSITIVE CONTROL FOR THE NEW ROUTE, in both directions, because either half
+    // alone would be satisfied by the wrong change:
+    //
+    //  * the store must SUCCEED at recording an outbound row — that is the gap that was
+    //    closed;
+    //  * `POST /v1/messages` must STILL answer 409 for one — the fix was to add a route,
+    //    not to loosen the guard that keeps the send path from being bypassed. A change
+    //    that lifted the 409 instead would pass every conformance case and quietly make
+    //    an outbound row creatable with no provider invocation behind it.
+    const subject = store();
+    const outbound = {
+      direction: "outbound",
+      from_addr: "sender@example.test",
+      to_addrs: ["recipient@example.test"],
+      subject: "recorded, not sent",
+      status: "queued",
+    };
+    const recorded = await subject.messages.createMessage(outbound);
+    expect(recorded.ok, `createMessage: ${JSON.stringify(recorded)}`).toBe(true);
+    if (!recorded.ok) return;
+    expect(recorded.value.direction).toBe("outbound");
+
+    const refusedByImport = await fetch(`${api.baseUrl}/v1/messages`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${api.apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ from: outbound.from_addr, to: outbound.to_addrs, direction: "outbound" }),
+    });
+    expect(refusedByImport.status, "POST /v1/messages must keep refusing an outbound write").toBe(409);
+    // The service's own document still declares that 409, so this is not a fixture-only
+    // property.
+    const paths = emailsSelfHostedOpenApi.paths as Record<string, Record<string, Record<string, unknown>>>;
+    expect(Object.keys(paths["/v1/messages"]?.["post"]?.["responses"] as object)).toContain("409");
+    // And the record route is the service's, not the fixture's invention.
+    expect(paths["/v1/messages/record"]?.["post"]).toBeDefined();
+  });
+
+  it("refuses a send-ledger field at the service as well as in the client", async () => {
+    // The client refuses these before the request (asserted above). This asserts the
+    // ROUTE refuses them too — otherwise the only thing standing between a fabricated
+    // idempotency fence and the ledger is a client-side check, and a row carrying an
+    // idempotency_key cannot be deleted afterwards.
+    for (const field of ["idempotency_key", "send_payload_hash", "send_state", "send_started_at"]) {
+      const answer = await fetch(`${api.baseUrl}/v1/messages/record`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${api.apiKey}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ from: "a@example.test", to: ["b@example.test"], [field]: "x" }),
+      });
+      expect(answer.status, `${field} must be refused by the route`).toBe(400);
+      const body = (await answer.json()) as Record<string, unknown>;
+      expect(body["reason"]).toBe("send_ledger_field");
+      expect(String(body["error"])).toContain(field);
+    }
   });
 });
 

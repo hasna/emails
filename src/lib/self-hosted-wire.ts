@@ -42,6 +42,7 @@ export function selfHostedTransportLimit(
 const STATIC_MESSAGE_PATH_SEGMENTS = new Set([
   "counts",
   "groups",
+  "record",
   "send",
   "send-intents",
   "threads",

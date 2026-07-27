@@ -18541,6 +18541,171 @@ export const SELF_HOSTED_RESPONSE_CONTRACTS: readonly SelfHostedResponseContract
   },
   {
     "method": "POST",
+    "operationId": "recordMessage",
+    "path": "/v1/messages/record",
+    "status": 200,
+    "schema": {
+      "type": "object",
+      "properties": {
+        "message": {
+          "$ref": "#/components/schemas/Message"
+        }
+      },
+      "required": [
+        "message"
+      ]
+    }
+  },
+  {
+    "method": "POST",
+    "operationId": "recordMessage",
+    "path": "/v1/messages/record",
+    "status": 201,
+    "schema": {
+      "type": "object",
+      "properties": {
+        "message": {
+          "$ref": "#/components/schemas/Message"
+        }
+      },
+      "required": [
+        "message"
+      ]
+    }
+  },
+  {
+    "method": "POST",
+    "operationId": "recordMessage",
+    "path": "/v1/messages/record",
+    "status": 400,
+    "schema": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "error": {
+              "type": "string",
+              "minLength": 1
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "error",
+            "reason"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "error": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "error"
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "method": "POST",
+    "operationId": "recordMessage",
+    "path": "/v1/messages/record",
+    "status": 401,
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "error",
+        "reason"
+      ]
+    }
+  },
+  {
+    "method": "POST",
+    "operationId": "recordMessage",
+    "path": "/v1/messages/record",
+    "status": 403,
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "error",
+        "reason"
+      ]
+    }
+  },
+  {
+    "method": "POST",
+    "operationId": "recordMessage",
+    "path": "/v1/messages/record",
+    "status": 413,
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": "string",
+          "enum": [
+            "request body too large"
+          ]
+        }
+      },
+      "required": [
+        "error"
+      ]
+    }
+  },
+  {
+    "method": "POST",
+    "operationId": "recordMessage",
+    "path": "/v1/messages/record",
+    "status": 500,
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": "string",
+          "enum": [
+            "internal error"
+          ]
+        }
+      },
+      "required": [
+        "error"
+      ]
+    }
+  },
+  {
+    "method": "POST",
     "operationId": "sendMessage",
     "path": "/v1/messages/send",
     "status": 200,

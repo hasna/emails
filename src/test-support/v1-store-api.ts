@@ -29,21 +29,22 @@
 // the contract is pinned to the server rather than to this file.
 //
 // WHERE THIS FIXTURE DIVERGES FROM THE REAL SERVICE — the complete list, because a
-// fixture's divergences are exactly what its green result does not cover. Two of the three
-// were found by adversarial review rather than disclosed up front, which is the reason the
-// list is now stated as a list.
+// fixture's divergences are exactly what its green result does not cover. Both were found
+// by adversarial review rather than disclosed up front, which is the reason the list is
+// stated as a list.
 //
-// 1. `POST /v1/messages` here ACCEPTS an outbound message. This is the headline finding of
-//    the work the fixture supports. The real service answers 409 "outbound messages must
-//    be sent through POST /v1/messages/send" for anything not inbound
-//    (service.ts:1453-1455), and that send route dispatches real mail through a provider —
-//    so there is no way to RECORD an outbound row without sending it. `createMessage` and
-//    `upsertMessage` are UNGATED on the seam, so a store has no capability to declare
-//    false and no legal refusal. FOUR conformance cases write outbound messages, so
-//    against `/v1` as it exists today the result is 36 passed / 8 refused / 4 FAILED, not
-//    40 / 8 / 0. Marked at the call site and listed in `HTTP_STORE_MISSING_ROUTES`.
+// The divergence that used to head this list is GONE, and the way it went is worth
+// recording. `POST /v1/messages` here USED TO accept an outbound message while the real
+// service answered 409 for anything not inbound — so four conformance cases passed against
+// this fixture and would have failed against `/v1` (36 / 8 / 4 rather than 40 / 8 / 0).
+// The fixture was modelling a route the service did not have. That route now exists
+// (`POST /v1/messages/record`), this fixture serves it, and `POST /v1/messages` here
+// answers the same 409 the service does — so the divergence was closed by building the
+// missing surface, not by relaxing the fixture. `src/server/self-hosted/store-conformance.integration.test.ts`
+// runs the same suite against the REAL service over HTTP, which is the check that keeps
+// this list honest from now on.
 //
-// 2. NO ROLE MODEL. This fixture authenticates one bearer key and grants it everything.
+// 1. NO ROLE MODEL. This fixture authenticates one bearer key and grants it everything.
 //    The real service gates three routes this store writes through behind a tenant
 //    owner/admin or an operator key: `POST /v1/send-keys/mint`, `PATCH /v1/send-keys/{id}`
 //    (`writeRequiresOperator` on the send-keys spec) and `PATCH /v1/addresses/{id}` when
@@ -51,9 +52,10 @@
 //    answer 403, so `mintSendKey`, `revokeSendKey` and `applyAddressOwnership` would
 //    refuse — and the two ungated conformance cases that drive them would go red. The
 //    client's 403 mapping is unit-tested directly instead; this fixture is not evidence
-//    for those three operations.
+//    for those three operations, and the live integration run supplies an operator key so
+//    that it is.
 //
-// 3. `PATCH /v1/send-keys/{id}` IGNORES the `revoked_at` value it is sent, revoking with
+// 2. `PATCH /v1/send-keys/{id}` IGNORES the `revoked_at` value it is sent, revoking with
 //    the store's own clock. The real service persists the client's timestamp verbatim
 //    (`revoked_at` is a writable column on the generic path). So the clock weakness that
 //    send-keys.ts documents at length — the revocation instant coming from the CLIENT — is
@@ -535,7 +537,7 @@ async function handleAddresses(context: RouteContext, id: string | null): Promis
 }
 
 async function handleMessageCollection(context: RouteContext): Promise<Response> {
-  const { store, url, method, body } = context;
+  const { store, url, method } = context;
   if (method === "GET") {
     const options = messagesOptions(url);
     if (options instanceof Response) return options;
@@ -548,11 +550,60 @@ async function handleMessageCollection(context: RouteContext): Promise<Response>
   }
   if (method !== "POST") return json(405, { error: "method not allowed" });
 
+  const parsed = messageWriteInput(context.body);
+  if ("response" in parsed) return parsed.response;
+  // THE INBOUND-ONLY GUARD, as the service enforces it (service.ts). This fixture used
+  // to accept an outbound row here and that was its headline divergence; recording one
+  // now goes to `/v1/messages/record`, exactly as it does against the real service.
+  if (parsed.input.direction !== "inbound") {
+    return json(409, { error: "outbound messages must be sent through POST /v1/messages/send" });
+  }
+  return writeMessage(store, parsed.input);
+}
+
+/**
+ * `POST /v1/messages/record` — persist a row in either direction, transmit nothing.
+ *
+ * The four send-ledger fields are refused with the service's own 400 and `reason`, so a
+ * client that stopped refusing them locally is caught here rather than silently served.
+ */
+async function handleMessageRecord(context: RouteContext): Promise<Response> {
+  if (context.method !== "POST") return json(405, { error: "method not allowed" });
+  const ledgerFields = SEND_LEDGER_FIELDS.filter((field) => field in context.body);
+  if (ledgerFields.length > 0) {
+    return json(400, {
+      error: `${ledgerFields.join(", ")} may only be written by POST /v1/messages/send`,
+      reason: "send_ledger_field",
+    });
+  }
+  const parsed = messageWriteInput(context.body);
+  if ("response" in parsed) return parsed.response;
+  return writeMessage(context.store, parsed.input);
+}
+
+/** With a source_id the write is an UPSERT: 201 on insert, 200 when it matched. */
+async function writeMessage(store: EmailStore, input: MessageWrite): Promise<Response> {
+  if (input.source_id !== undefined) {
+    const upserted = settled(await store.messages.upsertMessage(input));
+    if ("response" in upserted) return upserted.response;
+    return json(upserted.value.inserted ? 201 : 200, { message: publicMessage(upserted.value.record) });
+  }
+  const created = settled(await store.messages.createMessage(input));
+  return "response" in created ? created.response : json(201, { message: publicMessage(created.value) });
+}
+
+/** The four columns only the send path may write (service.ts, SEND_LEDGER_FIELDS). */
+const SEND_LEDGER_FIELDS = ["idempotency_key", "send_payload_hash", "send_state", "send_started_at"] as const;
+
+type MessageWrite = Parameters<EmailStore["messages"]["createMessage"]>[0];
+
+/** One body parser for both write routes, as the service has one. */
+function messageWriteInput(body: Record<string, unknown>): { input: MessageWrite } | { response: Response } {
   const from = body["from"] ?? body["from_addr"];
-  if (typeof from !== "string" || from.trim() === "") return json(400, { error: "from is required" });
+  if (typeof from !== "string" || from.trim() === "") return { response: json(400, { error: "from is required" }) };
   const rawTo = body["to"] ?? body["to_addrs"];
   const to = Array.isArray(rawTo) ? rawTo.map((entry) => String(entry)) : typeof rawTo === "string" ? [rawTo] : [];
-  if (to.length === 0) return json(400, { error: "to is required" });
+  if (to.length === 0) return { response: json(400, { error: "to is required" }) };
 
   const receivedAt = body["received_at"];
   const direction =
@@ -562,12 +613,6 @@ async function handleMessageCollection(context: RouteContext): Promise<Response>
         : "outbound"
       : String(body["direction"]);
 
-  // >>> THE ONE DIVERGENCE FROM THE REAL SERVICE. <<<
-  // service.ts:1453-1455 answers 409 here for anything not inbound, because outbound
-  // rows are ledger rows created only by the policy-guarded send path. That leaves the
-  // seam's UNGATED createMessage/upsertMessage unable to record an outbound message at
-  // all, which no capability can excuse. This fixture models the route a later phase
-  // must add; see HTTP_STORE_MISSING_ROUTES.
   const input = {
     from_addr: from,
     to_addrs: to,
@@ -596,15 +641,7 @@ async function handleMessageCollection(context: RouteContext): Promise<Response>
     ...(body["attachments"] === undefined ? {} : { attachments: body["attachments"] as unknown[] }),
     ...(body["source_id"] === undefined ? {} : { source_id: String(body["source_id"]) }),
   };
-
-  // With a source_id the write is an UPSERT: 201 on insert, 200 when it matched.
-  if (input.source_id !== undefined) {
-    const upserted = settled(await store.messages.upsertMessage(input));
-    if ("response" in upserted) return upserted.response;
-    return json(upserted.value.inserted ? 201 : 200, { message: publicMessage(upserted.value.record) });
-  }
-  const created = settled(await store.messages.createMessage(input));
-  return "response" in created ? created.response : json(201, { message: publicMessage(created.value) });
+  return { input };
 }
 
 async function handleMessageById(context: RouteContext, id: string): Promise<Response> {
@@ -724,6 +761,9 @@ async function route(context: RouteContext): Promise<Response> {
   }
 
   if (path === "/v1/messages") return handleMessageCollection(context);
+  // Before the `/v1/messages/{id}` matcher below, as it is on the service — otherwise
+  // "record" is read as an abbreviated message id.
+  if (path === "/v1/messages/record") return handleMessageRecord(context);
   if (path === "/v1/messages/counts") {
     if (method !== "GET") return json(405, { error: "method not allowed" });
     const domains = domainsParam(url);

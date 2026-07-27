@@ -3545,6 +3545,94 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
         },
       },
     },
+    // Record a message row without dispatching it. The counterpart of POST
+    // /v1/messages (inbound import only, 409 otherwise) and of POST /v1/messages/send
+    // (records AND transmits): this one is the only way to get an outbound row into the
+    // ledger without invoking a provider, and it refuses every send-ledger field so a
+    // row written here can never be confused with one the send fence produced.
+    "/v1/messages/record": {
+      post: {
+        operationId: "recordMessage",
+        summary:
+          "Record a message in either direction WITHOUT sending it. Supplying source_id makes the write idempotent. Scope emails:write.",
+        description:
+          "Persists a message row and transmits nothing. Unlike POST /v1/messages this accepts direction=outbound, and unlike POST /v1/messages/send it never invokes the configured provider. The four send-ledger fields (idempotency_key, send_payload_hash, send_state, send_started_at) are rejected with 400 send_ledger_field: only POST /v1/messages/send may write them.",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: {
+                  from: { type: "string" },
+                  to: { type: "array", items: { type: "string" } },
+                  cc: { type: "array", items: { type: "string" } },
+                  subject: { type: "string", nullable: true },
+                  text: { type: "string", nullable: true },
+                  html: { type: "string", nullable: true },
+                  status: { type: "string" },
+                  direction: {
+                    type: "string",
+                    enum: ["inbound", "outbound"],
+                    description:
+                      "Defaults to inbound when received_at, message_id or in_reply_to is present, and to outbound otherwise.",
+                  },
+                  received_at: { type: "string", format: "date-time", nullable: true },
+                  message_id: { type: "string", nullable: true },
+                  in_reply_to: { type: "string", nullable: true },
+                  is_read: { type: "boolean" },
+                  is_starred: { type: "boolean" },
+                  labels: { type: "array", items: { type: "string" } },
+                  headers: { type: "object", additionalProperties: true },
+                  attachments: { type: "array", items: { type: "object", additionalProperties: true } },
+                  provider_message_id: { type: "string", nullable: true },
+                  source_id: {
+                    type: "string",
+                    description:
+                      "Stable upstream id; enables idempotent upsert. A replay writes only the fields the body carries, so local read/star/label state survives it.",
+                  },
+                },
+                required: ["from", "to"],
+              },
+            },
+          },
+        },
+        responses: {
+          "200": {
+            description: "The source_id matched an existing row, which was updated",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: { message: { $ref: "#/components/schemas/Message" } },
+                  required: ["message"],
+                },
+              },
+            },
+          },
+          "201": {
+            description: "A new row was recorded",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: { message: { $ref: "#/components/schemas/Message" } },
+                  required: ["message"],
+                },
+              },
+            },
+          },
+          // Declared explicitly because this route's 400 can carry a `reason`, and the
+          // routine 400 the parity pass injects for every route with a request body is
+          // the CLOSED `{ error }` shape. Without this the service's own response would
+          // fail the generated wire contract.
+          "400": jsonResponse(
+            "The body is malformed, omits from/to, or names a send-ledger field",
+            closedErrorReasonSchema,
+          ),
+        },
+      },
+    },
     "/v1/messages/{id}": {
       get: {
         operationId: "getMessage",
