@@ -67,9 +67,13 @@ describe("MCP self_hosted guards", () => {
     });
   });
 
-  it("fires the email-ops self_hosted API-only guard for local-only send options", async () => {
-    // send_email routes to /v1, but local-only options (e.g. provider_id) are
-    // rejected by the email-ops "self_hosted API-only mode" guard before any call.
+  it("refuses a provider selector the send contract has no room for, and sends nothing", async () => {
+    // This assertion inverted when the email-ops family collapsed to one
+    // implementation. It used to check a guard in the deleted arm module whose
+    // refusal text told the caller which deployment word to set to reach the other
+    // arm's behaviour — a refusal that documented its own bypass. `provider_id` is
+    // now carried all the way to the one send path, which refuses it because the
+    // service selects the outbound provider itself.
     const result = await callTool("send_email", {
       from: "ops@example.com",
       to: ["user@example.com"],
@@ -78,7 +82,95 @@ describe("MCP self_hosted guards", () => {
       provider_id: "provider-1",
     });
     expect(result.isError).toBe(true);
-    expect(resultText(result)).toContain("self_hosted API-only mode");
+    expect(resultText(result)).toContain("--provider is not supported");
+    // The discriminating half: refused BEFORE dispatch, so no mail and no row.
+    expect(await stub.list("messages")).toHaveLength(0);
+  });
+
+  it("refuses the send options this build cannot carry instead of ignoring them", async () => {
+    // Four options are declared on send_email's schema but cannot be carried by
+    // the single send path. The failure being prevented is not a refusal that is
+    // too strict — it is a send that LOOKS successful while an option was dropped.
+    // `auth_token` makes that concrete: it selects the scoped send-key check, so a
+    // silently-ignored one is an authorization decision that never happened.
+    const cases: Array<[string, unknown]> = [
+      ["auth_token", "esk_example"],
+      ["unsubscribe_url", "https://example.com/u/1"],
+      ["headers", { "X-Thing": "1" }],
+      ["tags", { campaign: "spring" }],
+    ];
+
+    for (const [option, value] of cases) {
+      const result = await callTool("send_email", {
+        from: "ops@example.com",
+        to: ["user@example.com"],
+        subject: "uncarried",
+        text: "hi",
+        [option]: value,
+      });
+      expect(result.isError, `${option} must be refused`).toBe(true);
+      const text = resultText(result);
+      expect(text).toContain("option_not_carried");
+      expect(text).toContain(option);
+      // A refusal must not teach the caller how to defeat it. No setting, no
+      // variable, no "run it the other way" — only the option to remove.
+      expect(text).not.toMatch(/[A-Z][A-Z0-9]*_[A-Z0-9_]*=/);
+      // ...and nothing may have been sent on the way to the refusal.
+      expect(await stub.list("messages"), `${option} must not send`).toHaveLength(0);
+    }
+  });
+
+  it("does not fabricate an HTML part for a plain-text send", async () => {
+    // The two deleted arms disagreed about this and neither said so: the local one
+    // sent the text as given, this one markdown-rendered it into an HTML body the
+    // caller never wrote. One implementation cannot hold both, so the collapse
+    // picks the first — explicitly, because this tool has a separate `html`
+    // parameter for a caller who wants one. Asserted on BOTH sides of the seam
+    // (the local half is in src/mcp/tools/email-ops.test.ts) so the choice is
+    // pinned rather than incidental.
+    const result = await callTool("send_email", {
+      from: "ops@example.com",
+      to: ["user@example.com"],
+      subject: "text only",
+      text: "line one\nline two",
+    });
+
+    expect(result.isError).not.toBe(true);
+    const messages = await stub.list("messages");
+    expect(messages).toHaveLength(1);
+    expect(messages[0]?.["body_text"]).toBe("line one\nline two");
+    expect(messages[0]?.["body_html"] ?? null).toBeNull();
+  });
+
+  it("carries a template through the collapsed send path rather than refusing it", async () => {
+    // The deleted arm refused `template` and `template_vars` outright, on the
+    // grounds that the service's send route does not render templates. It does not
+    // have to: templates are read through their own family, so one implementation
+    // renders them here and sends the rendered result. This is capability the API
+    // configuration did not have before the collapse.
+    await stub.seed({
+      templates: [{
+        id: "tpl-1",
+        name: "welcome",
+        subject_template: "Hello {{name}}",
+        text_template: "Hi {{name}}, welcome.",
+      }],
+    });
+
+    const result = await callTool("send_email", {
+      from: "ops@example.com",
+      to: ["user@example.com"],
+      template: "welcome",
+      template_vars: { name: "Ada" },
+    });
+
+    expect(result.isError).not.toBe(true);
+    const messages = await stub.list("messages");
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      subject: "Hello Ada",
+      body_text: "Hi Ada, welcome.",
+    });
   });
 
   it("fails self-hosted-client-only tools without touching a local DB", async () => {

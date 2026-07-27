@@ -126,15 +126,24 @@ describe("MCP startup contract", () => {
   });
 
   it("keeps email operation implementation dependencies lazy", () => {
-    // Self-hosted-only: email ops route through the mail-data-source seam (/v1),
-    // no local DB module is imported anymore.
+    // ONE implementation. This test used to assert the opposite — that the module
+    // statically imported two sibling arm modules and dispatched between them on a
+    // deployment word — so it is the assertion that had to invert when the family
+    // collapsed. Every dependency below is reached through the owning family's
+    // FACADE and behind a dynamic import, so registering the tool set stays cheap.
     const lazyToolDeps = [
       "../../lib/mail-data-source.js",
+      "../../db/emails.js",
+      "../../db/email-content.js",
+      "../../db/templates.js",
+      "../../db/contacts.js",
+      "../../db/providers.js",
+      "../../db/scheduled.js",
+      "../../lib/sync.js",
+      "../../lib/stats.js",
       "../helpers.js",
     ];
     const source = readFileSync(join(toolsDir, "email-ops.ts"), "utf8");
-    const localSource = readFileSync(join(toolsDir, "email-ops.local.ts"), "utf8");
-    const remoteSource = readFileSync(join(toolsDir, "email-ops.remote.ts"), "utf8");
     const offenders: string[] = [];
 
     for (const match of source.matchAll(staticImport)) {
@@ -143,10 +152,20 @@ describe("MCP startup contract", () => {
     }
 
     expect(offenders).toEqual([]);
-    expect(source).toContain('from "./email-ops.local.js"');
-    expect(source).toContain('from "./email-ops.remote.js"');
-    expect(hasDynamicImport(localSource, "../helpers.js")).toBe(true);
-    for (const specifier of lazyToolDeps) expect(hasDynamicImport(remoteSource, specifier)).toBe(true);
+    for (const specifier of lazyToolDeps) {
+      expect(hasDynamicImport(source, specifier), `${specifier} must be imported lazily`).toBe(true);
+    }
+
+    // The arm modules are GONE, and no handler may reach past a facade into an
+    // implementation arm of another family — which is what the deleted local arm
+    // did for eleven of them. Test files are excluded the same way `toolFiles()`
+    // excludes them: a suite is not an implementation arm.
+    const familyModules = readdirSync(toolsDir).filter(
+      (file) => /^email-ops\./.test(file) && !/\.test\.(ts|tsx)$/.test(file),
+    );
+    expect(familyModules).toEqual(["email-ops.ts"]);
+    expect(source).not.toMatch(/from ["']\.\/email-ops\./);
+    expect(source).not.toMatch(/import\(["'][^"']*\.local\.js["']\)/);
   });
 
   it("keeps sequence implementation dependencies lazy", () => {
