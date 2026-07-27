@@ -340,6 +340,17 @@ describe("createForwardingRule", () => {
       if (!written.ok) throw new Error(`seeding rule ${n} failed: ${written.message}`);
     }
     const target = "source-0000@example.com";
+    // THE STORE'S OWN ORDER IS FORCED TO BE DETERMINISTIC, and finding out why this is
+    // necessary was worth the trouble: 520 rules written in a tight loop share an
+    // `updated_at` to the millisecond, so SQLite's `updated_at DESC, id DESC` falls through
+    // to a RANDOM uuid and which 500 land in the first page is chance. The control below
+    // ("the target is not in the first page") then held only ~500/520 of the time — a 4%
+    // flake that also made this test steal an unrelated mutant's kill during mutation
+    // testing. Stamping `updated_at` from the source address puts the target provably last.
+    db.run(
+      `UPDATE forwarding_rules
+          SET updated_at = datetime('2026-01-01 00:00:00', '+' || CAST(substr(source_address, 8, 4) AS INTEGER) || ' seconds')`,
+    );
 
     // THE CONTROL. A single clamped page really does miss the row, so the case is not
     // vacuous: without it, "the upsert found the row" would prove nothing.

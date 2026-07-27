@@ -113,21 +113,29 @@
 // WHAT REPLACES THE ARM CHOICE is the store's own answer. No branch on the store kind, on
 // the descriptor, or on the resolution plan. `src/store/` is untouched by this change.
 //
-// THREE GUARDS BELOW ARE UNREACHABLE BY CONSTRUCTION, and they are named here so a reviewer
+// FOUR GUARDS BELOW ARE UNREACHABLE BY CONSTRUCTION, and they are named here so a reviewer
 // does not have to re-derive it and so nobody writes a test that only appears to cover them.
-// Mutation testing reverted each change in this file one at a time; 27 of 30 mutants were
-// killed and these three survived, each because no input can reach the branch today:
+// Mutation testing reverted each change in this file one at a time; 26 of 30 mutants were
+// killed and these four survived, each because no input can reach the branch today:
 //
 //   1. `byRoute`'s `mode` and `id` tiebreakers. `ForwardingMode` has exactly ONE legal value,
 //      `toRule` faults on any other, and `(source_address, target_address, mode)` is UNIQUE
 //      on both schemas — so no two readable rules can tie. They exist for the day the enum
 //      grows, which is the day the tie becomes reachable.
-//   2. `recordForwardingDelivery`'s read-back null check. The row was written on the same
-//      connection two statements earlier.
-//   3. `listPendingForwarding`'s `requiredText(row, "inbound_email_id")`. It comes from
+//   2. `recordForwardingDelivery`'s read-back null check, and
+//   3. `toDelivery`'s status validation. Both sit behind the SAME fact: the row is read back
+//      on the same connection two statements after it was written, with a status this module
+//      validated before writing. They are defence on STORED data, kept for a row another
+//      writer left behind, and no input reaches either through this writer.
+//   4. `listPendingForwarding`'s `requiredText(row, "inbound_email_id")`. It comes from
 //      `inbound_emails.id`, a non-null PRIMARY KEY the query JOINs on.
 //
-// Every other guard in this file is killed by a test.
+// Every other guard in this file is killed by a test. One of those tests was FLAKY when it
+// was written and the mutation run is what exposed it: the 520-rule upsert case seeded rules
+// in a tight loop, so they shared an `updated_at` to the millisecond, SQLite's
+// `updated_at DESC, id DESC` fell through to a random uuid, and its control assertion held
+// only about 500/520 of the time — while stealing an unrelated mutant's kill. Its fixture now
+// stamps `updated_at` explicitly.
 
 import type { Database } from "./database.js";
 import { uuid } from "./runtime.js";

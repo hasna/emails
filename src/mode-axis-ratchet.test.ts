@@ -435,7 +435,7 @@ const root = join(import.meta.dir, "..");
  * step was still run, because the block above records a case where git flagged three counters
  * while eight auto-merged and four of those eight were wrong.
  *
- * Corpus of this change: 655 tracked, 654 scanned, 9,140,053 characters — both floors
+ * Corpus of this change: 655 tracked, 654 scanned, 9,141,571 characters — both floors
  * (500 files / 5,000,000 characters) cleared with room. Two files fewer than 65ed3a8, which is
  * exactly the two deleted arms; no test file was added, because this family's suite already
  * existed and was rewritten in place.
