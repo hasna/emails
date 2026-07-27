@@ -440,7 +440,9 @@ export function registerMiscCommands(program: Command, output: (data: unknown, f
     .description("Diagnose why inbound mail may not be reaching a local address")
     .action(async (address: string) => {
       try {
-        const { diagnoseInboundDeliveryLive, formatDeliveryDoctorReport } = await import("../../lib/delivery-doctor.local.js");
+        // The delivery doctor no longer has arms — one implementation reads the
+        // configured store — so this imports the module itself rather than an arm.
+        const { diagnoseInboundDeliveryLive, formatDeliveryDoctorReport } = await import("../../lib/delivery-doctor.js");
         const report = await diagnoseInboundDeliveryLive(address);
         output(report, formatDeliveryDoctorReport(report));
       } catch (e) {
