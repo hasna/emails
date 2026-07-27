@@ -8,6 +8,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import type { Subprocess } from "bun";
 import { SelfHostedHttpError, resetSelfHostedConfigCache } from "./self-hosted-store.js";
+import { DATABASE_PATH_SETTINGS, StoreConfigurationError } from "../store-resolution.js";
 import { listContacts } from "./contacts.js";
 import { listGroups } from "./groups.js";
 import { listOwners } from "./owners.js";
@@ -109,10 +110,57 @@ describe("resource repos route reads to selfHosted in selfHosted mode", () => {
     expect(rows[0]).not.toHaveProperty("api_key");
   });
 
-  test("listScheduledEmails returns selfHosted rows", () => {
-    const rows = listScheduledEmails();
-    expect(rows.map((s) => s.id)).toEqual(["s1"]);
-    expect(rows[0]!.to_addresses).toEqual(["b@x.com"]);
+  // The schedule no longer participates in the routing this file measures, and the way it
+  // stopped is worth stating precisely. Its family has collapsed to one implementation over
+  // the store seam, so it reaches this same `/v1` service because STORAGE CONFIGURATION
+  // named an Emails API — not because a mode word chose an arm.
+  //
+  // THE OLD PREMISE IS NO LONGER EXPRESSIBLE, which is the axis deletion working rather
+  // than a gap: every other case here runs with a local database configured AND an API
+  // configured, and reads the API because the mode word said so. `planEmailStore` treats
+  // that pair as a CONTRADICTION and refuses outright — deliberately no precedence, because
+  // a winner picked for you sends mail to the store you did not mean. So the database path
+  // is unset for the duration of this one case, leaving exactly one configured store.
+  //
+  // What it still guards is worth guarding: the rows must come from the service, mapped, and
+  // not from a local read (which is why this file leaves the local database empty at all).
+  test("listScheduledEmails reads the configured API store", async () => {
+    const restore = DATABASE_PATH_SETTINGS.map((key) => [key, process.env[key]] as const);
+    for (const [key] of restore) delete process.env[key];
+    try {
+      const rows = await listScheduledEmails();
+      expect(rows.map((s) => s.id)).toEqual(["s1"]);
+      expect(rows[0]!.to_addresses).toEqual(["b@x.com"]);
+    } finally {
+      for (const [key, value] of restore) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+
+  test("a local database AND an API both configured is refused, never silently resolved", async () => {
+    // The other half of the same finding, asserted rather than left implicit: with both
+    // configured the read must REFUSE. A precedence rule here would have made every case
+    // above pass while reading the wrong store.
+    //
+    // The contradiction is CONSTRUCTED here rather than inherited from the harness. The
+    // hermetic runner sets a database path and a bare `bun test` does not, so a case that
+    // read whatever the environment happened to hold would assert one thing under
+    // `bun run test` and something else run directly — and the version of this that did
+    // exactly that is how it was caught.
+    const key = DATABASE_PATH_SETTINGS[1];
+    const previous = process.env[key];
+    process.env[key] = ":memory:";
+    try {
+      expect(process.env.EMAILS_SELF_HOSTED_URL).toBeTruthy();
+      // AWAITED. `expect(promise).rejects` without it is a floating assertion that passes
+      // whatever the promise does.
+      await expect(listScheduledEmails()).rejects.toThrow(StoreConfigurationError);
+    } finally {
+      if (previous === undefined) delete process.env[key];
+      else process.env[key] = previous;
+    }
   });
 
   test("email log/search route to /v1/messages and surface only outbound", () => {

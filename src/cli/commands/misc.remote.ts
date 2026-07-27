@@ -59,9 +59,9 @@ function colorScheduledStatus(status: string): string {
   return chalk.red(status);
 }
 
-function cancelScheduled(id: string, describe: (shortId: string) => string): void {
+async function cancelScheduled(id: string, describe: (shortId: string) => string): Promise<void> {
   const resolvedId = resolveId("scheduled_emails", id);
-  if (!cancelScheduledEmail(resolvedId)) {
+  if (!(await cancelScheduledEmail(resolvedId))) {
     handleError(new Error(`Cannot cancel email ${id} (may already be sent or cancelled)`));
   }
   console.log(chalk.green(describe(resolvedId.slice(0, 8))));
@@ -81,11 +81,13 @@ export function registerMiscCommands(program: Command, output: (data: unknown, f
     .option("--limit <n>", "Maximum scheduled emails to show (default 20 compact, 50 verbose/json)")
     .option("--offset <n>", "Number of scheduled emails to skip", "0")
     .option("--verbose", "Show expanded list hints")
-    .action((opts: ScheduleListOptions) => {
+    .action(async (opts: ScheduleListOptions) => {
       try {
         const status = scheduledStatusOf(opts);
         const page = parseCliListPage(opts);
-        const emails = listScheduledEmailSummaries({
+        // Reads the store seam (async). A schedule it could not enumerate to the end is a
+        // THROW landing on `handleError`, never a short page presented as the whole list.
+        const emails = await listScheduledEmailSummaries({
           ...(status ? { status } : {}),
           ...page,
         });
@@ -115,9 +117,11 @@ export function registerMiscCommands(program: Command, output: (data: unknown, f
   scheduledCmd
     .command("cancel <id>")
     .description("Cancel a scheduled email")
-    .action((id: string) => {
+    .action(async (id: string) => {
       try {
-        cancelScheduled(id, (shortId) => `✓ Scheduled email cancelled: ${shortId}`);
+        // Awaited so a refusal from the store reaches `handleError` instead of surfacing as
+        // an unhandled rejection after the command has already reported success.
+        await cancelScheduled(id, (shortId) => `✓ Scheduled email cancelled: ${shortId}`);
       } catch (e) {
         handleError(e);
       }
@@ -131,11 +135,13 @@ export function registerMiscCommands(program: Command, output: (data: unknown, f
     .option("--limit <n>", "Maximum scheduled emails to show (default 20 compact, 50 verbose/json)")
     .option("--offset <n>", "Number of scheduled emails to skip", "0")
     .option("--verbose", "Show expanded list hints")
-    .action((opts: ScheduleListOptions) => {
+    .action(async (opts: ScheduleListOptions) => {
       try {
         const status = scheduledStatusOf(opts);
         const page = parseCliListPage(opts);
-        const emails = listScheduledEmailSummaries({
+        // Reads the store seam (async). A schedule it could not enumerate to the end is a
+        // THROW landing on `handleError`, never a short page presented as the whole list.
+        const emails = await listScheduledEmailSummaries({
           ...(status ? { status } : {}),
           ...page,
         });
@@ -160,9 +166,11 @@ export function registerMiscCommands(program: Command, output: (data: unknown, f
   scheduleCmd
     .command("cancel <id>")
     .description("Cancel a scheduled email")
-    .action((id: string) => {
+    .action(async (id: string) => {
       try {
-        cancelScheduled(id, (shortId) => `✓ Cancelled: ${shortId}`);
+        // Awaited so a refusal from the store reaches `handleError` instead of surfacing as
+        // an unhandled rejection after the command has already reported success.
+        await cancelScheduled(id, (shortId) => `✓ Cancelled: ${shortId}`);
       } catch (e) { handleError(e); }
     });
 

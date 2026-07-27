@@ -28,6 +28,7 @@
 
 import { resetSelfHostedConfigCache } from "../db/self-hosted-store.js";
 import { resetMailDataSource } from "../lib/mail-data-source.js";
+import { emailsSelfHostedOpenApi } from "../server/self-hosted/openapi.js";
 import { SELF_HOSTED_RESOURCES, resourceListOrderBy } from "../server/self-hosted/resources.js";
 import { DATABASE_PATH_SETTINGS } from "../store-resolution.js";
 
@@ -53,6 +54,34 @@ function declaredListOrder(): Record<string, Array<{ column: string; desc: boole
   return order;
 }
 
+/**
+ * The service's published contract for the generic `/v1/<resource>` routes, sliced to the
+ * two things `src/store-http/resources.ts` reads off it: the list route's query parameters
+ * (its declared equality filters) and the create route's request schema (its writable
+ * columns, with `additionalProperties: false`).
+ *
+ * A SLICE of the generated document, never a restatement of it. The whole document is about
+ * 550 KB, which is a lot to hand a subprocess through its environment; these two fields are
+ * 25 KB and are the entire surface the store consults. Anything else the store ever starts
+ * reading will be ABSENT rather than wrong, which faults loudly in that store by design.
+ */
+function publishedResourceContract(): { paths: Record<string, unknown> } {
+  const published = emailsSelfHostedOpenApi.paths as Record<string, Record<string, unknown>>;
+  const paths: Record<string, unknown> = {};
+  for (const spec of SELF_HOSTED_RESOURCES) {
+    const key = `/v1/${spec.path}`;
+    const route = published[key];
+    if (!route) continue;
+    const get = route["get"] as { parameters?: unknown } | undefined;
+    const post = route["post"] as { requestBody?: unknown } | undefined;
+    paths[key] = {
+      get: { parameters: get?.parameters ?? [] },
+      post: { requestBody: post?.requestBody ?? null },
+    };
+  }
+  return { paths };
+}
+
 /** Seed data keyed by /v1 resource name (e.g. `{ domains: [...], messages: [...] }`). */
 export type V1StubResources = Record<string, Array<Record<string, unknown>>>;
 
@@ -61,6 +90,28 @@ export interface V1StubOptions {
   apiKey?: string;
   /** Initial resources. Also used as the baseline restored by `reset()`. */
   seed?: V1StubResources;
+  /**
+   * Serve `GET /v1/openapi.json`. **Default false**, and the default is load-bearing.
+   *
+   * `src/store-http/` reads the published contract before any filtered list and before any
+   * write — it is that store's only source of truth for which columns a resource accepts
+   * and which query parameters its list route filters on, so it can refuse a field the
+   * service would accept and silently drop. A missing document is deliberately a FAULT
+   * there rather than a refusal, and AT LEAST ONE existing suite uses this fixture's
+   * inability to serve it as a NEGATIVE CONTROL (src/lib/analytics.test.ts asserts the
+   * delivery trend comes back unread, not zero, when the service cannot serve the
+   * contract). Serving it by default would have quietly turned that control green.
+   *
+   * So a suite that needs the contract asks for it, and the ask is visible in the diff.
+   *
+   * Turning this on does NOT make the fixture faithful for filtered reads: the generic
+   * list handler still IGNORES equality filters and merely records the query string, so it
+   * serves the UNFILTERED list for a filter it now declares it accepts. A client that
+   * trusted the filter would be wrong here and right in production, which is worse than no
+   * evidence at all — use `src/test-support/v1-store-api.ts` for filtered or paged
+   * store-seam tests.
+   */
+  openapi?: boolean;
 }
 
 export interface V1Stub {
@@ -248,6 +299,9 @@ let listRotateCalls = {};
 // (SELF_HOSTED_RESOURCES + resourceListOrderBy) so the stub orders lists the way the
 // real route does. Shape: { resource: [{ column, desc }, ...] }.
 const listOrder = safeParse(process.env.V1_STUB_LIST_ORDER);
+// The service's published contract for the generic resource routes, injected from the
+// server's own generated OpenAPI document (see the /v1/openapi.json route below).
+const openApiContract = safeParse(process.env.V1_STUB_OPENAPI);
 // Query string of every generic list request, per resource (see /v1/__list_queries).
 // Lets a test assert that a client pushed its filters SERVER-side instead of
 // dragging the whole table over and filtering in memory. Cleared on __reset.
@@ -858,6 +912,38 @@ const server = Bun.serve({
       // logout / switch-tenant / bootstrap-owner require auth → fall through.
     }
 
+    // ── the published contract, UNAUTHENTICATED, as the real service serves it ──
+    //
+    // ADDED BY THE db/scheduled COLLAPSE, and purely additive: this path used to 404.
+    //
+    // WHY IT IS NEEDED. A repository that has collapsed onto the store seam reaches an
+    // Emails API through src/store-http/, and that store reads /v1/openapi.json before any
+    // filtered list and before any write. The document is its single source of truth for
+    // which columns a resource accepts and which query parameters its list route filters
+    // on, so it can REFUSE a field the service would otherwise accept and silently drop.
+    // A missing document is deliberately a FAULT rather than a refusal there — a store that
+    // cannot keep that promise must not pretend to — so every stub-driven test whose command
+    // now reads through the seam faulted HERE instead of at whatever it was testing.
+    //
+    // The contract is the SERVER'S OWN, injected by startV1Stub from the generated document
+    // rather than restated in this file, for the same reason the list ordering above is:
+    // a hand-written contract in a fixture is a second source of truth that goes stale
+    // silently, and this fixture's only value is that its contract is the service's.
+    //
+    // THIS DOES NOT MAKE THE STUB FAITHFUL FOR FILTERED READS. The generic list handler
+    // below still IGNORES equality filters and merely records the query string, so it will
+    // serve the UNFILTERED list for a filter it now declares it accepts. A client that
+    // trusted the filter is still wrong here and right in production, which is worse than
+    // useless as evidence: use src/test-support/v1-store-api.ts for filtered or paged
+    // store-seam tests.
+    // Absent unless the suite asked for it (V1StubOptions.openapi) — see that field's note.
+    // Without it this path answers the same 404 it always did, which is what keeps an
+    // existing suite's negative control a control.
+    if (req.method === "GET" && parts[0] === "v1" && parts[1] === "openapi.json") {
+      if (!openApiContract.paths) return json({ error: "not found" }, 404);
+      return json(openApiContract);
+    }
+
     // Auth gate: accept the operator API key OR a valid user session token.
     const bearer = bearerOf(req);
     const isApiKey = Boolean(KEY) && bearer === KEY;
@@ -1238,6 +1324,7 @@ export async function startV1Stub(options: V1StubOptions = {}): Promise<V1Stub> 
       V1_STUB_RESOURCE_SPECS: JSON.stringify(V1_STUB_RESOURCE_SPECS),
       V1_STUB_RESOURCE_DEFAULTS: JSON.stringify(V1_STUB_RESOURCE_DEFAULTS),
       V1_STUB_LIST_ORDER: JSON.stringify(declaredListOrder()),
+      V1_STUB_OPENAPI: options.openapi === true ? JSON.stringify(publishedResourceContract()) : "",
     },
     stdout: "pipe",
     stderr: "inherit",

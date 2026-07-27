@@ -280,15 +280,51 @@ const root = join(import.meta.dir, "..");
  * variable, so the remaining five counters do not move.
  *
  * Corpus of this merged change: 660 tracked, 659 scanned, 8,970,424 characters.
+ * RE-MEASURED AND RE-PINNED AGAIN on the `src/db/scheduled` collapse, rebased three times in
+ * a row as the sibling collapses landed under it.
+ *
+ * THIS BRANCH HIT EVERY FAILURE MODE THIS BLOCK WARNS ABOUT, on three consecutive rebases,
+ * which is the clearest evidence yet that the PROCEDURE and not the conflict is what protects
+ * these numbers. Onto a2c940b: NO line conflicted at all, because this branch had not yet
+ * touched the block — so all eleven arrived from main silently, which is the per-metric
+ * minimum by another route, and the tree measured seven counters lower. Onto 1546869: three
+ * of eleven conflicted and eight merged with no marker. Onto 832d3c7: two regions conflicted
+ * and the rest merged silently again. Every time the answer was identical — zero all eleven,
+ * then measure the merged tree over the real `git ls-files` corpus. An absent conflict is not
+ * agreement; it is the absence of a question.
+ *
+ * WHAT THIS COLLAPSE ITSELF MOVES, measured on the commit it was rebased onto (832d3c7, where
+ * all eleven live counts equalled their declared ceilings) and again on the merged tree:
+ * `twoArmFamilies` and `remoteArmModules` by one each (the schedule family's two arms are
+ * deleted); `routedFacadeDefinitions` by one and `routedCallExpressions` by EIGHT — its facade
+ * held a dispatch helper and dispatched all eight of its exports through it, the largest
+ * dispatch table collapsed so far; `selfHostedResourceBranches` by two and
+ * `selfHostedResourceReferences` by seven (the local arm asked twice whether it was really the
+ * local arm, and the second arm reached the resource store five times); and
+ * `isSelfHostedModeReferences` by two (the deleted facade imported the client-side predicate
+ * and called it once). Neither deleted arm named the deployment setting or parsed it, so the
+ * three resolver/parser counters and the env counter do not move.
+ *
+ * ARITHMETIC A REVIEWER CAN CHECK RATHER THAN TRUST. Main at 832d3c7 pinned
+ * 33 / 33 / 24 / 273 / 47 / 199 / 66 / 62 / 65 / 16 / 235 and this branch had pinned
+ * 33 / 33 / 24 / 267 / 45 / 192 / 64 / 64 / 65 / 16 / 235 for its own tree. A per-metric
+ * minimum is 33 / 33 / 24 / 267 / 45 / 192 / 64 / 62 / 65 / 16 / 235. The MERGED tree measures
+ * 32 / 32 / 23 / 265 / 45 / 192 / 64 / 62 / 65 / 16 / 235 — so the minimum would have shipped
+ * twoArmFamilies, remoteArmModules and routedFacadeDefinitions one wide each and
+ * routedCallExpressions TWO wide, all four green under `<=`, because the two collapses removed
+ * DISJOINT references and a minimum cannot see that.
+ *
+ * Corpus of the merged change: 658 tracked, 657 scanned, 9,001,510 characters — two fewer
+ * tracked files than main, which is exactly the two deleted arms.
  */
 const CEILINGS: Record<string, number> = {
-  twoArmFamilies: 33,
-  remoteArmModules: 33,
-  routedFacadeDefinitions: 24,
-  routedCallExpressions: 273,
-  selfHostedResourceBranches: 47,
-  selfHostedResourceReferences: 199,
-  isSelfHostedModeReferences: 66,
+  twoArmFamilies: 32,
+  remoteArmModules: 32,
+  routedFacadeDefinitions: 23,
+  routedCallExpressions: 265,
+  selfHostedResourceBranches: 45,
+  selfHostedResourceReferences: 192,
+  isSelfHostedModeReferences: 64,
   getEmailsModeReferences: 62,
   resolveEmailsModeReferences: 65,
   normalizeEmailsModeReferences: 16,

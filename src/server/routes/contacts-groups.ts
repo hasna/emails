@@ -2,7 +2,7 @@
 import { listContacts, suppressContact, unsuppressContact } from '../../db/contacts.local.js';
 import { listTemplateSummaries, getTemplate, createTemplate, deleteTemplate } from '../../db/templates.local.js';
 import { listGroups, createGroup, deleteGroup, getGroupByName, listMemberSummaries, getMember, addMember, removeMember } from '../../db/groups.local.js';
-import { listScheduledEmailSummaries, cancelScheduledEmail } from '../../db/scheduled.local.js';
+import { listScheduledEmailSummaries, cancelScheduledEmail } from '../../db/scheduled.js';
 import { getEmailContent } from '../../db/email-content.local.js';
 import { getAnalytics } from '../../lib/analytics.js';
 import { exportEmailsCsv, exportEmailsJson, exportEventsCsv, exportEventsJson } from '../../lib/export.js';
@@ -180,7 +180,9 @@ if (path === "/api/scheduled" && method === "GET") {
       ...(statusParam ? { status: statusParam } : {}),
       ...queryPage(url, 100),
     };
-    return json(listScheduledEmailSummaries(opts));
+    // Reads the store seam (async). A schedule it could not enumerate to the end raises,
+    // and lands on `internalError` below rather than being served as a short page.
+    return json(await listScheduledEmailSummaries(opts));
   } catch (e) { return internalError(e); }
 }
 
@@ -190,7 +192,7 @@ if (scheduledMatch && method === "DELETE") {
   const id = resolveId("scheduled_emails", scheduledMatch[1]!);
   if (!id) return notFound();
   try {
-    const cancelled = cancelScheduledEmail(id);
+    const cancelled = await cancelScheduledEmail(id);
     if (!cancelled) return badRequest("Cannot cancel email (may already be sent or cancelled)");
     return json({ ok: true });
   } catch (e) { return internalError(e); }
