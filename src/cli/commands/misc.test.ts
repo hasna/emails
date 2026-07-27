@@ -8,8 +8,12 @@
 // out-of-process /v1 stub (see src/test-support/v1-stub.ts).
 //
 // What stays server-only is the scheduler LOOP and the batch sender (both need
-// the local provider send pipeline) and `doctor delivery` (local ingestion
-// diagnosis, still a stub in src/lib/delivery-doctor.remote.ts). `completion`
+// the local provider send pipeline) and `doctor delivery`. That last one is now a
+// property of THIS command family alone: src/lib/delivery-doctor.ts has collapsed to a
+// single implementation that reads whichever store the storage configuration names, so
+// the diagnosis itself no longer refuses. This arm's `serverOnly` refusal stands until
+// the misc family is collapsed too, and the MCP `diagnose_inbound_delivery` tool — which
+// goes through the module rather than through this arm — already answers. `completion`
 // and `verify-email` remain pure local commands.
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
 import { Command } from "commander";
