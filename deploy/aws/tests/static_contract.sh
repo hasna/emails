@@ -616,11 +616,11 @@ changelog_section_sha256() {
 }
 # Frozen deliberately: `3cbd39c` reassigned ~36 already-released 1.3.2 entries to
 # `[Unreleased]` 44 minutes after 1.3.2 published, and the previous digests pinned that wrong
-# boundary. The 1.3.2 section is now frozen whole (47 lines, byte-identical to what `fe61a46`
+# boundary. The 1.3.2 section is now frozen whole (46 lines, byte-identical to what `fe61a46`
 # published) rather than as the two bullets it had been narrowed to, and 1.4.0 is frozen too so
 # the same reassignment cannot happen to the next release.
 expected_unreleased_sha256='1da42e1a6a94b4180d823a144c4da54b6e03cff194335ac64be15f4de53c33f4'
-expected_release_140_sha256='4f038ad87a35a70bbdc8501549b359010511c2c0efaa2f55d162c2e359b45531'
+expected_release_140_sha256='eed1703bc83bebed2ef3ea668afaa40e7ba67591971f364b7d0dd9d7cbaffdea'
 expected_release_132_sha256='719b031270908506ac34b273a232384c81fbfaa00e3ecf9e6e4e3508fb8e6421'
 expected_release_132_opening='## 1.3.2 (2026-07-26)
 

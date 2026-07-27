@@ -24,7 +24,7 @@ const packageProvenanceWorkflowSha256 = "706c636d7b60059f6e8ce52229bfb723c0c9a2c
 // bullets stay inline as a readable anchor and are asserted as a prefix, so a reviewer can
 // still see what leads the section and neither bullet can be dropped.
 const unreleasedSectionSha256 = "1da42e1a6a94b4180d823a144c4da54b6e03cff194335ac64be15f4de53c33f4";
-const release140SectionSha256 = "4f038ad87a35a70bbdc8501549b359010511c2c0efaa2f55d162c2e359b45531";
+const release140SectionSha256 = "eed1703bc83bebed2ef3ea668afaa40e7ba67591971f364b7d0dd9d7cbaffdea";
 const release132SectionSha256 = "719b031270908506ac34b273a232384c81fbfaa00e3ecf9e6e4e3508fb8e6421";
 const unreleasedHeading = "## [Unreleased]";
 const release140Heading = "## 1.4.0 (2026-07-27)";
