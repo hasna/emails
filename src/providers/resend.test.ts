@@ -1,6 +1,8 @@
 import { describe, it, expect, mock, beforeEach } from "bun:test";
 import type { Provider } from "../types/index.js";
 import { ProviderConfigError } from "../types/index.js";
+import { formatDnsTable } from "../lib/dns.js";
+import { providerDnsPublishing } from "./index.js";
 
 // ─── Mocks for resend ──────────────────────────────────────────────────────────
 
@@ -260,6 +262,24 @@ describe("ResendAdapter.getDnsRecords", () => {
     const adapter = new ResendAdapter(makeProvider());
     const records = await adapter.getDnsRecords("unknown.com");
     expect(records).toEqual([]);
+  });
+
+  it("renders its empty result as an empty result, not as a provider with no DNS", async () => {
+    // The positive control for the `publishes: true` empty branch of
+    // formatDnsTable: this is the ONLY shipped provider whose adapter can return
+    // [] while the provider type genuinely does publish DNS (SES always appends
+    // SPF+DMARC, so it never can). Without this the branch would be unreachable
+    // from real adapter code and could rot untested.
+    const provider = makeProvider();
+    const records = await new ResendAdapter(provider).getDnsRecords("unknown.com");
+    expect(records).toEqual([]);
+
+    const rendered = formatDnsTable(records, providerDnsPublishing(provider));
+    expect(rendered).toContain("does publish DNS records");
+    expect(rendered).toContain("not been added to the provider");
+    // The sandbox explanation must not leak onto a domain that WILL have records.
+    expect(rendered).not.toContain("none are expected");
+    expect(rendered).not.toContain("sandbox");
   });
 
   it("returns empty array when domains list has no data", async () => {

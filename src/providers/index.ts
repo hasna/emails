@@ -1,4 +1,4 @@
-import type { DnsRecord, DnsStatus, Provider, SendEmailOptions, Stats } from "../types/index.js";
+import type { DnsPublishingSupport, DnsRecord, DnsStatus, Provider, SendEmailOptions, Stats } from "../types/index.js";
 import { ProviderConfigError } from "../types/index.js";
 import type { ProviderAdapter, RemoteAddress, RemoteDomain, RemoteEvent } from "./interface.js";
 
@@ -82,6 +82,47 @@ function assertProviderConfig(provider: Provider): void {
       return;
     default:
       throw new ProviderConfigError(`Unknown provider type: ${(provider as { type?: unknown }).type}`);
+  }
+}
+
+/**
+ * Whether `provider`'s type publishes DNS records at all.
+ *
+ * Lives here, next to `assertProviderConfig()` and `getAdapter()`, because this
+ * file is already the one place that decides anything from `ProviderType` — the
+ * alternative is a `provider.type === "sandbox"` test at every surface that
+ * renders records, which is exactly the drift this answers once.
+ *
+ * The switch is exhaustive and the default throws, so adding a provider type
+ * forces an explicit answer here rather than silently inheriting "publishes".
+ * That direction matters: inheriting the wrong default would print DNS advice
+ * for a provider that has none, or bury a real empty result.
+ *
+ * Reading it needs no credentials and does not load an adapter, so it is safe on
+ * a path that only formats output.
+ */
+export function providerDnsPublishing(provider: Provider): DnsPublishingSupport {
+  switch (provider.type) {
+    case "ses":
+    case "resend":
+      // Both hand mail to infrastructure that authenticates on the sending
+      // domain, so both have DKIM/SPF/DMARC for the operator to publish.
+      return { publishes: true };
+    case "sandbox":
+      return {
+        publishes: false,
+        reason:
+          "a sandbox provider captures mail in the local store instead of handing it to a "
+          + "DNS-authenticated sender, so a domain on one has no DKIM, SPF or DMARC of its own",
+        instead:
+          "Nothing is missing and nothing needs publishing. Move the domain to an SES or Resend "
+          + "provider when you want records to publish.",
+      };
+    default:
+      throw new ProviderConfigError(
+        `Unknown provider type: ${(provider as { type?: unknown }).type}. `
+          + "Declare whether it publishes DNS records in providerDnsPublishing().",
+      );
   }
 }
 

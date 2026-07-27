@@ -7,7 +7,7 @@ import { suspendAddress, activateAddress, setAddressQuota } from '../../db/addre
 import { createAlias, createCatchAll, removeAlias, getAlias, listAliases, resolveAlias } from '../../db/aliases.js';
 import { createSendKey, listSendKeySummaries, revokeSendKey, getSendKey, canOwnerSendFrom } from '../../db/send-keys.js';
 import { getProvider } from '../../db/providers.js';
-import { getAdapter } from '../../providers/index.js';
+import { getAdapter, providerDnsPublishing } from '../../providers/index.js';
 import { assessDomainReadiness } from '../../lib/domain-readiness.js';
 import { resolveEmailsMode } from '../../lib/mode.js';
 import { formatError, resolveId, DomainNotFoundError, AddressNotFoundError, ProviderNotFoundError } from '../helpers.js';
@@ -230,7 +230,11 @@ export function registerDomainTools(server: McpServer): void {
       const adapter = getAdapter(provider);
       const records = await adapter.getDnsRecords(domain);
       const { formatDnsTable } = await import("../../lib/dns.js");
-      return { content: [{ type: "text", text: formatDnsTable(records) }] };
+      // The provider's DNS-publishing answer travels with the records so an empty
+      // list is not rendered as a failed lookup. A sandbox provider returns []
+      // unconditionally by design, and the caller here is usually an agent that
+      // would otherwise report the operator's DNS as broken.
+      return { content: [{ type: "text", text: formatDnsTable(records, providerDnsPublishing(provider)) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
     }
