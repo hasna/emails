@@ -42,9 +42,9 @@ finds themselves adding one has mis-read this plan.
 
 The one-line version, and the strongest argument in the program:
 
-> The deployment-mode variable set to `self_hosted` means **opposite things in the two shipped
-> binaries.** In the `emails` CLI it means *"become an HTTP client"*. In `emails-serve` it means
-> *"become a Postgres server"*.
+> The deployment-mode variable set to `self_hosted` means **opposite things in two of the three
+> shipped binaries.** In the `emails` CLI it means *"become an HTTP client"*. In `emails-serve` it
+> means *"become a Postgres server"*. (`emails-mcp` reads it too, and inherits the CLI's meaning.)
 
 Two definitions of the same predicate exist today and prove it:
 
@@ -68,7 +68,7 @@ is the point of the program and needs no argument; raising one must be argued in
 |---|---|---|
 | `twoArmFamilies` | 43 | facades with two or more implementation arms — **structural, no identifier** |
 | `remoteArmModules` | 43 | `src/**/*.remote.*` HTTP-arm modules |
-| `routedFacadeDefinitions` | 30 | definitions of the dispatch helper, one per facade |
+| `routedFacadeDefinitions` | 30 | definitions of the dispatch helper — in 30 of the 43 facades; the other 13 dispatch without it |
 | `routedCallExpressions` | 293 | dispatch call sites — exports whose implementation is picked at runtime |
 | `selfHostedResourceBranches` | 47 | mode-gated resource-gate branches inside `*.local.*` |
 | `selfHostedResourceReferences` | 203 | the same gate anywhere in the tree (superset of the above) |
@@ -204,11 +204,16 @@ sites, and lowers `twoArmFamilies`, `remoteArmModules`, `routedFacadeDefinitions
 `routedCallExpressions` together. The `*.local.*` mode-gated branches inside it stay (§5.2).
 
 **Phase 5 — CLI command families and the TUI data layer.** Strictly after the db families they
-import; `src/cli/tui/data` has the largest fan-in in the repo (16 production importers) and goes
-last within the phase. The 8 branches on the data source's `mode` label — 5 real branches at
-`src/cli/commands/send.ts:136` and `src/cli/commands/inbox.local.ts:178,496,1006,1011`, plus 3
-pass-throughs at `src/cli/commands/inbox.remote.ts:427,679` and the TUI state — are deployment-mode
-decisions wearing a data-source costume and go with them. Do not replace the label with another
+import; `src/cli/tui/data` has the largest fan-in of the 43 two-arm families (16 production
+importers; next is `src/db/providers` at 12) and goes last within the phase. The branches on the data
+source's `mode` label — 5 at `src/cli/commands/send.ts:136` and
+`src/cli/commands/inbox.local.ts:178,496,1006,1011`, plus 3 pass-throughs at
+`src/cli/commands/inbox.remote.ts:427,679` and the TUI state, as recorded in
+`src/store/descriptor.ts:6-9` — are deployment-mode decisions wearing a data-source costume and go
+with them. **That recorded count of 8 is the sites at the top of the call chain, not all of them**:
+the two pass-throughs feed two further branches on the same value at
+`src/cli/commands/inbox.remote.ts:1095,1107`, and `src/lib/mail-data-source.ts:487` compares it for
+memoisation. Grep the label, do not work from the list. Do not replace it with another
 narrow union; `StoreDescriptor.kind` is deliberately `string` so no `switch` over it can be
 exhaustive (`src/store/descriptor.ts`).
 
@@ -226,7 +231,10 @@ and retire the backends. This is the phase that removes the largest block of dup
 the parity tests that exist only to compare the two.
 
 **Phase 8 — one send service.** The idempotency-fenced send ledger is the strongest arm's and the
-local arm has never had it (`SendIntentsRepository`, 12 operations, all gated on `sendIntentLedger`).
+local arm has never had it. `SendIntentsRepository` declares 12 operations, all capability-gated: 10
+on `sendIntentLedger` and 2 (`markSendBlocked`, `evaluateOutboundPolicy`) on `outboundPolicy`. The
+interface's own header comment claims all 12 are gated on the ledger; it is wrong, and the split
+matters — a store can hold the fence without being able to evaluate policy, and vice versa.
 One send service carries the **exactly-once ledger in every configuration**. A store that cannot hold
 the fence transactionally must refuse the send, not approximate it: a non-atomic reserve hands the
 same intent to two senders and mails the message twice, which is strictly worse than refusing.
@@ -239,7 +247,9 @@ axis they measure. Zero is *necessary and not sufficient* — see §4.1 — so t
 not a numbers check.
 
 **Phase 10 — drop the mode exports from the published surface.** `src/storage.ts` currently exports
-five mode functions and four mode types from `@hasna/emails/storage`. Removing them is a breaking
+**fourteen** mode symbols from `@hasna/emails/storage`: six functions, four constants and four types
+(`src/storage.ts:2-21`). Count the constants — they are what the tree-wide metric sees, and omitting
+them understates the phase. Removing them is a breaking
 change to a public package: **major version**, with the removal listed explicitly in the changelog.
 No re-export shim, no deprecated alias — a shim is a compatibility layer for an axis that no longer
 exists, which is the same mistake in a smaller box.
@@ -251,11 +261,14 @@ them again.
 
 1. **A guard that scans a tarball built without running its build step certifies an empty artifact.**
    The historical vacuous run of the pack scan packed 6 entries, scanned 5 files holding zero product
-   code, and printed a clean bill of health. `scripts/no-cloud-artifact-scan.mjs` now carries two
-   independent floors (100 files **and** 1,000,000 bytes), because a file count alone is cleared by
-   100 empty stubs and a byte total alone by one big file. A real artifact today scans 756 text files
-   and 12,646,868 bytes. **Any new guard needs a floor, and the floor belongs inside the function
-   every assertion goes through — not in one test that can be skipped.**
+   code, and printed a clean bill of health (recorded at `scripts/no-cloud-artifact-scan.mjs:11-17`).
+   It now carries two independent floors (100 files **and** 1,000,000 bytes), because a file count
+   alone is cleared by 100 empty stubs and a byte total alone by one big file. A real artifact scans
+   **756 text files and 12,646,868 bytes** after `bun run build` on `6646cc8` — the script's own
+   comment still says 696 files and 8.0 MB, so its "the byte floor is about an eighth of today's
+   payload" rationale is now nearer a twelfth. The floor is still doing its job; the prose is stale.
+   **Any new guard needs a floor, and the floor belongs inside the function every assertion goes
+   through — not in one test that can be skipped.**
 2. **Ban patterns without positive controls can be neutered while CI stays green.** A pattern that
    stops matching silently passes everything; a pattern widened until it matches anything blocks
    unrelated work. Every ban pattern and every ratchet metric therefore carries fixtures that MUST
@@ -263,7 +276,10 @@ them again.
    content — because repo counts are *supposed* to reach zero, and a "this metric found something"
    check would have to be deleted exactly when it matters most. **This includes path selectors**: a
    one-character typo in an arm-file selector once drove a 47-unit metric to zero with every other
-   assertion green.
+   assertion green (`src/mode-axis-ratchet.test.ts:42-47`; the `pathHits`/`pathMisses` fixtures and
+   the assertion at `:259-262` are the fix). Traps 1 and 2 survive only as prose in the guards
+   themselves — there is no commit left to read them from, which is the reason to keep writing them
+   down.
 3. **A ratchet keyed on symbol names is defeated by a rename.** Ten of the eleven metrics are; that is
    why `twoArmFamilies` is computed from file structure and why the metric list is asserted to contain
    exactly one identifier-independent counter. **Any future ratchet needs at least one structural
