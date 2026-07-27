@@ -179,23 +179,34 @@ export interface DnsRecord {
 /**
  * Whether a provider type publishes DNS records at all.
  *
- * An empty `DnsRecord[]` is ambiguous on its own: for `sandbox` it is the
- * complete and correct answer, and for `resend` it means the domain is not in
- * the account yet. Renderers cannot tell those apart from the array, so the
- * answer travels alongside it. `providerDnsPublishing()` in
- * `src/providers/index.ts` is the only producer.
+ * THE AMBIGUITY THIS EXISTS TO REMOVE. An empty `DnsRecord[]` means three
+ * different things and the array cannot say which:
  *
- * Modelled as a discriminated union so a provider cannot be declared
- * non-publishing without saying why — a `reason` that could be omitted would
- * reintroduce the bare message this type exists to remove.
+ *   - `sandbox` returns `[]` unconditionally. It captures mail in the local
+ *     store and never hands it to a DNS-authenticated sender, so the domain has
+ *     no DKIM/SPF/DMARC of its own. Empty is the COMPLETE answer.
+ *   - `resend` returns `[]` when the domain is not in the account — an
+ *     unfinished setup — and also when a `domains.list()`/`domains.get()` call
+ *     failed, because that adapter discards `result.error`. So a `[]` from a
+ *     publishing provider must not be reported as one specific cause.
+ *   - `ses` cannot return `[]` at all; it always appends SPF and DMARC.
+ *
+ * `providerDnsPublishing()` in `src/providers/index.ts` is the only producer.
+ * The discriminated union makes `reason` non-omittable in TypeScript; the
+ * renderer validates it again at runtime, because `formatDnsTable` is a package
+ * `exports` entry and untyped callers reach it.
  */
 export type DnsPublishingSupport =
   | { publishes: true }
   | {
       publishes: false;
-      /** Why this provider type has no records to publish, in operator-facing words. */
+      /**
+       * Why this provider type has no records to publish, in operator-facing
+       * words. A CLAUSE, not a sentence: no leading capital, no trailing period —
+       * the renderer embeds it after a colon and adds the period itself.
+       */
       reason: string;
-      /** What to do instead, when there is something useful to do. */
+      /** What to do instead. A full sentence, with its own terminating period. */
       instead?: string;
     };
 

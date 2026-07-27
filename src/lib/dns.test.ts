@@ -63,11 +63,9 @@ describe("formatDnsTable", () => {
   });
 });
 
-// An empty DnsRecord[] carries three different meanings, and before this the
-// formatter printed one sentence for all of them: a provider type that never
-// publishes DNS, a provider that does but returned nothing for this domain, and
-// (indistinguishably) a lookup that failed. The three assertions below are about
-// TELLING THEM APART, so each one checks both what its message says and that it
+// An empty DnsRecord[] means three different things (see `DnsPublishingSupport`)
+// and the formatter printed one sentence for all of them. These assertions are
+// about TELLING THEM APART, so each checks both what its message says and that it
 // is not one of the others.
 describe("formatDnsTable empty-case disambiguation", () => {
   const nonPublishing: DnsPublishingSupport = {
@@ -75,6 +73,7 @@ describe("formatDnsTable empty-case disambiguation", () => {
     reason: "a sandbox provider captures mail in the local store",
     instead: "Move the domain to a real provider.",
   };
+  const PLAIN = "No DNS records found.\n";
 
   it("says a non-publishing provider type has nothing to publish, and does not imply a lookup", () => {
     const output = formatDnsTable([], nonPublishing);
@@ -94,20 +93,55 @@ describe("formatDnsTable empty-case disambiguation", () => {
     expect(output).toContain("none are expected");
   });
 
-  it("says an empty result from a publishing provider is a result, not an absence of records", () => {
+  it("punctuates the composed sentence exactly once", () => {
+    // The reason is documented as a CLAUSE, but a caller that writes it as a
+    // sentence must not produce "…of its own..".
+    const output = formatDnsTable([], { publishes: false, reason: "there is no DNS here." });
+    expect(output).toContain("there is no DNS here.");
+    expect(output).not.toContain("..");
+  });
+
+  it("gives a publishing provider's empty result BOTH of its real causes", () => {
     const output = formatDnsTable([], { publishes: true });
-    expect(output).toContain("No DNS records found");
-    expect(output).toContain("does publish DNS records");
+    expect(output).toContain("does publish");
     expect(output).toContain("not been added to the provider");
-    // Must not borrow the structural wording: this domain WILL have records.
+    // The reason this is not a single-cause sentence: ResendAdapter.getDnsRecords
+    // discards `result.error`, so a failed or throttled lookup also arrives as [].
+    // Naming only the first cause would send an operator with a bad API key off to
+    // add a domain that is already there.
+    expect(output).toContain("throttled");
+    // Must not lead with the ambiguous word, or borrow the structural wording:
+    // this domain WILL have records.
+    expect(output.startsWith("No DNS records found")).toBe(false);
     expect(output).not.toContain("none are expected");
   });
 
   it("keeps the original sentence unchanged when the caller knows nothing about the provider", () => {
-    // Back-compat positive control. The public library export and the dashboard
-    // both call this with one argument, and a caller with no provider in hand must
-    // not be made to claim either of the two answers above.
-    expect(formatDnsTable([])).toBe("No DNS records found.\n");
+    // Back-compat positive control. `formatDnsTable` is a package `exports` entry
+    // and a caller with no provider in hand must not be made to claim either of
+    // the two answers above.
+    expect(formatDnsTable([])).toBe(PLAIN);
+  });
+
+  it("falls back to the plain sentence rather than rendering a malformed one", () => {
+    // The type forbids all of these; the type is not enforced at a package
+    // boundary. Before the runtime guard these printed "…none are expected: ."
+    // and "…none are expected: undefined." — both worse than what they replaced.
+    const malformed: unknown[] = [
+      { publishes: false, reason: "" },
+      { publishes: false, reason: "   " },
+      { publishes: false },
+      { publishes: "no" },
+      {},
+      null,
+      42,
+      "sandbox",
+    ];
+    for (const support of malformed) {
+      expect(formatDnsTable([], support as DnsPublishingSupport)).toBe(PLAIN);
+    }
+    // The `Array.map` hazard specifically: the second argument is the index.
+    expect([[], []].map(formatDnsTable)).toEqual([PLAIN, PLAIN]);
   });
 
   it("renders the table, not any empty-case message, whenever records exist", () => {

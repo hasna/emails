@@ -7,6 +7,7 @@ export type {
   Domain,
   DnsStatus,
   DnsRecord,
+  DnsPublishingSupport,
   EmailAddress,
   CreateAddressInput,
   Attachment,
@@ -321,7 +322,11 @@ export type { WarmingSchedule, WarmingDay, WarmingProgress } from "./lib/warming
 export type { ForwardingRunOptions, ForwardingRunResult, ForwardingRunItem } from "./lib/forwarding.js";
 
 // Provider factory
-export { getAdapter } from "./providers/index.js";
+// `providerDnsPublishing` ships with `getAdapter` on purpose: a consumer that
+// formats an adapter's records with `formatDnsTable` needs the descriptor for its
+// second argument, and re-deriving the sandbox special-case is the drift the
+// helper exists to prevent.
+export { getAdapter, providerDnsPublishing } from "./providers/index.js";
 export type { ProviderAdapter, RemoteDomain, RemoteAddress, RemoteEvent } from "./providers/interface.js";
 
 type SyncModule = typeof import("./lib/sync.js");
