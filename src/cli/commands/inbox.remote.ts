@@ -658,10 +658,14 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .option("--no-live-sync", "Register source but disable live sync")
     .action(async (opts: { bucket: string; prefix?: string; region?: string; provider?: string; name?: string; status?: string; liveSync?: boolean }) => {
       try {
-        const [{ addInboundBucket }, { registerS3Source }] = await Promise.all([
-          import("../../lib/config.js"),
-          import("../../lib/s3-sync.js"),
-        ]);
+        // `addInboundBucket` is NOT called in this arm. It writes the
+        // `inbound_s3_buckets` config that drives LOCAL ingestion, and this client
+        // performs none: `inbox sync-s3` and `inbox watch` both refuse here, and
+        // `emails status` deliberately reports `inbox.inbound_buckets` as
+        // unavailable because "an empty list here would falsely claim no bucket is
+        // configured". Writing to that key from a client that cannot ingest turned a
+        // declared gap into a half-truth.
+        const { registerS3Source } = await import("../../lib/s3-sync.js");
         const status = parseSourceStatus(opts.status);
         const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
         const source = registerS3Source({
@@ -673,10 +677,17 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
           status,
           liveSyncEnabled: opts.liveSync !== false && status === "live",
         });
-        if (source.status === "live" && source.live_sync_enabled) {
-          addInboundBucket(source.bucket, source.region, source.provider_id);
-        }
-        output(source, chalk.green(`✓ S3 source ${source.id} is ${source.status}${source.live_sync_enabled ? " (live sync enabled)" : " (live sync disabled)"}`));
+        // Do NOT say "live sync enabled". The `live_sync_enabled` column is recorded
+        // faithfully, but nothing in THIS client acts on it — ingestion runs on the
+        // operator's server — so echoing it as an enabled capability claimed an
+        // effect that cannot occur here. Say what actually happened: a registry entry
+        // was written, and where the ingestion it describes has to be configured.
+        output(source, [
+          chalk.green(`✓ Recorded S3 source ${source.id} (status ${source.status}) in this machine's source registry.`),
+          chalk.dim("  This registry is client-side provenance only. This client performs no S3 ingestion:"),
+          chalk.dim("  `emails inbox sync-s3` and `emails inbox watch` run on the self-hosted server, which"),
+          chalk.dim("  owns the SES -> S3 -> mailbox pipeline and must be configured there."),
+        ].join("\n"));
       } catch (e) {
         handleError(e);
       }

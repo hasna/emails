@@ -312,3 +312,60 @@ export function enumerateSelfHostedRows<T = Record<string, unknown>>(
     exhausted: !reachedEnd && !filled,
   };
 }
+
+/**
+ * Refuse a read that can neither prove it is whole nor prove it filled the window
+ * it was asked for.
+ *
+ * WHY THIS EXISTS, and why it is shared rather than re-written per repository.
+ * `selfHostedListQuery` asks for `max(1000, limit + offset)` rows in ONE request
+ * and sends no server-side offset, then windows the result locally. The server
+ * clamps every list to SELF_HOSTED_SERVER_PAGE_MAX (see
+ * src/server/self-hosted/store.ts clampLimit), so that helper can never see past
+ * row 500: a 600-row table answered `--limit 600` with 500 rows and exit 0, and
+ * answered `--offset 500` with an EMPTY list indistinguishable from "nothing
+ * here". Both were reproduced against the real service on Postgres. A caller
+ * cannot tell either outcome from the truth, which is the same defect class as
+ * publishing a page count as a total.
+ *
+ * The contract is the one src/db/events.remote.ts established:
+ *   UNBOUNDED ("give me everything") is answerable only by a complete enumeration.
+ *   BOUNDED ("give me the first N") is answered when the window is FULL, or when
+ *   the table ended first — then the short result is genuinely the whole tail.
+ * It is still refused when the read could neither fill the window nor reach the
+ * end, and when the window MOVED while it was being filled (`stable`), because a
+ * full window assembled out of a moving one is missing rows it will never mention.
+ *
+ * `events.remote.ts` keeps its own copy: its wording is asserted verbatim by
+ * src/db/events.remote.test.ts, and re-pointing it here would change those
+ * messages for no behavioural gain.
+ */
+export function assertHonestSelfHostedRead(
+  enumeration: SelfHostedEnumeration<unknown>,
+  bound: number | null,
+  context: { noun: string; narrowHint: string },
+): void {
+  if (bound === null ? enumeration.complete : (enumeration.filled || enumeration.complete) && enumeration.stable) {
+    return;
+  }
+  // Name whichever evidence actually fired: a deletion above the cursor skips rows
+  // without ever producing a duplicate, so `duplicates` alone is not the whole story.
+  const shiftEvidence = enumeration.duplicates > 0
+    ? `${enumeration.duplicates} duplicate row(s) means rows were skipped`
+    : "a page did not begin on the row the previous page ended on, so rows were skipped";
+  const cause = enumeration.exhausted
+    ? `the ${enumeration.pages}-page enumeration budget ran out`
+    : `the server's paging window shifted (${shiftEvidence})`;
+  if (bound === null) {
+    throw new Error(
+      `Refusing to return a partial ${context.noun} list: ${cause}, so the ${enumeration.rows.length} row(s) read `
+        + "are a LOWER BOUND, not the whole set — a caller that treated them as complete would be wrong. "
+        + context.narrowHint,
+    );
+  }
+  throw new Error(
+    `Refusing to return a partial ${context.noun} list: ${cause} with ${enumeration.rows.length} of the ${bound} `
+      + "row(s) the requested window needs, so this result is SHORT, not the end of the table — a caller that "
+      + "treated it as the window it asked for would silently skip rows. Retry, or " + context.narrowHint,
+  );
+}

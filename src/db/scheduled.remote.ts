@@ -1,6 +1,7 @@
 import { now, uuid } from "./runtime.js";
-import { safeOptionalLimit } from "./pagination.js";
-import { selfHostedResource, selfHostedListQuery, selfHostedPage, carray, cobj, cstrArray, ciso, cstr, cstrOrNull } from "./self-hosted-resource.js";
+import { safeOffset, safeOptionalLimit } from "./pagination.js";
+import { selfHostedResource, carray, cobj, cstrArray, ciso, cstr, cstrOrNull } from "./self-hosted-resource.js";
+import { assertHonestSelfHostedRead, enumerateSelfHostedRows } from "./self-hosted-page.js";
 
 const SCHEDULED_RESOURCE = "scheduled";
 
@@ -110,22 +111,55 @@ export interface ListDueEmailOptions {
   limit?: number;
 }
 
-export function listScheduledEmails(opts?: ListScheduledEmailOptions): ScheduledEmail[] {
-  const { query, limit, offset } = selfHostedListQuery(opts);
+/**
+ * Read the schedule through the PAGER, not through a single clamped request.
+ *
+ * `selfHostedListQuery` asks for `max(1000, limit + offset)` in one shot and sends
+ * no server-side offset; `GET /v1/scheduled` is a generic resource and clamps every
+ * list to 500 rows. Against the real service with 600 pending rows that returned
+ * 500 for `--limit 600` and an EMPTY list for `--offset 500`, both with exit 0 —
+ * a silently truncated page and a phantom "nothing scheduled". The pager reaches
+ * the window's far edge instead, and assertHonestSelfHostedRead refuses rather
+ * than hand back a page it cannot vouch for.
+ *
+ * `status` is a DECLARED server filter (src/server/self-hosted/resources.ts), so it
+ * is pushed down as a bound on how much is read; it is re-checked in the client so
+ * the answer is identical against a server that ignores unknown query params.
+ */
+function listFilteredScheduled(opts?: ListScheduledEmailOptions): ScheduledEmail[] {
+  const limit = safeOptionalLimit(opts?.limit);
+  const offset = safeOffset(opts?.offset);
+  const need = limit === null ? null : limit + offset;
+  const query: Record<string, string | number | boolean | undefined> = {};
   if (opts?.status) query["status"] = opts.status;
-  let rows = selfHostedResource(SCHEDULED_RESOURCE).list(query).map(apiToScheduledEmail);
-  if (opts?.status) rows = rows.filter((s) => s.status === opts.status);
+  const enumeration = enumerateSelfHostedRows<ScheduledEmail>(SCHEDULED_RESOURCE, {
+    query,
+    ...(need === null ? {} : { need }),
+    // Map and filter in ONE pass so a dropped row never counts toward the window.
+    select: (row) => {
+      const scheduled = apiToScheduledEmail(row);
+      return opts?.status && scheduled.status !== opts.status ? null : scheduled;
+    },
+  });
+  assertHonestSelfHostedRead(enumeration, need, {
+    noun: "scheduled email",
+    narrowHint: "ask for a bounded page (a limit is windowed by GET /v1/scheduled) or narrow the read with --status.",
+  });
+
+  const rows = enumeration.rows;
+  // Order the rows this read actually holds. Against `/v1/scheduled` this is a
+  // no-op (the server already returns `scheduled_at ASC`); it is what makes the
+  // ORDER of a complete, unbounded read independent of the server.
   rows.sort((a, b) => (a.scheduled_at ?? "").localeCompare(b.scheduled_at ?? ""));
-  return selfHostedPage(rows, limit, offset);
+  return limit === null ? rows : rows.slice(offset, offset + limit);
+}
+
+export function listScheduledEmails(opts?: ListScheduledEmailOptions): ScheduledEmail[] {
+  return listFilteredScheduled(opts);
 }
 
 export function listScheduledEmailSummaries(opts?: ListScheduledEmailOptions): ScheduledEmailSummary[] {
-  const { query, limit, offset } = selfHostedListQuery(opts);
-  if (opts?.status) query["status"] = opts.status;
-  let rows = selfHostedResource(SCHEDULED_RESOURCE).list(query).map(apiToScheduledEmail).map(scheduledToSummary);
-  if (opts?.status) rows = rows.filter((s) => s.status === opts.status);
-  rows.sort((a, b) => (a.scheduled_at ?? "").localeCompare(b.scheduled_at ?? ""));
-  return selfHostedPage(rows, limit, offset);
+  return listFilteredScheduled(opts).map(scheduledToSummary);
 }
 
 export function cancelScheduledEmail(id: string): boolean {
@@ -136,13 +170,31 @@ export function cancelScheduledEmail(id: string): boolean {
   return true;
 }
 
+/**
+ * Due rows, read through the pager for the same reason as the list above: a single
+ * `list({ limit: 1000 })` is clamped to 500 server-side, so a scheduler tick over a
+ * larger schedule would silently skip everything past that row — the due rows it
+ * never saw would simply never be sent.
+ *
+ * `scheduled_at <= now` is not a server filter, so the window is filled by a
+ * client-side `select`; `status` is, and is pushed down.
+ */
 export function getDueEmails(opts?: ListDueEmailOptions): ScheduledEmail[] {
   const currentTime = now();
   const limit = safeOptionalLimit(opts?.limit);
-  const rows = selfHostedResource(SCHEDULED_RESOURCE)
-    .list({ limit: 1000 })
-    .map(apiToScheduledEmail)
-    .filter((s) => s.status === "pending" && s.scheduled_at <= currentTime)
+  const enumeration = enumerateSelfHostedRows<ScheduledEmail>(SCHEDULED_RESOURCE, {
+    query: { status: "pending" },
+    ...(limit === null ? {} : { need: limit }),
+    select: (row) => {
+      const scheduled = apiToScheduledEmail(row);
+      return scheduled.status === "pending" && scheduled.scheduled_at <= currentTime ? scheduled : null;
+    },
+  });
+  assertHonestSelfHostedRead(enumeration, limit, {
+    noun: "due scheduled email",
+    narrowHint: "ask for a bounded batch (a limit is windowed by GET /v1/scheduled).",
+  });
+  const rows = enumeration.rows
     .sort((a, b) => (a.scheduled_at ?? "").localeCompare(b.scheduled_at ?? "") || a.id.localeCompare(b.id));
   return limit === null ? rows : rows.slice(0, limit);
 }

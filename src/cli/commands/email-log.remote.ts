@@ -498,12 +498,17 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
           handleError(new Error("Export type must be 'emails' or 'events'"));
         }
 
-        const { exportEmailsCsv, exportEmailsJson, exportEventsCsv, exportEventsJson } =
+        const { exportEmailsCsv, exportEmailsJson, exportEventsCsv, exportEventsJson, EXPORT_DEFAULT_LIMIT } =
           await import("../../lib/export.js");
         const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
         const fmt = opts.format ?? "json";
         const hasPage = opts.limit !== undefined || opts.offset !== undefined;
-        const limit = hasPage ? parseCliPositiveIntOption(opts.limit, 50, MAX_EMAIL_EXPORT_LIMIT) : undefined;
+        // The fallback is the EXPORT default (1000), not 50. `--offset` alone used to
+        // flip `hasPage` and then apply a 50-row limit nobody asked for, so a no-op
+        // `--offset 0` silently cut a 120-row export to 50 while reporting success.
+        const limit = hasPage
+          ? parseCliPositiveIntOption(opts.limit, EXPORT_DEFAULT_LIMIT, MAX_EMAIL_EXPORT_LIMIT)
+          : undefined;
         const offset = hasPage ? parseCliNonNegativeIntOption(opts.offset, 0) : undefined;
         const page = hasPage ? { limit, offset } : {};
         let result: string;

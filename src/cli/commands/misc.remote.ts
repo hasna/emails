@@ -222,14 +222,20 @@ export function registerMiscCommands(program: Command, output: (data: unknown, f
   // src/lib/doctor.remote.ts actually probes the operator service (`/health`,
   // `/ready`) and reports a parsed-but-unproven config as a WARN. That is the
   // same implementation the MCP `run_doctor` tool already runs in this mode.
+  // `--live` is deliberately NOT registered in this arm. It means "validate the
+  // stored per-provider credentials against the provider's API", and this client
+  // holds none — the operator's server signs and sends, so src/lib/doctor.remote.ts
+  // names the parameter `_opts` and discards it. Advertising the flag and forwarding
+  // it made `emails doctor --live` byte-identical to `emails doctor`: accepted,
+  // documented, and silently ignored. A flag that cannot do what it says should not
+  // be offered; the local arm, which does hold credentials, still offers it.
   const doctorCmd = program
     .command("doctor")
-    .description("Run system diagnostics")
-    .option("--live", "Validate provider credentials with live provider API calls")
-    .action(async (opts: { live?: boolean }) => {
+    .description("Run system diagnostics (probes the self-hosted service /health and /ready)")
+    .action(async () => {
       try {
         const { runDiagnostics, formatDiagnostics } = await import("../../lib/doctor.js");
-        const checks = await runDiagnostics({ liveProviderChecks: opts.live === true });
+        const checks = await runDiagnostics();
         output(checks, formatDiagnostics(checks));
       } catch (e) {
         handleError(e);
