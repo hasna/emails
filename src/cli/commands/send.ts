@@ -13,6 +13,12 @@ import {
   LOCAL_SEND_ATTACHMENT_LIMITS,
   SELF_HOSTED_SEND_ATTACHMENT_LIMITS,
 } from "../../lib/send-attachment-limits.js";
+import { findAddressesByEmail } from "../../db/addresses.js";
+import {
+  describeUncheckedSendPolicy,
+  evaluateAttachmentCaps,
+  evaluateSenderPreflight,
+} from "../../lib/send-preflight.js";
 
 const MAX_ATTACHMENT_SIZE = LOCAL_SEND_ATTACHMENT_LIMITS.maxBytesPerFile;
 const MAX_ATTACHMENT_COUNT = LOCAL_SEND_ATTACHMENT_LIMITS.maxFiles;
@@ -257,6 +263,61 @@ export function registerSendCommands(program: Command, _output: (data: unknown, 
           if (attachments.length) {
             console.log(chalk.dim(`  Attachments: ${attachments.length} inline file(s); ${mode} caps are ${describeSendAttachmentLimits(limits)}`));
           }
+
+          // ── the part that makes this a PRECHECK rather than an echo ──────────
+          //
+          // Everything above restates the arguments. Without what follows, this
+          // command produced byte-identical output for a verified sender, an
+          // unverified one whose send would be refused, and an address that does
+          // not exist at all — while operators used it as a gate before real sends.
+          if (selfHosted) {
+            // Read the sender record over /v1/addresses. This creates no message
+            // row and sends nothing; it answers the checks the server evaluates
+            // first, in the same order, and names the same policy code.
+            let senderRecord = null as { email: string; status: string; verified: boolean } | null;
+            let senderLookupFailed: string | null = null;
+            try {
+              const matches = findAddressesByEmail(opts.from);
+              senderRecord = matches[0]
+                ? { email: matches[0].email, status: matches[0].status, verified: matches[0].verified }
+                : null;
+            } catch (e) {
+              // A lookup that FAILED must never read as "sender is fine". Report the
+              // failure as unknown, not as a pass.
+              senderLookupFailed = e instanceof Error ? e.message : String(e);
+            }
+            if (senderLookupFailed) {
+              console.log(chalk.yellow(`  Sender:  could not be checked — ${senderLookupFailed}`));
+              console.log(chalk.dim("           This preview therefore does NOT predict whether the send is allowed."));
+            } else {
+              const verdict = evaluateSenderPreflight(opts.from, senderRecord);
+              console.log(verdict.ok
+                ? chalk.green(`  Sender:  ${verdict.message}`)
+                : chalk.red(`  Sender:  WOULD BE REFUSED (${verdict.code}) — ${verdict.message}`));
+            }
+          }
+
+          if (attachments.length) {
+            // Evaluate the REAL files against the mode's caps. These numbers were
+            // printed as prose above and never checked, so an attachment set the
+            // self-hosted route refuses previewed as fine.
+            const files = attachments.map((attachment) => ({
+              filename: attachment.filename,
+              bytes: Buffer.from(attachment.content, "base64").length,
+            }));
+            const capFindings = evaluateAttachmentCaps(files, limits);
+            if (capFindings.length > 0) {
+              for (const finding of capFindings) {
+                console.log(chalk.red(`  Attach:  WOULD BE REFUSED (${finding.rule}) — ${finding.detail}`));
+              }
+            } else {
+              console.log(chalk.green(`  Attach:  ${files.length} file(s) within the ${mode} caps.`));
+            }
+          }
+
+          // Say what this did NOT prove. A preview that stops at its own green lines
+          // is read as a guarantee it never made.
+          console.log(chalk.dim(`  Note:    ${describeUncheckedSendPolicy(selfHosted)}`));
           if (opts.schedule) {
             console.log(selfHosted
               ? chalk.yellow(`  Schedule:    ${opts.schedule} — the self-hosted server does not accept a scheduled send (a real send would fail)`)

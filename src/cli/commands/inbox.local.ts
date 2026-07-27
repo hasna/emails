@@ -468,7 +468,10 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         if (opts.read) rows = rows.filter((row) => row.is_read);
         if (since) rows = rows.filter((row) => messageOnOrAfter(row, since));
         if (rows.length === 0) {
-          output([], chalk.dim("No mail found. Try `emails inbox sources`, `emails refresh`, or `emails inbox wait <address>`."));
+          // `emails pull` (alias `emails provider sync`), NOT `emails refresh` —
+          // the latter is not a registered command and exits with
+          // "error: unknown command 'refresh'".
+          output([], chalk.dim("No mail found. Try `emails inbox sources`, `emails pull`, or `emails inbox wait <address>`."));
           return;
         }
         output(rows, formatMailboxMessages(rows, `Mailbox ${folder}`));

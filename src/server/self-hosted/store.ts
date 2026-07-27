@@ -230,6 +230,25 @@ export interface MessageListRecord
   snippet: string | null;
   /** Count only — full attachment metadata stays on the single-message read. */
   attachment_count: number;
+  /**
+   * WHY headers.policy_denial is projected as its own scalar on LIST rows.
+   *
+   * `send_state = 'blocked'` says a send was refused; it does not say why. The
+   * reason is written by markSendBlocked() into headers.policy_denial, and full
+   * `headers` are deliberately stripped from list rows (they and the bodies were
+   * ~73% of a 459KB page — see MESSAGE_LIST_COLUMNS). So a list consumer could see
+   * `blocked` and had no way at all to learn the cause: `emails log` and
+   * `emails email list` rendered the bare word.
+   *
+   * That cost five days on 2026-07-22 — an outbound customs-document email for a
+   * held shipment was refused with sender_unverified, read as an unremarkable
+   * "blocked", and the shipment was returned to its shipper while the reason sat
+   * unread in a jsonb column (2026-07-27).
+   *
+   * Projecting the whole headers object would undo the payload decision; a single
+   * short code does not. Null whenever the row was not policy-refused.
+   */
+  policy_denial: string | null;
 }
 
 /** One keyset page of the message list. */
@@ -529,6 +548,10 @@ const MESSAGE_LIST_COLUMNS =
   "m.source_id, m.send_state, m.send_started_at, m.created_at, m.updated_at, " +
   `NULLIF(left(regexp_replace(COALESCE(m.body_text, ''), '\\s+', ' ', 'g'), ${MESSAGE_SNIPPET_CHARS}), '') AS snippet, ` +
   "CASE WHEN jsonb_typeof(m.attachments) = 'array' THEN jsonb_array_length(m.attachments) ELSE 0 END AS attachment_count, " +
+  // One short text, not the whole headers object: a blocked row must be able to
+  // state its reason without re-adding the payload the column list exists to
+  // avoid. See MessageListRecord.policy_denial.
+  "m.headers->>'policy_denial' AS policy_denial, " +
   "to_char(m.sort_ts AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS cursor_ts";
 
 // ---- list ordering + folder predicates --------------------------------------
@@ -1085,7 +1108,27 @@ function mapMessageListRow(row: Record<string, unknown>): MessageListRecord {
       : "";
   const snippet = rawSnippet.replace(/\s+/g, " ").trim().slice(0, MESSAGE_SNIPPET_CHARS);
   const count = Number(row["attachment_count"]);
-  return { ...safe, snippet: snippet || null, attachment_count: Number.isFinite(count) ? count : 0 };
+  return {
+    ...safe,
+    snippet: snippet || null,
+    attachment_count: Number.isFinite(count) ? count : 0,
+    // Explicit rather than left to the raw-row spread: the field is part of the
+    // published list contract, so an absent/odd column must normalize to null
+    // instead of leaking `undefined` (which JSON.stringify would drop, making a
+    // required response property vanish).
+    policy_denial: policyDenialOf(row["policy_denial"]),
+  };
+}
+
+/**
+ * Normalize a policy-denial code to a non-empty string or null.
+ * Shared by the list projection and the API item projection so both paths agree
+ * on the same emptiness rule.
+ */
+export function policyDenialOf(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
 }
 
 /**
@@ -3762,6 +3805,32 @@ export class TenantScopedStore {
     if (address.status !== "active") {
       return { allowed: false, code: "sender_inactive", message: "sender address is not active", status: 403 };
     }
+    // OPEN QUESTION — deliberately NOT changed here. Read before "fixing" it.
+    //
+    // This check is strict on the ADDRESS alone. The very next check treats domain
+    // readiness as SUFFICIENT: `!addressReady && !domainReady && !domainProvisioned`
+    // lets a verified, ready domain vouch for an address that has no readiness of its
+    // own. The same row already carries `domain_verified` and `domain_status` (the
+    // LEFT JOIN above selects them), so the data for the same reasoning is in hand
+    // here — and is not used.
+    //
+    // That asymmetry produces a surprising result in practice: on a domain whose
+    // ownership AND DKIM/SPF/DMARC are all verified, and from which a sibling address
+    // sends successfully, a newly added address still defaults to verified = false and
+    // is refused. Provider identity models (SES/Resend domain identities) treat a
+    // verified domain as authorising every local part under it, which is why the
+    // behaviour reads as a bug to operators.
+    //
+    // It is left alone because loosening it is a TENANT-BOUNDARY decision, not a
+    // cleanup: this gate arrived with the tenant mail-boundary work, `verified` may be
+    // intended as a per-mailbox control-proof distinct from domain ownership, and
+    // widening it silently would grant send rights to every address on a verified
+    // domain across every deployment. Whoever resolves it should either implement the
+    // implication explicitly (probably at address creation on a verified domain,
+    // rather than by weakening the gate at send time) or record here why per-address
+    // proof is required. Until then the refusal is at least diagnosable and fixable:
+    // the code reaches the CLI as headers.policy_denial, and `emails address
+    // set-verified <email>` is the supported way to clear it.
     if (!address.verified) {
       return { allowed: false, code: "sender_unverified", message: "sender address is not verified", status: 403 };
     }

@@ -67,6 +67,14 @@ export const NEVER_AVAILABLE_COMMANDS: readonly string[] = [
   "emails domains enable-inbound",
   "emails domains enable-outbound",
   "emails domains verify",
+  // NOT a refusal call site — `emails refresh` is not a registered command at all
+  // (`error: unknown command 'refresh'`; the verb is `emails pull`, alias
+  // `emails provider sync`). It belongs here rather than in a per-mode list for
+  // exactly the reason this file documents above: it sat in
+  // SELF_HOSTED_REFUSED_COMMANDS alone, so local mode still proposed it, and
+  // `emails inbox status` printed "Pull now: emails refresh" to every local
+  // operator. A command that exists in NO mode must be unavailable in every mode.
+  "emails refresh",
 ];
 
 /**
@@ -90,7 +98,8 @@ export const SELF_HOSTED_REFUSED_COMMANDS: readonly string[] = [
   "emails monitor",
   "emails provider sync",
   "emails pull",
-  "emails refresh",
+  // `emails refresh` moved to NEVER_AVAILABLE_COMMANDS — it is not a command in
+  // any mode, and a per-mode entry only suppressed it in self_hosted.
   // The scheduler LOOP refuses (it needs the local send pipeline); reading and
   // cancelling the schedule over /v1/scheduled does not.
   "emails schedule run",

@@ -25,6 +25,7 @@ import {
   decodeAttachmentsCursor,
   MAX_ATTACHMENT_BATCH_IDS,
   MESSAGE_FOLDERS,
+  policyDenialOf,
   type MessageFolder,
   type TenantScopedStore,
   type MessageInput,
@@ -215,12 +216,17 @@ function publicMessageListItem(record: MessageRecord | MessageListRecord): Messa
     body_html: _bodyHtml,
     idempotency_key: _key,
     send_payload_hash: _hash,
-    headers: _headers,
+    headers,
     attachments,
     snippet: providedSnippet,
     attachment_count: providedAttachmentCount,
+    policy_denial: providedPolicyDenial,
     ...safe
-  } = record as MessageRecord & { snippet?: string | null; attachment_count?: number };
+  } = record as MessageRecord & {
+    snippet?: string | null;
+    attachment_count?: number;
+    policy_denial?: string | null;
+  };
   const rawSnippet = typeof providedSnippet === "string"
     ? providedSnippet
     : typeof bodyText === "string"
@@ -233,7 +239,16 @@ function publicMessageListItem(record: MessageRecord | MessageListRecord): Messa
       : Array.isArray(attachments)
         ? attachments.length
         : 0;
-  return { ...safe, snippet: snippet || null, attachment_count } as MessageListRecord;
+  // `headers` still never reaches a list item — but the ONE field inside it that a
+  // list consumer cannot live without does. A row projected from a full
+  // MessageRecord has no policy_denial column, so derive it from the headers we are
+  // about to drop; a row from the list query already carries it. Without this,
+  // stripping headers is what made `blocked` unexplainable on every list path
+  // (2026-07-27).
+  const policy_denial = providedPolicyDenial !== undefined
+    ? policyDenialOf(providedPolicyDenial)
+    : policyDenialOf((headers as Record<string, unknown> | undefined)?.["policy_denial"]);
+  return { ...safe, snippet: snippet || null, attachment_count, policy_denial } as MessageListRecord;
 }
 
 function sendPayloadHash(value: Record<string, unknown>): string {

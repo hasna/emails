@@ -366,3 +366,84 @@ describe("address list reports real ownership", () => {
     expect(result.data).toMatchObject([{ email: "free@example.com", owner: null, administrator: null }]);
   });
 });
+
+// THE MISSING WRITE PATH (2026-07-27).
+//
+// An unverified sender is refused by evaluateOutboundPolicy with
+// policy_denial "sender_unverified" BEFORE any provider is contacted, so the mail
+// simply never happens. That state was reachable and diagnosable but NOT FIXABLE
+// from this CLI: an exhaustive walk of `emails address` (add, list, owner,
+// set-owner, transfer-owner, unassign-owner, owner-history, suggest, provision,
+// verify, remove, suspend, activate, quota) found no verb that sets the flag.
+//   * `verify` only READS it — the name is the trap,
+//   * `add` has no --verified option,
+//   * `activate` reactivates a SUSPENDED address, a different field,
+//   * `provision` refuses in every mode.
+// The only route left was a hand-rolled PATCH /v1/addresses/{id}. Every layer
+// beneath the CLI already supported the write (db/addresses.ts markVerified, routed
+// to both arms, and the generated SDK's updateAddress) — only the verb was missing.
+describe("address set-verified command", () => {
+  it("sets the flag, so a blocked sender can actually be unblocked", async () => {
+    const created = createAddress({ email: "blocked@example.com", provider_id: "p1" });
+    expect(created.verified).toBe(false);
+
+    const { data, out } = await runAddressCommand(["address", "set-verified", "blocked@example.com", "--yes"]);
+    expect((data as { verified: boolean }).verified).toBe(true);
+    expect(out).toContain("blocked@example.com");
+    // The confirmation has to state the CONSEQUENCE. "Updated address" would leave
+    // the operator unsure whether the thing that was refusing their mail is fixed.
+    expect(out).toContain("no longer refused");
+  });
+
+  it("accepts an id as well as an email", async () => {
+    const created = createAddress({ email: "byid@example.com", provider_id: "p1" });
+    const { data } = await runAddressCommand(["address", "set-verified", created.id, "--yes"]);
+    expect((data as { id: string; verified: boolean }).id).toBe(created.id);
+    expect((data as { verified: boolean }).verified).toBe(true);
+  });
+
+  it("is idempotent and says so instead of pretending to have changed something", async () => {
+    const created = createAddress({ email: "already@example.com", provider_id: "p1" });
+    await runAddressCommand(["address", "set-verified", "already@example.com", "--yes"]);
+    const { data, out } = await runAddressCommand(["address", "set-verified", "already@example.com", "--yes"]);
+    expect((data as { verified: boolean }).verified).toBe(true);
+    expect(out).toContain("already verified");
+    expect(created.email).toBe("already@example.com");
+  });
+
+  it("refuses an unknown address rather than silently creating one", async () => {
+    const { error } = await runAddressCommandExpectingExit([
+      "address", "set-verified", "nobody@example.com", "--yes",
+    ]);
+    expect(error).toContain("process.exit:1");
+  });
+});
+
+describe("address verify command is read-only and says so", () => {
+  it("names the command that performs the change when the address is unverified", async () => {
+    createAddress({ email: "pending@example.com", provider_id: "p1" });
+    const { out } = await runAddressCommand(["address", "verify", "pending@example.com"]);
+    expect(out).toContain("not yet verified");
+    // The three things an operator needs and previously had to guess: what it costs,
+    // that this command will not fix it, and what will.
+    expect(out).toContain("sender_unverified");
+    expect(out).toContain("READS");
+    expect(out).toContain("emails address set-verified pending@example.com");
+  });
+
+  it("does NOT mutate — the flag is unchanged after a verify", async () => {
+    const created = createAddress({ email: "untouched@example.com", provider_id: "p1" });
+    await runAddressCommand(["address", "verify", "untouched@example.com"]);
+    const { data } = await runAddressCommand(["address", "list", "--verbose"]);
+    const row = (data as Array<{ id: string; verified: boolean }>).find((a) => a.id === created.id);
+    expect(row?.verified).toBe(false);
+  });
+
+  it("stays quiet about the remedy once the address is verified", async () => {
+    createAddress({ email: "done@example.com", provider_id: "p1" });
+    await runAddressCommand(["address", "set-verified", "done@example.com", "--yes"]);
+    const { out } = await runAddressCommand(["address", "verify", "done@example.com"]);
+    expect(out).toContain("is verified");
+    expect(out).not.toContain("set-verified done@example.com");
+  });
+});

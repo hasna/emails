@@ -352,6 +352,12 @@ export function mapMessageListRecord(row: MessageRow): MessageListRecord {
     updated_at: text(row["updated_at"]),
     snippet: snippet.length > 0 ? snippet : null,
     attachment_count: count(row["attachment_count"]),
+    // Always null here, and that is a measurement rather than a placeholder: this
+    // store declares no send-intent ledger (see the `send_state: "none"` note above),
+    // so no message in it was ever refused by an outbound policy gate and there is no
+    // denial to report. Reporting anything else would claim a refusal that never
+    // happened.
+    policy_denial: null,
   };
 }
 

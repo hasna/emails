@@ -231,7 +231,15 @@ async function buildSystemStatus(): Promise<EmailSystemStatus> {
   const partial: Omit<EmailSystemStatus, "next_actions"> = {
     ...blocks,
     // A bound still degrades: the caller asked for a total and got a floor.
-    degraded: failures.length > 0 || incomplete.length > 0,
+    //
+    // So does a mode note. When one is present the process is reading a DIFFERENT
+    // DATABASE than the operator asked for, so every count below is about the wrong
+    // system — a worse condition than any single unmeasured field, not a footnote to
+    // them. Without this the JSON payload reads `degraded: false, limited: false,
+    // total: 0, unread: 0`: immaculate, and wrong. The human renderers print the note,
+    // but agents read this object, and an agent sent to investigate a blocked message
+    // is exactly who concluded the mailbox was empty.
+    degraded: failures.length > 0 || incomplete.length > 0 || mode.warning !== null,
     limited: limitations.length > 0,
     unavailable,
     limitations,
@@ -367,6 +375,7 @@ export function formatEmailSystemStatus(status: EmailSystemStatus): string {
 export function statusGapSignals(status: EmailSystemStatus): {
   degraded: boolean;
   limited: boolean;
+  mode_warning: string | null;
   unavailable: string[];
   failures: string[];
   limitations: string[];
@@ -376,6 +385,14 @@ export function statusGapSignals(status: EmailSystemStatus): {
   return {
     degraded: status.degraded,
     limited: status.limited,
+    // The single most important thing a subset consumer can be told, and the one the
+    // subsets used to drop: WHICH SYSTEM these numbers describe. Every `--json` and
+    // MCP view projects a subset of the full status, and none of them carried `mode`,
+    // so a shadowed client-env pointer — the process reading an empty local database
+    // while the operator believes they are looking at the deployment — was invisible
+    // on every machine-readable surface. MCP has no human arm at all, so for an agent
+    // the note did not exist. Adding a signal here reaches every view.
+    mode_warning: status.mode.warning,
     unavailable: status.unavailable,
     failures: status.failures,
     limitations: status.limitations,
