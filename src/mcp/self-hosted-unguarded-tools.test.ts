@@ -1,10 +1,18 @@
 // Every MCP tool whose `assert*Allowed()` mode guard was deleted, driven END TO END
-// against the out-of-process /v1 stub (src/test-support/v1-stub.ts).
+// against a real `/v1` service.
+//
+// TWO FIXTURES, and which one a block uses is a property of the CLIENT it exercises. Most of
+// this file drives the out-of-process stub (src/test-support/v1-stub.ts). The ALIAS block does
+// not: that family has collapsed onto the store seam and now reaches `/v1` through the real
+// `HttpEmailStore`, which validates every filter and every write column against the service's
+// published contract — something the stub serves only on request and then does not honour for
+// filtered reads. That block uses src/test-support/v1-store-api.ts instead, and its own
+// docblock says why. The discipline below is unchanged for both.
 //
 // WHY THIS FILE EXISTS. Each of these tools already had three of the four pieces it
 // needed in self_hosted mode: a `/v1` route in src/server/self-hosted/resources.ts, a
-// complete HTTP client arm in src/db/*.remote.ts, and a CLI twin that performs the
-// SAME operation over the SAME route and succeeds. The fourth piece — the guard —
+// client that could reach it (an HTTP arm module at the time, the store seam now), and
+// a CLI twin that performs the SAME operation over the SAME route and succeeds. The fourth piece — the guard —
 // refused before any of it ran. Deleting the guard was the entire fix, so the proof
 // has to be the tool doing real work against a real server, not the absence of a
 // refusal string: an assertion that merely checked `isError` is false would also pass
@@ -33,6 +41,10 @@
 // src/mcp/domain-address-self-hosted.test.ts pins the guard itself.
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { startV1Stub, type V1Stub } from "../test-support/v1-stub.js";
+import { startV1StoreApi, type V1StoreApi } from "../test-support/v1-store-api.js";
+import { closeDatabase, getDatabase, resetDatabase, type Database } from "../db/database.js";
+import { createSqliteEmailStore } from "../store-sqlite/index.js";
+import { API_BASE_URL_SETTING, API_CREDENTIAL_SETTINGS, DATABASE_PATH_SETTINGS } from "../store-resolution.js";
 import { buildServer } from "./server.js";
 import { runDomainTool } from "./tools/domains-impl.js";
 
@@ -83,14 +95,80 @@ beforeEach(async () => {
 });
 afterEach(() => stub.clearEnv());
 
+/**
+ * THE ALIAS TOOLS DO NOT USE THE STUB ANY MORE, and the reason is a property of the fixture
+ * rather than of the tools.
+ *
+ * `src/db/aliases.ts` has collapsed onto the store seam, so these five tools now reach `/v1`
+ * through the REAL `HttpEmailStore`. That store reads `GET /v1/openapi.json` before any
+ * filtered list and before any write — the published contract is its only source of truth for
+ * which columns a resource accepts and which query parameters its list route filters on — and
+ * this fixture serves that document only on request. Worse, when it does serve it, its generic
+ * list handler still IGNORES equality filters and answers with the UNFILTERED list, which the
+ * collapsed module correctly treats as a FAULT (a superset presented as a filtered result is a
+ * wrong answer, not a value). The fixture's own documentation says exactly this and points at
+ * `src/test-support/v1-store-api.ts` for filtered or paged store-seam work.
+ *
+ * So this block drives a `/v1` service that translates HTTP into the same store seam. It stores
+ * nothing of its own, and the assertions keep this file's discipline unchanged: writes are read
+ * back off the SERVER's table, and reads are given rows seeded STRAIGHT into that table carrying
+ * values no tool here ever wrote — so the data can only have come off the wire. What changes is
+ * which `/v1` implementation answers, not what is proved.
+ *
+ * The environment is pointed at that service INSIDE this block, after the file-wide
+ * `stub.applyEnv()` has run, and put back by the file-wide `clearEnv()`. Exactly one store stays
+ * configured throughout: the database path is opened first and then removed from the
+ * environment, because a path AND an API together are a hard boot error with no precedence rule.
+ */
 describe("MCP alias tools in self_hosted mode (twins of `emails alias …`)", () => {
+  let db: Database;
+  let api: V1StoreApi;
+
+  /** Alias rows as the SERVER holds them, read without going through any tool. */
+  async function serverAliases(): Promise<Array<Record<string, unknown>>> {
+    const listed = await createSqliteEmailStore({ database: db }).aliases.list({ limit: 500 });
+    if (!listed.ok) throw new Error(`could not read the server's aliases: ${listed.message}`);
+    return listed.value;
+  }
+
+  function seedServerAlias(id: string, domain: string, localPart: string, target: string): void {
+    db.run(
+      "INSERT INTO aliases (id, domain, local_part, target_address, protected, created_at, updated_at)"
+        + " VALUES (?, ?, ?, ?, 0, ?, ?)",
+      [id, domain, localPart, target, NOW, NOW],
+    );
+  }
+
+  beforeEach(() => {
+    // The database is opened while its path is the only configured store, and the path is then
+    // removed — the handle stays open inside the service below, so the tools see exactly one
+    // configured store (the API) and still read one dataset.
+    for (const setting of [API_BASE_URL_SETTING, ...API_CREDENTIAL_SETTINGS]) delete process.env[setting];
+    process.env["EMAILS_DB_PATH"] = ":memory:";
+    resetDatabase();
+    db = getDatabase();
+    // The migration seeds a protected global catch-all with an EMPTY target. It is deleted here
+    // so each case starts from a table holding only what it puts there; the seam-level suite
+    // (src/db/aliases.test.ts) is where that row's presence is pinned.
+    db.run("DELETE FROM aliases");
+    api = startV1StoreApi({ store: createSqliteEmailStore({ database: db, detail: "mcp alias fixture" }) });
+    for (const setting of DATABASE_PATH_SETTINGS) delete process.env[setting];
+    process.env[API_BASE_URL_SETTING] = api.baseUrl;
+    process.env[API_CREDENTIAL_SETTINGS[1] as string] = api.apiKey;
+  });
+
+  afterEach(() => {
+    api.stop();
+    closeDatabase();
+  });
+
   it("add_alias writes the routing row through /v1/aliases", async () => {
     const alias = ok<{ domain: string; local_part: string; target_address: string }>(
       await runDomainTool("add_alias", { alias: "hello@acme.example", target: "ops@acme.example" }),
     );
 
     expect(alias).toMatchObject({ domain: "acme.example", local_part: "hello", target_address: "ops@acme.example" });
-    expect(await stub.list("aliases")).toMatchObject([
+    expect(await serverAliases()).toMatchObject([
       { domain: "acme.example", local_part: "hello", target_address: "ops@acme.example" },
     ]);
   });
@@ -98,20 +176,15 @@ describe("MCP alias tools in self_hosted mode (twins of `emails alias …`)", ()
   it("add_catch_all writes the domain catch-all through /v1/aliases", async () => {
     ok(await runDomainTool("add_catch_all", { domain: "acme.example", target: "ops@acme.example" }));
 
-    expect(await stub.list("aliases")).toMatchObject([{ domain: "acme.example", local_part: "*" }]);
+    expect(await serverAliases()).toMatchObject([{ domain: "acme.example", local_part: "*" }]);
   });
 
   it("list_aliases returns rows that only ever existed ON THE SERVER", async () => {
-    // Seeded straight onto the stub rather than written through a tool, so this
-    // proves the SERVER -> tool direction. A tool→tool round-trip would also pass
-    // against a self-consistent local store; this cannot.
-    await stub.seed({
-      ...structuredClone(SEED),
-      aliases: [
-        { id: "alias-seeded-1", domain: "acme.example", local_part: "sales", target_address: "ops@acme.example", protected: false, created_at: NOW, updated_at: NOW },
-        { id: "alias-seeded-2", domain: "acme.example", local_part: "hello", target_address: "ops@acme.example", protected: false, created_at: NOW, updated_at: NOW },
-      ],
-    });
+    // Seeded straight into the server's table rather than written through a tool, so this
+    // proves the SERVER -> tool direction. A tool→tool round-trip would also pass against a
+    // self-consistent local store; this cannot.
+    seedServerAlias("alias-seeded-1", "acme.example", "sales", "ops@acme.example");
+    seedServerAlias("alias-seeded-2", "acme.example", "hello", "ops@acme.example");
 
     const aliases = ok<Array<{ id: string; local_part: string }>>(await runDomainTool("list_aliases", { domain: "acme.example" }));
 
@@ -120,15 +193,10 @@ describe("MCP alias tools in self_hosted mode (twins of `emails alias …`)", ()
   });
 
   it("resolve_alias resolves against a routing table only the SERVER holds", async () => {
-    await stub.seed({
-      ...structuredClone(SEED),
-      aliases: [
-        { id: "alias-seeded-1", domain: "acme.example", local_part: "hello", target_address: "seeded-target@acme.example", protected: false, created_at: NOW, updated_at: NOW },
-      ],
-    });
+    seedServerAlias("alias-seeded-1", "acme.example", "hello", "seeded-target@acme.example");
 
-    // The target is a value no tool in this test ever wrote, so it can only have
-    // come off the wire.
+    // The target is a value no tool in this test ever wrote, so it can only have come off the
+    // wire.
     expect(ok(await runDomainTool("resolve_alias", { recipient: "hello@acme.example" })))
       .toEqual({ recipient: "hello@acme.example", target: "seeded-target@acme.example" });
     // A recipient with no alias resolves to null rather than erroring.
@@ -143,7 +211,7 @@ describe("MCP alias tools in self_hosted mode (twins of `emails alias …`)", ()
 
     expect(removed.isError).toBeFalsy();
     expect(text(removed)).toContain("hello@acme.example");
-    expect(await stub.list("aliases")).toEqual([]);
+    expect(await serverAliases()).toEqual([]);
   });
 });
 
