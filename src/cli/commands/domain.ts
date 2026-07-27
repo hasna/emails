@@ -1,11 +1,11 @@
 import type { Command } from "commander";
-import type { DnsRecord, DomainType } from "../../types/index.js";
+import type { DnsRecord, DomainType, Provider } from "../../types/index.js";
 import chalk from "../../lib/chalk-lite.js";
 import { createDomain, listDomains, listUsableDomains, deleteDomain, findDomainsByName, getDomain, getDomainByName, moveDomainProvider, updateDnsStatus, updateDomainReadiness } from "../../db/domains.js";
 import { getProvider } from "../../db/providers.js";
 import { createCatchAll, ensureDefaultCatchAll } from "../../db/aliases.js";
 import { setDomainProvisioning } from "../../db/provisioning.js";
-import { getAdapter } from "../../providers/index.js";
+import { getAdapter, providerDnsPublishing } from "../../providers/index.js";
 import { createWarmingSchedule, deleteWarmingSchedule, getWarmingSchedule, listWarmingSchedules, updateWarmingStatus } from "../../db/warming.js";
 import { describeWarmingProgress, formatWarmingStatus, generateWarmingPlan, getTodaySentCountsByDomain, type WarmingSchedule } from "../../lib/warming.js";
 import { colorDnsStatus, tableRow, truncate } from "../../lib/format.js";
@@ -123,7 +123,7 @@ function notImplementedAnywhere(command: string): never {
 async function expectedDnsRecords(
   domain: string,
   providerRef: string | undefined,
-): Promise<{ records: DnsRecord[]; providerId: string | null }> {
+): Promise<{ records: DnsRecord[]; providerId: string | null; provider: Provider | null }> {
   let provider = null;
   if (providerRef) {
     const providerId = resolveId("providers", providerRef);
@@ -135,9 +135,12 @@ async function expectedDnsRecords(
   }
   if (!provider) {
     const { generateSpfRecord, generateDmarcRecord } = await import("../../lib/dns.js");
-    return { records: [generateSpfRecord(domain), generateDmarcRecord(domain)], providerId: null };
+    return { records: [generateSpfRecord(domain), generateDmarcRecord(domain)], providerId: null, provider: null };
   }
-  return { records: await getAdapter(provider).getDnsRecords(domain), providerId: provider.id };
+  // The provider itself is returned, not just its id: `formatDnsTable` needs the
+  // `DnsPublishingSupport` descriptor to say anything true about an EMPTY table,
+  // and `providerDnsPublishing()` is the only producer of one.
+  return { records: await getAdapter(provider).getDnsRecords(domain), providerId: provider.id, provider };
 }
 
 function normalizeDomainType(value: string | undefined): DomainType | undefined {
@@ -222,9 +225,17 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
 
   const dnsAction = async (domain: string, opts: { provider?: string }) => {
     try {
-      const { records, providerId } = await expectedDnsRecords(domain, opts.provider);
+      const { records, providerId, provider } = await expectedDnsRecords(domain, opts.provider);
       const { formatDnsTable } = await import("../../lib/dns.js");
-      const lines = [chalk.bold(`\nDNS records for ${domain}:`), "", formatDnsTable(records)];
+      // An empty table is ambiguous on its own — a provider type that publishes no
+      // DNS records at all, a domain not yet added to a provider that does, and a
+      // provider lookup that failed all arrive here as `[]`. `providerDnsPublishing`
+      // is what distinguishes the first from the other two. Asked only when the
+      // table is empty AND a provider resolved, exactly as the MCP `get_dns_records`
+      // twin does it: a provider type `getAdapter()` accepts but the descriptor does
+      // not would otherwise turn a good table into a throw.
+      const support = records.length === 0 && provider ? providerDnsPublishing(provider) : undefined;
+      const lines = [chalk.bold(`\nDNS records for ${domain}:`), "", formatDnsTable(records, support)];
       if (!providerId) {
         // Said out loud: without a provider these are the generic SES SPF/DMARC
         // pair, NOT the domain's DKIM records. Silently omitting DKIM would read

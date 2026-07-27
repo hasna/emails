@@ -304,6 +304,30 @@ describe("domain dns command", () => {
     expect(result.error).toBe("process.exit:1");
     expect(result.stderr).not.toContain("v=spf1");
   });
+
+  it("explains an EMPTY provider table instead of printing the unknown-provider fallback", async () => {
+    // A sandbox adapter returns [] BY DESIGN. Without the `DnsPublishingSupport`
+    // descriptor `formatDnsTable` can only print its ambiguous fallback, which reads
+    // as a failed lookup for a provider that has nothing to publish in the first
+    // place. This is the half of #103's dns.ts work the recovered CLI path did not
+    // reach: it called `formatDnsTable(records)` with no second argument, so the
+    // better message existed and only the MCP twin could produce it.
+    await stub.seed({
+      providers: [{ id: "prov-box", name: "sandbox-1", type: "sandbox", active: true }],
+      domains: [{ id: "dom-box", domain: "boxed.example.com", provider: "prov-box", verified: false }],
+    });
+
+    const result = await runDomainCommand(["domain", "dns", "boxed.example.com"]);
+
+    expect(result.data).toMatchObject({ domain: "boxed.example.com", provider_id: "prov-box", records: [] });
+    expect(result.out).toContain("No DNS records to publish, and none are expected");
+    expect(result.out).toContain("has no DKIM, SPF or DMARC of its own");
+    expect(result.out).toContain("emails domain move-provider <domain> --to-provider <id>");
+    // The ambiguous sentence is the thing being replaced, so it must be absent.
+    expect(result.out).not.toContain("No DNS records found.");
+    // A provider DID resolve, so the no-provider caveat must not fire.
+    expect(result.out).not.toContain("No provider resolved");
+  });
 });
 
 describe("domain usable command", () => {

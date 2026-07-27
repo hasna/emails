@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { readFileSync } from "node:fs";
 import { cliRefusalFor } from "../test-support/cli-refusals.js";
 import { cliEquivalentForTool } from "./contracts.js";
 
@@ -327,13 +328,36 @@ describe("MCP CLI equivalents", () => {
     expect(cliRefusalFor("emails replies msg-1 --json", "self_hosted")).toBeNull();
   });
 
-  it("still admits that the two guarded tools name refused commands", () => {
-    // `get_dns_records` and `verify_domain` keep their mode guard because their CLI
-    // twins genuinely refuse. This is the negative control for the check above: if
-    // the oracle stopped seeing refusals, it would go green over everything.
-    expect(cliRefusalFor(cliEquivalentForTool("get_dns_records", { domain: "acme.example" }), "self_hosted"))
-      .toBe("emails domain dns");
+  it("still admits that a guarded tool names a refused command", () => {
+    // NEGATIVE CONTROL for the check above: if the oracle stopped seeing refusals it
+    // would go green over everything, so at least one guarded tool must still be
+    // observed naming a command that refuses. `verify_domain` is it — its CLI twin
+    // `emails domain verify` is `notImplementedAnywhere`, because wiring a WRITE to
+    // `getAdapter().verifyDomain` behind whatever ambient AWS credentials the calling
+    // machine happens to carry is a decision nobody has made.
     expect(cliRefusalFor(cliEquivalentForTool("verify_domain", { domain: "acme.example" }), "self_hosted"))
       .toBe("emails domain verify");
+  });
+
+  it("keeps the get_dns_records guard while its CLI twin runs, and advertises the twin", () => {
+    // This assertion is INVERTED from what it was, on purpose. `get_dns_records`
+    // keeps its self_hosted guard for the credential reason documented on
+    // `assertMcpLocalStateAllowed` — an MCP client's ambient AWS/Cloudflare
+    // environment is not the operator's shell. That reason never depended on the CLI
+    // twin also refusing, and the twin no longer does: `emails domain dns` is wired
+    // to `src/lib/dns.ts`, whose no-provider path is credential-free.
+    //
+    // So the tool is guarded AND the command it advertises runs. That is the useful
+    // shape: an agent refused the tool is handed something it can actually execute.
+    // A stale `.toBe("emails domain dns")` here would be a demand that the CLI go
+    // back to refusing.
+    const twin = cliEquivalentForTool("get_dns_records", { domain: "acme.example" });
+    expect(twin).toContain("emails domain dns");
+    expect(cliRefusalFor(twin, "self_hosted")).toBeNull();
+    // And the guard itself is still installed — read off the source, so deleting the
+    // call cannot leave this test green.
+    const impl = readFileSync(new URL("./tools/domains-impl.ts", import.meta.url), "utf8");
+    expect(impl).toContain('assertMcpLocalStateAllowed("get_dns_records"');
+    expect(impl).toContain('assertMcpLocalStateAllowed("verify_domain"');
   });
 });

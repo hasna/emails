@@ -85,10 +85,23 @@ function resolveSelfHostedAddressRef(ref: string): EmailAddress {
  * row — they call a provider adapter (`getAdapter(provider).getDnsRecords` /
  * `.verifyDomain`), and in self_hosted mode `getProvider` returns a `/v1/providers`
  * row whose credential columns do not exist server-side, so the adapter would fall
- * back to the CLIENT's own ambient AWS or Cloudflare credentials. Their CLI twins
- * (`emails domain dns`, `emails domain verify`) are `serverOnly(...)` for exactly
- * that reason, so this refusal matches a command that also cannot run — it is not
- * a guard standing in front of a working route.
+ * back to the CLIENT's own ambient AWS or Cloudflare credentials. That credential
+ * fallback is the whole reason, and it stands on its own: neither tool has a `/v1`
+ * route, so this is not a guard in front of a working one.
+ *
+ * The CLI twins are NOT symmetric with it, and saying so is the point:
+ *
+ *   * `emails domain verify` refuses (`notImplementedAnywhere`) — wiring a WRITE
+ *     to `.verifyDomain` behind ambient credentials is the decision nobody made.
+ *   * `emails domain dns` RUNS in both configurations. It is a read, and its
+ *     no-provider path (the generic SPF/DMARC pair from `src/lib/dns.ts`) needs no
+ *     credentials at all; only a resolved provider reaches the adapter. An agent
+ *     that hits this refusal should be told to run that command — which is why
+ *     `cliEquivalentForTool` still maps the tool to it.
+ *
+ * So do not "restore symmetry" by re-refusing the CLI command or by deleting this
+ * guard on the strength of the CLI running: the two surfaces differ because an MCP
+ * client's ambient environment is not the operator's shell.
  *
  * Every other tool that used to call this (and the alias-specific variant beside
  * it) had a working `/v1` route, a complete client arm in `src/db/*.remote.ts`, and
