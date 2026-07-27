@@ -1,4 +1,4 @@
-import type { DnsRecord } from "../types/index.js";
+import type { DnsPublishingSupport, DnsRecord } from "../types/index.js";
 
 export function generateSpfRecord(domain: string): DnsRecord {
   return {
@@ -18,8 +18,38 @@ export function generateDmarcRecord(domain: string): DnsRecord {
   };
 }
 
-export function formatDnsTable(records: DnsRecord[]): string {
-  if (records.length === 0) return "No DNS records found.\n";
+/**
+ * Render the DNS records a domain must publish.
+ *
+ * `support` is the answer to "does this provider type publish DNS records at
+ * all", from `providerDnsPublishing()`. It only changes the EMPTY case, and it
+ * changes it for a reason: the old single sentence, "No DNS records found",
+ * described a `sandbox` domain — which structurally has none and never will —
+ * with the same words as a `resend` domain that is simply not in the account
+ * yet. One is complete, the other is an unfinished setup, and an operator could
+ * not tell which they were looking at, nor rule out a failed lookup.
+ *
+ * Passing nothing keeps the original text byte-for-byte, so callers that have no
+ * provider in hand (the public library export, the dashboard) are unaffected and
+ * are never made to claim something they do not know.
+ *
+ * `support` is deliberately not used when records are present: a provider that
+ * returned records has records, whatever it declares, and the table is the
+ * answer.
+ */
+export function formatDnsTable(records: DnsRecord[], support?: DnsPublishingSupport): string {
+  if (records.length === 0) {
+    if (support && !support.publishes) {
+      return `No DNS records to publish, and none are expected: ${support.reason}.`
+        + `${support.instead ? ` ${support.instead}` : ""}\n`;
+    }
+    if (support?.publishes) {
+      return "No DNS records found for this domain. This provider type does publish DNS records, "
+        + "so an empty list is a result and not a provider with none to give — the domain has "
+        + "most likely not been added to the provider yet.\n";
+    }
+    return "No DNS records found.\n";
+  }
 
   const cols = {
     purpose: Math.max(7, ...records.map((r) => r.purpose.length)),

@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { closeDatabase, resetDatabase } from "../db/database.js";
+import { createDomain } from "../db/domains.local.js";
 import { createProvider } from "../db/providers.local.js";
 import { listSandboxEmails } from "../db/sandbox.local.js";
 import { mcpTestRequestInit, startTestMcpHttpServer } from "../test-support/mcp-http.js";
@@ -90,6 +91,40 @@ describe("MCP local mode", () => {
       const text = result.content[0]?.text ?? "";
       expect(text).not.toContain("disabled in self_hosted mode");
       expect(text).toContain("Could not resolve ID 'no-such-provider' in table 'providers'");
+    }
+  });
+
+  it("explains that a sandbox domain has no DNS records rather than reporting none found", async () => {
+    // The reachable end of this defect. `get_dns_records` on a sandbox domain
+    // answered "No DNS records found." — indistinguishable from a failed lookup or
+    // a misconfigured domain, and the caller here is normally an agent that would
+    // then tell the operator their DNS is broken. Sandbox structurally has none.
+    const provider = createProvider({ name: "mcp-local-sandbox-dns", type: "sandbox", active: true });
+    createDomain(provider.id, "sandbox-dns.test");
+    server = startTestMcpHttpServer();
+    const client = new Client({ name: "emails-sandbox-dns-test", version: "1.0.0" }, { capabilities: {} });
+    const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${server.port}/mcp`), mcpTestRequestInit());
+    await client.connect(transport, { timeout: 10_000 });
+
+    try {
+      // Both resolution paths: explicit provider_id, and inferred from the domain
+      // row. They took the same formatting call site, so both had the same bug.
+      for (const args of [{ domain: "sandbox-dns.test", provider_id: provider.id }, { domain: "sandbox-dns.test" }]) {
+        const result = await client.callTool({ name: "get_dns_records", arguments: args }, undefined, { timeout: 10_000 });
+        expect(result.isError).toBeFalsy();
+        const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+        const payload = JSON.parse(text) as { result?: string };
+        const message = payload.result ?? "";
+
+        expect(message).toContain("none are expected");
+        expect(message).toContain("captures mail in the local store");
+        expect(message).toContain("SES or Resend");
+        // The exact regression: the old sentence, and the "not found" reading of it.
+        expect(message).not.toContain("No DNS records found");
+        expect(message).not.toContain("found");
+      }
+    } finally {
+      await client.close();
     }
   });
 });

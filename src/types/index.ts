@@ -176,6 +176,29 @@ export interface DnsRecord {
   purpose: "DKIM" | "SPF" | "DMARC" | "MX" | "MAIL_FROM" | "SES_IDENTITY";
 }
 
+/**
+ * Whether a provider type publishes DNS records at all.
+ *
+ * An empty `DnsRecord[]` is ambiguous on its own: for `sandbox` it is the
+ * complete and correct answer, and for `resend` it means the domain is not in
+ * the account yet. Renderers cannot tell those apart from the array, so the
+ * answer travels alongside it. `providerDnsPublishing()` in
+ * `src/providers/index.ts` is the only producer.
+ *
+ * Modelled as a discriminated union so a provider cannot be declared
+ * non-publishing without saying why — a `reason` that could be omitted would
+ * reintroduce the bare message this type exists to remove.
+ */
+export type DnsPublishingSupport =
+  | { publishes: true }
+  | {
+      publishes: false;
+      /** Why this provider type has no records to publish, in operator-facing words. */
+      reason: string;
+      /** What to do instead, when there is something useful to do. */
+      instead?: string;
+    };
+
 // Address lifecycle status. `active` can send/receive; `suspended` is blocked
 // from sending (and excluded from delivery) but retained.
 export type AddressStatus = "active" | "suspended";
