@@ -9,7 +9,7 @@ pinned in the current package manifest and lockfile. Future third-party dependen
 managed quarantine process.
 
 Before a future `workflow_dispatch` deployment is introduced, an operator must
-provide a Mailery-owned infrastructure manifest and least-privilege role in the
+provide an operator-owned infrastructure manifest and least-privilege role in the
 target user's AWS account. The workflow must use `APP=emails`, require an
 explicit environment approval, and must not contain a Hasna account ID, bucket,
 cluster, database URL, secret path, or default endpoint.
