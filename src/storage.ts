@@ -55,3 +55,16 @@ export type {
   StoreDescriptor,
   Success,
 } from "./store/index.js";
+
+// The local SQLite implementation of that seam. Exported here — the storage
+// subpath — rather than left as an internal module for the same reason the types
+// above are: src/entrypoint-reachability.test.ts refuses to let product code sit
+// outside the shipped module graph, and allowlisting it would exempt the guard
+// instead of satisfying it.
+//
+// NOTHING IN THE APP CONSUMES THIS YET. The repositories still route themselves;
+// migrating them onto the store is the change after this one. What this export
+// buys today is that the implementation is built, type-checked and conformance
+// tested on the surface where the storage contract already lives.
+export { SQLITE_STORE_CAPABILITIES, createSqliteEmailStore, sqliteStoreDescriptor } from "./store-sqlite/index.js";
+export type { SqliteEmailStoreOptions } from "./store-sqlite/index.js";

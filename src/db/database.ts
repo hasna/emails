@@ -1938,6 +1938,7 @@ const MIGRATIONS = [
   ${RETIRED_LEGACY_INBOUND_BRIDGE_SQL}
   INSERT OR IGNORE INTO _migrations (id) VALUES (48);
   `,
+
 ];
 
 let _db: Database | null = null;
@@ -2519,6 +2520,43 @@ function ensureSchema(db: Database): void {
     WHERE provider_id IS NOT NULL AND message_id IS NOT NULL`);
   ensureIndex("CREATE INDEX IF NOT EXISTS idx_inbound_message_id ON inbound_emails(message_id) WHERE message_id IS NOT NULL");
   ensureColumn("ALTER TABLE inbound_emails ADD COLUMN attachment_paths TEXT NOT NULL DEFAULT '[]'");
+
+  // The five columns the store seam (src/store/) requires and these two tables never
+  // had. All nullable and additive, so an already-populated database is unchanged and
+  // every existing reader — each of which selects named columns or maps a fixed row
+  // shape — is unaffected.
+  //
+  //   * inbound_emails.status / .provider_message_id — writable through the seam's
+  //     updateMessageStatus. Without them a status patch would have to be accepted and
+  //     silently dropped, which is the plausible-wrong-answer failure the seam removes.
+  //   * inbound_emails.source_id — the stable upstream id upsertMessage fences on. The
+  //     partial unique index below IS that fence.
+  //   * inbound_emails.updated_at — the table only ever stamped created_at; the record
+  //     shape needs a real mtime, and readers COALESCE back to created_at for legacy rows.
+  //   * domains.notes — the seam's DomainRecord carries free-text notes (the strongest
+  //     arm has the column) and every other field of that record already has a home here.
+  //
+  // DELIBERATELY NOT A MIGRATIONS ENTRY, and this is the interesting part. Additive
+  // columns already land here rather than in the array (`attachment_paths`, `thread_id`,
+  // the provider_* columns), and there is a second, sharper reason: `applyMigrations`
+  // replays from `MAX(_migrations.id)`, so a new sentinel RAISES that level for every
+  // database. The retired-identity regression suite seeds "a database that has not yet
+  // reached migration 48" by deleting the 48 sentinel, which only works while 48 is the
+  // highest — a 49th entry silently stops the rename bridge replaying and takes that
+  // guard with it. `ensureSchema` runs unconditionally on every open, so these columns
+  // are guaranteed without moving the replay level at all.
+  //
+  // `inbound_emails` is misnamed: since migration 36 added `is_sent` it has held BOTH
+  // directions, and it is the only mail table here with folder state and labels. That is
+  // why it, and not the provider-scoped `emails` sent-ledger, is where the seam's single
+  // message family writes.
+  ensureColumn("ALTER TABLE inbound_emails ADD COLUMN status TEXT");
+  ensureColumn("ALTER TABLE inbound_emails ADD COLUMN provider_message_id TEXT");
+  ensureColumn("ALTER TABLE inbound_emails ADD COLUMN source_id TEXT");
+  ensureColumn("ALTER TABLE inbound_emails ADD COLUMN updated_at TEXT");
+  ensureColumn("ALTER TABLE domains ADD COLUMN notes TEXT");
+  ensureIndex(`CREATE UNIQUE INDEX IF NOT EXISTS idx_inbound_source_id ON inbound_emails(source_id)
+    WHERE source_id IS NOT NULL`);
 
   // Ensure email_triage table exists
   ensureTable(`CREATE TABLE IF NOT EXISTS email_triage (

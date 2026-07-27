@@ -659,12 +659,32 @@ function passingCase(id: string, requires: CapabilityKey | null, answer: unknown
 }
 
 describe("conformance harness", () => {
-  it("ships no cases yet, and says which capabilities that leaves uncovered", () => {
-    // Cases arrive with the implementations they describe. The gate for the first
-    // implementation PR is that this list is EMPTY — an unexercised capability is
-    // where a refusal quietly degenerates into "returns nothing".
-    expect(CONFORMANCE_CASES).toEqual([]);
-    expect(capabilityCoverageGaps()).toEqual([...CAPABILITY_KEYS]);
+  it("covers every declared capability, with no case left uncovered", () => {
+    // THE GATE, now satisfied. Cases arrive with the implementations they describe,
+    // and the first implementation may not land while any declared capability has no
+    // case — an unexercised capability is where a refusal quietly degenerates into
+    // "returns nothing". This assertion is the successor to the one that pinned the
+    // list EMPTY, and it is strictly stronger: the gap list must now be empty rather
+    // than complete.
+    expect(capabilityCoverageGaps()).toEqual([]);
+    // Non-vacuity, both ways round. A suite that lost its cases would satisfy nothing
+    // below it, and the floor makes that a red test rather than a green run over an
+    // empty array.
+    expect(CONFORMANCE_CASES.length).toBeGreaterThanOrEqual(30);
+    const ids = CONFORMANCE_CASES.map((testCase) => testCase.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    for (const testCase of CONFORMANCE_CASES) {
+      expect(testCase.what.length, `${testCase.id} has no behavioural statement`).toBeGreaterThan(20);
+      expect(typeof testCase.exercise, `${testCase.id} has no exercise`).toBe("function");
+      expect(typeof testCase.expect, `${testCase.id} has no expectation`).toBe("function");
+    }
+    // Both kinds of case must be present. A suite that is all-ungated never observes a
+    // refusal; a suite that is all-gated never observes ordinary behaviour.
+    expect(CONFORMANCE_CASES.filter((testCase) => testCase.requires === null).length).toBeGreaterThan(0);
+    expect(CONFORMANCE_CASES.filter((testCase) => testCase.requires !== null).length).toBeGreaterThan(0);
+    // And the gap function itself still works, proved against fixtures rather than
+    // against repo content, so it keeps working once the real list is complete.
+    expect(capabilityCoverageGaps([])).toEqual([...CAPABILITY_KEYS]);
     expect(capabilityCoverageGaps([passingCase("c1", "rawMessage")])).not.toContain("rawMessage");
   });
 
