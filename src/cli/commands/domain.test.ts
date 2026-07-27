@@ -328,6 +328,87 @@ describe("domain dns command", () => {
     // A provider DID resolve, so the no-provider caveat must not fire.
     expect(result.out).not.toContain("No provider resolved");
   });
+
+  it("does not contradict the 'domain check' it recommends in its own next-step line", async () => {
+    // `dnsAction` got the `DnsPublishingSupport` descriptor and `checkAction` did not,
+    // even though both read the same `expectedDnsRecords`. So `domain dns` answered
+    // "Nothing is missing" while the `domain check` it names one line later answered
+    // the unconditioned "No DNS records to check." — the same ambiguity, one command
+    // apart, on the command that recommends the other.
+    await stub.seed({
+      providers: [{ id: "prov-agree", name: "sandbox-agree", type: "sandbox", active: true }],
+      domains: [{ id: "dom-agree", domain: "agree.example.com", provider: "prov-agree", verified: false }],
+    });
+
+    const dns = await runDomainCommand(["domain", "dns", "agree.example.com"]);
+    const check = await runDomainCommand(["domain", "check", "agree.example.com"]);
+
+    // The recommendation is real: `dns` names `check`, so they must not disagree.
+    expect(dns.out).toContain("emails domain check agree.example.com");
+    for (const out of [dns.out, check.out]) {
+      expect(out).toContain("has no DKIM, SPF or DMARC of its own");
+      expect(out).toContain("emails domain move-provider <domain> --to-provider <id>");
+    }
+    expect(check.out).not.toContain("No DNS records to check.");
+  });
+
+  it("does not claim in a refusal that 'domain check' needs no provider", async () => {
+    // `emails domain verify`'s refusal said "'emails domain check <domain>' reads the
+    // published DNS directly and needs no provider." That is false: `check` resolves
+    // the domain's registered provider when it has one, which is how DKIM gets into
+    // the answer at all. A false sentence inside a refusal is the exact defect the
+    // refusal rewrite existed to remove, so it does not get to survive in it.
+    await stub.seed({
+      providers: [{ id: "prov-vfy", name: "sandbox-vfy", type: "sandbox", active: true }],
+      domains: [{ id: "dom-vfy", domain: "vfy.example.com", provider: "prov-vfy", verified: false }],
+    });
+
+    const refusal = await runDomainCommandExpectingExit(["domain", "verify", "vfy.example.com"]);
+    expect(refusal.error).toBe("process.exit:1");
+    expect(refusal.stderr).toContain("emails domain verify is not implemented in this build");
+    expect(refusal.stderr).not.toContain("needs no provider");
+    expect(refusal.stderr).toContain("resolving the domain's provider for DKIM when it has one");
+
+    // And the claim is checked against the command itself, not just reworded: a
+    // registered domain reports the provider it resolved.
+    const registered = await runDomainCommand(["domain", "check", "vfy.example.com"]);
+    expect(registered.data).toMatchObject({ provider_id: "prov-vfy" });
+    const unregistered = await runDomainCommand(["domain", "check", "unregistered.example.com"]);
+    expect(unregistered.data).toMatchObject({ provider_id: null });
+  });
+
+  it("answers instead of exiting 1 when the provider row cannot configure an adapter", async () => {
+    // `/v1` never distributes provider credentials — `apiToProvider` in
+    // src/db/providers.remote.ts maps every secret column to null on purpose — so in
+    // self_hosted mode EVERY Resend provider makes `getAdapter` throw "Resend
+    // provider requires an API key". That escaped, turning a read-only question into
+    // an exit-1 whose fix_commands sent the operator to configure a client-side key
+    // that structurally cannot live there.
+    //
+    // SPF and DMARC do not depend on the provider account, so they are still the
+    // honest answer; DKIM is the part that is missing, and it is named as such.
+    await stub.seed({
+      providers: [{ id: "prov-nokey", name: "resend-nokey", type: "resend", active: true }],
+      domains: [{ id: "dom-nokey", domain: "nokey.example.com", provider: "prov-nokey", verified: false }],
+    });
+
+    const result = await runDomainCommand(["domain", "dns", "nokey.example.com"]);
+
+    expect(result.data).toMatchObject({
+      domain: "nokey.example.com",
+      provider_id: "prov-nokey",
+      dkim_unavailable: "Resend provider requires an API key",
+    });
+    expect(result.out).toContain("v=spf1 include:amazonses.com ~all");
+    // Printing the pair silently would read as "no DKIM required", so it is stated.
+    expect(result.out).toContain("DKIM was NOT retrieved: Resend provider requires an API key.");
+    expect(result.out).toContain("do not depend on the provider account");
+    // A provider DID resolve, so the no-provider caveat must not fire, and the
+    // descriptor must NOT be produced — the table is non-empty and, more importantly,
+    // "this provider type does publish records" is not the thing that went wrong.
+    expect(result.out).not.toContain("No provider resolved");
+    expect(result.out).not.toContain("none are expected");
+  });
 });
 
 describe("domain usable command", () => {

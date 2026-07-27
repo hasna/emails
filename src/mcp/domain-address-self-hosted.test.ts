@@ -227,10 +227,14 @@ describe("MCP domain/address self_hosted API-only guards", () => {
 
   it("fails the two provider-adapter tools that no mode can serve", async () => {
     // These are the ONLY domain/address tools left behind a mode guard, and the
-    // guard is honest: they call `getAdapter(provider).getDnsRecords/.verifyDomain`,
-    // the `/v1/providers` row carries no credential columns, and their CLI twins
-    // (`emails domain dns`, `emails domain verify`) are `serverOnly(...)`. Removing
-    // this refusal would replace it with a client-credentialed AWS/Cloudflare call.
+    // guard is honest: they call `getAdapter(provider).getDnsRecords/.verifyDomain`
+    // and the `/v1/providers` row carries no credential columns, so removing this
+    // refusal would replace it with a client-credentialed AWS/Cloudflare call.
+    //
+    // NOT because their CLI twins also refuse — this comment used to say that and it
+    // is false of `emails domain dns`, which runs in both configurations. The twins
+    // are deliberately asymmetric: an MCP client's ambient environment is not the
+    // operator's shell.
     for (const [name, args] of [
       ["get_dns_records", { domain: "example.com" }],
       ["verify_domain", { domain: "example.com" }],
