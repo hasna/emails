@@ -10,7 +10,23 @@ import { buildS3PullTargets } from "./autopull-targets.js";
 export type { S3PullTarget } from "./autopull-targets.js";
 
 export interface PullForwardingResult { attempted: number; sent: number; failed: number; skipped: number }
-export interface PullResult { pulled: number; ok: boolean; reason?: string; configured: boolean; forwarded?: PullForwardingResult }
+export interface PullResult {
+  pulled: number;
+  ok: boolean;
+  reason?: string;
+  configured: boolean;
+  forwarded?: PullForwardingResult;
+  /**
+   * Caller-supplied provenance the store could not keep, from `S3SyncResult.unrecorded`.
+   *
+   * Separate from `reason` on purpose, and this is not a style choice: `reason` is set only
+   * when `ok` is false, and none of these is a failure — the mail landed. Folding them into
+   * `reason` would report a successful pull as broken; leaving them out entirely (which this
+   * function did until adversarial review) drops the note on the one path that pulls every
+   * configured bucket unattended.
+   */
+  unrecorded?: string[];
+}
 export interface PullOpts { s3?: boolean; limit?: number; forwarding?: boolean }
 
 export async function autoPull(opts?: PullOpts): Promise<PullResult> {
@@ -50,6 +66,7 @@ export async function autoPull(opts?: PullOpts): Promise<PullResult> {
   let reason: string | undefined;
   let ok = true;
   const syncErrors: string[] = [];
+  const unrecorded: string[] = [];
 
   if (doS3) {
     try {
@@ -72,6 +89,9 @@ export async function autoPull(opts?: PullOpts): Promise<PullResult> {
           });
           n += r.synced;
           if (r.errors.length > 0) syncErrors.push(...r.errors);
+          // NOT pushed onto syncErrors: nothing failed, so folding these in would set
+          // `ok = false` and report a successful pull as broken.
+          for (const note of r.unrecorded) if (!unrecorded.includes(note)) unrecorded.push(note);
         }
         return n;
       };
@@ -129,5 +149,6 @@ export async function autoPull(opts?: PullOpts): Promise<PullResult> {
     reason,
     configured: configured || (forwarded?.attempted ?? 0) > 0,
     forwarded,
+    ...(unrecorded.length > 0 ? { unrecorded } : {}),
   };
 }

@@ -1193,6 +1193,12 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
           }
           const r = await syncS3Inbox({ bucket, prefix, region, providerId: opts.provider, limit: 100 });
           if (r.synced > 0) console.log(chalk.green(`  ✓ ${r.synced} new email(s) delivered`) + chalk.dim(` (${r.skipped} already stored)`));
+          // PRINTED HERE even though the value returned to the watch loop cannot carry it: the
+          // seam this closure satisfies (src/lib/inbound-realtime.ts) is typed
+          // `Promise<{synced:number}|void>`, so the note has no field to travel in — and the
+          // caller who passed `--provider` is standing right here watching this stream. A loss
+          // note that only a formatter with room for it prints is not reported, it is lucky.
+          for (const note of r.unrecorded) console.log(chalk.yellow(`  Not recorded: ${note}`));
           return { synced: r.synced };
         };
 

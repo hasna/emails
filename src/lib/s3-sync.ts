@@ -72,9 +72,16 @@
 //     for exactly this reason — it has never held payload bytes.
 //   * the `mail_sources` registry and the last-synced-key note, both config file.
 //
-// NO SEAM OPERATION EXISTS — stated, not worked around. Each is reported to the caller in
-// `S3SyncResult.unrecorded` rather than dropped in silence, and each is a widening this PR
-// describes and deliberately does not make:
+// NO SEAM OPERATION EXISTS — stated, not worked around. Each is a widening this PR describes
+// and deliberately does not make.
+//
+// WHERE EACH ONE IS REPORTED, and the split is deliberate. The FIRST is a fact about what THIS
+// CALLER asked for, so it travels per run in `S3SyncResult.unrecorded` and every user-facing
+// formatter prints it. The other two are true of every ingest on every installation until the
+// seam widens — a static property of the product, not per-run news — so they are recorded HERE
+// and nowhere else. An earlier version put all three in the per-run channel; adversarial review
+// then found four of six consumers dropping the field, and the honest reading of that was that a
+// constant does not belong in a per-run channel, not that the constant needed plumbing six ways.
 //   * PROVIDER PROVENANCE. `inbound_emails.provider_id` is a real column with its own index,
 //     and NO seam shape has a provider field — not `MessageInput`, not `MessageRecord`, not
 //     `MessageStatusPatch`. So `--provider` is still VALIDATED (an unknown id still refuses,
@@ -181,15 +188,29 @@ export interface S3SyncResult {
   errors: string[];
   last_key?: string;
   /**
-   * Provenance this installation's store has no field for, named once per run.
+   * Provenance THE CALLER ASKED FOR that this installation's store has no field to hold.
    *
-   * NOT an error list and not a warning list: every one of these is a message that WAS
-   * ingested, minus a fact about it that no store behind this package can hold. It exists
-   * because the alternative — accepting `--provider` and dropping it — reports a write that
-   * did not happen, and a caller cannot see the difference. Empty on a run that lost nothing.
+   * NOT an error list and not a warning list: every entry describes messages that WERE
+   * ingested, minus a fact the caller supplied and no store behind this package can keep. It
+   * exists because the alternative — accepting `--provider` and dropping it — reports a write
+   * that did not happen, and a caller cannot see the difference. Empty on a run that lost
+   * nothing, and empty on a run that ingested nothing.
    *
-   * Every formatter of this result prints it. A truncation or loss note that a formatter drops
-   * on the floor is the same silence it was introduced to break.
+   * SCOPED TO CALLER-SUPPLIED FACTS ON PURPOSE, and the first version of this field was not.
+   * It also carried the thread-linkage and raw-object-size absences — which are TRUE, but true
+   * of every ingest on every installation, forever, until the seam widens. That is not per-run
+   * news; it is a static property of the product, and emitting it per run means every consumer
+   * has to plumb a constant. Adversarial review found four of six consumers dropping the field
+   * for exactly that reason, and the honest fix was to stop putting a constant in a per-run
+   * channel rather than to plumb it six ways. The static absences are documented in this file's
+   * header, where architectural absences belong.
+   *
+   * WHO PRINTS IT, stated precisely rather than claimed universally, because the first version
+   * of this comment claimed "every formatter" and that was false. Printed by `inbox sync-s3`
+   * (text and `--json`), `inbox watch`, `domain inbound`, the TUI autopull, and the
+   * `sync_s3_inbox` MCP tool (which serialises the whole result). NOT printed by
+   * `src/server/routes/inbound-webhook.ts`: its response is a fixed wire contract with no human
+   * reader, consumed by SES, and the note would be identical on every single delivery.
    */
   unrecorded: string[];
 }
@@ -999,23 +1020,20 @@ export async function syncS3Inbox(opts: S3SyncOptions): Promise<S3SyncResult> {
   const exactKeys = normalizeExactObjectKeys(opts.keys, prefix);
 
   /**
-   * Name what the ingested messages could not carry.
+   * Name the CALLER-SUPPLIED provenance the ingested messages could not carry.
    *
-   * GATED ON HAVING INGESTED SOMETHING. A run that stored no message lost no provenance, and a
-   * note on every empty poll is noise that trains a reader to skip the field — which is the
-   * same silence an unreported loss produces, arrived at from the other side.
+   * TWO GATES, and both matter. A run that stored no message lost nothing, and a note on every
+   * empty poll is noise that trains a reader to skip the field — the same silence an unreported
+   * loss produces, arrived at from the other side. And only a fact the CALLER supplied belongs
+   * here: the thread-linkage and raw-size absences are static properties of the product rather
+   * than per-run news, and live in this file's header. See `S3SyncResult.unrecorded`.
    */
   const noteUnrecorded = (): void => {
     if (result.synced === 0) return;
-    if (validatedProviderId !== null) {
-      result.unrecorded.push(
-        `provider ${validatedProviderId} was not recorded on the ${result.synced} ingested ` +
-          "message(s): no store behind this package has a provider field on a message",
-      );
-    }
+    if (validatedProviderId === null) return;
     result.unrecorded.push(
-      `thread linkage and raw object size were not recorded on the ${result.synced} ingested ` +
-        "message(s): the store seam has no field for either",
+      `provider ${validatedProviderId} was not recorded on the ${result.synced} ingested ` +
+        "message(s): no store behind this package has a provider field on a message",
     );
   };
 

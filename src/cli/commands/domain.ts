@@ -590,6 +590,10 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
             const { syncS3Inbox } = await import("../../lib/s3-sync.js");
             const sr = await syncS3Inbox({ bucket, prefix: `inbound/${domain}/`, region, providerId, limit: 500 });
             lines.push(chalk.green(`✓ Synced ${sr.synced} message(s)`) + (sr.errors.length ? chalk.yellow(` (${sr.errors.length} errors)`) : ""));
+            // This path passes a providerId, so it is one of the callers whose supplied
+            // provenance the store cannot keep. Dropping the note here would make the omission
+            // invisible on exactly the command that asked for it.
+            for (const note of sr.unrecorded) lines.push(chalk.yellow(`  Not recorded: ${note}`));
           }
         }
 

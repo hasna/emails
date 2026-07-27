@@ -52,7 +52,6 @@ import {
   retireS3Source,
   s3SyncLocalTestBoundary,
   syncS3Inbox,
-  type S3SyncResult,
 } from "./s3-sync.js";
 
 let originalHome: string | undefined;
@@ -229,14 +228,26 @@ for (const harness of HARNESSES) {
       expect(ingested.synced).toBe(1);
       // THE ABSENCE IS NAMED, not dropped. A run that accepted --provider and silently stored
       // nothing for it is indistinguishable at the call site from one that recorded it.
-      expect(ingested.unrecorded.some((note) => note.includes(providerId))).toBe(true);
-      expect(ingested.unrecorded.some((note) => note.includes("thread linkage"))).toBe(true);
+      expect(ingested.unrecorded).toHaveLength(1);
+      expect(ingested.unrecorded[0]).toContain(providerId);
 
       // GATED ON HAVING INGESTED SOMETHING. The second run stores nothing, so it lost nothing,
       // and a note on every empty poll is the noise that trains a reader to skip the field.
       const skipped = await syncS3Inbox({ bucket: BUCKET, prefix: PREFIX, providerId, store });
       expect(skipped.synced).toBe(0);
       expect(skipped.unrecorded).toEqual([]);
+    });
+
+    it("says nothing when the caller supplied no provenance to lose", async () => {
+      // THE SECOND GATE, and adversarial review is why it exists. `unrecorded` used to carry the
+      // thread-linkage and raw-size absences too — both true, but true of EVERY ingest on every
+      // installation, so the field was never empty on a successful run and four of six consumers
+      // dropped it as noise. A per-run channel carries per-run facts; a constant belongs in the
+      // module header. Without this case, re-adding the constant would go unnoticed.
+      serveObjects({ [`${PREFIX}obj-a`]: rawEmail({ subject: "no provider" }) });
+      const result = await syncS3Inbox({ bucket: BUCKET, prefix: PREFIX, store: harness.store() });
+      expect(result.synced).toBe(1);
+      expect(result.unrecorded).toEqual([]);
     });
 
     it("refuses an unknown provider BEFORE downloading a single object", async () => {

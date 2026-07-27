@@ -183,10 +183,14 @@ describe("MCP self_hosted guards", () => {
     // the delivery-event list and the outbound message stream — is served over `/v1`. A
     // refusal here would now be a refusal of something this client demonstrably can do,
     // which is what the case below demonstrates.
+    // `sync_s3_inbox` HAS ALSO MOVED OFF THIS LIST, for the same reason and with the same
+    // treatment — see the case below. The S3 inbox sync collapsed to one implementation over
+    // the store seam (src/lib/s3-sync.ts), so the refusal it asserted here is no longer true
+    // rather than no longer checked: the ingestion writes through whichever store the
+    // operator configured, and the deleted `s3-sync.remote.ts` that threw is gone.
     const cases: Array<[string, Record<string, unknown>]> = [
       ["batch_send", { recipients: [], template_name: "welcome", from_address: "ops@example.com" }],
       ["pull_events", {}],
-      ["sync_s3_inbox", { bucket: "inbound-bucket" }],
     ];
 
     for (const [name, args] of cases) {
@@ -194,6 +198,34 @@ describe("MCP self_hosted guards", () => {
       expect(result.isError).toBe(true);
       expect(resultText(result)).toContain("not available in the self-hosted client");
     }
+  });
+
+  it("no longer refuses sync_s3_inbox as client-only, and reaches the CONFIGURED STORE", async () => {
+    // The counterpart to the refusal that came off the list above, and its claim is bounded
+    // deliberately.
+    //
+    // WHAT THIS CASE PROVES: the tool no longer answers the self-hosted-client refusal, and the
+    // failure it does produce comes from the API this client is configured against — which is
+    // what shows it went to `/v1` and not to a local database. `startV1Stub` does not serve
+    // `POST /v1/messages/record` at all (and hard-codes `source_id: null`), so an ingestion
+    // through it can only get that far.
+    //
+    // WHAT IT DELIBERATELY DOES NOT PROVE, and where the proof lives instead: that the
+    // ingestion actually stores mail. Making this stub serve the record route would mean giving
+    // it upsert-on-`source_id` semantics it has no model for — a third implementation of message
+    // storage inside a fixture, more permissive than production, which is exactly the shape that
+    // hides defects no test can see. `src/lib/s3-sync.test.ts` carries that positive control
+    // against BOTH real stores, one of them the fixture whose route contract is pinned to the
+    // service's own OpenAPI document.
+    const result = await callTool("sync_s3_inbox", { bucket: "inbound-bucket", prefix: "inbound/" });
+
+    const text = resultText(result);
+    // THE NEGATIVE CONTROL IS THE POINT: the old refusal must be gone, not merely unasserted.
+    expect(text).not.toContain("not available in the self-hosted client");
+    expect(text).not.toContain("runs on the self-hosted server");
+    // And it must not have fallen back to a local database instead.
+    expect(text).not.toContain("no such table");
+    expect(text).not.toContain("SQLITE_");
   });
 
   it("MEASURES delivery statistics over /v1 instead of refusing them", async () => {
