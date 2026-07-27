@@ -33,11 +33,28 @@ describe("status availability primitives", () => {
     expect([...STATUS_UNAVAILABLE_CODES]).toEqual([
       "server_route_absent",
       "not_modelled_over_v1",
+      "not_modelled_on_store",
       "source_unreachable",
       "not_applicable",
       "enumeration_cap_exceeded",
       "enumeration_unstable",
     ]);
+  });
+
+  it("classifies a store-modelling gap as structural, not as a read failure", () => {
+    // `not_modelled_on_store` joined the set when the status facts stopped reading
+    // two per-deployment implementations and started reading whichever store the
+    // installation configured. It has to land in `limitations`, never `failures`:
+    // an operator cannot clear it by fixing anything, and a gap that is permanent on
+    // every healthy installation would pin `degraded` to true forever — the exact
+    // "flag that is never green" failure statusGapClass exists to prevent.
+    const reason = statusUnavailable(
+      "not_modelled_on_store",
+      "store_capability_outboundPolicy",
+      "sqlite:addresses",
+    ).reason;
+    expect(statusGapClass(reason)).toBe("structural");
+    expect(statusReasonCode(reason)).toBe("not_modelled_on_store");
   });
 
   it("refuses to record a gap for an AVAILABLE field", () => {

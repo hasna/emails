@@ -60,7 +60,15 @@ export interface DomainsStatusBlock {
   receive_ready: number | null;
   usable: DomainStatusRow[] | null;
   usable_limit: number;
-  usable_truncated: boolean;
+  /**
+   * Whether the sample above leaves rows out.
+   *
+   * NULLABLE, and the widening is the point: when the domain inventory could not be
+   * read, or was read only in part, whether the sample is the whole list is UNKNOWN —
+   * and `false` is a claim that it IS the whole list. That is the same fabricated
+   * comfortable value this payload exists to remove, one field over from the counts.
+   */
+  usable_truncated: boolean | null;
 }
 
 export interface AddressesStatusBlock {
@@ -72,7 +80,9 @@ export interface AddressesStatusBlock {
   ready_to_receive: number | null;
   usable_from: EnrichedAddress[] | null;
   usable_from_limit: number;
-  usable_from_truncated: boolean;
+  /** NULLABLE for the same reason as `usable_truncated`: a refused list has no
+   *  answerable truncation, and `false` would claim it is complete. */
+  usable_from_truncated: boolean | null;
 }
 
 export interface RealtimeStatusBlock {

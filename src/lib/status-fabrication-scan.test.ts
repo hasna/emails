@@ -26,8 +26,10 @@ const SRC = join(import.meta.dir, "..");
 const STATUS_BUILDERS = [
   "lib/agent-context.ts",
   "lib/status-facts.ts",
-  "lib/status-facts.local.ts",
-  "lib/status-facts.remote.ts",
+  // The enumeration EVERY status count is now built on. Same reason as
+  // db/self-hosted-page.ts below: a hardcoded `complete: true` here is the same lie
+  // as a hardcoded `total: 0`.
+  "lib/status-facts-enumeration.ts",
   "lib/status-types.ts",
   "lib/status-availability.ts",
   "lib/inbox-sync-status-format.ts",
