@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { Command } from "commander";
 import { closeDatabase, getDatabase, resetDatabase } from "../../db/database.js";
 import { createProvider } from "../../db/providers.local.js";
-import { createScheduledEmail, getScheduledEmail } from "../../db/scheduled.local.js";
+import { createScheduledEmail, getScheduledEmail } from "../../db/scheduled.js";
 import { listSandboxEmails } from "../../db/sandbox.local.js";
 import { createTemplate } from "../../db/templates.local.js";
 import { addStep, createSequence, enroll, listEnrollments } from "../../db/sequences.local.js";
@@ -54,7 +54,9 @@ describe("schedule list commands", () => {
   it("renders scheduled-email summaries without exposing payload bodies", async () => {
     const db = getDatabase();
     const provider = createProvider({ name: "list-sandbox", type: "sandbox" }, db);
-    createScheduledEmail({
+    // No `db` handle and no `await`-free call: `src/db/scheduled.ts` reads the store seam,
+    // which binds to the same process-wide connection `getDatabase()` returns here.
+    await createScheduledEmail({
       provider_id: provider.id,
       from_address: "sender@example.com",
       to_addresses: ["scheduled@example.com"],
@@ -64,7 +66,7 @@ describe("schedule list commands", () => {
       attachments_json: [{ filename: "secret.txt", content: "hidden attachment".repeat(50) }],
       template_vars: { hidden: "hidden template vars".repeat(50) },
       scheduled_at: "2030-01-01T00:00:00.000Z",
-    }, db);
+    });
 
     const output = await runMiscCommand(["schedule", "list", "--limit", "1"]);
 
@@ -81,14 +83,14 @@ describe("scheduler tick", () => {
   it("processes scheduled emails and sequence enrollments through one shared tick", async () => {
     const db = getDatabase();
     const provider = createProvider({ name: "tick-sandbox", type: "sandbox" }, db);
-    const scheduled = createScheduledEmail({
+    const scheduled = await createScheduledEmail({
       provider_id: provider.id,
       from_address: "sender@example.com",
       to_addresses: ["scheduled@example.com"],
       subject: "Scheduled smoke",
       text_body: "scheduled body",
       scheduled_at: "2000-01-01T00:00:00.000Z",
-    }, db);
+    });
 
     createTemplate({
       name: "tick-template",
@@ -111,7 +113,7 @@ describe("scheduler tick", () => {
 
     expect(result.scheduled).toMatchObject({ attempted: 1, sent: 1, failed: 0 });
     expect(result.sequences).toMatchObject({ attempted: 1, sent: 1, failed: 0 });
-    expect(getScheduledEmail(scheduled.id, db)?.status).toBe("sent");
+    expect((await getScheduledEmail(scheduled.id))?.status).toBe("sent");
 
     const subjects = listSandboxEmails(provider.id, 10, db).map((email) => email.subject);
     expect(subjects).toContain("Scheduled smoke");

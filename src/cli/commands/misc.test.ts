@@ -23,7 +23,13 @@ import { registerMiscCommands, runSchedulerTick } from "./misc.remote.js";
 let stub: V1Stub;
 
 beforeAll(async () => {
-  stub = await startV1Stub();
+  // `openapi: true`: the schedule commands below read through `src/db/scheduled.ts`, which
+  // has collapsed onto the store seam and therefore reaches this fixture through
+  // `src/store-http/`. That store reads the published contract before a filtered list or a
+  // write, and treats its absence as a fault — so without this the `--status` and `cancel`
+  // cases would fault on the contract rather than exercise anything. The option is off by
+  // default on purpose; see `V1StubOptions.openapi`.
+  stub = await startV1Stub({ openapi: true });
 });
 afterAll(() => stub.stop());
 beforeEach(async () => {

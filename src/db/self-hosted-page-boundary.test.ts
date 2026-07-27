@@ -19,7 +19,6 @@
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { startV1Stub, type V1Stub } from "../test-support/v1-stub.js";
-import { listScheduledEmailSummaries, getDueEmails } from "./scheduled.remote.js";
 import { listEmails } from "./emails.remote.js";
 import { SELF_HOSTED_SERVER_PAGE_MAX } from "./self-hosted-page.js";
 
@@ -87,51 +86,14 @@ describe("the stub enforces production's 500-row list clamp", () => {
   }, 30_000);
 });
 
-describe("scheduled reads cross the clamp instead of stopping at it", () => {
-  it("returns all 600 rows for a window that asks for them", async () => {
-    await stub.seed({ scheduled: scheduledRows(OVER_CLAMP) });
-    expect(listScheduledEmailSummaries({ limit: OVER_CLAMP })).toHaveLength(OVER_CLAMP);
-  }, 30_000);
-
-  it("returns the SECOND page instead of an empty list", async () => {
-    await stub.seed({ scheduled: scheduledRows(OVER_CLAMP) });
-
-    const page = listScheduledEmailSummaries({ limit: 100, offset: SELF_HOSTED_SERVER_PAGE_MAX });
-
-    // Not merely non-empty: the exact rows 500-599, in declared order.
-    expect(page).toHaveLength(100);
-    expect(page[0]?.id).toBe("sched-0500");
-    expect(page[99]?.id).toBe("sched-0599");
-  }, 30_000);
-
-  it("keeps a server-side status filter honest across the clamp", async () => {
-    await stub.seed({
-      scheduled: [
-        ...scheduledRows(OVER_CLAMP),
-        { ...scheduledRows(1)[0], id: "sched-cancelled", status: "cancelled" },
-      ],
-    });
-
-    const pending = listScheduledEmailSummaries({ status: "pending", limit: OVER_CLAMP + 1 });
-    expect(pending).toHaveLength(OVER_CLAMP);
-    expect(pending.every((row) => row.status === "pending")).toBe(true);
-  }, 30_000);
-
-  it("finds due rows that sit past the clamp", async () => {
-    // Only the LAST row is due; a read that stops at 500 reports an empty batch and
-    // the scheduler silently never sends it.
-    const rows = scheduledRows(OVER_CLAMP).map((row, index) => ({
-      ...row,
-      scheduled_at: index === OVER_CLAMP - 1
-        ? "2020-01-01T00:00:00.000Z"
-        : new Date(Date.UTC(2099, 0, 1, 0, 0, index)).toISOString(),
-    }));
-    await stub.seed({ scheduled: rows });
-
-    const due = getDueEmails({ limit: 10 });
-    expect(due.map((row) => row.id)).toEqual([`sched-${String(OVER_CLAMP - 1).padStart(4, "0")}`]);
-  }, 30_000);
-});
+// The four SCHEDULED cases that used to live here have MOVED to src/db/scheduled.test.ts,
+// not been dropped, and they came back stronger. That family has collapsed to one
+// implementation over the store seam, so the arm they drove no longer exists — and the
+// versions in their new home run over BOTH stores (SQLite directly, and the HTTP client
+// against a `/v1` service backed by the same SQLite store) rather than against one stub,
+// with the same 600 rows at the same clamp plus a fixture whose store order is the REVERSE
+// of due order. The `/v1/scheduled` seed below is kept, because the clamp control above
+// asserts on it and that control is what makes every other case in this file mean anything.
 
 describe("the sent ledger crosses the clamp instead of truncating the export", () => {
   it("returns all 600 rows for the export's default 1000-row limit", async () => {

@@ -8,7 +8,7 @@ import { createEvent } from "../../db/events.local.js";
 import { addMember, createGroup } from "../../db/groups.local.js";
 import { storeInboundEmail } from "../../db/inbound.local.js";
 import { createProvider } from "../../db/providers.local.js";
-import { createScheduledEmail, markSent } from "../../db/scheduled.local.js";
+import { createScheduledEmail, markSent } from "../../db/scheduled.js";
 import { storeSandboxEmail } from "../../db/sandbox.local.js";
 import { createSequence, enroll, unenroll } from "../../db/sequences.local.js";
 import { createTemplate } from "../../db/templates.local.js";
@@ -669,7 +669,7 @@ describe("emails serve REST parity smoke", () => {
       upsertContact(`default-contact-${i}@example.com`);
       createTemplate({ name: `default-template-${i}`, subject_template: `Template ${i}` });
       createGroup(`default-group-${i}`);
-      createScheduledEmail({
+      await createScheduledEmail({
         provider_id: provider.id,
         from_address: "ops@example.com",
         to_addresses: [`default-scheduled-${i}@example.com`],
@@ -742,7 +742,7 @@ describe("emails serve REST parity smoke", () => {
   it("paginates scheduled emails after REST status filtering", async () => {
     const provider = createProvider({ name: "sandbox", type: "sandbox", active: true });
     for (let i = 0; i < 5; i++) {
-      createScheduledEmail({
+      await createScheduledEmail({
         provider_id: provider.id,
         from_address: "ops@example.com",
         to_addresses: [`pending-${i}@example.com`],
@@ -754,14 +754,14 @@ describe("emails serve REST parity smoke", () => {
         scheduled_at: `2030-01-0${i + 1}T00:00:00.000Z`,
       });
     }
-    const sent = createScheduledEmail({
+    const sent = await createScheduledEmail({
       provider_id: provider.id,
       from_address: "ops@example.com",
       to_addresses: ["sent@example.com"],
       subject: "Sent",
       scheduled_at: "2030-01-01T12:00:00.000Z",
     });
-    markSent(sent.id);
+    await markSent(sent.id);
 
     const page = await json<Array<Record<string, unknown>>>("/api/scheduled?status=pending&limit=2&offset=1");
 

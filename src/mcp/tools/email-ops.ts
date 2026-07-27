@@ -608,7 +608,8 @@ export function registerEmailOpsTools(server: McpServer): void {
       const ccArr = input.cc ? (Array.isArray(input.cc) ? input.cc : [input.cc]) : [];
       const bccArr = input.bcc ? (Array.isArray(input.bcc) ? input.bcc : [input.bcc]) : [];
 
-      const scheduled = createScheduledEmail({
+      // `createScheduledEmail` reads the store seam and is async.
+      const scheduled = await createScheduledEmail({
         provider_id: providerId,
         from_address: input.from,
         to_addresses: toArr,
@@ -641,7 +642,7 @@ export function registerEmailOpsTools(server: McpServer): void {
   async ({ status, limit, offset }) => {
     try {
       const { listScheduledEmailSummaries } = await import('../../db/scheduled.js');
-      const emails = listScheduledEmailSummaries({
+      const emails = await listScheduledEmailSummaries({
         ...(status ? { status } : {}),
         limit: limit ?? 100,
         offset: offset ?? 0,
@@ -664,7 +665,7 @@ export function registerEmailOpsTools(server: McpServer): void {
       const { cancelScheduledEmail } = await import('../../db/scheduled.js');
       const { resolveId } = await import('../helpers.js');
       const resolvedId = resolveId("scheduled_emails", id);
-      const cancelled = cancelScheduledEmail(resolvedId);
+      const cancelled = await cancelScheduledEmail(resolvedId);
       if (!cancelled) throw new Error(`Cannot cancel email ${id} (may already be sent or cancelled)`);
       return { content: [{ type: "text", text: `Scheduled email cancelled: ${resolvedId}` }] };
     } catch (e) {
