@@ -520,10 +520,48 @@ describe("adopting the old raw_s3_url dedup key as the seam fence", () => {
     expect(withSource.n).toBe(0);
   });
 
-  it("is idempotent: a second call changes nothing", () => {
+  it("is idempotent, and picks the SAME survivor across repeated runs", () => {
     const url = `s3://${BUCKET}/${PREFIX}once`;
     insertLegacyRow(uuid(), url, url, "2026-01-01T00:00:00.000Z");
     expect(backfillS3SourceIdsFromRawUrls(db)).toBe(1);
+    expect(backfillS3SourceIdsFromRawUrls(db)).toBe(0);
+
+    // DETERMINISM, ASSERTED RATHER THAN ASSUMED. The survivor is chosen by
+    // `created_at ASC, id ASC`; with ten rows sharing a URL and sharing `created_at` to the
+    // millisecond — which is exactly what a tight ingestion loop produces — the tie-break on
+    // `id` is the only thing keeping this from being a coin flip that passes most of the time.
+    const shared = `s3://${BUCKET}/${PREFIX}tied`;
+    const ids: string[] = [];
+    for (let i = 0; i < 10; i++) {
+      const id = `tied-${String(9 - i).padStart(3, "0")}`;
+      ids.push(id);
+      insertLegacyRow(id, shared, shared, "2026-03-01T00:00:00.000Z");
+    }
+    expect(backfillS3SourceIdsFromRawUrls(db)).toBe(1);
+    const claimed = db.query("SELECT id FROM inbound_emails WHERE source_id = ?").all(shared) as Array<{ id: string }>;
+    // The lowest id, not the insertion order (which was reversed above on purpose).
+    expect(claimed.map((row) => row.id)).toEqual([[...ids].sort()[0]]);
+  });
+
+  it("skips the expensive scan entirely when there is nothing to repair", () => {
+    // The PRE-CHECK, and its absence is a per-open full table scan of inbound_emails on every
+    // CLI invocation — measured at 1.19-1.42 ms per open at 50k rows, growing linearly. The
+    // supporting partial index is what makes this an empty index scan rather than a table scan.
+    const plan = db
+      .query(
+        `EXPLAIN QUERY PLAN SELECT 1 AS found FROM inbound_emails
+          WHERE source_id IS NULL AND raw_s3_url LIKE 's3://%' LIMIT 1`,
+      )
+      .all() as Array<{ detail: string }>;
+    expect(plan.map((row) => row.detail).join(" | ")).toContain("idx_inbound_unfenced_s3");
+
+    // And the index it uses must be EMPTY on a mailbox whose inbound rows came from a non-S3
+    // path — the case a `WHERE source_id IS NULL`-only index would have failed.
+    insertLegacyRow(uuid(), null, "<webhook@example.test>", "2026-01-01T00:00:00.000Z");
+    const entries = db
+      .query("SELECT COUNT(*) AS n FROM inbound_emails WHERE source_id IS NULL AND raw_s3_url IS NOT NULL")
+      .get() as { n: number };
+    expect(entries.n).toBe(0);
     expect(backfillS3SourceIdsFromRawUrls(db)).toBe(0);
   });
 });

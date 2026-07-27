@@ -1077,6 +1077,38 @@ function runS3MessageIdRawUrlBackfill(db: Database): void {
  *   database, which is the normal steady state.
  */
 export function backfillS3SourceIdsFromRawUrls(db: Database): number {
+  // THE PRE-CHECK IS NOT AN OPTIMISATION, IT IS WHAT MAKES THIS SAFE TO RUN ON EVERY OPEN.
+  //
+  // `ensureSchema` is not a one-shot migration path — it runs on every database open, so every
+  // CLI invocation pays whatever this costs. Measured, on an ALREADY-REPAIRED table (the steady
+  // state), the bare `UPDATE` below costs 0.23-0.35 ms at 10k inbound rows and 1.19-1.42 ms at
+  // 50k, growing linearly, because `EXPLAIN QUERY PLAN` reads:
+  //
+  //   SCAN inbound_emails | CORRELATED SCALAR SUBQUERY 1
+  //     | SEARCH taken USING COVERING INDEX idx_inbound_source_id (source_id=?)
+  //     | CORRELATED SCALAR SUBQUERY 2 | SCAN earliest | USE TEMP B-TREE FOR ORDER BY
+  //
+  // A full table scan, because `idx_inbound_source_id` is partial `WHERE source_id IS NOT NULL`
+  // and therefore cannot serve an `IS NULL` predicate. With the pre-check and its supporting
+  // index the same steady state costs 0.0004-0.009 ms and the plan is an empty index scan.
+  //
+  // WHY THE INDEX IS NARROW, and this is the correction that matters: a partial index keyed only
+  // on `WHERE source_id IS NULL` looks right and is not. Inbound rows written by the non-seam
+  // paths (`storeInboundEmail`) leave `source_id` NULL, so on a mailbox filled by webhook or
+  // IMAP that index stays fully populated and the pre-check still scans O(all those rows). Adding
+  // `AND raw_s3_url IS NOT NULL` restricts it to the actual candidate set, which is EMPTY once
+  // repaired — measured empty at 50k rows in all three mailbox shapes (all S3-sourced, half and
+  // half, none S3-sourced).
+  const pending = db
+    .query(
+      `SELECT 1 AS found FROM inbound_emails
+        WHERE source_id IS NULL AND raw_s3_url LIKE 's3://%' LIMIT 1`,
+    )
+    .get() as { found: number } | null;
+  // NOT A SILENT SKIP. There is nothing to repair, which is a different fact from "the repair
+  // did not run", and the return value says zero either way.
+  if (pending === null) return 0;
+
   // A CORRELATED REFERENCE TO THE TABLE BEING UPDATED, by its own name rather than through an
   // `UPDATE … AS alias`. Both are valid SQLite, and the unaliased form is the one whose meaning
   // does not depend on the reader knowing which alias scope wins.
@@ -2621,6 +2653,14 @@ function ensureSchema(db: Database): void {
   ensureColumn("ALTER TABLE domains ADD COLUMN notes TEXT");
   ensureIndex(`CREATE UNIQUE INDEX IF NOT EXISTS idx_inbound_source_id ON inbound_emails(source_id)
     WHERE source_id IS NOT NULL`);
+
+  // The candidate set of the S3 fence repair below, and NOTHING else. See
+  // `backfillS3SourceIdsFromRawUrls` for the measured reason this index is required and for why
+  // the obvious `WHERE source_id IS NULL` form of it would have been useless: non-seam inbound
+  // writes leave `source_id` NULL, so that index never empties. With `raw_s3_url IS NOT NULL`
+  // the index is empty on a repaired database and the repair's pre-check is an empty index scan.
+  ensureIndex(`CREATE INDEX IF NOT EXISTS idx_inbound_unfenced_s3 ON inbound_emails(raw_s3_url)
+    WHERE source_id IS NULL AND raw_s3_url IS NOT NULL`);
 
   // ADOPT THE OLD S3 DEDUP KEY AS THE NEW FENCE. Without this, collapsing `src/lib/s3-sync`
   // onto the store seam would have RE-INGESTED EVERY MESSAGE ALREADY PULLED FROM S3.
