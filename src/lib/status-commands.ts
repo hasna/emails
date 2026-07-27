@@ -87,6 +87,22 @@ export const SELF_HOSTED_REFUSED_COMMANDS: readonly string[] = [
   "emails inbox setup-realtime",
   "emails inbox sync-s3",
   "emails inbox watch",
+  // ── FLAG-CONDITIONAL refusals ───────────────────────────────────────────────
+  // The base commands all RUN; only these flag forms throw, from an inline
+  // `handleError(new Error(...))` rather than a `serverOnly("emails ...")` call.
+  // src/lib/status-commands-coverage.test.ts reads those string literals, so it is
+  // structurally blind to every one of these — they can only be caught by hand, and
+  // are pinned by name in src/lib/status-commands.test.ts so they cannot drift.
+  // Nothing proposes these flag forms today; the entries make that hold by
+  // construction rather than by nobody having tried.
+  //
+  // `emails send --to-group` is deliberately NOT here. It used to belong on this
+  // list and no longer refuses — group fan-out is now a client-side recipient
+  // lookup (src/cli/commands/send.ts) — and listing a command that runs would
+  // suppress a real remedy from every suggestion path, which is the mirror image of
+  // the defect this registry exists to prevent. Verify before adding.
+  "emails inbox unread-count --by-address",
+  "emails inbox clear --provider",
   "emails monitor",
   "emails provider sync",
   "emails pull",

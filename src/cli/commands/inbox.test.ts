@@ -1663,7 +1663,11 @@ describe("inbox source lifecycle is a client-side registry", () => {
       status: "live",
       live_sync_enabled: true,
     });
-    expect(added.out).toContain("live sync enabled");
+    // No capability claim: this client performs no ingestion, so the message says
+    // what it actually did (recorded provenance) and where ingestion is configured.
+    expect(added.out).toContain("Recorded S3 source s3-inbound-mail-raw-");
+    expect(added.out).not.toContain("live sync enabled");
+    expect(added.out).toContain("performs no S3 ingestion");
 
     const listed = await runInboxCommand(["inbox", "source", "list"]);
     expect(listed.data as Array<{ id: string; bucket: string }>).toEqual([
@@ -1689,8 +1693,10 @@ describe("inbox source lifecycle is a client-side registry", () => {
       "inbox", "source", "add-s3", "--bucket", "cold-bucket", "--no-live-sync",
     ]);
 
+    // The column is recorded faithfully; the message makes no claim either way,
+    // because nothing in this client acts on it.
     expect(added.data).toMatchObject({ live_sync_enabled: false });
-    expect(added.out).toContain("live sync disabled");
+    expect(added.out).not.toContain("live sync enabled");
   });
 
   it("rejects an unknown --status", async () => {

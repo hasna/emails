@@ -625,7 +625,15 @@ function listMessages(params) {
       return Number.isFinite(t) && t >= cutoff;
     });
   }
-  const limit = Number(params.get("limit") || "500");
+  // CLAMP like production. src/server/self-hosted/store.ts clampLimit caps every
+  // list at 500, and the generic stub handler below already mirrors that. This
+  // bespoke /v1/messages handler did NOT, so a client that asked for 1000 rows got
+  // 1000 here and 500 from the real service - the stub was strictly more permissive
+  // than production on the single busiest read in the package. That is how
+  // 'emails export emails' shipped a silently truncated export with green tests:
+  // no test COULD see the truncation. A stub that is easier than production
+  // certifies nothing.
+  const limit = Math.min(Math.max(1, Math.floor(Number(params.get("limit") || "500"))), 500);
   const cursor = params.get("cursor");
   const cursorOffset = cursor === null ? null : decodeMessageOffsetCursor(cursor);
   if (cursor !== null && cursorOffset === null) return { error: "cursor is not a valid pagination cursor" };

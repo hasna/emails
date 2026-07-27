@@ -107,3 +107,35 @@ describe("mode-aware command availability", () => {
     }
   });
 });
+
+// Flag-conditional refusals: the base command runs, one flag form throws, and the
+// throw is an inline `handleError(new Error(...))` with no `serverOnly("emails ...")`
+// literal. src/lib/status-commands-coverage.test.ts derives its expectations from
+// those literals, so it is STRUCTURALLY blind to these — they are pinned here by name
+// instead, in both directions, so neither half can drift.
+describe("flag-conditional refusals the coverage scan cannot see", () => {
+  it("refuses the flag form while keeping the base command available", () => {
+    for (const [base, refusedFlagForm] of [
+      ["emails inbox unread-count", "emails inbox unread-count --by-address"],
+      ["emails inbox clear", "emails inbox clear --provider p1"],
+    ] as const) {
+      expect(isCommandAvailableInMode(base, "self_hosted"), base).toBe(true);
+      expect(isCommandAvailableInMode(refusedFlagForm, "self_hosted"), refusedFlagForm).toBe(false);
+    }
+    // Extra flags after the refused one must not smuggle it back in.
+    expect(isCommandAvailableInMode("emails inbox unread-count --by-address --limit 10", "self_hosted")).toBe(false);
+    // Local mode serves both from SQL, so both stay available there.
+    expect(isCommandAvailableInMode("emails inbox unread-count --by-address", "local")).toBe(true);
+    expect(isCommandAvailableInMode("emails inbox clear --provider p1", "local")).toBe(true);
+  });
+
+  // The mirror-image defect: listing a command that RUNS suppresses a real remedy.
+  // `emails send --to-group` used to refuse and now works (client-side group fan-out),
+  // so it must be absent from every refusal list.
+  it("does not refuse a flag form that was since implemented", () => {
+    for (const mode of ["local", "self_hosted"] as const) {
+      expect(isCommandAvailableInMode("emails send --to-group ops --subject s", mode), mode).toBe(true);
+    }
+    expect(SELF_HOSTED_REFUSED_COMMANDS).not.toContain("emails send --to-group");
+  });
+});
