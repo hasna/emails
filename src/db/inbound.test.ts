@@ -12,8 +12,10 @@
 //     attachment metadata — no local_path column).
 //   - provider_id scoping ("filters by provider_id", "count filtered by
 //     provider_id", "clears by provider_id"): a /v1 message carries no provider
-//     dimension, so the filter is ignored and a provider-scoped clear is a
-//     deliberate no-op. These local-only behaviors are gone.
+//     dimension, so the filter is unexpressible. These local-only behaviors are
+//     gone — and a provider-scoped CLEAR now REFUSES rather than reporting 0,
+//     because a destructive call must not silently mean something different here
+//     than it does against the local backend.
 //   - "recovers from malformed label JSON": recovered a local label_ids_json
 //     column; the /v1 `labels` field is a real array.
 //   - the whole "reply tracking (in_reply_to_email_id)" block: reply linkage was
@@ -112,7 +114,7 @@ describe("getInboundEmail", () => {
     expect(getInboundEmail("nonexistent-id")).toBeNull();
   });
 
-  it("tolerates malformed attachment JSON stored on /v1", async () => {
+  it("rejects malformed attachment arrays returned by /v1", async () => {
     await stub.seed({
       messages: [
         {
@@ -128,9 +130,41 @@ describe("getInboundEmail", () => {
       ],
     });
 
-    expect(getInboundEmail("m-bad")?.attachment_paths).toEqual([]);
-    expect(listInboundEmails({})[0]?.attachment_paths).toEqual([]);
-    expect(getInboundAttachmentPaths("m-bad")).toEqual([]);
+    expect(() => getInboundEmail("m-bad")).toThrow(
+      /invalid successful response: body\.message\.attachments must be an array/i,
+    );
+    expect(() => getInboundAttachmentPaths("m-bad")).toThrow(
+      /invalid successful response: body\.message\.attachments must be an array/i,
+    );
+  });
+
+  it("preserves valid null attachment slots returned by /v1", async () => {
+    await stub.seed({
+      messages: [
+        {
+          id: "m-null-slot",
+          direction: "inbound",
+          from_addr: "sender@example.com",
+          to_addrs: ["receiver@example.com"],
+          subject: "Null attachment slot",
+          received_at: "2026-01-01T00:00:00.000Z",
+          created_at: "2026-01-01T00:00:00.000Z",
+          attachments: [
+            { filename: "first.pdf", content_type: "application/pdf", size: 10 },
+            null,
+            { filename: "third.txt", content_type: "text/plain", size: 30 },
+          ],
+        },
+      ],
+    });
+
+    const expectedPaths = [
+      { filename: "first.pdf", content_type: "application/pdf", size: 10 },
+      { filename: "attachment-2", content_type: "application/octet-stream", size: 0 },
+      { filename: "third.txt", content_type: "text/plain", size: 30 },
+    ];
+    expect(getInboundEmail("m-null-slot")?.attachment_paths).toEqual(expectedPaths);
+    expect(getInboundAttachmentPaths("m-null-slot")).toEqual(expectedPaths);
   });
 
   it("reads attachment metadata as attachment paths (no local_path server-side)", () => {
@@ -292,6 +326,21 @@ describe("clearInboundEmails", () => {
 
   it("returns 0 when nothing to clear", () => {
     expect(clearInboundEmails()).toBe(0);
+  });
+
+  // A /v1 message row has no provider dimension, so this scope is unexpressible.
+  // Returning 0 claimed "no mail matched that provider" when the truth is "this
+  // store cannot answer that", and the SAME call against the local backend really
+  // does delete that provider's mail. Refuse loudly instead — a destructive
+  // operation must not change meaning with configuration.
+  it("refuses a provider-scoped clear instead of reporting a plausible 0", () => {
+    store();
+    store();
+
+    expect(() => clearInboundEmails("provider-1")).toThrow(/no provider provenance/);
+    expect(() => clearInboundEmails("provider-1")).toThrow(/Refusing rather than clearing the whole store/);
+    // Neither widened nor silently no-op'd: the mail is still there.
+    expect(listInboundEmails({})).toHaveLength(2);
   });
 });
 

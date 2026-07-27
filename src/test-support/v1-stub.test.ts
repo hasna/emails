@@ -7,6 +7,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { startV1Stub, type V1Stub } from "./v1-stub.js";
 import { selfHostedStoreFor } from "../db/self-hosted-store.js";
 import { resolveSelfHostedMailDataSource } from "../lib/self-hosted-mail-data-source.js";
+import { SELF_HOSTED_RESOURCES } from "../server/self-hosted/resources.js";
 
 let stub: V1Stub;
 
@@ -86,6 +87,72 @@ describe("v1-stub — generic resource CRUD over the synchronous curl store", ()
     const dumped = await stub.list("domains");
     expect(dumped.map((r) => r["domain"])).toEqual(["seed.example.com"]);
   });
+
+  const expectItemMiss = async (resource: string, method: "GET" | "PATCH" | "PUT" | "DELETE", error: string) => {
+    const response = await fetch(`${stub.baseUrl}/v1/${resource}/missing-id`, {
+      method,
+      headers: {
+        authorization: `Bearer ${stub.apiKey}`,
+        ...(method === "PATCH" || method === "PUT" ? { "content-type": "application/json" } : {}),
+      },
+      ...(method === "PATCH" || method === "PUT" ? { body: "{}" } : {}),
+    });
+    expect(response.status, `${method} ${resource}`).toBe(404);
+    expect(await response.json(), `${method} ${resource}`).toEqual({ error });
+  };
+
+  it("mirrors generic resource item-miss errors for every CRUD method", async () => {
+    for (const method of ["GET", "PATCH", "PUT", "DELETE"] as const) {
+      await expectItemMiss("templates", method, "templates not found");
+    }
+  });
+
+  it("mirrors bespoke domain, address, and message item-miss errors for every CRUD method", async () => {
+    for (const [resource, error] of [
+      ["domains", "domain not found"],
+      ["addresses", "address not found"],
+      ["messages", "message not found"],
+    ] as const) {
+      for (const method of ["GET", "PATCH", "PUT", "DELETE"] as const) {
+        await expectItemMiss(resource, method, error);
+      }
+    }
+  });
+
+  it("normalizes every registered resource seed to a complete server row", async () => {
+    await stub.seed(Object.fromEntries(
+      SELF_HOSTED_RESOURCES.map((spec) => [
+        spec.path,
+        [{ ...(spec.idColumn ? { [spec.idColumn]: `fixture-${spec.path}` } : {}) }],
+      ]),
+    ));
+
+    for (const spec of SELF_HOSTED_RESOURCES) {
+      const response = await fetch(`${stub.baseUrl}/v1/${spec.path}`, {
+        headers: { authorization: `Bearer ${stub.apiKey}` },
+      });
+      expect(response.status, spec.path).toBe(200);
+      const body = await response.json() as { items?: Array<Record<string, unknown>> };
+      expect(body.items, spec.path).toHaveLength(1);
+      const row = body.items![0]!;
+      const key = spec.idColumn ?? "id";
+      for (const field of [
+        key,
+        "tenant_id",
+        ...spec.columns.map((column) => column.name),
+        "created_at",
+        "updated_at",
+      ]) {
+        expect(Object.hasOwn(row, field), `${spec.path}.${field}`).toBe(true);
+      }
+      expect(row["tenant_id"], spec.path).toBe("00000000-0000-0000-0000-000000000001");
+      expect(Number.isNaN(Date.parse(String(row["created_at"]))), spec.path).toBe(false);
+      expect(Number.isNaN(Date.parse(String(row["updated_at"]))), spec.path).toBe(false);
+    }
+
+    const providers = await stub.list("providers");
+    expect(providers[0]).toMatchObject({ active: true, region: null });
+  });
 });
 
 describe("v1-stub — messages semantics over the async mail data source", () => {
@@ -109,6 +176,56 @@ describe("v1-stub — messages semantics over the async mail data source", () =>
     expect(counts.inbox).toBe(2);
     expect(counts.unread).toBe(1);
     expect(counts.sent).toBe(1);
+  });
+
+  it("paginates full message pages with an opaque cursor and preserves offset fallback", async () => {
+    await stub.seed({
+      messages: [
+        { id: "m1", direction: "inbound", received_at: "2026-06-01T00:00:00.000Z" },
+        { id: "m2", direction: "inbound", received_at: "2026-06-02T00:00:00.000Z" },
+        { id: "m3", direction: "inbound", received_at: "2026-06-03T00:00:00.000Z" },
+        { id: "m4", direction: "inbound", received_at: "2026-06-04T00:00:00.000Z" },
+      ],
+    });
+    const get = async (query: string) => {
+      const response = await fetch(`${stub.baseUrl}/v1/messages?${query}`, {
+        headers: { authorization: `Bearer ${stub.apiKey}` },
+      });
+      return {
+        response,
+        body: await response.json() as {
+          messages?: Array<Record<string, unknown>>;
+          next_cursor?: string | null;
+        },
+      };
+    };
+
+    const first = await get("limit=2");
+    expect(first.response.status).toBe(200);
+    expect(Object.keys(first.body).sort()).toEqual(["messages", "next_cursor"]);
+    expect(first.body.messages?.map((row) => row["id"])).toEqual(["m4", "m3"]);
+    expect(typeof first.body.next_cursor).toBe("string");
+    expect(first.body.next_cursor).not.toBe("2");
+    const repeatedFirst = await get("limit=2");
+    expect(repeatedFirst.body.next_cursor).toBe(first.body.next_cursor);
+
+    const second = await get(`limit=2&offset=999&cursor=${encodeURIComponent(first.body.next_cursor!)}`);
+    expect(second.response.status).toBe(200);
+    expect(second.body.messages?.map((row) => row["id"])).toEqual(["m2", "m1"]);
+    expect(typeof second.body.next_cursor).toBe("string");
+
+    const terminal = await get(`limit=2&cursor=${encodeURIComponent(second.body.next_cursor!)}`);
+    expect(terminal.response.status).toBe(200);
+    expect(terminal.body).toEqual({ messages: [], next_cursor: null });
+
+    const offset = await get("limit=1&offset=1");
+    expect(offset.response.status).toBe(200);
+    expect(offset.body.messages?.map((row) => row["id"])).toEqual(["m3"]);
+    expect(typeof offset.body.next_cursor).toBe("string");
+
+    const malformed = await get("limit=2&cursor=not-a-stub-cursor");
+    expect(malformed.response.status).toBe(400);
+    expect(malformed.body).toEqual({ error: "cursor is not a valid pagination cursor" });
   });
 
   it("sends via POST /v1/messages/send and persists the outbound row", async () => {

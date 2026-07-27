@@ -1,0 +1,190 @@
+name: Attest @hasna/emails 1.3.2 release evidence
+
+"on":
+  workflow_dispatch:
+
+jobs:
+  attest-published-package:
+    if: github.repository == 'hasna/emails' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      attestations: write
+
+    steps:
+      - name: Verify source and CI evidence
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          umask 077
+
+          readonly repository='hasna/emails'
+          readonly source_merge_commit='fe61a466a28115f33efda1ecc7632dbc7c6525c7'
+          readonly ci_run_id='30212897836'
+          verification_dir="$(mktemp -d)"
+          readonly verification_dir
+          readonly commit_response="${verification_dir}/source-commit.json"
+          readonly run_response="${verification_dir}/ci-run.json"
+
+          cleanup_verification() {
+            rm -rf -- "$verification_dir"
+          }
+          trap cleanup_verification EXIT
+
+          command -v gh >/dev/null
+          command -v jq >/dev/null
+
+          gh api \
+            --method GET \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "/repos/${repository}/commits/${source_merge_commit}" \
+            >"$commit_response"
+          jq --exit-status \
+            --arg source_merge_commit "$source_merge_commit" \
+            '.sha == $source_merge_commit' \
+            "$commit_response" >/dev/null
+
+          gh api \
+            --method GET \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "/repos/${repository}/actions/runs/${ci_run_id}" \
+            >"$run_response"
+          jq --exit-status \
+            --arg repository "$repository" \
+            --arg source_merge_commit "$source_merge_commit" \
+            --argjson ci_run_id "$ci_run_id" '
+              .id == $ci_run_id and
+              .repository.full_name == $repository and
+              .head_repository.full_name == $repository and
+              .head_sha == $source_merge_commit and
+              .status == "completed" and
+              .conclusion == "success" and
+              .event == "push" and
+              .head_branch == "main" and
+              .path == ".github/workflows/ci.yml"
+            ' "$run_response" >/dev/null
+
+      - name: Download and verify published tarball
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+
+          readonly artifact_dir='attestation-input'
+          readonly artifact="${artifact_dir}/emails-1.3.2.tgz"
+          readonly tarball_url='https://registry.npmjs.org/@hasna/emails/-/emails-1.3.2.tgz'
+          readonly expected_sha256='8f5e166e73ae7aebeb49a5eeae6dd199d0be63a9931a35981373e67b9ccfe431'
+          readonly expected_shasum='87c933255f5e95e7db8bf30bb606e07c1132f01e'
+          readonly expected_integrity='sha512-nGwS4AoZH2NwTV8Xoop2XupAubyq4bHuawYZX5itCjVwa/3U4hE6t+tBdnKZ9p72/BuUxmAL4iLEZ79eWlkCHg=='
+
+          mkdir --mode=700 "$artifact_dir"
+          curl --disable \
+            --fail \
+            --silent \
+            --show-error \
+            --proto '=https' \
+            --proto-redir '=https' \
+            --tlsv1.2 \
+            --connect-timeout 30 \
+            --max-time 300 \
+            --output "$artifact" \
+            "$tarball_url"
+
+          printf '%s  %s\n' "$expected_sha256" "$artifact" |
+            sha256sum --check --strict
+          printf '%s  %s\n' "$expected_shasum" "$artifact" |
+            sha1sum --check --strict
+
+          actual_integrity="sha512-$(openssl dgst -sha512 -binary "$artifact" | openssl base64 -A)"
+          readonly actual_integrity
+          if [[ "$actual_integrity" != "$expected_integrity" ]]; then
+            echo 'npm integrity verification failed' >&2
+            exit 1
+          fi
+
+      - name: Create release evidence predicate
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          readonly predicate='attestation-input/npm-release-evidence.json'
+
+          cat >"$predicate" <<'JSON'
+          {
+            "schemaVersion": 1,
+            "kind": "npm-release-evidence",
+            "package": {
+              "ecosystem": "npm",
+              "name": "@hasna/emails",
+              "version": "1.3.2",
+              "tarballUrl": "https://registry.npmjs.org/@hasna/emails/-/emails-1.3.2.tgz",
+              "sha256": "8f5e166e73ae7aebeb49a5eeae6dd199d0be63a9931a35981373e67b9ccfe431",
+              "npmShasum": "87c933255f5e95e7db8bf30bb606e07c1132f01e",
+              "npmIntegrity": "sha512-nGwS4AoZH2NwTV8Xoop2XupAubyq4bHuawYZX5itCjVwa/3U4hE6t+tBdnKZ9p72/BuUxmAL4iLEZ79eWlkCHg=="
+            },
+            "sourceEvidence": {
+              "repository": "https://github.com/hasna/emails",
+              "sourceMergeCommit": "fe61a466a28115f33efda1ecc7632dbc7c6525c7",
+              "reviewedHeadCommit": "4330ff214f53a41de681d595d188861bb3d36e13"
+            },
+            "mainCiEvidence": {
+              "runId": "30212897836",
+              "url": "https://github.com/hasna/emails/actions/runs/30212897836",
+              "workflow": ".github/workflows/ci.yml",
+              "event": "push",
+              "branch": "main",
+              "headSha": "fe61a466a28115f33efda1ecc7632dbc7c6525c7",
+              "conclusion": "success"
+            },
+            "attestationScope": {
+              "evidenceType": "post-publication-association",
+              "subjectOrigin": "downloaded-from-npm-registry",
+              "subjectBuiltByThisWorkflow": false,
+              "subjectPublishedByThisWorkflow": false,
+              "statement": "This workflow downloaded and digest-verified the npm tarball bytes, then attested the recorded release evidence. It did not build or publish the package."
+            }
+          }
+          JSON
+
+          jq --exit-status '
+            .schemaVersion == 1 and
+            .kind == "npm-release-evidence" and
+            .package.ecosystem == "npm" and
+            .package.name == "@hasna/emails" and
+            .package.version == "1.3.2" and
+            .package.tarballUrl == "https://registry.npmjs.org/@hasna/emails/-/emails-1.3.2.tgz" and
+            .package.sha256 == "8f5e166e73ae7aebeb49a5eeae6dd199d0be63a9931a35981373e67b9ccfe431" and
+            .package.npmShasum == "87c933255f5e95e7db8bf30bb606e07c1132f01e" and
+            .package.npmIntegrity == "sha512-nGwS4AoZH2NwTV8Xoop2XupAubyq4bHuawYZX5itCjVwa/3U4hE6t+tBdnKZ9p72/BuUxmAL4iLEZ79eWlkCHg==" and
+            .sourceEvidence.repository == "https://github.com/hasna/emails" and
+            .sourceEvidence.sourceMergeCommit == "fe61a466a28115f33efda1ecc7632dbc7c6525c7" and
+            .sourceEvidence.reviewedHeadCommit == "4330ff214f53a41de681d595d188861bb3d36e13" and
+            .mainCiEvidence.runId == "30212897836" and
+            .mainCiEvidence.url == "https://github.com/hasna/emails/actions/runs/30212897836" and
+            .mainCiEvidence.workflow == ".github/workflows/ci.yml" and
+            .mainCiEvidence.event == "push" and
+            .mainCiEvidence.branch == "main" and
+            .mainCiEvidence.headSha == "fe61a466a28115f33efda1ecc7632dbc7c6525c7" and
+            .mainCiEvidence.conclusion == "success" and
+            .attestationScope.evidenceType == "post-publication-association" and
+            .attestationScope.subjectOrigin == "downloaded-from-npm-registry" and
+            .attestationScope.subjectBuiltByThisWorkflow == false and
+            .attestationScope.subjectPublishedByThisWorkflow == false and
+            .attestationScope.statement == "This workflow downloaded and digest-verified the npm tarball bytes, then attested the recorded release evidence. It did not build or publish the package."
+          ' "$predicate" >/dev/null
+
+      - name: Attest downloaded npm tarball
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        with:
+          subject-path: attestation-input/emails-1.3.2.tgz
+          predicate-type: https://github.com/hasna/emails/attestations/npm-release-evidence/v1
+          predicate-path: attestation-input/npm-release-evidence.json
+          push-to-registry: false
+          create-storage-record: false

@@ -103,7 +103,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
 
   const addDomainAction = (
     domain: string,
-    opts: { provider: string; dryRun?: boolean; domainType?: string; sourceOfTruth?: string },
+    opts: { provider: string; dryRun?: boolean; domainType?: string },
     commandPrefix: "domain" | "domains",
   ) => {
     try {
@@ -120,6 +120,10 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
           provider_id: opts.provider,
           mode: mode.mode,
           provider: null,
+          // Not selectable: a domain created through this client is owned by the
+          // app's `/v1` database, and both domain mappers report `postgres`
+          // unconditionally. There is no local-SQLite-owned domain to choose, so
+          // this is reported, not requested.
           source_of_truth: "postgres",
           domain_type: domainType,
           existing: existing ? { id: existing.id, domain: existing.domain } : null,
@@ -168,16 +172,14 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .description("Add a domain to a provider")
     .requiredOption("--provider <id>", "Provider ID")
     .option("--domain-type <type>", "Domain type: system, self_hosted, or local_only")
-    .option("--source-of-truth <source>", "Source of truth: local or postgres")
     .option("--dry-run", "Resolve inputs and show the planned change without calling the provider or writing to the DB")
-    .action((domain: string, opts: { provider: string; dryRun?: boolean; domainType?: string; sourceOfTruth?: string }) => addDomainAction(domain, opts, "domains"));
+    .action((domain: string, opts: { provider: string; dryRun?: boolean; domainType?: string }) => addDomainAction(domain, opts, "domains"));
 
   domainsCmd
     .command("connect <domain>")
     .description("Connect an already-owned domain and generate DNS readiness tasks")
     .requiredOption("--provider <id>", "Provider ID")
     .option("--domain-type <type>", "Domain type: system, self_hosted, or local_only")
-    .option("--source-of-truth <source>", "Source of truth: local or postgres")
     .option("--dns-provider <provider>", "DNS provider label: manual, cloudflare, or route53", "manual")
     .option("--no-register-provider", "Do not call the mail provider to register the domain")
     .option("--dry-run", "Show the connection plan without calling the provider or writing to the DB")
@@ -226,16 +228,14 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .description("Add a domain to a provider")
     .requiredOption("--provider <id>", "Provider ID")
     .option("--domain-type <type>", "Domain type: system, self_hosted, or local_only")
-    .option("--source-of-truth <source>", "Source of truth: local or postgres")
     .option("--dry-run", "Resolve inputs and show the planned change without calling the provider or writing to the DB")
-    .action((domain: string, opts: { provider: string; dryRun?: boolean; domainType?: string; sourceOfTruth?: string }) => addDomainAction(domain, opts, "domain"));
+    .action((domain: string, opts: { provider: string; dryRun?: boolean; domainType?: string }) => addDomainAction(domain, opts, "domain"));
 
   domainCmd
     .command("connect <domain>")
     .description("Connect an already-owned domain and generate DNS readiness tasks")
     .requiredOption("--provider <id>", "Provider ID")
     .option("--domain-type <type>", "Domain type: system, self_hosted, or local_only")
-    .option("--source-of-truth <source>", "Source of truth: local or postgres")
     .option("--dns-provider <provider>", "DNS provider label: manual, cloudflare, or route53", "manual")
     .option("--no-register-provider", "Do not call the mail provider to register the domain")
     .option("--dry-run", "Show the connection plan without calling the provider or writing to the DB")

@@ -1,3 +1,4 @@
+import { canonicalSender } from "../lib/email-address.js";
 import {
   selfHostedResource,
   selfHostedListQuery,
@@ -51,7 +52,12 @@ type ContactStore = ReturnType<typeof selfHostedResource>;
  */
 function findContactByEmail(store: ContactStore, email: string): Contact | null {
   const rows = store.list({ email, limit: 500 }).map(apiToContact);
-  return rows.find((c) => c.email === email) ?? null;
+  // Canonical comparison — see contacts.local.ts. An exact match would let a
+  // mixed-case or `Name <addr>` spelling slip past a suppression check.
+  const wanted = canonicalSender(email) ?? email.trim().toLowerCase();
+  return rows.find((c) => c.email === email)
+    ?? rows.find((c) => (canonicalSender(c.email) ?? c.email.trim().toLowerCase()) === wanted)
+    ?? null;
 }
 
 export function upsertContact(email: string): Contact {
@@ -118,14 +124,38 @@ export function isContactSuppressed(email: string): boolean {
   return findContactByEmail(selfHostedResource(CONTACT_RESOURCE), email)?.suppressed === true;
 }
 
+/** See contacts.local.ts: canonical matching, and both spellings returned. */
 export function getSuppressedEmailSet(emails: Iterable<string>): Set<string> {
-  const uniqueEmails = Array.from(new Set(emails));
   const suppressed = new Set<string>();
-  if (uniqueEmails.length === 0) return suppressed;
+  const lookups = new Set<string>();
+  for (const raw of emails) {
+    if (typeof raw !== "string") continue;
+    const trimmed = raw.trim();
+    if (!trimmed) continue;
+    lookups.add(trimmed);
+    const canonical = canonicalSender(trimmed);
+    if (canonical) lookups.add(canonical);
+  }
+  if (lookups.size === 0) return suppressed;
   const store = selfHostedResource(CONTACT_RESOURCE);
-  for (const email of uniqueEmails) {
+  for (const email of lookups) {
     const contact = findContactByEmail(store, email);
-    if (contact?.suppressed) suppressed.add(contact.email);
+    if (!contact?.suppressed) continue;
+    suppressed.add(contact.email);
+    const canonical = canonicalSender(contact.email);
+    if (canonical) suppressed.add(canonical);
   }
   return suppressed;
+}
+
+/** See contacts.local.ts. */
+export function suppressedRecipientsAmong(recipients: Iterable<string>): string[] {
+  const list = [...recipients];
+  const suppressed = getSuppressedEmailSet(list);
+  if (suppressed.size === 0) return [];
+  return list.filter((recipient) => {
+    if (suppressed.has(recipient) || suppressed.has(recipient.trim())) return true;
+    const canonical = canonicalSender(recipient);
+    return canonical !== null && suppressed.has(canonical);
+  });
 }

@@ -225,7 +225,17 @@ describe("self-hosted OpenAPI identity and authorization contract", () => {
       in: "query",
       schema: { type: "integer", minimum: 1, maximum: 25 * 1024 * 1024 },
     });
-    expect(Object.keys(operation?.responses ?? {})).toEqual(["200", "400", "404", "409", "413", "422"]);
+    expect(Object.keys(operation?.responses ?? {})).toEqual([
+      "200",
+      "400",
+      "401",
+      "403",
+      "404",
+      "409",
+      "413",
+      "422",
+      "500",
+    ]);
     expect(operation?.responses?.["400"]).toMatchObject({
       description: expect.stringContaining("max_bytes"),
     });
@@ -240,7 +250,10 @@ describe("self-hosted OpenAPI identity and authorization contract", () => {
     const inventory = emailsSelfHostedOpenApi.components?.schemas?.AttachmentInventoryItem as
       | { required?: string[]; properties?: Record<string, unknown> }
       | undefined;
-    const batch = emailsSelfHostedOpenApi.components?.schemas?.AttachmentMeta as
+    const batch = emailsSelfHostedOpenApi.components?.schemas?.AttachmentBatchMeta as
+      | { required?: string[]; properties?: Record<string, unknown> }
+      | undefined;
+    const message = emailsSelfHostedOpenApi.components?.schemas?.AttachmentMeta as
       | { required?: string[]; properties?: Record<string, unknown> }
       | undefined;
 
@@ -249,6 +262,9 @@ describe("self-hosted OpenAPI identity and authorization contract", () => {
       expect(schema?.properties?.content_available).toMatchObject({ type: "boolean" });
       expect(schema?.properties).not.toHaveProperty("content_base64");
     }
+    expect(message?.required).toBeUndefined();
+    expect(message?.properties?.content_available).toMatchObject({ type: "boolean" });
+    expect(message?.properties).not.toHaveProperty("content_base64");
     expect(paths["/v1/attachments"]?.get?.responses?.["400"]
       ?.content?.["application/json"]?.schema?.properties?.code)
       .toMatchObject({
@@ -351,8 +367,12 @@ describe("self-hosted OpenAPI identity and authorization contract", () => {
     expect(paths["/v1/attachments/repairs"]?.post?.responses?.["429"]
       ?.content?.["application/json"]?.schema?.properties?.quota)
       .toMatchObject({ enum: ["active_runs", "ledger_runs", "ledger_entries"] });
-    expect(paths["/v1/attachments/repairs"]?.post?.responses?.["400"]
-      ?.content?.["application/json"]?.schema?.properties?.code)
+    const repairBadRequest = paths["/v1/attachments/repairs"]?.post?.responses?.["400"]
+      ?.content?.["application/json"]?.schema;
+    const repairBadRequestVariant = repairBadRequest?.anyOf?.find(
+      (variant) => variant.properties?.code,
+    ) ?? repairBadRequest;
+    expect(repairBadRequestVariant?.properties?.code)
       .toMatchObject({ enum: expect.arrayContaining(["invalid_repair_review"]) });
     expect(paths["/v1/attachments/repairs"]?.post?.responses?.["409"]
       ?.content?.["application/json"]?.schema?.properties?.code)
@@ -367,8 +387,12 @@ describe("self-hosted OpenAPI identity and authorization contract", () => {
     expect(paths["/v1/attachments/repairs/{id}"]?.get?.responses?.["400"]
       ?.content?.["application/json"]?.schema?.properties?.code)
       .toMatchObject({ enum: ["invalid_attachment_repair_id"] });
-    expect(paths["/v1/attachments/repairs/{id}/resume"]?.post?.responses?.["400"]
-      ?.content?.["application/json"]?.schema?.properties?.code)
+    const resumeBadRequest = paths["/v1/attachments/repairs/{id}/resume"]?.post
+      ?.responses?.["400"]?.content?.["application/json"]?.schema;
+    const resumeBadRequestVariant = resumeBadRequest?.anyOf?.find(
+      (variant) => variant.properties?.code,
+    ) ?? resumeBadRequest;
+    expect(resumeBadRequestVariant?.properties?.code)
       .toMatchObject({
         enum: expect.arrayContaining([
           "invalid_attachment_repair_id",
@@ -380,6 +404,34 @@ describe("self-hosted OpenAPI identity and authorization contract", () => {
       ?.content?.["application/json"]?.schema?.properties?.code)
       .toMatchObject({ enum: ["attachment_repair_not_configured"] });
     expect(JSON.stringify(paths["/v1/attachments/repairs"])).not.toContain("content_base64");
+  });
+
+  it("publishes both provider webhook receivers as explicitly public routes", () => {
+    // These are the ONLY /v1 routes a provider (AWS SNS, Resend) calls, and a
+    // provider holds no Hasna API key: the contract must say so, or an operator
+    // reading the document would put an API-key gate in front of them and
+    // silently break inbound mail and delivery-event ingestion.
+    for (const path of ["/v1/webhooks/ses-inbound", "/v1/webhooks/resend-inbound"]) {
+      const operation = paths[path]?.post;
+      expect(operation, path).toBeDefined();
+      expect(operation?.security, path).toEqual([]);
+      // The receivers fail CLOSED when their verification material is missing.
+      expect(operation?.responses, path).toHaveProperty("401");
+      expect(operation?.responses, path).toHaveProperty("503");
+      expect(operation?.responses, path).toHaveProperty("413");
+      expect(operation?.responses, path).toHaveProperty("200");
+      // Only POST is served; nothing else may be documented on these paths.
+      expect(Object.keys(paths[path] ?? {}), path).toEqual(["post"]);
+    }
+    expect(paths["/v1/webhooks/ses-inbound"]?.post?.operationId).toBe("receiveSesInboundWebhook");
+    expect(paths["/v1/webhooks/resend-inbound"]?.post?.operationId).toBe("receiveResendInboundWebhook");
+    // The documented tenant-selection rule is the one the code implements.
+    expect(paths["/v1/webhooks/ses-inbound"]?.post?.description).toContain("never from a body field");
+    expect(paths["/v1/webhooks/resend-inbound"]?.post?.description).toContain("never");
+    expect(paths["/v1/webhooks/resend-inbound"]?.post?.description).toContain("fails CLOSED");
+    for (const schema of ["SnsNotification", "ResendWebhookEvent", "WebhookReceipt"]) {
+      expect(emailsSelfHostedOpenApi.components?.schemas?.[schema], schema).toBeDefined();
+    }
   });
 
   it("enumerates every registry-backed resource in the generated contract", () => {

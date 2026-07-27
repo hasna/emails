@@ -600,6 +600,19 @@ function mailSourceTypeSql(providerTypeSql: string, rawS3Sql: string, metadataS3
   END`;
 }
 
+// Inbound mail whose `to` header has no parseable recipient is attributed to a
+// synthetic mailbox. `local.mailery` was that identity under the previous product
+// name; it is RETIRED. Migration 46 renamed it, but `ensureMailArchitecture` drops
+// and re-creates the inbound trigger on every `getDatabase()` call, so the
+// pre-rename literal embedded in that trigger re-minted the retired mailbox on the
+// very next open — splitting recipient-less mail across two mailboxes forever and
+// keeping a retired product identity permanently live. Single definition site so
+// the trigger, the backfill and the rename bridge cannot drift apart again.
+const LEGACY_INBOUND_ADDRESS = "legacy-inbound@local.emails";
+const LEGACY_INBOUND_MAILBOX_ID = `mbx:${LEGACY_INBOUND_ADDRESS}`;
+const RETIRED_LEGACY_INBOUND_ADDRESS = "legacy-inbound@local.mailery";
+const RETIRED_LEGACY_INBOUND_MAILBOX_ID = `mbx:${RETIRED_LEGACY_INBOUND_ADDRESS}`;
+
 function mailboxRecipientRowsSql(idSql: string, toAddressesSql: string): string {
   const addressSql = normalizedRecipientSql("j.value");
   return `SELECT ${idSql} AS inbound_email_id,
@@ -616,8 +629,8 @@ function mailboxRecipientRowsSql(idSql: string, toAddressesSql: string): string 
              AND normalized.address NOT LIKE '%>%'
           UNION ALL
           SELECT ${idSql} AS inbound_email_id,
-                 'legacy-inbound@local.mailery' AS address,
-                 'mbx:legacy-inbound@local.mailery' AS mailbox_id
+                 '${LEGACY_INBOUND_ADDRESS}' AS address,
+                 '${LEGACY_INBOUND_MAILBOX_ID}' AS mailbox_id
            WHERE NOT EXISTS (
              SELECT 1
                FROM (
@@ -632,16 +645,13 @@ function mailboxRecipientRowsSql(idSql: string, toAddressesSql: string): string 
            )`;
 }
 
-function folderRoleSql(isSentSql: string, isTrashSql: string, isSpamSql: string, isArchivedSql: string): string {
-  return `CASE
-    WHEN COALESCE(${isSentSql}, 0) = 1 THEN 'sent'
-    WHEN COALESCE(${isTrashSql}, 0) = 1 THEN 'trash'
-    WHEN COALESCE(${isSpamSql}, 0) = 1 THEN 'spam'
-    WHEN COALESCE(${isArchivedSql}, 0) = 1 THEN 'archive'
-    ELSE 'inbox'
-  END`;
-}
-
+// `mailboxes` and `mailbox_sources` are the two canonical tables that are still
+// live: `trg_providers_preserve_mail_history` reads `mailbox_sources` to refuse
+// deleting a provider that has source history, and `mailbox_sources.mailbox_id`
+// is a foreign key into `mailboxes`, so with `PRAGMA foreign_keys = ON` a missing
+// `mailboxes` row makes the source insert — and therefore the inbound INSERT that
+// fires it — fail. `mail_messages` survives because the inbound-delete trigger
+// below reads it; nothing populates it any more.
 const MAIL_ARCHITECTURE_SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS mailboxes (
     id TEXT PRIMARY KEY,
@@ -652,19 +662,6 @@ const MAIL_ARCHITECTURE_SCHEMA_SQL = `
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(address)
-  );
-
-  CREATE TABLE IF NOT EXISTS mail_folders (
-    id TEXT PRIMARY KEY,
-    mailbox_id TEXT NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE,
-    role TEXT NOT NULL DEFAULT 'custom' CHECK(role IN ('inbox','sent','archive','spam','trash','custom')),
-    name TEXT NOT NULL,
-    path TEXT NOT NULL,
-    provider_folder_id TEXT,
-    sort_order INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-    UNIQUE(mailbox_id, path)
   );
 
   CREATE TABLE IF NOT EXISTS mailbox_sources (
@@ -705,61 +702,25 @@ const MAIL_ARCHITECTURE_SCHEMA_SQL = `
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
 
-  CREATE TABLE IF NOT EXISTS mailbox_message_state (
-    id TEXT PRIMARY KEY,
-    mailbox_id TEXT NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE,
-    mail_message_id TEXT NOT NULL REFERENCES mail_messages(id) ON DELETE CASCADE,
-    folder_id TEXT REFERENCES mail_folders(id) ON DELETE SET NULL,
-    source_id TEXT REFERENCES mailbox_sources(id) ON DELETE SET NULL,
-    source_dedupe_key TEXT,
-    direction TEXT NOT NULL DEFAULT 'inbound' CHECK(direction IN ('inbound','outbound','sent')),
-    provider_message_id TEXT,
-    provider_thread_id TEXT,
-    thread_id TEXT,
-    labels_json TEXT NOT NULL DEFAULT '[]',
-    is_read INTEGER NOT NULL DEFAULT 0,
-    read_at TEXT,
-    is_archived INTEGER NOT NULL DEFAULT 0,
-    is_starred INTEGER NOT NULL DEFAULT 0,
-    is_spam INTEGER NOT NULL DEFAULT 0,
-    is_trash INTEGER NOT NULL DEFAULT 0,
-    received_at TEXT,
-    sent_at TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-    UNIQUE(mailbox_id, mail_message_id)
-  );
-
   CREATE INDEX IF NOT EXISTS idx_mailboxes_address ON mailboxes(address);
   CREATE INDEX IF NOT EXISTS idx_mailboxes_owner ON mailboxes(owner_id);
-  CREATE INDEX IF NOT EXISTS idx_mail_folders_mailbox_role ON mail_folders(mailbox_id, role);
   CREATE INDEX IF NOT EXISTS idx_mailbox_sources_mailbox ON mailbox_sources(mailbox_id, status);
   CREATE INDEX IF NOT EXISTS idx_mailbox_sources_provider ON mailbox_sources(provider_id);
   CREATE INDEX IF NOT EXISTS idx_mail_messages_rfc_message_id ON mail_messages(rfc_message_id) WHERE rfc_message_id IS NOT NULL;
   CREATE INDEX IF NOT EXISTS idx_mail_messages_received ON mail_messages(received_at);
-  CREATE INDEX IF NOT EXISTS idx_mailbox_state_mailbox_folder_received ON mailbox_message_state(mailbox_id, folder_id, received_at);
-  CREATE INDEX IF NOT EXISTS idx_mailbox_state_message ON mailbox_message_state(mail_message_id);
-  CREATE INDEX IF NOT EXISTS idx_mailbox_state_source ON mailbox_message_state(source_id);
-  CREATE UNIQUE INDEX IF NOT EXISTS idx_mailbox_state_source_dedupe ON mailbox_message_state(source_id, source_dedupe_key)
-    WHERE source_id IS NOT NULL AND source_dedupe_key IS NOT NULL;
 `;
 
+// `inbound_emails.mail_message_id` stays because the inbound-delete trigger reads
+// it to locate the canonical row a historical database may still hold. Nothing
+// writes it any more, so the COALESCE fallback in that trigger carries new rows.
 const MAIL_ARCHITECTURE_COLUMNS_SQL = `
   ALTER TABLE inbound_emails ADD COLUMN mail_message_id TEXT REFERENCES mail_messages(id) ON DELETE SET NULL;
-  ALTER TABLE inbound_emails ADD COLUMN primary_mailbox_id TEXT REFERENCES mailboxes(id) ON DELETE SET NULL;
-  ALTER TABLE inbound_emails ADD COLUMN primary_mailbox_source_id TEXT REFERENCES mailbox_sources(id) ON DELETE SET NULL;
   CREATE INDEX IF NOT EXISTS idx_inbound_mail_message ON inbound_emails(mail_message_id);
-  CREATE INDEX IF NOT EXISTS idx_inbound_primary_mailbox ON inbound_emails(primary_mailbox_id);
-  CREATE INDEX IF NOT EXISTS idx_inbound_primary_source ON inbound_emails(primary_mailbox_source_id);
 `;
 
 const MAIL_ARCHITECTURE_COLUMN_STATEMENTS = [
   "ALTER TABLE inbound_emails ADD COLUMN mail_message_id TEXT REFERENCES mail_messages(id) ON DELETE SET NULL",
-  "ALTER TABLE inbound_emails ADD COLUMN primary_mailbox_id TEXT REFERENCES mailboxes(id) ON DELETE SET NULL",
-  "ALTER TABLE inbound_emails ADD COLUMN primary_mailbox_source_id TEXT REFERENCES mailbox_sources(id) ON DELETE SET NULL",
   "CREATE INDEX IF NOT EXISTS idx_inbound_mail_message ON inbound_emails(mail_message_id)",
-  "CREATE INDEX IF NOT EXISTS idx_inbound_primary_mailbox ON inbound_emails(primary_mailbox_id)",
-  "CREATE INDEX IF NOT EXISTS idx_inbound_primary_source ON inbound_emails(primary_mailbox_source_id)",
 ] as const;
 
 function ensureMailArchitectureColumns(db: Database): void {
@@ -781,8 +742,8 @@ const MAIL_ARCHITECTURE_BACKFILL_SQL = `
    GROUP BY recipient.address;
 
   INSERT OR IGNORE INTO mailboxes (id, address, display_name, status, created_at, updated_at)
-  SELECT 'mbx:legacy-inbound@local.mailery',
-         'legacy-inbound@local.mailery',
+  SELECT '${LEGACY_INBOUND_MAILBOX_ID}',
+         '${LEGACY_INBOUND_ADDRESS}',
          'Legacy inbound',
          'active',
          COALESCE(MIN(inbound.created_at), datetime('now')),
@@ -793,44 +754,6 @@ const MAIL_ARCHITECTURE_BACKFILL_SQL = `
    )
   HAVING COUNT(*) > 0;
 
-  INSERT OR IGNORE INTO mail_folders (id, mailbox_id, role, name, path, sort_order, created_at, updated_at)
-  SELECT 'folder:' || id || ':inbox', id, 'inbox', 'Inbox', 'INBOX', 10, datetime('now'), datetime('now') FROM mailboxes;
-  INSERT OR IGNORE INTO mail_folders (id, mailbox_id, role, name, path, sort_order, created_at, updated_at)
-  SELECT 'folder:' || id || ':sent', id, 'sent', 'Sent', 'SENT', 20, datetime('now'), datetime('now') FROM mailboxes;
-  INSERT OR IGNORE INTO mail_folders (id, mailbox_id, role, name, path, sort_order, created_at, updated_at)
-  SELECT 'folder:' || id || ':archive', id, 'archive', 'Archive', 'ARCHIVE', 30, datetime('now'), datetime('now') FROM mailboxes;
-  INSERT OR IGNORE INTO mail_folders (id, mailbox_id, role, name, path, sort_order, created_at, updated_at)
-  SELECT 'folder:' || id || ':spam', id, 'spam', 'Spam', 'SPAM', 40, datetime('now'), datetime('now') FROM mailboxes;
-  INSERT OR IGNORE INTO mail_folders (id, mailbox_id, role, name, path, sort_order, created_at, updated_at)
-  SELECT 'folder:' || id || ':trash', id, 'trash', 'Trash', 'TRASH', 50, datetime('now'), datetime('now') FROM mailboxes;
-
-  -- Do not duplicate historical bodies into mail_messages. Existing inbound
-  -- bodies remain preserved in inbound_emails and can be joined by the
-  -- deterministic msg:inbound:<id> link; new inserts populate canonical bodies.
-  INSERT OR IGNORE INTO mail_messages (
-    id, rfc_message_id, subject, from_address, to_addresses, cc_addresses, bcc_addresses,
-    text_body, html_body, headers_json, attachments_json, raw_s3_url, metadata_s3_url,
-    raw_size, received_at, created_at, updated_at
-  )
-  SELECT 'msg:inbound:' || id,
-         message_id,
-         subject,
-         from_address,
-         to_addresses,
-         cc_addresses,
-         '[]',
-         NULL,
-         NULL,
-         headers_json,
-         attachments_json,
-         raw_s3_url,
-         metadata_s3_url,
-         COALESCE(raw_size, 0),
-         received_at,
-         created_at,
-         datetime('now')
-    FROM inbound_emails;
-
   WITH recipient_rows AS (
     SELECT inbound.id AS inbound_email_id,
            recipient.address AS address,
@@ -839,8 +762,8 @@ const MAIL_ARCHITECTURE_BACKFILL_SQL = `
       JOIN inbound_recipients recipient ON recipient.inbound_email_id = inbound.id
     UNION ALL
     SELECT inbound.id,
-           'legacy-inbound@local.mailery',
-           'mbx:legacy-inbound@local.mailery'
+           '${LEGACY_INBOUND_ADDRESS}',
+           '${LEGACY_INBOUND_MAILBOX_ID}'
       FROM inbound_emails inbound
      WHERE NOT EXISTS (
        SELECT 1 FROM inbound_recipients recipient WHERE recipient.inbound_email_id = inbound.id
@@ -886,131 +809,18 @@ const MAIL_ARCHITECTURE_BACKFILL_SQL = `
          datetime('now')
     FROM source_rows;
 
-  WITH recipient_rows AS (
-    SELECT inbound.id AS inbound_email_id,
-           recipient.address AS address,
-           'mbx:' || recipient.address AS mailbox_id
-      FROM inbound_emails inbound
-      JOIN inbound_recipients recipient ON recipient.inbound_email_id = inbound.id
-    UNION ALL
-    SELECT inbound.id,
-           'legacy-inbound@local.mailery',
-           'mbx:legacy-inbound@local.mailery'
-      FROM inbound_emails inbound
-     WHERE NOT EXISTS (
-       SELECT 1 FROM inbound_recipients recipient WHERE recipient.inbound_email_id = inbound.id
-     )
-  ),
-  state_rows AS (
-    SELECT state_base.*,
-           COUNT(*) OVER (
-             PARTITION BY state_base.mailbox_id,
-                          COALESCE(state_base.source_provider_id, 'none'),
-                          state_base.source_type,
-                          state_base.dedupe_base
-           ) AS source_dedupe_count
-      FROM (
-        SELECT inbound.*,
-               recipient_rows.address,
-               recipient_rows.mailbox_id,
-               CASE WHEN provider.id IS NULL THEN NULL ELSE inbound.provider_id END AS source_provider_id,
-               COALESCE(NULLIF(inbound.message_id, ''), inbound.id) AS dedupe_base,
-               ${mailSourceTypeSql("provider.type", "inbound.raw_s3_url", "inbound.metadata_s3_url", "inbound.message_id")} AS source_type,
-               ${folderRoleSql("inbound.is_sent", "inbound.is_trash", "inbound.is_spam", "inbound.is_archived")} AS folder_role
-          FROM recipient_rows
-          JOIN inbound_emails inbound ON inbound.id = recipient_rows.inbound_email_id
-          LEFT JOIN providers provider ON provider.id = inbound.provider_id
-      ) state_base
-  )
-  INSERT OR IGNORE INTO mailbox_message_state (
-    id, mailbox_id, mail_message_id, folder_id, source_id, source_dedupe_key,
-    direction, provider_message_id, provider_thread_id, thread_id, labels_json,
-    is_read, read_at, is_archived, is_starred, is_spam, is_trash, received_at,
-    created_at, updated_at
-  )
-  SELECT 'state:' || id || ':' || address,
-         mailbox_id,
-         'msg:inbound:' || id,
-         'folder:' || mailbox_id || ':' || folder_role,
-         'msrc:' || mailbox_id || ':' || COALESCE(source_provider_id, 'none') || ':' || source_type,
-         CASE
-           WHEN source_dedupe_count > 1 THEN dedupe_base || ':inbound:' || id
-           ELSE dedupe_base
-         END,
-         CASE WHEN COALESCE(is_sent, 0) = 1 THEN 'sent' ELSE 'inbound' END,
-         message_id,
-         provider_thread_id,
-         thread_id,
-         label_ids_json,
-         COALESCE(is_read, 0),
-         read_at,
-         COALESCE(is_archived, 0),
-         COALESCE(is_starred, 0),
-         COALESCE(is_spam, 0),
-         COALESCE(is_trash, 0),
-         received_at,
-         created_at,
-         datetime('now')
-    FROM state_rows;
-
-  UPDATE inbound_emails
-     SET mail_message_id = COALESCE(mail_message_id, 'msg:inbound:' || id);
-
-  UPDATE inbound_emails
-     SET primary_mailbox_id = COALESCE(primary_mailbox_id, (
-           SELECT state.mailbox_id
-             FROM mailbox_message_state state
-            WHERE state.mail_message_id = 'msg:inbound:' || inbound_emails.id
-            ORDER BY state.mailbox_id
-            LIMIT 1
-         )),
-         primary_mailbox_source_id = COALESCE(primary_mailbox_source_id, (
-           SELECT state.source_id
-             FROM mailbox_message_state state
-            WHERE state.mail_message_id = 'msg:inbound:' || inbound_emails.id
-            ORDER BY state.mailbox_id
-            LIMIT 1
-         ));
 `;
 
+// Canonical maintenance narrowed to the two tables that still have a reader:
+// `mailboxes` (the foreign-key parent) and `mailbox_sources` (read by
+// `trg_providers_preserve_mail_history`). The canonical message body, folder and
+// per-mailbox state writes this trigger used to perform had no reader at all.
 const MAIL_ARCHITECTURE_INBOUND_INSERT_TRIGGER_SQL = `
   CREATE TRIGGER trg_mail_architecture_inbound_insert
   AFTER INSERT ON inbound_emails
   BEGIN
-    INSERT OR IGNORE INTO mail_messages (
-      id, rfc_message_id, subject, from_address, to_addresses, cc_addresses, bcc_addresses,
-      text_body, html_body, headers_json, attachments_json, raw_s3_url, metadata_s3_url,
-      raw_size, received_at, created_at, updated_at
-    )
-    VALUES (
-      'msg:inbound:' || NEW.id, NEW.message_id, NEW.subject, NEW.from_address,
-      NEW.to_addresses, NEW.cc_addresses, '[]', NEW.text_body, NEW.html_body,
-      NEW.headers_json, NEW.attachments_json, NEW.raw_s3_url, NEW.metadata_s3_url,
-      COALESCE(NEW.raw_size, 0), NEW.received_at, NEW.created_at, datetime('now')
-    );
-
-    UPDATE inbound_emails
-       SET mail_message_id = COALESCE(mail_message_id, 'msg:inbound:' || NEW.id)
-     WHERE id = NEW.id;
-
     INSERT OR IGNORE INTO mailboxes (id, address, display_name, status, created_at, updated_at)
     SELECT mailbox_id, address, address, 'active', NEW.created_at, datetime('now')
-      FROM (${mailboxRecipientRowsSql("NEW.id", "NEW.to_addresses")});
-
-    INSERT OR IGNORE INTO mail_folders (id, mailbox_id, role, name, path, sort_order, created_at, updated_at)
-    SELECT 'folder:' || mailbox_id || ':inbox', mailbox_id, 'inbox', 'Inbox', 'INBOX', 10, datetime('now'), datetime('now')
-      FROM (${mailboxRecipientRowsSql("NEW.id", "NEW.to_addresses")});
-    INSERT OR IGNORE INTO mail_folders (id, mailbox_id, role, name, path, sort_order, created_at, updated_at)
-    SELECT 'folder:' || mailbox_id || ':sent', mailbox_id, 'sent', 'Sent', 'SENT', 20, datetime('now'), datetime('now')
-      FROM (${mailboxRecipientRowsSql("NEW.id", "NEW.to_addresses")});
-    INSERT OR IGNORE INTO mail_folders (id, mailbox_id, role, name, path, sort_order, created_at, updated_at)
-    SELECT 'folder:' || mailbox_id || ':archive', mailbox_id, 'archive', 'Archive', 'ARCHIVE', 30, datetime('now'), datetime('now')
-      FROM (${mailboxRecipientRowsSql("NEW.id", "NEW.to_addresses")});
-    INSERT OR IGNORE INTO mail_folders (id, mailbox_id, role, name, path, sort_order, created_at, updated_at)
-    SELECT 'folder:' || mailbox_id || ':spam', mailbox_id, 'spam', 'Spam', 'SPAM', 40, datetime('now'), datetime('now')
-      FROM (${mailboxRecipientRowsSql("NEW.id", "NEW.to_addresses")});
-    INSERT OR IGNORE INTO mail_folders (id, mailbox_id, role, name, path, sort_order, created_at, updated_at)
-    SELECT 'folder:' || mailbox_id || ':trash', mailbox_id, 'trash', 'Trash', 'TRASH', 50, datetime('now'), datetime('now')
       FROM (${mailboxRecipientRowsSql("NEW.id", "NEW.to_addresses")});
 
     INSERT OR IGNORE INTO mailbox_sources (
@@ -1039,63 +849,6 @@ const MAIL_ARCHITECTURE_INBOUND_INSERT_TRIGGER_SQL = `
            datetime('now')
       FROM (${mailboxRecipientRowsSql("NEW.id", "NEW.to_addresses")}) recipients
       LEFT JOIN providers provider ON provider.id = NEW.provider_id;
-
-    INSERT OR IGNORE INTO mailbox_message_state (
-      id, mailbox_id, mail_message_id, folder_id, source_id, source_dedupe_key,
-      direction, provider_message_id, provider_thread_id, thread_id, labels_json,
-      is_read, read_at, is_archived, is_starred, is_spam, is_trash, received_at,
-      created_at, updated_at
-    )
-    SELECT 'state:' || NEW.id || ':' || recipients.address,
-           recipients.mailbox_id,
-           'msg:inbound:' || NEW.id,
-           'folder:' || recipients.mailbox_id || ':' || ${folderRoleSql("NEW.is_sent", "NEW.is_trash", "NEW.is_spam", "NEW.is_archived")},
-           'msrc:' || recipients.mailbox_id || ':' || COALESCE(provider.id, 'none') || ':' ||
-             ${mailSourceTypeSql("provider.type", "NEW.raw_s3_url", "NEW.metadata_s3_url", "NEW.message_id")},
-           CASE
-             WHEN EXISTS (
-               SELECT 1
-                 FROM mailbox_message_state existing_state
-                WHERE existing_state.source_id = 'msrc:' || recipients.mailbox_id || ':' || COALESCE(provider.id, 'none') || ':' ||
-                    ${mailSourceTypeSql("provider.type", "NEW.raw_s3_url", "NEW.metadata_s3_url", "NEW.message_id")}
-                  AND existing_state.source_dedupe_key = COALESCE(NULLIF(NEW.message_id, ''), NEW.id)
-                LIMIT 1
-             ) THEN COALESCE(NULLIF(NEW.message_id, ''), NEW.id) || ':inbound:' || NEW.id
-             ELSE COALESCE(NULLIF(NEW.message_id, ''), NEW.id)
-           END,
-           CASE WHEN COALESCE(NEW.is_sent, 0) = 1 THEN 'sent' ELSE 'inbound' END,
-           NEW.message_id,
-           NEW.provider_thread_id,
-           NEW.thread_id,
-           NEW.label_ids_json,
-           COALESCE(NEW.is_read, 0),
-           NEW.read_at,
-           COALESCE(NEW.is_archived, 0),
-           COALESCE(NEW.is_starred, 0),
-           COALESCE(NEW.is_spam, 0),
-           COALESCE(NEW.is_trash, 0),
-           NEW.received_at,
-           NEW.created_at,
-           datetime('now')
-      FROM (${mailboxRecipientRowsSql("NEW.id", "NEW.to_addresses")}) recipients
-      LEFT JOIN providers provider ON provider.id = NEW.provider_id;
-
-    UPDATE inbound_emails
-       SET primary_mailbox_id = COALESCE(primary_mailbox_id, (
-             SELECT state.mailbox_id
-               FROM mailbox_message_state state
-              WHERE state.mail_message_id = 'msg:inbound:' || NEW.id
-              ORDER BY state.mailbox_id
-              LIMIT 1
-           )),
-           primary_mailbox_source_id = COALESCE(primary_mailbox_source_id, (
-             SELECT state.source_id
-               FROM mailbox_message_state state
-              WHERE state.mail_message_id = 'msg:inbound:' || NEW.id
-              ORDER BY state.mailbox_id
-              LIMIT 1
-           ))
-     WHERE id = NEW.id;
   END;
 `;
 
@@ -1114,116 +867,44 @@ const MAIL_ARCHITECTURE_INBOUND_DELETE_TRIGGER_SQL = `
   END;
 `;
 
-const MAIL_ARCHITECTURE_STATE_RECONCILE_SQL = `
-  DROP TABLE IF EXISTS temp_mailery_inbound_state_reconcile;
-  CREATE TEMP TABLE temp_mailery_inbound_state_reconcile AS
-  SELECT COALESCE(mail_message_id, 'msg:inbound:' || id) AS mail_message_id,
-         label_ids_json,
-         is_read,
-         read_at,
-         is_archived,
-         is_starred,
-         is_spam,
-         is_trash,
-         is_sent
-    FROM inbound_emails;
-  CREATE INDEX temp_mailery_inbound_state_reconcile_message
-      ON temp_mailery_inbound_state_reconcile(mail_message_id);
+const RETIRED_LEGACY_INBOUND_BRIDGE_SQL = `
+  INSERT OR IGNORE INTO mailboxes (id, address, display_name, owner_id, status, created_at, updated_at)
+  SELECT '${LEGACY_INBOUND_MAILBOX_ID}', '${LEGACY_INBOUND_ADDRESS}',
+         COALESCE(display_name, 'Legacy inbound'), owner_id, status, created_at, datetime('now')
+    FROM mailboxes
+   WHERE id = '${RETIRED_LEGACY_INBOUND_MAILBOX_ID}';
 
-  UPDATE mailbox_message_state
-     SET labels_json = (
-           SELECT inbound_state.label_ids_json
-             FROM temp_mailery_inbound_state_reconcile inbound_state
-            WHERE inbound_state.mail_message_id = mailbox_message_state.mail_message_id
-            LIMIT 1
-         ),
-         is_read = COALESCE((
-           SELECT inbound_state.is_read
-             FROM temp_mailery_inbound_state_reconcile inbound_state
-            WHERE inbound_state.mail_message_id = mailbox_message_state.mail_message_id
-            LIMIT 1
-         ), is_read),
-         read_at = (
-           SELECT inbound_state.read_at
-             FROM temp_mailery_inbound_state_reconcile inbound_state
-            WHERE inbound_state.mail_message_id = mailbox_message_state.mail_message_id
-            LIMIT 1
-         ),
-         is_archived = COALESCE((
-           SELECT inbound_state.is_archived
-             FROM temp_mailery_inbound_state_reconcile inbound_state
-            WHERE inbound_state.mail_message_id = mailbox_message_state.mail_message_id
-            LIMIT 1
-         ), is_archived),
-         is_starred = COALESCE((
-           SELECT inbound_state.is_starred
-             FROM temp_mailery_inbound_state_reconcile inbound_state
-            WHERE inbound_state.mail_message_id = mailbox_message_state.mail_message_id
-            LIMIT 1
-         ), is_starred),
-         is_spam = COALESCE((
-           SELECT inbound_state.is_spam
-             FROM temp_mailery_inbound_state_reconcile inbound_state
-            WHERE inbound_state.mail_message_id = mailbox_message_state.mail_message_id
-            LIMIT 1
-         ), is_spam),
-         is_trash = COALESCE((
-           SELECT inbound_state.is_trash
-             FROM temp_mailery_inbound_state_reconcile inbound_state
-            WHERE inbound_state.mail_message_id = mailbox_message_state.mail_message_id
-            LIMIT 1
-         ), is_trash),
-         folder_id = COALESCE((
-           SELECT 'folder:' || mailbox_message_state.mailbox_id || ':' ||
-                  CASE
-                    WHEN COALESCE(inbound_state.is_sent, 0) = 1 THEN 'sent'
-                    WHEN COALESCE(inbound_state.is_trash, 0) = 1 THEN 'trash'
-                    WHEN COALESCE(inbound_state.is_spam, 0) = 1 THEN 'spam'
-                    WHEN COALESCE(inbound_state.is_archived, 0) = 1 THEN 'archive'
-                    ELSE 'inbox'
-                  END
-             FROM temp_mailery_inbound_state_reconcile inbound_state
-            WHERE inbound_state.mail_message_id = mailbox_message_state.mail_message_id
-            LIMIT 1
-         ), folder_id),
+  -- Drop only sources whose re-keyed identity already exists: the same
+  -- provenance recorded twice, once under each name. Everything else is
+  -- re-pointed, never deleted.
+  DELETE FROM mailbox_sources
+   WHERE mailbox_id = '${RETIRED_LEGACY_INBOUND_MAILBOX_ID}'
+     AND EXISTS (
+       SELECT 1
+         FROM mailbox_sources other
+        WHERE other.id = replace(mailbox_sources.id,
+                                 '${RETIRED_LEGACY_INBOUND_ADDRESS}',
+                                 '${LEGACY_INBOUND_ADDRESS}')
+     );
+
+  -- The retired address is embedded in the source id and in external_mailbox,
+  -- not just in mailbox_id, so all three have to move together.
+  UPDATE mailbox_sources
+     SET id = replace(id, '${RETIRED_LEGACY_INBOUND_ADDRESS}', '${LEGACY_INBOUND_ADDRESS}'),
+         mailbox_id = '${LEGACY_INBOUND_MAILBOX_ID}',
+         external_mailbox = '${LEGACY_INBOUND_ADDRESS}',
          updated_at = datetime('now')
-   WHERE EXISTS (
-     SELECT 1
-       FROM temp_mailery_inbound_state_reconcile inbound_state
-      WHERE inbound_state.mail_message_id = mailbox_message_state.mail_message_id
-   );
-  DROP TABLE IF EXISTS temp_mailery_inbound_state_reconcile;
-`;
+   WHERE mailbox_id = '${RETIRED_LEGACY_INBOUND_MAILBOX_ID}';
 
-const MAIL_ARCHITECTURE_REPAIR_SQL = `
-  DELETE FROM mailbox_message_state
-   WHERE mail_message_id IN (
-         SELECT COALESCE(mail_message_id, 'msg:inbound:' || id)
-           FROM inbound_emails
-       );
-
-  ${MAIL_ARCHITECTURE_BACKFILL_SQL}
-
-  UPDATE inbound_emails
-     SET primary_mailbox_id = (
-           SELECT state.mailbox_id
-             FROM mailbox_message_state state
-            WHERE state.mail_message_id = COALESCE(inbound_emails.mail_message_id, 'msg:inbound:' || inbound_emails.id)
-            ORDER BY state.mailbox_id
-            LIMIT 1
-         ),
-         primary_mailbox_source_id = (
-           SELECT state.source_id
-             FROM mailbox_message_state state
-            WHERE state.mail_message_id = COALESCE(inbound_emails.mail_message_id, 'msg:inbound:' || inbound_emails.id)
-            ORDER BY state.mailbox_id
-            LIMIT 1
-         )
-   WHERE EXISTS (
-         SELECT 1
-           FROM mailbox_message_state state
-          WHERE state.mail_message_id = COALESCE(inbound_emails.mail_message_id, 'msg:inbound:' || inbound_emails.id)
-       );
+  -- mailbox_sources.mailbox_id cascades on delete, so the retired mailbox is
+  -- only removed once nothing is still attributed to it. Leaving the row behind
+  -- is recoverable; cascading away source history is not.
+  DELETE FROM mailboxes
+   WHERE id = '${RETIRED_LEGACY_INBOUND_MAILBOX_ID}'
+     AND NOT EXISTS (
+       SELECT 1 FROM mailbox_sources
+        WHERE mailbox_id = '${RETIRED_LEGACY_INBOUND_MAILBOX_ID}'
+     );
 `;
 
 const S3_MESSAGE_ID_RAW_URL_BACKFILL_SQL = `
@@ -1231,43 +912,6 @@ const S3_MESSAGE_ID_RAW_URL_BACKFILL_SQL = `
      SET raw_s3_url = message_id
    WHERE (raw_s3_url IS NULL OR raw_s3_url = '')
      AND message_id LIKE 's3://%';
-
-  UPDATE mail_messages
-     SET raw_s3_url = (
-           SELECT inbound.raw_s3_url
-             FROM inbound_emails inbound
-            WHERE inbound.mail_message_id = mail_messages.id
-              AND inbound.raw_s3_url IS NOT NULL
-              AND inbound.raw_s3_url != ''
-            LIMIT 1
-         )
-   WHERE (raw_s3_url IS NULL OR raw_s3_url = '')
-     AND id IN (
-           SELECT inbound.mail_message_id
-             FROM inbound_emails inbound
-            WHERE inbound.mail_message_id IS NOT NULL
-              AND inbound.raw_s3_url IS NOT NULL
-              AND inbound.raw_s3_url != ''
-         );
-
-  UPDATE mail_messages
-     SET raw_s3_url = (
-           SELECT inbound.raw_s3_url
-             FROM inbound_emails inbound
-            WHERE inbound.mail_message_id IS NULL
-              AND 'msg:inbound:' || inbound.id = mail_messages.id
-              AND inbound.raw_s3_url IS NOT NULL
-              AND inbound.raw_s3_url != ''
-            LIMIT 1
-         )
-   WHERE (raw_s3_url IS NULL OR raw_s3_url = '')
-     AND id IN (
-           SELECT 'msg:inbound:' || inbound.id
-             FROM inbound_emails inbound
-            WHERE inbound.mail_message_id IS NULL
-              AND inbound.raw_s3_url IS NOT NULL
-              AND inbound.raw_s3_url != ''
-         );
 `;
 
 const PROVIDER_DELETE_GUARD_SQL = `
@@ -1346,31 +990,40 @@ function ensureInboundLabels(db: Database): void {
 }
 
 export function ensureMailArchitecture(db: Database): void {
-  const tableExisted = tableExists(db, "mailbox_message_state");
+  // The migration-40 sentinel is keyed on `mailbox_sources`, the canonical table
+  // that survives. Keying it on a dropped table would leave the backfill
+  // permanently un-recorded and re-run it on every single open.
+  const tableExisted = tableExists(db, "mailbox_sources");
   safeExec(db, MAIL_ARCHITECTURE_SCHEMA_SQL);
   ensureMailArchitectureColumns(db);
   if (!migrationRecorded(db, 40) || !tableExisted) {
     db.exec(MAIL_ARCHITECTURE_BACKFILL_SQL);
   }
-  if (!migrationRecorded(db, 41) && tableExists(db, "mailbox_message_state")) {
-    safeExec(db, MAIL_ARCHITECTURE_STATE_RECONCILE_SQL);
-    safeExec(db, "INSERT OR IGNORE INTO _migrations (id) VALUES (41)");
-  }
   safeExec(db, "DROP TRIGGER IF EXISTS trg_mail_architecture_inbound_insert");
   safeExec(db, MAIL_ARCHITECTURE_INBOUND_INSERT_TRIGGER_SQL);
   safeExec(db, "DROP TRIGGER IF EXISTS trg_mail_architecture_inbound_delete");
-  safeExec(db, MAIL_ARCHITECTURE_INBOUND_DELETE_TRIGGER_SQL);
+  // Firing a trigger whose body names a missing table raises at DELETE time, not
+  // at CREATE time, so installing this unconditionally would break inbound
+  // deletes on a database that never had the canonical message table.
+  if (tableExists(db, "mail_messages")) {
+    safeExec(db, MAIL_ARCHITECTURE_INBOUND_DELETE_TRIGGER_SQL);
+  }
   safeExec(db, "DROP TRIGGER IF EXISTS trg_providers_preserve_mail_history");
   safeExec(db, PROVIDER_DELETE_GUARD_SQL);
-  if (tableExists(db, "mailbox_message_state")) {
+  if (tableExists(db, "mailbox_sources")) {
     safeExec(db, "INSERT OR IGNORE INTO _migrations (id) VALUES (40)");
   }
 }
 
+/**
+ * Re-derive the canonical `mailboxes` / `mailbox_sources` rows that
+ * `trg_providers_preserve_mail_history` reads, after an ingestion pass rewrote
+ * inbound provenance.
+ */
 export function rebuildInboundCanonicalState(db?: Database): void {
   const d = db || getDatabase();
   ensureMailArchitecture(d);
-  d.exec(MAIL_ARCHITECTURE_REPAIR_SQL);
+  d.exec(MAIL_ARCHITECTURE_BACKFILL_SQL);
 }
 
 export interface LegacyS3RawUrlSource {
@@ -2186,17 +1839,18 @@ const MIGRATIONS = [
   INSERT OR IGNORE INTO _migrations (id) VALUES (40);
   `,
 
-  // Migration 41: Reconcile canonical mailbox state after local read/archive/star
-  // mutations that were made before state writes updated both surfaces.
+  // Migration 41: reconciled canonical per-mailbox state after local
+  // read/archive/star mutations. `mailbox_message_state` had no reader and is
+  // dropped by migration 47, so the body is now a ledger entry only. Databases
+  // that already recorded 41 never replay it, so this is not a behaviour change
+  // for them.
   `
-  ${MAIL_ARCHITECTURE_STATE_RECONCILE_SQL}
   INSERT OR IGNORE INTO _migrations (id) VALUES (41);
   `,
 
-  // Migration 42: Re-run state reconciliation after reserved label mutations
-  // learned to update canonical spam/trash flags and folder placement.
+  // Migration 42: re-ran the same reconciliation for reserved label mutations.
+  // Retired with migration 41, above.
   `
-  ${MAIL_ARCHITECTURE_STATE_RECONCILE_SQL}
   INSERT OR IGNORE INTO _migrations (id) VALUES (42);
   `,
 
@@ -2207,14 +1861,14 @@ const MIGRATIONS = [
   INSERT OR IGNORE INTO _migrations (id) VALUES (43);
   `,
 
-  // Migration 44: rebuild inbound-derived canonical state with sanitized source
-  // provider IDs and install canonical cleanup for deleted inbound rows.
+  // Migration 44: rebuild inbound-derived canonical mailbox/source rows with
+  // sanitized provider IDs and install canonical cleanup for deleted inbound rows.
   `
   DROP TRIGGER IF EXISTS trg_mail_architecture_inbound_insert;
   ${MAIL_ARCHITECTURE_INBOUND_INSERT_TRIGGER_SQL}
   DROP TRIGGER IF EXISTS trg_mail_architecture_inbound_delete;
   ${MAIL_ARCHITECTURE_INBOUND_DELETE_TRIGGER_SQL}
-  ${MAIL_ARCHITECTURE_REPAIR_SQL}
+  ${MAIL_ARCHITECTURE_BACKFILL_SQL}
   INSERT OR IGNORE INTO _migrations (id) VALUES (44);
   `,
 
@@ -2240,28 +1894,13 @@ const MIGRATIONS = [
   INSERT OR IGNORE INTO _migrations (id) VALUES (45);
   `,
 
-  // Migration 46: additive Emails rename bridge. Historical migration bodies
-  // above remain byte-for-byte compatible with released Mailery databases.
+  // Migration 46: additive Emails rename bridge. The `mail_folders`,
+  // `mailbox_message_state` and `inbound_emails.primary_mailbox_id` legs were
+  // dropped with the write-only tables they renamed (migration 47) — a database
+  // that already recorded 46 never replays this body, and one that has not yet
+  // reached it drops those tables moments later.
   `
-  INSERT OR IGNORE INTO mailboxes (id, address, display_name, owner_id, status, created_at, updated_at)
-  SELECT 'mbx:legacy-inbound@local.emails', 'legacy-inbound@local.emails', display_name,
-         owner_id, status, created_at, datetime('now')
-    FROM mailboxes
-   WHERE id = 'mbx:legacy-inbound@local.mailery';
-
-  UPDATE mail_folders
-     SET mailbox_id = 'mbx:legacy-inbound@local.emails'
-   WHERE mailbox_id = 'mbx:legacy-inbound@local.mailery';
-  UPDATE mailbox_sources
-     SET mailbox_id = 'mbx:legacy-inbound@local.emails'
-   WHERE mailbox_id = 'mbx:legacy-inbound@local.mailery';
-  UPDATE mailbox_message_state
-     SET mailbox_id = 'mbx:legacy-inbound@local.emails'
-   WHERE mailbox_id = 'mbx:legacy-inbound@local.mailery';
-  UPDATE inbound_emails
-     SET primary_mailbox_id = 'mbx:legacy-inbound@local.emails'
-   WHERE primary_mailbox_id = 'mbx:legacy-inbound@local.mailery';
-  DELETE FROM mailboxes WHERE id = 'mbx:legacy-inbound@local.mailery';
+  ${RETIRED_LEGACY_INBOUND_BRIDGE_SQL}
 
   UPDATE domains SET domain_type = 'self_hosted' WHERE domain_type = 'tenant';
   UPDATE domains SET source_of_truth = 'postgres' WHERE source_of_truth = 'cloud';
@@ -2274,6 +1913,30 @@ const MIGRATIONS = [
     PRIMARY KEY (provider, event_id)
   );
   INSERT OR IGNORE INTO _migrations (id) VALUES (46);
+  `,
+
+  // Migration 47: drop the two canonical tables that were written by triggers and
+  // read by nothing. Both were derived entirely from `inbound_emails`, so no mail
+  // is lost: bodies live in `inbound_emails` (and, for historical rows, in
+  // `mail_messages`, which survives for the inbound-delete trigger). `mailboxes`
+  // and `mailbox_sources` also survive — `trg_providers_preserve_mail_history`
+  // reads the latter to refuse deleting a provider that still has history.
+  // `mailbox_message_state` goes first: it holds the foreign key into
+  // `mail_folders`.
+  `
+  DROP TABLE IF EXISTS mailbox_message_state;
+  DROP TABLE IF EXISTS mail_folders;
+  INSERT OR IGNORE INTO _migrations (id) VALUES (47);
+  `,
+
+  // Migration 48: re-run the rename bridge. Migration 46 already retired
+  // `local.mailery`, but the inbound trigger re-minted it on the next
+  // `getDatabase()` call, so any database released between the two carries the
+  // retired identity again. The trigger no longer knows the retired literal, so
+  // this pass is terminal rather than a truce.
+  `
+  ${RETIRED_LEGACY_INBOUND_BRIDGE_SQL}
+  INSERT OR IGNORE INTO _migrations (id) VALUES (48);
   `,
 ];
 
@@ -2299,8 +1962,14 @@ export function getDatabase(dbPath?: string): Database {
 
   const db = new Database(path);
   try {
-    db.run("PRAGMA journal_mode = WAL");
+    // busy_timeout FIRST. Converting a fresh database to WAL takes an exclusive
+    // lock, so when several processes open the same new database at once — which
+    // is exactly what the CLI does, one short-lived process per invocation —
+    // whichever loses the race fails immediately with SQLITE_BUSY unless a busy
+    // handler is already installed. Setting it afterwards is too late for the
+    // statement most likely to contend.
     db.run("PRAGMA busy_timeout = 5000");
+    db.run("PRAGMA journal_mode = WAL");
     db.run("PRAGMA foreign_keys = ON");
 
     runMigrations(db);
@@ -2314,7 +1983,7 @@ export function getDatabase(dbPath?: string): Database {
   }
 }
 
-function runMigrations(db: Database): void {
+function applyMigrations(db: Database): void {
   try {
     const result = db.query("SELECT MAX(id) as max_id FROM _migrations").get() as { max_id: number | null } | null;
     const currentLevel = result?.max_id ?? 0;
@@ -2335,8 +2004,73 @@ function runMigrations(db: Database): void {
       }
     }
   }
+}
 
-  ensureSchema(db);
+// Initialising a cold database applies ~200 migration statements plus ~140
+// idempotent schema probes. Left unbatched, SQLite commits — and fsyncs — each
+// one separately, which cost ~900ms on a local NVMe and several seconds on the
+// slower disks CI runners get; that latency, not the assertions, is what made
+// the file-backed database and live-CLI tests time out under load.
+//
+// Batching the whole sequence into one transaction turns those hundreds of
+// commits into a single one. It is purely a commit-boundary change: every
+// statement still runs in the same order, the per-statement `try`/`catch`
+// tolerance is preserved, and durability settings are untouched (no
+// `synchronous` downgrade), so an interrupted open still cannot observe a
+// half-applied schema. `runInTransaction` uses SAVEPOINTs, so callers nest
+// safely inside this transaction.
+function runMigrations(db: Database): void {
+  // BEGIN IMMEDIATE, never a bare BEGIN. A deferred BEGIN takes only a WAL read
+  // snapshot on the first statement below — `SELECT MAX(id) FROM _migrations` —
+  // and each DDL then has to upgrade that read transaction to a write one. If
+  // any other connection commits in between, the upgrade fails with
+  // SQLITE_BUSY_SNAPSHOT, and SQLite deliberately does NOT invoke the busy
+  // handler for it, so `busy_timeout` cannot absorb it. Because every statement
+  // here tolerates its own failure, the entire pass would be skipped while the
+  // now-read-only COMMIT still succeeded: the caller would be handed a silently
+  // un-migrated database, which is far worse than a slow one. Taking the write
+  // lock up front makes that race impossible — no other connection can commit
+  // while we hold it, and failure to acquire it surfaces as ordinary
+  // SQLITE_BUSY, which `busy_timeout` does absorb.
+  let batched = false;
+  try {
+    db.exec("BEGIN IMMEDIATE");
+    batched = true;
+  } catch {
+    // Either a caller already owns a transaction, or the write lock could not be
+    // taken. Apply unbatched, which is exactly the pre-batching behaviour.
+  }
+
+  if (!batched) {
+    applyMigrations(db);
+    ensureSchema(db);
+    return;
+  }
+
+  try {
+    applyMigrations(db);
+    ensureSchema(db);
+    db.exec("COMMIT");
+  } catch {
+    // The batch could not be committed. Discard it and rebuild one statement at
+    // a time. The reapply is level-based on purpose: replaying from zero would
+    // re-run migration 8, whose table-rebuild is destructive against data that
+    // is already migrated.
+    //
+    // Residual, for the error classes where SQLite ends the transaction itself
+    // (SQLITE_FULL, SQLITE_IOERR): statements after that point run in autocommit
+    // and durably record their sentinels, so `MAX(id)` can advance past a
+    // migration whose DDL was rolled back, and the level-based reapply will not
+    // revisit it. `ensureSchema` below is the designed backstop for exactly that
+    // gap, and it runs on every open.
+    try {
+      db.exec("ROLLBACK");
+    } catch {
+      // No transaction left to roll back.
+    }
+    applyMigrations(db);
+    ensureSchema(db);
+  }
 }
 
 function ensureSchema(db: Database): void {
@@ -2949,7 +2683,7 @@ const RESOLVABLE_TABLES = new Set([
   "providers", "domains", "addresses", "emails", "inbound_emails", "sandbox_emails",
   "templates", "contacts", "groups", "scheduled_emails", "sequences", "owners", "events",
   "aliases", "send_keys", "forwarding_rules", "forwarding_deliveries",
-  "mailboxes", "mail_folders", "mailbox_sources", "mail_messages", "mailbox_message_state",
+  "mailboxes", "mailbox_sources", "mail_messages",
 ]);
 
 export function resolvePartialId(db: Database, table: string, partialId: string): string | null {

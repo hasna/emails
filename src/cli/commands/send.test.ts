@@ -69,11 +69,14 @@ describe("emails send — routes through the server send API", () => {
     expect(messages).toHaveLength(1);
     expect(messages[0]).toMatchObject({
       direction: "outbound",
-      from: "agent@acme.com",
+      from_addr: "agent@acme.com",
+      to_addrs: ["dest@ext.com"],
       subject: "Hi",
-      text: "Body text",
+      body_text: "Body text",
+      status: "sent",
+      created_at: expect.any(String),
+      updated_at: expect.any(String),
     });
-    expect(messages[0]!["to"]).toEqual(["dest@ext.com"]);
   });
 
   it("sends to multiple recipients", async () => {
@@ -84,7 +87,16 @@ describe("emails send — routes through the server send API", () => {
     expect(result.consoleOutput).toContain("Email sent to a@ext.com, b@ext.com");
     const messages = await stub.list("messages");
     expect(messages).toHaveLength(1);
-    expect(messages[0]!["to"]).toEqual(["a@ext.com", "b@ext.com"]);
+    expect(messages[0]).toMatchObject({
+      direction: "outbound",
+      from_addr: "agent@acme.com",
+      to_addrs: ["a@ext.com", "b@ext.com"],
+      subject: "Hi",
+      body_text: "x",
+      status: "sent",
+      created_at: expect.any(String),
+      updated_at: expect.any(String),
+    });
   });
 });
 
@@ -105,8 +117,20 @@ describe("emails send — dry-run previews without sending", () => {
       "--schedule", "2030-01-01T00:00:00Z", "--dry-run",
     ]);
 
-    expect(result.consoleOutput).toContain("scheduling is not available in the self-hosted client");
+    expect(result.consoleOutput).toContain("the self-hosted server does not accept a scheduled send");
     expect(await stub.list("messages")).toHaveLength(0);
+  });
+
+  // --dry-run exists to PREDICT the send. It had no mode branch, so in LOCAL
+  // mode it announced "(self-hosted)", quoted the server's attachment caps and
+  // predicted a scheduling failure that does not happen locally.
+  it("labels the preview with the mode that would actually run the send", async () => {
+    const result = await runSendCommand([
+      "send", "--from", "agent@acme.com", "--to", "dest@ext.com", "--subject", "Hi", "--body", "x", "--dry-run",
+    ]);
+
+    expect(result.consoleOutput).toContain("[DRY RUN] Would send (self-hosted):");
+    expect(result.consoleOutput).not.toContain("Would send (local)");
   });
 });
 

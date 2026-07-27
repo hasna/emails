@@ -48,12 +48,10 @@ export interface ProviderRow {
   updated_at: string;
 }
 
-// Core mail architecture model
+// Canonical mailbox / ingestion-source model
 export type MailboxStatus = "active" | "inactive";
-export type MailFolderRole = "inbox" | "sent" | "archive" | "spam" | "trash" | "custom";
 export type MailboxSourceType = "ses" | "ses_s3" | "resend" | "sandbox" | "legacy_inbound" | "manual";
 export type MailboxSourceStatus = "active" | "inactive" | "legacy";
-export type MailboxMessageDirection = "inbound" | "outbound" | "sent";
 
 export interface Mailbox {
   id: string;
@@ -80,39 +78,6 @@ export interface CreateMailboxInput {
   display_name?: string | null;
   owner_id?: string | null;
   status?: MailboxStatus;
-}
-
-export interface MailFolder {
-  id: string;
-  mailbox_id: string;
-  role: MailFolderRole;
-  name: string;
-  path: string;
-  provider_folder_id: string | null;
-  sort_order: number;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface MailFolderRow {
-  id: string;
-  mailbox_id: string;
-  role: MailFolderRole;
-  name: string;
-  path: string;
-  provider_folder_id: string | null;
-  sort_order: number;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface CreateMailFolderInput {
-  mailbox_id: string;
-  role: MailFolderRole;
-  name: string;
-  path: string;
-  provider_folder_id?: string | null;
-  sort_order?: number;
 }
 
 export interface ProviderProvenanceSnapshot {
@@ -168,135 +133,6 @@ export interface CreateMailboxSourceInput {
   settings?: Record<string, unknown>;
   provider_snapshot?: ProviderProvenanceSnapshot | Record<string, unknown>;
   last_synced_at?: string | null;
-}
-
-export interface MailMessage {
-  id: string;
-  rfc_message_id: string | null;
-  subject: string;
-  from_address: string | null;
-  to_addresses: string[];
-  cc_addresses: string[];
-  bcc_addresses: string[];
-  text_body: string | null;
-  html_body: string | null;
-  headers: Record<string, unknown>;
-  attachments: unknown[];
-  raw_s3_url: string | null;
-  metadata_s3_url: string | null;
-  raw_size: number;
-  sent_at: string | null;
-  received_at: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface MailMessageRow {
-  id: string;
-  rfc_message_id: string | null;
-  subject: string;
-  from_address: string | null;
-  to_addresses: string;
-  cc_addresses: string;
-  bcc_addresses: string;
-  text_body: string | null;
-  html_body: string | null;
-  headers_json: string;
-  attachments_json: string;
-  raw_s3_url: string | null;
-  metadata_s3_url: string | null;
-  raw_size: number;
-  sent_at: string | null;
-  received_at: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface CreateMailMessageInput {
-  rfc_message_id?: string | null;
-  subject?: string;
-  from_address?: string | null;
-  to_addresses?: string[];
-  cc_addresses?: string[];
-  bcc_addresses?: string[];
-  text_body?: string | null;
-  html_body?: string | null;
-  headers?: Record<string, unknown>;
-  attachments?: unknown[];
-  raw_s3_url?: string | null;
-  metadata_s3_url?: string | null;
-  raw_size?: number;
-  sent_at?: string | null;
-  received_at?: string | null;
-}
-
-export interface MailboxMessageState {
-  id: string;
-  mailbox_id: string;
-  mail_message_id: string;
-  folder_id: string | null;
-  source_id: string | null;
-  source_dedupe_key: string | null;
-  direction: MailboxMessageDirection;
-  provider_message_id: string | null;
-  provider_thread_id: string | null;
-  thread_id: string | null;
-  labels: string[];
-  is_read: boolean;
-  read_at: string | null;
-  is_archived: boolean;
-  is_starred: boolean;
-  is_spam: boolean;
-  is_trash: boolean;
-  received_at: string | null;
-  sent_at: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface MailboxMessageStateRow {
-  id: string;
-  mailbox_id: string;
-  mail_message_id: string;
-  folder_id: string | null;
-  source_id: string | null;
-  source_dedupe_key: string | null;
-  direction: MailboxMessageDirection;
-  provider_message_id: string | null;
-  provider_thread_id: string | null;
-  thread_id: string | null;
-  labels_json: string;
-  is_read: number;
-  read_at: string | null;
-  is_archived: number;
-  is_starred: number;
-  is_spam: number;
-  is_trash: number;
-  received_at: string | null;
-  sent_at: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface UpsertMailboxMessageStateInput {
-  mailbox_id: string;
-  mail_message_id: string;
-  folder_id?: string | null;
-  source_id?: string | null;
-  source_dedupe_key?: string | null;
-  direction?: MailboxMessageDirection;
-  provider_message_id?: string | null;
-  provider_thread_id?: string | null;
-  thread_id?: string | null;
-  labels?: string[];
-  is_read?: boolean;
-  read_at?: string | null;
-  is_archived?: boolean;
-  is_starred?: boolean;
-  is_spam?: boolean;
-  is_trash?: boolean;
-  received_at?: string | null;
-  sent_at?: string | null;
 }
 
 // Domain types

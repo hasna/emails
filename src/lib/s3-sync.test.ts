@@ -17,10 +17,11 @@ import { s3SyncLocalTestBoundary } from "./s3-sync.local.js";
 // local config file with no database dependency, so it remains functional and is
 // covered here.
 
-const originalHome = process.env["HOME"];
+let originalHome: string | undefined;
 let tmpHome = "";
 
 beforeEach(() => {
+  originalHome = process.env["HOME"];
   tmpHome = mkdtempSync(join(tmpdir(), "emails-s3-source-"));
   process.env["HOME"] = tmpHome;
 });

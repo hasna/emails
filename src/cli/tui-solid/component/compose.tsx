@@ -26,8 +26,16 @@ export function ComposeWindow() {
 
   const send = async () => {
     try {
-      await emails.actions.sendCompose();
-      toast.show({ title: "Sent", message: "Message sent successfully.", tone: "success" });
+      const result = await emails.actions.sendCompose();
+      if (result?.inProgress) {
+        toast.show({
+          title: "Send in progress",
+          message: "This idempotent send is already running. Do not retry.",
+          tone: "warning",
+        });
+      } else {
+        toast.show({ title: "Sent", message: "Message sent successfully.", tone: "success" });
+      }
     } catch (error) {
       toast.show({ title: "Send failed", message: error instanceof Error ? error.message : String(error), tone: "error" });
     }

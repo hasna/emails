@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import {
   SelfHostedMailDataSource,
   type SelfHostedFetch,
@@ -10,6 +10,17 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
+
+let INHERITED_PROCESS_ENV: NodeJS.ProcessEnv;
+function captureInheritedProcessEnv(): void {
+  INHERITED_PROCESS_ENV = { ...process.env };
+}
+function restoreInheritedProcessEnv(): void {
+  for (const key of Object.keys(process.env)) {
+    if (!Object.prototype.hasOwnProperty.call(INHERITED_PROCESS_ENV, key)) delete process.env[key];
+  }
+  Object.assign(process.env, INHERITED_PROCESS_ENV);
+}
 
 const LEGACY_ENV_KEYS = [
   "MAILERY_MODE",
@@ -37,6 +48,8 @@ function clearModeEnv(): void {
 
 // A self-hosted /v1 message row (snake_case, as the API returns).
 function v1(id: string, over: Record<string, unknown> = {}): Record<string, unknown> {
+  const numericId = /^\d+$/.test(id) ? Number(id) : 0;
+  const day = String(10 + (numericId % 18)).padStart(2, "0");
   return {
     id,
     direction: "inbound",
@@ -50,14 +63,35 @@ function v1(id: string, over: Record<string, unknown> = {}): Record<string, unkn
     provider_message_id: null,
     message_id: `<${id}@x>`,
     in_reply_to: null,
-    received_at: `2026-06-1${id}T08:00:00.000Z`,
+    received_at: `2026-06-${day}T08:00:00.000Z`,
     is_read: false,
     is_starred: false,
     labels: [],
     headers: {},
-    created_at: `2026-06-1${id}T08:00:01.000Z`,
-    updated_at: `2026-06-1${id}T08:00:01.000Z`,
+    attachments: [],
+    source_id: null,
+    send_state: "none",
+    send_started_at: null,
+    created_at: `2026-06-${day}T08:00:01.000Z`,
+    updated_at: `2026-06-${day}T08:00:01.000Z`,
     ...over,
+  };
+}
+
+function listV1(row: Record<string, unknown>): Record<string, unknown> {
+  const {
+    body_text: bodyText,
+    body_html: _bodyHtml,
+    headers: _headers,
+    attachments,
+    ...summary
+  } = row;
+  return {
+    ...summary,
+    snippet: typeof bodyText === "string"
+      ? bodyText.replace(/\s+/g, " ").trim().slice(0, 140)
+      : null,
+    attachment_count: Array.isArray(attachments) ? attachments.length : 0,
   };
 }
 
@@ -119,8 +153,12 @@ function compactCursorServe(
     const ok = (body: unknown, status = 200) => ({ status, async text() { return JSON.stringify(body); } });
     const idMatch = u.pathname.match(/^\/v1\/messages\/([^/]+)$/);
     if (idMatch && method === "DELETE") {
-      deleted.push(decodeURIComponent(idMatch[1]!));
-      return ok({ deleted: true });
+      const id = decodeURIComponent(idMatch[1]!);
+      deleted.push(id);
+      return ok({ deleted: true, id });
+    }
+    if (idMatch && method === "GET") {
+      return ok({ error: "message not found" }, 404);
     }
     if (method !== "GET" || u.pathname !== "/v1/messages") return ok({ error: "not found" }, 404);
     if (u.searchParams.has("offset")) {
@@ -129,7 +167,7 @@ function compactCursorServe(
     const cursor = u.searchParams.get("cursor") ?? "";
     const page = pages.get(cursor);
     if (!page) return ok({ error: "cursor is not a valid pagination cursor" }, 400);
-    return ok({ messages: page.messages, next_cursor: page.nextCursor });
+    return ok({ messages: page.messages.map(listV1), next_cursor: page.nextCursor });
   };
   return { fetchImpl, requests, deleted };
 }
@@ -156,11 +194,19 @@ function legacyOffsetServe(
       const id = decodeURIComponent(idMatch[1]!);
       const had = rows.delete(id);
       deleted.push(id);
-      return had ? ok({ deleted: true }) : ok({ error: "not found" }, 404);
+      return had ? ok({ deleted: true, id }) : ok({ error: "message not found" }, 404);
+    }
+    if (idMatch && method === "GET") {
+      return ok({ error: "message not found" }, 404);
     }
     if (method !== "GET" || u.pathname !== "/v1/messages") return ok({ error: "not found" }, 404);
-    if (u.searchParams.has("cursor")) return ok({ error: "legacy server does not support cursors" }, 400);
-    const offset = Number(u.searchParams.get("offset") ?? "0");
+    const cursor = u.searchParams.get("cursor");
+    if (cursor && !cursor.startsWith("legacy-offset:")) {
+      return ok({ error: "cursor is not a valid pagination cursor" }, 400);
+    }
+    const offset = cursor
+      ? Number(cursor.slice("legacy-offset:".length))
+      : Number(u.searchParams.get("offset") ?? "0");
     if (offset > 100_000) {
       return ok({ error: "offset is limited to 100000; use cursor pagination for deep pages" }, 400);
     }
@@ -191,7 +237,13 @@ function legacyOffsetServe(
       }
     }
     const limit = Number(u.searchParams.get("limit") ?? "500");
-    return ok({ messages: ordered.slice(offset, offset + limit) });
+    const page = ordered.slice(offset, offset + limit);
+    return ok({
+      messages: page.map(listV1),
+      next_cursor: page.length === limit
+        ? `legacy-offset:${offset + page.length}`
+        : null,
+    });
   };
   return { fetchImpl, rows, requests, deleted };
 }
@@ -251,29 +303,16 @@ function fakeServe(
         ? Number(cursor.slice("cursor:".length))
         : Number(u.searchParams.get("offset") ?? "0");
       const page = ordered.slice(offset, offset + limit);
-      const messages = options.leanList ? page.map((row) => {
-        const {
-          body_text: bodyText,
-          body_html: _bodyHtml,
-          headers: _headers,
-          attachments,
-          ...summary
-        } = row;
-        return {
-          ...summary,
-          snippet: typeof bodyText === "string" ? bodyText.replace(/\s+/g, " ").trim().slice(0, 500) : null,
-          attachment_count: Array.isArray(attachments) ? attachments.length : 0,
-        };
-      }) : options.partialAttachmentList ? page.map((row) => {
+      const messages = options.partialAttachmentList ? page.map((row) => {
         const attachments = Array.isArray(row["attachments"])
           ? row["attachments"] as Array<Record<string, unknown>>
           : [];
         return {
-          ...row,
+          ...listV1(row),
           attachments: attachments.map((attachment) => ({ size: attachment["size"] })),
           attachment_count: attachments.length,
         };
-      }) : page;
+      }) : page.map(listV1);
       return {
         messages,
         nextCursor: page.length === limit ? `cursor:${offset + page.length}` : null,
@@ -317,12 +356,30 @@ function fakeServe(
     }
     if (u.pathname === "/v1/messages/counts" && method === "GET") return ok({ counts: counts() });
     if (u.pathname === "/v1/messages/send" && method === "POST") {
-      const body = JSON.parse(String(init.body));
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
       posted.push(body);
       const id = `posted-${posted.length}`;
-      const rec = { id, message_id: `<${id}@x>`, ...body };
+      const rec = v1(id, {
+        direction: "outbound",
+        from_addr: String(body["from"] ?? ""),
+        to_addrs: Array.isArray(body["to"]) ? body["to"] : [],
+        cc_addrs: Array.isArray(body["cc"]) ? body["cc"] : [],
+        subject: String(body["subject"] ?? ""),
+        body_text: typeof body["text"] === "string" ? body["text"] : null,
+        body_html: typeof body["html"] === "string" ? body["html"] : null,
+        status: "sent",
+        send_state: "sent",
+        provider_message_id: `provider-${id}`,
+        message_id: `<${id}@x>`,
+        received_at: null,
+      });
       rows.set(id, rec);
-      return ok({ message: rec }, 201);
+      return ok({
+        message: rec,
+        provider: "sandbox",
+        provider_message_id: `provider-${id}`,
+        sent: true,
+      }, 202);
     }
     if (attachmentMatch && method === "GET") {
       const id = decodeURIComponent(attachmentMatch[1]!);
@@ -330,10 +387,18 @@ function fakeServe(
       const index = Number(attachmentMatch[2]);
       const metadata = Array.isArray(row?.["attachments"]) ? row!["attachments"] as Record<string, unknown>[] : [];
       const contents = Array.isArray(row?.["_attachment_contents"]) ? row!["_attachment_contents"] as string[] : [];
-      if (!metadata[index]) return ok({ error: "not found", code: "attachment_not_found" }, 404);
+      if (!metadata[index]) return ok({ error: "attachment not found", code: "attachment_not_found" }, 404);
       return contents[index]
         ? ok({ attachment: { ...metadata[index], content_base64: contents[index] } })
-        : ok({ error: "attachment content is not stored", code: "attachment_content_unavailable", attachment: metadata[index] }, 409);
+        : ok({
+            error: "attachment content is not stored",
+            code: "attachment_content_unavailable",
+            attachment: {
+              filename: metadata[index]?.["filename"],
+              content_type: metadata[index]?.["content_type"],
+              size: metadata[index]?.["size"],
+            },
+          }, 409);
     }
     if (idMatch) {
       const id = decodeURIComponent(idMatch[1]!);
@@ -344,12 +409,16 @@ function fakeServe(
         const prefixed = [...rows.keys()].filter((key) => key.startsWith(id));
         if (prefixed.length > 1) return ok({ error: "ambiguous message id prefix", reason: "ambiguous_id" }, 409);
         if (prefixed.length === 1) return ok({ message: rows.get(prefixed[0]!) });
-        return ok({ error: "not found" }, 404);
+        return ok({ error: "message not found" }, 404);
       }
-      if (method === "DELETE") { const had = rows.delete(id); deleted.push(id); return had ? ok({ deleted: true }) : ok({ error: "not found" }, 404); }
+      if (method === "DELETE") {
+        const had = rows.delete(id);
+        deleted.push(id);
+        return had ? ok({ deleted: true, id }) : ok({ error: "message not found" }, 404);
+      }
       if (method === "PATCH") {
         const row = rows.get(id);
-        if (!row) return ok({ error: "not found" }, 404);
+        if (!row) return ok({ error: "message not found" }, 404);
         const body = JSON.parse(String(init.body ?? "{}")) as Record<string, unknown>;
         if (typeof body["is_read"] === "boolean") row["is_read"] = body["is_read"];
         if (typeof body["is_starred"] === "boolean") row["is_starred"] = body["is_starred"];
@@ -383,6 +452,7 @@ function make(
 }
 
 beforeEach(() => {
+  captureInheritedProcessEnv();
   clearModeEnv();
 });
 
@@ -390,6 +460,7 @@ afterEach(() => {
   resetMailDataSource();
   resetSelfHostedConfigCache();
   clearModeEnv();
+  restoreInheritedProcessEnv();
 });
 
 describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
@@ -489,7 +560,7 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     expect(body!.attachments.map((a) => a.filename)).toEqual(["attachment-1", "D394.pdf"]);
   });
 
-  it("keeps malformed attachment elements unavailable while preserving legacy unknown availability", async () => {
+  it("rejects malformed attachment elements at the successful message boundary", async () => {
     const { ds } = make([
       v1("malformed", {
         attachments: [
@@ -516,17 +587,7 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     ]);
 
     const [msg] = await ds.listMailbox("inbox");
-    const body = await ds.getMessageBody(msg!);
-    expect(body!.attachments.map((attachment) => ({
-      filename: attachment.filename,
-      content_available: attachment.content_available,
-    }))).toEqual([
-      { filename: "cover.png", content_available: true },
-      { filename: "attachment-2", content_available: false },
-      { filename: "D394.pdf", content_available: true },
-      { filename: "legacy.pdf", content_available: undefined },
-    ]);
-    expect(Object.hasOwn(body!.attachments[3]!, "content_available")).toBe(false);
+    await expect(ds.getMessageBody(msg!)).rejects.toThrow(/invalid successful response/i);
   });
 
   it("honors small inbox limits with one bounded server-side page", async () => {
@@ -753,8 +814,8 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     expect(counts.inbox).toBe(1001);
     expect(countServe.requests.filter((request) => request.startsWith("GET /v1/messages?"))).toEqual([
       "GET /v1/messages?limit=500&to=target%40example.com",
-      "GET /v1/messages?limit=500&offset=500&to=target%40example.com",
-      "GET /v1/messages?limit=500&offset=1000&to=target%40example.com",
+      "GET /v1/messages?limit=500&cursor=legacy-offset%3A500&to=target%40example.com",
+      "GET /v1/messages?limit=500&cursor=legacy-offset%3A1000&to=target%40example.com",
       "GET /v1/messages?limit=500&from=target%40example.com",
     ]);
 
@@ -772,8 +833,8 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     expect(oldest.map((message) => message.id)).toEqual(["legacy-1000"]);
     expect(oldestServe.requests.filter((request) => request.startsWith("GET /v1/messages?"))).toEqual([
       "GET /v1/messages?limit=500&direction=inbound",
-      "GET /v1/messages?limit=500&offset=500&direction=inbound",
-      "GET /v1/messages?limit=500&offset=1000&direction=inbound",
+      "GET /v1/messages?limit=500&cursor=legacy-offset%3A500&direction=inbound",
+      "GET /v1/messages?limit=500&cursor=legacy-offset%3A1000&direction=inbound",
     ]);
   });
 
@@ -793,7 +854,7 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     ]);
   });
 
-  it("falls back from a current cursor page to the correct legacy offset", async () => {
+  it("fails closed when a current cursor page omits its required continuation", async () => {
     const requests: string[] = [];
     const fetchImpl: SelfHostedFetch = async (url) => {
       const u = new URL(url);
@@ -806,12 +867,10 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
         status: 200,
         async text() {
           const body: Record<string, unknown> = {
-            messages: Array.from({ length: count }, (_, index) => ({
-              id: `mixed-${start + index}`,
-              direction: "inbound",
+            messages: Array.from({ length: count }, (_, index) => listV1(v1(`mixed-${start + index}`, {
               labels: ["audit"],
               received_at: new Date(Date.parse("2026-07-20T00:00:00.000Z") - (start + index) * 1000).toISOString(),
-            })),
+            }))),
           };
           if (!cursor && offset === 0) body["next_cursor"] = "after-first-page";
           return JSON.stringify(body);
@@ -824,13 +883,10 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
       fetchImpl,
     });
 
-    const labels = await ds.listLabelSummaries();
-
-    expect(labels).toContainEqual({ name: "audit", count: 1001, popular: true });
+    await expect(ds.listLabelSummaries()).rejects.toThrow(/next_cursor is required/i);
     expect(requests).toEqual([
       "/v1/messages?limit=500",
       "/v1/messages?limit=500&cursor=after-first-page",
-      "/v1/messages?limit=500&offset=1000",
     ]);
   });
 
@@ -849,8 +905,8 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     expect(messages.map((message) => message.id)).toEqual(["legacy-search-100"]);
     expect(serve.requests.filter((request) => request.startsWith("GET /v1/messages?"))).toEqual([
       "GET /v1/messages?limit=50&direction=inbound&search=deep+legacy+needle",
-      "GET /v1/messages?limit=50&offset=50&direction=inbound&search=deep+legacy+needle",
-      "GET /v1/messages?limit=50&offset=100&direction=inbound&search=deep+legacy+needle",
+      "GET /v1/messages?limit=50&cursor=legacy-offset%3A50&direction=inbound&search=deep+legacy+needle",
+      "GET /v1/messages?limit=50&cursor=legacy-offset%3A100&direction=inbound&search=deep+legacy+needle",
     ]);
   });
 
@@ -869,14 +925,14 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     expect(serve.deleted).toHaveLength(1001);
     expect(serve.requests.filter((request) => request.startsWith("GET /v1/messages?"))).toEqual([
       "GET /v1/messages?limit=500",
-      "GET /v1/messages?limit=500&offset=500",
-      "GET /v1/messages?limit=500&offset=1000",
+      "GET /v1/messages?limit=500&cursor=legacy-offset%3A500",
+      "GET /v1/messages?limit=500&cursor=legacy-offset%3A1000",
     ]);
     expect(serve.requests.findIndex((request) => request.startsWith("DELETE ")))
       .toBeGreaterThan(serve.requests.findIndex((request) => request.includes("offset=1000")));
   });
 
-  it("fails explicitly instead of returning partial success at the legacy offset cap", async () => {
+  it("fails closed before mutation when a page omits its required cursor field", async () => {
     const requests: string[] = [];
     const deleted: string[] = [];
     const fetchImpl: SelfHostedFetch = async (url, init) => {
@@ -885,10 +941,11 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
       requests.push(`${method} ${u.pathname}${u.search}`);
       const idMatch = u.pathname.match(/^\/v1\/messages\/([^/]+)$/);
       if (idMatch && method === "DELETE") {
-        deleted.push(decodeURIComponent(idMatch[1]!));
+        const id = decodeURIComponent(idMatch[1]!);
+        deleted.push(id);
         return {
           status: 200,
-          async text() { return JSON.stringify({ deleted: true }); },
+          async text() { return JSON.stringify({ deleted: true, id }); },
         };
       }
       const limit = Number(u.searchParams.get("limit") ?? "500");
@@ -897,12 +954,10 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
         status: 200,
         async text() {
           return JSON.stringify({
-            messages: Array.from({ length: limit }, (_, index) => ({
-              id: `cap-${offset + index}`,
-              direction: "inbound",
+            messages: Array.from({ length: limit }, (_, index) => listV1(v1(`cap-${offset + index}`, {
               labels: ["audit"],
               received_at: "2026-07-13T00:00:00.000Z",
-            })),
+            }))),
           });
         },
       };
@@ -913,8 +968,8 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
       fetchImpl,
     });
 
-    await expect(ds.clear({ mailbox: "inbox" })).rejects.toThrow(/legacy.*offset.*100000.*cursor|upgrade.*cursor/i);
-    expect(requests.at(-1)).toBe("GET /v1/messages?limit=500&offset=100000");
+    await expect(ds.clear({ mailbox: "inbox" })).rejects.toThrow(/next_cursor is required/i);
+    expect(requests).toEqual(["GET /v1/messages?limit=500"]);
     expect(deleted).toEqual([]);
   });
 
@@ -950,6 +1005,7 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     expect(messages.map((message) => message.id)).toEqual(["older-hit"]);
     expect(serve.requests).toEqual([
       "GET /v1/messages?limit=50&direction=inbound&search=needle",
+      "GET /v1/messages/newer-miss",
       "GET /v1/messages?limit=50&cursor=after-100000&direction=inbound&search=needle",
     ]);
   });
@@ -1110,13 +1166,13 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
       receivedSince: "2026-07-13T00:00:00.000Z",
       cursor: "raw-server-cursor",
       limit: 1,
-    })).rejects.toThrow(/raw cursor pagination returned a full page without next_cursor/);
+    })).rejects.toThrow(/next_cursor is required/i);
     expect(serve.requests).toEqual([
       "GET /v1/messages?limit=1&cursor=raw-server-cursor&since=2026-07-13T00%3A00%3A00.000Z",
     ]);
   });
 
-  it("accepts an empty raw cursor terminal page without a continuation cursor", async () => {
+  it("rejects an empty raw cursor page without the schema-required continuation", async () => {
     const serve = compactCursorServe(new Map([
       ["raw-server-cursor", {
         messages: [],
@@ -1129,17 +1185,11 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
       fetchImpl: serve.fetchImpl,
     });
 
-    const result = await ds.listInsertionsSince({
+    await expect(ds.listInsertionsSince({
       receivedSince: "2026-07-13T00:00:00.000Z",
       cursor: "raw-server-cursor",
       limit: 1,
-    });
-
-    expect(result).toEqual({
-      semantics: "insert_only",
-      insertions: [],
-      cursor: null,
-    });
+    })).rejects.toThrow(/next_cursor is required/i);
     expect(serve.requests).toEqual([
       "GET /v1/messages?limit=1&cursor=raw-server-cursor&since=2026-07-13T00%3A00%3A00.000Z",
     ]);
@@ -1179,8 +1229,8 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     expect(third.cursor).toBeNull();
     expect(serve.requests.filter((request) => request.startsWith("GET /v1/messages?"))).toEqual([
       "GET /v1/messages?limit=1&offset=1",
-      "GET /v1/messages?limit=1&offset=2",
-      "GET /v1/messages?limit=1&offset=3",
+      "GET /v1/messages?limit=1&cursor=legacy-offset%3A2",
+      "GET /v1/messages?limit=1&cursor=legacy-offset%3A3",
     ]);
   });
 
@@ -1230,9 +1280,9 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
         status: 200,
         async text() {
           return JSON.stringify({
-            messages: [v1(`bounded-${page}`, {
+            messages: [listV1(v1(`bounded-${page}`, {
               received_at: new Date(Date.parse("2026-07-20T00:00:00.000Z") - page * 1000).toISOString(),
-            })],
+            }))],
             next_cursor: nextCursor,
           });
         },
@@ -1383,7 +1433,8 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
         status: 200,
         async text() {
           return JSON.stringify({
-            messages: [v1("page-limit-row")],
+            messages: [listV1(v1("page-limit-row"))],
+            next_cursor: "next-page",
           });
         },
       };
@@ -1426,7 +1477,7 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     ]);
   });
 
-  it("allows a stale server to terminate a short page without next_cursor", async () => {
+  it("rejects a stale server page without the schema-required next_cursor", async () => {
     const serve = compactCursorServe(new Map([
       ["", { messages: [v1("only")], nextCursor: undefined }],
     ]));
@@ -1436,7 +1487,8 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
       fetchImpl: serve.fetchImpl,
     });
 
-    expect((await ds.listMailbox("inbox", { limit: 2 })).map((message) => message.id)).toEqual(["only"]);
+    await expect(ds.listMailbox("inbox", { limit: 2 }))
+      .rejects.toThrow(/next_cursor is required/i);
   });
 
   it("returns an opaque legacy-offset continuation when next_cursor is omitted on a full insertion page", async () => {
@@ -1465,8 +1517,8 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     expect(third.cursor).toBeNull();
     expect(serve.requests.filter((request) => request.startsWith("GET /v1/messages?"))).toEqual([
       "GET /v1/messages?limit=1",
-      "GET /v1/messages?limit=1&offset=1",
-      "GET /v1/messages?limit=1&offset=2",
+      "GET /v1/messages?limit=1&cursor=legacy-offset%3A1",
+      "GET /v1/messages?limit=1&cursor=legacy-offset%3A2",
     ]);
   });
 
@@ -1708,12 +1760,13 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     expect(msg?.send_state).toBe("uncertain");
   });
 
-  it("surfaces the server's error detail when a send fails (never just a bare HTTP status)", async () => {
+  it("surfaces a safe machine reason without retaining the server's sensitive send detail", async () => {
+    const sensitiveDetail = "Email address is not verified for secret-account@example.test";
     const serveFail: SelfHostedFetch = async () => ({
       status: 422,
       async text() {
         return JSON.stringify({
-          error: "the provider rejected this message; nothing was sent: Email address is not verified",
+          error: `the provider rejected this message; nothing was sent: ${sensitiveDetail}`,
           reason: "provider_rejected",
           sent: false,
           retry_safe: true,
@@ -1721,8 +1774,15 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
       },
     });
     const ds = new SelfHostedMailDataSource({ baseUrl: "https://emails.example/v1", apiKey: "k", fetchImpl: serveFail });
-    await expect(ds.send({ to: "x@external.example", from: "me@example.com", subject: "s", body: "b" }))
-      .rejects.toThrow(/Email address is not verified/);
+    let failure: unknown;
+    try {
+      await ds.send({ to: "x@external.example", from: "me@example.com", subject: "s", body: "b" });
+    } catch (error) {
+      failure = error;
+    }
+    expect(String(failure)).toContain("HTTP 422");
+    expect(String(failure)).toContain("provider_rejected");
+    expect(String(failure)).not.toContain(sensitiveDetail);
   });
 
   it("returns a sent-with-warning response as SUCCESS carrying the warning (a sent message must never look failed)", async () => {
@@ -1730,7 +1790,12 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
       status: 202,
       async text() {
         return JSON.stringify({
-          message: { id: "m1", message_id: "<m1@x>" },
+          message: v1("m1", {
+            direction: "outbound",
+            status: "sent",
+            send_state: "sent",
+            message_id: "<m1@x>",
+          }),
           provider: "ses",
           sent: true,
           provider_message_id: "prov-1",
@@ -1747,20 +1812,60 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     expect(res.messageId).toBe("prov-1");
   });
 
-  it("reads the provider message id from the record when the server sends no top-level echo", async () => {
+  it("rejects a sent response that omits the schema-required provider message id", async () => {
     const serveRecOnly: SelfHostedFetch = async () => ({
       status: 202,
       async text() {
         return JSON.stringify({
-          message: { id: "m2", message_id: "<m2@x>", provider_message_id: "prov-rec-2" },
+          message: v1("m2", {
+            direction: "outbound",
+            status: "sent",
+            send_state: "sent",
+            message_id: "<m2@x>",
+            provider_message_id: "prov-rec-2",
+          }),
           provider: "ses",
+          sent: true,
         });
       },
     });
     const ds = new SelfHostedMailDataSource({ baseUrl: "https://emails.example/v1", apiKey: "k", fetchImpl: serveRecOnly });
-    const res = await ds.send({ to: "x@external.example", from: "me@example.com", subject: "s", body: "b" });
-    expect(res.messageId).toBe("prov-rec-2");
-    expect(res.warning).toBeUndefined();
+    await expect(ds.send({
+      to: "x@external.example",
+      from: "me@example.com",
+      subject: "s",
+      body: "b",
+    })).rejects.toThrow(/invalid successful response|exactly one allowed response shape/i);
+  });
+
+  it("returns an in-progress send distinctly and does not require sent=true", async () => {
+    const serveInProgress: SelfHostedFetch = async () => ({
+      status: 202,
+      async text() {
+        return JSON.stringify({
+          message: v1("m-in-progress", {
+            direction: "outbound",
+            status: "sending",
+            send_state: "sending",
+          }),
+          provider: "ses",
+          in_progress: true,
+        });
+      },
+    });
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "k",
+      fetchImpl: serveInProgress,
+    });
+    const result = await ds.send({
+      to: "x@external.example",
+      from: "me@example.com",
+      subject: "s",
+      body: "b",
+    });
+    expect(result).toMatchObject({ id: "m-in-progress", inProgress: true });
+    expect(result.warning).toBeUndefined();
   });
 
   it("rejects --provider instead of silently ignoring it (the server owns the sender)", async () => {
@@ -1797,7 +1902,8 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     try { resolved = await ds.send({ to: "x@external.example", from: "me@example.com", subject: "s", body: "b" }); }
     catch (error) { rejected = error; }
     expect(resolved).toBeUndefined();
-    expect(String(rejected)).toContain("NOTHING was sent");
+    expect(String(rejected)).toContain("provider_rejected");
+    expect(String(rejected)).not.toContain("NOTHING was sent");
   });
 
   it("never turns an INDETERMINATE outcome into a resolved send", async () => {
@@ -1809,12 +1915,20 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
           reason: "provider_outcome_uncertain",
           sent: null,
           retry_safe: false,
+          reconciliation_required: true,
+          message: v1("unknown", { send_state: "uncertain" }),
         });
       },
     });
     const ds = new SelfHostedMailDataSource({ baseUrl: "https://emails.example/v1", apiKey: "k", fetchImpl: serveUnknown });
-    await expect(ds.send({ to: "x@external.example", from: "me@example.com", subject: "s", body: "b" }))
-      .rejects.toThrow(/may or may not have been sent/);
+    let failure: unknown;
+    try {
+      await ds.send({ to: "x@external.example", from: "me@example.com", subject: "s", body: "b" });
+    } catch (error) {
+      failure = error;
+    }
+    expect(String(failure)).toContain("provider_outcome_uncertain");
+    expect(String(failure)).not.toContain("may or may not have been sent");
   });
 
   it("returns verification candidates scoped to the recipient address", async () => {
@@ -2169,6 +2283,13 @@ function threadRow(id: string, over: Record<string, unknown> = {}): Record<strin
     is_starred: false,
     labels: [],
     headers: {},
+    provider_message_id: null,
+    attachments: [],
+    source_id: null,
+    send_state: "none",
+    send_started_at: null,
+    created_at: "2026-07-01T08:00:00.000Z",
+    updated_at: "2026-07-01T08:00:00.000Z",
     ...over,
   };
 }
@@ -2290,6 +2411,38 @@ describe("SelfHostedMailDataSource — source scoping", () => {
     const { ds, serve } = make([v1("2"), v1("5")]);
     await expect(ds.clear({ source: { providerId: "cred-1" } })).rejects.toThrow(/cannot be applied/);
     expect(serve.deleted).toEqual([]);
+  });
+
+  // `filter.providerId` is the MailClearFilter field the MCP `clear_inbound_emails`
+  // tool actually populates (`ds.clear({ providerId: provider_id })`) — a DIFFERENT
+  // field from `filter.source.providerId` above. It used to be read by nobody, so
+  // "clear one provider" silently became "clear the whole tenant folder" and
+  // reported a plausible count for it.
+  it("refuses a provider-scoped clear instead of widening it to the whole store", async () => {
+    const { ds, serve } = make([v1("2"), v1("5")]);
+
+    await expect(ds.clear({ providerId: "cred-1" })).rejects.toThrow(/no provider provenance/);
+    await expect(ds.clear({ providerId: "cred-1" })).rejects.toThrow(/Refusing rather than clearing the whole store/);
+    // The whole point: nothing was deleted, and no count was invented.
+    expect(serve.deleted).toEqual([]);
+    expect(serve.rows.size).toBe(2);
+  });
+
+  it("refuses a provider-scoped clear regardless of the mailbox or address scope alongside it", async () => {
+    const { ds, serve } = make([v1("2", { to_addrs: ["andrei@example.com"] }), v1("5")]);
+
+    await expect(ds.clear({ providerId: "cred-1", mailbox: "trash" })).rejects.toThrow(/no provider provenance/);
+    await expect(ds.clear({ providerId: "cred-1", source: { address: "andrei@example.com" } }))
+      .rejects.toThrow(/no provider provenance/);
+    expect(serve.deleted).toEqual([]);
+    expect(serve.rows.size).toBe(2);
+  });
+
+  it("still clears the unscoped mailbox", async () => {
+    const { ds, serve } = make([v1("2"), v1("5")]);
+
+    expect(await ds.clear({ mailbox: "inbox" })).toEqual({ cleared: 2 });
+    expect(serve.deleted.sort()).toEqual(["2", "5"]);
   });
 
   it("still narrows on address and domain scopes", async () => {

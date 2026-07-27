@@ -86,7 +86,7 @@ describe("provisioning defaults", () => {
 });
 
 describe("setDomainProvisioning / getDomainProvisioning", () => {
-  it("updates and reads back provisioning fields", () => {
+  it("maps the validated nameservers_json array when reading provisioning fields", async () => {
     const d = createDomain(providerId, "example.com");
     setDomainProvisioning(d.id, {
       provisioning_status: "verifying",
@@ -98,6 +98,12 @@ describe("setDomainProvisioning / getDomainProvisioning", () => {
       mail_from_domain: "mail.example.com",
       next_check_at: "2026-06-02T00:00:00.000Z",
     });
+    const raw = (await stub.list("domains")).find((row) => row["id"] === d.id);
+    expect(raw?.["nameservers_json"]).toEqual([
+      "a.ns.cloudflare.com",
+      "b.ns.cloudflare.com",
+    ]);
+
     const p = getDomainProvisioning(d.id)!;
     expect(p.provisioning_status).toBe("verifying");
     expect(p.purchase_provider).toBe("route53");

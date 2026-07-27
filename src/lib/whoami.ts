@@ -8,6 +8,7 @@
 // the transport's Authorization header.
 
 import { selfHostedApiRequest } from "../db/self-hosted-store.js";
+import { rethrowSelfHostedResponseFailure } from "./self-hosted-wire.js";
 
 export interface IdentityTenant {
   id: string | null;
@@ -101,12 +102,17 @@ export function fetchIdentity(): IdentityResult {
   return { ok: true, identity: normalizeIdentity(json) };
 }
 
-/** Fetch identity, swallowing all errors — for the MCP/TUI surfaces. */
+/**
+ * Fetch identity with availability-safe semantics for MCP/TUI surfaces.
+ * Invalid successful responses remain explicit contract failures and must
+ * never be rendered as the materially different "not signed in" state.
+ */
 export function fetchIdentitySafe(): IdentityContext | null {
   try {
     const result = fetchIdentity();
     return result.ok ? result.identity : null;
-  } catch {
+  } catch (error) {
+    rethrowSelfHostedResponseFailure(error);
     return null;
   }
 }

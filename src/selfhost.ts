@@ -1,23 +1,50 @@
 // @generated from src/server/self-hosted/openapi.ts by scripts/generate-selfhost-sdk.ts — DO NOT EDIT.
 // Regenerate: bun run scripts/generate-selfhost-sdk.ts
+import {
+  DEFAULT_SELF_HOSTED_HTTP_TIMEOUT_MS,
+  DEFAULT_SELF_HOSTED_MAX_RESPONSE_BYTES,
+  parseSelfHostedErrorJson,
+  parseSelfHostedSuccessJson,
+  projectSelfHostedErrorBody,
+  readSelfHostedResponseText,
+  selfHostedTransportLimit,
+  validateSelfHostedSdkSuccessResponse,
+} from "./lib/self-hosted-wire.js";
+
 // @generated from OpenAPI by @hasna/contracts SDK generator — DO NOT EDIT.
 // Source: Emails Self-Hosted API 1.0.0
 
-export interface User { "id": string; "email": string; "name"?: string | null; "status": string; "email_verified"?: boolean; "global_role"?: "user" | "super_admin"; "is_primary_super_admin"?: boolean }
+export interface ErrorResponse { "error": string }
 
-export interface Tenant { "id": string; "slug": string; "name": string; "status": string; "created_at"?: string; "updated_at"?: string }
+export interface User { "id": string; "email": string; "name": string | null; "status": string; "email_verified": boolean; "global_role": "user" | "super_admin"; "is_primary_super_admin": boolean; "created_at": string }
+
+export interface Tenant { "id": string; "slug": string; "name": string; "status": string }
+
+export interface TenantMembershipSummary { "id": string; "slug": string; "name": string; "status": string; "role": "owner" | "admin" | "member" | "viewer" }
+
+export interface TenantChoice { "slug": string; "name": string; "role": "owner" | "admin" | "member" | "viewer" }
 
 export interface EmailIdentity { "id": string; "email": string; "is_primary": boolean; "verified": boolean; "created_at"?: string }
 
-export interface Membership { "id": string; "user_id"?: string; "tenant_id"?: string; "email"?: string; "name"?: string | null; "role": "owner" | "admin" | "member" | "viewer"; "status": string; "created_at"?: string }
+export interface Membership { "id": string; "user_id": string; "email": string; "name": string | null; "role": "owner" | "admin" | "member" | "viewer"; "status": string; "created_at": string }
+
+export interface MembershipSummary { "id": string; "role": "owner" | "admin" | "member" | "viewer"; "status": string }
+
+export interface Invitation { "id": string; "email": string; "role": "owner" | "admin" | "member" | "viewer"; "expires_at": string; "accepted_at": string | null; "created_at": string }
+
+export interface ApiKeyMetadata { "kid": string; "app": string; "agent": string | null; "scopes": Array<string>; "issued_at": string; "expires_at": string | null; "revoked_at": string | null; "last_used_at": string | null; "created_by_user_id": string | null }
 
 export interface Domain { "id": string; "domain": string; "status": string; "provider"?: string | null; "verified": boolean; "notes"?: string | null; "provisioning_status"?: string; "purchase_provider"?: string | null; "dns_provider"?: string; "send_provider"?: string | null; "cf_zone_id"?: string | null; "registrar"?: string | null; "nameservers_json"?: Array<string>; "mail_from_domain"?: string | null; "last_error"?: string | null; "next_check_at"?: string | null; "created_at": string; "updated_at": string }
 
-export interface Address { "id": string; "email": string; "domain"?: string | null; "display_name"?: string | null; "status": string; "verified"?: boolean; "daily_quota"?: number | null; "domain_id"?: string | null; "receive_strategy"?: string | null; "forward_to"?: string | null; "routing_rule_id"?: string | null; "provisioning_status"?: string; "last_validated_at"?: string | null; "last_error"?: string | null; "next_check_at"?: string | null; "created_at": string; "updated_at": string }
+export interface Address { "id": string; "email": string; "domain"?: string | null; "display_name"?: string | null; "status": string; "verified"?: boolean; "daily_quota"?: number | null; "owner_id"?: string | null; "administrator_id"?: string | null; "domain_id"?: string | null; "receive_strategy"?: string | null; "forward_to"?: string | null; "routing_rule_id"?: string | null; "provisioning_status"?: string; "last_validated_at"?: string | null; "last_error"?: string | null; "next_check_at"?: string | null; "created_at": string; "updated_at": string }
 
-export interface MessageListItem { "id": string; "direction": string; "from_addr": string; "to_addrs": Array<string>; "cc_addrs"?: Array<string>; "subject"?: string | null; "snippet"?: string | null; "status": string; "provider_message_id"?: string | null; "message_id"?: string | null; "in_reply_to"?: string | null; "received_at"?: string | null; "is_read"?: boolean; "is_starred"?: boolean; "labels"?: Array<string>; "attachment_count"?: number; "source_id"?: string | null; "send_state"?: string; "send_started_at"?: string | null; "created_at": string; "updated_at": string }
+export interface SendKey { "id": string; "owner_id": string | null; "prefix": string | null; "label": string | null; "last_used_at": string | null; "revoked_at": string | null; "created_at": string; "updated_at": string }
 
-export interface Message { "id": string; "direction": string; "from_addr": string; "to_addrs": Array<string>; "cc_addrs"?: Array<string>; "subject"?: string | null; "body_text"?: string | null; "body_html"?: string | null; "status": string; "provider_message_id"?: string | null; "message_id"?: string | null; "in_reply_to"?: string | null; "received_at"?: string | null; "is_read"?: boolean; "is_starred"?: boolean; "labels"?: Array<string>; "headers"?: Record<string, unknown>; "attachments"?: Array<Record<string, unknown>>; "source_id"?: string | null; "send_state"?: string; "send_started_at"?: string | null; "created_at": string; "updated_at": string }
+export interface MessageListItem { "id": string; "direction": string; "from_addr": string; "to_addrs": Array<string>; "cc_addrs": Array<string>; "subject": string | null; "snippet": string | null; "status": string; "provider_message_id": string | null; "message_id": string | null; "in_reply_to": string | null; "received_at": string | null; "is_read": boolean; "is_starred": boolean; "labels": Array<string>; "attachment_count": number; "source_id": string | null; "send_state": string; "send_started_at": string | null; "created_at": string; "updated_at": string }
+
+export interface Message { "id": string; "direction": string; "from_addr": string; "to_addrs": Array<string>; "cc_addrs": Array<string>; "subject": string | null; "body_text": string | null; "body_html": string | null; "status": string; "provider_message_id": string | null; "message_id": string | null; "in_reply_to": string | null; "received_at": string | null; "is_read": boolean; "is_starred": boolean; "labels": Array<string>; "headers": Record<string, unknown>; "attachments": Array<AttachmentMeta | null>; "source_id": string | null; "send_state": string; "send_started_at": string | null; "created_at": string; "updated_at": string }
+
+export interface MessageCounts { "inbox": number; "unread": number; "starred": number; "sent": number; "archived": number; "spam": number; "trash": number; "total": number; "latest_received_at": string | null }
 
 export interface SendIntentMessage { "id": string; "send_state": "none" | "pending" | "blocked" | "cancelled" | "sending" | "sent" | "failed" | "uncertain" }
 
@@ -25,21 +52,29 @@ export interface SendIntentLookup { "found": boolean; "tombstoned": boolean; "re
 
 export interface SendIntentCancellation { "outcome": "tombstoned" | "cancelled" | "reconciliation_required"; "tombstoned": true; "reconciliation_required": boolean; "message": SendIntentMessage | null }
 
-export interface SendMessageError { "error": string; "reason"?: string; "provider_error"?: string; "sent"?: boolean | null; "retry_safe": boolean; "tombstoned"?: boolean; "message"?: Message | SendIntentMessage | null }
+export interface SendMessageError { "error": string; "reason"?: string; "provider_error"?: string; "sent"?: boolean | null; "retry_safe": boolean; "reconciliation_required"?: boolean; "tombstoned"?: boolean; "message"?: (Message | SendIntentMessage) | null }
 
 export interface AttachmentContent { "filename": string; "content_type": string; "size": number; "content_base64": string }
 
 export interface AttachmentUnavailableError { "error": string; "code": "attachment_content_unavailable"; "attachment": { "filename": string; "content_type": string; "size": number | null } }
 
-export interface AttachmentInventoryItem { "message_id": string; "attachment_index": number; "filename": string | null; "content_type": string | null; "size_bytes": number | null; "sha256": string | null; "content_available": boolean; "direction": "inbound" | "outbound" | null; "received_at": string | null }
+export interface AttachmentInventoryItem { "message_id": string; "attachment_index": number; "filename": string | null; "content_type": string | null; "size_bytes": number | null; "sha256": string | null; "content_available": boolean; "direction": ("inbound" | "outbound") | null; "received_at": string | null }
 
-export interface AttachmentMeta { "attachment_index": number; "filename": string | null; "content_type": string | null; "size_bytes": number | null; "sha256": string | null; "content_available": boolean }
+export interface AttachmentMeta { "filename"?: string | null; "content_type"?: string | null; "size"?: (number | string) | null; "sha256"?: string | null; "content_available"?: boolean }
+
+export interface AttachmentBatchMeta { "attachment_index": number; "filename": string | null; "content_type": string | null; "size_bytes": number | null; "sha256": string | null; "content_available": boolean }
 
 export interface AttachmentRepairSummary { "id": string; "apply": boolean; "status": "pending" | "completed"; "entry_total": number; "inventory_total": number; "repaired": number; "would_repair": number; "unavailable": number; "operator_action": number; "pending": number; "retrying": number; "entry_repaired": number; "entry_would_repair": number; "entry_unavailable": number; "entry_operator_action": number; "entry_pending": number; "entry_retrying": number; "attempts": number; "checkpoint": number; "byte_budget": number; "bytes_consumed": number; "time_budget_ms": number; "deadline_at": string; "created_at": string; "updated_at": string; "completed_at": string | null }
 
-export interface Thread { "thread_key": string; "subject"?: string | null; "message_count": number; "unread_count": number; "last_message_at"?: string | null; "first_message_at"?: string | null; "participants"?: Array<string> }
+export interface Thread { "thread_key": string; "subject": string | null; "message_count": number; "unread_count": number; "last_message_at": string | null; "first_message_at": string | null; "participants": Array<string> }
 
-export interface Mailbox { "id": string; "address": string; "display_name"?: string | null; "status"?: string; "total": number; "unread": number }
+export interface Mailbox { "id": string; "address": string; "display_name": string | null; "status": string; "total": number; "unread": number }
+
+export interface SnsNotification { "Type"?: "Notification" | "SubscriptionConfirmation"; "MessageId": string; "TopicArn"?: string; "Message"?: string; "Timestamp"?: string; "Signature": string; "SignatureVersion": "1" | "2"; "SigningCertURL": string; "SubscribeURL"?: string; "Token"?: string }
+
+export interface ResendWebhookEvent { "type": string; "created_at"?: string; "data"?: Record<string, unknown> }
+
+export interface WebhookReceipt { "ok": boolean; "duplicate"?: boolean; "confirmed"?: boolean; "ignored"?: string; "synced"?: number; "id"?: string | null; "event_id"?: string; "type"?: string; "message_id"?: string | null; "object_key"?: string | null }
 
 export interface EmailsSelfHostClientOptions {
   /** Base URL, e.g. process.env.APP_API_URL. */
@@ -52,6 +87,10 @@ export interface EmailsSelfHostClientOptions {
   fetch?: typeof fetch;
   /** Extra headers merged into every request. */
   headers?: Record<string, string>;
+  /** Per-request timeout in milliseconds (default: 30000). */
+  timeoutMs?: number;
+  /** Maximum response bytes read before failing closed (default: 8 MiB). */
+  maxResponseBytes?: number;
 }
 
 export type SendIntentRecoveryState = "blocked" | "cancelled" | "failed" | "none" | "pending" | "sending" | "sent" | "uncertain";
@@ -95,6 +134,8 @@ export class EmailsSelfHostClient {
   private readonly bearerToken: string | undefined;
   private readonly fetchImpl: typeof fetch;
   private readonly baseHeaders: Record<string, string>;
+  private readonly timeoutMs: number;
+  private readonly maxResponseBytes: number;
 
   constructor(options: EmailsSelfHostClientOptions) {
     if (!options.baseUrl) throw new Error("EmailsSelfHostClient requires a baseUrl.");
@@ -111,6 +152,16 @@ export class EmailsSelfHostClient {
     this.bearerToken = options.bearerToken;
     this.fetchImpl = options.fetch ?? globalThis.fetch;
     this.baseHeaders = options.headers ?? {};
+    this.timeoutMs = selfHostedTransportLimit(
+      options.timeoutMs,
+      DEFAULT_SELF_HOSTED_HTTP_TIMEOUT_MS,
+      "timeoutMs",
+    );
+    this.maxResponseBytes = selfHostedTransportLimit(
+      options.maxResponseBytes,
+      DEFAULT_SELF_HOSTED_MAX_RESPONSE_BYTES,
+      "maxResponseBytes",
+    );
   }
 
   private async request<T>(method: string, path: string, opts: { body?: unknown; query?: Record<string, unknown>; init?: RequestInit }): Promise<T> {
@@ -128,9 +179,39 @@ export class EmailsSelfHostClient {
       headers["Content-Type"] = "application/json";
       payload = JSON.stringify(opts.body);
     }
-    const response = await this.fetchImpl(url.toString(), { ...opts.init, method, headers, body: payload, redirect: "error" });
-    const text = await response.text();
-    const data = text ? (() => { try { return JSON.parse(text); } catch { return text; } })() : undefined;
+    const timeoutSignal = AbortSignal.timeout(this.timeoutMs);
+    const signal = opts.init?.signal
+      ? AbortSignal.any([opts.init.signal, timeoutSignal])
+      : timeoutSignal;
+    let response: Response;
+    try {
+      response = await this.fetchImpl(url.toString(), {
+        ...opts.init,
+        method,
+        headers,
+        body: payload,
+        redirect: "error",
+        signal,
+      });
+    } catch (error) {
+      if (timeoutSignal.aborted || (error as Error)?.name === "TimeoutError") {
+        throw new Error(`Self-hosted ${method} ${path} timed out after ${this.timeoutMs}ms`);
+      }
+      if (opts.init?.signal?.aborted || (error as Error)?.name === "AbortError") {
+        throw new Error(`Self-hosted ${method} ${path} request was aborted`);
+      }
+      throw new Error(`Cannot reach the Emails self-hosted service for ${method} ${path}`);
+    }
+    const text = await readSelfHostedResponseText(response, { method, path }, this.maxResponseBytes);
+    const data = response.ok
+      ? parseSelfHostedSuccessJson(text, { status: response.status, method, path })
+      : projectSelfHostedErrorBody(
+        method,
+        path,
+        response.status,
+        parseSelfHostedErrorJson(text, { status: response.status, method, path }),
+      );
+    if (response.ok) validateSelfHostedSdkSuccessResponse(method, path, response.status, data);
     if (!response.ok) {
       throw new ApiError(response.status, `${method} ${path} failed: ${response.status}`, data);
     }
@@ -138,7 +219,7 @@ export class EmailsSelfHostClient {
   }
 
     /** Liveness probe with database reachability */
-    async getHealth(init?: RequestInit): Promise<Record<string, unknown>> {
+    async getHealth(init?: RequestInit): Promise<{ "status": "ok"; "version": string; "mode": "self_hosted"; "name": "emails"; "db": { "ok": boolean; "latencyMs": number } }> {
       return this.request("GET", `/health`, {
         body: undefined,
         query: undefined,
@@ -147,7 +228,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Return this OpenAPI document */
-    async getOpenApiDocument(init?: RequestInit): Promise<Record<string, unknown>> {
+    async getOpenApiDocument(init?: RequestInit): Promise<{ "openapi": string; "info": { "title": string; "version": string }; "security": Array<Record<string, unknown>>; "paths": Record<string, unknown>; "components": Record<string, unknown> }> {
       return this.request("GET", `/openapi.json`, {
         body: undefined,
         query: undefined,
@@ -156,7 +237,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Readiness probe (reachable and fully migrated) */
-    async getReady(init?: RequestInit): Promise<Record<string, unknown>> {
+    async getReady(init?: RequestInit): Promise<{ "status": "ready"; "version": string; "mode": "self_hosted"; "db": { "ok": true; "latencyMs": number }; "pendingMigrations": Array<string>; "migrationIssues": Array<string> }> {
       return this.request("GET", `/ready`, {
         body: undefined,
         query: undefined,
@@ -165,7 +246,7 @@ export class EmailsSelfHostClient {
     }
 
     /** List tenant-scoped address-ownership-events */
-    async listResourceAddressOwnershipEvents(query?: { "limit"?: number; "offset"?: number; "address_id"?: string | null; "action"?: string | null }, init?: RequestInit): Promise<{ "items": Array<{ "id"?: string | null; "address_id"?: string | null; "action"?: string | null; "previous_owner_id"?: string | null; "previous_administrator_id"?: string | null; "owner_id"?: string | null; "administrator_id"?: string | null; "actor"?: string | null; "reason"?: string | null; "created_at"?: string; "updated_at"?: string }> }> {
+    async listResourceAddressOwnershipEvents(query?: { "limit"?: number; "offset"?: number; "address_id"?: string | null; "action"?: string | null }, init?: RequestInit): Promise<{ "items": Array<{ "id": string; "address_id": string | null; "action": string | null; "previous_owner_id": string | null; "previous_administrator_id": string | null; "owner_id": string | null; "administrator_id": string | null; "actor": string | null; "reason": string | null; "created_at": string; "tenant_id": string; "updated_at": string }> }> {
       return this.request("GET", `/v1/address-ownership-events`, {
         body: undefined,
         query,
@@ -174,7 +255,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Create a tenant-scoped address-ownership-events row */
-    async createResourceAddressOwnershipEvents(body: { "id"?: string | null; "address_id"?: string | null; "action"?: string | null; "previous_owner_id"?: string | null; "previous_administrator_id"?: string | null; "owner_id"?: string | null; "administrator_id"?: string | null; "actor"?: string | null; "reason"?: string | null; "created_at"?: string | null }, init?: RequestInit): Promise<{ "id"?: string | null; "address_id"?: string | null; "action"?: string | null; "previous_owner_id"?: string | null; "previous_administrator_id"?: string | null; "owner_id"?: string | null; "administrator_id"?: string | null; "actor"?: string | null; "reason"?: string | null; "created_at"?: string; "updated_at"?: string }> {
+    async createResourceAddressOwnershipEvents(body: { "id"?: string | null; "address_id"?: string | null; "action"?: string | null; "previous_owner_id"?: string | null; "previous_administrator_id"?: string | null; "owner_id"?: string | null; "administrator_id"?: string | null; "actor"?: string | null; "reason"?: string | null; "created_at"?: string | null }, init?: RequestInit): Promise<{ "id": string; "address_id": string | null; "action": string | null; "previous_owner_id": string | null; "previous_administrator_id": string | null; "owner_id": string | null; "administrator_id": string | null; "actor": string | null; "reason": string | null; "created_at": string; "tenant_id": string; "updated_at": string }> {
       return this.request("POST", `/v1/address-ownership-events`, {
         body,
         query: undefined,
@@ -183,7 +264,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Get a tenant-scoped address-ownership-events row */
-    async getResourceAddressOwnershipEvents(id: string, init?: RequestInit): Promise<{ "id"?: string | null; "address_id"?: string | null; "action"?: string | null; "previous_owner_id"?: string | null; "previous_administrator_id"?: string | null; "owner_id"?: string | null; "administrator_id"?: string | null; "actor"?: string | null; "reason"?: string | null; "created_at"?: string; "updated_at"?: string }> {
+    async getResourceAddressOwnershipEvents(id: string, init?: RequestInit): Promise<{ "id": string; "address_id": string | null; "action": string | null; "previous_owner_id": string | null; "previous_administrator_id": string | null; "owner_id": string | null; "administrator_id": string | null; "actor": string | null; "reason": string | null; "created_at": string; "tenant_id": string; "updated_at": string }> {
       return this.request("GET", `/v1/address-ownership-events/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -191,8 +272,17 @@ export class EmailsSelfHostClient {
       });
     }
 
+    /** Replace mutable fields on a tenant-scoped address-ownership-events row */
+    async replaceResourceAddressOwnershipEvents(id: string, body: { "id"?: string | null; "address_id"?: string | null; "action"?: string | null; "previous_owner_id"?: string | null; "previous_administrator_id"?: string | null; "owner_id"?: string | null; "administrator_id"?: string | null; "actor"?: string | null; "reason"?: string | null; "created_at"?: string | null }, init?: RequestInit): Promise<{ "id": string; "address_id": string | null; "action": string | null; "previous_owner_id": string | null; "previous_administrator_id": string | null; "owner_id": string | null; "administrator_id": string | null; "actor": string | null; "reason": string | null; "created_at": string; "tenant_id": string; "updated_at": string }> {
+      return this.request("PUT", `/v1/address-ownership-events/${encodeURIComponent(String(id))}`, {
+        body,
+        query: undefined,
+        init,
+      });
+    }
+
     /** Delete a tenant-scoped address-ownership-events row */
-    async deleteResourceAddressOwnershipEvents(id: string, init?: RequestInit): Promise<{ "deleted": boolean; "id": string }> {
+    async deleteResourceAddressOwnershipEvents(id: string, init?: RequestInit): Promise<{ "deleted": true; "id": string }> {
       return this.request("DELETE", `/v1/address-ownership-events/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -201,7 +291,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Update a tenant-scoped address-ownership-events row */
-    async updateResourceAddressOwnershipEvents(id: string, body: { "id"?: string | null; "address_id"?: string | null; "action"?: string | null; "previous_owner_id"?: string | null; "previous_administrator_id"?: string | null; "owner_id"?: string | null; "administrator_id"?: string | null; "actor"?: string | null; "reason"?: string | null; "created_at"?: string | null }, init?: RequestInit): Promise<{ "id"?: string | null; "address_id"?: string | null; "action"?: string | null; "previous_owner_id"?: string | null; "previous_administrator_id"?: string | null; "owner_id"?: string | null; "administrator_id"?: string | null; "actor"?: string | null; "reason"?: string | null; "created_at"?: string; "updated_at"?: string }> {
+    async updateResourceAddressOwnershipEvents(id: string, body: { "id"?: string | null; "address_id"?: string | null; "action"?: string | null; "previous_owner_id"?: string | null; "previous_administrator_id"?: string | null; "owner_id"?: string | null; "administrator_id"?: string | null; "actor"?: string | null; "reason"?: string | null; "created_at"?: string | null }, init?: RequestInit): Promise<{ "id": string; "address_id": string | null; "action": string | null; "previous_owner_id": string | null; "previous_administrator_id": string | null; "owner_id": string | null; "administrator_id": string | null; "actor": string | null; "reason": string | null; "created_at": string; "tenant_id": string; "updated_at": string }> {
       return this.request("PATCH", `/v1/address-ownership-events/${encodeURIComponent(String(id))}`, {
         body,
         query: undefined,
@@ -209,7 +299,7 @@ export class EmailsSelfHostClient {
       });
     }
 
-    async listAddresses(query?: { "limit"?: number; "offset"?: number }, init?: RequestInit): Promise<{ "addresses"?: Array<Address> }> {
+    async listAddresses(query?: { "limit"?: number; "offset"?: number }, init?: RequestInit): Promise<{ "addresses": Array<Address> }> {
       return this.request("GET", `/v1/addresses`, {
         body: undefined,
         query,
@@ -218,7 +308,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Register an email address (scope emails:write) */
-    async createAddress(body: { "email": string; "display_name"?: string | null; "status"?: string }, init?: RequestInit): Promise<{ "address"?: Address }> {
+    async createAddress(body: { "email": string; "display_name"?: string | null; "status"?: string }, init?: RequestInit): Promise<{ "address": Address }> {
       return this.request("POST", `/v1/addresses`, {
         body,
         query: undefined,
@@ -226,7 +316,7 @@ export class EmailsSelfHostClient {
       });
     }
 
-    async getAddress(id: string, init?: RequestInit): Promise<{ "address"?: Address }> {
+    async getAddress(id: string, init?: RequestInit): Promise<{ "address": Address }> {
       return this.request("GET", `/v1/addresses/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -234,7 +324,15 @@ export class EmailsSelfHostClient {
       });
     }
 
-    async deleteAddress(id: string, init?: RequestInit): Promise<Record<string, unknown>> {
+    async replaceAddress(id: string, body: { "display_name"?: string | null; "status"?: string; "verified"?: boolean; "daily_quota"?: number | null; "domain_id"?: string | null; "receive_strategy"?: string | null; "forward_to"?: string | null; "routing_rule_id"?: string | null; "provisioning_status"?: string; "last_validated_at"?: string | null; "last_error"?: string | null; "next_check_at"?: string | null }, init?: RequestInit): Promise<{ "address": Address }> {
+      return this.request("PUT", `/v1/addresses/${encodeURIComponent(String(id))}`, {
+        body,
+        query: undefined,
+        init,
+      });
+    }
+
+    async deleteAddress(id: string, init?: RequestInit): Promise<{ "deleted": true; "id": string }> {
       return this.request("DELETE", `/v1/addresses/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -242,7 +340,7 @@ export class EmailsSelfHostClient {
       });
     }
 
-    async updateAddress(id: string, body: { "display_name"?: string | null; "status"?: string; "verified"?: boolean; "daily_quota"?: number | null; "domain_id"?: string | null; "receive_strategy"?: string | null; "forward_to"?: string | null; "routing_rule_id"?: string | null; "provisioning_status"?: string; "last_validated_at"?: string | null; "last_error"?: string | null; "next_check_at"?: string | null }, init?: RequestInit): Promise<{ "address"?: Address }> {
+    async updateAddress(id: string, body: { "display_name"?: string | null; "status"?: string; "verified"?: boolean; "daily_quota"?: number | null; "domain_id"?: string | null; "receive_strategy"?: string | null; "forward_to"?: string | null; "routing_rule_id"?: string | null; "provisioning_status"?: string; "last_validated_at"?: string | null; "last_error"?: string | null; "next_check_at"?: string | null }, init?: RequestInit): Promise<{ "address": Address }> {
       return this.request("PATCH", `/v1/addresses/${encodeURIComponent(String(id))}`, {
         body,
         query: undefined,
@@ -251,7 +349,7 @@ export class EmailsSelfHostClient {
     }
 
     /** List tenant-scoped aliases */
-    async listResourceAliases(query?: { "limit"?: number; "offset"?: number; "domain"?: string | null; "local_part"?: string | null; "target_address"?: string | null }, init?: RequestInit): Promise<{ "items": Array<{ "id"?: string; "domain"?: string | null; "local_part"?: string | null; "target_address"?: string | null; "protected"?: boolean; "created_at"?: string; "updated_at"?: string }> }> {
+    async listResourceAliases(query?: { "limit"?: number; "offset"?: number; "domain"?: string | null; "local_part"?: string | null; "target_address"?: string | null }, init?: RequestInit): Promise<{ "items": Array<{ "domain": string | null; "local_part": string | null; "target_address": string | null; "protected": boolean; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> }> {
       return this.request("GET", `/v1/aliases`, {
         body: undefined,
         query,
@@ -260,7 +358,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Create a tenant-scoped aliases row */
-    async createResourceAliases(body: { "domain"?: string | null; "local_part"?: string | null; "target_address"?: string | null; "protected"?: boolean }, init?: RequestInit): Promise<{ "id"?: string; "domain"?: string | null; "local_part"?: string | null; "target_address"?: string | null; "protected"?: boolean; "created_at"?: string; "updated_at"?: string }> {
+    async createResourceAliases(body: { "domain"?: string | null; "local_part"?: string | null; "target_address"?: string | null; "protected"?: boolean }, init?: RequestInit): Promise<{ "domain": string | null; "local_part": string | null; "target_address": string | null; "protected": boolean; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("POST", `/v1/aliases`, {
         body,
         query: undefined,
@@ -269,7 +367,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Get a tenant-scoped aliases row */
-    async getResourceAliases(id: string, init?: RequestInit): Promise<{ "id"?: string; "domain"?: string | null; "local_part"?: string | null; "target_address"?: string | null; "protected"?: boolean; "created_at"?: string; "updated_at"?: string }> {
+    async getResourceAliases(id: string, init?: RequestInit): Promise<{ "domain": string | null; "local_part": string | null; "target_address": string | null; "protected": boolean; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("GET", `/v1/aliases/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -277,8 +375,17 @@ export class EmailsSelfHostClient {
       });
     }
 
+    /** Replace mutable fields on a tenant-scoped aliases row */
+    async replaceResourceAliases(id: string, body: { "domain"?: string | null; "local_part"?: string | null; "target_address"?: string | null; "protected"?: boolean }, init?: RequestInit): Promise<{ "domain": string | null; "local_part": string | null; "target_address": string | null; "protected": boolean; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
+      return this.request("PUT", `/v1/aliases/${encodeURIComponent(String(id))}`, {
+        body,
+        query: undefined,
+        init,
+      });
+    }
+
     /** Delete a tenant-scoped aliases row */
-    async deleteResourceAliases(id: string, init?: RequestInit): Promise<{ "deleted": boolean; "id": string }> {
+    async deleteResourceAliases(id: string, init?: RequestInit): Promise<{ "deleted": true; "id": string }> {
       return this.request("DELETE", `/v1/aliases/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -287,7 +394,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Update a tenant-scoped aliases row */
-    async updateResourceAliases(id: string, body: { "domain"?: string | null; "local_part"?: string | null; "target_address"?: string | null; "protected"?: boolean }, init?: RequestInit): Promise<{ "id"?: string; "domain"?: string | null; "local_part"?: string | null; "target_address"?: string | null; "protected"?: boolean; "created_at"?: string; "updated_at"?: string }> {
+    async updateResourceAliases(id: string, body: { "domain"?: string | null; "local_part"?: string | null; "target_address"?: string | null; "protected"?: boolean }, init?: RequestInit): Promise<{ "domain": string | null; "local_part": string | null; "target_address": string | null; "protected": boolean; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("PATCH", `/v1/aliases/${encodeURIComponent(String(id))}`, {
         body,
         query: undefined,
@@ -305,7 +412,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Return attachment metadata for an explicit, bounded list of message IDs, keyed by message_id, so a large exact-once scan can checkpoint per batch. Read-only (scope emails:read); at most 200 ids per request. */
-    async batchAttachments(body: { "message_ids": Array<string> }, init?: RequestInit): Promise<{ "by_message_id": Record<string, Array<AttachmentMeta>>; "unknown_ids": Array<string>; "max_batch_size": number }> {
+    async batchAttachments(body: { "message_ids": Array<string> }, init?: RequestInit): Promise<{ "by_message_id": Record<string, Array<AttachmentBatchMeta>>; "unknown_ids": Array<string>; "max_batch_size": number }> {
       return this.request("POST", `/v1/attachments/batch`, {
         body,
         query: undefined,
@@ -341,7 +448,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Create the first tenant owner using a tenant-bound operator API key */
-    async bootstrapOwner(body: { "email": string; "password": string; "name"?: string | null }, init?: RequestInit): Promise<Record<string, unknown>> {
+    async bootstrapOwner(body: { "email": string; "password": string; "name"?: string | null }, init?: RequestInit): Promise<{ "user": { "id": string; "email": string; "name": string | null; "status": string; "email_verified": boolean; "global_role"?: "user" | "super_admin"; "is_primary_super_admin"?: boolean; "created_at": string }; "tenant": { "id": string; "slug": string; "name": string; "status": string } | null }> {
       return this.request("POST", `/v1/auth/bootstrap-owner`, {
         body,
         query: undefined,
@@ -350,7 +457,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Idempotently register the configured primary platform super-admin */
-    async bootstrapPrimarySuperAdmin(body: { "email"?: string | null; "password": string; "name"?: string | null }, init?: RequestInit): Promise<Record<string, unknown>> {
+    async bootstrapPrimarySuperAdmin(body: { "email"?: string | null; "password": string; "name"?: string | null }, init?: RequestInit): Promise<{ "created": boolean; "user": User; "tenant": Tenant | null }> {
       return this.request("POST", `/v1/auth/bootstrap-super-admin`, {
         body,
         query: undefined,
@@ -359,7 +466,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Authenticate a verified user and create a tenant-bound session */
-    async logIn(body: { "email": string; "password": string; "tenant_slug"?: string | null }, init?: RequestInit): Promise<Record<string, unknown>> {
+    async logIn(body: { "email": string; "password": string; "tenant_slug"?: string | null }, init?: RequestInit): Promise<{ "needs_tenant": true; "tenants": Array<TenantChoice> } | { "session_token": string; "expires_at": string; "user": { "id": string; "email": string; "name": string | null; "status": string; "email_verified": boolean; "global_role"?: "user" | "super_admin"; "is_primary_super_admin"?: boolean; "created_at": string }; "tenant": { "id": string; "slug": string; "name": string; "status": string }; "role": "owner" | "admin" | "member" | "viewer" }> {
       return this.request("POST", `/v1/auth/login`, {
         body,
         query: undefined,
@@ -368,7 +475,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Revoke the current user session */
-    async logOut(init?: RequestInit): Promise<Record<string, unknown>> {
+    async logOut(init?: RequestInit): Promise<{ "logged_out": true }> {
       return this.request("POST", `/v1/auth/logout`, {
         body: undefined,
         query: undefined,
@@ -377,7 +484,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Revoke every session for the current user */
-    async logOutAll(init?: RequestInit): Promise<Record<string, unknown>> {
+    async logOutAll(init?: RequestInit): Promise<{ "logged_out": true }> {
       return this.request("POST", `/v1/auth/logout-all`, {
         body: undefined,
         query: undefined,
@@ -386,7 +493,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Request a password reset without revealing account existence */
-    async requestPasswordReset(body: { "email": string }, init?: RequestInit): Promise<Record<string, unknown>> {
+    async requestPasswordReset(body: { "email": string }, init?: RequestInit): Promise<{ "status": "reset_requested" }> {
       return this.request("POST", `/v1/auth/password/forgot`, {
         body,
         query: undefined,
@@ -395,7 +502,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Consume a password-reset token and revoke existing sessions */
-    async resetPassword(body: { "token": string; "new_password": string }, init?: RequestInit): Promise<Record<string, unknown>> {
+    async resetPassword(body: { "token": string; "new_password": string }, init?: RequestInit): Promise<{ "reset": true }> {
       return this.request("POST", `/v1/auth/password/reset`, {
         body,
         query: undefined,
@@ -403,8 +510,17 @@ export class EmailsSelfHostClient {
       });
     }
 
+    /** Report optional self-hosted sign-in providers */
+    async listAuthProviders(init?: RequestInit): Promise<{ "google": false; "device": false }> {
+      return this.request("GET", `/v1/auth/providers`, {
+        body: undefined,
+        query: undefined,
+        init,
+      });
+    }
+
     /** Create an unverified user and owner membership, then send email verification */
-    async signUp(body: { "email": string; "password": string; "name"?: string | null; "tenant_name": string; "tenant_slug"?: string | null }, init?: RequestInit): Promise<Record<string, unknown>> {
+    async signUp(body: { "email": string; "password": string; "name"?: string | null; "tenant_name": string; "tenant_slug"?: string | null }, init?: RequestInit): Promise<{ "status": "verification_required"; "email": string; "verification_required": true }> {
       return this.request("POST", `/v1/auth/signup`, {
         body,
         query: undefined,
@@ -413,7 +529,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Rotate the current user session into another tenant membership */
-    async switchTenant(body: { "tenant_slug": string }, init?: RequestInit): Promise<Record<string, unknown>> {
+    async switchTenant(body: { "tenant_slug": string }, init?: RequestInit): Promise<{ "session_token": string; "expires_at": string; "tenant": { "id": string; "slug": string; "name": string; "status": string }; "role": "owner" | "admin" | "member" | "viewer" }> {
       return this.request("POST", `/v1/auth/switch-tenant`, {
         body,
         query: undefined,
@@ -422,7 +538,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Verify a user email from a query-string token */
-    async verifyEmailLink(query?: { "token": string }, init?: RequestInit): Promise<Record<string, unknown>> {
+    async verifyEmailLink(query?: { "token": string }, init?: RequestInit): Promise<{ "verified": true; "user": { "id": string; "email": string; "name": string | null; "status": string; "email_verified": boolean; "global_role"?: "user" | "super_admin"; "is_primary_super_admin"?: boolean; "created_at": string } }> {
       return this.request("GET", `/v1/auth/verify-email`, {
         body: undefined,
         query,
@@ -431,7 +547,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Verify a user email from a JSON token */
-    async verifyEmailToken(body: { "token": string }, init?: RequestInit): Promise<Record<string, unknown>> {
+    async verifyEmailToken(body: { "token": string }, init?: RequestInit): Promise<{ "verified": true; "user": { "id": string; "email": string; "name": string | null; "status": string; "email_verified": boolean; "global_role"?: "user" | "super_admin"; "is_primary_super_admin"?: boolean; "created_at": string } }> {
       return this.request("POST", `/v1/auth/verify-email`, {
         body,
         query: undefined,
@@ -440,7 +556,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Request another verification message without revealing account existence */
-    async resendEmailVerification(body: { "email": string }, init?: RequestInit): Promise<Record<string, unknown>> {
+    async resendEmailVerification(body: { "email": string }, init?: RequestInit): Promise<{ "status": "verification_required"; "verification_required": true }> {
       return this.request("POST", `/v1/auth/verify-email/resend`, {
         body,
         query: undefined,
@@ -449,7 +565,7 @@ export class EmailsSelfHostClient {
     }
 
     /** List tenant-scoped contacts */
-    async listResourceContacts(query?: { "limit"?: number; "offset"?: number; "suppressed"?: boolean; "email"?: string | null }, init?: RequestInit): Promise<{ "items": Array<{ "id"?: string; "email"?: string | null; "name"?: string | null; "send_count"?: number; "bounce_count"?: number; "complaint_count"?: number; "last_sent_at"?: string | null; "suppressed"?: boolean; "created_at"?: string; "updated_at"?: string }> }> {
+    async listResourceContacts(query?: { "limit"?: number; "offset"?: number; "suppressed"?: boolean; "email"?: string | null }, init?: RequestInit): Promise<{ "items": Array<{ "email": string | null; "name": string | null; "send_count": number; "bounce_count": number; "complaint_count": number; "last_sent_at": string | null; "suppressed": boolean; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> }> {
       return this.request("GET", `/v1/contacts`, {
         body: undefined,
         query,
@@ -458,7 +574,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Create a tenant-scoped contacts row */
-    async createResourceContacts(body: { "email"?: string | null; "name"?: string | null; "send_count"?: number; "bounce_count"?: number; "complaint_count"?: number; "last_sent_at"?: string | null; "suppressed"?: boolean }, init?: RequestInit): Promise<{ "id"?: string; "email"?: string | null; "name"?: string | null; "send_count"?: number; "bounce_count"?: number; "complaint_count"?: number; "last_sent_at"?: string | null; "suppressed"?: boolean; "created_at"?: string; "updated_at"?: string }> {
+    async createResourceContacts(body: { "email"?: string | null; "name"?: string | null; "send_count"?: number; "bounce_count"?: number; "complaint_count"?: number; "last_sent_at"?: string | null; "suppressed"?: boolean }, init?: RequestInit): Promise<{ "email": string | null; "name": string | null; "send_count": number; "bounce_count": number; "complaint_count": number; "last_sent_at": string | null; "suppressed": boolean; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("POST", `/v1/contacts`, {
         body,
         query: undefined,
@@ -467,7 +583,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Get a tenant-scoped contacts row */
-    async getResourceContacts(id: string, init?: RequestInit): Promise<{ "id"?: string; "email"?: string | null; "name"?: string | null; "send_count"?: number; "bounce_count"?: number; "complaint_count"?: number; "last_sent_at"?: string | null; "suppressed"?: boolean; "created_at"?: string; "updated_at"?: string }> {
+    async getResourceContacts(id: string, init?: RequestInit): Promise<{ "email": string | null; "name": string | null; "send_count": number; "bounce_count": number; "complaint_count": number; "last_sent_at": string | null; "suppressed": boolean; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("GET", `/v1/contacts/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -475,8 +591,17 @@ export class EmailsSelfHostClient {
       });
     }
 
+    /** Replace mutable fields on a tenant-scoped contacts row */
+    async replaceResourceContacts(id: string, body: { "email"?: string | null; "name"?: string | null; "send_count"?: number; "bounce_count"?: number; "complaint_count"?: number; "last_sent_at"?: string | null; "suppressed"?: boolean }, init?: RequestInit): Promise<{ "email": string | null; "name": string | null; "send_count": number; "bounce_count": number; "complaint_count": number; "last_sent_at": string | null; "suppressed": boolean; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
+      return this.request("PUT", `/v1/contacts/${encodeURIComponent(String(id))}`, {
+        body,
+        query: undefined,
+        init,
+      });
+    }
+
     /** Delete a tenant-scoped contacts row */
-    async deleteResourceContacts(id: string, init?: RequestInit): Promise<{ "deleted": boolean; "id": string }> {
+    async deleteResourceContacts(id: string, init?: RequestInit): Promise<{ "deleted": true; "id": string }> {
       return this.request("DELETE", `/v1/contacts/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -485,7 +610,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Update a tenant-scoped contacts row */
-    async updateResourceContacts(id: string, body: { "email"?: string | null; "name"?: string | null; "send_count"?: number; "bounce_count"?: number; "complaint_count"?: number; "last_sent_at"?: string | null; "suppressed"?: boolean }, init?: RequestInit): Promise<{ "id"?: string; "email"?: string | null; "name"?: string | null; "send_count"?: number; "bounce_count"?: number; "complaint_count"?: number; "last_sent_at"?: string | null; "suppressed"?: boolean; "created_at"?: string; "updated_at"?: string }> {
+    async updateResourceContacts(id: string, body: { "email"?: string | null; "name"?: string | null; "send_count"?: number; "bounce_count"?: number; "complaint_count"?: number; "last_sent_at"?: string | null; "suppressed"?: boolean }, init?: RequestInit): Promise<{ "email": string | null; "name": string | null; "send_count": number; "bounce_count": number; "complaint_count": number; "last_sent_at": string | null; "suppressed": boolean; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("PATCH", `/v1/contacts/${encodeURIComponent(String(id))}`, {
         body,
         query: undefined,
@@ -494,7 +619,7 @@ export class EmailsSelfHostClient {
     }
 
     /** List sending domains */
-    async listDomains(query?: { "limit"?: number; "offset"?: number }, init?: RequestInit): Promise<{ "domains"?: Array<Domain> }> {
+    async listDomains(query?: { "limit"?: number; "offset"?: number }, init?: RequestInit): Promise<{ "domains": Array<Domain> }> {
       return this.request("GET", `/v1/domains`, {
         body: undefined,
         query,
@@ -503,7 +628,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Register a sending domain (scope emails:write) */
-    async createDomain(body: { "domain": string; "status"?: string; "provider"?: string | null; "verified"?: boolean; "notes"?: string | null }, init?: RequestInit): Promise<{ "domain"?: Domain }> {
+    async createDomain(body: { "domain": string; "status"?: string; "provider"?: string | null; "verified"?: boolean; "notes"?: string | null }, init?: RequestInit): Promise<{ "domain": Domain }> {
       return this.request("POST", `/v1/domains`, {
         body,
         query: undefined,
@@ -511,7 +636,7 @@ export class EmailsSelfHostClient {
       });
     }
 
-    async getDomain(id: string, init?: RequestInit): Promise<{ "domain"?: Domain }> {
+    async getDomain(id: string, init?: RequestInit): Promise<{ "domain": Domain }> {
       return this.request("GET", `/v1/domains/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -519,7 +644,15 @@ export class EmailsSelfHostClient {
       });
     }
 
-    async deleteDomain(id: string, init?: RequestInit): Promise<Record<string, unknown>> {
+    async replaceDomain(id: string, body: { "status"?: string; "provider"?: string | null; "verified"?: boolean; "notes"?: string | null; "provisioning_status"?: string; "purchase_provider"?: string | null; "dns_provider"?: string; "send_provider"?: string | null; "cf_zone_id"?: string | null; "registrar"?: string | null; "nameservers_json"?: Array<string>; "mail_from_domain"?: string | null; "last_error"?: string | null; "next_check_at"?: string | null }, init?: RequestInit): Promise<{ "domain": Domain }> {
+      return this.request("PUT", `/v1/domains/${encodeURIComponent(String(id))}`, {
+        body,
+        query: undefined,
+        init,
+      });
+    }
+
+    async deleteDomain(id: string, init?: RequestInit): Promise<{ "deleted": true; "id": string }> {
       return this.request("DELETE", `/v1/domains/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -527,7 +660,7 @@ export class EmailsSelfHostClient {
       });
     }
 
-    async updateDomain(id: string, body: { "status"?: string; "provider"?: string | null; "verified"?: boolean; "notes"?: string | null; "provisioning_status"?: string; "purchase_provider"?: string | null; "dns_provider"?: string; "send_provider"?: string | null; "cf_zone_id"?: string | null; "registrar"?: string | null; "nameservers_json"?: Array<string>; "mail_from_domain"?: string | null; "last_error"?: string | null; "next_check_at"?: string | null }, init?: RequestInit): Promise<{ "domain"?: Domain }> {
+    async updateDomain(id: string, body: { "status"?: string; "provider"?: string | null; "verified"?: boolean; "notes"?: string | null; "provisioning_status"?: string; "purchase_provider"?: string | null; "dns_provider"?: string; "send_provider"?: string | null; "cf_zone_id"?: string | null; "registrar"?: string | null; "nameservers_json"?: Array<string>; "mail_from_domain"?: string | null; "last_error"?: string | null; "next_check_at"?: string | null }, init?: RequestInit): Promise<{ "domain": Domain }> {
       return this.request("PATCH", `/v1/domains/${encodeURIComponent(String(id))}`, {
         body,
         query: undefined,
@@ -536,7 +669,7 @@ export class EmailsSelfHostClient {
     }
 
     /** List tenant-scoped email-agent-runs */
-    async listResourceEmailAgentRuns(query?: { "limit"?: number; "offset"?: number; "agent_key"?: string | null; "inbound_email_id"?: string | null; "status"?: string | null }, init?: RequestInit): Promise<{ "items": Array<{ "id"?: string; "agent_key"?: string | null; "inbound_email_id"?: string | null; "provider"?: string | null; "model"?: string | null; "status"?: string | null; "category"?: string | null; "labels_json"?: unknown; "priority"?: number; "confidence"?: number; "risk_score"?: number; "summary"?: string | null; "reasoning"?: string | null; "tool_calls_json"?: unknown; "output_json"?: unknown; "error"?: string | null; "started_at"?: string | null; "completed_at"?: string | null; "created_at"?: string; "updated_at"?: string }> }> {
+    async listResourceEmailAgentRuns(query?: { "limit"?: number; "offset"?: number; "agent_key"?: string | null; "inbound_email_id"?: string | null; "status"?: string | null }, init?: RequestInit): Promise<{ "items": Array<{ "agent_key": string | null; "inbound_email_id": string | null; "provider": string | null; "model": string | null; "status": string | null; "category": string | null; "labels_json": unknown; "priority": number; "confidence": number; "risk_score": number; "summary": string | null; "reasoning": string | null; "tool_calls_json": unknown; "output_json": unknown; "error": string | null; "started_at": string | null; "completed_at": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> }> {
       return this.request("GET", `/v1/email-agent-runs`, {
         body: undefined,
         query,
@@ -545,7 +678,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Create a tenant-scoped email-agent-runs row */
-    async createResourceEmailAgentRuns(body: { "agent_key"?: string | null; "inbound_email_id"?: string | null; "provider"?: string | null; "model"?: string | null; "status"?: string | null; "category"?: string | null; "labels_json"?: unknown; "priority"?: number; "confidence"?: number; "risk_score"?: number; "summary"?: string | null; "reasoning"?: string | null; "tool_calls_json"?: unknown; "output_json"?: unknown; "error"?: string | null; "started_at"?: string | null; "completed_at"?: string | null }, init?: RequestInit): Promise<{ "id"?: string; "agent_key"?: string | null; "inbound_email_id"?: string | null; "provider"?: string | null; "model"?: string | null; "status"?: string | null; "category"?: string | null; "labels_json"?: unknown; "priority"?: number; "confidence"?: number; "risk_score"?: number; "summary"?: string | null; "reasoning"?: string | null; "tool_calls_json"?: unknown; "output_json"?: unknown; "error"?: string | null; "started_at"?: string | null; "completed_at"?: string | null; "created_at"?: string; "updated_at"?: string }> {
+    async createResourceEmailAgentRuns(body: { "agent_key"?: string | null; "inbound_email_id"?: string | null; "provider"?: string | null; "model"?: string | null; "status"?: string | null; "category"?: string | null; "labels_json"?: unknown; "priority"?: number; "confidence"?: number; "risk_score"?: number; "summary"?: string | null; "reasoning"?: string | null; "tool_calls_json"?: unknown; "output_json"?: unknown; "error"?: string | null; "started_at"?: string | null; "completed_at"?: string | null }, init?: RequestInit): Promise<{ "agent_key": string | null; "inbound_email_id": string | null; "provider": string | null; "model": string | null; "status": string | null; "category": string | null; "labels_json": unknown; "priority": number; "confidence": number; "risk_score": number; "summary": string | null; "reasoning": string | null; "tool_calls_json": unknown; "output_json": unknown; "error": string | null; "started_at": string | null; "completed_at": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("POST", `/v1/email-agent-runs`, {
         body,
         query: undefined,
@@ -554,7 +687,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Get a tenant-scoped email-agent-runs row */
-    async getResourceEmailAgentRuns(id: string, init?: RequestInit): Promise<{ "id"?: string; "agent_key"?: string | null; "inbound_email_id"?: string | null; "provider"?: string | null; "model"?: string | null; "status"?: string | null; "category"?: string | null; "labels_json"?: unknown; "priority"?: number; "confidence"?: number; "risk_score"?: number; "summary"?: string | null; "reasoning"?: string | null; "tool_calls_json"?: unknown; "output_json"?: unknown; "error"?: string | null; "started_at"?: string | null; "completed_at"?: string | null; "created_at"?: string; "updated_at"?: string }> {
+    async getResourceEmailAgentRuns(id: string, init?: RequestInit): Promise<{ "agent_key": string | null; "inbound_email_id": string | null; "provider": string | null; "model": string | null; "status": string | null; "category": string | null; "labels_json": unknown; "priority": number; "confidence": number; "risk_score": number; "summary": string | null; "reasoning": string | null; "tool_calls_json": unknown; "output_json": unknown; "error": string | null; "started_at": string | null; "completed_at": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("GET", `/v1/email-agent-runs/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -562,8 +695,17 @@ export class EmailsSelfHostClient {
       });
     }
 
+    /** Replace mutable fields on a tenant-scoped email-agent-runs row */
+    async replaceResourceEmailAgentRuns(id: string, body: { "agent_key"?: string | null; "inbound_email_id"?: string | null; "provider"?: string | null; "model"?: string | null; "status"?: string | null; "category"?: string | null; "labels_json"?: unknown; "priority"?: number; "confidence"?: number; "risk_score"?: number; "summary"?: string | null; "reasoning"?: string | null; "tool_calls_json"?: unknown; "output_json"?: unknown; "error"?: string | null; "started_at"?: string | null; "completed_at"?: string | null }, init?: RequestInit): Promise<{ "agent_key": string | null; "inbound_email_id": string | null; "provider": string | null; "model": string | null; "status": string | null; "category": string | null; "labels_json": unknown; "priority": number; "confidence": number; "risk_score": number; "summary": string | null; "reasoning": string | null; "tool_calls_json": unknown; "output_json": unknown; "error": string | null; "started_at": string | null; "completed_at": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
+      return this.request("PUT", `/v1/email-agent-runs/${encodeURIComponent(String(id))}`, {
+        body,
+        query: undefined,
+        init,
+      });
+    }
+
     /** Delete a tenant-scoped email-agent-runs row */
-    async deleteResourceEmailAgentRuns(id: string, init?: RequestInit): Promise<{ "deleted": boolean; "id": string }> {
+    async deleteResourceEmailAgentRuns(id: string, init?: RequestInit): Promise<{ "deleted": true; "id": string }> {
       return this.request("DELETE", `/v1/email-agent-runs/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -572,7 +714,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Update a tenant-scoped email-agent-runs row */
-    async updateResourceEmailAgentRuns(id: string, body: { "agent_key"?: string | null; "inbound_email_id"?: string | null; "provider"?: string | null; "model"?: string | null; "status"?: string | null; "category"?: string | null; "labels_json"?: unknown; "priority"?: number; "confidence"?: number; "risk_score"?: number; "summary"?: string | null; "reasoning"?: string | null; "tool_calls_json"?: unknown; "output_json"?: unknown; "error"?: string | null; "started_at"?: string | null; "completed_at"?: string | null }, init?: RequestInit): Promise<{ "id"?: string; "agent_key"?: string | null; "inbound_email_id"?: string | null; "provider"?: string | null; "model"?: string | null; "status"?: string | null; "category"?: string | null; "labels_json"?: unknown; "priority"?: number; "confidence"?: number; "risk_score"?: number; "summary"?: string | null; "reasoning"?: string | null; "tool_calls_json"?: unknown; "output_json"?: unknown; "error"?: string | null; "started_at"?: string | null; "completed_at"?: string | null; "created_at"?: string; "updated_at"?: string }> {
+    async updateResourceEmailAgentRuns(id: string, body: { "agent_key"?: string | null; "inbound_email_id"?: string | null; "provider"?: string | null; "model"?: string | null; "status"?: string | null; "category"?: string | null; "labels_json"?: unknown; "priority"?: number; "confidence"?: number; "risk_score"?: number; "summary"?: string | null; "reasoning"?: string | null; "tool_calls_json"?: unknown; "output_json"?: unknown; "error"?: string | null; "started_at"?: string | null; "completed_at"?: string | null }, init?: RequestInit): Promise<{ "agent_key": string | null; "inbound_email_id": string | null; "provider": string | null; "model": string | null; "status": string | null; "category": string | null; "labels_json": unknown; "priority": number; "confidence": number; "risk_score": number; "summary": string | null; "reasoning": string | null; "tool_calls_json": unknown; "output_json": unknown; "error": string | null; "started_at": string | null; "completed_at": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("PATCH", `/v1/email-agent-runs/${encodeURIComponent(String(id))}`, {
         body,
         query: undefined,
@@ -581,7 +723,7 @@ export class EmailsSelfHostClient {
     }
 
     /** List tenant-scoped email-agents */
-    async listResourceEmailAgents(query?: { "limit"?: number; "offset"?: number }, init?: RequestInit): Promise<{ "items": Array<{ "agent_key"?: string | null; "enabled"?: boolean; "always_on"?: boolean; "provider"?: string | null; "model"?: string | null; "apply_labels"?: boolean; "use_network_tools"?: boolean; "config_json"?: unknown; "created_at"?: string; "updated_at"?: string }> }> {
+    async listResourceEmailAgents(query?: { "limit"?: number; "offset"?: number }, init?: RequestInit): Promise<{ "items": Array<{ "agent_key": string; "enabled": boolean; "always_on": boolean; "provider": string | null; "model": string | null; "apply_labels": boolean; "use_network_tools": boolean; "config_json": unknown; "tenant_id": string; "created_at": string; "updated_at": string }> }> {
       return this.request("GET", `/v1/email-agents`, {
         body: undefined,
         query,
@@ -590,7 +732,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Create a tenant-scoped email-agents row */
-    async createResourceEmailAgents(body: { "agent_key"?: string | null; "enabled"?: boolean; "always_on"?: boolean; "provider"?: string | null; "model"?: string | null; "apply_labels"?: boolean; "use_network_tools"?: boolean; "config_json"?: unknown }, init?: RequestInit): Promise<{ "agent_key"?: string | null; "enabled"?: boolean; "always_on"?: boolean; "provider"?: string | null; "model"?: string | null; "apply_labels"?: boolean; "use_network_tools"?: boolean; "config_json"?: unknown; "created_at"?: string; "updated_at"?: string }> {
+    async createResourceEmailAgents(body: { "agent_key"?: string | null; "enabled"?: boolean; "always_on"?: boolean; "provider"?: string | null; "model"?: string | null; "apply_labels"?: boolean; "use_network_tools"?: boolean; "config_json"?: unknown }, init?: RequestInit): Promise<{ "agent_key": string; "enabled": boolean; "always_on": boolean; "provider": string | null; "model": string | null; "apply_labels": boolean; "use_network_tools": boolean; "config_json": unknown; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("POST", `/v1/email-agents`, {
         body,
         query: undefined,
@@ -599,7 +741,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Get a tenant-scoped email-agents row */
-    async getResourceEmailAgents(id: string, init?: RequestInit): Promise<{ "agent_key"?: string | null; "enabled"?: boolean; "always_on"?: boolean; "provider"?: string | null; "model"?: string | null; "apply_labels"?: boolean; "use_network_tools"?: boolean; "config_json"?: unknown; "created_at"?: string; "updated_at"?: string }> {
+    async getResourceEmailAgents(id: string, init?: RequestInit): Promise<{ "agent_key": string; "enabled": boolean; "always_on": boolean; "provider": string | null; "model": string | null; "apply_labels": boolean; "use_network_tools": boolean; "config_json": unknown; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("GET", `/v1/email-agents/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -607,8 +749,17 @@ export class EmailsSelfHostClient {
       });
     }
 
+    /** Replace mutable fields on a tenant-scoped email-agents row */
+    async replaceResourceEmailAgents(id: string, body: { "agent_key"?: string | null; "enabled"?: boolean; "always_on"?: boolean; "provider"?: string | null; "model"?: string | null; "apply_labels"?: boolean; "use_network_tools"?: boolean; "config_json"?: unknown }, init?: RequestInit): Promise<{ "agent_key": string; "enabled": boolean; "always_on": boolean; "provider": string | null; "model": string | null; "apply_labels": boolean; "use_network_tools": boolean; "config_json": unknown; "tenant_id": string; "created_at": string; "updated_at": string }> {
+      return this.request("PUT", `/v1/email-agents/${encodeURIComponent(String(id))}`, {
+        body,
+        query: undefined,
+        init,
+      });
+    }
+
     /** Delete a tenant-scoped email-agents row */
-    async deleteResourceEmailAgents(id: string, init?: RequestInit): Promise<{ "deleted": boolean; "id": string }> {
+    async deleteResourceEmailAgents(id: string, init?: RequestInit): Promise<{ "deleted": true; "id": string }> {
       return this.request("DELETE", `/v1/email-agents/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -617,7 +768,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Update a tenant-scoped email-agents row */
-    async updateResourceEmailAgents(id: string, body: { "agent_key"?: string | null; "enabled"?: boolean; "always_on"?: boolean; "provider"?: string | null; "model"?: string | null; "apply_labels"?: boolean; "use_network_tools"?: boolean; "config_json"?: unknown }, init?: RequestInit): Promise<{ "agent_key"?: string | null; "enabled"?: boolean; "always_on"?: boolean; "provider"?: string | null; "model"?: string | null; "apply_labels"?: boolean; "use_network_tools"?: boolean; "config_json"?: unknown; "created_at"?: string; "updated_at"?: string }> {
+    async updateResourceEmailAgents(id: string, body: { "agent_key"?: string | null; "enabled"?: boolean; "always_on"?: boolean; "provider"?: string | null; "model"?: string | null; "apply_labels"?: boolean; "use_network_tools"?: boolean; "config_json"?: unknown }, init?: RequestInit): Promise<{ "agent_key": string; "enabled": boolean; "always_on": boolean; "provider": string | null; "model": string | null; "apply_labels": boolean; "use_network_tools": boolean; "config_json": unknown; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("PATCH", `/v1/email-agents/${encodeURIComponent(String(id))}`, {
         body,
         query: undefined,
@@ -626,7 +777,7 @@ export class EmailsSelfHostClient {
     }
 
     /** List tenant-scoped email-digests */
-    async listResourceEmailDigests(query?: { "limit"?: number; "offset"?: number; "period"?: string | null; "status"?: string | null }, init?: RequestInit): Promise<{ "items": Array<{ "id"?: string; "period"?: string | null; "since"?: string | null; "until"?: string | null; "provider"?: string | null; "model"?: string | null; "status"?: string | null; "message_count"?: number; "summary"?: string | null; "highlights_json"?: unknown; "action_items_json"?: unknown; "important_email_ids_json"?: unknown; "label_counts_json"?: unknown; "error"?: string | null; "started_at"?: string | null; "completed_at"?: string | null; "created_at"?: string; "updated_at"?: string }> }> {
+    async listResourceEmailDigests(query?: { "limit"?: number; "offset"?: number; "period"?: string | null; "status"?: string | null }, init?: RequestInit): Promise<{ "items": Array<{ "period": string | null; "since": string | null; "until": string | null; "provider": string | null; "model": string | null; "status": string | null; "message_count": number; "summary": string | null; "highlights_json": unknown; "action_items_json": unknown; "important_email_ids_json": unknown; "label_counts_json": unknown; "error": string | null; "started_at": string | null; "completed_at": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> }> {
       return this.request("GET", `/v1/email-digests`, {
         body: undefined,
         query,
@@ -635,7 +786,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Create a tenant-scoped email-digests row */
-    async createResourceEmailDigests(body: { "period"?: string | null; "since"?: string | null; "until"?: string | null; "provider"?: string | null; "model"?: string | null; "status"?: string | null; "message_count"?: number; "summary"?: string | null; "highlights_json"?: unknown; "action_items_json"?: unknown; "important_email_ids_json"?: unknown; "label_counts_json"?: unknown; "error"?: string | null; "started_at"?: string | null; "completed_at"?: string | null }, init?: RequestInit): Promise<{ "id"?: string; "period"?: string | null; "since"?: string | null; "until"?: string | null; "provider"?: string | null; "model"?: string | null; "status"?: string | null; "message_count"?: number; "summary"?: string | null; "highlights_json"?: unknown; "action_items_json"?: unknown; "important_email_ids_json"?: unknown; "label_counts_json"?: unknown; "error"?: string | null; "started_at"?: string | null; "completed_at"?: string | null; "created_at"?: string; "updated_at"?: string }> {
+    async createResourceEmailDigests(body: { "period"?: string | null; "since"?: string | null; "until"?: string | null; "provider"?: string | null; "model"?: string | null; "status"?: string | null; "message_count"?: number; "summary"?: string | null; "highlights_json"?: unknown; "action_items_json"?: unknown; "important_email_ids_json"?: unknown; "label_counts_json"?: unknown; "error"?: string | null; "started_at"?: string | null; "completed_at"?: string | null }, init?: RequestInit): Promise<{ "period": string | null; "since": string | null; "until": string | null; "provider": string | null; "model": string | null; "status": string | null; "message_count": number; "summary": string | null; "highlights_json": unknown; "action_items_json": unknown; "important_email_ids_json": unknown; "label_counts_json": unknown; "error": string | null; "started_at": string | null; "completed_at": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("POST", `/v1/email-digests`, {
         body,
         query: undefined,
@@ -644,7 +795,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Get a tenant-scoped email-digests row */
-    async getResourceEmailDigests(id: string, init?: RequestInit): Promise<{ "id"?: string; "period"?: string | null; "since"?: string | null; "until"?: string | null; "provider"?: string | null; "model"?: string | null; "status"?: string | null; "message_count"?: number; "summary"?: string | null; "highlights_json"?: unknown; "action_items_json"?: unknown; "important_email_ids_json"?: unknown; "label_counts_json"?: unknown; "error"?: string | null; "started_at"?: string | null; "completed_at"?: string | null; "created_at"?: string; "updated_at"?: string }> {
+    async getResourceEmailDigests(id: string, init?: RequestInit): Promise<{ "period": string | null; "since": string | null; "until": string | null; "provider": string | null; "model": string | null; "status": string | null; "message_count": number; "summary": string | null; "highlights_json": unknown; "action_items_json": unknown; "important_email_ids_json": unknown; "label_counts_json": unknown; "error": string | null; "started_at": string | null; "completed_at": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("GET", `/v1/email-digests/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -652,8 +803,17 @@ export class EmailsSelfHostClient {
       });
     }
 
+    /** Replace mutable fields on a tenant-scoped email-digests row */
+    async replaceResourceEmailDigests(id: string, body: { "period"?: string | null; "since"?: string | null; "until"?: string | null; "provider"?: string | null; "model"?: string | null; "status"?: string | null; "message_count"?: number; "summary"?: string | null; "highlights_json"?: unknown; "action_items_json"?: unknown; "important_email_ids_json"?: unknown; "label_counts_json"?: unknown; "error"?: string | null; "started_at"?: string | null; "completed_at"?: string | null }, init?: RequestInit): Promise<{ "period": string | null; "since": string | null; "until": string | null; "provider": string | null; "model": string | null; "status": string | null; "message_count": number; "summary": string | null; "highlights_json": unknown; "action_items_json": unknown; "important_email_ids_json": unknown; "label_counts_json": unknown; "error": string | null; "started_at": string | null; "completed_at": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
+      return this.request("PUT", `/v1/email-digests/${encodeURIComponent(String(id))}`, {
+        body,
+        query: undefined,
+        init,
+      });
+    }
+
     /** Delete a tenant-scoped email-digests row */
-    async deleteResourceEmailDigests(id: string, init?: RequestInit): Promise<{ "deleted": boolean; "id": string }> {
+    async deleteResourceEmailDigests(id: string, init?: RequestInit): Promise<{ "deleted": true; "id": string }> {
       return this.request("DELETE", `/v1/email-digests/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -662,7 +822,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Update a tenant-scoped email-digests row */
-    async updateResourceEmailDigests(id: string, body: { "period"?: string | null; "since"?: string | null; "until"?: string | null; "provider"?: string | null; "model"?: string | null; "status"?: string | null; "message_count"?: number; "summary"?: string | null; "highlights_json"?: unknown; "action_items_json"?: unknown; "important_email_ids_json"?: unknown; "label_counts_json"?: unknown; "error"?: string | null; "started_at"?: string | null; "completed_at"?: string | null }, init?: RequestInit): Promise<{ "id"?: string; "period"?: string | null; "since"?: string | null; "until"?: string | null; "provider"?: string | null; "model"?: string | null; "status"?: string | null; "message_count"?: number; "summary"?: string | null; "highlights_json"?: unknown; "action_items_json"?: unknown; "important_email_ids_json"?: unknown; "label_counts_json"?: unknown; "error"?: string | null; "started_at"?: string | null; "completed_at"?: string | null; "created_at"?: string; "updated_at"?: string }> {
+    async updateResourceEmailDigests(id: string, body: { "period"?: string | null; "since"?: string | null; "until"?: string | null; "provider"?: string | null; "model"?: string | null; "status"?: string | null; "message_count"?: number; "summary"?: string | null; "highlights_json"?: unknown; "action_items_json"?: unknown; "important_email_ids_json"?: unknown; "label_counts_json"?: unknown; "error"?: string | null; "started_at"?: string | null; "completed_at"?: string | null }, init?: RequestInit): Promise<{ "period": string | null; "since": string | null; "until": string | null; "provider": string | null; "model": string | null; "status": string | null; "message_count": number; "summary": string | null; "highlights_json": unknown; "action_items_json": unknown; "important_email_ids_json": unknown; "label_counts_json": unknown; "error": string | null; "started_at": string | null; "completed_at": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("PATCH", `/v1/email-digests/${encodeURIComponent(String(id))}`, {
         body,
         query: undefined,
@@ -671,7 +831,7 @@ export class EmailsSelfHostClient {
     }
 
     /** List tenant-scoped events */
-    async listResourceEvents(query?: { "limit"?: number; "offset"?: number; "email_id"?: string | null; "provider_id"?: string | null; "type"?: string | null; "recipient"?: string | null }, init?: RequestInit): Promise<{ "items": Array<{ "id"?: string; "email_id"?: string | null; "provider_id"?: string | null; "provider_event_id"?: string | null; "type"?: string | null; "recipient"?: string | null; "metadata"?: unknown; "occurred_at"?: string | null; "created_at"?: string; "updated_at"?: string }> }> {
+    async listResourceEvents(query?: { "limit"?: number; "offset"?: number; "email_id"?: string | null; "provider_id"?: string | null; "type"?: string | null; "recipient"?: string | null }, init?: RequestInit): Promise<{ "items": Array<{ "email_id": string | null; "provider_id": string | null; "provider_event_id": string | null; "type": string | null; "recipient": string | null; "metadata": unknown; "occurred_at": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> }> {
       return this.request("GET", `/v1/events`, {
         body: undefined,
         query,
@@ -680,7 +840,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Create a tenant-scoped events row */
-    async createResourceEvents(body: { "email_id"?: string | null; "provider_id"?: string | null; "provider_event_id"?: string | null; "type"?: string | null; "recipient"?: string | null; "metadata"?: unknown; "occurred_at"?: string | null }, init?: RequestInit): Promise<{ "id"?: string; "email_id"?: string | null; "provider_id"?: string | null; "provider_event_id"?: string | null; "type"?: string | null; "recipient"?: string | null; "metadata"?: unknown; "occurred_at"?: string | null; "created_at"?: string; "updated_at"?: string }> {
+    async createResourceEvents(body: { "email_id"?: string | null; "provider_id"?: string | null; "provider_event_id"?: string | null; "type"?: string | null; "recipient"?: string | null; "metadata"?: unknown; "occurred_at"?: string | null }, init?: RequestInit): Promise<{ "email_id": string | null; "provider_id": string | null; "provider_event_id": string | null; "type": string | null; "recipient": string | null; "metadata": unknown; "occurred_at": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("POST", `/v1/events`, {
         body,
         query: undefined,
@@ -689,7 +849,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Get a tenant-scoped events row */
-    async getResourceEvents(id: string, init?: RequestInit): Promise<{ "id"?: string; "email_id"?: string | null; "provider_id"?: string | null; "provider_event_id"?: string | null; "type"?: string | null; "recipient"?: string | null; "metadata"?: unknown; "occurred_at"?: string | null; "created_at"?: string; "updated_at"?: string }> {
+    async getResourceEvents(id: string, init?: RequestInit): Promise<{ "email_id": string | null; "provider_id": string | null; "provider_event_id": string | null; "type": string | null; "recipient": string | null; "metadata": unknown; "occurred_at": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("GET", `/v1/events/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -697,8 +857,17 @@ export class EmailsSelfHostClient {
       });
     }
 
+    /** Replace mutable fields on a tenant-scoped events row */
+    async replaceResourceEvents(id: string, body: { "email_id"?: string | null; "provider_id"?: string | null; "provider_event_id"?: string | null; "type"?: string | null; "recipient"?: string | null; "metadata"?: unknown; "occurred_at"?: string | null }, init?: RequestInit): Promise<{ "email_id": string | null; "provider_id": string | null; "provider_event_id": string | null; "type": string | null; "recipient": string | null; "metadata": unknown; "occurred_at": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
+      return this.request("PUT", `/v1/events/${encodeURIComponent(String(id))}`, {
+        body,
+        query: undefined,
+        init,
+      });
+    }
+
     /** Delete a tenant-scoped events row */
-    async deleteResourceEvents(id: string, init?: RequestInit): Promise<{ "deleted": boolean; "id": string }> {
+    async deleteResourceEvents(id: string, init?: RequestInit): Promise<{ "deleted": true; "id": string }> {
       return this.request("DELETE", `/v1/events/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -707,7 +876,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Update a tenant-scoped events row */
-    async updateResourceEvents(id: string, body: { "email_id"?: string | null; "provider_id"?: string | null; "provider_event_id"?: string | null; "type"?: string | null; "recipient"?: string | null; "metadata"?: unknown; "occurred_at"?: string | null }, init?: RequestInit): Promise<{ "id"?: string; "email_id"?: string | null; "provider_id"?: string | null; "provider_event_id"?: string | null; "type"?: string | null; "recipient"?: string | null; "metadata"?: unknown; "occurred_at"?: string | null; "created_at"?: string; "updated_at"?: string }> {
+    async updateResourceEvents(id: string, body: { "email_id"?: string | null; "provider_id"?: string | null; "provider_event_id"?: string | null; "type"?: string | null; "recipient"?: string | null; "metadata"?: unknown; "occurred_at"?: string | null }, init?: RequestInit): Promise<{ "email_id": string | null; "provider_id": string | null; "provider_event_id": string | null; "type": string | null; "recipient": string | null; "metadata": unknown; "occurred_at": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("PATCH", `/v1/events/${encodeURIComponent(String(id))}`, {
         body,
         query: undefined,
@@ -716,7 +885,7 @@ export class EmailsSelfHostClient {
     }
 
     /** List tenant-scoped forwarding */
-    async listResourceForwarding(query?: { "limit"?: number; "offset"?: number; "source_address"?: string | null; "target_address"?: string | null; "mode"?: string | null }, init?: RequestInit): Promise<{ "items": Array<{ "id"?: string; "source_address"?: string | null; "target_address"?: string | null; "mode"?: string | null; "provider_id"?: string | null; "from_address"?: string | null; "enabled"?: boolean; "created_at"?: string; "updated_at"?: string }> }> {
+    async listResourceForwarding(query?: { "limit"?: number; "offset"?: number; "source_address"?: string | null; "target_address"?: string | null; "mode"?: string | null }, init?: RequestInit): Promise<{ "items": Array<{ "source_address": string | null; "target_address": string | null; "mode": string | null; "provider_id": string | null; "from_address": string | null; "enabled": boolean; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> }> {
       return this.request("GET", `/v1/forwarding`, {
         body: undefined,
         query,
@@ -725,7 +894,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Create a tenant-scoped forwarding row */
-    async createResourceForwarding(body: { "source_address"?: string | null; "target_address"?: string | null; "mode"?: string | null; "provider_id"?: string | null; "from_address"?: string | null; "enabled"?: boolean }, init?: RequestInit): Promise<{ "id"?: string; "source_address"?: string | null; "target_address"?: string | null; "mode"?: string | null; "provider_id"?: string | null; "from_address"?: string | null; "enabled"?: boolean; "created_at"?: string; "updated_at"?: string }> {
+    async createResourceForwarding(body: { "source_address"?: string | null; "target_address"?: string | null; "mode"?: string | null; "provider_id"?: string | null; "from_address"?: string | null; "enabled"?: boolean }, init?: RequestInit): Promise<{ "source_address": string | null; "target_address": string | null; "mode": string | null; "provider_id": string | null; "from_address": string | null; "enabled": boolean; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("POST", `/v1/forwarding`, {
         body,
         query: undefined,
@@ -734,7 +903,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Get a tenant-scoped forwarding row */
-    async getResourceForwarding(id: string, init?: RequestInit): Promise<{ "id"?: string; "source_address"?: string | null; "target_address"?: string | null; "mode"?: string | null; "provider_id"?: string | null; "from_address"?: string | null; "enabled"?: boolean; "created_at"?: string; "updated_at"?: string }> {
+    async getResourceForwarding(id: string, init?: RequestInit): Promise<{ "source_address": string | null; "target_address": string | null; "mode": string | null; "provider_id": string | null; "from_address": string | null; "enabled": boolean; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("GET", `/v1/forwarding/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -742,8 +911,17 @@ export class EmailsSelfHostClient {
       });
     }
 
+    /** Replace mutable fields on a tenant-scoped forwarding row */
+    async replaceResourceForwarding(id: string, body: { "source_address"?: string | null; "target_address"?: string | null; "mode"?: string | null; "provider_id"?: string | null; "from_address"?: string | null; "enabled"?: boolean }, init?: RequestInit): Promise<{ "source_address": string | null; "target_address": string | null; "mode": string | null; "provider_id": string | null; "from_address": string | null; "enabled": boolean; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
+      return this.request("PUT", `/v1/forwarding/${encodeURIComponent(String(id))}`, {
+        body,
+        query: undefined,
+        init,
+      });
+    }
+
     /** Delete a tenant-scoped forwarding row */
-    async deleteResourceForwarding(id: string, init?: RequestInit): Promise<{ "deleted": boolean; "id": string }> {
+    async deleteResourceForwarding(id: string, init?: RequestInit): Promise<{ "deleted": true; "id": string }> {
       return this.request("DELETE", `/v1/forwarding/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -752,7 +930,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Update a tenant-scoped forwarding row */
-    async updateResourceForwarding(id: string, body: { "source_address"?: string | null; "target_address"?: string | null; "mode"?: string | null; "provider_id"?: string | null; "from_address"?: string | null; "enabled"?: boolean }, init?: RequestInit): Promise<{ "id"?: string; "source_address"?: string | null; "target_address"?: string | null; "mode"?: string | null; "provider_id"?: string | null; "from_address"?: string | null; "enabled"?: boolean; "created_at"?: string; "updated_at"?: string }> {
+    async updateResourceForwarding(id: string, body: { "source_address"?: string | null; "target_address"?: string | null; "mode"?: string | null; "provider_id"?: string | null; "from_address"?: string | null; "enabled"?: boolean }, init?: RequestInit): Promise<{ "source_address": string | null; "target_address": string | null; "mode": string | null; "provider_id": string | null; "from_address": string | null; "enabled": boolean; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("PATCH", `/v1/forwarding/${encodeURIComponent(String(id))}`, {
         body,
         query: undefined,
@@ -761,7 +939,7 @@ export class EmailsSelfHostClient {
     }
 
     /** List tenant-scoped group-members */
-    async listResourceGroupMembers(query?: { "limit"?: number; "offset"?: number; "group_id"?: string | null; "email"?: string | null }, init?: RequestInit): Promise<{ "items": Array<{ "id"?: string; "group_id"?: string | null; "email"?: string | null; "name"?: string | null; "vars"?: string | null; "added_at"?: string | null; "created_at"?: string; "updated_at"?: string }> }> {
+    async listResourceGroupMembers(query?: { "limit"?: number; "offset"?: number; "group_id"?: string | null; "email"?: string | null }, init?: RequestInit): Promise<{ "items": Array<{ "group_id": string | null; "email": string | null; "name": string | null; "vars": string | null; "added_at": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> }> {
       return this.request("GET", `/v1/group-members`, {
         body: undefined,
         query,
@@ -770,7 +948,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Create a tenant-scoped group-members row */
-    async createResourceGroupMembers(body: { "group_id"?: string | null; "email"?: string | null; "name"?: string | null; "vars"?: string | null; "added_at"?: string | null }, init?: RequestInit): Promise<{ "id"?: string; "group_id"?: string | null; "email"?: string | null; "name"?: string | null; "vars"?: string | null; "added_at"?: string | null; "created_at"?: string; "updated_at"?: string }> {
+    async createResourceGroupMembers(body: { "group_id"?: string | null; "email"?: string | null; "name"?: string | null; "vars"?: string | null; "added_at"?: string | null }, init?: RequestInit): Promise<{ "group_id": string | null; "email": string | null; "name": string | null; "vars": string | null; "added_at": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("POST", `/v1/group-members`, {
         body,
         query: undefined,
@@ -779,7 +957,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Get a tenant-scoped group-members row */
-    async getResourceGroupMembers(id: string, init?: RequestInit): Promise<{ "id"?: string; "group_id"?: string | null; "email"?: string | null; "name"?: string | null; "vars"?: string | null; "added_at"?: string | null; "created_at"?: string; "updated_at"?: string }> {
+    async getResourceGroupMembers(id: string, init?: RequestInit): Promise<{ "group_id": string | null; "email": string | null; "name": string | null; "vars": string | null; "added_at": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("GET", `/v1/group-members/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -787,8 +965,17 @@ export class EmailsSelfHostClient {
       });
     }
 
+    /** Replace mutable fields on a tenant-scoped group-members row */
+    async replaceResourceGroupMembers(id: string, body: { "group_id"?: string | null; "email"?: string | null; "name"?: string | null; "vars"?: string | null; "added_at"?: string | null }, init?: RequestInit): Promise<{ "group_id": string | null; "email": string | null; "name": string | null; "vars": string | null; "added_at": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
+      return this.request("PUT", `/v1/group-members/${encodeURIComponent(String(id))}`, {
+        body,
+        query: undefined,
+        init,
+      });
+    }
+
     /** Delete a tenant-scoped group-members row */
-    async deleteResourceGroupMembers(id: string, init?: RequestInit): Promise<{ "deleted": boolean; "id": string }> {
+    async deleteResourceGroupMembers(id: string, init?: RequestInit): Promise<{ "deleted": true; "id": string }> {
       return this.request("DELETE", `/v1/group-members/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -797,7 +984,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Update a tenant-scoped group-members row */
-    async updateResourceGroupMembers(id: string, body: { "group_id"?: string | null; "email"?: string | null; "name"?: string | null; "vars"?: string | null; "added_at"?: string | null }, init?: RequestInit): Promise<{ "id"?: string; "group_id"?: string | null; "email"?: string | null; "name"?: string | null; "vars"?: string | null; "added_at"?: string | null; "created_at"?: string; "updated_at"?: string }> {
+    async updateResourceGroupMembers(id: string, body: { "group_id"?: string | null; "email"?: string | null; "name"?: string | null; "vars"?: string | null; "added_at"?: string | null }, init?: RequestInit): Promise<{ "group_id": string | null; "email": string | null; "name": string | null; "vars": string | null; "added_at": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("PATCH", `/v1/group-members/${encodeURIComponent(String(id))}`, {
         body,
         query: undefined,
@@ -806,7 +993,7 @@ export class EmailsSelfHostClient {
     }
 
     /** List tenant-scoped groups */
-    async listResourceGroups(query?: { "limit"?: number; "offset"?: number }, init?: RequestInit): Promise<{ "items": Array<{ "id"?: string; "name"?: string | null; "description"?: string | null; "created_at"?: string; "updated_at"?: string }> }> {
+    async listResourceGroups(query?: { "limit"?: number; "offset"?: number }, init?: RequestInit): Promise<{ "items": Array<{ "name": string | null; "description": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> }> {
       return this.request("GET", `/v1/groups`, {
         body: undefined,
         query,
@@ -815,7 +1002,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Create a tenant-scoped groups row */
-    async createResourceGroups(body: { "name"?: string | null; "description"?: string | null }, init?: RequestInit): Promise<{ "id"?: string; "name"?: string | null; "description"?: string | null; "created_at"?: string; "updated_at"?: string }> {
+    async createResourceGroups(body: { "name"?: string | null; "description"?: string | null }, init?: RequestInit): Promise<{ "name": string | null; "description": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("POST", `/v1/groups`, {
         body,
         query: undefined,
@@ -824,7 +1011,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Get a tenant-scoped groups row */
-    async getResourceGroups(id: string, init?: RequestInit): Promise<{ "id"?: string; "name"?: string | null; "description"?: string | null; "created_at"?: string; "updated_at"?: string }> {
+    async getResourceGroups(id: string, init?: RequestInit): Promise<{ "name": string | null; "description": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("GET", `/v1/groups/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -832,8 +1019,17 @@ export class EmailsSelfHostClient {
       });
     }
 
+    /** Replace mutable fields on a tenant-scoped groups row */
+    async replaceResourceGroups(id: string, body: { "name"?: string | null; "description"?: string | null }, init?: RequestInit): Promise<{ "name": string | null; "description": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
+      return this.request("PUT", `/v1/groups/${encodeURIComponent(String(id))}`, {
+        body,
+        query: undefined,
+        init,
+      });
+    }
+
     /** Delete a tenant-scoped groups row */
-    async deleteResourceGroups(id: string, init?: RequestInit): Promise<{ "deleted": boolean; "id": string }> {
+    async deleteResourceGroups(id: string, init?: RequestInit): Promise<{ "deleted": true; "id": string }> {
       return this.request("DELETE", `/v1/groups/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -842,7 +1038,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Update a tenant-scoped groups row */
-    async updateResourceGroups(id: string, body: { "name"?: string | null; "description"?: string | null }, init?: RequestInit): Promise<{ "id"?: string; "name"?: string | null; "description"?: string | null; "created_at"?: string; "updated_at"?: string }> {
+    async updateResourceGroups(id: string, body: { "name"?: string | null; "description"?: string | null }, init?: RequestInit): Promise<{ "name": string | null; "description": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("PATCH", `/v1/groups/${encodeURIComponent(String(id))}`, {
         body,
         query: undefined,
@@ -851,7 +1047,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Accept an invitation and create a tenant-bound session */
-    async acceptInvite(body: { "token": string; "password"?: string | null; "name"?: string | null }, init?: RequestInit): Promise<Record<string, unknown>> {
+    async acceptInvite(body: { "token": string; "password"?: string | null; "name"?: string | null }, init?: RequestInit): Promise<{ "session_token": string; "expires_at": string; "user": User; "tenant": Tenant | null; "role": "owner" | "admin" | "member" | "viewer" }> {
       return this.request("POST", `/v1/invites/accept`, {
         body,
         query: undefined,
@@ -860,7 +1056,7 @@ export class EmailsSelfHostClient {
     }
 
     /** List tenant API-key metadata; owner or admin user session required */
-    async listTenantKeys(init?: RequestInit): Promise<Record<string, unknown>> {
+    async listTenantKeys(init?: RequestInit): Promise<{ "keys": Array<ApiKeyMetadata | { "kid": string; "app"?: string; "agent"?: string | null; "scopes": Array<string>; "issued_at"?: string; "expires_at": string | null; "revoked_at": string | null; "last_used_at"?: string | null; "created_by_user_id"?: string | null; "created_at": string }> }> {
       return this.request("GET", `/v1/keys`, {
         body: undefined,
         query: undefined,
@@ -869,7 +1065,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Mint a tenant API key; plaintext token is returned once */
-    async createTenantKey(body: { "scopes"?: Array<string>; "ttl_days"?: number | null }, init?: RequestInit): Promise<Record<string, unknown>> {
+    async createTenantKey(body: { "scopes"?: Array<string>; "ttl_days"?: number | null }, init?: RequestInit): Promise<{ "token": string; "kid": string; "scopes": Array<string>; "expires_at": string | null }> {
       return this.request("POST", `/v1/keys`, {
         body,
         query: undefined,
@@ -878,7 +1074,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Revoke a tenant API key; owner or admin user session required */
-    async revokeTenantKey(id: string, init?: RequestInit): Promise<Record<string, unknown>> {
+    async revokeTenantKey(id: string, init?: RequestInit): Promise<{ "revoked": true; "kid": string }> {
       return this.request("DELETE", `/v1/keys/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -886,8 +1082,17 @@ export class EmailsSelfHostClient {
       });
     }
 
+    /** Compatibility route for revoking a tenant API key */
+    async revokeTenantKeyByPost(id: string, init?: RequestInit): Promise<{ "revoked": true; "kid": string }> {
+      return this.request("POST", `/v1/keys/${encodeURIComponent(String(id))}/revoke`, {
+        body: undefined,
+        query: undefined,
+        init,
+      });
+    }
+
     /** Mail-view: registered addresses as mailboxes plus global folder counts */
-    async listMailboxes(init?: RequestInit): Promise<{ "mailboxes"?: Array<Mailbox>; "counts"?: Record<string, unknown> }> {
+    async listMailboxes(init?: RequestInit): Promise<{ "mailboxes": Array<Mailbox>; "counts": MessageCounts }> {
       return this.request("GET", `/v1/mailboxes`, {
         body: undefined,
         query: undefined,
@@ -896,7 +1101,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Return the authenticated user or API-key principal and active tenant */
-    async getCurrentPrincipal(init?: RequestInit): Promise<Record<string, unknown>> {
+    async getCurrentPrincipal(init?: RequestInit): Promise<{ "principal_type": "apikey"; "kid": string; "tenant": { "id": string; "slug": string; "name": string; "status": string } | { "id": string }; "scopes": Array<string> } | { "principal_type": "user"; "user": ({ "id": string; "email": string; "name": string | null; "status": string; "email_verified": boolean; "global_role"?: "user" | "super_admin"; "is_primary_super_admin"?: boolean; "created_at": string }) | null; "tenant": { "id": string; "slug": string; "name": string; "status": string } | { "id": string }; "role": "owner" | "admin" | "member" | "viewer"; "scopes": Array<string>; "memberships": Array<{ "tenant_id": string; "slug": string; "name": string; "role": "owner" | "admin" | "member" | "viewer" }>; "email_identities": Array<EmailIdentity> }> {
       return this.request("GET", `/v1/me`, {
         body: undefined,
         query: undefined,
@@ -905,7 +1110,7 @@ export class EmailsSelfHostClient {
     }
 
     /** List all login email identities for the current user */
-    async listEmailIdentities(init?: RequestInit): Promise<{ "email_identities"?: Array<EmailIdentity> }> {
+    async listEmailIdentities(init?: RequestInit): Promise<{ "email_identities": Array<EmailIdentity> }> {
       return this.request("GET", `/v1/me/email-identities`, {
         body: undefined,
         query: undefined,
@@ -914,7 +1119,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Add an email identity and send verification */
-    async addEmailIdentity(body: { "email": string }, init?: RequestInit): Promise<Record<string, unknown>> {
+    async addEmailIdentity(body: { "email": string }, init?: RequestInit): Promise<{ "email_identity": EmailIdentity; "verification_required": true }> {
       return this.request("POST", `/v1/me/email-identities`, {
         body,
         query: undefined,
@@ -923,7 +1128,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Remove a non-primary email identity */
-    async removeEmailIdentity(id: string, init?: RequestInit): Promise<Record<string, unknown>> {
+    async removeEmailIdentity(id: string, init?: RequestInit): Promise<{ "removed": true; "id": string }> {
       return this.request("DELETE", `/v1/me/email-identities/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -932,7 +1137,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Make a verified email identity primary */
-    async makePrimaryEmailIdentity(id: string, init?: RequestInit): Promise<Record<string, unknown>> {
+    async makePrimaryEmailIdentity(id: string, init?: RequestInit): Promise<{ "email_identity": EmailIdentity }> {
       return this.request("POST", `/v1/me/email-identities/${encodeURIComponent(String(id))}/primary`, {
         body: undefined,
         query: undefined,
@@ -941,7 +1146,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Compatibility alias for membership role update */
-    async replaceMembership(id: string, body: { "role": "owner" | "admin" | "member" | "viewer" }, init?: RequestInit): Promise<Record<string, unknown>> {
+    async replaceMembership(id: string, body: { "role": "owner" | "admin" | "member" | "viewer" }, init?: RequestInit): Promise<{ "membership": MembershipSummary }> {
       return this.request("PUT", `/v1/memberships/${encodeURIComponent(String(id))}`, {
         body,
         query: undefined,
@@ -950,7 +1155,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Remove a tenant membership under owner/admin role gates */
-    async removeMembership(id: string, init?: RequestInit): Promise<Record<string, unknown>> {
+    async removeMembership(id: string, init?: RequestInit): Promise<{ "removed": true; "id": string }> {
       return this.request("DELETE", `/v1/memberships/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -959,7 +1164,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Change a membership role under owner/admin role gates */
-    async updateMembership(id: string, body: { "role": "owner" | "admin" | "member" | "viewer" }, init?: RequestInit): Promise<Record<string, unknown>> {
+    async updateMembership(id: string, body: { "role": "owner" | "admin" | "member" | "viewer" }, init?: RequestInit): Promise<{ "membership": MembershipSummary }> {
       return this.request("PATCH", `/v1/memberships/${encodeURIComponent(String(id))}`, {
         body,
         query: undefined,
@@ -967,7 +1172,7 @@ export class EmailsSelfHostClient {
       });
     }
 
-    async listMessages(query?: { "limit"?: number; "offset"?: number; "cursor"?: string; "direction"?: "inbound" | "outbound"; "folder"?: "inbox" | "starred" | "sent" | "archived" | "spam" | "trash"; "domain"?: Array<string>; "to"?: string; "from"?: string; "subject"?: string; "q"?: string; "search"?: string; "since"?: string }, init?: RequestInit): Promise<{ "messages"?: Array<MessageListItem>; "next_cursor"?: string | null }> {
+    async listMessages(query?: { "limit"?: number; "offset"?: number; "cursor"?: string; "direction"?: "inbound" | "outbound"; "folder"?: "inbox" | "starred" | "sent" | "archived" | "spam" | "trash"; "domain"?: Array<string>; "to"?: string; "from"?: string; "subject"?: string; "q"?: string; "search"?: string; "since"?: string }, init?: RequestInit): Promise<{ "messages": Array<MessageListItem>; "next_cursor": string | null }> {
       return this.request("GET", `/v1/messages`, {
         body: undefined,
         query,
@@ -976,7 +1181,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Import an inbound message. Supplying source_id makes the write idempotent. Scope emails:write. */
-    async createMessage(body: { "from": string; "to": Array<string>; "cc"?: Array<string>; "subject"?: string | null; "text"?: string | null; "html"?: string | null; "status"?: string; "direction": "inbound"; "received_at"?: string | null; "message_id"?: string | null; "in_reply_to"?: string | null; "is_read"?: boolean; "is_starred"?: boolean; "labels"?: Array<string>; "headers"?: Record<string, unknown>; "attachments"?: Array<Record<string, unknown>>; "provider_message_id"?: string | null; "source_id"?: string }, init?: RequestInit): Promise<{ "message"?: Message }> {
+    async createMessage(body: { "from": string; "to": Array<string>; "cc"?: Array<string>; "subject"?: string | null; "text"?: string | null; "html"?: string | null; "status"?: string; "direction": "inbound"; "received_at"?: string | null; "message_id"?: string | null; "in_reply_to"?: string | null; "is_read"?: boolean; "is_starred"?: boolean; "labels"?: Array<string>; "headers"?: Record<string, unknown>; "attachments"?: Array<Record<string, unknown>>; "provider_message_id"?: string | null; "source_id"?: string }, init?: RequestInit): Promise<{ "message": Message }> {
       return this.request("POST", `/v1/messages`, {
         body,
         query: undefined,
@@ -985,7 +1190,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Return server-side mailbox counts */
-    async getMessageCounts(query?: { "domain"?: Array<string> }, init?: RequestInit): Promise<Record<string, unknown>> {
+    async getMessageCounts(query?: { "domain"?: Array<string> }, init?: RequestInit): Promise<{ "counts": MessageCounts }> {
       return this.request("GET", `/v1/messages/counts`, {
         body: undefined,
         query,
@@ -994,7 +1199,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Folder counts, flat at the top level (native-client shape); same data as /v1/messages/counts */
-    async getMessageGroups(query?: { "domain"?: Array<string> }, init?: RequestInit): Promise<{ "inbox"?: number; "unread"?: number; "starred"?: number; "sent"?: number; "archived"?: number; "spam"?: number; "trash"?: number; "total"?: number; "latest_received_at"?: string | null }> {
+    async getMessageGroups(query?: { "domain"?: Array<string> }, init?: RequestInit): Promise<MessageCounts> {
       return this.request("GET", `/v1/messages/groups`, {
         body: undefined,
         query,
@@ -1003,7 +1208,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Send through the configured SES or Resend provider and persist the resulting ledger row */
-    async sendMessage(body: { "from": string; "to": Array<string>; "cc"?: Array<string>; "bcc"?: Array<string>; "reply_to"?: string; "subject": string; "text"?: string; "html"?: string; "attachments"?: Array<{ "filename"?: string; "content": string; "content_type"?: string }>; "send_key"?: string; "idempotency_key": string }, init?: RequestInit): Promise<{ "message": Message; "provider": string; "idempotent_replay"?: true; "in_progress"?: true; "sent"?: true; "provider_message_id"?: string; "warning"?: string; "retry_safe"?: boolean }> {
+    async sendMessage(body: { "from": string; "to": Array<string>; "cc"?: Array<string>; "bcc"?: Array<string>; "reply_to"?: string; "subject": string; "text"?: string; "html"?: string; "attachments"?: Array<{ "filename"?: string; "content": string; "content_type"?: string }>; "send_key"?: string; "idempotency_key": string }, init?: RequestInit): Promise<{ "message": Message; "provider": string; "idempotent_replay": true; "sent": true; "provider_message_id": string } | { "message": Message; "provider": string; "in_progress": true } | { "message": Message; "provider": string; "sent": true; "provider_message_id": string; "warning"?: string; "retry_safe"?: false }> {
       return this.request("POST", `/v1/messages/send`, {
         body,
         query: undefined,
@@ -1048,7 +1253,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Mail-view: subject-rolled-up conversation list (newest activity first) */
-    async listThreads(query?: { "limit"?: number; "offset"?: number }, init?: RequestInit): Promise<{ "threads"?: Array<Thread> }> {
+    async listThreads(query?: { "limit"?: number; "offset"?: number }, init?: RequestInit): Promise<{ "threads": Array<Thread> }> {
       return this.request("GET", `/v1/messages/threads`, {
         body: undefined,
         query,
@@ -1056,7 +1261,7 @@ export class EmailsSelfHostClient {
       });
     }
 
-    async getMessage(id: string, init?: RequestInit): Promise<{ "message"?: Message }> {
+    async getMessage(id: string, init?: RequestInit): Promise<{ "message": Message }> {
       return this.request("GET", `/v1/messages/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -1064,7 +1269,15 @@ export class EmailsSelfHostClient {
       });
     }
 
-    async deleteMessage(id: string, init?: RequestInit): Promise<Record<string, unknown>> {
+    async replaceMessage(id: string, body: { "status"?: string; "provider_message_id"?: string | null; "is_read"?: boolean; "is_starred"?: boolean; "archived"?: boolean; "add_label"?: string; "remove_label"?: string }, init?: RequestInit): Promise<{ "message": Message }> {
+      return this.request("PUT", `/v1/messages/${encodeURIComponent(String(id))}`, {
+        body,
+        query: undefined,
+        init,
+      });
+    }
+
+    async deleteMessage(id: string, init?: RequestInit): Promise<{ "deleted": true; "id": string }> {
       return this.request("DELETE", `/v1/messages/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -1072,7 +1285,7 @@ export class EmailsSelfHostClient {
       });
     }
 
-    async updateMessage(id: string, body: { "status"?: string; "provider_message_id"?: string | null; "is_read"?: boolean; "is_starred"?: boolean; "archived"?: boolean; "add_label"?: string; "remove_label"?: string }, init?: RequestInit): Promise<{ "message"?: Message }> {
+    async updateMessage(id: string, body: { "status"?: string; "provider_message_id"?: string | null; "is_read"?: boolean; "is_starred"?: boolean; "archived"?: boolean; "add_label"?: string; "remove_label"?: string }, init?: RequestInit): Promise<{ "message": Message }> {
       return this.request("PATCH", `/v1/messages/${encodeURIComponent(String(id))}`, {
         body,
         query: undefined,
@@ -1089,7 +1302,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Mail-view: reconstructed raw MIME for a stored message */
-    async getMessageRaw(id: string, init?: RequestInit): Promise<{ "raw": string; "message_id"?: string | null }> {
+    async getMessageRaw(id: string, init?: RequestInit): Promise<{ "raw": string; "message_id": string | null }> {
       return this.request("GET", `/v1/messages/${encodeURIComponent(String(id))}/raw`, {
         body: undefined,
         query: undefined,
@@ -1098,7 +1311,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Return this OpenAPI document from the versioned API prefix */
-    async getVersionedOpenApiDocument(init?: RequestInit): Promise<Record<string, unknown>> {
+    async getVersionedOpenApiDocument(init?: RequestInit): Promise<{ "openapi": string; "info": { "title": string; "version": string }; "security": Array<Record<string, unknown>>; "paths": Record<string, unknown>; "components": Record<string, unknown> }> {
       return this.request("GET", `/v1/openapi.json`, {
         body: undefined,
         query: undefined,
@@ -1107,7 +1320,7 @@ export class EmailsSelfHostClient {
     }
 
     /** List tenant-scoped owners */
-    async listResourceOwners(query?: { "limit"?: number; "offset"?: number; "type"?: string | null }, init?: RequestInit): Promise<{ "items": Array<{ "id"?: string; "type"?: string | null; "name"?: string | null; "contact_email"?: string | null; "external_id"?: string | null; "created_at"?: string; "updated_at"?: string }> }> {
+    async listResourceOwners(query?: { "limit"?: number; "offset"?: number; "type"?: string | null }, init?: RequestInit): Promise<{ "items": Array<{ "type": string | null; "name": string | null; "contact_email": string | null; "external_id": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> }> {
       return this.request("GET", `/v1/owners`, {
         body: undefined,
         query,
@@ -1116,7 +1329,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Create a tenant-scoped owners row */
-    async createResourceOwners(body: { "type"?: string | null; "name"?: string | null; "contact_email"?: string | null; "external_id"?: string | null }, init?: RequestInit): Promise<{ "id"?: string; "type"?: string | null; "name"?: string | null; "contact_email"?: string | null; "external_id"?: string | null; "created_at"?: string; "updated_at"?: string }> {
+    async createResourceOwners(body: { "type"?: string | null; "name"?: string | null; "contact_email"?: string | null; "external_id"?: string | null }, init?: RequestInit): Promise<{ "type": string | null; "name": string | null; "contact_email": string | null; "external_id": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("POST", `/v1/owners`, {
         body,
         query: undefined,
@@ -1125,7 +1338,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Get a tenant-scoped owners row */
-    async getResourceOwners(id: string, init?: RequestInit): Promise<{ "id"?: string; "type"?: string | null; "name"?: string | null; "contact_email"?: string | null; "external_id"?: string | null; "created_at"?: string; "updated_at"?: string }> {
+    async getResourceOwners(id: string, init?: RequestInit): Promise<{ "type": string | null; "name": string | null; "contact_email": string | null; "external_id": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("GET", `/v1/owners/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -1133,8 +1346,17 @@ export class EmailsSelfHostClient {
       });
     }
 
+    /** Replace mutable fields on a tenant-scoped owners row */
+    async replaceResourceOwners(id: string, body: { "type"?: string | null; "name"?: string | null; "contact_email"?: string | null; "external_id"?: string | null }, init?: RequestInit): Promise<{ "type": string | null; "name": string | null; "contact_email": string | null; "external_id": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
+      return this.request("PUT", `/v1/owners/${encodeURIComponent(String(id))}`, {
+        body,
+        query: undefined,
+        init,
+      });
+    }
+
     /** Delete a tenant-scoped owners row */
-    async deleteResourceOwners(id: string, init?: RequestInit): Promise<{ "deleted": boolean; "id": string }> {
+    async deleteResourceOwners(id: string, init?: RequestInit): Promise<{ "deleted": true; "id": string }> {
       return this.request("DELETE", `/v1/owners/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -1143,7 +1365,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Update a tenant-scoped owners row */
-    async updateResourceOwners(id: string, body: { "type"?: string | null; "name"?: string | null; "contact_email"?: string | null; "external_id"?: string | null }, init?: RequestInit): Promise<{ "id"?: string; "type"?: string | null; "name"?: string | null; "contact_email"?: string | null; "external_id"?: string | null; "created_at"?: string; "updated_at"?: string }> {
+    async updateResourceOwners(id: string, body: { "type"?: string | null; "name"?: string | null; "contact_email"?: string | null; "external_id"?: string | null }, init?: RequestInit): Promise<{ "type": string | null; "name": string | null; "contact_email": string | null; "external_id": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("PATCH", `/v1/owners/${encodeURIComponent(String(id))}`, {
         body,
         query: undefined,
@@ -1152,7 +1374,7 @@ export class EmailsSelfHostClient {
     }
 
     /** List tenant-scoped providers */
-    async listResourceProviders(query?: { "limit"?: number; "offset"?: number; "type"?: string | null }, init?: RequestInit): Promise<{ "items": Array<{ "id"?: string; "name"?: string | null; "type"?: string | null; "region"?: string | null; "active"?: boolean; "created_at"?: string; "updated_at"?: string }> }> {
+    async listResourceProviders(query?: { "limit"?: number; "offset"?: number; "type"?: string | null }, init?: RequestInit): Promise<{ "items": Array<{ "name": string | null; "type": string | null; "region": string | null; "active": boolean; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> }> {
       return this.request("GET", `/v1/providers`, {
         body: undefined,
         query,
@@ -1161,7 +1383,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Create a tenant-scoped providers row */
-    async createResourceProviders(body: { "name"?: string | null; "type"?: string | null; "region"?: string | null; "active"?: boolean }, init?: RequestInit): Promise<{ "id"?: string; "name"?: string | null; "type"?: string | null; "region"?: string | null; "active"?: boolean; "created_at"?: string; "updated_at"?: string }> {
+    async createResourceProviders(body: { "name"?: string | null; "type"?: string | null; "region"?: string | null; "active"?: boolean }, init?: RequestInit): Promise<{ "name": string | null; "type": string | null; "region": string | null; "active": boolean; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("POST", `/v1/providers`, {
         body,
         query: undefined,
@@ -1170,7 +1392,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Get a tenant-scoped providers row */
-    async getResourceProviders(id: string, init?: RequestInit): Promise<{ "id"?: string; "name"?: string | null; "type"?: string | null; "region"?: string | null; "active"?: boolean; "created_at"?: string; "updated_at"?: string }> {
+    async getResourceProviders(id: string, init?: RequestInit): Promise<{ "name": string | null; "type": string | null; "region": string | null; "active": boolean; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("GET", `/v1/providers/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -1178,8 +1400,17 @@ export class EmailsSelfHostClient {
       });
     }
 
+    /** Replace mutable fields on a tenant-scoped providers row */
+    async replaceResourceProviders(id: string, body: { "name"?: string | null; "type"?: string | null; "region"?: string | null; "active"?: boolean }, init?: RequestInit): Promise<{ "name": string | null; "type": string | null; "region": string | null; "active": boolean; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
+      return this.request("PUT", `/v1/providers/${encodeURIComponent(String(id))}`, {
+        body,
+        query: undefined,
+        init,
+      });
+    }
+
     /** Delete a tenant-scoped providers row */
-    async deleteResourceProviders(id: string, init?: RequestInit): Promise<{ "deleted": boolean; "id": string }> {
+    async deleteResourceProviders(id: string, init?: RequestInit): Promise<{ "deleted": true; "id": string }> {
       return this.request("DELETE", `/v1/providers/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -1188,7 +1419,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Update a tenant-scoped providers row */
-    async updateResourceProviders(id: string, body: { "name"?: string | null; "type"?: string | null; "region"?: string | null; "active"?: boolean }, init?: RequestInit): Promise<{ "id"?: string; "name"?: string | null; "type"?: string | null; "region"?: string | null; "active"?: boolean; "created_at"?: string; "updated_at"?: string }> {
+    async updateResourceProviders(id: string, body: { "name"?: string | null; "type"?: string | null; "region"?: string | null; "active"?: boolean }, init?: RequestInit): Promise<{ "name": string | null; "type": string | null; "region": string | null; "active": boolean; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("PATCH", `/v1/providers/${encodeURIComponent(String(id))}`, {
         body,
         query: undefined,
@@ -1197,7 +1428,7 @@ export class EmailsSelfHostClient {
     }
 
     /** List tenant-scoped provisioning */
-    async listResourceProvisioning(query?: { "limit"?: number; "offset"?: number; "entity_type"?: string | null; "entity_id"?: string | null; "to_state"?: string | null }, init?: RequestInit): Promise<{ "items": Array<{ "id"?: string; "entity_type"?: string | null; "entity_id"?: string | null; "from_state"?: string | null; "to_state"?: string | null; "detail_json"?: unknown; "created_at"?: string; "updated_at"?: string }> }> {
+    async listResourceProvisioning(query?: { "limit"?: number; "offset"?: number; "entity_type"?: string | null; "entity_id"?: string | null; "to_state"?: string | null }, init?: RequestInit): Promise<{ "items": Array<{ "entity_type": string | null; "entity_id": string | null; "from_state": string | null; "to_state": string | null; "detail_json": unknown; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> }> {
       return this.request("GET", `/v1/provisioning`, {
         body: undefined,
         query,
@@ -1206,7 +1437,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Create a tenant-scoped provisioning row */
-    async createResourceProvisioning(body: { "entity_type"?: string | null; "entity_id"?: string | null; "from_state"?: string | null; "to_state"?: string | null; "detail_json"?: unknown }, init?: RequestInit): Promise<{ "id"?: string; "entity_type"?: string | null; "entity_id"?: string | null; "from_state"?: string | null; "to_state"?: string | null; "detail_json"?: unknown; "created_at"?: string; "updated_at"?: string }> {
+    async createResourceProvisioning(body: { "entity_type"?: string | null; "entity_id"?: string | null; "from_state"?: string | null; "to_state"?: string | null; "detail_json"?: unknown }, init?: RequestInit): Promise<{ "entity_type": string | null; "entity_id": string | null; "from_state": string | null; "to_state": string | null; "detail_json": unknown; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("POST", `/v1/provisioning`, {
         body,
         query: undefined,
@@ -1215,7 +1446,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Get a tenant-scoped provisioning row */
-    async getResourceProvisioning(id: string, init?: RequestInit): Promise<{ "id"?: string; "entity_type"?: string | null; "entity_id"?: string | null; "from_state"?: string | null; "to_state"?: string | null; "detail_json"?: unknown; "created_at"?: string; "updated_at"?: string }> {
+    async getResourceProvisioning(id: string, init?: RequestInit): Promise<{ "entity_type": string | null; "entity_id": string | null; "from_state": string | null; "to_state": string | null; "detail_json": unknown; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("GET", `/v1/provisioning/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -1223,8 +1454,17 @@ export class EmailsSelfHostClient {
       });
     }
 
+    /** Replace mutable fields on a tenant-scoped provisioning row */
+    async replaceResourceProvisioning(id: string, body: { "entity_type"?: string | null; "entity_id"?: string | null; "from_state"?: string | null; "to_state"?: string | null; "detail_json"?: unknown }, init?: RequestInit): Promise<{ "entity_type": string | null; "entity_id": string | null; "from_state": string | null; "to_state": string | null; "detail_json": unknown; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
+      return this.request("PUT", `/v1/provisioning/${encodeURIComponent(String(id))}`, {
+        body,
+        query: undefined,
+        init,
+      });
+    }
+
     /** Delete a tenant-scoped provisioning row */
-    async deleteResourceProvisioning(id: string, init?: RequestInit): Promise<{ "deleted": boolean; "id": string }> {
+    async deleteResourceProvisioning(id: string, init?: RequestInit): Promise<{ "deleted": true; "id": string }> {
       return this.request("DELETE", `/v1/provisioning/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -1233,7 +1473,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Update a tenant-scoped provisioning row */
-    async updateResourceProvisioning(id: string, body: { "entity_type"?: string | null; "entity_id"?: string | null; "from_state"?: string | null; "to_state"?: string | null; "detail_json"?: unknown }, init?: RequestInit): Promise<{ "id"?: string; "entity_type"?: string | null; "entity_id"?: string | null; "from_state"?: string | null; "to_state"?: string | null; "detail_json"?: unknown; "created_at"?: string; "updated_at"?: string }> {
+    async updateResourceProvisioning(id: string, body: { "entity_type"?: string | null; "entity_id"?: string | null; "from_state"?: string | null; "to_state"?: string | null; "detail_json"?: unknown }, init?: RequestInit): Promise<{ "entity_type": string | null; "entity_id": string | null; "from_state": string | null; "to_state": string | null; "detail_json": unknown; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("PATCH", `/v1/provisioning/${encodeURIComponent(String(id))}`, {
         body,
         query: undefined,
@@ -1242,7 +1482,7 @@ export class EmailsSelfHostClient {
     }
 
     /** List tenant-scoped sandbox-emails */
-    async listResourceSandboxEmails(query?: { "limit"?: number; "offset"?: number; "provider_id"?: string | null }, init?: RequestInit): Promise<{ "items": Array<{ "id"?: string; "provider_id"?: string | null; "from_address"?: string | null; "to_addresses"?: unknown; "cc_addresses"?: unknown; "bcc_addresses"?: unknown; "reply_to"?: string | null; "subject"?: string | null; "html"?: string | null; "text_body"?: string | null; "attachments_json"?: string | null; "headers_json"?: string | null; "created_at"?: string; "updated_at"?: string }> }> {
+    async listResourceSandboxEmails(query?: { "limit"?: number; "offset"?: number; "provider_id"?: string | null }, init?: RequestInit): Promise<{ "items": Array<{ "provider_id": string | null; "from_address": string | null; "to_addresses": unknown; "cc_addresses": unknown; "bcc_addresses": unknown; "reply_to": string | null; "subject": string | null; "html": string | null; "text_body": string | null; "attachments_json": string | null; "headers_json": string | null; "created_at": string; "id": string; "tenant_id": string; "updated_at": string }> }> {
       return this.request("GET", `/v1/sandbox-emails`, {
         body: undefined,
         query,
@@ -1251,7 +1491,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Create a tenant-scoped sandbox-emails row */
-    async createResourceSandboxEmails(body: { "provider_id"?: string | null; "from_address"?: string | null; "to_addresses"?: unknown; "cc_addresses"?: unknown; "bcc_addresses"?: unknown; "reply_to"?: string | null; "subject"?: string | null; "html"?: string | null; "text_body"?: string | null; "attachments_json"?: string | null; "headers_json"?: string | null; "created_at"?: string | null }, init?: RequestInit): Promise<{ "id"?: string; "provider_id"?: string | null; "from_address"?: string | null; "to_addresses"?: unknown; "cc_addresses"?: unknown; "bcc_addresses"?: unknown; "reply_to"?: string | null; "subject"?: string | null; "html"?: string | null; "text_body"?: string | null; "attachments_json"?: string | null; "headers_json"?: string | null; "created_at"?: string; "updated_at"?: string }> {
+    async createResourceSandboxEmails(body: { "provider_id"?: string | null; "from_address"?: string | null; "to_addresses"?: unknown; "cc_addresses"?: unknown; "bcc_addresses"?: unknown; "reply_to"?: string | null; "subject"?: string | null; "html"?: string | null; "text_body"?: string | null; "attachments_json"?: string | null; "headers_json"?: string | null; "created_at"?: string | null }, init?: RequestInit): Promise<{ "provider_id": string | null; "from_address": string | null; "to_addresses": unknown; "cc_addresses": unknown; "bcc_addresses": unknown; "reply_to": string | null; "subject": string | null; "html": string | null; "text_body": string | null; "attachments_json": string | null; "headers_json": string | null; "created_at": string; "id": string; "tenant_id": string; "updated_at": string }> {
       return this.request("POST", `/v1/sandbox-emails`, {
         body,
         query: undefined,
@@ -1260,7 +1500,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Get a tenant-scoped sandbox-emails row */
-    async getResourceSandboxEmails(id: string, init?: RequestInit): Promise<{ "id"?: string; "provider_id"?: string | null; "from_address"?: string | null; "to_addresses"?: unknown; "cc_addresses"?: unknown; "bcc_addresses"?: unknown; "reply_to"?: string | null; "subject"?: string | null; "html"?: string | null; "text_body"?: string | null; "attachments_json"?: string | null; "headers_json"?: string | null; "created_at"?: string; "updated_at"?: string }> {
+    async getResourceSandboxEmails(id: string, init?: RequestInit): Promise<{ "provider_id": string | null; "from_address": string | null; "to_addresses": unknown; "cc_addresses": unknown; "bcc_addresses": unknown; "reply_to": string | null; "subject": string | null; "html": string | null; "text_body": string | null; "attachments_json": string | null; "headers_json": string | null; "created_at": string; "id": string; "tenant_id": string; "updated_at": string }> {
       return this.request("GET", `/v1/sandbox-emails/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -1268,8 +1508,17 @@ export class EmailsSelfHostClient {
       });
     }
 
+    /** Replace mutable fields on a tenant-scoped sandbox-emails row */
+    async replaceResourceSandboxEmails(id: string, body: { "provider_id"?: string | null; "from_address"?: string | null; "to_addresses"?: unknown; "cc_addresses"?: unknown; "bcc_addresses"?: unknown; "reply_to"?: string | null; "subject"?: string | null; "html"?: string | null; "text_body"?: string | null; "attachments_json"?: string | null; "headers_json"?: string | null; "created_at"?: string | null }, init?: RequestInit): Promise<{ "provider_id": string | null; "from_address": string | null; "to_addresses": unknown; "cc_addresses": unknown; "bcc_addresses": unknown; "reply_to": string | null; "subject": string | null; "html": string | null; "text_body": string | null; "attachments_json": string | null; "headers_json": string | null; "created_at": string; "id": string; "tenant_id": string; "updated_at": string }> {
+      return this.request("PUT", `/v1/sandbox-emails/${encodeURIComponent(String(id))}`, {
+        body,
+        query: undefined,
+        init,
+      });
+    }
+
     /** Delete a tenant-scoped sandbox-emails row */
-    async deleteResourceSandboxEmails(id: string, init?: RequestInit): Promise<{ "deleted": boolean; "id": string }> {
+    async deleteResourceSandboxEmails(id: string, init?: RequestInit): Promise<{ "deleted": true; "id": string }> {
       return this.request("DELETE", `/v1/sandbox-emails/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -1278,7 +1527,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Update a tenant-scoped sandbox-emails row */
-    async updateResourceSandboxEmails(id: string, body: { "provider_id"?: string | null; "from_address"?: string | null; "to_addresses"?: unknown; "cc_addresses"?: unknown; "bcc_addresses"?: unknown; "reply_to"?: string | null; "subject"?: string | null; "html"?: string | null; "text_body"?: string | null; "attachments_json"?: string | null; "headers_json"?: string | null; "created_at"?: string | null }, init?: RequestInit): Promise<{ "id"?: string; "provider_id"?: string | null; "from_address"?: string | null; "to_addresses"?: unknown; "cc_addresses"?: unknown; "bcc_addresses"?: unknown; "reply_to"?: string | null; "subject"?: string | null; "html"?: string | null; "text_body"?: string | null; "attachments_json"?: string | null; "headers_json"?: string | null; "created_at"?: string; "updated_at"?: string }> {
+    async updateResourceSandboxEmails(id: string, body: { "provider_id"?: string | null; "from_address"?: string | null; "to_addresses"?: unknown; "cc_addresses"?: unknown; "bcc_addresses"?: unknown; "reply_to"?: string | null; "subject"?: string | null; "html"?: string | null; "text_body"?: string | null; "attachments_json"?: string | null; "headers_json"?: string | null; "created_at"?: string | null }, init?: RequestInit): Promise<{ "provider_id": string | null; "from_address": string | null; "to_addresses": unknown; "cc_addresses": unknown; "bcc_addresses": unknown; "reply_to": string | null; "subject": string | null; "html": string | null; "text_body": string | null; "attachments_json": string | null; "headers_json": string | null; "created_at": string; "id": string; "tenant_id": string; "updated_at": string }> {
       return this.request("PATCH", `/v1/sandbox-emails/${encodeURIComponent(String(id))}`, {
         body,
         query: undefined,
@@ -1287,7 +1536,7 @@ export class EmailsSelfHostClient {
     }
 
     /** List tenant-scoped scheduled */
-    async listResourceScheduled(query?: { "limit"?: number; "offset"?: number; "status"?: string | null }, init?: RequestInit): Promise<{ "items": Array<{ "id"?: string; "provider_id"?: string | null; "from_address"?: string | null; "to_addresses"?: unknown; "cc_addresses"?: unknown; "bcc_addresses"?: unknown; "reply_to"?: string | null; "subject"?: string | null; "html"?: string | null; "text_body"?: string | null; "attachments_json"?: unknown; "template_name"?: string | null; "template_vars"?: unknown; "scheduled_at"?: string | null; "status"?: string | null; "error"?: string | null; "created_at"?: string; "updated_at"?: string }> }> {
+    async listResourceScheduled(query?: { "limit"?: number; "offset"?: number; "status"?: string | null }, init?: RequestInit): Promise<{ "items": Array<{ "provider_id": string | null; "from_address": string | null; "to_addresses": unknown; "cc_addresses": unknown; "bcc_addresses": unknown; "reply_to": string | null; "subject": string | null; "html": string | null; "text_body": string | null; "attachments_json": unknown; "template_name": string | null; "template_vars": unknown; "scheduled_at": string | null; "status": string | null; "error": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> }> {
       return this.request("GET", `/v1/scheduled`, {
         body: undefined,
         query,
@@ -1296,7 +1545,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Create a tenant-scoped scheduled row */
-    async createResourceScheduled(body: { "provider_id"?: string | null; "from_address"?: string | null; "to_addresses"?: unknown; "cc_addresses"?: unknown; "bcc_addresses"?: unknown; "reply_to"?: string | null; "subject"?: string | null; "html"?: string | null; "text_body"?: string | null; "attachments_json"?: unknown; "template_name"?: string | null; "template_vars"?: unknown; "scheduled_at"?: string | null; "status"?: string | null; "error"?: string | null }, init?: RequestInit): Promise<{ "id"?: string; "provider_id"?: string | null; "from_address"?: string | null; "to_addresses"?: unknown; "cc_addresses"?: unknown; "bcc_addresses"?: unknown; "reply_to"?: string | null; "subject"?: string | null; "html"?: string | null; "text_body"?: string | null; "attachments_json"?: unknown; "template_name"?: string | null; "template_vars"?: unknown; "scheduled_at"?: string | null; "status"?: string | null; "error"?: string | null; "created_at"?: string; "updated_at"?: string }> {
+    async createResourceScheduled(body: { "provider_id"?: string | null; "from_address"?: string | null; "to_addresses"?: unknown; "cc_addresses"?: unknown; "bcc_addresses"?: unknown; "reply_to"?: string | null; "subject"?: string | null; "html"?: string | null; "text_body"?: string | null; "attachments_json"?: unknown; "template_name"?: string | null; "template_vars"?: unknown; "scheduled_at"?: string | null; "status"?: string | null; "error"?: string | null }, init?: RequestInit): Promise<{ "provider_id": string | null; "from_address": string | null; "to_addresses": unknown; "cc_addresses": unknown; "bcc_addresses": unknown; "reply_to": string | null; "subject": string | null; "html": string | null; "text_body": string | null; "attachments_json": unknown; "template_name": string | null; "template_vars": unknown; "scheduled_at": string | null; "status": string | null; "error": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("POST", `/v1/scheduled`, {
         body,
         query: undefined,
@@ -1305,7 +1554,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Get a tenant-scoped scheduled row */
-    async getResourceScheduled(id: string, init?: RequestInit): Promise<{ "id"?: string; "provider_id"?: string | null; "from_address"?: string | null; "to_addresses"?: unknown; "cc_addresses"?: unknown; "bcc_addresses"?: unknown; "reply_to"?: string | null; "subject"?: string | null; "html"?: string | null; "text_body"?: string | null; "attachments_json"?: unknown; "template_name"?: string | null; "template_vars"?: unknown; "scheduled_at"?: string | null; "status"?: string | null; "error"?: string | null; "created_at"?: string; "updated_at"?: string }> {
+    async getResourceScheduled(id: string, init?: RequestInit): Promise<{ "provider_id": string | null; "from_address": string | null; "to_addresses": unknown; "cc_addresses": unknown; "bcc_addresses": unknown; "reply_to": string | null; "subject": string | null; "html": string | null; "text_body": string | null; "attachments_json": unknown; "template_name": string | null; "template_vars": unknown; "scheduled_at": string | null; "status": string | null; "error": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("GET", `/v1/scheduled/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -1313,8 +1562,17 @@ export class EmailsSelfHostClient {
       });
     }
 
+    /** Replace mutable fields on a tenant-scoped scheduled row */
+    async replaceResourceScheduled(id: string, body: { "provider_id"?: string | null; "from_address"?: string | null; "to_addresses"?: unknown; "cc_addresses"?: unknown; "bcc_addresses"?: unknown; "reply_to"?: string | null; "subject"?: string | null; "html"?: string | null; "text_body"?: string | null; "attachments_json"?: unknown; "template_name"?: string | null; "template_vars"?: unknown; "scheduled_at"?: string | null; "status"?: string | null; "error"?: string | null }, init?: RequestInit): Promise<{ "provider_id": string | null; "from_address": string | null; "to_addresses": unknown; "cc_addresses": unknown; "bcc_addresses": unknown; "reply_to": string | null; "subject": string | null; "html": string | null; "text_body": string | null; "attachments_json": unknown; "template_name": string | null; "template_vars": unknown; "scheduled_at": string | null; "status": string | null; "error": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
+      return this.request("PUT", `/v1/scheduled/${encodeURIComponent(String(id))}`, {
+        body,
+        query: undefined,
+        init,
+      });
+    }
+
     /** Delete a tenant-scoped scheduled row */
-    async deleteResourceScheduled(id: string, init?: RequestInit): Promise<{ "deleted": boolean; "id": string }> {
+    async deleteResourceScheduled(id: string, init?: RequestInit): Promise<{ "deleted": true; "id": string }> {
       return this.request("DELETE", `/v1/scheduled/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -1323,7 +1581,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Update a tenant-scoped scheduled row */
-    async updateResourceScheduled(id: string, body: { "provider_id"?: string | null; "from_address"?: string | null; "to_addresses"?: unknown; "cc_addresses"?: unknown; "bcc_addresses"?: unknown; "reply_to"?: string | null; "subject"?: string | null; "html"?: string | null; "text_body"?: string | null; "attachments_json"?: unknown; "template_name"?: string | null; "template_vars"?: unknown; "scheduled_at"?: string | null; "status"?: string | null; "error"?: string | null }, init?: RequestInit): Promise<{ "id"?: string; "provider_id"?: string | null; "from_address"?: string | null; "to_addresses"?: unknown; "cc_addresses"?: unknown; "bcc_addresses"?: unknown; "reply_to"?: string | null; "subject"?: string | null; "html"?: string | null; "text_body"?: string | null; "attachments_json"?: unknown; "template_name"?: string | null; "template_vars"?: unknown; "scheduled_at"?: string | null; "status"?: string | null; "error"?: string | null; "created_at"?: string; "updated_at"?: string }> {
+    async updateResourceScheduled(id: string, body: { "provider_id"?: string | null; "from_address"?: string | null; "to_addresses"?: unknown; "cc_addresses"?: unknown; "bcc_addresses"?: unknown; "reply_to"?: string | null; "subject"?: string | null; "html"?: string | null; "text_body"?: string | null; "attachments_json"?: unknown; "template_name"?: string | null; "template_vars"?: unknown; "scheduled_at"?: string | null; "status"?: string | null; "error"?: string | null }, init?: RequestInit): Promise<{ "provider_id": string | null; "from_address": string | null; "to_addresses": unknown; "cc_addresses": unknown; "bcc_addresses": unknown; "reply_to": string | null; "subject": string | null; "html": string | null; "text_body": string | null; "attachments_json": unknown; "template_name": string | null; "template_vars": unknown; "scheduled_at": string | null; "status": string | null; "error": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("PATCH", `/v1/scheduled/${encodeURIComponent(String(id))}`, {
         body,
         query: undefined,
@@ -1332,7 +1590,7 @@ export class EmailsSelfHostClient {
     }
 
     /** List tenant-scoped send-keys */
-    async listResourceSendKeys(query?: { "limit"?: number; "offset"?: number; "owner_id"?: string | null }, init?: RequestInit): Promise<{ "items": Array<{ "id"?: string; "owner_id"?: string | null; "prefix"?: string | null; "label"?: string | null; "last_used_at"?: string | null; "revoked_at"?: string | null; "created_at"?: string; "updated_at"?: string }> }> {
+    async listResourceSendKeys(query?: { "limit"?: number; "offset"?: number; "owner_id"?: string | null }, init?: RequestInit): Promise<{ "items": Array<{ "owner_id": string | null; "prefix": string | null; "label": string | null; "last_used_at": string | null; "revoked_at": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> }> {
       return this.request("GET", `/v1/send-keys`, {
         body: undefined,
         query,
@@ -1341,7 +1599,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Create a tenant-scoped send-keys row */
-    async createResourceSendKeys(body: { "owner_id"?: string | null; "prefix"?: string | null; "label"?: string | null; "last_used_at"?: string | null; "revoked_at"?: string | null }, init?: RequestInit): Promise<{ "id"?: string; "owner_id"?: string | null; "prefix"?: string | null; "label"?: string | null; "last_used_at"?: string | null; "revoked_at"?: string | null; "created_at"?: string; "updated_at"?: string }> {
+    async createResourceSendKeys(body: { "owner_id"?: string | null; "prefix"?: string | null; "label"?: string | null; "last_used_at"?: string | null; "revoked_at"?: string | null }, init?: RequestInit): Promise<{ "owner_id": string | null; "prefix": string | null; "label": string | null; "last_used_at": string | null; "revoked_at": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("POST", `/v1/send-keys`, {
         body,
         query: undefined,
@@ -1349,8 +1607,8 @@ export class EmailsSelfHostClient {
       });
     }
 
-    /** Issue a scoped send key; the token is returned ONCE and never stored */
-    async mintSendKey(body: { "owner_id": string; "label"?: string | null }, init?: RequestInit): Promise<{ "token": string; "key": Record<string, unknown> }> {
+    /** Issue a scoped send key; the token is returned ONCE and never stored. Requires a tenant owner/admin session or an operator API key. */
+    async mintSendKey(body: { "owner_id": string; "label"?: string | null }, init?: RequestInit): Promise<{ "token": string; "key": SendKey }> {
       return this.request("POST", `/v1/send-keys/mint`, {
         body,
         query: undefined,
@@ -1359,7 +1617,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Verify a send-key token and (optionally) that it may send from a given address */
-    async verifySendKey(body: { "token": string; "from"?: string }, init?: RequestInit): Promise<{ "valid": boolean; "authorized": boolean; "key"?: Record<string, unknown> | null }> {
+    async verifySendKey(body: { "token": string; "from"?: string }, init?: RequestInit): Promise<{ "valid": boolean; "authorized": boolean; "key": SendKey | null }> {
       return this.request("POST", `/v1/send-keys/verify`, {
         body,
         query: undefined,
@@ -1368,7 +1626,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Get a tenant-scoped send-keys row */
-    async getResourceSendKeys(id: string, init?: RequestInit): Promise<{ "id"?: string; "owner_id"?: string | null; "prefix"?: string | null; "label"?: string | null; "last_used_at"?: string | null; "revoked_at"?: string | null; "created_at"?: string; "updated_at"?: string }> {
+    async getResourceSendKeys(id: string, init?: RequestInit): Promise<{ "owner_id": string | null; "prefix": string | null; "label": string | null; "last_used_at": string | null; "revoked_at": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("GET", `/v1/send-keys/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -1376,8 +1634,17 @@ export class EmailsSelfHostClient {
       });
     }
 
+    /** Replace mutable fields on a tenant-scoped send-keys row */
+    async replaceResourceSendKeys(id: string, body: { "owner_id"?: string | null; "prefix"?: string | null; "label"?: string | null; "last_used_at"?: string | null; "revoked_at"?: string | null }, init?: RequestInit): Promise<{ "owner_id": string | null; "prefix": string | null; "label": string | null; "last_used_at": string | null; "revoked_at": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
+      return this.request("PUT", `/v1/send-keys/${encodeURIComponent(String(id))}`, {
+        body,
+        query: undefined,
+        init,
+      });
+    }
+
     /** Delete a tenant-scoped send-keys row */
-    async deleteResourceSendKeys(id: string, init?: RequestInit): Promise<{ "deleted": boolean; "id": string }> {
+    async deleteResourceSendKeys(id: string, init?: RequestInit): Promise<{ "deleted": true; "id": string }> {
       return this.request("DELETE", `/v1/send-keys/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -1386,7 +1653,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Update a tenant-scoped send-keys row */
-    async updateResourceSendKeys(id: string, body: { "owner_id"?: string | null; "prefix"?: string | null; "label"?: string | null; "last_used_at"?: string | null; "revoked_at"?: string | null }, init?: RequestInit): Promise<{ "id"?: string; "owner_id"?: string | null; "prefix"?: string | null; "label"?: string | null; "last_used_at"?: string | null; "revoked_at"?: string | null; "created_at"?: string; "updated_at"?: string }> {
+    async updateResourceSendKeys(id: string, body: { "owner_id"?: string | null; "prefix"?: string | null; "label"?: string | null; "last_used_at"?: string | null; "revoked_at"?: string | null }, init?: RequestInit): Promise<{ "owner_id": string | null; "prefix": string | null; "label": string | null; "last_used_at": string | null; "revoked_at": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("PATCH", `/v1/send-keys/${encodeURIComponent(String(id))}`, {
         body,
         query: undefined,
@@ -1395,7 +1662,7 @@ export class EmailsSelfHostClient {
     }
 
     /** List tenant-scoped sequence-enrollments */
-    async listResourceSequenceEnrollments(query?: { "limit"?: number; "offset"?: number; "sequence_id"?: string | null; "status"?: string | null }, init?: RequestInit): Promise<{ "items": Array<{ "id"?: string; "sequence_id"?: string | null; "contact_email"?: string | null; "provider_id"?: string | null; "current_step"?: number; "status"?: string | null; "enrolled_at"?: string | null; "next_send_at"?: string | null; "completed_at"?: string | null; "created_at"?: string; "updated_at"?: string }> }> {
+    async listResourceSequenceEnrollments(query?: { "limit"?: number; "offset"?: number; "sequence_id"?: string | null; "status"?: string | null }, init?: RequestInit): Promise<{ "items": Array<{ "sequence_id": string | null; "contact_email": string | null; "provider_id": string | null; "current_step": number; "status": string | null; "enrolled_at": string | null; "next_send_at": string | null; "completed_at": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> }> {
       return this.request("GET", `/v1/sequence-enrollments`, {
         body: undefined,
         query,
@@ -1404,7 +1671,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Create a tenant-scoped sequence-enrollments row */
-    async createResourceSequenceEnrollments(body: { "sequence_id"?: string | null; "contact_email"?: string | null; "provider_id"?: string | null; "current_step"?: number; "status"?: string | null; "enrolled_at"?: string | null; "next_send_at"?: string | null; "completed_at"?: string | null }, init?: RequestInit): Promise<{ "id"?: string; "sequence_id"?: string | null; "contact_email"?: string | null; "provider_id"?: string | null; "current_step"?: number; "status"?: string | null; "enrolled_at"?: string | null; "next_send_at"?: string | null; "completed_at"?: string | null; "created_at"?: string; "updated_at"?: string }> {
+    async createResourceSequenceEnrollments(body: { "sequence_id"?: string | null; "contact_email"?: string | null; "provider_id"?: string | null; "current_step"?: number; "status"?: string | null; "enrolled_at"?: string | null; "next_send_at"?: string | null; "completed_at"?: string | null }, init?: RequestInit): Promise<{ "sequence_id": string | null; "contact_email": string | null; "provider_id": string | null; "current_step": number; "status": string | null; "enrolled_at": string | null; "next_send_at": string | null; "completed_at": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("POST", `/v1/sequence-enrollments`, {
         body,
         query: undefined,
@@ -1413,7 +1680,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Get a tenant-scoped sequence-enrollments row */
-    async getResourceSequenceEnrollments(id: string, init?: RequestInit): Promise<{ "id"?: string; "sequence_id"?: string | null; "contact_email"?: string | null; "provider_id"?: string | null; "current_step"?: number; "status"?: string | null; "enrolled_at"?: string | null; "next_send_at"?: string | null; "completed_at"?: string | null; "created_at"?: string; "updated_at"?: string }> {
+    async getResourceSequenceEnrollments(id: string, init?: RequestInit): Promise<{ "sequence_id": string | null; "contact_email": string | null; "provider_id": string | null; "current_step": number; "status": string | null; "enrolled_at": string | null; "next_send_at": string | null; "completed_at": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("GET", `/v1/sequence-enrollments/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -1421,8 +1688,17 @@ export class EmailsSelfHostClient {
       });
     }
 
+    /** Replace mutable fields on a tenant-scoped sequence-enrollments row */
+    async replaceResourceSequenceEnrollments(id: string, body: { "sequence_id"?: string | null; "contact_email"?: string | null; "provider_id"?: string | null; "current_step"?: number; "status"?: string | null; "enrolled_at"?: string | null; "next_send_at"?: string | null; "completed_at"?: string | null }, init?: RequestInit): Promise<{ "sequence_id": string | null; "contact_email": string | null; "provider_id": string | null; "current_step": number; "status": string | null; "enrolled_at": string | null; "next_send_at": string | null; "completed_at": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
+      return this.request("PUT", `/v1/sequence-enrollments/${encodeURIComponent(String(id))}`, {
+        body,
+        query: undefined,
+        init,
+      });
+    }
+
     /** Delete a tenant-scoped sequence-enrollments row */
-    async deleteResourceSequenceEnrollments(id: string, init?: RequestInit): Promise<{ "deleted": boolean; "id": string }> {
+    async deleteResourceSequenceEnrollments(id: string, init?: RequestInit): Promise<{ "deleted": true; "id": string }> {
       return this.request("DELETE", `/v1/sequence-enrollments/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -1431,7 +1707,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Update a tenant-scoped sequence-enrollments row */
-    async updateResourceSequenceEnrollments(id: string, body: { "sequence_id"?: string | null; "contact_email"?: string | null; "provider_id"?: string | null; "current_step"?: number; "status"?: string | null; "enrolled_at"?: string | null; "next_send_at"?: string | null; "completed_at"?: string | null }, init?: RequestInit): Promise<{ "id"?: string; "sequence_id"?: string | null; "contact_email"?: string | null; "provider_id"?: string | null; "current_step"?: number; "status"?: string | null; "enrolled_at"?: string | null; "next_send_at"?: string | null; "completed_at"?: string | null; "created_at"?: string; "updated_at"?: string }> {
+    async updateResourceSequenceEnrollments(id: string, body: { "sequence_id"?: string | null; "contact_email"?: string | null; "provider_id"?: string | null; "current_step"?: number; "status"?: string | null; "enrolled_at"?: string | null; "next_send_at"?: string | null; "completed_at"?: string | null }, init?: RequestInit): Promise<{ "sequence_id": string | null; "contact_email": string | null; "provider_id": string | null; "current_step": number; "status": string | null; "enrolled_at": string | null; "next_send_at": string | null; "completed_at": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("PATCH", `/v1/sequence-enrollments/${encodeURIComponent(String(id))}`, {
         body,
         query: undefined,
@@ -1440,7 +1716,7 @@ export class EmailsSelfHostClient {
     }
 
     /** List tenant-scoped sequence-steps */
-    async listResourceSequenceSteps(query?: { "limit"?: number; "offset"?: number; "sequence_id"?: string | null }, init?: RequestInit): Promise<{ "items": Array<{ "id"?: string; "sequence_id"?: string | null; "step_number"?: number; "delay_hours"?: number; "template_name"?: string | null; "from_address"?: string | null; "subject_override"?: string | null; "created_at"?: string; "updated_at"?: string }> }> {
+    async listResourceSequenceSteps(query?: { "limit"?: number; "offset"?: number; "sequence_id"?: string | null }, init?: RequestInit): Promise<{ "items": Array<{ "sequence_id": string | null; "step_number": number; "delay_hours": number; "template_name": string | null; "from_address": string | null; "subject_override": string | null; "created_at": string; "id": string; "tenant_id": string; "updated_at": string }> }> {
       return this.request("GET", `/v1/sequence-steps`, {
         body: undefined,
         query,
@@ -1449,7 +1725,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Create a tenant-scoped sequence-steps row */
-    async createResourceSequenceSteps(body: { "sequence_id"?: string | null; "step_number"?: number; "delay_hours"?: number; "template_name"?: string | null; "from_address"?: string | null; "subject_override"?: string | null; "created_at"?: string | null }, init?: RequestInit): Promise<{ "id"?: string; "sequence_id"?: string | null; "step_number"?: number; "delay_hours"?: number; "template_name"?: string | null; "from_address"?: string | null; "subject_override"?: string | null; "created_at"?: string; "updated_at"?: string }> {
+    async createResourceSequenceSteps(body: { "sequence_id"?: string | null; "step_number"?: number; "delay_hours"?: number; "template_name"?: string | null; "from_address"?: string | null; "subject_override"?: string | null; "created_at"?: string | null }, init?: RequestInit): Promise<{ "sequence_id": string | null; "step_number": number; "delay_hours": number; "template_name": string | null; "from_address": string | null; "subject_override": string | null; "created_at": string; "id": string; "tenant_id": string; "updated_at": string }> {
       return this.request("POST", `/v1/sequence-steps`, {
         body,
         query: undefined,
@@ -1458,7 +1734,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Get a tenant-scoped sequence-steps row */
-    async getResourceSequenceSteps(id: string, init?: RequestInit): Promise<{ "id"?: string; "sequence_id"?: string | null; "step_number"?: number; "delay_hours"?: number; "template_name"?: string | null; "from_address"?: string | null; "subject_override"?: string | null; "created_at"?: string; "updated_at"?: string }> {
+    async getResourceSequenceSteps(id: string, init?: RequestInit): Promise<{ "sequence_id": string | null; "step_number": number; "delay_hours": number; "template_name": string | null; "from_address": string | null; "subject_override": string | null; "created_at": string; "id": string; "tenant_id": string; "updated_at": string }> {
       return this.request("GET", `/v1/sequence-steps/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -1466,8 +1742,17 @@ export class EmailsSelfHostClient {
       });
     }
 
+    /** Replace mutable fields on a tenant-scoped sequence-steps row */
+    async replaceResourceSequenceSteps(id: string, body: { "sequence_id"?: string | null; "step_number"?: number; "delay_hours"?: number; "template_name"?: string | null; "from_address"?: string | null; "subject_override"?: string | null; "created_at"?: string | null }, init?: RequestInit): Promise<{ "sequence_id": string | null; "step_number": number; "delay_hours": number; "template_name": string | null; "from_address": string | null; "subject_override": string | null; "created_at": string; "id": string; "tenant_id": string; "updated_at": string }> {
+      return this.request("PUT", `/v1/sequence-steps/${encodeURIComponent(String(id))}`, {
+        body,
+        query: undefined,
+        init,
+      });
+    }
+
     /** Delete a tenant-scoped sequence-steps row */
-    async deleteResourceSequenceSteps(id: string, init?: RequestInit): Promise<{ "deleted": boolean; "id": string }> {
+    async deleteResourceSequenceSteps(id: string, init?: RequestInit): Promise<{ "deleted": true; "id": string }> {
       return this.request("DELETE", `/v1/sequence-steps/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -1476,7 +1761,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Update a tenant-scoped sequence-steps row */
-    async updateResourceSequenceSteps(id: string, body: { "sequence_id"?: string | null; "step_number"?: number; "delay_hours"?: number; "template_name"?: string | null; "from_address"?: string | null; "subject_override"?: string | null; "created_at"?: string | null }, init?: RequestInit): Promise<{ "id"?: string; "sequence_id"?: string | null; "step_number"?: number; "delay_hours"?: number; "template_name"?: string | null; "from_address"?: string | null; "subject_override"?: string | null; "created_at"?: string; "updated_at"?: string }> {
+    async updateResourceSequenceSteps(id: string, body: { "sequence_id"?: string | null; "step_number"?: number; "delay_hours"?: number; "template_name"?: string | null; "from_address"?: string | null; "subject_override"?: string | null; "created_at"?: string | null }, init?: RequestInit): Promise<{ "sequence_id": string | null; "step_number": number; "delay_hours": number; "template_name": string | null; "from_address": string | null; "subject_override": string | null; "created_at": string; "id": string; "tenant_id": string; "updated_at": string }> {
       return this.request("PATCH", `/v1/sequence-steps/${encodeURIComponent(String(id))}`, {
         body,
         query: undefined,
@@ -1485,7 +1770,7 @@ export class EmailsSelfHostClient {
     }
 
     /** List tenant-scoped sequences */
-    async listResourceSequences(query?: { "limit"?: number; "offset"?: number }, init?: RequestInit): Promise<{ "items": Array<{ "id"?: string; "name"?: string | null; "description"?: string | null; "status"?: string | null; "created_at"?: string; "updated_at"?: string }> }> {
+    async listResourceSequences(query?: { "limit"?: number; "offset"?: number }, init?: RequestInit): Promise<{ "items": Array<{ "name": string | null; "description": string | null; "status": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> }> {
       return this.request("GET", `/v1/sequences`, {
         body: undefined,
         query,
@@ -1494,7 +1779,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Create a tenant-scoped sequences row */
-    async createResourceSequences(body: { "name"?: string | null; "description"?: string | null; "status"?: string | null }, init?: RequestInit): Promise<{ "id"?: string; "name"?: string | null; "description"?: string | null; "status"?: string | null; "created_at"?: string; "updated_at"?: string }> {
+    async createResourceSequences(body: { "name"?: string | null; "description"?: string | null; "status"?: string | null }, init?: RequestInit): Promise<{ "name": string | null; "description": string | null; "status": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("POST", `/v1/sequences`, {
         body,
         query: undefined,
@@ -1503,7 +1788,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Get a tenant-scoped sequences row */
-    async getResourceSequences(id: string, init?: RequestInit): Promise<{ "id"?: string; "name"?: string | null; "description"?: string | null; "status"?: string | null; "created_at"?: string; "updated_at"?: string }> {
+    async getResourceSequences(id: string, init?: RequestInit): Promise<{ "name": string | null; "description": string | null; "status": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("GET", `/v1/sequences/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -1511,8 +1796,17 @@ export class EmailsSelfHostClient {
       });
     }
 
+    /** Replace mutable fields on a tenant-scoped sequences row */
+    async replaceResourceSequences(id: string, body: { "name"?: string | null; "description"?: string | null; "status"?: string | null }, init?: RequestInit): Promise<{ "name": string | null; "description": string | null; "status": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
+      return this.request("PUT", `/v1/sequences/${encodeURIComponent(String(id))}`, {
+        body,
+        query: undefined,
+        init,
+      });
+    }
+
     /** Delete a tenant-scoped sequences row */
-    async deleteResourceSequences(id: string, init?: RequestInit): Promise<{ "deleted": boolean; "id": string }> {
+    async deleteResourceSequences(id: string, init?: RequestInit): Promise<{ "deleted": true; "id": string }> {
       return this.request("DELETE", `/v1/sequences/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -1521,7 +1815,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Update a tenant-scoped sequences row */
-    async updateResourceSequences(id: string, body: { "name"?: string | null; "description"?: string | null; "status"?: string | null }, init?: RequestInit): Promise<{ "id"?: string; "name"?: string | null; "description"?: string | null; "status"?: string | null; "created_at"?: string; "updated_at"?: string }> {
+    async updateResourceSequences(id: string, body: { "name"?: string | null; "description"?: string | null; "status"?: string | null }, init?: RequestInit): Promise<{ "name": string | null; "description": string | null; "status": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("PATCH", `/v1/sequences/${encodeURIComponent(String(id))}`, {
         body,
         query: undefined,
@@ -1530,7 +1824,7 @@ export class EmailsSelfHostClient {
     }
 
     /** List tenant-scoped sources */
-    async listResourceSources(query?: { "limit"?: number; "offset"?: number; "mailbox_id"?: string | null; "provider_id"?: string | null; "type"?: string | null; "status"?: string | null }, init?: RequestInit): Promise<{ "items": Array<{ "id"?: string; "mailbox_id"?: string | null; "provider_id"?: string | null; "type"?: string | null; "name"?: string | null; "external_account_id"?: string | null; "external_mailbox"?: string | null; "status"?: string | null; "settings_json"?: unknown; "provider_snapshot_json"?: unknown; "last_synced_at"?: string | null; "created_at"?: string; "updated_at"?: string }> }> {
+    async listResourceSources(query?: { "limit"?: number; "offset"?: number; "mailbox_id"?: string | null; "provider_id"?: string | null; "type"?: string | null; "status"?: string | null }, init?: RequestInit): Promise<{ "items": Array<{ "mailbox_id": string | null; "provider_id": string | null; "type": string | null; "name": string | null; "external_account_id": string | null; "external_mailbox": string | null; "status": string | null; "settings_json": unknown; "provider_snapshot_json": unknown; "last_synced_at": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> }> {
       return this.request("GET", `/v1/sources`, {
         body: undefined,
         query,
@@ -1539,7 +1833,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Create a tenant-scoped sources row */
-    async createResourceSources(body: { "mailbox_id"?: string | null; "provider_id"?: string | null; "type"?: string | null; "name"?: string | null; "external_account_id"?: string | null; "external_mailbox"?: string | null; "status"?: string | null; "settings_json"?: unknown; "provider_snapshot_json"?: unknown; "last_synced_at"?: string | null }, init?: RequestInit): Promise<{ "id"?: string; "mailbox_id"?: string | null; "provider_id"?: string | null; "type"?: string | null; "name"?: string | null; "external_account_id"?: string | null; "external_mailbox"?: string | null; "status"?: string | null; "settings_json"?: unknown; "provider_snapshot_json"?: unknown; "last_synced_at"?: string | null; "created_at"?: string; "updated_at"?: string }> {
+    async createResourceSources(body: { "mailbox_id"?: string | null; "provider_id"?: string | null; "type"?: string | null; "name"?: string | null; "external_account_id"?: string | null; "external_mailbox"?: string | null; "status"?: string | null; "settings_json"?: unknown; "provider_snapshot_json"?: unknown; "last_synced_at"?: string | null }, init?: RequestInit): Promise<{ "mailbox_id": string | null; "provider_id": string | null; "type": string | null; "name": string | null; "external_account_id": string | null; "external_mailbox": string | null; "status": string | null; "settings_json": unknown; "provider_snapshot_json": unknown; "last_synced_at": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("POST", `/v1/sources`, {
         body,
         query: undefined,
@@ -1548,7 +1842,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Get a tenant-scoped sources row */
-    async getResourceSources(id: string, init?: RequestInit): Promise<{ "id"?: string; "mailbox_id"?: string | null; "provider_id"?: string | null; "type"?: string | null; "name"?: string | null; "external_account_id"?: string | null; "external_mailbox"?: string | null; "status"?: string | null; "settings_json"?: unknown; "provider_snapshot_json"?: unknown; "last_synced_at"?: string | null; "created_at"?: string; "updated_at"?: string }> {
+    async getResourceSources(id: string, init?: RequestInit): Promise<{ "mailbox_id": string | null; "provider_id": string | null; "type": string | null; "name": string | null; "external_account_id": string | null; "external_mailbox": string | null; "status": string | null; "settings_json": unknown; "provider_snapshot_json": unknown; "last_synced_at": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("GET", `/v1/sources/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -1556,8 +1850,17 @@ export class EmailsSelfHostClient {
       });
     }
 
+    /** Replace mutable fields on a tenant-scoped sources row */
+    async replaceResourceSources(id: string, body: { "mailbox_id"?: string | null; "provider_id"?: string | null; "type"?: string | null; "name"?: string | null; "external_account_id"?: string | null; "external_mailbox"?: string | null; "status"?: string | null; "settings_json"?: unknown; "provider_snapshot_json"?: unknown; "last_synced_at"?: string | null }, init?: RequestInit): Promise<{ "mailbox_id": string | null; "provider_id": string | null; "type": string | null; "name": string | null; "external_account_id": string | null; "external_mailbox": string | null; "status": string | null; "settings_json": unknown; "provider_snapshot_json": unknown; "last_synced_at": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
+      return this.request("PUT", `/v1/sources/${encodeURIComponent(String(id))}`, {
+        body,
+        query: undefined,
+        init,
+      });
+    }
+
     /** Delete a tenant-scoped sources row */
-    async deleteResourceSources(id: string, init?: RequestInit): Promise<{ "deleted": boolean; "id": string }> {
+    async deleteResourceSources(id: string, init?: RequestInit): Promise<{ "deleted": true; "id": string }> {
       return this.request("DELETE", `/v1/sources/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -1566,7 +1869,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Update a tenant-scoped sources row */
-    async updateResourceSources(id: string, body: { "mailbox_id"?: string | null; "provider_id"?: string | null; "type"?: string | null; "name"?: string | null; "external_account_id"?: string | null; "external_mailbox"?: string | null; "status"?: string | null; "settings_json"?: unknown; "provider_snapshot_json"?: unknown; "last_synced_at"?: string | null }, init?: RequestInit): Promise<{ "id"?: string; "mailbox_id"?: string | null; "provider_id"?: string | null; "type"?: string | null; "name"?: string | null; "external_account_id"?: string | null; "external_mailbox"?: string | null; "status"?: string | null; "settings_json"?: unknown; "provider_snapshot_json"?: unknown; "last_synced_at"?: string | null; "created_at"?: string; "updated_at"?: string }> {
+    async updateResourceSources(id: string, body: { "mailbox_id"?: string | null; "provider_id"?: string | null; "type"?: string | null; "name"?: string | null; "external_account_id"?: string | null; "external_mailbox"?: string | null; "status"?: string | null; "settings_json"?: unknown; "provider_snapshot_json"?: unknown; "last_synced_at"?: string | null }, init?: RequestInit): Promise<{ "mailbox_id": string | null; "provider_id": string | null; "type": string | null; "name": string | null; "external_account_id": string | null; "external_mailbox": string | null; "status": string | null; "settings_json": unknown; "provider_snapshot_json": unknown; "last_synced_at": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("PATCH", `/v1/sources/${encodeURIComponent(String(id))}`, {
         body,
         query: undefined,
@@ -1575,7 +1878,7 @@ export class EmailsSelfHostClient {
     }
 
     /** List tenant-scoped templates */
-    async listResourceTemplates(query?: { "limit"?: number; "offset"?: number }, init?: RequestInit): Promise<{ "items": Array<{ "id"?: string; "name"?: string | null; "subject_template"?: string | null; "html_template"?: string | null; "text_template"?: string | null; "metadata"?: unknown; "created_at"?: string; "updated_at"?: string }> }> {
+    async listResourceTemplates(query?: { "limit"?: number; "offset"?: number }, init?: RequestInit): Promise<{ "items": Array<{ "name": string | null; "subject_template": string | null; "html_template": string | null; "text_template": string | null; "metadata": unknown; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> }> {
       return this.request("GET", `/v1/templates`, {
         body: undefined,
         query,
@@ -1584,7 +1887,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Create a tenant-scoped templates row */
-    async createResourceTemplates(body: { "name"?: string | null; "subject_template"?: string | null; "html_template"?: string | null; "text_template"?: string | null; "metadata"?: unknown }, init?: RequestInit): Promise<{ "id"?: string; "name"?: string | null; "subject_template"?: string | null; "html_template"?: string | null; "text_template"?: string | null; "metadata"?: unknown; "created_at"?: string; "updated_at"?: string }> {
+    async createResourceTemplates(body: { "name"?: string | null; "subject_template"?: string | null; "html_template"?: string | null; "text_template"?: string | null; "metadata"?: unknown }, init?: RequestInit): Promise<{ "name": string | null; "subject_template": string | null; "html_template": string | null; "text_template": string | null; "metadata": unknown; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("POST", `/v1/templates`, {
         body,
         query: undefined,
@@ -1593,7 +1896,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Get a tenant-scoped templates row */
-    async getResourceTemplates(id: string, init?: RequestInit): Promise<{ "id"?: string; "name"?: string | null; "subject_template"?: string | null; "html_template"?: string | null; "text_template"?: string | null; "metadata"?: unknown; "created_at"?: string; "updated_at"?: string }> {
+    async getResourceTemplates(id: string, init?: RequestInit): Promise<{ "name": string | null; "subject_template": string | null; "html_template": string | null; "text_template": string | null; "metadata": unknown; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("GET", `/v1/templates/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -1601,8 +1904,17 @@ export class EmailsSelfHostClient {
       });
     }
 
+    /** Replace mutable fields on a tenant-scoped templates row */
+    async replaceResourceTemplates(id: string, body: { "name"?: string | null; "subject_template"?: string | null; "html_template"?: string | null; "text_template"?: string | null; "metadata"?: unknown }, init?: RequestInit): Promise<{ "name": string | null; "subject_template": string | null; "html_template": string | null; "text_template": string | null; "metadata": unknown; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
+      return this.request("PUT", `/v1/templates/${encodeURIComponent(String(id))}`, {
+        body,
+        query: undefined,
+        init,
+      });
+    }
+
     /** Delete a tenant-scoped templates row */
-    async deleteResourceTemplates(id: string, init?: RequestInit): Promise<{ "deleted": boolean; "id": string }> {
+    async deleteResourceTemplates(id: string, init?: RequestInit): Promise<{ "deleted": true; "id": string }> {
       return this.request("DELETE", `/v1/templates/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -1611,7 +1923,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Update a tenant-scoped templates row */
-    async updateResourceTemplates(id: string, body: { "name"?: string | null; "subject_template"?: string | null; "html_template"?: string | null; "text_template"?: string | null; "metadata"?: unknown }, init?: RequestInit): Promise<{ "id"?: string; "name"?: string | null; "subject_template"?: string | null; "html_template"?: string | null; "text_template"?: string | null; "metadata"?: unknown; "created_at"?: string; "updated_at"?: string }> {
+    async updateResourceTemplates(id: string, body: { "name"?: string | null; "subject_template"?: string | null; "html_template"?: string | null; "text_template"?: string | null; "metadata"?: unknown }, init?: RequestInit): Promise<{ "name": string | null; "subject_template": string | null; "html_template": string | null; "text_template": string | null; "metadata": unknown; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("PATCH", `/v1/templates/${encodeURIComponent(String(id))}`, {
         body,
         query: undefined,
@@ -1620,7 +1932,7 @@ export class EmailsSelfHostClient {
     }
 
     /** List the current user's active tenant memberships */
-    async listTenants(init?: RequestInit): Promise<{ "tenants"?: Array<Tenant> }> {
+    async listTenants(init?: RequestInit): Promise<{ "tenants": Array<TenantMembershipSummary> }> {
       return this.request("GET", `/v1/tenants`, {
         body: undefined,
         query: undefined,
@@ -1629,7 +1941,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Create a tenant owned by the current user */
-    async createTenant(body: { "name": string; "slug"?: string | null }, init?: RequestInit): Promise<Record<string, unknown>> {
+    async createTenant(body: { "name": string; "slug"?: string | null }, init?: RequestInit): Promise<{ "tenant": Tenant; "role": "owner" | "admin" | "member" | "viewer" }> {
       return this.request("POST", `/v1/tenants`, {
         body,
         query: undefined,
@@ -1637,7 +1949,7 @@ export class EmailsSelfHostClient {
       });
     }
 
-    async getTenant(id: string, init?: RequestInit): Promise<{ "tenant"?: Tenant }> {
+    async getTenant(id: string, init?: RequestInit): Promise<{ "tenant": Tenant; "role"?: "owner" | "admin" | "member" | "viewer" }> {
       return this.request("GET", `/v1/tenants/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -1646,7 +1958,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Compatibility alias for tenant update */
-    async replaceTenant(id: string, body: { "name"?: string; "slug"?: string; "status"?: string }, init?: RequestInit): Promise<Record<string, unknown>> {
+    async replaceTenant(id: string, body: { "name"?: string; "slug"?: string; "status"?: string }, init?: RequestInit): Promise<{ "tenant": Tenant }> {
       return this.request("PUT", `/v1/tenants/${encodeURIComponent(String(id))}`, {
         body,
         query: undefined,
@@ -1655,7 +1967,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Suspend a tenant; owner role required */
-    async suspendTenant(id: string, init?: RequestInit): Promise<Record<string, unknown>> {
+    async suspendTenant(id: string, init?: RequestInit): Promise<{ "suspended": true; "id": string }> {
       return this.request("DELETE", `/v1/tenants/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -1663,7 +1975,7 @@ export class EmailsSelfHostClient {
       });
     }
 
-    async updateTenant(id: string, body: { "name"?: string; "slug"?: string; "status"?: string }, init?: RequestInit): Promise<Record<string, unknown>> {
+    async updateTenant(id: string, body: { "name"?: string; "slug"?: string; "status"?: string }, init?: RequestInit): Promise<{ "tenant": Tenant }> {
       return this.request("PATCH", `/v1/tenants/${encodeURIComponent(String(id))}`, {
         body,
         query: undefined,
@@ -1672,7 +1984,7 @@ export class EmailsSelfHostClient {
     }
 
     /** List outstanding tenant invitations; owner or admin role required */
-    async listTenantInvites(id: string, init?: RequestInit): Promise<Record<string, unknown>> {
+    async listTenantInvites(id: string, init?: RequestInit): Promise<{ "invites": Array<Invitation> }> {
       return this.request("GET", `/v1/tenants/${encodeURIComponent(String(id))}/invites`, {
         body: undefined,
         query: undefined,
@@ -1681,7 +1993,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Invite a user; only an owner may grant the owner role */
-    async createTenantInvite(id: string, body: { "email": string; "role"?: "owner" | "admin" | "member" }, init?: RequestInit): Promise<Record<string, unknown>> {
+    async createTenantInvite(id: string, body: { "email": string; "role"?: "owner" | "admin" | "member" }, init?: RequestInit): Promise<{ "invited": true; "email": string; "role": "owner" | "admin" | "member"; "expires_at": string }> {
       return this.request("POST", `/v1/tenants/${encodeURIComponent(String(id))}/invites`, {
         body,
         query: undefined,
@@ -1690,7 +2002,7 @@ export class EmailsSelfHostClient {
     }
 
     /** List tenant memberships; owner or admin role required */
-    async listTenantMembers(id: string, init?: RequestInit): Promise<{ "members"?: Array<Membership> }> {
+    async listTenantMembers(id: string, init?: RequestInit): Promise<{ "members": Array<Membership> }> {
       return this.request("GET", `/v1/tenants/${encodeURIComponent(String(id))}/members`, {
         body: undefined,
         query: undefined,
@@ -1699,7 +2011,7 @@ export class EmailsSelfHostClient {
     }
 
     /** List tenant-scoped triage */
-    async listResourceTriage(query?: { "limit"?: number; "offset"?: number; "label"?: string | null; "priority"?: number; "sentiment"?: string | null; "email_id"?: string | null; "inbound_email_id"?: string | null }, init?: RequestInit): Promise<{ "items": Array<{ "id"?: string; "email_id"?: string | null; "inbound_email_id"?: string | null; "label"?: string | null; "priority"?: number; "summary"?: string | null; "sentiment"?: string | null; "draft_reply"?: string | null; "confidence"?: number; "model"?: string | null; "triaged_at"?: string | null; "created_at"?: string; "updated_at"?: string }> }> {
+    async listResourceTriage(query?: { "limit"?: number; "offset"?: number; "label"?: string | null; "priority"?: number; "sentiment"?: string | null; "email_id"?: string | null; "inbound_email_id"?: string | null }, init?: RequestInit): Promise<{ "items": Array<{ "email_id": string | null; "inbound_email_id": string | null; "label": string | null; "priority": number; "summary": string | null; "sentiment": string | null; "draft_reply": string | null; "confidence": number; "model": string | null; "triaged_at": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> }> {
       return this.request("GET", `/v1/triage`, {
         body: undefined,
         query,
@@ -1708,7 +2020,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Create a tenant-scoped triage row */
-    async createResourceTriage(body: { "email_id"?: string | null; "inbound_email_id"?: string | null; "label"?: string | null; "priority"?: number; "summary"?: string | null; "sentiment"?: string | null; "draft_reply"?: string | null; "confidence"?: number; "model"?: string | null; "triaged_at"?: string | null }, init?: RequestInit): Promise<{ "id"?: string; "email_id"?: string | null; "inbound_email_id"?: string | null; "label"?: string | null; "priority"?: number; "summary"?: string | null; "sentiment"?: string | null; "draft_reply"?: string | null; "confidence"?: number; "model"?: string | null; "triaged_at"?: string | null; "created_at"?: string; "updated_at"?: string }> {
+    async createResourceTriage(body: { "email_id"?: string | null; "inbound_email_id"?: string | null; "label"?: string | null; "priority"?: number; "summary"?: string | null; "sentiment"?: string | null; "draft_reply"?: string | null; "confidence"?: number; "model"?: string | null; "triaged_at"?: string | null }, init?: RequestInit): Promise<{ "email_id": string | null; "inbound_email_id": string | null; "label": string | null; "priority": number; "summary": string | null; "sentiment": string | null; "draft_reply": string | null; "confidence": number; "model": string | null; "triaged_at": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("POST", `/v1/triage`, {
         body,
         query: undefined,
@@ -1717,7 +2029,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Get a tenant-scoped triage row */
-    async getResourceTriage(id: string, init?: RequestInit): Promise<{ "id"?: string; "email_id"?: string | null; "inbound_email_id"?: string | null; "label"?: string | null; "priority"?: number; "summary"?: string | null; "sentiment"?: string | null; "draft_reply"?: string | null; "confidence"?: number; "model"?: string | null; "triaged_at"?: string | null; "created_at"?: string; "updated_at"?: string }> {
+    async getResourceTriage(id: string, init?: RequestInit): Promise<{ "email_id": string | null; "inbound_email_id": string | null; "label": string | null; "priority": number; "summary": string | null; "sentiment": string | null; "draft_reply": string | null; "confidence": number; "model": string | null; "triaged_at": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("GET", `/v1/triage/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -1725,8 +2037,17 @@ export class EmailsSelfHostClient {
       });
     }
 
+    /** Replace mutable fields on a tenant-scoped triage row */
+    async replaceResourceTriage(id: string, body: { "email_id"?: string | null; "inbound_email_id"?: string | null; "label"?: string | null; "priority"?: number; "summary"?: string | null; "sentiment"?: string | null; "draft_reply"?: string | null; "confidence"?: number; "model"?: string | null; "triaged_at"?: string | null }, init?: RequestInit): Promise<{ "email_id": string | null; "inbound_email_id": string | null; "label": string | null; "priority": number; "summary": string | null; "sentiment": string | null; "draft_reply": string | null; "confidence": number; "model": string | null; "triaged_at": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
+      return this.request("PUT", `/v1/triage/${encodeURIComponent(String(id))}`, {
+        body,
+        query: undefined,
+        init,
+      });
+    }
+
     /** Delete a tenant-scoped triage row */
-    async deleteResourceTriage(id: string, init?: RequestInit): Promise<{ "deleted": boolean; "id": string }> {
+    async deleteResourceTriage(id: string, init?: RequestInit): Promise<{ "deleted": true; "id": string }> {
       return this.request("DELETE", `/v1/triage/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -1735,7 +2056,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Update a tenant-scoped triage row */
-    async updateResourceTriage(id: string, body: { "email_id"?: string | null; "inbound_email_id"?: string | null; "label"?: string | null; "priority"?: number; "summary"?: string | null; "sentiment"?: string | null; "draft_reply"?: string | null; "confidence"?: number; "model"?: string | null; "triaged_at"?: string | null }, init?: RequestInit): Promise<{ "id"?: string; "email_id"?: string | null; "inbound_email_id"?: string | null; "label"?: string | null; "priority"?: number; "summary"?: string | null; "sentiment"?: string | null; "draft_reply"?: string | null; "confidence"?: number; "model"?: string | null; "triaged_at"?: string | null; "created_at"?: string; "updated_at"?: string }> {
+    async updateResourceTriage(id: string, body: { "email_id"?: string | null; "inbound_email_id"?: string | null; "label"?: string | null; "priority"?: number; "summary"?: string | null; "sentiment"?: string | null; "draft_reply"?: string | null; "confidence"?: number; "model"?: string | null; "triaged_at"?: string | null }, init?: RequestInit): Promise<{ "email_id": string | null; "inbound_email_id": string | null; "label": string | null; "priority": number; "summary": string | null; "sentiment": string | null; "draft_reply": string | null; "confidence": number; "model": string | null; "triaged_at": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("PATCH", `/v1/triage/${encodeURIComponent(String(id))}`, {
         body,
         query: undefined,
@@ -1744,7 +2065,7 @@ export class EmailsSelfHostClient {
     }
 
     /** List tenant-scoped warming */
-    async listResourceWarming(query?: { "limit"?: number; "offset"?: number; "status"?: string | null; "domain"?: string | null }, init?: RequestInit): Promise<{ "items": Array<{ "id"?: string; "domain"?: string | null; "provider_id"?: string | null; "target_daily_volume"?: number; "start_date"?: string | null; "status"?: string | null; "created_at"?: string; "updated_at"?: string }> }> {
+    async listResourceWarming(query?: { "limit"?: number; "offset"?: number; "status"?: string | null; "domain"?: string | null }, init?: RequestInit): Promise<{ "items": Array<{ "domain": string | null; "provider_id": string | null; "target_daily_volume": number; "start_date": string | null; "status": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> }> {
       return this.request("GET", `/v1/warming`, {
         body: undefined,
         query,
@@ -1753,7 +2074,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Create a tenant-scoped warming row */
-    async createResourceWarming(body: { "domain"?: string | null; "provider_id"?: string | null; "target_daily_volume"?: number; "start_date"?: string | null; "status"?: string | null }, init?: RequestInit): Promise<{ "id"?: string; "domain"?: string | null; "provider_id"?: string | null; "target_daily_volume"?: number; "start_date"?: string | null; "status"?: string | null; "created_at"?: string; "updated_at"?: string }> {
+    async createResourceWarming(body: { "domain"?: string | null; "provider_id"?: string | null; "target_daily_volume"?: number; "start_date"?: string | null; "status"?: string | null }, init?: RequestInit): Promise<{ "domain": string | null; "provider_id": string | null; "target_daily_volume": number; "start_date": string | null; "status": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("POST", `/v1/warming`, {
         body,
         query: undefined,
@@ -1762,7 +2083,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Get a tenant-scoped warming row */
-    async getResourceWarming(id: string, init?: RequestInit): Promise<{ "id"?: string; "domain"?: string | null; "provider_id"?: string | null; "target_daily_volume"?: number; "start_date"?: string | null; "status"?: string | null; "created_at"?: string; "updated_at"?: string }> {
+    async getResourceWarming(id: string, init?: RequestInit): Promise<{ "domain": string | null; "provider_id": string | null; "target_daily_volume": number; "start_date": string | null; "status": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("GET", `/v1/warming/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -1770,8 +2091,17 @@ export class EmailsSelfHostClient {
       });
     }
 
+    /** Replace mutable fields on a tenant-scoped warming row */
+    async replaceResourceWarming(id: string, body: { "domain"?: string | null; "provider_id"?: string | null; "target_daily_volume"?: number; "start_date"?: string | null; "status"?: string | null }, init?: RequestInit): Promise<{ "domain": string | null; "provider_id": string | null; "target_daily_volume": number; "start_date": string | null; "status": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
+      return this.request("PUT", `/v1/warming/${encodeURIComponent(String(id))}`, {
+        body,
+        query: undefined,
+        init,
+      });
+    }
+
     /** Delete a tenant-scoped warming row */
-    async deleteResourceWarming(id: string, init?: RequestInit): Promise<{ "deleted": boolean; "id": string }> {
+    async deleteResourceWarming(id: string, init?: RequestInit): Promise<{ "deleted": true; "id": string }> {
       return this.request("DELETE", `/v1/warming/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -1780,7 +2110,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Update a tenant-scoped warming row */
-    async updateResourceWarming(id: string, body: { "domain"?: string | null; "provider_id"?: string | null; "target_daily_volume"?: number; "start_date"?: string | null; "status"?: string | null }, init?: RequestInit): Promise<{ "id"?: string; "domain"?: string | null; "provider_id"?: string | null; "target_daily_volume"?: number; "start_date"?: string | null; "status"?: string | null; "created_at"?: string; "updated_at"?: string }> {
+    async updateResourceWarming(id: string, body: { "domain"?: string | null; "provider_id"?: string | null; "target_daily_volume"?: number; "start_date"?: string | null; "status"?: string | null }, init?: RequestInit): Promise<{ "domain": string | null; "provider_id": string | null; "target_daily_volume": number; "start_date": string | null; "status": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("PATCH", `/v1/warming/${encodeURIComponent(String(id))}`, {
         body,
         query: undefined,
@@ -1789,7 +2119,7 @@ export class EmailsSelfHostClient {
     }
 
     /** List tenant-scoped webhook-receipts */
-    async listResourceWebhookReceipts(query?: { "limit"?: number; "offset"?: number; "provider"?: string | null; "event_id"?: string | null }, init?: RequestInit): Promise<{ "items": Array<{ "id"?: string; "provider"?: string | null; "event_id"?: string | null; "resource_id"?: string | null; "completed_at"?: string | null; "created_at"?: string; "updated_at"?: string }> }> {
+    async listResourceWebhookReceipts(query?: { "limit"?: number; "offset"?: number; "provider"?: string | null; "event_id"?: string | null }, init?: RequestInit): Promise<{ "items": Array<{ "provider": string | null; "event_id": string | null; "resource_id": string | null; "completed_at": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> }> {
       return this.request("GET", `/v1/webhook-receipts`, {
         body: undefined,
         query,
@@ -1798,7 +2128,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Create a tenant-scoped webhook-receipts row */
-    async createResourceWebhookReceipts(body: { "provider"?: string | null; "event_id"?: string | null; "resource_id"?: string | null; "completed_at"?: string | null }, init?: RequestInit): Promise<{ "id"?: string; "provider"?: string | null; "event_id"?: string | null; "resource_id"?: string | null; "completed_at"?: string | null; "created_at"?: string; "updated_at"?: string }> {
+    async createResourceWebhookReceipts(body: { "provider"?: string | null; "event_id"?: string | null; "resource_id"?: string | null; "completed_at"?: string | null }, init?: RequestInit): Promise<{ "provider": string | null; "event_id": string | null; "resource_id": string | null; "completed_at": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("POST", `/v1/webhook-receipts`, {
         body,
         query: undefined,
@@ -1807,7 +2137,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Get a tenant-scoped webhook-receipts row */
-    async getResourceWebhookReceipts(id: string, init?: RequestInit): Promise<{ "id"?: string; "provider"?: string | null; "event_id"?: string | null; "resource_id"?: string | null; "completed_at"?: string | null; "created_at"?: string; "updated_at"?: string }> {
+    async getResourceWebhookReceipts(id: string, init?: RequestInit): Promise<{ "provider": string | null; "event_id": string | null; "resource_id": string | null; "completed_at": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("GET", `/v1/webhook-receipts/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -1815,8 +2145,17 @@ export class EmailsSelfHostClient {
       });
     }
 
+    /** Replace mutable fields on a tenant-scoped webhook-receipts row */
+    async replaceResourceWebhookReceipts(id: string, body: { "provider"?: string | null; "event_id"?: string | null; "resource_id"?: string | null; "completed_at"?: string | null }, init?: RequestInit): Promise<{ "provider": string | null; "event_id": string | null; "resource_id": string | null; "completed_at": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
+      return this.request("PUT", `/v1/webhook-receipts/${encodeURIComponent(String(id))}`, {
+        body,
+        query: undefined,
+        init,
+      });
+    }
+
     /** Delete a tenant-scoped webhook-receipts row */
-    async deleteResourceWebhookReceipts(id: string, init?: RequestInit): Promise<{ "deleted": boolean; "id": string }> {
+    async deleteResourceWebhookReceipts(id: string, init?: RequestInit): Promise<{ "deleted": true; "id": string }> {
       return this.request("DELETE", `/v1/webhook-receipts/${encodeURIComponent(String(id))}`, {
         body: undefined,
         query: undefined,
@@ -1825,7 +2164,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Update a tenant-scoped webhook-receipts row */
-    async updateResourceWebhookReceipts(id: string, body: { "provider"?: string | null; "event_id"?: string | null; "resource_id"?: string | null; "completed_at"?: string | null }, init?: RequestInit): Promise<{ "id"?: string; "provider"?: string | null; "event_id"?: string | null; "resource_id"?: string | null; "completed_at"?: string | null; "created_at"?: string; "updated_at"?: string }> {
+    async updateResourceWebhookReceipts(id: string, body: { "provider"?: string | null; "event_id"?: string | null; "resource_id"?: string | null; "completed_at"?: string | null }, init?: RequestInit): Promise<{ "provider": string | null; "event_id": string | null; "resource_id": string | null; "completed_at": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> {
       return this.request("PATCH", `/v1/webhook-receipts/${encodeURIComponent(String(id))}`, {
         body,
         query: undefined,
@@ -1833,8 +2172,26 @@ export class EmailsSelfHostClient {
       });
     }
 
+    /** Receive a Resend webhook for inbound mail and delivery outcomes */
+    async receiveResendInboundWebhook(body: ResendWebhookEvent, init?: RequestInit): Promise<WebhookReceipt> {
+      return this.request("POST", `/v1/webhooks/resend-inbound`, {
+        body,
+        query: undefined,
+        init,
+      });
+    }
+
+    /** Receive an AWS SNS notification for SES inbound mail and delivery outcomes */
+    async receiveSesInboundWebhook(body: SnsNotification, init?: RequestInit): Promise<WebhookReceipt> {
+      return this.request("POST", `/v1/webhooks/ses-inbound`, {
+        body,
+        query: undefined,
+        init,
+      });
+    }
+
     /** Service version and mode */
-    async getVersion(init?: RequestInit): Promise<Record<string, unknown>> {
+    async getVersion(init?: RequestInit): Promise<{ "status": "ok"; "version": string; "mode": "self_hosted"; "name": "emails" }> {
       return this.request("GET", `/version`, {
         body: undefined,
         query: undefined,

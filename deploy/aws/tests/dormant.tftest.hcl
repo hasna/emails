@@ -624,16 +624,14 @@ run "ses_credentials_injected_by_arn_reference_only" {
         jsondecode(aws_ecs_task_definition.worker.container_definitions)[0],
         jsondecode(aws_ecs_task_definition.migration.container_definitions)[0],
         ] : alltrue([
-          for entry in definition.secrets :
-          !contains([
-            "AWS_ACCESS_KEY_ID",
-            "AWS_SECRET_ACCESS_KEY",
-            "EMAILS_SES_ACCESS_KEY_ID",
-            "EMAILS_SES_SECRET_ACCESS_KEY",
-          ], entry.name)
+          # Deliberately a PATTERN, not a list of the four names this module
+          # happens to inject today: any future secret whose name carries an
+          # access key must fail here too, without someone remembering to
+          # extend an allowlist.
+          for entry in definition.secrets : !strcontains(upper(entry.name), "ACCESS_KEY")
       ])
     ])
-    error_message = "SES credentials are API-only: worker and migration tasks must keep their own task roles."
+    error_message = "SES credentials are API-only: the ingest worker's own task role has the SQS and inbound-bucket access an SES-scoped principal lacks."
   }
 
   # The IAM grant must be the BARE secret ARN — a `:JSON_KEY::` suffix is not a
@@ -692,13 +690,10 @@ run "no_ses_credentials_leaves_the_task_role_alone" {
 
   assert {
     condition = alltrue([
+      # A pattern, so a credential added under some other access-key name is
+      # caught here as well.
       for entry in jsondecode(aws_ecs_task_definition.api.container_definitions)[0].secrets :
-      !contains([
-        "AWS_ACCESS_KEY_ID",
-        "AWS_SECRET_ACCESS_KEY",
-        "EMAILS_SES_ACCESS_KEY_ID",
-        "EMAILS_SES_SECRET_ACCESS_KEY",
-      ], entry.name)
+      !strcontains(upper(entry.name), "ACCESS_KEY")
     ])
     error_message = "The default deployment must keep signing with the API task role."
   }

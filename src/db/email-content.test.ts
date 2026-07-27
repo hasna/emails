@@ -4,9 +4,9 @@
 // out-of-process /v1 stub — see src/test-support/v1-stub.ts.
 //
 // Migrated from the deleted local-SQLite pattern (getDatabase/resetDatabase/
-// :memory:/EMAILS_DB_PATH). The former "tolerates malformed header JSON" test
-// mutated the local `email_content.headers_json` column with db.run; here we seed
-// the malformed value onto the /v1 message row instead.
+// :memory:/EMAILS_DB_PATH). The former local mapper tolerated malformed header
+// JSON. The self-hosted boundary must instead reject a successful response whose
+// `headers` field is not an object.
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, it, expect } from "bun:test";
 import { startV1Stub, type V1Stub } from "../test-support/v1-stub.js";
@@ -103,8 +103,7 @@ describe("getEmailContent", () => {
     expect(content!.email_id).toBe(emailId);
   });
 
-  it("coerces malformed header JSON to an empty object", async () => {
-    // A /v1 message row whose `headers` is not valid JSON must map to {} (cobj).
+  it("rejects malformed header JSON returned by /v1", async () => {
     await stub.seed({
       messages: [
         {
@@ -121,8 +120,8 @@ describe("getEmailContent", () => {
       ],
     });
 
-    const content = getEmailContent("bad-headers");
-    expect(content?.headers).toEqual({});
-    expect(content?.text_body).toBe("test");
+    expect(() => getEmailContent("bad-headers")).toThrow(
+      /invalid successful response: body\.message\.headers must be a JSON object/i,
+    );
   });
 });

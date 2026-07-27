@@ -21,12 +21,36 @@
 //   - Control endpoints (unauthenticated so a beforeEach can always reset):
 //     POST /v1/__reset  { resources? }  -> replace the whole store (empty clears it)
 //     GET  /v1/__dump                   -> read the whole store back for assertions
+//     GET  /v1/__list_queries?resource= -> query strings of every list request made
 //
 // SAFETY: no secret is ever logged. The API key lives only in the subprocess env
 // and the Authorization header; the helper never prints it.
 
 import { resetSelfHostedConfigCache } from "../db/self-hosted-store.js";
 import { resetMailDataSource } from "../lib/mail-data-source.js";
+import { SELF_HOSTED_RESOURCES, resourceListOrderBy } from "../server/self-hosted/resources.js";
+
+/**
+ * The ORDER BY the real generic list route applies to each `/v1/<resource>`, parsed
+ * into sort terms for the stub.
+ *
+ * Read from the server's own registry rather than restated here, so the stub can
+ * never drift from the order production actually returns. That matters because a
+ * client is allowed to page a window SERVER-side and trust the server to order
+ * first — against a stub that returned insertion order, such a client would look
+ * broken while being right, or look right while being broken.
+ */
+function declaredListOrder(): Record<string, Array<{ column: string; desc: boolean }>> {
+  const order: Record<string, Array<{ column: string; desc: boolean }>> = {};
+  for (const spec of SELF_HOSTED_RESOURCES) {
+    order[spec.path] = resourceListOrderBy(spec)
+      .split(",")
+      .map((term) => term.trim().split(/\s+/))
+      .filter((parts) => parts[0])
+      .map((parts) => ({ column: parts[0]!, desc: (parts[1] ?? "ASC").toUpperCase() === "DESC" }));
+  }
+  return order;
+}
 
 /** Seed data keyed by /v1 resource name (e.g. `{ domains: [...], messages: [...] }`). */
 export type V1StubResources = Record<string, Array<Record<string, unknown>>>;
@@ -51,6 +75,19 @@ export interface V1Stub {
   list(resource: string): Promise<Array<Record<string, unknown>>>;
   /** Read the entire store back from the stub. */
   dump(): Promise<V1StubResources>;
+  /**
+   * Emulate a non-total list ORDER BY: before every list window the named
+   * resources (or all of them) are rotated by `rotate` positions, so a
+   * limit/offset pager sees duplicates and misses rows — the production
+   * `/v1/sources` failure mode. `rotate: 0` restores stable order.
+   */
+  setListOrderInstability(rotate: number, resources?: string[]): Promise<void>;
+  /**
+   * Query strings (without the leading `?`) of every generic list request the
+   * client made for `resource`, in order. Use it to assert a filter was pushed
+   * SERVER-side rather than applied in memory over the whole table.
+   */
+  listQueries(resource: string): Promise<string[]>;
   /** Read the current email-verification token for an address (test helper). */
   verifyToken(email: string): Promise<string | null>;
   /** Mark a signed-up user verified without a token (fixture shortcut). */
@@ -76,11 +113,116 @@ export interface V1Stub {
 }
 
 const DEFAULT_API_KEY = "hasna_emails_stub_key_0123456789";
+const NOW_DEFAULT = "__v1_stub_now__";
+
+const V1_STUB_RESOURCE_SPECS = Object.fromEntries(
+  SELF_HOSTED_RESOURCES.map((spec) => [
+    spec.path,
+    {
+      idColumn: spec.idColumn ?? null,
+      columns: spec.columns.map((column) => ({
+        name: column.name,
+        bool: column.bool === true,
+        int: column.int === true,
+        num: column.num === true,
+        json: column.json === true,
+      })),
+    },
+  ]),
+);
+
+// Actual database defaults for every generic resource. Fields absent here have
+// no SQL default: the fixture factory still projects them as null (or the
+// registry-declared primitive zero value) because SELECT * returns every column.
+const V1_STUB_RESOURCE_DEFAULTS: Record<string, Record<string, unknown>> = {
+  contacts: { send_count: 0, bounce_count: 0, complaint_count: 0, suppressed: false },
+  providers: { active: true },
+  templates: { subject_template: "", metadata: {} },
+  groups: {},
+  sequences: { status: "active" },
+  owners: { type: "human" },
+  "send-keys": {},
+  scheduled: {
+    to_addresses: [],
+    cc_addresses: [],
+    bcc_addresses: [],
+    subject: "",
+    attachments_json: [],
+    status: "pending",
+  },
+  aliases: { target_address: "", protected: false },
+  forwarding: { mode: "app-copy", enabled: true },
+  warming: { target_daily_volume: 0, status: "active" },
+  triage: { priority: 3, confidence: 0, triaged_at: NOW_DEFAULT },
+  provisioning: { detail_json: {} },
+  sources: {
+    name: "",
+    status: "active",
+    settings_json: {},
+    provider_snapshot_json: {},
+  },
+  events: { metadata: {}, occurred_at: NOW_DEFAULT },
+  "email-agents": {
+    enabled: false,
+    always_on: false,
+    provider: "external",
+    apply_labels: true,
+    use_network_tools: true,
+    config_json: {},
+  },
+  "email-agent-runs": {
+    labels_json: [],
+    tool_calls_json: [],
+    output_json: {},
+  },
+  "email-digests": {
+    since: NOW_DEFAULT,
+    until: NOW_DEFAULT,
+    message_count: 0,
+    highlights_json: [],
+    action_items_json: [],
+    important_email_ids_json: [],
+    label_counts_json: {},
+  },
+  "group-members": { vars: "{}", added_at: NOW_DEFAULT },
+  "sequence-steps": {
+    step_number: 0,
+    delay_hours: 0,
+    template_name: "",
+    created_at: NOW_DEFAULT,
+  },
+  "sequence-enrollments": {
+    current_step: 0,
+    status: "active",
+    enrolled_at: NOW_DEFAULT,
+  },
+  "address-ownership-events": { created_at: NOW_DEFAULT },
+  "webhook-receipts": { completed_at: NOW_DEFAULT },
+  "sandbox-emails": {
+    to_addresses: [],
+    cc_addresses: [],
+    bcc_addresses: [],
+    subject: "",
+    attachments_json: "[]",
+    headers_json: "{}",
+    created_at: NOW_DEFAULT,
+  },
+};
+
+const missingResourceDefaults = SELF_HOSTED_RESOURCES
+  .map((spec) => spec.path)
+  .filter((path) => !(path in V1_STUB_RESOURCE_DEFAULTS));
+if (missingResourceDefaults.length > 0) {
+  throw new Error(`V1 stub defaults missing resources: ${missingResourceDefaults.join(", ")}`);
+}
 
 // The stub server. Kept free of backticks and `${}` so it embeds cleanly in this
 // module's template literal. Reads its key + seed from env; announces its port.
 const SERVER_SRC = String.raw`
 const KEY = process.env.V1_STUB_API_KEY || "";
+const DEFAULT_TENANT_ID = "00000000-0000-0000-0000-000000000001";
+const RESOURCE_SPECS = safeParse(process.env.V1_STUB_RESOURCE_SPECS);
+const RESOURCE_DEFAULTS = safeParse(process.env.V1_STUB_RESOURCE_DEFAULTS);
 let store = safeParse(process.env.V1_STUB_SEED);
 // Secret token -> send-key id map. Kept OUT of the store object so it is never
 // returned by __dump (a send token must never leave the server). Cleared on __reset.
@@ -91,6 +233,18 @@ let authUsers = {};      // email -> { password, name, verified, tenants:[{slug,
 let sessions = {};       // emss_ token -> { email, tenant:{slug,name,role} }
 let verifyTokens = {};   // emiv_ token -> email
 let bootstrapped = false;
+// Non-total list-order emulation (see /v1/__list_order). 0 = stable order.
+let listRotate = 0;
+let listRotateResources = null;
+let listRotateCalls = {};
+// Declared ORDER BY per generic resource, injected from the server's own registry
+// (SELF_HOSTED_RESOURCES + resourceListOrderBy) so the stub orders lists the way the
+// real route does. Shape: { resource: [{ column, desc }, ...] }.
+const listOrder = safeParse(process.env.V1_STUB_LIST_ORDER);
+// Query string of every generic list request, per resource (see /v1/__list_queries).
+// Lets a test assert that a client pushed its filters SERVER-side instead of
+// dragging the whole table over and filtering in memory. Cleared on __reset.
+let listQueries = {};
 
 function safeParse(raw) {
   if (!raw) return {};
@@ -107,7 +261,59 @@ function singular(r) {
 }
 function rowsFor(resource) {
   if (!Array.isArray(store[resource])) store[resource] = [];
+  store[resource] = store[resource].map(function (row) {
+    return normalizeResourceRow(resource, row);
+  });
   return store[resource];
+}
+// Apply the resource's DECLARED ORDER BY, the way the real generic list route does
+// (store.ts listResource -> resourceListOrderBy). Without this the stub returned
+// insertion order, so any client that pages a window SERVER-side — trusting the
+// server to order first — could not be tested here at all: the stub would hand back
+// a differently-ordered window and a correct client would look broken. The order
+// terms come from the server's own registry (V1_STUB_LIST_ORDER), so the stub cannot
+// drift from it. Resources with a bespoke handler (messages) and non-registry paths
+// (domains/addresses) have no terms and keep insertion order.
+function sortForList(resource, rows) {
+  const terms = listOrder[resource];
+  if (!Array.isArray(terms) || terms.length === 0) return rows.slice();
+  return rows.slice().sort(function (a, b) {
+    for (const term of terms) {
+      const av = a[term.column];
+      const bv = b[term.column];
+      const aNull = av === null || av === undefined;
+      const bNull = bv === null || bv === undefined;
+      // Postgres default: NULLS LAST for ASC, NULLS FIRST for DESC.
+      if (aNull || bNull) {
+        if (aNull && bNull) continue;
+        return (aNull ? 1 : -1) * (term.desc ? -1 : 1);
+      }
+      // Three-way, so values that merely differ by TYPE but compare equal (1 vs "1")
+      // fall through to the next term instead of making the comparator inconsistent
+      // (returning 1 for both cmp(a,b) and cmp(b,a), which corrupts a sort).
+      const bothNumbers = typeof av === "number" && typeof bv === "number";
+      const l = bothNumbers ? (av as number) : String(av);
+      const r = bothNumbers ? (bv as number) : String(bv);
+      const cmp = l < r ? -1 : l > r ? 1 : 0;
+      if (cmp === 0) continue;
+      return term.desc ? -cmp : cmp;
+    }
+    return 0;
+  });
+}
+// Rotate the ORDERED rows before a list window is taken, so successive pages of one
+// enumeration see different row positions (a non-total ORDER BY). The rotation
+// accumulates across calls within one enumeration, which is what makes a pager see
+// duplicates and miss rows. It is applied to a copy (never the backing store) so the
+// declared order above stays the baseline every window is taken from.
+function rotateForList(resource, rows) {
+  if (!listRotate) return rows;
+  if (listRotateResources && listRotateResources.indexOf(resource) < 0) return rows;
+  const n = rows.length;
+  if (n < 2) return rows;
+  listRotateCalls[resource] = (listRotateCalls[resource] || 0) + 1;
+  const by = (((listRotate * listRotateCalls[resource]) % n) + n) % n;
+  return rows.slice(by).concat(rows.slice(0, by));
 }
 function includesText(value, query) {
   if (!query) return true;
@@ -117,6 +323,172 @@ function hasLabel(row, label) {
   return Array.isArray(row.labels) && row.labels.some(function (v) { return String(v).toLowerCase() === label; });
 }
 function isOutbound(row) { return String(row.direction || "").toLowerCase() === "outbound"; }
+function normalizeMessageRow(row) {
+  const source = row || {};
+  const now = source.created_at || new Date().toISOString();
+  return Object.assign({
+    id: crypto.randomUUID(),
+    direction: "inbound",
+    from_addr: "",
+    to_addrs: [],
+    cc_addrs: [],
+    subject: null,
+    body_text: null,
+    body_html: null,
+    status: "received",
+    provider_message_id: null,
+    message_id: null,
+    in_reply_to: null,
+    received_at: null,
+    is_read: false,
+    is_starred: false,
+    labels: [],
+    headers: {},
+    attachments: [],
+    source_id: null,
+    send_state: "none",
+    send_started_at: null,
+    created_at: now,
+    updated_at: now,
+  }, source, {
+    from_addr: source.from_addr === undefined ? (source.from_address || "") : source.from_addr,
+    to_addrs: source.to_addrs === undefined ? (Array.isArray(source.to_addresses) ? source.to_addresses : []) : source.to_addrs,
+    cc_addrs: source.cc_addrs === undefined ? (Array.isArray(source.cc_addresses) ? source.cc_addresses : []) : source.cc_addrs,
+    bcc_addrs: source.bcc_addrs === undefined ? (Array.isArray(source.bcc_addresses) ? source.bcc_addresses : []) : source.bcc_addrs,
+    received_at: source.received_at === undefined ? (source.sent_at || null) : source.received_at,
+  });
+}
+function normalizeGenericRow(row, defaults) {
+  const source = row || {};
+  const now = source.created_at || new Date().toISOString();
+  return Object.assign({
+    id: crypto.randomUUID(),
+    tenant_id: DEFAULT_TENANT_ID,
+    created_at: now,
+    updated_at: now,
+  }, defaults || {}, source);
+}
+function normalizeDomainRow(row) {
+  const source = row || {};
+  const domain = String(source.domain == null ? "" : source.domain).trim().toLowerCase();
+  return Object.assign(normalizeGenericRow(source, {
+    domain: domain,
+    status: "pending",
+    provider: null,
+    verified: false,
+    notes: null,
+    provisioning_status: "none",
+    purchase_provider: null,
+    dns_provider: "cloudflare",
+    send_provider: null,
+    cf_zone_id: null,
+    registrar: null,
+    nameservers_json: [],
+    mail_from_domain: null,
+    last_error: null,
+    next_check_at: null,
+  }), {
+    domain: domain,
+    nameservers_json: jsonArray(source.nameservers_json),
+  });
+}
+function normalizeAddressRow(row) {
+  const source = row || {};
+  const email = String(source.email == null ? "" : source.email).trim().toLowerCase();
+  const domain = email.includes("@") ? email.slice(email.indexOf("@") + 1) : null;
+  return Object.assign(normalizeGenericRow(source, {
+    email: email,
+    domain: domain,
+    display_name: null,
+    status: "active",
+    verified: false,
+    daily_quota: null,
+    owner_id: null,
+    administrator_id: null,
+    domain_id: null,
+    receive_strategy: null,
+    forward_to: null,
+    routing_rule_id: null,
+    provisioning_status: "none",
+    last_validated_at: null,
+    last_error: null,
+    next_check_at: null,
+  }), {
+    email: email,
+    domain: source.domain === undefined ? domain : source.domain,
+  });
+}
+function own(obj, key) {
+  return Object.prototype.hasOwnProperty.call(obj, key);
+}
+function fixtureDefault(value, now) {
+  if (value === "__v1_stub_now__") return now;
+  if (value && typeof value === "object") return JSON.parse(JSON.stringify(value));
+  return value;
+}
+function jsonArray(value) {
+  if (Array.isArray(value)) return value.slice();
+  if (typeof value !== "string") return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+function normalizeRegisteredResourceRow(resource, row) {
+  const spec = RESOURCE_SPECS[resource];
+  if (!spec || !Array.isArray(spec.columns)) return row;
+  const source = row || {};
+  const now = source.created_at || new Date().toISOString();
+  const key = spec.idColumn || "id";
+  const result = {
+    tenant_id: source.tenant_id || DEFAULT_TENANT_ID,
+    created_at: now,
+    updated_at: source.updated_at || now,
+  };
+  result[key] = source[key] == null
+    ? (key === "id" ? crypto.randomUUID() : "")
+    : source[key];
+  const defaults = RESOURCE_DEFAULTS[resource] || {};
+  for (const column of spec.columns) {
+    if (own(source, column.name)) continue;
+    if (own(defaults, column.name)) {
+      result[column.name] = fixtureDefault(defaults[column.name], now);
+    } else if (column.bool) {
+      result[column.name] = false;
+    } else if (column.int || column.num) {
+      result[column.name] = 0;
+    } else {
+      result[column.name] = null;
+    }
+  }
+  return Object.assign(result, source, {
+    tenant_id: source.tenant_id || DEFAULT_TENANT_ID,
+    created_at: source.created_at || now,
+    updated_at: source.updated_at || now,
+  });
+}
+function normalizeResourceRow(resource, row) {
+  if (resource === "domains") return normalizeDomainRow(row);
+  if (resource === "addresses") return normalizeAddressRow(row);
+  if (resource === "messages") return normalizeMessageRow(row);
+  return normalizeRegisteredResourceRow(resource, row);
+}
+function usesEntityEnvelope(resource) {
+  return resource === "domains" || resource === "addresses" || resource === "messages";
+}
+function resourceKey(resource) {
+  return RESOURCE_SPECS[resource] && RESOURCE_SPECS[resource].idColumn
+    ? RESOURCE_SPECS[resource].idColumn
+    : "id";
+}
+function itemNotFoundError(resource) {
+  if (resource === "domains") return "domain not found";
+  if (resource === "addresses") return "address not found";
+  if (resource === "messages") return "message not found";
+  return resource + " not found";
+}
 
 // ── auth helpers (mirror the server: domain allowlist, slug derivation) ─────────
 // The real server reads its allowlist from EMAILS_AUTH_ALLOWED_EMAIL_DOMAINS and
@@ -208,6 +580,26 @@ function isOwnerAuthorizedFrom(ownerId, from) {
   });
 }
 
+const MESSAGE_CURSOR_PREFIX = "v1-stub:";
+function encodeMessageOffsetCursor(offset) {
+  return MESSAGE_CURSOR_PREFIX + Buffer.from(JSON.stringify({ offset: offset }), "utf8").toString("base64url");
+}
+function decodeMessageOffsetCursor(raw) {
+  if (typeof raw !== "string" || !raw.startsWith(MESSAGE_CURSOR_PREFIX)) return null;
+  const encoded = raw.slice(MESSAGE_CURSOR_PREFIX.length);
+  if (!encoded || !/^[A-Za-z0-9_-]+$/.test(encoded)) return null;
+  try {
+    const decoded = Buffer.from(encoded, "base64url").toString("utf8");
+    if (Buffer.from(decoded, "utf8").toString("base64url") !== encoded) return null;
+    const parsed = JSON.parse(decoded);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    if (Object.keys(parsed).length !== 1 || !Object.prototype.hasOwnProperty.call(parsed, "offset")) return null;
+    return Number.isSafeInteger(parsed.offset) && parsed.offset >= 0 ? parsed.offset : null;
+  } catch {
+    return null;
+  }
+}
+
 function listMessages(params) {
   let ordered = rowsFor("messages").slice().sort(function (a, b) {
     return String(b.received_at || b.created_at || "").localeCompare(String(a.received_at || a.created_at || ""));
@@ -234,8 +626,15 @@ function listMessages(params) {
     });
   }
   const limit = Number(params.get("limit") || "500");
-  const offset = Number(params.get("offset") || "0");
-  return ordered.slice(offset, offset + limit).map(leanListRow);
+  const cursor = params.get("cursor");
+  const cursorOffset = cursor === null ? null : decodeMessageOffsetCursor(cursor);
+  if (cursor !== null && cursorOffset === null) return { error: "cursor is not a valid pagination cursor" };
+  const offset = cursorOffset === null ? Number(params.get("offset") || "0") : cursorOffset;
+  const messages = ordered.slice(offset, offset + limit).map(leanListRow);
+  return {
+    messages: messages,
+    next_cursor: messages.length === limit ? encodeMessageOffsetCursor(offset + messages.length) : null,
+  };
 }
 
 // A /v1 list row as the self-hosted serve actually returns it: bodies, headers
@@ -317,10 +716,34 @@ const server = Bun.serve({
       sessions = {};
       verifyTokens = {};
       bootstrapped = false;
+      listRotate = 0;
+      listRotateResources = null;
+      listRotateCalls = {};
+      listQueries = {};
       return json({ ok: true });
     }
     if (req.method === "GET" && parts[0] === "v1" && parts[1] === "__dump") {
       return json({ resources: store });
+    }
+    // Test-only: the query string of every generic list request for a resource, in
+    // order. A client that filters only in memory shows nothing but limit/offset.
+    if (req.method === "GET" && parts[0] === "v1" && parts[1] === "__list_queries") {
+      const resource = url.searchParams.get("resource") || "";
+      return json({ queries: listQueries[resource] || [] });
+    }
+    // Test-only: emulate a NON-TOTAL list ORDER BY. The real server sorts by
+    // columns that are not unique (e.g. sources by status, type, created_at), and
+    // Postgres may return tied rows in a different order per query — so a
+    // limit/offset pager can see the same row twice and never see others. Rotating
+    // the backing array by \`rotate\` before each list window reproduces exactly
+    // that, which is what makes the "3473 of 3899 rows, reported as a total" bug
+    // testable.
+    if (req.method === "POST" && parts[0] === "v1" && parts[1] === "__list_order") {
+      const body = await req.json().catch(function () { return {}; });
+      listRotate = Number(body.rotate || 0) || 0;
+      listRotateResources = Array.isArray(body.resources) ? body.resources : null;
+      listRotateCalls = {};
+      return json({ ok: true, rotate: listRotate });
     }
     // Test-only: read the current verification token for an email (the real
     // server emails it; here the test needs it to drive verify-email).
@@ -461,6 +884,7 @@ const server = Bun.serve({
           role: session.tenant.role,
           scopes: scopesForRole(session.tenant.role),
           memberships: (user ? user.tenants : []).map(function (t) { return { tenant_id: "tenant-" + t.slug, slug: t.slug, name: t.name, role: t.role }; }),
+          email_identities: [],
         });
       }
       return json({
@@ -510,13 +934,31 @@ const server = Bun.serve({
     if (resource === "messages" && sub === "send" && req.method === "POST") {
       const body = await req.json().catch(function () { return {}; });
       const now = new Date().toISOString();
-      const rec = Object.assign(
-        { id: crypto.randomUUID(), direction: "outbound", status: "sent", is_read: true, labels: [] },
-        body,
-        { message_id: "stub-" + (rowsFor("messages").length + 1), created_at: now, updated_at: now },
-      );
+      const providerMessageId = "stub-provider-" + (rowsFor("messages").length + 1);
+      const rec = normalizeMessageRow({
+        id: crypto.randomUUID(),
+        direction: "outbound",
+        from_addr: body.from || "",
+        to_addrs: Array.isArray(body.to) ? body.to : [],
+        cc_addrs: Array.isArray(body.cc) ? body.cc : [],
+        subject: body.subject == null ? null : String(body.subject),
+        body_text: typeof body.text === "string" ? body.text : null,
+        body_html: typeof body.html === "string" ? body.html : null,
+        status: "sent",
+        provider_message_id: providerMessageId,
+        message_id: "stub-" + (rowsFor("messages").length + 1),
+        is_read: true,
+        send_state: "sent",
+        created_at: now,
+        updated_at: now,
+      });
       rowsFor("messages").push(rec);
-      return json({ message: rec }, 201);
+      return json({
+        message: detailRow(rec),
+        provider: "stub",
+        sent: true,
+        provider_message_id: providerMessageId,
+      }, 202);
     }
     // Send-intent reconciliation: enough of the real contract for CLI tests.
     if (resource === "messages" && sub === "send-intents" && parts[3] === "uncertain" && req.method === "GET") {
@@ -543,7 +985,9 @@ const server = Bun.serve({
       return json({ reconciled: true, outcome: body.outcome, message: target });
     }
     if (resource === "messages" && id === undefined && req.method === "GET") {
-      return json({ messages: listMessages(url.searchParams) });
+      const page = listMessages(url.searchParams);
+      if (page.error) return json({ error: page.error }, 400);
+      return json(page);
     }
     if (resource === "messages" && id !== undefined && parts[3] === "attachments" && parts[4] !== undefined && req.method === "GET") {
       const all = rowsFor("messages");
@@ -579,7 +1023,7 @@ const server = Bun.serve({
         if (pref.length > 1) return json({ error: "ambiguous message id prefix", reason: "ambiguous_id" }, 409);
         rec = pref[0];
       }
-      if (!rec) return json({ error: "message not found" }, 404);
+      if (!rec) return json({ error: itemNotFoundError(resource) }, 404);
       return json({ message: detailRow(rec) });
     }
 
@@ -619,34 +1063,56 @@ const server = Bun.serve({
     const rows = rowsFor(resource);
 
     if (id === undefined && req.method === "GET") {
+      // Mirror the real server's list windowing (src/server/self-hosted/store.ts
+      // clampLimit/clampOffset): a supplied \`limit\` is CAPPED at 500, and
+      // \`offset\` skips rows. Without this the stub handed back every row for any
+      // limit, which hid the fact that a single \`.list({ limit: 1000 })\` can only
+      // ever see 500 rows — the silent-truncation trap behind fabricated totals.
+      if (!Array.isArray(listQueries[resource])) listQueries[resource] = [];
+      listQueries[resource].push(url.search.replace(/^\?/, ""));
+      const rawLimit = url.searchParams.get("limit");
+      const rawOffset = url.searchParams.get("offset");
+      const offset = rawOffset === null || Number.isNaN(Number(rawOffset)) || Number(rawOffset) < 0
+        ? 0
+        : Math.floor(Number(rawOffset));
+      const ordered = rotateForList(resource, sortForList(resource, rows));
+      let windowed = offset > 0 ? ordered.slice(offset) : ordered;
+      if (rawLimit !== null && !Number.isNaN(Number(rawLimit))) {
+        const limit = Math.min(Math.max(1, Math.floor(Number(rawLimit))), 500);
+        windowed = windowed.slice(0, limit);
+      }
+      if (!usesEntityEnvelope(resource)) return json({ items: windowed });
       const out = {};
-      out[resource] = rows;
-      out.items = rows;
+      out[resource] = windowed;
       return json(out);
     }
     if (id === undefined && req.method === "POST") {
       const body = await req.json().catch(function () { return {}; });
       const now = new Date().toISOString();
-      const entity = Object.assign(
-        { id: body && body.id ? body.id : crypto.randomUUID() },
+      let entity = Object.assign(
         body,
         { created_at: (body && body.created_at) || now, updated_at: now },
       );
+      entity = normalizeResourceRow(resource, entity);
       rows.push(entity);
+      if (!usesEntityEnvelope(resource)) return json(entity, 201);
       const wrap = {};
       wrap[singular(resource)] = entity;
       return json(wrap, 201);
     }
     if (id !== undefined && req.method === "GET") {
-      const e = rows.find(function (r) { return String(r.id) === id; });
-      if (!e) return json({ error: "not found" }, 404);
+      const key = resourceKey(resource);
+      const e = rows.find(function (r) { return String(r[key]) === id; });
+      if (!e) return json({ error: itemNotFoundError(resource) }, 404);
+      if (!usesEntityEnvelope(resource)) return json(e);
       const wrap = {};
       wrap[singular(resource)] = e;
       return json(wrap);
     }
     if (id !== undefined && (req.method === "PATCH" || req.method === "PUT")) {
-      const e = rows.find(function (r) { return String(r.id) === id; });
-      if (!e) return json({ error: "not found" }, 404);
+      const key = resourceKey(resource);
+      const e = rows.find(function (r) { return String(r[key]) === id; });
+      if (!e) return json({ error: itemNotFoundError(resource) }, 404);
       const patch = await req.json().catch(function () { return {}; });
       if (resource === "messages") {
         // Mirror the real server updateMessageStatus: a raw labels array is
@@ -662,16 +1128,21 @@ const server = Bun.serve({
         Object.assign(e, rest, { labels: labels, updated_at: new Date().toISOString() });
       } else {
         Object.assign(e, patch, { updated_at: new Date().toISOString() });
+        if (resource === "domains" || resource === "addresses") {
+          Object.assign(e, normalizeResourceRow(resource, e));
+        }
       }
+      if (!usesEntityEnvelope(resource)) return json(e);
       const wrap = {};
       wrap[singular(resource)] = e;
       return json(wrap);
     }
     if (id !== undefined && req.method === "DELETE") {
-      const i = rows.findIndex(function (r) { return String(r.id) === id; });
-      if (i < 0) return json({ error: "not found" }, 404);
+      const key = resourceKey(resource);
+      const i = rows.findIndex(function (r) { return String(r[key]) === id; });
+      if (i < 0) return json({ error: itemNotFoundError(resource) }, 404);
       rows.splice(i, 1);
-      return json({ ok: true });
+      return json({ deleted: true, id: id });
     }
     return json({ error: "method not allowed" }, 405);
   },
@@ -682,6 +1153,8 @@ console.log("PORT=" + server.port);
 const MODE_ENV = "EMAILS_MODE";
 const URL_ENV = "EMAILS_SELF_HOSTED_URL";
 const KEY_ENV = "EMAILS_SELF_HOSTED_API_KEY";
+const SESSION_ENV = "EMAILS_SESSION_TOKEN";
+const CLIENT_ENV_SECRET_ENV = "EMAILS_CLIENT_ENV_SECRET";
 
 /**
  * Start an out-of-process /v1 stub server and return a handle for driving it.
@@ -697,9 +1170,17 @@ const KEY_ENV = "EMAILS_SELF_HOSTED_API_KEY";
 export async function startV1Stub(options: V1StubOptions = {}): Promise<V1Stub> {
   const apiKey = options.apiKey ?? DEFAULT_API_KEY;
   const initialSeed = JSON.stringify(options.seed ?? {});
+  let priorEnv: Record<string, string | undefined> | undefined;
 
   const proc = Bun.spawn(["bun", "-e", SERVER_SRC], {
-    env: { ...process.env, V1_STUB_API_KEY: apiKey, V1_STUB_SEED: initialSeed },
+    env: {
+      ...process.env,
+      V1_STUB_API_KEY: apiKey,
+      V1_STUB_SEED: initialSeed,
+      V1_STUB_RESOURCE_SPECS: JSON.stringify(V1_STUB_RESOURCE_SPECS),
+      V1_STUB_RESOURCE_DEFAULTS: JSON.stringify(V1_STUB_RESOURCE_DEFAULTS),
+      V1_STUB_LIST_ORDER: JSON.stringify(declaredListOrder()),
+    },
     stdout: "pipe",
     stderr: "inherit",
   });
@@ -754,6 +1235,20 @@ export async function startV1Stub(options: V1StubOptions = {}): Promise<V1Stub> 
       const body = (await res.json()) as { resources?: V1StubResources };
       return body.resources ?? {};
     },
+    async setListOrderInstability(rotate, resources) {
+      const res = await fetch(`${baseUrl}/v1/__list_order`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ rotate, resources: resources ?? null }),
+      });
+      if (!res.ok) throw new Error(`v1-stub __list_order failed: HTTP ${res.status}`);
+    },
+    async listQueries(resource) {
+      const res = await fetch(`${baseUrl}/v1/__list_queries?resource=${encodeURIComponent(resource)}`);
+      if (!res.ok) throw new Error(`v1-stub __list_queries failed: HTTP ${res.status}`);
+      const body = (await res.json()) as { queries?: string[] };
+      return body.queries ?? [];
+    },
     async verifyToken(email) {
       const res = await fetch(`${baseUrl}/v1/__verify_token?email=${encodeURIComponent(email)}`);
       if (!res.ok) throw new Error(`v1-stub __verify_token failed: HTTP ${res.status}`);
@@ -777,16 +1272,28 @@ export async function startV1Stub(options: V1StubOptions = {}): Promise<V1Stub> 
       if (!res.ok) throw new Error(`v1-stub __seed_user failed: HTTP ${res.status}`);
     },
     applyEnv() {
+      priorEnv = {
+        [MODE_ENV]: process.env[MODE_ENV],
+        [URL_ENV]: process.env[URL_ENV],
+        [KEY_ENV]: process.env[KEY_ENV],
+        [SESSION_ENV]: process.env[SESSION_ENV],
+        [CLIENT_ENV_SECRET_ENV]: process.env[CLIENT_ENV_SECRET_ENV],
+      };
       process.env[MODE_ENV] = "self_hosted";
       process.env[URL_ENV] = baseUrl;
       process.env[KEY_ENV] = apiKey;
+      delete process.env[SESSION_ENV];
+      delete process.env[CLIENT_ENV_SECRET_ENV];
       resetSelfHostedConfigCache();
       resetMailDataSource();
     },
     clearEnv() {
-      delete process.env[MODE_ENV];
-      delete process.env[URL_ENV];
-      delete process.env[KEY_ENV];
+      for (const key of [MODE_ENV, URL_ENV, KEY_ENV, SESSION_ENV, CLIENT_ENV_SECRET_ENV]) {
+        const value = priorEnv?.[key];
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      priorEnv = undefined;
       resetSelfHostedConfigCache();
       resetMailDataSource();
     },

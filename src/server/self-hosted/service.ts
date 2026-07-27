@@ -33,6 +33,7 @@ import {
   type AddressProvisioningPatch,
   type AddressOwnershipPatch,
 } from "./store.js";
+import { SELF_HOSTED_SEND_ATTACHMENT_LIMITS } from "../../lib/send-attachment-limits.js";
 import {
   MAX_ATTACHMENT_REPAIR_PAGE_ITEMS,
   normalizeAttachmentRepairManifestEntries,
@@ -43,7 +44,16 @@ import {
 } from "./attachment-repair.js";
 import { validateAttachmentRepairReviewedDryRun } from "./attachment-repair-maintenance.js";
 import { emailsSelfHostedOpenApi } from "./openapi.js";
-import { resourceSpecForPath } from "./resources.js";
+import { resourceSpecForPath, type SelfHostedResourceSpec } from "./resources.js";
+import {
+  handleSelfHostedResendWebhook,
+  handleSelfHostedSesWebhook,
+  type FetchS3Object,
+} from "./webhooks.js";
+import {
+  RESEND_INBOUND_V1_WEBHOOK_PATH,
+  SES_INBOUND_V1_WEBHOOK_PATH,
+} from "../webhooks/receivers.js";
 import { classifyProviderSendError, type SelfHostedSender } from "./sender.js";
 import {
   isTenantOperator,
@@ -57,6 +67,12 @@ import type { AuthMailerConfig } from "./auth/mailer.js";
 import type { SelfHostedKeyStore } from "./keys.js";
 import { canonicalSender } from "../../lib/email-address.js";
 import { normalizeAttachmentByteLimit } from "../../lib/attachment-download.js";
+import { canonicalizeSelfHostedPathname } from "../../lib/self-hosted-paths.js";
+
+export {
+  canonicalizeApiV1Pathname,
+  canonicalizeClientDialectPathname,
+} from "../../lib/self-hosted-paths.js";
 
 interface ReadyResult {
   ok: boolean;
@@ -127,6 +143,17 @@ export interface SelfHostedServiceDeps {
       limit: number,
     ): Promise<AttachmentRepairLedgerRun>;
   };
+  /**
+   * Test/embedding seams for the provider webhook receivers. Production leaves
+   * these unset: S3 reads use the canonical client and SNS signatures are
+   * verified against the fetched AWS signing certificate.
+   */
+  webhooks?: {
+    fetchObject?: FetchS3Object;
+    verifySns?: (body: Record<string, unknown>) => Promise<boolean>;
+    fetchUrl?: (url: string) => Promise<unknown>;
+    now?: () => string;
+  };
 }
 
 const MODE = "self_hosted" as const;
@@ -141,6 +168,17 @@ function json(status: number, body: unknown): Response {
 function publicMessage(record: MessageRecord): Omit<MessageRecord, "idempotency_key" | "send_payload_hash"> {
   const { idempotency_key: _key, send_payload_hash: _hash, ...safe } = record;
   return safe;
+}
+
+function missingProviderProofResponse(record: MessageRecord): Response {
+  return json(409, {
+    error: "the send ledger says sent but has no provider message id; reconcile provider evidence before treating it as delivered",
+    reason: "provider_proof_missing",
+    sent: null,
+    message: publicMessage(record),
+    retry_safe: false,
+    reconciliation_required: true,
+  });
 }
 
 function sendIntentMessage(record: MessageRecord): { id: string; send_state: string } {
@@ -549,11 +587,32 @@ async function authenticate(
   return { ok: true, ctx: resolved.ctx, store: deps.store.forTenant(resolved.ctx.tenantId) };
 }
 
-function requireTenantOperator(auth: AuthOk): Response | null {
+/**
+ * Gate an operation that changes WHO may act inside the tenant, not merely what
+ * data the tenant holds. `emails:write` is the ordinary data-write grant and
+ * every role down to `member` holds it, so it must never be sufficient on its
+ * own for a privilege-granting route: an interactive caller needs owner/admin,
+ * and non-interactive automation needs the wildcard operator scope.
+ */
+/**
+ * Apply a resource spec's `writeRequiresOperator` flag to a generic CRUD write.
+ *
+ * The generic `/v1/<resource>` matcher reaches the same columns the bespoke
+ * handlers guard. Without this, role-gating a bespoke route (send-key minting,
+ * address ownership) is decorative: the caller just uses the generic path
+ * instead. Driven off the spec rather than a path list here, so a new
+ * authority-bearing resource is gated where it is declared.
+ */
+function requireResourceWriteAuthority(auth: AuthOk, spec: SelfHostedResourceSpec): Response | null {
+  if (!spec.writeRequiresOperator) return null;
+  return requireTenantOperator(auth, `writing ${spec.path}`);
+}
+
+function requireTenantOperator(auth: AuthOk, operation = "attachment repair"): Response | null {
   return isTenantOperator(auth.ctx)
     ? null
     : json(403, {
-        error: "attachment repair requires a tenant owner, admin, or operator API key",
+        error: `${operation} requires a tenant owner, admin, or operator API key`,
         reason: "operator_required",
       });
 }
@@ -587,13 +646,6 @@ async function resolveMessageIdOrError(
  * rewritten; any other path (including `/health`, `/openapi.json`, `/api/...`
  * that is not `/api/v1`) is returned unchanged.
  */
-export function canonicalizeApiV1Pathname(pathname: string): string {
-  if (pathname === "/api/v1" || pathname.startsWith("/api/v1/")) {
-    return pathname.slice("/api".length);
-  }
-  return pathname;
-}
-
 /**
  * The native client speaks a slightly different DIALECT than this service's
  * canonical `/v1` surface. It targets a few cloud-shaped segment names that map
@@ -614,35 +666,28 @@ export function canonicalizeApiV1Pathname(pathname: string): string {
  * alter method or body. The `/v1/keys/{id}/revoke` POST target is served by the
  * auth router alongside the existing `DELETE /v1/keys/{id}`.
  */
-export function canonicalizeClientDialectPathname(pathname: string): string {
-  if (pathname === "/v1/auth/me") return "/v1/me";
-  if (pathname === "/v1/api-keys") return "/v1/keys";
-  if (pathname.startsWith("/v1/api-keys/")) {
-    return `/v1/keys/${pathname.slice("/v1/api-keys/".length)}`;
-  }
-  return pathname;
-}
-
 /**
  * Route + handle a single request. Returns `null` when the path is not owned by
  * this service (so a caller can fall through to other handlers).
  */
+export interface SelfHostedRequestContext {
+  /** Socket peer address, e.g. `server.requestIP(req)?.address`. Anchors the
+   * per-IP auth rate limits, which must never key on a client-supplied header. */
+  socketAddress?: string | null;
+}
+
 export async function handleSelfHostedRequest(
   deps: SelfHostedServiceDeps,
   req: Request,
+  context: SelfHostedRequestContext = {},
 ): Promise<Response | null> {
   const url = new URL(req.url);
   // Normalize the `/api/v1` alias to `/v1` ONCE, at this single entry point that
   // both computes the route path AND dispatches to the auth router
   // (`handleAuthRoutes`) and `resolveRequestContext` (the verifier path). Rewrite
   // the URL object in place so every downstream path check sees canonical `/v1`.
-  const canonicalPathname = canonicalizeApiV1Pathname(url.pathname);
+  const canonicalPathname = canonicalizeSelfHostedPathname(url.pathname);
   if (canonicalPathname !== url.pathname) url.pathname = canonicalPathname;
-  // Then fold the native client's dialect segments (`/auth/me`, `/api-keys*`)
-  // onto their canonical `/v1` handlers. Pure path rewrite — method + body are
-  // untouched, so this stays a single normalization step at the one entry point.
-  const dialectPathname = canonicalizeClientDialectPathname(url.pathname);
-  if (dialectPathname !== url.pathname) url.pathname = dialectPathname;
   const path = url.pathname.replace(/\/+$/, "") || "/";
   const method = req.method.toUpperCase();
 
@@ -685,9 +730,38 @@ export async function handleSelfHostedRequest(
   const write = ["emails:write"];
 
   try {
+    // ---- provider webhook receivers --------------------------------------
+    // Claimed BEFORE everything else, for two reasons.
+    //
+    // 1. These are the ONLY /v1 routes a provider (AWS SNS, Resend) calls, and a
+    //    provider holds no Hasna API key. They authenticate the CALLER
+    //    cryptographically instead — an AWS SNS message signature against the
+    //    fetched signing certificate plus an exact topic/account allowlist, or a
+    //    Svix HMAC over the raw body. Both fail closed. They must therefore not
+    //    pass through `authenticate`, and the tenant comes from the trusted
+    //    envelope (never a body field) via the global inbound domain map.
+    // 2. The generic resource matcher below only matches two path segments and
+    //    would resolve `webhooks` as a resource name (404, since no such
+    //    resource exists), the same hazard `send-keys/mint` and
+    //    `send-keys/verify` are registered ahead of it to avoid.
+    //
+    // Everything they persist lands in the operator's Postgres through
+    // `deps.store.forTenant(...)`; see ./webhooks.ts.
+    if (path === SES_INBOUND_V1_WEBHOOK_PATH || path === RESEND_INBOUND_V1_WEBHOOK_PATH) {
+      if (method !== "POST") return json(405, { error: "method not allowed" });
+      const webhookDeps = {
+        store: deps.store,
+        env: deps.env ?? process.env,
+        ...(deps.webhooks ?? {}),
+      };
+      return path === SES_INBOUND_V1_WEBHOOK_PATH
+        ? await handleSelfHostedSesWebhook(webhookDeps, req)
+        : await handleSelfHostedResendWebhook(webhookDeps, req);
+    }
+
     // Auth / tenant / membership / key routes are claimed FIRST (they run their
     // own credential resolution + role gates). Returns null when not an auth path.
-    const authResponse = await handleAuthRoutes(deps, req, url);
+    const authResponse = await handleAuthRoutes(deps, req, url, { socketAddress: context.socketAddress ?? null });
     if (authResponse) return authResponse;
 
     // /v1/domains
@@ -789,6 +863,15 @@ export async function handleSelfHostedRequest(
         const auth = await authenticate(deps, req, url, write);
         if (!auth.ok) return auth.response;
         const body = await readJsonBody(req);
+        // Reassigning owner_id/administrator_id decides who may send as this
+        // address — the same authority the send-key mint grants, so it takes the
+        // same gate. Checked BEFORE any write so a refused request leaves no
+        // partial update behind; the ordinary address fields stay writable with
+        // plain `emails:write`.
+        if ("owner_id" in body || "administrator_id" in body) {
+          const operatorError = requireTenantOperator(auth, "reassigning address ownership");
+          if (operatorError) return operatorError;
+        }
         const quota = parseDailyQuota(body);
         if (quota.error) return json(400, { error: quota.error });
         let rec = await auth.store.updateAddress(id, {
@@ -990,7 +1073,9 @@ export async function handleSelfHostedRequest(
       if (!parsedIdempotencyKey.ok) return json(400, { error: parsedIdempotencyKey.error });
       const idempotencyKey = parsedIdempotencyKey.value;
       const rawAttachments = asArray(body.attachments) ?? [];
-      if (rawAttachments.length > 5) return json(400, { error: "at most 5 inline attachments are allowed" });
+      if (rawAttachments.length > SELF_HOSTED_SEND_ATTACHMENT_LIMITS.maxFiles) {
+        return json(400, { error: `at most ${SELF_HOSTED_SEND_ATTACHMENT_LIMITS.maxFiles} inline attachments are allowed` });
+      }
       let attachments: Array<{ filename: string; content: string; content_type: string }>;
       try {
         safeHeaderValue("from", from);
@@ -1004,10 +1089,10 @@ export async function handleSelfHostedRequest(
           const content = typeof item.content === "string" ? item.content : "";
           const bytes = decodeStrictBase64(content).byteLength;
           totalAttachmentBytes += bytes;
-          if (!content || bytes > 512 * 1024) {
+          if (!content || bytes > SELF_HOSTED_SEND_ATTACHMENT_LIMITS.maxBytesPerFile) {
             throw new Error(`attachment ${index} requires base64 content no larger than 512KiB`);
           }
-          if (totalAttachmentBytes > 768 * 1024) {
+          if (totalAttachmentBytes > SELF_HOSTED_SEND_ATTACHMENT_LIMITS.maxTotalBytes) {
             throw new Error("inline attachments may total at most 768KiB");
           }
           const filename = safeHeaderValue("attachment filename", String(item.filename ?? `attachment-${index + 1}`));
@@ -1073,6 +1158,9 @@ export async function handleSelfHostedRequest(
 
       if (!reserved.created) {
         if (reserved.record.send_state === "sent") {
+          if (!reserved.record.provider_message_id?.trim()) {
+            return missingProviderProofResponse(reserved.record);
+          }
           return json(200, {
             message: publicMessage(reserved.record),
             provider: deps.sender.provider,
@@ -1080,7 +1168,7 @@ export async function handleSelfHostedRequest(
             // The original attempt succeeded: say so at the top level, exactly
             // like a fresh success, so callers have ONE place to check.
             sent: true,
-            ...(reserved.record.provider_message_id ? { provider_message_id: reserved.record.provider_message_id } : {}),
+            provider_message_id: reserved.record.provider_message_id,
           });
         }
         if (reserved.record.send_state === "sending") {
@@ -1156,12 +1244,15 @@ export async function handleSelfHostedRequest(
       if (!claimed) {
         const latest = await auth.store.getMessage(reserved.record.id);
         if (latest?.send_state === "sent") {
+          if (!latest.provider_message_id?.trim()) {
+            return missingProviderProofResponse(latest);
+          }
           return json(200, {
             message: publicMessage(latest),
             provider: deps.sender.provider,
             idempotent_replay: true,
             sent: true,
-            ...(latest.provider_message_id ? { provider_message_id: latest.provider_message_id } : {}),
+            provider_message_id: latest.provider_message_id,
           });
         }
         if (latest?.send_state === "cancelled") {
@@ -1236,6 +1327,7 @@ export async function handleSelfHostedRequest(
           sent: null,
           message: publicMessage(uncertain ?? claimed),
           retry_safe: false,
+          reconciliation_required: true,
         });
       }
       try {
@@ -1779,10 +1871,21 @@ export async function handleSelfHostedRequest(
     // generic /v1/send-keys resource stays summary-only.
 
     // POST /v1/send-keys/mint — issue a scoped send key (token returned ONCE).
+    //
+    // Owner/admin (or an operator API key) ONLY. The send key is the control that
+    // decides which of the tenant's from-addresses a holder may send as, so
+    // minting one for a caller-supplied `owner_id` GRANTS send authority. With
+    // only `emails:write` — which `member` holds — a member could mint a key for
+    // another owner and send as that owner's addresses, i.e. mint their way
+    // around the very check the send key exists to enforce. `owners` rows carry
+    // no link back to `users`, so "the caller is that owner" is not expressible
+    // here; the role gate is the boundary that is.
     if (path === "/v1/send-keys/mint") {
       if (method !== "POST") return json(405, { error: "method not allowed" });
       const auth = await authenticate(deps, req, url, write);
       if (!auth.ok) return auth.response;
+      const operatorError = requireTenantOperator(auth, "minting a send key");
+      if (operatorError) return operatorError;
       const body = await readJsonBody(req);
       const ownerId = String(body.owner_id ?? "").trim();
       if (!ownerId) return json(400, { error: "owner_id is required" });
@@ -1837,6 +1940,8 @@ export async function handleSelfHostedRequest(
           if (method === "POST") {
             const auth = await authenticate(deps, req, url, write);
             if (!auth.ok) return auth.response;
+            const specError = requireResourceWriteAuthority(auth, spec);
+            if (specError) return specError;
             const body = await readJsonBody(req);
             return json(201, await auth.store.createResource(spec, body));
           }
@@ -1851,6 +1956,8 @@ export async function handleSelfHostedRequest(
         if (method === "PATCH" || method === "PUT") {
           const auth = await authenticate(deps, req, url, write);
           if (!auth.ok) return auth.response;
+          const specError = requireResourceWriteAuthority(auth, spec);
+          if (specError) return specError;
           const body = await readJsonBody(req);
           const rec = await auth.store.updateResource(spec, id, body);
           return rec ? json(200, rec) : json(404, { error: `${spec.path} not found` });
@@ -1858,6 +1965,8 @@ export async function handleSelfHostedRequest(
         if (method === "DELETE") {
           const auth = await authenticate(deps, req, url, write);
           if (!auth.ok) return auth.response;
+          const specError = requireResourceWriteAuthority(auth, spec);
+          if (specError) return specError;
           return (await auth.store.deleteResource(spec, id))
             ? json(200, { deleted: true, id })
             : json(404, { error: `${spec.path} not found` });

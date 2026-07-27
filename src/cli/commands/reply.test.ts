@@ -91,11 +91,11 @@ describe("forward command", () => {
 
     const sent = await outboundRows();
     expect(sent).toHaveLength(1);
-    expect(sent[0]).toMatchObject({ from: "me@acme.com", subject: "Fwd: Quarterly report" });
-    expect(sent[0]!["to"]).toEqual(["boss@acme.com"]);
+    expect(sent[0]).toMatchObject({ from_addr: "me@acme.com", subject: "Fwd: Quarterly report" });
+    expect(sent[0]!["to_addrs"]).toEqual(["boss@acme.com"]);
     // Prepended note + quoted original both carried in the re-sent body.
-    expect(String(sent[0]!["text"])).toContain("FYI");
-    expect(String(sent[0]!["text"])).toContain("Here are the numbers.");
+    expect(String(sent[0]!["body_text"])).toContain("FYI");
+    expect(String(sent[0]!["body_text"])).toContain("Here are the numbers.");
   });
 
   it("keeps an existing Fwd: prefix instead of doubling it", async () => {
@@ -139,9 +139,9 @@ describe("reply command", () => {
 
     const sent = await outboundRows();
     expect(sent).toHaveLength(1);
-    expect(sent[0]).toMatchObject({ from: "me@acme.com", subject: "Re: Question" });
-    expect(sent[0]!["to"]).toEqual(["ext@ext.com"]);
-    expect(String(sent[0]!["text"])).toContain("Yes, shipping today.");
+    expect(sent[0]).toMatchObject({ from_addr: "me@acme.com", subject: "Re: Question" });
+    expect(sent[0]!["to_addrs"]).toEqual(["ext@ext.com"]);
+    expect(String(sent[0]!["body_text"])).toContain("Yes, shipping today.");
   });
 
   it("reply-all folds in the other recipients, excluding the sender and de-duping", async () => {

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,8 +10,21 @@ import {
   persistClientEnvSessionToken,
 } from "./client-env.js";
 
-const ORIGINAL_PATH = process.env["PATH"];
-const ORIGINAL_HOME = process.env["HOME"];
+let INHERITED_PROCESS_ENV: NodeJS.ProcessEnv;
+let ORIGINAL_PATH: string | undefined;
+let ORIGINAL_HOME: string | undefined;
+function captureInheritedProcessEnv(): void {
+  INHERITED_PROCESS_ENV = { ...process.env };
+  ORIGINAL_PATH = process.env["PATH"];
+  ORIGINAL_HOME = process.env["HOME"];
+}
+function restoreInheritedProcessEnv(): void {
+  for (const key of Object.keys(process.env)) {
+    if (!Object.prototype.hasOwnProperty.call(INHERITED_PROCESS_ENV, key)) delete process.env[key];
+  }
+  Object.assign(process.env, INHERITED_PROCESS_ENV);
+}
+
 const ENV_KEYS = [
   "EMAILS_MODE",
   "HASNA_EMAILS_MODE",
@@ -109,8 +122,14 @@ exit 2
   return storePath;
 }
 
-beforeEach(resetEnv);
-afterEach(resetEnv);
+beforeEach(() => {
+  captureInheritedProcessEnv();
+  resetEnv();
+});
+afterEach(() => {
+  resetEnv();
+  restoreInheritedProcessEnv();
+});
 
 describe("Emails client-env loader", () => {
   it("runs secrets get with a scrubbed environment", () => {

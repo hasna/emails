@@ -17,7 +17,12 @@ const SENSITIVE_KEY_PARTS = [
   "credential",
 ];
 
-function isSensitiveKey(key: string): boolean {
+/**
+ * Whether a key name looks credential-bearing. Exported so the config
+ * write-allowlist can assert it never admits one (defense in depth: the
+ * allowlist is the gate, this is the trip-wire if someone widens it).
+ */
+export function isSensitiveKey(key: string): boolean {
   const normalized = key
     .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
     .replace(/[-\s]/g, "_")

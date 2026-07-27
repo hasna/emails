@@ -362,12 +362,30 @@ fi
 workflow_dir="$repo/.github/workflows"
 workflow="$workflow_dir/terraform-aws-validate.yml"
 product_workflow="$workflow_dir/ci.yml"
+provenance_workflow="$workflow_dir/package-provenance.yml"
+changelog="$repo/CHANGELOG.md"
 test -f "$workflow" || { echo "CI-safe Terraform workflow missing" >&2; exit 1; }
 test -f "$product_workflow" || { echo "product CI workflow missing" >&2; exit 1; }
+test -f "$provenance_workflow" || { echo "package provenance workflow missing" >&2; exit 1; }
+test -f "$changelog" || { echo "changelog missing" >&2; exit 1; }
 
-workflow_count="$(find "$workflow_dir" -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) | wc -l | tr -d '[:space:]')"
-if [ "$workflow_count" != "2" ]; then
-  echo "only ci.yml and terraform-aws-validate.yml are allowed" >&2
+expected_workflows='ci.yml
+package-provenance.yml
+terraform-aws-validate.yml'
+actual_workflows="$(
+  find "$workflow_dir" -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) \
+    | sed 's#^.*/##' \
+    | sort
+)"
+if [ "$actual_workflows" != "$expected_workflows" ]; then
+  echo "only ci.yml, package-provenance.yml, and terraform-aws-validate.yml are allowed" >&2
+  exit 1
+fi
+
+expected_provenance_sha256='706c636d7b60059f6e8ce52229bfb723c0c9a2c61cb4a462b3d6ead24a46232f'
+actual_provenance_sha256="$(sha256sum "$provenance_workflow" | awk '{ print $1 }')"
+if [ "$actual_provenance_sha256" != "$expected_provenance_sha256" ]; then
+  echo "package provenance workflow must match the exact reviewed manual attestation artifact" >&2
   exit 1
 fi
 
@@ -383,7 +401,7 @@ grep -Fq 'terraform providers lock -platform=darwin_arm64 -platform=linux_amd64'
 
 if grep -En 'id-token:[[:space:]]*write|configure-aws-credentials|amazon-ecr-login|role-to-assume|aws configure' \
   "$workflow" "$product_workflow" >/dev/null; then
-  echo "workflows must not request AWS credentials or OIDC" >&2
+  echo "validation workflows must not request AWS credentials or OIDC" >&2
   exit 1
 fi
 
@@ -395,11 +413,11 @@ fi
 
 if grep -En '(^|[^[:alnum:]_])(terraform|tofu)[[:space:]]+(apply|destroy)([^[:alnum:]_-]|$)|(^|[^[:alnum:]_])(npm|bun|pnpm|yarn)[[:space:]]+publish([^[:alnum:]_-]|$)|ecs[[:space:]]+update-service' \
   "$workflow" "$product_workflow" >/dev/null; then
-  echo "workflows must not apply, destroy, publish, or deploy" >&2
+  echo "validation workflows must not apply, destroy, publish, or deploy" >&2
   exit 1
 fi
 
-for allowed_workflow in "$workflow" "$product_workflow"; do
+for allowed_workflow in "$workflow" "$product_workflow" "$provenance_workflow"; do
   uses_count="$(grep -Ec 'uses:' "$allowed_workflow" || true)"
   pinned_uses_count="$(grep -Ec 'uses:[[:space:]]+[^@[:space:]]+@[0-9a-f]{40}([[:space:]]+#.*)?$' "$allowed_workflow" || true)"
   if [ "$uses_count" != "$pinned_uses_count" ]; then
@@ -407,6 +425,223 @@ for allowed_workflow in "$workflow" "$product_workflow"; do
     exit 1
   fi
 done
+
+provenance_trigger="$(
+  awk '
+    /^"on":[[:space:]]*$/ { capture = 1 }
+    capture { print }
+    capture && /^jobs:[[:space:]]*$/ { exit }
+  ' "$provenance_workflow"
+)"
+expected_provenance_trigger='"on":
+  workflow_dispatch:
+
+jobs:'
+if [ "$(grep -Fxc '"on":' "$provenance_workflow" || true)" != "1" ] \
+  || [ "$(grep -Fxc 'jobs:' "$provenance_workflow" || true)" != "1" ] \
+  || [ "$provenance_trigger" != "$expected_provenance_trigger" ]; then
+  echo "package provenance must be manual workflow_dispatch only" >&2
+  exit 1
+fi
+
+provenance_job_ids="$(
+  awk '
+    /^jobs:[[:space:]]*$/ { in_jobs = 1; next }
+    in_jobs && /^  [A-Za-z0-9_-]+:[[:space:]]*$/ {
+      job_id = $0
+      sub(/^  /, "", job_id)
+      sub(/:[[:space:]]*$/, "", job_id)
+      print job_id
+    }
+  ' "$provenance_workflow"
+)"
+if [ "$provenance_job_ids" != "attest-published-package" ]; then
+  echo "package provenance must contain only the guarded attestation job" >&2
+  exit 1
+fi
+
+provenance_guard="    if: github.repository == 'hasna/emails' && github.ref == 'refs/heads/main'"
+if [ "$(grep -Fxc "$provenance_guard" "$provenance_workflow" || true)" != "1" ]; then
+  echo "package provenance must have the exact hasna/emails main-branch guard" >&2
+  exit 1
+fi
+
+if [ "$(grep -Ec '^[[:space:]]*permissions:[[:space:]]*$' "$provenance_workflow" || true)" != "1" ]; then
+  echo "package provenance must declare exactly one permissions block" >&2
+  exit 1
+fi
+provenance_permissions="$(
+  awk '
+    /^    permissions:[[:space:]]*$/ { capture = 1; next }
+    capture && /^      [a-z-]+:[[:space:]]*[a-z]+[[:space:]]*$/ { print; next }
+    capture { exit }
+  ' "$provenance_workflow"
+)"
+expected_provenance_permissions='      actions: read
+      contents: read
+      id-token: write
+      attestations: write'
+if [ "$provenance_permissions" != "$expected_provenance_permissions" ]; then
+  echo "package provenance permissions must be limited to actions/contents read and attestation identity writes" >&2
+  exit 1
+fi
+
+expected_provenance_steps='Verify source and CI evidence
+Download and verify published tarball
+Create release evidence predicate
+Attest downloaded npm tarball'
+actual_provenance_steps="$(
+  sed -n 's/^      - name: //p' "$provenance_workflow"
+)"
+if [ "$actual_provenance_steps" != "$expected_provenance_steps" ]; then
+  echo "package provenance must contain only the exact reviewed verification and attestation steps" >&2
+  exit 1
+fi
+
+if [ "$(grep -Ec '^[[:space:]]+uses:' "$provenance_workflow" || true)" != "1" ] \
+  || [ "$(grep -Fxc '        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0' "$provenance_workflow" || true)" != "1" ]; then
+  echo "package provenance must use only the exact actions/attest v4.2.0 commit" >&2
+  exit 1
+fi
+
+if [ "$(grep -Fxc '          GH_TOKEN: ${{ github.token }}' "$provenance_workflow" || true)" != "1" ] \
+  || [ "$(grep -Eoc '\$\{\{[^}]+\}\}' "$provenance_workflow" || true)" != "1" ] \
+  || grep -Ein 'secrets([.]|\[)|set[[:space:]]+-x|printenv|(^|[[:space:]])env([[:space:]]|$)' \
+    "$provenance_workflow" >/dev/null; then
+  echo "package provenance must expose only github.token to gh without printing token-bearing environment" >&2
+  exit 1
+fi
+
+for provenance_live_verification_contract in \
+  "readonly repository='hasna/emails'" \
+  "readonly source_merge_commit='fe61a466a28115f33efda1ecc7632dbc7c6525c7'" \
+  "readonly ci_run_id='30212897836'" \
+  'command -v gh >/dev/null' \
+  'command -v jq >/dev/null' \
+  'verification_dir="$(mktemp -d)"' \
+  'readonly verification_dir' \
+  'trap cleanup_verification EXIT' \
+  '"/repos/${repository}/commits/${source_merge_commit}"' \
+  '"/repos/${repository}/actions/runs/${ci_run_id}"' \
+  '.sha == $source_merge_commit' \
+  '.id == $ci_run_id' \
+  '.repository.full_name == $repository' \
+  '.head_repository.full_name == $repository' \
+  '.head_sha == $source_merge_commit' \
+  '.status == "completed"' \
+  '.conclusion == "success"' \
+  '.event == "push"' \
+  '.head_branch == "main"' \
+  '.path == ".github/workflows/ci.yml"'; do
+  grep -Fq -- "$provenance_live_verification_contract" "$provenance_workflow" || {
+    echo "package provenance live source/CI verification missing: $provenance_live_verification_contract" >&2
+    exit 1
+  }
+done
+if grep -Fq 'readonly verification_dir="$(mktemp -d)"' "$provenance_workflow"; then
+  echo "package provenance must preserve temporary-directory assignment failures" >&2
+  exit 1
+fi
+if [ "$(grep -Ec '^[[:space:]]*gh api[[:space:]]*\\$' "$provenance_workflow" || true)" != "2" ] \
+  || [ "$(grep -Ec '^[[:space:]]*jq --exit-status' "$provenance_workflow" || true)" != "3" ]; then
+  echo "package provenance must perform exactly two GitHub API reads and three jq validations" >&2
+  exit 1
+fi
+
+for provenance_download_contract in \
+  "readonly tarball_url='https://registry.npmjs.org/@hasna/emails/-/emails-1.3.2.tgz'" \
+  'curl --disable' \
+  '--fail' \
+  "--proto '=https'" \
+  "--proto-redir '=https'" \
+  '--tlsv1.2' \
+  '--output "$artifact"' \
+  '"$tarball_url"'; do
+  grep -Fq -- "$provenance_download_contract" "$provenance_workflow" || {
+    echo "package provenance TLS registry download contract missing: $provenance_download_contract" >&2
+    exit 1
+  }
+done
+if [ "$(grep -Ec '^[[:space:]]*curl([[:space:]]|$)' "$provenance_workflow" || true)" != "1" ] \
+  || grep -En -- 'http://|--request|--data|--form|--upload-file|--user|--header|(^|[[:space:]])-[[:alpha:]]*k[[:alpha:]]*([[:space:]]|\\|$)|(^|[[:space:]])--insecure([[:space:]]|\\|$)' \
+    "$provenance_workflow" >/dev/null; then
+  echo "package provenance must perform one read-only TLS registry download" >&2
+  exit 1
+fi
+
+for provenance_integrity_contract in \
+  "readonly expected_sha256='8f5e166e73ae7aebeb49a5eeae6dd199d0be63a9931a35981373e67b9ccfe431'" \
+  "readonly expected_shasum='87c933255f5e95e7db8bf30bb606e07c1132f01e'" \
+  "readonly expected_integrity='sha512-nGwS4AoZH2NwTV8Xoop2XupAubyq4bHuawYZX5itCjVwa/3U4hE6t+tBdnKZ9p72/BuUxmAL4iLEZ79eWlkCHg=='" \
+  'sha256sum --check --strict' \
+  'sha1sum --check --strict' \
+  'actual_integrity="sha512-$(openssl dgst -sha512 -binary "$artifact" | openssl base64 -A)"' \
+  'if [[ "$actual_integrity" != "$expected_integrity" ]]; then'; do
+  grep -Fq -- "$provenance_integrity_contract" "$provenance_workflow" || {
+    echo "package provenance npm digest verification missing: $provenance_integrity_contract" >&2
+    exit 1
+  }
+done
+
+for provenance_predicate_contract in \
+  "readonly predicate='attestation-input/npm-release-evidence.json'" \
+  'cat >"$predicate" <<'\''JSON'\''' \
+  '"kind": "npm-release-evidence"' \
+  '"subjectBuiltByThisWorkflow": false' \
+  '"subjectPublishedByThisWorkflow": false' \
+  'jq --exit-status' \
+  'subject-path: attestation-input/emails-1.3.2.tgz' \
+  'predicate-type: https://github.com/hasna/emails/attestations/npm-release-evidence/v1' \
+  'predicate-path: attestation-input/npm-release-evidence.json' \
+  'push-to-registry: false' \
+  'create-storage-record: false'; do
+  grep -Fq -- "$provenance_predicate_contract" "$provenance_workflow" || {
+    echo "package provenance custom predicate contract missing: $provenance_predicate_contract" >&2
+    exit 1
+  }
+done
+
+release_132_section="$(
+  awk '
+    /^## 1[.]3[.]2 [(]2026-07-26[)]$/ { capture = 1 }
+    capture && /^## / && $0 != "## 1.3.2 (2026-07-26)" { exit }
+    capture { print }
+  ' "$changelog"
+)"
+unreleased_section="$(
+  awk '
+    /^## \[Unreleased\]$/ { capture = 1 }
+    capture && /^## / && $0 != "## [Unreleased]" { exit }
+    capture { print }
+  ' "$changelog"
+)"
+expected_release_132_section='## 1.3.2 (2026-07-26)
+
+- fail closed on malformed JSON, wrong response envelopes, and missing required
+  fields from successful self-hosted API responses before repositories, mailbox
+  status/context/sync projections, or the generated SDK can synthesize empty
+  rows, lists, or counts.
+- share one config-driven wire validator across the synchronous resource store,
+  asynchronous inbox data source, and generated `@hasna/emails/selfhost` client;
+  validation errors identify the endpoint and invalid field without including
+  credentials or response-body contents.'
+expected_unreleased_sha256='40e9d4fc08e67cd4f7d38b053c5c9031dd3e8e403d68bc7e40f83a87bc00ba20'
+actual_unreleased_sha256="$(printf '%s' "$unreleased_section" | sha256sum | awk '{ print $1 }')"
+unreleased_line="$(grep -Fn '## [Unreleased]' "$changelog" | cut -d: -f1)"
+release_132_line="$(grep -Fn '## 1.3.2 (2026-07-26)' "$changelog" | cut -d: -f1)"
+release_131_line="$(grep -Fn '## 1.3.1 (2026-07-26)' "$changelog" | cut -d: -f1)"
+if [ "$(grep -Fxc '## [Unreleased]' "$changelog" || true)" != "1" ] \
+  || [ "$(grep -Fxc '## 1.3.2 (2026-07-26)' "$changelog" || true)" != "1" ] \
+  || [ -z "$unreleased_line" ] \
+  || [ -z "$release_132_line" ] \
+  || [ -z "$release_131_line" ] \
+  || [ "$unreleased_line" -ge "$release_132_line" ] \
+  || [ "$release_132_line" -ge "$release_131_line" ] \
+  || [ "$actual_unreleased_sha256" != "$expected_unreleased_sha256" ] \
+  || [ "$release_132_section" != "$expected_release_132_section" ]; then
+  echo "1.3.2 changelog must contain exactly its two release bullets below the full Unreleased section" >&2
+  exit 1
+fi
 
 for runbook in "$repo/docs/DEPLOYMENT_CUTOVER.md" "$root/README.md"; do
   for phrase in \

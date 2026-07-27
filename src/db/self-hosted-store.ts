@@ -18,6 +18,13 @@
 import { spawnSync } from "node:child_process";
 import { EMAILS_SESSION_TOKEN_ENV, loadEmailsClientEnvSecret } from "../lib/client-env.js";
 import { getEmailsMode } from "../lib/mode.js";
+import {
+  parseSelfHostedErrorJson,
+  parseSelfHostedSuccessJson,
+  projectSelfHostedErrorBody,
+  SelfHostedResponseSizeError,
+  validateSelfHostedSdkSuccessResponse,
+} from "../lib/self-hosted-wire.js";
 
 const APP = "emails";
 
@@ -26,9 +33,8 @@ export class SelfHostedHttpError extends Error {
     readonly status: number,
     readonly method: string,
     readonly path: string,
-    readonly bodyText: string,
   ) {
-    super(`Self-hosted ${method} ${path} failed: HTTP ${status}${bodyText ? ` — ${bodyText.slice(0, 300)}` : ""}`);
+    super(`Self-hosted ${method} ${path} failed: HTTP ${status}`);
     this.name = "SelfHostedHttpError";
   }
 }
@@ -180,6 +186,9 @@ function positiveIntEnv(name: string, fallback: number): number {
 // Resolved per-call so an env override always applies (and tests can shorten it).
 function connectTimeoutSeconds(): number { return positiveIntEnv("EMAILS_SELF_HOSTED_HTTP_CONNECT_TIMEOUT", 10); }
 function maxTimeSeconds(): number { return positiveIntEnv("EMAILS_SELF_HOSTED_HTTP_TIMEOUT", 30); }
+function maxResponseBytes(): number {
+  return positiveIntEnv("EMAILS_SELF_HOSTED_HTTP_MAX_RESPONSE_BYTES", 8 * 1024 * 1024);
+}
 
 /**
  * Thrown when the curl transport itself fails (DNS/connect failure or a timeout)
@@ -225,6 +234,7 @@ function httpRequest(config: SelfHostedConfig, method: string, path: string, bod
   const url = `${config.baseUrl}${path}`;
   const connectTimeout = connectTimeoutSeconds();
   const maxTime = maxTimeSeconds();
+  const responseLimit = maxResponseBytes();
   const lines = [
     `url = ${curlConfigValue(url)}`,
     `request = ${curlConfigValue(method)}`,
@@ -232,6 +242,7 @@ function httpRequest(config: SelfHostedConfig, method: string, path: string, bod
     // Bounded, fail-loud transport (never hang indefinitely).
     `connect-timeout = ${connectTimeout}`,
     `max-time = ${maxTime}`,
+    `max-filesize = ${responseLimit}`,
     `silent`,
     `show-error`,
   ];
@@ -249,14 +260,20 @@ function httpRequest(config: SelfHostedConfig, method: string, path: string, bod
     encoding: "utf-8",
     env: curlProcessEnv(),
     input: lines.join("\n"),
-    maxBuffer: 128 * 1024 * 1024,
+    maxBuffer: responseLimit + 64 * 1024,
     // Hard ceiling in case curl itself wedges: kill just past its own max-time.
     timeout: (maxTime + connectTimeout + 5) * 1000,
   });
   if (proc.error) {
+    if ((proc.error as NodeJS.ErrnoException).code === "ENOBUFS") {
+      throw new SelfHostedResponseSizeError(method, path, responseLimit);
+    }
     // spawnSync's own timeout (ETIMEDOUT) or a spawn failure — surface as a
     // transport error, not a mysterious throw.
     throw new SelfHostedTransportError(method, path, (proc.error as Error).message || "curl could not run");
+  }
+  if (proc.status === 63) {
+    throw new SelfHostedResponseSizeError(method, path, responseLimit);
   }
   const out = proc.stdout ?? "";
   const nl = out.lastIndexOf("\n");
@@ -276,26 +293,10 @@ function httpRequest(config: SelfHostedConfig, method: string, path: string, bod
   return { status, body: bodyText };
 }
 
-function parseJson(text: string): unknown {
-  if (!text || !text.trim()) return null;
-  try {
-    return JSON.parse(text);
-  } catch {
-    return null;
-  }
-}
-
-const LIST_KEYS = ["items", "data", "results", "rows", "records"];
-
-function extractList(raw: unknown, resource: string): unknown[] {
-  if (Array.isArray(raw)) return raw;
-  if (raw && typeof raw === "object") {
-    const obj = raw as Record<string, unknown>;
-    for (const key of [resource, ...LIST_KEYS]) {
-      if (Array.isArray(obj[key])) return obj[key] as unknown[];
-    }
-  }
-  return [];
+function extractValidatedList(raw: unknown, resource: string): Record<string, unknown>[] {
+  const obj = raw as Record<string, unknown>;
+  const rows = obj[resource] ?? obj["items"];
+  return rows as Record<string, unknown>[];
 }
 
 /**
@@ -326,6 +327,15 @@ function singularOf(resource: string): string {
     : r.endsWith("s")
       ? r.slice(0, -1)
       : r;
+}
+
+function validateNotFoundResponse(method: "GET" | "DELETE", path: string, body: string): void {
+  projectSelfHostedErrorBody(
+    method,
+    path,
+    404,
+    parseSelfHostedErrorJson(body, { status: 404, method, path }),
+  );
 }
 
 export interface SelfHostedResourceStore {
@@ -363,32 +373,52 @@ export function selfHostedStoreFor(resource: string): SelfHostedResourceStore {
     resource: clean,
     baseUrl: config.baseUrl,
     list(query) {
-      const { status, body } = httpRequest(config, "GET", `${base}${encodeQuery(query)}`);
-      if (status < 200 || status >= 300) throw new SelfHostedHttpError(status, "GET", base, body);
-      return extractList(parseJson(body), clean) as Record<string, unknown>[];
+      const path = `${base}${encodeQuery(query)}`;
+      const { status, body } = httpRequest(config, "GET", path);
+      if (status < 200 || status >= 300) throw new SelfHostedHttpError(status, "GET", base);
+      const raw = parseSelfHostedSuccessJson(body, { status, method: "GET", path });
+      validateSelfHostedSdkSuccessResponse("GET", path, status, raw);
+      return extractValidatedList(raw, clean);
     },
     get(id) {
-      const { status, body } = httpRequest(config, "GET", `${base}/${encodeURIComponent(id)}`);
-      if (status === 404) return null;
-      if (status < 200 || status >= 300) throw new SelfHostedHttpError(status, "GET", `${base}/${id}`, body);
-      return unwrapSingle(parseJson(body), singular);
+      const path = `${base}/${encodeURIComponent(id)}`;
+      const { status, body } = httpRequest(config, "GET", path);
+      if (status === 404) {
+        validateNotFoundResponse("GET", path, body);
+        return null;
+      }
+      if (status < 200 || status >= 300) throw new SelfHostedHttpError(status, "GET", path);
+      const raw = parseSelfHostedSuccessJson(body, { status, method: "GET", path });
+      validateSelfHostedSdkSuccessResponse("GET", path, status, raw);
+      return unwrapSingle(raw, singular)!;
     },
     create(body) {
       const res = httpRequest(config, "POST", base, body);
-      if (res.status < 200 || res.status >= 300) throw new SelfHostedHttpError(res.status, "POST", base, res.body);
-      return unwrapSingle(parseJson(res.body), singular) ?? {};
+      if (res.status < 200 || res.status >= 300) throw new SelfHostedHttpError(res.status, "POST", base);
+      const raw = parseSelfHostedSuccessJson(res.body, { status: res.status, method: "POST", path: base });
+      validateSelfHostedSdkSuccessResponse("POST", base, res.status, raw);
+      return (unwrapSingle(raw, singular) ?? raw) as Record<string, unknown>;
     },
     update(id, patch, method = "PATCH") {
-      const res = httpRequest(config, method, `${base}/${encodeURIComponent(id)}`, patch);
+      const path = `${base}/${encodeURIComponent(id)}`;
+      const res = httpRequest(config, method, path, patch);
       if (res.status < 200 || res.status >= 300) {
-        throw new SelfHostedHttpError(res.status, method, `${base}/${id}`, res.body);
+        throw new SelfHostedHttpError(res.status, method, path);
       }
-      return unwrapSingle(parseJson(res.body), singular) ?? {};
+      const raw = parseSelfHostedSuccessJson(res.body, { status: res.status, method, path });
+      validateSelfHostedSdkSuccessResponse(method, path, res.status, raw);
+      return unwrapSingle(raw, singular)!;
     },
     del(id) {
-      const { status, body } = httpRequest(config, "DELETE", `${base}/${encodeURIComponent(id)}`);
-      if (status === 404) return false;
-      if (status < 200 || status >= 300) throw new SelfHostedHttpError(status, "DELETE", `${base}/${id}`, body);
+      const path = `${base}/${encodeURIComponent(id)}`;
+      const { status, body } = httpRequest(config, "DELETE", path);
+      if (status === 404) {
+        validateNotFoundResponse("DELETE", path, body);
+        return false;
+      }
+      if (status < 200 || status >= 300) throw new SelfHostedHttpError(status, "DELETE", path);
+      const raw = parseSelfHostedSuccessJson(body, { status, method: "DELETE", path });
+      validateSelfHostedSdkSuccessResponse("DELETE", path, status, raw);
       return true;
     },
   };
@@ -406,7 +436,6 @@ export function selfHostedStoreFor(resource: string): SelfHostedResourceStore {
 export interface SelfHostedApiResult {
   status: number;
   json: unknown;
-  bodyText: string;
 }
 
 export interface SelfHostedApiRequestOptions {
@@ -428,14 +457,51 @@ export function selfHostedApiRequest(
   if (requireCredential) {
     config = resolveSelfHostedConfig();
   } else {
-    // resolveSelfHostedBaseUrlLenient loads the vault entry, so env carries any
-    // available credential afterwards. Send it if present; otherwise none.
+    // Base URL discovery may load a client-env vault entry, but public auth
+    // requests must remain credentialless even when that load populates an
+    // operator key or a prior user session in process.env.
     const baseUrl = resolveSelfHostedBaseUrlLenient();
-    const credential = process.env[EMAILS_SESSION_TOKEN_ENV]?.trim() || process.env["EMAILS_SELF_HOSTED_API_KEY"]?.trim() || "";
-    config = { baseUrl, credential };
+    config = { baseUrl, credential: "" };
   }
   const { status, body: text } = httpRequest(config, method, path, body);
-  return { status, json: parseJson(text), bodyText: text };
+  const contractPath = `/v1${path}`;
+  const json = status >= 200 && status < 300
+    ? parseSelfHostedSuccessJson(text, { status, method, path: contractPath })
+    : projectSelfHostedErrorBody(
+      method,
+      contractPath,
+      status,
+      parseSelfHostedErrorJson(text, { status, method, path: contractPath }),
+    );
+  if (status >= 200 && status < 300) {
+    validateSelfHostedSdkSuccessResponse(method, contractPath, status, json);
+  }
+  return { status, json };
+}
+
+/**
+ * Probe an ORIGIN-level operational route (`/health`, `/ready`, `/version`).
+ *
+ * These live at the service root, NOT under `/v1`, so they cannot be reached via
+ * selfHostedApiRequest (whose base URL already ends in `/v1`). Read-only and
+ * bounded by the same curl timeouts as every other call.
+ */
+export function selfHostedProbe(path: string): SelfHostedApiResult {
+  const config = resolveSelfHostedConfig();
+  const origin = config.baseUrl.replace(/\/v1$/, "");
+  const { status, body } = httpRequest({ baseUrl: origin, credential: config.credential }, "GET", path);
+  const json = status >= 200 && status < 300
+    ? parseSelfHostedSuccessJson(body, { status, method: "GET", path })
+    : projectSelfHostedErrorBody(
+      "GET",
+      path,
+      status,
+      parseSelfHostedErrorJson(body, { status, method: "GET", path }),
+    );
+  if (status >= 200 && status < 300) {
+    validateSelfHostedSdkSuccessResponse("GET", path, status, json);
+  }
+  return { status, json };
 }
 
 // ---- id resolution (self-hosted) ------------------------------------------

@@ -1,5 +1,5 @@
 import type { Command } from "commander";
-import type { EmailSystemStatus } from "../../lib/agent-context.js";
+import { formatInboxSyncStatus } from "../../lib/inbox-sync-status-format.js";
 import chalk from "../../lib/chalk-lite.js";
 import { confirmDestructiveAction, handleError } from "../utils.js";
 import { extractEmailLinks, formatEmailLinks, type ExtractedEmailLink } from "../../lib/email-links.js";
@@ -607,9 +607,18 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .description("Show source-aware mailbox sync status")
     .action(async () => {
       try {
-        const { getEmailSystemStatusForRuntime } = await import("../../lib/agent-context.js");
+        const { getEmailSystemStatusForRuntime, statusGapSignals } = await import("../../lib/agent-context.js");
         const status = await getEmailSystemStatusForRuntime();
-        output({ inbox: status.inbox, mailboxes: status.mailboxes, sources: status.sources, cli_equivalents: status.cli_equivalents }, formatInboxSyncStatus(status));
+        // Carry the gap signals into the subset: a script reading only
+        // `inbox sync-status --json` must still be able to tell an unmeasured
+        // field from a measured zero.
+        output({
+          ...statusGapSignals(status),
+          inbox: status.inbox,
+          mailboxes: status.mailboxes,
+          sources: status.sources,
+          cli_equivalents: status.cli_equivalents,
+        }, formatInboxSyncStatus(status));
       } catch (e) {
         handleError(e);
       }
@@ -882,7 +891,14 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         const ds = resolveMailDataSource();
         const target = opts.provider ? `for provider ${opts.provider}` : "for all providers";
         // Self-hosted deletes on the server: drains a bulk delete over the inbox
-        // folder (scoped to the provider's mailbox when resolvable).
+        // folder. A provider-scoped clear is REFUSED there (a /v1 message carries
+        // no provider dimension) — surface that BEFORE the confirmation prompt, so
+        // the operator is not asked to confirm a destructive action that cannot run.
+        if (opts.provider) {
+          const { SELF_HOSTED_PROVIDER_CLEAR_UNSUPPORTED } = await import("../../lib/mail-types.js");
+          const { getEmailsMode } = await import("../../lib/mode.js");
+          if (getEmailsMode() === "self_hosted") handleError(new Error(SELF_HOSTED_PROVIDER_CLEAR_UNSUPPORTED));
+        }
         await confirmDestructiveAction(`Clear inbox emails ${target}?`, opts.yes);
         const { cleared } = await ds.clear({ providerId: opts.provider });
         console.log(chalk.green(`✓ Cleared ${cleared} email(s)`));
@@ -964,28 +980,6 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function formatInboxSyncStatus(status: EmailSystemStatus): string {
-  const lines: string[] = [chalk.bold("\nInbox sync status:")];
-  lines.push(`  Local inbox: ${status.inbox.total} total, ${status.inbox.unread} unread`);
-  lines.push(`  Folders:     ${status.mailboxes.counts.inbox} inbox, ${status.mailboxes.counts.sent} sent, ${status.mailboxes.counts.archived} archived`);
-  lines.push(`  Latest mail: ${status.inbox.latest_received_at ? chalk.green(status.inbox.latest_received_at) : chalk.dim("never")}`);
-  lines.push(`  Sources:     ${status.sources.total} ingestion source(s), ${status.sources.legacy} legacy, ${status.sources.orphaned} orphaned`);
-  for (const source of status.sources.items.filter((item) => item.kind !== "all").slice(0, 5)) {
-    const badges = source.badges.length ? chalk.dim(` [${source.badges.join(", ")}]`) : "";
-    lines.push(`    - ${source.label}${badges}: ${source.total} total, ${source.unread} unread`);
-  }
-  lines.push(`  S3 buckets:  ${status.inbox.inbound_buckets.length > 0 ? chalk.green(String(status.inbox.inbound_buckets.length)) : chalk.yellow("0")}`);
-  for (const bucket of status.inbox.inbound_buckets) {
-    lines.push(`    - s3://${bucket.bucket} ${chalk.dim(bucket.region)}${bucket.providerId ? chalk.dim(` provider=${bucket.providerId.slice(0, 8)}`) : ""}`);
-  }
-  lines.push(`  Realtime:    ${status.inbox.realtime.queue_configured ? chalk.green("configured") : chalk.yellow("not configured")}`);
-  if (status.inbox.realtime.last_poll_at) lines.push(`  Last poll:   ${chalk.green(status.inbox.realtime.last_poll_at)}`);
-  if (status.inbox.realtime.last_error) lines.push(`  Last error:  ${chalk.red(status.inbox.realtime.last_error)}`);
-  lines.push(chalk.dim("\n  Pull now: emails refresh"));
-  lines.push(chalk.dim("  Watch realtime: emails inbox watch --all-buckets"));
-  lines.push("");
-  return lines.join("\n");
-}
 
 function formatMailboxMessages(messages: TuiMessage[], title = "Mailbox"): string {
   const lines: string[] = [chalk.bold(`\n${title} (${messages.length}):`)];

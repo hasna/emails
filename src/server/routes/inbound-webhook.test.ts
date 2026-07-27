@@ -1,12 +1,24 @@
-import { afterEach, beforeEach, describe, it, expect } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, it, expect } from "bun:test";
 import { handleInboundWebhook } from "./inbound-webhook.js";
 import { setConfigValue } from "../../lib/config.js";
 import { closeDatabase, resetDatabase } from "../../db/database.js";
+
+let INHERITED_PROCESS_ENV: NodeJS.ProcessEnv;
+function captureInheritedProcessEnv(): void {
+  INHERITED_PROCESS_ENV = { ...process.env };
+}
+function restoreInheritedProcessEnv(): void {
+  for (const key of Object.keys(process.env)) {
+    if (!Object.prototype.hasOwnProperty.call(INHERITED_PROCESS_ENV, key)) delete process.env[key];
+  }
+  Object.assign(process.env, INHERITED_PROCESS_ENV);
+}
 
 const TOPIC_ARN = "arn:aws:sns:us-east-1:123456789012:emails-inbound";
 let snsSequence = 0;
 
 beforeEach(() => {
+  captureInheritedProcessEnv();
   process.env["EMAILS_DB_PATH"] = ":memory:";
   process.env["EMAILS_SNS_TOPIC_ARNS"] = TOPIC_ARN;
   process.env["EMAILS_AWS_ACCOUNT_IDS"] = "123456789012";
@@ -18,6 +30,7 @@ afterEach(() => {
   delete process.env["EMAILS_DB_PATH"];
   delete process.env["EMAILS_SNS_TOPIC_ARNS"];
   delete process.env["EMAILS_AWS_ACCOUNT_IDS"];
+  restoreInheritedProcessEnv();
 });
 
 const sesNotification = JSON.stringify({

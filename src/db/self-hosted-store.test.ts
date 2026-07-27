@@ -1,8 +1,31 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { SelfHostedTransportError, selfHostedStoreFor, isSelfHostedMode, resetSelfHostedConfigCache, resolveSelfHostedConfig } from "./self-hosted-store.js";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import {
+  SelfHostedTransportError,
+  selfHostedApiRequest,
+  selfHostedProbe,
+  selfHostedStoreFor,
+  isSelfHostedMode,
+  resetSelfHostedConfigCache,
+  resolveSelfHostedConfig,
+} from "./self-hosted-store.js";
+import { EMAILS_SESSION_TOKEN_ENV } from "../lib/client-env.js";
+import { SelfHostedWireResponseError } from "../lib/self-hosted-wire.js";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+let INHERITED_PROCESS_ENV: NodeJS.ProcessEnv;
+let ORIGINAL_PATH: string | undefined;
+function captureInheritedProcessEnv(): void {
+  INHERITED_PROCESS_ENV = { ...process.env };
+  ORIGINAL_PATH = process.env["PATH"];
+}
+function restoreInheritedProcessEnv(): void {
+  for (const key of Object.keys(process.env)) {
+    if (!Object.prototype.hasOwnProperty.call(INHERITED_PROCESS_ENV, key)) delete process.env[key];
+  }
+  Object.assign(process.env, INHERITED_PROCESS_ENV);
+}
 
 const KEYS = [
   "EMAILS_MODE",
@@ -10,6 +33,7 @@ const KEYS = [
   "EMAILS_CLIENT_ENV_SECRET",
   "EMAILS_SELF_HOSTED_URL",
   "EMAILS_SELF_HOSTED_API_KEY",
+  EMAILS_SESSION_TOKEN_ENV,
   "EMAILS_SELF_HOSTED_HTTP_CONNECT_TIMEOUT",
   "EMAILS_SELF_HOSTED_HTTP_TIMEOUT",
   "DATABASE_URL",
@@ -28,7 +52,6 @@ const KEYS = [
   "AWS_PROFILE",
   "CLOUDFLARE_API_KEY",
 ];
-const ORIGINAL_PATH = process.env["PATH"];
 let tempDirs: string[] = [];
 
 function clearEnv(): void {
@@ -56,30 +79,47 @@ exit 2
   process.env["EMAILS_CLIENT_ENV_SECRET"] = "hasna/test/opensource/emails/prod/client-env";
 }
 
-function installFakeCurl(): { argsPath: string; stdinPath: string; envPath: string } {
+function installFakeCurl(
+  response: { body?: string; status?: number } = {},
+): { argsPath: string; stdinPath: string; envPath: string } {
   const dir = mkdtempSync(join(tmpdir(), "emails-curl-test-"));
   tempDirs.push(dir);
   const argsPath = join(dir, "curl-args.txt");
   const stdinPath = join(dir, "curl-stdin.txt");
   const envPath = join(dir, "curl-env.txt");
+  const responsePath = join(dir, "curl-response.txt");
   const bin = join(dir, "curl");
+  writeFileSync(
+    responsePath,
+    response.body
+      ?? '{"domain":{"id":"domain-1","domain":"example.com","status":"pending","provider":null,"verified":false,"notes":null,"provisioning_status":"none","purchase_provider":null,"dns_provider":"cloudflare","send_provider":null,"cf_zone_id":null,"registrar":null,"nameservers_json":[],"mail_from_domain":null,"last_error":null,"next_check_at":null,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}}',
+  );
   writeFileSync(bin, `#!/bin/sh
 ARGS_PATH=${JSON.stringify(argsPath)}
 STDIN_PATH=${JSON.stringify(stdinPath)}
 ENV_PATH=${JSON.stringify(envPath)}
+RESPONSE_PATH=${JSON.stringify(responsePath)}
+STATUS=${JSON.stringify(String(response.status ?? 201))}
 printf '%s\\n' "$@" > "$ARGS_PATH"
 env | sort > "$ENV_PATH"
 cat > "$STDIN_PATH"
-printf '%s\\n%s' '{"domain":{"id":"domain-1","domain":"example.com"}}' '201'
+cat "$RESPONSE_PATH"
+printf '\\n%s' "$STATUS"
 `);
   chmodSync(bin, 0o700);
-  process.env["PATH"] = `${dir}:${ORIGINAL_PATH ?? ""}`;
+  process.env["PATH"] = `${dir}:${process.env["PATH"] ?? ORIGINAL_PATH ?? ""}`;
   return { argsPath, stdinPath, envPath };
 }
 
 describe("Emails self-hosted client resolver", () => {
-  beforeEach(clearEnv);
-  afterEach(clearEnv);
+  beforeEach(() => {
+    captureInheritedProcessEnv();
+    clearEnv();
+  });
+  afterEach(() => {
+    clearEnv();
+    restoreInheritedProcessEnv();
+  });
 
   test("unset env selects local and direct self-hosted resolution fails loud", () => {
     expect(isSelfHostedMode()).toBe(false);
@@ -234,6 +274,183 @@ describe("Emails self-hosted client resolver", () => {
       "CLOUDFLARE_API_KEY",
     ]) {
       expect(childEnvKeys.has(key)).toBe(false);
+    }
+  });
+
+  test("requireCredential=false never sends an existing environment or vault credential", () => {
+    installFakeSecrets(
+      `{"EMAILS_MODE":"self_hosted","EMAILS_SELF_HOSTED_URL":"https://emails.example","EMAILS_SELF_HOSTED_API_KEY":"vault-api-key-marker","${EMAILS_SESSION_TOKEN_ENV}":"vault-session-marker"}`,
+    );
+    process.env["EMAILS_SELF_HOSTED_API_KEY"] = "environment-api-key-marker";
+    process.env[EMAILS_SESSION_TOKEN_ENV] = "environment-session-marker";
+    const capture = installFakeCurl({
+      status: 200,
+      body: JSON.stringify({
+        status: "verification_required",
+        email: "user@example.com",
+        verification_required: true,
+      }),
+    });
+
+    const result = selfHostedApiRequest(
+      "POST",
+      "/auth/signup",
+      {
+        email: "user@example.com",
+        password: "correct horse battery staple",
+        tenant_name: "Example",
+      },
+      { requireCredential: false },
+    );
+
+    expect(result.status).toBe(200);
+    const args = readFileSync(capture.argsPath, "utf8");
+    const stdin = readFileSync(capture.stdinPath, "utf8");
+    const childEnv = readFileSync(capture.envPath, "utf8");
+    const transportInputs = `${args}\n${stdin}\n${childEnv}`;
+    expect(args.split(/\r?\n/).filter(Boolean)).toEqual([
+      "-q",
+      "-K",
+      "-",
+      "-w",
+      "%{http_code}",
+    ]);
+    expect(transportInputs).not.toContain("Authorization:");
+    expect(transportInputs.toLowerCase()).not.toContain("x-api-key");
+    for (const marker of [
+      "environment-api-key-marker",
+      "environment-session-marker",
+      "vault-api-key-marker",
+      "vault-session-marker",
+    ]) {
+      expect(transportInputs).not.toContain(marker);
+    }
+  });
+
+  test("root health probe validates a declared 200 response without exposing raw body text", () => {
+    process.env["EMAILS_MODE"] = "self_hosted";
+    process.env["EMAILS_SELF_HOSTED_URL"] = "https://emails.example";
+    process.env["EMAILS_SELF_HOSTED_API_KEY"] = "test-key";
+    const body = {
+      status: "ok",
+      version: "1.3.2",
+      mode: "self_hosted",
+      name: "emails",
+      db: { ok: true, latencyMs: 2 },
+    };
+    const capture = installFakeCurl({ status: 200, body: JSON.stringify(body) });
+
+    const result = selfHostedProbe("/health");
+
+    expect(result).toEqual({ status: 200, json: body });
+    expect(Object.keys(result).sort()).toEqual(["json", "status"]);
+    const stdin = readFileSync(capture.stdinPath, "utf8");
+    expect(stdin).toContain('url = "https://emails.example/health"');
+    expect(stdin).not.toContain("/v1/health");
+  });
+
+  test("root readiness probe validates a declared 503 response and returns only its safe projection", () => {
+    process.env["EMAILS_MODE"] = "self_hosted";
+    process.env["EMAILS_SELF_HOSTED_URL"] = "https://emails.example";
+    process.env["EMAILS_SELF_HOSTED_API_KEY"] = "test-key";
+    installFakeCurl({
+      status: 503,
+      body: JSON.stringify({
+        status: "not_ready",
+        version: "1.3.2",
+        mode: "self_hosted",
+        db: { ok: false, latencyMs: 3 },
+        pendingMigrations: ["0007_add_delivery_events"],
+        migrationIssues: [],
+      }),
+    });
+
+    const result = selfHostedProbe("/ready");
+
+    expect(result).toEqual({ status: 503, json: undefined });
+    expect(Object.keys(result).sort()).toEqual(["json", "status"]);
+  });
+
+  test("root probe rejects malformed JSON without leaking the response body", () => {
+    process.env["EMAILS_MODE"] = "self_hosted";
+    process.env["EMAILS_SELF_HOSTED_URL"] = "https://emails.example";
+    process.env["EMAILS_SELF_HOSTED_API_KEY"] = "test-key";
+    const body = '{"status":"response-secret-probe-marker"';
+    installFakeCurl({ status: 200, body });
+
+    let thrown: unknown;
+    try {
+      selfHostedProbe("/health");
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(SelfHostedWireResponseError);
+    expect(String(thrown)).toContain("body is not valid JSON");
+    expect(String(thrown)).not.toContain("response-secret-probe-marker");
+    expect(String(thrown)).not.toContain(body);
+  });
+
+  test("generic get and delete validate a declared 404 before returning absence", () => {
+    process.env["EMAILS_MODE"] = "self_hosted";
+    process.env["EMAILS_SELF_HOSTED_URL"] = "https://emails.example";
+    process.env["EMAILS_SELF_HOSTED_API_KEY"] = "test-key";
+    installFakeCurl({ status: 404, body: '{"error":"domain not found"}' });
+
+    const store = selfHostedStoreFor("domains");
+    expect(store.get("missing")).toBeNull();
+    expect(store.del("missing")).toBe(false);
+  });
+
+  for (const [label, body] of [
+    ["HTML", "<html>response-secret-html-marker</html>"],
+    ["malformed JSON", '{"error":"response-secret-json-marker"'],
+    ["the wrong envelope", '{"message":"response-secret-envelope-marker"}'],
+  ] as const) {
+    test(`generic get and delete reject a 404 with ${label} without leaking its body`, () => {
+      process.env["EMAILS_MODE"] = "self_hosted";
+      process.env["EMAILS_SELF_HOSTED_URL"] = "https://emails.example";
+      process.env["EMAILS_SELF_HOSTED_API_KEY"] = "test-key";
+      installFakeCurl({ status: 404, body });
+
+      const store = selfHostedStoreFor("domains");
+      for (const operation of [
+        () => store.get("missing"),
+        () => store.del("missing"),
+      ]) {
+        let thrown: unknown;
+        try {
+          operation();
+        } catch (error) {
+          thrown = error;
+        }
+        expect(thrown).toBeInstanceOf(SelfHostedWireResponseError);
+        expect(String(thrown)).not.toContain("response-secret");
+        expect(String(thrown)).not.toContain(body);
+      }
+    });
+  }
+
+  test("generic get and delete reject an undeclared 404 contract", () => {
+    process.env["EMAILS_MODE"] = "self_hosted";
+    process.env["EMAILS_SELF_HOSTED_URL"] = "https://emails.example";
+    process.env["EMAILS_SELF_HOSTED_API_KEY"] = "test-key";
+    installFakeCurl({ status: 404, body: '{"error":"response-secret-undeclared-marker"}' });
+
+    const store = selfHostedStoreFor("not-a-resource");
+    for (const operation of [
+      () => store.get("missing"),
+      () => store.del("missing"),
+    ]) {
+      let thrown: unknown;
+      try {
+        operation();
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBeInstanceOf(SelfHostedWireResponseError);
+      expect(String(thrown)).toContain("HTTP 404 is not declared");
+      expect(String(thrown)).not.toContain("response-secret-undeclared-marker");
     }
   });
 });

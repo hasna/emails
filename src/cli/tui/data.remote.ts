@@ -11,8 +11,9 @@
  * The `/v1` message model has NO thread_id column (threads are server-derived by
  * normalized subject) and no provider/source dimension on a message, so
  * conversation grouping is by subject and source scoping is limited to
- * address/domain. Reads that cannot be mapped cleanly degrade to empty results /
- * zero counts rather than throwing, so the TUI never crashes.
+ * address/domain. Availability failures retain the TUI's safe empty-state
+ * fallback, while malformed successful server responses remain explicit
+ * contract failures and are never presented as an empty mailbox.
  */
 import { uuid } from "../../db/runtime.js";
 import { selfHostedStoreFor, type SelfHostedResourceStore } from "../../db/self-hosted-store.js";
@@ -27,6 +28,7 @@ import { getLatestActiveProviderId } from "../../db/providers.js";
 import { getInboundBuckets, loadConfig, saveConfig } from "../../lib/config.js";
 import { assessDomainReadiness } from "../../lib/domain-readiness.js";
 import { resolveEmailsMode } from "../../lib/mode.js";
+import { rethrowSelfHostedResponseFailure } from "../../lib/self-hosted-wire.js";
 import { describeIdentity, fetchIdentitySafe, type IdentityContext } from "../../lib/whoami.js";
 import { listS3Sources } from "../../lib/s3-sync.js";
 import { normalizeThemeMode, type TuiThemeMode } from "./theme.js";
@@ -92,7 +94,8 @@ function scanAllMessages(): Record<string, unknown>[] {
       rows.push(...page);
       if (page.length < SELF_HOSTED_MAIL_PAGE) break;
     }
-  } catch {
+  } catch (error) {
+    rethrowSelfHostedResponseFailure(error);
     // A missing/unreachable serve yields an empty view rather than crashing the
     // TUI. Not cached, so the next read retries.
     return [];
@@ -104,7 +107,8 @@ function scanAllMessages(): Record<string, unknown>[] {
 function getMessageRow(id: string): Record<string, unknown> | null {
   try {
     return messagesStore().get(id);
-  } catch {
+  } catch (error) {
+    rethrowSelfHostedResponseFailure(error);
     return null;
   }
 }
@@ -550,7 +554,8 @@ export function listLabelSummaries(opts?: ListLabelSummaryOptions): LabelSummary
 export function activeProviderId(): string | null {
   try {
     return getLatestActiveProviderId();
-  } catch {
+  } catch (error) {
+    rethrowSelfHostedResponseFailure(error);
     return null;
   }
 }
@@ -561,7 +566,8 @@ export function providerIdForSender(address: string): string | null {
   try {
     const matches = findAddressesByEmail(normalized).filter((a) => (a.status ?? "active") === "active");
     return matches.find((a) => a.verified)?.provider_id ?? matches[0]?.provider_id ?? null;
-  } catch {
+  } catch (error) {
+    rethrowSelfHostedResponseFailure(error);
     return null;
   }
 }
@@ -577,7 +583,8 @@ export function defaultFromAddress(opts?: { source?: MailboxSource; fallback?: s
       .filter((address): address is string => !!address)
       .filter((address) => !domain || address.endsWith(`@${domain}`));
     return candidates[0] ?? "";
-  } catch {
+  } catch (error) {
+    rethrowSelfHostedResponseFailure(error);
     return "";
   }
 }
@@ -587,7 +594,7 @@ export function defaultFromAddress(opts?: { source?: MailboxSource; fallback?: s
  * endpoint. By default the body is treated as MARKDOWN and rendered to HTML.
  * Delivery and thread rollup are server-owned.
  */
-export async function sendComposed(input: ComposeInput): Promise<{ id: string; messageId: string }> {
+export async function sendComposed(input: ComposeInput): Promise<{ id: string; messageId: string; inProgress?: true }> {
   const to = input.to.split(",").map((s) => s.trim()).filter(Boolean);
   if (to.length === 0) throw new Error("At least one recipient is required.");
   if (!input.from) throw new Error("A From address is required.");
@@ -607,7 +614,11 @@ export async function sendComposed(input: ComposeInput): Promise<{ id: string; m
     ? created["message"] as Record<string, unknown>
     : created;
   const id = cstr(rec["id"]);
-  return { id, messageId: cstr(rec["message_id"]) || id };
+  return {
+    id,
+    messageId: cstr(rec["message_id"]) || id,
+    ...(created["in_progress"] === true ? { inProgress: true as const } : {}),
+  };
 }
 
 export interface DomainSummary {
@@ -660,7 +671,8 @@ export function listDomainSummaries(opts?: ListDomainSummaryOptions): DomainSumm
         };
       })
       .sort((a, b) => a.domain.localeCompare(b.domain));
-  } catch {
+  } catch (error) {
+    rethrowSelfHostedResponseFailure(error);
     return [];
   }
 }
@@ -717,7 +729,8 @@ export function listInboxAddresses(opts?: ListInboxAddressOptions): InboxAddress
       .filter((item) => !q || [item.address, item.label, item.domain].some((value) => String(value ?? "").toLowerCase().includes(q)))
       .slice(0, limit);
     return opts?.search?.trim() ? choices : [ALL_ADDRESSES, ...choices];
-  } catch {
+  } catch (error) {
+    rethrowSelfHostedResponseFailure(error);
     return opts?.search?.trim() ? [] : [ALL_ADDRESSES];
   }
 }

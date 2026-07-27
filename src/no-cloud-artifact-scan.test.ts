@@ -270,6 +270,34 @@ describe("packed hosted-control-plane scanner", () => {
     }
   });
 
+  it("does not let a hostname that merely starts with an exempt namespace through", () => {
+    // Regression: the namespace exemption was prefix-matched, so a first label that
+    // only BEGAN with `contract`/`service`/`emails`/`events` escaped the guard. The
+    // letter forms passed until the lookahead was anchored; the digit and hyphen
+    // forms passed even then, until the anchor class became `[a-z0-9-]` — both are
+    // legal DNS label characters, so both are real hostname shapes.
+    for (const bypass of [
+      "hasna.emailservice.com",
+      "hasna.eventsource.io",
+      "hasna.servicedesk.net",
+      "hasna.emails2.com",
+      "hasna.service-desk.net",
+      "hasna.events-api.io",
+      "hasna.contract7.com",
+    ]) {
+      expect(sourceBoundaryFindings(`const value = "${bypass}";`, "src/server/self-hosted/auth/allowed-email.ts"))
+        .toContain("vendor hostname");
+      // The packed artifact surface must fail on the same shape.
+      expect(hostedControlPlaneFindings(`var value = "${bypass}";`, "dist/chunk-fixture.js"))
+        .toContain("vendor hostname");
+    }
+    // The exemption still applies to the namespaces themselves, including the one a
+    // `\b` boundary would break (`_` is a word character).
+    for (const namespace of ["hasna.service_contract.v1", "hasna.contract.json", "com.hasna.emails", "hasna.events"]) {
+      expect(sourceBoundaryFindings(namespace, "src/lib/paths.ts")).toEqual([]);
+    }
+  });
+
   it("detects a private account or environment name on the source surface", () => {
     for (const leak of ["the alumia SES account", "hasna-studio-alumia", "ALUMIA", 'environment = "xyz-infra"']) {
       expect(sourceBoundaryFindings(leak, "deploy/aws/variables.tf")).toContain("vendor infrastructure name");

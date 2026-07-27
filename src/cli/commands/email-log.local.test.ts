@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
 import { Command } from "commander";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -11,6 +11,17 @@ import { createProvider } from "../../db/providers.local.js";
 import { createAddress, markVerified } from "../../db/addresses.local.js";
 import { setConfigValue } from "../../lib/config.js";
 import { registerEmailLogCommands } from "./email-log.local.js";
+
+let INHERITED_PROCESS_ENV: NodeJS.ProcessEnv;
+function captureInheritedProcessEnv(): void {
+  INHERITED_PROCESS_ENV = { ...process.env };
+}
+function restoreInheritedProcessEnv(): void {
+  for (const key of Object.keys(process.env)) {
+    if (!Object.prototype.hasOwnProperty.call(INHERITED_PROCESS_ENV, key)) delete process.env[key];
+  }
+  Object.assign(process.env, INHERITED_PROCESS_ENV);
+}
 
 function setupDb() {
   resetDatabase();
@@ -68,12 +79,14 @@ async function runEmailLogCommand(args: string[]) {
 }
 
 beforeEach(() => {
+  captureInheritedProcessEnv();
   setupDb();
 });
 
 afterEach(() => {
   closeDatabase();
   delete process.env["EMAILS_DB_PATH"];
+  restoreInheritedProcessEnv();
 });
 
 describe("email log list and search commands", () => {

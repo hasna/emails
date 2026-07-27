@@ -1,10 +1,21 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeAll, beforeEach, afterEach, afterAll } from "bun:test";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runDiagnostics, formatDiagnostics } from "./doctor.js";
 import type { DoctorCheck } from "./doctor.js";
 import { resetSelfHostedConfigCache } from "../db/self-hosted-store.js";
+
+let INHERITED_PROCESS_ENV: NodeJS.ProcessEnv;
+function captureInheritedProcessEnv(): void {
+  INHERITED_PROCESS_ENV = { ...process.env };
+}
+function restoreInheritedProcessEnv(): void {
+  for (const key of Object.keys(process.env)) {
+    if (!Object.prototype.hasOwnProperty.call(INHERITED_PROCESS_ENV, key)) delete process.env[key];
+  }
+  Object.assign(process.env, INHERITED_PROCESS_ENV);
+}
 
 // This client is self-hosted-ONLY: runDiagnostics no longer opens a local SQLite
 // database or counts providers/domains/addresses/contacts/templates (those live
@@ -44,6 +55,7 @@ function configureSelfHosted(): void {
 }
 
 beforeEach(() => {
+  captureInheritedProcessEnv();
   previousHome = process.env["HOME"];
   tempHome = mkdtempSync(join(tmpdir(), "emails-doctor-test-home-"));
   process.env["HOME"] = tempHome;
@@ -59,6 +71,7 @@ afterEach(() => {
   if (tempHome) rmSync(tempHome, { recursive: true, force: true });
   tempHome = undefined;
   previousHome = undefined;
+  restoreInheritedProcessEnv();
 });
 
 describe("runDiagnostics", () => {
@@ -68,7 +81,11 @@ describe("runDiagnostics", () => {
     expect(checks.some((c) => c.name === "Providers")).toBe(true);
   });
 
-  it("returns self-hosted operator guidance without creating a local database", async () => {
+  // A parsed client configuration must NEVER be reported as a passing API check:
+  // that was a fabricated green light (nothing was ever requested). The config
+  // check is a warn that says so, and the real verdict comes from probing
+  // /health and /ready. Here nothing listens on 127.0.0.1:3900, so both fail.
+  it("probes /health and /ready instead of passing on a parsed configuration", async () => {
     configureSelfHosted();
 
     const checks = await runDiagnostics();
@@ -77,9 +94,13 @@ describe("runDiagnostics", () => {
       status: "pass",
       message: "Self-hosted mode (self_hosted)",
     });
-    const api = checks.find((c) => c.name === "Self-hosted API");
-    expect(api?.status).toBe("pass");
-    expect(api?.message).toContain("/health");
+    const config = checks.find((c) => c.name === "Self-hosted client configuration");
+    expect(config?.status).toBe("warn");
+    expect(config?.message).toContain("Not a health signal on its own");
+    // No check may claim "pass" for the API without an answered request.
+    expect(checks.find((c) => c.name === "Self-hosted API /health")?.status).toBe("fail");
+    expect(checks.find((c) => c.name === "Self-hosted API /ready")?.status).toBe("fail");
+    expect(checks.some((c) => c.status === "pass" && c.name.startsWith("Self-hosted API"))).toBe(false);
     const sqlite = checks.find((c) => c.name === "Local SQLite");
     expect(sqlite?.status).toBe("warn");
     expect(sqlite?.message).toContain("must not open or create a local emails.db");
@@ -91,7 +112,13 @@ describe("runDiagnostics", () => {
 
     const checks = await runDiagnostics({ liveProviderChecks: true });
 
-    expect(checks.map((c) => c.name)).toEqual(["Mode", "Self-hosted API", "Local SQLite"]);
+    expect(checks.map((c) => c.name)).toEqual([
+      "Mode",
+      "Self-hosted client configuration",
+      "Self-hosted API /health",
+      "Self-hosted API /ready",
+      "Local SQLite",
+    ]);
     expect(existsSync(join(tempHome!, ".hasna", "emails", "emails.db"))).toBe(false);
   });
 });

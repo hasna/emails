@@ -3,6 +3,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resetSelfHostedConfigCache } from "../db/self-hosted-store.js";
+import { resetMailDataSource } from "../lib/mail-data-source.js";
+import { mcpTestRequestInit, MCP_TEST_HTTP_TOKEN, startTestMcpHttpServer } from "../test-support/mcp-http.js";
 import { startV1Stub, type V1Stub } from "../test-support/v1-stub.js";
 
 // Self-hosted-ONLY: the MCP HTTP transport serves tools that route through the
@@ -19,16 +21,23 @@ import { startV1Stub, type V1Stub } from "../test-support/v1-stub.js";
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 const { StreamableHTTPClientTransport } = await import("@modelcontextprotocol/sdk/client/streamableHttp.js");
 const { buildServer } = await import("./server.js");
-const { DEFAULT_MCP_HTTP_PORT, MCP_NAME, startHttpServer } = await import("./http.js");
+const { DEFAULT_MCP_HTTP_PORT, MCP_HTTP_ALLOWED_HOSTS_ENV, MCP_HTTP_TOKEN_ENV, MCP_NAME, startHttpServer } = await import("./http.js");
 
 const servers: Array<ReturnType<typeof startHttpServer>> = [];
 let stub: V1Stub;
 
+function restoreProcessEnv(inherited: NodeJS.ProcessEnv): void {
+  for (const key of Object.keys(process.env)) {
+    if (!Object.prototype.hasOwnProperty.call(inherited, key)) delete process.env[key];
+  }
+  Object.assign(process.env, inherited);
+}
+
 async function withClient<T>(name: string, run: (client: InstanceType<typeof Client>) => Promise<T>): Promise<T> {
-  const server = startHttpServer({ port: 0, log: () => {} });
+  const server = startTestMcpHttpServer();
   servers.push(server);
   const client = new Client({ name, version: "1.0.0" }, { capabilities: {} });
-  const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${server.port}/mcp`));
+  const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${server.port}/mcp`), mcpTestRequestInit());
   await client.connect(transport, { timeout: 10_000 });
   try {
     return await run(client);
@@ -63,7 +72,7 @@ afterEach(() => {
 describe("emails-mcp HTTP transport", () => {
   it("exposes health and serves MCP over Streamable HTTP", async () => {
     await stub.seed({ groups: [{ id: "g1", name: "api-group", description: null }] });
-    const server = startHttpServer({ port: 0, log: () => {} });
+    const server = startTestMcpHttpServer();
     servers.push(server);
 
     const baseUrl = `http://127.0.0.1:${server.port}`;
@@ -72,7 +81,7 @@ describe("emails-mcp HTTP transport", () => {
     expect(await health.json()).toEqual({ status: "ok", name: MCP_NAME });
 
     const client = new Client({ name: "emails-mcp-http-test", version: "1.0.0" }, { capabilities: {} });
-    const transport = new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`));
+    const transport = new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`), mcpTestRequestInit());
 
     try {
       await client.connect(transport, { timeout: 10_000 });
@@ -198,8 +207,6 @@ describe("emails-mcp HTTP transport", () => {
               content_available: false,
               direction: "outbound",
               received_at: "2026-07-24T08:00:00.000Z",
-              content_base64: "must-not-leak",
-              secret: "must-not-leak",
             }],
             next_cursor: "opaque/+==",
             api_key: "must-not-leak",
@@ -212,6 +219,7 @@ describe("emails-mcp HTTP transport", () => {
       },
     });
     servers.push(inventoryServer);
+    const inheritedProcessEnv = { ...process.env };
     process.env.EMAILS_MODE = "self_hosted";
     process.env.EMAILS_SELF_HOSTED_URL = `http://127.0.0.1:${inventoryServer.port}`;
     process.env.EMAILS_SELF_HOSTED_API_KEY = "attachment-inventory-http-test-key";
@@ -272,8 +280,68 @@ describe("emails-mcp HTTP transport", () => {
         expect(requests[0]?.searchParams.get("since")).toBe("2026-07-24T08:00:00.000Z");
       });
     } finally {
-      stub.applyEnv();
+      restoreProcessEnv(inheritedProcessEnv);
       resetSelfHostedConfigCache();
+      resetMailDataSource();
+    }
+  });
+
+  it("fails closed and redacts unsupported attachment inventory fields", async () => {
+    const contentSentinel = "must-not-leak-content";
+    const secretSentinel = "must-not-leak-secret";
+    const inventoryServer = Bun.serve({
+      port: 0,
+      fetch(request) {
+        const url = new URL(request.url);
+        if (url.pathname !== "/v1/attachments") {
+          return Response.json({ error: "not found" }, { status: 404 });
+        }
+        return Response.json({
+          items: [{
+            message_id: "message-1",
+            attachment_index: 0,
+            filename: "invoice.pdf",
+            content_type: "application/pdf",
+            size_bytes: 2048,
+            sha256: "b".repeat(64),
+            content_available: false,
+            direction: "outbound",
+            received_at: "2026-07-24T08:00:00.000Z",
+            content_base64: contentSentinel,
+            secret: secretSentinel,
+          }],
+          next_cursor: null,
+        });
+      },
+    });
+    servers.push(inventoryServer);
+    const inheritedProcessEnv = { ...process.env };
+    process.env.EMAILS_MODE = "self_hosted";
+    process.env.EMAILS_SELF_HOSTED_URL = `http://127.0.0.1:${inventoryServer.port}`;
+    process.env.EMAILS_SELF_HOSTED_API_KEY = "attachment-inventory-http-test-key";
+    resetSelfHostedConfigCache();
+
+    try {
+      await withClient("emails-mcp-attachment-inventory-redaction-test", async (client) => {
+        const result = await client.callTool(
+          { name: "list_attachments", arguments: {} },
+          undefined,
+          { timeout: 10_000 },
+        );
+        expect(result.isError).toBe(true);
+        const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+        const payload = JSON.parse(text) as Record<string, unknown>;
+        expect(Object.keys(payload).sort()).toEqual(["cli_equivalent", "error"]);
+        expect(text).toContain("invalid successful response");
+        expect(text).toContain("unsupported fields");
+        for (const sensitive of ["content_base64", "secret", "must-not-leak", contentSentinel, secretSentinel]) {
+          expect(text).not.toContain(sensitive);
+        }
+      });
+    } finally {
+      restoreProcessEnv(inheritedProcessEnv);
+      resetSelfHostedConfigCache();
+      resetMailDataSource();
     }
   });
 
@@ -283,11 +351,13 @@ describe("emails-mcp HTTP transport", () => {
     process.env["HOME"] = tmpHome;
 
     try {
-      await withClient("emails-mcp-config-redaction-test", async (client) => {
-        const setText = await callText(client, "set_config", { key: "cloudflare_api_token", value: "MCP_CONFIG_SECRET" });
-        expect(setText).toContain('"cloudflare_api_token": "***"');
-        expect(setText).not.toContain("MCP_CONFIG_SECRET");
+      // Planted through the OPERATOR path: `set_config` refuses credential keys
+      // outright now (see the set_config allowlist test), so the reader-side
+      // redaction contract is exercised against a token that is already on disk.
+      const { setConfigValue } = await import("../lib/config.js");
+      setConfigValue("cloudflare_api_token", "MCP_CONFIG_SECRET");
 
+      await withClient("emails-mcp-config-redaction-test", async (client) => {
         const getText = await callText(client, "get_config", { key: "cloudflare_api_token" });
         expect(getText).toContain('"cloudflare_api_token": "***"');
         expect(getText).not.toContain("MCP_CONFIG_SECRET");
@@ -295,6 +365,10 @@ describe("emails-mcp HTTP transport", () => {
         const listText = await callText(client, "list_config", {});
         expect(listText).toContain('"cloudflare_api_token": "***"');
         expect(listText).not.toContain("MCP_CONFIG_SECRET");
+
+        // And a permitted write still round-trips (unredacted — not a secret).
+        const setText = await callText(client, "set_config", { key: "default_provider", value: "agent-written" });
+        expect(setText).toContain('"default_provider": "agent-written"');
       });
     } finally {
       if (originalHome === undefined) delete process.env["HOME"];

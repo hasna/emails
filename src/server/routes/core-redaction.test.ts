@@ -1,7 +1,18 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { closeDatabase, getDatabase, resetDatabase } from "../../db/database.js";
 import { createProvider } from "../../db/providers.local.js";
 import { handle } from "./core.js";
+
+let INHERITED_PROCESS_ENV: NodeJS.ProcessEnv;
+function captureInheritedProcessEnv(): void {
+  INHERITED_PROCESS_ENV = { ...process.env };
+}
+function restoreInheritedProcessEnv(): void {
+  for (const key of Object.keys(process.env)) {
+    if (!Object.prototype.hasOwnProperty.call(INHERITED_PROCESS_ENV, key)) delete process.env[key];
+  }
+  Object.assign(process.env, INHERITED_PROCESS_ENV);
+}
 
 function call(path: string, init?: RequestInit) {
   const req = new Request(`http://127.0.0.1:3900${path}`, init);
@@ -10,6 +21,7 @@ function call(path: string, init?: RequestInit) {
 }
 
 beforeEach(() => {
+  captureInheritedProcessEnv();
   process.env["EMAILS_DB_PATH"] = ":memory:";
   resetDatabase();
 });
@@ -17,6 +29,7 @@ beforeEach(() => {
 afterEach(() => {
   closeDatabase();
   delete process.env["EMAILS_DB_PATH"];
+  restoreInheritedProcessEnv();
 });
 
 describe("core REST redaction", () => {

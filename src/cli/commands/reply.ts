@@ -1,8 +1,31 @@
 import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
+import { suppressedRecipientsAmong } from "../../db/contacts.js";
 import { resolveMailDataSource } from "../../lib/mail-data-source.js";
 import { handleError } from "../utils.js";
 import { formatThreadLabel } from "../tui/format.js";
+
+/**
+ * Refuse a send whose recipients include a suppressed contact.
+ *
+ * `forward` and `reply` reach `ds.send` exactly like `emails send` does, and in
+ * local mode nothing further down the chain consults `contacts` — so without
+ * this they mail a hard-bounced/complained/unsubscribed address. `reply --all`
+ * is the sharpest case: it fans out to every recipient on the parent, so a
+ * suppressed address is mailed without the operator ever typing it.
+ *
+ * Neither command takes `--force`: there is no "send anyway" story for a reply
+ * to a suppressed address, and the self-hosted server refuses it regardless
+ * (409 recipient_suppressed). Unsuppressing is the only path.
+ */
+function assertNoSuppressedRecipients(recipients: string[], command: string): void {
+  const suppressed = suppressedRecipientsAmong(recipients);
+  if (suppressed.length === 0) return;
+  handleError(new Error(
+    `Refusing to ${command} to suppressed recipient(s): ${suppressed.join(", ")}. `
+    + "Clear the suppression with `emails contact unsuppress <email>` first.",
+  ));
+}
 
 function fwdPrefix(subject: string): string {
   return /^fwd?:/i.test(subject.trim()) ? subject : `Fwd: ${subject}`;
@@ -32,6 +55,7 @@ export function registerReplyCommand(program: Command, output: (data: unknown, f
         const origBody = body?.text ?? body?.html ?? "";
         const subject = fwdPrefix(msg.subject);
         const fwdBody = (opts.body ? opts.body : "") + quoteBody(msg.from, msg.date, origBody);
+        assertNoSuppressedRecipients(opts.to, "forward");
         const result = await ds.send({ from: opts.from, to: opts.to.join(", "), subject, body: fwdBody, markdown: false });
         output({ id: result.id, to: opts.to, subject }, chalk.green(`✓ forwarded to ${opts.to.join(", ")} — "${subject}"`));
       } catch (e) { handleError(e); }
@@ -71,6 +95,7 @@ export function registerReplyCommand(program: Command, output: (data: unknown, f
           seen.add(key);
           toArr.push(addr);
         }
+        assertNoSuppressedRecipients(toArr, "reply");
         const result = await ds.send({
           from,
           to: toArr.join(", "),

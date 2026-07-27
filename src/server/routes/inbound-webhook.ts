@@ -1,32 +1,36 @@
 /**
- * Inbound webhook — the push half of real-time inbound. Point an SNS HTTP(S)
- * subscription (on the SES inbound topic) at `POST /webhook/ses-inbound`:
+ * Inbound webhook — the push half of real-time inbound, LOCAL (SQLite) mount.
+ * Point an SNS HTTP(S) subscription (on the SES inbound topic) at
+ * `POST /webhook/ses-inbound`:
  *   - SubscriptionConfirmation → we fetch SubscribeURL to confirm automatically.
- *   - Notification             → we parse it and run a dedup-safe syncS3Inbox so
- *                                the new message lands in the inbox immediately.
+ *   - Notification (Received)  → dedup-safe syncS3Inbox so the new message lands
+ *                                in the inbox immediately.
+ *   - Notification (Bounce / Complaint / Delivery) → the delivery outcome is
+ *                                persisted to the local `events` ledger.
  *
  * No manual `emails inbox sync-s3` needed. The bucket/region/prefix come from
  * config (inbound_s3_bucket / inbound_s3_region / inbound_s3_prefix).
+ *
+ * The receiver itself — signature verification, the SNS topic/account allowlist,
+ * SubscribeURL host pinning, parsing and the idempotency protocol — lives in
+ * ../webhooks/receivers.ts and is shared verbatim with the self-hosted `/v1`
+ * mount. This module supplies ONLY the local destination store: every write here
+ * goes through the `src/db/*.local.ts` SQLite repositories.
  */
-import { parseSesNotification } from "../../lib/inbound-realtime.js";
-import { json, badRequest } from "./helpers.js";
-import { getInboundBuckets, loadConfig } from "../../lib/config.js";
+import { getInboundBuckets, getInboundConfig, loadConfig } from "../../lib/config.js";
 import { emitEmailsEventBestEffort } from "../../lib/emails-events.js";
-import { verifySnsStructure } from "../../lib/webhook-events.js";
-import { snsMessageAllowed, snsPolicyFromEnv, verifyAwsSnsSignature } from "../../lib/sns-signature.js";
-import { getDatabase } from "../../db/database.js";
-import { getWebhookReceipt, recordWebhookReceipt } from "../../db/webhook-receipts.local.js";
-import { readBoundedRequestText, RouteBodyTooLargeError } from "./request-body.js";
+import {
+  receiveSesNotification,
+  SES_INBOUND_WEBHOOK_PATH,
+  type ConfiguredInboundSource,
+  type FetchLike,
+  type SesIngestRequest,
+  type SesIngestResult,
+  type WebhookReceiptLedger,
+} from "../webhooks/receivers.js";
 
-/** Injected fetch so confirmation is testable. */
-export type FetchLike = (url: string) => Promise<unknown>;
-
-/** True only for genuine AWS SNS HTTPS endpoints (host-pinned, anti-SSRF). */
-export function isAwsSnsUrl(url: string): boolean {
-  let u: URL;
-  try { u = new URL(url); } catch { return false; }
-  return u.protocol === "https:" && /^sns\.[a-z0-9-]+\.amazonaws\.com$/.test(u.hostname);
-}
+export { isAwsSnsUrl } from "../webhooks/receivers.js";
+export type { FetchLike } from "../webhooks/receivers.js";
 
 function configuredWebhookSecret(): string | undefined {
   const config = loadConfig();
@@ -41,12 +45,75 @@ function requireWebhookSecret(): boolean {
   return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
 }
 
-function requestWebhookSecret(req: Request): string | null {
-  const direct = req.headers.get("x-emails-webhook-secret");
-  if (direct) return direct;
-  const auth = req.headers.get("authorization") ?? "";
-  const match = auth.match(/^Bearer\s+(.+)$/i);
-  return match?.[1] ?? null;
+/**
+ * The single local SQLite `webhook_receipts` ledger. Local mode has one store, so
+ * there is no tenant dimension and the envelope evidence is not consulted.
+ */
+export function localWebhookReceiptLedger(): WebhookReceiptLedger {
+  return {
+    async find(provider, eventId) {
+      const { getDatabase } = await import("../../db/database.js");
+      const { getWebhookReceipt } = await import("../../db/webhook-receipts.local.js");
+      const existing = getWebhookReceipt(provider, eventId, getDatabase());
+      return existing ? { resourceId: existing.resource_id } : null;
+    },
+    async record(provider, eventId, resourceId) {
+      const { getDatabase } = await import("../../db/database.js");
+      const { recordWebhookReceipt } = await import("../../db/webhook-receipts.local.js");
+      recordWebhookReceipt(provider, eventId, resourceId, getDatabase());
+    },
+  };
+}
+
+/**
+ * Persist a delivery outcome into the local `events` ledger. `events.provider_id`
+ * is NOT NULL, so with no active provider row there is nothing to attach the
+ * outcome to and the receiver reports it unrouted rather than dropping it
+ * silently.
+ */
+export async function recordLocalDeliveryEvent(
+  providerType: "ses" | "resend",
+  event: {
+    provider_event_id: string;
+    type: "delivered" | "bounced" | "complained" | "opened" | "clicked";
+    recipient?: string;
+    provider_message_id?: string;
+    occurred_at: string;
+    metadata?: Record<string, unknown>;
+  },
+): Promise<{ id: string } | null> {
+  const { getDatabase } = await import("../../db/database.js");
+  const { getLatestActiveProviderId } = await import("../../db/providers.local.js");
+  const { createEvent } = await import("../../db/events.local.js");
+  const db = getDatabase();
+  const providerId = getLatestActiveProviderId(providerType, db) ?? getLatestActiveProviderId(undefined, db);
+  if (!providerId) return null;
+  const stored = createEvent({
+    provider_id: providerId,
+    provider_event_id: event.provider_event_id,
+    type: event.type,
+    recipient: event.recipient ?? null,
+    occurred_at: event.occurred_at,
+    metadata: {
+      ...(event.metadata ?? {}),
+      ...(event.provider_message_id ? { provider_message_id: event.provider_message_id } : {}),
+    },
+  }, db);
+  return { id: stored.id };
+}
+
+function localInboundSource(): ConfiguredInboundSource {
+  // The operator-configured source of truth; the payload's own bucket is never
+  // consulted (see the SECURITY note in the shared receiver).
+  const inbound = getInboundConfig();
+  return {
+    bucket: inbound.bucket,
+    prefix: inbound.prefix,
+    region: inbound.region,
+    providerId: inbound.bucket
+      ? getInboundBuckets().find((entry) => entry.bucket === inbound.bucket)?.providerId
+      : undefined,
+  };
 }
 
 export async function handleInboundWebhook(
@@ -56,103 +123,74 @@ export async function handleInboundWebhook(
   deps?: {
     fetchUrl?: FetchLike;
     verifySns?: (body: Record<string, unknown>) => Promise<boolean>;
-    sync?: (bucket: string, prefix: string | undefined, region: string | undefined, opts?: { keys?: string[]; providerId?: string }) => Promise<{ synced: number }>;
+    sync?: (
+      bucket: string,
+      prefix: string | undefined,
+      region: string | undefined,
+      opts?: { keys?: string[]; providerId?: string },
+    ) => Promise<{ synced: number }>;
   },
 ): Promise<Response | null> {
-  if (path !== "/webhook/ses-inbound" || method !== "POST") return null;
+  if (path !== SES_INBOUND_WEBHOOK_PATH || method !== "POST") return null;
 
-  let body: Record<string, unknown>;
-  try {
-    const parsed = JSON.parse(await readBoundedRequestText(req)) as unknown;
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return badRequest("Invalid JSON object");
-    body = parsed as Record<string, unknown>;
-  } catch (error) {
-    if (error instanceof RouteBodyTooLargeError) return json({ error: "Request body too large" }, 413);
-    return badRequest("Invalid JSON");
-  }
-
-  const secret = configuredWebhookSecret();
-  if (secret || requireWebhookSecret()) {
-    if (!secret) return json({ error: "SES inbound webhook secret is required but not configured" }, 503);
-    if (requestWebhookSecret(req) !== secret) return json({ error: "Invalid webhook secret" }, 401);
-  }
-  if (!verifySnsStructure(body)) return badRequest("Invalid SNS payload");
-  let policy;
-  try { policy = snsPolicyFromEnv(); } catch (error) {
-    return json({ error: error instanceof Error ? error.message : "SNS allowlist is not configured" }, 503);
-  }
-  if (!snsMessageAllowed(body, policy)) return json({ error: "SNS topic or account is not allowed" }, 401);
-  const signatureValid = await (deps?.verifySns ?? verifyAwsSnsSignature)(body).catch(() => false);
-  if (!signatureValid) return json({ error: "Invalid SNS signature" }, 401);
-
-  const type = body["Type"] ?? req.headers.get("x-amz-sns-message-type");
-  const eventId = typeof body["MessageId"] === "string" ? body["MessageId"] : "";
-  if (!eventId) return badRequest("SNS MessageId is required");
-  const db = getDatabase();
-  const existing = getWebhookReceipt("sns", eventId, db);
-  if (existing) return json({ ok: true, duplicate: true, message_id: eventId });
-
-  // 1. Auto-confirm the SNS subscription — but only fetch genuine AWS SNS
-  //    confirmation URLs (host-pinned to sns.<region>.amazonaws.com over HTTPS)
-  //    so a forged body can't turn this into a server-side request forgery.
-  if (type === "SubscriptionConfirmation" && typeof body["SubscribeURL"] === "string") {
-    if (!isAwsSnsUrl(body["SubscribeURL"] as string)) {
-      return badRequest("SubscribeURL is not a valid AWS SNS endpoint");
-    }
-    const fetchUrl = deps?.fetchUrl ?? (async (u: string) => { await fetch(u); });
-    await fetchUrl(body["SubscribeURL"] as string);
-    recordWebhookReceipt("sns", eventId, String(body["TopicArn"] ?? ""), db);
-    return json({ ok: true, confirmed: true });
-  }
-
-  // 2. Process an inbound notification.
-  if (type === "Notification" || body["notificationType"] === "Received" || body["Records"]) {
-    const note = parseSesNotification(typeof body["Message"] === "string" ? (body["Message"] as string) : JSON.stringify(body));
-    if (!note) return json({ ok: true, ignored: "unrecognized notification" });
-
-    const { getInboundConfig } = await import("../../lib/config.js");
-    const inbound = getInboundConfig();
-    // SECURITY: never trust note.bucket from the (unauthenticated) payload — a
-    // forged notification could otherwise make us ingest an arbitrary bucket.
-    // Always sync the operator-configured inbound bucket.
-    const bucket = inbound.bucket;
-    const region = inbound.region;
-    const prefix = inbound.prefix;
-    if (!bucket) return json({ ok: true, ignored: "no bucket configured" });
-    const providerId = getInboundBuckets().find((entry) => entry.bucket === bucket)?.providerId;
-    const objectKey = note.objectKey?.replace(/^\/+/, "");
-    if (objectKey && prefix && !objectKey.startsWith(prefix)) {
-      return json({ ok: true, ignored: "notification object key outside configured prefix", message_id: note.messageId, object_key: objectKey });
-    }
-    const exactKeys = objectKey ? [objectKey] : undefined;
-
-    const sync = deps?.sync ?? (async (b: string, p: string | undefined, r: string | undefined, syncOpts?: { keys?: string[]; providerId?: string }) => {
-      const { syncS3Inbox } = await import("../../lib/s3-sync.local.js");
-      return syncS3Inbox({ bucket: b, prefix: p, region: r, providerId: syncOpts?.providerId, keys: syncOpts?.keys, limit: syncOpts?.keys?.length ?? 100 });
+  const sync = deps?.sync ?? (async (
+    bucket: string,
+    prefix: string | undefined,
+    region: string | undefined,
+    syncOpts?: { keys?: string[]; providerId?: string },
+  ) => {
+    const { syncS3Inbox } = await import("../../lib/s3-sync.local.js");
+    return syncS3Inbox({
+      bucket,
+      prefix,
+      region,
+      providerId: syncOpts?.providerId,
+      keys: syncOpts?.keys,
+      limit: syncOpts?.keys?.length ?? 100,
     });
-    emitEmailsEventBestEffort({
-      type: "emails.inbound.sync.requested",
-      subject: note.messageId,
-      severity: "info",
-      dedupeKey: `emails:inbound:ses-sync-requested:${note.messageId}`,
-      message: "SES inbound notification requested mailbox sync",
-      data: {
-        message_id: note.messageId,
-        bucket,
-        prefix: prefix ?? "",
-        region,
-        object_key: objectKey ?? null,
-        provider_id: providerId ?? null,
-      },
-      metadata: {
-        route: "/webhook/ses-inbound",
-        exact_key: Boolean(exactKeys?.length),
-      },
-    });
-    const result = await sync(bucket, prefix, region, { keys: exactKeys, providerId });
-    recordWebhookReceipt("sns", eventId, note.messageId ?? null, db);
-    return json({ ok: true, synced: result.synced, message_id: note.messageId, object_key: objectKey ?? null });
-  }
+  });
 
-  return json({ ok: true, ignored: "unhandled message type" });
+  return receiveSesNotification(req, {
+    ledger: localWebhookReceiptLedger(),
+    inboundSource: localInboundSource,
+    configuredSecret: configuredWebhookSecret,
+    requireSecret: requireWebhookSecret,
+    fetchUrl: deps?.fetchUrl,
+    verifySns: deps?.verifySns,
+    route: SES_INBOUND_WEBHOOK_PATH,
+    onIngestRequested: (info) => {
+      emitEmailsEventBestEffort({
+        type: "emails.inbound.sync.requested",
+        subject: info.messageId,
+        severity: "info",
+        dedupeKey: `emails:inbound:ses-sync-requested:${info.messageId}`,
+        message: "SES inbound notification requested mailbox sync",
+        data: {
+          message_id: info.messageId,
+          bucket: info.bucket,
+          prefix: info.prefix ?? "",
+          region: info.region,
+          object_key: info.objectKey ?? null,
+          provider_id: info.providerId ?? null,
+        },
+        metadata: {
+          route: info.route,
+          exact_key: Boolean(info.objectKey),
+        },
+      });
+    },
+    async ingest(request: SesIngestRequest): Promise<SesIngestResult> {
+      const result = await sync(
+        request.bucket,
+        request.prefix,
+        request.region,
+        {
+          keys: request.objectKey ? [request.objectKey] : undefined,
+          providerId: request.providerId,
+        },
+      );
+      return { synced: result.synced, resourceId: request.messageId ?? null };
+    },
+    recordDeliveryEvent: (event) => recordLocalDeliveryEvent("ses", event),
+  });
 }

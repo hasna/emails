@@ -35,8 +35,8 @@ emails provider add --name production-resend --type resend --api-key ...
 emails domain setup example.com --provider <id> --email you@example.com ...
 
 # Or connect a domain you already own without buying it
-emails domains connect example.com --provider <id> --source-of-truth local --dry-run
-emails domains connect example.com --provider <id> --source-of-truth postgres --dns-provider route53 --no-register-provider
+emails domains connect example.com --provider <id> --dry-run
+emails domains connect example.com --provider <id> --dns-provider route53 --no-register-provider
 
 # Or configure DNS for an existing domain via Cloudflare
 emails domain setup-cloudflare example.com --provider <id>
@@ -75,10 +75,14 @@ a whole.
 
 Use these setup paths:
 
+The source of truth follows the mode; it is not a per-domain choice. A domain
+created or connected through this client is owned by the app's `/v1` database, so
+`source_of_truth` is reported as `postgres` and is not an input.
+
 | Mode | Who owns the mail source of truth | Domain setup path |
 | --- | --- | --- |
-| `local` | The local SQLite/files install | `emails domains add` or `emails domains connect --source-of-truth local`; DNS checks are advisory unless using a real send/receive provider. |
-| `self_hosted` | Your PostgreSQL/S3/SES or equivalent infrastructure | `emails domains connect --source-of-truth postgres`, then publish the returned DNS tasks and enable inbound/outbound when evidence is ready. |
+| `local` | The local SQLite/files install | `emails domains add`; DNS checks are advisory unless using a real send/receive provider. |
+| `self_hosted` | Your PostgreSQL/S3/SES or equivalent infrastructure | `emails domains connect`, then publish the returned DNS tasks and enable inbound/outbound when evidence is ready. |
 
 Authentication records are required only for the capability you enable:
 
@@ -340,7 +344,7 @@ CLI command, including the JSON flag, for auditability and handoff. Attachment
 content is never included in inventory output.
 
 ```bash
-emails-mcp
+emails-mcp            # stdio transport (default)
 ```
 
 ## REST API
@@ -534,18 +538,53 @@ services and never falls back to that local directory.
 
 ## Transport
 
-The shared Streamable HTTP transport is the default (one process, many agents); pass
-`--stdio` for a per-client stdio server:
+**stdio is the default** (one server per client, no listening socket). The shared
+Streamable HTTP transport is opt-in via `--http`, because it publishes every MCP
+tool — `send_email`, `add_forwarding_rule`, `set_config`, `create_send_key` — to
+anything that can reach the port:
 
 ```bash
-emails-mcp                     # http://127.0.0.1:8861/mcp (default)
-emails-mcp --port 8861         # explicit port
-emails-mcp --stdio             # stdio transport (one server per client)
+emails-mcp                     # stdio (default)
+emails-mcp --stdio             # same, explicit
 MCP_STDIO=1 emails-mcp         # same
+
+# HTTP: opt-in, and refuses to start without a bearer token
+EMAILS_MCP_HTTP_TOKEN="$(openssl rand -hex 32)" emails-mcp --http
+EMAILS_MCP_HTTP_TOKEN=... emails-mcp --http --port 8861   # or --port=8861
 ```
 
 - Health: `GET http://127.0.0.1:8861/health` -> `{"status":"ok","name":"emails"}`
-- Override port with `MCP_HTTP_PORT` or `--port`
+- Override port with `MCP_HTTP_PORT`, `--port <n>`, or `--port=<n>`
+
+### HTTP transport authorization
+
+A loopback bind is not an authorization boundary. Any local process can reach the
+port, and a web page can reach it too by re-resolving its own hostname to
+`127.0.0.1` (DNS rebinding) — at which point the browser considers the request
+same-origin and CORS never applies. So the HTTP transport:
+
+- **Requires `Authorization: Bearer <token>` on `/mcp`**, matching
+  `EMAILS_MCP_HTTP_TOKEN` (minimum 16 characters). Without the variable set, the
+  server refuses to start rather than listening unauthenticated.
+- **Validates the `Host` header on every path.** Default allowlist is the
+  loopback names at the bound port (`127.0.0.1:<port>`, `localhost:<port>`,
+  `[::1]:<port>`). Override with `EMAILS_MCP_ALLOWED_HOSTS` (comma-separated) —
+  required if you bind a wildcard address or front the server with a proxy.
+- **Validates `Origin` when the client sends one**, against
+  `EMAILS_MCP_ALLOWED_ORIGINS` (default: the loopback origins at the bound port).
+  Native MCP clients send no `Origin` and are unaffected.
+
+`/health` stays unauthenticated so liveness probes keep working; it returns only
+the static `{"status":"ok","name":"emails"}` and is still behind the `Host`
+allowlist.
+
+Client configuration, e.g. for the MCP TypeScript SDK:
+
+```ts
+new StreamableHTTPClientTransport(new URL("http://127.0.0.1:8861/mcp"), {
+  requestInit: { headers: { Authorization: `Bearer ${process.env.EMAILS_MCP_HTTP_TOKEN}` } },
+});
+```
 
 ## License
 
