@@ -98,37 +98,55 @@
 // type, so this keeps the moment of the refusal as well as the fact of it.
 //
 // "The refusal is preserved" is NOT the claim that nothing changed: the two are asked of
-// different settings. Every configuration in which the answer moved:
+// DIFFERENT settings, so the honest form of the claim is an enumeration and the enumeration is
+// MEASURED rather than reasoned about. Both database-path settings crossed with an API url
+// (absent / valid / unparseable), a credential (none / session token / operator key), the
+// client-env pointer (absent / present) and the deployment word (absent / local / server-side)
+// is 648 combinations; each was run against main and against this module and the answers
+// compared. Result: **48 both run, 300 both refuse, 276 change to a refusal, 24 change to a
+// run** — SEVEN classes in all, and every one is named below with its count. A reviewer who
+// wants only the important line: the only direction that needs justifying has ONE class in it.
 //
-// | configuration                                | main                                      | now                         |
-// |----------------------------------------------|-------------------------------------------|-----------------------------|
-// | API storage, no local file yet               | BOUND a listener, CREATED a phantom local | refuses, names the setting  |
-// |                                              | database, then 500 on every callback      |                             |
-// | API storage, STALE local file present        | BOUND a listener, answered 200, WROTE the | refuses, names the setting  |
-// |                                              | event into the stale file                 |                             |
-// | word says local, stale API pointer exported  | as one of the two above                   | refuses, names the setting  |
-// | both database-path settings, different files | ran on the documented precedence          | refuses as a contradiction  |
-// | storage resolves, data directory unsafe      | bound, then 500 on every callback         | refuses at construction     |
-// | word says server-side, NO storage setting    | THREW                                     | RUNS the receiver           |
+// MAIN RAN, THIS MODULE REFUSES — 276 combinations, six classes:
 //
-// THE FIRST TWO ARE MEASURED ON MAIN, NOT REASONED ABOUT, and they are different failures
-// worth separating. In the first, the phantom database has no `providers` row for the id the
-// CLI resolved out of the real store, and `events.provider_id` is a foreign key under
-// `PRAGMA foreign_keys = ON`, so every valid callback is answered 500 — the provider retries
-// until its budget drains and the delivery events are lost, while the CLI's own output said
-// the listener started. The second is the WORSE one and needs no fault at all: an
-// installation that moved from a local database to an Emails API and kept its old file
-// answers 200 and writes the event into that file, so the provider is told "done" and never
-// retries, and the row lands where nothing reads it. Both are pinned by cases in the suite.
+//    231  a database path AND an API setting are both configured. `planEmailStore` refuses a
+//         contradiction rather than picking a winner, and the receiver inherits that.
+//     24  both database-path settings set, naming DIFFERENT files. Main ran on the documented
+//         precedence; the resolver treats "which did you mean?" as unanswerable.
+//      6  an API url with NO credential. A url alone cannot produce a working store.
+//      6  an API url that does not parse.
+//      6  API STORAGE, RESOLVED — the class the deleted arm existed for. The receiver belongs
+//         to the service.
+//      3  a client-env pointer set whose API url is not present in the environment.
 //
-// The first four CONVERGE with the families that already collapsed and already refuse there
-// (`src/db/forwarding`, `src/lib/forwarding`, `src/lib/status-facts`). The fifth is a strict
-// improvement in the direction that matters for a webhook: refusing to start leaves the
-// callbacks queued at the provider instead of draining its retry budget against a 500. The
-// sixth is the mirror image and is the one to read twice — a listener now starts where it
-// previously threw. It is the correct answer for that configuration (an unset storage setting
-// IS a local SQLite installation, which is what `planEmailStore` resolves), and it is the
-// configuration the axis deletion removes.
+// The first five converge with the families that already collapsed and already refuse there
+// (`src/db/forwarding`, `src/lib/forwarding`, `src/lib/status-facts`).
+//
+// MAIN REFUSED, THIS MODULE RUNS — 24 combinations, ONE class, and it is the one to read
+// twice: storage resolves to a LOCAL DATABASE while the deployment word claims a server-side
+// deployment. Two things about it. First, main's refusal there does NOT come from the deleted
+// arm at all — the mode read itself throws ("the self-hosted client is not configured") before
+// any arm is chosen, so main never reached the stub. Second, running is the correct answer:
+// the storage settings say local SQLite, which is where the events would go, and the word that
+// disagreed is the axis being deleted. This class disappears with it.
+//
+// A SEVENTH CLASS IS OUTSIDE THAT GRID and is stated rather than counted, because an untrusted
+// data-directory ancestor cannot be varied as an environment value: storage resolves but the
+// data directory is refused (a symlink, an untrusted ancestor). Main bound the port and then
+// answered 500 to every callback; this refuses at construction. That is a strict improvement in
+// the direction that matters for a webhook — refusing to start leaves the callbacks queued at
+// the provider instead of draining its finite retry budget against a 500.
+//
+// WHAT MAIN ACTUALLY DID IN THE API CLASS, measured on main rather than assumed, because it is
+// two different failures and the second is the dangerous one. With no local file yet: main
+// bound a listener, CREATED a phantom database under the home directory, and answered 500 to
+// every valid callback — the phantom database has no `providers` row for the id the CLI
+// resolved out of the real store, and `events.provider_id` is a foreign key under
+// `PRAGMA foreign_keys = ON` — while the CLI's own output said the listener had started. With a
+// STALE local file present, which needs no fault at all and is just an installation that moved
+// from a local database to an Emails API and kept its old file: main answered 200 and WROTE the
+// event into that stale file, so the provider was told "done", never retried, and the row
+// landed where nothing reads it. Both are pinned by cases in the suite.
 //
 // WHAT THE CONSUMERS DO WITH THE REFUSAL, checked rather than assumed. `emails webhook
 // listen` (`src/cli/commands/email-log.local.ts`) already wraps the call and surfaces it
