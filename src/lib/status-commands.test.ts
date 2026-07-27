@@ -4,8 +4,8 @@
 // `emails provision status` and every JSON error proposed `emails doctor --json`,
 // both of which refused in self_hosted mode.
 //
-// `emails doctor` no longer refuses — src/lib/doctor.remote.ts probes the
-// operator service — so the self_hosted examples below use `emails stats`, which
+// `emails doctor` no longer refuses — src/lib/doctor.ts reads its facts through
+// the store seam — so the self_hosted examples below use `emails stats`, which
 // still has no client-side aggregation over the delivery events table. Keeping a
 // runnable command in these fixtures would make them vacuously green.
 

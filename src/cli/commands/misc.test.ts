@@ -3,9 +3,9 @@
 // Reading and cancelling the schedule, and running diagnostics, are NOT
 // server-only: `GET/PATCH /v1/scheduled` exists and src/db/scheduled.remote.ts
 // is a complete client for it (the MCP `list_scheduled` / `cancel_scheduled`
-// tools already take exactly that path), and src/lib/doctor.remote.ts probes
-// the operator service. Those commands are driven here against an
-// out-of-process /v1 stub (see src/test-support/v1-stub.ts).
+// tools already take exactly that path), and src/lib/doctor.ts reads its facts
+// through whichever store the configuration names. Those commands are driven
+// here against an out-of-process /v1 stub (see src/test-support/v1-stub.ts).
 //
 // What stays server-only is the scheduler LOOP and the batch sender (both need
 // the local provider send pipeline) and `doctor delivery`. That last one is now a
@@ -196,20 +196,59 @@ describe("schedule list routes to /v1/scheduled", () => {
   }
 });
 
-// ─── doctor (previously refused; now probes the operator service) ─────────────
+// ─── doctor (one implementation, reading through the store seam) ──────────────
+//
+// `emails doctor` has ONE implementation now (src/lib/doctor.ts). It no longer reports
+// a mode, and it no longer probes `/health` and `/ready`; it reads the resource facts
+// through the store the configuration names, which here is a client of this stub. So the
+// assertions moved from "the mode-specific arm ran" to "the API store actually served the
+// reads", which is a stronger claim about the service than a health endpoint is.
+//
+// `EMAILS_DB_PATH` is unset for this block ON PURPOSE, and it is not a workaround for a
+// resolver rule. `stub.applyEnv()` adds an API URL while the hermetic harness
+// (scripts/run-hermetic-tests.sh) exports `EMAILS_DB_PATH=:memory:`, so the process is
+// left naming BOTH a local database and an API — which src/store-resolution.ts correctly
+// refuses to resolve rather than picking a winner. This block wants the API store, so it
+// says so. (The harness-wide fix is its own change; this is the one command in this file
+// that constructs a store.)
 
-describe("doctor runs the self-hosted diagnostics", () => {
-  it("reports mode, client configuration and the real /health and /ready probes", async () => {
+describe("doctor runs the diagnostics against the configured store", () => {
+  const DATABASE_PATH_KEYS = ["HASNA_EMAILS_DB_PATH", "EMAILS_DB_PATH"] as const;
+  let priorDatabasePaths: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    priorDatabasePaths = {};
+    for (const key of DATABASE_PATH_KEYS) {
+      priorDatabasePaths[key] = process.env[key];
+      delete process.env[key];
+    }
+  });
+
+  // Restored so the blocks after this one see the environment they were written against.
+  afterEach(() => {
+    for (const key of DATABASE_PATH_KEYS) {
+      const value = priorDatabasePaths[key];
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  it("reports reads served by the API store, and no check that claims what it did not measure", async () => {
     const { data, output } = await runMisc(["doctor"]);
     const checks = data as Array<{ name: string; status: string; message: string }>;
     const named = (name: string) => checks.find((check) => check.name === name);
 
-    expect(named("Mode")).toMatchObject({ status: "pass" });
-    expect(named("Self-hosted client configuration")).toMatchObject({ status: "warn" });
-    // The stub serves /v1 only, so both probes must FAIL rather than be skipped:
-    // a diagnostic that cannot reach the service has to say so.
-    expect(named("Self-hosted API /health")).toMatchObject({ status: "fail" });
-    expect(named("Self-hosted API /ready")).toMatchObject({ status: "fail" });
+    // Reachability comes from a SERVED READ, never from a configuration that parsed.
+    expect(named("Store")).toMatchObject({ status: "pass" });
+    expect(named("Store")?.message).toContain("A read was served by");
+    // The deleted arms' checks are gone, along with the mode word they reported.
+    expect(named("Mode")).toBeUndefined();
+    expect(named("Self-hosted API /health")).toBeUndefined();
+    // What replaced the readiness probe says so instead of vanishing.
+    expect(named("Store readiness")).toMatchObject({ status: "unknown" });
+    // Real resource reads against the stub, and credential validity reported as unmeasured.
+    expect(named("Templates")).toMatchObject({ status: "pass", message: "0 template(s)" });
+    expect(named("Provider credentials")).toMatchObject({ status: "unknown" });
     expect(output).not.toContain("not available in the self-hosted client");
   });
 });
