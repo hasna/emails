@@ -1740,26 +1740,49 @@ export class EmailsSelfHostedStore {
   }
 }
 
-/** The EXCLUDED assignment list shared by both upsertMessage variants. */
-const MESSAGE_UPSERT_ASSIGNMENTS =
-  `direction           = EXCLUDED.direction,
-   from_addr           = EXCLUDED.from_addr,
-   to_addrs            = EXCLUDED.to_addrs,
-   cc_addrs            = EXCLUDED.cc_addrs,
-   subject             = EXCLUDED.subject,
-   body_text           = EXCLUDED.body_text,
-   body_html           = EXCLUDED.body_html,
-   status              = EXCLUDED.status,
-   provider_message_id = EXCLUDED.provider_message_id,
-   message_id          = EXCLUDED.message_id,
-   in_reply_to         = EXCLUDED.in_reply_to,
-   received_at         = EXCLUDED.received_at,
-   is_read             = EXCLUDED.is_read,
-   is_starred          = EXCLUDED.is_starred,
-   labels              = EXCLUDED.labels,
-   headers             = EXCLUDED.headers,
-   attachments         = EXCLUDED.attachments,
-   updated_at          = now()`;
+/**
+ * The columns an UPSERT-onto-an-existing-row writes: ONLY the ones the input carries.
+ *
+ * This is not an optimisation, and the previous unconditional list was a bug. Writing
+ * the whole insert set on the conflict path meant a re-imported message had its read
+ * flag, star, labels and `received_at` reset from `messageInsertParams`' DEFAULTS —
+ * `is_read ?? false`, `labels ?? []` — rather than from anything the caller said. So
+ * re-running an importer marked the whole mailbox unread, dropped every label and
+ * re-sorted the message to the import instant, on an operation whose entire contract is
+ * that a replay changes nothing it was not told about. The SQLite store found and fixed
+ * exactly this (src/store-sqlite/messages.ts, `updateValues`); this is the same fix on
+ * the Postgres side, so the two implementations of the seam finally agree.
+ *
+ * `from_addr` and `to_addrs` are unconditional because `MessageInput` requires them, so
+ * a caller always states them. `created_at`, `source_id` and the four send-ledger
+ * columns are never in the set: the first is the row's identity, the second is the
+ * conflict key, and the last four belong to the send path.
+ */
+function messageUpsertAssignments(input: MessageInput): string {
+  const assignments = ["from_addr = EXCLUDED.from_addr", "to_addrs = EXCLUDED.to_addrs"];
+  const whenGiven: Array<[string, unknown]> = [
+    ["direction", input.direction],
+    ["cc_addrs", input.cc_addrs],
+    ["subject", input.subject],
+    ["body_text", input.body_text],
+    ["body_html", input.body_html],
+    ["status", input.status],
+    ["provider_message_id", input.provider_message_id],
+    ["message_id", input.message_id],
+    ["in_reply_to", input.in_reply_to],
+    ["received_at", input.received_at],
+    ["is_read", input.is_read],
+    ["is_starred", input.is_starred],
+    ["labels", input.labels],
+    ["headers", input.headers],
+    ["attachments", input.attachments],
+  ];
+  for (const [column, value] of whenGiven) {
+    if (value !== undefined) assignments.push(`${column} = EXCLUDED.${column}`);
+  }
+  assignments.push("updated_at = now()");
+  return assignments.join(",\n         ");
+}
 
 /**
  * A store already bound to a single `tenantId`. EVERY method injects the tenant:
@@ -4066,6 +4089,10 @@ export class TenantScopedStore {
    * Idempotent write keyed on `(tenant_id, source_id)`: inserts a new row, or
    * updates the existing row with the same source_id within this tenant (so
    * re-running an import never duplicates and never touches another tenant's row).
+   *
+   * The conflict path writes only the columns the input carries — see
+   * `messageUpsertAssignments` for why writing all of them broke the very property
+   * "idempotent" names.
    */
   async upsertMessage(input: MessageInput): Promise<{ record: MessageRecord; inserted: boolean }> {
     if (!input.source_id) {
@@ -4075,7 +4102,7 @@ export class TenantScopedStore {
       `INSERT INTO messages (${MESSAGE_INSERT_COLS}, tenant_id)
        VALUES (${MESSAGE_INSERT_VALUES}, $24)
        ON CONFLICT (tenant_id, source_id) WHERE source_id IS NOT NULL DO UPDATE SET
-         ${MESSAGE_UPSERT_ASSIGNMENTS}
+         ${messageUpsertAssignments(input)}
        RETURNING ${MESSAGE_COLUMNS}, (xmax = 0) AS inserted`,
       [...messageInsertParams(input), this.tenantId],
     );

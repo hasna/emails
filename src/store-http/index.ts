@@ -88,10 +88,14 @@ export const HTTP_STORE_CAPABILITIES: StoreCapabilities = Object.freeze({
  * and pinned by a test — so it cannot quietly shrink by a capability being flipped to
  * true without a route appearing.
  *
- * `capability` is null for the entries that are NOT capability-shaped. Those are the
- * uncomfortable ones: the seam declares those operations ungated, so there is no
- * capability to declare false and no legal refusal, and this store depends on a route
- * that does not exist yet.
+ * `capability` is null for the entries that are NOT capability-shaped — the seam declares
+ * those operations ungated, so there is no capability to declare false and no refusal to
+ * hide behind. Every remaining null entry is therefore SERVED, by composing routes that
+ * do exist; what is missing is a cheaper or more atomic verb, and each entry says which.
+ *
+ * That was not always true. The list used to open with one null entry that was not served
+ * at all — see the note above the table — and closing it is what made "ungated means
+ * implemented" hold for every operation on this store rather than for most of them.
  */
 export interface MissingRoute {
   /** The seam operations that need it. */
@@ -104,18 +108,15 @@ export interface MissingRoute {
   today: string;
 }
 
+// CLOSED, and recorded here because a deleted entry is invisible in review:
+// `createMessage` / `upsertMessage` used to head this list. `POST /v1/messages` answers
+// 409 for anything not inbound and `POST /v1/messages/send` dispatches real mail, so
+// there was NO WAY to record an outbound message without sending it — and because the
+// seam leaves those two operations ungated, there was no capability to declare false and
+// therefore no legal refusal either. That entry was the only one in this list with no
+// honest answer available. `POST /v1/messages/record` now serves both operations in
+// either direction; `POST /v1/messages` keeps its 409 unchanged.
 export const HTTP_STORE_MISSING_ROUTES: readonly MissingRoute[] = Object.freeze([
-  {
-    operations: ["createMessage", "upsertMessage"],
-    capability: null,
-    wanted: "POST /v1/messages accepting direction=outbound, or POST /v1/messages/send-intents/reserve",
-    today:
-      "REFUSED BY THE SERVICE. POST /v1/messages answers 409 'outbound messages must be sent " +
-      "through POST /v1/messages/send' for anything not inbound (service.ts:1453-1455), and that " +
-      "send route dispatches real mail. There is no way to RECORD an outbound message without " +
-      "sending it, so these two ungated operations cannot be served for outbound input at all. " +
-      "This is the one gap with no legal refusal available, because the seam does not gate them.",
-  },
   {
     operations: [
       "lookupSendIntent",

@@ -3,21 +3,28 @@
 // FOUR THINGS IN THIS FILE ARE DECISIONS RATHER THAN TRANSCRIPTION, and each one is
 // a place where a wrong answer was available:
 //
-// 1. `createMessage` REFUSES the four send-ledger fields. `POST /v1/messages` reads
-//    neither `idempotency_key`, `send_payload_hash`, `send_state` nor
-//    `send_started_at` (src/server/self-hosted/service.ts:1432-1451) — it drops them.
-//    A caller who sets one and gets a 201 believes the fence was recorded when
-//    nothing was, which is worse than being told no. The SQLite store refuses the
-//    same four for the same reason (it has no columns for them); here the reason is
-//    that the route has no fields for them.
+// 0. BOTH WRITES GO TO `POST /v1/messages/record`, NOT TO `POST /v1/messages`. The
+//    latter imports INBOUND mail only and answers 409 for anything else, so it cannot
+//    serve two operations the seam leaves ungated — an outbound `createMessage` had no
+//    route at all, and no capability to be refused under. The record route persists a
+//    row in either direction and transmits nothing; the send path stays the only way to
+//    invoke a provider.
+//
+// 1. `createMessage` REFUSES the four send-ledger fields. The record route rejects them
+//    with 400 `send_ledger_field` rather than dropping them, and this store refuses
+//    them BEFORE the request so the caller learns which field is at fault without a
+//    round trip. A caller who sets one and gets a 201 believes the fence was recorded
+//    when nothing was, which is worse than being told no. The SQLite store refuses the
+//    same four for the same reason (it has no columns for them).
 //
 // 2. `createMessage` REFUSES A `source_id` BEFORE SENDING ANYTHING. With one, the route
-//    UPSERTS — and its upsert overwrites the whole column set, read and star flags and
-//    labels included. An earlier version sent the request and returned a conflict on the
-//    200 that means "matched an existing row", which was the worst answer available: the
-//    collided row had already been clobbered by the time the refusal was built, and the
-//    caller was told nothing had been written. The check therefore happens before the
-//    request, not after it. `upsertMessage` is the operation that means this.
+//    UPSERTS — and while the upsert now writes only the columns the body carries, it
+//    still resolves onto a row this caller did not name. An earlier version sent the
+//    request and returned a conflict on the 200 that means "matched an existing row",
+//    which was the worst answer available: the collided row had already been written by
+//    the time the refusal was built, and the caller was told nothing had happened. The
+//    check therefore happens before the request, not after it. `upsertMessage` is the
+//    operation that means this.
 //
 // 3. `upsertMessage` REFUSES a call with no `source_id`. Without one the route does a
 //    plain create, so a caller asking for an idempotent write would get a duplicate
@@ -84,9 +91,12 @@ const MAX_CLEAR_SWEEPS = 200;
 /** The batch ceiling `POST /v1/attachments/batch` enforces (`max_batch_size`). */
 const MAX_BATCH = 200;
 
+/** The one route that records a message row without dispatching it. */
+const RECORD_PATH = "/messages/record";
+
 /**
- * Fields a caller may set that `POST /v1/messages` does not read. Named here so the
- * refusal can say which one, rather than refusing the whole write anonymously.
+ * Fields a caller may set that the record route refuses. Named here so the refusal can
+ * say which one, rather than refusing the whole write anonymously.
  */
 const DROPPED_ON_THE_WIRE = [
   "idempotency_key",
@@ -125,10 +135,10 @@ function messageBody(input: MessageInput): Record<string, unknown> {
 }
 
 /**
- * The ledger fields this route silently drops, if the caller set any.
+ * The ledger fields the record route will not accept, if the caller set any.
  *
  * A field explicitly set to `null` or to the "no ledger" sentinel is NOT a write —
- * there is nothing to lose — so it passes. Anything else would be dropped.
+ * there is nothing to lose — so it passes, and this store never puts it on the wire.
  */
 function droppedLedgerField(input: MessageInput): string | null {
   const fields = input as unknown as Record<string, unknown>;
@@ -211,35 +221,30 @@ export function createMessagesRepository(transport: Transport): MessagesReposito
       const dropped = droppedLedgerField(input);
       if (dropped !== null) {
         return invalidInput(
-          `createMessage: POST /v1/messages does not carry ${dropped}, so the field would be ` +
-            "accepted and dropped; reserve a send intent instead of recording one here",
+          `createMessage: POST /v1${RECORD_PATH} does not carry ${dropped} — only the send ` +
+            "path may write the ledger — so reserve a send intent instead of recording one here",
         );
       }
       // REFUSED BEFORE THE REQUEST IS SENT, and the ordering is the entire point.
       //
-      // `POST /v1/messages` UPSERTS whenever a `source_id` is present, and its upsert
-      // overwrites the whole column set — `is_read`, `is_starred`, `labels`,
-      // `received_at`, subject, bodies, headers, attachments
-      // (src/server/self-hosted/store.ts, MESSAGE_UPSERT_ASSIGNMENTS). An earlier version
-      // of this method sent the request first and returned a conflict on the 200 that
-      // means "matched an existing row". That was the worst answer available: by the time
-      // the refusal was built the collided row had ALREADY been clobbered with this
-      // caller's payload, and the caller was told nothing had been written. Adversarial
-      // review caught it, and it is verbatim the defect class found in the SQLite store's
-      // upsert — a replay resetting read/star/label state — with a denial on top.
+      // The record route UPSERTS whenever a `source_id` is present, so the write resolves
+      // onto a row this caller did not name. An earlier version of this method sent the
+      // request first and returned a conflict on the 200 that means "matched an existing
+      // row". That was the worst answer available: by the time the refusal was built the
+      // collided row had ALREADY been written with this caller's payload, and the caller
+      // was told nothing had happened.
       //
       // A pre-flight existence check would not fix it either: the row can appear between
-      // the check and the write, and the write is destructive. So `createMessage` declines
-      // the fenced input outright. `upsertMessage` is the operation that means this, and
-      // it reports `inserted` honestly.
+      // the check and the write. So `createMessage` declines the fenced input outright.
+      // `upsertMessage` is the operation that means this, and it reports `inserted`
+      // honestly.
       if (input.source_id !== undefined && input.source_id !== null && input.source_id !== "") {
         return conflict(
-          "createMessage: a source_id makes POST /v1/messages an upsert that overwrites every " +
-            "column of any row it matches, including read, star and label state; call " +
-            "upsertMessage, which reports whether it inserted",
+          `createMessage: a source_id makes POST /v1${RECORD_PATH} an upsert onto whatever row ` +
+            "already carries that id; call upsertMessage, which reports whether it inserted",
         );
       }
-      const answer = await transport.request("POST", "/messages", { body: messageBody(input) });
+      const answer = await transport.request("POST", RECORD_PATH, { body: messageBody(input) });
       if (answer.status !== 201) return refusalForStatus(answer.status, answer.body, "createMessage");
       return ok(messageRecord(envelope(answer.body, "message", "createMessage"), "createMessage"));
     },
@@ -254,11 +259,11 @@ export function createMessagesRepository(transport: Transport): MessagesReposito
       const dropped = droppedLedgerField(input);
       if (dropped !== null) {
         return invalidInput(
-          `upsertMessage: POST /v1/messages does not carry ${dropped}, so the field would be ` +
-            "accepted and dropped",
+          `upsertMessage: POST /v1${RECORD_PATH} does not carry ${dropped} — only the send path ` +
+            "may write the ledger",
         );
       }
-      const answer = await transport.request("POST", "/messages", { body: messageBody(input) });
+      const answer = await transport.request("POST", RECORD_PATH, { body: messageBody(input) });
       // 201 inserted, 200 matched an existing source_id. The distinction IS the
       // operation's second return value, and it is the service's answer rather than a
       // guess made by comparing timestamps.
