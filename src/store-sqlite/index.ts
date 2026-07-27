@@ -93,7 +93,15 @@ export interface SqliteEmailStoreOptions {
    * which is what a shipped caller wants; tests hand in their own.
    */
   database?: Database;
-  /** Human-readable location for `descriptor.detail`. Never a credential. */
+  /**
+   * Human-readable location for `descriptor.detail`. Never a credential.
+   *
+   * Defaults to the OPEN CONNECTION'S OWN FILE rather than to a re-derived path.
+   * `getDatabase()` memoises one connection per process and ignores the path once it has
+   * opened, so anything computed from the environment can name a file the store is not
+   * bound to — and a diagnostics string that points at the wrong database is worse than
+   * no diagnostics at all.
+   */
   detail?: string;
 }
 
@@ -111,7 +119,7 @@ export function createSqliteEmailStore(options: SqliteEmailStoreOptions = {}): E
     createResourceRepository(db, RESOURCE_TABLES[family]);
 
   return {
-    descriptor: sqliteStoreDescriptor(options.detail ?? "SQLite database"),
+    descriptor: sqliteStoreDescriptor(options.detail ?? `SQLite at ${db.filename}`),
     capabilities,
 
     domains: createDomainsRepository(db),

@@ -234,6 +234,52 @@ describe("POST /v1/messages/record", () => {
     expect(wrongMethod.status).toBe(405);
   });
 
+  test("stores an empty source_id as NULL rather than as a fence", async () => {
+    // ADVERSARIAL REVIEW'S BLOCKER. Left as `""` the value lands in the column, and the
+    // partial unique index `(tenant_id, source_id) WHERE source_id IS NOT NULL` then makes
+    // the SECOND such write a unique violation — a 500 for a caller who asked for a plain
+    // create, where the SQLite store answers a typed conflict. The client permits `""`
+    // explicitly, so this was reachable from the shipped package.
+    const recorder = recordingClient();
+    const answer = await call(recorder, "/v1/messages/record", {
+      token: keyWith(["emails:write"]),
+      body: { ...OUTBOUND, source_id: "" },
+    });
+    expect(answer.status).toBe(201);
+    const insert = recorder.statements.find((sql) => sql.includes("INSERT INTO messages"));
+    // A plain create, NOT an upsert: an empty fence is no fence.
+    expect(insert).not.toContain("ON CONFLICT");
+    const bound = recorder.params[recorder.statements.indexOf(insert as string)] as unknown[];
+    expect(bound[18], "source_id must be NULL, not the empty string").toBeNull();
+  });
+
+  test("refuses a direction that is neither inbound nor outbound", async () => {
+    // Newly reachable, and newly worth guarding: until this route existed every write path
+    // PINNED the direction, so a caller could not store a typo. A stored "outbund" is read
+    // as inbound by every folder predicate (`lower(coalesce(direction,'')) <> 'outbound'`)
+    // AND excluded from the sender's outbound quota (`direction = 'outbound'`) — one row,
+    // two classifications — and an upsert would write it over a good row.
+    for (const direction of ["banana", "INBOUND", "Outbound", " inbound", 42]) {
+      const recorder = recordingClient();
+      const answer = await call(recorder, "/v1/messages/record", {
+        token: keyWith(["emails:write"]),
+        body: { from: "s@example.com", to: ["r@example.com"], direction },
+      });
+      expect(answer.status, `direction ${JSON.stringify(direction)} must be refused`).toBe(400);
+      expect(String(answer.body["error"])).toContain("direction must be one of");
+      expect(recorder.statements.some((sql) => sql.includes("INSERT INTO messages"))).toBe(false);
+    }
+    // POSITIVE CONTROL: both legal values still write, so this is not "reject everything".
+    for (const direction of ["inbound", "outbound"]) {
+      const answer = await call(recordingClient(), "/v1/messages/record", {
+        token: keyWith(["emails:write"]),
+        body: { from: "s@example.com", to: ["r@example.com"], direction },
+      });
+      expect(answer.status, direction).toBe(201);
+      expect((answer.body["message"] as Record<string, unknown>)["direction"]).toBe(direction);
+    }
+  });
+
   test("is not swallowed by the /v1/messages/{id} matcher", async () => {
     // `record` is a legal message-id PREFIX as far as that regex is concerned, so the
     // ordering in the router is load-bearing. A 404 "message not found" here would mean

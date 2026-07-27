@@ -241,7 +241,11 @@ function selfHostedResendInboundSink(deps: SelfHostedWebhookDeps, ledger: SelfHo
         message_id: parsed.provider_message_id || null,
         provider_message_id: parsed.provider_message_id || null,
         received_at: parsed.received_at,
-        is_read: false,
+        // `is_read` is DELIBERATELY ABSENT, not `false`. This write is an upsert on
+        // `source_id`, and the upsert now writes only the columns the input names — so
+        // stating `false` here would make a duplicate provider delivery mark an
+        // already-read message unread again, which is exactly the replay defect the
+        // conditional assignment list exists to close. The insert defaults it to false.
         headers: parsed.headers,
         attachments: [],
         // Stable upstream identity so a replay upserts instead of duplicating,

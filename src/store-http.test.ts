@@ -650,9 +650,13 @@ describe("the /v1 routes this store depends on", () => {
       expect(entry.today.length).toBeGreaterThan(0);
     }
     // The entries that are NOT capability-shaped are the ungated operations, and the
-    // category must not quietly disappear — four of them remain, each one a cheaper verb
-    // this store composes around.
-    expect(HTTP_STORE_MISSING_ROUTES.some((entry) => entry.capability === null)).toBe(true);
+    // category must not quietly disappear. SIX of them remain, each a cheaper or more
+    // atomic verb this store composes around. The COUNT is asserted, not merely
+    // `some(...)`: with a bare existence check five of the six could be deleted with this
+    // test green — the same quiet-shrink failure the assertion is here to prevent, and an
+    // earlier version of this comment claimed the wrong number precisely because nothing
+    // checked it.
+    expect(HTTP_STORE_MISSING_ROUTES.filter((entry) => entry.capability === null).length).toBe(6);
     // AND THE OUTBOUND-RECORD GAP IS CLOSED. It was the one entry in this list with no
     // legal answer available: `createMessage`/`upsertMessage` are ungated, so there was
     // no capability to declare false, and `/v1` had no route that recorded a message
@@ -664,10 +668,15 @@ describe("the /v1 routes this store depends on", () => {
         [],
       );
     }
-    // ...and the route table says so, pointing at the record route rather than at the
-    // inbound-only import route.
-    const writes = ROUTES.filter((route) => route.operations.includes("createMessage"));
-    expect(writes.map((route) => `${route.method} ${route.template}`)).toEqual(["POST /v1/messages/record"]);
+    // ...and the route table says so for BOTH operations, pointing at the record route
+    // rather than at the inbound-only import route. Checking only `createMessage` would
+    // have left `upsertMessage` free to point anywhere.
+    for (const operation of ["createMessage", "upsertMessage"]) {
+      const writes = ROUTES.filter((route) => route.operations.includes(operation));
+      expect(writes.map((route) => `${route.method} ${route.template}`), operation).toEqual([
+        "POST /v1/messages/record",
+      ]);
+    }
   });
 
   it("records an outbound message through the record route, and the import route still refuses one", async () => {
@@ -707,11 +716,16 @@ describe("the /v1 routes this store depends on", () => {
     expect(paths["/v1/messages/record"]?.["post"]).toBeDefined();
   });
 
-  it("refuses a send-ledger field at the service as well as in the client", async () => {
-    // The client refuses these before the request (asserted above). This asserts the
-    // ROUTE refuses them too — otherwise the only thing standing between a fabricated
-    // idempotency fence and the ledger is a client-side check, and a row carrying an
-    // idempotency_key cannot be deleted afterwards.
+  it("refuses a send-ledger field at the fixture route as well as in the client", async () => {
+    // The client refuses these before the request (asserted above); this asserts the
+    // ROUTE refuses them too, so the only thing standing between a fabricated idempotency
+    // fence and the ledger is not a client-side check.
+    //
+    // AGAINST THE FIXTURE, and named that way after review caught the earlier title
+    // claiming "at the service". The fixture imports the service's own
+    // `SEND_LEDGER_FIELDS`, so the LIST is the server's — but the refusal executing here
+    // is the fixture's. The real service's own refusal is asserted directly in
+    // src/server/self-hosted/message-record-route.test.ts.
     for (const field of ["idempotency_key", "send_payload_hash", "send_state", "send_started_at"]) {
       const answer = await fetch(`${api.baseUrl}/v1/messages/record`, {
         method: "POST",

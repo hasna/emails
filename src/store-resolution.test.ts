@@ -66,13 +66,34 @@ describe("configured store resolution — the four quadrants", () => {
     expect(lower.databasePath).toBe("/tmp/lower.db");
     expect(lower.setting).toBe(second);
 
-    // BOTH database settings set is NOT a contradiction — they configure the same
-    // thing, and the precedence between them is documented in the database layer.
-    const both = planEmailStore(bare({ [first]: "/tmp/higher.db", [second]: "/tmp/lower.db" }));
-    expect(both.store).toBe("sqlite");
-    if (both.store !== "sqlite") return;
-    expect(both.databasePath, `${first} must be read before ${second}`).toBe("/tmp/higher.db");
-    expect(both.setting).toBe(first);
+    // Both database settings naming the SAME file is not a contradiction, and the
+    // documented precedence names the higher-priority key.
+    const same = planEmailStore(bare({ [first]: "/tmp/same.db", [second]: "/tmp/same.db" }));
+    expect(same.store).toBe("sqlite");
+    if (same.store !== "sqlite") return;
+    expect(same.databasePath).toBe("/tmp/same.db");
+    expect(same.setting, `${first} must be read before ${second}`).toBe(first);
+  });
+
+  it("refuses two database settings that name DIFFERENT files", () => {
+    // Adversarial review's finding, and it is the module's own thesis applied to a
+    // smaller box: an earlier version of this test called two database settings "not a
+    // contradiction — they configure the same thing", which is false the moment their
+    // values differ. Documented precedence answers "which one wins?"; the question the
+    // operator asked is still "which one did you mean?".
+    const [first, second] = DATABASE_PATH_SETTINGS;
+    let thrown: unknown;
+    try {
+      planEmailStore(bare({ [first]: "/tmp/higher.db", [second]: "/tmp/lower.db" }));
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(StoreConfigurationError);
+    const error = thrown as StoreConfigurationError;
+    expect(error.message).toContain(first);
+    expect(error.message).toContain(second);
+    expect([...error.settings].sort()).toEqual([...DATABASE_PATH_SETTINGS].sort());
+    expect(error.message).not.toContain("/tmp/higher.db");
   });
 
   it("uses the API when only the base URL is configured", () => {
@@ -82,9 +103,52 @@ describe("configured store resolution — the four quadrants", () => {
     expect(plan.baseUrl).toBe(A_URL);
     expect(plan.setting).toBe(API_BASE_URL_SETTING);
     expect(plan.credentialSetting).toBe(API_CREDENTIAL_SETTINGS[0]);
-    // THE PLAN MUST NOT CARRY THE CREDENTIAL. It names the setting instead, because a
-    // plan is the object most likely to reach a log line.
+  });
+
+  it("keeps a URL-embedded credential out of the plan entirely", () => {
+    // THE PLAN MUST NOT CARRY A CREDENTIAL, and the URL is the way one gets in. An
+    // earlier version of this assertion used a URL with no userinfo, so it passed over
+    // nothing — the control could not fail. This one puts the token in the URL, which is
+    // exactly the input that used to serialise it with the plan.
+    const plan = planEmailStore(
+      bare({
+        [API_BASE_URL_SETTING]: `https://operator:${A_TOKEN}@mail.example.test/v1?t=1#frag`,
+        [API_CREDENTIAL_SETTINGS[0]]: A_TOKEN,
+      }),
+    );
+    expect(plan.store).toBe("api");
+    if (plan.store !== "api") return;
+    expect(plan.baseUrl).toBe("https://mail.example.test");
+    // The whole object, because a plan is what reaches a log line.
     expect(JSON.stringify(plan)).not.toContain(A_TOKEN);
+    expect(JSON.stringify(plan)).not.toContain("operator");
+  });
+
+  it("refuses a base URL that is not an http or https URL, naming the setting", () => {
+    // `new URL("operator:t0ken@host/v1")` PARSES — as the opaque scheme `operator:` — so
+    // userinfo stripping finds nothing to strip and the token survives into every string
+    // derived from it, including the diagnostics detail the seam requires to be safe to
+    // print. Requiring http/https is what makes the stripping happen at all.
+    for (const value of [`operator:${A_TOKEN}@mail.example.test/v1`, "mail.example.test", "ftp://mail.example.test"]) {
+      let thrown: unknown;
+      try {
+        planEmailStore(bare({ [API_BASE_URL_SETTING]: value, [API_CREDENTIAL_SETTINGS[0]]: A_TOKEN }));
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown, `${value} must be refused`).toBeInstanceOf(StoreConfigurationError);
+      const error = thrown as StoreConfigurationError;
+      expect(error.message).toContain(API_BASE_URL_SETTING);
+      expect(error.settings).toEqual([API_BASE_URL_SETTING]);
+      // The offending value is never quoted back — it can carry the credential.
+      expect(error.message).not.toContain(A_TOKEN);
+    }
+    // POSITIVE CONTROL: a loopback http URL is legitimate and must still resolve, so the
+    // scheme check is not simply "reject everything".
+    const loopback = planEmailStore(
+      bare({ [API_BASE_URL_SETTING]: "http://127.0.0.1:8080", [API_CREDENTIAL_SETTINGS[0]]: A_TOKEN }),
+    );
+    expect(loopback.store === "api" && loopback.baseUrl).toBe("http://127.0.0.1:8080");
   });
 
   it("prefers the session token over the operator API key, and says which it used", () => {
@@ -207,6 +271,45 @@ describe("configured store resolution — configurations it will not guess at", 
       expect(() => planEmailStore(bare({ [API_SETTINGS_POINTER]: blank }))).not.toThrow();
     }
   });
+
+  it("agrees with the database layer about which path is configured, including padded ones", () => {
+    // HALF A PROPERTY IS NOT THE PROPERTY. The test above proves the RESOLUTION treats a
+    // blank as unset; adversarial review found that the database layer did not, so
+    // `EMAILS_DB_PATH="   "` had the plan report the documented default while the layer
+    // that actually opens the file resolved a database named three spaces in the working
+    // directory — with every diagnostic saying "defaulted". Both halves are asserted
+    // here, against the real reader rather than a copy of its rules.
+    const inherited = { ...process.env };
+    try {
+      // The padded case uses `:memory:` deliberately: a real path goes through
+      // `canonicalizeDatabasePath`, which resolves symlinked ancestors, so comparing raw
+      // strings would fail on a platform where the temp root is a symlink and would be
+      // testing realpath rather than the trimming rule.
+      for (const [value, expected] of [
+        ["", null],
+        ["   ", null],
+        ["\t\n", null],
+        ["  :memory:  ", ":memory:"],
+        [":memory:", ":memory:"],
+      ] as const) {
+        for (const key of DATABASE_PATH_SETTINGS) delete process.env[key];
+        process.env[DATABASE_PATH_SETTINGS[1]] = value;
+        const plan = planEmailStore(process.env);
+        expect(plan.store).toBe("sqlite");
+        if (plan.store !== "sqlite") return;
+        expect(plan.setting, `${JSON.stringify(value)} setting`).toBe(expected === null ? null : DATABASE_PATH_SETTINGS[1]);
+        // The one assertion that matters: the two layers resolve the SAME file.
+        expect(plan.databasePath, `${JSON.stringify(value)} must resolve identically in both layers`).toBe(
+          getDatabasePath(),
+        );
+      }
+    } finally {
+      for (const key of Object.keys(process.env)) {
+        if (!Object.prototype.hasOwnProperty.call(inherited, key)) delete process.env[key];
+      }
+      Object.assign(process.env, inherited);
+    }
+  });
 });
 
 describe("the store the resolution actually hands back", () => {
@@ -235,7 +338,7 @@ describe("the store the resolution actually hands back", () => {
     Object.assign(process.env, inherited);
   });
 
-  it("builds the SQLite store, reporting the path the database layer actually opened", () => {
+  it("builds the SQLite store, reporting the OPEN CONNECTION's own file", () => {
     only({ [DATABASE_PATH_SETTINGS[1]]: ":memory:" });
     resetDatabase();
     const store = createConfiguredEmailStore();
@@ -243,10 +346,30 @@ describe("the store the resolution actually hands back", () => {
     // on — `descriptor.kind` is `string` on the seam precisely so this cannot become a
     // switch (see src/store/descriptor.ts).
     expect(store.capabilities).toEqual(SQLITE_STORE_CAPABILITIES);
-    // The path comes from the database layer, not from the plan, so it cannot name a file
-    // the connection is not bound to.
-    expect(store.descriptor.detail).toBe(`SQLite at ${getDatabasePath()}`);
-    expect(store.descriptor.detail).toContain(":memory:");
+    expect(store.descriptor.detail).toBe("SQLite at :memory:");
+  });
+
+  it("names the file it is really bound to, even when the environment has moved on", () => {
+    // THE ASSERTION AN EARLIER VERSION OF THIS FILE GOT WRONG. `getDatabase()` memoises
+    // ONE connection per process and ignores the path once it has opened, so any detail
+    // computed from the environment — including `getDatabasePath()`, which re-derives it —
+    // can name a file the store is not bound to. Adversarial review reproduced exactly
+    // that: open A, point the environment at B, and the store reported B while writing to
+    // A. The detail now comes from the connection itself, so this cannot drift.
+    only({ [DATABASE_PATH_SETTINGS[1]]: ":memory:" });
+    resetDatabase();
+    const bound = createConfiguredEmailStore();
+    expect(bound.descriptor.detail).toBe("SQLite at :memory:");
+
+    // The environment now names a DIFFERENT file, and the connection is still the old one.
+    const elsewhere = join(import.meta.dir, "..", "does-not-exist-and-never-opened.db");
+    process.env[DATABASE_PATH_SETTINGS[1]] = elsewhere;
+    expect(getDatabasePath(), "the env-derived path must really have moved").not.toBe(":memory:");
+    const stale = createConfiguredEmailStore();
+    expect(stale.descriptor.detail, "the detail must follow the connection, not the environment").toBe(
+      "SQLite at :memory:",
+    );
+    expect(stale.descriptor.detail).not.toContain("does-not-exist");
   });
 
   it("builds the API store for a configured base URL, and leaks no credential", () => {
