@@ -33,6 +33,7 @@
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDatabase, getDatabase, resetDatabase } from "../db/database.js";
@@ -478,9 +479,15 @@ describe("createWebhookServer /webhook/resend", () => {
   });
 
   it("does not remember an envelope whose event was never stored, so the retry is not swallowed", async () => {
-    // The replay cache is written only when a row was CREATED. If it were written unconditionally,
-    // a failed persist followed by the provider's retry would be answered "already processed" and
-    // the event would be lost silently.
+    // A 500 must not POISON the envelope. The replay cache is written after the persist, so a
+    // throwing persist skips it and the provider's retry is processed normally.
+    //
+    // A CORRECTION worth leaving in place, because the plausible rationale is wrong: this case does
+    // NOT exercise the `created` condition on that write. A throwing persist never reaches the
+    // condition at all — control leaves for the `catch` first — so making that write unconditional
+    // is invisible here, and a mutation run proved it. What the condition actually decides is which
+    // 200-body a re-delivery of an ALREADY-STORED envelope receives, which is why it is reported as
+    // an unpinned survivor rather than pinned by an assertion that would fix an arbitrary detail.
     const { url } = startReceiver();
     db.run("DROP TABLE events");
     expect((await postResend(url, resendBody("evt-retry"), "msg_retry")).status).toBe(500);
@@ -685,6 +692,30 @@ describe("createWebhookServer transport guards", () => {
     expect(eventRows().length).toBe(1);
   });
 
+  it("answers 413 to a DECLARED oversize WITHOUT reading the body", async () => {
+    // The two bounds are not redundant and this is the only case that separates them. The
+    // declared-length check exists so the reader never streams a payload it is going to reject; a
+    // client that declares 2 MiB and then sends nothing more must be refused on the declaration
+    // alone. Without that check the reader waits for bytes that never arrive and the request hangs,
+    // which is why this is asserted against a timeout rather than against a status alone. Written
+    // over a raw socket because `fetch` will not send a content-length that contradicts its body.
+    const { url } = startReceiver();
+    const port = Number(new URL(url).port);
+    const status = await new Promise<string>((resolve, reject) => {
+      const socket = connect({ host: "127.0.0.1", port }, () => {
+        socket.write(
+          "POST /webhook/resend HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n"
+            + `Content-Length: ${1024 * 1024 + 4096}\r\n\r\n{}`,
+        );
+      });
+      socket.setTimeout(5_000, () => { socket.destroy(); reject(new Error("the receiver never answered the declaration")); });
+      socket.once("data", (chunk: Buffer) => { socket.destroy(); resolve(chunk.toString("utf8").split("\r\n")[0] ?? ""); });
+      socket.once("error", reject);
+    });
+    expect(status).toContain("413");
+    expect(eventRows().length).toBe(0);
+  });
+
   it("answers 413 to an oversize STREAM whose length was never declared", async () => {
     // The case above is stopped by the DECLARED-length check, which shadows the streaming bound
     // entirely: `fetch` sets `content-length` for a string body. A chunked request declares no
@@ -714,10 +745,15 @@ describe("createWebhookServer transport guards", () => {
     expect(eventRows().length).toBe(0);
   });
 
-  it("treats an empty body as a JSON failure rather than crashing", async () => {
+  it("treats an empty body as a JSON failure rather than as an empty object", async () => {
+    // THE BODY TEXT IS THE ASSERTION, not the status. A bodyless POST and a body of `{}` both end
+    // in a 400, so a status-only assertion cannot tell "there was no body" from "the body parsed
+    // and then failed a later guard" — and a mutation that returned `"{}"` for an absent body
+    // survived exactly that way.
     const { url } = startReceiver();
     const response = await fetch(`${url}/webhook/resend`, { method: "POST", headers: { "content-length": "0" } });
     expect(response.status).toBe(400);
+    expect(await response.text()).toBe("Invalid JSON");
   });
 });
 

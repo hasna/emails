@@ -6,6 +6,36 @@ import { join } from "node:path";
 import { getClaudeMcpInstallCommand, getClaudeMcpRemoveCommand, getCodexMcpConfig, getGeminiMcpConfig } from "../../lib/mcp-install.js";
 import { handleError } from "../utils.js";
 
+/**
+ * Start the optional provider webhook listener for `emails serve`, AS A RESULT RATHER THAN AS A
+ * THROW — and hand the server back so a caller can stop it.
+ *
+ * Extracted, and named, for one reason: the receiver now REFUSES on an installation whose mail
+ * lives in an Emails API, because the service receives those callbacks (`src/lib/webhook.ts`
+ * states why). Inline in the action, that refusal was UNTESTABLE — the action's first statement
+ * starts a dashboard HTTP server that `startServer` does not hand back and nothing can stop, which
+ * is why this command has no end-to-end test at all — and an unhandled rejection there would have
+ * taken a dashboard that bound successfully down with an optional listener.
+ *
+ * `handleError` is deliberately NOT used: it exits the process, for the same reason.
+ *
+ * The server is RETURNED rather than discarded. The action still does not stop it (it runs until
+ * the operator interrupts), but a caller that needs to — a test — now can, which is the difference
+ * between a testable unit and this file's untestable action.
+ */
+export async function startServeWebhookListener(
+  port: number,
+  providerId: string | undefined,
+  webhookSecret: string | undefined,
+): Promise<{ started: true; server: { port: number; stop(closeActiveConnections?: boolean): void } } | { started: false; reason: string }> {
+  try {
+    const { createWebhookServer } = await import("../../lib/webhook.js");
+    return { started: true, server: createWebhookServer(port, providerId, webhookSecret) };
+  } catch (error) {
+    return { started: false, reason: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 export function registerServeCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   // ─── SERVE ────────────────────────────────────────────────────────────────────
   program
@@ -27,21 +57,22 @@ export function registerServeCommands(program: Command, output: (data: unknown, 
       const webhookPort = opts.all ? 9877 : (opts.webhookPort ? parseInt(opts.webhookPort, 10) : null);
       const smtpPort = opts.all ? 2525 : (opts.smtpPort ? parseInt(opts.smtpPort, 10) : null);
       if (webhookPort) {
-        // WRAPPED, because the receiver now REFUSES on an installation whose mail lives in
-        // an Emails API — the service receives those callbacks (`src/lib/webhook.ts`). The
-        // HTTP server above has already bound, so an unhandled rejection here would take a
-        // working listener down with an optional one; `handleError` would exit for the same
-        // reason. The refusal is reported and the process is MARKED FAILED so a supervisor
-        // still sees it, rather than being swallowed into a partial success that reads as
-        // success.
-        try {
-          const { createWebhookServer } = await import("../../lib/webhook.js");
-          createWebhookServer(webhookPort, opts.provider, opts.webhookSecret);
+        const outcome = await startServeWebhookListener(webhookPort, opts.provider, opts.webhookSecret);
+        if (outcome.started) {
           const securityNote = opts.webhookSecret ? chalk.green(" (signature verified)") : chalk.yellow(" (no signature verification)");
           console.log(chalk.dim(`  Webhook listener on port ${webhookPort}`) + securityNote);
-        } catch (e) {
+        } else {
+          // MARKED FAILED, not swallowed: the operator asked for a listener and did not get one, so
+          // a supervisor reading the exit status has to see it — while the dashboard that DID bind
+          // keeps serving.
+          //
+          // THE ONE LINE OF THIS CHANGE NO TEST REACHES, stated plainly rather than dressed up as
+          // unreachable: a mutation removing it survives. Reaching it means running the action, and
+          // the action's first statement binds a dashboard that `startServer` does not hand back, so
+          // a test that got here would hold a port for the rest of the run. The decision it belongs
+          // to — refuse versus start, and with what reason — IS tested, through the helper above.
           process.exitCode = 1;
-          console.error(chalk.red(`  Webhook listener NOT started: ${e instanceof Error ? e.message : String(e)}`));
+          console.error(chalk.red(`  Webhook listener NOT started: ${outcome.reason}`));
         }
       }
       if (smtpPort) {

@@ -162,6 +162,37 @@
 // proves for a repeated SNS delivery — so this is a cache that degrades under load rather
 // than a data defect, and every fix is a choice between a per-path budget and a keyed cache.
 // Recorded here rather than changed inside a collapse.
+//
+// ─── MUTATION SURVIVORS, EACH NAMED ───────────────────────────────────────────────────
+//
+// 48 mutants over this module and `src/cli/commands/serve.local.ts`, reverted one at a time:
+// 42 killed, 6 survived. Five of the six are here (the sixth is recorded in that file), and
+// none of them is "the test suite is thin" — each is a specific, stated reason:
+//
+//   * the API refusal NAMES THE SETTING TWICE, once to identify the configuration and once as
+//     the remedy, and the assertion requires it once. Removing either mention alone is
+//     invisible. Not closed, because asserting a mention count pins prose rather than
+//     behaviour.
+//   * `if (result.created)` on the replay-cache write. A persist that THROWS leaves for the
+//     `catch` before reaching it, so its only observable effect is which 200-body a
+//     re-delivery of an ALREADY-STORED envelope receives. Either choice is arbitrary; pinning
+//     one would fix a detail rather than a behaviour.
+//   * `Number.isFinite(declared)` on the declared body length. UNREACHABLE OVER HTTP, and
+//     measured rather than argued: Bun's request parser answers its own 400 to
+//     `Content-Length: 1e400`, to a 24-digit value and to `abc` before this handler runs, so
+//     the handler can only ever see a decimal string, which `Number()` maps to a finite value.
+//     The guard defends this function's own contract, not the transport.
+//   * the 10,000-entry cache eviction bound. Observing it needs 10,001 distinct SIGNED
+//     envelopes, and what it protects is memory rather than correctness.
+//   * the `default:` arm of the colour helper. The switch covers all five members of
+//     `WebhookEvent["type"]`, so no event either parser can produce reaches it, and it only
+//     changes a console line.
+//
+// The two bounds on the body are NOT redundant and the suite now separates them, which it did
+// not at first: removing the declared-length check left every case green, because the
+// streaming check reached the same 413 by reading the payload it exists to avoid reading. A
+// client that DECLARES an oversize and then sends nothing distinguishes them — without the
+// declared check the reader waits for bytes that never arrive and the request hangs.
 
 import { parseResendWebhook, parseSesWebhook, verifyResendSignature, verifySnsStructure } from "./webhook-events.js";
 import type { WebhookEvent } from "./webhook-events.js";

@@ -306,3 +306,60 @@ describe("email test command", () => {
     expect(queries.some((sql) => sql.includes("FROM addresses WHERE provider_id = ? ORDER BY created_at DESC"))).toBe(false);
   });
 });
+
+describe("webhook listen command", () => {
+  // THE REFUSAL HAS TO REACH THE OPERATOR, not just the function. `emails webhook listen` is the
+  // path an operator actually takes, and this command's own arm imported the DELETED
+  // `src/lib/webhook.local.ts` directly — bypassing the facade — so the consumer swap is exercised
+  // here rather than assumed. Asserted through the CLI's own error channel.
+  //
+  // NO CASE STARTS A LISTENER THAT IS NEVER STOPPED. The command discards the server it creates, so
+  // a successful start would hold the port and the event loop for the rest of the file. The passing
+  // side of the gate is proved by occupying the port first: reaching an "address in use" failure
+  // proves the gate was passed, because that error is raised by the bind the gate precedes.
+
+  async function runExpectingError(args: string[]): Promise<string> {
+    const program = new Command();
+    program.exitOverride();
+    const errors: string[] = [];
+    const originalError = console.error;
+    const originalLog = console.log;
+    const originalExit = process.exit;
+    console.error = ((...a: unknown[]) => { errors.push(a.map(String).join(" ")); }) as typeof console.error;
+    console.log = (() => {}) as typeof console.log;
+    process.exit = ((code?: number) => { throw new Error(`exit:${code ?? 0}`); }) as typeof process.exit;
+    registerEmailLogCommands(program, () => {});
+    try {
+      await program.parseAsync(["node", "emails", ...args]);
+    } catch {
+      // handleError exits through the stubbed process.exit (or commander throws).
+    } finally {
+      console.error = originalError;
+      console.log = originalLog;
+      process.exit = originalExit;
+    }
+    return errors.join("\n");
+  }
+
+  it("REFUSES at the command level when the mail lives behind the API, naming the setting", async () => {
+    delete process.env["EMAILS_DB_PATH"];
+    process.env["EMAILS_SELF_HOSTED_URL"] = "https://mail.example.test";
+    process.env["EMAILS_SELF_HOSTED_API_KEY"] = "not-a-real-credential";
+    const errors = await runExpectingError(["webhook", "listen", "--port", "0"]);
+    expect(errors).toContain("durable provider webhook receiver runs where the mail is stored");
+    expect(errors).toContain("EMAILS_SELF_HOSTED_URL");
+  });
+
+  it("gets PAST the gate on a local database, failing on the port instead of on storage", async () => {
+    const occupied = Bun.serve({ port: 0, fetch: () => new Response("busy") });
+    try {
+      const errors = await runExpectingError(["webhook", "listen", "--port", String(occupied.port)]);
+      // The gate passed: the failure is about the address, not about where the mail is.
+      expect(errors).not.toContain("durable provider webhook receiver runs where the mail is stored");
+      expect(errors.length, "the command neither refused nor failed to bind").toBeGreaterThan(0);
+      expect(errors).toMatch(/in use|EADDRINUSE|Failed to start/i);
+    } finally {
+      occupied.stop(true);
+    }
+  });
+});
