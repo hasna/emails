@@ -66,12 +66,13 @@ export interface DeliveryDoctorReport {
   alias_target: string | null;
   /**
    * Recent inbound messages addressed to this address, capped at
-   * `RECENT_MAIL_REPORT_LIMIT` — or NULL when the store refused to answer.
+   * `RECENT_MAIL_REPORT_LIMIT` — or NULL when the count is not known, which happens two
+   * ways: the store refused the read, or the bounded scan ended without finding one.
    *
    * Null rather than 0, and the distinction is the reason the field is nullable: "no
-   * mail has arrived for this address" and "this store would not tell me" are opposite
-   * diagnoses, and a zero cannot tell them apart. The check list carries the refusal
-   * that produced the null.
+   * mail has arrived for this address" and "nobody could tell me whether it did" are
+   * opposite diagnoses, and a zero cannot tell them apart. The check list always carries
+   * the reason for the null.
    */
   recent_local_messages: number | null;
   latest_received_at: string | null;
@@ -97,18 +98,24 @@ export interface LiveDeliveryDoctorOptions extends DeliveryDoctorOptions {
   inspectMx?: (domain: string) => Promise<MxAssessment>;
 }
 
-/** How many registry pages a lookup will scan before it calls the answer unknown. */
+/**
+ * The address-registry scan: rows per page, and how many pages it will read before it
+ * calls the answer unknown rather than absent. 500 is the seam's hard page cap.
+ */
 const ADDRESS_SCAN_PAGE_SIZE = 500;
 const ADDRESS_SCAN_MAX_PAGES = 40;
 
 /**
- * How many rows the recent-mail read asks for, and how many it reports.
+ * The recent-mail read: rows per page, how many pages, and how many messages the report
+ * carries.
  *
- * The seam's `to` filter is a SUBSTRING match on the recipient list (see
- * `messageFilters` in src/store-sqlite/messages.ts), so `ops@example.com` also selects
- * `devops@example.com`. The fetch is therefore wider than the report and the exact
- * recipient match is made here, mirroring how `inbound_recipients` is populated
- * (src/db/database.ts, `normalizedRecipientSql`).
+ * It PAGES, and the reason is the filter. The seam's `to` filter is a SUBSTRING match on
+ * the recipient list (see `messageFilters` in src/store-sqlite/messages.ts), so
+ * `ops@example.com` also selects `devops@example.com` — and enough of those can fill page
+ * after page while holding nothing addressed to the mailbox being diagnosed. So the fetch
+ * is wider than the report, the exact recipient match is made here (mirroring how
+ * `inbound_recipients` is populated: src/db/database.ts, `normalizedRecipientSql`), and
+ * exhausting the page budget with no match reports UNKNOWN instead of zero.
  */
 const RECENT_MAIL_SCAN_LIMIT = 500;
 const RECENT_MAIL_MAX_PAGES = 5;
