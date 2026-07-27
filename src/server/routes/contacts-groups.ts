@@ -4,7 +4,7 @@ import { listTemplateSummaries, getTemplate, createTemplate, deleteTemplate } fr
 import { listGroups, createGroup, deleteGroup, getGroupByName, listMemberSummaries, getMember, addMember, removeMember } from '../../db/groups.local.js';
 import { listScheduledEmailSummaries, cancelScheduledEmail } from '../../db/scheduled.local.js';
 import { getEmailContent } from '../../db/email-content.local.js';
-import { getAnalytics } from '../../lib/analytics.local.js';
+import { getAnalytics } from '../../lib/analytics.js';
 import { exportEmailsCsv, exportEmailsJson, exportEventsCsv, exportEventsJson } from '../../lib/export.js';
 import { json, notFound, badRequest, internalError, resolveId, resolveOptionalId, parseBody, queryInteger, queryPage } from './helpers.js';
 
@@ -203,7 +203,18 @@ if (path === "/api/analytics" && method === "GET") {
   try {
     const period = url.searchParams.get("period") ?? "30d";
     const resolvedId = resolveOptionalId("providers", url.searchParams.get("provider_id"));
-    return json(getAnalytics(resolvedId, period));
+    // A `provider_id` is REFUSED rather than ignored: the store seam cannot scope
+    // messages to a provider, so three of the four sections would cover every provider
+    // while the response claimed one. The refusal is a 400, not a 500, because the
+    // request is the thing that is wrong.
+    if (resolvedId) {
+      return badRequest(
+        "provider_id is not supported: the store seam cannot scope messages to a provider, so a " +
+          "provider-scoped report would cover every provider in its volume, recipient and hour " +
+          "sections. Omit provider_id.",
+      );
+    }
+    return json(await getAnalytics(undefined, period));
   } catch (e) { return internalError(e); }
 }
 

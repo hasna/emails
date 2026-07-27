@@ -269,7 +269,10 @@ export function registerMiscOpsTools(server: McpServer): void {
       const { resolveId } = await import('../helpers.js');
       const resolvedId = provider_id ? resolveId("providers", provider_id) : undefined;
       const { getAnalytics } = await import("../../lib/analytics.js");
-      const data = getAnalytics(resolvedId, period ?? "30d");
+      // Refuses a provider filter — the store seam cannot scope messages to a provider,
+      // and the throw lands on `toolError` below rather than producing a report that
+      // looks provider-specific and is not.
+      const data = await getAnalytics(resolvedId, period ?? "30d");
       return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
     } catch (e) {
       return toolError(e);
