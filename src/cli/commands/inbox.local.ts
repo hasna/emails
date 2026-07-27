@@ -1065,6 +1065,11 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         if ((result.attachments_saved ?? 0) > 0) lines.push(`  Attachments: ${chalk.cyan(String(result.attachments_saved))}`);
         if (result.errors.length > 0) lines.push(`  Errors:      ${chalk.red(String(result.errors.length))}`);
         if (result.last_key) lines.push(chalk.dim(`  Last key:    ${result.last_key}`));
+        // PRINTED, NOT COUNTED. `unrecorded` names provenance the ingested messages could not
+        // carry because no store behind this package has a field for it, and a loss note that
+        // survives only as a number is a loss note nobody can act on. It is deliberately not
+        // folded into `Errors`: nothing failed.
+        for (const note of result.unrecorded) lines.push(chalk.yellow(`  Not recorded: ${note}`));
         lines.push("");
         output(result, lines.join("\n"));
         if (result.errors.length > 0) {

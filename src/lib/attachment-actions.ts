@@ -11,6 +11,23 @@ export interface AttachmentMetaLike {
    * serve older than the content_available contract) — treat as unknown.
    */
   content_available?: boolean;
+  /**
+   * A location the METADATA ENTRY ITSELF carries, for a store that has no separate
+   * path column to put one in.
+   *
+   * `inbound_emails.attachment_paths` is unreachable through the store seam by
+   * construction — the seam's insert writes the literal `'[]'` into it and its update
+   * set never names it — so `src/lib/s3-sync.ts`, which now writes through the seam,
+   * records where it put an attachment's bytes on the attachment record instead.
+   * `MessageInput.attachments` is declared `unknown[]`, so a richer entry there is
+   * within contract rather than a widening of it.
+   *
+   * Read ONLY as a fallback, after a separate `paths` entry has failed to match, so
+   * every row written before that change is merged exactly as it was.
+   */
+  local_path?: string;
+  /** See {@link AttachmentMetaLike.local_path}. */
+  s3_url?: string;
 }
 
 export interface AttachmentPathLike {
@@ -79,11 +96,28 @@ export function mergeAttachmentDetails(
   // two same-named attachments keep distinct indexes instead of collapsing in
   // a filename-keyed map.
   const usedPaths = new Set<number>();
-  for (const current of details) {
+  details.forEach((current, detailIndex) => {
     const pathIndex = paths.findIndex((path, index) =>
       !usedPaths.has(index) && path.filename === current.filename,
     );
-    if (pathIndex < 0) continue;
+    // NO SEPARATE PATH MATCHED. Fall back to a location the metadata entry carries itself —
+    // see AttachmentMetaLike.local_path for why one can be there. `current.index` is the
+    // METADATA position and `details` skips nameless entries, so the entry is looked up by the
+    // index the detail recorded rather than by its position in this array.
+    if (pathIndex < 0) {
+      const self = meta[current.index ?? detailIndex];
+      if (self?.local_path) {
+        current.location = self.local_path;
+        current.location_type = "local";
+        current.file_url = localFileUrl(self.local_path);
+        current.openable = true;
+      } else if (self?.s3_url) {
+        current.location = self.s3_url;
+        current.location_type = "s3";
+        current.openable = false;
+      }
+      return;
+    }
     usedPaths.add(pathIndex);
     const path = paths[pathIndex]!;
     if (path.local_path) {
@@ -96,7 +130,7 @@ export function mergeAttachmentDetails(
       current.location_type = "s3";
       current.openable = false;
     }
-  }
+  });
 
   for (let index = 0; index < paths.length; index++) {
     if (usedPaths.has(index)) continue;
