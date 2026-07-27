@@ -520,6 +520,51 @@ describe("adopting the old raw_s3_url dedup key as the seam fence", () => {
     expect(withSource.n).toBe(0);
   });
 
+  it("scopes the UPDATE to s3:// itself, not only the pre-check that guards it", () => {
+    // MUTATION TESTING FOUND THIS UNASSERTED. Widening the UPDATE's own predicate from
+    // `LIKE 's3://%'` to `IS NOT NULL` left the suite green, because the case above supplies no
+    // row that reaches the UPDATE at all — the pre-check's own `LIKE` short-circuits it. So this
+    // case pairs a REAL S3 row (which opens the pre-check) with a non-S3 URL that is neither
+    // null nor empty, and the non-S3 row must still be untouched.
+    const s3Url = `s3://${BUCKET}/${PREFIX}real`;
+    insertLegacyRow("row-s3", s3Url, s3Url, "2026-01-01T00:00:00.000Z");
+    insertLegacyRow("row-http", "https://example.test/not-a-bucket-object", "<x@example.test>", "2026-01-02T00:00:00.000Z");
+
+    expect(backfillS3SourceIdsFromRawUrls(db)).toBe(1);
+    const rows = db
+      .query("SELECT id, source_id FROM inbound_emails ORDER BY id")
+      .all() as Array<{ id: string; source_id: string | null }>;
+    expect(rows).toEqual([
+      { id: "row-http", source_id: null },
+      { id: "row-s3", source_id: s3Url },
+    ]);
+  });
+
+  it("survives a SECOND open when a raw_s3_url is duplicated, instead of aborting on the index", () => {
+    // MUTATION TESTING FOUND THIS UNASSERTED TOO, and the bug behind it is worse than a gap.
+    // On run one the earliest row claims the URL. On run two the remaining duplicate is still a
+    // candidate and the `earliest` subquery — which filters `source_id IS NULL` — now names IT,
+    // so without the `NOT EXISTS` guard the statement tries to write a source_id that is already
+    // taken and violates idx_inbound_source_id. `ensureSchema` runs on EVERY database open, so
+    // that is not a failed repair: it is a CLI that cannot start.
+    const url = `s3://${BUCKET}/${PREFIX}twice`;
+    insertLegacyRow("dupe-a", url, url, "2026-01-01T00:00:00.000Z");
+    insertLegacyRow("dupe-b", url, url, "2026-02-01T00:00:00.000Z");
+
+    expect(backfillS3SourceIdsFromRawUrls(db)).toBe(1);
+    // The second call is the one that used to be able to throw.
+    expect(() => backfillS3SourceIdsFromRawUrls(db)).not.toThrow();
+    expect(backfillS3SourceIdsFromRawUrls(db)).toBe(0);
+
+    const rows = db
+      .query("SELECT id, source_id FROM inbound_emails ORDER BY id")
+      .all() as Array<{ id: string; source_id: string | null }>;
+    expect(rows).toEqual([
+      { id: "dupe-a", source_id: url },
+      { id: "dupe-b", source_id: null },
+    ]);
+  });
+
   it("is idempotent, and picks the SAME survivor across repeated runs", () => {
     const url = `s3://${BUCKET}/${PREFIX}once`;
     insertLegacyRow(uuid(), url, url, "2026-01-01T00:00:00.000Z");
@@ -543,10 +588,14 @@ describe("adopting the old raw_s3_url dedup key as the seam fence", () => {
     expect(claimed.map((row) => row.id)).toEqual([[...ids].sort()[0]]);
   });
 
-  it("skips the expensive scan entirely when there is nothing to repair", () => {
-    // The PRE-CHECK, and its absence is a per-open full table scan of inbound_emails on every
-    // CLI invocation — measured at 1.19-1.42 ms per open at 50k rows, growing linearly. The
-    // supporting partial index is what makes this an empty index scan rather than a table scan.
+  // WHAT THIS CASE DOES AND DOES NOT PROVE, stated because the first version of it overclaimed.
+  // It asserts that the supporting index EXISTS, that SQLite CHOOSES it for the repair's
+  // candidate predicate, and that it is EMPTY on a mailbox whose inbound rows came from a
+  // non-S3 path — which is the case the obvious `WHERE source_id IS NULL`-only index would have
+  // got wrong. It does NOT prove the source performs the pre-check: the plan below is taken over
+  // SQL written here, so an implementation that dropped the pre-check would still pass it. That
+  // half is evidenced by the timings in the PR body, not by this case.
+  it("has an index SQLite chooses for the repair's candidate set, and it is empty for non-S3 rows", () => {
     const plan = db
       .query(
         `EXPLAIN QUERY PLAN SELECT 1 AS found FROM inbound_emails
@@ -555,14 +604,69 @@ describe("adopting the old raw_s3_url dedup key as the seam fence", () => {
       .all() as Array<{ detail: string }>;
     expect(plan.map((row) => row.detail).join(" | ")).toContain("idx_inbound_unfenced_s3");
 
-    // And the index it uses must be EMPTY on a mailbox whose inbound rows came from a non-S3
-    // path — the case a `WHERE source_id IS NULL`-only index would have failed.
     insertLegacyRow(uuid(), null, "<webhook@example.test>", "2026-01-01T00:00:00.000Z");
     const entries = db
       .query("SELECT COUNT(*) AS n FROM inbound_emails WHERE source_id IS NULL AND raw_s3_url IS NOT NULL")
       .get() as { n: number };
     expect(entries.n).toBe(0);
     expect(backfillS3SourceIdsFromRawUrls(db)).toBe(0);
+
+    // A SCHEMA-SHAPE ASSERTION, LABELLED AS ONE. Mutation testing broadened the index to
+    // `WHERE source_id IS NULL` and the suite stayed green — the mutant keeps the same NAME, so
+    // the plan check above still matched it, and the row count above is a query rather than a
+    // read of the index. Nothing observable at this layer distinguishes the two definitions, and
+    // what does distinguish them is a TIMING (see the PR body: the broad form leaves the index
+    // populated by every non-seam inbound write). So the predicate itself is pinned here, and
+    // this half of the case is evidence about the schema and not about behaviour.
+    const index = db
+      .query("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_inbound_unfenced_s3'")
+      .get() as { sql: string } | null;
+    expect(index?.sql).toContain("source_id IS NULL");
+    expect(index?.sql, "the index must be narrowed to the candidate set, not to every unfenced row")
+      .toContain("raw_s3_url IS NOT NULL");
+  });
+
+  it("is wired into ensureSchema, so a database open repairs itself with no explicit call", async () => {
+    // THE END-TO-END CLAIM, and the one the [BREAKING] note is about: nothing in the sync path
+    // calls the repair, so if the `ensureSchema` wiring were dropped every case above would
+    // still pass while a real installation re-ingested its whole mailbox. This case opens a
+    // database the way the product does and never touches the repair function.
+    const key = `${PREFIX}wired`;
+    const url = `s3://${BUCKET}/${key}`;
+
+    // A FILE-BACKED database, not `:memory:`. Closing and re-opening an in-memory database
+    // discards it, so the seeded row would vanish and this case would pass for the wrong
+    // reason — which is exactly what its first version did.
+    const dbFile = join(tmpHome, "wired.sqlite");
+    closeDatabase();
+    process.env["EMAILS_DB_PATH"] = dbFile;
+    resetDatabase();
+    db = getDatabase();
+    db.run(
+      `INSERT INTO inbound_emails (id, message_id, raw_s3_url, from_address, to_addresses, subject, created_at, received_at)
+       VALUES (?, ?, ?, 'sender@example.test', '[]', 'legacy', ?, ?)`,
+      [uuid(), url, url, "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z"],
+    );
+    db.run("UPDATE inbound_emails SET source_id = NULL WHERE raw_s3_url = ?", [url]);
+    expect(
+      (db.query("SELECT source_id FROM inbound_emails WHERE raw_s3_url = ?").get(url) as { source_id: string | null })
+        .source_id,
+    ).toBeNull();
+
+    // Re-open through the product's own path; ensureSchema runs on every open.
+    closeDatabase();
+    db = getDatabase();
+
+    const fenced = db.query("SELECT source_id FROM inbound_emails WHERE raw_s3_url = ?").get(url) as
+      | { source_id: string | null }
+      | null;
+    expect(fenced?.source_id).toBe(url);
+
+    serveObjects({ [key]: rawEmail({ subject: "wired" }) });
+    const store = createSqliteEmailStore({ database: db, detail: "ensureSchema wiring" });
+    const result = await syncS3Inbox({ bucket: BUCKET, prefix: PREFIX, store });
+    expect(result.synced).toBe(0);
+    expect(result.skipped).toBe(1);
   });
 });
 
