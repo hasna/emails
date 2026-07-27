@@ -218,10 +218,15 @@ describe("address server-only lifecycle commands still block", () => {
   ];
 
   for (const [label, args] of blocked) {
-    it(`${label} exits with the self-hosted-server message`, async () => {
+    it(`${label} says it is unimplemented and names what to run instead`, async () => {
       const result = await runAddressCommandExpectingExit(args);
       expect(result.error).toBe("process.exit:1");
-      expect(result.stderr).toContain("is not available in the self-hosted client; it runs on the self-hosted server.");
+      expect(result.stderr).toContain(`${label} is not implemented in this build`);
+      expect(result.stderr).toContain("emails address add <email> --provider <id>");
+      // The message that shipped named a server route that does not exist, and
+      // named it unconditionally — so it lied in local mode too.
+      expect(result.stderr).not.toContain("not available in the self-hosted client");
+      expect(result.stderr).not.toContain("runs on the self-hosted server");
     });
   }
 });
