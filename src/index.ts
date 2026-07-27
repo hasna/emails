@@ -362,6 +362,28 @@ export {
   parseResendWebhook, parseSesWebhook,
 } from "./lib/webhook-events.js";
 export type { WebhookEvent } from "./lib/webhook-events.js";
+// NO SHAPE CHANGED HERE AND THE BEHAVIOUR DID, recorded at the export site by the convention the
+// forwarding block below established. `createWebhookServer` keeps its name, its four parameters
+// and its `Bun.Server` return — the facade published the local arm's declaration, so what a
+// consumer compiled against is what it still compiles against. The four pure parsers/verifiers
+// re-exported above are untouched and were identical in both deleted arms.
+//
+// WHAT CHANGED IS WHICH CONFIGURATIONS STAND UP A LISTENER. The deleted second arm threw for an
+// API-configured installation, and that refusal is PRESERVED — but it is now decided by STORAGE
+// CONFIGURATION rather than by the deployment word, and the two do not agree everywhere. Five
+// configurations answer differently, enumerated in `src/lib/webhook.ts`'s header; four newly refuse
+// (API storage with no deployment word, a stale client-secret pointer, two database paths at once,
+// a refused data directory) and ONE newly succeeds (deployment word self-hosted with no storage
+// setting naming anything). A consumer that called this on an API-configured installation and got a
+// running server now gets a thrown refusal instead — which is the point, because that server bound
+// a port the provider does not post to and wrote its events into a database nothing else reads.
+//
+// The throw is at CONSTRUCTION, not per request, so a caller that treats a returned server as proof
+// it can receive callbacks is still correct; a caller that never expected a throw is not.
+//
+// This needs a MAJOR version at release. The version is deliberately not bumped here, and
+// `CHANGELOG.md`'s `[Unreleased]` section is digest-frozen, so this comment and the pull request
+// are where the break is recorded.
 export { createWebhookServer } from "./lib/webhook.js";
 export { injectOpenPixel, injectClickTracking, prepareTrackedHtml } from "./lib/tracking.js";
 export { getFailoverProviderIds } from "./lib/config.js";

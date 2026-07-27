@@ -27,10 +27,22 @@ export function registerServeCommands(program: Command, output: (data: unknown, 
       const webhookPort = opts.all ? 9877 : (opts.webhookPort ? parseInt(opts.webhookPort, 10) : null);
       const smtpPort = opts.all ? 2525 : (opts.smtpPort ? parseInt(opts.smtpPort, 10) : null);
       if (webhookPort) {
-        const { createWebhookServer } = await import("../../lib/webhook.local.js");
-        createWebhookServer(webhookPort, opts.provider, opts.webhookSecret);
-        const securityNote = opts.webhookSecret ? chalk.green(" (signature verified)") : chalk.yellow(" (no signature verification)");
-        console.log(chalk.dim(`  Webhook listener on port ${webhookPort}`) + securityNote);
+        // WRAPPED, because the receiver now REFUSES on an installation whose mail lives in
+        // an Emails API — the service receives those callbacks (`src/lib/webhook.ts`). The
+        // HTTP server above has already bound, so an unhandled rejection here would take a
+        // working listener down with an optional one; `handleError` would exit for the same
+        // reason. The refusal is reported and the process is MARKED FAILED so a supervisor
+        // still sees it, rather than being swallowed into a partial success that reads as
+        // success.
+        try {
+          const { createWebhookServer } = await import("../../lib/webhook.js");
+          createWebhookServer(webhookPort, opts.provider, opts.webhookSecret);
+          const securityNote = opts.webhookSecret ? chalk.green(" (signature verified)") : chalk.yellow(" (no signature verification)");
+          console.log(chalk.dim(`  Webhook listener on port ${webhookPort}`) + securityNote);
+        } catch (e) {
+          process.exitCode = 1;
+          console.error(chalk.red(`  Webhook listener NOT started: ${e instanceof Error ? e.message : String(e)}`));
+        }
       }
       if (smtpPort) {
         const { createSmtpServer } = await import("../../lib/inbound.local.js");

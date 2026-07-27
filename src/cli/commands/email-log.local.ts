@@ -526,7 +526,7 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
     .option("--provider <id>", "Provider ID to associate events with")
     .action(async (opts: { port?: string; provider?: string }) => {
       try {
-        const { createWebhookServer } = await import("../../lib/webhook.local.js");
+        const { createWebhookServer } = await import("../../lib/webhook.js");
         const port = parseInt(opts.port ?? "9877", 10);
         const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
         createWebhookServer(port, providerId);
