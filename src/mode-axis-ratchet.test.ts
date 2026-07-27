@@ -551,7 +551,7 @@ const root = join(import.meta.dir, "..");
  * paragraph because this file sits inside the corpus it scans. An absent conflict is not
  * agreement; it is the absence of a question. A per-metric minimum is not a measurement.
  *
- * Corpus of this change: 652 tracked, 651 scanned, 9,254,622 characters — both floors
+ * Corpus of this change: 652 tracked, 651 scanned, 9,258,279 characters — both floors
  * (500 files / 5,000,000 characters) cleared with room. ONE file fewer than 4691c5d's 653, and
  * the arithmetic is worth spelling out because it is not "one arm": TWO arm modules are deleted
  * and ONE module is added (`src/lib/storage-wiring.ts`, the storage-configuration read extracted

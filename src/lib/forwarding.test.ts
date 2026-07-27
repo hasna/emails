@@ -220,6 +220,18 @@ describe("processForwardingRules storage gate", () => {
     });
   });
 
+  it("runs against a local database FILE, not only an in-memory one", async () => {
+    // The gate admits two shapes of local storage and a mutation run found that only ONE of
+    // them was covered: dropping the `database_file` case left every other case green because
+    // they all configure `:memory:`. A real path on disk is the shape an operator actually has.
+    closeDatabase();
+    clearStoreSettings();
+    process.env[DATABASE_PATH_SETTINGS[1]] = join(home, "forwarding.db");
+    await expect(processForwardingRules()).resolves.toEqual({
+      attempted: 0, sent: 0, failed: 0, skipped: 0, items: [],
+    });
+  });
+
   it("skips the gate when the caller states its storage, which is the documented contract", async () => {
     // A caller holding local storage keeps today's behaviour regardless of configuration —
     // `src/db/forwarding.ts`'s rule, one level up. The gate answers for callers that did not.
@@ -489,6 +501,32 @@ describe("processForwardingRules pipeline", () => {
     await expect(processForwardingRules({ db, limit: 2, send: recordingSend(second) }))
       .resolves.toMatchObject({ attempted: 1, sent: 1 });
     expect([...first, ...second]).toHaveLength(3);
+  });
+
+  it("defaults one run to 100 messages, not to the scan's own maximum", async () => {
+    // The default is the only thing standing between a run and the pending scan's 1000-row
+    // ceiling, and a mutation run found nothing covering it: every other case passes `limit`
+    // explicitly, so raising 100 to 1000 was invisible. 101 rows is the cheapest fixture that
+    // can tell the two apart.
+    //
+    // `received_at` IS STAMPED PER ROW rather than left to default, because rows written in a
+    // tight loop share a timestamp to the millisecond and the scan's `received_at ASC,
+    // source_address ASC` order would then be decided by nothing — which is how an ordering
+    // assertion comes to hold by luck.
+    seedProvider("p-1");
+    await seedRule("user@example.com", "archive@example.net", { providerId: "p-1" });
+    for (let index = 0; index < 101; index += 1) {
+      seedInbound(`inbound-${String(index).padStart(3, "0")}`, "user@example.com", {
+        receivedAt: `2026-06-01T12:${String(Math.floor(index / 60)).padStart(2, "0")}:${String(index % 60).padStart(2, "0")}.000Z`,
+      });
+    }
+
+    await expect(processForwardingRules({ db, send: recordingSend([]) }))
+      .resolves.toMatchObject({ attempted: 100, sent: 100 });
+    // The control that makes the 100 mean something: one row is left, so the fixture really did
+    // hold 101 and the first run really was bounded rather than exhausting the table.
+    await expect(processForwardingRules({ db, send: recordingSend([]) }))
+      .resolves.toMatchObject({ attempted: 1, sent: 1 });
   });
 
   it("does not forward through a DISABLED rule", async () => {

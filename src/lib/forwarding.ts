@@ -169,6 +169,26 @@
 //    value and clamps the rest to 1..1000 — including mapping `limit: 0` to one row, which is
 //    the deleted arm's arithmetic preserved exactly and is recorded there rather than
 //    re-implemented here.
+//
+// ─── ONE GUARD BELOW IS UNREACHABLE BY CONSTRUCTION ──────────────────────────────────
+//
+// Named here so a reviewer does not have to re-derive it and so nobody writes a test that only
+// APPEARS to cover it. Mutation testing reverted each change in this file and in
+// `src/lib/storage-wiring.ts` one at a time; 34 of 35 mutants were killed and this one survived:
+//
+//   `if (!inbound)` — the "inbound email no longer exists" skip. The pending-forward scan JOINs
+//   `inbound_emails` and projects `inbound.id`, so every pair it returns names a row that
+//   existed; `getInboundEmail` then re-reads that row by primary key on the SAME connection two
+//   statements later. Nothing a single run can do makes it absent. It is defence against a
+//   CONCURRENT deleter, which is a real caller of `deleteInboundEmail` — so the branch stays,
+//   and the reason it cannot be killed is that a test would have to interleave two writers on
+//   one connection, which would assert the interleaving rather than this behaviour.
+//
+// Every other guard in this file is killed by a test. The mutation run also found TWO REAL
+// COVERAGE GAPS, both closed: nothing exercised the on-disk `database_file` shape of local
+// storage (every case configured `:memory:`, so deleting that branch stayed green), and nothing
+// exercised the DEFAULT limit of 100 (every case passed `limit` explicitly, so raising it to the
+// scan's own 1000 maximum was invisible).
 
 import type { Database } from "../db/database.js";
 import { getDatabase } from "../db/database.js";
