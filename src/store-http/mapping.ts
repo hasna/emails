@@ -258,6 +258,10 @@ export function messageListRecord(value: unknown, what: string): MessageListReco
     updated_at: requiredString(row, "updated_at", what),
     snippet: nullableString(row, "snippet", what),
     attachment_count: requiredNumber(row, "attachment_count", what),
+    // Optional on the wire (an older server does not send it), so a missing value
+    // maps to null rather than failing the row. Without this, a `blocked` message
+    // loses its reason again the moment this mapper replaces the older one.
+    policy_denial: nullableString(row, "policy_denial", what),
   };
 }
 

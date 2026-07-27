@@ -27,9 +27,26 @@ describe("mode-aware command availability", () => {
   });
 
   it("keeps the self_hosted-only refusals available in local mode", () => {
-    for (const command of ["emails stats --json", "emails refresh", "emails monitor"]) {
+    for (const command of ["emails stats --json", "emails pull", "emails monitor"]) {
       expect(isCommandAvailableInMode(command, "local")).toBe(true);
     }
+  });
+
+  // REGRESSION (2026-07-27). `emails refresh` is not a registered command in
+  // ANY mode — running it exits with "error: unknown command 'refresh'". It used to
+  // sit in SELF_HOSTED_REFUSED_COMMANDS alone, and this very file asserted it was
+  // AVAILABLE in local mode, which is why `emails inbox status` kept printing
+  // "Pull now: emails refresh" to local operators until one of them followed the
+  // hint and hit the dead end. The real verb is `emails pull`.
+  it("refuses `emails refresh` in EVERY mode — it is not a command anywhere", () => {
+    for (const mode of ["local", "self_hosted"] as const) {
+      expect(isCommandAvailableInMode("emails refresh", mode), mode).toBe(false);
+    }
+    expect(NEVER_AVAILABLE_COMMANDS).toContain("emails refresh");
+    // …and the replacement must be genuinely runnable where ingestion is local,
+    // or this would be satisfied by suppressing the hint entirely.
+    expect(isCommandAvailableInMode("emails pull", "local")).toBe(true);
+    expect(isCommandAvailableInMode("emails pull", "self_hosted")).toBe(false);
   });
 
   // The registry narrowed when the gratuitous refusals were deleted: a prefix that

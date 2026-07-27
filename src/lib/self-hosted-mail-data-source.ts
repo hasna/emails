@@ -95,6 +95,12 @@ interface V1Message {
   is_starred?: boolean;
   labels?: string[] | null;
   headers?: Record<string, unknown> | null;
+  /**
+   * Outbound-policy denial code. List rows carry it as its own column (full
+   * headers are stripped from list pages for payload size); the detail read
+   * carries it inside `headers`. Read both, prefer the explicit column.
+   */
+  policy_denial?: string | null;
   attachments?: unknown[] | null;
   /** List rows carry only the count; full metadata comes from the detail read. */
   attachment_count?: number;
@@ -547,7 +553,25 @@ function v1ToTuiMessage(m: V1Message): TuiMessage {
     // render identically to a delivered message (2026-07-25 incident).
     ...(typeof m.status === "string" && m.status ? { status: m.status } : {}),
     ...(typeof m.send_state === "string" && m.send_state ? { send_state: m.send_state } : {}),
+    // And the REASON, not just the state. `blocked` alone is not actionable: the
+    // send was refused by a local policy gate before any provider was contacted,
+    // and until this was projected the cause was reachable only by calling
+    // GET /v1/messages/{id} by hand (2026-07-27).
+    ...(v1PolicyDenial(m) ? { policy_denial: v1PolicyDenial(m)! } : {}),
   };
+}
+
+/**
+ * The denial code for a row, from the list column or from the detail read's
+ * headers — whichever this row carries. Null when the row was not refused.
+ */
+function v1PolicyDenial(m: V1Message): string | null {
+  const explicit = typeof m.policy_denial === "string" ? m.policy_denial.trim() : "";
+  if (explicit) return explicit;
+  const fromHeaders = m.headers?.["policy_denial"];
+  if (typeof fromHeaders !== "string") return null;
+  const trimmed = fromHeaders.trim();
+  return trimmed ? trimmed : null;
 }
 
 function attachmentRecord(value: unknown): Record<string, unknown> | null {

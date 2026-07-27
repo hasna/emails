@@ -1,6 +1,6 @@
 import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
-import { createAddress, findAddressesByEmail, listAddresses, deleteAddress, getAddress, getAddressByEmail } from "../../db/addresses.js";
+import { createAddress, findAddressesByEmail, listAddresses, deleteAddress, getAddress, getAddressByEmail, markVerified } from "../../db/addresses.js";
 import { suspendAddress, activateAddress, setAddressQuota } from "../../db/address-lifecycle.js";
 import { colorDnsStatus, tableRow, truncate } from "../../lib/format.js";
 import { confirmDestructiveAction, formatListHint, handleError, isCliVerboseOutput, parseCliListPage, resolveId } from "../utils.js";
@@ -324,9 +324,20 @@ export function registerAddressCommands(program: Command, output: (data: unknown
       try { notImplementedAnywhere("emails address provision"); } catch (e) { handleError(e); }
     });
 
+  // `verify` READS. `set-verified` WRITES. They are separate commands, and this one
+  // says which it is.
+  //
+  // A command named `verify` that cannot verify is a usability trap: an operator whose
+  // send was refused with `sender_unverified` runs `emails address verify <email>`,
+  // gets "⚠ … is not yet verified", and reasonably concludes the tool has told them
+  // what to do next — when in fact this command has no write path at all and, until
+  // `set-verified` existed, neither did any other. `address add` has no --verified
+  // flag and `address provision` refuses in every mode, so the only route left was a
+  // hand-rolled PATCH /v1/addresses/{id}. The name is kept for compatibility; the
+  // description and the output now name the command that performs the change.
   addressCmd
     .command("verify <email>")
-    .description("Check verification status of an address")
+    .description("Check verification status of an address (READ-ONLY; use 'address set-verified' to change it)")
     .option("--provider <id>", "Provider ID")
     .action(async (email: string, opts: { provider?: string }) => {
       try {
@@ -341,7 +352,53 @@ export function registerAddressCommands(program: Command, output: (data: unknown
           console.log(chalk.green(`✓ ${email} is verified`));
         } else {
           console.log(chalk.yellow(`⚠ ${email} is not yet verified`));
+          // Say what "not verified" COSTS, and how to change it. Without this the
+          // reader learns a flag is false and nothing else — and an unverified sender
+          // is refused before any provider is contacted, so the send simply never
+          // happens and the ledger row says only `blocked`.
+          console.log(chalk.dim(
+            `  Sends from ${email} are refused by the outbound policy gate (policy_denial: sender_unverified)\n`
+            + "  before any provider is contacted. This command only READS the flag.\n"
+            + `  To set it: emails address set-verified ${email}`,
+          ));
         }
+      } catch (e) {
+        handleError(e);
+      }
+    });
+
+  addressCmd
+    .command("set-verified <email-or-id>")
+    .description("Mark a sender address as verified (allows outbound mail from it)")
+    .option("--yes", "Skip confirmation prompt")
+    .action(async (ref: string, opts: { yes?: boolean }) => {
+      try {
+        // Accept an email or an id: an operator arriving from a `sender_unverified`
+        // refusal has the ADDRESS in hand, not its uuid, and `verify` takes an email —
+        // taking only an id here would make the pair inconsistent at the worst moment.
+        const byEmail = findAddressesByEmail(ref);
+        if (byEmail.length > 1) {
+          handleError(new Error(
+            `${ref} matches ${byEmail.length} address records (${byEmail.map((a) => a.id.slice(0, 8)).join(", ")}). `
+            + "Pass the id instead.",
+          ));
+        }
+        const resolvedId = byEmail.length === 1 ? byEmail[0]!.id : resolveSelfHostedAddressId(ref);
+        const before = getAddress(resolvedId);
+        if (!before) handleError(new Error(`Address not found: ${ref}`));
+        if (before!.verified) {
+          output(before, chalk.dim(`${before!.email} is already verified — nothing to do.`));
+          return;
+        }
+        // Confirmed by default. Marking an address verified asserts that this
+        // deployment controls that mailbox and unblocks outbound mail from it, so it
+        // is an operator decision, not a routine edit. --yes for automation.
+        await confirmDestructiveAction(
+          `Mark ${before!.email} as verified? This allows outbound mail to be sent from it.`,
+          opts.yes,
+        );
+        const after = markVerified(resolvedId);
+        output(after, chalk.green(`✓ ${after.email} is now verified — outbound mail from it is no longer refused`));
       } catch (e) {
         handleError(e);
       }

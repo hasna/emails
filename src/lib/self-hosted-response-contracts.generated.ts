@@ -36682,6 +36682,11 @@ export const SELF_HOSTED_RESPONSE_COMPONENTS: Readonly<Record<string, unknown>> 
         "type": "string",
         "description": "none | pending | sending | sent | failed | uncertain | blocked | cancelled"
       },
+      "policy_denial": {
+        "type": "string",
+        "nullable": true,
+        "description": "Why an outbound policy gate refused this message (e.g. sender_unverified), or null when it was not refused. Mirrors headers.policy_denial. Full headers are stripped from list rows for payload size, so without this field a send_state of 'blocked' cannot be explained by any list consumer. OPTIONAL, unlike its neighbours, and deliberately so: a client that required it would refuse every list response from a server older than this field, turning a missing explanation into a total loss of `emails log` / `emails email list` across the whole installed base. Absent and null both mean 'no reason available here'; read it from GET /v1/messages/{id} headers.policy_denial when a list row omits it. The SERVER's obligation to project it is enforced by src/server/self-hosted/policy-denial-visibility.test.ts, not by the wire contract."
+      },
       "send_started_at": {
         "type": "string",
         "format": "date-time",

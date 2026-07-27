@@ -83,6 +83,8 @@ const MESSAGE = {
   labels: [],
   source_id: null,
   send_state: "sent",
+  // Required on a /v1 list item: null means "no outbound policy gate refused this".
+  policy_denial: null,
   send_started_at: null,
   created_at: "2026-07-08T12:00:00.000Z",
   updated_at: "2026-07-08T12:00:00.000Z",

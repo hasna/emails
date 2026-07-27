@@ -82,16 +82,23 @@ function listV1(row: Record<string, unknown>): Record<string, unknown> {
   const {
     body_text: bodyText,
     body_html: _bodyHtml,
-    headers: _headers,
+    headers,
     attachments,
     ...summary
   } = row;
+  // Mirrors the serve: the headers OBJECT stays off list rows, but the denial code
+  // inside it is projected as its own scalar, so a `blocked` row can state its
+  // reason without re-adding the payload the lean projection exists to avoid.
+  const denial = headers && typeof headers === "object" && !Array.isArray(headers)
+    ? (headers as Record<string, unknown>)["policy_denial"]
+    : undefined;
   return {
     ...summary,
     snippet: typeof bodyText === "string"
       ? bodyText.replace(/\s+/g, " ").trim().slice(0, 140)
       : null,
     attachment_count: Array.isArray(attachments) ? attachments.length : 0,
+    policy_denial: typeof denial === "string" && denial.trim() ? denial.trim() : null,
   };
 }
 
@@ -2480,5 +2487,60 @@ describe("SelfHostedMailDataSource — read filter", () => {
     const page = await ds.listMailbox("inbox", { read: true, limit: 2 });
     expect(page.map((m) => m.id)).toEqual(["read-new", "read-old"]);
     expect(page.every((m) => m.is_read)).toBe(true);
+  });
+});
+
+// THE REASON A REFUSED SEND WAS REFUSED, END TO END THROUGH THE MAPPING (2026-07-27).
+//
+// The client reads the denial code from two DIFFERENT places depending on the route,
+// and both have to work or the fix only half-lands:
+//   * LIST rows carry a `policy_denial` scalar (the serve strips the headers object
+//     from list pages for payload size);
+//   * the DETAIL read carries the full `headers`, with the code inside it.
+// A test that constructs a TuiMessage with `policy_denial` already set would pass
+// against either half being broken, so these drive the real mapping instead.
+describe("SelfHostedMailDataSource — a blocked message carries its reason", () => {
+  const blocked = (over: Record<string, unknown> = {}) => ({
+    ...v1("77"),
+    direction: "outbound",
+    status: "blocked",
+    send_state: "blocked",
+    ...over,
+  });
+
+  it("reads the code from the DETAIL response's headers", async () => {
+    const { ds } = make([blocked({ headers: { policy_denial: "sender_unverified" } })]);
+    const msg = await ds.getMessage("77");
+    expect(msg?.send_state).toBe("blocked");
+    expect(msg?.policy_denial).toBe("sender_unverified");
+  });
+
+  it("reads the code from a LIST row's scalar, where headers are absent", async () => {
+    const { ds } = make([blocked({ headers: { policy_denial: "sender_unverified" } })]);
+    const rows = await ds.listMailbox("sent", { limit: 10 });
+    const row = rows.find((candidate) => candidate.id === "77");
+    expect(row?.send_state).toBe("blocked");
+    // listV1 strips `headers` exactly as the serve does, so this can only pass via
+    // the projected scalar.
+    expect(row?.policy_denial).toBe("sender_unverified");
+  });
+
+  it("leaves it undefined when the row was not refused, rather than inventing one", async () => {
+    const { ds } = make([{ ...v1("78"), direction: "outbound", status: "sent", send_state: "sent" }]);
+    expect((await ds.getMessage("78"))?.policy_denial).toBeUndefined();
+  });
+
+  it("tolerates a server that sends neither the scalar nor a headers entry", async () => {
+    // An older serve predates the field entirely. The reason is simply unavailable —
+    // that must degrade to "no reason shown", never to an error or a fabricated code.
+    const { ds } = make([blocked({ headers: {} })]);
+    const msg = await ds.getMessage("77");
+    expect(msg?.send_state).toBe("blocked");
+    expect(msg?.policy_denial).toBeUndefined();
+  });
+
+  it("ignores a blank code instead of rendering an empty reason", async () => {
+    const { ds } = make([blocked({ headers: { policy_denial: "   " } })]);
+    expect((await ds.getMessage("77"))?.policy_denial).toBeUndefined();
   });
 });

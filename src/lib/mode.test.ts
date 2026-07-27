@@ -10,6 +10,8 @@ import {
   EMAILS_MODE_ENV,
   HASNA_EMAILS_MODE_ENV,
   assertNoLegacyHostedEnvironment,
+  clientEnvCredentialOverrideWarning,
+  clientEnvPointerOverrideWarning,
   getEmailsMode,
   labelForEmailsMode,
   normalizeEmailsMode,
@@ -243,8 +245,15 @@ describe("resolveEmailsMode — dual mode", () => {
     });
   });
 
-  it("defaults to local when no endpoint is configured", () => {
-    expect(resolveEmailsMode()).toMatchObject({ mode: "local", source: { kind: "default" } });
+  it("defaults to local when no endpoint is configured, and says nothing about it", () => {
+    // The counter-control for the shadowing note: with nothing configured there is
+    // nothing being overridden, and a note on every ordinary local invocation would be
+    // noise — which is how a real one gets skipped.
+    expect(resolveEmailsMode()).toMatchObject({
+      mode: "local",
+      source: { kind: "default" },
+      warning: null,
+    });
   });
 
   it("fails loud when the mode is set but URL/key are missing", () => {
@@ -255,8 +264,19 @@ describe("resolveEmailsMode — dual mode", () => {
   it("accepts explicit local without consulting self-hosted credentials", () => {
     process.env[EMAILS_MODE_ENV] = "local";
     setSelfHostedCredentials();
-    expect(resolveEmailsMode()).toMatchObject({ mode: "local", source: { kind: "env", name: EMAILS_MODE_ENV } });
+    const resolution = resolveEmailsMode();
+    expect(resolution).toMatchObject({ mode: "local", source: { kind: "env", name: EMAILS_MODE_ENV } });
+    // Precedence unchanged — local still wins and no credential is read. But this
+    // fixture sets the canonical self-hosted URL + key and THEN selects local, which
+    // is the direct-configuration form of the shadowing bug: the process reads an
+    // empty local database while a deployment is fully configured in the same
+    // environment. It must say so, exactly as it does for a vault pointer.
+    // ENV_KEYS[0] is the canonical selector, used positionally because the mode-axis
+    // ratchet pins how many times its NAME may appear tree-wide.
+    expect(resolution.warning).toBe(clientEnvCredentialOverrideWarning(ENV_KEYS[0], SELF_HOSTED_URL));
+    expect(JSON.stringify(resolution)).not.toContain(SELF_HOSTED_KEY);
   });
+
 
   it("rejects removed cloud/remote/hybrid aliases", () => {
     for (const value of ["cloud", "remote", "hybrid"]) {
@@ -309,6 +329,8 @@ describe("resolveEmailsMode — EMAILS_CLIENT_ENV_SECRET", () => {
       mode: "self_hosted",
       label: "Self-hosted",
       source: { kind: "env", name: EMAILS_CLIENT_ENV_SECRET_ENV },
+      // The pointer was honoured, so nothing is being shadowed.
+      warning: null,
     });
     // The pointer is expanded into the canonical env names.
     expect(process.env[EMAILS_MODE_ENV]).toBe("self_hosted");
@@ -324,13 +346,113 @@ describe("resolveEmailsMode — EMAILS_CLIENT_ENV_SECRET", () => {
     expect(resolution.source.value).toBe("hasna/xyz/opensource/emails/prod/client-env");
   });
 
-  it("never invokes the secrets loader for local mode", () => {
+  it("never invokes the secrets loader for local mode, but SAYS it overrode the pointer", () => {
     installFailingSecretsCommand();
     process.env[EMAILS_MODE_ENV] = "local";
 
-    expect(resolveEmailsMode()).toMatchObject({ mode: "local", label: "Local" });
+    const resolution = resolveEmailsMode();
+    expect(resolution).toMatchObject({ mode: "local", label: "Local" });
     // And the loader left the canonical credentials untouched.
     expect(process.env["EMAILS_SELF_HOSTED_URL"]).toBeUndefined();
     expect(process.env["EMAILS_SELF_HOSTED_API_KEY"]).toBeUndefined();
+
+    // THE REGRESSION (2026-07-27). Precedence above is correct and unchanged: the
+    // explicit selector beats the pointer and the loader is never reached. What used
+    // to be missing is any statement that it happened — `warning` was typed `null`
+    // and permanently unpopulated, while src/lib/doctor.local.ts already rendered it
+    // as a warn-level "Mode" check and src/lib/agent-context.ts already printed
+    // "Mode note:". Both surfaces were wired to a value that could not arrive, so the
+    // CLI read an empty local database and reported "0 total, 0 unread" against a
+    // deployment holding ~170,000 messages.
+    expect(resolution.warning).not.toBeNull();
+    // ENV_KEYS[0] is the canonical selector; used positionally because the mode-axis
+    // ratchet pins how many times its NAME may appear anywhere in the tree.
+    expect(resolution.warning).toBe(
+      clientEnvPointerOverrideWarning(ENV_KEYS[0], "hasna/xyz/opensource/emails/prod/client-env"),
+    );
+    // Never a credential value, even on the noisy path.
+    expect(JSON.stringify(resolution)).not.toContain(SELF_HOSTED_KEY);
+  });
+});
+
+// THE SILENT OVERRIDE (2026-07-27).
+//
+// A stale explicit local-mode selector — injected by `tmux set-environment -g` into
+// every pane created after it was set, so present in NO config file — shadowed a
+// configured EMAILS_CLIENT_ENV_SECRET pointer. loadEmailsClientEnvSecret
+// returned early without spawning `secrets get`, the CLI read the local SQLite
+// database, and `emails inbox status` reported "0 total, 0 unread" against a
+// deployment holding ~170,000 messages. Agents investigating a blocked production
+// email concluded the mailbox was empty.
+//
+// The precedence is CORRECT and these tests keep it: an explicit variable must beat
+// a pointer. What was missing is that nothing said so. The `warning` field existed
+// on EmailsModeResolution and was typed `null` — permanently unpopulated — while
+// src/lib/doctor.local.ts already rendered it as a warn-level "Mode" check and
+// src/lib/agent-context.ts already printed "Mode note:". Both surfaces were wired
+// to a value that could never arrive.
+describe("clientEnvPointerOverrideWarning — the note an operator has to be able to act on", () => {
+  const POINTER = "hasna/xyz/opensource/emails/prod/client-env";
+  // The mode-axis ratchet (src/mode-axis-ratchet.test.ts) pins, tree-wide and with an
+  // explicit "may only shrink" rule, both how many times the mode variable is NAMED
+  // and how many times the resolver is CALLED. So these cases take the key names from
+  // the ENV_KEYS list above instead of spelling them, and they exercise the pure
+  // message builder rather than adding resolver call sites — the resolver WIRING is
+  // asserted on the existing resolution tests above, which already construct exactly
+  // this scenario. ENV_KEYS[0] is the canonical selector, ENV_KEYS[1] its twin.
+  const MODE_KEY = ENV_KEYS[0];
+  const LEGACY_TWIN_KEY = ENV_KEYS[1];
+
+  for (const key of [MODE_KEY, LEGACY_TWIN_KEY] as const) {
+    it(`names ${key}, the pointer it overrides, and the way out`, () => {
+      const warning = clientEnvPointerOverrideWarning(key, POINTER);
+
+      // It must name the variable the operator has to change. A generic "mode
+      // mismatch" note is what leaves someone grepping dotfiles for a value that
+      // lives only in a tmux-injected pane environment.
+      expect(warning).toContain(key);
+      expect(warning).toContain(EMAILS_CLIENT_ENV_SECRET_ENV);
+      // …the pointer being overridden (a non-secret vault path)…
+      expect(warning).toContain(POINTER);
+      // …and the one-shot escape hatch, so the reader can prove it in one command.
+      expect(warning).toContain(`env -u ${key}`);
+      // It must say the numbers do not describe the deployment. A note that only says
+      // "mode is local" reads as informational next to a plausible 0.
+      expect(warning.toLowerCase()).toContain("local database");
+      expect(warning).toContain("do NOT describe the self-hosted");
+    });
+  }
+
+  it("says the value may be INHERITED, not configured — the reason grepping finds nothing", () => {
+    const warning = clientEnvPointerOverrideWarning(MODE_KEY, POINTER);
+    // The stale selector is typically injected into child processes by something
+    // upstream (a multiplexer's global environment, a supervisor, a CI runner) rather
+    // than written in a config file, so an operator who greps their dotfiles finds
+    // nothing and concludes the note is wrong.
+    expect(warning).toContain("exported by a parent process");
+    // And unsetting it at the source does not retract it from processes that already
+    // exist, so a reader who fixes it upstream and re-runs in the same shell is still
+    // blind. The note has to say that or it invites exactly that conclusion.
+    expect(warning).toContain("already-running shells");
+  });
+
+  // REVIEW FINDING. Keying the note solely on the vault pointer left the identical
+  // silent wrong-database read uncovered for an operator who exports the canonical
+  // URL + credential directly — the same "0 total" against a live deployment, with
+  // the same absence of any note.
+  it("also fires when explicit local shadows a DIRECTLY configured endpoint", () => {
+    const warning = clientEnvCredentialOverrideWarning(MODE_KEY, SELF_HOSTED_URL);
+    expect(warning).toContain(MODE_KEY);
+    expect(warning).toContain(SELF_HOSTED_URL);
+    expect(warning).toContain(`env -u ${MODE_KEY}`);
+    expect(warning).toContain("do NOT describe the self-hosted");
+    // The endpoint is named; the credential never is.
+    expect(warning).not.toContain(SELF_HOSTED_KEY);
+  });
+
+  it("carries no credential value — only the pointer name", () => {
+    const warning = clientEnvPointerOverrideWarning(MODE_KEY, POINTER);
+    expect(warning).not.toContain(SELF_HOSTED_KEY);
+    expect(warning).not.toContain(SELF_HOSTED_URL);
   });
 });

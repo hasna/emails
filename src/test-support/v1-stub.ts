@@ -667,6 +667,18 @@ function leanListRow(row) {
   const snippet = body.replace(/\s+/g, " ").trim().slice(0, 500);
   lean.snippet = snippet || null;
   lean.attachment_count = Array.isArray(row.attachments) ? row.attachments.length : 0;
+  // The serve keeps the headers object off list rows but DOES project the one field
+  // inside it that explains a refusal, as its own scalar (see MESSAGE_LIST_COLUMNS in
+  // src/server/self-hosted/store.ts, which selects headers ->> 'policy_denial').
+  // Mirror that here: dropping it would make the stub the only place where a blocked
+  // row cannot state its reason, which is the exact fake-vs-serve gap this helper's
+  // comment above warns about.
+  // (No backticks in this function: the whole stub server is embedded in a template
+  // literal, so a backtick here terminates it and the file stops parsing.)
+  const denial = row.headers && typeof row.headers === "object" && !Array.isArray(row.headers)
+    ? row.headers["policy_denial"]
+    : undefined;
+  lean.policy_denial = typeof denial === "string" && denial.trim() ? denial.trim() : null;
   return lean;
 }
 
