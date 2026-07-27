@@ -4,6 +4,7 @@ import { readFileSync, statSync } from "node:fs";
 import { basename, extname } from "node:path";
 import { resolveMailDataSource, type MailSendAttachment } from "../../lib/mail-data-source.js";
 import { getTemplate, renderTemplate } from "../../db/templates.js";
+import { getGroupByName, listMemberSummaries } from "../../db/groups.js";
 import { suppressedRecipientsAmong } from "../../db/contacts.js";
 import { handleError } from "../utils.js";
 import { getEmailsMode } from "../../lib/mode.js";
@@ -27,6 +28,47 @@ const ATTACHMENT_MIME_TYPES: Record<string, string> = {
   ".csv": "text/csv",
   ".json": "application/json",
 };
+
+/**
+ * Recipients of `--to-group <name>`.
+ *
+ * This used to be an unconditional refusal — "--to-group is not available in
+ * the self-hosted client without a self-hosted group-members send API" — which
+ * was wrong twice: it fired in local mode too, and no send API is needed. Group
+ * fan-out is a CLIENT-side recipient lookup. `src/db/groups.ts` is a routed
+ * facade whose reads resolve to local SQLite or `/v1`, and `emails group
+ * members <name>` has been printing exactly this list in both configurations
+ * all along. The pre-febe87e implementation did the same two calls against a
+ * local handle; the facade removes the handle, not the capability.
+ *
+ * The group expands into the To: header, which is what `--to a@x b@y` already
+ * does — no per-recipient fan-out is invented here.
+ */
+function resolveGroupRecipients(groupName: string): string[] {
+  const group = getGroupByName(groupName);
+  if (!group) {
+    handleError(new Error(
+      `Group not found: ${groupName}. List the groups you have with 'emails group list'.`,
+    ));
+  }
+  const members = listMemberSummaries(group!.id);
+  if (members.length === 0) {
+    handleError(new Error(
+      `Group '${groupName}' has no members. Add some with 'emails group add ${groupName} <email...>'.`,
+    ));
+  }
+  // A member added twice under different casing is ONE recipient; without this
+  // the address appears twice in the To: header of the delivered message.
+  const seen = new Set<string>();
+  const recipients: string[] = [];
+  for (const member of members) {
+    const key = member.email.trim().toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    recipients.push(member.email.trim());
+  }
+  return recipients;
+}
 
 // Read + base64-encode attachment files, enforcing the count/size caps before
 // handing the composed message to the self-hosted send API via the seam.
@@ -104,11 +146,19 @@ export function registerSendCommands(program: Command, _output: (data: unknown, 
       try {
         const ds = resolveMailDataSource();
 
-        // Resolve recipients from --to or --to-group. Group member fan-out is a
-        // server-side concern in the self-hosted client; require explicit --to.
+        // Resolve recipients from --to or --to-group.
         let toAddresses: string[] = opts.to || [];
         if (opts.toGroup) {
-          handleError(new Error("--to-group is not available in the self-hosted client without a self-hosted group-members send API. Pass explicit --to recipients."));
+          // Refused rather than merged or silently overwritten: the previous
+          // implementation replaced --to with the group, so an operator who
+          // passed both mailed a set they did not ask for and got no warning.
+          if (toAddresses.length > 0) {
+            handleError(new Error(
+              "Pass --to or --to-group, not both: --to-group replaces the recipient list, "
+              + "so combining them would silently drop the explicit --to addresses.",
+            ));
+          }
+          toAddresses = resolveGroupRecipients(opts.toGroup);
         }
         if (toAddresses.length === 0) handleError(new Error("No recipients specified. Use --to or --to-group"));
 
@@ -194,6 +244,12 @@ export function registerSendCommands(program: Command, _output: (data: unknown, 
           console.log(chalk.bold(`\n[DRY RUN] Would send (${selfHosted ? "self-hosted" : "local"}):`));
           console.log(`  ${chalk.dim("From:")}    ${opts.from}`);
           console.log(`  ${chalk.dim("To:")}      ${toAddresses.join(", ")}`);
+          // A group expands into ONE message addressed to every member, so the
+          // preview says so before the operator discovers it in the To: header
+          // of the delivered mail.
+          if (opts.toGroup) {
+            console.log(chalk.dim(`  Group:   ${opts.toGroup} — ${toAddresses.length} member(s), all in one To: header`));
+          }
           if (opts.cc?.length) console.log(`  ${chalk.dim("CC:")}      ${opts.cc.join(", ")}`);
           console.log(`  ${chalk.dim("Subject:")} ${subject}`);
           if (htmlBody) console.log(`  ${chalk.dim("Body:")}    HTML (${htmlBody.length} chars)`);

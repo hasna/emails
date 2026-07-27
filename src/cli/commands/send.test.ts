@@ -3,7 +3,8 @@
 // local sent ledger anymore. These tests drive the REAL command in-process
 // against an out-of-process /v1 stub (see src/test-support/v1-stub.ts): a real
 // send records an outbound message, a dry-run records nothing, and the
-// self-hosted-unsupported paths (--to-group, scheduling) fail loud.
+// self-hosted-unsupported path (scheduling) fails loud. `--to-group` is NOT in
+// that category and has its own two-mode suite (send-group.test.ts).
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { Command } from "commander";
 import { startV1Stub, type V1Stub } from "../../test-support/v1-stub.js";
@@ -135,14 +136,10 @@ describe("emails send — dry-run previews without sending", () => {
 });
 
 describe("emails send — self-hosted-unsupported paths fail loud", () => {
-  it("rejects --to-group (no server-side group fan-out)", async () => {
-    const errors = await runSendCommandExpectingExit([
-      "send", "--from", "agent@acme.com", "--to-group", "team", "--subject", "Hi", "--body", "x",
-    ]);
-
-    expect(errors).toContain("--to-group is not available in the self-hosted client");
-    expect(await stub.list("messages")).toHaveLength(0);
-  });
+  // `--to-group` used to live here as an unconditional refusal. It is a real
+  // command now — group expansion is a client-side lookup over the routed
+  // groups repo, needing no server route — and is covered in both modes by
+  // src/cli/commands/send-group.test.ts.
 
   it("requires explicit recipients", async () => {
     const errors = await runSendCommandExpectingExit([
