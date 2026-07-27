@@ -159,16 +159,34 @@ export type { SendKey, SendKeySummary } from "./db/send-keys.js";
 //    same reason as `getEmailContent` above: it fails QUIETLY in a consumer that does not await.
 //    `rule.enabled` on a promise is `undefined`, `if (rule)` is always truthy, so a "no such
 //    rule" branch becomes unreachable and a disabled rule reads as enabled.
-//  * THE SAME FIVE changed their SECOND PARAMETER TYPE from `Database` to `EmailStore`
-//    (`src/db/forwarding.ts:457,526,559,588,610`). Passing a `Database` handle — the documented
-//    way to scope these to one database, and the only way to scope them in a transaction — now
-//    passes a value of the wrong type.
+//  * THE SAME FIVE changed their STORE PARAMETER TYPE from `Database` to `EmailStore` — the
+//    SECOND parameter for four of them and the THIRD for `setForwardingRuleEnabled`, whose
+//    signature is `(id, enabled, store?)` (`src/db/forwarding.ts:457,526,559,588,610`). Passing
+//    a `Database` handle — the documented way to scope these to one database — now passes a
+//    value of the wrong type.
+//  * TRANSACTION SCOPING IS GONE, not merely retyped. `runInTransaction`
+//    (`src/db/database.ts:2723`) is `runInTransaction<T>(db, fn: () => T): T` — synchronous,
+//    SAVEPOINT-based, with no async variant. So the five above can no longer be scoped in a
+//    transaction at all: an `async` callback returns a promise that the SAVEPOINT commits
+//    around rather than waits for. This is the one break here with no compile-time signal and
+//    no runtime error — the writes simply land outside the transaction that appears to hold
+//    them.
 //  * `listPendingForwarding` and `recordForwardingDelivery` are still SYNCHRONOUS and still take
 //    a raw `Database`, but that argument is now REQUIRED (`:652-655`, `:701-703`). It used to be
-//    optional and defaulted to `getDatabase()`, so an existing no-argument call does not fail to
-//    compile in JS — it throws on a property access of `undefined` at runtime.
+//    optional and defaulted to `getDatabase()`.
 //  * `listPendingForwarding` also lost its `limit = 100` default, so its FIRST argument is
-//    required too. A `listPendingForwarding()` call that worked now throws.
+//    required too. A `listPendingForwarding()` call that worked now throws — and it throws from
+//    the finite-limit guard at `:657` (`Pending-forwarding limit must be a finite number.`),
+//    NOT from a property access on the missing database handle, which is never reached.
+//  * `listPendingForwarding(limit, opts)` — options as the SECOND argument, no database — was a
+//    WORKING PUBLISHED CALL FORM and is now a type error that passes `opts` where a `Database`
+//    is required. The pre-#125 published module was the routing barrel
+//    (`4691c5d^1:src/db/forwarding.ts`), whose `localCompat` shim was literally
+//    `listPendingForwarding: (limit, opts) => local.listPendingForwarding(limit, undefined, opts)`.
+//    That shim served every non-self-hosted caller that did not pass a handle, and the barrel's
+//    `as typeof remote` cast meant the PUBLISHED TYPE was the remote arm's signature, not the
+//    local arm's. Verifying this block against `forwarding.local.ts` instead of that barrel is
+//    how the break was missed the first time.
 //
 // All of it needs a MAJOR version at release. The version is deliberately not bumped in the
 // change that introduced them, and `CHANGELOG.md`'s `[Unreleased]` section is digest-frozen, so
