@@ -29,6 +29,7 @@
 import { resetSelfHostedConfigCache } from "../db/self-hosted-store.js";
 import { resetMailDataSource } from "../lib/mail-data-source.js";
 import { SELF_HOSTED_RESOURCES, resourceListOrderBy } from "../server/self-hosted/resources.js";
+import { DATABASE_PATH_SETTINGS } from "../store-resolution.js";
 
 /**
  * The ORDER BY the real generic list route applies to each `/v1/<resource>`, parsed
@@ -101,12 +102,18 @@ export interface V1Stub {
     tenants?: Array<{ slug: string; name: string; role: string }>;
   }): Promise<void>;
   /**
-   * Point the client at this stub: EMAILS_MODE=self_hosted, EMAILS_SELF_HOSTED_URL,
-   * EMAILS_SELF_HOSTED_API_KEY, then reset the config + mail-data-source caches.
-   * Call in `beforeEach`.
+   * Make this stub the ONE store this test context is configured to use:
+   * EMAILS_MODE=self_hosted, EMAILS_SELF_HOSTED_URL, EMAILS_SELF_HOSTED_API_KEY, the
+   * database-path settings UNSET (see `MANAGED_ENV_KEYS`), then the config and
+   * mail-data-source caches reset. Call in `beforeEach`.
    */
   applyEnv(): void;
-  /** Remove the env this helper set and reset caches. Call in `afterEach`. */
+  /**
+   * Put back exactly the environment `applyEnv` found — including the database path it
+   * removed, restored to its prior value or to ABSENT if it had none — and reset the
+   * caches. A no-op when `applyEnv` was never called, because this helper only ever
+   * undoes its own edits. Call in `afterEach`.
+   */
   clearEnv(): void;
   /** Kill the subprocess. Call in `afterAll`. */
   stop(): void;
@@ -1157,6 +1164,37 @@ const SESSION_ENV = "EMAILS_SESSION_TOKEN";
 const CLIENT_ENV_SECRET_ENV = "EMAILS_CLIENT_ENV_SECRET";
 
 /**
+ * Every environment key `applyEnv` writes and `clearEnv` puts back, in one list so the
+ * snapshot and the restore cannot disagree about which keys they cover.
+ *
+ * THE DATABASE-PATH SETTINGS ARE IN HERE, AND THAT IS THE POINT. `scripts/run-hermetic-
+ * tests.sh` sets a database path for the WHOLE suite — a hermeticity floor, so that no
+ * test can ever open the operator's real mail file. For a test that runs against a local
+ * store that floor is exactly right. For a test that runs against THIS STUB it is a
+ * second store: an installation with both a database path and an API base URL configured
+ * has two places to keep its mail and no way to tell which one was meant, which
+ * `planEmailStore` (src/store-resolution.ts) refuses to boot from — correctly, and by
+ * design, because a precedence rule there would silently serve rows from the store the
+ * operator did not choose. So any consumer that resolved its store from configuration
+ * threw instead of running inside every self-hosted test in the repo.
+ *
+ * The resolver is right; the helper was the thing configuring two stores. `applyEnv`
+ * therefore REMOVES the local-store configuration for as long as the API configuration
+ * is installed, and `clearEnv` puts it back — restoring the hermeticity floor for
+ * whatever runs next in this process. Both settings are handled, read from
+ * `DATABASE_PATH_SETTINGS` rather than re-spelled here, so a helper that unset only the
+ * lower-precedence one (and left the higher-precedence one to win) is not expressible.
+ */
+const MANAGED_ENV_KEYS: readonly string[] = Object.freeze([
+  MODE_ENV,
+  URL_ENV,
+  KEY_ENV,
+  SESSION_ENV,
+  CLIENT_ENV_SECRET_ENV,
+  ...DATABASE_PATH_SETTINGS,
+]);
+
+/**
  * Start an out-of-process /v1 stub server and return a handle for driving it.
  *
  * Typical use:
@@ -1272,28 +1310,42 @@ export async function startV1Stub(options: V1StubOptions = {}): Promise<V1Stub> 
       if (!res.ok) throw new Error(`v1-stub __seed_user failed: HTTP ${res.status}`);
     },
     applyEnv() {
-      priorEnv = {
-        [MODE_ENV]: process.env[MODE_ENV],
-        [URL_ENV]: process.env[URL_ENV],
-        [KEY_ENV]: process.env[KEY_ENV],
-        [SESSION_ENV]: process.env[SESSION_ENV],
-        [CLIENT_ENV_SECRET_ENV]: process.env[CLIENT_ENV_SECRET_ENV],
-      };
+      // SNAPSHOT ONCE. A second `applyEnv()` with no `clearEnv()` between them must not
+      // re-snapshot, or it would record the values this helper itself installed — and
+      // then `clearEnv()` would "restore" the applied state, leaving the database path
+      // deleted for every file that runs after this one in the shared test process.
+      if (priorEnv === undefined) {
+        const snapshot: Record<string, string | undefined> = {};
+        // `undefined` is recorded for a key that is ABSENT, and the restore below
+        // distinguishes it from `""` — a key put back as empty string is a different
+        // environment from a key that was never there.
+        for (const key of MANAGED_ENV_KEYS) snapshot[key] = process.env[key];
+        priorEnv = snapshot;
+      }
       process.env[MODE_ENV] = "self_hosted";
       process.env[URL_ENV] = baseUrl;
       process.env[KEY_ENV] = apiKey;
       delete process.env[SESSION_ENV];
       delete process.env[CLIENT_ENV_SECRET_ENV];
+      // The local store's configuration goes away while the API's is in force, so this
+      // process is configured with exactly ONE place to keep its mail.
+      for (const key of DATABASE_PATH_SETTINGS) delete process.env[key];
       resetSelfHostedConfigCache();
       resetMailDataSource();
     },
     clearEnv() {
-      for (const key of [MODE_ENV, URL_ENV, KEY_ENV, SESSION_ENV, CLIENT_ENV_SECRET_ENV]) {
-        const value = priorEnv?.[key];
-        if (value === undefined) delete process.env[key];
-        else process.env[key] = value;
+      // Nothing to undo without a snapshot: `clearEnv()` before any `applyEnv()`, or a
+      // second one after a restore, has installed nothing. Deleting the managed keys
+      // here would be the leak this method exists to prevent — it would strip a
+      // database path this helper never set.
+      if (priorEnv !== undefined) {
+        for (const key of MANAGED_ENV_KEYS) {
+          const value = priorEnv[key];
+          if (value === undefined) delete process.env[key];
+          else process.env[key] = value;
+        }
+        priorEnv = undefined;
       }
-      priorEnv = undefined;
       resetSelfHostedConfigCache();
       resetMailDataSource();
     },
