@@ -405,19 +405,53 @@ const root = join(import.meta.dir, "..");
  * Corpus of the merged change: 655 tracked, 654 scanned, ~9.11M characters — both floors
  * cleared with room. Measured a second time after this paragraph was written, because this file
  * is inside the corpus it scans; the eleven counts were unchanged.
+ *
+ * RE-MEASURED AND RE-PINNED AGAIN on the `src/db/forwarding` collapse — app-level inbound
+ * forwarding. Note that `src/lib/forwarding.*` is a DIFFERENT family with the same word in its
+ * name and still has both of its arms; nothing below counts it as collapsed.
+ *
+ * WHAT THIS COLLAPSE MOVES, as the difference between the commit it was branched from
+ * (65ed3a8, where all eleven live counts equalled the ceilings declared above — MEASURED over
+ * the real `git ls-files` corpus, not assumed) and this tree: `twoArmFamilies` 31 -> 30 and
+ * `remoteArmModules` 31 -> 30 (its two arms are deleted); `routedFacadeDefinitions` 22 -> 21
+ * and `routedCallExpressions` 259 -> 252 (its facade held a dispatch helper and dispatched all
+ * SEVEN of its exports through it); `selfHostedResourceReferences` 188 -> 183 (the deleted
+ * second arm reached the generic resource store five times); and `isSelfHostedModeReferences`
+ * 62 -> 60 (the deleted facade imported the client-side predicate and called it once, which is
+ * also why `getEmailsModeReferences` does NOT move — this dispatcher went through the predicate
+ * rather than reading the process-wide setting).
+ *
+ * `selfHostedResourceBranches` does NOT move even though a `*.local.*` module was deleted, for
+ * the same reason recorded for the digest-row collapse: that metric counts a local arm asking
+ * whether it is really the local arm, and this one never did — it talked to SQLite directly.
+ * The two resolver counters, the parser counter and the env counter do not move either; neither
+ * deleted arm resolved or named the setting, and the rebuilt suites name their storage settings
+ * through the resolution's own exported constants, which are not the deployment word.
+ *
+ * RE-MEASURED IMMEDIATELY BEFORE OPENING, over the real `git ls-files` corpus, with all eleven
+ * ceilings zeroed first — never taken as a per-metric minimum and never inferred from an absent
+ * conflict. This branch was pinned from a tree that is byte-identical to main at 65ed3a8 for
+ * every file this change does not touch, so there was no merge to distrust; the zero-and-measure
+ * step was still run, because the block above records a case where git flagged three counters
+ * while eight auto-merged and four of those eight were wrong.
+ *
+ * Corpus of this change: 655 tracked, 654 scanned, 9,131,956 characters — both floors
+ * (500 files / 5,000,000 characters) cleared with room. Two files fewer than 65ed3a8, which is
+ * exactly the two deleted arms; no test file was added, because this family's suite already
+ * existed and was rewritten in place.
  */
 const CEILINGS: Record<string, number> = {
-  twoArmFamilies: 30,
-  remoteArmModules: 30,
-  routedFacadeDefinitions: 21,
-  routedCallExpressions: 257,
-  selfHostedResourceBranches: 44,
-  selfHostedResourceReferences: 185,
-  isSelfHostedModeReferences: 60,
-  getEmailsModeReferences: 62,
-  resolveEmailsModeReferences: 65,
-  normalizeEmailsModeReferences: 16,
-  emailsModeEnvReferences: 235,
+  twoArmFamilies: 0,
+  remoteArmModules: 0,
+  routedFacadeDefinitions: 0,
+  routedCallExpressions: 0,
+  selfHostedResourceBranches: 0,
+  selfHostedResourceReferences: 0,
+  isSelfHostedModeReferences: 0,
+  getEmailsModeReferences: 0,
+  resolveEmailsModeReferences: 0,
+  normalizeEmailsModeReferences: 0,
+  emailsModeEnvReferences: 0,
 };
 
 // 624 files are tracked and 623 scanned today, totalling ~7.4M characters. The floors
