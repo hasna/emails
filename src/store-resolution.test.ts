@@ -13,10 +13,10 @@
 // read the ambient environment could not express the "nothing configured" quadrant at
 // all — and would have silently tested three quadrants while claiming four.
 
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { closeDatabase, defaultDatabasePath, resetDatabase } from "./db/database.js";
+import { closeDatabase, defaultDatabasePath, getDatabasePath, resetDatabase } from "./db/database.js";
 import { HTTP_STORE_CAPABILITIES } from "./store-http/index.js";
 import { SQLITE_STORE_CAPABILITIES } from "./store-sqlite/index.js";
 import {
@@ -210,27 +210,51 @@ describe("configured store resolution — configurations it will not guess at", 
 });
 
 describe("the store the resolution actually hands back", () => {
-  afterEach(() => {
-    closeDatabase();
+  // `createConfiguredEmailStore` takes NO environment argument, on purpose: it acquires
+  // the process-wide SQLite connection, so a store built from an injected environment
+  // could be bound to a different file than the one it reports. These tests therefore
+  // drive the real `process.env` and put it back afterwards.
+  let inherited: NodeJS.ProcessEnv;
+
+  const only = (settings: Record<string, string>): void => {
+    for (const key of [...DATABASE_PATH_SETTINGS, API_BASE_URL_SETTING, API_SETTINGS_POINTER, ...API_CREDENTIAL_SETTINGS]) {
+      delete process.env[key];
+    }
+    Object.assign(process.env, settings);
+  };
+
+  beforeEach(() => {
+    inherited = { ...process.env };
   });
 
-  it("builds the SQLite store for a configured database path", () => {
+  afterEach(() => {
+    closeDatabase();
+    for (const key of Object.keys(process.env)) {
+      if (!Object.prototype.hasOwnProperty.call(inherited, key)) delete process.env[key];
+    }
+    Object.assign(process.env, inherited);
+  });
+
+  it("builds the SQLite store, reporting the path the database layer actually opened", () => {
+    only({ [DATABASE_PATH_SETTINGS[1]]: ":memory:" });
     resetDatabase();
-    const store = createConfiguredEmailStore(bare({ [DATABASE_PATH_SETTINGS[1]]: ":memory:" }));
+    const store = createConfiguredEmailStore();
     // Identified by the capability set it DECLARES, not by a label a caller branches
     // on — `descriptor.kind` is `string` on the seam precisely so this cannot become a
     // switch (see src/store/descriptor.ts).
     expect(store.capabilities).toEqual(SQLITE_STORE_CAPABILITIES);
+    // The path comes from the database layer, not from the plan, so it cannot name a file
+    // the connection is not bound to.
+    expect(store.descriptor.detail).toBe(`SQLite at ${getDatabasePath()}`);
     expect(store.descriptor.detail).toContain(":memory:");
   });
 
   it("builds the API store for a configured base URL, and leaks no credential", () => {
-    const store = createConfiguredEmailStore(
-      bare({
-        [API_BASE_URL_SETTING]: `https://operator:${A_TOKEN}@mail.example.test/v1?t=1`,
-        [API_CREDENTIAL_SETTINGS[0]]: A_TOKEN,
-      }),
-    );
+    only({
+      [API_BASE_URL_SETTING]: `https://operator:${A_TOKEN}@mail.example.test/v1?t=1`,
+      [API_CREDENTIAL_SETTINGS[0]]: A_TOKEN,
+    });
+    const store = createConfiguredEmailStore();
     expect(store.capabilities).toEqual(HTTP_STORE_CAPABILITIES);
     // The two capability sets differ, so the assertion above actually discriminates.
     expect(HTTP_STORE_CAPABILITIES).not.toEqual(SQLITE_STORE_CAPABILITIES);
@@ -244,15 +268,12 @@ describe("the store the resolution actually hands back", () => {
   it("throws instead of building anything when the configuration contradicts itself", () => {
     // The construction path must not resolve what the plan refused to. A store built
     // here would be a working store for one of the two configured places to keep mail.
-    expect(() =>
-      createConfiguredEmailStore(
-        bare({
-          [DATABASE_PATH_SETTINGS[1]]: ":memory:",
-          [API_BASE_URL_SETTING]: A_URL,
-          [API_CREDENTIAL_SETTINGS[0]]: A_TOKEN,
-        }),
-      ),
-    ).toThrow(StoreConfigurationError);
+    only({
+      [DATABASE_PATH_SETTINGS[1]]: ":memory:",
+      [API_BASE_URL_SETTING]: A_URL,
+      [API_CREDENTIAL_SETTINGS[0]]: A_TOKEN,
+    });
+    expect(() => createConfiguredEmailStore()).toThrow(StoreConfigurationError);
   });
 });
 

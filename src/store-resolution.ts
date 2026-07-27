@@ -36,7 +36,7 @@
 // discriminant: after construction nobody may ask what kind of store they have (see
 // src/store/descriptor.ts for what happened the last time a label like that existed).
 
-import { defaultDatabasePath, getDatabase } from "./db/database.js";
+import { defaultDatabasePath, getDatabasePath } from "./db/database.js";
 import { EMAILS_CLIENT_ENV_SECRET_ENV, EMAILS_SESSION_TOKEN_ENV } from "./lib/client-env.js";
 import type { EmailStore } from "./store/email-store.js";
 import { createHttpEmailStore } from "./store-http/index.js";
@@ -99,7 +99,12 @@ export class StoreConfigurationError extends Error {
 export type StorePlan =
   | {
       readonly store: "sqlite";
-      /** The resolved absolute path (or `:memory:`). Safe to print. */
+      /**
+       * The configured path AS GIVEN, or the documented default when nothing named one.
+       * Safe to print. Not necessarily canonical: the database layer resolves symlinks
+       * and relative segments when it opens the file, so this is what the operator wrote
+       * rather than what the connection ends up bound to.
+       */
       readonly databasePath: string;
       /** Which setting supplied it, or null when it is the documented default. */
       readonly setting: string | null;
@@ -197,30 +202,35 @@ export function planEmailStore(env: NodeJS.ProcessEnv = process.env): StorePlan 
 }
 
 /**
- * Build the store this configuration means.
+ * Build the store this process's configuration means.
+ *
+ * NO `env` PARAMETER, unlike `planEmailStore`, and the asymmetry is deliberate. This
+ * function acquires PROCESS-WIDE resources — `getDatabase()` memoises one SQLite
+ * connection per process — so a caller who handed in a different environment object
+ * would get a store bound to whatever the process had already opened, with diagnostics
+ * naming the file it asked for. A store whose `detail` points at the wrong database is
+ * worse than no diagnostics at all, so the affordance is not offered: `planEmailStore`
+ * is the injectable, side-effect-light half, and this half reads the real environment.
  *
  * The `switch` is exhaustive over `StorePlan`, so a third store arm would fail to
  * compile here — which is the intended structural limit, not an oversight.
  */
-export function createConfiguredEmailStore(env: NodeJS.ProcessEnv = process.env): EmailStore {
-  const plan = planEmailStore(env);
+export function createConfiguredEmailStore(): EmailStore {
+  const plan = planEmailStore(process.env);
   switch (plan.store) {
     case "sqlite":
-      // `getDatabase` memoises one connection per process and ignores the path once it
-      // has opened, exactly as every other caller sees it. Passing the resolved path
-      // makes the resolution authoritative on a cold start instead of having the
-      // database layer re-derive it from a different environment object.
-      return createSqliteEmailStore({
-        database: getDatabase(plan.databasePath),
-        detail: `SQLite at ${plan.databasePath}`,
-      });
+      // `plan.databasePath` is NOT passed through. `getDatabase()` applies the same
+      // precedence this resolution reads, and it additionally canonicalises the value and
+      // memoises the connection — so the path it reports is the one the store's rows
+      // actually come from, and `plan.databasePath` (what the operator wrote) is not.
+      return createSqliteEmailStore({ detail: `SQLite at ${getDatabasePath()}` });
     case "api":
       // `detail` is left to the store, which strips userinfo, query and fragment out of
       // the origin before it is printed. The credential is read here and never stored
       // anywhere this module can print it.
       return createHttpEmailStore({
         baseUrl: plan.baseUrl,
-        credential: configured(env, plan.credentialSetting) as string,
+        credential: configured(process.env, plan.credentialSetting) as string,
       });
   }
 }

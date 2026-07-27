@@ -159,9 +159,9 @@ first.
 
 | # | Lands | Gate |
 |---|---|---|
-| 1 | `SqliteEmailStore` + shared conformance suite | uniform-coverage assertion passes; every capability covered |
-| 2 | `HttpEmailStore` against the same suite | both stores execute every case |
-| 3 | Configuration-driven store resolution | both-configured is a boot error, proven by test |
+| 1 | `SqliteEmailStore` + shared conformance suite — **landed** | uniform-coverage assertion passes; every capability covered |
+| 2 | `HttpEmailStore` against the same suite — **landed** | both stores execute every case |
+| 3 | Configuration-driven store resolution — **landed** | both-configured is a boot error, proven by test |
 | 4 | `src/db` families migrated, lowest fan-in first | ratchet drops each PR |
 | 5 | CLI command families + TUI data layer | strictly after their db families |
 | 6 | MCP surfaces collapsed, mode guards deleted | one registration path, no mode read in `src/mcp/**` |
@@ -187,6 +187,26 @@ the API URL is configured** — not from a mode word. **Both configured is a har
 precedence rule.** A precedence rule is the axis with extra steps: it answers "which one wins?"
 instead of "which one did you mean?", and the wrong answer is silent. One configured → that store.
 Neither → the default local SQLite path. Both → refuse to start, naming both settings.
+
+`src/store-resolution.ts` is that resolution. Two further configurations it refuses rather than
+resolves, both of which would otherwise pick a store silently: an API URL with no credential (that
+store answers 401 to everything, which is indistinguishable from one that legitimately declines
+everything), and a set vault pointer whose payload is not in the environment (the pointer names an
+API, so falling through to local SQLite serves local rows under an API configuration). It reads
+storage settings only, and a source-text assertion — not a convention — keeps it from reading the
+axis this program is deleting.
+
+Phase 3 also closed the gap phase 2 documented: `/v1` had **no route that recorded a message without
+sending it**, so `createMessage`/`upsertMessage` — ungated on the seam, hence with no capability to
+declare false and no legal refusal — could not be served for outbound input at all.
+`POST /v1/messages/record` serves both, in either direction, and refuses the four send-ledger
+columns so a row recorded there can never carry a fence the send path did not produce; the
+inbound-only 409 on `POST /v1/messages` is unchanged. The conformance suite now runs against the
+**real service** over HTTP with Postgres behind it in the `selfhost-postgres` job (40 passed /
+8 refused / 0 failed, with neutering controls that must turn it red), which is how the live run
+found and fixed the Postgres upsert writing its whole column set on a replay — resetting read, star
+and label state on the one operation whose contract is that a replay changes nothing it was not
+told about.
 
 **Phase 4 — migrate the two-arm `src/db` families, one at a time, lowest consumer fan-in first.**
 Fan-in measured on `6646cc8` by resolving relative import specifiers and counting the **non-test**
