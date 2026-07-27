@@ -4,13 +4,22 @@ import { resolveCloudflareAuth, type CloudflareAuth } from "./cloudflare-auth.js
 import { getEmailsMode } from "./mode.js";
 import { isSensitiveKey } from "./redaction.js";
 
-// Both local and self-hosted client paths share this config/credentials file
-// (Cloudflare/SES tokens, inbound bucket + mail-source registry, and provider
-// defaults). Keep its path independent from opening the SQLite database.
-function getConfigDir(): string {
+/**
+ * This machine's emails data directory, resolved WITHOUT opening (or hardening)
+ * the SQLite database.
+ *
+ * Both local and self-hosted client paths share the config/credentials file that
+ * lives here (Cloudflare/SES tokens, inbound bucket + mail-source registry, and
+ * provider defaults), and so do the on-disk logs the CLI tails. `getDataDir()`
+ * in src/db/database.ts resolves the same directory but additionally enforces
+ * SQLite parent-directory ownership/mode rules and creates it — correct before a
+ * database open, wrong for a read that never touches one.
+ */
+export function getEmailsDataDir(): string {
   const home = process.env["HOME"] || process.env["USERPROFILE"] || "~";
   return join(home, ".hasna", "emails");
 }
+function getConfigDir(): string { return getEmailsDataDir(); }
 function getConfigPath(): string { return join(getConfigDir(), "config.json"); }
 const CONFIG_DIR_MODE = 0o700;
 const CONFIG_FILE_MODE = 0o600;

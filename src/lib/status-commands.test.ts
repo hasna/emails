@@ -2,7 +2,12 @@
 // refuses is the same defect class as reporting a count that was never measured:
 // the payload asserts something untrue. `emails status` used to propose
 // `emails provision status` and every JSON error proposed `emails doctor --json`,
-// both of which refuse in self_hosted mode.
+// both of which refused in self_hosted mode.
+//
+// `emails doctor` no longer refuses — src/lib/doctor.remote.ts probes the
+// operator service — so the self_hosted examples below use `emails stats`, which
+// still has no client-side aggregation over the delivery events table. Keeping a
+// runnable command in these fixtures would make them vacuously green.
 
 import { describe, expect, it } from "bun:test";
 import {
@@ -15,15 +20,43 @@ import {
 
 describe("mode-aware command availability", () => {
   it("rejects the commands that refuse in self_hosted", () => {
-    expect(isCommandAvailableInMode("emails doctor --json", "self_hosted")).toBe(false);
+    expect(isCommandAvailableInMode("emails stats --json", "self_hosted")).toBe(false);
     expect(isCommandAvailableInMode("emails provision status", "self_hosted")).toBe(false);
     expect(isCommandAvailableInMode("emails inbox watch --all-buckets", "self_hosted")).toBe(false);
     expect(isCommandAvailableInMode("emails refresh", "self_hosted")).toBe(false);
   });
 
   it("keeps the self_hosted-only refusals available in local mode", () => {
-    for (const command of ["emails doctor --json", "emails refresh", "emails export events"]) {
+    for (const command of ["emails stats --json", "emails refresh", "emails monitor"]) {
       expect(isCommandAvailableInMode(command, "local")).toBe(true);
+    }
+  });
+
+  // The registry narrowed when the gratuitous refusals were deleted: a prefix that
+  // covers a whole namespace must not keep blocking the subcommands of it that run.
+  it("does not refuse the commands that were un-blocked in self_hosted", () => {
+    for (const command of [
+      "emails doctor --json",
+      "emails export emails --format json",
+      "emails export events --format json",
+      "emails schedule list --json",
+      "emails scheduled list --json",
+      "emails schedule cancel abc123",
+      "emails daemon status --json",
+      "emails daemon restart --json",
+      "emails logs tail --component scheduler",
+      "emails inbox source list --json",
+    ]) {
+      expect(isCommandAvailableInMode(command, "self_hosted"), command).toBe(true);
+    }
+    // …while the genuinely server-side neighbours in the same namespaces stay out.
+    for (const command of [
+      "emails doctor delivery ops@example.com",
+      "emails schedule run",
+      "emails scheduler",
+      "emails inbox sync-s3 --bucket b",
+    ]) {
+      expect(isCommandAvailableInMode(command, "self_hosted"), command).toBe(false);
     }
   });
 
@@ -49,7 +82,7 @@ describe("mode-aware command availability", () => {
 
   it("filters a suggestion list while preserving order", () => {
     const filtered = keepAvailableCommands(
-      ["emails status --json", "emails doctor --json", "emails provider list --json"],
+      ["emails status --json", "emails stats --json", "emails provider list --json"],
       "self_hosted",
     );
     expect(filtered).toEqual(["emails status --json", "emails provider list --json"]);

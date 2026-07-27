@@ -1,7 +1,7 @@
 import type { Command } from "commander";
 import { formatInboxSyncStatus } from "../../lib/inbox-sync-status-format.js";
 import chalk from "../../lib/chalk-lite.js";
-import { confirmDestructiveAction, handleError } from "../utils.js";
+import { confirmDestructiveAction, handleError, resolveId } from "../utils.js";
 import { extractEmailLinks, formatEmailLinks, type ExtractedEmailLink } from "../../lib/email-links.js";
 import { formatAttachmentSize, mergeAttachmentDetails, type AttachmentDetail } from "../../lib/attachment-actions.js";
 import { MAX_ATTACHMENT_DOWNLOAD_BYTES, writeAttachmentFile } from "../../lib/attachment-download.js";
@@ -182,6 +182,12 @@ async function runAutoPull(_opts: { s3?: boolean; limit?: number }) {
 // ingestion runs on the self-hosted API/worker. These commands are kept for
 // discoverability but fail loud. Use `emails inbox list/read/mark-read/status`
 // (API-backed) for the mail view.
+//
+// The `inbox source` LIFECYCLE (list/add-s3/retire) is not one of them. It is a
+// client-side registry held in this machine's config file, and
+// src/lib/s3-sync.remote.ts implements all three functions in full — the same
+// registry src/cli/tui/data.remote.ts already reads to resolve a `--source` ref
+// in this mode. Only the INGESTION half (`sync-s3`) is server-owned.
 function serverOnly(command: string): never {
   throw new Error(
     `emails inbox ${command} is not available in the self-hosted client; it runs on the self-hosted server.`,
@@ -630,8 +636,14 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .command("list")
     .alias("status")
     .description("List configured S3 ingestion sources")
-    .action(() => {
-      try { serverOnly("source list"); } catch (e) { handleError(e); }
+    .action(async () => {
+      try {
+        const { listS3Sources } = await import("../../lib/s3-sync.js");
+        const sources = listS3Sources();
+        output(sources, formatSourceList(sources));
+      } catch (e) {
+        handleError(e);
+      }
     });
 
   sourceCmd
@@ -644,15 +656,43 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .option("--name <name>", "Source display name")
     .option("--status <status>", "Source status: live | import | legacy | retired", "live")
     .option("--no-live-sync", "Register source but disable live sync")
-    .action(() => {
-      try { serverOnly("source add-s3"); } catch (e) { handleError(e); }
+    .action(async (opts: { bucket: string; prefix?: string; region?: string; provider?: string; name?: string; status?: string; liveSync?: boolean }) => {
+      try {
+        const [{ addInboundBucket }, { registerS3Source }] = await Promise.all([
+          import("../../lib/config.js"),
+          import("../../lib/s3-sync.js"),
+        ]);
+        const status = parseSourceStatus(opts.status);
+        const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
+        const source = registerS3Source({
+          bucket: opts.bucket,
+          prefix: opts.prefix,
+          region: opts.region,
+          providerId,
+          name: opts.name,
+          status,
+          liveSyncEnabled: opts.liveSync !== false && status === "live",
+        });
+        if (source.status === "live" && source.live_sync_enabled) {
+          addInboundBucket(source.bucket, source.region, source.provider_id);
+        }
+        output(source, chalk.green(`✓ S3 source ${source.id} is ${source.status}${source.live_sync_enabled ? " (live sync enabled)" : " (live sync disabled)"}`));
+      } catch (e) {
+        handleError(e);
+      }
     });
 
   sourceCmd
     .command("retire <source>")
     .description("Retire an S3 source without deleting provider rows or mail")
-    .action(() => {
-      try { serverOnly("source retire"); } catch (e) { handleError(e); }
+    .action(async (sourceRef: string) => {
+      try {
+        const { retireS3Source } = await import("../../lib/s3-sync.js");
+        const retired = retireS3Source(sourceRef);
+        output(retired, chalk.green(`✓ Retired S3 source ${retired.id}`));
+      } catch (e) {
+        handleError(e);
+      }
     });
 
   // ─── READ ─────────────────────────────────────────────────────────────────
@@ -993,6 +1033,49 @@ function formatMailboxMessages(messages: TuiMessage[], title = "Mailbox"): strin
     lines.push(
       `  ${star}${unread} ${chalk.dim(message.id.slice(0, 8))}  ${chalk.cyan(actor.slice(0, 28).padEnd(28))}  ${subject}  ${chalk.dim(date)}${labels}`,
     );
+  }
+  lines.push("");
+  return lines.join("\n");
+}
+
+function parseSourceStatus(value: string | undefined): "live" | "import" | "legacy" | "retired" {
+  if (value === "live" || value === "import" || value === "legacy" || value === "retired") return value;
+  throw new Error("Source status must be one of: live, import, legacy, retired");
+}
+
+/**
+ * `emails inbox source list` — the configured INGESTION registry, which is a
+ * different question from `emails inbox sources` (formatMailboxSources below),
+ * the mail-view scopes the store exposes.
+ */
+function formatSourceList(
+  sources: Array<{
+    id: string;
+    type: string;
+    name?: string;
+    status: string;
+    live_sync_enabled: boolean;
+    provider_id?: string;
+    bucket?: string;
+    prefix?: string;
+    region?: string;
+  }>,
+): string {
+  const lines = [chalk.bold("\nInbox sources:")];
+  if (sources.length === 0) {
+    lines.push(chalk.dim("  No sources configured."));
+    lines.push("");
+    return lines.join("\n");
+  }
+  for (const source of sources) {
+    const live = source.status === "live" && source.live_sync_enabled
+      ? chalk.green("live")
+      : source.status === "retired"
+        ? chalk.yellow("retired")
+        : chalk.dim(source.live_sync_enabled ? source.status : `${source.status}/disabled`);
+    const detail = `s3://${source.bucket ?? "unknown"}/${source.prefix ?? ""} ${source.region ?? "us-east-1"}${source.provider_id ? ` provider=${source.provider_id.slice(0, 8)}` : ""}`;
+    lines.push(`  ${chalk.cyan(source.id)}  [${source.type}]  ${live}  ${source.name ?? ""}`);
+    lines.push(chalk.dim(`    ${detail}`));
   }
   lines.push("");
   return lines.join("\n");

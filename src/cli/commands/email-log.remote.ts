@@ -8,12 +8,13 @@
 import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
 import { resolveMailDataSource, type MailDataSource } from "../../lib/mail-data-source.js";
-import { handleError, parseCliPositiveIntOption, parseCliNonNegativeIntOption } from "../utils.js";
+import { handleError, parseCliPositiveIntOption, parseCliNonNegativeIntOption, resolveId } from "../utils.js";
 import type { MessageBody, TuiMessage, TuiThreadMessage } from "../tui/data.js";
 import { formatThreadLabel, readableMessageText } from "../tui/format.js";
 
 const DEFAULT_REPLY_LIMIT = 20;
 const MAX_REPLY_LIMIT = 200;
+const MAX_EMAIL_EXPORT_LIMIT = 10000;
 
 interface ReplyPageOpts {
   limit?: string;
@@ -58,10 +59,16 @@ interface SelfHostedEmailDetail extends SelfHostedEmailSummary {
   flags: string[];
 }
 
-// Local sent-log/reporting, the local test-send and the local webhook/event
-// listener have no /v1 equivalent in this self-hosted-only client: they run on
-// the self-hosted server. These commands are kept for discoverability but fail
-// loud.
+// The local test-send and the local webhook/event listener have no /v1
+// equivalent in this self-hosted-only client: one drives the local provider
+// pipeline, the other binds a local HTTP port to receive provider callbacks that
+// are addressed to the operator's server. Both are kept for discoverability but
+// fail loud.
+//
+// `emails export` is NOT one of them: src/lib/export.ts reads through the routed
+// `db/emails.js` and `db/events.js` repositories, which are `/v1/messages` and
+// `/v1/events` clients in this mode — the same path the MCP `export_emails` /
+// `export_events` tools already take.
 function serverOnly(command: string): never {
   throw new Error(
     `${command} is not available in the self-hosted client; it runs on the self-hosted server.`,
@@ -485,8 +492,40 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
     .option("--offset <n>", "Number of rows to skip")
     .option("--format <fmt>", "Output format: json | csv", "json")
     .option("--output <file>", "Write to file instead of stdout")
-    .action(() => {
-      try { serverOnly("emails export"); } catch (e) { handleError(e); }
+    .action(async (type: string, opts: { provider?: string; from?: string; since?: string; until?: string; limit?: string; offset?: string; format?: string; output?: string }) => {
+      try {
+        if (type !== "emails" && type !== "events") {
+          handleError(new Error("Export type must be 'emails' or 'events'"));
+        }
+
+        const { exportEmailsCsv, exportEmailsJson, exportEventsCsv, exportEventsJson } =
+          await import("../../lib/export.js");
+        const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
+        const fmt = opts.format ?? "json";
+        const hasPage = opts.limit !== undefined || opts.offset !== undefined;
+        const limit = hasPage ? parseCliPositiveIntOption(opts.limit, 50, MAX_EMAIL_EXPORT_LIMIT) : undefined;
+        const offset = hasPage ? parseCliNonNegativeIntOption(opts.offset, 0) : undefined;
+        const page = hasPage ? { limit, offset } : {};
+        let result: string;
+
+        if (type === "emails") {
+          const filters = { provider_id: providerId, from_address: opts.from, since: opts.since, until: opts.until, ...page };
+          result = fmt === "csv" ? exportEmailsCsv(filters) : exportEmailsJson(filters);
+        } else {
+          const filters = { provider_id: providerId, since: opts.since, until: opts.until, ...page };
+          result = fmt === "csv" ? exportEventsCsv(filters) : exportEventsJson(filters);
+        }
+
+        if (opts.output) {
+          const { writeFileSync } = await import("node:fs");
+          writeFileSync(opts.output, result, "utf-8");
+          console.log(chalk.green("✓ Exported " + type + " to " + opts.output));
+        } else {
+          console.log(result);
+        }
+      } catch (e) {
+        handleError(e);
+      }
     });
 
   // ─── WEBHOOK ─────────────────────────────────────────────────────────────────

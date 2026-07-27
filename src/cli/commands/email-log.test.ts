@@ -311,14 +311,6 @@ describe("server-only commands block in the self-hosted client", () => {
       message: "emails test is not available in the self-hosted client; it runs on the self-hosted server.",
     },
     {
-      args: ["export", "emails"],
-      message: "emails export is not available in the self-hosted client; it runs on the self-hosted server.",
-    },
-    {
-      args: ["export", "events"],
-      message: "emails export is not available in the self-hosted client; it runs on the self-hosted server.",
-    },
-    {
       args: ["webhook", "listen", "--port", "19877"],
       message: "emails webhook listen is not available in the self-hosted client; it runs on the self-hosted server.",
     },
@@ -330,4 +322,73 @@ describe("server-only commands block in the self-hosted client", () => {
       expect(errors).toContain(message);
     });
   }
+});
+
+// ─── export (previously refused; now routed to /v1) ──────────────────────────
+//
+// `emails export` refused in this mode while the MCP `export_emails` /
+// `export_events` tools ran the SAME src/lib/export.ts over the SAME routed
+// repositories and worked. These tests are the proof the CLI reaches the API:
+// they assert seeded rows come back, so a re-introduced guard (or a read that
+// silently returns nothing) fails here.
+
+async function captureStdout(run: () => Promise<unknown>): Promise<string> {
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (...values: unknown[]) => { lines.push(values.map(String).join(" ")); };
+  try {
+    await run();
+  } finally {
+    console.log = originalLog;
+  }
+  return lines.join("\n");
+}
+
+describe("emails export routes to /v1 in the self-hosted client", () => {
+  it("exports outbound messages as JSON from GET /v1/messages", async () => {
+    await seed([
+      outbound("export-1", "March invoice", "2026-03-01T00:00:00.000Z"),
+      outbound("export-2", "April invoice", "2026-04-01T00:00:00.000Z"),
+    ]);
+
+    const stdout = await captureStdout(() => runEmailLogCommand(["export", "emails", "--limit", "10"]));
+    const rows = JSON.parse(stdout) as Array<{ id: string; subject: string }>;
+
+    expect(rows.map((row) => row.id).sort()).toEqual(["export-1", "export-2"]);
+    expect(rows.map((row) => row.subject).sort()).toEqual(["April invoice", "March invoice"]);
+  });
+
+  it("exports outbound messages as CSV", async () => {
+    await seed([outbound("export-csv", "CSV invoice", "2026-05-01T00:00:00.000Z")]);
+
+    const stdout = await captureStdout(() => runEmailLogCommand(["export", "emails", "--format", "csv", "--limit", "10"]));
+
+    expect(stdout.split("\n")[0]).toBe("id,from,to,subject,status,sent_at");
+    expect(stdout).toContain("export-csv");
+    expect(stdout).toContain("CSV invoice");
+  });
+
+  it("exports delivery events from GET /v1/events", async () => {
+    await stub.seed({
+      events: [{
+        id: "event-1",
+        email_id: "export-1",
+        provider_id: "provider-1",
+        type: "delivered",
+        recipient: "dest@example.com",
+        occurred_at: "2026-03-01T01:00:00.000Z",
+      }],
+    } as V1StubResources);
+
+    const stdout = await captureStdout(() => runEmailLogCommand(["export", "events", "--limit", "10"]));
+    const rows = JSON.parse(stdout) as Array<{ id: string; type: string }>;
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ id: "event-1", type: "delivered", recipient: "dest@example.com" });
+  });
+
+  it("still rejects an unknown export type instead of exporting nothing", async () => {
+    const errors = await runEmailLogCommandExpectingExit(["export", "contacts"]);
+    expect(errors).toContain("Export type must be 'emails' or 'events'");
+  });
 });

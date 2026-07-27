@@ -1594,9 +1594,6 @@ describe("inbox unread-count --by-address blocks in the self-hosted client", () 
 describe("server-only ingestion/diagnostic subcommands", () => {
   const cases: Array<{ label: string; args: string[]; command: string }> = [
     { label: "explain", args: ["inbox", "explain", "31f40200"], command: "emails inbox explain" },
-    { label: "source list", args: ["inbox", "source", "list"], command: "emails inbox source list" },
-    { label: "source add-s3", args: ["inbox", "source", "add-s3", "--bucket", "mail-bucket"], command: "emails inbox source add-s3" },
-    { label: "source retire", args: ["inbox", "source", "retire", "s3-mail-bucket"], command: "emails inbox source retire" },
     { label: "sync-s3", args: ["inbox", "sync-s3", "--bucket", "mail-bucket", "--limit", "1"], command: "emails inbox sync-s3" },
     { label: "setup-realtime", args: ["inbox", "setup-realtime", "example.com"], command: "emails inbox setup-realtime" },
     { label: "realtime-status", args: ["inbox", "realtime-status"], command: "emails inbox realtime-status" },
@@ -1613,4 +1610,114 @@ describe("server-only ingestion/diagnostic subcommands", () => {
       expect(result.stderr).toContain("it runs on the self-hosted server");
     });
   }
+});
+
+// ─── inbox source lifecycle (previously refused; client-side registry) ────────
+//
+// `inbox source list/add-s3/retire` used to refuse in this mode while
+// `inbox sources` — one word apart — worked, an intra-file contradiction. The
+// registry is client config: src/lib/s3-sync.remote.ts implements all three
+// functions, and src/cli/tui/data.remote.ts already READS the same registry to
+// resolve a `--source` ref. Only the INGESTION half (`sync-s3`) is server-owned,
+// and it still refuses (asserted above).
+//
+// Every test here runs under a temporary HOME so the registry writes land in a
+// throwaway config file, never the operator's.
+describe("inbox source lifecycle is a client-side registry", () => {
+  let sourceHome: string;
+  let priorSourceHome: string | undefined;
+
+  beforeEach(() => {
+    sourceHome = mkdtempSync(join(tmpdir(), "emails-inbox-source-home-"));
+    priorSourceHome = process.env.HOME;
+    process.env.HOME = sourceHome;
+  });
+  afterEach(() => {
+    if (priorSourceHome === undefined) delete process.env.HOME;
+    else process.env.HOME = priorSourceHome;
+    rmSync(sourceHome, { recursive: true, force: true });
+  });
+
+  it("reports an empty registry as empty instead of refusing", async () => {
+    const { data, out } = await runInboxCommand(["inbox", "source", "list"]);
+
+    expect(data).toEqual([]);
+    expect(out).toContain("No sources configured.");
+    expect(out).not.toContain("not available in the self-hosted client");
+  });
+
+  it("registers an S3 source with add-s3 and reads it back with list", async () => {
+    const added = await runInboxCommand([
+      "inbox", "source", "add-s3",
+      "--bucket", "inbound-mail",
+      "--prefix", "raw/",
+      "--region", "eu-west-1",
+      "--name", "Primary inbound",
+    ]);
+    expect(added.data).toMatchObject({
+      id: "s3-inbound-mail-raw-",
+      type: "s3",
+      bucket: "inbound-mail",
+      prefix: "raw/",
+      region: "eu-west-1",
+      status: "live",
+      live_sync_enabled: true,
+    });
+    expect(added.out).toContain("live sync enabled");
+
+    const listed = await runInboxCommand(["inbox", "source", "list"]);
+    expect(listed.data as Array<{ id: string; bucket: string }>).toEqual([
+      expect.objectContaining({ id: "s3-inbound-mail-raw-", bucket: "inbound-mail" }),
+    ]);
+    expect(listed.out).toContain("s3://inbound-mail/raw/ eu-west-1");
+  });
+
+  it("records provider provenance through the /v1 provider id resolver", async () => {
+    await stub.seed({ providers: [{ id: "0198d00d-0000-7000-8000-0000000000a1", name: "ses-inbound", type: "ses" }] });
+
+    const added = await runInboxCommand([
+      "inbox", "source", "add-s3",
+      "--bucket", "provenance-bucket",
+      "--provider", "0198d00d",
+    ]);
+
+    expect(added.data).toMatchObject({ provider_id: "0198d00d-0000-7000-8000-0000000000a1" });
+  });
+
+  it("honours --no-live-sync instead of silently enabling ingestion", async () => {
+    const added = await runInboxCommand([
+      "inbox", "source", "add-s3", "--bucket", "cold-bucket", "--no-live-sync",
+    ]);
+
+    expect(added.data).toMatchObject({ live_sync_enabled: false });
+    expect(added.out).toContain("live sync disabled");
+  });
+
+  it("rejects an unknown --status", async () => {
+    const result = await runInboxCommandExpectingExit([
+      "inbox", "source", "add-s3", "--bucket", "bad-status", "--status", "archived",
+    ]);
+    expect(result.error).toBe("process.exit:1");
+    expect(result.stderr).toContain("Source status must be one of: live, import, legacy, retired");
+  });
+
+  it("retires a registered source and keeps it listed as retired", async () => {
+    await runInboxCommand(["inbox", "source", "add-s3", "--bucket", "retire-me"]);
+
+    const retired = await runInboxCommand(["inbox", "source", "retire", "s3-retire-me"]);
+    expect(retired.data).toMatchObject({ id: "s3-retire-me", status: "retired", live_sync_enabled: false });
+    expect(retired.out).toContain("Retired S3 source s3-retire-me");
+
+    const listed = await runInboxCommand(["inbox", "source", "list"]);
+    expect(listed.data as Array<{ status: string }>).toEqual([
+      expect.objectContaining({ status: "retired" }),
+    ]);
+    expect(listed.out).toContain("retired");
+  });
+
+  it("fails retire for an unknown source rather than reporting success", async () => {
+    const result = await runInboxCommandExpectingExit(["inbox", "source", "retire", "s3-not-registered"]);
+    expect(result.error).toBe("process.exit:1");
+    expect(result.stderr).toContain("S3 source not found: s3-not-registered");
+  });
 });
