@@ -981,6 +981,104 @@ describe("reading a stored alias row", () => {
 });
 
 // ---------------------------------------------------------------------------------
+// Through the CONFIGURED store — no store argument at all.
+// ---------------------------------------------------------------------------------
+
+/**
+ * Every case above hands the module a store, which is what makes them checkable against both
+ * implementations. These pass NO store, so the module resolves one from STORAGE configuration —
+ * the path every real caller takes, and the only path whose behaviour can be compared with what
+ * this family did before it was collapsed.
+ *
+ * They are deliberately built on corruption a raw SQL write can produce in the real table, not
+ * on a stubbed store, so each of them RUNS on the pre-collapse implementation and gets a
+ * different answer rather than failing to load. `expect(...).rejects` is avoided on purpose: it
+ * reports "this was not a promise" for a synchronous implementation, which is a fact about a
+ * signature. The try/catch below asks the question that matters — was this a fault or a value.
+ */
+describe("through the configured store", () => {
+  async function faultOf(run: () => Promise<unknown>): Promise<{ error: unknown; answer: unknown }> {
+    let error: unknown = null;
+    let answer: unknown = "not called";
+    try {
+      answer = await run();
+    } catch (thrown) {
+      error = thrown;
+    }
+    return { error, answer };
+  }
+
+  it("resolves an alias it just created, with no store argument", async () => {
+    // THE CONTROL FOR EVERY CASE BELOW. Without it, a fault could be coming from a store that
+    // could not be resolved at all rather than from the row the case corrupted — and the cases
+    // would pass while proving nothing about the mapper.
+    const created = await createAlias("hello@acme.com", "ops@acme.com");
+    expect(created.target_address).toBe("ops@acme.com");
+    expect(await resolveAlias("hello@acme.com")).toBe("ops@acme.com");
+    expect((await listAliases("acme.com")).map((a) => a.local_part)).toEqual(["hello"]);
+  });
+
+  it("faults on a stored protected flag that is neither an integer nor a boolean", async () => {
+    // SQLite's INTEGER affinity leaves a non-numeric string as TEXT, so this is a row the real
+    // table can hold. A bare double-negation reports it as `true` and the HTTP arm's coercion
+    // reports it as `false`; either way the answer decides whether the catch-all that keeps
+    // unmatched mail from being dropped can be deleted.
+    clearAliases();
+    db.run(
+      "INSERT INTO aliases (id, domain, local_part, target_address, protected, created_at, updated_at)"
+        + " VALUES ('odd', 'x.com', 'a', 't@x.com', 'no', '2026-01-01', '2026-01-01')",
+    );
+    const { error, answer } = await faultOf(() => getAlias("odd"));
+    expect(error, `a corrupt protected flag answered ${JSON.stringify(answer)}`).toBeInstanceOf(Error);
+    expect(String(error)).toContain("refusing to guess whether it can be deleted");
+  });
+
+  it("faults on a stored protected integer outside 0 and 1", async () => {
+    clearAliases();
+    db.run(
+      "INSERT INTO aliases (id, domain, local_part, target_address, protected, created_at, updated_at)"
+        + " VALUES ('two', 'x.com', 'a', 't@x.com', 2, '2026-01-01', '2026-01-01')",
+    );
+    const { error, answer } = await faultOf(() => getAlias("two"));
+    expect(error, `protected = 2 answered ${JSON.stringify(answer)}`).toBeInstanceOf(Error);
+    expect(String(error)).toContain("no readable protected flag (2)");
+  });
+
+  it("faults on an unreadable timestamp rather than reporting a time", async () => {
+    clearAliases();
+    db.run(
+      "INSERT INTO aliases (id, domain, local_part, target_address, protected, created_at, updated_at)"
+        + " VALUES ('blank', 'x.com', 'a', 't@x.com', 0, '', '2026-01-01')",
+    );
+    const { error, answer } = await faultOf(() => getAlias("blank"));
+    expect(error, `an empty created_at answered ${JSON.stringify(answer)}`).toBeInstanceOf(Error);
+    expect(String(error)).toContain("has no readable created_at");
+  });
+
+  it("faults on an unreadable route rather than listing an alias with no domain", async () => {
+    clearAliases();
+    db.run(
+      "INSERT INTO aliases (id, domain, local_part, target_address, protected, created_at, updated_at)"
+        + " VALUES ('nodomain', '', 'a', 't@x.com', 0, '2026-01-01', '2026-01-01')",
+    );
+    const { error, answer } = await faultOf(() => listAliases());
+    expect(error, `an empty domain answered ${JSON.stringify(answer)}`).toBeInstanceOf(Error);
+    expect(String(error)).toContain("has no readable domain");
+  });
+
+  it("faults on an unreadable local part rather than resolving through it", async () => {
+    clearAliases();
+    db.run(
+      "INSERT INTO aliases (id, domain, local_part, target_address, protected, created_at, updated_at)"
+        + " VALUES ('nolocal', 'x.com', '', 't@x.com', 0, '2026-01-01', '2026-01-01')",
+    );
+    const { error, answer } = await faultOf(() => listAliases("x.com"));
+    expect(error, `an empty local_part answered ${JSON.stringify(answer)}`).toBeInstanceOf(Error);
+    expect(String(error)).toContain("has no readable local_part");
+  });
+});
+
+// ---------------------------------------------------------------------------------
 // A refusal is never an answer.
 // ---------------------------------------------------------------------------------
 
