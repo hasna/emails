@@ -53,9 +53,14 @@ const UNSHIPPED_DOMAIN_SURFACES: Record<string, UnshippedSurface> = {
   },
   "emails domain verify": {
     missing: "no command is wired to the provider's verification API",
+    // "needs no provider" was FALSE and this file is the one place it must not be:
+    // `emails domain check` resolves the domain's registered provider when it has
+    // one, and only falls back to the generic SPF/DMARC pair when none resolves.
+    // `--json` returns a non-null `provider_id` for any registered domain.
     instead: "'emails domain adopt <domain> --provider <id>' re-checks the provider and records "
       + "DKIM/SPF/DMARC through the same adapter; 'emails domain check <domain>' reads the "
-      + "published DNS directly and needs no provider.",
+      + "published DNS, resolving the domain's provider for DKIM when it has one and reporting "
+      + "SPF/DMARC alone when it does not.",
   },
   "emails domain status": {
     missing: "no command is wired to the domain lifecycle-readiness ledger; it is reachable only "
@@ -123,7 +128,7 @@ function notImplementedAnywhere(command: string): never {
 async function expectedDnsRecords(
   domain: string,
   providerRef: string | undefined,
-): Promise<{ records: DnsRecord[]; providerId: string | null; provider: Provider | null }> {
+): Promise<{ records: DnsRecord[]; providerId: string | null; provider: Provider | null; dkimUnavailable: string | null }> {
   let provider = null;
   if (providerRef) {
     const providerId = resolveId("providers", providerRef);
@@ -133,14 +138,41 @@ async function expectedDnsRecords(
     const registered = findDomainsByName(domain)[0];
     if (registered) provider = getProvider(registered.provider_id);
   }
-  if (!provider) {
+  const generic = async (): Promise<DnsRecord[]> => {
     const { generateSpfRecord, generateDmarcRecord } = await import("../../lib/dns.js");
-    return { records: [generateSpfRecord(domain), generateDmarcRecord(domain)], providerId: null, provider: null };
+    return [generateSpfRecord(domain), generateDmarcRecord(domain)];
+  };
+  if (!provider) {
+    return { records: await generic(), providerId: null, provider: null, dkimUnavailable: null };
   }
   // The provider itself is returned, not just its id: `formatDnsTable` needs the
   // `DnsPublishingSupport` descriptor to say anything true about an EMPTY table,
   // and `providerDnsPublishing()` is the only producer of one.
-  return { records: await getAdapter(provider).getDnsRecords(domain), providerId: provider.id, provider };
+  //
+  // `getAdapter` throws when the row cannot configure an adapter, and one such
+  // row is NOT an operator error: `apiToProvider` in src/db/providers.remote.ts
+  // maps every credential column to null on purpose — provider secrets are never
+  // distributed to a client — so in self_hosted mode EVERY Resend provider hits
+  // `assertProviderConfig`'s "Resend provider requires an API key". Letting that
+  // escape turned a read-only question into an exit-1 whose suggested fix was to
+  // go configure a client-side key that structurally cannot live there.
+  //
+  // The domain's SPF and DMARC do not depend on the provider account at all, so
+  // answer with those and say plainly that DKIM is the part that is missing and
+  // why. A wrong-but-real credential (a rejected key, a throttled call) still
+  // surfaces from the adapter itself, which is where it belongs.
+  let adapter;
+  try {
+    adapter = getAdapter(provider);
+  } catch (e) {
+    return {
+      records: await generic(),
+      providerId: provider.id,
+      provider,
+      dkimUnavailable: e instanceof Error ? e.message : String(e),
+    };
+  }
+  return { records: await adapter.getDnsRecords(domain), providerId: provider.id, provider, dkimUnavailable: null };
 }
 
 function normalizeDomainType(value: string | undefined): DomainType | undefined {
@@ -225,7 +257,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
 
   const dnsAction = async (domain: string, opts: { provider?: string }) => {
     try {
-      const { records, providerId, provider } = await expectedDnsRecords(domain, opts.provider);
+      const { records, providerId, provider, dkimUnavailable } = await expectedDnsRecords(domain, opts.provider);
       const { formatDnsTable } = await import("../../lib/dns.js");
       // An empty table is ambiguous on its own — a provider type that publishes no
       // DNS records at all, a domain not yet added to a provider that does, and a
@@ -234,7 +266,9 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
       // table is empty AND a provider resolved, exactly as the MCP `get_dns_records`
       // twin does it: a provider type `getAdapter()` accepts but the descriptor does
       // not would otherwise turn a good table into a throw.
-      const support = records.length === 0 && provider ? providerDnsPublishing(provider) : undefined;
+      const support = records.length === 0 && provider && !dkimUnavailable
+        ? providerDnsPublishing(provider)
+        : undefined;
       const lines = [chalk.bold(`\nDNS records for ${domain}:`), "", formatDnsTable(records, support)];
       if (!providerId) {
         // Said out loud: without a provider these are the generic SES SPF/DMARC
@@ -242,9 +276,16 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
         // as "no DKIM required".
         lines.push(chalk.dim("  No provider resolved — showing generic SPF/DMARC only."));
         lines.push(chalk.dim(`  Pass --provider <id> to include the provider's DKIM records.`));
+      } else if (dkimUnavailable) {
+        // The provider resolved but could not be asked, so these are the generic
+        // SPF/DMARC pair. Naming DKIM as the missing part is the whole point:
+        // printing the pair silently would read as "no DKIM required".
+        lines.push(chalk.yellow(`  DKIM was NOT retrieved: ${dkimUnavailable}.`));
+        lines.push(chalk.dim("  SPF and DMARC above are the domain's own and do not depend on the provider account."));
+        lines.push(chalk.dim("  Read the provider's DKIM records where the credentials live, or from the provider's dashboard."));
       }
       lines.push(chalk.dim(`  Confirm what is published: emails domain check ${domain}`));
-      output({ domain, provider_id: providerId, records }, lines.join("\n"));
+      output({ domain, provider_id: providerId, records, dkim_unavailable: dkimUnavailable }, lines.join("\n"));
     } catch (e) {
       handleError(e);
     }
@@ -252,7 +293,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
 
   const checkAction = async (domain: string, opts: { provider?: string }) => {
     try {
-      const { records, providerId } = await expectedDnsRecords(domain, opts.provider);
+      const { records, providerId, provider, dkimUnavailable } = await expectedDnsRecords(domain, opts.provider);
       const [{ checkDomainAuthentication, formatDnsCheck }, { inspectPublicMx, ownerLabel }] = await Promise.all([
         import("../../lib/dns-check.js"),
         import("../../lib/mx-ownership.js"),
@@ -262,7 +303,15 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
       // mailbox domain at SES by accident; it is why `--force-mx-switch` exists.
       const mx = await inspectPublicMx(domain);
 
-      const lines = [chalk.bold(`\nLive DNS check for ${domain}:`), "", formatDnsCheck(check.records)];
+      // The same descriptor `dnsAction` passes, for the same reason and under the
+      // same condition. `expectedDnsRecords` returns the provider precisely so
+      // BOTH siblings can answer the empty case; this one was reading only
+      // `providerId` and discarding it, so `domain dns` said "Nothing is missing"
+      // while the `domain check` it recommends answered "No DNS records to check."
+      const support = check.records.length === 0 && provider && !dkimUnavailable
+        ? providerDnsPublishing(provider)
+        : undefined;
+      const lines = [chalk.bold(`\nLive DNS check for ${domain}:`), "", formatDnsCheck(check.records, support)];
       lines.push(`  Root MX:   ${ownerLabel(mx.owner)} ${chalk.dim(`(${mx.summary})`)}`);
       lines.push(`  Outbound:  ${check.outbound_ready ? chalk.green("ready") : chalk.yellow("not ready")}`);
       lines.push(`  Inbound:   ${check.inbound_ready ? chalk.green("ready") : chalk.yellow("not ready")}`);
@@ -270,6 +319,8 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
       for (const warning of check.warnings) lines.push(chalk.yellow(`  ⚠ ${warning}`));
       if (!providerId) {
         lines.push(chalk.dim("  No provider resolved — DKIM was not checked. Pass --provider <id> to include it."));
+      } else if (dkimUnavailable) {
+        lines.push(chalk.yellow(`  DKIM was NOT checked: ${dkimUnavailable}.`));
       }
       lines.push("");
       output({ ...check, provider_id: providerId, mx }, lines.join("\n"));

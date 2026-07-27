@@ -152,9 +152,10 @@ describe("local status payload", () => {
     // `isCommandAvailableInMode(action.command, "local")`, i.e. it validated the
     // payload against the very registry that filtered it — so a command missing
     // from the registry passed here and threw at the terminal. That is how
-    // `emails domain check` (src/cli/commands/domain.ts serverOnly(), reached via
-    // domain-readiness fix_commands) stayed green. cliRefusalFor() reads the
-    // CLI's own call sites.
+    // `emails domain check` (then a refusal in src/cli/commands/domain.ts, reached
+    // via domain-readiness fix_commands) stayed green. It is wired up now, so it is
+    // history rather than a live example. cliRefusalFor() reads the CLI's own call
+    // sites, which is why it self-corrected when the command started working.
     const proposed = status.next_actions
       .map((action) => action.command)
       .filter((command): command is string => command !== null);

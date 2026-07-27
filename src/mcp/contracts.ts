@@ -63,7 +63,18 @@ export function cliEquivalentForTool(name: string, input: unknown): string {
     list_domains: () => `emails domain list${provider ? ` --provider ${provider}` : ""}${flag(input, "limit")}${flag(input, "offset")} --json`,
     list_usable_domains: () => `emails domain usable${provider ? ` --provider ${provider}` : ""}${enabled(input, "send")}${enabled(input, "receive")}${flag(input, "limit")}${flag(input, "offset")} --json`,
     add_domain: () => `emails domain add ${domain ?? "<domain>"} --provider ${provider ?? "<provider-id>"} --json`,
-    get_dns_records: () => `emails domain dns ${domain ?? id ?? "<domain-or-id>"} --json`,
+    // The note is load-bearing, not decoration. `get_dns_records` is guarded in
+    // self_hosted mode for ONE reason — with a `/v1/providers` row of type `ses` the
+    // adapter resolves credentials from the CALLER's ambient AWS environment, and an
+    // MCP client's environment is not the operator's shell. `emails domain dns` runs,
+    // and for a provider-backed domain it takes that same adapter path. Handing an
+    // agent the bare command therefore routed it straight around the guard by
+    // following the guard's own advice. Say so instead: the command is still the right
+    // one to name, because for a domain with no provider it is pure local computation.
+    get_dns_records: () => `emails domain dns ${domain ?? id ?? "<domain-or-id>"} --json`
+      + " # note: for a domain backed by a credentialed provider this reads the provider account with"
+      + " the AMBIENT credentials of whoever runs it — the exact call this tool is guarded against;"
+      + " it is pure local computation only for a domain with no provider",
     verify_domain: () => `emails domain verify ${domain ?? id ?? "<domain-or-id>"} --json`,
     remove_domain: () => `emails domain remove ${id ?? domain ?? "<domain-or-id>"} --yes --json`,
     provision_domain: () => `emails provision domain ${domain ?? "<domain>"} --provider ${provider ?? "<provider-id>"}${enabled(input, "add_mx")}${enabled(input, "force_mx_switch")} --json`,

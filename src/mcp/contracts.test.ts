@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
-import { cliRefusalFor } from "../test-support/cli-refusals.js";
+import { REFUSAL_HELPERS, cliRefusalFor, refusalHelpersObserved, scanCliRefusals } from "../test-support/cli-refusals.js";
 import { cliEquivalentForTool } from "./contracts.js";
 
 describe("MCP CLI equivalents", () => {
@@ -339,6 +339,33 @@ describe("MCP CLI equivalents", () => {
       .toBe("emails domain verify");
   });
 
+  it("sees refusals through EVERY helper shape, not just the one this file happens to name", () => {
+    // The control above exercises `notImplementedAnywhere` only, and that was not
+    // enough. Deleting `serverOnly` from the oracle's regex left the whole suite
+    // green — `src/mcp/contracts.test.ts` 25/0, `src/cli/unshipped-surface.test.ts`
+    // 26/0, both `agent-context` suites, `status-commands-coverage.test.ts` 7/0 —
+    // because every downstream assertion is of the form "this command must NOT
+    // refuse", and an oracle that sees fewer refusals only ever RELAXES those.
+    //
+    // Before `emails domain dns` was wired up, the old control happened to cover
+    // the `serverOnly` arm: `src/cli/commands/domain.ts` used that helper. It now
+    // uses `notImplementedAnywhere` exclusively, and all 17 surviving
+    // `serverOnly(...)` call sites sit in `*.remote.ts` where nothing asserted
+    // them. So this is counted per helper rather than per command: no single
+    // command being wired up can silently retire a whole shape again.
+    const observed = refusalHelpersObserved();
+    expect(Object.keys(observed).sort()).toEqual([...REFUSAL_HELPERS].sort());
+    for (const helper of REFUSAL_HELPERS) {
+      expect(observed[helper], `the refusal oracle no longer sees any ${helper}(...) call site`)
+        .toBeGreaterThan(0);
+    }
+    // And the `serverOnly` arm is reachable through the public entry point too, so
+    // a scan that populated the count but broke `cliRefusalFor` still fails here.
+    const serverOnlyCommand = scanCliRefusals().find((r) => r.helper === "serverOnly")?.command;
+    expect(serverOnlyCommand, "no serverOnly refusal to use as a control").toBeTruthy();
+    expect(cliRefusalFor(serverOnlyCommand!, "self_hosted")).toBe(serverOnlyCommand);
+  });
+
   it("keeps the get_dns_records guard while its CLI twin runs, and advertises the twin", () => {
     // This assertion is INVERTED from what it was, on purpose. `get_dns_records`
     // keeps its self_hosted guard for the credential reason documented on
@@ -352,8 +379,18 @@ describe("MCP CLI equivalents", () => {
     // A stale `.toBe("emails domain dns")` here would be a demand that the CLI go
     // back to refusing.
     const twin = cliEquivalentForTool("get_dns_records", { domain: "acme.example" });
-    expect(twin).toContain("emails domain dns");
-    expect(cliRefusalFor(twin, "self_hosted")).toBeNull();
+    // Pinned exactly, not by `toContain`. `toContain("emails domain dns")` also passes
+    // for `emails domain dns <domain-or-id> --json` — an unsubstituted placeholder —
+    // and this tool is not in the `unblocked` loop above that bans `<`.
+    const runnable = (twin.split(" # ")[0] ?? twin).trim();
+    expect(runnable).toBe("emails domain dns acme.example --json");
+    expect(cliRefusalFor(runnable, "self_hosted")).toBeNull();
+    // But the command must NOT be advertised bare: for a provider-backed domain it
+    // performs the very adapter call the guard exists to prevent, with the caller's
+    // ambient credentials. An agent handed this has to be told that, or the guard is
+    // circumventable by following its own fix_commands.
+    expect(twin).toContain(" # note: ");
+    expect(twin).toContain("AMBIENT credentials");
     // And the guard itself is still installed — read off the source, so deleting the
     // call cannot leave this test green.
     const impl = readFileSync(new URL("./tools/domains-impl.ts", import.meta.url), "utf8");

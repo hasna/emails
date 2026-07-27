@@ -21,10 +21,16 @@
 // NOT HERE, deliberately: `get_dns_records` and `verify_domain` keep their guard.
 // They call a provider ADAPTER rather than a repository; with a real `/v1/providers`
 // row of type `ses` the adapter would resolve credentials from the CLIENT's ambient
-// AWS environment, because the server schema has no credential columns. Their CLI
-// twins (`emails domain dns`, `emails domain verify`) are `serverOnly(...)` for the
-// same reason, so the refusal matches a command that also cannot run.
-// src/mcp/domain-address-self-hosted.test.ts pins that.
+// AWS environment, because the server schema has no credential columns. That
+// credential fallback is the whole reason and it stands on its own — neither tool
+// has a `/v1` route, so this is not a guard in front of a working one.
+//
+// The CLI twins are NOT symmetric with it, and this comment used to claim they were:
+// `emails domain verify` refuses, but `emails domain dns` RUNS in both
+// configurations — it is a read, and its no-provider arm needs no credentials at
+// all. So the refusal does NOT "match a command that also cannot run"; it matches
+// a surface whose ambient environment is not the operator's shell.
+// src/mcp/domain-address-self-hosted.test.ts pins the guard itself.
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { startV1Stub, type V1Stub } from "../test-support/v1-stub.js";
 import { buildServer } from "./server.js";
