@@ -1,11 +1,20 @@
-// Self-hosted-ONLY: `aws setup-inbound` provisions S3 + SES receipt rules, which
-// is server-side orchestration with no /v1 equivalent, so it now fails loud with
-// the server-only message. `aws status` still runs locally against the SES API
-// (mocked here), so it keeps a positive test. No local SQLite exists anymore.
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
+// `emails aws` talks to the operator's OWN AWS account in every configuration —
+// SES receipt rules and S3 buckets live in AWS, not behind `/v1`, and the
+// self-hosted server exposes no inbound-setup route for a client to call. Both
+// subcommands therefore get a positive test against the mocked SDKs.
+//
+// `setup-inbound` used to throw "is not available in the self-hosted client; it
+// runs on the self-hosted server" UNCONDITIONALLY — false in local mode, where
+// the very same `setupInboundEmail` + `registerS3Source` path already ran under
+// `emails domain adopt`, and false about the server, which has no such route.
+import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { Command } from "commander";
+import { setS3SendHandler, resetS3SendHandler, type S3Command } from "../../test-support/aws-s3-mock.js";
 
 const mockSesSend = mock(async (_cmd: unknown) => ({}) as Record<string, unknown>);
+// Routed through the SHARED s3 namespace: bun caches a mocked module at its first
+// dynamic import process-wide, so a second private `@aws-sdk/client-s3` shape here
+// would fight src/lib/aws-inbound.test.ts for the one cached namespace.
 const mockS3Send = mock(async (_cmd: unknown) => ({}) as Record<string, unknown>);
 
 mock.module("@aws-sdk/client-ses", () => ({
@@ -15,16 +24,8 @@ mock.module("@aws-sdk/client-ses", () => ({
   ListReceiptRuleSetsCommand: class { constructor(public input: unknown) {} },
   CreateReceiptRuleCommand: class { constructor(public input: unknown) {} },
   DescribeActiveReceiptRuleSetCommand: class { constructor(public input: unknown) {} },
-}));
-
-mock.module("@aws-sdk/client-s3", () => ({
-  S3Client: class { send = mockS3Send; },
-  CreateBucketCommand: class { constructor(public input: unknown) {} },
-  PutBucketPolicyCommand: class { constructor(public input: unknown) {} },
-  PutPublicAccessBlockCommand: class { constructor(public input: unknown) {} },
-  PutBucketVersioningCommand: class { constructor(public input: unknown) {} },
-  PutBucketEncryptionCommand: class { constructor(public input: unknown) {} },
-  HeadBucketCommand: class { constructor(public input: unknown) {} },
+  DescribeReceiptRuleCommand: class { constructor(public input: unknown) {} },
+  UpdateReceiptRuleCommand: class { constructor(public input: unknown) {} },
 }));
 
 const { registerAwsCommands } = await import("./aws.js");
@@ -80,6 +81,10 @@ beforeEach(() => {
   mockSesSend.mockReset();
   mockS3Send.mockReset();
   mockS3Send.mockImplementation(async () => ({}));
+  setS3SendHandler((cmd: S3Command) => mockS3Send(cmd));
+  // Short-circuits the STS lookup inside setupInboundEmail so the bucket policy
+  // is built without a network call. Restored by restoreInheritedProcessEnv().
+  process.env["AWS_ACCOUNT_ID"] = "123456789012";
   mockSesSend.mockImplementation(async (cmd: unknown) => {
     const name = (cmd as { constructor?: { name?: string } }).constructor?.name ?? "";
     if (name === "DescribeActiveReceiptRuleSetCommand") {
@@ -98,6 +103,7 @@ beforeEach(() => {
 
 afterEach(() => {
   delete process.env["AWS_PROFILE"];
+  resetS3SendHandler();
   restoreInheritedProcessEnv();
 });
 
@@ -117,22 +123,56 @@ describe("aws status command", () => {
   });
 });
 
+function sentCommandNames(spy: typeof mockSesSend | typeof mockS3Send): string[] {
+  return spy.mock.calls.map(([cmd]) => (cmd as { constructor?: { name?: string } })?.constructor?.name ?? "");
+}
+
 describe("aws setup-inbound command", () => {
-  it("is server-only in the self-hosted client", async () => {
-    const result = await runAwsExpectingExit([
-      "aws",
-      "setup-inbound",
-      "--domain",
-      "example.com",
-      "--bucket",
-      "inbound-bucket",
+  // THE REGRESSION. This threw unconditionally, so it refused in local mode too,
+  // and the reason it gave named a server route that does not exist. Worse, it is
+  // the command `emails provision *` and the MCP provisioning tools name as THE
+  // supported alternative — an honest refusal pointing at a dishonest one.
+  it("creates the bucket and the SES receipt rule instead of refusing", async () => {
+    const result = await runAws([
+      "aws", "setup-inbound", "--domain", "example.com", "--bucket", "inbound-bucket", "--region", "us-east-1",
     ]);
 
+    // It reached AWS: bucket setup on S3, receipt rule on SES.
+    expect(sentCommandNames(mockS3Send)).toContain("PutBucketPolicyCommand");
+    expect(sentCommandNames(mockSesSend)).toContain("CreateReceiptRuleCommand");
+    expect(result.data).toMatchObject({
+      bucket: "inbound-bucket",
+      s3_prefix: "inbound/example.com/",
+      source: { bucket: "inbound-bucket", prefix: "inbound/example.com/" },
+    });
+    const out = result.lines.join("\n");
+    expect(out).toContain("Setup complete!");
+    // The MX record is REPORTED for the operator to publish; nothing writes DNS.
+    expect(out).toContain("MX  example.com");
+    expect(out).toContain("emails inbox sync-s3 --source");
+    // The specific falsehoods that shipped.
+    expect(out).not.toContain("not available in the self-hosted client");
+    expect(out).not.toContain("runs on the self-hosted server");
+  });
+
+  it("registers the bucket so inbound sync can find the mail it just routed", async () => {
+    const result = await runAws([
+      "aws", "setup-inbound", "--domain", "example.com", "--bucket", "inbound-bucket",
+    ]);
+    const { getInboundBuckets } = await import("../../lib/config.js");
+    expect(getInboundBuckets().map((b) => b.bucket)).toContain("inbound-bucket");
+    const { listS3Sources } = await import("../../lib/s3-sync.js");
+    expect(listS3Sources().map((s) => s.bucket)).toContain("inbound-bucket");
+    expect(result.data).toBeTruthy();
+  });
+
+  it("fails on a missing bucket without touching AWS, and names the config key", async () => {
+    const result = await runAwsExpectingExit(["aws", "setup-inbound", "--domain", "example.com"]);
+
     expect(result.error).toBe("process.exit:1");
-    expect(result.stderr).toContain("emails aws setup-inbound");
-    expect(result.stderr).toContain("is not available in the self-hosted client");
-    expect(result.stderr).toContain("it runs on the self-hosted server");
-    // Blocks before ever touching AWS.
+    expect(result.stderr).toContain("emails config set inbound_s3_bucket");
+    // Says what is missing, not which mode the operator is in.
+    expect(result.stderr).not.toContain("self-hosted");
     expect(mockSesSend).not.toHaveBeenCalled();
     expect(mockS3Send).not.toHaveBeenCalled();
   });
