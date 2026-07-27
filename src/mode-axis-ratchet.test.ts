@@ -583,15 +583,93 @@ const root = join(import.meta.dir, "..");
  * module already existed and was rewritten in place, so it adds no file. The character total was
  * measured with this paragraph in place, since editing it changes the corpus it describes; the
  * eleven counts were identical before and after.
+ *
+ * RE-MEASURED AND RE-PINNED AGAIN on the `src/db/aliases` collapse — per-domain aliases and
+ * catch-all routing. It is the largest single-family reduction in this phase so far, and the
+ * shape of it is worth reading rather than only the size.
+ *
+ * WHAT THIS COLLAPSE ITSELF MOVES, as the difference between the tree it merges into (55de52c,
+ * verified INDEPENDENTLY over the real `git ls-files` corpus at 653 tracked / 652 scanned /
+ * 9,314,203 characters, where all eleven live counts equalled the ceilings it declared, ZERO
+ * slack) and the merged tree:
+ *
+ *   twoArmFamilies               28 -> 27   both of the family's arm modules are deleted, so its
+ *   remoteArmModules             28 -> 27   facade has no siblings left. THESE TWO ARE THE PAIR
+ *                                           that says a family is finished; the s3-sync split
+ *                                           moved the next two by a full collapse's amounts
+ *                                           while both its arms survived.
+ *   routedFacadeDefinitions      18 -> 17   the facade's dispatch helper is deleted
+ *   routedCallExpressions       244 -> 234  it dispatched all TEN of its exports through that
+ *                                           helper — the largest dispatch table collapsed in
+ *                                           this programme
+ *   selfHostedResourceReferences 180 -> 173 the deleted second arm reached the generic resource
+ *                                           helper seven times: once per read or write, which is
+ *                                           also why every one of those operations answered out
+ *                                           of a single clamped page
+ *   isSelfHostedModeReferences    58 -> 56  the deleted facade imported the client-side mode
+ *                                           predicate and called it once
+ *
+ * FIVE DO NOT MOVE, and each absence is a fact rather than an omission.
+ * `selfHostedResourceBranches` stays at 44 even though a `*.local.*` module was deleted: that
+ * metric counts a local arm asking whether it is really the local arm, and this one never did —
+ * it talked to SQLite directly. `getEmailsModeReferences` stays at 60 and the two resolver/parser
+ * counters stay at 65 and 16, because this dispatcher went through the predicate rather than
+ * reading or parsing the process-wide setting. And `emailsModeEnvReferences` stays at 235,
+ * which took deliberate care: the most natural way to prove the deleted second arm's clamped-page
+ * defect is a test that SETS the deployment word and drives that arm, and such a test would have
+ * RAISED a counter that may only fall — the env metric is a plain substring match that no
+ * spelling escapes. Both rebuilt suites therefore name their storage through the resolution's OWN
+ * exported constants, and the two 520-alias cases prove the defect through the store seam instead.
+ *
+ * THE REBASE ONTO 55de52c IS THE QUIETEST FORM OF THIS BLOCK'S HAZARD, and it is worth the
+ * arithmetic because git offered NO conflict at all in the version that mattered. This branch had
+ * not touched this file through its first two commits, so its copy was byte-identical to 016da25's
+ * — meaning a rebase would have taken main's block WHOLESALE, with no marker, no question, and the
+ * guard green. Main pinned 28/28/18/244/44/180/58/60/65/16/235 for ITS tree; the merged tree
+ * measures 27/27/17/234/44/173/56/60/65/16/235. So doing nothing would have shipped SIX counters
+ * and TWENTY-TWO units of slack — one each on the two arm counters and the facade counter, TEN on
+ * the dispatch-call counter, SEVEN on the resource-helper counter and TWO on the predicate counter
+ * — a licence to re-add two arm modules, a facade dispatcher, ten dispatch sites, seven resource
+ * calls and two predicate reads. A per-metric minimum of the two sides gives main's own numbers
+ * exactly, so it would have shipped the same twenty-two.
+ *
+ * WHAT PREVENTED IT was the strongest form of the defence this block records, taken from the
+ * `src/lib/forwarding` collapse: all eleven ceilings were committed as LITERAL ZEROS in their own
+ * commit BEFORE the rebase, so the block could not merge silently and the guard could not pass
+ * until every number had been re-measured. The rebase then conflicted on exactly the eleven lines,
+ * which is the loud failure the procedure is designed to force. Then: keep both sides' prose, keep
+ * the zeros, measure the merged tree over the real corpus, pin what was measured, and measure
+ * AGAIN after writing this paragraph because this file sits inside the corpus it scans.
+ *
+ * That second measurement was taken and the eleven were unchanged. The prose above names the
+ * dispatch helper, the generic resource helper and the mode predicate BY ROLE and never as the
+ * tokens the scan counts, which is #128's lesson (a ceiling comment that spelled a dispatch call
+ * while describing its deletion measured 247 against a code-only truth of 245) and #130's
+ * independently (a paragraph about a guard named that guard as a call and pushed its own metric
+ * from 180 to 181).
+ *
+ * Corpus of this change: 652 tracked, 651 scanned, 9,437,236 characters — both floors
+ * (500 files / 5,000,000 characters) cleared with room. ONE file fewer than 55de52c, and the
+ * arithmetic is worth spelling out: this family's two arms are deleted, and one test file is added
+ * — a suite for the CLI `inbox explain` handler, which adversarial review found was the only
+ * consumer whose call shape changed structurally and had no executable coverage at all. Both of
+ * this family's own suites already existed and were rewritten in place, so they add nothing.
+ *
+ * MEASURED FOUR TIMES, because three later rounds of review fixes changed the corpus after the
+ * first pin: once when the ceilings were first measured on the merged tree, once after this
+ * paragraph was written, and once after each of the two reviewers' findings landed. All eleven
+ * counts were identical every time — the added file and every edited comment contribute ZERO to all
+ * eleven, verified PER FILE rather than inferred from the total, which is the only way to see that
+ * a paragraph has not raised the very counter it describes.
  */
 const CEILINGS: Record<string, number> = {
-  twoArmFamilies: 28,
-  remoteArmModules: 28,
-  routedFacadeDefinitions: 18,
-  routedCallExpressions: 244,
+  twoArmFamilies: 27,
+  remoteArmModules: 27,
+  routedFacadeDefinitions: 17,
+  routedCallExpressions: 234,
   selfHostedResourceBranches: 44,
-  selfHostedResourceReferences: 180,
-  isSelfHostedModeReferences: 58,
+  selfHostedResourceReferences: 173,
+  isSelfHostedModeReferences: 56,
   getEmailsModeReferences: 60,
   resolveEmailsModeReferences: 65,
   normalizeEmailsModeReferences: 16,

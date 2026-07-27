@@ -697,7 +697,7 @@ export function registerDomainTools(server: McpServer): void {
   },
   async ({ alias, target }) => {
     try {
-      const a = createAlias(alias, target);
+      const a = await createAlias(alias, target);
       return { content: [{ type: "text", text: JSON.stringify(a, null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
@@ -714,7 +714,7 @@ export function registerDomainTools(server: McpServer): void {
   },
   async ({ domain, target }) => {
     try {
-      const a = createCatchAll(domain, target);
+      const a = await createCatchAll(domain, target);
       return { content: [{ type: "text", text: JSON.stringify(a, null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
@@ -732,7 +732,7 @@ export function registerDomainTools(server: McpServer): void {
   },
   async ({ domain, limit, offset }) => {
     try {
-      const aliases = listAliases(domain, { limit: limit ?? 100, offset: offset ?? 0 });
+      const aliases = await listAliases(domain, { limit: limit ?? 100, offset: offset ?? 0 });
       return { content: [{ type: "text", text: JSON.stringify(aliases, null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
@@ -748,9 +748,9 @@ export function registerDomainTools(server: McpServer): void {
   },
   async ({ alias_id }) => {
     try {
-      const a = getAlias(alias_id);
+      const a = await getAlias(alias_id);
       if (!a) throw new Error(`Alias not found: ${alias_id}`);
-      removeAlias(alias_id);
+      await removeAlias(alias_id);
       return { content: [{ type: "text", text: `Alias removed: ${a.local_part}@${a.domain}` }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
@@ -766,7 +766,7 @@ export function registerDomainTools(server: McpServer): void {
   },
   async ({ recipient }) => {
     try {
-      const target = resolveAlias(recipient);
+      const target = await resolveAlias(recipient);
       return { content: [{ type: "text", text: JSON.stringify({ recipient, target }, null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
