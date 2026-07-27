@@ -70,24 +70,23 @@ export const NEVER_AVAILABLE_COMMANDS: readonly string[] = [
 export const SELF_HOSTED_REFUSED_COMMANDS: readonly string[] = [
   "emails analytics",
   "emails batch",
-  "emails daemon",
-  "emails doctor",
-  "emails export",
+  // Only the delivery sub-diagnosis refuses; `emails doctor` itself probes the
+  // operator service (src/lib/doctor.remote.ts) and is a real remedy.
+  "emails doctor delivery",
   "emails inbox explain",
   "emails inbox listen",
   "emails inbox open",
   "emails inbox realtime-status",
   "emails inbox setup-realtime",
-  "emails inbox source",
   "emails inbox sync-s3",
   "emails inbox watch",
-  "emails logs tail",
   "emails monitor",
   "emails provider sync",
   "emails pull",
   "emails refresh",
-  "emails schedule",
-  "emails scheduled",
+  // The scheduler LOOP refuses (it needs the local send pipeline); reading and
+  // cancelling the schedule over /v1/scheduled does not.
+  "emails schedule run",
   "emails scheduler",
   "emails stats",
   "emails test",
