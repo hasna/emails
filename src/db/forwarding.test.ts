@@ -1155,8 +1155,16 @@ describe("the collapsed module", () => {
   });
 
   it("leaves the forwarding pipeline importing the facade rather than a deleted arm", () => {
-    const pipeline = readFileSync(join(dbDir, "..", "lib", "forwarding.local.ts"), "utf8");
+    // THE PATH MOVED, and the guard did not weaken. When this was written the pipeline was
+    // `src/lib/forwarding.local.ts`, an arm of a family that had not collapsed yet; that family
+    // has since collapsed too, so the module that must not import a deleted arm is the ONE
+    // implementation at `src/lib/forwarding.ts`. Both assertions still hold against it and both
+    // still mean what they meant.
+    const pipeline = readFileSync(join(dbDir, "..", "lib", "forwarding.ts"), "utf8");
     expect(pipeline).toContain('from "../db/forwarding.js"');
     expect(pipeline).not.toContain('from "../db/forwarding.local.js"');
+    // Positive control that the file really was read, so a path that stops resolving cannot
+    // satisfy the negative assertion by handing back an empty string.
+    expect(pipeline.length).toBeGreaterThan(4000);
   });
 });

@@ -63,10 +63,20 @@
 // INSTALLATION and recorded in its own config file, while ingestion into an Emails
 // API is performed by the service — so an empty bucket list or a `queue_configured`
 // negative would be a fabricated claim there rather than a measurement.
+//
+// THAT READ NOW LIVES IN `src/lib/storage-wiring.ts`, because the forwarding pipeline needs
+// exactly the same fact for exactly the same reason — it performs its own forwarding when it
+// owns its database and the service performs it otherwise — and a second copy of this
+// reasoning is how a sanctioned narrow answer becomes an unsanctioned general one. The rule
+// that decides who may ask is stated there, once.
 
 import { dirname } from "node:path";
-import { getDatabasePath } from "../db/database.js";
 import { getInboundBuckets, loadConfig } from "./config.js";
+import {
+  readStorageWiring,
+  storeErrorMessage as errorMessage,
+  type StorageWiring,
+} from "./storage-wiring.js";
 import { enumerateStoreRows, type StoreEnumeration } from "./status-facts-enumeration.js";
 import {
   StatusGaps,
@@ -87,11 +97,7 @@ import type {
   RealtimeStatusBlock,
   SourcesStatusBlock,
 } from "./status-types.js";
-import {
-  StoreConfigurationError,
-  createConfiguredEmailStore,
-  planEmailStore,
-} from "../store-resolution.js";
+import { createConfiguredEmailStore } from "../store-resolution.js";
 import type { EmailStore } from "../store/email-store.js";
 import type { Outcome } from "../store/outcome.js";
 import type { AddressRecord, DomainRecord, ResourceRow } from "../store/records.js";
@@ -152,11 +158,6 @@ function truthy(value: unknown): boolean {
   return Boolean(value);
 }
 
-function errorMessage(error: unknown): string {
-  const settings = error instanceof StoreConfigurationError ? ` (${error.settings.join(", ")})` : "";
-  return `${error instanceof Error ? error.message : String(error)}${settings}`;
-}
-
 function countByKey(rows: ResourceRow[], key: string): Record<string, number> {
   const counts: Record<string, number> = {};
   for (const row of rows) {
@@ -167,44 +168,10 @@ function countByKey(rows: ResourceRow[], key: string): Record<string, number> {
 }
 
 // ── how this installation is wired ──────────────────────────────────────────────
-
-/**
- * Where this installation keeps its mail, as far as its STORAGE configuration says.
- *
- * A closed union rather than a boolean, because "there is no local database file"
- * has three genuinely different causes and a status payload has to tell them apart:
- * the mail lives in an API, the database is in memory, or the configuration does not
- * resolve to a store at all.
- */
-type StorageWiring =
-  | { kind: "database_file"; path: string }
-  | { kind: "database_in_memory" }
-  | { kind: "api" }
-  | { kind: "unresolved"; message: string };
-
-/**
- * Read the storage configuration ONCE.
- *
- * Every failure mode is caught. `emails status` is the command an operator runs to
- * find out what is wrong, so it must never itself fail while trying to report where
- * its own files are — and both `planEmailStore` (which refuses a contradictory
- * configuration) and `getDatabasePath` (which resolves, creates and hardens a data
- * directory, and refuses untrusted ancestors) can throw.
- */
-function readStorageWiring(env: NodeJS.ProcessEnv): StorageWiring {
-  try {
-    const plan = planEmailStore(env);
-    if (plan.store === "api") return { kind: "api" };
-    // `plan.databasePath` is what the operator WROTE. The directory reported below
-    // has to be the one the rows are actually in, and the database layer
-    // canonicalises the value when it opens the file, so the resolved path is read
-    // from there rather than from the plan.
-    const path = getDatabasePath();
-    return path === ":memory:" ? { kind: "database_in_memory" } : { kind: "database_file", path };
-  } catch (error) {
-    return { kind: "unresolved", message: errorMessage(error) };
-  }
-}
+//
+// `StorageWiring` and `readStorageWiring` moved to `src/lib/storage-wiring.ts` when the
+// forwarding pipeline needed the same fact for the same reason. The rule for who may ask it,
+// and why it is not the deleted deployment axis under another name, is stated there once.
 
 // WHO PERFORMS THE INGESTION, which is what the two ingestion blocks below turn on.
 // An installation that keeps its mail in its own database performs its own

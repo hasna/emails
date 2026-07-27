@@ -408,7 +408,8 @@ const root = join(import.meta.dir, "..");
  *
  * RE-MEASURED AND RE-PINNED AGAIN on the `src/db/forwarding` collapse — app-level inbound
  * forwarding. Note that `src/lib/forwarding.*` is a DIFFERENT family with the same word in its
- * name and still has both of its arms; nothing below counts it as collapsed.
+ * name and, AT THAT COMMIT, still had both of its arms; nothing in that pin counted it as
+ * collapsed. (It is collapsed now — see the last block in this comment, which re-pins on it.)
  *
  * WHAT THIS COLLAPSE ITSELF MOVES, as the difference between the commit it was branched from
  * (65ed3a8, where all eleven live counts equalled the ceilings it declared — MEASURED, not
@@ -515,16 +516,83 @@ const root = join(import.meta.dir, "..");
  * Procedure, unchanged: zero all eleven, measure the merged tree over the real corpus, pin what was
  * measured, then measure AGAIN after writing this paragraph because this file sits inside the corpus
  * it scans. That second measurement was taken and the eleven were unchanged.
+ *
+ * RE-MEASURED AND RE-PINNED AGAIN on the `src/lib/forwarding` collapse — the app-level
+ * forwarding PIPELINE, the consumer of the `src/db/forwarding` family re-pinned above. Two
+ * families, one word, and this is the second of the pair to go.
+ *
+ * WHAT THIS COLLAPSE ITSELF MOVES, as the difference between the tree it merges into (016da25,
+ * where all eleven live counts equalled the ceilings it declared) and the merged tree:
+ * `twoArmFamilies` 29 -> 28 and `remoteArmModules` 29 -> 28 (its two arms are deleted);
+ * `routedFacadeDefinitions` 19 -> 18 and `routedCallExpressions` 245 -> 244 (its facade held a
+ * dispatch helper and dispatched its ONE export through it — the smallest facade in the
+ * programme so far, and why the call-expression counter moves by one rather than by several);
+ * and `getEmailsModeReferences` 62 -> 60 (the deleted facade imported the process-wide read and
+ * called it once, which is also why `isSelfHostedModeReferences` does NOT move — this
+ * dispatcher read the setting directly rather than through the client-side predicate). The
+ * other six do not move: neither deleted arm carried a resource branch, called either resolver,
+ * parsed the setting, or named the environment variable.
+ *
+ * TWO REBASES, AND THE SECOND ONE IS THE MOST INSTRUCTIVE INSTANCE THIS BLOCK HAS RECORDED,
+ * because the two rebases failed in OPPOSITE ways and the same procedure caught both.
+ *
+ * Onto a8aa241 (#126, comment-only): git flagged NOTHING here. A rebase that read the absent
+ * conflict as agreement would have carried the pre-rebase pin forward untested. All eleven were
+ * zeroed in their own commit first and then measured; they came back identical, which is the
+ * answer the procedure has to be ABLE to give — "unchanged" as a measurement, not an assumption.
+ *
+ * Onto 016da25 (#128, the s3-sync registry split, plus #129): git flagged ONE region, and it
+ * ENDED MID-BLOCK. Four ceiling lines were inside the markers and the remaining SEVEN merged
+ * with no marker at all, at this branch's pre-rebase values. Arithmetic a reviewer can check
+ * rather than trust — main pinned 29/29/19/245/44/180/58/62/65/16/235 and this branch had pinned
+ * 28/28/19/249/44/180/58/60/65/16/235 for its own pre-rebase tree, so git's own resolution (the
+ * silent seven, plus a per-metric minimum on the four it flagged) gives
+ * 28/28/19/245/44/180/58/60/65/16/235. The MERGED tree measures
+ * 28/28/18/244/44/180/58/60/65/16/235. So `routedFacadeDefinitions` would have shipped ONE wide
+ * and `routedCallExpressions` ONE wide, both green under `<=` — because the two changes removed
+ * DISJOINT dispatchers and neither a silent merge nor a minimum can see that. The seven silent
+ * ones happened to be right, which is the point: luck is not a method.
+ *
+ * THE ENV COUNTER IS THE ONE WORTH READING HERE, because it is the counter this collapse could
+ * most easily have RAISED. The deleted second arm was a stub that THREW, so preserving its
+ * refusal without the deployment word was the whole design problem — and the tempting way to
+ * prove the refusal survived is a test that SETS the deployment word and asserts the pipeline
+ * runs anyway. That test would have added `emailsModeEnvReferences`, a substring match no
+ * spelling escapes (not even an exported constant), and this counter may only fall. So the
+ * rebuilt suite does not name it at all: it configures storage through the resolution's OWN
+ * exported constants, and the absence of the mode read is left to THIS test, which is the guard
+ * designed for it and now has zero slack under it. The same reasoning kept the dispatch-helper
+ * and mode-read identifiers out of that suite's assertions.
+ *
+ * AND THIS BRANCH RAISED A COUNTER ONCE, FROM PROSE, which is #128's lesson arriving
+ * independently: a paragraph added to the collapsed module — explaining which guard currently
+ * stops one configuration from sending mail — named the routing helper AS A CALL, and
+ * `selfHostedResourceReferences` went 180 -> 181. A sentence about a guard pushing that guard's
+ * own metric backwards, in a file inside the scanned corpus, caught by re-measuring rather than
+ * by review. It is spelled as a FILE PATH now. The scan does not strip comments: never write a
+ * tracked token you are describing, name it by role, and re-measure after editing prose.
+ *
+ * Corpus of this change: 653 tracked, 652 scanned, 9,314,203 characters — both floors
+ * (500 files / 5,000,000 characters) cleared with room. The SAME tracked count as 016da25, and
+ * the arithmetic is worth spelling out because it is not "nothing moved": TWO arm modules are
+ * deleted and TWO are added — `src/lib/storage-wiring.ts`, the storage-configuration read
+ * extracted out of `src/lib/status-facts.ts` so the pipeline and the status payload share one
+ * definition site, and `src/lib/storage-wiring.test.ts`, which exists because a mutation run
+ * showed that inverting that module's in-memory discrimination survived the pipeline's own suite
+ * and was killed only by the status suite several layers away. The suite beside the collapsed
+ * module already existed and was rewritten in place, so it adds no file. The character total was
+ * measured with this paragraph in place, since editing it changes the corpus it describes; the
+ * eleven counts were identical before and after.
  */
 const CEILINGS: Record<string, number> = {
-  twoArmFamilies: 29,
-  remoteArmModules: 29,
-  routedFacadeDefinitions: 19,
-  routedCallExpressions: 245,
+  twoArmFamilies: 28,
+  remoteArmModules: 28,
+  routedFacadeDefinitions: 18,
+  routedCallExpressions: 244,
   selfHostedResourceBranches: 44,
   selfHostedResourceReferences: 180,
   isSelfHostedModeReferences: 58,
-  getEmailsModeReferences: 62,
+  getEmailsModeReferences: 60,
   resolveEmailsModeReferences: 65,
   normalizeEmailsModeReferences: 16,
   emailsModeEnvReferences: 235,

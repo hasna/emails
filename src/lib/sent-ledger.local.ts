@@ -33,12 +33,24 @@ export async function createSentEmailLedger(
  * die together when the `emails` family collapses onto the seam's messages repository.
  *
  * IT CREATES NO SPLIT-BRAIN, and that fact is load-bearing rather than convenient. This
- * module is unreachable on an API-configured installation: every path into it is selected by
- * a dispatch helper ONE LEVEL UP (`sendComposed` in src/cli/tui/data.ts and
- * `processForwardingRules` in src/lib/forwarding.ts both route to their own remote arms), so
- * the only installation that executes this line is the one whose store IS this database. On
- * an API-configured installation the body is recorded by the service's own send route, which
- * persists it when it reserves the send intent.
+ * module is unreachable on an API-configured installation, and BOTH paths into it stop there
+ * — but they now stop for two DIFFERENT reasons, which is worth stating because one of them
+ * used to be the same reason:
+ *
+ *   * `sendComposed` (src/cli/tui/data.ts) still routes to its own remote arm, so the
+ *     deployment word keeps that path away from here. That guard dies with that family.
+ *   * `processForwardingRules` (src/lib/forwarding.ts) has ONE implementation now and reads no
+ *     deployment word. It REFUSES instead, from storage configuration
+ *     (src/lib/storage-wiring.ts): an installation that reads its mail through an Emails API
+ *     cannot reach this module, because the pipeline throws before its first read rather than
+ *     reporting an empty run. The refusal was deliberately preserved for exactly this reason —
+ *     a collapse that let the pipeline fall through to a default local handle would have made
+ *     this module reachable on an API-configured installation and created the split-brain this
+ *     paragraph denies.
+ *
+ * So the only installation that executes this line is still the one whose store IS this
+ * database. On an API-configured installation the body is recorded by the service's own send
+ * route, which persists it when it reserves the send intent.
  *
  * WHAT DELETES THIS. The `emails` family's collapse, which must pass the body to
  * `messages.createMessage` at ledger-creation time — `MessageInput` already carries

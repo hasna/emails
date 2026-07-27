@@ -168,6 +168,22 @@ describe("forwarding command", () => {
     expect(await listForwardingRules()).toEqual([]);
   });
 
+  it("REFUSES `forwarding run` at the command level when the mail lives behind the API", async () => {
+    // THE REFUSAL HAS TO REACH THE OPERATOR, not just the function. `emails forwarding run` is the
+    // path an operator actually takes, and the wrong outcome here is not an exception — it is a
+    // cheerful "forwarding: 0 sent, 0 failed, 0 skipped (0 attempted)" for an inbox this side
+    // never looked at. Asserted through the CLI's own error channel, and the setting to unset is
+    // asserted too, because a refusal an operator cannot act on is a dead end.
+    configureApiStore();
+    const errors = await runForwardingCommandExpectingError(["forwarding", "run"]);
+    expect(errors).toContain("reads its mail through an Emails API");
+    expect(errors).toContain(API_BASE_URL_SETTING);
+    // The positive control: nothing was recorded, so the refusal really did precede every read
+    // and every write rather than aborting halfway through a run.
+    const ledger = db.query("SELECT COUNT(*) AS n FROM forwarding_deliveries").get() as { n: number };
+    expect(ledger.n).toBe(0);
+  });
+
   it("reports a bad address as an error rather than creating a rule", async () => {
     configureLocalStore();
     const errors = await runForwardingCommandExpectingError(["forwarding", "add", "not-an-address", "t@x.com"]);
@@ -177,9 +193,11 @@ describe("forwarding command", () => {
 
   it("runs the forwarding pipeline against local storage", async () => {
     // END TO END THROUGH THE CONSUMER SWAP. `emails forwarding run` reaches
-    // `src/lib/forwarding.local.ts`, which now imports the collapsed facade rather than the
-    // deleted `.local` arm, and calls both local-storage operations with the `Database` it
-    // already threads.
+    // `src/lib/forwarding.ts` — itself now ONE implementation, with both of its arms deleted —
+    // which imports the collapsed `src/db/forwarding` facade and calls both local-storage
+    // operations with the `Database` it already threads. Reaching this at all also exercises
+    // that pipeline's storage-configuration gate on its passing side, because
+    // `configureLocalStore()` names a local database.
     configureLocalStore();
     const empty = await runForwardingCommand(["forwarding", "run"]);
     expect(empty.data).toMatchObject({ attempted: 0, sent: 0, failed: 0, skipped: 0 });
