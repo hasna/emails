@@ -405,15 +405,66 @@ const root = join(import.meta.dir, "..");
  * Corpus of the merged change: 655 tracked, 654 scanned, ~9.11M characters — both floors
  * cleared with room. Measured a second time after this paragraph was written, because this file
  * is inside the corpus it scans; the eleven counts were unchanged.
+ *
+ * RE-MEASURED AND RE-PINNED AGAIN on the `src/db/forwarding` collapse — app-level inbound
+ * forwarding. Note that `src/lib/forwarding.*` is a DIFFERENT family with the same word in its
+ * name and still has both of its arms; nothing below counts it as collapsed.
+ *
+ * WHAT THIS COLLAPSE ITSELF MOVES, as the difference between the commit it was branched from
+ * (65ed3a8, where all eleven live counts equalled the ceilings it declared — MEASURED, not
+ * assumed) and that branch's own tree: `twoArmFamilies` 31 -> 30 and `remoteArmModules` 31 -> 30
+ * (its two arms are deleted); `routedFacadeDefinitions` 22 -> 21 and `routedCallExpressions`
+ * 259 -> 252 (its facade held a dispatch helper and dispatched all SEVEN of its exports through
+ * it); `selfHostedResourceReferences` 188 -> 183 (the deleted second arm reached the generic
+ * resource store five times); and `isSelfHostedModeReferences` 62 -> 60 (the deleted facade
+ * imported the client-side predicate and called it once, which is also why
+ * `getEmailsModeReferences` does NOT move — this dispatcher went through the predicate rather
+ * than reading the process-wide setting). `selfHostedResourceBranches` does NOT move even though
+ * a `*.local.*` module was deleted, for the reason recorded for the digest-row collapse: that
+ * metric counts a local arm asking whether it is really the local arm, and this one never did —
+ * it talked to SQLite directly. The two resolver counters, the parser counter and the env counter
+ * do not move either; neither deleted arm resolved or named the setting, and the rebuilt suites
+ * name their storage settings through the resolution's OWN exported constants, which are not the
+ * deployment word.
+ *
+ * THE REBASE ONTO e7ef9c1 IS THE THIRD MEASURED INSTANCE OF THE HAZARD THIS BLOCK KEEPS
+ * RECORDING, and it is the worst-numbered one so far. Git flagged exactly THREE ceiling lines
+ * (`routedCallExpressions`, `selfHostedResourceBranches`, `selfHostedResourceReferences`) and
+ * auto-merged the other EIGHT with no marker, at values the two sides happened to share. FIVE of
+ * those eight were WRONG on the merged tree:
+ *
+ *   twoArmFamilies           both sides 30, merged tree 29   (1 wide)
+ *   remoteArmModules         both sides 30, merged tree 29   (1 wide)
+ *   routedFacadeDefinitions  both sides 21, merged tree 20   (1 wide)
+ *   isSelfHostedModeReferences both sides 60, merged tree 58 (2 wide)
+ *   ... and on the three git DID flag, a per-metric minimum gives
+ *   routedCallExpressions        min(257, 252) = 252, merged tree 250  (2 wide)
+ *   selfHostedResourceReferences min(185, 183) = 183, merged tree 180  (3 wide)
+ *   selfHostedResourceBranches   min(44, 45)  = 44,  merged tree 44   (right, by luck)
+ *
+ * So resolving only what git asked about, and taking the minimum where it did ask, would have
+ * shipped TEN units of slack across SIX counters with `<=` green — a licence to re-add two arms,
+ * a facade dispatcher, two predicate reads, two dispatch sites and three resource calls. The two
+ * collapses removed DISJOINT references, and neither a silent merge nor a minimum can see that.
+ *
+ * The procedure that produced the numbers below: keep BOTH sides' prose, set all eleven ceilings
+ * to ZERO, measure the merged tree over the real `git ls-files` corpus, pin what was measured,
+ * then measure again after writing this paragraph because this file sits inside the corpus it
+ * scans. The ceiling-and-comment edit contributes zero to every metric.
+ *
+ * Corpus of the merged change: 653 tracked, 652 scanned, 9,202,221 characters — both floors
+ * (500 files / 5,000,000 characters) cleared with room. Two files fewer than e7ef9c1, which is
+ * exactly this family's two deleted arms; no test file was added, because its suite already
+ * existed and was rewritten in place.
  */
 const CEILINGS: Record<string, number> = {
-  twoArmFamilies: 30,
-  remoteArmModules: 30,
-  routedFacadeDefinitions: 21,
-  routedCallExpressions: 257,
+  twoArmFamilies: 29,
+  remoteArmModules: 29,
+  routedFacadeDefinitions: 20,
+  routedCallExpressions: 250,
   selfHostedResourceBranches: 44,
-  selfHostedResourceReferences: 185,
-  isSelfHostedModeReferences: 60,
+  selfHostedResourceReferences: 180,
+  isSelfHostedModeReferences: 58,
   getEmailsModeReferences: 62,
   resolveEmailsModeReferences: 65,
   normalizeEmailsModeReferences: 16,

@@ -9,7 +9,7 @@ import {
 } from "../../db/forwarding.js";
 import { formatListHint, handleError, isCliVerboseOutput, parseCliListPage, resolveId } from "../utils.js";
 
-function formatRule(rule: ReturnType<typeof createForwardingRule>): string {
+function formatRule(rule: Awaited<ReturnType<typeof createForwardingRule>>): string {
   const state = rule.enabled ? chalk.green("enabled") : chalk.dim("disabled");
   const provider = rule.provider_id ? ` provider=${rule.provider_id.slice(0, 8)}` : "";
   const from = rule.from_address ? ` from=${rule.from_address}` : "";
@@ -25,10 +25,10 @@ export function registerForwardingCommands(program: Command, output: (data: unkn
     .option("--provider <id>", "Provider ID to send forwarded copies through")
     .option("--from <email>", "From address for forwarded copies (defaults to source)")
     .option("--disabled", "Create the rule disabled")
-    .action((source: string, target: string, opts: { provider?: string; from?: string; disabled?: boolean }) => {
+    .action(async (source: string, target: string, opts: { provider?: string; from?: string; disabled?: boolean }) => {
       try {
         const providerId = opts.provider ? resolveId("providers", opts.provider) : null;
-        const rule = createForwardingRule({
+        const rule = await createForwardingRule({
           source_address: source,
           target_address: target,
           provider_id: providerId,
@@ -54,11 +54,11 @@ export function registerForwardingCommands(program: Command, output: (data: unkn
     .option("--limit <n>", "Maximum rules to show (default 20 compact, 50 verbose/json)")
     .option("--offset <n>", "Number of rules to skip", "0")
     .option("--verbose", "Show expanded list hints")
-    .action((opts: { source?: string; enabled?: boolean; disabled?: boolean; limit?: string; offset?: string; verbose?: boolean }) => {
+    .action(async (opts: { source?: string; enabled?: boolean; disabled?: boolean; limit?: string; offset?: string; verbose?: boolean }) => {
       try {
         const page = parseCliListPage(opts);
         const enabled = opts.enabled ? true : opts.disabled ? false : undefined;
-        const rules = listForwardingRules({ source_address: opts.source, enabled, ...page });
+        const rules = await listForwardingRules({ source_address: opts.source, enabled, ...page });
         if (rules.length === 0) {
           output([], chalk.dim("No forwarding rules configured."));
           return;
@@ -84,9 +84,9 @@ export function registerForwardingCommands(program: Command, output: (data: unkn
   cmd
     .command("enable <id>")
     .description("Enable a forwarding rule")
-    .action((id: string) => {
+    .action(async (id: string) => {
       try {
-        const rule = setForwardingRuleEnabled(resolveId("forwarding_rules", id), true);
+        const rule = await setForwardingRuleEnabled(resolveId("forwarding_rules", id), true);
         output(rule, chalk.green(`✓ enabled ${rule.source_address} -> ${rule.target_address}`));
       } catch (e) {
         handleError(e);
@@ -96,9 +96,9 @@ export function registerForwardingCommands(program: Command, output: (data: unkn
   cmd
     .command("disable <id>")
     .description("Disable a forwarding rule")
-    .action((id: string) => {
+    .action(async (id: string) => {
       try {
-        const rule = setForwardingRuleEnabled(resolveId("forwarding_rules", id), false);
+        const rule = await setForwardingRuleEnabled(resolveId("forwarding_rules", id), false);
         output(rule, chalk.yellow(`disabled ${rule.source_address} -> ${rule.target_address}`));
       } catch (e) {
         handleError(e);
@@ -108,12 +108,12 @@ export function registerForwardingCommands(program: Command, output: (data: unkn
   cmd
     .command("remove <id>")
     .description("Remove a forwarding rule")
-    .action((id: string) => {
+    .action(async (id: string) => {
       try {
         const resolved = resolveId("forwarding_rules", id);
-        const rule = getForwardingRule(resolved);
+        const rule = await getForwardingRule(resolved);
         if (!rule) return handleError(new Error(`Forwarding rule not found: ${id}`));
-        removeForwardingRule(resolved);
+        await removeForwardingRule(resolved);
         output(rule, chalk.green(`✓ removed ${rule.source_address} -> ${rule.target_address}`));
       } catch (e) {
         handleError(e);
