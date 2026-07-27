@@ -68,3 +68,25 @@ export type {
 // tested on the surface where the storage contract already lives.
 export { SQLITE_STORE_CAPABILITIES, createSqliteEmailStore, sqliteStoreDescriptor } from "./store-sqlite/index.js";
 export type { SqliteEmailStoreOptions } from "./store-sqlite/index.js";
+
+// The HTTP implementation of the same seam — a client of an Emails `/v1` API, and the
+// SECOND AND LAST implementation there will be. Exported here for the same reason the
+// SQLite one is: src/entrypoint-reachability.test.ts refuses to let product code sit
+// outside the shipped module graph, and allowlisting it would exempt that guard rather
+// than satisfy it.
+//
+// NOTHING IN THE APP CONSUMES THIS EITHER. This subpath is where the storage contract
+// lives, so both implementations are built, type-checked and conformance-tested here;
+// rewiring callers onto the seam is a later change.
+//
+// `HTTP_STORE_MISSING_ROUTES` is exported deliberately rather than kept internal: it is
+// the list of `/v1` routes that do not exist yet, and it is the reason three of this
+// store's seven capabilities are false. A consumer deciding whether the API can back
+// its use case reads that list.
+export {
+  HTTP_STORE_CAPABILITIES,
+  HTTP_STORE_MISSING_ROUTES,
+  createHttpEmailStore,
+  httpStoreDescriptor,
+} from "./store-http/index.js";
+export type { HttpEmailStoreOptions, MissingRoute } from "./store-http/index.js";
