@@ -44,12 +44,24 @@ describe("agent context", () => {
     expect(status.mailboxes.counts.sent).toBe(1);
   });
 
-  it("exposes the shared self-hosted store as a single ingestion source", async () => {
+  it("lists the shared store as a source row but REFUSES to count it as an ingestion source", async () => {
     await seedRepresentativeInbox();
     const status = await getEmailSystemStatus();
 
-    expect(status.sources.total).toBe(1);
+    // The row is still published, with its real mail totals, so the view is
+    // informative rather than empty — that part is unchanged.
     expect(status.sources.items[0]).toMatchObject({ id: "self_hosted", total: 6 });
+    // The COUNT is what changed, and deliberately. This view publishes exactly one
+    // row, `kind: "all"` — an aggregate over the whole shared store, not an ingestion
+    // source. The two deleted status modules disagreed about it: one counted the
+    // aggregate (so an installation that had configured nothing still reported one
+    // source), the other excluded it (so this view reported a flat zero). Neither is
+    // adopted: an aggregate-only view is reported as not answering the question,
+    // which is the only thing actually observable about it.
+    expect(status.sources.total).toBeNull();
+    expect(status.gaps["sources.total"]?.reason)
+      .toMatch(/^not_modelled_on_store:aggregate_only_mailbox_view/);
+    expect(status.limitations).toContain("sources.total");
     // The realtime queue lives on the server: `queue_configured: false` would be a
     // fabricated negative claim about the operator's ingestion.
     expect(status.inbox.realtime.queue_configured).toBeNull();
@@ -74,11 +86,13 @@ describe("agent context", () => {
     await seedRepresentativeInbox();
     const status = await getEmailSystemStatusForRuntime();
 
-    // No local SQLite island exists in the self-hosted client — and the null now
-    // carries a reason instead of standing on its own.
+    // An installation whose mail lives in an API holds no local data directory — and
+    // the null carries a reason instead of standing on its own. The reason now comes
+    // from the STORAGE configuration (src/store-resolution.ts) rather than from a
+    // deployment word, which is the same fact read from the setting that decides it.
     expect(status.database.data_dir).toBeNull();
     expect(status.gaps["database.data_dir"]?.reason)
-      .toMatch(/^not_applicable:local_database_absent_in_self_hosted/);
+      .toMatch(/^not_applicable:no_local_database_configured/);
     expect(status.mode.current).toBe("self_hosted");
     expect(status.inbox.total).toBe(6);
     expect(status.inbox.unread).toBe(3);

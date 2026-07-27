@@ -10,7 +10,7 @@
 //
 //   next_actions[0].command = "emails domain status --json"
 //
-// (src/lib/status-facts.remote.ts domainFixCommands -> agent-context.ts
+// (the deleted HTTP-arm status module's domainFixCommands -> agent-context.ts
 // buildNextActions), and `isCommandAvailableInMode` waved it through. Running it
 // throws "emails domain status is not available in the self-hosted client" — the
 // exact "remedy that refuses" defect the registry was introduced to remove.

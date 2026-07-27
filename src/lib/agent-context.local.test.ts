@@ -92,13 +92,66 @@ describe("local status payload", () => {
     expect(status.providers).toMatchObject({ total: 1, active: 1 });
     expect(status.providers.by_type).toEqual({ sandbox: 1 });
     expect(status.domains.total).toBe(1);
+    expect(status.domains.verified).toBe(0);
     expect(status.addresses.total).toBe(1);
-    // Local mode OWNS these, so they are numbers here and null in self-hosted.
-    expect(status.domains.send_ready).not.toBeNull();
-    expect(status.domains.receive_ready).not.toBeNull();
-    expect(status.addresses.usable_from).not.toBeNull();
+    expect(status.addresses.active).toBe(1);
+    expect(status.provisioning.domains_failed).toBe(0);
+    // Ingestion IS this installation's own when its mail is in its own database, so
+    // the bucket list and the realtime queue are measured from its config file
+    // rather than refused.
     expect(status.inbox.inbound_buckets.items).not.toBeNull();
+    expect(status.inbox.inbound_buckets.total).toBe(0);
     expect(status.inbox.realtime.queue_configured).not.toBeNull();
+    expect(status.inbox.realtime.availability.basis).toBe("local_config");
+  });
+
+  it("REFUSES the DNS readiness verdicts the store does not model, and does not fall back to a zero", async () => {
+    // A CAPABILITY LOSS, recorded rather than hidden. The deleted local-arm module
+    // computed these with `assessDomainReadiness` from the `dkim_status` /
+    // `spf_status` / `dmarc_status` and inbound/outbound route columns. The store
+    // seam's `DomainRecord` (src/store/records.ts) carries none of them, so no store
+    // answers the question — and the honest reply is a reason, not the `0` a
+    // fresh install would also produce.
+    seed();
+    const status = await getEmailSystemStatus();
+
+    expect(status.domains.send_ready).toBeNull();
+    expect(status.domains.receive_ready).toBeNull();
+    expect(status.gaps["domains.send_ready"]?.reason).toMatch(/^not_modelled_on_store:domain_dns_evidence/);
+    expect(statusGapClass(status.gaps["domains.send_ready"]?.reason)).toBe("structural");
+    // The block itself is still MEASURED — this is a field-level refusal, so the
+    // real `verified` column and the row sample are still published.
+    expect(status.domains.availability.available).toBe(true);
+    expect(status.domains.usable).toHaveLength(1);
+    // A renderer must print the reason, never a number.
+    const rendered = formatEmailSystemStatus(status);
+    expect(rendered).toContain("send-ready unavailable");
+    expect(rendered).toContain("domains.send_ready — not_modelled_on_store");
+  });
+
+  it("REFUSES send eligibility instead of answering it from `verified`, as the deleted local arm did", async () => {
+    // The strongest argument in this whole collapse. The deleted local module served
+    // `usable_from` from `listUsableSendingAddresses`, i.e.
+    // `verified = 1 AND status != 'suspended'` — and the deleted HTTP module's header
+    // recorded, in writing, that `verified` is NOT a send-readiness proxy: 319 of 325
+    // production addresses have `verified = false` and demonstrably send. So the
+    // local answer was a fabricated verdict that a `--json` consumer could not tell
+    // from a measurement. Send eligibility is `getAddressSendability`, gated on the
+    // `outboundPolicy` capability, which this store declares FALSE.
+    const { SQLITE_STORE_CAPABILITIES } = await import("../store-sqlite/index.js");
+    expect(SQLITE_STORE_CAPABILITIES.outboundPolicy).toBe(false);
+
+    seed();
+    const status = await getEmailSystemStatus();
+
+    // The seeded address is unverified, so the deleted arm would have returned []
+    // here — an empty list that reads as "no address can send".
+    expect(status.addresses.total).toBe(1);
+    expect(status.addresses.verified).toBe(0);
+    expect(status.addresses.usable_from).toBeNull();
+    expect(status.gaps["addresses.usable_from"]?.reason)
+      .toMatch(/^not_modelled_on_store:store_capability_outboundPolicy/);
+    expect(formatEmailSystemStatus(status)).toContain("usable sender(s) unavailable");
   });
 
   it("is not degraded on a healthy install, and says what it cannot answer", async () => {
@@ -114,13 +167,14 @@ describe("local status payload", () => {
     expect(status.limitations).toContain("sources.configured.total");
     expect(status.sources.configured.total).toBeNull();
     expect(status.gaps["sources.configured.total"]?.reason)
-      .toMatch(/^not_applicable:server_source_inventory/);
+      .toMatch(/^not_modelled_on_store:no_ingestion_source_repository/);
 
     for (const path of status.limitations) {
       expect(statusGapClass(status.gaps[path]?.reason), path).toBe("structural");
     }
     // The gap section is printed even though nothing failed.
-    expect(formatEmailSystemStatus(status)).toContain("sources.configured.total — not_applicable");
+    expect(formatEmailSystemStatus(status))
+      .toContain("sources.configured.total — not_modelled_on_store");
   });
 
   it("distinguishes a MEASURED zero from an unmeasured field on an empty database", async () => {
@@ -129,7 +183,13 @@ describe("local status payload", () => {
     // A real zero is a real answer: it stays 0, and its block stays available.
     expect(status.providers.total).toBe(0);
     expect(status.providers.availability.available).toBe(true);
-    expect(status.providers.availability.basis).toBe("local_query");
+    // `client_enumeration`, not `local_query`: the store seam publishes list
+    // operations and no aggregate, so every count in the payload is now produced by
+    // paging rows and counting them — and therefore carries a completeness flag that
+    // an exact `COUNT(*)` had no way to express.
+    expect(status.providers.availability.basis).toBe("client_enumeration");
+    expect(status.providers.availability.source).toBe("sqlite:providers");
+    expect(status.providers.availability.complete).toBe(true);
     expect(status.unavailable).not.toContain("providers.total");
     // An empty install has nothing to report as a failure either.
     expect(status.degraded).toBe(false);

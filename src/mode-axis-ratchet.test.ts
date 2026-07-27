@@ -124,19 +124,41 @@ const root = join(import.meta.dir, "..");
  * concurrent collapse that lands first makes this block a conflict rather than a
  * silent no-op — which is the correct failure. Re-measure and re-pin on rebase; do not
  * widen a number to make a merge easy.
+ *
+ * RE-PINNED AGAIN on the status-facts collapse, and the paragraph above is exactly why
+ * it was needed. "Zero slack on all eleven" was true of the tree it was measured on and
+ * stopped being true the moment two other changes merged on top of it without
+ * re-measuring: by the time this block was rebased, FIVE metrics were carrying slack
+ * again — `twoArmFamilies` and `remoteArmModules` one each, `selfHostedResourceReferences`
+ * four, `getEmailsModeReferences` two, `emailsModeEnvReferences` one. None of that slack
+ * was earned by this change; all of it is reclaimed here, because a ceiling above the
+ * live count is a licence to re-add exactly as many branches as the gap is wide with the
+ * guard still green.
+ *
+ * This collapse itself moves three: `twoArmFamilies` and `remoteArmModules` by one (the
+ * status-facts family's two arms are deleted), `getEmailsModeReferences` by two and
+ * `resolveEmailsModeReferences` by two (the deleted facade's dispatch read and the
+ * deleted local arm's mode resolution, which fed the domain inbound-readiness signals).
+ * Its own dispatch used neither the helper nor a dispatched export, so
+ * `routedFacadeDefinitions` and `routedCallExpressions` do not move.
+ *
+ * Measured over the real `git ls-files` corpus of THIS commit: 668 tracked, 667 scanned,
+ * 8,569,747 characters. The gap between what the tree contains and what the guard
+ * permits is zero on all eleven again — and the way to keep it that way is to re-measure
+ * on every rebase rather than to trust this sentence.
  */
 const CEILINGS: Record<string, number> = {
-  twoArmFamilies: 41,
-  remoteArmModules: 41,
+  twoArmFamilies: 39,
+  remoteArmModules: 39,
   routedFacadeDefinitions: 29,
   routedCallExpressions: 290,
   selfHostedResourceBranches: 47,
-  selfHostedResourceReferences: 203,
+  selfHostedResourceReferences: 199,
   isSelfHostedModeReferences: 70,
-  getEmailsModeReferences: 74,
-  resolveEmailsModeReferences: 71,
+  getEmailsModeReferences: 70,
+  resolveEmailsModeReferences: 69,
   normalizeEmailsModeReferences: 16,
-  emailsModeEnvReferences: 239,
+  emailsModeEnvReferences: 238,
 };
 
 // 624 files are tracked and 623 scanned today, totalling ~7.4M characters. The floors

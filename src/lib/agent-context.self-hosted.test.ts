@@ -68,6 +68,9 @@ beforeAll(async () => { stub = await startV1Stub(); });
 afterAll(() => stub.stop());
 beforeEach(async () => {
   await stub.reset();
+  // `applyEnv` makes this stub the ONE configured store, database path included: an
+  // installation pointed at an API must not also name a local database, because that
+  // pair is a hard configuration error rather than a precedence rule.
   stub.applyEnv();
   await stub.seed({ providers: PROVIDERS, domains: DOMAINS, addresses: ADDRESSES, sources: SOURCES });
 });
@@ -80,9 +83,12 @@ describe("self-hosted status reports REAL server inventory (G1)", () => {
     expect(status.providers.total).toBe(2);
     expect(status.providers.active).toBe(1);
     expect(status.providers.by_type).toEqual({ ses: 1 });
+    // The provenance now names the STORE and the family rather than a mode and a
+    // route: one implementation reads whichever store the configuration selected,
+    // and `api` is that store's diagnostics kind (src/store-http/outcome.ts).
     expect(status.providers.availability).toMatchObject({
       available: true,
-      source: "self_hosted_api:/v1/providers",
+      source: "api:providers",
       basis: "client_enumeration",
       complete: true,
     });
@@ -126,12 +132,32 @@ describe("self-hosted status reports REAL server inventory (G1)", () => {
     expect(status.provisioning.addresses_pending).toBe(1); // pending
   });
 
-  it("publishes the server's configured ingestion sources from /v1/sources", async () => {
+  it("REFUSES the configured ingestion-source inventory, because no store operation answers it", async () => {
+    // This block used to be read straight off `GET /v1/sources` by the deleted
+    // HTTP-arm module, and the fixture above still seeds two rows there — kept
+    // deliberately, so this test proves the field is refused because the STORE has
+    // no operation for it and not because the data is absent.
+    //
+    // `EmailStore` (src/store/email-store.ts) declares no ingestion-source
+    // repository, so the collapsed implementation has nothing to call. The one legal
+    // answer is a reason: a count read through a route the seam does not model would
+    // be a second, undeclared source of truth, and a `0` would claim the operator
+    // has configured no source at all.
+    expect(SOURCES.length, "the fixture must seed rows the refusal is NOT caused by").toBeGreaterThan(0);
+    expect(await stub.list("sources")).toHaveLength(SOURCES.length);
+
     const status = await getEmailSystemStatus();
 
-    expect(status.sources.configured.total).toBe(2);
-    expect(status.sources.configured.by_status).toEqual({ active: 1, paused: 1 });
-    expect(status.sources.configured.latest_last_synced_at).toBe("2026-07-01T09:00:00.000Z");
+    expect(status.sources.configured.availability.available).toBe(false);
+    expect(status.sources.configured.total).toBeNull();
+    expect(status.sources.configured.by_status).toBeNull();
+    expect(status.sources.configured.latest_last_synced_at).toBeNull();
+    expect(status.gaps["sources.configured.total"]?.reason)
+      .toMatch(/^not_modelled_on_store:no_ingestion_source_repository/);
+    // Structural, so it is a published limitation rather than a read failure — an
+    // operator cannot clear it by fixing anything.
+    expect(status.limitations).toContain("sources.configured.total");
+    expect(status.failures).not.toContain("sources.configured.total");
   });
 
   it("derives next_actions from the real numbers and never leaves them silently empty", async () => {
@@ -146,9 +172,9 @@ describe("self-hosted status reports REAL server inventory (G1)", () => {
     }
     // ORACLE IS THE CLI, NOT THE REGISTRY. This used to check two hardcoded
     // command names, so it could not see `emails domain status --json` — which
-    // status-facts.remote.ts domainFixCommands returned for exactly the failed
-    // domain seeded here, and which src/cli/commands/domain.ts serverOnly()s in
-    // every mode. cliRefusalFor() reads the CLI's own call sites.
+    // the deleted HTTP-arm status module's domainFixCommands returned for exactly
+    // the failed domain seeded here, and which src/cli/commands/domain.ts
+    // serverOnly()s in every mode. cliRefusalFor() reads the CLI's own call sites.
     const proposed = status.next_actions
       .map((action) => action.command)
       .filter((command): command is string => command !== null);
@@ -176,11 +202,13 @@ describe("anti-fabrication invariants (G2)", () => {
   it("never reports 0 for a resource the server answered with rows", async () => {
     const status = await getEmailSystemStatus();
 
+    // `sources.configured.total` is deliberately NOT in this list any more: no store
+    // operation answers it, so it is null with a reason rather than measured. The
+    // test above proves that refusal is not a disguised zero.
     const seeded: Array<[string, number, number | null]> = [
       ["providers.total", PROVIDERS.length, status.providers.total],
       ["domains.total", DOMAINS.length, status.domains.total],
       ["addresses.total", ADDRESSES.length, status.addresses.total],
-      ["sources.configured.total", SOURCES.length, status.sources.configured.total],
     ];
     for (const [path, seededCount, reported] of seeded) {
       expect(seededCount, `${path}: fixture must be non-empty`).toBeGreaterThan(0);
@@ -210,7 +238,7 @@ describe("anti-fabrication invariants (G2)", () => {
     expect(rendered).toContain("send-ready unavailable");
     // The gap section is mandatory whenever anything is unavailable.
     expect(rendered).toContain("Data gaps");
-    expect(rendered).toContain("addresses.usable_from — server_route_absent:/v1/senders");
+    expect(rendered).toContain("addresses.usable_from — not_modelled_on_store:store_capability_outboundPolicy");
   });
 });
 
@@ -238,15 +266,47 @@ describe("honest-unavailable contract (G3)", () => {
     expect(status.sources.legacy).toBeNull();
     expect(status.sources.orphaned).toBeNull();
 
-    expect(status.gaps["domains.send_ready"]?.reason).toMatch(/^not_modelled_over_v1:domain_dns_evidence/);
-    expect(status.gaps["addresses.usable_from"]?.reason).toMatch(/^server_route_absent:\/v1\/senders/);
-    expect(status.gaps["inbox.inbound_buckets.items"]?.reason).toMatch(/^not_applicable:server_owned_ingestion/);
-    expect(status.gaps["sources.legacy"]?.reason).toMatch(/^not_modelled_over_v1:source_classification/);
+    // The codes name what is actually missing now that there is ONE implementation:
+    // the store models no DNS evidence, declares the outbound-policy capability
+    // false, and — for an installation whose mail lives in an API — performs none of
+    // its own ingestion. `not_modelled_over_v1` would be a statement about one API's
+    // entity shapes, which is the wrong claim for a code that has to hold for
+    // whichever store the operator configured.
+    expect(status.gaps["domains.send_ready"]?.reason).toMatch(/^not_modelled_on_store:domain_dns_evidence/);
+    expect(status.gaps["addresses.usable_from"]?.reason)
+      .toMatch(/^not_modelled_on_store:store_capability_outboundPolicy/);
+    expect(status.gaps["inbox.inbound_buckets.items"]?.reason)
+      .toMatch(/^not_applicable:service_owned_ingestion/);
+    expect(status.gaps["sources.legacy"]?.reason).toMatch(/^not_modelled_on_store:source_classification/);
 
     for (const path of ["domains.send_ready", "addresses.usable_from", "inbox.inbound_buckets.items"]) {
       expect(status.unavailable).toContain(path);
       expect(status.limitations).toContain(path);
     }
+  });
+
+  it("refuses send eligibility because the store declares the capability false", async () => {
+    // NOT a regression from the deleted local-arm behaviour — a defect removal. That
+    // module answered `usable_from` from `verified = 1 AND status != 'suspended'`,
+    // which the deleted HTTP arm's own header forbade in writing: 319 of 325
+    // production addresses carry `verified = false` and demonstrably send. Send
+    // eligibility is `getAddressSendability`, gated on `outboundPolicy`, and BOTH
+    // store implementations declare that capability false. So the answer is a
+    // refusal that names the store's own declaration.
+    const { HTTP_STORE_CAPABILITIES } = await import("../store-http/index.js");
+    const { SQLITE_STORE_CAPABILITIES } = await import("../store-sqlite/index.js");
+    expect(HTTP_STORE_CAPABILITIES.outboundPolicy).toBe(false);
+    expect(SQLITE_STORE_CAPABILITIES.outboundPolicy).toBe(false);
+
+    const status = await getEmailSystemStatus();
+
+    expect(status.addresses.usable_from).toBeNull();
+    // ...and the addresses block is otherwise MEASURED, so this is a field-level
+    // refusal rather than a block that failed to read.
+    expect(status.addresses.availability.available).toBe(true);
+    expect(status.addresses.total).toBe(ADDRESSES.length);
+    expect(status.gaps["addresses.usable_from"]?.reason).toContain("outboundPolicy");
+    expect(status.gaps["addresses.usable_from"]?.reason).toContain("false");
   });
 
   it("still prints the data-gap section when the payload is healthy but limited", async () => {
@@ -258,39 +318,47 @@ describe("honest-unavailable contract (G3)", () => {
 
     expect(status.degraded).toBe(false);
     expect(rendered).toContain("Data gaps");
-    expect(rendered).toContain("addresses.usable_from — server_route_absent:/v1/senders");
+    expect(rendered).toContain("addresses.usable_from — not_modelled_on_store:store_capability_outboundPolicy");
     expect(rendered).not.toContain("Read failures");
   });
 
-  it("degrades and bounds the count when the server's paging window shifts", async () => {
-    // Production /v1/sources: 3899 rows, ORDER BY status,type,created_at (not a
+  it("degrades and bounds the count when the store's paging window shifts", async () => {
+    // Production `/v1/sources`: 3899 rows, ORDER BY status,type,created_at (not a
     // total order), so limit/offset paging returned 426 duplicates and skipped 426
-    // rows. The client de-duplicated and published 3473 as `complete: true`.
-    // A shifting window must now produce an explicit LOWER BOUND.
+    // rows. The client de-duplicated and published 3473 as a total — a number that
+    // looked authoritative and was 11% low. A shifting window must produce an
+    // explicit LOWER BOUND instead.
+    //
+    // The subject moved from the source inventory to DOMAINS because no store
+    // operation answers the source inventory any more, and this behaviour is not
+    // about which family it happens to: it is a property of every count in the
+    // payload, since the seam publishes list operations and no aggregates.
     const many = Array.from({ length: 1200 }, (_, index) => ({
-      id: `src-${String(index).padStart(5, "0")}`,
-      type: "ses-s3",
-      name: `source-${index}`,
-      status: "active",
-      last_synced_at: null,
+      id: `dom-${String(index).padStart(5, "0")}`,
+      domain: `d${index}.example`,
+      provider: "prov-ses",
+      verified: false,
+      provisioning_status: "ready",
+      last_error: null,
+      next_check_at: null,
       created_at: NOW,
       updated_at: NOW,
     }));
-    await stub.seed({ providers: PROVIDERS, domains: DOMAINS, addresses: ADDRESSES, sources: many });
-    await stub.setListOrderInstability(7, ["sources"]);
+    await stub.seed({ providers: PROVIDERS, domains: many, addresses: ADDRESSES, sources: SOURCES });
+    await stub.setListOrderInstability(7, ["domains"]);
 
     const status = await getEmailSystemStatus();
 
-    expect(status.sources.configured.availability.available).toBe(true);
-    expect(status.sources.configured.availability.complete).toBe(false);
-    expect(status.sources.configured.availability.reason).toMatch(/^enumeration_unstable:/);
-    expect(status.sources.configured.total).not.toBeNull();
-    expect(status.sources.configured.total!).toBeLessThan(many.length);
-    expect(status.incomplete).toContain("sources.configured");
+    expect(status.domains.availability.available).toBe(true);
+    expect(status.domains.availability.complete).toBe(false);
+    expect(status.domains.availability.reason).toMatch(/^enumeration_unstable:/);
+    expect(status.domains.total).not.toBeNull();
+    expect(status.domains.total!).toBeLessThan(many.length);
+    expect(status.incomplete).toContain("domains");
     expect(status.degraded).toBe(true);
 
     const rendered = formatEmailSystemStatus(status);
-    expect(rendered).toContain(`Configured sources: ≥${status.sources.configured.total}`);
+    expect(rendered).toContain(`Domains:   ≥${status.domains.total} total`);
     expect(rendered).toContain("Lower bounds");
   });
 
@@ -389,8 +457,8 @@ describe("honest-unavailable contract (G3)", () => {
     }
 
     if (status === null) {
-      const { collectStatusFacts } = await import("./status-facts.remote.js");
-      const facts = collectStatusFacts({
+      const { collectStatusFacts } = await import("./status-facts.js");
+      const facts = await collectStatusFacts({
         mailboxSources: [],
         domainLimit: 25,
         usableFromLimit: 25,

@@ -120,7 +120,11 @@ describe("self-hosted status CLI commands", () => {
     expect(payload.limited).toBe(true);
     expect(payload.limitations).toContain("addresses.usable_from");
     expect(payload.unavailable).toContain("addresses.usable_from");
-    expect(payload.gaps["addresses.usable_from"]?.reason).toMatch(/^server_route_absent:\/v1\/senders/);
+    // Send eligibility is `getAddressSendability`, gated on the `outboundPolicy`
+    // capability that BOTH store implementations declare false — so the reason now
+    // names the store's own declaration rather than one API route.
+    expect(payload.gaps["addresses.usable_from"]?.reason)
+      .toMatch(/^not_modelled_on_store:store_capability_outboundPolicy/);
 
     expect(result.formatted).toContain("Capabilities: 1/2 active provider credential(s)");
     expect(result.formatted).not.toContain("0/0 active provider credential(s)");

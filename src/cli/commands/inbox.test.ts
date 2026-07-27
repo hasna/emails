@@ -803,13 +803,22 @@ describe("inbox status / sync-status", () => {
     expect(data).toMatchObject({
       inbox: { total: 3, unread: 1 },
       mailboxes: { counts: { inbox: 2, sent: 1, archived: 1 } },
-      // legacy/orphaned are NOT zero: the /v1 mail view carries no
-      // active/legacy/orphaned badges, so a 0 there was a fabricated
-      // classification of the operator's ingestion. null + a reason instead.
-      sources: { total: 1, legacy: null, orphaned: null },
+      // NOTHING in this block is a zero. The mail view for a shared store publishes
+      // exactly one row, `kind: "all"` — an aggregate over the whole store, not an
+      // ingestion source — and it carries no active/legacy/orphaned badge. So the
+      // classification cannot be measured, and neither can the number of ingestion
+      // sources: counting the aggregate would report one source on an installation
+      // that has configured none, and excluding it would report a flat zero for a
+      // view that enumerates none. Each is null with its own reason.
+      sources: { total: null, legacy: null, orphaned: null },
     });
     const payload = data as { sources: { legacy: number | null }; gaps: Record<string, { reason: string }> };
-    expect(payload.gaps["sources.legacy"]?.reason).toMatch(/^not_modelled_over_v1:source_classification/);
+    expect(payload.gaps["sources.legacy"]?.reason).toMatch(/^not_modelled_on_store:source_classification/);
+    expect(payload.gaps["sources.total"]?.reason).toMatch(/^not_modelled_on_store:aggregate_only_mailbox_view/);
+    // The one row IS still published, with its real mail totals, so the view is
+    // informative rather than empty.
+    const listed = data as { sources: { items: Array<{ total: number }> } };
+    expect(listed.sources.items).toHaveLength(1);
     // The terminal must not paint a yellow "0" for buckets it never inspected.
     expect(out).toContain("S3 buckets:  unavailable");
     expect(out).toContain("Data gaps");

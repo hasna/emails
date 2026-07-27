@@ -41,15 +41,26 @@
  *
  * - `server_route_absent`     the self-hosted API has no route that answers this
  * - `not_modelled_over_v1`    the data is not represented on any `/v1` entity
- * - `source_unreachable`      the source exists but the read failed (HTTP/IO)
- * - `not_applicable`          the field has no meaning in the selected mode
+ * - `not_modelled_on_store`   the store the installation is configured with models
+ *                             no data that answers this: no operation on
+ *                             `src/store/repositories.ts` returns it, or the
+ *                             operation that would is behind a capability the store
+ *                             declares FALSE (src/store/capabilities.ts). Distinct
+ *                             from `not_modelled_over_v1`, which is a statement
+ *                             about one API's entity shapes and is simply wrong when
+ *                             the configured store is the local database.
+ * - `source_unreachable`      the source exists but the read failed (HTTP/IO), or
+ *                             the storage configuration names no resolvable store
+ * - `not_applicable`          the field has no meaning for this installation
  * - `enumeration_cap_exceeded` a count could only be bounded, not resolved
  * - `enumeration_unstable`    the source's paging window shifted, so the rows
- *                             counted are a subset (see src/db/self-hosted-page.ts)
+ *                             counted are a subset (see src/db/self-hosted-page.ts
+ *                             and src/lib/status-facts-enumeration.ts)
  */
 export const STATUS_UNAVAILABLE_CODES = [
   "server_route_absent",
   "not_modelled_over_v1",
+  "not_modelled_on_store",
   "source_unreachable",
   "not_applicable",
   "enumeration_cap_exceeded",
@@ -68,6 +79,7 @@ export type StatusUnavailableCode = (typeof STATUS_UNAVAILABLE_CODES)[number];
 export const STATUS_STRUCTURAL_CODES: readonly StatusUnavailableCode[] = [
   "not_applicable",
   "not_modelled_over_v1",
+  "not_modelled_on_store",
   "server_route_absent",
 ];
 

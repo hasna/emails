@@ -20,10 +20,11 @@
 //
 // THE RULE NOW
 // ------------
-// One assembler, one shape (src/lib/status-types.ts), facts gathered through the
-// mode seam (src/lib/status-facts.ts). Every field is either measured from a real
-// source or `null` with a machine-readable reason in `gaps` — see
-// src/lib/status-availability.ts for why `null` and not `0`/`[]`.
+// One assembler, one shape (src/lib/status-types.ts), facts gathered from the ONE
+// store this installation configured (src/lib/status-facts.ts — a single
+// implementation since the two per-deployment siblings were deleted). Every field is
+// either measured from a real source or `null` with a machine-readable reason in
+// `gaps` — see src/lib/status-availability.ts for why `null` and not `0`/`[]`.
 
 import { resolveMailDataSource } from "./mail-data-source.js";
 import { getEmailsMode, resolveEmailsMode, type EmailsMode } from "./mode.js";
@@ -147,7 +148,10 @@ async function buildSystemStatus(): Promise<EmailSystemStatus> {
   const primarySource = mailboxSources[0];
   const receivedTotal = counts.inbox + counts.archived + counts.spam + counts.trash;
 
-  const facts = collectStatusFacts({
+  // `await` because the facts now come from the store seam, and every store
+  // operation is a Promise (src/store/repositories.ts rule 1). This assembler was
+  // already async, so the change is the keyword and nothing else.
+  const facts = await collectStatusFacts({
     mailboxSources,
     domainLimit: DOMAIN_READINESS_LIMIT,
     usableFromLimit: USABLE_FROM_LIMIT,
@@ -481,7 +485,11 @@ export function formatAgentContextSummary(context: Record<string, unknown>): str
 export interface AgentContextSample {
   status: Record<string, unknown>;
   limits: { samples: number; domain_full_limit: number | null; address_full_limit: number | null };
-  truncated: { domains: boolean; addresses: boolean };
+  /**
+   * `null` where the underlying inventory could not be read, so truncation is not
+   * answerable — never `false`, which would claim the sample is the whole list.
+   */
+  truncated: { domains: boolean | null; addresses: boolean | null };
 }
 
 /**
@@ -539,8 +547,14 @@ export function sampleAgentContext(
       address_full_limit: status.addresses.usable_from_limit,
     },
     truncated: {
-      domains: status.domains.usable_truncated || (usableDomains?.length ?? 0) > sampleLimit,
-      addresses: status.addresses.usable_from_truncated || (usableFrom?.length ?? 0) > sampleLimit,
+      // An unknown truncation stays unknown. `null || (len > limit)` would answer
+      // `false` for a short sample of a list nobody managed to read.
+      domains: status.domains.usable_truncated === null
+        ? null
+        : status.domains.usable_truncated || (usableDomains?.length ?? 0) > sampleLimit,
+      addresses: status.addresses.usable_from_truncated === null
+        ? null
+        : status.addresses.usable_from_truncated || (usableFrom?.length ?? 0) > sampleLimit,
     },
   };
 }
