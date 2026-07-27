@@ -602,8 +602,23 @@ for provenance_predicate_contract in \
 done
 
 # This is the SECOND copy of the changelog boundary contract; `src/workflow-contract.test.ts`
-# holds the first. Both must be moved in the same commit, and both pin the same digests —
-# `changelog_section` below extracts byte-identically to that file's `markdownSection`.
+# holds the first. Both must be moved in the same commit, and both pin the same digests.
+#
+# `changelog_section` and that file's `markdownSection` agree on the CURRENT changelog and on
+# every realistic edit to it, but they are NOT byte-identical extractors, and an earlier version
+# of this comment wrongly claimed they were. They diverge on three inputs:
+#   - trailing spaces on a section's last content line, and whitespace-only trailing lines: the
+#     TypeScript side calls `.trimEnd()`, which strips them; `$(...)` strips only newlines.
+#   - a heading at EOF with no trailing newline: the TypeScript side searches for `heading\n`
+#     and returns "" (section NOT FOUND); `awk` matches the line and returns the heading.
+# Both agree on CRLF (both fail closed) and on a `## ` inside a fenced code block (both
+# terminate early — equally wrong, and identically so).
+#
+# The divergence is benign in this direction: TypeScript is the more permissive side, so a
+# trailing-whitespace edit passes there and fails HERE, leaving the composite exactly as strong
+# as the stricter copy. `.editorconfig` (`trim_trailing_whitespace`, `insert_final_newline`,
+# `end_of_line = lf`) rules out all three in practice. Do not "fix" one side to match the other
+# without checking which way the permissiveness runs.
 changelog_section() {
   awk -v heading="$1" '
     $0 == heading { capture = 1 }

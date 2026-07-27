@@ -60,26 +60,58 @@ function markdownSection(markdown: string, heading: string): string {
   return markdown.slice(start, nextHeading < 0 ? markdown.length : nextHeading).trimEnd();
 }
 
-function hasCanonicalReleaseBoundaries(changelog: string): boolean {
+/**
+ * Returns one string per violated condition, empty when the boundaries are canonical.
+ *
+ * Deliberately NOT a boolean. Twelve conditions ANDed into one predicate fail as
+ * `expected true, received false`, naming none of them — and the person reading that is
+ * mid-release-cut, which is the worst moment to be handed a riddle. Each violation names the
+ * section and, for a digest, both digests, so the fix is mechanical.
+ */
+function releaseBoundaryViolations(changelog: string): string[] {
+  const violations: string[] = [];
   const unreleasedIndex = changelog.indexOf(`${unreleasedHeading}\n`);
   const release140Index = changelog.indexOf(`${release140Heading}\n`);
   const release132Index = changelog.indexOf(`${release132Heading}\n`);
   const release131Index = changelog.indexOf(`${release131Heading}\n`);
   const release132Section = markdownSection(changelog, release132Heading);
 
-  return (
-    unreleasedIndex >= 0 &&
-    release140Index > unreleasedIndex &&
-    release132Index > release140Index &&
-    release131Index > release132Index &&
-    changelog.match(/^## \[Unreleased\]$/gm)?.length === 1 &&
-    changelog.match(/^## 1\.4\.0 \(2026-07-27\)$/gm)?.length === 1 &&
-    changelog.match(/^## 1\.3\.2 \(2026-07-26\)$/gm)?.length === 1 &&
-    textSha256(markdownSection(changelog, unreleasedHeading)) === unreleasedSectionSha256 &&
-    textSha256(markdownSection(changelog, release140Heading)) === release140SectionSha256 &&
-    textSha256(release132Section) === release132SectionSha256 &&
-    release132Section.startsWith(release132Opening)
-  );
+  if (unreleasedIndex < 0) violations.push(`${unreleasedHeading} is missing`);
+  if (!(release140Index > unreleasedIndex)) violations.push(`${release140Heading} must come after ${unreleasedHeading}`);
+  if (!(release132Index > release140Index)) violations.push(`${release132Heading} must come after ${release140Heading}`);
+  if (!(release131Index > release132Index)) violations.push(`${release131Heading} must come after ${release132Heading}`);
+
+  for (const [heading, pattern] of [
+    [unreleasedHeading, /^## \[Unreleased\]$/gm],
+    [release140Heading, /^## 1\.4\.0 \(2026-07-27\)$/gm],
+    [release132Heading, /^## 1\.3\.2 \(2026-07-26\)$/gm],
+  ] as const) {
+    const count = changelog.match(pattern)?.length ?? 0;
+    if (count !== 1) violations.push(`${heading} must appear exactly once, found ${count}`);
+  }
+
+  for (const [heading, expected] of [
+    [unreleasedHeading, unreleasedSectionSha256],
+    [release140Heading, release140SectionSha256],
+    [release132Heading, release132SectionSha256],
+  ] as const) {
+    const actual = textSha256(markdownSection(changelog, heading));
+    if (actual !== expected) {
+      violations.push(
+        `${heading} digest is ${actual}, frozen at ${expected} — if the edit is intended, move the constant in ` +
+          `BOTH src/workflow-contract.test.ts and deploy/aws/tests/static_contract.sh, and say why in the commit`,
+      );
+    }
+  }
+
+  if (!release132Section.startsWith(release132Opening)) {
+    violations.push(`${release132Heading} must still open with its two published release bullets`);
+  }
+  return violations;
+}
+
+function hasCanonicalReleaseBoundaries(changelog: string): boolean {
+  return releaseBoundaryViolations(changelog).length === 0;
 }
 
 function singleQuotedReadonly(workflow: string, name: string): string {
@@ -422,7 +454,8 @@ describe("repository workflow safety", () => {
 
   it("keeps every published release at its exact changelog boundary", () => {
     const changelog = readFileSync(join(repositoryRoot, "CHANGELOG.md"), "utf8");
-    expect(hasCanonicalReleaseBoundaries(changelog)).toBe(true);
+    // Asserted as a list, not a boolean, so a failure names the section and the digests.
+    expect(releaseBoundaryViolations(changelog)).toEqual([]);
 
     // The restored 1.3.2 section is what 1.3.2 was published with, so it must still carry the
     // entries `3cbd39c` moved out of it — not only its two opening bullets.
