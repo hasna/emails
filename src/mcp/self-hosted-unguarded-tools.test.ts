@@ -10,15 +10,21 @@
 // refusal string: an assertion that merely checked `isError` is false would also pass
 // against a tool that silently fell back to local SQLite.
 //
-// Every assertion below therefore reads the resulting ROW BACK OFF THE STUB. On
-// unmodified main every one of these tests fails with "disabled in self_hosted
-// API-only mode".
+// Each test therefore pins the tool to SERVER state in one of two directions, never
+// to a tool-to-tool round-trip (which a self-consistent local store would also
+// satisfy):
+//   - writes  read the resulting row back OFF THE STUB via `stub.list(...)`;
+//   - reads   are given rows seeded STRAIGHT onto the stub, carrying values no tool
+//             in the test ever wrote, so the data can only have come off the wire.
+// On unmodified main every one of these tests fails with a refusal.
 //
 // NOT HERE, deliberately: `get_dns_records` and `verify_domain` keep their guard.
-// They call a provider ADAPTER rather than a repository, their credentials do not
-// exist in the `/v1/providers` row, and their CLI twins (`emails domain dns`,
-// `emails domain verify`) are `serverOnly(...)` — there is no working route behind
-// that refusal to unblock. src/mcp/domain-address-self-hosted.test.ts still pins it.
+// They call a provider ADAPTER rather than a repository; with a real `/v1/providers`
+// row of type `ses` the adapter would resolve credentials from the CLIENT's ambient
+// AWS environment, because the server schema has no credential columns. Their CLI
+// twins (`emails domain dns`, `emails domain verify`) are `serverOnly(...)` for the
+// same reason, so the refusal matches a command that also cannot run.
+// src/mcp/domain-address-self-hosted.test.ts pins that.
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { startV1Stub, type V1Stub } from "../test-support/v1-stub.js";
 import { buildServer } from "./server.js";
@@ -89,20 +95,36 @@ describe("MCP alias tools in self_hosted mode (twins of `emails alias …`)", ()
     expect(await stub.list("aliases")).toMatchObject([{ domain: "acme.example", local_part: "*" }]);
   });
 
-  it("list_aliases reads the rows the server holds", async () => {
-    await runDomainTool("add_alias", { alias: "hello@acme.example", target: "ops@acme.example" });
-    await runDomainTool("add_alias", { alias: "sales@acme.example", target: "ops@acme.example" });
+  it("list_aliases returns rows that only ever existed ON THE SERVER", async () => {
+    // Seeded straight onto the stub rather than written through a tool, so this
+    // proves the SERVER -> tool direction. A tool→tool round-trip would also pass
+    // against a self-consistent local store; this cannot.
+    await stub.seed({
+      ...structuredClone(SEED),
+      aliases: [
+        { id: "alias-seeded-1", domain: "acme.example", local_part: "sales", target_address: "ops@acme.example", protected: false, created_at: NOW, updated_at: NOW },
+        { id: "alias-seeded-2", domain: "acme.example", local_part: "hello", target_address: "ops@acme.example", protected: false, created_at: NOW, updated_at: NOW },
+      ],
+    });
 
-    const aliases = ok<Array<{ local_part: string }>>(await runDomainTool("list_aliases", { domain: "acme.example" }));
+    const aliases = ok<Array<{ id: string; local_part: string }>>(await runDomainTool("list_aliases", { domain: "acme.example" }));
 
     expect(aliases.map((a) => a.local_part)).toEqual(["hello", "sales"]);
+    expect(aliases.map((a) => a.id).sort()).toEqual(["alias-seeded-1", "alias-seeded-2"]);
   });
 
-  it("resolve_alias resolves a recipient through the server's routing table", async () => {
-    await runDomainTool("add_alias", { alias: "hello@acme.example", target: "ops@acme.example" });
+  it("resolve_alias resolves against a routing table only the SERVER holds", async () => {
+    await stub.seed({
+      ...structuredClone(SEED),
+      aliases: [
+        { id: "alias-seeded-1", domain: "acme.example", local_part: "hello", target_address: "seeded-target@acme.example", protected: false, created_at: NOW, updated_at: NOW },
+      ],
+    });
 
+    // The target is a value no tool in this test ever wrote, so it can only have
+    // come off the wire.
     expect(ok(await runDomainTool("resolve_alias", { recipient: "hello@acme.example" })))
-      .toEqual({ recipient: "hello@acme.example", target: "ops@acme.example" });
+      .toEqual({ recipient: "hello@acme.example", target: "seeded-target@acme.example" });
     // A recipient with no alias resolves to null rather than erroring.
     expect(ok(await runDomainTool("resolve_alias", { recipient: "nobody@acme.example" })))
       .toEqual({ recipient: "nobody@acme.example", target: null });
@@ -148,16 +170,29 @@ describe("MCP address-lifecycle tools in self_hosted mode (twins of `emails addr
     expect(await stub.list("addresses")).toEqual([]);
   });
 
-  it("suggest_address suggests local-parts not already taken on the server", async () => {
+  it("suggest_address excludes local-parts already taken ON THE SERVER", async () => {
+    // The assertion has to name an address the candidate list actually offers.
+    // `suggestAddressLocalParts` has a FIXED candidate list (hello, hi, contact,
+    // support, team, admin, inbox, mail, ...) and returns FULL addresses, so
+    // asserting `not.toContain("ops")` — the seeded address — could never fail: "ops"
+    // is not a candidate and is not the shape of an element. `hello@` is both.
+    const baseline = ok<{ suggestions: string[] }>(await runDomainTool("suggest_address", { domain: "acme.example" }));
+    expect(baseline.suggestions).toContain("hello@acme.example");
+
+    // Take `hello@` on the SERVER, through a tool, then re-ask.
+    ok(await runDomainTool("add_address", { provider_id: "prov-1", email: "hello@acme.example" }));
+    expect((await stub.list("addresses")).map((r) => r["email"])).toContain("hello@acme.example");
+
     const suggested = ok<{ domain: string; suggestions: string[]; cli_equivalent: string }>(
       await runDomainTool("suggest_address", { domain: "acme.example" }),
     );
 
     expect(suggested.domain).toBe("acme.example");
-    expect(suggested.suggestions.length).toBeGreaterThan(0);
-    // `ops@acme.example` is seeded on the stub, so a suggestion list computed from
-    // server state cannot offer it back.
-    expect(suggested.suggestions).not.toContain("ops");
+    // THE discriminating assertion: the suggestion list changed because the SERVER
+    // row changed. A tool reading a local store, or ignoring the response, fails here.
+    expect(suggested.suggestions).not.toContain("hello@acme.example");
+    expect(suggested.suggestions).not.toEqual(baseline.suggestions);
+    expect(suggested.suggestions).toContain("hi@acme.example");
     expect(suggested.cli_equivalent).toBe("emails address suggest --domain acme.example --json");
   });
 });
@@ -196,14 +231,20 @@ describe("MCP group-member tools in self_hosted mode (twins of `emails group …
     expect(cli_equivalent).toBe("emails group members beta-testers --json");
   });
 
-  it("get_group_member returns one member including its vars", async () => {
-    await callTool("add_group_member", { group_name: "beta-testers", email: "ada@acme.example", vars: { plan: "pro" } });
+  it("get_group_member returns one member, with vars, from a SERVER-seeded row", async () => {
+    await stub.seed({
+      ...structuredClone(SEED),
+      "group-members": [
+        { id: "member-seeded-1", group_id: "group-1", email: "ada@acme.example", name: "Seeded Ada", vars: JSON.stringify({ plan: "seeded-pro" }), added_at: NOW, created_at: NOW, updated_at: NOW },
+      ],
+    });
 
-    const member = ok<{ email: string; vars: Record<string, string> }>(
+    const member = ok<{ email: string; name: string; vars: Record<string, string> }>(
       await callTool("get_group_member", { group_name: "beta-testers", email: "ada@acme.example" }),
     );
 
-    expect(member).toMatchObject({ email: "ada@acme.example", vars: { plan: "pro" } });
+    // `Seeded Ada` / `seeded-pro` were never written by a tool in this test.
+    expect(member).toMatchObject({ email: "ada@acme.example", name: "Seeded Ada", vars: { plan: "seeded-pro" } });
   });
 
   it("remove_group_member deletes the membership from /v1/group-members", async () => {
@@ -213,6 +254,40 @@ describe("MCP group-member tools in self_hosted mode (twins of `emails group …
 
     expect(removed.isError).toBeFalsy();
     expect(await stub.list("group-members")).toEqual([]);
+  });
+});
+
+describe("MCP list_replies in self_hosted mode (twin of `emails replies <id>`)", () => {
+  // This one refused UNCONDITIONALLY, in every mode, claiming "inbound reply tracking
+  // runs on the self-hosted server" and that no API-backed implementation existed.
+  // Both halves were false — `src/db/inbound.ts` routes `listReplySummaries` to
+  // `inbound.remote.ts`, which serves it from `/v1/messages`, and `emails replies`
+  // has always run there. It is a worse defect than the mode-conditional guards,
+  // which at least told the truth in local mode.
+  const SENT = { id: "msg-sent-1", direction: "outbound", message_id: "<root@acme.example>", from_addr: "ops@acme.example", to_addrs: ["ada@acme.example"], subject: "Question", body_text: "?", created_at: NOW, updated_at: NOW, received_at: NOW };
+  const REPLY = { id: "msg-reply-1", direction: "inbound", message_id: "<reply@acme.example>", in_reply_to: "<root@acme.example>", from_addr: "ada@acme.example", to_addrs: ["ops@acme.example"], subject: "Re: Question", body_text: "the answer", created_at: NOW, updated_at: NOW, received_at: NOW };
+
+  it("returns the reply the SERVER holds instead of refusing", async () => {
+    await stub.seed({ ...structuredClone(SEED), messages: [{ ...SENT }, { ...REPLY }] });
+
+    const result = await callTool("list_replies", { email_id: "msg-sent-1" });
+
+    expect(text(result)).not.toContain("not available in the self-hosted client");
+    const payload = ok<{ replies: Array<{ id: string; subject: string }>; total: number; cli_equivalent: string }>(result);
+    expect(payload.replies.map((r) => r.id)).toEqual(["msg-reply-1"]);
+    expect(payload.replies[0]?.subject).toBe("Re: Question");
+    expect(payload.total).toBe(1);
+    // The advertised command is the CLI twin that already worked.
+    expect(payload.cli_equivalent).toBe("emails replies msg-sent-1 --json");
+  });
+
+  it("returns an empty list for a message with no replies, not an error", async () => {
+    await stub.seed({ ...structuredClone(SEED), messages: [{ ...SENT }] });
+
+    const payload = ok<{ replies: unknown[]; total: number }>(await callTool("list_replies", { email_id: "msg-sent-1" }));
+
+    expect(payload.replies).toEqual([]);
+    expect(payload.total).toBe(0);
   });
 });
 
@@ -239,15 +314,23 @@ describe("MCP sequence step/enrollment tools in self_hosted mode (twins of `emai
     ]);
   });
 
-  it("list_enrollments reads enrollments back from the server", async () => {
-    await callTool("enroll_contact", { sequence_id: "onboarding", contact_email: "ada@acme.example" });
-    await callTool("enroll_contact", { sequence_id: "onboarding", contact_email: "grace@acme.example" });
+  it("list_enrollments reads SERVER-seeded enrollments, filtered by sequence", async () => {
+    await stub.seed({
+      ...structuredClone(SEED),
+      "sequence-enrollments": [
+        { id: "enroll-seeded-1", sequence_id: "sequence-1", contact_email: "ada@acme.example", provider_id: null, current_step: 3, status: "active", enrolled_at: NOW, next_send_at: null, completed_at: null, created_at: NOW, updated_at: NOW },
+        // A different sequence, to prove the filter is applied rather than ignored.
+        { id: "enroll-seeded-2", sequence_id: "sequence-other", contact_email: "grace@acme.example", provider_id: null, current_step: 0, status: "active", enrolled_at: NOW, next_send_at: null, completed_at: null, created_at: NOW, updated_at: NOW },
+      ],
+    });
 
-    const { items: enrollments } = ok<{ items: Array<{ contact_email: string }> }>(
+    const { items: enrollments } = ok<{ items: Array<{ id: string; contact_email: string; current_step: number }> }>(
       await callTool("list_enrollments", { sequence_id: "onboarding" }),
     );
 
-    expect(enrollments.map((e) => e.contact_email).sort()).toEqual(["ada@acme.example", "grace@acme.example"]);
+    expect(enrollments.map((e) => e.id)).toEqual(["enroll-seeded-1"]);
+    // `current_step: 3` is a server-only value; `enroll` always creates step 0.
+    expect(enrollments[0]).toMatchObject({ contact_email: "ada@acme.example", current_step: 3 });
   });
 
   it("unenroll_contact cancels the enrollment server-side", async () => {

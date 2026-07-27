@@ -28,6 +28,13 @@ function flag(input: unknown, key: string, name = key.replace(/_/g, "-")): strin
   return value ? ` --${name} ${value}` : "";
 }
 
+/** True when the caller supplied per-member template vars (which the CLI cannot take). */
+function hasVars(input: unknown): boolean {
+  const obj = input && typeof input === "object" ? input as Record<string, unknown> : {};
+  const vars = obj["vars"];
+  return !!vars && typeof vars === "object" && Object.keys(vars as Record<string, unknown>).length > 0;
+}
+
 function enabled(input: unknown, key: string, name = key.replace(/_/g, "-")): string {
   const obj = input && typeof input === "object" ? input as Record<string, unknown> : {};
   return obj[key] === true ? ` --${name}` : "";
@@ -143,9 +150,10 @@ export function cliEquivalentForTool(name: string, input: unknown): string {
     list_groups: () => `emails group list${flag(input, "limit")}${flag(input, "offset")} --json`,
     create_group: () => `emails group create ${arg(input, "name") ?? "<name>"} --json`,
     delete_group: () => `emails group delete ${id ?? "<group-id>"} --json`,
-    add_group_member: () => `emails group add ${arg(input, "group_name") ?? id ?? "<group>"} ${email ?? "<email>"}${flag(input, "name")} --json`,
+    add_group_member: () => `emails group add ${arg(input, "group_name") ?? id ?? "<group>"} ${email ?? "<email>"}${flag(input, "name")} --json${hasVars(input) ? " # note: per-member vars have no CLI equivalent; this command adds the member WITHOUT them" : ""}`,
     remove_group_member: () => `emails group remove-member ${arg(input, "group_name") ?? id ?? "<group>"} ${email ?? "<email>"} --json`,
     list_group_members: () => `emails group members ${arg(input, "group_name", "group_id", "id") ?? "<group-name>"}${flag(input, "limit")}${flag(input, "offset")} --json`,
+    get_group_member: () => `emails group members ${arg(input, "group_name", "group_id", "id") ?? "<group-name>"} --json # note: lists the group's members WITHOUT per-member vars; no CLI command returns a single member with them`,
     list_sandbox_emails: () => "emails sandbox list --json",
     get_sandbox_email: () => `emails sandbox show ${id ?? "<sandbox-id>"} --json`,
     clear_sandbox_emails: () => "emails sandbox clear --json",
@@ -171,6 +179,14 @@ function errorCode(message: string): string {
 
 function fixCommands(message: string, cliEquivalent: string): string[] {
   const lower = message.toLowerCase();
+  // These are SUBSTRING matches over an error message, so a word appearing inside a
+  // format hint hijacks the routing. `createAlias` on a malformed address throws
+  // "Invalid email address (expected local@domain): bad", whose literal "domain"
+  // sent the operator to `emails domain list` to debug a bad ALIAS argument. The
+  // caller's own command is the fix here, so short-circuit before the keyword scan.
+  // (Newly load-bearing: add_alias/add_catch_all only became reachable in
+  // self_hosted mode when their mode guard was deleted.)
+  if (lower.includes("invalid email address")) return [cliEquivalent, "emails alias list --json", "emails address list --json"];
   if (lower.includes("provider")) return ["emails provider list --json", "emails provider add --help", cliEquivalent];
   if (lower.includes("domain")) return ["emails domain list --json", "emails domain add --help", cliEquivalent];
   if (lower.includes("address")) return ["emails address list --json", "emails address provision --help", cliEquivalent];

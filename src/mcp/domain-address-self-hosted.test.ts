@@ -241,12 +241,29 @@ describe("MCP domain/address self_hosted API-only guards", () => {
     }
   });
 
-  it("no longer refuses the repository-backed domain/address tools", async () => {
-    // Each of these has a `/v1` route, a complete client arm, and a working CLI
-    // twin; the guard was the only thing refusing. This fixture is read-only, so
-    // the writes below fail at the fixture's 404 — what matters is that they get
-    // that far instead of being turned away by a mode check.
-    // src/mcp/self-hosted-unguarded-tools.test.ts drives them to completion.
+  it("no longer refuses the repository-backed domain/address tools — they reach the wire", async () => {
+    // Each of these has a `/v1` route, a complete client arm, and a working CLI twin;
+    // the guard was the only thing refusing.
+    //
+    // A bare `not.toContain("self_hosted API-only mode")` would be near-vacuous here:
+    // it stays green if a tool is replaced by `throw new Error("nope")`, and — worse —
+    // if a guard is re-added using the OTHER refusal wording this codebase already
+    // ships ("is API-backed in self_hosted mode and requires ..."). So each tool must
+    // additionally prove it got as far as the HTTP transport: it either succeeds, or
+    // fails with an error naming the wire (the `/v1` path or an HTTP status). This
+    // fixture only serves GET /v1/domains and GET /v1/addresses, so most calls fail
+    // there; src/mcp/self-hosted-unguarded-tools.test.ts drives them to completion
+    // against a full stub.
+    const REFUSAL_WORDINGS = ["self_hosted API-only mode", "is API-backed in self_hosted mode", "not available in the self-hosted client"];
+    // The discriminating property is "reached the HTTP transport", NOT "succeeded".
+    // Deliberately not asserting success for any of them: this suite shares a process
+    // with others that mutate the self-hosted env, and under that pollution the
+    // fixture's own key stops matching and every call fails 401 — which is still
+    // proof the tool got to the wire. `self-hosted-unguarded-tools.test.ts` drives all
+    // of these to completion against a clean stub; here the job is only to catch a
+    // re-added mode refusal or a stubbed-out throw, and reaching the wire does that.
+    const WIRE = /\/v1\/|\/(domains|addresses|aliases)\b|Self-hosted (GET|POST|PATCH|PUT|DELETE)|HTTP \d{3}/;
+
     for (const [name, args] of [
       ["remove_domain", { domain_id: "domain-ready-1" }],
       ["suggest_address", { domain: "example.com" }],
@@ -261,7 +278,24 @@ describe("MCP domain/address self_hosted API-only guards", () => {
       ["resolve_alias", { recipient: "hello@example.com" }],
     ] as const) {
       const result = await runDomainTool(name, args);
-      expect(result.content[0]?.text ?? "", name).not.toContain("self_hosted API-only mode");
+      const body = result.content[0]?.text ?? "";
+      expect(body, `${name} produced no output`).not.toBe("");
+      for (const wording of REFUSAL_WORDINGS) {
+        expect(body, `${name} still refuses by mode`).not.toContain(wording);
+      }
+      // Reached the transport: either it worked, or the failure names the wire.
+      if (result.isError) {
+        expect(body, `${name} failed before reaching the /v1 transport: ${body}`).toMatch(WIRE);
+      }
+    }
+  });
+
+  it("proves the wire-reaching assertion above can fail (guard wording is really absent)", async () => {
+    // Negative control for the loop: the two tools that KEEP their guard must trip
+    // the very check the loop applies, or the loop is asserting over nothing.
+    for (const name of ["get_dns_records", "verify_domain"] as const) {
+      const body = (await runDomainTool(name, { domain: "example.com" })).content[0]?.text ?? "";
+      expect(body).toContain("self_hosted API-only mode");
     }
   });
 });
