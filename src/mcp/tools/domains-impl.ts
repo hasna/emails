@@ -643,7 +643,7 @@ export function registerDomainTools(server: McpServer): void {
     try {
       const id = resolveId("addresses", address_id);
       if (!getAddress(id)) throw new AddressNotFoundError(id);
-      const addr = suspendAddress(id);
+      const addr = await suspendAddress(id);
       return { content: [{ type: "text", text: JSON.stringify(addr, null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
@@ -661,7 +661,7 @@ export function registerDomainTools(server: McpServer): void {
     try {
       const id = resolveId("addresses", address_id);
       if (!getAddress(id)) throw new AddressNotFoundError(id);
-      const addr = activateAddress(id);
+      const addr = await activateAddress(id);
       return { content: [{ type: "text", text: JSON.stringify(addr, null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
@@ -680,7 +680,7 @@ export function registerDomainTools(server: McpServer): void {
     try {
       const id = resolveId("addresses", address_id);
       if (!getAddress(id)) throw new AddressNotFoundError(id);
-      const addr = setAddressQuota(id, per_day ?? null);
+      const addr = await setAddressQuota(id, per_day ?? null);
       return { content: [{ type: "text", text: JSON.stringify(addr, null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };

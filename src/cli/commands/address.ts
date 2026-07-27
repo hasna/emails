@@ -424,11 +424,11 @@ export function registerAddressCommands(program: Command, output: (data: unknown
   addressCmd
     .command("suspend <id>")
     .description("Suspend a sender address (blocks sending until reactivated)")
-    .action((id: string) => {
+    .action(async (id: string) => {
       try {
         const resolvedId = resolveId("addresses", id);
         if (!getAddress(resolvedId)) handleError(new Error(`Address not found: ${id}`));
-        const a = suspendAddress(resolvedId);
+        const a = await suspendAddress(resolvedId);
         output(a, chalk.yellow(`⏸ Suspended ${a.email} — sending blocked`));
       } catch (e) {
         handleError(e);
@@ -438,11 +438,11 @@ export function registerAddressCommands(program: Command, output: (data: unknown
   addressCmd
     .command("activate <id>")
     .description("Reactivate a suspended sender address")
-    .action((id: string) => {
+    .action(async (id: string) => {
       try {
         const resolvedId = resolveId("addresses", id);
         if (!getAddress(resolvedId)) handleError(new Error(`Address not found: ${id}`));
-        const a = activateAddress(resolvedId);
+        const a = await activateAddress(resolvedId);
         output(a, chalk.green(`✓ Activated ${a.email} — sending allowed`));
       } catch (e) {
         handleError(e);
@@ -452,7 +452,7 @@ export function registerAddressCommands(program: Command, output: (data: unknown
   addressCmd
     .command("quota <id> <perDay>")
     .description("Set a daily send quota for an address (use 'none' to clear)")
-    .action((id: string, perDay: string) => {
+    .action(async (id: string, perDay: string) => {
       try {
         const resolvedId = resolveId("addresses", id);
         if (!getAddress(resolvedId)) handleError(new Error(`Address not found: ${id}`));
@@ -460,7 +460,7 @@ export function registerAddressCommands(program: Command, output: (data: unknown
           ? null
           : Number.parseInt(perDay, 10);
         if (quota !== null && Number.isNaN(quota)) handleError(new Error(`Invalid quota: ${perDay}`));
-        const a = setAddressQuota(resolvedId, quota);
+        const a = await setAddressQuota(resolvedId, quota);
         output(a, a.daily_quota === null
           ? chalk.green(`✓ Cleared daily quota for ${a.email}`)
           : chalk.green(`✓ Daily quota for ${a.email}: ${a.daily_quota}/day`));

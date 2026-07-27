@@ -220,15 +220,53 @@ const root = join(import.meta.dir, "..");
  * merged tree after every rebase, which is what produced the numbers below.
  *
  * Corpus of the merged change: 664 tracked, 663 scanned, 8,851,815 characters.
+ *
+ * RE-MEASURED AND RE-PINNED AGAIN on the `src/db/address-lifecycle` collapse — the FIRST
+ * `src/db/*` family to go, which is why the shape of the reduction is worth reading and not
+ * just the size of it.
+ *
+ * WHAT THIS COLLAPSE ITSELF MOVES, measured on the commit it was written on (8df9247, where
+ * all eleven live counts equalled their then-declared ceilings): `twoArmFamilies` and
+ * `remoteArmModules` by one each (the family's two arms are deleted, so the facade has no
+ * siblings left); `routedFacadeDefinitions` by one and `routedCallExpressions` by SIX — this
+ * facade held a dispatch helper and dispatched all six of its exports through it;
+ * `isSelfHostedModeReferences` by two (the deleted facade imported the client-side predicate
+ * and called it once). Neither deleted arm imported the resource helper or either mode
+ * resolver — they reached data sideways through ANOTHER family's arms instead — so the two
+ * `selfHostedResource*` counters, both mode-resolver counters and the env counter do not move.
+ *
+ * THE NUMBERS BELOW WERE RE-MEASURED ON THE MERGED TREE AFTER THIS REBASE, and the paragraph
+ * above about the silent half is why. Only ONE line conflicted here
+ * (`isSelfHostedModeReferences` / `getEmailsModeReferences`, where the two sides genuinely
+ * disagreed); `resolveEmailsModeReferences`, `normalizeEmailsModeReferences` and
+ * `emailsModeEnvReferences` sit BELOW the conflict region and were auto-merged with no marker
+ * at all. Trusting that silence is how a counter ships wide with the guard green.
+ *
+ * WHAT THE MERGED MEASUREMENT ACTUALLY CHANGED, stated as arithmetic so a reviewer can check
+ * it rather than trust it. Main at a2c940b pinned 35 / 35 / 26 / 281 / 47 / 199 / 68 / 64 /
+ * 65 / 16 / 235 and this branch had pinned 36 / 36 / 27 / 281 / 47 / 199 / 66 / 68 / 65 / 16 /
+ * 235 for its own tree. A per-metric minimum of those two lists is
+ * 35 / 35 / 26 / 281 / 47 / 199 / 66 / 64 / 65 / 16 / 235. The MERGED tree measures
+ * 34 / 34 / 25 / 275 / 47 / 199 / 66 / 64 / 65 / 16 / 235 — so the minimum would have shipped
+ * `twoArmFamilies`, `remoteArmModules` and `routedFacadeDefinitions` one wide each and
+ * `routedCallExpressions` SIX wide, with the guard green on all four, because `<=` cannot see
+ * slack. Corpus of the merged change: 662 tracked, 661 scanned, 8,902,586 characters.
+ *
+ * A NOTE FOR THE `src/db/*` FAMILIES BEHIND THIS ONE, since each will hit this block: a db
+ * family whose arms read the deployment word directly will move more counters than this one
+ * did; one that only reaches sideways into a sibling family's arm will move exactly these
+ * five. Either way the number to lower is the one you MEASURED, on the combined tree, after
+ * rebasing — and zeroing all eleven before measuring is what stops the previous pins from
+ * anchoring the new ones.
  */
 const CEILINGS: Record<string, number> = {
-  twoArmFamilies: 35,
-  remoteArmModules: 35,
-  routedFacadeDefinitions: 26,
-  routedCallExpressions: 281,
+  twoArmFamilies: 34,
+  remoteArmModules: 34,
+  routedFacadeDefinitions: 25,
+  routedCallExpressions: 275,
   selfHostedResourceBranches: 47,
   selfHostedResourceReferences: 199,
-  isSelfHostedModeReferences: 68,
+  isSelfHostedModeReferences: 66,
   getEmailsModeReferences: 64,
   resolveEmailsModeReferences: 65,
   normalizeEmailsModeReferences: 16,
