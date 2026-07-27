@@ -410,7 +410,7 @@ describe("emails batch keeps its (already correct) skip-unless-force shape", () 
     process.env["EMAILS_DB_PATH"] = ":memory:";
     resetDatabase();
     try {
-      const { batchSend } = await import("../../lib/batch.local.js");
+      const { batchSend } = await import("../../lib/batch.js");
       const { createTemplate } = await import("../../db/templates.local.js");
       const provider = createProvider({ name: "sandbox", type: "sandbox", active: true });
       createTemplate({ name: "tpl", subject_template: "S {{email}}", text_template: "B" });

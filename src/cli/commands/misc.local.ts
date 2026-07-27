@@ -372,7 +372,7 @@ export function registerMiscCommands(program: Command, output: (data: unknown, f
         if (!provider) handleError(new Error(`Provider not found: ${providerId}`));
 
         console.log(chalk.dim(`Batch sending with template '${opts.template}' from ${opts.from}...`));
-        const { batchSend } = await import("../../lib/batch.local.js");
+        const { batchSend } = await import("../../lib/batch.js");
         const result = await batchSend({
           csvPath: opts.csv,
           templateName: opts.template,
