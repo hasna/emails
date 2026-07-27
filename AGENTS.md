@@ -2,6 +2,19 @@
 
 This file guides AI coding agents working with `@hasna/emails` - an email management CLI, MCP server, and library supporting Resend, AWS SES, and Cloudflare-routed inbound mail.
 
+## Naming (read before "fixing" any Mailery reference)
+
+This product is **open-emails**: repo `hasna/emails`, package `@hasna/emails`,
+bins `emails*`, env prefix `EMAILS_*`. **Mailery is a separate, unrelated
+product and is not a name for this one** (owner ruling 2026-07-27).
+
+The string `mailery` still appears in this tree on purpose. It is either a
+guard that enforces the ruling, a frozen compatibility constant (migration IDs,
+the `mailery` API-key alias slug, legacy event source, `legacy-inbound@local.mailery`),
+or a banned env selector that must stay named to be rejected. **Do not
+bulk-rename it.** Read [docs/NAMING.md](docs/NAMING.md) first — it lists what
+breaks for each one.
+
 ## What This Package Does
 
 `@hasna/emails` manages the full email lifecycle locally:
