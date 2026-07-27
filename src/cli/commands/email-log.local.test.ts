@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDatabase, getDatabase, resetDatabase } from "../../db/database.js";
 import { createEmail } from "../../db/emails.local.js";
-import { storeEmailContent } from "../../db/email-content.js";
+import { storeSentEmailContent } from "../../lib/sent-ledger.local.js";
 import { storeInboundEmail } from "../../db/inbound.local.js";
 import { createProvider } from "../../db/providers.local.js";
 import { createAddress, markVerified } from "../../db/addresses.local.js";
@@ -154,7 +154,11 @@ describe("email show command", () => {
   it("renders stored HTML as readable text", async () => {
     const db = getDatabase();
     const sent = db.query("SELECT id FROM emails LIMIT 1").get() as { id: string };
-    storeEmailContent(sent.id, { html: "<p>Hello <strong>there</strong> &amp; welcome</p>" }, db);
+    // SEEDED THROUGH THE SURVIVING WRITER. `storeEmailContent` on the email-content family is
+    // now a typed refusal — the seam has no write that sets a body on an existing message — and
+    // the local ledger write lives in `src/lib/sent-ledger.local.ts`, which is what the two
+    // production senders call.
+    await storeSentEmailContent(sent.id, { html: "<p>Hello <strong>there</strong> &amp; welcome</p>" }, db);
 
     const { consoleOutput } = await runEmailLogCommand(["show", sent.id]);
 

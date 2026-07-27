@@ -18,7 +18,7 @@ import {
   getInboundEmail,
 } from "../../db/inbound.local.js";
 import { getEmail } from "../../db/emails.local.js";
-import { getEmailContent } from "../../db/email-content.local.js";
+import { getEmailContent } from "../../db/email-content.js";
 import { getEmailThreading, getThreadMessages, setInboundThreadId } from "../../db/threads.local.js";
 import { getLatestActiveProviderId, listProviderSummaries, listProviderNamesByIds } from "../../db/providers.local.js";
 import { listDomains } from "../../db/domains.local.js";
@@ -860,7 +860,14 @@ function fallbackMessageSummary(subject: string, text: string | null | undefined
   return `About ${topic}.`;
 }
 
-export function getMessageBody(msg: TuiMessage, db?: Database): MessageBody | null {
+/**
+ * ASYNC BECAUSE THE CONTENT FAMILY IS. `src/db/email-content.ts` reads through the store
+ * seam, whose operations are all promises, and this function is the only reader of it here.
+ * The `MailDataSource` contract this feeds already declared `Promise<MessageBody | null>`
+ * (src/lib/mail-data-source.ts) and every caller outside this module already awaited it, so
+ * the change is invisible past this file.
+ */
+export async function getMessageBody(msg: TuiMessage, db?: Database): Promise<MessageBody | null> {
   const d = db || getDatabase();
   if (msg.kind === "inbound") {
     const e = d.query(
@@ -911,7 +918,18 @@ export function getMessageBody(msg: TuiMessage, db?: Database): MessageBody | nu
   }
   const e = getEmail(msg.id, d);
   if (!e) return null;
-  const content = getEmailContent(e.id, d);
+  // NO DATABASE HANDLE. The content family takes a store and resolves it from
+  // configuration; the handle used to select an arm, and passing one here would have
+  // reached a mode branch rather than a database. A refusal from the store RAISES out of
+  // this function — it is not rendered as a message with no body.
+  //
+  // CONSEQUENCE, STATED BECAUSE IT IS A REAL SEAM IN THIS FUNCTION: `db` now governs only PART
+  // of what this function reads. The inbound branch above queries the handle it was given; this
+  // sent branch reads whichever store the installation configured. No production caller passes a
+  // non-default handle (`src/lib/mail-data-source.ts` passes none), so today the two are the same
+  // database — but a caller supplying a SECOND one would get its bodies from the first. The fix
+  // is for the whole function to take a store, which belongs to this module's own collapse.
+  const content = await getEmailContent(e.id);
   const triage = d.query(
     `SELECT summary
        FROM email_triage
@@ -986,7 +1004,7 @@ export interface ConversationBodyOptions {
 }
 
 /** The full conversation with bodies, oldest first. Falls back to the selected message. */
-export function getConversationBodies(msg: TuiMessage, db?: Database, opts?: ConversationBodyOptions): TuiThreadBody[] {
+export async function getConversationBodies(msg: TuiMessage, db?: Database, opts?: ConversationBodyOptions): Promise<TuiThreadBody[]> {
   const d = db || getDatabase();
   const conversation = getConversation(msg, d);
   const allItems = conversation.length > 0
@@ -1001,10 +1019,15 @@ export function getConversationBodies(msg: TuiMessage, db?: Database, opts?: Con
     }];
   const limit = opts?.limit ? positiveInt(opts.limit, 100) : undefined;
   const items = limit && allItems.length > limit ? allItems.slice(-limit) : allItems;
-  return items.map((item) => ({
-    item,
-    body: getMessageBody(threadItemToMessage(item, msg), d),
-  }));
+  // SEQUENTIAL, not `Promise.all`. Every read goes to the same store, the sent-message
+  // branch below it is a SQLite query on one shared connection, and a conversation is
+  // bounded by `opts.limit`; fanning the reads out would buy nothing here and would make an
+  // ordering bug in the store's cursor invisible.
+  const bodies: TuiThreadBody[] = [];
+  for (const item of items) {
+    bodies.push({ item, body: await getMessageBody(threadItemToMessage(item, msg), d) });
+  }
+  return bodies;
 }
 
 // ── mutations (inbound only; sent messages are immutable) ──────────────────────

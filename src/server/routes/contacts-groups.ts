@@ -3,7 +3,7 @@ import { listContacts, suppressContact, unsuppressContact } from '../../db/conta
 import { listTemplateSummaries, getTemplate, createTemplate, deleteTemplate } from '../../db/templates.local.js';
 import { listGroups, createGroup, deleteGroup, getGroupByName, listMemberSummaries, getMember, addMember, removeMember } from '../../db/groups.local.js';
 import { listScheduledEmailSummaries, cancelScheduledEmail } from '../../db/scheduled.js';
-import { getEmailContent } from '../../db/email-content.local.js';
+import { getEmailContent } from '../../db/email-content.js';
 import { getAnalytics } from '../../lib/analytics.js';
 import { exportEmailsCsv, exportEmailsJson, exportEventsCsv, exportEventsJson } from '../../lib/export.js';
 import { json, notFound, badRequest, internalError, resolveId, resolveOptionalId, parseBody, queryInteger, queryPage } from './helpers.js';
@@ -228,7 +228,12 @@ if (emailContentMatch && method === "GET") {
   const id = resolveId("emails", emailContentMatch[1]!);
   if (!id) return notFound();
   try {
-    const content = getEmailContent(id);
+    // NULL NOW MEANS "NO SUCH MESSAGE" AND ONLY THAT. It used to also mean "the message is
+    // here but carries no body row", which answered 404 for a message this route had just
+    // resolved an id for. A message with an empty body is now a 200 whose html and text are
+    // null; a store that REFUSED raises and is answered by `internalError` below, because a
+    // refusal is not a not-found.
+    const content = await getEmailContent(id);
     if (!content) return notFound("Email content not found");
     return json(content);
   } catch (e) { return internalError(e); }

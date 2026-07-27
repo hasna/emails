@@ -359,15 +359,61 @@ const root = join(import.meta.dir, "..");
  * Corpus of this change: 657 tracked, 656 scanned, 9,061,157 characters — both floors
  * (500 files / 5,000,000 characters) cleared with room. One file fewer than 06b7f42: two arm
  * modules deleted, one test file added.
+ *
+ * RE-MEASURED AND RE-PINNED AGAIN on the `src/db/email-content` collapse, which was rebased
+ * TWICE as sibling collapses landed under it, and the two rebases produced OPPOSITE-LOOKING
+ * invitations to get it wrong:
+ *
+ *  * onto 06b7f42, THIS FILE DID NOT CONFLICT AT ALL. `git diff origin/main` over it was EMPTY,
+ *    because that branch had not yet touched the block — so all eleven ceilings arrived from
+ *    main verbatim, git reported nothing to resolve, and the guard was green. There was no
+ *    visible resolution to be tempted by and no per-metric minimum to compute: the invitation
+ *    was simply to DO NOTHING. Measuring found SEVEN counters standing wide.
+ *  * onto 65ed3a8, THREE of eleven lines conflicted (`routedCallExpressions`,
+ *    `selfHostedResourceBranches`, `selfHostedResourceReferences`) and the other EIGHT
+ *    auto-merged with no marker, at values the two sides happened to share AFTER the digest-row
+ *    collapse had moved them — which is the worst case, because agreement on a number is not
+ *    agreement about a tree.
+ *
+ * Both times the answer was the same: zero all eleven, then measure the merged tree over the
+ * real `git ls-files` corpus. An absent conflict is not agreement; it is the absence of a
+ * question.
+ *
+ * WHAT THIS COLLAPSE ITSELF MOVES, as the difference between the commit it merges into
+ * (65ed3a8, where all eleven live counts equalled the ceilings it declared) and the merged
+ * tree: `twoArmFamilies` and `remoteArmModules` by one each (the family's two arms are
+ * deleted); `routedFacadeDefinitions` by one and `routedCallExpressions` by two (its facade
+ * held a dispatch helper and dispatched both of its exports through it);
+ * `selfHostedResourceBranches` by one and `selfHostedResourceReferences` by three (the local
+ * arm asked once whether it was really the local arm, and the two arms reached the resource
+ * store between them); and `isSelfHostedModeReferences` by two (the deleted facade imported the
+ * client-side predicate and called it once). Neither deleted arm named the deployment setting or
+ * parsed it, so the three resolver/parser counters and the env counter do not move.
+ *
+ * ARITHMETIC A REVIEWER CAN CHECK RATHER THAN TRUST. Main at 65ed3a8 pinned
+ * 31 / 31 / 22 / 259 / 45 / 188 / 62 / 62 / 65 / 16 / 235; this branch had pinned
+ * 31 / 31 / 22 / 263 / 44 / 189 / 62 / 62 / 65 / 16 / 235 for its own pre-rebase tree. The
+ * MERGED tree measures 30 / 30 / 21 / 257 / 44 / 185 / 60 / 62 / 65 / 16 / 235. So git's own
+ * resolution — the eight silently merged lines, plus a per-metric minimum on the three that
+ * conflicted — would have shipped `twoArmFamilies`, `remoteArmModules`,
+ * `routedFacadeDefinitions` one wide each, `routedCallExpressions` and
+ * `isSelfHostedModeReferences` two wide each, and `selfHostedResourceReferences` THREE wide:
+ * SIX counters and ten units of slack, all green under `<=`, because the two collapses removed
+ * DISJOINT references and neither a merge nor a minimum can see that.
+ * (`selfHostedResourceBranches` would have been right, by luck, which is the point.)
+ *
+ * Corpus of the merged change: 655 tracked, 654 scanned, ~9.11M characters — both floors
+ * cleared with room. Measured a second time after this paragraph was written, because this file
+ * is inside the corpus it scans; the eleven counts were unchanged.
  */
 const CEILINGS: Record<string, number> = {
-  twoArmFamilies: 31,
-  remoteArmModules: 31,
-  routedFacadeDefinitions: 22,
-  routedCallExpressions: 259,
-  selfHostedResourceBranches: 45,
-  selfHostedResourceReferences: 188,
-  isSelfHostedModeReferences: 62,
+  twoArmFamilies: 30,
+  remoteArmModules: 30,
+  routedFacadeDefinitions: 21,
+  routedCallExpressions: 257,
+  selfHostedResourceBranches: 44,
+  selfHostedResourceReferences: 185,
+  isSelfHostedModeReferences: 60,
   getEmailsModeReferences: 62,
   resolveEmailsModeReferences: 65,
   normalizeEmailsModeReferences: 16,

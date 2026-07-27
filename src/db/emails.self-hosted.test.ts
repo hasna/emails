@@ -1,10 +1,12 @@
-// Regression: in selfHosted (self_hosted) mode `getEmail`, `resolveEmailId`, and
-// `getEmailContent` MUST route to the app's /v1/messages API — never the local
-// (empty) SQLite `emails` table. Previously `getEmail`/`getEmailContent` read
-// SQLite unconditionally and `show`'s id resolution used the local
-// `resolvePartialId`, so `emails show <id>` returned "Email not found" for a
-// message that plainly existed over /v1 (search/list found it) — the split-brain
-// bug this test locks closed.
+// Regression: in selfHosted (self_hosted) mode `getEmail` and `resolveEmailId` MUST
+// route to the app's /v1/messages API — never the local (empty) SQLite `emails`
+// table. Previously `getEmail` read SQLite unconditionally and `show`'s id
+// resolution used the local `resolvePartialId`, so `emails show <id>` returned
+// "Email not found" for a message that plainly existed over /v1 (search/list found
+// it) — the split-brain bug this test locks closed.
+//
+// `getEmailContent` was covered here too and no longer is; the note at the end of the
+// describe block says where it went and why it could not stay.
 //
 // Mirrors domain.selfHosted.test.ts: the self-hosted-store's transport is a SYNCHRONOUS
 // curl (spawnSync) that blocks Bun's loop, so the /v1 stand-in runs in a
@@ -14,7 +16,6 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getEmail, resolveEmailId } from "./emails.js";
-import { getEmailContent } from "./email-content.js";
 import { resetSelfHostedConfigCache } from "./self-hosted-store.js";
 
 let INHERITED_PROCESS_ENV: NodeJS.ProcessEnv;
@@ -164,12 +165,18 @@ describe("emails repo — selfHosted (self_hosted) routing", () => {
     expect(resolveEmailId("nope")).toBeNull();
   });
 
-  it("getEmailContent returns the message body from the selfHosted API", async () => {
-    await seed([MESSAGE]);
-    const content = getEmailContent(MESSAGE.id);
-    expect(content).not.toBeNull();
-    expect(content!.text_body).toBe("hello from the selfHosted store");
-    expect(content!.html).toBe("<p>hello from the selfHosted store</p>");
-    expect(content!.headers).toEqual({ "X-Test": "1" });
-  });
+  // THE `getEmailContent` CASE MOVED, and this note is the whole reason it is not simply
+  // gone. It asserted that the reader routes to `/v1` rather than to the local SQLite island
+  // when the deployment word is set. That regression is now structurally impossible: the
+  // email-content family has no arms and no routing — it reads whichever store the
+  // installation configured — so there is nothing left here for a mode word to get wrong.
+  //
+  // It also could no longer run in this file's fixture. These cases set a database path AND
+  // an API origin at once (lines above), which `planEmailStore` treats as a hard boot error
+  // rather than a precedence rule, on the grounds that an installation with two places to
+  // keep its mail has not said which one it meant.
+  //
+  // The successor is `src/db/email-content.test.ts`, which asserts the same three fields
+  // against a REAL HTTP store in front of the seam — and against a real SQLite store with
+  // identical assertions, which this file could not do.
 });

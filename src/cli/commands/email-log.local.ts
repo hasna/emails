@@ -8,7 +8,7 @@
 import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
 import { listEmails, getEmail, searchEmails, resolveEmailId } from "../../db/emails.local.js";
-import { getEmailContent } from "../../db/email-content.local.js";
+import { getEmailContent } from "../../db/email-content.js";
 import { getLatestActiveProviderId, getProvider } from "../../db/providers.local.js";
 import { getPreferredActiveAddressEmail } from "../../db/addresses.local.js";
 import { getDatabase, resolvePartialId, resolvePartialIdOrThrow } from "../../db/database.js";
@@ -134,7 +134,9 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
   emailCmd
     .command("show <id>")
     .description("Show full details and body of a sent email")
-    .action((id: string) => {
+    // ASYNC because the content family reads through the store seam. Commander awaits an
+    // action's promise, so a rejection still reaches the same `handleError` path.
+    .action(async (id: string) => {
       // Re-use existing show logic
       try {
         const db = getDatabase();
@@ -142,7 +144,7 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
         if (!resolvedId) handleError(new Error(`Email not found: ${id}`));
         const emailRecord = getEmail(resolvedId!, db);
         if (!emailRecord) handleError(new Error(`Email not found: ${id}`));
-        const content = getEmailContent(resolvedId!, db);
+        const content = await getEmailContent(resolvedId!);
         console.log(chalk.bold(`\nEmail: ${emailRecord!.id}`));
         console.log(`  ${chalk.dim("Subject:")}  ${emailRecord!.subject}`);
         console.log(`  ${chalk.dim("From:")}     ${emailRecord!.from_address}`);
@@ -316,14 +318,14 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
 
   // ─── SHOW EMAIL ──────────────────────────────────────────────────────────────
   program.command("show <id>").description("Show full email details including body content")
-    .action((id: string) => {
+    .action(async (id: string) => {
       try {
         const db = getDatabase();
         const resolvedId = resolveEmailId(id, db);
         if (!resolvedId) handleError(new Error(`Email not found: ${id}`));
         const emailRecord = getEmail(resolvedId!, db);
         if (!emailRecord) handleError(new Error(`Email not found: ${id}`));
-        const content = getEmailContent(resolvedId!, db);
+        const content = await getEmailContent(resolvedId!);
 
         console.log(chalk.bold(`\nEmail: ${emailRecord!.id}`));
         console.log(`  ${chalk.dim("Subject:")}  ${emailRecord!.subject}`);
@@ -338,20 +340,24 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
         const replyCount = getReplyCount(resolvedId!, db);
         if (replyCount > 0) console.log(`  ${chalk.dim("Replies:")}  ${chalk.cyan(String(replyCount))} (use 'emails replies ${id}' to view)`);
 
-        if (content) {
-          const headers = content.headers;
-          if (Object.keys(headers).length > 0) {
-            console.log(chalk.bold("\n  Headers:"));
-            for (const [k, v] of Object.entries(headers)) {
-              console.log(`    ${chalk.dim(k + ":")} ${v}`);
-            }
+        const headers = content?.headers ?? {};
+        if (Object.keys(headers).length > 0) {
+          console.log(chalk.bold("\n  Headers:"));
+          for (const [k, v] of Object.entries(headers)) {
+            console.log(`    ${chalk.dim(k + ":")} ${v}`);
           }
+        }
 
-          if (content.text_body || content.html) {
-            console.log(chalk.bold("\n  Body:"));
-            console.log(readableMessageText(content.text_body, content.html).split("\n").map((l: string) => `    ${l}`).join("\n"));
-          }
+        if (content?.text_body || content?.html) {
+          console.log(chalk.bold("\n  Body:"));
+          console.log(readableMessageText(content.text_body, content.html).split("\n").map((l: string) => `    ${l}`).join("\n"));
         } else {
+          // KEYED ON THE BODY, NOT ON THE RECORD. This branch used to be `else` to
+          // `if (content)`, i.e. it fired only when the reader returned null — which it did
+          // when the content ROW was missing. Null now means "no such message" and nothing
+          // else, so a message with an empty body returns a record whose fields are null and
+          // this notice would never have printed again. The condition is the one the operator
+          // cares about either way: is there a body to show.
           console.log(chalk.dim("\n  No body content stored for this email."));
         }
         console.log();
