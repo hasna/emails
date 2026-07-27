@@ -43,7 +43,7 @@
 // 1. THE SEAM CANNOT EXPRESS THIS WRITE, and the missing piece is the FENCE rather than the
 //    row. `EmailStore.events` is `EventsRepository`, an alias of the generic
 //    `ResourceRepository<ResourceRow>` (`src/store/repositories.ts:358`), whose entire write
-//    surface is `create(input)` and `update(id, patch)`. The receiver's write is an UPSERT
+//    surface is `create(input)`, `update(id, patch)` and `remove(id)`. The receiver's write is an UPSERT
 //    whose fence is the partial unique index `idx_events_provider_event` on
 //    `(provider_id, provider_event_id) WHERE provider_event_id IS NOT NULL`
 //    (`src/db/database.ts:1264`, re-ensured at `:2407`), consulted by `INSERT OR IGNORE` and
@@ -99,43 +99,68 @@
 //
 // "The refusal is preserved" is NOT the claim that nothing changed: the two are asked of
 // DIFFERENT settings, so the honest form of the claim is an enumeration and the enumeration is
-// MEASURED rather than reasoned about. Both database-path settings crossed with an API url
-// (absent / valid / unparseable), a credential (none / session token / operator key), the
-// client-env pointer (absent / present) and the deployment word (absent / local / server-side)
-// is 648 combinations; each was run against main and against this module and the answers
-// compared. Result: **48 both run, 300 both refuse, 276 change to a refusal, 24 change to a
-// run** — SEVEN classes in all, and every one is named below with its count. A reviewer who
-// wants only the important line: the only direction that needs justifying has ONE class in it.
+// MEASURED rather than reasoned about.
+//
+// THE GRID, stated precisely enough to reproduce, because a reviewer checked the arithmetic and
+// an earlier, vaguer sentence here did not multiply out: the database-path dimension is
+// ASYMMETRIC — the first setting takes 3 values (absent, in-memory, file A) and the second takes
+// 4 (absent, in-memory, file A, file B), so that a same-path pair and a different-path pair are
+// both reachable. Crossed with an API url (absent / valid / unparseable), a credential (none /
+// session token / operator key), the client-env pointer (absent / present) and the deployment
+// word (absent / local / server-side): 3 x 4 x 3 x 3 x 2 x 3 = 648 combinations. Each was run
+// against main and against this module and the answers compared. Result: **48 both run, 300 both
+// refuse, 276 change to a refusal, 24 change to a run** — seven classes inside the grid, each
+// named below with its count. The line that matters most: the only direction that needs
+// justifying has ONE class in it.
 //
 // MAIN RAN, THIS MODULE REFUSES — 276 combinations, six classes:
 //
 //    231  a database path AND an API setting are both configured. `planEmailStore` refuses a
-//         contradiction rather than picking a winner, and the receiver inherits that.
+//         contradiction rather than picking a winner, and the receiver inherits that. THE
+//         LARGEST CLASS BY FAR — 84% of the change — and therefore the likeliest way a consumer
+//         notices this release.
 //     24  both database-path settings set, naming DIFFERENT files. Main ran on the documented
 //         precedence; the resolver treats "which did you mean?" as unanswerable.
-//      6  an API url with NO credential. A url alone cannot produce a working store.
-//      6  an API url that does not parse.
+//      9  an API url that does not parse.
 //      6  API STORAGE, RESOLVED — the class the deleted arm existed for. The receiver belongs
 //         to the service.
+//      3  an API url with NO credential. A url alone cannot produce a working store.
 //      3  a client-env pointer set whose API url is not present in the environment.
 //
-// The first five converge with the families that already collapsed and already refuse there
+// The last four are ordered by count and the 9/3 split is not a typo: `planEmailStore` PARSES
+// the url (`credentialFreeOrigin`, `src/store-resolution.ts:252`) BEFORE it looks for a
+// credential (`:253`), so an unparseable url with no credential is a parse failure. An earlier
+// version of this list said 6/6 — the check order read backwards — and the error was invisible
+// because the two figures cancel in the 276 total. Corrected against the resolver, not against
+// intuition.
+//
+// Five of the six converge with the families that already collapsed and already refuse there
 // (`src/db/forwarding`, `src/lib/forwarding`, `src/lib/status-facts`).
 //
 // MAIN REFUSED, THIS MODULE RUNS — 24 combinations, ONE class, and it is the one to read
 // twice: storage resolves to a LOCAL DATABASE while the deployment word claims a server-side
-// deployment. Two things about it. First, main's refusal there does NOT come from the deleted
-// arm at all — the mode read itself throws ("the self-hosted client is not configured") before
-// any arm is chosen, so main never reached the stub. Second, running is the correct answer:
-// the storage settings say local SQLite, which is where the events would go, and the word that
-// disagreed is the axis being deleted. This class disappears with it.
+// deployment. In 21 of the 24 that local database is EXPLICITLY configured, so this is not
+// merely "nothing was set". Two things about it. First, main's refusal there does NOT come from
+// the deleted arm at all — the mode read itself throws ("the self-hosted client is not
+// configured") before any arm is chosen, so main never reached the stub. Second, running is the
+// correct answer: the storage settings say local SQLite, which is where the events would go, and
+// the word that disagreed is the axis being deleted. This class disappears with it.
 //
-// A SEVENTH CLASS IS OUTSIDE THAT GRID and is stated rather than counted, because an untrusted
+// AN EIGHTH CLASS IS OUTSIDE THAT GRID and is stated rather than counted, because an untrusted
 // data-directory ancestor cannot be varied as an environment value: storage resolves but the
 // data directory is refused (a symlink, an untrusted ancestor). Main bound the port and then
 // answered 500 to every callback; this refuses at construction. That is a strict improvement in
 // the direction that matters for a webhook — refusing to start leaves the callbacks queued at
 // the provider instead of draining its finite retry budget against a 500.
+//
+// A NEW SIDE EFFECT AT CONSTRUCTION, which the enumeration does not show and which is worth
+// knowing before calling this in a test or a probe: resolving local storage goes through
+// `getDatabasePath()`, which CREATES AND HARDENS the data directory. Main created it on the
+// FIRST CALLBACK instead, so on this branch `createWebhookServer` touches the filesystem where
+// it previously did not. That is the same work opening the database would have done moments
+// later, and it is the price of answering "can this installation store an event?" before
+// accepting one — but it is a change, it is asserted by a case in the suite, and a caller that
+// expected construction to be inert should know.
 //
 // WHAT MAIN ACTUALLY DID IN THE API CLASS, measured on main rather than assumed, because it is
 // two different failures and the second is the dangerous one. With no local file yet: main
@@ -202,9 +227,22 @@
 //     The guard defends this function's own contract, not the transport.
 //   * the 10,000-entry cache eviction bound. Observing it needs 10,001 distinct SIGNED
 //     envelopes, and what it protects is memory rather than correctness.
-//   * the `default:` arm of the colour helper. The switch covers all five members of
-//     `WebhookEvent["type"]`, so no event either parser can produce reaches it, and it only
-//     changes a console line.
+//   * the `default:` arm of the colour helper. Unreachable — but a review found the reason this
+//     comment first gave for that ("no event either parser can produce reaches it") to be FALSE,
+//     and the correction is worth more than the survivor. `webhook-events.ts:57` and `:77` index
+//     a PLAIN OBJECT LITERAL with `typeMap[body.type]`, so INHERITED keys escape the
+//     `if (!eventType) return null` guard: measured directly, `type: "constructor"`,
+//     `"toString"` and `"valueOf"` all yield an event whose `type` is a FUNCTION, and
+//     `"__proto__"` yields one whose `type` is an object. The arm is still never reached, because
+//     binding a function into the `events` row throws and the request becomes a 500 before the
+//     console line — which is also the shape of the PRE-EXISTING DEFECT this exposes: a signed
+//     payload naming a prototype key gets a permanent 500 and is retried by the provider forever,
+//     where it should get the 200 "Unrecognized event type" that every other unknown type gets.
+//     NOT FIXED HERE, and the reason is blast radius rather than doubt: the fix belongs in
+//     `webhook-events.ts` (`Object.hasOwn`, or a null-prototype map), which is NOT part of this
+//     family and is shared with the server-side receiver in `src/server/webhooks/receivers.ts`,
+//     so changing it changes that receiver's behaviour too and wants its own change with its own
+//     tests on both mounts.
 //
 // The two bounds on the body are NOT redundant and the suite now separates them, which it did
 // not at first: removing the declared-length check left every case green, because the

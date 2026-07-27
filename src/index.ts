@@ -370,16 +370,42 @@ export type { WebhookEvent } from "./lib/webhook-events.js";
 //
 // WHAT CHANGED IS WHICH CONFIGURATIONS STAND UP A LISTENER. The deleted second arm threw for an
 // API-configured installation, and that refusal is PRESERVED — but it is now decided by STORAGE
-// CONFIGURATION rather than by the deployment word, and the two do not agree everywhere. Five
-// configurations answer differently, enumerated in `src/lib/webhook.ts`'s header; four newly refuse
-// (API storage with no deployment word, a stale client-secret pointer, two database paths at once,
-// a refused data directory) and ONE newly succeeds (deployment word self-hosted with no storage
-// setting naming anything). A consumer that called this on an API-configured installation and got a
-// running server now gets a thrown refusal instead — which is the point, because that server bound
-// a port the provider does not post to and wrote its events into a database nothing else reads.
+// CONFIGURATION rather than by the deployment word, and the two do not agree everywhere.
+//
+// SIX CLASSES NEWLY REFUSE and ONE NEWLY SUCCEEDS, measured over a 648-combination grid and
+// enumerated with counts in `src/lib/webhook.ts`'s header. Since `CHANGELOG.md`'s `[Unreleased]`
+// section is digest-frozen and the version is not bumped, THIS COMMENT IS THE CHANGELOG for the
+// break, so the classes are listed here in full rather than summarised — an earlier version of this
+// note said "five configurations" and omitted the largest one, which is the single most likely way
+// a consumer notices this release:
+//
+//   * A DATABASE PATH AND AN API SETTING CONFIGURED TOGETHER — 231 of the 276 changed
+//     combinations, 84% of the change. Previously ran against the local database; now refused as a
+//     two-store contradiction. If you set both, this is the one that will reach you.
+//   * both database-path settings naming DIFFERENT files (24) — previously ran on the documented
+//     `HASNA_`-wins precedence.
+//   * an API url that does not parse (9).
+//   * API storage, resolved (6) — the class the deleted arm existed for.
+//   * an API url with no credential (3).
+//   * a client-env pointer set whose API url is absent from the environment (3).
+//
+// And ONE newly succeeds: storage resolves to a local database while the deployment word claims a
+// server-side deployment — in 21 of those 24 combinations the local database is EXPLICITLY
+// configured, so this is not merely "nothing was set", and main's refusal there came from the mode
+// read throwing rather than from the deleted arm.
+//
+// (A refused data directory also changes answer — from "bound, then 500 per callback" to a
+// construction-time refusal — but it sits OUTSIDE that grid, because an untrusted ancestor is not
+// an environment value; it is described in the module header rather than counted here.)
+//
+// A consumer that called this on an API-configured installation and got a running server now gets a
+// thrown refusal instead — which is the point, because that server bound a port the provider does
+// not post to and, with a stale local database present, wrote its events into a file nothing reads.
 //
 // The throw is at CONSTRUCTION, not per request, so a caller that treats a returned server as proof
-// it can receive callbacks is still correct; a caller that never expected a throw is not.
+// it can receive callbacks is still correct; a caller that never expected a throw is not. Also new
+// at construction: resolving local storage CREATES AND HARDENS the data directory, which main did
+// on the first callback instead.
 //
 // This needs a MAJOR version at release. The version is deliberately not bumped here, and
 // `CHANGELOG.md`'s `[Unreleased]` section is digest-frozen, so this comment and the pull request

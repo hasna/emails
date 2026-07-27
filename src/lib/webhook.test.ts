@@ -324,9 +324,27 @@ describe("createWebhookServer storage gate", () => {
     expect(message).toContain(API_BASE_URL_SETTING);
   });
 
+  it("REFUSES a database path and an API setting configured TOGETHER, as a two-store contradiction", () => {
+    // THE LARGEST CHANGED CLASS — 231 of the 276 configurations whose answer this collapse moves,
+    // and it had no case at all until a review pointed that out. It is also the POSITIVE CONTROL
+    // for the case below: that one asserts a phrase is ABSENT, and the phrase is this resolver
+    // message's own wording, so without this case nothing proved the phrase was ever reachable.
+    clearStoreSettings();
+    process.env[DATABASE_PATH_SETTINGS[1]] = join(home, "local.db");
+    process.env[API_BASE_URL_SETTING] = "https://mail.example.test";
+    process.env[API_CREDENTIAL_SETTINGS[0]] = "not-a-real-credential";
+    const message = refusalMessage();
+    expect(message).toContain("cannot tell where this installation's delivery events would be stored");
+    expect(message).toContain("two configured places");
+    expect(message).toContain(DATABASE_PATH_SETTINGS[1]);
+    expect(message).toContain(API_BASE_URL_SETTING);
+  });
+
   it("does NOT phrase an unresolvable configuration as a contradiction between two stores", () => {
     // Two different faults arrive as one kind, and only one of them is about naming two stores.
     // The resolver's own message says which; this module must not assert the wrong one over it.
+    // The case above is this one's positive control — it proves the phrase asserted absent here is
+    // a phrase the resolver really does emit for the OTHER fault.
     clearStoreSettings();
     process.env[API_SETTINGS_POINTER] = "vault/item/name";
     const message = refusalMessage();

@@ -22,12 +22,21 @@ import { handleError } from "../utils.js";
  * The server is RETURNED rather than discarded. The action still does not stop it (it runs until
  * the operator interrupts), but a caller that needs to — a test — now can, which is the difference
  * between a testable unit and this file's untestable action.
+ *
+ * THE RETURN TYPE IS DERIVED FROM THE RECEIVER, NOT HAND-WRITTEN, and that is a correction rather
+ * than a style choice. A hand-written `{ port: number; stop(…) }` did not typecheck — `Bun.Server`
+ * declares `port` as `number | undefined` — and the failure was invisible to the whole test suite,
+ * because Bun transpiles without typechecking and the repo's only whole-program gate
+ * (`src/index.test.ts`) exhausts V8's heap before it can report. Derived, it cannot drift from what
+ * `Bun.serve` actually returns.
  */
+type WebhookListener = Awaited<ReturnType<typeof import("../../lib/webhook.js").createWebhookServer>>;
+
 export async function startServeWebhookListener(
   port: number,
   providerId: string | undefined,
   webhookSecret: string | undefined,
-): Promise<{ started: true; server: { port: number; stop(closeActiveConnections?: boolean): void } } | { started: false; reason: string }> {
+): Promise<{ started: true; server: WebhookListener } | { started: false; reason: string }> {
   try {
     const { createWebhookServer } = await import("../../lib/webhook.js");
     return { started: true, server: createWebhookServer(port, providerId, webhookSecret) };
@@ -62,16 +71,23 @@ export function registerServeCommands(program: Command, output: (data: unknown, 
           const securityNote = opts.webhookSecret ? chalk.green(" (signature verified)") : chalk.yellow(" (no signature verification)");
           console.log(chalk.dim(`  Webhook listener on port ${webhookPort}`) + securityNote);
         } else {
-          // MARKED FAILED, not swallowed: the operator asked for a listener and did not get one, so
-          // a supervisor reading the exit status has to see it — while the dashboard that DID bind
-          // keeps serving.
+          // REPORTED ALWAYS; the EXIT STATUS depends on whether the operator asked for this
+          // listener specifically. `--webhook-port <n>` is a request for a receiver and its absence
+          // is a failure, so the process is marked failed while the dashboard that DID bind keeps
+          // serving. `--all` is a convenience meaning "start what you can", and a review pointed
+          // out that failing it outright would be inconsistent anyway: the SMTP listener started
+          // below is NOT gated and still writes inbound mail into local SQLite in the very
+          // configuration this gate exists to refuse, so `--all` is half-gated whatever this line
+          // does. (That asymmetry is `src/lib/inbound.local.ts`'s to resolve when the inbound
+          // family collapses — it is named here, not papered over.)
           //
-          // THE ONE LINE OF THIS CHANGE NO TEST REACHES, stated plainly rather than dressed up as
-          // unreachable: a mutation removing it survives. Reaching it means running the action, and
-          // the action's first statement binds a dashboard that `startServer` does not hand back, so
-          // a test that got here would hold a port for the rest of the run. The decision it belongs
-          // to — refuse versus start, and with what reason — IS tested, through the helper above.
-          process.exitCode = 1;
+          // THE TWO LINES OF THIS CHANGE NO TEST REACHES, stated plainly rather than dressed up as
+          // unreachable: a mutation removing either survives. Reaching them means running the
+          // action, and the action's first statement binds a dashboard that `startServer` does not
+          // hand back, so a test that got here would hold a port for the rest of the run. The
+          // decision they hang off — refuse versus start, and with what reason — IS tested, through
+          // the helper above.
+          if (opts.webhookPort) process.exitCode = 1;
           console.error(chalk.red(`  Webhook listener NOT started: ${outcome.reason}`));
         }
       }

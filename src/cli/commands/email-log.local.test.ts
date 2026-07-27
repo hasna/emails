@@ -10,6 +10,11 @@ import { storeInboundEmail } from "../../db/inbound.local.js";
 import { createProvider } from "../../db/providers.local.js";
 import { createAddress, markVerified } from "../../db/addresses.local.js";
 import { setConfigValue } from "../../lib/config.js";
+import {
+  API_BASE_URL_SETTING,
+  API_CREDENTIAL_SETTINGS,
+  DATABASE_PATH_SETTINGS,
+} from "../../store-resolution.js";
 import { registerEmailLogCommands } from "./email-log.local.js";
 
 let INHERITED_PROCESS_ENV: NodeJS.ProcessEnv;
@@ -342,12 +347,16 @@ describe("webhook listen command", () => {
   }
 
   it("REFUSES at the command level when the mail lives behind the API, naming the setting", async () => {
-    delete process.env["EMAILS_DB_PATH"];
-    process.env["EMAILS_SELF_HOSTED_URL"] = "https://mail.example.test";
-    process.env["EMAILS_SELF_HOSTED_API_KEY"] = "not-a-real-credential";
+    // SETTINGS NAMED FROM THE RESOLVER'S CONSTANTS, not as literals, and ITERATED rather than
+    // spelled one at a time. `DATABASE_PATH_SETTINGS` has TWO entries and an earlier version of
+    // this case deleted only the second by name — it passed solely because the hermetic runner
+    // happens to unset the first, which is a dependency on the runner rather than on this file.
+    for (const setting of DATABASE_PATH_SETTINGS) delete process.env[setting];
+    process.env[API_BASE_URL_SETTING] = "https://mail.example.test";
+    process.env[API_CREDENTIAL_SETTINGS[1]] = "not-a-real-credential";
     const errors = await runExpectingError(["webhook", "listen", "--port", "0"]);
     expect(errors).toContain("durable provider webhook receiver runs where the mail is stored");
-    expect(errors).toContain("EMAILS_SELF_HOSTED_URL");
+    expect(errors).toContain(API_BASE_URL_SETTING);
   });
 
   it("gets PAST the gate on a local database, failing on the port instead of on storage", async () => {
