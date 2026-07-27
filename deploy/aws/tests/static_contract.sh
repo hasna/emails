@@ -620,7 +620,7 @@ changelog_section_sha256() {
 # published) rather than as the two bullets it had been narrowed to, and 1.4.0 is frozen too so
 # the same reassignment cannot happen to the next release.
 expected_unreleased_sha256='1da42e1a6a94b4180d823a144c4da54b6e03cff194335ac64be15f4de53c33f4'
-expected_release_140_sha256='eed1703bc83bebed2ef3ea668afaa40e7ba67591971f364b7d0dd9d7cbaffdea'
+expected_release_140_sha256='0fdd43b776c3715683234acad8a17df6eb3079f49869d88254a734f4cece7413'
 expected_release_132_sha256='719b031270908506ac34b273a232384c81fbfaa00e3ecf9e6e4e3508fb8e6421'
 expected_release_132_opening='## 1.3.2 (2026-07-26)
 

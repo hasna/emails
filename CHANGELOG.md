@@ -6,12 +6,68 @@ All notable changes to `@hasna/emails` are documented here.
 
 ## 1.4.0 (2026-07-27)
 
-Cut at `8df9247` (PR #117), the last commit before the first public-breaking family
-collapse. 92 commits. Additive on every published entry point, measured by enumerating
-the runtime export surface at both boundaries: `.` gained one export (`providerDnsPublishing`)
-and lost none, `./storage` went 20 → 35 value exports with none removed, `./selfhost` is
-unchanged, and no exported value changed from synchronous to asynchronous. `storeEmailContent`
-still writes.
+Cut at `8df9247` (PR #117). 92 commits.
+
+**THIS RELEASE CONTAINS BREAKING CHANGES. The version number below is not settled — see
+"Breaking" — and this section deliberately states the breaks rather than the number.**
+
+No export was removed or renamed, and no exported value changed from synchronous to
+asynchronous: `.` gained one export (`providerDnsPublishing`) and lost none, `./storage`
+went 20 → 35 value exports with none removed, `./selfhost` gained a `recordMessage`
+method on its client and one optional `MessageListItem` field. `storeEmailContent` still
+writes. That measurement is **name, arity and sync/async only, over three of the six
+published artifacts** — it does not cover the `emails` / `emails-mcp` / `emails-serve`
+bins, parameter types, thrown behaviour, or type-only widenings, and every break below
+is invisible to it. An earlier draft of this entry called the release "additive on every
+published entry point" on the strength of that measurement alone; it is not.
+
+### Breaking
+
+- **`runDiagnostics(db, …)` now THROWS where 1.3.2 returned checks.** `src/lib/doctor.ts:622`
+  still declares `dbOrOptions?: Database | DiagnosticsOptions`, so the call type-checks and
+  fails at runtime. The handle is refused deliberately — the checks read through the store
+  seam, so a supplied connection would be reported on by nothing while the caller believed it
+  was the subject of the report — but the refusal is a break, and the retained parameter type
+  means the compiler will not find it for you. Pass options only; use `_store` to target a
+  specific store.
+- **`batchSend` no longer consults the deployment-mode axis.** It resolved through the
+  process-wide deployment-mode read in 1.3.2; it now resolves a store from storage
+  configuration (`createConfiguredEmailStore()`), and `src/store-resolution.ts` contains no
+  reference to the mode variable at all. A deployment that set the mode variable to force local
+  behaviour while an API settings pointer was also configured got local behaviour before and
+  does not now — it
+  gets the pointer's store, or a `StoreConfigurationError` if the two contradict. This applies
+  to every command family moved onto the seam, not only batch.
+- **`emails status` / `emails inbox sync-status` `--json`, and the MCP `emails://status`
+  resource, lost three answers in local mode.** `src/lib/status-facts.ts:18-52` records them as
+  capability losses in its own words: `domains.send_ready` / `receive_ready` and the per-domain
+  `state` / `send_ready` / `receive_ready` verdicts are now REFUSED and the per-domain `issues`
+  list no longer carries DNS lines, because `DomainRecord` carries none of the DNS status
+  columns `assessDomainReadiness` needs; `sources.configured.*` is REFUSED, because the seam has
+  no ingestion-source repository; and `addresses.usable_from` is REFUSED. The third is a defect
+  removal rather than a loss — the deleted local arm answered it from
+  `verified = 1 AND status != 'suspended'`, a proxy production disproves, with 319 of 325
+  addresses `verified = false` that demonstrably send. Concretely, in local mode
+  `addresses.usable_from` goes `[]` → `null`, `domains.send_ready` and `receive_ready` go
+  `0` → `null`, and with domains present three more per-domain fields become `null` too. Every
+  count also becomes a client enumeration rather than a `COUNT(*)`, so a bounded read is
+  published as a lower bound instead of a total. Gate on `.degraded` / `.limited` and read
+  `gaps[path]`; do not do arithmetic on these fields.
+- **`--json` type widenings:** `usable_truncated` and `usable_from_truncated`
+  `boolean` → `boolean | null` (`src/lib/status-types.ts`). `send_ready`, `receive_ready` and
+  `usable_from` were already declared nullable in 1.3.2, so typed consumers compile unchanged —
+  their *behaviour* still changes from an answer to a permanent refusal.
+- **Exported type widenings, invisible at runtime and breaking for exhaustive consumers:**
+  `DoctorCheck.status` gains `"unknown"` (`src/lib/diagnostics-format.ts`), so a `switch` with a
+  `never` default no longer compiles; `EmailsModeResolution.warning` goes `null` →
+  `string | null` (`src/lib/mode.ts`), which is the return type of both mode-resolution entry
+  points, each a pre-existing `./storage` export. Populating `warning` is the point of the
+  mode-note fix below — it is still a change to a published type.
+
+Note on the cut point: `8df9247` was chosen as the last commit before the first family
+collapse that breaks a published signature by name or arity. The batch, doctor and
+status-facts collapses are inside this range and break behaviour without breaking either, so
+the cut bounds the *shape* of the public surface, not its semantics.
 
 ### Five silent email failures made loud, diagnosable and fixable
 
@@ -29,8 +85,8 @@ explained, and could not be fixed from the CLI.
 
 ### The storage seam
 
-- **feat(store): `@hasna/emails/storage` gains a declared store seam and two real implementations behind it, additively.** The seam is declared as types only, then implemented twice — `SqliteEmailStore` over local SQLite and `HttpEmailStore` over `/v1` — against one shared behavioural conformance suite, so the two stores are held to the same observable behaviour rather than to two dictionaries of expectations. `createConfiguredEmailStore`/`planEmailStore` resolve the store from storage configuration and refuse a contradiction instead of silently preferring one; the injectable environment was dropped from store construction so a store cannot be built against a different environment than the process it runs in. Capability and missing-route inventories (`SQLITE_STORE_CAPABILITIES`, `HTTP_STORE_CAPABILITIES`, `HTTP_STORE_MISSING_ROUTES`) are exported so an absence is published rather than discovered at the call site. `feat(selfhost)` adds the outbound-record route so conformance runs against the real service, not only a fixture. None of the 20 pre-existing `./storage` exports were removed or changed.
-- refactor: six command families collapse from per-mode twins to one implementation over the seam — batch, delivery-doctor, the MCP email-ops tools, status-facts, verification-code, and doctor. Each collapse deletes a duplicated arm that had already drifted from its twin. `fix(verification-code)` re-checks recipient scope on the record the candidate read returns, rather than on the candidate.
+- **feat(store): `@hasna/emails/storage` gains a declared store seam and two real implementations behind it, additively.** The seam is declared as types only, then implemented twice — `SqliteEmailStore` over local SQLite and `HttpEmailStore` over `/v1` — against one shared behavioural conformance suite, so the two stores are held to the same observable behaviour rather than to two dictionaries of expectations. `createConfiguredEmailStore`/`planEmailStore` resolve the store from storage configuration and refuse a contradiction instead of silently preferring one; the injectable environment was dropped from store construction so a store cannot be built against a different environment than the process it runs in. Capability and missing-route inventories (`SQLITE_STORE_CAPABILITIES`, `HTTP_STORE_CAPABILITIES`, `HTTP_STORE_MISSING_ROUTES`) are exported so an absence is published rather than discovered at the call site. `feat(selfhost)` adds the outbound-record route so conformance runs against the real service, not only a fixture. None of the 20 pre-existing `./storage` exports were removed or renamed — but the two mode-resolution entry points did change their return type; see Breaking.
+- refactor: six command families collapse from per-mode twins to one implementation over the seam — batch, delivery-doctor, the MCP email-ops tools, status-facts, verification-code, and doctor. Each collapse deletes a duplicated arm that had already drifted from its twin. This is not pure de-duplication: the batch, doctor and status-facts collapses each change published behaviour, and all three are listed under Breaking above. `fix(verification-code)` re-checks recipient scope on the record the candidate read returns, rather than on the candidate.
 - test: the harness configures exactly one store per test context, so a test can no longer pass because a second store was quietly in scope; the shared-process suite gate is restored and the deployment-mode axis is ratcheted with every ceiling pinned to its live count, so a new per-mode branch fails CI instead of accumulating. (This entry deliberately does not name the deployment-mode environment variable: that ratchet counts it across the whole tree, docs included, and the ceiling may only shrink — so naming it here would break the very guard being described.)
 - fix: thirteen findings from four adversarial reviews of the HTTP store, the write-path and vacuous-case defects two reviews found in the SQLite store, and what two reviews of store resolution found — including a 500 the fixture could not see, which is why conformance now runs against the real service.
 
