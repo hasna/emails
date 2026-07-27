@@ -296,13 +296,16 @@ describe("MCP CLI equivalents", () => {
   it("does not send an operator to debug DOMAINS for a malformed alias argument", async () => {
     // `fixCommands()` keyword-matches over the raw message, and `createAlias` throws
     // "Invalid email address (expected local@domain): ..." — whose literal "domain"
-    // routed the operator to `emails domain list`. Only reachable in self_hosted mode
-    // since add_alias/add_catch_all stopped refusing, so it is this PR's to own.
+    // routed the operator to `emails domain list`.
     // Must go through buildServer(), not runDomainTool(): installMcpToolContracts is
     // what wraps a raw throw into the structured {error:{code,fix_commands}} payload,
-    // and runDomainTool registers on a bare fake server that skips it. Both alias arms
-    // raise this identical message (aliases.local.ts / aliases.remote.ts), so local
-    // mode exercises the same classification path.
+    // and runDomainTool registers on a bare fake server that skips it.
+    //
+    // THE MESSAGE NOW HAS EXACTLY ONE SOURCE. `src/db/aliases.ts` used to be a facade over
+    // two arm modules that each raised this string separately, and which one ran depended on
+    // the deployment word; the family has been collapsed onto the store seam, so the
+    // classification path below is the only one there is and this case no longer depends on
+    // how the process was configured. `src/db/aliases.test.ts` pins the message itself.
     const { buildServer } = await import("./server.js");
     const server = buildServer() as unknown as {
       _registeredTools: Record<string, { handler: (i: Record<string, unknown>) => Promise<{ isError?: boolean; content: Array<{ text: string }> }> }>;
