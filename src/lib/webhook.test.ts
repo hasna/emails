@@ -566,7 +566,10 @@ describe("createWebhookServer /webhook/ses", () => {
 
   it("rejects an allowlisted topic ARN belonging to an account that is not allowlisted", async () => {
     const { url } = startReceiver();
-    const foreign = "arn:aws:sns:us-east-1:210987654321:emails-delivery-events";
+    // `999999999999` and not an arbitrary twelve digits: `src/no-cloud-boundary.test.ts` bans a
+    // `vendor aws account id` shape tree-wide and exempts exactly three documentation ids. An
+    // invented one FAILED that scan in the full suite, which is what it is there for.
+    const foreign = "arn:aws:sns:us-east-1:999999999999:emails-delivery-events";
     process.env[SNS_TOPIC_SETTING] = `${TOPIC_ARN},${foreign}`;
     const body = JSON.parse(snsBody("sns-foreign-account")) as Record<string, unknown>;
     body["TopicArn"] = foreign;
