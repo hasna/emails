@@ -4,11 +4,15 @@ Open-source email infrastructure for local SQLite workflows and operator-owned s
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
+> **This product is `open-emails`. Mailery is not a name for it.** (Owner
+> ruling, 2026-07-27 — see [docs/NAMING.md](docs/NAMING.md).)
+>
 > This package publishes as **`@hasna/emails`** and ships the `emails`,
 > `emails-mcp`, and `emails-serve` bins. `@hasna/mailery` on npm is the
 > abandoned 0.6.x line, and the `mailery*` bins belong to the separate cloud CLI
 > — neither is this package. The env prefix is `EMAILS_*`. This stays a
-> **cloud-free** OSS package: a hosted Mailery cloud is a separate product.
+> **cloud-free** OSS package: Mailery is a separate, unrelated product, not a
+> hosted version of this one.
 
 ## Install
 
