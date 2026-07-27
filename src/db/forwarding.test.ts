@@ -773,6 +773,31 @@ describe("a store that refuses", () => {
     );
   });
 
+  it("names the rule rather than re-inserting it when the update target has vanished", async () => {
+    // The upsert READ the row and then the UPDATE answered `null`, which means the row was
+    // deleted underneath it. Retrying as an insert would race the same deletion again and,
+    // when it lost, violate `UNIQUE(source_address, target_address, mode)` — so the vanished
+    // row is REPORTED. Nothing else in this suite can reach that branch, because it needs the
+    // read and the write to disagree.
+    const base = sqliteStore();
+    const rule = await createForwardingRule({
+      source_address: "user@example.com",
+      target_address: "archive@example.net",
+    }, base);
+    const store = storeWithForwarding({
+      async update(): Promise<Outcome<ResourceRow | null>> {
+        return { ok: true, value: null };
+      },
+    });
+    await expect(createForwardingRule({
+      source_address: "user@example.com",
+      target_address: "archive@example.net",
+      enabled: false,
+    }, store)).rejects.toThrow(new RegExp(`Forwarding rule not found: ${rule.id}`));
+    // And the row is untouched: the failed upsert did not insert a second one.
+    expect(await listForwardingRules({}, base)).toHaveLength(1);
+  });
+
   it("reports a store fault as a fault rather than as an empty list", async () => {
     const store = storeWithForwarding({
       async list(): Promise<Outcome<ResourceRow[]>> {
@@ -819,15 +844,43 @@ function seedInbound(to: string, receivedAt: string, opts: { isSent?: boolean } 
   return id;
 }
 
-/** A rule whose `created_at` is set explicitly, so the backfill gate can be exercised. */
+/**
+ * A rule whose `created_at` is set explicitly, so the backfill gate can be exercised.
+ *
+ * NO STORE IS INJECTED, deliberately: the configured store is the same in-memory SQLite
+ * database, so this fixture works under the collapsed signature AND under the deleted
+ * facade's — which is what lets the behavioural cases below run against `main` and DETECT a
+ * wrong answer there instead of dying on a signature mismatch.
+ */
 async function seedRule(source: string, createdAt: string, opts: { enabled?: boolean } = {}): Promise<string> {
   const rule = await createForwardingRule({
     source_address: source,
     target_address: "archive@example.net",
     enabled: opts.enabled ?? true,
-  }, sqliteStore());
+  });
   db.run("UPDATE forwarding_rules SET created_at = ? WHERE id = ?", [createdAt, rule.id]);
   return rule.id;
+}
+
+/**
+ * Force a value into `forwarding_rules` that its CHECK constraint forbids.
+ *
+ * This is how the SERVICE's side of the asymmetry is reproduced locally: the self-hosted
+ * Postgres migration DROPS `forwarding_rules_mode_check`, so a row the SQLite writer can
+ * never produce is an ordinary row over there. Suspending the constraint is the only way to
+ * put such a row in front of this module's read path without standing up Postgres.
+ */
+function forceRuleColumn(id: string, column: "mode" | "enabled", value: string): void {
+  db.run("PRAGMA ignore_check_constraints = ON");
+  try {
+    db.run(`UPDATE forwarding_rules SET ${column} = ? WHERE id = ?`, [value, id]);
+  } finally {
+    db.run("PRAGMA ignore_check_constraints = OFF");
+  }
+  const stored = db.query(`SELECT ${column} AS v FROM forwarding_rules WHERE id = ?`).get(id) as { v: unknown };
+  if (String(stored.v) !== value) {
+    throw new Error(`fixture could not force ${column} to ${value}; stored ${String(stored.v)}`);
+  }
 }
 
 describe("listPendingForwarding (local storage only)", () => {
@@ -893,6 +946,24 @@ describe("listPendingForwarding (local storage only)", () => {
     expect(listPendingForwarding(100, db)).toHaveLength(1);
   });
 
+  it("faults on a locally stored rule the shared mapper cannot read", async () => {
+    // THE PENDING SCAN USES THE SAME MAPPER THE SEAM READS DO, so a local row that is not a
+    // readable forwarding rule is a fault here too rather than only on the other path. An
+    // empty `created_at` is the reachable case: it is `NOT NULL` but not non-empty, and
+    // `datetime('')` is NULL — so the row is invisible to the received-at gate and only shows
+    // up under `--backfill`, which is exactly where a lax mapper would hand a caller a rule
+    // with no creation time.
+    const id = await seedRule("user@example.com", "2026-01-01 00:00:00");
+    const inboundId = seedInbound("user@example.com", "2026-01-02 00:00:00");
+    db.run("UPDATE forwarding_rules SET created_at = '' WHERE id = ?", [id]);
+
+    expect(() => listPendingForwarding(100, db, { backfill: true })).toThrow(/has no readable created_at/);
+    // THE POSITIVE CONTROL: with a readable `created_at` the same fixture yields the pending
+    // item, so the fault above is the mapper and not the fixture.
+    db.run("UPDATE forwarding_rules SET created_at = '2026-01-01 00:00:00' WHERE id = ?", [id]);
+    expect(listPendingForwarding(100, db, { backfill: true }).map((p) => p.inbound_email_id)).toEqual([inboundId]);
+  });
+
   it("refuses a non-finite limit instead of silently returning the whole table", async () => {
     // `Math.trunc(NaN)` is `NaN`, which binds as SQL NULL — and `LIMIT NULL` in SQLite
     // means NO LIMIT. So the deleted arm's clamp turned a bad limit into an unbounded read.
@@ -953,6 +1024,61 @@ describe("recordForwardingDelivery (local storage only)", () => {
     // The positive control: a legal status still writes.
     expect(recordForwardingDelivery({ rule_id: ruleId, inbound_email_id: inboundId, status: "sent" }, db).status)
       .toBe("sent");
+  });
+});
+
+// ---------------------------------------------------------------------------------
+// The divergences a stored row can carry, read through the CONFIGURED store.
+//
+// These three inject no store, so they run unchanged against the deleted two-arm facade —
+// which is the point. Every other behavioural case in this file dies on `main` with "is not
+// a function", a SIGNATURE failure that proves nothing about behaviour; these three make
+// `main` produce a WRONG ANSWER and fail on it.
+// ---------------------------------------------------------------------------------
+
+describe("a stored rule the type does not admit", () => {
+  it("is a fault rather than a mode cast into a field the CLI prints", async () => {
+    const id = await seedRule("user@example.com", "2026-01-01 00:00:00");
+    forceRuleColumn(id, "mode", "relay");
+
+    // The deleted mappers both did `row.mode as ForwardingMode` and handed "relay" to
+    // `emails forwarding list`, which prints it. Reachable for real on the service side,
+    // whose migration drops the CHECK this fixture suspends.
+    await expect(getForwardingRule(id)).rejects.toThrow(/Invalid forwarding mode in database: relay/);
+    await expect(listForwardingRules()).rejects.toThrow(/Invalid forwarding mode in database: relay/);
+    // THE POSITIVE CONTROL: with a legal mode the same row reads back fine, so the fixture
+    // is not simply breaking every read.
+    forceRuleColumn(id, "mode", "app-copy");
+    expect((await getForwardingRule(id))?.mode).toBe("app-copy");
+  });
+
+  it("is a fault rather than a guessed `enabled` flag", async () => {
+    const id = await seedRule("user@example.com", "2026-01-01 00:00:00");
+    // SQLite is loosely typed, so a non-integer really can land in this column — and
+    // `!!"no"` (the deleted local mapper) is `true`. A rule that copies mail to a third
+    // party must not have its switch guessed.
+    forceRuleColumn(id, "enabled", "no");
+
+    await expect(getForwardingRule(id)).rejects.toThrow(/no readable enabled flag/);
+    await expect(listForwardingRules()).rejects.toThrow(/no readable enabled flag/);
+    forceRuleColumn(id, "enabled", "1");
+    expect((await getForwardingRule(id))?.enabled).toBe(true);
+  });
+});
+
+describe("a bad pending-forward limit", () => {
+  it("is refused rather than turned into an unbounded read", async () => {
+    // `Math.trunc(NaN)` is `NaN`, which binds as SQL NULL, and `LIMIT NULL` in SQLite means
+    // NO LIMIT — so the deleted arm's clamp silently returned the whole table for a limit it
+    // could not read. Six pending messages make that visible rather than academic.
+    await seedRule("user@example.com", "2026-01-01 00:00:00");
+    for (let n = 0; n < 6; n += 1) seedInbound("user@example.com", `2026-01-02 00:00:0${n}`);
+
+    expect(() => listPendingForwarding(Number.NaN, db)).toThrow(/limit must be a finite number/);
+    // THE CONTROL that the fixture really does hold more rows than the bounded page, so
+    // "returns the whole table" and "returns the page" are distinguishable answers.
+    expect(listPendingForwarding(2, db)).toHaveLength(2);
+    expect(listPendingForwarding(100, db)).toHaveLength(6);
   });
 });
 

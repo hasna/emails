@@ -112,6 +112,22 @@
 //
 // WHAT REPLACES THE ARM CHOICE is the store's own answer. No branch on the store kind, on
 // the descriptor, or on the resolution plan. `src/store/` is untouched by this change.
+//
+// THREE GUARDS BELOW ARE UNREACHABLE BY CONSTRUCTION, and they are named here so a reviewer
+// does not have to re-derive it and so nobody writes a test that only appears to cover them.
+// Mutation testing reverted each change in this file one at a time; 27 of 30 mutants were
+// killed and these three survived, each because no input can reach the branch today:
+//
+//   1. `byRoute`'s `mode` and `id` tiebreakers. `ForwardingMode` has exactly ONE legal value,
+//      `toRule` faults on any other, and `(source_address, target_address, mode)` is UNIQUE
+//      on both schemas — so no two readable rules can tie. They exist for the day the enum
+//      grows, which is the day the tie becomes reachable.
+//   2. `recordForwardingDelivery`'s read-back null check. The row was written on the same
+//      connection two statements earlier.
+//   3. `listPendingForwarding`'s `requiredText(row, "inbound_email_id")`. It comes from
+//      `inbound_emails.id`, a non-null PRIMARY KEY the query JOINs on.
+//
+// Every other guard in this file is killed by a test.
 
 import type { Database } from "./database.js";
 import { uuid } from "./runtime.js";
