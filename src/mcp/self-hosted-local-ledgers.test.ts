@@ -15,6 +15,18 @@ const SEEDED_GROUP = {
   updated_at: "2026-01-01T00:00:00.000Z",
 };
 
+// The old case list named `seq-api-1` but seeded no sequence, so the two sequence
+// WRITES could only ever have failed at `getSequence`. Seeding it is what lets them
+// be converted from "asserted to refuse" to "asserted to work" rather than dropped.
+const SEEDED_SEQUENCE = {
+  id: "seq-api-1",
+  name: "api-sequence",
+  description: null,
+  status: "active",
+  created_at: "2026-01-01T00:00:00.000Z",
+  updated_at: "2026-01-01T00:00:00.000Z",
+};
+
 let stub: V1Stub;
 
 async function callTool(name: string, args: Record<string, unknown>) {
@@ -29,7 +41,7 @@ function resultText(result: { content: Array<{ text: string }> }): string {
 }
 
 beforeAll(async () => {
-  stub = await startV1Stub({ seed: { groups: [{ ...SEEDED_GROUP }] } });
+  stub = await startV1Stub({ seed: { groups: [{ ...SEEDED_GROUP }], sequences: [{ ...SEEDED_SEQUENCE }] } });
 });
 
 afterAll(() => stub.stop());
@@ -103,10 +115,14 @@ describe("MCP self_hosted repository-backed tools", () => {
     // twin. The guard was the only thing refusing, and it is gone.
     // src/mcp/self-hosted-unguarded-tools.test.ts asserts the resulting server rows;
     // here the point is only that no mode check turns them away.
+    // All six tools the old version asserted would refuse, converted rather than
+    // dropped — including the two sequence WRITES.
     const cases: Array<[string, Record<string, unknown>]> = [
       ["list_aliases", {}],
       ["list_group_members", { group_name: "api-group" }],
       ["add_group_member", { group_name: "api-group", email: "user@example.com" }],
+      ["add_sequence_step", { sequence_id: "seq-api-1", step_number: 1, delay_hours: 0, template_name: "welcome" }],
+      ["enroll_contact", { sequence_id: "seq-api-1", contact_email: "user@example.com" }],
       ["list_enrollments", {}],
     ];
 
@@ -114,6 +130,9 @@ describe("MCP self_hosted repository-backed tools", () => {
       const result = await callTool(name, args);
       expect(result.isError, `${name}: ${resultText(result)}`).not.toBe(true);
     }
+    // Each write landed on the SERVER, not in a local ledger.
     expect((await stub.list("group-members")).map((row) => row["email"])).toEqual(["user@example.com"]);
+    expect((await stub.list("sequence-steps")).map((row) => row["template_name"])).toEqual(["welcome"]);
+    expect((await stub.list("sequence-enrollments")).map((row) => row["contact_email"])).toEqual(["user@example.com"]);
   });
 });

@@ -254,13 +254,77 @@ describe("MCP CLI equivalents", () => {
       ["enroll_contact", { sequence_id: "onboarding", contact_email: "ada@acme.example" }],
       ["unenroll_contact", { sequence_id: "onboarding", contact_email: "ada@acme.example" }],
       ["list_enrollments", { sequence_id: "onboarding" }],
+      ["get_group_member", { group_name: "beta-testers", email: "ada@acme.example" }],
+      ["list_replies", { email_id: "msg-sent-1" }],
       ["list_warming_schedules", { status: "active" }],
     ];
     for (const [tool, input] of unblocked) {
       const command = cliEquivalentForTool(tool, input);
-      expect(command, `${tool} advertises a command with no arguments substituted`).not.toContain("<");
-      expect(cliRefusalFor(command, "self_hosted"), `${tool} advertises ${command}`).toBeNull();
+      // A missing map entry falls through to `emails --help # MCP tool: <name>`, which
+      // is not a refusal and has no `<` placeholder — so it would sail through both
+      // checks below while telling the agent nothing. `get_group_member` was exactly
+      // that: newly reachable with no entry at all.
+      expect(command, `${tool} has no cliEquivalentForTool entry`).not.toContain("emails --help");
+      // Only the leading command matters for runnability; a trailing `# note: ...` is a
+      // shell comment and is how this map flags a documented inexactness.
+      const runnable = (command.split(" # ")[0] ?? command).trim();
+      expect(runnable, `${tool} advertises a command with no arguments substituted`).not.toContain("<");
+      expect(cliRefusalFor(runnable, "self_hosted"), `${tool} advertises ${runnable}`).toBeNull();
     }
+  });
+
+  it("flags the two group-member inexactnesses instead of advertising a silent divergence", () => {
+    // `emails group add` has NO --vars option, so for a call carrying vars the
+    // advertised command RUNS and produces a DIFFERENT row (a member with no template
+    // vars). A silently divergent "equivalent" is worse than one that admits the gap.
+    expect(cliEquivalentForTool("add_group_member", { group_name: "beta-testers", email: "ada@acme.example", vars: { plan: "pro" } }))
+      .toBe("emails group add beta-testers ada@acme.example --json # note: per-member vars have no CLI equivalent; this command adds the member WITHOUT them");
+    // No vars supplied: exact, so no note.
+    expect(cliEquivalentForTool("add_group_member", { group_name: "beta-testers", email: "ada@acme.example" }))
+      .toBe("emails group add beta-testers ada@acme.example --json");
+    // An empty vars object is not a divergence either.
+    expect(cliEquivalentForTool("add_group_member", { group_name: "beta-testers", email: "ada@acme.example", vars: {} }))
+      .toBe("emails group add beta-testers ada@acme.example --json");
+
+    // No CLI command returns ONE member with its vars, so the nearest runnable
+    // command is named and the difference is stated.
+    expect(cliEquivalentForTool("get_group_member", { group_name: "beta-testers", email: "ada@acme.example" }))
+      .toBe("emails group members beta-testers --json # note: lists the group's members WITHOUT per-member vars; no CLI command returns a single member with them");
+  });
+
+  it("does not send an operator to debug DOMAINS for a malformed alias argument", async () => {
+    // `fixCommands()` keyword-matches over the raw message, and `createAlias` throws
+    // "Invalid email address (expected local@domain): ..." — whose literal "domain"
+    // routed the operator to `emails domain list`. Only reachable in self_hosted mode
+    // since add_alias/add_catch_all stopped refusing, so it is this PR's to own.
+    // Must go through buildServer(), not runDomainTool(): installMcpToolContracts is
+    // what wraps a raw throw into the structured {error:{code,fix_commands}} payload,
+    // and runDomainTool registers on a bare fake server that skips it. Both alias arms
+    // raise this identical message (aliases.local.ts / aliases.remote.ts), so local
+    // mode exercises the same classification path.
+    const { buildServer } = await import("./server.js");
+    const server = buildServer() as unknown as {
+      _registeredTools: Record<string, { handler: (i: Record<string, unknown>) => Promise<{ isError?: boolean; content: Array<{ text: string }> }> }>;
+    };
+    const result = await server._registeredTools["add_alias"]!.handler({ alias: "not-an-address", target: "ops@acme.example" });
+
+    expect(result.isError).toBe(true);
+    const payload = JSON.parse(result.content[0]?.text ?? "{}") as {
+      error: { message: string; code: string; fix_command: string; fix_commands: string[] };
+    };
+    expect(payload.error.message).toContain("Invalid email address");
+    expect(payload.error.code).toBe("invalid_input");
+    // The fix is to re-issue the alias command with a real address, not to inspect domains.
+    expect(payload.error.fix_command).toBe("emails alias add not-an-address ops@acme.example --json");
+    expect(payload.error.fix_commands).not.toContain("emails domain list --json");
+    expect(payload.error.fix_commands).not.toContain("emails domain add --help");
+  });
+
+  it("advertises the reply CLI twin that always worked", () => {
+    // `list_replies` refused unconditionally while `emails replies <id>` ran fine.
+    expect(cliEquivalentForTool("list_replies", { email_id: "msg-1", limit: 5, offset: 1 }))
+      .toBe("emails replies msg-1 --limit 5 --offset 1 --json");
+    expect(cliRefusalFor("emails replies msg-1 --json", "self_hosted")).toBeNull();
   });
 
   it("still admits that the two guarded tools name refused commands", () => {

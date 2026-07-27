@@ -189,16 +189,30 @@ export function registerSequenceTools(server: McpServer): void {
     limit: z.number().int().positive().max(MAX_MCP_REPLY_LIMIT).optional().describe("Maximum replies to return (default 20, max 100)"),
     offset: z.number().int().min(0).optional().describe("Number of replies to skip"),
   },
-  async () => {
-    // Reply tracking reads local inbound reply tables; there is no API-backed
-    // replies implementation in the self-hosted client (rule 6). Fail loud.
-    return {
-      content: [{
-        type: "text",
-        text: "Error: list_replies is not available in the self-hosted client; inbound reply tracking runs on the self-hosted server.",
-      }],
-      isError: true,
-    };
+  async ({ email_id, limit, offset }) => {
+    try {
+      // This refused unconditionally, in EVERY mode, claiming "inbound reply
+      // tracking runs on the self-hosted server" and that no API-backed
+      // implementation existed. Both halves were false: src/db/inbound.ts routes
+      // `listReplySummaries`/`getReplyCount` to inbound.remote.ts, which serves them
+      // from the `/v1/messages` list+get routes, and the CLI twin
+      // `emails replies <id>` (src/cli/commands/email-log.remote.ts) has always run
+      // in self_hosted mode over the same data. A refusal in front of a working
+      // route in BOTH modes is strictly worse than the mode-conditional guards —
+      // those at least told the truth in local mode.
+      const { listReplySummaries, getReplyCount } = await import("../../db/inbound.js");
+      const effectiveLimit = limit ?? 20;
+      const effectiveOffset = offset ?? 0;
+      const replies = listReplySummaries(email_id, { limit: effectiveLimit, offset: effectiveOffset });
+      return { content: [{ type: "text", text: JSON.stringify({
+        replies,
+        total: getReplyCount(email_id),
+        limit: effectiveLimit,
+        offset: effectiveOffset,
+      }, null, 2) }] };
+    } catch (e) {
+      return toolError(e);
+    }
   },
 );
 
