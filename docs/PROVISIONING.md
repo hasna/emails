@@ -15,7 +15,9 @@ receiving, create addresses, and verify by sending mail back and forth.
 ## What actually works today
 ```
 emails domain adopt ours.com --provider <ses-id>   # register an already-verified domain + wire SES inbound (S3) + catch-all
-emails aws setup-inbound                           # create the S3 bucket + SES receipt rules
+emails aws setup-inbound --domain ours.com --bucket <name>   # S3 bucket + SES receipt rules; prints the MX record to publish
+emails domain dns ours.com --provider <ses-id>     # DKIM/SPF/DMARC records the domain must publish
+emails domain check ours.com                       # what is actually published, plus root-MX owner
 emails address add andrew@ours.com --provider <ses-id>
 emails domain list --json                          # what is registered
 emails inbox sync-s3                               # pull inbound mail from the S3 bucket
