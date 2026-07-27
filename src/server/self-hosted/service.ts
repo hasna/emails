@@ -514,7 +514,27 @@ function asOptStringOrNull(value: unknown): string | null | undefined {
  * (`SendIntentDeletionForbiddenError`), so accepting one on a plain write would strand
  * the row as well as fabricate a fence.
  */
-const SEND_LEDGER_FIELDS = ["idempotency_key", "send_payload_hash", "send_state", "send_started_at"] as const;
+export const SEND_LEDGER_FIELDS = [
+  "idempotency_key",
+  "send_payload_hash",
+  "send_state",
+  "send_started_at",
+] as const;
+
+/**
+ * The only two directions a message row may carry.
+ *
+ * Validated rather than passed through, because until the record route existed EVERY
+ * write path pinned this: `POST /v1/messages` answers 409 for anything that is not
+ * exactly `inbound`, `reserveSendIntent` forces `outbound`, and the webhook sinks set
+ * `inbound` themselves. A route that accepts the value from a caller is the first one
+ * that can store a typo, and a typo is not merely cosmetic: every reader classifies a
+ * row as inbound with `lower(coalesce(direction,'')) <> 'outbound'`, while the outbound
+ * daily-quota query compares `direction = 'outbound'` exactly — so `"outbund"` would be
+ * filed as received mail AND excluded from the sender's quota, and an upsert would write
+ * it over a good row.
+ */
+const MESSAGE_DIRECTIONS = ["inbound", "outbound"] as const;
 
 /**
  * Map a request body onto a message write, or name the field that is missing.
@@ -540,7 +560,17 @@ function messageWriteInput(body: Record<string, unknown>): { input: MessageInput
   // the same body records both sent and received mail.
   const receivedAt = asOptStringOrNull(body.received_at);
   const directionRaw = body.direction === undefined ? undefined : String(body.direction);
+  if (directionRaw !== undefined && !(MESSAGE_DIRECTIONS as readonly string[]).includes(directionRaw)) {
+    return { error: `direction must be one of ${MESSAGE_DIRECTIONS.join(", ")}` };
+  }
   const direction = directionRaw ?? (receivedAt || body.message_id || body.in_reply_to ? "inbound" : undefined);
+
+  // An EMPTY source_id is not a fence and must not be stored as one. Left as `""` it
+  // lands in the column, where the partial unique index `(tenant_id, source_id) WHERE
+  // source_id IS NOT NULL` makes the SECOND such write a unique violation — a 500 for a
+  // caller who asked for a plain create. `undefined` stores NULL, which is what "no
+  // fence" means, and matches the client's own guard.
+  const sourceId = body.source_id === undefined ? undefined : String(body.source_id) || undefined;
 
   return {
     input: {
@@ -562,7 +592,7 @@ function messageWriteInput(body: Record<string, unknown>): { input: MessageInput
       labels: body.labels === undefined ? undefined : asStringArray(body.labels),
       headers: asObject(body.headers),
       attachments: asArray(body.attachments),
-      source_id: body.source_id === undefined ? undefined : String(body.source_id),
+      source_id: sourceId,
     },
   };
 }
@@ -1483,6 +1513,14 @@ export async function handleSelfHostedRequest(
         if ("error" in parsed) return json(400, { error: parsed.error });
         const input = parsed.input;
 
+        // KNOWN AND DELIBERATELY UNCHANGED: this route still ACCEPTS AND DROPS the four
+        // send-ledger fields, where /v1/messages/record refuses them. Now that both share
+        // `messageWriteInput` the refusal is one line from covering both, and it should —
+        // "accepted and dropped" is the exact failure this program exists to delete. It is
+        // not done here because it is a contract change to a route that has shipped for
+        // some time, which belongs in its own change with its own 400 declared on the
+        // published document, not as a side effect of adding a different route.
+        //
         // THE INBOUND-ONLY GUARD, and it stays. This route may not create an outbound
         // row, because an outbound row that never went through the send path has no
         // provider invocation behind it and this route cannot make one. A caller that

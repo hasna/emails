@@ -1757,6 +1757,12 @@ export class EmailsSelfHostedStore {
  * a caller always states them. `created_at`, `source_id` and the four send-ledger
  * columns are never in the set: the first is the row's identity, the second is the
  * conflict key, and the last four belong to the send path.
+ *
+ * One consequence worth stating: the statement TEXT now varies with the shape of the
+ * input, so a plan cache keyed on SQL text holds one entry per combination of named
+ * columns rather than one. The set of shapes real callers produce is small (each write
+ * site passes a fixed field list), and correctness is not negotiable against a cache
+ * hit rate.
  */
 function messageUpsertAssignments(input: MessageInput): string {
   const assignments = ["from_addr = EXCLUDED.from_addr", "to_addrs = EXCLUDED.to_addrs"];

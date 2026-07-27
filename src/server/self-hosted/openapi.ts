@@ -3627,7 +3627,7 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
           // the CLOSED `{ error }` shape. Without this the service's own response would
           // fail the generated wire contract.
           "400": jsonResponse(
-            "The body is malformed, omits from/to, or names a send-ledger field",
+            "The body is malformed, omits from/to, carries a direction that is neither inbound nor outbound, or names a send-ledger field",
             closedErrorReasonSchema,
           ),
         },

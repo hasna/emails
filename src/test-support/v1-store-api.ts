@@ -63,6 +63,10 @@
 
 import { emailsSelfHostedOpenApi } from "../server/self-hosted/openapi.js";
 import { SELF_HOSTED_RESOURCES } from "../server/self-hosted/resources.js";
+// The service's OWN list, imported rather than copied: a second literal here could drift
+// out of step with the route it claims to model, and this fixture's whole value is that
+// its contract is the server's.
+import { SEND_LEDGER_FIELDS } from "../server/self-hosted/service.js";
 import type { EmailStore } from "../store/email-store.js";
 import type { Outcome } from "../store/outcome.js";
 import type {
@@ -592,31 +596,50 @@ async function writeMessage(store: EmailStore, input: MessageWrite): Promise<Res
   return "response" in created ? created.response : json(201, { message: publicMessage(created.value) });
 }
 
-/** The four columns only the send path may write (service.ts, SEND_LEDGER_FIELDS). */
-const SEND_LEDGER_FIELDS = ["idempotency_key", "send_payload_hash", "send_state", "send_started_at"] as const;
-
 type MessageWrite = Parameters<EmailStore["messages"]["createMessage"]>[0];
 
-/** One body parser for both write routes, as the service has one. */
+/**
+ * One body parser for both write routes, as the service has one — and coercing the way
+ * the service coerces, which took three attempts to get right.
+ *
+ * The three corrections adversarial review found, each of which had made this fixture
+ * disagree with `/v1` on an input the conformance cases do not send:
+ *
+ *  1. `direction` IS LEFT UNSTATED when the body does not state it and carries no inbound
+ *     signal. Defaulting it to the literal `"outbound"` here meant a replay of
+ *     `{from, to, source_id}` onto an existing INBOUND row flipped it to outbound, while
+ *     the service omits `direction` from its conflict-time SET list and preserves it.
+ *     That is a divergence on the exact operation the conditional upsert is about, so a
+ *     green run here would have certified the opposite of the fix. The `!== "inbound"`
+ *     guard on the import route still works: `undefined` is not `"inbound"`.
+ *  2. `to` is TRIMMED before the emptiness test, as `service.ts` trims it. Without that,
+ *     `to: "   "` was a 201 here storing a whitespace recipient and a 400 there.
+ *  3. an EMPTY `source_id` is not a fence. Left as `""` the service stores it, and the
+ *     partial unique index makes the second such write a 500.
+ */
 function messageWriteInput(body: Record<string, unknown>): { input: MessageWrite } | { response: Response } {
   const from = body["from"] ?? body["from_addr"];
-  if (typeof from !== "string" || from.trim() === "") return { response: json(400, { error: "from is required" }) };
+  if (from === undefined || String(from).trim() === "") return { response: json(400, { error: "from is required" }) };
   const rawTo = body["to"] ?? body["to_addrs"];
-  const to = Array.isArray(rawTo) ? rawTo.map((entry) => String(entry)) : typeof rawTo === "string" ? [rawTo] : [];
+  const to = Array.isArray(rawTo)
+    ? rawTo.map((entry) => String(entry))
+    : typeof rawTo === "string" && rawTo.trim() !== ""
+      ? [rawTo.trim()]
+      : [];
   if (to.length === 0) return { response: json(400, { error: "to is required" }) };
 
   const receivedAt = body["received_at"];
-  const direction =
-    body["direction"] === undefined
-      ? receivedAt || body["message_id"] || body["in_reply_to"]
-        ? "inbound"
-        : "outbound"
-      : String(body["direction"]);
+  const directionRaw = body["direction"] === undefined ? undefined : String(body["direction"]);
+  if (directionRaw !== undefined && directionRaw !== "inbound" && directionRaw !== "outbound") {
+    return { response: json(400, { error: "direction must be one of inbound, outbound" }) };
+  }
+  const direction = directionRaw ?? (receivedAt || body["message_id"] || body["in_reply_to"] ? "inbound" : undefined);
+  const sourceId = body["source_id"] === undefined ? undefined : String(body["source_id"]) || undefined;
 
   const input = {
-    from_addr: from,
+    from_addr: String(from).trim(),
     to_addrs: to,
-    direction,
+    ...(direction === undefined ? {} : { direction }),
     ...(body["cc"] === undefined && body["cc_addrs"] === undefined
       ? {}
       : { cc_addrs: (body["cc"] ?? body["cc_addrs"]) as string[] }),
@@ -639,7 +662,7 @@ function messageWriteInput(body: Record<string, unknown>): { input: MessageWrite
     ...(body["labels"] === undefined ? {} : { labels: body["labels"] as string[] }),
     ...(body["headers"] === undefined ? {} : { headers: body["headers"] as Record<string, unknown> }),
     ...(body["attachments"] === undefined ? {} : { attachments: body["attachments"] as unknown[] }),
-    ...(body["source_id"] === undefined ? {} : { source_id: String(body["source_id"]) }),
+    ...(sourceId === undefined ? {} : { source_id: sourceId }),
   };
   return { input };
 }
