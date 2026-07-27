@@ -119,19 +119,25 @@
 // WHAT REPLACES THE ARM CHOICE is the store's own answer. No branch on the store kind, on the
 // descriptor, or on the resolution plan. `src/store/` is untouched by this change.
 //
-// THREE GUARDS BELOW ARE UNREACHABLE BY CONSTRUCTION, named here so a reviewer does not have to
-// re-derive it and so nobody writes a test that only appears to cover them:
+// ONE GUARD BELOW IS UNREACHABLE BY CONSTRUCTION, named here so a reviewer does not have to
+// re-derive it and so nobody writes a test that only appears to cover it. Mutation testing
+// reverted every change in this file one at a time; 54 of 55 mutants were killed and this is the
+// one that survived:
 //
-//   1. `byRoute`'s `id` tiebreaker. `(domain, local_part)` is UNIQUE on SQLite and
-//      `(tenant_id, domain, local_part)` on Postgres, so no two readable aliases in one scope
-//      can tie on domain and local-part. It exists because a page boundary over a non-total
-//      order can repeat or drop a row, and because the constraint is a schema fact rather than
-//      a type one.
-//   2. `readOneAlias`'s "more than one row" fault, for the same uniqueness reason. It is what
-//      would notice a schema that lost the constraint, and it refuses to pick one of two rows
-//      that both claim to route the same recipient.
-//   3. `upsertAlias`'s post-write `local_part` comparison, for a store that accepted the write
-//      and answered with another row. Both stores echo what they persisted today.
+//   `byRoute`'s `id` tiebreaker. `(domain, local_part)` is UNIQUE on SQLite and
+//   `(tenant_id, domain, local_part)` on Postgres, so no two readable aliases in one scope can
+//   tie on domain and local-part, and no input can reach the comparison. It stays because a page
+//   boundary over a non-total order can repeat or drop a row, and because the constraint is a
+//   schema fact that a migration can drop rather than a property of any type here.
+//
+// TWO OTHER GUARDS ARE UNREACHABLE THROUGH EITHER REAL STORE AND ARE STILL TESTED, which is a
+// different thing and worth distinguishing. `readOneAlias`'s "more than one row" fault sits
+// behind the same uniqueness constraint, and `upsertAlias`'s post-write comparison sits behind
+// both stores echoing what they persisted; each is exercised against a store whose one relevant
+// method is replaced, so the branch is covered even though no production input reaches it. The
+// post-write comparison is checked ONE FIELD AT A TIME for a reason the mutation run supplied: a
+// single fixture that differed in all three fields killed the whole condition while leaving each
+// individual term deletable, because the other two still caught that row.
 
 import { safeOffset, safeOptionalLimit } from "./pagination.js";
 import { enumerateStoreRows } from "../lib/status-facts-enumeration.js";

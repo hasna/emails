@@ -273,6 +273,10 @@ describe("createAlias / createCatchAll / setGlobalCatchAll", () => {
         /Invalid email address \(expected local@domain\): acme\.com/,
       );
       await expect(createAlias("hello@", "ops@acme.com", store)).rejects.toThrow(/Invalid email address/);
+      // An EMPTY local part is its own rejection and needs its own case: the guard is
+      // `at <= 0`, and a mutation run showed that weakening it to `at < 0` — which still
+      // rejects an address with no `@` at all — survived every other case here.
+      await expect(createAlias("@acme.com", "ops@acme.com", store)).rejects.toThrow(/Invalid email address/);
     });
   }
 
@@ -430,6 +434,25 @@ describe("listAliases", () => {
     expect(raw).not.toEqual(sorted);
   });
 
+  it("puts the global catch-all first even before a domain that sorts below the sentinel", async () => {
+    // THE GLOBAL-FIRST TERM IS SEPARATE FROM THE DOMAIN COMPARISON, and this is the case that
+    // proves it carries its own weight. Under code-unit order `*` (42) already sorts below every
+    // letter and digit, so for a syntactically valid domain the term is redundant — a mutation
+    // run showed that deleting it survived the ordering case above. A stored domain beginning
+    // with a lower code unit is a row the mapper accepts and only another writer can produce,
+    // and it is exactly where the term decides the answer.
+    clearAliases();
+    db.run(
+      "INSERT INTO aliases (id, domain, local_part, target_address, protected, created_at, updated_at)"
+        + " VALUES ('g', '*', '*', 'hq@x.com', 1, '2026-01-01', '2026-01-01'),"
+        + "        ('odd', '!odd.example', 'a', 't@x.com', 0, '2026-01-01', '2026-01-01')",
+    );
+    expect((await listAliases(undefined, undefined, sqliteStore())).map((a) => a.domain))
+      .toEqual(["*", "!odd.example"]);
+    // The control: the domain comparison alone really would have answered the other way round.
+    expect(["*", "!odd.example"].slice().sort()).toEqual(["!odd.example", "*"]);
+  });
+
   it("sorts in code-unit order rather than by the process locale", async () => {
     // The deleted HTTP arm used `localeCompare`, which is locale-dependent and orders `A`
     // AFTER `a` in most locales; SQLite's BINARY collation — the arm this resolves toward —
@@ -545,6 +568,11 @@ describe("listAliasesByTargets", () => {
 
       const matched = await listAliasesByTargets(["OPS@x.com", "  ops@x.com  ", ""], store);
       expect(matched.map((a) => `${a.local_part}@${a.domain}`)).toEqual(["support@x.com", "*@y.com"]);
+
+      // TRIMMING ON ITS OWN. The list above also contains an already-matching entry, so it
+      // cannot tell whether the padded one was trimmed — a mutation run showed exactly that.
+      const padded = await listAliasesByTargets(["\t ops@x.com \n"], store);
+      expect(padded.map((a) => `${a.local_part}@${a.domain}`)).toEqual(["support@x.com", "*@y.com"]);
     });
 
     it(`answers [] for an empty target set, on the ${name}`, async () => {
@@ -1181,15 +1209,33 @@ describe("a store that refuses", () => {
     );
   });
 
-  it("refuses to report a write the store answered with a different row", async () => {
-    const store = storeWithAliases({
-      async create(): Promise<Outcome<ResourceRow>> {
-        return { ok: true, value: syntheticRow(9, { local_part: "someone-else" }) };
-      },
-    });
-    await expect(createAlias("a@x.com", "t@x.com", store)).rejects.toThrow(
-      /accepted an alias write and answered with a different row/,
-    );
+  it("refuses to report a write the store answered with a different row, on EACH field", async () => {
+    // ONE STUB PER FIELD, and that is a correction rather than thoroughness for its own sake. A
+    // single stub whose row differed in all three fields killed the whole comparison but let
+    // each individual term be deleted — a mutation run showed all three surviving, because the
+    // other two still caught that row. Each case below differs in exactly ONE field.
+    const differences: Array<[string, Record<string, unknown>]> = [
+      ["domain", { domain: "other.example", local_part: "a", target_address: "t@x.com" }],
+      ["local part", { domain: "x.com", local_part: "b", target_address: "t@x.com" }],
+      ["target", { domain: "x.com", local_part: "a", target_address: "elsewhere@x.com" }],
+    ];
+    for (const [field, overrides] of differences) {
+      const store = storeWithAliases({
+        async create(): Promise<Outcome<ResourceRow>> {
+          return { ok: true, value: syntheticRow(9, overrides) };
+        },
+      });
+      let error: unknown = null;
+      let answer: unknown = "not called";
+      try {
+        answer = await createAlias("a@x.com", "t@x.com", store);
+      } catch (thrown) {
+        error = thrown;
+      }
+      expect(error, `a row differing only in its ${field} answered ${JSON.stringify(answer)}`)
+        .toBeInstanceOf(Error);
+      expect(String(error), field).toContain("answered with a different row");
+    }
   });
 
   it("reports a store fault as a fault rather than as an empty list", async () => {
