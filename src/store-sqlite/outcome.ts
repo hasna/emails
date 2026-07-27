@@ -63,9 +63,13 @@ function refusalForDatabaseError(error: unknown): Refusal | null {
   if (/UNIQUE constraint failed/i.test(message)) {
     return conflict(`the write conflicts with an existing row (${message})`);
   }
-  if (/NOT NULL constraint failed|CHECK constraint failed|FOREIGN KEY constraint failed|datatype mismatch|no such column/i.test(message)) {
+  if (/NOT NULL constraint failed|CHECK constraint failed|FOREIGN KEY constraint failed|datatype mismatch/i.test(message)) {
     return invalidInput(`the database rejected this input (${message})`);
   }
+  // `no such column` is deliberately NOT in that list. It means the schema is not
+  // what this code was written against — an unmigrated database, or an ensureSchema
+  // guarantee that silently failed. Reporting it as the caller's invalid input would
+  // blame the caller for a fault they cannot fix and cannot see, so it throws.
   return null;
 }
 

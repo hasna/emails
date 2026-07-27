@@ -90,7 +90,13 @@ export const UNIFIED_MESSAGES_SQL = `(
     e.message_id AS message_id,
     e.in_reply_to AS in_reply_to,
     e.sent_at AS received_at,
-    0 AS is_read,
+    -- The ledger has no read or star state, and is_read on the seam's record is a
+    -- non-optional boolean, so there is no "unknown" to return. 1 is the answer
+    -- src/cli/tui/data.local.ts already gives for these same rows (you have read
+    -- what you sent); agreeing with the other reader of this table beats inventing
+    -- a second convention. Outbound rows are excluded from every unread predicate
+    -- either way.
+    1 AS is_read,
     0 AS is_starred,
     0 AS is_archived,
     0 AS is_spam,
@@ -98,7 +104,15 @@ export const UNIFIED_MESSAGES_SQL = `(
     '[]' AS labels_json,
     ${jsonObjectColumn("ec.headers_json")} AS headers_json,
     '[]' AS attachments_json,
-    e.attachment_count AS attachment_count,
+    -- DERIVED, not the emails.attachment_count column. That column records how many
+    -- attachments a send had; this table stores no metadata and no bytes for them,
+    -- so nothing behind the number can be read. Surfacing it made three operations
+    -- disagree about one row: an empty attachments array, a count of three, and an
+    -- inventory scan that reported itself COMPLETE having emitted none of them. The
+    -- seam documents this field as the count of the attachments array, so it is
+    -- derived from that array and the three now agree. (The legacy column is
+    -- untouched and its own readers still see it.)
+    0 AS attachment_count,
     NULL AS source_id,
     e.idempotency_key AS idempotency_key,
     e.created_at AS created_at,
@@ -146,11 +160,28 @@ export const UNIFIED_MESSAGES_SQL = `(
 )`;
 
 // The server's predicates, expressed against this stream's columns.
+//
+// EACH FOLDER FLAG IS TESTED IN BOTH PLACES IT CAN LIVE, and that is not
+// belt-and-braces — it is a correctness fix. The server keeps archived / spam /
+// trash in `labels`; this database has boolean columns for them; and the shipped
+// local repository (`addInboundLabel`) writes ANY label string into
+// `label_ids_json` without touching those columns, as does a provider import
+// carrying SPAM or TRASH label ids. Testing only the column left a row whose
+// record said `labels: ["archived"]` on the inbox page and off the archived page —
+// one row, three incompatible answers. Adversarial review reproduced it.
+function folderLabelPredicate(label: string): string {
+  // `label` is one of the three literals in FOLDER_LABELS; never caller input.
+  return `EXISTS (
+    SELECT 1 FROM json_each(m.labels_json) folder
+     WHERE lower(TRIM(folder.value)) = '${label}'
+  )`;
+}
+
 const NOT_OUTBOUND_SQL = "lower(COALESCE(m.direction, '')) <> 'outbound'";
 const OUTBOUND_SQL = "lower(COALESCE(m.direction, '')) = 'outbound'";
-const ARCHIVED_SQL = "m.is_archived = 1";
-const SPAM_SQL = "(m.is_spam = 1 OR lower(COALESCE(m.status, '')) = 'spam')";
-const TRASH_SQL = "m.is_trash = 1";
+const ARCHIVED_SQL = `(m.is_archived = 1 OR ${folderLabelPredicate("archived")})`;
+const SPAM_SQL = `(m.is_spam = 1 OR lower(COALESCE(m.status, '')) = 'spam' OR ${folderLabelPredicate("spam")})`;
+const TRASH_SQL = `(m.is_trash = 1 OR ${folderLabelPredicate("trash")})`;
 
 export const FOLDER_PREDICATES: Record<MessageFolder, readonly string[]> = {
   inbox: [NOT_OUTBOUND_SQL, `NOT (${ARCHIVED_SQL})`, `NOT ${SPAM_SQL}`, `NOT (${TRASH_SQL})`],

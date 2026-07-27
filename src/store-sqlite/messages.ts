@@ -10,6 +10,7 @@
 
 import type { SQLQueryBindings } from "bun:sqlite";
 import type { Database } from "../db/database.js";
+import { sqlEmailAddress } from "../db/email-address-sql.js";
 import { cappedLimit, safeOffset } from "../db/pagination.js";
 import { now, uuid } from "../db/runtime.js";
 import type { StoreCapabilities } from "../store/capabilities.js";
@@ -36,7 +37,7 @@ import type {
   MessagesRepository,
   ThreadsRepository,
 } from "../store/repositories.js";
-import type { Outcome } from "../store/outcome.js";
+import type { Outcome, Refusal } from "../store/outcome.js";
 import {
   decodeAttachmentCursor,
   decodeMessageCursor,
@@ -68,6 +69,7 @@ const DEFAULT_PAGE = 100;
 const MAX_PAGE = 500;
 const UNIFIED_TABLE = "inbound_emails";
 const LEDGER_TABLE = "emails";
+const DELETE_CHUNK = 500;
 
 /** LIKE metacharacters, escaped so an id prefix stays an anchored range scan. */
 function escapeLike(value: string): string {
@@ -99,7 +101,9 @@ function messageFilters(opts: ListMessagesOptions | undefined): MessageQuery {
   const conditions: string[] = [];
   const params: SQLQueryBindings[] = [];
   if (opts?.direction) conditions.push(DIRECTION_PREDICATES[opts.direction]);
-  if (opts?.folder) conditions.push(...FOLDER_PREDICATES[opts.folder]);
+  // A folder the record type does not name would otherwise be a TypeError rather
+  // than an answer; a JS caller reaches this even though TypeScript cannot.
+  if (opts?.folder) conditions.push(...(FOLDER_PREDICATES[opts.folder] ?? []));
   if (opts?.to?.trim()) {
     conditions.push("lower(COALESCE(m.to_addrs_json, '')) LIKE ?");
     params.push(lowered(opts.to));
@@ -153,18 +157,25 @@ function selectRow(db: Database, id: string): MessageRow | null {
     .get(id) as MessageRow | null;
 }
 
-/** Write columns shared by insert and upsert, in one place so they cannot drift. */
-function unifiedWriteValues(input: MessageInput, timestamp: string): Record<string, SQLQueryBindings> {
-  const labels = (input.labels ?? []).map((label) => String(label));
-  const folderLabels = new Set(labels.filter(isFolderLabel).map(normalizeLabel));
-  const plainLabels = labels.filter((label) => !isFolderLabel(label));
+/** Merge `in_reply_to` into the headers blob, which is where this table keeps it. */
+function headersFor(input: MessageInput): string {
   const headers: Record<string, unknown> = { ...(input.headers ?? {}) };
-  // `in_reply_to` is a header on the wire and a column on the server. This table
-  // has the headers blob and no column, so the value round-trips through the
-  // blob — which is also where the unified read projects it from.
+  // `in_reply_to` is a header on the wire and a column on the server. This table has
+  // the headers blob and no column, so the value round-trips through the blob —
+  // which is also where the unified read projects it from.
   if (input.in_reply_to && headers["In-Reply-To"] === undefined && headers["in-reply-to"] === undefined) {
     headers["In-Reply-To"] = input.in_reply_to;
   }
+  return JSON.stringify(headers);
+}
+
+/**
+ * The columns a CREATE writes: every one of them, with the seam's defaults, because
+ * a new row has no prior state to preserve.
+ */
+function insertValues(input: MessageInput, timestamp: string): Record<string, SQLQueryBindings> {
+  const labels = (input.labels ?? []).map((label) => String(label));
+  const folderLabels = new Set(labels.filter(isFolderLabel).map(normalizeLabel));
   const direction = (input.direction ?? "outbound").trim().toLowerCase();
   return {
     from_address: input.from_addr,
@@ -176,8 +187,8 @@ function unifiedWriteValues(input: MessageInput, timestamp: string): Record<stri
     status: input.status ?? null,
     provider_message_id: input.provider_message_id ?? null,
     message_id: input.message_id ?? null,
-    label_ids_json: JSON.stringify(plainLabels),
-    headers_json: JSON.stringify(headers),
+    label_ids_json: JSON.stringify(labels.filter((label) => !isFolderLabel(label))),
+    headers_json: headersFor(input),
     attachments_json: JSON.stringify(input.attachments ?? []),
     received_at: input.received_at ?? timestamp,
     is_read: input.is_read ? 1 : 0,
@@ -191,10 +202,57 @@ function unifiedWriteValues(input: MessageInput, timestamp: string): Record<stri
   };
 }
 
+/**
+ * The columns an UPSERT-onto-an-existing-row writes: ONLY the ones the input
+ * actually carries.
+ *
+ * This is not an optimisation. Writing the full insert set on update meant a
+ * re-imported message had its read flag, star, labels and received_at reset from
+ * the input's defaults — so re-running an importer marked the whole mailbox unread,
+ * dropped every label, and re-sorted it to now. An operation the seam documents as
+ * IDEMPOTENT was destroying local state on every replay. Adversarial review
+ * reproduced it; this is the fix.
+ *
+ * `created_at` is never in the set, and the flag columns are only touched when the
+ * caller actually said something about them.
+ */
+function updateValues(input: MessageInput, timestamp: string): Record<string, SQLQueryBindings> {
+  const values: Record<string, SQLQueryBindings> = { updated_at: timestamp };
+  const put = (column: string, value: SQLQueryBindings): void => {
+    values[column] = value;
+  };
+  put("from_address", input.from_addr);
+  put("to_addresses", JSON.stringify(input.to_addrs ?? []));
+  if (input.cc_addrs !== undefined) put("cc_addresses", JSON.stringify(input.cc_addrs));
+  if (input.subject !== undefined) put("subject", input.subject ?? "");
+  if (input.body_text !== undefined) put("text_body", input.body_text);
+  if (input.body_html !== undefined) put("html_body", input.body_html);
+  if (input.status !== undefined) put("status", input.status);
+  if (input.provider_message_id !== undefined) put("provider_message_id", input.provider_message_id);
+  if (input.message_id !== undefined) put("message_id", input.message_id);
+  if (input.headers !== undefined || input.in_reply_to !== undefined) put("headers_json", headersFor(input));
+  if (input.attachments !== undefined) put("attachments_json", JSON.stringify(input.attachments));
+  if (input.received_at !== undefined) put("received_at", input.received_at);
+  if (input.is_read !== undefined) put("is_read", input.is_read ? 1 : 0);
+  if (input.is_starred !== undefined) put("is_starred", input.is_starred ? 1 : 0);
+  if (input.direction !== undefined) {
+    put("is_sent", input.direction.trim().toLowerCase() === "outbound" ? 1 : 0);
+  }
+  if (input.labels !== undefined) {
+    const labels = input.labels.map((label) => String(label));
+    const folderLabels = new Set(labels.filter(isFolderLabel).map(normalizeLabel));
+    put("label_ids_json", JSON.stringify(labels.filter((label) => !isFolderLabel(label))));
+    put("is_archived", folderLabels.has("archived") ? 1 : 0);
+    put("is_spam", folderLabels.has("spam") ? 1 : 0);
+    put("is_trash", folderLabels.has("trash") ? 1 : 0);
+  }
+  return values;
+}
+
 function insertUnifiedMessage(db: Database, input: MessageInput): string {
   const timestamp = now();
   const id = uuid();
-  const values = unifiedWriteValues(input, timestamp);
+  const values = insertValues(input, timestamp);
   const columns = Object.keys(values);
   db.run(
     `INSERT INTO ${UNIFIED_TABLE} (id, created_at, raw_size, attachment_paths, ${columns.join(", ")})
@@ -205,12 +263,46 @@ function insertUnifiedMessage(db: Database, input: MessageInput): string {
 }
 
 function updateUnifiedMessage(db: Database, id: string, input: MessageInput): void {
-  const values = unifiedWriteValues(input, now());
+  const values = updateValues(input, now());
   const columns = Object.keys(values);
   db.run(
     `UPDATE ${UNIFIED_TABLE} SET ${columns.map((column) => `${column} = ?`).join(", ")} WHERE id = ?`,
     [...columns.map((column) => values[column] as SQLQueryBindings), id],
   );
+}
+
+/**
+ * The four ledger fields a caller may supply and this store cannot store.
+ *
+ * `createMessage` and `upsertMessage` are NOT capability-gated, so a caller handing
+ * them an idempotency key or a send state gets no refusal from the capability
+ * machinery — and the columns do not exist here. Accepting the field and dropping it
+ * is precisely the failure the seam exists to remove (it is the same argument that
+ * put `domains.notes` in the schema), so the write is refused and names the fields.
+ */
+function ledgerFieldRefusal(input: MessageInput): Refusal | null {
+  const offending: string[] = [];
+  if (input.idempotency_key !== undefined && input.idempotency_key !== null) offending.push("idempotency_key");
+  if (input.send_payload_hash !== undefined && input.send_payload_hash !== null) offending.push("send_payload_hash");
+  if (input.send_started_at !== undefined && input.send_started_at !== null) offending.push("send_started_at");
+  if (input.send_state !== undefined && input.send_state !== "none") offending.push("send_state");
+  if (offending.length === 0) return null;
+  return invalidInput(
+    `this store cannot record ${offending.join(", ")} on a message: it has no send-intent ledger ` +
+      "(the sendIntentLedger capability is unavailable), and accepting the field without storing it " +
+      "would report a write that did not happen",
+  );
+}
+
+/** Reject a `since` SQLite cannot parse instead of silently matching nothing. */
+function unparseableSince(db: Database, since: string): Refusal | null {
+  const row = db.query("SELECT julianday(?) AS parsed").get(since) as { parsed: unknown } | null;
+  if (row !== null && row.parsed !== null) return null;
+  // julianday() answers NULL for an unparseable value, so every comparison against
+  // it is NULL and every row is filtered out — an empty page indistinguishable from
+  // a true empty result, which is the exact lie this seam removes. The strongest arm
+  // errors on the same input (`$n::timestamptz`), so refusing matches it.
+  return invalidInput(`since is not a timestamp SQLite can parse: ${since}`);
 }
 
 /**
@@ -360,7 +452,10 @@ export function createMessagesRepository(db: Database, capabilities: StoreCapabi
   return {
     async listMessages(opts?: ListMessagesOptions): Promise<Outcome<Page<MessageListRecord>>> {
       if (!capabilities.keysetPagination) return unavailable("keysetPagination");
-      return guard(() => listPage(db, opts));
+      return guard(() => {
+        const since = opts?.since?.trim() ? unparseableSince(db, opts.since.trim()) : null;
+        return since ?? listPage(db, opts);
+      });
     },
 
     async getMessage(id: string): Promise<Outcome<MessageRecord | null>> {
@@ -380,6 +475,11 @@ export function createMessagesRepository(db: Database, capabilities: StoreCapabi
               WHERE m.id LIKE ? ESCAPE '\\' ORDER BY m.id LIMIT 2`,
           )
           .all(`${escapeLike(value)}%`) as Array<{ id: string }>;
+        // Divergence from the strongest arm, deliberately: it returns a well-formed
+        // UUID verbatim with no round trip, so a non-existent full id resolves and
+        // 404s later. Here it is looked up, because the seam documents this operation
+        // as distinguishing "no such message" (404) from "your prefix matched
+        // several" (409), and it cannot do that without asking.
         if (rows.length === 0) return notFound(`no message matches ${value}`);
         // 404 and 409 are different answers, and every caller has to tell them
         // apart — which is why this returns an Outcome and not a nullable id.
@@ -389,6 +489,8 @@ export function createMessagesRepository(db: Database, capabilities: StoreCapabi
     },
 
     async createMessage(input: MessageInput): Promise<Outcome<MessageRecord>> {
+      const refused = ledgerFieldRefusal(input);
+      if (refused) return refused;
       return guard(() =>
         withImmediateTransaction(db, () => {
           const id = insertUnifiedMessage(db, input);
@@ -402,6 +504,8 @@ export function createMessagesRepository(db: Database, capabilities: StoreCapabi
     async upsertMessage(input: MessageInput): Promise<Outcome<{ record: MessageRecord; inserted: boolean }>> {
       const sourceId = input.source_id?.trim();
       if (!sourceId) return invalidInput("upsertMessage requires a source_id to fence on");
+      const refused = ledgerFieldRefusal(input);
+      if (refused) return refused;
       return guard<{ record: MessageRecord; inserted: boolean }>(() =>
         // The read-then-write is why this needs a write lock up front: two
         // concurrent upserts of the same source_id must produce one row and one
@@ -431,11 +535,18 @@ export function createMessagesRepository(db: Database, capabilities: StoreCapabi
     async deleteMessage(id: string): Promise<Outcome<boolean>> {
       return guard(() =>
         withImmediateTransaction(db, () => {
-          const row = selectRow(db, id);
-          if (!row) return ok(false);
-          const table = rowTable(row) === LEDGER_TABLE ? LEDGER_TABLE : UNIFIED_TABLE;
-          const result = db.run(`DELETE FROM ${table} WHERE id = ?`, [id]);
-          return ok(result.changes > 0);
+          // BOTH tables, by existence rather than by the driver's `changes`. The
+          // union carries no cross-table uniqueness guarantee, so resolving the
+          // physical table from whichever row the read happened to return could
+          // report a delete it had not performed. `changes` is also the wrong
+          // counter here — it includes the rows the cascade and the delete trigger
+          // remove from other tables.
+          const inUnified = db.query(`SELECT 1 AS ok FROM ${UNIFIED_TABLE} WHERE id = ?`).get(id) !== null;
+          const inLedger = db.query(`SELECT 1 AS ok FROM ${LEDGER_TABLE} WHERE id = ?`).get(id) !== null;
+          if (!inUnified && !inLedger) return ok(false);
+          if (inUnified) db.run(`DELETE FROM ${UNIFIED_TABLE} WHERE id = ?`, [id]);
+          if (inLedger) db.run(`DELETE FROM ${LEDGER_TABLE} WHERE id = ?`, [id]);
+          return ok(true);
         }),
       );
     },
@@ -465,7 +576,10 @@ export function createInboundRepository(db: Database, capabilities: StoreCapabil
       // Literally `listMessages` with a default folder. The inbox is not separate
       // storage here any more than it is on the server.
       const scoped: ListMessagesOptions = { ...opts, folder: opts?.folder ?? "inbox" };
-      return guard(() => listPage(db, scoped));
+      return guard(() => {
+        const since = opts?.since?.trim() ? unparseableSince(db, opts.since.trim()) : null;
+        return since ?? listPage(db, scoped);
+      });
     },
 
     async getUnreadCount(): Promise<Outcome<number>> {
@@ -507,8 +621,15 @@ export function createInboundRepository(db: Database, capabilities: StoreCapabil
             )
             .all(...params, UNIFIED_TABLE) as Array<{ id: string }>;
           if (ids.length === 0) return ok(0);
-          const placeholders = ids.map(() => "?").join(", ");
-          db.run(`DELETE FROM ${UNIFIED_TABLE} WHERE id IN (${placeholders})`, ids.map((row) => row.id));
+          // Chunked, so the statement never depends on how many bound parameters the
+          // driver happens to have been built to allow.
+          for (let start = 0; start < ids.length; start += DELETE_CHUNK) {
+            const chunk = ids.slice(start, start + DELETE_CHUNK);
+            db.run(
+              `DELETE FROM ${UNIFIED_TABLE} WHERE id IN (${chunk.map(() => "?").join(", ")})`,
+              chunk.map((row) => row.id),
+            );
+          }
           // The count is the number of MESSAGES removed, which is the number of ids
           // matched inside this write transaction — deliberately not the driver's
           // `changes`, which also counts the rows the cascade and the delete trigger
@@ -541,6 +662,8 @@ export function createEmailContentRepository(db: Database, capabilities: StoreCa
         const params: SQLQueryBindings[] = [];
         if (opts?.direction) conditions.push(DIRECTION_PREDICATES[opts.direction]);
         if (opts?.since?.trim()) {
+          const refused = unparseableSince(db, opts.since.trim());
+          if (refused) return refused;
           conditions.push("julianday(m.sort_ts) >= julianday(?)");
           params.push(opts.since.trim());
         }
@@ -683,8 +806,11 @@ export function createThreadsRepository(db: Database, capabilities: StoreCapabil
       if (!capabilities.mailRollups) return unavailable("mailRollups");
       return guard(() => {
         // Registered addresses, each with its inbound rollup — the server's shape.
-        // The recipient match parses the stored `to` array rather than substring
-        // matching it, so `Display Name <addr>` recipients are counted correctly.
+        // The recipient match EXTRACTS the address from each stored `to` entry with
+        // the same fragment the local repositories use, so a `Display Name <addr>`
+        // recipient counts. A whole-string equality silently counted only the bare
+        // form and under-reported the mailbox; the `domains` filter next to it had
+        // always parsed, so the file held two matchers that disagreed.
         const rows = db
           .query(
             `SELECT a.id AS id, a.email AS address, a.display_name AS display_name,
@@ -693,14 +819,14 @@ export function createThreadsRepository(db: Database, capabilities: StoreCapabil
                       WHERE lower(COALESCE(m.direction, '')) <> 'outbound'
                         AND EXISTS (
                           SELECT 1 FROM json_each(m.to_addrs_json) recipient
-                           WHERE lower(TRIM(recipient.value)) = lower(a.email)
+                           WHERE ${sqlEmailAddress("recipient.value")} = lower(TRIM(a.email))
                         )) AS total,
                     (SELECT COUNT(*) FROM ${UNIFIED_MESSAGES_SQL} m
                       WHERE lower(COALESCE(m.direction, '')) <> 'outbound'
                         AND m.is_read = 0
                         AND EXISTS (
                           SELECT 1 FROM json_each(m.to_addrs_json) recipient
-                           WHERE lower(TRIM(recipient.value)) = lower(a.email)
+                           WHERE ${sqlEmailAddress("recipient.value")} = lower(TRIM(a.email))
                         )) AS unread
                FROM addresses a
               ORDER BY a.email ASC`,

@@ -122,6 +122,12 @@ export async function runConformanceSuite(
     for (const testCase of declared) {
       const mustRefuse = testCase.requires !== null && !store.capabilities[testCase.requires];
       try {
+        // DROP any state this case left behind on an earlier store or an earlier run.
+        // Without this the `asserted before it wrote anything` guard is inert after the
+        // first pass through the suite, and a case whose `exercise` returned early —
+        // before its own `stash` — silently asserts against the PREVIOUS store's ids
+        // and can pass. Found by adversarial review, which reproduced exactly that.
+        CASE_STATE.delete(testCase.id);
         const value = await testCase.exercise(store);
         if (mustRefuse) {
           // The store declared it cannot do this, so the ONLY acceptable answer is the
@@ -323,9 +329,16 @@ function stashed(caseId: string): Record<string, unknown> {
   return state;
 }
 
-// Unique-per-run tokens, so a suite run twice against one store never collides
-// with its own earlier rows and no case depends on a clean database. Every count
-// assertion below is a DELTA for the same reason.
+// Unique-per-run tokens, so a suite run twice against one store never collides with
+// its own earlier rows. Two consequences worth stating rather than assuming:
+//
+//   * COUNT assertions are DELTAS (read before, write, read after) unless the count is
+//     itself token-scoped, in which case it is absolute and safe.
+//   * LIST assertions read the FIRST page and require the row just written to be on
+//     it. That is not an assumption about an empty database — it is an assertion about
+//     ORDERING: every list on this seam is newest-first, so a row created a moment ago
+//     is on page one. A store that ordered its lists arbitrarily would fail here, and
+//     should.
 const RUN_TAG = Math.random().toString(36).slice(2, 10);
 let mintCounter = 0;
 
@@ -377,9 +390,17 @@ async function domain(store: EmailStore): Promise<DomainRecord> {
   return must(store.domains.createDomain({ domain: domainToken(), provider: providerId }), "domains.createDomain");
 }
 
-async function address(store: EmailStore, quota?: number | null): Promise<AddressRecord> {
+async function address(
+  store: EmailStore,
+  quota?: number | null,
+  displayName?: string,
+): Promise<AddressRecord> {
   const registered = await domain(store);
-  const input = { email: `user-${token("addr")}@${registered.domain}`, daily_quota: quota ?? null };
+  const input = {
+    email: `user-${token("addr")}@${registered.domain}`,
+    daily_quota: quota ?? null,
+    display_name: displayName ?? null,
+  };
   return must(store.addresses.createAddress(input), "addresses.createAddress");
 }
 
@@ -432,7 +453,7 @@ function buildConformanceCases(): ConformanceCase[] {
           store.domains.createDomain({ domain: name, provider: providerId, status: "pending", notes: "hello" }),
           "createDomain",
         );
-        stash("domains/create-then-read-back", { name, id: created.id });
+        stash("domains/create-then-read-back", { name, id: created.id, provider: providerId });
         return store.domains.getDomain(created.id);
       },
       expect(outcome: unknown): void {
@@ -443,6 +464,7 @@ function buildConformanceCases(): ConformanceCase[] {
         same(read["status"], "pending", "domain status");
         same(read["notes"], "hello", "domain notes");
         same(read["verified"], false, "domain verified flag");
+        same(read["provider"], state["provider"], "the provider the domain was created against");
       },
     },
     {
@@ -766,11 +788,31 @@ function buildConformanceCases(): ConformanceCase[] {
       async exercise(store: EmailStore): Promise<unknown> {
         const subject = token("subject");
         const input = inboundMessage(`inbox-${RUN_TAG}@example.test`, subject);
+        const messageId = `<${token("mid")}@example.test>`;
+        const parentId = `<${token("parent")}@example.test>`;
+        const receivedAt = new Date(Date.now() - 90_000).toISOString();
         const created = await must(
-          store.messages.createMessage({ ...input, labels: ["needs-reply"], cc_addrs: ["cc@example.test"] }),
+          store.messages.createMessage({
+            ...input,
+            labels: ["needs-reply"],
+            cc_addrs: ["cc@example.test"],
+            body_html: `<p>${subject}</p>`,
+            message_id: messageId,
+            in_reply_to: parentId,
+            received_at: receivedAt,
+            headers: { "X-Conformance": subject },
+            attachments: [{ filename: `${subject}.txt`, content_type: "text/plain", size: 4 }],
+          }),
           "createMessage",
         );
-        stash("messages/create-then-read-back", { id: created.id, subject, to: input.to_addrs[0] });
+        stash("messages/create-then-read-back", {
+          id: created.id,
+          subject,
+          to: input.to_addrs[0],
+          messageId,
+          parentId,
+          receivedAt,
+        });
         return store.messages.getMessage(created.id);
       },
       expect(outcome: unknown): void {
@@ -783,8 +825,20 @@ function buildConformanceCases(): ConformanceCase[] {
         same(read.to_addrs[0], state["to"], "recipient");
         same(read.cc_addrs[0], "cc@example.test", "cc recipient");
         same(read.body_text, `body of ${String(state["subject"])}`, "message body");
+        same(read.body_html, `<p>${String(state["subject"])}</p>`, "message html body");
         check(read.labels.includes("needs-reply"), `the written label is missing: ${show(read.labels)}`);
         same(read.is_read, false, "an unread message reads back unread");
+        // Every remaining written field. Each of these was silently droppable before it
+        // was asserted, and a mapper returning `[]`, `{}` or null for any of them is the
+        // plausible-wrong-answer failure at record level.
+        same(read.message_id, state["messageId"], "message id header");
+        same(read.in_reply_to, state["parentId"], "in-reply-to");
+        same(read.received_at, state["receivedAt"], "received_at is the written instant, not now");
+        same(read.headers["X-Conformance"], state["subject"], "written headers round-trip");
+        same(read.attachments.length, 1, "written attachment metadata round-trips");
+        const attachment = asObject(read.attachments[0], "attachment metadata");
+        same(attachment["filename"], `${String(state["subject"])}.txt`, "attachment filename");
+        same(attachment["content_type"], "text/plain", "attachment content type");
       },
     },
     {
@@ -795,6 +849,14 @@ function buildConformanceCases(): ConformanceCase[] {
         const created = await must(store.messages.createMessage(outboundMessage(token("subject"))), "createMessage");
         const resolved = await must(store.messages.resolveMessageId(created.id), "resolveMessageId");
         same(resolved.id, created.id, "a full id resolves to itself");
+        // A PREFIX must resolve too — that is what the operation is for (it is the short
+        // id a list prints). 30 characters of a minted id is unique in practice, and an
+        // implementation that only matched whole ids would fail here.
+        const byPrefix = await must(
+          store.messages.resolveMessageId(created.id.slice(0, 30)),
+          "resolveMessageId(prefix)",
+        );
+        same(byPrefix.id, created.id, "a unique id prefix resolves to the whole id");
         // "no such message" is a REFUSAL, not a null: a caller has to be able to tell it
         // from "your prefix matched several", which carries a different status.
         return store.messages.resolveMessageId(`missing-${token("id")}`);
@@ -814,6 +876,17 @@ function buildConformanceCases(): ConformanceCase[] {
           "upsertMessage (first)",
         );
         same(first.inserted, true, "the first upsert inserts");
+        // Local state, set AFTER the import and before the replay. An upsert that writes
+        // its whole column set resets all of this — so a re-run of an importer marks the
+        // mailbox unread, drops every label and re-sorts it to now. "Idempotent" has to
+        // mean the second call leaves everything it was not told about alone.
+        const keptLabel = token("kept-label");
+        const importedAt = new Date(Date.now() - 7 * 24 * 3_600_000).toISOString();
+        await must(
+          store.messages.updateMessageStatus(first.record.id, { is_read: true, is_starred: true }),
+          "set the read and star flags before the replay",
+        );
+        await must(store.inbound.addInboundLabel(first.record.id, keptLabel), "label it before the replay");
         const secondSubject = token("subject");
         const second = await must(
           store.messages.upsertMessage({ ...outboundMessage(secondSubject), source_id: sourceId }),
@@ -832,6 +905,8 @@ function buildConformanceCases(): ConformanceCase[] {
           id: first.record.id,
           subject: secondSubject,
           source: sourceId,
+          keptLabel,
+          importedAt,
         });
         return store.messages.getMessage(first.record.id);
       },
@@ -841,6 +916,13 @@ function buildConformanceCases(): ConformanceCase[] {
         same(read.id, state["id"], "message id");
         same(read.subject, state["subject"], "the second upsert's subject won");
         same(read.source_id, state["source"], "source_id round-trips");
+        // Everything the replay was NOT told about must be untouched.
+        same(read.is_read, true, "a replay must not reset the read flag");
+        same(read.is_starred, true, "a replay must not reset the star");
+        check(
+          read.labels.includes(String(state["keptLabel"])),
+          `a replay must not drop labels: ${show(read.labels)}`,
+        );
       },
     },
     {
@@ -866,7 +948,17 @@ function buildConformanceCases(): ConformanceCase[] {
           null,
           "patching an unknown message answers null",
         );
-        stash("messages/status-patch-round-trip", { id: created.id, providerMessageId });
+        // A patch that ADDS one label and REMOVES another, in one call. Two
+        // read-modify-writes of the same stored label set inside one statement is how
+        // an implementation loses the first edit; only a combined patch catches it.
+        const kept = token("kept-label");
+        const dropped = token("dropped-label");
+        await must(store.messages.updateMessageStatus(created.id, { add_label: dropped }), "add the first label");
+        await must(
+          store.messages.updateMessageStatus(created.id, { add_label: kept, remove_label: dropped }),
+          "add one label and remove another in one patch",
+        );
+        stash("messages/status-patch-round-trip", { id: created.id, providerMessageId, kept, dropped });
         return store.messages.getMessage(created.id);
       },
       expect(outcome: unknown): void {
@@ -875,6 +967,8 @@ function buildConformanceCases(): ConformanceCase[] {
         same(read.id, state["id"], "message id");
         same(read.status, "delivered", "patched status");
         same(read.provider_message_id, state["providerMessageId"], "patched provider message id");
+        check(read.labels.includes(String(state["kept"])), `the added label is missing: ${show(read.labels)}`);
+        check(!read.labels.includes(String(state["dropped"])), `the removed label survived: ${show(read.labels)}`);
       },
     },
     {
@@ -911,6 +1005,37 @@ function buildConformanceCases(): ConformanceCase[] {
         same(after.total, before.total + 1, "total count");
         same(after.inbox, before.inbox + 1, "inbox count");
         same(after.unread, before.unread + 1, "unread count");
+      },
+    },
+
+    {
+      id: "messages/counts-scope-to-a-recipient-domain",
+      what: "counts scoped to one recipient domain see that domain's mail and nothing else",
+      requires: null,
+      async exercise(store: EmailStore): Promise<unknown> {
+        const scopedDomain = domainToken();
+        for (let index = 0; index < 2; index += 1) {
+          await must(
+            store.messages.createMessage(inboundMessage(`scoped-${index}@${scopedDomain}`, token("subject"))),
+            "createMessage (in scope)",
+          );
+        }
+        await must(
+          store.messages.createMessage(inboundMessage(`elsewhere-${RUN_TAG}@example.test`, token("subject"))),
+          "createMessage (out of scope)",
+        );
+        stash("messages/counts-scope-to-a-recipient-domain", { domain: scopedDomain });
+        return store.messages.messageCounts({ domains: [scopedDomain] });
+      },
+      expect(outcome: unknown): void {
+        const counts = countsOf(value(outcome, "messageCounts(domains)"), "scoped counts");
+        // Absolute, not a delta: the domain is minted for this case, so only its own two
+        // messages can be in scope. A scope filter that is ignored answers with the whole
+        // database and fails here.
+        same(counts.total, 2, "only the in-scope mail is counted");
+        same(counts.inbox, 2, "the in-scope mail is in the inbox");
+        same(counts.unread, 2, "the in-scope mail is unread");
+        check(counts.latest_received_at !== null, "counts over real mail carry a latest received time");
       },
     },
 
@@ -1050,23 +1175,31 @@ function buildConformanceCases(): ConformanceCase[] {
       requires: null,
       async exercise(store: EmailStore): Promise<unknown> {
         const scopedDomain = domainToken();
-        const created = await must(
-          store.messages.createMessage(inboundMessage(`cleared@${scopedDomain}`, token("subject"))),
-          "createMessage",
-        );
+        // THREE in scope, not one: a count of one cannot tell a correct count from a
+        // count that includes rows the cascade removed from other tables.
+        const scoped: string[] = [];
+        for (let index = 0; index < 3; index += 1) {
+          const written = await must(
+            store.messages.createMessage(inboundMessage(`cleared-${index}@${scopedDomain}`, token("subject"))),
+            "createMessage",
+          );
+          scoped.push(written.id);
+        }
         const untouched = await must(
           store.messages.createMessage(inboundMessage(`kept-${RUN_TAG}@example.test`, token("subject"))),
           "createMessage (out of scope)",
         );
         const cleared = await must(store.inbound.clearInboundEmails({ domains: [scopedDomain] }), "clearInboundEmails");
-        same(cleared, 1, "exactly the in-scope message was cleared");
+        same(cleared, 3, "exactly the three in-scope messages were cleared");
         const survivor = await must(store.messages.getMessage(untouched.id), "getMessage (out of scope)");
         check(survivor !== null, "clearing one domain must not remove another domain's mail");
-        stash("inbound/clear-removes-scoped-mail", { id: created.id });
-        return store.messages.getMessage(created.id);
+        for (const id of scoped.slice(1)) {
+          same(await must(store.messages.getMessage(id), "getMessage (cleared)"), null, `${id} must be gone`);
+        }
+        stash("inbound/clear-removes-scoped-mail", { id: scoped[0] });
+        return store.messages.getMessage(scoped[0] as string);
       },
       expect(outcome: unknown): void {
-        stashed("inbound/clear-removes-scoped-mail");
         same(value(outcome, "getMessage after clear"), null, "cleared mail must not be readable");
       },
     },
@@ -1104,7 +1237,6 @@ function buildConformanceCases(): ConformanceCase[] {
         return store.sendKeys.verifySendKey(minted.token);
       },
       expect(outcome: unknown): void {
-        stashed("send-keys/mint-then-verify-then-revoke");
         same(value(outcome, "verifySendKey after revoke"), null, "a revoked token must stop verifying");
       },
     },
@@ -1144,7 +1276,6 @@ function buildConformanceCases(): ConformanceCase[] {
         return store.contacts.get(id);
       },
       expect(outcome: unknown): void {
-        stashed("resources/uniform-crud-round-trip");
         same(value(outcome, "contacts.get after remove"), null, "a removed row must not be readable");
       },
     },
@@ -1156,16 +1287,23 @@ function buildConformanceCases(): ConformanceCase[] {
       requires: "keysetPagination",
       async exercise(store: EmailStore): Promise<unknown> {
         const subject = token("keyset");
-        const written: string[] = [];
-        for (let index = 0; index < 5; index += 1) {
+        // THREE of the five share one timestamp. That is the whole point: a keyset over
+        // a timestamp alone is not total, and rows written in a batch all carry the same
+        // instant, so ties are the COMMON case rather than the edge one. Five rows with
+        // five distinct timestamps never touch the tiebreaker that makes the order total.
+        const newer = new Date(Date.now() - 60_000).toISOString();
+        const older = new Date(Date.now() - 120_000).toISOString();
+        const stamps = [newer, newer, newer, older, older];
+        const written: Array<{ id: string; ts: string }> = [];
+        for (let index = 0; index < stamps.length; index += 1) {
           const created = await must(
             store.messages.createMessage({
               ...inboundMessage(`keyset-${RUN_TAG}@example.test`, `${subject} ${index}`),
-              received_at: new Date(Date.now() - index * 60_000).toISOString(),
+              received_at: stamps[index] as string,
             }),
             "createMessage",
           );
-          written.push(created.id);
+          written.push({ id: created.id, ts: stamps[index] as string });
         }
         const drained = await drainMessages(store, { subject, limit: 2 });
         if ("refused" in drained) return drained.refused;
@@ -1175,16 +1313,78 @@ function buildConformanceCases(): ConformanceCase[] {
       },
       expect(outcome: unknown): void {
         const state = stashed("messages/keyset-scan-emits-every-row-exactly-once");
-        const written = asArray(state["written"], "written ids").map((id) => String(id));
+        const written = asArray(state["written"], "written rows").map((row) => {
+          const entry = asObject(row, "written row");
+          return { id: String(entry["id"]), ts: String(entry["ts"]) };
+        });
         const scanned = asArray(state["scanned"], "scanned ids").map((id) => String(id));
-        same(scanned.length, written.length, "a keyset scan must emit every row exactly once");
+        // The EXACT total order, not merely the set. (ts DESC, id DESC) is the order the
+        // capability claims; asserting only the first element let a scan that paged by
+        // OFFSET, or dropped the id tiebreaker, pass.
+        const expected = [...written]
+          .sort((a, b) => (a.ts === b.ts ? (a.id < b.id ? 1 : -1) : a.ts < b.ts ? 1 : -1))
+          .map((row) => row.id);
+        same(scanned.join(","), expected.join(","), "the keyset scan order, exactly");
         same(new Set(scanned).size, scanned.length, "a keyset scan must not re-emit a row");
-        for (const id of written) check(scanned.includes(id), `the keyset scan skipped ${id}`);
-        // Newest first: message 0 was received most recently.
-        same(scanned[0], written[0], "the newest written message comes first");
         const page = pageOf(value(outcome, "listMessages"), "message page");
         same(page.items.length, 2, "the first page holds exactly the requested limit");
         check(page.next_cursor !== null, "a full first page must offer a cursor");
+      },
+    },
+    {
+      id: "messages/keyset-scan-is-exact-once-across-a-write-during-the-scan",
+      what: "a row written between two pages of a scan neither duplicates nor hides any row already being scanned",
+      requires: "keysetPagination",
+      async exercise(store: EmailStore): Promise<unknown> {
+        const subject = token("interleaved");
+        const written: string[] = [];
+        for (let index = 0; index < 4; index += 1) {
+          const created = await must(
+            store.messages.createMessage({
+              ...inboundMessage(`interleaved-${RUN_TAG}@example.test`, `${subject} ${index}`),
+              received_at: new Date(Date.now() - (index + 2) * 60_000).toISOString(),
+            }),
+            "createMessage",
+          );
+          written.push(created.id);
+        }
+        const first = await store.messages.listMessages({ subject, limit: 2 });
+        if (!first.ok) return first;
+        const seen = first.value.items.map((item) => item.id);
+        // A row lands mid-scan, OLDER than the cursor, so it falls inside the range the
+        // scan has not reached. It must appear, and it must not disturb the four already
+        // being scanned. (A row newer than the cursor would legitimately be missed — it
+        // lands behind the scan — which is why this one is deliberately older.)
+        const interleaved = await must(
+          store.messages.createMessage({
+            ...inboundMessage(`interleaved-${RUN_TAG}@example.test`, `${subject} late`),
+            received_at: new Date(Date.now() - 600_000).toISOString(),
+          }),
+          "createMessage (during the scan)",
+        );
+        let cursor = first.value.next_cursor;
+        for (let page = 0; page < 20 && cursor !== null; page += 1) {
+          const next = await store.messages.listMessages({ subject, limit: 2, cursor });
+          if (!next.ok) return next;
+          seen.push(...next.value.items.map((item) => item.id));
+          cursor = next.value.next_cursor;
+        }
+        stash("messages/keyset-scan-is-exact-once-across-a-write-during-the-scan", {
+          written,
+          interleaved: interleaved.id,
+          seen,
+        });
+        return store.messages.listMessages({ subject, limit: 50 });
+      },
+      expect(outcome: unknown): void {
+        const state = stashed("messages/keyset-scan-is-exact-once-across-a-write-during-the-scan");
+        const written = asArray(state["written"], "written ids").map((id) => String(id));
+        const seen = asArray(state["seen"], "scanned ids").map((id) => String(id));
+        same(new Set(seen).size, seen.length, `a row was emitted twice: ${show(seen)}`);
+        for (const id of written) check(seen.includes(id), `the scan lost ${id} when a row was written`);
+        check(seen.includes(String(state["interleaved"])), "a row written inside the scanned range must appear");
+        const page = pageOf(value(outcome, "listMessages"), "message page");
+        same(page.items.length, written.length + 1, "a wide page holds every row that was written");
       },
     },
     {
@@ -1205,14 +1405,33 @@ function buildConformanceCases(): ConformanceCase[] {
         const afterArchive = await store.inbound.listInbound({ subject, limit: 50 });
         if (!afterArchive.ok) return afterArchive;
         same(afterArchive.value.items.length, 0, "an archived message leaves the inbox page");
-        stash("inbound/folder-scope-moves-with-the-archive-flag", { id: created.id });
+        // A message CREATED with the folder label must land in that folder too. Folder
+        // state has two representations on this seam (the label set on the record, and
+        // whatever a store keeps underneath); a store that reads only one of them puts a
+        // message on the inbox page while its own record says it is archived.
+        const bornArchived = await must(
+          store.messages.createMessage({
+            ...inboundMessage(`folder-${RUN_TAG}@example.test`, subject),
+            labels: ["archived"],
+          }),
+          "createMessage (already archived)",
+        );
+        const inboxAgain = await store.inbound.listInbound({ subject, limit: 50 });
+        if (!inboxAgain.ok) return inboxAgain;
+        same(inboxAgain.value.items.length, 0, "a message created as archived is not on the inbox page");
+        stash("inbound/folder-scope-moves-with-the-archive-flag", { id: created.id, bornArchived: bornArchived.id });
         return store.inbound.listInbound({ subject, folder: "archived", limit: 50 });
       },
       expect(outcome: unknown): void {
         const state = stashed("inbound/folder-scope-moves-with-the-archive-flag");
         const page = pageOf(value(outcome, "listInbound(archived)"), "archived page");
-        same(page.items.length, 1, "the archived folder page holds the archived message");
-        same(page.items[0] === undefined ? null : page.items[0].id, state["id"], "and it is the archived one");
+        const ids = page.items.map((item) => item.id);
+        same(ids.length, 2, `the archived folder page holds both archived messages: ${show(ids)}`);
+        check(ids.includes(String(state["id"])), "the message archived by a flag write is on the archived page");
+        check(ids.includes(String(state["bornArchived"])), "the message created as archived is on the archived page");
+        for (const item of page.items) {
+          check(item.labels.includes("archived"), `an archived row must say so: ${show(item.labels)}`);
+        }
       },
     },
     {
@@ -1238,17 +1457,121 @@ function buildConformanceCases(): ConformanceCase[] {
         const drained = await drainAttachments(store, 1);
         if ("refused" in drained) return drained.refused;
         const seen = drained.items.map((item) => `${item.message_id}#${item.attachment_index}`);
-        stash("attachments/inventory-scan-emits-every-attachment-exactly-once", { expected, seen });
+        const mine = drained.items.filter((item) => String(item.filename ?? "").startsWith(tag));
+        stash("attachments/inventory-scan-emits-every-attachment-exactly-once", {
+          expected,
+          seen,
+          tag,
+          mine: mine.map((item) => ({ ...item })),
+        });
         return store.emailContent.listAttachments({ limit: 1 });
       },
-      expect(outcome: unknown): void {
+      expect(outcome: unknown, store: EmailStore): void {
         const state = stashed("attachments/inventory-scan-emits-every-attachment-exactly-once");
         const expected = asArray(state["expected"], "expected keys").map((key) => String(key));
         const seen = asArray(state["seen"], "seen keys").map((key) => String(key));
+        check(seen.length > 0, "the inventory returned nothing for messages that carry attachments");
         same(new Set(seen).size, seen.length, "the inventory must not emit an attachment twice");
         for (const key of expected) check(seen.includes(key), `the inventory scan skipped ${key}`);
+        // The ROW CONTENT, not just its identity. Every field below was droppable to
+        // null and `content_available` flippable to true with no case noticing, and that
+        // field is the one a reader uses to decide whether a download is worth
+        // attempting: these attachments were written WITHOUT bytes, so no store may
+        // report them as available.
+        const mine = asArray(state["mine"], "the written inventory rows");
+        same(mine.length, expected.length, "every written attachment carries its own inventory row");
+        for (const row of mine) {
+          const item = asObject(row, "inventory row");
+          check(String(item["filename"] ?? "").startsWith(String(state["tag"])), "inventory filename");
+          same(item["content_type"], "text/plain", "inventory content type");
+          check(typeof item["size_bytes"] === "number", `inventory size: ${show(item["size_bytes"])}`);
+          same(item["content_available"], false, "metadata written without bytes is not available content");
+          same(item["direction"], "inbound", "inventory direction");
+          check(item["received_at"] !== null, "inventory received_at");
+        }
+        void store;
         const page = asObject(value(outcome, "listAttachments"), "attachment page");
         same(asArray(page["items"], "attachment items").length, 1, "a one-row page holds one row");
+      },
+    },
+
+    {
+      id: "messages/list-filters-narrow-to-the-written-message",
+      what: "each list filter returns the message it matches and excludes the one it does not, with snippet and attachment count",
+      requires: "keysetPagination",
+      async exercise(store: EmailStore): Promise<unknown> {
+        const shared = token("filters");
+        const needle = token("needle");
+        const sender = `filter-sender-${token("s")}@example.test`;
+        const recipient = `filter-recipient-${token("r")}@example.test`;
+        const wanted = await must(
+          store.messages.createMessage({
+            ...inboundMessage(recipient, `${shared} wanted`),
+            from_addr: sender,
+            body_text: `this body contains ${needle} and nothing else does`,
+            attachments: [{ filename: `${needle}.txt`, content_type: "text/plain", size: 2 }],
+          }),
+          "createMessage (wanted)",
+        );
+        const other = await must(
+          store.messages.createMessage({
+            ...inboundMessage(`other-${token("o")}@example.test`, `${shared} other`),
+            from_addr: `other-sender-${token("s")}@example.test`,
+            body_text: "an unrelated body",
+          }),
+          "createMessage (other)",
+        );
+        const ids = async (opts: Record<string, unknown>): Promise<string[] | { refused: unknown }> => {
+          const answer = await store.messages.listMessages({ subject: shared, limit: 50, ...opts });
+          if (!answer.ok) return { refused: answer };
+          return answer.value.items.map((item) => item.id);
+        };
+        const both = await ids({});
+        if (!Array.isArray(both)) return both.refused;
+        same(both.length, 2, "both written messages share the subject filter");
+        const bySearch = await ids({ search: needle });
+        if (!Array.isArray(bySearch)) return bySearch.refused;
+        same(bySearch.join(","), wanted.id, "search matches exactly the message whose body carries the term");
+        const byFrom = await ids({ from: sender });
+        if (!Array.isArray(byFrom)) return byFrom.refused;
+        same(byFrom.join(","), wanted.id, "the from filter matches exactly one sender");
+        const byTo = await ids({ to: recipient });
+        if (!Array.isArray(byTo)) return byTo.refused;
+        same(byTo.join(","), wanted.id, "the to filter matches exactly one recipient");
+        const outbound = await ids({ direction: "outbound" });
+        if (!Array.isArray(outbound)) return outbound.refused;
+        same(outbound.length, 0, "inbound mail is not outbound");
+        const future = await ids({ since: new Date(Date.now() + 3_600_000).toISOString() });
+        if (!Array.isArray(future)) return future.refused;
+        same(future.length, 0, "a since in the future excludes mail that has already arrived");
+        // A since nothing can parse must be REFUSED, never answered with an empty page:
+        // an empty page is indistinguishable from "no mail since then".
+        refusal(
+          await store.messages.listMessages({ subject: shared, since: "not a timestamp at all" }),
+          "invalid_input",
+          422,
+          "an unparseable since",
+        );
+        stash("messages/list-filters-narrow-to-the-written-message", {
+          wanted: wanted.id,
+          other: other.id,
+          needle,
+        });
+        return store.messages.listMessages({ subject: shared, search: needle, limit: 50 });
+      },
+      expect(outcome: unknown): void {
+        const state = stashed("messages/list-filters-narrow-to-the-written-message");
+        const page = pageOf(value(outcome, "listMessages(search)"), "filtered page");
+        same(page.items.length, 1, "the search filter returns exactly the matching message");
+        const item = page.items[0];
+        if (item === undefined) fail("the filtered page is empty");
+        same(item.id, state["wanted"], "and it is the message that was written to match");
+        // The two list-only projections, which nothing else asserts.
+        check(
+          typeof item.snippet === "string" && item.snippet.includes(String(state["needle"])),
+          `the list snippet must come from the written body: ${show(item.snippet)}`,
+        );
+        same(item.attachment_count, 1, "the list row counts the written attachment");
       },
     },
 
@@ -1424,7 +1747,6 @@ function buildConformanceCases(): ConformanceCase[] {
         return store.sendIntents.lookupSendIntent(key);
       },
       expect(outcome: unknown): void {
-        stashed("send-intents/cancel-tombstones-the-key");
         const lookup = asObject(value(outcome, "lookupSendIntent"), "send intent lookup");
         same(lookup["tombstoned"], true, "a cancelled key stays tombstoned for every later reader");
       },
@@ -1434,38 +1756,59 @@ function buildConformanceCases(): ConformanceCase[] {
       what: "an uncertain intent appears in the uncertain list and leaves it once reconciled",
       requires: "sendIntentLedger",
       async exercise(store: EmailStore): Promise<unknown> {
-        const key = token("intent-key");
-        const reserved = await store.sendIntents.reserveSendIntent(key, {
-          ...outboundMessage(token("subject")),
-          idempotency_key: key,
-          send_payload_hash: token("hash"),
-        });
-        if (!reserved.ok) return reserved;
-        const claimed = await store.sendIntents.claimSendIntent(reserved.value.id);
-        if (!claimed.ok) return claimed;
-        const uncertain = await store.sendIntents.markSendUncertain(reserved.value.id, token("provider-msg"));
-        if (!uncertain.ok) return uncertain;
+        // TWO intents, and only one is reconciled. With one, an implementation that
+        // cleared the whole uncertain list — or returned `[]` from it — would pass.
+        const ids: string[] = [];
+        for (let index = 0; index < 2; index += 1) {
+          const key = token("intent-key");
+          const reserved = await store.sendIntents.reserveSendIntent(key, {
+            ...outboundMessage(token("subject")),
+            idempotency_key: key,
+            send_payload_hash: token("hash"),
+          });
+          if (!reserved.ok) return reserved;
+          const claimed = await store.sendIntents.claimSendIntent(reserved.value.id);
+          if (!claimed.ok) return claimed;
+          const uncertain = await store.sendIntents.markSendUncertain(reserved.value.id, token("provider-msg"));
+          if (!uncertain.ok) return uncertain;
+          ids.push(reserved.value.id);
+        }
         const listed = await store.sendIntents.listUncertainSendIntents({ limit: 500 });
         if (!listed.ok) return listed;
         // The non-emptiness assertion that matters most in this file: a store answering
         // `[]` here tells a reconciliation sweep that nothing is outstanding.
-        check(
-          listed.value.some((entry) => entry.id === reserved.value.id),
-          `an uncertain intent must be listed as uncertain: ${show(listed.value.map((entry) => entry.id))}`,
-        );
+        for (const id of ids) {
+          check(
+            listed.value.some((entry) => entry.id === id),
+            `an uncertain intent must be listed as uncertain: ${show(listed.value.map((entry) => entry.id))}`,
+          );
+        }
         const reconciled = await store.sendIntents.reconcileUncertainSendIntent(
-          reserved.value.id,
+          ids[0] as string,
           "conformance: the provider log shows the message left",
         );
         if (!reconciled.ok) return reconciled;
-        stash("send-intents/uncertain-intent-is-listed-until-it-is-reconciled", { id: reserved.value.id });
+        stash("send-intents/uncertain-intent-is-listed-until-it-is-reconciled", {
+          reconciled: ids[0],
+          untouched: ids[1],
+        });
         return store.sendIntents.listUncertainSendIntents({ limit: 500 });
       },
       expect(outcome: unknown): void {
         const state = stashed("send-intents/uncertain-intent-is-listed-until-it-is-reconciled");
-        const rows = asArray(value(outcome, "listUncertainSendIntents"), "uncertain intents");
-        const still = rows.filter((row) => asObject(row, "uncertain intent")["id"] === state["id"]);
-        same(still.length, 0, "a reconciled intent must leave the uncertain list");
+        const rows = asArray(value(outcome, "listUncertainSendIntents"), "uncertain intents").map((row) =>
+          asObject(row, "uncertain intent"),
+        );
+        same(
+          rows.filter((row) => row["id"] === state["reconciled"]).length,
+          0,
+          "a reconciled intent must leave the uncertain list",
+        );
+        same(
+          rows.filter((row) => row["id"] === state["untouched"]).length,
+          1,
+          "reconciling one intent must not clear the others",
+        );
       },
     },
 
@@ -1480,7 +1823,6 @@ function buildConformanceCases(): ConformanceCase[] {
         return store.addressLifecycle.getAddressSendability(created.email);
       },
       expect(outcome: unknown): void {
-        stashed("policy/a-zero-quota-address-is-not-sendable");
         const sendability = asObject(value(outcome, "getAddressSendability"), "sendability");
         same(sendability["sendable"], false, "an address with a zero daily quota cannot send");
         same(sendability["daily_quota"], 0, "the reported quota is the one that was written");
@@ -1501,7 +1843,6 @@ function buildConformanceCases(): ConformanceCase[] {
         });
       },
       expect(outcome: unknown): void {
-        stashed("policy/a-suspended-sender-is-not-allowed");
         const decision = asObject(value(outcome, "evaluateOutboundPolicy"), "policy decision");
         same(decision["allowed"], false, "a suspended sender must not be allowed to send");
         const code = decision["code"];
@@ -1530,7 +1871,6 @@ function buildConformanceCases(): ConformanceCase[] {
         return store.sendKeys.isOwnerAuthorizedFrom(owner, created.email);
       },
       expect(outcome: unknown): void {
-        stashed("policy/owner-authorization-follows-the-ownership-write");
         same(value(outcome, "isOwnerAuthorizedFrom"), true, "the assigned owner is authorized to send");
       },
     },
@@ -1538,13 +1878,33 @@ function buildConformanceCases(): ConformanceCase[] {
     // ---- attachmentRepair ------------------------------------------------
     {
       id: "repair/a-created-run-reads-back-by-its-id",
-      what: "a created attachment-repair run is readable by the id it was created with",
+      what: "a repair run reads back with the manifest it was created for, the same id on re-create, and null for an id that was never created",
       requires: "attachmentRepair",
       async exercise(store: EmailStore): Promise<unknown> {
         const manifest = token("manifest");
         const created = await store.attachmentRepair.createOrGetAttachmentRepairRun({ manifest_key: manifest });
         if (!created.ok) return created;
         const runId = String(asObject(created.value, "repair run")["id"]);
+        // The "OrGet" half of the name: a second create for the same manifest must
+        // return the SAME run, not a second one. A store that minted a new id per call
+        // would hand two workers two ledgers for one repair.
+        const again = await store.attachmentRepair.createOrGetAttachmentRepairRun({ manifest_key: manifest });
+        if (!again.ok) return again;
+        same(String(asObject(again.value, "repair run")["id"]), runId, "createOrGet must return the same run");
+        // And an id that was never created must not read back. Without this, a store
+        // that echoed any id it was handed would satisfy the read-back below.
+        const absent = await store.attachmentRepair.getAttachmentRepairRun(`never-${token("run")}`);
+        if (!absent.ok) return absent;
+        same(absent.value, null, "a run that was never created must not read back");
+        // Entries: the seam has NO operation that creates one (createOrGet takes only a
+        // manifest), so a write-then-read over entries is not expressible here yet. What
+        // IS assertable is that the pending list is a real list for a real run and that a
+        // claim against an entry that does not exist does not invent one.
+        const pending = await store.attachmentRepair.listPendingAttachmentRepairEntries(runId, 10);
+        if (!pending.ok) return pending;
+        const claimed = await store.attachmentRepair.claimAttachmentRepairEntry(runId, `never-${token("entry")}`);
+        if (!claimed.ok) return claimed;
+        same(claimed.value, null, "claiming an entry that does not exist must answer null");
         stash("repair/a-created-run-reads-back-by-its-id", { runId, manifest });
         return store.attachmentRepair.getAttachmentRepairRun(runId);
       },
@@ -1552,39 +1912,9 @@ function buildConformanceCases(): ConformanceCase[] {
         const state = stashed("repair/a-created-run-reads-back-by-its-id");
         const run = asObject(value(outcome, "getAttachmentRepairRun"), "repair run");
         same(run["id"], state["runId"], "the run reads back under its own id");
-      },
-    },
-    {
-      id: "repair/a-claimed-entry-leaves-the-pending-list",
-      what: "claiming a pending repair entry removes it from that run's pending list",
-      requires: "attachmentRepair",
-      async exercise(store: EmailStore): Promise<unknown> {
-        const created = await store.attachmentRepair.createOrGetAttachmentRepairRun({
-          manifest_key: token("manifest"),
-        });
-        if (!created.ok) return created;
-        const runId = String(asObject(created.value, "repair run")["id"]);
-        const pending = await store.attachmentRepair.listPendingAttachmentRepairEntries(runId, 10);
-        if (!pending.ok) return pending;
-        const first = pending.value[0];
-        if (first === undefined) {
-          stash("repair/a-claimed-entry-leaves-the-pending-list", { runId, entryId: null });
-          return store.attachmentRepair.listPendingAttachmentRepairEntries(runId, 10);
-        }
-        const entryId = String(asObject(first, "repair entry")["id"]);
-        const claimed = await store.attachmentRepair.claimAttachmentRepairEntry(runId, entryId);
-        if (!claimed.ok) return claimed;
-        await store.attachmentRepair.recordAttachmentRepairEntryOutcome(entryId, { outcome: "repaired" });
-        stash("repair/a-claimed-entry-leaves-the-pending-list", { runId, entryId });
-        return store.attachmentRepair.listPendingAttachmentRepairEntries(runId, 10);
-      },
-      expect(outcome: unknown): void {
-        const state = stashed("repair/a-claimed-entry-leaves-the-pending-list");
-        const rows = asArray(value(outcome, "listPendingAttachmentRepairEntries"), "pending entries");
-        const entryId = state["entryId"];
-        if (entryId === null) return;
-        const still = rows.filter((row) => asObject(row, "repair entry")["id"] === entryId);
-        same(still.length, 0, "a claimed entry must leave the pending list");
+        // The manifest the run was created FOR must be on it. Asserting only that the id
+        // echoes is satisfied by a store that persists nothing.
+        same(run["manifest_key"], state["manifest"], "the run carries the manifest it was created for");
       },
     },
 
@@ -1595,15 +1925,25 @@ function buildConformanceCases(): ConformanceCase[] {
       requires: "mailRollups",
       async exercise(store: EmailStore): Promise<unknown> {
         const subject = token("thread");
-        await must(
-          store.messages.createMessage(inboundMessage(`thread-${RUN_TAG}@example.test`, subject)),
+        const sender = `thread-sender-${RUN_TAG}@example.test`;
+        const parent = await must(
+          store.messages.createMessage({
+            ...inboundMessage(`thread-${RUN_TAG}@example.test`, subject),
+            from_addr: sender,
+          }),
           "createMessage (parent)",
         );
         await must(
-          store.messages.createMessage(inboundMessage(`thread-${RUN_TAG}@example.test`, `Re: ${subject}`)),
+          store.messages.createMessage({
+            ...inboundMessage(`thread-${RUN_TAG}@example.test`, `Re: ${subject}`),
+            from_addr: sender,
+          }),
           "createMessage (reply)",
         );
-        stash("threads/a-reply-rolls-up-with-its-parent-subject", { key: subject.toLowerCase() });
+        // ONE of the two is read, so message_count and unread_count must differ. Equal
+        // counts are satisfied by a rollup that copies one into the other.
+        await must(store.inbound.setInboundRead(parent.id, true), "setInboundRead(true)");
+        stash("threads/a-reply-rolls-up-with-its-parent-subject", { key: subject.toLowerCase(), sender });
         return store.threads.listThreads({ limit: 500 });
       },
       expect(outcome: unknown): void {
@@ -1615,7 +1955,12 @@ function buildConformanceCases(): ConformanceCase[] {
         same(matched.length, 1, `exactly one thread must carry the written subject key ${show(state["key"])}`);
         const thread = asObject(matched[0], "thread rollup");
         same(thread["message_count"], 2, "the reply rolls up with its parent");
-        same(thread["unread_count"], 2, "both written messages are unread");
+        same(thread["unread_count"], 1, "the read message is not counted as unread");
+        check(typeof thread["subject"] === "string", `the rollup carries a subject: ${show(thread["subject"])}`);
+        check(thread["last_message_at"] !== null, "the rollup carries a last-message time");
+        check(thread["first_message_at"] !== null, "the rollup carries a first-message time");
+        const participants = asArray(thread["participants"], "participants").map((entry) => String(entry));
+        check(participants.includes(String(state["sender"])), `participants lost the sender: ${show(participants)}`);
       },
     },
     {
@@ -1623,11 +1968,21 @@ function buildConformanceCases(): ConformanceCase[] {
       what: "mail written to a registered address is counted on that address's mailbox rollup",
       requires: "mailRollups",
       async exercise(store: EmailStore): Promise<unknown> {
-        const registered = await address(store);
+        const registered = await address(store, null, "Rollup Mailbox");
         await must(store.messages.createMessage(inboundMessage(registered.email, token("subject"))), "createMessage");
+        // A recipient in DISPLAY-NAME form must count for the same mailbox: a rollup that
+        // compares the whole stored string instead of extracting the address silently
+        // under-reports every mailbox that receives mail addressed that way.
+        await must(
+          store.messages.createMessage(
+            inboundMessage(`Rollup Mailbox <${registered.email}>`, token("subject")),
+          ),
+          "createMessage (display-name recipient)",
+        );
         stash("mailboxes/a-registered-address-rolls-up-its-inbound-mail", {
           id: registered.id,
           email: registered.email,
+          status: registered.status,
         });
         return store.threads.listMailboxes();
       },
@@ -1641,10 +1996,13 @@ function buildConformanceCases(): ConformanceCase[] {
         same(matched.length, 1, "the registered address has exactly one mailbox rollup");
         const mailbox = asObject(matched[0], "mailbox");
         same(mailbox["id"], state["id"], "the mailbox is the registered address");
-        same(mailbox["total"], 1, "the written message is counted");
-        same(mailbox["unread"], 1, "the written message is counted as unread");
+        same(mailbox["display_name"], "Rollup Mailbox", "the mailbox carries the address display name");
+        same(mailbox["status"], state["status"], "the mailbox carries the address status");
+        same(mailbox["total"], 2, "both written messages are counted, including the display-name recipient");
+        same(mailbox["unread"], 2, "both written messages are counted as unread");
         const counts = countsOf(rollup["counts"], "folder counts");
         check(counts.total > 0, "a rollup with mail must report a non-zero total");
+        check(counts.inbox >= 2, `the folder counts must include this mailbox's mail: ${show(counts)}`);
       },
     },
   ];

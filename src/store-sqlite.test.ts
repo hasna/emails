@@ -15,7 +15,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { closeDatabase, getDatabase, resetDatabase, type Database } from "./db/database.js";
 import { now, uuid } from "./db/runtime.js";
-import { CAPABILITY_KEYS, isCapabilityRefusal } from "./store/capabilities.js";
+import { CAPABILITY_KEYS, capabilityRefusal, isCapabilityRefusal } from "./store/capabilities.js";
 import {
   CONFORMANCE_CASES,
   assertUniformCaseCoverage,
@@ -41,8 +41,8 @@ function restoreInheritedProcessEnv(): void {
   Object.assign(process.env, INHERITED_PROCESS_ENV);
 }
 
-// Forty cases, each writing a handful of rows, run five times over (once clean and
-// once per neutering). Well past the 5s default on a loaded runner.
+// Forty-eight cases, each writing a handful of rows, run once clean plus once per
+// neutering. Well past the 5s default on a loaded runner.
 const SUITE_TIMEOUT_MS = 60_000;
 
 let db: Database;
@@ -104,7 +104,11 @@ describe("SqliteEmailStore conformance", () => {
 
   it("leaves no declared capability unexercised", () => {
     expect(capabilityCoverageGaps()).toEqual([]);
-    expect(CONFORMANCE_CASES.length).toBeGreaterThanOrEqual(30);
+    // The exact case list is pinned in src/store-seam.test.ts; here only the shape of
+    // the run matters, so this checks the two halves are both present rather than
+    // re-pinning a number in a second place.
+    expect(CONFORMANCE_CASES.filter((testCase) => testCase.requires === null).length).toBeGreaterThan(0);
+    expect(CONFORMANCE_CASES.filter((testCase) => testCase.requires !== null).length).toBeGreaterThan(0);
   });
 
   it("declares every capability exactly once, and refuses precisely what it declares false", async () => {
@@ -178,6 +182,64 @@ describe("SqliteEmailStore conformance", () => {
     expect(removed.ok && removed.value).toBe(true);
   });
 
+  it("refuses the send-ledger fields it has no columns for instead of dropping them", async () => {
+    // `createMessage` and `upsertMessage` are not capability-gated, so a caller handing
+    // them an idempotency key or a send state gets no refusal from the capability
+    // machinery — and there is nowhere to put either. Accepting and dropping is the
+    // failure the seam exists to remove.
+    const subject = store();
+    const base = { from_addr: "a@example.test", to_addrs: ["b@example.test"], subject: "ledger fields" };
+    for (const field of [
+      { idempotency_key: "MY-KEY" },
+      { send_payload_hash: "deadbeef" },
+      { send_state: "pending" },
+      { send_started_at: new Date().toISOString() },
+    ]) {
+      const refused = await subject.messages.createMessage({ ...base, ...field });
+      expect(refused.ok, `${JSON.stringify(field)} must be refused`).toBe(false);
+      if (refused.ok) continue;
+      expect(refused.code).toBe("invalid_input");
+      expect(refused.message).toContain(Object.keys(field)[0] as string);
+    }
+    // A send_state of "none" is what this store reports anyway, so it is accepted.
+    const accepted = await subject.messages.createMessage({ ...base, send_state: "none" });
+    expect(accepted.ok).toBe(true);
+  });
+
+  it("deletes an id that exists in both physical tables", async () => {
+    // The union carries no cross-table id-uniqueness guarantee, so a delete that
+    // resolved the table from whichever row the read returned could report a delete it
+    // had not performed. Not reachable through today's writers — which is exactly why it
+    // needs a test rather than an argument.
+    const subject = store();
+    const providerId = uuid();
+    db.run("INSERT INTO providers (id, name, type, created_at, updated_at) VALUES (?, ?, 'sandbox', ?, ?)", [
+      providerId,
+      "collision",
+      now(),
+      now(),
+    ]);
+    db.run(
+      `INSERT INTO emails (id, provider_id, from_address, to_addresses, subject, status, sent_at, created_at, updated_at)
+       VALUES (?, ?, ?, '[]', ?, 'sent', ?, ?, ?)`,
+      ["collision-1", providerId, "l@example.test", "collision", now(), now(), now()],
+    );
+    db.run(
+      `INSERT INTO inbound_emails (id, from_address, to_addresses, subject, received_at, created_at)
+       VALUES (?, ?, '[]', ?, ?, ?)`,
+      ["collision-1", "l@example.test", "collision", now(), now()],
+    );
+    const removed = await subject.messages.deleteMessage("collision-1");
+    expect(removed.ok && removed.value).toBe(true);
+    const left = db
+      .query(
+        `SELECT (SELECT COUNT(*) FROM emails WHERE id = 'collision-1') AS ledger,
+                (SELECT COUNT(*) FROM inbound_emails WHERE id = 'collision-1') AS unified`,
+      )
+      .get() as { ledger: number; unified: number };
+    expect(left).toEqual({ ledger: 0, unified: 0 });
+  });
+
   it("reads the legacy sent ledger through the unified stream", async () => {
     // Rows in `emails` are not written through the seam (that table's NOT NULL
     // provider FK is the storage artifact this store declines to lift), but they MUST
@@ -193,8 +255,8 @@ describe("SqliteEmailStore conformance", () => {
     ]);
     const ledgerId = uuid();
     db.run(
-      `INSERT INTO emails (id, provider_id, from_address, to_addresses, subject, status, sent_at, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, 'sent', ?, ?, ?)`,
+      `INSERT INTO emails (id, provider_id, from_address, to_addresses, subject, status, has_attachments, attachment_count, sent_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, 'sent', 1, 3, ?, ?, ?)`,
       [ledgerId, providerId, "ledger@example.test", JSON.stringify(["dest@example.test"]), "ledger row", now(), now(), now()],
     );
     const read = await subject.messages.getMessage(ledgerId);
@@ -203,6 +265,19 @@ describe("SqliteEmailStore conformance", () => {
     expect(read.value.direction).toBe("outbound");
     expect(read.value.subject).toBe("ledger row");
     expect(read.value.to_addrs).toEqual(["dest@example.test"]);
+    // A sent message is read; see the projection note in messages-sql.ts.
+    expect(read.value.is_read).toBe(true);
+    // THREE OPERATIONS, ONE ANSWER. The ledger row records `attachment_count = 3` but
+    // stores no metadata and no bytes, so the count is derived from the (empty)
+    // attachments array instead: the detail read, the list projection and the inventory
+    // scan must not disagree about how many attachments this row has.
+    expect(read.value.attachments).toEqual([]);
+    const listed = await subject.messages.listMessages({ subject: "ledger row", limit: 10 });
+    expect(listed.ok).toBe(true);
+    if (!listed.ok) return;
+    expect(listed.value.items[0]?.attachment_count).toBe(0);
+    const inventory = await subject.emailContent.listAttachments({ limit: 10 });
+    expect(inventory.ok && inventory.value.items.length).toBe(0);
     const counts = await subject.messages.messageCounts();
     expect(counts.ok && counts.value.sent).toBe(1);
 
@@ -235,12 +310,40 @@ describe("SqliteEmailStore conformance", () => {
   });
 
   it("never exposes a credential through the diagnostics descriptor", () => {
-    const subject = store();
-    expect(subject.descriptor.kind).toBe("sqlite");
-    expect(subject.descriptor.detail.length).toBeGreaterThan(0);
-    for (const secret of ["password", "secret", "token", "api_key", "?"]) {
-      expect(subject.descriptor.detail.toLowerCase()).not.toContain(secret);
+    // The DEFAULT detail, not one this test supplied — a test that asserts a property of
+    // its own literal proves nothing about the shipped path.
+    for (const subject of [createSqliteEmailStore({ database: db }), store()]) {
+      expect(subject.descriptor.kind).toBe("sqlite");
+      expect(subject.descriptor.detail.length).toBeGreaterThan(0);
+      for (const secret of ["password", "secret", "token", "api_key", "?", "://"]) {
+        expect(subject.descriptor.detail.toLowerCase()).not.toContain(secret);
+      }
     }
+  });
+
+  it("redacts provider credentials from the generic resource path", async () => {
+    // `providers` carries live sending credentials and this seam is published on a
+    // library subpath, so the generic CRUD path must neither read nor write them —
+    // the same rule that keeps `key_hash` off SendKeyRecord.
+    const subject = store();
+    const created = await subject.providers.create({ name: "redaction", type: "sandbox" });
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const id = String(created.value["id"]);
+    db.run("UPDATE providers SET api_key = ?, secret_key = ? WHERE id = ?", ["plaintext-key", "plaintext-secret", id]);
+    const read = await subject.providers.get(id);
+    expect(read.ok).toBe(true);
+    if (!read.ok || read.value === null) throw new Error("the provider did not read back");
+    for (const column of ["api_key", "access_key", "secret_key", "oauth_client_secret", "oauth_refresh_token", "oauth_access_token"]) {
+      expect(Object.keys(read.value), `${column} must not be projected`).not.toContain(column);
+    }
+    expect(JSON.stringify(read.value)).not.toContain("plaintext");
+    // And a WRITE that names one is refused rather than accepted.
+    const refused = await subject.providers.update(id, { api_key: "nope" });
+    expect(refused.ok).toBe(false);
+    if (refused.ok) return;
+    expect(refused.code).toBe("invalid_input");
+    expect(refused.message).toContain("credential column");
   });
 });
 
@@ -305,7 +408,7 @@ const NEUTERINGS: Neutering[] = [
   {
     label: "listMessages returns an empty page",
     caseId: "messages/keyset-scan-emits-every-row-exactly-once",
-    detail: "a keyset scan must emit every row exactly once",
+    detail: "the keyset scan order, exactly",
     break(subject: EmailStore): EmailStore {
       return {
         ...subject,
@@ -329,6 +432,44 @@ const NEUTERINGS: Neutering[] = [
           ...subject.emailContent,
           async getMessageAttachment() {
             return { ok: true, value: null };
+          },
+        },
+      };
+    },
+  },
+  {
+    label: "a flag write silently does nothing while reads keep working",
+    caseId: "inbound/starred-flag-round-trip",
+    detail: "the star is persisted",
+    break(subject: EmailStore): EmailStore {
+      // The most important control of the five: a WRITE that reports success and
+      // changes nothing. Every other neutering here breaks a read, and a suite that
+      // only catches broken reads would miss the whole class of "the write was
+      // accepted and dropped" bugs this seam exists to remove.
+      return {
+        ...subject,
+        inbound: {
+          ...subject.inbound,
+          async setInboundStarred(id: string) {
+            return subject.messages.getMessage(id);
+          },
+        },
+      };
+    },
+  },
+  {
+    label: "a refusal names a capability other than the one that was asked for",
+    caseId: "messages/raw-mime-carries-the-written-headers",
+    detail: "did not return the capability refusal",
+    break(subject: EmailStore): EmailStore {
+      // A single hard-coded refusal blob must not answer for every capability a store
+      // lacks. Fixture-tested in store-seam.test.ts; proved here against the real store.
+      return {
+        ...subject,
+        messages: {
+          ...subject.messages,
+          async getMessageRaw() {
+            return capabilityRefusal("mailRollups", "sqlite");
           },
         },
       };
@@ -358,8 +499,8 @@ describe("the conformance suite can fail", () => {
   }
 
   it("does not fail for the unmodified store", async () => {
-    // The other direction of the same control: the four neuterings above are only
-    // evidence if the store they were derived from is green.
+    // The other direction of the same control: the neuterings above are only evidence
+    // if the store they were derived from is green.
     const report = await runConformanceSuite([store()], CONFORMANCE_CASES);
     expect(conformanceFailures(report)).toEqual([]);
   }, SUITE_TIMEOUT_MS);

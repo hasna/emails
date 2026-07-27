@@ -30,6 +30,14 @@ import type { Database } from "../db/database.js";
  * proceeding un-transacted is how a partial write gets reported as a whole one.
  */
 export function withImmediateTransaction<TResult>(db: Database, work: () => TResult): TResult {
+  // ASK the connection, do not infer from an error string. The difference between
+  // "joined the caller's transaction" and "ran un-transacted while reporting
+  // success" must not rest on a driver's wording, so the enclosing-transaction case
+  // is decided by `inTransaction` up front. The message match below stays as a
+  // backstop for a driver that does not expose it; every other begin failure —
+  // SQLITE_BUSY after the busy timeout, a corrupt file — is rethrown, because
+  // silently proceeding un-transacted is how a partial write gets reported whole.
+  if (db.inTransaction) return work();
   let owned = false;
   try {
     db.exec("BEGIN IMMEDIATE");

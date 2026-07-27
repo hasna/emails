@@ -667,10 +667,62 @@ describe("conformance harness", () => {
     // list EMPTY, and it is strictly stronger: the gap list must now be empty rather
     // than complete.
     expect(capabilityCoverageGaps()).toEqual([]);
-    // Non-vacuity, both ways round. A suite that lost its cases would satisfy nothing
-    // below it, and the floor makes that a red test rather than a green run over an
-    // empty array.
-    expect(CONFORMANCE_CASES.length).toBeGreaterThanOrEqual(30);
+    // THE EXACT LIST, not a floor. A `>=` floor is not a pin: with 48 cases declared, a
+    // floor of 30 lets eighteen be deleted with this test still green — and the
+    // assertion this one replaced (`CONFORMANCE_CASES` is empty) WAS exact, so a floor
+    // would have been a loss of precision at the moment the list started mattering.
+    // Adding a case means adding a line here, which is the visible diff the seam's
+    // index.ts asks for from every other addition.
+    expect(CONFORMANCE_CASES.map((testCase) => testCase.id).sort()).toEqual([
+      "address-lifecycle/ownership-patch-round-trip",
+      "address-lifecycle/quota-write-round-trip",
+      "address-lifecycle/suspend-then-activate-round-trip",
+      "addresses/create-then-read-back",
+      "addresses/delete-removes-the-row",
+      "addresses/list-includes-the-created-row",
+      "addresses/quota-clear-is-not-a-no-op",
+      "attachments/content-lookup-answers-with-the-stored-bytes",
+      "attachments/inventory-scan-emits-every-attachment-exactly-once",
+      "attachments/metadata-batch-reports-content-availability",
+      "domains/create-then-read-back",
+      "domains/delete-removes-the-row",
+      "domains/list-includes-the-created-row",
+      "domains/lookup-by-name-finds-the-created-row",
+      "domains/update-then-read-back",
+      "inbound/archive-flag-round-trip",
+      "inbound/clear-removes-scoped-mail",
+      "inbound/folder-scope-moves-with-the-archive-flag",
+      "inbound/label-add-and-remove-round-trip",
+      "inbound/read-flag-round-trip",
+      "inbound/starred-flag-round-trip",
+      "inbound/unread-count-follows-the-read-flag",
+      "mailboxes/a-registered-address-rolls-up-its-inbound-mail",
+      "messages/counts-follow-the-writes",
+      "messages/counts-scope-to-a-recipient-domain",
+      "messages/create-then-read-back",
+      "messages/delete-removes-the-row",
+      "messages/keyset-scan-emits-every-row-exactly-once",
+      "messages/keyset-scan-is-exact-once-across-a-write-during-the-scan",
+      "messages/list-filters-narrow-to-the-written-message",
+      "messages/raw-mime-carries-the-written-headers",
+      "messages/resolve-id-answers-not-found-for-an-unknown-id",
+      "messages/status-patch-round-trip",
+      "messages/upsert-is-idempotent-on-source-id",
+      "policy/a-suspended-sender-is-not-allowed",
+      "policy/a-zero-quota-address-is-not-sendable",
+      "policy/owner-authorization-follows-the-ownership-write",
+      "provisioning/address-patch-round-trip",
+      "provisioning/domain-patch-round-trip",
+      "provisioning/event-recorded-then-listed",
+      "repair/a-created-run-reads-back-by-its-id",
+      "resources/uniform-crud-round-trip",
+      "send-intents/cancel-tombstones-the-key",
+      "send-intents/claim-then-complete-records-the-provider-id",
+      "send-intents/reserve-is-visible-through-the-key",
+      "send-intents/uncertain-intent-is-listed-until-it-is-reconciled",
+      "send-keys/mint-then-verify-then-revoke",
+      "threads/a-reply-rolls-up-with-its-parent-subject",
+    ]);
     const ids = CONFORMANCE_CASES.map((testCase) => testCase.id);
     expect(new Set(ids).size).toBe(ids.length);
     for (const testCase of CONFORMANCE_CASES) {

@@ -7,9 +7,10 @@
 // token is returned exactly once, at mint.
 //
 // `updated_at` is DERIVED. This table has no such column; the meaningful mtime is
-// the most recent thing that happened to the key, in precedence order: revoked
-// (terminal), then last used, then created. That is a projection of stored facts,
-// not a fabricated timestamp.
+// the LATEST of the three timestamps it does have — created, last used, revoked.
+// `MAX()` over them is correct by construction rather than by an argument about
+// which transition can follow which, which is what a precedence COALESCE would be.
+// It is a projection of stored facts, not a fabricated timestamp.
 
 import { createHash, randomBytes } from "node:crypto";
 import type { Database } from "../db/database.js";
@@ -28,7 +29,7 @@ const MAX_PAGE = 500;
 /** The non-secret projection. `key_hash` is not in it, and must never be. */
 const SEND_KEY_COLUMNS = `
   id, owner_id, prefix, label, last_used_at, revoked_at, created_at,
-  COALESCE(revoked_at, last_used_at, created_at) AS updated_at
+  MAX(created_at, COALESCE(last_used_at, ''), COALESCE(revoked_at, '')) AS updated_at
 `;
 
 function hashToken(token: string): string {

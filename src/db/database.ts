@@ -1938,7 +1938,6 @@ const MIGRATIONS = [
   ${RETIRED_LEGACY_INBOUND_BRIDGE_SQL}
   INSERT OR IGNORE INTO _migrations (id) VALUES (48);
   `,
-
 ];
 
 let _db: Database | null = null;
@@ -2529,8 +2528,12 @@ function ensureSchema(db: Database): void {
   //   * inbound_emails.status / .provider_message_id — writable through the seam's
   //     updateMessageStatus. Without them a status patch would have to be accepted and
   //     silently dropped, which is the plausible-wrong-answer failure the seam removes.
-  //   * inbound_emails.source_id — the stable upstream id upsertMessage fences on. The
-  //     partial unique index below IS that fence.
+  //   * inbound_emails.source_id — the stable upstream id upsertMessage keys on. The
+  //     FENCE is upsertMessage's own BEGIN IMMEDIATE read-then-write, which serialises
+  //     writers whether or not this index exists; the partial unique index below is a
+  //     backstop against a duplicate arriving by any other path. Said precisely because
+  //     `ensureIndex` tolerates its own failure, so a claim that the index IS the fence
+  //     would be a claim this file cannot keep.
   //   * inbound_emails.updated_at — the table only ever stamped created_at; the record
   //     shape needs a real mtime, and readers COALESCE back to created_at for legacy rows.
   //   * domains.notes — the seam's DomainRecord carries free-text notes (the strongest

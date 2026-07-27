@@ -60,6 +60,34 @@ export const RESOURCE_TABLES = Object.freeze({
 
 export type ResourceFamily = keyof typeof RESOURCE_TABLES;
 
+/**
+ * Columns a generic resource read must NEVER project, per table.
+ *
+ * The `providers` table carries live sending credentials. A generic `SELECT *` path
+ * would hand them to every caller of `providers.list()`, and this seam is published
+ * on a library subpath — so the same care that keeps `key_hash` off `SendKeyRecord`
+ * applies here. The strongest arm makes the same choice for the same reason (its
+ * resource registry calls it `redactColumns`), and its resources are summary-only.
+ *
+ * Redaction is enforced in BOTH directions: these columns are not read, and a write
+ * that names one is refused rather than accepted. Credentials belong to the code that
+ * owns them (src/db/provider-credentials.ts), not to a generic CRUD path.
+ */
+const REDACTED_COLUMNS: Record<string, readonly string[]> = Object.freeze({
+  providers: Object.freeze([
+    "api_key",
+    "access_key",
+    "secret_key",
+    "oauth_client_secret",
+    "oauth_refresh_token",
+    "oauth_access_token",
+  ]),
+});
+
+function redactedFor(table: string): readonly string[] {
+  return REDACTED_COLUMNS[table] ?? [];
+}
+
 interface ColumnInfo {
   name: string;
   primaryKeyPosition: number;
@@ -123,16 +151,37 @@ function bindable(value: unknown): SQLQueryBindings {
 }
 
 /** Reject unknown keys instead of dropping them; a dropped field is a silent lie. */
-function writableColumns(shape: TableShape, input: ResourceInput): { columns: string[] } | { refusal: string } {
-  const unknown = Object.keys(input).filter((key) => !shape.columns.includes(key));
+function writableColumns(
+  shape: TableShape,
+  table: string,
+  input: ResourceInput,
+): { columns: string[] } | { refusal: string } {
+  // `rowid` is projected on a composite-key table so the caller can address the row,
+  // but it is SQLite's own identity and not a column of the table. Accepting it back
+  // in a read-modify-write is what makes that round trip possible at all; rejecting
+  // it made `update(id, rowFromCreate)` impossible for those families.
+  const keys = Object.keys(input).filter((key) => !(shape.idIsRowid && key === "rowid"));
+  const unknown = keys.filter((key) => !shape.columns.includes(key));
   if (unknown.length > 0) {
     return { refusal: `unknown column(s) for this resource: ${unknown.sort().join(", ")}` };
   }
-  return { columns: Object.keys(input).filter((key) => input[key] !== undefined) };
+  const secret = keys.filter((key) => redactedFor(table).includes(key));
+  if (secret.length > 0) {
+    return {
+      refusal:
+        `credential column(s) may not be written through the generic resource path: ${secret.sort().join(", ")}`,
+    };
+  }
+  return { columns: keys.filter((key) => input[key] !== undefined) };
 }
 
 function projection(shape: TableShape, table: string): string {
-  return shape.idIsRowid ? `${table}.rowid AS rowid, ${table}.*` : `${table}.*`;
+  // An explicit column list, not `*`: a redacted column must not reach a caller, and
+  // a future migration that adds a credential column must not silently publish it.
+  const redacted = redactedFor(table);
+  const visible = shape.columns.filter((column) => !redacted.includes(column));
+  const columns = visible.map((column) => `${table}.${column}`).join(", ");
+  return shape.idIsRowid ? `${table}.rowid AS rowid, ${columns}` : columns;
 }
 
 function readRow(db: Database, table: string, shape: TableShape, id: SQLQueryBindings): ResourceRow | null {
@@ -185,7 +234,7 @@ export function createResourceRepository(db: Database, table: string): ResourceR
       return guard(() =>
         withImmediateTransaction(db, () => {
           const shape = shapeOf();
-          const writable = writableColumns(shape, input);
+          const writable = writableColumns(shape, table, input);
           if ("refusal" in writable) return invalidInput(writable.refusal);
           const values = new Map<string, SQLQueryBindings>();
           for (const column of writable.columns) values.set(column, bindable(input[column]));
@@ -218,7 +267,7 @@ export function createResourceRepository(db: Database, table: string): ResourceR
         withImmediateTransaction(db, () => {
           const shape = shapeOf();
           if (!readRow(db, table, shape, id)) return ok(null);
-          const writable = writableColumns(shape, patch);
+          const writable = writableColumns(shape, table, patch);
           if ("refusal" in writable) return invalidInput(writable.refusal);
           const columns = writable.columns.filter((column) => column !== shape.idColumn);
           const sets = columns.map((column) => `${column} = ?`);
