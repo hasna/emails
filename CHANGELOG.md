@@ -4,7 +4,63 @@ All notable changes to `@hasna/emails` are documented here.
 
 ## [Unreleased]
 
-- scope AWS module cross-account SES credentials to `EMAILS_SES_*` only; generic `AWS_*` credentials are no longer injected, so unrelated SDK clients retain the task-role default chain.
+## 1.4.0 (2026-07-27)
+
+Cut at `8df9247` (PR #117), the last commit before the first public-breaking family
+collapse. 92 commits. Additive on every published entry point, measured by enumerating
+the runtime export surface at both boundaries: `.` gained one export (`providerDnsPublishing`)
+and lost none, `./storage` went 20 → 35 value exports with none removed, `./selfhost` is
+unchanged, and no exported value changed from synchronous to asynchronous. `storeEmailContent`
+still writes.
+
+### Five silent email failures made loud, diagnosable and fixable
+
+Five defects that share one shape: the tool knew something the operator needed and did not
+say it. Together they cost five days on a real outbound message — it was refused before any
+provider was contacted, read as the bare word `blocked`, could not be predicted, could not be
+explained, and could not be fixed from the CLI.
+
+- **fix(cli): a stale explicit local-mode selector no longer overrides a configured client-env vault pointer in silence.** The CLI read an empty local database and reported `0 total, 0 unread` against a deployment holding roughly 170,000 messages. Precedence is CORRECT and is unchanged — the defect was the silence. `EmailsModeResolution.warning` was typed `null`, i.e. permanently unpopulatable, while `doctor.local.ts` already rendered it as a warn-level check and `agent-context.ts` already printed `Mode note:`; both surfaces were wired to a value that could never arrive. Populating it makes `emails doctor` loud with no changes to doctor at all, and `emails inbox status` now prints the note ABOVE the counts it invalidates. It also fires for a directly configured endpoint, not only a vault pointer. The machine-readable surfaces mattered more than the human ones: every `--json` and MCP view projects a subset that dropped `mode`, so an agent saw `degraded: false, total: 0` — immaculate, and wrong. A mode note now sets `degraded`, and the subsets carry `mode_warning`.
+- **fix(cli): a refused send states its reason on every CLI path.** The reason exists only in `headers.policy_denial`, and `headers` is deliberately stripped from list rows (headers and bodies were ~73% of a 459KB page), so the cause was unreachable on list paths even in principle. Rather than re-adding headers, the list projection now carries one short scalar, `policy_denial`, threaded through the SQL, the API item, the OpenAPI schema, the generated SDK, both store mappers and both renderers. `emails show` gains a `Blocked by:` line naming the code and stating that no provider was contacted. The field is OPTIONAL on the wire, deliberately: marking it required was tried and verified against the running deployment, and it broke every list read on version skew because the deployed server predates the field — a client that refuses to list mail at all is strictly worse than one that cannot explain a refusal. The server's obligation to project it is enforced by tests instead (`src/server/self-hosted/policy-denial-visibility.test.ts`).
+- fix(cli): `emails inbox status` no longer advertises `emails pull` as `emails refresh`, which is not a command in any mode. It sat in the self-hosted-only refusal list, so the per-mode filter never suppressed it in local mode — and a test asserted that broken behaviour. A command that exists in no mode now lives in `NEVER_AVAILABLE_COMMANDS`, per that registry's own documented doctrine.
+- **feat(cli): `emails address set-verified`.** Nothing in the CLI could set `addresses.verified`, so the most common refusal was diagnosable but not fixable and the only route was a hand-rolled PATCH. Every layer beneath the CLI already supported the write, so this adds the missing verb. The misleadingly named read-only `emails address verify` now says that it only reads, and names the command that changes it.
+- **fix(cli): `emails send --dry-run` is no longer a pure echo of its own arguments.** A verified sender, an unverified sender whose send would be refused, and an address that does not exist produced byte-identical output, while being used as a gate before real sends. It now reports the sender verdict using the same codes the policy gate returns and in the same order (`src/lib/send-preflight.ts`), evaluates real attachment sizes against the mode's caps (previously printed as prose and never checked), and states explicitly what it did NOT verify. It does not re-implement the gate — a second copy would drift from the enforcer.
+- docs: an asymmetry in the outbound policy gate is documented without being changed — the verified check tests the address alone while the very next check accepts domain readiness as sufficient, from the same row. Widening it is a tenant-boundary decision, not a cleanup.
+
+### The storage seam
+
+- **feat(store): `@hasna/emails/storage` gains a declared store seam and two real implementations behind it, additively.** The seam is declared as types only, then implemented twice — `SqliteEmailStore` over local SQLite and `HttpEmailStore` over `/v1` — against one shared behavioural conformance suite, so the two stores are held to the same observable behaviour rather than to two dictionaries of expectations. `createConfiguredEmailStore`/`planEmailStore` resolve the store from storage configuration and refuse a contradiction instead of silently preferring one; the injectable environment was dropped from store construction so a store cannot be built against a different environment than the process it runs in. Capability and missing-route inventories (`SQLITE_STORE_CAPABILITIES`, `HTTP_STORE_CAPABILITIES`, `HTTP_STORE_MISSING_ROUTES`) are exported so an absence is published rather than discovered at the call site. `feat(selfhost)` adds the outbound-record route so conformance runs against the real service, not only a fixture. None of the 20 pre-existing `./storage` exports were removed or changed.
+- refactor: six command families collapse from per-mode twins to one implementation over the seam — batch, delivery-doctor, the MCP email-ops tools, status-facts, verification-code, and doctor. Each collapse deletes a duplicated arm that had already drifted from its twin. `fix(verification-code)` re-checks recipient scope on the record the candidate read returns, rather than on the candidate.
+- test: the harness configures exactly one store per test context, so a test can no longer pass because a second store was quietly in scope; the shared-process suite gate is restored and the deployment-mode axis is ratcheted (`EMAILS_MODE`) with every ceiling pinned to its live count, so a new per-mode branch fails CI instead of accumulating.
+- fix: thirteen findings from four adversarial reviews of the HTTP store, the write-path and vacuous-case defects two reviews found in the SQLite store, and what two reviews of store resolution found — including a 500 the fixture could not see, which is why conformance now runs against the real service.
+
+### Refusals that were not real
+
+- fix: gratuitous self-hosted CLI refusals are deleted — `schedule`, `doctor`, `export`, `daemon`, `logs`, and `inbox source` all refused a mode whose routes already worked.
+- fix(mcp): gratuitous MCP mode guards standing in front of working `/v1` routes are deleted; `list_replies` is unblocked, and the honesty gaps two reviews found in that change are closed.
+- fix(cli): `emails aws setup-inbound` runs instead of blaming a mode.
+- feat(cli): `emails send --to-group` is implemented instead of refusing, and domain/address refusals say what is actually missing — four of them stop refusing altogether. (Recovered: this work and the truthful refusals were lost from `main` and restored, with five further defects two reviews found in the recovery closed.)
+- fix: the honesty defects two post-merge reviews found in the refusal deletions are closed.
+
+### Truthfulness and provenance
+
+- fix(cli): a provider type with no DNS records says so, instead of reporting `none found` — which reads as a failed lookup rather than an empty set. Eight findings from two adversarial reviews of that message are closed, and the recovered DNS command is reconciled with the `dns.ts` work that landed while it was lost.
+- fix(aws): cross-account SES credentials are scoped to `EMAILS_SES_*` only; generic `AWS_*` credentials are no longer injected, so unrelated SDK clients retain the task-role default chain.
+- test(aws): the access-key guards are patterns rather than name allowlists, and the package-provenance workflow is guarded — the suite fails closed on provenance workflow drift.
+- fix(db): cold database initialisation is batched behind an immediate transaction, and the test environment is restored rather than deleted, removing two CI flake sources.
+- fix(container): the Bun runtime architecture is verified and the smoke platform is explicit; the container platform regression is wired into the Bun suite.
+- docs: the deployment-mode removal plan is written into the repo; the `open-emails` brand ruling is recorded together with why the `mailery` strings stay; the rename provenance in `NAMING.md` is corrected and the kept residue is named.
+
+## 1.3.2 (2026-07-26)
+
+- fail closed on malformed JSON, wrong response envelopes, and missing required
+  fields from successful self-hosted API responses before repositories, mailbox
+  status/context/sync projections, or the generated SDK can synthesize empty
+  rows, lists, or counts.
+- share one config-driven wire validator across the synchronous resource store,
+  asynchronous inbox data source, and generated `@hasna/emails/selfhost` client;
+  validation errors identify the endpoint and invalid field without including
+  credentials or response-body contents.
 
 - **fix(status): the refusal registry is checked against the CLI, not against itself — `emails status` was still proposing a command that throws.** `src/lib/status-commands.ts` documented its source of truth as `grep -n 'serverOnly(' src/cli/commands/*.remote.ts`. That glob is wrong: `serverOnly()` is also defined and called in the SHARED modules `src/cli/commands/domain.ts` and `src/cli/commands/address.ts`, which `src/cli/index.tsx` loads in BOTH modes and whose helper throws unconditionally. Fifteen commands were missing from `NEVER_AVAILABLE_COMMANDS`, so `status-facts.remote.ts domainFixCommands` returned `emails domain status --json` for any failed/errored domain, `agent-context.ts buildNextActions` promoted `fix_commands[0]` into `next_actions`, and `isCommandAvailableInMode` waved it through — the exact "remedy that refuses" defect the registry exists to remove, reintroduced one command over. Local mode was hit the same way through `domain-readiness.ts` fix_commands (`emails domain check|dns|verify|setup-cloudflare`, all four unconditional refusals). Also fixed: `cli_equivalents.provision_address` and the `create_receive_address` workflow proposed `emails address provision` (refuses everywhere) — now `emails address add` plus an explicit `emails address set-owner` step, because `address add` takes only `--provider`/`--name` and the workflow was registering an owner it never attached; only one of the three workflow lists was mode-filtered, now all three are; and the `Usable domains:` footer and the MCP domains resource `cli_equivalent` both advertised `emails domain status`, now `emails domain list`.
 - **test(status): the two "never proposes a refused command" guards were self-referential and could not fail.** `agent-context.local.test.ts` asserted `isCommandAvailableInMode(action.command, "local") === true` — validating the payload against the same registry that filtered it, so a command missing from the registry passed the test and threw at the terminal. `agent-context.self-hosted.test.ts` only checked two hardcoded command names. Both now use `src/test-support/cli-refusals.ts`, which parses every `serverOnly(...)`/`notImplementedAnywhere(...)` call site out of `src/cli/commands/*.ts` — the CLI is the oracle, not the registry under test. New `src/lib/status-commands-coverage.test.ts` fails if the registry does not cover a scanned refusal, carries a positive control so it cannot pass over an empty scan, and carries a counter-control that the real remedies (`emails domain list --json`, `emails address add`, …) are still reported available, so "never propose a refusal" cannot be satisfied by proposing nothing. Against the pre-fix registry the new guards fail and name all fifteen missing commands plus `emails domain status --json (refused by emails domain status)`.
@@ -41,17 +97,6 @@ All notable changes to `@hasna/emails` are documented here.
 - fix(mcp): dropped the `assertWarmingLocalStateAllowed` guard that disabled `create_warming_schedule`, `get_warming_status`, `list_warming_schedules`, and `update_warming_status` in self_hosted mode. `src/db/warming.remote.ts` is a complete `/v1/warming` client, so there was no local-only state to protect. `list_warming_schedules` advertises `cli_equivalent: "emails domain warm-list"`, which is now a command that can actually succeed — asserted in the suite. `create_warming_schedule` gained the same duplicate-domain guard as the CLI twin.
 - perf(cli): `emails domain warm-list` reads the sent-mail ledger **once per page** instead of once per row, via a new `getTodaySentCountsByDomain`. In self-hosted mode each read is a synchronous `curl` spawn over today's messages, so a default 20-row page cost 20 identical requests.
 - refactor(warming): ramp position (`current_day`, `total_days`, `progress_percent`, `today_limit`, `today_sent`) is computed once in `describeWarmingProgress` and shared by the CLI, the MCP tools, the local `GET /api/warming/:domain` route, and `formatWarmingStatus` — replacing four copies of the same date math, one of which had already drifted from the server. `formatWarmingStatus` and `describeWarmingProgress` accept precomputed inputs so a single command does not read the sent-mail ledger more than once.
-
-## 1.3.2 (2026-07-26)
-
-- fail closed on malformed JSON, wrong response envelopes, and missing required
-  fields from successful self-hosted API responses before repositories, mailbox
-  status/context/sync projections, or the generated SDK can synthesize empty
-  rows, lists, or counts.
-- share one config-driven wire validator across the synchronous resource store,
-  asynchronous inbox data source, and generated `@hasna/emails/selfhost` client;
-  validation errors identify the endpoint and invalid field without including
-  credentials or response-body contents.
 
 ## 1.3.1 (2026-07-26)
 

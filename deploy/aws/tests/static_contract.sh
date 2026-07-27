@@ -601,21 +601,28 @@ for provenance_predicate_contract in \
   }
 done
 
-release_132_section="$(
-  awk '
-    /^## 1[.]3[.]2 [(]2026-07-26[)]$/ { capture = 1 }
-    capture && /^## / && $0 != "## 1.3.2 (2026-07-26)" { exit }
+# This is the SECOND copy of the changelog boundary contract; `src/workflow-contract.test.ts`
+# holds the first. Both must be moved in the same commit, and both pin the same digests —
+# `changelog_section` below extracts byte-identically to that file's `markdownSection`.
+changelog_section() {
+  awk -v heading="$1" '
+    $0 == heading { capture = 1 }
+    capture && /^## / && $0 != heading { exit }
     capture { print }
   ' "$changelog"
-)"
-unreleased_section="$(
-  awk '
-    /^## \[Unreleased\]$/ { capture = 1 }
-    capture && /^## / && $0 != "## [Unreleased]" { exit }
-    capture { print }
-  ' "$changelog"
-)"
-expected_release_132_section='## 1.3.2 (2026-07-26)
+}
+changelog_section_sha256() {
+  printf '%s' "$(changelog_section "$1")" | sha256sum | awk '{ print $1 }'
+}
+# Frozen deliberately: `3cbd39c` reassigned ~36 already-released 1.3.2 entries to
+# `[Unreleased]` 44 minutes after 1.3.2 published, and the previous digests pinned that wrong
+# boundary. The 1.3.2 section is now frozen whole (47 lines, byte-identical to what `fe61a46`
+# published) rather than as the two bullets it had been narrowed to, and 1.4.0 is frozen too so
+# the same reassignment cannot happen to the next release.
+expected_unreleased_sha256='1da42e1a6a94b4180d823a144c4da54b6e03cff194335ac64be15f4de53c33f4'
+expected_release_140_sha256='4f038ad87a35a70bbdc8501549b359010511c2c0efaa2f55d162c2e359b45531'
+expected_release_132_sha256='719b031270908506ac34b273a232384c81fbfaa00e3ecf9e6e4e3508fb8e6421'
+expected_release_132_opening='## 1.3.2 (2026-07-26)
 
 - fail closed on malformed JSON, wrong response envelopes, and missing required
   fields from successful self-hosted API responses before repositories, mailbox
@@ -625,21 +632,30 @@ expected_release_132_section='## 1.3.2 (2026-07-26)
   asynchronous inbox data source, and generated `@hasna/emails/selfhost` client;
   validation errors identify the endpoint and invalid field without including
   credentials or response-body contents.'
-expected_unreleased_sha256='40e9d4fc08e67cd4f7d38b053c5c9031dd3e8e403d68bc7e40f83a87bc00ba20'
-actual_unreleased_sha256="$(printf '%s' "$unreleased_section" | sha256sum | awk '{ print $1 }')"
+release_132_section="$(changelog_section '## 1.3.2 (2026-07-26)')"
+release_132_opening="$(printf '%s\n' "$release_132_section" | head -n 10)"
+actual_unreleased_sha256="$(changelog_section_sha256 '## [Unreleased]')"
+actual_release_140_sha256="$(changelog_section_sha256 '## 1.4.0 (2026-07-27)')"
+actual_release_132_sha256="$(changelog_section_sha256 '## 1.3.2 (2026-07-26)')"
 unreleased_line="$(grep -Fn '## [Unreleased]' "$changelog" | cut -d: -f1)"
+release_140_line="$(grep -Fn '## 1.4.0 (2026-07-27)' "$changelog" | cut -d: -f1)"
 release_132_line="$(grep -Fn '## 1.3.2 (2026-07-26)' "$changelog" | cut -d: -f1)"
 release_131_line="$(grep -Fn '## 1.3.1 (2026-07-26)' "$changelog" | cut -d: -f1)"
 if [ "$(grep -Fxc '## [Unreleased]' "$changelog" || true)" != "1" ] \
+  || [ "$(grep -Fxc '## 1.4.0 (2026-07-27)' "$changelog" || true)" != "1" ] \
   || [ "$(grep -Fxc '## 1.3.2 (2026-07-26)' "$changelog" || true)" != "1" ] \
   || [ -z "$unreleased_line" ] \
+  || [ -z "$release_140_line" ] \
   || [ -z "$release_132_line" ] \
   || [ -z "$release_131_line" ] \
-  || [ "$unreleased_line" -ge "$release_132_line" ] \
+  || [ "$unreleased_line" -ge "$release_140_line" ] \
+  || [ "$release_140_line" -ge "$release_132_line" ] \
   || [ "$release_132_line" -ge "$release_131_line" ] \
   || [ "$actual_unreleased_sha256" != "$expected_unreleased_sha256" ] \
-  || [ "$release_132_section" != "$expected_release_132_section" ]; then
-  echo "1.3.2 changelog must contain exactly its two release bullets below the full Unreleased section" >&2
+  || [ "$actual_release_140_sha256" != "$expected_release_140_sha256" ] \
+  || [ "$actual_release_132_sha256" != "$expected_release_132_sha256" ] \
+  || [ "$release_132_opening" != "$expected_release_132_opening" ]; then
+  echo "each published changelog section must match its frozen digest, in Unreleased/1.4.0/1.3.2/1.3.1 order" >&2
   exit 1
 fi
 

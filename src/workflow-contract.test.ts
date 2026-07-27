@@ -6,8 +6,31 @@ import { join } from "node:path";
 const workflowDir = join(import.meta.dir, "..", ".github", "workflows");
 const repositoryRoot = join(import.meta.dir, "..");
 const packageProvenanceWorkflowSha256 = "706c636d7b60059f6e8ce52229bfb723c0c9a2c61cb4a462b3d6ead24a46232f";
-const unreleasedSectionSha256 = "40e9d4fc08e67cd4f7d38b053c5c9031dd3e8e403d68bc7e40f83a87bc00ba20";
-const release132Section = `## 1.3.2 (2026-07-26)
+// Every changelog section below is frozen by digest, and every digest here must be updated
+// DELIBERATELY, in the same commit as the changelog edit that moves it. That is the point:
+// this contract exists because a released section was silently re-assigned once already.
+//
+// On 2026-07-26 at 21:04, 44 minutes after 1.3.2 was published, `3cbd39c` moved the
+// `## 1.3.2` heading BELOW ~36 lines of entries that had already shipped in it, reassigning
+// them to `[Unreleased]`. The frozen digests then pinned that wrong boundary as canonical, so
+// the next release would have re-announced 1.3.2's contents as new and omitted everything
+// actually new. Restoring the boundary for the 1.4.0 cut is what moved these digests; the
+// restored 1.3.2 section is byte-identical to the section 1.3.2 was published with (`fe61a46`).
+//
+// The three release sections are frozen by digest rather than by inline literal because the
+// restored 1.3.2 section is ~25KB of prose; a digest is the same strength of match as an
+// equality check (it is the mechanism this file already uses for the provenance workflow) and
+// it now covers all 46 lines of 1.3.2 rather than only the two it used to. The two opening
+// bullets stay inline as a readable anchor and are asserted as a prefix, so a reviewer can
+// still see what leads the section and neither bullet can be dropped.
+const unreleasedSectionSha256 = "1da42e1a6a94b4180d823a144c4da54b6e03cff194335ac64be15f4de53c33f4";
+const release140SectionSha256 = "4f038ad87a35a70bbdc8501549b359010511c2c0efaa2f55d162c2e359b45531";
+const release132SectionSha256 = "719b031270908506ac34b273a232384c81fbfaa00e3ecf9e6e4e3508fb8e6421";
+const unreleasedHeading = "## [Unreleased]";
+const release140Heading = "## 1.4.0 (2026-07-27)";
+const release132Heading = "## 1.3.2 (2026-07-26)";
+const release131Heading = "## 1.3.1 (2026-07-26)";
+const release132Opening = `${release132Heading}
 
 - fail closed on malformed JSON, wrong response envelopes, and missing required
   fields from successful self-hosted API responses before repositories, mailbox
@@ -37,22 +60,25 @@ function markdownSection(markdown: string, heading: string): string {
   return markdown.slice(start, nextHeading < 0 ? markdown.length : nextHeading).trimEnd();
 }
 
-function hasCanonicalRelease132Boundary(changelog: string): boolean {
-  const unreleasedHeading = "## [Unreleased]";
-  const release132Heading = "## 1.3.2 (2026-07-26)";
-  const release131Heading = "## 1.3.1 (2026-07-26)";
+function hasCanonicalReleaseBoundaries(changelog: string): boolean {
   const unreleasedIndex = changelog.indexOf(`${unreleasedHeading}\n`);
+  const release140Index = changelog.indexOf(`${release140Heading}\n`);
   const release132Index = changelog.indexOf(`${release132Heading}\n`);
   const release131Index = changelog.indexOf(`${release131Heading}\n`);
+  const release132Section = markdownSection(changelog, release132Heading);
 
   return (
     unreleasedIndex >= 0 &&
-    release132Index > unreleasedIndex &&
+    release140Index > unreleasedIndex &&
+    release132Index > release140Index &&
     release131Index > release132Index &&
     changelog.match(/^## \[Unreleased\]$/gm)?.length === 1 &&
+    changelog.match(/^## 1\.4\.0 \(2026-07-27\)$/gm)?.length === 1 &&
     changelog.match(/^## 1\.3\.2 \(2026-07-26\)$/gm)?.length === 1 &&
     textSha256(markdownSection(changelog, unreleasedHeading)) === unreleasedSectionSha256 &&
-    markdownSection(changelog, release132Heading) === release132Section
+    textSha256(markdownSection(changelog, release140Heading)) === release140SectionSha256 &&
+    textSha256(release132Section) === release132SectionSha256 &&
+    release132Section.startsWith(release132Opening)
   );
 }
 
@@ -394,39 +420,73 @@ describe("repository workflow safety", () => {
     }
   });
 
-  it("keeps 1.3.2 at the exact changelog boundary with only its two release bullets", () => {
+  it("keeps every published release at its exact changelog boundary", () => {
     const changelog = readFileSync(join(repositoryRoot, "CHANGELOG.md"), "utf8");
-    expect(hasCanonicalRelease132Boundary(changelog)).toBe(true);
+    expect(hasCanonicalReleaseBoundaries(changelog)).toBe(true);
+
+    // The restored 1.3.2 section is what 1.3.2 was published with, so it must still carry the
+    // entries `3cbd39c` moved out of it — not only its two opening bullets.
+    const release132Section = markdownSection(changelog, release132Heading);
+    expect(release132Section).toStartWith(release132Opening);
+    expect(release132Section.length).toBeGreaterThan(release132Opening.length);
+
+    function moveSectionIntoUnreleased(source: string, heading: string): string {
+      const section = markdownSection(source, heading);
+      return source
+        .replace(`${section}\n\n`, "")
+        .replace(`${unreleasedHeading}\n\n`, `${unreleasedHeading}\n\n${section}\n\n`);
+    }
 
     const adversarialFixtures = [
       {
         name: "unreleased entry drifted under 1.3.2",
         changelog: changelog.replace(
-          "## 1.3.2 (2026-07-26)\n\n",
-          "## 1.3.2 (2026-07-26)\n\n- unrelated unreleased entry\n",
+          `${release132Heading}\n\n`,
+          `${release132Heading}\n\n- unrelated unreleased entry\n`,
         ),
       },
       {
-        name: "third release bullet added",
+        name: "release bullet added after the two opening bullets",
         changelog: changelog.replace(
           "  credentials or response-body contents.\n",
           "  credentials or response-body contents.\n- unrelated third release bullet.\n",
         ),
       },
       {
-        name: "release boundary moved into Unreleased",
-        changelog: changelog
-          .replace(`${release132Section}\n\n`, "")
-          .replace(
-            "## [Unreleased]\n\n",
-            `## [Unreleased]\n\n${release132Section}\n\n`,
-          ),
+        name: "an entry added under Unreleased without moving the digest",
+        changelog: changelog.replace(
+          `${unreleasedHeading}\n\n`,
+          `${unreleasedHeading}\n\n- an entry nobody froze.\n\n`,
+        ),
+      },
+      {
+        name: "1.3.2 boundary moved into Unreleased",
+        changelog: moveSectionIntoUnreleased(changelog, release132Heading),
+      },
+      {
+        // `[Unreleased]` is empty and 1.4.0 sits directly under it, so reassigning 1.4.0 to
+        // `[Unreleased]` is exactly "delete the 1.4.0 heading" — the 3cbd39c move in the shape
+        // it would take against the release being cut here.
+        name: "1.4.0 heading deleted, reassigning the release to Unreleased",
+        changelog: changelog.replace(`${release140Heading}\n\n`, ""),
+      },
+      {
+        // The exact 2026-07-26 defect, re-enacted: keep the two opening bullets under 1.3.2 and
+        // reassign the rest of the published section to [Unreleased]. Before this test grew a
+        // digest over the whole section, this fixture PASSED as canonical.
+        name: "1.3.2's already-released entries reassigned to Unreleased (the 3cbd39c defect)",
+        changelog: (() => {
+          const alreadyReleased = release132Section.slice(release132Opening.length);
+          return changelog
+            .replace(release132Section, release132Opening)
+            .replace(`${unreleasedHeading}\n`, `${unreleasedHeading}${alreadyReleased}\n`);
+        })(),
       },
     ];
 
     for (const fixture of adversarialFixtures) {
       expect(fixture.changelog, `${fixture.name} fixture must change the changelog`).not.toBe(changelog);
-      expect(hasCanonicalRelease132Boundary(fixture.changelog), fixture.name).toBe(false);
+      expect(hasCanonicalReleaseBoundaries(fixture.changelog), fixture.name).toBe(false);
     }
   });
 
