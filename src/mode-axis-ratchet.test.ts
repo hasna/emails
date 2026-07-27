@@ -560,7 +560,18 @@ const root = join(import.meta.dir, "..");
  * pattern does not match, and the counter is back at 180. Two lessons for the next family: the
  * corpus includes comments, and "I only edited a comment" is not a reason to skip the re-measure.
  *
- * Corpus of this change: 653 tracked, 652 scanned, 9,279,975 characters — both floors
+ * REBASED ONTO a8aa241 (#126) AND RE-MEASURED THERE, by the procedure above rather than by
+ * resolving what git showed. This rebase is the FOURTH consecutive instance of the hazard this
+ * block keeps recording, and the quietest one yet: git flagged NOTHING in this block — #126 is a
+ * comment-only change to `src/index.ts` — so a rebase that trusted the absent conflict would have
+ * carried the pre-rebase pin forward untested. All eleven were ZEROED before the rebase, in their
+ * own commit so the diff shows it, then measured on the merged tree. They came back identical,
+ * which is the answer the procedure is designed to be able to give: "unchanged" is a measurement
+ * here, not an assumption. The concurrent `lib/s3-sync` branch pins ten of eleven to these same
+ * values and differs only on `routedCallExpressions`, so whichever of the two lands second gets
+ * almost nothing to resolve and has to re-measure anyway.
+ *
+ * Corpus of this change: 653 tracked, 652 scanned, 9,284,650 characters — both floors
  * (500 files / 5,000,000 characters) cleared with room. The SAME tracked count as 4691c5d, and
  * the arithmetic is worth spelling out because it is not "nothing moved": TWO arm modules are
  * deleted and TWO are added — `src/lib/storage-wiring.ts`, the storage-configuration read
@@ -573,17 +584,17 @@ const root = join(import.meta.dir, "..");
  * eleven counts were identical before and after.
  */
 const CEILINGS: Record<string, number> = {
-  twoArmFamilies: 0,
-  remoteArmModules: 0,
-  routedFacadeDefinitions: 0,
-  routedCallExpressions: 0,
-  selfHostedResourceBranches: 0,
-  selfHostedResourceReferences: 0,
-  isSelfHostedModeReferences: 0,
-  getEmailsModeReferences: 0,
-  resolveEmailsModeReferences: 0,
-  normalizeEmailsModeReferences: 0,
-  emailsModeEnvReferences: 0,
+  twoArmFamilies: 28,
+  remoteArmModules: 28,
+  routedFacadeDefinitions: 19,
+  routedCallExpressions: 249,
+  selfHostedResourceBranches: 44,
+  selfHostedResourceReferences: 180,
+  isSelfHostedModeReferences: 58,
+  getEmailsModeReferences: 60,
+  resolveEmailsModeReferences: 65,
+  normalizeEmailsModeReferences: 16,
+  emailsModeEnvReferences: 235,
 };
 
 // 624 files are tracked and 623 scanned today, totalling ~7.4M characters. The floors

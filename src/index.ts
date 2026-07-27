@@ -395,6 +395,25 @@ export {
 export { describeWarmingProgress, generateWarmingPlan, getTodayLimit, getTodaySentCount, getTodaySentCountsByDomain, formatWarmingStatus, warmingDayIndex } from "./lib/warming.js";
 export type { WarmingSchedule, WarmingDay, WarmingProgress } from "./lib/warming.js";
 
+// NO SHAPE CHANGED HERE AND THE BEHAVIOUR DID, which is the harder break to notice, so it is
+// recorded at the export site by the convention the block above established. `processForwardingRules`
+// (exported as a lazy wrapper further down) keeps its name, its signature, its `Promise` and all
+// three of these types unchanged — the facade published the local arm's declarations, so what a
+// consumer compiled against is what it still compiles against.
+//
+// WHAT CHANGED IS WHICH CONFIGURATIONS RUN. The deleted second arm threw for an API-configured
+// installation, and that refusal is preserved — but it is now decided by STORAGE CONFIGURATION
+// rather than by the deployment word, and the two do not agree everywhere. Five configurations
+// answer differently, enumerated in `src/lib/forwarding.ts`'s header; four newly refuse (API
+// storage with no deployment word, a stale client-secret pointer, two database paths at once, a
+// refused data directory) and ONE newly RUNS (deployment word self-hosted with no storage setting
+// naming anything). A consumer that called this on an API-configured installation and read
+// `attempted: 0` as "nothing to forward" now gets a thrown refusal instead — which is the point,
+// because that zero was a claim about mail this side never looked at.
+//
+// This needs a MAJOR version at release alongside the block above. The version is deliberately not
+// bumped here, and `CHANGELOG.md`'s `[Unreleased]` section is digest-frozen, so this comment and
+// the pull request are where the break is recorded.
 export type { ForwardingRunOptions, ForwardingRunResult, ForwardingRunItem } from "./lib/forwarding.js";
 
 // Provider factory
