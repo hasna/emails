@@ -469,7 +469,7 @@ export function registerInfrastructureTools(server: McpServer): void {
       try {
         const providerId = provider_id ? resolveId("providers", provider_id) : null;
         const { createForwardingRule } = await import("../../db/forwarding.js");
-        const rule = createForwardingRule({
+        const rule = await createForwardingRule({
           source_address,
           target_address,
           provider_id: providerId,
@@ -496,7 +496,7 @@ export function registerInfrastructureTools(server: McpServer): void {
     async ({ source_address, enabled, limit, offset }) => {
       try {
         const { listForwardingRules } = await import("../../db/forwarding.js");
-        const rules = listForwardingRules({ source_address, enabled, limit: limit ?? 50, offset: offset ?? 0 });
+        const rules = await listForwardingRules({ source_address, enabled, limit: limit ?? 50, offset: offset ?? 0 });
         return { content: [{ type: "text" as const, text: JSON.stringify({
           rules,
           cli_equivalent: `emails forwarding list${source_address ? ` --source ${source_address}` : ""}${enabled === true ? " --enabled" : enabled === false ? " --disabled" : ""}${limit ? ` --limit ${limit}` : ""}${offset ? ` --offset ${offset}` : ""} --json`,

@@ -6,7 +6,11 @@ import {
   listPendingForwarding,
   recordForwardingDelivery,
   type ForwardingRule,
-} from "../db/forwarding.local.js";
+  // The `src/db/forwarding` family has ONE implementation now, so this reaches the facade
+  // rather than a deleted `.local` arm. The two operations imported here still take the
+  // local `Database` this pipeline already threads — see that module's header for why the
+  // pending-forward join and the delivery ledger cannot go through the store seam.
+} from "../db/forwarding.js";
 import { createSentEmailLedger, storeSentEmailContent } from "./sent-ledger.local.js";
 import { sendWithFailover, type SendResult } from "./send.local.js";
 
