@@ -78,14 +78,23 @@ function resolveSelfHostedAddressRef(ref: string): EmailAddress {
   throw new AddressNotFoundError(trimmed);
 }
 
-function assertAliasLocalStateAllowed(toolName: string): void {
-  if (resolveEmailsMode().mode !== "self_hosted") return;
-  throw new Error(
-    `MCP tool ${toolName} is disabled in self_hosted API-only mode because it reads or writes local alias routing state. ` +
-      "Use the self-hosted Emails API for server-owned alias routing, or set EMAILS_MODE=local only for an explicit local alias store.",
-  );
-}
-
+/**
+ * Refuse a tool that NO mode can serve, naming the reason.
+ *
+ * The only two left are `get_dns_records` and `verify_domain`. They do not read a
+ * row — they call a provider adapter (`getAdapter(provider).getDnsRecords` /
+ * `.verifyDomain`), and in self_hosted mode `getProvider` returns a `/v1/providers`
+ * row whose credential columns do not exist server-side, so the adapter would fall
+ * back to the CLIENT's own ambient AWS or Cloudflare credentials. Their CLI twins
+ * (`emails domain dns`, `emails domain verify`) are `serverOnly(...)` for exactly
+ * that reason, so this refusal matches a command that also cannot run — it is not
+ * a guard standing in front of a working route.
+ *
+ * Every other tool that used to call this (and the alias-specific variant beside
+ * it) had a working `/v1` route, a complete client arm in `src/db/*.remote.ts`, and
+ * a CLI twin that already performed the same operation over the same route. Those
+ * guards were the only thing refusing and are gone.
+ */
 function assertMcpLocalStateAllowed(toolName: string, reason: string): void {
   if (resolveEmailsMode().mode !== "self_hosted") return;
   throw new Error(
@@ -278,7 +287,6 @@ export function registerDomainTools(server: McpServer): void {
   },
   async ({ domain_id }) => {
     try {
-      assertMcpLocalStateAllowed("remove_domain", "it mutates local domain rows");
       const id = resolveId("domains", domain_id);
       const domain = getDomain(id);
       if (!domain) throw new DomainNotFoundError(id);
@@ -521,7 +529,6 @@ export function registerDomainTools(server: McpServer): void {
   },
   async ({ domain }) => {
     try {
-      assertMcpLocalStateAllowed("suggest_address", "it reads local configured address rows");
       const { suggestAddressLocalParts } = await import('../../lib/address-ownership.js');
       const suggestions = suggestAddressLocalParts(domain, listAddressEmails());
       return { content: [{ type: "text", text: JSON.stringify({
@@ -597,7 +604,6 @@ export function registerDomainTools(server: McpServer): void {
   },
   async ({ address_id }) => {
     try {
-      assertMcpLocalStateAllowed("remove_address", "it mutates local address rows");
       const id = resolveId("addresses", address_id);
       const addr = getAddress(id);
       if (!addr) throw new AddressNotFoundError(id);
@@ -617,7 +623,6 @@ export function registerDomainTools(server: McpServer): void {
   },
   async ({ address_id }) => {
     try {
-      assertMcpLocalStateAllowed("suspend_address", "it mutates local address lifecycle rows");
       const id = resolveId("addresses", address_id);
       if (!getAddress(id)) throw new AddressNotFoundError(id);
       const addr = suspendAddress(id);
@@ -636,7 +641,6 @@ export function registerDomainTools(server: McpServer): void {
   },
   async ({ address_id }) => {
     try {
-      assertMcpLocalStateAllowed("activate_address", "it mutates local address lifecycle rows");
       const id = resolveId("addresses", address_id);
       if (!getAddress(id)) throw new AddressNotFoundError(id);
       const addr = activateAddress(id);
@@ -656,7 +660,6 @@ export function registerDomainTools(server: McpServer): void {
   },
   async ({ address_id, per_day }) => {
     try {
-      assertMcpLocalStateAllowed("set_address_quota", "it mutates local address quota rows");
       const id = resolveId("addresses", address_id);
       if (!getAddress(id)) throw new AddressNotFoundError(id);
       const addr = setAddressQuota(id, per_day ?? null);
@@ -676,7 +679,6 @@ export function registerDomainTools(server: McpServer): void {
   },
   async ({ alias, target }) => {
     try {
-      assertAliasLocalStateAllowed("add_alias");
       const a = createAlias(alias, target);
       return { content: [{ type: "text", text: JSON.stringify(a, null, 2) }] };
     } catch (e) {
@@ -694,7 +696,6 @@ export function registerDomainTools(server: McpServer): void {
   },
   async ({ domain, target }) => {
     try {
-      assertAliasLocalStateAllowed("add_catch_all");
       const a = createCatchAll(domain, target);
       return { content: [{ type: "text", text: JSON.stringify(a, null, 2) }] };
     } catch (e) {
@@ -713,7 +714,6 @@ export function registerDomainTools(server: McpServer): void {
   },
   async ({ domain, limit, offset }) => {
     try {
-      assertAliasLocalStateAllowed("list_aliases");
       const aliases = listAliases(domain, { limit: limit ?? 100, offset: offset ?? 0 });
       return { content: [{ type: "text", text: JSON.stringify(aliases, null, 2) }] };
     } catch (e) {
@@ -730,7 +730,6 @@ export function registerDomainTools(server: McpServer): void {
   },
   async ({ alias_id }) => {
     try {
-      assertAliasLocalStateAllowed("remove_alias");
       const a = getAlias(alias_id);
       if (!a) throw new Error(`Alias not found: ${alias_id}`);
       removeAlias(alias_id);
@@ -749,7 +748,6 @@ export function registerDomainTools(server: McpServer): void {
   },
   async ({ recipient }) => {
     try {
-      assertAliasLocalStateAllowed("resolve_alias");
       const target = resolveAlias(recipient);
       return { content: [{ type: "text", text: JSON.stringify({ recipient, target }, null, 2) }] };
     } catch (e) {

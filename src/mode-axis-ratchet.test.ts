@@ -64,12 +64,19 @@ const root = join(import.meta.dir, "..");
 /**
  * The pinned ceiling for every metric, measured on fe61a46 (the merge of #83).
  *
- * The `emailsModeEnvReferences` ceiling was first pinned at 232 on 5bb126e and is 242
- * here. Nothing was relaxed: ten new references to the variable landed on main while
- * this test was being written (seven in src/db/self-hosted-store.test.ts, two in the
- * new src/self-hosted-wire-regression.test.ts, one in src/mcp/http.test.ts), and the
- * ratchet caught them on rebase. That is the guard working, not the guard yielding —
- * and it is the last time the number may move UP.
+ * The `emailsModeEnvReferences` ceiling was first pinned at 232 on 5bb126e, rose to
+ * 242 on fe61a46, and is 239 here. It has never been RELAXED: the one increase was
+ * ten references that landed on main while this test was being written (seven in
+ * src/db/self-hosted-store.test.ts, two in the new
+ * src/self-hosted-wire-regression.test.ts, one in src/mcp/http.test.ts) and that the
+ * ratchet caught on rebase — the guard working, not the guard yielding, and the last
+ * time the number may move UP. The three that came off here, together with the one
+ * off `resolveEmailsModeReferences` (74 -> 73), are the mode guards deleted from
+ * src/mcp/tools/{domains-impl,misc-ops,sequences}.ts: `assertAliasLocalStateAllowed`,
+ * `assertGroupMemberStateAllowed` and `assertSequenceSubledgerAllowed` each read the
+ * mode variable and each named it again in the refusal text they no longer emit.
+ * (Spelled indirectly on purpose — this file is inside its own corpus and must
+ * contribute zero to every count.)
  *
  * Notes a reviewer should not have to re-derive:
  *  - `selfHostedResourceBranches` counts 47, of which 46 are call sites in the ten
@@ -102,9 +109,9 @@ const CEILINGS: Record<string, number> = {
   selfHostedResourceReferences: 203,
   isSelfHostedModeReferences: 70,
   getEmailsModeReferences: 78,
-  resolveEmailsModeReferences: 74,
+  resolveEmailsModeReferences: 73,
   normalizeEmailsModeReferences: 16,
-  emailsModeEnvReferences: 242,
+  emailsModeEnvReferences: 239,
 };
 
 // 624 files are tracked and 623 scanned today, totalling ~7.4M characters. The floors
