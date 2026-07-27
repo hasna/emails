@@ -380,7 +380,9 @@ describe("reply, forward, and the MCP send tool refuse suppressed recipients too
 
   it("the MCP send_email tool refuses a suppressed recipient, with no force escape", async () => {
     const { McpServer } = await import("@modelcontextprotocol/sdk/server/mcp.js");
-    const { registerEmailOpsTools } = await import("../../mcp/tools/email-ops.local.js");
+    // The facade, not an arm module: the family collapsed to one implementation,
+    // and this suppression gate is now the same gate in every configuration.
+    const { registerEmailOpsTools } = await import("../../mcp/tools/email-ops.js");
     const server = new McpServer({ name: "t", version: "1.0.0" });
     registerEmailOpsTools(server);
     const tool = (server as unknown as { _registeredTools: Record<string, { handler: (a: unknown) => Promise<{ content: Array<{ text: string }>; isError?: boolean }>; inputSchema?: unknown }> })
