@@ -14,9 +14,9 @@ export function registerAliasCommands(program: Command, output: (data: unknown, 
   cmd
     .command("add <alias> <target>")
     .description("Route an alias address to a target, e.g. alias add hello@acme.com ops@acme.com")
-    .action((alias: string, target: string) => {
+    .action(async (alias: string, target: string) => {
       try {
-        const a = createAlias(alias, target);
+        const a = await createAlias(alias, target);
         output(a, chalk.green(`✓ ${display(a)} → ${a.target_address}`));
       } catch (e) { handleError(e); }
     });
@@ -24,9 +24,9 @@ export function registerAliasCommands(program: Command, output: (data: unknown, 
   cmd
     .command("catch-all <domain> <target>")
     .description("Route every unmatched recipient on a domain to a target")
-    .action((domain: string, target: string) => {
+    .action(async (domain: string, target: string) => {
       try {
-        const a = createCatchAll(domain, target);
+        const a = await createCatchAll(domain, target);
         output(a, chalk.green(`✓ catch-all *@${a.domain} → ${a.target_address}`));
       } catch (e) { handleError(e); }
     });
@@ -34,9 +34,9 @@ export function registerAliasCommands(program: Command, output: (data: unknown, 
   cmd
     .command("global <target>")
     .description("Set the protected GLOBAL catch-all (all domains) → target (never deletable)")
-    .action((target: string) => {
+    .action(async (target: string) => {
       try {
-        const a = setGlobalCatchAll(target);
+        const a = await setGlobalCatchAll(target);
         output(a, chalk.green(`✓ global catch-all (all domains) → ${a.target_address || "(keep, no forward)"}`));
       } catch (e) { handleError(e); }
     });
@@ -48,11 +48,11 @@ export function registerAliasCommands(program: Command, output: (data: unknown, 
     .option("--limit <n>", "Maximum aliases to show (default 20 compact, 50 verbose/json)")
     .option("--offset <n>", "Number of aliases to skip", "0")
     .option("--verbose", "Show explanatory alias notes")
-    .action((opts: { domain?: string; limit?: string; offset?: string; verbose?: boolean }) => {
+    .action(async (opts: { domain?: string; limit?: string; offset?: string; verbose?: boolean }) => {
       try {
-        if (!opts.domain) ensureDefaultCatchAll(); // make sure the protected default exists
+        if (!opts.domain) await ensureDefaultCatchAll(); // make sure the protected default exists
         const page = parseCliListPage(opts);
-        const aliases = listAliases(opts.domain, page);
+        const aliases = await listAliases(opts.domain, page);
         if (aliases.length === 0) { output([], chalk.dim("No aliases configured.")); return; }
         const verbose = opts.verbose || isCliVerboseOutput();
         const lines = [chalk.bold("\nAliases:")];
@@ -61,7 +61,7 @@ export function registerAliasCommands(program: Command, output: (data: unknown, 
           const target = a.target_address || chalk.dim("(keep, no forward)");
           lines.push(`  ${chalk.cyan(a.id.slice(0, 8))} ${kind} ${display(a).padEnd(34)} → ${target}`);
         }
-        const g = getGlobalCatchAll();
+        const g = await getGlobalCatchAll();
         lines.push("");
         lines.push(formatListHint({
           shown: aliases.length,
@@ -79,11 +79,11 @@ export function registerAliasCommands(program: Command, output: (data: unknown, 
   cmd
     .command("remove <id>")
     .description("Remove an alias or catch-all by ID")
-    .action((id: string) => {
+    .action(async (id: string) => {
       try {
-        const a = getAlias(id);
+        const a = await getAlias(id);
         if (!a) return handleError(new Error(`Alias not found: ${id}`));
-        removeAlias(id);
+        await removeAlias(id);
         output(a, chalk.green(`✓ Removed ${display(a)}`));
       } catch (e) { handleError(e); }
     });
@@ -91,9 +91,9 @@ export function registerAliasCommands(program: Command, output: (data: unknown, 
   cmd
     .command("resolve <recipient>")
     .description("Show where a recipient address would be routed")
-    .action((recipient: string) => {
+    .action(async (recipient: string) => {
       try {
-        const target = resolveAlias(recipient);
+        const target = await resolveAlias(recipient);
         if (target) output({ recipient, target }, `${recipient} → ${chalk.green(target)}`);
         else output({ recipient, target: null }, chalk.dim(`${recipient} → (no alias; delivered as-is)`));
       } catch (e) { handleError(e); }

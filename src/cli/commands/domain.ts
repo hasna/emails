@@ -576,9 +576,9 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
 
         // 5. Catch-all: the protected global catch-all already covers every domain;
         // optionally pin a domain-specific target.
-        ensureDefaultCatchAll();
+        await ensureDefaultCatchAll();
         if (opts.catchAll) {
-          createCatchAll(domain, opts.catchAll);
+          await createCatchAll(domain, opts.catchAll);
           lines.push(chalk.green(`✓ catch-all *@${domain} → ${opts.catchAll}`));
         }
 

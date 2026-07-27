@@ -14,7 +14,8 @@ import { extractEmailLinks, formatEmailLinks, type ExtractedEmailLink } from "..
 import { formatAttachmentSize, mergeAttachmentDetails, type AttachmentDetail } from "../../lib/attachment-actions.js";
 import { MAX_ATTACHMENT_DOWNLOAD_BYTES, writeAttachmentFile } from "../../lib/attachment-download.js";
 import { openLocalTarget } from "../../lib/local-actions.js";
-import { resolveAlias } from "../../db/aliases.local.js";
+import { resolveAlias } from "../../db/aliases.js";
+import { createSqliteEmailStore } from "../../store-sqlite/index.js";
 import { findAddressesByEmail } from "../../db/addresses.local.js";
 import { findDomainsByName } from "../../db/domains.local.js";
 import { listAddressProvisioningByIds, listDomainProvisioningByIds, listReadyAddressCountsByDomains } from "../../db/provisioning.local.js";
@@ -534,22 +535,30 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
   inboxCmd
     .command("explain <email-id>")
     .description("Explain local routing, recipient ownership, and source readiness for an inbound email")
-    .action((emailId: string) => {
+    .action(async (emailId: string) => {
       try {
         const db = getDatabase();
         const fullId = resolveInboundEmailId(emailId);
         const email = getInboundEmailSummary(fullId, db);
         if (!email) handleError(new Error(`Email not found: ${emailId}`));
-        const routedRecipients = email!.to_addresses.map((recipient) => {
+        // Alias resolution reaches storage through the store seam now that `src/db/aliases.ts`
+        // has one implementation, so it is handed a store over THIS handle rather than the
+        // configured one. That is deliberate and it is what keeps `explain` honest: every other
+        // fact on this page is read from `db`, and a default store could resolve the alias
+        // against an API while the ownership and readiness rows beside it came from this file —
+        // one page, two datasets, no way for a reader to tell. It also reads no deployment
+        // setting: the store is built from the handle, not from configuration.
+        const aliasStore = createSqliteEmailStore({ database: db, detail: "SQLite (inbox explain)" });
+        const routedRecipients = await Promise.all(email!.to_addresses.map(async (recipient) => {
           const normalized = normalizeEmailAddress(recipient) ?? recipient.toLowerCase();
           const domainName = normalized.includes("@") ? normalized.split("@")[1] ?? "" : "";
           return {
             recipient: normalized,
-            aliasTarget: resolveAlias(normalized, db),
+            aliasTarget: await resolveAlias(normalized, aliasStore),
             exactAddresses: findAddressesByEmail(normalized, db),
             domainRows: domainName ? findDomainsByName(domainName, db) : [],
           };
-        });
+        }));
         const allAddresses = routedRecipients.flatMap((recipient) => recipient.exactAddresses);
         const allDomains = routedRecipients.flatMap((recipient) => recipient.domainRows);
         const enrichedAddresses = new Map(enrichAddresses(allAddresses).map((address) => [address.id, address]));
