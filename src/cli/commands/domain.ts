@@ -1,5 +1,5 @@
 import type { Command } from "commander";
-import type { DomainType } from "../../types/index.js";
+import type { DnsRecord, DomainType } from "../../types/index.js";
 import chalk from "../../lib/chalk-lite.js";
 import { createDomain, listDomains, listUsableDomains, deleteDomain, findDomainsByName, getDomain, getDomainByName, moveDomainProvider, updateDnsStatus, updateDomainReadiness } from "../../db/domains.js";
 import { getProvider } from "../../db/providers.js";
@@ -14,18 +14,130 @@ import { normalizeRoute53RegistrationContact } from "../../lib/route53-contact.j
 import { resolveEmailsMode } from "../../lib/mode.js";
 import { now } from "../../db/runtime.js";
 
-// Domain provisioning that requires provider adapters (live SES/Resend calls),
-// AWS/Cloudflare/Route53 DNS orchestration, live DNS/MX checks, or the
-// server-owned lifecycle-readiness ledger has no /v1 equivalent in this
-// self-hosted-only client — it runs on the self-hosted server. Those commands
-// are kept for discoverability but fail loud. Core domain CRUD
-// (`add`/`list`/`remove`/`usable`/`move-provider`), the warming schedule
-// commands (`warm*`), and the operator `adopt` command all route through the
-// warming/domain repositories, which resolve to local SQLite or the /v1 API.
-function serverOnly(command: string): never {
-  throw new Error(
-    `${command} is not available in the self-hosted client; it runs on the self-hosted server.`,
-  );
+// Every domain command below used to throw one sentence — "… is not available
+// in the self-hosted client; it runs on the self-hosted server" — from a single
+// `serverOnly()` helper, and the sentence was false in both halves:
+//
+//   * It fired UNCONDITIONALLY. `emails domain check example.com` printed it in
+//     LOCAL mode, naming a client the operator was not running.
+//   * There is no self-hosted server route behind any of them. `openapi.ts`
+//     defines plain CRUD for `/v1/domains` and `/v1/addresses` and nothing else
+//     for this surface: no verify route, no DNS route, no readiness route, no
+//     provisioning orchestrator. Pointing at a server was pointing at nothing.
+//
+// So a refusal here now says what is MISSING and what to run instead, and never
+// names a deployment mode. `emails provision *` was fixed to this shape first;
+// this table is the same contract for the domain surface, and it is a table
+// rather than one string because the commands are in different situations and a
+// single sentence could only be true of one of them.
+//
+// The four read-only DNS commands (`domain check`, `domains check`, `domain
+// dns`, `domains dns`) are no longer in the table at all: their implementations
+// (src/lib/dns.ts, src/lib/dns-check.ts, src/lib/mx-ownership.ts) are pure,
+// tested, mode-free library code that was simply never wired to a command, so
+// they are wired below instead of being explained away.
+interface UnshippedSurface {
+  /** What does not exist, stated without blaming a configuration. */
+  missing: string;
+  /** A command (or commands) that DO run and get the operator closer. */
+  instead: string;
+}
+
+const UNSHIPPED_DOMAIN_SURFACES: Record<string, UnshippedSurface> = {
+  "emails domain connect": {
+    missing: "the connect orchestration — register the domain, call the provider, then emit DNS "
+      + "readiness tasks — was removed and nothing replaced it",
+    instead: "Do those steps explicitly: 'emails domain add <domain> --provider <id>', then "
+      + "'emails domain dns <domain>' for the records to publish, then "
+      + "'emails domain adopt <domain> --provider <id>' once the provider has verified it.",
+  },
+  "emails domain verify": {
+    missing: "no command is wired to the provider's verification API",
+    instead: "'emails domain adopt <domain> --provider <id>' re-checks the provider and records "
+      + "DKIM/SPF/DMARC through the same adapter; 'emails domain check <domain>' reads the "
+      + "published DNS directly and needs no provider.",
+  },
+  "emails domain status": {
+    missing: "no command is wired to the domain lifecycle-readiness ledger; it is reachable only "
+      + "from the library export and the HTTP readiness API (GET /api/domains/readiness)",
+    instead: "'emails domains status [domain]' renders the domain records this client holds, and "
+      + "'emails domain check <domain>' reports live DNS readiness.",
+  },
+  "emails domains enable-inbound": {
+    missing: "no command is wired to the readiness ledger; the transition ships only as a library "
+      + "export and on the HTTP readiness API (PATCH /api/domains/:id/readiness)",
+    instead: "'emails domain adopt <domain> --provider <id>' wires SES inbound and marks the "
+      + "domain ready when it succeeds; 'emails aws setup-inbound --domain <domain>' does the "
+      + "S3 + receipt-rule half on its own.",
+  },
+  "emails domains enable-outbound": {
+    missing: "no command is wired to the readiness ledger; the transition ships only as a library "
+      + "export and on the HTTP readiness API (PATCH /api/domains/:id/readiness)",
+    instead: "'emails domain check <domain>' reports whether DKIM and SPF are actually published, "
+      + "which is the evidence the transition would have required.",
+  },
+  "emails domains disable-outbound": {
+    missing: "no command is wired to the readiness ledger; the transition ships only as a library "
+      + "export and on the HTTP readiness API (PATCH /api/domains/:id/readiness)",
+    instead: "To stop mail from an address today, suspend it: 'emails address suspend <id>'.",
+  },
+  "emails domain setup-cloudflare": {
+    missing: "the Cloudflare DNS writer ships as a library but no command is wired to it, because "
+      + "it would publish records using whatever provider and Cloudflare credentials the calling "
+      + "machine happens to have",
+    instead: "Publish the records from 'emails domain dns <domain>' yourself, then confirm them "
+      + "with 'emails domain check <domain>'.",
+  },
+  "emails domain setup": {
+    missing: "the buy -> zone -> provider -> DNS orchestration does not ship",
+    instead: "Run the steps that do: 'emails domain available <domain>', 'emails domain buy "
+      + "<domain> ...', then 'emails domain adopt <domain> --provider <id>' once the provider "
+      + "has verified it.",
+  },
+};
+
+// Plural aliases refuse for exactly the same reason as their singular twins, so
+// they share one entry instead of drifting apart.
+const UNSHIPPED_DOMAIN_ALIASES: Record<string, string> = {
+  "emails domains connect": "emails domain connect",
+  "emails domains verify": "emails domain verify",
+};
+
+function notImplementedAnywhere(command: string): never {
+  const entry = UNSHIPPED_DOMAIN_SURFACES[UNSHIPPED_DOMAIN_ALIASES[command] ?? command];
+  // Unreachable while the table covers every call site; a bare, honest sentence
+  // beats a `undefined` splice if a command is ever added without an entry.
+  if (!entry) throw new Error(`${command} is not implemented in this build.`);
+  throw new Error(`${command} is not implemented in this build: ${entry.missing}. ${entry.instead}`);
+}
+
+/**
+ * The DNS records `domain` is expected to publish.
+ *
+ * Mirrors the MCP `get_dns_records` tool: the provider's own records when a
+ * provider resolves (explicitly, or from the domain's registration), otherwise
+ * the generic SES SPF + DMARC pair, which needs no credentials at all. Both
+ * `dns` and `check` need exactly this, so they share it rather than each
+ * growing their own resolution rules.
+ */
+async function expectedDnsRecords(
+  domain: string,
+  providerRef: string | undefined,
+): Promise<{ records: DnsRecord[]; providerId: string | null }> {
+  let provider = null;
+  if (providerRef) {
+    const providerId = resolveId("providers", providerRef);
+    provider = getProvider(providerId);
+    if (!provider) handleError(new Error(`Provider not found: ${providerRef}`));
+  } else {
+    const registered = findDomainsByName(domain)[0];
+    if (registered) provider = getProvider(registered.provider_id);
+  }
+  if (!provider) {
+    const { generateSpfRecord, generateDmarcRecord } = await import("../../lib/dns.js");
+    return { records: [generateSpfRecord(domain), generateDmarcRecord(domain)], providerId: null };
+  }
+  return { records: await getAdapter(provider).getDnsRecords(domain), providerId: provider.id };
 }
 
 function normalizeDomainType(value: string | undefined): DomainType | undefined {
@@ -72,7 +184,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
         limit: page.limit,
         offset: page.offset,
         noun: "domain",
-        detailCommand: "use emails domain dns <domain> on the self-hosted server for DNS details",
+        detailCommand: "use emails domain dns <domain> for DNS details",
         verbose: opts.verbose || isCliVerboseOutput(),
       }));
       output(domains, lines.join("\n"));
@@ -83,8 +195,8 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
 
   const statusLifecycleAction = (domainOrId: string | undefined, opts: { provider?: string; limit?: string; offset?: string; verbose?: boolean }) => {
     try {
-      // No local lifecycle data in the self-hosted client: list via the /v1 API,
-      // or render the single matching domain's API record.
+      // There is no lifecycle-readiness ledger this client can read, in any
+      // configuration: list the domain records, or render the single match.
       if (!domainOrId) {
         listDomainsAction(opts);
         return;
@@ -95,7 +207,73 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
         handleError(new Error(`Domain not found: ${domainOrId}`));
         return;
       }
-      output(match, `${chalk.bold(`\nDomain ${match.domain}`)}\n  ID:   ${match.id.slice(0, 8)}\n  DNS:  DKIM:${colorDnsStatus(match.dkim_status)} SPF:${colorDnsStatus(match.spf_status)} DMARC:${colorDnsStatus(match.dmarc_status)}\n  ${chalk.dim("Full lifecycle readiness is served by the self-hosted operator API.")}\n`);
+      output(match, `${chalk.bold(`\nDomain ${match.domain}`)}\n  ID:   ${match.id.slice(0, 8)}\n  DNS:  DKIM:${colorDnsStatus(match.dkim_status)} SPF:${colorDnsStatus(match.spf_status)} DMARC:${colorDnsStatus(match.dmarc_status)}\n  ${chalk.dim(`Live DNS readiness: emails domain check ${match.domain}`)}\n`);
+    } catch (e) {
+      handleError(e);
+    }
+  };
+
+  // ── dns / check: read-only, wired to the libraries that always implemented them ──
+  // Neither command needs a server or a mode. `src/lib/dns.ts` builds the
+  // expected records, `src/lib/dns-check.ts` resolves what is actually published
+  // and grades the authentication signals, and `src/lib/mx-ownership.ts` names
+  // who owns root MX — all pure, all covered by their own suites, and all
+  // previously unreachable from any command.
+
+  const dnsAction = async (domain: string, opts: { provider?: string }) => {
+    try {
+      const { records, providerId } = await expectedDnsRecords(domain, opts.provider);
+      const { formatDnsTable } = await import("../../lib/dns.js");
+      const lines = [chalk.bold(`\nDNS records for ${domain}:`), "", formatDnsTable(records)];
+      if (!providerId) {
+        // Said out loud: without a provider these are the generic SES SPF/DMARC
+        // pair, NOT the domain's DKIM records. Silently omitting DKIM would read
+        // as "no DKIM required".
+        lines.push(chalk.dim("  No provider resolved — showing generic SPF/DMARC only."));
+        lines.push(chalk.dim(`  Pass --provider <id> to include the provider's DKIM records.`));
+      } else if (records.length === 0) {
+        // A provider CAN legitimately require nothing — `sandbox` returns an
+        // empty list — and a bare "No DNS records found." reads as a lookup that
+        // failed. Name which provider answered and with what.
+        lines.push(chalk.dim(`  Provider ${providerId.slice(0, 8)} requires no DNS records for this domain.`));
+        lines.push(chalk.dim(`  Drop --provider to see the generic SPF/DMARC pair instead.`));
+      }
+      lines.push(chalk.dim(`  Confirm what is published: emails domain check ${domain}`));
+      output({ domain, provider_id: providerId, records }, lines.join("\n"));
+    } catch (e) {
+      handleError(e);
+    }
+  };
+
+  const checkAction = async (domain: string, opts: { provider?: string }) => {
+    try {
+      const { records, providerId } = await expectedDnsRecords(domain, opts.provider);
+      const [{ checkDomainAuthentication, formatDnsCheck }, { inspectPublicMx, ownerLabel }] = await Promise.all([
+        import("../../lib/dns-check.js"),
+        import("../../lib/mx-ownership.js"),
+      ]);
+      const check = await checkDomainAuthentication(domain, records);
+      // Root-MX ownership is the check that stops an operator pointing a live
+      // mailbox domain at SES by accident; it is why `--force-mx-switch` exists.
+      const mx = await inspectPublicMx(domain);
+
+      const lines = [chalk.bold(`\nLive DNS check for ${domain}:`), "", formatDnsCheck(check.records)];
+      lines.push(`  Root MX:   ${ownerLabel(mx.owner)} ${chalk.dim(`(${mx.summary})`)}`);
+      lines.push(`  Outbound:  ${check.outbound_ready ? chalk.green("ready") : chalk.yellow("not ready")}`);
+      lines.push(`  Inbound:   ${check.inbound_ready ? chalk.green("ready") : chalk.yellow("not ready")}`);
+      for (const requirement of check.missing_requirements) lines.push(chalk.red(`  ✗ ${requirement}`));
+      for (const warning of check.warnings) lines.push(chalk.yellow(`  ⚠ ${warning}`));
+      if (!providerId) {
+        lines.push(chalk.dim("  No provider resolved — DKIM was not checked. Pass --provider <id> to include it."));
+      } else if (records.length === 0) {
+        // Without expected records every signal is `not_configured`, which
+        // `checkDomainAuthentication` maps to "not ready". That verdict is about
+        // having nothing to compare against, not about missing DNS — say which.
+        lines.push(chalk.dim(`  Provider ${providerId.slice(0, 8)} requires no DNS records, so nothing was compared.`));
+        lines.push(chalk.dim(`  The readiness lines above reflect that, not a failed lookup.`));
+      }
+      lines.push("");
+      output({ ...check, provider_id: providerId, mx }, lines.join("\n"));
     } catch (e) {
       handleError(e);
     }
@@ -177,51 +355,51 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
 
   domainsCmd
     .command("connect <domain>")
-    .description("Connect an already-owned domain and generate DNS readiness tasks")
+    .description("Connect an already-owned domain and generate DNS readiness tasks (NOT IMPLEMENTED in this build)")
     .requiredOption("--provider <id>", "Provider ID")
     .option("--domain-type <type>", "Domain type: system, self_hosted, or local_only")
     .option("--dns-provider <provider>", "DNS provider label: manual, cloudflare, or route53", "manual")
     .option("--no-register-provider", "Do not call the mail provider to register the domain")
     .option("--dry-run", "Show the connection plan without calling the provider or writing to the DB")
-    .action(() => { try { serverOnly("emails domains connect"); } catch (e) { handleError(e); } });
+    .action(() => { try { notImplementedAnywhere("emails domains connect"); } catch (e) { handleError(e); } });
 
   domainsCmd
     .command("dns <domain>")
-    .description("Show required DNS records and lifecycle context for a domain")
+    .description("Show the DNS records a domain must publish (DKIM/SPF/DMARC)")
     .option("--provider <id>", "Provider ID")
-    .action(() => { try { serverOnly("emails domains dns"); } catch (e) { handleError(e); } });
+    .action(dnsAction);
 
   domainsCmd
     .command("verify <domain>")
-    .description("Re-verify domain DNS status and update lifecycle context")
+    .description("Re-verify domain DNS status and update lifecycle context (NOT IMPLEMENTED in this build)")
     .option("--provider <id>", "Provider ID")
-    .action(() => { try { serverOnly("emails domains verify"); } catch (e) { handleError(e); } });
+    .action(() => { try { notImplementedAnywhere("emails domains verify"); } catch (e) { handleError(e); } });
 
   domainsCmd
     .command("check <domain>")
     .description("Live DNS check with per-domain authentication readiness")
     .option("--provider <id>", "Provider ID")
-    .action(() => { try { serverOnly("emails domains check"); } catch (e) { handleError(e); } });
+    .action(checkAction);
 
   domainsCmd
     .command("enable-inbound <domain>")
-    .description("Mark a domain inbound-ready after provider/DNS routing is configured")
+    .description("Mark a domain inbound-ready after provider/DNS routing is configured (NOT IMPLEMENTED in this build)")
     .option("--provider <id>", "Provider ID")
     .option("--force", "Mark inbound ready even if local readiness checks are not yet verified")
-    .action(() => { try { serverOnly("emails domains enable-inbound"); } catch (e) { handleError(e); } });
+    .action(() => { try { notImplementedAnywhere("emails domains enable-inbound"); } catch (e) { handleError(e); } });
 
   domainsCmd
     .command("enable-outbound <domain>")
-    .description("Enable outbound sending for a verified domain")
+    .description("Enable outbound sending for a verified domain (NOT IMPLEMENTED in this build)")
     .option("--provider <id>", "Provider ID")
     .option("--force", "Enable outbound even if local DKIM/SPF checks are not yet verified")
-    .action(() => { try { serverOnly("emails domains enable-outbound"); } catch (e) { handleError(e); } });
+    .action(() => { try { notImplementedAnywhere("emails domains enable-outbound"); } catch (e) { handleError(e); } });
 
   domainsCmd
     .command("disable-outbound <domain>")
-    .description("Disable outbound sending for a domain")
+    .description("Disable outbound sending for a domain (NOT IMPLEMENTED in this build)")
     .option("--provider <id>", "Provider ID")
-    .action(() => { try { serverOnly("emails domains disable-outbound"); } catch (e) { handleError(e); } });
+    .action(() => { try { notImplementedAnywhere("emails domains disable-outbound"); } catch (e) { handleError(e); } });
 
   domainCmd
     .command("add <domain>")
@@ -233,13 +411,13 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
 
   domainCmd
     .command("connect <domain>")
-    .description("Connect an already-owned domain and generate DNS readiness tasks")
+    .description("Connect an already-owned domain and generate DNS readiness tasks (NOT IMPLEMENTED in this build)")
     .requiredOption("--provider <id>", "Provider ID")
     .option("--domain-type <type>", "Domain type: system, self_hosted, or local_only")
     .option("--dns-provider <provider>", "DNS provider label: manual, cloudflare, or route53", "manual")
     .option("--no-register-provider", "Do not call the mail provider to register the domain")
     .option("--dry-run", "Show the connection plan without calling the provider or writing to the DB")
-    .action(() => { try { serverOnly("emails domain connect"); } catch (e) { handleError(e); } });
+    .action(() => { try { notImplementedAnywhere("emails domain connect"); } catch (e) { handleError(e); } });
 
   // ── adopt: seamlessly add an already-registered & SES-verified domain ────────
   // Operator command. Domain/alias/provisioning writes route through the /v1 db
@@ -381,24 +559,24 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
 
   domainCmd
     .command("dns <domain>")
-    .description("Show DNS records for a domain")
+    .description("Show the DNS records a domain must publish (DKIM/SPF/DMARC)")
     .option("--provider <id>", "Provider ID (optional if domain is unambiguous)")
-    .action(() => { try { serverOnly("emails domain dns"); } catch (e) { handleError(e); } });
+    .action(dnsAction);
 
   domainCmd
     .command("verify <domain>")
-    .description("Re-verify domain DNS status")
+    .description("Re-verify domain DNS status (NOT IMPLEMENTED in this build)")
     .option("--provider <id>", "Provider ID")
-    .action(() => { try { serverOnly("emails domain verify"); } catch (e) { handleError(e); } });
+    .action(() => { try { notImplementedAnywhere("emails domain verify"); } catch (e) { handleError(e); } });
 
   domainCmd
     .command("status")
-    .description("Show domain readiness summary table")
+    .description("Show domain readiness summary table (NOT IMPLEMENTED in this build; use emails domains status)")
     .option("--provider <id>", "Filter by provider ID")
     .option("--limit <n>", "Maximum domains to show (default 20 compact, 50 verbose/json)")
     .option("--offset <n>", "Number of domains to skip", "0")
     .option("--verbose", "Show per-domain issues and first fix command")
-    .action(() => { try { serverOnly("emails domain status"); } catch (e) { handleError(e); } });
+    .action(() => { try { notImplementedAnywhere("emails domain status"); } catch (e) { handleError(e); } });
 
   domainCmd
     .command("usable")
@@ -412,8 +590,8 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .action((opts: { receive?: boolean; send?: boolean; provider?: string; limit?: string; offset?: string; verbose?: boolean }) => {
       try {
         const page = parseCliListPage(opts);
-        // A verified domain sends and receives in the self-hosted model; the /v1
-        // usable filter keys off verification.
+        // A verified domain both sends and receives; the usable filter keys off
+        // verification, which is the only signal this client stores.
         const domains = listUsableDomains({
           provider_id: opts.provider,
           send: opts.send,
@@ -431,7 +609,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
           limit: page.limit,
           offset: page.offset,
           noun: "domain",
-          detailCommand: "domains are usable once verified on the self-hosted server",
+          detailCommand: "a domain becomes usable once its DKIM/SPF are verified",
           verbose: opts.verbose || isCliVerboseOutput(),
         }));
         output(domains, lines.join("\n"));
@@ -510,20 +688,20 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .command("check <domain>")
     .description("Live DNS check — verify actual DNS records against expected")
     .option("--provider <id>", "Provider ID")
-    .action(() => { try { serverOnly("emails domain check"); } catch (e) { handleError(e); } });
+    .action(checkAction);
 
   // ─── DNS SETUP (server-side) ───────────────────────────────────────────────
 
   domainCmd
     .command("setup-cloudflare <domain>")
-    .description("Auto-create DNS records in Cloudflare for email sending (DKIM, SPF, DMARC)")
+    .description("Auto-create DNS records in Cloudflare for email sending (NOT IMPLEMENTED in this build)")
     .requiredOption("--provider <id>", "SES or Resend provider ID")
     .option("--cloudflare-token <token>", "Cloudflare API token (falls back to config/env)")
     .option("--mx", "Also add MX record for receiving email")
     .option("--mx-server <host>", "Custom MX server hostname")
     .option("--register-ses", "Register the domain with SES first if not already added")
     .option("--force-mx-switch", "Allow adding MX even when existing root MX belongs to another provider")
-    .action(() => { try { serverOnly("emails domain setup-cloudflare"); } catch (e) { handleError(e); } });
+    .action(() => { try { notImplementedAnywhere("emails domain setup-cloudflare"); } catch (e) { handleError(e); } });
 
   // ─── DOMAIN WARMING ────────────────────────────────────────────────────────
   // Warming schedules are a first-class repository resource (`warming_schedules`
@@ -837,7 +1015,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
 
   domainCmd
     .command("setup <domain>")
-    .description("Full setup: buy + Route 53 zone + register with SES + configure DNS (DKIM/SPF/DMARC)")
+    .description("Full setup: buy + Route 53 zone + register with SES + configure DNS (NOT IMPLEMENTED in this build)")
     .requiredOption("--provider <id>", "SES or Resend provider ID")
     .requiredOption("--email <email>", "Registrant email")
     .requiredOption("--first-name <name>", "First name")
@@ -851,5 +1029,5 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .option("--org <name>", "Organization name")
     .option("--years <n>", "Registration years", "1")
     .option("--skip-buy", "Skip domain purchase (domain already registered)")
-    .action(() => { try { serverOnly("emails domain setup"); } catch (e) { handleError(e); } });
+    .action(() => { try { notImplementedAnywhere("emails domain setup"); } catch (e) { handleError(e); } });
 }
