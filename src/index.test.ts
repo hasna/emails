@@ -90,9 +90,17 @@ describe("public package entrypoint", () => {
       "resetDatabase",
       "runInTransaction",
       "resolvePartialId",
+      // Pairs with the exported `getAdapter` + `formatDnsTable`: without it a
+      // consumer can produce records and cannot build the descriptor that says
+      // whether an empty list means "nothing to publish" or "nothing came back".
+      "providerDnsPublishing",
     ]) {
       expect(typeof (emails as Record<string, unknown>)[name]).toBe("function");
     }
+    // Same round trip a consumer makes, proving the two exports compose.
+    expect(
+      emails.formatDnsTable([], emails.providerDnsPublishing({ type: "sandbox" } as Parameters<typeof emails.providerDnsPublishing>[0])),
+    ).toContain("none are expected");
     expect(emails.CANONICAL_OPEN_EMAILS_S3_BUCKET).toBeNull();
     for (const storageInternal of ["PG_MIGRATIONS", "PgAdapterAsync", "storagePush", "storagePull", "storageSync"]) {
       expect((emails as Record<string, unknown>)[storageInternal]).toBeUndefined();

@@ -230,11 +230,12 @@ export function registerDomainTools(server: McpServer): void {
       const adapter = getAdapter(provider);
       const records = await adapter.getDnsRecords(domain);
       const { formatDnsTable } = await import("../../lib/dns.js");
-      // The provider's DNS-publishing answer travels with the records so an empty
-      // list is not rendered as a failed lookup. A sandbox provider returns []
-      // unconditionally by design, and the caller here is usually an agent that
-      // would otherwise report the operator's DNS as broken.
-      return { content: [{ type: "text", text: formatDnsTable(records, providerDnsPublishing(provider)) }] };
+      // Sandbox returns [] by design, so the empty case must not read as a failed
+      // lookup. Asked only when it can matter: a provider type `getAdapter()`
+      // accepts but `providerDnsPublishing()` does not would otherwise turn a
+      // perfectly good table into an error.
+      const support = records.length === 0 ? providerDnsPublishing(provider) : undefined;
+      return { content: [{ type: "text", text: formatDnsTable(records, support) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
     }

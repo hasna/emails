@@ -58,17 +58,33 @@ describe("providerDnsPublishing", () => {
     expect(providerDnsPublishing(provider({ type: "resend", api_key: "re_test" })).publishes).toBe(true);
   });
 
-  it("covers every provider type, so a new one cannot inherit a wrong default", () => {
-    // The point of the throw: silently defaulting to "publishes" would print DNS
-    // advice for a provider that has none, which is the defect in the other
-    // direction. The list is derived from the ProviderType union via a mapping
-    // the compiler checks, so adding a member fails to typecheck here first.
+  it("returns a USABLE descriptor for every provider type, not merely a non-throwing one", () => {
+    // `Record<ProviderType, true>` would catch a new union member — except this
+    // file is never typechecked (`tsconfig.json` excludes `**/*.test.ts`, and
+    // `bun test` strips types), so it proves nothing on its own. The real
+    // exhaustiveness guard is `const exhaustive: never` in providerDnsPublishing,
+    // which lives in product code that `bunx tsc --noEmit` and `build:types` do
+    // cover. This test's job is the part a compiler cannot check: that a
+    // non-publishing answer is actually printable. Asserting only "does not throw"
+    // would let a future type ship with `reason: ""`, which the renderer degrades
+    // back to the bare sentence this whole change exists to delete.
     const allTypes: Record<ProviderType, true> = { resend: true, ses: true, sandbox: true };
     for (const type of Object.keys(allTypes) as ProviderType[]) {
-      expect(() => providerDnsPublishing(provider({ type, api_key: "re_test" }))).not.toThrow();
+      const support = providerDnsPublishing(provider({ type }));
+      if (!support.publishes) expect(support.reason.trim().length).toBeGreaterThan(20);
     }
     expect(() => providerDnsPublishing(provider({ type: "imap" as ProviderType }))).toThrow(ProviderConfigError);
     expect(() => providerDnsPublishing(provider({ type: "imap" as ProviderType })))
       .toThrow(/providerDnsPublishing/);
+  });
+
+  it("keeps the exhaustiveness guard in product code, where tsc can see it", () => {
+    // Guards the guard. A refactor that replaced `const exhaustive: never` with a
+    // plain `default: throw` would silently restore the hole: a `default` clause
+    // defeats TypeScript narrowing, and the runtime throw is unreachable from the
+    // MCP call site anyway because getAdapter() rejects an unknown type first.
+    const source = readFileSync(join(import.meta.dir, "index.ts"), "utf8");
+    const body = source.slice(source.indexOf("export function providerDnsPublishing"));
+    expect(body).toContain("const exhaustive: never = provider.type;");
   });
 });

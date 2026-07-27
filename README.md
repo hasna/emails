@@ -402,6 +402,18 @@ runInTransaction(db, () => {
 closeDatabase();
 ```
 
+The provider factory and the DNS helpers are exported too. `providerDnsPublishing`
+answers whether a provider type publishes DNS records at all, so an empty record
+list renders as "nothing to publish here" rather than "nothing found" — a
+`sandbox` provider captures mail locally and has no DKIM/SPF/DMARC of its own:
+
+```ts
+import { getAdapter, providerDnsPublishing, formatDnsTable } from "@hasna/emails";
+
+const records = await getAdapter(provider).getDnsRecords("example.com");
+console.log(formatDnsTable(records, providerDnsPublishing(provider)));
+```
+
 ## Inbound Email (AWS SES -> S3)
 
 ```bash

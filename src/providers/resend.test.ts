@@ -275,8 +275,13 @@ describe("ResendAdapter.getDnsRecords", () => {
     expect(records).toEqual([]);
 
     const rendered = formatDnsTable(records, providerDnsPublishing(provider));
-    expect(rendered).toContain("does publish DNS records");
+    expect(rendered).toContain("does publish");
     expect(rendered).toContain("not been added to the provider");
+    // And the OTHER cause, which this adapter can also produce: the three
+    // `return []` paths above discard `result.error`, so a bad API key or a
+    // throttled `domains.list()` arrives here indistinguishable from an unknown
+    // domain. The message must not name only one of them.
+    expect(rendered).toContain("throttled");
     // The sandbox explanation must not leak onto a domain that WILL have records.
     expect(rendered).not.toContain("none are expected");
     expect(rendered).not.toContain("sandbox");

@@ -88,18 +88,23 @@ function assertProviderConfig(provider: Provider): void {
 /**
  * Whether `provider`'s type publishes DNS records at all.
  *
- * Lives here, next to `assertProviderConfig()` and `getAdapter()`, because this
- * file is already the one place that decides anything from `ProviderType` — the
- * alternative is a `provider.type === "sandbox"` test at every surface that
- * renders records, which is exactly the drift this answers once.
+ * Lives here because this file owns the provider REGISTRY — `assertProviderConfig()`
+ * and `getAdapter()` are the two other per-type decisions that every caller
+ * inherits rather than restating. (Other files do branch on `provider.type`:
+ * `src/lib/send.local.ts`, `src/cli/commands/provider.ts`,
+ * `src/mcp/tools/providers-impl.ts`. Each answers a local question. This one is
+ * consumed by anything that renders records, so it belongs with the registry.)
  *
- * The switch is exhaustive and the default throws, so adding a provider type
- * forces an explicit answer here rather than silently inheriting "publishes".
- * That direction matters: inheriting the wrong default would print DNS advice
- * for a provider that has none, or bury a real empty result.
+ * `const exhaustive: never` is the load-bearing part. A bare `default: throw`
+ * defeats TypeScript's exhaustiveness narrowing, and the runtime throw is
+ * unreachable from the MCP call site anyway because `getAdapter()` rejects an
+ * unknown type first — so without the `never` assignment a new `ProviderType`
+ * member would silently inherit nothing and CI would stay green. `**\/*.test.ts`
+ * is excluded from `tsconfig.json`, so this guard has to live in product code to
+ * be checked at all.
  *
- * Reading it needs no credentials and does not load an adapter, so it is safe on
- * a path that only formats output.
+ * Reading this needs no credentials and does not load an adapter, so it is safe
+ * on a path that only formats output.
  */
 export function providerDnsPublishing(provider: Provider): DnsPublishingSupport {
   switch (provider.type) {
@@ -113,16 +118,20 @@ export function providerDnsPublishing(provider: Provider): DnsPublishingSupport 
         publishes: false,
         reason:
           "a sandbox provider captures mail in the local store instead of handing it to a "
-          + "DNS-authenticated sender, so a domain on one has no DKIM, SPF or DMARC of its own",
+          + "DNS-authenticated sender, so a sandbox domain has no DKIM, SPF or DMARC of its own",
         instead:
-          "Nothing is missing and nothing needs publishing. Move the domain to an SES or Resend "
-          + "provider when you want records to publish.",
+          "Nothing is missing. To get real records, move the domain to an SES or Resend provider: "
+          + "'emails domain move-provider <domain> --to-provider <id>'.",
       };
-    default:
+    default: {
+      // Compile-time exhaustiveness. The throw stays as well, because a provider
+      // row read out of the database can hold a type outside the union.
+      const exhaustive: never = provider.type;
       throw new ProviderConfigError(
-        `Unknown provider type: ${(provider as { type?: unknown }).type}. `
+        `Unknown provider type: ${String(exhaustive)}. `
           + "Declare whether it publishes DNS records in providerDnsPublishing().",
       );
+    }
   }
 }
 
