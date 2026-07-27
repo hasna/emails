@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { cliRefusalFor } from "../test-support/cli-refusals.js";
 import { cliEquivalentForTool } from "./contracts.js";
 
 describe("MCP CLI equivalents", () => {
@@ -171,5 +172,104 @@ describe("MCP CLI equivalents", () => {
 
     expect(cliEquivalentForTool("export_events", { limit: 2 }))
       .toBe("emails export events --limit 2 --format json");
+  });
+
+  // ─── cli_equivalent honesty ────────────────────────────────────────────────
+  //
+  // A `cli_equivalent` naming a command that cannot run is the same class of lie as
+  // a mode guard standing in front of a working route: the agent is told to go do
+  // something that will throw. These pin the tools whose mode guard was removed,
+  // because their advertised command is now reachable for the first time.
+
+  it("renders a runnable command for every tool whose mode guard was removed", () => {
+    // `emails sequence step add` has THREE required options — the old rendering
+    // omitted all of them, so the advertised command exited with
+    // "required option '--step <number>' not specified".
+    expect(cliEquivalentForTool("add_sequence_step", {
+      sequence_id: "onboarding",
+      step_number: 1,
+      delay_hours: 24,
+      template_name: "welcome",
+    })).toBe("emails sequence step add onboarding --step 1 --delay 24 --template welcome --json");
+
+    expect(cliEquivalentForTool("enroll_contact", { sequence_id: "onboarding", contact_email: "ada@acme.example" }))
+      .toBe("emails sequence enroll onboarding ada@acme.example --json");
+    expect(cliEquivalentForTool("unenroll_contact", { sequence_id: "onboarding", contact_email: "ada@acme.example" }))
+      .toBe("emails sequence unenroll onboarding ada@acme.example --json");
+
+    // The group-member tools take a group NAME, which is what the CLI takes too;
+    // the old lookup only knew `group_id` and always emitted a placeholder.
+    expect(cliEquivalentForTool("add_group_member", { group_name: "beta-testers", email: "ada@acme.example" }))
+      .toBe("emails group add beta-testers ada@acme.example --json");
+    expect(cliEquivalentForTool("remove_group_member", { group_name: "beta-testers", email: "ada@acme.example" }))
+      .toBe("emails group remove-member beta-testers ada@acme.example --json");
+
+    // `remove_alias` takes `alias_id` and `resolve_alias` takes `recipient`; neither
+    // key was read, so both rendered an unsubstituted placeholder.
+    expect(cliEquivalentForTool("remove_alias", { alias_id: "alias-1" }))
+      .toBe("emails alias remove alias-1 --json");
+    expect(cliEquivalentForTool("resolve_alias", { recipient: "hello@acme.example" }))
+      .toBe("emails alias resolve hello@acme.example --json");
+    expect(cliEquivalentForTool("add_alias", { alias: "hello@acme.example", target: "ops@acme.example" }))
+      .toBe("emails alias add hello@acme.example ops@acme.example --json");
+    expect(cliEquivalentForTool("add_catch_all", { domain: "acme.example", target: "ops@acme.example" }))
+      .toBe("emails alias catch-all acme.example ops@acme.example --json");
+
+    // `set_address_quota` takes `per_day`, and `null` means "clear", which the CLI
+    // spells `none` — `emails address quota <id> null` fails "Invalid quota".
+    expect(cliEquivalentForTool("set_address_quota", { address_id: "address-1", per_day: 25 }))
+      .toBe("emails address quota address-1 25 --json");
+    expect(cliEquivalentForTool("set_address_quota", { address_id: "address-1", per_day: null }))
+      .toBe("emails address quota address-1 none --json");
+
+    expect(cliEquivalentForTool("remove_domain", { domain_id: "domain-1" }))
+      .toBe("emails domain remove domain-1 --yes --json");
+    expect(cliEquivalentForTool("suggest_address", { domain: "acme.example" }))
+      .toBe("emails address suggest --domain acme.example --json");
+    for (const [tool, verb] of [["remove_address", "remove"], ["suspend_address", "suspend"], ["activate_address", "activate"]] as const) {
+      const suffix = verb === "remove" ? " --yes --json" : " --json";
+      expect(cliEquivalentForTool(tool, { address_id: "address-1" })).toBe(`emails address ${verb} address-1${suffix}`);
+    }
+  });
+
+  it("never points an unblocked tool at a CLI command that refuses", () => {
+    // The oracle is the CLI's own `serverOnly()` / `notImplementedAnywhere()` call
+    // sites (src/test-support/cli-refusals.ts), not a registry this file also feeds.
+    const unblocked: Array<[string, Record<string, unknown>]> = [
+      ["add_alias", { alias: "hello@acme.example", target: "ops@acme.example" }],
+      ["add_catch_all", { domain: "acme.example", target: "ops@acme.example" }],
+      ["list_aliases", { domain: "acme.example" }],
+      ["remove_alias", { alias_id: "alias-1" }],
+      ["resolve_alias", { recipient: "hello@acme.example" }],
+      ["remove_domain", { domain_id: "domain-1" }],
+      ["suggest_address", { domain: "acme.example" }],
+      ["remove_address", { address_id: "address-1" }],
+      ["suspend_address", { address_id: "address-1" }],
+      ["activate_address", { address_id: "address-1" }],
+      ["set_address_quota", { address_id: "address-1", per_day: 25 }],
+      ["add_group_member", { group_name: "beta-testers", email: "ada@acme.example" }],
+      ["remove_group_member", { group_name: "beta-testers", email: "ada@acme.example" }],
+      ["list_group_members", { group_name: "beta-testers" }],
+      ["add_sequence_step", { sequence_id: "onboarding", step_number: 1, delay_hours: 24, template_name: "welcome" }],
+      ["enroll_contact", { sequence_id: "onboarding", contact_email: "ada@acme.example" }],
+      ["unenroll_contact", { sequence_id: "onboarding", contact_email: "ada@acme.example" }],
+      ["list_enrollments", { sequence_id: "onboarding" }],
+      ["list_warming_schedules", { status: "active" }],
+    ];
+    for (const [tool, input] of unblocked) {
+      const command = cliEquivalentForTool(tool, input);
+      expect(command, `${tool} advertises a command with no arguments substituted`).not.toContain("<");
+      expect(cliRefusalFor(command, "self_hosted"), `${tool} advertises ${command}`).toBeNull();
+    }
+  });
+
+  it("still admits that the two guarded tools name refused commands", () => {
+    // `get_dns_records` and `verify_domain` keep their mode guard because their CLI
+    // twins genuinely refuse. This is the negative control for the check above: if
+    // the oracle stopped seeing refusals, it would go green over everything.
+    expect(cliRefusalFor(cliEquivalentForTool("get_dns_records", { domain: "acme.example" }), "self_hosted"))
+      .toBe("emails domain dns");
+    expect(cliRefusalFor(cliEquivalentForTool("verify_domain", { domain: "acme.example" }), "self_hosted"))
+      .toBe("emails domain verify");
   });
 });

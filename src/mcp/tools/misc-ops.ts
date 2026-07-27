@@ -32,14 +32,6 @@ async function assertSelfHostedApiRouteReady(toolName: string): Promise<boolean>
   return true;
 }
 
-async function assertGroupMemberStateAllowed(toolName: string, reason: string): Promise<void> {
-  if (!(await isSelfHostedRuntimeMode())) return;
-  throw new Error(
-    `MCP tool ${toolName} is disabled in self_hosted API-only mode because ${reason}. ` +
-      "Use the self-hosted Emails API for server-owned group member state, or set EMAILS_MODE=local only for an explicit local group-member ledger.",
-  );
-}
-
 export function registerMiscOpsTools(server: McpServer): void {
   // ─── GROUPS ─────────────────────────────────────────────────────────────────
 
@@ -110,6 +102,12 @@ export function registerMiscOpsTools(server: McpServer): void {
   },
   );
 
+  // Group MEMBERS are a repository resource in every configuration (local SQLite
+  // `group_members`, `/v1/group-members` on the self-hosted server), and
+  // src/db/groups.remote.ts is a complete client for it. The four member tools
+  // below therefore carry no mode guard — they are the MCP twins of `emails group
+  // add|remove-member|members|show`, which already perform the same operations
+  // over the same route.
   server.tool(
   "add_group_member",
   "Add a member to a recipient group",
@@ -121,7 +119,6 @@ export function registerMiscOpsTools(server: McpServer): void {
   },
   async ({ group_name, email, name, vars }) => {
     try {
-      await assertGroupMemberStateAllowed("add_group_member", "it writes local group member rows");
       const { getGroupByName, addMember } = await import('../../db/groups.js');
       const group = getGroupByName(group_name);
       if (!group) throw new Error(`Group not found: ${group_name}`);
@@ -142,7 +139,6 @@ export function registerMiscOpsTools(server: McpServer): void {
   },
   async ({ group_name, email }) => {
     try {
-      await assertGroupMemberStateAllowed("remove_group_member", "it writes local group member rows");
       const { getGroupByName, removeMember } = await import('../../db/groups.js');
       const group = getGroupByName(group_name);
       if (!group) throw new Error(`Group not found: ${group_name}`);
@@ -165,7 +161,6 @@ export function registerMiscOpsTools(server: McpServer): void {
   },
   async ({ group_name, limit, offset }) => {
     try {
-      await assertGroupMemberStateAllowed("list_group_members", "it reads local group member rows");
       const { getGroupByName, listMemberSummaries } = await import('../../db/groups.js');
       const group = getGroupByName(group_name);
       if (!group) throw new Error(`Group not found: ${group_name}`);
@@ -186,7 +181,6 @@ export function registerMiscOpsTools(server: McpServer): void {
   },
   async ({ group_name, email }) => {
     try {
-      await assertGroupMemberStateAllowed("get_group_member", "it reads local group member rows");
       const { getGroupByName, getMember } = await import('../../db/groups.js');
       const group = getGroupByName(group_name);
       if (!group) throw new Error(`Group not found: ${group_name}`);

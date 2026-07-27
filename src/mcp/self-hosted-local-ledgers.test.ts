@@ -2,10 +2,10 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { startV1Stub, type V1Stub } from "../test-support/v1-stub.js";
 import { buildServer } from "./server.js";
 
-// Self-hosted-ONLY: no local SQLite. list_groups and the warming tools route
-// straight through /v1 (no local subledger involved), while
-// alias/group-member/sequence subledger tools stay disabled behind the
-// "self_hosted API-only mode" guard.
+// Self-hosted-ONLY: no local SQLite. list_groups, the warming tools and the
+// alias/group-member/sequence tools all route straight through /v1 — none of them
+// is a "local subledger", each has a `/v1` resource, a complete client arm and a
+// working CLI twin, and none of them carries a mode guard any more.
 
 const SEEDED_GROUP = {
   id: "group-api-1",
@@ -43,7 +43,7 @@ afterEach(() => {
   stub.clearEnv();
 });
 
-describe("MCP self_hosted local ledger guards", () => {
+describe("MCP self_hosted repository-backed tools", () => {
   it("lists groups through the self_hosted API without computing local member counts", async () => {
     const result = await callTool("list_groups", {});
 
@@ -96,20 +96,24 @@ describe("MCP self_hosted local ledger guards", () => {
     expect(rows[0]?.["target_daily_volume"]).toBe(100);
   });
 
-  it("fails local alias, group-member, and sequence subledger tools with the API-only guard", async () => {
+  it("runs the alias, group-member, and sequence tools through /v1 instead of refusing", async () => {
+    // These were called "local subledger" tools and refused. They are not: aliases,
+    // group members, sequence steps and sequence enrollments are each a `/v1`
+    // resource with a complete client arm in src/db/*.remote.ts and a working CLI
+    // twin. The guard was the only thing refusing, and it is gone.
+    // src/mcp/self-hosted-unguarded-tools.test.ts asserts the resulting server rows;
+    // here the point is only that no mode check turns them away.
     const cases: Array<[string, Record<string, unknown>]> = [
       ["list_aliases", {}],
       ["list_group_members", { group_name: "api-group" }],
       ["add_group_member", { group_name: "api-group", email: "user@example.com" }],
-      ["add_sequence_step", { sequence_id: "seq-api-1", step_number: 1, delay_hours: 0, template_name: "welcome" }],
-      ["enroll_contact", { sequence_id: "seq-api-1", contact_email: "user@example.com" }],
       ["list_enrollments", {}],
     ];
 
     for (const [name, args] of cases) {
       const result = await callTool(name, args);
-      expect(result.isError).toBe(true);
-      expect(resultText(result)).toContain("self_hosted API-only mode");
+      expect(result.isError, `${name}: ${resultText(result)}`).not.toBe(true);
     }
+    expect((await stub.list("group-members")).map((row) => row["email"])).toEqual(["user@example.com"]);
   });
 });

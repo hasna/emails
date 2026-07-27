@@ -120,22 +120,30 @@ describe("template/contact/sequence parity", () => {
       expect(listContacts({ suppressed: true })).toContainEqual(expect.objectContaining({ email: "user@example.com" }));
       expect(getSequence("onboarding")?.id).toBe(sequence.id);
 
-      // Sequence sub-ledger writes (steps/enrollments) are DISABLED over MCP in
-      // self_hosted API-only mode — that server-owned state is written via the
-      // authenticated Emails API, not the MCP local write tools.
-      const step = await client.callTool({
-        name: "add_sequence_step",
-        arguments: { sequence_id: sequence.id, step_number: 1, delay_hours: 0, template_name: "welcome" },
-      }, undefined, { timeout: 10_000 });
-      expect(step.isError).toBe(true);
-      expect((step.content[0] as { text: string }).text).toContain("disabled in self_hosted API-only mode");
+      // Sequence steps and enrollments are `/v1/sequence-steps` and
+      // `/v1/sequence-enrollments`, so writing them over MCP is IN parity: the row
+      // the tool creates is the same row the exported library functions read back.
+      // These two calls used to be refused with "disabled in self_hosted API-only
+      // mode" while `emails sequence step add` / `emails sequence enroll` wrote the
+      // very same rows over the very same route — the guard was the only refusal.
+      await callTool(client, "add_sequence_step", {
+        sequence_id: sequence.id,
+        step_number: 1,
+        delay_hours: 0,
+        template_name: "welcome",
+      });
+      await callTool(client, "enroll_contact", {
+        sequence_id: sequence.id,
+        contact_email: "user@example.com",
+        provider_id: provider.id,
+      });
 
-      const enrollResult = await client.callTool({
-        name: "enroll_contact",
-        arguments: { sequence_id: sequence.id, contact_email: "user@example.com", provider_id: provider.id },
-      }, undefined, { timeout: 10_000 });
-      expect(enrollResult.isError).toBe(true);
-      expect((enrollResult.content[0] as { text: string }).text).toContain("disabled in self_hosted API-only mode");
+      expect(listSteps(sequence.id)).toContainEqual(expect.objectContaining({ step_number: 1, template_name: "welcome" }));
+      expect(listEnrollments({ sequence_id: sequence.id })).toContainEqual(expect.objectContaining({
+        contact_email: "user@example.com",
+        provider_id: provider.id,
+        status: "active",
+      }));
     } finally {
       await client.close();
     }

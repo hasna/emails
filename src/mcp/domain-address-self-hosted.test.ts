@@ -225,20 +225,43 @@ describe("MCP domain/address self_hosted API-only guards", () => {
     });
   });
 
-  it("fails local-only domain/address MCP tools before creating local SQLite", async () => {
+  it("fails the two provider-adapter tools that no mode can serve", async () => {
+    // These are the ONLY domain/address tools left behind a mode guard, and the
+    // guard is honest: they call `getAdapter(provider).getDnsRecords/.verifyDomain`,
+    // the `/v1/providers` row carries no credential columns, and their CLI twins
+    // (`emails domain dns`, `emails domain verify`) are `serverOnly(...)`. Removing
+    // this refusal would replace it with a client-credentialed AWS/Cloudflare call.
     for (const [name, args] of [
       ["get_dns_records", { domain: "example.com" }],
       ["verify_domain", { domain: "example.com" }],
+    ] as const) {
+      const result = await runDomainTool(name, args);
+      expect(result.isError).toBe(true);
+      expect(result.content[0]?.text ?? "").toContain("self_hosted API-only mode");
+    }
+  });
+
+  it("no longer refuses the repository-backed domain/address tools", async () => {
+    // Each of these has a `/v1` route, a complete client arm, and a working CLI
+    // twin; the guard was the only thing refusing. This fixture is read-only, so
+    // the writes below fail at the fixture's 404 — what matters is that they get
+    // that far instead of being turned away by a mode check.
+    // src/mcp/self-hosted-unguarded-tools.test.ts drives them to completion.
+    for (const [name, args] of [
       ["remove_domain", { domain_id: "domain-ready-1" }],
       ["suggest_address", { domain: "example.com" }],
       ["remove_address", { address_id: "addr-ready-1" }],
       ["suspend_address", { address_id: "addr-ready-1" }],
       ["activate_address", { address_id: "addr-ready-1" }],
       ["set_address_quota", { address_id: "addr-ready-1", per_day: 5 }],
+      ["add_alias", { alias: "hello@example.com", target: "ops@example.com" }],
+      ["add_catch_all", { domain: "example.com", target: "ops@example.com" }],
+      ["list_aliases", {}],
+      ["remove_alias", { alias_id: "alias-1" }],
+      ["resolve_alias", { recipient: "hello@example.com" }],
     ] as const) {
       const result = await runDomainTool(name, args);
-      expect(result.isError).toBe(true);
-      expect(result.content[0]?.text ?? "").toContain("self_hosted API-only mode");
+      expect(result.content[0]?.text ?? "", name).not.toContain("self_hosted API-only mode");
     }
   });
 });
