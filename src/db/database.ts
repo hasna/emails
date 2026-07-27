@@ -384,7 +384,21 @@ function getDbPath(): string {
       ? path
       : canonicalizeDatabasePath(path);
   }
-  // 3. Default: ~/.hasna/emails/emails.db
+  // 3. Default
+  return defaultDatabasePath();
+}
+
+/**
+ * The local database file used when no path is configured: `~/.hasna/emails/emails.db`.
+ *
+ * Exported so a caller that has to NAME the default — configuration resolution, a
+ * `doctor` line, an operator-facing error — reads it from here instead of re-spelling
+ * `join(getDataDir(), "emails.db")` and drifting when the directory moves.
+ *
+ * Creates and hardens the data directory as a side effect, because `getDataDir()`
+ * does; that is the same work opening the default database would do anyway.
+ */
+export function defaultDatabasePath(): string {
   return join(getDataDir(), "emails.db");
 }
 

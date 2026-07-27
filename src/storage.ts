@@ -90,3 +90,26 @@ export {
   httpStoreDescriptor,
 } from "./store-http/index.js";
 export type { HttpEmailStoreOptions, MissingRoute } from "./store-http/index.js";
+
+// WHICH of those two stores an installation gets, decided from storage configuration.
+//
+// This is the only export in this file that both implementations answer to, and the
+// only one an application should normally call: `createConfiguredEmailStore()` reads
+// the operator's settings and hands back the store they configured. A configuration
+// that names BOTH a database path and an API base URL throws `StoreConfigurationError`
+// rather than picking a winner — see src/store-resolution.ts for why a precedence rule
+// is the bug and not the fix.
+export {
+  API_BASE_URL_SETTING,
+  API_CREDENTIAL_SETTINGS,
+  API_SETTINGS_POINTER,
+  DATABASE_PATH_SETTINGS,
+  StoreConfigurationError,
+  createConfiguredEmailStore,
+  planEmailStore,
+} from "./store-resolution.js";
+export type { StorePlan } from "./store-resolution.js";
+
+// The default local database path, exported beside the resolution that names it so an
+// operator-facing diagnostic does not have to re-spell it.
+export { defaultDatabasePath } from "./db/database.js";
