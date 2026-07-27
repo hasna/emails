@@ -2,7 +2,7 @@ import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
 import { listEmails } from "../../db/emails.local.js";
 import { getLocalStats, formatStatsTable } from "../../lib/stats.local.js";
-import { getAnalytics, formatAnalytics } from "../../lib/analytics.local.js";
+import { getAnalytics, formatAnalytics } from "../../lib/analytics.js";
 import { colorStatus, truncate } from "../../lib/format.js";
 import { getDatabase } from "../../db/database.js";
 import { handleError, resolveId, parseDuration, padRight } from "../utils.js";
@@ -181,13 +181,17 @@ export function registerSyncCommands(program: Command, output: (data: unknown, f
     .description("Show email analytics (daily volume, top recipients, busiest hours, delivery trend)")
     .option("--provider <id>", "Filter by provider ID")
     .option("--period <period>", "Time period (e.g. 30d, 7d, 90d)", "30d")
-    .action((opts: { provider?: string; period: string }) => {
+    .action(async (opts: { provider?: string; period: string }) => {
       try {
         let providerId = opts.provider;
         if (providerId) {
           providerId = resolveId("providers", providerId);
         }
-        const data = getAnalytics(providerId, opts.period);
+        // `getAnalytics` reads the store seam, which is async, and REFUSES a provider
+        // filter — the seam cannot scope messages to a provider, so a scoped report
+        // would cover every provider in three of its four sections. The refusal is a
+        // throw and lands on `handleError` below, which is the loud answer this needs.
+        const data = await getAnalytics(providerId, opts.period);
         output(data, formatAnalytics(data));
       } catch (e) {
         handleError(e);

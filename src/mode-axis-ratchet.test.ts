@@ -145,6 +145,24 @@ const root = join(import.meta.dir, "..");
  *     `isSelfHostedModeReferences` by two (that facade's import of the client-side mode
  *     predicate and its one call).
  *
+ * RE-PINNED AGAIN on the analytics collapse, rebased over the verification-code and
+ * doctor pins above. THE CONFLICT THIS PRODUCED IS THE GUARD WORKING: with zero slack,
+ * concurrent collapses cannot all land without one of them re-measuring the COMBINED
+ * tree. Analytics deletes its two arms, so `twoArmFamilies` and `remoteArmModules` fall
+ * by one each; its facade's dispatch helper and two dispatched exports take
+ * `routedFacadeDefinitions` by one and `routedCallExpressions` by two; and the deleted
+ * facade's mode import plus its one dispatch read take `getEmailsModeReferences` by two.
+ * `resolveEmailsModeReferences` does not move — the deleted arms resolved no mode of
+ * their own, the local arm read SQLite directly and the second arm was a throwing stub.
+ *
+ * AND HERE IS WHY THE RESOLUTION MUST BE A MEASUREMENT AND NOT ARITHMETIC. The obvious
+ * way to settle a conflict in this block is to take the smaller of the two sides per
+ * metric. It is wrong, and this rebase is the proof: main and this branch BOTH carried
+ * `getEmailsModeReferences: 68`, so a per-metric minimum keeps 68 — while the merged tree
+ * measures 66, because the two collapses removed DISJOINT references and a minimum cannot
+ * see that. Two units of slack would have been pinned as "zero slack", which is exactly
+ * the licence this whole paragraph exists to deny. Zero every number, then measure.
+ *
  * Every number below is EXACTLY the count measured over the real `git ls-files` corpus of
  * THIS commit, re-measured after this comment was written because this file is inside the
  * corpus it scans. The gap between what the tree contains and what the guard permits is
@@ -174,14 +192,14 @@ const root = join(import.meta.dir, "..");
  * of this change: 668 tracked, 667 scanned, 8,745,666 characters.
  */
 const CEILINGS: Record<string, number> = {
-  twoArmFamilies: 37,
-  remoteArmModules: 37,
-  routedFacadeDefinitions: 28,
-  routedCallExpressions: 287,
+  twoArmFamilies: 36,
+  remoteArmModules: 36,
+  routedFacadeDefinitions: 27,
+  routedCallExpressions: 285,
   selfHostedResourceBranches: 47,
   selfHostedResourceReferences: 199,
   isSelfHostedModeReferences: 68,
-  getEmailsModeReferences: 68,
+  getEmailsModeReferences: 66,
   resolveEmailsModeReferences: 65,
   normalizeEmailsModeReferences: 16,
   emailsModeEnvReferences: 235,

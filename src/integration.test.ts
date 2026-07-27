@@ -71,13 +71,32 @@ describe("sandbox capture flow (via /v1)", () => {
 });
 
 describe("outbound sending is server-side", () => {
-  it("sendWithFailover, getLocalStats, and getAnalytics fail loud in the client", async () => {
+  it("sendWithFailover and getLocalStats fail loud in the client", async () => {
     const provider = createProvider({ name: "dev", type: "sandbox" });
     await expect(
       sendWithFailover(provider.id, { from: "a@example.com", to: "b@test.com", subject: "x", text: "y" }),
     ).rejects.toThrow(/not available in the self-hosted client/);
     expect(() => getLocalStats(provider.id, "30d")).toThrow(/self-hosted server/);
-    expect(() => getAnalytics(provider.id, "30d")).toThrow(/self-hosted server/);
+  });
+});
+
+describe("analytics", () => {
+  // ANALYTICS IS NO LONGER SERVER-ONLY, and that is the point of the collapse: it used to
+  // throw here unconditionally because its second arm was a stub, so an operator reading
+  // an installation through the API got no dashboard at all. It now reads the SAME store
+  // this test's environment configures, over the seam.
+  it("answers through the configured API store rather than refusing", async () => {
+    const data = await getAnalytics(undefined, "30d");
+    expect(data.sent_read.answered).toBe(true);
+    // Nothing has been sent through this store, and the read reached the end of the rows,
+    // so an empty list here is a genuine total rather than an unread table.
+    expect(data.sent_read.exact, data.sent_read.reason ?? "").toBe(true);
+    expect(data.dailyVolume).toEqual([]);
+  });
+
+  it("still refuses a provider-scoped report, because the seam cannot scope messages", async () => {
+    const provider = createProvider({ name: "dev", type: "sandbox" });
+    await expect(getAnalytics(provider.id, "30d")).rejects.toThrow(/cannot be produced from the store seam/);
   });
 });
 
