@@ -14,18 +14,30 @@ import {
   unassignAddressOwnerByRef,
 } from "../../lib/address-ownership.js";
 
-// The local address PROVISIONING orchestration (S3/SES receive setup, the
-// provisioning ledger) is owned by the self-hosted server and has no client-side
-// equivalent, so `address provision` is kept for discoverability but fails loud.
+// `address provision` used to throw "is not available in the self-hosted client;
+// it runs on the self-hosted server". Both halves were false: the throw was
+// unconditional, so it fired in local mode too, and there is no server route for
+// it to run on — `openapi.ts` exposes plain CRUD for `/v1/addresses` and no
+// provisioning route, and the container runs no reconciler. The orchestrator
+// this command wrapped was deleted as unreachable dead code, and nothing
+// replaced it in any configuration.
 //
-// Address ownership is NOT in that category: `src/db/owners.ts` routes every
+// So the refusal now says exactly that and names the two commands that DO the
+// work, matching the wording `emails provision *` and the MCP provisioning tools
+// already settled on. It must not name a deployment mode.
+//
+// Address ownership is NOT in this category: `src/db/owners.ts` routes every
 // ownership read/write to `src/db/owners.remote.ts`, which serves them from
 // `/v1/owners`, `/v1/addresses/<id>` (owner_id/administrator_id) and
 // `/v1/address-ownership-events`. Those subcommands run against the API in both
 // modes.
-function serverOnly(command: string): never {
+function notImplementedAnywhere(command: string): never {
   throw new Error(
-    `${command} is not available in the self-hosted client; it runs on the self-hosted server.`,
+    `${command} is not implemented in this build: there is no address provisioning ` +
+      `orchestrator and no route that performs one. Create the address with ` +
+      `'emails address add <email> --provider <id>', record who owns it with ` +
+      `'emails address set-owner <email> --owner <name>', and wire the domain's inbound ` +
+      `route with 'emails aws setup-inbound --domain <domain>'.`,
   );
 }
 
@@ -34,8 +46,8 @@ const MAX_OWNER_HISTORY_LIMIT = 100;
 
 /**
  * Provider label for display. The /v1 address entity carries no provider
- * association, so an empty provider_id means "served by the self-hosted server"
- * rather than "unknown provider".
+ * association, so an empty provider_id is reported as `self_hosted` — the
+ * DomainType value it corresponds to, not a claim about where it is served.
  */
 function providerLabel(address: { provider_name: string | null; provider_id: string }): string {
   return address.provider_name ?? (address.provider_id || "self_hosted");
@@ -296,7 +308,7 @@ export function registerAddressCommands(program: Command, output: (data: unknown
 
   addressCmd
     .command("provision <email>")
-    .description("Create an email address on a provisioned domain (alias of the address provisioning workflow)")
+    .description("Create an email address on a provisioned domain (NOT IMPLEMENTED in this build; use emails address add)")
     .requiredOption("--provider <id>", "Provider ID")
     .option("--domain <id>", "Domain ID (defaults to the address's domain if registered)")
     .option("--receive <strategy>", "Receive strategy: ses-s3 | cf-routing | resend-webhook", "ses-s3")
@@ -309,7 +321,7 @@ export function registerAddressCommands(program: Command, output: (data: unknown
     .option("--interval <sec>", "Seconds between readiness checks when --wait is used", "5")
     .option("--bucket <name>", "Inbound S3 bucket for receive validation (defaults to config inbound_s3_bucket)")
     .action(async () => {
-      try { serverOnly("emails address provision"); } catch (e) { handleError(e); }
+      try { notImplementedAnywhere("emails address provision"); } catch (e) { handleError(e); }
     });
 
   addressCmd
