@@ -22,7 +22,7 @@
 
 import type { StoreCapabilities } from "../store/capabilities.js";
 import type { StoreDescriptor } from "../store/descriptor.js";
-import type { EmailStore } from "../store/email-store.js";
+import type { SequenceCapableEmailStore } from "../store-sequence-subledger.js";
 import { createAttachmentRepairRepository, createSendIntentsRepository } from "./ledger.js";
 import {
   createEmailContentRepository,
@@ -264,7 +264,7 @@ function gateway(gateways: Record<string, ResourceGateway>, family: string): Res
   return found;
 }
 
-export function createHttpEmailStore(options: HttpEmailStoreOptions): EmailStore {
+export function createHttpEmailStore(options: HttpEmailStoreOptions): SequenceCapableEmailStore {
   const transport = createTransport({
     baseUrl: options.baseUrl,
     credential: options.credential,
@@ -293,6 +293,8 @@ export function createHttpEmailStore(options: HttpEmailStoreOptions): EmailStore
     contacts: createResourceRepository(gateway(gateways, "contacts")),
     groups: createResourceRepository(gateway(gateways, "groups")),
     sequences: createResourceRepository(gateway(gateways, "sequences")),
+    sequenceSteps: createResourceRepository(gateway(gateways, "sequenceSteps")),
+    sequenceEnrollments: createResourceRepository(gateway(gateways, "sequenceEnrollments")),
     templates: createResourceRepository(gateway(gateways, "templates")),
     owners: createResourceRepository(gateway(gateways, "owners")),
     providers: createResourceRepository(gateway(gateways, "providers")),

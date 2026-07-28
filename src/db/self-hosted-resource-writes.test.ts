@@ -18,7 +18,6 @@ import { suppressContact, unsuppressContact, listContacts } from "./contacts.js"
 import { createSendKey } from "./send-keys.js";
 import { DATABASE_PATH_SETTINGS } from "../store-resolution.js";
 import { createTemplate, listTemplates, getTemplate, deleteTemplate } from "./templates.js";
-import { createSequence, listSequences } from "./sequences.js";
 
 let INHERITED_PROCESS_ENV: NodeJS.ProcessEnv;
 function captureInheritedProcessEnv(): void {
@@ -207,12 +206,13 @@ describe("resource repos route writes to selfHosted in selfHosted mode", () => {
     expect(listTemplates().some((x) => x.name === "farewell")).toBe(false);
   });
 
-  test("createSequence POSTs to /v1/sequences and appears in selfHosted listSequences", () => {
-    const s = createSequence({ name: "onboarding", description: "drip" });
-    expect(s.id).toStartWith("s");
-    expect(s.status).toBe("active");
-    expect(listSequences().some((x) => x.name === "onboarding")).toBe(true);
-  });
+  // The sequences case that used to sit here proved the OLD routing bridge sent that
+  // family's writes to `/v1` when the deployment word said so. The family has collapsed
+  // onto the store seam and consults no such word, so the premise is gone — and the
+  // question that survives it (does a create land on the API dataset and come back from
+  // the API list?) is asked by src/db/sequences.test.ts against a REAL HTTP store over
+  // the store-seam `/v1` fixture, which also validates writes against the service's own
+  // published contract, something this hand-rolled stub cannot do.
 
   test("createSendKey POSTs to /v1/send-keys/mint and returns a hash-free key", async () => {
     const owner = createOwner({ type: "agent", name: "Key Owner" });

@@ -24,7 +24,7 @@
 import { getDatabase, type Database } from "../db/database.js";
 import type { StoreCapabilities } from "../store/capabilities.js";
 import type { StoreDescriptor } from "../store/descriptor.js";
-import type { EmailStore } from "../store/email-store.js";
+import type { SequenceCapableEmailStore } from "../store-sequence-subledger.js";
 import { createAttachmentRepairRepository, createSendIntentsRepository } from "./ledger.js";
 import {
   createEmailContentRepository,
@@ -108,11 +108,14 @@ export interface SqliteEmailStoreOptions {
 /**
  * Build the store.
  *
- * The return type is `EmailStore`, so every repository below is checked against
- * its interface at this assignment. There is deliberately no partial variant of
- * this function and no way to construct a store with a repository missing.
+ * The return type is `EmailStore` PLUS the sequence sub-ledger, so every repository
+ * below is checked against its interface at this assignment. The intersection is a
+ * widening, not a variant: every consumer that wants an `EmailStore` still gets one,
+ * and the two extra families are the declaration `src/store/` cannot carry while it is
+ * frozen (see src/store-sequence-subledger.ts). There is deliberately no partial
+ * variant of this function and no way to construct a store with a repository missing.
  */
-export function createSqliteEmailStore(options: SqliteEmailStoreOptions = {}): EmailStore {
+export function createSqliteEmailStore(options: SqliteEmailStoreOptions = {}): SequenceCapableEmailStore {
   const db = options.database ?? getDatabase();
   const capabilities = SQLITE_STORE_CAPABILITIES;
   const resource = (family: keyof typeof RESOURCE_TABLES) =>
@@ -140,6 +143,8 @@ export function createSqliteEmailStore(options: SqliteEmailStoreOptions = {}): E
     contacts: resource("contacts"),
     groups: resource("groups"),
     sequences: resource("sequences"),
+    sequenceSteps: resource("sequenceSteps"),
+    sequenceEnrollments: resource("sequenceEnrollments"),
     templates: resource("templates"),
     owners: resource("owners"),
     providers: resource("providers"),

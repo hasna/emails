@@ -34,7 +34,9 @@ let stub: V1Stub;
 const servers: Array<ReturnType<typeof startHttpServer>> = [];
 
 beforeAll(async () => {
-  stub = await startV1Stub();
+  // `openapi: true`: the collapsed sequences family reaches `/v1` through the real
+  // HTTP store, which reads the published contract before filtered reads and writes.
+  stub = await startV1Stub({ openapi: true });
 });
 
 afterAll(() => stub.stop());
@@ -89,10 +91,10 @@ describe("template/contact/sequence parity", () => {
 
     expect(getTemplate("welcome")?.subject_template).toBe("Welcome {{name}}");
     expect(isContactSuppressed("user@example.com")).toBe(true);
-    const sequence = getSequence("onboarding")!;
+    const sequence = (await getSequence("onboarding"))!;
     expect(sequence.name).toBe("onboarding");
-    expect(listSteps(sequence.id)).toHaveLength(1);
-    expect(listEnrollments({ sequence_id: sequence.id })).toContainEqual(expect.objectContaining({
+    expect(await listSteps(sequence.id)).toHaveLength(1);
+    expect(await listEnrollments({ sequence_id: sequence.id })).toContainEqual(expect.objectContaining({
       contact_email: "user@example.com",
       provider_id: providerId,
     }));
@@ -118,7 +120,7 @@ describe("template/contact/sequence parity", () => {
 
       expect(listTemplates()).toContainEqual(expect.objectContaining({ name: "welcome" }));
       expect(listContacts({ suppressed: true })).toContainEqual(expect.objectContaining({ email: "user@example.com" }));
-      expect(getSequence("onboarding")?.id).toBe(sequence.id);
+      expect((await getSequence("onboarding"))?.id).toBe(sequence.id);
 
       // Sequence steps and enrollments are `/v1/sequence-steps` and
       // `/v1/sequence-enrollments`, so writing them over MCP is IN parity: the row
@@ -138,8 +140,8 @@ describe("template/contact/sequence parity", () => {
         provider_id: provider.id,
       });
 
-      expect(listSteps(sequence.id)).toContainEqual(expect.objectContaining({ step_number: 1, template_name: "welcome" }));
-      expect(listEnrollments({ sequence_id: sequence.id })).toContainEqual(expect.objectContaining({
+      expect(await listSteps(sequence.id)).toContainEqual(expect.objectContaining({ step_number: 1, template_name: "welcome" }));
+      expect(await listEnrollments({ sequence_id: sequence.id })).toContainEqual(expect.objectContaining({
         contact_email: "user@example.com",
         provider_id: provider.id,
         status: "active",
@@ -149,16 +151,17 @@ describe("template/contact/sequence parity", () => {
     }
   }, 30_000);
 
-  it("covers the workflow through exported library functions including due-step processing", () => {
+  it("covers the workflow through exported library functions including due-step processing", async () => {
     createTemplate({ name: "welcome", subject_template: "Welcome {{name}}", text_template: "Hi {{name}}" });
     suppressContact("user@example.com");
-    const seq = createSequence({ name: "onboarding" });
-    addStep({ sequence_id: seq.id, step_number: 1, delay_hours: 0, template_name: "welcome" });
-    const enrollment = enroll({ sequence_id: seq.id, contact_email: "user@example.com" });
+    // The collapsed sequences family is async; every call below is awaited.
+    const seq = await createSequence({ name: "onboarding" });
+    await addStep({ sequence_id: seq.id, step_number: 1, delay_hours: 0, template_name: "welcome" });
+    const enrollment = await enroll({ sequence_id: seq.id, contact_email: "user@example.com" });
 
     expect(renderTemplate(getTemplate("welcome")!.subject_template, { name: "Ada" })).toBe("Welcome Ada");
     expect(isContactSuppressed("user@example.com")).toBe(true);
-    expect(getDueEnrollments()).toContainEqual(expect.objectContaining({ id: enrollment.id }));
-    expect(advanceEnrollment(enrollment.id)).toMatchObject({ status: "completed" });
+    expect(await getDueEnrollments()).toContainEqual(expect.objectContaining({ id: enrollment.id }));
+    expect(await advanceEnrollment(enrollment.id)).toMatchObject({ status: "completed" });
   });
 });

@@ -44,6 +44,14 @@ export const RESOURCE_PATHS: Readonly<Record<string, string>> = Object.freeze({
   providers: "providers",
   templates: "templates",
   sequences: "sequences",
+  /**
+   * NOT seam families either. The sequence sub-ledger
+   * (src/store-sequence-subledger.ts) rides the same generic CRUD path over two
+   * resources the service registers beside `sequences`; `EmailStore` does not declare
+   * them yet, so — like `provisioning` — they are excluded from the family check.
+   */
+  sequenceSteps: "sequence-steps",
+  sequenceEnrollments: "sequence-enrollments",
   scheduled: "scheduled",
   aliases: "aliases",
   forwarding: "forwarding",
@@ -62,9 +70,12 @@ export const RESOURCE_PATHS: Readonly<Record<string, string>> = Object.freeze({
   provisioning: "provisioning",
 });
 
+/** Entries in the path map that are NOT repositories on `EmailStore`. */
+const NOT_SEAM_FAMILIES = new Set(["provisioning", "sequenceSteps", "sequenceEnrollments"]);
+
 /** The families that are `ResourceRepository`s on `EmailStore`. */
 export const RESOURCE_FAMILIES: readonly string[] = Object.freeze(
-  Object.keys(RESOURCE_PATHS).filter((family) => family !== "provisioning"),
+  Object.keys(RESOURCE_PATHS).filter((family) => !NOT_SEAM_FAMILIES.has(family)),
 );
 
 function resourceRoutes(): RouteUse[] {

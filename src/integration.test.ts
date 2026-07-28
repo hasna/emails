@@ -149,22 +149,24 @@ describe("template rendering", () => {
 });
 
 describe("sequence enrollment flow (via /v1)", () => {
-  it("enrolls a contact, advances through steps, and completes", () => {
+  it("enrolls a contact, advances through steps, and completes", async () => {
+    // The collapsed sequences family is async and resolves the API store from the
+    // storage settings the stub's env installs; every call here is awaited.
     createTemplate({ name: "step1", subject_template: "Step 1", text_template: "Content 1" });
     createTemplate({ name: "step2", subject_template: "Step 2", text_template: "Content 2" });
-    const seq = createSequence({ name: "test-seq" });
-    addStep({ sequence_id: seq.id, step_number: 1, delay_hours: 0, template_name: "step1" });
-    addStep({ sequence_id: seq.id, step_number: 2, delay_hours: 24, template_name: "step2" });
+    const seq = await createSequence({ name: "test-seq" });
+    await addStep({ sequence_id: seq.id, step_number: 1, delay_hours: 0, template_name: "step1" });
+    await addStep({ sequence_id: seq.id, step_number: 2, delay_hours: 24, template_name: "step2" });
 
-    const enrollment = enroll({ sequence_id: seq.id, contact_email: "user@test.com" });
+    const enrollment = await enroll({ sequence_id: seq.id, contact_email: "user@test.com" });
     expect(enrollment.status).toBe("active");
     expect(enrollment.current_step).toBe(0);
 
-    const advanced = advanceEnrollment(enrollment.id);
+    const advanced = await advanceEnrollment(enrollment.id);
     expect(advanced?.current_step).toBe(1);
     expect(advanced?.status).toBe("active");
 
-    const completed = advanceEnrollment(enrollment.id);
+    const completed = await advanceEnrollment(enrollment.id);
     expect(completed?.status).toBe("completed");
   });
 });

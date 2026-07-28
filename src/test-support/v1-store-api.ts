@@ -79,6 +79,7 @@ import type {
 } from "../store/records.js";
 import { MESSAGE_FOLDERS } from "../store/records.js";
 import type { ResourceRepository } from "../store/repositories.js";
+import { sequenceSubledgerOf } from "../store-sequence-subledger.js";
 
 export interface V1StoreApi {
   /** Origin only, no trailing `/v1` — the shape `HttpEmailStoreOptions.baseUrl` takes. */
@@ -257,6 +258,11 @@ interface RouteContext {
 }
 
 function familyFor(store: EmailStore, path: string): ResourceRepository<Record<string, unknown>> | null {
+  // The sequence sub-ledger is carried by both shipped stores but not declared on the
+  // seam yet, so it is probed rather than read — a backing store without it simply does
+  // not serve those two paths, which is what the real service does for an unregistered
+  // resource.
+  const subledger = sequenceSubledgerOf(store);
   const families: Record<string, ResourceRepository<Record<string, unknown>>> = {
     contacts: store.contacts,
     groups: store.groups,
@@ -264,6 +270,12 @@ function familyFor(store: EmailStore, path: string): ResourceRepository<Record<s
     providers: store.providers,
     templates: store.templates,
     sequences: store.sequences,
+    ...(subledger === null
+      ? {}
+      : {
+          "sequence-steps": subledger.sequenceSteps,
+          "sequence-enrollments": subledger.sequenceEnrollments,
+        }),
     scheduled: store.scheduled,
     aliases: store.aliases,
     forwarding: store.forwarding,

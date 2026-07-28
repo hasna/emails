@@ -189,12 +189,18 @@ describe("CLI JSON contracts (self-hosted /v1)", () => {
   });
 
   it("keeps one-word unknown commands as command errors", () => {
+    // Explicit budget: this case cold-starts the whole CLI in a subprocess, and under a
+    // full serial run its wall time is dominated by machine load rather than by the
+    // assertion. It crossed the 5s default by ~0.6s exactly once in a 253-file run;
+    // A/B against pristine main showed identical standalone timings on both trees, so
+    // this is the same subprocess-bound budget shape #141/#142 fixed, not a startup
+    // regression.
     const result = runCli(["definitely-not-a-command"], cliEnv());
     expect(result.exitCode).not.toBe(0);
     const stderr = stderrText(result);
     expect(stderr).toContain("unknown command");
     expect(stderr).not.toContain("API_KEY");
-  });
+  }, 15_000);
 
   it("prints self-hosted agent context as stable redacted JSON", () => {
     const parsed = expectCliJsonOk<{ status: { mode: { current: string } } }>(
