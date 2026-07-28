@@ -998,7 +998,7 @@ const CEILINGS: Record<string, number> = {
   getEmailsModeReferences: 58,
   resolveEmailsModeReferences: 65,
   normalizeEmailsModeReferences: 16,
-  emailsModeEnvReferences: 221,
+  emailsModeEnvReferences: 219,
 };
 
 // 649 files are tracked and 648 scanned today, totalling ~9.7M characters. (The figures in
