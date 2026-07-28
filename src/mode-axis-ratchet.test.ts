@@ -754,17 +754,17 @@ const root = join(import.meta.dir, "..");
  * counts.
  */
 const CEILINGS: Record<string, number> = {
-  twoArmFamilies: 25,
-  remoteArmModules: 25,
-  routedFacadeDefinitions: 16,
-  routedCallExpressions: 215,
-  selfHostedResourceBranches: 44,
-  selfHostedResourceReferences: 156,
-  isSelfHostedModeReferences: 54,
-  getEmailsModeReferences: 58,
-  resolveEmailsModeReferences: 65,
-  normalizeEmailsModeReferences: 16,
-  emailsModeEnvReferences: 235,
+  twoArmFamilies: 0,
+  remoteArmModules: 0,
+  routedFacadeDefinitions: 0,
+  routedCallExpressions: 0,
+  selfHostedResourceBranches: 0,
+  selfHostedResourceReferences: 0,
+  isSelfHostedModeReferences: 0,
+  getEmailsModeReferences: 0,
+  resolveEmailsModeReferences: 0,
+  normalizeEmailsModeReferences: 0,
+  emailsModeEnvReferences: 0,
 };
 
 // 624 files are tracked and 623 scanned today, totalling ~7.4M characters. The floors
