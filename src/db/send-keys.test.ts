@@ -427,6 +427,14 @@ for (const [label, makeStore] of STORE_VARIANTS) {
 
         expect(keys).toHaveLength(520);
         expect(new Set(keys.map((key) => key.id)).size).toBe(520);
+
+        // THE PAGE PAST THE CLAMP, which is where the defect was visible without counting.
+        // Measured on unmodified main against a stub that clamps exactly as production does,
+        // this window came back EMPTY — a revocation review of the oldest keys shown nothing
+        // and given no reason to doubt it.
+        const lastPage = await listSendKeys("agent-1", { limit: 10, offset: 515 }, store);
+        expect(lastPage).toHaveLength(5);
+        expect(lastPage[0]!.id).toBe("k-0004");
       });
 
       it("CONTROL: one 1000-row request really does come back holding 500 of the 520", async () => {
