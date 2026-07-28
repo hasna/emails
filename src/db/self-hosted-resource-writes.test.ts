@@ -16,6 +16,7 @@ import { createOwner, listOwners } from "./owners.js";
 import { createGroup, listGroups } from "./groups.js";
 import { suppressContact, unsuppressContact, listContacts } from "./contacts.js";
 import { createSendKey } from "./send-keys.js";
+import { DATABASE_PATH_SETTINGS } from "../store-resolution.js";
 import { createTemplate, listTemplates, getTemplate, deleteTemplate } from "./templates.js";
 import { createSequence, listSequences } from "./sequences.js";
 
@@ -141,6 +142,13 @@ afterAll(() => proc?.kill());
 
 beforeEach(() => {
   captureInheritedProcessEnv();
+  // EXACTLY ONE STORE. The API settings below name this stub, and the collapsed send-key
+  // family resolves its store from STORAGE CONFIGURATION — so a database path left in the
+  // environment (the hermetic test harness sets one for every file) plus an API is a HARD
+  // BOOT ERROR with deliberately no precedence rule, and every call through that family
+  // would raise it. Named through the resolution's own exported list rather than copied as
+  // a literal, so this cannot go stale when the resolution learns another setting.
+  for (const setting of DATABASE_PATH_SETTINGS) delete process.env[setting];
   process.env.EMAILS_MODE = "self_hosted";
   process.env.EMAILS_SELF_HOSTED_URL = baseUrl;
   process.env.EMAILS_SELF_HOSTED_API_KEY = "test_key";
@@ -206,14 +214,19 @@ describe("resource repos route writes to selfHosted in selfHosted mode", () => {
     expect(listSequences().some((x) => x.name === "onboarding")).toBe(true);
   });
 
-  test("createSendKey POSTs to /v1/send-keys/mint and returns a hash-free key", () => {
+  test("createSendKey POSTs to /v1/send-keys/mint and returns a hash-free key", async () => {
     const owner = createOwner({ type: "agent", name: "Key Owner" });
-    const { token, key } = createSendKey(owner.id, "ci");
-    // The token is server-minted (routed to the selfHosted, not a local island).
+    // ASYNC AND RESOLVED FROM STORAGE CONFIGURATION. This family has collapsed onto the
+    // store seam, so it no longer consults the deployment word at all — it reaches this
+    // same stub because the API settings above name it, which is a STRICTLY STRONGER
+    // statement than the one this case used to make.
+    const { token, key } = await createSendKey(owner.id, "ci");
+    // The token is server-minted (it lands on the API, not on a local island).
     expect(token).toStartWith("esk_");
     expect(key.owner_id).toBe(owner.id);
     expect(key.label).toBe("ci");
-    // The client never receives the secret hash.
-    expect(key.key_hash).toBe("");
+    // The client never receives the secret hash — the field is ABSENT now, where it used
+    // to be present holding a fabricated `""` that a caller could compare against.
+    expect("key_hash" in key).toBe(false);
   });
 });

@@ -816,19 +816,71 @@ const root = join(import.meta.dir, "..");
  * zero to all eleven, and every file it EDITS has a per-file count unchanged by the edit. The
  * dispatch helper, the generic resource helper and the deployment predicate are named by ROLE
  * here and never as the tokens the scan counts.
+ *
+ * RE-MEASURED AND RE-PINNED AGAIN on the `src/db/send-keys` collapse — scoped send keys, the
+ * credential that decides which of an installation's addresses an agent may send as. BASE
+ * `7c32937`, verified INDEPENDENTLY over the real `git ls-files` corpus (649 tracked / 648
+ * scanned, 9,737,437 characters) with all eleven live counts equal to the ceilings the sandbox
+ * collapse declared and ZERO slack. EIGHT counters move — the most any family in this phase has
+ * moved, because this family's SQLite arm carried a deployment branch of its own in addition to
+ * the facade's dispatch:
+ *
+ *   twoArmFamilies                24 -> 23   both arm modules deleted, so the facade has no
+ *   remoteArmModules              24 -> 23   siblings left. THE PAIR THAT SAYS A FAMILY IS DONE.
+ *   routedFacadeDefinitions       15 -> 14   the facade's dispatch helper is deleted.
+ *   routedCallExpressions        209 -> 199  it dispatched all TEN exports through that helper.
+ *   selfHostedResourceBranches    44 -> 41   THE ONLY FAMILY IN THE PHASE SO FAR TO MOVE THIS
+ *                                            ONE. The deleted SQLite arm asked THREE TIMES
+ *                                            whether it was really the local arm — once to
+ *                                            refuse a mint outright, twice to answer a listing
+ *                                            from the HTTP bridge instead — so a single call
+ *                                            could take either path depending on which of the
+ *                                            two modules the caller reached first.
+ *   selfHostedResourceReferences 151 -> 139  those three, plus the nine reads and writes the
+ *                                            deleted HTTP arm made through the generic resource
+ *                                            helper. Four of those nine are also exactly why
+ *                                            four listings answered out of one clamped page.
+ *   isSelfHostedModeReferences    52 -> 50   the deleted facade imported the client-side
+ *                                            deployment predicate and called it once.
+ *   emailsModeEnvReferences      235 -> 234  ONE occurrence, and it is worth naming because it
+ *                                            is the first time this counter has moved for a
+ *                                            reason other than a test: the deleted SQLite arm's
+ *                                            refusal message told the operator which value to
+ *                                            set to get a working send key — a refusal
+ *                                            documenting its own bypass, deleted with the arm.
+ *
+ * THREE DO NOT MOVE, for the reasons the blocks above already record: this dispatcher went
+ * through the predicate rather than the process-wide read (58), and neither arm resolved or
+ * parsed the setting (65, 16). The env counter moved by exactly one and under the same
+ * discipline as every block above — the tempting way to prove the deleted arm refused a mint on
+ * one configuration is a case that SETS the deployment word, and that case would have raised a
+ * counter that may only fall. Both rebuilt suites name their storage through the resolution's
+ * own exported constants, and the clamp is proved through the store seam by
+ * `src/db/send-keys.test.ts` with a control asserting that one 1000-row request really comes
+ * back holding 500 of 520.
+ *
+ * Corpus of this change: 647 tracked, 646 scanned, ~9.80M characters — both floors cleared with
+ * room. TWO fewer tracked files than the base, and no new ones: the two arm modules are deleted
+ * and BOTH of this family's suites were rewritten in place. The character total is given to
+ * three figures on purpose: this paragraph is inside the corpus it describes. The two FILE
+ * counts and all eleven metric counts are exact, were measured on the merged tree and measured
+ * AGAIN after this paragraph was written, and were measured PER FILE: every file this change
+ * AUTHORS contributes zero to all eleven, and every file it EDITS has a per-file count
+ * unchanged by the edit — which was checked against the base rather than assumed, and holds for
+ * all three edited files that carry a non-zero count.
  */
 const CEILINGS: Record<string, number> = {
-  twoArmFamilies: 24,
-  remoteArmModules: 24,
-  routedFacadeDefinitions: 15,
-  routedCallExpressions: 209,
-  selfHostedResourceBranches: 44,
-  selfHostedResourceReferences: 151,
-  isSelfHostedModeReferences: 52,
+  twoArmFamilies: 23,
+  remoteArmModules: 23,
+  routedFacadeDefinitions: 14,
+  routedCallExpressions: 199,
+  selfHostedResourceBranches: 41,
+  selfHostedResourceReferences: 139,
+  isSelfHostedModeReferences: 50,
   getEmailsModeReferences: 58,
   resolveEmailsModeReferences: 65,
   normalizeEmailsModeReferences: 16,
-  emailsModeEnvReferences: 235,
+  emailsModeEnvReferences: 234,
 };
 
 // 649 files are tracked and 648 scanned today, totalling ~9.7M characters. (The figures in

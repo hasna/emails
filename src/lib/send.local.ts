@@ -6,7 +6,9 @@ import { getFailoverProviderIds } from "./config.js";
 // installation actually keeps its addresses. That family is collapsed: there is one
 // implementation, it reads through the store seam, and it is async.
 import { getAddressSendability } from "../db/address-lifecycle.js";
-import { assertSendAuthorized } from "../db/send-keys.local.js";
+// The FACADE, not an arm, for the same reason as the line above: that family is collapsed,
+// there is one implementation, it reads through the store seam, and it is async.
+import { assertSendAuthorized } from "../db/send-keys.js";
 import { canonicalSender } from "./email-address.js";
 import { getWarmingSchedule } from "../db/warming.local.js";
 import { getDomainByName } from "../db/domains.local.js";
@@ -122,8 +124,14 @@ export async function sendWithFailover(
 
   // Scoped-auth guard: when an auth_token (send key) is supplied, the sender
   // must own or administer the From address. No token = trusted local caller.
+  //
+  // NO `db` HANDLE IS FORWARDED, for the reason spelled out at the sendability check
+  // below: the collapsed family's injectable is a STORE, not a database handle, and it
+  // defaults to the one this installation's storage configuration names. A send key's
+  // scope is a property of the installation, not of whichever connection a command
+  // happened to open.
   if (opts.auth_token) {
-    assertSendAuthorized(opts.auth_token, opts.from, db);
+    await assertSendAuthorized(opts.auth_token, opts.from);
   }
 
   // Lifecycle guard: a suspended or over-quota sender address is blocked before

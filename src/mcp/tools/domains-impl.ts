@@ -783,7 +783,7 @@ export function registerDomainTools(server: McpServer): void {
   },
   async ({ owner_id, label }) => {
     try {
-      const { token, key } = createSendKey(owner_id, label);
+      const { token, key } = await createSendKey(owner_id, label);
       return { content: [{ type: "text", text: JSON.stringify({ token, id: key.id, owner_id: key.owner_id, label: key.label, note: "Store the token now — it will not be shown again." }, null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
@@ -801,7 +801,7 @@ export function registerDomainTools(server: McpServer): void {
   },
   async ({ owner_id, limit, offset }) => {
     try {
-      const keys = listSendKeySummaries(owner_id, { limit: limit ?? 100, offset: offset ?? 0 });
+      const keys = await listSendKeySummaries(owner_id, { limit: limit ?? 100, offset: offset ?? 0 });
       return { content: [{ type: "text", text: JSON.stringify(keys, null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
@@ -817,9 +817,11 @@ export function registerDomainTools(server: McpServer): void {
   },
   async ({ key_id }) => {
     try {
-      if (!getSendKey(key_id)) throw new Error(`Send key not found: ${key_id}`);
-      revokeSendKey(key_id);
-      return { content: [{ type: "text", text: `Send key revoked: ${key_id}` }] };
+      if (!(await getSendKey(key_id))) throw new Error(`Send key not found: ${key_id}`);
+      // `revokeSendKey` answers false for a key that was ALREADY revoked. Reporting a
+      // revocation that did not happen is the bug this branch removes.
+      const revoked = await revokeSendKey(key_id);
+      return { content: [{ type: "text", text: revoked ? `Send key revoked: ${key_id}` : `Send key was already revoked: ${key_id}` }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
     }
@@ -835,7 +837,7 @@ export function registerDomainTools(server: McpServer): void {
   },
   async ({ owner_id, from }) => {
     try {
-      const authorized = canOwnerSendFrom(owner_id, from);
+      const authorized = await canOwnerSendFrom(owner_id, from);
       return { content: [{ type: "text", text: JSON.stringify({ owner_id, from, authorized }, null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
