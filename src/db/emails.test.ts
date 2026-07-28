@@ -857,6 +857,23 @@ describe("the sent ledger refuses what it cannot answer", () => {
     expect(error.message).toContain("cursor it could not advance past");
   });
 
+  it("reports a transport fault rather than an empty ledger", async () => {
+    // `rows` is `[]` for THREE different reasons — the stream is empty, the store refused, or
+    // the read threw — and only the first of them is an empty ledger. A thrown fault reported
+    // as `[]` is what `src/lib/export.ts` would write to a file and `src/lib/warming.ts` would
+    // count against a daily send cap, so a broken connection would RAISE the cap.
+    const store = storeWithMessages({
+      listMessages: async (): Promise<Outcome<Page<MessageListRecord>>> => {
+        throw new Error("connection reset by peer");
+      },
+    });
+
+    const error = await rejection(listEmails({}, store));
+
+    expect(error.message).toContain("failed while reading the sent ledger");
+    expect(error.message).toContain("connection reset by peer");
+  });
+
   it("FAULTS on a row with no created_at rather than dating it to now", async () => {
     // Divergence 6. The deleted HTTP arm read every timestamp through a coercion answering
     // `new Date().toISOString()` for a MISSING value, so a row whose timestamp could not be
@@ -967,6 +984,25 @@ describe("the local ledger writer, which is what still records a send", () => {
 
     expect(second.id).toBe(first.id);
     expect(db.query("SELECT COUNT(*) AS n FROM emails").get()).toEqual({ n: 1 });
+  });
+
+  it("returns the STORED row, not one assembled from its own arguments", async () => {
+    // The write reads the row back rather than echoing the input, so a store that persisted
+    // something else is not taken at this module's word. `idempotency_key` is the column that
+    // shows the difference: the caller supplies it, the TABLE holds it, and an object built
+    // from the arguments would not carry it back.
+    const email = await createSentEmailLedger(
+      PROVIDER,
+      { from: "ops@example.com", to: ["a@b.com"], subject: "stored", idempotency_key: "fence-1" },
+      undefined,
+      db,
+    );
+
+    expect(email.idempotency_key).toBe("fence-1");
+    const stored = db.query("SELECT idempotency_key AS key, created_at AS created FROM emails WHERE id = ?")
+      .get(email.id) as { key: string; created: string } | null;
+    expect(stored?.key).toBe("fence-1");
+    expect(email.created_at).toBe(stored?.created);
   });
 
   it("is readable back through the collapsed family", async () => {
