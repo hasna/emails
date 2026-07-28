@@ -69,6 +69,16 @@
 //     `string[]` while holding a number. The HTTP arm's `stringArray` rejected both. The HTTP
 //     arm is the stronger one here: a domain whose nameserver list cannot be read is not a
 //     domain with no nameservers, and `domain adopt` prints that list to an operator.
+//
+//     THE GUARD BELOW ONLY REACHES HALF OF IT, and that is a STORE-LAYER DEFECT DESCRIBED AND
+//     NOT FIXED. `mapDomain` in `src/store-sqlite/registry.ts` maps this column with the SAME
+//     `parseJsonArray` and then casts each element with `String(...)`, so over the SQLite
+//     store unparseable content is already `[]` and a numeric element is already a string by
+//     the time this module sees it: the defect moved down rather than away. The HTTP store
+//     copies the column through unvalidated (`optional()` in `src/store-http/mapping.ts`), so
+//     the guard is live on that side. Fixing it means teaching that one mapper to fault, in
+//     `src/store/`'s implementation rather than in the seam — and this change leaves
+//     `src/store/` byte-identical, so it is recorded here instead.
 //  8. ABSENT IS NOT `now()`. The deleted HTTP arm read an event's `created_at` through the
 //     shared ISO coercion, which returns `new Date().toISOString()` for a MISSING value — so
 //     an event row whose timestamp could not be read was reported as having happened at the
@@ -1196,16 +1206,23 @@ export async function getProvisioningWorkSummary(
   const addresses = await readDueSide<AddressRecord>("addresses", "address", (opts) =>
     resolved.addresses.listAddresses(opts));
 
+  const availability = combineQueueAvailability(domains, addresses);
+  // ONE RECORD, SO ALL FOUR NUMBERS SHARE ITS FATE. When either side could not be read the
+  // record says `available: false`, and a payload that still carried the OTHER side's two real
+  // integers under it would be a confident number sitting inside a declared gap — a JSON
+  // consumer reading `failed_addresses: 0` has no way to see that `available` was false three
+  // keys up. The renderer already prints the whole block as unavailable; this makes the payload
+  // agree with it.
   const countDue = (side: DueSide): number | null =>
-    side.rows === null ? null : side.rows.filter((row) => isDue(row, ts)).length;
+    !availability.available || side.rows === null ? null : side.rows.filter((row) => isDue(row, ts)).length;
   const countFailed = (side: DueSide): number | null =>
-    side.rows === null ? null : side.rows.filter((row) => row.status === "failed").length;
+    !availability.available || side.rows === null ? null : side.rows.filter((row) => row.status === "failed").length;
 
   return {
     due_domains: countDue(domains),
     due_addresses: countDue(addresses),
     failed_domains: countFailed(domains),
     failed_addresses: countFailed(addresses),
-    availability: combineQueueAvailability(domains, addresses),
+    availability,
   };
 }
