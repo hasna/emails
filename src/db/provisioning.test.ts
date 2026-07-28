@@ -437,6 +437,26 @@ describe.each(STORE_VARIANTS)("inventories through the %s", (_label, makeStore) 
     expect([...byId.keys()]).toEqual([id]);
   });
 
+  it("resolves an id that arrived PADDED, with no unpadded copy beside it", async () => {
+    // The case above cannot kill a deleted `trim()`: it passes the bare id too, so the map is
+    // the same either way. Only a padded id ON ITS OWN makes the trim decide.
+    const id = seedDomain("first.example");
+    expect([...(await listDomainProvisioningByIds([`  ${id}\t`], makeStore())).keys()]).toEqual([id]);
+  });
+
+  it("treats an id set of nothing but blanks as empty, WITHOUT reading the store", async () => {
+    // Neither can the case above kill a deleted `filter(Boolean)`: a blank id simply matches no
+    // row, so the map is empty either way. What changes is whether the whole table is read to
+    // discover that — so the store here faults if it is touched at all.
+    const store = storeWith({
+      domains: { listDomains: () => Promise.reject(new Error("the store must not be read")) },
+    });
+    expect((await listDomainProvisioningByIds(["", "   ", "\t"], store)).size).toBe(0);
+    // CONTROL: one real id in the same call DOES read the store, and faults.
+    expect(await thrownBy(() => listDomainProvisioningByIds(["", "real"], store)))
+      .toContain("the store must not be read");
+  });
+
   it("leaves an id it could not resolve ABSENT from the map", async () => {
     // DIVERGENCE 10, preserved because BOTH arms did it, and pinned so it cannot change
     // silently. It is only safe because the enumeration behind it either saw the whole table
@@ -477,7 +497,17 @@ describe.each(STORE_VARIANTS)("inventories through the %s", (_label, makeStore) 
     const rows = await listAddressProvisioningForDomain(domainId, makeStore());
     const expected = [a, b].sort((x, y) => (x < y ? 1 : x > y ? -1 : 0));
     expect(rows.map((row) => row.id)).toEqual(expected);
+    //
+    // THIS CASE CANNOT KILL A DELETED `id` TIEBREAKER, and saying so is the point. `sort` is
+    // stable and both stores already order these rows `created_at DESC, id DESC`, so the term
+    // is redundant for any order they produce. Nor can a fixture manufacture a disagreement:
+    // a store that reorders a page moves the pager's anchor row, which `enumerateStoreRows`
+    // correctly reports as a SHIFTED WINDOW and this module correctly refuses. The term stays
+    // because `ListOptions` publishes no ordering at all and a page boundary over a non-total
+    // order can repeat or drop a row; it is named as a mutation survivor in the module header
+    // rather than covered by a test that only appears to cover it.
   });
+
 });
 
 describe("an empty id set is answered without reading anything", () => {
@@ -797,6 +827,33 @@ describe("a row this module cannot read is a fault, not a default", () => {
       .toEqual(["ns1.example.net"]);
   });
 
+  it("reads an ABSENT nameservers_json as an empty list, not as a fault", async () => {
+    // `DomainRecord.nameservers_json` is OPTIONAL on the seam and the HTTP mapper copies it
+    // only when the service sent it, so absence is reachable — and the column's
+    // `NOT NULL DEFAULT '[]'` makes `[]` the truthful answer. Both deleted arms agreed.
+    // Distinct from the null case below it and from every malformed case above: the group
+    // marker has already established that the provisioning columns WERE projected.
+    const id = seedDomain("example.com");
+    const base = sqliteStore();
+    const dropKey = (row: DomainRecord): DomainRecord => {
+      const { nameservers_json: _dropped, ...rest } = row;
+      return rest as DomainRecord;
+    };
+    const store = storeWith({
+      domains: {
+        getDomain: async (getId) => {
+          const row = await base.domains.getDomain(getId);
+          if (!row.ok || row.value === null) return row;
+          return { ok: true, value: dropKey(row.value) };
+        },
+      },
+    });
+    expect((await getDomainProvisioning(id, store))!.nameservers).toEqual([]);
+    // And an explicit null reads the same way.
+    expect((await getDomainProvisioning(id, domainRowWith({ nameservers_json: null })))!.nameservers)
+      .toEqual([]);
+  });
+
   it("refuses a domain with a null dns_provider, which neither schema admits", async () => {
     const id = seedDomain("example.com");
     expect(await thrownBy(() => getDomainProvisioning(id, domainRowWith({ dns_provider: null }))))
@@ -866,6 +923,44 @@ describe.each(STORE_VARIANTS)("the provisioning event log through the %s", (_lab
 
   it("answers no events for an entity that has none", async () => {
     expect(await listProvisioningEvents("domain", "never-touched", makeStore())).toEqual([]);
+  });
+
+  it("is not broken by an unreadable event belonging to a DIFFERENT entity", async () => {
+    // REGRESSION, and it was mine: an earlier version of this module mapped every row in the
+    // log before filtering by entity, so ONE malformed transition anywhere in an append-only
+    // table made EVERY entity's history unreadable. The two columns the filter needs are read
+    // off the raw row, so a row that is not part of the answer is never validated.
+    const store = makeStore();
+    await recordProvisioningEvent("domain", "mine", null, "verifying", {}, store);
+    await recordProvisioningEvent("domain", "someone-else", null, "verifying", {}, store);
+    db.run("UPDATE provisioning_events SET to_state = '' WHERE entity_id = 'someone-else'");
+
+    const mine = await listProvisioningEvents("domain", "mine", makeStore());
+    expect(mine.map((event) => event.to_state)).toEqual(["verifying"]);
+    // CONTROL: the poisoned row really is unreadable, so the assertion above passes because it
+    // was skipped rather than because the fixture failed to corrupt anything.
+    expect(await thrownBy(() => listProvisioningEvents("domain", "someone-else", makeStore())))
+      .toContain("no readable to_state");
+  });
+
+  it("falls through to detail_json when the row carries a NULL detail", async () => {
+    // REGRESSION, also mine: an earlier version tested `Object.hasOwn(row, "detail")`, which
+    // takes a present-but-NULL `detail` and answers `{}` — dropping a detail map that is right
+    // there in the row's `detail_json`. The deleted HTTP arm used `??` and fell through.
+    const base = sqliteStore();
+    const patched = storeWith({
+      provisioning: {
+        listProvisioningEvents: async (opts) => {
+          const page = await base.provisioning.listProvisioningEvents(opts);
+          if (!page.ok) return page;
+          return { ok: true, value: page.value.map((row) => ({ ...row, detail: null })) };
+        },
+      },
+    });
+    await recordProvisioningEvent("domain", "d1", null, "verifying", { attempt: 7 }, base);
+    const events = await listProvisioningEvents("domain", "d1", patched);
+    expect(events).toHaveLength(1);
+    expect(events[0]!.detail).toEqual({ attempt: 7 });
   });
 });
 

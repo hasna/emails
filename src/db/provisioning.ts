@@ -166,6 +166,30 @@
 // change. No caller passes an empty patch; the behaviour is pinned so it cannot drift
 // unnoticed.
 //
+// ─── THREE MUTATION SURVIVORS, NAMED SO NOBODY MISTAKES THEM FOR UNTESTED BRANCHES ───────
+//
+// Mutation testing reverted every change in this file and in the renderer one at a time:
+// FORTY-FIVE distinct mutants, forty-two killed. The three that survived are survivors for
+// three DIFFERENT reasons, and the difference matters:
+//
+//  1. `byNewestFirst`'s `id` tiebreaker is REDUNDANT against both real stores. Both order
+//     these rows `created_at DESC, id DESC` already and `Array.prototype.sort` is stable, so
+//     no order either store produces can make the term decide. Nor can a fixture manufacture
+//     one: a store that reorders a page moves the pager's anchor row, which
+//     `enumerateStoreRows` reports as a shifted window and this module then refuses. It stays
+//     because `ListOptions` publishes NO ordering at all — that is a contract, not an
+//     accident — and a page boundary over a non-total order can repeat or drop a row. The
+//     due-queue and event-log tiebreakers are NOT in this position and are both covered: their
+//     orders (`next_check_at`, `created_at ASC`) differ from what the store serves.
+//  2. `readyDomainIdOf`'s `if (!provisioning.domain_id) return null` is an EQUIVALENT MUTANT —
+//     deleting it changes nothing observable, because the ternary it guards then returns
+//     `provisioning.domain_id`, which in exactly that case IS null. It is kept for legibility,
+//     not for behaviour, and no test can or should kill it.
+//  3. `positive(null)` in `src/cli/commands/daemon.local.ts` is UNREACHABLE by construction:
+//     all four counts share one availability record, so a null count only occurs when
+//     `available` is false, and that branch returns before the guidance test runs. It is
+//     defence for whoever next changes the summary's shape, and it costs one operator.
+//
 // `recordProvisioningEvent` RETURNS THE STORED ROW, not the caller's input. Both deleted arms
 // returned an object they built themselves from the arguments they were handed, so a store
 // that persisted something else was never contradicted. The identity and the timestamp now
@@ -865,7 +889,11 @@ function requiredEventText(row: ResourceRow, column: string): string {
  * worth failing a read over.
  */
 function eventDetailOf(row: ResourceRow): Record<string, unknown> {
-  const value = Object.hasOwn(row, "detail") ? row["detail"] : row["detail_json"];
+  // `??`, not a presence test. The deleted HTTP arm read `row["detail"] ?? row["detail_json"]`,
+  // so a row carrying a NULL `detail` alongside a populated `detail_json` fell through to the
+  // stored column. A presence test does not: it would take the null and answer `{}`, dropping a
+  // detail map that is right there in the row.
+  const value = row["detail"] ?? row["detail_json"];
   if (value && typeof value === "object" && !Array.isArray(value)) {
     return value as Record<string, unknown>;
   }
@@ -990,9 +1018,13 @@ export async function listProvisioningEvents(
         + "an entity's history as all of it",
     );
   }
+  // FILTERED BEFORE MAPPED. The log holds every entity's transitions, and mapping validates
+  // six columns — so mapping first would let ONE unreadable row belonging to some OTHER domain
+  // fault a read it is not part of the answer to, and one such row would make every entity's
+  // history unreadable. The two columns the filter needs are read off the raw row.
   return enumeration.rows
+    .filter((row) => rowText(row["entity_type"]) === entity_type && rowText(row["entity_id"]) === entity_id)
     .map(toProvisioningEvent)
-    .filter((event) => event.entity_type === entity_type && event.entity_id === entity_id)
     .sort((a, b) => compareText(a.created_at, b.created_at) || compareText(a.id, b.id));
 }
 
