@@ -759,6 +759,15 @@ const root = join(import.meta.dir, "..");
  * generic resource helper and the mode predicate by ROLE and never as the tokens the scan
  * counts.
  */
+// TEMPORARILY ZERO, ON PURPOSE, FOR THE DURATION OF ONE REBASE — the SECOND one on this
+// branch, onto a main that moved the same counters this change moves.
+//
+// The ceilings do not reliably conflict on rebase, and the silent case is the dangerous one:
+// this branch's earlier rebase produced no conflict on these eleven lines at all. Zeroing them
+// makes the guard fail until the merged tree is measured and the block re-pinned in the next
+// commit. A per-metric minimum is worse than useless here — the reduction landing on main and
+// the one on this branch are DISJOINT, so the same number appearing on both sides is two
+// measurements of two different trees rather than agreement.
 const CEILINGS: Record<string, number> = {
   twoArmFamilies: 0,
   remoteArmModules: 0,
