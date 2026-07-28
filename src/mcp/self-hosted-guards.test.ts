@@ -185,7 +185,6 @@ describe("MCP self_hosted guards", () => {
     // which is what the case below demonstrates.
     const cases: Array<[string, Record<string, unknown>]> = [
       ["batch_send", { recipients: [], template_name: "welcome", from_address: "ops@example.com" }],
-      ["pull_events", {}],
       ["sync_s3_inbox", { bucket: "inbound-bucket" }],
     ];
 
@@ -194,6 +193,19 @@ describe("MCP self_hosted guards", () => {
       expect(result.isError).toBe(true);
       expect(resultText(result)).toContain("not available in the self-hosted client");
     }
+  });
+
+  it("REFUSES pull_events in the ingestion pipeline's own storage-derived words", async () => {
+    // `pull_events` USED TO BE IN THE LIST ABOVE. It still refuses — provider
+    // delivery-event ingestion writes ledgers that exist only beside a local database,
+    // and pulls with credentials this client does not hold — but the refusal is no
+    // longer the deleted client stub's sentence: the collapsed family derives it from
+    // STORAGE configuration (src/lib/sync.ts) and names the setting to change, which
+    // is strictly more actionable than "not available".
+    const result = await callTool("pull_events", {});
+    expect(result.isError).toBe(true);
+    expect(resultText(result)).toContain("ingestion belongs to that service");
+    expect(resultText(result)).toContain("Unset EMAILS_SELF_HOSTED_URL");
   });
 
   it("MEASURES delivery statistics over /v1 instead of refusing them", async () => {
