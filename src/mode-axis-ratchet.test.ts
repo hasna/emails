@@ -987,6 +987,13 @@ const root = join(import.meta.dir, "..");
  * measured PER FILE against main. The dispatch helper, the generic resource helper and the
  * deployment predicate are named by ROLE here and never as the tokens the scan counts.
  *
+ * RE-MEASURED AND RE-PINNED AGAIN after rebasing the sync collapse onto 4248487 (the
+ * contracts 0.8.2 upgrade). The rebase merged with NO conflict anywhere, which is the
+ * documented worst case for this block, so all eleven were zeroed in their own commit and
+ * the MERGED tree measured fresh: every count equals the sync-collapse paragraph below —
+ * the upgrade added one auth-compat suite and five verifier lines carrying no axis token.
+ * Corpus of the merged tree: 647 tracked, 646 scanned, ~9.96M characters.
+ *
  * RE-MEASURED AND RE-PINNED on the `src/lib/sync` collapse (provider delivery-event
  * ingestion). Both arms are deleted, so the structural pair falls by one each, 22 -> 21;
  * and the deleted facade held one import of the process-wide mode read plus one dispatch
@@ -1004,17 +1011,17 @@ const root = join(import.meta.dir, "..");
  * consumer modules repointed in place.
  */
 const CEILINGS: Record<string, number> = {
-  twoArmFamilies: 0,
-  remoteArmModules: 0,
-  routedFacadeDefinitions: 0,
-  routedCallExpressions: 0,
-  selfHostedResourceBranches: 0,
-  selfHostedResourceReferences: 0,
-  isSelfHostedModeReferences: 0,
-  getEmailsModeReferences: 0,
-  resolveEmailsModeReferences: 0,
-  normalizeEmailsModeReferences: 0,
-  emailsModeEnvReferences: 0,
+  twoArmFamilies: 21,
+  remoteArmModules: 21,
+  routedFacadeDefinitions: 13,
+  routedCallExpressions: 192,
+  selfHostedResourceBranches: 37,
+  selfHostedResourceReferences: 129,
+  isSelfHostedModeReferences: 48,
+  getEmailsModeReferences: 55,
+  resolveEmailsModeReferences: 65,
+  normalizeEmailsModeReferences: 16,
+  emailsModeEnvReferences: 219,
 };
 
 // 649 files are tracked and 648 scanned today, totalling ~9.7M characters. (The figures in
