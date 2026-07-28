@@ -240,8 +240,12 @@ function defaultSelectionStorageConflict(env: NodeJS.ProcessEnv): StoreConfigura
   let configuresApi: boolean;
   try {
     configuresApi = planEmailStore(env).store === "api";
-  } catch {
-    return null;
+  } catch (error) {
+    // Only the storage resolution's own typed refusal is deferred to. Anything else
+    // is a genuine fault, and swallowing it here would answer "local" over a broken
+    // resolver — the exact silent-wrong-store shape this guard exists to prevent.
+    if (error instanceof StoreConfigurationError) return null;
+    throw error;
   }
   if (!configuresApi) return null;
   return new StoreConfigurationError(
