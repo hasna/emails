@@ -41,7 +41,6 @@ function localWarmingEnv(): NodeJS.ProcessEnv {
   for (const key of SCRUBBED_ENV_KEYS) delete base[key];
   return {
     ...base,
-    EMAILS_MODE: "local",
     EMAILS_DB_PATH: join(dir, "emails.db"),
     HOME: homePath,
     NO_COLOR: "1",

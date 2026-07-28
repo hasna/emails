@@ -28,7 +28,6 @@ afterEach(() => {
   closeDatabase();
   delete process.env["EMAILS_DB_PATH"];
   delete process.env["RESEND_WEBHOOK_SECRET"];
-  delete process.env["EMAILS_MODE"];
   delete process.env["HASNA_EMAILS_DATABASE_URL"];
   restoreInheritedProcessEnv();
 });

@@ -65,7 +65,7 @@ sending `Authorization: Bearer <cred>`, both fed by one config resolver:
 - Async mail/inbox: `SelfHostedMailDataSource.request()` — `src/lib/self-hosted-mail-data-source.ts:322` (fetch).
 - Config: `resolveSelfHostedConfig()` — `src/db/self-hosted-store.ts:70` → `{baseUrl, apiKey}`.
 - Env (via `src/lib/client-env.ts`): vault pointer `EMAILS_CLIENT_ENV_SECRET` →
-  `EMAILS_MODE`, `EMAILS_SELF_HOSTED_URL`, `EMAILS_SELF_HOSTED_API_KEY`.
+  the deployment-mode selector, `EMAILS_SELF_HOSTED_URL`, `EMAILS_SELF_HOSTED_API_KEY`.
 
 The code runs on a **single DB DSN** (`EMAILS_DATABASE_URL`, `env.ts`) used by both
 `migrate.ts` and `serve.ts`. A least-privilege app role is only *aspirational* (a comment
