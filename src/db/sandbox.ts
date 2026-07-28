@@ -29,9 +29,11 @@
 //
 //  1. FOUR OPERATIONS READ ONE CLAMPED PAGE AND CALLED IT THE TABLE. The deleted HTTP arm
 //     answered `listSandboxEmails`, `listSandboxEmailSummaries`, `clearSandboxEmails` AND
-//     `getSandboxCount` out of a single `list({ limit: 1000 })`. Both stores clamp a page
-//     to 500 (`src/store-sqlite/resources.ts` MAX_PAGE, `src/store-http/registry.ts`, and
-//     the service clamps again), so above 500 captured emails that arm listed a window cut
+//     `getSandboxCount` out of a single `list({ limit: 1000 })`. A generic resource page is
+//     clamped to 500 at both ends of that request — `MAX_PAGE` in
+//     `src/store-sqlite/resources.ts` and `clampLimit` in `src/server/self-hosted/store.ts`
+//     (the HTTP client itself does not clamp; it passes the caller's limit through and the
+//     service caps it) — so above 500 captured emails that arm listed a window cut
 //     out of the wrong 500 rows, DELETED at most 500 while reporting that number as the
 //     total cleared, and reported a count of exactly 500 for a table of any larger size.
 //     The SQLite arm pushed `LIMIT`/`OFFSET` into SQL, deleted with one `DELETE` statement
