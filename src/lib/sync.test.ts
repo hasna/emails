@@ -214,9 +214,18 @@ describe("syncProvider storage refusals", () => {
     const providerId = seedProvider("p-explicit");
     configureApiStore();
 
-    const inserted = await syncProvider(providerId, db, stubAdapter([remoteEvent({ provider_event_id: "ev-1" })]));
+    // A BOUNCED event with a recipient, deliberately: the contact-counter write is the
+    // one call in the batch whose repository consults process-wide routing when there
+    // is work to do, so this case only proves the explicit-handle scope if it makes
+    // that repository do work.
+    const inserted = await syncProvider(providerId, db, stubAdapter([
+      remoteEvent({ provider_event_id: "ev-1", type: "bounced", recipient: "b@example.test" }),
+    ]));
     expect(inserted).toBe(1);
     expect(eventCount()).toBe(1);
+    expect(
+      db.query("SELECT bounce_count FROM contacts WHERE email = ?").get("b@example.test"),
+    ).toEqual({ bounce_count: 1 });
 
     // And the same for syncAll: its provider enumeration must run inside the same
     // explicit-handle scope, not re-consult the ambient environment.

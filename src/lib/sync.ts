@@ -348,7 +348,12 @@ export async function syncProvider(providerId: string, db?: Database, adapterOve
 
 export async function syncAll(db?: Database): Promise<Record<string, number>> {
   const d = db ?? configuredDeliveryEventLedger();
-  const providers = withExplicitDatabaseRoute([d], () => listActiveProviderSummaries(undefined, d));
+  // NOT wrapped in the explicit-handle scope, and the absence is measured rather than
+  // an oversight: this callee reads the handed-in handle directly and consults no
+  // routing of its own (src/db/providers.local.ts), so a scope here is dead code — a
+  // mutation run proved its removal unobservable. The scoped calls in `syncProvider`
+  // are the ones whose callees do interrogate routing.
+  const providers = listActiveProviderSummaries(undefined, d);
   const results: Record<string, number> = {};
 
   for (const provider of providers) {
