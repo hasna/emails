@@ -210,6 +210,22 @@ function withSendKeyList(
   return { ...store, sendKeys: { ...store.sendKeys, listSendKeys: list } };
 }
 
+/**
+ * A driven listing over a FIXED set of rows, paged the way a real store pages.
+ *
+ * `{ limit, offset }` is honoured exactly. That matters more than it looks: the enumeration
+ * ANCHORS — every page after the first re-requests the last row already read and requires it
+ * back — so a naive fixture that answers the whole set for offset 0 and nothing afterwards is
+ * read as a window that MOVED, and the listing refuses instead of reaching the case's subject.
+ */
+function pagedList(rows: readonly SendKeyRecord[]): (opts?: ListOptions) => Promise<Outcome<SendKeyRecord[]>> {
+  return async (opts) => {
+    const offset = opts?.offset ?? 0;
+    const limit = opts?.limit ?? rows.length;
+    return { ok: true, value: rows.slice(offset, offset + limit) };
+  };
+}
+
 /** One filler send-key row, for a driven listing. */
 function fillerKey(n: number, ownerId: string): SendKeyRecord {
   return {
@@ -659,6 +675,27 @@ describe("send keys — what an incomplete or refusing store produces", () => {
     expect(error.message).toContain("list this installation's send keys");
   });
 
+  it("imposes its OWN tiebreak on a store that ordered ties the other way", async () => {
+    // MUTATION TESTING FOUND THIS GAP, and it is worth stating why the obvious version of this
+    // case proves nothing. Both variants above are ultimately answered by the SQLite store,
+    // whose own `ORDER BY created_at DESC, id DESC` already presents ties in the order this
+    // module wants — and `Array.prototype.sort` is STABLE, so removing the facade's tiebreaker
+    // entirely leaves those results unchanged. The service orders ties the OPPOSITE way
+    // (`resourceListOrderBy` appends `id ASC`), which is the input that can tell the two
+    // apart, and no store available in a test process produces it.
+    const ascendingTies: SendKeyRecord[] = ["k-a", "k-b", "k-c"].map((id) => ({
+      ...fillerKey(10, "agent-1"),
+      id,
+      created_at: stamp(10),
+      updated_at: stamp(10),
+    }));
+    const store = withSendKeyList(sqliteStore(), pagedList(ascendingTies));
+
+    const keys = await listSendKeys("agent-1", undefined, store);
+
+    expect(keys.map((key) => key.id)).toEqual(["k-c", "k-b", "k-a"]);
+  });
+
   it("propagates a listing FAULT rather than answering with an empty list", async () => {
     const store = withSendKeyList(sqliteStore(), async () => {
       throw new Error("connection reset");
@@ -705,10 +742,10 @@ describe("send keys — what an incomplete or refusing store produces", () => {
     // `''` sorts after every real instant under a descending compare, so an unreadable key
     // would be published as the OLDEST one. Reachable from the SQLite store, whose mapper
     // answers `""` for an absent column.
-    const store = withSendKeyList(sqliteStore(), async (opts) =>
-      (opts?.offset ?? 0) === 0
-        ? { ok: true, value: [{ ...fillerKey(1, "agent-1"), created_at: "", updated_at: "" }] }
-        : { ok: true, value: [] });
+    const store = withSendKeyList(
+      sqliteStore(),
+      pagedList([{ ...fillerKey(1, "agent-1"), created_at: "", updated_at: "" }]),
+    );
 
     const error = await rejection(listSendKeys(undefined, undefined, store));
 
@@ -716,10 +753,7 @@ describe("send keys — what an incomplete or refusing store produces", () => {
   });
 
   it("REFUSES a listing that carries a key with no id", async () => {
-    const store = withSendKeyList(sqliteStore(), async (opts) =>
-      (opts?.offset ?? 0) === 0
-        ? { ok: true, value: [{ ...fillerKey(1, "agent-1"), id: "" }] }
-        : { ok: true, value: [] });
+    const store = withSendKeyList(sqliteStore(), pagedList([{ ...fillerKey(1, "agent-1"), id: "" }]));
 
     const error = await rejection(listSendKeys(undefined, undefined, store));
 
@@ -791,6 +825,62 @@ describe("send keys — what an incomplete or refusing store produces", () => {
     };
 
     expect(await canOwnerSendFrom("agent-1", "ops@x.com", store)).toBe(true);
+  });
+
+  it("answers false for a blank owner id WITHOUT reading a store that never finishes", async () => {
+    // The short-circuit is not an optimisation. Without it a blank owner id would reach the
+    // truncation refusal above and RAISE, where the answer — nobody is not an owner — was
+    // knowable without reading anything.
+    const base = sqliteStore();
+    let served = 0;
+    const store: EmailStore = {
+      ...base,
+      addresses: {
+        ...base.addresses,
+        listAddresses: async (opts) => {
+          served += 1;
+          return {
+            ok: true,
+            value: Array.from({ length: opts?.limit ?? 1 }, (_v, i) => ({
+              id: `a-${(opts?.offset ?? 0) + i}`,
+              email: "ops@x.com",
+              domain: "x.com",
+              display_name: null,
+              status: "active",
+              verified: true,
+              daily_quota: null,
+              owner_id: null,
+              administrator_id: null,
+              created_at: stamp(1),
+              updated_at: stamp(1),
+            })),
+          };
+        },
+      },
+    };
+
+    expect(await canOwnerSendFrom("", "ops@x.com", store)).toBe(false);
+    expect(served).toBe(0);
+  });
+
+  it("refuses to report a revocation the store did not actually make", async () => {
+    // A write echo that comes back NOT revoked is a store contradicting itself. Reporting
+    // `true` there would tell an operator a credential is dead when it is still live, which is
+    // the worst direction for this particular lie.
+    const base = sqliteStore();
+    seedOwner("agent-1", "revoker");
+    seedKey("k1", "agent-1", stamp(1));
+    const store: EmailStore = {
+      ...base,
+      sendKeys: {
+        ...base.sendKeys,
+        revokeSendKey: async () => ({ ok: true, value: { ...fillerKey(1, "agent-1"), id: "k1" } }),
+      },
+    };
+
+    const error = await rejection(revokeSendKey("k1", store));
+
+    expect(error.message).toContain("refusing to report it as revoked");
   });
 
   it("propagates an address REFUSAL rather than reporting a send unauthorized", async () => {
