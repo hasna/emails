@@ -185,19 +185,19 @@ describe("setupInboundEmail bucket-policy merge — must not clobber foreign sta
   const FOREIGN_READ = {
     Sid: "AllowCrossAccountInboundRead",
     Effect: "Allow",
-    Principal: { AWS: "arn:aws:iam::789877399345:role/emails-prod-task" },
+    Principal: { AWS: "arn:aws:iam::123456789012:role/ingest-worker-task" },
     Action: "s3:GetObject",
-    Resource: "arn:aws:s3:::hasna-emails-prod-inbound-638389534677/inbound/*",
+    Resource: "arn:aws:s3:::emails-inbound-111122223333/inbound/*",
   };
   const FOREIGN_LIST = {
     Sid: "AllowCrossAccountInboundList",
     Effect: "Allow",
-    Principal: { AWS: "arn:aws:iam::789877399345:role/emails-prod-task" },
+    Principal: { AWS: "arn:aws:iam::123456789012:role/ingest-worker-task" },
     Action: "s3:ListBucket",
-    Resource: "arn:aws:s3:::hasna-emails-prod-inbound-638389534677",
+    Resource: "arn:aws:s3:::emails-inbound-111122223333",
   };
-  const BUCKET = "hasna-emails-prod-inbound-638389534677";
-  const ACCOUNT = "638389534677";
+  const BUCKET = "emails-inbound-111122223333";
+  const ACCOUNT = "111122223333";
 
   let savedAccountId: string | undefined;
 
@@ -343,7 +343,7 @@ describe("setupInboundEmail bucket-policy merge — must not clobber foreign sta
 });
 
 describe("mergeSesBucketPolicy — pure merge semantics", () => {
-  const ACCOUNT = "638389534677";
+  const ACCOUNT = "111122223333";
 
   it("preserves unknown top-level policy fields and the existing Version", () => {
     const existing = JSON.stringify({
