@@ -330,14 +330,24 @@ describe("createWebhookServer storage gate", () => {
     // for the case below: that one asserts a phrase is ABSENT, and the phrase is this resolver
     // message's own wording, so without this case nothing proved the phrase was ever reachable.
     clearStoreSettings();
-    process.env[DATABASE_PATH_SETTINGS[1]] = join(home, "local.db");
+    const localPath = join(home, "local.db");
+    process.env[DATABASE_PATH_SETTINGS[1]] = localPath;
     process.env[API_BASE_URL_SETTING] = "https://mail.example.test";
     process.env[API_CREDENTIAL_SETTINGS[0]] = "not-a-real-credential";
     const message = refusalMessage();
     expect(message).toContain("cannot tell where this installation's delivery events would be stored");
     expect(message).toContain("two configured places");
-    expect(message).toContain(DATABASE_PATH_SETTINGS[1]);
     expect(message).toContain(API_BASE_URL_SETTING);
+    // NAMED BY EXCLUSION, because `DATABASE_PATH_SETTINGS[1]` is a SUBSTRING of
+    // `DATABASE_PATH_SETTINGS[0]`: a bare `toContain` of the shorter name also passes on a message
+    // that named only the longer one, which is weaker than it reads. Asserting the configured PATH
+    // instead does not work either and the reason is a deliberate property of the resolver —
+    // `StoreConfigurationError` carries the KEYS at fault and never their values, because one of
+    // them can be a credential. So the discriminator is that the setting NOT configured here is
+    // absent, which is only true if the one that is configured is the one being named.
+    expect(message).not.toContain(DATABASE_PATH_SETTINGS[0]);
+    expect(message).toContain(DATABASE_PATH_SETTINGS[1]);
+    expect(localPath.length).toBeGreaterThan(0);
   });
 
   it("does NOT phrase an unresolvable configuration as a contradiction between two stores", () => {
