@@ -759,13 +759,6 @@ const root = join(import.meta.dir, "..");
  * generic resource helper and the mode predicate by ROLE and never as the tokens the scan
  * counts.
  */
-// TEMPORARILY ZERO, ON PURPOSE, FOR THE DURATION OF ONE REBASE.
-//
-// A rebase does NOT reliably conflict on this block: a branch that never touched this file
-// inherits main's numbers wholesale, with no marker and a green guard — which is how a tree
-// once carried twenty-two units of slack across six counters, every one of them a licence to
-// re-add an arm module or a dispatch site. Zeros cannot merge silently: the guard fails until
-// the merged tree is measured and the block re-pinned in the next commit.
 const CEILINGS: Record<string, number> = {
   twoArmFamilies: 0,
   remoteArmModules: 0,
@@ -780,7 +773,9 @@ const CEILINGS: Record<string, number> = {
   emailsModeEnvReferences: 0,
 };
 
-// 624 files are tracked and 623 scanned today, totalling ~7.4M characters. The floors
+// 649 files are tracked and 648 scanned today, totalling ~9.6M characters. (The figures in
+// this paragraph were written when the corpus was 624/623 and ~7.4M and had gone stale; the
+// floors and the reasoning below are unchanged.) The floors
 // make "the scan stopped resolving files" or "the scan read them as empty" a red test
 // rather than a green run over nothing.
 //
