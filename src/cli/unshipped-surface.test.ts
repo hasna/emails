@@ -319,7 +319,10 @@ describe("unshipped CLI surfaces tell the truth (live)", () => {
     expect(payload.records.length).toBeGreaterThan(0);
     expect(Object.keys(payload.signals)).toContain("dkim");
     expect(payload.mx.owner).toBeTruthy();
-  });
+    // Three CLI spawns plus live DNS resolution: measured 5.2-7.4 s against
+    // the 5 s default across independent runs (including on unmodified main),
+    // so the default budget gauges machine load rather than the contract.
+  }, 60_000);
 
   it("emails inbound stays unregistered (superseded by emails inbox)", () => {
     // `inbound` was folded into `inbox` in the CLI restructure; its command

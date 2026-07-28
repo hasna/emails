@@ -244,7 +244,11 @@ void getEmail("message-id", 42 as unknown as string);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
-  }, 30_000);
+    // The budget covers three child `tsc` processes whose wall-clock scales
+    // with machine load, not with the contract: 30 s was measured 7 s short
+    // under a full parallel suite run on an idle arm64 box. A genuine hang
+    // still fails.
+  }, 180_000);
 
   it("keeps build outputs lean by externalizing installed runtime packages", () => {
     const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as {
