@@ -133,7 +133,11 @@ if (path === "/api/domains/readiness" && method === "GET") {
   try {
     const resolvedId = resolveOptionalId("providers", url.searchParams.get("provider_id"));
     const page = queryPage(url, 100);
-    return json(listDomainLifecycleSummaries({ provider_id: resolvedId, ...page }));
+    // AWAITED. `json(data: unknown)` accepts a promise without complaint and serialises it
+    // as `{}`, and an un-awaited rejection escapes the `catch` below as an unhandled
+    // rejection rather than a 500. `tsc` flagged only the one of these three that reached
+    // into the result.
+    return json(await listDomainLifecycleSummaries({ provider_id: resolvedId, ...page }));
   } catch (e) { return internalError(e); }
 }
 
@@ -143,7 +147,7 @@ if (domainReadinessMatch && method === "GET") {
   const id = resolveId("domains", domainReadinessMatch[1]!);
   if (!id) return notFound();
   try {
-    return json(getDomainLifecycleSummary(id));
+    return json(await getDomainLifecycleSummary(id));
   } catch (e) { return internalError(e); }
 }
 
@@ -153,7 +157,7 @@ if (domainReadinessMatch && (method === "PATCH" || method === "POST")) {
   if (!id) return notFound();
   try {
     const body = await parseBody(req) as Record<string, unknown>;
-    return json(updateDomainLifecycleReadiness(id, domainReadinessMutation(body)).after);
+    return json((await updateDomainLifecycleReadiness(id, domainReadinessMutation(body))).after);
   } catch (e) {
     if (e instanceof DomainReadinessRequestError) return badRequest(e.message);
     return internalError(e);

@@ -1,0 +1,41 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "preserve",
+    "jsxImportSource": "@opentui/solid",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "noEmit": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noUncheckedIndexedAccess": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "types": [
+      "bun-types"
+    ]
+  },
+  "files": [
+    "src/cli/commands/daemon.local.ts",
+    "src/cli/commands/daemon.remote.ts",
+    "src/cli/commands/domain.ts",
+    "src/cli/commands/inbox.local.ts",
+    "src/cli/tui-solid/context/emails-state.tsx",
+    "src/cli/tui/data.local.ts",
+    "src/cli/tui/data.remote.ts",
+    "src/cli/tui/data.ts",
+    "src/db/provisioning.ts",
+    "src/index.ts",
+    "src/lib/domain-readiness-service.ts",
+    "src/lib/domain-readiness.ts",
+    "src/mcp/resources.local.ts",
+    "src/mcp/resources.remote.ts",
+    "src/mcp/resources.ts",
+    "src/server/routes/core.ts",
+    "src/storage.ts"
+  ]
+}

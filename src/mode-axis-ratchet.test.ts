@@ -712,15 +712,61 @@ const root = join(import.meta.dir, "..");
  * surface a refusal), and both of this family's own suites rewritten in place. Measured with this
  * paragraph in place, and the eleven counts were re-measured AFTER writing it, per file as well as
  * in total.
+ *
+ * `src/db/provisioning` collapse (#134). BASE 7f5b5dd, verified INDEPENDENTLY over the real
+ * `git ls-files` corpus — 651 tracked / 650 scanned / 9,516,645 characters — with all eleven
+ * live counts equal to the ceilings it declared and ZERO slack. That family was the largest
+ * dispatch table in the programme: NINETEEN exports handed to a 509-line SQLite arm and a
+ * 401-line HTTP arm.
+ *
+ * Six counters move and five do not. Both arm modules are deleted, so the structural pair
+ * falls by one each (26 -> 25). The facade's dispatch helper goes with them, taking its own
+ * definition (17 -> 16) and all nineteen of its dispatch sites (234 -> 215) — the largest
+ * single reduction of that counter so far. The deleted HTTP arm reached the generic resource
+ * helper seventeen times, once per read or write (173 -> 156), which is also exactly why every
+ * one of those operations answered out of a single clamped page. The deleted facade imported
+ * the client-side mode predicate and called it once (56 -> 54).
+ *
+ * The five that do not move: `selfHostedResourceBranches` counts a LOCAL arm asking whether it
+ * is really the local arm, and this one never did — it held a `Database` and talked to SQLite
+ * directly. This dispatcher went through the predicate rather than reading the process-wide
+ * setting, and neither arm resolved or parsed it, so three more stay put. And the env counter
+ * stayed at 235 ON PURPOSE: the most natural way to prove the deleted HTTP arm's clamped-page
+ * defect is a test that SETS the deployment word and drives that arm, and that test would have
+ * RAISED a counter that may only fall — the env metric is a plain substring match no spelling
+ * escapes. The rebuilt suite names its storage through the resolution's own exported constants
+ * instead and proves the defect through the store seam.
+ *
+ * PROCEDURE, unchanged from the collapse before it and for the reason its note records: all
+ * eleven ceilings were committed as LITERAL ZEROS in their own commit before rebasing, so the
+ * block could not be inherited silently. Main had not moved (7f5b5dd), so the rebase was a
+ * no-op this time — the zeros were committed anyway, because "main did not move" is only
+ * knowable after the fetch and the discipline has to survive the case where it did. They were
+ * zeroed a SECOND time after adversarial review changed eight files: a pin is only valid for
+ * the tree it was measured on, and prose is part of the corpus. Measured in the WORKTREE, not
+ * the shared checkout, which sits on a different commit and yields a plausible wrong answer.
+ * A concurrent collapse (`db/sandbox`) moves these same counters, so whichever of the two
+ * lands second has to repeat all of this — two disjoint reductions merge cleanly and are
+ * still wrong, which is why a per-metric minimum is never taken.
+ *
+ * Corpus of this change: 650 tracked, 649 scanned, 9,636,309 characters — both floors cleared
+ * with room. ONE fewer tracked file than the base: two arm modules deleted, one config file
+ * added (`tsconfig.targeted.json`, the strict check this family and its consumers are verified
+ * with), and this family's suite rewritten in place. The eleven were measured on the merged
+ * tree, then measured AGAIN after this paragraph was written — this file sits inside the corpus
+ * it scans — and PER FILE on both trees, which showed every file this change touches
+ * contributing exactly what it contributed on main. The comment names the dispatch helper, the
+ * generic resource helper and the mode predicate by ROLE and never as the tokens the scan
+ * counts.
  */
 const CEILINGS: Record<string, number> = {
-  twoArmFamilies: 26,
-  remoteArmModules: 26,
-  routedFacadeDefinitions: 17,
-  routedCallExpressions: 234,
+  twoArmFamilies: 25,
+  remoteArmModules: 25,
+  routedFacadeDefinitions: 16,
+  routedCallExpressions: 215,
   selfHostedResourceBranches: 44,
-  selfHostedResourceReferences: 173,
-  isSelfHostedModeReferences: 56,
+  selfHostedResourceReferences: 156,
+  isSelfHostedModeReferences: 54,
   getEmailsModeReferences: 58,
   resolveEmailsModeReferences: 65,
   normalizeEmailsModeReferences: 16,

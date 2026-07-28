@@ -19,12 +19,15 @@ const LOG_FILES: Record<LogComponent, string[]> = {
 /**
  * The provisioning queue, taken from the SAME status facts `emails status` reports.
  *
- * This used to call `getProvisioningWorkSummary()` (src/db/provisioning.remote.ts),
- * which is a single `list({ limit: 1000 })` against `/v1/domains` and
- * `/v1/addresses` — not `/v1/provisioning`, which holds only the audit trail. The
+ * This used to call `getProvisioningWorkSummary()` through the deleted HTTP arm of the
+ * provisioning family, which was a single `list({ limit: 1000 })` against `/v1/domains`
+ * and `/v1/addresses` — not `/v1/provisioning`, which holds only the audit trail. The
  * server clamps every list to 500 rows, so those four counts were computed over at
  * most the first 500 rows of each resource and printed as bare integers: 600 due
- * domains rendered as `Due work: 500 domain(s)`.
+ * domains rendered as `Due work: 500 domain(s)`. That family has since collapsed onto
+ * the store seam and `getProvisioningWorkSummary` now carries a `StatusAvailability`
+ * of its own, so the local sibling renders the same way this one does; the fields here
+ * still measure something different, which is why they keep their own names.
  *
  * The honest answer was already in hand and thrown away.
  * `getEmailSystemStatusForRuntime()` is awaited here anyway, and its `provisioning`

@@ -41,7 +41,7 @@ describe("MCP resource payloads (self-hosted /v1)", () => {
       ],
     });
 
-    const domains = domainsResourcePayloadForRuntime() as {
+    const domains = await domainsResourcePayloadForRuntime() as {
       domains: Array<{ id: string; domain: string; provisioning: unknown; readiness: unknown }>;
       mode: string;
       source: string;

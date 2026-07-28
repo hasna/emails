@@ -505,7 +505,11 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
 
         // 2. Register in the emails store (/v1).
         const rec = getDomainByName(providerId, domain) ?? createDomain(providerId, domain);
-        setDomainProvisioning(rec.id, {
+        // AWAITED. `setDomainProvisioning` reaches the store seam and returns a promise;
+        // un-awaited it is a floating write whose rejection escapes this command's error
+        // handling, and `adopt` would print the success line below for a write that failed.
+        // `tsc` cannot see it — the result is discarded, so the promise is never touched.
+        await setDomainProvisioning(rec.id, {
           provisioning_status: "ses_identity_created",
           dns_provider: "cloudflare",
           send_provider: provider.type,
@@ -518,7 +522,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
           const st = await adapter.verifyDomain(domain);
           updateDnsStatus(rec.id, st.dkim, st.spf, st.dmarc);
           if (st.dkim === "verified") {
-            setDomainProvisioning(rec.id, { provisioning_status: "verified", next_check_at: null, last_error: null });
+            await setDomainProvisioning(rec.id, { provisioning_status: "verified", next_check_at: null, last_error: null });
           }
           lines.push(`  ${colorDnsStatus(st.dkim)} DKIM · ${colorDnsStatus(st.spf)} SPF · ${colorDnsStatus(st.dmarc)} DMARC`);
         } catch { /* non-fatal */ }
@@ -557,7 +561,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
             status: "live",
             liveSyncEnabled: true,
           });
-          setDomainProvisioning(rec.id, { provisioning_status: "ready", next_check_at: null, last_error: null });
+          await setDomainProvisioning(rec.id, { provisioning_status: "ready", next_check_at: null, last_error: null });
           updateDomainReadiness(rec.id, {
             provider_metadata: {
               inbound: {

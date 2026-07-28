@@ -285,7 +285,16 @@ async function handleGenericResource(context: RouteContext, path: string, id: st
   // a uniform family, because that is where the seam puts those operations.
   if (path === "provisioning") {
     if (method === "GET" && id === null) {
-      const listed = settled(await store.provisioning.listProvisioningEvents({ limit: intParam(url, "limit") ?? 500 }));
+      // `offset` IS FORWARDED. It used to be dropped here (and on `send-keys` below) while
+      // every other list route forwarded it, so a client paging this route received page one
+      // over and over: an enumeration that pages to an empty page never terminates, and an
+      // honest one reports "796 duplicates across 200 pages" for a table holding four rows.
+      // The service this fixture stands in for honours it, so dropping it here made the
+      // fixture WEAKER than production in a way no test could see.
+      const listed = settled(await store.provisioning.listProvisioningEvents({
+        limit: intParam(url, "limit") ?? 500,
+        ...(intParam(url, "offset") === undefined ? {} : { offset: intParam(url, "offset") }),
+      }));
       return "response" in listed ? listed.response : json(200, { items: listed.value });
     }
     if (method === "POST" && id === null) {
@@ -297,7 +306,10 @@ async function handleGenericResource(context: RouteContext, path: string, id: st
 
   if (path === "send-keys") {
     if (method === "GET" && id === null) {
-      const listed = settled(await store.sendKeys.listSendKeys({ limit: intParam(url, "limit") ?? 500 }));
+      const listed = settled(await store.sendKeys.listSendKeys({
+        limit: intParam(url, "limit") ?? 500,
+        ...(intParam(url, "offset") === undefined ? {} : { offset: intParam(url, "offset") }),
+      }));
       return "response" in listed ? listed.response : json(200, { items: listed.value });
     }
     if (method === "GET" && id !== null) {

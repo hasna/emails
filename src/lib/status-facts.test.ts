@@ -21,7 +21,7 @@ import { closeDatabase, getDatabase, resetDatabase } from "../db/database.js";
 import { createProvider } from "../db/providers.local.js";
 import { createDomain } from "../db/domains.local.js";
 import { createAddress } from "../db/addresses.local.js";
-import { setDomainProvisioning } from "../db/provisioning.local.js";
+import { setDomainProvisioning } from "../db/provisioning.js";
 import { createSqliteEmailStore } from "../store-sqlite/index.js";
 import { collectStatusFacts, type StatusFactsInput } from "./status-facts.js";
 import { statusGapClass } from "./status-availability.js";
@@ -81,7 +81,11 @@ async function seed(): Promise<EmailStore> {
   const sandbox = createProvider({ name: "Sandbox", type: "sandbox" }, db);
   const alpha = createDomain(ses.id, "alpha.example", db);
   const beta = createDomain(ses.id, "beta.example", db);
-  setDomainProvisioning(beta.id, { provisioning_status: "failed", last_error: "DNS never propagated" }, db);
+  await setDomainProvisioning(
+    beta.id,
+    { provisioning_status: "failed", last_error: "DNS never propagated" },
+    createSqliteEmailStore({ database: db, detail: "SQLite (status-facts fixture)" }),
+  );
   const ops = createAddress({ provider_id: ses.id, email: "ops@alpha.example" }, db);
   createAddress({ provider_id: ses.id, email: "old@alpha.example" }, db);
   createAddress({ provider_id: ses.id, email: "hi@beta.example" }, db);

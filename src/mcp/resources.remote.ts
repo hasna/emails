@@ -35,7 +35,7 @@ function selfHostedApiStatus(error?: unknown): Record<string, unknown> {
 // API through the resource repositories and mail data-source seam; there is no
 // local SQLite island to fall back to.
 
-export function domainsResourcePayloadForRuntime(): Record<string, unknown> {
+export async function domainsResourcePayloadForRuntime(): Promise<Record<string, unknown>> {
   try {
     const mode = resolveEmailsMode();
     const domainRows = listDomains(undefined, { limit: DOMAIN_RESOURCE_LIMIT + 1, offset: 0 });
@@ -46,8 +46,8 @@ export function domainsResourcePayloadForRuntime(): Record<string, unknown> {
     // hardcoded `ready_addresses: 0` here produced a fabricated readiness VERDICT
     // that this resource then published to agents.
     const sampleIds = sample.map((domain) => domain.id);
-    const provisioningById = listDomainProvisioningByIds(sampleIds);
-    const readyAddressesById = listReadyAddressCountsByDomains(sampleIds);
+    const provisioningById = await listDomainProvisioningByIds(sampleIds);
+    const readyAddressesById = await listReadyAddressCountsByDomains(sampleIds);
     const domains = sample.map((domain) => {
       const provisioning = provisioningById.get(domain.id) ?? null;
       return {
@@ -306,7 +306,7 @@ export function registerEmailResources(server: McpServer): void {
       mimeType: "application/json",
     },
     async () => {
-      return jsonResource("emails://domains", domainsResourcePayloadForRuntime());
+      return jsonResource("emails://domains", await domainsResourcePayloadForRuntime());
     },
   );
 

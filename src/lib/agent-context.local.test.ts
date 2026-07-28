@@ -21,10 +21,11 @@
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { closeDatabase, getDatabase, resetDatabase } from "../db/database.js";
+import { createSqliteEmailStore } from "../store-sqlite/index.js";
 import { createProvider } from "../db/providers.local.js";
 import { createDomain } from "../db/domains.local.js";
 import { createAddress } from "../db/addresses.local.js";
-import { setDomainProvisioning } from "../db/provisioning.local.js";
+import { setDomainProvisioning } from "../db/provisioning.js";
 import { formatEmailSystemStatus, getEmailSystemStatus } from "./agent-context.js";
 import { statusGapClass } from "./status-availability.js";
 import { isCommandAvailableInMode } from "./status-commands.js";
@@ -74,13 +75,21 @@ function seed(): void {
   createAddress({ provider_id: provider.id, email: "ops@alpha.example" }, db);
 }
 
-/** Seed one domain whose provisioning FAILED — the branch that proposes a remedy. */
-function seedFailedProvisioning(): void {
+/**
+ * Seed one domain whose provisioning FAILED — the branch that proposes a remedy.
+ *
+ * ASYNC because `setDomainProvisioning` reaches the store seam now.
+ */
+async function seedFailedProvisioning(): Promise<void> {
   const db = getDatabase();
   const provider = createProvider({ name: "Sandbox", type: "sandbox" }, db);
   const domain = createDomain(provider.id, "broken.example", db);
   createAddress({ provider_id: provider.id, email: "ops@broken.example" }, db);
-  setDomainProvisioning(domain.id, { provisioning_status: "failed", last_error: "DNS never propagated" }, db);
+  await setDomainProvisioning(
+    domain.id,
+    { provisioning_status: "failed", last_error: "DNS never propagated" },
+    createSqliteEmailStore({ database: db, detail: "SQLite (agent-context fixture)" }),
+  );
 }
 
 describe("local status payload", () => {
@@ -201,7 +210,7 @@ describe("local status payload", () => {
   // it the provisioning-failure branch proposed `emails provision status` here,
   // which throws `... is not implemented in this build` in EVERY mode.
   it("never proposes a command that refuses in local mode", async () => {
-    seedFailedProvisioning();
+    await seedFailedProvisioning();
     const status = await getEmailSystemStatus();
 
     expect(status.provisioning.domains_failed).toBe(1);
@@ -229,7 +238,7 @@ describe("local status payload", () => {
   });
 
   it("renders an unmeasured provisioning count as unavailable, never the word null", async () => {
-    seedFailedProvisioning();
+    await seedFailedProvisioning();
     const status = await getEmailSystemStatus();
     // Self-hosted can measure domain failures without address failures; the
     // renderer must not interpolate that null straight into the line.
