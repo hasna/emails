@@ -195,6 +195,26 @@ function strictRequiredSuperset(
     && [...otherFields].every((field) => candidateFields.has(field));
 }
 
+/**
+ * Server releases through 1.3.x serialize database `*_json` columns into
+ * responses as JSON-encoded STRINGS (`"[]"` rather than `[]`). Give exactly
+ * that field class a second reading: when a `*_json` property fails its
+ * declared schema while holding a string, decode the string ONCE and
+ * re-validate the decoded value against the same schema. A decoded value the
+ * contract accepts is normalized in place, so every consumer past the
+ * validator sees the declared shape; a string that does not parse, or parses
+ * to a shape the contract rejects, keeps the original refusal. Fields not
+ * named `*_json` never get the second reading.
+ */
+function decodeSerializedJsonColumn(field: string, value: unknown): { decoded: unknown } | null {
+  if (!field.endsWith("_json") || typeof value !== "string") return null;
+  try {
+    return { decoded: JSON.parse(value) };
+  } catch {
+    return null;
+  }
+}
+
 function schemaMatches(schema: JsonSchema, value: unknown, context: WireContext, path: string): string | null {
   const resolved = resolveSchema(schema, context);
   // OpenAPI 3.0 commonly places `nullable` beside a `$ref`. Preserve that
@@ -260,8 +280,15 @@ function schemaMatches(schema: JsonSchema, value: unknown, context: WireContext,
     const properties = isRecord(resolved["properties"]) ? resolved["properties"] : {};
     for (const [field, fieldSchema] of Object.entries(properties)) {
       if (!Object.prototype.hasOwnProperty.call(value, field) || !isRecord(fieldSchema)) continue;
-      const error = schemaMatches(fieldSchema, value[field], context, `${path}.${field}`);
-      if (error) return error;
+      const fieldPath = `${path}.${field}`;
+      const error = schemaMatches(fieldSchema, value[field], context, fieldPath);
+      if (error === null) continue;
+      const serialized = decodeSerializedJsonColumn(field, value[field]);
+      if (serialized !== null && schemaMatches(fieldSchema, serialized.decoded, context, fieldPath) === null) {
+        value[field] = serialized.decoded;
+        continue;
+      }
+      return error;
     }
     const additional = resolved["additionalProperties"];
     const extraFields = Object.keys(value).filter((field) => !(field in properties));

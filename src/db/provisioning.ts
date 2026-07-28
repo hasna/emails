@@ -82,11 +82,13 @@
 //     NOT FIXED. `mapDomain` in `src/store-sqlite/registry.ts` maps this column with the SAME
 //     `parseJsonArray` and then casts each element with `String(...)`, so over the SQLite
 //     store unparseable content is already `[]` and a numeric element is already a string by
-//     the time this module sees it: the defect moved down rather than away. The HTTP store
-//     copies the column through unvalidated (`optional()` in `src/store-http/mapping.ts`), so
-//     the guard is live on that side. Fixing it means teaching that one mapper to fault, in
-//     `src/store/`'s implementation rather than in the seam — and this change leaves
-//     `src/store/` byte-identical, so it is recorded here instead.
+//     the time this module sees it: the defect moved down rather than away. The HTTP store's
+//     mapper now decodes the serialized string form once and faults on anything that is not
+//     the declared array of strings (`optionalSerializedStringArray` in
+//     `src/store-http/mapping.ts`), so on that side the guard below is a second, agreeing
+//     reading rather than the only one. The SQLite half still stands as described — fixing it
+//     belongs in `src/store/`'s implementation rather than in the seam, `src/store/` stays
+//     byte-identical, and so it remains recorded here.
 //  8. ABSENT IS NOT `now()`. The deleted HTTP arm read an event's `created_at` through the
 //     shared ISO coercion, which returns `new Date().toISOString()` for a MISSING value — so
 //     an event row whose timestamp could not be read was reported as having happened at the
