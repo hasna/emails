@@ -758,31 +758,80 @@ const root = join(import.meta.dir, "..");
  * contributing exactly what it contributed on main. The comment names the dispatch helper, the
  * generic resource helper and the mode predicate by ROLE and never as the tokens the scan
  * counts.
+ *
+ * RE-MEASURED AND RE-PINNED AGAIN on the `src/db/sandbox` collapse — captured outbound mail for
+ * the sandbox provider. BASE `12c98f6`, verified INDEPENDENTLY over the real `git ls-files`
+ * corpus (650 tracked / 649 scanned) with all eleven live counts equal to the ceilings the
+ * provisioning collapse declared and ZERO slack. This is the first family in the phase whose
+ * SECOND arm was a full working implementation rather than a refusal or a stub, so the collapse
+ * is a resolution of eight measured disagreements; six counters move:
+ *
+ *   twoArmFamilies                25 -> 24   both arm modules deleted, so the facade has no
+ *   remoteArmModules              25 -> 24   siblings left. THE PAIR THAT SAYS A FAMILY IS DONE.
+ *   routedFacadeDefinitions       16 -> 15   the facade's dispatch helper is deleted.
+ *   routedCallExpressions        215 -> 209  it dispatched all SIX exports through that helper.
+ *   selfHostedResourceReferences 156 -> 151  the deleted second arm reached the generic resource
+ *                                            helper five times — once per operation except the
+ *                                            summary listing, which borrowed the full one. Those
+ *                                            five reads and writes are also exactly why four of
+ *                                            the six operations answered out of one clamped page.
+ *   isSelfHostedModeReferences    54 -> 52   the deleted facade imported the client-side
+ *                                            deployment predicate and called it once.
+ *
+ * FIVE DO NOT MOVE, for the reasons the two blocks above already record: that arm never asked
+ * whether it was really the local arm (44), this dispatcher went through the predicate rather
+ * than the process-wide read (58), and neither arm resolved or parsed the setting (65, 16).
+ * The env counter stayed at 235 under the same discipline — the tempting way to prove the
+ * deleted arm counted, listed and DELETED out of one clamped page is a case that SETS the
+ * deployment word, and that case would have raised a counter that may only fall. Both rebuilt
+ * suites name their storage through the resolution's own exported constants, including the
+ * database-path key, and the clamp is proved through the store seam by `src/db/sandbox.test.ts`
+ * with a control asserting that one 1000-row request really comes back holding 500 of 520.
+ *
+ * THE PROCEDURE EARNED ITS KEEP TWICE ON THIS BRANCH, in opposite ways, which is the whole
+ * argument for it. The FIRST rebase (onto the webhook follow-up) produced NO CONFLICT AT ALL on
+ * these eleven lines — the branch's first commits never touched this file — so without the zeros
+ * the tree would have inherited that main's block verbatim and shipped six counters and thirteen
+ * units of slack, green under `<=`, with no marker of any kind. The SECOND rebase (onto this
+ * base) conflicted LOUDLY on all eleven, because the zeros were there to conflict with. Neither
+ * outcome is predictable in advance, and only one of them is safe to rely on.
+ *
+ * A PER-METRIC MINIMUM WOULD HAVE BEEN WRONG HERE IN A WAY THAT LOOKS RIGHT. The provisioning
+ * collapse and this one finish DIFFERENT families, so their reductions compose: main declares
+ * 215 and 156 for the dispatch and resource counters and this branch had pinned 228 and 168 for
+ * its own pre-rebase tree, while the merged tree measures 209 and 151 — LOWER THAN EITHER SIDE.
+ * A minimum gives 215 and 156, six and five units wide. And four of the eleven were IDENTICAL on
+ * both sides (44, 58, 65, 16, 235), which reads as agreement and is two measurements of two
+ * different trees. Measuring the merged tree is the only thing that can tell the difference.
+ *
+ * Corpus of this change: 649 tracked, 648 scanned, ~9.73M characters — both floors cleared with
+ * room. ONE fewer tracked file than the base: two arm modules deleted and one test file added
+ * (`src/server/routes/core-sandbox.test.ts`, which pins the one consumer decision this collapse
+ * had to make — the local dashboard keeps reading local SQLite rather than following the
+ * environment — a decision mutation testing showed nothing else could kill), with both of this
+ * family's own suites rewritten in place. The character total is given to three figures on
+ * purpose: this paragraph is inside the corpus it describes. The two FILE counts and all eleven
+ * metric counts are exact, were measured on the merged tree and measured AGAIN after this
+ * paragraph was written, and were measured PER FILE: every file this change AUTHORS contributes
+ * zero to all eleven, and every file it EDITS has a per-file count unchanged by the edit. The
+ * dispatch helper, the generic resource helper and the deployment predicate are named by ROLE
+ * here and never as the tokens the scan counts.
  */
-// TEMPORARILY ZERO, ON PURPOSE, FOR THE DURATION OF ONE REBASE — the SECOND one on this
-// branch, onto a main that moved the same counters this change moves.
-//
-// The ceilings do not reliably conflict on rebase, and the silent case is the dangerous one:
-// this branch's earlier rebase produced no conflict on these eleven lines at all. Zeroing them
-// makes the guard fail until the merged tree is measured and the block re-pinned in the next
-// commit. A per-metric minimum is worse than useless here — the reduction landing on main and
-// the one on this branch are DISJOINT, so the same number appearing on both sides is two
-// measurements of two different trees rather than agreement.
 const CEILINGS: Record<string, number> = {
-  twoArmFamilies: 0,
-  remoteArmModules: 0,
-  routedFacadeDefinitions: 0,
-  routedCallExpressions: 0,
-  selfHostedResourceBranches: 0,
-  selfHostedResourceReferences: 0,
-  isSelfHostedModeReferences: 0,
-  getEmailsModeReferences: 0,
-  resolveEmailsModeReferences: 0,
-  normalizeEmailsModeReferences: 0,
-  emailsModeEnvReferences: 0,
+  twoArmFamilies: 24,
+  remoteArmModules: 24,
+  routedFacadeDefinitions: 15,
+  routedCallExpressions: 209,
+  selfHostedResourceBranches: 44,
+  selfHostedResourceReferences: 151,
+  isSelfHostedModeReferences: 52,
+  getEmailsModeReferences: 58,
+  resolveEmailsModeReferences: 65,
+  normalizeEmailsModeReferences: 16,
+  emailsModeEnvReferences: 235,
 };
 
-// 650 files are tracked and 649 scanned today, totalling ~9.6M characters. (The figures in
+// 649 files are tracked and 648 scanned today, totalling ~9.7M characters. (The figures in
 // this paragraph were written when the corpus was 624/623 and ~7.4M and had gone stale, and
 // the first correction of them was itself one file behind — adversarial review caught that.
 // The floors and the reasoning below are unchanged.) The floors
