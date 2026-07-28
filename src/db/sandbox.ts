@@ -636,11 +636,14 @@ export async function getSandboxEmail(id: string, store?: EmailStore): Promise<S
  * total. A removal that refuses or faults part way through throws naming how many rows are
  * already gone — a partial delete reported as a clean number is worse than an error.
  *
- * THE PROVIDER IS CHECKED AGAIN ON EVERY ROW, immediately before its removal, even though
- * the scan already re-asserted the filter over the same rows. This is the one operation in
- * the family that destroys data, the filter is the only thing scoping it, and the check costs
- * one comparison per row. It is named here so it is not mistaken for an untested branch: it
- * is driven by a store whose list ignores the filter it was given.
+ * THE PROVIDER IS CHECKED AGAIN ON EVERY ROW, immediately before its removal, and it is
+ * UNREACHABLE BY CONSTRUCTION TODAY: the scan has already re-asserted the same filter over the
+ * same array and thrown, so no store can get a foreign row this far. It survives mutation for
+ * that reason, which is measured rather than assumed, and it is named here so nobody mistakes
+ * it for a branch some test covers. It stays because this is the one operation in the family
+ * that destroys data, the filter is the only thing scoping it, the check costs one comparison
+ * per row, and the invariant it depends on lives in a different function that a later edit
+ * could weaken without touching this one.
  *
  * The count is the number of rows the store said it actually removed. A row that vanished
  * between the read and the delete answers `false` and is NOT counted, which is what the

@@ -421,6 +421,27 @@ for (const [label, makeStore] of STORE_VARIANTS) {
         expect(error.message).toContain("attachments_json");
       });
 
+      it("FAULTS on a recipient list whose entries are not text", async () => {
+        // A well-formed JSON array is not automatically a list of recipients. Both deleted
+        // mappers took the entries as given — one through an unchecked cast, one by coercing
+        // each entry with `String(...)`, which turns the number 42 into the address "42".
+        const store = makeStore();
+        seedCapture("sbx-numeric-to", stamp(1), { to_addresses: "[1, 2]" });
+
+        const error = await rejection(getSandboxEmail("sbx-numeric-to", store));
+        expect(error.message).toContain("to_addresses");
+        expect(error.message).toContain("number");
+      });
+
+      it("FAULTS on a header column holding a LIST rather than a map", async () => {
+        const store = makeStore();
+        seedCapture("sbx-array-headers", stamp(1), { headers_json: '["x-not", "a-map"]' });
+
+        const error = await rejection(getSandboxEmail("sbx-array-headers", store));
+        expect(error.message).toContain("headers_json");
+        expect(error.message).toContain("not a map");
+      });
+
       it("still reads a row carrying the OLD SQLite timestamp format", async () => {
         // The positive control for the format change: divergence 6 changes what this module
         // WRITES and must not change what it can READ. A row written by an older version is
@@ -774,6 +795,105 @@ describe("a store that cannot answer", () => {
     // that could never have deleted anything.
     expect(await clearSandboxEmails(P1, base)).toBe(1);
     expect(tableRows().map((row) => row["id"])).toEqual(["sbx-theirs"]);
+  });
+
+  it("breaks a tie on the id even when the store hands ties back the OTHER way round", async () => {
+    // WITHOUT THIS THE TIEBREAKER IS UNTESTED, which mutation testing established rather than
+    // guessing: `Array.prototype.sort` is stable, both shipped stores already return ties in
+    // descending id order, and the `/v1` fixture delegates to one of them — so deleting the
+    // tiebreaker changed no answer anywhere in this file. The service's own spec orders this
+    // resource `created_at DESC` with NO tiebreaker, so a real operator's Postgres may hand
+    // ties back in any order at all; this store hands them back in the worst one.
+    const base = sqliteStore();
+    // Ordered `created_at DESC, id ASC` — the service's declared order with the tie resolved
+    // the other way — and windowed from that one consistent sequence, so the pager still sees
+    // a stable table. Reversing each PAGE instead would have made the window move under the
+    // enumeration, which this module reports as an incomplete read rather than as an order.
+    const tiesAscending: EmailStore = {
+      ...base,
+      sandbox: {
+        ...base.sandbox,
+        list: async (opts?: ListOptions & { filters?: Record<string, string> }) => {
+          const all = await base.sandbox.list({ ...opts, limit: 500, offset: 0 });
+          if (!all.ok) return all;
+          const ordered = [...all.value].sort((left, right) => {
+            const byTime = String(right["created_at"]).localeCompare(String(left["created_at"]));
+            return byTime !== 0 ? byTime : String(left["id"]).localeCompare(String(right["id"]));
+          });
+          const start = opts?.offset ?? 0;
+          return { ok: true as const, value: ordered.slice(start, start + (opts?.limit ?? 100)) };
+        },
+      },
+    };
+    seedCapture("sbx-a", stamp(2));
+    seedCapture("sbx-b", stamp(2));
+    seedCapture("sbx-c", stamp(2));
+
+    // CONTROL: the store really does answer in the other order, so the assertion below is
+    // about this module's sort and not about the fixture agreeing with it already.
+    const raw = await tiesAscending.sandbox.list({ limit: 500 });
+    expect(raw.ok && raw.value.map((row) => row["id"])).toEqual(["sbx-a", "sbx-b", "sbx-c"]);
+
+    expect((await listSandboxEmails(undefined, 50, 0, tiesAscending)).map((email) => email.id))
+      .toEqual(["sbx-c", "sbx-b", "sbx-a"]);
+  });
+
+  it("does not count a row that had already gone by the time it was deleted", async () => {
+    // `remove` answers `false` for a row that is no longer there. The deleted SQLite arm
+    // reported `changes`, which counted the same way; counting the attempt instead would
+    // report a clear of rows another writer had already removed.
+    const base = sqliteStore();
+    seedCapture("sbx-1", stamp(1));
+    seedCapture("sbx-2", stamp(2));
+    const store: EmailStore = {
+      ...base,
+      sandbox: {
+        ...base.sandbox,
+        remove: async (id: string) => (id === "sbx-1" ? { ok: true as const, value: false } : base.sandbox.remove(id)),
+      },
+    };
+
+    expect(await clearSandboxEmails(undefined, store)).toBe(1);
+  });
+
+  for (const column of ["provider_id", "subject", "reply_to", "to_addresses", "headers_json"] as const) {
+    it(`FAULTS on a row the store answered WITHOUT its ${column} column`, async () => {
+      // Neither shipped store can produce this today — SQLite projects every column of the
+      // table and the service selects them all — so it is reachable only through a store that
+      // stopped projecting one, which is exactly the case where an absent column would
+      // otherwise be read as "no value". Both deleted mappers did read it that way.
+      const base = sqliteStore();
+      seedCapture("sbx-partial", stamp(1));
+      const store: EmailStore = {
+        ...base,
+        sandbox: {
+          ...base.sandbox,
+          get: async (id: string) => {
+            const found = await base.sandbox.get(id);
+            if (!found.ok || found.value === null) return found;
+            const stripped = { ...found.value };
+            delete stripped[column];
+            return { ok: true as const, value: stripped };
+          },
+        },
+      };
+
+      const error = await rejection(getSandboxEmail("sbx-partial", store));
+      expect(error.message).toContain(column);
+      expect(error.message).toContain("column at all");
+    });
+  }
+
+  it("FAULTS on a row whose id or created_at is present but EMPTY", async () => {
+    // `NOT NULL` does not cover an empty string. A row with no id cannot be fetched or
+    // deleted, and `''` as a timestamp sorts before every real instant, so it would be
+    // reported as the oldest capture rather than as an unreadable one.
+    const base = sqliteStore();
+    seedCapture("sbx-empty-stamp", "");
+
+    const error = await rejection(getSandboxEmail("sbx-empty-stamp", base));
+    expect(error.message).toContain("created_at");
+    expect(error.message).toContain("no readable");
   });
 
   it("names how many rows were already deleted when a removal refuses part way through", async () => {
