@@ -379,6 +379,20 @@ describe("mergeSesBucketPolicy — pure merge semantics", () => {
     expect(stmts.map((s) => s["Sid"])).toEqual(["Foreign", "AllowSESPuts"]);
   });
 
+  it("collapses duplicate AllowSESPuts occurrences to exactly one, in the first slot", () => {
+    const staleA = { Sid: "AllowSESPuts", Effect: "Allow", Principal: { Service: "ses.amazonaws.com" }, Action: "s3:PutObject", Resource: "arn:aws:s3:::b/inbound/old-a.com/*" };
+    const staleB = { Sid: "AllowSESPuts", Effect: "Allow", Principal: { Service: "ses.amazonaws.com" }, Action: "s3:PutObject", Resource: "arn:aws:s3:::b/inbound/old-b.com/*" };
+    const foreign = { Sid: "Foreign", Effect: "Allow", Principal: "*", Action: "s3:GetObject", Resource: "arn:aws:s3:::b/inbound/*" };
+    const merged = mergeSesBucketPolicy(
+      JSON.stringify({ Version: "2012-10-17", Statement: [staleA, foreign, staleB] }),
+      "b", "inbound/x.com/", ACCOUNT,
+    );
+    const stmts = (JSON.parse(merged) as { Statement: Record<string, unknown>[] }).Statement;
+    // First occurrence replaced in place, second dropped, foreign untouched between.
+    expect(stmts.map((s) => s["Sid"])).toEqual(["AllowSESPuts", "Foreign"]);
+    expect(stmts[0]!["Resource"]).toBe("arn:aws:s3:::b/inbound/*");
+  });
+
   it("builds a fresh policy when there is no existing document", () => {
     expect(mergeSesBucketPolicy(undefined, "b", "inbound/x.com/", ACCOUNT))
       .toBe(JSON.stringify(buildSesBucketPolicy("b", "inbound/x.com/", ACCOUNT)));
