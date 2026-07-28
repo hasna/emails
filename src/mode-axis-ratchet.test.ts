@@ -909,81 +909,92 @@ const root = join(import.meta.dir, "..");
 
 /*
  * RE-MEASURED AND RE-PINNED AGAIN on the `src/db/emails` collapse — the OUTBOUND SENT LEDGER.
- * BASE `7c32937`, verified INDEPENDENTLY in this worktree over the real `git ls-files` corpus
- * (649 tracked / 648 scanned / 9,737,437 characters) with all eleven live counts equal to the
- * ceilings the sandbox collapse declared and ZERO slack. Seven exports handed to a 282-line
+ * BASE `fa2b88a`, verified INDEPENDENTLY in this worktree over the real `git ls-files` corpus
+ * (647 tracked / 646 scanned / 9,805,459 characters) with all eleven live counts equal to the
+ * ceilings the send-keys collapse declared and ZERO slack. Seven exports handed to a 282-line
  * SQLite arm and a 188-line HTTP arm. Seven counters move:
  *
- *   twoArmFamilies                24 -> 23   both arm modules deleted, so the facade has no
- *   remoteArmModules              24 -> 23   siblings left. THE PAIR THAT SAYS A FAMILY IS DONE.
- *   routedFacadeDefinitions       15 -> 14   the facade's dispatch helper is deleted.
- *   routedCallExpressions        209 -> 202  it dispatched all SEVEN exports through that helper.
- *   selfHostedResourceBranches    44 -> 40   THIS ONE IS DIFFERENT FROM THE LAST TWO COLLAPSES,
+ *   twoArmFamilies                23 -> 22   both arm modules deleted, so the facade has no
+ *   remoteArmModules              23 -> 22   siblings left. THE PAIR THAT SAYS A FAMILY IS DONE.
+ *   routedFacadeDefinitions       14 -> 13   the facade's dispatch helper is deleted.
+ *   routedCallExpressions        199 -> 192  it dispatched all SEVEN exports through that helper.
+ *   selfHostedResourceBranches    41 -> 37   THIS ONE IS DIFFERENT FROM THE COLLAPSES BEFORE IT,
  *                                            and the difference is the defect. The local arm of
  *                                            this family DID ask whether it was really the local
  *                                            arm — four times, in getEmail, resolveEmailId,
  *                                            listEmails and searchEmails — so the SQLite arm was
  *                                            already half an HTTP arm, and the two halves
  *                                            disagreed about which rows a sent email even is.
- *   selfHostedResourceReferences 151 -> 141  four of those from the local arm and six from the
+ *   selfHostedResourceReferences 139 -> 129  four of those from the local arm and six from the
  *                                            deleted HTTP one, which is also exactly why its
  *                                            search and its id resolution answered out of one
  *                                            clamped page.
- *   isSelfHostedModeReferences    52 -> 50   the deleted facade imported the client-side
+ *   isSelfHostedModeReferences    50 -> 48   the deleted facade imported the client-side
  *                                            deployment predicate and called it once.
- *   emailsModeEnvReferences      235 -> 233  and this is the FIRST time in the phase that the env
- *                                            counter has moved. It is not a new discipline, it is
- *                                            the same one paying out: `src/db/emails.self-hosted.test.ts`
- *                                            existed only to prove that this family routed to the
- *                                            API when the deployment word said so, and it SET that
- *                                            word twice to do it. That premise is not weakened
- *                                            here, it stops existing — the family resolves its
- *                                            store from storage configuration and there is no word
- *                                            to set — so the file is deleted and its one surviving
- *                                            question (does a full id and a prefix resolve against
- *                                            the API dataset rather than an empty local table)
- *                                            is asked by the rewritten suite against a REAL
- *                                            `HttpEmailStore`, naming its storage through the
- *                                            resolution's own exported constants.
+ *   emailsModeEnvReferences      234 -> 232  `src/db/emails.self-hosted.test.ts` existed only to
+ *                                            prove that this family routed to the API when the
+ *                                            deployment word said so, and it SET that word twice
+ *                                            to do it. That premise is not weakened here, it
+ *                                            stops existing — the family resolves its store from
+ *                                            storage configuration and there is no word to set —
+ *                                            so the file is deleted and its one surviving
+ *                                            question (does a full id and a prefix resolve
+ *                                            against the API dataset rather than an empty local
+ *                                            table) is asked by the rewritten suite against a
+ *                                            REAL `HttpEmailStore`, naming its storage through
+ *                                            the resolution's own exported constants. The one
+ *                                            test file this change ADDS sets no deployment
+ *                                            variable at all, for the same reason.
  *
  * THREE DO NOT MOVE, for the reasons the blocks above already record: this dispatcher went
  * through the predicate rather than the process-wide read (58), and neither arm resolved or
  * parsed the setting (65, 16).
  *
- * PROCEDURE, unchanged and for the reason every note above it records: all eleven ceilings were
- * committed as LITERAL ZEROS in their own commit, so the block could not be inherited silently.
- * The rebase onto this base CONFLICTED — in `src/server/routes/core.ts`, where the sandbox
- * collapse and this one changed adjacent import lines — which is precisely the case where a
- * silently-merged ceiling block would have been most plausible and least visible. A per-metric
- * minimum would have been wrong here in the usual way: the sandbox collapse and this one finish
- * DIFFERENT families, so their reductions compose, and a minimum over the two sides gives main's
- * own numbers on all eleven. Measured in the WORKTREE, never the shared checkout, which sits on a
- * stale commit and yields a plausible wrong answer.
+ * PROCEDURE, AND THE SECOND REBASE IS WHY IT EXISTS. All eleven ceilings were committed as
+ * LITERAL ZEROS in their own commit before EACH of the two rebases this branch took. The first
+ * (onto `7c32937`) conflicted in `src/server/routes/core.ts` but NOT on this block. The second
+ * (onto this base, after #137 moved EIGHT of the eleven) conflicted on exactly FOUR of the
+ * eleven ceiling lines — `routedCallExpressions`, `selfHostedResourceBranches`,
+ * `selfHostedResourceReferences` and `emailsModeEnvReferences` — and SILENTLY AUTO-MERGED THE
+ * OTHER SEVEN, because both sides happened to hold the same literal there for entirely
+ * different reasons. Four loud lines and seven quiet ones in one merge is the whole argument:
+ * the quiet seven are two measurements of two different trees that read as agreement, and
+ * without the zeros there is nothing to make even the four speak up. The conflict was resolved
+ * to ZEROS on all eleven rather than to either side, and the tree was then measured.
  *
- * Corpus of this change: 646 tracked, 645 scanned, ~9.81M characters — both floors cleared with
- * room. THREE fewer tracked files than the base and NONE added: two arm modules and one
- * arm-premise suite deleted, with this family's remaining suite rewritten in place and four
- * consumer suites edited in place. The character total is given to three figures on purpose:
- * this paragraph is inside the corpus it describes. The two FILE counts and all eleven metric
- * counts are exact, were measured on the merged tree and measured AGAIN after this paragraph was
- * written, and were measured PER FILE against main: the per-file diff is exactly four entries —
- * the three deleted files and the rewritten facade — every file this change AUTHORS contributes
- * zero to all eleven, and every file it EDITS has a per-file count unchanged by the edit. The
- * dispatch helper, the generic resource helper and the deployment predicate are named by ROLE
- * here and never as the tokens the scan counts.
+ * A PER-METRIC MINIMUM WOULD HAVE BEEN WRONG ON SEVEN OF THE ELEVEN. This branch had pinned
+ * 202 / 40 / 141 / 233 for its own pre-rebase tree and main declares 199 / 41 / 139 / 234; the
+ * merged tree measures 192 / 37 / 129 / 232 — LOWER THAN EITHER SIDE ON ALL FOUR, because the
+ * two collapses finish DIFFERENT families and their reductions compose. A minimum gives
+ * 199 / 40 / 139 / 233, which is seven, three, ten and one units wide. The structural pair and
+ * the two dispatch counters are worse still: both sides read 23 / 23 / 14 / 50 and the merged
+ * tree is 22 / 22 / 13 / 48, so those four would have shipped one and two units wide each with
+ * NO CONFLICT MARKER OF ANY KIND. Measuring the merged tree is the only thing that can tell the
+ * difference.
+ *
+ * Corpus of this change: 645 tracked, 644 scanned, ~9.88M characters — both floors cleared with
+ * room. TWO fewer tracked files than the base: three deleted (two arm modules and the
+ * arm-premise suite) and ONE added — `src/cli/commands/email-log-provider-filter.test.ts`, which
+ * pins at the operator's own surface a refusal that three other suites pin only at the store
+ * layer. This family's remaining suite is rewritten in place and six consumer suites are edited
+ * in place. The character total is given to three figures on purpose: this paragraph is inside
+ * the corpus it describes. The two FILE counts and all eleven metric counts are exact, were
+ * measured on the merged tree and measured AGAIN after this paragraph was written, and were
+ * measured PER FILE against main. The dispatch helper, the generic resource helper and the
+ * deployment predicate are named by ROLE here and never as the tokens the scan counts.
  */
 const CEILINGS: Record<string, number> = {
-  twoArmFamilies: 0,
-  remoteArmModules: 0,
-  routedFacadeDefinitions: 0,
-  routedCallExpressions: 0,
-  selfHostedResourceBranches: 0,
-  selfHostedResourceReferences: 0,
-  isSelfHostedModeReferences: 0,
-  getEmailsModeReferences: 0,
-  resolveEmailsModeReferences: 0,
-  normalizeEmailsModeReferences: 0,
-  emailsModeEnvReferences: 0,
+  twoArmFamilies: 22,
+  remoteArmModules: 22,
+  routedFacadeDefinitions: 13,
+  routedCallExpressions: 192,
+  selfHostedResourceBranches: 37,
+  selfHostedResourceReferences: 129,
+  isSelfHostedModeReferences: 48,
+  getEmailsModeReferences: 58,
+  resolveEmailsModeReferences: 65,
+  normalizeEmailsModeReferences: 16,
+  emailsModeEnvReferences: 232,
 };
 
 // 649 files are tracked and 648 scanned today, totalling ~9.7M characters. (The figures in
