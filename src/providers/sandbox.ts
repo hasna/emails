@@ -69,9 +69,10 @@ export class SandboxAdapter implements ProviderAdapter {
     // would report a full sandbox as an empty one. Both are the fabricated value this
     // family's collapse removes, so the only honest answer left is to fail loudly.
     //
-    // Reachable only when the capture table could not be enumerated to its end (the
-    // 200-page budget, or rows moving under the pager); a store REFUSAL or a transport
-    // fault already throws out of `getSandboxCount` itself.
+    // Reachable whenever the capture table could not be enumerated to its end. That is NOT
+    // only a scale limit: the 200-page budget is one cause, and a row inserted or deleted
+    // between two pages is the other, which adversarial review measured at three rows. A store
+    // REFUSAL or a transport fault already throws out of `getSandboxCount` itself.
     if (count === null) {
       throw new Error(
         `Sandbox provider ${this.provider.id}: the captured emails could not be counted to the end of the `

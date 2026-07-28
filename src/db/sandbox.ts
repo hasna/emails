@@ -56,11 +56,21 @@
 //     The filtered set is enumerated in full, sorted here, and only then windowed.
 //  3. THE TIEBREAKER, WHICH NEITHER ARM HAD (the STORES both have one — see note 2 — but
 //     neither deleted arm did). The SQLite arm's SQL was `ORDER BY created_at DESC` and the
-//     HTTP arm sorted in JavaScript on `created_at` alone; `created_at` is not a total order
-//     and this table's stamps collide readily, since a send loop captures many rows inside
-//     one millisecond, so `--offset` could repeat or drop a row under either arm. Ordering
-//     is now `created_at DESC, id DESC`, which matches the SQLite store's own and is the
-//     opposite of the service's `id ASC`. Either choice is arbitrary; having one is not.
+//     HTTP arm sorted in JavaScript on `created_at` alone, so a page boundary that fell inside
+//     a group of equal stamps could repeat or drop a row under either arm. Ordering is now
+//     `created_at DESC, id DESC`, which matches the SQLite store's own and is the opposite of
+//     the service's `id ASC`. Either choice is arbitrary; having one is not.
+//     WHAT THAT COSTS, because it is user-visible and adversarial review measured it: `id` is
+//     a random v4 uuid, so a burst of captures sharing a stamp is now listed in an ARBITRARY
+//     (though stable and reproducible) order rather than the order they were sent. The deleted
+//     SQLite arm listed them in send order — accidentally, as the order its index scan
+//     happened to walk, which is not a property anything guaranteed. Two things make the trade
+//     smaller than it reads: note 6 moves the stamp from SECOND precision to MILLISECOND
+//     precision, so the collision window shrinks by three orders of magnitude, and a page
+//     boundary inside an untiebroken group loses rows outright rather than merely reordering
+//     them. The real fix is a sortable identity (uuidv7 or a ULID) or a sub-millisecond stamp,
+//     which would give send order AND page stability; that is a change to how ids are minted
+//     (`src/db/runtime.ts`), shared by every family, and it is named here rather than made.
 //  4. THE TWO ARMS SORTED WITH DIFFERENT COLLATIONS. The SQLite arm sorted in SQL under that
 //     engine's BINARY collation; the HTTP arm sorted in JavaScript with `localeCompare`,
 //     which is LOCALE-DEPENDENT — so that arm's page boundaries moved with the process
@@ -91,22 +101,28 @@
 //     Sandbox captures are ephemeral (this module publishes the operation that deletes them
 //     all), so no migration is proposed; a mixed table is named here so a reader who sees
 //     the ordering does not have to rediscover why.
-//  7. THE TWO MALFORMED-JSON COERCIONS DISAGREED ON THE THREE ADDRESS COLUMNS, AND BOTH
-//     FABRICATED. `to_addresses` is `TEXT` holding a JSON array in SQLite and `JSONB` in
-//     Postgres, so a reader must accept both shapes. On content it cannot parse, the SQLite
-//     arm's helper answered `[]` (every recipient silently dropped) and the HTTP arm's
-//     answered `[<the raw text>]` (a recipient invented that was never addressed). There is
-//     no stronger arm to resolve toward — both are the fabricated-value failure, in opposite
-//     directions — so an unreadable recipient list is a FAULT naming the row.
-//     ON `attachments_json` AND `headers_json` THE TWO ARMS AGREED, on `[]` and `{}`, and
-//     the fault below is therefore a WIDENING rather than a resolution — stated as one,
-//     because a divergence is not what justifies it. It is applied for the same reason and
-//     with the same evidence: an unreadable column read as an empty one is a captured email
-//     reported as having no attachments and no headers, which is a wrong answer wearing the
-//     shape of a right one, and both arms committed it.
+//  7. THE TWO MALFORMED-JSON COERCIONS DISAGREED ON EXACTLY TWO INPUTS, AND ONLY THOSE TWO
+//     ARE CHANGED. `to_addresses` is `TEXT` holding a JSON array in SQLite and `JSONB` in
+//     Postgres, so a reader must accept both shapes. The disagreements: (a) a NON-EMPTY string
+//     that does not parse — the SQLite arm's helper answered `[]`, every recipient silently
+//     dropped, and the HTTP arm's answered `[<the raw text>]`, a recipient invented that was
+//     never addressed; and (b) a well-formed array holding a NON-TEXT entry — the SQLite arm
+//     returned the raw value through an unchecked cast (a number sitting in a `string[]`) and
+//     the HTTP arm coerced it (`String(42)` is the address `"42"`). Both are FAULTS here:
+//     there is no stronger arm, and both answers are wrong about who the mail was for.
+//     EVERYTHING ELSE IS PRESERVED, INCLUDING THE FABRICATIONS. An absent column, an empty
+//     string, and content that parses to something other than a list all answered `[]` on BOTH
+//     arms; `attachments_json` and `headers_json` answered `[]` and `{}` on both arms for every
+//     unreadable input there is (`parseJsonArray`/`parseJsonObject` locally, `carray`/`cobj`
+//     remotely — they agree on all of them). An earlier version of this module faulted on all
+//     of those too. That was WRONG BY THIS FILE'S OWN RULE — where the arms agreed, preserving
+//     is the collapse and changing is a product decision — and it was an unforced regression
+//     rather than a resolution. Adversarial review measured the deleted helpers and caught it.
+//     The preserved fabrications are pinned in `src/db/sandbox.test.ts` under names that call
+//     them inherited defects, so neither direction can change silently.
 //     A corrupt row stays visible to `clearSandboxEmails`, which deliberately does not map
-//     (see that function), so it can still be deleted — and `storeSandboxEmail` refuses to
-//     CREATE one, so this module cannot produce the state it refuses to read.
+//     (see that function), so it can still be deleted; `storeSandboxEmail` refuses to CREATE
+//     one; and a row that faults on read now breaks ONLY the page that contains it.
 //  8. THE COUNT HAS NO STORE EQUIVALENT AT ALL. The seam publishes no aggregate — no count
 //     operation, no total on a list envelope, no cursor on the uniform families — so
 //     `COUNT(*)` becomes a bounded client-side enumeration, and a bounded enumeration cannot
@@ -150,6 +166,18 @@
 //    summary listing never paid for the bodies. The seam has no projection, so summaries are
 //    now built by reading the full row and dropping those three keys, exactly as the HTTP arm
 //    already did. The cost is bytes over the wire and in memory, not correctness.
+//  * THE COST OF READING THE WHOLE FILTERED SET FOR A WINDOWED PAGE, which is the price of
+//    note 2 and is unbounded rather than constant. Adversarial review measured a 50-row
+//    summary page over a 5,000-row table whose rows carry 20 KB of HTML and 20 KB of text:
+//    0.7 ms on the deleted SQLite arm (which pushed `LIMIT`/`OFFSET` into SQL and read 50
+//    rows) against ~350 ms here, materialising the whole table's bodies. 20,000 small rows
+//    measured ~175 ms. The MAPPING is now confined to the window (see `toSandboxEmail`), so
+//    what remains is the read itself, and it cannot be pushed down without answering from the
+//    wrong store's order. Two things bound it in practice — sandbox captures are ephemeral and
+//    this module publishes the operation that deletes them all, and the provider filter is
+//    pushed down — but neither is a fix. The fix is a store-level ordering guarantee or a
+//    cursor, which the seam does not have; the count widening described in note 8 would carry
+//    the same shape.
 //  * SYNCHRONOUS CALLS. All six are now `async`. Both arms were synchronous (one on SQLite,
 //    one on a blocking transport). Every consumer is listed in the PR body and awaited.
 //  * A CALLER-SUPPLIED DATABASE HANDLE. The trailing `db?: Database` slot is now a trailing
@@ -170,7 +198,7 @@ import { now } from "./runtime.js";
 import { enumerateStoreRows } from "../lib/status-facts-enumeration.js";
 import { createConfiguredEmailStore } from "../store-resolution.js";
 import type { EmailStore } from "../store/email-store.js";
-import type { Refusal } from "../store/outcome.js";
+import type { Outcome, Refusal } from "../store/outcome.js";
 import type { ResourceRow } from "../store/records.js";
 import type { Attachment } from "../types/index.js";
 
@@ -207,15 +235,28 @@ export interface StoreSandboxEmailInput {
 }
 
 /**
- * Pages one sandbox enumeration may fetch, at 500 rows a page — about 99,800 captured
- * emails (every page after the first re-requests the row it ended on, so it carries 499
- * fresh rows rather than 500).
+ * Pages one sandbox enumeration may fetch, at 500 rows a page — 99,302 captured emails, which
+ * is a MEASURED ceiling rather than the arithmetic one. Every page after the first re-requests
+ * the row it ended on, so it carries 499 fresh rows rather than 500, and the last page has to
+ * come back EMPTY: 500 + 198 * 499 = 99,302 completes and 99,303 does not. An earlier version
+ * of this comment said "about 99,800"; adversarial review measured the flip.
  *
  * Deliberately far above the shared 40-page default, because every operation here needs the
  * WHOLE filtered set: a list has to sort before it windows, a clear has to know every row it
  * is about to delete before it deletes any of them, and a count is the size of the set.
  * Running out is reported — as a throw for the reads and the clear, as `null` for the count
  * — and never as a smaller answer.
+ *
+ * THE BUDGET IS NOT THE ONLY WAY AN ENUMERATION FAILS TO FINISH, and reading it as a scale
+ * limit is a mistake adversarial review caught in an earlier draft of this comment. A row
+ * INSERTED OR DELETED between two pages moves the offset window, which the pager detects and
+ * reports as an incomplete read — at ANY table size, three rows included. In one process over
+ * SQLite that cannot happen (the awaits below only drain microtasks, so no other handler can
+ * interleave); it is reachable from a second process on the same file, and on the HTTP store,
+ * where every page is a real round trip and any concurrent client can trip it. The refusal is
+ * still the right answer — a moved window means rows were skipped, not that the table is
+ * smaller — but the message has to name the cause, because "narrow it with a provider filter"
+ * is useless advice for a concurrent write.
  */
 const MAX_SANDBOX_ROW_PAGES = 200;
 
@@ -313,43 +354,59 @@ function nullableText(row: ResourceRow, column: string): string | null {
 }
 
 /**
- * A column holding a JSON array, in whichever of the two shapes a store hands it back — and
- * a FAULT for anything else.
+ * A JSON-array column, parsed — with `null` for "I could not read this" so each caller can
+ * apply the rule its own column earned.
  *
- * Divergence 7. `to_addresses` / `cc_addresses` / `bcc_addresses` are `TEXT` holding a JSON
- * array in SQLite and `JSONB` in Postgres, so both an array and a JSON-encoded string are
- * legitimate. What is NOT legitimate is answering for content that parses to neither: the two
- * deleted helpers answered `[]` and `[<the raw text>]` respectively, dropping every recipient
- * or inventing one.
+ * `to_addresses` / `cc_addresses` / `bcc_addresses` are `TEXT` holding a JSON array in SQLite
+ * and `JSONB` in Postgres, so both an array and a JSON-encoded string are legitimate. An
+ * ABSENT column and an EMPTY string are the two shapes both deleted arms answered `[]` for,
+ * and both are reported as an empty list here (see `addressList`).
  */
-function jsonArray(row: ResourceRow, column: string): unknown[] {
-  if (!Object.hasOwn(row, column)) {
-    throw new Error(
-      `Sandbox email ${rowLabel(row)} has no ${column} column at all; refusing to report it as empty`,
-    );
-  }
-  const value = row[column];
-  if (Array.isArray(value)) return value;
+function parsedList(value: unknown): { list: unknown[] } | { unparseable: true } | { notAList: true } {
+  if (Array.isArray(value)) return { list: value };
   if (typeof value === "string") {
+    if (value === "") return { list: [] };
     let parsed: unknown;
     try {
       parsed = JSON.parse(value);
     } catch {
-      throw new Error(
-        `Sandbox email ${rowLabel(row)} has an unreadable ${column} (not JSON); `
-          + "refusing to report it as empty or as one entry",
-      );
+      return { unparseable: true };
     }
-    if (Array.isArray(parsed)) return parsed;
+    if (Array.isArray(parsed)) return { list: parsed };
   }
-  throw new Error(
-    `Sandbox email ${rowLabel(row)} has a ${column} that is not a list; refusing to report it as empty`,
-  );
+  if (value === null || value === undefined) return { list: [] };
+  return { notAList: true };
 }
 
-/** The three address columns, whose entries must every one be text. */
+/**
+ * One of the three ADDRESS columns — the only place the two deleted arms actually disagreed,
+ * and therefore the only place this module tightens.
+ *
+ * Divergence 7, narrowed after adversarial review. The disagreement is exactly one case: on a
+ * NON-EMPTY string that does not parse, the SQLite arm's helper answered `[]` (every recipient
+ * silently dropped) and the HTTP arm's answered `[<the raw text>]` (a recipient invented that
+ * was never addressed). That is a FAULT here, because there is no stronger arm to resolve
+ * toward and both answers are wrong about who the mail was for. A well-formed array holding a
+ * NON-TEXT entry is the second disagreement — the SQLite arm returned the raw value through an
+ * unchecked cast (a number in a `string[]`), the HTTP arm coerced it (`String(42)` is the
+ * address `"42"`) — and is also a fault.
+ *
+ * EVERYTHING ELSE IS PRESERVED, INCLUDING WHERE THE AGREED ANSWER IS A FABRICATION: an absent
+ * column, an empty string and content that parses to something other than an array all gave
+ * `[]` on BOTH arms, so they still do. That is this module's own rule (see the header), and an
+ * earlier version of this file broke it — it faulted on all of them, which is a product
+ * decision rather than a collapse. `src/db/sandbox.test.ts` pins the preserved cases under
+ * names that say they are inherited defects, so nobody can change them silently either way.
+ */
 function addressList(row: ResourceRow, column: string): string[] {
-  const entries = jsonArray(row, column);
+  const parsed = parsedList(row[column]);
+  if ("unparseable" in parsed) {
+    throw new Error(
+      `Sandbox email ${rowLabel(row)} has an unreadable ${column} (not JSON); `
+        + "refusing to report it as empty or as one entry",
+    );
+  }
+  const entries = "notAList" in parsed ? [] : parsed.list;
   for (const entry of entries) {
     if (typeof entry !== "string") {
       throw new Error(
@@ -362,43 +419,60 @@ function addressList(row: ResourceRow, column: string): string[] {
 }
 
 /**
- * The header map, in whichever of the two shapes a store hands it back.
+ * The attachment list — PRESERVED VERBATIM from both arms, fabrication included.
  *
- * `headers_json` is `TEXT` in BOTH schemas — the Postgres spec says so in writing, because
- * the client sends it pre-serialized and declaring it a JSON column would double-encode it
- * into a string scalar. An object is still accepted, because a drifted operator table could
- * hold one, and because accepting the shape the value already has costs nothing.
+ * Both deleted arms answered `[]` for an absent column, for content that is not JSON and for
+ * content that parses to something other than an array (`parseJsonArray` locally,
+ * `carray` remotely; they agree on every input). So they do not disagree, and there is nothing
+ * to resolve. It IS a fabrication — a capture whose attachment column was overwritten is
+ * reported as having no attachments — and it is named here and pinned as an inherited defect
+ * rather than fixed under cover of a collapse. Fixing it is a one-line change to this function
+ * plus a decision about what a listing should do with such a row, and belongs to whoever owns
+ * that decision.
+ */
+function attachmentList(row: ResourceRow): Attachment[] {
+  const parsed = parsedList(row["attachments_json"]);
+  return ("list" in parsed ? parsed.list : []) as Attachment[];
+}
+
+/**
+ * The header map — PRESERVED VERBATIM from both arms, fabrication included, for the same
+ * reason as the attachment list.
+ *
+ * `headers_json` is `TEXT` in BOTH schemas: the Postgres spec says so in writing, because the
+ * client sends it pre-serialized and declaring it a JSON column would double-encode it into a
+ * string scalar. An object is accepted too, because a drifted operator table could hold one.
+ * Anything else — absent, not JSON, a list — answered `{}` on both arms (`parseJsonObject`
+ * locally, `cobj` remotely) and still does.
  */
 function headerMap(row: ResourceRow): Record<string, string> {
-  const column = "headers_json";
-  if (!Object.hasOwn(row, column)) {
-    throw new Error(`Sandbox email ${rowLabel(row)} has no ${column} column at all; refusing to report no headers`);
-  }
-  const value = row[column];
+  const value = row["headers_json"];
   let parsed: unknown = value;
   if (typeof value === "string") {
+    if (value === "") return {};
     try {
       parsed = JSON.parse(value);
     } catch {
-      throw new Error(
-        `Sandbox email ${rowLabel(row)} has an unreadable ${column} (not JSON); refusing to report no headers`,
-      );
+      return {};
     }
   }
-  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error(`Sandbox email ${rowLabel(row)} has a ${column} that is not a map; refusing to report no headers`);
-  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return {};
   return parsed as Record<string, string>;
 }
 
 /**
  * A stored row, mapped to `SandboxEmail`.
  *
- * `attachments` keeps the unchecked cast both arms used. Every OTHER field is validated, so
- * this one is a deliberate exception rather than an oversight: `Attachment` is a structural
- * shape with optional members that neither store validates on the way in either, and turning
- * a capture with an odd attachment record into an unreadable row would lose the message body
- * as well. The list itself must parse (`jsonArray`); its entries are taken as given.
+ * `attachments` keeps the unchecked cast both arms used: `Attachment` is a structural shape
+ * with optional members that neither store validates on the way in either.
+ *
+ * THIS IS CALLED ONLY FOR ROWS IN THE REQUESTED WINDOW, never over the whole table. That is a
+ * correctness property rather than an optimisation, and adversarial review is the reason it is
+ * one: an earlier version mapped the entire filtered set before windowing, so a single row
+ * whose stored JSON could not be read made EVERY listing throw — including pages that did not
+ * contain it — with no remedy short of deleting all captured mail. The only fields validated
+ * over the whole set are the two the ORDER is built from (see `orderable`), because a row that
+ * cannot be placed really does break the ordering of everything around it.
  */
 function toSandboxEmail(row: ResourceRow): SandboxEmail {
   return {
@@ -412,7 +486,7 @@ function toSandboxEmail(row: ResourceRow): SandboxEmail {
     subject: presentText(row, "subject"),
     html: nullableText(row, "html"),
     text_body: nullableText(row, "text_body"),
-    attachments: jsonArray(row, "attachments_json") as Attachment[],
+    attachments: attachmentList(row),
     headers: headerMap(row),
     created_at: requiredText(row, "created_at"),
   };
@@ -437,8 +511,27 @@ function compareText(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
+/**
+ * A stored row reduced to the two fields the ORDER is built from.
+ *
+ * These two are validated over the WHOLE filtered set, and nothing else is: a row that cannot
+ * be placed in the order genuinely breaks the ordering of every row around it, while a row
+ * whose body cannot be read breaks only itself. `''` is rejected as well as absent, because an
+ * empty timestamp sorts before every real instant and would be reported as the oldest capture
+ * rather than as an unreadable one.
+ */
+interface OrderableRow {
+  id: string;
+  created_at: string;
+  row: ResourceRow;
+}
+
+function orderable(row: ResourceRow): OrderableRow {
+  return { id: requiredText(row, "id"), created_at: requiredText(row, "created_at"), row };
+}
+
 /** Newest first, with the identity as the tiebreaker (divergences 2 and 3). */
-function byNewest(a: SandboxEmail, b: SandboxEmail): number {
+function byNewest(a: OrderableRow, b: OrderableRow): number {
   return compareText(b.created_at, a.created_at) || compareText(b.id, a.id);
 }
 
@@ -529,28 +622,54 @@ async function scanSandbox(store: EmailStore, what: string, providerId: string |
   return { rows: enumeration.rows, complete: enumeration.complete, incompleteBecause };
 }
 
-/** The requested window of an already-ordered list, with both arms' clamping. */
+/**
+ * The requested window of an already-ordered list, with both arms' clamping.
+ *
+ * The offset is REJECTED rather than coerced when it is not a number. The deleted signature
+ * took `Database | number` in this position, so a JavaScript caller of the published package
+ * that still passes a handle would otherwise have it silently coerced to offset 0 by
+ * `safeOffset` and be answered from the configured store — a plausible wrong page, possibly
+ * from a different database, with no error. TypeScript callers cannot reach this; the compiler
+ * is not present at the call site of a published package. Found by adversarial review.
+ */
 function windowOf<T>(rows: T[], limit: number, offset: number): T[] {
+  if (typeof offset !== "number") {
+    throw new Error(
+      "listSandboxEmails / listSandboxEmailSummaries take (providerId, limit, offset, store). The third "
+        + "argument is the OFFSET; it used to accept a database handle and no longer does — pass the "
+        + "handle as a store in the fourth position instead.",
+    );
+  }
   const normalizedLimit = safeLimit(limit);
   const start = safeOffset(offset);
   return rows.slice(start, start + normalizedLimit);
 }
 
-/** Every captured email the filter admits, newest first — or a throw naming why not. */
-async function readSandbox(
+/**
+ * The requested window of the filter's captures, newest first — or a throw naming why not.
+ *
+ * ORDERING KEYS ARE VALIDATED OVER THE WHOLE SET; EVERYTHING ELSE ONLY FOR THE WINDOW. See
+ * `toSandboxEmail` for why that split is a correctness property.
+ */
+async function readSandboxWindow(
   store: EmailStore,
   what: string,
   providerId: string | undefined,
+  limit: number,
+  offset: number,
 ): Promise<SandboxEmail[]> {
   const scan = await scanSandbox(store, what, providerId);
   if (!scan.complete) {
     throw new Error(
       `Refusing to ${what}: ${scan.incompleteBecause}, so the ${scan.rows.length} row(s) read are a LOWER `
         + "BOUND rather than the captured emails. Rows past the boundary could sort anywhere within the "
-        + "listing, so a window cannot be cut from a partial read. Narrow it with a provider filter.",
+        + "listing, so a window cannot be cut from a partial read. If the cause is the page budget, "
+        + "narrow the read with a provider filter or clear the capture table; if it is rows moving "
+        + "under the read, retry when nothing else is writing.",
     );
   }
-  return scan.rows.map(toSandboxEmail).sort(byNewest);
+  const ordered = scan.rows.map(orderable).sort(byNewest);
+  return windowOf(ordered, limit, offset).map((entry) => toSandboxEmail(entry.row));
 }
 
 /**
@@ -658,8 +777,7 @@ export async function listSandboxEmails(
   offset = 0,
   store?: EmailStore,
 ): Promise<SandboxEmail[]> {
-  const rows = await readSandbox(storeFor(store), "list captured sandbox emails", providerId);
-  return windowOf(rows, limit, offset);
+  return readSandboxWindow(storeFor(store), "list captured sandbox emails", providerId, limit, offset);
 }
 
 /** The same listing without the two bodies and the header map. */
@@ -669,8 +787,14 @@ export async function listSandboxEmailSummaries(
   offset = 0,
   store?: EmailStore,
 ): Promise<SandboxEmailSummary[]> {
-  const rows = await readSandbox(storeFor(store), "list captured sandbox emails", providerId);
-  return windowOf(rows, limit, offset).map(toSummary);
+  const window = await readSandboxWindow(
+    storeFor(store),
+    "list captured sandbox emails",
+    providerId,
+    limit,
+    offset,
+  );
+  return window.map(toSummary);
 }
 
 /**
@@ -738,7 +862,21 @@ export async function clearSandboxEmails(providerId?: string, store?: EmailStore
     // un-clearable — the trap `src/db/aliases.ts` fell into for a row its own writer had
     // committed and its own reader then refused.
     const id = requiredText(row, "id");
-    const removed = await handle.sandbox.remove(id);
+    // THE FAULT PATH CARRIES THE SAME ACCOUNTING AS THE REFUSAL PATH, and it did not until
+    // adversarial review measured it: a `remove` that THREW — a locked database, a full disk, a
+    // transport reset — propagated with no count at all, so a clear that had already deleted
+    // half the table reported only "database is locked". On a destructive mail operation that
+    // is precisely the failure this function exists to prevent.
+    let removed: Outcome<boolean>;
+    try {
+      removed = await handle.sandbox.remove(id);
+    } catch (error) {
+      throw new Error(
+        `This installation's store faulted while it tried to ${what}: `
+          + `${error instanceof Error ? error.message : String(error)} — ${deleted} row(s) were already `
+          + "deleted before this one",
+      );
+    }
     if (!removed.ok) {
       throw new Error(
         `${storeRefusal(what, removed).message} — ${deleted} row(s) were already deleted before this one`,

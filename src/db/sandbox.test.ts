@@ -77,7 +77,19 @@ function configureExactlyOneStore(): void {
 }
 
 let db: ReturnType<typeof getDatabase>;
-let api: V1StoreApi;
+let api: V1StoreApi | null = null;
+
+/**
+ * The running `/v1` fixture, or a clear failure.
+ *
+ * The handle is nullable so a `beforeEach` that dies before it is assigned reports its own
+ * error rather than a `TypeError` from the teardown; this is the accessor every case uses, so
+ * "not started" can never read as "started and empty".
+ */
+function service(): V1StoreApi {
+  if (api === null) throw new Error("the /v1 fixture was not started");
+  return api;
+}
 
 beforeEach(() => {
   captureInheritedProcessEnv();
@@ -94,7 +106,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  api.stop();
+  api?.stop();
+  api = null;
   closeDatabase();
   restoreInheritedProcessEnv();
 });
@@ -104,7 +117,7 @@ function sqliteStore(): EmailStore {
 }
 
 function httpStore(): EmailStore {
-  return createHttpEmailStore({ baseUrl: api.baseUrl, credential: api.apiKey });
+  return createHttpEmailStore({ baseUrl: service().baseUrl, credential: service().apiKey });
 }
 
 const STORE_VARIANTS: ReadonlyArray<[string, () => EmailStore]> = [
@@ -375,6 +388,30 @@ for (const [label, makeStore] of STORE_VARIANTS) {
         expect("headers" in summary!).toBe(false);
       });
 
+      it("a row that cannot be read breaks ONLY the page that contains it", async () => {
+        // The defect this replaces: an earlier version mapped the WHOLE filtered set before
+        // cutting the window, so one unreadable row made every listing throw — including pages
+        // that did not contain it — and the only remedy the module offered was deleting all
+        // captured mail. Adversarial review measured it. The ordering keys are still validated
+        // over the whole set, because a row that cannot be placed really does break the order
+        // of everything around it; nothing else is.
+        const store = makeStore();
+        seedCapture("sbx-good-old", stamp(1), { subject: "readable, older" });
+        seedCapture("sbx-broken", stamp(2), { to_addresses: "not-json" });
+        seedCapture("sbx-good-new", stamp(3), { subject: "readable, newer" });
+
+        // Pages that avoid the broken row answer normally...
+        expect((await listSandboxEmails(undefined, 1, 0, store)).map((email) => email.subject))
+          .toEqual(["readable, newer"]);
+        expect((await listSandboxEmails(undefined, 1, 2, store)).map((email) => email.subject))
+          .toEqual(["readable, older"]);
+
+        // ...and the page that DOES contain it faults, naming the row.
+        const error = await rejection(listSandboxEmails(undefined, 1, 1, store));
+        expect(error.message).toContain("sbx-broken");
+        expect(error.message).toContain("to_addresses");
+      });
+
       it("windows summaries by the same order as the full listing", async () => {
         const store = makeStore();
         for (let index = 0; index < 4; index += 1) seedCapture(`sbx-${index}`, stamp(index));
@@ -431,21 +468,33 @@ for (const [label, makeStore] of STORE_VARIANTS) {
         expect(error.message).toContain("to_addresses");
       });
 
-      it("FAULTS on an unreadable header map rather than reporting no headers", async () => {
+      it("INHERITED DEFECT: an unreadable header map or attachment list is reported as EMPTY", async () => {
+        // BOTH DELETED ARMS ANSWERED `{}` AND `[]` HERE — `parseJsonObject`/`parseJsonArray`
+        // locally and `cobj`/`carray` remotely agree on every one of these inputs — so there is
+        // no divergence to resolve and this module preserves the behaviour, fabrication and
+        // all. An earlier version of this file FAULTED on all of them, which is a product
+        // decision dressed as a collapse; adversarial review measured the two arms and caught
+        // it. Pinned in both directions so nobody changes it silently either way, and named a
+        // defect so nobody mistakes it for a decision.
         const store = makeStore();
         seedCapture("sbx-bad-headers", stamp(1), { headers_json: "not-json" });
+        seedCapture("sbx-bad-att", stamp(2), { attachments_json: '{"not":"a list"}' });
+        seedCapture("sbx-list-headers", stamp(3), { headers_json: '["x-not", "a-map"]' });
 
-        const error = await rejection(getSandboxEmail("sbx-bad-headers", store));
-        expect(error.message).toContain("sbx-bad-headers");
-        expect(error.message).toContain("headers_json");
+        expect((await getSandboxEmail("sbx-bad-headers", store))?.headers).toEqual({});
+        expect((await getSandboxEmail("sbx-bad-att", store))?.attachments).toEqual([]);
+        expect((await getSandboxEmail("sbx-list-headers", store))?.headers).toEqual({});
       });
 
-      it("FAULTS on an attachment column that parses to something other than a list", async () => {
+      it("INHERITED DEFECT: an EMPTY recipient column is reported as no recipients", async () => {
+        // `''` is not JSON, but both arms answered `[]` for it (`parseJsonArray` short-circuits
+        // on a falsy string; `cstrArray` requires `v.trim()`), so it is preserved. Only a
+        // NON-EMPTY string that does not parse is a fault — that is the one input the two arms
+        // answered differently.
         const store = makeStore();
-        seedCapture("sbx-bad-att", stamp(1), { attachments_json: '{"not":"a list"}' });
+        seedCapture("sbx-empty-to", stamp(1), { to_addresses: "" });
 
-        const error = await rejection(getSandboxEmail("sbx-bad-att", store));
-        expect(error.message).toContain("attachments_json");
+        expect((await getSandboxEmail("sbx-empty-to", store))?.to_addresses).toEqual([]);
       });
 
       it("FAULTS on a recipient list whose entries are not text", async () => {
@@ -458,15 +507,6 @@ for (const [label, makeStore] of STORE_VARIANTS) {
         const error = await rejection(getSandboxEmail("sbx-numeric-to", store));
         expect(error.message).toContain("to_addresses");
         expect(error.message).toContain("number");
-      });
-
-      it("FAULTS on a header column holding a LIST rather than a map", async () => {
-        const store = makeStore();
-        seedCapture("sbx-array-headers", stamp(1), { headers_json: '["x-not", "a-map"]' });
-
-        const error = await rejection(getSandboxEmail("sbx-array-headers", store));
-        expect(error.message).toContain("headers_json");
-        expect(error.message).toContain("not a map");
       });
 
       it("still reads a row carrying the OLD SQLite timestamp format", async () => {
@@ -589,22 +629,6 @@ describe("the configured store", () => {
 
     const error = await rejection(getSandboxEmail("sbx-bad-to"));
     expect(error.message).toContain("to_addresses");
-  });
-
-  it("FAULTS on an unreadable header map rather than answering that there are none", async () => {
-    // The deleted SQLite arm's helper answered `{}` here.
-    seedCapture("sbx-bad-headers", stamp(1), { headers_json: "not-json" });
-
-    expect((await rejection(getSandboxEmail("sbx-bad-headers"))).message).toContain("headers_json");
-  });
-
-  it("FAULTS on an attachment column that is not a list rather than answering that there are none", async () => {
-    // The deleted SQLite arm's helper answered `[]` for anything that was not a JSON array,
-    // including a JSON OBJECT — so a capture whose attachment column had been overwritten with
-    // a record was reported as having no attachments.
-    seedCapture("sbx-bad-att", stamp(1), { attachments_json: '{"not":"a list"}' });
-
-    expect((await rejection(getSandboxEmail("sbx-bad-att"))).message).toContain("attachments_json");
   });
 
   it("writes created_at as an ISO instant, not the table's own default format", async () => {
@@ -888,7 +912,7 @@ describe("a store that cannot answer", () => {
     expect(await clearSandboxEmails(undefined, store)).toBe(1);
   });
 
-  for (const column of ["provider_id", "subject", "reply_to", "to_addresses", "headers_json"] as const) {
+  for (const column of ["provider_id", "subject", "reply_to", "from_address", "html"] as const) {
     it(`FAULTS on a row the store answered WITHOUT its ${column} column`, async () => {
       // Neither shipped store can produce this today — SQLite projects every column of the
       // table and the service selects them all — so it is reachable only through a store that
@@ -926,6 +950,43 @@ describe("a store that cannot answer", () => {
     const error = await rejection(getSandboxEmail("sbx-empty-stamp", base));
     expect(error.message).toContain("created_at");
     expect(error.message).toContain("no readable");
+  });
+
+  it("names how many rows were already deleted when a removal FAULTS part way through", async () => {
+    // The refusal path carried this accounting and the FAULT path did not, which adversarial
+    // review measured: a locked database, a full disk or a transport reset propagated with no
+    // count, so a clear that had already deleted half the table reported only the raw error.
+    const base = sqliteStore();
+    seedCapture("sbx-1", stamp(1));
+    seedCapture("sbx-2", stamp(2));
+    seedCapture("sbx-3", stamp(3));
+    const store: EmailStore = {
+      ...base,
+      sandbox: {
+        ...base.sandbox,
+        remove: async (id: string) => {
+          if (id === "sbx-1") throw new Error("database is locked");
+          return base.sandbox.remove(id);
+        },
+      },
+    };
+
+    const error = await rejection(clearSandboxEmails(undefined, store));
+    expect(error.message).toContain("database is locked");
+    expect(error.message).toContain("2 row(s) were already deleted");
+    expect(tableRows().map((row) => row["id"])).toEqual(["sbx-1"]);
+  });
+
+  it("REFUSES a legacy three-argument call that still passes a database handle", async () => {
+    // The deleted signature took `Database | number` in the third slot. `safeOffset` would
+    // coerce a handle to offset 0 and the call would be answered from the CONFIGURED store —
+    // a plausible wrong page, possibly from a different database, with no error. TypeScript
+    // callers cannot reach this; a JavaScript consumer of the published package can.
+    const error = await rejection(
+      listSandboxEmails(P1, 10, db as unknown as number),
+    );
+    expect(error.message).toContain("the OFFSET");
+    expect(error.message).toContain("fourth position");
   });
 
   it("names how many rows were already deleted when a removal refuses part way through", async () => {

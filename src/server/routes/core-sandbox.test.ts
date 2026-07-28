@@ -34,7 +34,19 @@ const PHANTOM_ID = "sbx-only-on-the-api";
 
 let INHERITED_PROCESS_ENV: NodeJS.ProcessEnv;
 let db: ReturnType<typeof getDatabase>;
-let api: V1StoreApi;
+let api: V1StoreApi | null = null;
+
+/**
+ * The running `/v1` fixture, or a clear failure.
+ *
+ * The handle is nullable so a `beforeEach` that dies before it is assigned reports its own
+ * error rather than a `TypeError` from the teardown; this is the accessor every case uses, so
+ * "not started" can never read as "started and empty".
+ */
+function service(): V1StoreApi {
+  if (api === null) throw new Error("the /v1 fixture was not started");
+  return api;
+}
 
 function phantomRow(): ResourceRow {
   return {
@@ -102,12 +114,13 @@ beforeEach(() => {
   // ENVIRONMENT now describes an API and nothing else. A path and an API together are a hard
   // boot error, so the two cannot both be configured.
   for (const setting of DATABASE_PATH_SETTINGS) delete process.env[setting];
-  process.env[API_BASE_URL_SETTING] = api.baseUrl;
-  process.env[API_CREDENTIAL_SETTINGS[1] as string] = api.apiKey;
+  process.env[API_BASE_URL_SETTING] = service().baseUrl;
+  process.env[API_CREDENTIAL_SETTINGS[1] as string] = service().apiKey;
 });
 
 afterEach(() => {
-  api.stop();
+  api?.stop();
+  api = null;
   closeDatabase();
   for (const key of Object.keys(process.env)) {
     if (!Object.hasOwn(INHERITED_PROCESS_ENV, key)) delete process.env[key];
@@ -123,26 +136,26 @@ describe("the fixture itself", () => {
     // regression would still look green. So the counterfactual is exercised for real: the store
     // the ENVIRONMENT names is built the same way the collapsed module would build it, and it
     // answers with the capture no local table holds. Adversarial review asked for this.
-    const before = api.requestCount();
-    const configured = createHttpEmailStore({ baseUrl: api.baseUrl, credential: api.apiKey });
+    const before = service().requestCount();
+    const configured = createHttpEmailStore({ baseUrl: service().baseUrl, credential: service().apiKey });
     const listed = await configured.sandbox.list({ limit: 50 });
 
     expect(listed.ok).toBe(true);
     if (listed.ok) expect(listed.value.map((row) => row["id"])).toEqual([PHANTOM_ID]);
-    expect(api.requestCount()).toBeGreaterThan(before);
+    expect(service().requestCount()).toBeGreaterThan(before);
   });
 });
 
 describe("GET /api/sandbox", () => {
   it("lists the LOCAL captures, not the ones the configured API would serve", async () => {
-    const before = api.requestCount();
+    const before = service().requestCount();
     const body = await (await call("/api/sandbox", "GET")).json() as Array<Record<string, unknown>>;
 
     expect(body.map((row) => row["id"])).toEqual(["sbx-local-2", "sbx-local-1"]);
     expect(body.map((row) => row["subject"])).toContain("held locally");
     // The route did not go to the wire at all — a stronger statement than "the phantom row is
     // absent", which would also hold for a route that asked the API and got nothing.
-    expect(api.requestCount()).toBe(before);
+    expect(service().requestCount()).toBe(before);
   });
 });
 
@@ -159,23 +172,23 @@ describe("GET /api/sandbox/:id", () => {
     // body would be unfalsifiable here — the phantom row could not appear under ANY routing —
     // so what is asserted instead is that the request count did not move. Adversarial review
     // found the earlier version of this case could not fail.
-    const before = api.requestCount();
+    const before = service().requestCount();
     const response = await call(`/api/sandbox/${PHANTOM_ID}`, "GET");
 
     expect(response.status).toBe(400);
-    expect(api.requestCount()).toBe(before);
+    expect(service().requestCount()).toBe(before);
   });
 });
 
 describe("DELETE /api/sandbox", () => {
   it("deletes the LOCAL captures and reports the number it really removed", async () => {
-    const before = api.requestCount();
+    const before = service().requestCount();
     const body = await (await call("/api/sandbox", "DELETE")).json() as { deleted: number };
 
     expect(body.deleted).toBe(2);
     expect(db.query("SELECT id FROM sandbox_emails").all()).toEqual([]);
     // A delete that followed the environment would have removed nothing local and reported 1,
     // because the API fixture answers every removal with success.
-    expect(api.requestCount()).toBe(before);
+    expect(service().requestCount()).toBe(before);
   });
 });
