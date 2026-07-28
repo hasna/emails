@@ -15970,6 +15970,74 @@ export const SELF_HOSTED_RESPONSE_CONTRACTS: readonly SelfHostedResponseContract
             "principal_type": {
               "type": "string",
               "enum": [
+                "idp"
+              ]
+            },
+            "sub": {
+              "type": "string",
+              "minLength": 1
+            },
+            "tenant": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "slug": {
+                      "type": "string"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "slug",
+                    "name",
+                    "status"
+                  ]
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "id"
+                  ]
+                }
+              ]
+            },
+            "scopes": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "principal_type",
+            "sub",
+            "tenant",
+            "scopes"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "principal_type": {
+              "type": "string",
+              "enum": [
                 "user"
               ]
             },

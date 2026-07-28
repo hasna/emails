@@ -33,6 +33,11 @@ const ALLOWED_UNREACHABLE: Array<{ path: string; reason: string }> = [
   { path: "src/test-support/cli-refusals.ts", reason: "test-only ORACLE: parses the CLI's serverOnly()/notImplementedAnywhere() call sites so a guard can check the refusal registry against the CLI instead of against itself. Deliberately not shipped — nothing at runtime may depend on reading its own source." },
   { path: "src/test-support/mcp-http.ts", reason: "test-only MCP HTTP fixture (bearer token + guarded transport), imported by *.test.ts" },
   { path: "src/server/self-hosted/auth/test-support.ts", reason: "test-only auth deps, imported by *.test.ts" },
+  {
+    path: "src/server/self-hosted/auth/idp-test-support.ts",
+    reason:
+      "test-only Ed25519 IdP-token signer, imported by *.test.ts. Deliberately not shipped — emails only VERIFIES IdP tokens; minting belongs to the IdP, so no runtime module may sign one.",
+  },
   { path: "src/types/domains.d.ts", reason: "ambient module declaration; consumed by tsc, not by the module graph" },
 ];
 

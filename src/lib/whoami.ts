@@ -23,7 +23,9 @@ export interface IdentityMembership {
 
 export interface IdentityContext {
   /** How the caller authenticated. */
-  principalType: "user" | "apikey" | "unknown";
+  principalType: "user" | "apikey" | "idp" | "unknown";
+  /** IdP principal id (`sub`) — present for IdP-token credentials. */
+  sub: string | null;
   user: { id: string | null; email: string | null; name: string | null } | null;
   /** The tenant this credential is currently scoped to. */
   tenant: IdentityTenant | null;
@@ -64,12 +66,12 @@ function toMemberships(value: unknown): IdentityMembership[] {
   return out;
 }
 
-/** Normalize a raw GET /v1/me body into an IdentityContext. */
-function normalizeIdentity(raw: unknown): IdentityContext {
+/** Normalize a raw GET /v1/me body into an IdentityContext. Exported for tests. */
+export function normalizeIdentity(raw: unknown): IdentityContext {
   const obj = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
   const principalRaw = str(obj["principalType"]) ?? str(obj["principal_type"]);
   const principalType: IdentityContext["principalType"] =
-    principalRaw === "user" || principalRaw === "apikey"
+    principalRaw === "user" || principalRaw === "apikey" || principalRaw === "idp"
       ? principalRaw
       : obj["user"]
         ? "user"
@@ -82,6 +84,7 @@ function normalizeIdentity(raw: unknown): IdentityContext {
     : [];
   return {
     principalType,
+    sub: str(obj["sub"]),
     user: userObj ? { id: str(userObj["id"]), email: str(userObj["email"]), name: str(userObj["name"]) } : null,
     tenant: toTenant(obj["tenant"]),
     role: str(obj["role"]),
@@ -121,6 +124,9 @@ export function fetchIdentitySafe(): IdentityContext | null {
 export function describeIdentity(identity: IdentityContext | null): string {
   if (!identity) return "not signed in";
   const org = identity.tenant?.slug ?? identity.tenant?.name ?? "unknown org";
+  if (identity.principalType === "idp") {
+    return identity.sub ? `${org} (idp agent ${identity.sub})` : `${org} (idp agent)`;
+  }
   if (identity.principalType === "apikey") return `${org} (api key)`;
   const who = identity.user?.email ?? "user";
   return identity.role ? `${who} · ${org} (${identity.role})` : `${who} · ${org}`;

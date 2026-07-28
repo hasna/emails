@@ -2677,6 +2677,36 @@ const ATTACHMENT_REPAIR_LEDGER = defineMigration(
   `,
 );
 
+/**
+ * 0021 — idp-principal → tenant map (ADR-0001 Phase 1, additive only).
+ *
+ * Resolution-layer table in the exact mold of api_key_tenants / send_key_tenants:
+ * read BEFORE a tenant is known (it resolves one), deliberately absent from
+ * SELF_HOSTED_RESOURCES and from the RLS list in 0013. Maps a verified idp
+ * token's `sub` (IdP user or service-principal id) to the emails tenant it may
+ * act in. `idp_tid` pins the IdP tenant observed when the grant was made — a
+ * token whose `tid` no longer matches is refused, so a principal moved between
+ * IdP tenants does not silently keep old mail access. `revoked_at` is the
+ * emails-side immediate kill switch (IdP revocation stops NEW tokens; stateless
+ * verifiers cannot see the jti denylist within a token's ≤24h life — ADR-0001).
+ */
+const IDP_PRINCIPAL_TENANTS = defineMigration(
+  "0021_idp_principal_tenants",
+  `
+  CREATE TABLE IF NOT EXISTS idp_principal_tenants (
+    sub                text PRIMARY KEY,
+    tenant_id          uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    idp_tid          text,
+    principal_type     text NOT NULL DEFAULT 'service' CHECK (principal_type IN ('user', 'service')),
+    note               text,
+    created_by_user_id uuid REFERENCES users(id),
+    created_at         timestamptz NOT NULL DEFAULT now(),
+    revoked_at         timestamptz
+  );
+  CREATE INDEX IF NOT EXISTS idp_principal_tenants_tenant_idx ON idp_principal_tenants (tenant_id);
+  `,
+);
+
 /** All migrations, in order: api-keys table (auth), the core schema, inbound. */
 export function emailsSelfHostedMigrations(): Migration[] {
   const authMigrations = apiKeyMigrations().map((m) => defineMigration(m.id, m.sql));
@@ -2704,5 +2734,6 @@ export function emailsSelfHostedMigrations(): Migration[] {
     SEND_INTENT_RECOVERY,
     INBOX_PERF_ROLLUPS,
     ATTACHMENT_REPAIR_LEDGER,
+    IDP_PRINCIPAL_TENANTS,
   ];
 }

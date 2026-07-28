@@ -46,6 +46,17 @@ export interface TenantRow {
   updated_at: string;
 }
 
+/** An IdP-principal → tenant grant (idp_principal_tenants; ADR-0001 Phase 1). */
+export interface IdpPrincipalMapping {
+  sub: string;
+  tenantId: string;
+  /** IdP tenant pinned at grant time; a token with a different `tid` is refused. */
+  idpTid: string | null;
+  principalType: "user" | "service";
+  /** Set ⇒ the emails-side kill switch is thrown; fail closed. */
+  revokedAt: string | null;
+}
+
 export interface UserRow {
   id: string;
   email: string;
@@ -220,6 +231,76 @@ export class AuthStore {
       [kid],
     );
     return row?.tenant_id ?? null;
+  }
+
+  /**
+   * Resolve a verified idp token's `sub` to its mapping row (ADR-0001 Phase 1).
+   * Mirrors getApiKeyTenant's fail-closed tenant-status join: a suspended tenant
+   * locks out its idp principals too. The row is returned WITH `revoked_at`
+   * and `idp_tid` so the caller can refuse with a precise, typed reason
+   * (revoked mapping vs IdP-tenant mismatch) instead of a generic miss.
+   */
+  async getIdpPrincipalTenant(sub: string): Promise<IdpPrincipalMapping | null> {
+    const row = await this.client.get<{
+      sub: string;
+      tenant_id: string;
+      idp_tid: string | null;
+      principal_type: string;
+      revoked_at: string | null;
+    }>(
+      `SELECT fpt.sub, fpt.tenant_id, fpt.idp_tid, fpt.principal_type, fpt.revoked_at
+         FROM idp_principal_tenants fpt
+         JOIN tenants t ON t.id = fpt.tenant_id
+        WHERE fpt.sub = $1 AND t.status = 'active'`,
+      [sub],
+    );
+    if (!row) return null;
+    return {
+      sub: row.sub,
+      tenantId: row.tenant_id,
+      idpTid: row.idp_tid,
+      principalType: row.principal_type === "user" ? "user" : "service",
+      revokedAt: row.revoked_at,
+    };
+  }
+
+  /** Create (or re-point) an IdP-principal mapping. Explicit grant, never inferred. */
+  async upsertIdpPrincipalTenant(input: {
+    sub: string;
+    tenantId: string;
+    idpTid?: string | null;
+    principalType?: "user" | "service";
+    note?: string | null;
+    createdByUserId?: string | null;
+  }): Promise<void> {
+    await this.client.execute(
+      `INSERT INTO idp_principal_tenants (sub, tenant_id, idp_tid, principal_type, note, created_by_user_id)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (sub) DO UPDATE SET
+         tenant_id = EXCLUDED.tenant_id,
+         idp_tid = EXCLUDED.idp_tid,
+         principal_type = EXCLUDED.principal_type,
+         note = EXCLUDED.note,
+         created_by_user_id = EXCLUDED.created_by_user_id,
+         revoked_at = NULL`,
+      [
+        input.sub,
+        input.tenantId,
+        input.idpTid ?? null,
+        input.principalType ?? "service",
+        input.note ?? null,
+        input.createdByUserId ?? null,
+      ],
+    );
+  }
+
+  /** Emails-side immediate kill switch for an IdP principal (ADR-0002 step 5). */
+  async revokeIdpPrincipalTenant(sub: string): Promise<boolean> {
+    const result = await this.client.query(
+      `UPDATE idp_principal_tenants SET revoked_at = now() WHERE sub = $1 AND revoked_at IS NULL`,
+      [sub],
+    );
+    return result.rowCount > 0;
   }
 
   /**
