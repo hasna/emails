@@ -290,7 +290,7 @@ describe("self-hosted OpenAPI success-response schemas", () => {
       expect.objectContaining({
         required: ["principal_type", "sub", "tenant", "scopes"],
         properties: expect.objectContaining({
-          principal_type: expect.objectContaining({ enum: ["fleet"] }),
+          principal_type: expect.objectContaining({ enum: ["idp"] }),
         }),
       }),
       expect.objectContaining({

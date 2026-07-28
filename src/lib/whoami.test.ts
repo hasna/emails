@@ -1,18 +1,18 @@
-// Client-side identity normalization — the fleet principal class (ADR-0001/2)
+// Client-side identity normalization — the idp principal class (ADR-0001/2)
 // plus the pre-existing shapes it must not disturb.
 
 import { describe, expect, it } from "bun:test";
 import { describeIdentity, normalizeIdentity } from "./whoami.js";
 
 describe("normalizeIdentity", () => {
-  it("normalizes a fleet /v1/me body (principal_type, sub, tenant, scopes)", () => {
+  it("normalizes an IdP /v1/me body (principal_type, sub, tenant, scopes)", () => {
     const identity = normalizeIdentity({
-      principal_type: "fleet",
+      principal_type: "idp",
       sub: "sp-agent-1",
       tenant: { id: "t-1", slug: "acme", name: "Acme" },
       scopes: ["emails:read"],
     });
-    expect(identity.principalType).toBe("fleet");
+    expect(identity.principalType).toBe("idp");
     expect(identity.sub).toBe("sp-agent-1");
     expect(identity.tenant).toEqual({ id: "t-1", slug: "acme", name: "Acme" });
     expect(identity.scopes).toEqual(["emails:read"]);
@@ -41,13 +41,13 @@ describe("normalizeIdentity", () => {
 });
 
 describe("describeIdentity", () => {
-  it("labels a fleet principal with its org and short sub", () => {
+  it("labels an IdP principal with its org and short sub", () => {
     const identity = normalizeIdentity({
-      principal_type: "fleet",
+      principal_type: "idp",
       sub: "sp-agent-1",
       tenant: { id: "t-1", slug: "acme", name: "Acme" },
       scopes: ["emails:read"],
     });
-    expect(describeIdentity(identity)).toBe("acme (fleet agent sp-agent-1)");
+    expect(describeIdentity(identity)).toBe("acme (idp agent sp-agent-1)");
   });
 });

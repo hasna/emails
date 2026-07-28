@@ -15970,7 +15970,7 @@ export const SELF_HOSTED_RESPONSE_CONTRACTS: readonly SelfHostedResponseContract
             "principal_type": {
               "type": "string",
               "enum": [
-                "fleet"
+                "idp"
               ]
             },
             "sub": {

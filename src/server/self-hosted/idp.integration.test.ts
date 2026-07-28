@@ -1,6 +1,6 @@
-// Fleet credential class against a REAL Postgres (ADR-0001 Phase 1).
+// Idp credential class against a REAL Postgres (ADR-0001 Phase 1).
 //
-// Proves what the hermetic fleet tests cannot: migration 0021 actually creates
+// Proves what the hermetic idp tests cannot: migration 0021 actually creates
 // the resolution table (outside RLS, idempotent), the AuthStore mapping methods
 // run real SQL, and resolveRequestContext resolves a real signed token through
 // the real store — allow, emails-side revocation, and the suspended-tenant
@@ -22,8 +22,8 @@ import type { SelfHostedServiceDeps } from "./service.js";
 import { AuthStore } from "./auth/store.js";
 import { RateLimiter } from "./auth/rate-limit.js";
 import { resolveRequestContext } from "./auth/service.js";
-import { FleetTokenAuthenticator, parseFleetClaimsUnverified } from "./auth/fleet-token.js";
-import { generateTestFleetKey, signTestFleetToken } from "./auth/fleet-test-support.js";
+import { IdpTokenAuthenticator, parseIdpClaimsUnverified } from "./auth/idp-token.js";
+import { generateTestIdpKey, signTestIdpToken } from "./auth/idp-test-support.js";
 import { testAuthEnv, testAuthMailer, STUB_KEY_STORE } from "./auth/test-support.js";
 
 const databaseUrl = process.env["EMAILS_TEST_POSTGRES_URL"];
@@ -34,9 +34,9 @@ const pg: PoolQueryClient | null = databaseUrl
 const liveJwksUrl = process.env["EMAILS_TEST_TENANTS_JWKS_URL"];
 
 const TENANT_ID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
-const FLEET_TID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+const IDP_TID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 const SIGNING_SECRET = "test-signing-secret-do-not-use-in-prod";
-const key = generateTestFleetKey("kid-int");
+const key = generateTestIdpKey("kid-int");
 
 function deps(): SelfHostedServiceDeps {
   return {
@@ -52,7 +52,7 @@ function deps(): SelfHostedServiceDeps {
     rateLimiter: new RateLimiter(),
     mailer: testAuthMailer(),
     env: testAuthEnv(),
-    fleetAuthenticator: new FleetTokenAuthenticator({
+    idpAuthenticator: new IdpTokenAuthenticator({
       jwksUrl: "https://idp.example.com/v1/.well-known/jwks.json",
       expectedAudiences: ["emails", "mailery"],
       fetchJwks: async () => ({ keys: [key.publicJwk] }),
@@ -78,7 +78,7 @@ beforeAll(async () => {
   await pg.execute("CREATE SCHEMA public");
   await new MigrationLedger(pg, emailsSelfHostedMigrations()).migrate();
   await pg.execute(
-    `INSERT INTO tenants (id, slug, name, status) VALUES ($1, 'fleet-int', 'Fleet Int', 'active')
+    `INSERT INTO tenants (id, slug, name, status) VALUES ($1, 'idp-int', 'Idp Int', 'active')
      ON CONFLICT (id) DO NOTHING`,
     [TENANT_ID],
   );
@@ -88,108 +88,108 @@ afterAll(async () => {
   await pg?.close();
 });
 
-describe.skipIf(!pg)("migration 0021 — fleet_principal_tenants", () => {
+describe.skipIf(!pg)("migration 0021 — idp_principal_tenants", () => {
   it("creates the resolution table OUTSIDE row-level security", async () => {
     const table = await pg!.one<{ relrowsecurity: boolean; relforcerowsecurity: boolean }>(
       `SELECT relrowsecurity, relforcerowsecurity
          FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-        WHERE n.nspname = 'public' AND c.relname = 'fleet_principal_tenants'`,
+        WHERE n.nspname = 'public' AND c.relname = 'idp_principal_tenants'`,
     );
     // Resolution tables are read BEFORE a tenant is known; RLS here would make
-    // every fleet authentication fail. Absence is the designed state.
+    // every idp authentication fail. Absence is the designed state.
     expect(table).toEqual({ relrowsecurity: false, relforcerowsecurity: false });
   });
 
   it("is internally idempotent: re-executing its SQL is a clean no-op", async () => {
-    const migration = emailsSelfHostedMigrations().find((m) => m.id === "0021_fleet_principal_tenants")!;
+    const migration = emailsSelfHostedMigrations().find((m) => m.id === "0021_idp_principal_tenants")!;
     await pg!.execute(migration.sql);
     await pg!.execute(migration.sql);
     expect(migration).toBeDefined();
   });
 });
 
-describe.skipIf(!pg)("AuthStore fleet mapping — real SQL round-trip", () => {
+describe.skipIf(!pg)("AuthStore idp mapping — real SQL round-trip", () => {
   const store = () => new AuthStore(pg!);
 
   it("upserts, resolves, and revokes a mapping", async () => {
-    await store().upsertFleetPrincipalTenant({
+    await store().upsertIdpPrincipalTenant({
       sub: "sp-roundtrip",
       tenantId: TENANT_ID,
-      fleetTid: FLEET_TID,
+      idpTid: IDP_TID,
       note: "integration",
     });
-    const mapping = await store().getFleetPrincipalTenant("sp-roundtrip");
+    const mapping = await store().getIdpPrincipalTenant("sp-roundtrip");
     expect(mapping).toMatchObject({
       sub: "sp-roundtrip",
       tenantId: TENANT_ID,
-      fleetTid: FLEET_TID,
+      idpTid: IDP_TID,
       principalType: "service",
       revokedAt: null,
     });
 
-    expect(await store().revokeFleetPrincipalTenant("sp-roundtrip")).toBe(true);
-    const revoked = await store().getFleetPrincipalTenant("sp-roundtrip");
+    expect(await store().revokeIdpPrincipalTenant("sp-roundtrip")).toBe(true);
+    const revoked = await store().getIdpPrincipalTenant("sp-roundtrip");
     expect(revoked?.revokedAt).not.toBeNull();
     // Second revoke is a no-op, reported as such.
-    expect(await store().revokeFleetPrincipalTenant("sp-roundtrip")).toBe(false);
+    expect(await store().revokeIdpPrincipalTenant("sp-roundtrip")).toBe(false);
     // Re-granting clears the revocation (explicit re-grant, audited by caller).
-    await store().upsertFleetPrincipalTenant({ sub: "sp-roundtrip", tenantId: TENANT_ID, fleetTid: FLEET_TID });
-    expect((await store().getFleetPrincipalTenant("sp-roundtrip"))?.revokedAt).toBeNull();
+    await store().upsertIdpPrincipalTenant({ sub: "sp-roundtrip", tenantId: TENANT_ID, idpTid: IDP_TID });
+    expect((await store().getIdpPrincipalTenant("sp-roundtrip"))?.revokedAt).toBeNull();
   });
 
   it("fails closed when the mapped tenant is suspended", async () => {
     const suspended = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
     await pg!.execute(
-      `INSERT INTO tenants (id, slug, name, status) VALUES ($1, 'fleet-sus', 'Suspended', 'suspended')
+      `INSERT INTO tenants (id, slug, name, status) VALUES ($1, 'idp-sus', 'Suspended', 'suspended')
        ON CONFLICT (id) DO NOTHING`,
       [suspended],
     );
-    await store().upsertFleetPrincipalTenant({ sub: "sp-suspended", tenantId: suspended });
-    expect(await store().getFleetPrincipalTenant("sp-suspended")).toBeNull();
+    await store().upsertIdpPrincipalTenant({ sub: "sp-suspended", tenantId: suspended });
+    expect(await store().getIdpPrincipalTenant("sp-suspended")).toBeNull();
   });
 });
 
 describe.skipIf(!pg)("resolveRequestContext with a real store and real signed tokens", () => {
   it("allows a mapped principal, then honors the emails-side kill switch", async () => {
-    await new AuthStore(pg!).upsertFleetPrincipalTenant({
+    await new AuthStore(pg!).upsertIdpPrincipalTenant({
       sub: "sp-e2e",
       tenantId: TENANT_ID,
-      fleetTid: FLEET_TID,
+      idpTid: IDP_TID,
     });
-    const { token } = signTestFleetToken(key, { sub: "sp-e2e", tid: FLEET_TID, scope: ["emails:*"] });
+    const { token } = signTestIdpToken(key, { sub: "sp-e2e", tid: IDP_TID, scope: ["emails:*"] });
 
     const allowed = await resolve(token);
     if (!allowed.ok) throw new Error("expected allow");
     expect(allowed.ctx).toEqual({
       tenantId: TENANT_ID,
-      principalType: "fleet",
+      principalType: "idp",
       sub: "sp-e2e",
       scopes: ["emails:*"],
     });
 
-    await new AuthStore(pg!).revokeFleetPrincipalTenant("sp-e2e");
-    expect(await denyReason(await resolve(token))).toEqual({ status: 403, reason: "fleet_principal_revoked" });
+    await new AuthStore(pg!).revokeIdpPrincipalTenant("sp-e2e");
+    expect(await denyReason(await resolve(token))).toEqual({ status: 403, reason: "idp_principal_revoked" });
   });
 
   it("refuses an unmapped principal against the real table", async () => {
-    const { token } = signTestFleetToken(key, { sub: "sp-never-mapped", tid: FLEET_TID });
+    const { token } = signTestIdpToken(key, { sub: "sp-never-mapped", tid: IDP_TID });
     expect(await denyReason(await resolve(token))).toEqual({ status: 403, reason: "no_tenant" });
   });
 });
 
 describe.skipIf(!liveJwksUrl)("live @hasna/tenants JWKS endpoint", () => {
   it("serves a JWKS the authenticator accepts, and refuses our locally-signed token (typed unknown_kid)", async () => {
-    const authenticator = new FleetTokenAuthenticator({
+    const authenticator = new IdpTokenAuthenticator({
       jwksUrl: liveJwksUrl!,
       expectedAudiences: ["emails", "mailery"],
     });
     // A locally-signed token must be refused with a typed reason (never a 5xx):
     // the live IdP does not hold our throwaway key. This proves the fetch path,
     // the JWKS parse, and the fail-closed verify against real key material.
-    const { token } = signTestFleetToken(key, { sub: "sp-live" });
+    const { token } = signTestIdpToken(key, { sub: "sp-live" });
     const result = await authenticator.authenticate(token);
     expect(result.ok).toBe(false);
     if (!result.ok) expect(["unknown_kid", "bad_signature"]).toContain(result.reason);
-    expect(parseFleetClaimsUnverified(token)?.sub).toBe("sp-live");
+    expect(parseIdpClaimsUnverified(token)?.sub).toBe("sp-live");
   });
 });

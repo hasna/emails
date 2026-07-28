@@ -17,11 +17,11 @@
 import type { ApiKeyVerifier } from "@hasna/contracts/auth";
 import { extractToken, hasAllScopes } from "@hasna/contracts/auth";
 import {
-  looksLikeFleetToken,
-  normalizeFleetScopes,
-  parseFleetClaimsUnverified,
-  type FleetTokenAuthenticator,
-} from "./fleet-token.js";
+  looksLikeIdpToken,
+  normalizeIdpScopes,
+  parseIdpClaimsUnverified,
+  type IdpTokenAuthenticator,
+} from "./idp-token.js";
 import {
   hashPassword,
   verifyPasswordOrEqualizeTiming,
@@ -57,7 +57,7 @@ import {
 
 // ---- request context ---------------------------------------------------------
 
-export type PrincipalType = "user" | "apikey" | "fleet";
+export type PrincipalType = "user" | "apikey" | "idp";
 
 export interface RequestContext {
   tenantId: string;
@@ -66,17 +66,17 @@ export interface RequestContext {
   role?: Role;
   globalRole?: GlobalRole;
   kid?: string;
-  /** Fleet principal id (IdP `sub`) — present for the fleet credential class. */
+  /** IdP principal id (`sub`) — present for the IdP credential class. */
   sub?: string;
   scopes: string[];
 }
 
 /**
- * Structured, secret-free audit record for every fleet-token authentication
- * decision (ADR-0002 §Audit: `fleet.auth.allow` / `fleet.auth.deny`). Carries
+ * Structured, secret-free audit record for every idp-token authentication
+ * decision (ADR-0002 §Audit: `idp.auth.allow` / `idp.auth.deny`). Carries
  * the jti (the audit join key with the IdP's issuance log) — never the token.
  */
-export interface FleetAuthAuditEvent {
+export interface IdpAuthAuditEvent {
   outcome: "allow" | "deny";
   sub: string | null;
   tid: string | null;
@@ -125,13 +125,13 @@ export interface AuthServiceDeps {
   mailer: AuthMailerConfig;
   env?: NodeJS.ProcessEnv;
   /**
-   * Fleet-token verifier (ADR-0001 Phase 1). Absent/null ⇒ the fleet credential
+   * Idp-token verifier (ADR-0001 Phase 1). Absent/null ⇒ the idp credential
    * class is REFUSED with a typed error — fail closed until an operator
    * configures the IdP's JWKS URL. Existing classes are unaffected either way.
    */
-  fleetAuthenticator?: FleetTokenAuthenticator | null;
-  /** Audit hook for fleet auth decisions; unset ⇒ silent (tests). */
-  fleetAudit?: (event: FleetAuthAuditEvent) => void;
+  idpAuthenticator?: IdpTokenAuthenticator | null;
+  /** Audit hook for idp auth decisions; unset ⇒ silent (tests). */
+  idpAudit?: (event: IdpAuthAuditEvent) => void;
 }
 
 export type ResolveResult =
@@ -202,18 +202,18 @@ export async function resolveRequestContext(
     };
   }
 
-  // Fleet tokens (EdDSA JWS from the fleet IdP — ADR-0001 Phase 1). Detected
+  // Idp tokens (EdDSA JWS from the IdP — ADR-0001 Phase 1). Detected
   // STRUCTURALLY and only after the prefix classes above, so `hasna_`/`emss_`
   // behaviour is byte-equivalent with this class present or absent.
-  if (looksLikeFleetToken(token)) {
-    return await resolveFleetContext(deps, req, url, requiredScopes, token);
+  if (looksLikeIdpToken(token)) {
+    return await resolveIdpContext(deps, req, url, requiredScopes, token);
   }
 
   return fail(401, "unrecognized credential", "malformed");
 }
 
-/** The fleet branch of resolveRequestContext: verify → map sub → scopes → ctx. */
-async function resolveFleetContext(
+/** The idp branch of resolveRequestContext: verify → map sub → scopes → ctx. */
+async function resolveIdpContext(
   deps: AuthServiceDeps,
   req: Request,
   url: URL,
@@ -226,7 +226,7 @@ async function resolveFleetContext(
     reason: string | null,
     ids: { sub?: string | null; tid?: string | null; jti?: string | null; kid?: string | null },
   ): void => {
-    deps.fleetAudit?.({
+    deps.idpAudit?.({
       outcome,
       sub: ids.sub ?? null,
       tid: ids.tid ?? null,
@@ -242,15 +242,15 @@ async function resolveFleetContext(
   };
   // Forensic ids for deny lines before/without signature trust (mirrors the
   // API-key path's structural kid recovery). Never used for authorization.
-  const unverified = parseFleetClaimsUnverified(token);
+  const unverified = parseIdpClaimsUnverified(token);
 
-  const authenticator = deps.fleetAuthenticator ?? null;
+  const authenticator = deps.idpAuthenticator ?? null;
   if (!authenticator) {
-    audit("deny", 401, "fleet_not_configured", unverified ?? {});
+    audit("deny", 401, "idp_not_configured", unverified ?? {});
     return fail(
       401,
-      "fleet tokens are not accepted by this deployment (no fleet JWKS configured)",
-      "fleet_not_configured",
+      "idp tokens are not accepted by this deployment (no idp JWKS configured)",
+      "idp_not_configured",
     );
   }
 
@@ -259,28 +259,28 @@ async function resolveFleetContext(
     audit("deny", verified.status, verified.reason, unverified ?? {});
     const message =
       verified.reason === "jwks_unavailable"
-        ? "fleet auth is temporarily unavailable (JWKS could not be fetched)"
-        : "fleet token was refused";
+        ? "idp auth is temporarily unavailable (JWKS could not be fetched)"
+        : "idp token was refused";
     return fail(verified.status, message, verified.reason);
   }
   const { claims, kid } = verified;
   const ids = { sub: claims.sub, tid: claims.tid, jti: claims.jti, kid };
 
-  const mapping = await deps.authStore.getFleetPrincipalTenant(claims.sub);
+  const mapping = await deps.authStore.getIdpPrincipalTenant(claims.sub);
   if (!mapping) {
     audit("deny", 403, "no_tenant", ids);
-    return fail(403, "fleet principal is not mapped to a tenant", "no_tenant");
+    return fail(403, "idp principal is not mapped to a tenant", "no_tenant");
   }
   if (mapping.revokedAt) {
-    audit("deny", 403, "fleet_principal_revoked", ids);
-    return fail(403, "fleet principal access has been revoked", "fleet_principal_revoked");
+    audit("deny", 403, "idp_principal_revoked", ids);
+    return fail(403, "idp principal access has been revoked", "idp_principal_revoked");
   }
-  if (mapping.fleetTid && mapping.fleetTid !== claims.tid) {
-    audit("deny", 403, "fleet_tenant_mismatch", ids);
-    return fail(403, "fleet token tenant does not match the granted mapping", "fleet_tenant_mismatch");
+  if (mapping.idpTid && mapping.idpTid !== claims.tid) {
+    audit("deny", 403, "idp_tenant_mismatch", ids);
+    return fail(403, "idp token tenant does not match the granted mapping", "idp_tenant_mismatch");
   }
 
-  const scopes = normalizeFleetScopes(claims.scope);
+  const scopes = normalizeIdpScopes(claims.scope);
   if (!hasAllScopes(scopes, requiredScopes)) {
     audit("deny", 403, "insufficient_scope", ids);
     return fail(403, "insufficient scope for this operation", "insufficient_scope");
@@ -291,7 +291,7 @@ async function resolveFleetContext(
     ok: true,
     ctx: {
       tenantId: mapping.tenantId,
-      principalType: "fleet",
+      principalType: "idp",
       sub: claims.sub,
       scopes,
     },
@@ -890,9 +890,9 @@ async function handleMe(deps: AuthServiceDeps, req: Request, url: URL): Promise<
   if (!resolved.ok) return resolved.response;
   const ctx = resolved.ctx;
   const tenant = await deps.authStore.getTenantById(ctx.tenantId);
-  if (ctx.principalType === "fleet") {
+  if (ctx.principalType === "idp") {
     return json(200, {
-      principal_type: "fleet",
+      principal_type: "idp",
       sub: ctx.sub,
       tenant: tenant ? toPublicTenant(tenant) : { id: ctx.tenantId },
       scopes: ctx.scopes,

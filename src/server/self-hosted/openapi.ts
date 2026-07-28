@@ -1424,7 +1424,7 @@ const currentPrincipalResponseSchema = {
     {
       type: "object",
       properties: {
-        principal_type: { type: "string", enum: ["fleet"] },
+        principal_type: { type: "string", enum: ["idp"] },
         sub: { type: "string", minLength: 1 },
         tenant: authRouteTenantReferenceSchema,
         scopes: { type: "array", items: { type: "string" } },

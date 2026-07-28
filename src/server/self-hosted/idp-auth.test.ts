@@ -1,7 +1,7 @@
-// Fleet-token credential class at the service level (ADR-0001 Phase 1).
+// Idp-token credential class at the service level (ADR-0001 Phase 1).
 //
 // Drives resolveRequestContext + GET /v1/me with a fake query client and an
-// injected FleetTokenAuthenticator whose JWKS "fetch" is a stub. Asserts the
+// injected IdpTokenAuthenticator whose JWKS "fetch" is a stub. Asserts the
 // new class end to end (verify → map sub → tenant → scopes → identity) AND
 // that the existing hasna_/emss_ dispatch is untouched by its presence.
 //
@@ -12,25 +12,25 @@ import { verifyApiKey } from "@hasna/contracts/auth";
 import type { TypedQueryClient } from "../../storage-kit/index.js";
 import { emailsSelfHostedMigrations } from "./migrations.js";
 import { handleSelfHostedRequest, type SelfHostedServiceDeps } from "./service.js";
-import { FleetTokenAuthenticator } from "./auth/fleet-token.js";
-import { generateTestFleetKey, signTestFleetToken } from "./auth/fleet-test-support.js";
+import { IdpTokenAuthenticator } from "./auth/idp-token.js";
+import { generateTestIdpKey, signTestIdpToken } from "./auth/idp-test-support.js";
 import {
   resolveRequestContext,
-  type FleetAuthAuditEvent,
+  type IdpAuthAuditEvent,
 } from "./auth/service.js";
 import { ALLOWED_EMAIL_DOMAINS_ENV } from "./auth/allowed-email.js";
 import { selfScopedStore, testAuthDeps } from "./auth/test-support.js";
 
 const SIGNING_SECRET = "test-signing-secret-do-not-use-in-prod";
 const TENANT_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
-const FLEET_TID = "11111111-2222-3333-4444-555555555555";
+const IDP_TID = "11111111-2222-3333-4444-555555555555";
 
-const key = generateTestFleetKey("kid-svc");
+const key = generateTestIdpKey("kid-svc");
 
 interface MappingRow {
   sub: string;
   tenant_id: string;
-  fleet_tid: string | null;
+  idp_tid: string | null;
   principal_type: string;
   revoked_at: string | null;
 }
@@ -45,7 +45,7 @@ function fakeClient(mappings: Map<string, MappingRow>): TypedQueryClient {
       return [] as T[];
     },
     async get<T>(sql: string, params?: readonly unknown[]): Promise<T | null> {
-      if (sql.includes("fleet_principal_tenants")) {
+      if (sql.includes("idp_principal_tenants")) {
         return (mappings.get(String(params?.[0])) as T | undefined) ?? null;
       }
       if (sql.includes("FROM tenants WHERE id")) {
@@ -68,8 +68,8 @@ function fakeClient(mappings: Map<string, MappingRow>): TypedQueryClient {
   return client;
 }
 
-function fleetAuthenticator(): FleetTokenAuthenticator {
-  return new FleetTokenAuthenticator({
+function idpAuthenticator(): IdpTokenAuthenticator {
+  return new IdpTokenAuthenticator({
     jwksUrl: "https://idp.example.com/v1/.well-known/jwks.json",
     expectedAudiences: ["emails", "mailery"],
     fetchJwks: async () => ({ keys: [key.publicJwk] }),
@@ -78,8 +78,8 @@ function fleetAuthenticator(): FleetTokenAuthenticator {
 
 function deps(options: {
   mappings?: Map<string, MappingRow>;
-  authenticator?: FleetTokenAuthenticator | null;
-  audit?: (event: FleetAuthAuditEvent) => void;
+  authenticator?: IdpTokenAuthenticator | null;
+  audit?: (event: IdpAuthAuditEvent) => void;
 } = {}): SelfHostedServiceDeps {
   const client = fakeClient(options.mappings ?? new Map());
   const d: SelfHostedServiceDeps = {
@@ -92,8 +92,8 @@ function deps(options: {
     ...testAuthDeps(client, SIGNING_SECRET),
   };
   d.env = { [ALLOWED_EMAIL_DOMAINS_ENV]: "example.com" };
-  if (options.authenticator !== undefined) d.fleetAuthenticator = options.authenticator;
-  if (options.audit) d.fleetAudit = options.audit;
+  if (options.authenticator !== undefined) d.idpAuthenticator = options.authenticator;
+  if (options.audit) d.idpAudit = options.audit;
   return d;
 }
 
@@ -101,7 +101,7 @@ function mappingRow(overrides: Partial<MappingRow> = {}): MappingRow {
   return {
     sub: "sp-agent-1",
     tenant_id: TENANT_ID,
-    fleet_tid: FLEET_TID,
+    idp_tid: IDP_TID,
     principal_type: "service",
     revoked_at: null,
     ...overrides,
@@ -124,70 +124,70 @@ async function reason(response: Response): Promise<{ status: number; reason: str
   return { status: response.status, reason: body.reason };
 }
 
-describe("fleet credential class — fail closed until configured", () => {
-  it("refuses a fleet-shaped token with a typed 401 when no JWKS is configured", async () => {
-    const { token } = signTestFleetToken(key, { sub: "sp-agent-1" });
+describe("idp credential class — fail closed until configured", () => {
+  it("refuses an IdP-shaped token with a typed 401 when no JWKS is configured", async () => {
+    const { token } = signTestIdpToken(key, { sub: "sp-agent-1" });
     const result = await resolve(deps(), token);
     if (result.ok) throw new Error("expected refusal");
-    expect(await reason(result.response)).toEqual({ status: 401, reason: "fleet_not_configured" });
+    expect(await reason(result.response)).toEqual({ status: 401, reason: "idp_not_configured" });
   });
 
   it("surfaces JWKS unavailability as a typed 503, never an allow", async () => {
-    const authenticator = new FleetTokenAuthenticator({
+    const authenticator = new IdpTokenAuthenticator({
       jwksUrl: "https://idp.example.com/v1/.well-known/jwks.json",
       expectedAudiences: ["emails"],
       fetchJwks: async () => {
         throw new Error("down");
       },
     });
-    const { token } = signTestFleetToken(key, { sub: "sp-agent-1" });
+    const { token } = signTestIdpToken(key, { sub: "sp-agent-1" });
     const result = await resolve(deps({ authenticator }), token);
     if (result.ok) throw new Error("expected refusal");
     expect(await reason(result.response)).toEqual({ status: 503, reason: "jwks_unavailable" });
   });
 });
 
-describe("fleet credential class — mapping and scopes", () => {
+describe("idp credential class — mapping and scopes", () => {
   it("resolves a mapped principal to its tenant with normalized scopes", async () => {
     const mappings = new Map([["sp-agent-1", mappingRow()]]);
-    const { token } = signTestFleetToken(key, { sub: "sp-agent-1", tid: FLEET_TID, scope: ["*"] });
-    const result = await resolve(deps({ mappings, authenticator: fleetAuthenticator() }), token);
+    const { token } = signTestIdpToken(key, { sub: "sp-agent-1", tid: IDP_TID, scope: ["*"] });
+    const result = await resolve(deps({ mappings, authenticator: idpAuthenticator() }), token);
     if (!result.ok) throw new Error(`expected ok, got ${result.response.status}`);
     expect(result.ctx).toEqual({
       tenantId: TENANT_ID,
-      principalType: "fleet",
+      principalType: "idp",
       sub: "sp-agent-1",
       scopes: ["emails:*"],
     });
   });
 
   it("refuses an unmapped principal (403 no_tenant) — mapping is explicit, never inferred", async () => {
-    const { token } = signTestFleetToken(key, { sub: "sp-unmapped", tid: FLEET_TID });
-    const result = await resolve(deps({ authenticator: fleetAuthenticator() }), token);
+    const { token } = signTestIdpToken(key, { sub: "sp-unmapped", tid: IDP_TID });
+    const result = await resolve(deps({ authenticator: idpAuthenticator() }), token);
     if (result.ok) throw new Error("expected refusal");
     expect(await reason(result.response)).toEqual({ status: 403, reason: "no_tenant" });
   });
 
-  it("honors the emails-side kill switch (403 fleet_principal_revoked)", async () => {
+  it("honors the emails-side kill switch (403 idp_principal_revoked)", async () => {
     const mappings = new Map([["sp-agent-1", mappingRow({ revoked_at: "2026-07-28T00:00:00Z" })]]);
-    const { token } = signTestFleetToken(key, { sub: "sp-agent-1", tid: FLEET_TID });
-    const result = await resolve(deps({ mappings, authenticator: fleetAuthenticator() }), token);
+    const { token } = signTestIdpToken(key, { sub: "sp-agent-1", tid: IDP_TID });
+    const result = await resolve(deps({ mappings, authenticator: idpAuthenticator() }), token);
     if (result.ok) throw new Error("expected refusal");
-    expect(await reason(result.response)).toEqual({ status: 403, reason: "fleet_principal_revoked" });
+    expect(await reason(result.response)).toEqual({ status: 403, reason: "idp_principal_revoked" });
   });
 
-  it("refuses a token whose IdP tenant no longer matches the pinned grant (403 fleet_tenant_mismatch)", async () => {
+  it("refuses a token whose IdP tenant no longer matches the pinned grant (403 idp_tenant_mismatch)", async () => {
     const mappings = new Map([["sp-agent-1", mappingRow()]]);
-    const { token } = signTestFleetToken(key, { sub: "sp-agent-1", tid: "99999999-0000-0000-0000-000000000000" });
-    const result = await resolve(deps({ mappings, authenticator: fleetAuthenticator() }), token);
+    const { token } = signTestIdpToken(key, { sub: "sp-agent-1", tid: "99999999-0000-0000-0000-000000000000" });
+    const result = await resolve(deps({ mappings, authenticator: idpAuthenticator() }), token);
     if (result.ok) throw new Error("expected refusal");
-    expect(await reason(result.response)).toEqual({ status: 403, reason: "fleet_tenant_mismatch" });
+    expect(await reason(result.response)).toEqual({ status: 403, reason: "idp_tenant_mismatch" });
   });
 
   it("enforces required scopes with wildcard satisfaction (read grant cannot write)", async () => {
     const mappings = new Map([["sp-agent-1", mappingRow()]]);
-    const d = deps({ mappings, authenticator: fleetAuthenticator() });
-    const readToken = signTestFleetToken(key, { sub: "sp-agent-1", tid: FLEET_TID, scope: ["emails:read"] }).token;
+    const d = deps({ mappings, authenticator: idpAuthenticator() });
+    const readToken = signTestIdpToken(key, { sub: "sp-agent-1", tid: IDP_TID, scope: ["emails:read"] }).token;
     const denied = await resolve(d, readToken, ["emails:write"]);
     if (denied.ok) throw new Error("expected refusal");
     expect(await reason(denied.response)).toEqual({ status: 403, reason: "insufficient_scope" });
@@ -197,37 +197,37 @@ describe("fleet credential class — mapping and scopes", () => {
 
   it("refuses an expired token with its typed verify reason", async () => {
     const mappings = new Map([["sp-agent-1", mappingRow()]]);
-    const { token } = signTestFleetToken(key, { sub: "sp-agent-1", tid: FLEET_TID, nowMs: Date.now() - 10_000_000, ttlSeconds: 60 });
-    const result = await resolve(deps({ mappings, authenticator: fleetAuthenticator() }), token);
+    const { token } = signTestIdpToken(key, { sub: "sp-agent-1", tid: IDP_TID, nowMs: Date.now() - 10_000_000, ttlSeconds: 60 });
+    const result = await resolve(deps({ mappings, authenticator: idpAuthenticator() }), token);
     if (result.ok) throw new Error("expected refusal");
     expect(await reason(result.response)).toEqual({ status: 401, reason: "expired" });
   });
 });
 
-describe("fleet credential class — /v1/me identity", () => {
-  it("returns the fleet principal, tenant and scopes", async () => {
+describe("idp credential class — /v1/me identity", () => {
+  it("returns the idp principal, tenant and scopes", async () => {
     const mappings = new Map([["sp-agent-1", mappingRow()]]);
-    const { token } = signTestFleetToken(key, { sub: "sp-agent-1", tid: FLEET_TID, scope: ["emails:read"] });
+    const { token } = signTestIdpToken(key, { sub: "sp-agent-1", tid: IDP_TID, scope: ["emails:read"] });
     const response = await handleSelfHostedRequest(
-      deps({ mappings, authenticator: fleetAuthenticator() }),
+      deps({ mappings, authenticator: idpAuthenticator() }),
       get("/v1/me", token),
     );
     expect(response.status).toBe(200);
     const body = (await response.json()) as Record<string, unknown>;
-    expect(body["principal_type"]).toBe("fleet");
+    expect(body["principal_type"]).toBe("idp");
     expect(body["sub"]).toBe("sp-agent-1");
     expect(body["scopes"]).toEqual(["emails:read"]);
     expect((body["tenant"] as Record<string, unknown>)["id"]).toBe(TENANT_ID);
   });
 });
 
-describe("fleet credential class — audit + dispatch isolation", () => {
+describe("idp credential class — audit + dispatch isolation", () => {
   it("emits allow and deny audit events carrying sub/jti/reason, never the token", async () => {
-    const events: FleetAuthAuditEvent[] = [];
+    const events: IdpAuthAuditEvent[] = [];
     const mappings = new Map([["sp-agent-1", mappingRow()]]);
-    const d = deps({ mappings, authenticator: fleetAuthenticator(), audit: (e) => events.push(e) });
-    const ok = signTestFleetToken(key, { sub: "sp-agent-1", tid: FLEET_TID, jti: "jti-ok" });
-    const bad = signTestFleetToken(key, { sub: "sp-unmapped", tid: FLEET_TID, jti: "jti-bad" });
+    const d = deps({ mappings, authenticator: idpAuthenticator(), audit: (e) => events.push(e) });
+    const ok = signTestIdpToken(key, { sub: "sp-agent-1", tid: IDP_TID, jti: "jti-ok" });
+    const bad = signTestIdpToken(key, { sub: "sp-unmapped", tid: IDP_TID, jti: "jti-bad" });
     await resolve(d, ok.token);
     await resolve(d, bad.token);
     expect(events).toHaveLength(2);
@@ -240,11 +240,11 @@ describe("fleet credential class — audit + dispatch isolation", () => {
   });
 
   it("leaves the existing classes untouched: hasna_ still routes to the API-key verifier, junk is still 'malformed'", async () => {
-    const d = deps({ authenticator: fleetAuthenticator() });
+    const d = deps({ authenticator: idpAuthenticator() });
     const apiKey = await resolve(d, "hasna_not-a-real-key");
     if (apiKey.ok) throw new Error("expected refusal");
     expect(apiKey.response.status).toBe(401);
-    expect((await apiKey.response.json()) as object).not.toMatchObject({ reason: "fleet_not_configured" });
+    expect((await apiKey.response.json()) as object).not.toMatchObject({ reason: "idp_not_configured" });
 
     const junk = await resolve(d, "junk-token");
     if (junk.ok) throw new Error("expected refusal");

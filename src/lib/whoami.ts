@@ -23,8 +23,8 @@ export interface IdentityMembership {
 
 export interface IdentityContext {
   /** How the caller authenticated. */
-  principalType: "user" | "apikey" | "fleet" | "unknown";
-  /** Fleet principal id (IdP `sub`) — present for fleet-token credentials. */
+  principalType: "user" | "apikey" | "idp" | "unknown";
+  /** IdP principal id (`sub`) — present for IdP-token credentials. */
   sub: string | null;
   user: { id: string | null; email: string | null; name: string | null } | null;
   /** The tenant this credential is currently scoped to. */
@@ -71,7 +71,7 @@ export function normalizeIdentity(raw: unknown): IdentityContext {
   const obj = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
   const principalRaw = str(obj["principalType"]) ?? str(obj["principal_type"]);
   const principalType: IdentityContext["principalType"] =
-    principalRaw === "user" || principalRaw === "apikey" || principalRaw === "fleet"
+    principalRaw === "user" || principalRaw === "apikey" || principalRaw === "idp"
       ? principalRaw
       : obj["user"]
         ? "user"
@@ -124,8 +124,8 @@ export function fetchIdentitySafe(): IdentityContext | null {
 export function describeIdentity(identity: IdentityContext | null): string {
   if (!identity) return "not signed in";
   const org = identity.tenant?.slug ?? identity.tenant?.name ?? "unknown org";
-  if (identity.principalType === "fleet") {
-    return identity.sub ? `${org} (fleet agent ${identity.sub})` : `${org} (fleet agent)`;
+  if (identity.principalType === "idp") {
+    return identity.sub ? `${org} (idp agent ${identity.sub})` : `${org} (idp agent)`;
   }
   if (identity.principalType === "apikey") return `${org} (api key)`;
   const who = identity.user?.email ?? "user";
