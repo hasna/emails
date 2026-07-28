@@ -147,6 +147,10 @@ describe("SqliteEmailStore conformance", () => {
       ["providers", () => subject.providers.list()],
       ["templates", () => subject.templates.list()],
       ["sequences", () => subject.sequences.list()],
+      // The sequence sub-ledger: carried by the store, declared by
+      // src/store-sequence-subledger.ts rather than by the frozen seam.
+      ["sequenceSteps", () => subject.sequenceSteps.list()],
+      ["sequenceEnrollments", () => subject.sequenceEnrollments.list()],
       ["scheduled", () => subject.scheduled.list()],
       ["aliases", () => subject.aliases.list()],
       ["forwarding", () => subject.forwarding.list()],

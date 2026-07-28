@@ -32,7 +32,10 @@ async function runSequenceCommand(args: string[]) {
 }
 
 beforeAll(async () => {
-  stub = await startV1Stub();
+  // `openapi: true` because the collapsed family pushes its equality filters down, and
+  // the REAL HTTP store reads the service's published contract before accepting a
+  // filter or a write — a missing document is deliberately a fault there.
+  stub = await startV1Stub({ openapi: true });
 });
 afterAll(() => stub.stop());
 beforeEach(async () => {
@@ -100,10 +103,10 @@ describe("sequence show command", () => {
 
 describe("sequence enrollments command", () => {
   it("lists all enrollments without requiring a sequence name", async () => {
-    const sequence = createSequence({ name: "cli-enrollment-all" });
-    const other = createSequence({ name: "cli-enrollment-other" });
-    enroll({ sequence_id: sequence.id, contact_email: "first@example.com" });
-    enroll({ sequence_id: other.id, contact_email: "second@example.com" });
+    const sequence = await createSequence({ name: "cli-enrollment-all" });
+    const other = await createSequence({ name: "cli-enrollment-other" });
+    await enroll({ sequence_id: sequence.id, contact_email: "first@example.com" });
+    await enroll({ sequence_id: other.id, contact_email: "second@example.com" });
 
     const result = await runSequenceCommand(["sequence", "enrollments"]);
     const data = result.data as Array<{ contact_email: string }>;

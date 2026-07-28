@@ -6,7 +6,7 @@ import { createScheduledEmail, getScheduledEmail } from "../../db/scheduled.js";
 import { listSandboxEmails } from "../../db/sandbox.js";
 import { createSqliteEmailStore } from "../../store-sqlite/index.js";
 import { createTemplate } from "../../db/templates.local.js";
-import { addStep, createSequence, enroll, listEnrollments } from "../../db/sequences.local.js";
+import { addStep, createSequence, enroll, listEnrollments } from "../../db/sequences.js";
 import { registerMiscCommands, runSchedulerTick } from "./misc.local.js";
 
 let INHERITED_PROCESS_ENV: NodeJS.ProcessEnv;
@@ -98,15 +98,17 @@ describe("scheduler tick", () => {
       subject_template: "Welcome {{email}}",
       text_template: "hello {{email}}",
     }, db);
-    const sequence = createSequence({ name: "tick-sequence" }, db);
-    addStep({
+    // The collapsed sequences family is async; the trailing `db` handle still means
+    // "this exact database", now as a SQLite store bound to it.
+    const sequence = await createSequence({ name: "tick-sequence" }, db);
+    await addStep({
       sequence_id: sequence.id,
       step_number: 1,
       delay_hours: 0,
       template_name: "tick-template",
       from_address: "sender@example.com",
     }, db);
-    const enrollment = enroll({ sequence_id: sequence.id, contact_email: "sequence@example.com", provider_id: provider.id }, db);
+    const enrollment = await enroll({ sequence_id: sequence.id, contact_email: "sequence@example.com", provider_id: provider.id }, db);
     db.run("UPDATE sequence_enrollments SET next_send_at = ? WHERE id = ?", ["2000-01-01T00:00:00.000Z", enrollment.id]);
 
     const logs: string[] = [];
@@ -120,7 +122,7 @@ describe("scheduler tick", () => {
       .map((email) => email.subject);
     expect(subjects).toContain("Scheduled smoke");
     expect(subjects).toContain("Welcome sequence@example.com");
-    expect(listEnrollments({ sequence_id: sequence.id }, db)[0]?.status).toBe("completed");
+    expect((await listEnrollments({ sequence_id: sequence.id }, db))[0]?.status).toBe("completed");
     expect(logs.some((line) => line.includes("Sent scheduled email"))).toBe(true);
     expect(logs.some((line) => line.includes("Sent sequence step"))).toBe(true);
   });
