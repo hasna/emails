@@ -1010,18 +1010,83 @@ const root = join(import.meta.dir, "..");
  * two arm modules deleted, no file added, the family's suite rewritten in place and two
  * consumer modules repointed in place.
  */
+
+/*
+ * RE-MEASURED AND RE-PINNED AGAIN on the `src/db/sequences` collapse — the drip-sequence
+ * family: sequences, their steps, and their enrollments. BASE `4248487`, verified
+ * INDEPENDENTLY in a pristine worktree over the real `git ls-files` corpus (649 tracked /
+ * 648 scanned / 9,937,104 characters) with all eleven live counts equal to the ceilings the
+ * sent-ledger collapse declared and ZERO slack. Fifteen exports handed to a 407-line SQLite
+ * arm and a 290-line second arm. Seven counters move:
+ *
+ *   twoArmFamilies                22 -> 21   both arm modules deleted, so the facade has no
+ *   remoteArmModules              22 -> 21   siblings left. THE PAIR THAT SAYS A FAMILY IS DONE.
+ *   routedFacadeDefinitions       13 -> 12   the facade's dispatch helper is deleted.
+ *   routedCallExpressions        192 -> 177  it dispatched all FIFTEEN exports through that
+ *                                            helper — the largest dispatch table in the
+ *                                            src/db phase so far.
+ *   selfHostedResourceBranches    37 -> 32   the deleted SQLite arm asked FIVE TIMES whether
+ *                                            it was really the local arm — once per
+ *                                            sequence-table operation — while its ten
+ *                                            step/enrollment operations never asked, which is
+ *                                            exactly the provenance split the collapsed
+ *                                            module's header records: one configuration could
+ *                                            create a sequence on the API and enroll a
+ *                                            contact into a local island that had never heard
+ *                                            of it.
+ *   selfHostedResourceReferences 129 -> 110  those five, plus the FOURTEEN reads and writes
+ *                                            the deleted second arm made through the generic
+ *                                            resource helper — every one of them answering
+ *                                            out of a single clamped page, which is why steps
+ *                                            past row 500 vanished from the positions
+ *                                            `current_step` indexes and an existing
+ *                                            enrollment past it was re-created as a
+ *                                            duplicate.
+ *   isSelfHostedModeReferences    48 -> 46   the deleted facade imported the client-side
+ *                                            deployment predicate and called it once.
+ *
+ * FOUR DO NOT MOVE, for the reasons the blocks above already record: this dispatcher went
+ * through the predicate rather than the process-wide read (58), and neither arm resolved or
+ * parsed the setting (65, 16). The env counter stayed at 219 under the same discipline as
+ * every collapse before it — the tempting way to prove the deleted second arm's clamped-page
+ * defects is a case that SETS the deployment word and drives that arm, and that case would
+ * have raised a counter that may only fall. The rebuilt suite names its storage through the
+ * resolution's own exported constants and proves every clamp through the store seam, with
+ * one-page controls asserting a 1000-row request really answers 500 of 520.
+ *
+ * WHAT THIS COLLAPSE ADDS THAT NO SIBLING NEEDED: the seam declares ONE repository for this
+ * family and the family owns THREE tables. The two sub-ledger tables now ride the same
+ * generic resource path on BOTH stores through a structural extension the two shipped
+ * constructors carry (src/store-sequence-subledger.ts), because `src/store/` is
+ * byte-identical in this change and may not grow the declaration yet. The extension module,
+ * the collapsed family and its rewritten suite all contribute ZERO to every counter here,
+ * verified per file; among every file this change EDITS, only the MCP tool module carries
+ * counts at all, and its diff against main contains none of the counted tokens.
+ *
+ * THE REBASE ONTO 4248487 PRODUCED NO CONFLICT ON THIS BLOCK — main had not touched it since
+ * the base this branch was cut from — and the procedure treated that silence exactly as the
+ * paragraphs above instruct: all eleven ceilings were committed as LITERAL ZEROS in their own
+ * commit before the rebase, the merged tree was measured over the real `git ls-files` corpus,
+ * the numbers below are what was measured, and they were measured AGAIN after this paragraph
+ * was written because this file sits inside the corpus it scans.
+ *
+ * Corpus of this change: 648 tracked, 647 scanned, ~9.97M characters — both floors cleared
+ * with room. ONE fewer tracked file than the base: two arm modules deleted, one extension
+ * module added; the family's suite and every consumer suite were rewritten or edited in
+ * place.
+ */
 const CEILINGS: Record<string, number> = {
-  twoArmFamilies: 0,
-  remoteArmModules: 0,
-  routedFacadeDefinitions: 0,
-  routedCallExpressions: 0,
-  selfHostedResourceBranches: 0,
-  selfHostedResourceReferences: 0,
-  isSelfHostedModeReferences: 0,
-  getEmailsModeReferences: 0,
-  resolveEmailsModeReferences: 0,
-  normalizeEmailsModeReferences: 0,
-  emailsModeEnvReferences: 0,
+  twoArmFamilies: 21,
+  remoteArmModules: 21,
+  routedFacadeDefinitions: 12,
+  routedCallExpressions: 177,
+  selfHostedResourceBranches: 32,
+  selfHostedResourceReferences: 110,
+  isSelfHostedModeReferences: 46,
+  getEmailsModeReferences: 58,
+  resolveEmailsModeReferences: 65,
+  normalizeEmailsModeReferences: 16,
+  emailsModeEnvReferences: 219,
 };
 
 // 649 files are tracked and 648 scanned today, totalling ~9.7M characters. (The figures in
