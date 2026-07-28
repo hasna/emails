@@ -90,7 +90,14 @@ describe("startServeWebhookListener", () => {
   it("REPORTS a bind failure the same way, so the caller has one shape to handle", async () => {
     const occupied = Bun.serve({ port: 0, fetch: () => new Response("busy") });
     try {
-      const outcome = await startServeWebhookListener(occupied.port, "provider-1", undefined);
+      // ASSERTED, not asserted-away. `Bun.Server.port` is `number | undefined`, which is the same
+      // declaration that made a hand-written return type in the module under test fail to compile.
+      // A non-null assertion here would have hidden it again; this narrows it and, if Bun ever
+      // returns no port, fails with a sentence instead of passing on a coerced value.
+      const busyPort = occupied.port;
+      expect(typeof busyPort, "Bun.serve reported no port to contend for").toBe("number");
+      if (typeof busyPort !== "number") return;
+      const outcome = await startServeWebhookListener(busyPort, "provider-1", undefined);
       expect(outcome.started).toBe(false);
       if (outcome.started) { outcome.server.stop(true); throw new Error("two listeners bound the same port"); }
       // Not the storage refusal — a different failure, reported through the same channel.
