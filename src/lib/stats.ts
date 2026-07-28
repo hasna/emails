@@ -356,7 +356,7 @@ function outboundBoundReason(outbound: OutboundEnumeration): string {
  * Measure delivery statistics for one period.
  *
  * `store` is an INJECTION POINT, for tests and for the one shipped caller that already
- * holds a store for a specific database connection (src/lib/sync.local.ts). A caller that
+ * holds a store for a specific database connection (src/lib/sync.ts). A caller that
  * passes nothing gets the store this installation's configuration means, which is what
  * every other shipped call site wants.
  *

@@ -986,16 +986,39 @@ const root = join(import.meta.dir, "..");
  * measured on the merged tree and measured AGAIN after this paragraph was written, and were
  * measured PER FILE against main. The dispatch helper, the generic resource helper and the
  * deployment predicate are named by ROLE here and never as the tokens the scan counts.
+ *
+ * RE-MEASURED AND RE-PINNED AGAIN after rebasing the sync collapse onto 4248487 (the
+ * contracts 0.8.2 upgrade). The rebase merged with NO conflict anywhere, which is the
+ * documented worst case for this block, so all eleven were zeroed in their own commit and
+ * the MERGED tree measured fresh: every count equals the sync-collapse paragraph below —
+ * the upgrade added one auth-compat suite and five verifier lines carrying no axis token.
+ * Corpus of the merged tree: 647 tracked, 646 scanned, ~9.96M characters.
+ *
+ * RE-MEASURED AND RE-PINNED on the `src/lib/sync` collapse (provider delivery-event
+ * ingestion). Both arms are deleted, so the structural pair falls by one each, 22 -> 21;
+ * and the deleted facade held one import of the process-wide mode read plus one dispatch
+ * read in EACH of its two exports, so that counter falls by three, 58 -> 55. Nothing else
+ * moves, and each absence has a reason: the facade dispatched inline (neither dispatch
+ * counter), the deleted client arm was a throwing stub that resolved no mode of its own
+ * (the resolver counters), the surviving pipeline reaches the not-yet-collapsed
+ * repositories through the routing layer's explicit-handle scope rather than through any
+ * predicate of its own (the predicate and resource-helper counters), and its rewritten
+ * suite configures STORAGE — through the resolver's exported constants — and never the
+ * deployment word (the env counter). Base measurement, the half a rebase invalidates: on
+ * 3ff6623 all eleven live counts equalled the ceilings above, so there was no inherited
+ * slack to reclaim. Corpus of this change: 646 tracked, 645 scanned, ~9.95M characters —
+ * two arm modules deleted, no file added, the family's suite rewritten in place and two
+ * consumer modules repointed in place.
  */
 const CEILINGS: Record<string, number> = {
-  twoArmFamilies: 22,
-  remoteArmModules: 22,
+  twoArmFamilies: 21,
+  remoteArmModules: 21,
   routedFacadeDefinitions: 13,
   routedCallExpressions: 192,
   selfHostedResourceBranches: 37,
   selfHostedResourceReferences: 129,
   isSelfHostedModeReferences: 48,
-  getEmailsModeReferences: 58,
+  getEmailsModeReferences: 55,
   resolveEmailsModeReferences: 65,
   normalizeEmailsModeReferences: 16,
   emailsModeEnvReferences: 219,

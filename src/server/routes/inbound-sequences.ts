@@ -326,11 +326,11 @@ if (path === "/api/pull" && method === "POST") {
     let result: Record<string, number>;
     if (body.provider_id) {
       const id = resolveIdStrict("providers", String(body.provider_id));
-      const { syncProvider } = await import('../../lib/sync.local.js');
+      const { syncProvider } = await import('../../lib/sync.js');
       const count = await syncProvider(id);
       result = { [id]: count };
     } else {
-      const { syncAll } = await import('../../lib/sync.local.js');
+      const { syncAll } = await import('../../lib/sync.js');
       result = await syncAll();
     }
     return json(result);
