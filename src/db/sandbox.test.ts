@@ -412,6 +412,30 @@ for (const [label, makeStore] of STORE_VARIANTS) {
         expect(error.message).toContain("to_addresses");
       });
 
+      it("FAULTS the WHOLE listing on a row that cannot be ordered, unlike one that cannot be read", async () => {
+        // The other half of the split above, and the reason it is a split rather than a
+        // blanket relaxation: a row with no readable `created_at` cannot be PLACED, and ''
+        // sorts before every real instant — so admitting it would silently report it as the
+        // oldest capture and shift every page boundary around it. That breaks the order of
+        // rows it does not contain, which an unreadable body does not.
+        const store = makeStore();
+        seedCapture("sbx-ok-1", stamp(1));
+        seedCapture("sbx-ok-2", stamp(2));
+        seedCapture("sbx-unplaceable", "");
+
+        // Even the page that holds only readable rows refuses, and that is deliberate.
+        const error = await rejection(listSandboxEmails(undefined, 1, 0, store));
+        expect(error.message).toContain("sbx-unplaceable");
+        expect(error.message).toContain("created_at");
+
+        // CONTROL: with that row gone the same page answers, so the fault is about the row
+        // and not about the fixture.
+        expect(await clearSandboxEmails(undefined, store)).toBe(3);
+        seedCapture("sbx-ok-3", stamp(3));
+        expect((await listSandboxEmails(undefined, 1, 0, store)).map((email) => email.id))
+          .toEqual(["sbx-ok-3"]);
+      });
+
       it("windows summaries by the same order as the full listing", async () => {
         const store = makeStore();
         for (let index = 0; index < 4; index += 1) seedCapture(`sbx-${index}`, stamp(index));
