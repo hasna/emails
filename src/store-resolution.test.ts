@@ -151,6 +151,59 @@ describe("configured store resolution — the four quadrants", () => {
     expect(loopback.store === "api" && loopback.baseUrl).toBe("http://127.0.0.1:8080");
   });
 
+  it("REFUSES plaintext http to a non-loopback host, in the legacy client's own words", () => {
+    // THE CREDENTIAL RIDES ON THIS TRANSPORT. A store built from a plaintext URL puts
+    // the bearer credential in an Authorization header on an unencrypted connection to
+    // whatever answers at that host — the legacy client has always refused exactly this
+    // (src/db/self-hosted-store.ts), and the seam path replacing it must not quietly
+    // drop the refusal. Same allowed set, same sentence: one message, not two dialects.
+    for (const value of [
+      "http://mail.example.test",
+      "http://192.0.2.10:8080/v1",
+      "http://mail.internal:3000",
+      // PARITY, not an oversight: WHATWG hostnames keep the brackets on an IPv6
+      // literal, so the legacy client's bare-token loopback comparison never matches
+      // one and it refuses this URL. The seam matches that behaviour exactly rather
+      // than quietly allowing what the guarded path refuses. (Verified against the
+      // legacy resolver, not inferred.)
+      "http://[::1]:8080",
+      // A hostname that merely STARTS with a loopback literal is not loopback.
+      "http://127.0.0.1.evil.example",
+    ]) {
+      let thrown: unknown;
+      try {
+        planEmailStore(bare({ [API_BASE_URL_SETTING]: value, [API_CREDENTIAL_SETTINGS[0]]: A_TOKEN }));
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown, `${value} must be refused`).toBeInstanceOf(StoreConfigurationError);
+      const error = thrown as StoreConfigurationError;
+      // The legacy guard's sentence, verbatim, so an operator who has seen one refusal
+      // recognises the other.
+      expect(error.message).toContain("must use https except for a loopback development URL");
+      expect(error.message).toContain(API_BASE_URL_SETTING);
+      expect(error.settings).toEqual([API_BASE_URL_SETTING]);
+      // The refusal is the string most likely to reach a log line, and the URL's
+      // userinfo can carry the credential — never quote the value back.
+      expect(error.message).not.toContain(A_TOKEN);
+      expect(error.message).not.toContain(value);
+    }
+  });
+
+  it("still allows https everywhere and plaintext http on the loopback development set", () => {
+    // POSITIVE CONTROL for the refusal above: the guard must be "https except
+    // loopback", not "reject http". The allowed set is exactly the legacy client's.
+    for (const value of [
+      "https://mail.example.test",
+      "http://127.0.0.1:8080",
+      "http://localhost:8080",
+      "http://localhost",
+    ]) {
+      const plan = planEmailStore(bare({ [API_BASE_URL_SETTING]: value, [API_CREDENTIAL_SETTINGS[0]]: A_TOKEN }));
+      expect(plan.store, `${value} must resolve to the API store`).toBe("api");
+    }
+  });
+
   it("prefers the session token over the operator API key, and says which it used", () => {
     expect(API_CREDENTIAL_SETTINGS[0]).toBe("EMAILS_SESSION_TOKEN");
     expect(API_CREDENTIAL_SETTINGS[1]).toBe("EMAILS_SELF_HOSTED_API_KEY");
@@ -386,6 +439,18 @@ describe("the store the resolution actually hands back", () => {
     expect(store.descriptor.detail).not.toContain(A_TOKEN);
     expect(store.descriptor.detail).not.toContain("operator");
     expect(store.descriptor.detail).toBe("Emails API at https://mail.example.test");
+  });
+
+  it("never CONSTRUCTS a store holding the credential for a plaintext non-loopback URL", () => {
+    // The construction path must refuse what the plan refuses. A store built here
+    // would hold the real credential and put it on the wire in cleartext on its first
+    // operation — the runtime-confirmed shape of the bug this guard exists for.
+    only({
+      [API_BASE_URL_SETTING]: "http://192.0.2.10:8080",
+      [API_CREDENTIAL_SETTINGS[0]]: A_TOKEN,
+    });
+    expect(() => createConfiguredEmailStore()).toThrow(StoreConfigurationError);
+    expect(() => createConfiguredEmailStore()).toThrow("must use https except for a loopback development URL");
   });
 
   it("throws instead of building anything when the configuration contradicts itself", () => {
