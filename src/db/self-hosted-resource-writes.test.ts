@@ -206,14 +206,19 @@ describe("resource repos route writes to selfHosted in selfHosted mode", () => {
     expect(listSequences().some((x) => x.name === "onboarding")).toBe(true);
   });
 
-  test("createSendKey POSTs to /v1/send-keys/mint and returns a hash-free key", () => {
+  test("createSendKey POSTs to /v1/send-keys/mint and returns a hash-free key", async () => {
     const owner = createOwner({ type: "agent", name: "Key Owner" });
-    const { token, key } = createSendKey(owner.id, "ci");
-    // The token is server-minted (routed to the selfHosted, not a local island).
+    // ASYNC AND RESOLVED FROM STORAGE CONFIGURATION. This family has collapsed onto the
+    // store seam, so it no longer consults the deployment word at all — it reaches this
+    // same stub because the API settings above name it, which is a STRICTLY STRONGER
+    // statement than the one this case used to make.
+    const { token, key } = await createSendKey(owner.id, "ci");
+    // The token is server-minted (it lands on the API, not on a local island).
     expect(token).toStartWith("esk_");
     expect(key.owner_id).toBe(owner.id);
     expect(key.label).toBe("ci");
-    // The client never receives the secret hash.
-    expect(key.key_hash).toBe("");
+    // The client never receives the secret hash — the field is ABSENT now, where it used
+    // to be present holding a fabricated `""` that a caller could compare against.
+    expect("key_hash" in key).toBe(false);
   });
 });
