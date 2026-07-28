@@ -909,9 +909,9 @@ const root = join(import.meta.dir, "..");
 
 /*
  * RE-MEASURED AND RE-PINNED AGAIN on the `src/db/emails` collapse — the OUTBOUND SENT LEDGER.
- * BASE `fa2b88a`, verified INDEPENDENTLY in this worktree over the real `git ls-files` corpus
- * (647 tracked / 646 scanned / 9,805,459 characters) with all eleven live counts equal to the
- * ceilings the send-keys collapse declared and ZERO slack. Seven exports handed to a 282-line
+ * BASE `8589d44`, verified INDEPENDENTLY in this worktree over the real `git ls-files` corpus
+ * (647 tracked / 646 scanned / 9,808,029 characters) with all eleven live counts equal to the
+ * ceilings the mode-env sweep declared and ZERO slack. Seven exports handed to a 282-line
  * SQLite arm and a 188-line HTTP arm. Seven counters move:
  *
  *   twoArmFamilies                23 -> 22   both arm modules deleted, so the facade has no
@@ -931,7 +931,7 @@ const root = join(import.meta.dir, "..");
  *                                            clamped page.
  *   isSelfHostedModeReferences    50 -> 48   the deleted facade imported the client-side
  *                                            deployment predicate and called it once.
- *   emailsModeEnvReferences      234 -> 232  `src/db/emails.self-hosted.test.ts` existed only to
+ *   emailsModeEnvReferences      223 -> 221  `src/db/emails.self-hosted.test.ts` existed only to
  *                                            prove that this family routed to the API when the
  *                                            deployment word said so, and it SET that word twice
  *                                            to do it. That premise is not weakened here, it
@@ -953,14 +953,18 @@ const root = join(import.meta.dir, "..");
  * PROCEDURE, AND THE SECOND REBASE IS WHY IT EXISTS. All eleven ceilings were committed as
  * LITERAL ZEROS in their own commit before EACH of the two rebases this branch took. The first
  * (onto `7c32937`) conflicted in `src/server/routes/core.ts` but NOT on this block. The second
- * (onto this base, after #137 moved EIGHT of the eleven) conflicted on exactly FOUR of the
+ * (onto `fa2b88a`, after #137 moved EIGHT of the eleven) conflicted on exactly FOUR of the
  * eleven ceiling lines — `routedCallExpressions`, `selfHostedResourceBranches`,
  * `selfHostedResourceReferences` and `emailsModeEnvReferences` — and SILENTLY AUTO-MERGED THE
  * OTHER SEVEN, because both sides happened to hold the same literal there for entirely
  * different reasons. Four loud lines and seven quiet ones in one merge is the whole argument:
  * the quiet seven are two measurements of two different trees that read as agreement, and
  * without the zeros there is nothing to make even the four speak up. The conflict was resolved
- * to ZEROS on all eleven rather than to either side, and the tree was then measured.
+ * to ZEROS on all eleven rather than to either side, and the tree was then measured. The THIRD
+ * (onto this base, after the mode-env sweep moved ONE counter and left ten identical)
+ * conflicted on the whole block as a single hunk — ten of whose eleven lines were literally
+ * equal on both sides. That is the shape a reader is most tempted to resolve by "taking
+ * theirs"; it was resolved to zeros and measured like the others.
  *
  * A PER-METRIC MINIMUM WOULD HAVE BEEN WRONG ON SEVEN OF THE ELEVEN. This branch had pinned
  * 202 / 40 / 141 / 233 for its own pre-rebase tree and main declares 199 / 41 / 139 / 234; the
@@ -972,7 +976,7 @@ const root = join(import.meta.dir, "..");
  * NO CONFLICT MARKER OF ANY KIND. Measuring the merged tree is the only thing that can tell the
  * difference.
  *
- * Corpus of this change: 645 tracked, 644 scanned, ~9.89M characters — both floors cleared with
+ * Corpus of this change: 645 tracked, 644 scanned, ~9.90M characters — both floors cleared with
  * room. TWO fewer tracked files than the base: three deleted (two arm modules and the
  * arm-premise suite) and ONE added — `src/cli/commands/email-log-provider-filter.test.ts`, which
  * pins at the operator's own surface a refusal that three other suites pin only at the store
@@ -984,17 +988,17 @@ const root = join(import.meta.dir, "..");
  * deployment predicate are named by ROLE here and never as the tokens the scan counts.
  */
 const CEILINGS: Record<string, number> = {
-  twoArmFamilies: 0,
-  remoteArmModules: 0,
-  routedFacadeDefinitions: 0,
-  routedCallExpressions: 0,
-  selfHostedResourceBranches: 0,
-  selfHostedResourceReferences: 0,
-  isSelfHostedModeReferences: 0,
-  getEmailsModeReferences: 0,
-  resolveEmailsModeReferences: 0,
-  normalizeEmailsModeReferences: 0,
-  emailsModeEnvReferences: 0,
+  twoArmFamilies: 22,
+  remoteArmModules: 22,
+  routedFacadeDefinitions: 13,
+  routedCallExpressions: 192,
+  selfHostedResourceBranches: 37,
+  selfHostedResourceReferences: 129,
+  isSelfHostedModeReferences: 48,
+  getEmailsModeReferences: 58,
+  resolveEmailsModeReferences: 65,
+  normalizeEmailsModeReferences: 16,
+  emailsModeEnvReferences: 221,
 };
 
 // 649 files are tracked and 648 scanned today, totalling ~9.7M characters. (The figures in
