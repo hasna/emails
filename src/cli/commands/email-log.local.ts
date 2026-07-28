@@ -394,7 +394,9 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
   program.command("conversation <id>").description("Show full conversation thread for a sent email (email + all replies)")
     .option("--limit <n>", "Max reply bodies", String(DEFAULT_REPLY_LIMIT))
     .option("--offset <n>", "Skip first N replies", "0")
-    .action((id: string, opts: ReplyPageOpts) => {
+    // ASYNC because the sent ledger reads through the store seam. Commander awaits an
+    // action's promise, so a rejection still reaches the same `handleError` path.
+    .action(async (id: string, opts: ReplyPageOpts) => {
       try {
         const db = getDatabase();
         const resolvedId = resolveId("emails", id);
