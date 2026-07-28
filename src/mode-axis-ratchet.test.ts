@@ -1063,27 +1063,37 @@ const root = join(import.meta.dir, "..");
  * verified per file; among every file this change EDITS, only the MCP tool module carries
  * counts at all, and its diff against main contains none of the counted tokens.
  *
- * THE REBASE ONTO 4248487 PRODUCED NO CONFLICT ON THIS BLOCK — main had not touched it since
- * the base this branch was cut from — and the procedure treated that silence exactly as the
- * paragraphs above instruct: all eleven ceilings were committed as LITERAL ZEROS in their own
- * commit before the rebase, the merged tree was measured over the real `git ls-files` corpus,
- * the numbers below are what was measured, and they were measured AGAIN after this paragraph
- * was written because this file sits inside the corpus it scans.
+ * TWO REBASES, AND THE SECOND IS ANOTHER MEASURED INSTANCE OF THE PER-METRIC-MINIMUM HAZARD.
+ * Onto 4248487 this block did not conflict at all — main had not touched it — and the zeros
+ * committed before the rebase are what forced a measurement anyway. Onto 9cede22 (which
+ * merged the mail-fetch pipeline collapse, a sibling in this same phase), ONLY the zeros
+ * commit conflicted; the re-pin commit carrying this branch's own pre-rebase numbers then
+ * applied CLEANLY on top, green under `<=`, with three counters standing wide: main pinned
+ * 21 / 21 / 13 / 192 / 37 / 129 / 48 / 55 / 65 / 16 / 219 for its tree (verified
+ * INDEPENDENTLY in a pristine worktree at 649 tracked / 648 scanned / 9,989,459 characters,
+ * zero slack), this branch had pinned 21 / 21 / 12 / 177 / 32 / 110 / 46 / 58 / 65 / 16 / 219
+ * for its own pre-rebase tree, and a per-metric minimum of the two gives
+ * 21 / 21 / 12 / 177 / 32 / 110 / 46 / 55 / 65 / 16 / 219 — while the MERGED tree measures
+ * 20 / 20 / 12 / 177 / 32 / 110 / 46 / 55 / 65 / 16 / 219. The two collapses finish
+ * DIFFERENT families, so the structural pair composes to a number LOWER than either side,
+ * which no minimum and no clean apply can see. The numbers below are the merged tree's,
+ * measured over the real `git ls-files` corpus and measured AGAIN after this paragraph was
+ * written because this file sits inside the corpus it scans.
  *
- * Corpus of this change: 648 tracked, 647 scanned, ~9.97M characters — both floors cleared
+ * Corpus of this change: 648 tracked, 647 scanned, ~10.03M characters — both floors cleared
  * with room. ONE fewer tracked file than the base: two arm modules deleted, one extension
  * module added; the family's suite and every consumer suite were rewritten or edited in
  * place.
  */
 const CEILINGS: Record<string, number> = {
-  twoArmFamilies: 21,
-  remoteArmModules: 21,
+  twoArmFamilies: 20,
+  remoteArmModules: 20,
   routedFacadeDefinitions: 12,
   routedCallExpressions: 177,
   selfHostedResourceBranches: 32,
   selfHostedResourceReferences: 110,
   isSelfHostedModeReferences: 46,
-  getEmailsModeReferences: 58,
+  getEmailsModeReferences: 55,
   resolveEmailsModeReferences: 65,
   normalizeEmailsModeReferences: 16,
   emailsModeEnvReferences: 219,
