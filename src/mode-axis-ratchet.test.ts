@@ -1080,7 +1080,12 @@ const root = join(import.meta.dir, "..");
  * measured over the real `git ls-files` corpus and measured AGAIN after this paragraph was
  * written because this file sits inside the corpus it scans.
  *
- * Corpus of this change: 648 tracked, 647 scanned, ~10.03M characters — both floors cleared
+ * A THIRD REBASE (onto bd4869a, the fleet-token slice) moved NO counter: the pristine base
+ * measures the same eleven the block above declares, and the merged tree re-measures exactly
+ * the numbers pinned below — verified rather than assumed, because the previous rebase is
+ * the proof that a clean apply can be wrong.
+ *
+ * Corpus of this change: 654 tracked, 653 scanned, ~10.10M characters — both floors cleared
  * with room. ONE fewer tracked file than the base: two arm modules deleted, one extension
  * module added; the family's suite and every consumer suite were rewritten or edited in
  * place.
