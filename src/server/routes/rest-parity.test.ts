@@ -10,7 +10,7 @@ import { storeInboundEmail } from "../../db/inbound.local.js";
 import { createProvider } from "../../db/providers.local.js";
 import { createScheduledEmail, markSent } from "../../db/scheduled.js";
 import { storeSandboxEmail } from "../../db/sandbox.js";
-import { createSequence, enroll, unenroll } from "../../db/sequences.local.js";
+import { createSequence, enroll, unenroll } from "../../db/sequences.js";
 import { createTemplate } from "../../db/templates.local.js";
 import { createWarmingSchedule, updateWarmingStatus } from "../../db/warming.local.js";
 import { seedEmailAgentRun, seedTriage } from "../../test-support/legacy-mail-seed.js";
@@ -688,7 +688,7 @@ describe("emails serve REST parity smoke", () => {
         subject: `Default scheduled ${i}`,
         scheduled_at: `2030-01-${String((i % 28) + 1).padStart(2, "0")}T00:00:00.000Z`,
       });
-      createSequence({ name: `default-sequence-${i}` });
+      await createSequence({ name: `default-sequence-${i}` });
     }
 
     const members = createGroup("default-member-page");
@@ -696,9 +696,9 @@ describe("emails serve REST parity smoke", () => {
       addMember(members.id, `default-member-${i}@example.com`);
     }
 
-    const enrollments = createSequence({ name: "default-enrollment-page" });
+    const enrollments = await createSequence({ name: "default-enrollment-page" });
     for (let i = 0; i < 101; i++) {
-      enroll({ sequence_id: enrollments.id, contact_email: `default-enrollment-${i}@example.com` });
+      await enroll({ sequence_id: enrollments.id, contact_email: `default-enrollment-${i}@example.com` });
     }
 
     for (let i = 0; i < 51; i++) {
@@ -847,7 +847,7 @@ describe("emails serve REST parity smoke", () => {
   it("paginates sequences before returning REST results", async () => {
     const db = getDatabase();
     for (let i = 0; i < 5; i++) {
-      const sequence = createSequence({ name: `sequence-${i}` });
+      const sequence = await createSequence({ name: `sequence-${i}` });
       const timestamp = `2026-01-0${i + 1}T00:00:00.000Z`;
       db.run("UPDATE sequences SET created_at = ?, updated_at = ? WHERE id = ?", [timestamp, timestamp, sequence.id]);
     }
@@ -859,23 +859,23 @@ describe("emails serve REST parity smoke", () => {
 
   it("paginates sequence enrollments after REST sequence and status filtering", async () => {
     const db = getDatabase();
-    const sequence = createSequence({ name: "rest-enrollment-page" });
-    const other = createSequence({ name: "rest-other-enrollment-page" });
+    const sequence = await createSequence({ name: "rest-enrollment-page" });
+    const other = await createSequence({ name: "rest-other-enrollment-page" });
     for (let i = 0; i < 5; i++) {
       const email = `active-${i}@example.com`;
-      enroll({ sequence_id: sequence.id, contact_email: email });
+      await enroll({ sequence_id: sequence.id, contact_email: email });
       db.run(
         "UPDATE sequence_enrollments SET enrolled_at = ? WHERE sequence_id = ? AND contact_email = ?",
         [`2026-01-0${i + 1}T00:00:00.000Z`, sequence.id, email],
       );
     }
-    enroll({ sequence_id: sequence.id, contact_email: "cancelled@example.com" });
-    unenroll(sequence.id, "cancelled@example.com");
+    await enroll({ sequence_id: sequence.id, contact_email: "cancelled@example.com" });
+    await unenroll(sequence.id, "cancelled@example.com");
     db.run(
       "UPDATE sequence_enrollments SET enrolled_at = ? WHERE sequence_id = ? AND contact_email = ?",
       ["2026-01-10T00:00:00.000Z", sequence.id, "cancelled@example.com"],
     );
-    enroll({ sequence_id: other.id, contact_email: "other@example.com" });
+    await enroll({ sequence_id: other.id, contact_email: "other@example.com" });
     db.run(
       "UPDATE sequence_enrollments SET enrolled_at = ? WHERE sequence_id = ? AND contact_email = ?",
       ["2026-01-11T00:00:00.000Z", other.id, "other@example.com"],
@@ -894,8 +894,8 @@ describe("emails serve REST parity smoke", () => {
   });
 
   it("resolves encoded sequence names in REST sequence routes", async () => {
-    const sequence = createSequence({ name: "rest sequence/name" });
-    enroll({ sequence_id: sequence.id, contact_email: "alice@example.com" });
+    const sequence = await createSequence({ name: "rest sequence/name" });
+    await enroll({ sequence_id: sequence.id, contact_email: "alice@example.com" });
     const encoded = encodeURIComponent(sequence.name);
 
     const enrollments = await json<Array<{ contact_email: string; sequence_id: string }>>(
