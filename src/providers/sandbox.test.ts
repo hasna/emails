@@ -61,7 +61,7 @@ function openDatabase(): void {
     delete process.env[setting];
   }
   for (const setting of DATABASE_PATH_SETTINGS) delete process.env[setting];
-  process.env["EMAILS_DB_PATH"] = ":memory:";
+  process.env[DATABASE_PATH_SETTINGS[1]] = ":memory:";
   resetDatabase();
   db = getDatabase();
   // `sandbox_emails.provider_id` is a real foreign key into `providers`.

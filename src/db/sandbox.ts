@@ -29,28 +29,38 @@
 //
 //  1. FOUR OPERATIONS READ ONE CLAMPED PAGE AND CALLED IT THE TABLE. The deleted HTTP arm
 //     answered `listSandboxEmails`, `listSandboxEmailSummaries`, `clearSandboxEmails` AND
-//     `getSandboxCount` out of a single `list({ limit: 1000 })`. A generic resource page is
-//     clamped to 500 at both ends of that request — `MAX_PAGE` in
-//     `src/store-sqlite/resources.ts` and `clampLimit` in `src/server/self-hosted/store.ts`
-//     (the HTTP client itself does not clamp; it passes the caller's limit through and the
-//     service caps it) — so above 500 captured emails that arm listed a window cut
-//     out of the wrong 500 rows, DELETED at most 500 while reporting that number as the
-//     total cleared, and reported a count of exactly 500 for a table of any larger size.
-//     The SQLite arm pushed `LIMIT`/`OFFSET` into SQL, deleted with one `DELETE` statement
-//     and counted with `COUNT(*)`; it is the stronger arm on all four, and every read below
-//     enumerates to an EMPTY page and REFUSES if it could not finish.
+//     `getSandboxCount` out of a single `list({ limit: 1000 })`. Whichever store answers,
+//     a page of one of these families is capped at 500: `MAX_PAGE` in
+//     `src/store-sqlite/resources.ts` when SQLite answers, `clampLimit` in
+//     `src/server/self-hosted/store.ts` when the service does. (The HTTP store itself does
+//     NOT clamp — it passes the caller's limit through and the service caps it — so there is
+//     exactly one clamp on each path, not two.) Above 500 captured emails that arm listed a
+//     window cut out of the wrong 500 rows, DELETED at most 500 while reporting that number
+//     as the total cleared, and reported a count of exactly 500 for a whole table of any
+//     larger size (or for the first 500 of a filtered set, which is the same failure with a
+//     smaller number). The SQLite arm pushed `LIMIT`/`OFFSET` into SQL, deleted with one
+//     `DELETE` statement and counted with `COUNT(*)`; it is the stronger arm on all four.
+//     Every read below enumerates to an EMPTY page and refuses if it could not finish — with
+//     ONE deliberate exception, the count, which answers `null` instead (note 8).
 //  2. ORDER. `ResourceRepository.list` promises no order and `ListOptions` admits none, and
-//     the two stores order this family differently: the SQLite resource path derives
-//     `created_at DESC, id DESC` from the table's own shape (`describeTable`; this table has
-//     no `updated_at` locally) and the service's spec says `created_at DESC` with no
-//     tiebreaker. Both arms published newest-first. So NOTHING pushes a `limit`/`offset`
-//     down — the first N rows of a store's order, re-sorted here, is a plausible and
-//     silently wrong page against one of the two stores. The filtered set is enumerated in
-//     full, sorted here, and only then windowed.
-//  3. THE TIEBREAKER, which neither arm had. `created_at` alone is not a total order and
-//     this table's stamps collide readily — a send loop captures many rows inside one
-//     millisecond — so `--offset` could repeat or drop a row under either arm. Ordering is
-//     now `created_at DESC, id DESC`, which is also the SQLite store's own.
+//     the two stores order this family differently — in the TIEBREAK DIRECTION, which an
+//     earlier draft of this note got wrong and adversarial review corrected. The SQLite
+//     resource path derives `created_at DESC, id DESC` from the table's own shape
+//     (`describeTable`; this table has no `updated_at` locally). The service's spec field
+//     reads `created_at DESC`, but `resourceListOrderBy`
+//     (`src/server/self-hosted/resources.ts`) APPENDS the primary key when the clause does
+//     not already name it, so what the service actually emits is `created_at DESC, id ASC`
+//     — total, like SQLite's, and ordered the opposite way on a tie. Both arms published
+//     newest-first. So NOTHING pushes a `limit`/`offset` down: the first N rows of a store's
+//     order, re-sorted here, is a plausible and silently wrong page against one of the two.
+//     The filtered set is enumerated in full, sorted here, and only then windowed.
+//  3. THE TIEBREAKER, WHICH NEITHER ARM HAD (the STORES both have one — see note 2 — but
+//     neither deleted arm did). The SQLite arm's SQL was `ORDER BY created_at DESC` and the
+//     HTTP arm sorted in JavaScript on `created_at` alone; `created_at` is not a total order
+//     and this table's stamps collide readily, since a send loop captures many rows inside
+//     one millisecond, so `--offset` could repeat or drop a row under either arm. Ordering
+//     is now `created_at DESC, id DESC`, which matches the SQLite store's own and is the
+//     opposite of the service's `id ASC`. Either choice is arbitrary; having one is not.
 //  4. THE TWO ARMS SORTED WITH DIFFERENT COLLATIONS. The SQLite arm sorted in SQL under that
 //     engine's BINARY collation; the HTTP arm sorted in JavaScript with `localeCompare`,
 //     which is LOCALE-DEPENDENT — so that arm's page boundaries moved with the process
@@ -59,12 +69,14 @@
 //     either schema can hold in a timestamp or a uuid.
 //  5. A CLIENT-MINTED ID THAT THE REAL API STORE REFUSES. The deleted HTTP arm generated a
 //     uuid and sent it as `id`. `/v1/sandbox-emails` declares TWELVE writable columns and
-//     `id` is not among them, and the request schema is `additionalProperties: false`
-//     (`src/server/self-hosted/openapi.ts` builds it from the spec's column list), so the
-//     real `HttpEmailStore` REFUSES that write; the deleted bridge did not validate it and
-//     the service silently ignored the field, minting its own id and handing it back. So the
-//     client id was already dead on that arm — it merely could not be seen. Nothing below
-//     sends `id`; both stores mint it and the created row is read out of the store's answer.
+//     `id` is not among them. `HttpEmailStore` reads that published column list before every
+//     write and REFUSES a key the resource does not have (`src/store-http/resources.ts`) —
+//     the refusal is the client matching the contract's `properties`, and the schema's
+//     `additionalProperties: false` is what makes the list authoritative rather than
+//     indicative. The deleted bridge did not check, and the service silently ignored the
+//     field, minting its own id and handing it back. So the client id was already dead on
+//     that arm — it merely could not be seen. Nothing below sends `id`; both stores mint it
+//     and the created row is read out of the store's answer.
 //  6. `created_at` IS SENT, and this family is unusual in being able to. It IS a declared
 //     writable column on this resource (the spec lists it, unlike `aliases` or `scheduled`),
 //     and it is the family's ONLY ordering key, so one ISO instant from one clock is written
@@ -79,15 +91,22 @@
 //     Sandbox captures are ephemeral (this module publishes the operation that deletes them
 //     all), so no migration is proposed; a mixed table is named here so a reader who sees
 //     the ordering does not have to rediscover why.
-//  7. THE TWO MALFORMED-JSON COERCIONS DISAGREED, AND BOTH FABRICATED. `to_addresses` is
-//     `TEXT` holding a JSON array in SQLite and `JSONB` in Postgres, so a reader must accept
-//     both shapes. On content it cannot parse, the SQLite arm's helper answered `[]` (every
-//     recipient silently dropped) and the HTTP arm's answered `[<the raw text>]` (a recipient
-//     invented that was never addressed). There is no stronger arm to resolve toward — both
-//     are the fabricated-value failure, in opposite directions — so an unreadable recipient
-//     list, attachment list or header map is a FAULT naming the row. The row stays visible to
-//     `clearSandboxEmails`, which deliberately does not map (see that function), so a corrupt
-//     row can still be deleted.
+//  7. THE TWO MALFORMED-JSON COERCIONS DISAGREED ON THE THREE ADDRESS COLUMNS, AND BOTH
+//     FABRICATED. `to_addresses` is `TEXT` holding a JSON array in SQLite and `JSONB` in
+//     Postgres, so a reader must accept both shapes. On content it cannot parse, the SQLite
+//     arm's helper answered `[]` (every recipient silently dropped) and the HTTP arm's
+//     answered `[<the raw text>]` (a recipient invented that was never addressed). There is
+//     no stronger arm to resolve toward — both are the fabricated-value failure, in opposite
+//     directions — so an unreadable recipient list is a FAULT naming the row.
+//     ON `attachments_json` AND `headers_json` THE TWO ARMS AGREED, on `[]` and `{}`, and
+//     the fault below is therefore a WIDENING rather than a resolution — stated as one,
+//     because a divergence is not what justifies it. It is applied for the same reason and
+//     with the same evidence: an unreadable column read as an empty one is a captured email
+//     reported as having no attachments and no headers, which is a wrong answer wearing the
+//     shape of a right one, and both arms committed it.
+//     A corrupt row stays visible to `clearSandboxEmails`, which deliberately does not map
+//     (see that function), so it can still be deleted — and `storeSandboxEmail` refuses to
+//     CREATE one, so this module cannot produce the state it refuses to read.
 //  8. THE COUNT HAS NO STORE EQUIVALENT AT ALL. The seam publishes no aggregate — no count
 //     operation, no total on a list envelope, no cursor on the uniform families — so
 //     `COUNT(*)` becomes a bounded client-side enumeration, and a bounded enumeration cannot
@@ -138,8 +157,9 @@
 //    `Database | number` third parameter the facade needed to reconcile two incompatible arm
 //    signatures; their third parameter is now the offset both arms already accepted there.
 //    The one production caller that passed a handle — the local dashboard's `/api/sandbox`
-//    routes — passes the process-wide connection, and now passes a SQLite store bound to
-//    that same connection, so it reads exactly the rows it read before.
+//    routes — passed the process-wide connection to TWO of its three calls (the listing did
+//    not pass one and defaulted to the same connection), and all three now pass a SQLite
+//    store bound to it, so they read exactly the rows they read before.
 //
 // A REFUSAL IS NEVER AN ANSWER. Every store refusal below is turned into a thrown error
 // naming the operation and carrying the store's own code, status and message. Nothing here
@@ -533,6 +553,43 @@ async function readSandbox(
   return scan.rows.map(toSandboxEmail).sort(byNewest);
 }
 
+/**
+ * Refuse a capture this module would not be able to READ BACK.
+ *
+ * THE READ PATH FAULTS ON A ROW IT CANNOT MAKE SENSE OF (divergence 7), so a write path that
+ * did not check the same things would accept a row and then refuse to show it — and one such
+ * row makes every listing of the table fault until someone clears it. The types below say
+ * `string[]` / `Attachment[]` / `Record<string, string>`, but this is a published export of a
+ * JavaScript package and the compiler is not present at the call site; the deleted SQLite arm
+ * accepted all three because its reader validated nothing at all.
+ *
+ * `clearSandboxEmails` can still delete such a row if an older version wrote one, so this is
+ * about not CREATING the state rather than about being unable to recover from it.
+ */
+function rejectUnreadableCapture(input: StoreSandboxEmailInput): void {
+  for (const column of ["to_addresses", "cc_addresses", "bcc_addresses"] as const) {
+    const value = input[column];
+    if (!Array.isArray(value)) {
+      throw new Error(`Refusing to capture a sandbox email whose ${column} is not a list`);
+    }
+    for (const entry of value) {
+      if (typeof entry !== "string") {
+        throw new Error(
+          `Refusing to capture a sandbox email with a non-text entry in ${column} (${typeof entry}); `
+            + "it would be stored and then unreadable",
+        );
+      }
+    }
+  }
+  if (!Array.isArray(input.attachments)) {
+    throw new Error("Refusing to capture a sandbox email whose attachments are not a list");
+  }
+  const headers: unknown = input.headers;
+  if (headers === null || typeof headers !== "object" || Array.isArray(headers)) {
+    throw new Error("Refusing to capture a sandbox email whose headers are not a map");
+  }
+}
+
 function echoedWrong(id: string, column: string): Error {
   return new Error(
     `This installation's store captured sandbox email ${id} but answered with a different ${column}; `
@@ -553,6 +610,7 @@ export async function storeSandboxEmail(
   input: StoreSandboxEmailInput,
   store?: EmailStore,
 ): Promise<SandboxEmail> {
+  rejectUnreadableCapture(input);
   const created = await storeFor(store).sandbox.create({
     provider_id: input.provider_id,
     from_address: input.from_address,

@@ -73,7 +73,7 @@ function configureExactlyOneStore(): void {
     delete process.env[setting];
   }
   for (const setting of DATABASE_PATH_SETTINGS) delete process.env[setting];
-  process.env["EMAILS_DB_PATH"] = ":memory:";
+  process.env[DATABASE_PATH_SETTINGS[1]] = ":memory:";
 }
 
 let db: ReturnType<typeof getDatabase>;
@@ -244,6 +244,33 @@ for (const [label, makeStore] of STORE_VARIANTS) {
         expect(email.created_at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
         expect(email.created_at).not.toMatch(/^\d{4}-\d{2}-\d{2} /);
         expect(tableRows()[0]!["created_at"]).toBe(email.created_at);
+      });
+
+      it("REFUSES a capture it would not be able to read back, and writes nothing", async () => {
+        // The write path checks what the read path checks. Without this, a JavaScript caller
+        // (the compiler is not present at the call site of a published package) could store a
+        // row this module then faults on — and ONE such row makes every listing of the table
+        // fault until somebody clears it. The deleted SQLite arm accepted all four of these
+        // because its reader validated nothing at all.
+        const store = makeStore();
+        const cases: Array<[string, Partial<StoreSandboxEmailInput>]> = [
+          ["to_addresses", { to_addresses: [42] as unknown as string[] }],
+          ["cc_addresses", { cc_addresses: "not-a-list" as unknown as string[] }],
+          ["attachments", { attachments: {} as unknown as [] }],
+          ["headers", { headers: [] as unknown as Record<string, string> }],
+        ];
+
+        for (const [column, override] of cases) {
+          const error = await rejection(storeSandboxEmail(input(override), store));
+          expect(error.message, column).toContain("Refusing to capture");
+          // The message names the offending column, so a caller can fix the input rather than
+          // guess which of four it was.
+          expect(error.message, column).toContain(column);
+        }
+
+        // AND NOTHING WAS WRITTEN. The refusal has to happen before the store is asked, or the
+        // row it refuses to report is in the table anyway.
+        expect(tableRows()).toHaveLength(0);
       });
 
       it("keeps an empty subject as a value", async () => {
@@ -538,11 +565,16 @@ describe("the configured store", () => {
     expect(await clearSandboxEmails()).toBe(1);
   });
 
-  it("orders a tie on created_at by id, descending, rather than by insertion", async () => {
-    // Divergence 3. The deleted SQLite arm ordered `created_at DESC` with NO tiebreaker, so
-    // three rows sharing an instant came back in the order the table happened to hold them —
-    // insertion order, which is the ASCENDING id order these three are seeded in. That is not
-    // a reproducible page boundary, and `--offset` over it can repeat or drop a row.
+  it("PARITY: a tie on created_at comes back id-descending, as it did before", async () => {
+    // THIS ONE PASSES ON UNMODIFIED MAIN AND KILLS NO MUTANT, and it is labelled so nobody
+    // reads it as evidence for divergence 3. Adversarial review measured both facts. The
+    // deleted SQLite arm had no tiebreaker in its SQL, but SQLite walks `idx_sandbox_created`
+    // BACKWARDS for a `created_at DESC` scan, so ties came back in descending rowid order —
+    // which for these three rows coincides with descending id. The old order was an accident
+    // of an index rather than a guarantee, which is exactly why the tiebreaker is now
+    // explicit; the case that actually PROVES it is in the store-fixture block, where the
+    // store hands ties back the other way round. This one pins that the accident's outcome is
+    // preserved.
     seedCapture("sbx-a", stamp(2));
     seedCapture("sbx-b", stamp(2));
     seedCapture("sbx-c", stamp(2));

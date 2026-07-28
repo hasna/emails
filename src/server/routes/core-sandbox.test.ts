@@ -16,6 +16,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { closeDatabase, getDatabase, resetDatabase } from "../../db/database.js";
 import { handle } from "./core.js";
+import { createHttpEmailStore } from "../../store-http/index.js";
 import { createSqliteEmailStore } from "../../store-sqlite/index.js";
 import type { EmailStore } from "../../store/email-store.js";
 import type { ResourceRow } from "../../store/records.js";
@@ -89,7 +90,7 @@ beforeEach(() => {
     delete process.env[setting];
   }
   for (const setting of DATABASE_PATH_SETTINGS) delete process.env[setting];
-  process.env["EMAILS_DB_PATH"] = ":memory:";
+  process.env[DATABASE_PATH_SETTINGS[1]] = ":memory:";
   resetDatabase();
   db = getDatabase();
   db.run("INSERT INTO providers (id, name, type, active) VALUES (?, 'Dashboard', 'sandbox', 1)", [PROVIDER_ID]);
@@ -114,15 +115,34 @@ afterEach(() => {
   Object.assign(process.env, INHERITED_PROCESS_ENV);
 });
 
+describe("the fixture itself", () => {
+  it("POSITIVE CONTROL: the configured API is reachable and really does serve a different row", async () => {
+    // WITHOUT THIS EVERY ASSERTION BELOW IS UNFALSIFIABLE. `expect(...).not.toContain(PHANTOM_ID)`
+    // also passes when the `/v1` service is unreachable, mis-credentialled, or serving nothing —
+    // in which case the routes would look right for entirely the wrong reason, and a real
+    // regression would still look green. So the counterfactual is exercised for real: the store
+    // the ENVIRONMENT names is built the same way the collapsed module would build it, and it
+    // answers with the capture no local table holds. Adversarial review asked for this.
+    const before = api.requestCount();
+    const configured = createHttpEmailStore({ baseUrl: api.baseUrl, credential: api.apiKey });
+    const listed = await configured.sandbox.list({ limit: 50 });
+
+    expect(listed.ok).toBe(true);
+    if (listed.ok) expect(listed.value.map((row) => row["id"])).toEqual([PHANTOM_ID]);
+    expect(api.requestCount()).toBeGreaterThan(before);
+  });
+});
+
 describe("GET /api/sandbox", () => {
   it("lists the LOCAL captures, not the ones the configured API would serve", async () => {
+    const before = api.requestCount();
     const body = await (await call("/api/sandbox", "GET")).json() as Array<Record<string, unknown>>;
 
     expect(body.map((row) => row["id"])).toEqual(["sbx-local-2", "sbx-local-1"]);
-    // POSITIVE CONTROL that the API fixture really would have answered differently: it is the
-    // only place this id exists, and a route that followed the environment would show it.
-    expect(JSON.stringify(body)).not.toContain(PHANTOM_ID);
     expect(body.map((row) => row["subject"])).toContain("held locally");
+    // The route did not go to the wire at all — a stronger statement than "the phantom row is
+    // absent", which would also hold for a route that asked the API and got nothing.
+    expect(api.requestCount()).toBe(before);
   });
 });
 
@@ -132,20 +152,30 @@ describe("GET /api/sandbox/:id", () => {
     expect(body["subject"]).toBe("held locally");
   });
 
-  it("answers 404 for the capture only the configured API holds", async () => {
-    // `resolveIdStrict` looks the id up in the local table and cannot find it, so the route
-    // never reaches the store. Either way the dashboard must not serve it.
+  it("refuses the capture only the configured API holds, WITHOUT going to the wire", async () => {
+    // The status is pinned EXACTLY rather than as `>= 400`, and the reason is worth stating:
+    // `resolveIdStrict` looks the id up in the LOCAL table and throws `RouteInputError` (400)
+    // before any store is consulted, so this never reaches a 404. A `.not.toContain` on the
+    // body would be unfalsifiable here — the phantom row could not appear under ANY routing —
+    // so what is asserted instead is that the request count did not move. Adversarial review
+    // found the earlier version of this case could not fail.
+    const before = api.requestCount();
     const response = await call(`/api/sandbox/${PHANTOM_ID}`, "GET");
-    expect(response.status).toBeGreaterThanOrEqual(400);
-    expect(JSON.stringify(await response.json())).not.toContain("served by the API");
+
+    expect(response.status).toBe(400);
+    expect(api.requestCount()).toBe(before);
   });
 });
 
 describe("DELETE /api/sandbox", () => {
   it("deletes the LOCAL captures and reports the number it really removed", async () => {
+    const before = api.requestCount();
     const body = await (await call("/api/sandbox", "DELETE")).json() as { deleted: number };
 
     expect(body.deleted).toBe(2);
     expect(db.query("SELECT id FROM sandbox_emails").all()).toEqual([]);
+    // A delete that followed the environment would have removed nothing local and reported 1,
+    // because the API fixture answers every removal with success.
+    expect(api.requestCount()).toBe(before);
   });
 });

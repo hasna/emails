@@ -773,9 +773,10 @@ const CEILINGS: Record<string, number> = {
   emailsModeEnvReferences: 0,
 };
 
-// 649 files are tracked and 648 scanned today, totalling ~9.6M characters. (The figures in
-// this paragraph were written when the corpus was 624/623 and ~7.4M and had gone stale; the
-// floors and the reasoning below are unchanged.) The floors
+// 650 files are tracked and 649 scanned today, totalling ~9.6M characters. (The figures in
+// this paragraph were written when the corpus was 624/623 and ~7.4M and had gone stale, and
+// the first correction of them was itself one file behind — adversarial review caught that.
+// The floors and the reasoning below are unchanged.) The floors
 // make "the scan stopped resolving files" or "the scan read them as empty" a red test
 // rather than a green run over nothing.
 //
