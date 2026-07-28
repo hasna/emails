@@ -46,6 +46,14 @@
 //     and it is exactly the check both deleted arms performed and no more. It is NOT a
 //     policy evaluation: sender readiness, recipient suppression, warming limits and quota
 //     are what `outboundPolicy` covers and neither store has them.
+//     WHAT IT COSTS, on the send path, stated because it is a real regression rather than a
+//     wash: the deleted SQLite arm answered this from an INDEXED `WHERE LOWER(email) = ?`,
+//     and composing it costs a paged scan of the address registry per authorized send. The
+//     send path already pays one such scan — `src/db/address-lifecycle.ts` enumerates the
+//     same registry for `getAddressSendability` on EVERY send, token or not — so this is a
+//     second scan rather than a first, and it is only paid when a send key is supplied. The
+//     thing that removes both is a by-email address read on the seam, which is that family's
+//     widening to describe and not this one's.
 //  2. FOUR LISTINGS READ ONE CLAMPED PAGE AND CALLED IT THE TABLE. `listSendKeysByOwners`
 //     and `listSendKeySummariesByOwners` asked the deleted HTTP arm for `list({ limit:
 //     1000 })` and filtered the answer client-side; the two owner-filtered listings asked
