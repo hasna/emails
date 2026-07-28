@@ -960,7 +960,7 @@ const root = join(import.meta.dir, "..");
  * own numbers on all eleven. Measured in the WORKTREE, never the shared checkout, which sits on a
  * stale commit and yields a plausible wrong answer.
  *
- * Corpus of this change: 646 tracked, 645 scanned, ~9.80M characters — both floors cleared with
+ * Corpus of this change: 646 tracked, 645 scanned, ~9.81M characters — both floors cleared with
  * room. THREE fewer tracked files than the base and NONE added: two arm modules and one
  * arm-premise suite deleted, with this family's remaining suite rewritten in place and four
  * consumer suites edited in place. The character total is given to three figures on purpose:
