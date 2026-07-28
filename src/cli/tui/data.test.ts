@@ -345,7 +345,7 @@ describe("tui data — addresses / senders / domains", () => {
       domains: [{ id: "dom-1", domain: "acme.com", provider: "self_hosted", status: "verified", verified: true, created_at: "2026-01-01T00:00:00.000Z", updated_at: "2026-01-01T00:00:00.000Z" }],
     });
 
-    const summaries = listDomainSummaries();
+    const summaries = await listDomainSummaries();
     expect(summaries.some((s) => s.domain === "acme.com")).toBe(true);
   });
 });

@@ -64,7 +64,7 @@ async function runDaemon(args: string[]) {
 describe("daemon status reads the provisioning queue over /v1", () => {
   it("counts due and failed provisioning work instead of refusing", async () => {
     // The queue is derived from the provisioning lifecycle columns the domain and
-    // address resources carry (src/db/provisioning.remote.ts dueRows), so seed
+    // address resources carry (the deleted HTTP arm's `dueRows`), so seed
     // those rows rather than a synthetic queue table.
     await stub.seed({
       domains: [

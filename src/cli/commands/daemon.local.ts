@@ -4,7 +4,11 @@ import { join } from "node:path";
 import chalk from "../../lib/chalk-lite.js";
 import { getDataDir, getDatabase } from "../../db/database.js";
 import { getProvisioningWorkSummary } from "../../db/provisioning.js";
-import { renderStatusCount, renderStatusUnavailable } from "../../lib/status-availability.js";
+import {
+  renderStatusCount,
+  renderStatusUnavailable,
+  type StatusAvailability,
+} from "../../lib/status-availability.js";
 import { createSqliteEmailStore } from "../../store-sqlite/index.js";
 import { handleError } from "../utils.js";
 
@@ -69,7 +73,32 @@ function positive(value: number | null): boolean {
   return value !== null && value > 0;
 }
 
-function formatDaemonStatus(status: Awaited<ReturnType<typeof daemonStatus>>): string {
+/**
+ * What the renderer below needs, declared rather than inferred from `daemonStatus`.
+ *
+ * EXPORTED SO THE RENDERER CAN BE PINNED DIRECTLY. Two earlier collapses in this programme
+ * carried a lower bound correctly in the payload and DROPPED it in the formatter, so the
+ * operator still read a confident integer; the only way to catch that is to assert the
+ * rendered text for an availability record a real store rarely produces. Declaring the shape
+ * narrowly (rather than exporting `typeof daemonStatus`) also keeps the test free of the
+ * agent-context status block, which this function never reads past three fields.
+ */
+export interface DaemonQueueView {
+  availability: StatusAvailability;
+  due_domains: number | null;
+  due_addresses: number | null;
+  failed_domains: number | null;
+  failed_addresses: number | null;
+  drainable: boolean;
+}
+
+export interface DaemonStatusView {
+  queue: DaemonQueueView;
+  realtime: { queue_configured: boolean | null; last_poll_at: string | null; last_error: string | null };
+  start_commands: { realtime_watch: string };
+}
+
+export function formatDaemonStatus(status: DaemonStatusView): string {
   const lines = [chalk.bold("\nDaemon status:")];
   const queue = status.queue;
   if (!queue.availability.available) {

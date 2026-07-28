@@ -52,14 +52,14 @@ afterEach(() => {
 });
 
 describe("domain readiness service", () => {
-  it("exposes typed lifecycle summaries and gates self-hosted inbound on live S3 evidence", () => {
+  it("exposes typed lifecycle summaries and gates self-hosted inbound on live S3 evidence", async () => {
     const provider = createProvider({ name: "SES", type: "ses", region: "us-east-1" });
     const created = createDomain(provider.id, "example.com");
     // A self-hosted domain becomes send-ready once its DNS is verified
     // server-side (single all-or-nothing verified flag).
     const domain = updateDnsStatus(created.id, "verified", "verified", "verified");
 
-    const before = buildDomainLifecycleSummary(domain);
+    const before = await buildDomainLifecycleSummary(domain);
     expect(before.provider).toMatchObject({ id: provider.id, name: "SES", type: "ses" });
     expect(before.source_of_truth).toBe("postgres");
     expect(before.readiness.send_ready).toBe(true);
@@ -69,7 +69,10 @@ describe("domain readiness service", () => {
     expect(before.next_actions).toContain("emails domain adopt example.com --provider <provider>");
 
     // Enabling inbound is refused until a live SES/S3 source is registered.
-    expect(() => enableDomainInboundReadiness(domain.id)).toThrow("Inbound self_hosted source is not configured");
+    // `expect().toThrow()` cannot see a REJECTION, and an un-awaited promise never throws —
+    // it would pass for a function that stopped guarding entirely.
+    await expect(enableDomainInboundReadiness(domain.id))
+      .rejects.toThrow("Inbound self_hosted source is not configured");
 
     registerS3Source({
       bucket: "emails-inbound",
@@ -80,7 +83,7 @@ describe("domain readiness service", () => {
       liveSyncEnabled: true,
     });
 
-    const enabled = enableDomainInboundReadiness(domain.id);
+    const enabled = await enableDomainInboundReadiness(domain.id);
     // The live S3 source now satisfies the inbound-evidence gate...
     expect(enabled.before.readiness.inbound_evidence_ready).toBe(true);
     expect(enabled.after.readiness.inbound_evidence.live_s3_sources).toBe(1);
@@ -89,7 +92,7 @@ describe("domain readiness service", () => {
     // entity has no client-writable inbound_status column).
     expect(enabled.after.provisioning?.provisioning_status).toBe("inbound_ready");
 
-    const summaries = listDomainLifecycleSummaries({ provider_id: provider.id });
+    const summaries = await listDomainLifecycleSummaries({ provider_id: provider.id });
     expect(summaries).toHaveLength(1);
     expect(summaries[0]).toMatchObject({
       id: domain.id,
@@ -100,17 +103,17 @@ describe("domain readiness service", () => {
     expect(summaries[0]!.provisioning?.provisioning_status).toBe("inbound_ready");
   });
 
-  it("guards outbound readiness unless DKIM and SPF are verified", () => {
+  it("guards outbound readiness unless DKIM and SPF are verified", async () => {
     const provider = createProvider({ name: "SES", type: "ses", region: "us-east-1" });
     const created = createDomain(provider.id, "blocked.example.com");
 
-    expect(() => enableDomainOutboundReadiness(created.id)).toThrow("Outbound is not verified");
+    await expect(enableDomainOutboundReadiness(created.id)).rejects.toThrow("Outbound is not verified");
 
     const verified = updateDnsStatus(created.id, "verified", "verified", "verified");
-    const summary = buildDomainLifecycleSummary(verified);
+    const summary = await buildDomainLifecycleSummary(verified);
     expect(summary.readiness.send_ready).toBe(true);
 
-    const enabled = enableDomainOutboundReadiness(created.id);
+    const enabled = await enableDomainOutboundReadiness(created.id);
     // Outbound enablement is recorded as provisioning state; the /v1 domain
     // entity does not carry a client-writable outbound_status column.
     expect(enabled.after.provisioning?.provisioning_status).toBe("verified");
