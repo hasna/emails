@@ -138,6 +138,33 @@ export type {
   AddressOwnershipAction, AddressOwnershipEvent,
 } from "./db/owners.js";
 
+// ALL NINE VALUES BELOW CHANGED SHAPE, and this is a published entry point, so the break is
+// stated here rather than only in the commit that caused it. The send-key family collapsed onto
+// the store seam; there are THREE separate breaks and a consumer has to apply all three.
+//
+//  1. EVERY ONE IS ASYNC. `createSendKey`, `getSendKey`, `verifySendKey`, `listSendKeys`,
+//     `listSendKeySummaries`, `listSendKeySummariesByOwners`, `revokeSendKey`,
+//     `canOwnerSendFrom` and `assertSendAuthorized` all return promises now, because every
+//     operation on the seam does. This is the half that fails QUIETLY in a consumer that does
+//     not await: `key.revoked_at` on a promise is `undefined`, `if (key)` is always truthy, and
+//     `if (canOwnerSendFrom(...))` — a SEND-SCOPE GATE — is truthy for a promise that resolves
+//     to `false`. That last one is an authorization bypass in a consumer that forgets the
+//     `await`, so it is named first and named loudly.
+//  2. `SendKey` NO LONGER CARRIES `key_hash`, and `SendKeySummary` is now an alias of it. The
+//     field held the real SHA-256 on a local installation and a fabricated `""` on a
+//     self-hosted one; the seam's record has no hash at all and the service redacts the
+//     column, so reading `.key_hash` is now a compile error rather than a comparison that
+//     silently never matches. `owner_id` and `prefix` are `string | null` (the seam's
+//     nullability — a key outlives a deleted owner), and `updated_at` is new.
+//  3. THE THIRD ARGUMENT IS A STORE, NOT A DATABASE HANDLE. `createSendKey(ownerId, label,
+//     store?)`, `getSendKey(id, store?)`, `revokeSendKey(id, store?)`,
+//     `canOwnerSendFrom(ownerId, from, store?)`, `assertSendAuthorized(token, from, store?)`.
+//     The two owner-scoped listings are `(ownerId?, opts?, store?)` — the shape the facade
+//     already published — and `listSendKeySummariesByOwners(ownerIds, store?)`.
+//
+// WHAT IS NOT A BREAK, because a reader will look for it: the listings still answer newest
+// first, `revokeSendKey` still answers `false` for an unknown OR an already-revoked key, and
+// `verifySendKey` still answers `null` for an unknown, malformed or revoked token.
 export {
   createSendKey, getSendKey, verifySendKey, listSendKeys, listSendKeySummaries,
   listSendKeySummariesByOwners,
