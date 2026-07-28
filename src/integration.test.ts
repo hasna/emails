@@ -25,7 +25,18 @@ import { getAnalytics } from "./lib/analytics.js";
 let stub: V1Stub;
 
 beforeAll(async () => {
-  stub = await startV1Stub();
+  // `openapi: true` is needed by the sandbox block below and by nothing else here.
+  // `src/db/sandbox.ts` has collapsed onto the store seam, so its capture write goes through
+  // the REAL `HttpEmailStore`, which reads the service's published contract before any write
+  // — that document is its only source of truth for which columns a resource accepts, and a
+  // write that names an undeclared one is accepted and silently DROPPED by the generic route.
+  // A missing contract is deliberately a fault there, which is what this block hit.
+  //
+  // The reads here are all UNFILTERED, so the fixture's other weakness — a generic list that
+  // ignores equality filters and answers with the unfiltered list — cannot reach them. A
+  // filtered or paged store-seam read belongs on `src/test-support/v1-store-api.ts`, which is
+  // where `src/db/sandbox.test.ts` and `src/providers/sandbox.test.ts` now run.
+  stub = await startV1Stub({ openapi: true });
 });
 
 afterAll(() => stub.stop());
@@ -53,7 +64,7 @@ describe("sandbox capture flow (via /v1)", () => {
     });
 
     expect(msgId).toBeTruthy();
-    const captured = listSandboxEmails();
+    const captured = await listSandboxEmails();
     expect(captured.length).toBe(1);
     expect(captured[0]!.subject).toBe("Integration test");
     expect(captured[0]!.from_address).toBe("hello@example.com");
@@ -63,9 +74,9 @@ describe("sandbox capture flow (via /v1)", () => {
     const provider = createProvider({ name: "dev", type: "sandbox" });
     const adapter = new SandboxAdapter(provider);
     await adapter.sendEmail({ from: "a@b.com", to: "c@d.com", subject: "Test", text: "x" });
-    expect(listSandboxEmails().length).toBeGreaterThan(0);
-    clearSandboxEmails();
-    expect(listSandboxEmails().length).toBe(0);
+    expect((await listSandboxEmails()).length).toBeGreaterThan(0);
+    expect(await clearSandboxEmails()).toBe(1);
+    expect(await listSandboxEmails()).toHaveLength(0);
   });
 });
 
