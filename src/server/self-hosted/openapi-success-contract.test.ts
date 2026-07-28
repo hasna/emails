@@ -279,12 +279,18 @@ describe("self-hosted OpenAPI success-response schemas", () => {
     ]));
 
     const me = successSchema("/v1/me", "get", 200);
-    expect(me.oneOf).toHaveLength(2);
+    expect(me.oneOf).toHaveLength(3);
     expect(me.oneOf).toEqual(expect.arrayContaining([
       expect.objectContaining({
         required: ["principal_type", "kid", "tenant", "scopes"],
         properties: expect.objectContaining({
           principal_type: expect.objectContaining({ enum: ["apikey"] }),
+        }),
+      }),
+      expect.objectContaining({
+        required: ["principal_type", "sub", "tenant", "scopes"],
+        properties: expect.objectContaining({
+          principal_type: expect.objectContaining({ enum: ["fleet"] }),
         }),
       }),
       expect.objectContaining({
