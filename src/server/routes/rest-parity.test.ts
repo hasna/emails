@@ -3,7 +3,7 @@ import { createAddress } from "../../db/addresses.local.js";
 import { suppressContact, upsertContact } from "../../db/contacts.local.js";
 import { closeDatabase, getDatabase, resetDatabase } from "../../db/database.js";
 import { createDomain, updateDnsStatus, updateDomainReadiness } from "../../db/domains.local.js";
-import { createEmail } from "../../db/emails.local.js";
+import { createSentEmailLedger } from "../../lib/sent-ledger.local.js";
 import { createEvent } from "../../db/events.local.js";
 import { addMember, createGroup } from "../../db/groups.local.js";
 import { storeInboundEmail } from "../../db/inbound.local.js";
@@ -202,7 +202,7 @@ describe("emails serve REST parity smoke", () => {
     });
     const domain = createDomain(provider.id, "example.com");
     const address = createAddress({ provider_id: provider.id, email: "ops@example.com" });
-    const email = createEmail(provider.id, {
+    const email = await createSentEmailLedger(provider.id, {
       from: "ops@example.com",
       to: "user@example.com",
       subject: "REST smoke",
@@ -350,13 +350,13 @@ describe("emails serve REST parity smoke", () => {
   it("paginates REST exports before serializing response bodies", async () => {
     const db = getDatabase();
     const provider = createProvider({ name: "sandbox", type: "sandbox", active: true });
-    const older = createEmail(provider.id, {
+    const older = await createSentEmailLedger(provider.id, {
       from: "ops@example.com",
       to: "older@example.com",
       subject: "Older export",
       text: "hello",
     });
-    const newer = createEmail(provider.id, {
+    const newer = await createSentEmailLedger(provider.id, {
       from: "ops@example.com",
       to: "newer@example.com",
       subject: "Newer export",
@@ -425,13 +425,13 @@ describe("emails serve REST parity smoke", () => {
 
   it("filters REST sent email APIs by canonical sender", async () => {
     const provider = createProvider({ name: "sandbox", type: "sandbox", active: true });
-    const kept = createEmail(provider.id, {
+    const kept = await createSentEmailLedger(provider.id, {
       from: '"Ops Team" <ops@example.com>',
       to: "kept@example.com",
       subject: "REST kept",
       text: "hello",
     });
-    createEmail(provider.id, {
+    await createSentEmailLedger(provider.id, {
       from: "other@example.com",
       to: "other@example.com",
       subject: "REST other",
@@ -449,7 +449,7 @@ describe("emails serve REST parity smoke", () => {
     const provider = createProvider({ name: "sandbox", type: "sandbox", active: true });
     const db = getDatabase();
     for (let i = 0; i < 4; i++) {
-      const email = createEmail(provider.id, {
+      const email = await createSentEmailLedger(provider.id, {
         from: "ops@example.com",
         to: `user-${i}@example.com`,
         subject: `REST searchable ${i}`,
@@ -478,7 +478,7 @@ describe("emails serve REST parity smoke", () => {
   it("normalizes bad REST list limits before calling data APIs", async () => {
     const provider = createProvider({ name: "sandbox", type: "sandbox", active: true });
     for (let i = 0; i < 3; i++) {
-      const email = createEmail(provider.id, {
+      const email = await createSentEmailLedger(provider.id, {
         from: "ops@example.com",
         to: `user-${i}@example.com`,
         subject: `REST limit ${i}`,

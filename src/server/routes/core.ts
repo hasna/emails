@@ -2,7 +2,7 @@
 import { createProvider, listProviderSummaries, deleteProvider, getProvider, updateProvider } from '../../db/providers.local.js';
 import { createDomain, listDomains, deleteDomain, getDomain, updateDnsStatus } from '../../db/domains.local.js';
 import { createAddress, deleteAddress } from '../../db/addresses.local.js';
-import { listEmails, getEmail, searchEmails } from '../../db/emails.local.js';
+import { listEmails, getEmail, searchEmails } from '../../db/emails.js';
 import { listSandboxEmailSummaries, getSandboxEmail, clearSandboxEmails } from '../../db/sandbox.js';
 import { getDatabase } from '../../db/database.js';
 import { createSqliteEmailStore } from '../../store-sqlite/index.js';
@@ -309,7 +309,7 @@ if (path === "/api/emails" && method === "GET") {
       limit: queryInteger(url, "limit", 50, { min: 1, max: 1000 }),
       offset: optionalQueryInteger(url, "offset", { min: 0 }),
     };
-    return json(listEmails(filter));
+    return json(await listEmails(filter));
   } catch (e) { return internalError(e); }
 }
 
@@ -321,7 +321,7 @@ if (path === "/api/emails/search" && method === "GET") {
     const since = url.searchParams.get("since") ?? undefined;
     const limit = queryInteger(url, "limit", 50, { min: 1, max: 1000 });
     const offset = optionalQueryInteger(url, "offset", { min: 0 });
-    return json(searchEmails(q, { since, limit, offset }));
+    return json(await searchEmails(q, { since, limit, offset }));
   } catch (e) { return internalError(e); }
 }
 
@@ -331,7 +331,7 @@ if (emailMatch && method === "GET") {
   const id = resolveId("emails", emailMatch[1]!);
   if (!id) return notFound();
   try {
-    const email = getEmail(id);
+    const email = await getEmail(id);
     if (!email) return notFound();
     return json(email);
   } catch (e) { return internalError(e); }

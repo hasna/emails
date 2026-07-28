@@ -47,7 +47,7 @@ export function registerWarmingTools(server: McpServer): void {
       try {
         const schedule = getWarmingSchedule(domain);
         if (!schedule) throw new Error(`Warming schedule not found for domain: ${domain}`);
-        const { today_limit, today_sent, current_day } = describeWarmingProgress(schedule);
+        const { today_limit, today_sent, current_day } = await describeWarmingProgress(schedule);
         return { content: [{ type: "text", text: JSON.stringify({ schedule, today_limit, today_sent, current_day }, null, 2) }] };
       } catch (e) {
         return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };

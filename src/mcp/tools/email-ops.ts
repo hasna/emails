@@ -288,7 +288,7 @@ export function registerEmailOpsTools(server: McpServer): void {
       const resolvedProviderId = input.provider_id
         ? resolveId("providers", input.provider_id)
         : undefined;
-      const emails = listEmails({
+      const emails = await listEmails({
         ...input,
         provider_id: resolvedProviderId,
         limit: input.limit ?? 50,
@@ -313,7 +313,7 @@ export function registerEmailOpsTools(server: McpServer): void {
   async ({ query, since, limit, offset }) => {
     try {
       const { searchEmails } = await import('../../db/emails.js');
-      const emails = searchEmails(query, { since, limit: limit ?? 50, offset: offset ?? 0 });
+      const emails = await searchEmails(query, { since, limit: limit ?? 50, offset: offset ?? 0 });
       return { content: [{ type: "text", text: JSON.stringify(emails, null, 2) }] };
     } catch (e) {
       return toolError(e);
@@ -332,7 +332,7 @@ export function registerEmailOpsTools(server: McpServer): void {
       const { getEmail } = await import('../../db/emails.js');
       const { resolveId, EmailNotFoundError } = await import('../helpers.js');
       const id = resolveId("emails", email_id);
-      const email = getEmail(id);
+      const email = await getEmail(id);
       if (!email) throw new EmailNotFoundError(id);
       return { content: [{ type: "text", text: JSON.stringify(email, null, 2) }] };
     } catch (e) {
@@ -353,7 +353,7 @@ export function registerEmailOpsTools(server: McpServer): void {
       const { getEmailContent } = await import('../../db/email-content.js');
       const { resolveId, EmailNotFoundError } = await import('../helpers.js');
       const id = resolveId("emails", email_id);
-      const email = getEmail(id);
+      const email = await getEmail(id);
       if (!email) throw new EmailNotFoundError(id);
       // NO FABRICATED EMPTY CONTENT. The `|| { html: null, text_body: null, headers: {} }`
       // that used to stand here rendered "there is no such message" as "this message has no

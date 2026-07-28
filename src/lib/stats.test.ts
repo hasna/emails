@@ -22,7 +22,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { closeDatabase, getDatabase, resetDatabase, type Database } from "../db/database.js";
 import { createProvider } from "../db/providers.local.js";
-import { createEmail } from "../db/emails.local.js";
+import { createSentEmailLedger } from "./sent-ledger.local.js";
 import { createEvent } from "../db/events.local.js";
 import { createSqliteEmailStore } from "../store-sqlite/index.js";
 import { createHttpEmailStore } from "../store-http/index.js";
@@ -80,15 +80,15 @@ function isoAgo(ms: number): string {
  * window the windowed and unwindowed counts would be identical, and the window predicate
  * could be deleted with this suite still green.
  */
-function seed(): { alpha: string; beta: string } {
+async function seed(): Promise<{ alpha: string; beta: string }> {
   const alpha = createProvider({ name: "alpha", type: "sandbox" }, db).id;
   const beta = createProvider({ name: "beta", type: "sandbox" }, db).id;
 
   // The legacy provider-scoped ledger. `createEmail` stamps `sent_at` from the clock, so
   // these are inside any window; the out-of-window outbound row is written through the
   // seam below, where the timestamp is an input.
-  createEmail(alpha, { from: "a@x.test", to: "one@y.test", subject: "one", text: "t" }, "pm-1", db);
-  createEmail(beta, { from: "b@x.test", to: "two@y.test", subject: "two", text: "t" }, "pm-2", db);
+  await createSentEmailLedger(alpha, { from: "a@x.test", to: "one@y.test", subject: "one", text: "t" }, "pm-1", db);
+  await createSentEmailLedger(beta, { from: "b@x.test", to: "two@y.test", subject: "two", text: "t" }, "pm-2", db);
 
   const events: Array<[string, EventType, number]> = [
     [alpha, "delivered", 1 * DAY],
@@ -253,7 +253,7 @@ const IMPLEMENTATIONS: Array<[string, () => Promise<EmailStore>]> = [
 
 describe.each(IMPLEMENTATIONS)("delivery statistics measured through %s", (_label, open) => {
   it("POSITIVE CONTROL: every count is a total, every rate is a number, and nothing is refused", async () => {
-    seed();
+    await seed();
     const store = await open();
     const stats = await getLocalStats(undefined, "30d", store);
 
@@ -282,7 +282,7 @@ describe.each(IMPLEMENTATIONS)("delivery statistics measured through %s", (_labe
   });
 
   it("applies the period window to both inventories rather than counting the whole table", async () => {
-    seed();
+    await seed();
     const store = await open();
     // Three days: only the 1d and 2d delivered events; the outbound side keeps the two
     // ledger rows stamped now plus the 2d unified row.
@@ -300,7 +300,7 @@ describe.each(IMPLEMENTATIONS)("delivery statistics measured through %s", (_labe
   });
 
   it("refuses the SENT count when a provider is named, and does not answer with the unfiltered one", async () => {
-    const { alpha } = seed();
+    const { alpha } = await seed();
     const store = await open();
     const stats = await getLocalStats(alpha, "30d", store);
 
@@ -346,7 +346,7 @@ describe.each(IMPLEMENTATIONS)("delivery statistics measured through %s", (_labe
 
 describe("a read that did not happen is never published as a zero", () => {
   it("turns a declared-false capability into nulls with a structural reason", async () => {
-    seed();
+    await seed();
     const base = sqliteStore();
     await seedUnifiedOutbound(base);
     const store = storeExcept(base, {
@@ -402,7 +402,7 @@ describe("a read that did not happen is never published as a zero", () => {
   });
 
   it("refuses the sent count when the message list is behind a capability the store denies", async () => {
-    seed();
+    await seed();
     const base = sqliteStore();
     const store = storeExcept(base, {
       messages: {
@@ -575,7 +575,7 @@ describe("a bounded read is published as a lower bound", () => {
 
 describe("a rate is published only when every count it divides is a total", () => {
   it("refuses a rate whose DENOMINATOR is a lower bound even though its numerator is exact", async () => {
-    seed();
+    await seed();
     const base = sqliteStore();
     const store = storeExcept(base, {
       messages: { ...base.messages, listMessages: endlessMessagePages() },

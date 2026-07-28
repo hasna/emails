@@ -54,8 +54,8 @@ function csvCell(value: unknown): string {
   return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
-export function exportEmailsCsv(filters: EmailExportFilters): string {
-  const emails = listEmails(normalizeEmailFilters(filters));
+export async function exportEmailsCsv(filters: EmailExportFilters): Promise<string> {
+  const emails = await listEmails(normalizeEmailFilters(filters));
   const header = "id,from,to,subject,status,sent_at";
   const rows = emails.map(e =>
     [e.id, e.from_address, e.to_addresses, e.subject, e.status, e.sent_at].map(csvCell).join(",")
@@ -63,8 +63,8 @@ export function exportEmailsCsv(filters: EmailExportFilters): string {
   return [header, ...rows].join("\n");
 }
 
-export function exportEmailsJson(filters: EmailExportFilters): string {
-  return JSON.stringify(listEmails(normalizeEmailFilters(filters)), null, 2);
+export async function exportEmailsJson(filters: EmailExportFilters): Promise<string> {
+  return JSON.stringify(await listEmails(normalizeEmailFilters(filters)), null, 2);
 }
 
 export function exportEventsCsv(filters: EventExportFilters): string {

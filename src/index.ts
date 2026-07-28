@@ -61,6 +61,34 @@ export {
   markVerified,
 } from "./db/addresses.js";
 
+// THE SENT-LEDGER FAMILY CHANGED SHAPE IN FOUR WAYS, and this is a published entry point, so
+// the break is stated here rather than only in the commit that caused it.
+//
+//  * ALL SIX ARE ASYNC now, because they read through the store seam and every seam operation
+//    is a promise. This is the dangerous half of the break, because it fails QUIETLY in a
+//    consumer that does not await: `email.status` on a promise is `undefined`, `if (email)` is
+//    always truthy, and `emails.length` is `undefined` — so a "no such email" branch becomes
+//    unreachable and an empty ledger renders as `undefined`.
+//  * THEIR LAST PARAMETER IS AN `EmailStore`, NOT A `Database`. `getEmail(id, store?)`,
+//    `listEmails(filter?, store?)`, `searchEmails(query, opts?, store?)`,
+//    `updateEmailStatus(id, status, store?)` and `deleteEmail(id, store?)`. Passing the
+//    database handle that used to scope these to one file now passes a value of the wrong type.
+//  * `createEmail` NOW REFUSES, ALWAYS, by throwing. No store behind this package can write a
+//    provider-scoped sent-ledger row: `MessageInput` carries no `provider_id`, `bcc_addrs`,
+//    `reply_to` or `tags`, both stores refuse an `idempotency_key`, and the SQLite store writes
+//    messages to a table that `email_content` and `events` do not hold foreign keys into. See
+//    `src/db/emails.ts` for the four checks and the two seam widenings that would bring it
+//    back. A local installation still records a send through `createSentEmailLedger`.
+//  * THREE FIELDS ON `Email` ARE NULLABLE now — `provider_id`, `bcc_addresses` and `tags` —
+//    because no message projection on the seam publishes them, and `null` there means "this
+//    store does not record it" rather than the `"self_hosted"` / `[]` / `{}` the deleted HTTP
+//    arm invented. A consumer that renders `bcc_addresses.length` or spreads `tags` breaks at
+//    compile time, which is the point. `listEmails` also REFUSES a `provider_id` filter for
+//    the same reason, rather than ignoring it and returning another provider's mail.
+//
+// These need a MAJOR version at release. The version is deliberately not bumped in the change
+// that introduced them, and `CHANGELOG.md`'s `[Unreleased]` section is digest-frozen, so this
+// comment and the pull request are where the break is recorded.
 export {
   createEmail,
   getEmail,
