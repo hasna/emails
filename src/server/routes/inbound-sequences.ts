@@ -4,7 +4,7 @@ import { parseResendInbound, parseMailgunInbound, parseMimeEmail } from '../../l
 import { createSequence, getSequence, listSequences, deleteSequence, addStep, listSteps, enroll, unenroll, listEnrollments, type EnrollmentStatus } from '../../db/sequences.local.js';
 import { createWarmingSchedule, getWarmingSchedule, listWarmingSchedules, updateWarmingStatus, deleteWarmingSchedule } from '../../db/warming.local.js';
 import { describeWarmingProgress } from '../../lib/warming.js';
-import { updateEmailStatus } from '../../db/emails.local.js';
+import { updateEmailStatus } from '../../db/emails.js';
 import { upsertEvent } from '../../db/events.local.js';
 import { getDatabase } from '../../db/database.js';
 import { getLatestEmailDigest, normalizeEmailDigestPeriod } from '../../db/email-digests.js';
@@ -497,7 +497,7 @@ if (warmingDomainMatch && method === "GET") {
     const domain = decodeURIComponent(warmingDomainMatch[1]!);
     const schedule = getWarmingSchedule(domain);
     if (!schedule) return notFound("Warming schedule not found");
-    const { today_limit, today_sent, current_day } = describeWarmingProgress(schedule);
+    const { today_limit, today_sent, current_day } = await describeWarmingProgress(schedule);
     return json({ schedule, today_limit, today_sent, current_day });
   } catch (e) { return internalError(e); }
 }
@@ -541,7 +541,7 @@ if (trackOpenMatch && method === "GET") {
       metadata: { tracked: true, ip: req.headers.get("x-forwarded-for") ?? "unknown" },
       occurred_at: new Date().toISOString(),
     });
-    updateEmailStatus(emailId, "delivered");
+    await updateEmailStatus(emailId, "delivered");
   } catch { /* non-fatal — don't break the tracking pixel response */ }
 
   // Return 1x1 transparent GIF

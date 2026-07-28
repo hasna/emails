@@ -319,7 +319,7 @@ export function registerMiscOpsTools(server: McpServer): void {
       const resolvedId = provider_id ? resolveId("providers", provider_id) : undefined;
       const filters = { provider_id: resolvedId, from_address, since, until, limit: limit ?? 1000, offset: offset ?? 0 };
       const { exportEmailsCsv, exportEmailsJson } = await import("../../lib/export.js");
-      const output = (format ?? "json") === "csv" ? exportEmailsCsv(filters) : exportEmailsJson(filters);
+      const output = (format ?? "json") === "csv" ? await exportEmailsCsv(filters) : await exportEmailsJson(filters);
       return { content: [{ type: "text", text: output }] };
     } catch (e) {
       return toolError(e);

@@ -21,7 +21,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { closeDatabase, getDatabase, resetDatabase } from "../db/database.js";
 import { createProvider } from "../db/providers.local.js";
-import { createEmail } from "../db/emails.local.js";
+import { createSentEmailLedger } from "./sent-ledger.local.js";
 import { createEvent } from "../db/events.local.js";
 import { createSqliteEmailStore } from "../store-sqlite/index.js";
 import { createHttpEmailStore } from "../store-http/index.js";
@@ -89,14 +89,14 @@ async function seed(): Promise<Fixture> {
   };
 
   // DAY_ONE: two sends, one of them to two recipients (so `ops@` outranks `dev@`).
-  const first = createEmail(
+  const first = await createSentEmailLedger(
     provider.id,
     { from: "hi@alpha.example", to: ["ops@alpha.example", "dev@alpha.example"], subject: "one", text: "x" },
     "pm-1",
     db,
   );
   stamp(first.id, `${DAY_ONE}T09:15:00.000Z`);
-  const second = createEmail(
+  const second = await createSentEmailLedger(
     provider.id,
     { from: "hi@alpha.example", to: ["ops@alpha.example"], subject: "two", text: "x" },
     "pm-2",
@@ -105,7 +105,7 @@ async function seed(): Promise<Fixture> {
   stamp(second.id, `${DAY_ONE}T09:40:00.000Z`);
 
   // DAY_TWO: one send, a different hour.
-  const third = createEmail(
+  const third = await createSentEmailLedger(
     provider.id,
     { from: "hi@alpha.example", to: ["ops@alpha.example"], subject: "three", text: "x" },
     "pm-3",
@@ -114,7 +114,7 @@ async function seed(): Promise<Fixture> {
   stamp(third.id, `${DAY_TWO}T17:05:00.000Z`);
 
   // Outside the window entirely — it must not appear in any bucket.
-  const stale = createEmail(
+  const stale = await createSentEmailLedger(
     provider.id,
     { from: "hi@alpha.example", to: ["ancient@alpha.example"], subject: "stale", text: "x" },
     "pm-0",

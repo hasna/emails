@@ -43,7 +43,7 @@ export function validateSendAttachments(attachments: SendEmailOptions["attachmen
   }
 }
 
-export function assertWarmingLimit(opts: SendEmailOptions, db?: Database): void {
+export async function assertWarmingLimit(opts: SendEmailOptions, db?: Database): Promise<void> {
   if (opts.bypass_warming) return;
   const fromDomain = canonicalSender(opts.from)?.split("@")[1] ?? opts.from.split("@")[1];
   if (!fromDomain) return;
@@ -51,7 +51,7 @@ export function assertWarmingLimit(opts: SendEmailOptions, db?: Database): void 
   if (!warmingSchedule) return;
   const limit = getTodayLimit(warmingSchedule);
   if (limit === null) return;
-  const sent = getTodaySentCount(fromDomain);
+  const sent = await getTodaySentCount(fromDomain);
   if (sent >= limit) {
     throw new Error(`Warming limit reached for ${fromDomain}: ${sent}/${limit} emails sent today. Use bypass_warming for a trusted local override or wait until tomorrow.`);
   }
@@ -120,7 +120,7 @@ export async function sendWithFailover(
   db?: Database,
 ): Promise<SendResult> {
   validateSendAttachments(opts.attachments);
-  assertWarmingLimit(opts, db);
+  await assertWarmingLimit(opts, db);
 
   // Scoped-auth guard: when an auth_token (send key) is supplied, the sender
   // must own or administer the From address. No token = trusted local caller.

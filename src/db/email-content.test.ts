@@ -43,9 +43,8 @@ import {
 import type { EmailStore } from "../store/email-store.js";
 import type { MessageRecord } from "../store/records.js";
 import type { Outcome, Refusal } from "../store/outcome.js";
-import { createEmail } from "./emails.local.js";
 import { createProvider } from "./providers.local.js";
-import { storeSentEmailContent } from "../lib/sent-ledger.local.js";
+import { createSentEmailLedger, storeSentEmailContent } from "../lib/sent-ledger.local.js";
 import {
   EmailContentWriteUnsupportedError,
   getEmailContent,
@@ -621,13 +620,13 @@ describe("the published entry point", () => {
 // row — which is a property of that database and not of the seam.
 
 describe("content written by the ledger writer, read back through the seam", () => {
-  function seedLegacyLedgerRow(subject: string): string {
+  async function seedLegacyLedgerRow(subject: string): Promise<string> {
     const provider = createProvider({ name: "sandbox", type: "sandbox" });
-    return createEmail(provider.id, {
+    return (await createSentEmailLedger(provider.id, {
       from: "sender@example.test",
       to: ["recipient@example.test"],
       subject,
-    }).id;
+    })).id;
   }
 
   // THE TEST THE COLLAPSE NEEDS MOST. `createEmail` writes the ledger row and records NO body;
@@ -636,7 +635,7 @@ describe("content written by the ledger writer, read back through the seam", () 
   // simplification when a family collapses — the table would have a reader and no writer, and
   // nothing else in this suite would notice.
   it("is still read after the write moved out of the deleted arm", async () => {
-    const id = seedLegacyLedgerRow("legacy ledger row");
+    const id = await seedLegacyLedgerRow("legacy ledger row");
 
     await storeSentEmailContent(id, {
       text: "recorded by the ledger writer",
@@ -653,7 +652,7 @@ describe("content written by the ledger writer, read back through the seam", () 
   });
 
   it("replaces the recorded body on a second write, as the deleted arm did", async () => {
-    const id = seedLegacyLedgerRow("re-recorded");
+    const id = await seedLegacyLedgerRow("re-recorded");
 
     await storeSentEmailContent(id, { text: "first" });
     expect((await getEmailContent(id, sqliteHarness.store()))!.text_body).toBe("first");
@@ -666,7 +665,7 @@ describe("content written by the ledger writer, read back through the seam", () 
   // — the same rule as for a seam-created message, checked on the join that can actually
   // produce a missing right-hand side.
   it("answers an unrecorded ledger row with nulls rather than with null", async () => {
-    const id = seedLegacyLedgerRow("body never recorded");
+    const id = await seedLegacyLedgerRow("body never recorded");
 
     const content = await getEmailContent(id, sqliteHarness.store());
     expect(content, "the message exists, so this is not an absence").not.toBeNull();

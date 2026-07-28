@@ -80,8 +80,7 @@
 // with a second failure mode on the read that reports failures.
 
 import {
-  STORE_ENUMERATION_PAGE_BUDGET,
-  STORE_LIST_PAGE_MAX,
+  enumerateStorePages,
   enumerateStoreRows,
 } from "./status-facts-enumeration.js";
 import {
@@ -94,8 +93,8 @@ import {
 } from "./status-availability.js";
 import { StoreConfigurationError, createConfiguredEmailStore } from "../store-resolution.js";
 import type { EmailStore } from "../store/email-store.js";
-import type { Outcome, Refusal } from "../store/outcome.js";
-import type { MessageListRecord, Page, ResourceRow } from "../store/records.js";
+import type { Refusal } from "../store/outcome.js";
+import type { MessageListRecord, ResourceRow } from "../store/records.js";
 
 /**
  * The event types a delivery statistic is made of.
@@ -186,80 +185,34 @@ interface OutboundEnumeration {
 /**
  * Count outbound messages in the period by paging the message list to its end.
  *
- * THIS PAGER FOLLOWS THE CURSOR, which is a stronger end-of-table proof than the one
+ * THE PAGER FOLLOWS THE CURSOR, which is a stronger end-of-table proof than the one
  * `enumerateStoreRows` has to use for the uniform families. `Page.next_cursor` is
  * documented on the seam as "null exactly when this page is the last"
  * (src/store/records.ts), and both implementations answer it from their OWN row count
- * against their OWN clamped limit — SQLite from the query it just ran
- * (src/store-sqlite/messages.ts), the API store from the service's `next_cursor`
- * (src/store-http/messages.ts). So the STORE states the end rather than this client
- * inferring it.
+ * against their OWN clamped limit. So the STORE states the end rather than this client
+ * inferring it from a short page.
  *
- * WHAT IS DELIBERATELY NOT USED AS AN END SIGNAL: the length of a page. Every list route
- * here clamps `limit`, so a short page is byte-for-byte indistinguishable from the last
- * page of a small table, and a store that quietly served 200 rows for a 500-row request
- * would have had its first page published as a complete total. This loop never reads
- * `items.length` to decide it has finished — only `next_cursor === null` does that. The
- * two page checks below are ANTI-STALL guards against a store that contradicts its own
- * contract (a non-null cursor with no rows, or a cursor that does not advance), and both
- * leave the enumeration INCOMPLETE rather than calling it the end.
+ * THE LOOP ITSELF NOW LIVES IN `enumerateStorePages`
+ * (src/lib/status-facts-enumeration.ts), beside the offset pager it shares its honesty
+ * rules with. It moved there when `src/db/emails` collapsed onto the seam and needed the
+ * same walk over the same stream: two copies of "an empty page is not the end, a
+ * duplicate proves rows were skipped, a stalled cursor is not completeness" is two
+ * copies that can drift, and the offset pager's own header says why each of those rules
+ * exists. Only the SHAPE differs here — this caller wants a count of distinct ids and
+ * throws the rows away — so the fields are re-projected rather than re-derived.
  */
 async function countOutboundSince(store: EmailStore, since: string): Promise<OutboundEnumeration> {
-  const seen = new Set<string>();
-  let cursor: string | undefined;
-  let pages = 0;
-  let duplicates = 0;
-  let reachedEnd = false;
-  let refusal: Refusal | null = null;
-  let fault: string | null = null;
-
-  while (pages < STORE_ENUMERATION_PAGE_BUDGET) {
-    let outcome: Outcome<Page<MessageListRecord>>;
-    try {
-      outcome = await store.messages.listMessages({
-        direction: "outbound",
-        since,
-        limit: STORE_LIST_PAGE_MAX,
-        ...(cursor === undefined ? {} : { cursor }),
-      });
-    } catch (error) {
-      fault = faultMessage(error);
-      break;
-    }
-    pages += 1;
-    if (!outcome.ok) {
-      refusal = outcome;
-      break;
-    }
-    const page = outcome.value;
-    for (const row of page.items) {
-      // De-duplicated by id, and every duplicate is COUNTED as well as skipped: a keyset
-      // page is supposed to come from a total order, so a repeated row proves it did not,
-      // which means rows were skipped too. De-duplicating without saying so turns an
-      // inflated count into an undercount published as exact.
-      if (seen.has(row.id)) {
-        duplicates += 1;
-        continue;
-      }
-      seen.add(row.id);
-    }
-    if (page.next_cursor === null) {
-      reachedEnd = true;
-      break;
-    }
-    if (page.items.length === 0 || page.next_cursor === cursor) break;
-    cursor = page.next_cursor;
-  }
-
-  const answered = refusal === null && fault === null;
+  const enumeration = await enumerateStorePages<MessageListRecord>(
+    (opts) => store.messages.listMessages({ direction: "outbound", since, ...opts }),
+    { idOf: (row) => row.id },
+  );
   return {
-    count: seen.size,
-    refusal,
-    fault,
-    // Reaching the end alone is not completeness: a duplicate proves rows were skipped.
-    complete: answered && reachedEnd && duplicates === 0,
-    pages,
-    duplicates,
+    count: enumeration.rows.length,
+    refusal: enumeration.refusal,
+    fault: enumeration.fault,
+    complete: enumeration.complete,
+    pages: enumeration.pages,
+    duplicates: enumeration.duplicates,
   };
 }
 

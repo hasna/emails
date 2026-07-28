@@ -1,16 +1,110 @@
 import type { Database } from "../db/database.js";
-import { getDatabase } from "../db/database.js";
-import type { Email, SendEmailOptions } from "../types/index.js";
-import { createEmail } from "../db/emails.local.js";
+import { getDatabase, now, uuid } from "../db/database.js";
+import type { Email, EmailRow, EmailStatus, SendEmailOptions } from "../types/index.js";
+import { parseJsonArray, parseJsonObject } from "../db/json.js";
 import { setEmailThreading, type EmailThreading } from "../db/threads.local.js";
 
+/** An `emails` row, decoded. Byte-for-byte the deleted arm's mapping. */
+function rowToEmail(row: EmailRow): Email {
+  return {
+    ...row,
+    to_addresses: parseJsonArray<string>(row.to_addresses),
+    cc_addresses: parseJsonArray<string>(row.cc_addresses),
+    bcc_addresses: parseJsonArray<string>(row.bcc_addresses),
+    tags: parseJsonObject<Record<string, string>>(row.tags),
+    status: row.status as EmailStatus,
+    has_attachments: !!row.has_attachments,
+  };
+}
+
+/**
+ * Record a sent message in the LOCAL sent ledger.
+ *
+ * ─── THIS SQL MOVED HERE, AND IT IS THE FIRST HALF OF THE WRITE BELOW ─────────────────
+ *
+ * It used to live in `src/db/emails.local.ts`, one of two arms of a family that branched on
+ * the process-wide deployment word. That family is now ONE implementation over the store
+ * seam, and the seam CANNOT PERFORM THIS WRITE — `src/db/emails.ts` carries the evidence in
+ * full and its exported `createEmail` is now a named refusal. The four load-bearing facts:
+ *
+ *   1. `MessageInput` has no `provider_id`, no `bcc_addrs`, no `reply_to` and no `tags`,
+ *      and the `emails` table has all four.
+ *   2. `messages.createMessage` on the SQLite store inserts into `inbound_emails`, NOT into
+ *      `emails` — and `email_content.email_id` and `events.email_id` both declare
+ *      `REFERENCES emails(id)`, so a ledger row written through the seam could carry
+ *      neither a body nor a delivery event.
+ *   3. Both stores REFUSE an `idempotency_key` on `createMessage`, and the forwarding
+ *      pipeline sets one on every copy.
+ *   4. The deleted HTTP arm POSTed `direction: "outbound"` to a `/v1` route whose schema
+ *      declares `direction: { enum: ["inbound"] }`, so it could not have worked against the
+ *      real service at all.
+ *
+ * The comment under `storeSentEmailContent` below predicted this move before the collapse
+ * happened, and its reasoning is the reason the two halves are together: they record one
+ * message, they are reached on exactly the same paths, and splitting them would have put
+ * one half on a seam that drops four of its columns while the other stayed here.
+ *
+ * IT CREATES NO SPLIT-BRAIN, for exactly the reasons the note below gives for its own
+ * statement: this module is unreachable on an API-configured installation, both paths into
+ * it stop there, and on such an installation the SERVICE records a sent message when its
+ * send route reserves the send intent.
+ *
+ * @param db the ledger this write lands in. Real, and used — unlike the handle the deleted
+ *   facade took, which selected an arm.
+ */
 export async function createSentEmailLedger(
   providerId: string,
   opts: SendEmailOptions,
   providerMessageId?: string,
   db?: Database,
 ): Promise<Email> {
-  return createEmail(providerId, opts, providerMessageId, db);
+  const d = db || getDatabase();
+  const id = uuid();
+  const timestamp = now();
+  const toArr = Array.isArray(opts.to) ? opts.to : [opts.to];
+  const ccArr = opts.cc ? (Array.isArray(opts.cc) ? opts.cc : [opts.cc]) : [];
+  const bccArr = opts.bcc ? (Array.isArray(opts.bcc) ? opts.bcc : [opts.bcc]) : [];
+  const attachCount = opts.attachments?.length ?? 0;
+
+  // Idempotency: if a key was supplied and that send is already ledgered, return the
+  // existing row. This is the ONLY working idempotency fence on the local send path —
+  // `src/lib/forwarding.ts` records that the key fences nothing before this point, and
+  // `createMessage` refuses the column outright on both stores.
+  const idempotencyKey = (opts as unknown as Record<string, unknown>)["idempotency_key"] as string | undefined;
+  if (idempotencyKey) {
+    const existing = d.query("SELECT * FROM emails WHERE idempotency_key = ?").get(idempotencyKey) as EmailRow | null;
+    if (existing) return rowToEmail(existing);
+  }
+
+  d.run(
+    `INSERT INTO emails (id, provider_id, provider_message_id, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to, subject, status, has_attachments, attachment_count, tags, idempotency_key, sent_at, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'sent', ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      id,
+      providerId,
+      providerMessageId || null,
+      opts.from,
+      JSON.stringify(toArr),
+      JSON.stringify(ccArr),
+      JSON.stringify(bccArr),
+      opts.reply_to || null,
+      opts.subject,
+      attachCount > 0 ? 1 : 0,
+      attachCount,
+      JSON.stringify(opts.tags || {}),
+      idempotencyKey || null,
+      timestamp,
+      timestamp,
+      timestamp,
+    ],
+  );
+
+  const written = d.query("SELECT * FROM emails WHERE id = ?").get(id) as EmailRow | null;
+  // The row is read back rather than assembled from the arguments, so a store that
+  // persisted something else is not taken at this module's word — and the column defaults
+  // (`created_at`, `updated_at`) come from whatever actually wrote them.
+  if (!written) throw new Error(`sent ledger row ${id} disappeared immediately after insert`);
+  return rowToEmail(written);
 }
 
 /**

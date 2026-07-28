@@ -163,13 +163,35 @@ describe("resource repos route reads to selfHosted in selfHosted mode", () => {
     }
   });
 
-  test("email log/search route to /v1/messages and surface only outbound", () => {
-    const listed = listEmails();
-    expect(listed.map((e) => e.id)).toEqual(["m1"]);
-    expect(listed[0]!.subject).toBe("Sent one");
-    const found = searchEmails("Sent");
-    expect(found.map((e) => e.id)).toEqual(["m1"]);
-    expect(searchEmails("Received")).toEqual([]);
+  // The sent ledger no longer participates in the routing this file measures either, and it
+  // stopped the same way the schedule did: its family has collapsed to one implementation over
+  // the store seam, so it reaches this `/v1` service because STORAGE CONFIGURATION named an
+  // Emails API — not because a mode word chose an arm. The database path is therefore unset for
+  // the duration of this case, leaving exactly one configured store, because the pair is a
+  // CONTRADICTION that `planEmailStore` refuses outright.
+  //
+  // WHAT IT STILL GUARDS IS STRONGER THAN WHAT IT USED TO. The stand-in service below ignores
+  // `direction` entirely and serves BOTH rows for every request — which is exactly the shape of
+  // fixture that let the deleted arm look correct — so the outbound scoping asserted here is
+  // being done by the client, over rows a widened server handed it, and not by the query.
+  test("the sent ledger reads the configured API store and surfaces only outbound rows", async () => {
+    const restore = DATABASE_PATH_SETTINGS.map((key) => [key, process.env[key]] as const);
+    for (const [key] of restore) delete process.env[key];
+    try {
+      const listed = await listEmails();
+      expect(listed.map((e) => e.id)).toEqual(["m1"]);
+      expect(listed[0]!.subject).toBe("Sent one");
+      const found = await searchEmails("Sent");
+      expect(found.map((e) => e.id)).toEqual(["m1"]);
+      // "Received" is the inbound row's subject. It is served by the endpoint and must not
+      // reach the sent ledger.
+      expect(await searchEmails("Received")).toEqual([]);
+    } finally {
+      for (const [key, value] of restore) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
   });
 
   test("missing endpoint FAILS CLOSED (no silent local read)", () => {

@@ -4,8 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDatabase, getDatabase, resetDatabase } from "../../db/database.js";
-import { createEmail } from "../../db/emails.local.js";
-import { storeSentEmailContent } from "../../lib/sent-ledger.local.js";
+import { createSentEmailLedger, storeSentEmailContent } from "../../lib/sent-ledger.local.js";
 import { storeInboundEmail } from "../../db/inbound.local.js";
 import { createProvider } from "../../db/providers.local.js";
 import { createAddress, markVerified } from "../../db/addresses.local.js";
@@ -28,12 +27,12 @@ function restoreInheritedProcessEnv(): void {
   Object.assign(process.env, INHERITED_PROCESS_ENV);
 }
 
-function setupDb() {
+async function setupDb() {
   resetDatabase();
   process.env["EMAILS_DB_PATH"] = ":memory:";
   const db = getDatabase();
   const provider = createProvider({ name: "sandbox", type: "sandbox" }, db);
-  const sent = createEmail(provider.id, {
+  const sent = await createSentEmailLedger(provider.id, {
     from: "agent@example.com",
     to: "person@example.com",
     subject: "Original subject",
@@ -83,9 +82,12 @@ async function runEmailLogCommand(args: string[]) {
   return { data, formatted, consoleOutput: consoleLines.join("\n") };
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   captureInheritedProcessEnv();
-  setupDb();
+  // AWAITED. `setupDb` is async because the sent-ledger writer is, and a `beforeEach` that
+  // fired it without awaiting would let the first case run against an empty ledger — a
+  // failure that would look like a behaviour change in the command under test.
+  await setupDb();
 });
 
 afterEach(() => {
@@ -104,7 +106,7 @@ describe("email log list and search commands", () => {
       new Date(Date.UTC(2025, 0, 1)).toISOString(),
     ]);
     for (let i = 0; i < 3; i++) {
-      const email = createEmail(provider.id, {
+      const email = await createSentEmailLedger(provider.id, {
         from: "agent@example.com",
         to: `person${i}@example.com`,
         subject: `Paged sent ${i}`,
@@ -131,7 +133,7 @@ describe("email log list and search commands", () => {
     const db = getDatabase();
     const provider = db.query("SELECT id FROM providers LIMIT 1").get() as { id: string };
     for (let i = 0; i < 4; i++) {
-      const email = createEmail(provider.id, {
+      const email = await createSentEmailLedger(provider.id, {
         from: "agent@example.com",
         to: `search${i}@example.com`,
         subject: `Searchable sent ${i}`,

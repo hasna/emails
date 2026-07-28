@@ -98,7 +98,7 @@ export function getTodayLimit(schedule: WarmingSchedule): number | null {
  *
  * Every requested domain is present in the result, zero included.
  */
-export function getTodaySentCountsByDomain(domains: readonly string[]): Map<string, number> {
+export async function getTodaySentCountsByDomain(domains: readonly string[]): Promise<Map<string, number>> {
   const counts = new Map<string, number>();
   for (const domain of domains) {
     const key = domain.trim().toLowerCase();
@@ -110,7 +110,7 @@ export function getTodaySentCountsByDomain(domains: readonly string[]): Map<stri
   const start = `${today}T00:00:00.000Z`;
   const tomorrow = new Date(start);
   tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
-  for (const email of listEmails({ since: start, until: tomorrow.toISOString(), limit: 1000 })) {
+  for (const email of await listEmails({ since: start, until: tomorrow.toISOString(), limit: 1000 })) {
     const sender = (email.from_address ?? "").toLowerCase().split("@")[1]?.trim();
     if (sender !== undefined && counts.has(sender)) counts.set(sender, counts.get(sender)! + 1);
   }
@@ -118,8 +118,8 @@ export function getTodaySentCountsByDomain(domains: readonly string[]): Map<stri
 }
 
 /** Get how many emails have been sent from a single domain today. */
-export function getTodaySentCount(domain: string): number {
-  return getTodaySentCountsByDomain([domain]).get(domain.trim().toLowerCase()) ?? 0;
+export async function getTodaySentCount(domain: string): Promise<number> {
+  return (await getTodaySentCountsByDomain([domain])).get(domain.trim().toLowerCase()) ?? 0;
 }
 
 export interface WarmingProgress {
@@ -143,7 +143,7 @@ export interface WarmingProgress {
  * batched via getTodaySentCountsByDomain instead of paying one ledger read
  * per row.
  */
-export function describeWarmingProgress(schedule: WarmingSchedule, todaySent?: number): WarmingProgress {
+export async function describeWarmingProgress(schedule: WarmingSchedule, todaySent?: number): Promise<WarmingProgress> {
   // An unusable start date reports day 1 (with a 0 limit from getTodayLimit)
   // rather than propagating NaN into JSON output and rendered tables.
   const currentDay = Math.max(1, warmingDayIndex(schedule.start_date) ?? 1);
@@ -156,7 +156,7 @@ export function describeWarmingProgress(schedule: WarmingSchedule, todaySent?: n
     total_days: totalDays,
     progress_percent: Math.min(100, Math.round((currentDay / totalDays) * 100)),
     today_limit: getTodayLimit(schedule),
-    today_sent: todaySent ?? getTodaySentCount(schedule.domain),
+    today_sent: todaySent ?? (await getTodaySentCount(schedule.domain)),
   };
 }
 
@@ -164,10 +164,19 @@ export function describeWarmingProgress(schedule: WarmingSchedule, todaySent?: n
  * Format warming schedule status for terminal display. Callers that already
  * computed progress pass it in so the sent-mail read is not repeated.
  */
-export function formatWarmingStatus(
+export async function formatWarmingStatus(
   schedule: WarmingSchedule,
-  progress: WarmingProgress = describeWarmingProgress(schedule),
-): string {
+  progress?: WarmingProgress,
+): Promise<string> {
+  // The default is resolved HERE rather than in the parameter list: a default parameter
+  // cannot be awaited, and awaiting the promise instead of the value would have rendered
+  // `[object Promise]` into an operator-facing line.
+  const resolved = progress ?? (await describeWarmingProgress(schedule));
+  return formatWarmingProgress(schedule, resolved);
+}
+
+/** The pure half, so a caller that already has a progress record pays no read. */
+function formatWarmingProgress(schedule: WarmingSchedule, progress: WarmingProgress): string {
   return [
     `Domain: ${schedule.domain}`,
     `Status: ${schedule.status} | Day ${progress.current_day}/${progress.total_days} (${progress.progress_percent}% complete)`,

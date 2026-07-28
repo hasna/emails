@@ -790,7 +790,8 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .requiredOption("--target <n>", "Target daily send volume", parseInt)
     .option("--start-date <YYYY-MM-DD>", "Start date (default: today)")
     .option("--provider <id>", "Provider ID to associate")
-    .action((domain: string, opts: { target: number; startDate?: string; provider?: string }) => {
+    // ASYNC because the warming ramp reads today's sent mail through the store seam.
+    .action(async (domain: string, opts: { target: number; startDate?: string; provider?: string }) => {
       try {
         if (!Number.isInteger(opts.target) || opts.target <= 0) {
           handleError(new Error(`Invalid --target '${opts.target}'. Pass a positive whole daily send volume.`));
@@ -817,11 +818,11 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
           target_daily_volume: opts.target,
           start_date: opts.startDate,
         });
-        const progress = describeWarmingProgress(schedule);
+        const progress = await describeWarmingProgress(schedule);
         const plan = generateWarmingPlan(schedule.target_daily_volume);
         output({ schedule, ...progress, plan_days: plan.length, final_day: progress.total_days }, [
           chalk.green(`✓ Warming schedule created for ${domain}`),
-          formatWarmingStatus(schedule, progress),
+          await formatWarmingStatus(schedule, progress),
           chalk.dim(`\nWill reach target (${schedule.target_daily_volume}/day) in ${progress.total_days} days`),
         ].join("\n"));
       } catch (e) {
@@ -832,7 +833,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
   domainCmd
     .command("warm-status <domain>")
     .description("Show warming schedule status for a domain")
-    .action((domain: string) => {
+    .action(async (domain: string) => {
       try {
         const schedule = getWarmingSchedule(domain);
         if (!schedule) {
@@ -841,10 +842,10 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
           ));
           return;
         }
-        const progress = describeWarmingProgress(schedule);
+        const progress = await describeWarmingProgress(schedule);
         output(
           { schedule, ...progress },
-          `\n${formatWarmingStatus(schedule, progress)}\n`,
+          `\n${await formatWarmingStatus(schedule, progress)}\n`,
         );
       } catch (e) {
         handleError(e);
@@ -858,7 +859,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .option("--limit <n>", "Maximum schedules to show (default 20 compact, 50 verbose/json)")
     .option("--offset <n>", "Number of schedules to skip", "0")
     .option("--verbose", "Show expanded list hints")
-    .action((opts: { status?: string; limit?: string; offset?: string; verbose?: boolean }) => {
+    .action(async (opts: { status?: string; limit?: string; offset?: string; verbose?: boolean }) => {
       try {
         if (opts.status && !["active", "paused", "completed"].includes(opts.status)) {
           handleError(new Error(`Invalid --status '${opts.status}'. Use active, paused, or completed.`));
@@ -872,7 +873,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
         // One ledger read for the whole page instead of one per row: in
         // self-hosted mode each read is a synchronous curl spawn over today's
         // messages, so a 20-row page used to cost 20 identical requests.
-        const sentByDomain = getTodaySentCountsByDomain(schedules.map((schedule) => schedule.domain));
+        const sentByDomain = await getTodaySentCountsByDomain(schedules.map((schedule) => schedule.domain));
         const lines: string[] = [""];
         lines.push(tableRow(
           [chalk.bold("Domain"), 20],
@@ -883,7 +884,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
           [chalk.bold("Sent Today"), 12],
         ));
         for (const schedule of schedules) {
-          const progress = describeWarmingProgress(
+          const progress = await describeWarmingProgress(
             schedule,
             sentByDomain.get(schedule.domain.trim().toLowerCase()) ?? 0,
           );

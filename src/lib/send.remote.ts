@@ -37,7 +37,10 @@ export function validateSendAttachments(attachments: SendEmailOptions["attachmen
 // does not exist client-side. These entrypoints preserve their signatures and
 // fail loud.
 
-export function assertWarmingLimit(_opts: SendEmailOptions): void {
+// ASYNC to match the local arm, whose warming read goes through the store seam. The
+// facade publishes the intersection of the two declarations, so a sync arm here would make
+// the family's own type unawaitable at every call site.
+export async function assertWarmingLimit(_opts: SendEmailOptions): Promise<void> {
   throw new Error(
     "assertWarmingLimit is not available in the self-hosted client; warming rate limits are enforced on the self-hosted server.",
   );

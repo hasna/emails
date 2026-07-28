@@ -1,6 +1,6 @@
 import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
-import { listEmails } from "../../db/emails.local.js";
+import { listEmails } from "../../db/emails.js";
 import { getLocalStats, formatStatsTable } from "../../lib/stats.js";
 import { getAnalytics, formatAnalytics } from "../../lib/analytics.js";
 import { colorStatus, truncate } from "../../lib/format.js";
@@ -162,9 +162,14 @@ export function registerSyncCommands(program: Command, output: (data: unknown, f
           console.log(`  ${chalk.yellow("Opened")}:    ${renderStatusCount(stats.opened, events)}  ${pct(stats.open_rate)}`);
           console.log();
 
-          const emails = listEmails({ provider_id: providerId, limit: 5 });
+          // NO PROVIDER FILTER. `src/db/emails.ts` refuses one: no message projection on the
+          // store seam carries `provider_id`, so the filter can be neither pushed down nor
+          // re-checked, and quietly ignoring it here would print another provider's mail under
+          // this provider's heading. The five most recent sends across the whole ledger is the
+          // honest narrowing this panel can still make, and the heading says so.
+          const emails = await listEmails({ limit: 5 });
           if (emails.length > 0) {
-            console.log(chalk.bold("Recent emails:"));
+            console.log(chalk.bold("Recent emails (all providers):"));
             for (const e of emails) {
               const status = colorStatus(e.status);
               console.log(`  ${padRight(status, 12)}  ${truncate(e.subject, 40)}  \u2192 ${e.to_addresses[0] ?? ""}`);

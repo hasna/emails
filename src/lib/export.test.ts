@@ -1,5 +1,12 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { startV1Stub, type V1Stub } from "../test-support/v1-stub.js";
+import { closeDatabase, getDatabase, resetDatabase, type Database } from "../db/database.js";
+import {
+  API_BASE_URL_SETTING,
+  API_CREDENTIAL_SETTINGS,
+  API_SETTINGS_POINTER,
+  DATABASE_PATH_SETTINGS,
+} from "../store-resolution.js";
 import {
   EXPORT_DEFAULT_LIMIT,
   EXPORT_MAX_LIMIT,
@@ -9,53 +16,125 @@ import {
   exportEventsJson,
 } from "./export.js";
 
-// /v1 READ: every export function reads through the self-hosted resource store.
-//   - exportEmails* -> listEmails() over the outbound `/v1/messages` ledger.
-//   - exportEvents* -> listEvents() over the `/v1/events` resource.
-// The exporters dropped their `db` parameter and take (filters) only; the removed
-// local-SQLite `db.run("UPDATE ... sent_at ...")` timestamp mutations are replaced
-// by seeding the rows with the timestamps the filters key on (sent_at derives from
-// received_at, event windows from occurred_at).
+// THE TWO HALVES OF THIS FILE NOW READ THROUGH DIFFERENT LAYERS, and that is the whole
+// change here.
+//
+//   * THE EVENT EXPORTS still go through `listEvents`, which is a two-arm family, so those
+//     cases still drive the out-of-process `/v1` stub and are untouched.
+//   * THE EMAIL EXPORTS go through `listEmails`, which has COLLAPSED onto the store seam.
+//     `src/test-support/v1-stub.ts` is the wrong fixture for it — its generic list handler
+//     ignores equality filters and the real HTTP store reads `GET /v1/openapi.json` before a
+//     filtered list, which that stub serves only on request — so the email half runs against
+//     a real SQLite store, seeded straight into the `emails` table. `src/db/emails.test.ts`
+//     covers the same reads against BOTH shipped stores; what is asserted here is the
+//     EXPORT's own behaviour: its default and maximum page, its CSV shape and escaping, and
+//     the filters it forwards.
+//
+// AND ONE FILTER IS GONE, WHICH IS WHY MOST OF THESE CASES CHANGED SHAPE. `provider_id` is
+// no longer answerable: no message projection on the store seam carries a provider, so
+// `listEmails` REFUSES the filter rather than ignoring it and returning another provider's
+// mail. Every email case that used `provider_id: "p1"` as a convenient narrowing now narrows
+// by sender or by date instead, and the refusal itself gets a case — because an export that
+// silently widened would be a file that looks right and is not.
+
 let stub: V1Stub;
 beforeAll(async () => { stub = await startV1Stub(); });
 afterAll(() => stub.stop());
-beforeEach(async () => { await stub.reset(); stub.applyEnv(); });
-afterEach(() => stub.clearEnv());
 
-function outboundMessage(row: Record<string, unknown>): Record<string, unknown> {
-  return { direction: "outbound", status: "sent", provider_id: "p1", from_addr: "a@example.com", ...row };
+let INHERITED_PROCESS_ENV: NodeJS.ProcessEnv;
+
+function captureInheritedProcessEnv(): void {
+  INHERITED_PROCESS_ENV = { ...process.env };
 }
 
-describe("export schema contracts", () => {
-  it("defaults direct email exports to a bounded page", async () => {
-    const rows = Array.from({ length: EXPORT_DEFAULT_LIMIT + 1 }, (_, i) => outboundMessage({
-      id: `default-email-${i}`,
-      to_addrs: [`user-${i}@example.com`],
-      subject: `Default email export ${i}`,
-      body_text: "hello",
-      received_at: new Date(Date.UTC(2026, 0, 1) + i * 1000).toISOString(),
-    }));
-    await stub.seed({ messages: rows });
+function restoreInheritedProcessEnv(): void {
+  for (const key of Object.keys(process.env)) {
+    if (!Object.prototype.hasOwnProperty.call(INHERITED_PROCESS_ENV, key)) delete process.env[key];
+  }
+  Object.assign(process.env, INHERITED_PROCESS_ENV);
+}
 
-    const json = JSON.parse(exportEmailsJson({ provider_id: "p1" })) as Array<{ id: string }>;
-    const csv = exportEmailsCsv({ provider_id: "p1" });
+const PROVIDER = "p1";
+let db: Database;
+
+/**
+ * Leave exactly ONE store configured. A database path AND an API are a HARD BOOT ERROR with
+ * no precedence rule, so a stray API setting — including one this file's own stub applies in
+ * its other half — turns every email case into that error rather than into a store.
+ */
+function configureLocalStoreOnly(): void {
+  for (const setting of [API_BASE_URL_SETTING, API_SETTINGS_POINTER, ...API_CREDENTIAL_SETTINGS]) {
+    delete process.env[setting];
+  }
+  for (const setting of DATABASE_PATH_SETTINGS) delete process.env[setting];
+  process.env["EMAILS_DB_PATH"] = ":memory:";
+}
+
+/** A ledger row written straight into `emails`, with the id and `sent_at` a case names. */
+function seedLedger(id: string, sentAt: string, overrides: Record<string, unknown> = {}): void {
+  db.run(
+    `INSERT INTO emails
+       (id, provider_id, provider_message_id, from_address, to_addresses, cc_addresses,
+        bcc_addresses, reply_to, subject, status, has_attachments, attachment_count, tags,
+        sent_at, created_at, updated_at)
+     VALUES (?, ?, NULL, ?, ?, '[]', '[]', NULL, ?, 'sent', 0, 0, '{}', ?, ?, ?)`,
+    [
+      id,
+      PROVIDER,
+      (overrides["from_address"] as string) ?? "a@example.com",
+      (overrides["to_addresses"] as string) ?? JSON.stringify([`${id}@example.com`]),
+      (overrides["subject"] as string) ?? `Subject ${id}`,
+      sentAt,
+      sentAt,
+      sentAt,
+    ],
+  );
+}
+
+async function rejection(promise: Promise<unknown>): Promise<Error> {
+  try {
+    await promise;
+  } catch (error) {
+    return error as Error;
+  }
+  throw new Error("expected the call to throw, and it resolved");
+}
+
+describe("email exports, over the store seam", () => {
+  beforeEach(() => {
+    captureInheritedProcessEnv();
+    configureLocalStoreOnly();
+    resetDatabase();
+    db = getDatabase();
+    // `emails.provider_id` is NOT NULL with a foreign key into `providers`.
+    db.run("INSERT INTO providers (id, name, type, active) VALUES (?, ?, 'ses', 1)", [PROVIDER, PROVIDER]);
+  });
+
+  afterEach(() => {
+    closeDatabase();
+    restoreInheritedProcessEnv();
+  });
+
+  it("defaults direct email exports to a bounded page", async () => {
+    for (let index = 0; index < EXPORT_DEFAULT_LIMIT + 1; index += 1) {
+      seedLedger(`default-email-${index}`, new Date(Date.UTC(2026, 0, 1) + index * 1000).toISOString());
+    }
+
+    const json = JSON.parse(await exportEmailsJson({})) as Array<{ id: string }>;
+    const csv = await exportEmailsCsv({});
 
     expect(json).toHaveLength(EXPORT_DEFAULT_LIMIT);
     expect(csv.split("\n")).toHaveLength(EXPORT_DEFAULT_LIMIT + 1);
   });
 
   it("caps direct email export limits and normalizes bad offsets", async () => {
-    const rows = Array.from({ length: 3 }, (_, i) => outboundMessage({
-      id: `capped-email-${i}`,
-      to_addrs: [`capped-${i}@example.com`],
-      subject: `Capped email export ${i}`,
-      body_text: "hello",
-      received_at: new Date(Date.UTC(2026, 0, 1) + i * 1000).toISOString(),
-    }));
-    await stub.seed({ messages: rows });
+    for (let index = 0; index < 3; index += 1) {
+      seedLedger(`capped-email-${index}`, new Date(Date.UTC(2026, 0, 1) + index * 1000).toISOString(), {
+        subject: `Capped email export ${index}`,
+      });
+    }
 
-    const json = JSON.parse(exportEmailsJson({
-      provider_id: "p1",
+    const json = JSON.parse(await exportEmailsJson({
       limit: EXPORT_MAX_LIMIT + 1,
       offset: -100,
     })) as Array<{ subject: string }>;
@@ -64,59 +143,84 @@ describe("export schema contracts", () => {
     expect(json[0]?.subject).toBe("Capped email export 2");
   });
 
-  it("keeps email CSV headers stable and honors provider/since filters", async () => {
-    await stub.seed({
-      messages: [
-        outboundMessage({ id: "old-msg", provider_id: "p1", to_addrs: ["old@example.com"], subject: "Old", received_at: "2026-01-01T00:00:00.000Z" }),
-        outboundMessage({ id: "new-msg", provider_id: "p1", to_addrs: ["new@example.com"], subject: "New", received_at: "2026-02-01T00:00:00.000Z" }),
-        outboundMessage({ id: "other-msg", provider_id: "p2", from_addr: "b@example.com", to_addrs: ["other@example.com"], subject: "Other", received_at: "2026-02-01T00:00:00.000Z" }),
-      ],
-    });
+  it("keeps email CSV headers stable and honors the since filter", async () => {
+    seedLedger("old-msg", "2026-01-01T00:00:00.000Z", { subject: "Old", to_addresses: JSON.stringify(["old@example.com"]) });
+    seedLedger("new-msg", "2026-02-01T00:00:00.000Z", { subject: "New", to_addresses: JSON.stringify(["new@example.com"]) });
 
-    const csv = exportEmailsCsv({ provider_id: "p1", since: "2026-01-15T00:00:00.000Z" });
+    const csv = await exportEmailsCsv({ since: "2026-01-15T00:00:00.000Z" });
     expect(csv.split("\n")[0]).toBe("id,from,to,subject,status,sent_at");
     expect(csv).toContain("new-msg");
     expect(csv).toContain("new@example.com");
     expect(csv).not.toContain("old-msg");
-    expect(csv).not.toContain("other@example.com");
 
-    const json = JSON.parse(exportEmailsJson({ provider_id: "p1", since: "2026-01-15T00:00:00.000Z" })) as Array<{ id: string }>;
+    const json = JSON.parse(await exportEmailsJson({ since: "2026-01-15T00:00:00.000Z" })) as Array<{ id: string }>;
     expect(json.map((email) => email.id)).toEqual(["new-msg"]);
   });
 
   it("paginates email exports and escapes CSV cells", async () => {
-    await stub.seed({
-      messages: [
-        outboundMessage({ id: "old-msg", to_addrs: ["old@example.com"], subject: "Old", received_at: "2026-01-01T00:00:00.000Z" }),
-        outboundMessage({ id: "mid-msg", to_addrs: ["middle@example.com", "audit@example.com"], subject: "Middle, quoted", received_at: "2026-02-01T00:00:00.000Z" }),
-        outboundMessage({ id: "new-msg", to_addrs: ["new@example.com"], subject: "New", received_at: "2026-03-01T00:00:00.000Z" }),
-      ],
+    seedLedger("old-msg", "2026-01-01T00:00:00.000Z", { subject: "Old", to_addresses: JSON.stringify(["old@example.com"]) });
+    seedLedger("mid-msg", "2026-02-01T00:00:00.000Z", {
+      subject: "Middle, quoted",
+      to_addresses: JSON.stringify(["middle@example.com", "audit@example.com"]),
     });
+    seedLedger("new-msg", "2026-03-01T00:00:00.000Z", { subject: "New", to_addresses: JSON.stringify(["new@example.com"]) });
 
-    const json = JSON.parse(exportEmailsJson({ provider_id: "p1", limit: 1, offset: 1 })) as Array<{ id: string }>;
+    const json = JSON.parse(await exportEmailsJson({ limit: 1, offset: 1 })) as Array<{ id: string }>;
     expect(json.map((email) => email.id)).toEqual(["mid-msg"]);
 
-    const csv = exportEmailsCsv({ provider_id: "p1", limit: 1, offset: 1 });
+    const csv = await exportEmailsCsv({ limit: 1, offset: 1 });
     expect(csv).toContain('"[""middle@example.com"",""audit@example.com""]"');
     expect(csv).toContain('"Middle, quoted"');
     expect(csv).not.toContain("new-msg");
   });
 
   it("filters email exports by canonical sender through display-name From values", async () => {
-    await stub.seed({
-      messages: [
-        outboundMessage({ id: "kept-msg", from_addr: '"Ops Team" <ops@example.com>', to_addrs: ["kept@example.com"], subject: "Kept", received_at: "2026-02-01T00:00:00.000Z" }),
-        outboundMessage({ id: "other-msg", from_addr: "other@example.com", to_addrs: ["other@example.com"], subject: "Other", received_at: "2026-02-01T00:00:00.000Z" }),
-      ],
+    seedLedger("kept-msg", "2026-02-01T00:00:00.000Z", {
+      from_address: '"Ops Team" <ops@example.com>',
+      to_addresses: JSON.stringify(["kept@example.com"]),
+      subject: "Kept",
+    });
+    seedLedger("other-msg", "2026-02-01T00:00:00.000Z", {
+      from_address: "other@example.com",
+      to_addresses: JSON.stringify(["other@example.com"]),
+      subject: "Other",
     });
 
-    const json = JSON.parse(exportEmailsJson({ from_address: "ops@example.com" })) as Array<{ id: string }>;
+    const json = JSON.parse(await exportEmailsJson({ from_address: "ops@example.com" })) as Array<{ id: string }>;
     expect(json.map((email) => email.id)).toEqual(["kept-msg"]);
 
-    const csv = exportEmailsCsv({ from_address: "Ops Team <ops@example.com>" });
+    const csv = await exportEmailsCsv({ from_address: "Ops Team <ops@example.com>" });
     expect(csv).toContain("kept-msg");
     expect(csv).not.toContain("Other");
   });
+
+  // THE FILTER THAT IS GONE, in both directions. An export that quietly ignored `--provider`
+  // would write every provider's mail into a file the operator believes is one provider's, and
+  // an export that refused unconditionally would take the whole feature down.
+  it("REFUSES a provider-filtered export rather than writing every provider's mail", async () => {
+    seedLedger("only-msg", "2026-02-01T00:00:00.000Z");
+
+    for (const run of [
+      () => exportEmailsJson({ provider_id: PROVIDER }),
+      () => exportEmailsCsv({ provider_id: PROVIDER }),
+    ]) {
+      const error = await rejection(run());
+      expect(error.message).toContain("filtered by provider");
+    }
+  });
+
+  it("still exports when no provider filter is named", async () => {
+    seedLedger("only-msg", "2026-02-01T00:00:00.000Z");
+
+    const json = JSON.parse(await exportEmailsJson({})) as Array<{ id: string }>;
+
+    expect(json.map((email) => email.id)).toEqual(["only-msg"]);
+  });
+});
+
+describe("event exports, still over the /v1 stub", () => {
+  beforeEach(async () => { await stub.reset(); stub.applyEnv(); });
+  afterEach(() => stub.clearEnv());
 
   it("defaults direct event exports to a bounded page", async () => {
     const rows = Array.from({ length: EXPORT_DEFAULT_LIMIT + 1 }, (_, i) => ({

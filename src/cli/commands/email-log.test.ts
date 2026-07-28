@@ -13,10 +13,19 @@ let stub: V1Stub;
 
 type MessageSeed = Record<string, unknown>;
 
+// A SEEDED OUTBOUND ROW CARRIES A DELIVERY STATUS, because a real one always does.
+//
+// The stub defaults an unset `status` to `received`, and nothing used to look: the deleted
+// arm's mapper coerced any unrecognised status to `sent`. `src/db/emails` now FAULTS on a
+// status outside the five delivery states rather than reporting a received message as a sent
+// one, so an outbound row with no status is a fixture that could not exist in either real
+// store — SQLite derives `sent` from `is_sent` and the service writes a send status — and
+// leaving it unset would be testing the fault instead of the export.
 function outbound(id: string, subject: string, receivedAt: string, extra: MessageSeed = {}): MessageSeed {
   return {
     id,
     direction: "outbound",
+    status: "sent",
     from_addr: "agent@example.com",
     to_addrs: ["dest@example.com"],
     subject,

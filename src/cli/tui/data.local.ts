@@ -17,7 +17,7 @@ import {
   addInboundLabelSummary, removeInboundLabelSummary,
   getInboundEmail,
 } from "../../db/inbound.local.js";
-import { getEmail } from "../../db/emails.local.js";
+import { getEmail } from "../../db/emails.js";
 import { getEmailContent } from "../../db/email-content.js";
 import { getEmailThreading, getThreadMessages, setInboundThreadId } from "../../db/threads.local.js";
 import { getLatestActiveProviderId, listProviderSummaries, listProviderNamesByIds } from "../../db/providers.local.js";
@@ -917,7 +917,7 @@ export async function getMessageBody(msg: TuiMessage, db?: Database): Promise<Me
       attachments: mergeAttachments(parseJsonArray(e.attachments_json), parseJsonArray(e.attachment_paths)),
     };
   }
-  const e = getEmail(msg.id, d);
+  const e = await getEmail(msg.id);
   if (!e) return null;
   // NO DATABASE HANDLE. The content family takes a store and resolves it from
   // configuration; the handle used to select an arm, and passing one here would have
@@ -1340,7 +1340,7 @@ export async function sendComposed(input: ComposeInput, db?: Database): Promise<
       threadId = inbound?.thread_id ?? parent.thread_id ?? uuid();
       if (inbound && !inbound.thread_id) setInboundThreadId(inbound.id, threadId, d);
     } else {
-      const sent = getEmail(parent.id, d);
+      const sent = await getEmail(parent.id);
       const threading = sent ? getEmailThreading(sent.id, d) : null;
       parentMsgId = threading?.message_id ?? (sent?.provider_message_id ? `<${sent.provider_message_id}>` : null);
       parentRefs = threading?.references ?? [];

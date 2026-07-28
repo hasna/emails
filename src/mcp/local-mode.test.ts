@@ -60,9 +60,14 @@ describe("MCP local mode", () => {
       const sentText = sent.content[0]?.type === "text" ? sent.content[0].text : "";
       expect(sentText).toContain('"success": true');
 
+      // NO PROVIDER FILTER. The sent ledger reads through the store seam now and no message
+      // projection there carries a provider, so `list_emails` REFUSES that filter rather than
+      // ignoring it. This case is about the local end-to-end path — send, then read the same
+      // message back out of SQLite through the MCP server — and the unfiltered read is what
+      // proves it; the refusal itself is asserted in src/mcp/tools/email-ops.test.ts.
       const listed = await client.callTool({
         name: "list_emails",
-        arguments: { provider_id: provider.id, limit: 10 },
+        arguments: { limit: 10 },
       }, undefined, { timeout: 10_000 });
       const listedText = listed.content[0]?.type === "text" ? listed.content[0].text : "";
       expect(listedText).toContain("Local MCP smoke");

@@ -253,11 +253,11 @@ if (path === "/api/export/emails" && method === "GET") {
     const offset = queryInteger(url, "offset", 0, { min: 0 });
     const filters = { provider_id: providerId, from_address: fromAddress, since, until, limit, offset };
     if (format === "csv") {
-      return new Response(exportEmailsCsv(filters), {
+      return new Response(await exportEmailsCsv(filters), {
         headers: { "Content-Type": "text/csv", "X-Export-Limit": String(limit), "X-Export-Offset": String(offset) },
       });
     }
-    return new Response(exportEmailsJson(filters), {
+    return new Response(await exportEmailsJson(filters), {
       headers: { "Content-Type": "application/json", "X-Export-Limit": String(limit), "X-Export-Offset": String(offset) },
     });
   } catch (e) { return internalError(e); }

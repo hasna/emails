@@ -192,30 +192,55 @@ import {
   resolvePartialId,
   runInTransaction,
 } from "./types/index.js";
-import { getDatabase as getStorageDatabase } from "./types/storage.js";
+import { createSqliteEmailStore, getDatabase as getStorageDatabase } from "./types/storage.js";
+import type { EmailStore } from "./types/storage.js";
 
 const db: Database = getDatabase(":memory:");
 const same: Database = getStorageDatabase(":memory:");
 createProvider({ name: "typed", type: "sandbox" }, db);
 createGroup("typed-group", undefined, db);
-getEmail("message-id", db);
 listGroups(db, { limit: 1 });
 listProviders(db, { limit: 1 });
 resolvePartialId(db, "providers", "abc");
 runInTransaction(db, () => same);
+// THE SENT LEDGER WIDENED THIS PARAMETER RATHER THAN REPLACING IT. \`getEmail\` is ASYNC
+// now and takes an OPTIONAL store that may be an \`EmailStore\` (new) or the \`Database\`
+// this surface has published for its whole 1.x life (unchanged). All THREE shapes compile,
+// and the database arm is the one a released consumer already depends on.
+const store: EmailStore = createSqliteEmailStore();
+const byId: Promise<unknown> = getEmail("message-id");
+const byStore: Promise<unknown> = getEmail("message-id", store);
+const byDatabase: Promise<unknown> = getEmail("message-id", db);
+void byId;
+void byStore;
+void byDatabase;
 closeDatabase();
 `);
-      const check = Bun.spawnSync({
+      const typecheck = (file: string) => Bun.spawnSync({
         cmd: [
           "bun", "x", "tsc", "--noEmit", "--ignoreConfig", "--strict", "--skipLibCheck",
           "--target", "esnext", "--module", "esnext", "--moduleResolution", "bundler",
-          "--types", "bun-types", join(dir, "consumer.ts"),
+          "--types", "bun-types", join(dir, file),
         ],
         cwd: root,
         stdout: "pipe",
         stderr: "pipe",
       });
+      const check = typecheck("consumer.ts");
       expect(check.exitCode, `${check.stdout.toString()}\n${check.stderr.toString()}`).toBe(0);
+
+      // THE NEGATIVE CONTROL, and it is the half that makes the positive one mean anything.
+      // The store parameter is a UNION of two real shapes now, and a union is exactly the
+      // declaration most likely to rot into `any` — at which point the fixture above would
+      // keep passing while the surface accepted anything at all. A third, unrelated type must
+      // still be a COMPILE error.
+      writeFileSync(join(dir, "consumer-wrong-store.ts"), `
+import { getEmail } from "./types/index.js";
+
+void getEmail("message-id", 42 as unknown as string);
+`);
+      const refused = typecheck("consumer-wrong-store.ts");
+      expect(refused.exitCode, "handing getEmail a string must not typecheck").not.toBe(0);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
