@@ -302,16 +302,24 @@ describe("collapsed email-ops tool family", () => {
     });
     const emailId = (JSON.parse(text(sent)) as { email_id: string }).email_id;
 
-    // The provider filter is a REAL filter, not decoration. This is the pair the
-    // store seam's message list cannot express (no provider filter on its list
-    // options), which is why this tool did not move onto it — so both halves are
-    // asserted: the matching id returns the row, a foreign id returns none.
-    const mine = JSON.parse(text(await call("list_emails", { provider_id: providerId, limit: 10 }))) as unknown[];
-    expect(mine).toHaveLength(1);
-    const otherProvider = createProvider({ name: "email-ops-other", type: "sandbox", active: false }).id;
-    const theirs = JSON.parse(text(await call("list_emails", { provider_id: otherProvider, limit: 10 }))) as unknown[];
-    expect(theirs).toHaveLength(0);
-    // ...and the status filter, the other one the seam cannot express.
+    // THE PROVIDER FILTER NOW REFUSES, AND THE REFUSAL IS THE ASSERTION.
+    //
+    // This case used to read: "the provider filter is a REAL filter, not decoration. This is
+    // the pair the store seam's message list cannot express, which is why this tool did not
+    // move onto it." The tool HAS moved onto it — `src/db/emails` collapsed — and that
+    // sentence's premise is exactly why the filter cannot be served: no message projection on
+    // the seam carries a provider, so it can be neither pushed down nor re-checked. Answering
+    // with every provider's mail and answering with none are both wrong, so the tool refuses
+    // and names what is missing. An agent that asked for one provider's sent mail must not be
+    // handed another's, and must not be handed an empty list either.
+    const refused = await call("list_emails", { provider_id: providerId, limit: 10 });
+    expect(refused.isError, "a provider-filtered list must refuse").toBe(true);
+    expect(text(refused)).toContain("provider_id");
+    // ...and the UNFILTERED read still works, which is the half that turns a refused filter
+    // into a refused filter rather than a dead tool.
+    const all = JSON.parse(text(await call("list_emails", { limit: 10 }))) as unknown[];
+    expect(all).toHaveLength(1);
+    // The status filter is still served, in this module, over the enumerated stream.
     const bounced = JSON.parse(text(await call("list_emails", { status: "bounced", limit: 10 }))) as unknown[];
     expect(bounced).toHaveLength(0);
     const sent2 = JSON.parse(text(await call("list_emails", { status: "sent", limit: 10 }))) as unknown[];

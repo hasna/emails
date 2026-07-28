@@ -263,7 +263,15 @@ describe("emails serve REST parity smoke", () => {
     const addresses = await json<Array<{ id: string; email: string }>>(`/api/addresses?provider_id=${provider.id}`);
     expect(addresses[0]).toMatchObject({ id: address.id, email: "ops@example.com" });
 
-    const emails = await json<Array<{ id: string; subject: string }>>(`/api/emails?provider_id=${provider.id}`);
+    // THE PROVIDER FILTER IS REFUSED, NOT IGNORED, and both halves are asserted because an
+    // unconditional guard here would take the whole route down rather than one filter. No
+    // message projection on the store seam carries a provider, so `/api/emails?provider_id=`
+    // cannot be served with either every provider's mail or none of it.
+    const refusedByProvider = await call(`/api/emails?provider_id=${provider.id}`);
+    expect(refusedByProvider.status).toBe(500);
+    expect(await refusedByProvider.text()).toContain("provider");
+
+    const emails = await json<Array<{ id: string; subject: string }>>(`/api/emails`);
     expect(emails[0]).toMatchObject({ id: email.id, subject: "REST smoke" });
 
     const inbound = await json<Array<{ subject: string }>>("/api/inbound?to=ops@example.com");
@@ -313,8 +321,16 @@ describe("emails serve REST parity smoke", () => {
     expect(await json<Array<{ subject: string }>>(`/api/sandbox?provider_id=${provider.id}`))
       .toContainEqual(expect.objectContaining({ subject: "Sandbox smoke" }));
 
-    const exportedEmails = await json<Array<{ id: string }>>(`/api/export/emails?format=json&provider_id=${provider.id}`);
+    // Unfiltered, for the same reason `/api/emails?provider_id=` is refused above: the export
+    // reads the sent ledger through the store seam and no message projection there carries a
+    // provider. The refusal is asserted at that call site; what this one still proves is that
+    // the export route serves the row at all.
+    const exportedEmails = await json<Array<{ id: string }>>(`/api/export/emails?format=json`);
     expect(exportedEmails.map((item) => item.id)).toContain(email.id);
+
+    const refusedExport = await call(`/api/export/emails?format=json&provider_id=${provider.id}`);
+    expect(refusedExport.status).toBe(500);
+    expect(await refusedExport.text()).toContain("provider");
   });
 
   it("rejects unresolved or ambiguous REST provider filters instead of returning empty pages", async () => {
@@ -379,7 +395,10 @@ describe("emails serve REST parity smoke", () => {
       occurred_at: "2026-02-01T00:00:00.000Z",
     });
 
-    const exportedEmails = await json<Array<{ id: string }>>(`/api/export/emails?format=json&provider_id=${provider.id}&limit=1&offset=1`);
+    // Paged WITHOUT a provider filter, which the sent ledger can no longer answer — see the
+    // note on `/api/emails?provider_id=` above. The pagination is what this case is about and
+    // it is unchanged: newest first, so `limit=1&offset=1` is the second-newest row.
+    const exportedEmails = await json<Array<{ id: string }>>(`/api/export/emails?format=json&limit=1&offset=1`);
     expect(exportedEmails.map((item) => item.id)).toEqual([older.id]);
 
     const exportedEvents = await json<Array<{ id: string }>>(`/api/export/events?format=json&provider_id=${provider.id}&until=2026-01-15T00%3A00%3A00.000Z&limit=10`);

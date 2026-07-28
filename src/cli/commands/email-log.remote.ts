@@ -595,7 +595,7 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
 
         if (type === "emails") {
           const filters = { provider_id: providerId, from_address: opts.from, since: opts.since, until: opts.until, ...page };
-          result = fmt === "csv" ? exportEmailsCsv(filters) : exportEmailsJson(filters);
+          result = fmt === "csv" ? await exportEmailsCsv(filters) : await exportEmailsJson(filters);
         } else {
           const filters = { provider_id: providerId, since: opts.since, until: opts.until, ...page };
           result = fmt === "csv" ? exportEventsCsv(filters) : exportEventsJson(filters);
