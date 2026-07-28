@@ -661,19 +661,70 @@ const root = join(import.meta.dir, "..");
  * counts were identical every time — the added file and every edited comment contribute ZERO to all
  * eleven, verified PER FILE rather than inferred from the total, which is the only way to see that
  * a paragraph has not raised the very counter it describes.
+ *
+ * RE-MEASURED AND RE-PINNED AGAIN on the `src/lib/webhook` collapse — the standalone provider
+ * webhook receiver. What it moves is small and the SHAPE of what it does NOT move is the part worth
+ * reading, because a reviewer expecting a collapse to move the dispatch counters will otherwise
+ * think the pin is wrong:
+ *
+ *   twoArmFamilies               27 -> 26   both arm modules deleted, so the facade has no
+ *   remoteArmModules             27 -> 26   siblings left. THE PAIR THAT SAYS A FAMILY IS DONE.
+ *   getEmailsModeReferences      60 -> 58   the facade's import of the process-wide read, and its
+ *                                           one call.
+ *
+ * EIGHT DO NOT MOVE, and two of those absences are facts a reviewer should not have to re-derive.
+ * The dispatch pair — the helper definition count and the dispatched-call count — stays at 17 and
+ * 234 because THIS FACADE NEVER USED THE HELPER: it was a hand-written conditional over the
+ * process-wide read, dispatching a single export, so there was no helper to delete and no
+ * dispatched call to remove. That is also why the process-wide-read counter falls by exactly two
+ * here rather than by a helper's usual larger amount. `selfHostedResourceBranches` stays at 44 for
+ * the same reason the alias collapse recorded: the deleted local arm talked to SQLite directly and
+ * never asked whether it was really the local arm. The resolver/parser counters and the env counter
+ * are untouched at 65, 16 and 235 — and the last of those took the same deliberate care the block
+ * above describes, because the deleted second arm here was a stub that THREW, so the tempting way
+ * to prove its refusal survived is a case that SETS the deployment word, and that case would have
+ * raised a counter that may only fall. All three rebuilt suites name their storage through the
+ * resolution's OWN exported constants instead.
+ *
+ * THE REBASE ONTO THE ALIAS COLLAPSE IS THE CLEAREST WORKED EXAMPLE THIS BLOCK HAS OF ITS OWN
+ * HAZARD, and the arithmetic is worth checking rather than trusting, because git flagged SIX of
+ * the eleven lines and let FIVE through in silence.
+ *
+ * All eleven were committed as literal ZEROS before the rebase, so the guard could not pass until
+ * the merged tree was measured. Git then produced a conflict covering exactly six ceiling lines —
+ * the dispatch pair, the resource pair, the mode predicate and the process-wide read — while
+ * `twoArmFamilies`, `remoteArmModules` and the three parser/env counters merged with NO MARKER AT
+ * ALL, at whichever side git preferred.
+ *
+ * The base pinned 27/27/17/234/44/173/56/60/65/16/235 and this branch had pinned
+ * 27/27/18/244/44/180/58/58/65/16/235 for its own pre-rebase tree. On the six git flagged, a
+ * per-metric minimum happens to give the right answer. ON THE FIVE IT DID NOT FLAG IT DOES NOT:
+ * both sides carried 27 for the structural pair, the merged tree measures 26, so
+ * `twoArmFamilies` and `remoteArmModules` would each have shipped ONE WIDE — two units of slack,
+ * on the one metric in this file that a rename cannot fake, both green under `<=`, with no signal
+ * of any kind. The cause is the same one the block above names: the two collapses finish DIFFERENT
+ * families, and neither a silent merge nor a minimum can see that two disjoint reductions compose.
+ * Measuring is the only thing that can.
+ *
+ * Corpus of this change: 651 tracked, 650 scanned, 9,511,775 characters — both floors cleared with
+ * room. ONE fewer tracked file than the base: two arm modules deleted, one test file added
+ * (`src/cli/commands/serve.local.test.ts`, for a consumer that had no test at all and now has to
+ * surface a refusal), and both of this family's own suites rewritten in place. Measured with this
+ * paragraph in place, and the eleven counts were re-measured AFTER writing it, per file as well as
+ * in total.
  */
 const CEILINGS: Record<string, number> = {
-  twoArmFamilies: 0,
-  remoteArmModules: 0,
-  routedFacadeDefinitions: 0,
-  routedCallExpressions: 0,
-  selfHostedResourceBranches: 0,
-  selfHostedResourceReferences: 0,
-  isSelfHostedModeReferences: 0,
-  getEmailsModeReferences: 0,
-  resolveEmailsModeReferences: 0,
-  normalizeEmailsModeReferences: 0,
-  emailsModeEnvReferences: 0,
+  twoArmFamilies: 26,
+  remoteArmModules: 26,
+  routedFacadeDefinitions: 17,
+  routedCallExpressions: 234,
+  selfHostedResourceBranches: 44,
+  selfHostedResourceReferences: 173,
+  isSelfHostedModeReferences: 56,
+  getEmailsModeReferences: 58,
+  resolveEmailsModeReferences: 65,
+  normalizeEmailsModeReferences: 16,
+  emailsModeEnvReferences: 235,
 };
 
 // 624 files are tracked and 623 scanned today, totalling ~7.4M characters. The floors
