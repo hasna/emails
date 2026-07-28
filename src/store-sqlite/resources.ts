@@ -48,6 +48,11 @@ export const RESOURCE_TABLES = Object.freeze({
   providers: "providers",
   templates: "templates",
   sequences: "sequences",
+  // The sequence SUB-LEDGER (src/store-sequence-subledger.ts). Not seam families yet —
+  // `EmailStore` declares only `sequences` — but the same schema-driven path serves them,
+  // exactly as it serves `provisioning_events` for the provisioning repository.
+  sequenceSteps: "sequence_steps",
+  sequenceEnrollments: "sequence_enrollments",
   scheduled: "scheduled_emails",
   aliases: "aliases",
   forwarding: "forwarding_rules",

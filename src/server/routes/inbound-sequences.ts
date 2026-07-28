@@ -1,7 +1,8 @@
 // API route handlers — inbound-sequences.ts
 import { listInboundEmailSummaries, getInboundEmail, clearInboundEmails, storeInboundEmail } from '../../db/inbound.local.js';
 import { parseResendInbound, parseMailgunInbound, parseMimeEmail } from '../../lib/inbound.local.js';
-import { createSequence, getSequence, listSequences, deleteSequence, addStep, listSteps, enroll, unenroll, listEnrollments, type EnrollmentStatus } from '../../db/sequences.local.js';
+import { createSequence, getSequence, listSequences, deleteSequence, addStep, listSteps, enroll, unenroll, listEnrollments, type EnrollmentStatus } from '../../db/sequences.js';
+import { createSqliteEmailStore } from '../../store-sqlite/index.js';
 import { createWarmingSchedule, getWarmingSchedule, listWarmingSchedules, updateWarmingStatus, deleteWarmingSchedule } from '../../db/warming.local.js';
 import { describeWarmingProgress } from '../../lib/warming.js';
 import { updateEmailStatus } from '../../db/emails.js';
@@ -63,8 +64,24 @@ function parseEnrollmentStatus(value: string | null): EnrollmentStatus | undefin
   throw new Error("status must be active, completed, or cancelled");
 }
 
+/**
+ * The store the `/api/sequences` routes read and write through.
+ *
+ * This is the LOCAL DASHBOARD (`emails serve`), and every other import in this file is
+ * still a local-SQLite module reading the process-wide connection. When
+ * `src/db/sequences` collapsed onto the store seam its exports stopped requiring a
+ * `Database` and started resolving the CONFIGURED store when given nothing — so passing
+ * nothing here would have silently repointed these routes at an operator's API on any
+ * installation configured for one. They therefore name the SQLite store bound to that
+ * same connection, exactly as the `/api/sandbox` routes do (src/server/routes/core.ts).
+ * Built per request: the repositories are thin wrappers over the memoised connection.
+ */
+function localSequenceStore() {
+  return createSqliteEmailStore({ database: getDatabase() });
+}
+
 function resolveSequenceRef(raw: string) {
-  return getSequence(decodeURIComponent(raw));
+  return getSequence(decodeURIComponent(raw), localSequenceStore());
 }
 
 function normalizeMailboxParam(value: string | null | undefined): Mailbox {
@@ -359,7 +376,7 @@ if (path === "/api/digest" && method === "GET") {
 // GET /api/sequences
 if (path === "/api/sequences" && method === "GET") {
   try {
-    return json(listSequences(undefined, queryPage(url, 100)));
+    return json(await listSequences(queryPage(url, 100), localSequenceStore()));
   } catch (e) { return internalError(e); }
 }
 
@@ -368,7 +385,7 @@ if (path === "/api/sequences" && method === "POST") {
   try {
     const body = await parseBody(req) as Record<string, unknown>;
     if (!body.name) return badRequest("name is required");
-    const seq = createSequence({ name: String(body.name), description: body.description ? String(body.description) : undefined });
+    const seq = await createSequence({ name: String(body.name), description: body.description ? String(body.description) : undefined }, localSequenceStore());
     return json(seq, 201);
   } catch (e) { return internalError(e); }
 }
@@ -377,9 +394,9 @@ if (path === "/api/sequences" && method === "POST") {
 const seqDeleteMatch = path.match(/^\/api\/sequences\/([^/]+)$/);
 if (seqDeleteMatch && method === "DELETE") {
   try {
-    const seq = resolveSequenceRef(seqDeleteMatch[1]!);
+    const seq = await resolveSequenceRef(seqDeleteMatch[1]!);
     if (!seq) return notFound("Sequence not found");
-    deleteSequence(seq.id);
+    await deleteSequence(seq.id, localSequenceStore());
     return json({ deleted: true });
   } catch (e) { return internalError(e); }
 }
@@ -388,27 +405,27 @@ if (seqDeleteMatch && method === "DELETE") {
 const seqStepsMatch = path.match(/^\/api\/sequences\/([^/]+)\/steps$/);
 if (seqStepsMatch && method === "GET") {
   try {
-    const seq = resolveSequenceRef(seqStepsMatch[1]!);
+    const seq = await resolveSequenceRef(seqStepsMatch[1]!);
     if (!seq) return notFound("Sequence not found");
-    return json(listSteps(seq.id));
+    return json(await listSteps(seq.id, localSequenceStore()));
   } catch (e) { return internalError(e); }
 }
 
 // POST /api/sequences/:id/steps
 if (seqStepsMatch && method === "POST") {
   try {
-    const seq = resolveSequenceRef(seqStepsMatch[1]!);
+    const seq = await resolveSequenceRef(seqStepsMatch[1]!);
     if (!seq) return notFound("Sequence not found");
     const body = await parseBody(req) as Record<string, unknown>;
     if (!body.step_number || !body.template_name) return badRequest("step_number and template_name are required");
-    const step = addStep({
+    const step = await addStep({
       sequence_id: seq.id,
       step_number: Number(body.step_number),
       delay_hours: body.delay_hours ? Number(body.delay_hours) : 24,
       template_name: String(body.template_name),
       from_address: body.from_address ? String(body.from_address) : undefined,
       subject_override: body.subject_override ? String(body.subject_override) : undefined,
-    });
+    }, localSequenceStore());
     return json(step, 201);
   } catch (e) { return internalError(e); }
 }
@@ -417,7 +434,7 @@ if (seqStepsMatch && method === "POST") {
 const seqEnrollmentsMatch = path.match(/^\/api\/sequences\/([^/]+)\/enrollments$/);
 if (seqEnrollmentsMatch && method === "GET") {
   try {
-    const seq = resolveSequenceRef(seqEnrollmentsMatch[1]!);
+    const seq = await resolveSequenceRef(seqEnrollmentsMatch[1]!);
     if (!seq) return notFound("Sequence not found");
     let status: EnrollmentStatus | undefined;
     try {
@@ -425,11 +442,11 @@ if (seqEnrollmentsMatch && method === "GET") {
     } catch (error) {
       return badRequest(error instanceof Error ? error.message : String(error));
     }
-    return json(listEnrollments({
+    return json(await listEnrollments({
       sequence_id: seq.id,
       ...(status ? { status } : {}),
       ...queryPage(url, 100),
-    }));
+    }, localSequenceStore()));
   } catch (e) { return internalError(e); }
 }
 
@@ -437,15 +454,15 @@ if (seqEnrollmentsMatch && method === "GET") {
 const seqEnrollMatch = path.match(/^\/api\/sequences\/([^/]+)\/enroll$/);
 if (seqEnrollMatch && method === "POST") {
   try {
-    const seq = resolveSequenceRef(seqEnrollMatch[1]!);
+    const seq = await resolveSequenceRef(seqEnrollMatch[1]!);
     if (!seq) return notFound("Sequence not found");
     const body = await parseBody(req) as Record<string, unknown>;
     if (!body.contact_email) return badRequest("contact_email is required");
-    const enrollment = enroll({
+    const enrollment = await enroll({
       sequence_id: seq.id,
       contact_email: String(body.contact_email),
       provider_id: body.provider_id ? resolveIdStrict("providers", String(body.provider_id)) : undefined,
-    });
+    }, localSequenceStore());
     return json(enrollment, 201);
   } catch (e) { return internalError(e); }
 }
@@ -454,10 +471,10 @@ if (seqEnrollMatch && method === "POST") {
 const seqUnenrollMatch = path.match(/^\/api\/sequences\/([^/]+)\/enrollments\/(.+)$/);
 if (seqUnenrollMatch && method === "DELETE") {
   try {
-    const seq = resolveSequenceRef(seqUnenrollMatch[1]!);
+    const seq = await resolveSequenceRef(seqUnenrollMatch[1]!);
     const email = decodeURIComponent(seqUnenrollMatch[2]!);
     if (!seq) return notFound("Sequence not found");
-    const removed = unenroll(seq.id, email);
+    const removed = await unenroll(seq.id, email, localSequenceStore());
     if (!removed) return notFound("Enrollment not found or already inactive");
     return json({ unenrolled: true });
   } catch (e) { return internalError(e); }

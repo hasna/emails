@@ -9,9 +9,13 @@ import { getTemplate, renderTemplate } from "../../db/templates.local.js";
 import { getDatabase, resolvePartialId } from "../../db/database.js";
 import { truncate } from "../../lib/format.js";
 import { createSentEmailLedger } from "../../lib/sent-ledger.local.js";
+// The sequences family reads the store seam now: async, and the trailing `cache.db`
+// argument means what it says — a SQLite store bound to that exact handle — so this
+// LOCAL scheduler keeps processing the local database whatever storage the environment
+// resolves to, exactly as it always has.
 import {
   getDueEnrollments, advanceEnrollment, getStepAtIndex,
-} from "../../db/sequences.local.js";
+} from "../../db/sequences.js";
 import { formatListHint, handleError, isCliVerboseOutput, resolveId, parseDuration, parseCliListPage } from "../utils.js";
 
 const SCHEDULED_EMAIL_BATCH_SIZE = 100;
@@ -146,15 +150,19 @@ async function processDueScheduledEmails(cache: SchedulerTickCache, log: Schedul
 
 async function processDueSequenceEnrollments(cache: SchedulerTickCache, log: SchedulerLog, limit: number) {
   const result = emptyBatchResult();
-  const dueEnrollments = getDueEnrollments({ limit }, cache.db);
+  // `getDueEnrollments` REFUSES an enumeration it could not finish rather than handing
+  // back the first rows of the store's own order — the missed rows would be exactly the
+  // longest-overdue ones. That refusal propagates out of this tick as an error instead
+  // of quietly shrinking the batch.
+  const dueEnrollments = await getDueEnrollments({ limit }, cache.db);
   result.attempted = dueEnrollments.length;
 
   for (const enrollment of dueEnrollments) {
     try {
       const stepIndex = enrollment.current_step;
-      const step = getStepAtIndex(enrollment.sequence_id, stepIndex, cache.db);
+      const step = await getStepAtIndex(enrollment.sequence_id, stepIndex, cache.db);
       if (!step) {
-        advanceEnrollment(enrollment.id, cache.db);
+        await advanceEnrollment(enrollment.id, cache.db);
         result.skipped++;
         continue;
       }
@@ -162,7 +170,7 @@ async function processDueSequenceEnrollments(cache: SchedulerTickCache, log: Sch
       const template = getCachedTemplate(cache, step.template_name);
       if (!template) {
         log(chalk.yellow(`⚠ Template not found for sequence step: ${step.template_name}`));
-        advanceEnrollment(enrollment.id, cache.db);
+        await advanceEnrollment(enrollment.id, cache.db);
         result.skipped++;
         continue;
       }
@@ -180,7 +188,7 @@ async function processDueSequenceEnrollments(cache: SchedulerTickCache, log: Sch
       if (!from) from = getCachedFromAddress(cache, provider.id) ?? "";
       if (!from) {
         log(chalk.yellow(`⚠ No from address for sequence step ${step.id.slice(0, 8)}`));
-        advanceEnrollment(enrollment.id, cache.db);
+        await advanceEnrollment(enrollment.id, cache.db);
         result.skipped++;
         continue;
       }
@@ -196,7 +204,7 @@ async function processDueSequenceEnrollments(cache: SchedulerTickCache, log: Sch
 
       const sent = await sendWithFailoverLazy(provider.id, sendOpts, cache.db);
       await createSentEmailLedger(sent.providerId, sendOpts, sent.messageId, cache.db);
-      advanceEnrollment(enrollment.id, cache.db);
+      await advanceEnrollment(enrollment.id, cache.db);
       result.sent++;
       log(chalk.green(`✓ Sent sequence step ${step.step_number} to ${enrollment.contact_email}`));
     } catch (err) {

@@ -43,7 +43,7 @@ export function registerSequenceTools(server: McpServer): void {
     try {
       await assertSelfHostedApiRouteReady("list_sequences");
       const { listSequences } = await import("../../db/sequences.js");
-      const sequences = listSequences({ limit: limit ?? 100, offset: offset ?? 0 });
+      const sequences = await listSequences({ limit: limit ?? 100, offset: offset ?? 0 });
       return { content: [{ type: "text", text: JSON.stringify(sequences, null, 2) }] };
     } catch (e) {
       return toolError(e);
@@ -62,7 +62,7 @@ export function registerSequenceTools(server: McpServer): void {
     try {
       await assertSelfHostedApiRouteReady("create_sequence");
       const { createSequence } = await import("../../db/sequences.js");
-      const sequence = createSequence({ name, description });
+      const sequence = await createSequence({ name, description });
       return { content: [{ type: "text", text: JSON.stringify(sequence, null, 2) }] };
     } catch (e) {
       return toolError(e);
@@ -90,9 +90,9 @@ export function registerSequenceTools(server: McpServer): void {
   async ({ sequence_id, step_number, delay_hours, template_name, from_address, subject_override }) => {
     try {
       const { getSequence, addStep } = await import("../../db/sequences.js");
-      const seq = getSequence(sequence_id);
+      const seq = await getSequence(sequence_id);
       if (!seq) throw new Error(`Sequence not found: ${sequence_id}`);
-      const step = addStep({
+      const step = await addStep({
         sequence_id: seq.id,
         step_number,
         delay_hours,
@@ -118,9 +118,9 @@ export function registerSequenceTools(server: McpServer): void {
   async ({ sequence_id, contact_email, provider_id }) => {
     try {
       const { getSequence, enroll } = await import("../../db/sequences.js");
-      const seq = getSequence(sequence_id);
+      const seq = await getSequence(sequence_id);
       if (!seq) throw new Error(`Sequence not found: ${sequence_id}`);
-      const enrollment = enroll({ sequence_id: seq.id, contact_email, provider_id });
+      const enrollment = await enroll({ sequence_id: seq.id, contact_email, provider_id });
       return { content: [{ type: "text", text: JSON.stringify(enrollment, null, 2) }] };
     } catch (e) {
       return toolError(e);
@@ -138,9 +138,9 @@ export function registerSequenceTools(server: McpServer): void {
   async ({ sequence_id, contact_email }) => {
     try {
       const { getSequence, unenroll } = await import("../../db/sequences.js");
-      const seq = getSequence(sequence_id);
+      const seq = await getSequence(sequence_id);
       if (!seq) throw new Error(`Sequence not found: ${sequence_id}`);
-      const removed = unenroll(seq.id, contact_email);
+      const removed = await unenroll(seq.id, contact_email);
       return { content: [{ type: "text", text: removed ? "Contact unenrolled" : "Contact was not actively enrolled" }] };
     } catch (e) {
       return toolError(e);
@@ -162,11 +162,11 @@ export function registerSequenceTools(server: McpServer): void {
       const { getSequence, listEnrollments } = await import("../../db/sequences.js");
       let resolvedSequenceId: string | undefined;
       if (sequence_id) {
-        const seq = getSequence(sequence_id);
+        const seq = await getSequence(sequence_id);
         if (!seq) throw new Error(`Sequence not found: ${sequence_id}`);
         resolvedSequenceId = seq.id;
       }
-      const enrollments = listEnrollments({
+      const enrollments = await listEnrollments({
         sequence_id: resolvedSequenceId,
         status,
         limit: limit ?? 100,
