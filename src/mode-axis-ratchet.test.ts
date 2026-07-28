@@ -988,17 +988,17 @@ const root = join(import.meta.dir, "..");
  * deployment predicate are named by ROLE here and never as the tokens the scan counts.
  */
 const CEILINGS: Record<string, number> = {
-  twoArmFamilies: 22,
-  remoteArmModules: 22,
-  routedFacadeDefinitions: 13,
-  routedCallExpressions: 192,
-  selfHostedResourceBranches: 37,
-  selfHostedResourceReferences: 129,
-  isSelfHostedModeReferences: 48,
-  getEmailsModeReferences: 58,
-  resolveEmailsModeReferences: 65,
-  normalizeEmailsModeReferences: 16,
-  emailsModeEnvReferences: 221,
+  twoArmFamilies: 0,
+  remoteArmModules: 0,
+  routedFacadeDefinitions: 0,
+  routedCallExpressions: 0,
+  selfHostedResourceBranches: 0,
+  selfHostedResourceReferences: 0,
+  isSelfHostedModeReferences: 0,
+  getEmailsModeReferences: 0,
+  resolveEmailsModeReferences: 0,
+  normalizeEmailsModeReferences: 0,
+  emailsModeEnvReferences: 0,
 };
 
 // 649 files are tracked and 648 scanned today, totalling ~9.7M characters. (The figures in
