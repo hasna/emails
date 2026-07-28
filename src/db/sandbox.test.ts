@@ -501,15 +501,76 @@ for (const [label, makeStore] of STORE_VARIANTS) {
   });
 }
 
+// ── the configured store, with no argument at all ───────────────────────────────────────
+//
+// Every case above injects a store so both variants can be driven from one file. THIS BLOCK
+// INJECTS NOTHING and takes the path every production caller takes. It is also where the
+// behavioural difference from the deleted implementation is visible without a fixture: the
+// arguments are the ones the old signatures accepted, so the deleted arm RUNS and answers —
+// differently.
+
 describe("the configured store", () => {
   it("is resolved when no store is injected", async () => {
-    // Every case above injects a store so both variants can be driven from one file. This one
-    // takes the path every production caller takes, so a module that only worked with an
-    // explicit argument would be caught.
     const written = await storeSandboxEmail(input({ subject: "configured" }));
     expect((await getSandboxEmail(written.id))?.subject).toBe("configured");
     expect(await getSandboxCount()).toBe(1);
     expect(await clearSandboxEmails()).toBe(1);
+  });
+
+  it("orders a tie on created_at by id, descending, rather than by insertion", async () => {
+    // Divergence 3. The deleted SQLite arm ordered `created_at DESC` with NO tiebreaker, so
+    // three rows sharing an instant came back in the order the table happened to hold them —
+    // insertion order, which is the ASCENDING id order these three are seeded in. That is not
+    // a reproducible page boundary, and `--offset` over it can repeat or drop a row.
+    seedCapture("sbx-a", stamp(2));
+    seedCapture("sbx-b", stamp(2));
+    seedCapture("sbx-c", stamp(2));
+
+    expect((await listSandboxEmails()).map((email) => email.id)).toEqual(["sbx-c", "sbx-b", "sbx-a"]);
+  });
+
+  it("FAULTS on an unreadable recipient list rather than answering that there are none", async () => {
+    // Divergence 7. The deleted SQLite arm's helper answered `[]` here — every recipient
+    // silently dropped, with no error and nothing in any log.
+    seedCapture("sbx-bad-to", stamp(1), { to_addresses: "not-json" });
+
+    const error = await rejection(getSandboxEmail("sbx-bad-to"));
+    expect(error.message).toContain("to_addresses");
+  });
+
+  it("FAULTS on an unreadable header map rather than answering that there are none", async () => {
+    // The deleted SQLite arm's helper answered `{}` here.
+    seedCapture("sbx-bad-headers", stamp(1), { headers_json: "not-json" });
+
+    expect((await rejection(getSandboxEmail("sbx-bad-headers"))).message).toContain("headers_json");
+  });
+
+  it("FAULTS on an attachment column that is not a list rather than answering that there are none", async () => {
+    // The deleted SQLite arm's helper answered `[]` for anything that was not a JSON array,
+    // including a JSON OBJECT — so a capture whose attachment column had been overwritten with
+    // a record was reported as having no attachments.
+    seedCapture("sbx-bad-att", stamp(1), { attachments_json: '{"not":"a list"}' });
+
+    expect((await rejection(getSandboxEmail("sbx-bad-att"))).message).toContain("attachments_json");
+  });
+
+  it("writes created_at as an ISO instant, not the table's own default format", async () => {
+    // Divergence 6. The deleted SQLite arm omitted the column entirely, so the row took the
+    // table default and carried `YYYY-MM-DD HH:MM:SS`.
+    const written = await storeSandboxEmail(input());
+
+    expect(written.created_at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    expect(tableRows()[0]!["created_at"]).toBe(written.created_at);
+  });
+
+  it("counts the whole table rather than one page of it", async () => {
+    // 520 rows: one more than a page of 500 and then some. The deleted arm that read a single
+    // page answered exactly 500 here; the one that ran `COUNT(*)` answered 520.
+    for (let index = 0; index < 520; index += 1) {
+      seedCapture(`sbx-${String(index).padStart(4, "0")}`, stamp(index));
+    }
+
+    expect(await getSandboxCount()).toBe(520);
   });
 });
 
