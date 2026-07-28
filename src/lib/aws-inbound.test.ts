@@ -26,7 +26,7 @@ mock.module("@aws-sdk/client-ses", () => ({
   UpdateReceiptRuleCommand: class { constructor(public input: unknown) {} },
 }));
 
-const { setupInboundEmail, buildSesBucketPolicy } = await import("./aws-inbound.js");
+const { setupInboundEmail, buildSesBucketPolicy, mergeSesBucketPolicy, BucketPolicyParseError } = await import("./aws-inbound.js");
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -164,5 +164,241 @@ describe("setupInboundEmail", () => {
 
     const result = await setupInboundEmail({ domain: "x.com", bucket: "existing-bucket" });
     expect(result.bucket_created).toBe(false);
+  });
+});
+
+// ─── Bucket-policy merge — regression for the 2026-07-28 prod ingestion freeze ──
+//
+// PutBucketPolicy REPLACES the whole bucket policy. On 2026-07-28T17:15:39Z a CLI
+// inbound-provisioning run PUT buildSesBucketPolicy's output (AllowSESPuts only)
+// over the prod inbound bucket's policy, wiping the cross-account read/list grants
+// the ingest worker role depends on and freezing ingestion for 86 minutes
+// (incident d226ac44, bug 48d80ad6). The contract under test: attachSesBucketPolicy
+// must GET the current policy, upsert ONLY the statement it owns (Sid AllowSESPuts),
+// preserve every foreign statement verbatim and in order, and fail closed on a
+// policy it cannot parse.
+
+describe("setupInboundEmail bucket-policy merge — must not clobber foreign statements", () => {
+  // Realistic foreign statements mirroring the outage: cross-account read/list for
+  // the prod ingest worker role. These are NOT owned by aws-inbound.ts and must
+  // survive any provisioning run byte-for-byte.
+  const FOREIGN_READ = {
+    Sid: "AllowCrossAccountInboundRead",
+    Effect: "Allow",
+    Principal: { AWS: "arn:aws:iam::789877399345:role/emails-prod-task" },
+    Action: "s3:GetObject",
+    Resource: "arn:aws:s3:::hasna-emails-prod-inbound-638389534677/inbound/*",
+  };
+  const FOREIGN_LIST = {
+    Sid: "AllowCrossAccountInboundList",
+    Effect: "Allow",
+    Principal: { AWS: "arn:aws:iam::789877399345:role/emails-prod-task" },
+    Action: "s3:ListBucket",
+    Resource: "arn:aws:s3:::hasna-emails-prod-inbound-638389534677",
+  };
+  const BUCKET = "hasna-emails-prod-inbound-638389534677";
+  const ACCOUNT = "638389534677";
+
+  let savedAccountId: string | undefined;
+
+  beforeEach(() => {
+    // Pin the account id so setupInboundEmail never reaches for STS.
+    savedAccountId = process.env["AWS_ACCOUNT_ID"];
+    process.env["AWS_ACCOUNT_ID"] = ACCOUNT;
+    // SES side: everything succeeds (rule set + rule get created).
+    mockSesSend.mockImplementation(async () => ({}));
+  });
+
+  afterEach(() => {
+    if (savedAccountId === undefined) delete process.env["AWS_ACCOUNT_ID"];
+    else process.env["AWS_ACCOUNT_ID"] = savedAccountId;
+  });
+
+  /**
+   * Stateful S3 mock: GetBucketPolicy serves the current policy (NoSuchBucketPolicy
+   * when absent), PutBucketPolicy stores it. Records every PUT and the S3 command
+   * order so tests can assert get-before-put and fail-closed (no PUT at all).
+   */
+  function statefulPolicyBucket(initialPolicy: string | undefined) {
+    const state = { policy: initialPolicy, puts: [] as string[], commands: [] as string[] };
+    mockS3Send.mockImplementation(async (cmd: unknown) => {
+      const name = (cmd as { constructor?: { name?: string } })?.constructor?.name ?? "";
+      state.commands.push(name);
+      if (name === "GetBucketPolicyCommand") {
+        if (state.policy === undefined) {
+          throw Object.assign(new Error("The bucket policy does not exist"), { name: "NoSuchBucketPolicy" });
+        }
+        return { Policy: state.policy };
+      }
+      if (name === "PutBucketPolicyCommand") {
+        const policy = (cmd as { input: { Policy: string } }).input.Policy;
+        state.policy = policy;
+        state.puts.push(policy);
+        return {};
+      }
+      return {}; // HeadBucket succeeds — bucket exists; other setup calls succeed
+    });
+    return state;
+  }
+
+  type PolicyDoc = { Version?: string; Statement: Record<string, unknown>[] };
+  const statements = (json: string): Record<string, unknown>[] => (JSON.parse(json) as PolicyDoc).Statement;
+  const sidsOf = (json: string): (string | undefined)[] => statements(json).map((s) => s["Sid"] as string | undefined);
+
+  it("REGRESSION (2026-07-28 outage): preserves foreign cross-account statements verbatim and in order", async () => {
+    const bucket = statefulPolicyBucket(JSON.stringify({
+      Version: "2012-10-17",
+      Statement: [FOREIGN_READ, FOREIGN_LIST],
+    }));
+
+    await setupInboundEmail({ domain: "airapproach.com", bucket: BUCKET });
+
+    expect(bucket.puts.length).toBe(1);
+    const merged = statements(bucket.puts[0]!);
+    const read = merged.find((s) => s["Sid"] === "AllowCrossAccountInboundRead");
+    const list = merged.find((s) => s["Sid"] === "AllowCrossAccountInboundList");
+    // Byte-for-byte at statement level: the worker role's grants are untouched.
+    expect(JSON.stringify(read)).toBe(JSON.stringify(FOREIGN_READ));
+    expect(JSON.stringify(list)).toBe(JSON.stringify(FOREIGN_LIST));
+    // Order-stability: foreign statements keep their relative order.
+    const sids = sidsOf(bucket.puts[0]!);
+    expect(sids.indexOf("AllowCrossAccountInboundRead")).toBeLessThan(sids.indexOf("AllowCrossAccountInboundList"));
+    // The owned statement is upserted exactly once.
+    expect(sids.filter((s) => s === "AllowSESPuts").length).toBe(1);
+  });
+
+  it("starts from an empty policy on NoSuchBucketPolicy — and fetches before writing", async () => {
+    const bucket = statefulPolicyBucket(undefined);
+
+    await setupInboundEmail({ domain: "airapproach.com", bucket: BUCKET });
+
+    expect(bucket.puts.length).toBe(1);
+    expect(bucket.puts[0]).toBe(
+      JSON.stringify(buildSesBucketPolicy(BUCKET, "inbound/airapproach.com/", ACCOUNT)),
+    );
+    // Get→merge→Put: the current policy must be read before any replacement.
+    const getIdx = bucket.commands.indexOf("GetBucketPolicyCommand");
+    const putIdx = bucket.commands.indexOf("PutBucketPolicyCommand");
+    expect(getIdx).toBeGreaterThanOrEqual(0); // a blind Put never fetched at all
+    expect(putIdx).toBeGreaterThan(getIdx);
+  });
+
+  it("replaces an older AllowSESPuts in place — never duplicated, foreign neighbors intact", async () => {
+    const staleSesPuts = {
+      Sid: "AllowSESPuts",
+      Effect: "Allow",
+      Principal: { Service: "ses.amazonaws.com" },
+      Action: "s3:PutObject",
+      // Old per-domain grant from a pre-1.3 provisioning run — must be replaced.
+      Resource: `arn:aws:s3:::${BUCKET}/inbound/elyratelier.com/*`,
+    };
+    const bucket = statefulPolicyBucket(JSON.stringify({
+      Version: "2012-10-17",
+      Statement: [staleSesPuts, FOREIGN_READ],
+    }));
+
+    await setupInboundEmail({ domain: "airapproach.com", bucket: BUCKET });
+
+    const sids = sidsOf(bucket.puts[0]!);
+    expect(sids).toEqual(["AllowSESPuts", "AllowCrossAccountInboundRead"]); // in place, no reorder
+    const sesPuts = statements(bucket.puts[0]!).find((s) => s["Sid"] === "AllowSESPuts")!;
+    expect(sesPuts["Resource"]).toBe(`arn:aws:s3:::${BUCKET}/inbound/*`);
+    expect(sesPuts["Condition"]).toEqual({ StringEquals: { "aws:SourceAccount": ACCOUNT } });
+    expect(JSON.stringify(statements(bucket.puts[0]!).find((s) => s["Sid"] === "AllowCrossAccountInboundRead")))
+      .toBe(JSON.stringify(FOREIGN_READ));
+  });
+
+  it("fails closed on an unparseable existing policy — typed error, nothing written", async () => {
+    const bucket = statefulPolicyBucket("{ this is not json");
+
+    await expect(setupInboundEmail({ domain: "airapproach.com", bucket: BUCKET }))
+      .rejects.toMatchObject({ name: "BucketPolicyParseError" });
+    expect(bucket.puts.length).toBe(0);
+  });
+
+  it("fails closed on a parseable policy with an unusable Statement shape — nothing written", async () => {
+    const bucket = statefulPolicyBucket(JSON.stringify({ Version: "2012-10-17", Statement: "not-a-statement-list" }));
+
+    await expect(setupInboundEmail({ domain: "airapproach.com", bucket: BUCKET }))
+      .rejects.toMatchObject({ name: "BucketPolicyParseError" });
+    expect(bucket.puts.length).toBe(0);
+  });
+
+  it("is idempotent: a second provisioning run produces a byte-identical policy", async () => {
+    const bucket = statefulPolicyBucket(JSON.stringify({
+      Version: "2012-10-17",
+      Statement: [FOREIGN_READ, FOREIGN_LIST],
+    }));
+
+    await setupInboundEmail({ domain: "airapproach.com", bucket: BUCKET });
+    await setupInboundEmail({ domain: "airapproach.com", bucket: BUCKET });
+
+    expect(bucket.puts.length).toBe(2);
+    expect(bucket.puts[1]).toBe(bucket.puts[0]);
+    // And the foreign grants are still there after both runs.
+    const sids = sidsOf(bucket.puts[1]!);
+    expect(sids).toContain("AllowCrossAccountInboundRead");
+    expect(sids).toContain("AllowCrossAccountInboundList");
+  });
+});
+
+describe("mergeSesBucketPolicy — pure merge semantics", () => {
+  const ACCOUNT = "638389534677";
+
+  it("preserves unknown top-level policy fields and the existing Version", () => {
+    const existing = JSON.stringify({
+      Version: "2008-10-17",
+      Id: "hand-written-policy",
+      Statement: [{ Sid: "Foreign", Effect: "Deny", Principal: "*", Action: "s3:*", Resource: "arn:aws:s3:::b/*" }],
+    });
+    const merged = JSON.parse(mergeSesBucketPolicy(existing, "b", "inbound/x.com/", ACCOUNT)) as Record<string, unknown>;
+    expect(merged["Version"]).toBe("2008-10-17");
+    expect(merged["Id"]).toBe("hand-written-policy");
+    const stmts = merged["Statement"] as Record<string, unknown>[];
+    expect(stmts.map((s) => s["Sid"])).toEqual(["Foreign", "AllowSESPuts"]);
+  });
+
+  it("preserves statements that have no Sid at all", () => {
+    const anonymous = { Effect: "Allow", Principal: { AWS: "arn:aws:iam::111122223333:root" }, Action: "s3:GetObject", Resource: "arn:aws:s3:::b/inbound/*" };
+    const merged = mergeSesBucketPolicy(
+      JSON.stringify({ Version: "2012-10-17", Statement: [anonymous] }),
+      "b", "inbound/x.com/", ACCOUNT,
+    );
+    const stmts = (JSON.parse(merged) as { Statement: Record<string, unknown>[] }).Statement;
+    expect(JSON.stringify(stmts[0])).toBe(JSON.stringify(anonymous));
+    expect(stmts[1]!["Sid"]).toBe("AllowSESPuts");
+  });
+
+  it("accepts the single-object Statement form AWS's policy grammar allows", () => {
+    const lone = { Sid: "Foreign", Effect: "Allow", Principal: "*", Action: "s3:GetObject", Resource: "arn:aws:s3:::b/inbound/*" };
+    const merged = mergeSesBucketPolicy(
+      JSON.stringify({ Version: "2012-10-17", Statement: lone }),
+      "b", "inbound/x.com/", ACCOUNT,
+    );
+    const stmts = (JSON.parse(merged) as { Statement: Record<string, unknown>[] }).Statement;
+    expect(stmts.map((s) => s["Sid"])).toEqual(["Foreign", "AllowSESPuts"]);
+  });
+
+  it("builds a fresh policy when there is no existing document", () => {
+    expect(mergeSesBucketPolicy(undefined, "b", "inbound/x.com/", ACCOUNT))
+      .toBe(JSON.stringify(buildSesBucketPolicy("b", "inbound/x.com/", ACCOUNT)));
+  });
+
+  it("throws the typed parse error on garbage — callers must never write over it", () => {
+    // Not `.toThrow(SomeClass)`: that passes vacuously when the class binding is
+    // undefined. Catch and check the instance + name explicitly.
+    const expectParseError = (existing: string) => {
+      let caught: unknown;
+      try {
+        mergeSesBucketPolicy(existing, "b", "inbound/x.com/", ACCOUNT);
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).toBeInstanceOf(BucketPolicyParseError);
+      expect((caught as Error).name).toBe("BucketPolicyParseError");
+    };
+    expectParseError("not json at all");
+    expectParseError(JSON.stringify(["an", "array"]));
+    expectParseError(JSON.stringify({ Statement: [42] }));
   });
 });
