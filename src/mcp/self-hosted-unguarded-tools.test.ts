@@ -86,7 +86,9 @@ function ok<T>(result: { content: Array<{ text: string }>; isError?: boolean }):
 }
 
 beforeAll(async () => {
-  stub = await startV1Stub({ seed: structuredClone(SEED) });
+  // `openapi: true`: the collapsed sequences family's writes and filtered reads go
+  // through the real HTTP store, which requires the published contract.
+  stub = await startV1Stub({ openapi: true, seed: structuredClone(SEED) });
 });
 afterAll(() => stub.stop());
 beforeEach(async () => {

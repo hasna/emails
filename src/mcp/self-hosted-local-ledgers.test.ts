@@ -41,7 +41,10 @@ function resultText(result: { content: Array<{ text: string }> }): string {
 }
 
 beforeAll(async () => {
-  stub = await startV1Stub({ seed: { groups: [{ ...SEEDED_GROUP }], sequences: [{ ...SEEDED_SEQUENCE }] } });
+  // `openapi: true` because the collapsed sequences family reaches `/v1` through the
+  // REAL HTTP store, which reads the service's published contract before any filtered
+  // list or write; a missing document is deliberately a fault there.
+  stub = await startV1Stub({ openapi: true, seed: { groups: [{ ...SEEDED_GROUP }], sequences: [{ ...SEEDED_SEQUENCE }] } });
 });
 
 afterAll(() => stub.stop());
