@@ -502,6 +502,15 @@ export async function getSendKey(id: string, store?: EmailStore): Promise<SendKe
  * tell a caller holding a wrong token which kind of wrong it is.
  */
 export async function verifySendKey(token: string, store?: EmailStore): Promise<SendKey | null> {
+  // AN ABSENT TOKEN IS ANSWERED HERE, and that is a resolved store disagreement rather than a
+  // shortcut. The SQLite store answers `ok(null)` for `""` (it checks the token shape before
+  // it reads); the service answers 422 `invalid_input` — "token is required" — which the HTTP
+  // store surfaces as a refusal, so the same call raised on one configuration and answered
+  // `null` on the other. "No token was supplied" is not "this store cannot verify tokens", and
+  // it is knowable without asking either of them. Only the EMPTY case is decided here: a
+  // non-empty token that merely looks wrong still goes to the store, so the token FORMAT keeps
+  // its single definition site there rather than gaining a second copy in this module.
+  if (typeof token !== "string" || token === "") return null;
   const outcome = await storeFor(store).sendKeys.verifySendKey(token);
   if (!outcome.ok) throw storeRefusal("verify a send key", outcome);
   return outcome.value;
