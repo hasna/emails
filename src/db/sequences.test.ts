@@ -120,11 +120,17 @@ const STORE_VARIANTS: ReadonlyArray<[string, () => EmailStore]> = [
 // not declare the column), so a case that needs chosen ids, chosen timestamps, or more
 // rows than one page holds writes the table directly. Both variants read this same data.
 
-function seedSequence(row: { id: string; name: string; created_at?: string; status?: string }): void {
+function seedSequence(row: {
+  id: string;
+  name: string;
+  created_at?: string;
+  updated_at?: string;
+  status?: string;
+}): void {
   const at = row.created_at ?? "2026-01-01T00:00:00.000Z";
   db.run(
     "INSERT INTO sequences (id, name, description, status, created_at, updated_at) VALUES (?, ?, NULL, ?, ?, ?)",
-    [row.id, row.name, row.status ?? "active", at, at],
+    [row.id, row.name, row.status ?? "active", at, row.updated_at ?? at],
   );
 }
 
@@ -343,6 +349,31 @@ describe("step position over a server-shaped table", () => {
       expect(steps.map((step) => step.id)).toEqual(["step-a", "step-b", "step-c"]);
     }
   });
+
+  it("resolves a duplicated name to the NEWEST sequence, deterministically", async () => {
+    // Also server-reachable only: the local schema declares the name UNIQUE, the
+    // service does not, so the divergent dataset needs the server-shaped table.
+    db.run("ALTER TABLE sequences RENAME TO sequences_constrained");
+    db.run(
+      `CREATE TABLE sequences (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        description TEXT,
+        status TEXT NOT NULL DEFAULT 'active',
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )`,
+    );
+    // The OLD sequence was touched most recently, so the SQLite store's own generic
+    // order (updated_at first) serves it FIRST — a first-match resolution over the
+    // store's order picks the wrong twin, which a mutation run proved this case must
+    // be able to see. "Newest" here means created_at, on both stores, deliberately.
+    seedSequence({ id: "seq-old", name: "twin", created_at: "2026-01-01T00:00:00.000Z", updated_at: "2026-03-01T00:00:00.000Z" });
+    seedSequence({ id: "seq-new", name: "twin", created_at: "2026-02-01T00:00:00.000Z", updated_at: "2026-02-01T00:00:00.000Z" });
+    for (const [, variant] of STORE_VARIANTS) {
+      expect((await getSequence("twin", variant()))?.id).toBe("seq-new");
+    }
+  });
 });
 
 describe("steps past one clamped page", () => {
@@ -383,6 +414,17 @@ describe.each(STORE_VARIANTS)("enrollments (%s)", (_label, variant) => {
     const bare = await createSequence({ name: "no-steps-seq" }, store);
     const unscheduled = await enroll({ sequence_id: bare.id, contact_email: "dave@example.com" }, store);
     expect(unscheduled.next_send_at).toBeNull();
+  });
+
+  it("schedules the FIRST step's delay, not another step's", async () => {
+    const store = variant();
+    const seq = await createSequence({ name: "first-delay-seq" }, store);
+    await addStep({ sequence_id: seq.id, step_number: 2, delay_hours: 500, template_name: "late" }, store);
+    await addStep({ sequence_id: seq.id, step_number: 1, delay_hours: 1, template_name: "early" }, store);
+    const enrolled = await enroll({ sequence_id: seq.id, contact_email: "first@example.com" }, store);
+    const nextSend = new Date(enrolled.next_send_at as string).getTime();
+    // Position 1 (step_number 1, 1h), even though the 500h step was inserted first.
+    expect(nextSend).toBeLessThan(Date.now() + 2 * 3600 * 1000);
   });
 
   it("is idempotent for a (sequence, contact) pair in ANY status", async () => {
@@ -565,6 +607,85 @@ describe("the injectable and the sub-ledger boundary", () => {
     await expect(enroll({ sequence_id: "any", contact_email: "x@example.com" }, store)).rejects.toThrow(
       /sequence sub-ledger/,
     );
+  });
+});
+
+describe("defences a well-behaved fixture cannot exercise", () => {
+  // Both real stores honour equality filters and advance their pages, so the two
+  // defences below are only observable against a store that does not — and a mutation
+  // run showed that removing either one survived every case driven through the honest
+  // fixtures. Each wrapper here misbehaves in exactly one way.
+
+  it("re-checks the pushed-down sequence filter rather than trusting the store", async () => {
+    seedSequence({ id: "seq-mine", name: "mine" });
+    seedSequence({ id: "seq-theirs", name: "theirs" });
+    seedStep({ id: "step-mine", sequence_id: "seq-mine", step_number: 1 });
+    seedStep({ id: "step-theirs", sequence_id: "seq-theirs", step_number: 1 });
+    const real = sqliteStore();
+    const subledger = sequenceSubledgerOf(real);
+    if (subledger === null) throw new Error("the SQLite store lost its sub-ledger");
+    // Ignores `filters` entirely and answers with the unfiltered list — the exact
+    // behaviour of a route that silently drops a query parameter.
+    const filterIgnoring = {
+      ...real,
+      sequenceSteps: {
+        ...subledger.sequenceSteps,
+        list: (opts?: { limit?: number; offset?: number }) =>
+          subledger.sequenceSteps.list({ ...(opts?.limit === undefined ? {} : { limit: opts.limit }), ...(opts?.offset === undefined ? {} : { offset: opts.offset }) }),
+      },
+    } as unknown as EmailStore;
+    const steps = await listSteps("seq-mine", filterIgnoring);
+    expect(steps.map((step) => step.id)).toEqual(["step-mine"]);
+  });
+
+  it("re-checks the pushed-down enrollment filters rather than trusting the store", async () => {
+    seedSequence({ id: "seq-a", name: "a" });
+    seedSequence({ id: "seq-b", name: "b" });
+    seedEnrollment({ id: "en-a-active", sequence_id: "seq-a", contact_email: "aa@example.com" });
+    seedEnrollment({ id: "en-a-cancelled", sequence_id: "seq-a", contact_email: "ac@example.com", status: "cancelled" });
+    seedEnrollment({ id: "en-b-active", sequence_id: "seq-b", contact_email: "ba@example.com" });
+    const real = sqliteStore();
+    const subledger = sequenceSubledgerOf(real);
+    if (subledger === null) throw new Error("the SQLite store lost its sub-ledger");
+    const filterIgnoring = {
+      ...real,
+      sequenceEnrollments: {
+        ...subledger.sequenceEnrollments,
+        list: (opts?: { limit?: number; offset?: number }) =>
+          subledger.sequenceEnrollments.list({ ...(opts?.limit === undefined ? {} : { limit: opts.limit }), ...(opts?.offset === undefined ? {} : { offset: opts.offset }) }),
+      },
+    } as unknown as EmailStore;
+    const page = await listEnrollments({ sequence_id: "seq-a", status: "active" }, filterIgnoring);
+    expect(page.map((enrollment) => enrollment.id)).toEqual(["en-a-active"]);
+    expect(await countEnrollmentsByStatus("seq-a", filterIgnoring)).toEqual({
+      active: 1,
+      completed: 0,
+      cancelled: 1,
+      total: 2,
+    });
+  });
+
+  it("refuses a read whose pages never advance instead of presenting the loop as the table", async () => {
+    seedSequence({ id: "seq-stuck", name: "stuck" });
+    // TWO rows, so a window pinned to the first page can never legitimately reach the
+    // empty page that means "end of table" — the anchored re-read comes back holding
+    // rows that are not the anchor, which is the proof the window moved.
+    seedStep({ id: "step-stuck-a", sequence_id: "seq-stuck", step_number: 1 });
+    seedStep({ id: "step-stuck-b", sequence_id: "seq-stuck", step_number: 2 });
+    const real = sqliteStore();
+    const subledger = sequenceSubledgerOf(real);
+    if (subledger === null) throw new Error("the SQLite store lost its sub-ledger");
+    // Serves page one for every offset — a store whose window cannot move. An
+    // enumeration that cannot notice this reports the same rows forever as the table.
+    const stuck = {
+      ...real,
+      sequenceSteps: {
+        ...subledger.sequenceSteps,
+        list: (opts?: { limit?: number; offset?: number }) =>
+          subledger.sequenceSteps.list({ ...(opts ?? {}), offset: 0 }),
+      },
+    } as unknown as EmailStore;
+    await expect(listSteps("seq-stuck", stuck)).rejects.toThrow(/LOWER BOUND/);
   });
 });
 
