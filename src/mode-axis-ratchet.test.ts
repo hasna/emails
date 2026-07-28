@@ -741,9 +741,15 @@ const root = join(import.meta.dir, "..");
  * eleven ceilings were committed as LITERAL ZEROS in their own commit before rebasing, so the
  * block could not be inherited silently. Main had not moved (7f5b5dd), so the rebase was a
  * no-op this time — the zeros were committed anyway, because "main did not move" is only
- * knowable after the fetch and the discipline has to survive the case where it did.
+ * knowable after the fetch and the discipline has to survive the case where it did. They were
+ * zeroed a SECOND time after adversarial review changed eight files: a pin is only valid for
+ * the tree it was measured on, and prose is part of the corpus. Measured in the WORKTREE, not
+ * the shared checkout, which sits on a different commit and yields a plausible wrong answer.
+ * A concurrent collapse (`db/sandbox`) moves these same counters, so whichever of the two
+ * lands second has to repeat all of this — two disjoint reductions merge cleanly and are
+ * still wrong, which is why a per-metric minimum is never taken.
  *
- * Corpus of this change: 650 tracked, 649 scanned, 9,605,476 characters — both floors cleared
+ * Corpus of this change: 650 tracked, 649 scanned, 9,636,309 characters — both floors cleared
  * with room. ONE fewer tracked file than the base: two arm modules deleted, one config file
  * added (`tsconfig.targeted.json`, the strict check this family and its consumers are verified
  * with), and this family's suite rewritten in place. The eleven were measured on the merged
@@ -754,17 +760,17 @@ const root = join(import.meta.dir, "..");
  * counts.
  */
 const CEILINGS: Record<string, number> = {
-  twoArmFamilies: 0,
-  remoteArmModules: 0,
-  routedFacadeDefinitions: 0,
-  routedCallExpressions: 0,
-  selfHostedResourceBranches: 0,
-  selfHostedResourceReferences: 0,
-  isSelfHostedModeReferences: 0,
-  getEmailsModeReferences: 0,
-  resolveEmailsModeReferences: 0,
-  normalizeEmailsModeReferences: 0,
-  emailsModeEnvReferences: 0,
+  twoArmFamilies: 25,
+  remoteArmModules: 25,
+  routedFacadeDefinitions: 16,
+  routedCallExpressions: 215,
+  selfHostedResourceBranches: 44,
+  selfHostedResourceReferences: 156,
+  isSelfHostedModeReferences: 54,
+  getEmailsModeReferences: 58,
+  resolveEmailsModeReferences: 65,
+  normalizeEmailsModeReferences: 16,
+  emailsModeEnvReferences: 235,
 };
 
 // 624 files are tracked and 623 scanned today, totalling ~7.4M characters. The floors
