@@ -229,3 +229,154 @@ export async function enumerateStoreRows<TRow>(
   const exhausted = answered && !reachedEnd;
   return { rows, refusal, fault, complete, stable, pages, duplicates, shifted, exhausted };
 }
+
+// ─── THE CURSOR PAGER ────────────────────────────────────────────────────────────
+//
+// `enumerateStoreRows` above is the OFFSET pager, and it exists because the uniform
+// families' `ListOptions` carries nothing else. The message families are different:
+// `MessagesRepository.listMessages` returns a `Page<T>` whose `next_cursor` is
+// documented on the seam as "null exactly when this page is the last"
+// (src/store/records.ts), and both implementations answer it from their own row count
+// against their own clamped limit — SQLite from the query it just ran
+// (src/store-sqlite/messages.ts), the API store from the service's `next_cursor`
+// (src/store-http/messages.ts). So for those families the STORE states the end of the
+// table instead of this client inferring it from an empty page, which is strictly
+// stronger evidence.
+//
+// WHAT IS STILL NOT AN END SIGNAL: the LENGTH of a page. Every list route here clamps
+// `limit`, so a short page is byte-for-byte indistinguishable from the last page of a
+// small table. Nothing below reads `items.length` to decide it has finished — only
+// `next_cursor === null` does. The two anti-stall checks are guards against a store
+// that contradicts its own contract (a non-null cursor with no rows, or a cursor that
+// does not advance) and both leave the enumeration INCOMPLETE rather than calling it
+// the end.
+//
+// This lives beside the offset pager rather than in one of its callers because the
+// honesty rules are identical and there is no reason for two copies of them to drift.
+
+/** One keyset page read. `limit` and `cursor` are owned by the pager, never by a caller. */
+export type StoreCursorPage<TRow> = (opts: {
+  limit: number;
+  cursor?: string;
+}) => Promise<Outcome<{ items: TRow[]; next_cursor: string | null }>>;
+
+export interface StoreCursorEnumeration<TRow> {
+  /** Distinct rows, in the order the store served them. */
+  rows: TRow[];
+  /** The store's typed refusal, or null. Non-null means `rows` is empty because the
+   * store said no — not because the stream is empty. */
+  refusal: Refusal | null;
+  /** A thrown fault's message, or null. Same warning as `refusal`. */
+  fault: string | null;
+  /**
+   * true  => the store reported the last page AND no row came back twice, so
+   *          `rows` IS the whole filtered stream.
+   * false => the budget ran out, the store stalled, a row repeated, or the read never
+   *          happened; `rows` is a LOWER BOUND at best.
+   */
+  complete: boolean;
+  /** Pages actually fetched. */
+  pages: number;
+  /**
+   * Rows returned twice across pages. A keyset page is supposed to come from a TOTAL
+   * order, so a repeat proves it was not — which means rows were skipped as well.
+   * De-duplicating without saying so turns an inflated count into a silent undercount.
+   */
+  duplicates: number;
+  /** true => the store handed back a non-null cursor it could not advance past. */
+  stalled: boolean;
+  /** true => the page budget ran out before the store reported the last page. */
+  exhausted: boolean;
+}
+
+export interface EnumerateCursorOptions<TRow> {
+  pageSize?: number;
+  pageBudget?: number;
+  /**
+   * The row's identity, used for duplicate accounting. REQUIRED rather than guessed,
+   * for the same reason `enumerateStoreRows` requires it: a row shape whose id lives
+   * under another key would lose the check silently, and every count would still look
+   * exact.
+   */
+  idOf: (row: TRow) => string;
+}
+
+function clampCursorPageSize(value: number | undefined): number {
+  if (!value || !Number.isFinite(value)) return STORE_LIST_PAGE_MAX;
+  return Math.min(Math.max(1, Math.floor(value)), STORE_LIST_PAGE_MAX);
+}
+
+function clampCursorBudget(value: number | undefined): number {
+  if (!value || !Number.isFinite(value)) return STORE_ENUMERATION_PAGE_BUDGET;
+  return Math.max(1, Math.floor(value));
+}
+
+/** Page a keyset list to the end of the stream, or report why not. */
+export async function enumerateStorePages<TRow>(
+  read: StoreCursorPage<TRow>,
+  options: EnumerateCursorOptions<TRow>,
+): Promise<StoreCursorEnumeration<TRow>> {
+  const pageSize = clampCursorPageSize(options.pageSize);
+  const budget = clampCursorBudget(options.pageBudget);
+  const idOf = options.idOf;
+  const rows: TRow[] = [];
+  const seen = new Set<string>();
+  let cursor: string | undefined;
+  let pages = 0;
+  let duplicates = 0;
+  let stalled = false;
+  let reachedEnd = false;
+  let refusal: Refusal | null = null;
+  let fault: string | null = null;
+
+  while (pages < budget) {
+    let outcome: Outcome<{ items: TRow[]; next_cursor: string | null }>;
+    try {
+      outcome = await read({ limit: pageSize, ...(cursor === undefined ? {} : { cursor }) });
+    } catch (error) {
+      fault = faultMessage(error);
+      break;
+    }
+    pages += 1;
+    if (!outcome.ok) {
+      refusal = outcome;
+      break;
+    }
+    const page = outcome.value;
+    for (const row of page.items) {
+      const id = idOf(row);
+      if (seen.has(id)) {
+        duplicates += 1;
+        continue;
+      }
+      seen.add(id);
+      rows.push(row);
+    }
+    if (page.next_cursor === null) {
+      reachedEnd = true;
+      break;
+    }
+    // ANTI-STALL. A non-null cursor with no rows, or a cursor identical to the one just
+    // sent, means the store cannot advance. Breaking here leaves `reachedEnd` false, so
+    // the read is reported INCOMPLETE rather than as the end of the stream.
+    if (page.items.length === 0 || page.next_cursor === cursor) {
+      stalled = true;
+      break;
+    }
+    cursor = page.next_cursor;
+  }
+
+  const answered = refusal === null && fault === null;
+  // Reaching the end alone is not completeness: a duplicate proves rows were skipped.
+  const complete = answered && reachedEnd && duplicates === 0;
+  return {
+    rows,
+    refusal,
+    fault,
+    complete,
+    pages,
+    duplicates,
+    stalled: answered && stalled,
+    exhausted: answered && !reachedEnd && !stalled,
+  };
+}
