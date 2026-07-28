@@ -790,7 +790,8 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .requiredOption("--target <n>", "Target daily send volume", parseInt)
     .option("--start-date <YYYY-MM-DD>", "Start date (default: today)")
     .option("--provider <id>", "Provider ID to associate")
-    .action((domain: string, opts: { target: number; startDate?: string; provider?: string }) => {
+    // ASYNC because the warming ramp reads today's sent mail through the store seam.
+    .action(async (domain: string, opts: { target: number; startDate?: string; provider?: string }) => {
       try {
         if (!Number.isInteger(opts.target) || opts.target <= 0) {
           handleError(new Error(`Invalid --target '${opts.target}'. Pass a positive whole daily send volume.`));
