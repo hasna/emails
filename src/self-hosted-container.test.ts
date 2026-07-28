@@ -211,6 +211,13 @@ describe("self-hosted container TLS contract", () => {
     );
   });
 
+  // This case spawns a bash subprocess that itself compiles and runs probe
+  // scripts, so its wall-clock is dominated by process startup, not by the
+  // contract under test. Under the default 5 s budget it times out at
+  // ~5.0-6.6 s whenever the suite (or the machine) is busy — measured on
+  // pristine main by three independent runs — turning the test into a load
+  // gauge. The explicit budget keeps the assertion exactly as strict while
+  // giving the subprocess room; a genuine hang still fails.
   test("runs the fake-Docker platform regression in the Bun suite", () => {
     const output = execFileSync(
       "bash",
@@ -224,7 +231,7 @@ describe("self-hosted container TLS contract", () => {
     expect(output.trim()).toBe(
       "container runtime smoke platform tests passed",
     );
-  });
+  }, 60_000);
 
   test("pins the official RDS trust bundle by content digest", () => {
     expect(dockerfile).toContain(
