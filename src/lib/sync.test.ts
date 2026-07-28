@@ -217,6 +217,10 @@ describe("syncProvider storage refusals", () => {
     const inserted = await syncProvider(providerId, db, stubAdapter([remoteEvent({ provider_event_id: "ev-1" })]));
     expect(inserted).toBe(1);
     expect(eventCount()).toBe(1);
+
+    // And the same for syncAll: its provider enumeration must run inside the same
+    // explicit-handle scope, not re-consult the ambient environment.
+    await expect(syncAll(db)).resolves.toEqual({ "p-explicit": 0 });
   });
 });
 
@@ -370,6 +374,60 @@ describe("syncProvider ingestion", () => {
     expect(eventCount()).toBe(0);
     expect(emailStatus("m-1")).toBe("sent");
     expect((db.query("SELECT COUNT(*) AS n FROM contacts").get() as { n: number }).n).toBe(0);
+  });
+});
+
+// ── threshold alerts ─────────────────────────────────────────────────────────────────────
+
+describe("syncProvider threshold alerts", () => {
+  /** Everything the sync writes to stderr, captured for one call. */
+  async function captureAlerts(run: () => Promise<unknown>): Promise<string> {
+    const captured: string[] = [];
+    const original = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      captured.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      await run();
+    } finally {
+      process.stderr.write = original;
+    }
+    return captured.join("");
+  }
+
+  it("alerts on a tripped complaint threshold and ANNOUNCES an unevaluable bounce rate", async () => {
+    const { setConfigValue } = await import("./config.js");
+    setConfigValue("complaint-alert-threshold", 1);
+    setConfigValue("bounce-alert-threshold", 5);
+    const providerId = seedProvider("p-1");
+
+    // In-window timestamps: the alert read covers the last 30 days, and an event
+    // stamped outside it is CORRECTLY not counted — a fixture hazard this suite hit.
+    const output = await captureAlerts(() => syncProvider(providerId, db, stubAdapter([
+      remoteEvent({ provider_event_id: "ev-1", type: "complained", recipient: "c1@example.test", occurred_at: new Date(Date.now() - 3_600_000).toISOString() }),
+      remoteEvent({ provider_event_id: "ev-2", type: "complained", recipient: "c2@example.test", occurred_at: new Date(Date.now() - 1_800_000).toISOString() }),
+    ])));
+
+    // The count threshold trips on a LOWER BOUND, and the complaint share is reported
+    // as unavailable rather than fabricated: the seam cannot scope sent mail to a
+    // provider, and the alert must say so instead of inventing a denominator.
+    expect(output).toContain("ALERT [p-1]: 2 complaints");
+    expect(output).toContain("exceeds threshold 1");
+    expect(output).toContain("rate unavailable");
+    // The bounce-rate threshold CANNOT be evaluated for the same reason, and silence
+    // there would read exactly like "your bounce rate is fine" — it is announced.
+    expect(output).toContain("the bounce-rate alert (threshold 5%, last 30d) could not be evaluated");
+  });
+
+  it("stays SILENT when the pull inserted nothing", async () => {
+    const { setConfigValue } = await import("./config.js");
+    setConfigValue("complaint-alert-threshold", 1);
+    setConfigValue("bounce-alert-threshold", 5);
+    const providerId = seedProvider("p-1");
+
+    const output = await captureAlerts(() => syncProvider(providerId, db, stubAdapter([])));
+    expect(output).toBe("");
   });
 });
 
