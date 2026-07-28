@@ -818,17 +818,17 @@ const root = join(import.meta.dir, "..");
  * here and never as the tokens the scan counts.
  */
 const CEILINGS: Record<string, number> = {
-  twoArmFamilies: 24,
-  remoteArmModules: 24,
-  routedFacadeDefinitions: 15,
-  routedCallExpressions: 209,
-  selfHostedResourceBranches: 44,
-  selfHostedResourceReferences: 151,
-  isSelfHostedModeReferences: 52,
-  getEmailsModeReferences: 58,
-  resolveEmailsModeReferences: 65,
-  normalizeEmailsModeReferences: 16,
-  emailsModeEnvReferences: 235,
+  twoArmFamilies: 0,
+  remoteArmModules: 0,
+  routedFacadeDefinitions: 0,
+  routedCallExpressions: 0,
+  selfHostedResourceBranches: 0,
+  selfHostedResourceReferences: 0,
+  isSelfHostedModeReferences: 0,
+  getEmailsModeReferences: 0,
+  resolveEmailsModeReferences: 0,
+  normalizeEmailsModeReferences: 0,
+  emailsModeEnvReferences: 0,
 };
 
 // 649 files are tracked and 648 scanned today, totalling ~9.7M characters. (The figures in
