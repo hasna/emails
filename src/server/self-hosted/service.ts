@@ -61,8 +61,10 @@ import {
   isTenantOperator,
   resolveRequestContext,
   handleAuthRoutes,
+  type FleetAuthAuditEvent,
   type RequestContext,
 } from "./auth/service.js";
+import type { FleetTokenAuthenticator } from "./auth/fleet-token.js";
 import type { AuthStore } from "./auth/store.js";
 import type { RateLimiter } from "./auth/rate-limit.js";
 import type { AuthMailerConfig } from "./auth/mailer.js";
@@ -137,6 +139,10 @@ export interface SelfHostedServiceDeps {
   rateLimiter: RateLimiter;
   mailer: AuthMailerConfig;
   env?: NodeJS.ProcessEnv;
+  /** Fleet-token verifier (ADR-0001 Phase 1); absent ⇒ class refused, typed. */
+  fleetAuthenticator?: FleetTokenAuthenticator | null;
+  /** Audit hook for fleet auth decisions; unset ⇒ silent (tests). */
+  fleetAudit?: (event: FleetAuthAuditEvent) => void;
   /** Test/embedding seam; production falls back to the canonical S3 adapter. */
   attachmentRepair?: {
     processPage(

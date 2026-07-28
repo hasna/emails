@@ -90,6 +90,26 @@ export function looksLikeFleetToken(token: string): boolean {
   }
 }
 
+/**
+ * Structural claims parse with NO signature trust — audit forensics only
+ * (mirrors the API-key path's structural kid recovery for deny lines). The ids
+ * it returns must never feed an authorization decision.
+ */
+export function parseFleetClaimsUnverified(
+  token: string,
+): { sub: string | null; tid: string | null; jti: string | null; kid: string | null } | null {
+  const parts = token.split(".");
+  if (parts.length !== 3) return null;
+  try {
+    const header = JSON.parse(Buffer.from(parts[0]!, "base64url").toString("utf8")) as { kid?: unknown };
+    const claims = JSON.parse(Buffer.from(parts[1]!, "base64url").toString("utf8")) as Record<string, unknown>;
+    const str = (v: unknown): string | null => (typeof v === "string" && v ? v : null);
+    return { sub: str(claims["sub"]), tid: str(claims["tid"]), jti: str(claims["jti"]), kid: str(header.kid) };
+  } catch {
+    return null;
+  }
+}
+
 /** Structural claims validation: everything the mapping/scope steps rely on. */
 function validClaims(claims: FleetTokenClaims): boolean {
   return (

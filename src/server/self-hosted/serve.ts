@@ -15,6 +15,7 @@ import { AuthStore } from "./auth/store.js";
 import { RateLimiter } from "./auth/rate-limit.js";
 import { buildAuthMailerConfig } from "./auth/mailer.js";
 import { assertAllowedEmailDomainsConfigured } from "./auth/allowed-email.js";
+import { buildFleetAuthenticatorFromEnv } from "./auth/fleet-token.js";
 
 /** Assemble the service dependencies from the environment. */
 export function buildSelfHostedService(version: string): SelfHostedServiceDeps {
@@ -46,6 +47,24 @@ export function buildSelfHostedService(version: string): SelfHostedServiceDeps {
     },
     [SELF_HOSTED_APP, ...SELF_HOSTED_APP_ALIASES],
   );
+  // Fleet-token credential class (ADR-0001 Phase 1): built only when the
+  // operator configures the IdP's JWKS URL; otherwise the class is refused with
+  // a typed error (fail closed). An invalid URL throws here, at boot, loudly.
+  const fleetAuthenticator = buildFleetAuthenticatorFromEnv(
+    process.env,
+    [SELF_HOSTED_APP, ...SELF_HOSTED_APP_ALIASES],
+    (event) => {
+      // Secret-free JWKS observability (host + kids only).
+      console.log(
+        `[fleet-jwks] ${event.type} host=${event.urlHost}` +
+          (event.kids ? ` kids=${event.kids.join(",")}` : "") +
+          (event.error ? ` error=${event.error}` : ""),
+      );
+    },
+  );
+  console.log(
+    `[emails-self-hosted] fleet auth ${fleetAuthenticator ? `jwks=${new URL(fleetAuthenticator.jwksUrl).host}` : "disabled (no JWKS configured; fleet tokens refused)"}`,
+  );
   const sender = buildSelfHostedSender();
   // Secret-free boot line: WHICH identity outbound mail is signed with. Without
   // it, "the SES credentials are configured" was unverifiable from the running
@@ -69,6 +88,14 @@ export function buildSelfHostedService(version: string): SelfHostedServiceDeps {
     rateLimiter: new RateLimiter(),
     mailer,
     env: process.env,
+    fleetAuthenticator,
+    // Structured, secret-free fleet audit line (sub/jti/kid + outcome only).
+    fleetAudit: (e) => {
+      console.log(
+        `[fleet-auth] ${e.outcome} sub=${e.sub ?? "-"} jti=${e.jti ?? "-"} kid=${e.kid ?? "-"} ` +
+          `reason=${e.reason ?? "-"} ${e.method ?? "-"} ${e.path ?? "-"} status=${e.status}`,
+      );
+    },
   };
 }
 

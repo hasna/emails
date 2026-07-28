@@ -93,11 +93,14 @@ export function resolveSelfHostedConfig(
   const apiUrl = env["EMAILS_SELF_HOSTED_URL"]?.trim();
   const apiKey = env["EMAILS_SELF_HOSTED_API_KEY"]?.trim();
   const sessionToken = env[EMAILS_SESSION_TOKEN_ENV]?.trim();
-  // Prefer a user session token over the operator API key; the server maps
-  // whichever credential to its tenant. Tenant is never sent by the client.
-  const credential = sessionToken || apiKey;
+  const fleetToken = env["EMAILS_FLEET_TOKEN"]?.trim();
+  // Credential precedence: an explicit user session first, then the caller's
+  // own fleet identity token (ADR-0002 — an agent uses ITS identity even when
+  // an operator API key is also present in the env), then the operator key.
+  // The server maps whichever credential to its tenant; the client never sends one.
+  const credential = sessionToken || fleetToken || apiKey;
 
-  const signature = `${modeRaw ?? ""}|${apiUrl ?? ""}|${sessionToken ? "s" : ""}${apiKey ? "k" : ""}`;
+  const signature = `${modeRaw ?? ""}|${apiUrl ?? ""}|${sessionToken ? "s" : ""}${fleetToken ? "f" : ""}${apiKey ? "k" : ""}`;
   if (signature === _cachedSignature && _cachedConfig) return _cachedConfig;
 
   const config = computeConfig(modeRaw, apiUrl, credential);
@@ -124,7 +127,7 @@ function computeConfig(
   if (!apiUrl || !credential) {
     const missing = [
       !apiUrl ? "EMAILS_SELF_HOSTED_URL" : null,
-      !credential ? "EMAILS_SELF_HOSTED_API_KEY or EMAILS_SESSION_TOKEN" : null,
+      !credential ? "EMAILS_SELF_HOSTED_API_KEY, EMAILS_SESSION_TOKEN, or EMAILS_FLEET_TOKEN" : null,
     ].filter(Boolean).join(" and ");
     throw new Error(
       `${APP}: the self-hosted client is not configured (${missing} missing). ${CONFIG_HELP}`,

@@ -15,7 +15,13 @@
 // humans. Enumeration is avoided (generic messages, constant-time login).
 
 import type { ApiKeyVerifier } from "@hasna/contracts/auth";
-import { extractToken } from "@hasna/contracts/auth";
+import { extractToken, hasAllScopes } from "@hasna/contracts/auth";
+import {
+  looksLikeFleetToken,
+  normalizeFleetScopes,
+  parseFleetClaimsUnverified,
+  type FleetTokenAuthenticator,
+} from "./fleet-token.js";
 import {
   hashPassword,
   verifyPasswordOrEqualizeTiming,
@@ -51,7 +57,7 @@ import {
 
 // ---- request context ---------------------------------------------------------
 
-export type PrincipalType = "user" | "apikey";
+export type PrincipalType = "user" | "apikey" | "fleet";
 
 export interface RequestContext {
   tenantId: string;
@@ -60,7 +66,28 @@ export interface RequestContext {
   role?: Role;
   globalRole?: GlobalRole;
   kid?: string;
+  /** Fleet principal id (IdP `sub`) — present for the fleet credential class. */
+  sub?: string;
   scopes: string[];
+}
+
+/**
+ * Structured, secret-free audit record for every fleet-token authentication
+ * decision (ADR-0002 §Audit: `fleet.auth.allow` / `fleet.auth.deny`). Carries
+ * the jti (the audit join key with the IdP's issuance log) — never the token.
+ */
+export interface FleetAuthAuditEvent {
+  outcome: "allow" | "deny";
+  sub: string | null;
+  tid: string | null;
+  jti: string | null;
+  kid: string | null;
+  reason: string | null;
+  scopesRequired: string[];
+  method: string | null;
+  path: string | null;
+  status: number;
+  at: string;
 }
 
 const SCOPES_BY_ROLE: Record<Role, string[]> = {
@@ -97,6 +124,14 @@ export interface AuthServiceDeps {
   rateLimiter: RateLimiter;
   mailer: AuthMailerConfig;
   env?: NodeJS.ProcessEnv;
+  /**
+   * Fleet-token verifier (ADR-0001 Phase 1). Absent/null ⇒ the fleet credential
+   * class is REFUSED with a typed error — fail closed until an operator
+   * configures the IdP's JWKS URL. Existing classes are unaffected either way.
+   */
+  fleetAuthenticator?: FleetTokenAuthenticator | null;
+  /** Audit hook for fleet auth decisions; unset ⇒ silent (tests). */
+  fleetAudit?: (event: FleetAuthAuditEvent) => void;
 }
 
 export type ResolveResult =
@@ -167,7 +202,100 @@ export async function resolveRequestContext(
     };
   }
 
+  // Fleet tokens (EdDSA JWS from the fleet IdP — ADR-0001 Phase 1). Detected
+  // STRUCTURALLY and only after the prefix classes above, so `hasna_`/`emss_`
+  // behaviour is byte-equivalent with this class present or absent.
+  if (looksLikeFleetToken(token)) {
+    return await resolveFleetContext(deps, req, url, requiredScopes, token);
+  }
+
   return fail(401, "unrecognized credential", "malformed");
+}
+
+/** The fleet branch of resolveRequestContext: verify → map sub → scopes → ctx. */
+async function resolveFleetContext(
+  deps: AuthServiceDeps,
+  req: Request,
+  url: URL,
+  requiredScopes: string[],
+  token: string,
+): Promise<ResolveResult> {
+  const audit = (
+    outcome: "allow" | "deny",
+    status: number,
+    reason: string | null,
+    ids: { sub?: string | null; tid?: string | null; jti?: string | null; kid?: string | null },
+  ): void => {
+    deps.fleetAudit?.({
+      outcome,
+      sub: ids.sub ?? null,
+      tid: ids.tid ?? null,
+      jti: ids.jti ?? null,
+      kid: ids.kid ?? null,
+      reason,
+      scopesRequired: [...requiredScopes],
+      method: req.method,
+      path: url.pathname,
+      status,
+      at: new Date().toISOString(),
+    });
+  };
+  // Forensic ids for deny lines before/without signature trust (mirrors the
+  // API-key path's structural kid recovery). Never used for authorization.
+  const unverified = parseFleetClaimsUnverified(token);
+
+  const authenticator = deps.fleetAuthenticator ?? null;
+  if (!authenticator) {
+    audit("deny", 401, "fleet_not_configured", unverified ?? {});
+    return fail(
+      401,
+      "fleet tokens are not accepted by this deployment (no fleet JWKS configured)",
+      "fleet_not_configured",
+    );
+  }
+
+  const verified = await authenticator.authenticate(token);
+  if (!verified.ok) {
+    audit("deny", verified.status, verified.reason, unverified ?? {});
+    const message =
+      verified.reason === "jwks_unavailable"
+        ? "fleet auth is temporarily unavailable (JWKS could not be fetched)"
+        : "fleet token was refused";
+    return fail(verified.status, message, verified.reason);
+  }
+  const { claims, kid } = verified;
+  const ids = { sub: claims.sub, tid: claims.tid, jti: claims.jti, kid };
+
+  const mapping = await deps.authStore.getFleetPrincipalTenant(claims.sub);
+  if (!mapping) {
+    audit("deny", 403, "no_tenant", ids);
+    return fail(403, "fleet principal is not mapped to a tenant", "no_tenant");
+  }
+  if (mapping.revokedAt) {
+    audit("deny", 403, "fleet_principal_revoked", ids);
+    return fail(403, "fleet principal access has been revoked", "fleet_principal_revoked");
+  }
+  if (mapping.fleetTid && mapping.fleetTid !== claims.tid) {
+    audit("deny", 403, "fleet_tenant_mismatch", ids);
+    return fail(403, "fleet token tenant does not match the granted mapping", "fleet_tenant_mismatch");
+  }
+
+  const scopes = normalizeFleetScopes(claims.scope);
+  if (!hasAllScopes(scopes, requiredScopes)) {
+    audit("deny", 403, "insufficient_scope", ids);
+    return fail(403, "insufficient scope for this operation", "insufficient_scope");
+  }
+
+  audit("allow", 200, null, ids);
+  return {
+    ok: true,
+    ctx: {
+      tenantId: mapping.tenantId,
+      principalType: "fleet",
+      sub: claims.sub,
+      scopes,
+    },
+  };
 }
 
 // ---- request helpers ---------------------------------------------------------
@@ -762,6 +890,14 @@ async function handleMe(deps: AuthServiceDeps, req: Request, url: URL): Promise<
   if (!resolved.ok) return resolved.response;
   const ctx = resolved.ctx;
   const tenant = await deps.authStore.getTenantById(ctx.tenantId);
+  if (ctx.principalType === "fleet") {
+    return json(200, {
+      principal_type: "fleet",
+      sub: ctx.sub,
+      tenant: tenant ? toPublicTenant(tenant) : { id: ctx.tenantId },
+      scopes: ctx.scopes,
+    });
+  }
   if (ctx.principalType === "apikey") {
     return json(200, {
       principal_type: "apikey",
