@@ -480,15 +480,35 @@ async function enumerateOutbound(
  * caller asked for, and faulting during a FILTER would take down a listing over a row the
  * filter was about to exclude anyway.
  */
+/**
+ * The sender a filter names, or null when it names none.
+ *
+ * `canonicalSender` answers null for anything that is not an addr-spec, and this falls back to
+ * the trimmed text so an unusable-but-non-blank value (`--from not-an-address`) still filters
+ * and legitimately matches nothing. Only a value with no content at all is absent.
+ */
+function normalizedSender(value: string | undefined): string | null {
+  if (value === undefined) return null;
+  const canonical = canonicalSender(value) ?? value.trim().toLowerCase();
+  return canonical === "" ? null : canonical;
+}
+
 function matchesFilter(row: MessageListRecord, filter: EmailFilter, what: string): boolean {
   if (filter.status) {
     const wanted: readonly string[] = Array.isArray(filter.status) ? filter.status : [filter.status];
     if (!wanted.includes(row.status)) return false;
   }
-  if (filter.from_address) {
-    const want = canonicalSender(filter.from_address) ?? filter.from_address.trim().toLowerCase();
+  // A BLANK SENDER FILTER IS AN ABSENT ONE, NOT A FILTER THAT MATCHES NOTHING.
+  //
+  // `--from "   "` is truthy, canonicalises to the empty string, and would then be compared
+  // against every row's real address — so the whole ledger came back EMPTY for a filter the
+  // operator did not really give. That is a fabricated empty, and it is the same shape as the
+  // two stores disagreeing about an empty value. `""` was already treated as absent by the
+  // truthiness test; `"   "` now agrees with it.
+  const wantedSender = normalizedSender(filter.from_address);
+  if (wantedSender !== null) {
     const have = canonicalSender(row.from_addr) ?? row.from_addr.trim().toLowerCase();
-    if (have !== want) return false;
+    if (have !== wantedSender) return false;
   }
   if (filter.since !== undefined || filter.until !== undefined) {
     const dated = datedFor(row, what);
@@ -568,6 +588,11 @@ export async function createEmail(
  * received message `sent`.
  */
 export async function getEmail(id: string, store?: EmailStore): Promise<Email | null> {
+  // AN EMPTY ID NAMES NOTHING, and it is answered here rather than at the store because the two
+  // stores disagree about it: SQLite matches no row, and the API store puts an empty segment on
+  // the path, where the service's routing and its error envelope are a different question from
+  // "no such message". Neither disagreement is interesting and both are avoidable.
+  if (id.trim() === "") return null;
   const record = required("read a sent email", await storeFor(store).messages.getMessage(id));
   if (record === null) return null;
   return isOutbound(record.direction) ? recordToEmail(record) : null;

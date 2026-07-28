@@ -368,6 +368,19 @@ for (const [label, makeStore] of STORE_VARIANTS) {
         expect(rows.map((row) => row.id)).toEqual(["exact"]);
       });
 
+      it("treats a BLANK sender filter as absent rather than as a filter matching nothing", async () => {
+        // `--from "   "` is truthy and canonicalises to the empty string. Compared against every
+        // row's real address it returns an EMPTY ledger for a filter the operator did not
+        // really give — a fabricated empty. `""` was always treated as absent; `"   "` agrees.
+        seedLedger("a", stamp(1), { from_address: "ops@example.com" });
+        const store = makeStore();
+
+        expect((await listEmails({ from_address: "   " }, store)).map((row) => row.id)).toEqual(["a"]);
+        expect((await listEmails({ from_address: "" }, store)).map((row) => row.id)).toEqual(["a"]);
+        // ...and a non-blank sender nothing matches is still a REAL empty, not an absent filter.
+        expect(await listEmails({ from_address: "nobody@example.com" }, store)).toEqual([]);
+      });
+
       it("accepts a display-name sender and compares the address inside it", async () => {
         seedLedger("exact", stamp(1), { from_address: "ops@example.com" });
 
@@ -545,8 +558,13 @@ for (const [label, makeStore] of STORE_VARIANTS) {
         expect(await getEmail("received", store)).toBeNull();
       });
 
-      it("answers null for an id nothing holds", async () => {
-        expect(await getEmail("no-such-id", makeStore())).toBeNull();
+      it("answers null for an id nothing holds, and for a blank id", async () => {
+        const store = makeStore();
+        expect(await getEmail("no-such-id", store)).toBeNull();
+        // The two stores disagree about an empty id — SQLite matches no row, the API store puts
+        // an empty segment on the path — so it is answered before either is asked.
+        expect(await getEmail("", store)).toBeNull();
+        expect(await getEmail("   ", store)).toBeNull();
       });
 
       it("reports the fields the seam does not publish as null, not as empty", async () => {
