@@ -972,7 +972,7 @@ const root = join(import.meta.dir, "..");
  * NO CONFLICT MARKER OF ANY KIND. Measuring the merged tree is the only thing that can tell the
  * difference.
  *
- * Corpus of this change: 645 tracked, 644 scanned, ~9.88M characters — both floors cleared with
+ * Corpus of this change: 645 tracked, 644 scanned, ~9.89M characters — both floors cleared with
  * room. TWO fewer tracked files than the base: three deleted (two arm modules and the
  * arm-premise suite) and ONE added — `src/cli/commands/email-log-provider-filter.test.ts`, which
  * pins at the operator's own surface a refusal that three other suites pin only at the store
