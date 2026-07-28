@@ -1,12 +1,26 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, it, expect } from "bun:test";
-import { startV1Stub, type V1Stub } from "../test-support/v1-stub.js";
+import { afterEach, beforeEach, describe, it, expect } from "bun:test";
+import { closeDatabase, getDatabase, resetDatabase, type Database } from "../db/database.js";
+import {
+  API_BASE_URL_SETTING,
+  API_CREDENTIAL_SETTINGS,
+  API_SETTINGS_POINTER,
+  DATABASE_PATH_SETTINGS,
+} from "../store-resolution.js";
 import { describeWarmingProgress, generateWarmingPlan, getTodayLimit, formatWarmingStatus, getTodaySentCount, getTodaySentCountsByDomain, warmingDayIndex } from "./warming.js";
 import type { WarmingSchedule } from "./warming.js";
 
-// getTodaySentCount / formatWarmingStatus read the outbound sent-ledger over the
-// /v1 messages store, so a configured self-hosted endpoint is required even when
-// no rows are seeded. generateWarmingPlan and getTodayLimit are pure and do not
-// need it, but sharing the stub scaffolding keeps the file uniform.
+// THE LEDGER READ MOVED AND SO DID THIS FIXTURE. `getTodaySentCount` counts today's outbound
+// mail through `listEmails`, which has COLLAPSED onto the store seam — so it no longer reaches
+// `/v1` through the resource bridge this file used to stub, and the three functions that
+// depend on it are ASYNC. `src/test-support/v1-stub.ts` is the wrong fixture for a seam read
+// (its generic list handler ignores equality filters, and the real HTTP store reads
+// `GET /v1/openapi.json` before a filtered list, which that stub serves only on request), so
+// the counting cases seed a real SQLite `emails` table instead and read it through the
+// configured store. `src/db/emails.test.ts` covers the same read against BOTH shipped stores;
+// what these cases own is the UTC day window and the sender-domain tally.
+//
+// `generateWarmingPlan`, `getTodayLimit` and `warmingDayIndex` are pure and need none of it.
+
 /** N days before today's UTC calendar date — the calendar the ramp is anchored on. */
 function utcDaysAgo(days: number): string {
   const date = new Date();
@@ -14,11 +28,51 @@ function utcDaysAgo(days: number): string {
   return date.toISOString().slice(0, 10);
 }
 
-let stub: V1Stub;
-beforeAll(async () => { stub = await startV1Stub(); });
-afterAll(() => stub.stop());
-beforeEach(async () => { await stub.reset(); stub.applyEnv(); });
-afterEach(() => stub.clearEnv());
+const PROVIDER = "warming-provider";
+let db: Database;
+let INHERITED_PROCESS_ENV: NodeJS.ProcessEnv;
+
+/**
+ * Leave exactly ONE store configured. A database path AND an API are a HARD BOOT ERROR with no
+ * precedence rule, so a stray inherited API setting turns every count below into that error
+ * rather than into a zero — which is the failure this file must never report as "nothing sent
+ * today", because a zero there raises a warming cap.
+ */
+function configureLocalStoreOnly(): void {
+  for (const setting of [API_BASE_URL_SETTING, API_SETTINGS_POINTER, ...API_CREDENTIAL_SETTINGS]) {
+    delete process.env[setting];
+  }
+  for (const setting of DATABASE_PATH_SETTINGS) delete process.env[setting];
+  process.env["EMAILS_DB_PATH"] = ":memory:";
+}
+
+beforeEach(() => {
+  INHERITED_PROCESS_ENV = { ...process.env };
+  configureLocalStoreOnly();
+  resetDatabase();
+  db = getDatabase();
+  db.run("INSERT INTO providers (id, name, type, active) VALUES (?, ?, 'ses', 1)", [PROVIDER, PROVIDER]);
+});
+
+afterEach(() => {
+  closeDatabase();
+  for (const key of Object.keys(process.env)) {
+    if (!Object.prototype.hasOwnProperty.call(INHERITED_PROCESS_ENV, key)) delete process.env[key];
+  }
+  Object.assign(process.env, INHERITED_PROCESS_ENV);
+});
+
+/** A sent-ledger row with the sender and instant a case names. */
+function seedSent(id: string, fromAddress: string, sentAt: string): void {
+  db.run(
+    `INSERT INTO emails
+       (id, provider_id, provider_message_id, from_address, to_addresses, cc_addresses,
+        bcc_addresses, reply_to, subject, status, has_attachments, attachment_count, tags,
+        sent_at, created_at, updated_at)
+     VALUES (?, ?, NULL, ?, '["client@example.com"]', '[]', '[]', NULL, 's', 'sent', 0, 0, '{}', ?, ?, ?)`,
+    [id, PROVIDER, fromAddress, sentAt, sentAt, sentAt],
+  );
+}
 
 // PURE: generateWarmingPlan is a deterministic ramp computation.
 describe("generateWarmingPlan", () => {
@@ -166,44 +220,32 @@ describe("getTodayLimit", () => {
 describe("getTodaySentCount", () => {
   it("counts today's outbound rows by sender domain", async () => {
     const nowIso = new Date().toISOString();
-    await stub.seed({
-      messages: [
-        { id: "warm-1", direction: "outbound", from_addr: "sender@warm.test", to_addrs: ["client@example.com"], subject: "warm sent", status: "sent", received_at: nowIso, created_at: nowIso },
-        { id: "warm-2", direction: "outbound", from_addr: "ops@warm.test", to_addrs: ["client@example.com"], subject: "warm sent 2", status: "sent", received_at: nowIso, created_at: nowIso },
-        { id: "other-1", direction: "outbound", from_addr: "sender@other.test", to_addrs: ["client@example.com"], subject: "other sent", status: "sent", received_at: nowIso, created_at: nowIso },
-      ],
-    });
+    seedSent("warm-1", "sender@warm.test", nowIso);
+    seedSent("warm-2", "ops@warm.test", nowIso);
+    seedSent("other-1", "sender@other.test", nowIso);
 
-    expect(getTodaySentCount("warm.test")).toBe(2);
-    expect(getTodaySentCount("other.test")).toBe(1);
-    expect(getTodaySentCount("nobody.test")).toBe(0);
+    expect(await getTodaySentCount("warm.test")).toBe(2);
+    expect(await getTodaySentCount("other.test")).toBe(1);
+    expect(await getTodaySentCount("nobody.test")).toBe(0);
   });
 
   it("excludes rows sent outside today's UTC window", async () => {
     const nowIso = new Date().toISOString();
     const yesterday = new Date(Date.now() - 36 * 60 * 60 * 1000).toISOString();
-    await stub.seed({
-      messages: [
-        { id: "today", direction: "outbound", from_addr: "sender@warm.test", to_addrs: ["client@example.com"], subject: "today", status: "sent", received_at: nowIso, created_at: nowIso },
-        { id: "old", direction: "outbound", from_addr: "sender@warm.test", to_addrs: ["client@example.com"], subject: "old", status: "sent", received_at: yesterday, created_at: yesterday },
-      ],
-    });
+    seedSent("today", "sender@warm.test", nowIso);
+    seedSent("old", "sender@warm.test", yesterday);
 
-    expect(getTodaySentCount("warm.test")).toBe(1);
+    expect(await getTodaySentCount("warm.test")).toBe(1);
   });
 
   it("counts many domains in one ledger read, zeros included", async () => {
     const nowIso = new Date().toISOString();
-    await stub.seed({
-      messages: [
-        { id: "b-1", direction: "outbound", from_addr: "a@one.test", to_addrs: ["c@example.com"], subject: "s", status: "sent", received_at: nowIso, created_at: nowIso },
-        { id: "b-2", direction: "outbound", from_addr: "b@one.test", to_addrs: ["c@example.com"], subject: "s", status: "sent", received_at: nowIso, created_at: nowIso },
-        { id: "b-3", direction: "outbound", from_addr: "c@two.test", to_addrs: ["c@example.com"], subject: "s", status: "sent", received_at: nowIso, created_at: nowIso },
-        { id: "b-4", direction: "outbound", from_addr: "d@unlisted.test", to_addrs: ["c@example.com"], subject: "s", status: "sent", received_at: nowIso, created_at: nowIso },
-      ],
-    });
+    seedSent("b-1", "a@one.test", nowIso);
+    seedSent("b-2", "b@one.test", nowIso);
+    seedSent("b-3", "c@two.test", nowIso);
+    seedSent("b-4", "d@unlisted.test", nowIso);
 
-    const counts = getTodaySentCountsByDomain(["one.test", "TWO.test", "quiet.test"]);
+    const counts = await getTodaySentCountsByDomain(["one.test", "TWO.test", "quiet.test"]);
     expect(counts.get("one.test")).toBe(2);
     expect(counts.get("two.test")).toBe(1);
     expect(counts.get("quiet.test")).toBe(0);
@@ -212,9 +254,9 @@ describe("getTodaySentCount", () => {
     expect([...counts.keys()].sort()).toEqual(["one.test", "quiet.test", "two.test"]);
   });
 
-  it("returns an empty map without reading anything for an empty domain list", () => {
-    expect(getTodaySentCountsByDomain([]).size).toBe(0);
-    expect(getTodaySentCountsByDomain(["", "   "]).size).toBe(0);
+  it("returns an empty map without reading anything for an empty domain list", async () => {
+    expect((await getTodaySentCountsByDomain([])).size).toBe(0);
+    expect((await getTodaySentCountsByDomain(["", "   "])).size).toBe(0);
   });
 });
 
@@ -236,9 +278,9 @@ describe("describeWarmingProgress", () => {
     };
   }
 
-  it("reports day 1 on the start date", () => {
+  it("reports day 1 on the start date", async () => {
     const plan = generateWarmingPlan(5000);
-    const progress = describeWarmingProgress(makeSchedule());
+    const progress = await describeWarmingProgress(makeSchedule());
     expect(progress.current_day).toBe(1);
     expect(progress.total_days).toBe(plan[plan.length - 1]!.day);
     expect(progress.today_limit).toBe(50);
@@ -246,50 +288,47 @@ describe("describeWarmingProgress", () => {
     expect(progress.progress_percent).toBe(Math.round((1 / progress.total_days) * 100));
   });
 
-  it("advances current_day with elapsed days and agrees with getTodayLimit", () => {
+  it("advances current_day with elapsed days and agrees with getTodayLimit", async () => {
     const schedule = makeSchedule({ start_date: utcDaysAgo(6) });
-    const progress = describeWarmingProgress(schedule);
+    const progress = await describeWarmingProgress(schedule);
     expect(progress.current_day).toBe(7);
     expect(progress.today_limit).toBe(getTodayLimit(schedule));
     expect(progress.today_limit).toBe(400);
   });
 
-  it("accepts a precomputed sent count instead of re-reading the ledger", () => {
-    expect(describeWarmingProgress(makeSchedule(), 17).today_sent).toBe(17);
+  it("accepts a precomputed sent count instead of re-reading the ledger", async () => {
+    expect((await describeWarmingProgress(makeSchedule(), 17)).today_sent).toBe(17);
   });
 
-  it("reports day 1 with a zero limit for an unusable start date", () => {
+  it("reports day 1 with a zero limit for an unusable start date", async () => {
     // Reachable in self-hosted mode: the Postgres schema relaxed start_date to
     // nullable and the /v1 client coerces null to "". NaN must not reach output,
     // and an unknown start must not read as "full volume allowed".
     for (const start_date of ["", "not-a-date"]) {
-      const progress = describeWarmingProgress(makeSchedule({ start_date }));
+      const progress = await describeWarmingProgress(makeSchedule({ start_date }));
       expect(progress.current_day).toBe(1);
       expect(Number.isFinite(progress.progress_percent)).toBe(true);
       expect(progress.today_limit).toBe(0);
     }
   });
 
-  it("caps progress_percent at 100 once the ramp is behind schedule", () => {
-    const progress = describeWarmingProgress(makeSchedule({ start_date: "2020-01-01" }));
+  it("caps progress_percent at 100 once the ramp is behind schedule", async () => {
+    const progress = await describeWarmingProgress(makeSchedule({ start_date: "2020-01-01" }));
     expect(progress.progress_percent).toBe(100);
     expect(progress.today_limit).toBe(5000);
   });
 
-  it("reports no limit for paused and completed schedules", () => {
-    expect(describeWarmingProgress(makeSchedule({ status: "paused" })).today_limit).toBeNull();
-    expect(describeWarmingProgress(makeSchedule({ status: "completed" })).today_limit).toBeNull();
+  it("reports no limit for paused and completed schedules", async () => {
+    expect((await describeWarmingProgress(makeSchedule({ status: "paused" }))).today_limit).toBeNull();
+    expect((await describeWarmingProgress(makeSchedule({ status: "completed" }))).today_limit).toBeNull();
   });
 
   it("counts today's sent mail for the schedule's own domain", async () => {
     const nowIso = new Date().toISOString();
-    await stub.seed({
-      messages: [
-        { id: "p-1", direction: "outbound", from_addr: "a@progress.test", to_addrs: ["c@example.com"], subject: "s", status: "sent", received_at: nowIso, created_at: nowIso },
-        { id: "p-2", direction: "outbound", from_addr: "b@other.test", to_addrs: ["c@example.com"], subject: "s", status: "sent", received_at: nowIso, created_at: nowIso },
-      ],
-    });
-    expect(describeWarmingProgress(makeSchedule()).today_sent).toBe(1);
+    seedSent("p-1", "a@progress.test", nowIso);
+    seedSent("p-2", "b@other.test", nowIso);
+
+    expect((await describeWarmingProgress(makeSchedule())).today_sent).toBe(1);
   });
 });
 
@@ -297,7 +336,7 @@ describe("describeWarmingProgress", () => {
 // With an empty store the sent count is 0; the assertions here only concern the
 // schedule fields, which are formatted purely.
 describe("formatWarmingStatus", () => {
-  it("includes domain name in output", () => {
+  it("includes domain name in output", async () => {
     const today = new Date().toISOString().slice(0, 10);
     const schedule: WarmingSchedule = {
       id: "test",
@@ -309,13 +348,13 @@ describe("formatWarmingStatus", () => {
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     };
-    const output = formatWarmingStatus(schedule);
+    const output = await formatWarmingStatus(schedule);
     expect(output).toContain("mysite.com");
     expect(output).toContain("active");
     expect(output).toContain("1000");
   });
 
-  it("shows paused status", () => {
+  it("shows paused status", async () => {
     const today = new Date().toISOString().slice(0, 10);
     const schedule: WarmingSchedule = {
       id: "test2",
@@ -327,11 +366,11 @@ describe("formatWarmingStatus", () => {
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     };
-    const output = formatWarmingStatus(schedule);
+    const output = await formatWarmingStatus(schedule);
     expect(output).toContain("paused");
   });
 
-  it("renders a caller-supplied progress snapshot without re-reading sent mail", () => {
+  it("renders a caller-supplied progress snapshot without re-reading sent mail", async () => {
     const schedule: WarmingSchedule = {
       id: "test3",
       domain: "precomputed.com",
@@ -342,7 +381,7 @@ describe("formatWarmingStatus", () => {
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     };
-    const output = formatWarmingStatus(schedule, {
+    const output = await formatWarmingStatus(schedule, {
       current_day: 4,
       total_days: 10,
       progress_percent: 40,
