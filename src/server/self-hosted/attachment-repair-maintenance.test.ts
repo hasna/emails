@@ -140,7 +140,6 @@ function deps(
     closes,
     deps: {
       env: {
-        EMAILS_MODE: "self_hosted",
         EMAILS_DATABASE_URL: "postgresql://redacted",
         EMAILS_INGEST_S3_BUCKET: "canonical-inbound",
         ECS_CONTAINER_METADATA_URI_V4: "http://169.254.170.2/v4/example",

@@ -32,7 +32,6 @@ function localCliEnv(): NodeJS.ProcessEnv {
   mkdirSync(homePath, { recursive: true });
   return {
     ...process.env,
-    EMAILS_MODE: "local",
     EMAILS_DB_PATH: join(dir, "emails.db"),
     HOME: homePath,
     NO_COLOR: "1",

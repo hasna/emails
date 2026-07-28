@@ -104,7 +104,7 @@ function nullPayload(): EmailSystemStatus {
   const capped = statusAvailable("self_hosted_api:/v1/addresses", "client_enumeration", false);
   return {
     generated_at: "2026-07-01T00:00:00.000Z",
-    mode: { current: "self_hosted", label: "Self-hosted", source: { kind: "env", name: "EMAILS_MODE", value: "self_hosted" }, warning: null },
+    mode: { current: "self_hosted", label: "Self-hosted", source: { kind: "config", name: "emails_mode", value: "self_hosted" }, warning: null },
     degraded: true,
     limited: true,
     unavailable: ["addresses.usable_from", "domains.send_ready", "providers.total"],

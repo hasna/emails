@@ -868,6 +868,43 @@ const root = join(import.meta.dir, "..");
  * AUTHORS contributes zero to all eleven, and every file it EDITS has a per-file count
  * unchanged by the edit — which was checked against the base rather than assumed, and holds for
  * all three edited files that carry a non-zero count.
+ *
+ * RE-MEASURED AND RE-PINNED on the UNOWNED-REFERENCE SWEEP — the first change in this program
+ * that collapses no family and deletes no arm. Its whole subject is the residue no family owns:
+ * settings of the deployment-mode variable that survive in fixtures and cleanup blocks after
+ * the behaviour they served is gone. BASE fa2b88a, verified INDEPENDENTLY over the real
+ * `git ls-files` corpus (647 tracked / 646 scanned, 9,805,459 characters) with all eleven live
+ * counts equal to the ceilings the send-keys collapse declared and ZERO slack. ONE counter
+ * moves:
+ *
+ *   emailsModeEnvReferences      234 -> 223  ELEVEN occurrences across eight files, each one
+ *                                            traced to the code before deletion: a save/set/
+ *                                            restore pin around a readiness-parity test that
+ *                                            never asserts on the mode; two spawned-CLI env
+ *                                            pins whose value the canonical hermetic runner
+ *                                            already supplies ambiently; a cleanup `delete` of
+ *                                            a variable its suite never sets, one line above a
+ *                                            full environment restore; a status fixture whose
+ *                                            source block named the env selector although the
+ *                                            renderer under test prints only current and label
+ *                                            (it now uses the equally-real config-key form);
+ *                                            two fake ECS env fixtures carrying a key the
+ *                                            module under test never reads (it consults
+ *                                            exactly three keys of that env, and its pool
+ *                                            reads the process environment instead); and one
+ *                                            design-doc inventory line, reworded to name the
+ *                                            selector by role.
+ *
+ * TEN DO NOT MOVE, and that is the finding: every occurrence of the predicate, the reader, the
+ * resolvers, the parser and the resource gate outside the swept files is load-bearing for a
+ * family that has not collapsed yet, for a guard, or for the axis machinery itself. The sweep's
+ * discipline cut the other way too — of the ~20 doc/deploy occurrences the brief estimated as
+ * removable, 18 stay, because the server refuses to boot without the variable, the migrator
+ * throws without it, and a client only reaches the HTTP arm through an explicit selector; a doc
+ * or compose line that tells an operator to set it is a true statement about the shipped
+ * binaries and dies with the axis in phase 9, not before. Every removal here is a fixture no
+ * assertion reads; nothing this change touches is load-bearing, which is why the suite is
+ * unchanged by it.
  */
 const CEILINGS: Record<string, number> = {
   twoArmFamilies: 23,
@@ -880,7 +917,7 @@ const CEILINGS: Record<string, number> = {
   getEmailsModeReferences: 58,
   resolveEmailsModeReferences: 65,
   normalizeEmailsModeReferences: 16,
-  emailsModeEnvReferences: 234,
+  emailsModeEnvReferences: 223,
 };
 
 // 649 files are tracked and 648 scanned today, totalling ~9.7M characters. (The figures in
