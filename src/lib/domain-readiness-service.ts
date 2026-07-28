@@ -113,6 +113,38 @@ export interface DomainReadinessService {
   update(domainOrId: string, input: DomainReadinessMutationInput, options?: Omit<ResolveDomainLifecycleOptions, "db">): Promise<DomainReadinessMutationResult>;
 }
 
+/**
+ * Refuse to publish a readiness verdict built from TWO DIFFERENT DATASETS.
+ *
+ * The domain rows come from `listDomains`, which is still a two-arm family routing on the
+ * deployment word. The provisioning columns and the ready-address counts come from
+ * `src/db/provisioning`, which resolves its store from the STORAGE CONFIGURATION instead.
+ * Those are different resolvers reading different inputs, and they can disagree: an
+ * installation with an API url and key exported but no deployment word set resolves `local`
+ * for the domain rows and `api` for the provisioning read. Every local domain id is then
+ * absent from both maps.
+ *
+ * Absence is normally a VALUE here — it is what the two deleted arms did, and it is safe when
+ * both reads saw the same table, because every `domains` row carries its own provisioning
+ * columns and therefore always resolves. Absence for EVERY id is different: it is the
+ * signature of two datasets, and publishing it would report a fully provisioned installation
+ * as `provisioning: null, ready_addresses: 0` — a confident, wrong readiness verdict on
+ * `GET /api/domains/readiness`, `emails domain list` and the MCP domains resource. That is the
+ * exact fabricated zero this programme exists to remove, so it is a refusal.
+ *
+ * This guard disappears when `src/db/domains` collapses onto the seam too and both reads take
+ * the same store. Adversarial review found the split.
+ */
+function assertOneDataset(domainIds: string[], resolved: number): void {
+  if (domainIds.length === 0 || resolved > 0) return;
+  throw new Error(
+    `This installation resolved ${domainIds.length} domain(s) but no provisioning state for any `
+      + "of them. Every domain row carries its own provisioning columns, so this means the "
+      + "domain list and the provisioning read reached different storage; refusing to report "
+      + "these domains as unprovisioned",
+  );
+}
+
 function providerSummary(provider: Provider | null): DomainReadinessProviderSummary | null {
   if (!provider) return null;
   return {
@@ -236,6 +268,7 @@ export async function buildDomainLifecycleSummaries(
   const domainIds = domains.map((domain) => domain.id);
   const provisioningById = await listDomainProvisioningByIds(domainIds);
   const readyAddressesById = await listReadyAddressCountsByDomains(domainIds);
+  assertOneDataset(domainIds, provisioningById.size);
   const providerById = new Map<string, Provider | null>();
 
   return domains.map((domain) => {

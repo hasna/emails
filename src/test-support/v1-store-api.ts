@@ -292,7 +292,7 @@ async function handleGenericResource(context: RouteContext, path: string, id: st
       // The service this fixture stands in for honours it, so dropping it here made the
       // fixture WEAKER than production in a way no test could see.
       const listed = settled(await store.provisioning.listProvisioningEvents({
-        ...(intParam(url, "limit") === undefined ? {} : { limit: intParam(url, "limit") }),
+        limit: intParam(url, "limit") ?? 500,
         ...(intParam(url, "offset") === undefined ? {} : { offset: intParam(url, "offset") }),
       }));
       return "response" in listed ? listed.response : json(200, { items: listed.value });
@@ -307,7 +307,7 @@ async function handleGenericResource(context: RouteContext, path: string, id: st
   if (path === "send-keys") {
     if (method === "GET" && id === null) {
       const listed = settled(await store.sendKeys.listSendKeys({
-        ...(intParam(url, "limit") === undefined ? {} : { limit: intParam(url, "limit") }),
+        limit: intParam(url, "limit") ?? 500,
         ...(intParam(url, "offset") === undefined ? {} : { offset: intParam(url, "offset") }),
       }));
       return "response" in listed ? listed.response : json(200, { items: listed.value });

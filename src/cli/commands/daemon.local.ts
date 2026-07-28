@@ -89,12 +89,16 @@ export interface DaemonQueueView {
   due_addresses: number | null;
   failed_domains: number | null;
   failed_addresses: number | null;
-  drainable: boolean;
 }
 
 export interface DaemonStatusView {
   queue: DaemonQueueView;
-  realtime: { queue_configured: boolean | null; last_poll_at: string | null; last_error: string | null };
+  realtime: {
+    queue_configured: boolean | null;
+    last_poll_at: string | null;
+    last_error: string | null;
+    availability?: StatusAvailability;
+  };
   start_commands: { realtime_watch: string };
 }
 
@@ -113,7 +117,20 @@ export function formatDaemonStatus(status: DaemonStatusView): string {
       lines.push(chalk.yellow(`  Counts are LOWER BOUNDS: ${queue.availability.reason ?? "the enumeration could not be completed"}`));
     }
   }
-  lines.push(`  Realtime:   ${status.realtime.queue_configured ? chalk.green("configured") : chalk.yellow("not configured")}`);
+  // `queue_configured` IS NULLABLE AND NULL IS NOT `false`. `realtimeBlock`
+  // (src/lib/status-facts.ts) nulls all four realtime fields whenever the config file cannot
+  // be read, and this line used to render that null as "not configured" — a confident negative
+  // claim about a measurement that did not happen, in the one command an operator runs to find
+  // out whether ingestion is running. Every other renderer of this exact field already guards
+  // it (`daemon.remote.ts`, `inbox-sync-status-format.ts`, `agent-context.ts`); this one did
+  // not, and widening the field's declared type without widening the branch is what made it
+  // visible. Adversarial review caught it.
+  const realtimeLabel = status.realtime.queue_configured === null
+    ? renderStatusUnavailable(status.realtime.availability)
+    : status.realtime.queue_configured
+      ? chalk.green("configured")
+      : chalk.yellow("not configured");
+  lines.push(`  Realtime:   ${realtimeLabel}`);
   if (status.realtime.last_poll_at) lines.push(`  Last poll:  ${chalk.green(status.realtime.last_poll_at)}`);
   if (status.realtime.last_error) lines.push(`  Last error: ${chalk.red(status.realtime.last_error)}`);
   lines.push("");

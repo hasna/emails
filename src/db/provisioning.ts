@@ -20,11 +20,16 @@
 //
 // ─── WHAT THE TWO ARMS ACTUALLY DID DIFFERENTLY, MEASURED RATHER THAN ASSUMED ─────────────
 //
-// Thirteen divergences. The SQLite arm was the stronger one on nine of them, the HTTP arm on
-// two, and on two they agreed and the agreed behaviour is preserved.
+// FOURTEEN divergences, and the tally is: the SQLite arm was stronger on FIVE (1, 2, 4, 8, 9),
+// the HTTP arm on TWO (7, 11), the two AGREED on three and the agreed behaviour is preserved
+// (10, 12, 13), THREE are cases where neither arm was right and both are corrected (3, 5, 6),
+// and ONE is resolved AWAY from both arms with the reason stated (14). An earlier version of
+// this note said "nine, two and two", which does not add to thirteen or to anything else;
+// adversarial review did the arithmetic.
 //
-//  1. THIRTEEN READS ANSWERED OUT OF ONE CLAMPED PAGE. Every read in the deleted HTTP arm
-//     was a single `list({ limit: 1000 })`, which the service clamps to 500 and which the
+//  1. FOURTEEN READS ANSWERED OUT OF ONE CLAMPED PAGE — twelve literal `list({ limit: 1000 })`
+//     sites feeding fourteen exports, because one of them (`dueRows`) served both queue
+//     operations and both sides of the summary. The service clamps that to 500 and the
 //     SQLite resource path clamps to 500 as well. So above 500 rows that arm reported a
 //     domain as "not provisioned", an address as having no provisioning row, a due-work
 //     queue missing its tail, and a `ready` count that stopped at the page boundary — the
@@ -47,9 +52,10 @@
 //     from whichever store performed the write, and both stores stamp them.
 //  4. THE TWO ARMS SORTED WITH DIFFERENT COLLATIONS, and one of them was LOCALE-DEPENDENT.
 //     The SQLite arm sorted in SQL under that engine's BINARY collation; the HTTP arm sorted
-//     in JavaScript with `localeCompare`, so its page boundaries and its due-work order moved
-//     with the process locale. Everything below compares in UTF-16 code-unit order, which is
-//     deterministic on every machine.
+//     in JavaScript with `localeCompare`, so the order it PRESENTED moved with the process
+//     locale. (Not its page boundaries — those were the server's `ORDER BY`; an earlier
+//     version of this note said otherwise and adversarial review corrected it.) Everything
+//     below compares in UTF-16 code-unit order, which is deterministic on every machine.
 //  5. NEITHER ARM HAD A TOTAL ORDER, so equal timestamps ordered arbitrarily. The SQLite arm
 //     ordered addresses `created_at DESC` and due work `next_check_at ASC` with no
 //     tiebreaker; the HTTP arm's comparator returned 0 for a tie and inherited whatever the
@@ -68,7 +74,9 @@
 //     does not check that the elements are strings — so `["a", 1]` came back typed as
 //     `string[]` while holding a number. The HTTP arm's `stringArray` rejected both. The HTTP
 //     arm is the stronger one here: a domain whose nameserver list cannot be read is not a
-//     domain with no nameservers, and `domain adopt` prints that list to an operator.
+//     domain with no nameservers, and `domain adopt` prints that list to an operator. The
+//     deleted HTTP arm also accepted a bare `nameservers` key as a fallback for
+//     `nameservers_json`; neither store emits one, and that fallback is not carried over.
 //
 //     THE GUARD BELOW ONLY REACHES HALF OF IT, and that is a STORE-LAYER DEFECT DESCRIBED AND
 //     NOT FIXED. `mapDomain` in `src/store-sqlite/registry.ts` maps this column with the SAME
@@ -109,6 +117,16 @@
 //     the three known strategies is passed through rather than rejected, because the column
 //     has no CHECK in either schema and a migration that adds a fourth strategy must not make
 //     every existing address unreadable.
+// 14. AN EMPTY `domain_id` NAMES NO DOMAIN, and this is the one divergence resolved AWAY from
+//     both arms. `addresses.domain_id` is a bare nullable TEXT column with no foreign key, and
+//     `setAddressProvisioning(id, { domain_id: "" })` writes one — no store refuses it. The
+//     deleted SQL tested `domain_id IS NOT NULL`, so `''` COUNTED as a domain: it produced a
+//     `GROUP BY` bucket keyed on the empty string and a `ready` tally under it. Every read
+//     below instead treats `''` the same way it treats absence, because a bucket keyed `''`
+//     is a domain this module invented — nothing can join it to a `domains` row. The write is
+//     deliberately left alone: refusing a column value the schema accepts is a product
+//     decision, and the four reads now agree with each other, which the two arms did not.
+//     Both adversarial reviewers found this independently, in both directions.
 //
 // ─── THE AGGREGATES, WHICH ARE THE HARD PART ──────────────────────────────────────────────
 //
@@ -147,6 +165,17 @@
 // (325 addresses, 75 domains). The SQLite arm did each of these in one indexed query, and
 // that is a real cost this change accepts in exchange for not answering out of one page.
 //
+// AND WHAT IS NOT MERELY SLOWER, which the first version of this note left out. The
+// enumeration is BOUNDED: 200 pages at 500 rows, minus one anchor row a page, is 99,801 rows.
+// Past that the three count operations do not degrade, they THROW — on the local SQLite store
+// too, where the deleted arm ran a `GROUP BY` with no bound at all. The callers that would
+// go from working to failing are `GET /api/domains/readiness`, the MCP `emails://domains`
+// resource, `emails inbox explain` and the TUI workspace. No installation recorded here is
+// within three orders of magnitude of that ceiling, and the alternative — publishing a bound
+// through a `Map<string, number>` that has nowhere to record it — is the fabricated readiness
+// verdict this change exists to remove. It is a real cost and it is stated rather than left
+// to be discovered. Adversarial review asked for it.
+//
 // A SEAM WIDENING, DESCRIBED AND NOT MADE. `ProvisioningRepository.listProvisioningEvents`
 // takes a bare `ListOptions`, so the entity filter cannot be pushed down — even though BOTH
 // implementations already support it (each delegates to a generic resource `list` that takes
@@ -155,40 +184,63 @@
 // string> }` would turn `listProvisioningEvents` from a full scan of an append-only,
 // unboundedly growing table into an indexed read. It is deliberately NOT made here: two
 // audits are waiting on `src/store/`, and this change leaves it byte-identical. Until then
-// the event scan carries its own larger page budget and refuses rather than truncating.
+// the event scan runs on the same budget as the registry reads and refuses rather than
+// truncating. (An earlier version of this sentence said "its own larger page budget", which
+// contradicted the constant twenty lines down; both reviewers caught it.)
 //
 // ─── TWO BEHAVIOURS THAT CHANGE, NEITHER OF THEM A DIVERGENCE ─────────────────────────────
 //
 // `setAddressProvisioning(id, {})` NO LONGER BUMPS `updated_at`. Both deleted arms wrote
-// `updated_at` unconditionally. The seam's `applyAddressProvisioning` returns the row without
-// writing when the patch names no column, while `applyDomainProvisioning` still stamps it —
-// an asymmetry inside `src/store/` that this module is not allowed to paper over and does not
-// change. No caller passes an empty patch; the behaviour is pinned so it cannot drift
-// unnoticed.
+// `updated_at` unconditionally. On the SQLITE store `applyAddressProvisioning` returns the
+// row without writing when the patch names no column, while `applyDomainProvisioning` still
+// stamps it; on the HTTP store NEITHER stamps, because the service returns the row unchanged
+// for an empty body. So this is one store's asymmetry rather than a seam property — an
+// earlier version of this note claimed the latter — and it is not this module's to paper
+// over. No caller passes an empty patch, and both shapes are pinned so neither can drift.
 //
-// ─── THREE MUTATION SURVIVORS, NAMED SO NOBODY MISTAKES THEM FOR UNTESTED BRANCHES ───────
+// ─── WHAT MUTATION TESTING FOUND, INCLUDING WHERE MY FIRST ACCOUNT OF IT WAS WRONG ───────
 //
-// Mutation testing reverted every change in this file and in the renderer one at a time:
-// FORTY-FIVE distinct mutants, forty-two killed. The three that survived are survivors for
-// three DIFFERENT reasons, and the difference matters:
+// Mutation testing reverted every change in this file and in the renderer one at a time. The
+// first round was FORTY-FIVE mutants I chose myself, forty-two killed, and I published three
+// survivors with three explanations. TWO OF THOSE THREE EXPLANATIONS WERE FALSE, and an
+// independent reviewer's sixteen probes — chosen without seeing my list — found NINE further
+// survivors my forty-five could not see. That is the honest shape of an author's own mutant
+// list, and it is why the number below is the second one:
 //
-//  1. `byNewestFirst`'s `id` tiebreaker is REDUNDANT against both real stores. Both order
-//     these rows `created_at DESC, id DESC` already and `Array.prototype.sort` is stable, so
-//     no order either store produces can make the term decide. Nor can a fixture manufacture
-//     one: a store that reorders a page moves the pager's anchor row, which
-//     `enumerateStoreRows` reports as a shifted window and this module then refuses. It stays
-//     because `ListOptions` publishes NO ordering at all — that is a contract, not an
-//     accident — and a page boundary over a non-total order can repeat or drop a row. The
-//     due-queue and event-log tiebreakers are NOT in this position and are both covered: their
-//     orders (`next_check_at`, `created_at ASC`) differ from what the store serves.
-//  2. `readyDomainIdOf`'s `if (!provisioning.domain_id) return null` is an EQUIVALENT MUTANT —
-//     deleting it changes nothing observable, because the ternary it guards then returns
-//     `provisioning.domain_id`, which in exactly that case IS null. It is kept for legibility,
-//     not for behaviour, and no test can or should kill it.
-//  3. `positive(null)` in `src/cli/commands/daemon.local.ts` is UNREACHABLE by construction:
-//     all four counts share one availability record, so a null count only occurs when
-//     `available` is false, and that branch returns before the guidance test runs. It is
-//     defence for whoever next changes the summary's shape, and it costs one operator.
+//   * `byNewestFirst`'s `id` tiebreaker. I called it redundant "against both real stores".
+//     It is not. `src/store-sqlite/registry.ts` orders `listAddresses`
+//     `created_at DESC, id DESC` but the SERVER orders it `created_at DESC, id ASC`
+//     (`src/server/self-hosted/store.ts`) — which divergence 6 says twenty lines above, so the
+//     claim contradicted its own file. The mutant survived because the HTTP variant of the
+//     suite runs against a fixture that translates HTTP into the SQLite seam and therefore
+//     serves SQLite's ordering, not because the term is dead. A case now drives the SERVER's
+//     ordering through a store that pages consistently, and kills it. I also claimed no
+//     fixture could exist because reordering trips the pager's shift detector; that was wrong
+//     too — a fixture applying a consistent TOTAL order to the whole table pages cleanly.
+//   * `readyDomainIdOf`'s `if (!provisioning.domain_id) return null`. I called it an equivalent
+//     mutant. It is not: `nullableText` yields `""` for an empty column, `""` is falsy but not
+//     null, and without the guard a ready address with `domain_id = ""` is tallied under an
+//     empty key. That value is writable through this module (divergence 14) and reachable in
+//     the schema. Covered now, in both directions.
+//   * `positive(null)` in the renderer. The conclusion held; the MECHANISM I gave did not.
+//     `formatDaemonStatus` has no early return — the call is skipped by `||` short-circuiting.
+//     And `DaemonStatusView` is exported, so a caller can hand it `available: true` with null
+//     counts even though `daemonStatus()` cannot.
+//
+// Both reviewers' probes are folded in, and the gaps they exposed are closed with cases rather
+// than with prose: the `<=` boundary of the due predicate at exactly `asOf`; the ADDRESSES side
+// of the combined availability record (its domains twin was covered and its own was not, so a
+// truncated address enumeration would have printed bare integers — divergence 1, reintroduced);
+// the `enumeration_cap_exceeded` / `enumeration_unstable` CODE rather than the prose tail both
+// arms share; each of the four post-write re-assertion conjuncts separately; the non-capability
+// refusal path; the empty-string `nameservers_json`; the identity half of the address guard;
+// and the absence of the drain guidance when the queue really is empty.
+//
+// ONE SURVIVOR REMAINS, and it is a genuine equivalence rather than a gap: the defensive copies
+// (`[...input.nameservers]` on the write, `[...decoded]` on the read). Both stores serialise
+// immediately, so no caller can observe the aliasing either copy prevents. They stay because
+// handing a caller's array to a store, or a store's array to a caller, is a hazard the next
+// change should not have to rediscover.
 //
 // `recordProvisioningEvent` RETURNS THE STORED ROW, not the caller's input. Both deleted arms
 // returned an object they built themselves from the arguments they were handed, so a store
@@ -759,9 +811,21 @@ export async function listAddressProvisioningForDomain(
   domainId: string,
   store?: EmailStore,
 ): Promise<AddressProvisioningByDomain[]> {
+  // AN EMPTY ARGUMENT NAMES NO DOMAIN, and neither does an empty column (divergence 14). Both
+  // halves are needed for the four per-domain reads to agree: `groupByDomain` skips a row whose
+  // owner is `''`, `idSet` drops a blank id before `listAddressProvisioningByDomains` can ask
+  // about one — and this read used a bare `===`, so `listAddressProvisioningForDomain("")`
+  // returned exactly the rows the other three had already decided were unowned. The
+  // inconsistency was caught by the case written to pin the rule, which is the only reason it
+  // is not still here.
+  const wanted = domainId.trim();
+  if (!wanted) return [];
   const rows = await readAddresses(storeFor(store), "list one domain's addresses");
   return [...rows]
-    .filter((row) => domainIdOf(row) === domainId)
+    .filter((row) => {
+      const owning = domainIdOf(row);
+      return owning !== null && owning !== "" && owning === wanted;
+    })
     .sort(byNewestFirst)
     .map(addressByDomainOf);
 }
@@ -951,6 +1015,18 @@ export async function recordProvisioningEvent(
   detail: Record<string, unknown> = {},
   store?: EmailStore,
 ): Promise<ProvisioningEvent> {
+  // VALIDATED BEFORE THE WRITE, not after. `to_state` and `entity_id` are `TEXT NOT NULL` in
+  // both schemas and an EMPTY string satisfies that, so a blank one used to be committed and
+  // then rejected by this module's own reader — a row written successfully, reported as a
+  // failure, and thereafter poisoning `listProvisioningEvents` for that entity forever. That
+  // is the accept-on-write / refuse-on-read shape, and the fix belongs on this side of the
+  // store call. Adversarial review found it.
+  if (!entity_id.trim()) {
+    throw new Error("A provisioning event needs the id of the domain or address it describes.");
+  }
+  if (!to_state.trim()) {
+    throw new Error("A provisioning event needs a to_state; refusing to record a transition to nothing.");
+  }
   const outcome = await storeFor(store).provisioning.recordProvisioningEvent({
     entity_type,
     entity_id,
@@ -1208,8 +1284,27 @@ async function readDueSide<TRecord extends { id: string }>(
  * `≥` that they have not earned.
  */
 function combineQueueAvailability(domains: DueSide, addresses: DueSide): StatusAvailability {
-  if (!domains.availability.available) return domains.availability;
-  if (!addresses.availability.available) return addresses.availability;
+  const domainsFailed = !domains.availability.available;
+  const addressesFailed = !addresses.availability.available;
+  // BOTH SIDES FAILING IS ITS OWN FACT. Returning the first record would show only one of two
+  // simultaneous failures — and if the domains side is a declared-false capability
+  // (STRUCTURAL, nothing an operator can clear) while the addresses side is a live transport
+  // fault, the outage that can be fixed is the one that disappears. `statusGapClass` reads the
+  // code prefix to decide whether the installation is `degraded`, so hiding the live failure
+  // behind the structural one is the "flag nobody reads" failure exactly. `readDueSide`'s own
+  // note condemns collapsing these; the combiner must not reintroduce it. Adversarial review
+  // caught this.
+  if (domainsFailed && addressesFailed) {
+    return statusUnavailable(
+      "source_unreachable",
+      "provisioning_queue_both",
+      QUEUE_SOURCE,
+      `neither side of the queue could be read — domains: ${domains.availability.reason ?? "no reason given"}`
+        + ` · addresses: ${addresses.availability.reason ?? "no reason given"}`,
+    );
+  }
+  if (domainsFailed) return domains.availability;
+  if (addressesFailed) return addresses.availability;
   if (domains.availability.complete === false) return domains.availability;
   if (addresses.availability.complete === false) return addresses.availability;
   return statusAvailable(QUEUE_SOURCE, "client_enumeration");

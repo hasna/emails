@@ -88,17 +88,13 @@ describe("daemon commands", () => {
   // collapses in this programme carried the bound in the payload and dropped it in the
   // formatter, so the operator still read a confident integer.
 
-  it("prints the counts as LOWER BOUNDS when the enumeration could not finish", async () => {
-    const provider = createProvider({ name: "ses", type: "ses", active: true });
-    const domain = createDomain(provider.id, "due.example.com");
-    await setDomainProvisioning(domain.id, {
-      provisioning_status: "ses_identity_created",
-      next_check_at: "2020-01-01T00:00:00.000Z",
-    });
-    // A store whose window MOVES under paging: the enumeration answers rows but cannot call
-    // them all of them. Injected by giving the command a database whose domain list drops the
-    // first row of every page after the first — see src/db/provisioning.test.ts for the same
-    // fixture and why one is not enough.
+  it("prints the counts as LOWER BOUNDS when the enumeration could not finish", () => {
+    // A RENDERER PIN, and nothing more: the view is a literal this test writes, which is what
+    // `DaemonStatusView` was exported for. An earlier version seeded a provider, a domain and a
+    // provisioning row that nothing here read, under a comment describing an injected store
+    // that did not exist — it read as end-to-end coverage it never was. That the availability
+    // record below is one a real truncated enumeration produces is pinned separately, in
+    // src/db/provisioning.test.ts.
     const status = {
       generated_at: "2026-01-01T00:00:00.000Z",
       queue: {
@@ -113,7 +109,6 @@ describe("daemon commands", () => {
         due_addresses: 0,
         failed_domains: 0,
         failed_addresses: 0,
-        drainable: false,
       },
       realtime: { queue_configured: false, last_poll_at: null, last_error: null },
       start_commands: { realtime_watch: "emails inbox watch --all-buckets" },
@@ -126,7 +121,7 @@ describe("daemon commands", () => {
     expect(rendered).toContain("No provisioning reconciler ships in this build");
   });
 
-  it("prints the reason, not four zeros, when the queue could not be read at all", async () => {
+  it("prints the reason, not four zeros, when the queue could not be read at all", () => {
     const status = {
       generated_at: "2026-01-01T00:00:00.000Z",
       queue: {
@@ -141,7 +136,6 @@ describe("daemon commands", () => {
         due_addresses: null,
         failed_domains: null,
         failed_addresses: null,
-        drainable: false,
       },
       realtime: { queue_configured: false, last_poll_at: null, last_error: null },
       start_commands: { realtime_watch: "emails inbox watch --all-buckets" },
@@ -156,7 +150,7 @@ describe("daemon commands", () => {
     expect(rendered).toContain("No provisioning reconciler ships in this build");
   });
 
-  it("CONTROL: a complete read prints bare integers with no bound marker", async () => {
+  it("CONTROL: a complete read prints bare integers with no bound marker", () => {
     const status = {
       generated_at: "2026-01-01T00:00:00.000Z",
       queue: {
@@ -171,7 +165,6 @@ describe("daemon commands", () => {
         due_addresses: 0,
         failed_domains: 0,
         failed_addresses: 0,
-        drainable: false,
       },
       realtime: { queue_configured: false, last_poll_at: null, last_error: null },
       start_commands: { realtime_watch: "emails inbox watch --all-buckets" },
@@ -180,6 +173,72 @@ describe("daemon commands", () => {
     expect(rendered).toContain("Due work:   3 domain(s), 0 address(es)");
     expect(rendered).not.toContain("≥");
     expect(rendered).not.toContain("LOWER BOUNDS");
+  });
+
+  it("omits the drain guidance when the queue was read and really is empty", () => {
+    // The only assertion about an empty queue was that the command runs; nothing asserted the
+    // guidance is ABSENT, so `value > 0` weakened to `value >= 0` survived — the block whose
+    // whole purpose is "show this only when there is work" could have been a constant.
+    const rendered = formatDaemonStatus({
+      generated_at: "2026-01-01T00:00:00.000Z",
+      queue: {
+        availability: {
+          available: true, reason: null, source: "store:provisioning_queue",
+          basis: "client_enumeration" as const, complete: true,
+        },
+        due_domains: 0, due_addresses: 0, failed_domains: 0, failed_addresses: 0,
+      },
+      realtime: { queue_configured: false, last_poll_at: null, last_error: null },
+      start_commands: { realtime_watch: "emails inbox watch --all-buckets" },
+    });
+    expect(rendered).toContain("Due work:   0 domain(s), 0 address(es)");
+    expect(rendered).not.toContain("No provisioning reconciler ships in this build");
+    expect(rendered).not.toContain("emails domain adopt");
+  });
+
+  it("never renders an UNMEASURED realtime queue as 'not configured'", () => {
+    // `queue_configured` is nullable — `realtimeBlock` nulls all four realtime fields when the
+    // config file cannot be read — and this line rendered that null as a confident negative,
+    // in the one command an operator runs to find out whether ingestion is running. Every
+    // other renderer of the same field already guards it. Adversarial review caught it.
+    const rendered = formatDaemonStatus({
+      generated_at: "2026-01-01T00:00:00.000Z",
+      queue: {
+        availability: {
+          available: true, reason: null, source: "store:provisioning_queue",
+          basis: "client_enumeration" as const, complete: true,
+        },
+        due_domains: 0, due_addresses: 0, failed_domains: 0, failed_addresses: 0,
+      },
+      realtime: {
+        queue_configured: null,
+        last_poll_at: null,
+        last_error: null,
+        availability: {
+          available: false,
+          reason: "source_unreachable:config — the realtime queue settings could not be read",
+          source: "local_config", basis: null, complete: null,
+        },
+      },
+      start_commands: { realtime_watch: "emails inbox watch --all-buckets" },
+    });
+    expect(rendered).not.toContain("not configured");
+    expect(rendered).toContain("could not be read");
+    // CONTROL: a MEASURED false really does print "not configured", so the assertion above is
+    // about the null rather than about the branch being gone.
+    const measured = formatDaemonStatus({
+      generated_at: "2026-01-01T00:00:00.000Z",
+      queue: {
+        availability: {
+          available: true, reason: null, source: "store:provisioning_queue",
+          basis: "client_enumeration" as const, complete: true,
+        },
+        due_domains: 0, due_addresses: 0, failed_domains: 0, failed_addresses: 0,
+      },
+      realtime: { queue_configured: false, last_poll_at: null, last_error: null },
+      start_commands: { realtime_watch: "emails inbox watch --all-buckets" },
+    });
+    expect(measured).toContain("not configured");
   });
 
   it("carries the availability record into the JSON payload", async () => {

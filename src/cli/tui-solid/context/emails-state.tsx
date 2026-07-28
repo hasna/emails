@@ -321,19 +321,29 @@ function createEmailsStore(initialMailbox?: Mailbox) {
   };
 
   // ASYNC BECAUSE `listDomainSummaries` IS: its provisioning columns come through the store
-  // seam now, where every operation returns a promise. This is a fire-and-forget action rather
-  // than a reactive derivation, so awaiting it changes nothing a component observes — the
-  // rows still land through `setState`, one tick later. The address picker deliberately did
-  // NOT move: `resolveAddressChoice` feeds a synchronous memo, which is why `data.local.ts`
-  // reads `provisioning_status` off the row it already selects instead.
+  // seam now, where every operation returns a promise. The address picker deliberately did NOT
+  // move — `resolveAddressChoice` feeds a synchronous memo, which is why `data.local.ts` reads
+  // `provisioning_status` off the row it already selects instead.
+  //
+  // THE GENERATION TOKEN IS NOT DECORATION. Under the synchronous call two page-key presses
+  // could not interleave; now they can, and offset paging gives no ordering guarantee, so a
+  // slow first request resolving after a fast second one would render page N's rows while
+  // `state.domainsPage` says N+1 — and `domainsHasMore`, which is the guard that decides
+  // whether the next press is allowed at all, would be left holding the wrong page's answer.
+  // Only the newest request may write. Adversarial review caught this.
+  let workspaceGeneration = 0;
   const reloadWorkspace = async () => {
+    workspaceGeneration += 1;
+    const generation = workspaceGeneration;
     try {
       const domains = await listDomainSummaries({ limit: WORKSPACE_PAGE_SIZE + 1, offset: state.domainsPage * WORKSPACE_PAGE_SIZE });
+      if (generation !== workspaceGeneration) return;
       setState({
         domains: domains.slice(0, WORKSPACE_PAGE_SIZE),
         domainsHasMore: domains.length > WORKSPACE_PAGE_SIZE,
       });
     } catch (error) {
+      if (generation !== workspaceGeneration) return;
       setState("lastError", error instanceof Error ? error.message : String(error));
     }
   };
@@ -423,9 +433,15 @@ function createEmailsStore(initialMailbox?: Mailbox) {
   const actions = {
     reload,
     reloadWorkspace,
+    // SEQUENCED, not fired and forgotten. The synchronous call put the rows in
+    // `state.domains` BEFORE the route flipped; firing and forgetting flips first, so the
+    // domains view mounts showing the PREVIOUS page's rows and then swaps under the reader — a
+    // component does observe that. The action stays `void`-returning so its fifteen call sites
+    // (`onPress={() => actions.openRoute(...)}`) do not each become a floating promise;
+    // `reloadWorkspace` handles its own errors, so the chain cannot reject.
     openRoute(route: RouteName) {
-      if (route === "domains") void reloadWorkspace();
-      setState("route", route);
+      if (route !== "domains") return setState("route", route);
+      void reloadWorkspace().then(() => setState("route", route));
     },
     openDialog(dialog: DialogName) {
       if (dialog === "address") {
@@ -434,7 +450,11 @@ function createEmailsStore(initialMailbox?: Mailbox) {
       }
       if (dialog === "filter" || dialog === "search") setState("searchDraft", state.search);
       if (dialog === "digest") void loadDigestSnapshot(state.digestPeriod, { local: true });
-      if (dialog === "domains") void reloadWorkspace();
+      // Same sequencing as `openRoute`, for the same reason.
+      if (dialog === "domains") {
+        void reloadWorkspace().then(() => setState("dialog", dialog));
+        return;
+      }
       if (dialog === "labels") void ds.listLabelSummaries({ limit: 80 }).then((labels) => setState("labels", labels));
       setState("dialog", dialog);
     },

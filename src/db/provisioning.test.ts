@@ -80,6 +80,7 @@ import type { EmailStore } from "../store/email-store.js";
 import type { Outcome } from "../store/outcome.js";
 import type { DomainRecord, ResourceInput, ResourceRow } from "../store/records.js";
 import { startV1StoreApi, type V1StoreApi } from "../test-support/v1-store-api.js";
+import { statusGapClass, statusReasonCode } from "../lib/status-availability.js";
 import {
   API_BASE_URL_SETTING,
   API_CREDENTIAL_SETTINGS,
@@ -173,6 +174,38 @@ function storeWith(patch: {
     addresses: { ...base.addresses, ...(patch.addresses ?? {}) },
     provisioning: { ...base.provisioning, ...(patch.provisioning ?? {}) },
   };
+}
+
+/**
+ * A store that serves addresses in the SERVER's order rather than SQLite's.
+ *
+ * `src/server/self-hosted/store.ts` orders `listAddresses` `created_at DESC, id ASC`; the
+ * SQLite store orders it `created_at DESC, id DESC`. The `/v1` fixture translates HTTP into
+ * the SQLite seam, so neither store variant above reproduces the server's tie order — which is
+ * exactly why the address `id` tiebreaker survived mutation and why claiming it redundant
+ * "against both real stores" was wrong.
+ *
+ * The reordering is a CONSISTENT TOTAL ORDER applied to the whole table before windowing, so
+ * it pages cleanly: the anchor row lands where the pager expects it, no duplicate, no shift.
+ * That also disproves the other half of the claim — that no fixture could exist because
+ * reordering necessarily trips the shift detector.
+ */
+function serverOrderedAddresses(): EmailStore {
+  const base = sqliteStore();
+  return storeWith({
+    addresses: {
+      listAddresses: async (opts) => {
+        const whole = await base.addresses.listAddresses({ limit: 500, offset: 0 });
+        if (!whole.ok) return whole;
+        const ordered = [...whole.value].sort((a, b) =>
+          (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0)
+          || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+        const offset = opts?.offset ?? 0;
+        const limit = opts?.limit ?? 100;
+        return { ok: true, value: ordered.slice(offset, offset + limit) };
+      },
+    },
+  });
 }
 
 function seedDomain(name: string): string {
@@ -361,6 +394,19 @@ describe.each(STORE_VARIANTS)("writing provisioning state through the %s", (_lab
     expect(cleared!.provisioning_status).toBe("verifying");
   });
 
+  it("refuses to record an event with a blank entity_id or to_state, BEFORE writing", async () => {
+    // Accept-on-write / refuse-on-read: `TEXT NOT NULL` admits `''`, so a blank used to be
+    // committed and then rejected by this module's own reader, poisoning that entity's history
+    // permanently. The store must never see it.
+    const store = makeStore();
+    expect(await thrownBy(() => recordProvisioningEvent("domain", "  ", null, "verifying", {}, store)))
+      .toContain("needs the id of the domain or address");
+    expect(await thrownBy(() => recordProvisioningEvent("domain", "d1", null, "  ", {}, store)))
+      .toContain("refusing to record a transition to nothing");
+    // AND WROTE NOTHING, which is the half that matters.
+    expect(db.query("SELECT COUNT(*) AS n FROM provisioning_events").get() as { n: number }).toEqual({ n: 0 });
+  });
+
   it("answers null for a write against a row that does not exist", async () => {
     // DIVERGENCE 9: the SQLite arm ran an UPDATE affecting zero rows and answered null; the
     // HTTP arm's bridge threw on the 404. The signature has always published `| null`.
@@ -380,6 +426,37 @@ describe.each(STORE_VARIANTS)("writing provisioning state through the %s", (_lab
     }, makeStore());
     expect(written!.nameservers).toEqual(["ns1.example.net", "ns2.example.net"]);
     expect(await getDomainProvisioning(id, makeStore())).toEqual(written!);
+  });
+});
+
+describe("an EMPTY patch", () => {
+  const stampOf = (table: "domains" | "addresses", id: string): string =>
+    (db.query(`SELECT updated_at FROM ${table} WHERE id = ?`).get(id) as { updated_at: string }).updated_at;
+
+  it("is a STORE-specific behaviour, and both shapes are pinned", async () => {
+    // Documented but never pinned, and the note about it was wrong: the asymmetry belongs to
+    // the SQLITE store, not to the seam. `applyAddressProvisioning` returns the row without
+    // writing when the patch names no column, while `applyDomainProvisioning` still stamps —
+    // over HTTP NEITHER stamps, because the service returns the row unchanged for an empty
+    // body. Both deleted arms stamped unconditionally, on both paths. No caller passes an
+    // empty patch; this exists so none of the three behaviours can drift unnoticed.
+    const domainId = seedDomain("example.com");
+    const addressId = seedAddress("ops@example.com");
+    const OLD = "2020-01-01T00:00:00.000Z";
+
+    db.run("UPDATE addresses SET updated_at = ? WHERE id = ?", [OLD, addressId]);
+    db.run("UPDATE domains SET updated_at = ? WHERE id = ?", [OLD, domainId]);
+    expect(await setAddressProvisioning(addressId, {}, sqliteStore())).not.toBeNull();
+    expect(await setDomainProvisioning(domainId, {}, sqliteStore())).not.toBeNull();
+    expect(stampOf("addresses", addressId), "SQLite: the address path does not write").toBe(OLD);
+    expect(stampOf("domains", domainId), "SQLite: the domain path stamps").not.toBe(OLD);
+
+    db.run("UPDATE addresses SET updated_at = ? WHERE id = ?", [OLD, addressId]);
+    db.run("UPDATE domains SET updated_at = ? WHERE id = ?", [OLD, domainId]);
+    expect(await setAddressProvisioning(addressId, {}, httpStore())).not.toBeNull();
+    expect(await setDomainProvisioning(domainId, {}, httpStore())).not.toBeNull();
+    expect(stampOf("addresses", addressId), "HTTP: neither path writes").toBe(OLD);
+    expect(stampOf("domains", domainId), "HTTP: neither path writes").toBe(OLD);
   });
 });
 
@@ -467,6 +544,38 @@ describe.each(STORE_VARIANTS)("inventories through the %s", (_label, makeStore) 
     expect([...byId.keys()]).toEqual([id]);
   });
 
+  it("keys the NAMED addresses' provisioning state by id, and only those", async () => {
+    // This export was reached by exactly one assertion — with an EMPTY argument. It is live in
+    // `src/mcp/resources.local.ts`, and its domain twin has four cases.
+    const first = seedAddress("first@example.com");
+    const second = seedAddress("second@example.com");
+    seedAddress("third@example.com");
+    await setAddressProvisioning(first, { provisioning_status: "ready", forward_to: "x@y.test" }, makeStore());
+    await setAddressProvisioning(second, { provisioning_status: "failed", last_error: "boom" }, makeStore());
+
+    const byId = await listAddressProvisioningByIds([first, ` ${second} `, first, "no-such-address"], makeStore());
+    expect([...byId.keys()].sort()).toEqual([first, second].sort());
+    expect(byId.get(first)!.forward_to).toBe("x@y.test");
+    expect(byId.get(second)!.last_error).toBe("boom");
+  });
+
+  it("applies the id tiebreaker against the order the SERVER actually serves", async () => {
+    // See `serverOrderedAddresses`. Neither store variant reproduces `created_at DESC, id ASC`,
+    // so this is the only fixture in the suite where the tiebreaker decides anything.
+    const domainId = seedDomain("first.example");
+    const a = seedAddress("a@first.example", domainId);
+    const b = seedAddress("b@first.example", domainId);
+    db.run("UPDATE addresses SET created_at = '2026-01-01T00:00:00.000Z'");
+    const store = serverOrderedAddresses();
+    const expected = [a, b].sort((x, y) => (x < y ? 1 : x > y ? -1 : 0));
+    expect((await listAddressProvisioningForDomain(domainId, store)).map((row) => row.id))
+      .toEqual(expected);
+    // CONTROL: the fixture really does serve the opposite tie order, and it pages cleanly —
+    // an enumeration that had shifted would have refused instead of answering.
+    const served = await onePage(store.addresses.listAddresses({ limit: 500 }));
+    expect(served.map((row) => row.id)).toEqual([...expected].reverse());
+  });
+
   it("groups addresses under their domain, newest first, and skips the unowned ones", async () => {
     const domainId = seedDomain("first.example");
     const older = seedAddress("older@first.example", domainId);
@@ -532,6 +641,32 @@ describe("an empty id set is answered without reading anything", () => {
 // ── counts ──────────────────────────────────────────────────────────────────────
 
 describe.each(STORE_VARIANTS)("ready-address counts through the %s", (_label, makeStore) => {
+  it("treats an EMPTY domain_id as no domain at all, in every read", async () => {
+    // DIVERGENCE 14, and the mutation record's "equivalent mutant" claim was wrong about it:
+    // `nullableText` yields `""`, which is falsy but not null, so without the guard a ready
+    // address with an empty owner is tallied under an empty key. `""` is writable through this
+    // module and no store refuses it, and the deleted SQL (`domain_id IS NOT NULL`) COUNTED
+    // such a row. A bucket keyed `""` is a domain this module invented.
+    const store = makeStore();
+    const real = seedDomain("real.example");
+    const owned = seedAddress("owned@real.example", real);
+    const orphan = seedAddress("orphan@real.example");
+    await setAddressProvisioning(owned, { provisioning_status: "ready" }, store);
+    await setAddressProvisioning(orphan, { provisioning_status: "ready", domain_id: "" }, store);
+
+    // CONTROL: the empty value really was written and really does read back, so the assertions
+    // below are about how it is INTERPRETED rather than about a write that did not land.
+    expect((await getAddressProvisioning(orphan, makeStore()))!.domain_id).toBe("");
+
+    const counts = await listReadyAddressCountsByDomain(makeStore());
+    expect([...counts.keys()]).toEqual([real]);
+    expect(counts.has("")).toBe(false);
+    expect(await countReadyAddressesForDomain("", makeStore())).toBe(0);
+    const grouped = await listAddressProvisioningByDomain(makeStore());
+    expect([...grouped.keys()]).toEqual([real]);
+    expect(await listAddressProvisioningForDomain("", makeStore())).toEqual([]);
+  });
+
   it("counts only addresses that are ready AND owned by a domain", async () => {
     const first = seedDomain("first.example");
     const second = seedDomain("second.example");
@@ -854,6 +989,16 @@ describe("a row this module cannot read is a fault, not a default", () => {
       .toEqual([]);
   });
 
+  it("reads an EMPTY nameservers_json string as an empty list, not as bad JSON", async () => {
+    // Distinct from absent and from null. Without the short-circuit `JSON.parse("")` throws and
+    // the domain faults with "not JSON" — a fault for a column that simply holds nothing.
+    const id = seedDomain("example.com");
+    expect((await getDomainProvisioning(id, domainRowWith({ nameservers_json: "" })))!.nameservers)
+      .toEqual([]);
+    expect((await getDomainProvisioning(id, domainRowWith({ nameservers_json: "   " })))!.nameservers)
+      .toEqual([]);
+  });
+
   it("refuses a domain with a null dns_provider, which neither schema admits", async () => {
     const id = seedDomain("example.com");
     expect(await thrownBy(() => getDomainProvisioning(id, domainRowWith({ dns_provider: null }))))
@@ -866,6 +1011,23 @@ describe("a row this module cannot read is a fault, not a default", () => {
     const written = await setDomainProvisioning(id, { dns_provider: "" }, sqliteStore());
     expect(written!.dns_provider).toBe("");
     expect((await getDomainProvisioning(id, sqliteStore()))!.dns_provider).toBe("");
+  });
+
+  it("refuses an address row with no readable id", async () => {
+    const domainId = seedDomain("example.com");
+    seedAddress("ops@example.com", domainId);
+    const base = sqliteStore();
+    const store = storeWith({
+      addresses: {
+        listAddresses: async (opts) => {
+          const page = await base.addresses.listAddresses(opts);
+          if (!page.ok) return page;
+          return { ok: true, value: page.value.map((row) => ({ ...row, id: "" })) };
+        },
+      },
+    });
+    expect(await thrownBy(() => listAddressProvisioningForDomain(domainId, store)))
+      .toContain("no readable id");
   });
 
   it("refuses an address row with no readable email", async () => {
@@ -1041,12 +1203,20 @@ describe("the event write names only the columns the resource has", () => {
     }
   });
 
-  it("refuses to report a transition the store did not record", async () => {
+  it.each([
+    ["entity_type", { entity_type: "address" }],
+    ["entity_id", { entity_id: "somebody-else" }],
+    ["from_state", { from_state: "not-what-was-asked" }],
+    ["to_state", { to_state: "something else" }],
+  ] as const)("refuses to report a transition whose %s the store changed", async (_field, patch) => {
+    // ONE FIELD AT A TIME. A single fixture that changed only `to_state` killed the whole
+    // condition while leaving the other three conjuncts individually deletable — so a store
+    // that recorded a `domain` transition as an `address` one, or against the wrong entity,
+    // was caught by code with no coverage at all. Adversarial review measured that.
     const base = sqliteStore();
     const store = storeWith({
       provisioning: {
-        recordProvisioningEvent: (event) =>
-          base.provisioning.recordProvisioningEvent({ ...event, to_state: "something else" }),
+        recordProvisioningEvent: (event) => base.provisioning.recordProvisioningEvent({ ...event, ...patch }),
       },
     });
     expect(await thrownBy(() => recordProvisioningEvent("domain", "d1", "none", "verifying", {}, store)))
@@ -1130,6 +1300,23 @@ describe.each(STORE_VARIANTS)("the daemon queue through the %s", (_label, makeSt
     for (const id of scheduled) expect(due.some((row) => row.id === id)).toBe(false);
   });
 
+  it("includes a row whose check falls EXACTLY on the asOf instant", async () => {
+    // The `<=` boundary, and it was undiscriminated: every other case uses a check time strictly
+    // before or strictly after `asOf`, so `<=` weakened to `<` survived. A reconciler that
+    // schedules `next_check_at = now()` and then asks for due work at that same instant is the
+    // realistic shape, and under `<` its own row is invisible for a tick.
+    const store = makeStore();
+    const onTheDot = seedDomain("exact.example");
+    await setDomainProvisioning(onTheDot, { provisioning_status: "verifying", next_check_at: NOW }, store);
+    expect((await claimDueDomains(NOW, makeStore())).map((row) => row.id)).toEqual([onTheDot]);
+    // CONTROL: one millisecond later it is not yet due, so the assertion above is about the
+    // boundary rather than about the comparison being absent.
+    const justAfter = new Date(Date.parse(NOW) + 1).toISOString();
+    const later = seedDomain("just-after.example");
+    await setDomainProvisioning(later, { provisioning_status: "verifying", next_check_at: justAfter }, store);
+    expect((await claimDueDomains(NOW, makeStore())).map((row) => row.id)).toEqual([onTheDot]);
+  });
+
   it("excludes a row with no next_check_at even when it is not terminal", async () => {
     const id = seedDomain("unscheduled.example");
     await setDomainProvisioning(id, { provisioning_status: "verifying" }, makeStore());
@@ -1191,6 +1378,97 @@ describe("the work summary reports a bound instead of refusing", () => {
     // A BOUND, not a zero and not a null: rows really were read.
     expect(summary.due_domains).toBeGreaterThan(0);
     expect(summary.due_domains).toBeLessThan(600);
+  });
+
+  it("marks the counts as bounds when the ADDRESSES side is the truncated one", async () => {
+    // The domains twin of this case existed and this one did not, so deleting the addresses
+    // arm of `combineQueueAvailability` survived mutation — and with it deleted, a truncated
+    // address enumeration reports `complete: true` and the renderer prints BARE INTEGERS.
+    // That is divergence 1 reintroduced on the local side, which is the whole point of the
+    // change. Adversarial review found it.
+    const domainId = seedDomain("bulk.example");
+    seedAddresses(600, "due", domainId, "verifying");
+    db.run("UPDATE addresses SET next_check_at = ? WHERE id LIKE 'due-%'", [PAST]);
+    const base = sqliteStore();
+    const store = storeWith({
+      addresses: { listAddresses: (opts) => base.addresses.listAddresses({ ...opts, limit: 3 }) },
+    });
+    const summary = await getProvisioningWorkSummary(NOW, store);
+    expect(summary.availability.complete).toBe(false);
+    expect(summary.availability.reason).toContain("lower bounds, not totals");
+    // The DOMAINS side read cleanly, and its numbers are still nulled — one record covers all
+    // four, so a renderer cannot show two of them without the `≥` the others have not earned.
+    expect(summary.due_addresses).toBeGreaterThan(0);
+    expect(summary.due_addresses).toBeLessThan(600);
+  });
+
+  it("names the enumeration_cap_exceeded CODE, not just the shared prose", async () => {
+    // Both arms of the reason end in "counts are lower bounds, not totals", so asserting only
+    // that tail let the `enumeration.stable` test be inverted with nothing noticing — a page
+    // budget running out would then be reported as `enumeration_unstable`, a fabricated
+    // accusation that the store's list order is not total, printed verbatim to the operator.
+    // `statusReasonCode` reads the prefix, so the machine-readable classification is wrong too.
+    seedDomains(600, "due", { status: "verifying", next: PAST });
+    const base = sqliteStore();
+    const store = storeWith({
+      domains: { listDomains: (opts) => base.domains.listDomains({ ...opts, limit: 3 }) },
+    });
+    const summary = await getProvisioningWorkSummary(NOW, store);
+    expect(summary.availability.reason).toContain("enumeration_cap_exceeded:");
+    expect(summary.availability.reason).not.toContain("enumeration_unstable");
+    expect(statusReasonCode(summary.availability.reason)).toBe("enumeration_cap_exceeded");
+  });
+
+  it("names the enumeration_unstable CODE when the window moved instead", async () => {
+    seedDomains(600, "bulk");
+    const base = sqliteStore();
+    let pages = 0;
+    const store = storeWith({
+      domains: {
+        listDomains: async (opts) => {
+          pages += 1;
+          const page = await base.domains.listDomains(opts);
+          if (!page.ok || pages === 1) return page;
+          return { ok: true, value: page.value.slice(1) };
+        },
+      },
+    });
+    const summary = await getProvisioningWorkSummary(NOW, store);
+    expect(statusReasonCode(summary.availability.reason)).toBe("enumeration_unstable");
+  });
+
+  it("classifies a NON-capability refusal as a live failure, not a structural one", async () => {
+    // Only `capability_unavailable` reached this ternary. The else-branch decides whether
+    // `statusGapClass` calls the installation `degraded`, so misclassifying a live store
+    // failure as structural is the "flag nobody reads" failure this vocabulary exists to stop.
+    const store = storeWith({
+      domains: {
+        listDomains: async () => ({ ok: false, code: "not_found", message: "no such scope", status: 404 }),
+      },
+    });
+    const summary = await getProvisioningWorkSummary(NOW, store);
+    expect(statusReasonCode(summary.availability.reason)).toBe("source_unreachable");
+    expect(statusGapClass(summary.availability.reason)).toBe("failure");
+    // CONTROL: the capability refusal really is classified the other way.
+    const structural = await getProvisioningWorkSummary(NOW, storeWith({
+      domains: { listDomains: async () => CAPABILITY_REFUSAL },
+    }));
+    expect(statusGapClass(structural.availability.reason)).toBe("structural");
+  });
+
+  it("reports BOTH sides when both fail, rather than only the first", async () => {
+    // A structural refusal on one side and a live transport fault on the other: returning the
+    // first record would hide the outage an operator can actually fix, and `statusGapClass`
+    // would call the whole thing structural.
+    const store = storeWith({
+      domains: { listDomains: async () => CAPABILITY_REFUSAL },
+      addresses: { listAddresses: () => Promise.reject(new Error("connection reset")) },
+    });
+    const summary = await getProvisioningWorkSummary(NOW, store);
+    expect(summary.availability.available).toBe(false);
+    expect(summary.availability.reason).toContain("capability_unavailable");
+    expect(summary.availability.reason).toContain("connection reset");
+    expect(statusGapClass(summary.availability.reason)).toBe("failure");
   });
 
   it("nulls every count and records the reason when the store refuses", async () => {
