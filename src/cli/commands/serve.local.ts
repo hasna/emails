@@ -29,6 +29,10 @@ import { handleError } from "../utils.js";
  * because Bun transpiles without typechecking and the repo's only whole-program gate
  * (`src/index.test.ts`) exhausts V8's heap before it can report. Derived, it cannot drift from what
  * `Bun.serve` actually returns.
+ *
+ * The `Awaited<>` is defensive rather than load-bearing — `createWebhookServer` is synchronous, so
+ * this resolves to `Bun.Server` today. It is kept so the alias survives that function becoming
+ * async, which is the change most likely to reintroduce the drift this replaced.
  */
 type WebhookListener = Awaited<ReturnType<typeof import("../../lib/webhook.js").createWebhookServer>>;
 
@@ -82,11 +86,18 @@ export function registerServeCommands(program: Command, output: (data: unknown, 
           // family collapses — it is named here, not papered over.)
           //
           // THE TWO LINES OF THIS CHANGE NO TEST REACHES, stated plainly rather than dressed up as
-          // unreachable: a mutation removing either survives. Reaching them means running the
-          // action, and the action's first statement binds a dashboard that `startServer` does not
-          // hand back, so a test that got here would hold a port for the rest of the run. The
-          // decision they hang off — refuse versus start, and with what reason — IS tested, through
-          // the helper above.
+          // unreachable, and MEASURED rather than estimated: THREE mutants over them all survive —
+          // never setting the status, always setting it (so `--all` stops being distinguished), and
+          // dropping the report entirely. Reaching them means running the action, and the action's
+          // first statement binds a dashboard that `startServer` does not hand back, so a test that
+          // got here would hold a port for the rest of the run. The decision they hang off — refuse
+          // versus start, and with what reason — IS tested, through the helper above.
+          //
+          // A PRE-EXISTING ODDITY ONE LINE UP, found while checking this and left alone because it
+          // is not this change's to fix: `--all` is evaluated BEFORE `--webhook-port`, so
+          // `emails serve --all --webhook-port 9999` silently binds 9877 and discards the explicit
+          // port. The conditional below still reads the explicit flag correctly, so the exit status
+          // is right even in that case; it is the PORT that is wrong, and it was wrong before this.
           if (opts.webhookPort) process.exitCode = 1;
           console.error(chalk.red(`  Webhook listener NOT started: ${outcome.reason}`));
         }

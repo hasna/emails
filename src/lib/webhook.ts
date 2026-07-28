@@ -155,12 +155,16 @@
 //
 // A NEW SIDE EFFECT AT CONSTRUCTION, which the enumeration does not show and which is worth
 // knowing before calling this in a test or a probe: resolving local storage goes through
-// `getDatabasePath()`, which CREATES AND HARDENS the data directory. Main created it on the
-// FIRST CALLBACK instead, so on this branch `createWebhookServer` touches the filesystem where
-// it previously did not. That is the same work opening the database would have done moments
-// later, and it is the price of answering "can this installation store an event?" before
-// accepting one — but it is a change, it is asserted by a case in the suite, and a caller that
-// expected construction to be inert should know.
+// `getDatabasePath()`, and WHEN NO PATH IS CONFIGURED that reaches `defaultDatabasePath()` ->
+// `getDataDir()`, which CREATES AND HARDENS the data directory. A CONFIGURED path does not — it
+// goes through `canonicalizeDatabasePath()`, which resolves without creating anything
+// (`src/db/database.ts:385-402`). So the filesystem write is specific to the defaulted case, which
+// is also the only case the suite's positive control exercises; an earlier version of this
+// paragraph stated it unconditionally and a second reviewer was right that the assertion cited
+// does not cover the broader claim. Main did this work on the FIRST CALLBACK instead, so in that
+// one configuration `createWebhookServer` now touches the filesystem where it previously did not.
+// It is the same work opening the database would have done moments later, and it is the price of
+// answering "can this installation store an event?" before accepting one.
 //
 // WHAT MAIN ACTUALLY DID IN THE API CLASS, measured on main rather than assumed, because it is
 // two different failures and the second is the dangerous one. With no local file yet: main
@@ -208,9 +212,15 @@
 //
 // ─── MUTATION SURVIVORS, EACH NAMED ───────────────────────────────────────────────────
 //
-// 48 mutants over this module and `src/cli/commands/serve.local.ts`, reverted one at a time:
-// 42 killed, 6 survived. Five of the six are here (the sixth is recorded in that file), and
-// none of them is "the test suite is thin" — each is a specific, stated reason:
+// 51 mutants over this module and `src/cli/commands/serve.local.ts`, reverted one at a time:
+// 42 killed, 9 survived. SIX of the nine are here and three are recorded in that file, and none
+// of them is "the test suite is thin" — each is a specific, stated reason.
+//
+// THE COUNT ITSELF WAS WRONG ONCE, which is worth more than the count: an earlier version of this
+// paragraph said 48/42/6 and was not updated when a later fix split one untested line into two.
+// A second reviewer re-measured and found three survivors in that file rather than one. Exactly
+// the failure this comment documents elsewhere — a number asserted rather than re-measured after
+// the thing it counts changed.
 //
 //   * the API refusal NAMES THE SETTING TWICE, once to identify the configuration and once as
 //     the remedy, and the assertion requires it once. Removing either mention alone is
@@ -227,6 +237,14 @@
 //     The guard defends this function's own contract, not the transport.
 //   * the 10,000-entry cache eviction bound. Observing it needs 10,001 distinct SIGNED
 //     envelopes, and what it protects is memory rather than correctness.
+//   * the `default:` arm of the STORAGE GATE — the exhaustiveness guard itself. Unreachable by
+//     construction, and deliberately so: `StorageWiring` has four members and all four are handled
+//     above, so no runtime test can reach it. Its protection is a COMPILE-time one and it is proved
+//     by experiment rather than by a test — adding a fifth member to the union in
+//     `src/lib/storage-wiring.ts` makes this file fail with
+//     `TS2322: Type '{ kind: "postgres"; }' is not assignable to type 'never'`, and removing the
+//     guard makes the same tree compile silently and START the receiver. That inversion is why the
+//     arm exists.
 //   * the `default:` arm of the colour helper. Unreachable — but a review found the reason this
 //     comment first gave for that ("no event either parser can produce reaches it") to be FALSE,
 //     and the correction is worth more than the survivor. `webhook-events.ts:57` and `:77` index
@@ -300,6 +318,21 @@ function requireLocalEventStorage(): void {
         "the provider webhook receiver cannot start because it cannot tell where this installation's delivery "
           + `events would be stored: ${wiring.message}`,
       );
+    default: {
+      // FAILS CLOSED ON AN UNKNOWN STORAGE KIND, and the `never` binding makes a fifth
+      // `StorageWiring` member a COMPILE error here rather than a silent start. Without this the
+      // switch simply falls through and the function returns, so a new kind would stand up a
+      // receiver — the exact inverse of the invariant this gate exists for, and reachable by
+      // adding one member to a union in another file. Both sibling readers of `readStorageWiring`
+      // (`src/lib/forwarding.ts`, `src/lib/status-facts.ts`) are already structurally exhaustive
+      // because they RETURN a value; this one returns `void`, so it needed saying explicitly.
+      // `src/store-resolution.ts:288` states the same property for its own switch.
+      const unhandled: never = wiring;
+      throw new Error(
+        "the provider webhook receiver cannot start: this installation's storage configuration resolved to a "
+          + `kind this receiver does not know how to store events for (${JSON.stringify(unhandled)}).`,
+      );
+    }
   }
 }
 

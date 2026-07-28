@@ -706,7 +706,7 @@ const root = join(import.meta.dir, "..");
  * families, and neither a silent merge nor a minimum can see that two disjoint reductions compose.
  * Measuring is the only thing that can.
  *
- * Corpus of this change: 651 tracked, 650 scanned, 9,511,775 characters — both floors cleared with
+ * Corpus of this change: 651 tracked, 650 scanned, 9,516,645 characters — both floors cleared with
  * room. ONE fewer tracked file than the base: two arm modules deleted, one test file added
  * (`src/cli/commands/serve.local.test.ts`, for a consumer that had no test at all and now has to
  * surface a refusal), and both of this family's own suites rewritten in place. Measured with this
