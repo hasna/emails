@@ -45,6 +45,7 @@
 //     per operation, including one proving `deleteEmail` cannot destroy received mail.
 
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { Database as SqliteDatabase } from "bun:sqlite";
 import { closeDatabase, getDatabase, resetDatabase, type Database } from "./database.js";
 import {
   createEmail,
@@ -998,6 +999,53 @@ describe("the sent ledger refuses what it cannot answer", () => {
     });
 
     expect((await listEmails({}, store)).map((row) => row.id)).toEqual(["outbound-row"]);
+  });
+});
+
+describe("the injectable accepts BOTH published shapes", () => {
+  // `Database` injection is the shape this package has published for its whole 1.x life, and
+  // `src/index.test.ts` compiles a synthetic consumer that uses it. Narrowing the parameter to
+  // `EmailStore` is a breaking change to that surface — it was narrowed in an earlier revision
+  // of this branch and the entrypoint contract test is what caught it. Both arms are pinned
+  // here so neither can be dropped quietly.
+  it("reads through a caller-supplied Database, scoped to that handle", async () => {
+    seedLedger("by-handle", stamp(1), { subject: "handle scoped" });
+
+    const email = await getEmail("by-handle", db);
+
+    expect(email?.subject).toBe("handle scoped");
+    expect((await listEmails({}, db)).map((row) => row.id)).toEqual(["by-handle"]);
+  });
+
+  it("reads through a caller-supplied EmailStore", async () => {
+    seedLedger("by-store", stamp(1), { subject: "store scoped" });
+
+    const email = await getEmail("by-store", sqliteStore());
+
+    expect(email?.subject).toBe("store scoped");
+  });
+
+  it("USES the handle it was given rather than resolving the configured store", async () => {
+    // THE HALF THAT MAKES THE FIRST CASE MEAN SOMETHING. A boundary that recognised a
+    // `Database` and then ignored it — resolving the configured store instead — would pass
+    // the case above, because in this suite the configured store IS that same database. A
+    // CLOSED handle cannot be confused with a working one: if the argument were dropped, this
+    // read would quietly return the seeded row instead of faulting.
+    seedLedger("configured-row", stamp(1));
+    const closed = new SqliteDatabase(":memory:");
+    closed.close();
+
+    await expect(listEmails({}, closed)).rejects.toThrow();
+    // ...and the configured read still answers, so the fault above is about the handle rather
+    // than about the suite's state.
+    expect((await listEmails({}, db)).map((row) => row.id)).toEqual(["configured-row"]);
+  });
+
+  it("FAULTS on an argument that is neither, rather than silently reading the configured store", async () => {
+    const error = await rejection(listEmails({}, 42 as unknown as EmailStore));
+
+    expect(error.message).toContain("EmailStore");
+    expect(error.message).toContain("Database");
   });
 });
 

@@ -207,8 +207,18 @@ import { enumerateStorePages, type StoreCursorEnumeration } from "../lib/status-
 import { safeOffset, safeOptionalLimit } from "./pagination.js";
 import { createConfiguredEmailStore } from "../store-resolution.js";
 import type { EmailStore } from "../store/email-store.js";
+import { createSqliteEmailStore } from "../store-sqlite/index.js";
+import type { Database } from "./database.js";
 import type { Outcome, Refusal } from "../store/outcome.js";
 import type { MessageListRecord, MessageRecord } from "../store/records.js";
+
+/**
+ * What the six reads accept as their optional store argument.
+ *
+ * A UNION RATHER THAN A REPLACEMENT, because `Database` has been the published shape of this
+ * parameter for the package's whole 1.x life. See `storeFor` for what each arm means.
+ */
+export type LedgerStore = EmailStore | Database;
 
 /**
  * Pages one ledger enumeration may fetch, at 500 rows a page — about 100,000 rows.
@@ -259,14 +269,44 @@ function storeRefusal(what: string, refusal: Refusal): Error {
 }
 
 /**
- * The store this call should use: the injected one, or the configured one.
+ * THE INJECTABLE ACCEPTS BOTH SHAPES, AND THAT IS A PUBLISHED-SURFACE OBLIGATION RATHER
+ * THAN A CONVENIENCE.
+ *
+ * These six exports are on the package's public entrypoint (`src/index.ts`), and every one
+ * of them has always taken an optional `Database` meaning "scope this to the database I
+ * own". Narrowing that parameter to `EmailStore` is a BREAKING change to a 1.x surface —
+ * `src/index.test.ts` compiles a synthetic consumer that injects a `Database` precisely to
+ * catch it, and it did. So the parameter is WIDENED instead: a caller may hand in a store
+ * (new) or the database handle they always could (unchanged), and the boundary adapts.
+ *
+ * A `Database` becomes a SQLite store BOUND TO THAT HANDLE, which is stronger than what the
+ * deleted facade did with it — that one used the handle's PRESENCE to pick an arm and then
+ * passed it on, so the parameter's documented meaning and its actual effect were different
+ * things. Here it means what it says.
+ *
+ * THE DISCRIMINATION IS STRUCTURAL, not a label: `EmailStore` exposes repositories and a
+ * `bun:sqlite` `Database` exposes `query`. Neither has the other's shape, and `descriptor` is
+ * deliberately NOT used for it — branching on that field is forbidden (src/store/descriptor.ts),
+ * and this is not asking WHICH store it is, only which of two argument shapes was passed.
+ * Anything that is neither is a fault naming both, because silently treating it as absent
+ * would resolve the configured store and read the wrong installation's mail.
  *
  * Built per call rather than at module load, because a contradictory storage configuration
  * is a boot error raised by the resolution and it belongs to the call that needed a store,
  * not to whoever imported this module first.
  */
-function storeFor(store: EmailStore | undefined): EmailStore {
-  return store ?? createConfiguredEmailStore();
+function storeFor(handle: LedgerStore | undefined): EmailStore {
+  if (handle === undefined) return createConfiguredEmailStore();
+  const candidate = handle as Partial<EmailStore> & Partial<Database>;
+  if (typeof candidate.messages === "object" && candidate.messages !== null) return handle as EmailStore;
+  if (typeof candidate.query === "function") {
+    return createSqliteEmailStore({ database: handle as Database, detail: "caller-supplied database" });
+  }
+  throw new Error(
+    "The sent ledger's optional second argument must be an EmailStore or a bun:sqlite Database; "
+      + `received ${handle === null ? "null" : typeof handle}. Passing neither would silently read the `
+      + "store this installation is configured with, which is not the one the caller named.",
+  );
 }
 
 /** Unwrap an `Outcome`, or throw the refusal naming the operation. */
@@ -587,7 +627,7 @@ export async function createEmail(
  * because it is not an entry in the sent ledger and reporting it as one requires calling a
  * received message `sent`.
  */
-export async function getEmail(id: string, store?: EmailStore): Promise<Email | null> {
+export async function getEmail(id: string, store?: LedgerStore): Promise<Email | null> {
   // AN EMPTY ID NAMES NOTHING, and it is answered here rather than at the store because the two
   // stores disagree about it: SQLite matches no row, and the API store puts an empty segment on
   // the path, where the service's routing and its error envelope are a different question from
@@ -615,7 +655,7 @@ export async function getEmail(id: string, store?: EmailStore): Promise<Email | 
  *
  * @throws when the prefix matches more than one sent email (divergence 9).
  */
-export async function resolveEmailId(id: string, store?: EmailStore): Promise<string | null> {
+export async function resolveEmailId(id: string, store?: LedgerStore): Promise<string | null> {
   const trimmed = id.trim();
   if (!trimmed) return null;
   const resolved = storeFor(store);
@@ -637,7 +677,7 @@ export async function resolveEmailId(id: string, store?: EmailStore): Promise<st
 }
 
 /** The sent ledger, filtered, ordered newest-first and windowed — or a refusal. */
-export async function listEmails(filter: EmailFilter = {}, store?: EmailStore): Promise<Email[]> {
+export async function listEmails(filter: EmailFilter = {}, store?: LedgerStore): Promise<Email[]> {
   const what = "list the sent ledger";
   assertProviderFilterAvailable(filter.provider_id, what);
   const enumeration = await enumerateOutbound(storeFor(store), (row) => matchesFilter(row, filter, what));
@@ -653,7 +693,7 @@ export async function listEmails(filter: EmailFilter = {}, store?: EmailStore): 
 export async function searchEmails(
   query: string,
   opts?: { since?: string; limit?: number; offset?: number },
-  store?: EmailStore,
+  store?: LedgerStore,
 ): Promise<Email[]> {
   const what = "search the sent ledger";
   const needle = query.toLowerCase();
@@ -681,7 +721,7 @@ export async function searchEmails(
 export async function updateEmailStatus(
   id: string,
   status: EmailStatus,
-  store?: EmailStore,
+  store?: LedgerStore,
 ): Promise<Email> {
   // THE WRITE MAY NOT ACCEPT WHAT THE READ REFUSES. `EmailStatus` constrains a TypeScript
   // caller and nothing else — this module is published as JavaScript, `src/server/routes` casts
@@ -715,7 +755,7 @@ export async function updateEmailStatus(
  * a received message just as happily, and `emails log delete` must not be a way to destroy
  * received mail.
  */
-export async function deleteEmail(id: string, store?: EmailStore): Promise<boolean> {
+export async function deleteEmail(id: string, store?: LedgerStore): Promise<boolean> {
   const resolved = storeFor(store);
   const existing = await getEmail(id, resolved);
   if (existing === null) return false;

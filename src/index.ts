@@ -69,10 +69,14 @@ export {
 //    consumer that does not await: `email.status` on a promise is `undefined`, `if (email)` is
 //    always truthy, and `emails.length` is `undefined` — so a "no such email" branch becomes
 //    unreachable and an empty ledger renders as `undefined`.
-//  * THEIR LAST PARAMETER IS AN `EmailStore`, NOT A `Database`. `getEmail(id, store?)`,
+//  * THEIR LAST PARAMETER IS WIDENED, NOT REPLACED. `getEmail(id, store?)`,
 //    `listEmails(filter?, store?)`, `searchEmails(query, opts?, store?)`,
-//    `updateEmailStatus(id, status, store?)` and `deleteEmail(id, store?)`. Passing the
-//    database handle that used to scope these to one file now passes a value of the wrong type.
+//    `updateEmailStatus(id, status, store?)` and `deleteEmail(id, store?)` now take an
+//    `EmailStore` OR the `Database` this surface has published for its whole 1.x life. An
+//    earlier revision of this change NARROWED it to `EmailStore`, which is a breaking change
+//    to a released entrypoint; the synthetic-consumer gate below caught it. A `Database` now
+//    becomes a SQLite store bound to that handle, so the parameter finally means what it has
+//    always said — the deleted facade used the handle's PRESENCE to pick an arm.
 //  * `createEmail` NOW REFUSES, ALWAYS, by throwing. No store behind this package can write a
 //    provider-scoped sent-ledger row: `MessageInput` carries no `provider_id`, `bcc_addrs`,
 //    `reply_to` or `tags`, both stores refuse an `idempotency_key`, and the SQLite store writes
