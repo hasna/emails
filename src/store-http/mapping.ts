@@ -133,6 +133,41 @@ function optional(target: Record<string, unknown>, row: Record<string, unknown>,
   }
 }
 
+/**
+ * An OPTIONAL `*_json` column the seam declares as a DECODED array of strings
+ * (`nameservers_json?: string[]`) — which server releases through 1.3.x send as
+ * a JSON-encoded STRING (`"[]"` rather than `[]`).
+ *
+ * The string form is decoded ONCE and held to the declared shape. A value that
+ * is neither the declared array of strings nor a string decoding to one is a
+ * FAULT, not a pass-through and not a default: an unreadable nameserver list is
+ * not a domain with no nameservers, and copying the raw value forward hands the
+ * seam a record its own type says cannot exist. Decoding is not inventing — the
+ * headline rule holds. Absent stays absent, because the field is optional and
+ * "the API did not disclose this" is a different fact from every value.
+ */
+function optionalSerializedStringArray(
+  target: Record<string, unknown>,
+  row: Record<string, unknown>,
+  key: string,
+  what: string,
+): void {
+  if (!(key in row)) return;
+  let value: unknown = row[key];
+  if (typeof value === "string") {
+    try {
+      value = JSON.parse(value);
+    } catch {
+      fault(what, `a non-array ${key}`);
+    }
+  }
+  if (!Array.isArray(value)) fault(what, `a non-array ${key}`);
+  for (const entry of value) {
+    if (typeof entry !== "string") fault(what, `a non-string entry in ${key}`);
+  }
+  target[key] = value;
+}
+
 // ---- domains ----------------------------------------------------------------
 
 const DOMAIN_OPTIONAL = [
@@ -142,7 +177,6 @@ const DOMAIN_OPTIONAL = [
   "send_provider",
   "cf_zone_id",
   "registrar",
-  "nameservers_json",
   "mail_from_domain",
   "last_error",
   "next_check_at",
@@ -161,6 +195,7 @@ export function domainRecord(value: unknown, what: string): DomainRecord {
     updated_at: requiredString(row, "updated_at", what),
   };
   optional(mapped, row, DOMAIN_OPTIONAL);
+  optionalSerializedStringArray(mapped, row, "nameservers_json", what);
   return mapped as unknown as DomainRecord;
 }
 
