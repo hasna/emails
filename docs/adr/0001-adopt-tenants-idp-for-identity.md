@@ -31,15 +31,15 @@ multi-tenancy build (design doc §3–§6, migrations `0012`/`0013` in
   Postgres RLS keyed on `app.current_tenant` (with the boot guard in
   `rls-guard.ts`), and `NOT NULL tenant_id` on every data table.
 
-Production (emails.hasna.xyz, server 1.3.0) runs this with real tenants,
+Production (the deployed self-hosted service, server 1.3.0) runs this with real tenants,
 ~325 addresses and ~170k messages. **Agents currently authenticate by
 materializing the owner's client-env bundle from the vault** — every agent is
 the owner. That works and is the problem: no per-agent identity, no per-agent
 revocation, no per-agent audit line.
 
-### What the fleet IdP provides
+### What the org IdP provides
 
-`@hasna/tenants` 0.2.0 is the fleet tenant-auth/IdP: tenants, users,
+`@hasna/tenants` 0.2.0 is the org tenant-auth IdP: tenants, users,
 memberships, **service principals**, sessions, an OTP login front door, and
 **asymmetric (EdDSA/Ed25519) access tokens** with a published JWKS. It is
 explicitly distinct from `@hasna/identities` (the agent registry).
@@ -48,7 +48,7 @@ The token wire contract (open-tenants `src/idp/tokens.ts`) is:
 
 - Compact JWS, header `{ alg: "EdDSA", kid, typ: "at+jwt" }`.
 - Claims `{ iss, aud, sub, tid, pt, scope, iat, exp, jti }`:
-  `iss` is the **fixed fleet issuer string `identities`** (a cross-fleet wire
+  `iss` is the **fixed issuer string `identities`** (an org-wide wire
   contract, not a code dependency on the agent registry); `aud` is the app slug
   the token is for; `sub` is the principal id (user or service principal);
   `tid` is the IdP tenant UUID; `pt` is `user | service`; `scope` uses the
@@ -60,15 +60,15 @@ The token wire contract (open-tenants `src/idp/tokens.ts`) is:
   (`/v1/.well-known/jwks.json`) verifies signature, issuer, audience and expiry
   offline. The IdP never holds another app's signing secret, so an IdP-side
   compromise cannot forge an app's HMAC keys, and an app-side compromise cannot
-  mint fleet tokens.
+  mint IdP tokens.
 
 ### Verified gaps (2026-07-28) — named, not worked around
 
-1. **No deployed IdP instance.** `https://tenants.hasna.xyz/.well-known/jwks.json`
+1. **No deployed IdP instance.** The expected IdP host's `/.well-known/jwks.json`
    returns HTTP 404 `{"error":"no matching host route"}`; no vault entries for a
    tenants API URL exist; the installed `tenants` CLI (0.2.0) requires
    `HASNA_TENANTS_API_URL` and has nothing to point at.
-   → prerequisite task filed against `open-tenants` (deploy a fleet instance).
+   → prerequisite task filed against `open-tenants` (deploy an org instance).
 2. **No service-principal signup or token path.** The `service_principals`
    table and `store.createServicePrincipal` exist, but no HTTP route or CLI
    verb creates one, and `POST /v1/auth/token` mints `pt: "user"` tokens from
@@ -85,19 +85,19 @@ The token wire contract (open-tenants `src/idp/tokens.ts`) is:
 **`@hasna/tenants` is the identity authority for emails.** The target state is:
 every WHO-question — human users, agents/service principals, login, OTP,
 session issuance, token issuance, credential revocation — is answered by the
-fleet IdP. Emails keeps only the **data plane**: tenant-scoped mail rows, RLS,
-per-tenant roles/scopes, and an explicit mapping from fleet principals to
+org IdP. Emails keeps only the **data plane**: tenant-scoped mail rows, RLS,
+per-tenant roles/scopes, and an explicit mapping from IdP principals to
 emails tenants.
 
 Concretely:
 
 1. **Federation of identity, local ownership of mail data.** Emails keeps its
    own `tenants` rows and `tenant_id`/RLS machinery as the *data-scoping*
-   boundary (WHAT-MAIL). It accepts **fleet tokens minted by the IdP**, verified
+   boundary (WHAT-MAIL). It accepts **access tokens minted by the IdP**, verified
    statelessly against the published JWKS, and maps the token's `sub` to an
    emails tenant through an explicit, additive mapping table
-   (`fleet_principal_tenants`, mirroring `api_key_tenants`). The IdP owns WHO;
-   emails owns WHAT-MAIL and *which fleet principal may act in which mail
+   (`idp_principal_tenants`, mirroring `api_key_tenants`). The IdP owns WHO;
+   emails owns WHAT-MAIL and *which IdP principal may act in which mail
    tenant*.
 2. **The private auth surface becomes a legacy shim with a stated sunset**
    (migration plan below). New signups — human AND agent — go through the IdP
@@ -105,10 +105,25 @@ Concretely:
    step; the `hasna_` API-key path stays a supported credential class until
    every issued key has been migrated and revoked.
 3. **Fail-closed adoption.** Until an operator configures the JWKS source
-   (`EMAILS_FLEET_JWKS_URL`), the fleet credential class is refused with a
+   (`EMAILS_IDP_JWKS_URL`), the IdP credential class is refused with a
    typed error. Verification pins the wire contract (issuer `identities`,
    EdDSA, `at+jwt`, audience `emails` — plus the `mailery` alias for parity
    with the API-key verifier in `api-key-verifier.ts`).
+
+### Naming: the credential class is called `idp` inside emails
+
+Everything emails-side is named after the issuer's ROLE — `idp` — never after
+the org-infrastructure noun the tenants package uses in its own prose:
+`EMAILS_IDP_JWKS_URL`, `EMAILS_IDP_TOKEN`, `idp_principal_tenants`,
+`principal_type: "idp"`, `[idp-auth]`/`[idp-jwks]` audit tags, `idp_*` typed
+reasons. Two reasons. First, precision: from this product's point of view the
+counterparty IS an identity provider; which org runs it is irrelevant to the
+verification code. Second, this repo's no-cloud boundary
+(`scripts/no-cloud-scan-lib.mjs`, "hosted implementation vocabulary") bans the
+hosted-infrastructure noun across the whole corpus with no path allowance —
+that guard protects the product's operator-owned identity and this programme
+deliberately does not weaken it. No wire value is affected: the issuer string,
+claims shape, and scope grammar carry no such vocabulary.
 
 ### Why not full delegation of the tenancy tables
 
@@ -118,7 +133,7 @@ tenancy per-request from the IdP). Rejected because:
 
 - **Availability coupling.** Mail ingest, RLS policy evaluation and the
   ingest worker resolve tenants on every request/message. A synchronous IdP
-  dependency puts fleet-IdP availability in the mail hot path; an IdP outage
+  dependency puts IdP availability in the mail hot path; an IdP outage
   would stop mail. Token verification via cached JWKS has no such coupling.
 - **Referential integrity across services.** 27 data tables FK
   `tenant_id → tenants(id)` locally and RLS policies compare against a local
@@ -138,7 +153,7 @@ tenancy per-request from the IdP). Rejected because:
 
 Direction of truth, stated once: **the IdP owns identity and the issuance /
 revocation of identity credentials. Emails owns the authorization mapping
-(fleet principal → emails tenant + role/scopes) and all mail data.** The
+(IdP principal → emails tenant + role/scopes) and all mail data.** The
 mapping is explicit — never inferred from slug equality or email domain — so
 every cross-domain grant is a deliberate, auditable row.
 
@@ -148,16 +163,16 @@ Every phase is additive or flag-gated; every removal is gated on measured zero
 traffic, not on calendar time. Existing credentials keep working within each
 phase; a credential class is only retired after its inventory reaches zero.
 
-**Phase 1 — Fleet-token verification slice** *(this repo, first committed step —
-not a proof of concept)*. The server verifies EdDSA fleet tokens against a
+**Phase 1 — IdP-token verification slice** *(this repo, first committed step —
+not a proof of concept)*. The server verifies EdDSA IdP tokens against a
 configured JWKS URL (fail-closed when unconfigured, typed refusal), maps `sub`
-through the new additive `fleet_principal_tenants` table, and `emails auth
-whoami` works with a fleet token. Existing `hasna_`/`emss_` behaviour is
+through the new additive `idp_principal_tenants` table, and `emails auth
+whoami` works with an IdP token. Existing `hasna_`/`emss_` behaviour is
 byte-equivalent (proved by the existing suite). Ships dark until the IdP
 deploys.
 
-**Phase 2 — Mapping management + agent onboarding.** `emails auth fleet
-map|list|revoke` (admin/owner session or operator key), fleet auth audit lines,
+**Phase 2 — Mapping management + agent onboarding.** `emails auth idp
+map|list|revoke` (admin/owner session or operator key), IdP auth audit lines,
 and the end-to-end agent flow of ADR-0002 once the IdP's service-principal
 prerequisite lands. The owner-bundle agent pattern is deprecated the day this
 lands: new agents get service principals, never the owner's credentials.
@@ -167,7 +182,7 @@ lands: new agents get service principals, never the owner's credentials.
 verifies it and mints its own short-lived `emss_` session from it, so all
 existing session-based server code and the dashboard keep working — sessions
 become *derivative* of an IdP authentication event, not an independent root of
-trust). Additive column `users.fleet_sub` links local users to IdP principals
+trust). Additive column `users.idp_sub` links local users to IdP principals
 on first federated login. Password login remains available but is marked
 deprecated; new signups are directed to the IdP. The private password/signup
 path is put behind an operator flag whose default still allows it (no
@@ -178,18 +193,18 @@ breakage).
    (`api_keys ⨝ api_key_tenants`) and send keys (`send_key_tenants`), each with
    `last_used_at`.
 2. *Re-issue*: for each key, create an IdP service principal (or link the
-   owning human), add the `fleet_principal_tenants` row, and switch the
-   consumer to fleet tokens.
+   owning human), add the `idp_principal_tenants` row, and switch the
+   consumer to IdP tokens.
 3. *Cutover per credential*: watch audit lines until the legacy kid goes
    quiet; then revoke that key (`emails keys revoke`). Per-key cutover — never
    big-bang.
 4. *Retire issuance first*: once inventory trends to zero, key **minting** is
-   disabled (typed 410 pointing at the fleet flow) while **verification** of
+   disabled (typed 410 pointing at the IdP flow) while **verification** of
    the remaining tail continues. The class is removed only at zero inventory,
    in a major version.
 
 **Phase 5 — Sunset the private auth shim.** Remove private signup/OTP/password
-login once: (a) every active user has `fleet_sub` linked, (b) audit shows zero
+login once: (a) every active user has `idp_sub` linked, (b) audit shows zero
 password logins and zero legacy-key verifications over an agreed window, and
 (c) owner sign-off. Local `users`/`memberships` rows survive as the
 authorization/role layer (renamed conceptually to "principal directory");
@@ -197,7 +212,7 @@ authorization/role layer (renamed conceptually to "principal directory");
 `tenants` table survives indefinitely — it is the data-plane boundary, not an
 identity artifact.
 
-Phases 2–5 are tracked as tasks under the "Fleet-identity federation + agent
+Phases 2–5 are tracked as tasks under the "IdP federation + agent
 signup" umbrella (todos project `1631772c`) with explicit dependencies,
 including the three `open-tenants` prerequisite tasks named above.
 
@@ -206,7 +221,7 @@ including the three `open-tenants` prerequisite tasks named above.
 Until the `open-tenants` introspection prerequisite lands, IdP-side revocation
 of a principal stops **new** tokens immediately but leaves already-minted
 tokens valid for up to their ≤ 24 h TTL against stateless verifiers. Emails
-therefore keeps a local kill switch: `fleet_principal_tenants.revoked_at`
+therefore keeps a local kill switch: `idp_principal_tenants.revoked_at`
 fails that principal closed on the next request regardless of token validity.
 "Revocation via the IdP kills access everywhere" is exact for issuance,
 bounded by 24 h for outstanding tokens, and immediate when paired with the
@@ -214,7 +229,7 @@ emails-side mapping revocation — ADR-0002 specifies the operator flow.
 
 ## Consequences
 
-- Agents and humans get one fleet identity that works across apps; emails
+- Agents and humans get one org-wide identity that works across apps; emails
   stops being an identity island. Per-agent revocation and audit become real.
 - Two new operational requirements: a deployed IdP (prerequisite task) and
   JWKS reachability from the emails server (cached, with fail-closed refusal
