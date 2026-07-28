@@ -25,7 +25,28 @@ import { getAnalytics } from "./lib/analytics.js";
 let stub: V1Stub;
 
 beforeAll(async () => {
-  stub = await startV1Stub();
+  // `openapi: true` is REQUIRED by the sandbox block below and CHANGES the analytics block,
+  // and adversarial review is the reason both halves of that sentence are here.
+  //
+  // Why it is required: `src/db/sandbox.ts` has collapsed onto the store seam, so its capture
+  // write goes through the REAL `HttpEmailStore`, which reads the service's published contract
+  // before any write — that document is its only source of truth for which columns a resource
+  // accepts, and a write naming an undeclared one is accepted and silently DROPPED by the
+  // generic route. A missing contract is deliberately a fault there, which is what this block
+  // hit.
+  //
+  // What else it changes: `getAnalytics` pushes an equality filter on the event type, and the
+  // HTTP store refuses a filter the contract does not declare. Without the document that
+  // refusal was a fault and the delivery-event read came back UNANSWERED; with it the filter
+  // is accepted and the read answers. The analytics block below now pins that explicitly
+  // rather than leaving it to depend on the fixture's events table happening to be empty.
+  //
+  // What it does NOT fix: the fixture's generic list still IGNORES equality filters and
+  // answers with the unfiltered list. The sandbox reads here are all UNFILTERED so they cannot
+  // meet it; a filtered or paged store-seam read belongs on
+  // `src/test-support/v1-store-api.ts`, which is where `src/db/sandbox.test.ts` and
+  // `src/providers/sandbox.test.ts` now run.
+  stub = await startV1Stub({ openapi: true });
 });
 
 afterAll(() => stub.stop());
@@ -53,7 +74,7 @@ describe("sandbox capture flow (via /v1)", () => {
     });
 
     expect(msgId).toBeTruthy();
-    const captured = listSandboxEmails();
+    const captured = await listSandboxEmails();
     expect(captured.length).toBe(1);
     expect(captured[0]!.subject).toBe("Integration test");
     expect(captured[0]!.from_address).toBe("hello@example.com");
@@ -63,9 +84,9 @@ describe("sandbox capture flow (via /v1)", () => {
     const provider = createProvider({ name: "dev", type: "sandbox" });
     const adapter = new SandboxAdapter(provider);
     await adapter.sendEmail({ from: "a@b.com", to: "c@d.com", subject: "Test", text: "x" });
-    expect(listSandboxEmails().length).toBeGreaterThan(0);
-    clearSandboxEmails();
-    expect(listSandboxEmails().length).toBe(0);
+    expect((await listSandboxEmails()).length).toBeGreaterThan(0);
+    expect(await clearSandboxEmails()).toBe(1);
+    expect(await listSandboxEmails()).toHaveLength(0);
   });
 });
 
@@ -96,6 +117,12 @@ describe("analytics", () => {
     // so an empty list here is a genuine total rather than an unread table.
     expect(data.sent_read.exact, data.sent_read.reason ?? "").toBe(true);
     expect(data.dailyVolume).toEqual([]);
+    // Pinned because it MOVED with `openapi: true` above and would otherwise be invisible: the
+    // delivery-event read is filtered on the event type, and the HTTP store can only accept a
+    // filter the published contract declares. Before the document was served this came back
+    // unanswered; a future change that stops serving it would silently flip this back, and an
+    // unanswered read here is not the same fact as an empty one.
+    expect(data.events_read.answered, data.events_read.reason ?? "").toBe(true);
   });
 
   it("still refuses a provider-scoped report, because the seam cannot scope messages", async () => {

@@ -15,7 +15,7 @@ import { Command } from "commander";
 import { closeDatabase, getDatabase, resetDatabase } from "../../db/database.js";
 import { suppressContact } from "../../db/contacts.local.js";
 import { createProvider } from "../../db/providers.local.js";
-import { listSandboxEmails } from "../../db/sandbox.local.js";
+import { listSandboxEmails } from "../../db/sandbox.js";
 import { resetMailDataSource } from "../../lib/mail-data-source.js";
 import { startV1Stub, type V1Stub } from "../../test-support/v1-stub.js";
 import { registerSendCommands } from "./send.js";
@@ -183,7 +183,7 @@ describe("emails send — suppressed recipients (local)", () => {
     expect(result.exited).toBe(true);
     expect(result.errorOutput).toContain("Refusing to send to suppressed recipient(s): blocked@ext.com");
     // Local mode has no second gate, so this assertion is the whole finding.
-    expect(listSandboxEmails(providerId, 10)).toHaveLength(0);
+    expect(await listSandboxEmails(providerId, 10)).toHaveLength(0);
   });
 
   it("honours --force, which is what the flag always claimed to do", async () => {
@@ -194,7 +194,7 @@ describe("emails send — suppressed recipients (local)", () => {
 
     expect(result.exited).toBe(false);
     expect(result.consoleOutput).toContain("--force: sending to the suppressed recipient(s) anyway.");
-    expect(listSandboxEmails(providerId, 10)).toHaveLength(1);
+    expect(await listSandboxEmails(providerId, 10)).toHaveLength(1);
   });
 
   it("still sends to a recipient that is not suppressed, without --force", async () => {
@@ -204,7 +204,7 @@ describe("emails send — suppressed recipients (local)", () => {
     ]);
 
     expect(result.exited).toBe(false);
-    expect(listSandboxEmails(providerId, 10)).toHaveLength(1);
+    expect(await listSandboxEmails(providerId, 10)).toHaveLength(1);
   });
 });
 
@@ -253,7 +253,7 @@ describe("suppression matches the recipient canonically, not by exact string", (
 
       expect(result.exited).toBe(true);
       expect(result.errorOutput).toContain("Refusing to send to suppressed recipient(s)");
-      expect(listSandboxEmails(providerId, 10)).toHaveLength(0);
+      expect(await listSandboxEmails(providerId, 10)).toHaveLength(0);
     }
   });
 
@@ -268,7 +268,7 @@ describe("suppression matches the recipient canonically, not by exact string", (
     ]);
 
     expect(result.exited).toBe(true);
-    expect(listSandboxEmails(providerId, 10)).toHaveLength(0);
+    expect(await listSandboxEmails(providerId, 10)).toHaveLength(0);
   });
 
   it("does not over-match a different address that merely looks similar", async () => {
@@ -280,7 +280,7 @@ describe("suppression matches the recipient canonically, not by exact string", (
     ]);
 
     expect(result.exited).toBe(false);
-    expect(listSandboxEmails(providerId, 10)).toHaveLength(1);
+    expect(await listSandboxEmails(providerId, 10)).toHaveLength(1);
   });
 });
 
@@ -364,7 +364,7 @@ describe("reply, forward, and the MCP send tool refuse suppressed recipients too
 
     expect(result.exited).toBe(true);
     expect(result.errorOutput).toContain("Refusing to forward to suppressed recipient(s)");
-    expect(listSandboxEmails(providerId, 10)).toHaveLength(0);
+    expect(await listSandboxEmails(providerId, 10)).toHaveLength(0);
   });
 
   it("emails reply refuses a suppressed recipient it derived itself", async () => {
@@ -375,7 +375,7 @@ describe("reply, forward, and the MCP send tool refuse suppressed recipients too
 
     expect(result.exited).toBe(true);
     expect(result.errorOutput).toContain("Refusing to reply to suppressed recipient(s)");
-    expect(listSandboxEmails(providerId, 10)).toHaveLength(0);
+    expect(await listSandboxEmails(providerId, 10)).toHaveLength(0);
   });
 
   it("the MCP send_email tool refuses a suppressed recipient, with no force escape", async () => {
@@ -398,7 +398,7 @@ describe("reply, forward, and the MCP send tool refuse suppressed recipients too
 
     expect(result.isError).toBe(true);
     expect(result.content[0]!.text).toContain("suppressed recipient(s)");
-    expect(listSandboxEmails(providerId, 10)).toHaveLength(0);
+    expect(await listSandboxEmails(providerId, 10)).toHaveLength(0);
     // No `force` parameter exists on this tool — an agent cannot opt out.
     expect(JSON.stringify(tool.inputSchema ?? {})).not.toContain("force");
   });

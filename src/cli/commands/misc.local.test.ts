@@ -3,7 +3,8 @@ import { Command } from "commander";
 import { closeDatabase, getDatabase, resetDatabase } from "../../db/database.js";
 import { createProvider } from "../../db/providers.local.js";
 import { createScheduledEmail, getScheduledEmail } from "../../db/scheduled.js";
-import { listSandboxEmails } from "../../db/sandbox.local.js";
+import { listSandboxEmails } from "../../db/sandbox.js";
+import { createSqliteEmailStore } from "../../store-sqlite/index.js";
 import { createTemplate } from "../../db/templates.local.js";
 import { addStep, createSequence, enroll, listEnrollments } from "../../db/sequences.local.js";
 import { registerMiscCommands, runSchedulerTick } from "./misc.local.js";
@@ -115,7 +116,8 @@ describe("scheduler tick", () => {
     expect(result.sequences).toMatchObject({ attempted: 1, sent: 1, failed: 0 });
     expect((await getScheduledEmail(scheduled.id))?.status).toBe("sent");
 
-    const subjects = listSandboxEmails(provider.id, 10, db).map((email) => email.subject);
+    const subjects = (await listSandboxEmails(provider.id, 10, 0, createSqliteEmailStore({ database: db })))
+      .map((email) => email.subject);
     expect(subjects).toContain("Scheduled smoke");
     expect(subjects).toContain("Welcome sequence@example.com");
     expect(listEnrollments({ sequence_id: sequence.id }, db)[0]?.status).toBe("completed");

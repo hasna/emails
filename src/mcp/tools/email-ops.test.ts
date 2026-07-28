@@ -20,7 +20,7 @@ import { closeDatabase, resetDatabase } from "../../db/database.js";
 import { suppressContact } from "../../db/contacts.local.js";
 import { getEmailContent } from "../../db/email-content.js";
 import { createProvider } from "../../db/providers.local.js";
-import { listSandboxEmails } from "../../db/sandbox.local.js";
+import { listSandboxEmails } from "../../db/sandbox.js";
 import { createWarmingSchedule } from "../../db/warming.local.js";
 import { resetMailDataSource } from "../../lib/mail-data-source.js";
 import { registerEmailOpsTools } from "./email-ops.js";
@@ -135,7 +135,7 @@ describe("collapsed email-ops tool family", () => {
       // variable assignment, no "run it the other way".
       expect(message).not.toMatch(/[A-Z][A-Z0-9]*_[A-Z0-9_]*=/);
       // And it must be a REFUSAL, not a quiet success: nothing was sent.
-      expect(listSandboxEmails(providerId, 10), `${option} must not send`).toHaveLength(0);
+      expect(await listSandboxEmails(providerId, 10), `${option} must not send`).toHaveLength(0);
     }
   });
 
@@ -154,7 +154,7 @@ describe("collapsed email-ops tool family", () => {
 
     expect(result.isError).toBe(true);
     expect(text(result)).toContain("suppressed recipient(s)");
-    expect(listSandboxEmails(providerId, 10)).toHaveLength(0);
+    expect(await listSandboxEmails(providerId, 10)).toHaveLength(0);
 
     // No `force` escape. Asserted BEHAVIOURALLY rather than by inspecting the
     // schema: an absent key in a serialized zod object is vacuously true, so a
@@ -170,7 +170,7 @@ describe("collapsed email-ops tool family", () => {
     });
     expect(forced.isError).toBe(true);
     expect(text(forced)).toContain("suppressed recipient(s)");
-    expect(listSandboxEmails(providerId, 10)).toHaveLength(0);
+    expect(await listSandboxEmails(providerId, 10)).toHaveLength(0);
   });
 
   it("still blocks a send that a warming schedule forbids", async () => {
@@ -196,7 +196,7 @@ describe("collapsed email-ops tool family", () => {
 
     expect(result.isError).toBe(true);
     expect(text(result)).toContain("Warming limit reached for warming.example.test");
-    expect(listSandboxEmails(providerId, 10)).toHaveLength(0);
+    expect(await listSandboxEmails(providerId, 10)).toHaveLength(0);
   });
 
   it("sends a plain-text message without fabricating an HTML part", async () => {
@@ -236,7 +236,7 @@ describe("collapsed email-ops tool family", () => {
     });
 
     expect(sent.isError).not.toBe(true);
-    const captured = listSandboxEmails(providerId, 10);
+    const captured = await listSandboxEmails(providerId, 10);
     expect(captured).toHaveLength(1);
     expect(JSON.stringify(captured[0])).toContain("Hello Ada");
   });
@@ -251,7 +251,7 @@ describe("collapsed email-ops tool family", () => {
 
     expect(result.isError).toBe(true);
     expect(text(result)).toContain("Template not found: no-such-template");
-    expect(listSandboxEmails(providerId, 10)).toHaveLength(0);
+    expect(await listSandboxEmails(providerId, 10)).toHaveLength(0);
   });
 
   it("round-trips templates, contacts and the scheduled queue through one implementation", async () => {

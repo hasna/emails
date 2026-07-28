@@ -3,8 +3,9 @@ import { createProvider, listProviderSummaries, deleteProvider, getProvider, upd
 import { createDomain, listDomains, deleteDomain, getDomain, updateDnsStatus } from '../../db/domains.local.js';
 import { createAddress, deleteAddress } from '../../db/addresses.local.js';
 import { listEmails, getEmail, searchEmails } from '../../db/emails.local.js';
-import { listSandboxEmailSummaries, getSandboxEmail, clearSandboxEmails } from '../../db/sandbox.local.js';
+import { listSandboxEmailSummaries, getSandboxEmail, clearSandboxEmails } from '../../db/sandbox.js';
 import { getDatabase } from '../../db/database.js';
+import { createSqliteEmailStore } from '../../store-sqlite/index.js';
 import { getEvent, listEventSummaries } from '../../db/events.local.js';
 import { getAdapter } from '../../providers/index.js';
 import { getLocalStats } from '../../lib/stats.js';
@@ -18,6 +19,25 @@ import {
 import { json, notFound, badRequest, internalError, resolveId, resolveIdStrict, resolveOptionalId, parseBody, sanitizeProvider, checkRateLimit, tooManyRequests, queryInteger, optionalQueryInteger, queryPage } from './helpers.js';
 
 class DomainReadinessRequestError extends Error {}
+
+/**
+ * The store the `/api/sandbox` routes read and delete through.
+ *
+ * This is the LOCAL DASHBOARD (`emails serve`), and every other import in this file is still
+ * a local-SQLite module reading the process-wide connection. When `src/db/sandbox` collapsed
+ * onto the store seam its exports stopped naming a `Database` and started taking an
+ * `EmailStore`, so the three routes below name the SQLite store bound to that same
+ * connection rather than falling through to whatever storage the environment resolves to.
+ * Passing nothing would have silently repointed the local dashboard at an operator's API on
+ * any installation configured for one — a behaviour change dressed as a collapse.
+ *
+ * Built per request, which costs one object: the repositories are thin wrappers over the
+ * memoised connection, and holding one at module scope would open the database when this
+ * module is first imported rather than when a request needs it.
+ */
+function localSandboxStore() {
+  return createSqliteEmailStore({ database: getDatabase() });
+}
 
 export async function handle(req: Request, url: URL, path: string, method: string): Promise<Response | null> {
 function enumField<T extends string>(body: Record<string, unknown>, key: string, allowed: readonly T[]): T | undefined {
@@ -360,7 +380,7 @@ if (path === "/api/sandbox" && method === "GET") {
   try {
     const page = queryPage(url, 50);
     const resolvedId = resolveOptionalId("providers", url.searchParams.get("provider_id"));
-    return json(listSandboxEmailSummaries(resolvedId, page.limit, page.offset));
+    return json(await listSandboxEmailSummaries(resolvedId, page.limit, page.offset, localSandboxStore()));
   } catch (e) { return internalError(e); }
 }
 
@@ -368,9 +388,8 @@ if (path === "/api/sandbox" && method === "GET") {
 const sandboxGetMatch = path.match(/^\/api\/sandbox\/([^/]+)$/);
 if (sandboxGetMatch && method === "GET") {
   try {
-    const db = getDatabase();
     const id = resolveIdStrict("sandbox_emails", sandboxGetMatch[1]!);
-    const email = getSandboxEmail(id, db);
+    const email = await getSandboxEmail(id, localSandboxStore());
     if (!email) return notFound("Sandbox email not found");
     return json(email);
   } catch (e) { return internalError(e); }
@@ -380,8 +399,7 @@ if (sandboxGetMatch && method === "GET") {
 if (path === "/api/sandbox" && method === "DELETE") {
   try {
     const resolvedId = resolveOptionalId("providers", url.searchParams.get("provider_id"));
-    const db = getDatabase();
-    const count = clearSandboxEmails(resolvedId, db);
+    const count = await clearSandboxEmails(resolvedId, localSandboxStore());
     return json({ deleted: count });
   } catch (e) { return internalError(e); }
 }
