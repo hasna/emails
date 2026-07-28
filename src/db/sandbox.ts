@@ -637,7 +637,10 @@ export async function storeSandboxEmail(
   if (email.provider_id !== input.provider_id) throw echoedWrong(email.id, "provider_id");
   if (email.from_address !== input.from_address) throw echoedWrong(email.id, "from_address");
   if (email.subject !== input.subject) throw echoedWrong(email.id, "subject");
-  if (email.to_addresses.join("\n") !== input.to_addresses.join("\n")) {
+  // JSON rather than a joined string: a recipient that CONTAINS the separator would make two
+  // different lists compare equal, which is a false negative in exactly the check that exists
+  // to catch a dropped field.
+  if (JSON.stringify(email.to_addresses) !== JSON.stringify(input.to_addresses)) {
     throw echoedWrong(email.id, "to_addresses");
   }
   return email;
