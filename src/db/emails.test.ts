@@ -577,13 +577,38 @@ for (const [label, makeStore] of STORE_VARIANTS) {
         expect(email?.idempotency_key ?? null).toBeNull();
       });
 
+      // THE SELF-HOSTED SERVICE'S OWN SEND STATES, which are NOT the local ledger's five.
+      //
+      // `messages.status` is `TEXT NOT NULL DEFAULT 'queued'` on the service
+      // (src/server/self-hosted/migrations.ts) and its send path writes `queued` on every
+      // reservation and re-arm, `blocked` on a policy refusal and `uncertain` when a provider
+      // call's outcome could not be established (src/server/self-hosted/store.ts). A read that
+      // refused those would take `emails log list`, the export and `GET /api/emails` down on
+      // every reserved-but-unsent message — the rows an operator most wants to see. This is a
+      // schema divergence the TypeScript types cannot show (`MessageRecord.status` is a bare
+      // string), and the first draft of this collapse would have shipped the fault.
+      for (const state of ["queued", "blocked", "uncertain"] as const) {
+        it(`reads a message the service left in '${state}' instead of faulting`, async () => {
+          seedUnified("service-state", stamp(1), { sent: true, status: state });
+
+          const email = await getEmail("service-state", makeStore());
+
+          expect(email).not.toBeNull();
+          expect(email?.status).toBe(state);
+          expect((await listEmails({}, makeStore())).map((row) => row.id)).toEqual(["service-state"]);
+        });
+      }
+
       it("FAULTS on a status outside the five rather than reporting it as sent", async () => {
-        // Divergence 5. `inbound_emails.status` has no CHECK constraint, so this is reachable.
-        seedUnified("odd", stamp(1), { sent: true, status: "queued" });
+        // Divergence 5. `inbound_emails.status` has no CHECK constraint, so an arbitrary value
+        // is reachable — and `delivered-maybe` is one NEITHER store produces, which is what
+        // makes it the right probe now that the service's own `queued`, `blocked` and
+        // `uncertain` are legal reads.
+        seedUnified("odd", stamp(1), { sent: true, status: "delivered-maybe" });
 
         const error = await rejection(getEmail("odd", makeStore()));
 
-        expect(error.message).toContain("queued");
+        expect(error.message).toContain("delivered-maybe");
         expect(error.message).toContain("refusing to report it as sent");
       });
     });
@@ -682,6 +707,21 @@ for (const [label, makeStore] of STORE_VARIANTS) {
         expect(raw.ok && raw.value?.status).toBe("received");
       });
 
+      it("REFUSES a service-only state the local ledger's CHECK cannot hold", async () => {
+        // The inverse of the split below, and deliberate: the READ accepts every state a store
+        // can produce (eight) and the WRITE accepts every state both stores can accept (five).
+        // `queued` is readable and unwritable, because writing it to the local `emails` table
+        // violates that table's CHECK constraint.
+        seedLedger("target", stamp(1), { status: "sent" });
+        const store = makeStore();
+
+        const error = await rejection(updateEmailStatus("target", "queued", store));
+
+        expect(error).not.toBeInstanceOf(EmailNotFoundError);
+        expect(error.message).toContain("queued");
+        expect((await getEmail("target", store))?.status).toBe("sent");
+      });
+
       it("REFUSES a status the read would not accept, and leaves the row alone", async () => {
         // The accept-on-write / refuse-on-read split. `EmailStatus` constrains a TypeScript
         // caller and nothing else: this module ships as JavaScript and
@@ -727,7 +767,7 @@ for (const [label, makeStore] of STORE_VARIANTS) {
         // before windowing would make that one row take down every listing in the ledger,
         // including listings that would never have shown it.
         seedLedger("readable-new", stamp(9));
-        seedUnified("unreadable-old", stamp(1), { sent: true, status: "queued" });
+        seedUnified("unreadable-old", stamp(1), { sent: true, status: "delivered-maybe" });
 
         const rows = await listEmails({ limit: 1 }, makeStore());
 
@@ -736,19 +776,19 @@ for (const [label, makeStore] of STORE_VARIANTS) {
 
       it("still faults when the unreadable row is INSIDE the window", async () => {
         seedLedger("readable-new", stamp(9));
-        seedUnified("unreadable-old", stamp(1), { sent: true, status: "queued" });
+        seedUnified("unreadable-old", stamp(1), { sent: true, status: "delivered-maybe" });
 
         const error = await rejection(listEmails({}, makeStore()));
 
         expect(error.message).toContain("unreadable-old");
-        expect(error.message).toContain("queued");
+        expect(error.message).toContain("delivered-maybe");
       });
 
       it("excludes an unreadable row that merely fails a filter, without faulting", async () => {
         // The filter runs on the RAW record, so a row whose status this family cannot present
         // is excluded by a status filter rather than faulting the whole read.
         seedLedger("kept", stamp(9), { status: "delivered" });
-        seedUnified("odd", stamp(1), { sent: true, status: "queued" });
+        seedUnified("odd", stamp(1), { sent: true, status: "delivered-maybe" });
 
         const rows = await listEmails({ status: "delivered" }, makeStore());
 

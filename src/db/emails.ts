@@ -90,6 +90,25 @@
 //     type that says it cannot be. `inbound_emails.status` has NO CHECK constraint
 //     (src/db/database.ts migration 18), so the value is reachable. It is a FAULT below,
 //     naming the row and the value.
+//
+//     AND THE SET OF LEGAL STATES IS EIGHT, NOT FIVE, WHICH IS A SCHEMA DIVERGENCE THE
+//     TYPESCRIPT TYPES CANNOT SHOW. `MessageRecord.status` is a bare `string`. The local
+//     ledger's CHECK admits five; the self-hosted service declares
+//     `messages.status TEXT NOT NULL DEFAULT 'queued'`
+//     (src/server/self-hosted/migrations.ts) and its own send path writes `queued` on every
+//     reservation and re-arm, `blocked` when an outbound policy gate refuses, and `uncertain`
+//     when a provider call's outcome could not be established (src/server/self-hosted/store.ts).
+//     So `queued` is the ORDINARY state of a reserved-but-unsent message on an API-configured
+//     installation, and a read that refuses it takes `emails log list`, the export and
+//     `GET /api/emails` down on exactly the rows an operator most wants to see. This was found
+//     by checking the two schemas against each other rather than by a test, and the first draft
+//     of this collapse would have shipped it.
+//
+//     THE READ AND THE WRITE THEREFORE ADMIT DIFFERENT SETS, ON PURPOSE: the read accepts every
+//     state a store can PRODUCE (eight), and `updateEmailStatus` accepts every state both
+//     stores can ACCEPT (five, the local CHECK). That is not the accept-on-write /
+//     refuse-on-read split this module closes elsewhere — it is its inverse, and it is the only
+//     shape that neither loses a real row nor writes one a store cannot hold.
 //  6. ABSENT IS NOT `now()`. The HTTP arm read every timestamp through a coercion that
 //     answers `new Date().toISOString()` for a MISSING value, so a row whose `created_at`
 //     could not be read was reported as having been sent at the moment it was read. Both
@@ -182,7 +201,7 @@
 // the whole one, which is the defect this collapse exists to remove.
 
 import type { Email, EmailFilter, EmailStatus, SendEmailOptions } from "../types/index.js";
-import { EmailNotFoundError } from "../types/index.js";
+import { EmailNotFoundError, WRITABLE_EMAIL_STATUSES } from "../types/index.js";
 import { canonicalSender } from "../lib/email-address.js";
 import { enumerateStorePages, type StoreCursorEnumeration } from "../lib/status-facts-enumeration.js";
 import { safeOffset, safeOptionalLimit } from "./pagination.js";
@@ -201,14 +220,28 @@ import type { MessageListRecord, MessageRecord } from "../store/records.js";
  */
 const MAX_LEDGER_PAGES = 200;
 
-/** The five states `Email.status` can hold. Divergence 5 turns anything else into a fault. */
-const EMAIL_STATUSES: ReadonlySet<string> = new Set<EmailStatus>([
+/**
+ * Every state a STORE CAN PRODUCE for a sent-ledger row. Divergence 5 turns anything else
+ * into a fault.
+ *
+ * Eight, not five, and the difference is a schema divergence rather than generosity: the local
+ * ledger's CHECK admits five, and the self-hosted service's `messages.status` is
+ * `TEXT NOT NULL DEFAULT 'queued'` with `queued`, `blocked` and `uncertain` written by its own
+ * send path. See the `EmailStatus` note in src/types/index.ts.
+ */
+const READABLE_EMAIL_STATUSES: ReadonlySet<string> = new Set<EmailStatus>([
   "sent",
   "delivered",
   "bounced",
   "complained",
   "failed",
+  "queued",
+  "blocked",
+  "uncertain",
 ]);
+
+/** Every state a WRITE may name — the five the local ledger's CHECK accepts. */
+const WRITABLE_STATUSES: ReadonlySet<string> = new Set<string>(WRITABLE_EMAIL_STATUSES);
 
 // ─── Refusals, faults and the store handle ──────────────────────────────────
 
@@ -292,10 +325,11 @@ function requiredTimestamp(value: string | null | undefined, id: string, column:
 
 function emailStatusOf(value: string, id: string): EmailStatus {
   // Divergence 5.
-  if (!EMAIL_STATUSES.has(value)) {
+  if (!READABLE_EMAIL_STATUSES.has(value)) {
     throw new Error(
       `This installation's store returned message ${id || "(no id)"} with status ${JSON.stringify(value)}, `
-        + "which is not one of sent, delivered, bounced, complained or failed; refusing to report it as sent",
+        + "which is not a delivery state either store produces for a sent message "
+        + `(${[...READABLE_EMAIL_STATUSES].join(", ")}); refusing to report it as sent`,
     );
   }
   return value as EmailStatus;
@@ -630,10 +664,11 @@ export async function updateEmailStatus(
   // the five. Writing a sixth value would make the row this call just wrote unreadable by the
   // read beside it. That accept-on-write / refuse-on-read split is a real defect shape found in
   // a sibling family, so the write is held to the read's vocabulary.
-  if (!EMAIL_STATUSES.has(status)) {
+  if (!WRITABLE_STATUSES.has(status)) {
     throw new Error(
-      `Refusing to set sent email ${id} to status ${JSON.stringify(status)}: it is not one of sent, `
-        + "delivered, bounced, complained or failed, and this family could not read the row back afterwards",
+      `Refusing to set sent email ${id} to status ${JSON.stringify(status)}: the local ledger's CHECK `
+        + `constraint admits only ${[...WRITABLE_STATUSES].join(", ")}, so this write would either be `
+        + "rejected by that store or produce a row only one of the two stores could hold",
     );
   }
   const resolved = storeFor(store);
