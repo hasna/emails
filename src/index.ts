@@ -288,6 +288,27 @@ export { formatDnsCheck } from "./lib/dns-check-format.js";
 export type { DnsCheckResult } from "./lib/dns-check-format.js";
 export { formatDiagnostics } from "./lib/diagnostics-format.js";
 export type { DoctorCheck } from "./lib/diagnostics-format.js";
+// PUBLISHED SHAPE CHANGE, recorded at the export site.
+//
+// EIGHT of the exports below became ASYNCHRONOUS when `src/db/provisioning` collapsed onto
+// the store seam: `buildDomainLifecycleSummary`, `buildDomainLifecycleSummaries`,
+// `listDomainLifecycleSummaries`, `getDomainLifecycleSummary`,
+// `updateDomainLifecycleReadiness`, `enableDomainInboundReadiness`,
+// `enableDomainOutboundReadiness` and `disableDomainOutboundReadiness`. Every lifecycle
+// summary carries the domain's provisioning columns and its ready-address count, and both now
+// come from `src/store/`, where every operation returns a promise. `createDomainReadinessService`
+// is unchanged as a function and its three METHODS return promises, which the
+// `DomainReadinessService` interface declares.
+//
+// A caller that does not `await` them gets a promise, and a promise is TRUTHY — so
+// `if (getDomainLifecycleSummary(id).readiness.send_ready)` is now a type error, but
+// `enableDomainInboundReadiness(id)` on its own is a silently floating write. The three
+// affected routes in `src/server/routes/core.ts` are awaited; two of those three did NOT
+// produce a `tsc` error, because `json(data: unknown)` accepts a promise and serialises it
+// as `{}`.
+//
+// `assessDomainLifecycleReadiness`, `defaultDomainSourceOfTruth` and
+// `resolveDomainLifecycleRecord` are unchanged: none of them reads provisioning state.
 export {
   assessDomainLifecycleReadiness,
   buildDomainLifecycleSummaries,

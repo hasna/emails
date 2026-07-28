@@ -649,7 +649,10 @@ export interface ListDomainSummaryOptions {
   offset?: number;
 }
 
-export function listDomainSummaries(opts?: ListDomainSummaryOptions): DomainSummary[] {
+// ASYNC TO MATCH THE LOCAL TWIN, which reaches the store seam for its provisioning columns
+// and therefore cannot stay synchronous. Nothing in THIS arm needs to await; the keyword is
+// here so the routed export has ONE return type instead of one per deployment word.
+export async function listDomainSummaries(opts?: ListDomainSummaryOptions): Promise<DomainSummary[]> {
   const page = pageFromOptions(opts, 50);
   try {
     const domains = listDomains(undefined, page);

@@ -320,9 +320,15 @@ function createEmailsStore(initialMailbox?: Mailbox) {
     }
   };
 
-  const reloadWorkspace = () => {
+  // ASYNC BECAUSE `listDomainSummaries` IS: its provisioning columns come through the store
+  // seam now, where every operation returns a promise. This is a fire-and-forget action rather
+  // than a reactive derivation, so awaiting it changes nothing a component observes — the
+  // rows still land through `setState`, one tick later. The address picker deliberately did
+  // NOT move: `resolveAddressChoice` feeds a synchronous memo, which is why `data.local.ts`
+  // reads `provisioning_status` off the row it already selects instead.
+  const reloadWorkspace = async () => {
     try {
-      const domains = listDomainSummaries({ limit: WORKSPACE_PAGE_SIZE + 1, offset: state.domainsPage * WORKSPACE_PAGE_SIZE });
+      const domains = await listDomainSummaries({ limit: WORKSPACE_PAGE_SIZE + 1, offset: state.domainsPage * WORKSPACE_PAGE_SIZE });
       setState({
         domains: domains.slice(0, WORKSPACE_PAGE_SIZE),
         domainsHasMore: domains.length > WORKSPACE_PAGE_SIZE,
@@ -418,7 +424,7 @@ function createEmailsStore(initialMailbox?: Mailbox) {
     reload,
     reloadWorkspace,
     openRoute(route: RouteName) {
-      if (route === "domains") reloadWorkspace();
+      if (route === "domains") void reloadWorkspace();
       setState("route", route);
     },
     openDialog(dialog: DialogName) {
@@ -428,7 +434,7 @@ function createEmailsStore(initialMailbox?: Mailbox) {
       }
       if (dialog === "filter" || dialog === "search") setState("searchDraft", state.search);
       if (dialog === "digest") void loadDigestSnapshot(state.digestPeriod, { local: true });
-      if (dialog === "domains") reloadWorkspace();
+      if (dialog === "domains") void reloadWorkspace();
       if (dialog === "labels") void ds.listLabelSummaries({ limit: 80 }).then((labels) => setState("labels", labels));
       setState("dialog", dialog);
     },
@@ -596,7 +602,7 @@ function createEmailsStore(initialMailbox?: Mailbox) {
     workspacePage(delta: number) {
       if (delta > 0 && !state.domainsHasMore) return;
       setState("domainsPage", Math.max(0, state.domainsPage + delta));
-      reloadWorkspace();
+      void reloadWorkspace();
     },
     async pullNow() {
       // Auto-pull was LOCAL S3->SQLite ingestion. The self-hosted seam exposes only
@@ -607,7 +613,7 @@ function createEmailsStore(initialMailbox?: Mailbox) {
 
   onMount(() => {
     reload({ preserveSelection: false });
-    reloadWorkspace();
+    void reloadWorkspace();
     const clock = setInterval(() => setState("now", Date.now()), CLOCK_MS);
     const refresh = setInterval(() => {
       if (!state.busyPull) reload({ preserveSelection: true });

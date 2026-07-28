@@ -18,7 +18,7 @@ import { resolveAlias } from "../../db/aliases.js";
 import { createSqliteEmailStore } from "../../store-sqlite/index.js";
 import { findAddressesByEmail } from "../../db/addresses.local.js";
 import { findDomainsByName } from "../../db/domains.local.js";
-import { listAddressProvisioningByIds, listDomainProvisioningByIds, listReadyAddressCountsByDomains } from "../../db/provisioning.local.js";
+import { listAddressProvisioningByIds, listDomainProvisioningByIds, listReadyAddressCountsByDomains } from "../../db/provisioning.js";
 import { sqlEmailAddress } from "../../db/email-address-sql.js";
 import { assessDomainReadiness } from "../../lib/domain-readiness.js";
 import { domainInboundReadinessSignals } from "../../lib/domain-inbound-evidence.js";
@@ -541,20 +541,21 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         const fullId = resolveInboundEmailId(emailId);
         const email = getInboundEmailSummary(fullId, db);
         if (!email) handleError(new Error(`Email not found: ${emailId}`));
-        // Alias resolution reaches storage through the store seam now that `src/db/aliases.ts`
-        // has one implementation, so it is handed a store over THIS handle rather than the
+        // Alias resolution AND the provisioning reads below reach storage through the store
+        // seam now that `src/db/aliases.ts` and `src/db/provisioning.ts` each have one
+        // implementation, so they are handed a store over THIS handle rather than the
         // configured one. That is deliberate and it is what keeps `explain` honest: every other
         // fact on this page is read from `db`, and a default store could resolve the alias
-        // against an API while the ownership and readiness rows beside it came from this file —
+        // against an API while the ownership rows beside it came from this file —
         // one page, two datasets, no way for a reader to tell. It also reads no deployment
         // setting: the store is built from the handle, not from configuration.
-        const aliasStore = createSqliteEmailStore({ database: db, detail: "SQLite (inbox explain)" });
+        const explainStore = createSqliteEmailStore({ database: db, detail: "SQLite (inbox explain)" });
         const routedRecipients = await Promise.all(email!.to_addresses.map(async (recipient) => {
           const normalized = normalizeEmailAddress(recipient) ?? recipient.toLowerCase();
           const domainName = normalized.includes("@") ? normalized.split("@")[1] ?? "" : "";
           return {
             recipient: normalized,
-            aliasTarget: await resolveAlias(normalized, aliasStore),
+            aliasTarget: await resolveAlias(normalized, explainStore),
             exactAddresses: findAddressesByEmail(normalized, db),
             domainRows: domainName ? findDomainsByName(domainName, db) : [],
           };
@@ -562,9 +563,9 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         const allAddresses = routedRecipients.flatMap((recipient) => recipient.exactAddresses);
         const allDomains = routedRecipients.flatMap((recipient) => recipient.domainRows);
         const enrichedAddresses = new Map(enrichAddresses(allAddresses).map((address) => [address.id, address]));
-        const addressProvisioning = listAddressProvisioningByIds(allAddresses.map((address) => address.id), db);
-        const domainProvisioning = listDomainProvisioningByIds(allDomains.map((domain) => domain.id), db);
-        const readyAddressCounts = listReadyAddressCountsByDomains(allDomains.map((domain) => domain.id), db);
+        const addressProvisioning = await listAddressProvisioningByIds(allAddresses.map((address) => address.id), explainStore);
+        const domainProvisioning = await listDomainProvisioningByIds(allDomains.map((domain) => domain.id), explainStore);
+        const readyAddressCounts = await listReadyAddressCountsByDomains(allDomains.map((domain) => domain.id), explainStore);
         const providerNames = listProviderNamesByIds([
           ...(email!.provider_id ? [email!.provider_id] : []),
           ...allAddresses.map((address) => address.provider_id),

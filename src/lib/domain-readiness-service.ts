@@ -100,10 +100,17 @@ export interface DomainReadinessMutationResult {
   updated: Domain;
 }
 
+/**
+ * ASYNCHRONOUS BECAUSE THE PROVISIONING READS ARE. Every summary carries the domain's
+ * provisioning columns and its ready-address count, and `src/db/provisioning.ts` reaches
+ * those through the store seam, where every operation returns a promise. Three of these
+ * were synchronous and are re-exported from `src/index.ts`; the shape change is recorded
+ * there.
+ */
 export interface DomainReadinessService {
-  list(options?: Omit<ListDomainLifecycleSummaryOptions, "db">): DomainLifecycleSummary[];
-  get(domainOrId: string, options?: Omit<ResolveDomainLifecycleOptions, "db">): DomainLifecycleSummary;
-  update(domainOrId: string, input: DomainReadinessMutationInput, options?: Omit<ResolveDomainLifecycleOptions, "db">): DomainReadinessMutationResult;
+  list(options?: Omit<ListDomainLifecycleSummaryOptions, "db">): Promise<DomainLifecycleSummary[]>;
+  get(domainOrId: string, options?: Omit<ResolveDomainLifecycleOptions, "db">): Promise<DomainLifecycleSummary>;
+  update(domainOrId: string, input: DomainReadinessMutationInput, options?: Omit<ResolveDomainLifecycleOptions, "db">): Promise<DomainReadinessMutationResult>;
 }
 
 function providerSummary(provider: Provider | null): DomainReadinessProviderSummary | null {
@@ -205,27 +212,30 @@ function lifecycleSummaryFromParts(
   };
 }
 
-export function buildDomainLifecycleSummary(
+export async function buildDomainLifecycleSummary(
   domain: Domain,
   opts: BuildDomainLifecycleSummaryOptions = {},
-): DomainLifecycleSummary {
+): Promise<DomainLifecycleSummary> {
   return lifecycleSummaryFromParts(domain, {
     mode: resolveMode(opts.mode),
     provider: opts.provider === undefined ? getProvider(domain.provider_id) : opts.provider,
-    provisioning: opts.provisioning === undefined ? getDomainProvisioning(domain.id) : opts.provisioning,
-    ready_addresses: opts.ready_addresses ?? (listReadyAddressCountsByDomains([domain.id]).get(domain.id) ?? 0),
+    provisioning: opts.provisioning === undefined ? await getDomainProvisioning(domain.id) : opts.provisioning,
+    // `?? 0` on a MISSING key, never on a truncated read: `listReadyAddressCountsByDomains`
+    // refuses rather than returning a short map, so an absent domain here means the whole
+    // address table was read and none of it belongs to this domain.
+    ready_addresses: opts.ready_addresses ?? ((await listReadyAddressCountsByDomains([domain.id])).get(domain.id) ?? 0),
   });
 }
 
-export function buildDomainLifecycleSummaries(
+export async function buildDomainLifecycleSummaries(
   domains: Domain[],
   opts: Pick<BuildDomainLifecycleSummaryOptions, "mode"> = {},
-): DomainLifecycleSummary[] {
+): Promise<DomainLifecycleSummary[]> {
   if (domains.length === 0) return [];
   const mode = resolveMode(opts.mode);
   const domainIds = domains.map((domain) => domain.id);
-  const provisioningById = listDomainProvisioningByIds(domainIds);
-  const readyAddressesById = listReadyAddressCountsByDomains(domainIds);
+  const provisioningById = await listDomainProvisioningByIds(domainIds);
+  const readyAddressesById = await listReadyAddressCountsByDomains(domainIds);
   const providerById = new Map<string, Provider | null>();
 
   return domains.map((domain) => {
@@ -241,7 +251,7 @@ export function buildDomainLifecycleSummaries(
   });
 }
 
-export function listDomainLifecycleSummaries(options: ListDomainLifecycleSummaryOptions = {}): DomainLifecycleSummary[] {
+export function listDomainLifecycleSummaries(options: ListDomainLifecycleSummaryOptions = {}): Promise<DomainLifecycleSummary[]> {
   const domains = listDomains(options.provider_id, { limit: options.limit, offset: options.offset });
   return buildDomainLifecycleSummaries(domains, { mode: options.mode });
 }
@@ -271,7 +281,7 @@ export function resolveDomainLifecycleRecord(
 export function getDomainLifecycleSummary(
   domainOrId: string,
   options: ResolveDomainLifecycleOptions = {},
-): DomainLifecycleSummary {
+): Promise<DomainLifecycleSummary> {
   const domain = resolveDomainLifecycleRecord(domainOrId, { provider_id: options.provider_id });
   return buildDomainLifecycleSummary(domain, { mode: options.mode });
 }
@@ -295,13 +305,13 @@ function toReadinessUpdate(input: DomainReadinessMutationInput): DomainReadiness
   return update;
 }
 
-export function updateDomainLifecycleReadiness(
+export async function updateDomainLifecycleReadiness(
   domainOrId: string,
   input: DomainReadinessMutationInput,
   options: ResolveDomainLifecycleOptions = {},
-): DomainReadinessMutationResult {
+): Promise<DomainReadinessMutationResult> {
   const domain = resolveDomainLifecycleRecord(domainOrId, { provider_id: options.provider_id });
-  const before = buildDomainLifecycleSummary(domain, { mode: options.mode });
+  const before = await buildDomainLifecycleSummary(domain, { mode: options.mode });
   const update = toReadinessUpdate(input);
   const timestamp = now();
 
@@ -330,8 +340,12 @@ export function updateDomainLifecycleReadiness(
     ? updateDomainReadiness(domain.id, update)
     : domain;
 
+  // AWAITED, not fired and forgotten. Un-awaited these are floating promises: the summary
+  // below would be built before the write landed, so `after.provisioning` would report the
+  // state the row had BEFORE the transition this function just performed, and a rejected
+  // write would surface as an unhandled rejection rather than as a failed command.
   if (input.inbound_status === "ready") {
-    setDomainProvisioning(domain.id, {
+    await setDomainProvisioning(domain.id, {
       provisioning_status: "inbound_ready",
       last_error: null,
       next_check_at: null,
@@ -339,7 +353,7 @@ export function updateDomainLifecycleReadiness(
   }
 
   if (input.outbound_status === "ready" && domain.dkim_status === "verified" && domain.spf_status === "verified") {
-    setDomainProvisioning(domain.id, {
+    await setDomainProvisioning(domain.id, {
       provisioning_status: "verified",
       last_error: null,
       next_check_at: null,
@@ -349,28 +363,28 @@ export function updateDomainLifecycleReadiness(
   return {
     before,
     updated,
-    after: buildDomainLifecycleSummary(updated, { mode: options.mode }),
+    after: await buildDomainLifecycleSummary(updated, { mode: options.mode }),
   };
 }
 
 export function enableDomainInboundReadiness(
   domainOrId: string,
   options: ResolveDomainLifecycleOptions & { force?: boolean } = {},
-): DomainReadinessMutationResult {
+): Promise<DomainReadinessMutationResult> {
   return updateDomainLifecycleReadiness(domainOrId, { inbound_status: "ready", force: options.force }, options);
 }
 
 export function enableDomainOutboundReadiness(
   domainOrId: string,
   options: ResolveDomainLifecycleOptions & { force?: boolean } = {},
-): DomainReadinessMutationResult {
+): Promise<DomainReadinessMutationResult> {
   return updateDomainLifecycleReadiness(domainOrId, { outbound_status: "ready", force: options.force }, options);
 }
 
 export function disableDomainOutboundReadiness(
   domainOrId: string,
   options: ResolveDomainLifecycleOptions = {},
-): DomainReadinessMutationResult {
+): Promise<DomainReadinessMutationResult> {
   return updateDomainLifecycleReadiness(domainOrId, { outbound_status: "disabled" }, options);
 }
 

@@ -1,7 +1,8 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { getDatabase, type Database } from "../db/database.js";
 import { listDomains } from "../db/domains.local.js";
-import { listAddressProvisioningByIds, listDomainProvisioningByIds, listReadyAddressCountsByDomains } from "../db/provisioning.local.js";
+import { listAddressProvisioningByIds, listDomainProvisioningByIds, listReadyAddressCountsByDomains } from "../db/provisioning.js";
+import { createSqliteEmailStore } from "../store-sqlite/index.js";
 import { countValue } from "../db/scalars.js";
 import { assessDomainReadiness } from "../lib/domain-readiness.js";
 import { domainInboundReadinessSignals } from "../lib/domain-inbound-evidence.js";
@@ -34,13 +35,18 @@ function countAddresses(db: Database): number {
   return countValue(row?.count);
 }
 
-export function domainsResourcePayload(db: Database = getDatabase()): Record<string, unknown> {
+export async function domainsResourcePayload(db: Database = getDatabase()): Promise<Record<string, unknown>> {
   const domainRows = listDomains(undefined, db, { limit: DOMAIN_RESOURCE_LIMIT + 1, offset: 0 });
   const truncated = domainRows.length > DOMAIN_RESOURCE_LIMIT;
   const visibleDomains = domainRows.slice(0, DOMAIN_RESOURCE_LIMIT);
   const domainIds = visibleDomains.map((domain) => domain.id);
-  const readyAddressCounts = listReadyAddressCountsByDomains(domainIds, db);
-  const domainProvisioning = listDomainProvisioningByIds(domainIds, db);
+  // The provisioning family reads through the store seam now, and this arm holds the
+  // `Database` every other fact on this page comes from. Building the store from that
+  // handle keeps one page on one dataset: a default store could have resolved provisioning
+  // against an API while the domain rows beside it came from the local file.
+  const store = createSqliteEmailStore({ database: db, detail: "SQLite (mcp domains resource)" });
+  const readyAddressCounts = await listReadyAddressCountsByDomains(domainIds, store);
+  const domainProvisioning = await listDomainProvisioningByIds(domainIds, store);
   const domains = visibleDomains.map((domain) => {
     const ready_addresses = readyAddressCounts.get(domain.id) ?? 0;
     const provisioning = domainProvisioning.get(domain.id) ?? null;
@@ -68,7 +74,10 @@ export async function addressesResourcePayload(db: Database = getDatabase()): Pr
   const addressRows = listEnrichedAddresses(undefined, { limit: ADDRESS_RESOURCE_LIMIT + 1, offset: 0 });
   const truncated = addressRows.length > ADDRESS_RESOURCE_LIMIT;
   const visibleAddresses = addressRows.slice(0, ADDRESS_RESOURCE_LIMIT);
-  const addressProvisioning = listAddressProvisioningByIds(visibleAddresses.map((address) => address.id), db);
+  const addressProvisioning = await listAddressProvisioningByIds(
+    visibleAddresses.map((address) => address.id),
+    createSqliteEmailStore({ database: db, detail: "SQLite (mcp addresses resource)" }),
+  );
   const addresses = visibleAddresses.map((address) => ({
     ...address,
     provisioning: addressProvisioning.get(address.id) ?? null,
@@ -282,7 +291,7 @@ export function registerEmailResources(server: McpServer): void {
       mimeType: "application/json",
     },
     async () => {
-      return jsonResource("emails://domains", domainsResourcePayload());
+      return jsonResource("emails://domains", await domainsResourcePayload());
     },
   );
 
