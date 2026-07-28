@@ -1080,7 +1080,7 @@ const root = join(import.meta.dir, "..");
  * measured over the real `git ls-files` corpus and measured AGAIN after this paragraph was
  * written because this file sits inside the corpus it scans.
  *
- * A THIRD REBASE (onto bd4869a, the fleet-token slice) moved NO counter: the pristine base
+ * A THIRD REBASE (onto bd4869a, the token-verification slice) moved NO counter: the pristine base
  * measures the same eleven the block above declares, and the merged tree re-measures exactly
  * the numbers pinned below — verified rather than assumed, because the previous rebase is
  * the proof that a clean apply can be wrong.
