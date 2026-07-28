@@ -877,6 +877,34 @@ describe("the sent ledger refuses what it cannot answer", () => {
     expect(error.message).toContain("no created_at");
   });
 
+  // THE `id` TIEBREAKER IS LOAD-BEARING AND NEITHER REAL STORE CAN SHOW IT.
+  //
+  // Mutation testing removed `|| compareText(b.id, a.id)` from the comparator and all 100
+  // cases stayed green, including the one above that seeds three ledger rows on one
+  // timestamp. The reason is not that the term is dead: both store variants already serve a
+  // tie in id-DESCENDING order (`src/store-sqlite/messages-sql.ts`), and `Array.prototype.sort`
+  // is stable, so the store's order survived the sort and happened to be the answer.
+  //
+  // THE SERVER ORDERS THE SAME TIE THE OTHER WAY. `src/server/self-hosted/store.ts` orders its
+  // message list `id ASC` within a timestamp, so against a real service the mutant reverses
+  // three rows that a caller is told are newest-first. The store below serves exactly that
+  // order — a CONSISTENT TOTAL order applied before the window, so it pages cleanly and trips
+  // no shift detector — which is the only fixture that can tell the two comparators apart.
+  it("imposes its own total order on a tie the store serves ASCENDING", async () => {
+    const tie = stamp(5);
+    const store = storeWithMessages({
+      listMessages: async (): Promise<Outcome<Page<MessageListRecord>>> => ({
+        ok: true,
+        value: {
+          items: [listRow("id-a", tie), listRow("id-b", tie), listRow("id-c", tie)],
+          next_cursor: null,
+        },
+      }),
+    });
+
+    expect((await listEmails({}, store)).map((row) => row.id)).toEqual(["id-c", "id-b", "id-a"]);
+  });
+
   it("re-checks direction on the row that came back, not only in the query", async () => {
     // The push-down is the STORE's predicate. A store that widened it — or a fixture that
     // ignored the filter, which is precisely what `v1-stub.ts` does with equality filters —
