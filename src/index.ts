@@ -207,6 +207,22 @@ export {
 } from "./db/scheduled.js";
 export type { ScheduledEmail, ScheduledEmailSummary } from "./db/scheduled.js";
 
+// SHAPE CHANGES ON ALL SIX, recorded here because this is the published surface.
+//
+//  * ALL SIX ARE NOW ASYNC. Both deleted arms were synchronous; every operation on the store
+//    seam returns a promise, so these return promises too. An un-awaited call is TRUTHY, so a
+//    consumer that forgets `await` reads a pending promise as a captured email and its fields
+//    as `undefined` — without necessarily failing to compile.
+//  * THE TRAILING `db?: Database` SLOT IS NOW `store?: EmailStore` on all six, and
+//    `listSandboxEmails` / `listSandboxEmailSummaries` lose the `Database | number` third
+//    parameter that reconciled two incompatible arm signatures: their third parameter is the
+//    offset, and the store is fourth.
+//  * `getSandboxCount` RETURNS `Promise<number | null>` rather than `Promise<number>`. The
+//    seam publishes no aggregate, so a count is a bounded enumeration; `null` means the
+//    enumeration did not reach the end of the table and any number would be a lower bound
+//    rather than a total. It is never `0` for that case — a refusal or a fault throws — and
+//    the reason a bound is not published as a bare number is in `src/db/sandbox.ts`,
+//    divergence 8.
 export {
   storeSandboxEmail, listSandboxEmails, listSandboxEmailSummaries, getSandboxEmail,
   clearSandboxEmails, getSandboxCount,

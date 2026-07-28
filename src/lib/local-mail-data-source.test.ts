@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDatabase, resetDatabase } from "../db/database.js";
 import { createProvider } from "../db/providers.local.js";
-import { getSandboxCount } from "../db/sandbox.local.js";
+import { getSandboxCount } from "../db/sandbox.js";
 import { storeInboundEmail } from "../db/inbound.local.js";
 import { resetMailDataSource, resolveMailDataSource, SqliteMailDataSource } from "./mail-data-source.js";
 
@@ -315,6 +315,6 @@ describe("SqliteMailDataSource", () => {
     });
     expect(result.id).toBeTruthy();
     expect(result.messageId).toBeTruthy();
-    expect(getSandboxCount(provider.id)).toBe(1);
+    expect(await getSandboxCount(provider.id)).toBe(1);
   });
 });

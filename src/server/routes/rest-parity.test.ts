@@ -9,7 +9,7 @@ import { addMember, createGroup } from "../../db/groups.local.js";
 import { storeInboundEmail } from "../../db/inbound.local.js";
 import { createProvider } from "../../db/providers.local.js";
 import { createScheduledEmail, markSent } from "../../db/scheduled.js";
-import { storeSandboxEmail } from "../../db/sandbox.local.js";
+import { storeSandboxEmail } from "../../db/sandbox.js";
 import { createSequence, enroll, unenroll } from "../../db/sequences.local.js";
 import { createTemplate } from "../../db/templates.local.js";
 import { createWarmingSchedule, updateWarmingStatus } from "../../db/warming.local.js";
@@ -236,7 +236,7 @@ describe("emails serve REST parity smoke", () => {
       summary: "REST inbound summary",
       confidence: 0.8,
     });
-    storeSandboxEmail({
+    await storeSandboxEmail({
       provider_id: provider.id,
       from_address: "ops@example.com",
       to_addresses: ["user@example.com"],
@@ -567,7 +567,7 @@ describe("emails serve REST parity smoke", () => {
       [provider.id, "Sandbox new", "2026-02-03T00:00:00.000Z"],
       [other.id, "Sandbox other", "2026-02-04T00:00:00.000Z"],
     ] as Array<[string, string, string]>) {
-      const email = storeSandboxEmail({
+      const email = await storeSandboxEmail({
         provider_id: providerId,
         from_address: "ops@example.com",
         to_addresses: ["user@example.com"],

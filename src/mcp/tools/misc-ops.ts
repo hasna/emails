@@ -208,7 +208,7 @@ export function registerMiscOpsTools(server: McpServer): void {
       const { listSandboxEmailSummaries } = await import('../../db/sandbox.js');
       const { resolveId } = await import('../helpers.js');
       const resolvedId = provider_id ? resolveId("providers", provider_id) : undefined;
-      const emails = listSandboxEmailSummaries(resolvedId, limit ?? 50, offset ?? 0);
+      const emails = await listSandboxEmailSummaries(resolvedId, limit ?? 50, offset ?? 0);
       return { content: [{ type: "text", text: JSON.stringify(emails, null, 2) }] };
     } catch (e) {
       return toolError(e);
@@ -227,7 +227,7 @@ export function registerMiscOpsTools(server: McpServer): void {
       const { getSandboxEmail } = await import('../../db/sandbox.js');
       const { resolveId } = await import('../helpers.js');
       const resolvedId = resolveId("sandbox_emails", id);
-      const email = getSandboxEmail(resolvedId);
+      const email = await getSandboxEmail(resolvedId);
       if (!email) throw new Error(`Sandbox email not found: ${id}`);
       return { content: [{ type: "text", text: JSON.stringify(email, null, 2) }] };
     } catch (e) {
@@ -247,7 +247,7 @@ export function registerMiscOpsTools(server: McpServer): void {
       const { clearSandboxEmails } = await import('../../db/sandbox.js');
       const { resolveId } = await import('../helpers.js');
       const resolvedId = provider_id ? resolveId("providers", provider_id) : undefined;
-      const count = clearSandboxEmails(resolvedId);
+      const count = await clearSandboxEmails(resolvedId);
       return { content: [{ type: "text", text: JSON.stringify({ deleted: count }, null, 2) }] };
     } catch (e) {
       return toolError(e);

@@ -4,7 +4,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { closeDatabase, resetDatabase } from "../db/database.js";
 import { createDomain } from "../db/domains.local.js";
 import { createProvider } from "../db/providers.local.js";
-import { listSandboxEmails } from "../db/sandbox.local.js";
+import { listSandboxEmails } from "../db/sandbox.js";
 import { mcpTestRequestInit, startTestMcpHttpServer } from "../test-support/mcp-http.js";
 import { startHttpServer } from "./http.js";
 import { buildServer } from "./server.js";
@@ -66,7 +66,7 @@ describe("MCP local mode", () => {
       }, undefined, { timeout: 10_000 });
       const listedText = listed.content[0]?.type === "text" ? listed.content[0].text : "";
       expect(listedText).toContain("Local MCP smoke");
-      expect(listSandboxEmails(provider.id, 10)).toHaveLength(1);
+      expect(await listSandboxEmails(provider.id, 10)).toHaveLength(1);
     } finally {
       await client.close();
     }

@@ -22,7 +22,7 @@ import { closeDatabase, resetDatabase } from "../../db/database.js";
 import { resetSelfHostedConfigCache } from "../../db/self-hosted-store.js";
 import { addMember, createGroup } from "../../db/groups.js";
 import { createProvider } from "../../db/providers.local.js";
-import { listSandboxEmails } from "../../db/sandbox.local.js";
+import { listSandboxEmails } from "../../db/sandbox.js";
 import { resetMailDataSource } from "../../lib/mail-data-source.js";
 import { startV1Stub, type V1Stub } from "../../test-support/v1-stub.js";
 import { registerSendCommands } from "./send.js";
@@ -124,7 +124,7 @@ describe("emails send --to-group (local)", () => {
     expect(result.consoleOutput).toContain("Email sent to one@ext.com, two@ext.com");
     // The refusal that shipped, in the mode it was most obviously wrong about.
     expect(result.errorOutput).not.toContain("not available in the self-hosted client");
-    const sent = listSandboxEmails(providerId, 10);
+    const sent = await listSandboxEmails(providerId, 10);
     expect(sent).toHaveLength(1);
     // One message carrying BOTH members, which is what `--to a@x b@y` produces
     // — no invented per-recipient fan-out.
@@ -140,7 +140,7 @@ describe("emails send --to-group (local)", () => {
     expect(result.exited).toBe(false);
     expect(result.consoleOutput).toContain("Would send (local)");
     expect(result.consoleOutput).toContain("Group:   team — 2 member(s), all in one To: header");
-    expect(listSandboxEmails(providerId, 10)).toHaveLength(0);
+    expect(await listSandboxEmails(providerId, 10)).toHaveLength(0);
   });
 
   it("collapses a member listed twice under different casing", async () => {
@@ -168,7 +168,7 @@ describe("emails send --to-group (local)", () => {
     expect(result.errorOutput).toContain("Group not found: nope");
     expect(result.errorOutput).toContain("emails group list");
     expect(result.errorOutput).not.toContain("self-hosted");
-    expect(listSandboxEmails(providerId, 10)).toHaveLength(0);
+    expect(await listSandboxEmails(providerId, 10)).toHaveLength(0);
   });
 
   it("refuses an empty group and names the command that fills it", async () => {
@@ -181,7 +181,7 @@ describe("emails send --to-group (local)", () => {
     expect(result.exited).toBe(true);
     expect(result.errorOutput).toContain("Group 'empty' has no members");
     expect(result.errorOutput).toContain("emails group add empty");
-    expect(listSandboxEmails(providerId, 10)).toHaveLength(0);
+    expect(await listSandboxEmails(providerId, 10)).toHaveLength(0);
   });
 
   it("refuses --to and --to-group together rather than dropping --to", async () => {
@@ -192,7 +192,7 @@ describe("emails send --to-group (local)", () => {
 
     expect(result.exited).toBe(true);
     expect(result.errorOutput).toContain("Pass --to or --to-group, not both");
-    expect(listSandboxEmails(providerId, 10)).toHaveLength(0);
+    expect(await listSandboxEmails(providerId, 10)).toHaveLength(0);
   });
 });
 
