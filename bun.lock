@@ -13,7 +13,7 @@
         "@aws-sdk/client-sqs": "^3.1072.0",
         "@aws-sdk/client-sts": "^3.1072.0",
         "@aws-sdk/credential-provider-ini": "^3.972.55",
-        "@hasna/contracts": "0.4.2",
+        "@hasna/contracts": "0.8.2",
         "@hasna/domains": "0.0.35",
         "@hasna/events": "^0.1.8",
         "@hasna/mcp-harness": "0.1.0",
@@ -159,7 +159,7 @@
 
     "@babel/types": ["@babel/types@7.29.7", "", { "dependencies": { "@babel/helper-string-parser": "^7.29.7", "@babel/helper-validator-identifier": "^7.29.7" } }, "sha512-4zBIxpPzowiZpusoFkyGVwakdRJUyuH5PxQ/PrqghfdFWWasvnCdPfQXHrenDai+gyLARulZjZowCOj6fjT4pA=="],
 
-    "@hasna/contracts": ["@hasna/contracts@0.4.2", "", { "dependencies": { "commander": "^13.1.0", "zod": "^3.25.76" }, "bin": { "contracts": "dist/cli/index.js", "contracts-cli": "dist/cli/index.js" } }, "sha512-xD7ZWQXR+AjYAJVpaMsQ+8V0SABiJSKVeI0B1WbPByYeGz6daDtgyZ6c3q0c2S6uzIEtUxlGHPundr675636ew=="],
+    "@hasna/contracts": ["@hasna/contracts@0.8.2", "", { "dependencies": { "commander": "^13.1.0", "zod": "^3.25.76" }, "bin": { "contracts": "dist/cli/index.js", "contracts-cli": "dist/cli/contracts-cli.js" } }, "sha512-oi+Q1QyxARpTRmE2za1rCzETi7DqB0EeimI3hIh2iMKV2Sh0D2Mi6KkDqNLnYsRZKjxEH5VapFoprb1Vi+R9+Q=="],
 
     "@hasna/domains": ["@hasna/domains@0.0.35", "", { "dependencies": { "@aws-sdk/client-route-53": "^3.1067.0", "@aws-sdk/client-route-53-domains": "^3.1067.0", "@aws-sdk/credential-provider-ini": "3.972.53", "@hasna/contracts": "^0.5.2", "@modelcontextprotocol/sdk": "^1.29.0", "chalk": "^5.4.1", "commander": "^13.1.0", "ink": "^5.2.0", "ink-text-input": "^6.0.0", "pg": "^8.21.0", "react": "^18.3.1", "zod": "^3.24.2" }, "optionalDependencies": { "@hasna/events": "^0.1.7" }, "peerDependencies": { "@hasna/contacts": "^0.6.19" }, "optionalPeers": ["@hasna/contacts"], "bin": { "domains": "dist/cli/index.js", "domains-mcp": "dist/mcp/index.js", "domains-serve": "dist/server/index.js" } }, "sha512-926OuguAuUsTQ1YOXmbU2fhCFwDBfwIGqK0oVJQjffMJXV+rYC/4Aowj2HMgWjWiF/S+FW4oj/e3B89bE4YxhA=="],
 

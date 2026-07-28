@@ -79,7 +79,7 @@
     "@aws-sdk/client-sqs": "^3.1072.0",
     "@aws-sdk/client-sts": "^3.1072.0",
     "@aws-sdk/credential-provider-ini": "^3.972.55",
-    "@hasna/contracts": "0.4.2",
+    "@hasna/contracts": "0.8.2",
     "@hasna/domains": "0.0.35",
     "@hasna/events": "^0.1.8",
     "@hasna/mcp-harness": "0.1.0",

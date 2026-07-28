@@ -53,6 +53,11 @@ export function verifyApiKeyWithAliases(
           outcome: decision.ok ? "allow" : "deny",
           app: decision.ok ? decision.principal.app : canonicalApp,
           kid: decision.ok ? decision.principal.kid : denyKid(),
+          // Unlike `kid` (recovered structurally above for forensics), `tid` is
+          // an ORGANIZATION attribution: contracts' own middleware emits it only
+          // once the signature has verified, so a deny here logs null rather
+          // than naming a tenant the request never proved.
+          tid: decision.ok ? decision.principal.tid : null,
           reason: decision.ok ? null : decision.reason,
           scopesRequired: [...(context?.requiredScopes ?? [])],
           method: context?.method ?? null,
