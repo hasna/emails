@@ -710,8 +710,8 @@ describe("conformance harness", () => {
     // list EMPTY, and it is strictly stronger: the gap list must now be empty rather
     // than complete.
     expect(capabilityCoverageGaps()).toEqual([]);
-    // THE EXACT LIST, not a floor. A `>=` floor is not a pin: with 48 cases declared, a
-    // floor of 30 lets eighteen be deleted with this test still green — and the
+    // THE EXACT LIST, not a floor. A `>=` floor is not a pin: with 61 cases declared, a
+    // floor of 30 lets thirty-one be deleted with this test still green — and the
     // assertion this one replaced (`CONFORMANCE_CASES` is empty) WAS exact, so a floor
     // would have been a loss of precision at the moment the list started mattering.
     // Adding a case means adding a line here, which is the visible diff the seam's
@@ -758,7 +758,21 @@ describe("conformance harness", () => {
       "provisioning/domain-patch-round-trip",
       "provisioning/event-recorded-then-listed",
       "repair/a-created-run-reads-back-by-its-id",
-      "resources/uniform-crud-round-trip",
+      "resources/aliases-crud-round-trip",
+      "resources/boolean-equality-filter-round-trip",
+      "resources/contacts-crud-round-trip",
+      "resources/email-digests-crud-round-trip",
+      "resources/events-crud-round-trip",
+      "resources/forwarding-crud-round-trip",
+      "resources/groups-crud-round-trip",
+      "resources/owners-crud-round-trip",
+      "resources/providers-crud-round-trip",
+      "resources/sandbox-crud-round-trip",
+      "resources/scheduled-crud-round-trip",
+      "resources/sequences-crud-round-trip",
+      "resources/templates-crud-round-trip",
+      "resources/warming-crud-round-trip",
+      "resources/webhook-receipts-crud-round-trip",
       "send-intents/cancel-tombstones-the-key",
       "send-intents/claim-then-complete-records-the-provider-id",
       "send-intents/reserve-is-visible-through-the-key",

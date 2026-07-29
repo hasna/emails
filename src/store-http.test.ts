@@ -4,7 +4,7 @@
 //
 // THREE THINGS THIS FILE HAS TO ESTABLISH, and they are separable:
 //
-// 1. THE STORE BEHAVES. The same 48 unmodified conformance cases the SQLite store
+// 1. THE STORE BEHAVES. The same 61 unmodified conformance cases the SQLite store
 //    runs, over real HTTP, against a `/v1` service backed by a real store. No case is
 //    skipped and no capability excuses one: a false capability still runs its case and
 //    still has to answer with the typed refusal.
@@ -404,7 +404,7 @@ describe("HttpEmailStore conformance", () => {
 
   it("reports the three-state attachment lookup in all three states", async () => {
     // Conformance only exercises "available". A client collapsing the 409 into ok(null)
-    // would pass all 48 cases, so the other two states are asserted directly.
+    // would pass all conformance cases, so the other two states are asserted directly.
     const subject = store();
     const withBytes = await subject.messages.createMessage({
       direction: "inbound",

@@ -44,7 +44,10 @@ import type {
   MessageListRecord,
   MessageRecord,
   Page,
+  ResourceInput,
+  ResourceRow,
 } from "./records.js";
+import type { ResourceRepository } from "./repositories.js";
 
 /**
  * One behavioural case.
@@ -383,6 +386,355 @@ async function provider(store: EmailStore): Promise<string> {
 async function ownerId(store: EmailStore): Promise<string> {
   const row = await must(store.owners.create({ type: "human", name: token("owner") }), "owners.create");
   return String(asObject(row, "owner row")["id"]);
+}
+
+type UniformResourceFamily =
+  | "contacts"
+  | "groups"
+  | "owners"
+  | "providers"
+  | "templates"
+  | "sequences"
+  | "scheduled"
+  | "aliases"
+  | "forwarding"
+  | "warming"
+  | "events"
+  | "emailDigests"
+  | "webhookReceipts"
+  | "sandbox";
+
+interface UniformResourceFixture {
+  create: ResourceInput;
+  field: string;
+  initial: string | number;
+  patch: ResourceInput;
+  updated: string | number;
+}
+
+interface UniformResourceCaseSpec {
+  family: UniformResourceFamily;
+  slug: string;
+  prepare(store: EmailStore): Promise<UniformResourceFixture>;
+}
+
+/**
+ * One fixture per `ResourceRepository` on EmailStore. The fields are deliberately
+ * family-specific: the case must cross that family's real schema and ORDER BY, not
+ * merely prove that fourteen properties happen to expose five functions.
+ */
+function uniformResourceCaseSpecs(): UniformResourceCaseSpec[] {
+  return [
+  {
+    family: "contacts",
+    slug: "contacts",
+    async prepare() {
+      const initial = token("contact-name");
+      const updated = token("contact-name-updated");
+      return {
+        create: { email: `${token("contact")}@example.test`, name: initial },
+        field: "name",
+        initial,
+        patch: { name: updated },
+        updated,
+      };
+    },
+  },
+  {
+    family: "groups",
+    slug: "groups",
+    async prepare() {
+      const initial = token("group-description");
+      const updated = token("group-description-updated");
+      return {
+        create: { name: token("group"), description: initial },
+        field: "description",
+        initial,
+        patch: { description: updated },
+        updated,
+      };
+    },
+  },
+  {
+    family: "owners",
+    slug: "owners",
+    async prepare() {
+      const initial = token("owner-name");
+      const updated = token("owner-name-updated");
+      return {
+        create: { type: "human", name: initial },
+        field: "name",
+        initial,
+        patch: { name: updated },
+        updated,
+      };
+    },
+  },
+  {
+    family: "providers",
+    slug: "providers",
+    async prepare() {
+      const initial = token("provider-region");
+      const updated = token("provider-region-updated");
+      return {
+        create: { name: token("provider"), type: "sandbox", region: initial },
+        field: "region",
+        initial,
+        patch: { region: updated },
+        updated,
+      };
+    },
+  },
+  {
+    family: "templates",
+    slug: "templates",
+    async prepare() {
+      const initial = token("template-subject");
+      const updated = token("template-subject-updated");
+      return {
+        create: { name: token("template"), subject_template: initial },
+        field: "subject_template",
+        initial,
+        patch: { subject_template: updated },
+        updated,
+      };
+    },
+  },
+  {
+    family: "sequences",
+    slug: "sequences",
+    async prepare() {
+      const initial = token("sequence-description");
+      const updated = token("sequence-description-updated");
+      return {
+        create: { name: token("sequence"), description: initial },
+        field: "description",
+        initial,
+        patch: { description: updated },
+        updated,
+      };
+    },
+  },
+  {
+    family: "scheduled",
+    slug: "scheduled",
+    async prepare(store) {
+      const initial = token("scheduled-subject");
+      const updated = token("scheduled-subject-updated");
+      return {
+        create: {
+          provider_id: await provider(store),
+          from_address: `${token("scheduled-sender")}@example.test`,
+          subject: initial,
+          scheduled_at: new Date(Date.now() + 60_000).toISOString(),
+        },
+        field: "subject",
+        initial,
+        patch: { subject: updated },
+        updated,
+      };
+    },
+  },
+  {
+    family: "aliases",
+    slug: "aliases",
+    async prepare() {
+      const initial = `${token("alias-target")}@example.test`;
+      const updated = `${token("alias-target-updated")}@example.test`;
+      return {
+        create: { domain: domainToken(), local_part: token("alias"), target_address: initial },
+        field: "target_address",
+        initial,
+        patch: { target_address: updated },
+        updated,
+      };
+    },
+  },
+  {
+    family: "forwarding",
+    slug: "forwarding",
+    async prepare() {
+      const initial = `${token("forward-target")}@example.test`;
+      const updated = `${token("forward-target-updated")}@example.test`;
+      return {
+        create: {
+          source_address: `${token("forward-source")}@example.test`,
+          target_address: initial,
+          mode: "app-copy",
+        },
+        field: "target_address",
+        initial,
+        patch: { target_address: updated },
+        updated,
+      };
+    },
+  },
+  {
+    family: "warming",
+    slug: "warming",
+    async prepare() {
+      return {
+        create: { domain: domainToken(), target_daily_volume: 10, start_date: "2026-01-01" },
+        field: "target_daily_volume",
+        initial: 10,
+        patch: { target_daily_volume: 20 },
+        updated: 20,
+      };
+    },
+  },
+  {
+    family: "events",
+    slug: "events",
+    async prepare(store) {
+      const initial = `${token("event-recipient")}@example.test`;
+      const updated = `${token("event-recipient-updated")}@example.test`;
+      return {
+        create: {
+          provider_id: await provider(store),
+          type: "delivered",
+          recipient: initial,
+          occurred_at: new Date().toISOString(),
+        },
+        field: "recipient",
+        initial,
+        patch: { recipient: updated },
+        updated,
+      };
+    },
+  },
+  {
+    family: "emailDigests",
+    slug: "email-digests",
+    async prepare() {
+      const initial = token("digest-summary");
+      const updated = token("digest-summary-updated");
+      const instant = new Date().toISOString();
+      return {
+        create: {
+          period: "today",
+          since: instant,
+          until: instant,
+          provider: "local",
+          model: "conformance",
+          status: "ok",
+          summary: initial,
+          started_at: instant,
+          completed_at: instant,
+        },
+        field: "summary",
+        initial,
+        patch: { summary: updated },
+        updated,
+      };
+    },
+  },
+  {
+    family: "webhookReceipts",
+    slug: "webhook-receipts",
+    async prepare() {
+      const initial = token("webhook-resource");
+      const updated = token("webhook-resource-updated");
+      return {
+        create: { provider: "conformance", event_id: token("webhook-event"), resource_id: initial },
+        field: "resource_id",
+        initial,
+        patch: { resource_id: updated },
+        updated,
+      };
+    },
+  },
+  {
+    family: "sandbox",
+    slug: "sandbox",
+    async prepare(store) {
+      const initial = token("sandbox-subject");
+      const updated = token("sandbox-subject-updated");
+      return {
+        create: {
+          provider_id: await provider(store),
+          from_address: `${token("sandbox-sender")}@example.test`,
+          subject: initial,
+        },
+        field: "subject",
+        initial,
+        patch: { subject: updated },
+        updated,
+      };
+    },
+    },
+  ];
+}
+
+function resourceIdentity(row: ResourceRow, what: string): string {
+  const identity = row["id"] ?? row["rowid"];
+  check(
+    (typeof identity === "string" && identity.length > 0) ||
+      (typeof identity === "number" && Number.isFinite(identity)),
+    `${what} has no usable id or rowid: ${show(row)}`,
+  );
+  return String(identity);
+}
+
+function uniformResourceCase(spec: UniformResourceCaseSpec): ConformanceCase {
+  const caseId = `resources/${spec.slug}-crud-round-trip`;
+  const label = spec.family;
+  return {
+    id: caseId,
+    what: `${label} create, list, get, update, validation, and delete agree across every store`,
+    requires: null,
+    async exercise(store: EmailStore): Promise<unknown> {
+      const repository: ResourceRepository<ResourceRow> = store[spec.family];
+      const fixture = await spec.prepare(store);
+      const created = asObject(
+        await must(repository.create(fixture.create), `${label}.create`),
+        `created ${label} row`,
+      );
+      const id = resourceIdentity(created, `created ${label} row`);
+      same(created[fixture.field], fixture.initial, `${label} create returns the written ${fixture.field}`);
+
+      const read = asObject(await must(repository.get(id), `${label}.get`), `read ${label} row`);
+      same(resourceIdentity(read, `read ${label} row`), id, `${label} get returns the created identity`);
+      same(read[fixture.field], fixture.initial, `${label} get returns the written ${fixture.field}`);
+
+      const listed = asArray(await must(repository.list({ limit: 500 }), `${label}.list`), `listed ${label} rows`)
+        .map((row) => asObject(row, `listed ${label} row`))
+        .filter((row) => resourceIdentity(row, `listed ${label} row`) === id);
+      same(listed.length, 1, `${label} list returns the created row exactly once`);
+      same(listed[0]?.[fixture.field], fixture.initial, `${label} list returns the written ${fixture.field}`);
+
+      // Schema disagreement must be visible as a refusal on EVERY family. Checking
+      // only contacts left every other OpenAPI/table mapping free to accept-and-drop.
+      refusal(
+        await repository.create({ nonsense_column: 1 }),
+        "invalid_input",
+        422,
+        `${label} unknown column`,
+      );
+
+      const patched = await must(repository.update(id, fixture.patch), `${label}.update`);
+      check(patched !== null, `${label}.update answered null for a row it had just created`);
+      same(
+        asObject(patched, `updated ${label} row`)[fixture.field],
+        fixture.updated,
+        `${label} update returns the patched ${fixture.field}`,
+      );
+      const updated = asObject(
+        await must(repository.get(id), `${label}.get after update`),
+        `read updated ${label} row`,
+      );
+      same(updated[fixture.field], fixture.updated, `${label} update is durable`);
+
+      same(await must(repository.remove(id), `${label}.remove`), true, `${label} first remove reports true`);
+      same(await must(repository.remove(id), `${label}.remove again`), false, `${label} second remove reports false`);
+      stash(caseId, { id });
+      return repository.get(id);
+    },
+    expect(outcome: unknown): void {
+      const state = stashed(caseId);
+      check(typeof state["id"] === "string", `${label} case did not record the removed identity`);
+      same(value(outcome, `${label}.get after remove`), null, `removed ${label} row must not be readable`);
+    },
+  };
 }
 
 async function domain(store: EmailStore): Promise<DomainRecord> {
@@ -1242,9 +1594,18 @@ function buildConformanceCases(): ConformanceCase[] {
     },
 
     // ---- the uniform resource families ----------------------------------
+    // One independent case per family. A loop INSIDE one case would still report a
+    // single green/red result and could be shortened without the exact case-id pin
+    // noticing; separate cases make every family part of uniform coverage itself.
+    ...uniformResourceCaseSpecs().map(uniformResourceCase),
+
+    // Boolean equality filters travel as the words "true"/"false" across the seam,
+    // and SQLite stores booleans as 0/1 — a store that compares the word against the
+    // number silently returns nothing. Exercise both boolean words through a real
+    // filtered list, on top of the per-family CRUD cases above.
     {
-      id: "resources/uniform-crud-round-trip",
-      what: "a uniform family create is readable by id, filterable in list, updatable, and gone after remove",
+      id: "resources/boolean-equality-filter-round-trip",
+      what: "boolean equality filters match rows in both the true and false state across every store",
       requires: null,
       async exercise(store: EmailStore): Promise<unknown> {
         const email = `contact-${token("c")}@example.test`;
@@ -1253,9 +1614,6 @@ function buildConformanceCases(): ConformanceCase[] {
           "created contact",
         );
         const id = String(created["id"]);
-        const read = asObject(await must(store.contacts.get(id), "contacts.get"), "read contact");
-        same(read["email"], email, "the created email reads back");
-        same(read["name"], "Original", "the created name reads back");
         const filtered = asArray(
           await must(
             store.contacts.list({ limit: 500, filters: { email, suppressed: "true" } }),
@@ -1264,9 +1622,6 @@ function buildConformanceCases(): ConformanceCase[] {
           "filtered contacts",
         );
         same(filtered.length, 1, "text and boolean equality filters find exactly the created row");
-        // An unknown column is REFUSED rather than silently ignored: a dropped field is
-        // a write the caller believes happened.
-        refusal(await store.contacts.create({ nonsense_column: 1 }), "invalid_input", 422, "an unknown column");
         await must(store.contacts.update(id, { name: "Updated", suppressed: false }), "contacts.update");
         const filteredFalse = asArray(
           await must(
@@ -1276,14 +1631,8 @@ function buildConformanceCases(): ConformanceCase[] {
           "filtered contacts after update",
         );
         same(filteredFalse.length, 1, "the false boolean word finds the updated row");
-        const updated = asObject(
-          await must(store.contacts.get(id), "contacts.get after update"),
-          "updated contact",
-        );
-        same(updated["name"], "Updated", "the update reads back");
-        same(await must(store.contacts.remove(id), "contacts.remove"), true, "the first remove reports true");
-        same(await must(store.contacts.remove(id), "contacts.remove again"), false, "the second remove reports false");
-        stash("resources/uniform-crud-round-trip", { id });
+        same(await must(store.contacts.remove(id), "contacts.remove"), true, "the cleanup remove reports true");
+        stash("resources/boolean-equality-filter-round-trip", { id });
         return store.contacts.get(id);
       },
       expect(outcome: unknown): void {
