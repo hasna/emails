@@ -328,7 +328,9 @@ export function enumerateSelfHostedRows<T = Record<string, unknown>>(
  * cannot tell either outcome from the truth, which is the same defect class as
  * publishing a page count as a total.
  *
- * The contract is the one src/db/events.remote.ts established:
+ * The contract was established by the events family's deleted `/v1` arm (that
+ * family has since collapsed onto the store seam and no longer reads through this
+ * module; the remaining `*.remote.ts` arms below do):
  *   UNBOUNDED ("give me everything") is answerable only by a complete enumeration.
  *   BOUNDED ("give me the first N") is answered when the window is FULL, or when
  *   the table ended first — then the short result is genuinely the whole tail.
@@ -336,9 +338,10 @@ export function enumerateSelfHostedRows<T = Record<string, unknown>>(
  * end, and when the window MOVED while it was being filled (`stable`), because a
  * full window assembled out of a moving one is missing rows it will never mention.
  *
- * `events.remote.ts` keeps its own copy: its wording is asserted verbatim by
- * src/db/events.remote.test.ts, and re-pointing it here would change those
- * messages for no behavioural gain.
+ * Note the bounded half depends on trusting the SERVER's declared ordering to hand
+ * the window over directly. The seam-side pager (src/lib/status-facts-enumeration.ts)
+ * deliberately does NOT inherit it, because the seam declares no ordering a client
+ * could trust — src/db/events.ts divergence 6 records that trade.
  */
 export function assertHonestSelfHostedRead(
   enumeration: SelfHostedEnumeration<unknown>,
