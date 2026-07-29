@@ -68,8 +68,12 @@ function describeOwnership(detail: { address: { owner: { name: string; type: str
 function resolveSelfHostedAddressId(ref: string): string {
   const exact = getAddress(ref);
   if (exact) return exact.id;
+  // Matches the EMAIL as well as an id prefix: sibling address verbs (owner,
+  // verify, set-owner) accept the email, and `address list` prints it (task
+  // 55c19dde).
+  const wanted = ref.trim().toLowerCase();
   const matches = listAddresses(undefined, { limit: 1000 })
-    .filter((address) => address.id.startsWith(ref));
+    .filter((address) => address.id.startsWith(ref) || address.email.toLowerCase() === wanted);
   if (matches.length === 1) return matches[0]!.id;
   if (matches.length > 1) {
     handleError(new Error(`Address ID is ambiguous: ${matches.map((address) => address.id.slice(0, 8)).join(", ")}`));
@@ -439,8 +443,7 @@ export function registerAddressCommands(program: Command, output: (data: unknown
     .description("Reactivate a suspended sender address")
     .action(async (id: string) => {
       try {
-        const resolvedId = resolveId("addresses", id);
-        if (!getAddress(resolvedId)) handleError(new Error(`Address not found: ${id}`));
+        const resolvedId = resolveSelfHostedAddressId(id);
         const a = await activateAddress(resolvedId);
         output(a, chalk.green(`✓ Activated ${a.email} — sending allowed`));
       } catch (e) {
@@ -453,8 +456,7 @@ export function registerAddressCommands(program: Command, output: (data: unknown
     .description("Set a daily send quota for an address (use 'none' to clear)")
     .action(async (id: string, perDay: string) => {
       try {
-        const resolvedId = resolveId("addresses", id);
-        if (!getAddress(resolvedId)) handleError(new Error(`Address not found: ${id}`));
+        const resolvedId = resolveSelfHostedAddressId(id);
         const quota = /^(none|null|unlimited|0?)$/i.test(perDay) && perDay !== "0"
           ? null
           : Number.parseInt(perDay, 10);

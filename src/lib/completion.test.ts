@@ -68,3 +68,47 @@ describe("generateFishCompletion", () => {
     expect(result).toContain("send");
   });
 });
+
+// ─── TRUTHFULNESS: the scripts must suggest the CLI that exists ────────────────
+//
+// The hand-maintained lists had rotted both ways (task 78653c1c item 1): they
+// suggested `config` — which the router refuses as unknown — and omitted whole
+// real command groups. Top-level suggestions are now derived from the router's
+// own dispatch set; these tests pin that derivation.
+
+import { knownCommandNames } from "../cli/router.js";
+
+describe("completion scripts match the router's dispatch set", () => {
+  const scripts: Array<[string, string]> = [
+    ["bash", generateBashCompletion()],
+    ["zsh", generateZshCompletion()],
+    ["fish", generateFishCompletion()],
+  ];
+
+  for (const [shell, script] of scripts) {
+    it(`${shell}: suggests no removed command`, () => {
+      // `config` was removed from the CLI; suggesting it completes to an
+      // unknown-command error.
+      expect(script).not.toMatch(/[ '"]config[ '")]/);
+    });
+
+    it(`${shell}: carries the real command groups the old list omitted`, () => {
+      for (const command of ["inbox", "owner", "alias", "sendkey", "auth", "db", "whoami", "sequence", "status"]) {
+        expect(script, `${shell} completion omits '${command}'`).toContain(command);
+      }
+    });
+  }
+
+  it("bash: every top-level suggestion is a command the router dispatches", () => {
+    const script = generateBashCompletion();
+    const commands = /commands="([^"]+)"/.exec(script)?.[1]?.split(" ") ?? [];
+    expect(commands.length).toBeGreaterThan(30);
+    for (const command of commands) {
+      expect(knownCommandNames.has(command), `'${command}' is suggested but not dispatchable`).toBe(true);
+    }
+    // And the derivation is complete, not a hand-copied subset.
+    for (const command of knownCommandNames) {
+      expect(commands, `dispatchable '${command}' is missing from completion`).toContain(command);
+    }
+  });
+});

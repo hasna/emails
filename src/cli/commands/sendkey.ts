@@ -84,10 +84,24 @@ export function registerSendKeyCommands(program: Command, output: (data: unknown
 
   cmd
     .command("revoke <id>")
-    .description("Revoke a send key by ID")
+    .description("Revoke a send key by ID (full, or the 8-char id `sendkey list` prints)")
     .action(async (id: string) => {
       try {
-        const k = await getSendKey(id);
+        // `sendkey list` prints 8-char ids; the full UUID is only visible via
+        // --json. A verb must accept the handle its own list hands out (task
+        // 55c19dde).
+        let k = await getSendKey(id);
+        if (!k) {
+          const matches = (await listSendKeySummaries(undefined, { limit: 1000 }))
+            .filter((key) => key.id.startsWith(id));
+          if (matches.length > 1) {
+            return handleError(new Error(`Send key '${id}' is ambiguous: ${matches.map((key) => key.id.slice(0, 8)).join(", ")}`));
+          }
+          if (matches.length === 1) {
+            k = await getSendKey(matches[0]!.id);
+            id = matches[0]!.id;
+          }
+        }
         if (!k) return handleError(new Error(`Send key not found: ${id}`));
         // THE ANSWER IS READ NOW, where it used to be discarded. `revokeSendKey` returns
         // true only when THIS call revoked the key; the previous version printed the

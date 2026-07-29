@@ -1,4 +1,109 @@
+import { knownCommandNames } from "../cli/router.js";
+
+// Shell completion scripts.
+//
+// TOP-LEVEL COMMANDS ARE DERIVED, NOT HAND-MAINTAINED. The previous version
+// carried its own hand-written command list, which had rotted both ways: it
+// still suggested `config` — a command the router refuses as unknown — and it
+// omitted whole real command groups (inbox, owner, alias, sendkey, auth, db,
+// keys, whoami, ...). `knownCommandNames` in src/cli/router.ts is the set the
+// CLI actually dispatches, so deriving from it keeps completion truthful as
+// commands come and go (task 78653c1c, item 1).
+//
+// Subcommand suggestions below remain curated: they are a convenience layer,
+// and an INCOMPLETE suggestion list is acceptable where a WRONG one is not —
+// every name listed is verified against the live help tree.
+
+const TOP_LEVEL_COMMANDS = [...knownCommandNames].sort();
+
+/** Short descriptions where useful; commands without one complete by name alone. */
+const COMMAND_DESCRIPTIONS: Record<string, string> = {
+  provider: "Manage email providers",
+  domain: "Manage sending domains",
+  domains: "Manage domain lifecycle",
+  address: "Manage sender addresses",
+  addresses: "List sender addresses",
+  forwarding: "Manage app-level forwarding rules",
+  send: "Send an email",
+  email: "Sent email log, search, and history",
+  inbox: "Sync and browse inbound emails",
+  pull: "Sync events from providers",
+  stats: "Show email statistics",
+  monitor: "Live monitor with auto-refresh",
+  serve: "Start the self-hosted HTTP service",
+  mcp: "Install/configure the MCP server",
+  log: "Show email send log",
+  test: "Send a test email",
+  search: "Search sent email",
+  export: "Export emails or events",
+  template: "Manage templates",
+  preview: "Preview a template",
+  contact: "Manage email contacts",
+  contacts: "Manage email contacts",
+  group: "Manage recipient groups",
+  sequence: "Manage drip sequences",
+  batch: "Batch send from CSV",
+  schedule: "Manage and run the scheduler",
+  scheduled: "Manage scheduled emails",
+  scheduler: "Start the scheduler",
+  webhook: "Webhook receiver for email events",
+  analytics: "Show email analytics",
+  doctor: "Run system diagnostics",
+  completion: "Generate shell completions",
+  owner: "Manage address owners",
+  alias: "Manage aliases and catch-all routing",
+  sendkey: "Scoped send keys",
+  "send-intent": "Inspect uncertain outbound sends",
+  reply: "Reply to an email in-thread",
+  forward: "Forward an email",
+  status: "Show email system health",
+  aws: "AWS infrastructure setup",
+  daemon: "Inspect daemon and worker health",
+  logs: "Inspect local emails logs",
+  db: "Self-hosted Postgres schema",
+  "self-hosted": "Operate a self-hosted deployment",
+  auth: "Accounts, sessions, and sign-in",
+  keys: "Tenant-scoped API keys",
+  whoami: "Show the signed-in user",
+  ui: "Open the Emails UI",
+  agent: "Agent-oriented context helpers",
+  code: "Find the latest verification code",
+  links: "Extract links from an inbound email",
+  conversation: "Show a full conversation thread",
+  replies: "Show replies to a sent email",
+  show: "Show full email details",
+  "verify-email": "Verify an email address",
+  provision: "Automated provisioning (not implemented)",
+};
+
+/** Curated subcommand suggestions — every name exists on the current CLI. */
+const SUBCOMMANDS: Record<string, string> = {
+  provider: "add list remove update status check sync",
+  domain: "add connect adopt list dns verify status usable move-provider remove check available buy",
+  address: "add list verify remove activate suspend quota owner set-owner",
+  forwarding: "add list enable disable remove run explain",
+  template: "add list show remove",
+  contact: "list suppress unsuppress",
+  contacts: "list suppress unsuppress",
+  group: "create list show members add remove-member delete",
+  sequence: "create list show pause archive enroll unenroll enroll-bulk enrollments step",
+  scheduled: "list cancel",
+  schedule: "list cancel run",
+  alias: "add catch-all global list remove resolve",
+  sendkey: "create list revoke check",
+  owner: "register list addresses",
+  inbox: "list unread-count search read open mailboxes sources status sync-status mark-read archive star label attachments delete clear sync-s3 code links wait",
+  email: "list search show replies thread send",
+  export: "emails events",
+  completion: "bash zsh fish",
+};
+
 export function generateBashCompletion(): string {
+  const cases = Object.entries(SUBCOMMANDS)
+    .map(([command, subcommands]) => `    ${command})
+      COMPREPLY=( $(compgen -W "${subcommands}" -- "\${cur}") )
+      ;;`)
+    .join("\n");
   return `# bash completion for emails
 _emails_completion() {
   local cur prev commands
@@ -6,84 +111,36 @@ _emails_completion() {
   cur="\${COMP_WORDS[COMP_CWORD]}"
   prev="\${COMP_WORDS[COMP_CWORD-1]}"
 
-  commands="provider domain address forwarding send pull stats monitor serve mcp config log test search export template contacts group batch scheduled scheduler webhook analytics doctor completion"
+  commands="${TOP_LEVEL_COMMANDS.join(" ")}"
 
   case "\${prev}" in
     emails)
       COMPREPLY=( $(compgen -W "\${commands}" -- "\${cur}") )
       ;;
-    provider)
-      COMPREPLY=( $(compgen -W "add list remove update status" -- "\${cur}") )
-      ;;
-    domain)
-      COMPREPLY=( $(compgen -W "add list dns verify remove status check" -- "\${cur}") )
-      ;;
-    address)
-      COMPREPLY=( $(compgen -W "add list verify remove" -- "\${cur}") )
-      ;;
-    forwarding)
-      COMPREPLY=( $(compgen -W "add list enable disable remove run explain" -- "\${cur}") )
-      ;;
-    template)
-      COMPREPLY=( $(compgen -W "add list show remove" -- "\${cur}") )
-      ;;
-    contacts)
-      COMPREPLY=( $(compgen -W "list suppress unsuppress" -- "\${cur}") )
-      ;;
-    group)
-      COMPREPLY=( $(compgen -W "create list show add remove-member delete" -- "\${cur}") )
-      ;;
-    scheduled)
-      COMPREPLY=( $(compgen -W "list cancel" -- "\${cur}") )
-      ;;
-    config)
-      COMPREPLY=( $(compgen -W "set get list" -- "\${cur}") )
-      ;;
-    export)
-      COMPREPLY=( $(compgen -W "emails events" -- "\${cur}") )
-      ;;
-    batch)
-      COMPREPLY=( $(compgen -W "send" -- "\${cur}") )
-      ;;
-    completion)
-      COMPREPLY=( $(compgen -W "bash zsh fish" -- "\${cur}") )
-      ;;
+${cases}
   esac
 }
 complete -F _emails_completion emails`;
 }
 
 export function generateZshCompletion(): string {
+  const commandEntries = TOP_LEVEL_COMMANDS
+    .map((command) => {
+      const description = COMMAND_DESCRIPTIONS[command];
+      return description ? `    '${command}:${description}'` : `    '${command}'`;
+    })
+    .join("\n");
+  const cases = Object.entries(SUBCOMMANDS)
+    .map(([command, subcommands]) => `        ${command})
+          _values 'subcommand' ${subcommands.split(" ").map((value) => `'${value}'`).join(" ")}
+          ;;`)
+    .join("\n");
   return `#compdef emails
 
 _emails() {
   local -a commands
   commands=(
-    'provider:Manage email providers'
-    'domain:Manage domains'
-    'address:Manage sender addresses'
-    'forwarding:Manage app-level forwarding rules'
-    'send:Send an email'
-    'pull:Sync events from providers'
-    'stats:Show email statistics'
-    'monitor:Monitor provider health'
-    'serve:Start HTTP server'
-    'mcp:Start MCP server'
-    'config:Manage configuration'
-    'log:Show email log'
-    'test:Send a test email'
-    'search:Search emails'
-    'export:Export data'
-    'template:Manage templates'
-    'contacts:Manage contacts'
-    'group:Manage contact groups'
-    'batch:Batch operations'
-    'scheduled:Manage scheduled emails'
-    'scheduler:Run the scheduler'
-    'webhook:Manage webhooks'
-    'analytics:Show email analytics'
-    'doctor:Run system diagnostics'
-    'completion:Generate shell completions'
+${commandEntries}
   )
 
   _arguments '1: :->command' '*:: :->args'
@@ -94,42 +151,7 @@ _emails() {
       ;;
     args)
       case $words[1] in
-        provider)
-          _values 'subcommand' 'add' 'list' 'remove' 'update' 'status'
-          ;;
-        domain)
-          _values 'subcommand' 'add' 'list' 'dns' 'verify' 'remove' 'status' 'check'
-          ;;
-        address)
-          _values 'subcommand' 'add' 'list' 'verify' 'remove'
-          ;;
-        forwarding)
-          _values 'subcommand' 'add' 'list' 'enable' 'disable' 'remove' 'run' 'explain'
-          ;;
-        template)
-          _values 'subcommand' 'add' 'list' 'show' 'remove'
-          ;;
-        contacts)
-          _values 'subcommand' 'list' 'suppress' 'unsuppress'
-          ;;
-        group)
-          _values 'subcommand' 'create' 'list' 'show' 'add' 'remove-member' 'delete'
-          ;;
-        scheduled)
-          _values 'subcommand' 'list' 'cancel'
-          ;;
-        config)
-          _values 'subcommand' 'set' 'get' 'list'
-          ;;
-        export)
-          _values 'subcommand' 'emails' 'events'
-          ;;
-        batch)
-          _values 'subcommand' 'send'
-          ;;
-        completion)
-          _values 'subcommand' 'bash' 'zsh' 'fish'
-          ;;
+${cases}
       esac
       ;;
   esac
@@ -139,69 +161,22 @@ _emails "$@"`;
 }
 
 export function generateFishCompletion(): string {
+  const topLevel = TOP_LEVEL_COMMANDS
+    .map((command) => {
+      const description = COMMAND_DESCRIPTIONS[command];
+      const suffix = description ? ` -d '${description}'` : "";
+      return `complete -c emails -n '__fish_use_subcommand' -a '${command}'${suffix}`;
+    })
+    .join("\n");
+  const subcommands = Object.entries(SUBCOMMANDS)
+    .map(([command, subs]) => `complete -c emails -n '__fish_seen_subcommand_from ${command}' -a '${subs}'`)
+    .join("\n");
   return `# fish completion for emails
 complete -c emails -f
 
-# Top-level commands
-complete -c emails -n '__fish_use_subcommand' -a 'provider' -d 'Manage email providers'
-complete -c emails -n '__fish_use_subcommand' -a 'domain' -d 'Manage domains'
-complete -c emails -n '__fish_use_subcommand' -a 'address' -d 'Manage sender addresses'
-complete -c emails -n '__fish_use_subcommand' -a 'forwarding' -d 'Manage app-level forwarding rules'
-complete -c emails -n '__fish_use_subcommand' -a 'send' -d 'Send an email'
-complete -c emails -n '__fish_use_subcommand' -a 'pull' -d 'Sync events from providers'
-complete -c emails -n '__fish_use_subcommand' -a 'stats' -d 'Show email statistics'
-complete -c emails -n '__fish_use_subcommand' -a 'monitor' -d 'Monitor provider health'
-complete -c emails -n '__fish_use_subcommand' -a 'serve' -d 'Start HTTP server'
-complete -c emails -n '__fish_use_subcommand' -a 'mcp' -d 'Start MCP server'
-complete -c emails -n '__fish_use_subcommand' -a 'config' -d 'Manage configuration'
-complete -c emails -n '__fish_use_subcommand' -a 'log' -d 'Show email log'
-complete -c emails -n '__fish_use_subcommand' -a 'test' -d 'Send a test email'
-complete -c emails -n '__fish_use_subcommand' -a 'search' -d 'Search emails'
-complete -c emails -n '__fish_use_subcommand' -a 'export' -d 'Export data'
-complete -c emails -n '__fish_use_subcommand' -a 'template' -d 'Manage templates'
-complete -c emails -n '__fish_use_subcommand' -a 'contacts' -d 'Manage contacts'
-complete -c emails -n '__fish_use_subcommand' -a 'group' -d 'Manage contact groups'
-complete -c emails -n '__fish_use_subcommand' -a 'batch' -d 'Batch operations'
-complete -c emails -n '__fish_use_subcommand' -a 'scheduled' -d 'Manage scheduled emails'
-complete -c emails -n '__fish_use_subcommand' -a 'scheduler' -d 'Run the scheduler'
-complete -c emails -n '__fish_use_subcommand' -a 'webhook' -d 'Manage webhooks'
-complete -c emails -n '__fish_use_subcommand' -a 'analytics' -d 'Show email analytics'
-complete -c emails -n '__fish_use_subcommand' -a 'doctor' -d 'Run system diagnostics'
-complete -c emails -n '__fish_use_subcommand' -a 'completion' -d 'Generate shell completions'
+# Top-level commands (derived from the router's dispatch set)
+${topLevel}
 
-# Provider subcommands
-complete -c emails -n '__fish_seen_subcommand_from provider' -a 'add list remove update status'
-
-# Domain subcommands
-complete -c emails -n '__fish_seen_subcommand_from domain' -a 'add list dns verify remove status check'
-
-# Address subcommands
-complete -c emails -n '__fish_seen_subcommand_from address' -a 'add list verify remove'
-
-# Forwarding subcommands
-complete -c emails -n '__fish_seen_subcommand_from forwarding' -a 'add list enable disable remove run explain'
-
-# Template subcommands
-complete -c emails -n '__fish_seen_subcommand_from template' -a 'add list show remove'
-
-# Contacts subcommands
-complete -c emails -n '__fish_seen_subcommand_from contacts' -a 'list suppress unsuppress'
-
-# Group subcommands
-complete -c emails -n '__fish_seen_subcommand_from group' -a 'create list show add remove-member delete'
-
-# Scheduled subcommands
-complete -c emails -n '__fish_seen_subcommand_from scheduled' -a 'list cancel'
-
-# Config subcommands
-complete -c emails -n '__fish_seen_subcommand_from config' -a 'set get list'
-
-# Export subcommands
-complete -c emails -n '__fish_seen_subcommand_from export' -a 'emails events'
-
-# Batch subcommands
-complete -c emails -n '__fish_seen_subcommand_from batch' -a 'send'
-
-# Completion subcommands
-complete -c emails -n '__fish_seen_subcommand_from completion' -a 'bash zsh fish'`;
+# Subcommands
+${subcommands}`;
 }
