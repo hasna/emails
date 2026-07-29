@@ -247,4 +247,20 @@ describe("daemon commands", () => {
       queue: { availability: { available: true, complete: true, basis: "client_enumeration" } },
     });
   });
+
+  it("rejects inherited object keys as log components", async () => {
+    const originalExit = process.exit;
+    const originalError = console.error;
+    const errors: string[] = [];
+    console.error = ((message?: unknown) => { errors.push(String(message ?? "")); }) as typeof console.error;
+    process.exit = ((code?: number) => { throw new Error(`process.exit:${code ?? 0}`); }) as typeof process.exit;
+    try {
+      await expect(runDaemonCommand(["logs", "tail", "--component", "constructor"]))
+        .rejects.toThrow("process.exit:1");
+      expect(errors.join("\n")).toContain("Unknown log component: constructor");
+    } finally {
+      process.exit = originalExit;
+      console.error = originalError;
+    }
+  });
 });

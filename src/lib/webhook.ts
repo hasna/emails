@@ -248,22 +248,11 @@
 //     `TS2322: Type '{ kind: "postgres"; }' is not assignable to type 'never'`, and removing the
 //     guard makes the same tree compile silently and START the receiver. That inversion is why the
 //     arm exists.
-//   * the `default:` arm of the colour helper. Unreachable — but a review found the reason this
-//     comment first gave for that ("no event either parser can produce reaches it") to be FALSE,
-//     and the correction is worth more than the survivor. `webhook-events.ts:57` and `:77` index
-//     a PLAIN OBJECT LITERAL with `typeMap[body.type]`, so INHERITED keys escape the
-//     `if (!eventType) return null` guard: measured directly, `type: "constructor"`,
-//     `"toString"` and `"valueOf"` all yield an event whose `type` is a FUNCTION, and
-//     `"__proto__"` yields one whose `type` is an object. The arm is still never reached, because
-//     binding a function into the `events` row throws and the request becomes a 500 before the
-//     console line — which is also the shape of the PRE-EXISTING DEFECT this exposes: a signed
-//     payload naming a prototype key gets a permanent 500 and is retried by the provider forever,
-//     where it should get the 200 "Unrecognized event type" that every other unknown type gets.
-//     NOT FIXED HERE, and the reason is blast radius rather than doubt: the fix belongs in
-//     `webhook-events.ts` (`Object.hasOwn`, or a null-prototype map), which is NOT part of this
-//     family and is shared with the server-side receiver in `src/server/webhooks/receivers.ts`,
-//     so changing it changes that receiver's behaviour too and wants its own change with its own
-//     tests on both mounts.
+//   * the `default:` arm of the colour helper. Unreachable: `webhook-events.ts` now performs an
+//     own-property lookup before accepting either provider's type, so inherited names such as
+//     `constructor` and `__proto__` are rejected as unrecognized instead of becoming a function /
+//     object-valued event type. Keep the default as a harmless rendering fallback for callers of
+//     this helper; the persistence boundary independently constrains the durable enum.
 //
 // The two bounds on the body are NOT redundant and the suite now separates them, which it did
 // not at first: removing the declared-length check left every case green, because the

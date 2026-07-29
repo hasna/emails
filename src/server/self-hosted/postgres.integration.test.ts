@@ -82,7 +82,7 @@ async function columnType(table: string, column: string): Promise<string | null>
 /**
  * The writes the self-hosted server actually makes, one per drift class, each
  * chosen to stress a reconcile: legacy CHECK enums (provider='external',
- * mode='redirect', new triage/digest/event/source enums), dropped legacy FKs
+ * mode='redirect', new triage/digest/source enums), dropped legacy FKs
  * (ids that live in messages / self_hosted_providers / are external), relaxed
  * NOT NULL (domains/addresses provider_id, send_keys key_hash, in-progress
  * agent runs), added columns (updated_at, group_members.id), restored defaults
@@ -114,8 +114,8 @@ async function serverWriteFailures(store: TenantScopedStore): Promise<string[]> 
     store.createResource(R("triage"), { email_id: "e1", label: "needs-decision", priority: 3, sentiment: "mixed" }));
   await attempt("forwarding mode=redirect", () =>
     store.createResource(R("forwarding"), { source_address: "s@x.com", target_address: "t@x.com", mode: "redirect", enabled: true }));
-  await attempt("events type=processed (metadata jsonb->text, FK)", () =>
-    store.createResource(R("events"), { provider_id: "ses", type: "processed", recipient: "r@x.com", metadata: { k: "v" } }));
+  await attempt("events metadata jsonb->text + dropped FK", () =>
+    store.createResource(R("events"), { provider_id: "ses", type: "delivered", recipient: "r@x.com", metadata: { k: "v" } }));
   await attempt("sources type=imap (checks/FK/json)", () =>
     store.createResource(R("sources"), { mailbox_id: "mb1", provider_id: "p", type: "imap", name: "n", status: "paused", settings_json: { a: 1 }, provider_snapshot_json: { b: 2 } }));
   await attempt("warming omit start_date/volume", () =>
@@ -232,6 +232,35 @@ describe("self-hosted Postgres integration", () => {
     const claimed = await store.claimSendIntent(first.record.id);
     expect(claimed?.send_state).toBe("sending");
     expect((await store.completeSendIntent(first.record.id, "provider-ci")).send_state).toBe("sent");
+  });
+
+  it.skipIf(!client)("0022 rejects new non-enum event types without deleting legacy poison", async () => {
+    await resetPublicSchema();
+    const migrations = emailsSelfHostedMigrations();
+    const guardIndex = migrations.findIndex((migration) => migration.id === "0022_events_type_enum_check");
+    expect(guardIndex).toBeGreaterThan(0);
+    await new MigrationLedger(client!, migrations.slice(0, guardIndex)).migrate();
+
+    const events = resourceSpecForPath("events")!;
+    const scoped = new EmailsSelfHostedStore(client!).forTenant(DEFAULT_TENANT_ID);
+    const legacy = await scoped.createResource(events, { type: "constructor" });
+    expect(legacy["type"]).toBe("constructor");
+
+    const guard = migrations[guardIndex]!;
+    await client!.execute(guard.sql);
+    await client!.execute(guard.sql); // internally idempotent
+
+    expect(await scoped.listResource(events, { filters: { type: "constructor" } })).toHaveLength(1);
+    await expect(scoped.createResource(events, { type: "__proto__" }))
+      .rejects.toThrow(/events_type_enum_check/);
+    expect((await scoped.createResource(events, { type: "delivered" }))["type"]).toBe("delivered");
+
+    const constraint = await client!.one<{ convalidated: boolean }>(
+      `SELECT convalidated FROM pg_constraint
+        WHERE conrelid = 'public.events'::regclass AND conname = 'events_type_enum_check'`,
+    );
+    // NOT VALID preserves the pre-existing row but still rejects every new bad write.
+    expect(constraint.convalidated).toBe(false);
   });
 
   it.skipIf(!client)("atomically tombstones send intents with tenant isolation and real claim/cancel concurrency", async () => {

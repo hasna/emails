@@ -389,7 +389,9 @@ export async function syncProvider(providerId: string, db?: Database, adapterOve
 
       // Update email status if we have a linked email
       if (emailLink) {
-        const newStatus = STATUS_MAP[remoteEvent.type];
+        const newStatus = Object.hasOwn(STATUS_MAP, remoteEvent.type)
+          ? STATUS_MAP[remoteEvent.type]
+          : undefined;
         if (newStatus && emailLink.status === "sent") {
           statusUpdates.push({ id: emailLink.id, status: newStatus });
           emailLink.status = newStatus;

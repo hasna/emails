@@ -173,15 +173,17 @@ describe("logs tail reads this machine's log files", () => {
     expect(output).toContain("not published over /v1");
   });
 
-  it("still rejects an unknown component", async () => {
+  it("still rejects unknown and inherited-key components", async () => {
     const originalExit = process.exit;
     const originalError = console.error;
     const errors: string[] = [];
     console.error = ((message?: unknown) => { errors.push(String(message ?? "")); }) as typeof console.error;
     process.exit = ((code?: number) => { throw new Error(`process.exit:${code ?? 0}`); }) as typeof process.exit;
     try {
-      await expect(runDaemon(["logs", "tail", "--component", "nope"])).rejects.toThrow("process.exit:1");
-      expect(errors.join("\n")).toContain("Unknown log component: nope");
+      for (const component of ["nope", "constructor", "__proto__"]) {
+        await expect(runDaemon(["logs", "tail", "--component", component])).rejects.toThrow("process.exit:1");
+        expect(errors.join("\n")).toContain(`Unknown log component: ${component}`);
+      }
     } finally {
       process.exit = originalExit;
       console.error = originalError;

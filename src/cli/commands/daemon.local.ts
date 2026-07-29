@@ -22,6 +22,10 @@ const LOG_FILES: Record<LogComponent, string[]> = {
   nightly: ["nightly-sync.log"],
 };
 
+function isLogComponent(value: string): value is LogComponent {
+  return Object.hasOwn(LOG_FILES, value);
+}
+
 /**
  * The provisioning queue, over the store seam.
  *
@@ -205,8 +209,8 @@ export function registerDaemonCommands(program: Command, output: (data: unknown,
     .option("--lines <n>", "Lines to show from each file", "80")
     .action((opts: { component: string; lines: string }) => {
       try {
-        const component = opts.component as LogComponent;
-        if (!LOG_FILES[component]) handleError(new Error(`Unknown log component: ${opts.component}`));
+        if (!isLogComponent(opts.component)) handleError(new Error(`Unknown log component: ${opts.component}`));
+        const component = opts.component;
         const result = readTail(component, parseInt(opts.lines, 10) || 80);
         const existing = result.files.filter((file) => file.exists);
         const formatted = existing.length

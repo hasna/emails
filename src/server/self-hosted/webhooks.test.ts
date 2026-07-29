@@ -413,6 +413,17 @@ const neverVerified = async () => false;
 // ---------------------------------------------------------------------------
 
 describe("self-hosted webhook mount", () => {
+  test("0022 installs the Postgres event-type allowlist without deleting legacy rows", () => {
+    const migration = emailsSelfHostedMigrations().find(
+      (candidate) => candidate.id === "0022_events_type_enum_check",
+    );
+    expect(migration).toBeDefined();
+    expect(migration!.sql).toContain("ADD CONSTRAINT events_type_enum_check");
+    expect(migration!.sql).toContain("'delivered','bounced','complained','opened','clicked','unsubscribed'");
+    expect(migration!.sql).toContain("NOT VALID");
+    expect(migration!.sql).not.toMatch(/DELETE\s+FROM\s+(?:public\.)?events/i);
+  });
+
   test("every documented webhook route is actually mounted, and vice versa", async () => {
     const documented = Object.keys(emailsSelfHostedOpenApi.paths as Record<string, unknown>)
       .filter((path) => path.startsWith("/v1/webhooks/"))
