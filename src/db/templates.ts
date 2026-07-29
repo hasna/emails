@@ -328,14 +328,16 @@ async function findByNameRaw(store: EmailStore, name: string, what: string): Pro
 /**
  * The row `nameOrId` addresses: the id's own row when the store has one, else the
  * newest row carrying it as an exact name — id over name, which is what BOTH deleted
- * arms promised (divergence 5). An empty reference addresses no row — and through an
- * API, a blank path segment is a DIFFERENT route (the list), whose answer must not
- * be presented as a record.
+ * arms promised (divergence 5). A blank reference addresses no row: the ID half of
+ * that answer now belongs to the SEAM (both stores' `get` answer null for a blank id,
+ * before any request is built), and what remains here is only the NAME half — a blank
+ * reference must not fall through to the name scan and resolve a template that
+ * happens to carry an empty name.
  */
 async function findByRefRaw(store: EmailStore, nameOrId: string, what: string): Promise<ResourceRow | null> {
-  if (nameOrId.trim() === "") return null;
   const direct = required(what, await store.templates.get(nameOrId));
   if (direct !== null) return direct;
+  if (nameOrId.trim() === "") return null;
   return (await findByNameRaw(store, nameOrId, what)) ?? null;
 }
 

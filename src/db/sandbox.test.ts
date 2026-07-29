@@ -460,24 +460,20 @@ for (const [label, makeStore] of STORE_VARIANTS) {
         expect(await getSandboxEmail("nonexistent-id", makeStore())).toBeNull();
       });
 
-      it("answers null for a BLANK id without asking the store", async () => {
-        // The SQLite arm answered null (no row has an empty id). The API path would build
-        // `GET /v1/sandbox-emails/`, whose trailing slash the service strips before
-        // dispatching, landing on the LIST route and handing back an envelope the mapper
-        // faults on. The store below throws if it is touched at all, so this asserts the
-        // ABSENCE of the request and not only the shape of the answer.
+      it("answers null for a BLANK id, decided at the seam", async () => {
+        // A blank id is absence, and that answer now belongs to the SEAM on both arms:
+        // the SQLite arm's `WHERE id = ''` matches nothing, and the HTTP arm answers
+        // null BEFORE building a request — `GET /v1/sandbox-emails/` is the LIST route
+        // in disguise once the service strips the trailing slash, and it is never sent.
+        // The hand-written caller guard this module carried is retired for that reason,
+        // the same way the alias/group/template readers were handled.
         const store = makeStore();
-        const refuses: EmailStore = {
-          ...store,
-          sandbox: {
-            ...store.sandbox,
-            get: async () => {
-              throw new Error("the store must not be asked for a blank id");
-            },
-          },
-        };
+        seedCapture("sbx-present", stamp(1));
 
-        expect(await getSandboxEmail("", refuses)).toBeNull();
+        expect(await getSandboxEmail("", store)).toBeNull();
+        // And the control: the seam still answers a real id, so null above is the
+        // blank-id decision and not a broken reader.
+        expect((await getSandboxEmail("sbx-present", store))?.id).toBe("sbx-present");
       });
 
       it("FAULTS on a recipient list that is not readable JSON rather than reporting none", async () => {

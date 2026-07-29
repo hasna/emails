@@ -448,9 +448,9 @@ export async function createGroup(name: string, description?: string, store?: Gr
 }
 
 export async function getGroup(id: string, store?: GroupStore): Promise<Group | null> {
-  // An empty id addresses no row — and through an API, a blank path segment is a
-  // DIFFERENT route (the list), whose answer must not be presented as a record.
-  if (id.trim() === "") return null;
+  // A blank id is absence, answered by the SEAM on both arms (the HTTP store decides
+  // it before building a request, so the blank path segment can never reach the LIST
+  // route). The hand-written guard here is retired for that reason.
   const record = required("read a group", await storeFor(store).groups.get(id));
   return record === null ? null : toGroup(record);
 }

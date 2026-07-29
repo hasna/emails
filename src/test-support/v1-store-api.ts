@@ -55,11 +55,22 @@
 //    for those three operations, and the live integration run supplies an operator key so
 //    that it is.
 //
-// 2. `PATCH /v1/send-keys/{id}` IGNORES the `revoked_at` value it is sent, revoking with
-//    the store's own clock. The real service persists the client's timestamp verbatim
-//    (`revoked_at` is a writable column on the generic path). So the clock weakness that
-//    send-keys.ts documents at length — the revocation instant coming from the CLIENT — is
-//    not exercised end to end here.
+// 2. GONE, closed the same way as the headline divergence — by making the fixture match
+//    the service rather than by relaxing anything. `PATCH /v1/send-keys/{id}` used to
+//    IGNORE the `revoked_at` value it was sent, revoking with the backing store's own
+//    clock; the real service persists the client's timestamp VERBATIM (`revoked_at` is a
+//    writable column on the generic path), including stamping a second instant over a
+//    key already revoked. That made the whole client-clock class — the weakness
+//    send-keys.ts documents at length — unobservable here: the backing SQLite arm writes
+//    `WHERE revoked_at IS NULL`, so a client that re-PATCHed on every repeat revoke
+//    still read back a stable instant and looked idempotent. The fixture now persists
+//    the client's value the way the service does. Because the seam deliberately has no
+//    verbatim write for this column (`revokeSendKey(id)` takes no instant), the value
+//    lives in a per-fixture response overlay over the send-keys routes — the ONE
+//    narrowly scoped exception to "this fixture stores nothing", carrying exactly the
+//    column whose service behaviour the seam cannot reproduce, so that a client which
+//    stops guarding repeat revokes FAILS here instead of being handed idempotence it
+//    does not have.
 
 import { emailsSelfHostedOpenApi } from "../server/self-hosted/openapi.js";
 import { SELF_HOSTED_RESOURCES } from "../server/self-hosted/resources.js";
@@ -257,6 +268,13 @@ interface RouteContext {
   url: URL;
   method: string;
   body: Record<string, unknown>;
+  /**
+   * `send_keys.revoked_at` as the CLIENT wrote it, per key id — divergence note 2 in
+   * the header. The service persists this column verbatim through its generic write
+   * path and the seam has no verbatim write for it, so the fixture keeps the client's
+   * value here and lays it over every send-keys answer.
+   */
+  sendKeyRevocations: Map<string, string>;
 }
 
 function familyFor(store: EmailStore, path: string): ResourceRepository<Record<string, unknown>> | null {
@@ -325,25 +343,40 @@ async function handleGenericResource(context: RouteContext, path: string, id: st
   }
 
   if (path === "send-keys") {
+    // The client-written `revoked_at`, laid over the backing store's row — see the
+    // header's divergence note 2 for why this one column is fixture-held.
+    const overlay = context.sendKeyRevocations;
+    const withClientRevocation = (row: unknown): unknown => {
+      if (typeof row !== "object" || row === null) return row;
+      const record = row as Record<string, unknown>;
+      const instant = overlay.get(String(record["id"]));
+      return instant === undefined ? record : { ...record, revoked_at: instant };
+    };
     if (method === "GET" && id === null) {
       const listed = settled(await store.sendKeys.listSendKeys({
         limit: intParam(url, "limit") ?? 500,
         ...(intParam(url, "offset") === undefined ? {} : { offset: intParam(url, "offset") }),
       }));
-      return "response" in listed ? listed.response : json(200, { items: listed.value });
+      return "response" in listed
+        ? listed.response
+        : json(200, { items: listed.value.map(withClientRevocation) });
     }
     if (method === "GET" && id !== null) {
       const read = settled(await store.sendKeys.getSendKey(id));
       if ("response" in read) return read.response;
-      return read.value === null ? notFound("send-keys") : json(200, read.value);
+      return read.value === null ? notFound("send-keys") : json(200, withClientRevocation(read.value));
     }
     if ((method === "PATCH" || method === "PUT") && id !== null) {
       // The generic path writes the `revoked_at` column; the seam expresses that write
-      // as `revokeSendKey`, so a body naming it is served by that operation.
+      // as `revokeSendKey`, so a body naming it is served by that operation — with the
+      // client's own instant persisted VERBATIM over the store's stamp, repeat writes
+      // included, exactly as the service's generic updater applies it.
       if (!("revoked_at" in body)) return json(400, { error: "send-keys accepts no such update" });
       const revoked = settled(await store.sendKeys.revokeSendKey(id));
       if ("response" in revoked) return revoked.response;
-      return revoked.value === null ? notFound("send-keys") : json(200, revoked.value);
+      if (revoked.value === null) return notFound("send-keys");
+      if (typeof body["revoked_at"] === "string") overlay.set(id, body["revoked_at"]);
+      return json(200, withClientRevocation(revoked.value));
     }
     return json(405, { error: "method not allowed" });
   }
@@ -947,6 +980,9 @@ async function route(context: RouteContext): Promise<Response> {
 export function startV1StoreApi(options: V1StoreApiOptions): V1StoreApi {
   const apiKey = options.apiKey ?? DEFAULT_API_KEY;
   let served = 0;
+  // Per-fixture, not per-request: the client-written revocation instant has to survive
+  // across calls to be readable back, exactly as the service's column does.
+  const sendKeyRevocations = new Map<string, string>();
 
   const server = Bun.serve({
     hostname: "127.0.0.1",
@@ -979,7 +1015,7 @@ export function startV1StoreApi(options: V1StoreApiOptions): V1StoreApi {
         }
       }
       try {
-        return await route({ store: options.store, url, method: request.method, body });
+        return await route({ store: options.store, url, method: request.method, body, sendKeyRevocations });
       } catch (error) {
         // A THROW from the store is a fault, and the service answers 500 for one. It is
         // reported rather than swallowed so a broken fixture is not read as a refusal.

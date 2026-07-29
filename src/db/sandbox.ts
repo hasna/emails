@@ -800,15 +800,12 @@ export async function listSandboxEmailSummaries(
 /**
  * One captured email, or null.
  *
- * A BLANK ID IS ABSENCE AND IS ANSWERED WITHOUT TOUCHING THE STORE. The SQLite arm answered
- * null (no row has an empty id); the HTTP path would build `GET /v1/sandbox-emails/`, whose
- * trailing slash the service strips before dispatching — which lands on the LIST route and
- * hands back an envelope this mapper would fault on. Null is the stronger arm's answer and is
- * the one kept. The CLI's own id resolution rejects a blank id upstream, so this is defence
- * for a direct caller of the library.
+ * A blank id is absence, answered by the SEAM on both arms: the HTTP store decides it
+ * before building a request, so `GET /v1/sandbox-emails/` — the LIST route in
+ * disguise — is never sent, and the SQLite arm's `WHERE id = ''` matches nothing. The
+ * hand-written guard this function carried is retired for that reason.
  */
 export async function getSandboxEmail(id: string, store?: EmailStore): Promise<SandboxEmail | null> {
-  if (!id) return null;
   const found = await storeFor(store).sandbox.get(id);
   if (!found.ok) throw storeRefusal("read a captured sandbox email", found);
   return found.value === null ? null : toSandboxEmail(found.value);
