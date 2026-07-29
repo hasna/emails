@@ -109,7 +109,7 @@ afterEach(() => {
 
 function seedProvider(id: string, createdAt = "2026-01-01T00:00:00.000Z"): string {
   db.run(
-    "INSERT INTO providers (id, name, type, api_key, active, created_at, updated_at) VALUES (?, ?, 'resend', 'k', 1, ?, ?)",
+    "INSERT INTO providers (id, name, type, active, created_at, updated_at) VALUES (?, ?, 'resend', 1, ?, ?)",
     [id, id, createdAt, createdAt],
   );
   return id;

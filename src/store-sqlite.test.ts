@@ -340,6 +340,12 @@ describe("SqliteEmailStore conformance", () => {
     expect(created.ok).toBe(true);
     if (!created.ok) return;
     const id = String(created.value["id"]);
+    // Plant rogue plaintext directly in the table to prove the READ path redacts it
+    // as defense-in-depth. The schema triggers now refuse plaintext credential
+    // writes outright, so drop them just for this injection — the store's own write
+    // refusal is still exercised below.
+    db.run("DROP TRIGGER IF EXISTS trg_providers_reject_plaintext_secrets_insert");
+    db.run("DROP TRIGGER IF EXISTS trg_providers_reject_plaintext_secrets_update");
     db.run("UPDATE providers SET api_key = ?, secret_key = ? WHERE id = ?", ["plaintext-key", "plaintext-secret", id]);
     const read = await subject.providers.get(id);
     expect(read.ok).toBe(true);

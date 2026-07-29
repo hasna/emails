@@ -54,12 +54,12 @@ export async function autoPull(opts?: PullOpts): Promise<PullResult> {
   if (doS3) {
     try {
       const { syncS3Inbox } = await import("../../lib/s3-sync.js");
-      const { getProvider } = await import("../../db/providers.js");
+      const { getProviderWithCredentials } = await import("../../db/providers.js");
       if (inbound.profile) process.env["AWS_PROFILE"] = inbound.profile;
       const syncAll = async () => {
         let n = 0;
         for (const target of targets) {
-          const prov = target.providerId ? getProvider(target.providerId) : null;
+          const prov = target.providerId ? getProviderWithCredentials(target.providerId) : null;
           const r = await syncS3Inbox({
             sourceId: target.sourceId,
             bucket: target.bucket,

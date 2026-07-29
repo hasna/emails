@@ -40,6 +40,14 @@ export {
   deleteProvider,
   getActiveProvider,
 } from "./db/providers.js";
+export {
+  ProviderSecretsUnavailableError,
+  defaultProviderSecretsKeyringPath,
+  providerSecretsKeyStatus,
+  rewrapProviderSecrets,
+  revokeProviderSecretsRootKey,
+  rotateProviderSecretsRootKey,
+} from "./db/provider-secrets.js";
 
 export {
   createDomain,

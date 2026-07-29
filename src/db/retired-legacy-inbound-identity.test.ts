@@ -109,8 +109,8 @@ describe("the retired local.mailery inbound identity", () => {
     const inboundId = storeRecipientLessInbound(seed);
     const providerId = uuid();
     seed.run(
-      "INSERT INTO providers (id, name, type, api_key, active, created_at, updated_at) VALUES (?,?,?,?,1,?,?)",
-      [providerId, "retired-era", "resend", "k", now(), now()],
+      "INSERT INTO providers (id, name, type, active, created_at, updated_at) VALUES (?,?,?,1,?,?)",
+      [providerId, "retired-era", "resend", now(), now()],
     );
     seed.run(
       "INSERT OR IGNORE INTO mailboxes (id, address, display_name, status, created_at, updated_at) VALUES (?,?,?,'active',?,?)",
@@ -122,7 +122,11 @@ describe("the retired local.mailery inbound identity", () => {
        VALUES (?,?,?,'resend','retired-era resend',?,'active','{}','{}',?,?)`,
       [`msrc:${RETIRED_MAILBOX_ID}:${providerId}:resend`, RETIRED_MAILBOX_ID, providerId, RETIRED_ADDRESS, now(), now()],
     );
-    seed.run("DELETE FROM _migrations WHERE id = 48");
+    // Reset the migration level to BELOW the retirement bridge so it replays.
+    // The level check keys on MAX(id), so deleting only 48 while a later migration
+    // (49, the provider-secrets table) remains would leave the level unchanged and
+    // the bridge would not re-run. Delete everything from the bridge onward.
+    seed.run("DELETE FROM _migrations WHERE id >= 48");
     const before = seed.query("SELECT COUNT(*) AS count FROM mailbox_sources").get() as { count: number };
     closeDatabase();
     resetDatabase();
@@ -164,7 +168,11 @@ describe("the retired local.mailery inbound identity", () => {
        VALUES (?,?,NULL,'legacy_inbound','Legacy inbound',?,'legacy','{}','{}',?,?)`,
       [`msrc:${RETIRED_MAILBOX_ID}:none:legacy_inbound`, RETIRED_MAILBOX_ID, RETIRED_ADDRESS, now(), now()],
     );
-    seed.run("DELETE FROM _migrations WHERE id = 48");
+    // Reset the migration level to BELOW the retirement bridge so it replays.
+    // The level check keys on MAX(id), so deleting only 48 while a later migration
+    // (49, the provider-secrets table) remains would leave the level unchanged and
+    // the bridge would not re-run. Delete everything from the bridge onward.
+    seed.run("DELETE FROM _migrations WHERE id >= 48");
     closeDatabase();
     resetDatabase();
 

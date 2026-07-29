@@ -2,7 +2,7 @@ import type { Command } from "commander";
 import type { DnsRecord, DomainType, Provider } from "../../types/index.js";
 import chalk from "../../lib/chalk-lite.js";
 import { createDomain, listDomains, listUsableDomains, deleteDomain, findDomainsByName, getDomain, getDomainByName, moveDomainProvider, updateDnsStatus, updateDomainReadiness } from "../../db/domains.js";
-import { getProvider } from "../../db/providers.js";
+import { getProvider, getProviderWithCredentials } from "../../db/providers.js";
 import { createCatchAll, ensureDefaultCatchAll } from "../../db/aliases.js";
 import { setDomainProvisioning } from "../../db/provisioning.js";
 import { getAdapter, providerDnsPublishing } from "../../providers/index.js";
@@ -489,7 +489,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .action(async (domain: string, opts: { provider: string; inbound?: boolean; bucket?: string; region?: string; catchAll?: string; sync?: boolean; forceMxSwitch?: boolean }) => {
       try {
         const providerId = resolveId("providers", opts.provider);
-        const provider = getProvider(providerId);
+        const provider = getProviderWithCredentials(providerId);
         if (!provider) return handleError(new Error(`Provider not found: ${opts.provider}`));
 
         const region = opts.region ?? provider.region ?? "us-east-1";

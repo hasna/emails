@@ -64,7 +64,7 @@
 
 import { getDatabase, runInTransaction, now, uuid } from "../db/database.js";
 import { withExplicitDatabaseRoute } from "../db/database-routing.js";
-import { getProvider, listActiveProviderSummaries } from "../db/providers.local.js";
+import { getProviderWithCredentials, listActiveProviderSummaries } from "../db/providers.local.js";
 import { incrementBounceCounts, incrementComplaintCounts } from "../db/contacts.js";
 import { getAdapter } from "../providers/index.js";
 import { getLocalStats } from "./stats.js";
@@ -340,7 +340,7 @@ export async function syncProvider(providerId: string, db?: Database, adapterOve
   // an environment their caller has already resolved. The scope is DEPTH-COUNTED,
   // SYNCHRONOUS state, so nothing wrapped here awaits — the same constraint the
   // transaction below is under, for the same reason.
-  const provider = withExplicitDatabaseRoute([d], () => getProvider(providerId, d));
+  const provider = withExplicitDatabaseRoute([d], () => getProviderWithCredentials(providerId, d));
   if (!provider) throw new Error(`Provider not found: ${providerId}`);
 
   const adapter = adapterOverride ?? getAdapter(provider);

@@ -1,10 +1,17 @@
 import type { Database } from "./database.js";
 import type { CreateProviderInput, Provider, ProviderRow, ProviderSummary, ProviderType } from "../types/index.js";
 import { ProviderNotFoundError } from "../types/index.js";
-import { getDatabase, now, uuid } from "./database.js";
+import { getDatabase, now, runInTransaction, uuid } from "./database.js";
 import { safeOffset, safeOptionalLimit } from "./pagination.js";
 import { selfHostedResource, selfHostedListQuery, selfHostedPage, cbool, ciso, cstr, cstrOrNull } from "./self-hosted-resource.local.js";
 import { assertNoProviderCredentials } from "./provider-credentials.js";
+import {
+  getProviderSecrets,
+  PROVIDER_SECRET_FIELDS,
+  storeProviderSecrets,
+  updateProviderSecrets,
+  type ProviderSecrets,
+} from "./provider-secrets.js";
 
 const PROVIDER_RESOURCE = "providers";
 const SUPPORTED_PROVIDER_TYPES = ["resend", "ses", "sandbox"] as const;
@@ -77,15 +84,15 @@ const PROVIDER_COLUMNS = [
   "id",
   "name",
   "type",
-  "api_key",
+  "NULL AS api_key",
   "region",
-  "access_key",
-  "secret_key",
-  "oauth_client_id",
-  "oauth_client_secret",
-  "oauth_refresh_token",
-  "oauth_access_token",
-  "oauth_token_expiry",
+  "NULL AS access_key",
+  "NULL AS secret_key",
+  "NULL AS oauth_client_id",
+  "NULL AS oauth_client_secret",
+  "NULL AS oauth_refresh_token",
+  "NULL AS oauth_access_token",
+  "NULL AS oauth_token_expiry",
   "active",
   "created_at",
   "updated_at",
@@ -111,8 +118,8 @@ function rowToProviderSummary(row: ProviderSummaryRow): ProviderSummary {
 }
 
 /**
- * Local SQLite rows DO carry credentials, so nothing to refuse — except on the
- * self-hosted compat branch below, which has nowhere to put them.
+ * Local SQLite stores credentials only in its encrypted provider_secrets
+ * envelope. The self-hosted compat branch has no per-provider secret store.
  */
 export function assertProviderCredentialsStorable(input: Partial<CreateProviderInput>): void {
   if (selfHostedResource(PROVIDER_RESOURCE)) assertNoProviderCredentials(input);
@@ -134,33 +141,42 @@ export function createProvider(input: CreateProviderInput, db?: Database): Provi
   const id = uuid();
   const timestamp = now();
 
-  d.run(
-    `INSERT INTO providers (id, name, type, api_key, region, access_key, secret_key,
-       oauth_client_id, oauth_client_secret, oauth_refresh_token, oauth_access_token, oauth_token_expiry,
-       active, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
-    [
-      id,
-      input.name,
-      input.type,
-      input.api_key || null,
-      input.region || null,
-      input.access_key || null,
-      input.secret_key || null,
-      null,
-      null,
-      null,
-      null,
-      null,
-      timestamp,
-      timestamp,
-    ],
-  );
+  runInTransaction(d, () => {
+    d.run(
+      `INSERT INTO providers (id, name, type, region, active, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 1, ?, ?)`,
+      [id, input.name, input.type, input.region || null, timestamp, timestamp],
+    );
+    storeProviderSecrets(id, {
+      api_key: input.api_key || null,
+      access_key: input.access_key || null,
+      secret_key: input.secret_key || null,
+    }, d);
+  });
 
   return getProvider(id, d)!;
 }
 
-export function getProvider(id: string, db?: Database): Provider | null {
+export function getProvider(id: string, db?: Database, withCredentials = false): Provider | null {
+  return readProvider(id, db, withCredentials);
+}
+
+/**
+ * Internal authority boundary for code that must call a provider API. Ordinary
+ * provider DTOs always carry null credential fields; only this explicitly
+ * named lookup unwraps the encrypted envelope.
+ */
+export function getProviderWithCredentials(id: string, db?: Database): Provider | null {
+  return readProvider(id, db, true);
+}
+
+// The single mode-gated provider read behind both the redacted and the
+// credentialed lookups. Keeping ONE self-hosted branch here — rather than one
+// per public function — decides the arm and the credential envelope in the same
+// place: a self-hosted resource returns the server's own record, which never
+// carries the local encrypted secret, so `withCredentials` only unwraps the
+// envelope on the SQLite store that owns it.
+function readProvider(id: string, db: Database | undefined, withCredentials: boolean): Provider | null {
   const selfHosted = selfHostedResource(PROVIDER_RESOURCE);
   if (selfHosted) {
     const record = selfHosted.get(id);
@@ -169,7 +185,8 @@ export function getProvider(id: string, db?: Database): Provider | null {
   const d = db || getDatabase();
   const row = d.query(`SELECT ${PROVIDER_COLUMNS} FROM providers WHERE id = ? AND type IN (${SUPPORTED_PROVIDER_TYPE_SQL})`).get(id) as ProviderRow | null;
   if (!row) return null;
-  return rowToProvider(row);
+  const base = rowToProvider(row);
+  return withCredentials ? { ...base, ...getProviderSecrets(id, d) } : base;
 }
 
 export function resolveProviderId(id: string, db?: Database): string | null {
@@ -315,7 +332,8 @@ export function updateProvider(
   if (!provider) throw new ProviderNotFoundError(id);
 
   const sets: string[] = ["updated_at = ?"];
-  const params: (string | number | null)[] = [now()];
+  const timestamp = now();
+  const params: (string | number | null)[] = [timestamp];
 
   if (input.name !== undefined) { sets.push("name = ?"); params.push(input.name); }
   if (input.type !== undefined) {
@@ -323,14 +341,21 @@ export function updateProvider(
     sets.push("type = ?");
     params.push(input.type);
   }
-  if (input.api_key !== undefined) { sets.push("api_key = ?"); params.push(input.api_key || null); }
   if (input.region !== undefined) { sets.push("region = ?"); params.push(input.region || null); }
-  if (input.access_key !== undefined) { sets.push("access_key = ?"); params.push(input.access_key || null); }
-  if (input.secret_key !== undefined) { sets.push("secret_key = ?"); params.push(input.secret_key || null); }
   if (input.active !== undefined) { sets.push("active = ?"); params.push(input.active ? 1 : 0); }
 
-  params.push(id);
-  d.run(`UPDATE providers SET ${sets.join(", ")} WHERE id = ?`, params);
+  const secretUpdates: Partial<ProviderSecrets> = {};
+  for (const field of PROVIDER_SECRET_FIELDS) {
+    if (field in input) {
+      secretUpdates[field] = (input as Partial<ProviderSecrets>)[field] ?? null;
+    }
+  }
+
+  runInTransaction(d, () => {
+    params.push(id);
+    d.run(`UPDATE providers SET ${sets.join(", ")} WHERE id = ?`, params);
+    if (Object.keys(secretUpdates).length > 0) updateProviderSecrets(id, secretUpdates, d);
+  });
 
   return getProvider(id, d)!;
 }

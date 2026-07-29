@@ -1,5 +1,6 @@
 import type { DnsPublishingSupport, DnsRecord, DnsStatus, Provider, SendEmailOptions, Stats } from "../types/index.js";
 import { ProviderConfigError } from "../types/index.js";
+import { applyDurableCredentials } from "../db/providers.js";
 import type { ProviderAdapter, RemoteAddress, RemoteDomain, RemoteEvent } from "./interface.js";
 
 class LazyProviderAdapter implements ProviderAdapter {
@@ -136,25 +137,33 @@ export function providerDnsPublishing(provider: Provider): DnsPublishingSupport 
 }
 
 export function getAdapter(provider: Provider): ProviderAdapter {
-  assertProviderConfig(provider);
-  switch (provider.type) {
+  // Provider DTOs are credential-free. Unwrap only at the provider execution
+  // boundary; candidates used for validation already carry their unsaved
+  // credential values and therefore never touch the durable keyring. Only the
+  // secret fields are overlaid, so the caller's own provider type still selects
+  // the adapter that is built.
+  const executable = provider.id && /^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(provider.id)
+    ? applyDurableCredentials(provider)
+    : provider;
+  assertProviderConfig(executable);
+  switch (executable.type) {
     case "resend":
       return new LazyProviderAdapter(async () => {
         const { ResendAdapter } = await import("./resend.js");
-        return new ResendAdapter(provider);
+        return new ResendAdapter(executable);
       });
     case "ses":
       return new LazyProviderAdapter(async () => {
         const { SESAdapter } = await import("./ses.js");
-        return new SESAdapter(provider);
+        return new SESAdapter(executable);
       }, { supportsMailFrom: true, supportsDomainVerification: true });
     case "sandbox":
       return new LazyProviderAdapter(async () => {
         const { SandboxAdapter } = await import("./sandbox.js");
-        return new SandboxAdapter(provider);
+        return new SandboxAdapter(executable);
       });
     default:
-      throw new ProviderConfigError(`Unknown provider type: ${provider.type}`);
+      throw new ProviderConfigError(`Unknown provider type: ${executable.type}`);
   }
 }
 

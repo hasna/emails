@@ -93,12 +93,11 @@ function seedProvider(
   options: { type?: string; apiKey?: string | null; active?: number } = {},
 ): string {
   db.run(
-    "INSERT INTO providers (id, name, type, api_key, active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    "INSERT INTO providers (id, name, type, active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
     [
       id,
       id,
       options.type ?? "sandbox",
-      options.apiKey === undefined ? "k" : options.apiKey,
       options.active ?? 1,
       "2026-01-01T00:00:00.000Z",
       "2026-01-01T00:00:00.000Z",
