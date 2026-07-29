@@ -18,8 +18,8 @@ import { formatThreadLabel } from "../tui/format.js";
  * to a suppressed address, and the self-hosted server refuses it regardless
  * (409 recipient_suppressed). Unsuppressing is the only path.
  */
-function assertNoSuppressedRecipients(recipients: string[], command: string): void {
-  const suppressed = suppressedRecipientsAmong(recipients);
+async function assertNoSuppressedRecipients(recipients: string[], command: string): Promise<void> {
+  const suppressed = await suppressedRecipientsAmong(recipients);
   if (suppressed.length === 0) return;
   handleError(new Error(
     `Refusing to ${command} to suppressed recipient(s): ${suppressed.join(", ")}. `
@@ -55,7 +55,7 @@ export function registerReplyCommand(program: Command, output: (data: unknown, f
         const origBody = body?.text ?? body?.html ?? "";
         const subject = fwdPrefix(msg.subject);
         const fwdBody = (opts.body ? opts.body : "") + quoteBody(msg.from, msg.date, origBody);
-        assertNoSuppressedRecipients(opts.to, "forward");
+        await assertNoSuppressedRecipients(opts.to, "forward");
         const result = await ds.send({ from: opts.from, to: opts.to.join(", "), subject, body: fwdBody, markdown: false });
         output({ id: result.id, to: opts.to, subject }, chalk.green(`✓ forwarded to ${opts.to.join(", ")} — "${subject}"`));
       } catch (e) { handleError(e); }
@@ -95,7 +95,7 @@ export function registerReplyCommand(program: Command, output: (data: unknown, f
           seen.add(key);
           toArr.push(addr);
         }
-        assertNoSuppressedRecipients(toArr, "reply");
+        await assertNoSuppressedRecipients(toArr, "reply");
         const result = await ds.send({
           from,
           to: toArr.join(", "),

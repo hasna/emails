@@ -45,16 +45,18 @@
 // upsert). `src/store/` is byte-identical after this change, so those stay here,
 // beside the handle that can answer them.
 //
-// The local-arm imports below (`providers.local`, `events.local`, `contacts.local`)
-// are the same shape `src/lib/forwarding.ts` uses for the same reason: every one of
-// them takes the explicit `Database` this pipeline threads, and this pipeline is only
-// reachable on an installation whose store IS that database.
+// The local-arm imports below (`providers.local`, `events.local`) are the same shape
+// `src/lib/forwarding.ts` uses for the same reason: every one of them takes the
+// explicit `Database` this pipeline threads, and this pipeline is only reachable on an
+// installation whose store IS that database. The contacts family has collapsed onto
+// the store seam; its calls below hand it the same `Database`, which it binds to a
+// SQLite store scoped to exactly these rows.
 
 import { getDatabase, runInTransaction } from "../db/database.js";
 import { withExplicitDatabaseRoute } from "../db/database-routing.js";
 import { getProvider, listActiveProviderSummaries } from "../db/providers.local.js";
 import { upsertEventWithResult } from "../db/events.local.js";
-import { incrementBounceCounts, incrementComplaintCounts } from "../db/contacts.local.js";
+import { incrementBounceCounts, incrementComplaintCounts } from "../db/contacts.js";
 import { getAdapter } from "../providers/index.js";
 import { getLocalStats } from "./stats.js";
 import { createSqliteEmailStore } from "../store-sqlite/index.js";
@@ -287,10 +289,15 @@ export async function syncProvider(providerId: string, db?: Database, adapterOve
   let inserted = 0;
 
   // THE CALLBACK IS SYNCHRONOUS AND MUST STAY SO — see the header. An `await` inside
-  // it would commit the surrounding SAVEPOINT around nothing.
+  // it would commit the surrounding SAVEPOINT around nothing. The contact-counter
+  // writes are therefore OUTSIDE it: the collapsed contacts family is async (it reads
+  // and writes through the store seam), so the recipients are collected here and
+  // counted after the commit. What that moves out of the atomic unit is named in
+  // src/db/contacts.ts — a crash between the commit and the counter write loses the
+  // bump, where the old single-transaction shape could not.
+  const bouncedRecipients: string[] = [];
+  const complainedRecipients: string[] = [];
   withExplicitDatabaseRoute([d], () => runInTransaction(d, () => {
-    const bouncedRecipients: string[] = [];
-    const complainedRecipients: string[] = [];
     const statusUpdates: EmailStatusUpdate[] = [];
 
     for (const remoteEvent of remoteEvents) {
@@ -334,9 +341,9 @@ export async function syncProvider(providerId: string, db?: Database, adapterOve
     }
 
     applyEmailStatusUpdates(statusUpdates, d);
-    incrementBounceCounts(bouncedRecipients, d);
-    incrementComplaintCounts(complainedRecipients, d);
   }));
+  await incrementBounceCounts(bouncedRecipients, d);
+  await incrementComplaintCounts(complainedRecipients, d);
 
   // Check bounce/complaint thresholds after sync
   if (inserted > 0) {

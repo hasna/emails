@@ -169,9 +169,11 @@ export async function batchSend(opts: BatchSendOptions): Promise<BatchResult> {
 
   const adapter = opts._adapter;
   const result: BatchResult = { total: rows.length, sent: 0, failed: 0, suppressed: 0, errors: [] };
+  // The batch's own resolved store, so a `_store` injection scopes the suppression
+  // read and the counter writes to the same rows it sends from.
   const suppressedEmailSet = opts.force
     ? new Set<string>()
-    : getSuppressedEmailSet(rows.map((row) => row["email"] ?? ""));
+    : await getSuppressedEmailSet(rows.map((row) => row["email"] ?? ""), store);
   const sentEmails: string[] = [];
 
   for (const row of rows) {
@@ -216,7 +218,7 @@ export async function batchSend(opts: BatchSendOptions): Promise<BatchResult> {
     }
   }
 
-  incrementSendCounts(sentEmails);
+  await incrementSendCounts(sentEmails, store);
 
   return result;
 }
