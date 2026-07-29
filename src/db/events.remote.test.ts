@@ -87,7 +87,8 @@ describe("self-hosted event listing", () => {
 
   // The server-side filters are a BOUND, not the answer: the same filters run
   // again in memory so the result is identical against a server (or a stub) that
-  // ignores unknown query params. Same convention as src/db/contacts.remote.ts.
+  // ignores unknown query params. Same convention as the collapsed contacts
+  // family's pushed-down email filter (src/db/contacts.ts).
   it("stays correct against a server that ignores the query params", async () => {
     await stub.seed({ events: eventRows(60) });
 

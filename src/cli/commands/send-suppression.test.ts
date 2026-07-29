@@ -13,7 +13,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { Command } from "commander";
 import { closeDatabase, getDatabase, resetDatabase } from "../../db/database.js";
-import { suppressContact } from "../../db/contacts.local.js";
+import { suppressContact } from "../../db/contacts.js";
 import { createProvider } from "../../db/providers.local.js";
 import { listSandboxEmails } from "../../db/sandbox.js";
 import { resetMailDataSource } from "../../lib/mail-data-source.js";
@@ -156,14 +156,17 @@ describe("emails send — suppressed recipients (self-hosted)", () => {
 describe("emails send — suppressed recipients (local)", () => {
   let providerId: string;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     captureInheritedProcessEnv();
     process.env["EMAILS_MODE"] = "local";
     process.env["EMAILS_DB_PATH"] = ":memory:";
     resetDatabase();
     resetMailDataSource();
     providerId = createProvider({ name: "sandbox", type: "sandbox", active: true }).id;
-    suppressContact("blocked@ext.com");
+    // The collapsed contacts family is async and store-seam-backed; hand it the
+    // memoised connection explicitly so the seed lands on the database this suite
+    // resets, whatever the surrounding environment configures.
+    await suppressContact("blocked@ext.com", getDatabase());
   });
 
   afterEach(() => {
@@ -243,7 +246,7 @@ describe("suppression matches the recipient canonically, not by exact string", (
   ];
 
   it("refuses every spelling of a suppressed recipient", async () => {
-    suppressContact("blocked@ext.com");
+    await suppressContact("blocked@ext.com", getDatabase());
 
     for (const spelling of spellings) {
       const result = await runSend([
@@ -260,7 +263,7 @@ describe("suppression matches the recipient canonically, not by exact string", (
   it("refuses when the stored contact is the differently-spelled one", async () => {
     // The operator suppressed a mixed-case address; a lowercase send must still
     // be refused, or `emails contact suppress` silently did nothing.
-    suppressContact("Blocked@Ext.com");
+    await suppressContact("Blocked@Ext.com", getDatabase());
 
     const result = await runSend([
       "send", "--from", "agent@acme.com", "--to", "blocked@ext.com", "--subject", "Hi", "--body", "x",
@@ -272,7 +275,7 @@ describe("suppression matches the recipient canonically, not by exact string", (
   });
 
   it("does not over-match a different address that merely looks similar", async () => {
-    suppressContact("blocked@ext.com");
+    await suppressContact("blocked@ext.com", getDatabase());
 
     const result = await runSend([
       "send", "--from", "agent@acme.com", "--to", "notblocked@ext.com", "--subject", "Hi", "--body", "x",
@@ -289,14 +292,17 @@ describe("suppression matches the recipient canonically, not by exact string", (
 describe("reply, forward, and the MCP send tool refuse suppressed recipients too", () => {
   let providerId: string;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     captureInheritedProcessEnv();
     process.env["EMAILS_MODE"] = "local";
     process.env["EMAILS_DB_PATH"] = ":memory:";
     resetDatabase();
     resetMailDataSource();
     providerId = createProvider({ name: "sandbox", type: "sandbox", active: true }).id;
-    suppressContact("blocked@ext.com");
+    // The collapsed contacts family is async and store-seam-backed; hand it the
+    // memoised connection explicitly so the seed lands on the database this suite
+    // resets, whatever the surrounding environment configures.
+    await suppressContact("blocked@ext.com", getDatabase());
   });
 
   afterEach(() => {
@@ -427,7 +433,7 @@ describe("emails batch keeps its (already correct) skip-unless-force shape", () 
       const { createTemplate } = await import("../../db/templates.local.js");
       const provider = createProvider({ name: "sandbox", type: "sandbox", active: true });
       createTemplate({ name: "tpl", subject_template: "S {{email}}", text_template: "B" });
-      suppressContact("blocked@ext.com");
+      await suppressContact("blocked@ext.com", getDatabase());
 
       const sent: string[] = [];
       const result = await batchSend({

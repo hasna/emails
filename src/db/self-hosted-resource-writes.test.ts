@@ -1,7 +1,7 @@
 // End-to-end proof that the resource repositories route WRITES to the selfHosted /v1
 // API in selfHosted mode (not the local SQLite island) — the write half of the
 // split-brain fix. Reads were already routed (see self-hosted-resource-routing.test.ts);
-// this covers createOwner, createGroup, and contact suppress/unsuppress, plus
+// this covers createOwner and createGroup, plus
 // send-key minting (which POSTs to the bespoke /v1/send-keys/mint endpoint — the
 // token/hash are server-minted and only a hash-free key summary reaches the client).
 //
@@ -14,7 +14,6 @@ import type { Subprocess } from "bun";
 import { resetSelfHostedConfigCache } from "./self-hosted-store.js";
 import { createOwner, listOwners } from "./owners.js";
 import { createGroup, listGroups } from "./groups.js";
-import { suppressContact, unsuppressContact, listContacts } from "./contacts.js";
 import { createSendKey } from "./send-keys.js";
 import { DATABASE_PATH_SETTINGS } from "../store-resolution.js";
 import { createTemplate, listTemplates, getTemplate, deleteTemplate } from "./templates.js";
@@ -178,15 +177,14 @@ describe("resource repos route writes to selfHosted in selfHosted mode", () => {
     expect(listGroups().some((x) => x.name === "writer-group")).toBe(true);
   });
 
-  test("suppressContact creates-then-suppresses on the selfHosted and shows in selfHosted list", () => {
-    suppressContact("blocked@example.com");
-    const suppressed = listContacts({ suppressed: true });
-    expect(suppressed.map((c) => c.email)).toContain("blocked@example.com");
-    // Idempotent unsuppress flips the same selfHosted record (no duplicate contact).
-    unsuppressContact("blocked@example.com");
-    expect(listContacts({ suppressed: true }).map((c) => c.email)).not.toContain("blocked@example.com");
-    expect(listContacts().filter((c) => c.email === "blocked@example.com")).toHaveLength(1);
-  });
+  // The contacts case that used to sit here proved the OLD routing bridge sent that
+  // family's suppress/unsuppress writes to `/v1` when the deployment word said so. The
+  // family has collapsed onto the store seam and consults no such word, so the premise
+  // is gone — and the questions that survive it (does a suppression land on the API
+  // dataset, flip the SAME record rather than minting a sibling, and come back from the
+  // API list?) are asked by src/db/contacts.test.ts against a REAL HTTP store over the
+  // store-seam `/v1` fixture, which also validates writes against the service's own
+  // published contract, something this hand-rolled stub cannot do.
 
   test("createTemplate POSTs to /v1/templates and appears in selfHosted listTemplates", () => {
     const t = createTemplate({ name: "welcome", subject_template: "Hi {{name}}", html_template: "<p>hi</p>" });
