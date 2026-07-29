@@ -1,91 +1,65 @@
-# OpenTUI UI Implementation
+# OpenTUI UI implementation
 
-Date: 2026-06-04
+Status: shipped as `emails ui`. The original React spike has been replaced by
+Solid/OpenTUI; this page describes the current tree.
 
-## Scope
+## Runtime and build
 
-`emails ui` has moved from Ink to OpenTUI. The command now creates an
-OpenTUI `CliRenderer`, renders through `@opentui/react`, and keeps OpenTUI
-core/react packages external in the Bun bundle so native runtime package
-resolution works correctly.
+The command module at `src/cli/commands/ui.tsx` stays lightweight and loads a
+separate UI runtime. Source runs through `src/cli/tui/runtime.tsx`; packaged
+builds prefer `dist/cli/ui-runtime-bundle.js`, produced by
+`scripts/build-tui-runtime.ts`.
 
-The implemented UI covers:
+The current UI stack is:
 
-- Home
-- Inbox
-- Wide inbox split preview
-- Address picker
-- Reader
-- Compose
-- Domains
-- Settings
+- `@opentui/core` 0.4.1;
+- `@opentui/solid` 0.4.1;
+- `@opentui/keymap` 0.4.1;
+- `solid-js` 1.9.13.
 
-## Current OpenTUI Facts
+The dedicated bundle uses the OpenTUI Solid transform and keeps native
+platform packages external. The main CLI bundle also keeps packages external,
+so the native OpenTUI library is resolved for the machine running the command.
+The renderer uses an alternate screen, mouse input, Kitty keyboard support,
+60 FPS targeting, and explicit signal cleanup.
 
-- OpenTUI is a native terminal UI core written in Zig with TypeScript bindings.
-- OpenTUI is currently Bun-exclusive; Node and Deno support are still in progress.
-- The UI uses `@opentui/core` and `@opentui/react` at `0.3.2`.
-- React is pinned to `19.2.0` to satisfy the OpenTUI React peer dependency.
-- OpenTUI detects terminal theme mode; `emails ui` uses that for the persisted
-  `auto` theme setting and falls back to local terminal environment hints.
+## Source layout
 
-References:
+- `src/cli/tui-solid/App.tsx` composes providers, sidebar, mailbox/reader
+  routes, compose window, dialogs, toasts, and renderer cleanup.
+- `src/cli/tui-solid/component/` contains the sidebar, mailbox, reader,
+  composer, and dialogs.
+- `src/cli/tui-solid/context/` owns state, commands, keymaps, themes, dialogs,
+  and toasts.
+- `src/cli/tui/data.ts` routes the shared data API to local or self-hosted
+  implementations; formatting, clipboard handling, auto-pull, and settings
+  remain under `src/cli/tui/`.
 
-- https://opentui.com/
-- https://opentui.com/docs/getting-started/
-- https://opentui.com/docs/bindings/react/
-- https://opentui.com/docs/core-concepts/renderer/
-- https://www.termcn.dev/docs/components/opentui
+There is no `src/cli/tui/App.tsx` compatibility component and no
+`@opentui/react` dependency in the current implementation.
 
-## Implementation Notes
+## Current UX
 
-- `src/cli/commands/ui.tsx` owns renderer creation, terminal title setup, and
-  shutdown waiting.
-- `src/cli/tui/App.tsx` owns OpenTUI keyboard handling, theme detection,
-  terminal background control, and renderable layout.
-- `src/cli/tui/data.ts` remains the DB-backed data layer for mailbox lists,
-  counts, enriched inbox/address choices, domains, settings, compose send, and mutations.
-- `src/cli/tui/theme.ts` now exposes hex palettes for OpenTUI `fg`/`bg` colors,
-  including dashboard sidebar and metric surfaces.
-- `src/cli/tui/App.test.ts` uses `@opentui/react/test-utils` and OpenTUI mock
-  keyboard input instead of `ink-testing-library`.
-- Explicit Shift-G pulls are serialized through the same busy lock as
-  background auto-pull so repeated refreshes do not overlap.
-- There is no mature official OpenTUI template gallery to vendor here. The
-  current layout stays as owned app code and follows the available OpenTUI
-  renderer, React, resize, and theme-mode APIs.
+`emails ui` requires stdin and stdout to be TTYs. It opens the saved mailbox,
+or the mailbox selected by `--mailbox`; the default is Inbox. The layout has a
+persistent mailbox/sidebar region and a workspace for mailbox lists, reader,
+and domains. It supports address and source selection, search/filter/grouping,
+labels and categories, digests, attachment/link/raw dialogs, compose/reply/
+forward, settings, light/dark/auto themes, background refresh, and both local
+and self-hosted mail data sources.
 
-## UX Model
-
-- Startup without `--mailbox` opens Home, not Inbox.
-- Wide terminals open as a two-column dashboard: persistent left navigation and
-  a right workspace with mailbox metrics, operations health, or the active
-  surface.
-- Narrow terminals collapse to a single workspace with a compact top nav.
-- Inbox is a unified all-address view by default.
-- Wide Inbox renders a message list and preview reader side by side.
-- Use the mailbox dialog to choose all mail or an exact email address.
-- Use CLI/API/MCP source filters to inspect active, legacy, or orphaned ingestion streams.
-- Sidebar labels filter the mailbox without mutating message labels.
-- Mail categories are listed separately as Primary, Social, Promotions,
-  Updates, and Forums.
-- Sources carry provider/account provenance in the picker; domain diagnostics
-  live in Domains.
-- Compose has editable From, To, Subject, and Body fields.
-- Settings opens as a compact dialog with Sync, Defaults, and Display submenus
-  for auto-pull, dim-read, default folder, default inbox,
-  default From, and theme mode.
+Valid startup mailbox values are `inbox`, `unread`, `starred`, `sent`,
+`archived`, `spam`, and `trash`. For a non-interactive workflow use the commands
+suggested by the refusal: `emails inbox list`, `emails inbox read <id>`, and
+`emails send`.
 
 ## Verification
-
-Focused verification should include:
 
 ```bash
 bun run build
 bun test src/cli/tui
 bun dist/cli/index.js ui --help
-bun dist/cli/index.js interactive
 ```
 
-`interactive` should remain an unknown command; this internal app intentionally
-uses `emails ui` only.
+`interactive` is not a command; the terminal application is exposed only as
+`emails ui`.

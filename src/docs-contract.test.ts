@@ -43,4 +43,46 @@ describe("agent documentation contract", () => {
       expect(conventions).toContain(phrase);
     }
   });
+
+  it("keeps the current CLI, auth, UI, and migration documentation honest", () => {
+    const readme = readFileSync(join(root, "README.md"), "utf8");
+    const cli = readFileSync(join(root, "docs", "CLI.md"), "utf8");
+    const auth = readFileSync(join(root, "docs", "AUTHENTICATION.md"), "utf8");
+    const provisioning = readFileSync(join(root, "docs", "PROVISIONING.md"), "utf8");
+    const openTui = readFileSync(join(root, "docs", "opentui-ui-spike.md"), "utf8");
+    const macos = readFileSync(join(root, "docs", "macos-app.md"), "utf8");
+    const cutover = readFileSync(join(root, "docs", "DEPLOYMENT_CUTOVER.md"), "utf8");
+
+    expect(readme).not.toContain("emails config            #");
+    for (const command of ["emails send-intent", "emails self-hosted key", "emails auth", "emails keys"]) {
+      expect(readme).toContain(command);
+    }
+
+    for (const command of [
+      "`provider`",
+      "`domain`",
+      "`inbox`",
+      "`send-intent`",
+      "`self-hosted`",
+      "`auth`",
+      "`keys`",
+    ]) {
+      expect(cli).toContain(command);
+    }
+    expect(cli).toContain("`emails-serve`");
+    expect(cli).toContain("`emails-mcp`");
+
+    expect(auth).toContain("EMAILS_SESSION_TOKEN");
+    expect(auth).toContain("EMAILS_IDP_TOKEN");
+    expect(auth).toContain("EMAILS_SELF_HOSTED_API_KEY");
+    expect(auth).toContain("0021_idp_principal_tenants");
+
+    expect(provisioning).toContain("the stateful provisioning workflow is not implemented");
+    expect(provisioning).toContain("There is no\n`emails config` command");
+    expect(openTui).toContain("@opentui/solid` 0.4.1");
+    expect(openTui).toContain("There is no `src/cli/tui/App.tsx` compatibility component");
+    expect(macos).toContain("not shipped and not buildable");
+    expect(cutover).toContain("0020_attachment_repair_ledger");
+    expect(cutover).toContain("pre-0020");
+  });
 });

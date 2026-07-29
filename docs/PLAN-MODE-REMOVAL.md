@@ -1,6 +1,8 @@
 # PLAN — Deleting the deployment-mode axis (open-emails)
 
-> Status: IN PROGRESS — the guard and the seam have landed; no implementation has (2026-07-27).
+> Status: IN PROGRESS — phases 1–3 have landed and phase 4 is actively collapsing
+> repository families (verified 2026-07-29). The live ratchet currently reports
+> 14 two-arm families; use its test output rather than the baseline counts below.
 > Owner: agents. Gates: `src/mode-axis-ratchet.test.ts`, `src/store-seam.test.ts`.
 > Every number in this file was measured on `6646cc8` (`origin/main`) with Bun 1.3.14. Re-measure
 > before trusting one; the commands are in §10.
@@ -56,13 +58,14 @@ Two definitions of the same predicate exist today and prove it:
 One variable, two contradictory semantics. No amount of documentation fixes that; renaming it moves
 the contradiction; defaulting it hides the contradiction. Only deletion resolves it.
 
-## 4. Current state — what exists, and what it measures
+## 4. Baseline state on `6646cc8` — what existed and what it measured
 
 ### 4.1 The ratchet (`src/mode-axis-ratchet.test.ts`)
 
 Eleven metrics, each pinned as a **ceiling that may only decrease** (`<=`, never `===`). Lowering one
-is the point of the program and needs no argument; raising one must be argued in review. Measured on
-`6646cc8` — every metric sits **exactly at its ceiling**, i.e. no phase has landed yet:
+is the point of the program and needs no argument; raising one must be argued in review. The table
+below is the historical measurement on `6646cc8`, when every metric sat exactly
+at its ceiling and no phase had landed. It is not the current tree's count:
 
 | Metric | Ceiling = today | What it counts |
 |---|---|---|
@@ -91,9 +94,11 @@ variable and the arm-file suffix drives all ten to zero with all 43 families, 29
 242 references still standing. `twoArmFamilies` is the one computed from file structure, which is why
 it is listed first and why the deletion PR must be **read**, not merely measured.
 
-### 4.2 The seam (`src/store/`) — types only
+### 4.2 The seam (`src/store/`) — types only at the baseline
 
-Declared, not implemented. Eight files, 1,567 lines, guarded by `src/store-seam.test.ts`:
+At the baseline it was declared but not implemented. The current tree contains
+both SQLite and HTTP stores plus the shared conformance suite described in
+phases 1–3. Historical baseline figures follow:
 
 | Fact | Value on `6646cc8` |
 |---|---|

@@ -104,7 +104,9 @@ Authentication records are required only for the capability you enable:
   before moving from `p=none` to stricter policies.
 
 Self-hosted clients must set `EMAILS_MODE=self_hosted`,
-`EMAILS_SELF_HOSTED_URL`, and `EMAILS_SELF_HOSTED_API_KEY`. The service uses
+`EMAILS_SELF_HOSTED_URL`, and one bearer credential:
+`EMAILS_SESSION_TOKEN`, `EMAILS_IDP_TOKEN`, or
+`EMAILS_SELF_HOSTED_API_KEY` (in that precedence order). The service uses
 `EMAILS_DATABASE_URL`, `EMAILS_API_SIGNING_KEY`,
 `EMAILS_AUTH_ALLOWED_EMAIL_DOMAINS`, and `EMAILS_AUTH_FROM`; Postgres is authoritative
 and there is no hybrid SQLite synchronization mode.
@@ -122,16 +124,12 @@ revoke the old key after the rollback window closes.
 
 ## Emails UI (`emails ui`)
 
-A full-screen OpenTUI mail client with a responsive dashboard shell. Wide
-terminals use a two-column admin layout with persistent navigation, mailbox
-metrics, operations health, folders, actions, and a focused workspace. Inbox on
-wide terminals uses a split message list + preview reader. Narrow terminals collapse to
-a compact single-column view with the same Inbox, Compose, Domains, and
-Settings dialog. Inbox starts at all addresses and can be filtered to one email
-address when needed. Mailbox source status is exposed through CLI/API/MCP
-surfaces without treating provider credentials as inboxes. Live read-state,
-local refresh, background auto-pull, and an `auto`/`light`/`dark` color theme
-keep the mailbox current and readable across terminals.
+A full-screen Solid/OpenTUI mail client with a persistent mailbox sidebar and a
+workspace for message lists, the reader, and domain status. Inbox can be scoped
+to all addresses or one address and filtered by ingestion source, folder,
+label, and search. Grouping, digests, attachment/link/raw views, live read
+state, local refresh, background auto-pull, and `auto`/`light`/`dark` themes are
+available in both local and self-hosted clients.
 
 ```bash
 emails ui
@@ -139,20 +137,24 @@ emails ui --mailbox unread
 ```
 
 The app uses visible buttons and the Shortcuts command palette for actions.
-Mailbox filtering is handled by the mailbox dialog, which lists all mailboxes
-and configured/observed recipient addresses. Sidebar labels filter mailbox
-content, and mail categories show Primary, Social, Promotions, Updates,
-and Forums separately from custom labels. Reader shows
-attachments with size/type. Composer writes **markdown** rendered to HTML on
-send. Settings opens as a simple menu dialog for sync, defaults, and display
-controls. Folders: Inbox · Unread · Starred · Sent · Archived · Spam · Trash.
+The address and source dialogs select mailbox scope; sidebar labels filter
+mailbox content, and mail categories show Primary, Social, Promotions, Updates,
+and Forums separately from custom labels. Reader dialogs expose attachments,
+links, and raw details. Composer writes **markdown** rendered to HTML on send.
+Settings controls sync, defaults, and display. Folders: Inbox · Unread ·
+Starred · Sent · Archived · Spam · Trash.
 
 ## Command Structure
+
+The table below covers every primary root namespace. Standalone compatibility
+aliases and the full subcommand matrix are in [docs/CLI.md](docs/CLI.md); the
+runtime `emails <command> --help` output remains the option-level source of
+truth.
 
 ```
 emails ui                # Mailbox UI - inbox, compose, domains, settings
 emails provider          # provider credentials/capabilities (ses, resend, sandbox)
-emails domain            # add/verify/buy/setup/dns/check domains
+emails domain / domains  # domain records, purchase, DNS checks, warming
 emails domain warm       # domain warming schedules: warm, warm-status, warm-list,
                          #   warm-pause, warm-resume, warm-complete, warm-delete
 emails address           # manage sender addresses (add, suspend, activate, quota)
@@ -164,9 +166,10 @@ emails owner             # ownership: register human/agent owners
 emails alias             # per-domain aliases + catch-all routing
 emails forwarding        # app-level forwarding for locally received/synced mail
 emails sendkey           # scoped send keys (restrict an agent to its own addresses)
+emails send-intent       # inspect/reconcile uncertain self-hosted send outcomes
 emails send              # send an email
 emails reply / forward   # reply (in-thread) or forward a sent/inbound email
-emails email             # sent email: list, search, show, replies, conversation
+emails email             # sent email: list, search, show, replies, thread
 emails inbox             # mailbox folders, sources, sync, read/star/archive/label, watch
 emails template          # email templates
 emails contact           # contacts (suppression list)
@@ -174,14 +177,19 @@ emails group             # recipient groups
 emails sequence          # drip sequences
 emails schedule          # scheduled emails: list, cancel, run
 emails db                # self-hosted PostgreSQL migration and status commands
+emails self-hosted key   # operator API-key create/list/rotate/revoke
+emails auth              # self-hosted signup/login/logout/tenant sessions
+emails keys              # tenant-scoped API keys for the active organization
+emails whoami            # current self-hosted principal and organization
 emails aws               # AWS setup: SES receipt rules, S3 inbound bucket
-emails config            # configuration (key=value)
 emails stats             # delivery statistics (--inbox for received mail)
 emails analytics         # email analytics
 emails doctor            # system diagnostics
 emails doctor delivery   # diagnose missing inbound mail for one address
-emails serve             # local HTTP server + dashboard + /api management routes
+emails provision         # registered but intentionally NOT IMPLEMENTED
+emails serve             # local dashboard or self-hosted /v1 service, by mode
 emails mcp               # install MCP server
+emails remove            # remove MCP configuration from supported agent clients
 ```
 
 ### Compact Output and Gradual Disclosure
@@ -203,8 +211,6 @@ emails forwarding list --source ops@example.com
 emails agent context             # compact agent context summary
 emails agent context --verbose   # full redacted context snapshot
 emails agent context --json      # full machine-readable context
-emails config list --verbose     # full redacted config values
-emails config keys --verbose     # include examples for every key
 emails email show <id>           # detail path for one sent email
 emails inbox read <id>           # detail path for one inbound email
 emails inbox attachments --limit 100 --direction inbound --json
@@ -361,10 +367,12 @@ emails-mcp            # stdio transport (default)
 
 ## REST API
 
-`emails serve` exposes the local dashboard and management API:
+`emails serve` selects the server by deployment mode:
 
-- **Dashboard / management API** under `/api/*` for providers, domains,
-  addresses, messages, stats, sources, and mailbox views.
+- In local mode it exposes the static dashboard and its unauthenticated,
+  loopback-oriented management API under `/api/*` on `127.0.0.1:3900`.
+- In `self_hosted` mode it exposes the authenticated PostgreSQL-backed `/v1`
+  service on `0.0.0.0:8080`; `/openapi.json` is the formal wire contract.
 - Scoped send keys remain part of the local send authorization model; there is
   no separate hosted-agent API surface in this OSS server.
 
@@ -459,12 +467,20 @@ allowlists before it confirms or syncs a notification.
 
 ## Self-Hosted Runtime (PostgreSQL/S3/SES)
 
-The server uses operator-owned Postgres and provider accounts. A client must configure `EMAILS_MODE=self_hosted`, `EMAILS_SELF_HOSTED_URL`, and `EMAILS_SELF_HOSTED_API_KEY`. The service requires `EMAILS_DATABASE_URL`, `EMAILS_API_SIGNING_KEY`, `EMAILS_SEND_PROVIDER=ses|resend`, `EMAILS_AUTH_ALLOWED_EMAIL_DOMAINS`, and `EMAILS_AUTH_FROM`. SES uses the deployment IAM role; Resend uses `RESEND_API_KEY`.
+The server uses operator-owned Postgres and provider accounts. A client must
+configure `EMAILS_MODE=self_hosted`, `EMAILS_SELF_HOSTED_URL`, and one of
+`EMAILS_SESSION_TOKEN`, `EMAILS_IDP_TOKEN`, or
+`EMAILS_SELF_HOSTED_API_KEY`. The service requires `EMAILS_DATABASE_URL`,
+`EMAILS_API_SIGNING_KEY`, `EMAILS_SEND_PROVIDER=ses|resend`,
+`EMAILS_AUTH_ALLOWED_EMAIL_DOMAINS`, and `EMAILS_AUTH_FROM`. SES uses the
+deployment IAM role; Resend uses `RESEND_API_KEY`. See
+[docs/AUTHENTICATION.md](docs/AUTHENTICATION.md) for signup, sessions,
+tenant-scoped keys, and optional IdP verification.
 
 `EMAILS_AUTH_ALLOWED_EMAIL_DOMAINS` is the allowlist of email domains that may sign up, log in, or be invited (comma- or space-separated globs, `*` matching one DNS label — e.g. `example.com` or `example.*`), and `EMAILS_AUTH_FROM` is the sender identity for confirmation/reset/invite mail. **Neither has a default and the service refuses to boot without them**: this package ships no domain and no sender of its own, so a default would either lock your auth surface to someone else's organisation or open signup to everyone. See [docs/SELF_HOSTED_RUNTIME.md](docs/SELF_HOSTED_RUNTIME.md).
 
-Self-hosted client commands fail closed when the mode, URL, or API key is
-missing or invalid. With `--json`, the CLI emits one structured error object on
+Self-hosted client commands fail closed when the mode, URL, or selected bearer
+credential is missing or invalid. With `--json`, the CLI emits one structured error object on
 stderr, exits nonzero, and leaves stdout empty. It does not open, create, or
 fall back to the local SQLite database.
 

@@ -1,8 +1,10 @@
 # PLAN — Automated Domain → Email Address Provisioning (open-emails)
 
-> Status: NOT IMPLEMENTED (2026-07-25). Owner: agents. Companion plan: `open-domains/docs/PLAN-PROVISIONING.md`.
-> The orchestrator/daemon/round-trip modules this plan describes were built but never wired to any
-> shipped entrypoint, and were removed as dead code. `emails provision *` fails loud in every mode.
+> Status: DESIGN TARGET, NOT IMPLEMENTED (verified 2026-07-29). Owner: agents.
+> Companion plan: `open-domains/docs/PLAN-PROVISIONING.md`.
+> No shipped orchestrator, daemon, round-trip runner, or `/v1` provisioning route exists.
+> Some schema/state-machine helpers remain, but no entrypoint drives them.
+> `emails provision *` and the `provision_*` MCP tools fail loud in every mode.
 > The BrandSight/GCD DNS client below was likewise removed (enterprise-contract-only, never reachable).
 > This plan turns open-emails into a system that **gives users and agents real email addresses on
 > domains we own**, fully automatically: buy/verify the domain, wire DNS through Cloudflare, set up
@@ -31,14 +33,15 @@ in Cloudflare regardless of where the domain was bought.
 | Cloudflare DNS auto-publish (DKIM/SPF/DMARC/MX) | `src/lib/cloudflare-dns.ts` `setupEmailDns()` | Direct Cloudflare REST client, no connector dependency. |
 | Resend send + domain | `src/providers/resend.ts` | Send-only + domain create/verify. |
 | S3/SES inbound sync | `src/lib/s3-sync.ts`, `inbox sync-s3` | Active stored-mail path. |
-| Cloudflare routing inbound | `src/lib/cloudflare-routing.ts` | Active forwarding/routing setup; stored body requires SES/S3 or Worker/webhook persistence. |
-| Partial orchestration | `src/mcp/tools/infrastructure.ts` | `setup_domain_for_email`, `setup_cloudflare_dns`, `setup_ses_inbound`. |
+| Cloudflare routing inbound | Not implemented | Cloudflare may own public MX, but this package has no provider-native routing-rule client. App-level `emails forwarding` runs only after mail enters Emails. |
+| One-shot local infrastructure helpers | `src/mcp/tools/infrastructure.ts` | `setup_domain_for_email`, `setup_cloudflare_dns`, and `setup_ses_inbound` work in local mode with the executing machine's cloud credentials; they are not a resumable provisioner. |
 | Address / domain / provider DB | `src/db/{addresses,domains,providers}.ts` | Schema exists; needs extension (§5). |
 | Cross-repo link | imports `@hasna/domains` | r53 buy/zone functions already imported. |
 
-**Critical gap:** `setup_domain_for_email` currently creates a **Route53 hosted zone** and writes DNS
-there. New rule: **DNS is ALWAYS Cloudflare.** This flow must be refactored to delegate NS to
-Cloudflare and publish records via `cloudflare-dns.ts` (§6, T-E2).
+`setup_domain_for_email` already creates/reuses a Cloudflare zone, delegates a
+Route 53 Domains registration to its nameservers when possible, and publishes
+records through `cloudflare-dns.ts`. The remaining critical gap is durable,
+resumable orchestration and a server-side authorization boundary for that work.
 
 ## 3. Provider capability matrix (2026 — from research)
 
@@ -60,6 +63,10 @@ Cloudflare and publish records via `cloudflare-dns.ts` (§6, T-E2).
 - **No IMAP/POP mailbox exists at any provider** — providers are credentials/capabilities, sources ingest mail, and SQLite/S3-backed local storage is the user-visible mailbox. Document this clearly so nobody expects "direct access."
 
 ## 4. Architecture — the provisioning state machine
+
+Everything from this section onward is proposed behavior unless explicitly
+listed as existing in section 2. See `docs/PROVISIONING.md` for current operator
+commands.
 
 A domain and each address move through an explicit, resumable state machine (persisted in DB so the
 daemon can resume after crash/restart):
@@ -99,7 +106,8 @@ Every transition is idempotent and re-entrant. Each state records `attempts`, `l
 - New table **`provisioning_events`**: append-only audit (`entity_type`, `entity_id`, `from_state`,
   `to_state`, `detail_json`, `created_at`) — powers `emails provision status` and the dashboard.
 
-Add a SQLite migration in `src/db/database.ts` and the matching `pg-migrations.ts` for the remote storage path.
+Add a SQLite migration in `src/db/database.ts` and a matching self-hosted
+Postgres migration in `src/server/self-hosted/migrations.ts`.
 
 ## 6. New / changed code modules
 

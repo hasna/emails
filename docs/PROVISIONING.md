@@ -1,100 +1,93 @@
-# Email-address provisioning (open-emails)
+# Email-address provisioning
 
-> **STATUS: NOT IMPLEMENTED in the shipped package.** Every `emails provision *`
-> command and every `provision_*` MCP tool fails loud. There is no local
-> provisioning orchestrator (it was unreachable from all shipped entrypoints and
-> was deleted) and the self-hosted server exposes no provisioning route and runs
-> no reconciler. The rest of this document describes the intended design, not
-> current behaviour. **Provisioning today is manual — see "What actually works"
-> below.**
+> **Status: the stateful provisioning workflow is not implemented.** Every
+> `emails provision *` command and the MCP tools `provision_domain`,
+> `provision_address`, and `provision_status` returns an actionable error. The
+> package ships no provisioning reconciler or `/v1` provisioning route.
 
-Give users and agents **real email addresses on domains we own**, fully
-automatically: buy the domain, wire DNS through Cloudflare, set up SES sending +
-receiving, create addresses, and verify by sending mail back and forth.
+The registered commands preserve compatibility and make the missing capability
+explicit; registration in `--help` is not a claim that they work. The internal
+provisioning records and state-machine helpers are not connected to a shipped
+orchestrator.
 
-## What actually works today
-```
-emails domain adopt ours.com --provider <ses-id>   # register an already-verified domain + wire SES inbound (S3) + catch-all
-emails aws setup-inbound --domain ours.com --bucket <name>   # S3 bucket + SES receipt rules; prints the MX record to publish
-emails domain dns ours.com --provider <ses-id>     # DKIM/SPF/DMARC records the domain must publish
-emails domain check ours.com                       # what is actually published, plus root-MX owner
-emails address add andrew@ours.com --provider <ses-id>
-emails domain list --json                          # what is registered
-emails inbox sync-s3                               # pull inbound mail from the S3 bucket
-```
+## Supported operator workflow
 
-## One command (design target — NOT implemented)
-```
-emails provision domain ours.com --provider <ses-id> --add-mx   # SES identity + publish DNS in Cloudflare
-emails provision address andrew@ours.com --provider <ses-id> --receive ses-s3
-emails address provision andrew@ours.com --provider <ses-id> --receive ses-s3  # address-first alias
-emails provision status
-```
-For buying + delegating first, use `@hasna/domains` (`domains domain buy <name> --wait --dns cloudflare`) or the `setup_domain_for_email` MCP tool (which now buys, creates the Cloudflare zone, delegates NS, registers with SES, and publishes DNS **in Cloudflare**).
+For a domain already registered and verified in SES, use the manual path:
 
-Ownership is separate from address creation. Use `emails address owner <email>`
-to inspect owner/admin state, `emails address set-owner <email> --owner <owner>`
-for initial assignment, and the explicit `transfer-owner`, `unassign-owner`, and
-`owner-history` commands when ownership changes need an audit trail.
-
-## The pipeline
-1. **Buy** (Route53, `@hasna/domains`) — the only reliable self-serve API.
-2. **DNS → always Cloudflare** — create the zone, delegate registrar NS to it.
-3. **Send** — SES domain identity (any `*@domain` can send); Resend secondary.
-4. **Receive** — one of three ingestion-source strategies (none are IMAP mailboxes):
-   - `ses-s3` (default): SES receipt rule → S3 → `emails inbox sync-s3` → SQLite. This is an ingestion source feeding the local mailbox.
-   - `cf-routing`: Cloudflare Email Routing forward/Worker (no stored body unless a Worker persists it).
-   - `resend-webhook`: Resend `email.received` webhook (no stored mailbox body unless persisted).
-5. **Validate** — `emails test roundtrip` sends tokened mail back and forth and confirms receipt.
-
-## There is no IMAP/POP mailbox anywhere
-No provider (SES, Cloudflare, Resend) exposes an IMAP/POP inbox. Providers are
-credentials/capabilities; sources are ingestion streams. For the `ses-s3`
-strategy, SES drops raw MIME into S3 and `emails inbox sync-s3` parses it into
-the local mailbox store. Query the synced store with `emails inbox mailboxes`,
-`emails inbox sources`, or mailbox list/search commands instead of expecting
-direct provider mailbox access.
-
-## State machine + daemon
-Domains and addresses move through an explicit, resumable lifecycle
-(`src/lib/provision/state-machine.ts`); the reconciler daemon
-(`src/daemon/provisioner.ts`) advances any entity whose `next_check_at` is due,
-crash-safe because all state lives in the DB.
-
-Useful health checks:
-
-```
-emails status
-emails daemon status
-emails inbox sync-status
-emails doctor delivery andrew@ours.com
-emails logs tail --component daemon
+```bash
+emails provider add --name production-ses --type ses --region us-east-1
+emails domain adopt example.com --provider <ses-id> --no-inbound
+emails domain dns example.com --provider <ses-id>
+emails domain check example.com --provider <ses-id>
+emails address add hello@example.com --provider <ses-id>
 ```
 
-## Credentials (`emails doctor`)
-- **AWS** (SES send/inbound, Route53 buy): `AWS_PROFILE` or keys, region us-east-1.
-- **Cloudflare** (DNS + Email Routing): `CLOUDFLARE_API_TOKEN` *or*
-  `CLOUDFLARE_API_KEY`+`CLOUDFLARE_EMAIL` + `CLOUDFLARE_ACCOUNT_ID`.
-- **Resend** (optional): `RESEND_API_KEY`.
-- **SES sandbox**: new accounts send only to verified identities (200/day, 1/sec);
-  request production access with the `ses-sandbox` helper (PutAccountDetails).
+`domain dns` prints expected records and `domain check` reads public DNS. Neither
+publishes DNS. `domain verify`, despite appearing in help for compatibility, is
+not implemented; use `domain check` for the live result.
 
-## Proven live
-Verified end-to-end: 3 funny `.com` domains bought, DNS in Cloudflare, SES DKIM
-verified, 3 addresses/domain, **144/144 emails** sent via the `emails` CLI and
-received (SES→S3→SQLite). See `docs/PLAN-PROVISIONING.md` for the architecture.
+When SES should also receive the domain, omit `--no-inbound` from `domain adopt`
+or run the explicit inbound setup:
 
-## AWS account architecture (self-hosted operator example)
-| Concern | AWS account | Notes |
-|---|---|---|
-| **SES** (send + inbound) | Operator mail account | Production access. All domain identities, MAIL FROM, and receipt rules live here; configure S3 with `inbound_s3_bucket` / `inbound_s3_buckets`. |
-| **Domain purchase** (Route53 Domains) | Operator registrar account | Run `domains domain buy` with the operator's AWS profile or ambient credentials. |
-| **DNS** | Operator Cloudflare account | Always Cloudflare — DKIM/SPF/DMARC/MAIL-FROM/inbound-MX + Email Routing. |
-| **Send (secondary)** | Resend | Provider integrated; sends proven. Free plan caps Resend-verified domains at 1. |
+```bash
+emails aws setup-inbound \
+  --domain example.com \
+  --bucket operator-owned-inbound-bucket \
+  --provider <ses-id>
 
-`emails config set inbound_s3_bucket <bucket>` makes `emails inbox sync-s3` default to that inbound bucket (no `--bucket` needed). Inbound buckets must block public access and use server-side encryption; keep the versioning policy explicit because raw MIME objects are the mailbox for the `ses-s3` strategy. `emails doctor` reports SES sandbox/production + provisioning creds.
+# Publish the MX value printed by setup-inbound, then ingest mail:
+emails inbox sync-s3 --source <source-id>
+emails inbox sources
+emails inbox mailboxes
+```
 
-### Integration status (priority: SES, Resend, Cloudflare)
-- **SES**: verified + send/receive tested with operator-owned domains.
-- **Resend**: ✅ send tested end-to-end (Resend send → our domain → SES inbound).
-- **Cloudflare**: ✅ DNS + Email Routing client.
+Both `domain adopt` and `aws setup-inbound` mutate the AWS account selected by
+the executing machine's profile/credentials. In a self-hosted client they are
+still operator-side infrastructure commands; the `/v1` server does not perform
+that work. Run them only from an operator-controlled machine against the
+intended account.
+
+`domain adopt` refuses SES inbound setup if another provider owns public root
+MX. Use `--force-mx-switch` only for an intentional inbound migration. For a
+send-only SES identity behind Google Workspace or another mailbox provider,
+keep `--no-inbound` and preserve the existing MX.
+
+The inbound bucket may also come from `EMAILS_INBOUND_S3_BUCKET` or the
+`inbound_s3_bucket` config value written by `domain adopt`. There is no
+`emails config` command in this build.
+
+## Local MCP infrastructure helpers
+
+Local mode also exposes direct, operator-credentialed infrastructure tools:
+
+- `setup_domain_for_email` can buy through Route 53 Domains, create a
+  Cloudflare zone, delegate nameservers, register the mail provider domain, and
+  publish email DNS in Cloudflare;
+- `setup_cloudflare_dns` publishes DKIM/SPF/DMARC and optional MX records;
+- `setup_ses_inbound` creates the S3 bucket and SES receipt rules.
+
+These are one-shot infrastructure helpers, not the missing resumable
+`provision_*` workflow. They are refused in `self_hosted` mode because otherwise
+they would mutate infrastructure using the client machine's ambient cloud
+credentials while recording state in the operator's shared service.
+
+## Mailbox model
+
+SES, Resend, and Cloudflare routing are capabilities or ingestion paths, not
+IMAP/POP mailboxes. SES can archive raw MIME to S3; `emails inbox sync-s3` parses
+it into the selected Emails store. Cloudflare Email Routing forwards mail and
+does not create a stored mailbox here. Resend inbound is persisted only when a
+configured webhook delivers it to this application.
+
+App-level forwarding under `emails forwarding` runs only after this package has
+received or synced the source message. If Google Workspace, Microsoft 365, or
+another provider owns root MX and mail never enters Emails, configure forwarding
+at that provider.
+
+## Unimplemented target
+
+The intended resumable domain/address state machine, retry/status commands,
+daemon, and round-trip acceptance runner remain design work. Their historical
+design is preserved in [PLAN-PROVISIONING.md](PLAN-PROVISIONING.md); it is not an
+operator runbook and its example future commands must not be used as current
+instructions.
