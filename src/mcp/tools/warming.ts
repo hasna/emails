@@ -6,8 +6,9 @@ import { formatError } from "../helpers.js";
 
 // Warming schedules are a repository resource in every configuration (local
 // SQLite `warming_schedules`, `/v1/warming` on the self-hosted server), so these
-// tools call src/db/warming.ts directly — no mode guard. They are the MCP twins
-// of `emails domain warm*`.
+// tools call the collapsed warming family (src/db/warming.ts) directly — one
+// async implementation over the store seam, resolved from storage configuration.
+// They are the MCP twins of `emails domain warm*`.
 export function registerWarmingTools(server: McpServer): void {
   server.tool(
     "create_warming_schedule",
@@ -23,14 +24,14 @@ export function registerWarmingTools(server: McpServer): void {
         // Same duplicate guard as `emails domain warm`: the /v1 store accepts a
         // second POST for the same domain, which would leave two schedules and
         // make which one the reads see arbitrary.
-        const existing = getWarmingSchedule(domain);
+        const existing = await getWarmingSchedule(domain);
         if (existing) {
           throw new Error(
             `${domain} already has a warming schedule (status ${existing.status}, target ${existing.target_daily_volume}/day, started ${existing.start_date}). ` +
               "Use update_warming_status to change its state, or delete it first to retarget.",
           );
         }
-        const schedule = createWarmingSchedule({ domain, target_daily_volume, start_date, provider_id });
+        const schedule = await createWarmingSchedule({ domain, target_daily_volume, start_date, provider_id });
         const plan = generateWarmingPlan(target_daily_volume);
         return { content: [{ type: "text", text: JSON.stringify({ schedule, plan_days: plan.length, final_day: plan[plan.length - 1]?.day }, null, 2) }] };
       } catch (e) {
@@ -45,7 +46,7 @@ export function registerWarmingTools(server: McpServer): void {
     { domain: z.string().describe("Domain to check") },
     async ({ domain }) => {
       try {
-        const schedule = getWarmingSchedule(domain);
+        const schedule = await getWarmingSchedule(domain);
         if (!schedule) throw new Error(`Warming schedule not found for domain: ${domain}`);
         const { today_limit, today_sent, current_day } = await describeWarmingProgress(schedule);
         return { content: [{ type: "text", text: JSON.stringify({ schedule, today_limit, today_sent, current_day }, null, 2) }] };
@@ -67,7 +68,7 @@ export function registerWarmingTools(server: McpServer): void {
       try {
         const effectiveLimit = limit ?? 100;
         const effectiveOffset = offset ?? 0;
-        const rows = listWarmingSchedules(status, { limit: effectiveLimit + 1, offset: effectiveOffset });
+        const rows = await listWarmingSchedules(status, { limit: effectiveLimit + 1, offset: effectiveOffset });
         const schedules = rows.slice(0, effectiveLimit);
         return { content: [{ type: "text", text: JSON.stringify({
           schedules,
@@ -91,7 +92,7 @@ export function registerWarmingTools(server: McpServer): void {
     },
     async ({ domain, status }) => {
       try {
-        const updated = updateWarmingStatus(domain, status);
+        const updated = await updateWarmingStatus(domain, status);
         if (!updated) throw new Error(`Warming schedule not found for domain: ${domain}`);
         return { content: [{ type: "text", text: JSON.stringify(updated, null, 2) }] };
       } catch (e) {

@@ -10,7 +10,16 @@ import { getAddressSendability } from "../db/address-lifecycle.js";
 // there is one implementation, it reads through the store seam, and it is async.
 import { assertSendAuthorized } from "../db/send-keys.js";
 import { canonicalSender } from "./email-address.js";
-import { getWarmingSchedule } from "../db/warming.local.js";
+// The FACADE'S SUCCESSOR, not an arm. This module used to import `warming.local.js`
+// directly, which pinned the send cap to one arm's dataset regardless of where this
+// installation actually keeps its schedules. That family is collapsed: there is one
+// implementation, it reads through the store seam, and it is async. The `db` handle
+// this gate already threads is forwarded — the collapsed family binds a SQLite store
+// to exactly that connection — so a local configuration reads exactly the rows it
+// read before; with no handle it resolves the CONFIGURED store, so an installation
+// configured for an API gates sends on the schedules that API holds rather than on a
+// local island holding none.
+import { getWarmingSchedule } from "../db/warming.js";
 import { getDomainByName } from "../db/domains.local.js";
 import { resolveEmailsMode } from "./mode.js";
 import { getTodayLimit, getTodaySentCount } from "./warming.js";
@@ -47,7 +56,7 @@ export async function assertWarmingLimit(opts: SendEmailOptions, db?: Database):
   if (opts.bypass_warming) return;
   const fromDomain = canonicalSender(opts.from)?.split("@")[1] ?? opts.from.split("@")[1];
   if (!fromDomain) return;
-  const warmingSchedule = getWarmingSchedule(fromDomain, db);
+  const warmingSchedule = await getWarmingSchedule(fromDomain, db);
   if (!warmingSchedule) return;
   const limit = getTodayLimit(warmingSchedule);
   if (limit === null) return;

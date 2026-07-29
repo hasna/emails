@@ -21,7 +21,7 @@ import { suppressContact } from "../../db/contacts.js";
 import { getEmailContent } from "../../db/email-content.js";
 import { createProvider } from "../../db/providers.local.js";
 import { listSandboxEmails } from "../../db/sandbox.js";
-import { createWarmingSchedule } from "../../db/warming.local.js";
+import { createWarmingSchedule } from "../../db/warming.js";
 import { resetMailDataSource } from "../../lib/mail-data-source.js";
 import { registerEmailOpsTools } from "./email-ops.js";
 
@@ -184,7 +184,9 @@ describe("collapsed email-ops tool family", () => {
     // the domain is over it. That is the guard's fail-closed branch, not a fixture
     // trick: an unusable or future start date must not mean "go".
     const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-    createWarmingSchedule({ domain: "warming.example.test", provider_id: providerId, target_daily_volume: 500, start_date: tomorrow });
+    // The collapsed family, scoped to the same process-wide connection the send
+    // gate reads (the same handle `suppressContact` is given above).
+    await createWarmingSchedule({ domain: "warming.example.test", provider_id: providerId, target_daily_volume: 500, start_date: tomorrow }, getDatabase());
 
     const result = await call("send_email", {
       from: "agent@warming.example.test",

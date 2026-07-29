@@ -181,9 +181,9 @@ describe("emails domain warm* (live, temp SQLite)", () => {
     // Newest-first, like every other list command.
     expect(both.map((row) => row.domain)).toEqual(["second.example.com", "ramp.example.com"]);
 
-    // --limit/--offset must survive the repository facade: the local repo takes
-    // (status, db, opts) and the /v1 client takes (status, opts), so a dropped
-    // options argument here would silently return the whole table.
+    // --limit/--offset must survive the collapsed family's dual argument orders
+    // (the published surface admits both (status, opts) and (status, store, opts)),
+    // so a dropped options argument here would silently return the whole table.
     const firstPage = runJson<WarmingSchedulePayload[]>(["domain", "warm-list", "--limit", "1"], env);
     expect(firstPage.map((row) => row.domain)).toEqual(["second.example.com"]);
     const secondPage = runJson<WarmingSchedulePayload[]>(["domain", "warm-list", "--limit", "1", "--offset", "1"], env);

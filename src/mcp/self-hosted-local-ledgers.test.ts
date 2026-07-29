@@ -82,7 +82,8 @@ describe("MCP self_hosted repository-backed tools", () => {
   });
 
   it("runs the warming tools through the self_hosted API instead of refusing", async () => {
-    // warming.remote.ts is a complete /v1 client, so these tools are NOT local
+    // The collapsed warming family reaches `/v1` through the REAL HTTP store
+    // resolved from this configuration, so these tools are NOT local
     // subledger tools and carry no mode guard — they are the MCP twins of
     // `emails domain warm*`.
     const created = await callTool("create_warming_schedule", { domain: "warm.example.com", target_daily_volume: 100 });

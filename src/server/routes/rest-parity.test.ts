@@ -12,7 +12,7 @@ import { createScheduledEmail, markSent } from "../../db/scheduled.js";
 import { storeSandboxEmail } from "../../db/sandbox.js";
 import { createSequence, enroll, unenroll } from "../../db/sequences.js";
 import { createTemplate } from "../../db/templates.js";
-import { createWarmingSchedule, updateWarmingStatus } from "../../db/warming.local.js";
+import { createWarmingSchedule, updateWarmingStatus } from "../../db/warming.js";
 import { seedEmailAgentRun, seedTriage } from "../../test-support/legacy-mail-seed.js";
 import { handleApiRequest } from "../api-routes.js";
 
@@ -702,7 +702,7 @@ describe("emails serve REST parity smoke", () => {
     }
 
     for (let i = 0; i < 51; i++) {
-      createWarmingSchedule({ domain: `default-warm-${i}.example.com`, target_daily_volume: 100 });
+      await createWarmingSchedule({ domain: `default-warm-${i}.example.com`, target_daily_volume: 100 });
     }
 
     expect(await json<Array<unknown>>(`/api/addresses?provider_id=${provider.id}`)).toHaveLength(100);
@@ -790,10 +790,10 @@ describe("emails serve REST parity smoke", () => {
   it("paginates warming schedules after REST status filtering", async () => {
     const db = getDatabase();
     for (let i = 1; i <= 4; i++) {
-      const schedule = createWarmingSchedule({ domain: `warm-${i}.example.com`, target_daily_volume: 100 });
+      const schedule = await createWarmingSchedule({ domain: `warm-${i}.example.com`, target_daily_volume: 100 });
       db.run("UPDATE warming_schedules SET created_at = ? WHERE id = ?", [`2026-01-0${i} 00:00:00`, schedule.id]);
     }
-    updateWarmingStatus("warm-4.example.com", "paused");
+    await updateWarmingStatus("warm-4.example.com", "paused");
 
     const page = await json<Array<{ domain: string; status: string }>>("/api/warming?status=active&limit=2&offset=1");
 

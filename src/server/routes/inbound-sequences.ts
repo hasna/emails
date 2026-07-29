@@ -3,7 +3,7 @@ import { listInboundEmailSummaries, getInboundEmail, clearInboundEmails, storeIn
 import { parseResendInbound, parseMailgunInbound, parseMimeEmail } from '../../lib/inbound.local.js';
 import { createSequence, getSequence, listSequences, deleteSequence, addStep, listSteps, enroll, unenroll, listEnrollments, type EnrollmentStatus } from '../../db/sequences.js';
 import { createSqliteEmailStore } from '../../store-sqlite/index.js';
-import { createWarmingSchedule, getWarmingSchedule, listWarmingSchedules, updateWarmingStatus, deleteWarmingSchedule } from '../../db/warming.local.js';
+import { createWarmingSchedule, getWarmingSchedule, listWarmingSchedules, updateWarmingStatus, deleteWarmingSchedule } from '../../db/warming.js';
 import { describeWarmingProgress } from '../../lib/warming.js';
 import { updateEmailStatus } from '../../db/emails.js';
 import { upsertEvent } from '../../db/events.local.js';
@@ -77,6 +77,16 @@ function parseEnrollmentStatus(value: string | null): EnrollmentStatus | undefin
  * Built per request: the repositories are thin wrappers over the memoised connection.
  */
 function localSequenceStore() {
+  return createSqliteEmailStore({ database: getDatabase() });
+}
+
+/**
+ * The store the `/api/warming` routes read and write through — the SQLite store bound
+ * to the same process-wide connection, for exactly the reason `localSequenceStore`
+ * spells out above. One binding per collapsed family, so each set of routes names its
+ * own store and neither collapse leans on the other's local alias.
+ */
+function localWarmingStore() {
   return createSqliteEmailStore({ database: getDatabase() });
 }
 
@@ -487,7 +497,9 @@ if (path === "/api/warming" && method === "GET") {
   try {
     const url = new URL(req.url);
     const status = url.searchParams.get("status") ?? undefined;
-    return json(listWarmingSchedules(status, undefined, queryPage(url, 50)));
+    // Reads the store seam (async). A table it could not enumerate to the end raises,
+    // and lands on `internalError` below rather than being served as a short page.
+    return json(await listWarmingSchedules(status, queryPage(url, 50), localWarmingStore()));
   } catch (e) { return internalError(e); }
 }
 
@@ -497,12 +509,12 @@ if (path === "/api/warming" && method === "POST") {
     const body = await parseBody(req) as Record<string, unknown>;
     if (!body.domain) return badRequest("domain is required");
     if (!body.target_daily_volume) return badRequest("target_daily_volume is required");
-    const schedule = createWarmingSchedule({
+    const schedule = await createWarmingSchedule({
       domain: String(body.domain),
       target_daily_volume: Number(body.target_daily_volume),
       start_date: body.start_date ? String(body.start_date) : undefined,
       provider_id: body.provider_id ? resolveIdStrict("providers", String(body.provider_id)) : undefined,
-    });
+    }, localWarmingStore());
     return json(schedule, 201);
   } catch (e) { return internalError(e); }
 }
@@ -512,7 +524,7 @@ const warmingDomainMatch = path.match(/^\/api\/warming\/([^/]+)$/);
 if (warmingDomainMatch && method === "GET") {
   try {
     const domain = decodeURIComponent(warmingDomainMatch[1]!);
-    const schedule = getWarmingSchedule(domain);
+    const schedule = await getWarmingSchedule(domain, localWarmingStore());
     if (!schedule) return notFound("Warming schedule not found");
     const { today_limit, today_sent, current_day } = await describeWarmingProgress(schedule);
     return json({ schedule, today_limit, today_sent, current_day });
@@ -526,7 +538,7 @@ if (warmingDomainMatch && method === "PUT") {
     const body = await parseBody(req) as Record<string, unknown>;
     if (!body.status) return badRequest("status is required");
     const status = String(body.status) as "active" | "paused" | "completed";
-    const updated = updateWarmingStatus(domain, status);
+    const updated = await updateWarmingStatus(domain, status, localWarmingStore());
     if (!updated) return notFound("Warming schedule not found");
     return json(updated);
   } catch (e) { return internalError(e); }
@@ -536,7 +548,7 @@ if (warmingDomainMatch && method === "PUT") {
 if (warmingDomainMatch && method === "DELETE") {
   try {
     const domain = decodeURIComponent(warmingDomainMatch[1]!);
-    const deleted = deleteWarmingSchedule(domain);
+    const deleted = await deleteWarmingSchedule(domain, localWarmingStore());
     if (!deleted) return notFound("Warming schedule not found");
     return json({ deleted: true });
   } catch (e) { return internalError(e); }
