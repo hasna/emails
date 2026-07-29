@@ -274,15 +274,20 @@ export function registerSequenceCommands(program: Command, output: (data: unknow
         if (!seq) handleError(new Error(`Sequence not found: ${name}`));
         const steps = await listSteps(seq!.id);
         if (steps.length === 0) {
-          console.log(chalk.dim("No steps."));
+          output([], chalk.dim("No steps."));
           return;
         }
-        console.log(chalk.bold(`\nSteps for '${name}':`));
+        // output(rows, prose) rather than console.log prose: under --json this
+        // list emitted display lines wrapped as {"output":[...]}, which made the
+        // full step id unobtainable anywhere in the CLI (tasks 15908bba,
+        // 55c19dde).
+        const lines = [chalk.bold(`\nSteps for '${name}':`)];
         for (const step of steps) {
           const fromStr = step.from_address ? ` from ${step.from_address}` : "";
-          console.log(`  ${step.step_number}. [${chalk.cyan(step.id.slice(0, 8))}] ${step.template_name}${fromStr}  delay: ${step.delay_hours}h`);
+          lines.push(`  ${step.step_number}. [${chalk.cyan(step.id.slice(0, 8))}] ${step.template_name}${fromStr}  delay: ${step.delay_hours}h`);
         }
-        console.log();
+        lines.push("");
+        output(steps, lines.join("\n"));
       } catch (e) {
         handleError(e);
       }
@@ -290,12 +295,29 @@ export function registerSequenceCommands(program: Command, output: (data: unknow
 
   sequenceStepCmd
     .command("remove <step-id>")
-    .description("Remove a step by ID")
+    .description("Remove a step by ID (full, or the 8-char id `step add`/`step list` print)")
     .action(async (stepId: string) => {
       try {
-        const removed = await removeStep(stepId);
-        if (!removed) handleError(new Error(`Step not found: ${stepId}`));
-        output({ removed: true, step_id: stepId }, chalk.green(`✓ Step removed: ${stepId}`));
+        // `step add` and `step list` print 8-char ids; nothing in the CLI ever
+        // printed the full one, so requiring it made this verb unusable (task
+        // 55c19dde). A short ref is resolved across every sequence's steps.
+        let resolvedId = stepId;
+        if (!(await removeStep(stepId))) {
+          const matches: string[] = [];
+          for (const sequence of await listSequences({ limit: 1000 })) {
+            for (const step of await listSteps(sequence.id)) {
+              if (step.id.startsWith(stepId)) matches.push(step.id);
+            }
+          }
+          if (matches.length > 1) {
+            handleError(new Error(`Step '${stepId}' is ambiguous: ${matches.map((id) => id.slice(0, 8)).join(", ")}`));
+          }
+          if (matches.length === 0) handleError(new Error(`Step not found: ${stepId}`));
+          resolvedId = matches[0]!;
+          const removed = await removeStep(resolvedId);
+          if (!removed) handleError(new Error(`Step not found: ${stepId}`));
+        }
+        output({ removed: true, step_id: resolvedId }, chalk.green(`✓ Step removed: ${resolvedId}`));
       } catch (e) {
         handleError(e);
       }

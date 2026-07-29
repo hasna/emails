@@ -185,8 +185,12 @@ function normalizeDomainType(value: string | undefined): DomainType | undefined 
 function resolveSelfHostedDomainId(ref: string): string {
   const exact = getDomain(ref);
   if (exact) return exact.id;
+  // Matches the domain NAME as well as an id prefix: every sibling domain verb
+  // takes the name, and `domain list` prints it — a remove that refused the
+  // name was the family's one odd verb out (task 55c19dde).
+  const wanted = ref.trim().toLowerCase();
   const matches = listDomains(undefined, { limit: 1000 })
-    .filter((domain) => domain.id.startsWith(ref));
+    .filter((domain) => domain.id.startsWith(ref) || domain.domain.toLowerCase() === wanted);
   if (matches.length === 1) return matches[0]!.id;
   if (matches.length > 1) {
     handleError(new Error(`Domain ID is ambiguous: ${matches.map((domain) => domain.id.slice(0, 8)).join(", ")}`));

@@ -81,14 +81,33 @@ export function registerAliasCommands(program: Command, output: (data: unknown, 
       } catch (e) { handleError(e); }
     });
 
+  // Accepts every handle the CLI itself hands out: the full UUID, the 8-char
+  // prefix `alias list` prints, and the alias address `alias add` took. The
+  // previous version accepted only the full UUID — a handle visible only via
+  // --json (task 55c19dde).
+  async function resolveAliasSelector(ref: string) {
+    const direct = await getAlias(ref);
+    if (direct) return direct;
+    const wanted = ref.trim().toLowerCase();
+    const rows = await listAliases(undefined, { limit: 1000 });
+    const matches = rows.filter((a) =>
+      a.id.startsWith(ref)
+      || `${a.local_part}@${a.domain}`.toLowerCase() === wanted
+      || display(a).toLowerCase() === wanted);
+    if (matches.length === 1) return matches[0]!;
+    if (matches.length > 1) {
+      handleError(new Error(`Alias '${ref}' is ambiguous: ${matches.map((a) => a.id.slice(0, 8)).join(", ")}`));
+    }
+    handleError(new Error(`Alias not found: ${ref}`));
+  }
+
   cmd
     .command("remove <id>")
-    .description("Remove an alias or catch-all by ID")
+    .description("Remove an alias or catch-all by ID (full or 8-char), or by its alias address")
     .action(async (id: string) => {
       try {
-        const a = await getAlias(id);
-        if (!a) return handleError(new Error(`Alias not found: ${id}`));
-        await removeAlias(id);
+        const a = await resolveAliasSelector(id);
+        await removeAlias(a.id);
         output(a, chalk.green(`✓ Removed ${display(a)}`));
       } catch (e) { handleError(e); }
     });
