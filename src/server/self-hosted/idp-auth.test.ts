@@ -41,7 +41,11 @@ function fakeClient(mappings: Map<string, MappingRow>): TypedQueryClient {
       const rows = (await client.many(sql, params)) as never[];
       return { rows, rowCount: rows.length };
     },
-    async many<T>(): Promise<T[]> {
+    async many<T>(sql: string, params?: readonly unknown[]): Promise<T[]> {
+      if (typeof sql === "string" && sql.includes("idp_principal_tenants")) {
+        const row = mappings.get(String(params?.[0]));
+        return (row ? [row] : []) as T[];
+      }
       return [] as T[];
     },
     async get<T>(sql: string, params?: readonly unknown[]): Promise<T | null> {

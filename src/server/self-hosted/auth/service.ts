@@ -266,19 +266,34 @@ async function resolveIdpContext(
   const { claims, kid } = verified;
   const ids = { sub: claims.sub, tid: claims.tid, jti: claims.jti, kid };
 
-  const mapping = await deps.authStore.getIdpPrincipalTenant(claims.sub);
-  if (!mapping) {
+  // Since the (sub, tenant_id) keying, one sub may hold several grants. Refuse
+  // with the MOST SPECIFIC typed reason: no rows at all, every row pinned to a
+  // different IdP tenant, every candidate revoked, or — fail closed rather
+  // than pick silently — more than one live candidate.
+  const mappings = await deps.authStore.listIdpPrincipalTenantsForSub(claims.sub);
+  if (mappings.length === 0) {
     audit("deny", 403, "no_tenant", ids);
     return fail(403, "idp principal is not mapped to a tenant", "no_tenant");
   }
-  if (mapping.revokedAt) {
-    audit("deny", 403, "idp_principal_revoked", ids);
-    return fail(403, "idp principal access has been revoked", "idp_principal_revoked");
-  }
-  if (mapping.idpTid && mapping.idpTid !== claims.tid) {
+  const tidMatched = mappings.filter((m) => !m.idpTid || m.idpTid === claims.tid);
+  if (tidMatched.length === 0) {
     audit("deny", 403, "idp_tenant_mismatch", ids);
     return fail(403, "idp token tenant does not match the granted mapping", "idp_tenant_mismatch");
   }
+  const live = tidMatched.filter((m) => !m.revokedAt);
+  if (live.length === 0) {
+    audit("deny", 403, "idp_principal_revoked", ids);
+    return fail(403, "idp principal access has been revoked", "idp_principal_revoked");
+  }
+  if (live.length > 1) {
+    audit("deny", 403, "idp_grant_ambiguous", ids);
+    return fail(
+      403,
+      "idp principal holds more than one live tenant grant; revoke all but one for this IdP tenant",
+      "idp_grant_ambiguous",
+    );
+  }
+  const mapping = live[0]!;
 
   const scopes = normalizeIdpScopes(claims.scope);
   if (!hasAllScopes(scopes, requiredScopes)) {
