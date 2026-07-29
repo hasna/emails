@@ -26,11 +26,18 @@ beforeEach(async () => { await stub.reset(); stub.applyEnv(); });
 afterEach(() => stub.clearEnv());
 
 function rows(count: number): Array<Record<string, unknown>> {
+  // Explicit DESCENDING created_at (row 0 newest). The stub now applies the real
+  // server's address list order (`created_at DESC, id ASC` — see declaredListOrder
+  // in src/test-support/v1-stub.ts), so a fixture without timestamps would be
+  // served in the order of the seed call's now()-stamp millisecond ties, not in
+  // insertion order. Stamping newest-first makes served order == insertion order,
+  // keeping every positional expectation below deterministic and meaningful.
   return Array.from({ length: count }, (_, index) => ({
     id: `addr-${String(index).padStart(5, "0")}`,
     email: `user${index}@example.com`,
     status: "active",
     verified: index % 2 === 0,
+    created_at: new Date(Date.UTC(2026, 0, 1, 0, 0, 0) - index * 1000).toISOString(),
   }));
 }
 

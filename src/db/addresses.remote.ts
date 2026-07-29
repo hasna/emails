@@ -1,6 +1,7 @@
 import type { AddressStatus, CreateAddressInput, EmailAddress } from "../types/index.js";
 import { AddressNotFoundError } from "../types/index.js";
 import { safeOffset, safeOptionalLimit } from "./pagination.js";
+import { assertHonestSelfHostedRead, enumerateSelfHostedRows } from "./self-hosted-page.js";
 import { selfHostedResource } from "./self-hosted-resource.js";
 import type { SelfHostedResourceStore } from "./self-hosted-store.js";
 
@@ -55,21 +56,55 @@ export function getAddress(id: string): EmailAddress | null {
   return e ? apiToAddress(e) : null;
 }
 
+// Every list-shaped read below walks `/v1/addresses` through the shared pager
+// instead of taking ONE page and calling it the table. The server windows a
+// missing limit to 100 rows and caps every page at 500 (clampLimit in
+// src/server/self-hosted/store.ts), so the previous single-call convention —
+// `.list({ limit: 1000 })`, or no limit at all — silently returned 100 or 500
+// rows of a larger table as if complete; production crossed 100 addresses long
+// ago and holds 325 today. `/v1/addresses` declares no server-side filters, so
+// every filter here runs in the pager's `select`, which counts a bounded
+// window in rows KEPT rather than rows read.
+//
+// `bound` follows the contract src/db/events.remote.ts established: `null`
+// means "everything", answerable only by a complete enumeration; a number
+// means "the first N in the server's declared order" (`created_at DESC,
+// id ASC` — total, and the same order every sort in this file applies), served
+// once the window is full or the table ended first. A read that can prove
+// neither REFUSES instead of returning a plausible subset.
+function readAddresses(bound: number | null, keep?: (address: EmailAddress) => boolean): EmailAddress[] {
+  const enumeration = enumerateSelfHostedRows<EmailAddress>(ADDRESS_RESOURCE, {
+    ...(bound === null ? {} : { need: bound }),
+    select: (row) => {
+      const address = apiToAddress(row);
+      return keep && !keep(address) ? null : address;
+    },
+  });
+  assertHonestSelfHostedRead(enumeration, bound, {
+    noun: "address",
+    narrowHint: "ask for a bounded page with an explicit limit (GET /v1/addresses windows on limit/offset).",
+  });
+  return enumeration.rows;
+}
+
+const byNewestFirst = (a: EmailAddress, b: EmailAddress): number =>
+  (b.created_at ?? "").localeCompare(a.created_at ?? "");
+
 export function getAddressByEmail(_provider_id: string, email: string): EmailAddress | null {
   // The self-hosted model keys addresses by email (no provider dimension). Match
   // on email so `address add` dedup, get, and remove all resolve the same record.
+  //
+  // Bounded to ONE row: existence is the question. On a table the pager cannot
+  // finish, this REFUSES rather than returning null — this null is what
+  // `address add` dedupes against, and a false null mints a duplicate address.
   const target = email.trim().toLowerCase();
-  const found = selfHostedAddresses().list({ limit: 1000 }).map(apiToAddress).find((a) => a.email.trim().toLowerCase() === target);
-  return found ?? null;
+  const rows = readAddresses(1, (a) => a.email.trim().toLowerCase() === target);
+  return rows[0] ?? null;
 }
 
 export function findAddressesByEmail(email: string): EmailAddress[] {
   const target = email.trim().toLowerCase();
-  return selfHostedAddresses()
-    .list({ limit: 1000 })
-    .map(apiToAddress)
-    .filter((a) => a.email.trim().toLowerCase() === target)
-    .sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
+  return readAddresses(null, (a) => a.email.trim().toLowerCase() === target).sort(byNewestFirst);
 }
 
 export interface ListAddressOptions {
@@ -88,23 +123,24 @@ export interface AddressReadinessOptions extends ListAddressOptions {
 export function listAddresses(provider_id?: string, opts?: ListAddressOptions): EmailAddress[] {
   const lim = safeOptionalLimit(opts?.limit);
   const off = safeOffset(opts?.offset);
-  const query: Record<string, string | number | undefined> = {};
-  if (lim !== null) query["limit"] = Math.max(1000, lim + off);
-  let addresses = selfHostedAddresses().list(query).map(apiToAddress);
-  if (provider_id) addresses = addresses.filter((a) => a.provider_id === provider_id);
-  addresses.sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
-  return lim === null ? addresses : addresses.slice(off, off + lim);
+  // The window's far edge is `lim + off` because the slice below runs locally
+  // after the client-side provider filter; the pager still caps every request
+  // at the server's page maximum and pages to reach the edge.
+  const rows = readAddresses(
+    lim === null ? null : lim + off,
+    provider_id ? (a) => a.provider_id === provider_id : undefined,
+  );
+  rows.sort(byNewestFirst);
+  return lim === null ? rows : rows.slice(off, off + lim);
 }
 
 export function listAddressesByProviderIds(providerIds: Iterable<string>): EmailAddress[] {
   const ids = [...new Set([...providerIds].map((id) => id.trim()).filter(Boolean))];
   if (ids.length === 0) return [];
   const idSet = new Set(ids);
-  return selfHostedAddresses()
-    .list({ limit: 1000 })
-    .map(apiToAddress)
-    .filter((a) => idSet.has(a.provider_id))
-    .sort((a, b) => a.provider_id.localeCompare(b.provider_id) || (b.created_at ?? "").localeCompare(a.created_at ?? ""));
+  return readAddresses(null, (a) => idSet.has(a.provider_id)).sort(
+    (a, b) => a.provider_id.localeCompare(b.provider_id) || byNewestFirst(a, b),
+  );
 }
 
 // Readiness over /v1: the rich local domain-lifecycle join (DKIM/SPF/provisioning
@@ -126,37 +162,29 @@ function addressReadinessMatch(a: EmailAddress, opts: AddressReadinessOptions): 
 export function listAddressesForReadiness(opts: AddressReadinessOptions = {}): EmailAddress[] {
   const lim = safeOptionalLimit(opts.limit);
   const off = safeOffset(opts.offset);
-  const addresses = selfHostedAddresses()
-    .list({ limit: 1000 })
-    .map(apiToAddress)
-    .filter((a) => addressReadinessMatch(a, opts))
-    .sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
-  return lim === null ? addresses : addresses.slice(off, off + lim);
+  const rows = readAddresses(lim === null ? null : lim + off, (a) => addressReadinessMatch(a, opts));
+  rows.sort(byNewestFirst);
+  return lim === null ? rows : rows.slice(off, off + lim);
 }
 
 export function countAddressesForReadiness(opts: Omit<AddressReadinessOptions, "limit" | "offset"> = {}): number {
-  return selfHostedAddresses()
-    .list({ limit: 1000 })
-    .map(apiToAddress)
-    .filter((a) => addressReadinessMatch(a, opts)).length;
+  // A count is a claim about the WHOLE table, so it enumerates completely or
+  // refuses; a count taken from one page is a lower bound published as a total.
+  return readAddresses(null, (a) => addressReadinessMatch(a, opts)).length;
 }
 
 export function listAddressEmails(provider_id?: string): string[] {
-  return selfHostedAddresses()
-    .list({ limit: 1000 })
-    .map(apiToAddress)
-    .filter((a) => (provider_id ? a.provider_id === provider_id : true))
-    .sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""))
+  return readAddresses(null, provider_id ? (a) => a.provider_id === provider_id : undefined)
+    .sort(byNewestFirst)
     .map((a) => a.email);
 }
 
 export function listActiveAddressEmails(provider_id?: string): string[] {
-  return selfHostedAddresses()
-    .list({ limit: 1000 })
-    .map(apiToAddress)
-    .filter((a) => (a.status ?? "active") === "active")
-    .filter((a) => (provider_id ? a.provider_id === provider_id : true))
-    .sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""))
+  return readAddresses(
+    null,
+    (a) => (a.status ?? "active") === "active" && (provider_id ? a.provider_id === provider_id : true),
+  )
+    .sort(byNewestFirst)
     .map((a) => a.email);
 }
 
@@ -165,10 +193,11 @@ function domainOf(email: string): string | null {
   return at > 0 && at < email.length - 1 ? email.slice(at + 1).toLowerCase() : null;
 }
 
+// Per-domain counts are claims about the whole table (see
+// countAddressesForReadiness): enumerate completely or refuse.
 export function listActiveAddressCountsByDomain(): Map<string, number> {
   const counts = new Map<string, number>();
-  for (const a of selfHostedAddresses().list({ limit: 1000 }).map(apiToAddress)) {
-    if ((a.status ?? "active") !== "active") continue;
+  for (const a of readAddresses(null, (address) => (address.status ?? "active") === "active")) {
     const domain = domainOf(a.email);
     if (!domain) continue;
     counts.set(domain, (counts.get(domain) ?? 0) + 1);
@@ -180,10 +209,14 @@ export function listActiveAddressCountsByDomains(domains: Iterable<string>): Map
   const normalized = new Set([...domains].map((domain) => domain.trim().toLowerCase()).filter(Boolean));
   if (normalized.size === 0) return new Map();
   const counts = new Map<string, number>();
-  for (const a of selfHostedAddresses().list({ limit: 1000 }).map(apiToAddress)) {
-    if ((a.status ?? "active") !== "active") continue;
+  const keep = (a: EmailAddress): boolean => {
+    if ((a.status ?? "active") !== "active") return false;
     const domain = domainOf(a.email);
-    if (!domain || !normalized.has(domain)) continue;
+    return domain !== null && normalized.has(domain);
+  };
+  for (const a of readAddresses(null, keep)) {
+    const domain = domainOf(a.email);
+    if (!domain) continue;
     counts.set(domain, (counts.get(domain) ?? 0) + 1);
   }
   return counts;
@@ -191,15 +224,16 @@ export function listActiveAddressCountsByDomains(domains: Iterable<string>): Map
 
 export function getPreferredActiveAddressEmail(opts?: { provider_id?: string; domain?: string }): string | null {
   const domain = opts?.domain?.toLowerCase();
-  const match = selfHostedAddresses()
-    .list({ limit: 1000 })
-    .map(apiToAddress)
-    .filter((a) => (a.status ?? "active") === "active")
-    .filter((a) => (opts?.provider_id ? a.provider_id === opts.provider_id : true))
-    .filter((a) => (domain ? domainOf(a.email) === domain : true))
-    .sort((a, b) =>
-      Number(b.verified) - Number(a.verified) || (b.created_at ?? "").localeCompare(a.created_at ?? ""),
-    )[0];
+  // The ranking puts `verified` above recency, which is NOT the server's list
+  // order, so the best row can sit anywhere in the table: this read cannot be
+  // bounded and must see everything before it may pick.
+  const match = readAddresses(
+    null,
+    (a) =>
+      (a.status ?? "active") === "active" &&
+      (opts?.provider_id ? a.provider_id === opts.provider_id : true) &&
+      (domain ? domainOf(a.email) === domain : true),
+  ).sort((a, b) => Number(b.verified) - Number(a.verified) || byNewestFirst(a, b))[0];
   return match?.email ?? null;
 }
 
@@ -207,11 +241,8 @@ export function listUsableSendingAddresses(opts?: { limit?: number }): EmailAddr
   const limit = typeof opts?.limit === "number" && Number.isFinite(opts.limit) && opts.limit > 0
     ? Math.floor(opts.limit)
     : null;
-  const rows = selfHostedAddresses()
-    .list({ limit: 1000 })
-    .map(apiToAddress)
-    .filter((a) => a.verified && (a.status ?? "active") !== "suspended")
-    .sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
+  const rows = readAddresses(limit, (a) => a.verified && (a.status ?? "active") !== "suspended");
+  rows.sort(byNewestFirst);
   return limit === null ? rows : rows.slice(0, limit);
 }
 

@@ -44,6 +44,19 @@ import { DATABASE_PATH_SETTINGS } from "../store-resolution.js";
  */
 function declaredListOrder(): Record<string, Array<{ column: string; desc: boolean }>> {
   const order: Record<string, Array<{ column: string; desc: boolean }>> = {};
+  // `/v1/addresses` is hand-coded on the server rather than registry-driven, so its
+  // ORDER BY cannot be read from SELF_HOSTED_RESOURCES: it is `created_at DESC,
+  // id ASC` in src/server/self-hosted/store.ts listAddresses, restated here (the
+  // one hand-coded exception to the read-from-registry rule above) so a client
+  // that windows addresses SERVER-side is tested against the order production
+  // actually returns. Without it the stub served addresses in INSERTION order and
+  // a paging-correct client looked broken. Hand-coded domains keeps insertion
+  // order — no client windows domains server-side today; give it the same
+  // treatment before one does.
+  order["addresses"] = [
+    { column: "created_at", desc: true },
+    { column: "id", desc: false },
+  ];
   for (const spec of SELF_HOSTED_RESOURCES) {
     order[spec.path] = resourceListOrderBy(spec)
       .split(",")
@@ -333,8 +346,9 @@ function rowsFor(resource) {
 // server to order first — could not be tested here at all: the stub would hand back
 // a differently-ordered window and a correct client would look broken. The order
 // terms come from the server's own registry (V1_STUB_LIST_ORDER), so the stub cannot
-// drift from it. Resources with a bespoke handler (messages) and non-registry paths
-// (domains/addresses) have no terms and keep insertion order.
+// drift from it — plus one restated hand-coded exception (addresses; see
+// declaredListOrder). Resources with a bespoke handler (messages) and the remaining
+// non-registry path (domains) have no terms and keep insertion order.
 function sortForList(resource, rows) {
   const terms = listOrder[resource];
   if (!Array.isArray(terms) || terms.length === 0) return rows.slice();
@@ -1177,10 +1191,13 @@ const server = Bun.serve({
 
     if (id === undefined && req.method === "GET") {
       // Mirror the real server's list windowing (src/server/self-hosted/store.ts
-      // clampLimit/clampOffset): a supplied \`limit\` is CAPPED at 500, and
-      // \`offset\` skips rows. Without this the stub handed back every row for any
-      // limit, which hid the fact that a single \`.list({ limit: 1000 })\` can only
-      // ever see 500 rows — the silent-truncation trap behind fabricated totals.
+      // clampLimit/clampOffset): a supplied \`limit\` is CAPPED at 500, a MISSING
+      // (or zero/NaN) \`limit\` defaults to 100, and \`offset\` skips rows. Without
+      // the cap the stub handed back every row for any limit, which hid the fact
+      // that a single \`.list({ limit: 1000 })\` can only ever see 500 rows; and
+      // without the 100-row default it handed back every row for NO limit, which
+      // hid the fact that a no-limit list call sees 100 rows of a 325-row table —
+      // both are the silent-truncation trap behind fabricated totals.
       if (!Array.isArray(listQueries[resource])) listQueries[resource] = [];
       listQueries[resource].push(url.search.replace(/^\?/, ""));
       const rawLimit = url.searchParams.get("limit");
@@ -1190,10 +1207,11 @@ const server = Bun.serve({
         : Math.floor(Number(rawOffset));
       const ordered = rotateForList(resource, sortForList(resource, rows));
       let windowed = offset > 0 ? ordered.slice(offset) : ordered;
-      if (rawLimit !== null && !Number.isNaN(Number(rawLimit))) {
-        const limit = Math.min(Math.max(1, Math.floor(Number(rawLimit))), 500);
-        windowed = windowed.slice(0, limit);
-      }
+      const parsedLimit = rawLimit === null ? Number.NaN : Number(rawLimit);
+      const limit = !parsedLimit || Number.isNaN(parsedLimit)
+        ? 100
+        : Math.min(Math.max(1, Math.floor(parsedLimit)), 500);
+      windowed = windowed.slice(0, limit);
       if (!usesEntityEnvelope(resource)) return json({ items: windowed });
       const out = {};
       out[resource] = windowed;
