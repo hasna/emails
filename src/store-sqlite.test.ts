@@ -143,6 +143,9 @@ describe("SqliteEmailStore conformance", () => {
     const families: Array<[string, () => Promise<unknown>]> = [
       ["contacts", () => subject.contacts.list()],
       ["groups", () => subject.groups.list()],
+      // The group membership ledger: carried by the store, declared by
+      // src/store-group-membership.ts rather than by the frozen seam.
+      ["groupMembers", () => subject.groupMembers.list()],
       ["owners", () => subject.owners.list()],
       ["providers", () => subject.providers.list()],
       ["templates", () => subject.templates.list()],

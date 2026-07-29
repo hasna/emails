@@ -5,7 +5,7 @@ import { closeDatabase, getDatabase, resetDatabase } from "../../db/database.js"
 import { createDomain, updateDnsStatus, updateDomainReadiness } from "../../db/domains.local.js";
 import { createSentEmailLedger } from "../../lib/sent-ledger.local.js";
 import { createEvent } from "../../db/events.local.js";
-import { addMember, createGroup } from "../../db/groups.local.js";
+import { addMember, createGroup } from "../../db/groups.js";
 import { storeInboundEmail } from "../../db/inbound.local.js";
 import { createProvider } from "../../db/providers.local.js";
 import { createScheduledEmail, markSent } from "../../db/scheduled.js";
@@ -680,7 +680,7 @@ describe("emails serve REST parity smoke", () => {
       createDomain(provider.id, `default-domain-${i}.example.com`);
       await upsertContact(`default-contact-${i}@example.com`, getDatabase());
       createTemplate({ name: `default-template-${i}`, subject_template: `Template ${i}` });
-      createGroup(`default-group-${i}`);
+      await createGroup(`default-group-${i}`);
       await createScheduledEmail({
         provider_id: provider.id,
         from_address: "ops@example.com",
@@ -691,9 +691,9 @@ describe("emails serve REST parity smoke", () => {
       await createSequence({ name: `default-sequence-${i}` });
     }
 
-    const members = createGroup("default-member-page");
+    const members = await createGroup("default-member-page");
     for (let i = 0; i < 101; i++) {
-      addMember(members.id, `default-member-${i}@example.com`);
+      await addMember(members.id, `default-member-${i}@example.com`);
     }
 
     const enrollments = await createSequence({ name: "default-enrollment-page" });
@@ -802,10 +802,10 @@ describe("emails serve REST parity smoke", () => {
   });
 
   it("paginates groups before returning REST results", async () => {
-    createGroup("gamma");
-    createGroup("alpha");
-    createGroup("delta");
-    createGroup("beta");
+    await createGroup("gamma");
+    await createGroup("alpha");
+    await createGroup("delta");
+    await createGroup("beta");
 
     const page = await json<Array<{ name: string }>>("/api/groups?limit=2&offset=1");
 
@@ -813,11 +813,11 @@ describe("emails serve REST parity smoke", () => {
   });
 
   it("paginates group members before returning REST results", async () => {
-    const group = createGroup("rest-members");
-    addMember(group.id, "dave@example.com");
-    addMember(group.id, "charlie@example.com");
-    addMember(group.id, "alice@example.com");
-    addMember(group.id, "bob@example.com", "Bob", { hidden: "REST hidden group vars ".repeat(100) });
+    const group = await createGroup("rest-members");
+    await addMember(group.id, "dave@example.com");
+    await addMember(group.id, "charlie@example.com");
+    await addMember(group.id, "alice@example.com");
+    await addMember(group.id, "bob@example.com", "Bob", { hidden: "REST hidden group vars ".repeat(100) });
 
     const page = await json<Array<Record<string, unknown>>>("/api/groups/rest-members/members?limit=2&offset=1");
 
@@ -833,8 +833,8 @@ describe("emails serve REST parity smoke", () => {
   });
 
   it("resolves encoded group names in REST member routes", async () => {
-    const group = createGroup("rest members/name");
-    addMember(group.id, "alice@example.com", "Alice", { role: "ops" });
+    const group = await createGroup("rest members/name");
+    await addMember(group.id, "alice@example.com", "Alice", { role: "ops" });
     const encoded = encodeURIComponent(group.name);
 
     const members = await json<Array<{ email: string }>>(`/api/groups/${encoded}/members`);
