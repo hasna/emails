@@ -605,7 +605,7 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     const msgs = await ds.listMailbox("inbox", { limit: 1 });
     expect(msgs).toHaveLength(1);
     expect(serve.requests.filter((request) => request.startsWith("GET /v1/messages?"))).toEqual([
-      "GET /v1/messages?limit=50&direction=inbound",
+      "GET /v1/messages?limit=50&folder=inbox&direction=inbound",
     ]);
   });
 
@@ -622,7 +622,7 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
 
     expect(msgs.map((m) => m.id)).toEqual(["today"]);
     expect(serve.requests.filter((request) => request.startsWith("GET /v1/messages?"))).toEqual([
-      "GET /v1/messages?limit=50&direction=inbound&since=2026-07-11T21%3A00%3A00.000Z",
+      "GET /v1/messages?limit=50&folder=inbox&direction=inbound&since=2026-07-11T21%3A00%3A00.000Z",
     ]);
   });
 
@@ -632,7 +632,7 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     expect(unread.map((m) => m.id).sort()).toEqual(["3", "5"]);
     const hits = await ds.listMailbox("inbox", { search: "oana" });
     expect(hits.map((m) => m.id)).toEqual(["3"]);
-    expect(serve.requests).toContain("GET /v1/messages?limit=200&direction=inbound&search=oana");
+    expect(serve.requests).toContain("GET /v1/messages?limit=200&folder=inbox&direction=inbound&search=oana");
   });
 
   it("locally verifies server-returned rows when a stale server ignores filters", async () => {
@@ -650,7 +650,7 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     });
 
     expect(hits.map((m) => m.id)).toEqual(["match"]);
-    expect(serve.requests).toContain("GET /v1/messages?limit=200&direction=inbound&since=2026-07-12T00%3A00%3A00.000Z&to=target%40example.com&search=needle");
+    expect(serve.requests).toContain("GET /v1/messages?limit=200&folder=inbox&direction=inbound&since=2026-07-12T00%3A00%3A00.000Z&to=target%40example.com&search=needle");
   });
 
   it("hydrates lean rows before rejecting body-only search matches with label filters", async () => {
@@ -754,7 +754,7 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
 
     expect(messages.map((message) => message.id)).toEqual(["attachment-final"]);
     expect(serve.requests).toContain(
-      "GET /v1/messages?limit=50&cursor=cursor%3A50&direction=inbound&search=final-reconciliation.pdf",
+      "GET /v1/messages?limit=50&cursor=cursor%3A50&folder=inbox&direction=inbound&search=final-reconciliation.pdf",
     );
     expect(serve.requests).toContain("GET /v1/messages/attachment-final");
   });
@@ -799,9 +799,9 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     expect(messages.map((message) => message.id)).toEqual(["oldest", "middle", "newest"]);
     expect(new Set(messages.map((message) => message.id)).size).toBe(3);
     expect(serve.requests).toEqual([
-      "GET /v1/messages?limit=500&direction=inbound",
-      "GET /v1/messages?limit=500&cursor=after-50000&direction=inbound",
-      "GET /v1/messages?limit=500&cursor=after-100000&direction=inbound",
+      "GET /v1/messages?limit=500&folder=inbox&direction=inbound",
+      "GET /v1/messages?limit=500&cursor=after-50000&folder=inbox&direction=inbound",
+      "GET /v1/messages?limit=500&cursor=after-100000&folder=inbox&direction=inbound",
     ]);
   });
 
@@ -839,9 +839,9 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     });
     expect(oldest.map((message) => message.id)).toEqual(["legacy-1000"]);
     expect(oldestServe.requests.filter((request) => request.startsWith("GET /v1/messages?"))).toEqual([
-      "GET /v1/messages?limit=500&direction=inbound",
-      "GET /v1/messages?limit=500&cursor=legacy-offset%3A500&direction=inbound",
-      "GET /v1/messages?limit=500&cursor=legacy-offset%3A1000&direction=inbound",
+      "GET /v1/messages?limit=500&folder=inbox&direction=inbound",
+      "GET /v1/messages?limit=500&cursor=legacy-offset%3A500&folder=inbox&direction=inbound",
+      "GET /v1/messages?limit=500&cursor=legacy-offset%3A1000&folder=inbox&direction=inbound",
     ]);
   });
 
@@ -857,7 +857,7 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
 
     expect(messages).toHaveLength(1);
     expect(serve.requests.filter((request) => request.startsWith("GET /v1/messages?"))).toEqual([
-      "GET /v1/messages?limit=50&direction=inbound",
+      "GET /v1/messages?limit=50&folder=inbox&direction=inbound",
     ]);
   });
 
@@ -911,9 +911,9 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
 
     expect(messages.map((message) => message.id)).toEqual(["legacy-search-100"]);
     expect(serve.requests.filter((request) => request.startsWith("GET /v1/messages?"))).toEqual([
-      "GET /v1/messages?limit=50&direction=inbound&search=deep+legacy+needle",
-      "GET /v1/messages?limit=50&cursor=legacy-offset%3A50&direction=inbound&search=deep+legacy+needle",
-      "GET /v1/messages?limit=50&cursor=legacy-offset%3A100&direction=inbound&search=deep+legacy+needle",
+      "GET /v1/messages?limit=50&folder=inbox&direction=inbound&search=deep+legacy+needle",
+      "GET /v1/messages?limit=50&cursor=legacy-offset%3A50&folder=inbox&direction=inbound&search=deep+legacy+needle",
+      "GET /v1/messages?limit=50&cursor=legacy-offset%3A100&folder=inbox&direction=inbound&search=deep+legacy+needle",
     ]);
   });
 
@@ -1011,9 +1011,9 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     expect(Array.isArray(messages)).toBe(true);
     expect(messages.map((message) => message.id)).toEqual(["older-hit"]);
     expect(serve.requests).toEqual([
-      "GET /v1/messages?limit=50&direction=inbound&search=needle",
+      "GET /v1/messages?limit=50&folder=inbox&direction=inbound&search=needle",
       "GET /v1/messages/newer-miss",
-      "GET /v1/messages?limit=50&cursor=after-100000&direction=inbound&search=needle",
+      "GET /v1/messages?limit=50&cursor=after-100000&folder=inbox&direction=inbound&search=needle",
     ]);
   });
 
@@ -1607,7 +1607,7 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     expect((await ds.listMailbox("starred")).map((m) => m.id)).toEqual(["1"]);
     expect((await ds.mailboxCounts()).starred).toBe(1);
     expect(serve.requests.filter((request) => request.startsWith("GET /v1/messages?"))).toEqual([
-      "GET /v1/messages?limit=200&direction=inbound",
+      "GET /v1/messages?limit=200&folder=starred&direction=inbound",
     ]);
   });
 

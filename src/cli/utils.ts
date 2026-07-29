@@ -1,4 +1,5 @@
 import chalk from "../lib/chalk-lite.js";
+import { SCHEDULED_STATUSES, type ScheduledStatus } from "../db/scheduled.js";
 import { writeSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { resolveResourceId, listResourceIdMatches } from "../db/self-hosted-store.js";
@@ -327,6 +328,19 @@ export function parseDuration(str: string): number {
     case "h": return val * 3600000;
     default: return 300000;
   }
+}
+
+/**
+ * Validate a `--status` value for the scheduled-email list commands against the
+ * store's own enum. A blind cast here answered `--status bogus` with `[]` and
+ * exit 0, so a typo like `canceled` read as "nothing is cancelled" while the
+ * sibling `email list --status` refused the same shape of input (task 6d5ebed5).
+ */
+export function parseScheduledStatusFilter(value: string | undefined): ScheduledStatus | undefined {
+  if (value === undefined) return undefined;
+  const normalized = value.trim().toLowerCase();
+  if ((SCHEDULED_STATUSES as readonly string[]).includes(normalized)) return normalized as ScheduledStatus;
+  throw new Error(`Unknown --status ${JSON.stringify(value)}. Valid statuses: ${SCHEDULED_STATUSES.join(", ")}.`);
 }
 
 export function parseCliPositiveIntOption(

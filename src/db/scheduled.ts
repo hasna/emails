@@ -82,7 +82,8 @@ import { createConfiguredEmailStore } from "../store-resolution.js";
 import type { EmailStore } from "../store/email-store.js";
 import type { ResourceInput, ResourceRow } from "../store/records.js";
 
-export type ScheduledStatus = "pending" | "sent" | "cancelled" | "failed";
+export const SCHEDULED_STATUSES = ["pending", "sent", "cancelled", "failed"] as const;
+export type ScheduledStatus = (typeof SCHEDULED_STATUSES)[number];
 
 export interface ScheduledEmail {
   id: string;

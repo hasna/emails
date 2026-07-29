@@ -20,7 +20,7 @@ import { createSentEmailLedger } from "../../lib/sent-ledger.local.js";
 import {
   getDueEnrollments, advanceEnrollment, getStepAtIndex,
 } from "../../db/sequences.js";
-import { formatListHint, handleError, isCliVerboseOutput, resolveId, parseDuration, parseCliListPage } from "../utils.js";
+import { formatListHint, handleError, isCliVerboseOutput, resolveId, parseDuration, parseCliListPage, parseScheduledStatusFilter } from "../utils.js";
 
 const SCHEDULED_EMAIL_BATCH_SIZE = 100;
 const SEQUENCE_SCHEDULER_BATCH_SIZE = 100;
@@ -245,7 +245,7 @@ export function registerMiscCommands(program: Command, output: (data: unknown, f
     .option("--verbose", "Show expanded list hints")
     .action(async (opts: { status?: string; limit?: string; offset?: string; verbose?: boolean }) => {
       try {
-        const status = opts.status as "pending" | "sent" | "cancelled" | "failed" | undefined;
+        const status = parseScheduledStatusFilter(opts.status);
         const page = parseCliListPage(opts);
         // Reads the store seam (async). A schedule it could not enumerate to the end is a
         // THROW landing on `handleError` below, never a short page presented as the list —
@@ -307,7 +307,7 @@ export function registerMiscCommands(program: Command, output: (data: unknown, f
     .option("--verbose", "Show expanded list hints")
     .action(async (opts: { status?: string; limit?: string; offset?: string; verbose?: boolean }) => {
       try {
-        const status = opts.status as "pending" | "sent" | "cancelled" | "failed" | undefined;
+        const status = parseScheduledStatusFilter(opts.status);
         const page = parseCliListPage(opts);
         // Reads the store seam (async). A schedule it could not enumerate to the end is a
         // THROW landing on `handleError` below, never a short page presented as the list —

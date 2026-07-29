@@ -153,7 +153,13 @@ function parseNonNegativeIntOption(value: string | undefined, fallback = 0): num
 
 function normalizeCliMailbox(value: string | undefined): Mailbox {
   const normalized = (value ?? "inbox").trim().toLowerCase();
-  return CLI_MAILBOXES.includes(normalized as Mailbox) ? normalized as Mailbox : "inbox";
+  if (!CLI_MAILBOXES.includes(normalized as Mailbox)) {
+    // Refused rather than defaulted: this used to map every unrecognised value
+    // to "inbox", so a typo like `--folder starrred` listed the WRONG folder's
+    // mail with exit 0 (task a126c676).
+    throw new Error(`Unknown folder ${JSON.stringify(value)}. Valid folders: ${CLI_MAILBOXES.join(", ")}.`);
+  }
+  return normalized as Mailbox;
 }
 
 function mailboxSourceFromOptions(opts: { source?: string; provider?: string; address?: string; domain?: string }): MailboxSource | undefined {
