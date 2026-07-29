@@ -142,12 +142,15 @@ function serverOwnedFor(table: string): readonly string[] {
 
 interface ColumnInfo {
   name: string;
+  declaredType: string;
   primaryKeyPosition: number;
 }
 
 interface TableShape {
   /** Every column the table physically has. */
   columns: string[];
+  /** Declared SQLite type for each physical column, as reported by PRAGMA. */
+  columnTypes: ReadonlyMap<string, string>;
   /**
    * The column rows are addressed by.
    *
@@ -170,6 +173,7 @@ function describeTable(db: Database, table: string): TableShape {
   const info = db.query(`PRAGMA table_info(${table})`).all() as Array<Record<string, unknown>>;
   const columns: ColumnInfo[] = info.map((row) => ({
     name: String(row["name"]),
+    declaredType: String(row["type"] ?? ""),
     primaryKeyPosition: Number(row["pk"] ?? 0),
   }));
   if (columns.length === 0) throw new Error(`table ${table} has no columns; the schema is not migrated`);
@@ -184,6 +188,7 @@ function describeTable(db: Database, table: string): TableShape {
   const timeOrder = hasUpdatedAt ? "updated_at DESC" : hasCreatedAt ? "created_at DESC" : null;
   return {
     columns: names,
+    columnTypes: new Map(columns.map((column) => [column.name, column.declaredType])),
     idColumn,
     idIsRowid: single === null,
     mintsId: single === "id",
@@ -200,6 +205,31 @@ function bindable(value: unknown): SQLQueryBindings {
   if (typeof value === "number" || typeof value === "string") return value;
   if (value instanceof Date) return value.toISOString();
   return JSON.stringify(value);
+}
+
+/** Coerce string filters the same way a typed resource column is written. */
+function filterBinding(declaredType: string | undefined, value: unknown): SQLQueryBindings {
+  if (typeof value !== "string") return bindable(value);
+  const type = (declaredType ?? "").toUpperCase();
+  const normalized = value.trim().toLowerCase();
+  const boolean = normalized === "true" ? 1 : normalized === "false" ? 0 : null;
+
+  // SQLite stores this schema's booleans and integers in INTEGER columns. Boolean
+  // words therefore need explicit handling before the ordinary numeric conversion.
+  if (type.includes("INT")) {
+    if (boolean !== null) return boolean;
+    const number = Number(value);
+    return Number.isFinite(number) ? Math.trunc(number) : 0;
+  }
+  if (type.includes("BOOL")) {
+    if (boolean !== null) return boolean;
+    return Number(value) === 0 ? 0 : 1;
+  }
+  if (type.includes("REAL") || type.includes("FLOA") || type.includes("DOUB") || type.includes("NUM")) {
+    const number = Number(value);
+    return Number.isFinite(number) ? number : 0;
+  }
+  return bindable(value);
 }
 
 /** Reject unknown keys instead of dropping them; a dropped field is a silent lie. */
@@ -291,7 +321,7 @@ export function createResourceRepository(db: Database, table: string): ResourceR
               ORDER BY ${shape.orderBy} LIMIT ? OFFSET ?`,
           )
           .all(
-            ...keys.map((key) => bindable(filters[key])),
+            ...keys.map((key) => filterBinding(shape.columnTypes.get(key), filters[key])),
             cappedLimit(opts?.limit, DEFAULT_PAGE, MAX_PAGE),
             safeOffset(opts?.offset),
           ) as ResourceRow[];
