@@ -294,6 +294,13 @@ async function resolveIdpContext(
     );
   }
   const mapping = live[0]!;
+  // The grant pins WHAT KIND of principal it was made for; a token asserting a
+  // different kind is a different identity wearing the same sub. The column
+  // exists precisely to be compared.
+  if (mapping.principalType !== claims.pt) {
+    audit("deny", 403, "idp_principal_type_mismatch", ids);
+    return fail(403, "idp token principal type does not match the granted mapping", "idp_principal_type_mismatch");
+  }
 
   const scopes = normalizeIdpScopes(claims.scope);
   if (!hasAllScopes(scopes, requiredScopes)) {
@@ -1098,9 +1105,12 @@ async function handleGetTenant(deps: AuthServiceDeps, req: Request, url: URL, te
   const resolved = await resolveRequestContext(deps, req, url, ["emails:read"]);
   if (!resolved.ok) return resolved.response;
   const membership = await callerMembership(deps, resolved.ctx, tenantId);
-  // A key may read its own tenant; a user must be a member.
-  const keyOwnsTenant = resolved.ctx.principalType === "apikey" && resolved.ctx.tenantId === tenantId;
-  if (!membership && !keyOwnsTenant) return json(404, { error: "organization not found", reason: "not_found" });
+  // A non-user principal (API key or IdP principal) may read ITS OWN tenant —
+  // the id /v1/me just returned; a user must be a member.
+  const principalOwnsTenant =
+    (resolved.ctx.principalType === "apikey" || resolved.ctx.principalType === "idp") &&
+    resolved.ctx.tenantId === tenantId;
+  if (!membership && !principalOwnsTenant) return json(404, { error: "organization not found", reason: "not_found" });
   const tenant = await deps.authStore.getTenantById(tenantId);
   if (!tenant) return json(404, { error: "organization not found", reason: "not_found" });
   return json(200, { tenant: toPublicTenant(tenant), role: membership?.role });
