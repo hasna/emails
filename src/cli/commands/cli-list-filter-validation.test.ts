@@ -14,7 +14,7 @@
 //
 // WHY A SUBPROCESS. `handleError` (src/cli/utils.ts) ends in `process.exit(1)`;
 // same harness as email-log-provider-filter.test.ts: temp HOME, temp SQLite,
-// environment scrubbed BY PREFIX (the fleet shell exports this package's whole
+// environment scrubbed BY PREFIX (an operator shell may export this package's whole
 // client configuration, and enumerating those keys here would add references
 // the mode-axis ratchet counts).
 
