@@ -489,6 +489,16 @@ describe("createWebhookServer /webhook/resend", () => {
     expect(eventRows().length).toBe(0);
   });
 
+  it("treats Object.prototype names as unrecognised Resend types and stores none", async () => {
+    const { url } = startReceiver();
+    for (const [index, type] of ["constructor", "__proto__", "hasOwnProperty", "toString"].entries()) {
+      const response = await postResend(url, resendBody(`evt-prototype-${index}`, type), `msg-prototype-${index}`);
+      expect(response.status, type).toBe(200);
+      expect(await response.text(), type).toBe("Unrecognized event type");
+    }
+    expect(eventRows()).toEqual([]);
+  });
+
   it("refuses to store a recognised event when no provider was named", async () => {
     const { url } = startReceiver({ providerId: undefined });
     const response = await postResend(url, resendBody("evt-no-provider"), "msg_no_provider");
@@ -560,6 +570,16 @@ describe("createWebhookServer /webhook/ses", () => {
       expect(response.status, `${notificationType} was not accepted`).toBe(200);
     }
     expect(eventRows().map((row) => row.type)).toEqual(cases.map(([, stored]) => stored));
+  });
+
+  it("treats Object.prototype names as unrecognised SES types and stores none", async () => {
+    const { url } = startReceiver();
+    for (const [index, type] of ["constructor", "__proto__", "hasOwnProperty", "toString"].entries()) {
+      const response = await postSes(url, snsBody(`sns-prototype-${index}`, type));
+      expect(response.status, type).toBe(200);
+      expect(await response.text(), type).toBe("Unrecognized event type");
+    }
+    expect(eventRows()).toEqual([]);
   });
 
   it("stores exactly ONE row for a repeated SNS MessageId — the database fence, not the cache", async () => {

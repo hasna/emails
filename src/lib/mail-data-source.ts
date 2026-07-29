@@ -436,7 +436,9 @@ export class SqliteMailDataSource implements MailDataSource {
   async deleteMessage(id: string): Promise<void> { deleteInboundEmail(id); }
 
   async bulk(input: MailBulkInput): Promise<MailBulkResult> {
-    const setter = LOCAL_BULK_FLAG_ACTIONS[input.action];
+    const setter = Object.hasOwn(LOCAL_BULK_FLAG_ACTIONS, input.action)
+      ? LOCAL_BULK_FLAG_ACTIONS[input.action]
+      : undefined;
     if (!setter) throw new Error(`unsupported local bulk action '${input.action}'`);
     const ids = input.ids?.length
       ? input.ids.slice(0, LOCAL_BULK_MAX)

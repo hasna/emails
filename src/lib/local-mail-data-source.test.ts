@@ -164,6 +164,15 @@ describe("SqliteMailDataSource", () => {
     expect(updated?.labels).toContain("Action Required");
   });
 
+  it("rejects inherited object keys as bulk actions", async () => {
+    const stored = seedInbound();
+    const source = resolveMailDataSource();
+
+    await expect(source.bulk({ action: "constructor", ids: [stored.id] }))
+      .rejects.toThrow("unsupported local bulk action 'constructor'");
+    expect((await source.getMessage(stored.id))?.is_read).toBe(false);
+  });
+
   it("finds verification codes from the local recipient index", async () => {
     const stored = seedInbound();
     const found = await resolveMailDataSource().findLatest("ops@example.test");

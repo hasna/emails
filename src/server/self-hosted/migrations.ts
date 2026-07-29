@@ -2707,6 +2707,38 @@ const IDP_PRINCIPAL_TENANTS = defineMigration(
   `,
 );
 
+/**
+ * 0022 — constrain the delivery-event vocabulary at the Postgres boundary.
+ *
+ * SQLite has always enforced this enum, but the self-hosted `events` table was
+ * left as unconstrained TEXT. That turned a parser or generic-resource mistake
+ * into durable garbage (notably Object.prototype values selected by a webhook
+ * type such as `constructor`). `NOT VALID` is deliberate: it enforces every new
+ * INSERT/UPDATE without making deployment fail if an older installation already
+ * contains an out-of-vocabulary row. Existing rows remain available for an
+ * operator to inspect and repair instead of being silently deleted or rewritten.
+ */
+const EVENTS_TYPE_ENUM_CHECK = defineMigration(
+  "0022_events_type_enum_check",
+  `
+  DO $$
+  BEGIN
+    IF to_regclass('public.events') IS NULL THEN RETURN; END IF;
+    IF NOT EXISTS (
+      SELECT 1
+        FROM pg_constraint
+       WHERE conrelid = 'public.events'::regclass
+         AND conname = 'events_type_enum_check'
+    ) THEN
+      ALTER TABLE public.events
+        ADD CONSTRAINT events_type_enum_check
+        CHECK (type IN ('delivered','bounced','complained','opened','clicked','unsubscribed'))
+        NOT VALID;
+    END IF;
+  END $$;
+  `,
+);
+
 /** All migrations, in order: api-keys table (auth), the core schema, inbound. */
 export function emailsSelfHostedMigrations(): Migration[] {
   const authMigrations = apiKeyMigrations().map((m) => defineMigration(m.id, m.sql));
@@ -2735,5 +2767,6 @@ export function emailsSelfHostedMigrations(): Migration[] {
     INBOX_PERF_ROLLUPS,
     ATTACHMENT_REPAIR_LEDGER,
     IDP_PRINCIPAL_TENANTS,
+    EVENTS_TYPE_ENUM_CHECK,
   ];
 }
