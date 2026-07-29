@@ -1181,7 +1181,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         if (!bucket) { handleError(new Error("No S3 bucket: pass --bucket or set inbound_s3_bucket")); return; }
 
         const { makeSqsAdapter } = await import("../../lib/inbound-realtime-aws.js");
-        const { watchInboundOnce } = await import("../../lib/inbound-realtime.js");
+        const { watchInboundOnce, watchPollConfigPatch, pullOutcomeToWatchSync } = await import("../../lib/inbound-realtime.js");
         const { syncS3Inbox } = await import("../../lib/s3-sync.local.js");
         const sqs = makeSqsAdapter({ queueUrl, region });
         const rememberPoll = (patch: Record<string, unknown> = {}) => {
@@ -1190,21 +1190,35 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
           for (const [key, value] of Object.entries(patch)) latest[key] = value;
           saveConfig(latest);
         };
+        // Both pull paths SWALLOW per-object/listing failures into their result
+        // instead of throwing, so the errors must be returned here — otherwise
+        // watchInboundOnce deletes the queue messages for mail that never landed.
         const sync = async () => {
           if (opts.allBuckets) {
             const r = await runAutoPull({ s3: true, limit: 1000 });
             if (r.pulled > 0) console.log(chalk.green(`  ✓ ${r.pulled} new email(s) delivered across configured buckets`));
-            return { synced: r.pulled };
+            return pullOutcomeToWatchSync(r);
           }
           const r = await syncS3Inbox({ bucket, prefix, region, providerId: opts.provider, limit: 100 });
           if (r.synced > 0) console.log(chalk.green(`  ✓ ${r.synced} new email(s) delivered`) + chalk.dim(` (${r.skipped} already stored)`));
-          return { synced: r.synced };
+          return { synced: r.synced, errors: r.errors };
+        };
+        const reportIngestErrors = (errors: string[]) => {
+          if (errors.length === 0) return;
+          console.error(chalk.yellow(`  ${errors.length} ingest error(s) — queue messages left for redelivery:`));
+          for (const e of errors.slice(0, 5)) console.error(chalk.yellow(`    ${e}`));
         };
 
         if (opts.once) {
           const r = await watchInboundOnce(sqs, queueUrl, sync);
-          rememberPoll({ inbound_realtime_last_error: null, inbound_realtime_last_messages: r.messages });
-          output(r, r.triggered ? chalk.green(`✓ Processed ${r.messages} notification(s)`) : chalk.dim("No new mail."));
+          rememberPoll(watchPollConfigPatch(r));
+          reportIngestErrors(r.errors);
+          output(
+            r,
+            r.errors.length > 0
+              ? chalk.yellow(`⚠ ${r.messages} notification(s) received, ${r.errors.length} ingest error(s) — nothing acknowledged`)
+              : r.triggered ? chalk.green(`✓ Processed ${r.messages} notification(s)`) : chalk.dim("No new mail."),
+          );
           return;
         }
 
@@ -1214,7 +1228,9 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         while (true) {
           try {
             const r = await watchInboundOnce(sqs, queueUrl, sync);
-            rememberPoll({ inbound_realtime_last_error: null, inbound_realtime_last_messages: r.messages });
+            rememberPoll(watchPollConfigPatch(r));
+            reportIngestErrors(r.errors);
+            if (r.errors.length > 0) await new Promise((resolve) => setTimeout(resolve, 3000));
           } catch (e) {
             const message = e instanceof Error ? e.message : String(e);
             rememberPoll({ inbound_realtime_last_error: message });

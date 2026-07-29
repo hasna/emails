@@ -82,6 +82,12 @@ export interface SqsLike {
 export interface WatchResult {
   messages: number;
   triggered: boolean;
+  /**
+   * Ingest failures the sync SWALLOWED — per-object and listing errors it
+   * reports instead of throwing (`syncS3Inbox` never throws for those).
+   * Non-empty means the received messages were NOT deleted.
+   */
+  errors: string[];
 }
 
 /**
@@ -89,8 +95,8 @@ export interface WatchResult {
  * running the dedup-safe `sync` REPEATEDLY until it stops pulling new mail —
  * each scan is capped (e.g. 100 objects), so a backlog larger than one scan
  * would otherwise be lost when we delete the messages. Only after a full drain
- * do we delete the processed messages. If `sync` throws, messages are left on
- * the queue for redelivery.
+ * do we delete the processed messages. If `sync` throws OR reports swallowed
+ * ingest errors, messages are left on the queue for redelivery.
  *
  * `sync` may return `{ synced }`; when it does, draining continues while
  * `synced > 0`. A void-returning sync runs exactly once (back-compat).
@@ -100,15 +106,53 @@ const MAX_DRAIN_ITERATIONS = 50;
 export async function watchInboundOnce(
   sqs: SqsLike,
   _queueUrl: string,
-  sync: () => Promise<{ synced: number } | void>,
+  sync: () => Promise<{ synced: number; errors?: string[] } | void>,
 ): Promise<WatchResult> {
   const messages = await sqs.receive();
-  if (messages.length === 0) return { messages: 0, triggered: false };
+  if (messages.length === 0) return { messages: 0, triggered: false, errors: [] };
   // Drain fully before deleting anything.
+  const errors: string[] = [];
   for (let i = 0; i < MAX_DRAIN_ITERATIONS; i++) {
     const r = await sync();
+    if (r?.errors && r.errors.length > 0) errors.push(...r.errors);
     if (!r || r.synced === 0) break;
   }
-  for (const m of messages) await sqs.deleteMessage(m.ReceiptHandle);
-  return { messages: messages.length, triggered: true };
+  // A drain that swallowed ingest errors has NOT persisted everything the
+  // notifications point to. Deleting would consume the only redelivery signal
+  // for mail that never landed — so the messages stay on the queue (visibility
+  // timeout, then redelivery / DLQ redrive), exactly as if `sync` had thrown.
+  if (errors.length === 0) {
+    for (const m of messages) await sqs.deleteMessage(m.ReceiptHandle);
+  }
+  return { messages: messages.length, triggered: true, errors };
+}
+
+/**
+ * Adapt a pull outcome that signals failure as `{ ok, reason }` into the watch
+ * sync contract. The watch loop previously read only `pulled` and DISCARDED
+ * `ok`/`reason`, so a pull that failed outright still looked like a clean
+ * zero-item sync and the queue messages were deleted.
+ */
+export function pullOutcomeToWatchSync(
+  r: { pulled: number; ok: boolean; reason?: string },
+): { synced: number; errors: string[] } {
+  return { synced: r.pulled, errors: r.ok ? [] : [r.reason ?? "pull failed"] };
+}
+
+/**
+ * Config bookkeeping for one watch poll. A poll whose drain swallowed ingest
+ * errors must RECORD them: stamping `inbound_realtime_last_error: null` after
+ * such a poll is how a total ingestion freeze once looked healthy in
+ * `inbox realtime-status` and status-facts while 100% of objects failed.
+ */
+export function watchPollConfigPatch(result: WatchResult): Record<string, unknown> {
+  const { errors } = result;
+  const summary = errors.length === 0
+    ? null
+    : `${errors.length} ingest error(s); queue messages left for redelivery: `
+      + `${errors.slice(0, 3).join("; ")}${errors.length > 3 ? "; …" : ""}`;
+  return {
+    inbound_realtime_last_messages: result.messages,
+    inbound_realtime_last_error: summary,
+  };
 }
