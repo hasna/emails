@@ -204,19 +204,48 @@ describe("configured store resolution — the four quadrants", () => {
     }
   });
 
-  it("prefers the session token over the operator API key, and says which it used", () => {
-    expect(API_CREDENTIAL_SETTINGS[0]).toBe("EMAILS_SESSION_TOKEN");
-    expect(API_CREDENTIAL_SETTINGS[1]).toBe("EMAILS_SELF_HOSTED_API_KEY");
-    const keyOnly = planEmailStore(bare({ [API_BASE_URL_SETTING]: A_URL, [API_CREDENTIAL_SETTINGS[1]]: "hasna_k" }));
-    expect(keyOnly.store === "api" && keyOnly.credentialSetting).toBe(API_CREDENTIAL_SETTINGS[1]);
-    const bothCredentials = planEmailStore(
+  it("prefers session over identity over operator key, and says which it used", () => {
+    // Precedence is pinned by NAME, not by index, and it mirrors the legacy client's
+    // `sessionToken || idpToken || apiKey` (src/db/self-hosted-store.ts): an explicit
+    // user session first, then the caller's own identity token — ADR-0002, an agent
+    // uses ITS identity even when an operator key is also present — then the key.
+    expect([...API_CREDENTIAL_SETTINGS]).toEqual([
+      "EMAILS_SESSION_TOKEN",
+      "EMAILS_IDP_TOKEN",
+      "EMAILS_SELF_HOSTED_API_KEY",
+    ]);
+    const keyOnly = planEmailStore(bare({ [API_BASE_URL_SETTING]: A_URL, [API_CREDENTIAL_SETTINGS[2]]: "hasna_k" }));
+    expect(keyOnly.store === "api" && keyOnly.credentialSetting).toBe(API_CREDENTIAL_SETTINGS[2]);
+    const identityAndKey = planEmailStore(
+      bare({
+        [API_BASE_URL_SETTING]: A_URL,
+        [API_CREDENTIAL_SETTINGS[1]]: "emid_agent_identity",
+        [API_CREDENTIAL_SETTINGS[2]]: "hasna_k",
+      }),
+    );
+    expect(identityAndKey.store === "api" && identityAndKey.credentialSetting).toBe(API_CREDENTIAL_SETTINGS[1]);
+    const allThree = planEmailStore(
       bare({
         [API_BASE_URL_SETTING]: A_URL,
         [API_CREDENTIAL_SETTINGS[0]]: A_TOKEN,
-        [API_CREDENTIAL_SETTINGS[1]]: "hasna_k",
+        [API_CREDENTIAL_SETTINGS[1]]: "emid_agent_identity",
+        [API_CREDENTIAL_SETTINGS[2]]: "hasna_k",
       }),
     );
-    expect(bothCredentials.store === "api" && bothCredentials.credentialSetting).toBe(API_CREDENTIAL_SETTINGS[0]);
+    expect(allThree.store === "api" && allThree.credentialSetting).toBe(API_CREDENTIAL_SETTINGS[0]);
+  });
+
+  it("resolves an API store from a URL plus ONLY the caller's identity token", () => {
+    // THE SEAM DEFECT THIS PINS: the server verifies identity tokens as a first-class
+    // principal and the legacy client accepts one, but this resolution used to omit
+    // EMAILS_IDP_TOKEN from its credential settings — so a URL-plus-identity-token
+    // configuration threw "no credential is set" despite holding a valid credential.
+    const plan = planEmailStore(bare({ [API_BASE_URL_SETTING]: A_URL, EMAILS_IDP_TOKEN: "emid_agent_identity" }));
+    expect(plan.store).toBe("api");
+    if (plan.store !== "api") return;
+    expect(plan.credentialSetting).toBe("EMAILS_IDP_TOKEN");
+    // The plan names the SETTING, never the credential value.
+    expect(JSON.stringify(plan)).not.toContain("emid_agent_identity");
   });
 
   it("REFUSES TO START when both a database path and an API base URL are configured", () => {

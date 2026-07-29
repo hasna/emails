@@ -37,7 +37,7 @@
 // src/store/descriptor.ts for what happened the last time a label like that existed).
 
 import { defaultDatabasePath } from "./db/database.js";
-import { EMAILS_CLIENT_ENV_SECRET_ENV, EMAILS_SESSION_TOKEN_ENV } from "./lib/client-env.js";
+import { EMAILS_CLIENT_ENV_SECRET_ENV, EMAILS_IDP_TOKEN_ENV, EMAILS_SESSION_TOKEN_ENV } from "./lib/client-env.js";
 import type { EmailStore } from "./store/email-store.js";
 import { createHttpEmailStore } from "./store-http/index.js";
 import { createSqliteEmailStore } from "./store-sqlite/index.js";
@@ -55,11 +55,16 @@ export const DATABASE_PATH_SETTINGS = Object.freeze(["HASNA_EMAILS_DB_PATH", "EM
 export const API_BASE_URL_SETTING = "EMAILS_SELF_HOSTED_URL";
 
 /**
- * The settings that carry the API credential, in precedence order. A user session
- * token wins over an operator API key, matching the existing client.
+ * The settings that carry the API credential, in precedence order: an explicit user
+ * session first, then the caller's own identity token — ADR-0002, an agent uses ITS
+ * identity even when an operator key is also present in the env — then the operator
+ * API key. The same order the existing client applies (src/db/self-hosted-store.ts,
+ * `sessionToken || idpToken || apiKey`), so the two paths cannot disagree about
+ * which credential a mixed environment means.
  */
 export const API_CREDENTIAL_SETTINGS = Object.freeze([
   EMAILS_SESSION_TOKEN_ENV,
+  EMAILS_IDP_TOKEN_ENV,
   "EMAILS_SELF_HOSTED_API_KEY",
 ] as const);
 
@@ -267,8 +272,9 @@ export function planEmailStore(env: NodeJS.ProcessEnv = process.env): StorePlan 
     if (credentialSetting === undefined) {
       throw new StoreConfigurationError(
         `${API_BASE_URL_SETTING} configures an Emails API but no credential is set. ` +
-          `Set ${API_CREDENTIAL_SETTINGS.join(" or ")} (a user session token wins over an ` +
-          `operator API key), or unset ${API_BASE_URL_SETTING} to use the local database.`,
+          `Set ${API_CREDENTIAL_SETTINGS.join(" or ")} (when several are set, the ` +
+          `earlier-listed one wins: user session, then the caller's identity token, then ` +
+          `the operator API key), or unset ${API_BASE_URL_SETTING} to use the local database.`,
         [API_BASE_URL_SETTING, ...API_CREDENTIAL_SETTINGS],
       );
     }

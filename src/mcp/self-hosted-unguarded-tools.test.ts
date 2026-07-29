@@ -156,7 +156,7 @@ describe("MCP alias tools in self_hosted mode (twins of `emails alias …`)", ()
     api = startV1StoreApi({ store: createSqliteEmailStore({ database: db, detail: "mcp alias fixture" }) });
     for (const setting of DATABASE_PATH_SETTINGS) delete process.env[setting];
     process.env[API_BASE_URL_SETTING] = api.baseUrl;
-    process.env[API_CREDENTIAL_SETTINGS[1] as string] = api.apiKey;
+    process.env[API_CREDENTIAL_SETTINGS[2] as string] = api.apiKey;
   });
 
   afterEach(() => {

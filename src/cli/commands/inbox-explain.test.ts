@@ -161,7 +161,7 @@ describe("inbox explain (local arm)", () => {
     try {
       for (const setting of DATABASE_PATH_SETTINGS) delete process.env[setting];
       process.env[API_BASE_URL_SETTING] = other.baseUrl;
-      process.env[API_CREDENTIAL_SETTINGS[1] as string] = other.apiKey;
+      process.env[API_CREDENTIAL_SETTINGS[2] as string] = other.apiKey;
 
       const before = other.requestCount();
       const payload = (await runInboxCommand(["inbox", "explain", "inbound-explain-1"])).data as ExplainPayload;

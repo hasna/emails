@@ -173,7 +173,7 @@ describe("the ambient test environment configures exactly one store", () => {
     const contradiction = {
       ...process.env,
       [API_BASE_URL_SETTING]: stub.baseUrl,
-      [API_CREDENTIAL_SETTINGS[1]]: stub.apiKey,
+      [API_CREDENTIAL_SETTINGS[2]]: stub.apiKey,
     };
     let thrown: unknown;
     try {

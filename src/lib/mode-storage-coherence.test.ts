@@ -69,7 +69,7 @@ afterEach(() => {
 
 describe("split-brain storage configuration — the word-routed side fails closed", () => {
   it("REFUSES the word-routed families when storage names an API and the word is unset", () => {
-    only({ [API_BASE_URL_SETTING]: A_URL, [API_CREDENTIAL_SETTINGS[1]]: A_KEY });
+    only({ [API_BASE_URL_SETTING]: A_URL, [API_CREDENTIAL_SETTINGS[2]]: A_KEY });
     // The divergence is real, not hypothetical: the seam side of this SAME
     // environment resolves to the API store...
     expect(planEmailStore(process.env).store).toBe("api");
@@ -112,7 +112,7 @@ describe("split-brain storage configuration — the word-routed side fails close
     only({
       [DATABASE_PATH_SETTINGS[1]]: ":memory:",
       [API_BASE_URL_SETTING]: A_URL,
-      [API_CREDENTIAL_SETTINGS[1]]: A_KEY,
+      [API_CREDENTIAL_SETTINGS[2]]: A_KEY,
     });
     expect(() => planEmailStore(process.env)).toThrow(StoreConfigurationError);
     expect(() => listOwners()).not.toThrow();
@@ -121,7 +121,7 @@ describe("split-brain storage configuration — the word-routed side fails close
   it("keys on the configured URL, never on a credential alone", () => {
     // A credential with no URL configures nothing — the seam resolves local SQLite —
     // so the word-routed default agrees with the seam and there is nothing to refuse.
-    only({ [DATABASE_PATH_SETTINGS[1]]: ":memory:", [API_CREDENTIAL_SETTINGS[1]]: A_KEY });
+    only({ [DATABASE_PATH_SETTINGS[1]]: ":memory:", [API_CREDENTIAL_SETTINGS[2]]: A_KEY });
     expect(planEmailStore(process.env).store).toBe("sqlite");
     expect(() => listOwners()).not.toThrow();
   });
