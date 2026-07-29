@@ -5,7 +5,7 @@ import { createProvider } from "../../db/providers.local.js";
 import { createScheduledEmail, getScheduledEmail } from "../../db/scheduled.js";
 import { listSandboxEmails } from "../../db/sandbox.js";
 import { createSqliteEmailStore } from "../../store-sqlite/index.js";
-import { createTemplate } from "../../db/templates.local.js";
+import { createTemplate } from "../../db/templates.js";
 import { addStep, createSequence, enroll, listEnrollments } from "../../db/sequences.js";
 import { registerMiscCommands, runSchedulerTick } from "./misc.local.js";
 
@@ -93,7 +93,9 @@ describe("scheduler tick", () => {
       scheduled_at: "2000-01-01T00:00:00.000Z",
     });
 
-    createTemplate({
+    // The collapsed templates family is async; the trailing `db` handle still means
+    // "this exact database", now as a SQLite store bound to it.
+    await createTemplate({
       name: "tick-template",
       subject_template: "Welcome {{email}}",
       text_template: "hello {{email}}",

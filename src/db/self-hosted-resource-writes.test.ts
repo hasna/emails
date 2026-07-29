@@ -15,7 +15,6 @@ import { resetSelfHostedConfigCache } from "./self-hosted-store.js";
 import { createOwner, listOwners } from "./owners.js";
 import { createSendKey } from "./send-keys.js";
 import { DATABASE_PATH_SETTINGS } from "../store-resolution.js";
-import { createTemplate, listTemplates, getTemplate, deleteTemplate } from "./templates.js";
 
 let INHERITED_PROCESS_ENV: NodeJS.ProcessEnv;
 function captureInheritedProcessEnv(): void {
@@ -187,23 +186,14 @@ describe("resource repos route writes to selfHosted in selfHosted mode", () => {
   // store-seam `/v1` fixture, which also validates writes against the service's own
   // published contract, something this hand-rolled stub cannot do.
 
-  test("createTemplate POSTs to /v1/templates and appears in selfHosted listTemplates", () => {
-    const t = createTemplate({ name: "welcome", subject_template: "Hi {{name}}", html_template: "<p>hi</p>" });
-    expect(t.id).toStartWith("t");
-    expect(t.subject_template).toBe("Hi {{name}}");
-    expect(listTemplates().some((x) => x.name === "welcome")).toBe(true);
-  });
-
-  test("getTemplate/deleteTemplate route show+remove to selfHosted (by name and id)", () => {
-    const t = createTemplate({ name: "farewell", subject_template: "Bye {{name}}" });
-    // show by id AND by name both resolve against the selfHosted, not the empty local DB.
-    expect(getTemplate(t.id)?.name).toBe("farewell");
-    expect(getTemplate("farewell")?.id).toBe(t.id);
-    // remove deletes the selfHosted record (resolving name -> id first).
-    expect(deleteTemplate("farewell")).toBe(true);
-    expect(getTemplate("farewell")).toBeNull();
-    expect(listTemplates().some((x) => x.name === "farewell")).toBe(false);
-  });
+  // The templates cases that used to sit here proved the OLD routing bridge sent that
+  // family's create/show/remove to `/v1` when the deployment word said so. The family
+  // has collapsed onto the store seam and consults no such word, so the premise is
+  // gone — and the questions that survive it (does a create land on the API dataset,
+  // does a name lookup find it past one clamped page, and does a remove delete the
+  // API record?) are asked by src/db/templates.test.ts against a REAL HTTP store over
+  // the store-seam `/v1` fixture, which also validates writes against the service's
+  // own published contract, something this hand-rolled stub cannot do.
 
   // The sequences case that used to sit here proved the OLD routing bridge sent that
   // family's writes to `/v1` when the deployment word said so. The family has collapsed

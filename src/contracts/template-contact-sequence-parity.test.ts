@@ -89,7 +89,7 @@ describe("template/contact/sequence parity", () => {
     await expectCliOk(runCli(["--json", "sequence", "step", "add", "onboarding", "--step", "1", "--delay", "0", "--template", "welcome"]));
     await expectCliOk(runCli(["--json", "sequence", "enroll", "onboarding", "user@example.com", "--provider", providerId]));
 
-    expect(getTemplate("welcome")?.subject_template).toBe("Welcome {{name}}");
+    expect((await getTemplate("welcome"))?.subject_template).toBe("Welcome {{name}}");
     expect(await isContactSuppressed("user@example.com")).toBe(true);
     const sequence = (await getSequence("onboarding"))!;
     expect(sequence.name).toBe("onboarding");
@@ -118,7 +118,7 @@ describe("template/contact/sequence parity", () => {
       await callTool(client, "suppress_contact", { email: "user@example.com" });
       const sequence = await callTool<{ id: string }>(client, "create_sequence", { name: "onboarding" });
 
-      expect(listTemplates()).toContainEqual(expect.objectContaining({ name: "welcome" }));
+      expect(await listTemplates()).toContainEqual(expect.objectContaining({ name: "welcome" }));
       expect(await listContacts({ suppressed: true })).toContainEqual(expect.objectContaining({ email: "user@example.com" }));
       expect((await getSequence("onboarding"))?.id).toBe(sequence.id);
 
@@ -152,7 +152,7 @@ describe("template/contact/sequence parity", () => {
   }, 30_000);
 
   it("covers the workflow through exported library functions including due-step processing", async () => {
-    createTemplate({ name: "welcome", subject_template: "Welcome {{name}}", text_template: "Hi {{name}}" });
+    await createTemplate({ name: "welcome", subject_template: "Welcome {{name}}", text_template: "Hi {{name}}" });
     // The collapsed contacts family is async too — an un-awaited suppress here leaked
     // its rejection into the NEXT test file when the stub env was already torn down.
     await suppressContact("user@example.com");
@@ -161,7 +161,7 @@ describe("template/contact/sequence parity", () => {
     await addStep({ sequence_id: seq.id, step_number: 1, delay_hours: 0, template_name: "welcome" });
     const enrollment = await enroll({ sequence_id: seq.id, contact_email: "user@example.com" });
 
-    expect(renderTemplate(getTemplate("welcome")!.subject_template, { name: "Ada" })).toBe("Welcome Ada");
+    expect(renderTemplate((await getTemplate("welcome"))!.subject_template, { name: "Ada" })).toBe("Welcome Ada");
     expect(await isContactSuppressed("user@example.com")).toBe(true);
     expect(await getDueEnrollments()).toContainEqual(expect.objectContaining({ id: enrollment.id }));
     expect(await advanceEnrollment(enrollment.id)).toMatchObject({ status: "completed" });

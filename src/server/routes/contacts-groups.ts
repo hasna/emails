@@ -1,6 +1,6 @@
 // API route handlers — contacts-groups.ts
 import { listContacts, suppressContact, unsuppressContact } from '../../db/contacts.js';
-import { listTemplateSummaries, getTemplate, createTemplate, deleteTemplate } from '../../db/templates.local.js';
+import { listTemplateSummaries, getTemplate, createTemplate, deleteTemplate } from '../../db/templates.js';
 import { createSqliteEmailStore } from '../../store-sqlite/index.js';
 import { getDatabase } from '../../db/database.js';
 import { listGroups, createGroup, deleteGroup, getGroupByName, listMemberSummaries, getMember, addMember, removeMember } from '../../db/groups.js';
@@ -14,24 +14,29 @@ const EXPORT_DEFAULT_LIMIT = 1000;
 const EXPORT_MAX_LIMIT = 5000;
 
 /**
- * The stores the `/api/contacts` and `/api/groups` routes read and write through.
+ * The stores the `/api/contacts`, `/api/groups` and `/api/templates` routes read and
+ * write through.
  *
  * This is the LOCAL DASHBOARD (`emails serve`), and the neighbouring imports in this
  * file are still local-SQLite modules reading the process-wide connection. When each
- * of these two families collapsed onto the store seam its exports stopped requiring a
+ * of these families collapsed onto the store seam its exports stopped requiring a
  * `Database` and started resolving the CONFIGURED store when given nothing — so passing
  * nothing here would have silently repointed these routes at an operator's API on any
  * installation configured for one. They therefore name the SQLite store bound to that
  * same connection, exactly as the `/api/sequences` routes do
  * (src/server/routes/inbound-sequences.ts). Built per request: the repositories are
  * thin wrappers over the memoised connection. One binding per family, so each set of
- * routes names its own store and neither collapse leans on the other's local alias.
+ * routes names its own store and no collapse leans on another's local alias.
  */
 function localContactStore() {
   return createSqliteEmailStore({ database: getDatabase() });
 }
 
 function localGroupStore() {
+  return createSqliteEmailStore({ database: getDatabase() });
+}
+
+function localTemplateStore() {
   return createSqliteEmailStore({ database: getDatabase() });
 }
 
@@ -83,7 +88,10 @@ if (contactUnsuppressMatch && method === "POST") {
 // GET /api/templates
 if (path === "/api/templates" && method === "GET") {
   try {
-    return json(listTemplateSummaries(undefined, queryPage(url, 100)));
+    // Reads the store seam (async). A library it could not enumerate to the end
+    // raises, and lands on `internalError` below rather than being served as a
+    // short page.
+    return json(await listTemplateSummaries(queryPage(url, 100), localTemplateStore()));
   } catch (e) { return internalError(e); }
 }
 
@@ -93,12 +101,12 @@ if (path === "/api/templates" && method === "POST") {
     const body = await parseBody(req) as Record<string, unknown>;
     if (!body.name) return badRequest("name is required");
     if (!body.subject_template) return badRequest("subject_template is required");
-    const template = createTemplate({
+    const template = await createTemplate({
       name: String(body.name),
       subject_template: String(body.subject_template),
       html_template: body.html_template as string | undefined,
       text_template: body.text_template as string | undefined,
-    });
+    }, localTemplateStore());
     return json(template, 201);
   } catch (e) { return internalError(e); }
 }
@@ -107,7 +115,7 @@ if (path === "/api/templates" && method === "POST") {
 const templateMatch = path.match(/^\/api\/templates\/([^/]+)$/);
 if (templateMatch && method === "GET") {
   try {
-    const template = getTemplate(decodeURIComponent(templateMatch[1]!));
+    const template = await getTemplate(decodeURIComponent(templateMatch[1]!), localTemplateStore());
     if (!template) return notFound("Template not found");
     return json(template);
   } catch (e) { return internalError(e); }
@@ -116,7 +124,7 @@ if (templateMatch && method === "GET") {
 // DELETE /api/templates/:id
 if (templateMatch && method === "DELETE") {
   try {
-    const deleted = deleteTemplate(decodeURIComponent(templateMatch[1]!));
+    const deleted = await deleteTemplate(decodeURIComponent(templateMatch[1]!), localTemplateStore());
     if (!deleted) return notFound("Template not found");
     return json({ ok: true });
   } catch (e) { return internalError(e); }

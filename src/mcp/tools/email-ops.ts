@@ -166,7 +166,7 @@ export function registerEmailOpsTools(server: McpServer): void {
       let html = input.html;
       let text = input.text;
       if (input.template) {
-        const tpl = getTemplate(input.template);
+        const tpl = await getTemplate(input.template);
         if (!tpl) throw new Error(`Template not found: ${input.template}`);
         const vars = input.template_vars || {};
         subject = renderTemplate(tpl.subject_template, vars);
@@ -447,7 +447,7 @@ export function registerEmailOpsTools(server: McpServer): void {
   async ({ limit, offset }) => {
     try {
       const { listTemplateSummaries } = await import('../../db/templates.js');
-      const templates = listTemplateSummaries({ limit: limit ?? 100, offset: offset ?? 0 });
+      const templates = await listTemplateSummaries({ limit: limit ?? 100, offset: offset ?? 0 });
       return { content: [{ type: "text", text: JSON.stringify(templates, null, 2) }] };
     } catch (e) {
       return toolError(e);
@@ -464,7 +464,7 @@ export function registerEmailOpsTools(server: McpServer): void {
   async ({ name_or_id }) => {
     try {
       const { getTemplate } = await import('../../db/templates.js');
-      const template = getTemplate(name_or_id);
+      const template = await getTemplate(name_or_id);
       if (!template) throw new Error(`Template not found: ${name_or_id}`);
       return { content: [{ type: "text", text: JSON.stringify(template, null, 2) }] };
     } catch (e) {
@@ -485,7 +485,7 @@ export function registerEmailOpsTools(server: McpServer): void {
   async (input) => {
     try {
       const { createTemplate } = await import('../../db/templates.js');
-      const template = createTemplate(input);
+      const template = await createTemplate(input);
       return { content: [{ type: "text", text: JSON.stringify(template, null, 2) }] };
     } catch (e) {
       return toolError(e);
@@ -502,7 +502,7 @@ export function registerEmailOpsTools(server: McpServer): void {
   async ({ name_or_id }) => {
     try {
       const { deleteTemplate } = await import('../../db/templates.js');
-      const deleted = deleteTemplate(name_or_id);
+      const deleted = await deleteTemplate(name_or_id);
       if (!deleted) throw new Error(`Template not found: ${name_or_id}`);
       return { content: [{ type: "text", text: `Template removed: ${name_or_id}` }] };
     } catch (e) {
@@ -609,7 +609,7 @@ export function registerEmailOpsTools(server: McpServer): void {
       let html = input.html;
       let text = input.text;
       if (input.template) {
-        const tpl = getTemplate(input.template);
+        const tpl = await getTemplate(input.template);
         if (!tpl) throw new Error(`Template not found: ${input.template}`);
         const vars = input.template_vars || {};
         subject = renderTemplate(tpl.subject_template, vars);

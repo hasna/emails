@@ -11,7 +11,7 @@ import { createProvider } from "../../db/providers.local.js";
 import { createScheduledEmail, markSent } from "../../db/scheduled.js";
 import { storeSandboxEmail } from "../../db/sandbox.js";
 import { createSequence, enroll, unenroll } from "../../db/sequences.js";
-import { createTemplate } from "../../db/templates.local.js";
+import { createTemplate } from "../../db/templates.js";
 import { createWarmingSchedule, updateWarmingStatus } from "../../db/warming.local.js";
 import { seedEmailAgentRun, seedTriage } from "../../test-support/legacy-mail-seed.js";
 import { handleApiRequest } from "../api-routes.js";
@@ -679,7 +679,7 @@ describe("emails serve REST parity smoke", () => {
       createAddress({ provider_id: provider.id, email: `default-address-${i}@example.com` });
       createDomain(provider.id, `default-domain-${i}.example.com`);
       await upsertContact(`default-contact-${i}@example.com`, getDatabase());
-      createTemplate({ name: `default-template-${i}`, subject_template: `Template ${i}` });
+      await createTemplate({ name: `default-template-${i}`, subject_template: `Template ${i}` });
       await createGroup(`default-group-${i}`);
       await createScheduledEmail({
         provider_id: provider.id,
@@ -733,7 +733,7 @@ describe("emails serve REST parity smoke", () => {
   it("paginates templates before returning REST results", async () => {
     const db = getDatabase();
     for (let i = 0; i < 5; i++) {
-      const template = createTemplate({
+      const template = await createTemplate({
         name: `template-${i}`,
         subject_template: `Template ${i}`,
         html_template: `<main>${`REST template hidden html ${i} `.repeat(100)}</main>`,

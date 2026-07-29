@@ -10,9 +10,9 @@ import type { Subprocess } from "bun";
 import { SelfHostedHttpError, resetSelfHostedConfigCache } from "./self-hosted-store.js";
 import { DATABASE_PATH_SETTINGS, StoreConfigurationError } from "../store-resolution.js";
 import { listContacts } from "./contacts.js";
+import { listEvents } from "./events.js";
 import { listGroups } from "./groups.js";
 import { listOwners } from "./owners.js";
-import { listTemplates } from "./templates.js";
 import { listProviderSummaries } from "./providers.js";
 import { listScheduledEmails } from "./scheduled.js";
 import { listEmails, searchEmails } from "./emails.js";
@@ -230,7 +230,16 @@ describe("resource repos route reads to selfHosted in selfHosted mode", () => {
     }
   });
 
+  // Templates no longer participate in the routing this file measures, and they
+  // stopped the same way the schedule, the sent ledger, contacts and groups did: the
+  // family has collapsed to one implementation over the store seam, so it reaches a
+  // `/v1` service because STORAGE CONFIGURATION named an Emails API — not because a
+  // mode word chose an arm. Its reads are proven against a REAL HTTP store by
+  // src/db/templates.test.ts. This case therefore probes a family still ON the old
+  // routing: the stand-in service serves no `/v1/events` route, and a mode-routed read
+  // must surface that as the transport's own error — never fall back to the empty
+  // local island and answer [].
   test("missing endpoint FAILS CLOSED (no silent local read)", () => {
-    expect(() => listTemplates()).toThrow(SelfHostedHttpError);
+    expect(() => listEvents()).toThrow(SelfHostedHttpError);
   });
 });

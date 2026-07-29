@@ -143,9 +143,11 @@ describe("contacts + suppression flow (via /v1)", () => {
 });
 
 describe("template rendering", () => {
-  it("renders a template with variables and round-trips through /v1", () => {
-    createTemplate({ name: "welcome", subject_template: "Hello {{name}}!", html_template: "<p>Hi {{name}}</p>" });
-    expect(getTemplate("welcome")?.subject_template).toBe("Hello {{name}}!");
+  it("renders a template with variables and round-trips through /v1", async () => {
+    // The collapsed templates family is async and resolves the API store from the
+    // storage settings the stub's env installs; every call here is awaited.
+    await createTemplate({ name: "welcome", subject_template: "Hello {{name}}!", html_template: "<p>Hi {{name}}</p>" });
+    expect((await getTemplate("welcome"))?.subject_template).toBe("Hello {{name}}!");
     expect(renderTemplate("Hello {{name}}!", { name: "Alice" })).toBe("Hello Alice!");
   });
 });
@@ -154,8 +156,8 @@ describe("sequence enrollment flow (via /v1)", () => {
   it("enrolls a contact, advances through steps, and completes", async () => {
     // The collapsed sequences family is async and resolves the API store from the
     // storage settings the stub's env installs; every call here is awaited.
-    createTemplate({ name: "step1", subject_template: "Step 1", text_template: "Content 1" });
-    createTemplate({ name: "step2", subject_template: "Step 2", text_template: "Content 2" });
+    await createTemplate({ name: "step1", subject_template: "Step 1", text_template: "Content 1" });
+    await createTemplate({ name: "step2", subject_template: "Step 2", text_template: "Content 2" });
     const seq = await createSequence({ name: "test-seq" });
     await addStep({ sequence_id: seq.id, step_number: 1, delay_hours: 0, template_name: "step1" });
     await addStep({ sequence_id: seq.id, step_number: 2, delay_hours: 24, template_name: "step2" });
