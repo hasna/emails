@@ -417,6 +417,11 @@ type ContactCountColumn = "send_count" | "bounce_count" | "complaint_count";
  * distinct address: find canonically, create at zero when absent, add the batch's
  * count, stamp `last_sent_at` for sends, and auto-suppress at the bounce threshold.
  * The atomicity the local arm's single UPDATE had is named as lost in the header.
+ *
+ * ONE whole-table enumeration resolves the ENTIRE batch — a per-address lookup here
+ * would walk the table once per unmatched address, which for the CSV batch path is
+ * the difference between one scan and thousands. The writes that follow are still one
+ * per touched contact, which is what the seam offers.
  */
 async function incrementCounts(
   emails: Iterable<string>,
@@ -431,9 +436,42 @@ async function incrementCounts(
   if (counts.size === 0) return;
 
   const resolved = storeFor(store);
-  const timestamp = new Date().toISOString();
+  const rows = await readAll(resolved, undefined, "count contact activity");
+  // The same resolution findContactRaw applies, precomputed: exact spelling first,
+  // then the newest row sharing the canonical form.
+  const byExact = new Map<string, ResourceRow>();
+  const byCanonical = new Map<string, ResourceRow>();
+  const newerOf = (held: ResourceRow | undefined, row: ResourceRow): ResourceRow =>
+    held === undefined || byNewestUpdateRaw(row, held) < 0 ? row : held;
+  for (const row of rows) {
+    const spelled = cstr(row["email"]);
+    byExact.set(spelled, newerOf(byExact.get(spelled), row));
+    const canonical = canonicalOf(spelled);
+    byCanonical.set(canonical, newerOf(byCanonical.get(canonical), row));
+  }
+
+  // Merge the batch by RESOLVED identity before writing: two spellings of one address
+  // in a single batch are one contact, and writing them separately against the same
+  // pre-read base would lose one increment (existing row) or mint a sibling (missing
+  // row). The sequential lookup this replaces re-read between writes and never saw
+  // that hazard; the index must merge instead.
+  const groups = new Map<string, { existing: ResourceRow | null; email: string; count: number }>();
   for (const [email, count] of counts) {
-    const existing = await findContactRaw(resolved, email, `count activity for ${email}`);
+    const spelled = email.trim();
+    const existing = spelled === ""
+      ? null
+      : byExact.get(spelled) ?? byCanonical.get(canonicalOf(spelled)) ?? null;
+    const key = existing !== null ? `row:${cstr(existing["id"])}` : `new:${spelled === "" ? email : canonicalOf(spelled)}`;
+    const held = groups.get(key);
+    if (held === undefined) {
+      groups.set(key, { existing, email, count });
+    } else {
+      held.count += count;
+    }
+  }
+
+  const timestamp = new Date().toISOString();
+  for (const { existing, email, count } of groups.values()) {
     const base = existing === null ? 0 : cnum(existing[column]);
     const next = base + count;
     const patch: Record<string, unknown> = { [column]: next };

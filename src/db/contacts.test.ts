@@ -185,6 +185,17 @@ describe.each(STORE_VARIANTS)("contact CRUD (%s)", (_label, variant) => {
     expect(rowsFor("bob@example.com")).toHaveLength(1);
   });
 
+  it("resolves canonical duplicates to the newest row, exact spelling first", async () => {
+    // Two rows for one address are REACHABLE through an API store whose table
+    // predates canonical matching. The resolution must be deterministic: an exact
+    // spelling wins outright, and among canonical-only matches the newest does.
+    seedContact({ id: "c-older", email: "Dup@Example.com", updated_at: "2026-01-01T00:00:00.000Z" });
+    seedContact({ id: "c-newer", email: "DUP@example.com", updated_at: "2026-01-02T00:00:00.000Z" });
+    const store = variant();
+    expect((await getContact("Dup@Example.com", store))?.id).toBe("c-older");
+    expect((await getContact("dup@example.com", store))?.id).toBe("c-newer");
+  });
+
   it("retrieves a contact by email and answers null for an unknown one", async () => {
     const store = variant();
     await upsertContact("test@example.com", store);
@@ -336,6 +347,23 @@ describe.each(STORE_VARIANTS)("counters (%s)", (_label, variant) => {
     const updated = await getContact("Spelled@Example.com", store);
     expect(updated?.bounce_count).toBe(3);
     expect(updated?.suppressed).toBe(true);
+  });
+
+  it("merges spellings of ONE address within a batch — one row, every increment kept", async () => {
+    const store = variant();
+    // A missing address arriving under three spellings must create ONE row carrying
+    // all three bounces (and therefore auto-suppress), never three sibling rows.
+    await incrementBounceCounts(["hop@example.com", "Hop@Example.com", "Hopper <hop@example.com>"], store);
+    expect(rowsFor("hop@example.com")).toHaveLength(1);
+    const merged = await getContact("hop@example.com", store);
+    expect(merged?.bounce_count).toBe(3);
+    expect(merged?.suppressed).toBe(true);
+
+    // An existing row reached under two spellings keeps both increments.
+    seedContact({ id: "c-held", email: "held@example.com", send_count: 5 });
+    await incrementSendCounts(["held@example.com", "Held@Example.com"], store);
+    expect(rowsFor("held@example.com")).toHaveLength(1);
+    expect((await getContact("held@example.com", store))?.send_count).toBe(7);
   });
 
   it("does nothing for an empty batch", async () => {
