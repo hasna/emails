@@ -1230,7 +1230,6 @@ const root = join(import.meta.dir, "..");
  * its membership-ledger extension module. Re-measured AFTER this paragraph was written,
  * because this file sits inside the corpus it scans.
  *
-<<<<<<< HEAD
  * THE TEMPLATES COLLAPSE moved the same seven counters, tightened here from the
  * f3035cf numbers to EXACTLY what the tree now measures. The family's three modules
  * contributed 1/1/1/7/5/11/2 on the seven that move — measured per file on the base
@@ -1300,19 +1299,45 @@ const root = join(import.meta.dir, "..");
  * tracked, 648 scanned, ~10.24M characters — two fewer tracked files than the base
  * (two arm modules deleted, nothing added). Re-measured AFTER this paragraph was
  * written, because this file sits inside the corpus it scans.
+ *
+ * THE WARMING COLLAPSE THEN REBASED ACROSS THE TEMPLATES COLLAPSE, AND THE COMPOSING-
+ * REDUCTIONS HAZARD FIRED FOR THE SIXTH TIME, in exactly the shape the groups
+ * paragraph above predicted for the fifth. Each branch had pinned truthfully for ITS
+ * OWN tree (templates 17/17/9/144/15/69/40 on the seven that move, this one
+ * 17/17/9/146/20/75/40), and NEITHER set is right for the merged tree. Git flagged
+ * exactly THREE ceiling lines — the dispatch-call, branch and reference counters,
+ * where the two sides' numbers differ — and let EIGHT merge in silence, including the
+ * structural pair, the facade counter and the predicate counter, where both sides
+ * agreed on 17/17/9/40 and the merged tree measures 16/16/8/38.
+ *
+ * What prevented it is the procedure both collapses already follow: this branch's
+ * eleven were committed as LITERAL ZEROS in their own commit BEFORE the rebase, so
+ * the silently-merged lines could not pass the guard, the merged tree was measured
+ * over the real `git ls-files` corpus, and the numbers below are that measurement.
+ * The composition was then CHECKED rather than admired: base f3035cf
+ * 18/18/10/151/20/80/42, minus the templates family's measured reductions
+ * (1/1/1/7/5/11/2), minus this family's measured reductions (1/1/1/5/0/5/2), equals
+ * 16/16/8/139/15/64/38 on the seven that move — exactly what the merged tree
+ * measures, with no cross-term. The four parser/env counters hold at 55/65/16/219 on
+ * both sides and on the merged tree.
+ *
+ * Corpus of the merged tree: 647 tracked, 646 scanned, ~10.28M characters — both
+ * floors cleared with room; each branch deleted its family's two arm modules and
+ * added nothing. Re-measured AFTER this paragraph was written, because this file sits
+ * inside the corpus it scans.
  */
 const CEILINGS: Record<string, number> = {
-  twoArmFamilies: 0,
-  remoteArmModules: 0,
-  routedFacadeDefinitions: 0,
-  routedCallExpressions: 0,
-  selfHostedResourceBranches: 0,
-  selfHostedResourceReferences: 0,
-  isSelfHostedModeReferences: 0,
-  getEmailsModeReferences: 0,
-  resolveEmailsModeReferences: 0,
-  normalizeEmailsModeReferences: 0,
-  emailsModeEnvReferences: 0,
+  twoArmFamilies: 16,
+  remoteArmModules: 16,
+  routedFacadeDefinitions: 8,
+  routedCallExpressions: 139,
+  selfHostedResourceBranches: 15,
+  selfHostedResourceReferences: 64,
+  isSelfHostedModeReferences: 38,
+  getEmailsModeReferences: 55,
+  resolveEmailsModeReferences: 65,
+  normalizeEmailsModeReferences: 16,
+  emailsModeEnvReferences: 219,
 };
 
 // 649 files are tracked and 648 scanned today, totalling ~9.7M characters. (The figures in
