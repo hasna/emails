@@ -86,19 +86,16 @@ const TIED_INSTANT = "2020-05-05T05:05:05.000Z";
 describe("uniform-family list order — the divergence that keeps order out of the contract", () => {
   it("the two arms declare different total orders for the same tied rows (STRONG detector)", async () => {
     // Three contacts whose created_at/updated_at all tie, with ids whose lexicographic
-    // order is unambiguous. The SQLite arm accepts explicit id and timestamps because
-    // they are real columns of the table.
+    // order is unambiguous. The fixture is seeded BELOW the seam: neither arm accepts a
+    // caller-supplied id or timestamp any more (server-owned columns are refused on
+    // both), and this test needs tied rows with chosen ids precisely to observe the
+    // arms' own orderings — so it inserts them with its own SQL against the database
+    // both stores read.
     const store = sqliteStore();
     for (const id of ["order-aa", "order-bb", "order-cc"]) {
-      must(
-        await store.contacts.create({
-          id,
-          email: `${id}@ordering.example.test`,
-          created_at: TIED_INSTANT,
-          updated_at: TIED_INSTANT,
-        }),
-        `contacts.create ${id}`,
-      );
+      db.query(
+        "INSERT INTO contacts (id, email, created_at, updated_at) VALUES (?, ?, ?, ?)",
+      ).run(id, `${id}@ordering.example.test`, TIED_INSTANT, TIED_INSTANT);
     }
     const listed = must(await store.contacts.list({ limit: 500 }), "contacts.list");
     const observed = listed

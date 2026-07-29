@@ -121,13 +121,18 @@ const SERVER_OWNED_COLUMNS = Object.freeze(["id", "created_at", "updated_at"]);
 /**
  * The published contract's own exceptions: stamped-when-absent columns it declares
  * CALLER-WRITABLE, which this arm must keep accepting for the same parity reason it
- * refuses the rest. Two exist (src/server/self-hosted/resources.ts): a sandbox
+ * refuses the rest. Three exist (src/server/self-hosted/resources.ts): a sandbox
  * capture and a sequence step both carry a caller-supplied `created_at`, because it
- * is an ordering fact of the thing captured rather than of the row's insertion.
+ * is an ordering fact of the thing captured rather than of the row's insertion; and
+ * the append-only address-ownership audit trail declares BOTH `id` and `created_at`
+ * caller-writable — the client MINTS the event id and reads it straight back, and
+ * the instant is the ordering fact of the reassignment being audited
+ * (src/db/owners.ts, divergence 4 of that collapse).
  */
 const CALLER_WRITABLE_STAMPS: Record<string, readonly string[]> = Object.freeze({
   sandbox_emails: Object.freeze(["created_at"]),
   sequence_steps: Object.freeze(["created_at"]),
+  address_ownership_events: Object.freeze(["id", "created_at"]),
 });
 
 function serverOwnedFor(table: string): readonly string[] {
