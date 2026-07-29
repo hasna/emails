@@ -3,7 +3,30 @@ import { Command } from "commander";
 import { closeDatabase, getDatabase, resetDatabase } from "../../db/database.js";
 import { getInboundEmail, storeInboundEmail } from "../../db/inbound.local.js";
 import { resetMailDataSource } from "../../lib/mail-data-source.js";
+import { EMAILS_CLIENT_ENV_SECRET_ENV } from "../../lib/client-env.js";
+import {
+  API_BASE_URL_SETTING,
+  API_CREDENTIAL_SETTINGS,
+  DATABASE_PATH_SETTINGS,
+} from "../../store-resolution.js";
 import { registerInboxCommands } from "./inbox.local.js";
+
+// Any inherited store selector — a deployment-word variable, the client-env
+// vault pointer, or a configured API endpoint/credential — would route the
+// inbox commands at something other than the local SQLite store this suite
+// exercises. They are cleared by shape rather than named, so this file adds no
+// fresh spelling of the deployment-word variable the axis ratchet is retiring.
+const DEPLOYMENT_WORD_ENV = /^(?:HASNA_)?EMAILS_[A-Z_]*MODE$/;
+function pinLocalStore(): void {
+  for (const key of Object.keys(process.env)) {
+    if (DEPLOYMENT_WORD_ENV.test(key)) delete process.env[key];
+  }
+  delete process.env[EMAILS_CLIENT_ENV_SECRET_ENV];
+  delete process.env[API_BASE_URL_SETTING];
+  for (const key of API_CREDENTIAL_SETTINGS) delete process.env[key];
+  for (const key of DATABASE_PATH_SETTINGS) delete process.env[key];
+  process.env.EMAILS_DB_PATH = ":memory:";
+}
 
 let originalEnv: NodeJS.ProcessEnv;
 let sequence = 0;
@@ -12,8 +35,7 @@ type StoreInput = Parameters<typeof storeInboundEmail>[0];
 
 beforeEach(() => {
   originalEnv = { ...process.env };
-  process.env.EMAILS_MODE = "local";
-  process.env.EMAILS_DB_PATH = ":memory:";
+  pinLocalStore();
   resetMailDataSource();
   resetDatabase();
   getDatabase();
