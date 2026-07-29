@@ -1388,19 +1388,38 @@ const root = join(import.meta.dir, "..");
  * tracked file than the base (two arm modules deleted, one non-seam ledger
  * declaration added). Re-measured AFTER this paragraph was written, because this
  * file sits inside the corpus it scans.
+ *
+ * REBASED AS THE SECOND MERGER across the `src/db/events` collapse (#163), and the
+ * composing-reductions hazard is exactly why the numbers below are a MEASUREMENT and
+ * not a per-metric minimum. Both families lower an overlapping set, so the merged
+ * tree sits BELOW either branch: `twoArmFamilies` and `remoteArmModules` are 14, not
+ * the 15 each branch pinned for its own tree — a per-metric minimum would have kept
+ * 15 and shipped a unit of slack on the structural counters, the precise trap the
+ * zero-first procedure exists to defeat. The eleven were committed as literal zeros
+ * before this rebase, the MERGED tree was measured over the real `git ls-files`
+ * corpus, and these are that measurement: base 8309875 16·16·8·139·15·64·38, minus
+ * events' reductions (1·1·1·7·0·3·2), minus owners' reductions (1·1·1·17·6·25·2),
+ * equals 14·14·6·115·9·36·34 on the seven that move — with no cross-term, which the
+ * measurement confirms rather than assumes. The four parser/env counters hold at
+ * 55/65/16/219: neither collapse names the deployment setting. The routing suite's
+ * fail-closed probe (events re-homed it from `listEvents` to `listDomains`) and the
+ * owners case both survive the merge; the split-brain coherence exemplar stays on
+ * providers. Corpus of the merged tree: 644 tracked, 643 scanned, ~10.36M
+ * characters. Re-measured AFTER this paragraph was written, because this file sits
+ * inside the corpus it scans.
  */
 const CEILINGS: Record<string, number> = {
-  twoArmFamilies: 0,
-  remoteArmModules: 0,
-  routedFacadeDefinitions: 0,
-  routedCallExpressions: 0,
-  selfHostedResourceBranches: 0,
-  selfHostedResourceReferences: 0,
-  isSelfHostedModeReferences: 0,
-  getEmailsModeReferences: 0,
-  resolveEmailsModeReferences: 0,
-  normalizeEmailsModeReferences: 0,
-  emailsModeEnvReferences: 0,
+  twoArmFamilies: 14,
+  remoteArmModules: 14,
+  routedFacadeDefinitions: 6,
+  routedCallExpressions: 115,
+  selfHostedResourceBranches: 9,
+  selfHostedResourceReferences: 36,
+  isSelfHostedModeReferences: 34,
+  getEmailsModeReferences: 55,
+  resolveEmailsModeReferences: 65,
+  normalizeEmailsModeReferences: 16,
+  emailsModeEnvReferences: 219,
 };
 
 // 649 files are tracked and 648 scanned today, totalling ~9.7M characters. (The figures in
