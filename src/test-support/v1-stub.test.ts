@@ -8,6 +8,7 @@ import { startV1Stub, type V1Stub } from "./v1-stub.js";
 import { selfHostedStoreFor } from "../db/self-hosted-store.js";
 import { resolveSelfHostedMailDataSource } from "../lib/self-hosted-mail-data-source.js";
 import { SELF_HOSTED_RESOURCES } from "../server/self-hosted/resources.js";
+import { createHttpEmailStore } from "../store-http/index.js";
 
 let stub: V1Stub;
 
@@ -78,6 +79,22 @@ describe("v1-stub — generic resource CRUD over the synchronous curl store", ()
     expect(store.list().map((r) => r["email"]).sort()).toEqual(["a@x.com", "b@x.com"]);
     // The domains resource is now empty (seed replaced everything).
     expect(selfHostedStoreFor("domains").list()).toEqual([]);
+  });
+
+  it("defaults an unbounded generic store list to production's 100-row window", async () => {
+    await stub.seed({
+      scheduled: Array.from({ length: 101 }, (_unused, index) => ({
+        id: `scheduled-${String(index).padStart(3, "0")}`,
+        scheduled_at: new Date(Date.UTC(2026, 6, 1, 0, 0, index)).toISOString(),
+      })),
+    });
+    expect(await stub.list("scheduled")).toHaveLength(101);
+
+    const store = createHttpEmailStore({ baseUrl: stub.baseUrl, credential: stub.apiKey });
+    const listed = await store.scheduled.list();
+    expect(listed.ok).toBe(true);
+    if (!listed.ok) return;
+    expect(listed.value).toHaveLength(100);
   });
 
   it("enforces bearer auth (list back via the control dump helper)", async () => {

@@ -1177,10 +1177,10 @@ const server = Bun.serve({
 
     if (id === undefined && req.method === "GET") {
       // Mirror the real server's list windowing (src/server/self-hosted/store.ts
-      // clampLimit/clampOffset): a supplied \`limit\` is CAPPED at 500, and
-      // \`offset\` skips rows. Without this the stub handed back every row for any
-      // limit, which hid the fact that a single \`.list({ limit: 1000 })\` can only
-      // ever see 500 rows — the silent-truncation trap behind fabricated totals.
+      // clampLimit/clampOffset): an omitted \`limit\` DEFAULTS to 100, a supplied
+      // \`limit\` is CAPPED at 500, and \`offset\` skips rows. Without this the stub
+      // handed back every row for an unbounded \`.list()\`, even though production
+      // returns only its first 100 rows.
       if (!Array.isArray(listQueries[resource])) listQueries[resource] = [];
       listQueries[resource].push(url.search.replace(/^\?/, ""));
       const rawLimit = url.searchParams.get("limit");
@@ -1190,8 +1190,9 @@ const server = Bun.serve({
         : Math.floor(Number(rawOffset));
       const ordered = rotateForList(resource, sortForList(resource, rows));
       let windowed = offset > 0 ? ordered.slice(offset) : ordered;
-      if (rawLimit !== null && !Number.isNaN(Number(rawLimit))) {
-        const limit = Math.min(Math.max(1, Math.floor(Number(rawLimit))), 500);
+      const requestedLimit = rawLimit === null ? 100 : Number(rawLimit);
+      if (!Number.isNaN(requestedLimit)) {
+        const limit = Math.min(Math.max(1, Math.floor(requestedLimit)), 500);
         windowed = windowed.slice(0, limit);
       }
       if (!usesEntityEnvelope(resource)) return json({ items: windowed });
