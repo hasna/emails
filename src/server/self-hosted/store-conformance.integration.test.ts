@@ -1,7 +1,7 @@
 // The shared store conformance suite, run by `HttpEmailStore` over real HTTP against
 // the REAL `/v1` service, backed by real Postgres.
 //
-// WHY THIS FILE IS THE POINT OF THE PHASE. `src/store-http.test.ts` runs the same 61
+// WHY THIS FILE IS THE POINT OF THE PHASE. `src/store-http.test.ts` runs the same 62
 // cases against `src/test-support/v1-store-api.ts` — a translation-layer fixture that
 // re-implements the route contract. That run is worth having (it catches a client that
 // mis-maps a field, because every row it serves comes out of a real store), but it can
@@ -208,7 +208,7 @@ describe.skipIf(!pgClient)("HttpEmailStore conformance against the real /v1 serv
       // this phase makes about the real service; the previous phase measured 36 / 8 / 4
       // against it, and the four failures were the outbound writes that had no route.
       const counted = totals(report);
-      expect(CONFORMANCE_CASES.length).toBe(61);
+      expect(CONFORMANCE_CASES.length).toBe(62);
       expect(counted).toEqual({ passed: 53, refused: 8, failed: 0 });
       // The 8 refusals are exactly the cases whose capability this store declares false —
       // never one it claims to support.

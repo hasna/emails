@@ -710,7 +710,7 @@ describe("conformance harness", () => {
     // list EMPTY, and it is strictly stronger: the gap list must now be empty rather
     // than complete.
     expect(capabilityCoverageGaps()).toEqual([]);
-    // THE EXACT LIST, not a floor. A `>=` floor is not a pin: with 61 cases declared, a
+    // THE EXACT LIST, not a floor. A `>=` floor is not a pin: with 62 cases declared, a
     // floor of 30 lets thirty-one be deleted with this test still green — and the
     // assertion this one replaced (`CONFORMANCE_CASES` is empty) WAS exact, so a floor
     // would have been a loss of precision at the moment the list started mattering.

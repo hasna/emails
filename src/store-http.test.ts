@@ -4,7 +4,7 @@
 //
 // THREE THINGS THIS FILE HAS TO ESTABLISH, and they are separable:
 //
-// 1. THE STORE BEHAVES. The same 61 unmodified conformance cases the SQLite store
+// 1. THE STORE BEHAVES. The same 62 unmodified conformance cases the SQLite store
 //    runs, over real HTTP, against a `/v1` service backed by a real store. No case is
 //    skipped and no capability excuses one: a false capability still runs its case and
 //    still has to answer with the typed refusal.
