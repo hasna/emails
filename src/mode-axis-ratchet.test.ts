@@ -1141,17 +1141,17 @@ const root = join(import.meta.dir, "..");
  * edited in place.
  */
 const CEILINGS: Record<string, number> = {
-  twoArmFamilies: 19,
-  remoteArmModules: 19,
-  routedFacadeDefinitions: 11,
-  routedCallExpressions: 163,
-  selfHostedResourceBranches: 25,
-  selfHostedResourceReferences: 96,
-  isSelfHostedModeReferences: 44,
-  getEmailsModeReferences: 55,
-  resolveEmailsModeReferences: 65,
-  normalizeEmailsModeReferences: 16,
-  emailsModeEnvReferences: 219,
+  twoArmFamilies: 0,
+  remoteArmModules: 0,
+  routedFacadeDefinitions: 0,
+  routedCallExpressions: 0,
+  selfHostedResourceBranches: 0,
+  selfHostedResourceReferences: 0,
+  isSelfHostedModeReferences: 0,
+  getEmailsModeReferences: 0,
+  resolveEmailsModeReferences: 0,
+  normalizeEmailsModeReferences: 0,
+  emailsModeEnvReferences: 0,
 };
 
 // 649 files are tracked and 648 scanned today, totalling ~9.7M characters. (The figures in
